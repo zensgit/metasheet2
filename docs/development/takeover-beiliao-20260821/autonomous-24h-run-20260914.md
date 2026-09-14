@@ -20,9 +20,11 @@
 | P2 | ② 收件人选人 #5705 / ⑥ 字段拖拽 #5706 / 受管字段删除守卫 #5707 | opus ×2 / Fable + 终审 | #5705 CI 24/24 → `afc7d721e`;#5706 23/23 → `d659e7bf9`;#5707 双反驳 PASS + 终审 FIX_FIRST(全文本级,协调方落实)→ CI 26/26 → `ce9da32ae` |
 | P3 | bom备料 五列恢复 | 协调方(SQL,值不出 222) | 已完成(§4.1) |
 | P4 | r39 上机(③ #5702、② #5701、守卫 #5707、②⑥ 前端) | 协调方 | 18:50 上 222,exit 0(§4.2);GET /bases 核对:无新 base,备料 base 仍只含 bom备料 + 确认账本(已有安装零变化如规格所述) |
-| P5 | 前端「服务暂时不可用」区分网络不通/服务端错误 | opus | 待派 |
-| P6 | 审计写失败 warn→error+计数(观测性) | opus | 待派 |
+| P5 | 前端「服务暂时不可用」区分网络不通/服务端错误 | opus | impl `4c85a5c8`(统一到 `utils/networkErrors.ts` 的 hasHttpResponse 判据;两处产生点收敛)→ 反驳 BLOCK(helper spec 不在任何 CI 车道)→ fix `b96a8f0a`(接进 run-required-web-tests.sh + CI 接线用例)→ 复驳 PASS → **PR #5712 已开、不合**:它推翻了既有 F4-B「两层同文案」裁决,等 owner 决定 |
+| P6 | 审计写失败 warn→error+计数(观测性) | opus | `5f0c228b`(单参数 error 调用堵住驱动原文回显;去 resourceId;coreMetrics 计数;非阻塞契约用例)→ 反驳 PASS → PR #5713,CI 绿即合,进 r40 |
 | P7 | 本 MD + 72h MD 收尾合并 | 协调方 | 窗口末 |
+| P8 | #5707 后续:受管字段拒绝码的中英文案(前端) | opus | 派出 |
+| P9 | 就绪检查盲点排查:五列缺失时计划任务 dry-run 仍报 ready | opus(只读) | 派出 |
 
 ## 3. 替 owner 定的口径(本轮)
 
@@ -40,7 +42,7 @@
 ### 4.2 上机
 
 - **r38**:备份 `upgrade-backup-20260914-180125`;维护门 WIRED → 后端直连 attempt 3 → nginx 200;migration 0;smoke PASS;`nav-brand-link` 标记 True。
-- **r39(`ce9da32ae`)**:备份 `upgrade-backup-20260914-184958`;维护门 WIRED → attempt 3 → nginx 200;migration 0;upgrade exit 0;smoke PASS(新 bundle `index-jb44UN8k.js`);标记:own-base 模块 / ensureSystemBase dist / managed-field-delete-guard dist / attendance seed gate 皆 True,`ATTENDANCE_REPORT_FIELD_CATALOG_SEED` 未设(默认开);一个「http-routes 含 ensureSystemBase」标记 False 是我猜的子串(接线在 target-provisioning.cjs),改用哈希核对:222 上 `http-routes.cjs` sha256 前缀 `0ec8534b` == main 的 `runtimeFiles.pluginHttpRoutes` pin。演示 dry-run 见下。
+- **r39(`ce9da32ae`)**:备份 `upgrade-backup-20260914-184958`;维护门 WIRED → attempt 3 → nginx 200;migration 0;upgrade exit 0;smoke PASS(新 bundle `index-jb44UN8k.js`);标记:own-base 模块 / ensureSystemBase dist / managed-field-delete-guard dist / attendance seed gate 皆 True,`ATTENDANCE_REPORT_FIELD_CATALOG_SEED` 未设(默认开);一个「http-routes 含 ensureSystemBase」标记 False 是我猜的子串(接线在 target-provisioning.cjs),改用哈希核对:222 上 `http-routes.cjs` sha256 前缀 `0ec8534b` == main 的 `runtimeFiles.pluginHttpRoutes` pin。演示 dry-run:update 0 / skip 578 / inactive 1 / manual_confirm 3(与 r38 + 五列恢复后一致)。
 
 ## 5. 未做与原因
 
