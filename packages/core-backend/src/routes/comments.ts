@@ -646,9 +646,26 @@ export function commentsRouter(injector?: Injector): Router {
 
   /**
    * POST /api/multitable/:spreadsheetId/comments/mark-all-read
-   * Body: { userId: string }
+   * Body: { userId?: string } — `userId` is ACCEPTED AND IGNORED (see below).
    *
-   * Batch-mark all unread comments in this spreadsheet as read for the user.
+   * Batch-mark all unread comments in this spreadsheet as read FOR THE AUTHENTICATED ACTOR.
+   *
+   * W4-G — read receipts are written for the actor, never for a body-named subject. This handler used
+   * to resolve the subject as `body.userId || context.userId` ("prefer body userId"), which made the
+   * write-side subject attacker-controlled: any authenticated caller holding `comments:write` plus
+   * sheet read (the gate below) could POST `{"userId":"<victim>"}` and have
+   * `CommentService.markAllCommentsRead` upsert `meta_comment_reads` rows under the victim's id,
+   * silently clearing that victim's unread/mention state on the sheet. No caller in `apps/web/src`
+   * ever sent the field. The subject is now exclusively `context.userId`, i.e. the id
+   * `resolveRequestAccess` read off the authenticated request (`req.user.id/sub/userId`) — the SAME
+   * id this file already uses for every other per-actor comment write (mention mark-read, reactions).
+   *
+   * The `userId` field stays in the schema deliberately: it is parsed, validated exactly as before and
+   * then never read. Dropping it from the schema would be silently equivalent for well-formed requests
+   * (zod strips unknown keys) but would ALSO flip `{"userId":""}` from its current 400 to a 200, i.e. a
+   * behavior change beyond the security fix; keeping the field pins every status code to what shipped
+   * and leaves an explicit, commented marker so the branch cannot be "restored" as a lost feature.
+   * A hypothetical old client that still sends the field keeps working — it just marks its own reads.
    */
   router.post('/api/multitable/:spreadsheetId/comments/mark-all-read', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const spreadsheetId = req.params.spreadsheetId?.trim()
@@ -657,6 +674,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     const schema = z.object({
+      // Legacy wire field: validated for shape compatibility, then IGNORED. The read-receipt subject
+      // is the authenticated actor only — see the W4-G note above.
       userId: z.string().min(1).optional(),
     })
     const parsed = schema.safeParse(req.body)
@@ -667,9 +686,8 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentReadContext(req, res, spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      // Prefer body userId; fall back to authenticated user
-      const userId = parsed.data.userId?.trim() || context.userId
-      const count = await commentService.markAllCommentsRead(spreadsheetId, userId, deniedRows(context))
+      // Actor only. `parsed.data.userId` is deliberately NOT consulted (W4-G).
+      const count = await commentService.markAllCommentsRead(spreadsheetId, context.userId, deniedRows(context))
       return res.json({ ok: true, data: { markedRead: count } })
     } catch (error) {
       logger.error('Failed to mark all comments as read', error as Error)
