@@ -1253,8 +1253,10 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       //
       // X5 CHANGED THE FIRST HALF OF THAT: the truncated sample is now the deterministic top-N by
       // row identity (`createRowErrorCollector`, stock-preparation-bom-expansion.cjs — see
-      // ROW_ERROR_IDENTITY_FIELDS' header), so two reads of one batch retain the SAME entries in the
-      // same order whatever order the source produced them in, and `plan.summary.conflictTypes` —
+      // ROW_ERROR_IDENTITY_FIELDS' header), so two reads that produce one SET of rowErrors retain the SAME N
+      // entries in the same order whatever order the source produced them in (an early-exit batch —
+      // max_rows_exceeded and friends — is a different set, fenced by canApply=false above), and
+      // `plan.summary.conflictTypes` —
       // one manual_confirm decision per retained entry — no longer disagrees between two dry-runs.
       // That was the residual this comment used to record as open; it is closed at the expander,
       // which is where it had to be closed, not by a different hash recipe here.

@@ -227,9 +227,11 @@ const ROW_ERROR_LIMIT_CEILING = 20000
 // arrival order for every same-type collision. The other three fields stay declared because a
 // rowError carrying a row identity is a planned shape (the expanded ROW already has both
 // `idempotencyKey` and `path`) and because X4's `rowHashIdentityToken` reads the same token types.
-// `testTheSampleIsOrderBlindWhenTwoDefectsShareAType` pins the working half on a real expansion AND
-// pins this scope claim, so a payload that starts carrying `path` turns that test red and brings
-// whoever added it back to this paragraph. (The resemblance to X4 is in the TOKEN helper, not in
+// `testTheSampleIsOrderBlindWhenTwoDefectsShareAType` pins the working half on a real expansion and
+// pins the key set of the `invalid_quantity` payload ONLY; `missing_component` is pinned by its own
+// `{type, field, depth} and nothing else` case; `ambiguous_component` and the ext-mapping payloads
+// carry no key-set pin today, so a `path` added THERE would not turn any test red — re-read this
+// paragraph before adding one. (The resemblance to X4 is in the TOKEN helper, not in
 // the key: `canonicalHashOrder` orders rowErrors with an identity of `() => ''`, content alone.)
 //
 // ASYMMETRY, DELIBERATE AND NARROW: an expansion that did NOT overflow still reports its rowErrors
@@ -243,7 +245,9 @@ const ROW_ERROR_LIMIT_CEILING = 20000
 // defects — a real diagnostic sequence, and the only place it survives; (2) under the cap the
 // retained set IS the whole set, so no selection is happening and no two reads can differ — sorting
 // would buy no determinism at all, while renumbering the positional `index` that
-// `stock-preparation-expansion-snapshot-mapper.cjs` hands `stampMissingChildLine`. The determinism
+// `stock-preparation-expansion-snapshot-mapper.cjs` hands `stampMissingChildLine`. Past the cap the
+// sorted sample DOES renumber that index (deterministically), and the stamped lines' pathKeys move
+// with it — that is the accepted price of determinism, not a contradiction of (2). The determinism
 // this constant is about is only in question once something was dropped.
 const ROW_ERROR_IDENTITY_FIELDS = Object.freeze(['type', 'path', 'idempotencyKey', 'componentCode'])
 
@@ -1098,9 +1102,10 @@ function stableRowErrorContent(value) {
   return encoded === undefined ? 'undefined' : encoded
 }
 
-// Identity first, content second. Entries that tie on BOTH are equal VALUES (the content half is a
-// total projection of the entry), so which of them the collector happens to keep cannot change a
-// single byte of what leaves this module.
+// Identity first, content second. For the scalar-only payloads this module emits, entries that tie on
+// BOTH are equal VALUES (the content projection serialises Date/Map/Set as '{}', so a non-scalar
+// payload — none exists today — could tie without being equal), so which of them the collector
+// happens to keep cannot change a single byte of what leaves this module.
 function compareRetainedRowErrors(left, right) {
   if (left.identity !== right.identity) return left.identity < right.identity ? -1 : 1
   if (left.content !== right.content) return left.content < right.content ? -1 : 1
@@ -1127,7 +1132,7 @@ function compareRetainedRowErrors(left, right) {
 function createRowErrorCollector(capacity) {
   const limit = Number.isInteger(capacity) && capacity > 0 ? capacity : ROW_ERROR_LIMIT
   const entries = []
-  // `true` exactly when something was refused a slot — which is exactly when the expansion is
+  // `true` exactly when something was refused a slot or evicted an incumbent — which is exactly when the expansion is
   // truncated, i.e. the same condition `rowErrorTruncationOf` reports as `total > retained`. ONE
   // fact, read here to choose between traversal order and sorted order, so the array's shape and
   // the summary's `rowErrorsTruncated` can never disagree.
