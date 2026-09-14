@@ -79,3 +79,10 @@ npx tsc --noEmit -p tsconfig.w5f-spec-check.tmp.json
 - 未运行 core-backend 全量测试套件(耗时/超出任务范围,只跑了目标 spec + 相邻 spec)。
 - 未跑集成测试(该服务的行为是纯 kysely 查询构建层面,集成测试需要真实 PG,未在本任务范围内配置)。
 - 未 push、未开 PR(按任务要求)。
+
+## 轻量复核（查找者 + 裁决：可合）
+
+- **[已声明补充] `POST /api/admin/dlq/retry-all`**（`admin-routes.ts:1631` `const { limit = 100 } = req.body`，解构默认只对 undefined 生效）：请求体 `{"limit":0}` 现在命中短路 → 一条都不重试（`retried:0`、`remaining:total`）；改前最多重试 50 条。方向保守且「limit 0 = 重试 0 条」语义更对，但属**写端点**行为变化，正文已补。
+- **[信息] spec 背书强度**：mock 里所有 builder `mockReturnThis()`、`selectFrom()` 返回 `db` 自身，运行期 `query === countQuery`，因此「短路后 total 仍按 status/topic 过滤计」这条**靠代码阅读成立（`:157/:162` 对 countQuery 同样 `.where`）**，spec 不背书——删掉那两行 `countQuery.where` 整套 spec 仍绿。留待有真库道时钉。
+- 核过清白：主断言非空转（兄弟用例须显式 `execute.mockResolvedValueOnce([])` 才过；count 不跑则 total=0≠42）；短路在 `total` 之后；`?limit=` 空串经 `admin-routes.ts:1406` `limit ? Number(limit) : undefined` 仍回落 50（只有字面 `?limit=0`/`-0` 短路）；其它调用方（HealthAggregator limit:1、AdvancedMessaging 整模块 mock）不受影响；CI 必过泳道收；与 origin/main 现头 `merge-tree` 零冲突。
+
