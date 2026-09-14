@@ -84,6 +84,17 @@ function verify_onprem_env_templates() {
     local abs="${root}/${rel}"
     grep -q '^JWT_SECRET=change-me$' "$abs" || die "${rel} must retain JWT_SECRET=change-me placeholder"
     grep -q '^BCRYPT_SALT_ROUNDS=12$' "$abs" || die "${rel} must pin BCRYPT_SALT_ROUNDS=12"
+
+    # Templates are not required to declare ENCRYPTION_KEY/ENCRYPTION_SALT (this repo state
+    # predates that addition), but if a template does declare one, it must be an empty
+    # placeholder. A non-empty value here would mean a real encryption secret got committed
+    # to a shipped on-prem template.
+    if grep -q '^ENCRYPTION_KEY=' "$abs"; then
+      grep -q '^ENCRYPTION_KEY=$' "$abs" || die "${rel} must keep ENCRYPTION_KEY empty (no real value committed to template)"
+    fi
+    if grep -q '^ENCRYPTION_SALT=' "$abs"; then
+      grep -q '^ENCRYPTION_SALT=$' "$abs" || die "${rel} must keep ENCRYPTION_SALT empty (no real value committed to template)"
+    fi
   done
 }
 

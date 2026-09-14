@@ -38,6 +38,20 @@ function require_bcrypt_salt_rounds() {
   fi
 }
 
+# Encryption-at-rest master key/salt for packages/core-backend/src/security/encrypted-secrets.ts.
+# These must be present and must not equal the built-in insecure default sentinels, otherwise
+# any secret encrypted with the fallback key is trivially decryptable. We deliberately never
+# echo the configured value back to the operator (values-free diagnostics).
+function require_encryption_material() {
+  local var_name="$1"
+  local value="$2"
+  local default_sentinel="$3"
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  if [[ "$value" == "$default_sentinel" ]]; then
+    die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  fi
+}
+
 function get_env_value() {
   local key="$1"
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -63,9 +77,13 @@ UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
 CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
 DEPLOYMENT_MODEL="$(get_env_value DEPLOYMENT_MODEL)"
 BCRYPT_SALT_ROUNDS="$(get_env_value BCRYPT_SALT_ROUNDS)"
+ENCRYPTION_KEY="$(get_env_value ENCRYPTION_KEY)"
+ENCRYPTION_SALT="$(get_env_value ENCRYPTION_SALT)"
 
 require_strong_jwt_secret "$JWT_SECRET"
 require_bcrypt_salt_rounds "$BCRYPT_SALT_ROUNDS"
+require_encryption_material "ENCRYPTION_KEY" "$ENCRYPTION_KEY" "default-key-change-in-production"
+require_encryption_material "ENCRYPTION_SALT" "$ENCRYPTION_SALT" "default-salt-change-in-production"
 
 [[ -n "$POSTGRES_PASSWORD" ]] || die "POSTGRES_PASSWORD is missing in ${ENV_FILE}"
 [[ "$POSTGRES_PASSWORD" != "change-me" ]] || die "POSTGRES_PASSWORD is still 'change-me' in ${ENV_FILE}"
