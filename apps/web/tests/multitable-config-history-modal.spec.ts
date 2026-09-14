@@ -173,6 +173,28 @@ describe('MetaConfigHistoryModal — readable configuration operations', () => {
     const actors = [...document.body.querySelectorAll('[data-test="config-history-actor"]')].map((el) => el.textContent)
     expect(actors).toEqual(['操作人 张三', '操作人 unknown-user'])
   })
+
+  it.each([true, false])('shows time in the viewer device timezone with a zone label (isZh=%s)', async (isZh) => {
+    const createdAt = '2026-09-14T08:00:00.000Z'
+    mountModal({ isZh, items: [rev({ createdAt })] })
+    await nextTick()
+    const time = q('.cfg-history__time')
+    expect(time?.tagName).toBe('TIME')
+    expect(time?.textContent).toBe(new Date(createdAt).toLocaleString(isZh ? 'zh-CN' : 'en-US', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23', timeZoneName: 'short',
+    }))
+    expect(time?.getAttribute('datetime')).toBe(createdAt)
+    expect(time?.getAttribute('title')).toBe(createdAt)
+    expect(time?.textContent).not.toBe(createdAt)
+  })
+
+  it('preserves an invalid legacy time verbatim instead of inventing a local time', async () => {
+    mountModal({ items: [rev({ createdAt: 'legacy-time-unavailable' })] })
+    await nextTick()
+    expect(q('.cfg-history__time')?.textContent).toBe('legacy-time-unavailable')
+  })
 })
 
 describe('MetaConfigHistoryModal — S2 aiShortcut prompt-config history rendering', () => {

@@ -53,6 +53,19 @@ claimed by this report.
 
 ## Delivery Boundary
 
+Viewer-time follow-up: the existing modal suite now has 44 tests; the five-file
+frontend group has 117 tests. Timezone tests run with UTC and America/New_York.
+Hardcoding UTC produced two precise failures in New York; restored code passes.
+The time remains the same instant: formatting uses viewer device timezone only,
+while original UTC text stays in the title/datetime attributes. Invalid legacy
+timestamps remain unchanged rather than being replaced with invented times.
+
+Chromium timezone contexts independently verified the same synthetic instant:
+Asia/Taipei `16:00:00 GMT+8`, UTC `08:00:00`, America/New_York `04:00:00 GMT-4`.
+The original `2026-09-14T08:00:00.000Z` datetime stayed identical in all contexts.
+Desktop/mobile screenshots were refreshed in Asia/Taipei; 1440px and 390px had no
+horizontal overflow. Web app typecheck and changed source ESLint passed again.
+
 Draft/HOLD publication only. No Ready, merge, flag change, dispatch, deployment,
 production access or customer data. The disposable database is dropped and its
 dedicated PostgreSQL process stopped after verification. Existing historical

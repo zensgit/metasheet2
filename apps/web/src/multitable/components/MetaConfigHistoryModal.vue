@@ -52,7 +52,7 @@
               <p v-else-if="rev.action === 'create' || rev.action === 'delete'" class="cfg-history__hint" data-test="config-history-details-unavailable">{{ l('record.configHistoryDetailsUnavailable') }}</p>
               <div class="cfg-history__meta">
                 <span v-if="rev.actorId" data-test="config-history-actor" :title="rev.actorId">{{ l('record.configHistoryBy') }} {{ rev.actorName || rev.actorId }}</span>
-                <span class="cfg-history__time">{{ rev.createdAt }}</span>
+                <time class="cfg-history__time" :datetime="rev.createdAt" :title="rev.createdAt">{{ configHistoryTime(rev.createdAt, isZh) }}</time>
               </div>
             </li>
           </ul>
@@ -125,7 +125,7 @@ import type { MetaConfigRevision, ConfigRestoreExecuteConfirm, ConfigRestorePrev
 import { redactString } from '../utils/automation-log-redact'
 import { recordLabel, configRestoreTypedConfirm, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { MtIconButton } from '../ui'
-import { configHistoryEntityName, configHistoryKeyLabel, configHistoryOperation } from '../utils/meta-config-history-labels'
+import { configHistoryEntityName, configHistoryKeyLabel, configHistoryOperation, configHistoryTime } from '../utils/meta-config-history-labels'
 import { fieldTypeLabel } from '../utils/meta-core-labels'
 
 const props = defineProps<{

@@ -91,3 +91,14 @@ export function configHistoryEntityName(rev: MetaConfigRevision, resolve: (id: s
   const name = snapshot?.name
   return typeof name === 'string' && name.trim() ? name : resolve(rev.entityId)
 }
+
+export function configHistoryTime(timestamp: string, isZh: boolean): string {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return timestamp
+  // Omit timeZone to use the current viewer's device zone, not the actor's or the server's zone.
+  return date.toLocaleString(isZh ? 'zh-CN' : 'en-US', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23', timeZoneName: 'short',
+  })
+}

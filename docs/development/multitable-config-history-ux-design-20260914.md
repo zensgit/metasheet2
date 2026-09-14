@@ -26,6 +26,7 @@ not a new recovery capability.
 | Historical name present | Use revision after.name, or before.name for deletion |
 | Name unavailable | Existing live label resolver, then its ID fallback |
 | Operator | Server directory display name; preserve actor ID fallback and tooltip |
+| Event time | Current viewer device timezone, explicit zone label and 24-hour clock; original UTC value retained in tooltip and datetime attribute |
 | Missing snapshot | Explicit unavailable details, never an invented snapshot |
 
 Create/delete rendering uses declared changed keys. Legacy empty key lists fall
@@ -44,3 +45,13 @@ conditional-read literal masking is unchanged.
 No mutation endpoint, migration, flag, shared CI selector, recycle-bin behavior,
 whole-table recovery or deployment is changed. The existing modal spec is already
 included in both multitable web guard and required web tests.
+
+## Recovery UX Follow-up Boundary
+
+The existing trash UI still lists/restores deleted records, not whole sheets.
+The owner-requested split (recycle bin for whole sheets; record/field deletion
+details and recovery in history) is not delivered by this configuration-history
+presentation patch. Whole-sheet soft-delete/restore APIs exist, but the table
+recycle-bin list/entry UI remains separate work. Existing record history restores
+prior values of a live record, not deleted-record entries. Field undelete stays
+server-gated; only previously captured value/link tombstones can rehydrate data.
