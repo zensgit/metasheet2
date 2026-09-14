@@ -1216,6 +1216,10 @@ module.exports = {
   ensureStockPreparationFillView,
   buildStockPreparationFillViewDescriptor,
   summarizeStockPreparationTargetReadiness,
+  // THE ONE field-existence probe (db / computed / computed_scope_unavailable), exported so the
+  // dry-run/apply plan layer runs the SAME probe readiness runs instead of growing a second "does
+  // this column still exist" judgement (stock-preparation-table-actions.cjs `assertTargetFieldsExist`).
+  resolveFieldExistence,
   hashEvidenceValue,
   sandboxStockPreparationTemplate,
   inspectStockPreparationCanonicalTarget,

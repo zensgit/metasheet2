@@ -52,6 +52,15 @@ export interface SaveBlockEmailSnapshot {
   bodyTemplate: string
 }
 
+/**
+ * send_notification: the backend refuses an empty recipient list at save (400 NO_RECIPIENTS) and at
+ * run (AUTOMATION_NO_RECIPIENTS_ERROR). Mirroring that one rule here turns the 400 into an inline
+ * "why is Save disabled" reason; membership/authorization of each id stays a server decision.
+ */
+export interface SaveBlockNotificationSnapshot {
+  userIdCount: number
+}
+
 export interface SaveBlockDeleteRecordSnapshot {
   acknowledged: boolean
 }
@@ -68,6 +77,7 @@ export interface SaveBlockActionSnapshot {
   groupMessage?: SaveBlockGroupMessageSnapshot
   personMessage?: SaveBlockPersonMessageSnapshot
   email?: SaveBlockEmailSnapshot
+  notification?: SaveBlockNotificationSnapshot
   deleteRecord?: SaveBlockDeleteRecordSnapshot
   fwbWriteback?: SaveBlockFwbWritebackSnapshot
 }
@@ -321,6 +331,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
           anchor: `${scope} [data-field="emailBodyTemplate"]`,
         })
       }
+    }
+
+    if (action.notification && action.notification.userIdCount === 0) {
+      reasons.push({
+        key: `action-${action.index}-recipients`,
+        message: zh
+          ? `「${label}」未设置通知接收人，请搜索并选择至少一个用户。`
+          : `"${label}" has no recipients — search and select at least one user.`,
+        anchor: `${scope} [data-field="notificationRecipientSearch"]`,
+      })
     }
 
     if (action.deleteRecord && !action.deleteRecord.acknowledged) {

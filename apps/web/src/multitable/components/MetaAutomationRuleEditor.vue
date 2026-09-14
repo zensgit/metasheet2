@@ -457,10 +457,68 @@
 
             <!-- send_notification config -->
             <div v-if="action.type === 'send_notification'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.userId', isZh) }}</label>
-              <el-input v-model="action.config.userId" type="text" :placeholder="automationLabel('actionConfig.userId', isZh)" />
+              <!--
+                Recipient picker: search sheet members by name/email (same roster the save gate
+                validates against) and pick them; the draft keeps a comma-joined user-id string
+                (action.config.userId) so the persisted shape stays actionConfig.userIds: string[].
+                Ids that cannot be resolved (e.g. a hand-typed "4") stay visible as raw chips with an
+                "unmatched" badge and can be removed; the manual textarea remains for users the
+                search cannot reach (no search permission, e-learning projection sheets, top-8 cap).
+              -->
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipients', isZh) }}</label>
+              <el-input
+                v-model="notificationRecipientSearch[action.draftId]"
+                type="text"
+                :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                data-field="notificationRecipientSearch"
+                @input="void loadNotificationRecipientSuggestions(action.draftId)"
+              />
+              <div v-if="notificationRecipientLoading[action.draftId]" class="meta-rule-editor__hint">{{ automationLabel('actionConfig.recipientSearching', isZh) }}</div>
+              <div v-else-if="notificationRecipientErrors[action.draftId]" class="meta-rule-editor__hint meta-rule-editor__hint--error" data-field="notificationRecipientSearchError">{{ notificationRecipientErrors[action.draftId] }}</div>
+              <div v-else-if="availableNotificationRecipientSuggestions(action.draftId, action.config).length" class="meta-rule-editor__recipient-list">
+                <button
+                  v-for="candidate in availableNotificationRecipientSuggestions(action.draftId, action.config)"
+                  :key="candidate.subjectId"
+                  class="meta-rule-editor__recipient-option"
+                  type="button"
+                  :disabled="isInactivePersonRecipientCandidate(candidate)"
+                  :data-notification-recipient-suggestion="candidate.subjectId"
+                  @click="addNotificationRecipient(action.draftId, action.config, candidate)"
+                >
+                  <strong>{{ candidate.label }}</strong>
+                  <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                  <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ automationLabel('actionConfig.recipientInactive', isZh) }}</span>
+                </button>
+              </div>
+              <div v-else-if="notificationRecipientSearchActive(action.draftId)" class="meta-rule-editor__hint" data-field="notificationRecipientNoMatch">{{ automationLabel('actionConfig.recipientNoMatch', isZh) }}</div>
+              <div v-if="selectedNotificationRecipients(action.config).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                <button
+                  v-for="recipient in selectedNotificationRecipients(action.config)"
+                  :key="recipient.id"
+                  class="meta-rule-editor__recipient-chip"
+                  :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                  type="button"
+                  :data-notification-recipient="recipient.id"
+                  :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                  @click="removeNotificationRecipient(action.config, recipient.id)"
+                >
+                  <strong>{{ recipient.label }}</strong>
+                  <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                  <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                  <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                </button>
+              </div>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipientIdsManual', isZh) }}</label>
+              <el-input
+                v-model="action.config.userId"
+                type="textarea"
+                :rows="2"
+                :placeholder="automationLabel('actionConfig.recipientIdsManualPlaceholder', isZh)"
+                data-field="notificationUserIds"
+                @blur="void resolveNotificationRecipientIds(parseUserIdsText(action.config.userId))"
+              />
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.message', isZh) }}</label>
-              <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" />
+              <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" data-field="notificationMessage" />
             </div>
 
             <!-- write_approval_form_values (FWB create/update from approval) config -->
@@ -1280,7 +1338,46 @@
                       <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <el-input
+                        v-model="notificationRecipientSearch[notificationPickerKey(action, 'cb', bIdx, aIdx)]"
+                        class="meta-rule-editor__input--sm"
+                        :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                        data-field="branchNotificationRecipientSearch"
+                        @input="void loadNotificationRecipientSuggestions(notificationPickerKey(action, 'cb', bIdx, aIdx))"
+                      />
+                      <div v-if="notificationRecipientErrors[notificationPickerKey(action, 'cb', bIdx, aIdx)]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ notificationRecipientErrors[notificationPickerKey(action, 'cb', bIdx, aIdx)] }}</div>
+                      <div v-else-if="availableNotificationRecipientSuggestions(notificationPickerKey(action, 'cb', bIdx, aIdx), bAct).length" class="meta-rule-editor__recipient-list">
+                        <button
+                          v-for="candidate in availableNotificationRecipientSuggestions(notificationPickerKey(action, 'cb', bIdx, aIdx), bAct)"
+                          :key="candidate.subjectId"
+                          class="meta-rule-editor__recipient-option"
+                          type="button"
+                          :disabled="isInactivePersonRecipientCandidate(candidate)"
+                          :data-notification-recipient-suggestion="candidate.subjectId"
+                          @click="addNotificationRecipient(notificationPickerKey(action, 'cb', bIdx, aIdx), bAct, candidate)"
+                        >
+                          <strong>{{ candidate.label }}</strong>
+                          <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                        </button>
+                      </div>
+                      <div v-if="selectedNotificationRecipients(bAct).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                        <button
+                          v-for="recipient in selectedNotificationRecipients(bAct)"
+                          :key="recipient.id"
+                          class="meta-rule-editor__recipient-chip"
+                          :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                          type="button"
+                          :data-notification-recipient="recipient.id"
+                          :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                          @click="removeNotificationRecipient(bAct, recipient.id)"
+                        >
+                          <strong>{{ recipient.label }}</strong>
+                          <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                          <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                          <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                        </button>
+                      </div>
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" data-field="branchNotificationUserIds" @blur="void resolveNotificationRecipientIds(parseUserIdsText(bAct.userId))" />
                       <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
                     <!-- A6-3-3b branch-local wait_for_callback: zero-param suspend point (no fields to author) -->
@@ -1314,7 +1411,46 @@
                       <el-button size="small" class="meta-rule-editor__btn" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <el-input
+                        v-model="notificationRecipientSearch[notificationPickerKey(action, 'db', aIdx)]"
+                        class="meta-rule-editor__input--sm"
+                        :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                        data-field="branchNotificationRecipientSearch"
+                        @input="void loadNotificationRecipientSuggestions(notificationPickerKey(action, 'db', aIdx))"
+                      />
+                      <div v-if="notificationRecipientErrors[notificationPickerKey(action, 'db', aIdx)]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ notificationRecipientErrors[notificationPickerKey(action, 'db', aIdx)] }}</div>
+                      <div v-else-if="availableNotificationRecipientSuggestions(notificationPickerKey(action, 'db', aIdx), bAct).length" class="meta-rule-editor__recipient-list">
+                        <button
+                          v-for="candidate in availableNotificationRecipientSuggestions(notificationPickerKey(action, 'db', aIdx), bAct)"
+                          :key="candidate.subjectId"
+                          class="meta-rule-editor__recipient-option"
+                          type="button"
+                          :disabled="isInactivePersonRecipientCandidate(candidate)"
+                          :data-notification-recipient-suggestion="candidate.subjectId"
+                          @click="addNotificationRecipient(notificationPickerKey(action, 'db', aIdx), bAct, candidate)"
+                        >
+                          <strong>{{ candidate.label }}</strong>
+                          <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                        </button>
+                      </div>
+                      <div v-if="selectedNotificationRecipients(bAct).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                        <button
+                          v-for="recipient in selectedNotificationRecipients(bAct)"
+                          :key="recipient.id"
+                          class="meta-rule-editor__recipient-chip"
+                          :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                          type="button"
+                          :data-notification-recipient="recipient.id"
+                          :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                          @click="removeNotificationRecipient(bAct, recipient.id)"
+                        >
+                          <strong>{{ recipient.label }}</strong>
+                          <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                          <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                          <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                        </button>
+                      </div>
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" data-field="branchNotificationUserIds" @blur="void resolveNotificationRecipientIds(parseUserIdsText(bAct.userId))" />
                       <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
                     <!-- A6-3-3b branch-local wait_for_callback (default branch): zero-param suspend point -->
@@ -1359,7 +1495,46 @@
                       <el-button size="small" class="meta-rule-editor__btn" data-action="add-parallel-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('parallelBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" />
+                      <el-input
+                        v-model="notificationRecipientSearch[notificationPickerKey(action, 'pb', bIdx, aIdx)]"
+                        class="meta-rule-editor__input--sm"
+                        :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                        data-field="branchNotificationRecipientSearch"
+                        @input="void loadNotificationRecipientSuggestions(notificationPickerKey(action, 'pb', bIdx, aIdx))"
+                      />
+                      <div v-if="notificationRecipientErrors[notificationPickerKey(action, 'pb', bIdx, aIdx)]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ notificationRecipientErrors[notificationPickerKey(action, 'pb', bIdx, aIdx)] }}</div>
+                      <div v-else-if="availableNotificationRecipientSuggestions(notificationPickerKey(action, 'pb', bIdx, aIdx), bAct).length" class="meta-rule-editor__recipient-list">
+                        <button
+                          v-for="candidate in availableNotificationRecipientSuggestions(notificationPickerKey(action, 'pb', bIdx, aIdx), bAct)"
+                          :key="candidate.subjectId"
+                          class="meta-rule-editor__recipient-option"
+                          type="button"
+                          :disabled="isInactivePersonRecipientCandidate(candidate)"
+                          :data-notification-recipient-suggestion="candidate.subjectId"
+                          @click="addNotificationRecipient(notificationPickerKey(action, 'pb', bIdx, aIdx), bAct, candidate)"
+                        >
+                          <strong>{{ candidate.label }}</strong>
+                          <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                        </button>
+                      </div>
+                      <div v-if="selectedNotificationRecipients(bAct).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                        <button
+                          v-for="recipient in selectedNotificationRecipients(bAct)"
+                          :key="recipient.id"
+                          class="meta-rule-editor__recipient-chip"
+                          :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                          type="button"
+                          :data-notification-recipient="recipient.id"
+                          :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                          @click="removeNotificationRecipient(bAct, recipient.id)"
+                        >
+                          <strong>{{ recipient.label }}</strong>
+                          <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                          <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                          <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                        </button>
+                      </div>
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" data-field="branchNotificationUserIds" @blur="void resolveNotificationRecipientIds(parseUserIdsText(bAct.userId))" />
                       <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.message', isZh)" />
                     </template>
                     <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchAction(branch, aIdx)">&times;</el-button>
@@ -1713,6 +1888,20 @@ type PersonRecipientDirectoryEntry = {
 }
 
 const personRecipientDirectory = ref<Record<string, PersonRecipientDirectoryEntry>>({})
+// send_notification recipient picker state, keyed by picker key (top-level: action.draftId;
+// branch rows: see notificationPickerKey). Search text lives here rather than in the draft so
+// typing a query never dirties the rule. Resolved names/emails are read from
+// personRecipientDirectory (shared with the DingTalk person picker; same candidate endpoint).
+const notificationRecipientSearch = ref<Record<string, string>>({})
+const notificationRecipientSuggestions = ref<Record<string, MetaSheetPermissionCandidate[]>>({})
+const notificationRecipientLoading = ref<Record<string, boolean>>({})
+const notificationRecipientErrors = ref<Record<string, string>>({})
+// ids looked up by exact id against the sheet roster and NOT found — their chip carries the
+// "unmatched" badge. An id whose lookup failed (e.g. no search permission) is neither resolved nor
+// a miss: it renders as a plain raw-id chip, still removable.
+const notificationRecipientMisses = ref<Record<string, boolean>>({})
+const notificationRecipientResolveInFlight = new Set<string>()
+let notificationRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
@@ -3121,6 +3310,14 @@ watch(
       personRecipientSuggestions.value = {}
       personRecipientLoading.value = {}
       personRecipientErrors.value = {}
+      notificationRecipientSearch.value = {}
+      notificationRecipientSuggestions.value = {}
+      notificationRecipientLoading.value = {}
+      notificationRecipientErrors.value = {}
+      notificationRecipientMisses.value = {}
+      // Resolve persisted notification recipient ids to names/emails so an existing rule opens with
+      // readable chips; ids the roster does not know get the "unmatched" badge.
+      void resolveNotificationRecipientIds(collectDraftNotificationRecipientIds())
       // FWB template source: load active version + form fields for the mapping editor.
       const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
         ? draft.value.triggerConfig.templateId
@@ -3282,6 +3479,9 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
         subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate : '',
         bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
       }
+    }
+    if (action.type === 'send_notification') {
+      snapshot.notification = { userIdCount: parseUserIdsText(action.config.userId).length }
     }
     if (action.type === 'delete_record') {
       snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
@@ -3730,6 +3930,146 @@ function removePersonRecipient(action: DraftAction, userId: string) {
   action.config.userIdsText = parseUserIdsText(action.config.userIdsText)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+// ---------------------------------------------------------------------------
+// send_notification recipient picker. Works over any "holder" that carries the comma-joined
+// user-id string — the top-level action config (`action.config.userId`) and branch-row drafts
+// (`bAct.userId`) — so the top-level and nested notification actions share one implementation.
+// Data source: the same form-share candidate endpoint the DingTalk person picker uses, filtered
+// to users; the backend save gate validates against exactly that roster.
+// ---------------------------------------------------------------------------
+type NotificationRecipientHolder = { userId?: string }
+
+function notificationPickerKey(action: DraftAction, ...parts: Array<string | number>): string {
+  return [action.draftId, ...parts].join(':')
+}
+
+function notificationRecipientSearchActive(key: string): boolean {
+  return (notificationRecipientSearch.value[key] ?? '').trim().length > 0
+}
+
+function selectedNotificationRecipients(holder: NotificationRecipientHolder) {
+  return Array.from(new Set(parseUserIdsText(holder.userId))).map((id) => {
+    const directoryEntry = personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
+    return {
+      id,
+      label: directoryEntry?.label ?? id,
+      subtitle: directoryEntry?.subtitle,
+      unresolved: !directoryEntry && notificationRecipientMisses.value[id] === true,
+    }
+  })
+}
+
+function availableNotificationRecipientSuggestions(key: string, holder: NotificationRecipientHolder) {
+  const selected = new Set(parseUserIdsText(holder.userId))
+  return (notificationRecipientSuggestions.value[key] ?? []).filter(
+    (candidate) => candidate.subjectType === 'user' && !selected.has(candidate.subjectId),
+  )
+}
+
+async function loadNotificationRecipientSuggestions(key: string) {
+  const query = (notificationRecipientSearch.value[key] ?? '').trim()
+  if (!props.client || !query) {
+    notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: [] }
+    notificationRecipientErrors.value = { ...notificationRecipientErrors.value, [key]: '' }
+    notificationRecipientLoading.value = { ...notificationRecipientLoading.value, [key]: false }
+    return
+  }
+
+  const requestId = ++notificationRecipientSuggestionLoadId
+  notificationRecipientLoading.value = { ...notificationRecipientLoading.value, [key]: true }
+  notificationRecipientErrors.value = { ...notificationRecipientErrors.value, [key]: '' }
+  try {
+    const response = await props.client.listFormShareCandidates(props.sheetId, { q: query, limit: 8 })
+    if (requestId !== notificationRecipientSuggestionLoadId) return
+    const users = response.items.filter((candidate) => candidate.subjectType === 'user')
+    rememberPersonRecipientSuggestions(users)
+    notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: users }
+  } catch (error) {
+    if (requestId !== notificationRecipientSuggestionLoadId) return
+    notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: [] }
+    notificationRecipientErrors.value = {
+      ...notificationRecipientErrors.value,
+      [key]: error instanceof Error ? error.message : 'Failed to search users',
+    }
+  } finally {
+    if (requestId === notificationRecipientSuggestionLoadId) {
+      notificationRecipientLoading.value = { ...notificationRecipientLoading.value, [key]: false }
+    }
+  }
+}
+
+function addNotificationRecipient(key: string, holder: NotificationRecipientHolder, candidate: MetaSheetPermissionCandidate) {
+  if (candidate.subjectType !== 'user') return
+  if (isInactivePersonRecipientCandidate(candidate)) return
+  const ids = new Set(parseUserIdsText(holder.userId))
+  ids.add(candidate.subjectId)
+  holder.userId = Array.from(ids).join(', ')
+  rememberPersonRecipientSuggestions([candidate])
+  if (notificationRecipientMisses.value[candidate.subjectId]) {
+    const rest = { ...notificationRecipientMisses.value }
+    delete rest[candidate.subjectId]
+    notificationRecipientMisses.value = rest
+  }
+  notificationRecipientSearch.value = { ...notificationRecipientSearch.value, [key]: '' }
+  notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: [] }
+  notificationRecipientErrors.value = { ...notificationRecipientErrors.value, [key]: '' }
+}
+
+function removeNotificationRecipient(holder: NotificationRecipientHolder, userId: string) {
+  holder.userId = parseUserIdsText(holder.userId)
+    .filter((id) => id !== userId)
+    .join(', ')
+}
+
+function collectDraftNotificationRecipientIds(): string[] {
+  const ids: string[] = []
+  for (const action of draft.value.actions) {
+    if (action.type === 'send_notification') ids.push(...parseUserIdsText(action.config.userId))
+    const branchGroups: Array<{ actions: BranchActionDraft[] } | null | undefined> = [
+      ...(Array.isArray(action.config.branches) ? action.config.branches : []),
+      action.config.defaultBranch,
+      ...(Array.isArray(action.config.parallelBranches) ? action.config.parallelBranches : []),
+    ]
+    for (const group of branchGroups) {
+      if (!group || !Array.isArray(group.actions)) continue
+      for (const branchAction of group.actions) {
+        if (branchAction.type === 'send_notification') ids.push(...parseUserIdsText(branchAction.userId))
+      }
+    }
+  }
+  return Array.from(new Set(ids))
+}
+
+// Look each id up by exact match (the candidate search matches on id/email/name substrings, so
+// q=id with the max page size finds the id itself when it is a roster member). Found → directory
+// entry (name + email chip); not found → miss (raw chip + "unmatched" badge); lookup error → left
+// undecided so the chip stays a plain raw id. Never retried within one open of the dialog.
+async function resolveNotificationRecipientIds(ids: string[]) {
+  const client = props.client
+  if (!client) return
+  const pending = Array.from(new Set(ids)).filter((id) =>
+    !personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
+    && notificationRecipientMisses.value[id] === undefined
+    && !notificationRecipientResolveInFlight.has(id),
+  )
+  await Promise.all(pending.map(async (id) => {
+    notificationRecipientResolveInFlight.add(id)
+    try {
+      const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
+      const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
+      if (matches.length) {
+        rememberPersonRecipientSuggestions(matches)
+      } else {
+        notificationRecipientMisses.value = { ...notificationRecipientMisses.value, [id]: true }
+      }
+    } catch {
+      // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+    } finally {
+      notificationRecipientResolveInFlight.delete(id)
+    }
+  }))
 }
 
 function groupDestinationScope(destination?: DingTalkGroupDestination): 'private' | 'sheet' | 'org' {
@@ -4750,6 +5090,14 @@ async function onTestRun(): Promise<void> {
   font-size: 12px;
   color: var(--ms-text-3);
   font-style: normal;
+}
+
+.meta-rule-editor__recipient-chip--unresolved {
+  border-color: var(--el-color-danger);
+}
+
+.meta-rule-editor__recipient-chip .meta-rule-editor__recipient-badge {
+  color: var(--el-color-danger-dark-2);
 }
 
 .meta-rule-editor__toggle-label {
