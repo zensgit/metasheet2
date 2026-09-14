@@ -318,7 +318,9 @@ export async function saveApprovalFormDraft(input: SaveApprovalFormDraftInput): 
     // lock, inside the same transaction) — "nothing else is locked" was never true, LEAF or not. And
     // the grep claim was refuted by that same grep (`pg_advisory_xact_lock` is a substring of
     // `pg_advisory_xact_lock_shared`, so it also matches the SHARED variant):
-    // `attendance/w7-resolver/w7-composite-lock-order.ts`'s `acquireAttendanceW7CompositeFactsLocksV1`
+    // `attendance/w7-resolver/w7-composite-lock-order.ts`'s composite-lock helper (named there;
+    // deliberately NOT repeated here — that module's own inertness sweep treats any mention of
+    // its symbols inside a PRODUCTION file as a call site, so citing the name would red that lane)
     // takes two SHARED advisory locks in one transaction in a fixed order (membership timeline, then
     // schedule facts); `multitable/stock-preparation-persist-unit-of-work.ts` takes a project lock
     // and a batch lock (plus, via `acquireCanonicalSheetFencesInOrder`, one per sheet id) in one
