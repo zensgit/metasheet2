@@ -36,6 +36,16 @@
 //      MVP_TARGET_OBJECT_ID_INVALID (zero writes, zero transactions); an absent table => 409
 //      MVP_REPAIR_TARGET_ABSENT (zero writes).
 //   R9 the route table names the route exactly once, as POST, on the handler this suite exercised.
+//   R10 (反驳 r1) an UNREGISTERED objectId — the host's tx surface throws its status-less
+//      MultitableObjectScopeError whose message names `${projectId}/${objectId}` (the 222 pre-check
+//      state) => 409 MVP_REPAIR_SCOPE_UNAVAILABLE, details {objectId, hostMethod}, response AND every
+//      log line values-free (no tenant id, no project id), zero additive writes, the one transaction
+//      rolled back; a two-table sweep where the second table is unregistered rolls back the first
+//      table's already-submitted write too (atomic) and reports the same 409.
+//
+//   (反驳 r1, folded into R5) `workspaceId` is no longer an accepted-and-ignored key => 400; an
+//   objectIds key that names nothing ([] / [123, null] / '') => 400 with zero host calls — it must not
+//   widen into "all 9 tables".
 //
 // MUTATIONS this suite is calibrated against (in-memory, never on disk — a preload swaps the module
 // source at _compile time): M1 `requireAccess(req, 'admin')` dropped from the handler => R4 red;
@@ -43,7 +53,8 @@
 // `input.projectId`) => R5 and R7 red; M3 the handler calls ensureStockPreparationMvpTargets instead
 // of the repair verb => R1 red (the route degenerates into the dead end: no additive write reaches
 // the host); M4 the handler answers 200 on an old host => R6 red; M5 the 501 re-cast dropped (verb's
-// 503 passes through) => R6 red.
+// 503 passes through) => R6 red; M7 the verb's scope re-cast dropped (the raw host error escapes) =>
+// R10 red; M8 the empty-objectIds guard dropped => R5 red.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -79,9 +90,25 @@ function clone(value) {
  * recording stub that THROWS — reaching one is itself the failure. `withRepairRunner: false` is the
  * older host (no runObjectFieldsRepairTransaction).
  */
-function createProvisioning({ withRepairRunner = true, absentObjectIds = [] } = {}) {
+// 反驳 r1: the host's OWN error shape for an object this plugin never claimed — no `status`, and a
+// message that names the tenant's project id (packages/core-backend/src/multitable/plugin-scope.ts:91-99).
+function hostObjectScopeError(projectId, objectId) {
+  return Object.assign(
+    new Error(`Plugin integration-core cannot claim multitable object ${projectId}/${objectId}; owned by unregistered`),
+    { name: 'MultitableObjectScopeError', code: 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN' },
+  )
+}
+
+function createProvisioning({ withRepairRunner = true, absentObjectIds = [], unregisteredObjectIds = [] } = {}) {
   const missing = new Map() // objectId -> Set(fieldId)
   const absent = new Set(absentObjectIds)
+  // 反驳 r1: objectIds with NO plugin_multitable_object_registry row. Mirrors the host exactly
+  // (plugin-scope.ts:436-460): the three content methods assert object scope, findObjectSheet is
+  // discovery-only and still answers.
+  const unregistered = new Set(unregisteredObjectIds)
+  const assertScope = (projectId, objectId) => {
+    if (unregistered.has(objectId)) throw hostObjectScopeError(projectId, objectId)
+  }
   const calls = {
     findObjectSheet: [],
     resolveFieldIds: [],
@@ -92,6 +119,7 @@ function createProvisioning({ withRepairRunner = true, absentObjectIds = [] } = 
     patchObjectFieldProperty: [],
     deleteObjectField: [],
     runObjectFieldsRepairTransaction: 0,
+    rolledBackTransactions: 0,
   }
   const gone = (objectId) => missing.get(objectId) || new Set()
   const provisioning = {
@@ -107,11 +135,13 @@ function createProvisioning({ withRepairRunner = true, absentObjectIds = [] } = 
     },
     async resolveExistingObjectFieldIds({ projectId, objectId, fieldIds } = {}) {
       calls.resolveExistingObjectFieldIds.push({ projectId, objectId, fieldIds: [...fieldIds] })
+      assertScope(projectId, objectId)
       const set = gone(objectId)
       return Object.fromEntries((Array.isArray(fieldIds) ? fieldIds : []).filter((id) => !set.has(id)).map((id) => [id, `fld_${objectId}_${id}`]))
     },
     async readObjectFieldsContent({ projectId, objectId, fieldIds } = {}) {
       calls.readObjectFieldsContent.push({ projectId, objectId })
+      assertScope(projectId, objectId)
       const set = gone(objectId)
       const out = {}
       for (const id of Array.isArray(fieldIds) ? fieldIds : []) {
@@ -121,6 +151,7 @@ function createProvisioning({ withRepairRunner = true, absentObjectIds = [] } = 
     },
     async ensureMissingObjectFields(input = {}) {
       calls.ensureMissingObjectFields.push(clone(input))
+      assertScope(input.projectId, input.objectId)
       const set = gone(input.objectId)
       const addedFieldIds = []
       const skippedExistingFieldIds = []
@@ -151,12 +182,18 @@ function createProvisioning({ withRepairRunner = true, absentObjectIds = [] } = 
   if (withRepairRunner) {
     provisioning.runObjectFieldsRepairTransaction = async (fn) => {
       calls.runObjectFieldsRepairTransaction += 1
-      return fn({
-        findObjectSheet: (i) => provisioning.findObjectSheet(i),
-        resolveExistingObjectFieldIds: (i) => provisioning.resolveExistingObjectFieldIds(i),
-        readObjectFieldsContent: (i) => provisioning.readObjectFieldsContent(i),
-        ensureMissingObjectFields: (i) => provisioning.ensureMissingObjectFields(i),
-      })
+      try {
+        return await fn({
+          findObjectSheet: (i) => provisioning.findObjectSheet(i),
+          resolveExistingObjectFieldIds: (i) => provisioning.resolveExistingObjectFieldIds(i),
+          readObjectFieldsContent: (i) => provisioning.readObjectFieldsContent(i),
+          ensureMissingObjectFields: (i) => provisioning.ensureMissingObjectFields(i),
+        })
+      } catch (error) {
+        // A throw out of the callback is what the real runner rolls back on.
+        calls.rolledBackTransactions += 1
+        throw error
+      }
     }
   }
   return {
@@ -272,16 +309,14 @@ function createResponse() {
   }
 }
 
+// 反驳 r1: NO try/catch here. `addRoute` stores registerIntegrationRoutes' wrapper, which turns every
+// throw into sendError — so a throw reaching this helper IS a dispatcher regression and fails the test
+// instead of being re-shaped into a status the assertions might accept.
 async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  try {
-    await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
-  } catch (error) {
-    res.statusCode = error && error.status ? error.status : 500
-    res.body = { ok: false, error: { code: error && error.code ? error.code : 'THREW', message: error && error.message, details: error && error.details } }
-  }
+  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a body`)
   return res
 }
@@ -433,6 +468,12 @@ async function r5TheRequestCannotSteerTheRepair() {
     ['body baseId', { body: { baseId: 'base_of_tenant_evil' } }, 'STOCK_PREPARATION_BASE_ID_NOT_ALLOWED'],
     ['caller-supplied field list', { body: { objectIds: [LINE_OBJECT_ID], fields: [{ id: 'ext_backdoor', type: 'text' }] } }, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID'],
     ['unknown key', { body: { sheetId: 'sheet_x' } }, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID'],
+    // 反驳 r1: workspaceId was accepted-and-ignored; now it is simply not a key of this route.
+    ['accepted-and-ignored key workspaceId', { body: { objectIds: [LINE_OBJECT_ID], workspaceId: 'ws_1' } }, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID'],
+    // 反驳 r1: an objectIds key that names nothing must not widen into "all 9 tables".
+    ['empty objectIds []', { body: { objectIds: [] } }, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID'],
+    ['objectIds with no usable entry [123, null]', { body: { objectIds: [123, null] } }, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID'],
+    ['objectIds empty string', { body: { objectIds: '' } }, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID'],
   ]
   for (const [label, req, code] of arms) {
     const harness = mount()
@@ -443,10 +484,14 @@ async function r5TheRequestCannotSteerTheRepair() {
     assertZeroHostCalls(harness, `R5 [${label}]`)
     assert.equal(JSON.stringify(res.body).includes('tenant_evil'), false, `R5 [${label}]: the steering value is not echoed`)
   }
-  // Control: without a steering key the same request is NOT refused on that ground.
+  // Control: without a steering / unknown key the same request is NOT refused on that ground.
   const harness = mount()
-  const ok = await repair(harness.routes, { body: { objectIds: [LINE_OBJECT_ID], workspaceId: 'ws_1' } })
+  const ok = await repair(harness.routes, { body: { objectIds: [LINE_OBJECT_ID] } })
   assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+  // Control: an OMITTED objectIds key still means every MVP table (R2 proves the count).
+  const omitted = await repair(mount().routes, { body: {} })
+  assert.equal(omitted.statusCode, 200, JSON.stringify(omitted.body))
+  assert.equal(omitted.body.data.tables.length, ALL_MVP_OBJECT_IDS.length)
 }
 
 // ── R6 ────────────────────────────────────────────────────────────────────────────────────────
@@ -501,6 +546,51 @@ async function r8TheVerbsOwnRefusalsPassThroughWithZeroWrites() {
   }
 }
 
+// ── R10 ───────────────────────────────────────────────────────────────────────────────────────
+
+async function r10AnUnregisteredObjectIdIsRefusedValuesFreeWithZeroWrites() {
+  {
+    const harness = mount({ unregisteredObjectIds: [LINE_OBJECT_ID] })
+    harness.host.remove(LINE_OBJECT_ID, MISSING_LINE_FIVE)
+    const res = await repair(harness.routes, { body: { objectIds: [LINE_OBJECT_ID] } })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'MVP_REPAIR_SCOPE_UNAVAILABLE')
+    assert.deepEqual(clone(res.body.error.details), { objectId: LINE_OBJECT_ID, hostMethod: 'resolveExistingObjectFieldIds' })
+    assertValuesFree(res.body, 'R10 response')
+    assert.equal(String(res.body.error.message).includes('cannot claim'), false, 'R10: the host message is not forwarded')
+    // Every log line: the plugin-name prefix `[plugin-integration-core]` is not a value, the project id
+    // `${tenant}:integration-core`, the tenant id and the host's message text are.
+    for (const line of harness.logLines) {
+      const text = JSON.stringify(line)
+      for (const token of [TENANT_ID, ':integration-core', 'cannot claim', 'sheet_', 'fld_']) {
+        assert.equal(text.includes(token), false, `R10 log line must not leak "${token}"`)
+      }
+    }
+    assert.deepEqual(harness.host.calls.ensureMissingObjectFields, [], 'R10: zero additive writes')
+    assert.equal(harness.host.calls.runObjectFieldsRepairTransaction, 1, 'R10: the one transaction was opened')
+    assert.equal(harness.host.calls.rolledBackTransactions, 1, 'R10: and rolled back by the typed throw')
+    assertNoStructureMutationNoRowWrite(harness, 'R10')
+  }
+  {
+    // Atomic: the FIRST table's additive write is already submitted inside the tx when the second
+    // (unregistered) table refuses — the whole sweep rolls back and the response is the same 409.
+    const [batchObjectId] = ALL_MVP_OBJECT_IDS.filter((objectId) => objectId !== LINE_OBJECT_ID && objectId.endsWith('_bom_snapshot_batch'))
+    assert.ok(batchObjectId, 'CONTROL: the batch table is an MVP table')
+    const harness = mount({ unregisteredObjectIds: [LINE_OBJECT_ID] })
+    harness.host.remove(batchObjectId, ['snapshotVersion'])
+    harness.host.remove(LINE_OBJECT_ID, MISSING_LINE_FIVE)
+    const res = await repair(harness.routes, { body: { objectIds: [batchObjectId, LINE_OBJECT_ID] } })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'MVP_REPAIR_SCOPE_UNAVAILABLE')
+    assert.equal(res.body.error.details.objectId, LINE_OBJECT_ID)
+    assertValuesFree(res.body, 'R10 two-table response')
+    assert.equal(harness.host.calls.ensureMissingObjectFields.length, 1, 'CONTROL: the registered table`s write was submitted inside the tx')
+    assert.equal(harness.host.calls.ensureMissingObjectFields[0].objectId, batchObjectId)
+    assert.equal(harness.host.calls.rolledBackTransactions, 1, 'R10: the whole sweep rolled back')
+    assertNoStructureMutationNoRowWrite(harness, 'R10 two-table')
+  }
+}
+
 // ── R9 ────────────────────────────────────────────────────────────────────────────────────────
 
 function r9TheRouteTableNamesTheRouteOnce() {
@@ -519,6 +609,7 @@ async function main() {
   await r7TheRepairedProjectIsTheAuthenticatedTenantsStagingProject()
   await r8TheVerbsOwnRefusalsPassThroughWithZeroWrites()
   r9TheRouteTableNamesTheRouteOnce()
+  await r10AnUnregisteredObjectIdIsRefusedValuesFreeWithZeroWrites()
   console.log('stock-preparation-mvp-repair-routes tests passed')
 }
 

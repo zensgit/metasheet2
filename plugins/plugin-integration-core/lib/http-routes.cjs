@@ -1617,9 +1617,10 @@ const VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS = new Set([
 // (tenantId / projectId / baseId) are not even accepted-and-ignored: a request that carries one is
 // refused 400 before any host call (assertNoRequestBaseId + assertStockPreparationMvpRepairNoSteering),
 // and a caller-supplied field list has no key to arrive through — the repair set is always the
-// template's missing set, computed server-side.
+// template's missing set, computed server-side. 反驳 r1: `workspaceId` was accepted-and-ignored here
+// (the handler never used it, the verb has no such parameter) — on a route whose design point is
+// "no accepted-and-ignored key", it is gone: `objectIds` is the ONLY key.
 const VALID_STOCK_PREPARATION_MVP_REPAIR_REQUEST_KEYS = new Set([
-  'workspaceId',
   'objectIds',
 ])
 const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -2402,10 +2403,18 @@ function normalizeStockPreparationMvpRepairRequest(input = {}) {
       throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
     }
   }
-  return {
-    workspaceId: firstString(input.workspaceId),
-    objectIds: normalizeRequestedMvpObjectIds(input.objectIds),
+  const objectIds = normalizeRequestedMvpObjectIds(input.objectIds)
+  if (input.objectIds !== undefined && input.objectIds !== null && objectIds === undefined) {
+    // 反驳 r1: an objectIds key that names NOTHING ([] / [123, null] / '') must not widen into
+    // "all 9 MVP tables" — that is the OMITTED-key meaning, and only an omitted key may mean it.
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID',
+      'objectIds must name at least one MVP objectId when present; omit the key to repair every MVP table',
+      { field: 'objectIds' },
+    )
   }
+  return { objectIds }
 }
 
 // #5721 终审: WRITE-path input for the MVP repair route. The tenant/project derivation is byte-identical
@@ -2420,7 +2429,6 @@ function stockPreparationMvpRepairInput(req, rawInput = {}) {
   const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
   return {
     tenantId,
-    workspaceId: input.workspaceId,
     projectId,
     objectIds: input.objectIds,
   }
@@ -2855,7 +2863,9 @@ function sandboxTargetRouteError(error) {
 
 // #5721 终审: the MVP repair route's status projection. Every refusal the verb raises already carries
 // its own status (409 MVP_REPAIR_TARGET_ABSENT / 422 MVP_TARGET_OBJECT_ID_INVALID / 409
-// REPAIR_CONCURRENT_FIELD_APPEARED / …) and passes through sendError unchanged. The ONE re-cast: a
+// REPAIR_CONCURRENT_FIELD_APPEARED / 409 MVP_REPAIR_SCOPE_UNAVAILABLE — the verb's own values-free
+// re-cast of the host's status-less MultitableObjectScopeError, 反驳 r1 / …) and passes through
+// sendError unchanged. The ONE re-cast: a
 // host without the atomic repair runner (runObjectFieldsRepairTransaction) is "this server cannot
 // perform the repair" — 501 Not Implemented at the route, on the verb's own code/message/details, so
 // an old host is refused explicitly and values-free, never answered 200 as if the table had been
