@@ -1510,6 +1510,15 @@ export default defineConfig({
       // how it went un-run entirely) and wired as a WHOLE FILE into plugin-tests.yml's multitable
       // real-DB step, where DATABASE_URL is set and the in-suite sentinel fails-not-skips.
       'tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts',
+      // 托管表 schema 写门 — the only end-to-end proof that a sheet-scoped writer is refused on a
+      // plugin-provisioned sheet's COLUMNS while keeping its data plane, asserted by meta_fields ROW
+      // COUNT equality against real Postgres. Excluded here so its `describeIfDatabase` cannot
+      // skip-green in the no-DB job, and wired as a WHOLE FILE into its own evidence lane
+      // .github/workflows/managed-sheet-schema-write-gate-realdb.yml (a standalone lane rather than a
+      // plugin-tests.yml allowlist entry: that file is an s6a sha256-pinned provenance input, so every
+      // edit forces a re-pin — the same precedent the approval-realdb-* lanes cite). The no-DB half of
+      // the same matrix runs on every PR as tests/unit/multitable-managed-sheet-schema-write-gate.test.ts.
+      'tests/integration/multitable-managed-sheet-schema-write-gate.db.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
       // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
       // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it
