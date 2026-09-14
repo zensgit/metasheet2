@@ -392,6 +392,7 @@ import {
   type RecoveryArchiveApplicationDatabaseRuntime,
 } from './multitable/recovery-archive-application'
 import { isOapiAllowlistRequest } from './multitable/oapi-read-allowlist'
+import { createIntegrationApiTokenGate } from './middleware/integration-api-token-gate'
 import { dashboardRouter } from './routes/dashboard'
 import { automationWebhookJsonParser, createAutomationRoutes } from './routes/automation'
 import { createMultitableAiRoutes } from './routes/multitable-ai'
@@ -1670,10 +1671,12 @@ export class MetaSheetServer {
     this.app.use((req: Request, res: Response, next: NextFunction) => {
       if (isWhitelisted(req.path)) return next()
       if (isPublicFormAuthBypass(req)) return optionalJwtAuthMiddleware(req, res, next)
-      // OAPI-1/2a: let an `mst_` API token reach the per-route apiTokenAuth + requireScope guards on the
-      // method-bound allowlist (read GETs ∪ the 4 OAPI-2a write routes), fail-closed. An `mst_` bearer on
-      // any non-allowlisted (method, path) falls through to jwtAuthMiddleware → 401, so a token can never
-      // reach a write/side-effecting route outside the allowlist (kept in lockstep with the mounted guards).
+      // OAPI-1/2a + G44: let an `mst_` API token reach the guards that authenticate it, on the
+      // method-bound allowlist (multitable read GETs ∪ the 4 OAPI-2a write routes ∪ the G44 integration
+      // read GETs), fail-closed. An `mst_` bearer on any non-allowlisted (method, path) falls through to
+      // jwtAuthMiddleware → 401, so a token can never reach a write/side-effecting route outside the
+      // allowlist. The multitable terms are in lockstep with per-route `apiTokenAuth` + `requireScope`
+      // mounts; the integration term is in lockstep with `integrationApiTokenGate`, mounted just below.
       if (isOapiAllowlistRequest(req.method, req.path, req.headers.authorization)) return next()
       // API paths default INTO the session gate. `isApiPath` is the shared policy predicate
       // (auth/api-path-policy.ts) that every layer asking this question uses, so the gate and the
@@ -1681,6 +1684,14 @@ export class MetaSheetServer {
       if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)
       return next()
     })
+
+    // G44 — THE integration open-API token guard. The plugin that registers `/api/integration/**`
+    // (`plugin-integration-core`, provenance-pinned) has no host-owned router to mount a per-route
+    // `apiTokenAuth` + `requireScope` on, so the guard is mounted once for the whole subtree HERE:
+    // after the global gate (so it only sees requests the allowlist already classified) and BEFORE the
+    // correlation/tenant middlewares below (so the identity it builds is the one they enrich from).
+    // It is a no-op for every request that is not an `mst_` bearer on `/api/integration`.
+    this.app.use(createIntegrationApiTokenGate())
 
     // Post-auth enrichment: correlation ALS starts before auth so preflights
     // are covered; once auth runs, attach user/tenant for downstream logs.

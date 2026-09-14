@@ -486,8 +486,15 @@ const showTokenForm = ref(false)
 const newTokenPlaintext = ref<string | null>(null)
 const copiedNewToken = ref(false)
 const tokenDraft = ref({ name: '', scopes: [] as string[], expiresAt: '' })
-// Must match the backend enum ALL_API_TOKEN_SCOPES (packages/core-backend/src/multitable/api-tokens.ts).
-// The old ['read','write','admin'] were rejected by the server (400) — a contract/UI drift.
+// A DECLARED SUBSET of the backend enum ALL_API_TOKEN_SCOPES
+// (packages/core-backend/src/multitable/api-tokens.ts:43-51, currently 7 entries). Every value here
+// MUST exist in that enum — the old ['read','write','admin'] did not and were rejected by the server
+// (400), the contract/UI drift this comment exists because of. The converse does NOT hold: the enum may
+// carry scopes this picker deliberately does not offer. Today that is `integration:read` (G44), a
+// machine-credential scope for the read-only /api/integration contract; it is mintable via
+// POST /api/multitable/api-tokens and intentionally not self-service from this UI yet. If you add it
+// here, add a label in multitable/utils/meta-api-token-labels.ts too (unknown values fall through to
+// the raw string).
 const availableScopes = ['records:read', 'records:write', 'fields:read', 'comments:read', 'comments:write', 'webhooks:manage']
 
 // ---- Webhooks ----
