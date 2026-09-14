@@ -677,4 +677,108 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(diagnostics.textContent).toContain('K3_WISE_TEST_FAILED')
     expect(diagnostics.textContent).toContain('已按 values-free 纪律隐藏')
   })
+
+  // G10 终审 F05 — this page led with "K3 目标永久只读、不写回" while still offering 执行物料 / 执行 BOM
+  // and an 允许真实执行 checkbox three panels down. The copy and the controls now say one thing.
+  it('G10: the K3 preset page offers no live-run control, only dry-run plus the read-only notice', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const buttonText = Array.from(container.querySelectorAll('button')).map((button) => button.textContent?.trim() ?? '')
+    expect(buttonText).not.toContain('执行物料')
+    expect(buttonText).not.toContain('执行 BOM')
+
+    // Dry-run is a READ the frozen ruling deliberately keeps (external-write-dry-run.cjs) — hiding it
+    // would remove the only thing this page can still do, which is the E4-05 failure mode.
+    expect(buttonText).toContain('Dry-run 物料')
+    expect(buttonText).toContain('Dry-run BOM')
+
+    // The consent toggle for a push that can never happen is gone with the buttons.
+    const checkLabels = Array.from(container.querySelectorAll('label')).map((label) => label.textContent ?? '')
+    expect(checkLabels.some((text) => text.includes('允许真实执行 Pipeline'))).toBe(false)
+
+    const notice = container.querySelector('[data-testid="k3-live-run-fenced-notice"]')
+    expect(notice).not.toBeNull()
+    expect(notice?.textContent).toContain('只读')
+
+    expect(container.textContent).toContain('仅 dry-run')
+    expect(container.textContent).toContain('K3 目标只能 dry-run')
+    // F09: the run-log blurb no longer advertises a Save-only push on a page that cannot do one.
+    expect(container.textContent).not.toContain('Save-only 推送和回写结果')
+  })
+
+  // G10 终审 — this page shipped its own copy of parseIntegrationResponse that threw a bare Error, so the
+  // view's catch could never humanize anything no matter what it called. One parser now, and the catch
+  // binds the error instead of discarding it.
+  it('G10: a dry-run failure carrying a registered code renders its label; an unregistered one keeps values-free copy', async () => {
+    let detailsCode = 'VALIDATION_FAILED'
+    const serverProse = 'SENTINEL-SERVER-PROSE row 42 rejected'
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.endsWith('/dry-run')) {
+        // PipelineRunnerError shape: class name on top, product code in details (http-routes.cjs
+        // inferErrorCode / inferHttpStatus).
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: 'PipelineRunnerError', message: serverProse, details: { code: detailsCode } } }),
+          { status: 422, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = inputByLabel(container, '物料 Pipeline ID')
+    pipelineIdInput.value = 'pipe_material_1'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const dryRunButton = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Dry-run 物料')) as HTMLButtonElement
+    expect(dryRunButton).toBeTruthy()
+    expect(dryRunButton.disabled).toBe(false)
+    dryRunButton.click()
+    await flushUi(8)
+
+    const status = container.querySelector('.k3-setup__status') as HTMLElement
+    expect(status).not.toBeNull()
+    expect(status.getAttribute('data-kind')).toBe('error')
+    // Harness locale is 'en' (afterEach restores it), so this is the registered en label.
+    expect(status.textContent).toContain('Data validation failed.')
+    expect(status.textContent).not.toContain('提交 Pipeline 运行失败')
+    // Values-free discipline holds either way: the server sentence never renders on this page.
+    expect(container.textContent).not.toContain(serverProse)
+
+    // An UNREGISTERED code must fall back to the page's FIXED copy — never to the server prose.
+    if (app) app.unmount()
+    container.remove()
+    detailsCode = 'SOME_UNREGISTERED_RUNTIME_CODE'
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const secondInput = inputByLabel(container, '物料 Pipeline ID')
+    secondInput.value = 'pipe_material_1'
+    secondInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    const secondButton = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Dry-run 物料')) as HTMLButtonElement
+    secondButton.click()
+    await flushUi(8)
+
+    const fallbackStatus = container.querySelector('.k3-setup__status') as HTMLElement
+    expect(fallbackStatus.textContent).toContain('提交 Pipeline 运行失败，详情见服务端日志。')
+    expect(container.textContent).not.toContain(serverProse)
+  })
 })

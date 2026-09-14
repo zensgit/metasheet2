@@ -99,13 +99,24 @@
     <strong>运行时会发生什么</strong>
     <ul>
       <li>Dry-run 只读取来源数据并生成目标 payload preview，不写 K3 或其他外部系统。</li>
-      <li>Save-only 只调用目标系统保存接口；默认不 Submit、不 Audit，也不覆盖来源多维表。</li>
+      <li>Save-only 只调用目标系统保存接口；默认不 Submit、不 Audit，也不覆盖来源多维表。K3 目标永久只读，不提供 Save-only 推送。</li>
       <li>成功后展示写入数、外部 ID 或单据号；失败会写入 dead letter，可从异常区打开排查。</li>
       <li>导出清洗结果只使用已脱敏 preview，可用于人工复核或交接。</li>
     </ul>
   </div>
 
-  <label class="integration-workbench__inline-check">
+  <!-- G10: a fenced target gets a SENTENCE where the Save-only control used to be, not a disabled
+       button. A disabled control still reads as "not yet" — something a permission or a setting could
+       turn on — and this is permanent. The allow-toggle goes with it: consenting to a push that can
+       never happen is not a choice worth offering. -->
+  <p
+    v-if="targetWriteFenced"
+    class="integration-workbench__hint integration-workbench__hint--strong"
+    data-testid="save-only-fenced-notice"
+  >
+    {{ k3WriteFenceExplanation }}
+  </p>
+  <label v-else class="integration-workbench__inline-check">
     <input v-model="allowSaveOnlyRun" type="checkbox" data-testid="allow-save-only-run" />
     <span>允许本次 Save-only 推送。保持 Submit / Audit 关闭。</span>
   </label>
@@ -130,7 +141,7 @@
     <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== '' || !canRunPipeline" @click="executePipeline(true)">
       {{ runningPipeline === 'dry-run' ? 'Dry-run 中' : 'Dry-run' }}
     </button>
-    <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunPipeline" @click="executePipeline(false)">
+    <button v-if="!targetWriteFenced" type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunPipeline" @click="executePipeline(false)">
       {{ runningPipeline === 'run' ? '推送中' : 'Save-only 推送' }}
     </button>
   </div>
@@ -149,6 +160,7 @@
 // to before this slice — this component renders *inside* that shell, not around it.
 import type { IntegrationPipelineMode, IntegrationStagingDescriptor } from '../../services/integration/workbench'
 import type { ReadinessItem, SourceFieldOption, WatermarkType } from './integrationWorkbenchSectionTypes'
+import { K3_WRITE_FENCE_EXPLANATION } from '../../services/integration/writeFence'
 
 defineProps<{
   generatedPipelineName: string
@@ -164,9 +176,18 @@ defineProps<{
   runningPipeline: 'dry-run' | 'run' | ''
   canRunPipeline: boolean
   dryRunEmptyPreviewNotice: string
+  // G10: the selected TARGET is inside the permanent K3 external-write fence. Resolved by the parent
+  // (it owns the target system), passed down as a plain boolean so this component keeps its 'no state,
+  // no service calls' contract. It can only remove the Save-only affordance — false is exactly the
+  // pre-G10 rendering.
+  targetWriteFenced: boolean
   useGeneratedPipelineName: () => void
   executePipeline: (dryRun: boolean) => Promise<void>
 }>()
+
+// Rendered verbatim from the shared constant rather than retyped here, so this panel and the page
+// copy above it cannot drift into two different accounts of the same permanent fence.
+const k3WriteFenceExplanation = K3_WRITE_FENCE_EXPLANATION.zh
 
 const pipelineName = defineModel<string>('pipelineName', { default: '' })
 const pipelineMode = defineModel<IntegrationPipelineMode>('pipelineMode', { default: 'manual' })
