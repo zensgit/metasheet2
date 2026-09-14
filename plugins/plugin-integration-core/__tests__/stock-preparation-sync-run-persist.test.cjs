@@ -28,7 +28,8 @@
 //       (the fixture's derived sheet id diverges from findObjectSheet's and the probe still fires).
 //
 // MUTATIONS the (i) cases are calibrated against (run in-memory by the implementer's mutation runner,
-// never on disk): M1 probe loop removed => (i-a)(i-a2)(i-g)(i-h) red; M2 capability gate removed (old
+// never on disk): M1 probe loop removed => (i-a)(i-a2)(i-b)(i-d)(i-e)(i-g) red ((i-h) drives the guard
+// directly and (i-f) still 409s, so both survive it by design); M2 capability gate removed (old
 // host probed too) => (i-c) red, and `!== 'db'` guard removed (scope-degraded verdict refused) =>
 // (i-d) red; M3 details carry a sheet id / extra key => (i-a) red; M4 host failure rethrown raw =>
 // (i-e) red; M5 probe moved before sheet resolution => (i-f) red.
