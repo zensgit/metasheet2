@@ -223,6 +223,7 @@ node __tests__/stock-preparation-department-fields-and-write-scoping.test.cjs
 node __tests__/stock-preparation-project-board.test.cjs
 node __tests__/stock-preparation-operator-pull-gate.test.cjs
 node __tests__/stock-preparation-dry-run-target-field-probe-routes.test.cjs
+node __tests__/stock-preparation-mvp-persist-target-field-probe-routes.test.cjs
 node __tests__/stock-preparation-write-scope-reconcile-bounds.test.cjs
 
 # G4/M2 (#5553): adapter-load hard dependency + no credential-stripped fallback.
