@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createPinia } from 'pinia'
 import IntegrationWorkbenchRail, {
   type IntegrationWorkbenchRailGroup,
 } from '../src/components/integration/IntegrationWorkbenchRail.vue'
@@ -152,6 +153,9 @@ describe('IntegrationWorkbenchView — IU-2a chrome integration', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(IntegrationWorkbenchViewForChromeTest as Component)
+    // 整合切片 (2026-09-09): 连接管理 now embeds DataSourcesPanel, which owns a pinia store.
+    // The blanket empty-list apiGet stub above already answers its on-mount list call.
+    app.use(createPinia())
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {

@@ -184,9 +184,30 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Template Details', titleZh: '模板详情', requiresAuth: true },
   },
   {
+    // 整合切片 (2026-09-09): the standalone 外接数据源 page was folded into 数据工厂's 连接管理
+    // section, so this path is now a REDIRECT that keeps every existing bookmark, doc link and
+    // in-app hint working. The hash is the workbench's own section anchor — the view resolves it
+    // via resolveWorkbenchLandingGroupId() and scrolls there (views/integrationWorkbenchLanding.ts).
+    //
+    // The target carries the workbench's `integration:write` gate, which the old page did not.
+    // That is a TIGHTENING and deliberate. Scoped to what is actually true: no principal loses a
+    // NAVIGATION entry point — the shell's 外接数据源 nav link was itself gated on
+    // integration:write (App.vue's `canUseIntegration`), so everyone who could SEE that link can
+    // still open the target. The other entry points do change for a principal without
+    // integration:write, and this comment names them rather than claiming they do not exist:
+    //   * a bookmark / printed runbook on '/data-sources' now meets the workbench guard and is
+    //     bounced to the home path instead of rendering the page;
+    //   * 备料向导①'s link is exactly that case — 交付指南 lists 「开始使用」 as a surface a
+    //     `stock-prep:admin` holder sees (customer-delivery-guide-20260904.md 的可见项表格; the
+    //     harness's `stockadmin` actor holds stock-prep:admin and nothing else), and that holder
+    //     has no integration:write. StockPreparationGettingStarted.vue therefore renders that
+    //     link ONLY when the host says the principal can open 数据工厂, and a plain-text
+    //     「联系实施」 sentence otherwise — a bounce is not an entry point.
+    // The target path also sits under the '/integrations' prefix that PLM_WORKBENCH_ALLOWED_PREFIXES
+    // already allows (router/guardPolicy.ts), so PLM-focused orgs are not bounced by the fold.
     path: '/data-sources',
     name: 'data-sources',
-    component: () => import('../views/DataSourcesView.vue'),
+    redirect: { path: '/integrations/workbench', hash: '#int-sec-connection' },
     meta: { title: 'Data Sources', titleZh: '外接数据源', requiresAuth: true },
   },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),

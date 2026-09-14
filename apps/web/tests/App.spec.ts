@@ -351,3 +351,77 @@ describe('App top-bar account identity display', () => {
     expect(el.querySelector('.nav-user')).toBeNull()
   })
 })
+describe('App primary nav after the 外接数据源 fold (整合切片 2026-09-09)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/attendance'
+    mocks.route.fullPath = '/attendance'
+    mocks.route.meta = {}
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    mocks.getApiBase.mockReturnValue('https://api.example.com')
+    window.localStorage.clear()
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to, class: 'nav-link' }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+    return container
+  }
+
+  function navHrefs(el: HTMLElement): string[] {
+    return Array.from(el.querySelectorAll('.nav-links a')).map((anchor) => anchor.getAttribute('href') ?? '')
+  }
+
+  it('drops the /data-sources entry while keeping the 数据工厂 entry it folded into', async () => {
+    // Same principal the retired entry was gated on (integration:write) — so this is not "the
+    // link is missing because the gate is closed", it is "the link is gone for the very
+    // principal that used to see it, and its destination is still one click away".
+    const token = fakeJwt({ email: 'nav-probe@example.test' })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+    window.localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+
+    const el = await mountApp()
+    const hrefs = navHrefs(el)
+    expect(hrefs).toContain('/integrations/workbench')
+    expect(hrefs).not.toContain('/data-sources')
+    expect(el.querySelector('.nav-links a[href="/data-sources"]')).toBeNull()
+  })
+
+  it('renders no /data-sources entry for a principal without integration:write either', async () => {
+    const token = fakeJwt({ email: 'nav-probe@example.test' })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+    window.localStorage.setItem('user_permissions', JSON.stringify([]))
+
+    const el = await mountApp()
+    expect(navHrefs(el)).not.toContain('/data-sources')
+  })
+})
