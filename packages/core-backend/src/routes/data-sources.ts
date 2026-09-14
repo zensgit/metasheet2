@@ -712,8 +712,41 @@ export function dataSourcesRouter(): Router {
   /**
    * PUT /api/data-sources/:id/credentials
    * Rotate write-only credentials. Non-secret config updates stay on PUT /:id.
+   *
+   * G02 PR-1 — the coarse gate here is `data_sources:rotate`, EXCLUSIVELY; it is deliberately NOT
+   * `rbacGuardAny(['data_sources:rotate', 'data_sources:write'])`.
+   *
+   * Rotating a credential and repointing a source are different-magnitude acts that shared one code
+   * until now. Rotation swaps a secret while the target database stays put — a high-frequency
+   * operations chore that should be delegable. `PUT /:id` (:615) changes `connection.host`, which
+   * moves where every pipeline built on this source reads from, and nothing pins that at runtime
+   * unless the id is ARMED (`assertSqlSourceProvisionableAtRuntime` only guards armed ids). While
+   * both sat behind `data_sources:write`, delegating the chore necessarily delegated the repoint.
+   *
+   * FAIL-CLOSED, AND THAT IS THE POINT. Accepting `write` here as a fallback would leave the two
+   * acts fused and make this change cosmetic. So a non-admin who holds `data_sources:write` and not
+   * `data_sources:rotate` now gets 403 ON THIS ROUTE (platform admins are unaffected: rbacGuard
+   * short-circuits the global-admin tier at src/rbac/rbac.ts:69-72).
+   *
+   * STATED PRECISELY: what `write` alone loses is IN-PLACE rotation, not every route to a new
+   * secret. `write` still owns `DELETE /:id` (:851) plus `POST /api/data-sources` (:463) with the
+   * same id and fresh `credentials`, i.e. an owner can drop and re-create the source (the delete
+   * runs `manager.assertAccess` first, so a non-owner still eats the uniform 404, and re-creation
+   * only ever lands under the caller's own ownership); and it still owns `PUT /:id` (:615), which
+   * repoints `connection`. What this gate splits is the AUTHORIZATION SURFACE of two
+   * different-magnitude acts, so the chore becomes delegable without the repoint — it is not a
+   * claim that a `write` holder can never reach a new password.
+   *
+   * The deployment prerequisite — count today's `data_sources:write` holders read-only across ALL
+   * THREE live surfaces (`role_permissions`, `user_permissions` and the legacy `users.permissions`
+   * column), then grant `data_sources:rotate` through a ROLE before shipping — is written out in
+   * db/migrations/zzzz20260912120000_add_data_source_sharing_permissions.ts and in
+   * docs/development/data-source-sharing-pr1-rotate-scope-design-20260912.md.
+   *
+   * The fine gate below (`manager.assertAccess`) is UNCHANGED: holding `rotate` still gets the
+   * uniform 404 on somebody else's source. This PR moves one coarse door, nothing else.
    */
-  router.put('/api/data-sources/:id/credentials', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
+  router.put('/api/data-sources/:id/credentials', rbacGuard('data_sources', 'rotate'), async (req: Request, res: Response) => {
     const parse = DataSourceCredentialsUpdateSchema.safeParse(req.body)
     if (!parse.success) {
       return res.status(400).json({
