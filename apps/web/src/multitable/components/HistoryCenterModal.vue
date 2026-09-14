@@ -1,15 +1,22 @@
 <!--
   Global History & Point-in-Time Restore — T2/T3 read-only base-level history center.
   Lists permission-filtered change batches (newest first) with time/actor/source/action filters, and
-  expands a batch to its per-record change detail. Read-only: no restore here (T5/T6 are gated). All
-  visibility + counts come permission-filtered from the backend (LOCK-3) — the FE renders what it is given
-  and never reconstructs hidden rows.
+  expands a batch to its per-record change detail. Deleted-record recovery is limited to the active sheet
+  and an explicit caller-supplied lifecycle capability. All visibility + counts come permission-filtered
+  from the backend (LOCK-3) — the FE renders what it is given and never reconstructs hidden rows.
 -->
 <template>
-  <div v-if="open" class="meta-hist__overlay" @click.self="emit('close')">
+  <div v-if="open && !showDeletedRecords" class="meta-hist__overlay" @click.self="emit('close')">
     <div class="meta-hist__modal" role="dialog" aria-modal="true" :aria-label="t('历史记录', 'History')">
       <header class="meta-hist__header">
         <h3 class="meta-hist__title">{{ t('历史记录', 'History') }}</h3>
+        <button
+          v-if="canOpenDeletedRecords"
+          class="meta-hist__deleted-records"
+          type="button"
+          data-test="hist-open-deleted-records"
+          @click="openDeletedRecords()"
+        >{{ t('已删除的记录', 'Deleted records') }}</button>
         <MtIconButton class="meta-hist__close" :aria-label="t('关闭', 'Close')" @click="emit('close')">×</MtIconButton>
       </header>
 
@@ -23,10 +30,10 @@
         <template v-else>
           <div class="meta-hist__pinned-summary">
             <span class="meta-hist__who">{{ actorLabel(pinnedDetail.actorName, pinnedDetail.actorId) }} · {{ sourceLabel(pinnedDetail.source) }}</span>
-            <span class="meta-hist__when">{{ formatTime(pinnedDetail.createdAt) }}</span>
+            <span class="meta-hist__when">{{ configHistoryTime(pinnedDetail.createdAt, isZh) }}</span>
             <span class="meta-hist__counts" data-test="hist-pinned-counts">{{ countLabel(pinnedDetail) }}</span>
           </div>
-          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :field-names="pinnedDetail.fieldNames" :person-names="pinnedDetail.personNames" :field-types="pinnedDetail.fieldTypes" :link-summaries="linkSummaries" :person-summaries="personSummaries" :action-label="actionLabel" @open-record="emit('open-record', $event)" />
+          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :field-names="pinnedDetail.fieldNames" :person-names="pinnedDetail.personNames" :field-types="pinnedDetail.fieldTypes" :link-summaries="linkSummaries" :person-summaries="personSummaries" :active-sheet-id="sheetId" :can-restore-records="canRestoreRecords" :action-label="actionLabel" @open-record="emit('open-record', $event)" @restore-record="openDeletedRecords($event)" />
         </template>
       </div>
 
@@ -63,12 +70,12 @@
             <span class="meta-hist__action" :data-action="b.action">{{ actionLabel(b.action) }}</span>
             <span class="meta-hist__counts" data-test="hist-counts">{{ countLabel(b) }}</span>
             <span class="meta-hist__who">{{ actorLabel(b.actorName, b.actorId) }} · {{ sourceLabel(b.source) }}</span>
-            <span class="meta-hist__when">{{ formatTime(b.createdAt) }}</span>
+            <span class="meta-hist__when">{{ configHistoryTime(b.createdAt, isZh) }}</span>
           </button>
           <div v-if="expandedId === b.batchId" class="meta-hist__detail" data-test="hist-detail">
             <p v-if="detailLoading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</p>
             <p v-else-if="!detail" class="meta-hist__hint">{{ t('无法打开该批次', 'This batch is unavailable') }}</p>
-            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :field-names="detail.fieldNames" :person-names="detail.personNames" :field-types="detail.fieldTypes" :link-summaries="linkSummaries" :person-summaries="personSummaries" :action-label="actionLabel" @open-record="emit('open-record', $event)" />
+            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :field-names="detail.fieldNames" :person-names="detail.personNames" :field-types="detail.fieldTypes" :link-summaries="linkSummaries" :person-summaries="personSummaries" :active-sheet-id="sheetId" :can-restore-records="canRestoreRecords" :action-label="actionLabel" @open-record="emit('open-record', $event)" @restore-record="openDeletedRecords($event)" />
           </div>
         </li>
       </ul>
@@ -82,14 +89,24 @@
       >{{ loadingMore ? t('加载中…', 'Loading…') : t('加载更多', 'Load more') }}</MtButton>
     </div>
   </div>
+  <TrashModal
+    :open="showDeletedRecords"
+    :sheet-id="sheetId || ''"
+    :fields="fields"
+    :selected-record-id="selectedDeletedRecordId"
+    @close="closeDeletedRecords"
+    @restored="onDeletedRecordRestored"
+  />
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
+import { configHistoryTime } from '../utils/meta-config-history-labels'
 import { historyActor } from '../utils/meta-record-labels'
 import HistoryBatchChangesList from './HistoryBatchChangesList.vue'
+import TrashModal from './TrashModal.vue'
 import { MtButton, MtIconButton } from '../ui'
 import type { LinkedRecordSummary, PersonSummary } from '../types'
 
@@ -97,6 +114,8 @@ const props = defineProps<{
   open: boolean
   baseId: string
   sheetId?: string
+  /** Active-sheet lifecycle authority. It never authorizes all-tables rows. */
+  canRestoreRecords?: boolean
   /** `type`/`order`/`property` are optional extras consumed by HistoryBatchChangesList for record
    *  titles + type-aware diff values; the modal itself only reads id/name (filter options). */
   fields?: Array<{ id: string; name: string; type?: string; order?: number; property?: Record<string, unknown> }>
@@ -119,6 +138,7 @@ const emit = defineEmits<{
   (e: 'close'): void
   /** PR-C: relayed verbatim from HistoryBatchChangesList — the workbench owns drawer/sheet concerns. */
   (e: 'open-record', payload: { sheetId: string; recordId: string }): void
+  (e: 'restored', payload: { sheetId: string; recordId: string }): void
 }>()
 
 const { isZh } = useLocale()
@@ -132,6 +152,9 @@ const filterFrom = ref('')
 const filterTo = ref('')
 const filterField = ref('')
 const scopeAllSheets = ref(false) // T2b: default to the active sheet; opt in to all readable tables
+const showDeletedRecords = ref(false)
+const selectedDeletedRecordId = ref<string | null>(null)
+const canOpenDeletedRecords = computed(() => Boolean(props.sheetId && props.canRestoreRecords))
 
 const {
   batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch,
@@ -164,8 +187,10 @@ function toggle(batchId: string): Promise<void> {
 }
 
 watch(
-  () => [props.open, props.baseId] as const,
+  () => [props.open, props.baseId, props.sheetId] as const,
   ([open]) => {
+    showDeletedRecords.value = false
+    selectedDeletedRecordId.value = null
     if (!open || !props.baseId) return
     void reload()
     // W3-5b: the pinned banner is the sole deep-link display mechanism (see the prop doc above) — it does
@@ -177,6 +202,31 @@ watch(
     else clearPinned()
   },
   { immediate: true },
+)
+
+function openDeletedRecords(record?: { sheetId: string; recordId: string }): void {
+  if (!canOpenDeletedRecords.value) return
+  if (record && record.sheetId !== props.sheetId) return
+  selectedDeletedRecordId.value = record?.recordId ?? null
+  showDeletedRecords.value = true
+}
+
+function closeDeletedRecords(): void {
+  showDeletedRecords.value = false
+  selectedDeletedRecordId.value = null
+}
+
+function onDeletedRecordRestored(payload: { sheetId: string; recordId: string }): void {
+  emit('restored', payload)
+  closeDeletedRecords()
+  if (payload.sheetId === props.sheetId) void reload()
+}
+
+watch(
+  () => props.canRestoreRecords,
+  (canRestoreRecords) => {
+    if (!canRestoreRecords) closeDeletedRecords()
+  },
 )
 
 function dismissPinned(): void {
@@ -212,30 +262,26 @@ function countLabel(b: { visibleAffectedRecordCount: number; visibleAffectedFiel
   return t(`${b.visibleAffectedRecordCount} 条记录 · ${b.visibleAffectedFieldCount} 个字段`,
     `${b.visibleAffectedRecordCount} record(s) · ${b.visibleAffectedFieldCount} field(s)`)
 }
-function formatTime(iso: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
-}
 </script>
 
 <style scoped>
 .meta-hist__overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.meta-hist__modal { background: var(--meta-surface, #fff); color: var(--meta-text, #1f2329); border-radius: 8px; min-width: 420px; max-width: 640px; max-height: 76vh; overflow: auto; padding: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18); }
-.meta-hist__header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.meta-hist__title { margin: 0; font-size: 15px; }
+.meta-hist__modal { background: var(--meta-surface, #fff); color: var(--meta-text, #1f2329); border-radius: 8px; width: min(640px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 16px; box-sizing: border-box; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18); }
+.meta-hist__header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.meta-hist__title { flex: 1; min-width: 0; margin: 0; font-size: 15px; }
+.meta-hist__deleted-records { margin-left: auto; margin-right: 8px; cursor: pointer; }
 /* .meta-hist__close: now <MtIconButton> (ghost, token-styled; the × glyph char passes through its
    default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
    (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 .meta-hist__filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-.meta-hist__filter { font-size: 12px; padding: 4px 6px; border: 1px solid var(--meta-border, #ddd); border-radius: 4px; }
+.meta-hist__filter { min-width: 0; max-width: 100%; font-size: 12px; padding: 4px 6px; border: 1px solid var(--meta-border, #ddd); border-radius: 4px; }
 /* .meta-hist__apply / .meta-hist__more (below): the Filter and Load-more controls are now <MtButton>
    (ghost, token-styled — both were unstyled/browser-default-appearance secondary actions). The former
    `.meta-hist__apply { cursor: pointer; font-size: 12px; }` rule was removed (MtButton already sets both);
    `.meta-hist__more` never had bespoke CSS. Classes + data-test kept for selector stability. */
 .meta-hist__list { list-style: none; margin: 0; padding: 0; }
 .meta-hist__row { border-bottom: 1px solid var(--meta-border, #eee); }
-.meta-hist__summary { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 0; background: none; border: none; cursor: pointer; text-align: left; color: inherit; }
+.meta-hist__summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; width: 100%; padding: 8px 0; background: none; border: none; cursor: pointer; text-align: left; color: inherit; }
 .meta-hist__action { font-size: 12px; font-weight: 600; min-width: 56px; }
 .meta-hist__counts { font-size: 12px; }
 .meta-hist__who { flex: 1; min-width: 0; color: var(--meta-text-secondary, #888); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -251,7 +297,13 @@ function formatTime(iso: string): string {
 /* .meta-hist__pinned-dismiss: the Clear control is now <MtButton> (ghost, token-styled — it was already a
    neutral --ms-* bordered secondary action, so this is a like-for-like swap). Its bespoke CSS was removed;
    class + data-test kept for selector stability. */
-.meta-hist__pinned-summary { display: flex; gap: 12px; align-items: center; margin-bottom: var(--ms-space-2); }
+.meta-hist__pinned-summary { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-bottom: var(--ms-space-2); }
 .meta-hist__error { color: var(--meta-danger, #c0392b); margin: 0 0 8px; }
 .meta-hist__hint { color: var(--meta-text-secondary, #888); padding: 12px 0; }
+@media (max-width: 420px) {
+  .meta-hist__summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+  .meta-hist__action { grid-column: 1; }
+  .meta-hist__counts { grid-column: 2; text-align: right; }
+  .meta-hist__who, .meta-hist__when { grid-column: 1 / -1; min-width: 0; overflow: visible; text-overflow: clip; white-space: normal; }
+}
 </style>

@@ -22488,6 +22488,96 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/multitable/bases/{baseId}/trash:
+    get:
+      summary: List restorable deleted tables in a base
+      description: >-
+        Requires sheet lifecycle authority and read access. Returns only
+        eligible soft-deleted user tables; managed and system projections are
+        excluded. Authorization is applied before pagination. No total count is
+        exposed. Missing, deleted, and inaccessible bases return 403. The opaque
+        cursor is bound to the base and uses a stable table-id keyset.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: baseId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 50
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - in: query
+          name: cursor
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+          description: Opaque nextCursor from the preceding page of this base.
+      responses:
+        '200':
+          description: Authorized deleted tables, possibly empty.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - sheets
+                      - nextCursor
+                    properties:
+                      sheets:
+                        type: array
+                        maxItems: 100
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - id
+                            - baseId
+                            - name
+                            - description
+                            - deletedAt
+                          properties:
+                            id:
+                              type: string
+                            baseId:
+                              type: string
+                            name:
+                              type: string
+                            description:
+                              type: string
+                              nullable: true
+                            deletedAt:
+                              type: string
+                              format: date-time
+                      nextCursor:
+                        type: string
+                        nullable: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/multitable/templates:
     get:
       summary: List built-in multitable templates
@@ -22787,7 +22877,12 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/multitable/sheets/{sheetId}:
     delete:
-      summary: Delete a multitable sheet
+      summary: Soft-delete a multitable sheet
+      description: >-
+        Marks the table deleted while retaining its fields, records, and views.
+        It is no longer accessible through live table reads or writes.
+        Authorized users can restore it from the table recycle bin; this is not
+        a record deletion or field deletion.
       security:
         - bearerAuth: []
       parameters:
@@ -22821,6 +22916,76 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/multitable/sheets/{sheetId}/restore:
+    post:
+      summary: Restore a soft-deleted multitable sheet
+      description: >-
+        Clears the table deletion marker under the same lifecycle authority as
+        table deletion. Retained fields, records, views, and inbound links
+        become available again. Does not restore an earlier data version or
+        recreate a table that was permanently deleted. Live or missing tables
+        return 404; a concurrent recovery fence returns 409. No feature flag is
+        changed.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Table restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - restored
+                      - sheet
+                    properties:
+                      restored:
+                        type: string
+                      sheet:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - id
+                          - baseId
+                          - name
+                          - description
+                        properties:
+                          id:
+                            type: string
+                          baseId:
+                            type: string
+                            nullable: true
+                          name:
+                            type: string
+                          description:
+                            type: string
+                            nullable: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/multitable/sheets/{sheetId}/permissions:
     get:
       summary: List sheet permission assignments

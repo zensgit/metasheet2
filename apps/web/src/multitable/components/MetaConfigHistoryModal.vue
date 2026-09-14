@@ -36,7 +36,7 @@
                   class="cfg-history__revert"
                   data-test="config-history-revert"
                   @click="openRevert(rev)"
-                >{{ l('record.configRestoreAction') }}</button>
+                >{{ rev.action === 'delete' ? (isZh ? '恢复已删除项' : 'Restore deleted item') : l('record.configRestoreAction') }}</button>
               </div>
               <ul v-if="renderedChanges(rev).length" class="cfg-history__changes">
                 <li v-for="change in renderedChanges(rev)" :key="change.key" class="cfg-history__change">
@@ -119,7 +119,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import type { MetaConfigRevision, ConfigRestoreExecuteConfirm, ConfigRestorePreview, ConfigRestoreUpdatePreview } from '../api/client'
 import { redactString } from '../utils/automation-log-redact'
@@ -137,6 +137,7 @@ const props = defineProps<{
   /** resolve an entity id to a display label (the workbench owns the field/view name map). */
   recordLabelOf: (entityId: string) => string
   isZh: boolean
+  scopeKey?: string
   /** T9-W: when provided, an update row gets a Revert action wired through these (the workbench owns the client). */
   previewRevert?: (revisionId: string) => Promise<ConfigRestorePreview>
   executeRevert?: (revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) => Promise<void>
@@ -336,6 +337,7 @@ const emptyRevertState = (): RevertState => ({
   typedConfirm: '',
 })
 const revert = ref<RevertState>(emptyRevertState())
+let revertGeneration = 0
 const canRevert = (_rev: MetaConfigRevision): boolean => typeof props.previewRevert === 'function'
 const canConfirmCurrentPreview = computed(() => {
   const preview = revert.value.preview
@@ -347,16 +349,19 @@ const canConfirmCurrentPreview = computed(() => {
 
 async function openRevert(rev: MetaConfigRevision): Promise<void> {
   if (!props.previewRevert) return
+  const ticket = ++revertGeneration
   revert.value = { ...emptyRevertState(), visible: true, loading: true }
   try {
     const preview = await props.previewRevert(rev.id)
+    if (ticket !== revertGeneration || !props.visible) return
     revert.value = { visible: true, loading: false, executing: false, error: '', preview, typedConfirm: '' }
   } catch (e) {
+    if (ticket !== revertGeneration || !props.visible) return
     revert.value = {
       visible: true,
       loading: false,
       executing: false,
-      error: (e as Error)?.message ?? l('record.configRestoreError'),
+      error: restoreError(e),
       preview: null,
       typedConfirm: '',
     }
@@ -364,17 +369,28 @@ async function openRevert(rev: MetaConfigRevision): Promise<void> {
 }
 async function confirmRevert(): Promise<void> {
   const preview = revert.value.preview
-  if (!preview || !props.executeRevert || !canConfirmCurrentPreview.value) return
+  if (!preview || !props.executeRevert || !canConfirmCurrentPreview.value || revert.value.executing) return
+  const ticket = revertGeneration
   revert.value = { ...revert.value, executing: true, error: '' }
   try {
     await props.executeRevert(preview.revisionId, preview.previewToken, requiredConfirm(preview))
+    if (ticket !== revertGeneration || !props.visible) return
     revert.value = emptyRevertState()
     emit('reverted')
   } catch (e) {
-    revert.value = { ...revert.value, executing: false, error: (e as Error)?.message ?? l('record.configRestoreError') }
+    if (ticket === revertGeneration && props.visible) revert.value = { ...revert.value, executing: false, error: restoreError(e) }
   }
 }
-function cancelRevert(): void { revert.value = emptyRevertState() }
+function cancelRevert(): void { revertGeneration += 1; revert.value = emptyRevertState() }
+watch(() => [props.visible, props.scopeKey] as const, cancelRevert, { flush: 'sync' })
+onBeforeUnmount(cancelRevert)
+
+function restoreError(cause: unknown): string {
+  if ((cause as { code?: string })?.code === 'CONFIG_UNDELETE_DISABLED') {
+    return props.isZh ? '已删除配置的恢复尚未启用，未修改任何数据。' : 'Deleted configuration recovery is not enabled. No data was changed.'
+  }
+  return (cause as Error)?.message ?? l('record.configRestoreError')
+}
 
 function isUpdatePreview(preview: ConfigRestorePreview): preview is ConfigRestoreUpdatePreview {
   return 'opKind' in preview

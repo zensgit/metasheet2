@@ -5,7 +5,7 @@
  * entity-type filter only emits a re-fetch (server re-applies the gate). Mounted via createApp + jsdom (Teleport).
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { createApp, nextTick } from 'vue'
+import { createApp, h, nextTick, reactive } from 'vue'
 
 import MetaConfigHistoryModal from '../src/multitable/components/MetaConfigHistoryModal.vue'
 import { MultitableApiClient, type MetaConfigRevision, type ConfigRestorePreview } from '../src/multitable/api/client'
@@ -22,16 +22,17 @@ const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
 
 type Props = {
   visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string
+  scopeKey?: string
   recordLabelOf: (id: string) => string; isZh: boolean; onClose: () => void; onFilterChange: (t: string) => void
   previewRevert?: (id: string) => Promise<ConfigRestorePreview>; executeRevert?: (id: string, h: string, confirm?: string) => Promise<void>; onReverted?: () => void
 }
 const mounted: Array<{ unmount: () => void }> = []
 function mountModal(over: Partial<Props>) {
-  const props: Props = {
+  const props = reactive<Props>({
     visible: true, items: [], loading: false, entityType: '', recordLabelOf: (id) => `name:${id}`, isZh: false,
     onClose: vi.fn(), onFilterChange: vi.fn(), ...over,
-  }
-  const app = createApp(MetaConfigHistoryModal, props as unknown as Record<string, unknown>)
+  })
+  const app = createApp({ render: () => h(MetaConfigHistoryModal, props as unknown as Record<string, unknown>) })
   const c = document.createElement('div'); document.body.appendChild(c); app.mount(c); mounted.push(app); return props
 }
 const q = (s: string) => document.body.querySelector(s) as HTMLElement | null
@@ -51,6 +52,32 @@ const waitUntil = async (pred: () => boolean, tries = 100): Promise<void> => {
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
 
 describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
+  it.each(['cancel', 'scope', 'close'])('does not reopen a late restore preview after %s', async (change) => {
+    let resolve!: (value: ConfigRestorePreview) => void
+    const pending = new Promise<ConfigRestorePreview>((done) => { resolve = done })
+    const props = mountModal({ scopeKey: 's1', items: [rev({ id: 'a', action: 'delete' })], previewRevert: () => pending })
+    await flush()
+    q('[data-test="config-history-revert"]')!.click(); await flush()
+    if (change === 'scope') props.scopeKey = 's2'
+    else if (change === 'close') props.visible = false
+    else q('[data-test="config-restore-cancel"]')!.click()
+    await flush(); resolve(previewOf({})); await flush()
+    props.visible = true; await flush()
+    expect(q('[data-test="config-restore-confirm"]')).toBeNull()
+  })
+
+  it('labels a deleted configuration restore and explains a disabled gate without enabling it', async () => {
+    const executeRevert = vi.fn()
+    mountModal({ isZh: true, items: [rev({ action: 'delete' })], executeRevert,
+      previewRevert: vi.fn().mockRejectedValue(Object.assign(new Error('gate off'), { code: 'CONFIG_UNDELETE_DISABLED' })) })
+    await flush()
+    expect(q('[data-test="config-history-revert"]')?.textContent).toBe('恢复已删除项')
+    q('[data-test="config-history-revert"]')!.click(); await flush()
+    expect(q('[data-test="config-restore-error"]')?.textContent).toContain('未修改任何数据')
+    expect(q('[data-test="config-restore-confirm-btn"]')).toBeNull()
+    expect(executeRevert).not.toHaveBeenCalled()
+  })
+
   it('renders the server revisions FAITHFULLY (action, entity, changed before→after) — no client-side filtering', async () => {
     mountModal({ items: [
       rev({ id: 'a', entityType: 'field', entityId: 'fld_1', action: 'update', changedKeys: ['name'], before: { name: 'Old' }, after: { name: 'New' } }),

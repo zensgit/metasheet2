@@ -51,7 +51,7 @@
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
@@ -660,12 +660,12 @@
       @close="showApiTokenManager = false"
     />
 
-    <TrashModal
+    <SheetTrashModal
       :open="showTrash"
-      :sheet-id="workbench.activeSheetId.value"
-      :fields="twoLayerVisibleFields"
+      :base-id="activeBaseId || ''"
+      :client="workbench.client"
       @close="showTrash = false"
-      @restored="onTrashRestored"
+      @restored="onSheetTrashRestored"
     />
 
     <HistoryCenterModal
@@ -676,11 +676,14 @@
       :link-summaries="grid.linkSummaries.value"
       :person-summaries="grid.personSummaries.value"
       :initial-batch-id="historyDeepLinkBatchId"
+      :can-restore-records="caps.canDeleteRecord.value"
       @close="closeHistory"
       @open-record="onHistoryOpenRecord"
+      @restored="onHistoryRecordRestored"
     />
     <MetaConfigHistoryModal
       :visible="configHistory.visible"
+      :scope-key="workbench.activeSheetId.value"
       :items="configHistory.items"
       :loading="configHistory.loading"
       :entity-type="configHistory.entityType"
@@ -827,7 +830,7 @@ import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaAiBulkFillDialog from '../components/MetaAiBulkFillDialog.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
-import TrashModal from '../components/TrashModal.vue'
+import SheetTrashModal from '../components/SheetTrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
 import RecoveryArchiveModal from '../components/RecoveryArchiveModal.vue'
@@ -1461,9 +1464,17 @@ function openConfigHistory() {
 function onConfigHistoryFilter(entityType: string) { void loadConfigHistory(entityType) }
 function closeConfigHistory() { configHistory.value = { ...configHistory.value, visible: false } }
 
-// After an undelete, the restored record is back in the sheet → refresh the current page so it appears.
-function onTrashRestored(): void {
-  void grid.reloadCurrentPage()
+function onHistoryRecordRestored(payload: { sheetId: string; recordId: string }): void {
+  if (payload.sheetId === workbench.activeSheetId.value) void grid.reloadCurrentPage()
+}
+async function onSheetTrashRestored(payload: { baseId: string; sheetId: string }): Promise<void> {
+  if (payload.baseId !== workbench.activeBaseId.value) return
+  // Keep a live current sheet selected; recover an empty base through its existing context loader.
+  const sheetId = workbench.activeSheetId.value
+  const ok = sheetId
+    ? await workbench.loadSheetMeta(sheetId)
+    : await workbench.loadBaseContext(payload.baseId, { sheetId: payload.sheetId })
+  if (!ok && payload.baseId === workbench.activeBaseId.value) showError(wb('toast.sheetRefreshFailed', isZh.value))
 }
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
@@ -3573,7 +3584,7 @@ async function onRenameSheet(sheetId: string, name: string) {
 // for the SELECTED sheet when the server-derived `canDeleteSheet` bit is true, and this handler
 // re-checks that bit so a stale rail can never issue the request. Confirm first — the same
 // window.confirm idiom every other destructive prompt in this file uses — with copy that names the
-// sheet and states the consequence (records hidden with it; admin-only API restore, no UI yet).
+// sheet and states the consequence (records hidden with it; lifecycle-authorized recycle-bin restore).
 // Refusals are coded (409 SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED, 404 SHEET_DELETED) and get
 // plain-language toasts by CODE; anything else surfaces the server message or the generic toast.
 //

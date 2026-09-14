@@ -22,15 +22,20 @@ import { createApp, nextTick } from 'vue'
 import HistoryCenterModal from '../src/multitable/components/HistoryCenterModal.vue'
 import type { HistoryBatchDetail, HistoryBatchSummary } from '../src/multitable/types'
 
-const { mockListHistoryEvents, mockGetHistoryBatch } = vi.hoisted(() => ({
+const historyClientMocks = vi.hoisted(() => ({
   mockListHistoryEvents: vi.fn(),
   mockGetHistoryBatch: vi.fn(),
+  mockListDeletedRecords: vi.fn(),
+  mockRestoreDeletedRecord: vi.fn(),
 }))
+const { mockListHistoryEvents, mockGetHistoryBatch, mockListDeletedRecords, mockRestoreDeletedRecord } = historyClientMocks
 
 vi.mock('../src/multitable/api/client', () => ({
   multitableClient: {
-    listHistoryEvents: mockListHistoryEvents,
-    getHistoryBatch: mockGetHistoryBatch,
+    listHistoryEvents: historyClientMocks.mockListHistoryEvents,
+    getHistoryBatch: historyClientMocks.mockGetHistoryBatch,
+    listDeletedRecords: historyClientMocks.mockListDeletedRecords,
+    restoreDeletedRecord: historyClientMocks.mockRestoreDeletedRecord,
   },
 }))
 
@@ -483,6 +488,114 @@ describe('HistoryCenterModal — record click-through emit (PR-C)', () => {
       expect(chip.tagName).toBe('SPAN')
       chip.click()
       expect(onOpenRecord).not.toHaveBeenCalled()
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+describe('HistoryCenterModal — deleted-record recovery', () => {
+  it('opens the existing Deleted records dialog from the authorized active-sheet header action', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [], total: 0, nextCursor: null, searchTruncated: false })
+    mockListDeletedRecords.mockResolvedValue({ records: [], total: 0 })
+    const { app, container } = mountModalWithProps({ sheetId: 'sheet_active', canRestoreRecords: true })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-open-deleted-records"]')!.click()
+      await flushPromises()
+      expect(container.querySelector('.meta-hist__overlay')).toBeNull()
+      expect(container.querySelector('.meta-trash__title')?.textContent).toContain('Deleted records')
+      expect(mockListDeletedRecords).toHaveBeenCalledWith('sheet_active', undefined)
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('offers recovery only for an authorized delete on the active sheet, confirms with masked before-side details, and uses the deleted-record endpoint', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'delete' })], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([
+      {
+        sheetId: 'sheet_active', recordId: 'rec_deleted', action: 'delete', version: 3,
+        changedFieldIds: [], before: { fld_title: 'Visible before value', fld_hidden: 'must not render' }, after: null,
+      },
+      {
+        sheetId: 'sheet_other', recordId: 'rec_other', action: 'delete', version: 3,
+        changedFieldIds: [], before: { fld_title: 'Other sheet' }, after: null,
+      },
+    ]))
+    mockListDeletedRecords.mockResolvedValue({
+      records: [{
+        recordId: 'rec_deleted', sheetId: 'sheet_active', data: { fld_title: 'Current server value' },
+        originalVersion: 4, createdBy: null, deletedBy: 'user_1', deletedAt: new Date().toISOString(),
+      }], total: 1,
+    })
+    mockRestoreDeletedRecord.mockResolvedValue({ restored: 'rec_deleted', sheetId: 'sheet_active' })
+    const onRestored = vi.fn()
+    const { app, container } = mountModalWithProps({
+      sheetId: 'sheet_active',
+      canRestoreRecords: true,
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text', order: 0 }],
+      onRestored,
+    })
+    try {
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-open-deleted-records"]')?.textContent).toContain('Deleted records')
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const restoreButtons = container.querySelectorAll<HTMLButtonElement>('[data-test="hist-restore-deleted-record"]')
+      expect(restoreButtons).toHaveLength(1) // the all-tables row remains read-only
+      restoreButtons[0].click()
+      await flushPromises()
+      expect(container.querySelector('.meta-hist__overlay')).toBeNull() // never two active modal overlays
+      expect(mockListDeletedRecords).toHaveBeenCalledWith('sheet_active', { limit: 100, offset: 0 })
+      expect(container.querySelector('[data-test="trash-record-details"]')?.textContent).toContain('Current server value')
+      expect(container.textContent).not.toContain('Visible before value')
+      container.querySelector<HTMLButtonElement>('[data-test="trash-restore"]')!.click()
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="trash-restore-confirm"]')!.click()
+      await flushPromises()
+      expect(mockRestoreDeletedRecord).toHaveBeenCalledWith('rec_deleted')
+      expect(onRestored).toHaveBeenCalledWith({ sheetId: 'sheet_active', recordId: 'rec_deleted' })
+      expect(mockListHistoryEvents.mock.calls.length).toBeGreaterThanOrEqual(2)
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('keeps a selected history record read-only when it is absent from the current deleted-record list', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'delete' })], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_active', recordId: 'rec_not_current', action: 'delete', version: 3,
+      changedFieldIds: [], before: { fld_title: 'Historical only' }, after: null,
+    }]))
+    mockListDeletedRecords.mockResolvedValue({ records: [], total: 0 })
+    const { app, container } = mountModalWithProps({
+      sheetId: 'sheet_active', canRestoreRecords: true,
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text', order: 0 }],
+    })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-restore-deleted-record"]')!.click()
+      await flushPromises()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await flushPromises()
+      expect(container.querySelector('[data-test="trash-selected-unavailable"]')?.textContent).toContain('not currently available')
+      expect(container.querySelector('[data-test="trash-restore"]')).toBeNull()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('does not infer recovery authority from a history row or show the deleted-record entry point without it', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'delete' })], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_active', recordId: 'rec_deleted', action: 'delete', version: 3,
+      changedFieldIds: [], before: { fld_title: 'Visible before value' }, after: null,
+    }]))
+    const { app, container } = mountModalWithProps({
+      sheetId: 'sheet_active',
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text', order: 0 }],
+    })
+    try {
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-open-deleted-records"]')).toBeNull()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-restore-deleted-record"]')).toBeNull()
     } finally { app.unmount(); container.remove() }
   })
 })

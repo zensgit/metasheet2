@@ -19,7 +19,7 @@
 // `meta-form-share-manager-migration.spec.ts` for a `client`-PROP manager) — driving TrashModal from
 // its initial loading state to its post-load, button-bearing phase with zero business-logic changes.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import TrashModal from '../src/multitable/components/TrashModal.vue'
 import { useLocale } from '../src/composables/useLocale'
 import {
@@ -151,5 +151,128 @@ describe('TrashModal — red line: restore/confirm-restore stay untouched native
     confirmBtn.click()
     await flushBehindFlow()
     expect(restoreDeletedRecord).toHaveBeenCalledWith('r1')
+  })
+})
+
+describe('TrashModal — deleted-record recovery details', () => {
+  it('uses the Deleted records label, renders only caller-visible before-side fields, and emits a sheet-qualified restore', async () => {
+    useLocale().setLocale('en')
+    const { restoreDeletedRecord } = patchTrashClient({
+      listDeletedRecords: vi.fn().mockResolvedValue({
+        records: [{ ...rec('r1'), data: { title: 'Visible title', hidden: 'must not render' } }], total: 1,
+      }),
+    })
+    const onRestored = vi.fn()
+    const { container } = await mountLoaded({
+      fields: [
+        { id: 'title', name: 'Title', type: 'text', order: 0 },
+        { id: 'visible_missing', name: 'Visible missing', type: 'text', order: 1 },
+      ],
+      onRestored,
+    })
+    expect(container.querySelector('.meta-trash__title')?.textContent).toContain('Deleted records')
+    const details = container.querySelector('[data-test="trash-record-details"]')?.textContent ?? ''
+    expect(details).toContain('Title')
+    expect(details).toContain('Visible title')
+    expect(container.querySelector('dt[title="Title"]')).toBeTruthy()
+    expect(container.querySelector('dd[title="Visible title"]')).toBeTruthy()
+    expect(details).not.toContain('must not render')
+    expect(container.querySelector('[data-test="trash-record-details-partial"]')?.textContent).toContain('Some visible')
+    expect(container.querySelector('[data-test="trash-current-scope"]')?.textContent).toContain('Current recoverable')
+    container.querySelector<HTMLButtonElement>('[data-test="trash-restore"]')!.click()
+    await nextTick()
+    container.querySelector<HTMLButtonElement>('[data-test="trash-restore-confirm"]')!.click()
+    await flushBehindFlow()
+    expect(restoreDeletedRecord).toHaveBeenCalledWith('r1')
+    expect(onRestored).toHaveBeenCalledWith({ sheetId: 's1', recordId: 'r1' })
+  })
+
+  it('offers Load more for older current deleted records and appends them', async () => {
+    useLocale().setLocale('en')
+    let resolveMore: ((value: { records: MetaDeletedRecord[]; total: number }) => void) | undefined
+    const { listDeletedRecords } = patchTrashClient({
+      listDeletedRecords: vi.fn()
+        .mockResolvedValueOnce({ records: [rec('newer')], total: 2 })
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveMore = resolve })),
+    })
+    const { container } = await mountLoaded()
+    const more = container.querySelector<HTMLButtonElement>('[data-test="trash-load-more"]')
+    expect(more?.textContent).toContain('Load more')
+    more!.click()
+    await nextTick()
+    expect(more?.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('[data-test="trash-restore"]')?.disabled).toBe(true)
+    resolveMore!({ records: [rec('older')], total: 2 })
+    await flushBehindFlow()
+    expect(listDeletedRecords).toHaveBeenNthCalledWith(2, 's1', { limit: 100, offset: 1 })
+    expect([...container.querySelectorAll('[data-test="trash-record-title"]')].map((node) => node.getAttribute('title'))).toEqual(['newer', 'older'])
+  })
+
+  it('disables Load more while a restore is pending', async () => {
+    useLocale().setLocale('en')
+    let resolveRestore: ((value: { restored: string; sheetId: string }) => void) | undefined
+    patchTrashClient({
+      listDeletedRecords: vi.fn().mockResolvedValue({ records: [rec('r1')], total: 2 }),
+      restoreDeletedRecord: vi.fn().mockImplementation(() => new Promise((resolve) => { resolveRestore = resolve })),
+    })
+    const { container } = await mountLoaded()
+    container.querySelector<HTMLButtonElement>('[data-test="trash-restore"]')!.click()
+    await nextTick()
+    container.querySelector<HTMLButtonElement>('[data-test="trash-restore-confirm"]')!.click()
+    await nextTick()
+    expect(container.querySelector<HTMLButtonElement>('[data-test="trash-load-more"]')?.disabled).toBe(true)
+    resolveRestore!({ restored: 'r1', sheetId: 's1' })
+    await flushBehindFlow()
+  })
+
+  it('moves a selected history record to the top only after finding it in the current server list', async () => {
+    useLocale().setLocale('en')
+    const { listDeletedRecords } = patchTrashClient({
+      listDeletedRecords: vi.fn().mockResolvedValue({ records: [rec('r1'), rec('r2')], total: 2 }),
+    })
+    const { container } = await mountLoaded({ selectedRecordId: 'r2' })
+    const titles = [...container.querySelectorAll('[data-test="trash-record-title"]')].map((node) => node.getAttribute('title'))
+    expect(titles).toEqual(['r2', 'r1'])
+    expect(listDeletedRecords).toHaveBeenCalledWith('s1', { limit: 100, offset: 0 })
+  })
+
+  it('does not emit a restore after a close/reopen or unmount invalidates its pending operation', async () => {
+    useLocale().setLocale('en')
+    let resolveRestore: ((value: { restored: string; sheetId: string }) => void) | undefined
+    patchTrashClient({
+      restoreDeletedRecord: vi.fn().mockImplementation(() => new Promise((resolve) => { resolveRestore = resolve })),
+    })
+    const open = ref(true)
+    const onRestored = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(defineComponent({
+      setup: () => () => h(TrashModal, { open: open.value, sheetId: 's1', onRestored }),
+    }))
+    try {
+      app.mount(container)
+      await flushBehindFlow()
+      container.querySelector<HTMLButtonElement>('[data-test="trash-restore"]')!.click()
+      await nextTick()
+      container.querySelector<HTMLButtonElement>('[data-test="trash-restore-confirm"]')!.click()
+      open.value = false
+      await nextTick()
+      open.value = true
+      await flushBehindFlow()
+      resolveRestore!({ restored: 'r1', sheetId: 's1' })
+      await flushBehindFlow()
+      expect(onRestored).not.toHaveBeenCalled()
+
+      container.querySelector<HTMLButtonElement>('[data-test="trash-restore"]')!.click()
+      await nextTick()
+      container.querySelector<HTMLButtonElement>('[data-test="trash-restore-confirm"]')!.click()
+      app.unmount()
+      resolveRestore!({ restored: 'r1', sheetId: 's1' })
+      await flushBehindFlow()
+      expect(onRestored).not.toHaveBeenCalled()
+    } finally {
+      app.unmount()
+      container.remove()
+    }
   })
 })

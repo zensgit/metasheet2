@@ -22,6 +22,8 @@ const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 
 let capturedRailAttrs: Record<string, unknown> | null = null
+let capturedSheetTrashAttrs: Record<string, unknown> | null = null
+let capturedHistoryAttrs: Record<string, unknown> | null = null
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -81,6 +83,18 @@ vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({
   }),
 }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/SheetTrashModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedSheetTrashAttrs = attrs
+    return () => h('div', { 'data-sheet-trash': true })
+  } }),
+}))
+vi.mock('../src/multitable/components/HistoryCenterModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedHistoryAttrs = attrs
+    return () => h('div', { 'data-record-history': true })
+  } }),
+}))
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
@@ -186,6 +200,8 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     capturedRailAttrs = null
+    capturedSheetTrashAttrs = null
+    capturedHistoryAttrs = null
     confirmSpy = vi.fn(() => true)
     vi.stubGlobal('confirm', confirmSpy)
     container = document.createElement('div')
@@ -222,6 +238,42 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
     workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, canDeleteSheet: false }
     await flushUi()
     expect(capturedRailAttrs!['can-delete-sheet']).toBe(false)
+  })
+
+  it('keeps the base recycle-bin entry after the last live sheet is gone and reloads that base on restore', async () => {
+    workbenchMock.activeSheetId.value = ''
+    workbenchMock.sheets.value = []
+    workbenchMock.capabilities.value = { canDeleteSheet: false }
+    await mountAndGetDelete()
+    const button = container!.querySelector('[data-action="open-trash"]') as HTMLElement
+    expect(button).not.toBeNull(); button.click(); await flushUi()
+    expect(capturedSheetTrashAttrs?.open).toBe(true)
+    expect(capturedSheetTrashAttrs?.['base-id']).toBe('base_ops')
+    expect(capturedSheetTrashAttrs?.client).toBe(workbenchMock.client)
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    await onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadBaseContext.mock.calls).toEqual([['base_ops', { sheetId: 'sheet_restored' }]])
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the active sheet list without switching sheets, and ignores stale-base restore notifications', async () => {
+    await mountAndGetDelete()
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    await onRestored({ baseId: 'old_base', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+    await onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadSheetMeta.mock.calls).toEqual([['sheet_orders']])
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+  })
+
+  it('routes deleted-record recovery through history and refreshes only its current sheet', async () => {
+    await mountAndGetDelete()
+    expect(capturedHistoryAttrs?.['can-restore-records']).toBe(true)
+    const onRestored = capturedHistoryAttrs!.onRestored as (value: { sheetId: string; recordId: string }) => void
+    onRestored({ sheetId: 'other_sheet', recordId: 'r1' })
+    expect(gridMock.reloadCurrentPage).not.toHaveBeenCalled()
+    onRestored({ sheetId: 'sheet_orders', recordId: 'r1' })
+    expect(gridMock.reloadCurrentPage).toHaveBeenCalledTimes(1)
   })
 
   it('fails CLOSED when the /context object carries no canDeleteSheet key (old backend), even though the capabilities composable says true', async () => {

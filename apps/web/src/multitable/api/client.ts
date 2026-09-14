@@ -1292,6 +1292,19 @@ export interface RestoreBatchExecuteResult {
   targetVersion: number
 }
 
+export interface DeletedSheet {
+  id: string
+  baseId: string
+  name: string
+  description: string | null
+  deletedAt: string
+}
+
+export interface DeletedSheetPage {
+  sheets: DeletedSheet[]
+  nextCursor: string | null
+}
+
 // T9-R4: a config/schema-change history entry (server-gated per entity type; the FE renders it as-is).
 export interface MetaConfigRevision {
   id: string
@@ -1953,9 +1966,21 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
-  // Undo a soft delete (POST /api/multitable/sheets/:id/restore). API half only in this slice: there
-  // is no recycle-bin UI yet, so nothing in the workbench calls this — it exists so the follow-up
-  // (list soft-deleted sheets + restore) has its wire contract pinned now.
+  async listDeletedSheets(baseId: string, params?: { cursor?: string; limit?: number }): Promise<DeletedSheetPage> {
+    const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/trash${qs(params ?? {})}`)
+    const data = await this.parseJson<DeletedSheetPage>(res)
+    if (!data || !Array.isArray(data.sheets)
+      || !(data.nextCursor === null || (typeof data.nextCursor === 'string' && data.nextCursor.length > 0))
+      || !data.sheets.every((sheet) => sheet && typeof sheet.id === 'string' && sheet.id.length > 0
+        && sheet.baseId === baseId && typeof sheet.name === 'string'
+        && (sheet.description === null || typeof sheet.description === 'string')
+        && typeof sheet.deletedAt === 'string' && Number.isFinite(new Date(sheet.deletedAt).getTime()))) {
+      throw new Error('Invalid deleted sheets response')
+    }
+    return data
+  }
+
+  // Undo a soft delete through the same lifecycle-authority gate as deletion.
   async restoreSheet(sheetId: string): Promise<{ restored: string; sheet: MetaSheet }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore`, { method: 'POST' })
     return this.parseJson(res)
@@ -1984,9 +2009,12 @@ export class MultitableApiClient implements CommentsApiClient {
       body: JSON.stringify({}),
     })
     const data = await this.parseJson<{ restored?: string; sheetId?: string }>(res)
+    if (data?.restored !== recordId || typeof data.sheetId !== 'string' || !data.sheetId) {
+      throw new Error('Invalid record restore response')
+    }
     return {
-      restored: typeof data?.restored === 'string' ? data.restored : recordId,
-      sheetId: typeof data?.sheetId === 'string' ? data.sheetId : '',
+      restored: data.restored,
+      sheetId: data.sheetId,
     }
   }
 

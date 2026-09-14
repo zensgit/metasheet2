@@ -58,7 +58,10 @@ import {
   resolveBaseReadable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
+  resolveSheetCapabilitiesForAccess,
   resolveSheetReadableCapabilities,
+  SHEET_ADMIN_PERMISSION_CODES,
+  SHEET_READ_PERMISSION_CODES,
   type MultitableCapabilityOrigin,
   type MultitableRowActions,
   type MultitableSheetPermissionCandidate,
@@ -105,6 +108,7 @@ import {
   isElearningProjectionSheetIdCandidate,
 } from '../multitable/elearning-projection-constants'
 import { isPluginSystemBaseIdCandidate } from '../multitable/plugin-scope'
+import { APPROVAL_PROJECTION_BASE_ID } from '../multitable/approval-projection-constants'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
@@ -7284,6 +7288,111 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list bases failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list bases' } })
+    }
+  })
+
+  router.get('/bases/:baseId/trash', async (req: Request, res: Response) => {
+    const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+    const parsed = z.object({
+      limit: z.string().max(3).regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().max(100)).optional(),
+      cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    }).safeParse(req.query)
+    let afterId: string | null = null
+    if (!baseId || baseId.length > 50 || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid trash pagination' } })
+    }
+    if (parsed.data.cursor) {
+      try {
+        const decoded = z.tuple([z.literal(1), z.literal(baseId), z.string().min(1).max(50)])
+          .parse(JSON.parse(Buffer.from(parsed.data.cursor, 'base64url').toString('utf8')))
+        if (Buffer.from(JSON.stringify(decoded)).toString('base64url') !== parsed.data.cursor) throw new Error('Invalid cursor')
+        afterId = decoded[2]
+      } catch {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid trash pagination' } })
+      }
+    }
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      if (isElearningProjectionBaseIdCandidate(baseId) || baseId === APPROVAL_PROJECTION_BASE_ID) return sendForbidden(res)
+      const globalCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const limit = parsed.data.limit ?? 20
+      const data = await pool.transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        // Pre-filter BEFORE LIMIT. Mirror the shared scope loader's user > group > role
+        // precedence, using its permission-code sets; confirm each result with restore's resolver.
+        // Match ECMAScript trim(), including BOM/NBSP, not PostgreSQL's locale-dependent space class.
+        const trimCharacters = '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+        const eligibleSheets = `
+          FROM meta_sheets s
+          JOIN meta_bases b ON b.id = s.base_id AND b.deleted_at IS NULL
+          LEFT JOIN LATERAL (
+            SELECT array_agg(btrim(sp.perm_code, $9::text)) AS codes
+            FROM spreadsheet_permissions sp
+            WHERE sp.sheet_id = s.id
+              AND btrim(sp.perm_code, $9::text) <> '' AND (
+              (sp.subject_type = 'user' AND sp.subject_id = $2)
+              OR (sp.subject_type = 'member-group' AND EXISTS (
+                SELECT 1 FROM platform_member_group_members gm
+                WHERE gm.user_id = $2 AND gm.group_id::text = sp.subject_id
+              ))
+              OR (sp.subject_type = 'role' AND EXISTS (
+                SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = sp.subject_id
+              ))
+            )
+            GROUP BY sp.subject_type
+            ORDER BY CASE sp.subject_type WHEN 'user' THEN 0 WHEN 'member-group' THEN 1 ELSE 2 END
+            LIMIT 1
+          ) grants ON true
+          WHERE s.base_id = $1
+            AND s.system_kind IS NULL
+            AND s.id !~ '^sht_el_stats_[a-f0-9]{32}$'
+            AND btrim(coalesce(s.description, ''), $9::text) <> $8
+            AND NOT EXISTS (SELECT 1 FROM plugin_multitable_object_registry pr WHERE pr.sheet_id = s.id)
+            AND ($3::boolean OR grants.codes && $7::text[])
+            AND ($4::boolean OR grants.codes && $6::text[] OR (grants.codes IS NULL AND $5::boolean))`
+        const params = [baseId, access.userId, globalCapabilities.canManageFields,
+          access.isAdminRole, globalCapabilities.canRead, [...SHEET_READ_PERMISSION_CODES],
+          [...SHEET_ADMIN_PERMISSION_CODES], SYSTEM_PEOPLE_SHEET_DESCRIPTION, trimCharacters]
+        const admission = await query(`SELECT s.id ${eligibleSheets} ORDER BY s.id ASC LIMIT 1`, params)
+        const proof = admission.rows[0] as { id: string } | undefined
+        if (proof) {
+          const resolved = await resolveSheetCapabilitiesForAccess(query, proof.id, access)
+          if (!resolved.capabilities.canRead || !hasSheetLifecycleAuthority(resolved.access, resolved.sheetScope)) return null
+        } else if (!globalCapabilities.canManageFields || !(await resolveBaseReadable(req, query, baseId))) {
+          // Missing, deleted and inaccessible bases have the same refusal. Ownership never
+          // grants lifecycle authority, but an authorized empty base can have an empty bin.
+          return null
+        }
+        const result = await query(
+          `SELECT s.id, s.base_id, s.name, s.description,
+                  to_char(s.deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deleted_at
+           ${eligibleSheets}
+             AND s.deleted_at IS NOT NULL AND ($10::text IS NULL OR s.id > $10)
+           ORDER BY s.id ASC LIMIT $11`,
+          [...params, afterId, limit + 1],
+        )
+        const sheets: Array<{ id: string; baseId: string; name: string; description: string | null; deletedAt: string }> = []
+        for (const row of result.rows as Array<{ id: string; base_id: string; name: string; description: string | null; deleted_at: string }>) {
+          const resolved = await resolveSheetCapabilitiesForAccess(query, row.id, access)
+          if (!resolved.capabilities.canRead || !hasSheetLifecycleAuthority(resolved.access, resolved.sheetScope)) return null
+          sheets.push({ id: row.id, baseId: row.base_id, name: row.name, description: row.description, deletedAt: row.deleted_at })
+        }
+        const hasMore = sheets.length > limit
+        sheets.splice(limit)
+        // Stable ID keyset: no JavaScript Date conversion or deletion-time precision loss.
+        const nextCursor = hasMore
+          ? Buffer.from(JSON.stringify([1, baseId, sheets[sheets.length - 1].id])).toString('base64url')
+          : null
+        return { sheets, nextCursor }
+      })
+      if (!data) return sendForbidden(res)
+      return res.json({ ok: true, data })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list deleted sheets' } })
     }
   })
 
@@ -14486,8 +14595,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * capability gate runs BEFORE that distinction is drawn, so a caller without schema authority never
    * learns whether a given id is deleted, live, or absent.
    *
-   * NOTE (deliberate, stated in the PR): this is the API half only. There is no recycle-bin UI in
-   * this slice — listing and browsing soft-deleted sheets is a follow-up.
+   * The base-scoped table recycle bin lists eligible soft-deleted sheets and calls this endpoint.
    */
   router.post('/sheets/:sheetId/restore', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''

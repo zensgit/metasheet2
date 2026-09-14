@@ -246,8 +246,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     zh: '该表由系统托管，不能删除。',
   },
   'toast.sheetAlreadyDeleted': {
-    en: 'This sheet was already deleted. An administrator can restore it through the API.',
-    zh: '该数据表已被删除，管理员可通过接口恢复。',
+    en: 'This sheet was already deleted. An authorized administrator can restore it from the recycle bin.',
+    zh: '该数据表已被删除，有权限的管理员可从回收站恢复整表。',
   },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
@@ -444,11 +444,11 @@ export function recordNotFound(recordId: string, isZh: boolean): string {
 
 // Sheet-delete confirm (workbench onDeleteSheet). Names the sheet the user is about to delete and
 // states the consequence honestly: records are hidden with the sheet (soft delete), and only an
-// administrator can bring it back through the API — there is no recycle-bin UI in this slice.
+// authorized administrator can bring it back from the sheet recycle bin.
 export function sheetDeleteConfirm(sheetName: string, isZh: boolean): string {
   return isZh
-    ? `删除数据表「${sheetName}」？记录会一并隐藏，可由管理员通过接口恢复。`
-    : `Delete sheet "${sheetName}"? Its records are hidden with it; an administrator can restore it through the API.`
+    ? `删除数据表「${sheetName}」？记录会一并隐藏，有权限的管理员可从回收站恢复整表。`
+    : `Delete sheet "${sheetName}"? Its records are hidden with it; an authorized administrator can restore the table from the recycle bin.`
 }
 
 // Sheet-delete failure copy, chosen by the server's error CODE (the codes are stable contracts;
