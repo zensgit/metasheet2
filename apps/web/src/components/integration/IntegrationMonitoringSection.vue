@@ -5,7 +5,7 @@
         <div class="integration-workbench__panel-head">
           <div>
             <h2>运行监控</h2>
-        <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters（可重放），便于清洗后回看失败原因。</p>
+        <p data-testid="monitoring-summary">{{ observationCountsSummary }}。{{ monitoringScopeSummary }}，每页 {{ monitoringQuery.pageSize }} 条，第 {{ monitoringPage }} 页。</p>
       </div>
       <button type="button" class="integration-workbench__button" data-testid="refresh-observation" :disabled="observingPipeline" @click="refreshPipelineObservation(false)">
         {{ observingPipeline ? '刷新中' : '刷新监控' }}
@@ -14,9 +14,84 @@
       </template>
 
 
+    <!-- X1: `:data-filter-epoch` is not decoration — it makes this subtree re-render after EVERY
+         apply attempt, so v-model's updated hook snaps each control back to the cursor that
+         actually produced the rows below when a read failed and the cursor did not move. -->
+    <div
+      class="integration-workbench__monitoring-filters"
+      data-testid="monitoring-filters"
+      :data-filter-epoch="filterEpoch"
+    >
+      <label>
+        <span>管道范围</span>
+        <select data-testid="monitoring-pipeline-scope" v-model="pipelineScopeModel">
+          <option value="current">{{ currentPipelineId ? `当前 Pipeline（${currentPipelineId}）` : '当前 Pipeline（未设置 → 跨管道）' }}</option>
+          <option value="all">全部管道（跨管道）</option>
+          <option value="custom">指定 Pipeline ID</option>
+        </select>
+      </label>
+      <label v-if="monitoringQuery.pipelineScope === 'custom'">
+        <span>Pipeline ID</span>
+        <input
+          v-model.lazy="pipelineIdModel"
+          data-testid="monitoring-pipeline-id"
+          placeholder="留空 = 跨管道"
+        />
+      </label>
+      <label>
+        <span>运行状态</span>
+        <select data-testid="monitoring-run-status" v-model="runStatusModel">
+          <option value="">全部状态</option>
+          <option v-for="status in runStatusOptions" :key="status" :value="status">{{ status }}</option>
+        </select>
+      </label>
+      <label>
+        <span>死信状态</span>
+        <select data-testid="monitoring-dead-letter-status" v-model="deadLetterStatusModel">
+          <option value="">全部状态</option>
+          <option v-for="status in deadLetterStatusOptions" :key="status" :value="status">{{ status }}</option>
+        </select>
+      </label>
+      <label>
+        <span>每页</span>
+        <select data-testid="monitoring-page-size" v-model="pageSizeModel">
+          <option v-for="size in pageSizeOptions" :key="size" :value="String(size)">{{ size }}</option>
+        </select>
+      </label>
+      <div class="integration-workbench__monitoring-pager">
+        <button
+          type="button"
+          class="integration-workbench__button integration-workbench__button--ghost"
+          data-testid="monitoring-prev-page"
+          :disabled="!canGoPreviousPage"
+          @click="goPreviousPage"
+        >上一页</button>
+        <span data-testid="monitoring-page-indicator">第 {{ monitoringPage }} 页 · offset {{ monitoringQuery.offset }}</span>
+        <button
+          type="button"
+          class="integration-workbench__button integration-workbench__button--ghost"
+          data-testid="monitoring-next-page"
+          :disabled="!canGoNextPage"
+          @click="goNextPage"
+        >下一页</button>
+        <span v-if="pollingActive" class="integration-workbench__badge" data-testid="monitoring-polling">运行中 · 每 5 秒自动刷新</span>
+      </div>
+      <p
+        v-if="monitoringError"
+        class="integration-workbench__hint integration-workbench__hint--strong"
+        data-testid="monitoring-error"
+        role="alert"
+      >{{ monitoringError }}</p>
+      <p class="integration-workbench__hint" data-testid="monitoring-reach-hint">
+        后端 <code>GET /runs</code> 与 <code>GET /dead-letters</code> 只接受 pipelineId / status / limit / offset，
+        既没有时间窗参数也不返回总数：所以这里没有起止时间筛选，"下一页"按"本页取满 = 可能还有下一页"判断，
+        翻页同时作用于两个列表。
+      </p>
+    </div>
+
     <div class="integration-workbench__observation">
       <div>
-        <h3>最近运行</h3>
+        <h3>运行记录</h3>
         <div v-if="pipelineRuns.length === 0" class="integration-workbench__empty" data-testid="pipeline-runs-empty">
           <strong data-testid="pipeline-runs-empty-what">{{ bi(
             '这里展示最近的清洗流程运行记录（状态 / 读取 / 清洗 / 写入 / 失败行数）。',
@@ -43,6 +118,31 @@
             </div>
             <small>{{ run.startedAt || run.createdAt || run.id }}<template v-if="run.finishedAt"> → {{ run.finishedAt }}</template></small>
             <p v-if="run.errorSummary" class="integration-workbench__run-error" :data-testid="`run-error-${run.id}`">{{ run.errorSummary }}</p>
+            <div class="integration-workbench__run-detail">
+              <button
+                type="button"
+                class="integration-workbench__link-button"
+                :data-testid="`toggle-run-detail-${run.id}`"
+                @click="toggleRunDetail(run.id)"
+              >{{ isRunDetailExpanded(run.id) ? '收起运行详情' : '展开运行详情' }}</button>
+              <dl v-if="isRunDetailExpanded(run.id)" :data-testid="`run-detail-${run.id}`">
+                <div><dt>run id</dt><dd>{{ run.id }}</dd></div>
+                <div><dt>pipeline</dt><dd>{{ run.pipelineId }}</dd></div>
+                <div><dt>mode</dt><dd>{{ run.mode }}</dd></div>
+                <div v-if="run.triggeredBy"><dt>triggered by</dt><dd>{{ run.triggeredBy }}</dd></div>
+                <div><dt>rows</dt><dd>read {{ run.rowsRead }} · clean {{ run.rowsCleaned }} · write {{ run.rowsWritten }} · fail {{ run.rowsFailed }}</dd></div>
+                <div><dt>started</dt><dd>{{ run.startedAt || '-' }}</dd></div>
+                <div><dt>finished</dt><dd>{{ run.finishedAt || '-' }}</dd></div>
+                <div v-if="run.durationMs != null"><dt>duration</dt><dd>{{ run.durationMs }}ms</dd></div>
+                <div v-if="run.errorSummary"><dt>error summary</dt><dd>{{ run.errorSummary }}</dd></div>
+                <div><dt>本页死信</dt><dd :data-testid="`run-dead-letter-count-${run.id}`">{{ deadLetterCountForRun(run.id) }}</dd></div>
+              </dl>
+              <p
+                v-if="isRunDetailExpanded(run.id)"
+                class="integration-workbench__hint"
+                :data-testid="`run-detail-source-${run.id}`"
+              >以上字段全部来自列表行本身；后端没有 <code>GET /runs/:id</code>，本期不新增后端路由，"本页死信"只统计当前已加载的这一页死信。</p>
+            </div>
             <div v-if="runRowSummaries(run).length > 0" class="integration-workbench__run-summaries">
               <button type="button" class="integration-workbench__link-button" :data-testid="`toggle-run-summaries-${run.id}`" @click="toggleRunSummaries(run.id)">
                 {{ isRunExpanded(run.id) ? '收起行级结果' : `展开行级结果（${runRowSummaries(run).length}）` }}
@@ -53,7 +153,20 @@
         </ol>
       </div>
       <div>
-        <h3>Open Dead Letters</h3>
+        <h3>Dead Letters<span v-if="monitoringQuery.deadLetterStatus">（{{ monitoringQuery.deadLetterStatus }}）</span></h3>
+        <div
+          v-if="deadLetterErrorGroups.length > 0"
+          class="integration-workbench__dead-letter-groups"
+          data-testid="dead-letter-error-groups"
+        >
+          <span
+            v-for="group in deadLetterErrorGroups"
+            :key="group.errorCode"
+            class="integration-workbench__badge"
+            :data-testid="`dead-letter-group-${group.errorCode}`"
+          >{{ group.errorCode }} × {{ group.count }}</span>
+          <span class="integration-workbench__hint" data-testid="dead-letter-groups-scope">按 errorCode 统计当前这一页（后端不返回分组/总数）</span>
+        </div>
         <div v-if="deadLetters.length === 0" class="integration-workbench__empty" data-testid="dead-letters-empty">
           <strong data-testid="dead-letters-empty-what">{{ bi(
             'Dead letter 是清洗流程运行中未能成功写入的行，按原因分组，便于排查后再决定是否重放。',
@@ -69,8 +182,11 @@
             <strong :data-testid="`dead-letter-label-${deadLetter.id}`">{{ deadLetterErrorLabel(deadLetter) }}</strong>
             <span v-if="deadLetterErrorHint(deadLetter)">{{ deadLetterErrorHint(deadLetter) }}</span>
             <small :data-testid="`dead-letter-code-${deadLetter.id}`">errorCode: {{ deadLetter.errorCode }}</small>
-            <small>
-              {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
+            <!-- X2: the dead-letter list is the only surface here that can trigger a REAL write
+                 (replay), and G34 made its default scope cross-pipeline — so the row must say
+                 which pipeline it belongs to, and so must the confirm button's title. -->
+            <small :data-testid="`dead-letter-meta-${deadLetter.id}`">
+              {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }} · pipeline {{ deadLetter.pipelineId }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
             </small>
             <div class="integration-workbench__dead-letter-actions">
               <span
@@ -92,6 +208,7 @@
                     class="integration-workbench__button integration-workbench__button--danger"
                     :data-testid="`confirm-replay-dead-letter-${deadLetter.id}`"
                     :disabled="replayingDeadLetterId === deadLetter.id"
+                    :title="`将重放 dead letter ${deadLetter.id}（pipeline ${deadLetter.pipelineId}）— 会向目标系统真实写入`"
                     @click="replayDeadLetter(deadLetter)"
                   >{{ replayingDeadLetterId === deadLetter.id ? 'Replay 中…' : '确认 Replay（会真实写入）' }}</button>
                   <button
@@ -181,16 +298,50 @@
 // every ref/computed/service-call; this component only renders them and forwards user actions
 // back up by calling the exact same function references it is handed as props (mirrors the
 // `tr` function-prop pattern already established by IntegrationWorkbenchRail.vue in IU-2a).
+// G34 运行监控到达率 (docs/development/integration-monitoring-reach-design-20260910.md): the
+// section stopped being "one pipeline, newest 5". Everything that DECIDES a query lives in the
+// pure monitoringQuery module; this component only renders the controls, hands the pure
+// transitions' output back to the view (`applyMonitoringQuery`), and owns the 5s poll timer.
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type {
   IntegrationDeadLetter,
   IntegrationPipelineRun,
   IntegrationProvenanceTimelineEntry,
   IntegrationTargetWriteSummary,
 } from '../../services/integration/workbench'
+import {
+  MONITORING_DEAD_LETTER_STATUS_OPTIONS,
+  MONITORING_PAGE_SIZE_OPTIONS,
+  MONITORING_POLL_INTERVAL_MS,
+  MONITORING_RUN_STATUS_OPTIONS,
+  countDeadLettersForRun,
+  groupDeadLettersByErrorCode,
+  hasNextMonitoringPage,
+  hasPreviousMonitoringPage,
+  hasRunningRun,
+  monitoringPageNumber,
+  nextMonitoringPage,
+  previousMonitoringPage,
+  withMonitoringDeadLetterStatus,
+  withMonitoringPageSize,
+  withMonitoringPipelineId,
+  withMonitoringPipelineScope,
+  withMonitoringRunStatus,
+  type MonitoringPipelineScope,
+  type MonitoringQueryState,
+} from '../../services/integration/monitoringQuery'
 
-defineProps<{
+const props = defineProps<{
   observationSummary: string
   observingPipeline: boolean
+  /** The section's filter/pagination cursor (owned by the view, built by the pure module). */
+  monitoringQuery: MonitoringQueryState
+  /** X1: non-empty when the last read FAILED — rendered here because filter reads are silent. */
+  monitoringError: string
+  /** The workbench's saved pipeline id — the fallback the 'current' scope resolves to. */
+  currentPipelineId: string
+  /** Store the next cursor and re-read. The ONLY way this component changes the query. */
+  applyMonitoringQuery: (next: MonitoringQueryState) => void | Promise<void>
   pipelineRuns: IntegrationPipelineRun[]
   deadLetters: IntegrationDeadLetter[]
   /** Bilingual copy helper — same shape as the view's local `bi(zh, en)` function. */
@@ -208,13 +359,164 @@ defineProps<{
   rowProvenanceError: (deadLetterId: string) => string
   rowProvenanceTimeline: (deadLetterId: string) => IntegrationProvenanceTimelineEntry[]
   rowProvenanceAttrsSummary: (attrs: Record<string, unknown> | undefined) => string
+  /** The operator-initiated read (刷新 button). Always wins over a background poll. */
   refreshPipelineObservation: (silent?: boolean) => Promise<void>
+  /**
+   * The BACKGROUND read, used by the 5s timer and by nothing else. It is a separate prop (not a
+   * flag on the one above) so that "this request was nobody's request" is stated at the call site
+   * the timer uses: the loader behind it refuses to run while an operator read is unsettled, and
+   * its answer is dropped if the operator has moved on (#5612 [P2]).
+   */
+  pollPipelineObservation: () => Promise<void>
   toggleRunSummaries: (runId: string) => void
   requestReplay: (deadLetterId: string) => void
   cancelReplay: () => void
   replayDeadLetter: (deadLetter: IntegrationDeadLetter) => Promise<void>
   toggleDeadLetterProvenance: (deadLetter: IntegrationDeadLetter) => Promise<void>
 }>()
+
+const runStatusOptions = MONITORING_RUN_STATUS_OPTIONS
+const deadLetterStatusOptions = MONITORING_DEAD_LETTER_STATUS_OPTIONS
+const pageSizeOptions = MONITORING_PAGE_SIZE_OPTIONS
+
+const monitoringPage = computed(() => monitoringPageNumber(props.monitoringQuery))
+
+// The parent's summary string hard-codes "open dead letters" — true only for the DEFAULT
+// dead-letter filter. Once the operator picks another status, saying "open" would be a lie, so
+// the count line is rebuilt locally for that case (and reused verbatim otherwise).
+const observationCountsSummary = computed(() => {
+  if (props.monitoringQuery.deadLetterStatus === 'open') return props.observationSummary
+  const status = props.monitoringQuery.deadLetterStatus || '全部状态'
+  return `${props.pipelineRuns.length} runs / ${props.deadLetters.length} dead letters（${status}）`
+})
+const deadLetterErrorGroups = computed(() => groupDeadLettersByErrorCode(props.deadLetters))
+
+const monitoringScopeSummary = computed(() => {
+  const query = props.monitoringQuery
+  if (query.pipelineScope === 'all') return '跨全部管道'
+  if (query.pipelineScope === 'custom') {
+    return query.pipelineId ? `Pipeline ${query.pipelineId}` : '指定 Pipeline 为空 → 跨全部管道'
+  }
+  return props.currentPipelineId ? `Pipeline ${props.currentPipelineId}` : '当前 Pipeline 未设置 → 跨全部管道'
+})
+
+// One cursor drives BOTH lists, so "there may be more" is true when EITHER list came back full:
+// hiding 下一页 because the shorter list ran out would strand the other list's rows.
+const loadedPageCount = computed(() => Math.max(props.pipelineRuns.length, props.deadLetters.length))
+const canGoNextPage = computed(() => hasNextMonitoringPage(props.monitoringQuery, loadedPageCount.value))
+const canGoPreviousPage = computed(() => hasPreviousMonitoringPage(props.monitoringQuery))
+
+// X1: every control writes through here. The view commits the new cursor ONLY together with the
+// rows it produced, so after a failed read `props.monitoringQuery` is still the old cursor while
+// the DOM control holds the value the operator just picked. Bumping the epoch forces a re-render,
+// and v-model's updated hook then resets the control to the cursor the visible rows belong to —
+// no control may ever claim a filter that is not the one on screen.
+const filterEpoch = ref(0)
+
+async function applyQuery(next: MonitoringQueryState): Promise<void> {
+  try {
+    await props.applyMonitoringQuery(next)
+  } finally {
+    filterEpoch.value += 1
+  }
+}
+
+const pipelineScopeModel = computed<MonitoringPipelineScope>({
+  get: () => props.monitoringQuery.pipelineScope,
+  set: (value) => {
+    void applyQuery(withMonitoringPipelineScope(props.monitoringQuery, value))
+  },
+})
+
+const pipelineIdModel = computed<string>({
+  get: () => props.monitoringQuery.pipelineId,
+  set: (value) => {
+    void applyQuery(withMonitoringPipelineId(props.monitoringQuery, value))
+  },
+})
+
+const runStatusModel = computed<string>({
+  get: () => props.monitoringQuery.runStatus,
+  set: (value) => {
+    void applyQuery(withMonitoringRunStatus(props.monitoringQuery, value))
+  },
+})
+
+const deadLetterStatusModel = computed<string>({
+  get: () => props.monitoringQuery.deadLetterStatus,
+  set: (value) => {
+    void applyQuery(withMonitoringDeadLetterStatus(props.monitoringQuery, value))
+  },
+})
+
+const pageSizeModel = computed<string>({
+  get: () => String(props.monitoringQuery.pageSize),
+  set: (value) => {
+    void applyQuery(withMonitoringPageSize(props.monitoringQuery, Number(value)))
+  },
+})
+
+function goNextPage(): void {
+  if (!canGoNextPage.value) return
+  void applyQuery(nextMonitoringPage(props.monitoringQuery, loadedPageCount.value))
+}
+
+function goPreviousPage(): void {
+  if (!canGoPreviousPage.value) return
+  void applyQuery(previousMonitoringPage(props.monitoringQuery))
+}
+
+// Run detail is LOCAL state on purpose: there is no GET /runs/:id (the route table stops at
+// GET /api/integration/runs — http-routes.cjs:270), so "详情" can only re-show fields the list
+// row already carries. Nothing here fetches.
+const expandedRunDetailIds = ref<Set<string>>(new Set())
+
+function isRunDetailExpanded(runId: string): boolean {
+  return expandedRunDetailIds.value.has(runId)
+}
+
+function toggleRunDetail(runId: string): void {
+  const next = new Set(expandedRunDetailIds.value)
+  if (next.has(runId)) next.delete(runId)
+  else next.add(runId)
+  expandedRunDetailIds.value = next
+}
+
+function deadLetterCountForRun(runId: string): number {
+  return countDeadLettersForRun(props.deadLetters, runId)
+}
+
+// Polling: only a `running` run can still change, so the timer exists exactly while one is on
+// screen. It re-reads through `pollPipelineObservation` — the loader's BACKGROUND door (silent =
+// no status-bar noise). The timer stays dumb on purpose: it fires every 5s and the gate inside the
+// loader decides whether this tick may run at all, because the timer cannot see whether an
+// operator read is in flight (#5612 [P2]: a tick that fired mid-filter-read used to re-issue the
+// cursor the operator had already left AND cancel their answer). A refused tick is not lost —
+// the next tick re-asks, and the first one after the read settles carries the committed cursor.
+// The timer is cleared when the last running run leaves AND on unmount — an interval that
+// outlives the component would keep fetching for a screen nobody is looking at.
+const pollingActive = computed(() => hasRunningRun(props.pipelineRuns))
+let monitoringPollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopMonitoringPoll(): void {
+  if (monitoringPollTimer === null) return
+  clearInterval(monitoringPollTimer)
+  monitoringPollTimer = null
+}
+
+function startMonitoringPoll(): void {
+  if (monitoringPollTimer !== null) return
+  monitoringPollTimer = setInterval(() => {
+    void props.pollPipelineObservation()
+  }, MONITORING_POLL_INTERVAL_MS)
+}
+
+watch(pollingActive, (running) => {
+  if (running) startMonitoringPoll()
+  else stopMonitoringPoll()
+}, { immediate: true })
+
+onBeforeUnmount(stopMonitoringPoll)
 </script>
 
 <style scoped>
@@ -327,6 +629,92 @@ defineProps<{
 .integration-workbench__badge--retryable {
   background: var(--el-color-success-light-9);
   color: var(--el-color-success-dark-2);
+}
+
+.integration-workbench__monitoring-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.integration-workbench__monitoring-filters label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.integration-workbench__monitoring-filters select,
+.integration-workbench__monitoring-filters input {
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--ms-border);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font: inherit;
+}
+
+.integration-workbench__monitoring-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.integration-workbench__monitoring-filters .integration-workbench__hint {
+  flex-basis: 100%;
+  margin-top: 0;
+  font-size: 12px;
+}
+
+.integration-workbench__dead-letter-groups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.integration-workbench__dead-letter-groups .integration-workbench__hint {
+  margin-top: 0;
+}
+
+.integration-workbench__run-detail {
+  display: grid;
+  gap: 4px;
+}
+
+.integration-workbench__run-detail dl {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.integration-workbench__run-detail dl > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.integration-workbench__run-detail dt {
+  min-width: 88px;
+  color: var(--ms-text-2);
+}
+
+.integration-workbench__run-detail dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.integration-workbench__run-detail .integration-workbench__hint {
+  margin-top: 2px;
+  font-size: 12px;
 }
 
 .integration-workbench__observation {
