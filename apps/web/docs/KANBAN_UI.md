@@ -37,5 +37,5 @@ This guide outlines the Vue 3 Kanban view implementation for MVP, integrating wi
 
 
 ## Auth & Caching
-- Strict auth: set `KANBAN_AUTH_REQUIRED=true` to enforce JWT; in dev/test, backend allows fallback with `x-user-id`.
+- Auth: Kanban endpoints always require a JWT — `/api/kanban` is behind the global session gate and is not in its exception list (`packages/core-backend/src/auth/api-path-policy.ts`). `KANBAN_AUTH_REQUIRED` is parsed into config but no route consumes it, so setting it changes nothing. The `x-user-id` header (`packages/core-backend/src/routes/kanban.ts:23-33`) is a dead fallback that never actually activates. For local dev, get a token from `GET /api/auth/dev-token` (non-production only, `packages/core-backend/src/routes/auth.ts:63`).
 - ETag caching: store `ETag` from GET response and send via `If-None-Match` on subsequent GETs to reduce bandwidth and latency.
