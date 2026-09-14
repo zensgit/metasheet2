@@ -83,6 +83,17 @@ export interface UnifiedApprovalDTO {
    */
   canDecideCurrentNode?: boolean
   /**
+   * P3-2(a) design-lock 2026-09-12 — navigation-only handle to the viewer's OWN
+   * approval-projection sheet ("我自己的审批投影表"), or `null` when there is nothing to link
+   * to (no template, no participant row for this viewer, or any resolution failure —
+   * fail-closed, never a hint that the projection sheet exists). Computed server-side from the
+   * SAME canonical participant predicate every other projection-read surface uses
+   * (`loadApprovalProjectionParticipantSheetIds`); the client must render the entry ONLY when
+   * this is present and navigate with EXACTLY these ids (never re-derive templateId → sheetId,
+   * never guess a viewId). Entry only — this carries no form content.
+   */
+  projectionEntry?: { sheetId: string; viewId: string } | null
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
    * care about parallelism keep using `currentNodeKey` unchanged.

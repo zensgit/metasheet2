@@ -20,6 +20,7 @@ import {
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
 import { resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { resolveApprovalProjectionEntryForViewer } from '../multitable/approval-record-projection-service'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -993,6 +994,17 @@ export class ApprovalBridgeService {
         viewerUserId: viewerUserId ?? null,
         viewerRoles: viewerRoles ?? null,
       })
+    }
+    // P3-2(a) design-lock 2026-09-12 — navigation-only handle to the viewer's OWN approval-
+    // projection sheet. Entry only (no form content); computed from the CANONICAL participant
+    // predicate, fail-closed to `null` on any missing input or failure — see
+    // `resolveApprovalProjectionEntryForViewer` for the full contract.
+    if (dto) {
+      dto.projectionEntry = await resolveApprovalProjectionEntryForViewer(
+        (sql: string, params?: unknown[]) => pool!.query(sql, params),
+        row.template_id,
+        viewerUserId,
+      )
     }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).
