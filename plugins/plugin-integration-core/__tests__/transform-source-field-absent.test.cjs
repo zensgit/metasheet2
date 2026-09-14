@@ -21,6 +21,7 @@ const {
   SOURCE_FIELD_ABSENT,
   getPath,
   resolveSourcePath,
+  transformValue,
   transformRecord,
   __internals: { absentSourceLookupKey },
 } = require(path.join(__dirname, '..', 'lib', 'transform-engine.cjs'))
@@ -199,39 +200,132 @@ function testBlankDefaultValueIsUnset() {
   )
 }
 
-// --- 3c. a bare `concat` still writes '' - a PINNED residual, not a fix -------
-// `concat` filters its blank parts and join()s them, so an all-absent concat returns '' rather
-// than undefined (`transform-engine.cjs:243-261`); the third no-write condition is
-// `outputValue === undefined`, so that '' is written with no warning. Widening the condition to
-// isBlank() would ALSO stop writing values a chain was explicitly asked to manufacture (the
-// `{fn:'defaultValue', value:''}` case below), which `transform-engine.cjs:345-354` refuses to do.
-// The behaviour fix belongs to a separate cut; this case pins today's answer so it cannot drift.
-function testBareConcatStillWritesEmptyString() {
-  for (const transform of [{ fn: 'concat' }, { fn: 'concat', fields: ['colour'], separator: '-' }]) {
-    const result = transformRecord({ code: 'MAT-001' }, [
-      { sourceField: 'code', targetField: 'FNumber' },
-      { sourceField: 'spec', targetField: 'FSpec', transform },
-    ])
-    assert.deepEqual(
-      result.value,
-      { FNumber: 'MAT-001', FSpec: '' },
-      'pinned residual: an all-absent concat manufactures an empty string and it IS written',
-    )
-    assert.deepEqual(result.warnings, [], 'and it is not reported as an absence')
+// --- 3c. a concat with NOTHING to join produces nothing, and nothing is written
+// #5628 left this as a pinned residual: `concat` filtered its blank parts and join()ed them, so a
+// concat whose every part was absent returned '' rather than undefined, the third no-write
+// condition (`outputValue === undefined`) read that '' as "the chain produced a value", and the
+// manufactured empty string was written over a correct target value with NO warning. It is now
+// closed at the source (`transform-engine.cjs` `concat`): join() of zero SUPPLIED parts produces
+// nothing instead of ''.
+//
+// "Supplied" is PRESENCE, not non-blankness, and the whole short circuit is fenced to the one
+// branch that would otherwise blank a target (the mapping's own path absent AND no default). Both
+// halves are pinned below, because widening either of them would stop writing values a chain was
+// explicitly asked to manufacture - `{fn:'defaultValue', value:''}` and `{fn:'concat',
+// values:['']}` - which is the one thing this line of work refuses to do.
+async function testAllAbsentConcatWritesNothing() {
+  // 1. Nothing supplied -> nothing written, and the absence is REPORTED (it used to be silent).
+  const nothingSupplied = [
+    { label: 'bare concat', transform: { fn: 'concat' } },
+    { label: 'every field absent', transform: { fn: 'concat', fields: ['colour', 'shade'], separator: '-' } },
+    { label: 'includeCurrent:false and no parts', transform: { fn: 'concat', includeCurrent: false } },
+    { label: 'empty fields/values arrays', transform: { fn: 'concat', fields: [], values: [] } },
+    { label: 'concat then upper', transform: [{ fn: 'concat' }, { fn: 'upper' }] },
+    { label: 'concat then trim', transform: [{ fn: 'concat' }, { fn: 'trim' }] },
+    { label: 'concat then toNumber', transform: [{ fn: 'concat' }, { fn: 'toNumber' }] },
+    { label: 'trim then concat', transform: [{ fn: 'trim' }, { fn: 'concat' }] },
+  ]
+  for (const { label, transform } of nothingSupplied) {
+    // The registry shape (`defaultValue: null`) is the one every stored pipeline actually has.
+    for (const extra of [{}, { defaultValue: null }, { defaultValue: undefined }]) {
+      const result = transformRecord({ code: 'MAT-001' }, [
+        { sourceField: 'code', targetField: 'FNumber' },
+        { sourceField: 'spec', targetField: 'FSpec', transform, ...extra },
+      ])
+      assert.deepEqual(
+        ownKeys(result.value),
+        ['FNumber'],
+        `${label}: a concat with nothing to join must not manufacture a value over the target`,
+      )
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(result.value, 'FSpec'),
+        false,
+        `${label}: the key must be ABSENT, not present-holding-''`,
+      )
+      assert.deepEqual(warningCodes(result), ['SOURCE_FIELD_ABSENT'], `${label}: and the absence is reported`)
+      assert.equal(result.ok, true, `${label}: an absence is still not a failure`)
+    }
   }
 
-  // Why the residual is not closed by widening the third condition:
+  // 2. POSITIVE CONTROLS - one supplied part is enough, and it still joins exactly as before.
+  const stillWrites = [
+    { label: 'literal', record: {}, transform: { fn: 'concat', values: ['LITERAL'], separator: '|' }, expected: 'LITERAL' },
+    { label: 'EMPTY literal', record: {}, transform: { fn: 'concat', values: [''] }, expected: '' },
+    { label: 'one of two fields present', record: { colour: 'RED' }, transform: { fn: 'concat', fields: ['colour', 'shade'], separator: '-' }, expected: 'RED' },
+    { label: 'both fields present', record: { colour: 'RED', shade: 'DARK' }, transform: { fn: 'concat', fields: ['colour', 'shade'], separator: '-' }, expected: 'RED-DARK' },
+    // Presence, not non-blankness: the record DOES carry `colour`, it is just empty. The join
+    // still runs and still filters the blank out, so the answer is '' and it is still written.
+    { label: 'field present holding ""', record: { colour: '' }, transform: { fn: 'concat', fields: ['colour'], separator: '-' }, expected: '' },
+    { label: 'field present holding null', record: { colour: null }, transform: { fn: 'concat', fields: ['colour'], separator: '-' }, expected: '' },
+    { label: 'field present holding 0', record: { colour: 0 }, transform: { fn: 'concat', fields: ['colour'], separator: '-' }, expected: '0' },
+    { label: 'concat then a defaultValue', record: {}, transform: [{ fn: 'concat' }, { fn: 'defaultValue', args: { value: 'D' } }], expected: 'D' },
+    // The pre-change chain handed a later dictMap the '' that concat used to return; that LOOKUP
+    // KEY is kept alive, so a dictionary answer that fires today keeps firing.
+    { label: 'concat then a dictMap keyed on ""', record: {}, transform: [{ fn: 'concat' }, { fn: 'dictMap', args: { map: { '': 'EMPTY' } } }], expected: 'EMPTY' },
+    { label: 'a defaultValue then concat', record: {}, transform: [{ fn: 'defaultValue', args: { value: 'D' } }, { fn: 'concat' }], expected: 'D' },
+  ]
+  for (const { label, record, transform, expected } of stillWrites) {
+    for (const extra of [{}, { defaultValue: null }]) {
+      const result = transformRecord(record, [{ sourceField: 'spec', targetField: 'FSpec', transform, ...extra }])
+      assert.deepEqual(result.value, { FSpec: expected }, `${label}: a supplied part still produces its join`)
+      assert.deepEqual(result.warnings, [], `${label}: a produced value is not an absence`)
+    }
+  }
+
+  // 3. The mapping's own path EXISTS -> the source spoke, and '' is its answer. Untouched.
+  for (const record of [{ spec: '' }, { spec: null }, { spec: undefined }]) {
+    const result = transformRecord(record, [{ sourceField: 'spec', targetField: 'FSpec', transform: { fn: 'concat' } }])
+    assert.deepEqual(
+      result.value,
+      { FSpec: '' },
+      `${JSON.stringify(record)}: a path that EXISTS is the source clearing the value, written as before`,
+    )
+    assert.deepEqual(result.warnings, [])
+  }
+  // A real default supplies the part, so there is something to join.
+  assert.deepEqual(
+    transformRecord({}, [{ sourceField: 'spec', targetField: 'FSpec', defaultValue: 'X', transform: { fn: 'concat' } }]).value,
+    { FSpec: 'X' },
+  )
+
+  // 4. The third no-write condition was NOT widened to isBlank(): a chain explicitly asked for an
+  //    empty string still writes one. (This is why the fix belongs in `concat`, not in the gate.)
   const deliberateEmpty = transformRecord({}, [
     { sourceField: 'spec', targetField: 'T', transform: { fn: 'defaultValue', value: '' } },
   ])
   assert.deepEqual(deliberateEmpty.value, { T: '' }, 'a chain asked for an empty string still writes one')
   assert.deepEqual(deliberateEmpty.warnings, [])
 
-  // A concat that produces a NON-EMPTY value writes it, exactly as before.
-  const produced = transformRecord({ code: 'MAT-001', colour: 'RED' }, [
-    { sourceField: 'spec', targetField: 'FSpec', transform: { fn: 'concat', fields: ['colour'], separator: '-' } },
-  ])
-  assert.deepEqual(produced.value, { FSpec: 'RED' })
+  // 5. NO CONTEXT, NO SHORT CIRCUIT. The exported transformValue() - every caller outside
+  //    transformRecord() - keeps getting '' for the same arguments.
+  assert.equal(transformValue(undefined, { fn: 'concat' }), '', 'transformValue() with no context is unchanged')
+  assert.equal(transformValue(undefined, { fn: 'concat', includeCurrent: false }), '')
+  assert.equal(transformValue('A', { fn: 'concat', values: ['B'], separator: '-' }), 'A-B')
+
+  // 6. END TO END through the runner and the real multitable adapter: the stored value survives.
+  const harness = createHarness({
+    fieldMappings: [
+      { id: 'fm1', pipeline_id: 'pipe_x02', source_field: 'code', target_field: 'code', transform: null, validation: null, default_value: null, sort_order: 0, created_at: null },
+      { id: 'fm2', pipeline_id: 'pipe_x02', source_field: 'name', target_field: 'name', transform: JSON.stringify({ fn: 'concat', args: { fields: ['nickname'], separator: '-' } }), validation: null, default_value: null, sort_order: 1, created_at: null },
+      { id: 'fm3', pipeline_id: 'pipe_x02', source_field: 'quantity', target_field: 'quantity', transform: null, validation: null, default_value: null, sort_order: 2, created_at: null },
+    ].map(rowToFieldMapping),
+    multitableRows: [{ id: 'rec_existing', sheetId: 'sheet_approved_materials', version: 1, data: { code: 'MAT-001', name: 'Correct bolt', quantity: 7 } }],
+    sourceRecords: [{ code: 'MAT-001', quantity: 9, updatedAt: '2026-09-10T00:00:00.000Z' }],
+  })
+  const runResult = await harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  assert.equal(runResult.metrics.rowsFailed, 0)
+  assert.equal(
+    harness.storedRows[0].data.name,
+    'Correct bolt',
+    'an all-absent concat must not blank the stored value through the runner either',
+  )
+  assert.equal(harness.storedRows[0].data.quantity, 9, 'the column the source did carry is still written')
+  const runRow = harness.db.tables.get('integration_runs')[0]
+  assert.deepEqual(runRow.details.sourceFieldAbsent, {
+    code: 'SOURCE_FIELD_ABSENT',
+    rows: 1,
+    fields: [{ sourceField: 'name', targetField: 'name' }],
+  }, 'and the run reports it instead of losing it')
 }
 
 // --- 3e. a dictMap that answers the PRE-CHANGE lookup key still writes --------
@@ -1081,7 +1175,7 @@ const CASES = {
   testPresentButEmptyStillWrites,
   testDefaultsAndTransformsStillProduceValues,
   testBlankDefaultValueIsUnset,
-  testBareConcatStillWritesEmptyString,
+  testAllAbsentConcatWritesNothing,
   testDictMapNullKeyStillAnswersAbsentSource,
   testEmptyArraySegmentIsAbsentByDecision,
   testSkipDoesNotBypassGuards,

@@ -1,7 +1,7 @@
 # 映射源字段「不存在」不再静默覆盖目标值（X02）— 验证
 
-- 日期：2026-09-11（返修轮：2026-09-11，X02 终审后；订正轮：2026-09-11，审阅人点名 dictMap `"null"` 键）
-- 分支：`fix/transform-source-field-absent`（基于 `919582e71`；第一版 `c2b482c8b`，本文为其返修后的状态）
+- 日期：2026-09-11（返修轮：2026-09-11，X02 终审后；订正轮：2026-09-11，审阅人点名 dictMap `"null"` 键；**第三轮：2026-09-11，#5628 登记的 bare `concat` 后续单**）
+- 分支：`fix/transform-source-field-absent`（基于 `919582e71`；第一版 `c2b482c8b`）→ **第三轮在 `fix/transform-bare-concat-empty-output`，叠在 `7aaadcdfa` 之上**；本文为第三轮后的状态
 - 本机：Windows 11，Node 在 worktree `C:\Users\zhou\Downloads\dev\metasheet-wt-g44` 内直接跑（未 `pnpm install`，未建新 worktree，未复制仓库）
 - 配套设计文档：`docs/development/transform-source-field-absent-design-20260911.md`
 
@@ -105,9 +105,36 @@ combinations: 3060  diffs: 784
 
 （顺带说明：把网格砍回 11 种 transform、剔掉全部 `dictMap` 键形状，订正前后都是 504 组差异且全是 A 类——这正是上一版看不见这一类的原因：**盲区在 transform 维度，不在记录/路径/默认值维度**。上一版报的 420 与这里的 504 不同，是因为记录/路径两维的取值不同；原脚本没留档，我不声称复刻了它。）
 
-## 1. 套件（17 个用例：返修轮新增 6 个，本订正轮再新增 2 个）
+## 0c. 第三轮（后续单）：bare `concat` 残留已修
 
-`plugins/plugin-integration-core/__tests__/transform-source-field-absent.test.cjs`（1111 行）：
+- 分支：`fix/transform-bare-concat-empty-output`，叠在 `7aaadcdfa`（#5628 HEAD）之上
+- 改动面：`lib/transform-engine.cjs`（代码）、`__tests__/transform-source-field-absent.test.cjs`（用例 3c 改钉新行为 + 加正控）、`lib/pipeline-runner.cjs` 与 `lib/external-write-dry-run.cjs`（**仅注释里指向 `transform-engine.cjs` 的行号**，各 1 行，无可执行语句变化，`git diff --numstat` 各为 `1 1`）
+- 设计与裁决写在设计文档 3.4；两张网格的数字写在设计文档 3.2 的「第三轮」小节
+
+### 差异盘点（同一份重建脚本，先自证再盘点）
+
+脚本同样是进程内跑完即弃、不落仓库。**先自证**：用它跑 `919582e71` vs `7aaadcdfa`，得到 **3060 组 / 784 组差异 / 全 A 类**，与上一轮登记的数字逐位相同——重建脚本与上一轮同维度这一点因此可核。
+
+```
+grid: 12 records x 3 paths x 5 defaultValue shapes x 17 transforms = 3060
+### 919582e71                vs 7aaadcdfa(#5628 HEAD)   diffs: 784   [784] A
+### 919582e71                vs 第三轮                    diffs: 868   [868] A
+### 7aaadcdfa(#5628 HEAD)    vs 第三轮                    diffs:  84   [ 84] A
+       e.g. empty | spec | default=nokey | concat:bare :: 5628HEAD=""/w[] -> g44=<unwritten>/w[SOURCE_FIELD_ABSENT]
+
+grid: CONCAT SUPPLEMENT: 12 records x 3 paths x 5 defaultValue shapes x 21 concat 形状/链 = 3780
+### 919582e71                vs 7aaadcdfa(#5628 HEAD)   diffs:   0   <= #5628 对「链里含 concat」的映射零影响
+### 919582e71                vs 第三轮                    diffs: 896   [896] A
+### 7aaadcdfa(#5628 HEAD)    vs 第三轮                    diffs: 896   [896] A
+```
+
+**相对 #5628 HEAD 新增 84 组（基础网格）+ 896 组（concat 专项补充网格），合计 980 组，全部是「写 `''` → 不写并记 `SOURCE_FIELD_ABSENT`」。B 类（非空→不写）、C 类（值被改）、D 类（不写→写）均为 0。** 按形状拆见设计文档 3.2 的表；`concat:literal`、`values:['']`、任一部件存在、`[concat,defaultValue]`、`[concat,dictMap:""键]`、`[defaultValue,concat]` 六类**零差异**。
+
+**中间量度如实登记**：只改 `concat`、不做链级查表键还原的那一版，在补充网格里有 **84 组 B + 180 组 C-blank**，全部集中在 `[concat, dictMap]`（详因见设计文档 3.4 第 3 条）。是这次测量促成了 `transformValue` 那一处改动；上表是还原之后的结果。
+
+## 1. 套件（17 个用例：返修轮新增 6 个，订正轮再新增 2 个，第三轮改写 1 个）
+
+`plugins/plugin-integration-core/__tests__/transform-source-field-absent.test.cjs`（1205 行）：
 
 | # | 用例 | 钉住的事实 |
 | --- | --- | --- |
@@ -115,7 +142,7 @@ combinations: 3060  diffs: 784
 | 2 | `testPresentButEmptyStillWrites` | `null`/`''`/`0`/`false`/自有键持 `undefined` 五种"存在但空"照旧写、不记 warning |
 | 3 | `testDefaultsAndTransformsStillProduceValues` | 非空 `defaultValue` 优先级不变；`defaultValue`/`dictMap.defaultValue`/`concat.values` 造出的值照旧写；纯透传 `trim`/`toNumber` 链落到不写 |
 | 3b | `testBlankDefaultValueIsUnset` **（新）** | `defaultValue: null` 与 `defaultValue: undefined` 都是注册表编码的"未设置"，不算供值 → 不写 + 告警；`defaultValue: ''` 仍写；**路径存在**时回填优先级逐条不变 |
-| 3c | `testBareConcatStillWritesEmptyString` **（新）** | 残留显式化：`{fn:'concat'}` 与 `{fn:'concat',fields:[...]}` 全缺时写 `''` 且不记告警；`{fn:'defaultValue',value:''}` 仍写 `''`（这正是不能放宽第三条件的原因）；产出非空值的 concat 照旧写 |
+| 3c | `testAllAbsentConcatWritesNothing` **（第三轮改写，原 `testBareConcatStillWritesEmptyString`）** | 残留**已修**：8 种「一个部件都没被供给」的形状（bare / 字段全缺 / `includeCurrent:false` / `fields:[] values:[]` / `[concat,upper]` / `[concat,trim]` / `[concat,toNumber]` / `[trim,concat]`）× 3 种默认值形状（无键 / `null` / `undefined`）**全部不写 + 记 `SOURCE_FIELD_ABSENT`**；10 条正控**照旧写**（字面量 / 空字面量 `values:['']` / 两字段有一个在 / 两个都在 / 字段存在但值为 `''`、`null`、`0` / `[concat,defaultValue]` / `[concat,dictMap:""键]` / `[defaultValue,concat]`）；3 条「路径存在」（`''`/`null`/自有键持 `undefined`）仍写 `''`；`defaultValue:'X'` 仍写 `'X'`；`{fn:'defaultValue',value:''}` 仍写 `''`（这正是仍然不能放宽第三条件的原因）；导出的 `transformValue()` 无 context 时仍返回 `''`；外加一条走完整 `runPipeline` + 真 multitable 适配器的端到端断言（库里 `'Correct bolt'` 留住、`quantity` 更新成 9、`details.sourceFieldAbsent.rows === 1`） |
 | 3e | `testDictMapNullKeyStillAnswersAbsentSource` **（本轮新增）** | 审阅人订正：存库形状 + `dictMap {"null":"UNKNOWN"}` 在源字段缺失时**照旧写 `UNKNOWN`**（`rowToFieldMapping` / `normalizeFieldMappings` 两种产出，字典经 `JSON.stringify` 存取）；`[trim,dictMap]`/`[upper,dictMap]`/`[dictMap,upper]` 同样命中；**未命中仍不写**；`trim`/`upper`/`lower`/`toNumber`/`toDate` 单步**仍不写**（钉住「不做全局归一化」）；无 `defaultValue` 键的字面量映射**不**被 `"null"` 条目命中、但被 `"undefined"` 条目命中（钉住「键跟着映射走」）；两键并存时命中 `"null"`；`args.defaultValue` 与非空 `mapping.defaultValue` 照旧 |
 | 3d | `testEmptyArraySegmentIsAbsentByDecision` **（新）** | F02 定案：`tags[]` 对空数组 = 不存在；`tags`（数组本身）= 存在，写 `[]` 清空目标 |
 | 4 | `testSkipDoesNotBypassGuards` | 3 个不安全 `targetField` 在源字段缺失时仍 `TRANSFORM_FAILED`；`required` 照旧判 `REQUIRED` |
@@ -146,11 +173,28 @@ $ node __tests__/test-chain-completeness.test.cjs
 ✓ test-chain-completeness: 215 suites, all executed by `pnpm test` (0 intentional exclusions)
 ```
 
-## 3. 变异自证（返修轮 9 项 + 订正轮 6 项，全部原地改 → 跑 → 还原 → sha256 核对）
+## 3. 变异自证（返修轮 9 项 + 订正轮 6 项 + 第三轮 8 项，全部原地改 → 跑 → 还原 → sha256 核对）
 
-计数口径：`total=17 failed=N`，逐个用例独立 try/catch，N 是**精确的红用例条数**。订正轮的对照组（无变异）：`{"total":17,"failed":0,"red":[]}`。
+计数口径：`total=17 failed=N`，逐个用例独立 try/catch，N 是**精确的红用例条数**。订正轮与第三轮的对照组（无变异）都是 `{"total":17,"failed":0,"red":[]}`。
 
-### 3.1 订正轮（本轮，对照组 17/17 绿）
+### 3.0 第三轮（bare `concat`），对照组 17/17 绿
+
+| 变异 | 改了什么 | 文件 | 红 | 红在哪句断言 |
+| --- | --- | --- | --- | --- |
+| **M21** | 去掉 `concat` 的短路，全缺时照旧造 `''`（= #5628 HEAD 的行为） | transform-engine | **1 / 17** | `testAllAbsentConcatWritesNothing`（`bare concat: a concat with nothing to join must not manufacture a value over the target`） |
+| **M22** | 把「所有部件都缺」误判成「任一部件缺」（`parts.some(p => p === undefined)`） | transform-engine | **2 / 17** | `testAllAbsentConcatWritesNothing`（`includeCurrent:false and no parts: …`，正控侧红在「两字段只有一个在」）、`testDefaultsAndTransformsStillProduceValues`（`{fn:'concat', values:['LITERAL']}` 那条既有正控） |
+| **M23** | 第三条件放宽成 `isBlank(outputValue)`（审阅人明令不许的那一步） | transform-engine | **1 / 17** | `testAllAbsentConcatWritesNothing`（`EMPTY literal: a supplied part still produces its join`——`{fn:'concat', values:['']}` 会停写） |
+| **M24** | `transformContext` 不再带 `sourceFieldAbsent`（接线断开，`concat` 永远看不到缺失分支） | transform-engine | **1 / 17** | `testAllAbsentConcatWritesNothing`（`bare concat: …`） |
+| **M25** | 去掉链级查表键还原（`concat` 短路后下游 `dictMap` 丢掉改动前的 `""` 键） | transform-engine | **1 / 17** | `testAllAbsentConcatWritesNothing`（`concat then a dictMap keyed on "": a supplied part still produces its join`） |
+| **M26** | 「被供给」从**存在**降格成**非空**（源侧 `{colour:''}` 会被当成没供给） | transform-engine | **1 / 17** | `testAllAbsentConcatWritesNothing`（`field present holding "": a supplied part still produces its join`） |
+| **M27** | 短路不再被 `sourceFieldAbsent` 圈住（无 context 也短路） | transform-engine | **1 / 17** | `testAllAbsentConcatWritesNothing`（`{}: a path that EXISTS is the source clearing the value, written as before`——`{spec:undefined}` 会从写 `''` 变成写 `undefined`） |
+| **M8**（第三次重跑） | 门的第二条件改回 `!usedDefault` | transform-engine | **7 / 17** | 订正轮那 6 条 + `testAllAbsentConcatWritesNothing`（新用例同样依赖这道门） |
+
+每次变异后按原字节写回并核对 sha256，8 项全部 `OK`（同一个值 `4a7bc99d01e5f4a7be64f529953388657f17dafff903d401369e3e5f0eb0145a`，即第三轮收尾时 `lib/transform-engine.cjs` 的**工作区字节**，本机 CRLF）。变异探针与网格脚本都只在系统临时目录里跑，不落仓库。
+
+判别力说明：M21 / M24 是同一件事的两端——一个拿掉 `concat` 里的短路，一个拿掉 `transformRecord` 递给它的那一位信息，两者都让新用例转红，所以这条守卫**接线是通的**，不是只在单元里自说自话。M22 / M26 / M27 分别攻三处窄化（「全缺」的定义、「被供给」的定义、短路的作用域），各自红在不同的正控断言上。M23 是审阅人明令不许的那一步，红在 `values:['']` 上——正好证明第三条件仍然不能放宽。
+
+### 3.1 订正轮（第二轮，对照组 17/17 绿）
 
 | 变异 | 改了什么 | 文件 | 红 | 红在哪句断言 |
 | --- | --- | --- | --- | --- |
@@ -173,7 +217,7 @@ $ node __tests__/test-chain-completeness.test.cjs
 | M11 | 规划器改回比全部 `writableFields` | external-write-dry-run | **1 / 15** | `testPlannerConvergesWhenSourceFieldIsAbsent`（`the plan converges instead of re-planning a no-op update`） |
 | M12 | 计数改回"先判上限再去重" | pipeline-runner | **1 / 15** | `testFieldsTruncatedOnlyWhenAPairWasDropped` |
 | M13 | 行计数改回看 `warnings.length`（不按 code 过滤） | pipeline-runner | **0 / 15** | —（**负结果**，见下） |
-| M14 | 第三条件放宽成 `isBlank(outputValue)` | transform-engine | **1 / 15** | `testBareConcatStillWritesEmptyString` |
+| M14 | 第三条件放宽成 `isBlank(outputValue)` | transform-engine | **1 / 15** | `testBareConcatStillWritesEmptyString`（该用例已在第三轮改写成 `testAllAbsentConcatWritesNothing`；同一变异在第三轮编号 M23，仍红 1 条） |
 | M15 | 空数组段当作存在 | transform-engine | **1 / 15** | `testEmptyArraySegmentIsAbsentByDecision` |
 | M16 | 成功路径不再 `...buildSourceFieldAbsentDetails()` | pipeline-runner | 4 / 15 | `testRunReportsAbsenceWithCountAndFieldNames`、`testStoredMappingShapeIsNotBlanked`、`testDryRunReportsAbsenceAndWritesNothing`、`testFieldsTruncatedOnlyWhenAPairWasDropped` |
 
@@ -187,7 +231,7 @@ $ node __tests__/test-chain-completeness.test.cjs
 
 ### 负结果（诚实标注）
 
-1. **M13 零红。** 把行计数改回 `warnings.length > 0` 不触发任何用例。原因实读确认：`transform-engine.cjs:359` 是本文件唯一的 `warnings.push`，`code` 恒为 `SOURCE_FIELD_ABSENT`，所以今天两种写法逐行等价——这条改动是**纯潜伏加固**，没有能让它变红的当前输入。没有为它造用例，因为造出来的只能是"给 transformRecord 打桩塞一个假 code"，那是钉桩不是钉行为。
+1. **M13 零红。** 把行计数改回 `warnings.length > 0` 不触发任何用例。原因实读确认：`transform-engine.cjs:412` 是本文件唯一的 `warnings.push`，`code` 恒为 `SOURCE_FIELD_ABSENT`，所以今天两种写法逐行等价——这条改动是**纯潜伏加固**，没有能让它变红的当前输入。没有为它造用例，因为造出来的只能是"给 transformRecord 打桩塞一个假 code"，那是钉桩不是钉行为。
 2. **未重跑整条 215 条 test-chain。** 任务硬规则禁止（磁盘约 1.5 GB）。第一版那轮的穷举结论（M1 在 215 条上只红新套件）仍然成立且**仍然无判别力**，正是本轮补用例 9 的原因。
 3. **M2–M7（第一版的变异）未在返修后重跑。**
 
@@ -202,13 +246,54 @@ lib/external-write-dry-run.cjs                    7f0465f4bc94a90e4d9a0bcb75c952
 __tests__/transform-source-field-absent.test.cjs  828fbb2e99cd07a4172b1d61dbf421acf6918940b0d9bcaef3c6344b71101b91
 ```
 
-本轮对三个 lib 的改动面：`transform-engine.cjs` 是**代码**改动（兼容键）；`pipeline-runner.cjs` 与 `external-write-dry-run.cjs` 只改了**注释里指向 `transform-engine.cjs` 的行号**（代码行移位了），没有可执行语句变化——`git diff` 可核。返修轮记录的哈希（`67a738f3…` / `646115c4…` / `d18f6a3b…`）因此全部作废，以上为本轮收尾字节。
+本轮对三个 lib 的改动面：`transform-engine.cjs` 是**代码**改动（兼容键）；`pipeline-runner.cjs` 与 `external-write-dry-run.cjs` 只改了**注释里指向 `transform-engine.cjs` 的行号**（代码行移位了），没有可执行语句变化——`git diff` 可核。返修轮记录的哈希（`67a738f3…` / `646115c4…` / `d18f6a3b…`）因此全部作废，以上为**订正轮**收尾字节。
+
+#### 第三轮收尾字节（改用 LF 归一后的 sha256，跨平台可核；上面两轮记的是本机 CRLF 字节，口径不同，不能直接比）
+
+```
+lib/transform-engine.cjs                          17c4eb0d73aa7d4c0ed6bc095a075141b1ee93f8f35d731fcb2fdff9e2babd21
+lib/pipeline-runner.cjs                           297e99fb2abb739cedcb407d598fee8e2c1362493b7586576ec0d3363f235009
+lib/external-write-dry-run.cjs                    2592ded983c574e7574db47744795ad3e008a612cb55260a3464e5bd36f31d76
+__tests__/transform-source-field-absent.test.cjs  e33d8afc6fea60e4085246de2e6e116d04fcb761a9eb0b4ca6f9695b546f61a0
+```
+
+第三轮对三个 lib 的改动面：`transform-engine.cjs` 是**代码**改动（`concat` 的短路 + `transformValue` 的链级查表键 + `transformContext` 多一位）；`pipeline-runner.cjs:788` 与 `external-write-dry-run.cjs:571` 只改了**注释里指向 `transform-engine.cjs` 的行号**（`:359`→`:412`、`:345-368`→`:397-420`），`git diff --numstat` 各为 `1 1`，可核。
 
 ## 4. 套件与检查的实际数字
 
-### 受影响套件（逐个实跑，exit code）
+### 第三轮：受影响套件逐个实跑（exit code）
 
-订正轮逐个重跑（**本轮的数字**）：
+套件选择同上一轮的口径：对 `__tests__/` 全量 grep `transform-engine|transformRecord|external-write-dry-run|pipeline-runner`，命中 **15 个文件**，逐个跑完，再补 8 条间接相关 / 守卫套件。
+
+```
+transform-source-field-absent            exit=0   (17/17 cases，控制组 failed=0)
+transform-validator                      exit=0
+pipeline-runner                          exit=0
+external-write-dry-run                   exit=0
+data-source-sql-readonly-source-adapter  exit=0
+df-n2-2c-provenance-read                 exit=0
+e2e-plm-k3wise-writeback                 exit=0
+http-routes-plm-k3wise-poc               exit=0
+k3-external-write-permanent-fence        exit=0
+k3-wise-c6-write-profile                 exit=0
+k3-write-approval-posture                exit=0
+metasheet-multitable-target-adapter      exit=0
+outbound-http-write-gate                 exit=0
+http-routes                              exit=0
+pipelines                                exit=0
+k3-df-t1-target-payload-preview          exit=0
+k3-raw-row-intake-aliases                exit=0
+k3-save-body-composer.parity             exit=0
+test-chain-completeness                  exit=0   (215 suites, 0 intentional exclusions)
+sealed-export-package-provenance         exit=0   (pin 未动，66 个叶子键)
+b2a-trial-registry-wiring                exit=1   MODULE_NOT_FOUND @metasheet/mssql-readonly-utils（本机缺件）
+k3-sqlserver-external-write-fence-parity exit=1   同上
+k3-wise-adapters                         exit=1   同上（require 阶段就崩，本刀改的代码根本没加载）
+```
+
+三条红与前两轮登记的是同一批本机缺件（本 worktree 未 `pnpm install`，按硬规则不装），与本轮改动无关。
+
+### 订正轮（第二轮）的数字，保留备查
 
 ```
 transform-source-field-absent        exit=0   (17/17 cases)
@@ -249,13 +334,15 @@ k3-wise-adapters                             exit=1  MODULE_NOT_FOUND @metasheet
 
 ### 语法检查
 
-`node --check` 四个改动文件（3 个 lib + 1 个套件）全部通过（订正轮重跑了改动过的 `transform-engine.cjs` 与套件）。
+`node --check` 四个改动文件（3 个 lib + 1 个套件）全部通过（第三轮重跑了全部四个）。
 
 ### 溯源 pin
 
 改动的四个文件都不在 pin 清单里，**没有重打 pin**：`lib/sealed-export/vectors/s6a-package-provenance-pins.json` 共 **66** 个 pin 键，无 `transform-engine` / `pipeline-runner` / `external-write-dry-run` / `test-chain.txt` 相关键。
 
 订正轮复核：pin 文件**一字未改**，叶子键数仍是 **66**，`sealed-export-package-provenance.test.cjs` `exit=0`。
+
+第三轮复核：同上，pin 文件与 `test-chain.txt` 均**一字未改**（第三轮没有新增套件文件，改写的用例挂在既有套件里），叶子键数 **66**，`sealed-export-package-provenance` 与 `test-chain-completeness` 两条守卫 `exit=0`。
 
 ### type-check
 
@@ -270,14 +357,22 @@ k3-wise-adapters                             exit=1  MODULE_NOT_FOUND @metasheet
 4. 真实数据库 / 222 上机验证：没做，全部是进程内假件。
 5. `external-write-dry-run` 的 `counts` / `rowErrorTypes` 没有新增 `source_field_absent` 口径（只做了收敛性修复）。
 6. `sourceFieldAbsent.rows` 没有抬进 `metrics`：那会牵动落库形状（`run-log.cjs:45-52` 只透传 5 个键，且它们是**独立列**不是 JSONB），按派工要求"只登记不做"。
-7. bare `concat` 的**行为**没有修正（只钉住现状 + 订正文档口径），留下一刀。
+7. ~~bare `concat` 的**行为**没有修正（只钉住现状 + 订正文档口径），留下一刀。~~ **第三轮已修**，见 0c / 3.0 与设计文档 3.4。
 8. 那两条 `MODULE_NOT_FOUND` 的本机红没有修（环境缺件，且禁止安装）；订正轮补跑时又撞到第三条同因的 `k3-wise-adapters`，同样没修。
 
 ### 订正轮（本轮）额外没跑 / 没做的
 
 1. **没有复刻上一版那个 1980 组的脚本**：它是进程内跑完即弃的，没有留档。本轮是**重建**网格（3060 组）并把 transform 维度补全，所以本轮的 A 类条数（784）与上一版报的 420 不可直接相减；两者的记录/路径维度取值不同。能直接对照的是**同一份新脚本**跑出的三个版本结果。
 2. **没有把 `dictMap` 未命中时的口径改回去**：改动前写 `null`（存库映射）/ `undefined`（字面量映射），现在不写。这属于本刀的目标行为，不是回归。
-3. **`concat` 没有拿到兼容键**：它今天对缺失部件的答案是 `''`（不是 `undefined`），本来就会被写出去，与本轮的洞无关；bare `concat` 的残留仍见设计文档 3.4。
+3. **`concat` 没有拿到兼容键**：它当时对缺失部件的答案是 `''`（不是 `undefined`），本来就会被写出去，与那一轮的洞无关。（**第三轮补记**：修掉 `concat` 之后它确实需要一个链级的查表键还原，见 3.0 的 M25 与设计文档 3.4 第 3 条。）
 4. **M20 零红**（把兼容键无条件发给所有映射）：如实标注为负结果，原因见 3.1 末。
 5. **没跑** 整条 215 条 test-chain、`pnpm -r type-check`、`pnpm -r lint`、真库/222 上机；订正轮跑的是 20 条相关套件（含 completeness 与 pin 两条守卫）。
 6. **没有改 `apps/web`、没有改 pin、没有改 `test-chain.txt`**（本轮没有新增套件文件，两条新用例挂在既有套件里）。
+
+### 第三轮（bare `concat`）额外没跑 / 没做的
+
+1. **没跑**整条 215 条 test-chain（派工硬规则：内存吃紧，只跑受影响套件）、`pnpm -r type-check`、`pnpm -r lint`、真库 / 222 上机。本轮跑的是 23 条套件（含 completeness 与 pin 两条守卫）。
+2. **没有把 `concat` 的「哪些部件缺失」上报出去**：`SOURCE_FIELD_ABSENT` 的 `details` 仍然是空对象，告警里只有 `sourceField`（映射的那一个）与 `targetField`。真要说清「是 `fields:['colour','shade']` 两个都不在」，得扩 warning 形状与 values-free 论证，属另一刀。
+3. **没有给 `applyTransform` 加通用的「是否产出」信号**：#5628 设计文档 3.4 曾把它称作「正解」。本轮只让 `concat` 一个 step 产出 `undefined`，是因为它是唯一一个**从零造值**的 step（`defaultValue` / `dictMap` 的值都是操作员写下来的）。要做通用信号就要改 `applyTransform` 的返回形状（它在 `__internals` 里导出），收益在本轮没有对应需求。
+4. **补充网格里的 21 种 concat 形状不是穷举**：`separator` 只取了两种、没有造 `fields` 里带数组段 / 嵌套路径的部件、没有三步以上的链。已覆盖的是「部件供给的四种来源 × 步骤前后位置 × 下游四类 step」。
+5. **没有复用上一轮的脚本**（它没留档），是按同样维度重建的；重建的可信度用「跑基线 vs #5628 HEAD 得到与上一轮逐位相同的 784/全 A」来自证，而不是自称复刻。

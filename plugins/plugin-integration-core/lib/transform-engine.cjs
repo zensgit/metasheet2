@@ -250,9 +250,41 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
 
       const separator = args.separator === undefined ? '' : String(args.separator)
       const parts = []
-      if (args.includeCurrent !== false) parts.push(value)
-      for (const field of args.fields || []) parts.push(getPath(sourceRecord, field))
-      for (const literal of args.values || []) parts.push(literal)
+      // "Supplied" is PRESENCE, not non-blankness. A part that exists holding '' or null was
+      // spoken by the source - or written down by the operator as a literal - so the concat has
+      // something to answer with and is joined byte-for-byte as before, empty result included.
+      let anyPartSupplied = false
+      if (args.includeCurrent !== false) {
+        parts.push(value)
+        if (value !== undefined) anyPartSupplied = true
+      }
+      for (const field of args.fields || []) {
+        // Same traversal, same value as getPath() (resolveSourcePath() pins that parity); what is
+        // new is `found`, i.e. whether the record carries the field at all.
+        const part = resolveSourcePath(sourceRecord, field)
+        parts.push(part.value)
+        if (part.found) anyPartSupplied = true
+      }
+      for (const literal of args.values || []) {
+        parts.push(literal)
+        anyPartSupplied = true
+      }
+
+      // Not one part was supplied: joining zero parts returns '', an empty string manufactured
+      // out of nothing, which transformRecord()'s third no-write condition then read as "the
+      // chain produced a value" and wrote over a correct target value (#5628 pinned this as a
+      // known residual). Produce NOTHING instead, so that condition sees the truth.
+      //
+      // Two independent narrowings keep this to exactly that case:
+      //   - ONE supplied part is enough to take the join below - a part holding '' or null was
+      //     spoken by the source, a literal was written down by the operator, and both still
+      //     produce their (possibly empty) join byte-for-byte as before;
+      //   - `context.sourceFieldAbsent` restricts the whole short circuit to the one branch that
+      //     would otherwise blank a target: the mapping's own source path absent AND no default
+      //     supplied a value. A path that EXISTS (holding undefined included) and the exported
+      //     transformValue() with no context both keep returning ''. `undefined` on its own
+      //     cannot tell those apart - only transformRecord() can, and this is how it says so.
+      if (!anyPartSupplied && context.sourceFieldAbsent === true) return undefined
 
       return parts
         .filter((part) => !isBlank(part) && !isBlankAfterTrim(part))
@@ -282,10 +314,27 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
 }
 
 function transformValue(value, transform, sourceRecord = {}, context = EMPTY_TRANSFORM_CONTEXT) {
-  return normalizeTransformList(transform).reduce(
-    (current, step) => applyTransform(current, step, sourceRecord, context),
-    value,
-  )
+  let current = value
+  // Only ever REPLACED by a fresh object, never mutated: the caller's context (and the frozen
+  // EMPTY_TRANSFORM_CONTEXT) is left exactly as it was handed in.
+  let stepContext = context
+  for (const step of normalizeTransformList(transform)) {
+    const next = applyTransform(current, step, sourceRecord, stepContext)
+    // The single step whose new answer changes what the PRE-CHANGE engine would have handed the
+    // REST of the chain. A `concat` with nothing to join used to return '' (join of zero parts)
+    // and a later `dictMap` looked THAT up; it now returns `undefined`, which would silently swap
+    // that lookup key and could stop a dictionary answer that fires today. Pin the key back to
+    // what the pre-change chain carried here - always '', because join() of zero parts is always
+    // ''. Same rule as absentSourceLookupKey(): the KEY is restored, never the VALUE, so a
+    // dictionary MISS still carries nothing down the chain and the target still goes unwritten.
+    // `fn` is re-normalised rather than inferred: `undefined` also arrives here from steps that
+    // merely passed nothing through (trim/upper/toNumber), and those did NOT carry '' before.
+    if (next === undefined && stepContext.sourceFieldAbsent === true && normalizeTransformStep(step).fn === 'concat') {
+      stepContext = { ...stepContext, absentSourceKey: '' }
+    }
+    current = next
+  }
+  return current
 }
 
 function transformRecord(sourceRecord, fieldMappings = []) {
@@ -337,21 +386,25 @@ function transformRecord(sourceRecord, fieldMappings = []) {
       // `dictMap` alone (absentSourceLookupKey()). A mapping whose dictionary answers the key the
       // pre-change engine looked up still produces that answer, so the promise below - "a pipeline
       // that writes a non-empty value today keeps writing it" - holds for dictMaps too.
+      // `sourceFieldAbsent` is the same fact the no-write branch below tests, handed to the one
+      // step that cannot work it out for itself: `concat` sees only `undefined` and cannot tell
+      // "no part was supplied" from "a part was supplied holding undefined".
       const transformContext = !resolved.found && !defaultApplied
-        ? { absentSourceKey: absentSourceLookupKey(mapping) }
+        ? { absentSourceKey: absentSourceLookupKey(mapping), sourceFieldAbsent: true }
         : EMPTY_TRANSFORM_CONTEXT
       const outputValue = transformValue(fieldValue, mapping.transform, sourceRecord, transformContext)
 
       // Do not write only when ALL THREE hold: the source path was absent from this record, no
       // default actually supplied a value, and the transform chain produced nothing of its own.
-      // A `concat` that produced a NON-EMPTY value, a `dictMap` fallback, or a `dictMap` whose
+      // A `concat` with at least one SUPPLIED part, a `dictMap` fallback, or a `dictMap` whose
       // dictionary carries the pre-change lookup key (its "null" entry - see
-      // absentSourceLookupKey()) still writes exactly as before - a bare `concat` whose parts
-      // are all absent still produces '' and is still written; widening this condition to
-      // isBlank() would stop writing values a chain was asked
-      // to manufacture (`{fn:'defaultValue', value:''}`), which is the one thing this cut refuses
-      // to do. A path that EXISTS holding null or '' is the source genuinely clearing the value
-      // and is written as before.
+      // absentSourceLookupKey()) still writes exactly as before. A `concat` with no supplied part
+      // now produces nothing rather than an '' manufactured out of thin air, so it lands here -
+      // that is a change in `concat` (see its case above), NOT in this condition: widening this
+      // one to isBlank() would stop writing values a chain was asked to manufacture
+      // (`{fn:'defaultValue', value:''}`, `{fn:'concat', values:['']}`), which is the one thing
+      // this cut refuses to do. A path that EXISTS holding null or '' is the source genuinely
+      // clearing the value and is written as before.
       if (!resolved.found && !defaultApplied && outputValue === undefined) {
         // Run the write-side path guard anyway - see parseTargetPath(). Its throw is caught below
         // and recorded as TRANSFORM_FAILED, exactly as setPath()'s throw was.

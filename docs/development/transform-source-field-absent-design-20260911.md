@@ -6,6 +6,7 @@
 - 核心原则：**「字段不存在」不等于「值为空」。**
 - 返修（X02 终审）：第一版的门在生产路径上空转——见 3.1/3.2。本文中标注「返修后」的行号以返修后的文件为准。
 - 订正（审阅人，2026-09-11 第二轮）：「不会少写非空值」这句**原来不成立**——`dictMap: {"null": "UNKNOWN"}` 遇到缺失字段，旧版写 `UNKNOWN`、新版不写。已复现、已修（见 3.8）、差异盘点已重跑（见 3.2）。
+- **后续单（2026-09-11 第三轮，分支 `fix/transform-bare-concat-empty-output`，叠在 `7aaadcdfa` 之上）**：3.4 登记的「bare `concat` 从零造空串」残留**已修**——修的是 `concat` 自己（没有一个部件被供给时产出 `undefined` 而不是 `''`），三条件与其它 step 一字未动。见 3.4 与 3.2 的第三次盘点。
 
 ## 1. 缺陷与调用链（实读行号）
 
@@ -50,7 +51,7 @@
 
 `getPath` 本身**一字未改**（`transform-engine.cjs:43-50`）。理由：它被 `validator.cjs:10`、`watermark.cjs:3`、`idempotency.cjs:4`、`reference-mapping-resolver.cjs:16`、`http-routes.cjs:289`、`adapters/k3-save-body-composer.cjs:20`、`adapters/data-source-sql-readonly-source-adapter.cjs:31` 共 7 处引用，都不在这一刀的范围内。特别是 `__proto__` 这类路径：`getPath({}, '__proto__')` 返回 `Object.prototype`，而 `hasOwnProperty` 判定为 `found === false`——`value` 仍然一致，只有 `found` 不同，所以不改 `getPath` 就不会动到上述 7 处引用读到的值。
 
-## 3. 三种情况分别怎么处理（写在 `transform-engine.cjs:311-370`）
+## 3. 三种情况分别怎么处理（写在 `transform-engine.cjs:360-432`，第三轮后行号）
 
 ```
 resolved     = resolveSourcePath(sourceRecord, mapping.sourceField)
@@ -59,14 +60,18 @@ defaultApplied = usedDefault && mapping.defaultValue !== null && mapping.default
 
 取值回填：if (defaultApplied || (usedDefault && resolved.found)) fieldValue = mapping.defaultValue
 
-// 只给「会落到不写」的那一条映射，且只有 dictMap 会去读它（见 3.8）
+// 只给「会落到不写」的那一条映射；absentSourceKey 只有 dictMap 读（3.8），
+// sourceFieldAbsent 只有 concat 读（3.4，第三轮）
 transformContext = (!resolved.found && !defaultApplied)
-                   ? { absentSourceKey: absentSourceLookupKey(mapping) }   // 改动前会被查的那个键
+                   ? { absentSourceKey: absentSourceLookupKey(mapping),   // 改动前会被查的那个键
+                       sourceFieldAbsent: true }
                    : {}
 outputValue = transformValue(fieldValue, mapping.transform, sourceRecord, transformContext)
 
 不写的充要条件： !resolved.found && !defaultApplied && outputValue === undefined
 ```
+
+第三轮只多了一件事：`concat` 在**一个部件都没被供给**时产出 `undefined`（而不是 `join()` 零个部件得到的 `''`），于是第三个条件对它**自然成立**。三条件本身、`defaultValue`/`dictMap`/其它 step 一字未动。
 
 ### 3.1 为什么第二个条件不能是 `usedDefault`（X02 返修的核心）
 
@@ -123,6 +128,44 @@ combinations: 3060  diffs: 784
 
 订正后的结论（这一版可以承诺，**作用域是这张 3060 组的网格**）：与 `919582e71` 相比，网格内**差异只有一个方向**——改动前写进去的是一个空值（`undefined`/`null`/`''`），现在不写并记一条告警。**没有任何一组从「写了一个非空值」变成「不写」，也没有任何一组写出的值发生改变**（B/C/C-nonempty 三类归零）。784 比 756 多出的 28 组是 `dictMap` 的 `"undefined"` 键那一族：订正前它被新的 `undefined` 意外命中并写出一个改动前不会写的值，订正后它按改动前的键（`"null"`）查表、查不到、不写，回到 A 类。
 
+#### 第三轮（bare `concat`）：同一份脚本重建 + concat 专项补充网格
+
+上一轮的脚本同样是跑完即弃、没有留档，所以第三轮**按同样维度重建**并先自证：跑 `919582e71` vs `7aaadcdfa`（#5628 HEAD），拿到的是 **3060 组 / 784 组差异 / 全部 A 类**——与上一轮登记的数字逐位相同，重建脚本与原脚本同维度这一点因此是可核的，不是自称。
+
+```
+grid: 12 records x 3 paths x 5 defaultValue shapes x 17 transforms = 3060
+
+### 919582e71 vs 7aaadcdfa (#5628 HEAD)         diffs: 784   [784] A
+### 919582e71 vs 本轮                            diffs: 868   [868] A
+### 7aaadcdfa (#5628 HEAD) vs 本轮               diffs:  84   [ 84] A
+       e.g. empty | spec | default=nokey | concat:bare :: 5628HEAD=""/w[] -> g44=<unwritten>/w[SOURCE_FIELD_ABSENT]
+```
+
+**相对 #5628 HEAD 新增 84 组，全部是「写 `''` → 不写并记 `SOURCE_FIELD_ABSENT`」**，一组 B（非空→不写）、一组 C（值被改）都没有。84 = 28 组「路径确实不存在」的（记录 × 路径）组合 × 3 种「默认值未设置」的形状（无键 / `null` / `undefined`），乘在 `concat:bare` 这一种 transform 上；`concat:literal`（带字面量）**零差异**。
+
+基础网格的 transform 维度里只有两种 concat，所以第三轮另建了一张 **concat 专项补充网格**（同样的 12 记录 × 3 路径 × 5 默认值形状 × **21 种** concat 形状/链，= 3780 组；记录里另加 `other:'z'`、`blank:''` 两个键以便造「部件存在」的正例）：
+
+```
+grid: CONCAT SUPPLEMENT = 3780
+
+### 919582e71 vs 7aaadcdfa (#5628 HEAD)   diffs: 0     <= #5628 对「链里含 concat」的映射零影响
+### 919582e71 vs 本轮                      diffs: 896   [896] A
+### 7aaadcdfa vs 本轮                      diffs: 896   [896] A
+```
+
+按形状拆（两张网格合计 980 组差异，全部 A 类）：
+
+| 形状 | 差异组数 |
+| --- | --- |
+| `concat:bare`（基础网格） | 84 |
+| `concat` 全部字段都缺 / `includeCurrent:false` 无部件 / `fields:[] values:[]` | 84 × 3 |
+| `[concat,upper]`、`[concat,trim]`、`[concat,toNumber]`、`[trim,concat]` | 84 × 4 |
+| `[concat,dictMap]`（`"null"` 键 / `"undefined"` 键 / 未命中） | 84 × 3 |
+| `[dictMap:"null"键, concat]` | 56（另外 28 组字典命中 → 有部件 → 照旧写 `NK`） |
+| `concat:literal`、`values:['']`、任一字段存在（含存在但为 `''`/`null`/`0`）、`[concat,defaultValue]`、`[concat,dictMap:""键]`、`[defaultValue,concat]` | **0** |
+
+**中间量度如实登记**：先写出来的那一版**只**改了 `concat`，补充网格里出现了 **84 组 B 类 + 180 组 C-blank**，全部集中在 `[concat, dictMap]`：改动前 `concat` 交给下游 `dictMap` 的是 `''`，查的键就是 `""`；只改 `concat` 之后交下去的是 `undefined`，键悄悄变成了 `absentSourceLookupKey()` 的那个键，于是 `{"": "EMPTY"}` 这种字典**今天会写的值不写了**（B），`{"null": ...}` 这种**今天不会写的值反而写了**（C）。这正是 3.8 里审阅人点名过的同一类错误换了个位置重演。修法与 3.8 同款：链级只把**查表键**还原成改动前这一点上会查的那个键（永远是 `''`，因为 `join()` 零个部件恒等于 `''`），值一个字不动。上表就是还原之后的结果——B / C 两类归零。
+
 ### 3.3 三种情况的处置表
 
 | 情形 | 行为 | 与改动前相比 |
@@ -132,19 +175,39 @@ combinations: 3060  diffs: 784
 | 配了非空 `mapping.defaultValue`（含 `''`） | 照旧走默认值，优先级不变 | 不变 |
 | 路径存在但值空 + 任意 `defaultValue`（含 `null`） | 照旧回填后再写 | 不变 |
 | 路径不存在，但 transform 链自己产出了**非空**值（`concat` 带 `values`、`dictMap` 带 `defaultValue`、`dictMap` 带改动前查表键（`"null"`）、`defaultValue` 步骤） | 照旧写 | 不变（`dictMap` 那一格靠 3.8 的兼容键才成立） |
-| 路径不存在，`concat` 的部件也全缺 | **照旧写空串 `''`**，且不记告警 | 不变（**已知残留**，见 3.4） |
+| 路径不存在，`concat` 至少有**一个部件被供给**（字面量、或某个 `fields` 字段在源侧存在——哪怕值是 `''`/`null`） | 照旧按既有规则拼（结果可能就是 `''`），照旧写 | 不变 |
+| 路径不存在，`concat` 的部件**一个都没被供给** | **不写 + 记 `SOURCE_FIELD_ABSENT`** | **变（第三轮，见 3.4；#5628 那一版是照旧写 `''` 且不记告警）** |
 
 第三个条件 `outputValue === undefined` 是刻意的：只有「从头到尾谁都没给出值」才落到不写。
 
 但它**一个人撑不住**「今天能跑通的管道不会开始少写非空字段」这句承诺：链里的 `dictMap` 是**查表**，改动前查的键是回填出来的 `null`，现在链里流的是 `undefined`，键就变了。这一条由 3.8 的兼容键补上；两者合起来才是那句承诺的完整依据，盘点数字见 3.2。
 
-### 3.4 已知残留：bare `concat` 会从零造出空串（本刀不修，只写死并钉住）
+### 3.4 bare `concat` 从零造空串：#5628 登记的残留，第三轮已修
 
-`concat`（`transform-engine.cjs:243-261`）先 `filter(part => !isBlank(part) && !isBlankAfterTrim(part))` 再 `join(separator)`，**所有部件都缺失时返回 `''` 而不是 `undefined`**。于是第三个条件为假，目标被写成空串，`warnings` 为空。实测：`{fn:'concat'}` 与 `{fn:'concat', fields:['colour']}` 在源侧全缺时都产出 `{"FSpec":""}`。
+**残留是什么**（#5628 的原文保留在此，便于对照）：`concat` 先 `filter(part => !isBlank(part) && !isBlankAfterTrim(part))` 再 `join(separator)`，**所有部件都缺失时返回 `''` 而不是 `undefined`**。于是第三个条件为假，目标被写成空串，`warnings` 为空。实测：`{fn:'concat'}` 与 `{fn:'concat', fields:['colour']}` 在源侧全缺时都产出 `{"FSpec":""}`。#5628 把它订正成「产出**非空**值时照旧写」并用 `testBareConcatStillWritesEmptyString` 钉住了当时的行为。
 
-因此上一版设计文档 §3 表格第 4 行「transform 链自己产出了值」对 bare `concat` 是**假陈述**——它不是「产出了值」，它是**从零造了一个空串**。本文已改为「产出**非空**值时照旧写」，并新增 `testBareConcatStillWritesEmptyString` **钉住今天的行为**，把残留变成显式合同而不是意外。
+**第三轮的修法（选 (a)：改 `concat` 自己，不动第三条件）**——`transform-engine.cjs:243-292`：
 
-**不把第三条件放宽成 `isBlank(outputValue)`**：实测 HEAD 上 `transform: {fn:'defaultValue', value:''}` 在源字段缺失时写出 `{"T":""}`，放宽后它会停写——那正是 `transform-engine.cjs:345-354` 注释明文承诺不做的「让今天能跑的管道开始少写字段」。正解是把「是否产出」沿 `applyTransform` 传下来，属另一刀。变异 M14 证明这条钉子是活的：一放宽，`testBareConcatStillWritesEmptyString` 立刻红。
+```js
+let anyPartSupplied = false
+if (args.includeCurrent !== false) { parts.push(value); if (value !== undefined) anyPartSupplied = true }
+for (const field of args.fields || []) { const part = resolveSourcePath(sourceRecord, field); parts.push(part.value); if (part.found) anyPartSupplied = true }
+for (const literal of args.values || []) { parts.push(literal); anyPartSupplied = true }
+
+if (!anyPartSupplied && context.sourceFieldAbsent === true) return undefined
+```
+
+为什么选 (a) 而不是 (b)（把「哪些字段缺失」灌进 `transformContext`、在 bare 情形短路）：(a) 只改 `concat` 一个 case 的返回值，**第三条件、取值回填、其它 6 个 step 一字不动**，「不写」的判据仍然只有 `outputValue === undefined` 这一条；(b) 要在 `transformRecord` 里替 `concat` 提前算一遍它的部件，等于把一个 step 的语义搬到调度层，`fields` 解析会出现第二份实现（与 `concat` 自己的那份可能漂移），而且仍然要在 `concat` 里落地短路。(b) 唯一比 (a) 多出来的能力——把「部件为何缺失」上报——本轮没有需求。
+
+三处刻意的窄化，每一处都有正控钉住：
+
+1. **「被供给」判的是「存在」，不是「非空」**。源侧 `{colour: ''}` 是**说了话**（把值清空了），`values:['']` 是操作员**写下了**一个空字面量：两者都照旧走 `join`，答案就是 `''`，照旧写。只有「一个部件都没被供给」才产出 `undefined`。`fields` 因此改用 `resolveSourcePath()`（与 `getPath()` 同值、多一个 `found`，值的一致性由既有用例 5 的 182 组断言钉着），不是改用一个新的取值口径。
+2. **整条短路被 `context.sourceFieldAbsent` 圈在「本来就会落到不写」的那一条映射上**。路径存在（包括自有键持 `undefined`）、默认值真的供了值、以及**导出的 `transformValue()` 的所有外部调用者**（无 context），都照旧得到 `''`。没有这一层，`{spec: undefined}` + bare `concat` 会从写 `''` 变成写 `undefined`——那是「值被改」，不是本轮要的「空串→不写」。
+3. **链级只还原查表键，不还原值**（`transformValue`，`transform-engine.cjs:316-337`）：`concat` 短路之后，下游 `dictMap` 若不做处理会换一个键去查表。改动前这一点上被查的键恒为 `""`（`join()` 零个部件恒等于 `''`），所以把键钉回 `""`，值不动——命中就照旧写，未命中仍然落到不写。理由与 3.8 完全同款，实测数据见 3.2 的「中间量度」。
+
+**仍然不把第三条件放宽成 `isBlank(outputValue)`**（审阅人明令）：`{fn:'defaultValue', value:''}`、`{fn:'concat', values:['']}` 都是链被**明确要求**造出一个空串，放宽会让它们停写。变异 M23 证明这条钉子是活的：一放宽，`testAllAbsentConcatWritesNothing` 的 `EMPTY literal` 正控立刻红。
+
+钉子：`testAllAbsentConcatWritesNothing`（替代 #5628 的 `testBareConcatStillWritesEmptyString`）——8 种「无部件」形状 × 3 种默认值形状全部断言**不写 + 告警**，10 条正控断言**照旧写**，3 条「路径存在」断言写 `''`，1 条 `transformValue()` 无 context 断言写 `''`，外加一条走完整 `runPipeline` + 真 multitable 适配器的端到端断言（库里的 `'Correct bolt'` 必须留住）。
 
 ### 3.5 定案：数组段为空 = 不存在（原 F02，本刀裁定）
 
@@ -177,7 +240,7 @@ const comparedFields = writableFields.filter((field) => getPath(targetRecord, fi
 
 ### 3.7 不写不等于跳过守卫
 
-改动前 `setPath` 承担了两件事：路径安全检查 + 写入。跳过写入会连带跳过检查，那是把守卫放松。所以把检查拆成 `parseTargetPath`（`transform-engine.cjs:98-109`，逻辑与原 `setPath` 开头**逐字相同**），`setPath` 改为调用它（`:111-112`），而"不写"分支里**先调用 `parseTargetPath(targetField)` 再记 warning**（`:320`）。于是 `targetField` 为 `__proto__` / `x.constructor.y` 的映射，无论源字段在不在，都照旧抛 `TransformError` → 落进 `errors` → `ok === false`。变异 M4 证明这条线是活的。
+改动前 `setPath` 承担了两件事：路径安全检查 + 写入。跳过写入会连带跳过检查，那是把守卫放松。所以把检查拆成 `parseTargetPath`（`transform-engine.cjs:98-109`，逻辑与原 `setPath` 开头**逐字相同**），`setPath` 改为调用它（`:111-112`），而"不写"分支里**先调用 `parseTargetPath(targetField)` 再记 warning**（`:411`）。于是 `targetField` 为 `__proto__` / `x.constructor.y` 的映射，无论源字段在不在，都照旧抛 `TransformError` → 落进 `errors` → `ok === false`。变异 M4 证明这条线是活的。
 
 `required` 语义也没动：`validator.cjs` 的 `validateRecord` 用 `getPath(record, field)` 读目标值（`validator.cjs:234`），没写的键读出来还是 `undefined`，`required` 照旧判 `REQUIRED`。
 
@@ -231,7 +294,7 @@ const comparedFields = writableFields.filter((field) => getPath(targetRecord, fi
 **两个先例，各照一半，都在仓内，没有自创格式：**
 
 1. **条目形状**照 `transform-engine.cjs` 自己的 `errors` 条目（改动前 `:239-246`）：
-   `{ field, sourceField, index, code, message, details }`。新的 warning 条目字段名、顺序完全一致，只是 `code` 换成 `SOURCE_FIELD_ABSENT`（`transform-engine.cjs:359-366`）。同一个函数产出、同一批消费者读，形状统一。
+   `{ field, sourceField, index, code, message, details }`。新的 warning 条目字段名、顺序完全一致，只是 `code` 换成 `SOURCE_FIELD_ABSENT`（`transform-engine.cjs:412-418`）。同一个函数产出、同一批消费者读，形状统一。
 2. **数组名与"非致命"语义**照 `lib/stock-preparation-source-preflight.cjs`：那里 `SOURCE_PREFLIGHT_WARNING_CODES`（`:380-398`）配 `warnings.push({ code, detail })`（`:1859-1915`），warning 不改判定结果，只是被读出来。所以这里也叫 `warnings`，且**不参与 `ok` 的计算**。
 
 **运行级呈现**照 `pipeline-runner.cjs` 自己的 `buildProvenanceDetails()`（`:1012-1016`）：一个跑在 try 外面的运行级计数器，只在 `> 0` 时进 `finishRun` 的 `details`，并且**成功路径和失败路径两处都带上**。新增的 `buildSourceFieldAbsentDetails()` 就在它下面（`pipeline-runner.cjs:1018-1029`，`const` 在 `:1022`），接线在 `:1222`（成功）与 `:1250`（失败）。
@@ -290,10 +353,10 @@ const comparedFields = writableFields.filter((field) => getPath(targetRecord, fi
 6. **`metrics` 形状（裁决 (a)：只登记，不做）**：终审要求把 `sourceFieldAbsent.rows` 抬进 `metrics`，理由是运行历史面板只渲染 status/metrics/errorSummary/targetWriteSummaries。**实读复验后本刀不做**：`run-log.cjs:45-52` 的 `normalizeMetrics` 只透传 5 个已知键，而 `finishRun`（`run-log.cjs:108-126`）把它们作为**独立列**交给 `updatePipelineRun`（`rowsRead` / `rowsCleaned` / `rowsWritten` / `rowsFailed` / `durationMs`），没有一个通用的 metrics JSONB。多一个指标就要多一列，是落库形状变更 + 迁移，超出本刀边界。
    顺带订正终审的一个前提：`targetWriteSummaries` 其实也在 `details` 里（`pipeline-runner.cjs:1218-1220` 写入，`apps/web/src/views/IntegrationWorkbenchView.vue:3285` 读的是 `run.details?.targetWriteSummaries`），所以「面板只渲染 metrics」并不完全成立——**面板已经在读 details 的某些键**，`sourceFieldAbsent` 要可见，正确的一刀是在前端加一个 details 读点，而不是改落库形状。该前端改动本刀不做（与在飞 PR 的前端文件冲突面重叠）。
 7. **`apps/web` 的错误码文案**（`errorCodeLabels.ts`）：本刀不碰（被在飞 PR 占用）。`SOURCE_FIELD_ABSENT` 目前只在运行详情里以裸码出现。
-8. **bare `concat` 的行为修正**：见 3.4，本刀只订正口径 + 钉住现状。
+8. ~~**bare `concat` 的行为修正**：见 3.4，本刀只订正口径 + 钉住现状。~~ **已在第三轮（`fix/transform-bare-concat-empty-output`）做掉**，见 3.4。
 9. **`dictMap` 未命中时的口径**：改动前写空值、现在不写，属本刀的目标行为，不是残留（3.8 末）。
 
-## 7. 血缘与守卫一览（返修后行号）
+## 7. 血缘与守卫一览（第三轮后行号）
 
 | 位置 | 作用 |
 | --- | --- |
@@ -302,14 +365,16 @@ const comparedFields = writableFields.filter((field) => getPath(targetRecord, fi
 | `transform-engine.cjs:98-109` | `parseTargetPath` —— 从 `setPath` 拆出的写侧路径守卫 |
 | `transform-engine.cjs:192` | `EMPTY_TRANSFORM_CONTEXT` —— 除「不写分支」外每个调用者看到的形状 |
 | `transform-engine.cjs:206-210` | `absentSourceLookupKey` —— 改动前会被查的那个**键**（3.8） |
-| `transform-engine.cjs:262-278` | `dictMap` 用这个键查表；**只**换键不换值，未命中仍落到不写（3.8） |
-| `transform-engine.cjs:316-317` | `usedDefault` —— **只**管取值优先级，与改动前同款 |
-| `transform-engine.cjs:325-327` | `defaultApplied` —— 「默认值真的给出了值」，空默认不算（3.1） |
-| `transform-engine.cjs:334` | 取值回填，收成 `defaultApplied || (usedDefault && resolved.found)`（3.2） |
-| `transform-engine.cjs:340-343` | `transformContext` —— 只在「本来会落到不写」的那条映射上构造（3.8） |
-| `transform-engine.cjs:355` | 不写的三条件，第二条用 `!defaultApplied` |
-| `transform-engine.cjs:358` | 不写分支里仍然跑写侧路径守卫 |
-| `transform-engine.cjs:387` | `ok` 仍然只看 `errors` |
+| `transform-engine.cjs:243-292` | `concat` —— 「被供给的部件」记账（`:266` 用 `resolveSourcePath().found`）；`:287` 一个部件都没被供给且本映射落在缺失分支时产出 `undefined`（3.4，第三轮） |
+| `transform-engine.cjs:294-310` | `dictMap` 用兼容键查表；**只**换键不换值，未命中仍落到不写（3.8） |
+| `transform-engine.cjs:316-337` | `transformValue` —— 逐步跑链；`:332-334` 在 `concat` 短路后把下游 `dictMap` 的查表键钉回 `""`（改动前这一点上被查的键），值不动（3.4，第三轮） |
+| `transform-engine.cjs:365-366` | `usedDefault` —— **只**管取值优先级，与改动前同款 |
+| `transform-engine.cjs:374-376` | `defaultApplied` —— 「默认值真的给出了值」，空默认不算（3.1） |
+| `transform-engine.cjs:383` | 取值回填，收成 `defaultApplied || (usedDefault && resolved.found)`（3.2） |
+| `transform-engine.cjs:392-394` | `transformContext` —— 只在「本来会落到不写」的那条映射上构造；带 `absentSourceKey`（3.8）与 `sourceFieldAbsent`（3.4） |
+| `transform-engine.cjs:408` | 不写的三条件，第二条用 `!defaultApplied`；第三轮**一字未动** |
+| `transform-engine.cjs:411` | 不写分支里仍然跑写侧路径守卫 |
+| `transform-engine.cjs:440` | `ok` 仍然只看 `errors` |
 | `pipeline-runner.cjs:75-78` | 字段对上限 50 |
 | `pipeline-runner.cjs:786-806` | 每行的计数与字段名收集（不碰 metrics）；`:790` 按 code 过滤后再计行，`:800` 先去重再判上限 |
 | `pipeline-runner.cjs:1018-1029` | 运行级 details 构造 |
