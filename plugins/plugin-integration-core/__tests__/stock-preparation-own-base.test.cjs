@@ -7,7 +7,8 @@
  * pair already exists anchors the other to its own base and nothing ever derives next to it.
  *
  *   T1   derived id: deterministic, prefixed, regex-valid, tenant-opaque; blank tenant -> 400
- *   T2   the prefix is the plugin's own (`base_<plugin.json name minus plugin->_`)
+ *   T2   the prefix is the plugin's own (`base_<plugin.json name minus plugin->_`); the core id
+ *        rule the fence duplicates is byte-identical to core's SYSTEM_BASE_ID_PATTERN literal
  *   T3   fresh install with the opt-in: anchor lookup (ledger absent), ensureSystemBase BEFORE
  *        ensureObject, baseId = derived, name by locale (zh-CN -> 备料), evidence
  *        ownBaseSource/ownBaseCreated
@@ -24,8 +25,12 @@
  *        base, another plugin's system base) is NEVER followed — 409
  *        STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED through the REAL routes in both directions and
  *        at module level, zero ensureSystemBase, zero ensureObject, no base id in the response or
- *        the error, gate on or off; every accepted shape (null / base_legacy /
- *        base_integration-core_*) still anchors
+ *        the error, gate on or off; every accepted shape (null / base_legacy / a
+ *        base_integration-core_ id ensureSystemBase could have minted) still anchors; and
+ *        (re-refutation r1 of the fix) an id UNDER the prefix that the plugin could never mint —
+ *        the bare prefix, `_x.y`, `_备料`, over-long — is foreign too: the fence is pinned to be
+ *        a SUBSET of the `POST /bases` reservation regex read from plugin-scope.ts, so no route
+ *        can hand a user a base the anchor follows
  *   T7   env off (every off-value, trimmed/case-insensitive) -> zero ensureSystemBase, baseId null
  *        on a fresh install; the anchor still runs (it neither derives nor creates); unset / other
  *        values -> on
@@ -50,7 +55,8 @@
  * T12 red (projectId variant -> T10 red); M3 remove the anchor step -> T5 red; M4 detach the
  * ledger from the resolver (no objectId) -> T5 red; M5 gate always on -> T7 red; M9 detach the
  * MAIN TABLE from the resolver (no objectId) -> T3 red, T6(d) red; M10 gate before anchor -> T6(e)
- * red; M11 anchor accepts ANY base (the fence removed) -> T6(h) red.
+ * red; M11 anchor accepts ANY base (the fence removed) -> T6(h) red; M11c fence back to the bare
+ * prefix (wider than the reservation) -> T6(h) red.
  */
 
 const assert = require('node:assert/strict')
@@ -67,10 +73,12 @@ const {
   STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX,
   STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
   STOCK_PREPARATION_LEGACY_BASE_ID,
+  STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN,
   STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,
   stockPreparationOwnBasePairPartners,
+  stockPreparationSystemBaseIdMintable,
   stockPreparationOwnBaseAnchorAccepts,
   resolveStockPreparationOwnBase,
 } = ownBase
@@ -91,6 +99,18 @@ const pluginManifest = require(path.join(__dirname, '..', 'plugin.json'))
 
 const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const SYSTEM_BASE_ID_PATTERN = /^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$/
+// The two core rules the fence must agree with, read from the core SOURCE (not re-typed): the id
+// rule ensureSystemBase applies (provisioning.ts) and the `POST /bases` reservation (plugin-scope.ts).
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..')
+const CORE_PROVISIONING_PATH = path.join(REPO_ROOT, 'packages', 'core-backend', 'src', 'multitable', 'provisioning.ts')
+const CORE_PLUGIN_SCOPE_PATH = path.join(REPO_ROOT, 'packages', 'core-backend', 'src', 'multitable', 'plugin-scope.ts')
+
+function readRegExpLiteral(filePath, constName) {
+  const src = fs.readFileSync(filePath, 'utf8')
+  const match = src.match(new RegExp(`export const ${constName} = /(.*)/([a-z]*)\\r?\\n`))
+  assert.ok(match, `${constName} is an exported regex literal in ${path.basename(filePath)}`)
+  return new RegExp(match[1], match[2])
+}
 const PROJECT_ID = 'tenant_1:integration-core'
 const ADMIN_USER = { id: 'user_admin', tenantId: 'tenant_1', roles: ['admin'], permissions: ['integration:admin'] }
 const CANONICAL_ROUTE = '/api/integration/stock-preparation/target/ensure'
@@ -316,6 +336,11 @@ function testDerivedIdShape() {
   assert.ok(derived.startsWith(`base_${slug}_`), 'T2 under the plugin-scope prefix base_<slug>_')
   assert.equal(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX, `base_${slug}_`, 'T2 the anchor fence is the plugin-scope prefix itself')
   assert.equal(STOCK_PREPARATION_LEGACY_BASE_ID, 'base_legacy')
+  // The core id rule the fence duplicates is core's own, byte for byte (source and flags).
+  const coreIdRule = readRegExpLiteral(CORE_PROVISIONING_PATH, 'SYSTEM_BASE_ID_PATTERN')
+  assert.equal(STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN.source, coreIdRule.source, 'T2 the fence uses core\'s SYSTEM_BASE_ID_PATTERN literal')
+  assert.equal(STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN.flags, coreIdRule.flags, 'T2 same flags')
+  assert.equal(SYSTEM_BASE_ID_PATTERN.source, coreIdRule.source, 'T2 this suite\'s own copy is core\'s too')
 }
 
 async function testDerivationIgnoresProjectId() {
@@ -619,6 +644,34 @@ async function testThreeOrdersOneBase() {
       assert.equal(serialized.includes(leak), false, `T6(h) ${label}: the response never carries ${leak}`)
     }
   }
+  // RE-REFUTATION r1 OF THE FIX, through the REAL canonical route: a base UNDER the plugin prefix
+  // that ensureSystemBase could never have minted (and `POST /bases` therefore does NOT reserve —
+  // the bare prefix, a `.`, a space, a `!`, CJK, over-long) is a user-creatable base; the first
+  // fence (`startsWith` only) followed it. 409, zero writes, the id (and so the prefix) absent
+  // from the response.
+  const underPrefixButNotMintable = [
+    STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX, // the bare prefix: empty rest
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}x.y`,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX} x`,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}squat!`,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}备料`,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}${'a'.repeat(126 - STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX.length)}`, // 126 chars: one over core's cap
+  ]
+  for (const squat of underPrefixButNotMintable) {
+    assert.equal(squat.startsWith(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX), true)
+    assert.equal(stockPreparationSystemBaseIdMintable(squat), false, `T6(h) ${JSON.stringify(squat).slice(0, 40)} is not mintable`)
+    assert.equal(stockPreparationOwnBaseAnchorAccepts(squat), false, `T6(h) ${JSON.stringify(squat).slice(0, 40)} is foreign despite the prefix`)
+    const h = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet(squat) } })
+    const res = await invoke(mountRoutes(h.api), 'POST', CANONICAL_ROUTE, { user: ADMIN_USER, body: {} })
+    assert.equal(res.statusCode, 409, `T6(h) squat under the prefix ${JSON.stringify(squat).slice(0, 40)}: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED')
+    assert.deepEqual({ ...res.body.error.details }, { reason: 'foreign_base', anchorMember: 'confirmation_ledger' })
+    assert.equal(findCalls(h.calls, 'ensureSystemBase').length, 0, 'T6(h) squat under the prefix: zero derivation')
+    assert.equal(findCalls(h.calls, 'ensureObject').length, 0, 'T6(h) squat under the prefix: zero writes')
+    assert.equal(h.sheets.has(MAIN_OBJECT_ID), false, 'T6(h) squat under the prefix: the main table was never created')
+    assert.equal(JSON.stringify(res.body).includes(squat), false, 'T6(h) squat under the prefix: the response never carries the id')
+    assert.equal(JSON.stringify(res.body).includes(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX), false, 'T6(h) squat under the prefix: nor the prefix')
+  }
   // Module-level mirror: every foreign shape is refused typed — a user base, another plugin's
   // system base, ids that only LOOK like the prefix or the legacy id — in both directions, with
   // the error naming the member and the reason but never the base id; and the gate being OFF does
@@ -635,6 +688,9 @@ async function testThreeOrdersOneBase() {
     'base_legacy2',
     'BASE_LEGACY',
     ' base_legacy',
+    ...underPrefixButNotMintable,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}\u00e9`, // non-ASCII letter under the prefix
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}sp_\n`, // control char under the derived prefix
   ]
   for (const foreign of foreignShapes) {
     assert.equal(stockPreparationOwnBaseAnchorAccepts(foreign), false, `T6(h) ${JSON.stringify(foreign)} is foreign`)
@@ -666,13 +722,60 @@ async function testThreeOrdersOneBase() {
   // ... and every ACCEPTED shape still anchors (the positive control the fence must not break):
   // the legacy null, the shared default base, this tenant's derived id, another tenant's derived id,
   // any other base under the plugin prefix.
-  for (const accepted of [null, STOCK_PREPARATION_LEGACY_BASE_ID, derived, otherSystemBase, `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}catalog`]) {
+  const acceptedShapes = [
+    null,
+    STOCK_PREPARATION_LEGACY_BASE_ID,
+    derived,
+    otherSystemBase,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}catalog`,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}a`, // the shortest mintable rest
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}A-Z_09`,
+    `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}${'a'.repeat(125 - STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX.length)}`, // 125 chars: core's cap
+  ]
+  for (const accepted of acceptedShapes) {
     assert.equal(stockPreparationOwnBaseAnchorAccepts(accepted), true, `T6(h) ${JSON.stringify(accepted)} is accepted`)
+    if (accepted !== null && accepted !== STOCK_PREPARATION_LEGACY_BASE_ID) {
+      assert.match(accepted, SYSTEM_BASE_ID_PATTERN, `T6(h) ${JSON.stringify(accepted)} is an id ensureSystemBase could mint`)
+    }
     const host = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet(accepted) } })
     const resolved = await resolveStockPreparationOwnBase({ provisioning: host.api, projectId: PROJECT_ID, objectId: MAIN_OBJECT_ID, tenantId: 'tenant_1', env: {} })
     assert.deepEqual(resolved, { baseId: accepted, source: 'anchor' }, `T6(h) ${JSON.stringify(accepted)} anchors`)
     assert.equal(findCalls(host.calls, 'ensureSystemBase').length, 0)
   }
+
+  // THE FENCE IS A SUBSET OF THE `POST /bases` RESERVATION — the rule that makes the anchor safe
+  // against user-created bases: every string the fence accepts (other than base_legacy) is one the
+  // reservation regex (read from plugin-scope.ts, the source `POST /bases` executes) refuses to
+  // mint for a user, and under this plugin's prefix the two rules coincide exactly with "mintable".
+  // Checked on every shape above plus a deterministic fuzz over the prefix + up to 8 chars drawn
+  // from an alphabet that includes every class the reservation excludes.
+  const reservation = readRegExpLiteral(CORE_PLUGIN_SCOPE_PATH, 'PLUGIN_SYSTEM_BASE_ID_PATTERN')
+  assert.equal(reservation.test(derived), true, 'T6(h) the derived id is reserved on POST /bases')
+  assert.equal(reservation.test(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX), false, 'T6(h) the bare prefix is NOT reserved (a user can create it) — so the fence must refuse it')
+  let seed = 0x9f1c
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed }
+  const alphabet = ['a', 'Z', '0', '_', '-', '.', ' ', '!', '/', '\u5907', '\u00e9', '\n', 'base_', 'sp_']
+  const fuzz = []
+  for (let i = 0; i < 3000; i += 1) {
+    const n = rnd() % 9
+    let rest = ''
+    for (let j = 0; j < n; j += 1) rest += alphabet[rnd() % alphabet.length]
+    fuzz.push(`${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}${rest}`)
+  }
+  let acceptedByFence = 0
+  for (const candidate of [...foreignShapes, ...acceptedShapes.filter((value) => typeof value === 'string'), ...fuzz]) {
+    const accepts = stockPreparationOwnBaseAnchorAccepts(candidate)
+    if (candidate === STOCK_PREPARATION_LEGACY_BASE_ID) continue
+    if (accepts) {
+      acceptedByFence += 1
+      assert.equal(reservation.test(candidate), true, `T6(h) fence ⊆ reservation: ${JSON.stringify(candidate)} is accepted by the fence but a user could POST /bases it`)
+    }
+    if (candidate.startsWith(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX) && candidate.length <= 125) {
+      assert.equal(accepts, reservation.test(candidate), `T6(h) under the prefix the fence IS the reservation: ${JSON.stringify(candidate)}`)
+    }
+    assert.equal(accepts, stockPreparationSystemBaseIdMintable(candidate), `T6(h) the fence is exactly "mintable" for ${JSON.stringify(candidate)}`)
+  }
+  assert.ok(acceptedByFence > 100, `T6(h) the fuzz exercised the accepted side too (${acceptedByFence})`)
 }
 
 // ── T7: the env gate ───────────────────────────────────────────────────────────────────────────

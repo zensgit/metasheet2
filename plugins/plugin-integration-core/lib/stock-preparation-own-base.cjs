@@ -37,9 +37,13 @@
 //                                       direct caller.
 //   3. anchor: the pair PARTNER already exists (findObjectSheet) -> ITS sheet.baseId, source
 //                                       'anchor' — ONLY when that base is the legacy null,
-//                                       `base_legacy`, or a `base_integration-core_` system base.
+//                                       `base_legacy`, or a `base_integration-core_` system base
+//                                       of the exact shape ensureSystemBase could have created
+//                                       (prefix + a NON-EMPTY rest, whole id under the core id
+//                                       rule `^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$`).
 //                                       Any other base (a user base `base_<uuid>`, another
-//                                       plugin's system base) -> 409
+//                                       plugin's system base, an id under the prefix that the
+//                                       plugin could never have minted) -> 409
 //                                       STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED, values-free:
 //                                       no derivation (that would split the pair), no legacy
 //                                       fall-back (so would that), no ensureSystemBase, no
@@ -64,7 +68,19 @@
 // multitable:write holder could plant an empty ledger-id sheet in THEIR base and have the admin's
 // next main-table ensure land inside it. Following a partner is sound only into a base the plugin
 // already accounts for: the shared default every pre-B3 install sits in, or a system base created
-// through ensureSystemBase (prefix-checked by plugin-scope, reserved on POST /bases).
+// through ensureSystemBase.
+//
+// THE FENCE IS THE SAME SHAPE AS THE RESERVATION (re-refutation r1 of the fix). The first fence
+// accepted the bare prefix (`startsWith('base_integration-core_')`), which is WIDER than what
+// `POST /bases` reserves (`^base_[a-z0-9][a-z0-9-]*_[A-Za-z0-9_-]+$`: a non-empty rest in the
+// core id charset) and wider than what ensureSystemBase can mint (plugin-scope refuses the bare
+// prefix; core refuses any char outside `[A-Za-z0-9_-]` and any id over 125 chars). So a user
+// could `POST /bases { id: 'base_integration-core_' }` (or `…_x.y`, `…_备料`), own it, plant a
+// pair member there through `POST /sheets`, and the bare-prefix fence followed it. Now the fence
+// accepts under the prefix EXACTLY the ids ensureSystemBase could have created — every one of
+// which `POST /bases` refuses — so no route can hand a user a base the anchor would follow.
+// The test suite pins both halves against the core source (the reservation regex literal and
+// the core id rule literal are read from plugin-scope.ts / provisioning.ts, not re-typed).
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
@@ -82,11 +98,18 @@ const STOCK_PREP_OWN_BASE_ENV = 'MULTITABLE_STOCK_PREP_OWN_BASE'
 const STOCK_PREP_OWN_BASE_OFF_VALUES = Object.freeze(new Set(['false', '0', 'off', 'no']))
 // The plugin's system-base prefix, exactly what plugin-scope enforces
 // (`getPluginBaseIdPrefix('plugin-integration-core')` = `base_<pluginSlug>_`), plus this line's own
-// `sp_` segment for the derived id. The anchor (step 3) accepts any base under the plugin prefix.
+// `sp_` segment for the derived id. The anchor (step 3) accepts a base under the plugin prefix
+// only when the WHOLE id also satisfies the core id rule below with a non-empty rest.
 const STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX = 'base_integration-core_'
 const STOCK_PREPARATION_OWN_BASE_ID_PREFIX = `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}sp_`
 // The shared default base every pre-B3 install (222 included) sits in; the anchor accepts it.
 const STOCK_PREPARATION_LEGACY_BASE_ID = 'base_legacy'
+// Core's `SYSTEM_BASE_ID_PATTERN` (provisioning.ts), the rule ensureSystemBase applies to every id
+// it mints: charset `[A-Za-z0-9_-]`, 8..125 chars. Duplicated here because the plugin cannot
+// import core; the suite pins this literal against the core source (T2). Together with the
+// prefix + non-empty rest it is a SUBSET of the `POST /bases` reservation
+// (`PLUGIN_SYSTEM_BASE_ID_PATTERN`, plugin-scope.ts), which the suite also pins (T6(h)).
+const STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN = /^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$/
 const STOCK_PREPARATION_OWN_BASE_DIGEST_LENGTH = 24
 // The pair that must share one base. Both objectIds live HERE, not in the ledger module: the
 // ledger's G1 structural guard forbids it from naming the canonical object at all. Each member
@@ -145,14 +168,26 @@ function stockPreparationOwnBasePairPartners(objectId) {
   return STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.filter((candidate) => candidate !== self)
 }
 
+// Is `baseId` an id ensureSystemBase could have minted for THIS plugin? Prefix + non-empty rest
+// (plugin-scope's rule) AND the whole id under core's id rule (charset + length). Exactly the
+// ids `POST /bases` refuses under this prefix — never wider than the reservation.
+function stockPreparationSystemBaseIdMintable(baseId) {
+  return typeof baseId === 'string'
+    && baseId.startsWith(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX)
+    && baseId.length > STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX.length
+    && STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN.test(baseId)
+}
+
 // The only bases a partner may pull the other half into: the legacy null, the shared default
-// base, or a system base under this plugin's prefix. Exact strings — no trim, no case folding —
-// so `base_integration-core` (no trailing `_`), `base_integration_core_x` and `BASE_LEGACY` are
-// all foreign.
+// base, or a system base of this plugin's own mintable shape. Exact strings — no trim, no case
+// folding — so `base_integration-core` (no trailing `_`), `base_integration_core_x`, `BASE_LEGACY`,
+// and — under the prefix — `base_integration-core_` (empty rest), `base_integration-core_x.y`,
+// `base_integration-core_备料` (chars the plugin could never mint and `POST /bases` does not
+// reserve) are all foreign.
 function stockPreparationOwnBaseAnchorAccepts(baseId) {
   if (baseId === null) return true
   if (typeof baseId !== 'string') return false
-  return baseId === STOCK_PREPARATION_LEGACY_BASE_ID || baseId.startsWith(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX)
+  return baseId === STOCK_PREPARATION_LEGACY_BASE_ID || stockPreparationSystemBaseIdMintable(baseId)
 }
 
 // The pair member's role for the values-free refusal message: it names WHICH member anchored,
@@ -221,11 +256,13 @@ module.exports = {
   STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX,
   STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
   STOCK_PREPARATION_LEGACY_BASE_ID,
+  STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN,
   STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
   OWN_BASE_SOURCES,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,
   stockPreparationOwnBasePairPartners,
+  stockPreparationSystemBaseIdMintable,
   stockPreparationOwnBaseAnchorAccepts,
   resolveStockPreparationOwnBase,
 }
