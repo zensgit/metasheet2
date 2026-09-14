@@ -23,11 +23,19 @@
 //   (g) same 口径 as ensure/readiness: the five the probe reports are the five readiness reports for
 //       the same host, ext fields included.
 //   (h) the ext_ half of the verdict: a declared extension column the host does not hold is reported.
+//   (i) the probe judges the BOUND sheet or judges nothing: a binding whose (project, object) pair the
+//       host derives to a different sheet than `target.sheetId` is never judged on that other sheet —
+//       no refusal, no DB read, the pre-probe result (反驳 r1 blocker).
+//   (j) a host failure on the DB read is a values-free 503 TARGET_SCHEMA_UNAVAILABLE, never a plan and
+//       never the driver's text (反驳 r1 minor).
+//   (k) apply refuses BEFORE the single-use token is consumed: the same token applies once the columns
+//       are back (反驳 r1 minor).
 //
 // MUTATIONS this suite is calibrated against (run in-memory by the implementer's mutation runner, never
 // on disk): M1 probe call removed => (a)(e) red; M2 probe reads the fieldIdMap shape instead of the host
 // => (a) red; M3 refuse in every mode / on old hosts => (c)(d) red; M4 details carry values => (f) red;
-// M5 probe moved after the source read => (a)'s zero-read assertions red.
+// M5 probe moved after the source read => (a)'s zero-read assertions red; M6 sheet-identity gate removed
+// => (i) red; M7 apply's pre-token probe removed => (k) red; M8 host failure rethrown raw => (j) red.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -161,6 +169,10 @@ function createMemoryStore() {
  *                   id in `missing`, exactly as the host omits ids absent from `meta_fields`.
  *   dbRead: false — an older host: compute-only `resolveFieldIds` and nothing else.
  *   scopeError    — the DB read throws it (MultitableObjectScopeError shape) instead of answering.
+ *   derivedSheetId — what `getObjectSheetId(project, object)` answers: the sheet the host's DB read
+ *                   would key `meta_fields` on. SHEET_ID by default (a binding whose two halves name
+ *                   one tuple, i.e. a sheet ensure provisioned); anything else is the pre-registry /
+ *                   hand-bound shape the probe must not judge.
  *
  * `computedMissing` makes the compute-only map ALSO omit ids. A real compute-only host never omits
  * (it derives an id for every field it is asked about), so this is not a model of production — it is
@@ -171,12 +183,17 @@ function createMemoryStore() {
  * `ensureObject` is present so a probe that tried to heal would be caught, and it throws so the
  * attempt cannot pass silently.
  */
-function createProvisioning({ missing = [], dbRead = true, scopeError = null, computedMissing = missing } = {}) {
+function createProvisioning({ missing = [], dbRead = true, scopeError = null, computedMissing = missing, derivedSheetId = SHEET_ID } = {}) {
   const calls = []
   const answer = (fieldIds, omit) => Object.fromEntries(
     (Array.isArray(fieldIds) ? fieldIds : []).filter((id) => !omit.includes(id)).map((id) => [id, physical(id)]),
   )
   const provisioning = {
+    // Pure derivation, exactly the host's: no IO, and the id the DB read below keys on.
+    getObjectSheetId(projectId, objectId) {
+      calls.push(['getObjectSheetId', { projectId, objectId }])
+      return derivedSheetId
+    },
     async findObjectSheet({ projectId, objectId } = {}) {
       calls.push(['findObjectSheet', { projectId, objectId }])
       return { id: SHEET_ID, baseId: null, name: objectId, description: null }
@@ -280,8 +297,9 @@ async function aMissingColumnsRefuseBeforeAnyReadOrPlan() {
   assert.deepEqual(source.calls, [], '(a) zero source reads')
   assert.deepEqual(records.calls, [], '(a) zero records reads or writes — no plan was built')
   assert.equal(tokenStore.map.size, 0, '(a) zero tokens minted')
-  assert.deepEqual(host.callNames(), ['resolveExistingObjectFieldIds'], '(a) one DB read, zero ensureObject, zero findObjectSheet')
-  const probeCall = host.calls[0][1]
+  assert.deepEqual(host.callNames(), ['getObjectSheetId', 'resolveExistingObjectFieldIds'], '(a) one derivation, one DB read, zero ensureObject, zero findObjectSheet')
+  assert.deepEqual(host.calls[0][1], { projectId: PROJECT_ID, objectId: OBJECT_ID }, '(a) the derivation names the sheet the DB read is about')
+  const probeCall = host.calls[1][1]
   assert.equal(probeCall.projectId, PROJECT_ID, '(a) the probe asks under the threaded project')
   assert.equal(probeCall.objectId, OBJECT_ID, '(a) the probe asks about the action target object')
   assert.deepEqual(probeCall.fieldIds, TEMPLATE_FIELD_IDS, '(a) the probe asks about every template field')
@@ -301,7 +319,7 @@ async function bCompleteHostLeavesTheResultUntouched() {
   assert.deepEqual(comparable(result), expected.result, '(b) a complete target plans exactly what the unprobed call planned')
   assert.deepEqual(storedTokenRecord(tokenStore), expected.token, '(b) and mints the same token record')
   assert.equal('fieldExistenceMode' in result.evidence, false, '(b) evidence gains no key on the db leg either')
-  assert.deepEqual(host.callNames(), ['resolveExistingObjectFieldIds'], '(b) the probe cost exactly one DB read')
+  assert.deepEqual(host.callNames(), ['getObjectSheetId', 'resolveExistingObjectFieldIds'], '(b) the probe cost exactly one DB read (the derivation is pure)')
 }
 
 // ── (c) older host, no DB read => the pre-probe result, and the probe never spoke to the host ──
@@ -345,25 +363,13 @@ async function dScopeRefusalDegradesInsteadOfRefusing() {
     assert.deepEqual(storedTokenRecord(tokenStore), expected.token)
     assert.deepEqual(
       host.callNames(),
-      ['resolveExistingObjectFieldIds', 'resolveFieldIds'],
+      ['getObjectSheetId', 'resolveExistingObjectFieldIds', 'resolveFieldIds'],
       `(d/${shape}) the probe degraded through resolveFieldExistence's own fallback — no ensureObject, no refusal`,
     )
     // And the degradation IS the provisioning module's, not a re-implementation: the same host
     // answers the same mode through the exported probe.
     const direct = await resolveFieldExistence({ provisioning: host.provisioning, projectId: PROJECT_ID, objectId: OBJECT_ID, fieldIds: TEMPLATE_FIELD_IDS })
     assert.equal(direct.fieldExistenceMode, 'computed_scope_unavailable')
-  }
-  // A NON-scope error from the DB read is not swallowed: it is a host failure, and the plan must not
-  // proceed on a schema nobody could read.
-  {
-    const boom = new Error('meta_fields read failed')
-    boom.code = 'ECONNRESET'
-    const host = createProvisioning({ scopeError: boom })
-    await assert.rejects(
-      () => dryRunStockPreparationAction(dryRunInput({ targetFieldExistence: { provisioning: host.provisioning, projectId: PROJECT_ID } })),
-      (error) => error === boom,
-      '(d) a non-scope host failure propagates (the probe does not convert it into a plan)',
-    )
   }
 }
 
@@ -391,7 +397,20 @@ async function eApplyIsRefusedThroughTheSameLayer() {
   assert.deepEqual(error.details.missingFields, [...MISSING_FIVE], '(e) apply reports the same five through the same probe')
   assert.deepEqual(source.calls, [], '(e) apply did not re-expand the source')
   assert.deepEqual(records.calls, [], '(e) apply wrote nothing and read nothing')
-  assert.deepEqual(drifted.callNames(), ['resolveExistingObjectFieldIds'], '(e) one DB read, zero ensureObject')
+  assert.deepEqual(drifted.callNames(), ['getObjectSheetId', 'resolveExistingObjectFieldIds'], '(e) one DB read, zero ensureObject')
+  // (k) the refusal landed BEFORE the token consume: the single-use token is still there...
+  assert.equal(tokenStore.map.size, 1, '(k) a refused apply does not burn the dry-run token')
+  // ...so the operator runs ensure (columns back) and applies the plan they proved, SAME token.
+  const records3 = createRecordsApi()
+  const applied3 = await applyStockPreparationAction({
+    ...dryRunInput({ targetFieldExistence: { provisioning: complete.provisioning, projectId: PROJECT_ID }, tokenStore, records: records3 }),
+    dryRunToken: dryRun.dryRunToken,
+    permission: 'write',
+    sandboxPolicy: SANDBOX_POLICY,
+  })
+  assert.equal(applied3.status, 'succeeded', '(k) the same token applies once the columns are back')
+  assert.ok(records3.calls.some(([name]) => name === 'createRecord'), '(k) and the write happened')
+  assert.equal(tokenStore.map.size, 0, '(k) only the apply that went through consumed the token')
 
   // Control: the same apply with the columns present goes through and writes.
   const tokenStore2 = createMemoryStore()
@@ -468,12 +487,101 @@ async function hADeclaredExtensionColumnTheHostLacksIsReported() {
     targetFieldExistence: { provisioning: host.provisioning, projectId: PROJECT_ID },
   })))
   assert.deepEqual(error.details.missingFields, [EXT_FIELD_IDS[0]])
-  assert.deepEqual(host.calls[0][1].fieldIds, TEMPLATE_FIELD_IDS.concat(EXT_FIELD_IDS), '(h) the probe asks about template + declared ext ids')
+  assert.deepEqual(host.calls[1][1].fieldIds, TEMPLATE_FIELD_IDS.concat(EXT_FIELD_IDS), '(h) the probe asks about template + declared ext ids')
 
   // And an action that declares no ext ids is not asked about any.
   const plain = createProvisioning({ missing: [] })
   await dryRunStockPreparationAction(dryRunInput({ targetFieldExistence: { provisioning: plain.provisioning, projectId: PROJECT_ID } }))
-  assert.deepEqual(plain.calls[0][1].fieldIds, TEMPLATE_FIELD_IDS)
+  assert.deepEqual(plain.calls[1][1].fieldIds, TEMPLATE_FIELD_IDS)
+}
+
+// ── (i) the probe judges the bound sheet, or it judges nothing ────────────────────────────────
+//
+// The host's DB read keys `meta_fields` on the sheet it DERIVES from (project, object); the plan reads
+// and writes `target.sheetId` verbatim, and nothing requires the two to name one sheet (THE CARRY
+// TENANT WALL, http-routes.cjs, retired exactly that rule). A probe that ignored this could refuse a
+// healthy bound sheet because a DIFFERENT sheet lost columns — or pass a broken one because the
+// derived sheet is whole. Either way the guarantee would be about a table the plan never touches.
+
+async function iADivergentBindingIsNeverJudgedOnAnotherSheet() {
+  const expected = await baseline()
+  // The derived sheet is missing five columns. The bound sheet (the one the plan reads/writes) is
+  // not the derived sheet, so the probe has no proof the DB read would be about it.
+  const host = createProvisioning({ missing: MISSING_FIVE, derivedSheetId: 'sheet_derived_elsewhere' })
+  const tokenStore = createMemoryStore()
+  const result = await dryRunStockPreparationAction(dryRunInput({
+    targetFieldExistence: { provisioning: host.provisioning, projectId: PROJECT_ID },
+    tokenStore,
+  }))
+  assert.deepEqual(comparable(result), expected.result, '(i) a divergent binding plans exactly the pre-probe plan')
+  assert.deepEqual(storedTokenRecord(tokenStore), expected.token)
+  assert.deepEqual(host.callNames(), ['getObjectSheetId'], '(i) the derivation ran and the DB read did NOT: nothing about another sheet was consulted')
+  assert.deepEqual(host.calls[0][1], { projectId: PROJECT_ID, objectId: OBJECT_ID })
+
+  // The reported shape: objectId OMITTED from the config (it defaults to the template's) while the
+  // sheetId was bound by the deployment. The pair the host would judge is (staging project, default
+  // object), which is not provably this sheet — so, again, no judgement.
+  const defaulted = action()
+  delete defaulted.target.objectId
+  const host2 = createProvisioning({ missing: MISSING_FIVE, derivedSheetId: 'sheet_derived_elsewhere' })
+  const again = await dryRunStockPreparationAction(dryRunInput({
+    action: defaulted,
+    targetFieldExistence: { provisioning: host2.provisioning, projectId: PROJECT_ID },
+  }))
+  assert.equal(again.status, 'ready', '(i) the defaulted-object binding is not refused on the derived sheet')
+  assert.deepEqual(host2.callNames(), ['getObjectSheetId'])
+  assert.equal(host2.calls[0][1].objectId, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
+
+  // And when the derived sheet IS the bound sheet, the same five refuse (the positive half of the
+  // identity, so a gate that compared the wrong thing could not pass both arms).
+  const bound = createProvisioning({ missing: MISSING_FIVE, derivedSheetId: SHEET_ID })
+  await expectRefusal(() => dryRunStockPreparationAction(dryRunInput({
+    targetFieldExistence: { provisioning: bound.provisioning, projectId: PROJECT_ID },
+  })))
+  assert.deepEqual(bound.callNames(), ['getObjectSheetId', 'resolveExistingObjectFieldIds'])
+
+  // A host that cannot derive is not asked to judge either: no derivation, no DB read, no refusal.
+  const underivable = createProvisioning({ missing: MISSING_FIVE })
+  delete underivable.provisioning.getObjectSheetId
+  const third = await dryRunStockPreparationAction(dryRunInput({
+    targetFieldExistence: { provisioning: underivable.provisioning, projectId: PROJECT_ID },
+  }))
+  assert.deepEqual(comparable(third), expected.result, '(i) an underivable host plans the pre-probe plan')
+  assert.deepEqual(underivable.calls, [], '(i) and is not asked anything')
+}
+
+// ── (j) a host failure on the DB read is a values-free 503, not a plan and not a driver string ──
+
+async function jAHostFailureIsAValuesFree503() {
+  const boom = new Error('connection terminated')
+  boom.code = 'ECONNRESET'
+  const host = createProvisioning({ scopeError: boom })
+  const source = createSourceAdapter()
+  const records = createRecordsApi()
+  const tokenStore = createMemoryStore()
+  let caught = null
+  try {
+    await dryRunStockPreparationAction(dryRunInput({
+      targetFieldExistence: { provisioning: host.provisioning, projectId: PROJECT_ID },
+      source,
+      records,
+      tokenStore,
+    }))
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught, '(j) the plan did not proceed on a schema nobody could read')
+  assert.equal(caught.name, 'StockPreparationTableActionError')
+  assert.equal(caught.status, 503)
+  assert.equal(caught.code, 'TARGET_SCHEMA_UNAVAILABLE')
+  assert.deepEqual(caught.details, { targetObjectId: OBJECT_ID }, '(j) details carry the object id and nothing else')
+  assert.equal(caught.cause, boom, '(j) the host failure travels on cause, for the server log')
+  const text = JSON.stringify(caught.details) + caught.message
+  assert.equal(text.includes('connection terminated'), false, '(j) the driver text never leaves the module')
+  assert.equal(text.includes('ECONNRESET'), false)
+  assert.deepEqual(source.calls, [], '(j) zero source reads')
+  assert.deepEqual(records.calls, [], '(j) zero records calls')
+  assert.equal(tokenStore.map.size, 0, '(j) zero tokens minted')
 }
 
 // ── the probe is one exported thing, reachable for the route suite ────────────────────────────
@@ -491,6 +599,8 @@ async function main() {
   await fTheRefusalCarriesLogicalIdsOnly()
   await gTheProbeAndReadinessReportTheSameMissingSet()
   await hADeclaredExtensionColumnTheHostLacksIsReported()
+  await iADivergentBindingIsNeverJudgedOnAnotherSheet()
+  await jAHostFailureIsAValuesFree503()
   theProbeIsExportedFromTheInternals()
   console.log('stock-preparation-target-field-existence-probe tests passed')
 }

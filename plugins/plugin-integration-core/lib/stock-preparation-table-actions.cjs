@@ -680,31 +680,72 @@ function assertStockPreparationTargetReady(input = {}) {
  * judgement — the verdict, whenever there is one, is always its.
  *
  * VALUES-FREE: the refusal carries logical ids only — never a physical field id, never a sheet id.
+ *
+ * THE SHEET IT JUDGES IS THE SHEET THE PLAN READS AND WRITES, OR IT JUDGES NOTHING. The host's DB
+ * read takes `(projectId, objectId)` and keys `meta_fields` on the sheet id it DERIVES from that pair
+ * (`getObjectSheetId`, packages/core-backend/src/multitable/provisioning.ts — one-way, no IO). The
+ * plan does not use that pair: every existing-row read and every write on this path addresses
+ * `action.target.sheetId` verbatim, and `normalizeTarget` accepts any sheetId while DEFAULTING the
+ * objectId independently, so the two halves of a binding are not required to name one tuple —
+ * pre-registry installs do not (see THE CARRY TENANT WALL in http-routes.cjs, which retired exactly
+ * this derived-id rule as a refusal). Left unguarded, a divergent binding would let the probe refuse
+ * a healthy sheet on the strength of a different one, or pass a broken sheet because the derived
+ * one is whole. So the probe derives the id the DB read is about to judge, through the same
+ * `getObjectSheetId` the host itself keys on, and runs ONLY when that id is the bound sheet. Any
+ * other binding degrades exactly like `computed_scope_unavailable`: no refusal, no log, no host
+ * read, the pre-probe result byte for byte. That is the fail-open posture the carry wall settled
+ * on for such installs; readiness answers them the same way it always did.
+ *
+ * HOST FAILURE IS A VALUES-FREE 503, NOT A PLAN. `resolveFieldExistence` degrades a scope refusal
+ * and rethrows everything else — a pool or query failure on `meta_fields`. Before this probe no
+ * metadata-store error could reach the plan path at all; it must not now reach the operator as a
+ * driver string with an inferred status. It is refused as 503 TARGET_SCHEMA_UNAVAILABLE carrying
+ * the object id and nothing else (the original stays on `cause` for the server log), the same
+ * posture the source side takes for an unreachable source database (SOURCE_UNAVAILABLE, #5586).
  */
 async function assertTargetFieldsExist(action, targetFieldExistence) {
   if (!isPlainObject(targetFieldExistence)) return
   const provisioning = targetFieldExistence.provisioning
   const projectId = optionalString(targetFieldExistence.projectId)
   if (!provisioning || !projectId) return
+  // The DB read, the compute-only fallback `resolveFieldExistence` degrades through, and the
+  // derivation that names the sheet the read is about: the contract the shared probe calls into,
+  // and what every real host has exposed since the provisioning surface existed.
   if (
     typeof provisioning.resolveExistingObjectFieldIds !== 'function'
     || typeof provisioning.resolveFieldIds !== 'function'
+    || typeof provisioning.getObjectSheetId !== 'function'
   ) return
+  const objectId = action.target.objectId
   const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
-  const { resolved, fieldExistenceMode } = await resolveFieldExistence({
-    provisioning,
-    projectId,
-    objectId: action.target.objectId,
-    fieldIds: templateLogicalFieldIds(action.template).concat(extensionFieldIds),
-  })
-  if (fieldExistenceMode !== 'db') return
-  const missingFields = missingLogicalFields(action.template, resolved, extensionFieldIds)
+  let verdict
+  try {
+    const judgedSheetId = optionalString(provisioning.getObjectSheetId(projectId, objectId))
+    if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return
+    verdict = await resolveFieldExistence({
+      provisioning,
+      projectId,
+      objectId,
+      fieldIds: templateLogicalFieldIds(action.template).concat(extensionFieldIds),
+    })
+  } catch (error) {
+    const unavailable = new StockPreparationTableActionError(
+      503,
+      'TARGET_SCHEMA_UNAVAILABLE',
+      'target table schema could not be read; retry once the metadata store answers',
+      { targetObjectId: objectId },
+    )
+    unavailable.cause = error
+    throw unavailable
+  }
+  if (verdict.fieldExistenceMode !== 'db') return
+  const missingFields = missingLogicalFields(action.template, verdict.resolved, extensionFieldIds)
   if (missingFields.length === 0) return
   throw new StockPreparationTableActionError(
     422,
     'TARGET_SCHEMA_INCOMPLETE',
     'target table is missing template or extension fields; run target readiness/ensure before planning',
-    { targetObjectId: action.target.objectId, missingFields, fieldExistenceMode },
+    { targetObjectId: objectId, missingFields, fieldExistenceMode: verdict.fieldExistenceMode },
   )
 }
 
@@ -2251,6 +2292,13 @@ async function applyStockPreparationAction(input = {}) {
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
     now: input.now,
   })
+  // Column existence BEFORE the token consume as well, for the reason B2a gives above: a target whose
+  // columns vanished between plan and apply is refused without burning the single-use token, so the
+  // operator who runs ensure can apply the plan they proved instead of planning again. The line
+  // inside `computeDryRun` runs once more a moment later; that second indexed read is the price of
+  // keeping "everything that plans through computeDryRun is probed" a property of computeDryRun
+  // itself rather than of whoever calls it.
+  await assertTargetFieldsExist(action, input.targetFieldExistence)
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),

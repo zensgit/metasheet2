@@ -18,6 +18,16 @@
 //   R4 the request cannot name the probe input: `targetFieldExistence` in the body => 400, and the
 //      host was never asked.
 //   R5 a host whose DB read refuses the object scope => 200, identical to the old-host response.
+//   R6 a binding whose (staging project, object) the host derives to a DIFFERENT sheet than the bound
+//      one => 200, identical to the old-host response, and the DB read about that other sheet never
+//      ran (反驳 r1 blocker).
+//   R7 the large-BOM lane: expansion PLAN, apply-job START and apply-job RUN each refuse 422 on the
+//      stored job's target when the five are gone — before the existing-row read, before a checkpoint
+//      job exists, before a chunk writes — and each goes through once the columns are back.
+//   R8 a host failure on the DB read => 503 TARGET_SCHEMA_UNAVAILABLE, details = { targetObjectId },
+//      no driver text in the response, zero source/records calls.
+//   R3 also pins that a refused apply does NOT burn the dry-run token: the SAME token applies once the
+//      columns are back.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -116,13 +126,19 @@ function createRecordsApi() {
  * refuse and the `db`-only gate would be unobservable through the route. The plan itself never reads
  * this map on these mounts (the action carries an explicit fieldIdMap), so the response cannot move.
  */
-function createProvisioning({ dbRead = true, scopeError = null, computedMissing = [] } = {}) {
+function createProvisioning({ dbRead = true, scopeError = null, computedMissing = [], derivedSheetId = SHEET_ID } = {}) {
   const missing = new Set()
   const probeCalls = []
+  const derivations = []
   const answer = (fieldIds) => Object.fromEntries(
     (Array.isArray(fieldIds) ? fieldIds : []).filter((id) => !missing.has(id)).map((id) => [id, physical(id)]),
   )
   const provisioning = {
+    // Pure derivation, exactly the host's: the sheet id the DB read below keys `meta_fields` on.
+    getObjectSheetId(projectId, objectId) {
+      derivations.push({ projectId, objectId })
+      return derivedSheetId
+    },
     async findObjectSheet({ objectId } = {}) {
       return { id: SHEET_ID, baseId: null, name: objectId, description: null }
     },
@@ -142,7 +158,7 @@ function createProvisioning({ dbRead = true, scopeError = null, computedMissing 
       return answer(fieldIds)
     }
   }
-  return { provisioning, missing, probeCalls }
+  return { provisioning, missing, probeCalls, derivations }
 }
 
 function inertService(methods) {
@@ -198,9 +214,9 @@ function actionConfig() {
   }
 }
 
-function mount({ dbRead = true, scopeError = null, computedMissing = [] } = {}) {
+function mount({ dbRead = true, scopeError = null, computedMissing = [], derivedSheetId = SHEET_ID } = {}) {
   const routes = new Map()
-  const host = createProvisioning({ dbRead, scopeError, computedMissing })
+  const host = createProvisioning({ dbRead, scopeError, computedMissing, derivedSheetId })
   const records = createRecordsApi()
   const source = createSourceAdapter()
   const context = {
@@ -231,7 +247,7 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [] } = {}) 
       error(message, detail) { logLines.push(['error', message, detail]) },
     },
   })
-  return { routes, host, records, source, logLines }
+  return { routes, host, records, source, logLines, context }
 }
 
 function createResponse() {
@@ -294,6 +310,7 @@ async function r1MissingColumnsRefuseTheRouteBeforeAnyRead() {
   assert.equal(text.includes('fld_'), false, 'R1: no physical id in the response')
   assert.equal(text.includes(SHEET_ID), false, 'R1: no sheet id in the response')
   assert.equal(harness.host.probeCalls.length, 1, 'R1: exactly one DB read')
+  assert.deepEqual(harness.host.derivations, [{ projectId: STAGING_PROJECT_ID, objectId: OBJECT_ID }], 'R1: the probe first derived the sheet the read is about, under the authenticated tenant')
   assert.equal(harness.host.probeCalls[0].projectId, STAGING_PROJECT_ID, 'R1: the probe asked under the authenticated tenant\'s staging project')
   assert.equal(harness.host.probeCalls[0].objectId, OBJECT_ID, 'R1: about the configured target object')
   assert.deepEqual(harness.host.probeCalls[0].fieldIds, TEMPLATE_FIELD_IDS)
@@ -338,13 +355,15 @@ async function r3ApplyIsRefusedWhenColumnsVanishAfterTheDryRun() {
     writesBefore,
     'R3: a refused apply writes nothing',
   )
-  // Control: columns back, fresh token, the write goes through.
+  // Control, and the token half: columns back, the SAME token the refusal did not burn applies.
   harness.host.missing.clear()
-  const replanned = await dryRun(harness.routes)
-  assert.equal(replanned.statusCode, 200, JSON.stringify(replanned.body))
-  const applied = await apply(harness.routes, replanned.body.data.dryRunToken)
+  const applied = await apply(harness.routes, planned.body.data.dryRunToken)
   assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
-  assert.ok(harness.records.calls.some(([name]) => name === 'createRecord'), 'R3 control: the complete target is written')
+  assert.ok(harness.records.calls.some(([name]) => name === 'createRecord'), 'R3 control: the complete target is written with the token the refusal left intact')
+  // And it was single-use: the same token a second time is refused as consumed.
+  const reused = await apply(harness.routes, planned.body.data.dryRunToken)
+  assert.equal(reused.statusCode, 409, JSON.stringify(reused.body))
+  assert.equal(reused.body.error.code, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID')
 }
 
 // ── R4 ────────────────────────────────────────────────────────────────────────────────────────
@@ -378,12 +397,128 @@ async function r5ScopeRefusedHostAnswersLikeAnOldHost(legacyData) {
   assert.equal(harness.host.probeCalls.length, 1)
 }
 
+// ── R6 ────────────────────────────────────────────────────────────────────────────────────────
+
+async function r6ADivergentBindingIsNotJudgedOnTheDerivedSheet(legacyData) {
+  // The host derives (staging project, object) to a sheet that is NOT the bound one; that other sheet
+  // is missing the five. The bound sheet is what the plan reads and writes, so no judgement.
+  const harness = mount({ derivedSheetId: 'sheet_derived_elsewhere' })
+  for (const id of MISSING_FIVE) harness.host.missing.add(id)
+  const res = await dryRun(harness.routes)
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  assert.deepEqual(comparable(res.body.data), legacyData, 'R6: a divergent binding answers exactly the old-host answer')
+  assert.equal(harness.host.probeCalls.length, 0, 'R6: the DB read about the other sheet never ran')
+  assert.deepEqual(harness.host.derivations, [{ projectId: STAGING_PROJECT_ID, objectId: OBJECT_ID }], 'R6: the derivation is what decided it')
+  assert.deepEqual(harness.logLines, [], 'R6: and nothing was logged about it')
+}
+
+// ── R7 the large-BOM lane ─────────────────────────────────────────────────────────────────────
+
+const JOBS_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
+
+async function r7TheLargeBomLaneIsProbedAtPlanApprovalAndEveryChunk() {
+  const harness = mount()
+  const storedKeys = () => [...harness.context.storage.keys()].length
+  const writes = () => harness.records.calls.filter(([name]) => name !== 'queryRecords').length
+  const started = await call(harness.routes, 'POST', JOBS_ROUTE, {
+    user: READ_USER,
+    params: ACTION_PARAMS,
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(started.statusCode, 202, JSON.stringify(started.body))
+  const jobId = started.body.data.jobId
+  const jobParams = { ...ACTION_PARAMS, jobId }
+  const expanded = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/run`, { user: READ_USER, params: jobParams })
+  assert.equal(expanded.statusCode, 200, JSON.stringify(expanded.body))
+
+  // PLAN with the five gone => 422, before the existing-row read.
+  for (const id of MISSING_FIVE) harness.host.missing.add(id)
+  const recordsBefore = harness.records.calls.length
+  const refusedPlan = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/plan`, { user: READ_USER, params: jobParams, body: {} })
+  assert.equal(refusedPlan.statusCode, 422, JSON.stringify(refusedPlan.body))
+  assert.equal(refusedPlan.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.deepEqual(refusedPlan.body.error.details.missingFields, [...MISSING_FIVE])
+  assert.equal(harness.records.calls.length, recordsBefore, 'R7 plan: the existing-row read never ran')
+  harness.host.missing.clear()
+  const planned = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/plan`, { user: READ_USER, params: jobParams, body: {} })
+  assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
+
+  // START (approval) with the five gone => 422, and no checkpoint job came into existence.
+  for (const id of MISSING_FIVE) harness.host.missing.add(id)
+  const keysBefore = storedKeys()
+  const refusedStart = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/apply-jobs`, {
+    user: ADMIN_USER,
+    params: jobParams,
+    body: { confirm: { acceptManualConfirmHold: true } },
+  })
+  assert.equal(refusedStart.statusCode, 422, JSON.stringify(refusedStart.body))
+  assert.equal(refusedStart.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.equal(storedKeys(), keysBefore, 'R7 start: no checkpoint apply job was stored')
+  harness.host.missing.clear()
+  const approved = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/apply-jobs`, {
+    user: ADMIN_USER,
+    params: jobParams,
+    body: { confirm: { acceptManualConfirmHold: true } },
+  })
+  assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+  const applyJobId = approved.body.data.jobId
+
+  // RUN (a chunk) with the five gone => 422, zero writes; columns back => the chunk writes.
+  for (const id of MISSING_FIVE) harness.host.missing.add(id)
+  const writesBefore = writes()
+  const refusedRun = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/apply-jobs/:applyJobId/run`, {
+    user: ADMIN_USER,
+    params: { ...jobParams, applyJobId },
+  })
+  assert.equal(refusedRun.statusCode, 422, JSON.stringify(refusedRun.body))
+  assert.equal(refusedRun.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.deepEqual(refusedRun.body.error.details.missingFields, [...MISSING_FIVE])
+  assert.equal(writes(), writesBefore, 'R7 run: a refused chunk writes nothing')
+  harness.host.missing.clear()
+  const ran = await call(harness.routes, 'POST', `${JOBS_ROUTE}/:jobId/apply-jobs/:applyJobId/run`, {
+    user: ADMIN_USER,
+    params: { ...jobParams, applyJobId },
+  })
+  assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
+  assert.ok(harness.records.calls.some(([name]) => name === 'createRecord'), 'R7 control: the chunk wrote once the columns were back')
+  // Every refusal on this lane was values-free and about the stored job's target object.
+  for (const res of [refusedPlan, refusedStart, refusedRun]) {
+    assert.deepEqual(Object.keys(res.body.error.details).sort(), ['fieldExistenceMode', 'missingFields', 'targetObjectId'])
+    assert.equal(res.body.error.details.targetObjectId, OBJECT_ID)
+    const text = JSON.stringify(res.body)
+    assert.equal(text.includes('fld_'), false)
+    assert.equal(text.includes(SHEET_ID), false)
+  }
+}
+
+// ── R8 ────────────────────────────────────────────────────────────────────────────────────────
+
+async function r8AHostFailureIsAValuesFree503() {
+  const boom = new Error('connection terminated')
+  boom.code = 'ECONNRESET'
+  const harness = mount({ scopeError: boom })
+  const res = await dryRun(harness.routes)
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, 'TARGET_SCHEMA_UNAVAILABLE')
+  // `sendError` sanitizes details into a null-prototype object; compare keys and value, not prototype.
+  assert.deepEqual(Object.keys(res.body.error.details), ['targetObjectId'], 'R8: details carry the object id and nothing else')
+  assert.equal(res.body.error.details.targetObjectId, OBJECT_ID)
+  const text = JSON.stringify(res.body)
+  assert.equal(text.includes('connection terminated'), false, 'R8: no driver text in the response')
+  assert.equal(text.includes('ECONNRESET'), false)
+  assert.deepEqual(harness.source.calls, [], 'R8: zero source reads')
+  assert.deepEqual(harness.records.calls, [], 'R8: zero records calls')
+}
+
 async function main() {
   await r1MissingColumnsRefuseTheRouteBeforeAnyRead()
   const legacyData = await r2CompleteHostAndOldHostAnswerIdentically()
   await r3ApplyIsRefusedWhenColumnsVanishAfterTheDryRun()
   await r4TheRequestCannotNameTheProbeInput()
   await r5ScopeRefusedHostAnswersLikeAnOldHost(legacyData)
+  await r6ADivergentBindingIsNotJudgedOnTheDerivedSheet(legacyData)
+  await r7TheLargeBomLaneIsProbedAtPlanApprovalAndEveryChunk()
+  await r8AHostFailureIsAValuesFree503()
   console.log('stock-preparation-dry-run-target-field-probe-routes tests passed')
 }
 

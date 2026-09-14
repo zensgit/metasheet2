@@ -4006,6 +4006,15 @@ function requireStockPreparationAudit() {
    * the confirmation-decision reconcile, mvp-persist and the small-BOM apply. Each passes the tenant
    * it already derived for its own B2a/adapter scope, so the probe's project and the source read's
    * tenant are one value.
+   *
+   * THREE MORE on the large-BOM lane, which never plans through `computeDryRun`: the expansion-job
+   * PLAN route (plans against the target from the stored artifact), the apply-job START route
+   * (approves a write) and the apply-job RUN route (writes a chunk). Each calls the SAME exported
+   * probe on the STORED expansion job's action snapshot — the target the plan was built for and the
+   * target the checkpoint job writes, never the live binding — before the existing-row read, the
+   * approval, and the chunk write respectively. The judgement is still the one function; the lane
+   * has no shared plan seam to hang it on, so its entry points call it the way they thread
+   * `installedFieldProperties`.
    */
   function targetFieldExistenceForTenant(tenantId) {
     const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
@@ -6387,6 +6396,9 @@ function requireStockPreparationAudit() {
       })
       assertAuthoritativeLargeBomExpansion(job)
       const action = assertStockPreparationTargetReady(job.actionSnapshot)
+      // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
+      // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
+      await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
       const projectNo = job.parameters && job.parameters.projectNo
       const existingRows = await tableActionInternals.readExistingStockPreparationRows(
         getMultitableRecordsApi(),
@@ -6469,6 +6481,10 @@ function requireStockPreparationAudit() {
         actionId,
         jobId,
       })
+      const snapshotAction = assertStockPreparationTargetReady(expansionJob.actionSnapshot)
+      // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
+      // checkpoint job that would write to it exists.
+      await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6477,10 +6493,7 @@ function requireStockPreparationAudit() {
         principal: requestPrincipal(req),
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
-        installedFieldProperties: await resolveInstalledFieldProperties(
-          req,
-          assertStockPreparationTargetReady(expansionJob.actionSnapshot),
-        ),
+        installedFieldProperties: await resolveInstalledFieldProperties(req, snapshotAction),
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
@@ -6515,6 +6528,18 @@ function requireStockPreparationAudit() {
         applyJobId: firstString(requestParams(req).applyJobId),
       })
       assertApplyJobMatchesExpansion(pendingJob, jobId)
+      // 目标表字段存在性探针 per chunk, against the STORED expansion job's snapshot (the target this
+      // checkpoint job writes — `pendingJob.target` is copied from it). A chunk runs as its own HTTP
+      // request, so a column deleted mid-run stops the next chunk instead of writing around it.
+      await tableActionInternals.assertTargetFieldsExist(
+        assertStockPreparationTargetReady((await loadLargeBomBackgroundExpansionJob({
+          storage: context.storage,
+          ...routeScope,
+          actionId,
+          jobId,
+        })).actionSnapshot),
+        targetFieldExistenceForTenant(routeScope.tenantId),
+      )
       // FOS-4b-3-prod P2: the large-BOM checkpoint apply funnels through here. Shared apply gate before any
       // write — no production policy → sandbox gate (canonical rejected, fail-closed); a configured
       // production policy may authorize the canonical (large route) per the controlled exception.
