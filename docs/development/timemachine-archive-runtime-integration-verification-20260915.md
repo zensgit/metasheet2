@@ -2,6 +2,26 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Fresh Workbench Acceptance After Record Approval Replay
+
+Clean head `4151ce27dbcd5aaf5a304294e160fddb90b31eb5`, tree
+`ef8a7b30d68a2ff4b0d83a42fbc9cd417eaa03da`, passes the real LoginView /
+persisted session / app router / MetaSheetServer workbench acceptance 6/6.
+Artifact run `22b8fa90-928d-4aa3-9e94-c15dc4f733b2` binds script SHA-256
+`a7286d110194bda8d87f0fe4d77aa2aec8dc1868199dafde727d3ac6f558495d`.
+Cases cover retained rows, history, retained whole-table delete/restore, named
+actor and selected-row restoration, viewer-local time and typed column/captured
+value restoration. Fresh 405 migrations and no-op replay pass; artifact fixture
+residue is zero across all 12 categories, cleanupErrors is empty, independent
+database/backend residue is zero after drop, and the dedicated PG is stopped.
+
+Log `/private/tmp/tm-4151-workbench-20260916.log` records `Shutdown complete`
+before `Shutdown timeout, forcing exit` ten seconds later. Current index.ts does
+not cancel the timeout losing its Promise.race; successful workbench cases do
+not prove shutdown lifecycle correctness. The owning approval shutdown task has
+this exact evidence and the timer-cleanup distinction. No fresh 5,001-record
+archive run, production provider/custody acceptance, or deployment is claimed.
+
 ## Record Approval Main Replay
 
 Tested merge `5a8054d48a52b417cef7c99372541300fd776a2c`, tree
