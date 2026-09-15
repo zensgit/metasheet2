@@ -138,6 +138,20 @@ export type MetaRecordLabelKey =
   //     round-1 `record.fieldsInView` key). ---
   | 'record.hideEmpty'
   | 'record.editLinks'
+  // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
+  //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
+  //     kebab row (+ its own title key, button-suffix pattern above); every `approval.*` key belongs to
+  //     MetaRecordApprovalSubmitDialog.vue or MetaRecordApprovalPanel.vue. Counts/identifiers are
+  //     interpolated by the helpers at the foot of this file, never concatenated in a template. ---
+  | 'record.submitApproval' | 'record.submitApprovalTitle'
+  | 'approval.dialogTitle' | 'approval.close' | 'approval.cancel' | 'approval.submit' | 'approval.submitting'
+  | 'approval.template' | 'approval.templatePlaceholder' | 'approval.templatesLoading'
+  | 'approval.templatesUnavailable' | 'approval.formLoading' | 'approval.formLoadFailed'
+  | 'approval.unsupportedField' | 'approval.requiredMissing' | 'approval.requiredMark'
+  | 'approval.inFlight' | 'approval.viewInstance' | 'approval.submitFailed'
+  | 'approval.panelTitle' | 'approval.panelExpand' | 'approval.panelCollapse'
+  | 'approval.panelLoading' | 'approval.panelError' | 'approval.panelEmpty'
+  | 'approval.requestNo' | 'approval.submittedBy' | 'approval.submittedAt' | 'approval.unknownActor'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -383,6 +397,37 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
   'record.hideEmpty': { en: 'Hide empty fields', zh: '隐藏空字段' },
   'record.editLinks': { en: 'Edit links', zh: '编辑关联' },
+  // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
+  // convention as every other block in this table.
+  'record.submitApproval': { en: 'Submit for approval', zh: '送审' },
+  'record.submitApprovalTitle': { en: 'Submit this record for approval', zh: '将此记录提交审批' },
+  'approval.dialogTitle': { en: 'Submit for approval', zh: '送审' },
+  'approval.close': { en: 'Close submit dialog', zh: '关闭送审对话框' },
+  'approval.cancel': { en: 'Cancel', zh: '取消' },
+  'approval.submit': { en: 'Submit', zh: '提交' },
+  'approval.submitting': { en: 'Submitting…', zh: '正在提交…' },
+  'approval.template': { en: 'Approval template', zh: '审批模板' },
+  'approval.templatePlaceholder': { en: 'Pick a template', zh: '请选择模板' },
+  'approval.templatesLoading': { en: 'Loading templates…', zh: '正在加载模板…' },
+  'approval.templatesUnavailable': { en: 'No available template, or no approval read permission.', zh: '无可用模板或无审批读取权限。' },
+  'approval.formLoading': { en: 'Loading form…', zh: '正在加载表单…' },
+  'approval.formLoadFailed': { en: 'Failed to load the template form.', zh: '加载模板表单失败。' },
+  'approval.unsupportedField': { en: 'This template contains an unsupported field type — please start it from the approval centre.', zh: '该模板含不支持的字段类型，请到审批中心发起。' },
+  'approval.requiredMissing': { en: 'Fill in every required field first.', zh: '请先填写所有必填项。' },
+  'approval.requiredMark': { en: 'Required', zh: '必填' },
+  'approval.inFlight': { en: 'This record is already in approval with this template.', zh: '该记录已在此模板审批中。' },
+  'approval.viewInstance': { en: 'Open the approval', zh: '查看审批' },
+  'approval.submitFailed': { en: 'Submit failed.', zh: '送审失败。' },
+  'approval.panelTitle': { en: 'Approvals', zh: '审批' },
+  'approval.panelExpand': { en: 'Show approvals', zh: '展开审批' },
+  'approval.panelCollapse': { en: 'Hide approvals', zh: '收起审批' },
+  'approval.panelLoading': { en: 'Loading approvals…', zh: '正在加载审批…' },
+  'approval.panelError': { en: 'Failed to load approvals.', zh: '加载审批失败。' },
+  'approval.panelEmpty': { en: 'This record has never been submitted for approval.', zh: '此记录尚未送审。' },
+  'approval.requestNo': { en: 'Request', zh: '编号' },
+  'approval.submittedBy': { en: 'Submitted by', zh: '申请人' },
+  'approval.submittedAt': { en: 'Submitted at', zh: '送审时间' },
+  'approval.unknownActor': { en: 'Unknown', zh: '未知' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -617,4 +662,20 @@ export function resetConfirmWarnAfterNot(asOf: string, isZh: boolean): string {
   return isZh
     ? `一次普通恢复。如果需要保留 ${asOf} 之后新建的记录，请使用`
     : `a normal restore. Need to keep records created after ${asOf}? Use`
+}
+
+// 记录级送审 (design §5): "送审后数据已变更（N 个字段）" — the drift notice on a submission row. A COUNT,
+// never a field name and never a value: the server only ever returns changed field IDs, and even those
+// are not rendered here.
+export function recordApprovalDriftNotice(changedCount: number, isZh: boolean): string {
+  return isZh
+    ? `送审后数据已变更（${changedCount} 个字段）`
+    : `Record changed after submit (${changedCount} field${changedCount === 1 ? '' : 's'})`
+}
+
+// The success toast after a submit. `requestNo` is the server-issued display number (e.g. AP-2026-0001);
+// when the backend has not assigned one yet the toast degrades to the plain verb.
+export function recordApprovalSubmittedToast(requestNo: string | undefined, isZh: boolean): string {
+  if (!requestNo) return isZh ? '已送审' : 'Submitted for approval'
+  return isZh ? `已送审 ${requestNo}` : `Submitted for approval ${requestNo}`
 }

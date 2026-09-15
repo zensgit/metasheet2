@@ -438,6 +438,7 @@
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
+        :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
@@ -478,6 +479,7 @@
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
+        @approval-submitted="onRecordApprovalSubmitted"
         @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
@@ -748,7 +750,7 @@ import {
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
   fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
 } from '../utils/workbench-labels'
-import { recordLabel } from '../utils/meta-record-labels'
+import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
@@ -773,6 +775,7 @@ import type {
   MetaFieldCreateType,
   MetaFieldType,
   MetaRecord,
+  MetaRecordApprovalSubmission,
   MetaRowActions,
   MetaViewPermission,
   MetaFieldPermissionEntry,
@@ -984,6 +987,13 @@ const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEna
 // pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
 // so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
 const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
+// 记录级送审 (多维表 × 审批 阶段二 §4.2/§5): server-derived `multitable:submit-approval`, read with the
+// SAME shape as canDeleteSheet/pitResetEnabled above — straight off the /context capabilities object
+// (`=== true`), never a role fallback, so an old backend, a legacy role-string source or a stale object
+// all fail CLOSED (送审 entry hidden). `useMultitableCapabilities` exposes the same key for any other
+// consumer (composable-tier contract, see that file); this view deliberately reads the source object so a
+// capability the server has not sent is `undefined`, not a lookup on a partially-shaped capabilities bag.
+const canSubmitApproval = computed(() => capabilitySource.value?.canSubmitApproval === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
@@ -1617,6 +1627,14 @@ function showSuccess(msg: string, action?: ToastAction) {
 function historyLinkAction(batchId: string | null): ToastAction | undefined {
   if (!batchId) return undefined
   return { label: wb('toast.viewInHistory', isZh.value), onClick: () => openHistoryForBatch(batchId) }
+}
+
+// 记录级送审 (多维表 × 审批 阶段二 §5): the inspector owns the dialog and its own panel refresh; the
+// workbench's whole job here is the toast, so a user who submitted from a drawer that is about to close
+// still sees the server-issued request number. No capability decision is made here — `canSubmitApproval`
+// (passed to the inspector above) already gated the entry, and the route re-enforces it.
+function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
+  showSuccess(recordApprovalSubmittedToast(submission.requestNo, isZh.value))
 }
 
 function ensureCanCreateRecord(): boolean {

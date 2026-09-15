@@ -28,6 +28,7 @@ const EMPTY_CAPABILITIES: MetaCapabilities = {
   canManageAutomation: false,
   canExport: false,
   canSendNotification: false,
+  canSubmitApproval: false,
 }
 
 function filterVisibleSheets(sheets: MetaSheet[]): MetaSheet[] {
