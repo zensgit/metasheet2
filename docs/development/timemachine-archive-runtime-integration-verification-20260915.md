@@ -206,3 +206,13 @@ Code `909afa204a72bd989c77a8203c5b823db37ccac9`, tree `bc7e22e5405710de7c927e23d
 - Fresh isolated PG15 stream PASS. Final route + restore-jobs real-DB suites: 2 files / 87 tests PASS, zero skips. Formula/lookup/parser/reference and worker/application unit neighbors: 8 files / 135 tests PASS. Core tsc, both modified small module ESLint and diff-check PASS; no megafile-wide lint claim.
 - Effects/sheet/job fixtures zero; disposable database dropped, prefix databases/backends zero, PG stopped. Logs: `/private/tmp/tm-derived-race-{migrate,before,target-final,authority-mutation,fence-mutation,scope-mutation,full,unit,tsc-final,lint}.log` (local only).
 - No new remote-state claim, push/PR, flag, Ready, merge or deployment. Throughput/capacity, actual process restart, standard startup/provider and current-main replay remain open; overall goal is not complete.
+
+### Provider And Process-Restart Merge Verification
+
+Exact code `378190bc0f014b05f2364c06cc88fe34d26aa4a9`, tree `f4b958532d834eb83df12a8a2ae5912ba75f7cd2`.
+
+- Ordered true merges: `d52b332b3659b47d50d039a44737a89b1a0a0176` incorporates main `3af8f12f73feedd517bfe97a92697cb1bb15536d`; `36337e86a44b6c33d0d349dd08aa8d7a6fb922f4` incorporates #5726 `598b5bec3d2f5a5eee644de54c75d9a2e1cd6a64`; final code incorporates #5728 `eabd47aaf20a248b5148d195dd80ff33f47fdde9`. Sole manual conflict resolution: restore-jobs real-DB spec, preserving both branches' assertions and cleanup.
+- Fresh isolated PG15 full migration succeeds, ledger count 403. Restore-jobs suite 36/36 includes real child SIGKILL before/after COMMIT, durable revision-bound enqueue, rollback and terminal consumption. Exact-anchor route suite 53/53 covers canonical authority and commit-held processor races. Combined 89/89, no skips; these are separate suites, not a single canonical server/process acceptance claim.
+- Async facade/application/worker/server unit neighbors: 4 files, 80/80 PASS. Core `pnpm exec tsc --noEmit` rerun exits 0; diff-check PASS. Existing incoming tests were reused, not duplicated. No new mutation claim for the merge-only checkpoint.
+- Effects, fixture sheets and jobs all zero before dropping the dedicated DB. Afterwards database-prefix and backend counts both zero; owned PG stopped. Logs are local `/private/tmp/tm-runtime-merge-{migrate,process,route,unit,tsc}.log`; the final tsc rerun was directly observed exit 0 rather than inferred from an empty log.
+- No push, PR metadata, Ready, merge-to-main, flags, dispatch or deployment. Production provider/custody, standard startup, queue capacity and combined canonical restart remain open; overall goal remains active.
