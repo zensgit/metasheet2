@@ -2,6 +2,22 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Shutdown Neighbor CI Repair
+
+Test-only commit `0e59e8518646faf56509d4ee842fd1f4c2616895` follows published
+`e82a12310b8571b7b296dde8c00d246bb0dc4640`. The Node20 job 104494115055
+in run 35002512661 reported three failures in two neighboring unit files.
+Local whole-file reproduction matched exactly: 3 failed / 158 passed.
+The app-registration census now pins `startOnce`, where startup registrations
+actually reside, and the automation test awaits asynchronous shutdown before
+asserting all nine subscriptions were removed. Neither census completeness nor
+subscription count was weakened; production files are unchanged.
+The two files plus completion-shutdown and automation-lifecycle neighbors pass
+172/172. Core typecheck and diff-check pass. Local logs are
+`/private/tmp/tm-neighbor-{red,green,tsc}-20260916.log`.
+The pre-fix RED is reproduction evidence, not a separate production mutation.
+New published-head CI remains required; no new browser or DB run is claimed.
+
 ## Optional Router Injection Main Replay
 
 Merge `f82e71be32d5b3c3bb7bf4ed3befaad7e1b98294`, tree
