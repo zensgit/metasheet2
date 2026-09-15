@@ -1,5 +1,13 @@
 # Archive Readiness Verification
 
+## Current-Main Replay (2026-09-15)
+
+- Replay code head `0403667ffb0f6ab6f75792365892ebe89ca95bfd`, tree `5bbdfc62850d02922a6a060468c0457e0675cfcb`.
+- Ordered parents: existing PR #5725 head `978dc2e017f0db9ae878debd708cbf4560b8cec3` and then-current main `58f704be92fe7711332b84d87a7c545776a38b8f`.
+- True merge, no conflicts or manual resolution. All six existing candidate paths, including screenshots and design, were byte-identical before this evidence-only update. Relative-main census remains exactly those six paths.
+- Replay gates: archive modal 38/38; combined modal/client 116/116; `pnpm exec vue-tsc --noEmit -p tsconfig.app.json` exit 0; diff-check PASS. Domain guard and required-web still invoke both complete suites; no selector edits.
+- Existing browser/mutation evidence below is historical and remains bound to its original checkpoint, not a new runtime/UAT result. This replay changes no backend, provider, authority, flags or deployment state. Fresh published exact-head CI is a separate gate; PR stays Draft/HOLD.
+
 ## Identity
 
 - Base main: `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
