@@ -1443,6 +1443,36 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(3)
   })
 
+  // #5750 review: a host that posts only { baseId } gets sheetId/viewId filled in from the CURRENT
+  // ones (MultitableEmbedHost.handleNavigateMessage), so it lands on exactly the comparison above.
+  // A base id the workbench knows is a real base switch and must never be ignored -- otherwise that
+  // request is answered 'applied' while the frame stays where it was.
+  it('#5750 never ignores a base id that names another KNOWN base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // base_sales comes from the listBases() mock -- a known base, same sheet/view as now.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_known_other_base' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // An UNKNOWN id for the base the active sheet already lives in is still ignored (that is the
+    // URL-slug case this fast path exists for).
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_slug' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+  })
+
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
       { id: 'fld_title', name: 'Title', type: 'string' },

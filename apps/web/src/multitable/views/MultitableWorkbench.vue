@@ -3843,6 +3843,12 @@ function externalContextBaseMatchesWorkbench(inputBaseId: string) {
   const activeBaseId = workbench.activeBaseId.value ?? ''
   if (inputBaseId === activeBaseId || !inputBaseId) return true
   if (!activeBaseId) return false
+  // A base id this workbench KNOWS (it is in the loaded base list) is never a different spelling of
+  // the active base -- it is a real base switch request. Ignoring it would answer 'applied' to a
+  // host that posted only { baseId } (handleNavigateMessage fills sheetId/viewId in from the
+  // current ones) while nothing switched; that request has to go down the normal path and fail
+  // loudly, as it did before this fast path existed.
+  if (bases.value.some((base) => base.id === inputBaseId)) return false
   const activeSheet = workbench.sheets.value.find((sheet) => sheet.id === (workbench.activeSheetId.value ?? ''))
   return !!activeSheet && activeSheet.baseId === activeBaseId
 }
