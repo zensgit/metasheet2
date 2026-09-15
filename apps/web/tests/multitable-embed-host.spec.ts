@@ -222,6 +222,27 @@ describe('multitable embed host guards', () => {
     return { router, navigated, navigationResults }
   }
 
+  it('#5750 keeps ?baseId= in the URL when the applied context carries no base id', async () => {
+    const { router } = await mountRouteHost('/multitable/sheet_orders/view_grid?baseId=base_ops&keepme=1')
+    expect(router.currentRoute.value.query.baseId).toBe('base_ops')
+
+    // mt:navigate with an EXPLICIT empty baseId = "same base, other sheet". The workbench stays on
+    // base_ops (its getEmbedHostState snapshot says so), so the URL must keep pinning that base
+    // instead of deleting the key while every other query param survives the spread.
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:navigate', baseId: '', sheetId: 'sheet_deals', viewId: 'view_grid', requestId: 'req_no_base' },
+    }))
+    await vi.waitFor(() => expect(requestExternalContextSyncSpy).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(router.currentRoute.value.params.sheetId).toBe('sheet_deals'))
+
+    expect(router.currentRoute.value.params.sheetId).toBe('sheet_deals')
+    expect(router.currentRoute.value.query.keepme).toBe('1')
+    expect(router.currentRoute.value.query.baseId).toBe('base_ops')
+    // ...and the frame renders the same base the URL now pins.
+    expect(container?.querySelector('[data-workbench-base-id]')?.getAttribute('data-workbench-base-id')).toBe('base_ops')
+  })
+
   it('blocks route leave when the workbench rejects page leave', async () => {
     confirmPageLeaveSpy.mockReturnValue(false)
     const { router } = await mountRouteHost()

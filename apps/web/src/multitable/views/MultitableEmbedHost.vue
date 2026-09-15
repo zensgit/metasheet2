@@ -259,10 +259,20 @@ async function applyHostOverrides(context: ContextSnapshot) {
     sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : undefined,
     viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
   })
-  if (contextMatches(routeContext, context)) return
+  // #5750: an applied context WITHOUT a baseId means "whatever base the workbench is already on",
+  // not "this sheet has no base". Writing `baseId: undefined` into the query DELETES ?baseId= from
+  // the URL (while every other query key survives the spread) even though the workbench keeps
+  // rendering that base, so the URL stops round-tripping: a reload or a copied link lands on the
+  // base-less resolution path instead of the base the frame is showing. Fall back to the base the
+  // workbench itself reports, then to the one already pinned in the URL; a genuinely base-less
+  // workbench still drops the key.
+  const resolvedBaseId = context.baseId
+    || (workbenchRef.value?.getEmbedHostState?.()?.currentContext.baseId ?? '')
+    || routeContext.baseId
+  if (contextMatches(routeContext, { ...context, baseId: resolvedBaseId })) return
   const nextQuery: LocationQueryRaw = {
     ...route.query,
-    baseId: context.baseId || undefined,
+    baseId: resolvedBaseId || undefined,
   }
   delete nextQuery.recordId
   delete nextQuery.mode

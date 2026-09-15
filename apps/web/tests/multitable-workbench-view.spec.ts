@@ -1368,6 +1368,81 @@ describe('MultitableWorkbench view wiring', () => {
     return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
 
+  // #5750: an embedding host re-sends the same mt:navigate context on a timer (once a second in the
+  // report). The host/URL base id is a slug, while workbench.activeBaseId is whatever the LOADED
+  // context said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+  // ctx.sheet.baseId) -- so a verbatim comparison of the two can miss forever and every tick
+  // re-enters applyExternalContext (and, when the user is busy or has drafts open, the defer toast).
+  async function replayExternalContextSync(
+    hostState: any,
+    context: { baseId: string; sheetId: string; viewId: string },
+    times: number,
+  ) {
+    const results: Array<{ status: string; context: { baseId: string; sheetId: string; viewId: string } }> = []
+    for (let i = 0; i < times; i += 1) {
+      results.push(await hostState.workbenchRef.requestExternalContextSync(context, { requestId: `req_${i}` }))
+      await flushUi()
+    }
+    return results
+  }
+
+  it('#5750 short-circuits repeated external context syncs whose base id is spelled differently from the loaded base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    // What the first load already wrote into the state: the CONTEXT's base id, not the URL slug.
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    const results = await replayExternalContextSync(
+      hostState,
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      5,
+    )
+
+    expect(workbenchMock.syncExternalContext).not.toHaveBeenCalled()
+    expect(results.map((result) => result.status)).toEqual(['applied', 'applied', 'applied', 'applied', 'applied'])
+    // The echo carries the base the workbench is really on, so the embed host can pin it in the URL.
+    expect(results[0].context).toEqual({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+  })
+
+  it('#5750 keeps syncing when the base id is not the only difference, or when the active sheet is not known to live in the active base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // A different sheet is never ignored, whatever the base id says.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_deals', viewId: 'view_grid' },
+      { requestId: 'req_other_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // Neither is a different view.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_other_view' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(2)
+
+    // And the base id is only ignored when the loaded sheet list PROVES the active sheet lives in
+    // the active base: an unknown active sheet keeps the strict comparison.
+    workbenchMock.sheets.value = []
+    await flushUi()
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_unknown_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(3)
+  })
+
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
       { id: 'fld_title', name: 'Title', type: 'string' },

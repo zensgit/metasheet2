@@ -88,6 +88,25 @@ export function useMultitableWorkbench(opts?: {
   // loadSheets / restoreSnapshot / any caller assigning the refs directly): as soon as state
   // diverges from what this cache recorded, the skip cannot fire.
   let lastAppliedSheetMeta: { sheetId: string; viewId: string; payload: string; state: string } | null = null
+  // #5750: the (baseId, sheetId, viewId) syncExternalContext was last ASKED for, together with the
+  // active triple that request actually produced. An embedding host re-sends `mt:navigate` /
+  // `external-context-result` on a timer, so the SAME request arrives once a second; without this
+  // memo none of the guards below can recognise it, because the loaded CONTEXT -- not the caller --
+  // decides the active triple (syncContextState overwrites activeBaseId with ctx.base.id /
+  // ctx.sheet.baseId, and falls activeViewId back to views[0] when the requested view is not in
+  // ctx.views), so the state can never equal what the caller asked for and every repeat refetches.
+  // The recorded RESULT is what keeps this honest: any other writer (selectSheet / selectView /
+  // selectBase / loadSheets / restoreSnapshot / a later sync) moves the active triple away and the
+  // skip stops firing. FAILED syncs are deliberately NOT memoized -- a repeat is the only recovery
+  // path for a transient error.
+  let lastExternalContextSync: {
+    baseId: string
+    sheetId: string
+    viewId: string
+    resultBaseId: string
+    resultSheetId: string
+    resultViewId: string
+  } | null = null
 
   // toRaw: these refs hold DEEP-reactive proxies, so walking them through the proxy traps costs
   // several times the raw walk and materialises a proxy for every nested object (option lists on a
@@ -338,6 +357,38 @@ export function useMultitableWorkbench(opts?: {
     const nextSheetId = params.sheetId?.trim() ?? ''
     const nextViewId = params.viewId?.trim() ?? ''
 
+    // #5750: an identical repeat of the last SUCCESSFUL request, with nothing having moved the
+    // workbench since -- the fetch would only re-derive the state that is already on screen.
+    if (
+      lastExternalContextSync
+      && lastExternalContextSync.baseId === nextBaseId
+      && lastExternalContextSync.sheetId === nextSheetId
+      && lastExternalContextSync.viewId === nextViewId
+      && lastExternalContextSync.resultBaseId === activeBaseId.value
+      && lastExternalContextSync.resultSheetId === activeSheetId.value
+      && lastExternalContextSync.resultViewId === activeViewId.value
+    ) {
+      return true
+    }
+
+    const ok = await runExternalContextSync(nextBaseId, nextSheetId, nextViewId)
+    if (!ok) return false
+    lastExternalContextSync = {
+      baseId: nextBaseId,
+      sheetId: nextSheetId,
+      viewId: nextViewId,
+      resultBaseId: activeBaseId.value,
+      resultSheetId: activeSheetId.value,
+      resultViewId: activeViewId.value,
+    }
+    return true
+  }
+
+  async function runExternalContextSync(
+    nextBaseId: string,
+    nextSheetId: string,
+    nextViewId: string,
+  ): Promise<boolean> {
     if (nextBaseId) {
       return switchBase(nextBaseId, {
         sheetId: nextSheetId || undefined,
