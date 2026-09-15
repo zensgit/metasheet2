@@ -26,6 +26,7 @@ import * as realtimeMod from '../../src/multitable/realtime-publish'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 import { applyFencedDerivedDataMerge, withFencedDerivedTransaction } from '../../src/multitable/derived-write-fence'
+import { runRecoveryArchiveDerivedTransaction } from '../../src/multitable/recovery-archive-derived-processor'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import { acquireRecoveryAuthorityLease, resolveDatabaseRecoverySheetAuthority } from '../../src/multitable/recovery-authorization-stability'
 import { enqueueRecoveryMutationEvent, type RecoveryMutationEvent } from '../../src/multitable/recovery-mutation-events'
@@ -1367,6 +1368,52 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     } finally {
       publish.mockRestore()
       await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test('WORKER-SCOPE: rejects a link target added between discovery and fence acquisition', async () => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const extraSheet = `${SHEET}_scope_expansion`
+    const extraField = `${F_SRC_LINK}_scope_expansion`
+    let release!: () => void
+    let reached!: () => void
+    const hold = new Promise<void>(resolve => { release = resolve })
+    const ready = new Promise<void>(resolve => { reached = resolve })
+    let paused = false
+    const materialize = vi.fn(async () => true)
+    let running: Promise<boolean> | undefined
+    try {
+      await q('INSERT INTO meta_sheets (id,base_id,name) VALUES ($1,$2,$3)', [extraSheet, BASE, 'Scope fixture'])
+      const transaction = (run: (query: QueryFn) => Promise<boolean>) => txn(query => run(async (statement, params) => {
+        if (!paused && statement === 'SELECT pg_advisory_xact_lock(hashtext($1))') {
+          paused = true
+          reached()
+          await hold
+        }
+        return query(statement, params)
+      }))
+      running = runRecoveryArchiveDerivedTransaction(transaction, {
+        identity: { jobId: randomUUID(), workspaceId: `workspace_scope_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR },
+        revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM], linkInvalidations: [],
+      }, materialize)
+      const rejected = expect(running).rejects.toThrow('RECOVERY_DERIVED_SCOPE_CHANGED')
+      await Promise.race([ready, running.then(() => { throw new Error('scope_barrier_not_reached') })])
+      await txn(async query => {
+        await query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
+        await query(`INSERT INTO meta_fields (id,sheet_id,name,type,property,"order")
+          VALUES ($1,$2,'Scope link','link',$3::jsonb,99)`,
+        [extraField, SHEET, JSON.stringify({ foreignSheetId: extraSheet })])
+      })
+      release()
+      await rejected
+      expect(materialize).not.toHaveBeenCalled()
+    } finally {
+      release()
+      await running?.catch(() => {})
+      await q('DELETE FROM meta_fields WHERE id=$1', [extraField])
+      await q('DELETE FROM meta_sheets WHERE id=$1', [extraSheet])
       delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
     }
   })
