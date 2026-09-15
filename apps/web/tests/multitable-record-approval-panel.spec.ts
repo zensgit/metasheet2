@@ -24,6 +24,11 @@
  *  9. The refresh watcher compares its two sources PER ELEMENT: an id-equal, version-equal `record`
  *     replacement (what an ordinary grid re-read hands down) fires NO request while expanded.
  *     Collapse the source back into one getter returning an array ⇒ red.
+ * 10. PAGE (backend #5763): the panel asks for ONE page with an EXPLICIT `{ limit }` and renders the
+ *     server's `hasMore` as a 「还有更多」 notice. Drop the notice (or infer it from row count) ⇒ red.
+ * 11. MARKER (backend #5763): a TERMINAL row carrying `RECORD_APPROVAL_NOTIFICATION_FAILED` renders the
+ *     「已通过，但通知发送失败」 line — the miss is otherwise invisible. A terminal row WITHOUT the
+ *     code renders nothing. Drop the marker branch ⇒ red.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
@@ -68,11 +73,13 @@ const SUBMISSIONS: MetaRecordApprovalSubmission[] = [
 
 const mountedApps: App[] = []
 
-function fakeClient(rows: MetaRecordApprovalSubmission[] | Error = SUBMISSIONS) {
+// The client answers a PAGE (`{ submissions, hasMore }`, backend #5763), not a bare array - the fake
+// must too, or the panel's truncation notice would be untestable and the shape drift invisible here.
+function fakeClient(rows: MetaRecordApprovalSubmission[] | Error = SUBMISSIONS, hasMore = false) {
   return {
     listRecordApprovals: rows instanceof Error
       ? vi.fn().mockRejectedValue(rows)
-      : vi.fn().mockResolvedValue(rows),
+      : vi.fn().mockResolvedValue({ submissions: rows, hasMore }),
   }
 }
 
@@ -143,7 +150,7 @@ describe('MetaRecordApprovalPanel — lazy, self-gated', () => {
 
     await expand(container)
     expect(client!.listRecordApprovals).toHaveBeenCalledTimes(1)
-    expect(client!.listRecordApprovals).toHaveBeenCalledWith('sheet_1', 'rec_1')
+    expect(client!.listRecordApprovals).toHaveBeenCalledWith('sheet_1', 'rec_1', { limit: 20 })
     expect(entries(container)).toHaveLength(2)
 
     // collapse → expand again: the loaded list is reused, no second read
@@ -253,7 +260,7 @@ describe('MetaRecordApprovalPanel — refresh signals', () => {
 
     await expand(container)
     expect(client!.listRecordApprovals).toHaveBeenCalledTimes(2)
-    expect(client!.listRecordApprovals).toHaveBeenLastCalledWith('sheet_1', 'rec_2')
+    expect(client!.listRecordApprovals).toHaveBeenLastCalledWith('sheet_1', 'rec_2', { limit: 20 })
   })
 
   it('a record-updated refresh (version bump) re-reads while OPEN, and stays lazy while collapsed', async () => {
@@ -322,11 +329,12 @@ describe('MetaRecordApprovalPanel — refresh signals', () => {
   })
 
   it('a refresh signal that lands DURING a read is queued, not swallowed', async () => {
-    let resolveFirst: (rows: MetaRecordApprovalSubmission[]) => void = () => {}
-    const first = new Promise<MetaRecordApprovalSubmission[]>((resolve) => { resolveFirst = resolve })
+    type Page = { submissions: MetaRecordApprovalSubmission[]; hasMore: boolean }
+    let resolveFirst: (page: Page) => void = () => {}
+    const first = new Promise<Page>((resolve) => { resolveFirst = resolve })
     const listRecordApprovals = vi.fn()
       .mockReturnValueOnce(first)
-      .mockResolvedValue(SUBMISSIONS)
+      .mockResolvedValue({ submissions: SUBMISSIONS, hasMore: false })
     const { container, state } = mountPanel({ client: { listRecordApprovals } as never })
     await flushUi()
 
@@ -337,7 +345,7 @@ describe('MetaRecordApprovalPanel — refresh signals', () => {
     // The post-submit signal arrives while the first read is still in flight.
     state.refreshToken += 1
     await flushUi(2)
-    resolveFirst([])
+    resolveFirst({ submissions: [], hasMore: false })
     await flushUi(8)
 
     expect(listRecordApprovals).toHaveBeenCalledTimes(2)
@@ -419,6 +427,79 @@ describe('MetaRecordApprovalPanel — server answers that are not the happy path
   })
 })
 
+describe('MetaRecordApprovalPanel - one page + the notification marker (backend #5763)', () => {
+  it('asks for ONE page with an explicit limit and shows the 「还有更多」 notice when the server says so', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container, client } = mountPanel({ client: fakeClient(SUBMISSIONS, true) })
+    await flushUi()
+    await expand(container)
+    // The limit is the PANEL's choice (the notice names it), not the route's default.
+    expect(client!.listRecordApprovals).toHaveBeenCalledWith('sheet_1', 'rec_1', { limit: 20 })
+    const notice = container.querySelector('[data-test="record-approval-has-more"]')
+    expect(notice).not.toBeNull()
+    expect(notice!.textContent).toBe('还有更多（仅显示最近 20 条）')
+    // Values-free: a truncation notice, never a total.
+    expect(container.textContent).not.toContain('fld_qty')
+  })
+
+  it('shows NO notice when hasMore is false, even with a full-looking page', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mountPanel({ client: fakeClient(SUBMISSIONS, false) })
+    await flushUi()
+    await expand(container)
+    expect(container.querySelector('[data-test="record-approval-has-more"]')).toBeNull()
+    expect(container.textContent).not.toContain('还有更多')
+  })
+
+  it('a failed read shows the error state and no truncation notice', async () => {
+    const { container } = mountPanel({ client: fakeClient(new Error('boom')) })
+    await flushUi()
+    await expand(container)
+    expect(container.querySelector('[data-test="record-approval-error"]')).not.toBeNull()
+    expect(container.querySelector('[data-test="record-approval-has-more"]')).toBeNull()
+  })
+
+  it('an approved row stamped RECORD_APPROVAL_NOTIFICATION_FAILED shows the marker; a clean one does not', async () => {
+    useLocale().setLocale('zh-CN')
+    const rows: MetaRecordApprovalSubmission[] = [
+      {
+        id: 'sub_n',
+        templateId: 'tpl_leave',
+        status: 'approved',
+        // The row-level code the backend stamps when the terminal write landed but the requester's
+        // bell did not (record-approval-submission-service.ts RECORD_APPROVAL_ROW_ERROR_CODES).
+        error: 'RECORD_APPROVAL_NOTIFICATION_FAILED',
+        drift: { changed: false, changedFieldIds: [] },
+      },
+      { id: 'sub_ok', templateId: 'tpl_leave', status: 'approved', drift: { changed: false, changedFieldIds: [] } },
+    ]
+    const { container } = mountPanel({ client: fakeClient(rows) })
+    await flushUi()
+    await expand(container)
+    const marked = entries(container)[0].querySelector('[data-test="record-approval-notification-failed"]')
+    expect(marked).not.toBeNull()
+    expect(marked!.textContent).toBe('已通过，但通知发送失败')
+    // Never the raw token, and never a second 「失败原因」 line (that one belongs to `failed` rows).
+    expect(container.textContent).not.toContain('RECORD_APPROVAL_NOTIFICATION_FAILED')
+    expect(entries(container)[0].querySelector('[data-test="record-approval-failure"]')).toBeNull()
+    // The clean approved row carries no marker at all.
+    expect(entries(container)[1].querySelector('[data-test="record-approval-notification-failed"]')).toBeNull()
+  })
+
+  it('en parity, and an IN-FLIGHT row carrying the code renders no marker (no outcome to claim)', async () => {
+    const rows: MetaRecordApprovalSubmission[] = [
+      { id: 'sub_n', templateId: 'tpl_leave', status: 'approved', error: 'RECORD_APPROVAL_NOTIFICATION_FAILED', drift: { changed: false, changedFieldIds: [] } },
+      { id: 'sub_p', templateId: 'tpl_leave', status: 'pending', error: 'RECORD_APPROVAL_NOTIFICATION_FAILED', drift: { changed: false, changedFieldIds: [] } },
+    ]
+    const { container } = mountPanel({ client: fakeClient(rows) })
+    await flushUi()
+    await expand(container)
+    const marks = Array.from(container.querySelectorAll('[data-test="record-approval-notification-failed"]'))
+    expect(marks).toHaveLength(1)
+    expect(marks[0].textContent).toBe('Approved, but the notification could not be sent.')
+  })
+})
+
 describe('MetaRecordApprovalPanel inside the record inspector', () => {
   it('sits in the 详情 tab and is mounted with the inspector sheetId/apiClient', async () => {
     const container = document.createElement('div')
@@ -426,7 +507,7 @@ describe('MetaRecordApprovalPanel inside the record inspector', () => {
     const client = {
       getRecordSubscriptionStatus: vi.fn().mockResolvedValue({ subscribed: false, subscription: null }),
       listRecordHistory: vi.fn().mockResolvedValue([]),
-      listRecordApprovals: vi.fn().mockResolvedValue(SUBMISSIONS),
+      listRecordApprovals: vi.fn().mockResolvedValue({ submissions: SUBMISSIONS, hasMore: false }),
     }
     const app = createApp({
       render() {
@@ -448,7 +529,7 @@ describe('MetaRecordApprovalPanel inside the record inspector', () => {
     expect(section(container)).not.toBeNull()
     expect(client.listRecordApprovals).not.toHaveBeenCalled()
     await expand(container)
-    expect(client.listRecordApprovals).toHaveBeenCalledWith('sheet_1', 'rec_1')
+    expect(client.listRecordApprovals).toHaveBeenCalledWith('sheet_1', 'rec_1', { limit: 20 })
     expect(entries(container)).toHaveLength(2)
   })
 
