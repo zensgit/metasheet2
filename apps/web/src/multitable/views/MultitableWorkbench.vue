@@ -3913,6 +3913,34 @@ function getCurrentExternalContext() {
   }
 }
 
+// #5750 follow-up (review round 2): which triple an 'applied' result echoes. getCurrentExternalContext()
+// reads the LIVE refs, and every caller below reads them AFTER an await -- loadBaseContext applies the
+// context and only THEN awaits /fields, so a rail click (selectSheet/selectView) or a second overlapping
+// sync can move the active triple inside that window. useMultitableWorkbench documents exactly this hazard
+// and keeps per-sync `inFlightExternalSyncs` so its memo never records another writer's result as this
+// request's; tests/multitable-external-context-sync.spec.ts pins the window as reachable (a sync for
+// sheet_orders resolves true while the rail click's sheet_deals is on screen).
+// So: echo the live triple only when it is still a RESOLUTION OF THIS REQUEST --
+//   - the base the request named is the one in effect (or a spelling of it: the fast-path matcher),
+//   - the sheet the request named is the one in effect,
+//   - the view the request named is in effect, or is not a view this sheet HAS (the dead/renamed view
+//     the loaded context legitimately falls back to views[0] for -- the case this echo change is for).
+// Otherwise this request lost a race: echo the REQUEST, which is what shipped before, so the embed host
+// pins the requested triple and the props watcher carries the frame back to it.
+function resolveAppliedExternalContextEcho(request: { baseId: string; sheetId: string; viewId: string }) {
+  const current = getCurrentExternalContext()
+  if (!externalContextBaseMatchesWorkbench(request.baseId)) return request
+  if (request.sheetId && request.sheetId !== current.sheetId) return request
+  if (
+    request.viewId
+    && request.viewId !== current.viewId
+    && workbench.views.value.some((view) => view.id === request.viewId)
+  ) {
+    return request
+  }
+  return current
+}
+
 async function applyExternalContext(input: { baseId: string; sheetId: string; viewId: string }) {
   pendingExternalContext.value = null
   pendingExternalContextReason.value = null
@@ -3943,8 +3971,16 @@ async function replayPendingExternalContextIfReady() {
   const ok = await applyExternalContext(replay.context)
   emit('external-context-result', ok
     ? {
+      // #5750 follow-up: echo what is ACTUALLY on screen, not what was asked for. The loaded
+      // context decides the active triple (syncContextState overwrites activeBaseId with
+      // ctx.base.id / ctx.sheet.baseId and falls activeViewId back to views[0] when the requested
+      // view is not in ctx.views), so a request naming a dead view applies successfully while the
+      // workbench lands on another view. Echoing the request made the embed host pin that dead
+      // triple into the URL and re-send it forever; the resolved triple round-trips -- but only
+      // when it IS this request's resolution (see resolveAppliedExternalContextEcho). FAILURES keep
+      // echoing the request -- there is no applied context to report for them.
       status: 'applied',
-      context: replay.context,
+      context: resolveAppliedExternalContextEcho(replay.context),
       requestId: replay.requestId,
     }
     : {
@@ -4036,7 +4072,12 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
-  return { status: 'applied', context: nextContext, requestId: options?.requestId }
+  // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple, never the requested
+  // one, whenever what is on screen is this request's own resolution. The fast-path 'applied' return
+  // at the top of this function already reports the live triple (it has just proved the refs equal the
+  // request, synchronously), so a caller could otherwise get two different shapes of 'applied' for the
+  // same context.
+  return { status: 'applied', context: resolveAppliedExternalContextEcho(nextContext), requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {
