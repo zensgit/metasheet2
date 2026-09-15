@@ -71,6 +71,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         claimed_at TIMESTAMPTZ,
         claim_expires_at TIMESTAMPTZ,
         claim_worker_id TEXT,
+        send_issued_at TIMESTAMPTZ,
         last_error TEXT,
         redelivery_safe BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -78,6 +79,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       )
     `.execute(db)
   }
+
+  // Q19 fix (re-claimed `sending` ambiguity): stamped by the worker IMMEDIATELY BEFORE the create
+  // request leaves the process, cleared on every retry. It is the ONLY evidence that separates
+  // "the lease expired before anything was sent" (safe to send now) from "a request was issued and
+  // we never saw its answer" (ambiguous ⇒ terminal `outcome_unknown`, never resent). Additive +
+  // idempotent so a dev DB that already ran the CREATE TABLE above picks it up.
+  await sql`ALTER TABLE dingtalk_todo_mirrors ADD COLUMN IF NOT EXISTS send_issued_at TIMESTAMPTZ`.execute(db)
 
   // §3 index 1 — THE idempotency key (see header). UNIQUE (org_id, source_key).
   await createIndexIfNotExists(db, 'uq_dingtalk_todo_mirrors_source_key', DINGTALK_TODO_MIRRORS_TABLE, ['org_id', 'source_key'], { unique: true })

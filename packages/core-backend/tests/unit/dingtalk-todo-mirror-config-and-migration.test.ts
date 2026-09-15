@@ -77,6 +77,14 @@ describe('zzzz20260916120000_create_dingtalk_todo_mirrors', () => {
     expect(content).toContain("CHECK (complete_reason IS NULL OR complete_reason IN ('next_node', 'approved', 'rejected', 'revoked', 'cancelled'))")
   })
 
+  it('carries send_issued_at — the ONLY evidence that separates a lost lease from an issued send', async () => {
+    const content = await fs.readFile(MIGRATION_PATH, 'utf-8')
+    // in the CREATE TABLE for a fresh install...
+    expect(content).toContain('send_issued_at TIMESTAMPTZ,')
+    // ...and additively for a database that already ran an earlier copy of this migration
+    expect(content).toContain('ALTER TABLE dingtalk_todo_mirrors ADD COLUMN IF NOT EXISTS send_issued_at TIMESTAMPTZ')
+  })
+
   it('down() drops the indexes and the table with IF EXISTS', async () => {
     const content = await fs.readFile(MIGRATION_PATH, 'utf-8')
     expect(content).toContain('DROP INDEX IF EXISTS uq_dingtalk_todo_mirrors_source_key')

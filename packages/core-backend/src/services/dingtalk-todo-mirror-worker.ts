@@ -43,7 +43,7 @@ import {
 } from '../integrations/dingtalk/client'
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import { resolveDingTalkTodoOperatorUnionId } from '../integrations/dingtalk/todo-operator-config'
-import { DINGTALK_TODO_MIRRORS_TABLE } from './dingtalk-todo-mirror-service'
+import { DINGTALK_TODO_MIRRORS_TABLE, type TodoMirrorCompleteReason } from './dingtalk-todo-mirror-service'
 
 export type TodoMirrorWorkerQuery = <T = unknown>(
   sql: string,
@@ -68,6 +68,8 @@ export const TODO_MIRROR_ERROR_CODES = {
   missingTaskId: 'todo_missing_task_id',
   createFailed: 'todo_create_failed',
   createOutcomeUnknown: 'todo_create_outcome_unknown',
+  /** A lease-expired `sending` row whose create request HAD already been issued (see `deliver`). */
+  createReclaimAmbiguous: 'todo_create_reclaim_ambiguous',
   completeFailed: 'todo_complete_failed',
   completeOutcomeUnknown: 'todo_complete_outcome_unknown',
 } as const
@@ -132,6 +134,13 @@ export interface TodoMirrorRow {
   dingtalk_task_id: string | null
   status: string
   attempt_count: number | string
+  /**
+   * The status the row had BEFORE this claim bumped it (returned from the claim CTE's snapshot).
+   * `'sending'` means this claim RE-took an abandoned in-flight send — see `deliver`.
+   */
+  prior_status?: string | null
+  /** Set by `markSendIssued` immediately before a create request leaves the process. */
+  send_issued_at?: string | null
 }
 
 export interface TodoMirrorRunResult {
@@ -253,7 +262,7 @@ export class DingTalkTodoMirrorWorker {
     const asOf = this.now().toISOString()
     const { rows } = await this.query<TodoMirrorRow>(
       `WITH claim AS (
-         SELECT id
+         SELECT id, status AS prior_status
            FROM ${DINGTALK_TODO_MIRRORS_TABLE}
           WHERE (
                   status IN ('pending', 'completing')
@@ -292,7 +301,9 @@ export class DingTalkTodoMirrorWorker {
                     d.source_key,
                     d.dingtalk_task_id,
                     d.status,
-                    d.attempt_count
+                    d.attempt_count,
+                    d.send_issued_at,
+                    claim.prior_status
        )
        SELECT * FROM claimed ORDER BY id`,
       [asOf, this.batchSize, this.leaseMs, this.workerId],
@@ -330,7 +341,33 @@ export class DingTalkTodoMirrorWorker {
     }
   }
 
+  /**
+   * Q19 fix (re-claimed in-flight send). The claim predicate deliberately re-takes a `sending` row whose
+   * lease expired (a crashed/restarted worker). Re-running the create for such a row is the ONE place the
+   * ledger could resend an AMBIGUOUS request — a second todo for the same task, whose first task id is
+   * lost (the first attempt's CAS fails as `lost-lease`). That is exactly what the design forbids
+   * ("outcome_unknown … 永不重发"), and it was handled one way for an in-process timeout and the opposite
+   * way for a crash.
+   *
+   * `send_issued_at` is the discriminator, and it is EVIDENCE, not a guess:
+   *   - stamped ⇒ a create request left this process and we never saw its answer ⇒ TERMINAL
+   *     `outcome_unknown`, redelivery_safe=false (no operator gate can resend it either);
+   *   - NULL ⇒ the lease died BEFORE anything was issued (recipient resolve / config / token stage),
+   *     so sending now cannot duplicate anything ⇒ fall through to a normal create attempt.
+   * A `completing` re-claim needs no such care: marking an already-done todo done again is idempotent
+   * (and a vanished todo is `isDingTalkTodoTaskMissing` ⇒ completed).
+   */
   private async deliver(row: TodoMirrorRow): Promise<TodoMirrorDeliverOutcome> {
+    if (row.status !== 'completing' && String(row.prior_status ?? '') === 'sending' && row.send_issued_at) {
+      const ok = await this.markTerminal(
+        row.id,
+        'outcome_unknown',
+        Number(row.attempt_count),
+        TODO_MIRROR_ERROR_CODES.createReclaimAmbiguous,
+        false,
+      )
+      return ok ? 'outcome_unknown' : 'lost-lease'
+    }
     return row.status === 'completing' ? this.deliverCompletion(row) : this.deliverCreate(row)
   }
 
@@ -368,6 +405,10 @@ export class DingTalkTodoMirrorWorker {
     })
     const detailUrl = buildTodoMirrorDetailUrl(resolveTodoMirrorAppBaseUrl(this.env), row.instance_id)
 
+    // EVIDENCE BEFORE THE SEND (and a free lease check): if this CAS matches 0 rows our lease was
+    // stolen, so we must NOT send at all — the holder will. See `deliver` for why the stamp matters.
+    if (!await this.markSendIssued(row.id, attemptCount)) return 'lost-lease'
+
     try {
       const accessToken = await this.fetchAccessToken(config)
       const sent = await this.createTodoTask(
@@ -387,7 +428,13 @@ export class DingTalkTodoMirrorWorker {
         unionId: recipient.unionId,
         integrationId: recipient.integrationId,
       })
-      return ok ? 'created' : 'lost-lease'
+      if (!ok) return 'lost-lease'
+      // The seat may have died WHILE we were sending. The consumer's sweeps skip `sending` rows (the
+      // lease is ours), and a terminal event that already ran will never come back — so the row would
+      // settle into `created` and keep a live todo for a finished approval forever. Close the window
+      // here, on the same liveness predicate the consumer uses.
+      await this.retireCreatedSeatIfGone(row)
+      return 'created'
     } catch (error) {
       if (isDingTalkOutcomeUnknown(error)) {
         // TERMINAL and never resent: DingTalk may have created the todo. Reconciliation is manual.
@@ -477,6 +524,7 @@ export class DingTalkTodoMirrorWorker {
               last_error = $3,
               claim_expires_at = NULL,
               claim_worker_id = NULL,
+              send_issued_at = NULL,
               updated_at = $4::timestamptz
         WHERE id = $1::uuid
           AND status = $8
@@ -485,6 +533,80 @@ export class DingTalkTodoMirrorWorker {
       [row.id, next, code, now.toISOString(), this.workerId, attemptCount, nextStatus, claimedStatus],
     )
     return Number(result.rowCount ?? 0) === 1
+  }
+
+  /**
+   * Stamp `send_issued_at` under the lease CAS, immediately before the create request is issued.
+   * Returns false when the lease is no longer ours (nothing is sent in that case).
+   */
+  private async markSendIssued(id: string, attemptCount: number): Promise<boolean> {
+    const now = this.now().toISOString()
+    const result = await this.query(
+      `UPDATE ${DINGTALK_TODO_MIRRORS_TABLE}
+          SET send_issued_at = $2::timestamptz,
+              updated_at = $2::timestamptz
+        WHERE id = $1::uuid
+          AND status = 'sending'
+          AND claim_worker_id = $3
+          AND attempt_count = $4::int`,
+      [id, now, this.workerId, attemptCount],
+    )
+    return Number(result.rowCount ?? 0) === 1
+  }
+
+  /**
+   * Post-create liveness re-check (Q19 finding "terminal event during `sending`"). If the seat this row
+   * mirrors is no longer an ACTIVE `approval_assignments` row, the just-created todo must be taken back
+   * immediately: move `created` → `completing` so the very next tick marks it done. The instance status
+   * only picks the `complete_reason`; the RETIREMENT decision is the seat, so a plain node advance during
+   * the send window is covered too.
+   *
+   * Best-effort by construction: a probe failure leaves the row `created` (today's behaviour), it never
+   * turns a delivered todo into an error. The CAS `status = 'created'` makes it a no-op when a terminal
+   * event got there first.
+   */
+  private async retireCreatedSeatIfGone(row: TodoMirrorRow): Promise<boolean> {
+    try {
+      const probe = await this.query<{ seat_live: boolean; instance_status: string | null }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM approval_assignments a
+            WHERE a.instance_id = $1
+              AND a.node_key = $2
+              AND a.assignee_id = $3
+              AND a.entry_epoch IS NOT DISTINCT FROM $4::int
+              AND a.is_active = TRUE
+         ) AS seat_live,
+         (SELECT i.status FROM approval_instances i WHERE i.id = $1) AS instance_status`,
+        [row.instance_id, row.node_key, row.recipient_user_id, row.entry_epoch],
+      )
+      const probed = probe.rows[0]
+      if (!probed || probed.seat_live !== false) return false
+      const reason = todoMirrorReasonFromInstanceStatus(probed.instance_status)
+      const now = this.now().toISOString()
+      const updated = await this.query(
+        `UPDATE ${DINGTALK_TODO_MIRRORS_TABLE}
+            SET status = 'completing',
+                complete_reason = $2,
+                attempt_count = 0,
+                next_attempt_at = $3::timestamptz,
+                last_error = NULL,
+                claim_worker_id = NULL,
+                claim_expires_at = NULL,
+                updated_at = $3::timestamptz
+          WHERE id = $1::uuid
+            AND status = 'created'`,
+        [row.id, reason, now],
+      )
+      const flipped = Number(updated.rowCount ?? 0) === 1
+      if (flipped) {
+        this.logger.info(
+          `DingTalk todo mirror: seat gone mid-send, retiring instance=${row.instance_id} node=${row.node_key} reason=${reason}`,
+        )
+      }
+      return flipped
+    } catch {
+      return false
+    }
   }
 
   private async markCreated(
@@ -650,18 +772,53 @@ export class DingTalkTodoMirrorWorker {
   }
 }
 
-/** A DingTalk answer we DID receive: the request was definitely rejected, nothing was created. */
+/**
+ * A DingTalk answer we DID receive AND that no retry can change: the request was definitely rejected and
+ * nothing was created. `true` here dead-letters the row on attempt #1 (retryOrFail is called with
+ * `retryable = !definite`), so the set must stay exactly the answers that are permanent.
+ *
+ * Q19 fix: 429 (flow control) and 408 (gateway timeout) are TRANSIENT. The transport hands a send-tier
+ * 429 back as a plain `DingTalkRequestError` with `outcomeUnknown: false` precisely so the LEDGER
+ * decides (transport.ts:540-544), and treating every 4xx as permanent dead-lettered every mirror row in
+ * a rate-limited window on its first attempt — the 1m/5m/15m/60m/6h ladder never ran. This is the same
+ * set the attendance worker retries (`isRetryableDingTalkErrorCode`,
+ * AttendanceNotificationDeliveryWorker.ts:1155-1157). 5xx is defence in depth: a send-tier 5xx normally
+ * arrives pre-marked outcome-unknown and terminates above, and if it ever arrives bare it is not a
+ * permanent rejection either.
+ *
+ * `DingTalkBusinessError` is UNREACHABLE for the three todo endpoints (`envelope: 'none'`; the transport
+ * only raises it for `envelope: 'oapi'`, transport.ts:398-404). It is kept as a definite rejection for
+ * the shape's own sake, but no todo-path test may claim coverage through it.
+ */
 function isDefiniteDingTalkRejection(error: unknown): boolean {
   if (isDingTalkOutcomeUnknown(error)) return false
   if (error instanceof DingTalkBusinessError) return true
-  if (error instanceof DingTalkRequestError) return error.statusCode >= 400 && error.statusCode < 500
+  if (error instanceof DingTalkRequestError) {
+    if (error.statusCode === 408 || error.statusCode === 429) return false
+    if (error.statusCode >= 500) return false
+    return error.statusCode >= 400
+  }
   return false
+}
+
+/** Instance status ⇒ `complete_reason`. Anything non-terminal (or unknown) is a plain node advance. */
+export function todoMirrorReasonFromInstanceStatus(status: string | null | undefined): TodoMirrorCompleteReason {
+  switch (String(status ?? '').trim().toLowerCase()) {
+    case 'approved': return 'approved'
+    case 'rejected': return 'rejected'
+    case 'revoked': return 'revoked'
+    case 'cancelled':
+    case 'canceled': return 'cancelled'
+    default: return 'next_node'
+  }
 }
 
 export type TodoMirrorRequeueOutcome =
   | 'requeued'
   | 'already_delivered'
   | 'refused_outcome_unknown'
+  /** The gate's two status predicates passed, but the approval seat is no longer live (Q19 fix). */
+  | 'refused_seat_gone'
   | 'not_eligible'
   | 'not_found'
 
@@ -677,14 +834,25 @@ type RequeueQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unkno
 
 /**
  * OPERATOR-INITIATED requeue of ONE failed mirror row. Nothing in the background calls this: the
- * worker only ever claims pending/completing (and reclaims a lease-expired sending), so the ONLY
- * failed → live transition in the system is this explicit request.
+ * worker only ever claims pending/completing (and a lease-expired `sending`, which it now terminates
+ * as ambiguous instead of resending), so the ONLY failed → live transition in the system is this
+ * explicit request. Its production entry point is the operator CLI
+ * `packages/core-backend/scripts/dingtalk-todo-mirror-requeue.ts` (see `runDingTalkTodoMirrorRequeueCli`
+ * below) — deliberately a CLI and not an HTTP route: this is an on-prem owner action on ONE row, and a
+ * route would need a new permission code plus a tenant-scoped surface for a feature that ships OFF.
  *
- * TWO load-bearing gate predicates (each pinned by a mutation test):
+ * THREE load-bearing gate predicates (each pinned by a mutation test), plus an explicit org scope:
+ *   org_id = $2                — the caller must name the tenant; a row of another org is `not_found`,
+ *                                never silently requeued and never described back to the caller;
  *   status = 'failed'          — a terminal failure is the only candidate;
  *   redelivery_safe = true     — set by the worker ONLY for a DEFINITE non-delivery. `outcome_unknown`
  *                                rows never get it (and are excluded by the status predicate anyway),
  *                                so an ambiguous send can never be resent.
+ *
+ * AND (Q19 fix) a row with NO DingTalk task id may only go back to `pending` when its approval SEAT is
+ * still live: requeueing a create for an approval that has since finished would mint a todo nobody will
+ * ever close (no further approval event is coming for that instance). Rows that DO carry a task id are
+ * requeued unconditionally — their pending work is "mark that todo done", which is always safe.
  *
  * AND the phase is RESTORED, not reset: a row that already has a `dingtalk_task_id` goes back to
  * `completing`, never to `pending`. Sending it back to `pending` would create a SECOND todo for a task
@@ -692,11 +860,12 @@ type RequeueQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unkno
  */
 export async function requeueFailedDingTalkTodoMirror(
   query: RequeueQueryFn,
-  id: string,
+  input: { id: string; orgId: string },
 ): Promise<TodoMirrorRequeueResult> {
-  const trimmed = id.trim()
-  if (trimmed.length === 0) {
-    return { outcome: 'not_found', id, status: null, previousStatus: null, orgId: null }
+  const trimmed = (input?.id ?? '').trim()
+  const orgId = (input?.orgId ?? '').trim()
+  if (trimmed.length === 0 || orgId.length === 0) {
+    return { outcome: 'not_found', id: trimmed, status: null, previousStatus: null, orgId: null }
   }
 
   const updated = await query(
@@ -708,12 +877,25 @@ export async function requeueFailedDingTalkTodoMirror(
             claimed_at = NULL,
             claim_expires_at = NULL,
             claim_worker_id = NULL,
+            send_issued_at = NULL,
             updated_at = NOW()
       WHERE id = $1::uuid
+        AND org_id = $2
         AND status = 'failed'
         AND redelivery_safe = true
+        AND (
+          dingtalk_task_id IS NOT NULL
+          OR EXISTS (
+            SELECT 1 FROM approval_assignments a
+             WHERE a.instance_id = ${DINGTALK_TODO_MIRRORS_TABLE}.instance_id
+               AND a.node_key = ${DINGTALK_TODO_MIRRORS_TABLE}.node_key
+               AND a.assignee_id = ${DINGTALK_TODO_MIRRORS_TABLE}.recipient_user_id
+               AND a.entry_epoch IS NOT DISTINCT FROM ${DINGTALK_TODO_MIRRORS_TABLE}.entry_epoch
+               AND a.is_active = TRUE
+          )
+        )
       RETURNING org_id, status`,
-    [trimmed],
+    [trimmed, orgId],
   )
   if (Number(updated.rowCount ?? 0) === 1) {
     const row = updated.rows[0] as { org_id?: string; status?: string }
@@ -727,16 +909,76 @@ export async function requeueFailedDingTalkTodoMirror(
   }
 
   const read = await query(
-    `SELECT status, org_id FROM ${DINGTALK_TODO_MIRRORS_TABLE} WHERE id = $1::uuid`,
-    [trimmed],
+    `SELECT status, org_id, redelivery_safe FROM ${DINGTALK_TODO_MIRRORS_TABLE} WHERE id = $1::uuid AND org_id = $2`,
+    [trimmed, orgId],
   )
   if (read.rows.length === 0) {
     return { outcome: 'not_found', id: trimmed, status: null, previousStatus: null, orgId: null }
   }
-  const row = read.rows[0] as { status: string; org_id: string }
+  const row = read.rows[0] as { status: string; org_id: string; redelivery_safe?: boolean }
   const status = String(row.status)
   const base = { id: trimmed, status, previousStatus: status, orgId: row.org_id ?? null }
   if (status === 'created' || status === 'completed') return { outcome: 'already_delivered', ...base }
   if (status === 'outcome_unknown') return { outcome: 'refused_outcome_unknown', ...base }
+  // Both status predicates passed, so the ONLY remaining reason the UPDATE matched nothing is the
+  // seat-liveness arm: this approval no longer has an active seat for the row.
+  if (status === 'failed' && row.redelivery_safe === true) return { outcome: 'refused_seat_gone', ...base }
   return { outcome: 'not_eligible', ...base }
+}
+
+export interface TodoMirrorRequeueCliResult {
+  exitCode: number
+  report: Record<string, unknown>
+}
+
+/** `--id <uuid> --org <orgId>`; both are REQUIRED (the org scope is a gate, not a convenience). */
+export function parseTodoMirrorRequeueArgv(argv: string[]): { id: string; orgId: string } | null {
+  let id = ''
+  let orgId = ''
+  for (let i = 0; i < argv.length; i += 1) {
+    const flag = String(argv[i] ?? '')
+    const value = String(argv[i + 1] ?? '').trim()
+    if (flag === '--id') { id = value; i += 1 }
+    else if (flag === '--org') { orgId = value; i += 1 }
+  }
+  if (!id || !orgId) return null
+  return { id, orgId }
+}
+
+/**
+ * The operator CLI's whole body, kept in `src/` so it is type-checked and unit-tested; the script file
+ * only supplies a pg pool. VALUES-FREE output: ids, statuses and the outcome word — never a subject, a
+ * person's name or a unionId.
+ */
+export async function runDingTalkTodoMirrorRequeueCli(
+  query: RequeueQueryFn,
+  argv: string[],
+): Promise<TodoMirrorRequeueCliResult> {
+  const parsed = parseTodoMirrorRequeueArgv(argv)
+  if (!parsed) {
+    return {
+      exitCode: 1,
+      report: {
+        operation: 'dingtalk_todo_mirror_requeue',
+        version: 1,
+        valuesFree: true,
+        outcome: 'usage',
+        usage: 'tsx scripts/dingtalk-todo-mirror-requeue.ts --id <mirror-row-uuid> --org <org-id>',
+      },
+    }
+  }
+  const result = await requeueFailedDingTalkTodoMirror(query, parsed)
+  return {
+    exitCode: result.outcome === 'requeued' ? 0 : 2,
+    report: {
+      operation: 'dingtalk_todo_mirror_requeue',
+      version: 1,
+      valuesFree: true,
+      id: result.id,
+      orgId: parsed.orgId,
+      outcome: result.outcome,
+      status: result.status,
+      previousStatus: result.previousStatus,
+    },
+  }
 }

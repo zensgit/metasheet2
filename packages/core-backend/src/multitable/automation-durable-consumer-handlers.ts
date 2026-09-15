@@ -146,10 +146,13 @@ export function buildDurableConsumerHandlers(services: DurableDeliveryServices):
       // can only mean a producer enqueued a row the manifest does not route to this key: THROW, so it
       // surfaces through the retry/dead-letter ceiling instead of being silently dropped.
       //
-      // Both sinks are idempotent (UNIQUE (org_id, source_key) + ON CONFLICT DO NOTHING for the create
-      // half, status-guarded UPDATEs for the retire half) and both return early when
-      // DINGTALK_TODO_MIRROR_ENABLED is not exactly 'true' — so a double delivery through both legs, or
-      // a durable redelivery, can neither duplicate a todo nor write a row for a disabled feature.
+      // Both sinks are idempotent and both return early when DINGTALK_TODO_MIRROR_ENABLED is not
+      // exactly 'true', so a double delivery through both legs, or a durable redelivery, can neither
+      // duplicate a todo nor write a row for a disabled feature. BOTH halves earn that, separately:
+      // the create half on UNIQUE (org_id, source_key) + ON CONFLICT DO NOTHING (plus a seat-liveness
+      // gate, so a replay cannot mint a todo for an approval that is already over), and the retire half
+      // on seat LIVENESS rather than on "who announced last" — a replayed OLD task_created retires the
+      // dead rows it always would have and leaves the current seat alone.
       if (event.eventType === 'approval.task_created') {
         await todoMirrorService.handleApprovalTaskCreated(event.payload as ApprovalTaskCreatedEventV1)
         return
