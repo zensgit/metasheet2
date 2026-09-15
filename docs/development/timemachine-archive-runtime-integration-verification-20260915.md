@@ -2,6 +2,19 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Optional Router Injection Main Replay
+
+Merge `f82e71be32d5b3c3bb7bf4ed3befaad7e1b98294`, tree
+`2cca78b9691d87f97db630b91aa3c67c0389cc27`, preserves ordered parents
+`df1b4f477059506ff2126b4a6698d7c8f169e2e4` and main
+`7c2af702003f60f7c5425f3c752fa5801f39fbad`. Incoming delta is only the approval
+panel, submit dialog and record inspector optional-router injection (12+/12-),
+with no conflicts, backend, migration or workflow change. Three affected Web
+files pass 100/100; app-only vue-tsc and diff-check pass. Logs
+`/private/tmp/tm-7c2af-{focused,app-tsc}-20260916.log`. Broader tests and browser
+evidence below remain bound to 4bd71; this narrow replay does not claim a fresh
+browser/DB run. Published-head CI remains required.
+
 ## Completion Shutdown Integration Acceptance
 
 All following local evidence binds clean code `4bd71a62834bbee6d3764dd8ff9b16223a102ed0`,
