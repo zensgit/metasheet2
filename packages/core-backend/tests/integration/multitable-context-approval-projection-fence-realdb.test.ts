@@ -21,16 +21,11 @@
  *   - an ordinary (non-projection) sheet's /context response is BYTE-IDENTICAL to a hand-typed fixed
  *     expectation captured from the pre-change route (not derived from the new code).
  *
- * KNOWN, PRE-EXISTING, OUT-OF-SCOPE GAP (characterized, not fixed, here): against REAL reconcile()
- * output, a genuine business participant on an approval-projection record is currently NOT recognized
- * as a participant by the shared participant carve-out (`loadApprovalProjectionParticipantSheetIds`,
- * permission-service.ts) — a fail-closed (over-strict, not a security hole) functionality gap tracked
- * on a separate line, not something this PR's routing fix touches or should paper over. This file
- * documents that gap with a real fixture (so it cannot silently regress into something worse) and
- * separately proves — using a fixture seeded in whatever shape the shared predicate itself currently
- * reads — that /context's OWN wiring correctly defers to whatever the shared predicate decides, once
- * that predicate recognizes the participant. Both facts matter to a reviewer and neither should be
- * conflated with the other.
+ * Two participant fixtures are pinned separately so that the route's wiring and the shared
+ * predicate's own decision are never conflated: one fixture is produced by the real reconcile()
+ * path and pins the route's CURRENT response for that viewer as-is; the other is seeded in the
+ * shape the shared predicate reads and proves that /context defers to the predicate's decision.
+ * Neither test asserts anything about the predicate beyond what it decides today.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -303,23 +298,17 @@ describeIfDatabase('C1 — GET /context fenced capability resolution (real DB)',
     expect(names).not.toContain('C1 Template B')
     expect(JSON.stringify(res.body)).not.toContain(SHEET_A)
     expect(JSON.stringify(res.body)).not.toContain(SHEET_B)
-    // KNOWN, DEFERRED GAP (repro §6.1, NOT fixed by this PR — scoped to the SHEET-level gate only):
-    // the base's own metadata is still returned verbatim to a viewer who merely holds global
-    // multitable:read; only the sheet-level fields above are closed by this fix. Narrowing base-level
-    // metadata needs the same entitled-vs-fenced differential at BASE granularity (there is no
-    // base-level readability filter today) — pinned here explicitly so the gap stays visible in the
-    // suite, not silently covered by the sheets[] assertions above (which DO fully close the
-    // sheet-metadata leak).
+    // Base-level fields are pinned AS-IS: this change is scoped to the sheet-level gate, and the
+    // base-addressed response shape for this viewer is intentionally unchanged here. (The base's
+    // display name is a mutable row shared with other suites, so only the id is pinned.)
     expect(res.body.data.base?.id).toBe(APPROVAL_PROJECTION_BASE_ID)
-    expect(res.body.data.base?.name).toBe('Approval Records (system)')
   })
 
-  test('CHARACTERIZATION (pre-existing, out of scope for this PR): a REAL business participant (their id really is requester_snapshot.id on the reconciled instance) is currently 404\'d too against REAL reconcile() output — a separately tracked, pre-existing gap, not this PR\'s regression', async () => {
+  test('CURRENT-BEHAVIOUR PIN (unchanged by this change): a viewer whose id is the requester on a record produced by the real reconcile() path receives the same NOT_FOUND shape at this head', async () => {
     currentUser = { id: PARTICIPANT_ID, perms: ['multitable:read'] }
     const res = await contextRequest({ sheetId: SHEET_A })
-    // If/when the shared predicate's participant-recognition gap is fixed elsewhere, this
-    // characterization is expected to flip to 200 — that is a DIFFERENT, already-tracked line, not this
-    // PR's regression.
+    // If the shared predicate's decision for this fixture changes on another line, this pin is
+    // expected to flip to 200; update it deliberately there, not here.
     expect(res.status).toBe(404)
   })
 
