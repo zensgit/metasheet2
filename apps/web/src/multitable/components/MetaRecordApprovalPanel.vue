@@ -289,8 +289,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, ref, useId, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { computed, inject, onUnmounted, ref, useId, watch } from 'vue'
+import { RouterLink, routerKey } from 'vue-router'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import {
@@ -336,7 +336,7 @@ const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 // Non-throwing inject (see MetaRecordInspector.vue's file header): the drawer mounts without a router in
 // several frozen specs, so the request-number link is rendered only when a router really exists.
-const hasRouter = !!useRouter()
+const hasRouter = !!inject(routerKey, null)
 
 // 审批进度 GATE (Q17). The SAME hook ApprovalCenterView.vue (`canWrite`) and ApprovalDetailView.vue
 // (`canAct`) already call — one definition of what `approvals:read` means on the FE, read off the
