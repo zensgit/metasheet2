@@ -380,7 +380,8 @@ describe('useMultitableWorkbench', () => {
   // capabilities/permissions with brand-new object identities every time, which re-ran every
   // identity-keyed watcher in the workbench. An unchanged payload must now be a pure no-op.
   describe('#5743 unchanged sheet-meta payloads', () => {
-    function metaFetch(fieldsPayload: () => any[]) {
+    function metaFetch(fieldsPayload: () => any[], viewsPayload?: () => any[]) {
+      const views = viewsPayload ?? (() => [{ id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid' }])
       return vi.fn(async (input: string) => {
         if (input.startsWith('/api/multitable/fields?sheetId=s1')) {
           return new Response(JSON.stringify({ ok: true, data: { fields: fieldsPayload() } }), { status: 200 })
@@ -392,7 +393,7 @@ describe('useMultitableWorkbench', () => {
               base: { id: 'base_ops', name: 'Ops Base' },
               sheet: { id: 's1', baseId: 'base_ops', name: 'Orders', description: null },
               sheets: [{ id: 's1', baseId: 'base_ops', name: 'Orders', description: null }],
-              views: [{ id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid' }],
+              views: views(),
               capabilities: {
                 canRead: true,
                 canCreateRecord: true,
@@ -533,6 +534,105 @@ describe('useMultitableWorkbench', () => {
       description = undefined
       expect(await wb.loadSheetMeta('s1')).toBe(true)
       expect(wb.fields.value).not.toBe(fieldsRef)
+    })
+
+    // The skip is keyed on the payload AND on a fingerprint of the state that payload produced.
+    // Everything else that writes these refs — a dialog assigning wb.fields.value optimistically,
+    // selectView, loadBaseContext, restoreSnapshot — moves the state out from under the recorded
+    // fingerprint without touching the record itself. With only the payload half, the very next
+    // poll would read "same answer as last time" and skip, and the workbench would stay desynced
+    // from the server answer it just fetched, for as long as that answer keeps coming back the
+    // same (i.e. forever on an idle sheet). These three cases pin the state half.
+    it('re-applies an identical payload after the fields ref was written directly', async () => {
+      const fields = [
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_qty', name: 'Qty', type: 'number' },
+      ]
+      const fetchFn = metaFetch(() => fields)
+      const client = new MultitableApiClient({ fetchFn })
+      const wb = useMultitableWorkbench({ client, initialViewId: 'v1' })
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      const appliedFields = wb.fields.value
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      // Baseline: an unchanged payload on unchanged state is still skipped.
+      expect(wb.fields.value).toBe(appliedFields)
+
+      wb.fields.value = wb.fields.value.filter((field) => field.id !== 'fld_qty')
+      const writtenDirectly = wb.fields.value
+      expect(writtenDirectly).toHaveLength(1)
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      expect(wb.fields.value).not.toBe(writtenDirectly)
+      expect(wb.fields.value.map((field) => field.id)).toEqual(['fld_title', 'fld_qty'])
+    })
+
+    it('re-applies an identical payload after selectView moved the active view', async () => {
+      const fetchFn = metaFetch(
+        () => [{ id: 'fld_title', name: 'Title', type: 'string' }],
+        () => [
+          { id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid' },
+          { id: 'v2', sheetId: 's1', name: 'Kanban', type: 'kanban' },
+        ],
+      )
+      const client = new MultitableApiClient({ fetchFn })
+      const wb = useMultitableWorkbench({ client, initialViewId: 'v1' })
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      const viewsRef = wb.views.value
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      expect(wb.views.value).toBe(viewsRef)
+
+      wb.selectView('v2')
+      expect(wb.activeViewId.value).toBe('v2')
+
+      // Asking for v1 again: sheetId, viewId and payload all match what was recorded, so the state
+      // half is the only thing that can notice activeViewId drifted away in between. (A keep-alive
+      // poll with no viewId opt would carry requestedViewId 'v2' and be caught by the viewId half
+      // instead — this is the case that half cannot see.)
+      expect(await wb.loadSheetMeta('s1', { viewId: 'v1' })).toBe(true)
+      expect(wb.activeViewId.value).toBe('v1')
+      expect(wb.views.value).not.toBe(viewsRef)
+    })
+
+    // restoreSnapshot() is not part of the composable's public surface (its only caller is
+    // syncExternalContext's rollback, which restores content-identical state, so the clause is not
+    // observable through it) — loadBaseContext is the public sibling write path, same hazard.
+    it('re-applies an identical payload after loadBaseContext rewrote the state', async () => {
+      const sheetContext = {
+        base: { id: 'base_ops', name: 'Ops Base' },
+        sheet: { id: 's1', baseId: 'base_ops', name: 'Orders', description: null },
+        sheets: [{ id: 's1', baseId: 'base_ops', name: 'Orders', description: null }],
+        views: [{ id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid' }],
+        fieldPermissions: {},
+        viewPermissions: {},
+        personalOverrideViewIds: [],
+      }
+      const baseContext = {
+        ...sheetContext,
+        sheets: [
+          { id: 's1', baseId: 'base_ops', name: 'Orders', description: null },
+          { id: 's2', baseId: 'base_ops', name: 'Invoices', description: null },
+        ],
+      }
+      const client = {
+        listFields: vi.fn(async () => ({ fields: [{ id: 'fld_title', name: 'Title', type: 'string' }] })),
+        loadContext: vi.fn(async (params: { baseId?: string; sheetId?: string }) => (
+          params.baseId ? baseContext : sheetContext
+        )),
+      } as unknown as MultitableApiClient
+      const wb = useMultitableWorkbench({ client, initialViewId: 'v1' })
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      const fieldsRef = wb.fields.value
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      expect(wb.fields.value).toBe(fieldsRef)
+
+      expect(await wb.loadBaseContext('base_ops')).toBe(true)
+      expect(wb.sheets.value.map((sheet) => sheet.id)).toEqual(['s1', 's2'])
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      expect(wb.sheets.value.map((sheet) => sheet.id)).toEqual(['s1'])
     })
   })
 })

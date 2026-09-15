@@ -605,6 +605,44 @@ describe('MultitableWorkbench manager dialog meta keep-alive (#5743)', () => {
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
   })
 
+  // #5743 follow-up (merge judge): the catch-up must RESTART the cadence, not just add a refresh on
+  // top of an interval that kept its pre-hidden phase. With the old phase standing, "open, 5 s, tab
+  // hidden 20 s, tab back" refreshed at t=25 s (catch-up) and again at t=30 s (the tick that had
+  // been queued since t=15 s) — two round trips five seconds apart inside one nominal 15 s window.
+  it('restarts the interval phase from the visibility catch-up', async () => {
+    const root = await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    await flushFake(5_000)
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+
+    // t = 25 s: the t = 15 s tick landed on a hidden tab and was skipped.
+    await flushFake(20_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // t = 39 s. The pre-change build fired here (its old phase still had a tick due at t = 30 s).
+    await flushFake(14_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // t = 40 s: exactly one full interval after the catch-up.
+    await flushFake(1_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
+
+    // The re-armed interval is still the one teardown knows about — closing the dialog silences it,
+    // which is also the proof that re-arming left no orphaned second interval behind.
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-close-field-manager"]')?.click()
+    await flushUi()
+    const callsAfterClose = workbenchMock.loadSheetMeta.mock.calls.length
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS * 3)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(callsAfterClose)
+  })
+
   it('stops entirely once the dialog closes, including the visibility catch-up', async () => {
     const root = await mountWithOpenDialog()
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)

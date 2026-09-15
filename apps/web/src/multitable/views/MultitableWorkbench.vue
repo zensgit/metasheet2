@@ -4694,6 +4694,22 @@ function stopDialogMetaRefresh() {
   dialogMetaRefreshQueued = false
 }
 
+// #5743 follow-up: a refresh that is NOT an interval tick (dialog open, visibility catch-up) also
+// RESTARTS the cadence. Without the re-arm the interval kept the phase it had before the tab went
+// hidden, so "hidden 20 s -> visible" fired the catch-up and then let the pre-existing tick land a
+// few seconds later: two refreshes inside one 15 s window. The re-arm lives in this helper instead
+// of inline in the listener body so the listener closure identity never changes (the very function
+// object that was added is what stopDialogMetaRefresh must hand removeEventListener), and so at
+// most one interval is ever alive: the previous id is cleared before the new one lands in the same
+// slot stopDialogMetaRefresh reads.
+function armDialogMetaRefreshTimer() {
+  if (dialogMetaRefreshTimer != null) window.clearInterval(dialogMetaRefreshTimer)
+  dialogMetaRefreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    void refreshDialogMeta()
+  }, DIALOG_META_REFRESH_INTERVAL_MS)
+}
+
 // #5743: open → refresh once, then a SLOW keep-alive (15 s), skipped entirely while the tab is
 // hidden and re-fired once the moment it comes back. The old 1200 ms cadence pinned an idle admin
 // tab at ~1 req/s per open dialog forever; the composable's fingerprint check now also keeps an
@@ -4701,15 +4717,13 @@ function stopDialogMetaRefresh() {
 function startDialogMetaRefresh() {
   stopDialogMetaRefresh()
   void refreshDialogMeta()
-  dialogMetaRefreshTimer = window.setInterval(() => {
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
-    void refreshDialogMeta()
-  }, DIALOG_META_REFRESH_INTERVAL_MS)
+  armDialogMetaRefreshTimer()
   if (typeof document !== 'undefined') {
     dialogMetaVisibilityListener = () => {
       if (document.visibilityState === 'hidden') return
       if (!dialogMetaRefreshWanted()) return
       void refreshDialogMeta()
+      armDialogMetaRefreshTimer()
     }
     document.addEventListener('visibilitychange', dialogMetaVisibilityListener)
   }
