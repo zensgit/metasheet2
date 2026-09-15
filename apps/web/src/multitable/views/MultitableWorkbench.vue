@@ -183,14 +183,14 @@
             </ul>
           </template>
           <footer class="mt-save-tpl__footer">
-            <router-link
+            <RouterLink
               class="mt-save-tpl__link"
               :to="{ name: TemplateCenterRouteName }"
               data-testid="save-sheet-as-template-center-link"
               @click="closeSaveSheetAsTemplate"
             >
               {{ wb('saveTpl.openCenter', isZh) }}
-            </router-link>
+            </RouterLink>
             <MtButton data-action="save-sheet-as-template-done" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.close', isZh) }}</MtButton>
           </footer>
         </div>
@@ -578,6 +578,7 @@
       @confirm="onLinkPickerConfirm"
     />
     <MetaPersonPicker
+      v-if="personPickerVisible || workbench.activeSheetId.value"
       :visible="personPickerVisible"
       :field="personPickerField"
       :sheet-id="workbench.activeSheetId.value"
@@ -623,6 +624,7 @@
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
     <MetaSheetPermissionManager
+      v-if="showPermissionManager || workbench.activeSheetId.value"
       :visible="showPermissionManager"
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
@@ -639,6 +641,7 @@
          it maintains its own list state in place; only an explicit close does. Closing on every
          update forced users to reopen the modal after each toggle/delete/save. -->
     <MetaAutomationManager
+      v-if="showAutomationManager || workbench.activeSheetId.value"
       :visible="showAutomationManager"
       :sheet-id="workbench.activeSheetId.value"
       :fields="grid.fields.value"
@@ -647,6 +650,7 @@
       @close="showAutomationManager = false"
     />
     <MetaFormShareManager
+      v-if="showFormShareManager || workbench.activeSheetId.value"
       :visible="showFormShareManager"
       :sheet-id="workbench.activeSheetId.value"
       :view-id="workbench.activeViewId.value"
@@ -720,7 +724,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
+import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
