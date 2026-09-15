@@ -74,6 +74,17 @@ Code/test head `dcb10e1c1b98d37181942870752d4d7c451306cd`, tree `d9eb3f4b1a08402
 
 ### Outstanding End-to-End Gates
 
+### Shared Mutation Event Checkpoint
+
+- Code SHA `9062f3144355e99798c0d505e939f6f54152bdba`; tree `f68b51dd5e8ef2bf042700fb8d32e2812b989dd3`.
+- Ten focused/neighbor unit files: 174/174 PASS. Event suite uses a mocked durable producer; it is not real outbox transaction evidence.
+- Removing identity equality from the worker event binding: exactly mixed-identity test RED (1 failed/5 passed); restored suite 6/6 PASS.
+- Core typecheck PASS; explicit unit-file typecheck PASS after correcting the test cleanup callback return; new source ESLint PASS; diff-check PASS.
+- No PostgreSQL run for this event extraction yet. Prior 32-test DB evidence above belongs to its earlier SHA and cannot establish this changed HTTP producer path.
+- No push/PR/Ready/merge/flag/dispatch/deploy; application composition, formula/realtime effects and real outbox rollback tests remain outstanding.
+
+### Remaining Combined Validation
+
 - Combined real-DB route and worker execution, mutation, and process-restart gates.
 - Shared full-read/plan authorization invoked by a real background worker.
 - Provider/KMS/object-store integration or ordinary application startup readiness.

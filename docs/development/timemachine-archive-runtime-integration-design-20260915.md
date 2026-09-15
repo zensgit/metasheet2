@@ -34,3 +34,9 @@ Worker-adapter checkpoint: `6185c4b39e49214643ced708ce60abfc605e926d`, tree `420
 5. Validate standard startup with real provider boundaries and synthetic isolated acceptance before claiming runtime readiness.
 
 Whole-sheet hard-delete resurrection, flags, dispatch, deployment, production and customer data remain outside this work. Ready/merge requires separate authorization. Existing constituent evidence is not combined runtime proof.
+
+### Shared Mutation Events
+
+Code checkpoint `9062f3144355e99798c0d505e939f6f54152bdba`, tree `f68b51dd5e8ef2bf042700fb8d32e2812b989dd3`, extracts the existing HTTP event builder into `recovery-mutation-events.ts`. HTTP and worker hooks use the same canonical producer, supplied transaction query, event family and payload. The transaction marker is not authority: the existing durable producer still probes the transaction. Worker hooks retain the same event ID until commit and reject a mixed/unbound identity batch before emitting anything. Durable delivery suppresses the legacy bus; disabled delivery preserves the legacy post-commit path. Failed enqueue never creates an emit-ready entry.
+
+These hooks are not yet assembled with standard application providers and post-commit formula/realtime effects. This is a local integration checkpoint, not completed runtime delivery.
