@@ -147,6 +147,10 @@ export type AutomationLabelKey =
   | 'actionConfig.emailBodyPlaceholder'
   | 'actionConfig.deleteRecordWarning'
   | 'actionConfig.deleteRecordAck'
+  | 'actionConfig.deleteRecordWarningCrossBase'
+  | 'actionConfig.deleteRecordAckCrossBase'
+  | 'actionConfig.crossBaseTargetWarning'
+  | 'actionConfig.crossBaseTargetIncomplete'
   | 'actionConfig.deleteRecordTestRunHint'
   | 'actionConfig.lockRecord'
   | 'actionConfig.waitForCallbackHint'
@@ -852,6 +856,25 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.deleteRecordAck': {
     en: 'I understand this permanently deletes the trigger record.',
     zh: '我确认此动作会永久删除触发记录。',
+  },
+  // #5739 泛化 round-2 — a loaded delete_record/update_record/lock_record may carry the cross-base target
+  // triple (targetBaseId/targetSheetId/targetRecordId). The editor does not author it but now PRESERVES it
+  // on save, so the screen must stop claiming the action hits "the trigger record in this table".
+  'actionConfig.deleteRecordWarningCrossBase': {
+    en: 'Deletes the TARGET record in another base — not the trigger record in this table. This is permanent and cannot be undone.',
+    zh: '将删除另一个 base 中的目标记录，而不是本表的触发记录。该操作是永久性的，无法撤销。',
+  },
+  'actionConfig.deleteRecordAckCrossBase': {
+    en: 'I understand this permanently deletes the target record in another base.',
+    zh: '我确认此动作会永久删除另一个 base 中的目标记录。',
+  },
+  'actionConfig.crossBaseTargetWarning': {
+    en: 'This action targets a record in ANOTHER base, not the trigger record in this table. The target below is kept exactly as loaded — this editor cannot change it.',
+    zh: '此动作指向另一个 base 中的记录，而不是本表的触发记录。下方目标按加载时原样保留——本编辑器无法修改。',
+  },
+  'actionConfig.crossBaseTargetIncomplete': {
+    en: 'This cross-base target is incomplete: targetSheetId and targetRecordId are both required once targetBaseId is set. The server refuses to save it and a run would fail — fix the rule through the API.',
+    zh: '跨 base 目标不完整：设置 targetBaseId 后必须同时有 targetSheetId 与 targetRecordId。服务端会拒绝保存、运行也会失败——请通过 API 修复该规则。',
   },
   'actionConfig.deleteRecordTestRunHint': {
     en: 'Test Run uses a synthetic record and will not delete a real record.',

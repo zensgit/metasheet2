@@ -381,6 +381,29 @@
                   <span class="meta-rule-editor__action-summary" data-field="actionSummary">{{ actionSummaries[idx] }}</span>
                 </template>
 
+            <!-- #5739 泛化 round-2: the cross-base target triple is not authored here but IS preserved on
+                 save, so the screen must say so — otherwise the delete warning ("the trigger record in this
+                 table") is simply false for such a rule. An incomplete triple is called out too: the
+                 backend rejects it at save (400) and the executor fails the step at run. -->
+            <div
+              v-if="crossBaseTargets[action.draftId]"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="crossBaseTarget"
+            >
+              <div>{{ automationLabel('actionConfig.crossBaseTargetWarning', isZh) }}</div>
+              <div data-field="crossBaseTargetIds">
+                targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
+                targetSheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }} ·
+                targetRecordId: {{ crossBaseTargets[action.draftId].targetRecordId || '—' }}
+              </div>
+              <div
+                v-if="!crossBaseTargets[action.draftId].targetSheetId || !crossBaseTargets[action.draftId].targetRecordId"
+                data-field="crossBaseTargetIncomplete"
+              >
+                {{ automationLabel('actionConfig.crossBaseTargetIncomplete', isZh) }}
+              </div>
+            </div>
+
             <!-- update_record config -->
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
@@ -1316,10 +1339,12 @@
               </el-checkbox>
             </div>
 
-            <!-- delete_record config (T0-3): same-base trigger-record only; acknowledgement is UI-only. -->
+            <!-- delete_record config (T0-3): authors the same-base trigger-record delete; acknowledgement is
+                 UI-only. A config LOADED with the cross-base triple keeps it (#5739 泛化) and switches the
+                 warning + ack to the cross-base wording, with the ack re-asked. -->
             <div v-if="action.type === 'delete_record'" class="meta-rule-editor__action-config" data-action-config="delete_record">
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="deleteRecordWarning">
-                {{ automationLabel('actionConfig.deleteRecordWarning', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId] ? 'actionConfig.deleteRecordWarningCrossBase' : 'actionConfig.deleteRecordWarning', isZh) }}
               </div>
               <el-checkbox
                 class="meta-rule-editor__toggle-label"
@@ -1327,7 +1352,7 @@
                 :model-value="isDeleteRecordAcknowledged(action)"
                 @change="setDeleteRecordAcknowledged(action, $event === true)"
               >
-                {{ automationLabel('actionConfig.deleteRecordAck', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId] ? 'actionConfig.deleteRecordAckCrossBase' : 'actionConfig.deleteRecordAck', isZh) }}
               </el-checkbox>
             </div>
 
@@ -1778,6 +1803,18 @@ import { automationTargetSheetOptions } from '../utils/automation-target-sheet-o
 interface FieldPair {
   fieldId: string
   value: string
+  // #5739 泛化 round-2 — the RAW loaded value plus the row identity it was parsed from.
+  // `update_record.fields` / `create_record.data` are `Record<string, unknown>` server-side
+  // (automation-actions.ts), and the backend's own legacy fold writes a `null` into `fields`
+  // (automation-service.ts normalizeLegacyActionPair), but this editor's value control is a plain text
+  // box. Re-deriving the saved value from that text rewrote 42 → "42", false → "false", null → "" and
+  // ["a","b"] → "a,b" on a load → save that changed NOTHING: the #4196 fingerprint hashes the RAW config,
+  // and "clear this cell" (null) silently became "write an empty string". So the raw value rides along and
+  // is re-emitted VERBATIM while the row is untouched (same fieldId AND same text); the moment the author
+  // edits either, the text box becomes authoritative and the value is the string they see.
+  rawFieldId?: string
+  rawText?: string
+  rawValue?: unknown
 }
 
 type DraftActionConfig = Record<string, unknown> & {
@@ -2104,8 +2141,12 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_person_message',
   // A-2b: approval card — recipient comes from the approval.task_created event, config is empty.
   'send_dingtalk_approval_card',
-  // T0-3: expose only the safe authoring shape — same-base trigger-record delete, config: {}.
-  // Cross-base delete remains backend/runtime-only and is not surfaced in this editor.
+  // T0-3: the editor AUTHORS only the safe shape — a same-base trigger-record delete; there are no
+  // cross-base target inputs here. #5739 泛化 changed what a SAVE does, not what it authors: a config
+  // loaded with the cross-base triple (targetBaseId/targetSheetId/targetRecordId) is now PRESERVED
+  // verbatim instead of being flattened to `{}` (flattening silently retargeted a foreign delete onto
+  // the local trigger record). Such an action renders the cross-base banner + the cross-base warning and
+  // ack wording, and its acknowledgement is NOT pre-checked — see crossBaseTargetOf().
   'delete_record',
   'wait_for_callback',
   'condition_branch',
@@ -2981,7 +3022,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : {}
     const fieldUpdates = Array.isArray(config.fieldUpdates)
       ? config.fieldUpdates
-      : Object.entries(fields).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+      : Object.entries(fields).map(([fieldId, value]) => fieldPairFromStored(fieldId, value))
     return { ...config, fieldUpdates }
   }
   if (type === 'create_record') {
@@ -2992,7 +3033,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : {}
     const fieldValues = Array.isArray(config.fieldValues)
       ? config.fieldValues
-      : Object.entries(data).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+      : Object.entries(data).map(([fieldId, value]) => fieldPairFromStored(fieldId, value))
     return {
       ...config,
       targetSheetId: typeof config.sheetId === 'string' ? config.sheetId : typeof config.targetSheetId === 'string' ? config.targetSheetId : '',
@@ -3503,7 +3544,13 @@ async function requestClose(): Promise<void> {
 function resetDeleteRecordAcknowledgements(): void {
   const next: Record<string, boolean> = {}
   for (const action of draft.value.actions) {
-    if (action.type === 'delete_record') next[action.draftId] = action.persisted === true
+    // #5739 泛化 round-2: a persisted same-base delete keeps its acknowledgement (the author already
+    // confirmed exactly this action). A CROSS-BASE delete does not: the confirmation the author gave was
+    // for "the trigger record in this table" — the wording this screen showed while the triple was being
+    // dropped on save — so it must be re-asked against the cross-base wording before the rule can be saved.
+    if (action.type === 'delete_record') {
+      next[action.draftId] = action.persisted === true && !crossBaseTargetOf(action)
+    }
   }
   deleteRecordAcknowledgements.value = next
 }
@@ -3525,6 +3572,44 @@ function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): voi
 // that can be unit-tested without this 3000+ line component. The parsing calls themselves
 // (parseGroupDestinationIds etc.) stay here unchanged: this is exactly what canSave read before,
 // just captured instead of immediately branching on it.
+// #5739 泛化 round-2 — the T3-5 cross-base target triple. update_record / delete_record / lock_record may
+// carry `targetBaseId` (+ the required `targetSheetId`/`targetRecordId`) to mutate a record in ANOTHER base
+// (automation-actions.ts, gated by automation-service.ts validateCrossBaseWriteConfig and re-checked per run
+// by the executor write-gate). This editor authors none of the three and preserves all three on save, so it
+// must at least TELL the author the action leaves this table — the delete warning/ack text is otherwise a
+// false statement, and an incomplete triple would arrive as an opaque 400.
+interface CrossBaseTarget {
+  targetBaseId: string
+  targetSheetId: string
+  targetRecordId: string
+}
+
+/**
+ * The cross-base target of a LOADED action config, or null for a same-base / newly authored action.
+ * Deliberately a hoisted function over a literal list (NOT a module-level `const Set`): the immediate
+ * `props.rule` watcher calls this through resetDeleteRecordAcknowledgements during setup, i.e. before a
+ * const declared further down would be initialized (TDZ ReferenceError, caught the first time by the
+ * "pre-checks the destructive acknowledgement" spec).
+ */
+function crossBaseTargetOf(action: DraftAction): CrossBaseTarget | null {
+  if (action.type !== 'update_record' && action.type !== 'delete_record' && action.type !== 'lock_record') return null
+  const config = isPlainRecord(action.originalConfig) ? action.originalConfig : null
+  if (!config) return null
+  const text = (key: string): string => (typeof config[key] === 'string' ? (config[key] as string).trim() : '')
+  const targetBaseId = text('targetBaseId')
+  if (!targetBaseId) return null
+  return { targetBaseId, targetSheetId: text('targetSheetId'), targetRecordId: text('targetRecordId') }
+}
+
+const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
+  const out: Record<string, CrossBaseTarget> = {}
+  for (const action of draft.value.actions) {
+    const target = crossBaseTargetOf(action)
+    if (target) out[action.draftId] = target
+  }
+  return out
+})
+
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   return draft.value.actions.map((action, index) => {
     const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
@@ -3570,6 +3655,8 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
     if (action.type === 'delete_record') {
       snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
     }
+    const crossBaseTarget = crossBaseTargetOf(action)
+    if (crossBaseTarget) snapshot.crossBaseTarget = crossBaseTarget
     if (action.type === 'write_approval_form_values') {
       snapshot.fwbWriteback = {
         mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
@@ -3823,6 +3910,30 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+/**
+ * #5739 泛化 round-2: one editable row for a stored `fields` / `data` entry. The row SHOWS the value as
+ * text (this editor has no typed value control), but remembers what was actually stored so an untouched
+ * row saves back exactly that — see the FieldPair comment for why the stringification is lossy.
+ */
+function fieldPairFromStored(fieldId: string, value: unknown): FieldPair {
+  const text = String(value ?? '')
+  return { fieldId, value: text, rawFieldId: fieldId, rawText: text, rawValue: value }
+}
+
+/**
+ * The value one row contributes to the saved config: the RAW loaded value while the row is UNTOUCHED
+ * (same fieldId, same text as loaded), otherwise the text the author typed. Rows the author added have no
+ * raw value and always save as text, exactly as before.
+ */
+function savedFieldPairValue(pair: Record<string, unknown>, fieldId: string): unknown {
+  const rawText = typeof pair.rawText === 'string' ? pair.rawText : null
+  const rawFieldId = typeof pair.rawFieldId === 'string' ? pair.rawFieldId : null
+  if (rawText !== null && rawFieldId === fieldId && pair.value === rawText && pair.rawValue !== undefined) {
+    return pair.rawValue
+  }
+  return pair.value ?? ''
+}
+
 function fieldPairsToRecord(value: unknown): Record<string, unknown> {
   if (!Array.isArray(value)) return {}
   const fields: Record<string, unknown> = {}
@@ -3830,7 +3941,7 @@ function fieldPairsToRecord(value: unknown): Record<string, unknown> {
     if (!isPlainRecord(pair)) continue
     const fieldId = typeof pair.fieldId === 'string' ? pair.fieldId.trim() : ''
     if (!fieldId) continue
-    fields[fieldId] = pair.value ?? ''
+    fields[fieldId] = savedFieldPairValue(pair, fieldId)
   }
   return fields
 }
@@ -4880,6 +4991,12 @@ const ACTION_OWNED_CONFIG_KEYS: Partial<Record<AutomationActionType, readonly st
   send_notification: ['userIds', 'message', 'userId'],
   send_email: ['recipients', 'subjectTemplate', 'bodyTemplate', 'recipientsText'],
   send_dingtalk_group_message: [
+    // `title` / `content` are the LEGACY aliases of titleTemplate / bodyTemplate: the backend promotes
+    // them into the modelled keys whenever those are blank (dingtalk-automation-link-validation.ts), so
+    // leaving them unowned would let a cleared title be re-published from the alias. The editor owns the
+    // message text → the aliases are consumed by the same rebuild (this is also the pre-#5739 behaviour).
+    'title',
+    'content',
     'destinationId',
     'destinationIds',
     'destinationIdFieldPath',
@@ -4892,6 +5009,9 @@ const ACTION_OWNED_CONFIG_KEYS: Partial<Record<AutomationActionType, readonly st
     'destinationPickerId',
   ],
   send_dingtalk_person_message: [
+    // See the group entry: legacy titleTemplate / bodyTemplate aliases, owned by the message-text UI.
+    'title',
+    'content',
     'userIds',
     'memberGroupIds',
     'userIdFieldPath',
@@ -4930,6 +5050,48 @@ const ACTION_OWNED_CONFIG_KEYS: Partial<Record<AutomationActionType, readonly st
     'parallelBranchUnsupportedReason',
     'parallelBranchOriginal',
   ],
+}
+
+/**
+ * #5739 泛化 round-2: "did the LOADED config carry this key?" — the question every no-key-may-be-ADDED
+ * rule below asks. A newly authored action has no snapshot and therefore no loaded shape to preserve, so
+ * it answers YES for every key: such an action keeps emitting the editor's canonical shape unchanged.
+ */
+function originalConfigHasKey(action: DraftAction, key: string): boolean {
+  if (!isPlainRecord(action.originalConfig)) return true
+  return Object.prototype.hasOwnProperty.call(action.originalConfig, key)
+}
+
+/**
+ * #5739 泛化 round-2 — singular/plural TWIN keys (destinationId/destinationIds,
+ * userIdFieldPath/userIdFieldPaths, memberGroupIdFieldPath/memberGroupIdFieldPaths). BOTH members are
+ * optional server-side (automation-actions.ts SendDingTalk*MessageConfig), so an API / quick-form / older
+ * rule may legitimately carry only one of them. This editor parses either into ONE list; writing both
+ * back would ADD a key on a save nobody meant as an edit — and the #4196 action fingerprint hashes the RAW
+ * config, so an untouched load → save would drift exactly the way this slice exists to prevent.
+ *
+ * Rule: emit the twin(s) the loaded config had, and add the missing twin only once the list is no longer
+ * the plain mirror of what was loaded (i.e. the author actually changed that control). An empty list emits
+ * NEITHER key — both are owned, so both stay deleted, which is the pre-existing "cleared → dropped" shape.
+ */
+function twinListKeys(
+  action: DraftAction,
+  singularKey: string,
+  pluralKey: string,
+  values: string[],
+): Record<string, unknown> {
+  if (!values.length) return {}
+  const original = isPlainRecord(action.originalConfig) ? action.originalConfig : null
+  const hadSingular = originalConfigHasKey(action, singularKey)
+  const hadPlural = originalConfigHasKey(action, pluralKey)
+  const mirrorsLoadedSingular = hadSingular
+    && !hadPlural
+    && values.length === 1
+    && values[0] === original?.[singularKey]
+  const out: Record<string, unknown> = {}
+  if (hadSingular || !hadPlural) out[singularKey] = values[0]
+  if (!mirrorsLoadedSingular) out[pluralKey] = values
+  return out
 }
 
 /**
@@ -5135,10 +5297,10 @@ function buildPayload(): Partial<AutomationRule> {
       return {
         type: action.type,
         config: buildActionConfigFromOriginal(action, {
-          destinationId: destinationIds[0] || undefined,
-          destinationIds: destinationIds.length ? destinationIds : undefined,
-          ...(destinationIdFieldPaths[0] ? { destinationIdFieldPath: destinationIdFieldPaths[0] } : {}),
-          ...(destinationIdFieldPaths.length ? { destinationIdFieldPaths } : {}),
+          // #5739 泛化 round-2: singular + plural are TWINS — emit the shape that was loaded, never grow it
+          // on an untouched save (see twinListKeys).
+          ...twinListKeys(action, 'destinationId', 'destinationIds', destinationIds),
+          ...twinListKeys(action, 'destinationIdFieldPath', 'destinationIdFieldPaths', destinationIdFieldPaths),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -5170,12 +5332,13 @@ function buildPayload(): Partial<AutomationRule> {
       return {
         type: action.type,
         config: buildActionConfigFromOriginal(action, {
-          userIds,
+          // `userIds` is required in SendDingTalkPersonMessageConfig, so a newly authored action still
+          // emits it even when empty; a PERSISTED config that legitimately never carried it (recipients
+          // come from a record field path) must not GROW the key on an untouched save.
+          userIds: userIds.length || originalConfigHasKey(action, 'userIds') ? userIds : undefined,
           memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
-          ...(userIdFieldPaths[0] ? { userIdFieldPath: userIdFieldPaths[0] } : {}),
-          ...(userIdFieldPaths.length ? { userIdFieldPaths } : {}),
-          ...(memberGroupIdFieldPaths[0] ? { memberGroupIdFieldPath: memberGroupIdFieldPaths[0] } : {}),
-          ...(memberGroupIdFieldPaths.length ? { memberGroupIdFieldPaths } : {}),
+          ...twinListKeys(action, 'userIdFieldPath', 'userIdFieldPaths', userIdFieldPaths),
+          ...twinListKeys(action, 'memberGroupIdFieldPath', 'memberGroupIdFieldPaths', memberGroupIdFieldPaths),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
