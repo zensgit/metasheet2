@@ -171,3 +171,14 @@ Code `9c9c093b2acb6206c9150cb807370a75aed81f0b`, tree `2527c6cf11928eb3c303c3b4a
 - Mutation forcing the factory's strict argument false: all six targeted cases RED. Restored full suite 43/43.
 - Synthetic record/sheet fixtures zero; dedicated database dropped, prefix/backends zero, PG stopped. Session-local logs: `/private/tmp/tm-derived-strict-{migrate,target-final,mutation,full,unit,tsc}.log`.
 - This proves strict helper behavior against a pre-existing durable block, not a new-block race or complete queue/runtime integration. Fresh processor binding, delete-link invalidation recompute, worker startup and real restart remain open. No push/PR/flags/deployment action.
+
+### Canonical Processor Checkpoint
+
+Code `089dec4c2d94ff5de28374d7b27451b5dbb30558`, tree `d0a5c9212b58fef7340a04d09ae43e2cc9551342`, adds the requestless canonical processor factory and dedicated implementation module. Neither queue nor application invokes this factory yet.
+
+- Fresh isolated PG15 stream succeeds; full exact-anchor route suite 49/49, no skips. Core tsc, new module ESLint and diff-check pass.
+- Six processor scenarios: revert computes both source formulas; delete recomputes the surviving related formula after actual source/edge deletion without resurrecting the source; revoked actor retries then succeeds after reactivation; active writer block rejects then succeeds after removal; denied related field scope and denied cross-base access refuse before source materialization. Every case rejects a mismatched workspace identity.
+- Initial four-case failure identified an incorrectly unconditional base-read gate. Same-base behavior now follows the existing sheet capability path; only cross-base targets require base readability. Final positive fixtures have no broad base-read grant.
+- No business event emission; realtime payloads contain no record patches; Yjs receives source/affected related IDs. Mutation dropping saved link invalidations: delete, related-scope denial and cross-base denial are exactly RED (3 fail/3 pass); restored full suite 49/49.
+- Fixture record/sheet/extra-base counts zero; dedicated DB dropped, prefix/backends zero, PG stopped. Session-local logs: `/private/tmp/tm-derived-processor-{migrate,target-final,mutation,full,tsc-final,lint}.log`.
+- This is actual processor/DB evidence, not queue-to-worker or process-restart proof. Concurrent permission/input changes, bounded lifecycle, provider/startup and current-main replay remain open. No push/PR/enablement/deployment action.
