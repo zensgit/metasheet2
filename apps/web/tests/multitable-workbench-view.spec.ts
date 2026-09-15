@@ -1554,6 +1554,111 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
+  // #5750 follow-up, review round 2: echoing "what is on screen" is only honest while what is on
+  // screen is still THIS request's resolution. applyExternalContext awaits, and the composable
+  // documents that window as reachable (loadBaseContext applies the context and only then awaits
+  // /fields, so a rail click or a second sync can move the active triple inside it -- pinned green by
+  // tests/multitable-external-context-sync.spec.ts, where a sheet_orders sync resolves true with
+  // sheet_deals on screen). An intruder's triple echoed as 'applied' would make the embed host pin
+  // the sheet the host never asked for and drop the navigation while reporting success.
+  it('#5750 follow-up echoes the REQUEST, not the intruding triple, when another sheet lands during the apply', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        // This sync's own application...
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        // ...then the rail click that lands inside the /fields await window.
+        workbenchMock.selectSheet('sheet_orders')
+        workbenchMock.selectView('view_grid')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      { requestId: 'req_raced_sheet' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeSheetId.value).toBe('sheet_orders')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      requestId: 'req_raced_sheet',
+    })
+  })
+
+  // Same race, one level finer: the intruder stays on the sheet and only changes the VIEW. The view
+  // the request named EXISTS here, so the views[0] fallback cannot explain the difference -- someone
+  // else moved, and the echo must not report their view as this request's result.
+  it('#5750 follow-up echoes the REQUEST when a concurrent writer switches to another existing view', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectView('view_timeline')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_raced_view' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeViewId.value).toBe('view_timeline')
+    // view_gallery is a real view of this sheet, so nothing about it licenses the swap.
+    expect(workbenchMock.views.value.some((view) => view.id === 'view_gallery')).toBe(true)
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      requestId: 'req_raced_view',
+    })
+  })
+
+  // ...and the base half. A host that posts only { baseId } has the sheet/view filled in from the
+  // current ones, so a base switch that is stomped back leaves a triple whose sheet AND view still
+  // match the request -- only the base gives the race away.
+  it('#5750 follow-up echoes the REQUEST when the base switch is stomped back by another writer', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectBase('base_ops')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_raced_base' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeBaseId.value).toBe('base_ops')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_raced_base',
+    })
+  })
+
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
       { id: 'fld_title', name: 'Title', type: 'string' },

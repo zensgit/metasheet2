@@ -194,6 +194,7 @@ function getEmbedHostStateSnapshot(): EmbedHostStateSnapshot {
 function emitStateSnapshot(data: Record<string, unknown>) {
   const requestId = typeof data.requestId === 'string' || typeof data.requestId === 'number' ? data.requestId : undefined
   const snapshot = getEmbedHostStateSnapshot()
+  reconcileEchoMemoWithWorkbench(snapshot.currentContext)
   postToParent({
     type: 'mt:navigation-state',
     requestId,
@@ -257,12 +258,29 @@ function rememberEchoedNavigationRequestId(requestId: string | number) {
   }
 }
 
+// Review round 2: the dedupe above is keyed on what the HOST last echoed, and the host's own notion of
+// where the frame is (effective* = override ?? props) is written only by applyHostOverrides -- so an
+// in-frame navigation (a user clicking another view inside the iframe) moves the workbench without the
+// host ever hearing about it. A parent that notices the drift the only way it can, by polling
+// mt:get-navigation-state (which answers from the WORKBENCH's real context), and then navigates back to
+// the triple it was last told about, would otherwise get its move suppressed as a duplicate. Whenever
+// that poll shows the frame is not where we said it was, the memo is stale: drop it, so the next landing
+// is news again. A parent that re-sends blindly without polling is indistinguishable from the ping-pong
+// this dedupe exists for, and is still deduped.
+function reconcileEchoMemoWithWorkbench(currentContext: ContextSnapshot) {
+  if (!lastEchoedNavigatedContext) return
+  if (contextMatches(lastEchoedNavigatedContext, normalizeContextSnapshot(currentContext))) return
+  lastEchoedNavigatedContext = null
+}
+
 function emitNavigated(context: ContextSnapshot, requestId?: string | number) {
   // An already-answered requestId is dropped from the payload, not used to drop the payload.
   const echoRequestId = requestId != null && echoedNavigationRequestIds.has(requestId) ? undefined : requestId
-  if (requestId != null) rememberEchoedNavigationRequestId(requestId)
   // The identical echo is already out; this request is answered by it.
   if (lastEchoedNavigatedContext && contextMatches(lastEchoedNavigatedContext, context)) return false
+  // Review round 2: burn the id only HERE, below the triple guard -- a suppressed echo never carried
+  // it, so marking it answered would strip the id from the next echo that really does carry it.
+  if (requestId != null) rememberEchoedNavigationRequestId(requestId)
   lastEchoedNavigatedContext = context
   const payload = {
     type: 'mt:navigated',
@@ -285,13 +303,17 @@ function flushPendingNavigationEcho(context: ContextSnapshot) {
   pendingNavigationEcho.value = null
   // `true` means "this pending echo is settled", not "a message went out": when emitNavigated
   // suppresses a duplicate the request is still answered (by the identical echo already sent plus
-  // its own mt:navigate-result), so callers must keep taking their early return -- re-running the
-  // generic watch echo below it would post exactly the duplicate this suppresses.
+  // its own mt:navigate-result). The effective-id watch relies on that distinction -- it must NOT
+  // fall through to its own generic echo, which would post exactly the duplicate this suppresses.
   emitNavigated(context, requestId)
   return true
 }
 
-async function applyHostOverrides(context: ContextSnapshot) {
+// `requestedContext` is what the HOST asked for, when that differs from what was applied (a request
+// naming a view this sheet does not have resolves back to the view already on screen). It is used for
+// the deep-link cleanup below only: the frame does not move for such a request, but ?recordId=/?mode=
+// still have to go, exactly as they did when the requested triple was the one pinned into the URL.
+async function applyHostOverrides(context: ContextSnapshot, requestedContext?: ContextSnapshot) {
   overrideBaseId.value = context.baseId || undefined
   overrideSheetId.value = context.sheetId || undefined
   overrideViewId.value = context.viewId || undefined
@@ -316,7 +338,7 @@ async function applyHostOverrides(context: ContextSnapshot) {
   // a host navigating back to the plain sheet would otherwise stay pinned on them. Keep doing the
   // replace whenever the raw context would have triggered it and either key is still in the URL.
   const urlShowsResolvedContext = contextMatches(routeContext, { ...context, baseId: resolvedBaseId })
-  const urlShowsRawContext = contextMatches(routeContext, context)
+  const urlShowsRawContext = contextMatches(routeContext, requestedContext ?? context)
   const hasDeepLinkKeys = route.query.recordId !== undefined || route.query.mode !== undefined
   if (urlShowsResolvedContext && (urlShowsRawContext || !hasDeepLinkKeys)) return
   const nextQuery: LocationQueryRaw = {
@@ -370,14 +392,21 @@ async function handleNavigateMessage(data: Record<string, unknown>) {
   })
   if (result.status !== 'applied') return
   pendingNavigationEcho.value = { requestId, context: resolvedContext }
-  if (flushPendingNavigationEcho(normalizeContextSnapshot({
+  // The echo is settled first (it must not wait for a route change that will not happen), but the
+  // overrides pass runs either way: when the frame is already where the request resolves to, it is a
+  // no-op for the ids and still does the ?recordId=/?mode= cleanup the request earned. Passing the
+  // REQUESTED triple keeps that cleanup on its pre-existing trigger -- "the URL does not show what the
+  // host asked for" -- now that the echo carries the resolved triple instead of the requested one.
+  flushPendingNavigationEcho(normalizeContextSnapshot({
     baseId: effectiveBaseId.value,
     sheetId: effectiveSheetId.value,
     viewId: effectiveViewId.value,
-  }))) {
-    return
-  }
-  await applyHostOverrides(resolvedContext)
+  }))
+  await applyHostOverrides(resolvedContext, normalizeContextSnapshot({
+    baseId: nextBaseId,
+    sheetId: nextSheetId,
+    viewId: nextViewId,
+  }))
 }
 
 function onWorkbenchExternalContextResult(payload: {
@@ -396,13 +425,14 @@ function onWorkbenchExternalContextResult(payload: {
   })
   if (payload.status !== 'applied') return
   pendingNavigationEcho.value = { requestId: payload.requestId, context: resolvedContext }
-  if (flushPendingNavigationEcho(normalizeContextSnapshot({
+  // Same two-step as handleNavigateMessage. The replayed request's own raw triple is not in hand here
+  // (the workbench parked it, not the host), so the resolved one doubles as it: a deferred replay that
+  // lands exactly on the URL's triple is a frame that never moved, and leaves the deep link alone.
+  flushPendingNavigationEcho(normalizeContextSnapshot({
     baseId: effectiveBaseId.value,
     sheetId: effectiveSheetId.value,
     viewId: effectiveViewId.value,
-  }))) {
-    return
-  }
+  }))
   void applyHostOverrides(resolvedContext)
 }
 

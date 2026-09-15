@@ -1041,6 +1041,145 @@ describe('multitable embed host guards', () => {
     // ...but 'req_dup' was answered exactly once.
     expect(navigatedPosts().filter((payload) => payload.requestId === 'req_dup')).toHaveLength(1)
   })
+
+  // Review round 2: the ?recordId=/?mode= cleanup used to ride along on the URL rewrite, and the URL
+  // was rewritten because the echoed (= requested) triple differed from the one on screen. Now that
+  // the workbench echoes the RESOLVED triple, a request naming a view this sheet does not have
+  // resolves back to the view already on screen -- the frame does not move, so nothing rewrites the
+  // URL, and the deep-link keys would survive a navigation that was supposed to clear them.
+  it('#5750 follow-up still strips recordId/mode when the request resolves back to the view on screen', async () => {
+    const host = await mountRouteHost('/multitable/sheet_orders/view_grid?baseId=base_ops&recordId=rec_1&mode=readonly')
+    expect(host.router.currentRoute.value.query.recordId).toBe('rec_1')
+    // What the workbench answers for a dead view id: views[0], which here is the view on screen.
+    requestExternalContextSyncSpy.mockResolvedValueOnce({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+    })
+
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:navigate', baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted', requestId: 'req_dead_view' },
+    }))
+    await vi.waitFor(() => expect(requestExternalContextSyncSpy).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(host.router.currentRoute.value.query.recordId).toBeUndefined())
+
+    expect(host.router.currentRoute.value.query.mode).toBeUndefined()
+    // ...while the URL keeps the live view, never the dead one the host asked for.
+    expect(host.router.currentRoute.value.params.viewId).toBe('view_grid')
+    expect(host.router.currentRoute.value.params.sheetId).toBe('sheet_orders')
+    expect(host.router.currentRoute.value.query.baseId).toBe('base_ops')
+    const navigatedPosts = parentPostMessageSpy.mock.calls
+      .map(([payload]) => payload as { type?: string; viewId?: string; requestId?: string | number })
+      .filter((payload) => payload?.type === 'mt:navigated')
+    expect(navigatedPosts).toHaveLength(1)
+    expect(navigatedPosts[0]?.viewId).toBe('view_grid')
+    expect(navigatedPosts[0]?.requestId).toBe('req_dead_view')
+  })
+
+  // Review round 2: the triple guard is keyed on what the HOST last echoed, and the host's overrides
+  // never see an in-frame navigation (a user clicking another view inside the iframe) -- so a parent
+  // that polls mt:get-navigation-state, sees the drift and navigates back would have its real move
+  // suppressed as a duplicate. The poll is the moment the host learns the frame is not where it said
+  // it was; from then on that landing is news again.
+  it('#5750 follow-up re-echoes a triple the frame drifted away from once the parent has polled the drift', async () => {
+    const host = await mountRouteHost()
+    const postedOfType = (type: string) =>
+      parentPostMessageSpy.mock.calls
+        .map(([payload]) => payload as { type?: string; baseId?: string; sheetId?: string; viewId?: string; requestId?: string | number; currentContext?: { viewId?: string } })
+        .filter((payload) => payload?.type === type)
+
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:navigate', baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery', requestId: 'req_first' },
+    }))
+    await vi.waitFor(() => expect(postedOfType('mt:navigated')).toHaveLength(1))
+
+    // The user switches view INSIDE the frame: the workbench moves, the host's overrides do not.
+    getEmbedHostStateSpy.mockReturnValue({
+      currentContext: { baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_kanban' },
+      hasBlockingState: false,
+      blockingReason: null,
+      hasUnsavedDrafts: false,
+      busy: false,
+      pendingContext: null,
+    })
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:get-navigation-state', requestId: 'req_poll' },
+    }))
+    await vi.waitFor(() => expect(postedOfType('mt:navigation-state')).toHaveLength(1))
+    expect(postedOfType('mt:navigation-state')[0]?.currentContext?.viewId).toBe('view_kanban')
+
+    // The parent corrects back to the triple it was last told about. That is a real move.
+    getEmbedHostStateSpy.mockReturnValue({
+      currentContext: { baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery' },
+      hasBlockingState: false,
+      blockingReason: null,
+      hasUnsavedDrafts: false,
+      busy: false,
+      pendingContext: null,
+    })
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:navigate', baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery', requestId: 'req_correct' },
+    }))
+    await vi.waitFor(() => expect(postedOfType('mt:navigate-result')).toHaveLength(2))
+    await vi.waitFor(() => expect(postedOfType('mt:navigated')).toHaveLength(2))
+
+    expect(postedOfType('mt:navigated').at(-1)).toEqual({
+      type: 'mt:navigated',
+      baseId: 'base_people',
+      sheetId: 'sheet_people',
+      viewId: 'view_gallery',
+      requestId: 'req_correct',
+    })
+    expect(host.navigated).toEqual([
+      { sheetId: 'sheet_people', viewId: 'view_gallery' },
+      { sheetId: 'sheet_people', viewId: 'view_gallery' },
+    ])
+  })
+
+  // Review round 2: a requestId is spent by an echo that GOES OUT. Recording it on the suppressed
+  // path would answer a request with silence and then strip its id from the echo that really carries
+  // it, leaving the parent an uncorrelatable message for a request it never saw answered.
+  it('#5750 follow-up keeps the requestId usable when its first echo was suppressed as a duplicate', async () => {
+    await mountRouteHost()
+    const navigatedPosts = () =>
+      parentPostMessageSpy.mock.calls
+        .map(([payload]) => payload as { type?: string; sheetId?: string; requestId?: string | number })
+        .filter((payload) => payload?.type === 'mt:navigated')
+
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:navigate', baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery', requestId: 'req_a' },
+    }))
+    await vi.waitFor(() => expect(navigatedPosts()).toHaveLength(1))
+
+    // A workbench result for a FRESH request repeats the triple already echoed: suppressed.
+    replayExternalContextResult?.({
+      status: 'applied',
+      context: { baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery' },
+      requestId: 'req_late',
+    })
+    await nextTick()
+    await nextTick()
+    expect(navigatedPosts()).toHaveLength(1)
+
+    // The same request then really moves the frame -- its echo must still carry its id.
+    replayExternalContextResult?.({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_deals', viewId: 'view_board' },
+      requestId: 'req_late',
+    })
+    await vi.waitFor(() => expect(navigatedPosts()).toHaveLength(2))
+    expect(navigatedPosts().at(-1)).toEqual({
+      type: 'mt:navigated',
+      baseId: 'base_ops',
+      sheetId: 'sheet_deals',
+      viewId: 'view_board',
+      requestId: 'req_late',
+    })
+  })
 })
 
 // P3-D2: positive coverage for the two owner-named origin fixes -- the wildcard is no longer honored
