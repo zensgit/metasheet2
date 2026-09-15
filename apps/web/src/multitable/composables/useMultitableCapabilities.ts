@@ -19,6 +19,13 @@ export interface MultitableCapabilities {
   // No role fallback and no fallbackKey on purpose: an old backend that does not send it, or a
   // legacy role-string source, yields false (delete entry hidden), never a guess from canManageFields.
   canDeleteSheet: Ref<boolean>
+  /**
+   * Record-level approval submit (multitable x approval phase 2). Server-derived from the
+   * multitable-namespaced `multitable:submit-approval` permission, exactly like canDeleteSheet:
+   * NO role fallback and NO fallbackKey on purpose, so a legacy role-string source or an older
+   * backend that never sends the key yields false and the drawer entry stays hidden.
+   */
+  canSubmitApproval: Ref<boolean>
 }
 
 const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
@@ -73,5 +80,6 @@ export function useMultitableCapabilities(
     // canSendNotification; current backends send it explicitly.
     canSendNotification: caps('canSendNotification', 'canEditRecord'),
     canDeleteSheet: caps('canDeleteSheet'),
+    canSubmitApproval: caps('canSubmitApproval'),
   }
 }

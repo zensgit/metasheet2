@@ -37,7 +37,6 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
-  MultitableCommentReaction,
   MultitableCommentPresenceSummary,
   CommentMentionSummary,
   CommentMentionSummaryItem,
@@ -81,6 +80,12 @@ import type {
   DingTalkPersonDelivery,
   DingTalkGroupDestinationInput,
   MetaDeletedRecord,
+  MetaApprovalTemplateSummary,
+  MetaApprovalTemplateDetail,
+  MetaApprovalFormField,
+  MetaApprovalFormOption,
+  MetaRecordApprovalSubmission,
+  MetaRecordApprovalDrift,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 import { apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
@@ -295,6 +300,179 @@ function normalizeFieldErrors(fieldErrors: unknown, isZh = false): Record<string
 function unwrapDataBody(body: unknown): unknown {
   if (!body || typeof body !== 'object') return undefined
   return (body as { data?: unknown }).data
+}
+
+/**
+ * 记录级送审 (多维表 x 审批 阶段二, design 4.1/4.4) — the typed 409 the submit route answers when the
+ * (sheet, record, template) triple already has a `creating`/`pending` row (its partial unique index).
+ * Carries the IN-FLIGHT instance's identifiers so the dialog can point at it instead of showing a bare
+ * error: the FE never invents them, it only renders what the server sent (both keys stay OPTIONAL — an
+ * older/leaner backend that omits them degrades to the plain "already in approval" notice).
+ */
+export interface RecordApprovalInFlightError extends Error {
+  status: number
+  code?: string
+  approvalInstanceId?: string
+  requestNo?: string
+}
+
+export const RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME = 'MultitableRecordApprovalInFlightError'
+
+export function isRecordApprovalInFlightError(value: unknown): value is RecordApprovalInFlightError {
+  return value instanceof Error && value.name === RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME
+}
+
+// The 409 body may arrive flat (`{ code, approvalInstanceId, ... }`), under the shared
+// `{ error: { ... } }` envelope the rest of this file's errors use, or — what the REAL route sends —
+// one level deeper still, under `error.details`:
+//   { ok:false, error:{ code, message, details:{ submissionId, approvalInstanceId, requestNo, status } } }
+// (core-backend/src/routes/multitable-record-approvals.ts `fail()` + the service's RecordApprovalError
+// details, pinned by its own unit test). Read ALL THREE and let the innermost win: reading `details`
+// too is strictly more tolerant than reading only the flat keys, so a leaner backend still degrades to
+// the plain "already in approval" notice instead of silently losing the identifiers.
+function recordApprovalConflictFields(body: unknown): Record<string, unknown> {
+  if (!isPlainObject(body)) return {}
+  const nested = isPlainObject(body.error) ? body.error : undefined
+  const data = isPlainObject(body.data) ? body.data : undefined
+  const detailsCandidate = nested?.details ?? data?.details ?? body.details
+  const details = isPlainObject(detailsCandidate) ? detailsCandidate : undefined
+  return { ...body, ...(data ?? {}), ...(nested ?? {}), ...(details ?? {}) }
+}
+
+/**
+ * The page size the record-drawer template picker asks for. The route's default is 20 (approvals.ts
+ * `parsePaging(req.query.pageSize, 20)`) and its hard ceiling is MAX_APPROVAL_PAGE_SIZE = 200, so a
+ * tenant with more than 20 published templates would otherwise get a SILENTLY truncated picker with no
+ * paging and (by design) no free-text id fallback. We ask for the ceiling and the dialog says so when
+ * the answer is full.
+ */
+export const RECORD_APPROVAL_TEMPLATE_PAGE_SIZE = 200
+
+function normalizeApprovalTemplateSummary(value: unknown): MetaApprovalTemplateSummary | null {
+  if (!isPlainObject(value) || typeof value.id !== 'string' || !value.id) return null
+  const name = optionalStringValue(value.name)
+  const status = optionalStringValue(value.status)
+  return { id: value.id, ...(name ? { name } : {}), ...(status ? { status } : {}) }
+}
+
+function normalizeApprovalFormOptions(value: unknown): MetaApprovalFormOption[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const options = value
+    .map((entry): MetaApprovalFormOption | null => {
+      // A bare string option (`["A","B"]`) is as common in hand-authored schemas as the {label,value} pair.
+      if (typeof entry === 'string') return entry ? { label: entry, value: entry } : null
+      if (!isPlainObject(entry)) return null
+      const rawValue = typeof entry.value === 'string' ? entry.value : undefined
+      const label = optionalStringValue(entry.label) ?? rawValue
+      if (rawValue === undefined || label === undefined) return null
+      return { label, value: rawValue }
+    })
+    .filter((entry): entry is MetaApprovalFormOption => entry !== null)
+  return options.length > 0 ? options : undefined
+}
+
+// VALUES-FREE on purpose: `defaultValue` is deliberately NOT carried over — the submit dialog starts
+// empty and the actor types what they mean to submit.
+function normalizeApprovalFormField(value: unknown): MetaApprovalFormField | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id) ?? optionalStringValue(value.fieldId)
+  if (!id) return null
+  const type = optionalStringValue(value.type) ?? 'unknown'
+  const label = optionalStringValue(value.label) ?? optionalStringValue(value.name) ?? id
+  const placeholder = optionalStringValue(value.placeholder)
+  const options = normalizeApprovalFormOptions(value.options)
+  return {
+    id,
+    type,
+    label,
+    ...(value.required === true ? { required: true } : {}),
+    ...(placeholder ? { placeholder } : {}),
+    ...(options ? { options } : {}),
+  }
+}
+
+function normalizeApprovalTemplateDetail(body: unknown, fallbackId: string): MetaApprovalTemplateDetail {
+  const root = isPlainObject(body) ? body : {}
+  // `{ template: {...} }` / `{ data: {...} }` envelopes and the bare DTO all reach here.
+  const record = isPlainObject(root.template) ? root.template : isPlainObject(root.data) ? root.data : root
+  const activeVersion = isPlainObject(record.activeVersion) ? record.activeVersion : undefined
+  const schema = isPlainObject(record.formSchema)
+    ? record.formSchema
+    : activeVersion && isPlainObject(activeVersion.formSchema)
+      ? activeVersion.formSchema
+      : {}
+  const rawFields = Array.isArray(schema.fields)
+    ? schema.fields
+    : Array.isArray(record.formFields)
+      ? record.formFields
+      : Array.isArray(record.fields)
+        ? record.fields
+        : []
+  const name = optionalStringValue(record.name)
+  const status = optionalStringValue(record.status)
+  // Both ids are VALUES-FREE identifiers carried for ONE reason: GET /api/approval-templates/:id
+  // serves the LATEST version's form schema (ApprovalProductService.getTemplate -> loadTemplateBundle
+  // preference 'latest'), while the create path validates against the ACTIVE published one
+  // ('active'). When the two differ the template has an unpublished draft edit and the form on screen
+  // is not the form the server will validate — the dialog warns instead of sending the actor into an
+  // unfixable 400. Fixing the read itself is a backend change, out of this surface's reach.
+  const activeVersionId = optionalStringValue(record.activeVersionId) ?? optionalStringValue(record.active_version_id)
+  const latestVersionId = optionalStringValue(record.latestVersionId) ?? optionalStringValue(record.latest_version_id)
+  return {
+    id: optionalStringValue(record.id) ?? fallbackId,
+    ...(name ? { name } : {}),
+    ...(status ? { status } : {}),
+    ...(activeVersionId ? { activeVersionId } : {}),
+    ...(latestVersionId ? { latestVersionId } : {}),
+    formFields: rawFields
+      .map((entry: unknown) => normalizeApprovalFormField(entry))
+      .filter((entry): entry is MetaApprovalFormField => entry !== null),
+  }
+}
+
+function normalizeRecordApprovalDrift(value: unknown): MetaRecordApprovalDrift {
+  const record = objectValue(value)
+  const changedFieldIds = Array.isArray(record.changedFieldIds)
+    ? record.changedFieldIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : []
+  // `changed` is the server's own verdict; an absent flag with a non-empty id list still means changed.
+  return { changed: record.changed === true || changedFieldIds.length > 0, changedFieldIds }
+}
+
+function normalizeRecordApprovalSubmission(value: unknown): MetaRecordApprovalSubmission | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id) ?? optionalStringValue(value.submissionId)
+  const templateId = optionalStringValue(value.templateId) ?? optionalStringValue(value.template_id)
+  if (!id || !templateId) return null
+  const templateName = optionalStringValue(value.templateName) ?? optionalStringValue(value.template_name)
+  const status = optionalStringValue(value.status) ?? 'pending'
+  const outcome = optionalStringValue(value.outcome)
+  const approvalInstanceId = optionalStringValue(value.approvalInstanceId) ?? optionalStringValue(value.approval_instance_id)
+  const requestNo = optionalStringValue(value.requestNo)
+    ?? optionalStringValue(value.approvalRequestNo)
+    ?? optionalStringValue(value.request_no)
+  const submittedBy = optionalStringValue(value.submittedBy) ?? optionalStringValue(value.submitted_by)
+  const submittedByName = optionalStringValue(value.submittedByName) ?? optionalStringValue(value.submitted_by_name)
+  const createdAt = optionalStringValue(value.createdAt) ?? optionalStringValue(value.created_at)
+  const completedAt = optionalStringValue(value.completedAt) ?? optionalStringValue(value.completed_at)
+  const error = optionalStringValue(value.error)
+  const rawVersion = value.recordVersionAtSubmit ?? value.record_version_at_submit
+  return {
+    id,
+    templateId,
+    ...(templateName ? { templateName } : {}),
+    status,
+    ...(outcome ? { outcome } : {}),
+    ...(approvalInstanceId ? { approvalInstanceId } : {}),
+    ...(requestNo ? { requestNo } : {}),
+    ...(submittedBy ? { submittedBy } : {}),
+    ...(submittedByName ? { submittedByName } : {}),
+    ...(typeof rawVersion === 'number' && Number.isFinite(rawVersion) ? { recordVersionAtSubmit: rawVersion } : {}),
+    ...(createdAt ? { createdAt } : {}),
+    ...(completedAt ? { completedAt } : {}),
+    ...(error ? { error } : {}),
+    drift: normalizeRecordApprovalDrift(value.drift),
+  }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -789,7 +967,13 @@ function normalizeRecordSubscriptionNotification(
       : payload?.eventType === 'notification.sent' ? 'notification.sent'
         : payload?.eventType === 'record.updated' ? 'record.updated'
           : null
-  if (!id || !sheetId || !recordId || !userId || !eventType) return null
+  // recordId is REQUIRED for record-scoped rows (comment.created / record.updated always carry the
+  // record they point at) but OPTIONAL for notification.sent: a send_notification action fired by a
+  // record-less trigger (approval.completed / approval.task_created / schedule / webhook) persists a
+  // row with recordId '' — the server's unread-count already counts it, so dropping it here made the
+  // bell badge say "1" while the panel said "暂无通知" (#5745 §5.4).
+  if (!id || !sheetId || !userId || !eventType) return null
+  if (!recordId && eventType !== 'notification.sent') return null
   return {
     id,
     sheetId,
@@ -1818,8 +2002,15 @@ export class MultitableApiClient implements CommentsApiClient {
    * template picker. Guarded server-side by `approvals:read` — an automation author lacking that permission
    * gets 401/403, which the editor degrades to a free-text template-id input (never a hard dependency).
    */
-  async listApprovalTemplates(): Promise<{ data: Array<{ id: string; name?: string }>; total: number }> {
-    const res = await this.fetch('/api/approval-templates')
+  async listApprovalTemplates(
+    params?: { status?: 'published' | 'draft' | 'archived'; pageSize?: number },
+  ): Promise<{ data: MetaApprovalTemplateSummary[]; total: number }> {
+    // 记录级送审 (design 5.1): the record drawer needs PUBLISHED templates only — the route already
+    // supports `?status=`, so the filter happens server-side. No argument = the pre-existing, unfiltered
+    // call the automation editor has always made (byte-identical URL, `qs` drops an undefined value).
+    // `pageSize` is likewise opt-in: only a caller that has a truncation story to tell (the submit
+    // dialog) sends it, so the editor's URL stays byte-identical to what #5747 shipped.
+    const res = await this.fetch(`/api/approval-templates${qs({ status: params?.status, pageSize: params?.pageSize })}`)
     // The route answers `{ data: [...], total }`; parseJson unwraps the `data` envelope, so the body
     // arrives here as the bare array. Re-wrap so callers get the documented `{ data, total }` shape
     // (before this the editor read `.data` off the array, always got `[]`, and silently fell back to
@@ -1830,8 +2021,106 @@ export class MultitableApiClient implements CommentsApiClient {
       : isPlainObject(body) && Array.isArray(body.data)
         ? body.data
         : []
-    const items = data.filter((item): item is { id: string; name?: string } => isPlainObject(item) && typeof item.id === 'string')
+    const items = data
+      .map((item) => normalizeApprovalTemplateSummary(item))
+      .filter((item): item is MetaApprovalTemplateSummary => item !== null)
     return { data: items, total: items.length }
+  }
+
+  /**
+   * 记录级送审 (design 5.2): ONE approval template plus its active version's form fields, for the
+   * generic record-drawer submit form. Same route the approval centre's own `getTemplate` uses
+   * (`approvals:read` guarded) — but normalized HERE, values-free, rather than importing anything from
+   * `src/approvals/**` (separate window; the multitable surface must not depend on its DTO churn).
+   * A template with no readable form schema normalizes to an EMPTY field list (the dialog then has
+   * nothing required to enforce and submits `{}`), never a throw.
+   */
+  async getApprovalTemplate(templateId: string): Promise<MetaApprovalTemplateDetail> {
+    const res = await this.fetch(`/api/approval-templates/${encodeURIComponent(templateId)}`)
+    const body = await this.parseJson<unknown>(res)
+    return normalizeApprovalTemplateDetail(body, templateId)
+  }
+
+  /**
+   * 记录级送审 (design 4.1): create an approval instance BOUND to this record. The server owns every
+   * decision that matters (capability + `approvals:write`, template published + readable, the
+   * in-flight partial unique index, the snapshot/version anchor) — this method only carries
+   * `{ templateId, formData }` and normalizes the answer.
+   *
+   * 409 `RECORD_APPROVAL_IN_FLIGHT` is mapped to a TYPED error (see `isRecordApprovalInFlightError`)
+   * carrying the in-flight `approvalInstanceId`/`requestNo` when the server sends them, because the
+   * dialog's whole job in that case is to point at the existing instance. Every other non-2xx keeps
+   * the shared MultitableApiError shape (`.status`/`.code`) parseJson throws.
+   */
+  async submitRecordApproval(
+    sheetId: string,
+    recordId: string,
+    body: { templateId: string; formData: Record<string, unknown> },
+  ): Promise<MetaRecordApprovalSubmission> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/approvals`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateId: body.templateId, formData: body.formData }),
+      },
+    )
+    if (res.status === 409) {
+      const raw = await res.text()
+      const parsed = raw ? safeParseJson(raw) : null
+      const fields = recordApprovalConflictFields(parsed)
+      const payload = normalizeApiErrorPayload(parsed, this.resolveIsZh())
+      const error = new Error(
+        payload.message ?? apiDefaultErrorMessage(payload.code, res.status, this.resolveIsZh()),
+      ) as RecordApprovalInFlightError
+      error.name = RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME
+      error.status = res.status
+      error.code = payload.code ?? optionalStringValue(fields.code)
+      const approvalInstanceId = optionalStringValue(fields.approvalInstanceId)
+        ?? optionalStringValue(fields.approval_instance_id)
+      const requestNo = optionalStringValue(fields.requestNo)
+        ?? optionalStringValue(fields.approvalRequestNo)
+        ?? optionalStringValue(fields.request_no)
+      if (approvalInstanceId) error.approvalInstanceId = approvalInstanceId
+      if (requestNo) error.requestNo = requestNo
+      throw error
+    }
+    const parsedBody = await this.parseJson<unknown>(res)
+    const envelope = isPlainObject(parsedBody) && isPlainObject(parsedBody.submission)
+      ? parsedBody.submission
+      : parsedBody
+    const submission = normalizeRecordApprovalSubmission(envelope)
+    if (!submission) {
+      const error = new Error(apiDefaultErrorMessage(undefined, res.status, this.resolveIsZh())) as Error & { status?: number }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      throw error
+    }
+    return submission
+  }
+
+  /**
+   * 记录级送审 (design 4.1): this record's submissions, newest first, each with the server-computed
+   * `drift` (changed flag + changed FIELD IDS, never values). Needs only `canRead`; an unreadable or
+   * empty answer normalizes to `[]` so the panel shows its empty state instead of breaking.
+   */
+  async listRecordApprovals(sheetId: string, recordId: string): Promise<MetaRecordApprovalSubmission[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/approvals`,
+    )
+    const body = await this.parseJson<unknown>(res)
+    const rows = Array.isArray(body)
+      ? body
+      : isPlainObject(body) && Array.isArray(body.submissions)
+        ? body.submissions
+        : isPlainObject(body) && Array.isArray(body.items)
+          ? body.items
+          : isPlainObject(body) && Array.isArray(body.data)
+            ? body.data
+            : []
+    return rows
+      .map((row: unknown) => normalizeRecordApprovalSubmission(row))
+      .filter((row): row is MetaRecordApprovalSubmission => row !== null)
   }
 
   /**

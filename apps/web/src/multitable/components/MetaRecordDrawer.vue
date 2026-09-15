@@ -32,6 +32,7 @@
     :upload-fn="uploadFn"
     :delete-attachment-fn="deleteAttachmentFn"
     :can-manage-record-permissions="canManageRecordPermissions"
+    :can-submit-approval="canSubmitApproval"
     :sheet-id="sheetId"
     :api-client="apiClient"
     :ai-shortcut="aiShortcut"
@@ -54,6 +55,7 @@
     @ai-preview="(field: MetaField) => emit('ai-preview', field)"
     @ai-run="(field: MetaField) => emit('ai-run', field)"
     @run-button="(payload: { recordId: string; field: MetaField }) => emit('run-button', payload)"
+    @approval-submitted="(submission: MetaRecordApprovalSubmission) => emit('approval-submitted', submission)"
   />
 </template>
 
@@ -69,6 +71,7 @@ import type {
   MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRecordApprovalSubmission,
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
@@ -100,6 +103,10 @@ withDefaults(defineProps<{
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canManageRecordPermissions?: boolean
+  /** 记录级送审 (多维表 × 审批 阶段二 §5): forwarded 1:1 to MetaRecordInspector's own prop — see that
+   *  component's doc comment. Optional with the SAME fail-closed default (absent ⇒ no 送审 entry), so
+   *  every pre-existing consumer of this deprecated shell is unaffected. */
+  canSubmitApproval?: boolean
   sheetId?: string
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
@@ -146,5 +153,8 @@ const emit = defineEmits<{
    * handler — which owns the runButton call + result.status branching + the
    * shared buttonRunPending key — handles both surfaces with no extra logic. */
   (e: 'run-button', payload: { recordId: string; field: MetaField }): void
+  /** 记录级送审 (阶段二 §5): re-emitted verbatim from MetaRecordInspector so a consumer of this shell
+   * sees exactly the inspector's event surface (the compat contract this file promises). */
+  (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
 </script>

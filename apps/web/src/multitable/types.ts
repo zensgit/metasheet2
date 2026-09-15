@@ -529,11 +529,12 @@ export interface MetaCapabilities {
   // (the route is authoritative); the FE mirror is OPTIONAL so existing capability fixtures
   // need not set it — treat absent as false. Full sheet write/admin only (not write-own).
   canSendNotification?: boolean
-  /** Record-level 送审 capability (multitable × approval phase 2, `multitable:submit-approval`).
-   *  Server-enforced — POST /sheets/:sheetId/records/:recordId/approvals re-checks it, and the approval
-   *  product independently re-checks `approvals:write` — so this mirror is a VISIBILITY hint only.
-   *  OPTIONAL: absent/false ⇒ the 送审 entry is HIDDEN (fail-closed, same discipline as the flags above),
-   *  and existing capability fixtures need not set it. The phase-2b FE slice consumes it. */
+  /**
+   * 记录级送审 (多维表 × 审批 阶段二, design §4.2): server-derived from the multitable-namespaced
+   * `multitable:submit-approval` permission. OPTIONAL and fail-closed — absent/false hides the
+   * drawer's 送审 entry entirely, and the route re-enforces it (plus `approvals:write`, which
+   * `createApproval` checks on its own side). Never derived from canEditRecord or a role string.
+   */
   canSubmitApproval?: boolean
 }
 
@@ -1633,4 +1634,84 @@ export interface FieldValidationRule {
   type: FieldValidationRuleType
   value?: string | number | string[]
   message?: string
+}
+
+// --- 记录级送审 / Record-level approval submit (多维表 × 审批 阶段二, design
+//     docs/development/takeover-beiliao-20260821/multitable-approval-phase2-record-submit-design-20260915.md §5) ---
+// These mirror the phase-2b BACKEND contract (design §4.1) rather than the approval centre's own DTOs:
+// the multitable surface must not import from `src/approvals/**` (separate window, separate lifecycle),
+// so the wire shapes it needs are declared — deliberately narrow and VALUES-FREE — here instead.
+
+/** A published approval template as the multitable template picker sees it (id + display name only). */
+export interface MetaApprovalTemplateSummary {
+  id: string
+  name?: string
+  /** `published` / `draft` / `archived` when the server sends it; absent on older payloads. */
+  status?: string
+}
+
+/** One renderable option of a `select` form field. */
+export interface MetaApprovalFormOption {
+  label: string
+  value: string
+}
+
+/**
+ * One form field of a template's ACTIVE version, normalized down to what the generic submit dialog
+ * can render. `type` is kept as the RAW server string (normalization to a render kind happens in the
+ * dialog) so an unknown type is visible as itself rather than silently coerced into a text box.
+ * No `defaultValue` on purpose: the picker is values-free until the user types.
+ */
+export interface MetaApprovalFormField {
+  id: string
+  type: string
+  label: string
+  required?: boolean
+  placeholder?: string
+  options?: MetaApprovalFormOption[]
+}
+
+/** A template + its active version's form fields (GET /api/approval-templates/:id). */
+export interface MetaApprovalTemplateDetail {
+  id: string
+  name?: string
+  status?: string
+  /**
+   * The published version the SERVER validates a submission against, and the newest authored version
+   * whose form schema this read actually returns. They differ exactly when the template has an
+   * unpublished draft edit — the dialog warns in that case (the fields on screen are then not the
+   * fields the create path prunes/validates against). Ids only; never a schema, never a value.
+   */
+  activeVersionId?: string
+  latestVersionId?: string
+  formFields: MetaApprovalFormField[]
+}
+
+/**
+ * Drift of the record since it was submitted (design §4.1): the backend compares the stored snapshot
+ * with the live row and returns only the CHANGED FIELD IDS — never a value, on either side.
+ */
+export interface MetaRecordApprovalDrift {
+  changed: boolean
+  changedFieldIds: string[]
+}
+
+/** One `multitable_record_approval_submissions` row as the record drawer reads it (design §3/§4.1). */
+export interface MetaRecordApprovalSubmission {
+  id: string
+  templateId: string
+  /** Present only when the backend joins the template name; the panel falls back to `templateId`. */
+  templateName?: string
+  status: string
+  outcome?: string
+  approvalInstanceId?: string
+  requestNo?: string
+  submittedBy?: string
+  submittedByName?: string
+  recordVersionAtSubmit?: number
+  createdAt?: string
+  completedAt?: string
+  /** Values-free error CODE for a `failed` row (never a message carrying record data). */
+  error?: string
+  drift: MetaRecordApprovalDrift
 }
