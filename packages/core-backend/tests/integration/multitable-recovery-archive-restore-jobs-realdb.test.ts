@@ -1,5 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { fork } from 'node:child_process'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -50,6 +52,7 @@ import { executeRecoveryArchiveAsyncRestoreChunk } from '../../src/multitable/re
 import {
   createLocalRecoveryArchiveObjectStoreProvider,
   createTransactionGuardedRecoveryArchiveObjectStore,
+  type RecoveryArchiveObjectStoreProvider,
 } from '../../src/multitable/recovery-archive-object-store'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 import {
@@ -94,6 +97,7 @@ import {
   type RecoveryArchiveDurableFixture,
   type RecoveryArchiveDurableFixtureObject,
 } from '../utils/recovery-archive-durable-fixture'
+import type { ArchiveProcessClaimSnapshot, ArchiveProcessWorkerInput, ArchiveProcessWorkerMessage } from '../utils/recovery-archive-process-worker'
 
 const runRealDb =
   Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
@@ -161,6 +165,91 @@ const transaction: RecoveryArchiveRestoreJobTransaction = async (work) => {
   } finally {
     transactionDepth -= 1
     client.release()
+  }
+}
+
+async function runArchiveProcessWorker(
+  input: Omit<ArchiveProcessWorkerInput, 'applicationName'>,
+  provider: RecoveryArchiveObjectStoreProvider,
+): Promise<ArchiveProcessWorkerMessage> {
+  const applicationName = `tm_archive_process_${randomUUID().replaceAll('-', '')}`
+  const fixtureRequire = createRequire(__filename)
+  const child = fork(join(__dirname, '../utils/recovery-archive-process-worker.ts'), [], {
+    execArgv: ['--require', fixtureRequire.resolve('tsx/cjs')],
+    serialization: 'advanced',
+    env: { ...process.env, NODE_ENV: 'test', METASHEET_ARCHIVE_PROCESS_FIXTURE: '1' },
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  })
+  const pendingReads = new Set<Promise<void>>()
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once('exit', (code, signal) => resolve({ code, signal }))
+  })
+  const waitForExit = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        exited,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('archive_process_exit_timeout')), 5_000)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const message = await new Promise<ArchiveProcessWorkerMessage>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('archive_process_message_timeout')), 60_000)
+      child.once('error', () => reject(new Error('archive_process_spawn_failed')))
+      child.once('exit', () => reject(new Error('archive_process_exited_without_result')))
+      child.on('message', (result: ArchiveProcessWorkerMessage) => {
+        if (result.kind === 'read-object') {
+          const read = provider.get(result.request).then(
+            (object) => {
+              if (child.connected) child.send({ kind: 'object-result', requestId: result.requestId, result: object }, () => {})
+            },
+            () => {
+              if (child.connected) child.send({ kind: 'object-result', requestId: result.requestId }, () => {})
+            },
+          )
+          pendingReads.add(read)
+          void read.finally(() => pendingReads.delete(read))
+          return
+        }
+        if (result.kind === 'error') reject(new Error(result.code))
+        else resolve(result)
+      })
+      child.send({ ...input, applicationName }, (error) => {
+        if (error) reject(new Error('archive_process_send_failed'))
+      })
+    })
+    expect(message.kind).toBe(input.phase === 'finish' ? 'done' : 'boundary')
+    if (message.kind === 'error' || message.kind === 'read-object') throw new Error('archive_process_result_missing')
+    expect(message.pid).toBe(child.pid)
+    expect(message.pid).not.toBe(process.pid)
+    if (message.kind === 'boundary') {
+      expect(message.phase).toBe(input.phase)
+      expect(child.kill('SIGKILL')).toBe(true)
+      expect(await waitForExit()).toEqual({ code: null, signal: 'SIGKILL' })
+    } else {
+      expect(await waitForExit()).toEqual({ code: 0, signal: null })
+    }
+    const deadline = Date.now() + 5_000
+    for (;;) {
+      const live = await q('SELECT count(*)::int AS count FROM pg_stat_activity WHERE application_name=$1', [applicationName])
+      if ((live.rows[0] as { count: number }).count === 0) break
+      if (Date.now() >= deadline) throw new Error('archive_process_backend_residue')
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    return message
+  } finally {
+    clearTimeout(timer)
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await waitForExit()
+    }
+    for (const read of pendingReads) await read
   }
 }
 
@@ -872,9 +961,9 @@ async function runOneChunk(
   })
 }
 
-async function waitUntil(timestamp: string): Promise<void> {
+async function waitUntil(timestamp: string, timeoutMs = 15_000): Promise<void> {
   // Ten-second fixture deadlines need a separate allowance for polling and scheduling.
-  const deadline = Date.now() + 15_000
+  const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const result = await q(`SELECT clock_timestamp() >= $1::timestamptz AS reached`, [timestamp])
     if ((result.rows[0] as { reached?: unknown } | undefined)?.reached === true) return
@@ -1696,9 +1785,22 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       recoveryMode: 'reset' as const,
       resumeAfterCrash: false,
     },
+    {
+      label: 'revert after SIGKILL before COMMIT and a fresh-process restart',
+      recoveryMode: 'revert' as const,
+      resumeAfterCrash: true,
+      processBoundary: 'before_commit' as const,
+    },
+    {
+      label: 'revert after SIGKILL after COMMIT before acknowledgment and a fresh-process restart',
+      recoveryMode: 'revert' as const,
+      resumeAfterCrash: true,
+      processBoundary: 'after_commit' as const,
+    },
   ])('runs one real encrypted archive $label through the production facade', async ({
     recoveryMode,
     resumeAfterCrash,
+    processBoundary,
   }) => {
     const expiresAt = '2099-12-31T00:00:00.000Z'
     const root = await mkdtemp(join(tmpdir(), `tm-composed-async-${recoveryMode}-`))
@@ -1707,6 +1809,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     let durable: RecoveryArchiveDurableFixture | undefined
     let fieldId = ''
     let recordIds: string[] = []
+    const keyMaterial = { dek: randomBytes(32), wrappedDek: randomBytes(48) }
 
     try {
       const fixture = await seedVerifiedArchive(
@@ -1776,6 +1879,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
             objectStore: provider,
             transactionDepth: depthProbe,
             objectExpiresAt: archiveExpiresAt,
+            keyMaterial,
           })
           return durable
         },
@@ -1858,7 +1962,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       )
       const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
       expect(candidate?.jobId).toBe(accepted.id)
-      const firstClaim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+      const firstClaim = processBoundary ? undefined : await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
         workerOwnerId: `${PREFIX}_composed_async_worker`,
         leaseUntil: future(240_000),
       })
@@ -1881,9 +1985,21 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           },
         })
 
-      const result = await executeChunk(firstClaim)
-      expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
-      expect(durable.custodyCalls).toEqual(expect.arrayContaining(['verify', 'unwrap']))
+      let crashedPid: number | undefined
+      let crashedSnapshot: ArchiveProcessClaimSnapshot | undefined
+      if (processBoundary) {
+        const boundary = await runArchiveProcessWorker({
+          phase: processBoundary, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
+        }, provider)
+        if (boundary.kind !== 'boundary') throw new Error('archive_process_boundary_missing')
+        crashedPid = boundary.pid
+        crashedSnapshot = boundary.claim
+      } else {
+        const result = await executeChunk(firstClaim!)
+        expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
+        expect(durable.custodyCalls).toEqual(expect.arrayContaining(['verify', 'unwrap']))
+      }
+      const committedBeforeRestart = processBoundary === 'before_commit' ? 0 : 1
 
       const firstRecord = await q(
         `SELECT data, version
@@ -1891,7 +2007,9 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           WHERE sheet_id=$1 AND id=$2`,
         [fixture.sheetId, recordIds[0]],
       )
-      expect(firstRecord.rows).toEqual(recoveryMode === 'reset'
+      expect(firstRecord.rows).toEqual(processBoundary === 'before_commit'
+        ? [{ data: { [fieldId]: 'live-00000' }, version: 2 }]
+        : recoveryMode === 'reset'
         ? []
         : [{
             data: { [fieldId]: 'archived-00000' },
@@ -1921,37 +2039,63 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       })
       expect(job).toMatchObject({
         state: 'applying',
-        completedCount: '1',
+        completedCount: String(committedBeforeRestart),
         totalCount: '5001',
       })
       if (!resumeAfterCrash) return
 
-      // The first worker has durably committed chunk 0, renews once, and then disappears without
-      // pause/finalize. Only lease expiry may make the same block owner reclaimable.
-      const crashedClaim = await renewRecoveryArchiveRestoreJobLease(transaction, firstClaim, {
-        leaseUntil: await databaseFuture(1_000),
-      })
-      expect(crashedClaim.blockFence).toBe(firstClaim.blockFence)
-      expect(crashedClaim.workerFence).toBe(firstClaim.workerFence)
-      await waitUntil(crashedClaim.leaseUntil)
+      const crashEvidence = await q(
+        `SELECT job.completed_count::text AS completed_count,
+                sheet.recovery_writer_state IS NOT NULL AS writer_blocked,
+                (SELECT count(*)::int FROM public.meta_recovery_archive_job_chunks c
+                  WHERE c.job_id=job.id AND c.state='committed') AS committed_chunks,
+                (SELECT count(*)::int FROM public.meta_record_revisions r
+                  WHERE r.sheet_id=job.sheet_id AND r.source='restore') AS restore_events
+           FROM public.meta_recovery_archive_jobs job
+           JOIN public.meta_sheets sheet ON sheet.id=job.sheet_id WHERE job.id=$1::uuid`,
+        [accepted.id],
+      )
+      expect(crashEvidence.rows).toEqual([{
+        completed_count: String(committedBeforeRestart),
+        writer_blocked: true,
+        committed_chunks: committedBeforeRestart,
+        restore_events: committedBeforeRestart,
+      }])
 
-      const resumedCandidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
-      expect(resumedCandidate).toMatchObject({
-        jobId: accepted.id,
-        blockFence: crashedClaim.blockFence,
-      })
-      const resumedClaim = await claimRecoveryArchiveRestoreJob(transaction, resumedCandidate!, {
-        workerOwnerId: `${PREFIX}_composed_async_worker_reclaimer`,
-        leaseUntil: future(240_000),
-      })
-      expect(resumedClaim.blockFence).toBe(crashedClaim.blockFence)
-      expect(resumedClaim.workerFence).toBe((BigInt(crashedClaim.workerFence) + 1n).toString())
-      await expect(readRecoveryArchiveRestoreWorkerBinding(q, crashedClaim)).rejects.toEqual(
-        new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
-      )
-      await expect(executeChunk(crashedClaim)).rejects.toEqual(
-        new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
-      )
+      // The first worker has durably committed chunk 0, renews once, and then disappears without
+      // pause/finalize in the original simulation. Killed processes retain their original real deadline.
+      let resumedClaim: RecoveryArchiveRestoreJobWorkerClaim | undefined
+      if (crashedSnapshot) {
+        await waitUntil(crashedSnapshot.leaseUntil, 45_000)
+        // A serialized observation is never a process-local branded write authority.
+        const serializedClaim = crashedSnapshot as RecoveryArchiveRestoreJobWorkerClaim
+        await expect(readRecoveryArchiveRestoreWorkerBinding(q, serializedClaim)).rejects.toEqual(
+          new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_INVALID_INPUT'),
+        )
+        await expect(executeChunk(serializedClaim)).rejects.toEqual(
+          new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_INVALID_INPUT'),
+        )
+      } else {
+        const crashedClaim = await renewRecoveryArchiveRestoreJobLease(transaction, firstClaim!, {
+          leaseUntil: await databaseFuture(1_000),
+        })
+        expect(crashedClaim.blockFence).toBe(firstClaim!.blockFence)
+        expect(crashedClaim.workerFence).toBe(firstClaim!.workerFence)
+        await waitUntil(crashedClaim.leaseUntil)
+        const resumedCandidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+        expect(resumedCandidate).toMatchObject({ jobId: accepted.id, blockFence: crashedClaim.blockFence })
+        resumedClaim = await claimRecoveryArchiveRestoreJob(transaction, resumedCandidate!, {
+          workerOwnerId: `${PREFIX}_composed_async_worker_reclaimer`, leaseUntil: future(240_000),
+        })
+        expect(resumedClaim.blockFence).toBe(crashedClaim.blockFence)
+        expect(resumedClaim.workerFence).toBe((BigInt(crashedClaim.workerFence) + 1n).toString())
+        await expect(readRecoveryArchiveRestoreWorkerBinding(q, crashedClaim)).rejects.toEqual(
+          new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
+        )
+        await expect(executeChunk(crashedClaim)).rejects.toEqual(
+          new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
+        )
+      }
       const staleAttemptEvidence = await q(
         `SELECT job.completed_count::text AS completed_count,
                 (SELECT count(*)::int
@@ -1965,20 +2109,33 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         [accepted.id],
       )
       expect(staleAttemptEvidence.rows).toEqual([{
-        completed_count: '1',
-        committed_chunks: 1,
-        restore_events: 1,
+        completed_count: String(committedBeforeRestart),
+        committed_chunks: committedBeforeRestart,
+        restore_events: committedBeforeRestart,
       }])
 
-      await expect(executeChunk(resumedClaim)).resolves.toEqual({
-        kind: 'committed',
-        chunkIndex: 1,
-        completedCount: '5001',
-      })
-      await expect(executeChunk(resumedClaim)).resolves.toEqual({ kind: 'no_pending_chunk' })
-      const terminal = await finalizeRecoveryArchiveRestoreJob(transaction, resumedClaim, {
-        replayHorizonMs: 0,
-      })
+      let terminal: Awaited<ReturnType<typeof finalizeRecoveryArchiveRestoreJob>>
+      if (processBoundary) {
+        const resumed = await runArchiveProcessWorker({
+          phase: 'finish', keyId: fixture.keyId, keyMaterial, jobId: accepted.id, priorClaim: crashedSnapshot,
+        }, provider)
+        if (resumed.kind !== 'done') throw new Error('archive_process_completion_missing')
+        expect(resumed.pid).not.toBe(crashedPid)
+        expect(resumed.claim.blockFence).toBe(crashedSnapshot!.blockFence)
+        expect(resumed.claim.workerFence).toBe((BigInt(crashedSnapshot!.workerFence) + 1n).toString())
+        expect(resumed.results).toEqual([
+          ...(committedBeforeRestart === 0 ? [{ kind: 'committed', chunkIndex: 0, completedCount: '1' }] : []),
+          { kind: 'committed', chunkIndex: 1, completedCount: '5001' },
+          { kind: 'no_pending_chunk' },
+        ])
+        terminal = resumed.terminal
+      } else {
+        await expect(executeChunk(resumedClaim!)).resolves.toEqual({
+          kind: 'committed', chunkIndex: 1, completedCount: '5001',
+        })
+        await expect(executeChunk(resumedClaim!)).resolves.toEqual({ kind: 'no_pending_chunk' })
+        terminal = await finalizeRecoveryArchiveRestoreJob(transaction, resumedClaim!, { replayHorizonMs: 0 })
+      }
       expect(terminal).toMatchObject({ state: 'done', completedCount: '5001' })
 
       const terminalEvidence = await q(
@@ -2051,7 +2208,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, 90_000)
 
   test('applies only one frozen whole-sheet chunk through the real L8 kernel after canonical prelocks', async () => {
     const fixture = await seedVerifiedArchive('async_l8_chunk')
