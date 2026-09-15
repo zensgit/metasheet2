@@ -29,11 +29,16 @@
  *     someone later appended `error.message` and started printing `API error: 500 ...` in a record
  *     drawer, which is the whole thing 'values-free' is supposed to forbid.
  *  6. FRESHNESS. A `refreshToken` bump (the inspector's post-submit signal) drops the progress cache and
- *     collapses the card, so the next expand re-reads. Skip `invalidateProgress()` there ⇒ red.
+ *     collapses the card, so the next expand re-reads. Skip `invalidateProgress()` there ⇒ red. A read
+ *     already IN FLIGHT across that bump is dropped as well: `loadProgress` captures
+ *     `activeProgressVersion` before awaiting and refuses to write a result the bump superseded, so the
+ *     late answer is neither rendered nor CACHED (a cached `loaded` entry would be served forever — the
+ *     cache branch returns early). Drop that `if (loadVersion !== activeProgressVersion) return` ⇒ red.
  *  7. 完成时间 renders on TERMINAL rows only — data the list route already returns and the panel never
  *     showed. Render it for every status ⇒ red.
  *  8. A ROUTER-LESS mount adds no NEW `[Vue warn]` (the card uses no router API at all). The panel's
- *     pre-existing `useRouter()` warn is the ONLY one tolerated — see that test's own comment.
+ *     pre-existing `useRouter()` warn is the ONLY one tolerated — and it is COUNTED (`<= 1`), not
+ *     filtered away: a SECOND `useRouter()` inside the card is red. See that test's own comment.
  *  9. IDENTITY. A detail payload whose `id` is not the instance the card asked for is REFUSED, rather
  *     than printed under this record's row: the route answers `id: row.id` from `WHERE id = $1`
  *     (ApprovalBridgeService.toUnifiedDTO), so an echo mismatch is never a legitimate answer. It is also
@@ -80,6 +85,19 @@ async function flushUi(cycles = 6) {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+/**
+ * A promise the test settles by hand, so a read can be held IN FLIGHT across a state change. Both
+ * progress reads need one: `loadProgress` awaits them together with `Promise.all`, so a pair with only
+ * one deferred half settles as soon as the other resolves.
+ */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
 }
 
 const RECORD = { id: 'rec_1', version: 3, data: { fld_title: 'Alpha' } } as unknown as MetaRecord
@@ -669,6 +687,63 @@ describe('审批进度卡片 — freshness', () => {
     await expandProgress(container)
     expect(mockGetApproval).toHaveBeenCalledTimes(2)
   })
+
+  it('drops a progress read that was IN FLIGHT across a refreshToken bump (the late answer never lands)', async () => {
+    // The window the `loadVersion !== activeProgressVersion` guard exists for. The instance pair is a
+    // NETWORK read; the inspector's post-submit bump lands whenever it lands, including between the
+    // click that opened the card and the answer. That answer is about the PRE-bump instance, and the
+    // damage is not only a frame of stale text: `loadProgress` would write it as `loaded`, and the
+    // cache branch (`existing.loaded ⇒ return`) then serves that superseded snapshot to every later
+    // expand for the life of the mount — exactly the bug `invalidateProgress()` was added to prevent,
+    // reintroduced through the back door by a read that predates it.
+    //
+    // BOTH halves are deferred on purpose: they are awaited with `Promise.all`, so leaving either one
+    // resolved would let the pair settle before the bump and pin nothing.
+    const inFlightDetail = deferred<Awaited<ReturnType<typeof getApproval>>>()
+    const inFlightHistory = deferred<Awaited<ReturnType<typeof getApprovalHistory>>>()
+    mockGetApproval.mockReturnValueOnce(inFlightDetail.promise)
+    mockGetApprovalHistory.mockReturnValueOnce(inFlightHistory.promise)
+
+    const { container, state } = mountPanel()
+    await expandPanel(container)
+    await expandProgress(container)
+    // Open, and genuinely still reading — nothing has settled.
+    expect(mockGetApproval).toHaveBeenCalledTimes(1)
+    expect(q(container, 'record-approval-progress-loading')).not.toBeNull()
+    expect(q(container, 'record-approval-progress-step')).toBeNull()
+
+    state.refreshToken += 1
+    await flushUi()
+    expect(q(container, 'record-approval-progress-body')).toBeNull()
+
+    // … and only NOW does the superseded read land, carrying the pre-bump snapshot.
+    inFlightDetail.resolve(detailFixture({ currentStep: 2 }))
+    inFlightHistory.resolve([
+      { id: 'h_stale', action: 'created', actorName: '陈旧', occurredAt: '2026-09-15T02:00:00.000Z' },
+    ] as never)
+    await flushUi()
+
+    // Nothing re-opened, nothing rendered.
+    expect(q(container, 'record-approval-progress-body')).toBeNull()
+    expect(progressToggles(container)[0]!.getAttribute('aria-expanded')).toBe('false')
+    expect(q(container, 'record-approval-progress-step')).toBeNull()
+    expect(container.textContent).not.toContain('陈旧')
+
+    // Nothing CACHED either: the next expand issues a real second pair and renders the post-bump
+    // answer. Without the version guard the late write lands as `loaded`, this expand is served from
+    // that cache (no second read) and the card shows the 第 2 / 3 步 + 陈旧 the bump declared stale.
+    mockGetApproval.mockResolvedValue(detailFixture({ currentStep: 3 }))
+    mockGetApprovalHistory.mockResolvedValue([
+      { id: 'h_fresh', action: 'approve', actorName: '李四', occurredAt: '2026-09-15T04:00:00.000Z' },
+    ] as never)
+    await expandProgress(container)
+
+    expect(mockGetApproval).toHaveBeenCalledTimes(2)
+    expect(mockGetApprovalHistory).toHaveBeenCalledTimes(2)
+    expect(q(container, 'record-approval-progress-step')!.textContent).toContain('第 3 / 3 步')
+    expect(q(container, 'record-approval-progress-history')!.textContent).toContain('李四')
+    expect(container.textContent).not.toContain('陈旧')
+  })
 })
 
 describe('审批进度卡片 — 完成时间', () => {
@@ -703,15 +778,23 @@ describe('审批进度卡片 — router-less mount', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    // The panel's own `useRouter()` (line ~194) is an unguarded `inject(routerKey)`, so a router-less
-    // mount has ALWAYS logged exactly this warning; PR #5766 is replacing that line with
-    // `inject(routerKey, null)` and this assertion stays green either way. Anything the progress card
-    // itself might add (a second router API, a missing required prop, a failed injection) is NOT in
-    // that allow-list and fails here.
-    const unexpected = warn.mock.calls
-      .map((call) => String(call[0]))
-      .filter((message) => !/injection "Symbol\(router\)" not found/.test(message))
+    // The panel's own `useRouter()` (`const hasRouter = !!useRouter()`) is an unguarded
+    // `inject(routerKey)`, so a router-less mount has ALWAYS logged exactly this warning; PR #5766 is
+    // replacing that line with `inject(routerKey, null)` and both assertions below stay green either
+    // way. Anything the progress card itself might add (a missing required prop, a failed injection of
+    // something else) is NOT in that allow-list and fails on `unexpected`.
+    const ROUTER_INJECTION_WARN = /injection "Symbol\(router\)" not found/
+    const messages = warn.mock.calls.map((call) => String(call[0]))
+    const unexpected = messages.filter((message) => !ROUTER_INJECTION_WARN.test(message))
     expect(unexpected).toEqual([])
+    // COUNTED, not filtered away. The tolerated warn has exactly ONE source — that single
+    // `useRouter()`, which Vue warns about once per router-less mount — so `<= 1` holds today and
+    // holds at 0 after #5766, while a SECOND `useRouter()`/`useRoute()` added inside the progress card
+    // makes it 2 and fails. Dropping these messages on the floor (the earlier shape of this test) made
+    // that mutation invisible: the card could grow a router dependency and this 'no NEW warn' pin
+    // would have stayed green.
+    const routerWarns = messages.filter((message) => ROUTER_INJECTION_WARN.test(message))
+    expect(routerWarns.length).toBeLessThanOrEqual(1)
     expect(error.mock.calls.map((call) => String(call[0]))).toEqual([])
     expect(q(container, 'record-approval-progress-step')).not.toBeNull()
   })
