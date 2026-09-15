@@ -49,7 +49,7 @@ import type { TransactionalQueryable } from '../../src/multitable/pg-transaction
 import { enqueueOutboxEvent } from '../../src/multitable/automation-outbox-enqueue'
 import { buildDurableConsumerHandlers, type DurableDeliveryServices } from '../../src/multitable/automation-durable-consumer-handlers'
 import { deriveOutboundIdempotencyKey } from '../../src/multitable/automation-action-idempotency'
-import { APPROVAL_COMPLETION_CONSUMERS, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
+import { APPROVAL_COMPLETION_CONSUMERS_V2, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
 import type { PoolClient } from 'pg'
 
 /**
@@ -229,7 +229,8 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
       client.release()
     }
     const s = await consumerStatuses(outboxId)
-    expect(Object.keys(s).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS].sort())
+    // v2 completion fan-out (v1's three + multitable-record-approval).
+    expect(Object.keys(s).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V2].sort())
     expect(Object.values(s).every((v) => v === 'pending')).toBe(true)
   })
 
@@ -374,6 +375,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
       },
       projectionService: { reconcile: async () => undefined },
       webhookService: { deliverEvent: async () => [] },
+      recordApprovalService: { handleApprovalCompletion: async () => undefined },
     } as unknown as DurableDeliveryServices
     const realHandlers = buildDurableConsumerHandlers(spyServices)
 

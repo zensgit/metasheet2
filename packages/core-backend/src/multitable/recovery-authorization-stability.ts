@@ -31,6 +31,7 @@ function intersectCapabilities(
     canManageAutomation: requestCapabilities.canManageAutomation && databaseCapabilities.canManageAutomation,
     canExport: requestCapabilities.canExport && databaseCapabilities.canExport,
     canSendNotification: requestCapabilities.canSendNotification && databaseCapabilities.canSendNotification,
+    canSubmitApproval: requestCapabilities.canSubmitApproval && databaseCapabilities.canSubmitApproval,
   }
 }
 
@@ -46,6 +47,7 @@ const DENIED_CAPABILITIES: MultitableCapabilities = {
   canManageAutomation: false,
   canExport: false,
   canSendNotification: false,
+  canSubmitApproval: false,
 }
 
 const AUTHORITY_LOCK_FUNCTION = 'metasheet_try_recovery_authority_user'

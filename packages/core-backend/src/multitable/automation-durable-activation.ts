@@ -14,7 +14,7 @@
  *     OFF ⇒ legacy emit, byte-identical). REPLACE is necessary, not stylistic — the webhook sink has no
  *     event-id dedup, so keep-both would double-deliver every webhook. An earlier draft of this header
  *     described a transitional keep-both window; that described only the pre-P1#2 state and is superseded.
- *   - `buildConsumerAdapterRegistry(handlers)` — the six ratified consumers (manifest v1 universe), each a
+ *   - `buildConsumerAdapterRegistry(handlers)` — the ratified consumers (manifest v2 universe), each a
  *     thin adapter delegating to an injected handler (S5 wiring passes the REAL service methods —
  *     `handleApprovalCompletionResume` / `...Trigger` / projection / task / record / webhook-bridge — which
  *     structurally REPLACES the anonymous bus closures and closes the manifest's un-enumerable direction).
@@ -43,7 +43,7 @@ import type { TransactionalQueryable } from './pg-transaction-guard'
 /** Throw this from a handler to mark a DETERMINISTIC permanent failure (→ dead_letter, not retried). */
 export class PermanentDeliveryFailure extends Error {}
 
-/** One handler per ratified consumer_key (manifest v1 universe). S5 wiring passes the real service methods. */
+/** One handler per ratified consumer_key (manifest v2 universe). S5 wiring passes the real service methods. */
 export interface DurableConsumerHandlers {
   'approval-bridge': (event: ClaimedConsumer) => Promise<void>
   'approval-trigger': (event: ClaimedConsumer) => Promise<void>
@@ -51,6 +51,8 @@ export interface DurableConsumerHandlers {
   'approval-task-trigger': (event: ClaimedConsumer) => Promise<void>
   'automation-record-trigger': (event: ClaimedConsumer) => Promise<void>
   'webhook-event-bridge': (event: ClaimedConsumer) => Promise<void>
+  /** Manifest v2 addition — record-level submit-for-approval completion (multitable × approval phase 2). */
+  'multitable-record-approval': (event: ClaimedConsumer) => Promise<void>
 }
 
 export const DURABLE_CONSUMER_KEYS = [
@@ -60,6 +62,7 @@ export const DURABLE_CONSUMER_KEYS = [
   'approval-task-trigger',
   'automation-record-trigger',
   'webhook-event-bridge',
+  'multitable-record-approval',
 ] as const satisfies readonly (keyof DurableConsumerHandlers)[]
 
 /**
@@ -77,7 +80,8 @@ export async function produceAutomationEvent(
   return enqueueOutboxEvent(trx, input)
 }
 
-/** Build the six-adapter registry from injected handlers, with the ratified outcome mapping. */
+/** Build the adapter registry (one per DURABLE_CONSUMER_KEYS entry) from injected handlers, with the
+ *  ratified outcome mapping. */
 export function buildConsumerAdapterRegistry(handlers: DurableConsumerHandlers): ConsumerAdapterRegistry {
   const registry = new ConsumerAdapterRegistry()
   for (const key of DURABLE_CONSUMER_KEYS) {
