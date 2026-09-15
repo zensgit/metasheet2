@@ -192,6 +192,6 @@
 4. 两点登记清单改多行（消 token 行冲突）。
 
 ### 5.5 环境残留
-- worktrees（均无未提交改动，分支已合并可删；删前按 [[git-worktree-remove-follows-junctions]] 先拆 junction）：wt-fe6（Q19）、wt-p5（Q17）、wt-p6（Q18/Q20）、wt-base3（Q16）、wt-flabel（Q10）、wt-docs6（本文，待 #5771 合并后）。
+- worktrees（均无未提交改动，分支已合并可删；删前先拆 junction（Windows 上 `git worktree remove --force` 会顺着 junction 递归删掉主检出的 node_modules，只用 PowerShell 删目录再 `git worktree prune`））：wt-fe6（Q19）、wt-p5（Q17）、wt-p6（Q18/Q20）、wt-base3（Q16）、wt-flabel（Q10）、wt-docs6（本文，待 #5771 合并后）。
 - 发布脚本与日志：`%LOCALAPPDATA%\Temp\claude-auto24\r47…r52\`（含 `ship.log` / `upgrade-222-rNN.log`）；账本 `claude-auto24\STATE.md`（逐条时间戳）。
 - 222：演示实例 AP-100003/100004/100005 均已关闭；`dingtalk_todo_mirrors` 空表；无待清数据；`approvals:read` 的手工授予保留。
