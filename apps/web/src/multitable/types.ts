@@ -1143,6 +1143,35 @@ export interface AutomationAction {
   config: Record<string, unknown>
 }
 
+/**
+ * start_approval 的后端 config 契约（镜像 packages/core-backend/src/multitable/automation-actions.ts
+ * 的 StartApprovalConfig + automation-service.ts validateStartApprovalConfig 接受的可选键）。
+ * 编辑器只建模 templateId / formDataMapping / resultWriteback 的三个字段选择器；其余键在保存时
+ * 按原样透传（见 MetaAutomationRuleEditor.vue 的 startApprovalOriginal）。
+ */
+export interface StartApprovalResultWritebackConfig {
+  statusField?: string
+  approverField?: string
+  completedAtField?: string
+  /** 非 approved 的终态结果是否也回写（默认 false）。 */
+  onNonApproved?: boolean
+  /** T3-5 跨 base 回写目标：三件要么全无要么全有（字面 id，不支持表达式）。 */
+  targetBaseId?: string
+  targetSheetId?: string
+  targetRecordId?: string
+  [key: string]: unknown
+}
+
+export interface StartApprovalConfig {
+  templateId: string
+  formDataMapping: Record<string, string>
+  requester?: {
+    mode?: 'trigger_actor' | 'rule_creator'
+  }
+  resultWriteback?: StartApprovalResultWritebackConfig
+  [key: string]: unknown
+}
+
 export interface AutomationRule {
   id: string
   sheetId: string
