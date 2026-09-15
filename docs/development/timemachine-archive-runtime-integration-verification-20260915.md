@@ -2,6 +2,26 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Standard Server HTTP Checkpoint
+
+- Clean tested code: `54ac563ce3d0d69b1970a986370a6ef6bce5238b`; tree `bf2184778e308488dc87adcdae05bfa302b458e7`; parent `75adc9c14fcaad03354221727bf79e5fb9204f35`. Three test/script files, +520/-188. The preceding conflict-free true merge has ordered parents `85592c35d6c5c52933bbe2e9f1aad55af22d4b3a` and then-current main `2b67a04625a0d6b089dac173e47a0de5d111e225`; incoming main delta is three notification client/test files, no archive overlap.
+- Manual standard-server acceptance: 3/3 scenario groups PASS. Real password login creates two persisted sessions; unauthenticated catalog returns 401 and read-only actor returns 403. Test-process flag OFF returns 503. Authorized catalog and preview work; preview selects async without changing 5,001 live rows. HTTP accept returns 202; server-owned worker reaches `done`, every record matches the encrypted archive with version 3, restore revisions count 5,001, and derived effects are exactly 5,001 completed / 0 pending. No test loop calls `runOnce` and no authorization callback is replaced.
+- Full fresh PostgreSQL stream: 403 migrations; second replay succeeds. Every manual run creates its own random database after checking the dedicated cluster identity, then drops it in cleanup. Final clean-run evidence: run ID `366559bf-4906-4224-b9d6-60ddcb4cb2eb`, worktreeClean=true, databaseResidue=0, cleanupErrors=[]. Independent final manual-prefix/regression-database and backend census returned `0|0`; owned PostgreSQL stopped. Local Node is 24.14.1; this is not remote Node18/20 evidence.
+- Script SHA-256: `c9b7a0bf1b509fa1edd691970cf513556b97353b369029d13854018d8d7b1c72`; extracted fixture: `0819d691e3aa62fcb598803e471cfabbcda1abefcfc2151ef4a4ff03d990eeee`; existing suite: `d0b80e45983ba9f31fe5fb8e6a8bccc2609d17e253888fae473ada92c3b1eb2b`. Final tracked dirty-diff hash is the empty SHA-256. The script also rechecks these bindings before declaring success.
+- Mutation: temporarily omit `MetaSheetServer.start()`'s archive-worker startup. Login/catalog/preview/accept remain reachable, but the job stays `planned`; the script exits 1 with `WORKER_COMPLETION_REQUIRED` instead of reporting success. Its database is also dropped. Production `src/index.ts` was restored byte-for-byte (SHA-256 `edd0fc4e3f3fac0e76cd16436952cd5756406c98c43a6a55728004b7eba1255f`) before the clean positive run.
+- Extracted-fixture whole-file regression: 39/39 PASS, no skips, 149.51 seconds, including both real SIGKILL/COMMIT boundaries and their application timers. This ran on the byte-identical final helper/suite before the code commit; it is not claimed as a second execution after commit. Its dedicated database had zero jobs, derived effects, test users/sheets and other connections, then was dropped.
+- Core typecheck and explicit script+source TypeScript check PASS; diff-check PASS. Terra Medium performed the scoped extraction. Sol High read-only review found no P1 but two harness/evidence P2: incomplete dirty-source binding and a shared restore/derived deadline. Both were corrected before the clean positive run. No second external verdict is claimed. The production implementation and shared CI selectors are unchanged; the existing real-DB suite remains in the post-migrate workflow and excluded from no-DB runs. The new manual HTTP script is not a required-CI test.
+- Local artifacts: `artifacts/recovery-archive-server/evidence.json` and `worker-start-mutation.json`; logs `/private/tmp/tm-archive-server-{exact,no-worker-mutation,tsc,core-tsc}-20260915.log` and `/private/tmp/tm-archive-fixture-regression-20260915.log`. They are session-local evidence, not uploaded remote artifacts. Initial harness attempts rejected a missing worker replay horizon and an incorrect expected job-state spelling; those failures are not counted as product defects or passes.
+- Boundary: seeded verified archive, synthetic key custody, test-only process-local object metadata. This does not prove a production capture builder, independently durable provider/KMS restart, archive browser UAT or deployment. The standard server's pre-existing shutdown timeout warning is not counted as a worker failure: the observed process exited 0 after draining and cleanup. No production/source change was made for that separate warning. Published-head CI must run afresh; no Ready/merge/flag/dispatch/deploy is authorized by these tests.
+
+Reproduction uses the already-audited disposable local cluster only; neither variable may name a shared or business service:
+
+```sh
+NODE_ENV=test TM_ARCHIVE_TEST_ADMIN_URL="$OWNED_TEST_CLUSTER_ADMIN_URL" \
+  TM_ARCHIVE_TEST_PGDATA="$OWNED_TEST_CLUSTER_DATA_DIRECTORY" \
+  pnpm --filter @metasheet/core-backend exec tsx scripts/verify-recovery-archive-server.mts
+```
+
 ## Real Application Timer Lifecycle
 
 - Code `34681dc7c326926311dbe5446b22355e8e81100f`, tree `c98b5d4a6b5075a03915f53a38ddab59f818fc0a`, parent `9763493bd481d9e4b6476b2830390603c401b04d`. Exactly two existing test/helper files, +68/-33; production source, providers, migrations, workflows and flags unchanged. This report/design/goal update is a docs-only child.

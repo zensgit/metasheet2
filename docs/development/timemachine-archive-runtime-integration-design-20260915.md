@@ -2,6 +2,38 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Standard Server HTTP Acceptance
+
+Code `54ac563ce3d0d69b1970a986370a6ef6bce5238b`, tree
+`bf2184778e308488dc87adcdae05bfa302b458e7`, adds the manual
+`packages/core-backend/scripts/verify-recovery-archive-server.mts` acceptance.
+The existing verified-archive seed is extracted into a shared test utility;
+production source, migrations, providers, workflows and persistent flags are unchanged.
+
+The script must create its own randomly named database on the audited, task-owned
+local test cluster, run the complete migration stream and a second replay, and
+scrub inherited endpoints and credentials before loading the application.
+Only owned loopback ports are admitted. Real password login and persisted sessions
+must lead through the canonical archive catalog, preview, accept and status routes.
+The standard server must own worker startup and draining; the script must not
+invoke a worker tick or replace authorization with an allow-all callback.
+
+Acceptance requires anonymous/reader refusal, flag-off refusal, a non-mutating
+async preview, exactly 5,001 restored records and revisions, and complete canonical
+derived-effect processing. Restore and derived processing have separate bounded
+deadlines. Removing standard-server worker startup must make this acceptance fail.
+Evidence binds HEAD/tree, all three scoped file hashes and the tracked dirty diff;
+source changes during the positive run are rejected. A new RUNNING marker replaces
+old PASS evidence before admission. PASS requires cleanup, including database
+disposal, not merely successful requests.
+
+This closes the local standard-server HTTP recovery path for a **seeded encrypted
+archive with synthetic custody and test-only local storage**. It does not prove
+archive capture/build/upload authority, independent durable storage/KMS across
+restarts, archive browser UAT or deployment. Production provider selection and
+operational acceptance remain separate. The earlier standard-HTTP-open wording
+below is historical and superseded only by this bounded acceptance.
+
 ## Current Application Lifecycle Contract
 
 Test checkpoint `34681dc7c326926311dbe5446b22355e8e81100f` exercises the existing
