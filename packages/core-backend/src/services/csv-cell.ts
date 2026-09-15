@@ -97,13 +97,13 @@ const DANGEROUS_LEAD_CHAR_SET: ReadonlySet<string> = new Set(CSV_FORMULA_INJECTI
  *   - 0 of the 4174 `Default_Ignorable_Code_Point` characters are missed (down from 4036 missed
  *     by the second round's pattern).
  *   - 0 of the 32 C0 controls are left un-neutralized (down from 27).
- *   - 17 of gate 2's original 18 named residuals are now covered by the pattern alone (up from
- *     15) — the ONLY one still outside it is U+0301 COMBINING ACUTE ACCENT (general category
- *     `Mn`; not `Cc`, not `Cf`, and NOT `Default_Ignorable_Code_Point` — combining diacritics in
- *     general are not DI, only the specific few Unicode has designated as such are, which does not
- *     include this one). `CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS` below now names exactly that one
- *     remaining exception, down from 3 (NUL and NEL both moved from the supplement into pattern
- *     coverage via `\p{Cc}`).
+ *   - 17 of gate 2's original 18 named residuals are covered by the pattern alone; the 18th,
+ *     U+0301 COMBINING ACUTE ACCENT (general category `Mn`; not `Cc`, not `Cf`, not
+ *     `Default_Ignorable_Code_Point`), was the last supplement entry and was REMOVED on
+ *     2026-09-15 by owner ruling: two review rounds could not confirm any importer mechanism for
+ *     it, and "unconfirmed after two rounds" was judged to be the signal. The supplement is now
+ *     EMPTY and kept only as the named extension point for a future entry that arrives WITH a
+ *     checkable mechanism.
  *
  * METHODOLOGY AND ITS LIMITS, stated rather than implied: the sweep (script run, numbers recorded
  * here, script deleted per this repo's scratch-probe discipline) ran on Node v25.9.0's V8/ICU
@@ -145,27 +145,14 @@ export const CSV_IGNORABLE_LEAD_PATTERN = /[\s\p{Cc}\p{Cf}\p{Default_Ignorable_C
  * mechanism nobody has verified, the reason stated below is NOT a claim about what any specific
  * spreadsheet importer does — no such mechanism has ever been confirmed for this character, across
  * two fix rounds — it is a checkable COST comparison instead:
- *   - U+0301 COMBINING ACUTE ACCENT — general category `Mn`. NOT `Cc`, NOT `Cf`, NOT
- *     `Default_Ignorable_Code_Point` (measured directly — combining diacritics are not, as a
- *     class, default-ignorable; only the specific few Unicode designates as such are, and this is
- *     not one of them), so no closed-form clause above covers it. NO CONFIRMED MECHANISM: an
- *     earlier draft of this comment claimed Unicode-normalizing import paths "drop" an orphaned
- *     combining mark; Unicode normalization (NFC/NFD/NFKC/NFKD) is decomposition and/or
- *     recomposition and never DELETES a character, so that claim was FALSE, not merely unverified,
- *     and no replacement mechanism has been confirmed since. Kept anyway, on an asymmetric-cost
- *     argument that is itself checkable rather than assumed: treating it as ignorable when no such
- *     importer behavior exists costs exactly one defensive apostrophe on a value that happens to
- *     start with a bare combining accent mark (verified by this file's own corpus tests — the
- *     ORIGINAL text always survives byte-for-byte behind that apostrophe); NOT treating it as
- *     ignorable, if such an importer behavior is ever found to exist, costs a live formula-
- *     injection bypass. That asymmetry, not a claimed mechanism, is the entirety of the
- *     justification for keeping this one entry.
- *
- * EXPORTED, small, and hand-typed on purpose (mirrors `CSV_FORMULA_INJECTION_LEAD_CHARS`'s own
- * discipline): a silent drop from this list is exactly the kind of regression only an independent
- * literal census — not iteration over the list itself — can catch.
+ *   - (none) — U+0301 COMBINING ACUTE ACCENT was the sole entry until 2026-09-15. It is now
+ *     NOT treated as an ignorable lead: a cell whose first character is U+0301 followed by a
+ *     formula-leading byte is emitted as-is. That is a deliberate, disclosed behaviour change:
+ *     no spreadsheet importer was ever shown to strip that character, so neutralizing it was a
+ *     cost with no demonstrated benefit. Adding an entry here again requires a NAMED, CHECKABLE
+ *     mechanism, not a cost-asymmetry argument.
  */
-export const CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS = ['\u0301'] as const
+export const CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS = [] as const
 
 export type CsvIgnorableLeadSupplementChar = (typeof CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS)[number]
 

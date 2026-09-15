@@ -88,15 +88,15 @@ describe('sanitizeCsvCell -- positive half (iterates the exported table)', () =>
 })
 
 describe('CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS (independent literal census)', () => {
-  it('is exactly the 1 named out-of-category exception -- a silent drop must fail this, not just iteration', () => {
+  it('is exactly EMPTY (U+0301 removed 2026-09-15 by owner ruling) -- a silent re-addition must fail this, not just iteration', () => {
     // Re-typed by hand, NOT derived from the constant under test -- this is what catches removal.
     // Written as \uXXXX escapes (not raw invisible/control bytes) so the list stays human-auditable.
     // NUL (\u0000) and NEL (\u0085) used to live here too; the P2-2/NIT-1 fix round moved both
     // into base-pattern coverage via `\p{Cc}`, so a THIRD escape appearing here again (without a
     // matching change to `CSV_IGNORABLE_LEAD_PATTERN`'s own comment) is exactly the regression
     // this census exists to catch.
-    expect([...CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS].sort()).toEqual(['\u0301'].sort())
-    expect(CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS.length).toBe(1)
+    expect([...CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS]).toEqual([])
+    expect(CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS.length).toBe(0)
   })
 })
 
@@ -139,7 +139,7 @@ const GATE2_RESIDUAL_CORPUS: ReadonlyArray<IgnorableCorpusEntry> = [
   { label: 'U+200E LEFT-TO-RIGHT MARK (Cf)', char: '\u200E', expectIgnorable: true, coveredBySupplement: false },
   { label: 'U+0000 NUL (Cc — pattern-covered as of P2-2/NIT-1, was a supplement entry before)', char: '\u0000', expectIgnorable: true, coveredBySupplement: false },
   { label: 'U+2060 WORD JOINER (Cf)', char: '\u2060', expectIgnorable: true, coveredBySupplement: false },
-  { label: 'U+0301 COMBINING ACUTE ACCENT (Mn — the one remaining named supplement entry)', char: '\u0301', expectIgnorable: true, coveredBySupplement: true },
+  { label: 'U+0301 COMBINING ACUTE ACCENT (Mn — supplement entry REMOVED 2026-09-15; now NOT ignorable)', char: '\u0301', expectIgnorable: false, coveredBySupplement: false },
   { label: 'U+00AD SOFT HYPHEN (Cf)', char: '\u00AD', expectIgnorable: true, coveredBySupplement: false },
   { label: 'U+0085 NEL (Cc — pattern-covered as of P2-2/NIT-1, was a supplement entry before)', char: '\u0085', expectIgnorable: true, coveredBySupplement: false },
   { label: 'U+2028 LINE SEPARATOR (Zl, but ECMAScript LineTerminator)', char: '\u2028', expectIgnorable: true, coveredBySupplement: false },
@@ -205,11 +205,23 @@ describe('isCsvIgnorableLeadChar -- corpus-driven outcome assertions (not a re-l
 })
 
 describe('isCsvIgnorableLeadChar -- SPLIT, not just union (NIT-2 fix)', () => {
-  it('the split is discriminating (both mechanisms are actually exercised by the corpus)', () => {
-    const supplementCovered = FULL_CORPUS.filter((c) => c.coveredBySupplement).length
-    const patternCovered = FULL_CORPUS.filter((c) => c.expectIgnorable && !c.coveredBySupplement).length
-    expect(supplementCovered).toBeGreaterThan(0)
-    expect(patternCovered).toBeGreaterThan(0)
+  it('the split is still discriminating with an EMPTY supplement: the pattern arm is exercised, the supplement arm is provably empty, and U+0301 is now rejected by BOTH', () => {
+    // Before 2026-09-15 this test proved both mechanisms were exercised by requiring a non-empty
+    // supplement. The supplement is now empty BY OWNER RULING (U+0301 dropped), so "both exercised"
+    // is no longer the invariant. What must stay true instead, each asserted against the EXPORTED
+    // primitives (never against the OR'd predicate):
+    //  (a) the pattern arm is load-bearing -- at least one hand-typed corpus char is pattern-covered;
+    //  (b) the supplement arm is empty -- so a silent re-addition changes this assertion, not just prose;
+    //  (c) U+0301 is rejected by the pattern AND absent from the supplement, hence NOT ignorable.
+    const patternCovered = FULL_CORPUS.filter(e => e.expectIgnorable && !e.coveredBySupplement)
+    expect(patternCovered.length).toBeGreaterThan(0)
+    for (const e of patternCovered) expect(CSV_IGNORABLE_LEAD_PATTERN.test(e.char)).toBe(true)
+    expect(CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS.length).toBe(0)
+    expect(CSV_IGNORABLE_LEAD_PATTERN.test('\u0301')).toBe(false)
+    expect((CSV_IGNORABLE_LEAD_SUPPLEMENT_CHARS as readonly string[]).includes('\u0301')).toBe(false)
+    expect(isCsvIgnorableLeadChar('\u0301')).toBe(false)
+    // Positive control for (c): a genuinely pattern-covered char IS ignorable via the predicate.
+    expect(isCsvIgnorableLeadChar(patternCovered[0].char)).toBe(true)
   })
 
   for (const { label, char, expectIgnorable, coveredBySupplement } of FULL_CORPUS) {
