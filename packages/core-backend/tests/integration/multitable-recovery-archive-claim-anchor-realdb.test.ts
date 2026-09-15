@@ -344,6 +344,7 @@ async function amendmentFingerprint(): Promise<string> {
 async function truncateOwnedState(): Promise<void> {
   if (!schemaIsUp) return
   const childTables = [
+    'meta_recovery_archive_derived_effects',
     'meta_recovery_archive_restore_plans',
     'meta_recovery_archive_job_chunks',
     'meta_recovery_archive_sync_receipts',
