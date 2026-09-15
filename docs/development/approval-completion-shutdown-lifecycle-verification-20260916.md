@@ -6,7 +6,7 @@ Date: 2026-09-16
 
 - Main baseline: `784c22dc182b2050bf204f4d013226d5bbb15131`
 - Precise-unsubscribe prerequisite (#5758): `f0a7e214c97731c504337847760bc8769bd81a44`
-- Verified implementation commit: `f0cd9ca2da56a2b2014c9b82e49a869aa62df85a`
+- Verified implementation commit: `b93877da982c5d1b73cc15f6e5e232f1bd1c5344`
 - The implementation commit has both the main baseline and prerequisite as ancestors.
 - This verification file is a documentation-only successor to the implementation commit.
 
@@ -81,6 +81,18 @@ git diff --check: passed
 The follow-up exact-head rerun also passed the server lifecycle and Time Machine recovery wiring
 neighbors (2 files, 9 tests). The broader neighbor and Automation V1 results above remain evidence from
 the preceding implementation commit; they were not rerun for the three-file follow-up.
+
+The first CI run at documentation head `b171cc34b302ff8ed5ddd96061eb2faa09094bfd`
+found two direct compatibility regressions in the Node 20 core-backend lane: the real-app assembly census
+still pinned startup-owned `this.app` sites to `start`, while the implementation had moved that body to
+`startOnce` for rollback; and standalone `AutomationService.shutdown()` no longer detached all nine
+subscriptions before its first asynchronous yield. The lane reported 3 failed tests in 2 files, with
+13,833 passed. The census pins were updated to the actual owner, and standalone shutdown now starts the
+producer drain and synchronously detaches completion consumers before awaiting it. The server continues
+to use the phased API, so its producer-before-consumer ordering is unchanged.
+
+The two affected files then passed locally (2 files, 161 tests), followed by the focused lifecycle suite
+(7 files, 94 tests), TypeScript typecheck, and `git diff --check`.
 
 The existing server-lifecycle neighbor attempted its normal default database connection and entered its
 existing degraded path because no test database was configured. No migration, database write, or real-DB
