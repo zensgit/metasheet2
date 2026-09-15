@@ -42,3 +42,9 @@ Code checkpoint `9062f3144355e99798c0d505e939f6f54152bdba`, tree `f68b51dd5e8ef2
 These hooks are not yet assembled with standard application providers and post-commit formula/realtime effects. This is a local integration checkpoint, not completed runtime delivery.
 
 Real-DB follow-up `745b5685626490426d8cd71164df3d0be02e23b9` proves the extracted producer's commit/rollback atomicity and autocommit refusal. It does not change the outstanding application composition contract or authorize enabling durable delivery outside the isolated test process.
+
+### Requestless Computed Effects
+
+Checkpoint `7e37fadb2c50e041178f60c10bb7be82a131ca14`, tree `9c7ef5473e68541f855de44dc62c0e0bbe737520`, adds explicit resolved-access propagation through lookup/rollup hydration, relation aggregation, formula recompute and dependent-record recompute. HTTP callers keep their request path. `createRecoveryComputedHelpers` accepts a resolved actor, rejects an absent actor, and does not manufacture a Request. The caller must obtain database-fresh authority and verify recovery scope before invoking it; the factory itself does not grant or refresh permission.
+
+The real-DB test exposed a pre-existing mismatch: recompute could discover an expression dependency absent from `formula_dependencies`, while taint only consulted that table. The taint graph now unions authoritative expression references with indexed dependencies, so a denied foreign input cannot be persisted as a degraded formula value through that fallback. This is reduce-only; indexed dependencies are retained. Standard worker composition remains open.

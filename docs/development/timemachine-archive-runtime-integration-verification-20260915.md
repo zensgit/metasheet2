@@ -96,6 +96,17 @@ Code/test head `dcb10e1c1b98d37181942870752d4d7c451306cd`, tree `d9eb3f4b1a08402
 
 ### Remaining Runtime Gates
 
+### Explicit Computed Authority Evidence
+
+- Code/test SHA `7e37fadb2c50e041178f60c10bb7be82a131ca14`, tree `9c7ef5473e68541f855de44dc62c0e0bbe737520`.
+- Six focused/neighbor unit files: 119/119 PASS; core typecheck PASS; diff-check PASS. No new whole-router lint claim.
+- Dedicated PG15 fresh migrated database; whole exact-anchor route suite 37/37 PASS, zero skips. Requestless worker helpers hydrate the actual foreign lookup, recompute its formula and discover related records. Hiding the foreign field yields an empty lookup and no formula overwrite; restoring visibility restores the positive result. Both indexed-dependency and missing-index cases run.
+- Before the taint fix, missing dependency rows produced formula value 1 instead of preserving 100; indexed case passed. After fix, both pass. Mutation suppressing expression-edge union again failed exactly the missing-index case (1 failed/1 passed); restored whole-file 37/37 PASS.
+- Pre-drop outbox/records/sheets/users/fields and other-backend census all 0; database dropped, prefix databases/backends 0, PG stopped. No runtime flag or external dispatcher enabled.
+- These are actual helper/HTTP regression checks, not evidence of standard background application composition. Provider wiring, full worker effects and restart acceptance remain required.
+
+### Outstanding Standard Runtime
+
 - Combined real-DB route and worker execution, mutation, and process-restart gates.
 - Shared full-read/plan authorization invoked by a real background worker.
 - Provider/KMS/object-store integration or ordinary application startup readiness.
