@@ -27,6 +27,7 @@ import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import { acquireRecoveryAuthorityLease } from '../../src/multitable/recovery-authorization-stability'
+import { enqueueRecoveryMutationEvent, type RecoveryMutationEvent } from '../../src/multitable/recovery-mutation-events'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -1198,6 +1199,56 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       await q('DELETE FROM meta_bases WHERE id=$1', [foreignBase])
       await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(originalPermissions)])
       curPerms = originalPermissions
+    }
+  })
+
+  test.each([true, false])('RECOVERY-EVENT: source write and durable event share commit=%s', async (commit) => {
+    await seedWorld()
+    const previousFlag = process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = 'true'
+    const before = (await q('SELECT version FROM meta_records WHERE id=$1', [REC_A])).rows[0].version
+    let event: RecoveryMutationEvent | undefined
+    try {
+      const write = txn(async (query) => {
+        await query('UPDATE meta_records SET version=version+1 WHERE id=$1', [REC_A])
+        event = await enqueueRecoveryMutationEvent(query, SHEET, ACTOR, {
+          kind: 'revert', recordId: REC_A, version: Number(before) + 1,
+          revisionId: randomUUID(), changedFieldIds: [F_STR], patch: { [F_STR]: 'restored' }, linkInvalidations: [],
+        })
+        const inside = await query('SELECT event_type, payload FROM meta_automation_outbox WHERE event_id=$1', [event.payload._eventId])
+        expect(inside.rows).toEqual([{ event_type: event.type, payload: event.payload }])
+        expect((await q('SELECT id FROM meta_automation_outbox WHERE event_id=$1', [event.payload._eventId])).rows).toEqual([])
+        if (!commit) throw new Error('SYNTHETIC_RECOVERY_ROLLBACK')
+      })
+      if (commit) await write
+      else await expect(write).rejects.toThrow('SYNTHETIC_RECOVERY_ROLLBACK')
+      expect(event).toBeDefined()
+      const durable = await q('SELECT event_type, payload FROM meta_automation_outbox WHERE event_id=$1', [event!.payload._eventId])
+      expect(durable.rows).toEqual(commit ? [{ event_type: event!.type, payload: event!.payload }] : [])
+      expect(Number((await q('SELECT version FROM meta_records WHERE id=$1', [REC_A])).rows[0].version)).toBe(Number(before) + (commit ? 1 : 0))
+      const consumers = await q(`SELECT c.consumer_key FROM meta_automation_outbox_consumer c
+        JOIN meta_automation_outbox o ON o.id=c.outbox_id WHERE o.event_id=$1 ORDER BY c.consumer_key`, [event!.payload._eventId])
+      expect(consumers.rows).toEqual(commit ? [{ consumer_key: 'automation-record-trigger' }, { consumer_key: 'webhook-event-bridge' }] : [])
+    } finally {
+      if (event) await q('DELETE FROM meta_automation_outbox WHERE event_id=$1', [event.payload._eventId])
+      if (previousFlag === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+      else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = previousFlag
+    }
+  })
+
+  test('RECOVERY-EVENT: autocommit query cannot forge a transaction for durable enqueue', async () => {
+    const previousFlag = process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = 'true'
+    const recordId = `rec_event_probe_${randomUUID()}`
+    try {
+      await expect(enqueueRecoveryMutationEvent(q, SHEET, ACTOR, {
+        kind: 'delete', recordId, revisionId: randomUUID(), linkInvalidations: [],
+      })).rejects.toThrow('must run inside a real database TRANSACTION')
+      expect((await q("SELECT id FROM meta_automation_outbox WHERE payload->>'recordId'=$1", [recordId])).rows).toEqual([])
+    } finally {
+      await q("DELETE FROM meta_automation_outbox WHERE payload->>'recordId'=$1", [recordId])
+      if (previousFlag === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+      else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = previousFlag
     }
   })
 
