@@ -2,6 +2,28 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Approval Progress Main Union
+
+True merge `190fc01e05d516c8d6c17ac5ab644f55b2b813bb`, tree
+`87873424d974161e9c31dbd6de8e365e269edfa7`, preserves ordered parents
+`891426af343c643f4f0939a93ee305f712d483fc` and main
+`8a54a35b15930ea28f60a9ab3c7f1a9f17e1de22`. Only the two shared test-command
+lines required manual union. Both retain sheet-trash and external-context-sync
+from TM and approval-progress from main. Command-token census (with nonempty
+positive controls): workflow 225/224 -> 226, required-web 434/433 -> 435,
+zero missing tokens from either parent. Initial required-web census matched no
+commands because it omitted `exec npx`; that empty result is not evidence and
+was replaced by the corrected census above.
+
+Six focused Web files pass 129/129. Application vue-tsc and both TM wiring suites
+pass. Full required-web exits zero; its final group passes 462 files / 6,968 tests.
+Official provenance computation with explicit repository root gives zero drift;
+the initial call without the required root argument was rejected and is not a
+provenance result. No backend/migration change or new DB/browser acceptance is
+claimed. Logs: `/private/tmp/tm-8a54-{focused,tsc,wiring,required-web}-20260916.log`.
+Published-head CI remains required; earlier 891426af3 had 34 successful checks
+and one intentional skip before this main advance.
+
 ## Workbench Mount Main Replay
 
 Merge `79b23381f55335ffe57c9d673ad90854feaae96d`, tree
