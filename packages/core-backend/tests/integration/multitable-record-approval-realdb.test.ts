@@ -42,7 +42,7 @@ import { up as createRecordApprovalSubmissions } from '../../src/db/migrations/z
 import { up as seedSubmitApprovalPermission } from '../../src/db/migrations/zzzz20260915121000_add_multitable_submit_approval_permission'
 import { createMultitableRecordApprovalRoutes } from '../../src/routes/multitable-record-approvals'
 import { buildDurableConsumerHandlers } from '../../src/multitable/automation-durable-consumer-handlers'
-import { createRecordApprovalCompletionSink } from '../../src/multitable/record-approval-submission-service'
+import { createPoolTransactionRunner, createRecordApprovalCompletionSink } from '../../src/multitable/record-approval-submission-service'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
@@ -362,7 +362,12 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     const rows = await submissionsFor(RECORD)
     const instanceId = rows[0]!.approval_instance_id!
     const pool = poolManager.get()
-    const sink = createRecordApprovalCompletionSink(pool.query.bind(pool) as never)
+    // Boot-identical injection (index.ts wires the SAME runner): the terminal UPDATE + notification INSERT
+    // share one real BEGIN/COMMIT here, so the production atomic path executes against a real database
+    // at least once instead of being vouched for only by the fake pool in the unit suite.
+    const sink = createRecordApprovalCompletionSink(pool.query.bind(pool) as never, {
+      runInTransaction: createPoolTransactionRunner(pool as never),
+    })
     // Boot-identical wiring: the same builder index.ts calls, so the adapter under test is the production
     // one (the other services are irrelevant to this key and are stubbed).
     const handlers = buildDurableConsumerHandlers({
