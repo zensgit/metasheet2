@@ -151,6 +151,9 @@ export type AutomationLabelKey =
   | 'actionConfig.deleteRecordAckCrossBase'
   | 'actionConfig.crossBaseTargetWarning'
   | 'actionConfig.crossBaseTargetIncomplete'
+  | 'actionConfig.crossBaseCreateTargetWarning'
+  | 'actionConfig.crossBaseCreateTargetIncomplete'
+  | 'actionConfig.crossBaseCreateSheetPickerHidden'
   | 'actionConfig.deleteRecordTestRunHint'
   | 'actionConfig.lockRecord'
   | 'actionConfig.waitForCallbackHint'
@@ -479,6 +482,12 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'actionConfig.emailSubjectPlaceholder',
   'actionConfig.bodyTemplate',
   'actionConfig.emailBodyPlaceholder',
+  // Cross-base CREATE copy (#5756 follow-up). Listed here — unlike the older
+  // `crossBaseTarget*`/`deleteRecord*` keys, which predate this list and are still missing from it —
+  // so meta-automation-labels.spec.ts's "fully readable in both locales" loop actually covers them.
+  'actionConfig.crossBaseCreateTargetWarning',
+  'actionConfig.crossBaseCreateTargetIncomplete',
+  'actionConfig.crossBaseCreateSheetPickerHidden',
   'actionConfig.lockRecord',
   'actionConfig.waitForCallbackHint',
   'conditionBranch.readOnly',
@@ -875,6 +884,23 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.crossBaseTargetIncomplete': {
     en: 'This cross-base target is incomplete: targetSheetId and targetRecordId are both required once targetBaseId is set. The server refuses to save it and a run would fail — fix the rule through the API.',
     zh: '跨 base 目标不完整：设置 targetBaseId 后必须同时有 targetSheetId 与 targetRecordId。服务端会拒绝保存、运行也会失败——请通过 API 修复该规则。',
+  },
+  // create_record opts into a cross-base write with `targetBaseId` ALONE (automation-actions.ts
+  // CreateRecordConfig; automation-service.ts validateCrossBaseWriteConfig deliberately skips
+  // create_record), and the target sheet is its own `sheetId`, not a `targetSheetId` sibling — so the
+  // mutate wording above ("a record in ANOTHER base", "kept exactly as loaded") is wrong twice for it:
+  // there is no target RECORD yet, and the sheet id IS editable here.
+  'actionConfig.crossBaseCreateTargetWarning': {
+    en: 'This action creates the record in ANOTHER base (targetBaseId below), not in this table. The target sheet id must name a sheet inside THAT base — the executor re-checks that per run and fails the step when it does not.',
+    zh: '此动作会在另一个 base（下方 targetBaseId）中创建记录，而不是在本表。目标数据表 ID 必须是那个 base 里的数据表——执行器每次运行都会重新校验，不一致则该步骤失败。',
+  },
+  'actionConfig.crossBaseCreateTargetIncomplete': {
+    en: 'This cross-base create has no target sheet id, so it does not say WHERE to create the record. The server still accepts the save (it only validates the update/delete/lock triple), but the run fails: the executor falls back to the trigger sheet in THIS base while still claiming targetBaseId, and the cross-base write gate rejects the mismatch.',
+    zh: '此跨 base 创建没有目标数据表 ID，等于没说明在哪里创建记录。服务端仍会接受保存（它只校验 update/delete/lock 三元组），但运行会失败：执行器会退回本 base 的触发数据表，同时仍声称 targetBaseId，跨 base 写入门会因声明与事实不符而拒绝。',
+  },
+  'actionConfig.crossBaseCreateSheetPickerHidden': {
+    en: 'The sheet dropdown is not offered for a cross-base create: it lists the sheets you can read without saying which base each one belongs to, so a pick cannot be trusted to land in the base above. Edit the target sheet id as text.',
+    zh: '跨 base 创建不提供数据表下拉：下拉列出的是你可读的数据表，但不显示每张表属于哪个 base，所选项无法保证落在上方那个 base。请以文本方式编辑目标数据表 ID。',
   },
   'actionConfig.deleteRecordTestRunHint': {
     en: 'Test Run uses a synthetic record and will not delete a real record.',
