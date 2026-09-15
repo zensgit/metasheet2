@@ -300,6 +300,7 @@ import {
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from '../multitable/automation-producer-emit'
+import { enqueueRecoveryMutationEvent } from '../multitable/recovery-mutation-events'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
@@ -11610,17 +11611,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       mutation: ExactAnchorAppliedMutation,
     ): Promise<void> => {
       appliedLinkInvalidations.push(...mutation.linkInvalidations)
-      const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
-        const result = await query(sql, params)
-        return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
-      })
+      const { payload } = await enqueueRecoveryMutationEvent(query, sheetId, actorId, mutation)
       if (mutation.kind === 'revert') {
-        const payload = withAutomationEventId({
-          sheetId,
-          recordId: mutation.recordId,
-          changes: mutation.patch,
-          actorId,
-        })
         updatedEventPayloads.push(payload)
         appliedReverts.push({
           recordId: mutation.recordId,
@@ -11629,16 +11621,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           patch: mutation.patch,
           revisionId: mutation.revisionId,
         })
-        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
       } else {
-        const payload = withAutomationEventId({
-          sheetId,
-          recordId: mutation.recordId,
-          actorId,
-        })
         deletedEventPayloads.push(payload)
         appliedDeleteIds.push(mutation.recordId)
-        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
       }
     }
 
