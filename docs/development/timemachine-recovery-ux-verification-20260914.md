@@ -2,12 +2,17 @@
 
 ## Full Workbench Recovery Gate 2026-09-15
 
-Code `4cf90b3ac1c1211b04f23260046c79db530f1081`, tree
-`9eabd69c128615b94dc54035ee436fc0630f3b03`, parent
-`321761ca35fca2cec113acc7ba6fa1bbcd836daa`. One new manual script,
-`packages/core-backend/scripts/verify-timemachine-workbench.mts`, 329 lines.
-Production source, migrations, workflows and permissions are unchanged. This
-design/report pair is a documentation-only child; publication remains Draft #5709.
+Code `890f39e3295e5f44ca85d84423b70cc842216071`, tree
+`4886fefc58c45d441822341d32526896301f2cbd`. Ordered merge parents:
+`d0c84011a0cc602e4f0dbe048653b45534252b7b` and then-current main
+`2b67a04625a0d6b089dac173e47a0de5d111e225`. The replay is conflict-free with
+no manual resolution; its only first-parent delta is main's three notification
+client/test files. Script introduction `4cf90b3ac1c1211b04f23260046c79db530f1081`
+and hardening `d0c84011a0cc602e4f0dbe048653b45534252b7b` add one manual script,
+`packages/core-backend/scripts/verify-timemachine-workbench.mts`, now 353 lines,
+and the design/report update. This acceptance work does not change production
+source, migrations, workflows or permissions. The final report update is a
+documentation-only child; publication remains Draft #5709.
 
 Clean exact-code-head run: 6 named cases PASS, process exit 0. The actual
 `MetaSheetServer.start()` and Web application (`index.html`, `src/main.ts`, Vite
@@ -49,14 +54,35 @@ runs were terminated and are NOT terminal passes. The unchanged server's uncance
 10-second shutdown-race timer still logs a timeout warning; the final script waits
 through it and exits naturally with 0, without forcing success via process.exit.
 
-Script/core-dependency standalone typecheck PASS; scoped diff-check PASS.
+Sol High reviewed the script at `4cf90b3ac1c1211b04f23260046c79db530f1081` and
+found three P2 acceptance gaps, closed by the bounded hardening above:
+
+- Require the connected database owner, no other sessions and empty user/recovery
+  tables before creating the server or fixtures (only the migration's unowned
+  `base_legacy` is allowed). A synthetic nonempty-base negative exits 1 with
+  `EMPTY_DATABASE_REQUIRED`, creates no user and preserves that base unchanged.
+- Attempt all cleanup operations independently; record fixed error labels and
+  fail on any error. Injecting a throw after browser close still cleans all 12
+  fixture families and stops the servers, but exits 1 with `CLEANUP_FAILED`.
+- Replace prior PASS at entry with RUNNING plus a new run id. The admission and
+  cleanup negatives both leave their own FAIL evidence, never the older PASS.
+
+The reviewer session is closed. These closures have local behavioral evidence,
+not a claimed second external zero-finding verdict. The final clean code-head
+six-case run includes both empty-database admission and successful cleanup.
+
+Script/core-dependency standalone typecheck PASS; scoped diff-check PASS. Five
+frontend files (table trash, config history, history inline diff, notification bell,
+multitable client) pass 165/165, including both newly inherited main test files.
 No full required-web rerun or new required-CI enrollment is claimed. This remains
 a manual acceptance script; published-head CI is a separate gate. Local result and
 desktop screenshots are under `artifacts/timemachine-workbench/`; the result binds
 the clean code head/tree and script SHA-256
-`538c39f85f9913e3909f6fe427c99b25c6211a8a7521d06b58ae26c67037be93`.
-Logs: `/private/tmp/tm-workbench-{fresh,replay,exact,final-typecheck}.log`,
-`/private/tmp/tm-workbench-mutation-refresh.log`.
+`a7286d110194bda8d87f0fe4d77aa2aec8dc1868199dafde727d3ac6f558495d`.
+Logs: `/private/tmp/tm-workbench-final-{fresh,replay}.log`,
+`/private/tmp/tm-workbench-current-main-{exact,typecheck,web}.log`,
+`/private/tmp/tm-workbench-mutation-refresh.log`,
+`/private/tmp/tm-workbench-{admission,cleanup}-negative.log`.
 
 Current boundary: full desktop workbench retained-table/row/column recovery is
 locally verified. This supersedes only the older sections' open full-workbench
