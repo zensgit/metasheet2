@@ -49,7 +49,7 @@ import type { TransactionalQueryable } from '../../src/multitable/pg-transaction
 import { enqueueOutboxEvent } from '../../src/multitable/automation-outbox-enqueue'
 import { buildDurableConsumerHandlers, type DurableDeliveryServices } from '../../src/multitable/automation-durable-consumer-handlers'
 import { deriveOutboundIdempotencyKey } from '../../src/multitable/automation-action-idempotency'
-import { APPROVAL_COMPLETION_CONSUMERS_V2, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
+import { APPROVAL_COMPLETION_CONSUMERS_V3, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
 import type { PoolClient } from 'pg'
 
 /**
@@ -214,7 +214,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     expect(registry.keys().sort()).toEqual([...DURABLE_CONSUMER_KEYS].sort())
   })
 
-  test('flag ON: produce (in txn) via the REAL seam enqueues the exact manifest fan-out (approval → 3 consumers, pending)', async () => {
+  test('flag ON: produce (in txn) via the REAL seam enqueues the exact manifest fan-out (approval → 5 consumers, pending)', async () => {
     // Proves the real produce→manifest fan-out WITHOUT draining (no tick → cannot claim a sibling suite's
     // rows on the shared CI DB — the drain/poison behavior is proven separately on run-unique keys below).
     const client = await db().getInternalPool().connect()
@@ -229,14 +229,14 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
       client.release()
     }
     const s = await consumerStatuses(outboxId)
-    // v2 completion fan-out (v1's three + multitable-record-approval).
-    expect(Object.keys(s).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V2].sort())
+    // v3 completion fan-out (v2's four + dingtalk-todo-mirror).
+    expect(Object.keys(s).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3].sort())
     expect(Object.values(s).every((v) => v === 'pending')).toBe(true)
   })
 
   test('boot lifecycle (flag ON): bootDurableDelivery returns a LIVE handle and stop() resolves cleanly — no rows touched', async () => {
     // The index.ts wiring calls exactly this. A large interval means the first tick never fires before stop(),
-    // so booting the REAL six-key registry is safe on the shared CI DB (it claims nothing). This proves the
+    // so booting the REAL eight-key registry is safe on the shared CI DB (it claims nothing). This proves the
     // start/stop lifecycle + shutdown hook path; per-row DELIVERY through the loop is proven by V2/V3 (tick)
     // and the handler MAPPING by the unit suite. A `count(*)` before/after guards against a stray claim.
     const before = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox_consumer WHERE status <> \'pending\'')

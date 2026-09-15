@@ -14,7 +14,7 @@
  *     OFF ⇒ legacy emit, byte-identical). REPLACE is necessary, not stylistic — the webhook sink has no
  *     event-id dedup, so keep-both would double-deliver every webhook. An earlier draft of this header
  *     described a transitional keep-both window; that described only the pre-P1#2 state and is superseded.
- *   - `buildConsumerAdapterRegistry(handlers)` — the ratified consumers (manifest v2 universe), each a
+ *   - `buildConsumerAdapterRegistry(handlers)` — the ratified consumers (manifest v3 universe), each a
  *     thin adapter delegating to an injected handler (S5 wiring passes the REAL service methods —
  *     `handleApprovalCompletionResume` / `...Trigger` / projection / task / record / webhook-bridge — which
  *     structurally REPLACES the anonymous bus closures and closes the manifest's un-enumerable direction).
@@ -43,7 +43,7 @@ import type { TransactionalQueryable } from './pg-transaction-guard'
 /** Throw this from a handler to mark a DETERMINISTIC permanent failure (→ dead_letter, not retried). */
 export class PermanentDeliveryFailure extends Error {}
 
-/** One handler per ratified consumer_key (manifest v2 universe). S5 wiring passes the real service methods. */
+/** One handler per ratified consumer_key (manifest v3 universe). S5 wiring passes the real service methods. */
 export interface DurableConsumerHandlers {
   'approval-bridge': (event: ClaimedConsumer) => Promise<void>
   'approval-trigger': (event: ClaimedConsumer) => Promise<void>
@@ -53,6 +53,14 @@ export interface DurableConsumerHandlers {
   'webhook-event-bridge': (event: ClaimedConsumer) => Promise<void>
   /** Manifest v2 addition — record-level submit-for-approval completion (multitable × approval phase 2). */
   'multitable-record-approval': (event: ClaimedConsumer) => Promise<void>
+  /**
+   * Manifest v3 addition — the DingTalk approval-todo ONE-WAY mirror. Routed on BOTH
+   * `approval.task_created` (create the mirrored todo) and the four completion families (mark it done).
+   * The handler is registered UNCONDITIONALLY, independent of DINGTALK_TODO_MIRROR_ENABLED: the flag
+   * gates what the handler WRITES (OFF ⇒ ACK, zero rows), never whether the adapter exists — a missing
+   * adapter would fail `assertManifestCompleteness` at boot and park every v3 row forever.
+   */
+  'dingtalk-todo-mirror': (event: ClaimedConsumer) => Promise<void>
 }
 
 export const DURABLE_CONSUMER_KEYS = [
@@ -63,6 +71,7 @@ export const DURABLE_CONSUMER_KEYS = [
   'automation-record-trigger',
   'webhook-event-bridge',
   'multitable-record-approval',
+  'dingtalk-todo-mirror',
 ] as const satisfies readonly (keyof DurableConsumerHandlers)[]
 
 /**
