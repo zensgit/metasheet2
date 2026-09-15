@@ -296,6 +296,26 @@ function detailWith(changes: HistoryBatchDetail['changes']): HistoryBatchDetail 
 }
 
 describe('HistoryCenterModal — record titles from the masked payload (PR-B)', () => {
+  it('shows deleted field values before-only when the wire after snapshot also contains pre-delete data', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'delete' })], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_deleted', action: 'delete', version: 2,
+      changedFieldIds: ['fld_title', 'fld_count'],
+      before: { fld_title: 'Deleted project', fld_count: 7 },
+      after: { fld_title: 'Deleted project', fld_count: 7 },
+    }]))
+    const { app, container } = mountModal([{ id: 'fld_title', name: 'Project' }, { id: 'fld_count', name: 'Quantity' }])
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const rows = [...container.querySelectorAll<HTMLElement>('[data-test="hist-diff-row"]')]
+      expect(rows.map((row) => row.querySelector('.meta-hist__diff-before')?.textContent)).toEqual(['Deleted project', '7'])
+      expect(rows.map((row) => row.querySelector('.meta-hist__diff-after'))).toEqual([null, null])
+      expect(rows.map((row) => row.querySelector('[data-test="hist-diff-op"]')?.textContent)).toEqual(['clear', 'clear'])
+    } finally { app.unmount(); container.remove() }
+  })
+
   it('renders the record title from the after-snapshot and keeps the full id in the title attr', async () => {
     mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
     mockGetHistoryBatch.mockResolvedValue(detailWith([{

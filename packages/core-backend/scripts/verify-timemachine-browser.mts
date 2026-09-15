@@ -65,10 +65,12 @@ app.get('/', async (_req, res, next) => {
       import 'element-plus/dist/index.css'
       import '/src/styles/tokens.css'
       import SheetTrashModal from '/src/multitable/components/SheetTrashModal.vue'
+      import HistoryCenterModal from '/src/multitable/components/HistoryCenterModal.vue'
       import { MultitableApiClient } from '/src/multitable/api/client.ts'
       const client = new MultitableApiClient()
       createApp({ setup() {
         const signedIn = ref(false), open = ref(false), message = ref('')
+        const historyOpen = ref(false), fields = ref([]), isAdmin = ref(false)
         async function login(event) {
           event.preventDefault()
           const data = new FormData(event.target)
@@ -77,6 +79,7 @@ app.get('/', async (_req, res, next) => {
           if (!response.ok) throw new Error('LOGIN_FAILED')
           const body = await response.json()
           localStorage.setItem('auth_token', body.data.token)
+          isAdmin.value = body.data.user.role === 'admin'
           signedIn.value = true
         }
         return () => h('main', { style: 'padding:24px;font:16px sans-serif' }, [
@@ -88,9 +91,14 @@ app.get('/', async (_req, res, next) => {
           ]) : h('section', [h('p', {'data-test':'signed-in'}, 'Signed in'),
             h('button', {onClick:async () => { await client.deleteSheet(${JSON.stringify(sheetId)}); message.value='Table deleted' }}, 'Delete fixture table'),
             h('button', {onClick:() => {open.value=true}}, 'Recycle bin'),
+            h('button', {onClick:async () => {await client.deleteRecord(${JSON.stringify(recordIds[0])}, 1); message.value='Record deleted'}}, 'Delete fixture record'),
+            h('button', {onClick:async () => {fields.value=(await client.listFields(${JSON.stringify(sheetId)})).fields; historyOpen.value=true}}, 'History'),
             h('p', {'data-test':'outcome'}, message.value),
             h(SheetTrashModal, {open:open.value, baseId:${JSON.stringify(baseId)}, client,
               onClose:()=>{open.value=false}, onRestored:()=>{message.value='Table restored'}}),
+            h(HistoryCenterModal, {open:historyOpen.value, baseId:${JSON.stringify(baseId)}, sheetId:${JSON.stringify(sheetId)},
+              fields:fields.value, canRestoreRecords:isAdmin.value, onClose:()=>{historyOpen.value=false},
+              onRestored:()=>{message.value='Record restored'}}),
           ]),
         ])
       }}).mount('#app')
@@ -186,7 +194,6 @@ try {
   const anonymous = await reader.request.post(`${origin}/api/multitable/sheets/${sheetId}/restore`)
   assert.equal(anonymous.status(), 401)
   cases.push('anonymous restore denied by canonical JWT middleware')
-  await reader.close()
   await page.locator('[data-test="sheet-trash-restore"]').click()
   await expect(page.locator('[data-test="sheet-trash-confirm"]')).toBeVisible()
   // Confirmation is necessary: displaying it must not change persistence.
@@ -199,6 +206,58 @@ try {
   assert.deepEqual(errors, [])
   cases.push('real modal confirmation restores exact retained content through production client/router')
   await page.screenshot({ path: resolve(output, 'trash-after-restore.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'Close this dialog', exact: true }).click()
+  const beforeRecord = before.records.find((record) => record.id === recordIds[0])
+  assert.ok(beforeRecord)
+  await page.getByRole('button', { name: 'Delete fixture record', exact: true }).click()
+  await expect(page.locator('[data-test="outcome"]')).toHaveText('Record deleted')
+  assert.equal((await q('SELECT count(*)::int AS n FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].n, 0)
+  const tombstone = (await q('SELECT data,deleted_by FROM meta_records_trash WHERE record_id=$1', [recordIds[0]])).rows
+  assert.equal(tombstone.length, 1)
+  assert.deepEqual(tombstone[0].data, beforeRecord.data)
+  assert.equal(tombstone[0].deleted_by, users[0])
+  assert.equal(await denied.evaluate(async (id) => (await fetch(`/api/multitable/records/${id}/restore`, {
+    method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
+  })).status, recordIds[0]), 403)
+  assert.equal((await reader.request.post(`${origin}/api/multitable/records/${recordIds[0]}/restore`)).status(), 401)
+  assert.equal((await q('SELECT count(*)::int AS n FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].n, 0)
+  assert.deepEqual((await q('SELECT data FROM meta_records_trash WHERE record_id=$1', [recordIds[0]])).rows[0].data, beforeRecord.data)
+  cases.push('authenticated read-only and anonymous record restores denied without changing the tombstone')
+  await reader.close()
+  await page.getByRole('button', { name: 'History', exact: true }).click()
+  const history = page.getByRole('dialog', { name: 'History', exact: true })
+  await expect(history.locator('[data-test="hist-batch"]')).toHaveCount(1)
+  await expect(history).toContainText('Recovery Tester')
+  await history.locator('[data-test="hist-batch"]').click()
+  await expect(history.locator('[data-test="hist-rec-label"]')).toHaveText('Synthetic project 0')
+  await expect(history.locator('[data-test="hist-diff-row"]')).toHaveCount(2)
+  await expect(history.locator('.meta-hist__diff-after')).toHaveCount(0)
+  await expect(history.locator('[data-test="hist-diff-row"]').filter({ hasText: 'Project' })).toContainText('Synthetic project 0')
+  await expect(history.locator('[data-test="hist-diff-row"]').filter({ hasText: 'Quantity' })).toContainText('7')
+  await page.screenshot({ path: resolve(output, 'history-deleted-record.png'), animations: 'disabled' })
+  await history.locator('[data-test="hist-restore-deleted-record"]').click()
+  const deleted = page.getByRole('dialog', { name: 'Deleted records', exact: true })
+  await expect(deleted.locator('[data-test="trash-record-title"]')).toHaveText('Synthetic project 0')
+  await expect(deleted.locator('[data-test="trash-record-details"] dt')).toHaveText(['Project', 'Quantity'])
+  await expect(deleted.locator('[data-test="trash-record-details"] dd')).toHaveText(['Synthetic project 0', '7'])
+  await expect(deleted).toContainText('Recovery Tester')
+  await deleted.locator('[data-test="trash-restore"]').click()
+  assert.equal((await q('SELECT count(*)::int AS n FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].n, 0)
+  const restoreResponse = page.waitForResponse((response) => response.url() === `${origin}/api/multitable/records/${recordIds[0]}/restore` && response.request().method() === 'POST')
+  await deleted.locator('[data-test="trash-restore-confirm"]').click()
+  assert.equal((await restoreResponse).status(), 200)
+  await expect(page.locator('[data-test="outcome"]')).toHaveText('Record restored')
+  const restoredRecord = (await q('SELECT * FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0]
+  for (const key of ['id', 'sheet_id', 'data', 'created_at', 'updated_at', 'created_by']) {
+    assert.deepEqual(restoredRecord[key], beforeRecord[key], `Record restore must preserve ${key}`)
+  }
+  assert.equal(restoredRecord.modified_by, users[0])
+  assert.equal((await q('SELECT count(*)::int AS n FROM meta_records_trash WHERE record_id=$1', [recordIds[0]])).rows[0].n, 0)
+  assert.deepEqual((await q('SELECT * FROM meta_records WHERE id=$1', [recordIds[1]])).rows[0], before.records.find((record) => record.id === recordIds[1]))
+  assert.deepEqual(errors, [])
+  cases.push('history shows canonical deletion actor and both pre-delete field values')
+  cases.push('history-selected current tombstone restores the whole row via deleted-record endpoint, preserving its peer')
+  await page.screenshot({ path: resolve(output, 'history-after-record-restore.png'), animations: 'disabled' })
   await context.close()
   evidence.result = 'PASS'
 } finally {
@@ -206,6 +265,8 @@ try {
   await vite.close()
   await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()))
   await q('DELETE FROM spreadsheet_permissions WHERE sheet_id=$1', [sheetId])
+  await q('DELETE FROM meta_record_revisions WHERE sheet_id=$1', [sheetId])
+  await q('DELETE FROM meta_records_trash WHERE sheet_id=$1', [sheetId])
   await q('DELETE FROM meta_sheets WHERE id=$1', [sheetId])
   await q('DELETE FROM meta_bases WHERE id=$1', [baseId])
   await q('DELETE FROM user_sessions WHERE user_id=ANY($1::text[])', [users])

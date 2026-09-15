@@ -256,7 +256,8 @@ function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): stri
 function changeFieldDiffs(c: HistoryChange): FieldDiffRow[] {
   return c.changedFieldIds.map((fieldId) => {
     const beforeHas = hasFieldValue(c.before, fieldId)
-    const afterHas = hasFieldValue(c.after, fieldId)
+    // Delete wire snapshots retain the pre-delete data on both sides; no value survives the deletion.
+    const afterHas = c.action !== 'delete' && hasFieldValue(c.after, fieldId)
     const shape: FieldDiffShape = beforeHas && afterHas ? 'changed' : afterHas ? 'set' : beforeHas ? 'cleared' : 'masked'
     return {
       fieldId,
