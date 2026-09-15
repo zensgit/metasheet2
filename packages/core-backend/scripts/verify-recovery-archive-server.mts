@@ -1,19 +1,22 @@
-/** Manual HTTP acceptance using a seeded encrypted archive, not a production capture/provider. */
+/** Real workbench/HTTP acceptance using a seeded archive, not a production capture/provider. */
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { closeSync, openSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { chromium, expect } from '@playwright/test'
 import { hash } from 'bcryptjs'
 import { Pool } from 'pg'
 import type { RecoveryArchiveApplicationDatabaseRuntime } from '../src/multitable/recovery-archive-application'
 import type { RecoveryArchiveDurableFixture } from '../tests/utils/recovery-archive-durable-fixture'
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
+const web = resolve(repo, 'apps/web')
 const output = resolve(repo, 'artifacts/recovery-archive-server')
 const runId = randomUUID()
 await mkdir(output, { recursive: true })
@@ -66,12 +69,19 @@ let objectsPath: string | undefined
 let app: import('../src/index').MetaSheetServer | undefined
 let poolManager: typeof import('../src/integration/db/connection-pool').poolManager | undefined
 let cleanupGlobals: (() => Promise<void>) | undefined
+let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+const webRequire = createRequire(resolve(web, 'package.json'))
+const { createServer } = await import(pathToFileURL(webRequire.resolve('vite')).href)
+let vite: Awaited<ReturnType<typeof createServer>> | undefined
 const cases: string[] = []
 const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim()
 const sourcePaths = [
   'packages/core-backend/scripts/verify-recovery-archive-server.mts',
+  'packages/core-backend/scripts/tsconfig.recovery-archive-acceptance.json',
   'packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts',
   'packages/core-backend/tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
+  'apps/web/src/multitable/components/RecoveryArchiveModal.vue',
+  'apps/web/src/multitable/views/MultitableWorkbench.vue',
 ]
 const sourceHashes = async () => Object.fromEntries(await Promise.all(sourcePaths.map(async (path) => [
   path, createHash('sha256').update(await readFile(resolve(repo, path))).digest('hex'),
@@ -84,6 +94,7 @@ const evidence: Record<string, unknown> = {
   sourceHashes: await sourceHashes(), dirtyDiffSha256: dirtyDiffHash(),
   fixture: 'synthetic seeded encrypted archive; test custody and local object store',
   backend: 'MetaSheetServer.start()', cases,
+  frontend: 'index.html -> src/main.ts -> real LoginView and MultitableWorkbench',
 }
 try {
   assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
@@ -166,6 +177,9 @@ try {
     [id, `${id}@example.test`, await hash(password, 10), role, JSON.stringify(permissions)])
   }
   await q('UPDATE meta_bases SET owner_id=$2 WHERE id=$1', [fixture.baseId, fixture.actorId])
+  const viewId = `${fixture.sheetId}_view`
+  await q(`INSERT INTO meta_views (id,sheet_id,name,type,filter_info,sort_info,group_info,hidden_field_ids,config)
+    VALUES ($1,$2,'Archive acceptance','grid','{}','{}','{}','[]','{}')`, [viewId, fixture.sheetId])
   await q('INSERT INTO meta_fields (id,sheet_id,name,type,property,"order") VALUES ($1,$2,\'Value\',\'string\',\'{}\',1)', [fieldId, fixture.sheetId])
   await q(`INSERT INTO meta_records (id,sheet_id,data,version,created_by,modified_by)
     SELECT $1::text || '_' || i::text,$1,jsonb_build_object($2::text,'live-' || i::text),2,$3,$3
@@ -211,7 +225,11 @@ try {
   await request(`${path}/catalog`, 401)
   await request(`${path}/catalog`, 403, readerToken)
   const catalog = await request(`${path}/catalog`, 200, token)
-  assert.ok(JSON.stringify(catalog).includes(fixture.generationId))
+  const entries = data(catalog).entries
+  assert.ok(Array.isArray(entries))
+  const entry = entries.find((candidate) => candidate.generationId === fixture.generationId)
+  assert.ok(entry)
+  assert.equal(typeof entry.recoveryPointAt, 'string')
   cases.push('canonical password login/session; anonymous and reader cannot manage archive')
   process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'false'
   await request(`${path}/catalog`, 503, token)
@@ -223,8 +241,106 @@ try {
   assert.equal(preview.executionKind, 'async')
   assert.equal((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id=$1 AND version=2', [fixture.sheetId])).rows[0].n, 5001)
   cases.push('flag-off rejection; authenticated preview produces async plan without modifying rows')
-  const accepted = data(await request(`${path}/jobs/accept`, 202, token, { previewIdentity: preview.previewIdentity }))
+  Object.assign(process.env, { VITE_API_URL: origin, VITE_API_BASE: origin })
+  vite = await createServer({
+    root: web, configFile: resolve(web, 'vite.config.ts'), envDir: output, mode: 'development',
+    cacheDir: resolve(output, 'vite-cache'), server: { host: '127.0.0.1', port: 0, strictPort: true },
+  })
+  await vite.listen()
+  const webAddress = vite.httpServer?.address()
+  assert.ok(webAddress && typeof webAddress !== 'string')
+  ports.add(webAddress.port)
+  const webOrigin = `http://127.0.0.1:${webAddress.port}`
+  browser = await chromium.launch({ headless: true })
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId: 'America/New_York', locale: 'en-US' })
+  context.setDefaultTimeout(30_000)
+  await context.route('**/*', async (route) => {
+    const url = new URL(route.request().url())
+    if (['data:', 'blob:'].includes(url.protocol) || [origin, webOrigin].includes(url.origin)) return route.continue()
+    networkErrors.push('UNAPPROVED_BROWSER_REQUEST')
+    await route.abort('blockedbyclient')
+  })
+  await context.routeWebSocket('**/*', (socket) => {
+    const url = new URL(socket.url())
+    if (url.hostname === '127.0.0.1' && ports.has(Number(url.port))) socket.connectToServer()
+    else { networkErrors.push('UNAPPROVED_BROWSER_WEBSOCKET'); socket.close() }
+  })
+  const page = await context.newPage()
+  page.on('pageerror', () => networkErrors.push('BROWSER_PAGE_ERROR'))
+  page.on('requestfailed', (req) => networkErrors.push(`BROWSER_REQUEST_FAILED:${new URL(req.url()).pathname}`))
+  page.on('response', (response) => {
+    if (new URL(response.url()).pathname.startsWith('/api/') && !response.ok()) {
+      networkErrors.push(`BROWSER_API_FAILED:${response.request().method()}:${new URL(response.url()).pathname}:${response.status()}`)
+    }
+  })
+  const workbenchPath = `/multitable/${fixture.sheetId}/${viewId}?baseId=${fixture.baseId}`
+  await page.goto(`${webOrigin}/login?redirect=${encodeURIComponent(workbenchPath)}`)
+  await page.locator('input[autocomplete="username"]').fill(`${fixture.actorId}@example.test`)
+  await page.locator('input[autocomplete="current-password"]').fill(password)
+  await page.locator('button.login-submit').click()
+  await expect(page).toHaveURL(`${webOrigin}${workbenchPath}`)
+  await expect(page.getByText('live-0', { exact: true })).toBeVisible()
+  assert.equal((await q('SELECT count(*)::int AS n FROM user_sessions')).rows[0].n, 3)
+  await page.locator('[data-action="open-archive-recovery"]').click()
+  const modal = page.locator('[data-test="archive-recovery-modal"]')
+  await expect(modal).toBeVisible()
+  const catalogEntry = modal.locator(`[data-test="archive-recovery-entry-${fixture.generationId}"]`)
+  const point = new Date(entry.recoveryPointAt)
+  const localTime = point.toLocaleString('en-US', { timeZone: 'America/New_York' })
+  assert.notEqual(localTime, point.toLocaleString('en-US', { timeZone: 'UTC' }))
+  await expect(catalogEntry.locator('.archive-recovery__entry-time')).toHaveText(localTime)
+  await catalogEntry.click()
+  await modal.locator('[data-test="archive-recovery-mode-revert"]').click()
+  await modal.locator('[data-test="archive-recovery-request-preview"]').click()
+  await expect(modal.locator('[data-test="archive-recovery-summary"]')).toContainText('5001')
+  await expect(modal.locator('[data-test="archive-recovery-async-required"]')).toBeVisible()
+  const execute = modal.locator('[data-test="archive-recovery-execute"]')
+  await expect(execute).toBeDisabled()
+  assert.equal((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id=$1 AND version=2', [fixture.sheetId])).rows[0].n, 5001)
+  cases.push('real browser login/catalog in viewer timezone/async preview; confirmation required and preview leaves live rows unchanged')
+  await page.screenshot({ path: resolve(output, 'archive-preview-desktop.png'), animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(modal.locator('[data-test="archive-recovery-summary"]')).toBeVisible()
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'MOBILE_PREVIEW_OVERFLOW')
+  await page.screenshot({ path: resolve(output, 'archive-preview-mobile.png'), animations: 'disabled' })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await modal.locator('[data-test="archive-recovery-confirm-input"]').check()
+  const acceptResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api${path}/jobs/accept`)
+  await execute.click()
+  const response = await acceptResponse
+  assert.equal(response.status(), 202)
+  const accepted = data(await response.json())
   assert.equal(typeof accepted.jobId, 'string')
+  await expect(modal.locator('[data-test="archive-recovery-job"]')).toBeVisible()
+  await page.reload()
+  await expect(page.locator('[data-action="open-archive-recovery"]')).toBeVisible()
+  const rediscovered = page.waitForResponse((reply) => new URL(reply.url()).pathname === `/api${path}/jobs`)
+  await page.locator('[data-action="open-archive-recovery"]').click()
+  assert.ok(JSON.stringify(await (await rediscovered).json()).includes(accepted.jobId as string))
+  await expect(modal.locator('[data-test="archive-recovery-job"]')).toBeVisible()
+  await expect(modal.locator('[data-test="archive-recovery-job-state"]')).toHaveText(/^(Completed|已完成)$/, { timeout: 300_000 })
+  await expect(modal.locator('[data-test="archive-recovery-job-counts"]')).toHaveText('5001 / 5001')
+  await expect(modal.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100')
+  cases.push('browser accepted one job; full page reload rediscovers persisted job and reports complete progress')
+  await page.screenshot({ path: resolve(output, 'archive-completed-desktop.png'), animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  for (const visibleProgress of [
+    modal.locator('[data-test="archive-recovery-job-counts"]'),
+    modal.getByRole('progressbar'),
+    modal.locator('[data-test="archive-recovery-job-outcome"]'),
+  ]) {
+    await expect(visibleProgress).toBeVisible()
+    await expect(visibleProgress).toBeInViewport({ ratio: 1 })
+    assert.ok(await visibleProgress.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), 'MOBILE_PROGRESS_CLIPPED')
+  }
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'MOBILE_OVERFLOW')
+  await page.screenshot({ path: resolve(output, 'archive-completed-mobile.png'), animations: 'disabled' })
+  await modal.locator('.archive-recovery__close').click()
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await expect(page.getByText('archived-0', { exact: true })).toBeVisible()
+  await expect(page.getByText('live-0', { exact: true })).toHaveCount(0)
+  assert.equal((await q('SELECT count(*)::int AS n FROM meta_recovery_archive_jobs WHERE sheet_id=$1', [fixture.sheetId])).rows[0].n, 1)
+  cases.push('completed recovery refreshes visible workbench values; mobile progress remains readable; only one job exists')
   const deadline = Date.now() + 300_000
   let snapshot = accepted
   while (snapshot.state !== 'done' && Date.now() < deadline) {
@@ -257,13 +373,15 @@ try {
   assert.equal(dirtyDiffHash(), evidence.dirtyDiffSha256, 'SOURCE_DIFF_CHANGED')
   evidence.restoredCount = 5001
   evidence.derived = derived
-  cases.push('HTTP accepted job restored 5001 rows exactly once through server-owned worker and canonical derived processor')
+  cases.push('browser accepted job restored 5001 rows exactly once through server-owned worker and canonical derived processor')
   evidence.result = 'PASS'
 } finally {
   const cleanupErrors: string[] = []
   const clean = async (name: string, work: () => Promise<unknown> | void) => {
     try { await work() } catch { cleanupErrors.push(name) }
   }
+  await clean('browser', () => browser?.close())
+  await clean('vite', () => vite?.close())
   await clean('server', () => app?.stop('TM_ARCHIVE_SERVER_ACCEPTANCE'))
   await clean('server-address', () => { if (app) assert.equal(app.getAddress(), null) })
   await clean('singletons', () => cleanupGlobals?.())
