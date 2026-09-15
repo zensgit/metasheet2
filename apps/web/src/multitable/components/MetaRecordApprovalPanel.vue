@@ -26,6 +26,15 @@
 
   VALUES-FREE: renders identifiers, a status, a timestamp and a COUNT of changed fields. Drift never
   names a field and never shows a value (the route does not return one).
+
+  ONE PAGE (backend #5763): the GET asks for an EXPLICIT `?limit=` and the route answers
+  `{ submissions, hasMore }`. `hasMore` is the SERVER's truncation flag (a limit+1 probe) and is never
+  inferred from the row count; the notice it renders counts the rows actually on screen and is never a
+  total. There is no paging UI here on purpose (design §5 ships a section); the approval centre owns the
+  full history.
+  The same PR stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a submission whose terminal write landed but
+  whose requester notification did not; a terminal row carrying it gets a one-line marker, because
+  otherwise the missing bell is invisible on a row that looks perfectly approved.
 -->
 <template>
   <section v-if="sectionVisible" class="meta-record-approval" data-test="record-approval">
@@ -112,6 +121,15 @@
             class="meta-record-approval__failure"
             data-test="record-approval-failure"
           >{{ l('approval.failureReason') }}: {{ failureReason(submission) }}</div>
+          <!-- A TERMINAL row whose write is correct but whose requester bell was never written
+               (RECORD_APPROVAL_NOTIFICATION_FAILED). Without this line the miss is invisible: the row
+               looks like every other approved one and the requester simply never heard. Values-free -
+               a coded marker rendered as copy, exactly like the failure line above. -->
+          <div
+            v-if="notificationNotice(submission)"
+            class="meta-record-approval__notification-failed"
+            data-test="record-approval-notification-failed"
+          >{{ notificationNotice(submission) }}</div>
           <div
             v-if="submission.drift.changed"
             class="meta-record-approval__drift"
@@ -124,6 +142,18 @@
         class="meta-record-approval__hint"
         data-test="record-approval-empty"
       >{{ l('approval.panelEmpty') }}</div>
+      <!-- The route returned `hasMore` for the page we asked for: say so instead of presenting a
+           truncated list as the whole history. No paging UI by design (§5 ships a section, not a list
+           view) - the approval centre is where the rest lives.
+           GATED ON THE LIST BEING ON SCREEN: `hasMore` survives a reload (it is the last answer the
+           server gave, not a guess), but while the next read is in flight - or after it failed - the
+           rows it counts are NOT rendered, and 「加载中」 + 「还有更多（仅显示最近 N 条）」 in the same
+           body describes a list nobody can see. -->
+      <div
+        v-if="hasMore && !loading && !loadFailed"
+        class="meta-record-approval__hint meta-record-approval__more"
+        data-test="record-approval-has-more"
+      >{{ hasMoreNotice }}</div>
     </div>
   </section>
 </template>
@@ -136,6 +166,8 @@ import { useLocale } from '../../composables/useLocale'
 import {
   recordApprovalDriftNotice,
   recordApprovalErrorLabel,
+  recordApprovalHasMoreNotice,
+  recordApprovalNotificationFailedNotice,
   recordApprovalSubmissionStatusLabel,
   recordLabel,
   type MetaRecordLabelKey,
@@ -161,12 +193,23 @@ const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 // several frozen specs, so the request-number link is rendered only when a router really exists.
 const hasRouter = !!useRouter()
 
+/**
+ * The page this panel asks for. EXPLICIT on purpose: the route has its own default and clamps to
+ * [1, 100], and a UI that never names its page size inherits whatever the server later changes that
+ * default to. Raising it here is the whole knob; there is no paging UI (design §5), the approval centre
+ * owns the full history. It is NOT what the 「仅显示最近 N 条」 notice counts — see `hasMoreNotice`.
+ */
+const RECORD_APPROVAL_PAGE_SIZE = 20
+
 const bodyId = `meta-record-approval-${useId()}`
 const expanded = ref(false)
 const loading = ref(false)
 const loaded = ref(false)
 const loadFailed = ref(false)
 const submissions = ref<MetaRecordApprovalSubmission[]>([])
+// Server-derived truncation flag for the page above - never a count, and never inferred from
+// `submissions.length === RECORD_APPROVAL_PAGE_SIZE` (a record with exactly one full page has no more).
+const hasMore = ref(false)
 
 const sectionVisible = computed(() => Boolean(props.record && props.sheetId && props.apiClient))
 
@@ -179,6 +222,16 @@ const localStatusLabel = (status: string) => recordApprovalSubmissionStatusLabel
 
 const failureReason = (submission: MetaRecordApprovalSubmission): string | null =>
   submission.status === 'failed' ? recordApprovalErrorLabel(submission.error, isZh.value) : null
+
+// Terminal row + RECORD_APPROVAL_NOTIFICATION_FAILED => the marker; null for every other pair (an
+// approved row WITHOUT the code renders nothing, a failed row keeps its single failure line).
+const notificationNotice = (submission: MetaRecordApprovalSubmission): string | null =>
+  recordApprovalNotificationFailedNotice(submission.status, submission.error, isZh.value)
+
+// 「仅显示最近 N 条」 counts the rows RENDERED, never the page size we asked for: the client normaliser
+// drops rows it cannot identify and a server is free to answer short, either of which would turn the
+// requested 20 into a claim about rows that are not on screen.
+const hasMoreNotice = computed(() => recordApprovalHasMoreNotice(submissions.value.length, isZh.value))
 
 // Stale-response guard (same closure-counter idiom as MetaRecordProvenancePanel): a load whose captured
 // version no longer matches when its await settles was superseded by a record switch, a refresh or the
@@ -199,6 +252,7 @@ function resetState(): void {
   loaded.value = false
   loadFailed.value = false
   submissions.value = []
+  hasMore.value = false
 }
 
 // Record navigation inside the drawer must not show the previous row's approvals.
@@ -248,18 +302,23 @@ async function loadSubmissions(): Promise<void> {
   const loadVersion = ++activeLoadVersion
   if (!client || !sheetId || !recordId) {
     submissions.value = []
+    hasMore.value = false
     loaded.value = true
     return
   }
   loading.value = true
   loadFailed.value = false
   try {
-    const result = await client.listRecordApprovals(sheetId, recordId)
+    const page = await client.listRecordApprovals(sheetId, recordId, { limit: RECORD_APPROVAL_PAGE_SIZE })
     if (loadVersion !== activeLoadVersion) return
-    submissions.value = result
+    submissions.value = page.submissions
+    hasMore.value = page.hasMore
     loaded.value = true
   } catch {
     if (loadVersion !== activeLoadVersion) return
+    // A failed read shows the error state only: a stale truncation notice under it would be a claim
+    // about an answer we never got.
+    hasMore.value = false
     loadFailed.value = true
   } finally {
     if (loadVersion === activeLoadVersion) {
@@ -303,5 +362,7 @@ function formatApprovalTime(value: string): string {
 .meta-record-approval__link { color: var(--ms-color-primary, #409eff); }
 .meta-record-approval__drift { font-size: 11px; color: #b45309; }
 .meta-record-approval__failure { font-size: 11px; color: #b91c1c; }
+.meta-record-approval__notification-failed { font-size: 11px; color: #b45309; }
+.meta-record-approval__more { color: #b45309; }
 .meta-record-approval__status { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 4px; padding: 1px 6px; }
 </style>
