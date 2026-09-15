@@ -677,6 +677,20 @@ Exact code: `79228def7c8f5d8e82588381ff21a4995f2ffb89`; tree:
 
 Earlier real DB/browser evidence remains bound to its own
 SHA and is not represented as a new run of this integration. Incoming main adds
-a mirror migration; fresh combined-schema acceptance is still required.
+a mirror migration. Fresh combined-schema acceptance on clean docs-child
+`a6280dfe3` (same runtime tree as code 79228def7) now passes: 406 migrations in the
+independent Kysely ledger, including the mirror migration, then a no-op second
+replay; multitable-durable-startup-failclosed real PG15 matrix 8/8 PASS.
+Logs: `/private/tmp/tm-c787-fresh-20260916.log`,
+`/private/tmp/tm-c787-replay-20260916.log`, and
+`/private/tmp/tm-c787-startup-db-20260916.log`.
+This startup harness deliberately preserves its shared pool across cases; it is
+not a physical pool-close proof. Unit deferred-work shutdown evidence is separate.
+The dedicated database was dropped, independent prefix database/backend counts
+are both zero, and the dedicated PostgreSQL process was stopped.
+Initial attempts against the earlier stopped cluster used unmatched role names
+and failed before migration; that cluster was stopped unchanged. A fresh UTF8
+cluster with explicit synthetic role was then initialized. Sandbox shared-memory
+denial was resolved only for task-owned init/start/stop operations.
 Provider/custody/capture policy and nightly operational attribution remain open.
 No Ready/merge, flags, dispatch, deployment or real-customer actions occurred.
