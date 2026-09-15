@@ -22,6 +22,27 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Current Requirement Audit
+
+Published candidate: #5744 `d47219272d17d4225b0146a36ebb8213037f0c84`,
+based on main `59d1eac2c943e3ede8990f9521dc0d96207b7bcd`.
+The following is a checkpoint, not a live CI or production status dashboard.
+Historical queues below do not override this audit.
+
+| Requirement | Evidence and boundary | Still required |
+| --- | --- | --- |
+| History, configuration history and whole-table recycle bin | Combined candidate contains the existing UX ancestry; clean `ba803089` real LoginView/workbench acceptance 6/6 covers selected row, typed column/captured values, retained table and actor/local-time presentation | Published-head CI; separate merge authority; no hard-delete resurrection |
+| Archive readiness and safe refresh | Existing readiness candidate is integrated; no duplicate implementation; read-only diagnosis remains separate from restore | Published-head CI; configured provider/runtime acceptance must not be inferred from UI availability |
+| Archive runtime authority and durable derived work | Implemented callbacks, fresh authority, worker lifecycle and real process-crash acceptance are recorded under their exact SHAs in the verification report | Explicit provider/custody and capture coverage decisions; independent durable storage acceptance |
+| Real archive recovery | Earlier clean browser run restores exactly 5,001 records and drains derived work; this is a seeded encrypted synthetic archive, not production capture | Do not describe that run as repeated on `ba803089`; no production durability claim |
+| Combined-main integration | Frontend union 238 focused tests plus required-web; backend integration 114+61 tests; 405 migrations/replay; workbench 6/6 and incoming submission DB 12/12 | New exact-head CI; main-existing completion shutdown P2 remains unwaived |
+| Completion shutdown P2 | Approval task independently confirmed untracked completion promises and destructive sibling unsubscribe; static trace plus in-memory probes, not a real-DB loss incident | Owning bounded precise-unsubscribe fix, producer quiescence and sink drain acceptance; preserve TM worker drain |
+| Nightly operations | Latest three workflow queries still identify the recorded missing-sample failures; no new successful evidence | Owner-selected scrape/label evidence; no threshold relaxation or production sample-generating actions |
+
+Current CI snapshot: 25 successful checks, one expected skip, four running;
+this is not terminal acceptance. All report-only corrections remain distinct
+from the code SHA on which browser and database tests ran.
+
 ### Backend Main Replay
 
 Main advanced again to `59d1eac2c943e3ede8990f9521dc0d96207b7bcd` before
@@ -122,7 +143,13 @@ Read-only GitHub evidence, not a production probe or an alert-resolution claim:
 - At runtime candidate `8196e5f558c37cd01e79056c3c3be45eecadd54a`, required-samples plus cache contracts pass 6/6 locally. The missing-samples negative produces exactly five passes/six N/A/exit 1, while supplied synthetic latency samples produce 11 passes/exit 0. Validator, thresholds and required-samples test are byte-identical to the failed-run SHA.
 - No alert, threshold, workflow, scrape configuration or production state was changed. These failures must remain open until the owner-selected target/label population and authorized sample evidence are established. Do not generate production reload/restore operations solely to silence the monitor, and do not count unrelated recent health-probe successes as closure. Other attendance scheduled failures are separate, not attributed by this checkpoint.
 
-| Item | Current evidence | Remaining acceptance |
+### Historical Initial Gap Census
+
+This table records the initial investigation only. Several implementation and
+integration gaps were subsequently closed as described in Current Requirement
+Audit and the SHA-bound verification report; do not replay them as new work.
+
+| Item | Initial evidence | Initial remaining acceptance |
 | --- | --- | --- |
 | Configuration-history UX | Draft #5704 at `e92e462b84e74aa242382c2f31eab326ceb60854`; exact-head checks terminal without failure | Current-main integration, independent final review, separate merge authorization |
 | Recycle-bin/history separation and restoration UX | Draft #5709 at `478ed2da6cb22d5677a8f23f7df949f6b37b8b6f`; exact-head checks terminal without failure | Preserve snapshot/permission/conflict guards; current-main integration and merge gate |
@@ -188,7 +215,11 @@ No migration, dependency, workflow, flag, frontend, API, or OpenAPI changes.
 Method shape validation is necessary preflight, not provider authenticity,
 immutability, connectivity, durability, or production-readiness evidence.
 
-## Next bounded implementation
+## Historical Next Bounded Implementation
+
+The following was the first planned runtime slice, subsequently implemented
+in the integration chain. It is preserved as design provenance, not an open
+request to duplicate the runtime callbacks.
 
 Sol's read-only trace identified a concrete vendor-neutral prerequisite:
 `RecoveryArchiveApplicationComposition.worker.apply` is process-wide, while
