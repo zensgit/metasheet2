@@ -75,7 +75,10 @@ vi.mock('../../src/multitable/recovery-archive-sync-restore', async () => {
   }
 })
 
-import type { MaterializedArchiveAsyncFenceLease } from '../../src/multitable/exact-anchor-recovery-execute'
+import type {
+  MaterializedArchiveAsyncFenceLease,
+  MaterializedArchiveAsyncChunkApplyInput,
+} from '../../src/multitable/exact-anchor-recovery-execute'
 import {
   executeRecoveryArchiveAsyncRestoreChunk,
   type RecoveryArchiveAsyncRestoreChunkInput,
@@ -224,8 +227,65 @@ function makeInput(order: string[]): RecoveryArchiveAsyncRestoreChunkInput {
       stabilizeAuthorization: vi.fn(async () => 'ready'),
       finalLockedFullRead: vi.fn(async () => true),
       evaluatePlanAuthorization: vi.fn(async () => true),
+      onMutationApplied: vi.fn(async () => {}),
     },
   }
+}
+
+function mockIdentityPipeline(
+  bindings: RecoveryArchiveRestoreWorkerBinding[],
+  mismatch: Partial<Pick<RecoveryArchiveRestoreWorkerBinding, 'jobId' | 'sheetId' | 'actorId'>> = {},
+): void {
+  dependencies.readWorkerBinding.mockImplementation(async (_query, workerClaim) =>
+    bindings.find((entry) => entry.jobId === workerClaim.jobId),
+  )
+  dependencies.loadPlan.mockImplementation(async (_store, _depth, entry) => ({
+    payload: { ...planPayload, ...entry },
+  }))
+  dependencies.loadChunk.mockResolvedValue(chunkPayload)
+  dependencies.loadArchive.mockImplementation(async (_transaction, input) => {
+    if (!await input.recheckAuthority(query)) {
+      throw new RecoveryArchivePreviewError('RECOVERY_ARCHIVE_PREVIEW_AUTHORITY_DENIED')
+    }
+    const entry = bindings.find((item) => item.sheetId === input.sheetId)!
+    return {
+      keyId: entry.keyId,
+      selectedBinding: {
+        ...entry,
+        anchorOperationId: planPayload.anchorOperationId,
+        anchorSeq: planPayload.anchorSeq,
+        checkpointId: planPayload.checkpointId,
+        rootHash: entry.archiveRootHash,
+      },
+    }
+  })
+  dependencies.readCompleteState.mockResolvedValue({ records: new Map(), links: [] })
+  dependencies.materializeLinks.mockReturnValue([])
+  dependencies.acquireFences.mockResolvedValue({})
+  dependencies.applyChunk.mockResolvedValue({
+    ok: true, receipt: { operationId: OPERATION_ID, endpointSeq: '19', eventCount: 1, committedCount: '1' },
+  })
+  dependencies.runChunk.mockImplementation(async (
+    transaction: RecoveryArchiveRestoreJobTransaction,
+    workerClaim: RecoveryArchiveRestoreJobWorkerClaim,
+    options: RunRecoveryArchiveRestoreChunkInput,
+  ) => {
+    const materialized = await options.materialize(expectedChunk)
+    const entry = bindings.find((item) => item.jobId === workerClaim.jobId)!
+    return transaction(async (fresh) => {
+      await options.prelock?.(fresh, { jobId: entry.jobId, sheetId: entry.sheetId })
+      const context = {
+        jobId: entry.jobId, sheetId: entry.sheetId, actorId: entry.actorId,
+        recoveryMode: entry.recoveryMode, scopeKind: entry.scopeKind, chunkIndex: 0,
+        executionLease: {} as RecoveryArchiveRestoreChunkExecutionLease,
+        ...mismatch,
+      }
+      if (!await options.recheckAuthority(fresh, context)) {
+        throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED')
+      }
+      return options.apply(fresh, { ...context, operationId: OPERATION_ID, payload: materialized.payload })
+    })
+  })
 }
 
 describe('Time Machine async archive restore facade', () => {
@@ -254,8 +314,9 @@ describe('Time Machine async archive restore facade', () => {
       order.push('chunk')
       return chunkPayload
     })
-    dependencies.loadArchive.mockImplementation(async () => {
+    dependencies.loadArchive.mockImplementation(async (_transaction, input) => {
       order.push('archive')
+      expect(await input.recheckAuthority(query)).toBe(true)
       return {
         keyId: binding.keyId,
         selectedBinding: {
@@ -286,9 +347,17 @@ describe('Time Machine async archive restore facade', () => {
       return fenceLease
     })
     const executionLease = {} as RecoveryArchiveRestoreChunkExecutionLease
-    dependencies.applyChunk.mockImplementation(async (_query, _input, options) => {
+    const lockedScope = {} as Parameters<MaterializedArchiveAsyncChunkApplyInput['finalLockedFullRead']>[1]
+    const planContext = {} as Parameters<MaterializedArchiveAsyncChunkApplyInput['evaluatePlanAuthorization']>[1]
+    const mutation = { kind: 'delete', recordId: 'record-async-worker', revisionId: 'revision', linkInvalidations: [] } as const
+    dependencies.applyChunk.mockImplementation(async (fresh, apply: MaterializedArchiveAsyncChunkApplyInput, options) => {
       order.push('l8')
       expect(options.executionLease).toBe(executionLease)
+      expect(await apply.preliminaryFullRead(fresh)).toBe(true)
+      expect(await apply.stabilizeAuthorization(fresh, planContext)).toBe('ready')
+      expect(await apply.finalLockedFullRead(fresh, lockedScope)).toBe(true)
+      expect(await apply.evaluatePlanAuthorization(fresh, planContext)).toBe(true)
+      await apply.onMutationApplied?.(fresh, { ...mutation, linkInvalidations: [] })
       return {
         ok: true,
         receipt: { operationId: OPERATION_ID, endpointSeq: '19', eventCount: 1, committedCount: '1' },
@@ -325,7 +394,8 @@ describe('Time Machine async archive restore facade', () => {
       })
     })
 
-    await expect(executeRecoveryArchiveAsyncRestoreChunk(makeInput(order))).resolves.toEqual({
+    const input = makeInput(order)
+    await expect(executeRecoveryArchiveAsyncRestoreChunk(input)).resolves.toEqual({
       kind: 'committed',
       chunkIndex: 0,
       completedCount: '1',
@@ -337,6 +407,7 @@ describe('Time Machine async archive restore facade', () => {
       'plan',
       'chunk',
       'archive',
+      'authority',
       'reader',
       'links',
       'transaction',
@@ -344,6 +415,20 @@ describe('Time Machine async archive restore facade', () => {
       'authority',
       'l8',
     ])
+    const identity = {
+      jobId: binding.jobId, workspaceId: binding.workspaceId, baseId: binding.baseId,
+      sheetId: binding.sheetId, actorId: binding.actorId,
+    }
+    expect(input.recheckAuthority).toHaveBeenNthCalledWith(1, query, identity)
+    expect(input.recheckAuthority).toHaveBeenNthCalledWith(2, query, identity)
+    expect(input.apply.preliminaryFullRead).toHaveBeenCalledWith(query, identity)
+    expect(input.apply.stabilizeAuthorization).toHaveBeenCalledWith(query, planContext, identity)
+    expect(input.apply.finalLockedFullRead).toHaveBeenCalledWith(query, lockedScope, identity)
+    expect(input.apply.evaluatePlanAuthorization).toHaveBeenCalledWith(query, planContext, identity)
+    expect(input.apply.onMutationApplied).toHaveBeenCalledWith(query, mutation, identity)
+    const received = vi.mocked(input.recheckAuthority).mock.calls[0][1]
+    expect(Object.isFrozen(received)).toBe(true)
+    expect(Reflect.set(received, 'actorId', 'wrong-actor')).toBe(false)
     expect(dependencies.applyChunk).toHaveBeenCalledWith(
       query,
       expect.objectContaining({ sheetId: binding.sheetId, actorId: binding.actorId }),
@@ -382,6 +467,72 @@ describe('Time Machine async archive restore facade', () => {
     expect(order).toEqual([])
     expect(dependencies.loadChunk).not.toHaveBeenCalled()
     expect(dependencies.acquireFences).not.toHaveBeenCalled()
+    expect(dependencies.applyChunk).not.toHaveBeenCalled()
+  })
+
+  it('reuses runtime adapters across concurrent jobs without reusing either job identity', async () => {
+    const otherBinding = {
+      ...binding,
+      jobId: '55555555-5555-4555-8555-555555555555',
+      workspaceId: 'other-workspace', baseId: 'other-base', sheetId: 'other-sheet', actorId: 'other-actor',
+    }
+    mockIdentityPipeline([binding, otherBinding])
+    const identities: unknown[] = []
+    const input = makeInput([])
+    vi.mocked(input.apply.preliminaryFullRead).mockImplementation(async (_query, identity) => {
+      identities.push(identity)
+      return true
+    })
+    dependencies.applyChunk.mockImplementation(async (fresh, apply: MaterializedArchiveAsyncChunkApplyInput) => {
+      expect(await apply.preliminaryFullRead(fresh)).toBe(true)
+      return { ok: true, receipt: { operationId: OPERATION_ID, endpointSeq: '19', eventCount: 1, committedCount: '1' } }
+    })
+    await Promise.all([binding, otherBinding].map((entry) => executeRecoveryArchiveAsyncRestoreChunk({
+      ...input,
+      claim: { ...claim, jobId: entry.jobId, sheetId: entry.sheetId },
+    })))
+    expect(identities).toHaveLength(2)
+    expect(identities).toEqual(expect.arrayContaining([binding, otherBinding].map((entry) => ({
+      jobId: entry.jobId, workspaceId: entry.workspaceId, baseId: entry.baseId,
+      sheetId: entry.sheetId, actorId: entry.actorId,
+    }))))
+    expect(identities[0]).not.toBe(identities[1])
+    expect(identities.every(Object.isFrozen)).toBe(true)
+  })
+
+  it.each(['jobId', 'sheetId', 'actorId'] as const)(
+    'rejects a changed runner %s before invoking transactional authority or apply callbacks',
+    async (key) => {
+      mockIdentityPipeline([binding], { [key]: 'wrong-identity' })
+      const input = makeInput([])
+      await expect(executeRecoveryArchiveAsyncRestoreChunk(input)).rejects.toEqual(
+        new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_INVALID'),
+      )
+      expect(input.recheckAuthority).toHaveBeenCalledTimes(1) // archive materialization only
+      expect(dependencies.applyChunk).not.toHaveBeenCalled()
+      expect(input.apply.onMutationApplied).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['jobId', 'sheetId'] as const)('rejects a worker-binding %s mismatch before archive reads', async (key) => {
+    mockIdentityPipeline([binding])
+    dependencies.readWorkerBinding.mockResolvedValue({ ...binding, [key]: 'wrong-identity' })
+    await expect(executeRecoveryArchiveAsyncRestoreChunk(makeInput([]))).rejects.toEqual(
+      new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_INVALID'),
+    )
+    expect(dependencies.loadPlan).not.toHaveBeenCalled()
+    expect(dependencies.loadArchive).not.toHaveBeenCalled()
+    expect(dependencies.applyChunk).not.toHaveBeenCalled()
+  })
+
+  it('honors a task-specific authority revocation before any apply callback', async () => {
+    mockIdentityPipeline([binding])
+    const input = makeInput([])
+    vi.mocked(input.recheckAuthority).mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    await expect(executeRecoveryArchiveAsyncRestoreChunk(input)).rejects.toEqual(
+      new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED'),
+    )
+    expect(input.recheckAuthority).toHaveBeenCalledTimes(2)
     expect(dependencies.applyChunk).not.toHaveBeenCalled()
   })
 

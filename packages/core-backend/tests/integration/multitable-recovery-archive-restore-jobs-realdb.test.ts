@@ -46,7 +46,10 @@ import {
   type RecoveryArchiveAsyncPlanObject,
   type RecoveryArchiveAsyncPlanPayload,
 } from '../../src/multitable/recovery-archive-async-plan'
-import { executeRecoveryArchiveAsyncRestoreChunk } from '../../src/multitable/recovery-archive-async-restore'
+import {
+  executeRecoveryArchiveAsyncRestoreChunk,
+  type RecoveryArchiveWorkerIdentity,
+} from '../../src/multitable/recovery-archive-async-restore'
 import {
   createLocalRecoveryArchiveObjectStoreProvider,
   createTransactionGuardedRecoveryArchiveObjectStore,
@@ -1862,6 +1865,18 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         workerOwnerId: `${PREFIX}_composed_async_worker`,
         leaseUntil: future(240_000),
       })
+      const identityStages = new Set<string>()
+      const checkWorkerIdentity = (stage: string, identity: RecoveryArchiveWorkerIdentity): void => {
+        expect(identity).toEqual({
+          jobId: accepted.id,
+          workspaceId: fixture.workspaceId,
+          baseId: fixture.baseId,
+          sheetId: fixture.sheetId,
+          actorId: fixture.actorId,
+        })
+        expect(Object.isFrozen(identity)).toBe(true)
+        identityStages.add(stage)
+      }
       const executeChunk = (claim: RecoveryArchiveRestoreJobWorkerClaim) =>
         executeRecoveryArchiveAsyncRestoreChunk({
           transaction,
@@ -1872,17 +1887,38 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
             transactionDepth: depthProbe,
           },
           claim,
-          recheckAuthority: async () => true,
+          recheckAuthority: async (_query, identity) => {
+            checkWorkerIdentity('recheck', identity)
+            return true
+          },
           apply: {
-            preliminaryFullRead: async () => true,
-            stabilizeAuthorization: async () => 'ready',
-            finalLockedFullRead: async () => true,
-            evaluatePlanAuthorization: async () => true,
+            preliminaryFullRead: async (_query, identity) => {
+              checkWorkerIdentity('preliminary', identity)
+              return true
+            },
+            stabilizeAuthorization: async (_query, context, identity) => {
+              checkWorkerIdentity('stabilize', identity)
+              expect(context).toMatchObject({ sheetId: identity.sheetId, actorId: identity.actorId })
+              return 'ready'
+            },
+            finalLockedFullRead: async (_query, _scope, identity) => {
+              checkWorkerIdentity('final', identity)
+              return true
+            },
+            evaluatePlanAuthorization: async (_query, context, identity) => {
+              checkWorkerIdentity('plan', identity)
+              expect(context).toMatchObject({ sheetId: identity.sheetId, actorId: identity.actorId })
+              return true
+            },
+            onMutationApplied: async (_query, _mutation, identity) => {
+              checkWorkerIdentity('mutation', identity)
+            },
           },
         })
 
       const result = await executeChunk(firstClaim)
       expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
+      expect([...identityStages].sort()).toEqual(['final', 'mutation', 'plan', 'preliminary', 'recheck', 'stabilize'])
       expect(durable.custodyCalls).toEqual(expect.arrayContaining(['verify', 'unwrap']))
 
       const firstRecord = await q(
