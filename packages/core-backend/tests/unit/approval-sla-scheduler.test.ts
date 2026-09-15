@@ -124,6 +124,36 @@ describe('ApprovalSlaScheduler', () => {
     await firstPromise
   })
 
+  it('stop closes timer admission and waits for an in-flight node timeout effect', async () => {
+    let release!: () => void
+    const onNodeEffect = vi.fn(() => new Promise<'applied'>((resolve) => {
+      release = () => resolve('applied')
+    }))
+    const scheduler = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: focused lifecycle double
+      metrics: {
+        checkSlaBreaches: vi.fn().mockResolvedValue([]),
+        scanNodeTimeouts: vi.fn().mockResolvedValue([
+          { instanceId: 'apr_timeout_lifecycle', effect: 'transfer' },
+        ]),
+      } as any,
+      intervalMs: 30_000,
+      onNodeEffect,
+    })
+    scheduler.start()
+    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.waitFor(() => expect(onNodeEffect).toHaveBeenCalledTimes(1))
+
+    let stopped = false
+    const stop = scheduler.stop().then(() => { stopped = true })
+    await Promise.resolve()
+    expect(stopped).toBe(false)
+    release()
+    await stop
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(onNodeEffect).toHaveBeenCalledTimes(1)
+  })
+
   it('runs ticks only on the process that acquired the leader lock', async () => {
     const store = new Map()
     const leaderLockA = new RedisLeaderLock({ client: new MemoryLeaderLockClient(store) })
@@ -165,8 +195,7 @@ describe('ApprovalSlaScheduler', () => {
     await first.ready
     expect(first.leader).toBe(true)
 
-    first.stop()
-    await Promise.resolve()
+    await first.stop()
 
     const second = new ApprovalSlaScheduler({
       // biome-ignore lint/suspicious/noExplicitAny: test double
@@ -175,7 +204,7 @@ describe('ApprovalSlaScheduler', () => {
     })
     await second.ready
     expect(second.leader).toBe(true)
-    second.stop()
+    await second.stop()
   })
 
   it('retries acquisition as follower and takes over after the leader stops', async () => {
@@ -202,13 +231,13 @@ describe('ApprovalSlaScheduler', () => {
     expect(leader.leader).toBe(true)
     expect(follower.leader).toBe(false)
 
-    leader.stop()
+    await leader.stop()
     await vi.advanceTimersByTimeAsync(120)
 
     expect(follower.leader).toBe(true)
     expect(await follower.tick(new Date('2026-04-25T10:00:00Z'))).toEqual(['apr-takeover'])
     expect(followerCheck).toHaveBeenCalledTimes(1)
-    follower.stop()
+    await follower.stop()
   })
 
   it('updates the injected leader gauge across follower, leader, and relinquished states', async () => {
@@ -232,7 +261,7 @@ describe('ApprovalSlaScheduler', () => {
     expect(values.get('follower')).toBe(0)
     expect(values.get('relinquished')).toBe(0)
 
-    scheduler.stop()
+    await scheduler.stop()
     expect(values.get('leader')).toBe(0)
     expect(values.get('follower')).toBe(0)
     expect(values.get('relinquished')).toBe(1)
