@@ -618,6 +618,7 @@
       @committed="onBulkFillCommitted"
     />
     <MetaViewManager
+      v-if="showViewManager || workbench.activeSheetId.value"
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value" :field-permissions="effectiveFieldPermissions"
       @update:dirty="viewManagerDirty = $event"
@@ -702,6 +703,7 @@
       @reverted="onConfigReverted"
     />
     <RecoveryArchiveModal
+      v-if="showRecoveryArchive || workbench.activeSheetId.value"
       :visible="showRecoveryArchive"
       :sheet-id="workbench.activeSheetId.value"
       :is-zh="isZh"

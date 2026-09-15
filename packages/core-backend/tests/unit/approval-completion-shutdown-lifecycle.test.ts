@@ -35,6 +35,8 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
       approvalProjectionSweepScheduler: { stop(): Promise<void> } | null
       approvalProjectionService: { unsubscribe(bus: unknown): void; drainCompletionHandlers(): Promise<void> } | null
       recordApprovalCompletionSubscription: { detach(): void; drain(): Promise<void> } | null
+      dingtalkTodoMirrorSubscription: { detach(): void; drain(): Promise<void> } | null
+      stopDingTalkTodoMirrorWorker: (() => Promise<void>) | undefined
       dingtalkInteractiveCardStreamWorker: { shutdown(): Promise<{ state: 'disabled'; reason: 'env_disabled' }> }
     }
     lifecycle.durableDeliveryLoop = {
@@ -61,6 +63,11 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
         return sinkPending.then(() => { order.push('sink:done') })
       }),
     }
+    lifecycle.dingtalkTodoMirrorSubscription = {
+      detach: vi.fn(() => { order.push('todo:detach') }),
+      drain: vi.fn(async () => { order.push('todo:drain') }),
+    }
+    lifecycle.stopDingTalkTodoMirrorWorker = vi.fn(async () => { order.push('todo:worker:drain') })
     lifecycle.dingtalkInteractiveCardStreamWorker = {
       shutdown: vi.fn(async () => ({ state: 'disabled', reason: 'env_disabled' })),
     }
@@ -76,6 +83,9 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
     releaseSink()
     await stop
     expect(order.indexOf('sink:done')).toBeLessThan(order.indexOf('pool'))
+    expect(order.indexOf('todo:worker:drain')).toBeLessThan(order.indexOf('todo:detach'))
+    expect(order.indexOf('todo:detach')).toBeLessThan(order.indexOf('todo:drain'))
+    expect(order.indexOf('todo:drain')).toBeLessThan(order.indexOf('pool'))
   })
 
   test('a producer stop failure preserves completion listeners and the database pool', async () => {
@@ -89,6 +99,23 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
     }
     lifecycle.durableDeliveryLoop = { stop: vi.fn().mockRejectedValue(new Error('producer sentinel')) }
     lifecycle.recordApprovalCompletionSubscription = { detach, drain: vi.fn(async () => {}) }
+
+    await expect(server.stop()).rejects.toThrow('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+    expect(detach).not.toHaveBeenCalled()
+    expect(poolEnd).not.toHaveBeenCalled()
+  })
+
+  test('a DingTalk todo worker drain failure preserves its listener and the database pool', async () => {
+    expect(pgPool).not.toBeNull()
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const detach = vi.fn()
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const lifecycle = server as unknown as {
+      stopDingTalkTodoMirrorWorker: (() => Promise<void>) | undefined
+      dingtalkTodoMirrorSubscription: { detach(): void; drain(): Promise<void> } | null
+    }
+    lifecycle.stopDingTalkTodoMirrorWorker = vi.fn().mockRejectedValue(new Error('worker drain sentinel'))
+    lifecycle.dingtalkTodoMirrorSubscription = { detach, drain: vi.fn(async () => {}) }
 
     await expect(server.stop()).rejects.toThrow('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     expect(detach).not.toHaveBeenCalled()

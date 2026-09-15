@@ -137,12 +137,65 @@ export const ROUTING_MANIFEST_V2: RoutingManifest = deepFreezeManifest({
   },
 })
 
-export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V2
+/**
+ * v3 — v2 PLUS the DingTalk approval-todo ONE-WAY mirror consumer (`dingtalk-todo-mirror`).
+ *
+ * WHY A NEW VERSION AND NOT AN EDIT OF v1/v2: same rule as the v1→v2 step. A row is dispatched per the
+ * manifest version STAMPED ON IT at enqueue (#4203 §manifest), so v1 and v2 stay byte-for-byte what
+ * they were and every in-flight row keeps the fan-out it was enqueued with. The mirror consumer never
+ * inherits a backlog of rows it has no consumer row for, and no v1/v2 row parks waiting for it.
+ *
+ * DELTA vs v2 — the mirror is the FIRST consumer to need BOTH halves of the approval life cycle:
+ *   - the four COMPLETION families gain `dingtalk-todo-mirror` (mark the mirrored todo done);
+ *   - `approval.task_created` gains it too (create the mirrored todo). That is a SECOND consumer on a
+ *     family that has had exactly one since v1, which is precisely why this needs its own version.
+ * Every other route is the SAME frozen array object as v1/v2 — identical routing, no drift.
+ *
+ * ROLLING DEPLOY (#4203 §234-255): expanding a family to a new consumer_key is activation-gated — the
+ * worker that KNOWS the key ships first (`DURABLE_CONSUMER_KEYS` + `buildDurableConsumerHandlers`
+ * entry), and only then may a producer stamp v3. Both halves land in THIS commit, the supported shape
+ * for a single-artifact on-prem deployment. In a multi-replica rolling deploy an N-1 worker sees the
+ * v3 `dingtalk-todo-mirror` rows an N producer enqueued but cannot claim them: the unknown-consumer_key
+ * rule leaves them `pending` with an alert until an N worker drains them — never lost, never poisoned.
+ *
+ * NOTE the routing is INDEPENDENT of the DINGTALK_TODO_MIRROR_ENABLED feature flag, and must be: the
+ * rows have to be enqueued and ACKed either way. With the flag OFF the consumer ACKs without writing
+ * anything (`dingtalk-todo-mirror-service.ts`), so a flag-OFF deployment costs one no-op consumer row
+ * per approval event and nothing else. Making the ROUTE flag-conditional would make the manifest a
+ * function of runtime env — two replicas could then disagree about a row's fan-out.
+ */
+export const APPROVAL_COMPLETION_CONSUMERS_V3: readonly string[] = Object.freeze([
+  ...APPROVAL_COMPLETION_CONSUMERS_V2,
+  'dingtalk-todo-mirror',
+])
+
+/** task_created's v3 set: the v1 automation trigger PLUS the todo mirror. */
+export const APPROVAL_TASK_CREATED_CONSUMERS_V3: readonly string[] = Object.freeze([
+  ...ROUTING_MANIFEST_V1.routes['approval.task_created'],
+  'dingtalk-todo-mirror',
+])
+
+export const ROUTING_MANIFEST_V3: RoutingManifest = deepFreezeManifest({
+  version: 3,
+  routes: {
+    'approval.approved': APPROVAL_COMPLETION_CONSUMERS_V3,
+    'approval.rejected': APPROVAL_COMPLETION_CONSUMERS_V3,
+    'approval.revoked': APPROVAL_COMPLETION_CONSUMERS_V3,
+    'approval.cancelled': APPROVAL_COMPLETION_CONSUMERS_V3,
+    'approval.task_created': APPROVAL_TASK_CREATED_CONSUMERS_V3,
+    'multitable.record.created': ROUTING_MANIFEST_V1.routes['multitable.record.created'],
+    'multitable.record.updated': ROUTING_MANIFEST_V1.routes['multitable.record.updated'],
+    'multitable.record.deleted': ROUTING_MANIFEST_V1.routes['multitable.record.deleted'],
+    'multitable.form.submitted': ROUTING_MANIFEST_V1.routes['multitable.form.submitted'],
+  },
+})
+
+export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V3
 
 /** Versions this build can dispatch. A row stamped with an unknown version must be left alone (older/newer
  *  worker's job), mirroring the unknown-consumer_key rule. v1 stays supported for in-flight rows enqueued
  *  before this deploy — they keep their v1 fan-out forever. */
-export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2])
+export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3])
 
 /**
  * Expand an event type to its consumer_keys under the given manifest. Returns undefined for an event type
