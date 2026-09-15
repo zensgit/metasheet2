@@ -65,6 +65,20 @@ export interface SaveBlockDeleteRecordSnapshot {
   acknowledged: boolean
 }
 
+/**
+ * #5739 泛化 round-2 — the cross-base target triple of a record-mutating action (update_record /
+ * delete_record / lock_record), read from the config as LOADED. The editor does not author these keys but
+ * preserves them on save, so an INCOMPLETE triple (targetBaseId without targetSheetId + targetRecordId)
+ * now reaches the backend, which refuses it at save time (automation-service.ts validateCrossBaseWriteConfig
+ * → HTTP 400) and would fail the step at run time. Mirroring that one shape rule here turns the opaque 400
+ * into an inline, anchored "why is Save disabled" line; authority over the target base stays server-side.
+ */
+export interface SaveBlockCrossBaseTargetSnapshot {
+  targetBaseId: string
+  targetSheetId: string
+  targetRecordId: string
+}
+
 export interface SaveBlockFwbWritebackSnapshot {
   mappingCount: number
   confirmed: boolean
@@ -90,6 +104,7 @@ export interface SaveBlockActionSnapshot {
   email?: SaveBlockEmailSnapshot
   notification?: SaveBlockNotificationSnapshot
   deleteRecord?: SaveBlockDeleteRecordSnapshot
+  crossBaseTarget?: SaveBlockCrossBaseTargetSnapshot
   fwbWriteback?: SaveBlockFwbWritebackSnapshot
 }
 
@@ -353,6 +368,20 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
           ? `「${label}」未设置通知接收人，请搜索并选择至少一个用户。`
           : `"${label}" has no recipients — search and select at least one user.`,
         anchor: `${scope} [data-field="notificationRecipientSearch"]`,
+      })
+    }
+
+    if (
+      action.crossBaseTarget
+      && action.crossBaseTarget.targetBaseId
+      && (!action.crossBaseTarget.targetSheetId || !action.crossBaseTarget.targetRecordId)
+    ) {
+      reasons.push({
+        key: `action-${action.index}-crossBaseTarget`,
+        message: zh
+          ? `「${label}」跨 base 目标不完整：设置 targetBaseId 后必须同时有 targetSheetId 与 targetRecordId，服务端会拒绝保存。请通过 API 修复该规则。`
+          : `"${label}" has an incomplete cross-base target: targetSheetId and targetRecordId are both required once targetBaseId is set, and the server refuses to save it. Fix the rule through the API.`,
+        anchor: `${scope} [data-field="crossBaseTarget"]`,
       })
     }
 

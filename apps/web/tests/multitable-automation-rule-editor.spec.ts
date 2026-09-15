@@ -4796,4 +4796,645 @@ describe('MetaAutomationRuleEditor', () => {
       ])
     })
   })
+
+  // --------------------------------------------------------------------------------------------
+  // #5739 泛化 — EVERY action type's save must start from the RAW loaded config, not from the
+  // modelled fields alone.
+  //
+  // #5739 fixed start_approval only. Every other type rebuilt its config from the UI model, so a rule
+  // authored by the API, the quick form, or an older editor silently lost every key this editor does
+  // not model on an UNTOUCHED load → save: update_record/delete_record's T3-5 cross-base triple,
+  // create_record's targetBaseId, and any key a newer backend adds. Those keys are legal — the save
+  // path never whitelists config keys (validateActionObject in
+  // packages/core-backend/src/multitable/automation-service.ts persists `config` verbatim) — and
+  // load-bearing at runtime (automation-executor.ts reads the triples). They are also HASHED by the
+  // #4196 raw-config action fingerprint, so a silent drop makes an unrelated edit look like a config
+  // change on a rule nobody touched.
+  //
+  // Each round-trip case carries BOTH (a) one REAL optional key the backend types but this editor does
+  // not model and (b) an unknown `x_customerExtension: { nested: true }`, and asserts SORTED-KEY JSON
+  // equality — byte-identity across all keys, not a "contains" check.
+  describe('#5739 泛化: unmodelled action config keys survive an untouched load → save', () => {
+    /** JSON with every object's keys sorted → order-independent byte-identity of the whole config. */
+    function stableJson(value: unknown): string {
+      return JSON.stringify(value, (_key, raw) => {
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          return Object.fromEntries(
+            Object.entries(raw as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          )
+        }
+        return raw
+      })
+    }
+
+    function mountWithAction(type: string, config: Record<string, unknown>) {
+      const saved = vi.fn()
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        views,
+        onSave: saved,
+        rule: fakeRule({
+          name: `preserve ${type}`,
+          // Both the legacy single-action columns and the actions[] array carry the same config, exactly
+          // as the API returns them.
+          actionType: type,
+          actionConfig: config,
+          actions: [{ type, config }],
+        } as unknown as Partial<AutomationRule>),
+      })
+      return { container, saved }
+    }
+
+    async function saveAndReadConfig(container: HTMLElement, saved: ReturnType<typeof vi.fn>) {
+      const btn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(btn.disabled).toBe(false)
+      btn.click()
+      await flushPromises()
+      expect(saved).toHaveBeenCalledTimes(1)
+      return saved.mock.calls[0][0].actions[0].config as Record<string, unknown>
+    }
+
+    function setInput(container: HTMLElement, selector: string, value: string) {
+      const host = container.querySelector(selector) as HTMLElement
+      const el = (host instanceof HTMLInputElement || host instanceof HTMLTextAreaElement
+        ? host
+        : host.querySelector('input, textarea')) as HTMLInputElement | HTMLTextAreaElement
+      el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    const extension = { nested: true }
+
+    // (a) = the REAL legal optional key, quoted from the backend type/validator it comes from.
+    const roundTripCases: Array<{ type: string; unmodelled: string; config: Record<string, unknown> }> = [
+      {
+        type: 'update_record',
+        // automation-actions.ts UpdateRecordConfig targetBaseId?/targetSheetId?/targetRecordId?,
+        // gated by automation-service.ts validateCrossBaseWriteConfig.
+        unmodelled: 'cross-base triple',
+        config: {
+          fields: { fld_1: 'done' },
+          targetBaseId: 'base_x',
+          targetSheetId: 'sheet_x',
+          targetRecordId: 'rec_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'create_record',
+        // automation-actions.ts CreateRecordConfig.targetBaseId (executor re-verifies base-WRITE on it).
+        unmodelled: 'targetBaseId',
+        config: {
+          sheetId: 'sheet_2',
+          data: { fld_1: 'a' },
+          targetBaseId: 'base_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'delete_record',
+        // Worst case before this fix: buildPayload emitted a literal `{}` — EVERY key discarded.
+        unmodelled: 'cross-base triple',
+        config: {
+          targetBaseId: 'base_x',
+          targetSheetId: 'sheet_x',
+          targetRecordId: 'rec_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_webhook',
+        // automation-actions.ts SendWebhookConfig headers?/body?/secret? (secret = HMAC-SHA256 signing).
+        unmodelled: 'headers/body/secret',
+        config: {
+          url: 'https://example.test/hook',
+          method: 'POST',
+          headers: { 'X-Trace': '1' },
+          body: { payload: 'custom' },
+          secret: 's3cr3t',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_notification',
+        // SendNotificationConfig types no optional key, so the honest unmodelled case is the extension
+        // key validateActionObject persists verbatim.
+        unmodelled: 'extension key only',
+        config: { userIds: ['user_1', 'user_2'], message: 'hi', x_customerExtension: extension },
+      },
+      {
+        type: 'send_email',
+        unmodelled: 'extension key only',
+        config: {
+          recipients: ['ops@example.com', 'owner@example.com'],
+          subjectTemplate: 'S',
+          bodyTemplate: 'B',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_dingtalk_group_message',
+        unmodelled: 'extension key only',
+        config: {
+          destinationId: 'dt_1',
+          destinationIds: ['dt_1'],
+          // Stored recipient field paths must come back with their `record.` prefix intact, not re-prefixed.
+          destinationIdFieldPath: 'record.fld_2',
+          destinationIdFieldPaths: ['record.fld_2'],
+          titleTemplate: 'T',
+          bodyTemplate: 'B',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_dingtalk_person_message',
+        unmodelled: 'extension key only',
+        config: {
+          userIds: ['user_1'],
+          userIdFieldPath: 'record.assigneeUserIds',
+          userIdFieldPaths: ['record.assigneeUserIds'],
+          titleTemplate: 'T',
+          bodyTemplate: 'B',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'lock_record',
+        // automation-actions.ts LockRecordConfig cross-base LOCK opt-in (full explicit addressing).
+        unmodelled: 'cross-base triple',
+        config: {
+          locked: true,
+          targetBaseId: 'base_x',
+          targetSheetId: 'sheet_x',
+          targetRecordId: 'rec_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'wait_for_callback',
+        // automation-actions.ts WaitForCallbackConfig.reason?: 'external_event'.
+        unmodelled: 'reason',
+        config: { reason: 'external_event', x_customerExtension: extension },
+      },
+      {
+        type: 'start_approval',
+        // T3-5 cross-base writeback target + requester.mode (#5724/#5739 — kept green through the
+        // generalisation, which moved this branch onto the shared snapshot).
+        unmodelled: 'resultWriteback cross-base triple + requester',
+        config: {
+          templateId: 'tmpl_9',
+          formDataMapping: { amount: 'fld_2' },
+          resultWriteback: {
+            statusField: 'fld_1',
+            targetBaseId: 'base_x',
+            targetSheetId: 'sheet_x',
+            targetRecordId: 'rec_x',
+          },
+          requester: { mode: 'form_field_user', fieldId: 'reviewerUserId' },
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'condition_branch',
+        // conditionBranchUnsupportedReason does NOT reject unknown TOP-LEVEL keys, so such a config opens
+        // EDITABLE and the rebuild used to drop them. (Nested branch actions are safe by construction: an
+        // unmodelled nested key makes the whole branch non-round-trippable → read-only → re-emitted
+        // verbatim. parallel_branch rejects unknown top-level keys the same way, which is why it has no
+        // case here — it can never reach the editable rebuild with one.)
+        unmodelled: 'extension key only',
+        config: {
+          branches: [
+            {
+              key: 'b1',
+              conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_1', operator: 'eq', value: 'x' }] },
+              actions: [{ type: 'update_record', config: { fields: { fld_2: 'y' } } }],
+            },
+          ],
+          x_customerExtension: extension,
+        },
+      },
+    ]
+
+    for (const testCase of roundTripCases) {
+      it(`${testCase.type}: an untouched load → save is byte-identical (${testCase.unmodelled} + x_customerExtension)`, async () => {
+        const { container, saved } = mountWithAction(testCase.type, testCase.config)
+        await flushPromises()
+        // round-2: a CROSS-BASE delete_record re-asks its destructive acknowledgement (the pre-checked one
+        // was given against the "trigger record in this table" wording, which is false for it). Ticking the
+        // box is the only interaction — the config itself is still untouched.
+        const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement | null
+        if (ack && !ack.checked) {
+          ack.checked = true
+          ack.dispatchEvent(new Event('change'))
+          await flushPromises()
+        }
+        const config = await saveAndReadConfig(container, saved)
+        // FAIL-FIRST: revert any one type's rebuild to the modelled-keys-only object and THIS case goes red.
+        expect(stableJson(config)).toBe(stableJson(testCase.config))
+      })
+    }
+
+    // ---- the other half of the contract: a key the UI OWNS and the author CLEARED must be DELETED,
+    // never resurrected from the preserved original. One case per type that has something clearable.
+    // (delete_record owns nothing; start_approval's clear semantics are pinned by the #5739/#5742 cases
+    // above; the passthrough types edit their modelled keys in place.)
+
+    it('update_record: removing the last field row empties `fields` without resurrecting the loaded value', async () => {
+      const { container, saved } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      ;(container.querySelector('[data-action-index="0"] .meta-rule-editor__field-pair .meta-rule-editor__btn--icon') as HTMLButtonElement).click()
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.fields).toEqual({})
+      // Unowned keys are untouched by the clear.
+      expect(config.targetBaseId).toBe('base_x')
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('create_record: clearing the target sheet DELETES `sheetId` (the loaded one is not restored)', async () => {
+      const { container, saved } = mountWithAction('create_record', {
+        sheetId: 'sheet_2',
+        data: { fld_1: 'a' },
+        targetBaseId: 'base_x',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      setInput(container, '[data-field="createRecordTargetSheetId"]', '')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('sheetId')
+      expect(config.targetBaseId).toBe('base_x')
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('send_notification: a legacy `userId` string is consumed by the recipient model, not re-emitted', async () => {
+      const { container, saved } = mountWithAction('send_notification', {
+        userIds: ['user_1'],
+        // v0/quick-form legacy mirror of userIds: OWNED (the picker parses it), so it must not ride back
+        // out next to the canonical array it was folded into.
+        userId: 'user_9',
+        message: 'hi',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('userId')
+      expect(config.userIds).toEqual(['user_1'])
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('send_email: dropping a recipient shrinks `recipients` (no merge with the loaded list)', async () => {
+      const { container, saved } = mountWithAction('send_email', {
+        recipients: ['ops@example.com', 'owner@example.com'],
+        subjectTemplate: 'S',
+        bodyTemplate: 'B',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      setInput(container, '[data-field="emailRecipients"]', 'ops@example.com')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.recipients).toEqual(['ops@example.com'])
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('send_dingtalk_group_message: clearing the public-form link DELETES `publicFormViewId`', async () => {
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1'],
+        titleTemplate: 'T',
+        bodyTemplate: 'B',
+        publicFormViewId: 'view_form',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      epSetSelect(container.querySelector('[data-action-index="0"] [data-field="publicFormViewId"]'), '')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('publicFormViewId')
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('send_dingtalk_person_message: clearing the public-form link DELETES `publicFormViewId`', async () => {
+      const { container, saved } = mountWithAction('send_dingtalk_person_message', {
+        userIds: ['user_1'],
+        titleTemplate: 'T',
+        bodyTemplate: 'B',
+        publicFormViewId: 'view_form',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      epSetSelect(container.querySelector('[data-action-index="0"] [data-field="dingtalkPersonPublicFormViewId"]'), '')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('publicFormViewId')
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('switching an action type drops the loaded snapshot — no cross-type key bleed', async () => {
+      // The snapshot belongs to the type it was LOADED as: an update_record cross-base triple must not
+      // reappear inside a send_email config just because the author re-picked the action type.
+      const { container, saved } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+      epSetSelect(actionSelect, 'send_email')
+      await flushPromises()
+      setInput(container, '[data-field="emailRecipients"]', 'ops@example.com')
+      setInput(container, '[data-field="emailSubjectTemplate"]', 'S')
+      setInput(container, '[data-field="emailBodyTemplate"]', 'B')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).toEqual({ recipients: ['ops@example.com'], subjectTemplate: 'S', bodyTemplate: 'B' })
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------------
+  // #5739 泛化 round-2 — the adversarial review of the first pass found two ways the "byte-identical
+  // round-trip" guarantee still broke, plus a truth gap the preservation itself opened:
+  //   (1) the rebuild is only as lossless as the DRAFT it overlays: `fields`/`data` values were re-derived
+  //       from a TEXT box, so 42 → "42", false → "false", null → "" on a save that changed nothing;
+  //   (2) the DingTalk singular/plural twins were always BOTH written back, so a config that carried only
+  //       one of them GREW a key on an untouched save (the #4196 fingerprint hashes the raw config);
+  //   (3) preserving the cross-base triple made the delete warning/ack text ("the trigger record in this
+  //       table") false for such a rule, and an INCOMPLETE triple now reaches the backend, which rejects
+  //       the whole save with a 400 the author cannot act on.
+  describe('#5739 泛化 round-2: lossless drafts, no added keys, a truthful cross-base screen', () => {
+    /** JSON with every object's keys sorted → order-independent byte-identity of the whole config. */
+    function stableJson(value: unknown): string {
+      return JSON.stringify(value, (_key, raw) => {
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          return Object.fromEntries(
+            Object.entries(raw as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          )
+        }
+        return raw
+      })
+    }
+
+    function mountWithAction(type: string, config: Record<string, unknown>) {
+      const saved = vi.fn()
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        views,
+        onSave: saved,
+        rule: fakeRule({
+          name: `round2 ${type}`,
+          actionType: type,
+          actionConfig: config,
+          actions: [{ type, config }],
+        } as unknown as Partial<AutomationRule>),
+      })
+      return { container, saved }
+    }
+
+    async function saveAndReadConfig(container: HTMLElement, saved: ReturnType<typeof vi.fn>) {
+      const btn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(btn.disabled).toBe(false)
+      btn.click()
+      await flushPromises()
+      expect(saved).toHaveBeenCalledTimes(1)
+      return saved.mock.calls[0][0].actions[0].config as Record<string, unknown>
+    }
+
+    function blockKeys(container: HTMLElement): string[] {
+      return Array.from(container.querySelectorAll('[data-action="save-block-reason"]'))
+        .map((el) => el.getAttribute('data-reason-key') ?? '')
+    }
+
+    const extension = { nested: true }
+
+    // ---- (1) the draft must not rewrite values it only SHOWS as text -----------------------------
+
+    it('update_record: non-string `fields` values survive an untouched load → save', async () => {
+      // All five shapes are backend-legal (automation-actions.ts types `fields` as Record<string, unknown>)
+      // and backend-PRODUCED: automation-service.ts normalizeLegacyActionPair writes `null` into `fields`
+      // for a legacy update_field rule, where null means "clear the cell" — "" would mean "write an empty
+      // string", a different record mutation.
+      const config = {
+        fields: { fld_score: 42, fld_done: false, fld_note: null, fld_tags: ['red', 'blue'], fld_1: { a: 1 } },
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('update_record', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('update_record: editing ONE row stringifies that row only — untouched rows keep their raw values', async () => {
+      const { container, saved } = mountWithAction('update_record', {
+        fields: { fld_score: 42, fld_1: 'done' },
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const rows = container.querySelectorAll('[data-action-index="0"] .meta-rule-editor__field-pair')
+      const edited = rows[1].querySelector('.meta-rule-editor__input--sm input') as HTMLInputElement
+      edited.value = 'shipped'
+      edited.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.fields).toEqual({ fld_score: 42, fld_1: 'shipped' })
+    })
+
+    it('create_record: non-string `data` values survive an untouched load → save', async () => {
+      const config = {
+        sheetId: 'sheet_2',
+        data: { fld_score: 0, fld_done: false, fld_note: null, fld_tags: ['red'] },
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('create_record', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    // ---- (2) an untouched save must not ADD a mirror key ------------------------------------------
+
+    it('send_dingtalk_group_message: a singular-only destinationId config does not grow `destinationIds`', async () => {
+      // automation-actions.ts SendDingTalkGroupMessageConfig types BOTH destinationId? and destinationIds?
+      // as optional, so carrying only the singular is a legal API/quick-form shape.
+      const config = { destinationId: 'dt_1', titleTemplate: 'T', bodyTemplate: 'B', x_customerExtension: extension }
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('send_dingtalk_group_message: a plural-only destinationIds config does not grow `destinationId`', async () => {
+      const config = { destinationIds: ['dt_1', 'dt_2'], titleTemplate: 'T', bodyTemplate: 'B' }
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('send_dingtalk_person_message: a field-path-only config grows neither `userIds` nor `userIdFieldPaths`', async () => {
+      const config = {
+        userIdFieldPath: 'record.assigneeUserIds',
+        titleTemplate: 'T',
+        bodyTemplate: 'B',
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('send_dingtalk_person_message', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    // Create-mode (no loaded shape) is already pinned by the authoring specs above — e.g. "saves a
+    // DingTalk group message rule" expects BOTH destinationId and destinationIds, and the person-message
+    // authoring specs expect `userIds: []` next to the field-path twins. The no-ADD rule keys off the
+    // LOADED config precisely so those stay green.
+
+    it('send_dingtalk_group_message: the legacy `title`/`content` aliases are consumed, not re-emitted', async () => {
+      // dingtalk-automation-link-validation.ts promotes title → titleTemplate / content → bodyTemplate
+      // whenever the modelled key is blank, so an unowned alias could re-publish text the author cleared.
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1'],
+        title: 'OLD',
+        content: 'OLDBODY',
+        titleTemplate: 'NEW',
+        bodyTemplate: 'NEWBODY',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('title')
+      expect(config).not.toHaveProperty('content')
+      expect(config.titleTemplate).toBe('NEW')
+      expect(config.bodyTemplate).toBe('NEWBODY')
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    it('start_approval: outcomeValues are TRIMMED on save — the one documented exception to byte-identity', async () => {
+      // #5742 canonicalises the mapping on the way IN and on the way OUT (MetaAutomationRuleEditor.vue
+      // readResultWritebackOutcomeValues). Pinned so "byte-identical for all keys" is never read as
+      // covering this deliberate trim.
+      const { container, saved } = mountWithAction('start_approval', {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_1', outcomeValues: { approved: ' PASS ' } },
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.resultWriteback).toEqual({ statusField: 'fld_1', outcomeValues: { approved: 'PASS' } })
+      expect(config.x_customerExtension).toEqual(extension)
+    })
+
+    // ---- (3) the screen must tell the truth about a preserved cross-base target -------------------
+
+    it('delete_record: a cross-base target shows the banner, re-asks the acknowledgement, keeps the triple', async () => {
+      const config = {
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('delete_record', config)
+      await flushPromises()
+
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner).not.toBeNull()
+      expect(banner.textContent).toContain('ANOTHER base')
+      expect(banner.textContent).toContain('base_x')
+      expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).toBeNull()
+      // The warning + ack must stop claiming this deletes "the trigger record in this table".
+      const warning = container.querySelector('[data-action-index="0"] [data-field="deleteRecordWarning"]') as HTMLElement
+      expect(warning.textContent).toContain('another base')
+      const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement
+      expect(ack.checked).toBe(false)
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+      expect(blockKeys(container)).toContain('action-0-deleteAck')
+
+      ack.checked = true
+      ack.dispatchEvent(new Event('change'))
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('delete_record: a SAME-base delete keeps its pre-checked acknowledgement and shows no banner', async () => {
+      const { container } = mountWithAction('delete_record', {})
+      await flushPromises()
+      expect(container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]')).toBeNull()
+      const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement
+      expect(ack.checked).toBe(true)
+      const warning = container.querySelector('[data-action-index="0"] [data-field="deleteRecordWarning"]') as HTMLElement
+      expect(warning.textContent).toContain('trigger record')
+    })
+
+    it('update_record: a cross-base target shows the banner on a non-delete action too', async () => {
+      const { container } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+      })
+      await flushPromises()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner).not.toBeNull()
+      expect(banner.textContent).toContain('sheet_x')
+      expect(banner.textContent).toContain('rec_x')
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+    })
+
+    it('update_record: an INCOMPLETE cross-base triple blocks save instead of arriving as a server 400', async () => {
+      // automation-service.ts validateCrossBaseWriteConfig rejects targetBaseId without its two siblings
+      // (HTTP 400). Preserving the key made that reachable, so the editor now says it inline and anchors it.
+      const { container } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+      })
+      await flushPromises()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).not.toBeNull()
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+      expect(blockKeys(container)).toContain('action-0-crossBaseTarget')
+    })
+
+    // ---- structural: a future rebuild branch cannot forget its owned-key entry ---------------------
+
+    it('every buildPayload branch that rebuilds a config declares its OWNED keys', async () => {
+      // `ACTION_OWNED_CONFIG_KEYS[action.type] ?? []` silently means "this type owns nothing", so a rebuild
+      // branch added without an entry would overlay the full original and resurrect keys the author
+      // cleared. The invariant lived only in a comment; this reads the component source and enforces it.
+      const { existsSync, readFileSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+      // cwd is apps/web when vitest runs from there (run-required-web-tests.sh) and the repo root in some
+      // IDE runners — resolve both instead of import.meta.url, which vitest does not expose as a file: URL.
+      const file = [
+        resolve(process.cwd(), 'src/multitable/components/MetaAutomationRuleEditor.vue'),
+        resolve(process.cwd(), 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'),
+      ].find((candidate) => existsSync(candidate))
+      expect(file, `component source not found from cwd ${process.cwd()}`).toBeTruthy()
+      const source = readFileSync(file as string, 'utf8')
+      const ownedStart = source.indexOf('const ACTION_OWNED_CONFIG_KEYS')
+      const ownedEnd = source.indexOf('function buildActionConfigFromOriginal')
+      expect(ownedStart).toBeGreaterThan(0)
+      expect(ownedEnd).toBeGreaterThan(ownedStart)
+      const declared = new Set(
+        Array.from(source.slice(ownedStart, ownedEnd).matchAll(/^ {2}([a-z_]+): \[/gm), (m) => m[1]),
+      )
+      const payloadSource = source.slice(source.indexOf('function buildPayload('))
+      const rebuilt = new Set<string>()
+      for (const match of payloadSource.matchAll(/if \(action\.type === '([a-z_]+)'\) \{([\s\S]*?)\n {4}\}/g)) {
+        if (match[2].includes('buildActionConfigFromOriginal(')) rebuilt.add(match[1])
+      }
+      // Sanity: the scan actually found the branches (a regex that matches nothing must not pass).
+      expect(rebuilt.size).toBeGreaterThanOrEqual(8)
+      expect([...rebuilt].filter((type) => !declared.has(type))).toEqual([])
+    })
+  })
 })
