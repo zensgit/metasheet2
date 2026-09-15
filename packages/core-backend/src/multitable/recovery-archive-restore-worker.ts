@@ -182,7 +182,11 @@ export function createRecoveryArchiveRestoreWorkerFromOperations(
       if (shouldStop()) return result('stopped', swept, 0)
 
       try {
-        await operations.processDerivedWork?.()
+        // Drain a bounded batch without starving restore jobs or hot-looping a retry.
+        for (let attempt = 0; attempt < 32 && operations.processDerivedWork; attempt += 1) {
+          if (shouldStop()) return result('stopped', swept, 0)
+          if (await operations.processDerivedWork() !== 'completed') break
+        }
       } catch {
         return result('tick_failed', swept, 0)
       }
