@@ -67,18 +67,19 @@ describe('enqueueApprovalEventIfDurable — flag ON enqueues the FULL event, key
 
     const consumerInsert = writes.find((w) => w.sql.includes('meta_automation_outbox_consumer'))
     expect(consumerInsert).toBeDefined()
-    // approval.approved fans out to the FOUR completion consumers under the CURRENT manifest (v2 =
-     // v1 + multitable-record-approval, the record-level submit-for-approval sink). Pinned explicitly:
-     // a producer that silently reverted to the v1 fan-out would strand every record submission.
+    // approval.approved fans out to the FIVE completion consumers under the CURRENT manifest (v3 =
+     // v2 + dingtalk-todo-mirror; v2 = v1 + multitable-record-approval). Pinned explicitly: a producer
+     // that silently reverted to an older fan-out would strand every record submission / todo mirror.
     expect(consumerInsert!.params?.[1]).toEqual([
       'approval-bridge',
       'approval-trigger',
       'approval-projection',
       'multitable-record-approval',
+      'dingtalk-todo-mirror',
     ])
   })
 
-  test('task_created event routes to exactly [approval-task-trigger]', async () => {
+  test('task_created event routes to exactly [approval-task-trigger, dingtalk-todo-mirror] (manifest v3)', async () => {
     const { trx, writes } = fakeTxn()
     const taskEvent = {
       version: 1,
@@ -92,7 +93,9 @@ describe('enqueueApprovalEventIfDurable — flag ON enqueues the FULL event, key
     }
     expect(await enqueueApprovalEventIfDurable(trx, taskEvent, FLAG_ON)).toBe(true)
     const consumerInsert = writes.find((w) => w.sql.includes('meta_automation_outbox_consumer'))
-    expect(consumerInsert!.params?.[1]).toEqual(['approval-task-trigger'])
+    // manifest v3 gave task_created its SECOND consumer (the DingTalk approval-todo mirror). Exact set,
+    // not a `toContain`: a route silently added or dropped here must red.
+    expect(consumerInsert!.params?.[1]).toEqual(['approval-task-trigger', 'dingtalk-todo-mirror'])
     const outboxInsert = writes.find((w) => w.sql.includes('INSERT INTO meta_automation_outbox '))
     expect((outboxInsert!.params as unknown[])[5]).toBe(taskEvent.eventId)
   })

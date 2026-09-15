@@ -11,7 +11,8 @@
  *          sorted, all pending), committed WITH the terminal transition; the legacy
  *          `emitApprovalCompletionEvent` bus emit is SUPPRESSED (shared-bus spy sees nothing).
  *   F1-G2  flag ON + createApproval with a pending assignment → per-recipient `approval.task_created` outbox
- *          row to EXACTLY [approval-task-trigger], `event_id` BYTE-EQUAL to the legacy quad formula
+ *          row to EXACTLY [approval-task-trigger, dingtalk-todo-mirror] (manifest v3), `event_id`
+ *          BYTE-EQUAL to the legacy quad formula
  *          (`approval-task:instanceId:nodeKey:entryEpoch:assigneeUserId`); legacy emit SUPPRESSED (spy silent).
  *   F1-G3  flag ON + auto-approve-at-entry (requester-merge terminal at create) → ONE `approval.approved`
  *          outbox row (fanned to the 3 completion consumers) and ZERO `approval.task_created` rows; spy silent.
@@ -211,8 +212,9 @@ describeIfDatabase('P1#2e — producer family 1: approval completion + task_crea
     const rows = await outboxRowsForInstance(id)
     expect(rows).toHaveLength(1)
     expect(rows[0].event_type).toBe('approval.approved')
-    // manifest v2 fan-out: v1's three completion consumers + the record-level submit-for-approval sink.
-    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger', 'multitable-record-approval'])
+    // manifest v3 fan-out: v1's three completion consumers + the record-level submit-for-approval sink
+    // + the DingTalk todo mirror.
+    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger', 'dingtalk-todo-mirror', 'multitable-record-approval'])
     expect(await consumerStatuses(rows[0].id)).toEqual(['pending', 'pending', 'pending', 'pending'])
     expect(rows[0].event_id).toBe(rows[0].payload.eventId)
     expect((rows[0].payload.transition as { toStatus: string }).toStatus).toBe('approved')
@@ -229,7 +231,8 @@ describeIfDatabase('P1#2e — producer family 1: approval completion + task_crea
     const rows = await outboxRowsForInstance(id)
     expect(rows).toHaveLength(1)
     expect(rows[0].event_type).toBe('approval.task_created')
-    expect(rows[0].consumers).toEqual(['approval-task-trigger'])
+    // manifest v3: task_created gained its SECOND consumer (the todo mirror).
+    expect(rows[0].consumers).toEqual(['approval-task-trigger', 'dingtalk-todo-mirror'])
     expect(await consumerStatuses(rows[0].id)).toEqual(['pending'])
     // Byte-equality to the legacy quad formula, reconstructed from the durable assignment row itself.
     const asg = (await q(
@@ -254,7 +257,7 @@ describeIfDatabase('P1#2e — producer family 1: approval completion + task_crea
     const rows = await outboxRowsForInstance(id)
     expect(rows).toHaveLength(1)
     expect(rows[0].event_type).toBe('approval.approved')
-    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger', 'multitable-record-approval'])
+    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger', 'dingtalk-todo-mirror', 'multitable-record-approval'])
     // No pending assignment survived the cascade → NO task_created row was enqueued (the recheck's intent).
     expect(rows.filter((r) => r.event_type === 'approval.task_created')).toHaveLength(0)
     expect(spy).toHaveLength(0)

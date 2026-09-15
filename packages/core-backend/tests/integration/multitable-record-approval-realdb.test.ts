@@ -510,6 +510,8 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
       projectionService: { reconcile: async () => undefined },
       webhookService: { deliverEvent: async () => [] },
       recordApprovalService: sink,
+      // manifest v3 key, irrelevant to this scenario: stubbed like the other non-subject services.
+      todoMirrorService: { handleApprovalTaskCreated: async () => {}, handleApprovalCompletion: async () => {} },
     } as never)
 
     const claimed = {

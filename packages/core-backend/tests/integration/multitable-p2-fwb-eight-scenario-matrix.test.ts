@@ -466,8 +466,9 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
     setFlags(true, true)
     try {
       // 1) the approval completion event enters the REAL durable outbox in a COMMITTED transaction —
-      //    manifest v2 fans approval.approved out to approval-bridge/-trigger/-projection PLUS
-      //    multitable-record-approval (the record-level submit-for-approval sink).
+      //    manifest v3 fans approval.approved out to approval-bridge/-trigger/-projection PLUS
+      //    multitable-record-approval (the record-level submit-for-approval sink) PLUS
+      //    dingtalk-todo-mirror (the approval-todo one-way mirror).
       const evtS8 = track(`evt_${RUN}_s8`)
       const parent = await enqueueCommitted({ eventType: 'approval.approved', eventId: evtS8, payload: completionEvent(instanceC, evtS8), automationDepth: 0 })
 
@@ -481,6 +482,9 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
         // manifest v2 consumer. This scenario enqueues a synthetic completion for an instance that has no
         // record submission row, so the real sink would no-op; a spy keeps the scenario hermetic.
         recordApprovalService: { handleApprovalCompletion: async () => undefined },
+        // manifest v3 consumer (DingTalk todo mirror). Same reasoning: spied, so the scenario stays
+        // hermetic and the mirror's own flag/ledger behaviour is proven by its own suites.
+        todoMirrorService: { handleApprovalTaskCreated: async () => undefined, handleApprovalCompletion: async () => undefined },
       })
       const fullRegistry = buildConsumerAdapterRegistry(handlers) // the boot-identical six-adapter worker
       // Tick 1 runs a worker scoped to the approval-completion keys (the dispatcher's own worker-key
@@ -497,14 +501,16 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       await runDispatchTick(db(), approvalWorker, { batchSize: 500 })
 
       // 3) tick 1 delivered the completion fan-out: the three REAL consumers this worker registered
-      //    resolved 'done' (the v2 record-approval row stays 'pending' — this worker does not claim that
-      //    key, which is exactly the dispatcher's worker-key contract), and the
+      //    resolved 'done' (the v2 record-approval and v3 todo-mirror rows stay 'pending' — this worker
+      //    does not claim those keys, which is exactly the dispatcher's worker-key contract), and the
       //    approval-trigger adapter drove handleApprovalCompletionTrigger → executeRule → the production
       //    write_approval_form_values action.
       expect(await consumerStates(parent.outboxId)).toEqual([
         ['approval-bridge', 'done'],
         ['approval-projection', 'done'],
         ['approval-trigger', 'done'],
+        // manifest v3 row, not registered by this scoped worker → untouched, still pending.
+        ['dingtalk-todo-mirror', 'pending'],
         // manifest v2 row, not registered by this scoped worker → untouched, still pending.
         ['multitable-record-approval', 'pending'],
       ])
