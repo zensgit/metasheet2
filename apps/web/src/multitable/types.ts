@@ -1712,7 +1712,21 @@ export interface MetaRecordApprovalSubmission {
   recordVersionAtSubmit?: number
   createdAt?: string
   completedAt?: string
-  /** Values-free error CODE for a `failed` row (never a message carrying record data). */
+  /**
+   * Values-free error CODE (never a message carrying record data). A `failed` row carries its refusal
+   * code; a TERMINAL row can carry `RECORD_APPROVAL_NOTIFICATION_FAILED`, which means the submission
+   * itself is correct and only the requester's notification is missing (backend #5763).
+   */
   error?: string
   drift: MetaRecordApprovalDrift
+}
+
+/**
+ * One PAGE of a record's approval submissions. The route answers `{ submissions, hasMore }` (backend
+ * #5763): `hasMore` is derived from a `limit + 1` fetch whose extra row is never returned, so it means
+ * "this record has more submissions than the page you asked for", never a count.
+ */
+export interface MetaRecordApprovalListPage {
+  submissions: MetaRecordApprovalSubmission[]
+  hasMore: boolean
 }
