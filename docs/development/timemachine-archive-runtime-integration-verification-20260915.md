@@ -194,3 +194,15 @@ Code `a4436047b0f98c8e0bcc081850ec67c97fc90a5a`, tree `bc53d3527c7292158786baf98
 - Mutation omitting mandatory enqueue: both real encrypted facade cases RED. Mutation omitting worker consumption: five worker assertions RED. Restored unit matrix 59/59 and combined real-DB matrix 83/83 PASS.
 - Logs are session-local `/private/tmp/tm-derived-runtime-{migrate,unit-restored,combined-final,target-restored,enqueue-mutation,worker-mutation,tsc-final,lint-final}.log`, not remote CI evidence.
 - Live remote main was `3af8f12f73feedd517bfe97a92697cb1bb15536d` during this checkpoint. The integration branch has not yet replayed that main. Remaining read/write races, throughput, provider/standard startup and real process-restart gates remain open. No push, PR, Ready, merge, flags, dispatch or deployment occurred.
+
+### Commit-Held Derived Inputs And Authority
+
+Code `909afa204a72bd989c77a8203c5b823db37ccac9`, tree `bc7e22e5405710de7c927e23da210369d8d39c44`: four files, archive-only shared read/write transaction and post-commit invalidation.
+
+- Before implementation, all three new two-connection cases failed: source fence, foreign fence and actor lifecycle revoke could proceed while the processor paused after reading input.
+- Final cases hold a real calculation-read barrier. Competing source/foreign canonical lock acquisition times out; actor deactivation fails with the existing authority-busy code. After processor commit, the same writer succeeds. A subsequent calculation reads the new value (21), and a subsequently deactivated actor is denied. Cleanup always releases the barrier and awaits the processor.
+- Transaction negative proves an autocommit query is rejected, a scoped query cannot materialize another sheet, and a simulated commit failure rolls formula value 11 back to 100 without publishing. Restored normal transaction commits 11 and publishes.
+- Mutations: removing actor lease gives exactly 1 RED/2 GREEN race cases; removing canonical fence entry gives exactly 2 RED/1 GREEN; removing scope membership guard makes the transaction negative RED. All restored.
+- Fresh isolated PG15 stream PASS. Final route + restore-jobs real-DB suites: 2 files / 87 tests PASS, zero skips. Formula/lookup/parser/reference and worker/application unit neighbors: 8 files / 135 tests PASS. Core tsc, both modified small module ESLint and diff-check PASS; no megafile-wide lint claim.
+- Effects/sheet/job fixtures zero; disposable database dropped, prefix databases/backends zero, PG stopped. Logs: `/private/tmp/tm-derived-race-{migrate,before,target-final,authority-mutation,fence-mutation,scope-mutation,full,unit,tsc-final,lint}.log` (local only).
+- No new remote-state claim, push/PR, flag, Ready, merge or deployment. Throughput/capacity, actual process restart, standard startup/provider and current-main replay remain open; overall goal is not complete.
