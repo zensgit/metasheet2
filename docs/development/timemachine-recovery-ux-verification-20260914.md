@@ -253,3 +253,53 @@ code byte-identical; these are reused prior-checkpoint results, not a new DB run
 Local logs use `/private/tmp/tm-history-*-20260914.log`. This report appendix is
 documentation-only relative to the code head above. Fresh published exact-head CI
 is still a separate gate; no Ready, merge, flag, dispatch or deployment is granted.
+
+## Current-Main Replay: 2026-09-15
+
+- Previous published head: `3ffb95b23a0021fce281f7c529f98c1e643419fc`.
+  Its 28 SUCCESS / 1 intentional Strict E2E SKIPPED and all 13 protected checks
+  are prior-head evidence, not validation of this new replay.
+- Incoming main: `a7128c2f187f90e595fc93afa70c712e17031589`.
+  Since the previous base, it contains three stock-prep commits from #5721,
+  #5720 and #5722, affecting 17 plugin-integration-core files.
+- True-merge code head: `6346a0eddfc7d3209e352211d0aec52ad7b916cf`.
+- Code tree: `02d5acaad177916863b26c0b906a93befcb86c12`.
+- Ordered parents are the previous published head first, incoming main second.
+- No conflicts or manual resolutions; `git show --remerge-diff` is empty.
+  All 47 TM-owned paths are byte-identical to the previous published head;
+  all 17 incoming-main paths are byte-identical to main. Their intersection
+  is empty. No extra runtime, dependency, workflow or migration edit occurred.
+
+### New Replay Gates
+
+| Gate | Result |
+| --- | --- |
+| Recovery/history/config/trash neighbors | 11 files / 188 tests PASS |
+| Required web | All groups PASS; final group 456 files / 6740 tests; overlapping groups not summed |
+| Web application typecheck | `vue-tsc --noEmit -p tsconfig.app.json` PASS on Node 20 |
+| Incoming plugin neighbors | 10 files PASS, including MVP persist/repair routes, provisioning, target-field probe, sync-run persist, runtime persist and HTTP routes |
+| Sealed export | Complete 11-file S5 chain PASS |
+| Official provenance | Main's pin retained byte-for-byte; frozen/live differenceCount=0 |
+| Synthetic browser | 1440px and 390px table/record recovery, deletion details and config refusal PASS; zero page errors/overflow |
+| Viewer timezones | Asia/Taipei and America/New_York assertions PASS |
+| Diff | `git diff --check` PASS |
+
+Main's two changed pin values cover stock-prep sync-run persist and plugin HTTP
+routes. Neither recovery code nor its selectors required a pin refresh. All
+OpenAPI, core recovery routes/tests and migrations remain byte-identical to the
+previous candidate. Therefore the earlier 402-migration replay and 6-file/77-test
+isolated PostgreSQL results remain explicitly reused evidence; no new DB run or
+new mutation run is claimed here. The dedicated DB remains stopped.
+
+Independent Luna high read-only review of the frozen merged tree: zero P1/P2
+within this replay. It checked ownership/equivalence, test-chain and pin retention,
+and the lack of changes to TM route/permission/restore contracts; it did not rerun
+tests or certify all upstream stock-prep functionality. The coordinator ran the
+gates above. The reviewer session was closed.
+
+Session-local logs and fresh browser images are under
+`/private/tmp/tm-current-main-replay-*-20260915*`. Synthetic component screenshots
+are still not authenticated browser-to-database UAT. This appendix is a separate
+report-only child of the merge code head. New published-head CI must be observed
+after ordinary push to the existing Draft #5709. No Ready, merge, auto-merge,
+flag, dispatch, deployment, production or real customer data action is authorized.
