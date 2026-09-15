@@ -11,6 +11,8 @@ vi.mock('../../src/multitable/access', async (original) => ({
 }))
 import type { ResolvedRequestAccess } from '../../src/multitable/access'
 import { resolveBaseReadable, resolveBaseReadableForAccess, type QueryFn } from '../../src/multitable/permission-service'
+import { resolveRecoverySheetAuthority } from '../../src/multitable/recovery-authorization-stability'
+import { deriveElearningProjectionBaseId, deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
 
 const member: ResolvedRequestAccess = { userId: 'actor-read', permissions: [], isAdminRole: false }
 const admin = { ...member, isAdminRole: true }
@@ -52,6 +54,25 @@ describe('explicit recovery base readability', () => {
     expect(await resolveBaseReadable(req, queryFor(), ` ${baseId} `)).toBe(false)
     expect(requestAccess).toHaveBeenCalledWith(req)
     expect(requestAccess).toHaveBeenCalledTimes(1)
+  })
+  test.each(['org-read', 'other-org', undefined])('preserves verified tenant for projection base parity (%s)', async (tenant) => {
+    const permissions = ['multitable:read', 'elearning:admin']
+    requestAccess.mockResolvedValue({ ...member, permissions, ...(tenant ? { authenticatedTenantId: tenant } : {}) })
+    const authorityQuery: QueryFn = async (sql) => ({ rows: sql.includes('FROM users')
+      ? [{ role: 'user', permissions, is_active: true, rbac_admin: false }]
+      : [] })
+    const resolved = await resolveRecoverySheetAuthority(req, authorityQuery, 'source-sheet')
+    expect(resolved.access.permissions).toEqual(permissions)
+    const targetBase = deriveElearningProjectionBaseId('org-read')
+    const targetSheet = deriveElearningProjectionSheetId('org-read')
+    const projectionQuery: QueryFn = async (sql) => {
+      if (sql.includes('SELECT owner_id')) return { rows: [{ owner_id: null }] }
+      if (sql.includes('SELECT org_id, sheet_id')) return { rows: [{ org_id: 'org-read', sheet_id: targetSheet }] }
+      if (sql.includes('SELECT id') && sql.includes('FROM meta_sheets')) return { rows: [{ id: targetSheet }] }
+      throw new Error('unexpected_projection_query')
+    }
+    expect(await resolveBaseReadableForAccess(projectionQuery, targetBase, resolved.access)).toBe(tenant === 'org-read')
+    expect(resolved.access.authenticatedTenantId).toBe(tenant)
   })
 })
 

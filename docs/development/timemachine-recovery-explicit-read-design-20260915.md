@@ -12,6 +12,9 @@ Extract the existing base-read policy into `resolveBaseReadableForAccess`; the H
 wrapper delegates to it. Preserve live-base checks, projection restrictions, global
 grants, ownership, field scope, cross-base masks and same-base opt-out semantics.
 The explicit snapshot is an internal adjudicated input, never a new client argument.
+Preserve `authenticatedTenantId` from canonical request access in the recovery access
+result so non-system projection administrators retain same-org read parity. Database
+permissions and the request/database admin intersection remain unchanged.
 
 No new grant, migration, flag, provider, restore mode or worker enablement. This is
 a prerequisite for request-independent worker policy, not full runtime composition.
