@@ -26,7 +26,7 @@
 | Q14 | Q9 前端配套：面板「还有更多」与通知失败标记，客户端 hasMore/limit | opus / opus / fable | #5765（784c22dc1；裁判 MERGE @7f9f04afe，3 条反驳全落码） | ✅ 已合，r50 |
 | Q15 | 编辑器 #5756 往返用例 CI 5 s 超时抖动（#5763 web-tests 红暴露） | opus 单代理 | #5764（21 个 it 显式 30 s 超时；变异 1 ms → 12 红） | ✅ 已合，r50 |
 | Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | #5766（23133d0df；`useRouter()` 探测 → `inject(routerKey, null)`，告警 75→0，变异回退 27，vue-tsc 干净；合并 7c2af7020） | ✅ 已合，r51 |
-| Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | #5770（裁判 MERGE @1ad1bb795，7 条反驳 0 major 全落码；两项可选测试加固由单代理跟进；设计见 §2） | 🟡 CI |
+| Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | #5770（裁判 MERGE @1ad1bb795，7 条反驳 0 major 全落码；可选两项已加固；CI 一轮被审批窗口 tripwire 拦下——多维表不得引用成员身份解析器，改 assigneeName→序号两步规则；合并 8a54a35b1） | ✅ 已合，r51 |
 | Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | #5769（9628f98f6；`router-link` 1311→0，`Invalid prop` 20→8 余为未涉及的三个弹窗；顺带发现显式导入后 `<script setup>` 会把同名 kebab 标签自动解析，变异须导入与标签一起回退；合并 cae1f2421）；他窗口领域的 62% 只记录在 §5.3 | ✅ 已合，r51 |
 | Q19 | 钉钉待办单向镜像（B 方案，队列外候选 4）：设计稿 + 默认关闭的实现 | 3 读者地图 → 主会话写设计 → opus 实现 / opus 反驳×2 / fable 裁判 | 设计 `dingtalk-todo-mirror-b-design-20260916.md`；分支 `feat/dingtalk-todo-mirror`（wt-fe6）；owner 三项前置未满足前保持关闭 | 🟡 流水线 |
 | — | 222 发布 | — | r47 / r48 / r49 / r50 已上并实测（§3）；r51 = r50 + #5761 + #5766（+ Q17/Q18 若绿）计划 08:00 前上 | 🟡 |
