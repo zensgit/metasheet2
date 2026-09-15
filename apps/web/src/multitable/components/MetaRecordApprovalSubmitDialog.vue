@@ -209,8 +209,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, useId, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { computed, inject, nextTick, ref, useId, watch } from 'vue'
+import { RouterLink, routerKey } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import {
   recordApprovalErrorLabel,
@@ -247,7 +247,7 @@ const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 // Same (non-throwing `inject`) idiom MetaRecordInspector uses: several frozen drawer specs mount this
 // tree with no router installed, so the instance link is rendered only when a router really exists.
-const hasRouter = !!useRouter()
+const hasRouter = !!inject(routerKey, null)
 
 const templateSelectId = `meta-approval-template-${useId()}`
 const fieldControlId = (fieldId: string) => `${templateSelectId}-${fieldId}`
