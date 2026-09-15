@@ -1088,6 +1088,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -2672,6 +2673,8 @@ describe('MultitableWorkbench view wiring', () => {
     expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
+  // #5743: same contract (refresh while open, silence after close), slower clock — the cadence now
+  // comes from DIALOG_META_REFRESH_INTERVAL_MS instead of a hard-coded 1200 ms.
   it('refreshes sheet metadata while the view manager is open and stops after close', async () => {
     vi.useFakeTimers()
     mountWorkbench()
@@ -2686,7 +2689,7 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
     expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_orders')
 
-    await vi.advanceTimersByTimeAsync(1200)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
@@ -2696,7 +2699,7 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
     workbenchMock.loadSheetMeta.mockClear()
 
-    await vi.advanceTimersByTimeAsync(2400)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS * 2)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
