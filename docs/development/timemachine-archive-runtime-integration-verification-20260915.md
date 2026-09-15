@@ -107,6 +107,17 @@ Code/test head `dcb10e1c1b98d37181942870752d4d7c451306cd`, tree `d9eb3f4b1a08402
 
 ### Outstanding Standard Runtime
 
+### Worker Callback Composition Evidence
+
+- Code/test SHA `467b80a239c81b58e1e44a1ec4336c5ef7ab3aef`; tree `452dd5beac6309a01a55de006a1a231fe368a7cf`.
+- Six focused/neighbor unit files 90/90 PASS; core typecheck and diff-check PASS.
+- Dedicated PG15 fresh migrations; whole exact-anchor route suite 39/39 PASS, zero skips. Two new worker-callback cases use real source/link updates and the actual callback assembly: no event/Yjs emission inside the transaction; authorized post-commit recompute produces 11; post-commit account revocation retains prior derived value 100 and emits only ID invalidations. Event bus/realtime/Yjs are observed with spies, not external delivery.
+- Mutation replacing post-commit authority recheck with unconditional entry: exactly revoked case RED, normal case GREEN. Restored whole-file 39/39 PASS.
+- Record/outbox/sheet/user fixtures and other backends 0; database dropped, database prefix 0, PG stopped. No deployment/production/flag action.
+- This is callback composition evidence without a long-lived archive writer block. Job finalization releases that block after chunk callbacks, so terminal/restart-safe derived effects remain unproven and explicitly pending. Standard startup has not been enabled or claimed complete.
+
+### Still Required
+
 - Combined real-DB route and worker execution, mutation, and process-restart gates.
 - Shared full-read/plan authorization invoked by a real background worker.
 - Provider/KMS/object-store integration or ordinary application startup readiness.
