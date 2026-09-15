@@ -17,10 +17,12 @@
   this component hides rather than crashing, the same discipline MetaRecordProvenancePanel follows.
 
   LAZY: the GET fires on FIRST EXPAND only — never on record open, so the record-detail critical path
-  gains no request. Collapse/re-expand reuses the loaded list. It re-fetches only on a real change signal:
-  the record's version moving (a `record-updated` refresh reaches this component as a new `record` prop,
-  see MultitableWorkbench's realtime handler) or `refreshToken` being bumped by the inspector after a
-  successful submit — and even then only while the section is open.
+  gains no request. Collapse/re-expand reuses the loaded list. A real change signal — the record's version
+  moving (a `record-updated` refresh reaches this component as a new `record` prop, see
+  MultitableWorkbench's realtime handler) or `refreshToken` being bumped by the inspector after a
+  successful submit — always INVALIDATES that cache: an open section re-reads immediately, a collapsed one
+  re-reads on its next expand (still lazy, never eager). A signal that lands mid-read is queued rather
+  than dropped, because the read in flight is about to write pre-change rows.
 
   VALUES-FREE: renders identifiers, a status, a timestamp and a COUNT of changed fields. Drift never
   names a field and never shows a value (the route does not return one).
@@ -66,7 +68,22 @@
               class="meta-record-approval__template"
               data-test="record-approval-template"
             >{{ submission.templateName || submission.templateId }}</strong>
-            <StatusTag domain="approvalInstance" size="sm" :status="submission.status" />
+            <!-- 'creating'/'failed' describe the SUBMISSION, not an approval instance, and the shared
+                 approvalInstance domain table does not carry them (statusDomains.ts) — its fallback would
+                 print the raw English token in a zh UI. Those two are rendered locally with real copy;
+                 every status StatusTag owns still goes through StatusTag. -->
+            <StatusTag
+              v-if="!localStatusLabel(submission.status)"
+              domain="approvalInstance"
+              size="sm"
+              :status="submission.status"
+            />
+            <span
+              v-else
+              class="meta-record-approval__status"
+              :data-status="submission.status"
+              data-test="record-approval-local-status"
+            >{{ localStatusLabel(submission.status) }}</span>
           </div>
           <div class="meta-record-approval__entry-meta">
             <span v-if="submission.requestNo" data-test="record-approval-request-no">
@@ -87,6 +104,14 @@
               {{ l('approval.submittedAt') }} {{ formatApprovalTime(submission.createdAt) }}
             </span>
           </div>
+          <!-- A failed submission otherwise gave the operator nothing: the row carries a sanitized
+               refusal CODE (never a message, never a value). Render it as localized copy when we know the
+               code, and NOTHING when we do not — a raw token is not an explanation. -->
+          <div
+            v-if="failureReason(submission)"
+            class="meta-record-approval__failure"
+            data-test="record-approval-failure"
+          >{{ l('approval.failureReason') }}: {{ failureReason(submission) }}</div>
           <div
             v-if="submission.drift.changed"
             class="meta-record-approval__drift"
@@ -110,6 +135,8 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import {
   recordApprovalDriftNotice,
+  recordApprovalErrorLabel,
+  recordApprovalSubmissionStatusLabel,
   recordLabel,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
@@ -143,16 +170,30 @@ const submissions = ref<MetaRecordApprovalSubmission[]>([])
 
 const sectionVisible = computed(() => Boolean(props.record && props.sheetId && props.apiClient))
 
+// COUNT-FREE when the server masked every changed field id away (`{ changed: true, changedFieldIds: [] }`
+// is a legitimate answer for an actor whose field-read mask hides the changed fields) — see the helper.
 const driftNotice = (submission: MetaRecordApprovalSubmission) =>
   recordApprovalDriftNotice(submission.drift.changedFieldIds.length, isZh.value)
+
+const localStatusLabel = (status: string) => recordApprovalSubmissionStatusLabel(status, isZh.value)
+
+const failureReason = (submission: MetaRecordApprovalSubmission): string | null =>
+  submission.status === 'failed' ? recordApprovalErrorLabel(submission.error, isZh.value) : null
 
 // Stale-response guard (same closure-counter idiom as MetaRecordProvenancePanel): a load whose captured
 // version no longer matches when its await settles was superseded by a record switch, a refresh or the
 // component unmounting, and must not write state however late it lands.
 let activeLoadVersion = 0
 
+// A change signal that arrives WHILE a read is in flight would otherwise be swallowed: the in-flight read
+// is about to write the PRE-change rows and set `loaded`, and nothing re-arms it (so even a later
+// collapse/re-expand would serve the stale cache for the life of the mount). Remember it and re-run from
+// that read's own `finally`.
+let refreshPending = false
+
 function resetState(): void {
   activeLoadVersion += 1
+  refreshPending = false
   expanded.value = false
   loading.value = false
   loaded.value = false
@@ -166,18 +207,19 @@ watch(() => props.record?.id, () => {
 })
 
 // A real change signal: the record's version moved (the workbench re-read it after a `record-updated`
-// realtime event or a local patch) or the inspector bumped refreshToken after a submit. Re-read ONLY
-// while the section is open — a collapsed panel stays lazy and picks the change up on its next expand.
+// realtime event or a local patch) or the inspector bumped refreshToken after a submit. The CACHE is
+// invalidated either way — including while collapsed, where an edit used to be dropped permanently
+// because `loaded` stayed true and the next expand was a no-op. Only the FETCH is conditional: a
+// collapsed panel stays lazy and re-reads on its next expand.
 watch(
   () => [props.record?.version, props.refreshToken] as const,
-  ([, token], [, previousToken]) => {
-    if (!expanded.value) {
-      // A submit that happened while the panel was collapsed must not be served from a stale cache the
-      // next time it opens.
-      if (token !== previousToken) loaded.value = false
+  () => {
+    loaded.value = false
+    if (!expanded.value) return
+    if (loading.value) {
+      refreshPending = true
       return
     }
-    loaded.value = false
     void loadSubmissions()
   },
 )
@@ -208,7 +250,15 @@ async function loadSubmissions(): Promise<void> {
     if (loadVersion !== activeLoadVersion) return
     loadFailed.value = true
   } finally {
-    if (loadVersion === activeLoadVersion) loading.value = false
+    if (loadVersion === activeLoadVersion) {
+      loading.value = false
+      if (refreshPending) {
+        refreshPending = false
+        // What we just wrote predates the signal that arrived mid-flight: drop it and read again.
+        loaded.value = false
+        if (expanded.value) void loadSubmissions()
+      }
+    }
   }
 }
 
@@ -240,4 +290,6 @@ function formatApprovalTime(value: string): string {
 .meta-record-approval__entry-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: #64748b; }
 .meta-record-approval__link { color: var(--ms-color-primary, #409eff); }
 .meta-record-approval__drift { font-size: 11px; color: #b45309; }
+.meta-record-approval__failure { font-size: 11px; color: #b91c1c; }
+.meta-record-approval__status { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 4px; padding: 1px 6px; }
 </style>

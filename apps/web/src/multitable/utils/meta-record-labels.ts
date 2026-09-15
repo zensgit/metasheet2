@@ -152,6 +152,16 @@ export type MetaRecordLabelKey =
   | 'approval.panelTitle' | 'approval.panelExpand' | 'approval.panelCollapse'
   | 'approval.panelLoading' | 'approval.panelError' | 'approval.panelEmpty'
   | 'approval.requestNo' | 'approval.submittedBy' | 'approval.submittedAt' | 'approval.unknownActor'
+  // --- 评审第二轮补齐 / round-2 gaps. The route's refusals are fixed ENGLISH strings and its
+  //     submission statuses include two values the shared approvalInstance status table does not
+  //     know ('creating'/'failed'), so both were reaching a zh UI as raw English. These keys are the
+  //     localization layer for exactly those two gaps, plus the two "what you see may not be what
+  //     the server uses" notices (truncated roster / unpublished template draft). ---
+  | 'approval.statusCreating' | 'approval.statusFailed' | 'approval.failureReason'
+  | 'approval.errorPermissionDenied' | 'approval.errorTemplateForbidden'
+  | 'approval.errorTemplateNotPublished' | 'approval.errorRecordNotFound'
+  | 'approval.errorCreateFailed' | 'approval.errorValidation'
+  | 'approval.templateDraftPending'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -428,6 +438,20 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.submittedBy': { en: 'Submitted by', zh: '申请人' },
   'approval.submittedAt': { en: 'Submitted at', zh: '送审时间' },
   'approval.unknownActor': { en: 'Unknown', zh: '未知' },
+  // Submission statuses the shared `approvalInstance` StatusTag domain does not carry (they describe
+  // the SUBMISSION, not an approval instance) — localized here rather than widening that shared table.
+  'approval.statusCreating': { en: 'Submitting', zh: '提交中' },
+  'approval.statusFailed': { en: 'Submit failed', zh: '提交失败' },
+  'approval.failureReason': { en: 'Reason', zh: '失败原因' },
+  // The route's coded refusals (multitable-record-approvals.ts / record-approval-submission-service.ts).
+  // Their server messages are fixed ENGLISH sentences; we render these by CODE instead.
+  'approval.errorPermissionDenied': { en: 'You do not have permission to submit this record for approval.', zh: '没有送审权限（需多维表送审权限与审批发起权限）。' },
+  'approval.errorTemplateForbidden': { en: 'You may not use this approval template.', zh: '无权使用该审批模板。' },
+  'approval.errorTemplateNotPublished': { en: 'This approval template is not published.', zh: '该审批模板未发布。' },
+  'approval.errorRecordNotFound': { en: 'This record no longer exists.', zh: '记录不存在或已被删除。' },
+  'approval.errorCreateFailed': { en: 'Could not create the approval. Please try again.', zh: '创建审批实例失败，请稍后重试。' },
+  'approval.errorValidation': { en: 'The form does not match this template. Check the required fields.', zh: '表单内容不符合模板要求，请检查必填项。' },
+  'approval.templateDraftPending': { en: 'This template has unpublished changes — the form below may differ from the one the approval will use.', zh: '该模板有未发布的改动，下方表单可能与实际审批表单不一致。' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -667,7 +691,16 @@ export function resetConfirmWarnAfterNot(asOf: string, isZh: boolean): string {
 // 记录级送审 (design §5): "送审后数据已变更（N 个字段）" — the drift notice on a submission row. A COUNT,
 // never a field name and never a value: the server only ever returns changed field IDs, and even those
 // are not rendered here.
+//
+// COUNT-FREE when the id list is empty. `{ changed: true, changedFieldIds: [] }` is a LEGITIMATE server
+// answer, not a bug: `changed` is anchored on the record version, while the id list is filtered through
+// the caller's own field-read mask (record-approval-submission-service.ts computeRecordApprovalDrift),
+// so a viewer who may not read the changed fields gets the warning with no ids. Rendering that as
+// "已变更（0 个字段）" would contradict itself.
 export function recordApprovalDriftNotice(changedCount: number, isZh: boolean): string {
+  if (!Number.isFinite(changedCount) || changedCount <= 0) {
+    return isZh ? '送审后数据已变更' : 'Record changed after submit'
+  }
   return isZh
     ? `送审后数据已变更（${changedCount} 个字段）`
     : `Record changed after submit (${changedCount} field${changedCount === 1 ? '' : 's'})`
@@ -678,4 +711,45 @@ export function recordApprovalDriftNotice(changedCount: number, isZh: boolean): 
 export function recordApprovalSubmittedToast(requestNo: string | undefined, isZh: boolean): string {
   if (!requestNo) return isZh ? '已送审' : 'Submitted for approval'
   return isZh ? `已送审 ${requestNo}` : `Submitted for approval ${requestNo}`
+}
+
+// 记录级送审 round-2: map the record-approval route's REFUSAL CODES to localized copy. The route's
+// own messages are fixed English sentences ('Insufficient permissions', 'Approval template is not
+// published', …) which the shared client surfaces verbatim, so a zh operator would read English. Codes
+// are identifiers, never values — an unknown one returns null and the caller falls back to its generic
+// copy rather than printing a raw token.
+const RECORD_APPROVAL_ERROR_LABELS: Record<string, MetaRecordLabelKey> = {
+  RECORD_APPROVAL_PERMISSION_DENIED: 'approval.errorPermissionDenied',
+  RECORD_APPROVAL_TEMPLATE_FORBIDDEN: 'approval.errorTemplateForbidden',
+  RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED: 'approval.errorTemplateNotPublished',
+  RECORD_APPROVAL_RECORD_NOT_FOUND: 'approval.errorRecordNotFound',
+  RECORD_APPROVAL_CREATE_FAILED: 'approval.errorCreateFailed',
+  VALIDATION_ERROR: 'approval.errorValidation',
+  FORBIDDEN: 'approval.errorPermissionDenied',
+}
+
+export function recordApprovalErrorLabel(code: string | undefined, isZh: boolean): string | null {
+  if (!code) return null
+  const key = RECORD_APPROVAL_ERROR_LABELS[code]
+  return key ? recordLabel(key, isZh) : null
+}
+
+// The two submission statuses that are NOT approval-instance statuses ('creating' = the durable row
+// exists but the instance is not created yet; 'failed' = createApproval refused). The shared
+// `approvalInstance` StatusTag domain deliberately does not carry them, and its raw-status fallback
+// would print the English token in a zh UI — so the panel renders THESE two itself. Returns null for
+// every status StatusTag does own, which is the panel's signal to use StatusTag.
+export function recordApprovalSubmissionStatusLabel(status: string, isZh: boolean): string | null {
+  if (status === 'creating') return recordLabel('approval.statusCreating', isZh)
+  if (status === 'failed') return recordLabel('approval.statusFailed', isZh)
+  return null
+}
+
+// The picker asks for at most `shown` published templates (the route's ceiling). When the answer is
+// exactly that full, more may exist and there is no paging and no free-text id fallback here — say so
+// instead of silently presenting a truncated roster as the whole list.
+export function recordApprovalTemplatesTruncatedNotice(shown: number, isZh: boolean): string {
+  return isZh
+    ? `仅显示前 ${shown} 个已发布模板，其余请到审批中心发起。`
+    : `Showing the first ${shown} published templates only — start the rest from the approval centre.`
 }

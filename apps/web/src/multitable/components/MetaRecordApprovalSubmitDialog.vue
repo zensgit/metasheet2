@@ -6,12 +6,16 @@
   its form, and the record is submitted for approval — without first authoring an automation rule.
 
   STRUCTURE: Teleport + overlay + `role="dialog"` + `aria-label`, deliberately the same shape as
-  MetaExportDialog.vue (this file's structural template), so the two modals of this surface behave
-  identically for keyboard/AT users.
+  MetaExportDialog.vue (this file's structural template). It goes one step further than that file: the
+  `aria-modal="true"` it declares is BACKED — focus moves into the panel on open, Tab is trapped inside,
+  Esc closes it (and only it), and focus returns to the opener on close, the way
+  AttendanceSetupTemplatePrefillDialog.vue does it. A teleported modal that claims aria-modal without
+  that behaviour leaves focus on <body> and lets Tab walk the workbench behind the overlay.
 
-  TEMPLATE LIST: `client.listApprovalTemplates({ status: 'published' })` — the filter is a SERVER
-  parameter, not a client-side `.filter()`, so a draft/archived template can never reach the picker even
-  if the roster is paginated. An empty roster or a 401/403 (the route is `approvals:read` guarded) shows
+  TEMPLATE LIST: `client.listApprovalTemplates({ status: 'published', pageSize })` — the filter is a
+  SERVER parameter, not a client-side `.filter()`, so a draft/archived template can never reach the picker
+  even if the roster is paginated; `pageSize` is the route's ceiling because its default (20) would
+  silently truncate the picker, and a full answer shows a "the rest live in the approval centre" notice. An empty roster or a 401/403 (the route is `approvals:read` guarded) shows
   ONE notice and NOTHING else: there is deliberately no free-text template-id input, because typing an id
   you cannot read is not a permission the FE may hand out.
 
@@ -32,11 +36,14 @@
   <Teleport to="body">
     <div v-if="visible" class="meta-approval-overlay" @click.self="onCancel">
       <div
+        ref="modalRef"
         class="meta-approval-modal"
         role="dialog"
         aria-modal="true"
+        tabindex="-1"
         :aria-label="l('approval.dialogTitle')"
         data-testid="record-approval-dialog"
+        @keydown="onKeydown"
       >
         <div class="meta-approval__header">
           <strong>{{ l('approval.dialogTitle') }}</strong>
@@ -57,6 +64,11 @@
           >{{ l('approval.templatesUnavailable') }}</p>
           <div v-else class="meta-approval__row">
             <label class="meta-approval__label" :for="templateSelectId">{{ l('approval.template') }}</label>
+            <p
+              v-if="templatesTruncated"
+              class="meta-approval__hint meta-approval__hint--warn"
+              data-testid="record-approval-templates-truncated"
+            >{{ truncatedNotice }}</p>
             <select
               :id="templateSelectId"
               class="meta-approval__select"
@@ -83,7 +95,14 @@
             data-testid="record-approval-form-error"
           >{{ l('approval.formLoadFailed') }}</p>
 
-          <div v-else-if="selectedTemplateId" class="meta-approval__fields">
+          <p
+            v-if="formHasLoaded && templateDraftPending"
+            class="meta-approval__hint meta-approval__hint--warn"
+            role="alert"
+            data-testid="record-approval-template-draft-notice"
+          >{{ l('approval.templateDraftPending') }}</p>
+
+          <div v-if="formHasLoaded && selectedTemplateId" class="meta-approval__fields">
             <div v-for="field in formFields" :key="field.id" class="meta-approval__row">
               <label class="meta-approval__label" :for="fieldControlId(field.id)">
                 {{ field.label }}
@@ -128,8 +147,11 @@
                 :value="stringDraft(field.id)"
                 @input="setDraft(field.id, ($event.target as HTMLInputElement).value)"
               />
+              <!-- `id` matters: the row's <label for> above points here, and an unsupported field has no
+                   control of its own — without it the label referenced nothing at all. -->
               <span
                 v-else
+                :id="fieldControlId(field.id)"
                 class="meta-approval__hint meta-approval__hint--warn"
                 :data-testid="`record-approval-field-unsupported-${field.id}`"
               >{{ field.type }}</span>
@@ -187,12 +209,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId, watch } from 'vue'
+import { computed, nextTick, ref, useId, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
-import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import {
+  recordApprovalErrorLabel,
+  recordApprovalTemplatesTruncatedNotice,
+  recordLabel,
+  type MetaRecordLabelKey,
+} from '../utils/meta-record-labels'
 import { MtButton, MtIconButton } from '../ui'
-import { isRecordApprovalInFlightError, type MultitableApiClient } from '../api/client'
+import {
+  isRecordApprovalInFlightError,
+  RECORD_APPROVAL_TEMPLATE_PAGE_SIZE,
+  type MultitableApiClient,
+} from '../api/client'
 import type {
   MetaApprovalFormField,
   MetaApprovalTemplateSummary,
@@ -228,6 +259,12 @@ const selectedTemplateId = ref('')
 const formFields = ref<MetaApprovalFormField[]>([])
 const formLoading = ref(false)
 const formLoadFailed = ref(false)
+// Ids only (never a schema): the read serves the LATEST version's form while the server validates the
+// ACTIVE published one, so a difference means the form on screen is not the form that will be checked.
+const formActiveVersionId = ref<string | undefined>(undefined)
+const formLatestVersionId = ref<string | undefined>(undefined)
+const modalRef = ref<HTMLElement | null>(null)
+let previouslyFocused: HTMLElement | null = null
 const drafts = ref<Record<string, string | boolean>>({})
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
@@ -263,6 +300,17 @@ function renderKind(field: MetaApprovalFormField): RenderKind {
   if (kind === 'select' && !(field.options && field.options.length > 0)) return 'unsupported'
   return kind
 }
+
+const formHasLoaded = computed(() => Boolean(selectedTemplateId.value) && !formLoading.value && !formLoadFailed.value)
+
+const templatesTruncated = computed(() => templates.value.length >= RECORD_APPROVAL_TEMPLATE_PAGE_SIZE)
+const truncatedNotice = computed(() => recordApprovalTemplatesTruncatedNotice(templates.value.length, isZh.value))
+
+const templateDraftPending = computed(() => Boolean(
+  formActiveVersionId.value
+  && formLatestVersionId.value
+  && formActiveVersionId.value !== formLatestVersionId.value,
+))
 
 const hasUnsupportedField = computed(() => formFields.value.some((field) => renderKind(field) === 'unsupported'))
 
@@ -301,6 +349,8 @@ function resetFormState(): void {
   formFields.value = []
   formLoading.value = false
   formLoadFailed.value = false
+  formActiveVersionId.value = undefined
+  formLatestVersionId.value = undefined
   drafts.value = {}
   submitError.value = null
   inFlightNotice.value = null
@@ -310,8 +360,13 @@ watch(() => props.visible, (open) => {
   activeLoadVersion += 1
   if (!open) {
     submitting.value = false
+    // Focus goes back where it came from (the kebab item), never to document.body.
+    previouslyFocused?.focus()
+    previouslyFocused = null
     return
   }
+  previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  void nextTick(() => modalRef.value?.focus())
   templates.value = []
   templatesUnavailable.value = false
   selectedTemplateId.value = ''
@@ -325,7 +380,13 @@ async function loadTemplates(): Promise<void> {
   templatesLoading.value = true
   try {
     // status is a SERVER filter (design §5.1) — never a client-side narrowing of an unfiltered roster.
-    const result = await props.client.listApprovalTemplates({ status: 'published' })
+    // pageSize is the route's ceiling: its DEFAULT is 20, which would silently truncate the picker (there
+    // is no paging and, by design, no free-text id fallback here). `templatesTruncated` says so if even
+    // the ceiling fills up.
+    const result = await props.client.listApprovalTemplates({
+      status: 'published',
+      pageSize: RECORD_APPROVAL_TEMPLATE_PAGE_SIZE,
+    })
     if (loadVersion !== activeLoadVersion) return
     templates.value = result.data
     // Empty roster and "you may not read templates" are the SAME user-facing state by design: one
@@ -355,6 +416,8 @@ async function loadTemplateForm(templateId: string): Promise<void> {
     const detail = await props.client.getApprovalTemplate(templateId)
     if (loadVersion !== activeLoadVersion) return
     formFields.value = detail.formFields
+    formActiveVersionId.value = detail.activeVersionId
+    formLatestVersionId.value = detail.latestVersionId
     drafts.value = {}
   } catch {
     if (loadVersion !== activeLoadVersion) return
@@ -405,7 +468,14 @@ async function onSubmit(): Promise<void> {
         ...(error.approvalInstanceId ? { approvalInstanceId: error.approvalInstanceId } : {}),
       }
     } else {
-      submitError.value = (error as Error)?.message || l('approval.submitFailed')
+      // The route's refusals are fixed ENGLISH sentences ('Insufficient permissions', 'Approval template
+      // is not published', …) which the shared client surfaces verbatim — render them by CODE instead. An
+      // UNKNOWN code still shows the server text (better than a generic sentence for an unexpected
+      // failure), and a codeless failure falls back to the generic one.
+      const code = (error as { code?: string })?.code
+      submitError.value = recordApprovalErrorLabel(code, isZh.value)
+        ?? (error as Error)?.message
+        ?? l('approval.submitFailed')
     }
   } finally {
     submitting.value = false
@@ -414,6 +484,46 @@ async function onSubmit(): Promise<void> {
 
 function onCancel(): void {
   emit('close')
+}
+
+// `aria-modal="true"` is a PROMISE to assistive tech: focus is inside, Tab stays inside, Esc gets out.
+// Ported from AttendanceSetupTemplatePrefillDialog.vue (the repo's worked example) rather than left as a
+// bare attribute — the dialog is teleported to <body>, so without this focus sits on body and Tab walks
+// the workbench behind the overlay.
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    // Stop here: the inspector's own Escape handler closes the whole drawer, and Esc in a modal must
+    // close the modal only.
+    event.stopPropagation()
+    emit('close')
+    return
+  }
+  if (event.key !== 'Tab') return
+  const modal = modalRef.value
+  if (!modal) return
+  const focusable = Array.from(modal.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+  if (focusable.length === 0) {
+    event.preventDefault()
+    modal.focus()
+    return
+  }
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  const active = document.activeElement
+  const activeInModal = active instanceof HTMLElement && modal.contains(active) && active !== modal
+  if (event.shiftKey) {
+    if (!activeInModal || active === first) {
+      event.preventDefault()
+      last.focus()
+    }
+  } else if (!activeInModal || active === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 </script>
 

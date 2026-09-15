@@ -14,7 +14,13 @@
  *  4. StatusTag renders the submission status through the shared status renderer.
  *  5. The drift notice shows a COUNT ("送审后数据已变更（N 个字段）") and never a field name or value.
  *  6. A record switch resets the panel (the next record must not show the previous one's approvals);
- *     a version bump / refreshToken bump re-reads ONLY while the section is open.
+ *     a version bump / refreshToken bump re-reads immediately while OPEN and invalidates the cache while
+ *     COLLAPSED (so the next expand re-reads) — the panel stays lazy either way, but a change is never
+ *     dropped. A signal that lands mid-read is queued, not swallowed.
+ *  7. `{ changed: true, changedFieldIds: [] }` (the answer for an actor whose field-read mask hides every
+ *     changed field) renders the COUNT-FREE notice, never "0 个字段".
+ *  8. The two submission-only statuses ('creating'/'failed') render localized copy rather than the raw
+ *     English token StatusTag's neutral fallback would print; a failed row explains itself by CODE.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
@@ -264,6 +270,48 @@ describe('MetaRecordApprovalPanel — refresh signals', () => {
     expect(client!.listRecordApprovals).toHaveBeenCalledTimes(2)
   })
 
+  it('a version bump that lands while COLLAPSED is picked up by the next expand (never dropped)', async () => {
+    // Mirrors the refreshToken case below. Before the fix the collapsed branch only invalidated for a
+    // token change, so an edit made while the panel was closed left `loaded === true` and the next
+    // expand was a no-op — the stale rows (and a stale "no drift" state) were shown for the whole mount.
+    const { container, client, state } = mountPanel()
+    await flushUi()
+    await expand(container)
+    expect(client!.listRecordApprovals).toHaveBeenCalledTimes(1)
+
+    await expand(container) // collapse
+    expect(toggle(container)!.getAttribute('aria-expanded')).toBe('false')
+    state.record = { ...(RECORD as object), version: 5 } as unknown as MetaRecord
+    await flushUi(6)
+    expect(client!.listRecordApprovals).toHaveBeenCalledTimes(1) // still lazy: nothing fetched yet
+
+    await expand(container)
+    expect(client!.listRecordApprovals).toHaveBeenCalledTimes(2)
+  })
+
+  it('a refresh signal that lands DURING a read is queued, not swallowed', async () => {
+    let resolveFirst: (rows: MetaRecordApprovalSubmission[]) => void = () => {}
+    const first = new Promise<MetaRecordApprovalSubmission[]>((resolve) => { resolveFirst = resolve })
+    const listRecordApprovals = vi.fn()
+      .mockReturnValueOnce(first)
+      .mockResolvedValue(SUBMISSIONS)
+    const { container, state } = mountPanel({ client: { listRecordApprovals } as never })
+    await flushUi()
+
+    toggle(container)!.click()
+    await flushUi(2)
+    expect(listRecordApprovals).toHaveBeenCalledTimes(1)
+
+    // The post-submit signal arrives while the first read is still in flight.
+    state.refreshToken += 1
+    await flushUi(2)
+    resolveFirst([])
+    await flushUi(8)
+
+    expect(listRecordApprovals).toHaveBeenCalledTimes(2)
+    expect(entries(container)).toHaveLength(2)
+  })
+
   it('a refreshToken bump after a submit re-reads while open, and invalidates the cache while collapsed', async () => {
     const { container, client, state } = mountPanel()
     await flushUi()
@@ -281,6 +329,61 @@ describe('MetaRecordApprovalPanel — refresh signals', () => {
     expect(client!.listRecordApprovals).toHaveBeenCalledTimes(2)
     await expand(container)
     expect(client!.listRecordApprovals).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('MetaRecordApprovalPanel — server answers that are not the happy path', () => {
+  const masked: MetaRecordApprovalSubmission[] = [{
+    id: 'sub_m',
+    templateId: 'tpl_leave',
+    status: 'pending',
+    submittedBy: 'u_1',
+    // The route's own answer when the version moved but every changed field is outside this viewer's
+    // field-read mask (record-approval-submission-service.ts computeRecordApprovalDrift).
+    drift: { changed: true, changedFieldIds: [] },
+  }]
+
+  it('renders the COUNT-FREE drift notice when the server masked every changed field id', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mountPanel({ client: fakeClient(masked) })
+    await flushUi()
+    await expand(container)
+    const drift = container.querySelector('[data-test="record-approval-drift"]')
+    expect(drift).not.toBeNull()
+    expect(drift!.textContent).toBe('送审后数据已变更')
+    expect(drift!.textContent).not.toContain('0 个字段')
+  })
+
+  it('localizes the two submission-only statuses instead of printing the raw English token', async () => {
+    useLocale().setLocale('zh-CN')
+    const rows: MetaRecordApprovalSubmission[] = [
+      { id: 'sub_f', templateId: 'tpl_leave', status: 'failed', error: 'RECORD_APPROVAL_PERMISSION_DENIED', drift: { changed: false, changedFieldIds: [] } },
+      { id: 'sub_c', templateId: 'tpl_leave', status: 'creating', drift: { changed: false, changedFieldIds: [] } },
+    ]
+    const { container } = mountPanel({ client: fakeClient(rows) })
+    await flushUi()
+    await expand(container)
+    const tags = Array.from(container.querySelectorAll('[data-test="record-approval-local-status"]'))
+    expect(tags.map((tag) => tag.textContent)).toEqual(['提交失败', '提交中'])
+    expect(container.textContent).not.toContain('failed')
+    expect(container.textContent).not.toContain('creating')
+    // A failed row explains itself by CODE — localized copy, never the raw token, never a value.
+    const reason = container.querySelector('[data-test="record-approval-failure"]')!
+    expect(reason.textContent).toContain('没有送审权限')
+    expect(reason.textContent).not.toContain('RECORD_APPROVAL_PERMISSION_DENIED')
+    // StatusTag still owns every status it knows: these two rows carry none.
+    expect(container.querySelectorAll('.ms-status-tag')).toHaveLength(0)
+  })
+
+  it('an UNKNOWN failure code prints nothing rather than a raw token', async () => {
+    const rows: MetaRecordApprovalSubmission[] = [
+      { id: 'sub_f', templateId: 'tpl_leave', status: 'failed', error: 'SOME_NEW_CODE', drift: { changed: false, changedFieldIds: [] } },
+    ]
+    const { container } = mountPanel({ client: fakeClient(rows) })
+    await flushUi()
+    await expand(container)
+    expect(container.querySelector('[data-test="record-approval-failure"]')).toBeNull()
+    expect(container.textContent).not.toContain('SOME_NEW_CODE')
   })
 })
 

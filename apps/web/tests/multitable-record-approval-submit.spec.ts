@@ -20,6 +20,16 @@
  *
  * The client tier is covered here too (URL/body/normalization/409 typing) because those four methods
  * exist only for this surface.
+ *
+ * Round 2 (adversarial review) adds:
+ *  7. The 409 identifiers are read off the REAL wire envelope, where the route nests them under
+ *     `error.details` (routes/multitable-record-approvals.ts `fail()`); the flat shape stays supported
+ *     as the legacy/tolerance case. Drop the `details` merge in `recordApprovalConflictFields` ⇒ red.
+ *  8. The picker asks for the route's page-size CEILING (its default of 20 truncates silently) and says
+ *     so when the answer fills it.
+ *  9. A coded refusal renders LOCALIZED copy, not the route's fixed English sentence.
+ * 10. The FROZEN shell re-emits `approval-submitted` (the prop half was pinned, the emit half was not).
+ * 11. `aria-modal="true"` is backed by real focus/Esc behaviour.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App } from 'vue'
@@ -259,6 +269,25 @@ describe('记录抽屉 送审 entry (kebab gating)', () => {
     await openKebab(container)
     expect(submitApprovalItem()).toBeNull()
   })
+
+  it('the FROZEN shell RE-EMITS approval-submitted 1:1 (delete the forwarding line ⇒ red)', async () => {
+    // The prop half was already pinned above; without this case the shell could drop the emit and every
+    // suite would stay green (design §2 item 10 asks for BOTH halves).
+    const onApprovalSubmitted = vi.fn()
+    const { container } = mountInspector({
+      canSubmitApproval: true,
+      component: MetaRecordDrawer,
+      onApprovalSubmitted,
+    })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    expect(onApprovalSubmitted).toHaveBeenCalledWith(SUBMISSION)
+  })
 })
 
 describe('送审对话框 / MetaRecordApprovalSubmitDialog', () => {
@@ -267,7 +296,9 @@ describe('送审对话框 / MetaRecordApprovalSubmitDialog', () => {
     await flushUi()
     await openDialog(container)
     expect(client.listApprovalTemplates).toHaveBeenCalledTimes(1)
-    expect(client.listApprovalTemplates).toHaveBeenCalledWith({ status: 'published' })
+    // pageSize is the route's ceiling (MAX_APPROVAL_PAGE_SIZE): its DEFAULT of 20 would truncate the
+    // picker silently, and this dialog has no paging and (by design) no free-text id fallback.
+    expect(client.listApprovalTemplates).toHaveBeenCalledWith({ status: 'published', pageSize: 200 })
     const options = Array.from(templateSelect()!.querySelectorAll('option')).map((o) => o.value)
     // option[0] is the placeholder; the rest are exactly the roster the server returned.
     expect(options).toEqual(['', 'tpl_leave', 'tpl_purchase'])
@@ -316,6 +347,12 @@ describe('送审对话框 / MetaRecordApprovalSubmitDialog', () => {
     await pickTemplate('tpl_purchase')
     expect(document.querySelector('[data-testid="record-approval-unsupported-notice"]')).not.toBeNull()
     expect(document.querySelector('[data-testid="record-approval-field-unsupported-items"]')).not.toBeNull()
+    // The row still has a real label target: an unsupported field renders no control, so the <label for>
+    // pointed at nothing at all until the notice span took the control id.
+    const unsupportedRow = document.querySelector('[data-testid="record-approval-field-unsupported-items"]')!
+    const label = Array.from(dialog()!.querySelectorAll('label')).find((node) => node.textContent?.includes('明细'))!
+    expect(label.getAttribute('for')).toBe(unsupportedRow.id)
+    expect(unsupportedRow.id).not.toBe('')
     expect(submitBtn()!.disabled).toBe(true)
     // Even filling the supported field does not unlock it.
     setFieldValue('reason', '采购')
@@ -384,6 +421,92 @@ describe('送审对话框 / MetaRecordApprovalSubmitDialog', () => {
     const link = document.querySelector<HTMLAnchorElement>('[data-testid="record-approval-in-flight-link"]')
     expect(link).not.toBeNull()
     expect(link!.getAttribute('href')).toBe('/approvals/inst_9')
+  })
+
+  it('a CODED refusal renders localized copy, not the route\'s English sentence', async () => {
+    // The route's refusals are fixed English strings ('Insufficient permissions'), which the shared
+    // client surfaces as `error.message`; a zh operator must not read that.
+    useLocale().setLocale('zh-CN')
+    const denied = Object.assign(new Error('Insufficient permissions'), {
+      status: 403,
+      code: 'RECORD_APPROVAL_PERMISSION_DENIED',
+    })
+    const client = fakeApiClient({ submitRecordApproval: vi.fn().mockRejectedValue(denied) })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    const notice = document.querySelector('[data-testid="record-approval-submit-error"]')!
+    expect(notice.textContent).toContain('没有送审权限')
+    expect(notice.textContent).not.toContain('Insufficient permissions')
+  })
+
+  it('a VALIDATION_ERROR (form does not match the template) is localized too', async () => {
+    useLocale().setLocale('zh-CN')
+    const invalid = Object.assign(new Error('Approval creation was rejected'), {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+    })
+    const client = fakeApiClient({ submitRecordApproval: vi.fn().mockRejectedValue(invalid) })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    expect(document.querySelector('[data-testid="record-approval-submit-error"]')!.textContent)
+      .toContain('表单内容不符合模板要求')
+  })
+
+  it('warns when the template has an unpublished draft (the form shown is not the form validated)', async () => {
+    const client = fakeApiClient({
+      getApprovalTemplate: vi.fn().mockResolvedValue({ ...SIMPLE_FORM, activeVersionId: 'v1', latestVersionId: 'v2' }),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    expect(document.querySelector('[data-testid="record-approval-template-draft-notice"]')).toBeNull()
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-template-draft-notice"]')).not.toBeNull()
+    // It is a WARNING, not a block: the server still owns the verdict.
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('says so when the published roster fills the page-size ceiling (no paging, no id fallback)', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => ({ id: `tpl_${i}`, name: `T${i}`, status: 'published' }))
+    const client = fakeApiClient({ listApprovalTemplates: vi.fn().mockResolvedValue({ data: many, total: 200 }) })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    expect(document.querySelector('[data-testid="record-approval-templates-truncated"]')).not.toBeNull()
+  })
+
+  it('does NOT cry truncation when the roster fits', async () => {
+    const { container } = mountInspector({ canSubmitApproval: true })
+    await flushUi()
+    await openDialog(container)
+    expect(document.querySelector('[data-testid="record-approval-templates-truncated"]')).toBeNull()
+  })
+
+  it('backs its aria-modal promise: focus lands inside, Esc closes only the dialog', async () => {
+    const { container } = mountInspector({ canSubmitApproval: true })
+    await flushUi()
+    await openDialog(container)
+    const modal = dialog()!
+    expect(modal.contains(document.activeElement)).toBe(true)
+    modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi(6)
+    expect(dialog()).toBeNull()
+    // The drawer itself is still open: Esc in the modal closed the modal only.
+    expect(container.querySelector('[data-testid="record-inspector-menu"]')).not.toBeNull()
   })
 
   it('a non-409 failure shows the plain submit error, never the in-flight notice', async () => {
@@ -471,7 +594,44 @@ describe('client tier — the four record-approval methods', () => {
     })
   })
 
-  it('maps 409 to the typed in-flight error carrying approvalInstanceId/requestNo', async () => {
+  it('reads the 409 identifiers out of the REAL envelope (error.details), not just a flat body', async () => {
+    // routes/multitable-record-approvals.ts `fail()` nests them: { ok, error: { code, message, details } },
+    // with details = { submissionId, approvalInstanceId, requestNo, status } (pinned by the backend's own
+    // unit test). Reading only the flat keys made the dialog's request number + link dead in production.
+    const fetchFn = vi.fn().mockResolvedValue(json({
+      ok: false,
+      error: {
+        code: 'RECORD_APPROVAL_IN_FLIGHT',
+        message: 'This record already has an in-flight approval for this template',
+        details: { submissionId: 'sub_x', approvalInstanceId: 'inst_9', requestNo: 'AP-9', status: 'pending' },
+      },
+    }, 409))
+    await expect(clientWith(fetchFn).submitRecordApproval('sheet_1', 'rec_1', { templateId: 't', formData: {} }))
+      .rejects.toSatisfy((error: unknown) => {
+        if (!isRecordApprovalInFlightError(error)) return false
+        return error.status === 409
+          && error.code === 'RECORD_APPROVAL_IN_FLIGHT'
+          && error.approvalInstanceId === 'inst_9'
+          && error.requestNo === 'AP-9'
+      })
+  })
+
+  it('getApprovalTemplate keeps the two version ids (draft-vs-active divergence is detectable)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(json({
+      data: { id: 'tpl_leave', status: 'published', activeVersionId: 'v1', latestVersionId: 'v2', formSchema: { fields: [] } },
+    }))
+    const detail = await clientWith(fetchFn).getApprovalTemplate('tpl_leave')
+    expect(detail.activeVersionId).toBe('v1')
+    expect(detail.latestVersionId).toBe('v2')
+  })
+
+  it('listApprovalTemplates({ status, pageSize }) sends the page size the picker asked for', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(json({ data: PUBLISHED_TEMPLATES, total: 2 }))
+    await clientWith(fetchFn).listApprovalTemplates({ status: 'published', pageSize: 200 })
+    expect(fetchFn).toHaveBeenCalledWith('/api/approval-templates?status=published&pageSize=200')
+  })
+
+  it('maps 409 to the typed in-flight error carrying approvalInstanceId/requestNo (flat legacy body)', async () => {
     const fetchFn = vi.fn().mockResolvedValue(json({
       error: { code: 'RECORD_APPROVAL_IN_FLIGHT', message: '已在审批中', approvalInstanceId: 'inst_9', requestNo: 'AP-9' },
     }, 409))

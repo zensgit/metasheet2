@@ -1676,6 +1676,14 @@ export interface MetaApprovalTemplateDetail {
   id: string
   name?: string
   status?: string
+  /**
+   * The published version the SERVER validates a submission against, and the newest authored version
+   * whose form schema this read actually returns. They differ exactly when the template has an
+   * unpublished draft edit — the dialog warns in that case (the fields on screen are then not the
+   * fields the create path prunes/validates against). Ids only; never a schema, never a value.
+   */
+  activeVersionId?: string
+  latestVersionId?: string
   formFields: MetaApprovalFormField[]
 }
 

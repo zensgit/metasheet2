@@ -323,14 +323,31 @@ export function isRecordApprovalInFlightError(value: unknown): value is RecordAp
   return value instanceof Error && value.name === RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME
 }
 
-// The 409 body may arrive either flat (`{ code, approvalInstanceId, ... }`) or under the shared
-// `{ error: { ... } }` envelope the rest of this file's errors use — read BOTH, prefer the envelope.
+// The 409 body may arrive flat (`{ code, approvalInstanceId, ... }`), under the shared
+// `{ error: { ... } }` envelope the rest of this file's errors use, or — what the REAL route sends —
+// one level deeper still, under `error.details`:
+//   { ok:false, error:{ code, message, details:{ submissionId, approvalInstanceId, requestNo, status } } }
+// (core-backend/src/routes/multitable-record-approvals.ts `fail()` + the service's RecordApprovalError
+// details, pinned by its own unit test). Read ALL THREE and let the innermost win: reading `details`
+// too is strictly more tolerant than reading only the flat keys, so a leaner backend still degrades to
+// the plain "already in approval" notice instead of silently losing the identifiers.
 function recordApprovalConflictFields(body: unknown): Record<string, unknown> {
   if (!isPlainObject(body)) return {}
   const nested = isPlainObject(body.error) ? body.error : undefined
   const data = isPlainObject(body.data) ? body.data : undefined
-  return { ...body, ...(data ?? {}), ...(nested ?? {}) }
+  const detailsCandidate = nested?.details ?? data?.details ?? body.details
+  const details = isPlainObject(detailsCandidate) ? detailsCandidate : undefined
+  return { ...body, ...(data ?? {}), ...(nested ?? {}), ...(details ?? {}) }
 }
+
+/**
+ * The page size the record-drawer template picker asks for. The route's default is 20 (approvals.ts
+ * `parsePaging(req.query.pageSize, 20)`) and its hard ceiling is MAX_APPROVAL_PAGE_SIZE = 200, so a
+ * tenant with more than 20 published templates would otherwise get a SILENTLY truncated picker with no
+ * paging and (by design) no free-text id fallback. We ask for the ceiling and the dialog says so when
+ * the answer is full.
+ */
+export const RECORD_APPROVAL_TEMPLATE_PAGE_SIZE = 200
 
 function normalizeApprovalTemplateSummary(value: unknown): MetaApprovalTemplateSummary | null {
   if (!isPlainObject(value) || typeof value.id !== 'string' || !value.id) return null
@@ -394,10 +411,20 @@ function normalizeApprovalTemplateDetail(body: unknown, fallbackId: string): Met
         : []
   const name = optionalStringValue(record.name)
   const status = optionalStringValue(record.status)
+  // Both ids are VALUES-FREE identifiers carried for ONE reason: GET /api/approval-templates/:id
+  // serves the LATEST version's form schema (ApprovalProductService.getTemplate -> loadTemplateBundle
+  // preference 'latest'), while the create path validates against the ACTIVE published one
+  // ('active'). When the two differ the template has an unpublished draft edit and the form on screen
+  // is not the form the server will validate — the dialog warns instead of sending the actor into an
+  // unfixable 400. Fixing the read itself is a backend change, out of this surface's reach.
+  const activeVersionId = optionalStringValue(record.activeVersionId) ?? optionalStringValue(record.active_version_id)
+  const latestVersionId = optionalStringValue(record.latestVersionId) ?? optionalStringValue(record.latest_version_id)
   return {
     id: optionalStringValue(record.id) ?? fallbackId,
     ...(name ? { name } : {}),
     ...(status ? { status } : {}),
+    ...(activeVersionId ? { activeVersionId } : {}),
+    ...(latestVersionId ? { latestVersionId } : {}),
     formFields: rawFields
       .map((entry: unknown) => normalizeApprovalFormField(entry))
       .filter((entry): entry is MetaApprovalFormField => entry !== null),
@@ -1971,12 +1998,14 @@ export class MultitableApiClient implements CommentsApiClient {
    * gets 401/403, which the editor degrades to a free-text template-id input (never a hard dependency).
    */
   async listApprovalTemplates(
-    params?: { status?: 'published' | 'draft' | 'archived' },
+    params?: { status?: 'published' | 'draft' | 'archived'; pageSize?: number },
   ): Promise<{ data: MetaApprovalTemplateSummary[]; total: number }> {
     // 记录级送审 (design 5.1): the record drawer needs PUBLISHED templates only — the route already
     // supports `?status=`, so the filter happens server-side. No argument = the pre-existing, unfiltered
     // call the automation editor has always made (byte-identical URL, `qs` drops an undefined value).
-    const res = await this.fetch(`/api/approval-templates${qs({ status: params?.status })}`)
+    // `pageSize` is likewise opt-in: only a caller that has a truncation story to tell (the submit
+    // dialog) sends it, so the editor's URL stays byte-identical to what #5747 shipped.
+    const res = await this.fetch(`/api/approval-templates${qs({ status: params?.status, pageSize: params?.pageSize })}`)
     // The route answers `{ data: [...], total }`; parseJson unwraps the `data` envelope, so the body
     // arrives here as the bare array. Re-wrap so callers get the documented `{ data, total }` shape
     // (before this the editor read `.data` off the array, always got `[]`, and silently fell back to
