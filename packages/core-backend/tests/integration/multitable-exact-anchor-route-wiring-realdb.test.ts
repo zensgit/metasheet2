@@ -25,6 +25,7 @@ import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import { applyFencedDerivedDataMerge, withFencedDerivedTransaction } from '../../src/multitable/derived-write-fence'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import { acquireRecoveryAuthorityLease, resolveDatabaseRecoverySheetAuthority } from '../../src/multitable/recovery-authorization-stability'
 import { enqueueRecoveryMutationEvent, type RecoveryMutationEvent } from '../../src/multitable/recovery-mutation-events'
@@ -1337,6 +1338,103 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     }
   })
 
+  test('WORKER-TRANSACTION: refuses autocommit and out-of-scope writes, rolls back materialization before notification', async () => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = { jobId: randomUUID(), workspaceId: `workspace_rollback_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR }
+    const work = { identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM, F_SRC_LINK], linkInvalidations: [] }
+    const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
+    try {
+      await expect(withFencedDerivedTransaction(q, [SHEET], async () => true))
+        .rejects.toThrow('RECOVERY_DERIVED_TRANSACTION_REQUIRED')
+      await expect(txn(query => withFencedDerivedTransaction(query, [SHEET], scoped =>
+        applyFencedDerivedDataMerge(scoped, REL_SHEET, REC_REL, { [F_REL_LOOKUP]: 123 }))))
+        .rejects.toThrow('RECOVERY_DERIVED_SCOPE_CHANGED')
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+      const processWork = createRecoveryArchiveDerivedProcessor({ query: q, transaction: fn => txn(async query => {
+        expect(await fn(query)).toBe(true)
+        expect((await query('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(11)
+        throw new Error('synthetic_derived_commit_failure')
+      }) })
+      await expect(processWork(work)).rejects.toThrow('synthetic_derived_commit_failure')
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(100)
+      expect(publish).not.toHaveBeenCalled()
+      expect(await createRecoveryArchiveDerivedProcessor({ query: q, transaction: txn })(work)).toBe(true)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(11)
+      expect(publish).toHaveBeenCalled()
+    } finally {
+      publish.mockRestore()
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test.each(['source', 'foreign', 'actor'] as const)('WORKER-RACE: holds %s stable across calculation and commit', async (kind) => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = { jobId: randomUUID(), workspaceId: `workspace_race_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR }
+    let release!: () => void
+    let reached!: () => void
+    const hold = new Promise<void>(resolve => { release = resolve })
+    const ready = new Promise<void>(resolve => { reached = resolve })
+    let paused = false
+    const gate = (query: QueryFn): QueryFn => async (sql, params) => {
+      const result = await query(sql, params)
+      if (!paused && sql === 'SELECT id,version,data FROM meta_records WHERE sheet_id=$1 AND id=ANY($2::text[])') {
+        paused = true
+        reached()
+        await hold
+      }
+      return result
+    }
+    const writer = await poolManager.get().getInternalPool()!.connect()
+    let running: Promise<boolean> | undefined
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+      const processWork = createRecoveryArchiveDerivedProcessor({ query: gate(q), transaction: fn => txn(query => fn(gate(query))) })
+      running = processWork({ identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM, F_SRC_LINK], linkInvalidations: [] })
+      await Promise.race([ready, running.then(() => { throw new Error('processor_returned_before_read_barrier') })])
+      await writer.query('BEGIN')
+      await writer.query("SET LOCAL lock_timeout='250ms'")
+      if (kind === 'actor') {
+        await expect(writer.query('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR]))
+          .rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      } else {
+        const sheetId = kind === 'source' ? SHEET : TGT_SHEET
+        await expect(writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(sheetId)]))
+          .rejects.toMatchObject({ code: '55P03' })
+      }
+      await writer.query('ROLLBACK')
+      release()
+      expect(await running).toBe(true)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(11)
+      if (kind === 'actor') {
+        await writer.query('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+        expect(await processWork({ identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM], linkInvalidations: [] })).toBe(false)
+      } else {
+        await writer.query('BEGIN')
+        await writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(kind === 'source' ? SHEET : TGT_SHEET)])
+        await writer.query('UPDATE meta_records SET data=data || $2::jsonb, version=version+1 WHERE id=$1',
+          [kind === 'source' ? REC_A : REC_TGT_LIVE, JSON.stringify({ [kind === 'source' ? F_NUM : F_TGT_NUM]: 20 })])
+        await writer.query('COMMIT')
+        expect(await processWork({ identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM, F_SRC_LINK], linkInvalidations: [] })).toBe(true)
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[kind === 'source' ? F_FORMULA : F_FOL]).toBe(21)
+      }
+    } finally {
+      await writer.query('ROLLBACK').catch(() => {})
+      release()
+      await running?.catch(() => {})
+      writer.release()
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
   test.each(['revert', 'delete', 'revoked', 'blocked', 'foreign_denied', 'crossbase_denied'] as const)('WORKER-PROCESSOR: canonical derived work handles %s without replaying events', async (scenario) => {
     await seedWorld({ withSideEffects: true })
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
@@ -1344,7 +1442,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     const identity = { jobId: randomUUID(), workspaceId: `workspace_processor_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR }
     const relatedFormula = `fld_earw_processor_formula_${TS}`
     const otherBase = `${BASE}_processor_other`
-    const processWork = createRecoveryArchiveDerivedProcessor({ query: q })
+    const processWork = createRecoveryArchiveDerivedProcessor({ query: q, transaction: txn })
     const emit = vi.spyOn(eventBus, 'emit').mockReturnValue(true)
     const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
     const invalidate = vi.fn(async (_ids: string[]) => {})
@@ -1429,7 +1527,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await seedWorld({ withSideEffects: true })
     const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
     const identity = Object.freeze({ jobId: randomUUID(), workspaceId: `workspace_effects_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR })
-    const callbacks = createRecoveryArchiveWorkerCallbacks({ query: q })
+    const callbacks = createRecoveryArchiveWorkerCallbacks({ query: q, transaction: txn })
     const emit = vi.spyOn(eventBus, 'emit').mockReturnValue(true)
     const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
     const invalidate = vi.fn(async (_recordIds: string[]) => {})

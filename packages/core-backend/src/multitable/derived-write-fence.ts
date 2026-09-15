@@ -27,12 +27,50 @@
  *    outside the fenced txn — a recovery that starts AND finishes in the compute→write gap clears
  *    the block, so a stale pre-recovery-derived value can still commit. Bounded: derived-only,
  *    self-heals on the next recompute, no PIT impact (these writes are revision-exempt/no-seq).
+ *  - Archive workers can explicitly use withFencedDerivedTransaction below: the query is scoped to
+ *    already-held sheet fences, so calculation reads and derived merges share one commit boundary.
+ *    This opt-in path does not change the legacy/default per-record transaction behavior above.
  */
-import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
+import { fenceWriterEntry, fenceWriterEntriesInOrder, isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
 import { poolManager } from '../integration/db/connection-pool'
+import { assertInTransaction } from './pg-transaction-guard'
+import type { QueryFn } from './permission-service'
 
 /** Minimal query shape shared by the callers' QueryFn / MultitableRecordsQueryFn aliases. */
 export type DerivedMergeQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+
+const scopedDerivedTransactions = new WeakMap<DerivedMergeQueryFn, ReadonlySet<string>>()
+
+/** Internal archive processor path: reads and all derived merges share the prelocked transaction. */
+export async function withFencedDerivedTransaction<T>(
+  query: QueryFn,
+  sheetIds: readonly string[],
+  run: (query: QueryFn) => Promise<T>,
+): Promise<T> {
+  if (!isWriterFenceEnabled() || sheetIds.length === 0) throw new Error('RECOVERY_DERIVED_FENCE_UNAVAILABLE')
+  try {
+    await assertInTransaction({ query: async (sql, params) => {
+      const result = await query(sql, params)
+      return { rows: result.rows as Record<string, unknown>[], rowCount: result.rowCount ?? null }
+    } }, 'recovery_derived_transaction')
+  } catch {
+    throw new Error('RECOVERY_DERIVED_TRANSACTION_REQUIRED')
+  }
+  let ordered: string[]
+  try {
+    ordered = await fenceWriterEntriesInOrder(query, sheetIds)
+  } catch (error) {
+    if (error instanceof SheetWriterBlockedError) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
+    throw error
+  }
+  const scoped: QueryFn = (sql, params) => query(sql, params)
+  scopedDerivedTransactions.set(scoped, new Set(ordered))
+  try {
+    return await run(scoped)
+  } finally {
+    scopedDerivedTransactions.delete(scoped)
+  }
+}
 
 /**
  * Merge `updates` (derived-value keys only) into one record's `data`, joining the canonical
@@ -45,6 +83,15 @@ export async function applyFencedDerivedDataMerge(
   recordId: string,
   updates: Record<string, unknown>,
 ): Promise<void> {
+  const scope = scopedDerivedTransactions.get(query)
+  if (scope) {
+    if (!scope.has(sheetId)) throw new Error('RECOVERY_DERIVED_SCOPE_CHANGED')
+    await query(
+      `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
+      [JSON.stringify(updates), recordId, sheetId],
+    )
+    return
+  }
   if (isWriterFenceEnabled()) {
     await poolManager.get().transaction(async ({ query: fencedQuery }) => {
       const fq = fencedQuery as unknown as DerivedMergeQueryFn

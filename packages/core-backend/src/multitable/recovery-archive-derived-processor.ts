@@ -1,8 +1,44 @@
 import type { QueryFn } from './permission-service'
 import type { RecoveryArchiveDerivedWork } from './recovery-archive-derived-effects'
-import type { RecoverySheetAuthority } from './recovery-authorization-stability'
+import { acquireRecoveryAuthorityLease, type RecoverySheetAuthority } from './recovery-authorization-stability'
 import type { RecordWriteHelpers, UniverMetaField, UniverMetaRecord, RelationalLinkField } from './record-write-service'
 import { loadFieldsForSheet } from './loaders'
+import { discoverRecoveryAuthoritySheetIds } from './exact-anchor-recovery-execute'
+import { withFencedDerivedTransaction } from './derived-write-fence'
+import type { RecoveryArchiveRestoreJobTransaction } from './recovery-archive-restore-jobs'
+
+export async function runRecoveryArchiveDerivedTransaction(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  work: RecoveryArchiveDerivedWork,
+  run: (query: QueryFn) => Promise<boolean>,
+): Promise<boolean> {
+  return transaction(async query => {
+    // Source fan-out can write its current neighbors; retained delete groups survive removed edges.
+    const writeSheets = new Set([
+      ...await discoverRecoveryAuthoritySheetIds(query, work.identity.sheetId),
+      ...work.linkInvalidations.map(group => group.sheetId),
+    ])
+    const scope = new Set<string>(writeSheets)
+    for (const sheetId of writeSheets) {
+      for (const id of await discoverRecoveryAuthoritySheetIds(query, sheetId)) scope.add(id)
+    }
+    return withFencedDerivedTransaction(query, [...scope], async scoped => {
+      for (const sheetId of writeSheets) {
+        const current = await discoverRecoveryAuthoritySheetIds(scoped, sheetId)
+        if (current.some(id => !scope.has(id))) throw new Error('RECOVERY_DERIVED_SCOPE_CHANGED')
+      }
+      const sheets = await scoped(`SELECT sheet.id FROM public.meta_sheets sheet
+        JOIN public.meta_bases base ON base.id=sheet.base_id
+        WHERE sheet.id=ANY($1::text[]) AND sheet.deleted_at IS NULL AND base.deleted_at IS NULL
+        ORDER BY base.id,sheet.id FOR SHARE OF base,sheet NOWAIT`, [[...scope].sort()])
+      if (sheets.rows.length !== scope.size) throw new Error('RECOVERY_DERIVED_SCOPE_CHANGED')
+      if (await acquireRecoveryAuthorityLease(scoped, [work.identity.actorId]) !== 'ready') {
+        throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+      }
+      return run(scoped)
+    })
+  })
+}
 
 type ComputedHelpers = Pick<RecordWriteHelpers,
   'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields' |
