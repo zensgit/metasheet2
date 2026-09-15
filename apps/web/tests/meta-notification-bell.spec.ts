@@ -123,6 +123,31 @@ describe('MetaNotificationBell (S1b)', () => {
     expect(message?.textContent).toContain('Ship the release')
   })
 
+  // #5745 §5.4 regression pin: a record-less notification.sent row (approval.completed / schedule /
+  // webhook trigger) renders in the panel; clicking it marks it read and closes the panel WITHOUT
+  // emitting navigate (F9b) — the row must not be hidden by the panel while the badge counts it.
+  it('renders a record-less notification.sent row and marks it read on click without navigating', async () => {
+    const onNavigate = vi.fn()
+    const recordless: MetaRecordSubscriptionNotification = { ...notifSent('n_recordless', 'approval done'), recordId: '' }
+    const m = mount({
+      listRecordSubscriptionNotifications: vi.fn(async () => [recordless]),
+      getRecordSubscriptionUnreadCount: vi.fn(async () => 1),
+    }, onNavigate)
+    mounted = m
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!.click()
+    await flush()
+    const items = m.container.querySelectorAll('[data-test="notification-item"]')
+    expect(items.length).toBe(1)
+    expect(m.container.querySelector('[data-test="notification-empty"]')).toBeNull()
+    expect(m.container.querySelector('[data-test="notification-message"]')?.textContent).toContain('approval done')
+    ;(items[0] as HTMLElement).click()
+    await flush()
+    expect(m.apiClient.markRecordSubscriptionNotificationsRead).toHaveBeenCalledWith(['n_recordless'])
+    expect(onNavigate).not.toHaveBeenCalled()
+    expect(m.container.querySelector('[data-test="notification-panel"]')).toBeNull()
+  })
+
   it('does not crash when the client fails — renders the error state instead (P2-1)', async () => {
     const m = mount({ listRecordSubscriptionNotifications: vi.fn(async () => { throw new Error('netfail') }) }); mounted = m
     await flush()
