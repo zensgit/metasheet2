@@ -4,6 +4,8 @@ Status: LOCAL CHECKPOINT ONLY; remaining runtime gates are open.
 
 ## Canonical Process Authorization Checkpoint
 
+- Current-main replay `44fdd13ec2fdcbae37a084520a9e1f1d13188f5a`, tree `ac65250eced7f76900969a13d82813f71cd32d6b`: ordered parents `1038e6a4a8cbfe1ff5aae3dd5c3cc1e8e6275892` and `4e216662e8d2fd2dbab2f77b529df91a934a986e`. Conflict-free; incoming delta is one business verification document only. All backend/plugin/script/workflow/web paths are byte-identical to the tested parent. Wiring contract 36/36 PASS after merge; historical 39/39 DB and mutation evidence below remains exact-code-equivalent, not a newly executed DB run.
+
 - Code `8f3a14a5580319321b3b64c9da3282061cee2233`, tree `2c5b3fa4cb1332adbf35103f2c892ee5341e21ea`; two test/helper files only, production unchanged.
 - Real SIGKILL child now uses `createRecoveryArchiveWorkerAuthorization()` rather than allow-all callbacks. Synthetic users have explicit database permissions. Each process scenario snapshots, enables and finally restores the canonical authority triggers in the isolated database; missing trigger substrate fails closed.
 - Both before-COMMIT and after-COMMIT/before-acknowledgment process-death cases PASS with fresh-process takeover, 5,001 records and existing exact-once/receipt assertions. Removing the fixture user's permissions makes the before-COMMIT scenario RED with `RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED`; restoration is included in full 39/39 PASS. Core typecheck and diff-check PASS.
