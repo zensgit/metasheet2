@@ -1122,10 +1122,8 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # (`npx vitest run multitable-automation-manager-roundtrip --reporter=dot` -> 14/14) together with
 # `multitable-automation-manager.spec.ts` (83/83) and `multitable-automation-rule-editor` (171/171).
 # Two-point discipline (header of this file): the .github/workflows/multitable-web-guard.yml mirror of
-# this token (its `on:` path block + run-list) is NOT part of this change -- a workflow edit needs a
-# workflow-scoped push and lands separately. Until it does, this always-on required gate
-# (web-tests.yml) is the only lane that runs the spec by name, which is the lane that must not miss it;
-# the path-filtered guard is the second opinion.
+# this token (both `on:` path blocks + run-list) IS landed in the same PR via a workflow-scoped push;
+# this always-on required gate runs it on every PR and the path-filtered guard is the second opinion.
 # Attendance import token/org binding: both specs are also listed in attendance-web-guard.yml;
 # keep their execution explicit in the always-on required lane.
 npx vitest run attendance-import-preview-regression.spec.ts useAttendanceAdminImportWorkflow.spec.ts --reporter=dot || exit $?
