@@ -67,6 +67,7 @@ import {
 } from '../multitable/permission-service'
 import {
   isRecoveryAuthorityBusyError,
+  resolveDatabaseRecoverySheetAuthority,
   resolveRecoverySheetAuthority,
 } from '../multitable/recovery-authorization-stability'
 import {
@@ -300,7 +301,8 @@ import {
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from '../multitable/automation-producer-emit'
-import { enqueueRecoveryMutationEvent } from '../multitable/recovery-mutation-events'
+import { createRecoveryArchiveWorkerRecordEvents, enqueueRecoveryMutationEvent } from '../multitable/recovery-mutation-events'
+import type { RecoveryArchiveWorkerApplyCallbacks } from '../multitable/recovery-archive-async-restore'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
@@ -6920,11 +6922,187 @@ async function hasFullTableReadAccess(
   return masked.size === scoped.size
 }
 
+/** One APPLIED revert's internal post-commit facts; patch never serializes into HTTP. */
+type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
+
+/**
+ * Post-commit recovery side effects (best-effort, non-fatal — a committed recovery must never turn into
+ * an HTTP 500 here): RecordWriteService-parity formula/related recompute over the recovered source rows
+ * (derived values are NOT restored history — they are recomputed AFTER the source commit), then
+ * source-sheet true-delta realtime (+ recomputed formula keys; the shared publisher strips patch values
+ * before broadcast), subscriber notifications, and related-sheet PURE-INVALIDATION fan-out (fieldIds +
+ * recordIds only, no recordPatches). Returns the Yjs record-id set to invalidate.
+ */
+const runRecoveryPostCommitSideEffects = async (
+  query: QueryFn,
+  sheetId: string,
+  actorId: string,
+  appliedReverts: AppliedRevertFact[],
+  linkInvalidations: ExactAnchorLinkInvalidation[],
+  helpers: Pick<RecordWriteHelpers, 'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields' | 'loadLinkValuesByRecord'>,
+): Promise<{ yjsRecordIds: string[] }> => {
+  const formulaByRecord = new Map<string, Record<string, unknown>>()
+  let relatedRecords: RelatedComputedRecord[] = []
+  try {
+    const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+    const recordIds = appliedReverts.map((r) => r.recordId)
+    const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
+    if (changedFieldIds.length > 0 && recordIds.length > 0) {
+      // RWS Step 4 parity: hydrate the recovered source rows BEFORE formula recompute so a
+      // formula-over-lookup sees the real lookup value (load rows → link values → applyLookupRollup →
+      // snapshot hydrated data → related recompute → recalculateFormulaFields(hydrated)).
+      const recordRes = await query(
+        'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [sheetId, recordIds],
+      )
+      const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+        id: String(row.id),
+        version: Number(row.version ?? 0),
+        data: normalizeJson(row.data),
+      })) as UniverMetaRecord[]
+
+      let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+      if (rows.length > 0) {
+        const relationalLinkFields = fields
+          .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+          .filter((v): v is { fieldId: string; cfg: NonNullable<ReturnType<typeof parseLinkFieldConfig>> } => !!v && !!v.cfg)
+        const linkValuesByRecord = await helpers.loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+        await helpers.applyLookupRollup(query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+        hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+      }
+
+      relatedRecords = await helpers.computeDependentLookupRollupRecords(query, sheetId, recordIds, changedFieldIds)
+
+      const formulaRecords = await helpers.recalculateFormulaFields(query, sheetId, fields, recordIds, changedFieldIds, hydratedDataByRecord)
+      for (const fr of formulaRecords) formulaByRecord.set(fr.recordId, fr.data)
+    }
+  } catch (err) {
+    console.warn('[univer-meta] recovery post-commit formula/related recompute failed (non-fatal):', err)
+  }
+
+  // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
+  // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
+  if (appliedReverts.length > 0) {
+    try {
+      const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: appliedReverts.map((r) => r.recordId),
+        fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
+        recordPatches: appliedReverts.map((r) => ({
+          recordId: r.recordId,
+          version: r.version,
+          patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
+        })),
+      })
+    } catch (err) {
+      console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
+    }
+  }
+
+  for (const r of appliedReverts) {
+    await notifyRecordSubscribersBestEffort(
+      query,
+      { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
+      'exact-anchor-recovery',
+    )
+  }
+
+  // Related-sheet fan-out is PURE INVALIDATION (no recordPatches / no snapshots — RWS FOL-1 parity).
+  const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
+  for (const record of relatedRecords) {
+    if (!Array.isArray(record.affectedFieldIds) || record.affectedFieldIds.length === 0) continue
+    let group = affectedRelatedBySheet.get(record.sheetId)
+    if (!group) {
+      group = { recordIds: [], fieldIds: new Set<string>() }
+      affectedRelatedBySheet.set(record.sheetId, group)
+    }
+    group.recordIds.push(record.recordId)
+    for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+  }
+  // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
+  // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
+  // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
+  // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
+  for (const invalidation of linkInvalidations) {
+    let group = affectedRelatedBySheet.get(invalidation.sheetId)
+    if (!group) {
+      group = { recordIds: [], fieldIds: new Set<string>() }
+      affectedRelatedBySheet.set(invalidation.sheetId, group)
+    }
+    const seen = new Set(group.recordIds)
+    for (const recordId of invalidation.recordIds) {
+      if (seen.has(recordId)) continue
+      seen.add(recordId)
+      group.recordIds.push(recordId)
+    }
+    for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
+  }
+  try {
+    for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
+      publishMultitableSheetRealtime({
+        spreadsheetId: relatedSheetId,
+        ...(relatedSheetId === sheetId ? { actorId } : {}),
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: group.recordIds,
+        fieldIds: [...group.fieldIds],
+      })
+    }
+  } catch (err) {
+    console.warn('[univer-meta] recovery related-sheet invalidation publish failed (non-fatal):', err)
+  }
+
+  const yjsRecordIds = [
+    ...appliedReverts.map((r) => r.recordId),
+    ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
+  ]
+  return { yjsRecordIds: [...new Set(yjsRecordIds)] }
+}
+
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */
 export function createRecoveryArchiveWorkerAuthorization() {
   return bindRecoveryArchiveWorkerAuthorization((query, sheetId, authority) => (
     hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities)
   ))
+}
+
+/** Canonical background callbacks; this factory accepts no caller-supplied authorization policy. */
+export function createRecoveryArchiveWorkerCallbacks(database: Pick<RecoveryArchiveRouterDatabaseRuntime, 'query'>) {
+  const authorization = createRecoveryArchiveWorkerAuthorization()
+  const events = createRecoveryArchiveWorkerRecordEvents(eventBus)
+  const apply: RecoveryArchiveWorkerApplyCallbacks = {
+    ...authorization.apply,
+    onMutationApplied: events.onMutationApplied,
+    afterCommit: async (identity, mutations) => {
+      await events.afterCommit!(identity, mutations)
+      const reverted = mutations.filter((m): m is Extract<ExactAnchorAppliedMutation, { kind: 'revert' }> => m.kind === 'revert')
+      const deleted = mutations.filter(m => m.kind === 'delete').map(m => m.recordId)
+      const invalidations = mutations.flatMap(m => m.linkInvalidations)
+      let yjsIds = [...mutations.map(m => m.recordId), ...invalidations.flatMap(i => i.recordIds)]
+      if (await authorization.recheckAuthority(database.query, identity)) {
+        const authority = await resolveDatabaseRecoverySheetAuthority(database.query, identity.sheetId, identity.actorId)
+        const side = await runRecoveryPostCommitSideEffects(
+          database.query, identity.sheetId, identity.actorId,
+          reverted.map(m => ({ recordId: m.recordId, version: m.version, fieldIds: m.changedFieldIds, patch: m.patch, revisionId: m.revisionId })),
+          invalidations,
+          { ...createRecoveryComputedHelpers(authority.access), loadLinkValuesByRecord },
+        )
+        yjsIds = [...yjsIds, ...side.yjsRecordIds]
+      } else {
+        // The write committed before revocation. Invalidate IDs without reading or computing values.
+        for (const target of [{ sheetId: identity.sheetId, recordIds: reverted.map(m => m.recordId), fieldIds: [] as string[] }, ...invalidations]) {
+          if (target.recordIds.length) publishMultitableSheetRealtime({ spreadsheetId: target.sheetId, source: 'multitable', kind: 'record-updated', recordIds: target.recordIds, fieldIds: target.fieldIds })
+        }
+      }
+      if (deleted.length) publishMultitableSheetRealtime({ spreadsheetId: identity.sheetId, actorId: identity.actorId, source: 'multitable', kind: 'record-deleted', recordIds: deleted })
+      if (yjsInvalidator && yjsIds.length) await yjsInvalidator([...new Set(yjsIds)])
+    },
+  }
+  return { recheckAuthority: authorization.recheckAuthority, apply }
 }
 
 /**
@@ -11491,148 +11669,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   }
 
-  /** One APPLIED revert's post-commit facts (route-memory only — patch NEVER serializes into HTTP). */
-  type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
-
-  /**
-   * Post-commit recovery side effects (best-effort, non-fatal — a committed recovery must never turn into
-   * an HTTP 500 here): RecordWriteService-parity formula/related recompute over the recovered source rows
-   * (derived values are NOT restored history — they are recomputed AFTER the source commit), then
-   * source-sheet true-delta realtime (+ recomputed formula keys; the shared publisher strips patch values
-   * before broadcast), subscriber notifications, and related-sheet PURE-INVALIDATION fan-out (fieldIds +
-   * recordIds only, no recordPatches). Returns the Yjs record-id set to invalidate.
-   */
-  const runRecoveryPostCommitSideEffects = async (
-    req: Request,
-    query: QueryFn,
-    sheetId: string,
-    actorId: string,
-    appliedReverts: AppliedRevertFact[],
-    linkInvalidations: ExactAnchorLinkInvalidation[],
-  ): Promise<{ yjsRecordIds: string[] }> => {
-    const formulaByRecord = new Map<string, Record<string, unknown>>()
-    let relatedRecords: RelatedComputedRecord[] = []
-    try {
-      const helpers = createRecordWriteHelpers(req, { query })
-      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
-      const recordIds = appliedReverts.map((r) => r.recordId)
-      const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
-      if (changedFieldIds.length > 0 && recordIds.length > 0) {
-        // RWS Step 4 parity: hydrate the recovered source rows BEFORE formula recompute so a
-        // formula-over-lookup sees the real lookup value (load rows → link values → applyLookupRollup →
-        // snapshot hydrated data → related recompute → recalculateFormulaFields(hydrated)).
-        const recordRes = await query(
-          'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-          [sheetId, recordIds],
-        )
-        const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
-          id: String(row.id),
-          version: Number(row.version ?? 0),
-          data: normalizeJson(row.data),
-        })) as UniverMetaRecord[]
-
-        let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
-        if (rows.length > 0) {
-          const relationalLinkFields = fields
-            .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
-            .filter((v): v is { fieldId: string; cfg: NonNullable<ReturnType<typeof parseLinkFieldConfig>> } => !!v && !!v.cfg)
-          const linkValuesByRecord = await helpers.loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
-          await helpers.applyLookupRollup(query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
-          hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
-        }
-
-        relatedRecords = await helpers.computeDependentLookupRollupRecords(query, sheetId, recordIds, changedFieldIds)
-
-        const formulaRecords = await helpers.recalculateFormulaFields(query, sheetId, fields, recordIds, changedFieldIds, hydratedDataByRecord)
-        for (const fr of formulaRecords) formulaByRecord.set(fr.recordId, fr.data)
-      }
-    } catch (err) {
-      console.warn('[univer-meta] recovery post-commit formula/related recompute failed (non-fatal):', err)
-    }
-
-    // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
-    // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
-    if (appliedReverts.length > 0) {
-      try {
-        const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
-        publishMultitableSheetRealtime({
-          spreadsheetId: sheetId,
-          actorId,
-          source: 'multitable',
-          kind: 'record-updated',
-          recordIds: appliedReverts.map((r) => r.recordId),
-          fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
-          recordPatches: appliedReverts.map((r) => ({
-            recordId: r.recordId,
-            version: r.version,
-            patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
-          })),
-        })
-      } catch (err) {
-        console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
-      }
-    }
-
-    for (const r of appliedReverts) {
-      await notifyRecordSubscribersBestEffort(
-        query,
-        { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
-        'exact-anchor-recovery',
-      )
-    }
-
-    // Related-sheet fan-out is PURE INVALIDATION (no recordPatches / no snapshots — RWS FOL-1 parity).
-    const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
-    for (const record of relatedRecords) {
-      if (!Array.isArray(record.affectedFieldIds) || record.affectedFieldIds.length === 0) continue
-      let group = affectedRelatedBySheet.get(record.sheetId)
-      if (!group) {
-        group = { recordIds: [], fieldIds: new Set<string>() }
-        affectedRelatedBySheet.set(record.sheetId, group)
-      }
-      group.recordIds.push(record.recordId)
-      for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
-    }
-    // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
-    // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
-    // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
-    // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
-    for (const invalidation of linkInvalidations) {
-      let group = affectedRelatedBySheet.get(invalidation.sheetId)
-      if (!group) {
-        group = { recordIds: [], fieldIds: new Set<string>() }
-        affectedRelatedBySheet.set(invalidation.sheetId, group)
-      }
-      const seen = new Set(group.recordIds)
-      for (const recordId of invalidation.recordIds) {
-        if (seen.has(recordId)) continue
-        seen.add(recordId)
-        group.recordIds.push(recordId)
-      }
-      for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
-    }
-    try {
-      for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
-        publishMultitableSheetRealtime({
-          spreadsheetId: relatedSheetId,
-          ...(relatedSheetId === sheetId ? { actorId } : {}),
-          source: 'multitable',
-          kind: 'record-updated',
-          recordIds: group.recordIds,
-          fieldIds: [...group.fieldIds],
-        })
-      }
-    } catch (err) {
-      console.warn('[univer-meta] recovery related-sheet invalidation publish failed (non-fatal):', err)
-    }
-
-    const yjsRecordIds = [
-      ...appliedReverts.map((r) => r.recordId),
-      ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
-    ]
-    return { yjsRecordIds: [...new Set(yjsRecordIds)] }
-  }
-
   const createRecoveryMutationObserver = (
     req: Request,
     database: RecoveryArchiveRouteDatabase,
@@ -11669,12 +11705,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const afterCommit = async (): Promise<void> => {
       try {
         const side = await runRecoveryPostCommitSideEffects(
-          req,
           database.query,
           sheetId,
           actorId,
           appliedReverts,
           appliedLinkInvalidations,
+          createRecordWriteHelpers(req, { query: database.query }),
         )
         for (const payload of updatedEventPayloads) {
           emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', payload)

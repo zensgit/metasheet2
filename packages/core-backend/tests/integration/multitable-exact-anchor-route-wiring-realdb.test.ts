@@ -19,7 +19,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { createRecoveryArchiveWorkerAuthorization, createRecoveryComputedHelpers, setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
+import { createRecoveryArchiveWorkerAuthorization, createRecoveryArchiveWorkerCallbacks, createRecoveryComputedHelpers, setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
@@ -1282,6 +1282,50 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       expect((await compute()).formulas).toEqual(allowed.formulas)
     } finally {
       await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
+    }
+  })
+
+  test.each([false, true])('WORKER-CALLBACKS: commit-bound effects with post-commit revocation=%s', async (revoked) => {
+    await seedWorld({ withSideEffects: true })
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = Object.freeze({ jobId: randomUUID(), workspaceId: `workspace_effects_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR })
+    const callbacks = createRecoveryArchiveWorkerCallbacks({ query: q })
+    const emit = vi.spyOn(eventBus, 'emit').mockReturnValue(true)
+    const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
+    const invalidate = vi.fn(async (_recordIds: string[]) => {})
+    setYjsInvalidatorForRoutes(invalidate)
+    const fact: exactApply.ExactAnchorAppliedMutation = {
+      kind: 'revert', recordId: REC_A, version: 3, revisionId: randomUUID(),
+      changedFieldIds: [F_NUM, F_SRC_LINK], patch: { [F_NUM]: 10, [F_SRC_LINK]: [REC_TGT_ANCHOR] }, linkInvalidations: [],
+    }
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      await txn(async query => {
+        await query('UPDATE meta_records SET data=data || $2::jsonb, version=3 WHERE id=$1', [REC_A, JSON.stringify(fact.patch)])
+        await query('UPDATE meta_links SET foreign_record_id=$3 WHERE field_id=$1 AND record_id=$2', [F_SRC_LINK, REC_A, REC_TGT_ANCHOR])
+        await callbacks.apply.onMutationApplied!(query, fact, identity)
+        expect(emit).not.toHaveBeenCalled()
+        expect(invalidate).not.toHaveBeenCalled()
+      })
+      if (revoked) await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+      await callbacks.apply.afterCommit!(identity, [fact])
+      expect(emit).toHaveBeenCalledTimes(1)
+      expect(emit).toHaveBeenCalledWith('multitable.record.updated', {
+        sheetId: SHEET, actorId: ACTOR, recordId: REC_A, changes: fact.patch, _eventId: expect.any(String),
+      })
+      const data = (await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data
+      expect(data[F_FORMULA]).toBe(revoked ? 100 : 11)
+      expect(data[F_FOL]).toBe(revoked ? 100 : 11)
+      expect(invalidate).toHaveBeenCalledTimes(1)
+      expect(invalidate.mock.calls[0][0]).toContain(REC_A)
+      expect(publish).toHaveBeenCalled()
+      if (revoked) expect(publish.mock.calls.every(([payload]) => payload.recordPatches === undefined)).toBe(true)
+    } finally {
+      emit.mockRestore()
+      publish.mockRestore()
+      setYjsInvalidatorForRoutes(null)
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
     }
   })
 
