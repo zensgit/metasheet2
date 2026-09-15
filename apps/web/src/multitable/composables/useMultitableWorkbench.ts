@@ -34,6 +34,20 @@ function filterVisibleSheets(sheets: MetaSheet[]): MetaSheet[] {
   return sheets.filter((sheet) => sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION)
 }
 
+// #5743: key-sorted stringify so two structurally identical meta payloads (or two snapshots of the
+// workbench state) hash to the same string regardless of JSON key order. Inputs are server JSON and
+// state derived from it — no cycles, functions or Dates to worry about.
+function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return 'null'
+  if (typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(',')}}`
+}
+
 export function useMultitableWorkbench(opts?: {
   initialBaseId?: string
   initialSheetId?: string
@@ -61,6 +75,31 @@ export function useMultitableWorkbench(opts?: {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const suppressedSheetMetaReloads = new Set<string>()
+  // #5743: the meta payload last APPLIED by loadSheetMeta, plus a fingerprint of the state that
+  // apply produced. A reload whose payload AND whose still-current state both match is a no-op, so
+  // the writes are skipped — otherwise every refresh hands fresh object identities to
+  // sheets/views/fields/capabilities/permissions and re-runs every identity-keyed watcher
+  // downstream (the manager-dialog keep-alive made that a per-tick cost, #5743).
+  // The state half is what keeps this honest without touching the other writers (loadBaseContext /
+  // loadSheets / restoreSnapshot / any caller assigning the refs directly): as soon as state
+  // diverges from what this cache recorded, the skip cannot fire.
+  let lastAppliedSheetMeta: { sheetId: string; viewId: string; payload: string; state: string } | null = null
+
+  function currentMetaStateFingerprint(): string {
+    return stableStringify({
+      activeBaseId: activeBaseId.value,
+      activeSheetId: activeSheetId.value,
+      activeViewId: activeViewId.value,
+      sheets: sheets.value,
+      fields: fields.value,
+      views: views.value,
+      capabilities: capabilities.value,
+      capabilityOrigin: capabilityOrigin.value,
+      fieldPermissions: fieldPermissions.value,
+      viewPermissions: viewPermissions.value,
+      personalOverrideViewIds: personalOverrideViewIds.value,
+    })
+  }
 
   const activeView = computed<MetaView | null>(
     () => views.value.find((v) => v.id === activeViewId.value) ?? null,
@@ -192,8 +231,38 @@ export function useMultitableWorkbench(opts?: {
           viewId: requestedViewId,
         }),
       ])
+      // #5743: the requests always go out (callers reload precisely to SEE server-side changes),
+      // but an unchanged answer must not churn the refs. Everything syncContextState reads goes
+      // into the payload fingerprint; requestedViewId does too, since it steers which view wins.
+      const payloadFingerprint = stableStringify({
+        fields: fData.fields ?? [],
+        base: ctx?.base ?? null,
+        sheet: ctx?.sheet ?? null,
+        sheets: ctx?.sheets ?? null,
+        views: ctx?.views ?? null,
+        capabilities: ctx?.capabilities ?? null,
+        capabilityOrigin: ctx?.capabilityOrigin ?? null,
+        fieldPermissions: ctx?.fieldPermissions ?? null,
+        viewPermissions: ctx?.viewPermissions ?? null,
+        personalOverrideViewIds: ctx?.personalOverrideViewIds ?? null,
+      })
+      if (
+        lastAppliedSheetMeta
+        && lastAppliedSheetMeta.sheetId === sheetId
+        && lastAppliedSheetMeta.viewId === (requestedViewId ?? '')
+        && lastAppliedSheetMeta.payload === payloadFingerprint
+        && lastAppliedSheetMeta.state === currentMetaStateFingerprint()
+      ) {
+        return true
+      }
       fields.value = fData.fields ?? []
       syncContextState(ctx, requestedViewId)
+      lastAppliedSheetMeta = {
+        sheetId,
+        viewId: requestedViewId ?? '',
+        payload: payloadFingerprint,
+        state: currentMetaStateFingerprint(),
+      }
       return true
     } catch (e: any) {
       error.value = e.message ?? fallback('error.loadSheetMetadata')

@@ -50,6 +50,29 @@ function stubMetaSheetViewRail() {
   })
 }
 
+// #5743's keep-alive test needs to CLOSE a manager dialog. MetaFieldManager is rendered
+// unconditionally with a :visible prop, so a bare stubComponent() gives the test no way to emit
+// 'close' back to the workbench; this stub surfaces both the visible prop and a close button.
+function stubMetaFieldManager() {
+  return defineComponent({
+    name: 'MetaFieldManager',
+    props: { visible: { type: Boolean, default: false } },
+    emits: ['close'],
+    setup(props, { emit }) {
+      return () => h('div', {
+        'data-stub-MetaFieldManager': 'true',
+        'data-visible': String(props.visible === true),
+      }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-close-field-manager',
+          onClick: () => emit('close'),
+        }, 'close'),
+      ])
+    },
+  })
+}
+
 function stubMetaBasePicker() {
   return defineComponent({
     name: 'MetaBasePicker',
@@ -153,7 +176,7 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubC
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
 vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
 vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
-vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
+vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubMetaFieldManager() }))
 vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
 vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
 vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
@@ -175,6 +198,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -479,5 +503,146 @@ describe('MultitableWorkbench rename affordance wiring', () => {
     await flushUi()
 
     expect(showErrorSpy).toHaveBeenCalledWith(message)
+  })
+})
+
+// #5743: with a manager dialog open, the workbench used to re-arm a 1200 ms interval that called
+// workbench.loadSheetMeta() forever — GET /fields + GET /context roughly once a second, for as long
+// as the dialog stayed open, on a tab nobody was looking at. These tests pin the replacement
+// cadence: one refresh on open, then DIALOG_META_REFRESH_INTERVAL_MS, nothing at all while the tab
+// is hidden, one catch-up refresh when it comes back, and silence once the dialog closes.
+describe('MultitableWorkbench manager dialog meta keep-alive (#5743)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    delete (document as unknown as { visibilityState?: unknown }).visibilityState
+    showErrorSpy.mockReset()
+    showSuccessSpy.mockReset()
+    vi.clearAllMocks()
+  })
+
+  function setVisibility(state: 'visible' | 'hidden') {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => state,
+    })
+  }
+
+  // Fake timers do not fake microtasks, so the component's own await chain still needs draining.
+  async function flushFake(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms)
+    await flushUi()
+  }
+
+  function openFieldManager(root: HTMLDivElement) {
+    const managerButtons = Array.from(root.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    const fieldsButton = managerButtons.find((button) => button.textContent?.includes('Fields'))
+    expect(fieldsButton).toBeTruthy()
+    fieldsButton!.click()
+  }
+
+  async function mountWithOpenDialog(): Promise<HTMLDivElement> {
+    const Host = defineComponent({
+      setup() {
+        return () => h(MultitableWorkbench as Component)
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+    setVisibility('visible')
+    vi.useFakeTimers()
+    workbenchMock.loadSheetMeta.mockClear() // drop mount-time refreshes; count only the keep-alive
+    openFieldManager(container!)
+    await flushUi()
+    return container!
+  }
+
+  it('refreshes once on open and then only every DIALOG_META_REFRESH_INTERVAL_MS — not once a second', async () => {
+    await mountWithOpenDialog()
+
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    await flushFake(10_000)
+    // The old cadence would have fired ~8 more times by here.
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS - 10_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_orders')
+  })
+
+  it('polls nothing while the tab is hidden and catches up once when it becomes visible again', async () => {
+    await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushFake(30_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // ...and the slow cadence resumes from there rather than replaying the hidden window.
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops entirely once the dialog closes, including the visibility catch-up', async () => {
+    const root = await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-close-field-manager"]')?.click()
+    await flushUi()
+    workbenchMock.loadSheetMeta.mockClear()
+
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS * 4)
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  // The catch-up listener is document-scoped and outlives the dialog, so stopDialogMetaRefresh has
+  // to detach it (the interval alone is not the whole teardown). Behaviourally it is masked by the
+  // dialogMetaRefreshWanted() re-check, hence the listener-identity assertion.
+  it('detaches the visibilitychange listener when the dialog closes', async () => {
+    const addSpy = vi.spyOn(document, 'addEventListener')
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+
+    const root = await mountWithOpenDialog()
+    const added = addSpy.mock.calls
+      .filter(([type]) => type === 'visibilitychange')
+      .map(([, handler]) => handler)
+    expect(added).toHaveLength(1)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-close-field-manager"]')?.click()
+    await flushUi()
+
+    const removed = removeSpy.mock.calls
+      .filter(([type]) => type === 'visibilitychange')
+      .map(([, handler]) => handler)
+    expect(removed).toContain(added[0])
   })
 })

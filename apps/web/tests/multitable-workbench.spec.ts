@@ -374,4 +374,133 @@ describe('useMultitableWorkbench', () => {
 
     expect(wb.error.value).toBe('backend raw')
   })
+
+  // #5743: the manager dialogs reload sheet meta on a keep-alive. The REQUEST always goes out (that
+  // is the point of a refresh), but an unchanged answer used to re-seat sheets/views/fields/
+  // capabilities/permissions with brand-new object identities every time, which re-ran every
+  // identity-keyed watcher in the workbench. An unchanged payload must now be a pure no-op.
+  describe('#5743 unchanged sheet-meta payloads', () => {
+    function metaFetch(fieldsPayload: () => any[]) {
+      return vi.fn(async (input: string) => {
+        if (input.startsWith('/api/multitable/fields?sheetId=s1')) {
+          return new Response(JSON.stringify({ ok: true, data: { fields: fieldsPayload() } }), { status: 200 })
+        }
+        if (input.startsWith('/api/multitable/context?sheetId=s1')) {
+          return new Response(JSON.stringify({
+            ok: true,
+            data: {
+              base: { id: 'base_ops', name: 'Ops Base' },
+              sheet: { id: 's1', baseId: 'base_ops', name: 'Orders', description: null },
+              sheets: [{ id: 's1', baseId: 'base_ops', name: 'Orders', description: null }],
+              views: [{ id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid' }],
+              capabilities: {
+                canRead: true,
+                canCreateRecord: true,
+                canEditRecord: true,
+                canDeleteRecord: false,
+                canManageFields: true,
+                canManageSheetAccess: true,
+                canManageViews: true,
+                canComment: true,
+                canManageAutomation: false,
+                canExport: true,
+              },
+              fieldPermissions: { fld_title: { fieldId: 'fld_title', canRead: true, canWrite: true } },
+              viewPermissions: { v1: { viewId: 'v1', canRead: true, canWrite: true } },
+              personalOverrideViewIds: [],
+            },
+          }), { status: 200 })
+        }
+        throw new Error('Unexpected request: ' + input)
+      })
+    }
+
+    it('re-fetches but does not replace object identities when nothing changed', async () => {
+      const fields = [{ id: 'fld_title', name: 'Title', type: 'string' }]
+      const fetchFn = metaFetch(() => fields)
+      const client = new MultitableApiClient({ fetchFn })
+      const wb = useMultitableWorkbench({ client, initialViewId: 'v1' })
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      const fieldsRef = wb.fields.value
+      const viewsRef = wb.views.value
+      const sheetsRef = wb.sheets.value
+      const capabilitiesRef = wb.capabilities.value
+      const fieldPermissionsRef = wb.fieldPermissions.value
+      const viewPermissionsRef = wb.viewPermissions.value
+      const personalOverrideRef = wb.personalOverrideViewIds.value
+      const callsAfterFirst = fetchFn.mock.calls.length
+
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+
+      // The poll still hits the server: /fields + /context, exactly as before.
+      expect(fetchFn.mock.calls.length).toBe(callsAfterFirst + 2)
+      expect(wb.fields.value).toBe(fieldsRef)
+      expect(wb.views.value).toBe(viewsRef)
+      expect(wb.sheets.value).toBe(sheetsRef)
+      expect(wb.capabilities.value).toBe(capabilitiesRef)
+      expect(wb.fieldPermissions.value).toBe(fieldPermissionsRef)
+      expect(wb.viewPermissions.value).toBe(viewPermissionsRef)
+      expect(wb.personalOverrideViewIds.value).toBe(personalOverrideRef)
+      expect(wb.activeSheetId.value).toBe('s1')
+      expect(wb.activeViewId.value).toBe('v1')
+    })
+
+    it('does replace them as soon as the payload actually changes', async () => {
+      let fields = [{ id: 'fld_title', name: 'Title', type: 'string' }]
+      const fetchFn = metaFetch(() => fields)
+      const client = new MultitableApiClient({ fetchFn })
+      const wb = useMultitableWorkbench({ client, initialViewId: 'v1' })
+
+      await wb.loadSheetMeta('s1')
+      const fieldsRef = wb.fields.value
+      await wb.loadSheetMeta('s1')
+      expect(wb.fields.value).toBe(fieldsRef)
+
+      fields = [
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_qty', name: 'Qty', type: 'number' },
+      ]
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+
+      expect(wb.fields.value).not.toBe(fieldsRef)
+      expect(wb.fields.value).toEqual([
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_qty', name: 'Qty', type: 'number' },
+      ])
+    })
+
+    it('never skips when the requested sheet differs, even if that sheet answers with the same shape', async () => {
+      const fetchFn = vi.fn(async (input: string) => {
+        const sheetId = input.includes('s2') ? 's2' : 's1'
+        if (input.startsWith('/api/multitable/fields')) {
+          return new Response(JSON.stringify({ ok: true, data: { fields: [{ id: 'fld_title', name: 'Title', type: 'string' }] } }), { status: 200 })
+        }
+        if (input.startsWith('/api/multitable/context')) {
+          return new Response(JSON.stringify({
+            ok: true,
+            data: {
+              sheet: { id: sheetId, baseId: 'base_ops', name: sheetId, description: null },
+              sheets: [
+                { id: 's1', baseId: 'base_ops', name: 's1', description: null },
+                { id: 's2', baseId: 'base_ops', name: 's2', description: null },
+              ],
+              views: [{ id: sheetId + '_view', sheetId, name: 'Grid', type: 'grid' }],
+            },
+          }), { status: 200 })
+        }
+        throw new Error('Unexpected request: ' + input)
+      })
+      const client = new MultitableApiClient({ fetchFn })
+      const wb = useMultitableWorkbench({ client })
+
+      await wb.loadSheetMeta('s1')
+      const fieldsRef = wb.fields.value
+      await wb.loadSheetMeta('s2')
+
+      expect(wb.activeSheetId.value).toBe('s2')
+      expect(wb.activeViewId.value).toBe('s2_view')
+      expect(wb.fields.value).not.toBe(fieldsRef)
+    })
+  })
 })

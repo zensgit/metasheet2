@@ -752,6 +752,7 @@ import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
   bulkFailureSamples as fmtBulkFailureSamples,
@@ -1593,6 +1594,7 @@ const workbenchReady = ref(false)
 let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
+let dialogMetaVisibilityListener: (() => void) | null = null
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
@@ -4646,7 +4648,7 @@ async function refreshDialogMeta() {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    const shouldRefresh = dialogMetaRefreshWanted()
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -4654,20 +4656,46 @@ async function refreshDialogMeta() {
   }
 }
 
+// Same predicate the watch below uses to arm/disarm the keep-alive — the visibility listener has to
+// re-check it because a dialog can close between a tab being hidden and it coming back.
+function dialogMetaRefreshWanted(): boolean {
+  return Boolean(
+    (showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value)
+    && workbench.activeSheetId.value,
+  )
+}
+
 function stopDialogMetaRefresh() {
   if (dialogMetaRefreshTimer != null) {
     window.clearInterval(dialogMetaRefreshTimer)
     dialogMetaRefreshTimer = null
   }
+  if (dialogMetaVisibilityListener) {
+    document.removeEventListener('visibilitychange', dialogMetaVisibilityListener)
+    dialogMetaVisibilityListener = null
+  }
   dialogMetaRefreshQueued = false
 }
 
+// #5743: open → refresh once, then a SLOW keep-alive (15 s), skipped entirely while the tab is
+// hidden and re-fired once the moment it comes back. The old 1200 ms cadence pinned an idle admin
+// tab at ~1 req/s per open dialog forever; the composable's fingerprint check now also keeps an
+// unchanged answer from re-seating sheets/views/fields identities on every tick.
 function startDialogMetaRefresh() {
   stopDialogMetaRefresh()
   void refreshDialogMeta()
   dialogMetaRefreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
     void refreshDialogMeta()
-  }, 1200)
+  }, DIALOG_META_REFRESH_INTERVAL_MS)
+  if (typeof document !== 'undefined') {
+    dialogMetaVisibilityListener = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!dialogMetaRefreshWanted()) return
+      void refreshDialogMeta()
+    }
+    document.addEventListener('visibilitychange', dialogMetaVisibilityListener)
+  }
 }
 
 // --- Bulk delete ---
