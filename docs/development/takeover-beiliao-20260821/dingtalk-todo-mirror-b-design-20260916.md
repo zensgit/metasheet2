@@ -1,7 +1,7 @@
 # 钉钉待办单向镜像（B 方案）设计 — 备料 × 审批
 
 日期：2026-09-16（第六次 24h 自主授权内，设计先行；代码按本文实现，默认关闭）
-状态：设计定稿待 owner 三项前置（§8）；实现 PR 见 24h 记录 §0 Q19
+状态：实现分支 `feat/dingtalk-todo-mirror`（默认关闭）；§4 已按反驳轮修正为"席位存活退休"；owner 前置见 §8；实现 PR 见 24h 记录 §0 Q19
 关联裁决：`beiliao-dingtalk-todo-decision`（A 工作通知先上 → B 单向镜像下一波 → 永不做 C 入站）；`stock-preparation-overall-plan-20260902.md` W2-1；`multitable-approval-integration-design-20260915.md`（钉钉只做 transport）
 
 ## 0. 一句话
@@ -64,10 +64,11 @@
 
 | 事件 | 动作 |
 | --- | --- |
-| `approval.task_created`（instance X, node N, epoch E, assignee U） | ① 把 X 上所有 `(node_key, entry_epoch) ≠ (N, E)` 且状态 ∈ {pending, created} 的行标 `superseded`（complete_reason=`next_node`，需要对钉钉发"完成"的行进入 `completing`）；② UPSERT 一行 (X, N, E, U) status=`pending`（幂等键冲突即 ACK）。 |
+| `approval.task_created`（instance X, node N, epoch E, assignee U） | ① **按席位存活退休**（实现修正，2026-09-16 反驳轮）：X 上状态 ∈ {pending, created} 且在 `approval_assignments` 里**已无 is_active 席位**（同 instance/node_key/entry_epoch/recipient）的行标 `superseded`（created 行进入 `completing`）；不再用 "(node, epoch) ≠ (N, E)"——那会把并行网关的同 epoch 兄弟分支、以及 at-least-once 重投的旧事件误杀当前席位；同轮改派（同 node/epoch 换人）也靠存活判定退休旧收件人。② 插入 (X, N, E, U) status=`pending`，且只在该席位仍存活时插入（幂等键冲突即 ACK）。 |
 | `approval.approved/rejected/revoked/cancelled` | X 上所有 pending → `skipped`（未发出的不再发）；created → `completing`（complete_reason=事件）。 |
 | worker 取 `pending` | 解析 unionId → 无则 `skipped_no_identity`；调创建 API（sourceId = source_key，subject = 「审批待处理：<模板名> <requestNo>」，detailUrl = 平台 `/approvals/<instanceId>`，executorIds=[unionId]，creatorId = 应用操作者 unionId，见 §8）；成功 → `created` + task_id；确定失败 → `failed`（redelivery_safe=true）；网络/超时/5xx → `outcome_unknown`（终态，不重发，留给对账）。 |
-| worker 取 `completing` | 调完成 API（PUT done=true）；成功 → `completed`；钉钉报"任务不存在" → `completed`（视为已清理）；其它同上。 |
+| worker 取 `completing` | 调完成 API（PUT done=true）；成功 → `completed`；HTTP 404 → `completed`（视为已清理；**裁判提醒**：操作者 unionId 变更或权限问题也可能答 404，owner 实测前此分支按 404 处理，见 §8.5）；408/429/5xx → 退避重试；其它 4xx → `failed`。 |
+| worker 取 `pending` 补充 | 发请求前先在租约 CAS 下戳 `send_issued_at`（在取 token 之后、真正 POST 之前）；租约过期被重领时若已戳 → `outcome_unknown`（不重发，避免重复待办）；未戳 → 可安全重发。创建成功后立刻探一次席位存活，已死则直接进 `completing`（覆盖"发送中实例已终态"的窗口）。 |
 
 **没有任务已决事件**的后果：某节点若被或签同伴先决，其余同伴的待办要到下一节点激活时才会被标 superseded；这是现有事件模型的边界，写进 owner 说明，不在本轮补事件（审批中心代码属另一窗口）。
 
@@ -91,7 +92,9 @@ pending ──(无 unionId / 无 org)──▶ skipped
 
 - 创建：`POST /v1.0/todo/users/{operatorUnionId}/tasks`，头 `x-acs-dingtalk-access-token`；体 `sourceId, subject, creatorId, executorIds[], detailUrl{appUrl,pcUrl}, isOnlyShowExecutor:true, notifyConfigs{dingNotify:'1'}`。
 - 完成：`PUT /v1.0/todo/users/{operatorUnionId}/tasks/{taskId}`，体 `{ done: true }`。
-- 删除：`DELETE /v1.0/todo/users/{operatorUnionId}/tasks/{taskId}`（仅对账工具用）。
+- 删除：`DELETE /v1.0/todo/users/{operatorUnionId}/tasks/{taskId}`（仅对账工具用，状态机不调用）。
+- 重投：无路由，只有 CLI `packages/core-backend/scripts/dingtalk-todo-mirror-requeue.ts --id <row> --org <org>`（org 限定；席位已死的创建阶段行拒绝重投）。
+- 深链：只读 env `PUBLIC_APP_URL` / `APP_BASE_URL`，不读 `directory_integrations.config.approvalCardPublicAppUrl`。
 - 权限：企业应用需开通待办写权限（开放平台"待办"权限组）。
 - 客户端落在 `integrations/dingtalk/client.ts` 新增 `createDingTalkTodoTask / completeDingTalkTodoTask / deleteDingTalkTodoTask`，`kind:'send'`、`envelope:'none'`，错误分类沿用 `isDingTalkOutcomeUnknown → DingTalkRequestError → DingTalkBusinessError`。
 
@@ -108,7 +111,9 @@ pending ──(无 unionId / 无 org)──▶ skipped
 1. 企业应用开通"待办"写权限，并确认应用可作为待办创建者。
 2. 指定"操作者"账号的 unionId（待办在钉钉里显示的创建者），填入 `directory_integrations.config.todoOperatorUnionId`。
 3. 222 上核对 `directory_accounts.union_id` / `user_external_identities.provider_union_id` 覆盖率（只报计数）；备料审批的处理人都要有。
-4. 决定是否要 role 席位待办（需审批窗口补"按角色展开成员"的事件，或镜像侧自行展开——后者会与审批中心的席位语义分叉，不建议）。
+4. 真租户探针一轮：创建 → 完成 → 再完成 → 完成一条已删除的任务，记录"任务不存在"的 HTTP 状态与 body code（账本目前把完成 PUT 的任何 404 当已清理）。
+5. `docker/app.env` 设 `PUBLIC_APP_URL`（或 `APP_BASE_URL`），否则待办深链解析不到。
+6. 决定是否要 role 席位待办（需审批窗口补"按角色展开成员"的事件，或镜像侧自行展开——后者会与审批中心的席位语义分叉，不建议）。
 
 ## 9. 验证矩阵（实现 PR 必附）
 
