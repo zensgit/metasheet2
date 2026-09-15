@@ -35,6 +35,7 @@ import { canReadApprovalTemplateForAutomation } from '../multitable/automation-a
 import { loadAuthorizedApprovalActor } from '../multitable/automation-approval-bridge-service'
 import type { QueryFn } from '../multitable/permission-service'
 import {
+  createPoolTransactionRunner,
   listRecordApprovalSubmissions,
   RECORD_APPROVAL_ERROR_CODES,
   RECORD_APPROVAL_LIST_DEFAULT_LIMIT,
@@ -185,8 +186,23 @@ export function createMultitableRecordApprovalRoutes(
           // `CreateApprovalActor` is module-private in ApprovalProductService; the bridge's loader returns
           // a structurally identical object (userId + name/email/roles/permissions), so the cast is a
           // visibility workaround, not a shape change.
-          createApproval: async (request, createActor) =>
-            approvals.createApproval(request as never, createActor as never),
+          // `status` is threaded because an auto-approving template returns an ALREADY TERMINAL instance
+          // whose completion event was emitted before createApproval returned — see CreatedApprovalRef.
+          createApproval: async (request, createActor) => {
+            const created = await approvals.createApproval(request as never, createActor as never)
+            return { id: created.id, requestNo: created.requestNo ?? null, status: created.status ?? null }
+          },
+          // One PK read, only when the promote wrote 'pending': closes the window where the instance went
+          // terminal between createApproval's COMMIT and the promote (that completion was delivered while
+          // approval_instance_id was still NULL and therefore matched no row).
+          loadApprovalStatus: async (instanceId: string) => {
+            const result = await query('SELECT status FROM approval_instances WHERE id = $1', [instanceId])
+            const status = (result.rows[0] as { status?: unknown } | undefined)?.status
+            return typeof status === 'string' ? status : null
+          },
+          // Terminal state discovered during submit writes the row AND the requester notification in one
+          // transaction, exactly like the completion consumer.
+          completion: { runInTransaction: createPoolTransactionRunner(pool) },
         },
       )
 

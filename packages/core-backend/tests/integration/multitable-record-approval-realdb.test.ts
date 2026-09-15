@@ -19,13 +19,18 @@
  *       `multitable-record-approval`, boot-identical) → row `approved` + exactly ONE notification row;
  *       a REDELIVERY adds nothing (the `WHERE status = 'pending'` guard, proven against real rowcounts);
  *   G6  GET drift: after a real record write the list reports `changed` with the changed field id, and a
- *       field the caller may not read is masked out of `changedFieldIds` (values never appear at all).
+ *       field the caller may not read is masked out of `changedFieldIds` (values never appear at all);
+ *   G7  a STALE `creating` claim is reclaimed by the next submit against the REAL partial unique index
+ *       (`creating` is not an absorbing state), while a FRESH one still refuses with 409 (G7b).
  *
  * Runs only with DATABASE_URL — the no-DB vitest config EXCLUDES this file (so it cannot skip-green in the
  * required job). Its CI lane is .github/workflows/multitable-record-approval-realdb.yml, which is NOT in
  * this commit: the pushing token has no `workflow` OAuth scope. Until that file lands, run this suite with
  * `vitest --config vitest.integration.config.ts run tests/integration/multitable-record-approval-realdb.test.ts`
- * against a migrated database.
+ * against a migrated database. The ROUTE GATES (403 without the code, template forbidden/unpublished, 404,
+ * 409, the values-free audit + refusals, the masked drift) are additionally covered in the always-running
+ * no-DB lane by tests/unit/multitable-record-approval-routes.test.ts, which drives this same router with
+ * faked collaborators — that spec is the stand-in until this lane exists, not a replacement for it.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -301,6 +306,55 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     ])
     const after = await insert('creating')
     expect(after.rows).toHaveLength(1)
+    await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
+  })
+
+  test('G7 a STALE `creating` claim does not brick the pair: the next submit reclaims it (real index)', async () => {
+    // A claim whose process died between the INSERT and either follow-up UPDATE: `creating`, no instance,
+    // older than RECORD_APPROVAL_CREATING_CLAIM_TTL_MS. Nothing else in the system ever clears such a row
+    // (no revoke endpoint, no sweeper), so without the reclaim the partial unique index would refuse every
+    // future submission of this (record, template) FOREVER.
+    const stale = await q(
+      `INSERT INTO multitable_record_approval_submissions
+         (sheet_id, record_id, template_id, status, submitted_by, record_version_at_submit, record_snapshot, created_at)
+       VALUES ($1, $2, $3, 'creating', $4, 1, '{}'::jsonb, NOW() - INTERVAL '30 minutes')
+       RETURNING id`,
+      [SHEET, RECORD_B, publishedTemplateId, SUBMITTER],
+    )
+    const staleId = (stale.rows[0] as { id: string }).id
+
+    const res = await submit(RECORD_B, { templateId: publishedTemplateId, formData: { summary: 'after reclaim' } })
+    expect(res.status).toBe(201)
+    expect(res.body.data.submission.status).toBe('pending')
+
+    const rows = await submissionsFor(RECORD_B)
+    const reclaimed = rows.find((r) => r.id === staleId)!
+    expect(reclaimed.status).toBe('failed')
+    expect(reclaimed.error).toBe('RECORD_APPROVAL_CLAIM_EXPIRED')
+    // exactly one in-flight row survives — the reclaim did not widen the uniqueness rule
+    expect(rows.filter((r) => r.status === 'creating' || r.status === 'pending')).toHaveLength(1)
+  })
+
+  test('G7b a FRESH `creating` claim is still honoured: 409 with no instance link, and NO approval is created', async () => {
+    await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
+    await q(
+      `INSERT INTO multitable_record_approval_submissions
+         (sheet_id, record_id, template_id, status, submitted_by, record_version_at_submit, record_snapshot)
+       VALUES ($1, $2, $3, 'creating', $4, 1, '{}'::jsonb)`,
+      [SHEET, RECORD_B, publishedTemplateId, SUBMITTER],
+    )
+    const before = (await q('SELECT count(*)::int AS n FROM approval_instances WHERE template_id = $1', [publishedTemplateId]))
+      .rows[0] as { n: number }
+
+    const res = await submit(RECORD_B, { templateId: publishedTemplateId, formData: { summary: 'too soon' } })
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('RECORD_APPROVAL_IN_FLIGHT')
+    expect(res.body.error.details.status).toBe('creating')
+    expect(res.body.error.details.approvalInstanceId).toBeNull()
+    expect(await submissionsFor(RECORD_B)).toHaveLength(1)
+    const after = (await q('SELECT count(*)::int AS n FROM approval_instances WHERE template_id = $1', [publishedTemplateId]))
+      .rows[0] as { n: number }
+    expect(after.n).toBe(before.n)
     await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
   })
 

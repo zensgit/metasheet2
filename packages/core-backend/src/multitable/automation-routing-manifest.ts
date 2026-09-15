@@ -43,8 +43,12 @@
  * (1) ship workers that know K (adapter registered), (2) only then ship producers whose manifest expands K.
  * The worker side is protected at runtime (unknown key → pending + alert, S2-a/S2-b); the PRODUCER side
  * CANNOT be (an N-1 producer simply never writes the K row — nothing exists to park or alert on), so K
- * expansion must wait until all producers are N-aware. `SUPPORTED_MANIFEST_VERSIONS` is the deploy gate's
- * anchor: a dispatcher refuses rows stamped with a version it does not know.
+ * expansion must wait until all producers are N-aware. `SUPPORTED_MANIFEST_VERSIONS` is this BUILD's
+ * declaration of the manifest versions it understands; it is enforced at BOOT by
+ * `assertManifestCompleteness` (shipping a CURRENT manifest whose version is not declared supported is a
+ * startup error). It is NOT a dispatcher-side filter: `automation-durable-dispatcher` selects
+ * `manifest_version` but does not compare it — a row's fan-out was already decided AT ENQUEUE, and the
+ * runtime protection against a row this worker cannot serve is the unknown-consumer_key park + alert.
  *
  * Pure data + assertions — no DB, no side effects, flag-independent (nothing reads it until S4 enqueues).
  */
@@ -105,9 +109,13 @@ export const ROUTING_MANIFEST_V1: RoutingManifest = deepFreezeManifest({
  * ROLLING DEPLOY (#4203 §234-255): expanding a family to a new consumer_key is activation-gated — workers
  * that KNOW the key ship first (adapter registered = this commit's `DURABLE_CONSUMER_KEYS` +
  * `buildDurableConsumerHandlers` entry), and only then may producers stamp v2. Both halves land in THIS
- * commit, which is the supported shape for a single-artifact deployment: an N-1 worker never sees a v2 row
- * (its producers are N-1 too), and an N worker serves both v1 and v2 rows because
- * `SUPPORTED_MANIFEST_VERSIONS` contains both.
+ * commit, which is the supported shape for a single-artifact deployment. Be precise about what that buys
+ * during a MULTI-REPLICA rolling deploy: every replica shares one `meta_automation_outbox_consumer` table,
+ * so an N-1 worker DOES see rows an N replica's producer enqueued — it just cannot claim them. The
+ * guarantee is the unknown-consumer_key rule (`automation-durable-dispatch-loop`: unknown keys are alerted
+ * and left `pending`, never claimed and never terminated), so a `multitable-record-approval` row waits for
+ * an N worker instead of being lost. The reverse direction is what the frozen v1 protects: an in-flight v1
+ * row keeps its v1 fan-out and never acquires the new consumer.
  */
 export const APPROVAL_COMPLETION_CONSUMERS_V2: readonly string[] = Object.freeze([
   ...APPROVAL_COMPLETION_CONSUMERS,
@@ -161,6 +169,14 @@ export function assertManifestCompleteness(
   registry: Pick<ConsumerAdapterRegistry, 'keys'>,
   manifest: RoutingManifest = CURRENT_ROUTING_MANIFEST,
 ): void {
+  // The version declaration is load-bearing, not prose: shipping a manifest this build does not declare
+  // support for would stamp outbox rows with a version no worker in the fleet admits to serving. Boot
+  // fails instead (the same fail-closed posture as the bidirectional key assertion below).
+  if (!SUPPORTED_MANIFEST_VERSIONS.has(manifest.version)) {
+    throw new Error(
+      `routing manifest v${manifest.version} is not in SUPPORTED_MANIFEST_VERSIONS (${[...SUPPORTED_MANIFEST_VERSIONS].join(', ')}) — bump the supported set with the manifest`,
+    )
+  }
   const registered = new Set(registry.keys())
   const routed = new Set(manifestConsumerKeys(manifest))
   const unserved = [...routed].filter((k) => !registered.has(k))

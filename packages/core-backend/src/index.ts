@@ -3788,12 +3788,16 @@ export class MetaSheetServer {
     // durable-delivery block below (manifest v2). The sink's UPDATE is guarded on `status = 'pending'`, so
     // a double delivery through both legs cannot double-notify.
     try {
-      const { createRecordApprovalCompletionSink, subscribeRecordApprovalCompletionBus } = await import(
+      const { createRecordApprovalCompletionSink, createPoolTransactionRunner, subscribeRecordApprovalCompletionBus } = await import(
         './multitable/record-approval-submission-service'
       )
       const recordApprovalPool = poolManager.get()
       this.recordApprovalCompletionSink = createRecordApprovalCompletionSink(
         recordApprovalPool.query.bind(recordApprovalPool),
+        // ATOMIC completion: the terminal UPDATE and the requester's notification INSERT share one
+        // transaction. Without it a notification INSERT that fails after the UPDATE committed is lost for
+        // good — the durable retry re-runs the guarded UPDATE, matches zero rows and ACKs.
+        { runInTransaction: createPoolTransactionRunner(recordApprovalPool) },
       )
       subscribeRecordApprovalCompletionBus(
         eventBus,
@@ -3973,15 +3977,18 @@ export class MetaSheetServer {
         this.automationServiceReady && Boolean(this.automationService),
       )
       if (this.automationServiceReady && this.automationService) {
-        const { createRecordApprovalCompletionSink: createRecordApprovalSink } = await import(
-          './multitable/record-approval-submission-service'
-        )
+        const {
+          createRecordApprovalCompletionSink: createRecordApprovalSink,
+          createPoolTransactionRunner: createRecordApprovalTxnRunner,
+        } = await import('./multitable/record-approval-submission-service')
         // Reuse the SAME sink object the eventBus leg subscribed (built above); fall back to a fresh one
         // only if that init degraded — the durable leg must never be missing its handler (the manifest v2
         // completeness assertion would abort boot, which is the intended fail-closed outcome).
         const durablePool = poolManager.get()
         const recordApprovalSink = this.recordApprovalCompletionSink
-          ?? createRecordApprovalSink(durablePool.query.bind(durablePool))
+          ?? createRecordApprovalSink(durablePool.query.bind(durablePool), {
+            runInTransaction: createRecordApprovalTxnRunner(durablePool),
+          })
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
           projectionService: getApprovalRecordProjectionService(),

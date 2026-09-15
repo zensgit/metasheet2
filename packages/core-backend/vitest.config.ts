@@ -623,7 +623,10 @@ export default defineConfig({
       // same precedent as approval-realdb-directory-resolve.yml).
       // NOTE (PR 2a): that workflow file could NOT be pushed with this commit -- the pushing token has no
       // `workflow` OAuth scope -- so it must be added by a workflow-scoped push before this suite has a
-      // lane. Until then the suite runs ONLY on demand (vitest.integration.config.ts + DATABASE_URL).
+      // lane. Until then the suite runs ONLY on demand (vitest.integration.config.ts + DATABASE_URL), and
+      // the ROUTE GATES it proves end-to-end are covered in THIS lane by
+      // tests/unit/multitable-record-approval-routes.test.ts (real router, faked collaborators) so the
+      // contract is not entirely unexecuted while the lane is missing.
       'tests/integration/multitable-record-approval-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep

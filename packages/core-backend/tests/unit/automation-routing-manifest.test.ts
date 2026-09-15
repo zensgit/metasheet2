@@ -147,6 +147,22 @@ describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-l
     expect([...SUPPORTED_MANIFEST_VERSIONS].sort()).toEqual([1, 2])
   })
 
+  test('SUPPORTED_MANIFEST_VERSIONS is ENFORCED, not prose: an undeclared manifest version fails the boot assertion', () => {
+    // Review finding (2026-09-15): the header called this constant "the deploy gate's anchor" while the
+    // dispatcher never compares manifest_version — the constant was read by nothing in src. It is now the
+    // boot gate for the manifest THIS BUILD ships: stamping outbox rows with a version the fleet does not
+    // declare must fail at startup, not at delivery time.
+    const v3 = { version: 3, routes: ROUTING_MANIFEST_V2.routes }
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V2_KEYS), v3)).toThrow(
+      /manifest v3 is not in SUPPORTED_MANIFEST_VERSIONS/,
+    )
+    // both DECLARED versions still pass with their own complete registries
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V1_KEYS), ROUTING_MANIFEST_V1)).not.toThrow()
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V2_KEYS), ROUTING_MANIFEST_V2)).not.toThrow()
+    // ...and the manifest this build actually ships is one of them
+    expect(SUPPORTED_MANIFEST_VERSIONS.has(CURRENT_ROUTING_MANIFEST.version)).toBe(true)
+  })
+
   test('completeness: the v2 universe REQUIRES an adapter for multitable-record-approval (a v1-only worker reds)', () => {
     // A worker that still registers only the six v1 adapters would park every v2 completion row for the
     // record-approval consumer — the boot assertion must refuse that, naming the key.

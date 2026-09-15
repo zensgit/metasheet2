@@ -15,6 +15,17 @@
  *     and therefore sends NO second notification and publishes NO second invalidation (remove the guard
  *     or the zero-row early return → red);
  *   - drift returns FIELD IDS ONLY, masked by the caller's field-permission read set, never values;
+ *   - the ORDERING failures the 2026-09-15 adversarial review found, each against a Postgres-shaped row
+ *     store (partial unique index + the real WHERE guards emulated), not against SQL strings:
+ *       * an auto-approving template completes INSIDE createApproval and its completion is delivered
+ *         while the row is still ('creating', instance NULL) → the promote must write the TERMINAL state,
+ *         not 'pending' (otherwise the row is stranded and the pair is 409-bricked forever);
+ *       * an instance that goes terminal between COMMIT and the promote is caught by the one-shot
+ *         post-promote status probe;
+ *       * a `creating` claim is reclaimable after a TTL (it is not an absorbing state), and a 5xx
+ *         createApproval throw KEEPS the claim (an instance may exist) instead of freeing the slot;
+ *       * the terminal UPDATE + the notification INSERT are ONE transaction, so a failed notification
+ *         rolls the terminal write back and the retry redoes both;
  *   - the manifest v2 consumer universe and the durable handler key agree;
  *   - the two `deriveCapabilities` copies (access.ts / sheet-capabilities.ts) agree on canSubmitApproval.
  */
@@ -25,17 +36,21 @@ import { describe, expect, test, vi } from 'vitest'
 import {
   applyRecordApprovalCompletion,
   computeRecordApprovalDrift,
+  createPoolTransactionRunner,
   listRecordApprovalSubmissions,
   mapCreateApprovalFailure,
   recordApprovalCompletionOutcome,
+  RECORD_APPROVAL_CREATING_CLAIM_TTL_MS,
   RECORD_APPROVAL_ERROR_CODES,
   RECORD_APPROVAL_IN_FLIGHT_INDEX,
   RECORD_APPROVAL_IN_FLIGHT_STATUSES,
+  RECORD_APPROVAL_ROW_ERROR_CODES,
   RECORD_APPROVAL_SUBMISSIONS_TABLE,
   RecordApprovalError,
   submitRecordApproval,
   subscribeRecordApprovalCompletionBus,
   createRecordApprovalCompletionSink,
+  terminalOutcomeOf,
 } from '../../src/multitable/record-approval-submission-service'
 import { DURABLE_CONSUMER_KEYS } from '../../src/multitable/automation-durable-activation'
 import {
@@ -179,7 +194,11 @@ describe('submitRecordApproval — three steps, durable claim FIRST', () => {
     expect(createApproval).toHaveBeenCalledTimes(1)
     expect(createApproval.mock.invocationCallOrder[0]).toBeGreaterThan(0)
     expect(calls[1]!.sql).toContain('UPDATE')
-    expect(calls[1]!.sql).toContain("status = 'pending'")
+    // The promoted status is a PARAMETER now, because an approval that was already terminal when it was
+    // created must be written terminal here (see the auto-approval describe below). A non-terminal create
+    // still promotes to exactly 'pending' with a null outcome.
+    expect(calls[1]!.params[3]).toBe('pending')
+    expect(calls[1]!.params[4]).toBeNull()
     expect(calls[1]!.sql).toContain("WHERE id = $1 AND status = 'creating'")
     expect(row.status).toBe('pending')
     expect(row.approvalInstanceId).toBe('inst_1')
@@ -547,5 +566,446 @@ describe('canSubmitApproval: the REST and Yjs/OAPI derivations cannot drift', ()
       expect(deriveCapabilitiesRest(permissions, false)).toEqual(deriveCapabilitiesBridge(permissions, false))
       expect(deriveCapabilitiesRest(permissions, true)).toEqual(deriveCapabilitiesBridge(permissions, true))
     }
+  })
+})
+
+
+// ── ordering + recovery (adversarial review 2026-09-15) ───────────────────────
+
+/**
+ * A Postgres-SHAPED row store: it enforces the partial unique index and evaluates the statements' WHERE
+ * guards instead of matching SQL text. That is what makes the tests below mutation-sensitive — delete
+ * `AND status = 'pending'` (or `AND status = 'creating'`, or the staleness predicate) from the service and
+ * this fake starts matching rows it should not, which is exactly what the assertions catch.
+ */
+function createRowStore(options: { now?: () => number } = {}) {
+  const rows: Array<Record<string, unknown>> = []
+  const nowFn = options.now ?? (() => Date.parse('2026-09-15T12:00:00.000Z'))
+  const iso = () => new Date(nowFn()).toISOString()
+  const inFlight = (r: Record<string, unknown>) => r.status === 'creating' || r.status === 'pending'
+  const clone = (r: Record<string, unknown>) => ({ ...r })
+
+  const query = async (sql: string, params: unknown[] = []) => {
+    const text = sql.replace(/\s+/g, ' ').trim()
+
+    if (text.startsWith(`INSERT INTO ${RECORD_APPROVAL_SUBMISSIONS_TABLE}`)) {
+      const [id, sheetId, recordId, templateId, submittedBy, version, snapshot] = params as string[]
+      const collides = rows.some(
+        (r) => inFlight(r) && r.sheet_id === sheetId && r.record_id === recordId && r.template_id === templateId,
+      )
+      if (collides) {
+        throw Object.assign(new Error(`duplicate key value violates unique constraint "${RECORD_APPROVAL_IN_FLIGHT_INDEX}"`), {
+          code: '23505',
+          constraint: RECORD_APPROVAL_IN_FLIGHT_INDEX,
+        })
+      }
+      rows.push({
+        id,
+        sheet_id: sheetId,
+        record_id: recordId,
+        template_id: templateId,
+        approval_instance_id: null,
+        approval_request_no: null,
+        status: 'creating',
+        outcome: null,
+        submitted_by: submittedBy,
+        record_version_at_submit: Number(version),
+        record_snapshot: snapshot,
+        error: null,
+        created_at: iso(),
+        completed_at: null,
+      })
+      return { rows: [], rowCount: 1 }
+    }
+
+    if (text.startsWith(`UPDATE ${RECORD_APPROVAL_SUBMISSIONS_TABLE}`)) {
+      const where = text.slice(text.indexOf(' WHERE '))
+      let candidates = rows
+      if (/WHERE id = \$1/.test(where)) candidates = candidates.filter((r) => r.id === params[0])
+      if (/WHERE approval_instance_id = \$1/.test(where)) candidates = candidates.filter((r) => r.approval_instance_id === params[0])
+      if (/status = 'creating'/.test(where)) candidates = candidates.filter((r) => r.status === 'creating')
+      if (/status = 'pending'/.test(where)) candidates = candidates.filter((r) => r.status === 'pending')
+      if (/created_at < NOW\(\)/.test(where)) {
+        const ttlMs = Number(params[2] ?? 0)
+        candidates = candidates.filter((r) => Date.parse(String(r.created_at)) < nowFn() - ttlMs)
+      }
+      for (const row of candidates) {
+        if (/SET status = 'failed'/.test(text)) {
+          row.status = 'failed'
+          row.error = /COALESCE\(error, \$2\)/.test(text) ? (row.error ?? params[1]) : params[1]
+          row.completed_at = iso()
+        } else if (/SET status = \$2, outcome = \$2/.test(text)) {
+          row.status = params[1]
+          row.outcome = params[1]
+          row.completed_at = iso()
+        } else if (/SET status = \$4, outcome = \$5/.test(text)) {
+          row.status = params[3]
+          row.outcome = params[4] ?? null
+          row.approval_instance_id = params[1]
+          row.approval_request_no = params[2] ?? null
+          if (params[4]) row.completed_at = iso()
+        } else if (/SET error = \$2/.test(text)) {
+          row.error = params[1]
+        }
+      }
+      return { rows: candidates.map(clone), rowCount: candidates.length }
+    }
+
+    if (text.includes('status = ANY($4::text[])')) {
+      const [sheetId, recordId, templateId, statuses] = params as [string, string, string, string[]]
+      const found = rows.filter(
+        (r) => r.sheet_id === sheetId && r.record_id === recordId && r.template_id === templateId && statuses.includes(String(r.status)),
+      )
+      return { rows: found.map(clone), rowCount: found.length }
+    }
+    if (text.includes(`FROM ${RECORD_APPROVAL_SUBMISSIONS_TABLE} WHERE id = $1`)) {
+      const found = rows.filter((r) => r.id === params[0])
+      return { rows: found.map(clone), rowCount: found.length }
+    }
+    return { rows: [], rowCount: 0 }
+  }
+
+  return { query: query as never, rows, snapshot: () => rows.map(clone) }
+}
+
+function notificationRecorder() {
+  const sent: Array<{ userIds: string[]; message: string | null }> = []
+  const insertNotifications = (async (_q: unknown, input: { userIds: string[]; message?: string | null }) => {
+    sent.push({ userIds: input.userIds, message: input.message ?? null })
+    return { inserted: input.userIds.length }
+  }) as never
+  return { sent, deps: { insertNotifications, publishRealtime: () => undefined } }
+}
+
+const submitInput = (over: Record<string, unknown> = {}) => ({
+  sheetId: SHEET,
+  recordId: RECORD,
+  templateId: TEMPLATE,
+  formData: { f1: 'never-logged' },
+  submittedBy: USER,
+  recordVersion: 3,
+  recordSnapshot: { fld_a: 'secret-value' },
+  ...over,
+})
+
+const ACTOR = { userId: USER, permissions: ['approvals:write'] }
+
+describe('an approval that is ALREADY TERMINAL when created is not stranded in pending', () => {
+  test('auto-approval at create: the completion fires before the id is bound, yet the row lands approved + ONE notification, and the pair stays submittable', async () => {
+    const store = createRowStore()
+    const notifier = notificationRecorder()
+    const sink = createRecordApprovalCompletionSink(store.query, notifier.deps)
+
+    const submission = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      // PRODUCTION ORDERING: ApprovalProductService emits the completion event between COMMIT and
+      // `return approval` when the template auto-approves. At this instant our row is still
+      // ('creating', approval_instance_id = NULL), so the instance-keyed UPDATE matches nothing.
+      createApproval: async () => {
+        await sink.handleApprovalCompletion(
+          completionEvent({ approval: { ...completionEvent().approval, instanceId: 'inst_auto' } } as never),
+        )
+        return { id: 'inst_auto', requestNo: 'AP-AUTO', status: 'approved' }
+      },
+      completion: notifier.deps,
+    })
+
+    expect(submission.status).toBe('approved')
+    expect(submission.outcome).toBe('approved')
+    expect(submission.approvalInstanceId).toBe('inst_auto')
+    expect(submission.completedAt).not.toBeNull()
+    // exactly one bell: the dropped delivery sent none, the promote sent one
+    expect(notifier.sent).toEqual([{ userIds: [USER], message: '记录送审已通过' }])
+
+    // and the (record, template) pair is NOT bricked — the terminal row is outside the index predicate
+    const next = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_next', requestNo: 'AP-NEXT', status: 'pending' }),
+    })
+    expect(next.status).toBe('pending')
+  })
+
+  test('a redelivery of that same completion afterwards changes nothing (no second bell)', async () => {
+    const store = createRowStore()
+    const notifier = notificationRecorder()
+    const sink = createRecordApprovalCompletionSink(store.query, notifier.deps)
+    await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_auto', status: 'approved' }),
+      completion: notifier.deps,
+    })
+    await sink.handleApprovalCompletion(
+      completionEvent({ approval: { ...completionEvent().approval, instanceId: 'inst_auto' } } as never),
+    )
+    expect(notifier.sent).toHaveLength(1)
+    expect(store.snapshot()[0]!.status).toBe('approved')
+  })
+
+  test('post-promote probe: an instance that went terminal in the COMMIT→promote window is finalized', async () => {
+    const store = createRowStore()
+    const notifier = notificationRecorder()
+    const probe = vi.fn(async () => 'rejected')
+    const submission = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_race', requestNo: 'AP-RACE', status: 'pending' }),
+      loadApprovalStatus: probe,
+      completion: notifier.deps,
+    })
+    expect(probe).toHaveBeenCalledTimes(1)
+    expect(probe).toHaveBeenCalledWith('inst_race')
+    expect(submission.status).toBe('rejected')
+    expect(submission.outcome).toBe('rejected')
+    expect(notifier.sent).toEqual([{ userIds: [USER], message: '记录送审已驳回' }])
+  })
+
+  test('the probe is a RECONCILE, not an override: a still-running instance stays pending with no bell', async () => {
+    const store = createRowStore()
+    const notifier = notificationRecorder()
+    const submission = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_live', status: 'pending' }),
+      loadApprovalStatus: async () => 'pending',
+      completion: notifier.deps,
+    })
+    expect(submission.status).toBe('pending')
+    expect(notifier.sent).toHaveLength(0)
+    // a probe that throws must never fail the submission
+    const store2 = createRowStore()
+    const ok = await submitRecordApproval(store2.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_live2', status: 'pending' }),
+      loadApprovalStatus: async () => {
+        throw new Error('probe boom')
+      },
+    })
+    expect(ok.status).toBe('pending')
+  })
+
+  test('terminalOutcomeOf accepts exactly the four terminal statuses', () => {
+    for (const status of ['approved', 'rejected', 'revoked', 'cancelled']) {
+      expect(terminalOutcomeOf(status)).toBe(status)
+    }
+    for (const status of ['pending', 'draft', '', null, undefined, 42]) {
+      expect(terminalOutcomeOf(status)).toBeNull()
+    }
+  })
+})
+
+describe('`creating` is not an absorbing state', () => {
+  test('a claim older than the TTL is reclaimed by the next submit (and marked with a values-free code)', async () => {
+    let clock = Date.parse('2026-09-15T12:00:00.000Z')
+    const store = createRowStore({ now: () => clock })
+    // a claim whose process died: it never reached step 3 and nothing else will ever clear it
+    await store.query(
+      `INSERT INTO ${RECORD_APPROVAL_SUBMISSIONS_TABLE}
+         (id, sheet_id, record_id, template_id, status, submitted_by, record_version_at_submit, record_snapshot)
+       VALUES ($1, $2, $3, $4, 'creating', $5, $6, $7::jsonb)`,
+      ['sub_stale', SHEET, RECORD, TEMPLATE, USER, 1, '{}'],
+    )
+    clock += RECORD_APPROVAL_CREATING_CLAIM_TTL_MS + 1000
+
+    const submission = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_after_reclaim', status: 'pending' }),
+    })
+    expect(submission.status).toBe('pending')
+    const stale = store.snapshot().find((r) => r.id === 'sub_stale')!
+    expect(stale.status).toBe('failed')
+    expect(stale.error).toBe(RECORD_APPROVAL_ROW_ERROR_CODES.claimExpired)
+    expect(store.snapshot().filter((r) => r.status === 'creating' || r.status === 'pending')).toHaveLength(1)
+  })
+
+  test('a FRESH claim is NOT reclaimed — the in-flight rule still holds (409, no approval created)', async () => {
+    let clock = Date.parse('2026-09-15T12:00:00.000Z')
+    const store = createRowStore({ now: () => clock })
+    await store.query(
+      `INSERT INTO ${RECORD_APPROVAL_SUBMISSIONS_TABLE}
+         (id, sheet_id, record_id, template_id, status, submitted_by, record_version_at_submit, record_snapshot)
+       VALUES ($1, $2, $3, $4, 'creating', $5, $6, $7::jsonb)`,
+      ['sub_fresh', SHEET, RECORD, TEMPLATE, USER, 1, '{}'],
+    )
+    clock += 1000
+    const createApproval = vi.fn(async () => ({ id: 'inst_never', status: 'pending' }))
+    const error = await submitRecordApproval(store.query, submitInput(), ACTOR, { createApproval }).catch((e) => e)
+    expect(error).toBeInstanceOf(RecordApprovalError)
+    expect(error.statusCode).toBe(409)
+    expect(createApproval).not.toHaveBeenCalled()
+    expect(store.snapshot().find((r) => r.id === 'sub_fresh')!.status).toBe('creating')
+  })
+
+  test('the 409 details expose the stuck claim as a CODE (no instance link to offer)', async () => {
+    const store = createRowStore()
+    await store.query(
+      `INSERT INTO ${RECORD_APPROVAL_SUBMISSIONS_TABLE}
+         (id, sheet_id, record_id, template_id, status, submitted_by, record_version_at_submit, record_snapshot)
+       VALUES ($1, $2, $3, $4, 'creating', $5, $6, $7::jsonb)`,
+      ['sub_stuck', SHEET, RECORD, TEMPLATE, USER, 1, '{}'],
+    )
+    const error = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'x', status: 'pending' }),
+    }).catch((e) => e)
+    expect(error.details).toMatchObject({ submissionId: 'sub_stuck', approvalInstanceId: null, status: 'creating' })
+    expect(JSON.stringify(error.details)).not.toContain('secret-value')
+  })
+})
+
+describe('a createApproval throw only frees the in-flight slot when it PROVES nothing was created', () => {
+  test('4xx (pre-commit refusal) releases the claim: the next submit is accepted', async () => {
+    const store = createRowStore()
+    const denied = Object.assign(new Error('requester lacks approvals:write'), { statusCode: 403, code: 'APPROVAL_PERMISSION_DENIED' })
+    await expect(
+      submitRecordApproval(store.query, submitInput(), ACTOR, {
+        createApproval: async () => {
+          throw denied
+        },
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: RECORD_APPROVAL_ERROR_CODES.permissionDenied })
+    expect(store.snapshot()[0]!.status).toBe('failed')
+
+    const retry = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_retry', status: 'pending' }),
+    })
+    expect(retry.status).toBe('pending')
+  })
+
+  test('5xx (AMBIGUOUS: createApproval commits before its post-commit tail) KEEPS the claim', async () => {
+    const store = createRowStore()
+    await expect(
+      submitRecordApproval(store.query, submitInput(), ACTOR, {
+        createApproval: async () => {
+          // e.g. ApprovalProductService's post-COMMIT `getApproval` miss → 500 APPROVAL_CREATE_FAILED,
+          // by which time an approval_instances row DOES exist.
+          throw Object.assign(new Error('Approval not found after creation'), { statusCode: 500, code: 'APPROVAL_CREATE_FAILED' })
+        },
+      }),
+    ).rejects.toMatchObject({ statusCode: 502, code: RECORD_APPROVAL_ERROR_CODES.createFailed })
+
+    const claim = store.snapshot()[0]!
+    expect(claim.status).toBe('creating')
+    expect(claim.error).toBe(RECORD_APPROVAL_ROW_ERROR_CODES.unverified)
+
+    // and the very next submit must NOT be allowed to create a SECOND live approval for this record
+    const createApproval = vi.fn(async () => ({ id: 'inst_duplicate', status: 'pending' }))
+    await expect(submitRecordApproval(store.query, submitInput(), ACTOR, { createApproval })).rejects.toMatchObject({
+      statusCode: 409,
+    })
+    expect(createApproval).not.toHaveBeenCalled()
+  })
+
+  test('a promote that fails does NOT mark the row failed (the instance exists) and does not leak driver text', async () => {
+    const store = createRowStore()
+    const boom = Object.assign(new Error('terminating connection due to administrator command value=13800000000'), { code: '57P01' })
+    const query = (async (sql: string, params: unknown[] = []) => {
+      if (sql.includes("SET status = $4, outcome = $5")) throw boom
+      return store.query(sql, params)
+    }) as never
+    const error = await submitRecordApproval(query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_orphan', status: 'pending' }),
+    }).catch((e) => e)
+    expect(error).toBeInstanceOf(RecordApprovalError)
+    expect(error.statusCode).toBe(502)
+    expect(error.code).toBe(RECORD_APPROVAL_ERROR_CODES.createFailed)
+    expect(error.message).not.toContain('13800000000')
+    // the claim survives (it is the only thing standing between this and a duplicate live approval)
+    expect(store.snapshot()[0]!.status).toBe('creating')
+  })
+})
+
+describe('completion is ATOMIC: the terminal UPDATE and the notification commit together', () => {
+  /** A transaction runner that behaves like BEGIN/ROLLBACK over the fake store's rows. */
+  function transactionalStore() {
+    const store = createRowStore()
+    const runInTransaction = async <T>(fn: (q: never) => Promise<T>): Promise<T> => {
+      const before = store.snapshot()
+      try {
+        return await fn(store.query)
+      } catch (error) {
+        store.rows.length = 0
+        store.rows.push(...before)
+        throw error
+      }
+    }
+    return { store, runInTransaction: runInTransaction as never }
+  }
+
+  test('a notification INSERT that throws rolls the terminal write back, so the RETRY delivers both exactly once', async () => {
+    const { store, runInTransaction } = transactionalStore()
+    await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_txn', requestNo: 'AP-TXN', status: 'pending' }),
+    })
+
+    const sent: string[] = []
+    let failNext = true
+    const deps = {
+      runInTransaction,
+      publishRealtime: () => undefined,
+      insertNotifications: (async (_q: unknown, input: { message?: string | null }) => {
+        if (failNext) {
+          failNext = false
+          throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+        }
+        sent.push(String(input.message))
+        return { inserted: 1 }
+      }) as never,
+    }
+    const event = completionEvent({ approval: { ...completionEvent().approval, instanceId: 'inst_txn' } } as never)
+
+    // first delivery: the durable adapter sees a throw → retryable adapter_error
+    await expect(applyRecordApprovalCompletion(store.query, event, deps)).rejects.toMatchObject({ code: '40P01' })
+    expect(sent).toHaveLength(0)
+    // ROLLED BACK: the row is still pending, so the redelivery can (and must) find it
+    expect(store.snapshot()[0]!.status).toBe('pending')
+
+    await expect(applyRecordApprovalCompletion(store.query, event, deps)).resolves.toMatchObject({ applied: true })
+    expect(sent).toEqual(['记录送审已通过'])
+    expect(store.snapshot()[0]!.status).toBe('approved')
+
+    // ...and a third delivery still changes nothing
+    await expect(applyRecordApprovalCompletion(store.query, event, deps)).resolves.toEqual({ applied: false })
+    expect(sent).toHaveLength(1)
+  })
+
+  test('the notification INSERT runs on the TRANSACTION query, never on the pool one', async () => {
+    const store = createRowStore()
+    await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_q', status: 'pending' }),
+    })
+    const txQuery = (async (sql: string, params: unknown[] = []) => store.query(sql, params)) as never
+    const seen: unknown[] = []
+    await applyRecordApprovalCompletion(
+      store.query,
+      completionEvent({ approval: { ...completionEvent().approval, instanceId: 'inst_q' } } as never),
+      {
+        runInTransaction: (async (fn: (q: unknown) => Promise<unknown>) => fn(txQuery)) as never,
+        publishRealtime: () => undefined,
+        insertNotifications: (async (q: unknown) => {
+          seen.push(q)
+          return { inserted: 1 }
+        }) as never,
+      },
+    )
+    expect(seen).toEqual([txQuery])
+  })
+
+  test('createPoolTransactionRunner delegates to the pool\u2019s own transaction() and propagates throws', async () => {
+    const calls: string[] = []
+    const client = { query: async (sql: string) => ({ rows: [], rowCount: 0, sql }) as never }
+    const pool = {
+      transaction: async <T>(handler: (c: typeof client) => Promise<T>): Promise<T> => {
+        calls.push('begin')
+        try {
+          const result = await handler(client)
+          calls.push('commit')
+          return result
+        } catch (error) {
+          calls.push('rollback')
+          throw error
+        }
+      },
+    }
+    const run = createPoolTransactionRunner(pool as never)
+    await expect(run(async (q) => {
+      await q('SELECT 1')
+      return 'ok'
+    })).resolves.toBe('ok')
+    expect(calls).toEqual(['begin', 'commit'])
+
+    await expect(run(async () => {
+      throw new Error('inner')
+    })).rejects.toThrow('inner')
+    expect(calls).toEqual(['begin', 'commit', 'begin', 'rollback'])
   })
 })
