@@ -21,6 +21,8 @@ The three inputs are true-merged without rewriting their history. The sole manua
 
 ## Remaining Runtime Work
 
+Shared-policy checkpoint: `5fb07a51126aa228bf635b9d2d49d62720af4c00`, tree `e429ed6710cd948da1c0bd45826a069e4b1c0930`. `recovery-plan-authorization.ts` now owns the existing authorization stabilizer and true-delta evaluator. HTTP delegates to it using its unchanged request/database resolver and full-read evaluator. There is no worker adapter or startup activation yet. The shared evaluator accepts transaction-bound authority/full-read functions; callers must not provide permissive substitutes.
+
 1. Share the existing full-read and true-delta evaluator between HTTP and worker without changing HTTP behavior.
 2. Bind background identity to live scope; do not invent an authenticated tenant from a request-shaped object or unverified input.
 3. Compose canonical mutation/outbox and post-commit effects; preserve cancellation, lease fencing, and writer-block cleanup.
