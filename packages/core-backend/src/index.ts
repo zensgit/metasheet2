@@ -244,6 +244,7 @@ import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { approvalMetricsRouter } from './routes/approval-metrics'
 import { approvalCommentsRouter } from './routes/approval-comments'
+import { approvalFormDraftsRouter } from './routes/approval-form-drafts'
 import {
   setApprovalCommentMentionDelivery,
   setApprovalCommentNotifyChecker,
@@ -1759,6 +1760,16 @@ export class MetaSheetServer {
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
 
+    // 路由：审批填单草稿（P3-3，服务端存储）— registered BEFORE approvalsRouter() below: its list
+    // endpoint is `GET /api/approvals/form-drafts` (a single literal path segment), which would
+    // otherwise be SHADOWED by approvalsRouter's own generic `GET /api/approvals/:id` (Express
+    // matches routers in `app.use()` registration order, and `:id` matches the literal
+    // 'form-drafts' just as readily as a real approval id) — the same reasoning approvals.ts's own
+    // 'directory' / 'record-link-options' sub-routes document for why THEY must precede `:id`
+    // within that file. The `/api/approvals/form-drafts/:templateId` item routes have an extra path
+    // segment and never collided, but ordering this whole router first is simpler than special-
+    // casing just the list route, and cannot regress anything registered after it.
+    this.app.use(approvalFormDraftsRouter())
     // 路由：审批（示例）
     this.app.use(approvalsRouter({
       injector: this.injector,
