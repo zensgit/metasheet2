@@ -297,3 +297,14 @@ Exact code `04b63fd732ecb33c90cc07e2767cebc4630a8647`, tree `9584554625d1c48ba5c
 ### Current-Main Attendance Replay
 
 True merge `bf98898de36e71a913ac526752eeb8870d212168`, tree `f673c33c3273507cdfddd692495d504b2494b0dd`, ordered parents `7510edbb59c5e954e90b39cd09fac859d84a4306` and then-current main `3af707dddca48b196e168da0fab45560f88acd11`. Seven incoming attendance Web paths, no conflicts or manual resolutions. First-parent backend/plugin/script/workflow/OpenAPI delta is empty, including provenance. Incoming attendance dashboard/reveal tests pass 98/98; the three disposition/sink guards pass 19/19 again; diff-check and worktree clean. Logs `/private/tmp/tm-main-attendance-neighbor.log` and `/private/tmp/tm-derived-disposition-merged.log`. No repeated real-DB claim or production operation; publication still requires fresh exact-head remote checks.
+
+### Fresh-Process Worker Drain
+
+Exact code `7e451b46b14859eadd4e5dd3a015799cb22efc07`, tree `b505c7da96644c8846d26f3b9be0c9df5872f608`: two test/harness files only, 62 additions / 13 deletions.
+
+- Both real SIGKILL cases now invoke a fresh child using the production worker factory and `runOnce`, canonical derived processor and real PG transactions. Parent PID differs; normal child exit is 0 and its application-name backend census returns zero. The original restore restart/lease/receipt assertions remain intact.
+- Inactive actor: one attempted callback, zero completions, one idle tick, no stale formula change and 5,001 pending effects. Reactivated actor: exactly 5,001 callback completions; batch sizes exactly 156 times 32, then 9, then 0. Each tick has zero restore chunks/sweeps. Formula and ledger completion assertions remain exact. No parent callback completes these effects.
+- Mutation changing the production worker derived loop bound from 32 to 0 makes the before-COMMIT case RED: expected one denied callback, received zero. Production worker restored byte-identical, Git blob `15f950ed13e795f28a7d9540d494914cd046800e`.
+- Fresh isolated migration PASS; final complete restore-jobs suite 39/39 PASS, zero skips, 141.75 seconds. Core tsc and diff-check PASS. Logs `/private/tmp/tm-child-drain-{migrate,target,mutation,full,final-tsc}.log` are session-local evidence, not remote artifacts.
+- Synthetic users, jobs, effects and other database backends zero. Dedicated DB dropped, exact/prefix database and backend census zero, PG stopped. No shared DB, provider or deployment change.
+- Two simultaneous connections suffice for this serial fixture, not a production capacity SLA. Child object store/key custody remain fixture-bound; standard startup/provider, timer-driven server acceptance and real browser UAT are not claimed. Remote CI must be evaluated at the published successor SHA.
