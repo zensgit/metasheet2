@@ -138,3 +138,15 @@ Code `af9a2520d611cbee703191d621d98b008a7426c4`, tree `9f610e54907f508561bb72e43
 - Logs: `/private/tmp/tm-derived-migrate.log`, `tm-derived-replay.log`, `tm-derived-target.log`, `tm-derived-mutation.log`, `tm-derived-full-final.log`, `tm-derived-tsc.log`, `tm-derived-lint.log` (session-local, not remote artifacts).
 
 Remaining: transaction-bound enqueue, bounded terminal consumer with strict error handling, live authorization/fence checks, crash/restart completion and standard startup assembly. This checkpoint is not end-to-end derived recovery proof and has not been pushed or published.
+
+### Transaction-Bound Derived Enqueue
+
+Code `1b1621d41dbbc53cbe8c3f91c60315f9f9c48d56`, tree `f73c9ebc8982daff559d1c7d30a4022aae64b79d`, adds the internal enqueue primitive and six cases to the existing real-DB suite. The application does not call it yet; consumer and callback wiring remain open.
+
+- Dedicated PG15 fresh full migration succeeds. Final full restore-jobs suite: 31/31 with no skips.
+- Enqueue cases cover committed revert/delete ID projection, duplicate idempotency, invisibility to another connection before commit, rollback, conflicting revision payload rollback, all four wrong scope/actor fields, planned-job refusal and real autocommit refusal. Deletion retains link invalidations but no source field IDs.
+- Mutation disabling the post-conflict equality check produces the exact conflict-case RED; restored implementation passes the whole suite.
+- Core tsc, new module ESLint and diff-check pass. No shared workflow or no-DB selector change; this suite retains its existing post-migrate wiring.
+- Ledger/sheet/job fixtures zero; dedicated database dropped, prefix/backends zero, PG stopped.
+- Logs are session-local `/private/tmp/tm-derived-enqueue-{migrate,target,mutation,full-final,tsc,lint}.log`, not remote CI evidence.
+- During verification remote main advanced to `f274316f6dfe2ba7f0de78dee7c43aa3624748c7`; fetched delta contains 13 stock-preparation plugin files and no path overlap with this checkpoint. Integration branch is still based on `062614f4407b3d9bffc82dae266071b8a6e5e5bd`; current-main replay remains necessary before publication. No push/PR/flag/deployment action occurred.
