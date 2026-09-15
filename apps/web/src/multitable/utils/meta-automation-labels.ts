@@ -378,6 +378,7 @@ export type AutomationLabelKey =
   | 'resultWriteback.outcome.rejected'
   | 'resultWriteback.outcome.revoked'
   | 'resultWriteback.outcome.cancelled'
+  | 'resultWriteback.markUnknownOption'
   | 'resultWriteback.optionMissingBlocker'
 
 export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
@@ -693,6 +694,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'resultWriteback.outcome.rejected',
   'resultWriteback.outcome.revoked',
   'resultWriteback.outcome.cancelled',
+  'resultWriteback.markUnknownOption',
   'resultWriteback.optionMissingBlocker',
 ]
 
@@ -1090,6 +1092,9 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'resultWriteback.outcome.rejected': { en: 'Rejected', zh: '拒绝' },
   'resultWriteback.outcome.revoked': { en: 'Revoked', zh: '撤销' },
   'resultWriteback.outcome.cancelled': { en: 'Cancelled', zh: '取消' },
+  // The marked entry in an OUTCOME-value picker is a written VALUE, not a field — 'markUnknown' above
+  // ("unknown field") belongs to the three FIELD pickers and would mislabel it.
+  'resultWriteback.markUnknownOption': { en: 'not an option', zh: '不在选项中' },
   // #5742 save blocker — the client mirror of the backend's select-option check. Placeholders are filled by
   // automationResultWritebackOptionMissingMessage below (field name / written value / outcome label).
   'resultWriteback.optionMissingBlocker': {

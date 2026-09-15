@@ -458,7 +458,10 @@ export function validateStartApprovalConfig(config: Record<string, unknown>, pat
   }
   // W7-1 approval-result backwrite: a DECLARED, FIXED outcome→field mapping. The admin picks WHICH
   // source field receives `outcome` / `approver` / `completedAt` — NOT a free template expression — so
-  // the write path stays values-constrained (values come from the completion event, never user strings).
+  // the write path stays values-constrained: the approver/completedAt values come from the completion
+  // EVENT only, and the status value comes from the event OR (since #5742) from the declared
+  // `outcomeValues` LITERAL — which for a select must be one of that field's own options (save + fire-time
+  // check), and for string/longText may be any declared literal. Never a template evaluated on record data.
   // Optional; ≥1 field if present. The mapping is part of the action config, so it is covered by the
   // resume-time action-fingerprint drift guard (cannot be swapped after the approval suspends).
   if (config.resultWriteback !== undefined) {
@@ -492,6 +495,17 @@ export function validateStartApprovalConfig(config: Record<string, unknown>, pat
       mapped += 1
     }
     if (mapped === 0) return `${path}.resultWriteback must map at least one of statusField/approverField/completedAtField`
+    // #5742: the mapping ONLY applies to the status field (buildResultWritebackPatch reads it under
+    // `if (statusField)`), so `outcomeValues` without a `statusField` is dead config that silently never
+    // fires — reject it loudly. Checked AFTER the field loop so the more specific "must map at least one
+    // of …" error still wins for a writeback that maps no field at all. `{}` stays legal (= absent).
+    if (
+      isRecord(outcomeValues)
+      && Object.keys(outcomeValues).length > 0
+      && resultWritebackFieldId(config.resultWriteback, 'statusField') === null
+    ) {
+      return `${path}.resultWriteback.outcomeValues requires ${path}.resultWriteback.statusField (the mapping only applies to the status field)`
+    }
     // T3-5 cross-base target: an OPTIONAL literal triple. If ANY of the three target ids is present, require
     // the FULL triple as non-empty strings (Q4). No expression templating — literal ids only. Target
     // field-type/read validation AND the author's target-base write authority are DEFERRED to runtime (the
@@ -591,9 +605,12 @@ type ApprovalBackwriteOutcome =
   | { kind: 'same-base'; patch: Record<string, unknown> }
   | { kind: 'cross-base'; target: { targetBaseId: string; targetSheetId: string; targetRecordId: string } }
 
-// The backwrite patch: DECLARED fixed field→value mapping, VALUES sourced from the completion EVENT only
-// (status = outcome, approver = the approval actor, completedAt = the event time). Never the trigger actor.
-function buildResultWritebackPatch(
+// The backwrite patch: DECLARED fixed field→value mapping. approver = the approval actor and completedAt =
+// the event time come from the completion EVENT only (never the trigger actor); status = the RESOLVED
+// outcome value (#5742: the declared `outcomeValues` literal when present, else the raw outcome).
+// Exported for unit coverage: this is the single line where the mapping becomes user-visible, so it needs
+// its own test rather than leaning on the shared resolver's cases.
+export function buildResultWritebackPatch(
   writeback: Record<string, unknown>,
   event: ApprovalCompletionEventV1,
 ): Record<string, unknown> {
@@ -3652,8 +3669,10 @@ export class AutomationService {
   /**
    * W7-1 approval-result backwrite: write the DECLARED fixed outcome→field mapping (from the
    * start_approval action's `resultWriteback`) onto the SOURCE record, using values from the completion
-   * event ONLY (never user-templated strings — that keeps the write path values-constrained, the whole
-   * reason this was gated). Goes through the record lock guard (B1: an automation does not implicitly own
+   * event — plus, since #5742, the DECLARED `outcomeValues` literal for the status field (a select literal
+   * is constrained to that field's own options by the save/fire-time check; a string/longText one is any
+   * declared literal). Never a user-templated string evaluated against record data — that is what keeps the
+   * write path values-constrained, the whole reason this was gated. Goes through the record lock guard (B1: an automation does not implicitly own
    * a lock). Null-safe: `approver` is null on auto/system approval (the field is written null, not
    * crashed). Same-base only (the source record that started the approval). The approved branch always
    * writes when configured; non-approved terminal outcomes require the explicit `onNonApproved` opt-in so
@@ -3961,12 +3980,18 @@ export class AutomationService {
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
   // rule's source sheet. Returns an error message (→ AutomationRuleValidationError) or null.
   //
+  // WIRING, stated exactly (it is narrower than "save"): the ONLY caller is createRule (:1397). updateRule
+  // does NOT run this gate — it never has — so editing an existing rule is NOT hard-failed here; the editor's
+  // client blocker is the hint on that path and the FIRE-TIME check (assertResultWritebackFields) is the
+  // fail-closed authority for every path. Widening it to updateRule is an owner call (it would make an
+  // already-saved rule whose select lost an option unsaveable until the mapping is fixed), not this issue's.
+  //
   // #5742 outcome coverage: 'approved' is always checked (the path every backwrite rule has). When the rule
-  // opts into `onNonApproved`, 'rejected' is checked TOO — the editor's save-blocker mirrors exactly these
-  // two, so a mapped-but-missing option fails where the author can still fix it. 'revoked' / 'cancelled'
-  // stay on the FIRE-TIME check only: save-time strictness is deliberately scoped to the outcomes the editor
-  // gates, so an existing rule whose select lacks a 撤销/取消 option is not retroactively unsaveable (it
-  // still fails closed at fire time, which is where those rare terminal states actually occur).
+  // opts into `onNonApproved`, 'rejected' is checked TOO, so a mapped-but-missing option fails where the
+  // author can still fix it. 'revoked' / 'cancelled' stay on the FIRE-TIME check only: save-time strictness
+  // is deliberately scoped to the outcomes the editor gates, so an existing rule whose select lacks a
+  // 撤销/取消 option is not retroactively unsaveable (it still fails closed at fire time, which is where
+  // those rare terminal states actually occur).
   private async assertResultWritebackFieldsAtSave(
     sheetId: string,
     actions: AutomationAction[] | null,

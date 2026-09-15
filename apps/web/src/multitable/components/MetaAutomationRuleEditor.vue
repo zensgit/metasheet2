@@ -637,11 +637,12 @@
                 <el-option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
               </el-select>
 
-              <!-- #5742 审批结果 → 写入值: only shown once a status field is chosen (it is the only field the
-                   mapping applies to). An empty row keeps the legacy behaviour — the RAW outcome literal. -->
-              <div v-if="resultWritebackStatusFieldSelected(action)" class="meta-rule-editor__writeback-outcomes" data-field="resultWritebackOutcomeValues">
-                <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.outcomeValuesTitle', isZh) }}</label>
-                <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.outcomeValuesHint', isZh) }}</div>
+              <!-- #5742. The 非通过结果也写回 checkbox is shown whenever ANY writeback field is mapped: it gates
+                   the WHOLE backwrite (approver/completedAt included, automation-service writeApprovalResultBack),
+                   so hiding it behind the status picker would leave a live key the author cannot see or edit.
+                   The 审批结果 → 写入值 rows need a status field — that is the only field the mapping applies to.
+                   An empty row keeps the legacy behaviour — the RAW outcome literal. -->
+              <div v-if="resultWritebackAnyFieldSelected(action)" class="meta-rule-editor__writeback-outcomes" data-field="resultWritebackOutcomeValues">
                 <el-checkbox
                   class="meta-rule-editor__toggle-label"
                   data-field="resultWritebackOnNonApproved"
@@ -650,6 +651,9 @@
                 >
                   {{ automationLabel('resultWriteback.onNonApproved', isZh) }}
                 </el-checkbox>
+                <template v-if="resultWritebackStatusFieldSelected(action)">
+                <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.outcomeValuesTitle', isZh) }}</label>
+                <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.outcomeValuesHint', isZh) }}</div>
                 <div v-for="outcome in resultWritebackOutcomeRows(action)" :key="outcome" class="meta-rule-editor__field-pair">
                   <span class="meta-rule-editor__preset-label">{{ automationResultWritebackOutcomeLabel(outcome, isZh) }}</span>
                   <el-select
@@ -673,6 +677,7 @@
                     @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
                   />
                 </div>
+                </template>
               </div>
 
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.approverField', isZh) }}</label>
@@ -4592,7 +4597,10 @@ function readResultWritebackOutcomeValues(raw: unknown): Record<string, string> 
   const values: Record<string, string> = {}
   for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
     const value = source[outcome]
-    if (typeof value === 'string' && value.trim()) values[outcome] = value
+    // TRIMMED on the way in, exactly as the save trims on the way out and as the backend resolver trims
+    // before writing/validating — one canonical form for the draft, the picker options, the blocker and the
+    // payload, so a stored ' 已通过 ' does not render an unmatched el-select modelValue.
+    if (typeof value === 'string' && value.trim()) values[outcome] = value.trim()
   }
   return values
 }
@@ -4661,6 +4669,26 @@ function resultWritebackStatusFieldSelected(action: DraftAction): boolean {
   return resultWritebackStatusFieldId(action).length > 0
 }
 
+// Is ANY of the three writeback pickers filled? (Same condition as the save-time `hasMappedWritebackField`:
+// with none of them set the whole resultWriteback object is dropped, so nothing below it applies either.)
+function resultWritebackAnyFieldSelected(action: DraftAction): boolean {
+  return (['resultWritebackStatusField', 'resultWritebackApproverField', 'resultWritebackCompletedAtField'] as const)
+    .some((key) => typeof action.config[key] === 'string' && (action.config[key] as string).trim().length > 0)
+}
+
+// T3-5 cross-base target. The editor does not MODEL the triple, so it is read off the preserved original
+// config (#5724) — the same place an unedited load→save carries it from.
+const RESULT_WRITEBACK_TARGET_KEYS = ['targetBaseId', 'targetSheetId', 'targetRecordId'] as const
+
+function resultWritebackIsCrossBase(action: DraftAction): boolean {
+  const original = isPlainRecord(action.config.startApprovalOriginal) ? action.config.startApprovalOriginal : {}
+  const writeback = isPlainRecord(original.resultWriteback) ? original.resultWriteback : {}
+  return RESULT_WRITEBACK_TARGET_KEYS.some((key) => {
+    const value = writeback[key]
+    return typeof value === 'string' && value.trim().length > 0
+  })
+}
+
 function resultWritebackStatusField(action: DraftAction): AutomationRuleEditorField | undefined {
   const id = resultWritebackStatusFieldId(action)
   return id ? props.fields.find((field) => field.id === id) : undefined
@@ -4701,7 +4729,9 @@ function resultWritebackOutcomeOptions(action: DraftAction, outcome: string): Re
   if (current && !options.some((option) => option.value === current)) {
     // Same P2 rule as resultWritebackFieldOptions: a configured value that is not (or no longer) an option
     // is appended as a MARKED option so the picker never renders empty and an unedited save carries it back.
-    const marker = automationLabel('resultWriteback.markUnknown', isZh.value)
+    // NOTE the marker key: this entry is a written VALUE, so it uses 'markUnknownOption' ("not an option"),
+    // NOT the field pickers' 'markUnknown' ("unknown field") — that one would mislabel a value as a field.
+    const marker = automationLabel('resultWriteback.markUnknownOption', isZh.value)
     options.push({
       value: current,
       label: isZh.value ? `${current}（${marker}）` : `${current} (${marker})`,
@@ -4746,16 +4776,21 @@ function setResultWritebackOnNonApproved(action: DraftAction, value: boolean): v
  * select and the value that WOULD be written for an outcome is not one of its options, the save is blocked
  * with an actionable message instead of a server 400.
  *
- * Scope, stated plainly: only 'approved' (always) and 'rejected' (when 非通过结果也写回 is on) — the exact
- * pair the backend hard-fails at SAVE time. 'revoked'/'cancelled' are authored here but only enforced at fire
- * time, so the mirror does not block a save the server would accept. A select whose option set this editor
- * does not know (no `options` on the field) is NOT blocked: the backend gate stays the authority, and a
- * blocker built on missing knowledge would be an unfixable dead end for the author.
+ * Scope, stated plainly: only 'approved' (always) and 'rejected' (when 非通过结果也写回 is on) — the pair the
+ * backend checks at SAVE time (on createRule; updateRule does not run that gate at all, so on the edit path
+ * this blocker is a HINT that is strictly stronger than the server). 'revoked'/'cancelled' are authored here
+ * but only enforced at fire time. Two more cases are deliberately NOT blocked, because the server accepts
+ * them and a blocker the server disagrees with is an unfixable dead end:
+ *   - a select whose option set this editor does not know (no `options` on the field);
+ *   - a T3-5 CROSS-BASE writeback — its status field lives in the TARGET sheet, not in `props.fields`, and
+ *     the backend gate skips it for exactly that reason (assertResultWritebackFieldsAtSave →
+ *     `if (isCrossBaseWriteback(writeback)) continue`), deferring to the runtime cross-base check.
  */
 const resultWritebackOutcomeBlocks = computed<StartApprovalOutcomeValueBlock[]>(() => {
   const blocks: StartApprovalOutcomeValueBlock[] = []
   for (const [index, action] of draft.value.actions.entries()) {
     if (action.type !== 'start_approval') continue
+    if (resultWritebackIsCrossBase(action)) continue
     const field = resultWritebackStatusField(action)
     if (!field || field.type !== 'select') continue
     const optionValues = resultWritebackStatusOptions(action).map((option) => option.value)
@@ -4875,12 +4910,22 @@ function buildPayload(): Partial<AutomationRule> {
       // from the preserved original — unchecking 非通过结果也写回 must DELETE resultWriteback.onNonApproved,
       // and an emptied mapping must drop resultWriteback.outcomeValues entirely (absence = write the raw
       // outcome, which is the pre-#5742 behaviour).
+      // The mapping applies to the STATUS field only (the backend validator rejects one without a
+      // statusField), so a cleared status picker drops it. onNonApproved is NOT dropped with it — it gates
+      // the WHOLE backwrite, approver/completedAt included — and its checkbox stays visible for exactly that
+      // reason, so an approver-only rule keeps its opt-in instead of silently losing it here.
       const outcomeValues: Record<string, string> = {}
-      for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
-        const value = resultWritebackOutcomeValue(action, outcome).trim()
-        if (value) outcomeValues[outcome] = value
+      if (statusField) {
+        for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+          const value = resultWritebackOutcomeValue(action, outcome).trim()
+          if (value) outcomeValues[outcome] = value
+        }
       }
       if (action.config.resultWritebackOnNonApproved === true) resultWriteback.onNonApproved = true
+      // An EXPLICIT stored `false` is re-emitted verbatim: it is inert server-side (`onNonApproved === true`
+      // is what runtime reads), but the #4196 action fingerprint hashes the RAW config, so silently dropping
+      // it on an unrelated edit would change the persisted JSON of a rule nobody touched.
+      else if (originalWriteback.onNonApproved === false) resultWriteback.onNonApproved = false
       if (Object.keys(outcomeValues).length > 0) resultWriteback.outcomeValues = outcomeValues
       const config: Record<string, unknown> = {
         ...original,

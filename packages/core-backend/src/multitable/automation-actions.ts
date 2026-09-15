@@ -239,7 +239,10 @@ export interface StartApprovalConfig {
    * #5742 `outcomeValues`: an optional declared outcome → written-value mapping for `statusField`.
    * Absent / empty ⇒ the RAW outcome string is written (unchanged pre-#5742 behaviour); present ⇒ the
    * mapped non-empty value is written, which is what lets a Chinese single-select keep 已通过/已拒绝
-   * instead of growing options literally named 'approved'/'rejected'.
+   * instead of growing options literally named 'approved'/'rejected'. It applies to `statusField` ONLY, so
+   * the validator rejects a non-empty `outcomeValues` when no `statusField` is mapped (dead config).
+   * `onNonApproved`, by contrast, gates the WHOLE backwrite (approver/completedAt included), so it is
+   * meaningful without a `statusField`.
    */
   resultWriteback?: {
     statusField?: string

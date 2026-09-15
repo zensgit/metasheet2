@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   AutomationService,
+  buildResultWritebackPatch,
   resolveWritebackStatusValue,
   resultWritebackFieldTypeError,
   validateStartApprovalConfig,
@@ -91,6 +92,62 @@ describe('#5742 resultWritebackFieldTypeError select-option check', () => {
   })
 })
 
+/**
+ * The PATCH itself. `buildResultWritebackPatch` is the single line where the mapping becomes user-visible
+ * (the value actually written onto the record), so it gets its own cases: covering only the shared resolver
+ * would let the write and the option check drift apart with the suite still green.
+ */
+describe('#5742 buildResultWritebackPatch status value', () => {
+  const completionEvent = (toStatus: string) => ({
+    version: 1,
+    eventId: 'evt_1',
+    eventType: 'approval.completed',
+    occurredAt: '2026-09-15T02:00:00.000Z',
+    source: 'approval-product',
+    approval: {
+      instanceId: 'ai_1', requestNo: null, templateId: 'tpl_1', templateVersionId: null,
+      publishedDefinitionId: null, businessKey: null, workflowKey: null,
+    },
+    transition: { toStatus },
+    actor: { id: 'usr_1', name: null },
+    requester: { id: 'usr_2' },
+  }) as never
+
+  it('writes the MAPPED value into the status field', () => {
+    const patch = buildResultWritebackPatch(
+      { statusField: 'fld_status', outcomeValues: { approved: ZH_APPROVED } },
+      completionEvent('approved'),
+    )
+    expect(patch).toEqual({ fld_status: ZH_APPROVED })
+  })
+
+  it('writes the RAW outcome when the mapping is absent or does not cover this outcome', () => {
+    expect(buildResultWritebackPatch({ statusField: 'fld_status' }, completionEvent('approved')))
+      .toEqual({ fld_status: 'approved' })
+    expect(buildResultWritebackPatch(
+      { statusField: 'fld_status', outcomeValues: { approved: ZH_APPROVED } },
+      completionEvent('rejected'),
+    )).toEqual({ fld_status: 'rejected' })
+  })
+
+  it('leaves the approver / completedAt values sourced from the EVENT (the mapping is status-only)', () => {
+    const patch = buildResultWritebackPatch(
+      {
+        statusField: 'fld_status',
+        approverField: 'fld_approver',
+        completedAtField: 'fld_done',
+        outcomeValues: { rejected: ZH_REJECTED },
+      },
+      completionEvent('rejected'),
+    )
+    expect(patch).toEqual({
+      fld_status: ZH_REJECTED,
+      fld_approver: 'usr_1',
+      fld_done: '2026-09-15T02:00:00.000Z',
+    })
+  })
+})
+
 describe('#5742 validateStartApprovalConfig outcomeValues shape', () => {
   const base = { templateId: 'tpl_1', formDataMapping: { amount: '{{record.amount}}' } }
   const withWriteback = (writeback: unknown) => ({ ...base, resultWriteback: writeback })
@@ -133,6 +190,22 @@ describe('#5742 validateStartApprovalConfig outcomeValues shape', () => {
   it('still requires at least one mapped FIELD — outcomeValues alone is not a mapping', () => {
     expect(validateStartApprovalConfig(withWriteback({ outcomeValues: { approved: ZH_APPROVED } }), 'actionConfig'))
       .toMatch(/must map at least one of statusField\/approverField\/completedAtField/)
+  })
+
+  it('rejects a non-empty outcomeValues with NO statusField (dead config: the mapping is status-only)', () => {
+    expect(validateStartApprovalConfig(withWriteback({
+      approverField: 'fld_approver',
+      outcomeValues: { approved: ZH_APPROVED },
+    }), 'actionConfig')).toBe(
+      'actionConfig.resultWriteback.outcomeValues requires actionConfig.resultWriteback.statusField '
+      + '(the mapping only applies to the status field)',
+    )
+    // …while an EMPTY mapping (= absent) and a bare onNonApproved stay legal without a statusField:
+    // onNonApproved gates the WHOLE backwrite, approver/completedAt included.
+    expect(validateStartApprovalConfig(withWriteback({ approverField: 'fld_approver', outcomeValues: {} }), 'actionConfig'))
+      .toBeNull()
+    expect(validateStartApprovalConfig(withWriteback({ approverField: 'fld_approver', onNonApproved: true }), 'actionConfig'))
+      .toBeNull()
   })
 })
 
