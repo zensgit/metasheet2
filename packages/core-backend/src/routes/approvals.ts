@@ -59,7 +59,9 @@ import {
   isApprovalListTab,
   type ApprovalBridgePlmAdapter,
   type ApprovalListTab,
+  type UnifiedApprovalDTO,
 } from '../services/approval-bridge-types'
+import { sanitizeCsvRow, CSV_LINE_TERMINATOR } from '../services/csv-cell'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
 import {
   searchDirectoryUsers,
@@ -83,6 +85,107 @@ import {
 
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
+
+// P3-1 — CSV export (contract: docs' review `p31-approval-export-contract-20260911.md`).
+// Hard ceiling on rows a single export request can return. A caller MAY ask for fewer via
+// `?limit=`, which is clamped to this ceiling (never raised past it) — see
+// `resolveApprovalExportLimit` and the `?format=csv` branch of `GET /api/approvals` below.
+// Bounded per contract §5: never silently truncated — `X-Approval-Export-Capped` reports whether
+// the underlying scoped query itself hit this bound.
+//
+// Fix round (P2-1, gate finding): lowered from 5000 to 500. `canReadApprovalInstance` (§1.5's
+// per-row admission check below) costs THREE queries per row — `viewerRoles`'s two lookups
+// (`SELECT role FROM users …`, `SELECT ur.role_id, r.name FROM user_roles …`) plus the main
+// admission `SELECT` — and FOUR with `APPROVAL_S1_ORG_PIN_ENABLED=true` (an extra
+// `viewerActiveOrgIds` lookup). The admission loop runs these SEQUENTIALLY, on one pooled
+// connection, for a `viewerId` that never changes across the whole loop. The gate measured
+// 1.20 ms/row on loopback against near-empty tables — a best case — and projected 30-75 s per
+// export at a realistic 2-5 ms DB round-trip, against a pool whose default is `max: 20`
+// (`src/integration/db/connection-pool.ts`): a handful of concurrent exports would starve every
+// other request on the instance.
+//
+// Second fix round (P3-E, gate-2 finding) — corrected arithmetic: with `APPROVAL_S1_ORG_PIN_
+// ENABLED=true` the admission check is FOUR queries/row, so the worst case at this cap is
+// 500 * 4 * 5ms = 10s at the TOP of the stated 2-5ms RTT range, not "single-digit seconds" as
+// this comment previously claimed (10s is not single-digit). Honest range: roughly 4s (pin off,
+// 3 queries/row, 2ms RTT) to 10s (pin on, 4 queries/row, 5ms RTT).
+//
+// Second fix round (P3-E, gate-2 finding) — this cap was asserted ONLY by
+// `tests/integration/approval-export-csv.db.test.ts`, which runs in the `approval-realdb-
+// export-csv` GitHub Actions lane — an ADVISORY (non-required) check on `main` (confirmed live via
+// `gh api repos/zensgit/metasheet2/branches/main/protection`; no `approval-realdb-*` lane is
+// required, matching every sibling lane). Silently raising this constant back toward 5000 would
+// have kept every REQUIRED check green.
+//
+// `resolveApprovalExportLimit`'s own value AND its clamping behavior are now additionally asserted
+// in `tests/unit/approval-export-row-cap.test.ts`. That this closes the gap was checked first-hand,
+// not inherited: `packages/core-backend/package.json`'s own `test` script is the bare `vitest`
+// (no `--config`, i.e. the default `vitest.config.ts` that DOES collect `tests/unit/`); this repo's
+// `.github/workflows/plugin-tests.yml` `test` job (matrix `[18.x, 20.x]`) runs
+// `pnpm --filter @metasheet/core-backend test` in its "Run core-backend tests" step with NO
+// `if: matrix.node-version == …` guard, so it executes on BOTH matrix legs; and `test (20.x)` (not
+// `test (18.x)`) is the required context. So a regression in this cap or its clamping now also
+// fails a REQUIRED check, not only the advisory real-DB lane.
+//
+// Do NOT fix this by adding an export-local roles/admission cache: that would FORK the canonical
+// predicate the mutation-tested §2 row A relies on (contract §1 forbids a second path; "不接受
+// 「注释声明复用」" applies exactly as much to a memoized copy as to a rewritten query). Raising
+// this cap back up is gated on a Lock-10 follow-up that memoizes the role lookup INSIDE
+// `canReadApprovalInstance` itself (or adds an optional pre-resolved-roles parameter), touching
+// all 9 existing call sites under its own authorization — not on this slice.
+export const APPROVAL_EXPORT_ROW_CAP = 500
+
+/**
+ * The ONLY place that computes the CSV export's effective per-request row limit — extracted (P3-E,
+ * gate-2 fix round) so the unit suite can gate both `APPROVAL_EXPORT_ROW_CAP`'s VALUE and this
+ * clamping behavior without a live server or database. The `?format=csv` branch below calls this
+ * exact function, not a re-derivation of it, so a test importing it exercises production code.
+ * `rawLimit` is `req.query.limit` (or any parseable value); an absent/invalid/negative value falls
+ * back to the cap itself (an export with no `?limit=` should return up to the full cap), and any
+ * value above the cap is clamped down to it — it can never be raised past `APPROVAL_EXPORT_ROW_CAP`.
+ */
+export function resolveApprovalExportLimit(rawLimit: unknown): number {
+  return parsePaging(rawLimit, APPROVAL_EXPORT_ROW_CAP, APPROVAL_EXPORT_ROW_CAP)
+}
+
+// P3-1 — the CSV column projection. Every value is read DIRECTLY off the SAME `UnifiedApprovalDTO`
+// the JSON list response serializes (contract §1.6: hidden-field redaction and the record-link
+// read-projection sentinel are already baked into `dto.formSnapshot` by the time it reaches this
+// router — this table only PROJECTS existing DTO fields, it never re-derives or re-fetches
+// anything). Structured fields (`requester`/`subject`/`formSnapshot`) are left as objects; the CSV
+// serializer JSON-stringifies them uniformly, same as every other cell (contract §3.3 — every
+// user-controlled value is run through the same sanitizer, not just the obvious string columns).
+// Comments and attachments are deliberately absent: they are not part of `UnifiedApprovalDTO` and
+// are each authorized by their own gate (contract §1.6) — fetching them here would open a second,
+// ungated path to a resource that already has one.
+const APPROVAL_EXPORT_CSV_COLUMNS: ReadonlyArray<{
+  header: string
+  value: (dto: UnifiedApprovalDTO) => unknown
+}> = [
+  { header: 'id', value: (d) => d.id },
+  { header: 'sourceSystem', value: (d) => d.sourceSystem },
+  { header: 'externalApprovalId', value: (d) => d.externalApprovalId ?? null },
+  { header: 'workflowKey', value: (d) => d.workflowKey ?? null },
+  { header: 'businessKey', value: (d) => d.businessKey ?? null },
+  { header: 'requestNo', value: (d) => d.requestNo ?? null },
+  { header: 'title', value: (d) => d.title ?? null },
+  { header: 'status', value: (d) => d.status },
+  { header: 'requesterId', value: (d) => d.requester?.id ?? null },
+  { header: 'requesterName', value: (d) => d.requester?.name ?? null },
+  { header: 'subject', value: (d) => d.subject ?? null },
+  { header: 'currentStep', value: (d) => d.currentStep },
+  { header: 'totalSteps', value: (d) => d.totalSteps },
+  { header: 'templateId', value: (d) => d.templateId ?? null },
+  { header: 'templateVersionId', value: (d) => d.templateVersionId ?? null },
+  { header: 'currentNodeKey', value: (d) => d.currentNodeKey ?? null },
+  // Already redacted (hidden-field fence) AND record-link-projected (sentinel for an
+  // unauthorized viewer) at DTO-construction time — see `ApprovalBridgeService.listApprovals`'s
+  // `toUnifiedDTO` + `projectRecordLinkFormSnapshotsForViewerBatch` calls. This router never
+  // touches the raw stored `form_snapshot`.
+  { header: 'formSnapshot', value: (d) => d.formSnapshot ?? null },
+  { header: 'createdAt', value: (d) => d.createdAt },
+  { header: 'updatedAt', value: (d) => d.updatedAt },
+]
 const approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])
 // B3-04 (design-lock 2026-07-05): the participant-facing directory picker. Unlike the template-author
 // directory above, this serves ordinary approval ACTIONS (transfer / add-sign), the fill-form user
@@ -1102,12 +1205,31 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   )
 
   r.get('/api/approvals', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    // Hoisted OUT of the `try` block on purpose: a `const` declared inside `try {}` is a separate
+    // lexical block from `catch {}` and is not visible there — the `catch` below needs to know
+    // whether this was a CSV request even when the failure happens before the format is parsed
+    // (e.g. the `!pool` check), so it defaults to `false` (never mistakes an early failure for an
+    // export failure) and is set once the query string has actually been read.
+    let isCsvExport = false
     try {
       if (!pool) {
         return res.status(503).json(
           approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
         )
       }
+
+      // P3-1 — `?format=csv` is an OUTPUT branch on this SAME route/guard/query, not a second
+      // endpoint (the shape `routes/audit-logs.ts` already uses). Fix round (P3-3, gate finding):
+      // this route pre-dates this slice and NEVER read `format` at all, so `?format=json` (and
+      // `?format=anything`, and `?format[]=x`) was previously accepted-and-ignored — 200 JSON, same
+      // as no `format` — NOT rejected. Contract §5 forbids changing an existing read endpoint's
+      // semantics, so ONLY the EXACT literal string `csv` selects the CSV branch (no trimming, no
+      // case-folding — `?format=CSV` or `?format= csv ` is just another non-`csv` value); every
+      // other shape — a different string, a non-string (array/bracket form), absent — falls through
+      // to the pre-existing JSON response UNCHANGED. There is deliberately no 400 for an
+      // unrecognised `format` here (unlike `sourceSystem`/`tab` below, which are pre-existing
+      // validated parameters this slice does not touch).
+      isCsvExport = req.query.format === 'csv'
 
       // Wave 2 WP2: `sourceSystem` drives the unified Inbox filter.
       //   - 'all'      → mixed feed across platform + plm (no filter)
@@ -1127,6 +1249,25 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         ? undefined
         : (rawSourceSystem as 'platform' | 'plm')
       const sourceSystemProvided = rawSourceSystem !== ''
+      // P3-1 — refuse `?format=csv&sourceSystem=plm` outright, BEFORE it can reach the
+      // `sourceSystem === 'plm'` sync branch below. Two independent reasons converge on the same
+      // 400, not one: (1) that branch calls `bridgeService.syncPlmApprovals({ status, limit,
+      // offset })` with THIS request's `limit` — which for a CSV request is the export cap
+      // (≤ `APPROVAL_EXPORT_ROW_CAP`, up to 10x the ordinary JSON page size), so allowing the
+      // combination would let any `approvals:read` holder trigger an oversized external PLM fetch
+      // + upsert batch via a plain GET, a side-effect-magnitude change this slice is not
+      // authorized to make to an existing endpoint; (2) it would be pointless work regardless —
+      // `canReadApprovalInstance` (§1.5) refuses EVERY `plm:` id unconditionally (OD-S1-18), so an
+      // all-`plm:` scope is STRUCTURALLY guaranteed to export zero rows. Refusing loudly beats
+      // silently doing the expensive sync and handing back an empty file.
+      if (isCsvExport && sourceSystem === 'plm') {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_EXPORT_SOURCE_SYSTEM_UNSUPPORTED',
+            "format=csv does not support sourceSystem='plm' — every plm: row is refused by the export's canonical read check (§1.5); use sourceSystem='platform' or 'all'",
+          ),
+        )
+      }
       const status = typeof req.query.status === 'string' ? req.query.status : undefined
       const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
@@ -1230,12 +1371,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const createdTo = rawCreatedTo || undefined
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
-      const { limit, offset } = req.query.page || req.query.pageSize
-        ? resolveApprovalListPaging(page, pageSize)
-        : {
-            limit: parsePaging(req.query.limit, 50),
-            offset: parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER),
-          }
+      // P3-1 — export ignores client PAGING (`page`/`pageSize`/`offset`): an export is "give me up
+      // to N matching rows from the start of my scope", not a page of them, so `offset` is always
+      // 0. `limit` MAY still be narrowed by the caller via `?limit=`, but `parsePaging`'s own `max`
+      // argument means it can never be RAISED past `APPROVAL_EXPORT_ROW_CAP` (contract §5 — bounded
+      // and never silently truncated; `X-Approval-Export-Capped` below reports when this bound is
+      // what stopped the query short of the caller's full scope).
+      const { limit, offset } = isCsvExport
+        ? { limit: resolveApprovalExportLimit(req.query.limit), offset: 0 }
+        : (req.query.page || req.query.pageSize
+          ? resolveApprovalListPaging(page, pageSize)
+          : {
+              limit: parsePaging(req.query.limit, 50),
+              offset: parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER),
+            })
       const actorId = resolveApprovalActorId(req)
       const actorRoles = resolveApprovalActorRoles(req)
 
@@ -1304,6 +1453,110 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         offset,
       })
 
+      if (isCsvExport) {
+        // P3-1 §1.5 (contract, owner-knowable safety decision — see PR body): `result.data` above
+        // is the LIST scope, which is DOCUMENTED to be strictly WIDER than the canonical
+        // per-instance predicate on two axes (`ApprovalBridgeService.ts`'s own scope docblock):
+        // it admits `source_queue` seats the predicate excludes (OD-S1-5), and it admits every
+        // `plm:` mirror row the predicate refuses outright (OD-S1-18). That gap is a KNOWN,
+        // recorded list⊋detail defect, not a feature — a row can appear in the feed and still
+        // 404 on open. A CSV export is a persistent artifact that LEAVES the system, so it must
+        // NOT inherit that gap: it takes the NARROWER of the two planes, i.e.
+        // `export ⊆ read(detail)`. Every candidate row is re-checked, one at a time, through the
+        // SAME `canReadApprovalInstance` that gates detail/history/metrics/comments/attachments —
+        // never a second predicate, never "trust the list scope". No resolvable actor id ⇒ admit
+        // nothing (fail-closed, the same posture the list scope itself takes for an unresolved
+        // actor).
+        //
+        // Cost, stated rather than hidden: one admission probe per candidate row. Bounded by
+        // `limit` (≤ `APPROVAL_EXPORT_ROW_CAP`) above, so this is O(cap), never O(table).
+        const exportViewerId = actorId || null
+        const admitted: UnifiedApprovalDTO[] = []
+        if (exportViewerId && pool) {
+          for (const dto of result.data) {
+            // eslint-disable-next-line no-await-in-loop -- sequential, deliberately: bounded by the
+            // row cap, and keeps this a plain per-row admission check rather than a burst of
+            // concurrent queries against the same pool for one export request.
+            const readable = await canReadApprovalInstance(pool, exportViewerId, dto.id)
+            if (readable) admitted.push(dto)
+          }
+        }
+
+        // §5 — bounded, never silently truncated: `result.total` is the COUNT for the SAME
+        // (wider) list-scope query `result.data` came from, so `result.total > limit` means the
+        // scoped query itself was cut short by the cap — independent of how many of the FETCHED
+        // rows the admission filter above then dropped (that is `export ⊆ read`, a different,
+        // legitimate reason for fewer CSV rows than `result.total`, not truncation).
+        const capped = result.data.length >= limit && result.total > limit
+
+        // Fix round (P3-2, gate finding): build the ENTIRE response body — including the final
+        // row count baked into `admitted` above — BEFORE setting a single header. Previously the
+        // four `X-Approval-Export-*` / `Content-Type` / `Content-Disposition` headers were set
+        // HERE, ahead of the serialization loop below; the gate proved (by injecting a throw
+        // immediately after that `setHeader` block) that a throw in that window shipped a JSON
+        // error body under `Content-Type: text/csv` + `attachment` + a false
+        // `X-Approval-Export-Row-Count: 0` — Express's `res.json()` only sets `Content-Type`
+        // `if (!this.get('Content-Type'))`, so the already-set CSV type/disposition survived onto
+        // the JSON error. `column.value(dto)` is plain property access and `stringifyCsvValue`
+        // already try/catches its own `JSON.stringify` call, so nothing in this loop is expected
+        // to throw today — but the fix removes the window BY CONSTRUCTION rather than relying on
+        // that staying true: no header is reachable from any code path that has not already
+        // finished building `body`.
+        const lines = [sanitizeCsvRow(APPROVAL_EXPORT_CSV_COLUMNS.map((column) => column.header))]
+        for (const dto of admitted) {
+          lines.push(sanitizeCsvRow(APPROVAL_EXPORT_CSV_COLUMNS.map((column) => column.value(dto))))
+        }
+        // Fix round (P3-4, gate finding): prepend a UTF-8 BOM, matching this repo's own newest CSV
+        // exporter's precedent (`routes/univer-meta.ts`'s `format === 'csv'` branch: "UTF-8 BOM so
+        // Excel opens non-ASCII (e.g. CJK) CSV without mojibake — matches common export tooling").
+        // Excel on Windows ignores the HTTP `charset` for a downloaded file and guesses the local
+        // codepage instead; without the BOM a CJK title (this product's approval data is largely
+        // Chinese) mis-decodes. The BOM is a body concern, not a per-cell one — it never interacts
+        // with `neutralizeFormulaInjectionLead` (fix round P3-F, gate-2 finding: corrected —
+        // that function no longer "only inspects each CELL's own leading byte" as of the P3-6 fix,
+        // which made it scan forward past a run of ignorable characters; the reason this BOM still
+        // does not interact with it is unchanged, though: `neutralizeFormulaInjectionLead` operates
+        // PER CELL, on cell text that never contains this body-level BOM in the first place).
+        const body = Buffer.concat([
+          Buffer.from('﻿', 'utf8'),
+          Buffer.from(lines.join(CSV_LINE_TERMINATOR) + CSV_LINE_TERMINATOR, 'utf8'),
+        ])
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+        // Fixed literal filename — never interpolate request/user-controlled input into a response
+        // header (contract §5: no header-injection / reflected-filename surface).
+        res.setHeader('Content-Disposition', 'attachment; filename="approvals-export.csv"')
+        // §4/§5 — machine-checkable signals a bare status code can't carry: the ROW COUNT actually
+        // written (post admission-filter — never the wider list total); the EFFECTIVE limit this
+        // particular request ran under (`?limit=` when given, else the server default — always
+        // ≤ the hard ceiling); the hard CEILING itself (`APPROVAL_EXPORT_ROW_CAP`, constant
+        // regardless of `?limit=` — kept as a SEPARATE header from `-Row-Limit` on purpose: a
+        // machine reading "…-Row-Cap" would otherwise reasonably expect the server ceiling, not
+        // whatever this one request happened to ask for); and whether the underlying scoped query
+        // hit that effective limit.
+        res.setHeader('X-Approval-Export-Row-Count', String(admitted.length))
+        res.setHeader('X-Approval-Export-Row-Limit', String(limit))
+        res.setHeader('X-Approval-Export-Row-Cap', String(APPROVAL_EXPORT_ROW_CAP))
+        res.setHeader('X-Approval-Export-Capped', capped ? 'true' : 'false')
+        // §4 — a zero-row export is a SUCCESSFUL empty result (200, text/csv, header row only,
+        // `X-Approval-Export-Row-Count: 0`). Fix round (P3-2, corrects an overclaim the gate
+        // refuted): every `res.setHeader` call above runs only AFTER `body` is fully materialised,
+        // and the only statements between the FIRST of those `setHeader` calls and `res.send(body)`
+        // are the remaining `setHeader` calls themselves, operating on an already-built `Buffer` —
+        // nothing in that stretch can throw. So a throw that reaches this route's `catch` block
+        // below (from admission, from the column-projection loop, or from building `body`) has, in
+        // every such case, occurred BEFORE the first of these `setHeader` calls, and the failure
+        // path stays a DIFFERENT status code with a JSON body, never this Content-Type. (The prior
+        // comment asserted this unconditionally, with no ordering argument to back it; the gate's
+        // probe — a throw injected right after the OLD, earlier header-setting — showed it was
+        // false before this fix. This restatement is deliberately narrower: it does not claim
+        // anything about a failure inside `res.send` itself, e.g. a transport-level socket error
+        // after headers have already gone out — that is a different failure class this comment
+        // makes no claim about.)
+        res.status(200).send(body)
+        return
+      }
+
       res.json({
         data: result.data,
         total: result.total,
@@ -1311,6 +1564,22 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         offset,
       })
     } catch (error) {
+      if (isCsvExport) {
+        // Never degrade a failed export into a 200 empty CSV (contract §4 — that is exactly the
+        // "refusal renders as all-clear" shape this repo has been bitten by before). A schema-not-
+        // ready degradation still answers a distinct error status + JSON body, not a look-alike
+        // empty export.
+        handleApprovalsError(
+          res,
+          error,
+          'APPROVAL_EXPORT_FAILED',
+          'Failed to export approvals',
+          () => res.status(503).json(
+            approvalErrorResponse('APPROVAL_EXPORT_DEGRADED', 'Approvals export is temporarily degraded'),
+          ),
+        )
+        return
+      }
       handleApprovalsError(
         res,
         error,
