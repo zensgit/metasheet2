@@ -13,6 +13,7 @@ import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
+import { sanitizeCsvRow } from '../services/csv-cell'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import {
   deriveDelegatedAdminNamespace,
@@ -101,7 +102,15 @@ type AdminRoleCatalogRow = {
 
 type AdminAuditLogRow = {
   id: number
-  created_at: string
+  // `audit_logs.created_at` is TIMESTAMPTZ per `src/db/migrations/zz20251231_create_audit_tables.ts:53`
+  // (the earlier `20250926_create_audit_tables.sql:74` declared plain TIMESTAMP; either way
+  // node-postgres's default type parsers return a JS `Date` for both TIMESTAMPTZ (OID 1184) and
+  // TIMESTAMP (OID 1114)). This codebase has no `setTypeParser` override — `grep -rn
+  // "setTypeParser" packages/` at this head has zero real hits (the only match is this comment's
+  // own mention of the string). The type below is `Date | string` — Date is what pg actually
+  // returns at runtime; string is kept because tests (and any future driver/mock) may hand this a
+  // pre-stringified value.
+  created_at: Date | string
   event_type: string
   event_category: string
   event_severity: string
@@ -4996,22 +5005,47 @@ export function adminUsersRouter(): Router {
       res.write('id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details\n')
 
       for (const item of rows.rows) {
-        const line = [
+        // Shared csv-cell.ts sanitizer: RFC-4180 quoting plus formula-injection lead-char
+        // neutralization. Row terminator stays '\n' (unchanged) — only per-cell escaping moved.
+        //
+        // `event_severity` (audit_logs schema: `VARCHAR(20) DEFAULT 'INFO'`, no NOT NULL — see
+        // 20250926_create_audit_tables.sql) is the one column below that both lacks a NOT NULL
+        // guarantee AND was passed BARE (no `|| ''`) to the pre-migration inline escaper, which
+        // stringified every value with plain `String(v)` — so a null rendered as the literal
+        // text "null", not an empty cell. `sanitizeCsvRow`'s stringifier renders null as ''
+        // instead. Pre-stringifying here keeps that one pre-existing quirk byte-for-byte so this
+        // migration stays a pure escaper swap; id/created_at/action/event_type are NOT NULL per
+        // the same schema, so they need no such preservation.
+        //
+        // `created_at` is TIMESTAMPTZ, so pg hands this a JS `Date` at runtime (see the
+        // `AdminAuditLogRow` type comment above). `sanitizeCsvCell`'s stringifier has no
+        // Date-specific branch — an un-converted Date falls through to `JSON.stringify(date)`,
+        // which returns the ISO text wrapped in a literal JSON string (i.e. WITH embedded `"`
+        // characters), and RFC-4180 quoting then doubles those quotes: every cell would come out
+        // as `"""2026-01-01T00:00:00.000Z"""` instead of a plain ISO date.
+        //
+        // NOT A "RESTORE PARITY" FIX — disclosed, not silent: pre-migration, `String(date)`
+        // rendered this column as a LOCALE- AND TZ-DEPENDENT string (e.g.
+        // "Thu Jan 01 2026 08:00:00 GMT+0800 (China Standard Time)"), never ISO. Converting via
+        // `.toISOString()` — the same pattern `audit-logs.ts` and `attendance-admin.ts` already
+        // use for their own timestamp column — changes every `created_at` cell in
+        // `iam-admin-audit-*.csv` from that locale/TZ-dependent text to ISO-8601 UTC. That is a
+        // third, deliberate difference class (beyond the formula-lead apostrophe and CR quoting),
+        // not a byte-for-byte carryover of the pre-migration shape, and belongs in the PR body as
+        // such.
+        const line = sanitizeCsvRow([
           item.id,
-          item.created_at,
+          item.created_at instanceof Date ? item.created_at.toISOString() : item.created_at,
           item.resource_type || '',
           item.resource_id || '',
           item.action,
           item.event_type,
-          item.event_severity,
+          String(item.event_severity),
           item.user_email || '',
           item.user_name || '',
           item.error_code || '',
           JSON.stringify(item.action_details || {}),
-        ].map((value) => {
-          const text = String(value)
-          return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
-        }).join(',')
+        ])
         res.write(`${line}\n`)
       }
 

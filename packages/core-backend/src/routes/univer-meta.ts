@@ -21,6 +21,7 @@ import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
 import { rbacGuard } from '../rbac/rbac'
+import { sanitizeCsvRow, CSV_LINE_TERMINATOR } from '../services/csv-cell'
 import {
   deriveCapabilities,
   resolveRequestAccess,
@@ -5100,19 +5101,20 @@ function parseExportFormat(value: unknown):
 // Serialize the already-MASKED header + cell matrix as CSV (RFC-4180-ish). The `rows` cells are the
 // serializeXlsxCell projection (string | number | boolean | null | undefined), so this only stringifies +
 // quotes — it adds NO data access and inherits the same field/view/§2a.3-taint mask applied upstream.
-function buildExportCsv(
+// EXPORTED (mirrors this file's existing pattern for other pure helpers, e.g. `aggregateRollup`,
+// `evaluateMetaFilterCondition`) so the unit suite can call it directly with fixed input/expected-output
+// fixtures instead of driving the whole export route through a mocked DB.
+export function buildExportCsv(
   headers: string[],
   rows: Array<Array<string | number | boolean | null | undefined>>,
 ): string {
-  const escape = (value: string | number | boolean | null | undefined): string => {
-    if (value === null || value === undefined) return ''
-    const s = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const lines = [headers.map(escape).join(',')]
-  for (const row of rows) lines.push(row.map(escape).join(','))
+  // Shared csv-cell.ts sanitizer: RFC-4180 quoting plus formula-injection lead-char
+  // neutralization, applied uniformly to header and data cells alike (matches this
+  // function's prior behavior of running every cell through the same escape fn).
+  const lines = [sanitizeCsvRow(headers)]
+  for (const row of rows) lines.push(sanitizeCsvRow(row))
   // CRLF line endings = the CSV de-facto standard (Excel-friendly).
-  return lines.join('\r\n')
+  return lines.join(CSV_LINE_TERMINATOR)
 }
 
 async function loadDashboardSourceRows(args: {

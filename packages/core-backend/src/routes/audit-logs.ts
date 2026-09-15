@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { pool } from '../db/pg'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
+import { sanitizeCsvRow } from '../services/csv-cell'
 
 export function auditLogsRouter(): Router {
   const r = Router()
@@ -59,7 +60,9 @@ export function auditLogsRouter(): Router {
         res.setHeader('Content-Disposition', 'attachment; filename="audit-logs.csv"')
         res.write('id,occurred_at,actor_id,actor_type,action,resource_type,resource_id,request_id,ip,user_agent,meta\n')
         for (const r of rows) {
-          const line = [
+          // Shared csv-cell.ts sanitizer: RFC-4180 quoting plus formula-injection lead-char
+          // neutralization. Row terminator stays '\n' (unchanged) — only per-cell escaping moved.
+          const line = sanitizeCsvRow([
             r.id,
             r.occurred_at.toISOString?.() || r.occurred_at,
             r.actor_id || '',
@@ -71,10 +74,7 @@ export function auditLogsRouter(): Router {
             r.ip || '',
             (r.user_agent || '').replace(/[\n\r]/g, ' '),
             JSON.stringify(r.meta || {})
-          ].map(v => {
-            const s = String(v)
-            return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
-          }).join(',')
+          ])
           res.write(line + '\n')
         }
         return res.end()
