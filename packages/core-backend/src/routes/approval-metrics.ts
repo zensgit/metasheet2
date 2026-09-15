@@ -14,6 +14,7 @@ import { rbacGuard } from '../rbac/rbac'
 import { Logger } from '../core/logger'
 import { pool } from '../db/pg'
 import { canReadApprovalInstance } from '../services/approval-instance-readability'
+import { approvalAdminCapabilityGuard } from '../services/approval-admin-capability'
 import {
   ApprovalMetricsService,
   getApprovalMetricsService,
@@ -57,9 +58,15 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
   const r = Router()
   const metricsService = options?.metricsService ?? getApprovalMetricsService()
 
+  // P4(2) phase 0 (census-tiered-admin-20260915.md Q1) — summary/report/teams/breaches are the
+  // "data-admin" capability sites; today they still evaluate the SAME `approvals:admin` permission
+  // `process` does (see `services/approval-admin-capability.ts` docblock — the registered-but-
+  // unconsumed `approvals:admin-data` code is deliberately not wired in this phase).
+  const approvalDataAdminGuard = approvalAdminCapabilityGuard('data')
+
   r.get('/api/approvals/metrics/summary',
     authenticate,
-    rbacGuard('approvals:admin'),
+    approvalDataAdminGuard,
     async (req: Request, res: Response) => {
       try {
         const summary = await metricsService.getMetricsSummary({
@@ -77,7 +84,7 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
 
   r.get('/api/approvals/metrics/report',
     authenticate,
-    rbacGuard('approvals:admin'),
+    approvalDataAdminGuard,
     async (req: Request, res: Response) => {
       try {
         const report = await metricsService.getMetricsReport({
@@ -120,7 +127,7 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
 
   r.get('/api/approvals/metrics/teams',
     authenticate,
-    rbacGuard('approvals:admin'),
+    approvalDataAdminGuard,
     async (req: Request, res: Response) => {
       try {
         const data = await metricsService.getMetricsByDepartment({
@@ -139,7 +146,7 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
 
   r.get('/api/approvals/metrics/breaches',
     authenticate,
-    rbacGuard('approvals:admin'),
+    approvalDataAdminGuard,
     async (req: Request, res: Response) => {
       try {
         const limit = Number.parseInt(String(req.query.limit ?? '50'), 10)

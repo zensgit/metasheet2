@@ -37,7 +37,7 @@ import {
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
-import { isApprovalAdministrator } from '../services/approval-admin-capability'
+import { approvalAdminCapabilityGuard, isApprovalAdministrator } from '../services/approval-admin-capability'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import {
   canReadApprovalInstance,
@@ -186,7 +186,16 @@ const APPROVAL_EXPORT_CSV_COLUMNS: ReadonlyArray<{
   { header: 'createdAt', value: (d) => d.createdAt },
   { header: 'updatedAt', value: (d) => d.updatedAt },
 ]
-const approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])
+// P4(2) phase 0 (census-tiered-admin-20260915.md Q1; design draft §3.2/§3.4) — this guard used to be
+// assigned `rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])` directly.
+// `approvalAdminCapabilityGuard('template')` resolves the SAME two codes (plus platform-admin) via
+// the single collapsed resolver; every route below that references this constant (16 template
+// routes plus the 4 admin `/api/approval-delegations` routes, kept on the template code as the
+// "保留,改动属阶段 1" exception — see the resolver's docblock) is therefore covered by one change.
+const approvalTemplateAdminGuard = approvalAdminCapabilityGuard('template')
+// Phase 0's process-admin capability, replacing the two literal `rbacGuard('approvals:admin')`
+// call sites (`/api/approvals/:id/jump`, `/api/approvals/admin/reassign`) below.
+const approvalProcessAdminGuard = approvalAdminCapabilityGuard('process')
 // B3-04 (design-lock 2026-07-05): the participant-facing directory picker. Unlike the template-author
 // directory above, this serves ordinary approval ACTIONS (transfer / add-sign), the fill-form user
 // field, and delegation self-service — those users may hold only approvals:read or :write, not the
@@ -2426,7 +2435,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approvals/:id/jump', authenticate, rbacGuard('approvals:admin'), async (req: Request, res: Response) => {
+  r.post('/api/approvals/:id/jump', authenticate, approvalProcessAdminGuard, async (req: Request, res: Response) => {
     try {
       const productService = getProductService()
       const userId = resolveApprovalActorId(req)
@@ -2506,8 +2515,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
    * transport failing. The three answers a client needs are `true`, `false`, and "could not
    * determine", so this route returns the first two as data and the third as a non-200.
    *
-   * It grants nothing. `rbacGuard('approvals:admin')` still gates every admin mutation and the list
-   * scope still gates the projection; a client that lies about this value gains no access.
+   * It grants nothing. `approvalProcessAdminGuard` (P4(2) phase 0 — the collapsed resolver, still
+   * evaluating the same `approvals:admin` permission it always did) still gates every admin
+   * mutation, and the list scope still gates the projection; a client that lies about this value
+   * gains no access.
    *
    * IT ANSWERS THE SCOPE'S ADMIN ARM, NOT THE WHOLE SCOPE. `listApprovals` conjoins a SECOND
    * condition when `APPROVAL_S1_ORG_PIN_ENABLED` is true (default OFF): a platform row is admitted
@@ -2551,7 +2562,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approvals/admin/reassign', authenticate, rbacGuard('approvals:admin'), async (req: Request, res: Response) => {
+  r.post('/api/approvals/admin/reassign', authenticate, approvalProcessAdminGuard, async (req: Request, res: Response) => {
     try {
       const productService = getProductService()
       const userId = resolveApprovalActorId(req)
