@@ -22,6 +22,16 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Operational attribution checkpoint (2026-09-15)
+
+Read-only GitHub evidence, not a production probe or an alert-resolution claim:
+
+- Phase 5 Nightly Validation run `34920290620`, job `104226687112` fails at validation. Regression run `34919841957`, job `104225261850`, and External Metrics run `34919685921`, job `104224778280`, fail at their final status gates. All three bind `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
+- All three report 11 checks: five passing, zero measured threshold failures, six N/A. Their parser finds 22 histogram families but zero matching the two configured latency families. Missing samples, rather than measured excessive latency, are the directly evidenced reason for failure.
+- `scripts/phase5-thresholds.json` requests plugin reload for `example-plugin`, plus snapshot create/restore. `metrics.ts` declares those families; plugin-loader and SnapshotService contain observation call sites. Source existence does not prove the deployed registry, scrape target, label population or recent activity.
+- At runtime candidate `8196e5f558c37cd01e79056c3c3be45eecadd54a`, required-samples plus cache contracts pass 6/6 locally. The missing-samples negative produces exactly five passes/six N/A/exit 1, while supplied synthetic latency samples produce 11 passes/exit 0. Validator, thresholds and required-samples test are byte-identical to the failed-run SHA.
+- No alert, threshold, workflow, scrape configuration or production state was changed. These failures must remain open until the owner-selected target/label population and authorized sample evidence are established. Do not generate production reload/restore operations solely to silence the monitor, and do not count unrelated recent health-probe successes as closure. Other attendance scheduled failures are separate, not attributed by this checkpoint.
+
 | Item | Current evidence | Remaining acceptance |
 | --- | --- | --- |
 | Configuration-history UX | Draft #5704 at `e92e462b84e74aa242382c2f31eab326ceb60854`; exact-head checks terminal without failure | Current-main integration, independent final review, separate merge authorization |
