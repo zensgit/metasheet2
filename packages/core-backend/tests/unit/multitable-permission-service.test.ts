@@ -499,6 +499,16 @@ describe('permission-service: request-keyed resolvers', () => {
     expect(Array.from(readable)).toEqual(['sheet_2'])
   })
 
+  it('resolveReadableSheetIds accepts explicit worker authority without request claims', async () => {
+    const { query } = makeQuery([
+      () => ({ rows: [{ sheet_id: 'sheet_2', perm_code: 'multitable:read', subject_type: 'user' }] }),
+    ])
+    const access = { userId: 'worker', permissions: [], isAdminRole: false }
+    const readable = await resolveReadableSheetIds(undefined, query, ['sheet_1', 'sheet_2'], access)
+    expect([...readable]).toEqual(['sheet_2'])
+    await expect(resolveReadableSheetIds(undefined, query, ['sheet_1'])).rejects.toThrow('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+  })
+
   it('resolveReadableSheetIds trims before deduplication', async () => {
     vi.mocked(listUserPermissions).mockResolvedValue([])
     vi.mocked(isAdmin).mockResolvedValue(false)

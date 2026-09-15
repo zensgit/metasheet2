@@ -1830,14 +1830,16 @@ export async function resolveSheetReadableCapabilities(
 }
 
 export async function resolveReadableSheetIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetIds: Iterable<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).map((sheetId) => sheetId.trim()).filter(Boolean)))
   if (uniqueSheetIds.length === 0) return new Set()
 
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   if (access.isAdminRole) {
     return new Set(uniqueSheetIds)
   }

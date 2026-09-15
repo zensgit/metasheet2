@@ -19,14 +19,14 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { createRecoveryArchiveWorkerAuthorization, setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
+import { createRecoveryArchiveWorkerAuthorization, createRecoveryComputedHelpers, setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
-import { acquireRecoveryAuthorityLease } from '../../src/multitable/recovery-authorization-stability'
+import { acquireRecoveryAuthorityLease, resolveDatabaseRecoverySheetAuthority } from '../../src/multitable/recovery-authorization-stability'
 import { enqueueRecoveryMutationEvent, type RecoveryMutationEvent } from '../../src/multitable/recovery-mutation-events'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -1249,6 +1249,39 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       await q("DELETE FROM meta_automation_outbox WHERE payload->>'recordId'=$1", [recordId])
       if (previousFlag === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
       else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = previousFlag
+    }
+  })
+
+  test.each([true, false])('WORKER-COMPUTED: requestless hydration retains taint with dependency rows=%s', async (withDependencies) => {
+    await seedWorld({ withSideEffects: true })
+    if (withDependencies) await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$1)', [SHEET, F_FOL, F_SRC_LOOKUP])
+    const authority = await resolveDatabaseRecoverySheetAuthority(q, SHEET, ACTOR)
+    const helpers = createRecoveryComputedHelpers(authority.access)
+    const fields = (await q('SELECT id, name, type, property FROM meta_fields WHERE sheet_id=$1', [SHEET])).rows as Parameters<typeof helpers.applyLookupRollup>[2]
+    const links = [{ fieldId: F_SRC_LINK, cfg: { foreignSheetId: TGT_SHEET, limitSingleRecord: false } }]
+    const values = new Map([[REC_A, new Map([[F_SRC_LINK, [REC_TGT_LIVE]]])]])
+    const compute = async () => {
+      const rows = (await q('SELECT id, version, data FROM meta_records WHERE id=$1', [REC_A])).rows as Parameters<typeof helpers.applyLookupRollup>[3]
+      await helpers.applyLookupRollup(q, SHEET, fields, rows, links, values)
+      const formulas = await helpers.recalculateFormulaFields(q, SHEET, fields, [REC_A], [F_SRC_LINK], new Map(rows.map(row => [row.id, row.data])))
+      return { rows, formulas }
+    }
+    try {
+      const allowed = await compute()
+      expect(allowed.rows[0].data[F_SRC_LOOKUP]).toEqual([99])
+      expect(allowed.formulas).toEqual([{ recordId: REC_A, data: { [F_FOL]: 100 } }])
+      const related = await helpers.computeDependentLookupRollupRecords(q, SHEET, [REC_A], [F_NUM])
+      expect(related.some(row => row.recordId === REC_REL && row.affectedFieldIds.includes(F_REL_LOOKUP))).toBe(true)
+      await q(`INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+        VALUES ($1,$2,'user',$3,FALSE,FALSE)`, [TGT_SHEET, F_TGT_NUM, ACTOR])
+      const denied = await compute()
+      expect(denied.rows[0].data[F_SRC_LOOKUP]).toEqual([])
+      expect(denied.formulas).toEqual([])
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FOL]).toBe(100)
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
+      expect((await compute()).formulas).toEqual(allowed.formulas)
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
     }
   })
 

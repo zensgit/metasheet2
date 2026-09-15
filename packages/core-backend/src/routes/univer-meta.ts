@@ -1556,13 +1556,14 @@ function resolveRelationCriteriaValue(valueExpr: string, recordData: Record<stri
 // aggregate, or a fail-LOUD sentinel: #PERM! (boundary made it unknowable for this actor), #LIMIT! (a §5
 // cap was hit), #ERROR! (misconfig / operator-incompatible criteria). NEVER a silent null on a boundary.
 async function resolveRelationAggregation(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceSheetId: string,
   recordId: string,
   recordData: Record<string, unknown>,
   call: RelationAggregationCall,
   fields: UniverMetaField[],
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<number | string | boolean | null | unknown[]> {
   const linkField = fields.find((f) => f.id === call.linkFieldId && f.type === 'link')
   const linkCfg = linkField ? parseLinkFieldConfig(linkField.property) : null
@@ -1577,7 +1578,7 @@ async function resolveRelationAggregation(
   if (linkIds.length > MAX_RELATION_SCAN_RECORDS) return REL_AGG_LIMIT_SENTINEL
 
   // Sheet-level read gate.
-  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId])
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId], authorityAccess)
   if (!readableForeignSheetIds.has(foreignSheetId)) return REL_AGG_PERM_SENTINEL
 
   // Foreign-FIELD readability — cross-base flows through the SAME per-field gate as lookup/rollup, not a
@@ -1589,12 +1590,13 @@ async function resolveRelationAggregation(
   // criteria over an unreadable field is a side-channel — the match count would leak it).
   const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId])
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId], authorityAccess)
   if (shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false)) return REL_AGG_PERM_SENTINEL
   if (shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)) return REL_AGG_PERM_SENTINEL
 
   // Materialize the foreign records, excluding row-level-denied ones (absent → never matched/counted).
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRes = await query(
     'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
     [foreignSheetId, linkIds],
@@ -2998,7 +3000,7 @@ async function recalculateFormulaFields(
   // §2a.3 B1: `req` is the WRITING actor — needed to resolve write-side formula taint so a
   // foreign-field-denied writer never recomputes (and persists) a permission-degraded formula
   // value into shared meta_records.data. See the taint skip below.
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   fields: UniverMetaField[],
@@ -3021,6 +3023,7 @@ async function recalculateFormulaFields(
   // Everything downstream (taint skip, relation-agg/pure split, per-record materialization) is
   // unchanged — the SAME taint discipline applies byte-for-byte to both callers.
   explicitFormulaFieldIds?: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
   if (updatedRecordIds.length === 0) return []
   if (!explicitFormulaFieldIds && changedFieldIds.length === 0) return []
@@ -3081,7 +3084,7 @@ async function recalculateFormulaFields(
   // whose deps (transitively) reach a lookup/rollup masked for THIS writer, leaving the previously
   // stored AUTHORIZED value untouched — symmetric to the export/aggregate/read taint sinks. An
   // authorized writer (nothing masked) gets an empty tainted set → recompute is unchanged.
-  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds)
+  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds, authorityAccess)
   for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
@@ -3127,7 +3130,7 @@ async function recalculateFormulaFields(
       if (recData) {
         const updates: Record<string, unknown> = {}
         for (const [fieldId, call] of relationAggByField) {
-          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields, authorityAccess)
         }
         for (const fieldId of cliffFieldIds) {
           updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
@@ -3444,6 +3447,18 @@ async function resolveTaintedFormulaFieldIds(
     dependsOnByField.set(fieldId, set)
   }
 
+  // Recompute also discovers dependencies from authoritative expressions when the index is stale.
+  // Taint must include the same edges or masked hydration could overwrite a stored authorized value.
+  for (const field of fields) {
+    if (field.type !== 'formula') continue
+    const expression = formulaExpressionOf(field)
+    if (!expression) continue
+    const refs = multitableFormulaEngine.extractFieldReferences(expression)
+    const deps = dependsOnByField.get(field.id) ?? new Set<string>()
+    for (const ref of refs) deps.add(ref)
+    dependsOnByField.set(field.id, deps)
+  }
+
   // Resolve foreign-field readability ONCE for every foreign sheet any computed field references.
   const sourceSheet = await loadSheetRowShared(query, sheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
@@ -3590,13 +3605,14 @@ async function resolveDisplayFieldTaint(
 }
 
 async function applyLookupRollup(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceSheetId: string,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
   linkValuesByRecord: Map<string, Map<string, string[]>>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<void> {
   const lookupFieldIds = fields.filter((f) => f.type === 'lookup').map((f) => f.id)
   const rollupFieldIds = fields.filter((f) => f.type === 'rollup').map((f) => f.id)
@@ -3654,7 +3670,7 @@ async function applyLookupRollup(
     }
   }
 
-  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys(), authorityAccess)
 
   // §2a.3 — resolve foreign-FIELD-level readability + cross-base for every readable foreign sheet
   // (one scope-map load per foreign sheet, batched — never per record). Source base_id is needed
@@ -3666,6 +3682,7 @@ async function applyLookupRollup(
     query,
     sourceBaseId,
     Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
+    authorityAccess,
   )
 
   // #18 row-level read-deny (cross-record): when a FOREIGN sheet opts in (its
@@ -3675,7 +3692,8 @@ async function applyLookupRollup(
   // lookup values AND never counted by rollup — so a rollup count equals the count of READABLE foreign
   // records, never the true total (no cardinality leak). Resolved once per read; flag-OFF on the foreign
   // sheet → no exclusion → byte-identical; admins bypass.
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -3850,13 +3868,14 @@ function mergeComputedRecords(
 }
 
 async function computeDependentLookupRollupRecords(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   // A-full (design #2410): the edited (source) sheet + its changed field ids gate which related
   // lookup/rollup fields count as "affected" for the one-hop formula recompute below.
   sourceSheetId: string,
   updatedRecordIds: string[],
   changedFieldIds: string[],
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<RelatedComputedRecord[]> {
   if (updatedRecordIds.length === 0) return []
 
@@ -3917,12 +3936,17 @@ async function computeDependentLookupRollupRecords(
     const relatedSheet = await loadSheetRowShared(query, sheetId)
     const relatedBaseId = relatedSheet?.baseId ?? null
     if (baseIdsAreCrossBase(sourceBaseId, relatedBaseId)) {
-      const baseReadable = relatedBaseId != null && (await resolveBaseReadable(req, query, relatedBaseId))
+      const baseReadable = relatedBaseId != null && (authorityAccess
+        ? await resolveBaseReadableForAccess(query, relatedBaseId, authorityAccess)
+        : req ? await resolveBaseReadable(req, query, relatedBaseId) : false)
       if (!baseReadable) continue
     }
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
-    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+    if (!authorityAccess && !req) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+    const { access, capabilities } = authorityAccess
+      ? await resolveSheetCapabilitiesForAccess(query, sheetId, authorityAccess)
+      : await resolveSheetReadableCapabilities(req!, query, sheetId)
     if (!access.userId || !capabilities.canRead) continue
     const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
     allowedFieldIdsBySheet.set(sheetId, computeAllowedFieldIds(fields, capabilities, fieldScopeMap))
@@ -3951,7 +3975,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord, authorityAccess)
 
     // A-full (design #2410): one-hop formula recompute on the related records. A related
     // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
@@ -4024,6 +4048,8 @@ async function computeDependentLookupRollupRecords(
         Array.from(affectedFieldIdsByRecord.keys()),
         Array.from(affectedComputedFieldIds),
         hydratedDataByRecord,
+        undefined,
+        authorityAccess,
       )
       formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
     }
@@ -4037,7 +4063,7 @@ async function computeDependentLookupRollupRecords(
     if (relAggAffectedByRecord.size > 0) {
       const candidateRel = new Set<string>()
       for (const s of relAggAffectedByRecord.values()) for (const id of s) candidateRel.add(id)
-      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel)
+      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel, authorityAccess)
       for (const [recordId, fieldIds] of relAggAffectedByRecord) {
         const recData = rows.find((r) => r.id === recordId)?.data ?? (await loadRecordDataById(query, sheetId, recordId))
         if (!recData) continue
@@ -4048,7 +4074,7 @@ async function computeDependentLookupRollupRecords(
           const expr = f ? formulaExpressionOf(f) : null
           const call = expr ? parseRelationAggregationCall(expr) : null
           if (!call) continue
-          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields, authorityAccess)
         }
         // W0-1 L4-cov follow-up (post-merge review of #4438): the fan-out materialization joins the
         // canonical fence via the SHARED derived-write seam, keyed on the DEPENDENT sheet being written
@@ -4763,6 +4789,19 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
  * (`createRecordWriteHelpers(req, pool)`); every helper receives its query
  * function per-call from RecordWriteService, so the pool is not consumed here.
  */
+export function createRecoveryComputedHelpers(authorityAccess: ResolvedRequestAccess): Pick<RecordWriteHelpers,
+  'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields'> {
+  if (!authorityAccess.userId) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+  return {
+    applyLookupRollup: (query, sheetId, fields, rows, links, values) =>
+      applyLookupRollup(undefined, query, sheetId, fields, rows, links, values, authorityAccess),
+    computeDependentLookupRollupRecords: (query, sheetId, ids, changed) =>
+      computeDependentLookupRollupRecords(undefined, query, sheetId, ids, changed, authorityAccess),
+    recalculateFormulaFields: (query, sheetId, fields, ids, changed, hydrated) =>
+      recalculateFormulaFields(undefined, query, sheetId, fields, ids, changed, hydrated, undefined, authorityAccess),
+  }
+}
+
 export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn }): RecordWriteHelpers {
   return {
     normalizeLinkIds,
