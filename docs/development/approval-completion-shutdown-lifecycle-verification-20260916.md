@@ -6,7 +6,7 @@ Date: 2026-09-16
 
 - Main baseline: `784c22dc182b2050bf204f4d013226d5bbb15131`
 - Precise-unsubscribe prerequisite (#5758): `f0a7e214c97731c504337847760bc8769bd81a44`
-- Verified implementation commit: `2ee83bb86ddd6facf95ffce67b79af9f13f2debb`
+- Verified implementation commit: `f0cd9ca2da56a2b2014c9b82e49a869aa62df85a`
 - The implementation commit has both the main baseline and prerequisite as ancestors.
 - This verification file is a documentation-only successor to the implementation commit.
 
@@ -36,13 +36,18 @@ Before production implementation, the focused lifecycle command produced 68 pass
 tests. The failures were the missing lifecycle handles, delayed scheduler/callback drains, partial
 subscription rollback, and early DingTalk shutdown behavior introduced by the new tests.
 
+The exact-head follow-up test delayed the recovery-worker drain while making a producer drain reject
+immediately. Before the follow-up fix, the lifecycle file produced 1 failed and 6 passed tests plus one
+Vitest unhandled-rejection error (`producer sentinel`). This confirmed that the shared barrier observed
+the rejection too late.
+
 ## Green evidence
 
 Focused lifecycle and precise-unsubscribe suite:
 
 ```text
 7 test files passed
-93 tests passed
+94 tests passed
 0 failed
 ```
 
@@ -56,6 +61,8 @@ Covered behavior includes:
 - SLA, projection sweep, Automation timer, and DingTalk callback admissions close synchronously and
   their admitted work drains.
 - Producer failure and DingTalk client-stop failure produce zero `pool.end()` calls.
+- An immediately rejected producer drain is observed before an unrelated recovery-worker drain finishes;
+  the final barrier still rejects and the pool remains open.
 - A stale DingTalk start failure is not misclassified as a stop failure; a real half-started-client close
   failure remains fail-closed.
 - Partial startup invokes the same idempotent stop promise.
@@ -70,6 +77,10 @@ Automation V1: 1 file, 292 tests passed
 core-backend TypeScript typecheck: passed
 git diff --check: passed
 ```
+
+The follow-up exact-head rerun also passed the server lifecycle and Time Machine recovery wiring
+neighbors (2 files, 9 tests). The broader neighbor and Automation V1 results above remain evidence from
+the preceding implementation commit; they were not rerun for the three-file follow-up.
 
 The existing server-lifecycle neighbor attempted its normal default database connection and entered its
 existing degraded path because no test database was configured. No migration, database write, or real-DB
@@ -91,12 +102,29 @@ assertions. The mutation was removed with a targeted patch; the same file then p
 the final 93/93 focused run. This proves the tests depend on listeners remaining attached until the
 producer barrier succeeds.
 
+Follow-up mutation: remove the immediate observation wrapper from the durable-delivery producer drain
+while leaving the later shared barrier intact.
+
+Result:
+
+```text
+approval-completion-shutdown-lifecycle.test.ts: 1 failed, 6 passed, 1 unhandled rejection
+```
+
+The mutation reproduced the delayed-handler failure and was removed with a targeted patch. The lifecycle
+file then passed 7/7 and the final focused run passed 94/94. The catch handler observes the original
+promise in the creation stack but does not replace it, so the later barrier still receives the rejection
+and returns `APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED` with zero `pool.end()` calls.
+
 ## Independent bounded review
 
 A read-only independent review was constrained to the eight production files and lifecycle tests. It
 found one valid P1: a stale DingTalk boot-time start failure was returned as a shutdown failure even when
 no client existed. The implementation was corrected and two opposing tests were added: start-only failure
 closes successfully, while a real half-started-client close failure stays failed.
+
+A subsequent exact-head read-only review found the immediate producer-rejection P2 described above. The
+bounded follow-up changed only the server barrier, its dedicated test, and this design/verification pair.
 
 Two suggestions were not adopted:
 
