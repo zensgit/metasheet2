@@ -208,7 +208,7 @@ async function runArchiveProcessWorker(
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const message = await new Promise<ArchiveProcessWorkerMessage>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('archive_process_message_timeout')), 60_000)
+      timer = setTimeout(() => reject(new Error('archive_process_message_timeout')), input.phase === 'drain' ? 180_000 : 60_000)
       child.once('error', () => reject(new Error('archive_process_spawn_failed')))
       child.once('exit', () => reject(new Error('archive_process_exited_without_result')))
       child.on('message', (result: ArchiveProcessWorkerMessage) => {
@@ -232,7 +232,7 @@ async function runArchiveProcessWorker(
         if (error) reject(new Error('archive_process_send_failed'))
       })
     })
-    expect(message.kind).toBe(input.phase === 'finish' ? 'done' : 'boundary')
+    expect(message.kind).toBe(input.phase === 'drain' ? 'drained' : input.phase === 'finish' ? 'done' : 'boundary')
     if (message.kind === 'error' || message.kind === 'read-object') throw new Error('archive_process_result_missing')
     expect(message.pid).toBe(child.pid)
     expect(message.pid).not.toBe(process.pid)
@@ -2502,7 +2502,11 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1',
           [recordIds[0], JSON.stringify({ [formulaId]: 'stale-derived-value' })])
         await q('UPDATE users SET is_active=FALSE WHERE id=$1', [fixture.actorId])
-        await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('retry')
+        const denied = await runArchiveProcessWorker({
+          phase: 'drain', drainTicks: 1, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
+        }, provider)
+        expect(denied).toMatchObject({ kind: 'drained', attempts: 1, completed: 0, batches: [0],
+          ticks: [{ kind: 'idle', swept: 0, chunks: 0 }] })
         expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
           .toBe('stale-derived-value')
         expect((await q(`SELECT count(*)::int AS pending FROM meta_recovery_archive_derived_effects
@@ -2510,22 +2514,28 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           .toEqual([{ pending: 5001 }])
         await q('UPDATE users SET is_active=TRUE WHERE id=$1', [fixture.actorId])
       }
-      for (let effect = 0; effect < (processBoundary ? 5001 : 1); effect += 1) {
-        await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('completed')
-      }
-      expect(processDerived).toHaveBeenCalledTimes(processBoundary ? 5002 : 1)
       if (processBoundary) {
+        const drained = await runArchiveProcessWorker({
+          phase: 'drain', drainTicks: 158, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
+        }, provider)
+        expect(drained).toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001,
+          batches: [...Array.from({ length: 156 }, () => 32), 9, 0],
+          ticks: Array.from({ length: 158 }, () => ({ kind: 'idle', swept: 0, chunks: 0 })) })
         await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
+        expect(processDerived).not.toHaveBeenCalled()
         expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
           .toBe('archived-00000')
         expect((await q(`SELECT count(*)::int AS total,
           count(*) FILTER (WHERE completed_at IS NOT NULL)::int AS completed
           FROM meta_recovery_archive_derived_effects WHERE job_id=$1`, [accepted.id])).rows)
           .toEqual([{ total: 5001, completed: 5001 }])
+      } else {
+        await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('completed')
+        expect(processDerived).toHaveBeenCalledTimes(1)
+        expect(processDerived.mock.calls[0]?.[0]).toMatchObject({
+          identity: { jobId: accepted.id, sheetId: fixture.sheetId, actorId: fixture.actorId },
+        })
       }
-      expect(processDerived.mock.calls[0]?.[0]).toMatchObject({
-        identity: { jobId: accepted.id, sheetId: fixture.sheetId, actorId: fixture.actorId },
-      })
 
       const terminalEvidence = await q(
         `SELECT job.state, job.completed_count::text AS completed_count,

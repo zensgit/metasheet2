@@ -1,5 +1,6 @@
 import { Pool } from 'pg'
-import { createRecoveryArchiveWorkerAuthorization } from '../../src/routes/univer-meta'
+import { createRecoveryArchiveDerivedProcessor, createRecoveryArchiveWorkerAuthorization } from '../../src/routes/univer-meta'
+import { createRecoveryArchiveRestoreWorker, type RecoveryArchiveRestoreWorkerRunResult } from '../../src/multitable/recovery-archive-restore-worker'
 
 import { executeRecoveryArchiveAsyncRestoreChunk } from '../../src/multitable/recovery-archive-async-restore'
 import type {
@@ -23,7 +24,8 @@ export type ArchiveProcessClaimSnapshot = Pick<RecoveryArchiveRestoreJobWorkerCl
   | 'workerFence' | 'leaseUntil' | 'resumeDeadline'>
 
 export interface ArchiveProcessWorkerInput {
-  readonly phase: 'before_commit' | 'after_commit' | 'finish'
+  readonly phase: 'before_commit' | 'after_commit' | 'finish' | 'drain'
+  readonly drainTicks?: number
   readonly applicationName: string
   readonly keyId: string
   readonly keyMaterial: RecoveryArchiveFixtureKeyMaterial
@@ -33,6 +35,7 @@ export interface ArchiveProcessWorkerInput {
 
 export type ArchiveProcessWorkerMessage =
   | { kind: 'read-object'; requestId: number; request: RecoveryArchiveObjectReadRequest }
+  | { kind: 'drained'; pid: number; attempts: number; completed: number; batches: number[]; ticks: RecoveryArchiveRestoreWorkerRunResult[] }
   | { kind: 'boundary'; phase: 'before_commit' | 'after_commit'; pid: number; claim: ArchiveProcessClaimSnapshot }
   | {
       kind: 'done'
@@ -83,7 +86,7 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     application_name: input.applicationName,
-    max: 1,
+    max: input.phase === 'drain' ? 2 : 1,
   })
   let depth = 0
   let executingChunk = false
@@ -115,6 +118,42 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     }
   }
   try {
+    if (input.phase === 'drain') {
+      const tickCount = input.drainTicks ?? 0
+      if (!Number.isSafeInteger(tickCount) || tickCount < 1 || tickCount > 158) {
+        throw new Error('archive_process_drain_bound_invalid')
+      }
+      const authorization = createRecoveryArchiveWorkerAuthorization()
+      const processDerived = createRecoveryArchiveDerivedProcessor({ query, transaction })
+      let attempts = 0
+      let completed = 0
+      const worker = createRecoveryArchiveRestoreWorker({
+        query, transaction, leaseMs: 240_000, replayHorizonMs: 0,
+        workerOwnerId: input.applicationName,
+        runtime: {
+          keyCustody: createFixtureKeyCustody(input.keyId, [], input.keyMaterial), objectStore,
+          transactionDepth: { currentTransactionDepth: () => depth },
+        },
+        recheckAuthority: authorization.recheckAuthority,
+        apply: authorization.apply,
+        processDerivedWork: async work => {
+          attempts += 1
+          if (work.identity.jobId !== input.jobId) throw new Error('archive_process_derived_job_mismatch')
+          const result = await processDerived(work)
+          if (result) completed += 1
+          return result
+        },
+      })
+      const ticks: RecoveryArchiveRestoreWorkerRunResult[] = []
+      const batches: number[] = []
+      for (let tick = 0; tick < tickCount; tick += 1) {
+        const before = completed
+        ticks.push(await worker.runOnce())
+        batches.push(completed - before)
+      }
+      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, ticks })
+      return
+    }
     if (input.priorClaim) {
       let code: unknown
       try {
