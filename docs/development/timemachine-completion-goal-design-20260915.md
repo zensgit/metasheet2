@@ -24,23 +24,38 @@ discard existing work or silently rewrite another candidate.
 
 ### Latest Local Checkpoint
 
-At code `34681dc7c326926311dbe5446b22355e8e81100f` (base main `28d11496bb4281738c3dd13096fe317ff42e8780`), runtime successor #5744 contains canonical per-job authority, durable derived queue, transaction-held computed input/authorization, bounded drain and migration replay repairs. Both actual SIGKILL boundaries now resume through the production application composition and real interval, then independently drain all 5,001 derived effects in fresh processes. Full isolated restore suite 39/39 and timer-cancellation mutation are recorded in the runtime verification MD. Existing earlier finalization/scheduling negatives retain their own exact evidence. Earlier queue rows below are historical checkpoints, not current remote CI claims.
+Runtime code `1907d2b413abbeb65b00e07c917406154f001501`, tree
+`72ec5b49e7890421f7e27c9810568e1e6cbae277`, extends successor #5744 with
+real LoginView/Workbench -> MetaSheetServer -> seeded encrypted archive -> owned
+PostgreSQL browser acceptance. Six scenario groups pass at the clean code head:
+authorization/flag negatives, viewer timezone, non-mutating confirmed preview,
+browser job acceptance, full-page rediscovery, completed mobile/desktop progress,
+visible grid refresh, and independent exact 5,001-row/revision/derived-effect
+postconditions. Both discovery omission and offscreen mobile counts are proven
+RED mutations. The archive client/modal neighbors pass 95/95. Prior full 39/39
+real-DB crash/timer evidence remains bound to byte-identical test/production
+sources, not claimed as another run here. Independent database/backend residue
+is zero and the owned cluster is stopped. Main remains `2b67a04625a0d6b089dac173e47a0de5d111e225`.
 
-UI code `e8cadc2989b38d9d36975d22ff7451dbe2d3843a`, published as the docs-child
-`321761ca35fca2cec113acc7ba6fa1bbcd836daa` in Draft #5709, has real canonical
-login/session/JWT + dedicated PostgreSQL component-level table/row/column restore
-acceptance: 15 named checks, with captured versus definition-only values, actual
-audit actor, server confirmation/flag negatives and cleanup. This is not the full
-workbench route or archive-provider browser flow. Draft #5725 remains a separate
-six-file readiness candidate at `94add2a91e828cdcf70ba0a0375f4d0575b37695`;
-its returned workflow page is terminal 15 success/1 expected skip, not merge or
-production approval. No duplicate readiness implementation is required.
+UI code `890f39e3295e5f44ca85d84423b70cc842216071`, published as docs-child
+`c970c88096995057a5b54be34082a03a047fdd7e` in Draft #5709, documents six real
+full-workbench table/row/column recovery cases, beyond the earlier component-only
+acceptance. Its current exact-head CI was independently read as 28 SUCCESS + 1
+expected SKIP, zero pending/failure, base=current main. Draft #5725 remains a
+separate six-file readiness candidate at `94add2a91e828cdcf70ba0a0375f4d0575b37695`:
+23 SUCCESS + 1 expected SKIP, zero pending/failure, but base is the older
+`28d11496bb4281738c3dd13096fe317ff42e8780`. These are not merge approvals.
+The previous #5744 published head `a1d2fe1968c9464de9b7306ac72f07065f380925`
+was still 24 SUCCESS / 1 SKIP / 3 in progress at the last REST check; new
+publication requires fresh exact-head CI. Earlier queue rows below are historical
+checkpoints, not current remote CI claims. No duplicate readiness implementation
+is required.
 
 Remaining work is not another reimplementation of these primitives:
 
 - Standard server startup still needs the explicitly selected object-store/custody composition; fixture storage is not a production choice.
-- Application timer/start/stop and authenticated recovery-component acceptance are now evidenced as above. Full `MetaSheetServer.start()` lifecycle, full-workbench routing and archive browser-to-provider acceptance remain open.
-- Existing UI candidates #5709 and #5725 require current exact-head remote/integration verification; no duplicate UI implementation or implicit merge.
+- Application timers, standard server lifecycle, full-workbench routing and archive browser-to-test-provider acceptance are evidenced above. Production capture/coverage construction and independent durable provider/KMS acceptance remain open; seeded verified archives are not substitutes for them.
+- Existing UI candidates #5709 and #5725 need bounded integration/current-main verification, especially the older #5725 base, plus separate merge authority. Their individual green matrices do not prove a combined final tree; no duplicate UI implementation or implicit merge.
 - Nightly missing-sample attribution below is open; no threshold relaxation or production reload/restore is authorized.
 - GitHub API reads have intermittently failed with timeout/EOF. Ordinary Git pushes do not prove exact-head CI green. Keep Draft/HOLD and recheck the published head when API access returns.
 

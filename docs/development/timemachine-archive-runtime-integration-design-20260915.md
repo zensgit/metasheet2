@@ -2,6 +2,41 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Real Archive Workbench Acceptance
+
+Code `1907d2b413abbeb65b00e07c917406154f001501`, tree
+`72ec5b49e7890421f7e27c9810568e1e6cbae277`, extends the existing manual
+standard-server acceptance instead of creating a parallel backend or browser
+harness. Parent is `a1d2fe1968c9464de9b7306ac72f07065f380925`; current-main
+ancestor is `2b67a04625a0d6b089dac173e47a0de5d111e225`. Two script/config
+files change, +137/-5; production source and shared CI wiring are unchanged.
+
+The real LoginView must create a persisted session and navigate through the real
+router into MultitableWorkbench. Archive selection and async preview must occur
+through its toolbar/modal; the recovery point must use the viewer's timezone.
+Confirmation is required before the browser submits the one real job. Reloading
+the entire page must rediscover that persisted job through the server, reach
+completed progress, and refresh visible grid values. No response stubbing,
+manufactured browser token, localStorage injection or test-driven worker tick is
+allowed. Independent database checks still prove all 5,001 rows/revisions and
+all 5,001 completed derived effects, not just a success message.
+
+Desktop and mobile preview/completion screenshots accompany the local evidence.
+Mobile count, progressbar and outcome must intersect the viewport in full and
+must not be horizontally clipped. Removing job discovery or shifting the count
+offscreen must fail this acceptance. Browser errors, failed API responses and
+non-owned network targets remain fatal. Cleanup closes browser and Vite before
+the standard server, then drops the owned database and object directory.
+
+`scripts/tsconfig.recovery-archive-acceptance.json` supplies an explicit, committed
+TypeScript project for the manual Node/browser script; it does not broaden the
+default test project or a required workflow. The script binds its config and two
+production UI surfaces in addition to the prior source fingerprints. This closes
+only synthetic browser-to-standard-server-to-fixture-provider acceptance.
+Production capture, coverage construction, independent provider/KMS durability,
+runtime enablement and deployment remain outside this evidence. The older
+archive-browser-open wording below is retained as historical checkpoint context.
+
 ## Standard Server HTTP Acceptance
 
 Code `54ac563ce3d0d69b1970a986370a6ef6bce5238b`, tree

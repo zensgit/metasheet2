@@ -2,6 +2,32 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Real Archive Browser Checkpoint
+
+- Clean tested code: `1907d2b413abbeb65b00e07c917406154f001501`; tree `72ec5b49e7890421f7e27c9810568e1e6cbae277`; parent `a1d2fe1968c9464de9b7306ac72f07065f380925`. Exactly two script/config files, +137/-5. Main was independently rechecked as `2b67a04625a0d6b089dac173e47a0de5d111e225`; no incoming replay was needed for this checkpoint. Production UI/backend, migrations and workflows have no final delta.
+- Final manual run `913bcb95-87d7-4d2e-9b6d-8832f324c63e`: **6/6 scenario groups PASS**, process exit 0, worktreeClean=true. Complete fresh 403 migrations plus replay. Actual MetaSheetServer, Vite app entry/router, LoginView and MultitableWorkbench; real password auth and three persisted sessions including the browser. No fulfilled/stubbed responses or injected browser auth.
+- HTTP authority negatives remain 401 anonymous / 403 reader / 503 test-process flag OFF. Browser catalog time matches America/New_York and differs from UTC. Real UI preview is async, shows 5,001 changes, leaves all live values/version unchanged and disables execution until confirmed. Browser acceptance returns 202 and creates exactly one persisted job. Full-page reload rediscovers the same job from the server; UI shows Completed, 5001 / 5001 and 100 percent. Closing the modal reveals archived-0 instead of live-0 in the workbench.
+- Independent postconditions: all 5,001 records exactly match the seeded encrypted archive and have version 3; 5,001 restore revisions; derived effects `{n:5001,pending:0}`. Desktop 1440x1000 and mobile 390x844 preview/completion screenshots were inspected. Mobile progress/count/outcome must be fully in the viewport and un-clipped. The broader app navigation's responsive layout is not reworked by this acceptance-only change.
+- Mutation 1: omit `applyJobSnapshot` during server job discovery. Browser acceptance still happens and the server returns the persisted job, but the reloaded modal has no job panel; the exact post-reload `toBeVisible` fails. Mutation evidence run `baa52e94-7fec-4e67-bc5d-b8e9a48851c2` is FAIL with cleanupErrors=[] and databaseResidue=0.
+- Mutation 2: mobile CSS translates the count outside the viewport. The count still exists and reads 5001 / 5001, but `toBeInViewport` fails with viewport ratio 0. This closes the Terra Medium review's real P2 false-positive concern; the reviewer did not run tests or provide a second post-fix verdict. Both mutations were restored with apply_patch before the clean positive run. Modal SHA-256 is restored exactly to `ec133098d0e3203cb73e24645b9a8c878aac826745035b8ea807420ae032ff15`.
+- Script SHA-256 `42973525ce6a9c3ff2b780033cdf0d5ea5310b5154974d33ed0f999fd6cb02bd`; committed script config SHA-256 `2dd24a7fd87076eeeb2c11fc62e489395d46cc3317f4f5643466c00db39ebaaa`. The fixture and existing 39-case real-DB suite are byte-identical to the preceding verified checkpoint; that whole suite was not rerun in this script-only window. New run evidence also binds the modal/workbench source hashes and the empty tracked-diff hash.
+- Archive client/modal neighbors: **2 files / 95 tests PASS**. Committed script/source TypeScript project PASS. ESLint PASS with that explicit parser project; the default lint command initially rejected the script because the default core tsconfig excludes it, so that initial command is not counted as lint success. `git diff --check` PASS.
+- Cleanup: browser/Vite/server closed, owned database and object directory removed; final independent database-prefix/backend census `0|0`; dedicated PG stopped. No customer data, persistent flag, dispatch or deployment was involved. Initial harness attempt failed on an incorrect job-table name after browser completion; it was corrected and is not counted as a product failure or a passing gate.
+- Evidence is session-local: `artifacts/recovery-archive-server/{evidence,browser-discovery-mutation,browser-mobile-mutation}.json`, four `archive-{preview,completed}-{desktop,mobile}.png`, and `/private/tmp/tm-archive-browser-*.log`. The seeded catalog uses the existing fixture coverage metadata (coverageRowCount=0); actual manifest records and independently verified restore count are 5,001. This does **not** prove production capture/coverage generation, provider/KMS durability or deployed UAT. The manual script is not a required-CI test. Published-head checks must run afresh after ordinary push.
+
+Reproduction on the already-admitted owned synthetic cluster:
+
+```sh
+NODE_ENV=test TM_ARCHIVE_TEST_ADMIN_URL="$OWNED_TEST_CLUSTER_ADMIN_URL" \
+  TM_ARCHIVE_TEST_PGDATA="$OWNED_TEST_CLUSTER_DATA_DIRECTORY" \
+  pnpm --filter @metasheet/core-backend exec tsx scripts/verify-recovery-archive-server.mts
+pnpm --filter @metasheet/core-backend exec tsc -p scripts/tsconfig.recovery-archive-acceptance.json
+pnpm --filter @metasheet/core-backend exec eslint scripts/verify-recovery-archive-server.mts \
+  --parser-options '{"project":"./scripts/tsconfig.recovery-archive-acceptance.json"}'
+pnpm --filter @metasheet/web exec vitest run --watch=false \
+  tests/multitable-recovery-archive-client.spec.ts tests/multitable-recovery-archive-modal.spec.ts
+```
+
 ## Standard Server HTTP Checkpoint
 
 - Clean tested code: `54ac563ce3d0d69b1970a986370a6ef6bce5238b`; tree `bf2184778e308488dc87adcdae05bfa302b458e7`; parent `75adc9c14fcaad03354221727bf79e5fb9204f35`. Three test/script files, +520/-188. The preceding conflict-free true merge has ordered parents `85592c35d6c5c52933bbe2e9f1aad55af22d4b3a` and then-current main `2b67a04625a0d6b089dac173e47a0de5d111e225`; incoming main delta is three notification client/test files, no archive overlap.
