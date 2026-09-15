@@ -8,6 +8,7 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
+import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
 import {
   abandonRecoveryArchiveRestoreJob,
   acceptRecoveryArchiveRestoreJob,
@@ -1483,6 +1484,59 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       [fixture.sheetId, selectedRecordId],
     )
     expect(revision.rows).toEqual([{ changed_field_ids: [selectedFieldId] }])
+  })
+
+  test('derived effects migration supports empty down/down/up/up without losing the canonical schema', async () => {
+    await migrationDb.transaction().execute(async (trx) => {
+      await derivedEffectsMigration.up(trx)
+      await derivedEffectsMigration.down(trx)
+      await derivedEffectsMigration.down(trx)
+      await derivedEffectsMigration.up(trx)
+      await derivedEffectsMigration.up(trx)
+    })
+  })
+
+  test.each([
+    'ALTER TABLE public.meta_recovery_archive_derived_effects ALTER COLUMN field_ids DROP NOT NULL',
+    'ALTER TABLE public.meta_recovery_archive_derived_effects ALTER COLUMN created_at DROP DEFAULT',
+    'ALTER TABLE public.meta_recovery_archive_derived_effects DROP CONSTRAINT meta_recovery_archive_derived_effects_pkey, ADD PRIMARY KEY (revision_id) DEFERRABLE',
+  ])('derived effects migration rejects catalog drift: %s', async (statement) => {
+    await expect(migrationDb.transaction().execute(async (trx) => {
+      await sql.raw(statement).execute(trx)
+      await derivedEffectsMigration.up(trx)
+    })).rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECTS_SCHEMA_DRIFT')
+    await derivedEffectsMigration.up(migrationDb)
+  })
+
+  test('derived effects migration refuses populated down and preserves pending work', async () => {
+    const fixture = await seedVerifiedArchive('derived_effects_down')
+    const plan = compilePlan(fixture)
+    const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
+    const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+      token, plan, identity: restoreRequestIdentity(fixture),
+      resumeDeadline: future(60_000), recheckAuthority: async () => true,
+    })
+    const revisionId = randomUUID()
+    try {
+      await q(`INSERT INTO public.meta_recovery_archive_derived_effects
+        (revision_id, job_id, record_id, field_ids, link_invalidations)
+        VALUES ($1,$2,$3,$4,$5::jsonb)`,
+      [revisionId, accepted.id, `${PREFIX}_derived_record`, ['field'], '[]'])
+      await expect(migrationDb.transaction().execute(derivedEffectsMigration.down))
+        .rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECTS_DOWN_IN_USE')
+      const pending = await q(`SELECT revision_id::text, completed_at
+        FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1`, [revisionId])
+      expect(pending.rows).toEqual([{ revision_id: revisionId, completed_at: null }])
+      await derivedEffectsMigration.up(migrationDb)
+    } finally {
+      await q('DELETE FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1', [revisionId])
+      await cancelRecoveryArchiveRestoreJob(transaction, {
+        workspaceId: fixture.workspaceId, baseId: fixture.baseId,
+        sheetId: fixture.sheetId, actorId: fixture.actorId, jobId: accepted.id,
+        replayHorizonMs: 0, recheckAuthority: async () => true,
+      })
+    }
   })
 
   test('fails migration preflight when archive expiry or writer ownership columns drift', async () => {
