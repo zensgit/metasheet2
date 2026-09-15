@@ -145,34 +145,53 @@
 
 - **CI「红」先看步骤状态再看断言**：#5761 的 web-tests 失败没有任何 FAIL 断言，日志停在 15:50 的某个用例后 45 min 无输出、步骤仍 `in_progress`，是 job 到 50 min 被杀。直接诱因是该 spec 在无路由挂载时每个用例刷 `[Vue warn] injection "Symbol(router)" not found`，Vue 把整个 mock 客户端对象（几百行）打进 stderr，476 段 dump 撑爆 vitest worker 的 RPC（与考勤守卫「Timeout calling onTaskUpdate」同一形态）。处置分两层：分支合入 main 重跑（#5764 已把同批用例超时放宽），再由 Q16 从组件侧把 `useRouter()` 换成带默认值的 `inject(routerKey, null)` 让警告归零。教训：spec 里的 Vue warn 不是「噪音」，是 CI 稳定性成本，看到就该清。
 
+- **边界先看测试，不看 CODEOWNERS**：三读者地图说"审批中心的所有权边界没有工具化"，错——`approval-member-identity-coverage-enumeration.spec.ts` 的 scope-leak sweep 就是工具化的边界（`src` 全树禁止 `getResolvedUserName / ApprovalDirectoryUser / assigneeId`），#5770 首轮 CI 因此红。设计跨窗口 import 之前，先 grep `tests/` 里有没有针对该模块的 sweep/tripwire；被拦下时按对方的口径改（只用 payload 显示名 + 值无关序号），不改 allowlist。
+- **两点登记的 token 行必撞**：`run-required-web-tests.sh` exec 行与 `multitable-web-guard.yml` run-list 都是单行 token 列表，本轮 #5761、#5770 两次与 main 冲突；固定解法是取 main 整行再追加缺的 token（放 `--reporter=dot` 前）、`bash -n` + yaml 解析 + 两个文件 grep 新旧 token；长期该把清单改成多行。
+- **Monitor 的 shell 没有 jq**：用 `jq` 解析 `gh` 输出的监控在 Monitor 里恒空，第一版把空当"完成"秒退、第二版 30 分钟零事件过期；改用 `gh --jq`，并对空输出显式打 `gh-empty` 事件。
+- **裁判"无人看的路径"要落成 owner 探针**：Q19 里完成 PUT 的任何 404 都当"已清理"，操作者 unionId 变更或权限问题也会 404——代码层无法分辨，写进 owner 前置（真租户探针一轮记录 404 语义）比猜 body code 诚实。
+
 ## 5. 未完成 / 交接
 
-（截至 2026-09-16 00:50，随进展更新；最终版在授权结束前定稿）
+（定稿 2026-09-16 04:45；授权到 18:05，若之后再有变动会以进度快照追加到本节末尾）
+
+### 5.0 一句话账目
+- 代码 PR 18 个全部合并：#5748 #5751 #5752 #5753 #5754 #5755 #5756 #5759 #5760 #5761 #5763 #5764 #5765 #5766 #5769 #5770 #5772 #5773；docs PR #5771（本文 + 两份设计稿 + 一处 0903 文档纠正）。
+- 222 发布 6 次（r47–r52），每次都有 gitSha == main 的权威标记与浏览器实测（§3）；当前 222 = main `0be3f25da`。
+- issue 4 个：#5757（nginx index.html 无 Cache-Control）、#5762（编辑器预览与执行器失真）、#5774（convergence guard Windows 伪红）、#5775（他窗口 spec Vue warn 普查）。
+- 对抗核验：Q1/Q2/Q3/Q4/Q7/Q8/Q9/Q11/Q14/Q17/Q19 十一条流水线，反驳共 80+ 条，major 全部落码，裁判无一 BLOCK。
 
 ### 5.1 在飞
-- #5761（Q11）：合入 main `f1cc1858b` 后 CI 重跑；绿即合并（分支含 `.github` 改动，须 zensgit 推送）。
-- Q16：`fix/record-approval-router-inject-quiet`，sonnet 单代理实现中；PR 走一轮小范围核验（无行为变化，看 spec 警告计数 0 + 变异回退非 0）。
-- 下一次发布：复制 `claude-auto24/r52/` 为 r53（脚本改 TAG/ToolsDir/标记头），`build|ship`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。
-- 本文、阶段二设计稿、钉钉 B 方案设计稿：docs PR #5771（分支 `docs/autonomous-24h-run-20260915`，wt-docs6），随进度快照持续推送，授权结束前定稿合并。
+- 无代码 PR 在飞。docs PR #5771 已绿，定稿后合并（分支 `docs/autonomous-24h-run-20260915`，wt-docs6）。
 
 ### 5.2 需要 owner 拍板 / 动手的
 | 事项 | 出处 | 说明 |
 | --- | --- | --- |
-| `approvals:write` 是否授予普通用户角色 | #5754 / #5763 正文 | 记录级送审需要申请人能创建实例；目前 222 只有 admin 有 |
-| creating-claim TTL 5 min | #5754 | 在途占位的过期时间，取默认值；业务上想更短/更长改常量即可 |
+| `approvals:read` 授予普通用户角色 | #5754 / #5763 / #5770 | 记录级送审的申请人要看进度卡片、送审对话框要列模板，都过这道门；222 目前只有 admin 有（手工授予）；播种归审批窗口 #5741 |
+| `approvals:write` 是否授予普通用户角色 | #5754 | 申请人创建实例需要 |
+| creating-claim TTL 5 min | #5754 | 在途占位过期时间，取默认值 |
 | #5763 四项行为变化 | #5763 正文 | 模板名/申请人名走审批中心可见性门、自动通过原子提升+补偿、hasMore、limit 上限 |
-| 222 nginx `index.html` 无 `Cache-Control` | issue #5757 | 浏览器长期跑旧 SPA 包；建议 `no-cache` 或短 max-age，属运维改动 |
-| #5741 `approvals:read` 播种 | issue #5741 | 归审批窗口补迁移；222 手工授予保留 |
-| 锁包文档 §T0-3 更新 | #5763 裁判遗留 | 说明记录级送审的耐久投递已纳入 v2 清单 |
-| 预览与执行器失真 | issue #5762 | 编辑器预览用 label 而执行器用 id，非阻断 |
-| 客户规则「测试」每次记录更新失败 | 222 观察 | 早于本轮存在，未动；需客户确认该规则是否还要 |
+| 钉钉待办镜像（B）前置 8 项 | #5772 正文 / 设计稿 §8 | 待办写权限、操作者 unionId（SQL 直设 `directory_integrations.config.todoOperatorUnionId`）、222 unionId 覆盖率、`PUBLIC_APP_URL`、真租户 404 语义探针、role 席位决定、之后才开 `DINGTALK_TODO_MIRROR_ENABLED=true`、重投只有 CLI |
+| 222 是否启用耐久投递 | §3.6 | `AUTOMATION_DURABLE_DELIVERY_ENABLED` 未设，审批事件走 eventBus 腿；开了才有 outbox 重试与 manifest v3 扇出，也才需要看 `dingtalk-todo-mirror` 消费者积压 |
+| 222 nginx `index.html` 无 `Cache-Control` | #5757 | 浏览器长期跑旧 SPA 包（r49 误判事故根因） |
+| 锁包文档 §T0-3 更新 | #5763 裁判遗留 | 说明记录级送审的耐久投递已纳入 v2/v3 清单 |
+| 编辑器预览与执行器失真 | #5762 | 预览用 label、执行器用 id，非阻断 |
+| 客户规则「测试」每次记录更新失败 | 222 观察 | 早于本轮，未动；需客户确认是否还要 |
+| 待处理人显示名 | #5770 | 审批 payload 无 `metadata.assigneeName` 时抽屉只显示「成员 N」；若要真名，需审批窗口在 task 席位 metadata 里带显示名（多维表侧不做 id→名字解析，tripwire） |
 
-### 5.3 队列之外的候选（按我给用户的顺序）
-1. 记录抽屉审批卡片（在抽屉内直接看当前实例与节点，不必跳审批中心）。
-2. 钉钉待办 B 方案镜像代码（设计已定，见 [[beiliao-dingtalk-todo-decision]]；三条 owner 侧前置未满足）。
-3. 技术债：lint 残留、过期上机标记。
-4. Vue warn 噪音（Q18 普查结论，他窗口领域只记录不动）：`tests/IntegrationWorkbenchView.spec.ts`（38.6k 行 / 2358 条）、`IntegrationBridgeAgentSection` / `IntegrationReadSourceConfigPanel` / `approvalTemplateAuthoring` / `IntegrationCompositionWizard` 等裸 `createApp()` 未 `app.use(ElementPlus)`（`tests/fwb-rule-authoring.spec.ts` 有现成写法），合计约 62%；`AttendanceView.vue:12388` 的 `useRouter()` 在 15+ 考勤 spec 里刷 389 条，可用 Q16 同法或共享 `mountWithRouter()`；`AttendanceSchedulingAdminSection` / `asyncStateBlock` 两个 spec 各 1 万行 stderr 但几乎不是 Vue warn，另有别的噪音源。
+### 5.3 已知小遗留（不阻断，谁顺手谁做）
+- `apps/web/src/multitable/utils/meta-record-labels.ts` 里 `recordApprovalApproverFallbackLabel` 的注释仍写"目录解析器未能确认"，实际触发条件是"payload 无 assigneeName"（一行）。
+- #5770 卡片 `loadProgress` 的 `catch` 分支同款版本守卫未被测试钉住（成功路径已钉）。
+- #5772 worker：`failed` / `outcome_unknown` 无告警；创建后的席位探针尽力而为；worker 用例的 org 限定断言是 SQL 文本 pin。
+- lint 普查（#5773 正文）：`require-default-prop` 47、vendor `prefer-const` 16、`no-unused-vars` 11、`ban-types` 4、`no-v-html` 3 等均需语义性修改，另开专项。
+- 他窗口 spec 噪音见 #5775；convergence guard Windows 伪红见 #5774。
 
-### 5.4 环境残留
-- worktrees：wt-fe6（#5761 分支）、wt-base3（Q16）、wt-docs6（本文）；其余分支均已合并，可 `git worktree` 清理（按 [[git-worktree-remove-follows-junctions]] 先拆 junction）。
-- 222：演示记录 rec_c5918f1c…/rec_bb72a248… 的实例均已关闭；无待清数据。
+### 5.4 之后的候选（按价值排序）
+1. 钉钉待办镜像的 role / source_queue 席位（需审批窗口补"按角色展开成员"的事件，或明确不做）。
+2. `failed` / `outcome_unknown` 告警 + 平台管理员级重投路由（现只有 CLI）。
+3. 记录级送审：申请人自己撤回（现只能在审批中心撤回）。
+4. 两点登记清单改多行（消 token 行冲突）。
+
+### 5.5 环境残留
+- worktrees（均无未提交改动，分支已合并可删；删前按 [[git-worktree-remove-follows-junctions]] 先拆 junction）：wt-fe6（Q19）、wt-p5（Q17）、wt-p6（Q18/Q20）、wt-base3（Q16）、wt-flabel（Q10）、wt-docs6（本文，待 #5771 合并后）。
+- 发布脚本与日志：`%LOCALAPPDATA%\Temp\claude-auto24\r47…r52\`（含 `ship.log` / `upgrade-222-rNN.log`）；账本 `claude-auto24\STATE.md`（逐条时间戳）。
+- 222：演示实例 AP-100003/100004/100005 均已关闭；`dingtalk_todo_mirrors` 空表；无待清数据；`approvals:read` 的手工授予保留。
