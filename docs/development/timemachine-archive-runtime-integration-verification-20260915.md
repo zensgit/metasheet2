@@ -2,6 +2,20 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Completion Shutdown Integration Acceptance
+
+All following local evidence binds clean code `4bd71a62834bbee6d3764dd8ff9b16223a102ed0`,
+tree `f96027d15689b52756e812dbf800951c6eb02890`, not a future published head:
+
+- Lifecycle/EventBus focused: 7 files / 94 tests PASS. Server, archive application/wiring and Automation V1 neighbors: 4 files / 334 tests PASS. Core and app-only Web typechecks PASS.
+- Required-web exits 0; final group 461 files / 6,939 tests PASS. TM wiring 42/42 PASS. Logs `/private/tmp/tm-shutdown-{focused,neighbors,required-web,core-tsc,app-tsc,wiring}-20260916.log` (focused log is `tm-shutdown-union-focused-20260916.log`). Existing fixture warnings remain.
+- Preceding main replay focused Web: 4 files / 208 tests PASS. Two selector files preserve both parents: workflow token counts 445/441 to 447; required script 221/223 to 225, each missing=0. Shutdown merge has no manual resolution.
+- Workbench run `c675c10b-1cc6-4cc7-b4e8-d77d20c6b06b`: 6/6 PASS with real login, retained whole-table recovery, selected row recovery and typed column/captured-value recovery. Fresh 405 migrations + replay; all 12 fixture residue categories zero; cleanupErrors empty.
+- Archive run `d6439065-44df-4681-8f84-2d49a945c6db`: 6/6 PASS, fresh 405 migrations + replay. Real login and 401/403/503 negatives, viewer-timezone catalog, non-mutating preview, confirmation, persisted job rediscovery, exactly 5,001 restored rows and derived `{n:5001,pending:0}`. Desktop/mobile completion screenshots inspected: complete count and restored values visible.
+- Both browser processes exit 0 with `Database pool closed` followed by `Shutdown complete`, without the preceding checkpoint's delayed `Shutdown timeout` warning. This is synthetic real-workbench acceptance, not arbitrary production WebSocket/signal/failure acceptance.
+- Both dedicated databases are removed, independent exact/prefix database and backend census zero, task-owned PG stopped. Browser logs `/private/tmp/tm-4bd71-{workbench,archive}-20260916.log`; artifacts under `artifacts/timemachine-workbench` and `artifacts/recovery-archive-server`.
+- Source shutdown mutation evidence remains bound to #5768's implementation commits; this automatic integration did not rerun those mutations. Published combined-head CI remains required. Production provider/KMS durability, capture coverage and nightly missing-sample attribution remain open.
+
 ## Fresh Workbench Acceptance After Record Approval Replay
 
 Clean head `4151ce27dbcd5aaf5a304294e160fddb90b31eb5`, tree

@@ -2,6 +2,24 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Completion Shutdown Integration
+
+Clean tested code `4bd71a62834bbee6d3764dd8ff9b16223a102ed0`, tree
+`f96027d15689b52756e812dbf800951c6eb02890`, true-merges ordered parents
+`126ef8e26cb18f270fc2ab1b04749482e6dd0152` and shutdown candidate
+`b171cc34b302ff8ed5ddd96061eb2faa09094bfd` (#5768, including #5758).
+The first parent preserves then-current main `a4007e1e37f5aa522b7558a9e90a6f945941bee3`.
+Only the preceding main replay required two test-list UNION resolutions;
+the shutdown integration itself is conflict-free.
+
+Producer admissions close before awaiting admitted work. Owned completion
+subscriptions stay attached until producer and transitive producer drains finish;
+then their callbacks drain before the pool closes. Immediate rejection observation
+retains the original rejection for the barrier verdict. Restore-worker failure
+still forbids pool close. Successful timeout timers are cleared.
+The owning shutdown design/verification pair records failure and mutation scope.
+This adds no provider selection, capture policy, permissions, or runtime enablement.
+
 ## Record Approval Main Replay
 
 True merge `5a8054d48a52b417cef7c99372541300fd776a2c`, tree

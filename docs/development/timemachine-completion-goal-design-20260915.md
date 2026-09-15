@@ -22,6 +22,18 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Completion Shutdown Integration Checkpoint
+
+Local clean `4bd71a62834bbee6d3764dd8ff9b16223a102ed0` integrates #5768/#5758
+with main `a4007e1e37f5aa522b7558a9e90a6f945941bee3`. The bounded shutdown
+repair has 94 focused + 334 neighbor cases, and both real-workbench and seeded
+archive browser chains pass 6/6 with normal pool close/exit and zero DB residue.
+Full required-web passes (final group 461 files / 6,939 tests). Exact evidence is
+in the runtime verification report. This supersedes the older unimplemented
+shutdown checkpoint below only for its bounded local code/test scope; new
+combined-head CI remains open. Provider/custody, capture policy and nightly
+operational attribution remain unresolved. Goal remains ACTIVE, not complete.
+
 ### Current Requirement Audit
 
 Published candidate: #5744 `d47219272d17d4225b0146a36ebb8213037f0c84`,
