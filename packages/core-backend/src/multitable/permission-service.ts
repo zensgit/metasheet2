@@ -1808,6 +1808,9 @@ export async function resolveSheetCapabilitiesForAccess(
    *
    * `undefined` iff the caller passed `skipLiveness: true` above — no query is made and no value is
    * fabricated in its place. Every caller that does not opt out keeps getting a real verdict.
+   * Only a caller that has ALREADY established the sheet's liveness itself (e.g. resolved the sheet
+   * through a `deleted_at IS NULL` filter before calling) may opt out; opting out anywhere else
+   * re-opens the liveness closure this resolver exists to keep.
    */
   sheetLiveness: SheetLiveness | undefined
 }> {
