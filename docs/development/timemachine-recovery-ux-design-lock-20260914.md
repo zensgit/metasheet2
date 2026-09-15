@@ -15,7 +15,7 @@ deployment, production or real customer data.
 
 The manual harness `packages/core-backend/scripts/verify-timemachine-browser.mts`
 must use canonical password login, persisted sessions, JWT middleware, the real
-multitable router/client, `SheetTrashModal` and `HistoryCenterModal`. No injected request user, minted
+multitable router/client, `SheetTrashModal`, `HistoryCenterModal` and `MetaConfigHistoryModal`. No injected request user, minted
 fixture token, intercepted API or fake restore result qualifies. Use a dedicated
 loopback PostgreSQL test database; refuse general/shared database names and ports.
 Compare retained field, record and view rows independently in PostgreSQL; a UI
@@ -25,9 +25,26 @@ and prove fixture/session cleanup. For records, delete through the canonical
 client, select the resulting history entry, then restore its current tombstone
 through the real confirmation. Independently compare the complete stored row
 data/identity/timestamps and its untouched peer; reader/anonymous restores must
-leave the tombstone unchanged. This is manual component-to-real-backend
-acceptance, not a claim that full-workbench navigation, config restore, archive
-worker, staging or production has passed. No new recovery authority is added.
+leave the tombstone unchanged.
+
+For configuration history, delete a column through the canonical client, preview
+the actual persisted delete revision, and execute through typed confirmation.
+Test two consecutive deletions of the same field: captured values are restored
+even with capture now disabled, while an uncaptured later deletion restores only
+the definition and cannot reuse earlier tombstones. Compare field identity,
+type/property/order, both records, an untouched field, trailing-field order and
+view-reference cleanup. Restore must not silently re-add removed view references.
+Verify the actual actor on configuration and value-restoration audit records.
+With a valid preview token, the server must still refuse a disabled execute gate,
+wrong/missing confirmation, authenticated reader and anonymous requests without
+writes. Configuration flags may be enabled only inside the isolated test process
+and must be restored in finally. Explicit cleanup includes config revisions and
+value/link tombstones, which do not all cascade from the sheet.
+
+Code `e8cadc2989b38d9d36975d22ff7451dbe2d3843a` supplies this manual
+component-to-real-backend acceptance; see the exact-head verification section.
+It is not a claim that full-workbench navigation, archive worker, staging or
+production has passed. No new recovery authority is added.
 
 ### Product Behavior
 

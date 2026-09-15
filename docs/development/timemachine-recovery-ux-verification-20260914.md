@@ -1,5 +1,75 @@
 # Time Machine Recovery UX Verification
 
+## Authenticated Configuration Restore Gate 2026-09-15
+
+Code `e8cadc2989b38d9d36975d22ff7451dbe2d3843a`, tree
+`7c64e36af206b99e463889f26899230e4eccfe11`, parent
+`162eab9ce444382d6a390ef087a3bbbfea04cb56`. Exactly one code file:
+`packages/core-backend/scripts/verify-timemachine-browser.mts`, +175/-6.
+Production source, migrations, workflows and recovery authority are unchanged.
+This report/design update is a documentation-only child. Main remains
+`28d11496bb4281738c3dd13096fe317ff42e8780`; publication is existing Draft #5709.
+
+Clean exact-code-head manual browser run: 15 named checks PASS using canonical
+password login, persisted session/JWT, real client/router/modal and dedicated
+PostgreSQL. The nine earlier retained-table/whole-row/history checks stay green.
+The new configuration checks cover:
+
+- Real column deletion displays its name, type, readable order label, authenticated
+  actor and browser America/New_York timestamp. Field/row state is independently
+  read from PostgreSQL, not inferred from a toast or stubbed API.
+- Preview with undelete disabled refuses 403 without changes. A valid preview
+  token cannot bypass a subsequently disabled execute flag (403), wrong or missing
+  server confirmation (400). UI empty/wrong confirmation stays disabled.
+- Captured deletion restores the exact field definition, position and both row
+  values even after capture is disabled. Deleting the same field again with capture
+  off restores only its definition, with an explicit no-values notice; prior-cycle
+  tombstones do not resurrect values. Restore audit binds the actual logged-in actor.
+- Authenticated reader/anonymous preview and execute return 403/401 without writes.
+  Trailing-field ordering and unrelated field data survive; filter/sort/group/hidden
+  references are cleaned at delete and remain cleaned at restore.
+
+Eight discriminating mutations each exit nonzero at the intended assertion:
+skip value rehydration; bypass execute flag; bypass server confirmation; null the
+restore actor; enable the UI confirm button unconditionally; omit hidden-field
+cleanup; omit delete-order compaction; omit config-revision cleanup (10 residual
+rows instead of zero). Production files were restored byte-for-byte, then the
+clean exact-code-head run passed. A first hidden-field mutation attempt hit a Vite
+WebSocket infrastructure error and is NOT counted. The harness now binds Vite's
+transport to its own random-port HTTP server rather than the shared default port;
+the repeated hidden-field mutation fails precisely on the retained deleted id.
+
+Fresh database: 402 migrations, second replay no-op. After the deliberate cleanup
+mutation, discard/recreate the entire dedicated database and rerun fresh/replay
+before final acceptance. Final fixture census: sheets/fields/records/views/grants,
+config revisions, value/link tombstones, sessions and users all zero. Independent
+database-prefix and backend residue zero after dropping it; owned PostgreSQL stopped.
+Both configuration environment flags are restored to their original process values.
+
+Additional gates: three existing config/history Web specs 83/83 PASS; standalone
+harness plus normal core dependency typecheck PASS (repository node resolution,
+ESNext for top-level await); diff-check PASS. No full required-web rerun or new
+required-CI enrollment is claimed for this manual acceptance script.
+
+Sol High's bounded read-only harness review exposed missing server-execute negatives,
+actor checks, nondegenerate cascade fixtures and cleanup census. These were closed
+with the assertions/mutations above; there is no claimed second external 0/0 verdict.
+Luna Low only checked report update locations, not runtime correctness. Sessions closed.
+
+Evidence: `/private/tmp/tm-config-browser-exact.log`,
+`/private/tmp/tm-config-browser-final-{fresh,replay,typecheck}.log`,
+`/private/tmp/tm-config-browser-web-neighbors.log`,
+`/private/tmp/tm-config-mutation-*.log`; SHA-bound result and captured/definition-only
+preview/restored screenshots under `artifacts/timemachine-browser/`. Desktop preview
+screenshots inspected; no new mobile configuration-restore claim.
+
+Current boundary: authenticated component-level table, record and column restoration
+are locally verified. Full-workbench navigation, archive startup/storage, tenant UAT,
+staging and production remain separate. Fresh published-head CI remains required.
+No Ready, merge, persistent flag, dispatch or deployment. Older sections below retain
+their original SHA-scoped open-gate statements; this section supersedes only their
+current column-acceptance status, not their historical evidence.
+
 ## Authenticated Row Restore And Delete Details 2026-09-15
 
 Code `3835186b3c2102470683795ca96fcd9c62fb98a9`, tree
