@@ -37,7 +37,6 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
-  MultitableCommentReaction,
   MultitableCommentPresenceSummary,
   CommentMentionSummary,
   CommentMentionSummaryItem,
