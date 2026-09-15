@@ -1,5 +1,13 @@
 # Archive Readiness Verification
 
+## Current-Main Replay At 2b67a046
+
+- Clean tested true merge `98df048ed4bf38b1044967de46d2e16abb5e6164`, tree `d36ba30fb3ef859f174b524b6fb8fda25674e7e8`; ordered parents `94add2a91e828cdcf70ba0a0375f4d0575b37695` and then-current main `2b67a04625a0d6b089dac173e47a0de5d111e225`.
+- The main delta is exactly three notification client/test files. No conflict or manual resolution; all six readiness paths, including the screenshots, are byte-identical before this documentation-only update. Relative-main census remains the original six paths. The older frozen worktree at `978dc2e017f0db9ae878debd708cbf4560b8cec3` is untouched; a new isolated current-main worktree preserves its state.
+- Four whole-file gates PASS, **174/174**: archive modal 38, archive client 78, incoming multitable client 50 and notification bell 8. Application `vue-tsc --noEmit -p tsconfig.app.json` and diff-check PASS. Commands and logs: `pnpm --filter @metasheet/web exec vitest run --watch=false tests/multitable-recovery-archive-modal.spec.ts tests/multitable-recovery-archive-client.spec.ts tests/meta-notification-bell.spec.ts tests/multitable-client.spec.ts`; `/private/tmp/tm-readiness-replay-2b67-{focused,tsc}-20260915.log`.
+- Both complete archive suites remain in the actual domain guard invocation and `run-required-web-tests.sh` invocation, not merely path filters. No dependency installation, workflow, backend, provider, database, permission or flag change. Earlier browser/mutation evidence remains bound to its historical code; this no-conflict replay does not claim a repeated browser/DB/full-required-web run.
+- Prior published head `94add2a91...` was terminal 23 SUCCESS + 1 expected SKIP with no pending/failure. New publication needs fresh exact-head CI and stays Draft/HOLD. This is current-main readiness UI verification, not combined runtime/UX integration or a production provider/enablement claim.
+
 ## Current-Main Replay At 28d11496
 
 - True merge `6983e2353d8dfb8f90a1bec776b9a86c03e51b27`, tree `3bd18da648cf7e1dd94643a55f941cfa611f27bd`, ordered parents `955ec9095b40d8ce4407ac42e21a45fc17c7e04b` and main `28d11496bb4281738c3dd13096fe317ff42e8780`.

@@ -1,5 +1,15 @@
 # Time Machine Archive Readiness
 
+## Current Replay Checkpoint
+
+The unchanged readiness contract is now checked on true merge
+`98df048ed4bf38b1044967de46d2e16abb5e6164`, tree
+`d36ba30fb3ef859f174b524b6fb8fda25674e7e8`, with ordered parents prior PR
+head `94add2a91e828cdcf70ba0a0375f4d0575b37695` and current main
+`2b67a04625a0d6b089dac173e47a0de5d111e225`. All six candidate paths are
+byte-equivalent before this report/design-only update. No new behavior or
+provider decision is introduced; the earlier base below is historical.
+
 ## Scope and Authority
 
 Owner requested continued archive recovery improvement on 2026-09-15. This
