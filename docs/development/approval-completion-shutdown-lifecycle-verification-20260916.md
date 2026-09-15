@@ -7,6 +7,7 @@ Date: 2026-09-16
 - Main baseline: `784c22dc182b2050bf204f4d013226d5bbb15131`
 - Precise-unsubscribe prerequisite (#5758): `f0a7e214c97731c504337847760bc8769bd81a44`
 - Verified implementation commit: `b93877da982c5d1b73cc15f6e5e232f1bd1c5344`
+- Startup-matrix harness follow-up: `a03db65f7329e819b532a4ff6c0a3714dc38d979`
 - The implementation commit has both the main baseline and prerequisite as ancestors.
 - This verification file is a documentation-only successor to the implementation commit.
 
@@ -93,6 +94,18 @@ to use the phased API, so its producer-before-consumer ordering is unchanged.
 
 The two affected files then passed locally (2 files, 161 tests), followed by the focused lifecycle suite
 (7 files, 94 tests), TypeScript typecheck, and `git diff --check`.
+
+The next CI run at documentation head `5a9493285b243f155a2096c90e223473414b440a`
+passed the complete core-backend step in both Node lanes, then exposed one later Node 18 real-DB harness
+failure: the startup fail-closed matrix still assumed rejected starts never invoked `stop()`. Its first
+failure row now correctly ran the shared cleanup path and ended the process-global pool, so a later healthy
+row failed against that already-ended pool (1 failed, 1,783 passed in the integration step). The test-only
+harness follow-up spies `pool.end()` to a no-op for this multi-server matrix and restores it after all
+successful servers are stopped; every other worker, producer, listener, and scheduler rollback remains real.
+
+No local database was configured. The corrected integration file was collected with its integration config
+and all 8 database-gated tests skipped; that is collection evidence only, not a passing DB run. TypeScript
+typecheck and `git diff --check` passed. A current-head CI run remains required for database-backed proof.
 
 The existing server-lifecycle neighbor attempted its normal default database connection and entered its
 existing degraded path because no test database was configured. No migration, database write, or real-DB
