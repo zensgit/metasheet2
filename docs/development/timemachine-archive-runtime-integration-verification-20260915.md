@@ -2,6 +2,14 @@
 
 Status: LOCAL CHECKPOINT ONLY; remaining runtime gates are open.
 
+## Exact Migration Census CI Repair
+
+- Published `95c65d772a6cd33bd561bdaf48f93ca6c37c9846` failed Node18/20 at the W0 exact-anchor static wiring step: the verifier correctly included 27 migrations, but its independent roster still required 26.
+- Test-only fix `26b4f88d4219f10d799245dcc797fa753a238fca` adds derived effects as the final roster entry and an explicit removal mutation. Existing ordered equality and all prior negative checks remain intact. Direct wiring contract: 36/36 PASS; no skips.
+- Current-main replay `31b9214559badfc59f148f9e34c966c0b8fe8550`, tree `e8b9141cc3a3d6c5a0f209e8205583c68eb03fb2`, has ordered parents `26b4f88d4219f10d799245dcc797fa753a238fca` and `58f704be92fe7711332b84d87a7c545776a38b8f`. Merge was conflict-free; incoming changes are three automation-editor files and two operational reports, with no recovery-source overlap.
+- On the replay: wiring 36/36, automation editor neighbor 127/127, official package provenance frozen/live differenceCount=0. The first web attempt lacked the worktree-local dependency link; after linking the already-installed web dependencies, the full target ran successfully. No dependency installation or lock change.
+- This round changes no recovery production code or migration. Earlier real-DB replay evidence remains bound to its recorded head; remote CI for the successor must run afresh. No Ready, merge, flags, dispatch, deployment or production operations.
+
 ## Commit Effects Checkpoint
 
 - Code `77fa2e3d85a0fba5b734d86a9b6fa56666645667`; tree `6360456c6bc41512b4770ad2a51efd68224ad05a`.
