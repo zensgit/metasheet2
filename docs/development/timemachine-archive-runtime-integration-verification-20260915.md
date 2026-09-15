@@ -2,6 +2,16 @@
 
 Status: LOCAL CHECKPOINT ONLY; remaining runtime gates are open.
 
+## Canonical Process Authorization Checkpoint
+
+- Code `8f3a14a5580319321b3b64c9da3282061cee2233`, tree `2c5b3fa4cb1332adbf35103f2c892ee5341e21ea`; two test/helper files only, production unchanged.
+- Real SIGKILL child now uses `createRecoveryArchiveWorkerAuthorization()` rather than allow-all callbacks. Synthetic users have explicit database permissions. Each process scenario snapshots, enables and finally restores the canonical authority triggers in the isolated database; missing trigger substrate fails closed.
+- Both before-COMMIT and after-COMMIT/before-acknowledgment process-death cases PASS with fresh-process takeover, 5,001 records and existing exact-once/receipt assertions. Removing the fixture user's permissions makes the before-COMMIT scenario RED with `RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED`; restoration is included in full 39/39 PASS. Core typecheck and diff-check PASS.
+- The initial canonical attempt correctly failed because fresh migrations leave authority triggers disabled. No production flag or trigger state was changed. Temporary reason-only diagnosis was removed; the production facade is byte-identical to parent.
+- Fresh isolated migration succeeded. User/job/backend residue zero; all tested authority triggers restored disabled; database dropped, prefix databases/backends zero and dedicated PG stopped.
+- This supersedes the earlier allow-all-child limitation only. The parent still supplies a local synthetic object store over IPC and fixture custody; full worker-loop derived draining, explicit revocation between process restarts, standard startup and independently durable provider acceptance are not established here.
+- Pre-push remote main advanced from `58f704be92fe7711332b84d87a7c545776a38b8f` to `4e216662e8d2fd2dbab2f77b529df91a934a986e`; this checkpoint is local-only pending bounded replay. Existing remote #5744 remains `a37e93f422e121e8f023579b084e67b6f845a266`.
+
 ## Exact Migration Census CI Repair
 
 ### Connection Exhaustion Evidence
