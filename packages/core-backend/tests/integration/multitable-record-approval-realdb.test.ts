@@ -10,7 +10,9 @@
  *   G1  no `multitable:submit-approval` → 403 and ZERO submission rows (the capability gate is a door,
  *       not a decoration);
  *   G2  a DRAFT template → 400 RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED, still zero rows;
- *   G3  success → one `pending` row bound to a REAL `approval_instances` row (the three-step landed);
+ *   G3  success → one `pending` row bound to a REAL `approval_instances` row (the three-step landed), and
+ *       the GET resolves the REAL directory names (`templateName` = the template row's `name`,
+ *       `submittedByName` = the submitter's `users` row) instead of echoing ids;
  *   G4  a second submit of the same (record, template) → 409 RECORD_APPROVAL_IN_FLIGHT naming the
  *       in-flight instance, and STILL exactly one in-flight row (the partial unique index, under the
  *       real index — this is the uniqueness proof §6 asks for);
@@ -20,6 +22,9 @@
  *       a REDELIVERY adds nothing (the `WHERE status = 'pending'` guard, proven against real rowcounts);
  *   G6  GET drift: after a real record write the list reports `changed` with the changed field id, and a
  *       field the caller may not read is masked out of `changedFieldIds` (values never appear at all);
+ *   G6c `?limit=` paging against real rows: two TERMINAL submissions for one record (G4b's raw-insert
+ *       trick) answered with `limit=1` → ONE submission + `hasMore: true`, and with a limit that covers
+ *       them → both + `hasMore: false` (the limit+1 probe row is never returned);
  *   G6b a caller holding submit-approval but NO read code (a DEDICATED user — never granted
  *       `multitable:read`/`multitable:write`, so the 60s RBAC permission memo cannot launder it) is
  *       refused 403 on the LIST, while the same GET still answers 200 for a reader;
@@ -87,6 +92,8 @@ const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, para
 let app: Express
 let currentUserId = SUBMITTER
 let publishedTemplateId = ''
+/** The published template's REAL `name`, read back from `approval_templates` (never assumed). */
+let publishedTemplateName = ''
 let draftTemplateId = ''
 const templateIds: string[] = []
 
@@ -144,6 +151,9 @@ const submit = (recordId: string, body: Record<string, unknown>) =>
 
 const list = (recordId: string) =>
   request(app).get(`/api/multitable/sheets/${SHEET}/records/${recordId}/approvals`)
+
+const listPage = (recordId: string, limit: number | string) =>
+  request(app).get(`/api/multitable/sheets/${SHEET}/records/${recordId}/approvals?limit=${limit}`)
 
 describeIfDatabase('multitable record-level submit-for-approval (real DB)', () => {
   beforeAll(async () => {
@@ -219,6 +229,10 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     templateIds.push(published.id)
     await approvals.publishTemplate(published.id, { policy: { allowRevoke: true } } as never)
     publishedTemplateId = published.id
+    publishedTemplateName = String(
+      ((await q('SELECT name FROM approval_templates WHERE id = $1::uuid', [publishedTemplateId])).rows[0] as
+        { name?: unknown } | undefined)?.name ?? '',
+    )
     const draft = await approvals.createTemplate(templateRequest(`mtra-draft-${TS}`) as never)
     templateIds.push(draft.id)
     draftTemplateId = draft.id
@@ -300,6 +314,27 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     expect((snap.rows[0] as { record_snapshot: Record<string, unknown> }).record_snapshot[F_TITLE]).toBe('before')
     // ...and the response NEVER carries it
     expect(JSON.stringify(res.body)).not.toContain('classified-before')
+
+    // the LIST resolves the two directory names against the REAL tables: `approval_templates.id` is UUID
+    // while `template_id` is TEXT, so this is also where a cast-shaped join would blow up (22P02) or
+    // silently match nothing — a fake query cannot prove either way.
+    expect(publishedTemplateName.length).toBeGreaterThan(0) // non-vacuity: the row really carries a name
+    const listed = await list(RECORD)
+    expect(listed.status).toBe(200)
+    const listedRow = listed.body.data.submissions[0] as {
+      templateId: string
+      templateName: string | null
+      submittedBy: string
+      submittedByName: string | null
+    }
+    expect(listedRow.templateName).toBe(publishedTemplateName)
+    expect(listedRow.submittedByName).not.toBeNull()
+    // the fixture seeds `users.name = the user id`, so the name preference (name → username → email local
+    // part) must resolve to exactly that — and the ids stay next to the names, untouched.
+    expect(listedRow.submittedByName).toBe(SUBMITTER)
+    expect(listedRow.templateId).toBe(publishedTemplateId)
+    expect(listedRow.submittedBy).toBe(SUBMITTER)
+    expect(listed.body.data.hasMore).toBe(false)
   })
 
   test('G4 a second submit for the SAME (record, template) → 409 naming the in-flight instance; still ONE in-flight row', async () => {
@@ -478,10 +513,55 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     expect(submissions[0]!.drift.changed).toBe(true)
     // F_SECRET changed too, but it is field-permission-denied for SUBMITTER → not even its id appears.
     expect(submissions[0]!.drift.changedFieldIds).toEqual([F_TITLE])
+    // the same page still carries the directory names (and only one page's worth of rows)
+    const named = res.body.data.submissions[0] as { templateName: string | null; submittedByName: string | null }
+    expect(named.templateName).toBe(publishedTemplateName)
+    expect(named.submittedByName).toBe(SUBMITTER)
+    expect(res.body.data.hasMore).toBe(false)
     const body = JSON.stringify(res.body)
     for (const value of ['before', 'after', 'classified-before', 'classified-after']) {
       expect(body).not.toContain(`"${value}"`)
     }
+  })
+
+  test('G6c ?limit paging: two TERMINAL rows → limit=1 gives ONE submission + hasMore, a wider limit gives both', async () => {
+    // G4b's trick: terminal rows are OUTSIDE the in-flight partial unique index, so two of them for the
+    // same (sheet, record, template) are legal and give the list something to page over.
+    await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
+    for (const [status, ageMinutes] of [['approved', 2], ['rejected', 1]] as Array<[string, number]>) {
+      await q(
+        `INSERT INTO multitable_record_approval_submissions
+           (sheet_id, record_id, template_id, status, outcome, submitted_by, record_version_at_submit,
+            record_snapshot, created_at, completed_at)
+         VALUES ($1, $2, $3, $4, $4, $5, 1, '{}'::jsonb, NOW() - ($6::int * INTERVAL '1 minute'), NOW())`,
+        [SHEET, RECORD_B, publishedTemplateId, status, SUBMITTER, ageMinutes],
+      )
+    }
+
+    const firstPage = await listPage(RECORD_B, 1)
+    expect(firstPage.status).toBe(200)
+    const page = firstPage.body.data.submissions as Array<{ status: string; templateName: string | null }>
+    expect(page).toHaveLength(1) // the limit+1 PROBE row is fetched but never returned
+    expect(firstPage.body.data.hasMore).toBe(true)
+    expect(page[0]!.status).toBe('rejected') // newest first
+    expect(page[0]!.templateName).toBe(publishedTemplateName)
+
+    const wholeList = await listPage(RECORD_B, 5)
+    expect(wholeList.status).toBe(200)
+    expect(wholeList.body.data.submissions).toHaveLength(2)
+    expect(wholeList.body.data.hasMore).toBe(false)
+
+    // an out-of-range limit is CLAMPED, not honoured and not refused
+    const clamped = await listPage(RECORD_B, 100000)
+    expect(clamped.status).toBe(200)
+    expect(clamped.body.data.submissions).toHaveLength(2)
+    expect(clamped.body.data.hasMore).toBe(false)
+    const zero = await listPage(RECORD_B, 0)
+    expect(zero.status).toBe(200)
+    expect(zero.body.data.submissions).toHaveLength(1) // clamped UP to 1, never an empty page
+    expect(zero.body.data.hasMore).toBe(true)
+
+    await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
   })
 
   test('G6b a caller without sheet read access cannot list the record approvals', async () => {

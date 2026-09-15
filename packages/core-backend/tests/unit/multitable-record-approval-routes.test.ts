@@ -61,6 +61,8 @@ const RECORD = 'rec_route_1'
 const TEMPLATE = 'tpl_route_1'
 const USER = 'u_route_1'
 const SECRET_VALUE = 'classified-13800000000'
+const TEMPLATE_NAME = '记录送审模板'
+const USER_NAME = '赵六'
 
 const READABLE = {
   access: { userId: USER, isAdminRole: false },
@@ -107,13 +109,55 @@ async function invoke(
   return res
 }
 
+const listedSubmission = (over: Record<string, unknown> = {}) => ({
+  id: 'sub_route_existing',
+  sheet_id: SHEET,
+  record_id: RECORD,
+  template_id: TEMPLATE,
+  approval_instance_id: 'inst_existing',
+  approval_request_no: 'AP-EXISTING',
+  status: 'pending',
+  outcome: null,
+  submitted_by: USER,
+  record_version_at_submit: 2,
+  error: null,
+  created_at: '2026-09-14T00:00:00.000Z',
+  completed_at: null,
+  record_snapshot: { fld_a: 'old-secret', fld_hidden: 'hidden-old' },
+  ...over,
+})
+
 /** Answers the SQL the route + service issue; every unmatched statement is an empty result. */
-function seedQueries(overrides: { templateStatus?: string | null; record?: { version: number; data: unknown } | null; insertThrows?: unknown } = {}) {
+function seedQueries(overrides: {
+  templateStatus?: string | null
+  record?: { version: number; data: unknown } | null
+  insertThrows?: unknown
+  listRows?: Array<Record<string, unknown>>
+  templateNameRows?: Array<Record<string, unknown>>
+  userRows?: Array<Record<string, unknown>>
+} = {}) {
   const templateStatus = overrides.templateStatus === undefined ? 'published' : overrides.templateStatus
   const record = overrides.record === undefined ? { version: 4, data: { fld_a: SECRET_VALUE } } : overrides.record
+  // The pool's REAL `transaction()` shape (BEGIN -> handler(client) -> COMMIT): the route builds the
+  // service's `runInTransaction` dep out of it, and the AUTO-APPROVE promote + bell now ride inside it.
+  // Leaving it unimplemented would silently answer `undefined` for that whole unit of work.
+  mocks.transaction.mockImplementation(async (handler: (client: { query: typeof mocks.query }) => unknown) =>
+    handler({ query: mocks.query }),
+  )
   mocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
     if (sql.includes('FROM approval_templates')) {
+      // the LIST's batched name lookup vs the POST gate's status read — different statements, same table
+      if (sql.includes('ANY($1::text[])')) {
+        return {
+          rows: overrides.templateNameRows ?? [{ id: TEMPLATE, name: TEMPLATE_NAME }],
+          rowCount: (overrides.templateNameRows ?? [{}]).length,
+        }
+      }
       return { rows: templateStatus === null ? [] : [{ status: templateStatus }], rowCount: templateStatus === null ? 0 : 1 }
+    }
+    if (sql.includes('FROM users')) {
+      const rows = overrides.userRows ?? [{ id: USER, name: USER_NAME, username: null, email: `${USER}@example.test` }]
+      return { rows, rowCount: rows.length }
     }
     if (sql.includes('FROM meta_records')) {
       return { rows: record ? [record] : [], rowCount: record ? 1 : 0 }
@@ -148,27 +192,11 @@ function seedQueries(overrides: { templateStatus?: string | null; record?: { ver
       }
     }
     if (sql.includes('FROM multitable_record_approval_submissions')) {
-      return {
-        rows: [
-          {
-            id: 'sub_route_existing',
-            sheet_id: SHEET,
-            record_id: RECORD,
-            template_id: TEMPLATE,
-            approval_instance_id: 'inst_existing',
-            approval_request_no: 'AP-EXISTING',
-            status: 'pending',
-            outcome: null,
-            submitted_by: USER,
-            record_version_at_submit: 2,
-            error: null,
-            created_at: '2026-09-14T00:00:00.000Z',
-            completed_at: null,
-            record_snapshot: { fld_a: 'old-secret', fld_hidden: 'hidden-old' },
-          },
-        ],
-        rowCount: 1,
-      }
+      const all = overrides.listRows ?? [listedSubmission()]
+      // honour the LIMIT the service asked for ($3 = limit + 1), so hasMore is derived by the service
+      const bound = sql.includes('LIMIT $3') ? Number(params[2] ?? all.length) : all.length
+      const rows = all.slice(0, bound)
+      return { rows, rowCount: rows.length }
     }
     return { rows: [], rowCount: 0 }
   })
@@ -334,6 +362,62 @@ describe('GET /sheets/:sheetId/records/:recordId/approvals — read gate + maske
       expect(serialized).not.toContain(value)
     }
     expect(mocks.loadReadableRecordFieldIds).toHaveBeenCalledTimes(1)
+  })
+
+  it('each submission carries templateName / submittedByName, resolved by ONE batched lookup each', async () => {
+    const res = await invoke('get')
+    expect(res.statusCode).toBe(200)
+    const body = res.body as { data: { submissions: Array<Record<string, unknown>>; hasMore: boolean } }
+    expect(body.data.submissions[0]!.templateName).toBe(TEMPLATE_NAME)
+    expect(body.data.submissions[0]!.submittedByName).toBe(USER_NAME)
+    // ids stay exactly as before next to the new names
+    expect(body.data.submissions[0]!.templateId).toBe(TEMPLATE)
+    expect(body.data.submissions[0]!.submittedBy).toBe(USER)
+    expect(body.data.hasMore).toBe(false)
+    // ONE query per directory for the whole response, never one per row
+    const lookups = mocks.query.mock.calls.filter(
+      ([sql]) => String(sql).includes('ANY($1::text[])') || String(sql).includes('FROM users'),
+    )
+    expect(lookups).toHaveLength(2)
+  })
+
+  it('a deleted template / a deleted user leave the names null (the row still lists)', async () => {
+    seedQueries({ templateNameRows: [], userRows: [] })
+    const res = await invoke('get')
+    const body = res.body as { data: { submissions: Array<Record<string, unknown>> } }
+    expect(res.statusCode).toBe(200)
+    expect(body.data.submissions[0]!.templateName).toBeNull()
+    expect(body.data.submissions[0]!.submittedByName).toBeNull()
+  })
+
+  it('?limit is CLAMPED to [1,100] and the page SELECT asks for limit + 1', async () => {
+    for (const [requested, expectedFetch] of [
+      [undefined, 21],
+      ['3', 4],
+      ['0', 2],
+      ['-9', 2],
+      ['1000', 101],
+      ['abc', 21],
+    ] as Array<[string | undefined, number]>) {
+      seedQueries()
+      mocks.query.mockClear() // each iteration must read ITS OWN page call, not the previous one's
+      await invoke('get', { query: requested === undefined ? {} : { limit: requested } })
+      const pageCall = mocks.query.mock.calls.find(([sql]) => String(sql).includes('LIMIT $3'))!
+      expect(pageCall[1][2]).toBe(expectedFetch)
+    }
+  })
+
+  it('hasMore is TRUE when a limit+1 probe row comes back, and that row is NOT returned', async () => {
+    seedQueries({
+      listRows: [
+        listedSubmission({ id: 'sub_newest', created_at: '2026-09-14T03:00:00.000Z' }),
+        listedSubmission({ id: 'sub_probe', created_at: '2026-09-14T02:00:00.000Z' }),
+      ],
+    })
+    const res = await invoke('get', { query: { limit: '1' } })
+    const body = res.body as { data: { submissions: Array<{ id: string }>; hasMore: boolean } }
+    expect(body.data.submissions.map((row) => row.id)).toEqual(['sub_newest'])
+    expect(body.data.hasMore).toBe(true)
   })
 
   it('refuses a caller the shared read gate refuses (no list without canRead)', async () => {

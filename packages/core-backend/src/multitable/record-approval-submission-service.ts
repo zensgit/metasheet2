@@ -18,7 +18,10 @@
  *           `createApproval` and emits the completion event before it returns, against a row whose
  *           approval_instance_id is still NULL → that delivery matches nothing and is ACKed). Step 3 is
  *           therefore terminal-aware, and when it writes 'pending' it probes the instance ONCE more
- *           (`loadApprovalStatus`) to catch a terminal transition that landed in the same window.
+ *           (`loadApprovalStatus`) to catch a terminal transition that landed in the same window. That
+ *           terminal promote and the requester's notification share ONE transaction (the same
+ *           `runInTransaction` dep the completion sink uses), because nothing will ever re-deliver that
+ *           already-ACKed completion: a committed terminal row with a failed bell would be permanent.
  *       (b) `creating` must not be an ABSORBING state: every follow-up UPDATE can fail and nothing else
  *           in the system ever clears such a row (no revoke endpoint, no sweeper), so a stale claim is
  *           reclaimable after RECORD_APPROVAL_CREATING_CLAIM_TTL_MS, and a 5xx/unknown createApproval
@@ -107,6 +110,13 @@ export interface RecordApprovalDrift {
 
 export interface RecordApprovalSubmissionView extends RecordApprovalSubmissionRow {
   drift: RecordApprovalDrift
+  /**
+   * `approval_templates.name` for `templateId`, or null when the template is GONE (deleted after the
+   * submission) — the client then falls back to the id it already has. Directory data, not a record value.
+   */
+  templateName: string | null
+  /** The submitter's display name (see `recordApprovalDisplayName`), or null when the user row is gone. */
+  submittedByName: string | null
 }
 
 /** Values-free refusal. `code` is an identifier; `message` is a fixed string, never driver text. */
@@ -493,9 +503,9 @@ export async function submitRecordApproval(
   // that was already terminal when it was created is written terminal HERE, because its completion event
   // was delivered against an unbound row and dropped.
   const createdOutcome = terminalOutcomeOf(approval.status)
-  let promoted: { rows: unknown[]; rowCount?: number | null }
-  try {
-    promoted = await query(
+
+  const promote = async (q: QueryFn): Promise<Record<string, unknown> | null> => {
+    const promoted = await q(
       `UPDATE ${RECORD_APPROVAL_SUBMISSIONS_TABLE}
         SET status = $4, outcome = $5, approval_instance_id = $2, approval_request_no = $3,
             completed_at = CASE WHEN $5::text IS NULL THEN completed_at ELSE NOW() END
@@ -504,10 +514,59 @@ export async function submitRecordApproval(
                 status, outcome, submitted_by, record_version_at_submit, error, created_at, completed_at`,
       [submissionId, approval.id, approval.requestNo ?? null, createdOutcome ?? 'pending', createdOutcome],
     )
+    return (promoted.rows[0] ?? null) as Record<string, unknown> | null
+  }
+
+  /**
+   * AUTO-APPROVED AT CREATE — the terminal promote and the requester's bell are ONE write.
+   *
+   * This is the same pair the completion consumer makes atomic (`applyRecordApprovalTerminalByInstance`
+   * + RecordApprovalCompletionDeps.runInTransaction), and it is MORE load-bearing here, not less: the
+   * instance's own completion event was already delivered against an unbound row and ACKed, so nothing
+   * will ever re-deliver it. If the promote committed alone and the notification INSERT then threw, the
+   * row would sit terminal with NO bell forever — an unrecoverable half-write. Inside one transaction the
+   * failure rolls the promote back too: the row stays `creating`, the caller gets the values-free 502
+   * below, and the claim is released by the TTL reclaim (which is also why the residual is bounded).
+   *
+   * Non-terminal ('pending') submissions are untouched by this: they write one statement, exactly as
+   * before, and their notification arrives with the real completion event.
+   */
+  const promoteTerminal = async (q: QueryFn): Promise<Record<string, unknown> | null> => {
+    const promotedRow = await promote(q)
+    if (promotedRow && createdOutcome) {
+      await notifyRecordApprovalTerminal(q, promotedRow, createdOutcome, null, completionDeps)
+    }
+    return promotedRow
+  }
+
+  let row: Record<string, unknown> | null
+  try {
+    if (createdOutcome && completionDeps.runInTransaction) {
+      row = await completionDeps.runInTransaction(promoteTerminal)
+    } else if (createdOutcome) {
+      // NO RUNNER (unit fakes, or a boot site that wired none): there is no transaction to roll back, so
+      // the promote has already committed on its own and the bell stays BEST-EFFORT — failing the submit
+      // here would report "could not be linked" about a row that IS linked. Production always supplies the
+      // runner (the route passes `createPoolTransactionRunner(pool)`), so this branch is the fallback, not
+      // the contract.
+      row = await promote(query)
+      if (row) {
+        try {
+          await notifyRecordApprovalTerminal(query, row, createdOutcome, null, completionDeps)
+        } catch (error) {
+          logger.warn(
+            `[multitable.record.approval] submission ${submissionId} notification for an auto-approved instance failed (${error instanceof Error ? error.name : 'unknown'})`,
+          )
+        }
+      }
+    } else {
+      row = await promote(query)
+    }
   } catch (error) {
-    // The approval instance EXISTS but we could not bind it. Marking the row 'failed' here would be both
-    // a lie and a hole (it would free the in-flight slot for a duplicate live approval). Keep the claim,
-    // log IDS ONLY, and let the TTL reclaim release it.
+    // The approval instance EXISTS but the submission could not be promoted (the bind UPDATE failed, or
+    // the atomic terminal write above rolled back). Marking the row 'failed' here would be both a lie and
+    // a hole (it would free the in-flight slot for a duplicate live approval). Keep the claim, log IDS
+    // ONLY, and let the TTL reclaim release it.
     logger.error(
       `[multitable.record.approval] submission ${submissionId} could not bind approval instance ${approval.id}; claim kept until the ${RECORD_APPROVAL_CREATING_CLAIM_TTL_MS}ms TTL reclaim`,
       error instanceof Error ? new Error(error.name) : undefined,
@@ -518,21 +577,8 @@ export async function submitRecordApproval(
       'The approval was created but could not be linked to the record',
     )
   }
-  const row = (promoted.rows[0] ?? null) as Record<string, unknown> | null
 
-  if (row && createdOutcome) {
-    // Auto-approved at create: send the ONE notification the (dropped) completion delivery would have
-    // sent. Best-effort — the submit response already carries the terminal state, and failing the whole
-    // submission because a notification row could not be written would be worse than a missing bell.
-    try {
-      await notifyRecordApprovalTerminal(query, row, createdOutcome, null, completionDeps)
-    } catch (error) {
-      logger.warn(
-        `[multitable.record.approval] submission ${submissionId} notification for an auto-approved instance failed (${error instanceof Error ? error.name : 'unknown'})`,
-      )
-    }
-    return mapRow(row)
-  }
+  if (row && createdOutcome) return mapRow(row)
 
   if (row && deps.loadApprovalStatus) {
     const observed = await deps.loadApprovalStatus(approval.id).catch((error) => {
@@ -641,6 +687,20 @@ async function loadInFlightSubmission(
 export const RECORD_APPROVAL_LIST_DEFAULT_LIMIT = 20
 export const RECORD_APPROVAL_LIST_MAX_LIMIT = 100
 
+/**
+ * `?limit=` is CALLER INPUT, so the bound lives HERE (the service), not in the route: every caller gets
+ * the same clamp and a future second caller cannot forget it.
+ *   - absent / non-numeric        → RECORD_APPROVAL_LIST_DEFAULT_LIMIT
+ *   - 0, negatives, fractions     → clamped UP to 1 (a zero-row page is never what a drawer asked for)
+ *   - anything over the max       → clamped DOWN to RECORD_APPROVAL_LIST_MAX_LIMIT (one request must not
+ *                                   be able to read the whole table for a hot record)
+ */
+export function clampRecordApprovalListLimit(value: unknown): number {
+  const raw = Number(value ?? RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+  if (!Number.isFinite(raw)) return RECORD_APPROVAL_LIST_DEFAULT_LIMIT
+  return Math.min(Math.max(Math.trunc(raw), 1), RECORD_APPROVAL_LIST_MAX_LIMIT)
+}
+
 export interface ListRecordApprovalsInput {
   sheetId: string
   recordId: string
@@ -649,14 +709,108 @@ export interface ListRecordApprovalsInput {
   limit?: number
 }
 
+export interface ListRecordApprovalsResult {
+  submissions: RecordApprovalSubmissionView[]
+  /**
+   * True iff this record has MORE submissions than the page returned. Derived from a `limit + 1` fetch
+   * whose extra row is NEVER returned — a `COUNT(*)` would be a second scan and could disagree with the
+   * page (rows are inserted concurrently), and the drawer only needs "is there another page".
+   */
+  hasMore: boolean
+}
+
+/**
+ * The submitter's display name: `name` → `username` → the email LOCAL PART.
+ *
+ * The local part, never the whole address: it identifies the person to a reader who is already looking at
+ * that person's submission, without turning this list into an email-harvesting endpoint. Returns null when
+ * the row carries none of the three, so the client keeps showing the raw user id instead of an empty cell.
+ */
+export function recordApprovalDisplayName(raw: Record<string, unknown>): string | null {
+  const name = typeof raw.name === 'string' ? raw.name.trim() : ''
+  if (name) return name
+  const username = typeof raw.username === 'string' ? raw.username.trim() : ''
+  if (username) return username
+  const email = typeof raw.email === 'string' ? raw.email.trim() : ''
+  const at = email.indexOf('@')
+  const local = (at >= 0 ? email.slice(0, at) : email).trim()
+  return local.length > 0 ? local : null
+}
+
+/**
+ * A directory table that is not there (42P01 undefined_table) or is missing the column we asked for
+ * (42703 undefined_column — e.g. a harness whose `users` predates `username`) degrades to NO NAMES, never
+ * to a failed list: the names are decoration on top of ids the caller already has. Every OTHER error
+ * RETHROWS — a bare `catch {}` would turn a transient connection failure into "the directory is empty"
+ * with no signal at all (the posture `resolvePersonDirectoryEntries` already ratified).
+ */
+function isMissingDirectoryRelation(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code
+  return code === '42P01' || code === '42703'
+}
+
+/**
+ * ONE batched lookup for the whole response — never one per row (N+1 is the exact failure this shape
+ * exists to prevent): the distinct template ids of the page go out in a single IN-query.
+ *
+ * `approval_templates.id` is UUID while this table's `template_id` is TEXT (design §3 / the migration), so
+ * the comparison is made on TEXT: `id = ANY($1::uuid[])` raises 22P02 for a single non-uuid-shaped stored
+ * id and would take the WHOLE list down for one bad row. `lower()` on both sides because `uuid::text`
+ * renders canonical lowercase while the stored text is whatever the submit call sent.
+ */
+async function loadApprovalTemplateNames(query: QueryFn, templateIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>()
+  const ids = [...new Set(templateIds.map((id) => String(id ?? '').trim().toLowerCase()).filter((id) => id.length > 0))]
+  if (ids.length === 0) return names
+  try {
+    const result = await query(
+      'SELECT id::text AS id, name FROM approval_templates WHERE lower(id::text) = ANY($1::text[])',
+      [ids],
+    )
+    for (const raw of result.rows as Array<Record<string, unknown>>) {
+      const id = typeof raw.id === 'string' ? raw.id.trim().toLowerCase() : ''
+      const name = typeof raw.name === 'string' ? raw.name.trim() : ''
+      if (id && name) names.set(id, name)
+    }
+  } catch (error) {
+    if (!isMissingDirectoryRelation(error)) throw error
+  }
+  return names
+}
+
+/** The submitter half of the same one-query-per-response rule. `users.id` is TEXT, so no cast games. */
+async function loadSubmitterDisplayNames(query: QueryFn, userIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>()
+  const ids = [...new Set(userIds.map((id) => String(id ?? '').trim()).filter((id) => id.length > 0))]
+  if (ids.length === 0) return names
+  try {
+    const result = await query('SELECT id, name, username, email FROM users WHERE id = ANY($1::text[])', [ids])
+    for (const raw of result.rows as Array<Record<string, unknown>>) {
+      const id = typeof raw.id === 'string' ? raw.id : String(raw.id ?? '')
+      const display = recordApprovalDisplayName(raw)
+      if (id && display) names.set(id, display)
+    }
+  } catch (error) {
+    if (!isMissingDirectoryRelation(error)) throw error
+  }
+  return names
+}
+
+/**
+ * The record drawer's page: newest first, drift computed per row, plus the two DIRECTORY NAMES the panel
+ * shows instead of raw ids. Exactly FOUR statements no matter how many rows come back — the record probe,
+ * the page (limit + 1), one template IN-query and one user IN-query.
+ *
+ * VALUES-FREE STILL HOLDS: `templateName` / `submittedByName` are directory data about the SUBMISSION's
+ * template and submitter, returned only to a caller that has already passed the record read gate (the same
+ * names that caller sees in the approval center). They are never logged and nothing about the record's own
+ * data is exposed by them — `record_snapshot` still never leaves this function.
+ */
 export async function listRecordApprovalSubmissions(
   query: QueryFn,
   input: ListRecordApprovalsInput,
-): Promise<RecordApprovalSubmissionView[]> {
-  const limit = Math.min(
-    Math.max(Number(input.limit ?? RECORD_APPROVAL_LIST_DEFAULT_LIMIT) || RECORD_APPROVAL_LIST_DEFAULT_LIMIT, 1),
-    RECORD_APPROVAL_LIST_MAX_LIMIT,
-  )
+): Promise<ListRecordApprovalsResult> {
+  const limit = clampRecordApprovalListLimit(input.limit)
   const recordResult = await query(
     'SELECT version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [input.recordId, input.sheetId],
@@ -673,22 +827,32 @@ export async function listRecordApprovalSubmissions(
       WHERE sheet_id = $1 AND record_id = $2
       ORDER BY created_at DESC
       LIMIT $3`,
-    [input.sheetId, input.recordId, limit],
+    // limit + 1: the extra row is the hasMore PROBE and is sliced off below, never returned.
+    [input.sheetId, input.recordId, limit + 1],
   )
 
-  return (result.rows as Array<Record<string, unknown>>).map((raw) => {
-    const row = mapRow(raw)
-    return {
-      ...row,
-      drift: computeRecordApprovalDrift({
-        snapshot: raw.record_snapshot,
-        current: currentData,
-        recordVersion,
-        recordVersionAtSubmit: row.recordVersionAtSubmit,
-        readableFieldIds: input.readableFieldIds,
-      }),
-    }
-  })
+  const fetched = result.rows as Array<Record<string, unknown>>
+  const hasMore = fetched.length > limit
+  const page = (hasMore ? fetched.slice(0, limit) : fetched).map((raw) => ({ raw, row: mapRow(raw) }))
+
+  // TWO lookups for the whole page (sequential, so a failure in the first cannot leave the second's
+  // rejection unhandled), never two per row.
+  const templateNames = await loadApprovalTemplateNames(query, page.map(({ row }) => row.templateId))
+  const submitterNames = await loadSubmitterDisplayNames(query, page.map(({ row }) => row.submittedBy))
+
+  const submissions = page.map(({ raw, row }) => ({
+    ...row,
+    templateName: templateNames.get(row.templateId.trim().toLowerCase()) ?? null,
+    submittedByName: submitterNames.get(row.submittedBy) ?? null,
+    drift: computeRecordApprovalDrift({
+      snapshot: raw.record_snapshot,
+      current: currentData,
+      recordVersion,
+      recordVersionAtSubmit: row.recordVersionAtSubmit,
+      readableFieldIds: input.readableFieldIds,
+    }),
+  }))
+  return { submissions, hasMore }
 }
 
 // ── completion (durable consumer + eventBus fallback share this) ───────────────

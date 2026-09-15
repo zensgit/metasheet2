@@ -2,7 +2,10 @@
  * Multitable RECORD-LEVEL submit-for-approval routes (multitable × approval phase 2, design §4.1).
  *
  *   POST /api/multitable/sheets/:sheetId/records/:recordId/approvals   body { templateId, formData }
- *   GET  /api/multitable/sheets/:sheetId/records/:recordId/approvals
+ *   GET  /api/multitable/sheets/:sheetId/records/:recordId/approvals   ?limit= (clamped to [1, 100])
+ *        → { ok, data: { submissions, hasMore } }, each submission carrying `templateName` /
+ *        `submittedByName` (directory names resolved by ONE batched lookup each, null when the template
+ *        or the user row is gone) so the panel never has to render a raw id, and never issues N+1 reads.
  *
  * No revoke/delete endpoint here on purpose: revocation lives in the approval center (design §4.1).
  *
@@ -35,10 +38,10 @@ import { canReadApprovalTemplateForAutomation } from '../multitable/automation-a
 import { loadAuthorizedApprovalActor } from '../multitable/automation-approval-bridge-service'
 import type { QueryFn } from '../multitable/permission-service'
 import {
+  clampRecordApprovalListLimit,
   createPoolTransactionRunner,
   listRecordApprovalSubmissions,
   RECORD_APPROVAL_ERROR_CODES,
-  RECORD_APPROVAL_LIST_DEFAULT_LIMIT,
   RecordApprovalError,
   submitRecordApproval,
   type RecordApprovalSubmissionRow,
@@ -242,7 +245,9 @@ export function createMultitableRecordApprovalRoutes(
     if (!sheetId || !recordId) {
       return fail(res, 400, 'VALIDATION_ERROR', 'sheetId and recordId are required')
     }
-    const limitRaw = Number(req.query.limit ?? RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+    // Caller input: clamped to [1, RECORD_APPROVAL_LIST_MAX_LIMIT] by the service's own helper (a garbage
+    // or absent value falls back to the default) — the bound is the service's, not this route's.
+    const limit = clampRecordApprovalListLimit(req.query.limit)
 
     try {
       const pool = poolManager.get()
@@ -255,11 +260,11 @@ export function createMultitableRecordApprovalRoutes(
       // The drift response carries FIELD IDS, so it is masked by the record read path's own field mask.
       const readableFieldIds = await loadReadableRecordFieldIds(req, query, sheetId, access.userId, capabilities)
 
-      const submissions = await listRecordApprovalSubmissions(query, {
+      const { submissions, hasMore } = await listRecordApprovalSubmissions(query, {
         sheetId,
         recordId,
         readableFieldIds,
-        limit: Number.isFinite(limitRaw) ? limitRaw : RECORD_APPROVAL_LIST_DEFAULT_LIMIT,
+        limit,
       })
 
       return res.json({
@@ -267,8 +272,13 @@ export function createMultitableRecordApprovalRoutes(
         data: {
           submissions: submissions.map((row) => ({
             ...serializeSubmission(row),
+            // Directory NAMES, never logged: the caller has already passed the record read gate and these
+            // are the same names the approval center shows it. Null when the template / user row is gone.
+            templateName: row.templateName,
+            submittedByName: row.submittedByName,
             drift: row.drift,
           })),
+          hasMore,
         },
       })
     } catch (error) {
