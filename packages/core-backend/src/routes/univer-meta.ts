@@ -56,7 +56,6 @@ import {
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
   resolveBaseReadableForAccess,
-  resolveSheetCapabilitiesForAccess,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
   resolveSheetCapabilitiesForAccess,
