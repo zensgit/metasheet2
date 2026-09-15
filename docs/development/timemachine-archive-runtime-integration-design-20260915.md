@@ -126,3 +126,9 @@ Test code `7e451b46b14859eadd4e5dd3a015799cb22efc07` advances the preceding pare
 ### Production Worker Resume Acceptance
 
 Test code `7d6d230c68720b5dc0bc679fb6a8d86fe6b09206` removes manual claim/chunk/finalize orchestration from the fresh-process resume path. The production worker now selects, claims, applies, renews and finalizes the retained job. A crash before commit requires two resumed chunks; a crash after commit/before acknowledgement requires only one. Serialized old claims remain rejected. Terminal state is read independently from the database, not inferred from the worker result. The crash injector still uses a transaction barrier around the production chunk executor; key custody/object store remain isolated fixtures. No production implementation, recovery semantics or deployment settings change.
+
+### Full-Schema Test Fixture Ownership
+
+Test-only code `3409c5f92b7622cb4b683ffe5e74c4e7186176ba` updates older archive fixtures for the existing derived-effect ledger's restrictive job FK. Cleanup uses an explicit archive-owned table allowlist and includes the child only if the relation exists. It never uses TRUNCATE CASCADE or discovers unrelated tables to delete. Older partial-schema fixtures remain valid.
+
+Catalog migration rehearsal preserves the optional child topology: empty child down precedes job down; job up precedes child up. The positive replay checks that the originally present child exists again before intentional transaction rollback. Production nonempty-down refusal, migration authority checks, immutable effects and restrictive FKs are unchanged. The change repairs test setup/teardown on the combined 403-migration tree, not restore behavior, provider selection or runtime enablement.

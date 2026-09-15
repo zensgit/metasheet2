@@ -1,6 +1,30 @@
 # Archive Runtime Integration Verification
 
-Status: LOCAL CHECKPOINT ONLY; remaining runtime gates are open.
+Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
+
+## Full-Schema Fixture Cleanup CI Repair
+
+- Code `3409c5f92b7622cb4b683ffe5e74c4e7186176ba`, tree `0ff867aa5ea8771454a45e96ad37aab2cee1ee64`, parent `cf69839968748f34a28df79206bce1b61d11ece5`. Six integration-test files only, 53 insertions and 5 deletions. No production, migration, workflow, package, flag or provenance change.
+- Parent #5744 Node20 job `104332733237`, run `34954318359`, failed in the multitable real-DB step. Seven archive files failed: six old cleanup paths omitted the derived-effect child table and raised PostgreSQL `0A000`; leftover state also caused downstream catalog/hold assertions to fail. Node18 success did not override this exact-head failure. A full-schema local catalog run reproduced the FK failure before the repair.
+- Cleanup now includes the archive-owned child only when present. Catalog rollback drops the empty child before jobs and reapplies it after jobs; the existing empty down/up positive explicitly checks child restoration before its transaction rolls back. No `CASCADE`, constraint weakening or test exclusion was introduced.
+- Local Node `24.14.1`, isolated PostgreSQL 15: fresh full stream 403 migrations; subsequent migrate replay exit 0 and ledger count 403. Local Node is not a substitute for the new Node18/20 remote matrix.
+- Final whole-file run: catalog 41/41, claim-anchor 19/19, coverage-binding 13/13, object-receipt-authority 17/17, source-pin-authority 18/18, stale-pin-cleanup 19/19, legal-hold-authority 19/19, restore-jobs 39/39. Total 8 files / 185 tests PASS, no skips. The unchanged restore-jobs neighbor includes the real process-death and 5,001-record resume/drain cases.
+- Mutations: omit child from TRUNCATE -> exact FK refusal; omit child down -> dependent-object refusal instead of the expected nonempty-authority error; omit child reapply -> explicit child-presence assertion fails. All restored; catalog SHA-256 `a4a4d32b22590fb07d0e781e24e01f4794271a87120b7d94fae675cadb0df840`. One initial down mutation was contaminated by earlier intentionally failed cleanup and is not counted; its clean positive followed by a fresh distinguishing RED is the evidence.
+- Core typecheck PASS; exact-anchor plus D2 archive wiring 42/42 PASS; diff-check PASS. Terra Medium independently reviewed the six-file cleanup delta with no P1/P2, without running DB/tests; the subsequently added child-restoration assertion was directly mutation-checked by the main task. No additional model review is claimed.
+- Before final database disposal: archive/job/derived-effect counts and other connections were zero; one synthetic key from the deliberately broken cleanup run remained. The entire dedicated database was dropped. Independent exact/prefix database and backend census then returned zero; dedicated PostgreSQL stopped. No shared service or real customer data was used.
+- Test logs are session-local under `/private/tmp/tm-runtime-ci-cleanup-*`; no remote artifact is claimed. This closes the bounded fixture dependency failure locally, not all runtime/product gates. New remote exact-head CI remains required. Standard provider/custody startup and full deployed acceptance remain open.
+
+Commands from the repository worktree:
+
+```sh
+pnpm --filter @metasheet/core-backend migrate
+NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+  tests/integration/multitable-recovery-archive-{catalog,claim-anchor,coverage-binding,object-receipt-authority,source-pin-authority,stale-pin-cleanup,legal-hold-authority,restore-jobs}-realdb.test.ts --reporter=dot
+pnpm --filter @metasheet/core-backend run type-check
+node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs scripts/ops/multitable-d2-archive-ci-wiring.test.mjs
+```
+
+`DATABASE_URL` must point only at the dedicated synthetic database; the report intentionally omits connection credentials. Shell brace expansion above denotes the exact eight-file run, not an unbounded glob.
 
 ## Canonical Process Authorization Checkpoint
 
