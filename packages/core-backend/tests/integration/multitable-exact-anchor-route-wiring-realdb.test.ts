@@ -19,7 +19,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
+import { createRecoveryArchiveWorkerAuthorization, setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
@@ -1198,6 +1198,51 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       await q('DELETE FROM meta_bases WHERE id=$1', [foreignBase])
       await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(originalPermissions)])
       curPerms = originalPermissions
+    }
+  })
+
+  test('WORKER-AUTHORITY: real database revocation and scope drift fail closed without request claims', async () => {
+    await seedWorld()
+    const original = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0]
+    const workspaceId = `workspace_worker_${TS}`
+    const identity = Object.freeze({ jobId: `job_worker_${TS}`, actorId: ACTOR, sheetId: SHEET, baseId: BASE, workspaceId })
+    const worker = createRecoveryArchiveWorkerAuthorization()
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, workspaceId])
+      expect(await worker.recheckAuthority(q, identity)).toBe(true)
+      expect(await worker.apply.preliminaryFullRead(q, identity)).toBe(true)
+      await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(true)
+      await q(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1,$2,'user',$3,FALSE,FALSE)`, [SHEET, F_STR, ACTOR],
+      )
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      await q('UPDATE field_permissions SET visible=TRUE, read_only=TRUE WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, F_STR, ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(true)
+      const planContext = {
+        mode: 'revert' as const, actorId: ACTOR, sheetId: SHEET,
+        plan: { reverts: [], resurrects: [], deletedAtAnchorLiveNow: [], createdAfterAnchor: [], driftCount: 0, unchangedCount: 0 },
+        revertWrites: [{ recordId: REC_A, liveVersion: 2, changedFieldIds: [F_STR], patch: { [F_STR]: 'restored' }, projectedData: { [F_STR]: 'restored' }, linkUpdates: [] }],
+        deleteRecordIds: [],
+      }
+      expect(await worker.apply.evaluatePlanAuthorization(q, planContext, identity)).toBe(false)
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, F_STR, ACTOR])
+      expect(await worker.apply.evaluatePlanAuthorization(q, planContext, identity)).toBe(true)
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, `${workspaceId}_other`])
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, workspaceId])
+      await q("UPDATE users SET permissions='[]'::jsonb WHERE id=$1", [ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      expect((await q('SELECT data, version FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([
+        { data: { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }, version: 2 },
+      ])
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, F_STR, ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, original.workspace_id])
+      await q('UPDATE users SET is_active=TRUE, permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(curPerms)])
     }
   })
 
