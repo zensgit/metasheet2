@@ -101,7 +101,7 @@ function fakeApiClient(overrides: Record<string, unknown> = {}) {
     listApprovalTemplates: vi.fn().mockResolvedValue({ data: PUBLISHED_TEMPLATES, total: 2 }),
     getApprovalTemplate: vi.fn().mockResolvedValue(SIMPLE_FORM),
     submitRecordApproval: vi.fn().mockResolvedValue(SUBMISSION),
-    listRecordApprovals: vi.fn().mockResolvedValue([]),
+    listRecordApprovals: vi.fn().mockResolvedValue({ submissions: [], hasMore: false }),
     ...overrides,
   }
 }
@@ -665,11 +665,39 @@ describe('client tier — the four record-approval methods', () => {
         ],
       },
     }))
-    const rows = await clientWith(fetchFn).listRecordApprovals('sheet_1', 'rec_1')
+    const page = await clientWith(fetchFn).listRecordApprovals('sheet_1', 'rec_1')
+    // No `?limit=` when the caller asked for none: an empty/garbage one is "said nothing" on the server
+    // (clampRecordApprovalListLimit) and must not be sent as a page size the UI did not choose.
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet_1/records/rec_1/approvals')
-    expect(rows).toHaveLength(2)
-    expect(rows[0].drift).toEqual({ changed: true, changedFieldIds: ['fld_a', 'fld_b'] })
-    expect(rows[1].drift).toEqual({ changed: false, changedFieldIds: [] })
+    expect(page.submissions).toHaveLength(2)
+    expect(page.submissions[0].drift).toEqual({ changed: true, changedFieldIds: ['fld_a', 'fld_b'] })
+    expect(page.submissions[1].drift).toEqual({ changed: false, changedFieldIds: [] })
+    // hasMore ABSENT => false: an old server must not make the panel claim a truncation it cannot prove.
+    expect(page.hasMore).toBe(false)
+  })
+
+  it('listRecordApprovals forwards ?limit= and returns the server hasMore (backend #5763)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(json({
+      data: {
+        submissions: [{ id: 'sub_1', templateId: 'tpl_leave', status: 'approved', error: 'RECORD_APPROVAL_NOTIFICATION_FAILED', drift: { changed: false, changedFieldIds: [] } }],
+        hasMore: true,
+      },
+    }))
+    const page = await clientWith(fetchFn).listRecordApprovals('sheet_1', 'rec_1', { limit: 20 })
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet_1/records/rec_1/approvals?limit=20')
+    expect(page.hasMore).toBe(true)
+    // The ROW error code survives normalisation - the panel renders its marker from this, by CODE.
+    expect(page.submissions[0].error).toBe('RECORD_APPROVAL_NOTIFICATION_FAILED')
+  })
+
+  it('a non-positive / non-finite limit is NOT sent, and a non-boolean hasMore is not believed', async () => {
+    // A fresh Response per call: a Response body can only be read once.
+    const fetchFn = vi.fn().mockImplementation(async () => json({ data: { submissions: [], hasMore: 'yes' } }))
+    const page = await clientWith(fetchFn).listRecordApprovals('sheet_1', 'rec_1', { limit: 0 })
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet_1/records/rec_1/approvals')
+    expect(page.hasMore).toBe(false)
+    await clientWith(fetchFn).listRecordApprovals('sheet_1', 'rec_1', { limit: Number.NaN })
+    expect(fetchFn).toHaveBeenLastCalledWith('/api/multitable/sheets/sheet_1/records/rec_1/approvals')
   })
 })
 
