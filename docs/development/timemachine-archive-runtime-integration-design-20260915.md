@@ -4,8 +4,8 @@ Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement
 
 ## Combined Current-Main Contract
 
-Clean code `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`, tree
-`4ba0f8216849f1486d2eb0ebf02b0531223149dc`, integrates runtime #5744,
+Clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree
+`5c72f2df21d143a112d6dbbe52d1a1953eea0bda`, integrates runtime #5744,
 recovery UX #5709 (including #5704), and readiness #5725 by true merges.
 The final merge's second parent is main
 `f67984b34cc170e7256292e671d619502feea0e9`. Its eight automation files have
@@ -30,7 +30,10 @@ results, failures and rollback snapshots cannot replace newer user context, and
 an old request cannot clear a newer load's busy state. A background manager poll
 must not start while a foreground base-context load is pending; otherwise the
 temporary new-base/old-sheet combination could invalidate the user's switch.
-Interval and visibility refresh resume against the new sheet after navigation.
+Sheet-only and view-only external navigation must also set this foreground busy
+state before awaiting metadata, even when the URL supplies no base. The existing
+generation-aware finally clears it. Interval and visibility refresh resume
+against the selected sheet after navigation.
 Cancelled restore refreshes must not toast errors into another selected sheet.
 
 These changes preserve refresh cadence, server permissions, restore semantics,

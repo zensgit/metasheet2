@@ -24,8 +24,8 @@ discard existing work or silently rewrite another candidate.
 
 ### Latest Local Checkpoint
 
-Combined clean code `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`, tree
-`4ba0f8216849f1486d2eb0ebf02b0531223149dc`, true-merges #5744 runtime,
+Combined clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree
+`5c72f2df21d143a112d6dbbe52d1a1953eea0bda`, retains true-merges of #5744 runtime,
 #5709 UX and #5725 readiness with main
 `f67984b34cc170e7256292e671d619502feea0e9`. The 109-file union includes
 historical reports and screenshots. No duplicate implementation or new PR is
@@ -33,12 +33,12 @@ needed; ordinary publication uses existing #5744 and preserves all source heads.
 
 Integration fixed a duplicate import and two real context races: stale metadata
 must not override a newer base/sheet/view or restore; background polling must not
-supersede a pending foreground base switch. Guards have discriminating mutations
+supersede pending foreground base, sheet-only or view-only navigation. Guards have discriminating mutations
 and the final narrow Sol High review returns 0 P1/P2/P3. Real full-workbench
 recovery and archive browser chains each pass 6/6 on this exact clean tree; the
 archive restores 5,001 records and drains all derived effects. Dedicated databases
 and backends are gone and PostgreSQL is stopped. Final required-web passes,
-including its 456-file/6,788-test final group. Source application/core/script
+including its 456-file/6,790-test final group. Source application/core/script
 typechecks pass; full local Web build typecheck retains an explicitly recorded
 unchanged-config Vite dependency conflict, not an unqualified green claim.
 
@@ -88,6 +88,8 @@ Remaining work is not another reimplementation of these primitives:
 ### Operational attribution checkpoint (2026-09-15)
 
 Read-only GitHub evidence, not a production probe or an alert-resolution claim:
+
+- Final artifact refresh retrieved External Metrics artifact `10377791613` from run `34919685921`. Its JSON summary independently confirms 11 checks / 5 passes / 0 measured failures / 6 N/A / overall fail. Only summary JSON/Markdown are present, not raw scrape samples, so target/label attribution remains open. All three latest-run queries now succeed and still identify the same failed scheduled runs below. No operational mutation was made.
 
 - Fresh per-workflow reads after the application-timer checkpoint still return External Metrics `34919685921` and Regression `34919841957` as their latest runs, both failed on the previously audited SHA. The main Nightly run `34920290620` is independently confirmed failed, but its latest-run query returned EOF and does not prove there is no newer run. Recent unrelated health-monitor successes are not substituted for these gates. No rerun, dispatch, threshold change or production sampling was performed.
 

@@ -2,6 +2,21 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Final Navigation Checkpoint
+
+- Final clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree `5c72f2df21d143a112d6dbbe52d1a1953eea0bda`, parent `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`. The production delta is exactly two foreground `loading=true` assignments in sheet-only/view-only external navigation; the existing background guard and generation-aware cleanup apply to these routes too. Two deferred-response regressions are RED on old code and under omission mutation, then restored GREEN. Three accompanying MD files record the preceding combined checkpoint, not additional runtime changes.
+- Five workbench files / 213 tests PASS; restored composable/manager pair 46/46. Web application TypeScript and the two touched-file lint checks PASS. Fresh Sol High read-only review of the two-line delta and its ownership interaction: P1/P2/P3=0/0/0; session closed, no model-run tests. The full local Vite config type mismatch recorded below remains a limitation, not a passing gate.
+- Full required-web on this exact code exits 0; all groups PASS, final group **456 files / 6,790 tests**. Backend, workflow, script, OpenAPI and plugin trees are byte-identical to `c2c7d2ec`; its core/script typecheck, 43/43 wiring and full S5 evidence are reused with that explicit boundary.
+- Fresh real-workbench run `59628c05-fb5d-479d-8eea-cf3013d0c7ff`: **6/6 PASS**, sourceHead/tree exact and worktreeClean=true. Repeats all table/row/column/authentication scenarios below; fresh 403 migrations plus replay; all 12 fixture census counts and cleanupErrors zero, database dropped.
+- Fresh real-archive run `750b3581-8a59-492f-8d57-16f704d05b1c`: **6/6 PASS**, same exact clean source. Fresh 403 migrations plus replay; repeats canonical authentication/flag negatives, confirmed non-mutating preview, persisted-job rediscovery, desktop/mobile progress and exact 5,001-row restoration. Derived `{n:5001,pending:0}`, databaseResidue=0, cleanupErrors=[]. Both processes exit 0; the pre-existing shutdown warning remains recorded.
+- Independent final archive/workbench database-prefix and backend counts are zero; owned PG is stopped. One initial cluster restart omitted the dedicated port and failed before any connection or test; it was corrected to the previously audited loopback port. No shared database was used, and the failed initialization commands are not passing evidence.
+- Final browser artifacts retain the same local paths below and now bind `5131269ff`. Logs: `/private/tmp/tm-final-5131269-{workbench-browser,archive-browser,required-web,migrate,replay}-20260915.log`; focused/mutation/type/lint logs use `/private/tmp/tm-final-external-busy-*-20260915.log`. Screenshots were inspected; no new screenshot is claimed as an uploaded remote artifact.
+- Read-only nightly artifact retrieval now succeeds: run `34919685921`, artifact `10377791613`, ZIP SHA-256 `0604d894c0c5fd9af2c859dd152d737f7898b04707ec014ed038a729c050f426`. Its `phase5.json` confirms 11 checks, 5 passes, 0 measured failures, 6 N/A and overall fail. The archive contains only JSON/Markdown summaries, not raw scrape samples; it does not settle deployed target/label attribution or authorize production sampling. All three scheduled alerts remain open.
+
+Publication uses a docs-only child of this code in existing Draft #5744. Fresh
+published-head CI and separate Ready/merge authority remain required. No flags,
+dispatch, deployment, production provider/capture or real tenant activation.
+
 ## Combined Current-Main Verification
 
 All evidence below is local unless explicitly identified as a GitHub readback.
