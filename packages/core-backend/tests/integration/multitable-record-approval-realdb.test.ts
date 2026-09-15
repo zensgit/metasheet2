@@ -27,7 +27,8 @@
  *       them → both + `hasMore: false` (the limit+1 probe row is never returned);
  *   G6d the template-name gate is VISIBILITY-filtered against the real `visibility_scope` jsonb: two
  *       terminal rows in ONE response, one template the caller may read (name present) and one whose
- *       scope names another user (name null) — a fake query cannot answer the jsonb predicate;
+ *       scope names another user (name null) — a fake query cannot answer the jsonb predicate — plus the
+ *       CONVERSE, the same two rows read by the one user that scope DOES name, which carries BOTH names;
  *   G6e a reader WITHOUT `approvals:read` still lists the record's submissions but gets NO template name,
  *       while the same GET for a reader that holds the code does carry it (non-vacuity);
  *   G6b a caller holding submit-approval but NO read code (a DEDICATED user — never granted
@@ -110,6 +111,16 @@ let draftTemplateId = ''
 /** A PUBLISHED template whose `visibility_scope` excludes SUBMITTER (G6d's subject). */
 let restrictedTemplateId = ''
 let restrictedTemplateName = ''
+/**
+ * The restricted template's name, which MUST DIFFER from every other template name in this fixture.
+ * G6d scans the WHOLE list response for this string, while the very same response legitimately carries
+ * the VISIBLE template's name — so a name shared between the two makes that scan unsatisfiable by
+ * construction. That is exactly how this lane went red on PR #5763: `templateRequest()` hard-coded
+ * `'MTRA Approval'` for all three templates, the gate correctly returned `templateName: null` for the
+ * restricted row, and the scan then tripped on the VISIBLE row's name. `${TS}` additionally keeps it
+ * clear of rows an earlier run may have left on a shared CI database.
+ */
+const RESTRICTED_TEMPLATE_NAME = `MTRA Restricted ${TS}`
 const templateIds: string[] = []
 
 const submissionsFor = async (recordId: string) =>
@@ -136,10 +147,10 @@ const notificationsFor = async (recordId: string) =>
     [SHEET, recordId],
   )).rows as Array<{ user_id: string; event_type: string; message: string | null }>
 
-function templateRequest(key: string) {
+function templateRequest(key: string, name = 'MTRA Approval') {
   return {
     key,
-    name: 'MTRA Approval',
+    name,
     visibilityScope: { type: 'all', ids: [] },
     formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
     approvalGraph: {
@@ -228,6 +239,14 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
       NO_APPROVAL_READ,
       'multitable:read',
     ])
+    // APPROVER is G6d's CONVERSE actor: the only user the restricted template's `visibility_scope` names.
+    // It needs `multitable:read` to get past the record read gate and `approvals:read` to reach the
+    // template lookup at all, so that the null SUBMITTER gets can be attributed to the jsonb predicate
+    // rather than to the restricted row being unreadable for everyone (a broken uuid/text join, an
+    // unpublished row or a typo'd id would look identical without this half).
+    for (const code of ['multitable:read', 'approvals:read']) {
+      await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [APPROVER, code])
+    }
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'MTRA Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'MTRA Sheet'])
@@ -261,7 +280,9 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     // A published template whose visibility_scope names ONLY the approver: SUBMITTER may read every other
     // template in this fixture but not this one, so G6d can prove the name lookup is visibility-FILTERED
     // (not merely `approvals:read`-gated) against the real jsonb predicate.
-    const restricted = await approvals.createTemplate(templateRequest(`mtra-restricted-${TS}`) as never)
+    const restricted = await approvals.createTemplate(
+      templateRequest(`mtra-restricted-${TS}`, RESTRICTED_TEMPLATE_NAME) as never,
+    )
     templateIds.push(restricted.id)
     await approvals.publishTemplate(restricted.id, { policy: { allowRevoke: true } } as never)
     restrictedTemplateId = restricted.id
@@ -616,6 +637,13 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
       )
     }
     expect(restrictedTemplateName.length).toBeGreaterThan(0) // non-vacuity: the hidden template HAS a name
+    // TRIPWIRE for the leak scan further down. That scan can only ever pass while the hidden template's
+    // name is DISJOINT from everything the response is allowed to carry — above all from the VISIBLE
+    // template's name, which the same response asserts is present. Fail here, loudly and about the
+    // FIXTURE, instead of failing later with `expected ... not to contain 'MTRA Approval'` while the gate
+    // was in fact doing its job (PR #5763's real-DB red).
+    expect(restrictedTemplateName).not.toBe(publishedTemplateName)
+    expect(publishedTemplateName.includes(restrictedTemplateName)).toBe(false)
 
     const res = await list(RECORD_B)
     expect(res.status).toBe(200)
@@ -629,6 +657,20 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     expect(JSON.stringify(res.body)).not.toContain(restrictedTemplateName)
     // ...and the id the caller already had is untouched, so the panel can still fall back to it
     expect(hidden.templateId).toBe(restrictedTemplateId)
+
+    // CONVERSE (the positive half of the same predicate): the SAME two rows, read by APPROVER — the one
+    // user the restricted scope names — carry BOTH names. Without this, "the restricted name is null"
+    // would be satisfied just as well by a template nobody can read (wrong join, unpublished row, wrong
+    // id) as by the visibility filter, and the negative above would be vacuous.
+    invalidateUserPerms(APPROVER)
+    currentUserId = APPROVER
+    const inScope = await list(RECORD_B)
+    currentUserId = SUBMITTER
+    expect(inScope.status).toBe(200)
+    const scoped = inScope.body.data.submissions as Array<{ templateId: string; templateName: string | null }>
+    expect(scoped).toHaveLength(2)
+    expect(scoped.find((row) => row.templateId === restrictedTemplateId)!.templateName).toBe(restrictedTemplateName)
+    expect(scoped.find((row) => row.templateId === publishedTemplateId)!.templateName).toBe(publishedTemplateName)
 
     await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
   })
