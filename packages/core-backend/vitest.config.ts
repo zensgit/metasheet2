@@ -563,6 +563,16 @@ export default defineConfig({
       // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
       'tests/integration/approval-projection-visibility.db.test.ts',
       'tests/integration/approval-projection-participant-read.db.test.ts',
+      // C1: GET /context now routes through the same fenced capability resolver every other
+      // sheet-addressed route in univer-meta.ts already uses (resolveSheetCapabilitiesForAccess /
+      // filterReadableSheetRowsForAccess), instead of a bare deriveCapabilities + unfiltered SQL.
+      // Provisions REAL approval-projection sheets via getApprovalRecordProjectionService().reconcile()
+      // (not hand-typed projection rows). DATABASE_URL-gated (describeIfDatabase); excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the standalone
+      // approval-realdb-context-projection-fence.yml lane (NOT plugin-tests.yml: that file is an s6a
+      // sha256-pinned provenance input — see that lane's own header for the full rationale — so this
+      // slice leaves it byte-identical rather than adding an allowlist entry there).
+      'tests/integration/multitable-context-approval-projection-fence-realdb.test.ts',
       // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',

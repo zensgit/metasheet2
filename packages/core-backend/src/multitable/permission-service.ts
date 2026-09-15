@@ -1678,10 +1678,15 @@ export async function filterReadableSheetRowsForAccess<T extends { id: string }>
   sheetRows: T[],
   access: ResolvedRequestAccess,
   baseCapabilities?: MultitableCapabilities,
+  // Optional caller-preloaded scope map, keyed exactly as loadSheetPermissionScopeMap would build one
+  // for THESE sheetRows and THIS access.userId (a caller that already loaded the map for the same sheet
+  // set — e.g. a route that also needs it for its own local decision — passes it here instead of making
+  // this function issue a redundant, identical query). Absent, this loads it itself exactly as before.
+  preloadedScopeMap?: Map<string, SheetPermissionScope>,
 ): Promise<T[]> {
   if (sheetRows.length === 0 || access.isAdminRole) return sheetRows
   const effectiveCapabilities = baseCapabilities ?? deriveCapabilities(access.permissions, access.isAdminRole)
-  const scopeMap = await loadSheetPermissionScopeMap(
+  const scopeMap = preloadedScopeMap ?? await loadSheetPermissionScopeMap(
     query,
     sheetRows.map((row) => String(row.id)),
     access.userId,
@@ -1767,6 +1772,18 @@ export async function resolveSheetCapabilitiesForAccess(
   query: QueryFn,
   sheetId: string,
   access: ResolvedRequestAccess,
+  // Optional caller-preloaded scope map. MUST have been loaded (via loadSheetPermissionScopeMap, or an
+  // equivalent superset load) for THIS sheetId and THIS access.userId — e.g. a route that already loaded
+  // the map for its own sibling-list decision over a set that includes sheetId passes it here instead of
+  // this function re-querying it. Absent, this loads it itself exactly as before.
+  preloadedScopeMap?: Map<string, SheetPermissionScope>,
+  // P2-02 (gate-2, C1 /context re-gate): a caller that will NEVER read the returned `sheetLiveness` —
+  // e.g. GET /context, which reads only `.sheetScope` / `.capabilities` / `.capabilityOrigin` off this
+  // result and has its OWN, separate existence check earlier in the request — can opt out of the
+  // `loadSheetLiveness` query entirely. Every other existing caller omits this (default `false`) and
+  // keeps loading it exactly as before; `sheetLiveness` is `undefined` ONLY when the caller passed
+  // `true` here, so a caller that reads the field without opting out is unaffected either way.
+  skipLiveness?: boolean,
 ): Promise<{
   access: ResolvedRequestAccess
   capabilities: MultitableCapabilities
@@ -1778,12 +1795,15 @@ export async function resolveSheetCapabilitiesForAccess(
    * path that only ever asked "may this actor?" and never "is there a sheet?". Capabilities are NOT
    * zeroed for a dead sheet: callers must answer 404 (a coded refusal), not 403, and the restore flow
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
+   *
+   * `undefined` iff the caller passed `skipLiveness: true` above — no query is made and no value is
+   * fabricated in its place. Every caller that does not opt out keeps getting a real verdict.
    */
-  sheetLiveness: SheetLiveness
+  sheetLiveness: SheetLiveness | undefined
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
-  const sheetLiveness = await loadSheetLiveness(query, sheetId)
-  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
+  const sheetLiveness = skipLiveness ? undefined : await loadSheetLiveness(query, sheetId)
+  const scopeMap = preloadedScopeMap ?? await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
   let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
   // A + T36-1 (Plan A): the approval projection base stays admin-only on the write/manage plane;
