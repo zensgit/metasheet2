@@ -1,5 +1,12 @@
 # Archive Readiness Verification
 
+## Current-Main Replay At 28d11496
+
+- True merge `6983e2353d8dfb8f90a1bec776b9a86c03e51b27`, tree `3bd18da648cf7e1dd94643a55f941cfa611f27bd`, ordered parents `955ec9095b40d8ce4407ac42e21a45fc17c7e04b` and main `28d11496bb4281738c3dd13096fe317ff42e8780`.
+- Incoming attendance/client/document changes have zero overlap with the six readiness paths; all six blobs are byte-identical before this report update. No conflicts, manual resolution, backend/provider/flag/selector changes.
+- Modal/client plus incoming approval-template client: 3 files / 120 tests PASS; application vue-tsc and diff-check PASS. Logs `/private/tmp/tm-readiness-current-{focused,tsc}.log` are local only. No repeated browser/DB/mutation or full required-web claim for unchanged readiness code.
+- Connector readback of the preceding #5725 head confirmed OPEN/Draft; its returned PR workflow page contained 15 success and one expected skip, all completed. This is old-head workflow evidence, not a new-head complete checks claim. Preserve Draft/HOLD and require fresh published-head CI. Provider startup and authenticated browser-to-backend acceptance remain separate.
+
 ## Current-Main Replay (2026-09-15)
 
 - Replay code head `0403667ffb0f6ab6f75792365892ebe89ca95bfd`, tree `5bbdfc62850d02922a6a060468c0457e0675cfcb`.
