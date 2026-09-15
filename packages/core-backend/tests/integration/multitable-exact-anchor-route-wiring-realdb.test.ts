@@ -1277,11 +1277,63 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       const denied = await compute()
       expect(denied.rows[0].data[F_SRC_LOOKUP]).toEqual([])
       expect(denied.formulas).toEqual([])
+      await expect(createRecoveryComputedHelpers(authority.access, true).recalculateFormulaFields(
+        q, SHEET, fields, [REC_A], [F_SRC_LINK], new Map(denied.rows.map(row => [row.id, row.data])),
+      )).rejects.toThrow('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
       expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FOL]).toBe(100)
       await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
       expect((await compute()).formulas).toEqual(allowed.formulas)
     } finally {
       await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
+    }
+  })
+
+  test.each(['source', 'related', 'source_relation', 'related_relation'] as const)('WORKER-STRICT: blocked %s formula remains retryable, legacy stays best-effort', async (target) => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const relatedFormula = `fld_earw_rel_formula_${TS}`
+    const source = target.startsWith('source')
+    const relation = target.endsWith('_relation')
+    const sheetId = source ? SHEET : REL_SHEET
+    const recordId = source ? REC_A : REC_REL
+    const formulaId = source ? F_FORMULA : relatedFormula
+    const originalProperty = (await q('SELECT property FROM meta_fields WHERE id=$1', [F_FORMULA])).rows[0].property
+    if (!source) await q(`INSERT INTO meta_fields (id,sheet_id,name,type,property,"order")
+      VALUES ($1,$2,'Derived','formula',$3::jsonb,3)`,
+    [relatedFormula, REL_SHEET, JSON.stringify({ expression: relation
+      ? `=RELSUMIF("${F_REL_LINK}","${F_NUM}","${F_NUM}","greater",0)` : `={${F_REL_LOOKUP}}+1` })])
+    try {
+      if (source && relation) {
+        await q('UPDATE meta_fields SET property=$2::jsonb WHERE id=$1', [F_FORMULA,
+          JSON.stringify({ expression: `=RELSUMIF("${F_SRC_LINK}","${F_TGT_NUM}","${F_TGT_NUM}","greater",0)` })])
+        await q('INSERT INTO formula_dependencies (sheet_id,field_id,depends_on_field_id,depends_on_sheet_id) VALUES ($1,$2,$3,$1)',
+          [SHEET, F_FORMULA, F_SRC_LINK])
+      }
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [recordId, JSON.stringify({ [formulaId]: 100 })])
+      const authority = await resolveDatabaseRecoverySheetAuthority(q, SHEET, ACTOR)
+      const fields = (await q('SELECT id,name,type,property FROM meta_fields WHERE sheet_id=$1', [SHEET])).rows
+        .filter(field => field.type !== 'formula' || field.id === formulaId)
+      const compute = async (strict: boolean) => {
+        const helpers = createRecoveryComputedHelpers(authority.access, strict)
+        return source
+          ? helpers.recalculateFormulaFields(q, SHEET, fields, [REC_A], [F_NUM, F_SRC_LINK])
+          : helpers.computeDependentLookupRollupRecords(q, SHEET, [REC_A], [F_NUM])
+      }
+      await q("UPDATE meta_sheets SET recovery_writer_state='fencing' WHERE id=$1", [sheetId])
+      await expect(compute(true)).rejects.toThrow('RECOVERY_DERIVED_WRITE_INCOMPLETE')
+      await expect(compute(false)).resolves.toBeInstanceOf(Array)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[formulaId]).toBe(100)
+      await q('UPDATE meta_sheets SET recovery_writer_state=NULL WHERE id=$1', [sheetId])
+      await compute(true)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[formulaId])
+        .toBe(relation ? source ? 99 : 10 : 11)
+    } finally {
+      await q('UPDATE meta_sheets SET recovery_writer_state=NULL WHERE id=$1', [sheetId])
+      await q('DELETE FROM formula_dependencies WHERE field_id=$1', [relatedFormula])
+      await q('DELETE FROM meta_fields WHERE id=$1', [relatedFormula])
+      await q('UPDATE meta_fields SET property=$2::jsonb WHERE id=$1', [F_FORMULA, JSON.stringify(originalProperty)])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
     }
   })
 

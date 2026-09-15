@@ -3026,6 +3026,7 @@ async function recalculateFormulaFields(
   // unchanged — the SAME taint discipline applies byte-for-byte to both callers.
   explicitFormulaFieldIds?: Set<string>,
   authorityAccess?: ResolvedRequestAccess,
+  requireComplete = false,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
   if (updatedRecordIds.length === 0) return []
   if (!explicitFormulaFieldIds && changedFieldIds.length === 0) return []
@@ -3087,6 +3088,7 @@ async function recalculateFormulaFields(
   // stored AUTHORIZED value untouched — symmetric to the export/aggregate/read taint sinks. An
   // authorized writer (nothing masked) gets an empty tainted set → recompute is unchanged.
   const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds, authorityAccess)
+  if (requireComplete && taintedForWriter.size > 0) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
   for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
@@ -3121,6 +3123,7 @@ async function recalculateFormulaFields(
       const nextData = hydrated
         ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, pureFormulaFieldIds)
         : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, pureFormulaFieldIds)
+      if (requireComplete && !nextData) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
       if (nextData) {
         for (const fieldId of pureFormulaFieldIds) {
           if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
@@ -3152,6 +3155,7 @@ async function recalculateFormulaFields(
             Object.assign(formulaData, updates)
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
+              if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               derivedWriteBlocked = true
               console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
             } else {
@@ -3878,6 +3882,7 @@ async function computeDependentLookupRollupRecords(
   updatedRecordIds: string[],
   changedFieldIds: string[],
   authorityAccess?: ResolvedRequestAccess,
+  requireComplete = false,
 ): Promise<RelatedComputedRecord[]> {
   if (updatedRecordIds.length === 0) return []
 
@@ -3941,7 +3946,10 @@ async function computeDependentLookupRollupRecords(
       const baseReadable = relatedBaseId != null && (authorityAccess
         ? await resolveBaseReadableForAccess(query, relatedBaseId, authorityAccess)
         : req ? await resolveBaseReadable(req, query, relatedBaseId) : false)
-      if (!baseReadable) continue
+      if (!baseReadable) {
+        if (requireComplete) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+        continue
+      }
     }
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
@@ -3949,7 +3957,10 @@ async function computeDependentLookupRollupRecords(
     const { access, capabilities } = authorityAccess
       ? await resolveSheetCapabilitiesForAccess(query, sheetId, authorityAccess)
       : await resolveSheetReadableCapabilities(req!, query, sheetId)
-    if (!access.userId || !capabilities.canRead) continue
+    if (!access.userId || !capabilities.canRead) {
+      if (requireComplete) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+      continue
+    }
     const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
     allowedFieldIdsBySheet.set(sheetId, computeAllowedFieldIds(fields, capabilities, fieldScopeMap))
   }
@@ -4052,6 +4063,7 @@ async function computeDependentLookupRollupRecords(
         hydratedDataByRecord,
         undefined,
         authorityAccess,
+        requireComplete,
       )
       formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
     }
@@ -4066,6 +4078,7 @@ async function computeDependentLookupRollupRecords(
       const candidateRel = new Set<string>()
       for (const s of relAggAffectedByRecord.values()) for (const id of s) candidateRel.add(id)
       const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel, authorityAccess)
+      if (requireComplete && taintedRel.size > 0) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
       for (const [recordId, fieldIds] of relAggAffectedByRecord) {
         const recData = rows.find((r) => r.id === recordId)?.data ?? (await loadRecordDataById(query, sheetId, recordId))
         if (!recData) continue
@@ -4092,6 +4105,7 @@ async function computeDependentLookupRollupRecords(
             formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
+              if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
               break
             }
@@ -4791,16 +4805,16 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
  * (`createRecordWriteHelpers(req, pool)`); every helper receives its query
  * function per-call from RecordWriteService, so the pool is not consumed here.
  */
-export function createRecoveryComputedHelpers(authorityAccess: ResolvedRequestAccess): Pick<RecordWriteHelpers,
+export function createRecoveryComputedHelpers(authorityAccess: ResolvedRequestAccess, requireComplete = false): Pick<RecordWriteHelpers,
   'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields'> {
   if (!authorityAccess.userId) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   return {
     applyLookupRollup: (query, sheetId, fields, rows, links, values) =>
       applyLookupRollup(undefined, query, sheetId, fields, rows, links, values, authorityAccess),
     computeDependentLookupRollupRecords: (query, sheetId, ids, changed) =>
-      computeDependentLookupRollupRecords(undefined, query, sheetId, ids, changed, authorityAccess),
+      computeDependentLookupRollupRecords(undefined, query, sheetId, ids, changed, authorityAccess, requireComplete),
     recalculateFormulaFields: (query, sheetId, fields, ids, changed, hydrated) =>
-      recalculateFormulaFields(undefined, query, sheetId, fields, ids, changed, hydrated, undefined, authorityAccess),
+      recalculateFormulaFields(undefined, query, sheetId, fields, ids, changed, hydrated, undefined, authorityAccess, requireComplete),
   }
 }
 
