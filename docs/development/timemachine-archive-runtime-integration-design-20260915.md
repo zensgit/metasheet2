@@ -2,6 +2,43 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Combined Current-Main Contract
+
+Clean code `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`, tree
+`4ba0f8216849f1486d2eb0ebf02b0531223149dc`, integrates runtime #5744,
+recovery UX #5709 (including #5704), and readiness #5725 by true merges.
+The final merge's second parent is main
+`f67984b34cc170e7256292e671d619502feea0e9`. Its eight automation files have
+zero path overlap with the Time Machine candidate. No constituent PR is closed
+or merged by this integration; publication reuses the existing #5744 branch.
+
+The user-visible ownership boundaries remain separate:
+
+- Recycle bin restores a retained, soft-deleted whole table with its rows, fields
+  and views. It cannot resurrect a physically hard-deleted table.
+- Record history identifies the deleted row, its visible field values and named
+  actor; selected-record restoration does not restore unrelated rows or schema.
+- Configuration history describes typed field/schema changes and viewer-local
+  time. Column recovery uses the existing typed restore and captured-value guards,
+  not a row-history write pretending to recreate schema.
+- Archive recovery requires a verified archive and explicit confirmed preview;
+  server-owned durable jobs and derived work remain behind existing authority.
+
+Integration exposed two overlapping asynchronous-context defects. Metadata loads
+now bind both a request generation and the selected base/sheet/view. Superseded
+results, failures and rollback snapshots cannot replace newer user context, and
+an old request cannot clear a newer load's busy state. A background manager poll
+must not start while a foreground base-context load is pending; otherwise the
+temporary new-base/old-sheet combination could invalidate the user's switch.
+Interval and visibility refresh resume against the new sheet after navigation.
+Cancelled restore refreshes must not toast errors into another selected sheet.
+
+These changes preserve refresh cadence, server permissions, restore semantics,
+and default flag behavior. They add no provider selection or deployment policy.
+The verification report binds both real-browser chains to this combined code.
+Production capture/coverage, durable provider/key custody, operational missing
+samples, fresh published-head CI and separate merge authority remain open.
+
 ## Real Archive Workbench Acceptance
 
 Code `1907d2b413abbeb65b00e07c917406154f001501`, tree

@@ -24,6 +24,32 @@ discard existing work or silently rewrite another candidate.
 
 ### Latest Local Checkpoint
 
+Combined clean code `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`, tree
+`4ba0f8216849f1486d2eb0ebf02b0531223149dc`, true-merges #5744 runtime,
+#5709 UX and #5725 readiness with main
+`f67984b34cc170e7256292e671d619502feea0e9`. The 109-file union includes
+historical reports and screenshots. No duplicate implementation or new PR is
+needed; ordinary publication uses existing #5744 and preserves all source heads.
+
+Integration fixed a duplicate import and two real context races: stale metadata
+must not override a newer base/sheet/view or restore; background polling must not
+supersede a pending foreground base switch. Guards have discriminating mutations
+and the final narrow Sol High review returns 0 P1/P2/P3. Real full-workbench
+recovery and archive browser chains each pass 6/6 on this exact clean tree; the
+archive restores 5,001 records and drains all derived effects. Dedicated databases
+and backends are gone and PostgreSQL is stopped. Final required-web passes,
+including its 456-file/6,788-test final group. Source application/core/script
+typechecks pass; full local Web build typecheck retains an explicitly recorded
+unchanged-config Vite dependency conflict, not an unqualified green claim.
+
+The runtime integration design/verification reports contain exact run IDs,
+mutation scope, reuse boundaries and current local limitations. Source candidate
+combination is now verified locally. Fresh published-head CI, separate merge
+authority, production provider/custody/capture decisions and nightly missing
+samples are still open. Overall goal remains ACTIVE, not product FINAL.
+
+### Previous Local Checkpoint
+
 Runtime code `1907d2b413abbeb65b00e07c917406154f001501`, tree
 `72ec5b49e7890421f7e27c9810568e1e6cbae277`, extends successor #5744 with
 real LoginView/Workbench -> MetaSheetServer -> seeded encrypted archive -> owned

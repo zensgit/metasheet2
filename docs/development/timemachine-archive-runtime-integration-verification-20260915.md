@@ -2,6 +2,43 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Combined Current-Main Verification
+
+All evidence below is local unless explicitly identified as a GitHub readback.
+Historical sections retain their own exact SHA and do not supersede this section.
+
+- Clean tested code: `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`; tree `4ba0f8216849f1486d2eb0ebf02b0531223149dc`. Relative main `f67984b34cc170e7256292e671d619502feea0e9`: 109 files, including inherited reports/screenshots, not 109 new production files. This report is a docs-only child of the tested code.
+- True merge sequence: `21592612` joins #5744 `dbc4e2d4` with main `268aded9`; `195dbcc2` adds #5709 `c970c880`; `0ddc79e6` adds #5725 `0a23e4ed`. All three are conflict-free. Their path union has 106 entries. `703b7456` removes one duplicate permission-helper import left by the automatic merge; no authority logic changes. `86f40dcb` and `d775f50e` close context ownership and poll priority defects, adding three existing-main paths to that union. Final true merge `c2c7d2ec` has ordered parents `d775f50e5829f49b5b9a3db1c40537b9de8a3930` and `f67984b34cc170e7256292e671d619502feea0e9`; eight incoming automation files, zero TM overlap, zero manual resolution.
+- Context regressions: 5 workbench files / 211 tests PASS. Old same-sheet response, stale context/error rollback, direct view switch, loading ownership and restore-notification cases are pinned. Independently neutralizing generation, identity, stale-rollback, and poll-loading guards makes the corresponding tests RED; all restored before commit. Initial pre-fix context cases were 7 RED, stale toast 1 RED, and poll priority 1 RED. Final Sol High read-only narrow integration review: P1/P2/P3=0/0/0, session closed; no model test execution or fresh whole-PR external review is claimed.
+- Incoming-main neighbors on final code: 4 Web files / 210 tests PASS, including automation editor 139/139 and manager refresh 15/15; backend outcome/wiring 2 files / 33 tests plus archive application 1 file / 33 tests PASS. The earlier integrated 16-file Web run was 534/534 and 10-file backend run 185/185 on `703b7456`; these are earlier checkpoints, not extra final-head executions.
+- Final required-web exits 0; all command groups pass, with the final group 456 files / 6,788 tests. The three edited workbench suites are in multitable-web-guard and the required script's actual invocation; the latter intentionally uses suffix-free filters for manager-flow and sheet-delete. A literal full-filename-only probe initially returned false for those two filters, but runtime token inspection and the executed test log prove coverage; no selector edit was needed.
+- Core typecheck, Web application-only `vue-tsc --noEmit -p tsconfig.app.json`, and the explicit archive script TypeScript project PASS. Full local `vue-tsc -b` does NOT pass: unchanged `vite.config.ts` sees incompatible Vite 5/7 plugin types in the reused installed dependency tree. Config, manifest and lockfile are byte-identical to main; this is recorded, not masked or counted as an all-project typecheck pass. Touched view lint has zero errors; the mounted manager test retains eight existing multi-component warnings. Local Node is 24.14.1, not remote Node18/20.
+- Exact-anchor/D2/OpenAPI wiring: 43/43 PASS. Official `computePackageProvenancePinSet` frozen/live differenceCount=0; no pin refresh. Full 11-file sealed-export S5 chain PASS, including positive package provenance. Existing installed mssql was exposed through temporary NODE_PATH only; no install, lockfile or shared dependency edit.
+
+### Real Recovery Acceptance
+
+Both scripts ran on clean `c2c7d2ec` and tree above through the real LoginView,
+app router, MultitableWorkbench, MetaSheetServer and dedicated PostgreSQL 15.
+No successful API response was mocked and no browser authentication was injected.
+
+- Workbench run `e0102434-f6e6-4726-b874-371dc52ea9ed`: 6/6 PASS, exit 0. Covers real login, history entry, whole-table soft delete retaining all data/schema/views, explicit table restore, named actor plus all deleted values followed by selected-row-only restore, and deleted-column/local-time presentation followed by typed restore of the column and captured values. Full fresh 403 migrations and second no-op replay. All 12 fixture census counts are zero; cleanupErrors=[]; independent remaining connections/users/sheets/records zero before database drop.
+- Archive run `4387cda5-d539-402a-b754-d4205d03f1e6`: 6/6 PASS, exit 0. Fresh 403 migrations/replay; 401 anonymous, 403 reader, 503 test-process flag OFF. Viewer-local catalog, non-mutating 5,001-row preview and required confirmation; one browser-accepted job rediscovered after full-page reload. Exactly 5,001 restored records at version 3, 5,001 revisions and derived `{n:5001,pending:0}`. Desktop 1440x1000 and mobile 390x844 screenshots were inspected; completed progress/count and restored values are visible. databaseResidue=0, cleanupErrors=[]. The pre-existing server shutdown timeout warning is not represented as a clean absence of warnings; the process exits 0 after cleanup.
+- Combined real-DB regression at `703b7456923b28cc1f18ce73d29c1e46808bdc45`: four whole files / 90 tests PASS, zero skips (archive restore-jobs, config-history API, history-before hydration, dangling-link repair). Actual SIGKILL boundaries and application-timer resume/drain remain included. These suites and their recovery/history production sources are byte-identical to the final code; this is reuse of scoped evidence, not a second 90-test execution after the Web fixes or incoming automation changes.
+- Both browser databases were dropped. Independent archive/workbench prefix database and backend counts are zero; owned PostgreSQL stopped. No persistent flag, customer data, external dispatch, staging or production operation.
+
+Local artifacts: `artifacts/timemachine-workbench/evidence.json` and
+`artifacts/recovery-archive-server/evidence.json`, with their screenshots. They
+bind code/tree, clean state, script hashes, fixture type and cleanup. Logs are
+`/private/tmp/tm-final-c2c7-{workbench-browser,archive-browser,required-web,wiring,s5,script-tsc}-20260915.log`
+and `/private/tmp/tm-final-main-{backend,application,web,web-app-tsc,web-tsc,core-tsc}-20260915.log`.
+These artifacts are session-local, not uploaded CI evidence.
+
+### Remaining Gates
+
+- Ordinary publication reuses #5744; new exact-head CI is required. Previous runtime head `dbc4e2d4` still had Node20 running at the last read. Main `f67984b3` had 15 SUCCESS, 3 SKIPPED and 2 running checks at the successful REST snapshot, after one API timeout; no combined-main all-green claim.
+- Fresh read-only nightly queries still return failed runs `34919685921`, `34919841957`, `34920290620` on `c6f2d437`. Existing missing-sample attribution remains open; no alert/threshold change or production reload/restore was performed.
+- Synthetic seeded archives do not prove production capture/coverage, durable object-store/key custody, real tenant UAT or deployment. Whole hard-deleted-table resurrection is excluded. #5709/#5725 metadata and separate Ready/merge authority remain unchanged.
+
 ## Real Archive Browser Checkpoint
 
 - Clean tested code: `1907d2b413abbeb65b00e07c917406154f001501`; tree `72ec5b49e7890421f7e27c9810568e1e6cbae277`; parent `a1d2fe1968c9464de9b7306ac72f07065f380925`. Exactly two script/config files, +137/-5. Main was independently rechecked as `2b67a04625a0d6b089dac173e47a0de5d111e225`; no incoming replay was needed for this checkpoint. Production UI/backend, migrations and workflows have no final delta.

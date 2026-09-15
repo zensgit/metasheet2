@@ -106,6 +106,27 @@ describe('workbench context request ownership', () => {
     expect(wb.error.value).toBeNull()
   })
 
+  it.each([
+    { scope: 'sheet', input: { sheetId: 'sheet_b' }, suffix: 'b', viewId: 'view_b' },
+    { scope: 'view', input: { viewId: 'view_selected' }, suffix: 'a', viewId: 'view_selected' },
+  ])('marks an external $scope navigation busy until its metadata settles', async ({ input, suffix, viewId }) => {
+    const { wb, contexts, context, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const target = context(suffix)
+    contexts.mockResolvedValueOnce({
+      ...target,
+      views: [{ ...target.views[0], id: viewId }],
+    })
+    const navigation = wb.syncExternalContext(input)
+    expect(wb.loading.value).toBe(true)
+    late.resolve(fieldData('selected context'))
+    expect(await navigation).toBe(true)
+    expect([wb.activeSheetId.value, wb.activeViewId.value]).toEqual([`sheet_${suffix}`, viewId])
+    expect(wb.fields.value).toEqual(fieldData('selected context').fields)
+    expect(wb.loading.value).toBe(false)
+  })
+
   it('keeps a view selected while an older metadata response was in flight', async () => {
     const { wb, fields, fieldData } = fixture()
     const late = deferred<ReturnType<typeof fieldData>>()

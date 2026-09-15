@@ -378,6 +378,7 @@ export function useMultitableWorkbench(opts?: {
         return true
       }
       const snapshot = snapshotState()
+      loading.value = true
       const pending = loadSheetMeta(nextSheetId, { viewId: nextViewId || undefined })
       const isCurrent = currentContextRequest()
       const ok = await pending
@@ -391,6 +392,7 @@ export function useMultitableWorkbench(opts?: {
 
     if (nextViewId && nextViewId !== activeViewId.value && activeSheetId.value) {
       const snapshot = snapshotState()
+      loading.value = true
       const pending = loadSheetMeta(activeSheetId.value, { viewId: nextViewId })
       const isCurrent = currentContextRequest()
       const ok = await pending
