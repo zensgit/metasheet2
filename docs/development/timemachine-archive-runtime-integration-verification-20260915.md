@@ -2,6 +2,17 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Real Application Timer Lifecycle
+
+- Code `34681dc7c326926311dbe5446b22355e8e81100f`, tree `c98b5d4a6b5075a03915f53a38ddab59f818fc0a`, parent `9763493bd481d9e4b6476b2830390603c401b04d`. Exactly two existing test/helper files, +68/-33; production source, providers, migrations, workflows and flags unchanged. This report/design/goal update is a docs-only child.
+- Fresh child processes now compose `createRecoveryArchiveApplication`, use its actual interval and `startWorker`/`stopWorker`, and observe real run/lifecycle callbacks. The resume and derived-drain paths no longer call `runOnce` from a test loop. Canonical authorization, real PostgreSQL transactions and both actual SIGKILL boundaries remain.
+- Clean code-head full restore-jobs suite: 39/39 PASS, no skips, 141.73 seconds. After before-COMMIT and after-COMMIT crashes, application startup resumes respectively two/one chunks, finalizes exactly 5,001 rows, and releases the writer block. Inactive actor leaves all 5,001 derived effects pending; reactivation lets timer ticks complete them in 156 batches of 32, then 9, then an idle tick. Existing independent database exact-once/formula/version assertions remain.
+- Every normal child reports lifecycle `started,drained`, observes no further result during five interval lengths after stop, exits normally, and leaves no application-name database backend. Mutation omitting production `cancel(timer)` makes the before-COMMIT case RED at `archive_process_exit_timeout`; its owned child is killed by existing finally cleanup. Restored worker is byte-identical to parent before final green.
+- Application/worker/server-wiring unit neighbors: 3 files / 67 tests PASS. Core typecheck, explicit helper/dependency typecheck and diff-check PASS. Terra Medium independently reviewed only the two-file test delta with zero findings; no model test execution is claimed and the session is closed.
+- Dedicated PostgreSQL 15: fresh 403 migrations, subsequent replay no-op. Jobs, effects, synthetic users/sheets/bases and other connections zero before disposal. Database dropped; exact/prefix database and backend census zero; owned PG stopped. Test environment/authority triggers use the existing finally restoration; no live environment setting changed.
+- Logs: `/private/tmp/tm-runtime-timer-{target,stop-mutation,exact-full,unit,tsc,helper-tsc,migrate,replay}.log`. These are local evidence, not remote CI artifacts. The selected mutation run's 38 filtered tests are not counted as a full pass.
+- This closes the application interval/start/stop composition gate only. It is not a `MetaSheetServer.start()` HTTP lifecycle test, independent production object-store/KMS acceptance, archive browser UAT or deployment. Object bytes still cross fixture IPC and custody remains synthetic. Provider/custody selection and full standard startup remain open; fresh published-head CI is required.
+
 ## Full-Schema Fixture Cleanup CI Repair
 
 - Code `3409c5f92b7622cb4b683ffe5e74c4e7186176ba`, tree `0ff867aa5ea8771454a45e96ad37aab2cee1ee64`, parent `cf69839968748f34a28df79206bce1b61d11ece5`. Six integration-test files only, 53 insertions and 5 deletions. No production, migration, workflow, package, flag or provenance change.

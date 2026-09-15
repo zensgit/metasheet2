@@ -24,12 +24,22 @@ discard existing work or silently rewrite another candidate.
 
 ### Latest Local Checkpoint
 
-At code `7d6d230c68720b5dc0bc679fb6a8d86fe6b09206` (base main `3af707dddca48b196e168da0fab45560f88acd11`), runtime successor #5744 contains canonical per-job authority, durable derived queue, transaction-held computed input/authorization, bounded drain and migration replay repairs. Both actual SIGKILL boundaries now resume through the production worker factory, then independently drain all 5,001 derived effects in fresh processes. Full isolated restore suite 39/39 and discriminating finalization/scheduling negatives are recorded in the runtime verification MD. Earlier queue rows below are historical checkpoints, not current remote CI claims.
+At code `34681dc7c326926311dbe5446b22355e8e81100f` (base main `28d11496bb4281738c3dd13096fe317ff42e8780`), runtime successor #5744 contains canonical per-job authority, durable derived queue, transaction-held computed input/authorization, bounded drain and migration replay repairs. Both actual SIGKILL boundaries now resume through the production application composition and real interval, then independently drain all 5,001 derived effects in fresh processes. Full isolated restore suite 39/39 and timer-cancellation mutation are recorded in the runtime verification MD. Existing earlier finalization/scheduling negatives retain their own exact evidence. Earlier queue rows below are historical checkpoints, not current remote CI claims.
+
+UI code `e8cadc2989b38d9d36975d22ff7451dbe2d3843a`, published as the docs-child
+`321761ca35fca2cec113acc7ba6fa1bbcd836daa` in Draft #5709, has real canonical
+login/session/JWT + dedicated PostgreSQL component-level table/row/column restore
+acceptance: 15 named checks, with captured versus definition-only values, actual
+audit actor, server confirmation/flag negatives and cleanup. This is not the full
+workbench route or archive-provider browser flow. Draft #5725 remains a separate
+six-file readiness candidate at `94add2a91e828cdcf70ba0a0375f4d0575b37695`;
+its returned workflow page is terminal 15 success/1 expected skip, not merge or
+production approval. No duplicate readiness implementation is required.
 
 Remaining work is not another reimplementation of these primitives:
 
 - Standard server startup still needs the explicitly selected object-store/custody composition; fixture storage is not a production choice.
-- Timer/server lifecycle and real browser-to-backend synthetic acceptance are not replaced by worker-factory/process tests.
+- Application timer/start/stop and authenticated recovery-component acceptance are now evidenced as above. Full `MetaSheetServer.start()` lifecycle, full-workbench routing and archive browser-to-provider acceptance remain open.
 - Existing UI candidates #5709 and #5725 require current exact-head remote/integration verification; no duplicate UI implementation or implicit merge.
 - Nightly missing-sample attribution below is open; no threshold relaxation or production reload/restore is authorized.
 - GitHub API reads have intermittently failed with timeout/EOF. Ordinary Git pushes do not prove exact-head CI green. Keep Draft/HOLD and recheck the published head when API access returns.
@@ -37,6 +47,8 @@ Remaining work is not another reimplementation of these primitives:
 ### Operational attribution checkpoint (2026-09-15)
 
 Read-only GitHub evidence, not a production probe or an alert-resolution claim:
+
+- Fresh per-workflow reads after the application-timer checkpoint still return External Metrics `34919685921` and Regression `34919841957` as their latest runs, both failed on the previously audited SHA. The main Nightly run `34920290620` is independently confirmed failed, but its latest-run query returned EOF and does not prove there is no newer run. Recent unrelated health-monitor successes are not substituted for these gates. No rerun, dispatch, threshold change or production sampling was performed.
 
 - Phase 5 Nightly Validation run `34920290620`, job `104226687112` fails at validation. Regression run `34919841957`, job `104225261850`, and External Metrics run `34919685921`, job `104224778280`, fail at their final status gates. All three bind `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
 - All three report 11 checks: five passing, zero measured threshold failures, six N/A. Their parser finds 22 histogram families but zero matching the two configured latency families. Missing samples, rather than measured excessive latency, are the directly evidenced reason for failure.

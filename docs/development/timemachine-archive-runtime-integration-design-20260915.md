@@ -1,6 +1,26 @@
 # Archive Runtime Integration
 
-Status: LOCAL INTEGRATION IN PROGRESS. Not runtime acceptance or enablement.
+Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
+
+## Current Application Lifecycle Contract
+
+Test checkpoint `34681dc7c326926311dbe5446b22355e8e81100f` exercises the existing
+production application composition and actual timer in fresh processes after
+both crash boundaries. Resume and derived draining must enter through
+`createRecoveryArchiveApplication().startWorker()`, not a test-driven `runOnce`
+loop. Canonical authority and transaction providers remain mandatory. Completion
+is checked against persisted rows, revisions and the derived ledger. Revocation
+must defer derived work without marking it complete.
+
+Stopping must drain the current tick, emit the expected lifecycle, prevent later
+run callbacks and release the timer so the child exits normally before pool
+disposal. Omitting timer cancellation must fail acceptance. These tests keep
+synthetic custody and parent IPC storage; they do not choose or approve a
+production provider. Full standard-server HTTP startup remains separate.
+
+The following chronological checkpoints retain their original local evidence
+and open-gate wording; later exact checkpoints supersede only the corresponding
+bounded acceptance, not all runtime/production readiness.
 
 ## Frozen Inputs
 
