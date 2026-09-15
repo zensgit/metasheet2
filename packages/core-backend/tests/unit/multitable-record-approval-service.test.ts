@@ -842,27 +842,65 @@ describe('applyRecordApprovalCompletion — exactly-once effects', () => {
 // ── two legs, one handler ─────────────────────────────────────────────────────
 
 describe('completion wiring: durable consumer + eventBus fallback share ONE idempotent handler', () => {
-  test('the eventBus leg subscribes exactly the four completion families, routed into the sink', async () => {
+  test('the eventBus leg owns, detaches, and drains exactly its four completion subscriptions', async () => {
     const subscribed: string[] = []
     const handlers: Array<(payload: unknown) => void> = []
+    const unsubscribe = vi.fn(() => true)
     const bus = {
       subscribe: (eventType: string, handler: (payload: never) => void) => {
         subscribed.push(eventType)
         handlers.push(handler as (payload: unknown) => void)
         return `sub_${subscribed.length}`
       },
+      unsubscribe,
     }
     const seen: unknown[] = []
-    const ids = subscribeRecordApprovalCompletionBus(bus, {
-      handleApprovalCompletion: async (event) => {
+    let release!: () => void
+    const subscription = subscribeRecordApprovalCompletionBus(bus, {
+      handleApprovalCompletion: async (event) => new Promise<void>((resolve) => {
         seen.push(event)
-      },
+        release = resolve
+      }),
     })
     expect(subscribed).toEqual(['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'])
-    expect(ids).toHaveLength(4)
+    expect(subscription.ids).toEqual(['sub_1', 'sub_2', 'sub_3', 'sub_4'])
     handlers[0]!(completionEvent())
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+
+    subscription.detach()
+    subscription.detach()
+    expect(unsubscribe.mock.calls).toEqual([
+      ['sub_1'],
+      ['sub_2'],
+      ['sub_3'],
+      ['sub_4'],
+    ])
+
+    let drained = false
+    const drain = subscription.drain().then(() => { drained = true })
     await Promise.resolve()
-    expect(seen).toHaveLength(1)
+    expect(drained).toBe(false)
+    release()
+    await drain
+    expect(drained).toBe(true)
+  })
+
+  test('a partial subscription failure precisely rolls back the ids already registered', () => {
+    const unsubscribe = vi.fn(() => true)
+    let attempts = 0
+    const bus = {
+      subscribe: () => {
+        attempts += 1
+        if (attempts === 3) throw new Error('subscription sentinel')
+        return `sub_${attempts}`
+      },
+      unsubscribe,
+    }
+
+    expect(() => subscribeRecordApprovalCompletionBus(bus, {
+      handleApprovalCompletion: async () => undefined,
+    })).toThrow('subscription sentinel')
+    expect(unsubscribe.mock.calls).toEqual([['sub_1'], ['sub_2']])
   })
 
   test('the sink built for the durable leg runs the SAME idempotent UPDATE', async () => {
