@@ -1595,6 +1595,10 @@ let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
 let dialogMetaVisibilityListener: (() => void) | null = null
+// Cleared on unmount so an idle-deferred callback scheduled during mount, or a dialog-meta refresh
+// that was still in flight, can never fire into a torn-down workbench (or eat a later test's
+// mocked fetch). Declared up here because refreshDialogMeta() below reads it.
+let workbenchAlive = true
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
@@ -4641,14 +4645,27 @@ async function refreshDialogMeta() {
   try {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
-    if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
+    // workbenchAlive: this write lands AFTER an await, so a refresh still in flight when the
+    // workbench unmounted must not write into a torn-down grid.
+    if (refreshed && workbenchAlive && workbench.activeSheetId.value === activeSheetId) {
+      // #5743: an unchanged poll no longer replaces workbench.fields, so the computed hands back the
+      // very same field objects — reseating grid.fields anyway would invalidate every grid computed
+      // and re-render the table on each keep-alive tick for nothing.
+      const nextFields = propertyVisibleWorkbenchFields.value
+      const currentFields = grid.fields.value
+      const sameFields = currentFields.length === nextFields.length
+        && currentFields.every((field, index) => field === nextFields[index])
+      if (!sameFields) grid.fields.value = [...nextFields]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = dialogMetaRefreshWanted()
+    // workbenchAlive: the dialog refs dialogMetaRefreshWanted() reads survive unmount and the
+    // "sheet changed mid-flight" clause below is true by construction after a teardown that
+    // switched sheets, so without this a refresh in flight during teardown would issue one more
+    // GET /fields + GET /context into a dead component.
+    const shouldRefresh = workbenchAlive && dialogMetaRefreshWanted()
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -5212,10 +5229,6 @@ watch(
     void replayPendingExternalContextIfReady()
   },
 )
-
-// Cleared on unmount so an idle-deferred callback scheduled during mount can
-// never fire into a torn-down workbench (or eat a later test's mocked fetch).
-let workbenchAlive = true
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)

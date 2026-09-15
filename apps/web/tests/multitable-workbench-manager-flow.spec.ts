@@ -645,4 +645,83 @@ describe('MultitableWorkbench manager dialog meta keep-alive (#5743)', () => {
       .map(([, handler]) => handler)
     expect(removed).toContain(added[0])
   })
+
+  // Teardown has to cancel the QUEUED re-run too, not just the interval and the listener: a refresh
+  // that is still awaiting when the workbench unmounts comes back into a finally whose re-run clause
+  // is armed (the sheet changed mid-flight) and whose dialog refs still read "open" — that used to
+  // put one more GET /fields + GET /context on the wire against a dead component.
+  it('fires nothing after unmount, even with a refresh in flight and a sheet switch queued', async () => {
+    await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    // Hold the keep-alive tick's refresh open.
+    const pending: { settle: (value: boolean) => void } = { settle: () => {} }
+    workbenchMock.loadSheetMeta.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { pending.settle = resolve }),
+    )
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // Sheet switches while that refresh is in flight -> the finally's re-run clause arms.
+    workbenchMock.activeSheetId.value = 'sheet_invoices'
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    app!.unmount()
+    app = null
+    pending.settle(true)
+    await flushUi()
+
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+  })
+
+  // The keep-alive also reseated grid.fields with a brand-new array on every tick, which invalidates
+  // every grid computed (and re-renders the table) even when the refresh brought back the very same
+  // field objects — which, with the composable's fingerprint skip, is now the steady state.
+  it('leaves grid.fields identity alone when a refresh brings back the same field objects', async () => {
+    await mountWithOpenDialog()
+    const seeded = gridMock.fields.value
+    expect(seeded.length).toBeGreaterThan(0)
+
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+    expect(gridMock.fields.value).toBe(seeded)
+
+    // A real field change still reseats it.
+    workbenchMock.fields.value = [
+      ...workbenchMock.fields.value,
+      { id: 'fld_qty', name: 'Qty', type: 'number' },
+    ]
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(gridMock.fields.value).not.toBe(seeded)
+    expect(gridMock.fields.value.map((field: { id: string }) => field.id)).toContain('fld_qty')
+  })
+
+  // Same teardown hole on the other side of the await: the refresh's own grid.fields write lands
+  // after loadSheetMeta settles, so an unmount in between must cancel it too (here the answer
+  // genuinely changed, which is the only way the write is observable).
+  it('does not write grid.fields from a refresh that settles after unmount', async () => {
+    await mountWithOpenDialog()
+    const seeded = gridMock.fields.value
+    expect(seeded.length).toBeGreaterThan(0)
+
+    const pending: { settle: (value: boolean) => void } = { settle: () => {} }
+    workbenchMock.loadSheetMeta.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { pending.settle = resolve }),
+    )
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // What that in-flight refresh is about to apply.
+    workbenchMock.fields.value = [
+      ...workbenchMock.fields.value,
+      { id: 'fld_qty', name: 'Qty', type: 'number' },
+    ]
+    app!.unmount()
+    app = null
+    pending.settle(true)
+    await flushUi()
+
+    expect(gridMock.fields.value).toBe(seeded)
+  })
 })

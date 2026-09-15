@@ -502,5 +502,37 @@ describe('useMultitableWorkbench', () => {
       expect(wb.activeViewId.value).toBe('s2_view')
       expect(wb.fields.value).not.toBe(fieldsRef)
     })
+
+    // The fingerprint folded `undefined` into `null`, so a key flipping between the two read as
+    // "unchanged" and the skip swallowed it. Unreachable through the JSON-parsing production client,
+    // reachable through any injected one (this test, a future embed host).
+    it('does not confuse an undefined field property with an explicit null', async () => {
+      let description: string | null | undefined = null
+      const context = {
+        base: { id: 'base_ops', name: 'Ops Base' },
+        sheet: { id: 's1', baseId: 'base_ops', name: 'Orders', description: null },
+        sheets: [{ id: 's1', baseId: 'base_ops', name: 'Orders', description: null }],
+        views: [{ id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid' }],
+        fieldPermissions: {},
+        viewPermissions: {},
+        personalOverrideViewIds: [],
+      }
+      const client = {
+        listFields: vi.fn(async () => ({
+          fields: [{ id: 'fld_title', name: 'Title', type: 'string', description }],
+        })),
+        loadContext: vi.fn(async () => context),
+      } as unknown as MultitableApiClient
+      const wb = useMultitableWorkbench({ client, initialViewId: 'v1' })
+
+      await wb.loadSheetMeta('s1')
+      const fieldsRef = wb.fields.value
+      await wb.loadSheetMeta('s1')
+      expect(wb.fields.value).toBe(fieldsRef)
+
+      description = undefined
+      expect(await wb.loadSheetMeta('s1')).toBe(true)
+      expect(wb.fields.value).not.toBe(fieldsRef)
+    })
   })
 })

@@ -1,4 +1,4 @@
-import { ref, computed, watch } from 'vue'
+import { ref, computed, toRaw, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type {
   MetaCapabilityOrigin,
@@ -37,8 +37,12 @@ function filterVisibleSheets(sheets: MetaSheet[]): MetaSheet[] {
 // #5743: key-sorted stringify so two structurally identical meta payloads (or two snapshots of the
 // workbench state) hash to the same string regardless of JSON key order. Inputs are server JSON and
 // state derived from it — no cycles, functions or Dates to worry about.
+// `undefined` gets its own token: JSON-parsed server answers can never produce one, but an injected
+// client (tests, a future embed host) can, and `{x: null}` colliding with `{x: undefined}` would
+// make the skip below swallow a real change.
 function stableStringify(value: unknown): string {
-  if (value === null || value === undefined) return 'null'
+  if (value === undefined) return 'undef'
+  if (value === null) return 'null'
   if (typeof value !== 'object') return JSON.stringify(value) ?? 'null'
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
   const record = value as Record<string, unknown>
@@ -85,19 +89,23 @@ export function useMultitableWorkbench(opts?: {
   // diverges from what this cache recorded, the skip cannot fire.
   let lastAppliedSheetMeta: { sheetId: string; viewId: string; payload: string; state: string } | null = null
 
+  // toRaw: these refs hold DEEP-reactive proxies, so walking them through the proxy traps costs
+  // several times the raw walk and materialises a proxy for every nested object (option lists on a
+  // wide sheet). The raw graph is the same content, and both the record pass and the compare pass
+  // read it the same way, so the comparison is unaffected.
   function currentMetaStateFingerprint(): string {
     return stableStringify({
       activeBaseId: activeBaseId.value,
       activeSheetId: activeSheetId.value,
       activeViewId: activeViewId.value,
-      sheets: sheets.value,
-      fields: fields.value,
-      views: views.value,
-      capabilities: capabilities.value,
-      capabilityOrigin: capabilityOrigin.value,
-      fieldPermissions: fieldPermissions.value,
-      viewPermissions: viewPermissions.value,
-      personalOverrideViewIds: personalOverrideViewIds.value,
+      sheets: toRaw(sheets.value),
+      fields: toRaw(fields.value),
+      views: toRaw(views.value),
+      capabilities: toRaw(capabilities.value),
+      capabilityOrigin: toRaw(capabilityOrigin.value),
+      fieldPermissions: toRaw(fieldPermissions.value),
+      viewPermissions: toRaw(viewPermissions.value),
+      personalOverrideViewIds: toRaw(personalOverrideViewIds.value),
     })
   }
 
@@ -233,7 +241,8 @@ export function useMultitableWorkbench(opts?: {
       ])
       // #5743: the requests always go out (callers reload precisely to SEE server-side changes),
       // but an unchanged answer must not churn the refs. Everything syncContextState reads goes
-      // into the payload fingerprint; requestedViewId does too, since it steers which view wins.
+      // into the payload fingerprint. requestedViewId is NOT in it — it steers which view wins, so
+      // it is compared separately in the guard below and must stay part of that guard.
       const payloadFingerprint = stableStringify({
         fields: fData.fields ?? [],
         base: ctx?.base ?? null,
