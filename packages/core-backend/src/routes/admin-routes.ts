@@ -1396,8 +1396,15 @@ router.get('/yjs/status', requireAdminRole(), async (_req: Request, res: Respons
 /**
  * GET /api/admin/dlq
  * List DLQ messages
+ *
+ * SECURITY (issue #5678, batch 1): this read used to carry no authorization at all. It delegates to
+ * dlqService.list(), which selects from `dead_letter_queue` (DeadLetterQueueService.ts:151) — a
+ * table with no tenant_id column, queried with no tenant predicate — so the response is every failed
+ * message on the platform, `payload` included, to any authenticated caller of any tenant. Gated on
+ * platform admin like its retry/resolve/cleanup siblings (requireAdminRole: no user or non-admin ->
+ * 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed, see guards/audit-integration.ts:113).
  */
-router.get('/dlq', async (req: Request, res: Response) => {
+router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { status, topic, limit, offset } = req.query;
     const result = await dlqService.list({
