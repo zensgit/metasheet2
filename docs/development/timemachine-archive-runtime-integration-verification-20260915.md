@@ -124,3 +124,17 @@ Code/test head `dcb10e1c1b98d37181942870752d4d7c451306cd`, tree `d9eb3f4b1a08402
 - Remote CI, PR publication, merge, staging, UAT or production readiness.
 
 Constituent PR reports remain SHA-scoped; their prior DB/mutation evidence does not replace these combined gates. No extra reviewer was invoked for this integration checkpoint.
+
+### Derived Ledger Schema Checkpoint
+
+Code `af9a2520d611cbee703191d621d98b008a7426c4`, tree `9f610e54907f508561bb72e43df11953a1a0c28d`, adds only the internal ledger migration, five cases in the existing restore-jobs real-DB suite, and its bounded design contract. Remote main was rechecked as `062614f4407b3d9bffc82dae266071b8a6e5e5bd`. No enqueue or consumer is wired yet.
+
+- Dedicated PG15 fresh stream: 403 migrations; second migration run exits 0 with no new migration.
+- Focused migration cases: 5/5. Empty down/down/up/up succeeds; dropped NOT NULL/default and deferred primary-key drift are rejected; populated down fails closed and retains pending work.
+- Mutation changing populated-down rejection to a silent return: the exact refusal case RED (promise resolved); restored code passes the complete suite.
+- Initial full-suite run exposed the new fixture's planned job contaminating subsequent candidate selection. The fixture now cancels its job through the existing API in finally. Final full restore-jobs real-DB suite: 25/25, no skip.
+- Core `tsc --noEmit`, migration ESLint and `git diff --check`: PASS. The existing suite is already named in the plugin post-migrate lane and excluded from no-DB unit collection; no shared selector changed.
+- Final ledger/sheet/job fixture counts: 0. Dedicated database dropped; database prefix and backends: 0; PG stopped.
+- Logs: `/private/tmp/tm-derived-migrate.log`, `tm-derived-replay.log`, `tm-derived-target.log`, `tm-derived-mutation.log`, `tm-derived-full-final.log`, `tm-derived-tsc.log`, `tm-derived-lint.log` (session-local, not remote artifacts).
+
+Remaining: transaction-bound enqueue, bounded terminal consumer with strict error handling, live authorization/fence checks, crash/restart completion and standard startup assembly. This checkpoint is not end-to-end derived recovery proof and has not been pushed or published.
