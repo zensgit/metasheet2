@@ -28,7 +28,7 @@
 | Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | #5766（23133d0df；`useRouter()` 探测 → `inject(routerKey, null)`，告警 75→0，变异回退 27，vue-tsc 干净） | 🟡 CI |
 | Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | 分支 `feat/record-approval-progress-card`（wt-p5）；设计见 §2 | 🟡 流水线 |
 | Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | 分支 `fix/workbench-routerlink-prop-warns`（wt-p6）；他窗口领域的 62%（Integration*/TemplateAuthoring 裸 createApp 未装 ElementPlus、AttendanceView useRouter）只记录在 §5.3 | 🟡 进行中 |
-| — | 222 发布 | — | r47 / r48 / r49 已上（§3）；r50 = r49 + #5759 #5760 #5763 #5764 #5765（+#5761 若绿）计划 08:00 前上 | 🟡 |
+| — | 222 发布 | — | r47 / r48 / r49 / r50 已上并实测（§3）；r51 = r50 + #5761 + #5766（+ Q17/Q18 若绿）计划 08:00 前上 | 🟡 |
 
 ## 1. 队列与模型选择依据
 
@@ -111,6 +111,15 @@
   - 运维项（待 owner）：nginx 给 `index.html` 加 `Cache-Control: no-cache`，否则升级后用户会残留旧包直到启发式缓存过期。
 - #5755（外部上下文收敛）无法在 222 手工构造嵌入宿主重发，以单元/组件级用例（指向主检出 4 红 / 本分支绿）为证。
 
+### 3.4 r50（main `784c22dc1` = r49 + #5759 + #5760 + #5763 + #5764 + #5765），2026-09-16 01:01–01:07 上 222
+- 构建 3 min（run 34998683711），包 gitSha `784c22dc1` == origin/main；上机 wrapper 8 步全过：维护门 WIRED、F22 必存文件 + 逐文件哈希过、迁移跑完、backend `:8900/health` 第 3 次探测 OK、nginx `/api/health` 200、pm2 online；计划任务 dry-run 200（service-account 路径，未碰凭据）。
+- 标记：与 r49 逐行一致（diff 为空）；权威标记仍是 gitSha。
+- 浏览器实测（先 `about:blank` 再带 `_v=` 回来，`document.scripts` 只含 `index-Don-5Acb.js`，与构建日志一致）：
+  - `rec_bb72a248…` 抽屉「审批」面板列出 2 条已通过（AP-100004 / AP-100003），每条显示模板名「备料送审示例」（#5763 走审批中心可见性门，admin 可见）、申请人显示名、编号链接 `/approvals/<instanceId>`、送审时间；AP-100003 带「送审后数据已变更（1 个字段）」；请求 `?limit=20`（#5765 客户端透出 limit）；只有 2 条故无「还有更多」。
+  - 无送审记录 `rec_cd439e98…`：「此记录尚未送审」。
+  - 未做：#5760 嵌入宿主回显（需 iframe 宿主页，222 上没有）；#5759/#5764 是 spec-only。
+- #5761（Q11）、#5766（Q16）此时未合，留给 r51。
+
 ## 4. 过程发现与教训
 
 - 主检出本地 `main` 落后 origin/main 三周（e89f3e15e vs 28d11496b），在那里读代码与派只读诊断会得到旧代码/错行号；已快进并记忆化（读前 ff-only）。
@@ -125,7 +134,7 @@
 ### 5.1 在飞
 - #5761（Q11）：合入 main `f1cc1858b` 后 CI 重跑；绿即合并（分支含 `.github` 改动，须 zensgit 推送）。
 - Q16：`fix/record-approval-router-inject-quiet`，sonnet 单代理实现中；PR 走一轮小范围核验（无行为变化，看 spec 警告计数 0 + 变异回退非 0）。
-- r50：`claude-auto24/r50/r50-build-and-ship.sh build|ship` + `upgrade-222-r50.ps1`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。
+- r51：复制 `claude-auto24/r50/` 为 r51（脚本改 TAG/ToolsDir/标记头），`build|ship`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。
 - 本文与阶段二设计稿：分支 `docs/autonomous-24h-run-20260915`（wt-docs6），最后一并开 docs PR。
 
 ### 5.2 需要 owner 拍板 / 动手的
