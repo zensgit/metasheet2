@@ -2,6 +2,23 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Workbench Mount Main Replay
+
+Merge `79b23381f55335ffe57c9d673ad90854feaae96d`, tree
+`2fae0a90caee11655b1e1fb62160f825e4737e12`, preserves ordered parents
+`3f462512ac0918fb3809a4eb61bf072e7d99357e` and current main
+`cae1f24215e1793665cc873aca00b7af164495b3`. Incoming change is exactly two
+files: workbench child mount conditions/RouterLink and the template-save test.
+No conflicts, backend, migration or workflow changes. Template-save, workbench,
+history field-scope and sheet-trash tests pass 42/42; app-only vue-tsc and
+diff-check pass. Logs: `/private/tmp/tm-cae1-main-{focused,tsc}-20260916.log`.
+
+Before replay, published `3f462512` Plugin System run `35006776884` completed
+successfully; the connector's first page lists all 26 PR-triggered runs as
+25 success / one skipped. This is run-level evidence, not a job-count census.
+New published-head CI remains required. Earlier browser/DB and mutation evidence
+is reused under its original exact code SHA, not claimed as rerun here.
+
 ## Final Shutdown Test Union
 
 True merge `a0e11874d2d2885be626a0448d01fe8b8b4c522e` has ordered parents
