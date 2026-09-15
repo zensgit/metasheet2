@@ -929,7 +929,16 @@ import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '.
 const props = defineProps<{
   visible: boolean
   sheetId: string
-  fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
+  // `options` mirrors MetaField.options (types.ts): the backend-populated convenience shape for select
+  // fields. Pass-through here, but the rule editor READS it (#5742 resultWriteback outcome picker + its
+  // missing-option blocker), so leaving it off this declaration types the data away on the way through.
+  fields: Array<{
+    id: string
+    name: string
+    type: string
+    property?: Record<string, unknown>
+    options?: Array<{ value: string; color?: string }>
+  }>
   client?: MultitableApiClient
   views?: MetaView[]
 }>()
