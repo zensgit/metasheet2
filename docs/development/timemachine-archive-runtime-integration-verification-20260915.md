@@ -308,3 +308,12 @@ Exact code `7e451b46b14859eadd4e5dd3a015799cb22efc07`, tree `b505c7da96644c8846d
 - Fresh isolated migration PASS; final complete restore-jobs suite 39/39 PASS, zero skips, 141.75 seconds. Core tsc and diff-check PASS. Logs `/private/tmp/tm-child-drain-{migrate,target,mutation,full,final-tsc}.log` are session-local evidence, not remote artifacts.
 - Synthetic users, jobs, effects and other database backends zero. Dedicated DB dropped, exact/prefix database and backend census zero, PG stopped. No shared DB, provider or deployment change.
 - Two simultaneous connections suffice for this serial fixture, not a production capacity SLA. Child object store/key custody remain fixture-bound; standard startup/provider, timer-driven server acceptance and real browser UAT are not claimed. Remote CI must be evaluated at the published successor SHA.
+
+### Production Worker Resume
+
+Exact code `7d6d230c68720b5dc0bc679fb6a8d86fe6b09206`, tree `23c9484142ddb9b4292c6997f242d7bb6cd222b9`: two test/harness files only, 37 additions / 29 deletions.
+
+- Fresh-process resume uses `createRecoveryArchiveRestoreWorker().runOnce()` with canonical authorization and processor. Before-COMMIT case reports completed/2 chunks; after-COMMIT-before-ack case reports completed/1 chunk, both with zero sweeps. Database evidence independently proves done/5,001, incremented worker fence, unchanged block fence, exact chunk/restore revision uniqueness, terminal aggregate and writer-block release. The subsequent independent worker drain still proves all 5,001 effects and exact bounded batches.
+- Mutation replaces only production factory finalization with a no-op. Worker returns completed, but the before-COMMIT case fails because the independently queried job state is applying rather than done. Restored production file matches Git blob `15f950ed13e795f28a7d9540d494914cd046800e`.
+- Fresh isolated migration PASS; restored full suite 39/39 PASS, zero skips, 147.42 seconds; core tsc and diff-check PASS. Logs `/private/tmp/tm-worker-resume-{migrate,mutation,full,tsc}.log` are session-local, not remote CI evidence.
+- Users/jobs/effects/other backends zero, dedicated DB dropped, prefix databases/backends zero, PG stopped. No dependency installation or shared DB operation. Standard startup/provider configuration, real timer/server lifecycle and browser UAT remain outside this evidence.

@@ -22,6 +22,18 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Latest Local Checkpoint
+
+At code `7d6d230c68720b5dc0bc679fb6a8d86fe6b09206` (base main `3af707dddca48b196e168da0fab45560f88acd11`), runtime successor #5744 contains canonical per-job authority, durable derived queue, transaction-held computed input/authorization, bounded drain and migration replay repairs. Both actual SIGKILL boundaries now resume through the production worker factory, then independently drain all 5,001 derived effects in fresh processes. Full isolated restore suite 39/39 and discriminating finalization/scheduling negatives are recorded in the runtime verification MD. Earlier queue rows below are historical checkpoints, not current remote CI claims.
+
+Remaining work is not another reimplementation of these primitives:
+
+- Standard server startup still needs the explicitly selected object-store/custody composition; fixture storage is not a production choice.
+- Timer/server lifecycle and real browser-to-backend synthetic acceptance are not replaced by worker-factory/process tests.
+- Existing UI candidates #5709 and #5725 require current exact-head remote/integration verification; no duplicate UI implementation or implicit merge.
+- Nightly missing-sample attribution below is open; no threshold relaxation or production reload/restore is authorized.
+- GitHub API reads have intermittently failed with timeout/EOF. Ordinary Git pushes do not prove exact-head CI green. Keep Draft/HOLD and recheck the published head when API access returns.
+
 ### Operational attribution checkpoint (2026-09-15)
 
 Read-only GitHub evidence, not a production probe or an alert-resolution claim:
