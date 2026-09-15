@@ -305,6 +305,18 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
     expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
   })
 
+  it('does not toast a cancelled restore refresh after selecting another sheet in the same base', async () => {
+    await mountAndGetDelete()
+    const late = deferred<boolean>()
+    workbenchMock.loadSheetMeta.mockImplementationOnce(() => late.promise)
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    const pending = onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    workbenchMock.activeSheetId.value = 'another_live_sheet'
+    late.resolve(false)
+    await pending
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
   it('routes deleted-record recovery through history and refreshes only its current sheet', async () => {
     await mountAndGetDelete()
     expect(capturedHistoryAttrs?.['can-restore-records']).toBe(true)

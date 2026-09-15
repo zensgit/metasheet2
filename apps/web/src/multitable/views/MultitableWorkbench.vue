@@ -1491,7 +1491,9 @@ async function onSheetTrashRestored(payload: { baseId: string; sheetId: string }
   const ok = sheetId
     ? await workbench.loadSheetMeta(sheetId)
     : await workbench.loadBaseContext(payload.baseId, { sheetId: payload.sheetId })
-  if (!ok && payload.baseId === workbench.activeBaseId.value) showError(wb('toast.sheetRefreshFailed', isZh.value))
+  if (!ok && payload.baseId === workbench.activeBaseId.value && sheetId === workbench.activeSheetId.value) {
+    showError(wb('toast.sheetRefreshFailed', isZh.value))
+  }
 }
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
