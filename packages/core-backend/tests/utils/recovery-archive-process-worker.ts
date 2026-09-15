@@ -10,7 +10,6 @@ import type {
 } from '../../src/multitable/recovery-archive-object-store'
 import {
   claimRecoveryArchiveRestoreJob,
-  finalizeRecoveryArchiveRestoreJob,
   readRecoveryArchiveRestoreWorkerBinding,
   selectRecoveryArchiveRestoreJobCandidate,
   type RecoveryArchiveRestoreJobQuery,
@@ -40,9 +39,9 @@ export type ArchiveProcessWorkerMessage =
   | {
       kind: 'done'
       pid: number
-      claim: ArchiveProcessClaimSnapshot
-      results: Awaited<ReturnType<typeof executeRecoveryArchiveAsyncRestoreChunk>>[]
-      terminal: Awaited<ReturnType<typeof finalizeRecoveryArchiveRestoreJob>>
+      claim: Pick<ArchiveProcessClaimSnapshot, 'blockFence' | 'workerFence'>
+      outcome: RecoveryArchiveRestoreWorkerRunResult
+      terminal: { state: string; completedCount: string }
     }
   | { kind: 'error'; code: string }
 
@@ -86,7 +85,7 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     application_name: input.applicationName,
-    max: input.phase === 'drain' ? 2 : 1,
+    max: input.phase === 'drain' || input.phase === 'finish' ? 2 : 1,
   })
   let depth = 0
   let executingChunk = false
@@ -117,23 +116,25 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       client.release()
     }
   }
+  const runtime = {
+    keyCustody: createFixtureKeyCustody(input.keyId, [], input.keyMaterial),
+    objectStore,
+    transactionDepth: { currentTransactionDepth: () => depth },
+  }
+  const authorization = createRecoveryArchiveWorkerAuthorization()
   try {
     if (input.phase === 'drain') {
       const tickCount = input.drainTicks ?? 0
       if (!Number.isSafeInteger(tickCount) || tickCount < 1 || tickCount > 158) {
         throw new Error('archive_process_drain_bound_invalid')
       }
-      const authorization = createRecoveryArchiveWorkerAuthorization()
       const processDerived = createRecoveryArchiveDerivedProcessor({ query, transaction })
       let attempts = 0
       let completed = 0
       const worker = createRecoveryArchiveRestoreWorker({
         query, transaction, leaseMs: 240_000, replayHorizonMs: 0,
         workerOwnerId: input.applicationName,
-        runtime: {
-          keyCustody: createFixtureKeyCustody(input.keyId, [], input.keyMaterial), objectStore,
-          transactionDepth: { currentTransactionDepth: () => depth },
-        },
+        runtime,
         recheckAuthority: authorization.recheckAuthority,
         apply: authorization.apply,
         processDerivedWork: async work => {
@@ -167,11 +168,30 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     }
     const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
     if (candidate?.jobId !== input.jobId) throw new Error('archive_process_candidate_mismatch')
+    if (input.phase === 'finish') {
+      const worker = createRecoveryArchiveRestoreWorker({
+        query, transaction, runtime, leaseMs: 240_000, replayHorizonMs: 0,
+        workerOwnerId: input.applicationName,
+        recheckAuthority: authorization.recheckAuthority,
+        apply: authorization.apply,
+        processDerivedWork: createRecoveryArchiveDerivedProcessor({ query, transaction }),
+      })
+      const outcome = await worker.runOnce()
+      const terminal = await query(`SELECT state, completed_count::text AS completed_count,
+        block_fence::text AS block_fence, worker_fence::text AS worker_fence
+        FROM meta_recovery_archive_jobs WHERE id=$1::uuid`, [input.jobId])
+      const row = terminal.rows[0] as { state: string; completed_count: string; block_fence: string; worker_fence: string } | undefined
+      if (!row) throw new Error('archive_process_terminal_missing')
+      await send({ kind: 'done', pid: process.pid, outcome,
+        claim: { blockFence: row.block_fence, workerFence: row.worker_fence },
+        terminal: { state: row.state, completedCount: row.completed_count },
+      })
+      return
+    }
     const clock = await query("SELECT clock_timestamp() + interval '30 seconds' AS lease_until")
     const claim = await claimRecoveryArchiveRestoreJob(transaction, candidate, {
       workerOwnerId: input.applicationName,
-      leaseUntil: input.phase === 'finish'
-        ? new Date(Date.now() + 240_000) : (clock.rows[0] as { lease_until: Date }).lease_until,
+      leaseUntil: (clock.rows[0] as { lease_until: Date }).lease_until,
     })
     claimSnapshot = {
       jobId: claim.jobId, sheetId: claim.sheetId, keyId: claim.keyId,
@@ -180,13 +200,6 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       leaseUntil: claim.leaseUntil, resumeDeadline: claim.resumeDeadline,
     }
     executingChunk = true
-    const runtime = {
-      keyCustody: createFixtureKeyCustody(input.keyId, [], input.keyMaterial),
-      objectStore,
-      transactionDepth: { currentTransactionDepth: () => depth },
-    }
-    const results: Awaited<ReturnType<typeof executeRecoveryArchiveAsyncRestoreChunk>>[] = []
-    const authorization = createRecoveryArchiveWorkerAuthorization()
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const result = await executeRecoveryArchiveAsyncRestoreChunk({
         transaction,
@@ -196,11 +209,8 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
         recheckAuthority: authorization.recheckAuthority,
         apply: authorization.apply,
       })
-      results.push(result)
       if (result.kind === 'no_pending_chunk') {
-        const terminal = await finalizeRecoveryArchiveRestoreJob(transaction, claim, { replayHorizonMs: 0 })
-        await send({ kind: 'done', pid: process.pid, claim: claimSnapshot, results, terminal })
-        return
+        throw new Error('archive_process_crash_boundary_missing')
       }
     }
     throw new Error('archive_process_chunk_bound_exceeded')

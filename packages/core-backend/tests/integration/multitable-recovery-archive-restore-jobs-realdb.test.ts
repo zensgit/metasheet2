@@ -2471,7 +2471,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         restore_events: committedBeforeRestart,
       }])
 
-      let terminal: Awaited<ReturnType<typeof finalizeRecoveryArchiveRestoreJob>>
+      let terminal: { state: string; completedCount: string }
       if (processBoundary) {
         const resumed = await runArchiveProcessWorker({
           phase: 'finish', keyId: fixture.keyId, keyMaterial, jobId: accepted.id, priorClaim: crashedSnapshot,
@@ -2480,11 +2480,9 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         expect(resumed.pid).not.toBe(crashedPid)
         expect(resumed.claim.blockFence).toBe(crashedSnapshot!.blockFence)
         expect(resumed.claim.workerFence).toBe((BigInt(crashedSnapshot!.workerFence) + 1n).toString())
-        expect(resumed.results).toEqual([
-          ...(committedBeforeRestart === 0 ? [{ kind: 'committed', chunkIndex: 0, completedCount: '1' }] : []),
-          { kind: 'committed', chunkIndex: 1, completedCount: '5001' },
-          { kind: 'no_pending_chunk' },
-        ])
+        expect(resumed.outcome).toEqual({
+          kind: 'completed', swept: 0, chunks: committedBeforeRestart === 0 ? 2 : 1,
+        })
         terminal = resumed.terminal
       } else {
         await expect(executeChunk(resumedClaim!)).resolves.toEqual({
