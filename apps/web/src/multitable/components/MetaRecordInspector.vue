@@ -1335,9 +1335,29 @@ const subscriptionLoading = ref(false)
 const subscriptionError = ref('')
 let subscriptionRequestId = 0
 
-watch(() => props.record, () => {
+// Per-record state must not leak into the next row. The subscription half resets on EVERY replacement
+// (unchanged: a re-read can legitimately carry a new subscription state for the same row, so it is
+// re-fetched by the watcher below).
+//
+// The two CHILD DIALOG flags are the part that was missing. This shell is mounted UNCONDITIONALLY by
+// MultitableWorkbench.vue and NEVER unmounts (see the open/focus section's own comment above) — only
+// `visible` toggles — so a local `ref(false)` here lives for the whole workbench session. Both dialogs
+// are `v-if`-gated on `record` (plus sheetId/apiClient/capability), which means a record vanishing
+// underneath an OPEN dialog — a realtime delete, or the workbench clearing the selection, both of which
+// set `record` to null — DESTROYS the dialog element without its `@close` ever running, and the flag
+// stays `true`. Open the next record and the `v-if` is satisfied again: the dialog springs open unasked,
+// now bound to the NEXT record's id, where a single confirm would 送审 (or re-permission) a record the
+// user never chose. Reset whenever the id actually MOVES, null included.
+//
+// Deliberately NOT on every replacement: the grid hands this shell a fresh `record` object for the same
+// row after any patch/re-read, and slamming a half-filled 送审 form shut on an unrelated background
+// refresh would be its own bug. `next?.id === prev?.id` is the line between the two.
+watch(() => props.record, (next, prev) => {
   recordSubscribed.value = false
   subscriptionError.value = ''
+  if (next?.id === prev?.id) return
+  showApprovalSubmit.value = false
+  showRecordPermissions.value = false
 })
 
 watch(

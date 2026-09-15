@@ -211,8 +211,20 @@ watch(() => props.record?.id, () => {
 // invalidated either way — including while collapsed, where an edit used to be dropped permanently
 // because `loaded` stayed true and the next expand was a no-op. Only the FETCH is conditional: a
 // collapsed panel stays lazy and re-reads on its next expand.
+//
+// ARRAY OF GETTERS, not one getter returning an array. The earlier shape
+// (`() => [props.record?.version, props.refreshToken] as const`) allocated a NEW array on every
+// evaluation, and `watch` compares a getter's result with `Object.is` — two arrays holding the same
+// two numbers are never `Object.is`-equal, so the callback fired on EVERY re-evaluation of the source,
+// i.e. every time the workbench handed this panel a fresh `record` object. The grid replaces
+// `record` wholesale on any page reload / re-read, version unchanged, so an OPEN panel issued a
+// redundant GET each time — a request storm driven by nothing the user changed. With the multi-source
+// form Vue compares PER ELEMENT, so an equal-version replacement is a no-op and only a real
+// version/token move reaches the body. A record SWITCH is not this watcher's job either way: the
+// `props.record?.id` watcher above already calls `resetState()` (which clears `loaded`), so a
+// same-version switch to a different record still invalidates. Semantics below are unchanged.
 watch(
-  () => [props.record?.version, props.refreshToken] as const,
+  [() => props.record?.version, () => props.refreshToken],
   () => {
     loaded.value = false
     if (!expanded.value) return

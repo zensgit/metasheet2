@@ -21,6 +21,9 @@
  *     changed field) renders the COUNT-FREE notice, never "0 个字段".
  *  8. The two submission-only statuses ('creating'/'failed') render localized copy rather than the raw
  *     English token StatusTag's neutral fallback would print; a failed row explains itself by CODE.
+ *  9. The refresh watcher compares its two sources PER ELEMENT: an id-equal, version-equal `record`
+ *     replacement (what an ordinary grid re-read hands down) fires NO request while expanded.
+ *     Collapse the source back into one getter returning an array ⇒ red.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
@@ -266,6 +269,35 @@ describe('MetaRecordApprovalPanel — refresh signals', () => {
     // collapsed: a further version bump must NOT fetch
     await expand(container)
     state.record = { ...(RECORD as object), version: 5 } as unknown as MetaRecord
+    await flushUi(6)
+    expect(client!.listRecordApprovals).toHaveBeenCalledTimes(2)
+  })
+
+  it('an equal-version record replacement (an ordinary grid re-read) does NOT re-fetch while OPEN', async () => {
+    // Regression (阶段二 前端裁判 item 2): the refresh watcher's source used to be ONE getter returning a
+    // fresh array — `() => [props.record?.version, props.refreshToken] as const`. `watch` compares a
+    // getter's RESULT with Object.is, and two arrays holding the same two numbers are never Object.is
+    // equal, so the callback fired on every re-evaluation, i.e. every time MultitableWorkbench handed
+    // this panel a NEW `record` object for the SAME row at the SAME version — which any grid page
+    // reload / unrelated re-read does. An expanded panel therefore issued a GET per reload with nothing
+    // to show for it. Restore the single-getter source and the first `toHaveBeenCalledTimes(1)` below
+    // goes red (2 calls). The multi-source form compares PER ELEMENT.
+    const { container, client, state } = mountPanel()
+    await flushUi()
+    await expand(container)
+    expect(client!.listRecordApprovals).toHaveBeenCalledTimes(1)
+    expect(toggle(container)!.getAttribute('aria-expanded')).toBe('true')
+
+    // Same id, same version, brand-new object identity — exactly what a re-read hands down.
+    state.record = { id: 'rec_1', version: 3, data: { fld_title: 'Alpha' } } as unknown as MetaRecord
+    await flushUi(6)
+    expect(client!.listRecordApprovals).toHaveBeenCalledTimes(1)
+    // Still open, still showing the rows it already had — the cache was not invalidated either.
+    expect(toggle(container)!.getAttribute('aria-expanded')).toBe('true')
+    expect(entries(container)).toHaveLength(2)
+
+    // A REAL change still re-reads, exactly once (the fix narrows the trigger, it does not remove it).
+    state.record = { id: 'rec_1', version: 4, data: { fld_title: 'Beta' } } as unknown as MetaRecord
     await flushUi(6)
     expect(client!.listRecordApprovals).toHaveBeenCalledTimes(2)
   })

@@ -1084,8 +1084,21 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # matches exactly ONE file under apps/web (verified by a full non-node_modules path sweep). Verified green in
 # isolation (`npx vitest run multitable-record-approval-submit --reporter=dot` -> 25/25;
 # `npx vitest run multitable-record-approval-panel --reporter=dot` -> 14/14) and in this batch before wiring.
-# Two-point discipline (header of this file): the same two tokens + path triggers are added to
-# multitable-web-guard.yml.
+# Two-point discipline (header of this file), stated plainly: these two tokens
+# (`multitable-record-approval-submit`, `multitable-record-approval-panel`) and the four path triggers
+# they would need are NOT mirrored into .github/workflows/multitable-web-guard.yml — not yet, and not by
+# this branch: the push token that carried it has no `workflow` scope, so no change under .github/ could
+# land with it at all. The four paths a mirror still owes that guard (both `on:` blocks, which carry
+# separate copies of the list) are:
+#   * apps/web/src/multitable/components/MetaRecordApprovalSubmitDialog.vue
+#   * apps/web/src/multitable/components/MetaRecordApprovalPanel.vue
+#   * apps/web/tests/multitable-record-approval-submit.spec.ts
+#   * apps/web/tests/multitable-record-approval-panel.spec.ts
+# Same shape as the App Center note further up in this file (`Two-point discipline, stated plainly: these
+# tokens were NOT mirrored into approval-web-guard / multitable-web-guard`): this script IS the always-on
+# required gate (web-tests.yml:77) and it runs both tokens in the batch below, so the two new specs DO
+# have a referee on every PR — what is missing is only the path-filtered guard's second opinion. Adding
+# it requires a workflow-scoped token (follow-up).
 # Attendance import token/org binding: both specs are also listed in attendance-web-guard.yml;
 # keep their execution explicit in the always-on required lane.
 npx vitest run attendance-import-preview-regression.spec.ts useAttendanceAdminImportWorkflow.spec.ts --reporter=dot || exit $?

@@ -30,6 +30,10 @@
  *  9. A coded refusal renders LOCALIZED copy, not the route's fixed English sentence.
  * 10. The FROZEN shell re-emits `approval-submitted` (the prop half was pinned, the emit half was not).
  * 11. `aria-modal="true"` is backed by real focus/Esc behaviour.
+ * 12. The inspector NEVER unmounts (MultitableWorkbench mounts it unconditionally), so the local
+ *     `showApprovalSubmit` flag outlives any single record: a record that disappears under an OPEN
+ *     dialog must not leave the flag set and auto-open the dialog against the NEXT record's id.
+ *     Drop the `showApprovalSubmit.value = false` reset in the `props.record` watcher ⇒ red.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App } from 'vue'
@@ -698,5 +702,92 @@ describe('reactivity of the capability prop', () => {
     canSubmitApproval.value = true
     await flushUi()
     expect(submitApprovalItem()).not.toBeNull()
+  })
+})
+
+describe('选中记录消失时的对话框状态 / dialog state across a record switch', () => {
+  it('a record that vanishes while the 送审 dialog is OPEN does not re-open it against the NEXT record', async () => {
+    // Why this is not theoretical: MultitableWorkbench.vue mounts this shell with NO `v-if` at the call
+    // site (only the shell's own root carries `v-if="visible"`), so the instance — and the local
+    // `showApprovalSubmit` ref — lives for the whole workbench session. The dialog itself IS `v-if`-gated
+    // on `record`, so a realtime delete (or the workbench clearing the selection) sets `record` to null
+    // and DESTROYS the dialog without its `@close` ever running. The flag stays `true`; the next record
+    // re-satisfies the `v-if` and the dialog reappears unasked, now carrying `:record-id="record.id"` of a
+    // record the user never chose — one confirm away from 送审 on the wrong row.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const record = ref<MetaRecord | null>(RECORD)
+    const client = fakeApiClient()
+    const app = createApp({
+      render() {
+        return h(MetaRecordInspector, {
+          visible: true,
+          record: record.value,
+          fields: FIELDS,
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          sheetId: 'sheet_1',
+          apiClient: client as never,
+          canSubmitApproval: true,
+        })
+      },
+    })
+    app.mount(container)
+    mountedApps.push(app)
+    await flushUi()
+
+    await openDialog(container)
+    expect(dialog()).not.toBeNull()
+
+    // The record disappears underneath the open dialog.
+    record.value = null
+    await flushUi(6)
+    expect(dialog()).toBeNull()
+
+    // The next record arrives. Without the reset in the `props.record` watcher the dialog is back.
+    record.value = { id: 'rec_2', version: 1, data: { fld_title: 'Beta' } } as unknown as MetaRecord
+    await flushUi(6)
+    expect(dialog()).toBeNull()
+    expect(templateSelect()).toBeNull()
+
+    // The entry is not broken by the reset — opening it deliberately for rec_2 still works.
+    await openDialog(container)
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('an id-EQUAL record replacement (a background re-read) leaves an open dialog alone', async () => {
+    // The other half of the line: the grid hands the shell a fresh `record` object for the SAME row
+    // after any patch/re-read. Resetting on every replacement (rather than on an id change) would slam
+    // a half-filled 送审 form shut on an unrelated background refresh.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const record = ref<MetaRecord | null>(RECORD)
+    const client = fakeApiClient()
+    const app = createApp({
+      render() {
+        return h(MetaRecordInspector, {
+          visible: true,
+          record: record.value,
+          fields: FIELDS,
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          sheetId: 'sheet_1',
+          apiClient: client as never,
+          canSubmitApproval: true,
+        })
+      },
+    })
+    app.mount(container)
+    mountedApps.push(app)
+    await flushUi()
+
+    await openDialog(container)
+    expect(dialog()).not.toBeNull()
+
+    record.value = { id: 'rec_1', version: 4, data: { fld_title: 'Alpha 2' } } as unknown as MetaRecord
+    await flushUi(6)
+    expect(dialog()).not.toBeNull()
   })
 })
