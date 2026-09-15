@@ -1303,6 +1303,7 @@ export interface MetaConfigRevision {
   changedKeys: string[]
   batchId: string | null
   actorId: string | null
+  actorName?: string | null
   createdAt: string
 }
 
