@@ -10,6 +10,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { hash } from 'bcryptjs'
 import { chromium, expect } from '@playwright/test'
 
+const repo = fileURLToPath(new URL('../../../', import.meta.url))
+const web = resolve(repo, 'apps/web')
+const output = resolve(repo, 'artifacts/timemachine-workbench')
+const runId = randomUUID()
+await mkdir(output, { recursive: true })
+// A failed admission or interrupted rerun must never leave a previous PASS current.
+await writeFile(resolve(output, 'evidence.json'), `${JSON.stringify({ runId, result: 'RUNNING' })}\n`)
 const database = new URL(process.env.DATABASE_URL ?? 'http://invalid')
 assert.equal(process.env.NODE_ENV, 'test', 'NODE_ENV=test required')
 assert.equal(database.protocol, 'postgresql:')
@@ -17,10 +24,6 @@ assert.equal(database.hostname, '127.0.0.1')
 assert.match(database.pathname, /^\/tm_browser_acceptance_[a-z0-9_]+$/)
 assert.ok(database.port && !['5432', '5433', '5435'].includes(database.port), 'Dedicated PG port required')
 
-const repo = fileURLToPath(new URL('../../../', import.meta.url))
-const web = resolve(repo, 'apps/web')
-const output = resolve(repo, 'artifacts/timemachine-workbench')
-await mkdir(output, { recursive: true })
 const configPath = resolve(output, 'isolated-config.json')
 await writeFile(configPath, '{}\n')
 // Do not inherit customer endpoints, credentials, flags, Redis, or a repository config file.
@@ -60,7 +63,8 @@ const { messageBus } = await import('../src/integration/messaging/message-bus')
 const { getSafetyGuard } = await import('../src/guards/SafetyGuard')
 const { destroyIdempotency } = await import('../src/guards/idempotency')
 const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, params)
-const app = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+let app: InstanceType<typeof MetaSheetServer> | undefined
+let databaseAdmitted = false
 const webRequire = createRequire(resolve(web, 'package.json'))
 const { createServer } = await import(pathToFileURL(webRequire.resolve('vite')).href)
 let vite: Awaited<ReturnType<typeof createServer>> | undefined
@@ -76,7 +80,7 @@ const records = [`tm_workbench_row1_${suffix}`, `tm_workbench_row2_${suffix}`]
 const password = randomBytes(24).toString('hex')
 const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim()
 const evidence: Record<string, unknown> = {
-  fixture: 'synthetic-only', sourceHead: git('rev-parse', 'HEAD'), sourceTree: git('rev-parse', 'HEAD^{tree}'),
+  runId, result: 'RUNNING', fixture: 'synthetic-only', sourceHead: git('rev-parse', 'HEAD'), sourceTree: git('rev-parse', 'HEAD^{tree}'),
   worktreeClean: git('status', '--porcelain') === '',
   scriptSha256: createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex'),
   backend: 'MetaSheetServer.start()', frontend: 'index.html -> src/main.ts -> appRoutes', cases: [],
@@ -91,7 +95,19 @@ const snapshot = async () => ({
 
 try {
   assert.equal((await q('SELECT current_database() AS name')).rows[0].name, database.pathname.slice(1))
+  assert.equal((await q(`SELECT pg_get_userbyid(datdba)=current_user AS owned
+    FROM pg_database WHERE datname=current_database()`)).rows[0].owned, true, 'DATABASE_OWNER_REQUIRED')
+  assert.equal((await q(`SELECT count(*)::int AS n FROM pg_stat_activity
+    WHERE datname=current_database() AND pid<>pg_backend_pid()`)).rows[0].n, 0, 'EXCLUSIVE_DATABASE_REQUIRED')
   assert.equal((await q('SELECT count(*)::int AS n FROM directory_integrations')).rows[0].n, 0)
+  assert.equal((await q("SELECT count(*)::int AS n FROM meta_bases WHERE id<>'base_legacy' OR owner_id IS NOT NULL OR workspace_id IS NOT NULL")).rows[0].n, 0, 'EMPTY_DATABASE_REQUIRED')
+  for (const table of ['users', 'user_sessions', 'meta_sheets', 'meta_fields', 'meta_records', 'meta_views',
+    'meta_record_revisions', 'meta_records_trash', 'meta_config_revisions', 'meta_field_value_tombstones', 'meta_link_tombstones']) {
+    assert.equal((await q(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n, 0, 'EMPTY_DATABASE_REQUIRED')
+  }
+  databaseAdmitted = true
+  evidence.databaseAdmission = 'owner/exclusive/empty'
+  app = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
   await q(`INSERT INTO users (id,email,name,password_hash,role,is_active,activation_status,local_password_set,must_change_password)
     VALUES ($1,$2,'Recovery Tester',$3,'admin',true,'activated',true,false)`,
   [userId, `${userId}@example.test`, await hash(password, 10)])
@@ -285,17 +301,22 @@ try {
 } finally {
   delete process.env.MULTITABLE_ENABLE_CONFIG_UNDELETE
   delete process.env.MULTITABLE_TOMBSTONE_CAPTURE_ENABLED
-  try {
-    await browser?.close()
-    await vite?.close()
+  const cleanupErrors: string[] = []
+  const clean = async (name: string, operation: () => Promise<unknown> | void) => {
+    try { await operation() } catch { cleanupErrors.push(name) }
+  }
+  await clean('browser', () => browser?.close())
+  await clean('vite', () => vite?.close())
+  if (databaseAdmitted) {
     for (const table of ['meta_record_revisions', 'meta_records_trash', 'meta_config_revisions', 'meta_field_value_tombstones', 'meta_link_tombstones']) {
-      await q(`DELETE FROM ${table} WHERE sheet_id=$1`, [sheetId])
+      await clean(table, () => q(`DELETE FROM ${table} WHERE sheet_id=$1`, [sheetId]))
     }
-    await q('DELETE FROM meta_sheets WHERE base_id=$1', [baseId])
-    await q('DELETE FROM meta_bases WHERE id=$1', [baseId])
-    await q('DELETE FROM user_sessions WHERE user_id=$1', [userId])
-    await q('DELETE FROM users WHERE id=$1', [userId])
-    const residue = (await q(`SELECT
+    await clean('sheets', () => q('DELETE FROM meta_sheets WHERE base_id=$1', [baseId]))
+    await clean('bases', () => q('DELETE FROM meta_bases WHERE id=$1', [baseId]))
+    await clean('sessions', () => q('DELETE FROM user_sessions WHERE user_id=$1', [userId]))
+    await clean('users', () => q('DELETE FROM users WHERE id=$1', [userId]))
+    await clean('residue', async () => {
+      const residue = (await q(`SELECT
       (SELECT count(*)::int FROM meta_bases WHERE id=$1) AS bases,
       (SELECT count(*)::int FROM meta_sheets WHERE base_id=$1) AS sheets,
       (SELECT count(*)::int FROM users WHERE id=$2) AS users,
@@ -308,22 +329,25 @@ try {
       (SELECT count(*)::int FROM meta_config_revisions WHERE sheet_id=ANY($3::text[])) AS config_revisions,
       (SELECT count(*)::int FROM meta_field_value_tombstones WHERE sheet_id=ANY($3::text[])) AS value_tombstones,
       (SELECT count(*)::int FROM meta_link_tombstones WHERE sheet_id=ANY($3::text[])) AS link_tombstones`,
-    [baseId, userId, [sheetId, peerSheetId]])).rows[0]
-    assert.deepEqual(residue, {
-      bases: 0, sheets: 0, users: 0, sessions: 0, fields: 0, records: 0, views: 0,
-      record_revisions: 0, record_trash: 0, config_revisions: 0, value_tombstones: 0, link_tombstones: 0,
+      [baseId, userId, [sheetId, peerSheetId]])).rows[0]
+      assert.deepEqual(residue, {
+        bases: 0, sheets: 0, users: 0, sessions: 0, fields: 0, records: 0, views: 0,
+        record_revisions: 0, record_trash: 0, config_revisions: 0, value_tombstones: 0, link_tombstones: 0,
+      })
+      evidence.fixtureResidue = residue
     })
-    evidence.fixtureResidue = residue
-  } finally {
-    try {
-      await app.stop('TM_WORKBENCH_ACCEPTANCE')
-      assert.equal(app.getAddress(), null)
-      // These process-local singletons are initialized by the standard server entrypoint.
-      getSafetyGuard().destroy()
-      await destroyIdempotency()
-      await messageBus.shutdown()
-    } finally { Socket.prototype.connect = originalConnect }
   }
+  await clean('server', () => app?.stop('TM_WORKBENCH_ACCEPTANCE'))
+  await clean('server-address', () => { if (app) assert.equal(app.getAddress(), null) })
+  // These process-local singletons are initialized by the standard server entrypoint.
+  await clean('safety-guard', () => { if (app) getSafetyGuard().destroy() })
+  await clean('idempotency', () => destroyIdempotency())
+  await clean('message-bus', () => messageBus.shutdown())
+  await clean('database-pool', () => { if (!app || cleanupErrors.includes('server')) return poolManager.close() })
+  Socket.prototype.connect = originalConnect
+  evidence.cleanupErrors = cleanupErrors
+  if (evidence.result !== 'PASS' || cleanupErrors.length) evidence.result = 'FAIL'
+  await writeFile(resolve(output, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
+  assert.deepEqual(cleanupErrors, [], 'CLEANUP_FAILED')
 }
-await writeFile(resolve(output, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
 console.log(`TM_WORKBENCH_PASS ${cases.length}`)

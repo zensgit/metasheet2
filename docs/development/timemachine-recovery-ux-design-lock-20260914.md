@@ -11,6 +11,37 @@ deployment, production or real customer data.
 
 ## Contract
 
+### Full Workbench Acceptance
+
+The separate manual script
+`packages/core-backend/scripts/verify-timemachine-workbench.mts` must start the
+standard `MetaSheetServer`, the real Web Vite config and `index.html`/`src/main.ts`,
+and enter `MultitableWorkbench` through `LoginView` and its actual router. No
+component harness, synthetic JWT, fulfilled API interception or customer endpoint
+may substitute for that path. Permit only the owned loopback database/API/Web
+ports; browser request failures, non-success API responses and page errors fail
+the gate. Configuration comes from a generated empty file and a scrubbed process
+environment; plugins and optional external schedulers remain disabled.
+Before creating the application or any fixture, require database ownership by the
+connected role, no other database sessions and empty user/recovery data families;
+only the migration-created unowned `base_legacy` base is allowed.
+
+Perform retained-table deletion/recovery through navigation and the recycle bin,
+record deletion/recovery through the grid and History, and column deletion/recovery
+through Fields and Configuration History. Require independent database equality,
+explicit restore confirmation, readable deletion details/actor/viewer-local time,
+and a refreshed visible grid. A disabled restore-refresh event must make the
+restored-row visibility assertion fail even if the database write succeeded.
+
+Cleanup must close the browser, Vite, server/pool and its process-local guard and
+messaging singletons, then exit naturally. Census all owned base/sheet/field/row/
+view/session/user/revision/trash/tombstone families and independently drop the
+dedicated database. Attempt every cleanup even when a sibling fails and fail the
+run on any cleanup error. Invalidate old PASS evidence to a new RUNNING run id at
+entry; publish PASS only after the full run and all cleanup pass. This is desktop synthetic acceptance, not a production
+shutdown, archive-provider, mobile, tenant-UAT or enablement claim. It supplements,
+not replaces, the negative and second-deletion-cycle component gates below.
+
 ### Authenticated Browser Acceptance
 
 The manual harness `packages/core-backend/scripts/verify-timemachine-browser.mts`

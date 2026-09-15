@@ -1,5 +1,69 @@
 # Time Machine Recovery UX Verification
 
+## Full Workbench Recovery Gate 2026-09-15
+
+Code `4cf90b3ac1c1211b04f23260046c79db530f1081`, tree
+`9eabd69c128615b94dc54035ee436fc0630f3b03`, parent
+`321761ca35fca2cec113acc7ba6fa1bbcd836daa`. One new manual script,
+`packages/core-backend/scripts/verify-timemachine-workbench.mts`, 329 lines.
+Production source, migrations, workflows and permissions are unchanged. This
+design/report pair is a documentation-only child; publication remains Draft #5709.
+
+Clean exact-code-head run: 6 named cases PASS, process exit 0. The actual
+`MetaSheetServer.start()` and Web application (`index.html`, `src/main.ts`, Vite
+config, router and LoginView) use canonical password login and a persisted session.
+The browser enters the complete workbench, not a component-only harness. All data
+is synthetic; requests go only to the owned loopback API/Web/database ports.
+No API response is fulfilled or stubbed; API failures and browser errors fail.
+
+- Workbench login/navigation loads both persisted rows without changing them.
+- The actual toolbar opens History.
+- Navigation deletes a whole retained table without deleting its fields/rows/views.
+- The recycle-bin preview does not restore early; explicit confirmation restores
+  that table and navigation, with exact retained fields/rows/views.
+- Grid deletion shows the actor name and both deleted field names/values in History;
+  deleted-record confirmation restores that row's full data while its peer is
+  unchanged. The restored row must immediately reappear in the visible grid.
+- Fields deletes a column; Configuration History shows its name, readable Field
+  order, authenticated actor and browser America/New_York timestamp checked against
+  PostgreSQL. Typed confirmation restores the definition/order and both captured
+  values, with the restored column visible in the grid. Capture is off at restore.
+
+Mutation: disconnect `HistoryCenterModal`'s workbench `restored` event. The actual
+restore endpoint still succeeds and the database row is restored, but the browser
+assertion fails because that row is absent from the grid. The production file was
+restored byte-for-byte (SHA-256
+`0cddbd2302a6aeb23f439a48aa1e0f988c498ad733fce3631c62bd74dd10dd48`),
+then the clean exact-code-head six-case run passed.
+
+Fresh independent database: 402 migrations, second replay no-op. Final fixture
+census: 12 families all zero (bases, sheets, users, sessions, fields, records,
+views, record/config revisions, record trash, value/link tombstones). Database
+connections zero before drop; exact-prefix database/backend residue zero after
+drop. Owned PostgreSQL stopped. No shared/customer database was used.
+
+Earlier diagnostic runs exposed process-global SafetyGuard/idempotency/message-bus
+timers that standard server stop alone does not release. This manual script calls
+their existing cleanup APIs; it does not modify server shutdown. Hung diagnostic
+runs were terminated and are NOT terminal passes. The unchanged server's uncanceled
+10-second shutdown-race timer still logs a timeout warning; the final script waits
+through it and exits naturally with 0, without forcing success via process.exit.
+
+Script/core-dependency standalone typecheck PASS; scoped diff-check PASS.
+No full required-web rerun or new required-CI enrollment is claimed. This remains
+a manual acceptance script; published-head CI is a separate gate. Local result and
+desktop screenshots are under `artifacts/timemachine-workbench/`; the result binds
+the clean code head/tree and script SHA-256
+`538c39f85f9913e3909f6fe427c99b25c6211a8a7521d06b58ae26c67037be93`.
+Logs: `/private/tmp/tm-workbench-{fresh,replay,exact,final-typecheck}.log`,
+`/private/tmp/tm-workbench-mutation-refresh.log`.
+
+Current boundary: full desktop workbench retained-table/row/column recovery is
+locally verified. This supersedes only the older sections' open full-workbench
+gate; their SHA-scoped component evidence remains intact. Archive provider/startup,
+mobile workbench, real-tenant UAT and production remain separate. No Ready, merge,
+persistent flag, dispatch or deployment action.
+
 ## Authenticated Configuration Restore Gate 2026-09-15
 
 Code `e8cadc2989b38d9d36975d22ff7451dbe2d3843a`, tree
