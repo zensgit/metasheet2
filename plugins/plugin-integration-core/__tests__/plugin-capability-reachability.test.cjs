@@ -160,6 +160,11 @@ const CAPABILITY_ENTRY_POINTS = Object.freeze([
     exportName: 'runStockPreparationSourcePreflight',
     why: 'the whole source preflight: measures the customer source`s reachability, data and TOPOLOGY. With no caller, a deployment configured for the wrong bridge goes on expanding zero rows and calling it success — the failure the module was written for',
   },
+  {
+    module: 'lib/stock-preparation-mvp-provisioning.cjs',
+    exportName: 'repairStockPreparationMvpTargets',
+    why: 'the ONLY additive column repair for a drifted MVP snapshot table. Until the #5721 终审 route it had no production caller at all, so the mvp-persist probe`s 422 TARGET_SCHEMA_INCOMPLETE pointed at a dead end (the shape #5118 had)',
+  },
   // NOT declared here, deliberately: `assertSourcePreflightValuesFree`. This guard asks whether some
   // OTHER production file names a capability, and that self-check has exactly one production caller —
   // the preflight itself, in the same module, on every run before it returns. Declaring it would make

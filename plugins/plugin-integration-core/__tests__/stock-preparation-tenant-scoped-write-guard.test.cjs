@@ -113,6 +113,7 @@ const STRUCTURE_WRITE_HANDLERS = [
   'stockPreparationSandboxTargetEnsure',
   'stockPreparationOptionsSync',
   'stockPreparationMvpEnsure',
+  'stockPreparationMvpRepair',
   'stockPreparationMvpOptionsSync',
   'fieldOptionsSync',
 ]
@@ -178,8 +179,9 @@ for (const [readHandler, sharedNormalizer] of [
   })
 }
 
-// GHSA-m6qv step-1 follow-up (owner decision A): the 3 WRITE-path normalizers must reject an explicit
-// request baseId (fail-closed, third steering axis) and must NOT forward a request baseId to provisioning.
+// GHSA-m6qv step-1 follow-up (owner decision A): the WRITE-path normalizers (the original three plus the
+// #5721 终审 MVP repair one) must reject an explicit request baseId (fail-closed, third steering axis) and
+// must NOT forward a request baseId to provisioning.
 function writeVariantBody(src, name) {
   const startMarker = `function ${name}(req, rawInput = {}) {`
   const start = src.indexOf(startMarker)
@@ -187,7 +189,7 @@ function writeVariantBody(src, name) {
   const end = src.indexOf('\n}', start)
   return src.slice(start, end).replace(/\/\/[^\n]*/g, '')  // strip comments — guards reason about code, not prose
 }
-for (const name of ['stockPreparationTargetWriteInput', 'stockPreparationSandboxTargetWriteInput', 'stockPreparationMvpTargetWriteInput']) {
+for (const name of ['stockPreparationTargetWriteInput', 'stockPreparationSandboxTargetWriteInput', 'stockPreparationMvpTargetWriteInput', 'stockPreparationMvpRepairInput']) {
   const body = writeVariantBody(ROUTES_SRC, name)
   check(`${name}: rejects an explicit request baseId (assertNoRequestBaseId)`, () => {
     assert.equal(body.includes('assertNoRequestBaseId(rawInput)'), true, `${name} must call assertNoRequestBaseId(rawInput) before building the input`)

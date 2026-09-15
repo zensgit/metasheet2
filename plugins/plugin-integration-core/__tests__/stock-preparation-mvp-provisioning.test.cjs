@@ -680,6 +680,8 @@ async function main() {
     const mapTable = repaired.tables.find((t) => t.objectId === MAP)
     assert.equal(mapTable.mode, 'mvp_repaired')
     assert.equal(mapTable.addedFieldCount, 1)
+    assert.deepEqual(mapTable.addedFieldIds, ['plmDrawingNo'], 'the LOGICAL id that was added')
+    assert.equal(mapTable.addedFieldCount, mapTable.addedFieldIds.length, 'ONE 口径: count === ids.length')
     assert.equal(calls.ensureMissingObjectFields.length, 1, 'repair goes through the additive-only primitive')
     assert.equal(repaired.evidence.repairedTableCount, 1)
     assertValuesFree(repaired.evidence, 'repair evidence')
@@ -794,6 +796,48 @@ async function main() {
       StockPreparationTargetProvisioningError,
       'REPAIR_MUTATED_EXISTING_FIELD',
     )
+
+    // (j) 反驳 r1: an UNREGISTERED object — the host's tx surface throws its status-less
+    //     MultitableObjectScopeError whose message names the project id — is refused TYPED
+    //     (409 MVP_REPAIR_SCOPE_UNAVAILABLE) and VALUES-FREE (no project id anywhere), with zero
+    //     additive writes. Readiness degrades this error; repair must not (it would write through the
+    //     compute-only map), and it must not escape as an opaque 500 that echoes the project id.
+    for (const hostMethod of ['resolveExistingObjectFieldIds', 'readObjectFieldsContent', 'ensureMissingObjectFields']) {
+      const scopeCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+      scopeCtx.context.api.multitable.provisioning[hostMethod] = async (input) => {
+        throw Object.assign(
+          new Error(`Plugin integration-core cannot claim multitable object ${input.projectId}/${input.objectId}; owned by unregistered`),
+          { name: 'MultitableObjectScopeError', code: 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN' },
+        )
+      }
+      const refused = await rejectsWith(
+        () => repairStockPreparationMvpTargets({ context: scopeCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] }),
+        StockPreparationTargetProvisioningError,
+        'MVP_REPAIR_SCOPE_UNAVAILABLE',
+      )
+      assert.equal(refused.status, 409, `(j) ${hostMethod}: carries its own status`)
+      assert.deepEqual(refused.details, { objectId: MAP, hostMethod }, `(j) ${hostMethod}: details name the template objectId and the refusing method only`)
+      assertValuesFree({ message: refused.message, details: refused.details }, `(j) ${hostMethod} refusal`, [LEAKY_PROJECT_ID, 'tenant_leaky', 'cannot claim'])
+      assert.equal(scopeCtx.calls.ensureMissingObjectFields.length, 0, `(j) ${hostMethod}: no additive write completed on the host`)
+    }
+
+    // (k) 反驳 r1: ONE 口径 for count / ids / mode. A host that heals the column but UNDER-REPORTS
+    //     (neither `addedFieldIds` nor `skippedExistingFieldIds` name it) used to yield the
+    //     self-contradicting `mvp_already_ready` + addedFieldCount 0 + addedFieldIds ['plmDrawingNo'].
+    //     The re-verify proves the column present; count, ids and mode now all say "repaired".
+    const underCtx = createContext({ existingObjectIds: ALL_OBJECT_IDS.slice(), missingFieldsByObject: { [MAP]: ['plmDrawingNo'] } })
+    const honestEnsure = underCtx.context.api.multitable.provisioning.ensureMissingObjectFields
+    underCtx.context.api.multitable.provisioning.ensureMissingObjectFields = async function (input) {
+      await honestEnsure.call(this, input)
+      return { addedFieldIds: [], skippedExistingFieldIds: [] }
+    }
+    const under = await repairStockPreparationMvpTargets({ context: underCtx.context, projectId: LEAKY_PROJECT_ID, permission: 'admin', objectIds: [MAP] })
+    assert.deepEqual(
+      { mode: under.tables[0].mode, repaired: under.tables[0].repaired, addedFieldCount: under.tables[0].addedFieldCount, addedFieldIds: under.tables[0].addedFieldIds },
+      { mode: 'mvp_repaired', repaired: true, addedFieldCount: 1, addedFieldIds: ['plmDrawingNo'] },
+      '(k) count / ids / mode agree',
+    )
+    assert.equal(under.evidence.repairedTableCount, 1)
   }
 
   console.log('stock-preparation-mvp-provisioning.test.cjs OK')

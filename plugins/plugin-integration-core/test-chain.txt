@@ -223,6 +223,8 @@ node __tests__/stock-preparation-department-fields-and-write-scoping.test.cjs
 node __tests__/stock-preparation-project-board.test.cjs
 node __tests__/stock-preparation-operator-pull-gate.test.cjs
 node __tests__/stock-preparation-dry-run-target-field-probe-routes.test.cjs
+node __tests__/stock-preparation-mvp-persist-target-field-probe-routes.test.cjs
+node __tests__/stock-preparation-mvp-repair-routes.test.cjs
 node __tests__/stock-preparation-write-scope-reconcile-bounds.test.cjs
 
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---

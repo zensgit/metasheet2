@@ -30,12 +30,16 @@
 //       never the driver's text (反驳 r1 minor).
 //   (k) apply refuses BEFORE the single-use token is consumed: the same token applies once the columns
 //       are back (反驳 r1 minor).
+//   (l) a derivation that answers anything but a string - a Promise, i.e. the day the host makes
+//       `getObjectSheetId` async - is a values-free 503, never a silent skip of the whole probe; the
+//       ABSENCE answers (undefined/null/blank) keep the degrade (i) pins (#5719 终审 non-blocking item).
 //
 // MUTATIONS this suite is calibrated against (run in-memory by the implementer's mutation runner, never
 // on disk): M1 probe call removed => (a)(e) red; M2 probe reads the fieldIdMap shape instead of the host
 // => (a) red; M3 refuse in every mode / on old hosts => (c)(d) red; M4 details carry values => (f) red;
 // M5 probe moved after the source read => (a)'s zero-read assertions red; M6 sheet-identity gate removed
-// => (i) red; M7 apply's pre-token probe removed => (k) red; M8 host failure rethrown raw => (j) red.
+// => (i) red; M7 apply's pre-token probe removed => (k) red; M8 host failure rethrown raw => (j) red;
+// M9 the string assertion on the derivation removed => (l) red (a Promise silently turns the probe off).
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -584,6 +588,77 @@ async function jAHostFailureIsAValuesFree503() {
   assert.equal(tokenStore.map.size, 0, '(j) zero tokens minted')
 }
 
+// ── (l) a derivation that does not answer a string is a 503, not a silent skip ────────────
+//
+// `optionalString` in the plan module accepts nothing but a string, so the day a host makes
+// `getObjectSheetId` async its Promise normalises to null and the sheet-identity gate (i) pins reads it
+// as "not the bound sheet" - the probe turns ITSELF off for that entire install and nothing on the
+// response, in the log or in this suite says so. That is fail-open by accident, which is the failure
+// this probe exists to remove. So the contract is asserted: a value the probe cannot compare is refused
+// through the same values-free 503 a failed `meta_fields` read takes (j), while the ABSENCE answers keep
+// the degrade they always had - an absent id is a fact about the binding, a Promise is not.
+
+async function lANonStringDerivationIsRefusedInsteadOfSilentlySkipped() {
+  const expected = await baseline()
+  // `derivedSheetId` cannot carry these (a destructuring default would swallow `undefined`), so the
+  // derivation is replaced on the fake directly, recording the call the same way the fake does.
+  const hostAnswering = (value, { missing = MISSING_FIVE } = {}) => {
+    const host = createProvisioning({ missing })
+    host.provisioning.getObjectSheetId = (projectId, objectId) => {
+      host.calls.push(['getObjectSheetId', { projectId, objectId }])
+      return value
+    }
+    return host
+  }
+  for (const [label, derived] of [
+    ['an async host (Promise)', Promise.resolve(SHEET_ID)],
+    ['a thenable', { then(resolve) { resolve(SHEET_ID) } }],
+    ['a non-string id', 12345],
+  ]) {
+    const host = hostAnswering(derived)
+    const source = createSourceAdapter()
+    const records = createRecordsApi()
+    const tokenStore = createMemoryStore()
+    let caught = null
+    try {
+      await dryRunStockPreparationAction(dryRunInput({
+        targetFieldExistence: { provisioning: host.provisioning, projectId: PROJECT_ID },
+        source,
+        records,
+        tokenStore,
+      }))
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught, `(l) ${label}: the plan did not proceed on a probe that cannot name the sheet it judges`)
+    assert.equal(caught.name, 'StockPreparationTableActionError', `(l) ${label}`)
+    assert.equal(caught.status, 503, `(l) ${label}: the same posture as a metadata store that cannot answer`)
+    assert.equal(caught.code, 'TARGET_SCHEMA_UNAVAILABLE', `(l) ${label}`)
+    assert.deepEqual(caught.details, { targetObjectId: OBJECT_ID }, `(l) ${label}: details carry the object id and nothing else`)
+    assert.ok(caught.cause instanceof Error, `(l) ${label}: the reason travels on cause, for the server log`)
+    const text = JSON.stringify(caught.details) + caught.message
+    assert.equal(text.includes(SHEET_ID), false, `(l) ${label}: no sheet id leaves the module`)
+    assert.equal(text.includes(PROJECT_ID), false, `(l) ${label}: no project id leaves the module`)
+    assert.deepEqual(host.callNames(), ['getObjectSheetId'], `(l) ${label}: the DB read never ran`)
+    assert.deepEqual(source.calls, [], `(l) ${label}: zero source reads`)
+    assert.deepEqual(records.calls, [], `(l) ${label}: zero records calls`)
+    assert.equal(tokenStore.map.size, 0, `(l) ${label}: zero tokens minted`)
+  }
+  // The absence answers are NOT a contract breach, so this cannot pass by refusing everything that is
+  // not the bound sheet id: each of these keeps the pre-probe plan (i) measured.
+  for (const [label, derived] of [['undefined', undefined], ['null', null], ['a blank string', '   ']]) {
+    const host = hostAnswering(derived)
+    const tokenStore = createMemoryStore()
+    const result = await dryRunStockPreparationAction(dryRunInput({
+      targetFieldExistence: { provisioning: host.provisioning, projectId: PROJECT_ID },
+      tokenStore,
+    }))
+    assert.deepEqual(comparable(result), expected.result, `(l) ${label}: an absent derivation plans the pre-probe plan`)
+    assert.deepEqual(storedTokenRecord(tokenStore), expected.token, `(l) ${label}: and mints the pre-probe token`)
+    assert.deepEqual(host.callNames(), ['getObjectSheetId'], `(l) ${label}: and the DB read still never ran`)
+  }
+}
+
 // ── the probe is one exported thing, reachable for the route suite ────────────────────────────
 
 function theProbeIsExportedFromTheInternals() {
@@ -601,6 +676,7 @@ async function main() {
   await hADeclaredExtensionColumnTheHostLacksIsReported()
   await iADivergentBindingIsNeverJudgedOnAnotherSheet()
   await jAHostFailureIsAValuesFree503()
+  await lANonStringDerivationIsRefusedInsteadOfSilentlySkipped()
   theProbeIsExportedFromTheInternals()
   console.log('stock-preparation-target-field-existence-probe tests passed')
 }
