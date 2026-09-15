@@ -1,4 +1,5 @@
 import { Pool } from 'pg'
+import { createRecoveryArchiveWorkerAuthorization } from '../../src/routes/univer-meta'
 
 import { executeRecoveryArchiveAsyncRestoreChunk } from '../../src/multitable/recovery-archive-async-restore'
 import type {
@@ -146,20 +147,15 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       transactionDepth: { currentTransactionDepth: () => depth },
     }
     const results: Awaited<ReturnType<typeof executeRecoveryArchiveAsyncRestoreChunk>>[] = []
+    const authorization = createRecoveryArchiveWorkerAuthorization()
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const result = await executeRecoveryArchiveAsyncRestoreChunk({
         transaction,
         query,
         runtime,
         claim,
-        // Synthetic policy only: this fixture proves process durability, not authorization.
-        recheckAuthority: async () => true,
-        apply: {
-          preliminaryFullRead: async () => true,
-          stabilizeAuthorization: async () => 'ready',
-          finalLockedFullRead: async () => true,
-          evaluatePlanAuthorization: async () => true,
-        },
+        recheckAuthority: authorization.recheckAuthority,
+        apply: authorization.apply,
       })
       results.push(result)
       if (result.kind === 'no_pending_chunk') {

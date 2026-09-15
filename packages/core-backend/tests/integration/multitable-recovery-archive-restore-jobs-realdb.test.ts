@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
 import { ConnectionPool } from '../../src/integration/db/connection-pool'
+import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import { consumeRecoveryArchiveDerivedEffect, enqueueRecoveryArchiveDerivedEffect, type RecoveryArchiveDerivedWork } from '../../src/multitable/recovery-archive-derived-effects'
 import {
   abandonRecoveryArchiveRestoreJob,
@@ -1100,6 +1101,7 @@ async function cleanupFixtures(): Promise<void> {
     }
     await client.query(`DELETE FROM public.meta_recovery_archive_keys WHERE key_id LIKE $1`, [`${PREFIX}%`])
     await client.query(`DELETE FROM public.meta_bases WHERE id LIKE $1`, [`${PREFIX}%`])
+    await client.query(`DELETE FROM public.users WHERE id LIKE $1`, [`${PREFIX}%`])
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
@@ -2076,6 +2078,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     let fieldId = ''
     let recordIds: string[] = []
     let derivedJobId: string | undefined
+    const authorityTriggerStates: Array<{ table: string; trigger: string; restore: string }> = []
     const keyMaterial = { dek: randomBytes(32), wrappedDek: randomBytes(48) }
 
     try {
@@ -2153,6 +2156,20 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       )
       if (!durable || !fieldId || recordIds.length !== 5001) {
         throw new Error('recovery_archive_composed_fixture_not_materialized')
+      }
+      if (processBoundary) {
+        for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+          const state = await q('SELECT tgenabled FROM pg_trigger WHERE tgrelid=$1::regclass AND tgname=$2', [table, trigger])
+          const enabled = (state.rows[0] as { tgenabled: string } | undefined)?.tgenabled
+          const restoreModes: Record<string, string> = { O: 'ENABLE', D: 'DISABLE', R: 'ENABLE REPLICA', A: 'ENABLE ALWAYS' }
+          const restore = restoreModes[enabled ?? '']
+          if (!restore) throw new Error('archive_process_authority_trigger_missing')
+          authorityTriggerStates.push({ table, trigger, restore })
+          await q(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`)
+        }
+        await q(`INSERT INTO public.users (id, password_hash, permissions)
+          VALUES ($1, 'synthetic-not-a-password', $2::jsonb)`,
+        [fixture.actorId, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'])])
       }
       await q(
         `INSERT INTO public.meta_fields (id, sheet_id, name, type, property, "order")
@@ -2546,6 +2563,9 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     } finally {
       if (derivedJobId) {
         await q('DELETE FROM public.meta_recovery_archive_derived_effects WHERE job_id=$1', [derivedJobId])
+      }
+      for (const { table, trigger, restore } of authorityTriggerStates) {
+        await q(`ALTER TABLE ${table} ${restore} TRIGGER ${trigger}`)
       }
       await rm(root, { recursive: true, force: true })
     }
