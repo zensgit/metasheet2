@@ -968,6 +968,27 @@ describe('MultitableApiClient', () => {
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/record-subscription-notifications?sheetId=sheet_1&recordId=rec_1&limit=10')
   })
 
+  // #5745 §5.4: a notification.sent row from a record-less trigger (approval.completed etc.) has
+  // recordId '' — it must survive normalisation (the server's unread-count counts it), while
+  // record-scoped rows without a recordId are still dropped.
+  it('listRecordSubscriptionNotifications keeps a record-less notification.sent row and still drops record-scoped rows without recordId', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [
+          { id: 'note_sent', sheetId: 'sheet_1', recordId: '', userId: 'user_1', eventType: 'notification.sent', actorId: 'user_2', revisionId: null, commentId: null, message: 'approval done', createdAt: '2026-09-15T08:30:12.861Z', readAt: null },
+          { id: 'note_upd', sheetId: 'sheet_1', recordId: '', userId: 'user_1', eventType: 'record.updated', actorId: 'user_2', revisionId: 'rev_1', commentId: null, createdAt: '2026-09-15T08:30:12.861Z', readAt: null },
+          { id: 'note_cmt', sheetId: 'sheet_1', recordId: '', userId: 'user_1', eventType: 'comment.created', actorId: 'user_2', revisionId: null, commentId: 'cmt_1', createdAt: '2026-09-15T08:30:12.861Z', readAt: null },
+        ],
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const rows = await client.listRecordSubscriptionNotifications({ limit: 50 })
+    expect(rows.map((r) => r.id)).toEqual(['note_sent'])
+    expect(rows[0]).toMatchObject({ eventType: 'notification.sent', recordId: '', message: 'approval done' })
+  })
+
   // Notification Center S1b — real-wire coverage for the 3 read-state methods (#1779/#1781 forward
   // rule: every contract-consuming method must round-trip URL/method/envelope, not be mocked away).
   it('getRecordSubscriptionUnreadCount GETs the unread-count route and unwraps data.count', async () => {
