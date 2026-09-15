@@ -18,14 +18,15 @@
 | Q6 | 阶段二设计稿 | 主会话（基于 4 代理只读地图） | `multitable-approval-phase2-record-submit-design-20260915.md` | ✅ 草稿 |
 | Q7 | 编辑器所有动作类型 config 保留（#5739 泛化） | Explore 普查 → opus / opus / fable | #5756（79dbc6588；裁判 MERGE，8 条反驳全落码，含字段值字符串化与跨基界面失真两条 major） | ✅ 已合，r49 |
 | Q8 | #5750 外部上下文同步收敛（先复现） | opus 复现 / opus / opus / fable | #5755（14db7f82e；复现成功 5 次重发 = 5 次 HTTP；裁判 MERGE） | ✅ 已合，r49 |
-| Q9 | 2a 后续：列表带模板名/申请人名、hasMore、自动通过原子提升 | opus / opus / fable | 裁判 MERGE @12974a85e（11 条反驳 7 修，含模板名泄漏与回滚不可恢复两条 major）；PR 见 §2 | 🟡 CI |
+| Q9 | 2a 后续：列表带模板名/申请人名、hasMore、自动通过原子提升 | opus / opus / fable | #5763（裁判 MERGE，11 条反驳 7 修，含模板名泄漏与回滚不可恢复两条 major；realdb 15 例真库绿） | ✅ 已合，r50 |
 | Q10 | #5750 后续：嵌入宿主回显真实上下文、navigated 按请求去重 | opus / opus / fable | #5760（裁判 MERGE，5 条发现全落码，含回显赛跑 major） | ✅ 已合，r50 |
-| Q11 | 编辑器跨基 create_record 横幅 + 登记 #5747 客户端测试 | opus / opus / fable | 裁判 MERGE @96b175a42（4 条反驳全落码，含"文案与执行器相反"major）；guard 镜像；PR 见 §2 | 🟡 CI |
+| Q11 | 编辑器跨基 create_record 横幅 + 登记 #5747 客户端测试 | opus / opus / fable | #5761（裁判 MERGE @96b175a42，4 条反驳全落码，含"文案与执行器相反"major；guard 镜像 2e1c54d41；首轮 web-tests 因 vitest worker 卡死 50 min 被杀，见 §4；合入 main f1cc1858b 重跑） | 🟡 CI 重跑 |
 | Q12 | #5756 真实路径丢键（r49 实证"发现"） | opus 复现 | 未复现（13 例绿）；根因是浏览器跑旧包（见 §3.3），非缺陷；流水线已停 | ⛔ 误报，已纠 |
 | Q13 | 管理器→编辑器→PATCH 往返回归用例（源自 Q12 的复现夹具） | opus 单代理 | #5759（76cd69f5b；14 例 + approval.completed；两点登记，guard 镜像 zensgit 推送） | ✅ 已合，r50 |
-| Q14 | Q9 前端配套：面板「还有更多」与通知失败标记，客户端 hasMore/limit | opus / opus / fable | 裁判 MERGE @7f9f04afe（3 条反驳全落码）；PR 见 §2 | 🟡 CI |
-| Q15 | 编辑器 #5756 往返用例 CI 5 s 超时抖动（#5763 web-tests 红暴露） | opus 单代理 | #5764（21 个 it 显式 30 s 超时；变异 1 ms → 12 红） | 🟡 CI |
-| — | 222 发布 | — | r47 / r48（夜间） | 📝 |
+| Q14 | Q9 前端配套：面板「还有更多」与通知失败标记，客户端 hasMore/limit | opus / opus / fable | #5765（784c22dc1；裁判 MERGE @7f9f04afe，3 条反驳全落码） | ✅ 已合，r50 |
+| Q15 | 编辑器 #5756 往返用例 CI 5 s 超时抖动（#5763 web-tests 红暴露） | opus 单代理 | #5764（21 个 it 显式 30 s 超时；变异 1 ms → 12 红） | ✅ 已合，r50 |
+| Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | `useRouter()` 探测 → `inject(routerKey, null)`，行为不变；分支 `fix/record-approval-router-inject-quiet` | 🟡 进行中 |
+| — | 222 发布 | — | r47 / r48 / r49 已上（§3）；r50 = r49 + #5759 #5760 #5763 #5764 #5765（+#5761 若绿）计划 08:00 前上 | 🟡 |
 
 ## 1. 队列与模型选择依据
 
@@ -107,6 +108,35 @@
 - 主检出本地 `main` 落后 origin/main 三周（e89f3e15e vs 28d11496b），在那里读代码与派只读诊断会得到旧代码/错行号；已快进并记忆化（读前 ff-only）。
 - 只读地图 + 批评者比直接写设计更可靠：三条硬约束（§1 末）任何一条漏掉都会让阶段二返工。
 
+- **CI「红」先看步骤状态再看断言**：#5761 的 web-tests 失败没有任何 FAIL 断言，日志停在 15:50 的某个用例后 45 min 无输出、步骤仍 `in_progress`，是 job 到 50 min 被杀。直接诱因是该 spec 在无路由挂载时每个用例刷 `[Vue warn] injection "Symbol(router)" not found`，Vue 把整个 mock 客户端对象（几百行）打进 stderr，476 段 dump 撑爆 vitest worker 的 RPC（与考勤守卫「Timeout calling onTaskUpdate」同一形态）。处置分两层：分支合入 main 重跑（#5764 已把同批用例超时放宽），再由 Q16 从组件侧把 `useRouter()` 换成带默认值的 `inject(routerKey, null)` 让警告归零。教训：spec 里的 Vue warn 不是「噪音」，是 CI 稳定性成本，看到就该清。
+
 ## 5. 未完成 / 交接
 
-（24 小时结束时填写：在飞 PR、未上 222 的合并、待 owner 拍板项、下一步建议）
+（截至 2026-09-16 00:50，随进展更新；最终版在授权结束前定稿）
+
+### 5.1 在飞
+- #5761（Q11）：合入 main `f1cc1858b` 后 CI 重跑；绿即合并（分支含 `.github` 改动，须 zensgit 推送）。
+- Q16：`fix/record-approval-router-inject-quiet`，sonnet 单代理实现中；PR 走一轮小范围核验（无行为变化，看 spec 警告计数 0 + 变异回退非 0）。
+- r50：`claude-auto24/r50/r50-build-and-ship.sh build|ship` + `upgrade-222-r50.ps1`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。
+- 本文与阶段二设计稿：分支 `docs/autonomous-24h-run-20260915`（wt-docs6），最后一并开 docs PR。
+
+### 5.2 需要 owner 拍板 / 动手的
+| 事项 | 出处 | 说明 |
+| --- | --- | --- |
+| `approvals:write` 是否授予普通用户角色 | #5754 / #5763 正文 | 记录级送审需要申请人能创建实例；目前 222 只有 admin 有 |
+| creating-claim TTL 5 min | #5754 | 在途占位的过期时间，取默认值；业务上想更短/更长改常量即可 |
+| #5763 四项行为变化 | #5763 正文 | 模板名/申请人名走审批中心可见性门、自动通过原子提升+补偿、hasMore、limit 上限 |
+| 222 nginx `index.html` 无 `Cache-Control` | issue #5757 | 浏览器长期跑旧 SPA 包；建议 `no-cache` 或短 max-age，属运维改动 |
+| #5741 `approvals:read` 播种 | issue #5741 | 归审批窗口补迁移；222 手工授予保留 |
+| 锁包文档 §T0-3 更新 | #5763 裁判遗留 | 说明记录级送审的耐久投递已纳入 v2 清单 |
+| 预览与执行器失真 | issue #5762 | 编辑器预览用 label 而执行器用 id，非阻断 |
+| 客户规则「测试」每次记录更新失败 | 222 观察 | 早于本轮存在，未动；需客户确认该规则是否还要 |
+
+### 5.3 队列之外的候选（按我给用户的顺序）
+1. 记录抽屉审批卡片（在抽屉内直接看当前实例与节点，不必跳审批中心）。
+2. 钉钉待办 B 方案镜像代码（设计已定，见 [[beiliao-dingtalk-todo-decision]]；三条 owner 侧前置未满足）。
+3. 技术债：lint 残留、过期上机标记、spec 里其它 Vue warn 噪音（同 Q16 思路普查一遍）。
+
+### 5.4 环境残留
+- worktrees：wt-fe6（#5761 分支）、wt-base3（Q16）、wt-docs6（本文）；其余分支均已合并，可 `git worktree` 清理（按 [[git-worktree-remove-follows-junctions]] 先拆 junction）。
+- 222：演示记录 rec_c5918f1c…/rec_bb72a248… 的实例均已关闭；无待清数据。
