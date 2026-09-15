@@ -2,6 +2,19 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Embed Echo Main Replay
+
+True merge `0753062239e16cce410714f7083a19bb19e15fac`, tree
+`4dfffc3a6fd62970e3d02e5064c689242ec753de`, has ordered parents
+`b05fb6a8a61f6fb2f86e6a5254b23d7e42793538` and then-current main
+`1bbf3c1c311ffd7dd58e841dd5e9a1c642db7e2c`. Incoming embed-host resolved-context
+echoes and automation config roundtrip coverage coexist with TM atomic context
+generation. Product merge is automatic; only the two existing Web test lists
+require manual union. Both external-context-sync and automation-manager-roundtrip
+remain in both lanes. No backend, plugin or OpenAPI change is introduced relative
+to the first parent. Provider/custody, nightly sample attribution and the separately
+owned approval shutdown P2 remain open; this replay does not authorize enablement.
+
 ## Workbench Main Integration
 
 Code `19c6b60ccd4437003f4982308b58e00698dcdf9a` incorporates main

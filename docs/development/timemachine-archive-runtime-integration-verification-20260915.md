@@ -2,6 +2,16 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Embed Echo Main Replay
+
+Tested merge `0753062239e16cce410714f7083a19bb19e15fac`, tree `4dfffc3a6fd62970e3d02e5064c689242ec753de`, ordered parents `b05fb6a8a61f6fb2f86e6a5254b23d7e42793538` + main `1bbf3c1c311ffd7dd58e841dd5e9a1c642db7e2c`:
+
+- Four focused files (workbench view, embed host, external context, automation manager roundtrip): 186/186 PASS. Existing router-link resolution warnings remain; not warning-free.
+- Full required-web exits 0; all groups PASS, final group 460 files / 6,919 tests. Log `/private/tmp/tm-1bbf-required-web-20260916.log`.
+- `vue-tsc --noEmit -p tsconfig.app.json` PASS; 42/42 archive/exact-anchor wiring cases PASS. Logs `/private/tmp/tm-1bbf-app-tsc-20260916.log` and `/private/tmp/tm-1bbf-wiring-20260916.log`.
+- Manual resolution only in `.github/workflows/multitable-web-guard.yml` and `apps/web/scripts/run-required-web-tests.sh`. Mechanical relevant-token census against both parents: workflow 202/201 to 203, script 215/215 to 217; missing=0 for each parent. Both new whole-file tokens are retained.
+- Backend/plugin/OpenAPI first-parent delta empty; no fresh DB/browser/archive run claimed. Earlier synthetic evidence remains bound to its actual SHA. Diff-check and unmerged-index checks PASS. Fresh published-head CI and independent lifecycle/provider gates remain required.
+
 ## Nightly Diagnostic Contract Recheck
 
 On clean `928bbe4ec367970a9a967616b38b7d66886fa90f`, the following local command passes 25/25 with zero skips:
