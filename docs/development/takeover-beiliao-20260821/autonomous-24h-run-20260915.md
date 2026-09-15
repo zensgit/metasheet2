@@ -29,8 +29,8 @@
 | Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | #5770（裁判 MERGE @1ad1bb795，7 条反驳 0 major 全落码；可选两项已加固；CI 一轮被审批窗口 tripwire 拦下——多维表不得引用成员身份解析器，改 assigneeName→序号两步规则；合并 8a54a35b1） | ✅ 已合，r51 |
 | Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | #5769（9628f98f6；`router-link` 1311→0，`Invalid prop` 20→8 余为未涉及的三个弹窗；顺带发现显式导入后 `<script setup>` 会把同名 kebab 标签自动解析，变异须导入与标签一起回退；合并 cae1f2421）；他窗口领域的 62% 只记录在 §5.3 | ✅ 已合，r51 |
 | Q19 | 钉钉待办单向镜像（B 方案，队列外候选 4）：设计稿 + 默认关闭的实现 | 3 读者地图 → 主会话写设计 → opus 实现 / opus 反驳×2 / fable 裁判 | #5772（裁判 FIX→已修 @deeee9904：9 条反驳 4 major 全落码——并行网关/重投/发送中遇终态/429 分类；必修 realdb pin 对齐 v3；完成阶段取 token 拆分 cec884ede；realdb 泳道真库绿；合并 0e769bc88）；设计 `dingtalk-todo-mirror-b-design-20260916.md`；owner 前置未满足前保持关闭 | ✅ 已合，r52 |
-| Q20 | 技术债：`apps/web/src/multitable` lint 普查 + 仅安全自动修复；#5769 剩下的三个隐藏弹窗 null sheetId 告警 | sonnet 单代理 | #5773（8c154e429，4 行：1 条可安全自动修复的 lint + 三弹窗门控，`Invalid prop` 8→0；普查 43 错/52 警留档：`require-default-prop` 47、vendor `prefer-const` 16、`no-unused-vars` 11 等均非自动修复，另开专项） | 🟡 CI |
-| — | 222 发布 | — | r47 / r48 / r49 / r50 / r51 已上并实测（§3）；r52 = r51 + Q19（默认关闭，仅建表）视 CI 结果与 08:00 前时间窗决定 | 🟡 |
+| Q20 | 技术债：`apps/web/src/multitable` lint 普查 + 仅安全自动修复；#5769 剩下的三个隐藏弹窗 null sheetId 告警 | sonnet 单代理 | #5773（8c154e429，4 行：1 条可安全自动修复的 lint + 三弹窗门控，`Invalid prop` 8→0；普查 43 错/52 警留档：`require-default-prop` 47、vendor `prefer-const` 16、`no-unused-vars` 11 等均非自动修复，另开专项；合并 0be3f25da） | ✅ 已合，r52 |
+| — | 222 发布 | — | r47 / r48 / r49 / r50 / r51 已上并实测（§3）；r52 = r51 + #5772（默认关闭：建表 + manifest v3）+ #5773 构建中，08:00 前上 | 🟡 |
 
 ## 1. 队列与模型选择依据
 
