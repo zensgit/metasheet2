@@ -2,6 +2,19 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Record-Approval Main Integration
+
+Code `1937ec0e96984f310db034cfab8eac0d26693991`, tree
+`e0c6a366e8b54853e0186de7237556a431295a33`, true-merges the verified
+`50caab8495fa70e33985ec6ace190ae64eaafbc2` candidate with main
+`02808c068d8d5cf60ae9f73a1051b3cdffc6d65b`, in that parent order.
+Main adds record-approval UI. Only the domain web guard and required-web script
+needed manual conflict resolution: preserve the sheet-trash token and both
+record-approval tokens, with zero missing parent tokens. Product files merged
+automatically. No backend, migration, provider, OpenAPI or flag semantics changed.
+The 109-file TM delta remains relative to this new main. Earlier sections bind
+their original checkpoints; fresh publication CI is required for this merge.
+
 ## Combined Current-Main Contract
 
 Clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree

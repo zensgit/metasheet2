@@ -2,6 +2,16 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Current-Main Replay Checkpoint
+
+- Code `1937ec0e96984f310db034cfab8eac0d26693991`, tree `e0c6a366e8b54853e0186de7237556a431295a33`; ordered parents `50caab8495fa70e33985ec6ace190ae64eaafbc2` and `02808c068d8d5cf60ae9f73a1051b3cdffc6d65b`.
+- The prior published head reached **30 SUCCESS + 1 intentional SKIPPED**, zero pending/failure, including Node18/20 and coverage (run `34970354055`). This proves that head, not the new merge. Final-main drift was recorded in PR comment `5681405388` before replay.
+- Incoming main: 14 files, six path intersections. `git show --remerge-diff` names exactly `.github/workflows/multitable-web-guard.yml` and `apps/web/scripts/run-required-web-tests.sh`. Product merge is automatic; neither parent test set is removed. Domain token census: 437/439; required-web token census: 258/263; missing=0 for both parents in both files.
+- Focused record-approval/inspector/drawer/workbench/trash/config-history: **9 files / 238 tests PASS**. Existing router-injection warnings are not failures and were not suppressed. Web application `vue-tsc --noEmit -p tsconfig.app.json` PASS. TM D2/exact-anchor wiring **42/42 PASS**. Official frozen/live package provenance differenceCount=0, pin unchanged.
+- Full required-web exits 0, all groups pass; final group **458 files / 6,847 tests PASS**. Log: `/private/tmp/tm-02808-required-web-20260915.log`. Wiring log: `/private/tmp/tm-02808-wiring-20260915.log`. Diff-check and final clean-status checks PASS.
+- Backend/plugin/OpenAPI trees are byte-identical to the preceding published head. Earlier DB/process/browser evidence below remains explicitly bound to its tested SHA; no fresh browser/DB execution is claimed for this Web/main merge. No database or provider was started, no deployment performed. Full local Vite config typecheck limitation remains as recorded below.
+- This report-only child and merge will ordinary-FF update existing Draft #5744. Its new exact-head CI remains required. No Ready/merge, provider/custody decision, flag, dispatch or production action is authorized by these results.
+
 ## Final Navigation Checkpoint
 
 - Final clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree `5c72f2df21d143a112d6dbbe52d1a1953eea0bda`, parent `c2c7d2ec47c2f2eded4121794f89d112abdeaf9b`. The production delta is exactly two foreground `loading=true` assignments in sheet-only/view-only external navigation; the existing background guard and generation-aware cleanup apply to these routes too. Two deferred-response regressions are RED on old code and under omission mutation, then restored GREEN. Three accompanying MD files record the preceding combined checkpoint, not additional runtime changes.

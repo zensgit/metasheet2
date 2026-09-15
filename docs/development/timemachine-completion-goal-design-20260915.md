@@ -22,6 +22,18 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Current-Main Replay
+
+The prior published `50caab8495fa70e33985ec6ace190ae64eaafbc2` reached
+30 successful checks and one intentional skip. Main subsequently advanced to
+`02808c068d8d5cf60ae9f73a1051b3cdffc6d65b`. True merge
+`1937ec0e96984f310db034cfab8eac0d26693991` preserves both parents and both
+test-selector sets; only two shared test lists needed manual union. Nine focused
+Web files / 238 tests, application typecheck, 42 wiring tests and full
+required-web (final group 458 files / 6,847 tests) pass. Provenance drift is zero.
+New published-head CI remains open. Earlier browser/DB runs are SHA-bound reuse,
+not new runs of this merge. Operational and provider/capture gates remain open.
+
 ### Latest Local Checkpoint
 
 Combined clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree
