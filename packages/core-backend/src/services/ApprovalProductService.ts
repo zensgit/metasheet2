@@ -10163,6 +10163,12 @@ export class ApprovalProductService {
         if (requesterId !== actor.userId) {
           throw new ServiceError('Only the requester can revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
         }
+        // Status guard: some non-executor write paths do not clear `current_node_key` when
+        // moving an instance to a terminal status, so the node-key check below cannot be relied
+        // on alone to reject revoke on an already-terminal instance. Check status directly first.
+        if (APPROVAL_TERMINAL_STATUSES.includes(instance.status as typeof APPROVAL_TERMINAL_STATUSES[number])) {
+          throw new ServiceError('Approval is already in a terminal status', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+        }
         if (!currentNodeKey) {
           throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
         }
