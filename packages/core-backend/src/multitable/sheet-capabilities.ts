@@ -288,7 +288,14 @@ export async function resolveSheetCapabilitiesForUser(
       // writer's namespaced key from it — this was previously a SECOND hand-rolled copy that
       // compared against the bare (never-written) column name.
       let isParticipant = false
+      // Gate condition P3-1: guard an empty/blank actor id BEFORE the predicate, matching the three
+      // sibling consumers (`permission-service.ts` carve-out and both deny arms). The shared
+      // predicate COALESCEs a missing key to '', and the writer stores `approverId: ''` on a pending
+      // row, so without this guard an empty actor id would MATCH such a row. Inert today (base
+      // capabilities for '' are all-false and the per-row restriction only downgrades), added so all
+      // four consumers agree rather than relying on a downstream all-false to absorb it.
       try {
+        if (!userId || userId.trim() === '') throw new Error('blank actor id')
         const participant = await query(
           `SELECT 1 FROM meta_records
             WHERE sheet_id = $1

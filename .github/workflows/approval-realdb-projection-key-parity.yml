@@ -52,6 +52,10 @@ on:
       - 'packages/core-backend/vitest.config.ts'
       - 'packages/core-backend/vitest.integration.config.ts'
       - 'packages/core-backend/tests/setup.integration.ts'
+      - 'packages/core-backend/src/integration/db/connection-pool.ts'
+      - 'packages/core-backend/src/integration/events/event-bus.ts'
+      - 'packages/core-backend/src/multitable/access.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - '.github/workflows/approval-realdb-projection-key-parity.yml'
   push:
@@ -67,6 +71,10 @@ on:
       - 'packages/core-backend/vitest.config.ts'
       - 'packages/core-backend/vitest.integration.config.ts'
       - 'packages/core-backend/tests/setup.integration.ts'
+      - 'packages/core-backend/src/integration/db/connection-pool.ts'
+      - 'packages/core-backend/src/integration/events/event-bus.ts'
+      - 'packages/core-backend/src/multitable/access.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - '.github/workflows/approval-realdb-projection-key-parity.yml'
 
