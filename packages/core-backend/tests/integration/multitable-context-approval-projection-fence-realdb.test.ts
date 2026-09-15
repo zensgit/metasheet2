@@ -58,8 +58,8 @@ const BARE_ID = `u_c1_bare_${TS}` // zero multitable:* grants anywhere (token AN
 const GRANTEE_ID = `u_c1_grantee_${TS}` // zero GLOBAL multitable:* grants anywhere; the ONLY read
 // authority this actor has is a sheet-scoped spreadsheet_permissions row on GRANT_SHEET below — the
 // P2-01 remedy: this is the actor class the route's preloadedScopeMap hoist actually governs.
-const PARTICIPANT_ID = `u_c1_participant_${TS}` // real requester on TPL_A's instance (see note above: the
-// shared predicate does not currently recognize this — characterized below, not fixed here)
+const PARTICIPANT_ID = `u_c1_participant_${TS}` // real requester on TPL_A's instance (see note above:
+// the shared predicate's current decision for this fixture is pinned below as-is)
 
 // ── approval templates / instances (real provisioning → real reconcile()) ─────
 const TPL_A = randomUUID()
