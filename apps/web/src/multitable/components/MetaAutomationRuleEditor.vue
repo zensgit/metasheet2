@@ -387,8 +387,14 @@
                  backend rejects it at save (400) and the executor fails the step at run.
                  #5756 follow-up: create_record opts in with `targetBaseId` ALONE (its target sheet is
                  `sheetId`, there is no target record), so it renders the same banner with create-shaped
-                 copy — and its target-sheet DROPDOWN is withheld below, because that roster is not scoped
-                 to the target base and shows no base at all (see the comment there). -->
+                 copy, and its target-sheet dropdown below is SCOPED to the declared base.
+                 round-3: that copy no longer promises "creates in ANOTHER base" / "the run fails". The
+                 executor picks the destination from the target SHEET, not from this declaration
+                 (executeCreateRecord -> evaluateCrossBaseWriteGate returns `{crossBase:false}` as soon as
+                 the target sheet's REAL base equals the trigger base, before the claim is ever compared),
+                 so a blank/local sheet id creates the record HERE and the step succeeds - pinned by the
+                 integration test XW-3b (same-base create carrying targetBaseId, actor with base-write
+                 nowhere, asserts success). -->
             <div
               v-if="crossBaseTargets[action.draftId]"
               class="meta-rule-editor__hint meta-rule-editor__hint--warning"
@@ -435,26 +441,24 @@
                    the currently-configured id isn't in the fetched list, so a stale/foreign value is
                    never silently hidden). A missing/failed/empty listSheets() falls all the way back
                    to the plain text input in the v-else branch below.
-                   #5756 follow-up: the roster is NOT scoped to `targetBaseId` — client.listSheets() takes
-                   no baseId and GET /api/multitable/sheets returns every readable sheet — and
-                   automationTargetSheetOptions drops the row's `baseId`, so an option says nothing about
-                   which base it is in. For a CROSS-BASE create (`targetBaseId` set) a pick therefore cannot
-                   be trusted to land in the target base, and a wrong one is not a save error: the executor
-                   write-gate rejects it per run as claim ≠ truth. The dropdown is withheld and the v-else
-                   free-text input (same data-field, value preserved and still editable) carries the foreign
-                   id, with the hint above naming why. Chosen over "disable the select + keep the configured
-                   id as a marked option": smaller (one v-if term + one hint vs. a new per-action option
-                   builder) and more honest — a select would show a same-base sheet NAME for any id that
-                   collides with a local one, and disabling it would also take away the only in-editor way
-                   to fix a wrong foreign id. -->
+                   #5756 follow-up (round-3): the REQUEST is not scoped to `targetBaseId` - client.listSheets()
+                   takes no baseId and GET /api/multitable/sheets returns every readable sheet across bases -
+                   but every row carries `baseId` (univer-meta.ts GET /sheets; MetaSheet.baseId); only
+                   automationTargetSheetOptions drops it. So for a create that declares `targetBaseId` the
+                   list is SCOPED to that base here (targetSheetOptionsFor) rather than taken away: every
+                   offered option is provably inside the declared base, and a declaration equal to THIS base
+                   - a legal same-base shape the backend explicitly supports (XW-3b) - keeps its ordinary
+                   picker instead of losing the control. When no readable sheet is in that base the scoped
+                   list is empty and the field degrades to the v-else free-text input below, which stays the
+                   only way to author an id you cannot see; the hint states the scoping in both states. -->
               <div
                 v-if="crossBaseTargets[action.draftId]"
-                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+                class="meta-rule-editor__hint"
                 data-field="createRecordCrossBaseSheetHint"
               >
-                {{ automationLabel('actionConfig.crossBaseCreateSheetPickerHidden', isZh) }}
+                {{ automationLabel('actionConfig.crossBaseCreateSheetScoped', isZh) }}
               </div>
-              <template v-if="targetSheetOptions.length > 0 && !crossBaseTargets[action.draftId]">
+              <template v-if="targetSheetOptionsFor(action).length > 0">
                 <el-select
                   v-if="!isManualTargetSheetEntry(action)"
                   v-model="(action.config.targetSheetId as string)"
@@ -464,7 +468,7 @@
                   data-field="createRecordTargetSheetId"
                 >
                   <el-option value="" data-value="" :label="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
-                  <el-option v-for="opt in targetSheetOptions" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
+                  <el-option v-for="opt in targetSheetOptionsFor(action)" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
                 </el-select>
                 <el-input
                   v-else
@@ -1826,7 +1830,7 @@ import {
   summarizeAutomationAction,
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
-import { automationTargetSheetOptions } from '../utils/automation-target-sheet-options'
+import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
 
 interface FieldPair {
   fieldId: string
@@ -1997,12 +2001,34 @@ const targetSheetOptions = computed(() => automationTargetSheetOptions(available
 // is always visible/editable rather than silently swallowed by a dropdown that can't represent it.
 const manualTargetSheetOverride = ref<Record<string, boolean>>({})
 
+/**
+ * The target-sheet options for ONE create_record action. Default: the whole readable-sheet roster
+ * (unchanged G-B2-27 behaviour). #5756 follow-up round-3 - when the action declares `targetBaseId`, the
+ * roster is SCOPED to that base: GET /api/multitable/sheets returns sheets from every base the author can
+ * read, but each row carries `baseId`, which `automationTargetSheetOptions` drops. Scoping here makes an
+ * offered option provably inside the declared base (a pick cannot silently address a different one)
+ * WITHOUT withholding the control from the legal `targetBaseId == this base` shape (XW-3b). Rows with no
+ * baseId (legacy/null) are excluded rather than assumed local: unprovable is not the same as local. An
+ * empty result degrades the field to the free-text input below - the only way to author an id you cannot
+ * see. Hoisted `function` (not a computed) so it can call the equally hoisted crossBaseTargetOf without a
+ * TDZ on the consts declared further down.
+ */
+function targetSheetOptionsFor(action: DraftAction): AutomationTargetSheetOption[] {
+  const target = crossBaseTargetOf(action)
+  if (!target || target.kind !== 'create') return targetSheetOptions.value
+  return automationTargetSheetOptions(
+    availableSheets.value.filter((sheet) => typeof sheet.baseId === 'string' && sheet.baseId.trim() === target.targetBaseId),
+  )
+}
+
 function isManualTargetSheetEntry(action: DraftAction): boolean {
   const override = manualTargetSheetOverride.value[action.draftId]
   if (override !== undefined) return override
   const current = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
   if (!current) return false
-  return !targetSheetOptions.value.some((opt) => opt.value === current)
+  // Against the SCOPED list for a cross-base create: an id that is not provably in the declared base
+  // must stay visible in the text box, not be swallowed by a dropdown that cannot represent it.
+  return !targetSheetOptionsFor(action).some((opt) => opt.value === current)
 }
 
 function toggleManualTargetSheetEntry(action: DraftAction) {
