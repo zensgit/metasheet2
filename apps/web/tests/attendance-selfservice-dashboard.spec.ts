@@ -1140,7 +1140,7 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('#attendance-overview-requests')).toBeTruthy()
   })
 
-  it('below-fold IA: shift-swap still opens the shared request/makeup disclosure without a second form', async () => {
+  it('shift-swap tile opens the dedicated swap card below 常用 and leaves the shared disclosure closed', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
@@ -1151,7 +1151,15 @@ describe('Attendance self-service dashboard', () => {
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
     await flushUi(3)
 
-    expect(requestTools.open).toBe(true)
+    const card = container!.querySelector('[data-attendance-shift-swap-request-card]')
+    const common = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(card).toBeTruthy()
+    expect(common?.nextElementSibling).toBe(card)
+    expect(card?.querySelector('#attendance-shift-swap-card-title')?.textContent).toContain('Shift-swap request')
+    expect(card?.querySelector('[data-shift-swap-card-requester]')).toBeTruthy()
+    expect(card?.querySelector('[data-shift-swap-card-counterparty]')).toBeTruthy()
+    expect(card?.querySelector('[data-shift-swap-card-reason]')).toBeTruthy()
+    expect(requestTools.open).toBe(false)
     expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('shift_swap')
     expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
@@ -1179,6 +1187,7 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
     expect(container!.querySelector('[data-attendance-overtime-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
   })
 
   it('makeup tile opens the dedicated makeup card below 常用 and leaves the shared disclosure closed', async () => {
@@ -1203,6 +1212,7 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
     expect(container!.querySelector('[data-attendance-overtime-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
   })
 
   it('overtime tile opens the dedicated overtime card below 常用 and leaves the shared disclosure closed', async () => {
@@ -1228,6 +1238,7 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('overtime')
     expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
   })
 
   it.each([
@@ -2959,8 +2970,111 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-overtime-request-card]')).toBeNull()
     expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
-    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(true)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('shift_swap')
+  })
+
+  it('header cancel closes the shift-swap card without opening the shared disclosure', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
+    await flushUi(3)
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-shift-swap-card-cancel="header"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
+    expect(requestTools.open).toBe(false)
+  })
+
+  it('opening leave, makeup, or overtime closes the dedicated shift-swap card', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeTruthy()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeTruthy()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="overtime"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-overtime-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('overtime')
+  })
+
+  it('dedicated shift-swap card submits through POST /api/attendance/shift-swap-requests with exact assignment ids', async () => {
+    authMockState.currentUserId = 'swap-user-a'
+    const { createBodies } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-a' })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="shift-swap"]')!.click()
+    await flushUi(3)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-shift-swap-request-card]')
+    expect(card).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+
+    const requesterAssignment = card!.querySelector<HTMLSelectElement>('[data-shift-swap-card-requester]')
+    const counterpartyAssignment = card!.querySelector<HTMLSelectElement>('[data-shift-swap-card-counterparty]')
+    expect(requesterAssignment).toBeTruthy()
+    expect(counterpartyAssignment).toBeTruthy()
+    await vi.waitFor(() => {
+      expect(requesterAssignment!.value).toBe('assignment-a')
+      expect(counterpartyAssignment!.value).toBe('assignment-b')
+    }, { timeout: 1000 })
+    expect(Array.from(requesterAssignment!.options).map(option => option.value).filter(Boolean)).toEqual(['assignment-a'])
+    expect(Array.from(counterpartyAssignment!.options).map(option => option.value).filter(Boolean)).toEqual(['assignment-b'])
+
+    setFormValue(card!, '[data-shift-swap-card-reason]', 'Need to swap with evening shift')
+    card!.querySelector<HTMLButtonElement>('[data-shift-swap-card-submit]')!.click()
+    await flushUi(4)
+
+    expect(createBodies).toEqual([
+      {
+        requesterAssignmentId: 'assignment-a',
+        counterpartyAssignmentId: 'assignment-b',
+        reason: 'Need to swap with evening shift',
+      },
+    ])
+    const genericRequestPosts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/api/attendance/requests')
+      && String((init as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'POST',
+    )
+    expect(genericRequestPosts).toEqual([])
+    await vi.waitFor(() => expect(container!.querySelector('[data-attendance-shift-swap-request-card]')).toBeNull())
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+    expect(container!.textContent).toContain('Shift-swap request submitted.')
   })
 
   it('dedicated overtime card submits through POST /api/attendance/requests with start/end minutes', async () => {
