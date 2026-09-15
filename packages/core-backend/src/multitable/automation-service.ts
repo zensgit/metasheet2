@@ -2473,9 +2473,13 @@ export class AutomationService {
   }
 
   async shutdown(): Promise<void> {
-    await this.stopProducerAdmissions()
-    await this.drainTransitiveCompletionProducers()
+    const producerDrain = this.stopProducerAdmissions()
+    // Preserve the standalone shutdown contract: all subscriptions are detached synchronously.
+    // MetaSheetServer uses the phased methods above when it must keep completion consumers attached
+    // until every admitted producer has drained.
     this.detachCompletionConsumers()
+    await producerDrain
+    await this.drainTransitiveCompletionProducers()
     await this.drainCompletionConsumers()
     logger.info('AutomationService shut down')
   }

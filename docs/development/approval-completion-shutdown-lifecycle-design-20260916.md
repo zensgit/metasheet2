@@ -44,6 +44,8 @@ later barrier verdict. A partial startup uses the same idempotent cleanup path.
 - EventBus remains synchronous and unchanged. There is no global emit-await mechanism.
 - Each completion consumer tracks its own IDs and in-flight promises.
 - Automation separates admission producers, transitive completion producers, and terminal consumers.
+- Standalone `AutomationService.shutdown()` preserves its synchronous all-subscription detach contract;
+  the server uses the phased methods when producer-before-consumer drain ordering is required.
 - Timer schedulers latch stop synchronously and await their currently admitted callback.
 - The DingTalk worker distinguishes a stale start failure from a real client-stop failure.
 - The bounded shutdown helper always clears its timer on success; a real timeout rejects.
