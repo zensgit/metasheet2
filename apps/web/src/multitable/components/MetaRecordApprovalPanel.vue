@@ -35,6 +35,41 @@
   The same PR stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a submission whose terminal write landed but
   whose requester notification did not; a terminal row carrying it gets a one-line marker, because
   otherwise the missing bell is invisible on a row that looks perfectly approved.
+
+  审批进度 (Q17): a row with an `approvalInstanceId` also offers a COLLAPSED 「查看进度」 card that reads the
+  approval INSTANCE — `GET /api/approvals/:id` + `/history`, through the approval centre's own
+  `getApproval`/`getApprovalHistory`. Three rules make that safe to put on a multitable surface:
+    * GATE. The card (toggle included) renders only when the viewer holds `approvals:read` on the FE —
+      the SAME `useApprovalPermissions()` gate ApprovalCenterView/ApprovalDetailView use. Without it
+      NOTHING new is rendered and no request is ever issued: the existing request-number link and the
+      submissions list, which come from the multitable route's own `canRead`, are untouched. This is a
+      fail-closed CONVENIENCE gate, not the authority — the server re-decides both reads (rbacGuard
+      `approvals:read` first, then the per-instance participant predicate).
+    * LAZY, PER INSTANCE. The pair of reads fires on FIRST EXPAND of THAT row's card only, in parallel,
+      and is cached per `approvalInstanceId`. Collapse/re-expand reuses it; nothing polls, nothing
+      subscribes, nothing auto-retries.
+    * FRESHNESS. The cache is dropped by the SAME invalidation path the submissions list already has
+      (record switch, record version move, `refreshToken` bump) — see `invalidateProgress`. Progress that
+      predates an approval action is worse than no progress, so an invalidation also COLLAPSES every open
+      card: the next expand is a real re-read, and the panel stays lazy (no request is issued by the
+      invalidation itself).
+  VALUES-FREE degradation: 403 (no approvals:read on the server) and 404 (`APPROVAL_NOT_FOUND`, the
+  values-free answer a non-participant gets for an approval that does exist) are DIFFERENT sentences, an
+  answer that is not ABOUT this instance is a THIRD, and everything else is one generic failure with a
+  manual 重试. None of the four carries the thrown message, a status code, or anything else the server
+  said — the spec pins each by EQUALITY, not by substring, so a later 'improvement' that appends
+  `error.message` is red rather than green.
+    * IDENTITY (and what it says about DEV servers). `GET /api/approvals/:id` builds its DTO from
+      `SELECT * FROM approval_instances WHERE id = $1` and returns `id: row.id`
+      (ApprovalBridgeService.toUnifiedDTO), so a real answer echoes the requested id on BOTH the platform
+      and the PLM branch; a `detail.id` that differs is another approval's timeline about to be printed
+      under this record's row, and is refused. That check is also the only thing standing between this
+      card and `approvals/api.ts`'s mock branch, which short-circuits `getApproval`/`getApprovalHistory`
+      to module FIXTURES whenever `import.meta.env.DEV` is set without an explicit
+      `__APPROVAL_MOCK__ === false`, answering `apv_1` (`parseInt(id.replace('apv_', ''), 10) || 1`) for
+      every id this panel can hold. Suppressing the mock at its source would need `approvals/api.ts` to
+      export the flag — an owner ask, not this panel's call. Until then a dev-server walkthrough shows
+      the mismatch notice here, and is NOT evidence that the 步骤 / 待处理人 / 历史 rendering is correct.
 -->
 <template>
   <section v-if="sectionVisible" class="meta-record-approval" data-test="record-approval">
@@ -112,6 +147,13 @@
             <span v-if="submission.createdAt" data-test="record-approval-created-at">
               {{ l('approval.submittedAt') }} {{ formatApprovalTime(submission.createdAt) }}
             </span>
+            <!-- 完成时间: data the list route ALREADY returns and the panel never rendered. TERMINAL rows
+                 only (isRecordApprovalTerminalStatus — the same set the notification marker uses): the
+                 column is written by the terminal promote, so printing it beside a `pending` row would
+                 assert an outcome the server never gave. -->
+            <span v-if="completedAtText(submission)" data-test="record-approval-completed-at">
+              {{ l('approval.completedAt') }} {{ completedAtText(submission) }}
+            </span>
           </div>
           <!-- A failed submission otherwise gave the operator nothing: the row carries a sanitized
                refusal CODE (never a message, never a value). Render it as localized copy when we know the
@@ -135,6 +177,94 @@
             class="meta-record-approval__drift"
             data-test="record-approval-drift"
           >{{ driftNotice(submission) }}</div>
+          <!-- 审批进度 (Q17). Rendered ONLY with approvals:read (see the file header's GATE rule) and only
+               for a row that actually has an instance to read — a `creating`/`failed` submission has no
+               `approvalInstanceId` and gets nothing here. -->
+          <div
+            v-if="canReadApprovals && submission.approvalInstanceId"
+            class="meta-record-approval__progress"
+            data-test="record-approval-progress"
+          >
+            <button
+              type="button"
+              class="meta-record-approval__progress-toggle"
+              data-test="record-approval-progress-toggle"
+              :data-instance="submission.approvalInstanceId"
+              :aria-expanded="isProgressExpanded(submission.approvalInstanceId)"
+              @click="onToggleProgress(submission.approvalInstanceId)"
+            >{{
+              isProgressExpanded(submission.approvalInstanceId)
+                ? l('approval.progressCollapse')
+                : l('approval.progressExpand')
+            }}</button>
+            <div
+              v-if="isProgressExpanded(submission.approvalInstanceId)"
+              class="meta-record-approval__progress-body"
+              data-test="record-approval-progress-body"
+            >
+              <div
+                v-if="isProgressLoading(submission.approvalInstanceId)"
+                class="meta-record-approval__hint"
+                data-test="record-approval-progress-loading"
+              >{{ l('approval.progressLoading') }}</div>
+              <template v-else-if="progressErrorText(submission.approvalInstanceId)">
+                <div
+                  class="meta-record-approval__hint meta-record-approval__hint--error"
+                  data-test="record-approval-progress-error"
+                >{{ progressErrorText(submission.approvalInstanceId) }}</div>
+                <!-- A 403/404 is an ANSWER, not a hiccup: retrying it changes nothing and would train the
+                     operator to hammer a door that is closed. Only the generic failure offers 重试, and it
+                     is a BUTTON — there is no timer anywhere in this component. -->
+                <button
+                  v-if="progressCanRetry(submission.approvalInstanceId)"
+                  type="button"
+                  class="meta-record-approval__progress-retry"
+                  data-test="record-approval-progress-retry"
+                  @click="onRetryProgress(submission.approvalInstanceId)"
+                >{{ l('approval.progressRetry') }}</button>
+              </template>
+              <template v-else-if="isProgressReady(submission.approvalInstanceId)">
+                <div
+                  v-if="progressStepText(submission.approvalInstanceId)"
+                  class="meta-record-approval__progress-step"
+                  data-test="record-approval-progress-step"
+                >{{ progressStepText(submission.approvalInstanceId) }}</div>
+                <div
+                  v-if="progressApprovers(submission.approvalInstanceId).length > 0"
+                  class="meta-record-approval__progress-approvers"
+                  data-test="record-approval-progress-approvers"
+                >{{ l('approval.progressApprovers') }}: {{ progressApprovers(submission.approvalInstanceId).join('、') }}</div>
+                <div class="meta-record-approval__progress-history-title">{{ l('approval.progressHistory') }}</div>
+                <ol
+                  v-if="progressHistoryRows(submission.approvalInstanceId).length > 0"
+                  class="meta-record-approval__progress-history"
+                  data-test="record-approval-progress-history"
+                >
+                  <li
+                    v-for="row in progressHistoryRows(submission.approvalInstanceId)"
+                    :key="row.key"
+                    class="meta-record-approval__progress-history-row"
+                    data-test="record-approval-progress-history-row"
+                  >
+                    <span v-if="row.occurredAt" data-test="record-approval-progress-history-time">{{ formatApprovalTime(row.occurredAt) }}</span>
+                    <span data-test="record-approval-progress-history-actor">{{ row.actorName || l('approval.unknownActor') }}</span>
+                    <span data-test="record-approval-progress-history-action">{{ historyActionLabel(row.action) }}</span>
+                    <span v-if="row.comment" data-test="record-approval-progress-history-comment">{{ row.comment }}</span>
+                  </li>
+                </ol>
+                <div
+                  v-else
+                  class="meta-record-approval__hint"
+                  data-test="record-approval-progress-history-empty"
+                >{{ l('approval.progressHistoryEmpty') }}</div>
+                <div
+                  v-if="isProgressHistoryTruncated(submission.approvalInstanceId)"
+                  class="meta-record-approval__hint meta-record-approval__more"
+                  data-test="record-approval-progress-history-more"
+                >{{ historyCapNotice }}</div>
+              </template>
+            </div>
+          </div>
         </li>
       </ol>
       <div
@@ -164,16 +294,33 @@ import { RouterLink, routerKey } from 'vue-router'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import {
+  isRecordApprovalTerminalStatus,
+  recordApprovalApproverFallbackLabel,
   recordApprovalDriftNotice,
   recordApprovalErrorLabel,
   recordApprovalHasMoreNotice,
+  recordApprovalHistoryActionLabel,
   recordApprovalNotificationFailedNotice,
+  recordApprovalProgressHistoryCapNotice,
+  recordApprovalProgressStepNotice,
   recordApprovalSubmissionStatusLabel,
   recordLabel,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
+// 审批进度 (Q17) — the approval centre's OWN read helpers, imported, never re-implemented: one client for
+// `/api/approvals/:id` and `/:id/history` means the envelope-unwrapping fix that lives in
+// `normalizeApprovalHistoryEnvelope` cannot drift away from this surface.
+import { getApproval, getApprovalHistory, normalizeApprovalHistoryEnvelope } from '../../approvals/api'
+// NO member-identity resolver is imported here, on purpose (审批窗口 tripwire): turning an internal user
+// id into a display name is the approval window's own boundary, and
+// `tests/approval-member-identity-coverage-enumeration.spec.ts`'s scope-leak sweep reds the build if the
+// resolver — or the assignee-id field name — appears in ANY file under apps/web/src outside
+// `src/approvals/**` and `src/views/approval/**`. This card renders only the display name the approval
+// payload already carries; see `progressAssigneeLabel`.
+import { useApprovalPermissions } from '../../approvals/permissions'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaRecord, MetaRecordApprovalSubmission } from '../types'
+import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 
 const props = defineProps<{
   record?: MetaRecord | null
@@ -192,6 +339,16 @@ const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 // Non-throwing inject (see MetaRecordInspector.vue's file header): the drawer mounts without a router in
 // several frozen specs, so the request-number link is rendered only when a router really exists.
 const hasRouter = !!inject(routerKey, null)
+
+// 审批进度 GATE (Q17). The SAME hook ApprovalCenterView.vue (`canWrite`) and ApprovalDetailView.vue
+// (`canAct`) already call — one definition of what `approvals:read` means on the FE, read off the
+// session snapshot. It is a CONVENIENCE gate: the server re-decides every read (rbacGuard
+// `approvals:read` runs BEFORE the per-instance participant predicate on both routes), so a viewer who
+// somehow gets past this still gets 403/404, which the card renders as copy. Calling it here is safe
+// outside the approval surface: `bindApprovalAccessRefresh()` is idempotent behind a module-level
+// `listenersBound` flag, so a drawer that opens a hundred times still installs exactly one
+// storage/focus listener pair per page — the same one the approval centre installs.
+const { canRead: canReadApprovals } = useApprovalPermissions()
 
 /**
  * The page this panel asks for. EXPLICIT on purpose: the route has its own default and clamps to
@@ -233,6 +390,53 @@ const notificationNotice = (submission: MetaRecordApprovalSubmission): string | 
 // requested 20 into a claim about rows that are not on screen.
 const hasMoreNotice = computed(() => recordApprovalHasMoreNotice(submissions.value.length, isZh.value))
 
+/**
+ * How many history rows the card renders. The card is a SUMMARY beside a record, not the timeline — the
+ * approval centre owns the full one. The oldest rows are the ones dropped (see `normalizeProgressHistory`):
+ * an operator opening a record wants the last thing that happened.
+ */
+const PROGRESS_HISTORY_CAP = 20
+
+type ProgressErrorKind = 'forbidden' | 'not-participant' | 'mismatch' | 'failed'
+
+interface ProgressHistoryRow {
+  key: string
+  occurredAt: string | null
+  actorName: string | null
+  action: string
+  comment: string | null
+}
+
+interface ProgressEntry {
+  loading: boolean
+  loaded: boolean
+  errorKind: ProgressErrorKind | null
+  detail: UnifiedApprovalDTO | null
+  history: ProgressHistoryRow[]
+  historyTruncated: boolean
+}
+
+// Per-instance, per-mount caches. Keyed by `approvalInstanceId` rather than by submission id because the
+// READ is about the instance: two submissions can never share one, and the key survives a list re-read.
+const progressOpen = ref<Record<string, boolean>>({})
+const progressEntries = ref<Record<string, ProgressEntry>>({})
+// Stale-response guard for the progress reads specifically. The list's own `activeLoadVersion` is NOT
+// enough: a refreshToken bump invalidates progress WITHOUT calling resetState(), so a progress read in
+// flight across that bump would otherwise write post-invalidation state that predates the change.
+let activeProgressVersion = 0
+
+/**
+ * Drop every cached progress read AND collapse every open card. Called from exactly the places that
+ * invalidate the submissions list (record switch via `resetState`, version/refreshToken move, unmount),
+ * so 「查看进度」 can never show an answer older than the list it sits in. Issues NO request: the next
+ * expand does, which keeps the whole panel lazy.
+ */
+function invalidateProgress(): void {
+  activeProgressVersion += 1
+  progressOpen.value = {}
+  progressEntries.value = {}
+}
+
 // Stale-response guard (same closure-counter idiom as MetaRecordProvenancePanel): a load whose captured
 // version no longer matches when its await settles was superseded by a record switch, a refresh or the
 // component unmounting, and must not write state however late it lands.
@@ -247,6 +451,7 @@ let refreshPending = false
 function resetState(): void {
   activeLoadVersion += 1
   refreshPending = false
+  invalidateProgress()
   expanded.value = false
   loading.value = false
   loaded.value = false
@@ -281,6 +486,9 @@ watch(
   [() => props.record?.version, () => props.refreshToken],
   () => {
     loaded.value = false
+    // Same signal, same invalidation: a submission whose approval just moved must not keep serving the
+    // progress read taken before it moved.
+    invalidateProgress()
     if (!expanded.value) return
     if (loading.value) {
       refreshPending = true
@@ -292,6 +500,7 @@ watch(
 
 onUnmounted(() => {
   activeLoadVersion += 1
+  activeProgressVersion += 1
 })
 
 async function loadSubmissions(): Promise<void> {
@@ -338,6 +547,269 @@ function onToggle(): void {
   if (expanded.value) void loadSubmissions()
 }
 
+// ---------------------------------------------------------------------------
+// 审批进度 (Q17) — read, cache, render.
+// ---------------------------------------------------------------------------
+
+const historyCapNotice = computed(() =>
+  recordApprovalProgressHistoryCapNotice(PROGRESS_HISTORY_CAP, isZh.value))
+
+const completedAtText = (submission: MetaRecordApprovalSubmission): string =>
+  submission.completedAt && isRecordApprovalTerminalStatus(submission.status)
+    ? formatApprovalTime(submission.completedAt)
+    : ''
+
+const isProgressExpanded = (instanceId: string | undefined): boolean =>
+  Boolean(instanceId && progressOpen.value[instanceId])
+
+const progressEntry = (instanceId: string | undefined): ProgressEntry | undefined =>
+  instanceId ? progressEntries.value[instanceId] : undefined
+
+const isProgressLoading = (instanceId: string | undefined): boolean =>
+  Boolean(progressEntry(instanceId)?.loading)
+
+const isProgressReady = (instanceId: string | undefined): boolean =>
+  Boolean(progressEntry(instanceId)?.loaded)
+
+const PROGRESS_ERROR_KEYS: Record<ProgressErrorKind, MetaRecordLabelKey> = {
+  forbidden: 'approval.progressForbidden',
+  'not-participant': 'approval.progressNotParticipant',
+  mismatch: 'approval.progressMismatch',
+  failed: 'approval.progressFailed',
+}
+
+const progressErrorText = (instanceId: string | undefined): string => {
+  const kind = progressEntry(instanceId)?.errorKind
+  return kind ? l(PROGRESS_ERROR_KEYS[kind]) : ''
+}
+
+// 403/404 — and an answer about the WRONG instance — are ANSWERS (see the template's own note): only the
+// generic failure is retryable, because only it can come out differently the second time.
+const progressCanRetry = (instanceId: string | undefined): boolean =>
+  progressEntry(instanceId)?.errorKind === 'failed'
+
+const progressStepText = (instanceId: string | undefined): string => {
+  const detail = progressEntry(instanceId)?.detail
+  if (!detail) return ''
+  return recordApprovalProgressStepNotice(detail.currentStep, detail.totalSteps, isZh.value) ?? ''
+}
+
+const progressHistoryRows = (instanceId: string | undefined): ProgressHistoryRow[] =>
+  progressEntry(instanceId)?.history ?? []
+
+const isProgressHistoryTruncated = (instanceId: string | undefined): boolean =>
+  Boolean(progressEntry(instanceId)?.historyTruncated)
+
+const historyActionLabel = (action: string): string =>
+  recordApprovalHistoryActionLabel(action, isZh.value)
+
+/**
+ * One pending approver's label — TWO steps, deliberately one FEWER than ApprovalCenterDetailPane's
+ * `assigneeLabel`: the producer-supplied `metadata.assigneeName` when the approval payload carries a
+ * non-empty one, else the values-free ordinal 「成员 N」.
+ * WHY NOT THREE: the step that is gone is the approval centre's middle one — looking the assignment's
+ * internal user id up in the shared directory resolver. That lookup is the approval window's own
+ * member-identity boundary, fenced by the scope-leak sweep in
+ * `tests/approval-member-identity-coverage-enumeration.spec.ts`: no resolver reference, and no
+ * assignee-id field name, may exist outside `src/approvals/**` + `src/views/approval/**`. So this card
+ * never reads, logs or renders an assignee id at all — an assignment the approval side did not name
+ * reads as an ordinal, never as an identifier, and the name only the directory knows stays one click
+ * away in the approval centre, behind the request-number link this panel already renders.
+ */
+function progressAssigneeLabel(assignment: ApprovalAssignmentDTO, ordinal: number): string {
+  const metaName = assignment.metadata?.assigneeName
+  if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  return recordApprovalApproverFallbackLabel(ordinal, isZh.value)
+}
+
+/**
+ * Every ACTIVE assignment at the current node(s) — linear (`currentNodeKey`) or parallel
+ * (`currentNodeKeys`), the same filter ApprovalCenterDetailPane's `pendingApproverLabels` applies. The
+ * ordinal fallback numbers the RENDERED approvers, so a filter that let a finished or not-yet-reached
+ * assignment through inflates the count on screen rather than hiding inside it. Reads nothing but the
+ * cached `progressEntries` ref — no directory state, no request of its own.
+ */
+function progressApprovers(instanceId: string | undefined): string[] {
+  const detail = progressEntry(instanceId)?.detail
+  if (!detail) return []
+  const keys = new Set<string>(
+    detail.currentNodeKeys && detail.currentNodeKeys.length > 0
+      ? detail.currentNodeKeys
+      : detail.currentNodeKey
+        ? [detail.currentNodeKey]
+        : [],
+  )
+  if (keys.size === 0) return []
+  return (detail.assignments ?? [])
+    .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
+    .map((a, index) => progressAssigneeLabel(a, index + 1))
+}
+
+function pickString(row: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = row[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+/**
+ * History rows, oldest first, capped.
+ *
+ * SHAPE: the platform branch of `GET /api/approvals/:id/history` returns SNAKE_CASE rows
+ * (`occurred_at`/`actor_name`/`from_status`), while the PLM branch and `UnifiedApprovalHistoryDTO`
+ * are camelCase — a drift `approvals/api.ts` documents and does not reconcile. Reading BOTH spellings
+ * here is what makes the card work against a platform instance at all; picking one would render a
+ * timeline of blank actors and blank times for exactly the instances this panel creates.
+ *
+ * ORDER: sorted ASCENDING by parsed timestamp, with the server's own order as the tie-break (and as the
+ * whole order for rows whose timestamp will not parse) — never dropped for being unparseable.
+ * The CAP keeps the NEWEST rows (`slice(-cap)`), because the tail is what an operator opening a record
+ * is looking for.
+ *
+ * NOTHING-ROWS: a non-object element (a `null`, a scalar) used to be coerced to `{}` and still emitted a
+ * row — no time, no action, actor 「未知」 — i.e. an assertion that an unknown person did an unnamed
+ * thing at an unknown time. Such an element is dropped, and so is any row that survives parsing with no
+ * time, no actor, no action AND no comment: every other unknown on this card degrades to rendering
+ * nothing (步骤 needs both numbers, 待处理人 needs a current node), and a history row carrying zero
+ * information should too. A row that still carries SOMETHING — an orphan comment, say — is KEPT: the rule
+ * is 'no information', not 'unknown actor'.
+ */
+function normalizeProgressHistory(payload: unknown): { rows: ProgressHistoryRow[]; truncated: boolean } {
+  const items = (normalizeApprovalHistoryEnvelope(payload) as unknown[])
+    .filter((raw): raw is Record<string, unknown> => Boolean(raw) && typeof raw === 'object')
+  const parsed = items.map((row, index) => {
+    const occurredAt = pickString(row, 'occurredAt', 'occurred_at', 'createdAt', 'created_at')
+    const timestamp = occurredAt ? Date.parse(occurredAt) : Number.NaN
+    return {
+      index,
+      timestamp,
+      row: {
+        key: `${pickString(row, 'id') ?? 'row'}-${index}`,
+        occurredAt,
+        actorName: pickString(row, 'actorName', 'actor_name'),
+        action: pickString(row, 'action') ?? '',
+        comment: pickString(row, 'comment'),
+      } satisfies ProgressHistoryRow,
+    }
+  }).filter(({ row }) => Boolean(row.occurredAt || row.actorName || row.action || row.comment))
+  parsed.sort((a, b) => {
+    const aKnown = !Number.isNaN(a.timestamp)
+    const bKnown = !Number.isNaN(b.timestamp)
+    if (aKnown && bKnown && a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
+    return a.index - b.index
+  })
+  const rows = parsed.map((entry) => entry.row)
+  if (rows.length <= PROGRESS_HISTORY_CAP) return { rows, truncated: false }
+  return { rows: rows.slice(rows.length - PROGRESS_HISTORY_CAP), truncated: true }
+}
+
+/**
+ * The HTTP status behind a failed read, parsed DEFENSIVELY.
+ *
+ * `apiGet` (utils/api.ts) throws a plain `new Error(\`API error: \${status} \${statusText}\`)` — there is no
+ * typed error and no `status` property on that path, so the status has to come out of the message. A
+ * typed thrower (`ApprovalApiError` carries a real `status`) is preferred when present, and anything
+ * neither shape yields `null`, which the caller maps to the generic failure rather than guessing.
+ * The `API error:` prefix is part of the pattern on purpose: a bare three-digit match would read a 404
+ * out of any message that happens to contain one.
+ */
+function progressErrorStatus(error: unknown): number | null {
+  if (error && typeof error === 'object') {
+    const direct = (error as { status?: unknown }).status
+    if (typeof direct === 'number' && Number.isFinite(direct)) return direct
+  }
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string' ? error : ''
+  const match = /API error:\s*(\d{3})\b/.exec(message)
+  return match ? Number(match[1]) : null
+}
+
+function progressErrorKind(error: unknown): ProgressErrorKind {
+  const status = progressErrorStatus(error)
+  // 403 = the rbacGuard (no approvals:read on the server). 404 = APPROVAL_NOT_FOUND, the values-free
+  // answer canReadApprovalInstance gives a NON-PARTICIPANT. Two different sentences — see the labels.
+  if (status === 403) return 'forbidden'
+  if (status === 404) return 'not-participant'
+  return 'failed'
+}
+
+async function loadProgress(instanceId: string): Promise<void> {
+  // Fail-closed second time: the template already hides the toggle without the permission, and this
+  // makes a programmatic call without it a no-op rather than a request.
+  if (!canReadApprovals.value || !instanceId) return
+  const existing = progressEntries.value[instanceId]
+  // Cached (loaded) or already in flight => nothing. An ERROR entry is neither, so 重试 / a re-expand
+  // after a failure really does read again.
+  if (existing && (existing.loading || existing.loaded)) return
+  const loadVersion = activeProgressVersion
+  progressEntries.value[instanceId] = {
+    loading: true,
+    loaded: false,
+    errorKind: null,
+    detail: null,
+    history: [],
+    historyTruncated: false,
+  }
+  try {
+    // In PARALLEL: the two reads are independent and the card shows both or neither.
+    const [detail, history] = await Promise.all([
+      getApproval(instanceId),
+      getApprovalHistory(instanceId),
+    ])
+    if (loadVersion !== activeProgressVersion) return
+    // IDENTITY: the answer must be ABOUT the instance we asked for. See the file header — the route
+    // answers `id: row.id` from `WHERE id = $1`, so an echo mismatch is never a legitimate answer; it is
+    // either another approval's timeline or the DEV fixture branch of `approvals/api.ts`. Fail closed to
+    // a values-free notice (no 重试 — a re-read returns the same wrong instance) and render NEITHER
+    // half, because the history read is keyed by the same id and would be just as wrong.
+    const answeredId = typeof detail?.id === 'string' ? detail.id : ''
+    if (answeredId && answeredId !== instanceId) {
+      progressEntries.value[instanceId] = {
+        loading: false,
+        loaded: false,
+        errorKind: 'mismatch',
+        detail: null,
+        history: [],
+        historyTruncated: false,
+      }
+      return
+    }
+    const { rows, truncated } = normalizeProgressHistory(history)
+    progressEntries.value[instanceId] = {
+      loading: false,
+      loaded: true,
+      errorKind: null,
+      detail: detail ?? null,
+      history: rows,
+      historyTruncated: truncated,
+    }
+  } catch (error) {
+    if (loadVersion !== activeProgressVersion) return
+    progressEntries.value[instanceId] = {
+      loading: false,
+      loaded: false,
+      errorKind: progressErrorKind(error),
+      detail: null,
+      history: [],
+      historyTruncated: false,
+    }
+  }
+}
+
+function onToggleProgress(instanceId: string | undefined): void {
+  if (!instanceId) return
+  const next = !progressOpen.value[instanceId]
+  progressOpen.value = { ...progressOpen.value, [instanceId]: next }
+  if (next) void loadProgress(instanceId)
+}
+
+function onRetryProgress(instanceId: string | undefined): void {
+  if (!instanceId) return
+  void loadProgress(instanceId)
+}
+
 function formatApprovalTime(value: string): string {
   if (!value) return ''
   const timestamp = Date.parse(value)
@@ -365,4 +837,13 @@ function formatApprovalTime(value: string): string {
 .meta-record-approval__notification-failed { font-size: 11px; color: #b45309; }
 .meta-record-approval__more { color: #b45309; }
 .meta-record-approval__status { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 4px; padding: 1px 6px; }
+.meta-record-approval__progress { margin-top: 2px; }
+.meta-record-approval__progress-toggle { background: none; border: none; padding: 0; cursor: pointer; font-size: 11px; color: var(--ms-color-primary, #409eff); }
+.meta-record-approval__progress-body { margin-top: 4px; display: flex; flex-direction: column; gap: 3px; border-left: 2px solid #f1f5f9; padding-left: 8px; }
+.meta-record-approval__progress-step { font-size: 11px; color: #334155; font-weight: 600; }
+.meta-record-approval__progress-approvers { font-size: 11px; color: #475569; }
+.meta-record-approval__progress-history-title { font-size: 11px; color: #94a3b8; }
+.meta-record-approval__progress-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.meta-record-approval__progress-history-row { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #64748b; }
+.meta-record-approval__progress-retry { align-self: flex-start; background: none; border: none; padding: 0; cursor: pointer; font-size: 11px; color: var(--ms-color-primary, #409eff); }
 </style>
