@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
+import { ConnectionPool } from '../../src/integration/db/connection-pool'
 import { consumeRecoveryArchiveDerivedEffect, enqueueRecoveryArchiveDerivedEffect, type RecoveryArchiveDerivedWork } from '../../src/multitable/recovery-archive-derived-effects'
 import {
   abandonRecoveryArchiveRestoreJob,
@@ -1761,6 +1762,32 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           await runOneChunk(claim, [])
           await finalizeRecoveryArchiveRestoreJob(transaction, claim, { replayHorizonMs: 0 })
         } else await abandonRecoveryArchiveRestoreJob(transaction, claim, { replayHorizonMs: 0 })
+
+        if (terminal === 'done') {
+          const constrained = new ConnectionPool({
+            connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 1_000,
+          })
+          const constrainedTransaction: RecoveryArchiveRestoreJobTransaction = work =>
+            constrained.transaction(({ query }) => work(query as RecoveryArchiveRestoreJobQuery))
+          let innerEntered = false
+          try {
+            expect(await consumeRecoveryArchiveDerivedEffect(constrainedTransaction, async () =>
+              constrainedTransaction(async query => {
+                innerEntered = true
+                await query('SELECT 1')
+                return true
+              }))).toBe('retry')
+            expect(innerEntered).toBe(false)
+            expect(constrained.getInternalPool().waitingCount).toBe(0)
+            expect(constrained.getInternalPool().idleCount).toBe(1)
+            const uncompleted = await q(`SELECT completed_at, last_attempt_at IS NOT NULL AS attempted
+              FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1`, [revisionId])
+            expect(uncompleted.rows).toEqual([{ completed_at: null, attempted: true }])
+          } finally {
+            constrained.stopMetricsCollection()
+            await constrained.getInternalPool().end()
+          }
+        }
 
         expect(await consumeRecoveryArchiveDerivedEffect(transaction, async work => {
           expect(work).toEqual({ identity, revisionId, recordId: `${PREFIX}_deleted`, fieldIds: [], linkInvalidations: [] })
