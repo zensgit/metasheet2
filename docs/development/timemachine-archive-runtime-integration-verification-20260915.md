@@ -216,3 +216,12 @@ Exact code `378190bc0f014b05f2364c06cc88fe34d26aa4a9`, tree `f4b958532d834eb83df
 - Async facade/application/worker/server unit neighbors: 4 files, 80/80 PASS. Core `pnpm exec tsc --noEmit` rerun exits 0; diff-check PASS. Existing incoming tests were reused, not duplicated. No new mutation claim for the merge-only checkpoint.
 - Effects, fixture sheets and jobs all zero before dropping the dedicated DB. Afterwards database-prefix and backend counts both zero; owned PG stopped. Logs are local `/private/tmp/tm-runtime-merge-{migrate,process,route,unit,tsc}.log`; the final tsc rerun was directly observed exit 0 rather than inferred from an empty log.
 - No push, PR metadata, Ready, merge-to-main, flags, dispatch or deployment. Production provider/custody, standard startup, queue capacity and combined canonical restart remain open; overall goal remains active.
+
+### Bounded Derived Drain Verification
+
+Exact code `5522d0467e17c43eeafb910854d63bde2973b2c6`, tree `079470ea9da2126d968b8cee71dacf2e3a5534f6`; two source/test files, 26 additions/2 deletions.
+
+- New expectations against the old one-attempt implementation: 4 RED/22 PASS. Cases cover multiple completions followed by idle/retry and a continuously replenished queue, with ordinary restore finalization still reached after the bound. Existing stop-after-in-flight and infrastructure-failure tests remain green.
+- Restored implementation: four worker/application/facade/server unit files 83/83 PASS. Mutation breaking only on idle instead of every non-completed outcome: 2 RED/24 PASS. Restored direct worker suite 26/26 PASS. Core tsc, worker source ESLint and diff-check exit 0.
+- Logs: `/private/tmp/tm-derived-batch-{before,final,mutation,restored}.log`. No new DB claim: persistence/locking SQL is unchanged; preceding 89-test real-DB evidence binds its recorded code SHA. This scheduling test is not a production performance benchmark.
+- Local-only commit, no push/PR/flags/deployment. Capacity/indexing, canonical restart composition and provider decisions remain open.
