@@ -86,6 +86,8 @@ export async function applyFencedDerivedDataMerge(
   const scope = scopedDerivedTransactions.get(query)
   if (scope) {
     if (!scope.has(sheetId)) throw new Error('RECOVERY_DERIVED_SCOPE_CHANGED')
+    // lock-exempt: derived-only recompute under the scoped sheet fence; record locks do not freeze computed values
+    // revision-exempt: recomputed stored inputs, no authored edit or version bump; restore revisions are recorded separately
     await query(
       `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
       [JSON.stringify(updates), recordId, sheetId],
