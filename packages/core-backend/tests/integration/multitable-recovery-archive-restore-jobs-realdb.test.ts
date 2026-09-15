@@ -7,12 +7,13 @@ import { join } from 'node:path'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
 import { ConnectionPool } from '../../src/integration/db/connection-pool'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
+import { createRecoveryArchiveDerivedProcessor } from '../../src/routes/univer-meta'
 import { consumeRecoveryArchiveDerivedEffect, enqueueRecoveryArchiveDerivedEffect, type RecoveryArchiveDerivedWork } from '../../src/multitable/recovery-archive-derived-effects'
 import {
   abandonRecoveryArchiveRestoreJob,
@@ -1135,6 +1136,10 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     }
   })
 
+  afterEach(async () => {
+    await cleanupFixtures()
+  })
+
   afterAll(async () => {
     await cleanupFixtures()
     await migrationDb.destroy()
@@ -2086,7 +2091,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         `composed_async_facade_${recoveryMode}`,
         expiresAt,
         async (candidate) => {
-          fieldId = `${candidate.sheetId}_field`
+          fieldId = `fld_${candidate.sheetId}_field`
           recordIds = Array.from({ length: 5001 }, (_, index) =>
             `${candidate.sheetId}_record_${String(index).padStart(5, '0')}`,
           )
@@ -2333,7 +2338,9 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       expect(pendingDerived.rows).toEqual(committedBeforeRestart === 0 ? [] : [{
         record_id: recordIds[0], completed_at: null, revision_present: true,
       }])
-      const processDerived = vi.fn(async (_work: RecoveryArchiveDerivedWork) => true)
+      const processDerived = vi.fn(processBoundary
+        ? createRecoveryArchiveDerivedProcessor({ query: q, transaction })
+        : async (_work: RecoveryArchiveDerivedWork) => true)
       await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
       expect(processDerived).not.toHaveBeenCalled()
 
@@ -2487,8 +2494,35 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         terminal = await finalizeRecoveryArchiveRestoreJob(transaction, resumedClaim!, { replayHorizonMs: 0 })
       }
       expect(terminal).toMatchObject({ state: 'done', completedCount: '5001' })
-      await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('completed')
-      expect(processDerived).toHaveBeenCalledTimes(1)
+      const formulaId = `${fieldId}_after_restart_formula`
+      if (processBoundary) {
+        await q(`INSERT INTO meta_fields (id,sheet_id,name,type,property,"order")
+          VALUES ($1,$2,'Derived after restart','formula',$3::jsonb,2)`,
+        [formulaId, fixture.sheetId, JSON.stringify({ expression: `={${fieldId}}` })])
+        await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1',
+          [recordIds[0], JSON.stringify({ [formulaId]: 'stale-derived-value' })])
+        await q('UPDATE users SET is_active=FALSE WHERE id=$1', [fixture.actorId])
+        await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('retry')
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
+          .toBe('stale-derived-value')
+        expect((await q(`SELECT count(*)::int AS pending FROM meta_recovery_archive_derived_effects
+          WHERE job_id=$1 AND completed_at IS NULL`, [accepted.id])).rows)
+          .toEqual([{ pending: 5001 }])
+        await q('UPDATE users SET is_active=TRUE WHERE id=$1', [fixture.actorId])
+      }
+      for (let effect = 0; effect < (processBoundary ? 5001 : 1); effect += 1) {
+        await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('completed')
+      }
+      expect(processDerived).toHaveBeenCalledTimes(processBoundary ? 5002 : 1)
+      if (processBoundary) {
+        await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
+          .toBe('archived-00000')
+        expect((await q(`SELECT count(*)::int AS total,
+          count(*) FILTER (WHERE completed_at IS NOT NULL)::int AS completed
+          FROM meta_recovery_archive_derived_effects WHERE job_id=$1`, [accepted.id])).rows)
+          .toEqual([{ total: 5001, completed: 5001 }])
+      }
       expect(processDerived.mock.calls[0]?.[0]).toMatchObject({
         identity: { jobId: accepted.id, sheetId: fixture.sheetId, actorId: fixture.actorId },
       })
@@ -2557,7 +2591,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         [fixture.sheetId, recordIds[5000]],
       )
       expect(lastRecord.rows).toEqual([{
-        data: { [fieldId]: 'archived-05000' },
+        data: { [fieldId]: 'archived-05000', ...(processBoundary ? { [formulaId]: 'archived-05000' } : {}) },
         version: 3,
       }])
     } finally {
@@ -2569,7 +2603,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       }
       await rm(root, { recursive: true, force: true })
     }
-  }, 90_000)
+  }, 240_000)
 
   test('applies only one frozen whole-sheet chunk through the real L8 kernel after canonical prelocks', async () => {
     const fixture = await seedVerifiedArchive('async_l8_chunk')
