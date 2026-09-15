@@ -1372,6 +1372,12 @@ export default defineConfig({
       // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
       // plugin-tests.yml is left byte-identical for the s6a re-pin reason cited above.
       'tests/integration/approval-admin-capability-realdb.db.test.ts',
+      // P4(2) phase 0 (census-tiered-admin-20260915.md; design draft §4.B) — zero-behavior-change
+      // parity for `approvalAdminCapabilityGuard`/`resolveApprovalAdminCapability` across real HTTP
+      // routes and real seeded viewers (DB rows, not token claims — see the file's own docblock).
+      // Excluded here so describeIfDatabase cannot skip-green it; whole-file wired into
+      // .github/workflows/approval-realdb-admin-capability-resolver.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-admin-capability-resolver-phase0.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
