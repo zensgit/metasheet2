@@ -21,7 +21,7 @@
 | Q9 | 2a 后续：列表带模板名/申请人名、hasMore、自动通过原子提升 | opus / opus / fable | wt-p5 `feat/record-approval-list-names-limit` | 🟡 流水线 |
 | Q10 | #5750 后续：嵌入宿主回显真实上下文、navigated 按请求去重 | opus / opus / fable | wt-flabel `fix/embed-host-echo-context-dedup` | 🟡 流水线 |
 | Q11 | 编辑器跨基 create_record 横幅 + 登记 #5747 客户端测试 | opus / opus / fable | wt-fe6 `fix/editor-crossbase-create-banner` | 🟡 流水线 |
-| Q12 | #5756 真实路径丢键（r49 实证发现） | opus 复现 / opus / opus / fable | wt-p6 `fix/editor-load-actions-over-legacy-mirror` | 🟡 流水线 |
+| Q12 | #5756 真实路径丢键（r49 实证"发现"） | opus 复现 | 未复现（13 例绿）；根因是浏览器跑旧包（见 §3.3），非缺陷；流水线已停 | ⛔ 误报，已纠 |
 | — | 222 发布 | — | r47 / r48（夜间） | 📝 |
 
 ## 1. 队列与模型选择依据
@@ -73,7 +73,9 @@
 
 ### 3.3 r49（main `79dbc6588` = r48 + #5755 + #5756），2026-09-15 22:22–22:24 上 222
 - 备份 `pre-r49-20260915-222239.dump`；upgrade 退出 0；健康 OK；前端包含 `crossBaseTarget` 与外部上下文字面量（提示级）；dry-run 0；pm2 online；9 条 False 同前。`gh run watch` 撞 API EOF 后由 resume 路径自动接管（脚本已内置）。
-- **#5756 实证 → 发现未覆盖路径**：先用 SQL 给规则 B 的 `send_notification` 配置塞入未建模键 `x_customerExtension`，刷新页面后确认 `GET …/automations` 的 `actions[0].config` 带该键（旧镜像字段 `actionConfig` 不带），在编辑器里打开规则 B 原样保存 → **PATCH 体不含该键，DB 中键被丢**（三次重做排除了缓存与顺序因素）。即 #5756 的单测夹具（直接给编辑器喂 `actions`）没有覆盖真实的「管理器 → 编辑器 → PATCH」路径。已派 Q12 流水线：先在管理器层用真实客户端 fetch 桩复现（要求先红），再最小修复。
+- **#5756 实证（含一次误判与纠错）**：先用 SQL 给规则 B 的 `send_notification` 配置塞入未建模键 `x_customerExtension`，在编辑器里原样保存并抓 PATCH 体。前三次 PATCH 体都不含该键，一度判定为"#5756 未覆盖真实路径"并派了复现流水线（管理器层 13 例全绿，未复现）；随后核对 `document.scripts` 发现浏览器仍在跑 **r48 的包**（`index-B9H5OXJF.js`），而服务端已在发 r49 的 `index-CV9OqCO5.js`——222 的 nginx 对 `index.html` 不发 `Cache-Control`（只有 ETag），浏览器启发式缓存了旧 HTML，SPA 内导航与 `ignoreCache` 导航都没换包。用带随机参数的 URL 强制拉新 HTML 后重测：**PATCH 体含该键，DB 复核保留**，#5756 生效。
+  - 教训已入记忆：上机实测前先核对 `document.scripts` 的 `index-*.js` 与包一致。
+  - 运维项（待 owner）：nginx 给 `index.html` 加 `Cache-Control: no-cache`，否则升级后用户会残留旧包直到启发式缓存过期。
 - #5755（外部上下文收敛）无法在 222 手工构造嵌入宿主重发，以单元/组件级用例（指向主检出 4 红 / 本分支绿）为证。
 
 ## 4. 过程发现与教训
