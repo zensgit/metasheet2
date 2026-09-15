@@ -221,6 +221,18 @@ type SaveGate = {
   ) => Promise<string | null>
 }
 
+/**
+ * FIRE-TIME gate (the fail-closed authority for EVERY path — createRule is the only save-time caller, so an
+ * edited rule only meets the check here). Private for the same reason as the save gate, cast the same way.
+ */
+type FireGate = {
+  assertResultWritebackFields: (
+    sheetId: string,
+    writeback: Record<string, unknown>,
+    outcome: string,
+  ) => Promise<void>
+}
+
 function makeService(selectOptions: string[]) {
   const queryFn = vi.fn(async (sql: string) => {
     if (/FROM meta_fields/i.test(sql)) {
@@ -247,7 +259,7 @@ function makeService(selectOptions: string[]) {
   chain.execute = vi.fn(async () => [])
   chain.executeTakeFirst = vi.fn(async () => undefined)
   const service = new AutomationService(new EventBus(), chain as never, queryFn as never)
-  return { gate: service as unknown as SaveGate, queryFn }
+  return { gate: service as unknown as SaveGate, fire: service as unknown as FireGate, queryFn }
 }
 
 const approvalAction = (writeback: Record<string, unknown>) => ([{
@@ -307,5 +319,29 @@ describe('#5742 assertResultWritebackFieldsAtSave outcome coverage', () => {
     const { gate: zhOnly } = makeService(['待审批', ZH_APPROVED])
     await expect(zhOnly.assertResultWritebackFieldsAtSave('sheet_1', approvalAction({ statusField: 'fld_status' })))
       .resolves.toContain('for outcome approved')
+  })
+})
+
+/**
+ * FIRE-TIME seam. The save gate and the fire-time gate are two SEPARATE call sites of
+ * `resultWritebackFieldTypeError`; passing the writeback through at only one of them would leave the other
+ * validating the RAW outcome, and every save-time case here would still be green. So the mapping-aware
+ * resolution is pinned at the fire-time call site directly, against a select that has NO option named
+ * 'approved' — the exact shape a zh-only status field has in production.
+ */
+describe('#5742 assertResultWritebackFields (fire time) validates the RESOLVED value', () => {
+  it('passes a zh-only select when the approved mapping names one of its options', async () => {
+    const { fire } = makeService(['待审批', ZH_APPROVED])
+    await expect(fire.assertResultWritebackFields(
+      'sheet_1',
+      { statusField: 'fld_status', outcomeValues: { approved: ZH_APPROVED } },
+      'approved',
+    )).resolves.toBeUndefined()
+  })
+
+  it('control: the SAME select with NO mapping still fails closed on the raw outcome', async () => {
+    const { fire } = makeService(['待审批', ZH_APPROVED])
+    await expect(fire.assertResultWritebackFields('sheet_1', { statusField: 'fld_status' }, 'approved'))
+      .rejects.toThrow(/for outcome approved/)
   })
 })
