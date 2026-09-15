@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
+import { enqueueRecoveryArchiveDerivedEffect } from '../../src/multitable/recovery-archive-derived-effects'
 import {
   abandonRecoveryArchiveRestoreJob,
   acceptRecoveryArchiveRestoreJob,
@@ -1538,6 +1539,74 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       })
     }
   })
+
+  test.each(['commit', 'delete', 'rollback', 'conflict', 'identity', 'autocommit'] as const)(
+    'derived effects enqueue is transaction-bound and ID-only: %s', async (scenario) => {
+      const fixture = await seedVerifiedArchive(`derived_enqueue_${scenario}`)
+      const plan = compilePlan(fixture)
+      const token = mintToken(fixture, plan)
+      await preparePlan(fixture, plan, token)
+      const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+        token, plan, identity: restoreRequestIdentity(fixture),
+        resumeDeadline: future(60_000), recheckAuthority: async () => true,
+      })
+      const identity: RecoveryArchiveWorkerIdentity = {
+        jobId: accepted.id, workspaceId: fixture.workspaceId, baseId: fixture.baseId,
+        sheetId: fixture.sheetId, actorId: fixture.actorId,
+      }
+      const mutation = {
+        kind: scenario === 'delete' ? 'delete' as const : 'revert' as const,
+        recordId: `${PREFIX}_record`, revisionId: randomUUID(), version: 2,
+        changedFieldIds: ['second', 'first', 'first'], patch: { first: 'must-not-be-persisted' },
+        linkInvalidations: [{ sheetId: fixture.sheetId, recordIds: ['related'], fieldIds: ['link'] }],
+      }
+      try {
+        // A correct identity without an applying job is not sufficient to enqueue work.
+        await expect(transaction(query => enqueueRecoveryArchiveDerivedEffect(query, identity, mutation)))
+          .rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECT_JOB_MISMATCH')
+        const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+        expect(candidate?.jobId).toBe(accepted.id)
+        await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+          workerOwnerId: `${PREFIX}_derived_worker`, leaseUntil: future(45_000),
+        })
+        if (scenario === 'autocommit') {
+          await expect(enqueueRecoveryArchiveDerivedEffect(q, identity, mutation))
+            .rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECT_TRANSACTION_REQUIRED')
+        } else if (scenario === 'identity') {
+          for (const key of ['workspaceId', 'baseId', 'sheetId', 'actorId'] as const) {
+            await expect(transaction(query => enqueueRecoveryArchiveDerivedEffect(query,
+              { ...identity, [key]: `${PREFIX}_other_identity` }, mutation)))
+              .rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECT_JOB_MISMATCH')
+          }
+        } else {
+          const work = transaction(async (query) => {
+            await enqueueRecoveryArchiveDerivedEffect(query, identity, mutation)
+            const outside = await q('SELECT revision_id FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1', [mutation.revisionId])
+            expect(outside.rows).toEqual([])
+            if (scenario === 'rollback') throw new Error('TEST_ROLLBACK')
+            await enqueueRecoveryArchiveDerivedEffect(query, identity, mutation)
+            if (scenario === 'conflict') await enqueueRecoveryArchiveDerivedEffect(query, identity,
+              { ...mutation, recordId: `${PREFIX}_different_record` })
+          })
+          if (scenario === 'rollback') await expect(work).rejects.toThrow('TEST_ROLLBACK')
+          else if (scenario === 'conflict') await expect(work).rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECT_CONFLICT')
+          else await work
+        }
+        const persisted = await q(`SELECT record_id, field_ids, link_invalidations, completed_at
+          FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1`, [mutation.revisionId])
+        expect(persisted.rows).toEqual(scenario === 'commit' || scenario === 'delete' ? [{
+          record_id: mutation.recordId, field_ids: scenario === 'delete' ? [] : ['first', 'second'],
+          link_invalidations: mutation.linkInvalidations, completed_at: null,
+        }] : [])
+        expect(JSON.stringify(persisted.rows)).not.toContain('must-not-be-persisted')
+      } finally {
+        await q('DELETE FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1', [mutation.revisionId])
+        await cancelRecoveryArchiveRestoreJob(transaction, {
+          ...identity, replayHorizonMs: 0, recheckAuthority: async () => true,
+        })
+      }
+    },
+  )
 
   test('fails migration preflight when archive expiry or writer ownership columns drift', async () => {
     const expiryDrift = await databaseError(migrationDb.transaction().execute(async (trx) => {
