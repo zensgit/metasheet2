@@ -25,7 +25,9 @@
 | Q13 | 管理器→编辑器→PATCH 往返回归用例（源自 Q12 的复现夹具） | opus 单代理 | #5759（76cd69f5b；14 例 + approval.completed；两点登记，guard 镜像 zensgit 推送） | ✅ 已合，r50 |
 | Q14 | Q9 前端配套：面板「还有更多」与通知失败标记，客户端 hasMore/limit | opus / opus / fable | #5765（784c22dc1；裁判 MERGE @7f9f04afe，3 条反驳全落码） | ✅ 已合，r50 |
 | Q15 | 编辑器 #5756 往返用例 CI 5 s 超时抖动（#5763 web-tests 红暴露） | opus 单代理 | #5764（21 个 it 显式 30 s 超时；变异 1 ms → 12 红） | ✅ 已合，r50 |
-| Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | `useRouter()` 探测 → `inject(routerKey, null)`，行为不变；分支 `fix/record-approval-router-inject-quiet` | 🟡 进行中 |
+| Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | #5766（23133d0df；`useRouter()` 探测 → `inject(routerKey, null)`，告警 75→0，变异回退 27，vue-tsc 干净） | 🟡 CI |
+| Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | 分支 `feat/record-approval-progress-card`（wt-p5）；设计见 §2 | 🟡 流水线 |
+| Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | 分支 `fix/workbench-routerlink-prop-warns`（wt-p6）；他窗口领域的 62%（Integration*/TemplateAuthoring 裸 createApp 未装 ElementPlus、AttendanceView useRouter）只记录在 §5.3 | 🟡 进行中 |
 | — | 222 发布 | — | r47 / r48 / r49 已上（§3）；r50 = r49 + #5759 #5760 #5763 #5764 #5765（+#5761 若绿）计划 08:00 前上 | 🟡 |
 
 ## 1. 队列与模型选择依据
@@ -73,6 +75,12 @@
 
 ### Q11 编辑器跨基 create_record（PR #5761）
 后端允许 create_record 仅凭 `targetBaseId` 声明跨基；编辑器现在显示目的地横幅、按声明 base 过滤目标表下拉（roster 行自带 `baseId`）、`sheetId` 缺失内联提示；反驳者抓到初版文案"运行会失败"与执行器相反（执行器在目标表与触发表同 base 时静默建在本 base），文案改为陈述真实规则并钉用例；保存阻断只对 mutate 类三元组。预览层同类失真另立 #5762。
+
+### Q17 记录抽屉审批进度卡片
+- **地图（3 只读读者，origin/main 784c22dc1）**：面板今天只列提交行（状态/编号/申请人/送审时间/漂移），不渲染 completedAt，无节点/历史；审批中心 `GET /api/approvals/:id` 给 status、currentStep/totalSteps、currentNodeKey(s)、assignments[]（assigneeId/nodeKey/isActive，无名字），`/history` 给 snake_case 行（occurred_at/actor_name/action/comment）；两者都先过 `rbacGuard('approvals:read')`（403）再过参与人门 `canReadApprovalInstance`（非参与人值无关 404）；前端无可复用时间线组件（ApprovalDetailView 内联，pinia store 是共享单例不能借用）；待处理人名字靠 member-display-identity 批量解析。
+- **设计**：前端-only。面板每行有 `approvalInstanceId` 且查看者持 FE `approvals:read`（与审批中心同一门）才显示「查看进度」；展开才并行取 detail+history，缓存按实例，随面板既有失效路径（record.id / record.version / refreshToken）清空；渲染步骤 x/y、当前待处理人（复用审批中心的名字解析）、历史（兼容 snake/camel，最多 20 条）、终态行补「完成时间」；403 →「无权查看审批进度」、404 →「你不是该审批的参与人」、其它 → 重试，全部值无关；不加轮询/不加 useRouter。
+- **不做**：审批中心代码不动（只 import）；申请人无 `approvals:read` 时看不到进度——这正是 #5741/授予 `approvals:read` 给普通角色的 owner 决定（§5.2）。
+- **登记**：新 spec 两点登记（必跑脚本 + guard 清单）。
 
 ### Q5 componentSpec
 模板 `stock-preparation-templates.cjs:754` 早已 `labelZh: '组件规格'`，222 上的字段 `fld_3340800c07dc656a26e7141c`（五个恢复列之一，无 pack fieldId）仍是英文名，直接 `UPDATE meta_fields SET name` 改为「组件规格」（值无关，条件带原名）。新装实例走 zh-CN 时自然取中文。
@@ -135,7 +143,8 @@
 ### 5.3 队列之外的候选（按我给用户的顺序）
 1. 记录抽屉审批卡片（在抽屉内直接看当前实例与节点，不必跳审批中心）。
 2. 钉钉待办 B 方案镜像代码（设计已定，见 [[beiliao-dingtalk-todo-decision]]；三条 owner 侧前置未满足）。
-3. 技术债：lint 残留、过期上机标记、spec 里其它 Vue warn 噪音（同 Q16 思路普查一遍）。
+3. 技术债：lint 残留、过期上机标记。
+4. Vue warn 噪音（Q18 普查结论，他窗口领域只记录不动）：`tests/IntegrationWorkbenchView.spec.ts`（38.6k 行 / 2358 条）、`IntegrationBridgeAgentSection` / `IntegrationReadSourceConfigPanel` / `approvalTemplateAuthoring` / `IntegrationCompositionWizard` 等裸 `createApp()` 未 `app.use(ElementPlus)`（`tests/fwb-rule-authoring.spec.ts` 有现成写法），合计约 62%；`AttendanceView.vue:12388` 的 `useRouter()` 在 15+ 考勤 spec 里刷 389 条，可用 Q16 同法或共享 `mountWithRouter()`；`AttendanceSchedulingAdminSection` / `asyncStateBlock` 两个 spec 各 1 万行 stderr 但几乎不是 Vue warn，另有别的噪音源。
 
 ### 5.4 环境残留
 - worktrees：wt-fe6（#5761 分支）、wt-base3（Q16）、wt-docs6（本文）；其余分支均已合并，可 `git worktree` 清理（按 [[git-worktree-remove-follows-junctions]] 先拆 junction）。
