@@ -3377,28 +3377,38 @@ export class MetaSheetServer {
     }
   }
 
+  private observeShutdownTask<T>(task: Promise<T>): Promise<T> {
+    // Some producer drains can reject before the recovery worker finishes and before the shared
+    // allSettled barrier is installed. Observe immediately without changing the original promise,
+    // so the later barrier still sees and propagates the rejection as a values-free failure code.
+    void task.catch(() => undefined)
+    return task
+  }
+
   private async stopOnce(signal: string): Promise<void> {
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
     // completion listeners remain attached, so a terminal event emitted by already-admitted work is not lost.
     const approvalProducerDrains: Array<Promise<unknown>> = []
-    approvalProducerDrains.push(this.closeHttpServerForShutdown())
-    approvalProducerDrains.push(stopApprovalSlaScheduler())
+    approvalProducerDrains.push(this.observeShutdownTask(this.closeHttpServerForShutdown()))
+    approvalProducerDrains.push(this.observeShutdownTask(stopApprovalSlaScheduler()))
     if (this.automationService) {
-      approvalProducerDrains.push(this.automationService.stopProducerAdmissions())
+      approvalProducerDrains.push(this.observeShutdownTask(this.automationService.stopProducerAdmissions()))
     }
     if (this.approvalProjectionSweepScheduler) {
-      approvalProducerDrains.push(this.approvalProjectionSweepScheduler.stop())
+      approvalProducerDrains.push(this.observeShutdownTask(this.approvalProjectionSweepScheduler.stop()))
     }
     if (this.durableDeliveryLoop) {
-      approvalProducerDrains.push(this.durableDeliveryLoop.stop())
+      approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
     }
     if (this.dingtalkInteractiveCardStreamWorker) {
       approvalProducerDrains.push(
-        this.dingtalkInteractiveCardStreamWorker.shutdown().then((status) => {
-          if (status.state === 'failed') throw new Error('DINGTALK_CARD_STREAM_DRAIN_FAILED')
-        }),
+        this.observeShutdownTask(
+          this.dingtalkInteractiveCardStreamWorker.shutdown().then((status) => {
+            if (status.state === 'failed') throw new Error('DINGTALK_CARD_STREAM_DRAIN_FAILED')
+          }),
+        ),
       )
     }
 

@@ -95,6 +95,40 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
     expect(poolEnd).not.toHaveBeenCalled()
   })
 
+  test('observes an immediate producer rejection while the recovery worker is still draining', async () => {
+    expect(pgPool).not.toBeNull()
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const detach = vi.fn()
+    let releaseRecovery!: () => void
+    const recoveryPending = new Promise<void>((resolve) => { releaseRecovery = resolve })
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+      const lifecycle = server as unknown as {
+        durableDeliveryLoop: { stop(): Promise<void> } | null
+        recoveryArchiveApplication: { stopWorker(): Promise<void> }
+        recordApprovalCompletionSubscription: { detach(): void; drain(): Promise<void> } | null
+      }
+      lifecycle.durableDeliveryLoop = {
+        stop: vi.fn().mockRejectedValue(new Error('producer sentinel')),
+      }
+      lifecycle.recoveryArchiveApplication = { stopWorker: () => recoveryPending }
+      lifecycle.recordApprovalCompletionSubscription = { detach, drain: vi.fn(async () => {}) }
+
+      const stop = server.stop()
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(unhandled).not.toHaveBeenCalled()
+      expect(detach).not.toHaveBeenCalled()
+      expect(poolEnd).not.toHaveBeenCalled()
+      releaseRecovery()
+      await expect(stop).rejects.toThrow('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+      expect(poolEnd).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
+  })
+
   test('an active HTTP request drains before completion listeners detach', async () => {
     expect(pgPool).not.toBeNull()
     const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)

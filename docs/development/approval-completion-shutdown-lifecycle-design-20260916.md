@@ -35,7 +35,9 @@ Shutdown follows this order:
 
 A producer, transitive-producer, sink, HTTP, or recovery-worker failure or timeout is fail-closed: use
 values-free reason codes, reject shutdown, and leave the PostgreSQL pool open. Repeated stop calls share
-one promise. A partial startup uses the same idempotent cleanup path.
+one promise. Producer-drain promises are observed in the same synchronous stack in which they are created,
+before any unrelated worker drain can delay the shared barrier; the original rejection is retained for the
+later barrier verdict. A partial startup uses the same idempotent cleanup path.
 
 ## Local ownership
 
