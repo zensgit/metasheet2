@@ -650,3 +650,33 @@ Exact code `7d6d230c68720b5dc0bc679fb6a8d86fe6b09206`, tree `23c9484142ddb9b4292
 ### Template Client Current-Main Replay
 
 True merge `f78d286562a142f98c061d8842e88ff69f27cf37`, tree `ac69e2892e7c257fb018d9dcbaefdec2b4a17f53`, ordered parents `10499baa04de502e9bb9cba032f5e8b0bd473577` and main `28d11496bb4281738c3dd13096fe317ff42e8780`. The incoming #5747 delta is the approval-template list client and its dedicated test (two Web files), conflict-free with zero manual resolution. Backend/plugin/script/workflow/OpenAPI and provenance bytes are unchanged from the first parent. Incoming focused Web test 4/4 PASS (`/private/tmp/tm-template-client-replay.log`), diff-check PASS. The preceding 39/39 real-DB evidence is reused only for the byte-identical backend/harness; it is not new combined-main remote CI or browser acceptance.
+# DingTalk Mirror Lifecycle Integration Checkpoint
+
+Exact code: `79228def7c8f5d8e82588381ff21a4995f2ffb89`; tree:
+`854e01b7331d499d4b894a8477d4bd2ff53ad971`. Ordered parents:
+`32e517b2766b06ee5a32f4452accffebc3f112fa` and
+`c787f644fe19964eff67f3b1836ef3c1333c5e7d`.
+
+- Mirror consumer/worker, approval shutdown, durable handlers/routing and recovery
+  wiring: six backend unit files, 112/112 PASS.
+- Whole-table trash, workbench history field-scope and archive modal: three Web
+  files, 60/60 PASS (`/private/tmp/tm-c787-web-20260916.log`).
+- Core typecheck and app-only Web typecheck PASS (tm-c787-core-tsc and
+  tm-c787-web-tsc logs under /private/tmp, dated 20260916).
+- Exact-anchor/archive wiring PASS; official provenance differenceCount=0.
+- Independent in-memory exact-source subscription probe: callback returns a
+  promise; detach removes all five owned IDs and prevents new sink calls; drain
+  remains pending across setImmediate until the deferred sink is released.
+  This contrasts with the incoming-main probe, which returned no promise and
+  no drain handle. No DB or external request was used.
+- Core startup, mirror service and worker are byte-identical to owning c787f644f.
+  Only the workbench component conflict required manual resolution.
+
+- Full required-web exit 0, final group 462 files / 6,968 tests PASS; log:
+  `/private/tmp/tm-c787-required-web-20260916.log`.
+
+Earlier real DB/browser evidence remains bound to its own
+SHA and is not represented as a new run of this integration. Incoming main adds
+a mirror migration; fresh combined-schema acceptance is still required.
+Provider/custody/capture policy and nightly operational attribution remain open.
+No Ready/merge, flags, dispatch, deployment or real-customer actions occurred.

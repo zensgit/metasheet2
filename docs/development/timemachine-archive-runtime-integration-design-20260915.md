@@ -339,3 +339,23 @@ Test code `7d6d230c68720b5dc0bc679fb6a8d86fe6b09206` removes manual claim/chunk/
 Test-only code `3409c5f92b7622cb4b683ffe5e74c4e7186176ba` updates older archive fixtures for the existing derived-effect ledger's restrictive job FK. Cleanup uses an explicit archive-owned table allowlist and includes the child only if the relation exists. It never uses TRUNCATE CASCADE or discovers unrelated tables to delete. Older partial-schema fixtures remain valid.
 
 Catalog migration rehearsal preserves the optional child topology: empty child down precedes job down; job up precedes child up. The positive replay checks that the originally present child exists again before intentional transaction rollback. Production nonempty-down refusal, migration authority checks, immutable effects and restrictive FKs are unchanged. The change repairs test setup/teardown on the combined 403-migration tree, not restore behavior, provider selection or runtime enablement.
+# DingTalk Mirror Lifecycle Integration Checkpoint
+
+Code `79228def7c8f5d8e82588381ff21a4995f2ffb89`, tree
+`854e01b7331d499d4b894a8477d4bd2ff53ad971`, true-merges prior TM head
+`32e517b2766b06ee5a32f4452accffebc3f112fa` with owning lifecycle fix
+`c787f644fe19964eff67f3b1836ef3c1333c5e7d`. The latter includes main
+`0be3f25da4eeacfda0ad9144c70ab348633dbf91` as its second parent.
+
+Incoming main added a mirror consumer and delivery worker outside the existing
+completion shutdown barrier. The owning fix now retains subscription IDs and
+in-flight callbacks, closes admission and drains the worker before shared pool
+closure. The existing recovery worker shutdown and producer/transitive-producer/
+consumer order are preserved. This does not enable DingTalk or authorize sends.
+
+The only manual conflict is MultitableWorkbench.vue: keep SheetTrashModal's
+base-scoped whole-table recycle-bin contract, not main's old record TrashModal.
+The incoming view-manager/archive null-sheet conditional mounts are retained.
+The base toolbar can still open whole-table trash without an active sheet.
+No hard-deleted table resurrection, provider choice, capture policy, flag or
+deployment semantics are added. Fresh combined-head CI remains required.
