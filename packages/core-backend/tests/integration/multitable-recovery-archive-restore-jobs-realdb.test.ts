@@ -2066,7 +2066,21 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       // pause/finalize in the original simulation. Killed processes retain their original real deadline.
       let resumedClaim: RecoveryArchiveRestoreJobWorkerClaim | undefined
       if (crashedSnapshot) {
-        await waitUntil(crashedSnapshot.leaseUntil, 45_000)
+        const lease = await q(
+          `SELECT lease_until, lease_until > clock_timestamp() AS lease_live,
+                  worker_owner_id, worker_fence::text AS worker_fence
+             FROM public.meta_recovery_archive_jobs WHERE id=$1::uuid`,
+          [accepted.id],
+        )
+        expect(lease.rows).toEqual([{
+          lease_until: new Date(crashedSnapshot.leaseUntil),
+          lease_live: true,
+          worker_owner_id: crashedSnapshot.workerOwnerId,
+          worker_fence: crashedSnapshot.workerFence,
+        }])
+        const prematureCandidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+        expect(prematureCandidate?.jobId).not.toBe(accepted.id)
+        await waitUntil((lease.rows[0] as { lease_until: Date }).lease_until.toISOString(), 45_000)
         // A serialized observation is never a process-local branded write authority.
         const serializedClaim = crashedSnapshot as RecoveryArchiveRestoreJobWorkerClaim
         await expect(readRecoveryArchiveRestoreWorkerBinding(q, serializedClaim)).rejects.toEqual(

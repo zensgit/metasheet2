@@ -16,7 +16,9 @@ must use separate operating-system processes and independently observable databa
 3. Assert PostgreSQL has released the terminated process's connections. Before COMMIT,
    the first record, progress, receipt and revision must remain unchanged. After COMMIT,
    exactly one record, receipt and revision must exist despite the missing acknowledgment.
-4. Wait for the real persisted lease deadline. Reclaim with the canonical API; the durable
+4. Independently read the persisted lease and compare it with the killed worker's observation;
+   assert the lease is live and the canonical selector cannot pick that job prematurely.
+   Wait for the database-read deadline. Reclaim with the canonical API; the durable
    block fence stays unchanged while the worker fence increases. The existing in-process
    case proves old branded-claim refusal; process cases prove serialized claim observations
    cannot become write authority, without any additional revision or progress.
