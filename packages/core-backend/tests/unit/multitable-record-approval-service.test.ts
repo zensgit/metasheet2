@@ -357,6 +357,7 @@ describe('drift: ids only, version-anchored, masked by the caller field-permissi
       sheetId: SHEET,
       recordId: RECORD,
       readableFieldIds: new Set<string>(),
+      viewerUserId: USER,
     })
     expect(rows).toHaveLength(1)
     expect(rows[0]!.drift).toEqual({ changed: true, changedFieldIds: [] })
@@ -367,23 +368,46 @@ describe('drift: ids only, version-anchored, masked by the caller field-permissi
 
 // ── the list page: names, limit, hasMore ──────────────────────────────────────
 
-/** The fake the list battery answers from: record probe + page + the two directory IN-queries. */
+/**
+ * The fake the list battery answers from: the record probe, the page, the THREE template-gate statements
+ * (`approvals:read` codes + the viewer's users row + the role union) and the two directory IN-queries.
+ *
+ * The gate statements are answered here, not stubbed away, because the name lookup is only correct if it
+ * actually runs them: a caller without `approvals:read` must get NO template query at all.
+ */
 function listQuery(options: {
   submissions: Array<Record<string, unknown>>
   templates?: Array<Record<string, unknown>>
   users?: Array<Record<string, unknown>>
   templatesThrow?: unknown
   usersThrow?: unknown
+  /** the viewer's permission codes — the default holds `approvals:read` */
+  permissionCodes?: string[]
+  /** null = the viewer's `users` row is gone or deactivated, so no visibility actor can be built */
+  viewerRow?: { role?: string | null; department?: string | null; is_admin?: boolean | null } | null
+  /** when true the fake ENFORCES visibility: a template query that carries the filter's params matches nothing */
+  visibilityHidesEverything?: boolean
 }) {
   const calls: Call[] = []
   const query = async (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params })
     if (sql.includes('FROM meta_records')) return { rows: [{ version: 3, data: {} }], rowCount: 1 }
+    if (sql.includes('FROM user_permissions')) {
+      const codes = (options.permissionCodes ?? ['approvals:read', 'multitable:read']).map((code) => ({ permission_code: code }))
+      return { rows: codes, rowCount: codes.length }
+    }
+    if (sql.includes('FROM user_roles')) return { rows: [], rowCount: 0 }
+    if (sql.includes('is_active = TRUE')) {
+      const viewer = options.viewerRow === undefined ? { role: 'user', department: null, is_admin: false } : options.viewerRow
+      return { rows: viewer ? [viewer] : [], rowCount: viewer ? 1 : 0 }
+    }
     if (sql.includes('FROM approval_templates')) {
       if (options.templatesThrow) throw options.templatesThrow
+      // params = [ids] plus the visibility filter's three params when the actor is not a template manager
+      if (options.visibilityHidesEverything && params.length > 1) return { rows: [], rowCount: 0 }
       return { rows: options.templates ?? [], rowCount: (options.templates ?? []).length }
     }
-    if (sql.includes('FROM users')) {
+    if (sql.includes('FROM users WHERE id = ANY')) {
       if (options.usersThrow) throw options.usersThrow
       return { rows: options.users ?? [], rowCount: (options.users ?? []).length }
     }
@@ -396,13 +420,28 @@ function listQuery(options: {
     }
     return { rows: [], rowCount: 0 }
   }
-  const lookups = () => calls.filter((c) => c.sql.includes('FROM approval_templates') || c.sql.includes('FROM users'))
-  const pageLimitParam = () =>
-    Number(calls.find((c) => c.sql.includes(`FROM ${RECORD_APPROVAL_SUBMISSIONS_TABLE}`))!.params[2])
-  return { query: query as never, calls, lookups, pageLimitParam }
+  /** the two DIRECTORY lookups only — the gate statements below are counted separately */
+  const lookups = () =>
+    calls.filter((c) => c.sql.includes('FROM approval_templates') || c.sql.includes('FROM users WHERE id = ANY'))
+  const gateCalls = () =>
+    calls.filter(
+      (c) => c.sql.includes('FROM user_permissions') || c.sql.includes('FROM user_roles') || c.sql.includes('is_active = TRUE'),
+    )
+  const pageCall = () => calls.find((c) => c.sql.includes(`FROM ${RECORD_APPROVAL_SUBMISSIONS_TABLE}`))!
+  const pageLimitParam = () => Number(pageCall().params[2])
+  return { query: query as never, calls, lookups, gateCalls, pageCall, pageLimitParam }
 }
 
 const READ_ALL = new Set<string>(['fld_a'])
+
+/** Every list call carries the viewer: the template-name gate has no default subject. */
+const listInput = (over: Record<string, unknown> = {}) => ({
+  sheetId: SHEET,
+  recordId: RECORD,
+  readableFieldIds: READ_ALL,
+  viewerUserId: USER,
+  ...over,
+})
 
 describe('list page: directory names come from TWO batched lookups, never N+1', () => {
   const TPL_A = 'e7b1f0c2-0000-4000-8000-00000000000a'
@@ -433,17 +472,20 @@ describe('list page: directory names come from TWO batched lookups, never N+1', 
 
   test('5 rows, 2 templates, 3 users → EXACTLY two lookup queries, and the names land on the right rows', async () => {
     const fake = listQuery({ submissions: page(5), ...directory })
-    const { submissions } = await listRecordApprovalSubmissions(fake.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-    })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
     expect(submissions).toHaveLength(5)
     expect(fake.lookups()).toHaveLength(2)
+    // the template GATE is derived ONCE for the whole response too (codes + users row + roles), never per row
+    expect(fake.gateCalls()).toHaveLength(3)
     // one IN-query per directory: the DISTINCT ids only (2 templates, 3 users), not one call per row
     const [templateCall, userCall] = fake.lookups()
     expect(templateCall!.params[0]).toEqual([TPL_A, TPL_B.toLowerCase()])
     expect(userCall!.params[0]).toEqual(['u_0', 'u_1', 'u_2'])
+    // ...and that ONE template query carries the VISIBILITY predicate (the gate is in the SQL, not a
+    // post-filter): ids + the filter's user/dept/role params.
+    expect(templateCall!.sql).toContain('visibility_scope')
+    expect(templateCall!.params).toHaveLength(4)
+    expect(templateCall!.params[1]).toBe(USER)
 
     expect(submissions[0]!.templateName).toBe('记录送审模板A')
     // case-insensitive join: the row stores the id uppercase, the uuid column renders it lowercase
@@ -455,19 +497,16 @@ describe('list page: directory names come from TWO batched lookups, never N+1', 
     expect(JSON.stringify(submissions)).not.toContain('@example.test')
   })
 
-  test('ONE row needs the same two lookups — and ZERO rows needs none', async () => {
+  test('ONE row needs the same two lookups — and ZERO rows needs none (not even the gate)', async () => {
     const one = listQuery({ submissions: page(1), ...directory })
-    await listRecordApprovalSubmissions(one.query, { sheetId: SHEET, recordId: RECORD, readableFieldIds: READ_ALL })
+    await listRecordApprovalSubmissions(one.query, listInput())
     expect(one.lookups()).toHaveLength(2)
 
     const none = listQuery({ submissions: [], ...directory })
-    const empty = await listRecordApprovalSubmissions(none.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-    })
+    const empty = await listRecordApprovalSubmissions(none.query, listInput())
     expect(empty).toEqual({ submissions: [], hasMore: false })
     expect(none.lookups()).toHaveLength(0)
+    expect(none.gateCalls()).toHaveLength(0)
   })
 
   test('a template that is GONE and a user that is GONE are null, never an id wearing a name', async () => {
@@ -476,11 +515,7 @@ describe('list page: directory names come from TWO batched lookups, never N+1', 
       templates: [],
       users: [],
     })
-    const { submissions } = await listRecordApprovalSubmissions(fake.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-    })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
     expect(submissions[0]!.templateName).toBeNull()
     expect(submissions[0]!.submittedByName).toBeNull()
     // the ids themselves are untouched, so the client can still fall back to them
@@ -488,36 +523,86 @@ describe('list page: directory names come from TWO batched lookups, never N+1', 
     expect(submissions[0]!.submittedBy).toBe('u_deleted')
   })
 
-  test('an ABSENT directory (42P01/42703) degrades to null names; any other error is NOT swallowed', async () => {
+  test('a caller WITHOUT approvals:read gets NO templateName and issues NO template query (the submitter name still resolves)', async () => {
+    // THE HOLE THIS CLOSES (review round 2): `canRead` on a sheet comes from multitable:read/write/admin
+    // alone. Without this gate a plain grid viewer would learn the display NAME of a template that the
+    // same router refuses it on POST (RECORD_APPROVAL_TEMPLATE_FORBIDDEN) and that /api/approval-templates
+    // refuses it too.
+    const fake = listQuery({ submissions: page(1), ...directory, permissionCodes: ['multitable:read'] })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
+    expect(submissions[0]!.templateName).toBeNull()
+    expect(submissions[0]!.submittedByName).toBe('张三') // the submitter name is NOT approval-gated
+    expect(fake.calls.filter((c) => c.sql.includes('FROM approval_templates'))).toHaveLength(0)
+    // the row itself still lists, with the id it always had
+    expect(submissions[0]!.templateId).toBe(TPL_A)
+  })
+
+  test('a template hidden by its visibility_scope resolves to null, not to its name', async () => {
+    const fake = listQuery({ submissions: page(1), ...directory, visibilityHidesEverything: true })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
+    expect(submissions[0]!.templateName).toBeNull()
+    expect(submissions[0]!.submittedByName).toBe('张三')
+    // the query WAS issued (the caller holds approvals:read) and it carried the filter that hid the row
+    const templateCall = fake.calls.find((c) => c.sql.includes('FROM approval_templates'))!
+    expect(templateCall.params.length).toBeGreaterThan(1)
+  })
+
+  test('a viewer whose users row is gone/inactive resolves no template name at all (fail-closed actor)', async () => {
+    const fake = listQuery({ submissions: page(1), ...directory, viewerRow: null })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
+    expect(submissions[0]!.templateName).toBeNull()
+    expect(fake.calls.filter((c) => c.sql.includes('FROM approval_templates'))).toHaveLength(0)
+
+    // ...and so does an EMPTY viewer id (a caller that forgot the subject gets no names, never all names)
+    const anonymous = listQuery({ submissions: page(1), ...directory })
+    const result = await listRecordApprovalSubmissions(anonymous.query, listInput({ viewerUserId: '' }))
+    expect(result.submissions[0]!.templateName).toBeNull()
+    expect(anonymous.calls.filter((c) => c.sql.includes('FROM approval_templates'))).toHaveLength(0)
+  })
+
+  test('an ABSENT directory TABLE (42P01) degrades to null names; a missing COLUMN (42703) and any other error RETHROW', async () => {
     const missing = listQuery({
       submissions: page(1),
       templatesThrow: Object.assign(new Error('relation "approval_templates" does not exist'), { code: '42P01' }),
-      usersThrow: Object.assign(new Error('column "username" does not exist'), { code: '42703' }),
+      usersThrow: Object.assign(new Error('relation "users" does not exist'), { code: '42P01' }),
     })
-    const { submissions } = await listRecordApprovalSubmissions(missing.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-    })
+    const { submissions } = await listRecordApprovalSubmissions(missing.query, listInput())
     expect(submissions[0]!.templateName).toBeNull()
     expect(submissions[0]!.submittedByName).toBeNull()
+
+    // 42703 is NOT swallowed any more: every column these lookups read exists by migration, so tolerating
+    // undefined_column would only hide a future rename (the roles.description shape) behind null names.
+    const renamed = listQuery({
+      submissions: page(1),
+      usersThrow: Object.assign(new Error('column "username" does not exist'), { code: '42703' }),
+    })
+    await expect(listRecordApprovalSubmissions(renamed.query, listInput())).rejects.toMatchObject({ code: '42703' })
 
     const broken = listQuery({
       submissions: page(1),
       usersThrow: Object.assign(new Error('connection terminated'), { code: '08006' }),
     })
-    await expect(
-      listRecordApprovalSubmissions(broken.query, { sheetId: SHEET, recordId: RECORD, readableFieldIds: READ_ALL }),
-    ).rejects.toMatchObject({ code: '08006' })
+    await expect(listRecordApprovalSubmissions(broken.query, listInput())).rejects.toMatchObject({ code: '08006' })
+  })
+
+  test('PADDED stored ids still resolve: both maps are read exactly the way their IN-list was built', async () => {
+    const fake = listQuery({
+      submissions: [submissionRow({ id: 'sub_ws', template_id: ' E7B1F0C2-0000-4000-8000-00000000000A ', submitted_by: ' u_0 ' })],
+      ...directory,
+    })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
+    const [templateCall, userCall] = fake.lookups()
+    // the queries asked for the TRIMMED ids and the directory answered...
+    expect(templateCall!.params[0]).toEqual([TPL_A])
+    expect(userCall!.params[0]).toEqual(['u_0'])
+    // ...so reading the map with the raw padded value (the old bug) must not lose the name
+    expect(submissions[0]!.templateName).toBe('记录送审模板A')
+    expect(submissions[0]!.submittedByName).toBe('张三')
   })
 
   test('the existing submission fields are untouched by the two new keys', async () => {
     const fake = listQuery({ submissions: page(1), ...directory })
-    const { submissions } = await listRecordApprovalSubmissions(fake.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-    })
+    const { submissions } = await listRecordApprovalSubmissions(fake.query, listInput())
     expect(submissions[0]).toMatchObject({
       id: 'sub_0',
       sheetId: SHEET,
@@ -550,6 +635,24 @@ describe('list page: ?limit is clamped and hasMore is a limit+1 PROBE row', () =
     expect(clampRecordApprovalListLimit(1e9)).toBe(RECORD_APPROVAL_LIST_MAX_LIMIT)
   })
 
+  test('a BLANK ?limit= is ABSENT, not zero: it gets the default page, never a one-row page', async () => {
+    // `GET ...approvals?limit=` hands the route `''`, `?limit=%20` hands it `' '`, and a repeated empty
+    // `?limit=&limit=` hands it `[]`. `Number('')` is 0 — finite — so the clamp used to raise all three to
+    // ONE row with hasMore, i.e. a caller that said nothing got a 1-row page.
+    expect(clampRecordApprovalListLimit('')).toBe(RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+    expect(clampRecordApprovalListLimit('   ')).toBe(RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+    expect(clampRecordApprovalListLimit([])).toBe(RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+    expect(clampRecordApprovalListLimit(['2', '3'])).toBe(RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+    // an explicit 0 is still the task's clamp-UP case, not the default
+    expect(clampRecordApprovalListLimit('0')).toBe(1)
+
+    const rows = Array.from({ length: 200 }, (_, i) => submissionRow({ id: `sub_${i}` }))
+    const fake = listQuery({ submissions: rows })
+    const result = await listRecordApprovalSubmissions(fake.query, listInput({ limit: '' as never }))
+    expect(fake.pageLimitParam()).toBe(RECORD_APPROVAL_LIST_DEFAULT_LIMIT + 1)
+    expect(result.submissions).toHaveLength(RECORD_APPROVAL_LIST_DEFAULT_LIMIT)
+  })
+
   test('the page SELECT asks for limit + 1, and the clamp decides that limit', async () => {
     const rows = Array.from({ length: 200 }, (_, i) => submissionRow({ id: `sub_${i}` }))
     for (const [requested, expectedFetch] of [
@@ -560,12 +663,7 @@ describe('list page: ?limit is clamped and hasMore is a limit+1 PROBE row', () =
       [1000, RECORD_APPROVAL_LIST_MAX_LIMIT + 1],
     ] as Array<[number | undefined, number]>) {
       const fake = listQuery({ submissions: rows })
-      const result = await listRecordApprovalSubmissions(fake.query, {
-        sheetId: SHEET,
-        recordId: RECORD,
-        readableFieldIds: READ_ALL,
-        limit: requested,
-      })
+      const result = await listRecordApprovalSubmissions(fake.query, listInput({ limit: requested }))
       expect(fake.pageLimitParam()).toBe(expectedFetch)
       // the probe row is never returned: the page is exactly the clamped limit
       expect(result.submissions).toHaveLength(expectedFetch - 1)
@@ -575,23 +673,13 @@ describe('list page: ?limit is clamped and hasMore is a limit+1 PROBE row', () =
 
   test('hasMore is FALSE when the probe row does not come back (and the page is complete)', async () => {
     const exact = listQuery({ submissions: Array.from({ length: 2 }, (_, i) => submissionRow({ id: `sub_${i}` })) })
-    const result = await listRecordApprovalSubmissions(exact.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-      limit: 2,
-    })
+    const result = await listRecordApprovalSubmissions(exact.query, listInput({ limit: 2 }))
     expect(exact.pageLimitParam()).toBe(3)
     expect(result.submissions).toHaveLength(2)
     expect(result.hasMore).toBe(false)
 
     const under = listQuery({ submissions: [submissionRow({ id: 'sub_only' })] })
-    const small = await listRecordApprovalSubmissions(under.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-      limit: 2,
-    })
+    const small = await listRecordApprovalSubmissions(under.query, listInput({ limit: 2 }))
     expect(small.submissions).toHaveLength(1)
     expect(small.hasMore).toBe(false)
   })
@@ -604,14 +692,17 @@ describe('list page: ?limit is clamped and hasMore is a limit+1 PROBE row', () =
         submissionRow({ id: 'sub_probe', created_at: '2026-09-15T01:00:00.000Z' }),
       ],
     })
-    const result = await listRecordApprovalSubmissions(fake.query, {
-      sheetId: SHEET,
-      recordId: RECORD,
-      readableFieldIds: READ_ALL,
-      limit: 2,
-    })
+    const result = await listRecordApprovalSubmissions(fake.query, listInput({ limit: 2 }))
     expect(result.submissions.map((row) => row.id)).toEqual(['sub_newest', 'sub_middle'])
     expect(result.hasMore).toBe(true)
+  })
+
+  test('the page ORDER BY is a TOTAL order, so which row is the discarded probe is deterministic', async () => {
+    const fake = listQuery({ submissions: [submissionRow({ id: 'sub_only' })] })
+    await listRecordApprovalSubmissions(fake.query, listInput({ limit: 1 }))
+    // `created_at` alone ties (two submissions can share a timestamp); the id tiebreaker is what makes the
+    // limit+1 probe row well-defined for any future cursor page.
+    expect(fake.pageCall().sql.replace(/\s+/g, ' ')).toContain('ORDER BY created_at DESC, id DESC')
   })
 })
 
@@ -841,8 +932,10 @@ function createRowStore(options: { now?: () => number } = {}) {
   const inFlight = (r: Record<string, unknown>) => r.status === 'creating' || r.status === 'pending'
   const clone = (r: Record<string, unknown>) => ({ ...r })
 
+  const seen: string[] = []
   const query = async (sql: string, params: unknown[] = []) => {
     const text = sql.replace(/\s+/g, ' ').trim()
+    seen.push(text)
 
     if (text.startsWith(`INSERT INTO ${RECORD_APPROVAL_SUBMISSIONS_TABLE}`)) {
       const [id, sheetId, recordId, templateId, submittedBy, version, snapshot] = params as string[]
@@ -899,6 +992,9 @@ function createRowStore(options: { now?: () => number } = {}) {
           row.outcome = params[4] ?? null
           row.approval_instance_id = params[1]
           row.approval_request_no = params[2] ?? null
+          // COALESCE($6::text, error): null on every normal promote, a values-free code on the
+          // compensating replay — the fake evaluates it the way Postgres would.
+          if (/error = COALESCE\(\$6::text, error\)/.test(text) && params[5] != null) row.error = params[5]
           if (params[4]) row.completed_at = iso()
         } else if (/SET error = \$2/.test(text)) {
           row.error = params[1]
@@ -921,7 +1017,7 @@ function createRowStore(options: { now?: () => number } = {}) {
     return { rows: [], rowCount: 0 }
   }
 
-  return { query: query as never, rows, snapshot: () => rows.map(clone) }
+  return { query: query as never, rows, snapshot: () => rows.map(clone), statements: () => [...seen] }
 }
 
 function notificationRecorder() {
@@ -1269,27 +1365,80 @@ describe('completion is ATOMIC: the terminal UPDATE and the notification commit 
     expect(runInTransaction).not.toHaveBeenCalled()
   })
 
-  test('a failing bell ROLLS BACK the auto-approve promotion: the row stays `creating`, the caller gets a values-free 502', async () => {
+  test('a failing bell never commits HALF the pair: the atomic write rolls back, then the promote is COMPENSATED', async () => {
+    // WHY NOT "rolled back, end of story" (review round 2): the consumer path may stop at a rollback
+    // because its delivery is RETRIED. Nothing retries a submit. A bare rollback would leave the row
+    // `creating` while the instance is already TERMINAL — and the instance-keyed UPDATE only ever matches
+    // `pending`, so that binding would be lost forever, the TTL reclaim would stamp the row `failed` for
+    // an APPROVED approval, and the next submit would create a SECOND instance.
     const { store, runInTransaction } = transactionalStore()
+    const runner = vi.fn(runInTransaction as never)
+    const promotes = () => store.statements().filter((sql) => /SET status = \$4, outcome = \$5/.test(sql))
+    const submission = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_auto_boom', requestNo: 'AP-BOOM', status: 'approved' }),
+      completion: {
+        runInTransaction: runner as never,
+        publishRealtime: () => undefined,
+        insertNotifications: (async () => {
+          throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+        }) as never,
+      },
+    })
+
+    // ATOMIC FIRST: the pair was attempted inside the transaction and rolled back (two promote
+    // statements: the one that rolled back, and the compensating replay).
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(promotes()).toHaveLength(2)
+
+    // DEGRADED SECOND: the terminal truth is committed, and the missing bell is VISIBLE, not silent.
+    expect(submission.status).toBe('approved')
+    expect(submission.approvalInstanceId).toBe('inst_auto_boom')
+    const row = store.snapshot()[0]!
+    expect(row.status).toBe('approved')
+    expect(row.outcome).toBe('approved')
+    expect(row.approval_instance_id).toBe('inst_auto_boom')
+    expect(row.error).toBe(RECORD_APPROVAL_ROW_ERROR_CODES.notificationFailed)
+
+    // the completion that was already ACKed upstream can never re-deliver this outcome — which is exactly
+    // why the compensation had to write it: a later delivery matches nothing and changes nothing.
     await expect(
-      submitRecordApproval(store.query, submitInput(), ACTOR, {
-        createApproval: async () => ({ id: 'inst_auto_boom', requestNo: 'AP-BOOM', status: 'approved' }),
-        completion: {
-          runInTransaction,
-          publishRealtime: () => undefined,
-          insertNotifications: (async () => {
-            throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
-          }) as never,
-        },
+      applyRecordApprovalCompletion(
+        store.query,
+        completionEvent({ approval: { ...completionEvent().approval, instanceId: 'inst_auto_boom' } } as never),
+        { publishRealtime: () => undefined, insertNotifications: (async () => ({ inserted: 0 })) as never },
+      ),
+    ).resolves.toEqual({ applied: false })
+    expect(store.snapshot()[0]!.status).toBe('approved')
+
+    // ...and the pair is NOT bricked: the submission is terminal, so it holds no in-flight slot.
+    const next = await submitRecordApproval(store.query, submitInput(), ACTOR, {
+      createApproval: async () => ({ id: 'inst_after', status: 'pending' }),
+    })
+    expect(next.status).toBe('pending')
+  })
+
+  test('when the COMPENSATING promote fails too there is nothing honest to write: 502, claim KEPT', async () => {
+    const { store, runInTransaction } = transactionalStore()
+    // every promote fails (the bind UPDATE itself is broken, not just the bell)
+    const brokenQuery = (async (sql: string, params: unknown[] = []) => {
+      if (/SET status = \$4, outcome = \$5/.test(sql)) throw Object.assign(new Error('boom'), { code: '08006' })
+      return store.query(sql, params)
+    }) as never
+    const brokenRunner = (async (fn: (q: never) => Promise<unknown>) =>
+      runInTransaction(((q: never) => fn(brokenQuery)) as never)) as never
+
+    await expect(
+      submitRecordApproval(brokenQuery, submitInput(), ACTOR, {
+        createApproval: async () => ({ id: 'inst_auto_dead', status: 'approved' }),
+        completion: { runInTransaction: brokenRunner, publishRealtime: () => undefined },
       }),
     ).rejects.toMatchObject({ statusCode: 502, code: RECORD_APPROVAL_ERROR_CODES.createFailed })
 
-    // ROLLED BACK — not a committed terminal row whose bell can never be re-delivered
+    // the row is untouched — `creating`, unbound — and the claim is KEPT (an instance exists upstream), so
+    // a duplicate cannot slip in before the TTL reclaim.
     const row = store.snapshot()[0]!
     expect(row.status).toBe('creating')
-    expect(row.outcome).toBeNull()
     expect(row.approval_instance_id).toBeNull()
-    // ...and the claim is KEPT (an instance exists upstream), so a duplicate cannot slip in before the TTL
     await expect(
       submitRecordApproval(store.query, submitInput(), ACTOR, {
         createApproval: async () => ({ id: 'inst_dupe', status: 'pending' }),

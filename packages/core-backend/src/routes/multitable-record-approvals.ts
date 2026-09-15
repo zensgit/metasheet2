@@ -4,8 +4,10 @@
  *   POST /api/multitable/sheets/:sheetId/records/:recordId/approvals   body { templateId, formData }
  *   GET  /api/multitable/sheets/:sheetId/records/:recordId/approvals   ?limit= (clamped to [1, 100])
  *        → { ok, data: { submissions, hasMore } }, each submission carrying `templateName` /
- *        `submittedByName` (directory names resolved by ONE batched lookup each, null when the template
- *        or the user row is gone) so the panel never has to render a raw id, and never issues N+1 reads.
+ *        `submittedByName` (one batched lookup each, never N+1) so the panel need not render a raw id.
+ *        `templateName` is GATED on the caller's own approval-side template readability — the same
+ *        `approvals:read` + visibility_scope pair gate 3 applies below — and is null when the caller
+ *        fails it or the template is gone; `submittedByName` is null when that user row is gone.
  *
  * No revoke/delete endpoint here on purpose: revocation lives in the approval center (design §4.1).
  *
@@ -264,6 +266,11 @@ export function createMultitableRecordApprovalRoutes(
         sheetId,
         recordId,
         readableFieldIds,
+        // The TEMPLATE-NAME gate's subject: the service resolves a template's name only if THIS user
+        // could read that template in the approval center (`approvals:read` + visibility_scope), the
+        // same pair the POST path enforces. Never `req.user`/`x-tenant-id` — the id comes from the read
+        // gate's own resolved access.
+        viewerUserId: access.userId,
         limit,
       })
 
@@ -272,8 +279,10 @@ export function createMultitableRecordApprovalRoutes(
         data: {
           submissions: submissions.map((row) => ({
             ...serializeSubmission(row),
-            // Directory NAMES, never logged: the caller has already passed the record read gate and these
-            // are the same names the approval center shows it. Null when the template / user row is gone.
+            // NAMES, never logged. `templateName` is null unless this caller passes the approval-side
+            // template gate (`approvals:read` + visibility_scope — the record read gate does NOT imply
+            // it) or the template is gone; `submittedByName` is directory data about the submitter of a
+            // submission the caller is already reading, and is null when that user row is gone.
             templateName: row.templateName,
             submittedByName: row.submittedByName,
             drift: row.drift,

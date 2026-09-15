@@ -25,6 +25,11 @@
  *   G6c `?limit=` paging against real rows: two TERMINAL submissions for one record (G4b's raw-insert
  *       trick) answered with `limit=1` → ONE submission + `hasMore: true`, and with a limit that covers
  *       them → both + `hasMore: false` (the limit+1 probe row is never returned);
+ *   G6d the template-name gate is VISIBILITY-filtered against the real `visibility_scope` jsonb: two
+ *       terminal rows in ONE response, one template the caller may read (name present) and one whose
+ *       scope names another user (name null) — a fake query cannot answer the jsonb predicate;
+ *   G6e a reader WITHOUT `approvals:read` still lists the record's submissions but gets NO template name,
+ *       while the same GET for a reader that holds the code does carry it (non-vacuity);
  *   G6b a caller holding submit-approval but NO read code (a DEDICATED user — never granted
  *       `multitable:read`/`multitable:write`, so the 60s RBAC permission memo cannot launder it) is
  *       refused 403 on the LIST, while the same GET still answers 200 for a reader;
@@ -78,7 +83,14 @@ const APPROVER = `u_mtra_approver_${TS}`
  * (db/migrations/zzzz20260318110000_add_multitable_bases_and_permissions.ts:84-88).
  */
 const NO_READ = `u_mtra_noread_${TS}`
-const ALL_USERS = [SUBMITTER, NO_CODE, APPROVER, NO_READ]
+/**
+ * G6e's actor: holds `multitable:read` (so the record READ gate lets it list) and NOTHING approval-side —
+ * no `approvals:read`, no role. It is the subject of the second-round review finding: the record read gate
+ * does not imply the approval-side template gate, so this user must get `templateName: null` while the row
+ * itself still lists.
+ */
+const NO_APPROVAL_READ = `u_mtra_noapproval_${TS}`
+const ALL_USERS = [SUBMITTER, NO_CODE, APPROVER, NO_READ, NO_APPROVAL_READ]
 
 const BASE = `base_mtra_${TS}`
 const SHEET = `sheet_mtra_${TS}`
@@ -95,6 +107,9 @@ let publishedTemplateId = ''
 /** The published template's REAL `name`, read back from `approval_templates` (never assumed). */
 let publishedTemplateName = ''
 let draftTemplateId = ''
+/** A PUBLISHED template whose `visibility_scope` excludes SUBMITTER (G6d's subject). */
+let restrictedTemplateId = ''
+let restrictedTemplateName = ''
 const templateIds: string[] = []
 
 const submissionsFor = async (recordId: string) =>
@@ -207,6 +222,12 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     for (const code of ['multitable:submit-approval', 'approvals:read', 'approvals:write']) {
       await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [NO_READ, code])
     }
+    // NO_APPROVAL_READ can READ the sheet and holds NO approval code at all: a 200 with a NULL templateName
+    // isolates the approval-side template gate exactly the way G1 isolates the missing submit code.
+    await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [
+      NO_APPROVAL_READ,
+      'multitable:read',
+    ])
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'MTRA Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'MTRA Sheet'])
@@ -236,6 +257,22 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     const draft = await approvals.createTemplate(templateRequest(`mtra-draft-${TS}`) as never)
     templateIds.push(draft.id)
     draftTemplateId = draft.id
+
+    // A published template whose visibility_scope names ONLY the approver: SUBMITTER may read every other
+    // template in this fixture but not this one, so G6d can prove the name lookup is visibility-FILTERED
+    // (not merely `approvals:read`-gated) against the real jsonb predicate.
+    const restricted = await approvals.createTemplate(templateRequest(`mtra-restricted-${TS}`) as never)
+    templateIds.push(restricted.id)
+    await approvals.publishTemplate(restricted.id, { policy: { allowRevoke: true } } as never)
+    restrictedTemplateId = restricted.id
+    await q(`UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1::uuid`, [
+      restrictedTemplateId,
+      JSON.stringify({ type: 'user', ids: [APPROVER] }),
+    ])
+    restrictedTemplateName = String(
+      ((await q('SELECT name FROM approval_templates WHERE id = $1::uuid', [restrictedTemplateId])).rows[0] as
+        { name?: unknown } | undefined)?.name ?? '',
+    )
   })
 
   afterAll(async () => {
@@ -562,6 +599,65 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     expect(zero.body.data.hasMore).toBe(true)
 
     await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
+  })
+
+  test('G6d templateName is VISIBILITY-filtered: a template SUBMITTER may not read lists with a null name', async () => {
+    // Two terminal rows on the same record (G4b's trick), one per template: the visible one must carry its
+    // real name and the restricted one must carry NONE — in the SAME response, so a null cannot be blamed
+    // on a broken join.
+    await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
+    for (const [templateId, ageMinutes] of [[publishedTemplateId, 2], [restrictedTemplateId, 1]] as Array<[string, number]>) {
+      await q(
+        `INSERT INTO multitable_record_approval_submissions
+           (sheet_id, record_id, template_id, status, outcome, submitted_by, record_version_at_submit,
+            record_snapshot, created_at, completed_at)
+         VALUES ($1, $2, $3, 'approved', 'approved', $4, 1, '{}'::jsonb, NOW() - ($5::int * INTERVAL '1 minute'), NOW())`,
+        [SHEET, RECORD_B, templateId, SUBMITTER, ageMinutes],
+      )
+    }
+    expect(restrictedTemplateName.length).toBeGreaterThan(0) // non-vacuity: the hidden template HAS a name
+
+    const res = await list(RECORD_B)
+    expect(res.status).toBe(200)
+    const rows = res.body.data.submissions as Array<{ templateId: string; templateName: string | null }>
+    expect(rows).toHaveLength(2)
+    const visible = rows.find((row) => row.templateId === publishedTemplateId)!
+    const hidden = rows.find((row) => row.templateId === restrictedTemplateId)!
+    expect(visible.templateName).toBe(publishedTemplateName)
+    expect(hidden.templateName).toBeNull()
+    // the name must not leak anywhere else in the payload either
+    expect(JSON.stringify(res.body)).not.toContain(restrictedTemplateName)
+    // ...and the id the caller already had is untouched, so the panel can still fall back to it
+    expect(hidden.templateId).toBe(restrictedTemplateId)
+
+    await q('DELETE FROM multitable_record_approval_submissions WHERE record_id = $1', [RECORD_B])
+  })
+
+  test('G6e a reader WITHOUT approvals:read still lists, but gets no template name at all', async () => {
+    invalidateUserPerms(NO_APPROVAL_READ)
+    currentUserId = NO_APPROVAL_READ
+    const res = await list(RECORD)
+    currentUserId = SUBMITTER
+    expect(res.status).toBe(200)
+    const row = res.body.data.submissions[0] as {
+      templateId: string
+      templateName: string | null
+      submittedByName: string | null
+    }
+    // the POST path answers 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN for this user; the LIST must not hand it
+    // the same template's display name through the back door.
+    expect(row.templateName).toBeNull()
+    expect(row.templateId).toBe(publishedTemplateId)
+    // the SUBMITTER's display name is directory data about the actor of a visible submission — not gated.
+    expect(row.submittedByName).toBe(SUBMITTER)
+    expect(JSON.stringify(res.body)).not.toContain(publishedTemplateName)
+
+    // NON-VACUITY: the very same GET, same record, for SUBMITTER (who holds approvals:read) DOES carry it.
+    const withApprovalRead = await list(RECORD)
+    expect(withApprovalRead.status).toBe(200)
+    expect((withApprovalRead.body.data.submissions[0] as { templateName: string | null }).templateName).toBe(
+      publishedTemplateName,
+    )
   })
 
   test('G6b a caller without sheet read access cannot list the record approvals', async () => {
