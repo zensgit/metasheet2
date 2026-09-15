@@ -105,6 +105,13 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_METRIC_FIELDS', // e-learning projection metric-field registry suffix, not a flag
   'MULTITABLE_OBJECT_SCOPE_FORBIDDEN', // scope guards
   'MULTITABLE_PROJECT_NAMESPACE_FORBIDDEN',
+  // 记录级送审(#5754)的四个常量名，都不是环境开关，没有任何一处从 process.env 读它们；列在这里
+  // 等于声明「不得要求它出现在 GLOBAL_HISTORY_FLAG_MANIFEST 里」，而不是把它注册成 flag。
+  // 用 EXACT 而不是前缀家族：前缀会把未来同名下的真开关也静默放行（见上方 MAINTAINER NOTE）。
+  'MULTITABLE_RECORD_APPROVAL_IN_FLIGHT_STATUSES', // 送审在途状态字面量 ['creating','pending']（迁移的部分唯一索引与 service 共用），不是 flag
+  'MULTITABLE_RECORD_APPROVAL_SUBMISSIONS_TABLE', // 送审记录表名字面量（迁移与 service 共用），不是 flag
+  'MULTITABLE_SUBMIT_APPROVAL_PERMISSION', // permission code constant（multitable/submit-approval-permission.ts）
+  'MULTITABLE_SUBMIT_APPROVAL_PERMISSION_CODE', // 同一权限码在迁移侧的常量名，不是 flag
   'MULTITABLE_SHARE_PERMISSIONS', // share permission registry
   'MULTITABLE_SHEETS_TABLE', // e-learning projection mapping-table name suffix, not a flag
   // Schema-management permission split: these four are CONSTANT NAMES (permission codes and the

@@ -20,6 +20,9 @@
  *       a REDELIVERY adds nothing (the `WHERE status = 'pending'` guard, proven against real rowcounts);
  *   G6  GET drift: after a real record write the list reports `changed` with the changed field id, and a
  *       field the caller may not read is masked out of `changedFieldIds` (values never appear at all);
+ *   G6b a caller holding submit-approval but NO read code (a DEDICATED user — never granted
+ *       `multitable:read`/`multitable:write`, so the 60s RBAC permission memo cannot launder it) is
+ *       refused 403 on the LIST, while the same GET still answers 200 for a reader;
  *   G7  a STALE `creating` claim is reclaimed by the next submit against the REAL partial unique index
  *       (`creating` is not an absorbing state), while a FRESH one still refuses with 409 (G7b).
  *
@@ -43,6 +46,7 @@ import { up as seedSubmitApprovalPermission } from '../../src/db/migrations/zzzz
 import { createMultitableRecordApprovalRoutes } from '../../src/routes/multitable-record-approvals'
 import { buildDurableConsumerHandlers } from '../../src/multitable/automation-durable-consumer-handlers'
 import { createPoolTransactionRunner, createRecordApprovalCompletionSink } from '../../src/multitable/record-approval-submission-service'
+import { invalidateUserPerms } from '../../src/rbac/service'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
@@ -52,6 +56,24 @@ const TS = Date.now()
 const SUBMITTER = `u_mtra_submitter_${TS}`
 const NO_CODE = `u_mtra_nocode_${TS}`
 const APPROVER = `u_mtra_approver_${TS}`
+/**
+ * G6b's actor: a DEDICATED user that never holds `multitable:read`/`multitable:write` at any point in
+ * this suite — never granted, so never resolvable and never cacheable as readable. G6b used to reuse
+ * NO_CODE and DELETE its `multitable:read` row mid-suite; that was a FALSE GREEN locally and a real 200
+ * on CI, because `listUserPermissions` memoizes a user's codes for RBAC_CACHE_TTL_MS (default 60s,
+ * src/rbac/service.ts:12-13 + 74-99) and NO_CODE's list was already warmed by G1 — the DELETE hit the
+ * table, the request never read it back. A user with no read grant at all cannot be laundered by that
+ * cache, so the refusal below is about the ROUTE's gate, not about cache timing. (Same trap, same
+ * remedy, already documented in tests/integration/multitable-fwb-activation-realdb.test.ts:643-651.)
+ *
+ * Nothing else in this fixture can hand it read: `canRead` comes only from `multitable:read`/
+ * `multitable:write`/admin (src/multitable/access.ts:109-112), this suite creates no `user_roles` row
+ * (so neither the role union in listUserPermissions nor `isAdmin` applies), `users.permissions` is
+ * seeded `'[]'`, and the only non-admin role grant for those codes in the schema is admin-only
+ * (db/migrations/zzzz20260318110000_add_multitable_bases_and_permissions.ts:84-88).
+ */
+const NO_READ = `u_mtra_noread_${TS}`
+const ALL_USERS = [SUBMITTER, NO_CODE, APPROVER, NO_READ]
 
 const BASE = `base_mtra_${TS}`
 const SHEET = `sheet_mtra_${TS}`
@@ -145,7 +167,7 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
         [code],
       )
     }
-    for (const id of [SUBMITTER, NO_CODE, APPROVER]) {
+    for (const id of ALL_USERS) {
       await q(
         `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
          VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
@@ -166,6 +188,14 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     // `multitable:submit-approval`, so a 403 below isolates that single code.
     for (const code of ['multitable:read', 'approvals:read', 'approvals:write']) {
       await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [NO_CODE, code])
+    }
+    // NO_READ is the mirror image of NO_CODE: it holds `multitable:submit-approval` and both approval
+    // codes but NEITHER `multitable:read` NOR `multitable:write` (the two codes deriveCapabilities turns
+    // into `canRead`, src/multitable/access.ts:109-112), and it is in NO role (no `user_roles` row here,
+    // so neither the role union in listUserPermissions nor `isAdmin` can hand it anything). So a 403 in
+    // G6b isolates the missing READ code exactly the way G1 isolates the missing submit code.
+    for (const code of ['multitable:submit-approval', 'approvals:read', 'approvals:write']) {
+      await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [NO_READ, code])
     }
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'MTRA Base'])
@@ -197,19 +227,26 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
   afterAll(async () => {
     await q('DELETE FROM multitable_record_approval_submissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET]).catch(() => {})
-    await q('DELETE FROM approval_records WHERE instance_id IN (SELECT id FROM approval_instances WHERE template_id = ANY($1::text[]))', [templateIds]).catch(() => {})
-    await q('DELETE FROM approval_assignments WHERE instance_id IN (SELECT id FROM approval_instances WHERE template_id = ANY($1::text[]))', [templateIds]).catch(() => {})
-    await q('DELETE FROM approval_instances WHERE template_id = ANY($1::text[])', [templateIds]).catch(() => {})
-    await q('DELETE FROM approval_template_versions WHERE template_id = ANY($1::text[])', [templateIds]).catch(() => {})
-    await q('DELETE FROM approval_templates WHERE id = ANY($1::text[])', [templateIds]).catch(() => {})
+    // `approval_templates.id`, `approval_template_versions.template_id` and `approval_instances.template_id`
+    // are UUID columns (db/migrations/zzzz20260411120100_approval_templates_and_instance_extensions.ts:17,
+    // 30, 106), so a `text[]` array made every one of these five statements die with
+    // `operator does not exist: uuid = text` — swallowed by each statement's own `.catch(() => {})`, which
+    // is why the lane stayed green while leaving its templates/instances behind on the CI database. `::uuid[]` matches
+    // the column type (the repo's precedent for the same three tables, e.g.
+    // tests/integration/approval-attachment-pipeline-realdb.test.ts:197-198).
+    await q('DELETE FROM approval_records WHERE instance_id IN (SELECT id FROM approval_instances WHERE template_id = ANY($1::uuid[]))', [templateIds]).catch(() => {})
+    await q('DELETE FROM approval_assignments WHERE instance_id IN (SELECT id FROM approval_instances WHERE template_id = ANY($1::uuid[]))', [templateIds]).catch(() => {})
+    await q('DELETE FROM approval_instances WHERE template_id = ANY($1::uuid[])', [templateIds]).catch(() => {})
+    await q('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds]).catch(() => {})
+    await q('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
-    await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[SUBMITTER, NO_CODE, APPROVER]]).catch(() => {})
-    await q('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [[SUBMITTER, NO_CODE, APPROVER]]).catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[SUBMITTER, NO_CODE, APPROVER]]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [ALL_USERS]).catch(() => {})
+    await q('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [ALL_USERS]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [ALL_USERS]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL is set (this DB-backed lane must not silently skip)', () => {
@@ -448,11 +485,24 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
   })
 
   test('G6b a caller without sheet read access cannot list the record approvals', async () => {
-    await q('DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = $2', [NO_CODE, 'multitable:read'])
-    currentUserId = NO_CODE
+    // NO_READ holds submit-approval + both approval codes and NOTHING that yields `canRead`; it has made
+    // no earlier request in this suite, so `listUserPermissions` resolves it from the DATABASE here. The
+    // explicit invalidation makes that independent of ordering: whatever a future test does with this id,
+    // this request is answered from the real table, never from the 60s RBAC memo that made the earlier
+    // "delete the row, then call" shape report 200 on CI.
+    invalidateUserPerms(NO_READ)
+    currentUserId = NO_READ
     const res = await list(RECORD)
     currentUserId = SUBMITTER
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('RECORD_APPROVAL_PERMISSION_DENIED')
+    // fail-closed, not "empty list": the refusal must not carry submissions at all
+    expect(res.body.data).toBeUndefined()
+
+    // NON-VACUITY: the same GET, same record, for a caller that DOES hold `multitable:read` still answers
+    // 200 — so the 403 above is the read gate refusing NO_READ, not a broken route/fixture refusing
+    // everyone (G6 already read this record successfully as SUBMITTER).
+    const readable = await list(RECORD)
+    expect(readable.status).toBe(200)
   })
 })
