@@ -1130,6 +1130,43 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(await burnCountForToken(token)).toBe(0)
   })
 
+  test.each(['inactive', 'disabled'] as const)('AUTH-ACTOR: %s actor cannot recover through a surviving sheet-admin grant', async (state) => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const initial = (await q('SELECT role FROM users WHERE id=$1', [ACTOR])).rows[0] as { role: string | null }
+    try {
+      await q(
+        `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, user_id, perm_code)
+         VALUES ($1, 'user', $2, $2, 'multitable:admin')`,
+        [SHEET, ACTOR],
+      )
+      curPerms = []
+      await q("UPDATE users SET permissions='[]'::jsonb WHERE id=$1", [ACTOR])
+      const preview = await revertPreview({ anchorOperationId: anchorOp })
+      expect(preview.status).toBe(200)
+      const token = preview.body.data.previewIdentity as string
+      if (state === 'inactive') await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+      else await q("UPDATE users SET role='disabled' WHERE id=$1", [ACTOR])
+
+      const execute = await revertExecute({ previewIdentity: token })
+      expect(execute.status).toBe(403)
+      expect(execute.body.error.code).toBe('FORBIDDEN')
+      expect((await q('SELECT data, version FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([
+        { data: { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }, version: 2 },
+      ])
+      expect(await burnCountForToken(token)).toBe(0)
+
+      await q('UPDATE users SET is_active=TRUE, role=$2 WHERE id=$1', [ACTOR, initial.role])
+      const retry = await revertExecute({ previewIdentity: token })
+      expect(retry.status).toBe(200)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-at-anchor')
+      expect(await burnCountForToken(token)).toBe(1)
+    } finally {
+      await q('UPDATE users SET is_active=TRUE, role=$2 WHERE id=$1', [ACTOR, initial.role])
+      await q("DELETE FROM spreadsheet_permissions WHERE sheet_id=$1 AND subject_type='user' AND subject_id=$2", [SHEET, ACTOR])
+    }
+  })
+
   test('AUTHORITY-LOCKS: related user/role revokes fail fast, while unrelated last-login writes remain unblocked', async () => {
     await q(
       'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
