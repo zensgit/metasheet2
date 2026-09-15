@@ -4026,6 +4026,193 @@ describe('admin-users routes', () => {
     expect(response.textBody).toContain('alpha@example.com')
   })
 
+  // CSV shared-sanitizer migration (chore/csv-shared-sanitizer): this endpoint's per-cell escape
+  // used to be hand-rolled inline. It now delegates to the shared csv-cell.ts `sanitizeCsvRow`.
+  // These two cases assert (1) byte-for-byte parity on plain/RFC-4180-special cells and (2) the
+  // two INTENTIONAL additions the shared helper brings here: a formula-injection lead char gets
+  // a defensive leading apostrophe, and a bare CR (no LF) is now RFC-4180 quoted the same way a
+  // CR+LF pair already was.
+  it('CSV export: byte-identical output for plain and RFC-4180-special cells', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 5,
+        created_at: '2026-01-01T00:00:00.000Z',
+        resource_type: 'user',
+        resource_id: 'user-9',
+        action: 'update',
+        event_type: 'UPDATE',
+        event_severity: 'INFO',
+        user_email: 'a@example.com',
+        user_name: 'A, B "C"',
+        error_code: null,
+        action_details: { x: 1 },
+      }],
+    })
+
+    const response = await invokeRoute('get', '/api/admin/audit-activity/export.csv', { query: {} })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.textBody).toBe(
+      [
+        'id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details',
+        [
+          '5',
+          '2026-01-01T00:00:00.000Z',
+          'user',
+          'user-9',
+          'update',
+          'UPDATE',
+          'INFO',
+          'a@example.com',
+          '"A, B ""C"""',
+          '',
+          '"{""x"":1}"',
+        ].join(','),
+        '',
+      ].join('\n'),
+    )
+  })
+
+  it('CSV export positive control: neutralizes formula-injection lead chars and correctly quotes a bare CR', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 6,
+        created_at: '2026-01-02T00:00:00.000Z',
+        resource_type: 'user',
+        resource_id: 'res\rid',
+        action: '-2+3',
+        event_type: 'UPDATE',
+        event_severity: 'INFO',
+        user_email: 'b@example.com',
+        user_name: 'B',
+        error_code: null,
+        action_details: {},
+      }],
+    })
+
+    const response = await invokeRoute('get', '/api/admin/audit-activity/export.csv', { query: {} })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.textBody).toBe(
+      [
+        'id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details',
+        [
+          '6',
+          '2026-01-02T00:00:00.000Z',
+          'user',
+          '"res\rid"',
+          "'-2+3",
+          'UPDATE',
+          'INFO',
+          'b@example.com',
+          'B',
+          '',
+          '{}',
+        ].join(','),
+        '',
+      ].join('\n'),
+    )
+  })
+
+  // `event_severity` (schema: no NOT NULL) is the one column here that was passed BARE to the
+  // pre-migration escaper, which stringified a null as the literal text "null" (`String(null)`).
+  // Pinned byte-for-byte on purpose (see the route's own comment) rather than silently switched
+  // to an empty cell, so this migration stays a pure escaper swap on every column.
+  it('CSV export: preserves the literal "null" text for a null event_severity (pre-existing quirk, pinned)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 7,
+        created_at: '2026-01-03T00:00:00.000Z',
+        resource_type: 'user',
+        resource_id: 'user-10',
+        action: 'update',
+        event_type: 'UPDATE',
+        event_severity: null,
+        user_email: 'c@example.com',
+        user_name: 'C',
+        error_code: null,
+        action_details: {},
+      }],
+    })
+
+    const response = await invokeRoute('get', '/api/admin/audit-activity/export.csv', { query: {} })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.textBody).toBe(
+      [
+        'id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details',
+        [
+          '7',
+          '2026-01-03T00:00:00.000Z',
+          'user',
+          'user-10',
+          'update',
+          'UPDATE',
+          'null',
+          'c@example.com',
+          'C',
+          '',
+          '{}',
+        ].join(','),
+        '',
+      ].join('\n'),
+    )
+  })
+
+  // P1-2 (csv-helper gate): `audit_logs.created_at` is TIMESTAMPTZ, so pg hands the route a real
+  // `Date`, not the string every other fixture above uses. Before the fix, `sanitizeCsvCell` had
+  // no Date branch and fell through to `JSON.stringify(date)`, which produces a JSON STRING
+  // LITERAL (the ISO text wrapped in embedded `"` characters) that RFC-4180 quoting then doubles
+  // — every cell came out as `"""2026-01-01T00:00:00.000Z"""`. This fixture uses `new Date(...)`
+  // (a real runtime Date, not a string stand-in) and asserts the clean, unquoted ISO cell that the
+  // explicit `.toISOString()` conversion at the call site now produces. NOT a parity restoration:
+  // pre-migration, `String(date)` rendered this column as a locale/TZ-dependent string (never
+  // ISO), so ISO-8601 UTC output is a new, disclosed difference class, not the old shape.
+  it('CSV export: a real Date created_at (pg runtime shape) renders as a clean ISO cell, not a JSON-quoted one', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 8,
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+        resource_type: 'user',
+        resource_id: 'user-11',
+        action: 'update',
+        event_type: 'UPDATE',
+        event_severity: 'INFO',
+        user_email: 'd@example.com',
+        user_name: 'D',
+        error_code: null,
+        action_details: {},
+      }],
+    })
+
+    const response = await invokeRoute('get', '/api/admin/audit-activity/export.csv', { query: {} })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.textBody).toBe(
+      [
+        'id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details',
+        [
+          '8',
+          '2026-01-01T00:00:00.000Z',
+          'user',
+          'user-11',
+          'update',
+          'UPDATE',
+          'INFO',
+          'd@example.com',
+          'D',
+          '',
+          '{}',
+        ].join(','),
+        '',
+      ].join('\n'),
+    )
+  })
+
   it('applies date filters to admin audit activity queries', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query

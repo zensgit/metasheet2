@@ -1,10 +1,17 @@
 /**
  * P3-1 — CSV cell serialization with formula-injection hardening.
  *
- * Own module: this repo has no shared CSV sanitiser to reuse (a repo-wide search for
- * `csvEscape|sanitizeCsv|formulaInjection` returns nothing), so contract §3 is implemented fresh
- * here. This module is scoped to the approval export only; no other export path is modified by
- * this slice.
+ * Originally its own module: at the time this was written, a repo-wide search for
+ * `csvEscape|sanitizeCsv|formulaInjection` found no shared CSV sanitizer, so contract §3 was
+ * implemented fresh here, scoped to the approval export only.
+ *
+ * SINCE EXTENDED (chore/csv-shared-sanitizer): four other hand-written per-cell CSV escapers
+ * were consolidated onto `sanitizeCsvCell`/`sanitizeCsvRow` below —
+ * `routes/univer-meta.ts`'s `buildExportCsv` (multitable export), `routes/audit-logs.ts`'s
+ * `GET /api/audit-logs?format=csv`, `routes/attendance-admin.ts`'s local `csvCell` (delegates
+ * here now), and `routes/admin-users.ts`'s `GET /api/admin/audit-activity/export.csv`. This
+ * module is no longer approval-export-only; treat every call site above as a consumer when
+ * changing behavior here.
  *
  * THREAT (contract §3): Excel / LibreOffice / Google Sheets evaluate a cell that STARTS WITH
  * certain characters as a formula (or, historically, a DDE directive), which can exfiltrate data
