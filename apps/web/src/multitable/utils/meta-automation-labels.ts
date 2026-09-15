@@ -369,6 +369,16 @@ export type AutomationLabelKey =
   | 'resultWriteback.none'
   | 'resultWriteback.markUnknown'
   | 'resultWriteback.markIncompatible'
+  // #5742 outcome → written-value mapping (optional; empty row = write the raw outcome literal).
+  | 'resultWriteback.outcomeValuesTitle'
+  | 'resultWriteback.outcomeValuesHint'
+  | 'resultWriteback.onNonApproved'
+  | 'resultWriteback.rawValuePrefix'
+  | 'resultWriteback.outcome.approved'
+  | 'resultWriteback.outcome.rejected'
+  | 'resultWriteback.outcome.revoked'
+  | 'resultWriteback.outcome.cancelled'
+  | 'resultWriteback.optionMissingBlocker'
 
 export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.title',
@@ -675,6 +685,15 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'resultWriteback.none',
   'resultWriteback.markUnknown',
   'resultWriteback.markIncompatible',
+  'resultWriteback.outcomeValuesTitle',
+  'resultWriteback.outcomeValuesHint',
+  'resultWriteback.onNonApproved',
+  'resultWriteback.rawValuePrefix',
+  'resultWriteback.outcome.approved',
+  'resultWriteback.outcome.rejected',
+  'resultWriteback.outcome.revoked',
+  'resultWriteback.outcome.cancelled',
+  'resultWriteback.optionMissingBlocker',
 ]
 
 const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
@@ -1060,6 +1079,23 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'resultWriteback.none': { en: '(not written)', zh: '（不写回）' },
   'resultWriteback.markUnknown': { en: 'unknown field', zh: '未知字段' },
   'resultWriteback.markIncompatible': { en: 'incompatible', zh: '不兼容' },
+  'resultWriteback.outcomeValuesTitle': { en: 'Approval outcome → written value', zh: '审批结果 → 写入值' },
+  'resultWriteback.outcomeValuesHint': {
+    en: 'Optional. Leave a row empty to write the raw outcome (approved / rejected / …). Pick a value so a single-select status field keeps its own options.',
+    zh: '可选。留空则写入英文原文（approved / rejected / …）。选择写入值后，单选状态字段就不必再新增名为 approved 的选项。',
+  },
+  'resultWriteback.onNonApproved': { en: 'Also write non-approved outcomes', zh: '非通过结果也写回' },
+  'resultWriteback.rawValuePrefix': { en: 'Write the raw value', zh: '写入原文' },
+  'resultWriteback.outcome.approved': { en: 'Approved', zh: '通过' },
+  'resultWriteback.outcome.rejected': { en: 'Rejected', zh: '拒绝' },
+  'resultWriteback.outcome.revoked': { en: 'Revoked', zh: '撤销' },
+  'resultWriteback.outcome.cancelled': { en: 'Cancelled', zh: '取消' },
+  // #5742 save blocker — the client mirror of the backend's select-option check. Placeholders are filled by
+  // automationResultWritebackOptionMissingMessage below (field name / written value / outcome label).
+  'resultWriteback.optionMissingBlocker': {
+    en: 'Status field "{field}" has no option "{value}" ({outcome}) — pick the value to write below.',
+    zh: '状态字段「{field}」的选项不含「{value}」（{outcome}），请在下方选择要写入的选项',
+  },
 }
 
 type UnknownAutomationString = string & Record<never, never>
@@ -1067,6 +1103,36 @@ type UnknownAutomationString = string & Record<never, never>
 export function automationLabel(key: AutomationLabelKey, isZh: boolean): string {
   const entry = LABELS[key]
   return isZh ? entry.zh : entry.en
+}
+
+/** #5742: the four terminal approval outcomes a result-writeback can carry, in editor order. */
+export const AUTOMATION_RESULT_WRITEBACK_OUTCOMES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
+export type AutomationResultWritebackOutcome = typeof AUTOMATION_RESULT_WRITEBACK_OUTCOMES[number]
+
+export function automationResultWritebackOutcomeLabel(
+  outcome: AutomationResultWritebackOutcome | UnknownAutomationString,
+  isZh: boolean,
+): string {
+  if (outcome === 'approved') return automationLabel('resultWriteback.outcome.approved', isZh)
+  if (outcome === 'rejected') return automationLabel('resultWriteback.outcome.rejected', isZh)
+  if (outcome === 'revoked') return automationLabel('resultWriteback.outcome.revoked', isZh)
+  if (outcome === 'cancelled') return automationLabel('resultWriteback.outcome.cancelled', isZh)
+  return String(outcome)
+}
+
+/**
+ * #5742 save blocker text: the client mirror of the backend select-option check
+ * (resultWritebackFieldTypeError). Names the field, the value that WOULD be written (the resolved
+ * outcomeValues mapping, or the raw outcome when no mapping is declared) and which outcome it is for.
+ */
+export function automationResultWritebackOptionMissingMessage(
+  params: { fieldName: string; value: string; outcome: AutomationResultWritebackOutcome | UnknownAutomationString },
+  isZh: boolean,
+): string {
+  return automationLabel('resultWriteback.optionMissingBlocker', isZh)
+    .replace('{field}', params.fieldName)
+    .replace('{value}', params.value)
+    .replace('{outcome}', automationResultWritebackOutcomeLabel(params.outcome, isZh))
 }
 
 export function automationStatusLabel(status: AutomationStatus | UnknownAutomationString, isZh: boolean): string {

@@ -636,6 +636,45 @@
                 <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
                 <el-option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
               </el-select>
+
+              <!-- #5742 审批结果 → 写入值: only shown once a status field is chosen (it is the only field the
+                   mapping applies to). An empty row keeps the legacy behaviour — the RAW outcome literal. -->
+              <div v-if="resultWritebackStatusFieldSelected(action)" class="meta-rule-editor__writeback-outcomes" data-field="resultWritebackOutcomeValues">
+                <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.outcomeValuesTitle', isZh) }}</label>
+                <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.outcomeValuesHint', isZh) }}</div>
+                <el-checkbox
+                  class="meta-rule-editor__toggle-label"
+                  data-field="resultWritebackOnNonApproved"
+                  :model-value="action.config.resultWritebackOnNonApproved === true"
+                  @change="setResultWritebackOnNonApproved(action, $event === true)"
+                >
+                  {{ automationLabel('resultWriteback.onNonApproved', isZh) }}
+                </el-checkbox>
+                <div v-for="outcome in resultWritebackOutcomeRows(action)" :key="outcome" class="meta-rule-editor__field-pair">
+                  <span class="meta-rule-editor__preset-label">{{ automationResultWritebackOutcomeLabel(outcome, isZh) }}</span>
+                  <el-select
+                    v-if="resultWritebackStatusIsSelect(action)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    :model-value="resultWritebackOutcomeValue(action, outcome)"
+                    :placeholder="resultWritebackRawOutcomeLabel(outcome)"
+                    :data-field="`resultWritebackOutcomeValue-${outcome}`"
+                    @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
+                  >
+                    <el-option value="" data-value="" :label="resultWritebackRawOutcomeLabel(outcome)" />
+                    <el-option v-for="opt in resultWritebackOutcomeOptions(action, outcome)" :key="opt.value" :value="opt.value" :data-value="opt.value" :data-marked="opt.marked || undefined" :label="opt.label" />
+                  </el-select>
+                  <el-input
+                    v-else
+                    class="meta-rule-editor__input--sm"
+                    type="text"
+                    :model-value="resultWritebackOutcomeValue(action, outcome)"
+                    :placeholder="resultWritebackRawOutcomeLabel(outcome)"
+                    :data-field="`resultWritebackOutcomeValue-${outcome}`"
+                    @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
+                  />
+                </div>
+              </div>
+
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.approverField', isZh) }}</label>
               <el-select v-model="action.config.resultWritebackApproverField" class="meta-rule-editor__select" :placeholder="automationLabel('resultWriteback.none', isZh)" data-field="resultWritebackApproverField">
                 <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
@@ -1693,8 +1732,12 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationResultWritebackOptionMissingMessage,
+  automationResultWritebackOutcomeLabel,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
+  AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
+  type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
 import {
   type BranchActionDraft,
@@ -1719,6 +1762,7 @@ import {
   computeSaveBlockReasons,
   type SaveBlockActionSnapshot,
   type SaveBlockReason,
+  type StartApprovalOutcomeValueBlock,
 } from '../automationSaveBlockReasons'
 import {
   summarizeAutomationAction,
@@ -1763,6 +1807,10 @@ type DraftActionConfig = Record<string, unknown> & {
   resultWritebackStatusField?: string
   resultWritebackApproverField?: string
   resultWritebackCompletedAtField?: string
+  // #5742: 审批结果 → 写入值. Both are MODELLED now, so they OVERRIDE the startApprovalOriginal spread on save
+  // (clearing the checkbox must delete resultWriteback.onNonApproved, not silently re-emit the loaded true).
+  resultWritebackOnNonApproved?: boolean
+  resultWritebackOutcomeValues?: Record<string, string>
   locked?: boolean
   // A6-3-2a condition_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
   branches?: BranchDraft[]
@@ -2960,6 +3008,9 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       resultWritebackStatusField: typeof writeback.statusField === 'string' ? writeback.statusField : '',
       resultWritebackApproverField: typeof writeback.approverField === 'string' ? writeback.approverField : '',
       resultWritebackCompletedAtField: typeof writeback.completedAtField === 'string' ? writeback.completedAtField : '',
+      // #5742: the non-approved opt-in and the outcome→value mapping are now edited by the UI.
+      resultWritebackOnNonApproved: writeback.onNonApproved === true,
+      resultWritebackOutcomeValues: readResultWritebackOutcomeValues(writeback.outcomeValues),
       // Preserve the loaded config verbatim so the save rebuild below cannot drop backend-accepted keys the
       // editor has no UI for. Deep-cloned so later draft edits cannot mutate the snapshot.
       startApprovalOriginal: cloneStartApprovalOriginal(config),
@@ -3674,6 +3725,8 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     conditionsComplete: draft.value.conditions.conditions.every(areConditionsComplete),
     firstIncompleteConditionAnchor: firstIncompleteConditionAnchor.value,
     actions: saveBlockActionSnapshots.value,
+    // #5742: client mirror of the backend select-option check on the approval-result writeback.
+    startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
   })
 })
 
@@ -4517,6 +4570,8 @@ function cloneStartApprovalOriginal(config: Record<string, unknown>): Record<str
     'resultWritebackStatusField',
     'resultWritebackApproverField',
     'resultWritebackCompletedAtField',
+    'resultWritebackOnNonApproved',
+    'resultWritebackOutcomeValues',
     'startApprovalOriginal',
   ]
   const clone: Record<string, unknown> = {}
@@ -4525,6 +4580,21 @@ function cloneStartApprovalOriginal(config: Record<string, unknown>): Record<str
     clone[key] = value === null || typeof value !== 'object' ? value : JSON.parse(JSON.stringify(value))
   }
   return clone
+}
+
+// #5742: read the persisted `resultWriteback.outcomeValues` into the editable draft object. Only the four
+// known outcomes with non-empty string values are taken — an unknown key would be rejected by the backend
+// validator anyway, so carrying it into the picker model would build an unsaveable draft. (A function
+// DECLARATION, like cloneStartApprovalOriginal above: this runs from the `rule` watcher's immediate pass,
+// before later top-level consts in <script setup> are initialized.)
+function readResultWritebackOutcomeValues(raw: unknown): Record<string, string> {
+  const source = isPlainRecord(raw) ? raw : {}
+  const values: Record<string, string> = {}
+  for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+    const value = source[outcome]
+    if (typeof value === 'string' && value.trim()) values[outcome] = value
+  }
+  return values
 }
 
 // start_approval: formDataMapping rows reuse the FieldPair shape (fieldId = the approval-form field key,
@@ -4574,6 +4644,140 @@ function resultWritebackFieldOptions(
   }
   return options
 }
+
+// ── #5742 审批结果 → 写入值 ────────────────────────────────────────────────────────────────────────
+// The optional declared outcome → written-value mapping (`resultWriteback.outcomeValues`). Same posture as
+// the pickers above: the editor AUTHORS it, the backend validator is the authority. An empty row means the
+// RAW outcome literal is written, which is exactly what every rule saved before #5742 already does.
+type ResultWritebackOutcomeOption = { value: string; label: string; marked: boolean }
+
+function resultWritebackStatusFieldId(action: DraftAction): string {
+  return typeof action.config.resultWritebackStatusField === 'string'
+    ? action.config.resultWritebackStatusField.trim()
+    : ''
+}
+
+function resultWritebackStatusFieldSelected(action: DraftAction): boolean {
+  return resultWritebackStatusFieldId(action).length > 0
+}
+
+function resultWritebackStatusField(action: DraftAction): AutomationRuleEditorField | undefined {
+  const id = resultWritebackStatusFieldId(action)
+  return id ? props.fields.find((field) => field.id === id) : undefined
+}
+
+function resultWritebackStatusIsSelect(action: DraftAction): boolean {
+  return resultWritebackStatusField(action)?.type === 'select'
+}
+
+// The declared option set of the chosen select status field. Read from `options` (the shape this editor's
+// `fields` prop uses) with a `property.options` fallback (the raw field-property shape). An UNKNOWN option
+// set (neither present) returns [] — callers treat that as "cannot judge", never as "no options".
+function resultWritebackStatusOptions(action: DraftAction): ResultWritebackOutcomeOption[] {
+  const field = resultWritebackStatusField(action)
+  if (!field || field.type !== 'select') return []
+  const property = field.property as { options?: unknown } | undefined
+  const raw = Array.isArray(field.options)
+    ? (field.options as unknown[])
+    : Array.isArray(property?.options)
+      ? (property?.options as unknown[])
+      : []
+  const options: ResultWritebackOutcomeOption[] = []
+  for (const item of raw) {
+    if (!isPlainRecord(item)) continue
+    const value = item.value
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    const text = String(value)
+    if (!text) continue
+    const label = typeof item.label === 'string' && item.label ? item.label : text
+    options.push({ value: text, label, marked: false })
+  }
+  return options
+}
+
+function resultWritebackOutcomeOptions(action: DraftAction, outcome: string): ResultWritebackOutcomeOption[] {
+  const options = resultWritebackStatusOptions(action)
+  const current = resultWritebackOutcomeValue(action, outcome).trim()
+  if (current && !options.some((option) => option.value === current)) {
+    // Same P2 rule as resultWritebackFieldOptions: a configured value that is not (or no longer) an option
+    // is appended as a MARKED option so the picker never renders empty and an unedited save carries it back.
+    const marker = automationLabel('resultWriteback.markUnknown', isZh.value)
+    options.push({
+      value: current,
+      label: isZh.value ? `${current}（${marker}）` : `${current} (${marker})`,
+      marked: true,
+    })
+  }
+  return options
+}
+
+function resultWritebackOutcomeRows(action: DraftAction): AutomationResultWritebackOutcome[] {
+  return action.config.resultWritebackOnNonApproved === true
+    ? [...AUTOMATION_RESULT_WRITEBACK_OUTCOMES]
+    : ['approved']
+}
+
+function resultWritebackRawOutcomeLabel(outcome: string): string {
+  return `${automationLabel('resultWriteback.rawValuePrefix', isZh.value)} ${outcome}`
+}
+
+function resultWritebackOutcomeValue(action: DraftAction, outcome: string): string {
+  const values = action.config.resultWritebackOutcomeValues
+  const value = isPlainRecord(values) ? values[outcome] : undefined
+  return typeof value === 'string' ? value : ''
+}
+
+function setResultWritebackOutcomeValue(action: DraftAction, outcome: string, raw: unknown): void {
+  const next: Record<string, string> = { ...(action.config.resultWritebackOutcomeValues ?? {}) }
+  const value = typeof raw === 'string' ? raw : ''
+  // Empty ⇒ REMOVE the entry (the row then means "write the raw outcome"), never persist an empty string —
+  // the backend rejects one and the resolver would fall back to the raw outcome anyway.
+  if (value.trim()) next[outcome] = value
+  else delete next[outcome]
+  action.config.resultWritebackOutcomeValues = next
+}
+
+function setResultWritebackOnNonApproved(action: DraftAction, value: boolean): void {
+  action.config.resultWritebackOnNonApproved = value
+}
+
+/**
+ * Client mirror of the backend select-option check (resultWritebackFieldTypeError): if the status field is a
+ * select and the value that WOULD be written for an outcome is not one of its options, the save is blocked
+ * with an actionable message instead of a server 400.
+ *
+ * Scope, stated plainly: only 'approved' (always) and 'rejected' (when 非通过结果也写回 is on) — the exact
+ * pair the backend hard-fails at SAVE time. 'revoked'/'cancelled' are authored here but only enforced at fire
+ * time, so the mirror does not block a save the server would accept. A select whose option set this editor
+ * does not know (no `options` on the field) is NOT blocked: the backend gate stays the authority, and a
+ * blocker built on missing knowledge would be an unfixable dead end for the author.
+ */
+const resultWritebackOutcomeBlocks = computed<StartApprovalOutcomeValueBlock[]>(() => {
+  const blocks: StartApprovalOutcomeValueBlock[] = []
+  for (const [index, action] of draft.value.actions.entries()) {
+    if (action.type !== 'start_approval') continue
+    const field = resultWritebackStatusField(action)
+    if (!field || field.type !== 'select') continue
+    const optionValues = resultWritebackStatusOptions(action).map((option) => option.value)
+    if (optionValues.length === 0) continue
+    const outcomes: AutomationResultWritebackOutcome[] = action.config.resultWritebackOnNonApproved === true
+      ? ['approved', 'rejected']
+      : ['approved']
+    for (const outcome of outcomes) {
+      const value = resultWritebackOutcomeValue(action, outcome).trim() || outcome
+      if (optionValues.includes(value)) continue
+      blocks.push({
+        actionIndex: index,
+        outcome,
+        message: automationResultWritebackOptionMissingMessage(
+          { fieldName: field.name, value, outcome },
+          isZh.value,
+        ),
+      })
+    }
+  }
+  return blocks
+})
 
 function addCreateFieldValue(action: DraftAction) {
   if (!Array.isArray(action.config.fieldValues)) action.config.fieldValues = []
@@ -4664,6 +4868,20 @@ function buildPayload(): Partial<AutomationRule> {
       if (statusField) resultWriteback.statusField = statusField
       if (approverField) resultWriteback.approverField = approverField
       if (completedAtField) resultWriteback.completedAtField = completedAtField
+      // A writeback with no mapped FIELD is invalid server-side, so the field pickers alone decide whether the
+      // object is emitted at all — onNonApproved / outcomeValues can never resurrect it on their own.
+      const hasMappedWritebackField = Object.keys(resultWriteback).length > 0
+      // #5742: onNonApproved + outcomeValues are MODELLED now, so they are emitted from the DRAFT and never
+      // from the preserved original — unchecking 非通过结果也写回 must DELETE resultWriteback.onNonApproved,
+      // and an emptied mapping must drop resultWriteback.outcomeValues entirely (absence = write the raw
+      // outcome, which is the pre-#5742 behaviour).
+      const outcomeValues: Record<string, string> = {}
+      for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+        const value = resultWritebackOutcomeValue(action, outcome).trim()
+        if (value) outcomeValues[outcome] = value
+      }
+      if (action.config.resultWritebackOnNonApproved === true) resultWriteback.onNonApproved = true
+      if (Object.keys(outcomeValues).length > 0) resultWriteback.outcomeValues = outcomeValues
       const config: Record<string, unknown> = {
         ...original,
         templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
@@ -4671,10 +4889,12 @@ function buildPayload(): Partial<AutomationRule> {
       }
       // "nothing configured" must round-trip to ABSENCE — the backend rejects an empty `{}` mapping. Clearing
       // all three pickers therefore drops the whole resultWriteback object, its unmodelled siblings included.
-      if (Object.keys(resultWriteback).length > 0) {
+      if (hasMappedWritebackField) {
         const preservedWriteback: Record<string, unknown> = {}
         for (const [key, value] of Object.entries(originalWriteback)) {
+          // Modelled keys are rebuilt above; preserving the ORIGINAL here would make clearing them impossible.
           if (key === 'statusField' || key === 'approverField' || key === 'completedAtField') continue
+          if (key === 'onNonApproved' || key === 'outcomeValues') continue
           preservedWriteback[key] = value
         }
         config.resultWriteback = { ...preservedWriteback, ...resultWriteback }

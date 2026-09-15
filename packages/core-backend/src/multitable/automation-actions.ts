@@ -231,6 +231,32 @@ export interface StartApprovalConfig {
   requester?: {
     mode?: 'trigger_actor' | 'rule_creator'
   }
+  /**
+   * W7-1 approval-result backwrite (optional). RUNTIME VALIDATION IS THE SOURCE OF TRUTH
+   * (validateStartApprovalConfig in automation-service.ts); this shape only documents the keys the
+   * validator accepts so callers get editor help instead of guessing.
+   *
+   * #5742 `outcomeValues`: an optional declared outcome → written-value mapping for `statusField`.
+   * Absent / empty ⇒ the RAW outcome string is written (unchanged pre-#5742 behaviour); present ⇒ the
+   * mapped non-empty value is written, which is what lets a Chinese single-select keep 已通过/已拒绝
+   * instead of growing options literally named 'approved'/'rejected'.
+   */
+  resultWriteback?: {
+    statusField?: string
+    approverField?: string
+    completedAtField?: string
+    onNonApproved?: boolean
+    outcomeValues?: {
+      approved?: string
+      rejected?: string
+      revoked?: string
+      cancelled?: string
+    }
+    // T3-5 cross-base target: a literal triple (all three required when any is set).
+    targetBaseId?: string
+    targetSheetId?: string
+    targetRecordId?: string
+  }
 }
 
 /**
