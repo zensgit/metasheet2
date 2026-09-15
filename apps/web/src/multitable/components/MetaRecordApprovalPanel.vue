@@ -311,10 +311,12 @@ import {
 // `/api/approvals/:id` and `/:id/history` means the envelope-unwrapping fix that lives in
 // `normalizeApprovalHistoryEnvelope` cannot drift away from this surface.
 import { getApproval, getApprovalHistory, normalizeApprovalHistoryEnvelope } from '../../approvals/api'
-// The SAME shared, session-lifetime display-name resolver ApprovalCenterDetailPane uses, so a pending
-// approver reads identically in the drawer and in the approval centre (and degrades to the same
-// values-free 「成员 N」 ordinal when the directory cannot confirm a name).
-import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+// NO member-identity resolver is imported here, on purpose (审批窗口 tripwire): turning an internal user
+// id into a display name is the approval window's own boundary, and
+// `tests/approval-member-identity-coverage-enumeration.spec.ts`'s scope-leak sweep reds the build if the
+// resolver — or the assignee-id field name — appears in ANY file under apps/web/src outside
+// `src/approvals/**` and `src/views/approval/**`. This card renders only the display name the approval
+// payload already carries; see `progressAssigneeLabel`.
 import { useApprovalPermissions } from '../../approvals/permissions'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaRecord, MetaRecordApprovalSubmission } from '../types'
@@ -602,23 +604,30 @@ const historyActionLabel = (action: string): string =>
   recordApprovalHistoryActionLabel(action, isZh.value)
 
 /**
- * One pending approver's label — byte-for-byte the rule ApprovalCenterDetailPane's `assigneeLabel`
- * applies: a producer-supplied `metadata.assigneeName` first, then the shared directory resolver, then a
- * values-free ordinal. Never the raw internal user id.
+ * One pending approver's label — TWO steps, deliberately one FEWER than ApprovalCenterDetailPane's
+ * `assigneeLabel`: the producer-supplied `metadata.assigneeName` when the approval payload carries a
+ * non-empty one, else the values-free ordinal 「成员 N」.
+ * WHY NOT THREE: the step that is gone is the approval centre's middle one — looking the assignment's
+ * internal user id up in the shared directory resolver. That lookup is the approval window's own
+ * member-identity boundary, fenced by the scope-leak sweep in
+ * `tests/approval-member-identity-coverage-enumeration.spec.ts`: no resolver reference, and no
+ * assignee-id field name, may exist outside `src/approvals/**` + `src/views/approval/**`. So this card
+ * never reads, logs or renders an assignee id at all — an assignment the approval side did not name
+ * reads as an ordinal, never as an identifier, and the name only the directory knows stays one click
+ * away in the approval centre, behind the request-number link this panel already renders.
  */
 function progressAssigneeLabel(assignment: ApprovalAssignmentDTO, ordinal: number): string {
   const metaName = assignment.metadata?.assigneeName
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
-  const resolved = getResolvedUserName(assignment.assigneeId)
-  if (resolved) return resolved
   return recordApprovalApproverFallbackLabel(ordinal, isZh.value)
 }
 
 /**
  * Every ACTIVE assignment at the current node(s) — linear (`currentNodeKey`) or parallel
- * (`currentNodeKeys`), the same resolution ApprovalCenterDetailPane's `pendingApproverLabels` uses. Read
- * from the render effect (not a `computed`) on purpose: `getResolvedUserName` reads a `reactive()` map,
- * so the row re-renders by itself once the batch resolve kicked off by `loadProgress` lands.
+ * (`currentNodeKeys`), the same filter ApprovalCenterDetailPane's `pendingApproverLabels` applies. The
+ * ordinal fallback numbers the RENDERED approvers, so a filter that let a finished or not-yet-reached
+ * assignment through inflates the count on screen rather than hiding inside it. Reads nothing but the
+ * cached `progressEntries` ref — no directory state, no request of its own.
  */
 function progressApprovers(instanceId: string | undefined): string[] {
   const detail = progressEntry(instanceId)?.detail
@@ -767,9 +776,6 @@ async function loadProgress(instanceId: string): Promise<void> {
       }
       return
     }
-    // Side effect OUTSIDE any computed (directoryResolve.ts's own contract): kick off the batch
-    // display-name resolve for the ids this card is about to show.
-    ensureUserNamesResolved((detail?.assignments ?? []).map((a) => a.assigneeId))
     const { rows, truncated } = normalizeProgressHistory(history)
     progressEntries.value[instanceId] = {
       loading: false,

@@ -17,9 +17,12 @@
  *  2. LAZY. Expanding the PANEL reads the submissions list only; the instance pair fires on first expand
  *     of THAT row's card. Fetch from the load/mount path instead ⇒ red.
  *  3. CACHE. Exactly ONE pair of reads per instance; collapse/re-expand serves the cache.
- *  4. RENDER. 第 N / M 步 (only when both are numbers), 当前待处理人 resolved through the SAME shared
- *     directory resolver the approval centre uses, and a history list — oldest first, snake_case AND
- *     camelCase rows, capped at 20 with a 「仅显示最近 20 条」 note.
+ *  4. RENDER. 第 N / M 步 (only when both are numbers), 当前待处理人 taken from the approval payload's OWN
+ *     `metadata.assigneeName` — with the values-free 「成员 N」 ordinal when the payload names nobody —
+ *     and a history list, oldest first, snake_case AND camelCase rows, capped at 20 with a
+ *     「仅显示最近 20 条」 note. There is NO id → name resolution on this surface and no resolver mock in
+ *     this file: that is the approval window's member-identity boundary, enforced for the whole of
+ *     apps/web/src by approval-member-identity-coverage-enumeration's scope-leak sweep.
  *  5. DEGRADATION, VALUES-FREE BY EQUALITY. 403 → 无权查看审批进度, 404 → 你不是该审批的参与人，
  *     进度不可见, a wrong-instance answer → 返回的进度与该审批不一致，已隐藏, anything else → 进度加载失败
  *     + a 重试 BUTTON (the first three get no retry — they are answers, not hiccups). The status is
@@ -53,18 +56,16 @@
  *     rendering candidate on this card (the only id-shaped path is the 「成员 N」 fallback), so an
  *     id-absence assertion cannot see the ACTIVE-at-current-node filter disappear.
  *
- * NO REAL HTTP: `../src/approvals/api` is mocked at module level (`getApproval`/`getApprovalHistory`/
- * `resolveApprovalDirectoryUsers` only — every other export, including the real
- * `normalizeApprovalHistoryEnvelope` and the real `ApprovalDirectoryResolveError` class the resolver
- * branches on, is the genuine module).
+ * NO REAL HTTP: `../src/approvals/api` is mocked at module level (`getApproval`/`getApprovalHistory`
+ * only — every other export, including the real `normalizeApprovalHistoryEnvelope`, is the genuine
+ * module). Nothing directory-shaped is mocked here, because the panel calls nothing directory-shaped.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
 import MetaRecordApprovalPanel from '../src/multitable/components/MetaRecordApprovalPanel.vue'
 import type { MetaRecord, MetaRecordApprovalSubmission } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
-import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
-import { getApproval, getApprovalHistory, resolveApprovalDirectoryUsers } from '../src/approvals/api'
+import { getApproval, getApprovalHistory } from '../src/approvals/api'
 
 vi.mock('../src/approvals/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/approvals/api')>()
@@ -72,13 +73,11 @@ vi.mock('../src/approvals/api', async (importOriginal) => {
     ...actual,
     getApproval: vi.fn(),
     getApprovalHistory: vi.fn(),
-    resolveApprovalDirectoryUsers: vi.fn(async () => [] as Array<{ id: string; name: string }>),
   }
 })
 
 const mockGetApproval = vi.mocked(getApproval)
 const mockGetApprovalHistory = vi.mocked(getApprovalHistory)
-const mockResolveUsers = vi.mocked(resolveApprovalDirectoryUsers)
 
 async function flushUi(cycles = 6) {
   for (let i = 0; i < cycles; i += 1) {
@@ -230,11 +229,8 @@ async function expandProgress(root: HTMLElement, index = 0) {
 
 beforeEach(() => {
   localStorage.clear()
-  __resetResolvedDirectoryNamesForTests()
   mockGetApproval.mockReset()
   mockGetApprovalHistory.mockReset()
-  mockResolveUsers.mockReset()
-  mockResolveUsers.mockResolvedValue([])
   mockGetApproval.mockResolvedValue(detailFixture())
   mockGetApprovalHistory.mockResolvedValue([] as never)
   useLocale().setLocale('zh')
@@ -245,7 +241,6 @@ afterEach(() => {
     try { mountedApps.pop()!.unmount() } catch { /* already unmounted */ }
   }
   document.body.innerHTML = ''
-  __resetResolvedDirectoryNamesForTests()
   useLocale().setLocale('en')
   vi.restoreAllMocks()
 })
@@ -355,8 +350,17 @@ describe('审批进度卡片 — lazy fetch + cache', () => {
 })
 
 describe('审批进度卡片 — rendering', () => {
-  it('renders 步骤, 当前待处理人 (shared directory resolver) and history from snake_case rows', async () => {
-    mockResolveUsers.mockResolvedValue([{ id: 'u_manager', name: '李四' }])
+  it('renders 步骤, 当前待处理人 (the payload\'s own assigneeName) and history from snake_case rows', async () => {
+    // Only the ACTIVE assignment at the CURRENT node is named by the producer. The other two keep an
+    // empty `metadata` on purpose: if the active-at-current-node filter broke, they would show up as
+    // 「成员 2」/「成员 3」 next to 李四 rather than borrowing his name, and the EXACT assertion below reds.
+    mockGetApproval.mockResolvedValue(detailFixture({
+      assignments: [
+        { id: 'asgn_1', type: 'approval', assigneeId: 'u_manager', sourceStep: 2, nodeKey: 'approval_1', isActive: true, metadata: { assigneeName: '李四' } },
+        { id: 'asgn_2', type: 'approval', assigneeId: 'u_done', sourceStep: 1, nodeKey: 'approval_1', isActive: false, metadata: {} },
+        { id: 'asgn_3', type: 'approval', assigneeId: 'u_later', sourceStep: 3, nodeKey: 'approval_2', isActive: true, metadata: {} },
+      ],
+    }))
     mockGetApprovalHistory.mockResolvedValue([
       // Platform branch shape: snake_case, no camelCase siblings (approvals/api.ts documents the drift).
       { id: 'h2', action: 'approve', actor_id: 'u_1', actor_name: '张三', comment: '同意', from_status: 'pending', to_status: 'pending', occurred_at: '2026-09-15T04:00:00.000Z' },
@@ -369,16 +373,15 @@ describe('审批进度卡片 — rendering', () => {
 
     expect(q(container, 'record-approval-progress-step')!.textContent).toContain('第 2 / 3 步')
 
-    // The batch resolve was kicked off for the ids this card shows, and the resolved name is rendered
-    // (never the raw internal user id, never the 「成员 N」 fallback once a name lands).
-    expect(mockResolveUsers).toHaveBeenCalled()
+    // The name the APPROVAL SIDE supplied (`metadata.assigneeName`) is what renders — never the raw
+    // internal user id, and never the 「成员 N」 fallback while a supplied name exists.
     const approvers = q(container, 'record-approval-progress-approvers')!.textContent!.trim()
     // EXACT, because the point of the line is WHO is listed: the fixture also carries an INACTIVE
     // assignment at the current node and an ACTIVE one at a later node, and neither is a pending
     // approver. `not.toContain(rawId)` cannot pin that filter — a raw id is never rendered by this card
     // (the only id-shaped path is the 「成员 N」 fallback), so dropping the filter would still pass it.
     expect(approvers).toBe('当前待处理人: 李四')
-    // Kept anyway: these DO discriminate the label rule (a resolver bypass that printed the id).
+    // Kept anyway: these DO discriminate the label rule (a regression that printed the id instead).
     expect(approvers).not.toContain('u_manager')
     expect(approvers).not.toContain('u_done')
     expect(approvers).not.toContain('u_later')
@@ -458,8 +461,9 @@ describe('审批进度卡片 — rendering', () => {
     expect(q(container, 'record-approval-progress-history-empty')!.textContent).toContain('暂无历史记录')
   })
 
-  it('falls back to a values-free ordinal when the directory cannot confirm a name', async () => {
-    mockResolveUsers.mockResolvedValue([])
+  it('falls back to a values-free ordinal when the payload names nobody', async () => {
+    // The default fixture's assignments all carry an empty `metadata` — the only other thing they carry
+    // is an id, and an id is not a rendering candidate on this surface.
     const { container } = mountPanel()
     await expandPanel(container)
     await expandProgress(container)
