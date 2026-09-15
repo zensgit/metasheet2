@@ -2,6 +2,20 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Record Approval Main Replay
+
+Tested merge `5a8054d48a52b417cef7c99372541300fd776a2c`, tree
+`c77f762ad226c3d65c408458776aee372009e20e`, ordered parents
+`5c7f96a7b028414948e1cb673a4b75f6f2ec1576` +
+`784c22dc182b2050bf204f4d013226d5bbb15131`:
+
+- Backend focused unit: 2 files / 74 tests PASS; Web focused neighbors: 6 files / 316 tests PASS.
+- Required-web exits 0; final group 460 files / 6,929 tests PASS. Log `/private/tmp/tm-784c-required-web-20260916.log`.
+- Core typecheck and app-only `vue-tsc --noEmit -p tsconfig.app.json` PASS; diff-check PASS. No new mutation or independent review is claimed for this automatic merge.
+- Dedicated PG15 synthetic database: fresh 405 migrations, second no-op replay, record-approval realDB 15/15 PASS. Log `/private/tmp/tm-784c-realdb-20260916.log`. This Express fixture uses synthetic identity middleware, not real browser authentication.
+- Independent post-suite census: fixture users/sheets/bases and other database sessions each zero. Dedicated database dropped; exact database/backend residue zero; task-owned PostgreSQL stopped.
+- Main recheck remained `784c22dc`. Published predecessor `5c7f96a7` had 28 SUCCESS, 1 expected SKIP, and Node20 pending at the last live query. No remote CI result for this merge is claimed. Earlier browser evidence stays bound to its original SHA.
+
 ## Embed Echo Main Replay
 
 Tested merge `0753062239e16cce410714f7083a19bb19e15fac`, tree `4dfffc3a6fd62970e3d02e5064c689242ec753de`, ordered parents `b05fb6a8a61f6fb2f86e6a5254b23d7e42793538` + main `1bbf3c1c311ffd7dd58e841dd5e9a1c642db7e2c`:

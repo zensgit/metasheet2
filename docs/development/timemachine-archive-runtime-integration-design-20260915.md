@@ -2,6 +2,18 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Record Approval Main Replay
+
+True merge `5a8054d48a52b417cef7c99372541300fd776a2c`, tree
+`c77f762ad226c3d65c408458776aee372009e20e`, has ordered parents
+`5c7f96a7b028414948e1cb673a4b75f6f2ec1576` and then-current main
+`784c22dc182b2050bf204f4d013226d5bbb15131`. All 13 incoming paths merged
+automatically, including shared client and record-label utilities. No manual
+production resolution, migration, workflow, or new recovery semantics were added.
+Record approval names/pagination and atomic terminal handling remain main-owned.
+Approval completion shutdown, provider/custody decisions, and nightly sample
+attribution remain separate open gates; this replay does not close them.
+
 ## Embed Echo Main Replay
 
 True merge `0753062239e16cce410714f7083a19bb19e15fac`, tree
