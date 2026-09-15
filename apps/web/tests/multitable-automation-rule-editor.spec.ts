@@ -5411,6 +5411,194 @@ describe('MetaAutomationRuleEditor', () => {
       expect(blockKeys(container)).toContain('action-0-crossBaseTarget')
     }, ROUND_TRIP_TIMEOUT_MS)
 
+    // ---- (3b) create_record is the FOURTH cross-base writer, and it opts in with targetBaseId ALONE --
+    //
+    // automation-actions.ts CreateRecordConfig types `targetBaseId?` with NO targetSheetId/targetRecordId
+    // siblings (the target sheet is its own `sheetId`), and automation-service.ts
+    // validateCrossBaseWriteConfig lists only update/delete/lock — so the server saves targetBaseId alone
+    // and #5756 now preserves it. Before this change the editor rendered NO banner for such a rule while
+    // its target-sheet dropdown offered the whole readable-sheet roster (GET /api/multitable/sheets spans
+    // every base and automationTargetSheetOptions drops each row's baseId) against a sheet id that may
+    // address a different base.
+    //
+    // round-3 (adversarial review): what the banner SAYS has to match what the executor DOES.
+    // executeCreateRecord writes to `config.sheetId || context.sheetId`, and evaluateCrossBaseWriteGate
+    // returns `{crossBase:false}` as soon as that sheet's REAL base equals the trigger base — before the
+    // declared claim is ever compared — so a blank or local sheet id creates the record HERE and the step
+    // SUCCEEDS (backend XW-3b in multitable-cross-base-automation-write.test.ts pins exactly that, with an
+    // actor holding base-write nowhere). Copy promising "creates in ANOTHER base" / "the run fails" would
+    // be false in the common case, so these cases assert the honest wording instead. The roster rows also
+    // DO carry `baseId`, so the dropdown is SCOPED to the declared base rather than withheld: withholding
+    // it stripped the control from the legal `targetBaseId == this base` shape XW-3b exercises.
+
+    /**
+     * create_record mount WITH a sheet roster spanning two bases plus a legacy row that has no base at
+     * all, so the scoped-dropdown, the off-base-id and the degrade-to-text branches are all reachable.
+     * `sheet_x` is a deliberate lookalike: a readable sheet in THIS base whose id a cross-base rule might
+     * name, which the scoped list must refuse to offer as if it were the declared base's sheet.
+     */
+    function mountCreateRecord(
+      config: Record<string, unknown>,
+      listSheetsImpl?: () => Promise<{ sheets: unknown[] }>,
+    ) {
+      const saved = vi.fn()
+      const listSheets = vi.fn(listSheetsImpl ?? (async () => ({
+        sheets: [
+          { id: 'sheet_2', name: 'Tasks', baseId: 'base_1' },
+          { id: 'sheet_x', name: 'Local lookalike', baseId: 'base_1' },
+          { id: 'sheet_far', name: 'Remote table', baseId: 'base_x' },
+          { id: 'sheet_legacy', name: 'No base row' },
+        ],
+      })))
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        views,
+        client: { ...mockClient(), listSheets },
+        onSave: saved,
+        rule: fakeRule({
+          name: 'round2 create_record',
+          actionType: 'create_record',
+          actionConfig: config,
+          actions: [{ type: 'create_record', config }],
+        } as unknown as Partial<AutomationRule>),
+      })
+      return { container, saved, listSheets }
+    }
+
+    function sheetField(container: HTMLElement): HTMLElement {
+      return container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetId"]') as HTMLElement
+    }
+
+    /** Offered sheet ids, placeholder option dropped. */
+    function offeredSheetIds(container: HTMLElement): string[] {
+      return epOptions(sheetField(container)).map((o) => o.value).filter((v) => v !== '')
+    }
+
+    function typeTargetSheetId(container: HTMLElement, value: string) {
+      const el = sheetField(container) as HTMLInputElement
+      expect(el.tagName).toBe('INPUT')
+      el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    it('create_record: a cross-base targetBaseId shows the banner, scopes the dropdown to that base, and still round-trips', async () => {
+      const config = { sheetId: 'sheet_far', data: { fld_1: 'a' }, targetBaseId: 'base_x', x_customerExtension: extension }
+      const { container, saved, listSheets } = mountCreateRecord(config)
+      await flushPromises()
+      expect(listSheets).toHaveBeenCalledTimes(1) // the roster loaded — the dropdown branch was reachable
+
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner).not.toBeNull()
+      expect(banner.textContent).toContain('base_x')
+      expect(banner.textContent).toContain('sheet_far')
+      // No target RECORD exists for a create — the mutate ids row would print a bogus "targetRecordId: —".
+      expect(banner.textContent).not.toContain('targetRecordId')
+      expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).toBeNull()
+
+      // Honesty: the destination is decided by the target SHEET, not by this declaration. The banner may
+      // not promise the record leaves this base, nor that a mismatch fails the run (it does not — the gate
+      // short-circuits to same-base whenever the target sheet resolves into the trigger base).
+      expect(banner.textContent).toContain('does not by itself send the record to that base')
+      expect(banner.textContent).toContain('A target sheet in THIS base is created here')
+      expect(banner.textContent).not.toContain('the run fails')
+
+      // The dropdown is kept but SCOPED: only the declared base's readable sheets are offered. The local
+      // lookalike `sheet_x` and the base-less legacy row are not — an option here is provably in base_x.
+      expect(sheetField(container).tagName).not.toBe('INPUT') // el-select wrapper
+      expect(offeredSheetIds(container)).toEqual(['sheet_far'])
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordCrossBaseSheetHint"]')).not.toBeNull()
+
+      // The manual escape hatch survives, and the banner quotes the LIVE draft value, so it cannot go
+      // stale while the id is edited.
+      ;(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]') as HTMLButtonElement).click()
+      await flushPromises()
+      typeTargetSheetId(container, 'sheet_y')
+      await flushPromises()
+      expect((container.querySelector('[data-action-index="0"] [data-field="crossBaseTargetIds"]') as HTMLElement).textContent).toContain('sheet_y')
+
+      // ...and the whole config still saves byte-identically once the edit is undone (targetBaseId is NOT
+      // owned by this editor: no control clears it, so nothing may delete it).
+      typeTargetSheetId(container, 'sheet_far')
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('create_record: a targetBaseId equal to THIS base keeps its ordinary picker (the legal same-base shape)', async () => {
+      // multitable-cross-base-automation-write.test.ts XW-3b: a create carrying targetBaseId == the trigger
+      // base is a plain same-base create the gate never touches. Reporting it is fine; taking the sheet
+      // picker away from it (and telling the author the record leaves this base) is not.
+      const { container } = mountCreateRecord({ sheetId: 'sheet_2', data: {}, targetBaseId: 'base_1' })
+      await flushPromises()
+      expect(sheetField(container).tagName).not.toBe('INPUT')
+      expect(offeredSheetIds(container)).toEqual(['sheet_2', 'sheet_x']) // base_1 only — sheet_far is elsewhere
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]')).not.toBeNull()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner.textContent).toContain('A target sheet in THIS base is created here')
+      expect(banner.textContent).not.toContain('the run fails')
+    })
+
+    it('create_record: a sheet id that is not provably in the declared base is never offered by the scoped list', async () => {
+      // `sheet_x` is readable but lives in base_1, while the rule declares base_x. The dropdown must not
+      // present it (labelled with THIS base's name) as the target; it stays visible/editable as text.
+      const { container } = mountCreateRecord({ sheetId: 'sheet_x', data: {}, targetBaseId: 'base_x' })
+      await flushPromises()
+      expect(sheetField(container).tagName).toBe('INPUT') // manual default: the id isn't in the scoped list
+      expect((sheetField(container) as HTMLInputElement).value).toBe('sheet_x')
+
+      ;(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(offeredSheetIds(container)).toEqual(['sheet_far'])
+      expect(offeredSheetIds(container)).not.toContain('sheet_x')
+    })
+
+    it('create_record: a SAME-base create keeps the whole roster and shows no banner', async () => {
+      const { container } = mountCreateRecord({ sheetId: 'sheet_2', data: {} })
+      await flushPromises()
+      expect(container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]')).toBeNull()
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordCrossBaseSheetHint"]')).toBeNull()
+      expect(sheetField(container).tagName).not.toBe('INPUT') // el-select wrapper, unchanged behaviour
+      expect(offeredSheetIds(container)).toEqual(['sheet_2', 'sheet_x', 'sheet_far', 'sheet_legacy'])
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]')).not.toBeNull()
+    })
+
+    it('create_record: targetBaseId with no sheetId is flagged inline, does NOT block save, and does not promise a failed run', async () => {
+      // The mutate rule blocks save because validateCrossBaseWriteConfig 400s the incomplete triple.
+      // create_record is skipped by that validator, so blocking here would make a server-legal rule
+      // permanently unsavable in this editor. And the run does not fail either: with no sheetId the
+      // executor targets the TRIGGER sheet, the gate sees the same base on both sides and returns
+      // `{crossBase:false}` before looking at the claim, so the record is created here and the step
+      // succeeds. The inline note has to say that, not the opposite.
+      const config = { data: {}, targetBaseId: 'base_x', x_customerExtension: extension }
+      const { container, saved } = mountCreateRecord(config)
+      await flushPromises()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      const incomplete = banner.querySelector('[data-field="crossBaseTargetIncomplete"]') as HTMLElement
+      expect(incomplete).not.toBeNull()
+      expect(incomplete.textContent).toContain('the run does NOT fail')
+      expect(incomplete.textContent).toContain('the record is created here')
+      expect(incomplete.textContent).not.toContain('the run fails')
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+      expect(blockKeys(container)).not.toContain('action-0-crossBaseTarget')
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('create_record: with no roster at all the cross-base hint still describes the field that IS there', async () => {
+      // listSheets rejected — availableSheets is empty, so there is no dropdown to scope and the field
+      // degrades to the plain text input. The hint must not describe a control that does not exist.
+      const { container } = mountCreateRecord(
+        { sheetId: 'sheet_far', data: {}, targetBaseId: 'base_x' },
+        async () => { throw new Error('offline') },
+      )
+      await flushPromises()
+      expect(sheetField(container).tagName).toBe('INPUT')
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]')).toBeNull()
+      const hint = container.querySelector('[data-action-index="0"] [data-field="createRecordCrossBaseSheetHint"]') as HTMLElement
+      expect(hint).not.toBeNull()
+      expect(hint.textContent).toContain('the field stays a text box')
+    })
+
     // ---- structural: a future rebuild branch cannot forget its owned-key entry ---------------------
 
     it('every buildPayload branch that rebuilds a config declares its OWNED keys', async () => {

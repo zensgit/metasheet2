@@ -384,23 +384,38 @@
             <!-- #5739 泛化 round-2: the cross-base target triple is not authored here but IS preserved on
                  save, so the screen must say so — otherwise the delete warning ("the trigger record in this
                  table") is simply false for such a rule. An incomplete triple is called out too: the
-                 backend rejects it at save (400) and the executor fails the step at run. -->
+                 backend rejects it at save (400) and the executor fails the step at run.
+                 #5756 follow-up: create_record opts in with `targetBaseId` ALONE (its target sheet is
+                 `sheetId`, there is no target record), so it renders the same banner with create-shaped
+                 copy, and its target-sheet dropdown below is SCOPED to the declared base.
+                 round-3: that copy no longer promises "creates in ANOTHER base" / "the run fails". The
+                 executor picks the destination from the target SHEET, not from this declaration
+                 (executeCreateRecord -> evaluateCrossBaseWriteGate returns `{crossBase:false}` as soon as
+                 the target sheet's REAL base equals the trigger base, before the claim is ever compared),
+                 so a blank/local sheet id creates the record HERE and the step succeeds - pinned by the
+                 integration test XW-3b (same-base create carrying targetBaseId, actor with base-write
+                 nowhere, asserts success). -->
             <div
               v-if="crossBaseTargets[action.draftId]"
               class="meta-rule-editor__hint meta-rule-editor__hint--warning"
               data-field="crossBaseTarget"
             >
-              <div>{{ automationLabel('actionConfig.crossBaseTargetWarning', isZh) }}</div>
-              <div data-field="crossBaseTargetIds">
+              <div v-if="crossBaseTargets[action.draftId].kind === 'create'">{{ automationLabel('actionConfig.crossBaseCreateTargetWarning', isZh) }}</div>
+              <div v-else>{{ automationLabel('actionConfig.crossBaseTargetWarning', isZh) }}</div>
+              <div v-if="crossBaseTargets[action.draftId].kind === 'create'" data-field="crossBaseTargetIds">
+                targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
+                sheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }}
+              </div>
+              <div v-else data-field="crossBaseTargetIds">
                 targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
                 targetSheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }} ·
                 targetRecordId: {{ crossBaseTargets[action.draftId].targetRecordId || '—' }}
               </div>
               <div
-                v-if="!crossBaseTargets[action.draftId].targetSheetId || !crossBaseTargets[action.draftId].targetRecordId"
+                v-if="crossBaseTargetIncomplete(crossBaseTargets[action.draftId])"
                 data-field="crossBaseTargetIncomplete"
               >
-                {{ automationLabel('actionConfig.crossBaseTargetIncomplete', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId].kind === 'create' ? 'actionConfig.crossBaseCreateTargetIncomplete' : 'actionConfig.crossBaseTargetIncomplete', isZh) }}
               </div>
             </div>
 
@@ -425,8 +440,25 @@
                    may omit cross-base/future sheets (isManualTargetSheetEntry defaults to manual when
                    the currently-configured id isn't in the fetched list, so a stale/foreign value is
                    never silently hidden). A missing/failed/empty listSheets() falls all the way back
-                   to the plain text input in the v-else branch below. -->
-              <template v-if="targetSheetOptions.length > 0">
+                   to the plain text input in the v-else branch below.
+                   #5756 follow-up (round-3): the REQUEST is not scoped to `targetBaseId` - client.listSheets()
+                   takes no baseId and GET /api/multitable/sheets returns every readable sheet across bases -
+                   but every row carries `baseId` (univer-meta.ts GET /sheets; MetaSheet.baseId); only
+                   automationTargetSheetOptions drops it. So for a create that declares `targetBaseId` the
+                   list is SCOPED to that base here (targetSheetOptionsFor) rather than taken away: every
+                   offered option is provably inside the declared base, and a declaration equal to THIS base
+                   - a legal same-base shape the backend explicitly supports (XW-3b) - keeps its ordinary
+                   picker instead of losing the control. When no readable sheet is in that base the scoped
+                   list is empty and the field degrades to the v-else free-text input below, which stays the
+                   only way to author an id you cannot see; the hint states the scoping in both states. -->
+              <div
+                v-if="crossBaseTargets[action.draftId]"
+                class="meta-rule-editor__hint"
+                data-field="createRecordCrossBaseSheetHint"
+              >
+                {{ automationLabel('actionConfig.crossBaseCreateSheetScoped', isZh) }}
+              </div>
+              <template v-if="targetSheetOptionsFor(action).length > 0">
                 <el-select
                   v-if="!isManualTargetSheetEntry(action)"
                   v-model="(action.config.targetSheetId as string)"
@@ -436,7 +468,7 @@
                   data-field="createRecordTargetSheetId"
                 >
                   <el-option value="" data-value="" :label="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
-                  <el-option v-for="opt in targetSheetOptions" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
+                  <el-option v-for="opt in targetSheetOptionsFor(action)" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
                 </el-select>
                 <el-input
                   v-else
@@ -1798,7 +1830,7 @@ import {
   summarizeAutomationAction,
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
-import { automationTargetSheetOptions } from '../utils/automation-target-sheet-options'
+import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
 
 interface FieldPair {
   fieldId: string
@@ -1969,12 +2001,34 @@ const targetSheetOptions = computed(() => automationTargetSheetOptions(available
 // is always visible/editable rather than silently swallowed by a dropdown that can't represent it.
 const manualTargetSheetOverride = ref<Record<string, boolean>>({})
 
+/**
+ * The target-sheet options for ONE create_record action. Default: the whole readable-sheet roster
+ * (unchanged G-B2-27 behaviour). #5756 follow-up round-3 - when the action declares `targetBaseId`, the
+ * roster is SCOPED to that base: GET /api/multitable/sheets returns sheets from every base the author can
+ * read, but each row carries `baseId`, which `automationTargetSheetOptions` drops. Scoping here makes an
+ * offered option provably inside the declared base (a pick cannot silently address a different one)
+ * WITHOUT withholding the control from the legal `targetBaseId == this base` shape (XW-3b). Rows with no
+ * baseId (legacy/null) are excluded rather than assumed local: unprovable is not the same as local. An
+ * empty result degrades the field to the free-text input below - the only way to author an id you cannot
+ * see. Hoisted `function` (not a computed) so it can call the equally hoisted crossBaseTargetOf without a
+ * TDZ on the consts declared further down.
+ */
+function targetSheetOptionsFor(action: DraftAction): AutomationTargetSheetOption[] {
+  const target = crossBaseTargetOf(action)
+  if (!target || target.kind !== 'create') return targetSheetOptions.value
+  return automationTargetSheetOptions(
+    availableSheets.value.filter((sheet) => typeof sheet.baseId === 'string' && sheet.baseId.trim() === target.targetBaseId),
+  )
+}
+
 function isManualTargetSheetEntry(action: DraftAction): boolean {
   const override = manualTargetSheetOverride.value[action.draftId]
   if (override !== undefined) return override
   const current = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
   if (!current) return false
-  return !targetSheetOptions.value.some((opt) => opt.value === current)
+  // Against the SCOPED list for a cross-base create: an id that is not provably in the declared base
+  // must stay visible in the text box, not be swallowed by a dropdown that cannot represent it.
+  return !targetSheetOptionsFor(action).some((opt) => opt.value === current)
 }
 
 function toggleManualTargetSheetEntry(action: DraftAction) {
@@ -3578,9 +3632,17 @@ function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): voi
 // by the executor write-gate). This editor authors none of the three and preserves all three on save, so it
 // must at least TELL the author the action leaves this table — the delete warning/ack text is otherwise a
 // false statement, and an incomplete triple would arrive as an opaque 400.
+// #5756 follow-up — create_record is the FOURTH cross-base writer and it opts in with `targetBaseId`
+// ALONE: automation-actions.ts CreateRecordConfig types no targetSheetId/targetRecordId siblings (the
+// target sheet is its own `sheetId`, and there is no target record — the run creates one), and
+// automation-service.ts validateCrossBaseWriteConfig lists only update/delete/lock, so the server saves
+// `targetBaseId` without demanding anything else. `kind` keeps the two shapes apart everywhere the
+// mutate wording would be false for a create (no record id, and the sheet id IS editable on this screen).
 interface CrossBaseTarget {
+  kind: 'mutate' | 'create'
   targetBaseId: string
   targetSheetId: string
+  /** Always '' for kind === 'create': the record does not exist yet. */
   targetRecordId: string
 }
 
@@ -3592,13 +3654,32 @@ interface CrossBaseTarget {
  * "pre-checks the destructive acknowledgement" spec).
  */
 function crossBaseTargetOf(action: DraftAction): CrossBaseTarget | null {
-  if (action.type !== 'update_record' && action.type !== 'delete_record' && action.type !== 'lock_record') return null
+  const isMutate = action.type === 'update_record' || action.type === 'delete_record' || action.type === 'lock_record'
+  if (!isMutate && action.type !== 'create_record') return null
   const config = isPlainRecord(action.originalConfig) ? action.originalConfig : null
   if (!config) return null
   const text = (key: string): string => (typeof config[key] === 'string' ? (config[key] as string).trim() : '')
   const targetBaseId = text('targetBaseId')
   if (!targetBaseId) return null
-  return { targetBaseId, targetSheetId: text('targetSheetId'), targetRecordId: text('targetRecordId') }
+  if (!isMutate) {
+    // create_record: the target sheet is `sheetId` (CreateRecordConfig.sheetId), which the draft loads
+    // into `config.targetSheetId` (see draftConfigFromAction) and this editor DOES author — so read
+    // the LIVE draft value, not the loaded one, or the banner would keep quoting a sheet id the author
+    // just replaced. targetBaseId itself is unauthorable here and stays read from originalConfig.
+    const draftSheetId = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
+    return { kind: 'create', targetBaseId, targetSheetId: draftSheetId, targetRecordId: '' }
+  }
+  return { kind: 'mutate', targetBaseId, targetSheetId: text('targetSheetId'), targetRecordId: text('targetRecordId') }
+}
+
+/**
+ * Is the cross-base target missing an id the RUN needs? The mutate triple needs both siblings (and the
+ * server 400s without them); a create needs only the target sheet id (the server accepts it either way —
+ * see the 'actionConfig.crossBaseCreateTargetIncomplete' copy for what the run does instead).
+ */
+function crossBaseTargetIncomplete(target: CrossBaseTarget): boolean {
+  if (target.kind === 'create') return !target.targetSheetId
+  return !target.targetSheetId || !target.targetRecordId
 }
 
 const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
@@ -3656,7 +3737,12 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
       snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
     }
     const crossBaseTarget = crossBaseTargetOf(action)
-    if (crossBaseTarget) snapshot.crossBaseTarget = crossBaseTarget
+    // Only the MUTATE triple is a SAVE blocker. computeSaveBlockReasons blocks on "targetBaseId without
+    // BOTH siblings" because automation-service.ts validateCrossBaseWriteConfig 400s exactly that shape —
+    // and that validator skips create_record, so a cross-base create (targetBaseId alone, no targetRecordId
+    // ever) saves fine on the server. Handing it to the save gate would make such a rule permanently
+    // unsavable in this editor; the create case is surfaced by the banner instead (#5756 follow-up).
+    if (crossBaseTarget && crossBaseTarget.kind === 'mutate') snapshot.crossBaseTarget = crossBaseTarget
     if (action.type === 'write_approval_form_values') {
       snapshot.fwbWriteback = {
         mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
@@ -5269,7 +5355,11 @@ function buildPayload(): Partial<AutomationRule> {
     }
     if (action.type === 'create_record') {
       // #5739 泛化: `targetBaseId` (cross-base create; the executor re-verifies base-WRITE on it) is not
-      // modelled here and must survive. A cleared sheet picker still DELETES `sheetId` (undefined is skipped
+      // modelled here and must survive. #5756 follow-up: it stays OUT of ACTION_OWNED_CONFIG_KEYS above
+      // deliberately — this screen has no control that clears it (the banner only REPORTS it), so there is
+      // no "cleared to empty" state to translate into a delete; making the editor own a key it cannot
+      // author would turn every save of a legacy cross-base create into a silent downgrade to same-base.
+      // A cleared sheet picker still DELETES `sheetId` (undefined is skipped
       // by the overlay), instead of falling back to the loaded one.
       return {
         type: action.type,
