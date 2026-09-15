@@ -32,6 +32,19 @@ const ENABLED_ENV = Object.freeze({
   MULTITABLE_ENABLE_WRITER_FENCE: 'true',
 })
 
+const PROVIDER_METHODS = [
+  ['keyCustody', 'produceGenerationDek'],
+  ['keyCustody', 'unwrapGenerationDek'],
+  ['keyCustody', 'deriveDekFingerprint'],
+  ['keyCustody', 'macManifestRoot'],
+  ['keyCustody', 'verifyManifestRootMac'],
+  ['objectStore', 'put'],
+  ['objectStore', 'get'],
+  ['objectStore', 'head'],
+  ['objectStore', 'deleteExpired'],
+  ['objectStore', 'pin'],
+] as const
+
 beforeEach(() => {
   workerMocks.createRecoveryArchiveRestoreWorker.mockReset()
   workerMocks.createRecoveryArchiveRestoreWorker.mockImplementation(() => idleWorker())
@@ -381,6 +394,68 @@ describe('recovery archive application composition', () => {
       () => fakeDatabaseRuntime().runtime,
       ENABLED_ENV,
     )).toThrow('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID')
+  })
+
+  it.each(PROVIDER_METHODS)('rejects missing or non-callable %s.%s before resolving the database', (provider, method) => {
+    const schedule = vi.spyOn(globalThis, 'setInterval')
+    for (const invalid of [undefined, 'provider-secret']) {
+      const providers = fakeProviders()
+      Object.defineProperty(providers[provider], method, { value: invalid })
+      const resolveDatabaseRuntime = vi.fn(() => fakeDatabaseRuntime().runtime)
+
+      expect(() => createRecoveryArchiveApplication(
+        () => fakeComposition(providers),
+        resolveDatabaseRuntime,
+        ENABLED_ENV,
+      )).toThrow(new Error('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED'))
+
+      expect(resolveDatabaseRuntime).not.toHaveBeenCalled()
+      expect(workerMocks.createRecoveryArchiveRestoreWorker).not.toHaveBeenCalled()
+      expect(schedule).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each(PROVIDER_METHODS)('normalizes a throwing %s.%s accessor without leaking provider details', (provider, method) => {
+    const providers = fakeProviders()
+    Object.defineProperty(providers[provider], method, {
+      get() { throw new Error('provider-secret', { cause: 'private-custody-details' }) },
+    })
+    const resolveDatabaseRuntime = vi.fn(() => fakeDatabaseRuntime().runtime)
+    let failure: unknown
+    try {
+      createRecoveryArchiveApplication(
+        () => fakeComposition(providers),
+        resolveDatabaseRuntime,
+        ENABLED_ENV,
+      )
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toEqual(new Error('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED'))
+    expect(failure).not.toHaveProperty('cause')
+    expect(resolveDatabaseRuntime).not.toHaveBeenCalled()
+    expect(workerMocks.createRecoveryArchiveRestoreWorker).not.toHaveBeenCalled()
+  })
+
+  it('accepts prototype methods without calling external providers during preflight', async () => {
+    const providers = fakeProviders()
+    const inherited = {
+      keyCustody: Object.create(providers.keyCustody) as RecoveryArchiveKeyCustodyAdapter,
+      objectStore: Object.create(providers.objectStore) as RecoveryArchiveObjectStoreProvider,
+    }
+    const application = createRecoveryArchiveApplication(
+      () => fakeComposition(inherited),
+      () => fakeDatabaseRuntime().runtime,
+      ENABLED_ENV,
+    )
+    expect(application.routerOptions?.recoveryArchiveRuntime?.keyCustody).toBe(inherited.keyCustody)
+    expect(application.routerOptions?.recoveryArchiveRuntime?.objectStore).toBe(inherited.objectStore)
+    for (const [provider, method] of PROVIDER_METHODS) {
+      expect(Reflect.get(providers[provider], method)).not.toHaveBeenCalled()
+    }
+    expect(workerMocks.createRecoveryArchiveRestoreWorker).not.toHaveBeenCalled()
+    await application.stopWorker()
   })
 })
 
