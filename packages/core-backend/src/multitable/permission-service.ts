@@ -49,6 +49,7 @@ import {
   APPROVAL_PROJECTION_BASE_ID,
   restrictApprovalProjectionCapabilitiesPerRow,
   isApprovalProjectionBaseId,
+  approvalProjectionParticipantPredicateSql,
 } from './approval-projection-constants'
 import {
   canAccessElearningProjectionBase,
@@ -939,6 +940,12 @@ export async function loadRowLevelReadDenyEnabled(query: QueryFn, sheetId: strin
  * T36-1 (Plan A): of the given sheet ids, the approval-projection sheets where `userId` is a
  * PARTICIPANT in ≥1 row (row's own requesterId/approverId — zero new storage). Fail-closed: any
  * error → empty set → the caller treats the actor as a non-participant (full fence).
+ *
+ * Project-key fix: the projection WRITER namespaces every column by the row's OWN sheet id
+ * (`deriveProjectionFieldId` — `${sheetId}__${columnKey}`), so the match is derived IN SQL from
+ * `r.sheet_id` (a JOIN spans every sheet in `sheetIds`, each potentially a different template
+ * family) via the ONE shared `approvalProjectionParticipantPredicateSql` — never a bare
+ * `'requesterId'`/`'approverId'` literal, which the writer never stores a row under.
  */
 export async function loadApprovalProjectionParticipantSheetIds(
   query: QueryFn,
@@ -953,7 +960,7 @@ export async function loadApprovalProjectionParticipantSheetIds(
          JOIN meta_records r ON r.sheet_id = s.id
         WHERE s.id = ANY($1::text[])
           AND s.base_id = $2
-          AND (r.data->>'requesterId' = $3 OR r.data->>'approverId' = $3)`,
+          AND ${approvalProjectionParticipantPredicateSql('r.data', 'r.sheet_id', '$3')}`,
       [sheetIds, APPROVAL_PROJECTION_BASE_ID, userId],
     )
     return new Set((result.rows as Array<{ id: string }>).map((row) => row.id))
@@ -1050,11 +1057,11 @@ export async function loadApprovalProjectionDeniedRecordIds(
   if (requested && requested.length === 0) return { isProjection: false, denied: new Set() }
   const projectionIds = await loadApprovalProjectionSheetIds(query, [sheetId])
   if (!projectionIds.has(sheetId)) return { isProjection: false, denied: new Set() }
-  // COALESCE closes the SQL three-valued-logic hole: a row with a MISSING participant field
-  // yields NULL comparisons, and `NOT (NULL OR NULL)` is NULL — the corrupt row would silently
-  // escape the denied set (fail-OPEN). With COALESCE to '' it can never equal a real user id, so
-  // corrupt rows are always denied (lock §3 fail-closed). An empty/absent actor id denies every
-  // row for the same reason ('' is matched against COALESCE'd '' explicitly guarded out below).
+  // The COALESCE-to-'' fail-closed handling of a row with a MISSING/corrupt participant field
+  // (three-valued-logic: `NOT (NULL OR NULL)` is NULL, which a bare WHERE would drop from the
+  // denied set — fail-OPEN) now lives ONCE inside `approvalProjectionParticipantPredicateSql`,
+  // not re-spelled here. An empty/absent actor id denies every row for the same reason ('' is
+  // explicitly guarded out below before it could match a COALESCE'd '').
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
   if (!normalizedUserId) {
     const all = requested
@@ -1062,18 +1069,21 @@ export async function loadApprovalProjectionDeniedRecordIds(
       : await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])
     return { isProjection: true, denied: new Set((all.rows as Array<{ id: string }>).map((row) => row.id)) }
   }
+  // Project-key fix: `sheetId` is already a bound single-sheet parameter here ($1), so the shared
+  // predicate derives the namespaced key from that placeholder directly (no per-row JOIN needed,
+  // unlike the multi-sheet carve-out above) — same ONE definition, same fail-closed COALESCE.
   const result = requested
     ? await query(
       `SELECT id FROM meta_records
         WHERE sheet_id = $1
           AND id = ANY($3::text[])
-          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+          AND NOT ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}`,
       [sheetId, normalizedUserId, requested],
     )
     : await query(
       `SELECT id FROM meta_records
         WHERE sheet_id = $1
-          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+          AND NOT ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}`,
       [sheetId, normalizedUserId],
     )
   return { isProjection: true, denied: new Set((result.rows as Array<{ id: string }>).map((row) => row.id)) }
