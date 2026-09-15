@@ -303,3 +303,47 @@ are still not authenticated browser-to-database UAT. This appendix is a separate
 report-only child of the merge code head. New published-head CI must be observed
 after ordinary push to the existing Draft #5709. No Ready, merge, auto-merge,
 flag, dispatch, deployment, production or real customer data action is authorized.
+
+### Same-Window Main Advancement
+
+Before push, main advanced once more through #5712. The preceding replay and its
+report child `0c6285aa0db4cb9f0fef79c73558121807963c61` were kept locally, not
+published as a current-main candidate. No force update or history rewrite occurred.
+
+- New exact main: `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
+- Final true-merge code head: `3134d8762827adbae3fc7ae6a2253c93fff2ea45`.
+- Code tree: `a88502714619d7e5a5c9eb2bf2d8276e7c10a086`.
+- Ordered parents: `0c6285aa0db4cb9f0fef79c73558121807963c61`, then new main.
+- Incoming delta: eight files for network/no-response versus HTTP gateway copy,
+  their tests and required-web enrolment. The only common path was required-web.
+  The merge was automatic with no conflicts or manual resolutions. The other
+  seven incoming files exactly match main; all TM-owned non-shared blobs match
+  the preceding candidate.
+- Required-web preserves both parent token sets, including bare-basename filters.
+  The network-copy whole-file token and `multitable-sheet-trash` both remain.
+  Independent review also checked selector multiplicities with zero loss/extra.
+
+Fresh gates on this final code tree:
+
+| Gate | Result |
+| --- | --- |
+| Recovery plus network-error neighbors | 15 files / 264 tests PASS |
+| Backend network-copy CI wiring | 1 file / 7 tests PASS |
+| Required web | All groups PASS; final group 456 files / 6741 tests |
+| Web application typecheck | PASS on Node 20 |
+| Synthetic browser and timezones | Both viewports and timezones PASS; zero page errors/overflow |
+| Official provenance | Frozen/live differenceCount=0 |
+| Diff and merge resolution | Diff check PASS; empty remerge-diff |
+
+Luna high separately reviewed this new frozen delta: zero P1/P2. Restore POSTs
+still have no automatic retry; error codes/status and current failure state remain
+intact without emitting recovery success. HTTP gateway wording is preserved.
+The reviewer performed no tests/writes/network access and was closed. Prior
+plugin/S5 and real-DB gates remain scoped to their byte-identical modules; no
+second DB or new mutation execution is claimed.
+
+Logs and synthetic screenshots use `/private/tmp/tm-current-main-replay2-*`.
+The new main's long CI was still pending, with no observed failure, during local
+verification. Neither it nor fresh published-head CI is claimed terminal by this
+report. Publication remains an ordinary push to Draft #5709 only, without Ready,
+merge, flag, dispatch, staging, deployment, production or customer-data operations.
