@@ -112,3 +112,9 @@ Code `5522d0467e17c43eeafb910854d63bde2973b2c6` replaces the one-effect-per-time
 ### Pending Queue Index
 
 Code `027ff1ef7309306e88ce3d4797da3658b1298812` adds a partial btree index matching the existing pending-effect ordering (last attempt NULLS FIRST, creation time, revision) and completed-at-NULL predicate. The unpublished ledger migration owns its creation and exact definition/validity/readiness audit. Wrong predicate, column order or NULL ordering is rejected rather than silently accepted by IF NOT EXISTS. This does not change queue eligibility or authorization. Pool-capacity remains open: consumer and processor use separate simultaneous transactions; the main pool defaults to 20 but is configurable, so default capacity is not sufficient acceptance proof.
+
+### Canonical Derived Drain After Process Restart
+
+Test code `0f5e1176a4adc74afa26a6ac769af1982eb66892` replaces the terminal identity-only processor in the two actual process-kill cases with the canonical derived processor. Each case proves an inactive actor leaves all 5,001 effects pending and computed data unchanged; reactivation permits all effects to complete and formulas to reflect restored inputs. Draining occurs in the parent test process, not the restarted child's full worker scheduling loop. Object-store/key custody remain fixture implementations; standard provider startup and deployed acceptance remain open.
+
+Code `04b63fd732ecb33c90cc07e2767cebc4630a8647` declares the scoped derived SQL's existing lock/revision disposition. Computed-value refresh is not an authored edit and emits no extra record revision or version increment. This annotation does not waive the archive processor's actor authorization, authority lease, transaction scope or canonical sheet fences; no SQL or runtime behavior changes.

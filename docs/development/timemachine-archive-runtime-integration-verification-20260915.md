@@ -276,3 +276,20 @@ Remote #5744 at `c6488a47f8dde6059a5ef1c6e7de8d1a418b827f` failed migration-repl
 Fix `b068e9be8c705ab4d15374bab8730b5be0fb7d2b`, tree `9c193699d1cac294442289b79858af66b5ce9450`, adds the ledger to the ordered migration list and touched/owned catalog census. Its down now executes existence check, ACCESS EXCLUSIVE lock, nonempty refusal and drop in one DO statement, also valid for the verifier's direct autocommit invocation. No CASCADE or weakened down protection.
 
 Fresh dedicated DB passes the full verifier: 27 migrations, 931 catalog objects, fingerprint `05fc3f2c0ea108f2b99a32af6e3ec5b48d1e8aab056753c2a2528fec5e5d385e`. Injected failure after derived-ledger down gives the expected injected-down RED; subsequent full replay returns the identical fingerprint. Owning migration subset 8/8, tsc/lint/diff-check PASS. The first broken verifier left partial catalog cleanup, so repaired verification used a newly recreated dedicated DB rather than assuming that catalog was intact. DB dropped, prefix/backends zero, PG stopped. Logs `/private/tmp/tm-replay-fix-{before,after-fresh,injection,final,migration-tests}.log`. No remote success claim until the new exact head runs.
+
+### Process Restart And Canonical Derived Completion
+
+Exact test commit `0f5e1176a4adc74afa26a6ac769af1982eb66892`, tree `16ba1647f7c401b4892cf7c76e72236e49de18cb`:
+
+- Actual SIGKILL before commit and after commit/before acknowledgement retain the existing restore/receipt uniqueness assertions. Both now drain 5,001 effects through the real canonical derived processor rather than a terminal stub.
+- Inactive synthetic actor gives retry, zero computed change and 5,001 pending effects. Reactivation completes exactly 5,001 effects; the next consume is idle. First and last formula values match restored inputs; the last record remains version 3. Formula fixture IDs use the engine's existing `fld_` grammar, without changing production parsing.
+- Prefix-scoped afterEach cleanup prevents long process tests leaving an expired prior fixture for a subsequent sweep assertion. The strict expected sweep count remains unchanged. Final full suite: 39/39 PASS, zero skips, 147.51 seconds. Log `/private/tmp/tm-process-derived-isolated-full.log`; dedicated fresh migration log `/private/tmp/tm-process-derived-migrate.log`. Synthetic users/jobs/effects/backends zero, database dropped, prefix residue zero, dedicated PG stopped.
+- This is canonical parent-process queue consumption after child restart, not complete standard-startup/provider or child worker-loop acceptance. No new mutation result is claimed for this test-only commit.
+
+### Scoped Derived CI Disposition
+
+Exact code `04b63fd732ecb33c90cc07e2767cebc4630a8647`, tree `9584554625d1c48ba5c546176dff23cb288572e9`: one source file, two comment lines, no runtime/SQL change.
+
+- Remote run `34951043638` at `c9a5debf2d4b97f0ea0ab917d764635378742b43` reported missing lock/revision disposition at the new scoped derived UPDATE. Existing sibling derived writers already declare this computed-only exemption. Canonical actor authorization and scoped sheet fences remain required by the caller.
+- Direct lock guard, revision guard and richtext/longtext write-sink neighbor: 3 files / 19 tests PASS. Removing the two new annotations produces exactly the two corresponding guard failures, both naming this SQL site; restoring returns 19/19 PASS. Logs `/private/tmp/tm-derived-disposition-{guards,mutation,restored}.log`; diff-check PASS.
+- No DB rerun for comment-only source change. Prior 39/39 real-DB evidence remains bound to its exact test commit. Remote head must run its own CI; local results are not a remote pass.
