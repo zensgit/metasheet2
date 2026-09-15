@@ -2,6 +2,32 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Final Shutdown Test Union
+
+True merge `a0e11874d2d2885be626a0448d01fe8b8b4c522e` has ordered parents
+`b30424c4e7705743b9d4abf98167d642fdad4adc` and
+`06f1a9e79db652544e727a278815c57f3e3ae670` (#5768). There were no conflicts.
+The first-parent delta contains only two tests and two owning lifecycle reports;
+production files are unchanged. The earlier synchronous-detach compatibility
+proposal was withdrawn by its owner after the late-completion counterexample.
+
+On this clean merge, four focused unit files pass 173/173 and core typecheck passes.
+An isolated PostgreSQL 15 database applies all 405 migrations and replays with no
+pending migration. The actual startup-failure matrix passes 8/8. Its pool-end
+spy deliberately supports multiple server lifecycles in one test worker; it is
+not proof of physical pool shutdown. The independent browser shutdown evidence
+below remains separately bound to 4bd71. The disposable database is dropped,
+exact-prefix database/backend counts are both zero, and the owned PG cluster is stopped.
+
+Mutation: detach completion consumers before producer drain; the new standalone
+late-completion test fails (expected one bridge callback, observed zero). Restore
+the production file byte-for-byte; the complete lifecycle file passes 5/5.
+Logs: `/private/tmp/tm-06f1-union-unit-20260916.log` and
+`/private/tmp/tm-a0e118-{migrate,replay,startup-db,tsc,late-mutation,late-restored}-20260916.log`.
+Initial sandbox PG start/stop required elevated local process permission; these
+were retried only for this owned cluster. No production database was accessed.
+New published-head CI remains required.
+
 ## Shutdown Neighbor CI Repair
 
 Test-only commit `0e59e8518646faf56509d4ee842fd1f4c2616895` follows published
