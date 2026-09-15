@@ -752,6 +752,7 @@ import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
   bulkFailureSamples as fmtBulkFailureSamples,
@@ -1593,6 +1594,11 @@ const workbenchReady = ref(false)
 let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
+let dialogMetaVisibilityListener: (() => void) | null = null
+// Cleared on unmount so an idle-deferred callback scheduled during mount, or a dialog-meta refresh
+// that was still in flight, can never fire into a torn-down workbench (or eat a later test's
+// mocked fetch). Declared up here because refreshDialogMeta() below reads it.
+let workbenchAlive = true
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
@@ -4639,14 +4645,27 @@ async function refreshDialogMeta() {
   try {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
-    if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
+    // workbenchAlive: this write lands AFTER an await, so a refresh still in flight when the
+    // workbench unmounted must not write into a torn-down grid.
+    if (refreshed && workbenchAlive && workbench.activeSheetId.value === activeSheetId) {
+      // #5743: an unchanged poll no longer replaces workbench.fields, so the computed hands back the
+      // very same field objects — reseating grid.fields anyway would invalidate every grid computed
+      // and re-render the table on each keep-alive tick for nothing.
+      const nextFields = propertyVisibleWorkbenchFields.value
+      const currentFields = grid.fields.value
+      const sameFields = currentFields.length === nextFields.length
+        && currentFields.every((field, index) => field === nextFields[index])
+      if (!sameFields) grid.fields.value = [...nextFields]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    // workbenchAlive: the dialog refs dialogMetaRefreshWanted() reads survive unmount and the
+    // "sheet changed mid-flight" clause below is true by construction after a teardown that
+    // switched sheets, so without this a refresh in flight during teardown would issue one more
+    // GET /fields + GET /context into a dead component.
+    const shouldRefresh = workbenchAlive && dialogMetaRefreshWanted()
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -4654,20 +4673,60 @@ async function refreshDialogMeta() {
   }
 }
 
+// Same predicate the watch below uses to arm/disarm the keep-alive — the visibility listener has to
+// re-check it because a dialog can close between a tab being hidden and it coming back.
+function dialogMetaRefreshWanted(): boolean {
+  return Boolean(
+    (showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value)
+    && workbench.activeSheetId.value,
+  )
+}
+
 function stopDialogMetaRefresh() {
   if (dialogMetaRefreshTimer != null) {
     window.clearInterval(dialogMetaRefreshTimer)
     dialogMetaRefreshTimer = null
   }
+  if (dialogMetaVisibilityListener) {
+    document.removeEventListener('visibilitychange', dialogMetaVisibilityListener)
+    dialogMetaVisibilityListener = null
+  }
   dialogMetaRefreshQueued = false
 }
 
+// #5743 follow-up: a refresh that is NOT an interval tick (dialog open, visibility catch-up) also
+// RESTARTS the cadence. Without the re-arm the interval kept the phase it had before the tab went
+// hidden, so "hidden 20 s -> visible" fired the catch-up and then let the pre-existing tick land a
+// few seconds later: two refreshes inside one 15 s window. The re-arm lives in this helper instead
+// of inline in the listener body so the listener closure identity never changes (the very function
+// object that was added is what stopDialogMetaRefresh must hand removeEventListener), and so at
+// most one interval is ever alive: the previous id is cleared before the new one lands in the same
+// slot stopDialogMetaRefresh reads.
+function armDialogMetaRefreshTimer() {
+  if (dialogMetaRefreshTimer != null) window.clearInterval(dialogMetaRefreshTimer)
+  dialogMetaRefreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    void refreshDialogMeta()
+  }, DIALOG_META_REFRESH_INTERVAL_MS)
+}
+
+// #5743: open → refresh once, then a SLOW keep-alive (15 s), skipped entirely while the tab is
+// hidden and re-fired once the moment it comes back. The old 1200 ms cadence pinned an idle admin
+// tab at ~1 req/s per open dialog forever; the composable's fingerprint check now also keeps an
+// unchanged answer from re-seating sheets/views/fields identities on every tick.
 function startDialogMetaRefresh() {
   stopDialogMetaRefresh()
   void refreshDialogMeta()
-  dialogMetaRefreshTimer = window.setInterval(() => {
-    void refreshDialogMeta()
-  }, 1200)
+  armDialogMetaRefreshTimer()
+  if (typeof document !== 'undefined') {
+    dialogMetaVisibilityListener = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!dialogMetaRefreshWanted()) return
+      void refreshDialogMeta()
+      armDialogMetaRefreshTimer()
+    }
+    document.addEventListener('visibilitychange', dialogMetaVisibilityListener)
+  }
 }
 
 // --- Bulk delete ---
@@ -5184,10 +5243,6 @@ watch(
     void replayPendingExternalContextIfReady()
   },
 )
-
-// Cleared on unmount so an idle-deferred callback scheduled during mount can
-// never fire into a torn-down workbench (or eat a later test's mocked fetch).
-let workbenchAlive = true
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
