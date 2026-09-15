@@ -2,6 +2,16 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Nightly Diagnostic Contract Recheck
+
+On clean `928bbe4ec367970a9a967616b38b7d66886fa90f`, the following local command passes 25/25 with zero skips:
+
+```sh
+node --test scripts/ops/phase5-required-samples-contract.test.mjs scripts/ops/phase5-metrics-auth-fallback-workflow-contract.test.mjs scripts/ops/phase5-cache-hit-rate-contract.test.mjs scripts/ops/phase5-nginx-metrics-route-contract.test.mjs
+```
+
+Log: `/private/tmp/tm-nightly-contract-recheck-20260915.log`. The required-samples tests execute the real validator against a disposable loopback synthetic metrics server: missing latency samples produce exit 1, five passes and six N/A; complete synthetic samples produce exit 0 and eleven passes. These positives and negatives establish the local gate behavior, not deployed sample availability. The latest read-only `phase5-nightly.yml` query still returns failed run `34920290620` on `c6f2d437a8810a822fb4210976aaf6af9ed3af74`. No threshold, workflow, production endpoint, provider, or sampling action was changed; nightly attribution remains open.
+
 ## Workbench Main Integration Checkpoint
 
 - Fresh real-workbench acceptance on published `c54422cbb6b9f177803bdb6e26004f28fbd6b586`, tree `c91af5a3a4dc61cd7a8695eabae21f4eddbfb824`, passes **6/6**; run `87948eea-e8d4-4dfc-aca4-26681b3017bd`, clean source, unchanged script SHA-256 `a7286d110194bda8d87f0fe4d77aa2aec8dc1868199dafde727d3ac6f558495d`. Real LoginView/persisted session/router/MetaSheetServer covers retained table delete/restore, named actor and deleted row values, selected-row restore, viewer-local configuration history and typed-column/captured-value restore. Dedicated PG15 fresh migrate plus second replay pass; independent migration count=405. Script reports all 12 fixture categories zero and cleanupErrors empty. Disposable database removed, independent exact database/backend census `0|0`, dedicated PG stopped. Logs `/private/tmp/tm-c544-{migrate,replay,workbench}-20260915.log`; artifact `artifacts/timemachine-workbench/evidence.json`. This supersedes the earlier workbench browser checkpoint only; no fresh 5,001-row archive/provider validation is claimed.
