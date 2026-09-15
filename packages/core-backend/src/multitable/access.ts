@@ -1,6 +1,7 @@
 import type { Request } from 'express'
 
 import { deriveCanManageFields } from './manage-schema-permission'
+import { deriveCanSubmitApproval } from './submit-approval-permission'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 
 export type MultitableCapabilities = {
@@ -17,6 +18,11 @@ export type MultitableCapabilities = {
   // Sheet-level "send notification" capability (B1-S1 button send_notification gate).
   // Full sheet write/admin only — NOT write-own (notify is member fan-out, not record-scoped).
   canSendNotification: boolean
+  // Record-level "submit for approval" capability (multitable x approval phase 2). Its OWN permission
+  // code (`multitable:submit-approval`) — NOT implied by `multitable:write`: starting an approval is a
+  // cross-product action, and the approval product independently re-checks `approvals:write` on its own
+  // side (ApprovalProductService.createApproval), so this is the MULTITABLE-side door only.
+  canSubmitApproval: boolean
 }
 
 export type MultitableFieldPermission = {
@@ -123,6 +129,9 @@ export function deriveCapabilities(
     hasPermission(permissions, 'workflow:write') ||
     hasPermission(permissions, 'workflow:create') ||
     hasPermission(permissions, 'workflow:execute')
+  // Record-level submit-for-approval: its OWN code, never implied by write/automation. Shared helper so
+  // this file and its sheet-capabilities.ts clone cannot drift apart.
+  const canSubmitApproval = deriveCanSubmitApproval(permissions, isAdminRole, hasPermission)
 
   return {
     canRead,
@@ -136,6 +145,7 @@ export function deriveCapabilities(
     canManageAutomation,
     canExport: canRead,
     canSendNotification: canWrite,
+    canSubmitApproval,
   }
 }
 

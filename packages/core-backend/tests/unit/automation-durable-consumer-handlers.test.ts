@@ -29,6 +29,7 @@ function spyServices(): { services: DurableDeliveryServices; calls: Call[] } {
     },
     projectionService: { reconcile: rec('reconcile') as unknown as (id: string) => Promise<unknown> },
     webhookService: { deliverEvent: rec('deliverEvent') as unknown as (e: never, p: unknown) => Promise<unknown> },
+    recordApprovalService: { handleApprovalCompletion: rec('handleApprovalCompletion') as unknown as (e: never) => Promise<void> },
   }
   return { services, calls }
 }
@@ -122,6 +123,31 @@ describe('buildDurableConsumerHandlers — durable consumer_key → real product
     await expect(
       handlers['webhook-event-bridge'](claimed({ consumerKey: 'webhook-event-bridge', eventType: 'multitable.record.moved', payload: {} })),
     ).rejects.toThrow(/no webhook mapping/)
+  })
+
+  test('multitable-record-approval (manifest v2) delegates the completion event to the record-approval sink', async () => {
+    const { services, calls } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    await handlers['multitable-record-approval'](
+      claimed({ consumerKey: 'multitable-record-approval', eventType: 'approval.approved', payload: approvalPayload, manifestVersion: 2 }),
+    )
+    // The SAME sink object the eventBus leg subscribes — one idempotent handler, two legs.
+    expect(calls).toEqual([{ method: 'handleApprovalCompletion', args: [approvalPayload] }])
+  })
+
+  test('multitable-record-approval ACKs an approval that is not record-linked (sink no-ops; never a throw)', async () => {
+    const services = {
+      ...spyServices().services,
+      // The real sink resolves with { applied: false } when the UPDATE matches no submission row; the
+      // adapter must treat that as SUCCESS (a throw here would dead-letter every ordinary approval).
+      recordApprovalService: { handleApprovalCompletion: async () => undefined },
+    } as DurableDeliveryServices
+    const handlers = buildDurableConsumerHandlers(services)
+    await expect(
+      handlers['multitable-record-approval'](
+        claimed({ consumerKey: 'multitable-record-approval', eventType: 'approval.rejected', payload: { approval: { instanceId: 'not_a_record_submission' } }, manifestVersion: 2 }),
+      ),
+    ).resolves.toBeUndefined()
   })
 
   test('the REAL handler set is manifest-complete (registry keys === every routed consumer_key, bidirectional)', () => {

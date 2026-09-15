@@ -67,8 +67,15 @@ describe('enqueueApprovalEventIfDurable — flag ON enqueues the FULL event, key
 
     const consumerInsert = writes.find((w) => w.sql.includes('meta_automation_outbox_consumer'))
     expect(consumerInsert).toBeDefined()
-    // approval.approved fans out to the three completion consumers (manifest v1).
-    expect(consumerInsert!.params?.[1]).toEqual(['approval-bridge', 'approval-trigger', 'approval-projection'])
+    // approval.approved fans out to the FOUR completion consumers under the CURRENT manifest (v2 =
+     // v1 + multitable-record-approval, the record-level submit-for-approval sink). Pinned explicitly:
+     // a producer that silently reverted to the v1 fan-out would strand every record submission.
+    expect(consumerInsert!.params?.[1]).toEqual([
+      'approval-bridge',
+      'approval-trigger',
+      'approval-projection',
+      'multitable-record-approval',
+    ])
   })
 
   test('task_created event routes to exactly [approval-task-trigger]', async () => {
