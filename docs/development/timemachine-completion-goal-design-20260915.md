@@ -22,6 +22,17 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Backend Main Replay
+
+Main advanced again to `59d1eac2c943e3ede8990f9521dc0d96207b7bcd` before
+publication. Local true merge `ba803089f7990958b23f261229907fd7f3bf58e1`
+is conflict-free. Backend gates pass 114+61 unit cases, core typecheck and 42
+wiring cases; fresh PG15 migration/replay has 405 entries. Real workbench
+acceptance passes 6/6, plus incoming record-approval DB 12/12; the disposable
+database and connections are removed and PG stopped. Exact evidence and the
+failed extra manual census query are recorded in the verification report.
+New publication CI and provider/capture/operational gates remain open.
+
 ### Current-Main Replay
 
 The prior published `50caab8495fa70e33985ec6ace190ae64eaafbc2` reached

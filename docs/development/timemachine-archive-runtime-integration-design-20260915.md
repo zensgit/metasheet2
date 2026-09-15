@@ -2,6 +2,17 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Record-Approval Backend Integration
+
+Code `ba803089f7990958b23f261229907fd7f3bf58e1` true-merges main
+`59d1eac2c943e3ede8990f9521dc0d96207b7bcd` after the frontend replay below.
+No manual conflict resolution was needed. Incoming `canSubmitApproval` remains
+an AND intersection of request/database capabilities and false in the denied
+set; existing recovery authorizations are not widened. Record-approval startup
+and durable consumers coexist with recovery application construction/drain.
+The combination requires the new 405-migration stream, not the earlier 403
+stream. Verification below is isolated and does not enable production features.
+
 ## Record-Approval Main Integration
 
 Code `1937ec0e96984f310db034cfab8eac0d26693991`, tree

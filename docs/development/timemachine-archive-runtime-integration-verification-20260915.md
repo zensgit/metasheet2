@@ -2,6 +2,18 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Record-Approval Backend Main Checkpoint
+
+- Code `ba803089f7990958b23f261229907fd7f3bf58e1`, tree `6738f5f47f52b8b1b9477c6b01841c01010cf7bb`; ordered parents `c6475dfd84cefe8db7f7fff6b09f048b40b51a05` and main `59d1eac2c943e3ede8990f9521dc0d96207b7bcd`. The incoming 34-file record-approval backend merged without conflicts or manual changes.
+- Six backend startup/record-approval/durable-routing files: 114/114 PASS. Four recovery actor/worker/read/plan authority files: 61/61 PASS. Core typecheck PASS. TM D2/exact-anchor wiring 42/42 PASS; official provenance differenceCount=0. No pin or selector edits in this merge.
+- Fresh dedicated PG15 full migration: **405 entries**, followed by successful no-op replay. The two new record-approval migrations are included; the preceding 403-migration count is not reused for this tree.
+- Real LoginView/router/Workbench/MetaSheetServer acceptance run `396aeb0f-dc3b-4d23-9557-ee9c55679a87`: **6/6 PASS**, sourceHead/tree exact and clean. Whole-table recycle-bin restore, named deleted-row values/row-only restore, viewer-local configuration history and typed column/captured-value restore all pass. Script reports all 12 fixture categories zero and cleanupErrors=[].
+- On the same disposable migrated database, incoming `multitable-record-approval-realdb.test.ts`: **12/12 PASS**, including persisted submission, conflict, authority, durable completion and idempotent notification. This suite uses its documented test auth middleware and is not the browser-auth proof above.
+- An additional manual fixture-count query used the nonexistent `multitable_sheets` name and failed; it is NOT counted as successful residue evidence. Subsequent normal database drop succeeded, independent exact database/backend counts were both zero, and the owned PG cluster stopped. No shared or production database used.
+- Logs: `/private/tmp/tm-59d1-{backend,authority,core-tsc}-20260915.log`, `/private/tmp/tm-ba803-{migrate,replay,workbench,record-approval-db,wiring}-20260915.log`. Earlier full required-web evidence remains bound to `1937ec0e`; no Web production delta was introduced by this second backend-only main merge. The archive 5,001-row browser run remains on its earlier SHA, not rerun here.
+- Sol High narrow read-only terminal review: integration-specific P1/P2/P3=0/0/0; session closed, no model tests. It also found a **main-existing P2**: record-approval completion event subscriptions are not detached/drained, and their promises are untracked before pool shutdown. With durable delivery off, an approval completion racing shutdown may leave its submission/notification pending without retry. The implicated startup/service files are byte-identical to incoming main; this is not caused by the TM merge and is not fixed or waived by these tests. Separate ownership follow-up is required; no whole-candidate zero-P2 claim is made.
+- New published-head CI remains required; these local results do not imply Ready/merge or provider/custody/capture approval.
+
 ## Current-Main Replay Checkpoint
 
 - Code `1937ec0e96984f310db034cfab8eac0d26693991`, tree `e0c6a366e8b54853e0186de7237556a431295a33`; ordered parents `50caab8495fa70e33985ec6ace190ae64eaafbc2` and `02808c068d8d5cf60ae9f73a1051b3cdffc6d65b`.
