@@ -486,8 +486,21 @@ export class DingTalkTodoMirrorWorker {
       return this.retryOrFail(row, attemptCount, TODO_MIRROR_ERROR_CODES.configUnavailable, true)
     }
 
+    // Same split as the create half, and here the stakes are the MIRRORED TODO'S LIFETIME: the token
+    // fetch is a READ-tier call that issues NO completion request, but inside the completion catch an
+    // AMBIGUOUS-shaped token failure (a timeout marked `outcomeUnknown`) terminates the row as
+    // `outcome_unknown` — a state the claim predicate never re-takes — so the todo for an approval that
+    // is ALREADY FINISHED would stay open forever. Retry instead: marking an already-done todo done
+    // again is idempotent (and a vanished one is `isDingTalkTodoTaskMissing` ⇒ completed), so a
+    // completion retry can never duplicate anything.
+    let accessToken: string
     try {
-      const accessToken = await this.fetchAccessToken(config)
+      accessToken = await this.fetchAccessToken(config)
+    } catch {
+      return this.retryOrFail(row, attemptCount, TODO_MIRROR_ERROR_CODES.tokenUnavailable, true)
+    }
+
+    try {
       await this.completeTodoTask(accessToken, operatorUnionId, taskId, {})
       return await this.markTerminal(row.id, 'completed', attemptCount, null, false) ? 'completed' : 'lost-lease'
     } catch (error) {

@@ -518,6 +518,31 @@ describe('todo mirror worker — completion phase', () => {
     expect(h.writes()[0].params[6]).toBe(false)
   })
 
+  // Q19 follow-up: the completion half's token fetch issues NO PUT either. The AMBIGUOUS arm is the
+  // load-bearing one — with the token fetch inside the completion try/catch it terminates as
+  // `outcome_unknown`, which the claim predicate never re-takes, so the mirrored todo for an approval
+  // that is already finished would stay open FOREVER. Both shapes must ride the normal retry ladder
+  // and stay in the `completing` phase (never `pending`: that would mint a SECOND todo).
+  it.each([
+    ['a transient token endpoint failure', () => new DingTalkRequestError('token endpoint unavailable', 503, { code: 'x' })],
+    ['an AMBIGUOUS token failure (outcomeUnknown-marked)', () => Object.assign(new TypeError('fetch failed'), { outcomeUnknown: true })],
+  ])('%s in the COMPLETION phase issues NOTHING: retried as `completing`, never outcome_unknown', async (_label, makeError) => {
+    const h = harness({
+      claimed: [completingRow()],
+      fetchAccessToken: async () => { throw makeError() },
+    })
+    const result = await h.worker.runBatch()
+    expect(result).toMatchObject({ claimed: 1, retrying: 1, completed: 0, outcomeUnknown: 0, failed: 0 })
+    expect(h.completeTodoTask).not.toHaveBeenCalled()
+    // the token stage WAS reached and the ONLY mirror write after the claim is the retry
+    expect(h.trace).toEqual(['claim', 'token', 'mirror_write'])
+    const write = h.writes()[0]
+    expect(write.sql).toContain('SET status = $7')
+    expect(write.params[6]).toBe('completing') // back to the COMPLETION phase, never `pending`
+    expect(write.params[7]).toBe('completing') // CAS on the phase it was claimed in
+    expect(write.params[2]).toBe(TODO_MIRROR_ERROR_CODES.tokenUnavailable)
+  })
+
   it('a completing row with no task id fails WITHOUT being redelivery-safe (operator must look)', async () => {
     const h = harness({ claimed: [pendingRow({ status: 'completing', prior_status: 'completing', dingtalk_task_id: null, integration_id: 'integ-1' })] })
     const result = await h.worker.runBatch()
