@@ -1150,7 +1150,12 @@ export async function resolveAutomationSchedulerLeaderOptions(): Promise<Automat
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>
-  private subscriptionIds: string[] = []
+  private producerSubscriptionIds: string[] = []
+  private completionSubscriptionIds: string[] = []
+  private readonly producerInFlight = new Set<Promise<void>>()
+  private readonly transitiveCompletionInFlight = new Set<Promise<void>>()
+  private readonly completionConsumerInFlight = new Set<Promise<void>>()
+  private producerStopPromise: Promise<void> | null = null
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
@@ -1290,29 +1295,29 @@ export class AutomationService {
       const id = this.eventBus.subscribe<AutomationEventPayload>(
         eventType,
         (payload) => {
-          this.handleEvent(eventType, payload).catch((err) => {
+          this.trackLifecycleTask(this.producerInFlight, this.handleEvent(eventType, payload), (err) => {
             logger.error(`Automation handler error for ${eventType}`, err instanceof Error ? err : undefined)
           })
         },
       )
-      this.subscriptionIds.push(id)
+      this.producerSubscriptionIds.push(id)
     }
 
     for (const eventType of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
       const id = this.eventBus.subscribe<ApprovalCompletionEventV1>(
         eventType,
         (payload) => {
-          this.handleApprovalCompletionEvent(payload).catch((err) => {
+          this.trackLifecycleTask(this.transitiveCompletionInFlight, this.handleApprovalCompletionEvent(payload), (err) => {
             logger.error(`Automation approval bridge handler error for ${eventType}`, err instanceof Error ? err : undefined)
           })
           // T1-3 (Q7): fresh approval.completed rules fire for EVERY completion, independently of the
           // bridge resume above — the two consumers share no state (a bridged approval also fires rules).
-          this.handleApprovalCompletionTrigger(payload).catch((err) => {
+          this.trackLifecycleTask(this.completionConsumerInFlight, this.handleApprovalCompletionTrigger(payload), (err) => {
             logger.error(`Automation approval.completed trigger error for ${eventType}`, err instanceof Error ? err : undefined)
           })
         },
       )
-      this.subscriptionIds.push(id)
+      this.completionSubscriptionIds.push(id)
     }
 
     // A-2a: pending-task events ride their own subscription — one event per new actionable
@@ -1321,12 +1326,12 @@ export class AutomationService {
       const id = this.eventBus.subscribe<ApprovalTaskCreatedEventV1>(
         'approval.task_created',
         (payload) => {
-          this.handleApprovalTaskCreatedTrigger(payload).catch((err) => {
+          this.trackLifecycleTask(this.completionConsumerInFlight, this.handleApprovalTaskCreatedTrigger(payload), (err) => {
             logger.error('Automation approval.task_created trigger error', err instanceof Error ? err : undefined)
           })
         },
       )
-      this.subscriptionIds.push(id)
+      this.completionSubscriptionIds.push(id)
     }
 
     logger.info('AutomationService initialized (V1)')
@@ -2425,12 +2430,53 @@ export class AutomationService {
     this.scheduler.unregister(ruleId)
   }
 
-  shutdown(): void {
-    for (const id of this.subscriptionIds) {
-      this.eventBus.unsubscribe(id)
+  private trackLifecycleTask(
+    owner: Set<Promise<void>>,
+    task: Promise<void>,
+    onError: (error: unknown) => void,
+  ): void {
+    const settled = task.catch(onError)
+    owner.add(settled)
+    void settled.then(
+      () => owner.delete(settled),
+      () => owner.delete(settled),
+    )
+  }
+
+  private async drainLifecycleTasks(owner: Set<Promise<void>>): Promise<void> {
+    while (owner.size > 0) {
+      await Promise.allSettled([...owner])
     }
-    this.subscriptionIds = []
-    this.scheduler.destroy()
+  }
+
+  stopProducerAdmissions(): Promise<void> {
+    this.producerStopPromise ??= (async () => {
+      for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+      const schedulerStop = this.scheduler.destroy()
+      await this.drainLifecycleTasks(this.producerInFlight)
+      await schedulerStop
+    })()
+    return this.producerStopPromise
+  }
+
+  async drainTransitiveCompletionProducers(): Promise<void> {
+    await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
+  }
+
+  detachCompletionConsumers(): void {
+    for (const id of this.completionSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+  }
+
+  async drainCompletionConsumers(): Promise<void> {
+    await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
+    await this.drainLifecycleTasks(this.completionConsumerInFlight)
+  }
+
+  async shutdown(): Promise<void> {
+    await this.stopProducerAdmissions()
+    await this.drainTransitiveCompletionProducers()
+    this.detachCompletionConsumers()
+    await this.drainCompletionConsumers()
     logger.info('AutomationService shut down')
   }
 
