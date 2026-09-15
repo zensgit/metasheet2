@@ -12,10 +12,12 @@
 | Q0 | 铃铛计数 1 / 面板「暂无通知」（顺手，演示记录 §5.4） | 主会话 | #5748（2b67a0462） | ✅ 已合，待 r47 |
 | Q1 | #5742 写回 outcome→选项映射（`resultWriteback.outcomeValues`） | opus 实现 / opus 反驳 / fable 裁判 | #5752（f67984b34；裁判 FIX，10 条反驳全落码 + 遗留补 84551a0cb） | ✅ 已合，r47 |
 | Q2 | #5743 管理弹窗 1.2 s 轮询 | opus / opus / fable | #5751（268aded99；裁判 MERGE，两项遗留已补 ecfaaaf78；H2 → #5750） | ✅ 已合，待 r47 |
-| Q3 | 阶段二后端：记录级送审（提交表、路由、权限码、耐久消费者 v2） | opus / opus / fable | wt-p5 `feat/multitable-record-approval-submit-backend` | 🟡 流水线 |
-| Q4 | 阶段二前端：抽屉送审入口、对话框、审批面板 | opus / opus / fable | #5753（裁判 FIX @8bc1ab1d0，14 条反驳 12 修；遗留 3 项 e91c8c8b0 + guard 镜像 184cf4a20） | 🟡 CI |
+| Q3 | 阶段二后端：记录级送审（提交表、路由、权限码、耐久消费者 v2） | opus / opus / fable | #5754（59d1eac2c；裁判 FIX，10 条反驳 4 真问题已修；realdb 泳道 + G5 注入 + 三处 CI 修） | ✅ 已合，r48 |
+| Q4 | 阶段二前端：抽屉送审入口、对话框、审批面板 | opus / opus / fable | #5753（裁判 FIX @8bc1ab1d0，14 条反驳 12 修；遗留 3 项 e91c8c8b0 + guard 镜像 184cf4a20） | ✅ 已合，待 r48 |
 | Q5 | componentSpec 中文名「组件规格」 | 主会话 | 222 字段改名（模板已有 labelZh） | ✅ |
 | Q6 | 阶段二设计稿 | 主会话（基于 4 代理只读地图） | `multitable-approval-phase2-record-submit-design-20260915.md` | ✅ 草稿 |
+| Q7 | 编辑器所有动作类型 config 保留（#5739 泛化） | Explore 普查 → opus / opus / fable | 裁判 MERGE @364ca6a2c（8 条反驳全落码，含字段值字符串化与跨基界面失真两条 major）；PR 见 §2 | 🟡 CI |
+| Q8 | #5750 外部上下文同步收敛（先复现） | opus 复现 / opus / opus / fable | 复现成功（5 次重发 = 5 次 HTTP）；裁判 MERGE @dfae6f39f；PR 见 §2 | 🟡 CI |
 | — | 222 发布 | — | r47 / r48（夜间） | 📝 |
 
 ## 1. 队列与模型选择依据
@@ -54,6 +56,16 @@
 - **#5751 轮询**：打开「字段」管理弹窗，20 s 内 fields/context 共 4 次请求（开弹窗 1 对 + 15 s 保活 1 对；修复前约 20 对），关闭后 0。
 - **#5752 映射**：先把演示字段「审批状态」的选项从 approved/rejected 改为 已通过/已驳回（同步那条记录的值）；打开规则 A 编辑器出现「审批结果 → 写入值」块，且因选项集不含原文 approved 而正确给出阻断「请在下方选择要写入的选项」；选 已通过、勾选「非通过结果也写回」、选 已驳回后阻断消失，保存成功，DB `actions[0].config.resultWriteback = {statusField, onNonApproved:true, outcomeValues:{approved:已通过, rejected:已驳回}}`。端到端：记录 → 待审批（20:22:08.9）→ AP-100002 pending → 审批中心驳回（必填原因）→ 20:22:43.00 实例 rejected → 20:22:43.03 记录写回「已驳回」→ 规则 B 通知 1 条。规则 A 的执行记录为 failed「Approval completed with rejected」，这是既有设计（非通过结果终止后续动作链），写回仍按 `onNonApproved` 完成。
 - 顺带观察：客户自建的「测试」规则（当记录更新时 → 发送通知，无收件人）每次记录更新都失败一次（现 15 次），属既有配置问题，未动。
+
+### 3.2 r48（main `59d1eac2c` = r47 + #5753 + #5754），2026-09-15 22:08–22:10 上 222
+- 备份 `pre-r48-20260915-220804.dump`；两条迁移（提交表、`multitable:submit-approval`）执行成功；upgrade 退出 0；健康 OK；后端 dist 含提交服务与路由、前端包含送审入口 testid；探针：表与四个索引存在（含部分唯一 `uniq_mt_record_approval_in_flight`）、admin 已授权限码；dry-run 0；pm2 online；9 条 False 同前。
+- **阶段二端到端（记录 rec_bb72a248…，`bom备料`）**：
+  1. 抽屉 kebab 出现「送审」→ 对话框只列已发布模板「备料送审示例」→ 选中后渲染 说明/备注 → 提交 → toast「已送审 AP-100003」；DB 提交行 `pending`，`record_version_at_submit=2`，快照非空，绑定真实实例。
+  2. 展开抽屉「审批」面板：模板 id / 待处理 / 编号 / 申请人 id / 送审时间（名称 join 留 2a 后续）。
+  3. 改一格（审批状态 → 已通过）→ 面板显示「送审后数据已变更（1 个字段）」。
+  4. 审批中心通过 AP-100003 → 22:11:59.22 提交行 `approved`（同事务写入申请人通知，`record_id` 有值）+ 规则 B 通知 1 条；回到抽屉面板状态芯片「已通过」，铃铛徽标 4。
+  5. 在途唯一：再送审得 AP-100004（前一条已终态，部分索引放行）；紧接着第三次送审被拒，对话框内提示「该记录已在此模板审批中。 AP-100004 查看审批」。随后在审批中心通过 AP-100004 收尾。
+- 截图：r48-01 送审对话框、r48-02 面板待处理、r48-03 面板已通过、r48-04 409 提示。
 
 ## 4. 过程发现与教训
 
