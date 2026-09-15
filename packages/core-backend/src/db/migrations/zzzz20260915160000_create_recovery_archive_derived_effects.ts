@@ -41,6 +41,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       'FOREIGN KEY (job_id) REFERENCES meta_recovery_archive_jobs(id) ON DELETE RESTRICT',
       'PRIMARY KEY (revision_id)',
     ])) throw new Error(DRIFT)
+  await sql`CREATE INDEX IF NOT EXISTS meta_recovery_archive_derived_effects_pending_idx
+    ON public.meta_recovery_archive_derived_effects
+    (last_attempt_at NULLS FIRST, created_at, revision_id) WHERE completed_at IS NULL`.execute(db)
+  const index = await sql<{ definition: string; valid: boolean; ready: boolean }>`
+    SELECT pg_get_indexdef(i.indexrelid) AS definition, i.indisvalid AS valid, i.indisready AS ready
+      FROM pg_catalog.pg_index i
+     WHERE i.indexrelid=to_regclass('public.meta_recovery_archive_derived_effects_pending_idx')
+       AND i.indrelid='public.meta_recovery_archive_derived_effects'::regclass
+  `.execute(db)
+  if (index.rows.length !== 1 || !index.rows[0].valid || !index.rows[0].ready ||
+      index.rows[0].definition !== 'CREATE INDEX meta_recovery_archive_derived_effects_pending_idx ON public.meta_recovery_archive_derived_effects USING btree (last_attempt_at NULLS FIRST, created_at, revision_id) WHERE (completed_at IS NULL)') {
+    throw new Error(DRIFT)
+  }
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {

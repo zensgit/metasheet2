@@ -1603,6 +1603,21 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     await derivedEffectsMigration.up(migrationDb)
   })
 
+  test.each([
+    '(last_attempt_at, created_at, revision_id) WHERE completed_at IS NULL',
+    '(last_attempt_at NULLS FIRST, created_at, revision_id)',
+    '(created_at, revision_id) WHERE completed_at IS NULL',
+  ])('derived effects migration rejects pending index drift: %s', async (definition) => {
+    await expect(migrationDb.transaction().execute(async (trx) => {
+      await sql`DROP INDEX public.meta_recovery_archive_derived_effects_pending_idx`.execute(trx)
+      await sql.raw(`CREATE INDEX meta_recovery_archive_derived_effects_pending_idx
+        ON public.meta_recovery_archive_derived_effects ${definition}`).execute(trx)
+      await derivedEffectsMigration.up(trx)
+      throw new Error('PENDING_INDEX_DRIFT_NOT_REJECTED')
+    })).rejects.toThrow('RECOVERY_ARCHIVE_DERIVED_EFFECTS_SCHEMA_DRIFT')
+    await derivedEffectsMigration.up(migrationDb)
+  })
+
   test('derived effects migration refuses populated down and preserves pending work', async () => {
     const fixture = await seedVerifiedArchive('derived_effects_down')
     const plan = compilePlan(fixture)
