@@ -52,6 +52,19 @@ Code `6185c4b39e49214643ced708ce60abfc605e926d`, tree `420890aec4d0775297ca2b681
 
 ### Remaining Acceptance
 
+### PostgreSQL Authority Checkpoint
+
+Code/test head `dcb10e1c1b98d37181942870752d4d7c451306cd`, tree `d9eb3f4b1a0840222ee7a07d0d6687af73b510a7`:
+
+- Dedicated PostgreSQL 15 database, full `pnpm run migrate` then second replay: both exit 0; migration ledger count 402. This is this run's actual count, not the historical constituent count.
+- `METASHEET_REAL_DB_TEST_STEP=1 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts`: 32/32 PASS, no skipped tests in the final whole-file run.
+- New `WORKER-AUTHORITY` calls the actual worker factory against PostgreSQL without any HTTP request. It proves active authority, account revoke/re-enable, field-hidden full-read refusal, field-read-only true-delta refusal, restored writable positive, workspace drift and permission revocation. It asserts record data/version unchanged.
+- Mutation replacing worker full-read with `Promise.resolve(true)` failed precisely at the hidden-field refusal. Restored production file is byte-identical to `6185c4b39`; final whole-file suite passed.
+- Pre-drop fixture census: users/bases/sheets/records/fields 0; other database backends 0. Dedicated database dropped; exact/prefix database and backend census 0. Task-owned PG server stopped; DB window released.
+- This is worker authorization and HTTP route regression evidence, not a background chunk execution or startup/provider acceptance. The callback factory is not yet composed into the application worker, and durable mutation/post-commit effects remain open.
+
+### Outstanding End-to-End Gates
+
 - Combined real-DB route and worker execution, mutation, and process-restart gates.
 - Shared full-read/plan authorization invoked by a real background worker.
 - Provider/KMS/object-store integration or ordinary application startup readiness.
