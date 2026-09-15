@@ -293,6 +293,58 @@ describe('Time Machine async archive restore facade', () => {
     vi.clearAllMocks()
   })
 
+  it.each(['committed', 'rollback', 'already_committed', 'no_pending_chunk', 'effect_failure'] as const)(
+    'post-commit effects respect %s outcome', async (outcome) => {
+      const order: string[] = []
+      const input = makeInput(order)
+      mockIdentityPipeline([binding])
+      const pipeline = dependencies.runChunk.getMockImplementation()!
+      const mutation = { kind: 'delete' as const, recordId: 'record-effect', revisionId: 'revision-effect', linkInvalidations: [] }
+      dependencies.applyChunk.mockImplementation(async (fresh, apply: MaterializedArchiveAsyncChunkApplyInput) => {
+        await apply.onMutationApplied?.(fresh, mutation)
+        order.push('mutation')
+        return { ok: true, receipt: { operationId: OPERATION_ID, endpointSeq: '19', eventCount: 1, committedCount: '1' } }
+      })
+      dependencies.runChunk.mockImplementation(async (...args) => {
+        if (outcome === 'already_committed') {
+          await args[2].materialize(expectedChunk)
+          return { kind: outcome }
+        }
+        if (outcome === 'no_pending_chunk') return { kind: outcome }
+        await pipeline(...args)
+        if (outcome === 'rollback') throw new Error('synthetic_commit_failure')
+        order.push('commit')
+        return { kind: 'committed', chunkIndex: 0, completedCount: '1' }
+      })
+      const afterCommit = vi.fn(async () => {
+        order.push('afterCommit')
+        if (outcome === 'effect_failure') throw new Error('hostile-secret-value')
+      })
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const configured = { ...input, apply: { ...input.apply, afterCommit } }
+        if (outcome === 'rollback') {
+          await expect(executeRecoveryArchiveAsyncRestoreChunk(configured)).rejects.toThrow('synthetic_commit_failure')
+        } else {
+          const result = await executeRecoveryArchiveAsyncRestoreChunk(configured)
+          expect(result.kind).toBe(outcome === 'effect_failure' ? 'committed' : outcome)
+        }
+        if (outcome === 'committed' || outcome === 'effect_failure') {
+          expect(afterCommit).toHaveBeenCalledTimes(1)
+          expect(afterCommit).toHaveBeenCalledWith(
+            { jobId: binding.jobId, workspaceId: binding.workspaceId, baseId: binding.baseId, sheetId: binding.sheetId, actorId: binding.actorId },
+            [mutation],
+          )
+          expect(order.indexOf('afterCommit')).toBeGreaterThan(order.indexOf('commit'))
+        } else expect(afterCommit).not.toHaveBeenCalled()
+        if (outcome === 'effect_failure') expect(warning).toHaveBeenCalledWith('RECOVERY_ARCHIVE_POST_COMMIT_EFFECT_FAILED')
+        else expect(warning).not.toHaveBeenCalled()
+      } finally {
+        warning.mockRestore()
+      }
+    },
+  )
+
   it('materializes outside the destructive transaction, prelocks first, and forwards the L8 receipt', async () => {
     const order: string[] = []
     const targetRecords = new Map([[

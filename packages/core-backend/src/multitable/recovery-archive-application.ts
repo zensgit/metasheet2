@@ -271,6 +271,7 @@ function snapshotApplyDependencies(
 ): RecoveryArchiveApplicationWorkerDependencies['apply'] {
   if (!source || typeof source !== 'object') throw new Error(COMPOSITION_INVALID)
   const onMutationApplied = source.onMutationApplied
+  const afterCommit = source.afterCommit
   const apply: RecoveryArchiveApplicationWorkerDependencies['apply'] = {
     preliminaryFullRead: source.preliminaryFullRead,
     stabilizeAuthorization: source.stabilizeAuthorization,
@@ -279,13 +280,15 @@ function snapshotApplyDependencies(
     ...(onMutationApplied
       ? { onMutationApplied }
       : {}),
+    ...(afterCommit !== undefined ? { afterCommit } : {}),
   }
   if (
     typeof apply.preliminaryFullRead !== 'function' ||
     typeof apply.stabilizeAuthorization !== 'function' ||
     typeof apply.finalLockedFullRead !== 'function' ||
     typeof apply.evaluatePlanAuthorization !== 'function' ||
-    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function')
+    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function') ||
+    (apply.afterCommit !== undefined && typeof apply.afterCommit !== 'function')
   ) {
     throw new Error(COMPOSITION_INVALID)
   }

@@ -67,6 +67,11 @@ export interface RecoveryArchiveWorkerApplyCallbacks {
     mutation: ExactAnchorAppliedMutation,
     identity: RecoveryArchiveWorkerIdentity,
   ) => Promise<void>
+  /** Best-effort effects only. Durable events belong in onMutationApplied's transaction. */
+  readonly afterCommit?: (
+    identity: RecoveryArchiveWorkerIdentity,
+    mutations: readonly ExactAnchorAppliedMutation[],
+  ) => Promise<void>
 }
 
 export interface RecoveryArchiveAsyncRestoreChunkInput {
@@ -128,7 +133,8 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
 ): Promise<RecoveryArchiveRestoreChunkResult> {
   let fenceLease: MaterializedArchiveAsyncFenceLease | undefined
   let identity: RecoveryArchiveWorkerIdentity | undefined
-  return runRecoveryArchiveRestoreChunk(input.transaction, input.claim, {
+  const committedMutations: ExactAnchorAppliedMutation[] = []
+  const result = await runRecoveryArchiveRestoreChunk(input.transaction, input.claim, {
     facadeLease: mintRecoveryArchiveAsyncRestoreFacadeLease(input.claim),
     read: input.query,
     materialize: async (expected) => {
@@ -148,6 +154,8 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
       return input.recheckAuthority(query, identity)
     },
     apply: async (query, context) => {
+      // A transaction provider may retry its callback; retain facts only from its final attempt.
+      committedMutations.length = 0
       if (!fenceLease) {
         throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_APPLY_INVALID')
       }
@@ -164,7 +172,7 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
       }
       const result = await applyMaterializedExactArchiveRecoveryAsyncChunkInternal(
         query,
-        bindWorkerApply(input.apply, materialized.identity),
+        bindWorkerApply(input.apply, materialized.identity, committedMutations),
         {
           fenceLease,
           executionLease: context.executionLease,
@@ -202,11 +210,20 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
       return result.receipt
     },
   })
+  if (result.kind === 'committed' && identity && input.apply.afterCommit) {
+    try {
+      await input.apply.afterCommit(identity, committedMutations)
+    } catch {
+      console.warn('RECOVERY_ARCHIVE_POST_COMMIT_EFFECT_FAILED')
+    }
+  }
+  return result
 }
 
 function bindWorkerApply(
   apply: RecoveryArchiveWorkerApplyCallbacks,
   identity: RecoveryArchiveWorkerIdentity,
+  committedMutations: ExactAnchorAppliedMutation[],
 ): MaterializedArchiveAsyncChunkApplyInput {
   const onMutationApplied = apply.onMutationApplied
   return {
@@ -216,9 +233,10 @@ function bindWorkerApply(
     stabilizeAuthorization: (query, context) => apply.stabilizeAuthorization(query, context, identity),
     finalLockedFullRead: (query, scope) => apply.finalLockedFullRead(query, scope, identity),
     evaluatePlanAuthorization: (query, context) => apply.evaluatePlanAuthorization(query, context, identity),
-    onMutationApplied: onMutationApplied
-      ? (query, mutation) => onMutationApplied(query, mutation, identity)
-      : undefined,
+    onMutationApplied: async (query, mutation) => {
+      await onMutationApplied?.(query, mutation, identity)
+      committedMutations.push(mutation)
+    },
   }
 }
 

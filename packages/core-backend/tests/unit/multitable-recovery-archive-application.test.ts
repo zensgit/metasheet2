@@ -49,7 +49,7 @@ describe('recovery archive application composition', () => {
     [{ MULTITABLE_ENABLE_WRITER_FENCE: 'true' }, 'archive flag absent'],
     [{ MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'TRUE', MULTITABLE_ENABLE_WRITER_FENCE: 'true' }, 'archive flag non-exact'],
     [{ MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'TRUE' }, 'writer fence non-exact'],
-  ])('is inert with %s (%s)', async (env) => {
+  ])('is inert with %s (%s)', async (env, _label) => {
     const factory = vi.fn(() => {
       throw new Error('factory must remain unreachable')
     })
@@ -185,6 +185,7 @@ describe('recovery archive application composition', () => {
       stabilizeAuthorization: originalApply.stabilizeAuthorization,
       finalLockedFullRead: originalApply.finalLockedFullRead,
       evaluatePlanAuthorization: originalApply.evaluatePlanAuthorization,
+      afterCommit: originalApply.afterCommit,
     }
     const replacementWorker = fakeWorkerDependencies()
     const application = createRecoveryArchiveApplication(
@@ -250,6 +251,7 @@ describe('recovery archive application composition', () => {
     expect(workerInput?.apply.stabilizeAuthorization).toBe(expectedWorker.stabilizeAuthorization)
     expect(workerInput?.apply.finalLockedFullRead).toBe(expectedWorker.finalLockedFullRead)
     expect(workerInput?.apply.evaluatePlanAuthorization).toBe(expectedWorker.evaluatePlanAuthorization)
+    expect(workerInput?.apply.afterCommit).toBe(expectedWorker.afterCommit)
     expect(Object.isFrozen(workerInput?.apply)).toBe(true)
     expect(schedule).toHaveBeenCalledWith(expect.any(Function), 60_000)
   })
@@ -439,6 +441,7 @@ function fakeWorkerDependencies(): RecoveryArchiveApplicationWorkerDependencies 
       finalLockedFullRead: vi.fn(async () => true),
       evaluatePlanAuthorization: vi.fn(async () => true),
       onMutationApplied: vi.fn(async () => undefined),
+      afterCommit: vi.fn(async () => undefined),
     },
     leaseMs: 60_000,
     replayHorizonMs: 0,
