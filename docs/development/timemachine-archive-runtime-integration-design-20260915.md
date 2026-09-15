@@ -21,7 +21,9 @@ The three inputs are true-merged without rewriting their history. The sole manua
 
 ## Remaining Runtime Work
 
-Shared-policy checkpoint: `5fb07a51126aa228bf635b9d2d49d62720af4c00`, tree `e429ed6710cd948da1c0bd45826a069e4b1c0930`. `recovery-plan-authorization.ts` now owns the existing authorization stabilizer and true-delta evaluator. HTTP delegates to it using its unchanged request/database resolver and full-read evaluator. There is no worker adapter or startup activation yet. The shared evaluator accepts transaction-bound authority/full-read functions; callers must not provide permissive substitutes.
+Shared-policy checkpoint: `5fb07a51126aa228bf635b9d2d49d62720af4c00`, tree `e429ed6710cd948da1c0bd45826a069e4b1c0930`. `recovery-plan-authorization.ts` owns the existing authorization stabilizer and true-delta evaluator. HTTP delegates to it using its unchanged request/database resolver and full-read evaluator. The shared evaluator accepts transaction-bound authority/full-read functions; callers must not provide permissive substitutes.
+
+Worker-adapter checkpoint: `6185c4b39e49214643ced708ce60abfc605e926d`, tree `420890aec4d0775297ca2b681cc5cf740a29f119`. `createRecoveryArchiveWorkerAuthorization` binds the canonical full-read implementation without creating a Request. The new adapter compares persisted base/workspace/sheet identity with live non-deleted sheet/base rows, loads database-fresh actor authority on each read, and delegates true-delta/stabilization rules to the shared module. It rejects mismatched actor/sheet contexts and final lock scopes missing the source sheet. No tenant is inferred from the persisted identity. Provider/application composition and mutation/post-commit hooks remain unwired; this checkpoint does not enable the worker.
 
 1. Share the existing full-read and true-delta evaluator between HTTP and worker without changing HTTP behavior.
 2. Bind background identity to live scope; do not invent an authenticated tenant from a request-shaped object or unverified input.
