@@ -2,6 +2,19 @@
 
 Status: DRAFT/HOLD integration; bounded runtime acceptance below, not enablement.
 
+## Workbench Main Integration
+
+Code `19c6b60ccd4437003f4982308b58e00698dcdf9a` incorporates main
+`79dbc6588329b47e237315ea0bb1986625c5b64c` by true merge. External-context
+memoization coexists with TM generation ownership: context and fields apply
+atomically, superseded requests return false and do not memoize another writer.
+Two incoming tests were aligned to this existing contract; no production guard
+was weakened. Both Web gates now explicitly collect the new external-context
+spec, preserving all parent tokens. The verification report binds the final
+459-file required-web run and distinguishes its evidence from earlier runs.
+Provider/capture decisions, nightly attribution and the independently confirmed
+main-existing record-approval shutdown P2 remain open.
+
 ## Record-Approval Backend Integration
 
 Code `ba803089f7990958b23f261229907fd7f3bf58e1` true-merges main

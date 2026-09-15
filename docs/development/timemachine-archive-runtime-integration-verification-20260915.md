@@ -2,6 +2,16 @@
 
 Status: DRAFT/HOLD; exact-head remote CI and remaining runtime acceptance are open.
 
+## Workbench Main Integration Checkpoint
+
+- Code `19c6b60ccd4437003f4982308b58e00698dcdf9a`, tree `83f5faaf3b5223329531dd5daa32ff4e4557b4a9`; true merge `e9553b380c0b70c3f5e369d114db6a9d23280c59` incorporates main `79dbc6588329b47e237315ea0bb1986625c5b64c` without conflicts. Incoming 11 files cover external-context convergence and automation-editor serialization.
+- Initial five-file run: 362 PASS / 2 FAIL. Both incoming race tests assumed pre-fields context application and successful superseded requests, contrary to the TM atomic generation contract. Test-only child `bacea432` preserves atomic application and false cancellation; restored focused pair 42/42 PASS. Removing the post-fields generation check produces exactly those two RED cases, then restoration returns GREEN; production file restored byte-for-byte.
+- Added the external-context spec to both existing Web gates and both workflow path lists; parent token omissions=0. In-memory deletion probes independently fail each selector contract; these are mechanical probes, not executed workflow mutations.
+- Full required-web on the wired code exits 0, all groups pass; final group **459 files / 6,895 tests**, including external-context **11/11**. Log `/private/tmp/tm-19c6-required-web-20260915.log`. Earlier unwired full run passed 458/6,884 and does not substitute for this run.
+- Application-only TypeScript passes; 42 TM wiring tests pass; official provenance differenceCount=0 before the Web-only selector addition (no pinned workflow changed). Logs `/private/tmp/tm-79dbc-app-tsc-20260915.log` and `/private/tmp/tm-79dbc-wiring-20260915.log`. No new DB/browser execution on this checkpoint; earlier runs remain SHA-bound evidence.
+- Sol High narrow review was stopped while still running after its bounded window; no terminal verdict is claimed. Main-task code trace confirms cancelled requests return before memoization. The separately confirmed record-approval shutdown P2 remains unwaived and outside this test-only fix; independent ownership work is separate.
+- Not yet remote exact-head CI evidence. No Ready/merge, flag, dispatch, provider selection or deployment.
+
 ## Record-Approval Backend Main Checkpoint
 
 - Code `ba803089f7990958b23f261229907fd7f3bf58e1`, tree `6738f5f47f52b8b1b9477c6b01841c01010cf7bb`; ordered parents `c6475dfd84cefe8db7f7fff6b09f048b40b51a05` and main `59d1eac2c943e3ede8990f9521dc0d96207b7bcd`. The incoming 34-file record-approval backend merged without conflicts or manual changes.
