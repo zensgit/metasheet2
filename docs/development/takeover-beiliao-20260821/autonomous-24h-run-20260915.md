@@ -20,7 +20,7 @@
 | Q8 | #5750 外部上下文同步收敛（先复现） | opus 复现 / opus / opus / fable | #5755（14db7f82e；复现成功 5 次重发 = 5 次 HTTP；裁判 MERGE） | ✅ 已合，r49 |
 | Q9 | 2a 后续：列表带模板名/申请人名、hasMore、自动通过原子提升 | opus / opus / fable | #5763（裁判 MERGE，11 条反驳 7 修，含模板名泄漏与回滚不可恢复两条 major；realdb 15 例真库绿） | ✅ 已合，r50 |
 | Q10 | #5750 后续：嵌入宿主回显真实上下文、navigated 按请求去重 | opus / opus / fable | #5760（裁判 MERGE，5 条发现全落码，含回显赛跑 major） | ✅ 已合，r50 |
-| Q11 | 编辑器跨基 create_record 横幅 + 登记 #5747 客户端测试 | opus / opus / fable | #5761（裁判 MERGE @96b175a42，4 条反驳全落码，含"文案与执行器相反"major；guard 镜像 2e1c54d41；首轮 web-tests 因 vitest worker 卡死 50 min 被杀，见 §4；合入 main f1cc1858b 重跑） | 🟡 CI 重跑 |
+| Q11 | 编辑器跨基 create_record 横幅 + 登记 #5747 客户端测试 | opus / opus / fable | #5761（裁判 MERGE @96b175a42，4 条反驳全落码，含"文案与执行器相反"major；guard 镜像 2e1c54d41；首轮 web-tests 因 vitest worker 卡死 50 min 被杀，见 §4；合入 main f1cc1858b 重跑后全绿；合并 a4007e1e3） | ✅ 已合，r51 |
 | Q12 | #5756 真实路径丢键（r49 实证"发现"） | opus 复现 | 未复现（13 例绿）；根因是浏览器跑旧包（见 §3.3），非缺陷；流水线已停 | ⛔ 误报，已纠 |
 | Q13 | 管理器→编辑器→PATCH 往返回归用例（源自 Q12 的复现夹具） | opus 单代理 | #5759（76cd69f5b；14 例 + approval.completed；两点登记，guard 镜像 zensgit 推送） | ✅ 已合，r50 |
 | Q14 | Q9 前端配套：面板「还有更多」与通知失败标记，客户端 hasMore/limit | opus / opus / fable | #5765（784c22dc1；裁判 MERGE @7f9f04afe，3 条反驳全落码） | ✅ 已合，r50 |
