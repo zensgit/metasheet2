@@ -54,8 +54,22 @@
       card: the next expand is a real re-read, and the panel stays lazy (no request is issued by the
       invalidation itself).
   VALUES-FREE degradation: 403 (no approvals:read on the server) and 404 (`APPROVAL_NOT_FOUND`, the
-  values-free answer a non-participant gets for an approval that does exist) are DIFFERENT sentences, and
-  everything else is one generic failure with a manual 重试.
+  values-free answer a non-participant gets for an approval that does exist) are DIFFERENT sentences, an
+  answer that is not ABOUT this instance is a THIRD, and everything else is one generic failure with a
+  manual 重试. None of the four carries the thrown message, a status code, or anything else the server
+  said — the spec pins each by EQUALITY, not by substring, so a later 'improvement' that appends
+  `error.message` is red rather than green.
+    * IDENTITY (and what it says about DEV servers). `GET /api/approvals/:id` builds its DTO from
+      `SELECT * FROM approval_instances WHERE id = $1` and returns `id: row.id`
+      (ApprovalBridgeService.toUnifiedDTO), so a real answer echoes the requested id on BOTH the platform
+      and the PLM branch; a `detail.id` that differs is another approval's timeline about to be printed
+      under this record's row, and is refused. That check is also the only thing standing between this
+      card and `approvals/api.ts`'s mock branch, which short-circuits `getApproval`/`getApprovalHistory`
+      to module FIXTURES whenever `import.meta.env.DEV` is set without an explicit
+      `__APPROVAL_MOCK__ === false`, answering `apv_1` (`parseInt(id.replace('apv_', ''), 10) || 1`) for
+      every id this panel can hold. Suppressing the mock at its source would need `approvals/api.ts` to
+      export the flag — an owner ask, not this panel's call. Until then a dev-server walkthrough shows
+      the mismatch notice here, and is NOT evidence that the 步骤 / 待处理人 / 历史 rendering is correct.
 -->
 <template>
   <section v-if="sectionVisible" class="meta-record-approval" data-test="record-approval">
@@ -381,7 +395,7 @@ const hasMoreNotice = computed(() => recordApprovalHasMoreNotice(submissions.val
  */
 const PROGRESS_HISTORY_CAP = 20
 
-type ProgressErrorKind = 'forbidden' | 'not-participant' | 'failed'
+type ProgressErrorKind = 'forbidden' | 'not-participant' | 'mismatch' | 'failed'
 
 interface ProgressHistoryRow {
   key: string
@@ -558,6 +572,7 @@ const isProgressReady = (instanceId: string | undefined): boolean =>
 const PROGRESS_ERROR_KEYS: Record<ProgressErrorKind, MetaRecordLabelKey> = {
   forbidden: 'approval.progressForbidden',
   'not-participant': 'approval.progressNotParticipant',
+  mismatch: 'approval.progressMismatch',
   failed: 'approval.progressFailed',
 }
 
@@ -566,7 +581,8 @@ const progressErrorText = (instanceId: string | undefined): string => {
   return kind ? l(PROGRESS_ERROR_KEYS[kind]) : ''
 }
 
-// 403/404 are ANSWERS (see the template's own note): only the generic failure is retryable.
+// 403/404 — and an answer about the WRONG instance — are ANSWERS (see the template's own note): only the
+// generic failure is retryable, because only it can come out differently the second time.
 const progressCanRetry = (instanceId: string | undefined): boolean =>
   progressEntry(instanceId)?.errorKind === 'failed'
 
@@ -641,11 +657,19 @@ function pickString(row: Record<string, unknown>, ...keys: string[]): string | n
  * whole order for rows whose timestamp will not parse) — never dropped for being unparseable.
  * The CAP keeps the NEWEST rows (`slice(-cap)`), because the tail is what an operator opening a record
  * is looking for.
+ *
+ * NOTHING-ROWS: a non-object element (a `null`, a scalar) used to be coerced to `{}` and still emitted a
+ * row — no time, no action, actor 「未知」 — i.e. an assertion that an unknown person did an unnamed
+ * thing at an unknown time. Such an element is dropped, and so is any row that survives parsing with no
+ * time, no actor, no action AND no comment: every other unknown on this card degrades to rendering
+ * nothing (步骤 needs both numbers, 待处理人 needs a current node), and a history row carrying zero
+ * information should too. A row that still carries SOMETHING — an orphan comment, say — is KEPT: the rule
+ * is 'no information', not 'unknown actor'.
  */
 function normalizeProgressHistory(payload: unknown): { rows: ProgressHistoryRow[]; truncated: boolean } {
-  const items = normalizeApprovalHistoryEnvelope(payload) as unknown[]
-  const parsed = items.map((raw, index) => {
-    const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const items = (normalizeApprovalHistoryEnvelope(payload) as unknown[])
+    .filter((raw): raw is Record<string, unknown> => Boolean(raw) && typeof raw === 'object')
+  const parsed = items.map((row, index) => {
     const occurredAt = pickString(row, 'occurredAt', 'occurred_at', 'createdAt', 'created_at')
     const timestamp = occurredAt ? Date.parse(occurredAt) : Number.NaN
     return {
@@ -659,7 +683,7 @@ function normalizeProgressHistory(payload: unknown): { rows: ProgressHistoryRow[
         comment: pickString(row, 'comment'),
       } satisfies ProgressHistoryRow,
     }
-  })
+  }).filter(({ row }) => Boolean(row.occurredAt || row.actorName || row.action || row.comment))
   parsed.sort((a, b) => {
     const aKnown = !Number.isNaN(a.timestamp)
     const bKnown = !Number.isNaN(b.timestamp)
@@ -726,6 +750,23 @@ async function loadProgress(instanceId: string): Promise<void> {
       getApprovalHistory(instanceId),
     ])
     if (loadVersion !== activeProgressVersion) return
+    // IDENTITY: the answer must be ABOUT the instance we asked for. See the file header — the route
+    // answers `id: row.id` from `WHERE id = $1`, so an echo mismatch is never a legitimate answer; it is
+    // either another approval's timeline or the DEV fixture branch of `approvals/api.ts`. Fail closed to
+    // a values-free notice (no 重试 — a re-read returns the same wrong instance) and render NEITHER
+    // half, because the history read is keyed by the same id and would be just as wrong.
+    const answeredId = typeof detail?.id === 'string' ? detail.id : ''
+    if (answeredId && answeredId !== instanceId) {
+      progressEntries.value[instanceId] = {
+        loading: false,
+        loaded: false,
+        errorKind: 'mismatch',
+        detail: null,
+        history: [],
+        historyTruncated: false,
+      }
+      return
+    }
     // Side effect OUTSIDE any computed (directoryResolve.ts's own contract): kick off the batch
     // display-name resolve for the ids this card is about to show.
     ensureUserNamesResolved((detail?.assignments ?? []).map((a) => a.assigneeId))

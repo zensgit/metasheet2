@@ -1097,6 +1097,12 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # DTO shape, the 20-row cap, the 403/404/other mapping parsed out of apiGet's generic `API error: NNN`
 # throw, the refreshToken/version cache invalidation, 完成时间 on terminal rows only, and a router-less
 # mount adding no NEW [Vue warn]. The approvals api module is vi.mock'ed at module level -- no real HTTP.
+# FIX ROUND (same token, 5 more tests): the four degradation sentences are now pinned by EQUALITY plus a
+# negative on the thrown message (a `toContain` stayed green if someone appended `error.message`), the
+# 当前待处理人 line by EXACT rendered text (id-absence could not see the ACTIVE-at-current-node filter
+# disappear), the runtime half of the gate by a permission-revoke race, a detail payload that echoes a
+# DIFFERENT instance id is refused, an action code colliding with an Object.prototype key renders RAW,
+# and a null/scalar/empty history element is dropped instead of rendering a 「未知」 ghost row.
 # SUBSTRING COLLISION, checked mechanically in BOTH directions against every token in this file (same
 # counting rule this file documents: join backslash continuations, drop comment lines, take every
 # non-flag positional of each `vitest run`): NO existing token is a substring of
@@ -1104,8 +1110,8 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # `multitable-record-approval-submit` / `multitable-record-approval-panel` share only the
 # `multitable-record-approval-` prefix and diverge at `progress` vs `submit`/`panel`. The token matches
 # exactly ONE file under apps/web (verified by a full non-node_modules path sweep). Verified green in
-# isolation (`npx vitest run multitable-record-approval-progress --reporter=dot` -> 23/23) and alongside
-# both sibling approval specs (90/90) before wiring.
+# isolation (`npx vitest run multitable-record-approval-progress --reporter=dot` -> 28/28 after the fix
+# round, 23/23 when first wired) and alongside both sibling approval specs (95/95).
 # Two-point discipline (header of this file): the same token is mirrored into
 # .github/workflows/multitable-web-guard.yml (both `on:` path blocks carry the new spec; the run-list
 # carries the token).

@@ -176,6 +176,7 @@ export type MetaRecordLabelKey =
   | 'approval.progressExpand' | 'approval.progressCollapse' | 'approval.progressLoading'
   | 'approval.progressApprovers' | 'approval.progressHistory' | 'approval.progressHistoryEmpty'
   | 'approval.progressForbidden' | 'approval.progressNotParticipant' | 'approval.progressFailed'
+  | 'approval.progressMismatch'
   | 'approval.progressRetry' | 'approval.completedAt'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
@@ -488,6 +489,11 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.progressForbidden': { en: 'You may not view approval progress.', zh: '无权查看审批进度' },
   'approval.progressNotParticipant': { en: 'You are not a participant of this approval — progress is not visible.', zh: '你不是该审批的参与人，进度不可见' },
   'approval.progressFailed': { en: 'Failed to load progress.', zh: '进度加载失败' },
+  // The read SUCCEEDED but the answer is not about the instance the card asked for (`detail.id` !== the
+  // id we passed). Printing it would attach one approval's timeline to another approval's row, so the
+  // card says so and — like 403/404 — offers no 重试: a second read returns the same wrong instance.
+  // Values-free on purpose: neither the requested nor the answered id appears in the sentence.
+  'approval.progressMismatch': { en: 'Progress data does not match this approval — not shown.', zh: '返回的进度与该审批不一致，已隐藏' },
   'approval.progressRetry': { en: 'Retry', zh: '重试' },
   'approval.completedAt': { en: 'Completed at', zh: '完成时间' },
 }
@@ -935,7 +941,15 @@ const RECORD_APPROVAL_HISTORY_ACTION_LABELS: Record<string, { en: string; zh: st
 }
 
 export function recordApprovalHistoryActionLabel(action: string, isZh: boolean): string {
-  const entry = RECORD_APPROVAL_HISTORY_ACTION_LABELS[action]
+  // OWN keys only. The table above is a bare object literal, so it INHERITS `Object.prototype`: an action
+  // code that happens to be `toString` / `constructor` / `valueOf` / `hasOwnProperty` / `__proto__` would
+  // find a TRUTHY inherited member, skip the `return action` fallback and render `entry.zh === undefined`
+  // as an EMPTY cell — a blank row where the contract right above promises the RAW code. Reachability is
+  // not the argument (today's server writes an enumerated verb); the contract is stated, so it holds for
+  // every string rather than for the strings we happened to think of.
+  const entry = Object.prototype.hasOwnProperty.call(RECORD_APPROVAL_HISTORY_ACTION_LABELS, action)
+    ? RECORD_APPROVAL_HISTORY_ACTION_LABELS[action]
+    : undefined
   if (!entry) return action
   return isZh ? entry.zh : entry.en
 }

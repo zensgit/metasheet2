@@ -6,26 +6,47 @@
  * `/:id/history`, through the approval centre's own `getApproval`/`getApprovalHistory`.
  *
  * What this file pins (and the mutation that breaks each):
- *  1. GATE. Without `approvals:read` on the FE the card renders NOTHING and no instance read is ever
- *     issued — the submissions list and its request-number link are untouched. Drop the
- *     `canReadApprovals &&` in the template (or the `if (!canReadApprovals.value) return` in
- *     `loadProgress`) ⇒ red.
+ *  1. GATE, in BOTH halves — and they are pinned by DIFFERENT tests, because only one of them is
+ *     reachable from a click on a rendered button. Without `approvals:read` the card renders NOTHING and
+ *     no instance read is ever issued; the submissions list and its request-number link are untouched.
+ *     Dropping the `canReadApprovals &&` in the TEMPLATE ⇒ red (2 tests). Dropping the
+ *     `if (!canReadApprovals.value) return` inside `loadProgress` ⇒ red via the REVOKE-RACE test only:
+ *     every button that calls it lives inside the gated `div`, so that guard is reachable exactly in the
+ *     window between the permission ref flipping (`permissions.ts` refreshes a module-level ref from a
+ *     `storage` event, synchronously) and Vue patching the DOM. That window is what the test clicks in.
  *  2. LAZY. Expanding the PANEL reads the submissions list only; the instance pair fires on first expand
  *     of THAT row's card. Fetch from the load/mount path instead ⇒ red.
  *  3. CACHE. Exactly ONE pair of reads per instance; collapse/re-expand serves the cache.
  *  4. RENDER. 第 N / M 步 (only when both are numbers), 当前待处理人 resolved through the SAME shared
  *     directory resolver the approval centre uses, and a history list — oldest first, snake_case AND
  *     camelCase rows, capped at 20 with a 「仅显示最近 20 条」 note.
- *  5. DEGRADATION. 403 → 无权查看审批进度, 404 → 你不是该审批的参与人，进度不可见, anything else →
- *     进度加载失败 + a 重试 BUTTON (403/404 get no retry — they are answers, not hiccups). The status is
+ *  5. DEGRADATION, VALUES-FREE BY EQUALITY. 403 → 无权查看审批进度, 404 → 你不是该审批的参与人，
+ *     进度不可见, a wrong-instance answer → 返回的进度与该审批不一致，已隐藏, anything else → 进度加载失败
+ *     + a 重试 BUTTON (the first three get no retry — they are answers, not hiccups). The status is
  *     parsed out of `apiGet`'s generic `API error: NNN ...` throw (utils/api.ts has no typed error on
- *     that path), so map 404 onto the 403 copy ⇒ red.
+ *     that path), so map 404 onto the 403 copy ⇒ red. Each sentence is asserted by EQUALITY plus an
+ *     explicit negative on the thrown message and the status digits: a `toContain` would stay green if
+ *     someone later appended `error.message` and started printing `API error: 500 ...` in a record
+ *     drawer, which is the whole thing 'values-free' is supposed to forbid.
  *  6. FRESHNESS. A `refreshToken` bump (the inspector's post-submit signal) drops the progress cache and
  *     collapses the card, so the next expand re-reads. Skip `invalidateProgress()` there ⇒ red.
  *  7. 完成时间 renders on TERMINAL rows only — data the list route already returns and the panel never
  *     showed. Render it for every status ⇒ red.
  *  8. A ROUTER-LESS mount adds no NEW `[Vue warn]` (the card uses no router API at all). The panel's
  *     pre-existing `useRouter()` warn is the ONLY one tolerated — see that test's own comment.
+ *  9. IDENTITY. A detail payload whose `id` is not the instance the card asked for is REFUSED, rather
+ *     than printed under this record's row: the route answers `id: row.id` from `WHERE id = $1`
+ *     (ApprovalBridgeService.toUnifiedDTO), so an echo mismatch is never a legitimate answer. It is also
+ *     what stops `approvals/api.ts`'s DEV fixture branch (`apv_1` for every id) from fusing a fabricated
+ *     timeline into a frame of real submission data on a dev server. Drop the check ⇒ red.
+ * 10. HISTORY HYGIENE. A `null`/scalar/empty element is DROPPED instead of rendering a 「未知」 ghost row
+ *     (a row asserting an unknown person did an unnamed thing at an unknown time), while a row that still
+ *     carries something — an orphan comment — is kept. An unknown action code renders RAW even when it
+ *     collides with an `Object.prototype` key (`toString`/`__proto__`/`constructor`), which a bare-object
+ *     lookup renders BLANK.
+ * 11. 当前待处理人 is asserted by EXACT rendered text, never by `not.toContain(rawId)`: a raw id is not a
+ *     rendering candidate on this card (the only id-shaped path is the 「成员 N」 fallback), so an
+ *     id-absence assertion cannot see the ACTIVE-at-current-node filter disappear.
  *
  * NO REAL HTTP: `../src/approvals/api` is mocked at module level (`getApproval`/`getApprovalHistory`/
  * `resolveApprovalDirectoryUsers` only — every other export, including the real
@@ -244,6 +265,30 @@ describe('审批进度卡片 — approvals:read gate', () => {
     expect(mockGetApprovalHistory).not.toHaveBeenCalled()
   })
 
+  it('issues NO read when the permission is revoked between the reactive flip and the DOM patch', async () => {
+    // The RUNTIME half of the gate (`loadProgress`'s own `if (!canReadApprovals.value || !instanceId)
+    // return`). Every button that reaches it lives inside the gated `div`, so it is unreachable from a
+    // rendered click — EXCEPT in this window: `permissions.ts` refreshes a module-level `ref` from a
+    // `storage` event SYNCHRONOUSLY (another tab logging out / losing the role), so `canRead` is already
+    // false while Vue has not yet patched the button away. A click landing there must not read.
+    const { container } = mountPanel()
+    await expandPanel(container)
+    const button = progressToggles(container)[0]!
+
+    grantPermissions([])
+    window.dispatchEvent(new Event('storage'))
+    // Deliberately NOT awaited: the DOM still holds the button, the computed is already false.
+    button.click()
+
+    expect(mockGetApproval).not.toHaveBeenCalled()
+    expect(mockGetApprovalHistory).not.toHaveBeenCalled()
+
+    await flushUi()
+    // …and once Vue patches, the template half removes the card entirely.
+    expect(q(container, 'record-approval-progress')).toBeNull()
+    expect(mockGetApproval).not.toHaveBeenCalled()
+  })
+
   it('offers no card for a submission that has no approvalInstanceId', async () => {
     const { container } = mountPanel({ client: fakeClient([CREATING_SUBMISSION, PENDING_SUBMISSION]) })
     await expandPanel(container)
@@ -280,9 +325,14 @@ describe('审批进度卡片 — lazy fetch + cache', () => {
     await expandPanel(container)
     expect(progressToggles(container)).toHaveLength(2)
 
+    // The fixture must ECHO the id it is asked about (pin 9) — the card refuses an answer that is
+    // about another instance, so a copy-pasted `inst_1` fixture here would render the mismatch notice.
+    mockGetApproval.mockResolvedValue(detailFixture({ id: 'inst_3' }))
     await expandProgress(container, 1)
     expect(mockGetApproval).toHaveBeenCalledTimes(1)
     expect(mockGetApproval).toHaveBeenCalledWith('inst_3')
+    expect(q(container, 'record-approval-progress-error')).toBeNull()
+    expect(q(container, 'record-approval-progress-step')).not.toBeNull()
   })
 })
 
@@ -304,11 +354,14 @@ describe('审批进度卡片 — rendering', () => {
     // The batch resolve was kicked off for the ids this card shows, and the resolved name is rendered
     // (never the raw internal user id, never the 「成员 N」 fallback once a name lands).
     expect(mockResolveUsers).toHaveBeenCalled()
-    const approvers = q(container, 'record-approval-progress-approvers')!.textContent!
-    expect(approvers).toContain('当前待处理人')
-    expect(approvers).toContain('李四')
+    const approvers = q(container, 'record-approval-progress-approvers')!.textContent!.trim()
+    // EXACT, because the point of the line is WHO is listed: the fixture also carries an INACTIVE
+    // assignment at the current node and an ACTIVE one at a later node, and neither is a pending
+    // approver. `not.toContain(rawId)` cannot pin that filter — a raw id is never rendered by this card
+    // (the only id-shaped path is the 「成员 N」 fallback), so dropping the filter would still pass it.
+    expect(approvers).toBe('当前待处理人: 李四')
+    // Kept anyway: these DO discriminate the label rule (a resolver bypass that printed the id).
     expect(approvers).not.toContain('u_manager')
-    // Only the ACTIVE assignment at the CURRENT node.
     expect(approvers).not.toContain('u_done')
     expect(approvers).not.toContain('u_later')
 
@@ -393,8 +446,11 @@ describe('审批进度卡片 — rendering', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    const approvers = q(container, 'record-approval-progress-approvers')!.textContent!
-    expect(approvers).toContain('成员 1')
+    const approvers = q(container, 'record-approval-progress-approvers')!.textContent!.trim()
+    // EXACTLY one ordinal: the fallback numbers the RENDERED approvers, so a filter that let the other
+    // two assignments through would read 「成员 1、成员 2、成员 3」 and silently inflate the count of
+    // people the operator thinks are holding this approval.
+    expect(approvers).toBe('当前待处理人: 成员 1')
     expect(approvers).not.toContain('u_manager')
   })
 
@@ -411,9 +467,48 @@ describe('审批进度卡片 — rendering', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    const approvers = q(container, 'record-approval-progress-approvers')!.textContent!
-    expect(approvers).toContain('法务甲')
-    expect(approvers).toContain('合规乙')
+    const approvers = q(container, 'record-approval-progress-approvers')!.textContent!.trim()
+    expect(approvers).toBe('当前待处理人: 法务甲、合规乙')
+  })
+
+  it('renders action codes that collide with Object.prototype keys RAW, not blank', async () => {
+    // A bare-object lookup finds the INHERITED member for these three (a truthy Function/Object), skips
+    // the `if (!entry) return action` fallback and renders `entry.zh === undefined` — an empty cell,
+    // which is the one thing the helper's contract (「never dropped, never guessed」) forbids.
+    mockGetApprovalHistory.mockResolvedValue([
+      { id: 'h1', action: 'toString', actorName: '张三', occurredAt: '2026-09-15T02:00:00.000Z' },
+      { id: 'h2', action: '__proto__', actorName: '张三', occurredAt: '2026-09-15T03:00:00.000Z' },
+      { id: 'h3', action: 'constructor', actorName: '张三', occurredAt: '2026-09-15T04:00:00.000Z' },
+    ] as never)
+    const { container } = mountPanel()
+    await expandPanel(container)
+    await expandProgress(container)
+
+    const actions = qa(container, 'record-approval-progress-history-action')
+      .map((el) => el.textContent!.trim())
+    expect(actions).toEqual(['toString', '__proto__', 'constructor'])
+  })
+
+  it('drops history elements that carry NO information instead of rendering a 「未知」 ghost row', async () => {
+    mockGetApprovalHistory.mockResolvedValue([
+      { id: 'h1', action: 'created', actorName: '张三', occurredAt: '2026-09-15T02:00:00.000Z' },
+      null,
+      'not-a-row',
+      { id: 'h4' },
+      // Still carries SOMETHING — kept. The rule is 'no information', not 'unknown actor'.
+      { id: 'h5', comment: '一句备注' },
+    ] as never)
+    const { container } = mountPanel()
+    await expandPanel(container)
+    await expandProgress(container)
+
+    const rows = qa(container, 'record-approval-progress-history-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.textContent).toContain('发起')
+    expect(rows[1]!.textContent).toContain('一句备注')
+    // The dropped ones would each have rendered a row whose only content is 「未知」.
+    expect(qa(container, 'record-approval-progress-history-row')
+      .filter((row) => row.textContent!.trim() === '未知')).toHaveLength(0)
   })
 })
 
@@ -428,7 +523,14 @@ describe('审批进度卡片 — values-free degradation', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    expect(q(container, 'record-approval-progress-error')!.textContent).toContain('无权查看审批进度')
+    // EQUALITY + negatives, not `toContain`: the sentence must carry NOTHING the server said. Appending
+    // `error.message` here would render 'API error: 403 Forbidden' inside a record drawer and a
+    // `toContain` assertion would not notice.
+    const el = q(container, 'record-approval-progress-error')!
+    expect(el.textContent!.trim()).toBe('无权查看审批进度')
+    expect(el.textContent).not.toContain('API error')
+    expect(el.textContent).not.toContain('Forbidden')
+    expect(el.textContent).not.toContain('403')
     expect(q(container, 'record-approval-progress-retry')).toBeNull()
   })
 
@@ -439,8 +541,11 @@ describe('审批进度卡片 — values-free degradation', () => {
     await expandProgress(container)
 
     const text = q(container, 'record-approval-progress-error')!.textContent!
-    expect(text).toContain('你不是该审批的参与人，进度不可见')
+    expect(text.trim()).toBe('你不是该审批的参与人，进度不可见')
     expect(text).not.toContain('无权查看审批进度')
+    expect(text).not.toContain('API error')
+    expect(text).not.toContain('Not Found')
+    expect(text).not.toContain('404')
     expect(q(container, 'record-approval-progress-retry')).toBeNull()
   })
 
@@ -450,7 +555,12 @@ describe('审批进度卡片 — values-free degradation', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    expect(q(container, 'record-approval-progress-error')!.textContent).toContain('进度加载失败')
+    const failed = q(container, 'record-approval-progress-error')!
+    expect(failed.textContent!.trim()).toBe('进度加载失败')
+    // The generic branch is the one a 'helpful' refactor would attach the raw reason to.
+    expect(failed.textContent).not.toContain('API error')
+    expect(failed.textContent).not.toContain('Internal Server Error')
+    expect(failed.textContent).not.toContain('500')
     const retry = q(container, 'record-approval-progress-retry')!
     expect(mockGetApproval).toHaveBeenCalledTimes(1)
 
@@ -471,7 +581,9 @@ describe('审批进度卡片 — values-free degradation', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    expect(q(container, 'record-approval-progress-error')!.textContent).toContain('进度加载失败')
+    const el = q(container, 'record-approval-progress-error')!
+    expect(el.textContent!.trim()).toBe('进度加载失败')
+    expect(el.textContent).not.toContain('Network request failed')
     expect(q(container, 'record-approval-progress-retry')).not.toBeNull()
   })
 
@@ -482,7 +594,45 @@ describe('审批进度卡片 — values-free degradation', () => {
     await expandPanel(container)
     await expandProgress(container)
 
-    expect(q(container, 'record-approval-progress-error')!.textContent).toContain('无权查看审批进度')
+    const el = q(container, 'record-approval-progress-error')!
+    expect(el.textContent!.trim()).toBe('无权查看审批进度')
+    expect(el.textContent).not.toContain('API error')
+  })
+
+  it('refuses a detail payload that is about a DIFFERENT instance, with no retry', async () => {
+    // The read SUCCEEDS; the answer is simply not about `inst_1`. The real route echoes the requested id
+    // (`id: row.id` from `WHERE id = $1`), so this only happens when something is answering for another
+    // instance — including `approvals/api.ts`'s DEV fixture branch, which returns `apv_1` for every id.
+    mockGetApproval.mockResolvedValue(detailFixture({ id: 'apv_1' }))
+    mockGetApprovalHistory.mockResolvedValue([
+      { id: 'h1', action: 'created', actorName: '张三', occurredAt: '2026-09-15T02:00:00.000Z' },
+    ] as never)
+    const { container } = mountPanel()
+    await expandPanel(container)
+    await expandProgress(container)
+
+    // not-null FIRST, so removing the identity check reads as 'the card rendered the wrong
+    // instance' rather than as a TypeError on a missing element.
+    const el = q(container, 'record-approval-progress-error')
+    expect(el).not.toBeNull()
+    expect(el!.textContent!.trim()).toBe('返回的进度与该审批不一致，已隐藏')
+    // NEITHER half is rendered — the history read is keyed by the same id and is just as wrong.
+    expect(q(container, 'record-approval-progress-step')).toBeNull()
+    expect(q(container, 'record-approval-progress-approvers')).toBeNull()
+    expect(q(container, 'record-approval-progress-history')).toBeNull()
+    // An answer, not a hiccup: a re-read returns the same wrong instance.
+    expect(q(container, 'record-approval-progress-retry')).toBeNull()
+    // Values-free: neither id is printed anywhere in the card.
+    expect(container.textContent).not.toContain('apv_1')
+  })
+
+  it('accepts the answer when the echoed id matches (the identity check is not a blanket refusal)', async () => {
+    mockGetApproval.mockResolvedValue(detailFixture({ id: 'inst_1' }))
+    const { container } = mountPanel()
+    await expandPanel(container)
+    await expandProgress(container)
+    expect(q(container, 'record-approval-progress-error')).toBeNull()
+    expect(q(container, 'record-approval-progress-step')!.textContent).toContain('第 2 / 3 步')
   })
 })
 
