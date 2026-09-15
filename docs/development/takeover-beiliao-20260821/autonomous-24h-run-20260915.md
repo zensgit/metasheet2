@@ -9,11 +9,11 @@
 
 | # | 项 | 模型 | PR / 产物 | 状态 |
 | --- | --- | --- | --- | --- |
-| Q0 | 铃铛计数 1 / 面板「暂无通知」（顺手，演示记录 §5.4） | 主会话 | #5748 | 🟡 CI |
-| Q1 | #5742 写回 outcome→选项映射（`resultWriteback.outcomeValues`） | opus 实现 / opus 反驳 / fable 裁判 | wt-fe6 `fix/automation-writeback-outcome-values` | 🟡 流水线 |
-| Q2 | #5743 管理弹窗 1.2 s 轮询 | opus / opus / fable | wt-flabel `fix/multitable-dialog-meta-poll` | 🟡 流水线 |
+| Q0 | 铃铛计数 1 / 面板「暂无通知」（顺手，演示记录 §5.4） | 主会话 | #5748（2b67a0462） | ✅ 已合，待 r47 |
+| Q1 | #5742 写回 outcome→选项映射（`resultWriteback.outcomeValues`） | opus 实现 / opus 反驳 / fable 裁判 | #5752（f67984b34；裁判 FIX，10 条反驳全落码 + 遗留补 84551a0cb） | ✅ 已合，r47 |
+| Q2 | #5743 管理弹窗 1.2 s 轮询 | opus / opus / fable | #5751（268aded99；裁判 MERGE，两项遗留已补 ecfaaaf78；H2 → #5750） | ✅ 已合，待 r47 |
 | Q3 | 阶段二后端：记录级送审（提交表、路由、权限码、耐久消费者 v2） | opus / opus / fable | wt-p5 `feat/multitable-record-approval-submit-backend` | 🟡 流水线 |
-| Q4 | 阶段二前端：抽屉送审入口、对话框、审批面板 | opus / opus / fable | wt-base3 `feat/multitable-record-approval-submit-frontend` | 🟡 流水线 |
+| Q4 | 阶段二前端：抽屉送审入口、对话框、审批面板 | opus / opus / fable | #5753（裁判 FIX @8bc1ab1d0，14 条反驳 12 修；遗留 3 项 e91c8c8b0 + guard 镜像 184cf4a20） | 🟡 CI |
 | Q5 | componentSpec 中文名「组件规格」 | 主会话 | 222 字段改名（模板已有 labelZh） | ✅ |
 | Q6 | 阶段二设计稿 | 主会话（基于 4 代理只读地图） | `multitable-approval-phase2-record-submit-design-20260915.md` | ✅ 草稿 |
 | — | 222 发布 | — | r47 / r48（夜间） | 📝 |
@@ -48,7 +48,12 @@
 
 ## 3. 验证记录
 
-（每项合并后补：CI 泳道、变异证据、222 上机标记（按 gitSha 与文件哈希）、实测步骤与时序）
+### 3.1 r47（main `f67984b34` = r46 + #5748 + #5751 + #5752），2026-09-15 20:17–20:19 上 222
+- 升级前备份 `pre-r47-20260915-201741.dump`；in-place 升级退出 0；后端/nginx 健康 OK；维护门 WIRED；包 gitSha == main；后端 dist 含 `outcomeValues`/`resolveWritebackStatusValue`、前端包含 `resultWritebackOutcomeValue-` 与 `visibilitychange` 字面量（提示级，权威是 gitSha）；定时 dry-run 0；pm2 online；9 条 False 与 r46 相同（已知良性）。
+- **#5748 铃铛**：打开 bom备料 → 铃铛徽标 1 → 面板列出 1 条 `notification.sent`（r46 上为「暂无通知」）。
+- **#5751 轮询**：打开「字段」管理弹窗，20 s 内 fields/context 共 4 次请求（开弹窗 1 对 + 15 s 保活 1 对；修复前约 20 对），关闭后 0。
+- **#5752 映射**：先把演示字段「审批状态」的选项从 approved/rejected 改为 已通过/已驳回（同步那条记录的值）；打开规则 A 编辑器出现「审批结果 → 写入值」块，且因选项集不含原文 approved 而正确给出阻断「请在下方选择要写入的选项」；选 已通过、勾选「非通过结果也写回」、选 已驳回后阻断消失，保存成功，DB `actions[0].config.resultWriteback = {statusField, onNonApproved:true, outcomeValues:{approved:已通过, rejected:已驳回}}`。端到端：记录 → 待审批（20:22:08.9）→ AP-100002 pending → 审批中心驳回（必填原因）→ 20:22:43.00 实例 rejected → 20:22:43.03 记录写回「已驳回」→ 规则 B 通知 1 条。规则 A 的执行记录为 failed「Approval completed with rejected」，这是既有设计（非通过结果终止后续动作链），写回仍按 `onNonApproved` 完成。
+- 顺带观察：客户自建的「测试」规则（当记录更新时 → 发送通知，无收件人）每次记录更新都失败一次（现 15 次），属既有配置问题，未动。
 
 ## 4. 过程发现与教训
 
