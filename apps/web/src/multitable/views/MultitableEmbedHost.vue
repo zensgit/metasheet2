@@ -259,10 +259,27 @@ async function applyHostOverrides(context: ContextSnapshot) {
     sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : undefined,
     viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
   })
-  if (contextMatches(routeContext, context)) return
+  // #5750: an applied context WITHOUT a baseId means "whatever base the workbench is already on",
+  // not "this sheet has no base". Writing `baseId: undefined` into the query DELETES ?baseId= from
+  // the URL (while every other query key survives the spread) even though the workbench keeps
+  // rendering that base, so the URL stops round-tripping: a reload or a copied link lands on the
+  // base-less resolution path instead of the base the frame is showing. Fall back to the base the
+  // workbench itself reports; a workbench that reports no base of its own still drops the key
+  // (falling back to the URL's own stale baseId could pin a base that does not own this sheet).
+  const resolvedBaseId = context.baseId
+    || (workbenchRef.value?.getEmbedHostState?.()?.currentContext?.baseId ?? '')
+  // ...but that widened match must not swallow the recordId/mode cleanup this call used to do.
+  // Before the fallback, a context without a baseId always mismatched the URL, so the replace below
+  // ran and stripped both keys; they are live props (an open record dialog, a forced view mode), so
+  // a host navigating back to the plain sheet would otherwise stay pinned on them. Keep doing the
+  // replace whenever the raw context would have triggered it and either key is still in the URL.
+  const urlShowsResolvedContext = contextMatches(routeContext, { ...context, baseId: resolvedBaseId })
+  const urlShowsRawContext = contextMatches(routeContext, context)
+  const hasDeepLinkKeys = route.query.recordId !== undefined || route.query.mode !== undefined
+  if (urlShowsResolvedContext && (urlShowsRawContext || !hasDeepLinkKeys)) return
   const nextQuery: LocationQueryRaw = {
     ...route.query,
-    baseId: context.baseId || undefined,
+    baseId: resolvedBaseId || undefined,
   }
   delete nextQuery.recordId
   delete nextQuery.mode

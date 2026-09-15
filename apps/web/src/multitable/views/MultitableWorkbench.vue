@@ -3847,8 +3847,32 @@ function serializeExternalContext(input: { baseId: string; sheetId: string; view
   return `${input.baseId}::${input.sheetId}::${input.viewId}`
 }
 
+// #5750: the incoming baseId is what the embedding host / URL says, while activeBaseId is what the
+// LOADED CONTEXT said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+// ctx.sheet.baseId). Comparing the two verbatim makes this fast path miss forever whenever they
+// spell the same base differently, and a host that re-sends the same context on a timer then
+// re-enters applyExternalContext -- plus the busy / unsaved-draft defer toasts -- every tick.
+// A sheet belongs to exactly one base, so once the ACTIVE sheet is known (from the loaded sheet
+// list) to live in the active base, the requested base id carries nothing the sheet id does not
+// already carry. It is only ignored, never trusted: the caller still requires the sheet id (and the
+// view id) to equal the active one, so a foreign base can never select a sheet through this path,
+// and an unknown active sheet (empty/not-yet-loaded sheet list) keeps the strict comparison.
+function externalContextBaseMatchesWorkbench(inputBaseId: string) {
+  const activeBaseId = workbench.activeBaseId.value ?? ''
+  if (inputBaseId === activeBaseId || !inputBaseId) return true
+  if (!activeBaseId) return false
+  // A base id this workbench KNOWS (it is in the loaded base list) is never a different spelling of
+  // the active base -- it is a real base switch request. Ignoring it would answer 'applied' to a
+  // host that posted only { baseId } (handleNavigateMessage fills sheetId/viewId in from the
+  // current ones) while nothing switched; that request has to go down the normal path and fail
+  // loudly, as it did before this fast path existed.
+  if (bases.value.some((base) => base.id === inputBaseId)) return false
+  const activeSheet = workbench.sheets.value.find((sheet) => sheet.id === (workbench.activeSheetId.value ?? ''))
+  return !!activeSheet && activeSheet.baseId === activeBaseId
+}
+
 function externalContextMatchesWorkbench(input: { baseId: string; sheetId: string; viewId: string }) {
-  return input.baseId === (workbench.activeBaseId.value ?? '') &&
+  return externalContextBaseMatchesWorkbench(input.baseId) &&
     input.sheetId === (workbench.activeSheetId.value ?? '') &&
     input.viewId === (workbench.activeViewId.value ?? '')
 }
