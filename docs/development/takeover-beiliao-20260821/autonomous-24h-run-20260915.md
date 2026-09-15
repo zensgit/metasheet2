@@ -16,8 +16,12 @@
 | Q4 | 阶段二前端：抽屉送审入口、对话框、审批面板 | opus / opus / fable | #5753（裁判 FIX @8bc1ab1d0，14 条反驳 12 修；遗留 3 项 e91c8c8b0 + guard 镜像 184cf4a20） | ✅ 已合，待 r48 |
 | Q5 | componentSpec 中文名「组件规格」 | 主会话 | 222 字段改名（模板已有 labelZh） | ✅ |
 | Q6 | 阶段二设计稿 | 主会话（基于 4 代理只读地图） | `multitable-approval-phase2-record-submit-design-20260915.md` | ✅ 草稿 |
-| Q7 | 编辑器所有动作类型 config 保留（#5739 泛化） | Explore 普查 → opus / opus / fable | 裁判 MERGE @364ca6a2c（8 条反驳全落码，含字段值字符串化与跨基界面失真两条 major）；PR 见 §2 | 🟡 CI |
-| Q8 | #5750 外部上下文同步收敛（先复现） | opus 复现 / opus / opus / fable | 复现成功（5 次重发 = 5 次 HTTP）；裁判 MERGE @dfae6f39f；PR 见 §2 | 🟡 CI |
+| Q7 | 编辑器所有动作类型 config 保留（#5739 泛化） | Explore 普查 → opus / opus / fable | #5756（79dbc6588；裁判 MERGE，8 条反驳全落码，含字段值字符串化与跨基界面失真两条 major） | ✅ 已合，r49 |
+| Q8 | #5750 外部上下文同步收敛（先复现） | opus 复现 / opus / opus / fable | #5755（14db7f82e；复现成功 5 次重发 = 5 次 HTTP；裁判 MERGE） | ✅ 已合，r49 |
+| Q9 | 2a 后续：列表带模板名/申请人名、hasMore、自动通过原子提升 | opus / opus / fable | wt-p5 `feat/record-approval-list-names-limit` | 🟡 流水线 |
+| Q10 | #5750 后续：嵌入宿主回显真实上下文、navigated 按请求去重 | opus / opus / fable | wt-flabel `fix/embed-host-echo-context-dedup` | 🟡 流水线 |
+| Q11 | 编辑器跨基 create_record 横幅 + 登记 #5747 客户端测试 | opus / opus / fable | wt-fe6 `fix/editor-crossbase-create-banner` | 🟡 流水线 |
+| Q12 | #5756 真实路径丢键（r49 实证发现） | opus 复现 / opus / opus / fable | wt-p6 `fix/editor-load-actions-over-legacy-mirror` | 🟡 流水线 |
 | — | 222 发布 | — | r47 / r48（夜间） | 📝 |
 
 ## 1. 队列与模型选择依据
@@ -66,6 +70,11 @@
   4. 审批中心通过 AP-100003 → 22:11:59.22 提交行 `approved`（同事务写入申请人通知，`record_id` 有值）+ 规则 B 通知 1 条；回到抽屉面板状态芯片「已通过」，铃铛徽标 4。
   5. 在途唯一：再送审得 AP-100004（前一条已终态，部分索引放行）；紧接着第三次送审被拒，对话框内提示「该记录已在此模板审批中。 AP-100004 查看审批」。随后在审批中心通过 AP-100004 收尾。
 - 截图：r48-01 送审对话框、r48-02 面板待处理、r48-03 面板已通过、r48-04 409 提示。
+
+### 3.3 r49（main `79dbc6588` = r48 + #5755 + #5756），2026-09-15 22:22–22:24 上 222
+- 备份 `pre-r49-20260915-222239.dump`；upgrade 退出 0；健康 OK；前端包含 `crossBaseTarget` 与外部上下文字面量（提示级）；dry-run 0；pm2 online；9 条 False 同前。`gh run watch` 撞 API EOF 后由 resume 路径自动接管（脚本已内置）。
+- **#5756 实证 → 发现未覆盖路径**：先用 SQL 给规则 B 的 `send_notification` 配置塞入未建模键 `x_customerExtension`，刷新页面后确认 `GET …/automations` 的 `actions[0].config` 带该键（旧镜像字段 `actionConfig` 不带），在编辑器里打开规则 B 原样保存 → **PATCH 体不含该键，DB 中键被丢**（三次重做排除了缓存与顺序因素）。即 #5756 的单测夹具（直接给编辑器喂 `actions`）没有覆盖真实的「管理器 → 编辑器 → PATCH」路径。已派 Q12 流水线：先在管理器层用真实客户端 fetch 桩复现（要求先红），再最小修复。
+- #5755（外部上下文收敛）无法在 222 手工构造嵌入宿主重发，以单元/组件级用例（指向主检出 4 红 / 本分支绿）为证。
 
 ## 4. 过程发现与教训
 
