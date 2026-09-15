@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
-import { enqueueRecoveryArchiveDerivedEffect } from '../../src/multitable/recovery-archive-derived-effects'
+import { consumeRecoveryArchiveDerivedEffect, enqueueRecoveryArchiveDerivedEffect } from '../../src/multitable/recovery-archive-derived-effects'
 import {
   abandonRecoveryArchiveRestoreJob,
   acceptRecoveryArchiveRestoreJob,
@@ -1604,6 +1604,99 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         await cancelRecoveryArchiveRestoreJob(transaction, {
           ...identity, replayHorizonMs: 0, recheckAuthority: async () => true,
         })
+      }
+    },
+  )
+
+  test.each(['done', 'abandoned_partial', 'cancelled_zero_write'] as const)(
+    'derived effects consume only committed terminal work, retry failures and serialize consumers: %s', async (terminal) => {
+      const fixture = await seedVerifiedArchive(`derived_consume_${terminal}`)
+      const plan = compilePlan(fixture)
+      const token = mintToken(fixture, plan)
+      await preparePlan(fixture, plan, token)
+      const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+        token, plan, identity: restoreRequestIdentity(fixture),
+        resumeDeadline: future(60_000), recheckAuthority: async () => true,
+      })
+      const identity: RecoveryArchiveWorkerIdentity = {
+        jobId: accepted.id, workspaceId: fixture.workspaceId, baseId: fixture.baseId,
+        sheetId: fixture.sheetId, actorId: fixture.actorId,
+      }
+      const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+      expect(candidate?.jobId).toBe(accepted.id)
+      const claim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+        workerOwnerId: `${PREFIX}_derived_consumer`, leaseUntil: future(45_000),
+      })
+      const revisionId = randomUUID()
+      let processorCalls = 0
+      try {
+        await transaction(query => enqueueRecoveryArchiveDerivedEffect(query, identity, {
+          kind: 'delete', revisionId, recordId: `${PREFIX}_deleted`, linkInvalidations: [],
+        }))
+        expect(await consumeRecoveryArchiveDerivedEffect(transaction, async () => {
+          processorCalls += 1
+          return true
+        })).toBe('idle')
+        expect(processorCalls).toBe(0)
+        if (terminal === 'cancelled_zero_write') {
+          await cancelRecoveryArchiveRestoreJob(transaction, { ...identity, replayHorizonMs: 0, recheckAuthority: async () => true })
+          expect(await consumeRecoveryArchiveDerivedEffect(transaction, async () => {
+            processorCalls += 1
+            return true
+          })).toBe('idle')
+          expect(processorCalls).toBe(0)
+          return
+        }
+        await runOneChunk(claim, [])
+        if (terminal === 'done') {
+          await runOneChunk(claim, [])
+          await finalizeRecoveryArchiveRestoreJob(transaction, claim, { replayHorizonMs: 0 })
+        } else await abandonRecoveryArchiveRestoreJob(transaction, claim, { replayHorizonMs: 0 })
+
+        expect(await consumeRecoveryArchiveDerivedEffect(transaction, async work => {
+          expect(work).toEqual({ identity, revisionId, recordId: `${PREFIX}_deleted`, fieldIds: [], linkInvalidations: [] })
+          processorCalls += 1
+          return false
+        })).toBe('retry')
+        expect(await consumeRecoveryArchiveDerivedEffect(transaction, async () => {
+          processorCalls += 1
+          throw new Error('synthetic-private-error-not-for-persistence')
+        })).toBe('retry')
+        const pending = await q(`SELECT completed_at, last_attempt_at IS NOT NULL AS attempted
+          FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1`, [revisionId])
+        expect(pending.rows).toEqual([{ completed_at: null, attempted: true }])
+
+        let entered!: () => void
+        let release!: () => void
+        const started = new Promise<void>(resolve => { entered = resolve })
+        const held = new Promise<void>(resolve => { release = resolve })
+        const first = consumeRecoveryArchiveDerivedEffect(transaction, async () => {
+          processorCalls += 1
+          entered()
+          await held
+          return true
+        })
+        try {
+          await Promise.race([started, first.then(() => { throw new Error('PROCESSOR_NOT_ENTERED') })])
+          expect(await consumeRecoveryArchiveDerivedEffect(transaction, async () => {
+            processorCalls += 1
+            return true
+          })).toBe('idle')
+        } finally {
+          release()
+          expect(await first).toBe('completed')
+        }
+        expect(await consumeRecoveryArchiveDerivedEffect(transaction, async () => {
+          processorCalls += 1
+          return true
+        })).toBe('idle')
+        expect(processorCalls).toBe(3)
+      } finally {
+        await q('DELETE FROM public.meta_recovery_archive_derived_effects WHERE revision_id=$1', [revisionId])
+        const status = await q('SELECT state FROM public.meta_recovery_archive_jobs WHERE id=$1', [accepted.id])
+        if (['planned', 'applying', 'paused_retryable'].includes(String((status.rows[0] as { state: string }).state))) {
+          await abandonRecoveryArchiveRestoreJob(transaction, claim, { replayHorizonMs: 0 })
+        }
       }
     },
   )
