@@ -56,6 +56,8 @@ import {
   loadViewPermissionScopeMap,
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
+  resolveBaseReadableForAccess,
+  resolveSheetCapabilitiesForAccess,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
   resolveSheetReadableCapabilities,
@@ -3293,18 +3295,21 @@ async function resolveForeignFieldReadability(
   query: QueryFn,
   sourceBaseId: string | null,
   foreignSheetIds: Iterable<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Map<string, ForeignFieldReadability>> {
   const out = new Map<string, ForeignFieldReadability>()
   const unique = Array.from(new Set(Array.from(foreignSheetIds).filter(Boolean)))
   if (unique.length === 0) return out
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? await resolveRequestAccess(req)
   for (const foreignSheetId of unique) {
     const [foreignSheet, foreignFields, capabilities, fieldScopeMap] = await Promise.all([
       loadSheetRowShared(query, foreignSheetId),
       loadFieldsForSheetShared(query, foreignSheetId),
       // Capabilities don't affect field VISIBILITY (only readOnly), but resolve them so the
       // foreign-sheet derivation matches the export/view path exactly.
-      resolveSheetReadableCapabilities(req, query, foreignSheetId).then((r) => r.capabilities),
+      (authorityAccess
+        ? resolveSheetCapabilitiesForAccess(query, foreignSheetId, access)
+        : resolveSheetReadableCapabilities(req, query, foreignSheetId)).then((r) => r.capabilities),
       access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
     ])
     let readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
@@ -3319,7 +3324,9 @@ async function resolveForeignFieldReadability(
     // foreign base is unreadable by definition (can't opt in / can't grant) → mask (also crash-safe:
     // resolveBaseReadable would throw on null).
     if (crossBase) {
-      const baseReadable = foreignBaseId != null && (await resolveBaseReadable(req, query, foreignBaseId))
+      const baseReadable = foreignBaseId != null && (authorityAccess
+        ? await resolveBaseReadableForAccess(query, foreignBaseId, access)
+        : await resolveBaseReadable(req, query, foreignBaseId))
       if (!baseReadable) {
         readableFieldIds = new Set<string>()
       }
@@ -3377,6 +3384,7 @@ async function resolveTaintedFormulaFieldIds(
   query: QueryFn,
   sheetId: string,
   candidateFormulaFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   if (candidateFormulaFieldIds.size === 0) return new Set()
 
@@ -3444,7 +3452,7 @@ async function resolveTaintedFormulaFieldIds(
   for (const { foreignSheetId } of relAggByField.values()) {
     if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
   }
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds)
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds, authorityAccess)
 
   // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
   const maskedComputedFieldIds = new Set<string>()
@@ -3531,6 +3539,7 @@ async function maskStoredRecordFieldIds(
   sheetId: string,
   fields: Array<{ id: string; type: string }> | undefined,
   baseAllowedFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   const candidateFormulaIds = fields
     ? new Set(
@@ -3539,7 +3548,7 @@ async function maskStoredRecordFieldIds(
           .map((field) => field.id),
       )
     : new Set(baseAllowedFieldIds)
-  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds)
+  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds, authorityAccess)
   if (tainted.size === 0) return new Set(baseAllowedFieldIds)
   const masked = new Set(baseAllowedFieldIds)
   for (const id of tainted) masked.delete(id)
@@ -6864,22 +6873,8 @@ async function hasFullTableReadAccess(
   const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
   if (scoped.size !== unscoped.size) return false
   for (const id of unscoped) if (!scoped.has(id)) return false
-  // Formula-taint resolution traverses foreign-sheet/base readability through request-shaped helpers.
-  // Recovery must not feed those helpers the original JWT/cache claims after DB-fresh adjudication:
-  // expose only the transaction-fresh access snapshot while inheriting the request's non-auth surface.
-  const authorityReq = Object.create(req) as Request
-  Object.defineProperty(authorityReq, 'user', {
-    value: {
-      id: access.userId,
-      perms: access.permissions,
-      permissions: access.permissions,
-      roles: access.isAdminRole ? ['admin'] : [],
-      role: access.isAdminRole ? 'admin' : 'user',
-    },
-    enumerable: true,
-    configurable: true,
-  })
-  const masked = await maskStoredRecordFieldIds(authorityReq, query, sheetId, undefined, scoped)
+  // Keep the adjudicated snapshot through foreign-field/base checks; never reconstruct JWT claims.
+  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped, access)
   return masked.size === scoped.size
 }
 
