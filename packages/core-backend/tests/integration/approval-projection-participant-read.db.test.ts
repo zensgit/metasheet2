@@ -7,6 +7,24 @@
  * fail-closed handling of rows with missing/corrupt participant fields. Row narrowing rides the
  * W1-2-locked deny choke (loadRowLevelReadDenyEnabled + loadDeniedRecordIds), so every consumer
  * surface (records:read routes, export, history) inherits it.
+ *
+ * PROJECT-KEY FALSE-GREEN FIX (post-hoc): this suite's own `insert` helper used to write BARE
+ * column keys (`requesterId`, `approverId`, `status`, …) straight into `data`. The production
+ * writer (`ApprovalRecordProjectionService.buildRecordData`) never stores a row under those bare
+ * keys — every column is namespaced by the row's OWN sheet id via `deriveProjectionFieldId`
+ * (`${sheetId}__${columnKey}`), because one projection BASE holds one sheet per template family.
+ * A predicate that read the bare keys (the T36-1 review P1 defect fixed alongside this test) still
+ * passed against THIS suite's fixtures, because the fixtures and the buggy predicate shared the
+ * same wrong shape — a false green that could never have caught the defect it was written to guard.
+ * The helper now derives every key with the SAME production function the writer uses, so this
+ * suite can no longer pass against a `data` shape production does not write. It still hand-seeds
+ * (rather than running a real `reconcile()`) because two of its fixtures are synthetic edge shapes
+ * `reconcile()` can never deliberately produce — REC_OTHER (someone else's row, for the exclusion
+ * arm) and REC_CORRUPT (a row with NO participant fields at all, for the fail-closed arm) — a real
+ * approval instance always carries a requester and, once terminal, an approver. The REAL end-to-end
+ * reconcile path (create → approve, over the actual writer) is covered by the companion suite
+ * `approval-projection-key-parity.db.test.ts`, which additionally proves the four consumer
+ * surfaces agree using rows this production path actually produced.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Request } from 'express'
@@ -27,6 +45,7 @@ import { hasRecordPermissionAssignments } from '../../src/multitable/permission-
 import { requireRecordReadable } from '../../src/routes/univer-meta'
 import { resolveRequestAccess } from '../../src/multitable/access'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
+import { deriveProjectionFieldId } from '../../src/multitable/approval-record-projection-service'
 
 const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => pool.query(sql, params)
@@ -54,10 +73,18 @@ describeIfDb('T36-1 — projection per-row participant read (Plan A)', () => {
       [APPROVAL_PROJECTION_BASE_ID])
     await q(`INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1,$2,'ProjT361','') ON CONFLICT (id) DO NOTHING`,
       [PROJ_SHEET, APPROVAL_PROJECTION_BASE_ID])
-    const insert = (id: string, data: Record<string, unknown>) =>
-      q(`INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+    // Namespace every column with the PRODUCTION key-derivation function (see the file header) —
+    // this is what makes the fixtures a shape production could actually write, sans the two fields
+    // (REC_OTHER / REC_CORRUPT) reconcile() itself can never be made to omit deliberately.
+    const insert = (id: string, data: Record<string, unknown>) => {
+      const namespaced: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(data)) {
+        namespaced[deriveProjectionFieldId(PROJ_SHEET, key)] = value
+      }
+      return q(`INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
          VALUES ($1,$2,$3::jsonb,1,'system:approval-projection','system:approval-projection') ON CONFLICT (id) DO NOTHING`,
-        [id, PROJ_SHEET, JSON.stringify(data)])
+        [id, PROJ_SHEET, JSON.stringify(namespaced)])
+    }
     await insert(REC_MINE_REQ, { status: 'approved', requesterId: PARTICIPANT, approverId: 'someone_else' })
     await insert(REC_MINE_DEC, { status: 'rejected', requesterId: 'someone_else', approverId: PARTICIPANT })
     await insert(REC_OTHER, { status: 'approved', requesterId: 'someone_else', approverId: 'another_one' })

@@ -5,7 +5,11 @@
  */
 
 import { listUserPermissions, isAdmin } from '../rbac/service'
-import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilitiesPerRow } from './approval-projection-constants'
+import {
+  APPROVAL_PROJECTION_BASE_ID,
+  restrictApprovalProjectionCapabilitiesPerRow,
+  approvalProjectionParticipantPredicateSql,
+} from './approval-projection-constants'
 import { loadElearningProjectionSheetOrgMap } from './elearning-projection-access'
 import {
   deriveElearningProjectionSheetId,
@@ -279,12 +283,16 @@ export async function resolveSheetCapabilitiesForUser(
       // T36-1 (Plan A): participants keep the read plane here too (this choke serves the Yjs
       // bridge + OAPI tokens — read parity with the REST choke, W1-2 G-4). Fail-closed: any
       // participant-lookup error → full fence.
+      // Project-key fix: `sheetId` is already a bound single-sheet parameter here ($1); the SAME
+      // shared predicate `permission-service.ts` uses for the carve-out + deny arms derives the
+      // writer's namespaced key from it — this was previously a SECOND hand-rolled copy that
+      // compared against the bare (never-written) column name.
       let isParticipant = false
       try {
         const participant = await query(
           `SELECT 1 FROM meta_records
             WHERE sheet_id = $1
-              AND (data->>'requesterId' = $2 OR data->>'approverId' = $2)
+              AND ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}
             LIMIT 1`,
           [sheetId, userId],
         )

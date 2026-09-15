@@ -22,6 +22,68 @@ export function isApprovalProjectionBaseId(baseId: string | null | undefined): b
 }
 
 /**
+ * Delimiter `deriveProjectionFieldId` uses to namespace a projection record's per-column data keys
+ * by their OWN sheet id (the projection is one sheet per template family, so a bare column name
+ * would collide across sheets sharing the base). Kept private — every reader that needs to
+ * reconstruct the same key goes through `approvalProjectionParticipantPredicateSql` below, never by
+ * re-spelling `'__'` at the call site.
+ */
+const PROJECTION_FIELD_ID_DELIMITER = '__'
+
+/**
+ * THE single derivation of a projection record's per-column data-key id, namespaced by the row's
+ * OWN sheet id. Moved here (from `approval-record-projection-service.ts`, which re-exports it
+ * unchanged for its existing importers) so this side-effect-free module can be the ONE place both
+ * the WRITER (via that re-export) and every READER (via `approvalProjectionParticipantPredicateSql`)
+ * derive the key from — they can no longer drift into reading a bare column name the writer never
+ * stores under (the T36-1 review P1 defect this module now closes).
+ */
+export function deriveProjectionFieldId(sheetId: string, columnKey: string): string {
+  return `${sheetId}${PROJECTION_FIELD_ID_DELIMITER}${columnKey}`
+}
+
+const REQUESTER_ID_COLUMN_KEY = 'requesterId'
+const APPROVER_ID_COLUMN_KEY = 'approverId'
+
+/**
+ * THE single spelling of "does this approval-projection row identify `userId` as a PARTICIPANT"
+ * (the row's own requester, or its terminal decider) — a SQL boolean-expression fragment, not a
+ * JS predicate, because every caller needs it embedded in a query (a multi-sheet JOIN for the
+ * listing carve-out, a single-sheet scan for the per-row deny arms, an EXISTS probe for the
+ * Yjs/API-token capability choke) and re-deriving it per call site is exactly the drift this
+ * function exists to close.
+ *
+ * Reads the SAME namespaced key `deriveProjectionFieldId` writes — derived IN SQL from
+ * `sheetIdExpr` (the row's own `sheet_id`, since one projection BASE holds one sheet per template
+ * family and each sheet's rows are namespaced by ITS OWN id, never a hardcoded literal) — so it can
+ * never drift from what the writer actually stored, regardless of which sheet a row belongs to.
+ *
+ * `dataExpr` / `sheetIdExpr` are CALLER-SUPPLIED SQL identifiers or `$n` placeholders (e.g.
+ * `'r.data'` + `'r.sheet_id'`, or `'data'` + `'$1'` when the sheet id is already a bound
+ * parameter) — never raw user input — so the string interpolation here carries no injection risk;
+ * `userIdParam` is likewise a `$n` placeholder the caller binds normally, never a literal value.
+ *
+ * Always COALESCE'd to `''`: a row missing a participant field yields SQL NULL, and in a bare
+ * `NOT (a OR b)` deny-arm context `NOT (NULL OR NULL)` is NULL (three-valued logic), which a `WHERE`
+ * clause treats as false — the corrupt row would silently escape a deny set (fail-OPEN). COALESCE
+ * makes a missing field compare against `''`, which never equals a real (non-empty) `userIdParam`,
+ * so corrupt rows are always excluded from a positive "is participant" match AND always included in
+ * a `NOT(...)` deny set — fail-closed in both polarities the callers use this in.
+ */
+export function approvalProjectionParticipantPredicateSql(
+  dataExpr: string,
+  sheetIdExpr: string,
+  userIdParam: string,
+): string {
+  const requesterKey = `${PROJECTION_FIELD_ID_DELIMITER}${REQUESTER_ID_COLUMN_KEY}`
+  const approverKey = `${PROJECTION_FIELD_ID_DELIMITER}${APPROVER_ID_COLUMN_KEY}`
+  return (
+    `(COALESCE(${dataExpr}->>(${sheetIdExpr} || '${requesterKey}'), '') = ${userIdParam}`
+    + ` OR COALESCE(${dataExpr}->>(${sheetIdExpr} || '${approverKey}'), '') = ${userIdParam})`
+  )
+}
+
+/**
  * Admin-only capability fence: for a non-admin actor on a projection-base sheet, downgrade EVERY sensitive
  * `MultitableCapabilities` boolean to false — not just read. The projection base is a system read-model; a
  * non-admin (even with `multitable:write`/workflow perms) must get zero read/write/manage capability on it, or
