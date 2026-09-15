@@ -150,3 +150,14 @@ Code `1b1621d41dbbc53cbe8c3f91c60315f9f9c48d56`, tree `f73c9ebc8982daff559d1c7d3
 - Ledger/sheet/job fixtures zero; dedicated database dropped, prefix/backends zero, PG stopped.
 - Logs are session-local `/private/tmp/tm-derived-enqueue-{migrate,target,mutation,full-final,tsc,lint}.log`, not remote CI evidence.
 - During verification remote main advanced to `f274316f6dfe2ba7f0de78dee7c43aa3624748c7`; fetched delta contains 13 stock-preparation plugin files and no path overlap with this checkpoint. Integration branch is still based on `062614f4407b3d9bffc82dae266071b8a6e5e5bd`; current-main replay remains necessary before publication. No push/PR/flag/deployment action occurred.
+
+### Terminal Consumer Primitive
+
+Code `e2a78f8a1e86b560687a7843ff21d37bf41f8f95`, tree `404cc8a3c85ed79b803978ad2338e3dea9ee62d7`, adds the one-row terminal consumer and three real-DB lifecycle cases. It is not yet a production computed callback or worker integration.
+
+- Fresh dedicated PG15 migration succeeds; full restore-jobs suite 34/34, no skips. Core tsc, module ESLint and diff-check pass.
+- Actual job APIs create/claim and finalize/abandon/cancel fixture jobs. Applying jobs are not consumed; done and abandoned-partial jobs are consumed; cancelled-zero-write remains unconsumed.
+- False and thrown processor results preserve pending work and persist attempt time. A two-connection barrier proves a second consumer skips the locked row. Exact true completes it, and later attempts do not call the processor again. These synthetic processor tests prove queue behavior, not live formula recomputation or OS process restart.
+- Mutation treating false as completed: abandoned-partial case RED. Mutation admitting cancelled-zero-write jobs: cancellation case RED. Restored full suite 34/34.
+- Final queue/sheet/job fixtures 0; database dropped, prefix/backends 0, PG stopped. Logs: `/private/tmp/tm-derived-consume-{migrate,target,result-mutation,state-mutation,full,tsc,lint}.log` (session-local).
+- Open gates: strict computed success/failure propagation, fresh actor/scope processor binding, canonical-fence race tests, durable runtime hook wiring, process death/restart and startup/provider verification. No runtime enablement, push or PR publication claimed.
