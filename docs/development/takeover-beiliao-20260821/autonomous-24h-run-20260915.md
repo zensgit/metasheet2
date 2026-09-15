@@ -25,7 +25,7 @@
 | Q13 | 管理器→编辑器→PATCH 往返回归用例（源自 Q12 的复现夹具） | opus 单代理 | #5759（76cd69f5b；14 例 + approval.completed；两点登记，guard 镜像 zensgit 推送） | ✅ 已合，r50 |
 | Q14 | Q9 前端配套：面板「还有更多」与通知失败标记，客户端 hasMore/limit | opus / opus / fable | #5765（784c22dc1；裁判 MERGE @7f9f04afe，3 条反驳全落码） | ✅ 已合，r50 |
 | Q15 | 编辑器 #5756 往返用例 CI 5 s 超时抖动（#5763 web-tests 红暴露） | opus 单代理 | #5764（21 个 it 显式 30 s 超时；变异 1 ms → 12 红） | ✅ 已合，r50 |
-| Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | #5766（23133d0df；`useRouter()` 探测 → `inject(routerKey, null)`，告警 75→0，变异回退 27，vue-tsc 干净） | 🟡 CI |
+| Q16 | 送审面板/对话框/抽屉无路由挂载刷 `[Vue warn] injection "Symbol(router)"`（每次整段打印 mock 客户端，#5761 web-tests 卡死的直接诱因） | sonnet 单代理 | #5766（23133d0df；`useRouter()` 探测 → `inject(routerKey, null)`，告警 75→0，变异回退 27，vue-tsc 干净；合并 7c2af7020） | ✅ 已合，r51 |
 | Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | 分支 `feat/record-approval-progress-card`（wt-p5）；设计见 §2 | 🟡 流水线 |
 | Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | 分支 `fix/workbench-routerlink-prop-warns`（wt-p6）；他窗口领域的 62%（Integration*/TemplateAuthoring 裸 createApp 未装 ElementPlus、AttendanceView useRouter）只记录在 §5.3 | 🟡 进行中 |
 | — | 222 发布 | — | r47 / r48 / r49 / r50 已上并实测（§3）；r51 = r50 + #5761 + #5766（+ Q17/Q18 若绿）计划 08:00 前上 | 🟡 |
