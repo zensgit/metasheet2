@@ -29,7 +29,7 @@
 | Q17 | 记录抽屉「审批进度」卡片（步骤/待处理人/历史；队列外候选 1） | 3 读者地图 → opus 实现 / opus 反驳×2 / fable 裁判 | #5770（裁判 MERGE @1ad1bb795，7 条反驳 0 major 全落码；可选两项已加固；CI 一轮被审批窗口 tripwire 拦下——多维表不得引用成员身份解析器，改 assigneeName→序号两步规则；合并 8a54a35b1） | ✅ 已合，r51 |
 | Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | #5769（9628f98f6；`router-link` 1311→0，`Invalid prop` 20→8 余为未涉及的三个弹窗；顺带发现显式导入后 `<script setup>` 会把同名 kebab 标签自动解析，变异须导入与标签一起回退；合并 cae1f2421）；他窗口领域的 62% 只记录在 §5.3 | ✅ 已合，r51 |
 | Q19 | 钉钉待办单向镜像（B 方案，队列外候选 4）：设计稿 + 默认关闭的实现 | 3 读者地图 → 主会话写设计 → opus 实现 / opus 反驳×2 / fable 裁判 | 设计 `dingtalk-todo-mirror-b-design-20260916.md`；分支 `feat/dingtalk-todo-mirror`（wt-fe6）；owner 三项前置未满足前保持关闭 | 🟡 流水线 |
-| — | 222 发布 | — | r47 / r48 / r49 / r50 已上并实测（§3）；r51 = r50 + #5761 + #5766（+ Q17/Q18 若绿）计划 08:00 前上 | 🟡 |
+| — | 222 发布 | — | r47 / r48 / r49 / r50 / r51 已上并实测（§3）；r52 = r51 + Q19（默认关闭，仅建表）视 CI 结果与 08:00 前时间窗决定 | 🟡 |
 
 ## 1. 队列与模型选择依据
 
@@ -126,6 +126,12 @@
   - 未做：#5760 嵌入宿主回显（需 iframe 宿主页，222 上没有）；#5759/#5764 是 spec-only。
 - #5761（Q11）、#5766（Q16）此时未合，留给 r51。
 
+### 3.5 r51（main `8a54a35b1` = r50 + #5761 + #5766 + #5769 + #5770），2026-09-16 03:16–03:22 上 222
+- 构建 3 min（run 35012668469），包 gitSha `8a54a35b1` == origin/main；wrapper 8 步全过（维护门 WIRED、哈希核验、迁移、backend 第 3 次探测 OK、nginx 200）。
+- 浏览器实测（`about:blank` → 带 `_v=r51a` 回来，`document.scripts` 只含 `index-BFqiki7G.js`）：
+  - `rec_bb72a248…` 抽屉审批面板：两条已通过行都多了「完成时间」；每行有「查看进度」；点开 AP-100004 只发 `/api/approvals/<id>` 与 `/history` 两个请求，卡片显示「第 1 / 1 步」和历史两条（发起 / 通过，带操作者显示名与时间），终态实例不显示「当前待处理人」——与 #5770 设计一致。
+  - 未实测：无 `approvals:read` 用户看不到「查看进度」（222 只有 admin 账号可用）；#5766/#5769 为 spec 侧噪音清零，生产无可见变化；#5761 跨基横幅需跨 base 规则，未在 222 上造。
+
 ## 4. 过程发现与教训
 
 - 主检出本地 `main` 落后 origin/main 三周（e89f3e15e vs 28d11496b），在那里读代码与派只读诊断会得到旧代码/错行号；已快进并记忆化（读前 ff-only）。
@@ -140,7 +146,7 @@
 ### 5.1 在飞
 - #5761（Q11）：合入 main `f1cc1858b` 后 CI 重跑；绿即合并（分支含 `.github` 改动，须 zensgit 推送）。
 - Q16：`fix/record-approval-router-inject-quiet`，sonnet 单代理实现中；PR 走一轮小范围核验（无行为变化，看 spec 警告计数 0 + 变异回退非 0）。
-- r51：复制 `claude-auto24/r50/` 为 r51（脚本改 TAG/ToolsDir/标记头），`build|ship`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。
+- r52（可选）：复制 `claude-auto24/r51/` 为 r52（脚本改 TAG/ToolsDir/标记头），`build|ship`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。Q19 默认关闭，上机只多一张空表与 manifest v3（生产者/消费者同包）。
 - 本文与阶段二设计稿：分支 `docs/autonomous-24h-run-20260915`（wt-docs6），最后一并开 docs PR。
 
 ### 5.2 需要 owner 拍板 / 动手的
