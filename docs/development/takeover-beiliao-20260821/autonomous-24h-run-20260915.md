@@ -30,7 +30,7 @@
 | Q18 | Vue warn 普查（811 spec / 6698 条）+ 多维表侧两处清零（工作台小写 `<router-link>` 1301 条、隐藏对话框 null sheetId ~20 条） | sonnet 普查 / sonnet 实现 | #5769（9628f98f6；`router-link` 1311→0，`Invalid prop` 20→8 余为未涉及的三个弹窗；顺带发现显式导入后 `<script setup>` 会把同名 kebab 标签自动解析，变异须导入与标签一起回退；合并 cae1f2421）；他窗口领域的 62% 只记录在 §5.3 | ✅ 已合，r51 |
 | Q19 | 钉钉待办单向镜像（B 方案，队列外候选 4）：设计稿 + 默认关闭的实现 | 3 读者地图 → 主会话写设计 → opus 实现 / opus 反驳×2 / fable 裁判 | #5772（裁判 FIX→已修 @deeee9904：9 条反驳 4 major 全落码——并行网关/重投/发送中遇终态/429 分类；必修 realdb pin 对齐 v3；完成阶段取 token 拆分 cec884ede；realdb 泳道真库绿；合并 0e769bc88）；设计 `dingtalk-todo-mirror-b-design-20260916.md`；owner 前置未满足前保持关闭 | ✅ 已合，r52 |
 | Q20 | 技术债：`apps/web/src/multitable` lint 普查 + 仅安全自动修复；#5769 剩下的三个隐藏弹窗 null sheetId 告警 | sonnet 单代理 | #5773（8c154e429，4 行：1 条可安全自动修复的 lint + 三弹窗门控，`Invalid prop` 8→0；普查 43 错/52 警留档：`require-default-prop` 47、vendor `prefer-const` 16、`no-unused-vars` 11 等均非自动修复，另开专项；合并 0be3f25da） | ✅ 已合，r52 |
-| — | 222 发布 | — | r47 / r48 / r49 / r50 / r51 已上并实测（§3）；r52 = r51 + #5772（默认关闭：建表 + manifest v3）+ #5773 构建中，08:00 前上 | 🟡 |
+| — | 222 发布 | — | r47 / r48 / r49 / r50 / r51 / r52 已上并实测（§3.1–3.6）；main `0be3f25da` == 222 | ✅ |
 
 ## 1. 队列与模型选择依据
 
@@ -133,6 +133,11 @@
   - `rec_bb72a248…` 抽屉审批面板：两条已通过行都多了「完成时间」；每行有「查看进度」；点开 AP-100004 只发 `/api/approvals/<id>` 与 `/history` 两个请求，卡片显示「第 1 / 1 步」和历史两条（发起 / 通过，带操作者显示名与时间），终态实例不显示「当前待处理人」——与 #5770 设计一致。
   - 未实测：无 `approvals:read` 用户看不到「查看进度」（222 只有 admin 账号可用）；#5766/#5769 为 spec 侧噪音清零，生产无可见变化；#5761 跨基横幅需跨 base 规则，未在 222 上造。
 
+### 3.6 r52（main `0be3f25da` = r51 + #5772 + #5773），2026-09-16 04:20–04:23 上 222
+- 构建 3 min（run 见 `r52/build.log`），包 gitSha `0be3f25da` == origin/main；迁移 `zzzz20260916120000_create_dingtalk_todo_mirrors` 建表 + 4 索引成功；backend/nginx health OK；`DINGTALK_TODO_MIRROR_ENABLED` 未设（默认关）。
+- 222 事实：`meta_automation_outbox` 为空、`AUTOMATION_DURABLE_DELIVERY_ENABLED` 未设 → 审批事件走 **eventBus 腿**，manifest v3 的耐久扇出在 222 上无法实测（CI realdb 泳道已真库验证）。
+- 浏览器实测（`index-CBilgSJU.js`）：抽屉「送审」→ 选「备料送审示例」→ 提交 → 新实例 AP-100005 待处理；面板行「待处理」+「查看进度」→ 卡片「第 1 / 1 步」「当前待处理人: 成员 1」（审批 payload 无 `assigneeName`，按 #5770 的序号兜底，真名在编号链接后）+ 历史「发起」；期间 `dingtalk_todo_mirrors` 保持 0 行（开关 OFF ⇒ 消费者 ACK 不落库，在 eventBus 腿上得证）；审批中心「通过」后实例 approved、提交行 approved + 完成时间；演示实例已关闭。
+
 ## 4. 过程发现与教训
 
 - 主检出本地 `main` 落后 origin/main 三周（e89f3e15e vs 28d11496b），在那里读代码与派只读诊断会得到旧代码/错行号；已快进并记忆化（读前 ff-only）。
@@ -147,7 +152,7 @@
 ### 5.1 在飞
 - #5761（Q11）：合入 main `f1cc1858b` 后 CI 重跑；绿即合并（分支含 `.github` 改动，须 zensgit 推送）。
 - Q16：`fix/record-approval-router-inject-quiet`，sonnet 单代理实现中；PR 走一轮小范围核验（无行为变化，看 spec 警告计数 0 + 变异回退非 0）。
-- r52（可选）：复制 `claude-auto24/r51/` 为 r52（脚本改 TAG/ToolsDir/标记头），`build|ship`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。Q19 默认关闭，上机只多一张空表与 manifest v3（生产者/消费者同包）。
+- 下一次发布：复制 `claude-auto24/r52/` 为 r53（脚本改 TAG/ToolsDir/标记头），`build|ship`；上机后按 [[spa-navigation-keeps-old-bundle]] 先核对 `document.scripts` 再实测。
 - 本文、阶段二设计稿、钉钉 B 方案设计稿：docs PR #5771（分支 `docs/autonomous-24h-run-20260915`，wt-docs6），随进度快照持续推送，授权结束前定稿合并。
 
 ### 5.2 需要 owner 拍板 / 动手的
