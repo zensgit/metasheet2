@@ -512,8 +512,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { RouterLink, routerKey } from 'vue-router'
 import type {
   LinkedRecordSummary,
   PersonSummary,
@@ -750,10 +750,10 @@ const emit = defineEmits<{
 const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
-// See the inbox-link template comment above: `useRouter()` is a plain (non-throwing) `inject()`, so
-// capturing it once here is safe even in the several pre-existing router-less test harnesses that
-// mount this shell.
-const hasRouter = !!useRouter()
+// See the inbox-link template comment above: `inject(routerKey, null)` is a defaulted (non-throwing)
+// `inject()`, so capturing it once here is safe even in the several pre-existing router-less test
+// harnesses that mount this shell.
+const hasRouter = !!inject(routerKey, null)
 
 const showRecordPermissions = ref(false)
 // 记录级送审 (阶段二 §5): local open state for the child submit dialog + the counter that tells the

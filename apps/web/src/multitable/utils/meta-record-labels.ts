@@ -168,6 +168,16 @@ export type MetaRecordLabelKey =
   //     one page, so `hasMore` needs copy that says so, and the row marker needs a label for that code
   //     — an unlabelled code renders NOTHING (see recordApprovalErrorLabel), i.e. a silent miss. ---
   | 'approval.errorNotificationFailed' | 'approval.errorNotificationFailedTerminal'
+  // --- 审批进度卡片 / record-drawer approval PROGRESS card. The panel already lists a record's
+  //     submissions; the progress card is the collapsed, approvals:read-gated read of the approval
+  //     INSTANCE behind one of them (步骤 / 当前待处理人 / 历史). Every string here is either chrome or a
+  //     values-free degradation notice — the card renders identifiers, the display names the approval
+  //     centre already shows, a step COUNT and a localized action verb, never a form value. ---
+  | 'approval.progressExpand' | 'approval.progressCollapse' | 'approval.progressLoading'
+  | 'approval.progressApprovers' | 'approval.progressHistory' | 'approval.progressHistoryEmpty'
+  | 'approval.progressForbidden' | 'approval.progressNotParticipant' | 'approval.progressFailed'
+  | 'approval.progressMismatch'
+  | 'approval.progressRetry' | 'approval.completedAt'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -464,6 +474,28 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   // rejected row must not be told it 「已通过」.
   'approval.errorNotificationFailed': { en: 'Approved, but the notification could not be sent.', zh: '已通过，但通知发送失败' },
   'approval.errorNotificationFailedTerminal': { en: 'Completed, but the notification could not be sent.', zh: '已结束，但通知发送失败' },
+  // 审批进度卡片. The two failure notices below are DELIBERATELY different sentences: 403 is "this
+  // account may not read approvals at all" (the rbacGuard on GET /api/approvals/:id, which runs BEFORE
+  // any per-instance check), while 404 is the values-free answer the instance-scope predicate gives a
+  // NON-PARTICIPANT of an approval that does exist. Telling a non-participant 「无权」 would misreport a
+  // scope answer as a role answer, and telling a role-less account 「不是参与人」 would send them hunting
+  // for a CC that would not help.
+  'approval.progressExpand': { en: 'Show progress', zh: '查看进度' },
+  'approval.progressCollapse': { en: 'Hide progress', zh: '收起进度' },
+  'approval.progressLoading': { en: 'Loading progress…', zh: '正在加载进度…' },
+  'approval.progressApprovers': { en: 'Pending with', zh: '当前待处理人' },
+  'approval.progressHistory': { en: 'History', zh: '历史' },
+  'approval.progressHistoryEmpty': { en: 'No history yet.', zh: '暂无历史记录。' },
+  'approval.progressForbidden': { en: 'You may not view approval progress.', zh: '无权查看审批进度' },
+  'approval.progressNotParticipant': { en: 'You are not a participant of this approval — progress is not visible.', zh: '你不是该审批的参与人，进度不可见' },
+  'approval.progressFailed': { en: 'Failed to load progress.', zh: '进度加载失败' },
+  // The read SUCCEEDED but the answer is not about the instance the card asked for (`detail.id` !== the
+  // id we passed). Printing it would attach one approval's timeline to another approval's row, so the
+  // card says so and — like 403/404 — offers no 重试: a second read returns the same wrong instance.
+  // Values-free on purpose: neither the requested nor the answered id appears in the sentence.
+  'approval.progressMismatch': { en: 'Progress data does not match this approval — not shown.', zh: '返回的进度与该审批不一致，已隐藏' },
+  'approval.progressRetry': { en: 'Retry', zh: '重试' },
+  'approval.completedAt': { en: 'Completed at', zh: '完成时间' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -778,6 +810,16 @@ const RECORD_APPROVAL_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * The SAME set as above, exposed as a predicate so the panel's 「完成时间」 line and the notification
+ * marker agree on what "over" means by construction. A second literal list in the component would be
+ * free to drift (and a `completedAt` printed next to a `pending` row would assert an outcome the server
+ * never gave — the column is populated only on the terminal promote).
+ */
+export function isRecordApprovalTerminalStatus(status: string): boolean {
+  return RECORD_APPROVAL_TERMINAL_STATUSES.has(status)
+}
+
+/**
  * The row marker for a TERMINAL submission that still owes its requester notification. Returns null for
  * every other (status, code) pair, so:
  *   - a clean terminal row renders nothing,
@@ -823,4 +865,91 @@ export function recordApprovalTemplatesTruncatedNotice(shown: number, isZh: bool
   return isZh
     ? `仅显示前 ${shown} 个已发布模板，其余请到审批中心发起。`
     : `Showing the first ${shown} published templates only — start the rest from the approval centre.`
+}
+
+// ---------------------------------------------------------------------------
+// 审批进度卡片 / record approval PROGRESS card. The panel's per-submission, approvals:read-gated read of
+// the approval INSTANCE (GET /api/approvals/:id + /history). Every helper below is copy only: it takes a
+// COUNT, a CODE or an ORDINAL and never a form value.
+// ---------------------------------------------------------------------------
+
+/**
+ * 「第 N / M 步」 — the instance's step position, mirroring ApprovalCenterDetailPane's own line so the
+ * two surfaces read identically. Returns null unless BOTH numbers are real: the DTO types both as
+ * `number | null` (a non-pending instance has no current step), and 「第 - / 2 步」 is chrome pretending
+ * to be data.
+ */
+export function recordApprovalProgressStepNotice(
+  currentStep: unknown,
+  totalSteps: unknown,
+  isZh: boolean,
+): string | null {
+  if (typeof currentStep !== 'number' || !Number.isFinite(currentStep)) return null
+  if (typeof totalSteps !== 'number' || !Number.isFinite(totalSteps)) return null
+  return isZh ? `第 ${currentStep} / ${totalSteps} 步` : `Step ${currentStep} of ${totalSteps}`
+}
+
+/**
+ * The values-free, still-distinguishable fallback for an assignee whose display name the shared
+ * directory resolver could not confirm — the SAME convention (and the same wording in zh) as
+ * ApprovalCenterDetailPane's `assigneeLabel`. Never the raw internal user id.
+ */
+export function recordApprovalApproverFallbackLabel(ordinal: number, isZh: boolean): string {
+  const n = Number.isFinite(ordinal) && ordinal > 0 ? Math.trunc(ordinal) : 1
+  return isZh ? `成员 ${n}` : `Member ${n}`
+}
+
+/**
+ * The history rows the card renders are capped (the card is a summary, not the timeline — the approval
+ * centre owns that). The notice counts the CAP, which is also the number of rows actually on screen.
+ */
+export function recordApprovalProgressHistoryCapNotice(cap: number, isZh: boolean): string {
+  const count = Number.isFinite(cap) && cap > 0 ? Math.trunc(cap) : 0
+  return isZh
+    ? `仅显示最近 ${count} 条`
+    : `Showing the ${count} most recent only`
+}
+
+/**
+ * The history `action` vocabulary the platform writes (enumerated from the backend's own
+ * `action: '...'` literals in services/Approval*.ts + routes/approval*.ts). Copy carried over verbatim
+ * from ApprovalDetailView's local `actionLabel` map so the drawer and the approval centre name the same
+ * event the same way; that map is a component-local function with no export, so this is a deliberate
+ * second copy of the STRINGS, not of a mechanism.
+ *
+ * An UNKNOWN code is returned RAW (never dropped, never guessed): a server that adds a verb tomorrow
+ * shows the verb rather than a blank row, which is the same forward-compatible rule
+ * `recordBatchReasonLabel` already follows.
+ */
+const RECORD_APPROVAL_HISTORY_ACTION_LABELS: Record<string, { en: string; zh: string }> = {
+  created: { en: 'Submitted', zh: '发起' },
+  approve: { en: 'Approved', zh: '通过' },
+  auto_approve: { en: 'Auto-approved', zh: '自动通过' },
+  reject: { en: 'Rejected', zh: '驳回' },
+  transfer: { en: 'Transferred', zh: '转交' },
+  revoke: { en: 'Revoked', zh: '撤回' },
+  comment: { en: 'Commented', zh: '评论' },
+  return: { en: 'Returned', zh: '退回' },
+  sign: { en: 'Signed', zh: '签字' },
+  add_sign: { en: 'Approver added', zh: '加签' },
+  reduce_sign: { en: 'Approver removed', zh: '减签' },
+  cc: { en: 'Copied to', zh: '抄送' },
+  handle: { en: 'Handled', zh: '办理' },
+  remind: { en: 'Reminded', zh: '催办' },
+  reassign: { en: 'Reassigned', zh: '改派' },
+  jump: { en: 'Jumped', zh: '跳转' },
+}
+
+export function recordApprovalHistoryActionLabel(action: string, isZh: boolean): string {
+  // OWN keys only. The table above is a bare object literal, so it INHERITS `Object.prototype`: an action
+  // code that happens to be `toString` / `constructor` / `valueOf` / `hasOwnProperty` / `__proto__` would
+  // find a TRUTHY inherited member, skip the `return action` fallback and render `entry.zh === undefined`
+  // as an EMPTY cell — a blank row where the contract right above promises the RAW code. Reachability is
+  // not the argument (today's server writes an enumerated verb); the contract is stated, so it holds for
+  // every string rather than for the strings we happened to think of.
+  const entry = Object.prototype.hasOwnProperty.call(RECORD_APPROVAL_HISTORY_ACTION_LABELS, action)
+    ? RECORD_APPROVAL_HISTORY_ACTION_LABELS[action]
+    : undefined
+  if (!entry) return action
+  return isZh ? entry.zh : entry.en
 }
