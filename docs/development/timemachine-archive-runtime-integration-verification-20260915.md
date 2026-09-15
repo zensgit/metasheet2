@@ -161,3 +161,13 @@ Code `e2a78f8a1e86b560687a7843ff21d37bf41f8f95`, tree `404cc8a3c85ed79b803978ad2
 - Mutation treating false as completed: abandoned-partial case RED. Mutation admitting cancelled-zero-write jobs: cancellation case RED. Restored full suite 34/34.
 - Final queue/sheet/job fixtures 0; database dropped, prefix/backends 0, PG stopped. Logs: `/private/tmp/tm-derived-consume-{migrate,target,result-mutation,state-mutation,full,tsc,lint}.log` (session-local).
 - Open gates: strict computed success/failure propagation, fresh actor/scope processor binding, canonical-fence race tests, durable runtime hook wiring, process death/restart and startup/provider verification. No runtime enablement, push or PR publication claimed.
+
+### Strict Computed Helper Checkpoint
+
+Code `9c9c093b2acb6206c9150cb807370a75aed81f0b`, tree `2527c6cf11928eb3c303c3b4a9c846835451d150`, adds opt-in strict completion propagation to the shared formula/related helpers; ordinary HTTP defaults remain best-effort.
+
+- Fresh dedicated PG15 migration succeeds. Full exact-anchor route real-DB suite: 43/43. Formula engine/lookup/parser/reference neighbors: 4 files, 76/76. Core tsc and diff-check pass; no new global lint claim for the existing megafile.
+- Six targeted assertions cover denied foreign formula input with/without indexed dependencies, blocked pure source formula, blocked pure related formula, blocked source relation aggregate and blocked related relation aggregate. Each blocked case proves strict refusal, legacy benign return, unchanged stored value, then correct materialization after block removal.
+- Mutation forcing the factory's strict argument false: all six targeted cases RED. Restored full suite 43/43.
+- Synthetic record/sheet fixtures zero; dedicated database dropped, prefix/backends zero, PG stopped. Session-local logs: `/private/tmp/tm-derived-strict-{migrate,target-final,mutation,full,unit,tsc}.log`.
+- This proves strict helper behavior against a pre-existing durable block, not a new-block race or complete queue/runtime integration. Fresh processor binding, delete-link invalidation recompute, worker startup and real restart remain open. No push/PR/flags/deployment action.
