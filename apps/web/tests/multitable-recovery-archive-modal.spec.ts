@@ -118,6 +118,154 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe('RecoveryArchiveModal', () => {
+  it.each([
+    ['RECOVERY_ARCHIVE_CATALOG_DISABLED', 'Archive recovery is not enabled.'],
+    ['RECOVERY_ARCHIVE_PREVIEW_DISABLED', 'Archive recovery is not enabled.'],
+    ['RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED', 'Archive recovery is not enabled.'],
+    ['RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE', 'The archive recovery service is not ready.'],
+    ['RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE', 'The archive recovery service is not ready.'],
+    ['RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE', 'Archive recovery scope is not configured for this sheet.'],
+    ['RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID', 'Archive recovery data is currently unavailable.'],
+    ['RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID', 'Archive recovery data is currently unavailable.'],
+    ['RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID', 'Archive recovery data is currently unavailable.'],
+    ['UNRECOGNIZED_DISABLED', 'Archive recovery is currently unavailable.'],
+  ])('classifies %s without rendering raw server evidence', async (code, expected) => {
+    const props = mount({ listJobs: vi.fn().mockRejectedValue({ status: 503, code, message: 'PRIVATE_PROVIDER_DETAIL' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe(expected)
+    expect(document.body.textContent).not.toContain('PRIVATE_PROVIDER_DETAIL')
+    expect(document.body.textContent).not.toContain(code)
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    expect(props.executeArchive).not.toHaveBeenCalled()
+    expect(props.acceptJob).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [401, 'Sign in again to access archive recovery.'],
+    [403, 'You do not have archive recovery permission.'],
+    [404, 'The recovery point or job was not found.'],
+    [409, 'Recovery state changed. Refresh and try again.'],
+  ])('preserves HTTP %s precedence over an archive diagnostic', async (status, expected) => {
+    mount({ listJobs: vi.fn().mockRejectedValue({ status, code: 'RECOVERY_ARCHIVE_CATALOG_DISABLED' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe(expected)
+  })
+
+  it('does not classify arbitrary code substrings as archive readiness facts', async () => {
+    mount({ listJobs: vi.fn().mockRejectedValue({ code: 'HOST_PRIVATE_UNAVAILABLE', message: 'PRIVATE_PROVIDER_DETAIL' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe('Archive recovery request failed.')
+  })
+
+  it('shows localized disabled copy and an accessible read-only refresh control', async () => {
+    mount({ isZh: true, listJobs: vi.fn().mockRejectedValue({ status: 503, code: 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe('归档恢复尚未启用。')
+    const refresh = q('[data-test="archive-recovery-recheck"]')!
+    expect(refresh.getAttribute('aria-label')).toBe('重新检查归档恢复')
+    expect(refresh.getAttribute('title')).toBe('重新检查归档恢复')
+  })
+
+  it('rechecks discovery after failure, serializes clicks, and never starts a recovery write', async () => {
+    let resolveRetry!: (value: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn()
+      .mockRejectedValueOnce({ status: 503, code: 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED' })
+      .mockImplementationOnce(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveRetry = resolve }))
+    const props = mount({ listJobs })
+    await flush()
+    const refresh = q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement
+    refresh.click()
+    refresh.click()
+    await flush()
+    expect(refresh.disabled).toBe(true)
+    expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    resolveRetry({ entries: [jobSnapshot('paused_retryable')], nextCursor: null })
+    await flush()
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Paused and resumable')
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    expect(props.previewArchive).not.toHaveBeenCalled()
+    expect(props.executeArchive).not.toHaveBeenCalled()
+    expect(props.acceptJob).not.toHaveBeenCalled()
+    expect(props.resumeJob).not.toHaveBeenCalled()
+    expect(props.cancelJob).not.toHaveBeenCalled()
+  })
+
+  it('rechecks jobs before retrying a failed catalog and distinguishes an empty result', async () => {
+    const listCatalog = vi.fn().mockRejectedValueOnce({ status: 503, code: 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID' })
+      .mockResolvedValueOnce({ entries: [], nextCursor: null })
+    const props = mount({ listCatalog })
+    await flush()
+    expect(q('[data-test="archive-recovery-catalog-error"]')?.textContent).toBe('Archive recovery data is currently unavailable.')
+    ;(q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).click()
+    await flush()
+    expect(props.listJobs).toHaveBeenCalledTimes(2)
+    expect(listCatalog).toHaveBeenCalledTimes(2)
+    expect(props.listJobs.mock.invocationCallOrder[1]).toBeLessThan(listCatalog.mock.invocationCallOrder[1])
+    expect(q('[data-test="archive-recovery-empty"]')?.textContent).toBe('No archive recovery points are available.')
+    expect(q('[data-test="archive-recovery-catalog-error"]')).toBeFalsy()
+  })
+
+  it('invalidates an executable preview and confirmation before rediscovering a job', async () => {
+    const listJobs = vi.fn().mockResolvedValueOnce({ entries: [], nextCursor: null })
+      .mockResolvedValueOnce({ entries: [jobSnapshot('planned')], nextCursor: null })
+    const props = mount({ listJobs })
+    await flush()
+    ;(q(`[data-test="archive-recovery-entry-${generationId}"]`) as HTMLButtonElement).click()
+    await flush()
+    ;(q('[data-test="archive-recovery-request-preview"]') as HTMLButtonElement).click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    ;(q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).click()
+    await flush()
+    expect(q('[data-test="archive-recovery-execute"]')).toBeFalsy()
+    expect(q('[data-test="archive-recovery-preview-area"]')).toBeFalsy()
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Queued')
+    expect(props.executeArchive).not.toHaveBeenCalled()
+  })
+
+  it('discards an old refresh reply after switching sheets', async () => {
+    let resolveRetry!: (page: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn().mockRejectedValueOnce({ status: 503 })
+      .mockImplementationOnce(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveRetry = resolve }))
+      .mockResolvedValue({ entries: [], nextCursor: null })
+    const props = mount({ listJobs })
+    await flush()
+    ;(q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).click()
+    await flush()
+    props.sheetId.value = 'sheet_2'
+    await flush()
+    resolveRetry({ entries: [jobSnapshot('planned')], nextCursor: null })
+    await flush()
+    expect(q('[data-test="archive-recovery-job"]')).toBeFalsy()
+    expect(props.listCatalog).toHaveBeenCalledTimes(1)
+    expect(props.listCatalog).toHaveBeenCalledWith('sheet_2', { limit: 50 })
+    expect(props.acceptJob).not.toHaveBeenCalled()
+  })
+
+  it('ignores a late catalog error after closing and reopens through job discovery', async () => {
+    let rejectCatalog!: (error: unknown) => void
+    const listCatalog = vi.fn().mockImplementationOnce(() => new Promise<RecoveryArchiveCatalogPage>((_resolve, reject) => { rejectCatalog = reject }))
+      .mockResolvedValueOnce({ entries: [], nextCursor: null })
+    const props = mount({ listCatalog })
+    await flush()
+    expect((q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).disabled).toBe(true)
+    ;(q('.archive-recovery__close') as HTMLButtonElement).click()
+    await flush()
+    rejectCatalog({ status: 503, code: 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID' })
+    await flush()
+    expect(q('[data-test="archive-recovery-catalog-error"]')).toBeFalsy()
+    props.visible.value = false
+    await flush()
+    props.visible.value = true
+    await flush()
+    expect(props.listJobs).toHaveBeenCalledTimes(2)
+    expect(q('[data-test="archive-recovery-empty"]')?.textContent).toBe('No archive recovery points are available.')
+  })
+
   it('rediscovers the newest durable job after a full reload and resumes status polling without an action', async () => {
     vi.useFakeTimers()
     const listJobs = vi.fn(async (): Promise<RecoveryArchiveJobPage> => ({
