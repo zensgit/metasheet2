@@ -140,6 +140,48 @@ describe('automation lifecycle ownership', () => {
     expect(handleTrigger).toHaveBeenCalledTimes(2)
   })
 
+  test('standalone shutdown preserves a completion emitted by an already-admitted producer', async () => {
+    const bus = new EventBus()
+    const service = new AutomationService(
+      bus,
+      {} as never,
+      vi.fn(async () => ({ rows: [], rowCount: 0 })),
+    )
+    let releaseProducer!: () => void
+    const producerPending = new Promise<void>((resolve) => { releaseProducer = resolve })
+    const completionEvent = {
+      version: 1 as const,
+      eventId: 'approval_shutdown_late_completion',
+      eventType: 'approval.approved' as const,
+      source: 'approval-product' as const,
+      approval: { instanceId: 'apr_shutdown_late', templateId: 'tpl_1' },
+      transition: { toStatus: 'approved' as const },
+    }
+    const handleEvent = vi.spyOn(service, 'handleEvent').mockImplementation(async () => {
+      await producerPending
+      bus.emit('approval.approved', completionEvent)
+    })
+    const handleBridge = vi.spyOn(service, 'handleApprovalCompletionEvent').mockResolvedValue(undefined)
+    const handleTrigger = vi.spyOn(service, 'handleApprovalCompletionTrigger').mockResolvedValue(undefined)
+    service.init()
+
+    bus.emit('multitable.record.updated', { sheetId: 'sheet_lifecycle', recordId: 'record_late' })
+    await vi.waitFor(() => expect(handleEvent).toHaveBeenCalledTimes(1))
+    let shutdownDone = false
+    const shutdown = service.shutdown().then(() => { shutdownDone = true })
+    await Promise.resolve()
+    expect(shutdownDone).toBe(false)
+
+    releaseProducer()
+    await shutdown
+    expect(handleBridge).toHaveBeenCalledTimes(1)
+    expect(handleTrigger).toHaveBeenCalledTimes(1)
+
+    bus.emit('approval.approved', { ...completionEvent, eventId: 'approval_after_shutdown' })
+    expect(handleBridge).toHaveBeenCalledTimes(1)
+    expect(handleTrigger).toHaveBeenCalledTimes(1)
+  })
+
   test('transitive completion drain reaches a fixed point', async () => {
     const bus = new EventBus()
     const service = new AutomationService(

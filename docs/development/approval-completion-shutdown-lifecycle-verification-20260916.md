@@ -6,7 +6,8 @@ Date: 2026-09-16
 
 - Main baseline: `784c22dc182b2050bf204f4d013226d5bbb15131`
 - Precise-unsubscribe prerequisite (#5758): `f0a7e214c97731c504337847760bc8769bd81a44`
-- Verified implementation commit: `f0cd9ca2da56a2b2014c9b82e49a869aa62df85a`
+- Verified implementation commit: `e1da1528fa3e0f744f5885d27dd60f453af6f913`
+- Startup-matrix harness follow-up: `a03db65f7329e819b532a4ff6c0a3714dc38d979`
 - The implementation commit has both the main baseline and prerequisite as ancestors.
 - This verification file is a documentation-only successor to the implementation commit.
 
@@ -41,13 +42,19 @@ immediately. Before the follow-up fix, the lifecycle file produced 1 failed and 
 Vitest unhandled-rejection error (`producer sentinel`). This confirmed that the shared barrier observed
 the rejection too late.
 
+A later call-site review found that startup-time schedule catch-up can admit work before an Automation
+instance is published. A discriminating standalone-shutdown test held an admitted producer, then emitted
+an approval completion when released. The synchronous-detach compatibility implementation produced
+1 failed and 4 passed tests: both completion handlers had zero calls. This confirmed a lost-completion
+window rather than merely an asynchronous test expectation.
+
 ## Green evidence
 
 Focused lifecycle and precise-unsubscribe suite:
 
 ```text
 7 test files passed
-94 tests passed
+95 tests passed
 0 failed
 ```
 
@@ -63,6 +70,8 @@ Covered behavior includes:
 - Producer failure and DingTalk client-stop failure produce zero `pool.end()` calls.
 - An immediately rejected producer drain is observed before an unrelated recovery-worker drain finishes;
   the final barrier still rejects and the pool remains open.
+- Standalone Automation shutdown preserves a completion emitted by an already-admitted producer, then
+  rejects new completion admissions after detach.
 - A stale DingTalk start failure is not misclassified as a stop failure; a real half-started-client close
   failure remains fail-closed.
 - Partial startup invokes the same idempotent stop promise.
@@ -81,6 +90,33 @@ git diff --check: passed
 The follow-up exact-head rerun also passed the server lifecycle and Time Machine recovery wiring
 neighbors (2 files, 9 tests). The broader neighbor and Automation V1 results above remain evidence from
 the preceding implementation commit; they were not rerun for the three-file follow-up.
+
+The first CI run at documentation head `b171cc34b302ff8ed5ddd96061eb2faa09094bfd`
+found two direct compatibility regressions in the Node 20 core-backend lane: the real-app assembly census
+still pinned startup-owned `this.app` sites to `start`, while the implementation had moved that body to
+`startOnce` for rollback; and standalone `AutomationService.shutdown()` no longer detached all nine
+subscriptions before its first asynchronous yield. The lane reported 3 failed tests in 2 files, with
+13,833 passed. The census pins were updated to the actual owner. The old unsubscribe assertion was changed
+to await the now-asynchronous shutdown before checking all nine IDs; the later discriminating test above
+proved that preserving synchronous detach would violate the producer-before-consumer drain contract.
+
+The two affected files then passed locally (2 files, 161 tests), followed by the focused lifecycle suite
+(7 files, 94 tests), TypeScript typecheck, and `git diff --check`.
+
+The next CI run at documentation head `5a9493285b243f155a2096c90e223473414b440a`
+passed the complete core-backend step in both Node lanes, then exposed one later Node 18 real-DB harness
+failure: the startup fail-closed matrix still assumed rejected starts never invoked `stop()`. Its first
+failure row now correctly ran the shared cleanup path and ended the process-global pool, so a later healthy
+row failed against that already-ended pool (1 failed, 1,783 passed in the integration step). The test-only
+harness follow-up spies `pool.end()` to a no-op for this multi-server matrix and restores it after all
+successful servers are stopped; every other worker, producer, listener, and scheduler rollback remains real.
+
+No local database was configured. The corrected integration file was collected with its integration config
+and all 8 database-gated tests skipped; that is collection evidence only, not a passing DB run. TypeScript
+typecheck and `git diff --check` passed. A current-head CI run remains required for database-backed proof.
+
+At the final implementation commit, the three Automation/census files passed 166/166 and the focused
+lifecycle suite passed 95/95. TypeScript typecheck and `git diff --check` also passed.
 
 The existing server-lifecycle neighbor attempted its normal default database connection and entered its
 existing degraded path because no test database was configured. No migration, database write, or real-DB
@@ -125,6 +161,12 @@ closes successfully, while a real half-started-client close failure stays failed
 
 A subsequent exact-head read-only review found the immediate producer-rejection P2 described above. The
 bounded follow-up changed only the server barrier, its dedicated test, and this design/verification pair.
+
+The final call-site census found one production standalone `AutomationService.shutdown()` caller: rollback
+of an unpublished partial startup instance. Normal server shutdown uses the coordinated phased API; all
+other standalone callers are test cleanup. Because startup-time schedule catch-up can admit work, the old
+synchronous detach was not safe even at that one production call. The final standalone implementation now
+drains producers and transitive completion work before detach, with the RED/GREEN test described above.
 
 Two suggestions were not adopted:
 
