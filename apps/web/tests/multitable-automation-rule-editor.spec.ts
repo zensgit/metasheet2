@@ -949,6 +949,83 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({ statusField: 'fld_score', approverField: 'fld_gone' })
   })
 
+  it('#5724: preserves unmodelled start_approval config keys (onNonApproved + cross-base triple + unknown) across an edit+save', async () => {
+    const saved = vi.fn()
+    const writeback = {
+      statusField: 'fld_1',
+      approverField: 'fld_2',
+      // NOT modelled by the editor UI, but accepted by the backend validator
+      // (packages/core-backend/src/multitable/automation-service.ts:459-489).
+      onNonApproved: true,
+      targetBaseId: 'base_x',
+      targetSheetId: 'sheet_x',
+      targetRecordId: 'rec_x',
+    }
+    const rule = {
+      id: 'atr_5724', sheetId: 'sheet_1', name: 'keep', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: writeback,
+        // a key this editor version knows nothing about at all
+        futureBackendOnlyKey: { nested: ['a', 1, true] },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    // Edit something completely UNRELATED to the approval action config.
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'keep renamed'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const cfg = saved.mock.calls[0][0].actions[0].config
+    expect(saved.mock.calls[0][0].name).toBe('keep renamed')
+    // The unmodelled keys survive byte-equal (the from-scratch rebuild used to drop them).
+    expect(cfg.resultWriteback).toEqual(writeback)
+    expect(cfg.futureBackendOnlyKey).toEqual({ nested: ['a', 1, true] })
+    // ... and no UI-only draft key leaks into the saved config.
+    expect(Object.keys(cfg).sort()).toEqual(['formDataMapping', 'futureBackendOnlyKey', 'resultWriteback', 'templateId'])
+  })
+
+  it('#5724: modelled start_approval fields still OVERRIDE the preserved original', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5724_ovr', sheetId: 'sheet_1', name: 'override', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_old',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_1', onNonApproved: true },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const templateInput = container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement
+    templateInput.value = 'tmpl_new'
+    templateInput.dispatchEvent(new Event('input'))
+    const mappingKey = container.querySelector('[data-field="approvalMappingKey"]') as HTMLInputElement
+    mappingKey.value = 'total'
+    mappingKey.dispatchEvent(new Event('input'))
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_2')
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const cfg = saved.mock.calls[0][0].actions[0].config
+    expect(cfg.templateId).toBe('tmpl_new')
+    expect(cfg.formDataMapping).toEqual({ total: 'fld_2' })
+    // the edited picker wins over the loaded value, while the unmodelled sibling still rides along
+    expect(cfg.resultWriteback).toEqual({ statusField: 'fld_2', onNonApproved: true })
+  })
+
   it('can add and remove conditions', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
