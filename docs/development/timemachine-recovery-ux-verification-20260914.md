@@ -1,5 +1,11 @@
 # Time Machine Recovery UX Verification
 
+## Current-Main Replay 2026-09-15
+
+Local replay code `30a359631c9f7b534235e56a6c1ce687a4f3477f`, tree `9e914e5165212244f6b65c7ee99a1abc637a1b43`; ordered parents are original #5709 `478ed2da6cb22d5677a8f23f7df949f6b37b8b6f` and main `4bae83d67867b2e2d5e7e318ae89597184a291e3`. Fresh isolated replay worktree preserves the original frozen worktree. True merge is conflict-free, with no manual resolution. All 47 original candidate paths are byte-identical after replay; relative-main remains exactly those 47 paths, no unexpected files.
+
+On this replay: ten direct frontend files 241/241 PASS; required-web exits 0, all groups pass (last group 456 files/6741 tests; overlapping groups are not summed). Web application vue-tsc and core tsc PASS; OpenAPI parity PASS; official frozen/live package provenance equal; diff-check PASS. The new sheet-trash spec remains in both domain guard and required-web (the latter uses its basename filter). No product edits, new mutation, DB run or browser/UAT claim in this replay. Prior exact-SHA DB/browser/mutation evidence remains scoped to the entries below, supported by the byte-equivalence proof, not relabeled as rerun. Logs `/private/tmp/tm-ux-replay-{web,required-web,openapi}.log` are local evidence only. Publication targets the existing Draft #5709 by ordinary fast-forward; fresh remote CI is required. No Ready/merge/flag/dispatch/deployment.
+
 ## Exact Code and Release Boundary
 
 - Main baseline: `c13e40769690a4ed51b3f3a7ac2f8026638f3e88`.
