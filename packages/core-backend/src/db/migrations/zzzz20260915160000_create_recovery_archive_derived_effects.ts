@@ -1,6 +1,5 @@
 import { sql, type Kysely } from 'kysely'
 
-const TABLE = 'meta_recovery_archive_derived_effects'
 const DRIFT = 'RECOVERY_ARCHIVE_DERIVED_EFFECTS_SCHEMA_DRIFT'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
@@ -57,10 +56,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
-  const present = await sql<{ present: string | null }>`SELECT to_regclass('public.meta_recovery_archive_derived_effects')::text AS present`.execute(db)
-  if (!present.rows[0]?.present) return
-  await sql.raw(`LOCK TABLE public.${TABLE} IN ACCESS EXCLUSIVE MODE`).execute(db)
-  const rows = await sql`SELECT 1 FROM public.meta_recovery_archive_derived_effects LIMIT 1`.execute(db)
-  if (rows.rows.length) throw new Error('RECOVERY_ARCHIVE_DERIVED_EFFECTS_DOWN_IN_USE')
-  await sql`DROP TABLE public.meta_recovery_archive_derived_effects`.execute(db)
+  await sql`DO $$
+    BEGIN
+      IF to_regclass('public.meta_recovery_archive_derived_effects') IS NULL THEN RETURN; END IF;
+      LOCK TABLE public.meta_recovery_archive_derived_effects IN ACCESS EXCLUSIVE MODE;
+      IF EXISTS (SELECT 1 FROM public.meta_recovery_archive_derived_effects LIMIT 1) THEN
+        RAISE EXCEPTION 'RECOVERY_ARCHIVE_DERIVED_EFFECTS_DOWN_IN_USE';
+      END IF;
+      DROP TABLE public.meta_recovery_archive_derived_effects;
+    END;
+  $$`.execute(db)
 }
