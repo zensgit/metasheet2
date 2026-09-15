@@ -15,6 +15,7 @@ interface ListenerMeta {
   plugin?: string
   pattern: string | RegExp
   handler: EventHandler
+  emitterHandler?: EventHandler
 }
 
 let _idSeq = 0
@@ -41,9 +42,6 @@ export class EventBus {
   subscribe<T = EventPayload>(pattern: string | RegExp, handler: EventHandler<T>, plugin?: string): string {
     const id = `evt_${++_idSeq}`
     // Type assertion needed here as we're storing generic handlers
-    const meta: ListenerMeta = { id, plugin, pattern, handler: handler as EventHandler }
-    this.listeners.set(id, meta)
-
     const wrapper = (data: unknown) => {
       try {
         handler(data as T)
@@ -54,8 +52,10 @@ export class EventBus {
 
     // If pattern is string, direct subscribe.
     if (typeof pattern === 'string') {
+      this.listeners.set(id, { id, plugin, pattern, handler: handler as EventHandler, emitterHandler: wrapper })
       this.emitter.on(pattern, wrapper)
     } else {
+      this.listeners.set(id, { id, plugin, pattern, handler: handler as EventHandler })
       // For RegExp, wrap a generic listener: track all emits
       const _regexWrapper = (event: string, data: unknown) => {
         if (pattern.test(event)) wrapper(data)
@@ -81,8 +81,8 @@ export class EventBus {
   unsubscribe(id: string): boolean {
     const meta = this.listeners.get(id)
     if (!meta) return false
-    if (typeof meta.pattern === 'string') {
-      this.emitter.removeAllListeners(meta.pattern)
+    if (typeof meta.pattern === 'string' && meta.emitterHandler) {
+      this.emitter.removeListener(meta.pattern, meta.emitterHandler)
     }
     this.listeners.delete(id)
     return true

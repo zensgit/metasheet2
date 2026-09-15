@@ -605,6 +605,36 @@ describe('MultitableWorkbench manager dialog meta keep-alive (#5743)', () => {
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
   })
 
+  it('does not refresh the old sheet while a base-context switch is loading', async () => {
+    await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    // switchBase selects the new base before its context and fields arrive.
+    workbenchMock.activeBaseId.value = 'base_finance'
+    workbenchMock.loading.value = true
+    await flushUi()
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    workbenchMock.activeSheetId.value = 'sheet_invoices'
+    workbenchMock.activeViewId.value = 'view_invoices'
+    workbenchMock.loading.value = false
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_invoices')
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
+    expect(workbenchMock.activeBaseId.value).toBe('base_finance')
+    expect(workbenchMock.activeSheetId.value).toBe('sheet_invoices')
+  })
+
   // #5743 follow-up (merge judge): the catch-up must RESTART the cadence, not just add a refresh on
   // top of an interval that kept its pre-hidden phase. With the old phase standing, "open, 5 s, tab
   // hidden 20 s, tab back" refreshed at t=25 s (catch-up) and again at t=30 s (the tick that had

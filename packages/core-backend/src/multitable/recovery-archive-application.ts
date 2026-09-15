@@ -23,6 +23,7 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
   CreateRecoveryArchiveRestoreWorkerInput,
   | 'recheckAuthority'
   | 'apply'
+  | 'processDerivedWork'
   | 'leaseMs'
   | 'replayHorizonMs'
   | 'sweepLimit'
@@ -99,6 +100,7 @@ export function createRecoveryArchiveApplication(
     runtime,
     recheckAuthority: composition.worker.recheckAuthority,
     apply: composition.worker.apply,
+    processDerivedWork: composition.worker.processDerivedWork,
     leaseMs: composition.worker.leaseMs,
     replayHorizonMs: composition.worker.replayHorizonMs,
     sweepLimit: composition.worker.sweepLimit,
@@ -200,8 +202,18 @@ function snapshotComposition(
   if (
     !composition.keyCustody ||
     typeof composition.keyCustody !== 'object' ||
+    typeof composition.keyCustody.produceGenerationDek !== 'function' ||
+    typeof composition.keyCustody.unwrapGenerationDek !== 'function' ||
+    typeof composition.keyCustody.deriveDekFingerprint !== 'function' ||
+    typeof composition.keyCustody.macManifestRoot !== 'function' ||
+    typeof composition.keyCustody.verifyManifestRootMac !== 'function' ||
     !composition.objectStore ||
     typeof composition.objectStore !== 'object' ||
+    typeof composition.objectStore.put !== 'function' ||
+    typeof composition.objectStore.get !== 'function' ||
+    typeof composition.objectStore.head !== 'function' ||
+    typeof composition.objectStore.deleteExpired !== 'function' ||
+    typeof composition.objectStore.pin !== 'function' ||
     !Number.isSafeInteger(composition.auditedReplayHorizonMs) ||
     composition.auditedReplayHorizonMs < 0 ||
     !Number.isSafeInteger(composition.asyncResumeHorizonMs) ||
@@ -242,6 +254,7 @@ function snapshotWorkerDependencies(
   const apply = snapshotApplyDependencies(source.apply)
   const worker: RecoveryArchiveApplicationWorkerDependencies = {
     recheckAuthority: source.recheckAuthority,
+    processDerivedWork: source.processDerivedWork,
     apply,
     leaseMs: source.leaseMs,
     replayHorizonMs: source.replayHorizonMs,
@@ -252,6 +265,7 @@ function snapshotWorkerDependencies(
   }
   if (
     typeof worker.recheckAuthority !== 'function' ||
+    typeof worker.processDerivedWork !== 'function' ||
     !Number.isSafeInteger(worker.leaseMs) || worker.leaseMs < 1 ||
     !Number.isSafeInteger(worker.replayHorizonMs) || worker.replayHorizonMs < 0 ||
     (worker.sweepLimit !== undefined &&
@@ -271,6 +285,7 @@ function snapshotApplyDependencies(
 ): RecoveryArchiveApplicationWorkerDependencies['apply'] {
   if (!source || typeof source !== 'object') throw new Error(COMPOSITION_INVALID)
   const onMutationApplied = source.onMutationApplied
+  const afterCommit = source.afterCommit
   const apply: RecoveryArchiveApplicationWorkerDependencies['apply'] = {
     preliminaryFullRead: source.preliminaryFullRead,
     stabilizeAuthorization: source.stabilizeAuthorization,
@@ -279,13 +294,15 @@ function snapshotApplyDependencies(
     ...(onMutationApplied
       ? { onMutationApplied }
       : {}),
+    ...(afterCommit !== undefined ? { afterCommit } : {}),
   }
   if (
     typeof apply.preliminaryFullRead !== 'function' ||
     typeof apply.stabilizeAuthorization !== 'function' ||
     typeof apply.finalLockedFullRead !== 'function' ||
     typeof apply.evaluatePlanAuthorization !== 'function' ||
-    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function')
+    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function') ||
+    (apply.afterCommit !== undefined && typeof apply.afterCommit !== 'function')
   ) {
     throw new Error(COMPOSITION_INVALID)
   }

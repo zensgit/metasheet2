@@ -1,0 +1,284 @@
+# Time Machine completion goal and first runtime repair
+
+Status: ACTIVE development goal; bounded development and Draft/HOLD publication
+only. This document does not declare Time Machine complete or enable recovery.
+
+## Authority and baseline
+
+The owner requested automatic difficulty-based model allocation and execution
+of the remaining Time Machine repairs and development on 2026-09-15. Local
+development, isolated synthetic verification, ordinary pushes, and Draft/HOLD
+PRs are within the standing authorization. Ready/merge, flags, dispatch,
+deployment, production, and real customer data remain separate gates.
+
+Observed main: `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
+First repair code: `f27045c44c5381045f2618c019ee8ebe80138be9`.
+Code tree: `62fbd9a1e349c958eac12316a1ec1f93a634abc6`.
+
+Do not edit the dirty canonical checkout, other tasks' worktrees, or historical
+SHA-bound reports. Recheck main and candidate identity before publication. A
+current-main change requires a bounded overlap review; it is not permission to
+discard existing work or silently rewrite another candidate.
+
+## Execution queue
+
+### Completion Shutdown Integration Checkpoint
+
+Local clean `4bd71a62834bbee6d3764dd8ff9b16223a102ed0` integrates #5768/#5758
+with main `a4007e1e37f5aa522b7558a9e90a6f945941bee3`. The bounded shutdown
+repair has 94 focused + 334 neighbor cases, and both real-workbench and seeded
+archive browser chains pass 6/6 with normal pool close/exit and zero DB residue.
+Full required-web passes (final group 461 files / 6,939 tests). Exact evidence is
+in the runtime verification report. This supersedes the older unimplemented
+shutdown checkpoint below only for its bounded local code/test scope; new
+combined-head CI remains open. Provider/custody, capture policy and nightly
+operational attribution remain unresolved. Goal remains ACTIVE, not complete.
+
+### Current Requirement Audit
+
+Published candidate: #5744 `d47219272d17d4225b0146a36ebb8213037f0c84`,
+based on main `59d1eac2c943e3ede8990f9521dc0d96207b7bcd`.
+The following is a checkpoint, not a live CI or production status dashboard.
+Historical queues below do not override this audit.
+
+| Requirement | Evidence and boundary | Still required |
+| --- | --- | --- |
+| History, configuration history and whole-table recycle bin | Combined candidate contains the existing UX ancestry; clean `ba803089` real LoginView/workbench acceptance 6/6 covers selected row, typed column/captured values, retained table and actor/local-time presentation | Published-head CI; separate merge authority; no hard-delete resurrection |
+| Archive readiness and safe refresh | Existing readiness candidate is integrated; no duplicate implementation; read-only diagnosis remains separate from restore | Published-head CI; configured provider/runtime acceptance must not be inferred from UI availability |
+| Archive runtime authority and durable derived work | Implemented callbacks, fresh authority, worker lifecycle and real process-crash acceptance are recorded under their exact SHAs in the verification report | Explicit provider/custody and capture coverage decisions; independent durable storage acceptance |
+| Real archive recovery | Earlier clean browser run restores exactly 5,001 records and drains derived work; this is a seeded encrypted synthetic archive, not production capture | Do not describe that run as repeated on `ba803089`; no production durability claim |
+| Combined-main integration | Frontend union 238 focused tests plus required-web; backend integration 114+61 tests; 405 migrations/replay; workbench 6/6 and incoming submission DB 12/12 | New exact-head CI; main-existing completion shutdown P2 remains unwaived |
+| Completion shutdown P2 | Approval task independently confirmed untracked completion promises and destructive sibling unsubscribe; static trace plus in-memory probes, not a real-DB loss incident | Owning bounded precise-unsubscribe fix, producer quiescence and sink drain acceptance; preserve TM worker drain |
+| Nightly operations | Latest three workflow queries still identify the recorded missing-sample failures; no new successful evidence | Owner-selected scrape/label evidence; no threshold relaxation or production sample-generating actions |
+
+Current CI snapshot: 25 successful checks, one expected skip, four running;
+this is not terminal acceptance. All report-only corrections remain distinct
+from the code SHA on which browser and database tests ran.
+
+### Backend Main Replay
+
+Main advanced again to `59d1eac2c943e3ede8990f9521dc0d96207b7bcd` before
+publication. Local true merge `ba803089f7990958b23f261229907fd7f3bf58e1`
+is conflict-free. Backend gates pass 114+61 unit cases, core typecheck and 42
+wiring cases; fresh PG15 migration/replay has 405 entries. Real workbench
+acceptance passes 6/6, plus incoming record-approval DB 12/12; the disposable
+database and connections are removed and PG stopped. Exact evidence and the
+failed extra manual census query are recorded in the verification report.
+New publication CI and provider/capture/operational gates remain open.
+
+### Current-Main Replay
+
+The prior published `50caab8495fa70e33985ec6ace190ae64eaafbc2` reached
+30 successful checks and one intentional skip. Main subsequently advanced to
+`02808c068d8d5cf60ae9f73a1051b3cdffc6d65b`. True merge
+`1937ec0e96984f310db034cfab8eac0d26693991` preserves both parents and both
+test-selector sets; only two shared test lists needed manual union. Nine focused
+Web files / 238 tests, application typecheck, 42 wiring tests and full
+required-web (final group 458 files / 6,847 tests) pass. Provenance drift is zero.
+New published-head CI remains open. Earlier browser/DB runs are SHA-bound reuse,
+not new runs of this merge. Operational and provider/capture gates remain open.
+
+### Latest Local Checkpoint
+
+Combined clean code `5131269ffd5afcc8aa561800910bdb299f4e68df`, tree
+`5c72f2df21d143a112d6dbbe52d1a1953eea0bda`, retains true-merges of #5744 runtime,
+#5709 UX and #5725 readiness with main
+`f67984b34cc170e7256292e671d619502feea0e9`. The 109-file union includes
+historical reports and screenshots. No duplicate implementation or new PR is
+needed; ordinary publication uses existing #5744 and preserves all source heads.
+
+Integration fixed a duplicate import and two real context races: stale metadata
+must not override a newer base/sheet/view or restore; background polling must not
+supersede pending foreground base, sheet-only or view-only navigation. Guards have discriminating mutations
+and the final narrow Sol High review returns 0 P1/P2/P3. Real full-workbench
+recovery and archive browser chains each pass 6/6 on this exact clean tree; the
+archive restores 5,001 records and drains all derived effects. Dedicated databases
+and backends are gone and PostgreSQL is stopped. Final required-web passes,
+including its 456-file/6,790-test final group. Source application/core/script
+typechecks pass; full local Web build typecheck retains an explicitly recorded
+unchanged-config Vite dependency conflict, not an unqualified green claim.
+
+The runtime integration design/verification reports contain exact run IDs,
+mutation scope, reuse boundaries and current local limitations. Source candidate
+combination is now verified locally. Fresh published-head CI, separate merge
+authority, production provider/custody/capture decisions and nightly missing
+samples are still open. Overall goal remains ACTIVE, not product FINAL.
+
+### Previous Local Checkpoint
+
+Runtime code `1907d2b413abbeb65b00e07c917406154f001501`, tree
+`72ec5b49e7890421f7e27c9810568e1e6cbae277`, extends successor #5744 with
+real LoginView/Workbench -> MetaSheetServer -> seeded encrypted archive -> owned
+PostgreSQL browser acceptance. Six scenario groups pass at the clean code head:
+authorization/flag negatives, viewer timezone, non-mutating confirmed preview,
+browser job acceptance, full-page rediscovery, completed mobile/desktop progress,
+visible grid refresh, and independent exact 5,001-row/revision/derived-effect
+postconditions. Both discovery omission and offscreen mobile counts are proven
+RED mutations. The archive client/modal neighbors pass 95/95. Prior full 39/39
+real-DB crash/timer evidence remains bound to byte-identical test/production
+sources, not claimed as another run here. Independent database/backend residue
+is zero and the owned cluster is stopped. Main remains `2b67a04625a0d6b089dac173e47a0de5d111e225`.
+
+UI code `890f39e3295e5f44ca85d84423b70cc842216071`, published as docs-child
+`c970c88096995057a5b54be34082a03a047fdd7e` in Draft #5709, documents six real
+full-workbench table/row/column recovery cases, beyond the earlier component-only
+acceptance. Its current exact-head CI was independently read as 28 SUCCESS + 1
+expected SKIP, zero pending/failure, base=current main. Draft #5725 remains a
+separate six-file readiness candidate at `94add2a91e828cdcf70ba0a0375f4d0575b37695`:
+23 SUCCESS + 1 expected SKIP, zero pending/failure, but base is the older
+`28d11496bb4281738c3dd13096fe317ff42e8780`. These are not merge approvals.
+The previous #5744 published head `a1d2fe1968c9464de9b7306ac72f07065f380925`
+was still 24 SUCCESS / 1 SKIP / 3 in progress at the last REST check; new
+publication requires fresh exact-head CI. Earlier queue rows below are historical
+checkpoints, not current remote CI claims. No duplicate readiness implementation
+is required.
+
+Remaining work is not another reimplementation of these primitives:
+
+- Standard server startup still needs the explicitly selected object-store/custody composition; fixture storage is not a production choice.
+- Application timers, standard server lifecycle, full-workbench routing and archive browser-to-test-provider acceptance are evidenced above. Production capture/coverage construction and independent durable provider/KMS acceptance remain open; seeded verified archives are not substitutes for them.
+- Existing UI candidates #5709 and #5725 need bounded integration/current-main verification, especially the older #5725 base, plus separate merge authority. Their individual green matrices do not prove a combined final tree; no duplicate UI implementation or implicit merge.
+- Nightly missing-sample attribution below is open; no threshold relaxation or production reload/restore is authorized.
+- GitHub API reads have intermittently failed with timeout/EOF. Ordinary Git pushes do not prove exact-head CI green. Keep Draft/HOLD and recheck the published head when API access returns.
+
+### Operational attribution checkpoint (2026-09-15)
+
+Read-only GitHub evidence, not a production probe or an alert-resolution claim:
+
+- Final artifact refresh retrieved External Metrics artifact `10377791613` from run `34919685921`. Its JSON summary independently confirms 11 checks / 5 passes / 0 measured failures / 6 N/A / overall fail. Only summary JSON/Markdown are present, not raw scrape samples, so target/label attribution remains open. All three latest-run queries now succeed and still identify the same failed scheduled runs below. No operational mutation was made.
+
+- Fresh per-workflow reads after the application-timer checkpoint still return External Metrics `34919685921` and Regression `34919841957` as their latest runs, both failed on the previously audited SHA. The main Nightly run `34920290620` is independently confirmed failed, but its latest-run query returned EOF and does not prove there is no newer run. Recent unrelated health-monitor successes are not substituted for these gates. No rerun, dispatch, threshold change or production sampling was performed.
+
+- Phase 5 Nightly Validation run `34920290620`, job `104226687112` fails at validation. Regression run `34919841957`, job `104225261850`, and External Metrics run `34919685921`, job `104224778280`, fail at their final status gates. All three bind `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
+- All three report 11 checks: five passing, zero measured threshold failures, six N/A. Their parser finds 22 histogram families but zero matching the two configured latency families. Missing samples, rather than measured excessive latency, are the directly evidenced reason for failure.
+- `scripts/phase5-thresholds.json` requests plugin reload for `example-plugin`, plus snapshot create/restore. `metrics.ts` declares those families; plugin-loader and SnapshotService contain observation call sites. Source existence does not prove the deployed registry, scrape target, label population or recent activity.
+- At runtime candidate `8196e5f558c37cd01e79056c3c3be45eecadd54a`, required-samples plus cache contracts pass 6/6 locally. The missing-samples negative produces exactly five passes/six N/A/exit 1, while supplied synthetic latency samples produce 11 passes/exit 0. Validator, thresholds and required-samples test are byte-identical to the failed-run SHA.
+- No alert, threshold, workflow, scrape configuration or production state was changed. These failures must remain open until the owner-selected target/label population and authorized sample evidence are established. Do not generate production reload/restore operations solely to silence the monitor, and do not count unrelated recent health-probe successes as closure. Other attendance scheduled failures are separate, not attributed by this checkpoint.
+
+### Historical Initial Gap Census
+
+This table records the initial investigation only. Several implementation and
+integration gaps were subsequently closed as described in Current Requirement
+Audit and the SHA-bound verification report; do not replay them as new work.
+
+| Item | Initial evidence | Initial remaining acceptance |
+| --- | --- | --- |
+| Configuration-history UX | Draft #5704 at `e92e462b84e74aa242382c2f31eab326ceb60854`; exact-head checks terminal without failure | Current-main integration, independent final review, separate merge authorization |
+| Recycle-bin/history separation and restoration UX | Draft #5709 at `478ed2da6cb22d5677a8f23f7df949f6b37b8b6f`; exact-head checks terminal without failure | Preserve snapshot/permission/conflict guards; current-main integration and merge gate |
+| Archive unavailability and safe refresh | Draft #5725 at `978dc2e017f0db9ae878debd708cbf4560b8cec3`; exact-head CI running at initial census | Finish CI, keep read refresh separate from restore actions, merge gate |
+| Archive startup provider contract | First repair code above; local validation complete | Independent review and exact published-head CI |
+| Real archive runtime composition | `MetaSheetServer` accepts an injected composition, but direct startup uses `new MetaSheetServer()` without one | Complete production authority/apply callbacks and explicit provider/custody choice; retain fail-closed startup |
+| Restart and recovery acceptance | Existing worker/lease/fence tests and D7 runbook are inputs, not a real process-restart acceptance record | Isolated synthetic process crash/restart, exact lease takeover, no duplicate writes, permission revoke, complete cleanup |
+| Operational closeout | D8 metrics exist; current main also has scheduled/operational failed checks | Attribute actual failing runs separately from PR code CI; do not disable alerts or relax thresholds to get green |
+
+Existing Draft candidates are not newly implemented by this goal and are not
+merged merely because checks are green. Candidate-only functionality must not
+be described as current-main or deployed functionality.
+
+Ancestry check: `e92e462b84e74aa242382c2f31eab326ceb60854` is already an
+ancestor of `478ed2da6cb22d5677a8f23f7df949f6b37b8b6f`. Integrating #5709
+must preserve this configuration-history work, not replay #5704 a second time.
+The new sheet recycle-bin UI and config-history actor enrichment are in that
+candidate, not evidence that main already exposes them.
+
+The bounded record-history census found no established new restore defect.
+Follow-up acceptance should explicitly cover a selected schema-valid field
+absent from the target snapshot (unset, preserving unselected fields), named
+actors in the record drawer, and the drawer's visible user-timezone wording.
+Schema-deleted/unknown/hidden fields remain fail closed; restoring field values
+is not permission to recreate a removed schema definition.
+
+The prior D7 staging runbook and D1 provider/custody decision section remain
+references. No fake `async () => true` authority adapter, unverified catalog
+row, or same-host fixture store may become a production composition or a claim
+of independent durability. The all-main check list is not wholly green; passing
+push/PR tests do not erase failed scheduled operational runs.
+
+## First bounded repair
+
+### Reproduced defect
+
+`createRecoveryArchiveApplication` checks that custody/store providers are
+objects but did not check the methods required by their public contracts. A
+provider with a missing/non-callable method could expose router options and
+resolve the database instead of failing during composition.
+
+### Contract
+
+1. When either existing activation flag is not exact `true`, return before
+   reading the factory, providers, database, or starting a timer.
+2. With both flags exact true, validate all five custody methods and all five
+   store methods before database resolution or worker creation.
+3. Missing or non-callable methods fail with the existing fixed
+   `RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED` error.
+4. Throwing provider accessors are normalized to the same fixed error, without
+   forwarding provider text or a `cause` chain.
+5. Prototype methods remain supported. Preflight does not call any provider
+   operation, create keys, touch object storage, or test connectivity.
+6. Existing provider object identity, receiver behavior, runtime authorization,
+   worker lifetime, flag policy, and data-restore semantics are unchanged.
+
+Production and test write set:
+
+- `packages/core-backend/src/multitable/recovery-archive-application.ts`
+- `packages/core-backend/tests/unit/multitable-recovery-archive-application.test.ts`
+
+No migration, dependency, workflow, flag, frontend, API, or OpenAPI changes.
+Method shape validation is necessary preflight, not provider authenticity,
+immutability, connectivity, durability, or production-readiness evidence.
+
+## Historical Next Bounded Implementation
+
+The following was the first planned runtime slice, subsequently implemented
+in the integration chain. It is preserved as design provenance, not an open
+request to duplicate the runtime callbacks.
+
+Sol's read-only trace identified a concrete vendor-neutral prerequisite:
+`RecoveryArchiveApplicationComposition.worker.apply` is process-wide, while
+the full-read and mutation callbacks in `MaterializedArchiveAsyncChunkApplyInput`
+are currently request-closure-shaped. `executeRecoveryArchiveAsyncRestoreChunk`
+already authenticates the durable binding, but passes those callbacks through
+without a per-job workspace/base/sheet/actor context. The HTTP route constructs
+its own callbacks per request in `resolveRecoveryArchiveRestoreOwnerContext`.
+
+The next slice should pass an immutable job identity derived only from the
+authenticated binding into worker authorization/mutation callbacks, adapting
+back to the unchanged lower-level materialized apply contract. Candidate scope:
+`recovery-archive-async-restore.ts`, its existing unit test, and the existing
+`multitable-recovery-archive-restore-jobs-realdb.test.ts`. First reproduce the
+callback context gap, then prove two jobs cannot share/swap actor or sheet
+context, with the existing 5,001-record isolated DB gate and zero residue. Do
+not use an allow-all callback as final production authority. No provider choice
+or default enabled composition is included. This item is planned, not already
+implemented or verified by the first repair.
+
+## Model allocation and verification
+
+The coordinator owns the critical implementation and final integration. Luna
+performs the bounded UI/residual census; Sol high traces the runtime authority
+and provider gap. A terminal independent review must bind immutable commits,
+not a working tree while mutation tests are changing it. Model timeouts or
+quota errors are not approval. Routine work uses the smallest suitable model;
+high-risk recovery/permission/transaction work gets independent high-effort
+review. No file has more than one concurrent writer.
+
+Each completed slice needs focused tests plus relevant neighbors, discriminating
+negative/mutation proof, typecheck, lint, diff/file census, and exact-head CI.
+Real DB/browser/process evidence is required when the changed behavior needs
+it; a mocked test is labelled as such. Design and verification MDs keep local,
+remote, merge, runtime, and production evidence distinct.
+
+## Scope stops
+
+- Reconstructing bytes from an already physically destroyed sheet is not added
+  implicitly. Whole-sheet recycle-bin semantics require the existing candidate
+  and its explicit retained-data boundary, not archive resurrection claims.
+- New conflict policies, permission restoration, key destruction, retention
+  defaults, provider/custody selection, and production durability policy are not
+  inferred from a general request to accelerate development.
+- No real environment flag, dispatch, deployment, or production operation is
+  performed by this goal without its separate authorization.
+
+See `timemachine-archive-runtime-preflight-verification-20260915.md` for the
+first repair's reproducible evidence. The overall goal remains active after
+this bounded repair; remaining rows cannot be marked complete by this PR.

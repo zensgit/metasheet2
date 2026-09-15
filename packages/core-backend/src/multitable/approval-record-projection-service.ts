@@ -165,26 +165,46 @@ function toIsoOrEmpty(value: Date | null): string {
  */
 export class ApprovalRecordProjectionService {
   private readonly subscriptionIds: string[] = []
+  private readonly completionInFlight = new Set<Promise<void>>()
 
   /** Subscribe the terminal projection trigger to the completion bus (best-effort per event). */
   subscribe(eventBus: EventBus): void {
-    for (const eventType of APPROVAL_COMPLETION_EVENT_TYPES) {
-      const id = eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
-        const instanceId = payload?.approval?.instanceId
-        if (typeof instanceId !== 'string' || instanceId.length === 0) return
-        this.reconcile(instanceId).catch((error) => {
-          logger.warn(
-            `terminal projection for ${instanceId} failed: ${error instanceof Error ? error.message : String(error)}`,
+    try {
+      for (const eventType of APPROVAL_COMPLETION_EVENT_TYPES) {
+        const id = eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
+          const instanceId = payload?.approval?.instanceId
+          if (typeof instanceId !== 'string' || instanceId.length === 0) return
+          const task = this.reconcile(instanceId).then(
+            () => undefined,
+            (error) => {
+              logger.warn(
+                `terminal projection for ${instanceId} failed: ${error instanceof Error ? error.message : String(error)}`,
+              )
+            },
+          )
+          this.completionInFlight.add(task)
+          void task.then(
+            () => this.completionInFlight.delete(task),
+            () => this.completionInFlight.delete(task),
           )
         })
-      })
-      this.subscriptionIds.push(id)
+        this.subscriptionIds.push(id)
+      }
+    } catch (error) {
+      this.unsubscribe(eventBus)
+      throw error
     }
     logger.info('ApprovalRecordProjectionService subscribed to approval completion bus')
   }
 
   unsubscribe(eventBus: EventBus): void {
     for (const id of this.subscriptionIds.splice(0)) eventBus.unsubscribe(id)
+  }
+
+  async drainCompletionHandlers(): Promise<void> {
+    while (this.completionInFlight.size > 0) {
+      await Promise.allSettled([...this.completionInFlight])
+    }
   }
 
   /**

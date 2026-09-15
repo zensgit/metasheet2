@@ -80,6 +80,16 @@ export function useMultitableWorkbench(opts?: {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const suppressedSheetMetaReloads = new Set<string>()
+  let contextLoadGeneration = 0
+
+  // A newer load or a user selection owns the context, even if an older request finishes last.
+  function currentContextRequest(generation = contextLoadGeneration): () => boolean {
+    const baseId = activeBaseId.value
+    const sheetId = activeSheetId.value
+    const viewId = activeViewId.value
+    return () => generation === contextLoadGeneration
+      && baseId === activeBaseId.value && sheetId === activeSheetId.value && viewId === activeViewId.value
+  }
   // #5743: the meta payload last APPLIED by loadSheetMeta, plus a fingerprint of the state that
   // apply produced. A reload whose payload AND whose still-current state both match is a no-op, so
   // the writes are skipped — otherwise every refresh hands fresh object identities to
@@ -239,18 +249,21 @@ export function useMultitableWorkbench(opts?: {
   }
 
   async function loadSheets() {
+    if (activeBaseId.value) {
+      await loadBaseContext(activeBaseId.value, {
+        sheetId: activeSheetId.value || undefined,
+        viewId: activeViewId.value || undefined,
+      })
+      return
+    }
+    const generation = ++contextLoadGeneration
+    const isCurrent = currentContextRequest(generation)
     loading.value = true
     error.value = null
     const hadActiveSheet = !!activeSheetId.value
     try {
-      if (activeBaseId.value) {
-        await loadBaseContext(activeBaseId.value, {
-          sheetId: activeSheetId.value || undefined,
-          viewId: activeViewId.value || undefined,
-        })
-        return
-      }
       const data = await client.listSheets()
+      if (!isCurrent()) return
       sheets.value = filterVisibleSheets(data.sheets ?? [])
       if (!activeSheetId.value && sheets.value.length) {
         activeSheetId.value = sheets.value[0].id
@@ -261,14 +274,16 @@ export function useMultitableWorkbench(opts?: {
         await loadSheetMeta(activeSheetId.value)
       }
     } catch (e: any) {
-      error.value = e.message ?? fallback('error.loadSheets')
+      if (isCurrent()) error.value = e.message ?? fallback('error.loadSheets')
     } finally {
-      loading.value = false
+      if (generation === contextLoadGeneration) loading.value = false
     }
   }
 
   async function loadSheetMeta(sheetId: string, opts?: { viewId?: string }): Promise<boolean> {
     if (!sheetId) return false
+    const generation = ++contextLoadGeneration
+    const isCurrent = currentContextRequest(generation)
     error.value = null
     try {
       const requestedViewId = typeof opts?.viewId === 'string' && opts.viewId.trim()
@@ -281,6 +296,7 @@ export function useMultitableWorkbench(opts?: {
           viewId: requestedViewId,
         }),
       ])
+      if (!isCurrent()) return false
       // #5743: the requests always go out (callers reload precisely to SEE server-side changes),
       // but an unchanged answer must not churn the refs. Everything syncContextState reads goes
       // into the payload fingerprint. requestedViewId is NOT in it — it steers which view wins, so
@@ -321,13 +337,17 @@ export function useMultitableWorkbench(opts?: {
       }
       return true
     } catch (e: any) {
-      error.value = e.message ?? fallback('error.loadSheetMetadata')
+      if (isCurrent()) error.value = e.message ?? fallback('error.loadSheetMetadata')
       return false
+    } finally {
+      if (generation === contextLoadGeneration) loading.value = false
     }
   }
 
   async function loadBaseContext(baseId: string, opts?: { sheetId?: string; viewId?: string }): Promise<boolean> {
     if (!baseId) return false
+    const generation = ++contextLoadGeneration
+    const isCurrent = currentContextRequest(generation)
     loading.value = true
     error.value = null
     try {
@@ -336,19 +356,21 @@ export function useMultitableWorkbench(opts?: {
         sheetId: opts?.sheetId,
         viewId: opts?.viewId,
       })
+      if (!isCurrent()) return false
+      const visibleSheets = filterVisibleSheets(ctx.sheets ?? sheets.value)
+      const sheetId = ctx.sheet?.id && ctx.sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION
+        ? ctx.sheet.id
+        : visibleSheets.find((sheet) => sheet.id === activeSheetId.value)?.id ?? visibleSheets[0]?.id ?? ''
+      const fData = sheetId ? await client.listFields(sheetId) : { fields: [] }
+      if (!isCurrent()) return false
       syncContextState(ctx, opts?.viewId)
-      if (activeSheetId.value) {
-        const fData = await client.listFields(activeSheetId.value)
-        fields.value = fData.fields ?? []
-      } else {
-        fields.value = []
-      }
+      fields.value = fData.fields ?? []
       return true
     } catch (e: any) {
-      error.value = e.message ?? fallback('error.loadBaseMetadata')
+      if (isCurrent()) error.value = e.message ?? fallback('error.loadBaseMetadata')
       return false
     } finally {
-      loading.value = false
+      if (generation === contextLoadGeneration) loading.value = false
     }
   }
 
@@ -365,11 +387,14 @@ export function useMultitableWorkbench(opts?: {
     }
     const snapshot = snapshotState()
     activeBaseId.value = baseId
-    const ok = await loadBaseContext(baseId, {
+    const pending = loadBaseContext(baseId, {
       sheetId: requestedSheetId || undefined,
       viewId: requestedViewId || undefined,
     })
+    const isCurrent = currentContextRequest()
+    const ok = await pending
     if (ok) return true
+    if (!isCurrent()) return false
     const failureMessage = error.value
     restoreSnapshot(snapshot)
     error.value = failureMessage ?? fallback('error.loadBaseMetadata')
@@ -452,8 +477,12 @@ export function useMultitableWorkbench(opts?: {
         return true
       }
       const snapshot = snapshotState()
-      const ok = await loadSheetMeta(nextSheetId, { viewId: nextViewId || undefined })
+      loading.value = true
+      const pending = loadSheetMeta(nextSheetId, { viewId: nextViewId || undefined })
+      const isCurrent = currentContextRequest()
+      const ok = await pending
       if (ok) return true
+      if (!isCurrent()) return false
       const failureMessage = error.value
       restoreSnapshot(snapshot)
       error.value = failureMessage ?? fallback('error.loadSheetMetadata')
@@ -462,8 +491,12 @@ export function useMultitableWorkbench(opts?: {
 
     if (nextViewId && nextViewId !== activeViewId.value && activeSheetId.value) {
       const snapshot = snapshotState()
-      const ok = await loadSheetMeta(activeSheetId.value, { viewId: nextViewId })
+      loading.value = true
+      const pending = loadSheetMeta(activeSheetId.value, { viewId: nextViewId })
+      const isCurrent = currentContextRequest()
+      const ok = await pending
       if (ok) return true
+      if (!isCurrent()) return false
       const failureMessage = error.value
       restoreSnapshot(snapshot)
       error.value = failureMessage ?? fallback('error.loadSheetMetadata')

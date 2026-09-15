@@ -9,6 +9,167 @@ function mockClient(data: any = {}) {
   })
 }
 
+describe('workbench context request ownership', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (reason: Error) => void
+    const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail })
+    return { promise, resolve, reject }
+  }
+
+  function fixture() {
+    const client = mockClient()
+    const wb = useMultitableWorkbench({
+      client, initialBaseId: 'base_a', initialSheetId: 'sheet_a', initialViewId: 'view_a',
+    })
+    const context = (suffix: string) => ({
+      base: { id: `base_${suffix}`, name: suffix },
+      sheet: { id: `sheet_${suffix}`, baseId: `base_${suffix}`, name: suffix },
+      sheets: [{ id: `sheet_${suffix}`, baseId: `base_${suffix}`, name: suffix }],
+      views: [{ id: `view_${suffix}`, sheetId: `sheet_${suffix}`, name: suffix, type: 'grid' as const }],
+      capabilities: { ...wb.capabilities.value, canRead: true },
+    })
+    const fieldData = (name: string) => ({ fields: [{ id: 'field', name, type: 'string' as const }] })
+    const contexts = vi.spyOn(client, 'loadContext').mockImplementation(async (params) => (
+      context((params.baseId ?? params.sheetId ?? 'base_a').split('_')[1])
+    ))
+    const fields = vi.spyOn(client, 'listFields').mockImplementation(async (sheetId) => fieldData(sheetId))
+    return { wb, client, context, fieldData, contexts, fields }
+  }
+
+  it('does not let an older poll overwrite a newer restore refresh on the same sheet', async () => {
+    const { wb, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const oldPoll = wb.loadSheetMeta('sheet_a')
+    expect(await wb.loadSheetMeta('sheet_a')).toBe(true)
+    const latestFields = wb.fields.value
+    late.resolve(fieldData('before restore'))
+    expect(await oldPoll).toBe(false)
+    expect(wb.fields.value).toBe(latestFields)
+    expect(wb.fields.value).toEqual(fieldData('sheet_a').fields)
+    expect(wb.error.value).toBeNull()
+  })
+
+  it('does not let a restored-sheet refresh return the user to an older base', async () => {
+    const { wb, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const refresh = wb.loadSheetMeta('sheet_a')
+    expect(await wb.switchBase('base_b')).toBe(true)
+    late.resolve(fieldData('old base'))
+    expect(await refresh).toBe(false)
+    expect([wb.activeBaseId.value, wb.activeSheetId.value, wb.activeViewId.value])
+      .toEqual(['base_b', 'sheet_b', 'view_b'])
+    expect(wb.fields.value).toEqual(fieldData('sheet_b').fields)
+  })
+
+  it('does not roll back a newer successful switch when an older context returns', async () => {
+    const { wb, contexts, context, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof context>>()
+    contexts.mockImplementationOnce(() => late.promise)
+    const oldSwitch = wb.switchBase('base_b')
+    expect(await wb.switchBase('base_c')).toBe(true)
+    late.resolve(context('b'))
+    expect(await oldSwitch).toBe(false)
+    expect([wb.activeBaseId.value, wb.activeSheetId.value, wb.activeViewId.value])
+      .toEqual(['base_c', 'sheet_c', 'view_c'])
+    expect(wb.fields.value).toEqual(fieldData('sheet_c').fields)
+    expect(wb.error.value).toBeNull()
+    expect(wb.loading.value).toBe(false)
+  })
+
+  it('does not apply an older base field response after the new base finishes', async () => {
+    const { wb, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const oldSwitch = wb.switchBase('base_b')
+    await vi.waitFor(() => expect(fields).toHaveBeenCalledWith('sheet_b'))
+    expect(await wb.switchBase('base_c')).toBe(true)
+    late.resolve(fieldData('old fields'))
+    expect(await oldSwitch).toBe(false)
+    expect(wb.activeBaseId.value).toBe('base_c')
+    expect(wb.fields.value).toEqual(fieldData('sheet_c').fields)
+    expect(wb.loading.value).toBe(false)
+  })
+
+  it('ignores a stale external-context error without rolling back the newer selection', async () => {
+    const { wb, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const oldSwitch = wb.syncExternalContext({ sheetId: 'sheet_b' })
+    expect(await wb.switchBase('base_c')).toBe(true)
+    late.reject(new Error('older request failed'))
+    expect(await oldSwitch).toBe(false)
+    expect(wb.activeBaseId.value).toBe('base_c')
+    expect(wb.fields.value).toEqual(fieldData('sheet_c').fields)
+    expect(wb.error.value).toBeNull()
+  })
+
+  it.each([
+    { scope: 'sheet', input: { sheetId: 'sheet_b' }, suffix: 'b', viewId: 'view_b' },
+    { scope: 'view', input: { viewId: 'view_selected' }, suffix: 'a', viewId: 'view_selected' },
+  ])('marks an external $scope navigation busy until its metadata settles', async ({ input, suffix, viewId }) => {
+    const { wb, contexts, context, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const target = context(suffix)
+    contexts.mockResolvedValueOnce({
+      ...target,
+      views: [{ ...target.views[0], id: viewId }],
+    })
+    const navigation = wb.syncExternalContext(input)
+    expect(wb.loading.value).toBe(true)
+    late.resolve(fieldData('selected context'))
+    expect(await navigation).toBe(true)
+    expect([wb.activeSheetId.value, wb.activeViewId.value]).toEqual([`sheet_${suffix}`, viewId])
+    expect(wb.fields.value).toEqual(fieldData('selected context').fields)
+    expect(wb.loading.value).toBe(false)
+  })
+
+  it('keeps a view selected while an older metadata response was in flight', async () => {
+    const { wb, fields, fieldData } = fixture()
+    const late = deferred<ReturnType<typeof fieldData>>()
+    fields.mockImplementationOnce(() => late.promise)
+    const refresh = wb.loadSheetMeta('sheet_a')
+    wb.selectView('view_selected')
+    late.resolve(fieldData('old view'))
+    expect(await refresh).toBe(false)
+    expect(wb.activeViewId.value).toBe('view_selected')
+    expect(wb.fields.value).toEqual([])
+  })
+
+  it('keeps the latest loading state while an older base request finishes', async () => {
+    const { wb, contexts, context } = fixture()
+    const older = deferred<ReturnType<typeof context>>()
+    const latest = deferred<ReturnType<typeof context>>()
+    contexts.mockImplementationOnce(() => older.promise).mockImplementationOnce(() => latest.promise)
+    const oldSwitch = wb.switchBase('base_b')
+    const newSwitch = wb.switchBase('base_c')
+    older.resolve(context('b'))
+    expect(await oldSwitch).toBe(false)
+    expect(wb.loading.value).toBe(true)
+    latest.resolve(context('c'))
+    expect(await newSwitch).toBe(true)
+    expect(wb.loading.value).toBe(false)
+    expect(wb.activeBaseId.value).toBe('base_c')
+  })
+
+  it('ignores an older global sheet list after a base context is selected', async () => {
+    const { wb, client, context } = fixture()
+    wb.activeBaseId.value = ''
+    wb.activeSheetId.value = ''
+    const late = deferred<{ sheets: ReturnType<typeof context>['sheets'] }>()
+    vi.spyOn(client, 'listSheets').mockImplementationOnce(() => late.promise)
+    const globalLoad = wb.loadSheets()
+    expect(await wb.switchBase('base_b')).toBe(true)
+    late.resolve({ sheets: context('a').sheets })
+    await globalLoad
+    expect(wb.sheets.value).toEqual(context('b').sheets)
+    expect(wb.activeBaseId.value).toBe('base_b')
+  })
+})
+
 describe('useMultitableWorkbench', () => {
   beforeEach(() => {
     useLocale().setLocale('en')
