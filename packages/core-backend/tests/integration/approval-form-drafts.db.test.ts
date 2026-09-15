@@ -307,11 +307,24 @@ describeIfDatabase('P3-3 approval_form_drafts — real-DB acceptance (contract �
   })
 
   // ===============================================================================================
-  // FIX 4 (gate P2-4) — constructed interleaving: `clearApprovalFormDraft` (the DELETE endpoint,
-  // which deliberately takes NO advisory lock) races `saveApprovalFormDraft`'s UPDATE branch
-  // between its existence SELECT and its UPDATE. Driven by intercepting the ACTUAL query the
-  // production transaction issues (via the raw pg.Pool's `connect()`), not by a sleep/timing
-  // guess — the interleaving fires deterministically on every run.
+  // FIX 4 (gate P2-4) — constructed interleaving: an unlocked writer's DELETE races
+  // `saveApprovalFormDraft`'s UPDATE branch between its existence SELECT and its UPDATE. Driven by
+  // intercepting the ACTUAL query the production transaction issues (via the raw pg.Pool's
+  // `connect()`), not by a sleep/timing guess — the interleaving fires deterministically on every
+  // run.
+  //
+  // UPDATE (gate2 P3-D fix round): `clearApprovalFormDraft` used to be exactly such an unlocked
+  // writer and is what these two tests originally used to construct this race. It NOW shares
+  // `saveApprovalFormDraft`'s advisory lock (see that function's own comment), so it can no longer
+  // commit a DELETE while a save's transaction is mid-flight — calling it from inside this
+  // interleave hook would deadlock (the save transaction is paused waiting on the hook, which would
+  // be waiting on a lock the paused save transaction itself holds) rather than construct the race.
+  // These two tests now use a raw bypass DELETE (the same statement `clearApprovalFormDraft` used
+  // to issue, run directly against the pool with no lock) standing in for the class of unlocked
+  // writer this 409 path still has to defend against — currently `sweepExpiredApprovalFormDrafts`,
+  // which deliberately remains lock-free (see its own comment) since it is a global, not per-user,
+  // operation. The NEW interleaving `clearApprovalFormDraft` itself can no longer be raced into is
+  // covered separately below ("FIX P3-D").
   // ===============================================================================================
   describe('FIX 4: concurrent clear/save interleaving is a clean conflict, not a TypeError, and commits nothing extra', () => {
     /** Patches the raw pg.Pool's `connect()` so the FIRST client it hands out afterward has its
@@ -357,10 +370,12 @@ describeIfDatabase('P3-3 approval_form_drafts — real-DB acceptance (contract �
       expect((before.rows[0] as { c: number }).c).toBe(1)
 
       const restore = interleaveAfterExistenceSelect(async () => {
-        // A SEPARATE connection performs the clear WHILE the save's transaction is paused between
-        // its SELECT and its UPDATE — clearApprovalFormDraft takes no advisory lock, so this
-        // commits immediately and independently of the save's still-open transaction.
-        await clearApprovalFormDraft(pool(), userId, templateId)
+        // A SEPARATE connection performs a raw, unlocked DELETE (standing in for
+        // `sweepExpiredApprovalFormDrafts` or any other unlocked writer — see the describe block's
+        // own header comment for why this is no longer `clearApprovalFormDraft` itself) WHILE the
+        // save's transaction is paused between its SELECT and its UPDATE — no advisory lock, so
+        // this commits immediately and independently of the save's still-open transaction.
+        await pool().query(`DELETE FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`, [userId, templateId])
       })
       let caught: unknown = null
       try {
@@ -386,7 +401,9 @@ describeIfDatabase('P3-3 approval_form_drafts — real-DB acceptance (contract �
       await saveApprovalFormDraft({ userId, templateId, signature: 'sig-1', data: { v: 1 } })
 
       const restore = interleaveAfterExistenceSelect(async () => {
-        await clearApprovalFormDraft(pool(), userId, templateId)
+        // Raw, unlocked DELETE — see the describe block's header comment for why this is no longer
+        // `clearApprovalFormDraft` itself.
+        await pool().query(`DELETE FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`, [userId, templateId])
       })
       let res: Response
       try {
@@ -401,6 +418,92 @@ describeIfDatabase('P3-3 approval_form_drafts — real-DB acceptance (contract �
       const parsed = JSON.parse(raw) as { ok: boolean; error?: { code?: string } }
       expect(parsed.ok).toBe(false)
       expect(parsed.error?.code).toBe('APPROVAL_FORM_DRAFT_CONFLICT')
+    })
+  })
+
+  // ===============================================================================================
+  // FIX P3-D (gate2) — the "reverse interleaving" the gate disclosed: `clearApprovalFormDraft` used
+  // to be able to commit its DELETE as a no-op (nothing existed yet) WHILE a save's transaction was
+  // paused between its existence SELECT and its INSERT branch, and then that save's INSERT would
+  // commit unhindered right after — net effect: a clear the user fired got silently undone by a
+  // save that was already in flight. `clearApprovalFormDraft` now shares the SAME user-scoped
+  // advisory lock the save transaction takes, so this constructs the SAME window and proves the
+  // outcome flips: clear can no longer no-op past the save — it is forced to wait for the lock,
+  // which the save is holding, so it only runs (and finds the row) AFTER the save fully commits.
+  // ===============================================================================================
+  describe('FIX P3-D (gate2): clear cannot interleave inside a save transaction\'s SELECT-then-INSERT window', () => {
+    /** Same technique as `interleaveAfterExistenceSelect` above, but `onSelect` here is
+     *  fire-and-forget from the hook's own point of view: it must NOT be awaited before the SELECT's
+     *  result is returned to the save transaction, because `clearApprovalFormDraft` now needs the
+     *  SAME advisory lock this save transaction is currently holding — awaiting it here would
+     *  deadlock (the save transaction sits paused waiting on this hook, while the hook waits on a
+     *  lock only the paused save transaction can release). The caller gets back both the restore
+     *  function AND a way to observe the clear's own promise once it is kicked off. */
+    function interleaveDuringInsertBranch(onSelect: () => void): () => void {
+      const rawPool = poolManager.get().getInternalPool()
+      const originalConnect = rawPool.connect.bind(rawPool)
+      let patchedOneClient = false
+      ;(rawPool as unknown as { connect: unknown }).connect = async (...args: unknown[]) => {
+        const client = await (originalConnect as unknown as (...a: unknown[]) => Promise<{ query: unknown }>)(...args)
+        if (!patchedOneClient) {
+          patchedOneClient = true
+          const originalClientQuery = (client.query as (...a: unknown[]) => Promise<unknown>).bind(client)
+          let fired = false
+          ;(client as unknown as { query: unknown }).query = async (...qargs: unknown[]) => {
+            const result = await originalClientQuery(...qargs)
+            const sqlText = typeof qargs[0] === 'string' ? qargs[0] : (qargs[0] as { text?: string } | undefined)?.text
+            if (!fired && typeof sqlText === 'string' && sqlText.includes('SELECT id FROM approval_form_drafts WHERE user_id')) {
+              fired = true
+              onSelect() // NOT awaited -- let the save's SELECT resolve and proceed toward INSERT
+            }
+            return result
+          }
+        }
+        return client
+      }
+      return () => {
+        ;(rawPool as unknown as { connect: unknown }).connect = originalConnect
+      }
+    }
+
+    it('a clear issued WHILE a first-time save transaction is between its existence-SELECT (finds nothing) and its INSERT waits for the shared lock, then deletes the row the save just committed -- the draft ends up CLEARED (not resurrected), and neither call throws', async () => {
+      const userId = trackUser(freshId('p33-gate2-p3d-insert-race'))
+      const templateId = freshId('tmpl')
+
+      // Sanity: nothing exists yet for this (user, template) -- the save below MUST take the INSERT
+      // branch (existingId falsy), which is the branch this race is about.
+      const preCount = await pool().query(`SELECT count(*)::int AS c FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`, [userId, templateId])
+      expect((preCount.rows[0] as { c: number }).c).toBe(0)
+
+      let clearPromise: Promise<void> = Promise.resolve()
+      const restore = interleaveDuringInsertBranch(() => {
+        // Fired the instant the save's existence-SELECT resolves (existingId will be undefined --
+        // nothing exists yet). This clear now needs the SAME advisory lock the save's transaction
+        // already holds, so it cannot even attempt its DELETE until the save's transaction commits.
+        clearPromise = clearApprovalFormDraft(userId, templateId)
+      })
+
+      let saved: Awaited<ReturnType<typeof saveApprovalFormDraft>> | undefined
+      let saveError: unknown = null
+      try {
+        saved = await saveApprovalFormDraft({ userId, templateId, signature: 'sig-p3d', data: { v: 'first-save' } })
+      } catch (error) {
+        saveError = error
+      } finally {
+        restore()
+      }
+      await clearPromise // the deferred clear must have unblocked and run by now
+
+      // The save itself must have succeeded normally -- asserted by VALUE, not merely "did not
+      // throw" (a vacuous pass if nothing had run at all).
+      expect(saveError).toBeNull()
+      expect(saved?.templateId).toBe(templateId)
+      expect(saved?.data).toEqual({ v: 'first-save' })
+
+      // The delayed clear, having waited out the save's transaction, now finds and removes the row
+      // the save just committed -- the draft ends up CLEARED, not resurrected.
+      const after = await pool().query(`SELECT count(*)::int AS c FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`, [userId, templateId])
+      expect((after.rows[0] as { c: number }).c).toBe(0)
     })
   })
 

@@ -1022,11 +1022,45 @@ async function applyDraftRestore(): Promise<void> {
   }
 }
 
+/** P3-3 FIX C (gate2 P3-D) — the "quiesce then clear" sequence, factored out so the submit path and
+ *  the discard-restore path cannot drift onto different behavior again (which is exactly how
+ *  `discardDraftRestore` missed this fix the first time — gate2 P3-D residual #1). See the submit
+ *  call site's own comment (below) for the full race/residual/rejected-alternatives writeup this
+ *  sequence closes; this function IS that sequence: cancel the pending debounce timer (a save that
+ *  has not been ISSUED yet must never fire after the clear) and defer the CLEAR itself until any
+ *  already-IN-FLIGHT save (issued, HTTP request already sent) settles — because a save whose fetch
+ *  RESOLVES via a real response can only do so after its own server-side transaction has already
+ *  committed or rolled back, so once that promise settles there is no window left for this CLEAR to
+ *  land first.
+ *
+ *  Deliberately does NOT touch `draftArmed` — that is each CALL SITE's own decision, not shared.
+ *  `handleSubmit` sets `draftArmed = false` at its own call site because the component is about to
+ *  navigate away and never needs to autosave again; `discardDraftRestore` must NOT do that — it
+ *  runs early in this component's lifecycle (right after mount, before the user has necessarily
+ *  typed anything), and the user is expected to keep filling out THIS SAME form afterward. Sharing
+ *  a permanent disarm here would silently kill autosave for the rest of the session on every
+ *  discard — a session-wide, common-path regression, not a narrow one (unlike the submit call
+ *  site's own version of this hazard — see that site's comment).
+ *
+ *  Fire-and-forget from the CALLER's point of view — neither `saveFormDraftServer` nor
+ *  `clearFormDraftServer` ever throws, and nothing here needs to block the caller on a network
+ *  round-trip. */
+function cancelPendingDraftSaveThenClear(templateId: string | null): void {
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+  const pendingSave = draftSaveInFlight
+  if (templateId) {
+    void (pendingSave ?? Promise.resolve()).finally(() => {
+      void clearFormDraftServer(templateId)
+    })
+  }
+}
+
 function discardDraftRestore(): void {
   const templateId = currentDraftTemplateId()
-  // Best-effort, fire-and-forget — clearFormDraftServer never throws; nothing here needs to await
-  // the network round-trip before the restore banner can dismiss.
-  if (templateId) void clearFormDraftServer(templateId)
+  cancelPendingDraftSaveThenClear(templateId)
   pendingDraft.value = null
   draftRestoreVisible.value = false
 }
@@ -1651,9 +1685,9 @@ async function handleSubmit() {
     // CLEAR is fired right away regardless, its DELETE can commit on the server BEFORE that
     // in-flight SAVE's own transaction opens; the save then finds no existing row (`existingId`
     // undefined, approval-form-draft-service.ts's upsert `else` branch) and INSERTs, resurrecting
-    // the draft the user just submitted — the exact "silently resurrect the row" outcome that
-    // save's own docblock (approval-form-draft-service.ts:346-351) rejects for the narrower
-    // SELECT-vs-UPDATE window; this is that same rejection, widened to cover the
+    // the draft the user just submitted — the exact "silently resurrect the row" outcome
+    // `clearApprovalFormDraft`'s own comment (approval-form-draft-service.ts) rejects for the
+    // narrower SELECT-vs-UPDATE window; this is that same rejection, widened to cover the
     // already-in-flight-request window too.
     //   - Chosen: AWAIT the in-flight save (if any) before issuing CLEAR. This closes the window
     //     for the DOMINANT case: `saveFormDraftServer` never throws, but for a save whose fetch
@@ -1687,19 +1721,25 @@ async function handleSubmit() {
     // The await is NOT on the outer `handleSubmit` (navigation/other post-submit work below must
     // not block on a network round-trip that may already be seconds old) — only the CLEAR itself
     // is deferred until the in-flight save (if any) settles, via `.finally()`.
+    //
+    // FIX (gate2 P3-D, this same fix round): the cancel-timer / await-in-flight-save / defer-clear
+    // sequence itself now lives in the shared `cancelPendingDraftSaveThenClear` helper (used by
+    // `discardDraftRestore` too — see its own comment for why `draftArmed = false` stays HERE,
+    // submit-only, rather than moving into the shared helper). Separately, `saveApprovalFormDraft`
+    // / `clearApprovalFormDraft` (server) now serialize against each other via a shared advisory
+    // lock, closing this same race INSIDE an overlapping transaction even without this client-side
+    // await — but that does not make this await redundant: it is what stops CLEAR from even being
+    // SENT until the dominant-case save is known-settled, and it is still the only thing that helps
+    // at all for the "save's fetch rejects but the request already reached the server" residual
+    // described two paragraphs up, which the server lock cannot see (the two requests never overlap
+    // as far as the lock is concerned once the earlier one has already fully committed).
     {
       const submittedTemplateId = currentDraftTemplateId()
-      if (draftSaveTimer) {
-        clearTimeout(draftSaveTimer)
-        draftSaveTimer = null
-      }
+      // Submit-only: the component is about to navigate away (see below) and will not autosave
+      // again, so a PERMANENT disarm here is safe. `discardDraftRestore` must NOT do this — see
+      // `cancelPendingDraftSaveThenClear`'s own comment for why.
       draftArmed = false
-      const pendingSave = draftSaveInFlight
-      if (submittedTemplateId) {
-        void (pendingSave ?? Promise.resolve()).finally(() => {
-          void clearFormDraftServer(submittedTemplateId)
-        })
-      }
+      cancelPendingDraftSaveThenClear(submittedTemplateId)
     }
     // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
     const submittedTemplate = template.value

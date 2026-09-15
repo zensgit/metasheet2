@@ -1047,6 +1047,87 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
       }
     })
 
+    // -----------------------------------------------------------------------
+    // P3-3 FIX C (gate2 P3-D residual #1) -- `discardDraftRestore` used to fire `clearFormDraftServer`
+    // with NO regard for a pending/in-flight autosave at all: the identical race shape the two FIX C
+    // tests above cover for the submit path, gate2 found NOT covered here. Mirrors the submit-path
+    // test immediately above, but through `discardDraftRestore` (the shared
+    // `cancelPendingDraftSaveThenClear` helper is what makes the two paths behave identically here).
+    // NOTE: unlike submit, discard does NOT set `draftArmed = false` (see that helper's own comment
+    // for why) -- so this test must not type AGAIN after clicking discard, or a legitimate fresh
+    // save of the POST-discard content could arm and fire, which would be correct behavior, not a
+    // resurrection, but would confound this assertion.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX C (discard path): discard does not issue CLEAR while a debounced SAVE is still in flight, and no SAVE of the pre-discard content follows the CLEAR', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView() // the restore GET resolves during onMounted -> draftRestoreVisible=true, draftArmed=true
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy() // the restore offer fired
+
+        let resolveSave: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveSave = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed while the restore banner is still up'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+
+        // Let the 800ms debounce fire -- SAVE is now ISSUED but held open by `resolveSave`, i.e.
+        // genuinely IN FLIGHT, not merely scheduled.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled()
+
+        discardBtn!.click()
+        await flushUi()
+
+        // The old behaviour cleared immediately regardless of the in-flight save -- REDS here under
+        // that behaviour.
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while a same-slot SAVE is still in flight at discard time either',
+        ).not.toHaveBeenCalled()
+
+        // Settle the in-flight save -- CLEAR must follow now, and only now. Nothing was typed after
+        // the discard click, so no further save is expected either.
+        resolveSave()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1) // still just the one pre-discard save
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('POSITIVE CONTROL for the discard-path assertion above: WITHOUT discard, the identical typing DOES eventually produce a SAVE (proves the harness can detect a real SAVE firing -- the negative result above is not vacuous)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        reasonInput!.value = 'typed, discard never clicked'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // not yet -- still within the debounce window
+
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled() // the SAME 800ms elapsing, absent a discard, DOES fire the save
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled() // no discard happened -- nothing cleared
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('restore drops GC-swept attachment refs, warns, and keeps the live ones (positive control)', async () => {
       seedDraft(['att_live', 'att_swept'])
       fetchApprovalAttachmentRefsSpy.mockResolvedValue([

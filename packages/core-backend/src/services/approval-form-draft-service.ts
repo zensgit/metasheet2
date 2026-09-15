@@ -71,6 +71,16 @@
  *     read and the insert) — prune-on-write remains self-healing against rows inserted by some
  *     OTHER path directly, because the very next write (now itself serialized per-user) re-runs
  *     the same DELETE against a fully committed view of that user's rows.
+ *
+ *   FIX (gate2 P3-D) — `clearApprovalFormDraft` NOW ALSO takes this same user-scoped advisory lock
+ *     (see its own comment for the full race and the exact window this closes: a clear that used to
+ *     be able to commit as a no-op WHILE a save's transaction was between its existence-SELECT and
+ *     its INSERT, letting that save's INSERT resurrect the draft moments after the user asked to
+ *     remove it). Honest residual (documented in the PR body, not closed here — it needs a
+ *     monotonic marker that survives row deletion, which is DDL): a clear that runs to completion
+ *     entirely BEFORE a save's transaction even begins is unaffected by this lock — that save will
+ *     still create a fresh row, because from the lock's point of view the two transactions never
+ *     overlapped at all.
  */
 import { randomUUID } from 'crypto'
 import { transaction as runInTransaction } from '../db/pg'
@@ -185,6 +195,14 @@ export function formSchemaSignature(schema: ApprovalFormSchemaLike): string {
 
 function isNonBlank(value: unknown): value is string {
   return typeof value === 'string' && /[!-~]/.test(value)
+}
+
+/** FIX (gate2 P3-D): single source for the user-scoped advisory lock key, used by BOTH
+ *  `saveApprovalFormDraft` and `clearApprovalFormDraft` so the two paths cannot silently drift onto
+ *  different keys — two different literal strings would defeat the entire point of "the same lock"
+ *  (see `clearApprovalFormDraft`'s own comment for why it now takes this lock too). */
+function draftLockKey(userId: string): string {
+  return `approval_form_draft:${userId}`
 }
 
 function assertIdentity(userId: string, templateId: string): void {
@@ -326,28 +344,42 @@ export async function saveApprovalFormDraft(input: SaveApprovalFormDraftInput): 
     // and a batch lock (plus, via `acquireCanonicalSheetFencesInOrder`, one per sheet id) in one
     // transaction; `multitable/canonical-sheet-fence.ts`'s `acquireCanonicalSheetFencesInOrder` takes
     // one advisory lock per sheet id, in sorted order, in one transaction.
-    // The conclusion (no new cycle) still holds, but on a NARROWER, directly-checked basis:
-    //   1. A deadlock cycle over THIS advisory lock needs a SECOND transaction to also attempt
-    //      `pg_advisory_xact_lock` on this exact key while holding something this transaction
-    //      wants. Only one line in the entire repository ever acquires this key namespace — this
-    //      one. Full-repo grep (not scoped to any one package, `plugins/` included, with a positive
-    //      control proving the grep actually reaches every directory searched — `grep -rl
+    // UPDATE (gate2 P3-D fix round): `clearApprovalFormDraft` below NOW ALSO acquires this exact
+    // key (via the shared `draftLockKey` helper — one string builder, not two copy-pasted literals,
+    // so the two call sites cannot drift onto different keys) — see that function's own comment for
+    // why (it closes the "clear lands mid-save-transaction" race). The conclusion (no new deadlock
+    // cycle) still holds, but the basis below is updated for that:
+    //   1. A deadlock cycle over THIS advisory lock needs two transactions EACH holding something
+    //      the OTHER is waiting on. Both call sites that ever acquire this key namespace — save's
+    //      lock call above and clear's below — take it as their FIRST statement, before any row
+    //      operation on `approval_form_drafts`, and neither acquires any OTHER lock (advisory or
+    //      otherwise) at any point in its transaction. So the only thing either transaction can ever
+    //      be waiting on is this ONE key, held by the other — that is ordinary serialization (one
+    //      waits for the other to commit/roll back), not a cycle: a cycle needs a SECOND, differently
+    //      -ordered lock for the two transactions to deadlock over, and there isn't one here. Full-
+    //      repo grep (not scoped to any one package, `plugins/` included, with a positive control
+    //      proving the grep actually reaches every directory searched — `grep -rl
     //      --exclude-dir=.git --exclude-dir=node_modules "pg_advisory_xact_lock" .` returns 163
     //      hits across the tree, so the search is not silently empty):
     //      `grep -rn --exclude-dir=.git --exclude-dir=node_modules "approval_form_draft:" .` returns
-    //      exactly 2 hits, both on THIS file (this line and the comment naming the command). No
-    //      second transaction can ever be waiting on this key, so no cycle can form through it —
-    //      independent of what else this transaction locks internally.
-    //   2. Separately (belt-and-suspenders, not required for #1): the only OTHER writers to this
-    //      table are `clearApprovalFormDraft` and `sweepExpiredApprovalFormDrafts` below, and
-    //      NEITHER acquires any advisory lock at all (see each function's own comment) — so nothing
-    //      could be holding a row lock on `approval_form_drafts` while ALSO waiting on this key even
-    //      if some other code path somehow reused it.
+    //      exactly 2 hits, both on THIS file: the `draftLockKey` helper's own template string (the
+    //      ONLY place this literal exists — both lock-acquiring call sites, here and in
+    //      `clearApprovalFormDraft` below, call the helper rather than repeating the literal) and
+    //      the comment naming the command — confirming no third code path anywhere reuses this key
+    //      namespace.
+    //   2. Separately (belt-and-suspenders, not required for #1): the only OTHER writer to this
+    //      table is `sweepExpiredApprovalFormDrafts` below, a global TTL sweep across ALL users'
+    //      rows (not scoped to a single user, so it cannot meaningfully take a PER-USER lock keyed
+    //      this way without defeating its own purpose) — it acquires no advisory lock at all (see
+    //      its own comment), so it cannot be a participant in a cycle through this key either way.
+    //      This remains a residual (an unlocked bulk writer can still race a save's transaction the
+    //      same way `clearApprovalFormDraft` used to — see the PR body's disclosure list); it is not
+    //      newly introduced by this fix and is out of scope for it.
     // Narrowing the hash key space from `user:template` to `user` (one fewer distinguishing segment
     // fed into `hashtext()`) is a THROUGHPUT consideration (a hash collision with some unrelated
     // advisory lock elsewhere in the repo would serialize two unrelated critical sections against
     // each other) — it is not a correctness concern.
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`approval_form_draft:${userId}`])
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [draftLockKey(userId)])
 
     const existing = await client.query(
       `SELECT id FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`,
@@ -367,11 +399,19 @@ export async function saveApprovalFormDraft(input: SaveApprovalFormDraftInput): 
       const updatedRow = updateRes.rows[0] as unknown as ApprovalFormDraftRow | undefined
       if (!updatedRow) {
         // FIX 4 (gate P2-4): the row existed at the SELECT above but is gone by the time this
-        // UPDATE runs — the interleaving is `clearApprovalFormDraft` (the DELETE endpoint), which
-        // deliberately takes NO advisory lock (see that function's own comment), racing this same
-        // (user, template) slot between this transaction's SELECT and UPDATE. This is a real,
-        // constructed race (see the interleaving test in approval-form-drafts.db.test.ts), not a
-        // theoretical one. Two branches were considered:
+        // UPDATE runs. ORIGINALLY this was reachable via `clearApprovalFormDraft` (the DELETE
+        // endpoint) racing this same (user, template) slot between this transaction's SELECT and
+        // UPDATE — `clearApprovalFormDraft` took no advisory lock at the time. UPDATE (gate2 P3-D
+        // fix round): `clearApprovalFormDraft` now takes the SAME user-scoped advisory lock this
+        // save transaction is already holding, so it can no longer commit its DELETE while this
+        // transaction is mid-flight — that specific interleaving is closed (see
+        // `clearApprovalFormDraft`'s own comment). This branch stays reachable via any OTHER
+        // unlocked writer racing the same window — currently only `sweepExpiredApprovalFormDrafts`
+        // below (a global TTL sweep, deliberately not lock-scoped to one user — see its own comment)
+        // — so the 409 handling below remains live code, not dead code; the interleaving test in
+        // approval-form-drafts.db.test.ts now constructs it via a direct bypass DELETE standing in
+        // for that kind of unlocked writer, since `clearApprovalFormDraft` itself can no longer
+        // produce this exact race. Two branches were considered:
         //   - Re-INSERT the row: REJECTED. This is the concurrent-clear scenario. A clear that
         //     legitimately raced (and won) a save must not be undone by that same save silently
         //     falling back to an insert — that would resurrect the exact draft the user just asked
@@ -418,9 +458,53 @@ export async function saveApprovalFormDraft(input: SaveApprovalFormDraftInput): 
   })
 }
 
-export async function clearApprovalFormDraft(db: Queryable, userId: string, templateId: string): Promise<void> {
+// FIX (gate2 P3-D): this NO LONGER takes a `db: Queryable` parameter — the whole point of this fix
+// is that the DELETE must run on the SAME connection, inside the SAME kind of transaction, as the
+// advisory lock acquisition immediately below it (an advisory lock acquired via a pool's implicit
+// per-statement connection would be released again before the next statement even ran, providing
+// no protection at all). `saveApprovalFormDraft` above has the identical shape for the identical
+// reason — it does not take a `db` parameter either, always running against the process's one
+// connection pool via `runInTransaction`. An unused, silently-ignored `db` parameter would be worse
+// than no parameter (see the file's own "single definition doesn't make a narrow predicate
+// correct" discipline — the same applies to a parameter nobody consults). The two callers that used
+// to pass a pool here (`routes/approval-form-drafts.ts`, this file's own real-DB test) are updated.
+//
+// WHY THIS NOW TAKES A LOCK AT ALL (gate2 P3-D, CONFIRMED by the gate): before this fix, `clear`
+// took no lock and its single-statement DELETE could commit at ANY point relative to a concurrent
+// `saveApprovalFormDraft` — including the window BETWEEN that save's existence-SELECT and its
+// INSERT (the branch taken when no draft yet exists for this (user, template) — e.g. the user's
+// FIRST save for this template, or a save that legitimately raced a PRIOR clear). In that ordering,
+// `clear`'s DELETE finds nothing to remove (the row doesn't exist yet), commits as a no-op, and the
+// save's INSERT then commits UNHINDERED right after — net effect: the user asked to discard/clear
+// and got back exactly the draft they asked to remove, re-created moments later, with no conflict
+// signal anywhere (unlike the SELECT-vs-UPDATE window above, this ordering does not even go through
+// the 409 branch, because `existingId` was correctly empty at SELECT time — nothing here was ever
+// "wrong" from either statement's own point of view; the two operations were each individually
+// correct and only their INTERLEAVING was not). This is exactly the "reverse interleaving" gate2
+// P3-D disclosed: FIX 4 above only closed the SELECT-vs-UPDATE window (row existed, then vanished);
+// this is the SELECT-vs-INSERT window (row never existed yet, then got created after the clear had
+// already run to completion).
+//
+// THE FIX: `clear` now acquires the IDENTICAL advisory lock `saveApprovalFormDraft` takes (same key
+// via `draftLockKey`, same "lock first, row op after" order), inside its own transaction. This does
+// NOT prevent a clear that starts (and finishes) BEFORE a save's transaction even begins from being
+// followed by that save's INSERT — that ordering is a residual, and is the honest one left in the
+// PR body (closing it needs a monotonic marker that survives row deletion, which is DDL and out of
+// scope here). What it DOES close is the window this comment describes: once a save's transaction
+// has already acquired this lock, a concurrent clear for the SAME user cannot even attempt its
+// DELETE until that save's transaction has fully committed or rolled back — so if the save's
+// existence-SELECT already ran (found nothing) before clear's lock attempt, clear is forced to wait
+// until AFTER the save's INSERT has committed, at which point clear's (now finally running) DELETE
+// finds the just-created row and removes it. The net observable outcome flips from "clear no-ops,
+// then save resurrects" to "save completes, then clear removes it" — the two operations resolve to
+// a clean either-order-fully-serialized outcome instead of a lost-update-shaped interleaving.
+// (Verified by a constructed interleaving in approval-form-drafts.db.test.ts — see "FIX P3-D".)
+export async function clearApprovalFormDraft(userId: string, templateId: string): Promise<void> {
   if (!isNonBlank(userId) || !isNonBlank(templateId)) return
-  await db.query(`DELETE FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`, [userId, templateId])
+  await runInTransaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [draftLockKey(userId)])
+    await client.query(`DELETE FROM approval_form_drafts WHERE user_id = $1 AND template_id = $2`, [userId, templateId])
+  })
 }
 
 // ------------------------------------------------------------------------------------------------

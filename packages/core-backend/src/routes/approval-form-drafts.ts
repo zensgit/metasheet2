@@ -60,10 +60,14 @@ function handleDraftError(res: Response, error: unknown, fallbackCode: string, f
   if (error instanceof ApprovalFormDraftTooLargeError) {
     return res.status(413).json(draftErrorResponse(error.code, error.message))
   }
-  // FIX 4 (gate P2-4): a same-(user,template) `clearApprovalFormDraft` raced this save between its
-  // existence SELECT and its UPDATE. 409, not 500 — this is a deliberate, detected conflict, not
-  // an unexpected failure; the client's `saveFormDraftServer` already swallows any non-2xx
+  // FIX 4 (gate P2-4): the row this save's UPDATE branch expected to find vanished between its
+  // existence SELECT and the UPDATE itself. 409, not 500 — this is a deliberate, detected conflict,
+  // not an unexpected failure; the client's `saveFormDraftServer` already swallows any non-2xx
   // response (contract §4 D), so this surfaces to the user identically to any other lost autosave.
+  // (gate2 P3-D fix round: `clearApprovalFormDraft` now shares this save's advisory lock and can no
+  // longer produce this specific interleaving itself — see that function's own comment — so this
+  // branch is reached via some OTHER unlocked writer, e.g. `sweepExpiredApprovalFormDrafts`, racing
+  // the same window; the 409 handling here stays live code either way.)
   if (error instanceof ApprovalFormDraftConflictError) {
     return res.status(409).json(draftErrorResponse(error.code, error.message))
   }
@@ -127,7 +131,7 @@ export function approvalFormDraftsRouter(): Router {
       if (!pool) return res.status(503).json(draftErrorResponse('SERVICE_UNAVAILABLE', 'DB not configured'))
       const userId = resolveApprovalActorId(req)
       if (!userId) return unauthenticatedResponse(res)
-      await clearApprovalFormDraft(pool, userId, req.params.templateId)
+      await clearApprovalFormDraft(userId, req.params.templateId)
       return res.status(204).end()
     } catch (error) {
       return handleDraftError(res, error, 'APPROVAL_FORM_DRAFT_CLEAR_FAILED', 'Failed to clear approval form draft')
