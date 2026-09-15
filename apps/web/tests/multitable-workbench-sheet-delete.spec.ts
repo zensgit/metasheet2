@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import { fieldDeleteErrorMessage } from '../src/multitable/utils/workbench-labels'
+import type { MetaConfigRevision } from '../src/multitable/api/client'
 
 // Wire-drift lock for the sheet-delete entry (rail trash button → workbench). The rail only EMITS
 // `delete-sheet(id)`; MultitableWorkbench.vue's `onDeleteSheet` is the untested link between that
@@ -28,7 +29,10 @@ const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 
 let capturedRailAttrs: Record<string, unknown> | null = null
+let capturedSheetTrashAttrs: Record<string, unknown> | null = null
+let capturedHistoryAttrs: Record<string, unknown> | null = null
 let capturedFieldManagerAttrs: Record<string, unknown> | null = null
+let capturedConfigHistoryAttrs: Record<string, unknown> | null = null
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -88,6 +92,24 @@ vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({
   }),
 }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/SheetTrashModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedSheetTrashAttrs = attrs
+    return () => h('div', { 'data-sheet-trash': true })
+  } }),
+}))
+vi.mock('../src/multitable/components/HistoryCenterModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedHistoryAttrs = attrs
+    return () => h('div', { 'data-record-history': true })
+  } }),
+}))
+vi.mock('../src/multitable/components/MetaConfigHistoryModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedConfigHistoryAttrs = attrs
+    return () => h('div', { 'data-config-history': true })
+  } }),
+}))
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
@@ -135,6 +157,19 @@ function apiError(status: number, code: string, message: string) {
   return err
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: Error) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+
+const configRows = (id: string): MetaConfigRevision[] => [{
+  id, entityType: 'field', entityId: 'fld_title', action: 'delete',
+  before: { name: id }, after: null, changedKeys: [], batchId: null,
+  actorId: 'test_actor', createdAt: '2026-09-14T00:00:00.000Z',
+}]
+
 function createWorkbenchMock() {
   const activeBaseId = ref('base_ops')
   const activeSheetId = ref<string | null>('sheet_orders')
@@ -147,6 +182,7 @@ function createWorkbenchMock() {
       loadFormContext: vi.fn(), getRecord: vi.fn(), createSheet: vi.fn(), createBase: vi.fn(), renameSheet: vi.fn(),
       createField: vi.fn(), preparePersonField: vi.fn(), updateField: vi.fn(), deleteField: vi.fn(),
       createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(), submitForm: vi.fn(), updateView: vi.fn(),
+      getConfigHistory: vi.fn().mockResolvedValue([]),
       // The function under test:
       deleteSheet: vi.fn().mockResolvedValue({ deleted: 'sheet_orders' }),
     },
@@ -202,6 +238,9 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     capturedRailAttrs = null
+    capturedSheetTrashAttrs = null
+    capturedHistoryAttrs = null
+    capturedConfigHistoryAttrs = null
     confirmSpy = vi.fn(() => true)
     vi.stubGlobal('confirm', confirmSpy)
     container = document.createElement('div')
@@ -238,6 +277,136 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
     workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, canDeleteSheet: false }
     await flushUi()
     expect(capturedRailAttrs!['can-delete-sheet']).toBe(false)
+  })
+
+  it('keeps the base recycle-bin entry after the last live sheet is gone and reloads that base on restore', async () => {
+    workbenchMock.activeSheetId.value = ''
+    workbenchMock.sheets.value = []
+    workbenchMock.capabilities.value = { canDeleteSheet: false }
+    await mountAndGetDelete()
+    const button = container!.querySelector('[data-action="open-trash"]') as HTMLElement
+    expect(button).not.toBeNull(); button.click(); await flushUi()
+    expect(capturedSheetTrashAttrs?.open).toBe(true)
+    expect(capturedSheetTrashAttrs?.['base-id']).toBe('base_ops')
+    expect(capturedSheetTrashAttrs?.client).toBe(workbenchMock.client)
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    await onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadBaseContext.mock.calls).toEqual([['base_ops', { sheetId: 'sheet_restored' }]])
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the active sheet list without switching sheets, and ignores stale-base restore notifications', async () => {
+    await mountAndGetDelete()
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    await onRestored({ baseId: 'old_base', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+    await onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadSheetMeta.mock.calls).toEqual([['sheet_orders']])
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+  })
+
+  it('routes deleted-record recovery through history and refreshes only its current sheet', async () => {
+    await mountAndGetDelete()
+    expect(capturedHistoryAttrs?.['can-restore-records']).toBe(true)
+    const onRestored = capturedHistoryAttrs!.onRestored as (value: { sheetId: string; recordId: string }) => void
+    onRestored({ sheetId: 'other_sheet', recordId: 'r1' })
+    expect(gridMock.reloadCurrentPage).not.toHaveBeenCalled()
+    onRestored({ sheetId: 'sheet_orders', recordId: 'r1' })
+    expect(gridMock.reloadCurrentPage).toHaveBeenCalledTimes(1)
+  })
+
+  async function openConfigHistory(): Promise<void> {
+    const button = container!.querySelector('[data-action="open-config-history"]') as HTMLElement
+    expect(button).not.toBeNull()
+    button.click()
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.visible).toBe(true)
+  }
+
+  it.each(['resolve', 'reject'] as const)('ignores an old config-history %s after a newer filter result', async (settlement) => {
+    const old = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockReturnValueOnce(old.promise).mockResolvedValueOnce(configRows('current'))
+    await mountAndGetDelete()
+    await openConfigHistory()
+    ;(capturedConfigHistoryAttrs!.onFilterChange as (type: string) => void)('field')
+    await flushUi()
+    expect(workbenchMock.client.getConfigHistory.mock.calls).toEqual([['sheet_orders', {}], ['sheet_orders', { entityType: 'field' }]])
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('current'))
+    if (settlement === 'resolve') old.resolve(configRows('obsolete'))
+    else old.reject(new Error('obsolete failure'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('current'))
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+    expect(capturedConfigHistoryAttrs?.['entity-type']).toBe('field')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['resolve', 'reject'] as const)('keeps a reopened config-history load intact after an old %s', async (settlement) => {
+    const old = deferred<MetaConfigRevision[]>()
+    const current = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise)
+    await mountAndGetDelete()
+    await openConfigHistory()
+    ;(capturedConfigHistoryAttrs!.onClose as () => void)()
+    await flushUi()
+    await openConfigHistory()
+    if (settlement === 'resolve') old.resolve(configRows('obsolete'))
+    else old.reject(new Error('obsolete failure'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.loading).toBe(true)
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+    current.resolve(configRows('reopened'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('reopened'))
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+  })
+
+  it.each(['sheet', 'base'] as const)('closes and clears config history on a %s switch, including a return to the old scope', async (scope) => {
+    const old = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockResolvedValueOnce(configRows('loaded')).mockReturnValueOnce(old.promise)
+    await mountAndGetDelete()
+    await openConfigHistory()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('loaded'))
+    ;(capturedConfigHistoryAttrs!.onFilterChange as (type: string) => void)('view')
+    await flushUi()
+    const scopeRef = scope === 'sheet' ? workbenchMock.activeSheetId : workbenchMock.activeBaseId
+    const original = scopeRef.value
+    scopeRef.value = `${original}_other`
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.visible).toBe(false)
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    scopeRef.value = original
+    await flushUi()
+    old.resolve(configRows('obsolete'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.visible).toBe(false)
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not toast a late config-history failure after workbench unmount', async () => {
+    const old = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockReturnValueOnce(old.promise)
+    await mountAndGetDelete()
+    await openConfigHistory()
+    app!.unmount(); app = null
+    old.reject(new Error('obsolete failure'))
+    await flushUi()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('still surfaces a current config-history failure and accepts a subsequent retry', async () => {
+    workbenchMock.client.getConfigHistory.mockRejectedValueOnce(new Error('CURRENT_HISTORY_UNAVAILABLE')).mockResolvedValueOnce(configRows('retry'))
+    await mountAndGetDelete()
+    await openConfigHistory()
+    expect(showErrorSpy).toHaveBeenCalledWith('CURRENT_HISTORY_UNAVAILABLE')
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+    ;(capturedConfigHistoryAttrs!.onFilterChange as (type: string) => void)('field')
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('retry'))
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
   })
 
   it('fails CLOSED when the /context object carries no canDeleteSheet key (old backend), even though the capabilities composable says true', async () => {

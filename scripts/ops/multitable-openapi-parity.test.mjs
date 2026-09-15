@@ -24,6 +24,7 @@ const expectedFieldTypes = [
   'currency',
   'percent',
   'rating',
+  'duration',
   'url',
   'email',
   'phone',
@@ -57,6 +58,19 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   assert.ok(paths['/api/multitable/templates']?.get, 'missing template catalog endpoint')
   assert.ok(paths['/api/multitable/templates/{templateId}/install']?.post, 'missing template install endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}']?.delete, 'missing sheet delete endpoint')
+  const deletedSheets = paths['/api/multitable/bases/{baseId}/trash']?.get
+  assert.ok(deletedSheets, 'missing table recycle-bin list endpoint')
+  assert.deepEqual(deletedSheets.security, [{ bearerAuth: [] }])
+  assert.deepEqual(deletedSheets.parameters.map((p) => p.name), ['baseId', 'limit', 'cursor'])
+  assert.deepEqual(deletedSheets.parameters[1].schema, { type: 'integer', minimum: 1, maximum: 100, default: 20 })
+  const deletedPage = deletedSheets.responses['200'].content['application/json'].schema.properties.data
+  assert.equal(deletedPage.additionalProperties, false)
+  assert.deepEqual(deletedPage.required, ['sheets', 'nextCursor'])
+  assert.deepEqual(Object.keys(deletedPage.properties).sort(), ['nextCursor', 'sheets'])
+  assert.equal(deletedPage.properties.nextCursor.nullable, true)
+  assert.equal(deletedPage.properties.sheets.items.additionalProperties, false)
+  assert.deepEqual(deletedPage.properties.sheets.items.required, ['id', 'baseId', 'name', 'description', 'deletedAt'])
+  assert.ok(paths['/api/multitable/sheets/{sheetId}/restore']?.post, 'missing soft-deleted sheet restore endpoint')
   assert.ok(paths['/api/multitable/records/{recordId}']?.patch, 'missing single-record patch endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/import-xlsx']?.post, 'missing xlsx import endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/export-xlsx']?.get, 'missing xlsx export endpoint')
