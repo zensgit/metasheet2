@@ -460,6 +460,14 @@ describeIfDatabase('C1 — GET /context fenced capability resolution (real DB)',
           canComment: false,
           canManageAutomation: false,
           canSendNotification: false,
+          // Rebase absorption (main's zzzz20260915121000_add_multitable_submit_approval_permission /
+          // #5763, landed after this fixture was hand-typed): deriveCanSubmitApproval :=
+          // isAdminRole || hasPermission(permissions, 'multitable:submit-approval')
+          // (submit-approval-permission.ts). NONPART_ID is non-admin and holds only
+          // 'multitable:read' (see currentUser above) — no 'multitable:submit-approval' grant
+          // anywhere for this actor — so this is derived from that policy, not copied from the
+          // response body under test.
+          canSubmitApproval: false,
           canExport: true,
           pitResetEnabled: false,
           sheetRevertEnabled: false,
