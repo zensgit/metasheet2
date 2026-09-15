@@ -1820,7 +1820,18 @@ export class MultitableApiClient implements CommentsApiClient {
    */
   async listApprovalTemplates(): Promise<{ data: Array<{ id: string; name?: string }>; total: number }> {
     const res = await this.fetch('/api/approval-templates')
-    return this.parseJson(res)
+    // The route answers `{ data: [...], total }`; parseJson unwraps the `data` envelope, so the body
+    // arrives here as the bare array. Re-wrap so callers get the documented `{ data, total }` shape
+    // (before this the editor read `.data` off the array, always got `[]`, and silently fell back to
+    // the free-text template-id input even when the roster loaded fine).
+    const body = await this.parseJson<unknown>(res)
+    const data = Array.isArray(body)
+      ? body
+      : isPlainObject(body) && Array.isArray(body.data)
+        ? body.data
+        : []
+    const items = data.filter((item): item is { id: string; name?: string } => isPlainObject(item) && typeof item.id === 'string')
+    return { data: items, total: items.length }
   }
 
   /**
