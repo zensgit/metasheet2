@@ -1755,6 +1755,10 @@ type DraftActionConfig = Record<string, unknown> & {
   bodyTemplate?: string
   publicFormViewId?: string
   internalViewId?: string
+  // start_approval: the raw persisted config as loaded, kept verbatim so the from-scratch save rebuild can
+  // re-emit keys the editor does not model (e.g. resultWriteback.onNonApproved, the T3-5 cross-base triple,
+  // or any key a future backend accepts). UI-only; never emitted as a config key itself.
+  startApprovalOriginal?: Record<string, unknown> | null
   // W7 start_approval result-writeback pickers (UI-only bindings; assembled into config.resultWriteback on save).
   resultWritebackStatusField?: string
   resultWritebackApproverField?: string
@@ -2956,6 +2960,9 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       resultWritebackStatusField: typeof writeback.statusField === 'string' ? writeback.statusField : '',
       resultWritebackApproverField: typeof writeback.approverField === 'string' ? writeback.approverField : '',
       resultWritebackCompletedAtField: typeof writeback.completedAtField === 'string' ? writeback.completedAtField : '',
+      // Preserve the loaded config verbatim so the save rebuild below cannot drop backend-accepted keys the
+      // editor has no UI for. Deep-cloned so later draft edits cannot mutate the snapshot.
+      startApprovalOriginal: cloneStartApprovalOriginal(config),
     }
   }
   if (type === 'send_dingtalk_group_message') {
@@ -4500,6 +4507,26 @@ function removeFieldUpdate(action: DraftAction, idx: number) {
   ;(action.config.fieldUpdates as FieldPair[]).splice(idx, 1)
 }
 
+// Deep-clone the persisted start_approval config as loaded, minus the UI-only draft keys, so the save-time
+// rebuild can spread it back without either leaking editor scratch state or mutating the snapshot.
+// (The key list is inline, not a module const: this helper runs from the `rule` watcher's immediate pass,
+// which fires before later top-level consts in <script setup> are initialized.)
+function cloneStartApprovalOriginal(config: Record<string, unknown>): Record<string, unknown> {
+  const uiOnly = [
+    'formDataMappingPairs',
+    'resultWritebackStatusField',
+    'resultWritebackApproverField',
+    'resultWritebackCompletedAtField',
+    'startApprovalOriginal',
+  ]
+  const clone: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config)) {
+    if (uiOnly.includes(key)) continue
+    clone[key] = value === null || typeof value !== 'object' ? value : JSON.parse(JSON.stringify(value))
+  }
+  return clone
+}
+
 // start_approval: formDataMapping rows reuse the FieldPair shape (fieldId = the approval-form field key,
 // value = the source record field id). buildActionPayload assembles them into the {key: value} object the
 // backend's validateStartApprovalConfig requires.
@@ -4623,7 +4650,14 @@ function buildPayload(): Partial<AutomationRule> {
       // load→save silently drops it (the lossy round-trip the W7 lock exists to fix). Assemble resultWriteback
       // from the three pickers, emit only non-empty trimmed fields, and OMIT the key entirely when all three are
       // empty — the backend rejects an empty `{}` mapping, so "nothing configured" must round-trip to ABSENCE.
-      const resultWriteback: Record<string, string> = {}
+      // #5724 第一期: the rebuild now starts from the PRESERVED ORIGINAL config, so every key the backend
+      // accepts but this editor does not model (resultWriteback.onNonApproved, the T3-5 cross-base triple
+      // targetBaseId/targetSheetId/targetRecordId, and anything a newer backend adds) survives a
+      // load → edit-something-else → save round-trip byte-equal. Modelled fields are overlaid AFTER the
+      // spread, so the UI still wins for what it does edit.
+      const original = isPlainRecord(action.config.startApprovalOriginal) ? action.config.startApprovalOriginal : {}
+      const originalWriteback = isPlainRecord(original.resultWriteback) ? original.resultWriteback : {}
+      const resultWriteback: Record<string, unknown> = {}
       const statusField = typeof action.config.resultWritebackStatusField === 'string' ? action.config.resultWritebackStatusField.trim() : ''
       const approverField = typeof action.config.resultWritebackApproverField === 'string' ? action.config.resultWritebackApproverField.trim() : ''
       const completedAtField = typeof action.config.resultWritebackCompletedAtField === 'string' ? action.config.resultWritebackCompletedAtField.trim() : ''
@@ -4631,12 +4665,24 @@ function buildPayload(): Partial<AutomationRule> {
       if (approverField) resultWriteback.approverField = approverField
       if (completedAtField) resultWriteback.completedAtField = completedAtField
       const config: Record<string, unknown> = {
+        ...original,
         templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
         formDataMapping: fieldPairsToRecord(action.config.formDataMappingPairs),
       }
-      if (Object.keys(resultWriteback).length > 0) config.resultWriteback = resultWriteback
-      // W7 §6: no `requester` UI in this slice, but carry a backend-valid hand-authored `requester` through so
-      // the from-scratch rebuild stays lossless for any valid config (not just the keys this slice surfaces).
+      // "nothing configured" must round-trip to ABSENCE — the backend rejects an empty `{}` mapping. Clearing
+      // all three pickers therefore drops the whole resultWriteback object, its unmodelled siblings included.
+      if (Object.keys(resultWriteback).length > 0) {
+        const preservedWriteback: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(originalWriteback)) {
+          if (key === 'statusField' || key === 'approverField' || key === 'completedAtField') continue
+          preservedWriteback[key] = value
+        }
+        config.resultWriteback = { ...preservedWriteback, ...resultWriteback }
+      } else {
+        delete config.resultWriteback
+      }
+      // W7 §6: no `requester` UI in this slice — a hand-authored `requester` rides through on the spread above;
+      // an explicit draft value (if a later slice adds the UI) still wins.
       if (action.config.requester !== undefined) config.requester = action.config.requester
       return { type: action.type, config }
     }
