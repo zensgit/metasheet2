@@ -200,8 +200,18 @@ function snapshotComposition(
   if (
     !composition.keyCustody ||
     typeof composition.keyCustody !== 'object' ||
+    typeof composition.keyCustody.produceGenerationDek !== 'function' ||
+    typeof composition.keyCustody.unwrapGenerationDek !== 'function' ||
+    typeof composition.keyCustody.deriveDekFingerprint !== 'function' ||
+    typeof composition.keyCustody.macManifestRoot !== 'function' ||
+    typeof composition.keyCustody.verifyManifestRootMac !== 'function' ||
     !composition.objectStore ||
     typeof composition.objectStore !== 'object' ||
+    typeof composition.objectStore.put !== 'function' ||
+    typeof composition.objectStore.get !== 'function' ||
+    typeof composition.objectStore.head !== 'function' ||
+    typeof composition.objectStore.deleteExpired !== 'function' ||
+    typeof composition.objectStore.pin !== 'function' ||
     !Number.isSafeInteger(composition.auditedReplayHorizonMs) ||
     composition.auditedReplayHorizonMs < 0 ||
     !Number.isSafeInteger(composition.asyncResumeHorizonMs) ||
