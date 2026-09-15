@@ -1,5 +1,13 @@
 # Time Machine Recovery UX Verification
 
+## Current-Main Replay At 28d11496
+
+True merge `4711d94e29d75bb037642f178cca1a9b1f9fa3da`, tree `8f329eb60701373bb272c729373bde954d6eeccb`, ordered parents `d883a3a3d0b2f36f963f43573c4c59af1a39a182` and main `28d11496bb4281738c3dd13096fe317ff42e8780`. Incoming ten paths comprise attendance Web, the approval-template client fix/test and one unrelated document. Exactly one path overlaps the 47-file candidate: `apps/web/src/multitable/api/client.ts`. Its first-parent delta is only main's `listApprovalTemplates` envelope repair; all other owned blobs remain identical. Merge is automatic, no manual conflict resolution. Backend, OpenAPI, plugins, workflows and required-web are byte-identical to the first parent.
+
+On the merged tree: 13 focused recovery/config/history/trash/client and incoming attendance files pass 343/343; application vue-tsc and diff-check pass. Logs `/private/tmp/tm-ux-current-replay-{focused,tsc}.log` are local evidence. No new DB/browser/mutation execution or full required-web rerun is claimed for this unchanged recovery implementation. The existing two-point enrollment is retained unchanged.
+
+Connector readback before replay confirmed #5709 OPEN/Draft at `d883a3a3...`; its returned PR workflow page had 19 success and one expected skip, all completed. That evidence belongs to the old head, not this replay or a complete new-head check census. New publication remains ordinary push to the same Draft/HOLD PR, never Ready/merge. Authenticated browser-to-backend UAT remains open; existing component/browser mocks are presentation evidence only.
+
 ## Current-Main Replay 2026-09-15
 
 Final replay before publication: `78d2e5aa4d5a6d76d6b379c41f5382dc64a0f2b1`, tree `fa6c7b30c42fa6d5d7e5daa2d6b8d3e539e5b855`, absorbs new main `58f704be92fe7711332b84d87a7c545776a38b8f` after the initial gate. That main adds only automation editor/type/test changes; no original candidate path overlap or merge conflict. All original product/test/artifact blobs remain byte-identical; only this report differs, and relative-main census remains 47 files. Additional four editor/history/trash/config neighbors 207/207 and web application typecheck PASS (`/private/tmp/tm-ux-replay-main-neighbor.log`). The full required-web result below binds the initial replay, not a claimed second full rerun after this three-file main advance; fresh published-head CI must validate the final union.
