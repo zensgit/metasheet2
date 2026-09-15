@@ -2,6 +2,15 @@
 
 Status: LOCAL CHECKPOINT ONLY; remaining runtime gates are open.
 
+## Commit Effects Checkpoint
+
+- Code `77fa2e3d85a0fba5b734d86a9b6fa56666645667`; tree `6360456c6bc41512b4770ad2a51efd68224ad05a`.
+- Combined prior eight unit files plus `multitable-recovery-archive-application.test.ts`: 9 files / 168 tests PASS.
+- Five new async-facade cases cover committed, rollback, already-committed, no-pending and effect-failure outcomes; verify exact identity/mutations, ordering after commit, no replay notification and values-free warning. These use the mocked runner, not a real commit/crash test.
+- Mutation removing the committed-only discriminator: already-committed case RED (1 failure / 14 passes); restored combined gate 168/168.
+- Application snapshot test pins callback identity; source/core typecheck, explicit modified-unit typecheck, touched-module ESLint and diff-check PASS. Existing inert-mode table test now declares its unused second argument to satisfy explicit test TypeScript checking; behavior unchanged.
+- This does not prove durable outbox wiring, realDB post-commit ordering, standard startup or runtime notification delivery. Earlier PostgreSQL evidence remains bound to its recorded code/test head below.
+
 Code: `22d9fbcd6eefcfc752e953a79b9cf96341dd2836`.
 Tree: `756d1e7152ad4a2b732ae68525f5b8dda582cf7f`.
 Base: `062614f4407b3d9bffc82dae266071b8a6e5e5bd`.

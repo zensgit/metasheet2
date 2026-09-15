@@ -13,6 +13,8 @@ Status: LOCAL INTEGRATION IN PROGRESS. Not runtime acceptance or enablement.
 
 ## Contract
 
+Commit-effects checkpoint `77fa2e3d85a0fba5b734d86a9b6fa56666645667` (tree `6360456c6bc41512b4770ad2a51efd68224ad05a`) adds an optional worker `afterCommit(identity, mutations)` port. It runs only after a newly committed chunk, never after rollback, already-committed replay, or no-pending result. Transaction callback retries reset accumulated mutation facts. Effect failures log a fixed values-free code and do not rewrite committed status. Application dependency snapshots preserve this callback. Durable events must still be enqueued inside `onMutationApplied`; this best-effort port is not a durable delivery guarantee, and a process crash after COMMIT may lose the notification. Actual production event/formula/realtime handlers and provider startup composition remain to be connected and verified.
+
 Reuse existing recovery authority rather than implementing a permissive worker substitute. HTTP retains its request/database intersection. Background work must resolve the persisted actor from fresh database state and bind the persisted workspace/base/sheet to live scope. An invalid account cannot regain access through a surviving sheet grant.
 
 Full-table readability includes row restrictions, field scopes, and transitive foreign-field/base formula masking. Write authorization must additionally enforce the true delta's row edit/delete, field write, person membership, and forward-link target rules inside the fenced transaction. No cached JWT reconstruction, allow-all callback, or new grant semantics is acceptable.
