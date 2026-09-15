@@ -119,11 +119,16 @@ function normalize(mappings, overrides = {}) {
   return normalizeExtFieldMapping(mappingConfig(mappings, overrides), { pack: PACK })
 }
 
+// The example plm_system string target throughout this suite is `ext_legacyRowId`. It used to be
+// `ext_parentDrawingNo`, which the rehearsal pack stopped declaring on 2026-09-15 (规格 P: the
+// template pair is the one holder of 父组件图号 / 父组件名称), so the normalizer now rightly refuses
+// it as TARGET_NOT_DECLARED_IN_PACK. Nothing here depends on WHICH string column it is.
+//
 // ── 1. the normalizer accepts a valid config ──────────────────────────────────
 
 function normalizerAcceptsAValidConfig() {
   const mapping = normalize([
-    { sourceColumn: 'ParentDrawingNo', target: 'ext_parentDrawingNo' },
+    { sourceColumn: 'LegacyRowId', target: 'ext_legacyRowId' },
     { sourceColumn: 'Spec', target: 'ext_spec' },
     { sourceColumn: 'sort_id', target: 'ext_parentSortNo' },
     { sourceColumn: '提前周期', target: 'ext_standard' },
@@ -138,7 +143,7 @@ function normalizerAcceptsAValidConfig() {
   assert.equal(mapping.targetObjectId, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
 
   assert.deepEqual(extFieldMappingTargetIds(mapping), [
-    'ext_parentDrawingNo',
+    'ext_legacyRowId',
     'ext_spec',
     'ext_parentSortNo',
     'ext_standard',
@@ -149,7 +154,7 @@ function normalizerAcceptsAValidConfig() {
   // so. `coerce` is not authorable — `type` is not even an accepted key.
   const byTarget = new Map(mapping.mappings.map((entry) => [entry.target, entry]))
   assert.equal(byTarget.get('ext_parentSortNo').coerce, 'number')
-  assert.equal(byTarget.get('ext_parentDrawingNo').coerce, 'string')
+  assert.equal(byTarget.get('ext_legacyRowId').coerce, 'string')
   assert.equal(byTarget.get('ext_parentSortNo').ownership, 'plm_system')
   assertThrowsReason(
     () => normalize([{ sourceColumn: 'A', target: 'ext_parentSortNo', type: 'string' }]),
@@ -540,7 +545,7 @@ function nonStringScalarsBecomeTextLosslessly() {
   // is reported values-free (schema ids and a frozen token only).
   const mapping = normalize([
     { sourceColumn: 'Bom_ExAttr7', target: 'ext_spec' },
-    { sourceColumn: 'Bom_ExAttr8', target: 'ext_parentDrawingNo' },
+    { sourceColumn: 'Bom_ExAttr8', target: 'ext_legacyRowId' },
   ])
   const applied = applyExtFieldMapping(mapping, {
     Bom_ExAttr7: 12.5,
@@ -549,7 +554,7 @@ function nonStringScalarsBecomeTextLosslessly() {
   assert.deepEqual(applied.values, { ext_spec: '12.5' })
   assert.deepEqual(applied.errors, [{
     type: 'SOURCE_VALUE_NOT_A_STRING',
-    target: 'ext_parentDrawingNo',
+    target: 'ext_legacyRowId',
     sourceColumn: 'Bom_ExAttr8',
     expectedType: 'string',
   }])
@@ -590,7 +595,7 @@ function sourceData(partOverrides = {}) {
         SysVer: 'V1',
         // The legacy columns the mapper is here to reach. All strings, exactly
         // as the customer system stores them.
-        ParentDrawingNo: 'DWG-A-001',
+        LegacyRowId: 'DWG-A-001',
         SortNo: '10',
         Designer: 'designer-one',
         ...partOverrides,
@@ -602,7 +607,7 @@ function sourceData(partOverrides = {}) {
 }
 
 const ROW_MAPPING_ENTRIES = [
-  { sourceColumn: 'ParentDrawingNo', target: 'ext_parentDrawingNo' },
+  { sourceColumn: 'LegacyRowId', target: 'ext_legacyRowId' },
   { sourceColumn: 'SortNo', target: 'ext_parentSortNo' },
   { sourceColumn: 'Designer', target: 'ext_designer' },
 ]
@@ -634,7 +639,7 @@ async function rowProductionCarriesMappedValues() {
   assert.equal(mapped.valid, true)
   assert.equal(mapped.rows.length, 1)
   const row = mapped.rows[0]
-  assert.equal(row.ext_parentDrawingNo, 'DWG-A-001')
+  assert.equal(row.ext_legacyRowId, 'DWG-A-001')
   assert.equal(row.ext_designer, 'designer-one')
   assert.equal(row.ext_parentSortNo, 10)
   assert.equal(typeof row.ext_parentSortNo, 'number', 'an all-string source lands as a real number')
@@ -654,7 +659,7 @@ async function rowProductionCarriesMappedValues() {
     extFieldMapping: mapping,
   })
   assert.equal(partial.rows.length, 1)
-  assert.equal(partial.rows[0].ext_parentDrawingNo, 'DWG-A-001')
+  assert.equal(partial.rows[0].ext_legacyRowId, 'DWG-A-001')
   assert.equal(
     Object.prototype.hasOwnProperty.call(partial.rows[0], 'ext_parentSortNo'),
     false,
@@ -758,7 +763,7 @@ async function mappedValueReachesTheRecordThroughTheRealPlanner() {
   const plan = planStockPreparationConflicts({ ...planInput, installedFieldProperties: installedSheet() })
   const add = plan.decisions.find((entry) => entry.decision === 'add')
   assert.ok(add, 'the fixture must produce an add decision')
-  assert.equal(add.record.ext_parentDrawingNo, 'DWG-A-001')
+  assert.equal(add.record.ext_legacyRowId, 'DWG-A-001')
   assert.equal(add.record.ext_parentSortNo, 10)
   assert.equal(add.record.ext_designer, 'designer-one')
   assert.equal(add.record.componentCode, 'A-001', 'the canonical half still lands')
@@ -801,7 +806,7 @@ const PHYSICAL = {
   idempotencyKey: 'fld_key',
   projectNo: 'fld_project',
   componentCode: 'fld_code',
-  ext_parentDrawingNo: 'fld_ext_drawing',
+  ext_legacyRowId: 'fld_ext_legacy_row',
 }
 
 function planWith(record) {
@@ -809,7 +814,7 @@ function planWith(record) {
 }
 
 async function unmappedExtKeyFailsLoud() {
-  const record = { idempotencyKey: 'P-001/PART-A/1', componentCode: 'A-001', ext_parentDrawingNo: 'DWG-A-001' }
+  const record = { idempotencyKey: 'P-001/PART-A/1', componentCode: 'A-001', ext_legacyRowId: 'DWG-A-001' }
 
   // A. BOUND — the happy path. The ext_ value is written under its PHYSICAL id,
   // proving the map is what addresses the column.
@@ -822,9 +827,9 @@ async function unmappedExtKeyFailsLoud() {
   })
   assert.equal(okResult.ok, true, JSON.stringify(okResult.errors))
   assert.equal(bound.created.length, 1)
-  assert.equal(bound.created[0].data.fld_ext_drawing, 'DWG-A-001')
+  assert.equal(bound.created[0].data.fld_ext_legacy_row, 'DWG-A-001')
   assert.equal(
-    Object.prototype.hasOwnProperty.call(bound.created[0].data, 'ext_parentDrawingNo'),
+    Object.prototype.hasOwnProperty.call(bound.created[0].data, 'ext_legacyRowId'),
     false,
     'the logical id must not survive translation',
   )
@@ -834,7 +839,7 @@ async function unmappedExtKeyFailsLoud() {
   // id and the write went out addressing a field that does not exist. It must
   // now fail, loudly and typed, and MUST NOT create a record at all.
   const unbound = recordsApiSpy()
-  const { ext_parentDrawingNo: _dropped, ...withoutExt } = PHYSICAL
+  const { ext_legacyRowId: _dropped, ...withoutExt } = PHYSICAL
   const failResult = await applyStockPreparationPlan({
     permission: 'write',
     plan: planWith({ ...record }),
@@ -846,17 +851,17 @@ async function unmappedExtKeyFailsLoud() {
   assert.equal(failResult.counts.created, 0)
   assert.equal(failResult.errors.length, 1)
   assert.equal(failResult.errors[0].code, 'unmapped_extension_field')
-  assert.equal(failResult.errors[0].field, 'ext_parentDrawingNo')
+  assert.equal(failResult.errors[0].field, 'ext_legacyRowId')
   assert.equal(failResult.errors[0].reason, 'unmapped_extension_field')
   assert.equal(unbound.created.length, 0, 'nothing may be written when a key cannot be addressed')
 
   // THE FALLBACK ITSELF, pinned at the function. This is the assertion that
   // fails if anyone restores `fieldIdMap[field] || field`.
   assert.throws(
-    () => writerInternals.mapFieldName('ext_parentDrawingNo', withoutExt),
+    () => writerInternals.mapFieldName('ext_legacyRowId', withoutExt),
     (error) => error instanceof StockPreparationApplyWriterError &&
       error.details.code === 'unmapped_extension_field' &&
-      error.details.field === 'ext_parentDrawingNo',
+      error.details.field === 'ext_legacyRowId',
     'an unmapped ext_ id under an explicit map must throw, not fall back',
   )
   assert.throws(
@@ -875,7 +880,7 @@ async function unmappedExtKeyFailsLoud() {
   assert.equal(writerInternals.fieldIdMapHasExplicitBindings({}), false)
   assert.equal(writerInternals.fieldIdMapHasExplicitBindings({ a: '  ' }), false)
   assert.equal(writerInternals.fieldIdMapHasExplicitBindings({ a: 'fld_a' }), true)
-  assert.equal(writerInternals.mapFieldName('ext_parentDrawingNo', {}), 'ext_parentDrawingNo')
+  assert.equal(writerInternals.mapFieldName('ext_legacyRowId', {}), 'ext_legacyRowId')
 
   const logical = recordsApiSpy()
   const logicalResult = await applyStockPreparationPlan({
@@ -885,7 +890,7 @@ async function unmappedExtKeyFailsLoud() {
     recordsApi: logical.api,
   })
   assert.equal(logicalResult.ok, true, JSON.stringify(logicalResult.errors))
-  assert.equal(logical.created[0].data.ext_parentDrawingNo, 'DWG-A-001')
+  assert.equal(logical.created[0].data.ext_legacyRowId, 'DWG-A-001')
 }
 
 // ── 9. the completeness gate covers the mapped ext_ targets ───────────────────
@@ -916,8 +921,8 @@ function completenessGateCoversExtensionTargets() {
   let thrown = null
   try {
     assertStockPreparationTargetReady(baseAction({
-      extensionFieldIds: ['ext_parentDrawingNo', 'ext_designer'],
-      target: { sheetId: 'sheet-1', fieldIdMap: explicitFieldIdMap({ ext_parentDrawingNo: 'fld_ext_drawing' }) },
+      extensionFieldIds: ['ext_legacyRowId', 'ext_designer'],
+      target: { sheetId: 'sheet-1', fieldIdMap: explicitFieldIdMap({ ext_legacyRowId: 'fld_ext_legacy_row' }) },
     }))
   } catch (error) {
     thrown = error
@@ -929,13 +934,13 @@ function completenessGateCoversExtensionTargets() {
 
   // Declared AND bound => ready, and the ids survive normalization in order.
   const ready = assertStockPreparationTargetReady(baseAction({
-    extensionFieldIds: ['ext_parentDrawingNo', 'ext_designer'],
+    extensionFieldIds: ['ext_legacyRowId', 'ext_designer'],
     target: {
       sheetId: 'sheet-1',
-      fieldIdMap: explicitFieldIdMap({ ext_parentDrawingNo: 'fld_a', ext_designer: 'fld_b' }),
+      fieldIdMap: explicitFieldIdMap({ ext_legacyRowId: 'fld_a', ext_designer: 'fld_b' }),
     },
   }))
-  assert.deepEqual(ready.extensionFieldIds, ['ext_parentDrawingNo', 'ext_designer'])
+  assert.deepEqual(ready.extensionFieldIds, ['ext_legacyRowId', 'ext_designer'])
 
   // The declared list is itself fail-closed.
   const badIds = [['componentCode'], ['notExtension'], ['ext_'], ['ext_A'], [42], ['ext_a', 'ext_a'], 'ext_a']
@@ -951,13 +956,13 @@ function completenessGateCoversExtensionTargets() {
   // config never declared (the mapping object does not survive the JSON snapshot
   // that the gate reads, so the declared list is what protects the stored path).
   const action = assertStockPreparationTargetReady(baseAction({
-    extensionFieldIds: ['ext_parentDrawingNo'],
-    target: { sheetId: 'sheet-1', fieldIdMap: explicitFieldIdMap({ ext_parentDrawingNo: 'fld_a' }) },
+    extensionFieldIds: ['ext_legacyRowId'],
+    target: { sheetId: 'sheet-1', fieldIdMap: explicitFieldIdMap({ ext_legacyRowId: 'fld_a' }) },
   }))
   assert.doesNotThrow(() => tableActionInternals.assertExtFieldMappingAgreesWithAction(action, undefined))
   assert.doesNotThrow(() => tableActionInternals.assertExtFieldMappingAgreesWithAction(
     action,
-    normalize([{ sourceColumn: 'ParentDrawingNo', target: 'ext_parentDrawingNo' }]),
+    normalize([{ sourceColumn: 'LegacyRowId', target: 'ext_legacyRowId' }]),
   ))
   assert.throws(
     () => tableActionInternals.assertExtFieldMappingAgreesWithAction(
@@ -1018,7 +1023,7 @@ async function provisioningBindsExtensionFieldIds() {
 
   // Asked for and RESOLVABLE => bound in the returned map, so a downstream
   // ext_ write has a real physical id to address.
-  const wanted = ['ext_parentDrawingNo', 'ext_designer']
+  const wanted = ['ext_legacyRowId', 'ext_designer']
   const bound = provisioningStub({ resolvable: templateIds.concat(wanted) })
   const boundResult = await inspectStockPreparationCanonicalTarget({
     context: bound.context,
@@ -1028,12 +1033,12 @@ async function provisioningBindsExtensionFieldIds() {
   })
   assert.equal(boundResult.ready, true)
   assert.deepEqual(bound.asked[0], templateIds.concat(wanted), 'ext_ ids join the resolve set')
-  assert.equal(boundResult.target.fieldIdMap.ext_parentDrawingNo, 'fld_ext_parentDrawingNo')
+  assert.equal(boundResult.target.fieldIdMap.ext_legacyRowId, 'fld_ext_legacyRowId')
   assert.equal(boundResult.target.fieldIdMap.ext_designer, 'fld_ext_designer')
 
   // Asked for and UNRESOLVABLE => NOT ready. Fail-closed: an ext_ column that
   // is not installed must not be reported as bindable.
-  const missing = provisioningStub({ resolvable: templateIds.concat(['ext_parentDrawingNo']) })
+  const missing = provisioningStub({ resolvable: templateIds.concat(['ext_legacyRowId']) })
   const missingResult = await inspectStockPreparationCanonicalTarget({
     context: missing.context,
     projectId: 'proj-1',
@@ -1075,15 +1080,15 @@ function frozenVocabulariesAndValuesFreeEvidence() {
   }
 
   const mapping = normalize([
-    { sourceColumn: 'ParentDrawingNo', target: 'ext_parentDrawingNo' },
+    { sourceColumn: 'LegacyRowId', target: 'ext_legacyRowId' },
     { sourceColumn: 'SortNo', target: 'ext_parentSortNo' },
   ])
   const evidence = summarizeExtFieldMappingForEvidence(mapping)
   const text = JSON.stringify(evidence)
   assert.equal(evidence.mappingCount, 2)
-  assert.deepEqual(evidence.targetFieldIds, ['ext_parentDrawingNo', 'ext_parentSortNo'])
+  assert.deepEqual(evidence.targetFieldIds, ['ext_legacyRowId', 'ext_parentSortNo'])
   assert.deepEqual(evidence.coercions, [
-    { target: 'ext_parentDrawingNo', coerce: 'string', ownership: 'plm_system' },
+    { target: 'ext_legacyRowId', coerce: 'string', ownership: 'plm_system' },
     { target: 'ext_parentSortNo', coerce: 'number', ownership: 'plm_system' },
   ])
   // Source COLUMN names are schema and may appear; source VALUES may not — the
@@ -1092,7 +1097,7 @@ function frozenVocabulariesAndValuesFreeEvidence() {
 
   // Mutating an evidence projection must not reach the mapping behind it.
   evidence.targetFieldIds.push('ext_poisoned')
-  assert.deepEqual(extFieldMappingTargetIds(mapping), ['ext_parentDrawingNo', 'ext_parentSortNo'])
+  assert.deepEqual(extFieldMappingTargetIds(mapping), ['ext_legacyRowId', 'ext_parentSortNo'])
 
   // No live mutable export leaks (Set/Map handed out by reference).
   const seen = new WeakSet()
