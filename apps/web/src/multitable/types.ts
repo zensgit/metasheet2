@@ -1147,7 +1147,8 @@ export interface AutomationAction {
  * start_approval 的后端 config 契约（镜像 packages/core-backend/src/multitable/automation-actions.ts
  * 的 StartApprovalConfig + automation-service.ts validateStartApprovalConfig 接受的可选键）。
  * 编辑器只建模 templateId / formDataMapping / resultWriteback 的三个字段选择器；其余键在保存时
- * 按原样透传（见 MetaAutomationRuleEditor.vue 的 startApprovalOriginal）。
+ * 按原样透传（见 MetaAutomationRuleEditor.vue 的 DraftAction.originalConfig + ACTION_OWNED_CONFIG_KEYS，
+ * #5739 泛化后所有动作类型共用同一套保留语义）。
  */
 export interface StartApprovalResultWritebackConfig {
   statusField?: string
