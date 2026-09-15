@@ -85,6 +85,17 @@ Code/test head `dcb10e1c1b98d37181942870752d4d7c451306cd`, tree `d9eb3f4b1a08402
 
 ### Remaining Combined Validation
 
+### Mutation Event Real-DB Evidence
+
+- Exact code/test SHA `745b5685626490426d8cd71164df3d0be02e23b9`; tree `6379f5daf4f130ae92613b3e7a82dfea1674f3d8`. Remote main rechecked at `062614f4407b3d9bffc82dae266071b8a6e5e5bd` before this run.
+- Dedicated PG15 fresh migration count 402; second replay exit 0. Whole `multitable-exact-anchor-route-wiring-realdb.test.ts` with `METASHEET_REAL_DB_TEST_STEP=1`: 35/35 PASS, zero skips.
+- Three new `RECOVERY-EVENT` tests use the actual producer, not a mock: source version and event/consumer rows commit together; a deliberate rollback removes both; another connection cannot see uncommitted events; an autocommit query is rejected by the transaction probe. This verifies the extracted event hook, not a complete background job execution.
+- Mutation omitting `enqueueRecordEventIfDurable`: all three new cases RED. Restore was byte-identical to `9062f3144`; final whole-file 35/35 GREEN.
+- Pre-drop outbox/record/sheet/user fixture counts and other backends: all 0. Dedicated database dropped; prefix databases/backends 0; task-owned PG stopped. No flags outside this synthetic test process changed, no dispatcher ran.
+- Standard worker composition, post-commit derived/realtime effects, restart integration and provider startup remain incomplete. No publication, Ready, merge, deployment or production claim.
+
+### Remaining Runtime Gates
+
 - Combined real-DB route and worker execution, mutation, and process-restart gates.
 - Shared full-read/plan authorization invoked by a real background worker.
 - Provider/KMS/object-store integration or ordinary application startup readiness.
