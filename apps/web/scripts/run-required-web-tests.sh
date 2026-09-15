@@ -466,10 +466,19 @@ npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/Attendanc
 # These two are the first path-prefixed tokens in this bare-basename list — full paths
 # chosen for exactness (a future `*-api.spec.ts` would substring-collide with a bare
 # `api.spec.ts` token; today the bare token still selects exactly one file).
+# P5 (2026-09-14, transport-copy field incident): `tests/network-unavailable-copy.spec.ts` is the
+# ONLY spec that exercises the "a response EXISTS" arm of utils/networkErrors.ts's discriminator
+# (Response 503 / Response 200-non-JSON / a status-carrying error -> the gateway sentence). An
+# adversarial pass found it selected by NO `vitest run` token anywhere in .github/workflows/*.yml or
+# in this file, i.e. green only on a laptop -- the same footgun the #5012 note just above records
+# for tests/api.spec.ts. Full-path token, per the exactness convention of this block. Enrolment is
+# pinned mechanically by packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts,
+# which lives in a lane (`test (18.x)` / `test (20.x)`) that cannot be skipped.
 npx vitest run \
   tests/AttendanceReportFieldsSection.spec.ts \
   tests/api.spec.ts \
   tests/attendance-rules-me-contract-sync.spec.ts \
+  tests/network-unavailable-copy.spec.ts \
   approval-canvas-commands \
   approval-form-commands \
   approval-authoring-history \
