@@ -109,7 +109,8 @@ describe('recovery snapshot wiring through canonical formula masking', () => {
       expect(callsIn(body, name)).toHaveLength(0)
     }
     const foreign = bodyOf('resolveForeignFieldReadability').getText(source)
-    expect(foreign).toContain('authorityAccess ?? await resolveRequestAccess(req)')
+    expect(foreign).toContain('authorityAccess ?? (req ? await resolveRequestAccess(req) : null)')
+    expect(foreign).toContain("if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')")
     expect(foreign).toContain('? resolveSheetCapabilitiesForAccess')
     expect(foreign).toContain('? await resolveBaseReadableForAccess')
   })

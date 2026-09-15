@@ -73,6 +73,7 @@ import {
   createRecoveryAuthorizationStabilizer,
   createRecoveryPlanAuthorization,
 } from '../multitable/recovery-plan-authorization'
+import { bindRecoveryArchiveWorkerAuthorization } from '../multitable/recovery-archive-worker-authorization'
 import {
   acquireTrustCheckpointActivationLease,
   assertTrustCheckpointActivationAuthority,
@@ -3291,7 +3292,7 @@ async function recalcNewRecordFormulas(
 type ForeignFieldReadability = { readableFieldIds: Set<string>; crossBase: boolean }
 
 async function resolveForeignFieldReadability(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceBaseId: string | null,
   foreignSheetIds: Iterable<string>,
@@ -3300,14 +3301,15 @@ async function resolveForeignFieldReadability(
   const out = new Map<string, ForeignFieldReadability>()
   const unique = Array.from(new Set(Array.from(foreignSheetIds).filter(Boolean)))
   if (unique.length === 0) return out
-  const access = authorityAccess ?? await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   for (const foreignSheetId of unique) {
     const [foreignSheet, foreignFields, capabilities, fieldScopeMap] = await Promise.all([
       loadSheetRowShared(query, foreignSheetId),
       loadFieldsForSheetShared(query, foreignSheetId),
       // Capabilities don't affect field VISIBILITY (only readOnly), but resolve them so the
       // foreign-sheet derivation matches the export/view path exactly.
-      (authorityAccess
+      (authorityAccess || !req
         ? resolveSheetCapabilitiesForAccess(query, foreignSheetId, access)
         : resolveSheetReadableCapabilities(req, query, foreignSheetId)).then((r) => r.capabilities),
       access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
@@ -3324,7 +3326,7 @@ async function resolveForeignFieldReadability(
     // foreign base is unreadable by definition (can't opt in / can't grant) → mask (also crash-safe:
     // resolveBaseReadable would throw on null).
     if (crossBase) {
-      const baseReadable = foreignBaseId != null && (authorityAccess
+      const baseReadable = foreignBaseId != null && (authorityAccess || !req
         ? await resolveBaseReadableForAccess(query, foreignBaseId, access)
         : await resolveBaseReadable(req, query, foreignBaseId))
       if (!baseReadable) {
@@ -3380,7 +3382,7 @@ function shouldMaskForeignField(
  * taint-skipped) recompute output and never raw stored formula values.
  */
 async function resolveTaintedFormulaFieldIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   candidateFormulaFieldIds: Set<string>,
@@ -3534,7 +3536,7 @@ async function resolveTaintedFormulaFieldIds(
  * `filterRecordDataByFieldIds` call over stored record data is reachable without it.
  */
 async function maskStoredRecordFieldIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   fields: Array<{ id: string; type: string }> | undefined,
@@ -6859,7 +6861,7 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
  */
 async function hasFullTableReadAccess(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   access: ResolvedRequestAccess,
@@ -6876,6 +6878,13 @@ async function hasFullTableReadAccess(
   // Keep the adjudicated snapshot through foreign-field/base checks; never reconstruct JWT claims.
   const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped, access)
   return masked.size === scoped.size
+}
+
+/** Production worker authorization uses the same conservative read policy as HTTP recovery. */
+export function createRecoveryArchiveWorkerAuthorization() {
+  return bindRecoveryArchiveWorkerAuthorization((query, sheetId, authority) => (
+    hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities)
+  ))
 }
 
 /**
