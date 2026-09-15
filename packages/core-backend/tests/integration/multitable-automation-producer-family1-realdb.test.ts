@@ -6,8 +6,9 @@
  * wiring end-to-end over real Postgres, for BOTH event families in family 1:
  *
  *   F1-G1  flag ON + approve-to-terminal (dispatchAction approve on a single-node template) → ONE
- *          `approval.approved` outbox row fanned to EXACTLY [approval-bridge, approval-projection,
- *          approval-trigger] (sorted, all pending), committed WITH the terminal transition; the legacy
+ *          `approval.approved` outbox row fanned to EXACTLY the CURRENT manifest's completion set
+ *          (v2: [approval-bridge, approval-projection, approval-trigger, multitable-record-approval],
+ *          sorted, all pending), committed WITH the terminal transition; the legacy
  *          `emitApprovalCompletionEvent` bus emit is SUPPRESSED (shared-bus spy sees nothing).
  *   F1-G2  flag ON + createApproval with a pending assignment → per-recipient `approval.task_created` outbox
  *          row to EXACTLY [approval-task-trigger], `event_id` BYTE-EQUAL to the legacy quad formula
@@ -210,8 +211,9 @@ describeIfDatabase('P1#2e — producer family 1: approval completion + task_crea
     const rows = await outboxRowsForInstance(id)
     expect(rows).toHaveLength(1)
     expect(rows[0].event_type).toBe('approval.approved')
-    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger'])
-    expect(await consumerStatuses(rows[0].id)).toEqual(['pending', 'pending', 'pending'])
+    // manifest v2 fan-out: v1's three completion consumers + the record-level submit-for-approval sink.
+    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger', 'multitable-record-approval'])
+    expect(await consumerStatuses(rows[0].id)).toEqual(['pending', 'pending', 'pending', 'pending'])
     expect(rows[0].event_id).toBe(rows[0].payload.eventId)
     expect((rows[0].payload.transition as { toStatus: string }).toStatus).toBe('approved')
     // REPLACE leg: the durable enqueue is the ONLY path — the legacy post-commit completion emit stayed silent.
@@ -252,7 +254,7 @@ describeIfDatabase('P1#2e — producer family 1: approval completion + task_crea
     const rows = await outboxRowsForInstance(id)
     expect(rows).toHaveLength(1)
     expect(rows[0].event_type).toBe('approval.approved')
-    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger'])
+    expect(rows[0].consumers).toEqual(['approval-bridge', 'approval-projection', 'approval-trigger', 'multitable-record-approval'])
     // No pending assignment survived the cascade → NO task_created row was enqueued (the recheck's intent).
     expect(rows.filter((r) => r.event_type === 'approval.task_created')).toHaveLength(0)
     expect(spy).toHaveLength(0)

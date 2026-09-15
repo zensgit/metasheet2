@@ -89,11 +89,52 @@ export const ROUTING_MANIFEST_V1: RoutingManifest = deepFreezeManifest({
   },
 })
 
-export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V1
+/**
+ * v2 — v1 PLUS the record-level submit-for-approval consumer (`multitable-record-approval`).
+ *
+ * WHY A NEW VERSION AND NOT AN EDIT OF v1: a row is dispatched per the manifest version STAMPED ON IT at
+ * enqueue (#4203 §manifest). v1 is deep-frozen and stays byte-for-byte what it was, so every in-flight v1
+ * row keeps fanning out to exactly the three consumers that existed when it was enqueued — the new
+ * consumer never inherits a backlog it has no row for, and no v1 row parks waiting for an adapter that a
+ * rolling-deploy N-1 worker does not have.
+ *
+ * DELTA vs v1: the four `approval.*` COMPLETION families gain `multitable-record-approval`. Every other
+ * route (task_created, the record families, form.submitted) is the SAME array object as v1 — identical
+ * routing, shared frozen arrays, no accidental divergence.
+ *
+ * ROLLING DEPLOY (#4203 §234-255): expanding a family to a new consumer_key is activation-gated — workers
+ * that KNOW the key ship first (adapter registered = this commit's `DURABLE_CONSUMER_KEYS` +
+ * `buildDurableConsumerHandlers` entry), and only then may producers stamp v2. Both halves land in THIS
+ * commit, which is the supported shape for a single-artifact deployment: an N-1 worker never sees a v2 row
+ * (its producers are N-1 too), and an N worker serves both v1 and v2 rows because
+ * `SUPPORTED_MANIFEST_VERSIONS` contains both.
+ */
+export const APPROVAL_COMPLETION_CONSUMERS_V2: readonly string[] = Object.freeze([
+  ...APPROVAL_COMPLETION_CONSUMERS,
+  'multitable-record-approval',
+])
+
+export const ROUTING_MANIFEST_V2: RoutingManifest = deepFreezeManifest({
+  version: 2,
+  routes: {
+    'approval.approved': APPROVAL_COMPLETION_CONSUMERS_V2,
+    'approval.rejected': APPROVAL_COMPLETION_CONSUMERS_V2,
+    'approval.revoked': APPROVAL_COMPLETION_CONSUMERS_V2,
+    'approval.cancelled': APPROVAL_COMPLETION_CONSUMERS_V2,
+    'approval.task_created': ROUTING_MANIFEST_V1.routes['approval.task_created'],
+    'multitable.record.created': ROUTING_MANIFEST_V1.routes['multitable.record.created'],
+    'multitable.record.updated': ROUTING_MANIFEST_V1.routes['multitable.record.updated'],
+    'multitable.record.deleted': ROUTING_MANIFEST_V1.routes['multitable.record.deleted'],
+    'multitable.form.submitted': ROUTING_MANIFEST_V1.routes['multitable.form.submitted'],
+  },
+})
+
+export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V2
 
 /** Versions this build can dispatch. A row stamped with an unknown version must be left alone (older/newer
- *  worker's job), mirroring the unknown-consumer_key rule. */
-export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1])
+ *  worker's job), mirroring the unknown-consumer_key rule. v1 stays supported for in-flight rows enqueued
+ *  before this deploy — they keep their v1 fan-out forever. */
+export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2])
 
 /**
  * Expand an event type to its consumer_keys under the given manifest. Returns undefined for an event type

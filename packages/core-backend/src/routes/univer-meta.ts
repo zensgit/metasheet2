@@ -4886,6 +4886,29 @@ async function loadRevealedFieldIds(query: QueryFn, sheetId: string, capabilitie
 }
 
 /**
+ * The record READ path's field mask, as ONE named export.
+ *
+ * It is the exact chain every stored-record read already uses: `loadAllowedFieldIds` (visible property
+ * fields ∧ the per-subject `field_permissions` scope) then `maskStoredRecordFieldIds` (the §2a.3
+ * formula-taint chokepoint). Exported so a NEW read surface outside this module — the record-level
+ * approval drift response (`routes/multitable-record-approvals.ts`), which returns changed FIELD IDS —
+ * masks with the same set instead of growing a second, drifting implementation.
+ *
+ * FAIL CLOSED: no user / no sheet → EMPTY set (loadAllowedFieldIds' own posture), i.e. every field id
+ * masked, never "empty map ⇒ no denials ⇒ show all".
+ */
+export async function loadReadableRecordFieldIds(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  userId: string | null | undefined,
+  capabilities: MultitableCapabilities,
+): Promise<Set<string>> {
+  const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
+  return maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed)
+}
+
+/**
  * Global History LOCK-3 FIELD layer: build the per-sheet readable field-id sets the project-on-read
  * history projection masks with. Uses the EXACT chain the per-record history route uses —
  * `loadAllowedFieldIds` (visible property fields ∧ field_permissions scope) then `maskStoredRecordFieldIds`

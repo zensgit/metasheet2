@@ -42,6 +42,7 @@ const PROJECTION_DENY_CAPABILITY_KEYS = [
   'canComment',
   'canManageAutomation',
   'canSendNotification',
+  'canSubmitApproval',
 ] as const
 
 export function restrictApprovalProjectionCapabilities<T extends { canRead: boolean }>(

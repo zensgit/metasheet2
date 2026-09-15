@@ -399,6 +399,7 @@ import { automationWebhookJsonParser, createAutomationRoutes } from './routes/au
 import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
+import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -592,6 +593,9 @@ export class MetaSheetServer {
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
   private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+  /** Record-level submit-for-approval completion sink (eventBus leg + durable consumer share this object). */
+  private recordApprovalCompletionSink:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSink | null = null
   private readonly recoveryArchiveApplication: RecoveryArchiveApplication
 
   // IoC Container
@@ -1856,6 +1860,9 @@ export class MetaSheetServer {
     this.app.use('/api/multitable', createMultitableAiRoutes({ queue: new QueueServiceImpl() }))
     // B1-a1 button field run endpoint. See routes/multitable-button.ts header.
     this.app.use('/api/multitable', createMultitableButtonRoutes())
+    // Record-level submit-for-approval (multitable x approval phase 2):
+    //   POST/GET /sheets/:sheetId/records/:recordId/approvals. See routes/multitable-record-approvals.ts.
+    this.app.use('/api/multitable', createMultitableRecordApprovalRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
@@ -3774,6 +3781,32 @@ export class MetaSheetServer {
       this.logger.error('Approval record projection initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // Multitable x approval phase 2: the RECORD-LEVEL submit-for-approval completion sink. TWO LEGS, ONE
+    // idempotent handler, exactly like the bridge/projection consumers above: this eventBus subscription
+    // (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF, because `emitApprovalCompletionEvent` returns
+    // early when it is ON) and the durable consumer_key `multitable-record-approval` wired in the
+    // durable-delivery block below (manifest v2). The sink's UPDATE is guarded on `status = 'pending'`, so
+    // a double delivery through both legs cannot double-notify.
+    try {
+      const { createRecordApprovalCompletionSink, subscribeRecordApprovalCompletionBus } = await import(
+        './multitable/record-approval-submission-service'
+      )
+      const recordApprovalPool = poolManager.get()
+      this.recordApprovalCompletionSink = createRecordApprovalCompletionSink(
+        recordApprovalPool.query.bind(recordApprovalPool),
+      )
+      subscribeRecordApprovalCompletionBus(
+        eventBus,
+        this.recordApprovalCompletionSink,
+        (eventType, error) => this.logger.warn(
+          `Record approval completion handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      this.logger.info('Record approval completion sink initialized')
+    } catch (e) {
+      this.logger.error('Record approval completion sink initialization failed; continuing in degraded mode', e as Error)
+    }
+
     // Bind external data-source manager to DB and load persisted sources (A0)
     try {
       const { db: kyselyDbDataSources } = await import('./db/db')
@@ -3940,10 +3973,20 @@ export class MetaSheetServer {
         this.automationServiceReady && Boolean(this.automationService),
       )
       if (this.automationServiceReady && this.automationService) {
+        const { createRecordApprovalCompletionSink: createRecordApprovalSink } = await import(
+          './multitable/record-approval-submission-service'
+        )
+        // Reuse the SAME sink object the eventBus leg subscribed (built above); fall back to a fresh one
+        // only if that init degraded — the durable leg must never be missing its handler (the manifest v2
+        // completeness assertion would abort boot, which is the intended fail-closed outcome).
+        const durablePool = poolManager.get()
+        const recordApprovalSink = this.recordApprovalCompletionSink
+          ?? createRecordApprovalSink(durablePool.query.bind(durablePool))
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
           projectionService: getApprovalRecordProjectionService(),
           webhookService: new WebhookService(kyselyDbDurable),
+          recordApprovalService: recordApprovalSink,
         })
         this.durableDeliveryLoop = bootDurableDelivery(poolManager.get(), handlers, {
           onUnknownConsumerKeys: (keys) => this.logger.warn(`Durable delivery: unknown consumer keys parked pending: ${keys.join(', ')}`),

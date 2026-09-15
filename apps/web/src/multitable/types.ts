@@ -529,6 +529,12 @@ export interface MetaCapabilities {
   // (the route is authoritative); the FE mirror is OPTIONAL so existing capability fixtures
   // need not set it — treat absent as false. Full sheet write/admin only (not write-own).
   canSendNotification?: boolean
+  /** Record-level 送审 capability (multitable × approval phase 2, `multitable:submit-approval`).
+   *  Server-enforced — POST /sheets/:sheetId/records/:recordId/approvals re-checks it, and the approval
+   *  product independently re-checks `approvals:write` — so this mirror is a VISIBILITY hint only.
+   *  OPTIONAL: absent/false ⇒ the 送审 entry is HIDDEN (fail-closed, same discipline as the flags above),
+   *  and existing capability fixtures need not set it. The phase-2b FE slice consumes it. */
+  canSubmitApproval?: boolean
 }
 
 export interface YjsPresenceUser {

@@ -613,6 +613,18 @@ export default defineConfig({
       // P1#2e producer family 1 (approval completion + task_created) REPLACE site goldens: real DB, same shape.
       // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
       'tests/integration/multitable-automation-producer-family1-realdb.test.ts',
+      // multitable x approval phase 2 — record-level submit-for-approval end-to-end (403 without the
+      // code / 400 unpublished template / success -> pending row + real instance / 409 on the PARTIAL
+      // unique index / completion through the REAL durable adapter -> approved + one notification /
+      // drift masked by field permissions). Needs real Postgres: the 409 IS an index violation and the
+      // idempotent completion is a real rowcount. Excluded here so it cannot skip-green; it EXECUTES in
+      // the standalone .github/workflows/multitable-record-approval-realdb.yml lane (a standalone file,
+      // not a plugin-tests.yml entry, because that workflow is an s6a sha256-pinned provenance input --
+      // same precedent as approval-realdb-directory-resolve.yml).
+      // NOTE (PR 2a): that workflow file could NOT be pushed with this commit -- the pushing token has no
+      // `workflow` OAuth scope -- so it must be added by a workflow-scoped push before this suite has a
+      // lane. Until then the suite runs ONLY on demand (vitest.integration.config.ts + DATABASE_URL).
+      'tests/integration/multitable-record-approval-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,

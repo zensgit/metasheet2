@@ -19,7 +19,7 @@ import { afterAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { enqueueOutboxEvent, type TransactionalQueryable } from '../../src/multitable/automation-outbox-enqueue'
 import { ConsumerAdapterRegistry, runDispatchTick, type AdapterOutcome } from '../../src/multitable/automation-durable-dispatch-loop'
-import { APPROVAL_COMPLETION_CONSUMERS, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
+import { APPROVAL_COMPLETION_CONSUMERS_V2, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
 import type { PoolClient } from 'pg'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -66,14 +66,16 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
       outboxId = res.outboxId
       enqueued.push(outboxId)
       await client.query('COMMIT')
-      expect(res.consumerKeys).toEqual([...APPROVAL_COMPLETION_CONSUMERS])
-      expect(res.manifestVersion).toBe(1)
+      // CURRENT manifest = v2 (v1's three completion consumers + multitable-record-approval). Pinned
+      // explicitly, not via CURRENT_ROUTING_MANIFEST, so a silent manifest downgrade reds here.
+      expect(res.consumerKeys).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V2])
+      expect(res.manifestVersion).toBe(2)
     } finally {
       client.release()
     }
     const { outbox, consumers } = await rowsFor(outboxId)
-    expect(outbox[0]).toMatchObject({ event_type: 'approval.approved', event_id: `evt_${RUN}_commit`, manifest_version: 1, automation_depth: 2 })
-    expect(consumers.map((c) => c.consumer_key).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS].sort())
+    expect(outbox[0]).toMatchObject({ event_type: 'approval.approved', event_id: `evt_${RUN}_commit`, manifest_version: 2, automation_depth: 2 })
+    expect(consumers.map((c) => c.consumer_key).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V2].sort())
     expect(consumers.every((c) => c.status === 'pending')).toBe(true)
   })
 
