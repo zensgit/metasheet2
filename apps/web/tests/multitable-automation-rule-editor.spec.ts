@@ -1026,6 +1026,331 @@ describe('MetaAutomationRuleEditor', () => {
     expect(cfg.resultWriteback).toEqual({ statusField: 'fld_2', onNonApproved: true })
   })
 
+  // ── #5742 审批结果 → 写入值 (resultWriteback.outcomeValues) ────────────────────────────────────────
+  // A zh single-select status field: its options are the customer's own, and NONE of them is literally
+  // named 'approved' — which is exactly the shape that used to force 待审批/approved/rejected mixed options.
+  const fieldsWithZhStatus = [
+    ...fields,
+    {
+      id: 'fld_zh',
+      name: '审批状态',
+      type: 'select',
+      options: [
+        { value: '待审批', label: '待审批' },
+        { value: '已通过', label: '已通过' },
+        { value: '已拒绝', label: '已拒绝' },
+      ],
+    },
+  ]
+
+  function saveBlockKeys(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('[data-action="save-block-reason"]'))
+      .map((el) => el.getAttribute('data-reason-key') ?? '')
+  }
+
+  it('#5742: round-trips a loaded outcomeValues + onNonApproved untouched on an unedited save', async () => {
+    const saved = vi.fn()
+    const writeback = {
+      statusField: 'fld_zh',
+      onNonApproved: true,
+      outcomeValues: { approved: '已通过', rejected: '已拒绝' },
+    }
+    const rule = {
+      id: 'atr_5742_rt', sheetId: 'sheet_1', name: '写回', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' }, resultWriteback: writeback },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    // the mapping backfilled into the pickers (approved + rejected rows, the latter because onNonApproved is on)
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    expect(onNonApproved.checked).toBe(true)
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'))).toBe('已通过')
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]'))).toBe('已拒绝')
+    // revoked / cancelled rows exist (checkbox on) and default to "write the raw outcome"
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-revoked"]'))).toBe('')
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-approved')
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual(writeback)
+  })
+
+  it('#5742: picking an option for 通过 emits resultWriteback.outcomeValues {approved}', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_zh')
+    await flushPromises()
+    // the 通过 row is always shown; 拒绝/撤销/取消 only after the non-approved opt-in
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]')).not.toBeNull()
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]')).toBeNull()
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'), '已通过')
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({
+      statusField: 'fld_zh',
+      outcomeValues: { approved: '已通过' },
+    })
+  })
+
+  it('#5742: unchecking 非通过结果也写回 DELETES onNonApproved even when the loaded config had it', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5742_off', sheetId: 'sheet_1', name: '关掉', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', onNonApproved: true, outcomeValues: { approved: '已通过', rejected: '已拒绝' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    onNonApproved.checked = false
+    onNonApproved.dispatchEvent(new Event('change'))
+    await flushPromises()
+    // the non-approved rows are gone from the UI…
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]')).toBeNull()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const writeback = saved.mock.calls[0][0].actions[0].config.resultWriteback as Record<string, unknown>
+    // …and the saved config does NOT keep the loaded onNonApproved (modelled fields override the #5724 spread).
+    expect(writeback).not.toHaveProperty('onNonApproved')
+    expect(writeback.statusField).toBe('fld_zh')
+    expect(writeback.outcomeValues).toEqual({ approved: '已通过', rejected: '已拒绝' })
+  })
+
+  it('#5742: blocks save when the select status field has no option for the resolved 通过 value, and clears after picking', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_zh')
+    await flushPromises()
+    // Nothing mapped yet ⇒ the raw literal 'approved' would be written, and 审批状态 has no such option.
+    expect(saveBlockKeys(container)).toContain('action-0-writebackOutcome-approved')
+    const reason = container.querySelector('[data-reason-key="action-0-writebackOutcome-approved"]') as HTMLElement
+    expect(reason.textContent).toContain('审批状态')
+    expect(reason.textContent).toContain('approved')
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'), '已通过')
+    await flushPromises()
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-approved')
+    expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(1)
+  })
+
+  it('#5742: also blocks on 拒绝 once 非通过结果也写回 is on, per outcome', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus })
+    await flushPromises()
+    await selectStartApproval(container)
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_zh')
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'), '已通过')
+    await flushPromises()
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-rejected')
+
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    onNonApproved.checked = true
+    onNonApproved.dispatchEvent(new Event('change'))
+    await flushPromises()
+    // 撤销 / 取消 are authored here but only enforced at fire time — the client mirror stays scoped to the
+    // two outcomes the backend hard-fails at SAVE time.
+    expect(saveBlockKeys(container)).toContain('action-0-writebackOutcome-rejected')
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-revoked')
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-cancelled')
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]'), '已拒绝')
+    await flushPromises()
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+  })
+
+  it('#5742: an empty mapping is OMITTED from the payload (absence = write the raw outcome)', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+    // fld_1 is a select whose option set this editor does NOT know (no `options` on the field) — the client
+    // mirror must not block on missing knowledge; the backend gate stays the authority.
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_1')
+    await flushPromises()
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const writeback = saved.mock.calls[0][0].actions[0].config.resultWriteback as Record<string, unknown>
+    expect(writeback).toEqual({ statusField: 'fld_1' })
+    expect(writeback).not.toHaveProperty('outcomeValues')
+    expect(writeback).not.toHaveProperty('onNonApproved')
+  })
+
+  it('#5742: a text status field takes a free-text written value (no option set to pick from)', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_2') // Name (string)
+    await flushPromises()
+
+    const input = container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]') as HTMLInputElement
+    expect(input.tagName).toBe('INPUT')
+    input.value = ' 已通过 '
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    // trimmed on the way out — the same trimmed value the backend resolver writes
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({
+      statusField: 'fld_2',
+      outcomeValues: { approved: '已通过' },
+    })
+  })
+
+  it('#5742: a T3-5 CROSS-BASE writeback is never blocked client-side (its status field lives in the TARGET sheet)', async () => {
+    const saved = vi.fn()
+    // The backend save gate short-circuits cross-base writebacks (isCrossBaseWriteback → continue) because the
+    // target field is not in THIS sheet's schema. Without the same short-circuit here, a cross-base rule that
+    // the server accepts could not be saved from the editor at all — not even to rename it.
+    const writeback = {
+      statusField: 'fld_zh',
+      targetBaseId: 'base_x', targetSheetId: 'sheet_x', targetRecordId: 'rec_x',
+    }
+    const rule = {
+      id: 'atr_5742_xbase', sheetId: 'sheet_1', name: '跨库', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' }, resultWriteback: writeback },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    // fld_zh (the SOURCE sheet's select) has no 'approved' option, so a same-base rule WOULD be blocked here.
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual(writeback)
+  })
+
+  it('#5742: an out-of-list written VALUE is marked "not an option", not "unknown field" (that marker names a FIELD)', async () => {
+    const rule = {
+      id: 'atr_5742_mark', sheetId: 'sheet_1', name: '标记', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', outcomeValues: { approved: '已归档' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule })
+    await flushPromises()
+
+    const marked = epOptions(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'))
+      .find((option) => option.value === '已归档')
+    // (this suite runs in the en locale; the zh pair is 不在选项中 / 未知字段)
+    expect(marked?.textContent).toContain('not an option')
+    expect(marked?.textContent).not.toContain('unknown field')
+  })
+
+  it('#5742: clearing the status field keeps the 非通过结果也写回 checkbox editable and drops the now-dead mapping', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5742_clear', sheetId: 'sheet_1', name: '清空', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', approverField: 'fld_2', onNonApproved: true, outcomeValues: { approved: '已通过' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), '')
+    await flushPromises()
+    // The mapping rows are gone (they only apply to the status field)…
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]')).toBeNull()
+    // …but onNonApproved gates the WHOLE backwrite (the approver field still writes on rejection), so its
+    // checkbox stays visible and checked instead of becoming an invisible live key.
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    expect(onNonApproved).not.toBeNull()
+    expect(onNonApproved.checked).toBe(true)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({ approverField: 'fld_2', onNonApproved: true })
+  })
+
+  it('#5742: an EXPLICIT onNonApproved:false round-trips verbatim (the #4196 fingerprint hashes the raw config)', async () => {
+    const saved = vi.fn()
+    const writeback = { statusField: 'fld_zh', onNonApproved: false, outcomeValues: { approved: '已通过' } }
+    const rule = {
+      id: 'atr_5742_false', sheetId: 'sheet_1', name: '显式false', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' }, resultWriteback: writeback },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    expect(onNonApproved.checked).toBe(false)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual(writeback)
+  })
+
+  it('#5742: a stored value with surrounding whitespace loads TRIMMED, so it matches its option', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5742_trim', sheetId: 'sheet_1', name: '空白', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', outcomeValues: { approved: '  已通过  ' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    // the picker shows the real option (not an extra 不在选项中 entry) and nothing is blocked
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'))).toBe('已通过')
+    expect(epOptions(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]')).map((o) => o.value))
+      .toEqual(['', '待审批', '已通过', '已拒绝'])
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({
+      statusField: 'fld_zh',
+      outcomeValues: { approved: '已通过' },
+    })
+  })
+
   it('can add and remove conditions', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()

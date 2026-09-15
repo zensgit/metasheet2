@@ -71,6 +71,17 @@ export interface SaveBlockFwbWritebackSnapshot {
   readOnly: boolean
 }
 
+/**
+ * #5742 — one "the status select has no such option" blocker for a start_approval action, pre-evaluated by
+ * the editor (it owns the field list + the label catalogue). `outcome` is the approval outcome the value
+ * would be written for; it keys both the reason and the anchor, so two failing outcomes are two lines.
+ */
+export interface StartApprovalOutcomeValueBlock {
+  actionIndex: number
+  outcome: string
+  message: string
+}
+
 export interface SaveBlockActionSnapshot {
   index: number
   type: AutomationActionType
@@ -109,6 +120,8 @@ export interface SaveBlockReasonsInput {
   /** Selector for the first incomplete condition/group, when one can be identified. */
   firstIncompleteConditionAnchor?: string
   actions: SaveBlockActionSnapshot[]
+  /** #5742: pre-evaluated result-writeback outcome→value blockers (empty / omitted when none). */
+  startApprovalOutcomeValueBlocks?: StartApprovalOutcomeValueBlock[]
 }
 
 export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlockReason[] {
@@ -376,6 +389,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
         })
       }
     }
+  }
+
+  // #5742: mirrors the backend save gate (a select status field must contain the value the backwrite would
+  // write). The message arrives pre-composed; the anchor points at the very picker that fixes it.
+  for (const block of input.startApprovalOutcomeValueBlocks ?? []) {
+    reasons.push({
+      key: `action-${block.actionIndex}-writebackOutcome-${block.outcome}`,
+      message: block.message,
+      anchor: `[data-action-index="${block.actionIndex}"] [data-field="resultWritebackOutcomeValue-${block.outcome}"]`,
+    })
   }
 
   return reasons
