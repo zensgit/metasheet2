@@ -15,14 +15,18 @@ deployment, production or real customer data.
 
 The manual harness `packages/core-backend/scripts/verify-timemachine-browser.mts`
 must use canonical password login, persisted sessions, JWT middleware, the real
-multitable router/client and `SheetTrashModal`. No injected request user, minted
+multitable router/client, `SheetTrashModal` and `HistoryCenterModal`. No injected request user, minted
 fixture token, intercepted API or fake restore result qualifies. Use a dedicated
 loopback PostgreSQL test database; refuse general/shared database names and ports.
 Compare retained field, record and view rows independently in PostgreSQL; a UI
 success message alone is insufficient. Deny reader and anonymous restores while
 the table is still deleted. Assert viewer-local time, close servers and pools,
-and prove fixture/session cleanup. This is manual component-to-real-backend
-acceptance, not a claim that the full workbench, row/config restore, archive
+and prove fixture/session cleanup. For records, delete through the canonical
+client, select the resulting history entry, then restore its current tombstone
+through the real confirmation. Independently compare the complete stored row
+data/identity/timestamps and its untouched peer; reader/anonymous restores must
+leave the tombstone unchanged. This is manual component-to-real-backend
+acceptance, not a claim that full-workbench navigation, config restore, archive
 worker, staging or production has passed. No new recovery authority is added.
 
 ### Product Behavior
@@ -48,6 +52,12 @@ worker, staging or production has passed. No new recovery authority is added.
    note; never enable flags or manufacture missing historical values.
 5. Deletion details use the historical before-side, visible field names and values;
    fallback identifiers remain honest when authorized metadata is unavailable.
+   Canonical delete revisions may stamp no changed fields. The read projection
+   unions existing ids with object-snapshot keys, then applies the existing
+   field allow-set to details, names, counts and field filters in exact/estimate
+   lists. It does not rewrite revisions or invent values when snapshots are
+   missing. A delete's retained wire `after` snapshot is not a surviving value;
+   the UI displays its values before-only.
    All recovery UI must handle loading, empty, error, cancellation and scope change
    without applying a stale response to a newly selected base or sheet.
 6. Timestamps are stored and returned as before; these three surfaces format time

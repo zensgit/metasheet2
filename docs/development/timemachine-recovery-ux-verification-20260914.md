@@ -1,5 +1,60 @@
 # Time Machine Recovery UX Verification
 
+## Authenticated Row Restore And Delete Details 2026-09-15
+
+Code `3835186b3c2102470683795ca96fcd9c62fb98a9`, tree
+`a0562dc9ab82c3c1d2c36f19c632c1867d254e1e`, parent
+`271924bd94c98965f24e63f623ec6f8d71a3ada8`. Five code/test files;
+this design/report update is a documentation-only child. Main recheck remains
+`28d11496bb4281738c3dd13096fe317ff42e8780`; publication stays Draft #5709.
+
+The real authenticated browser uncovered a production read-model bug: canonical
+delete stamps empty changed-field ids despite retaining the pre-delete snapshot,
+so field details were absent. The projection now derives object-snapshot keys plus
+existing ids before the unchanged permission mask. Exact/estimate summary counts,
+detail names/values and field-filter results agree; denied fields stay absent.
+The renderer displays deletion before-only rather than old-value-to-same-value.
+No migration, writer, permission, OpenAPI or workflow contract changed.
+
+Exact code-head results:
+
+- Manual browser: 9 checks PASS through canonical password/session/JWT/router,
+  real client and real components. Retained-table restore remains green. Actual
+  record deletion shows both field names/values and the actor name; selecting
+  that history item restores the current tombstone after explicit confirmation.
+  DB identity, full data, original created/updated timestamps and creator match;
+  restoring actor is recorded, tombstone disappears, peer record is unchanged.
+  Authenticated reader and anonymous record restore return 403/401 without writes.
+- Existing frontend history/trash/table-trash files: 3 files, 66/66 PASS.
+- Existing history projection/field-mask/recycle-bin real-DB neighbors: 7 files,
+  73/73 PASS, including 12 before-hydration cases. Fresh dedicated DB has 402
+  migrations. No skipped DB tests are counted.
+- Core typecheck, standalone browser-harness typecheck and application-only
+  `vue-tsc --noEmit -p tsconfig.app.json` PASS. Full Web `type-check` is NOT PASS:
+  unchanged `vite.config.ts` encounters installed Vite 5/7 plugin type mismatch.
+  Web scoped ESLint passes using the already installed parser via `NODE_PATH`;
+  no dependency install/edit. Core scoped ESLint reports one pre-existing
+  `no-extra-semi` error, reproduced on the parent via stdin; no new lint finding.
+- Mutation: suppress snapshot-key derivation -> 2 exact backend failures;
+  remove delete-before-only guard -> 1 frontend failure. Both sources restored
+  byte-for-byte before exact-head green runs. Initial pre-fix browser also fails
+  on the missing field rows, not on an unavailable API or skipped assertion.
+- Sol High read-only review: 0 P1/P2, no material P3 gap in the two production
+  changes and their tests. It ran no tests and did not review the manual harness;
+  the main task independently ran that acceptance. Session closed.
+
+Local evidence: `/private/tmp/tm-browser-record-exact.log`,
+`/private/tmp/tm-delete-fields-{exact-db,exact-web,mutation-db,mutation-web}.log`;
+SHA-bound result and screenshots in `artifacts/timemachine-browser/`. Fixture,
+session, tombstone, revision and other-backend census is zero; dedicated DB
+dropped, database-prefix/backend residue zero, owned PostgreSQL stopped.
+
+Both changed automated specs retain their existing required-lane enrollment;
+the browser script remains manual, not a new CI-enrolled test. Full required-web
+was not rerun locally for this narrow change; fresh published-head CI is pending.
+Config restore, full-workbench navigation, archive startup/storage, staging and
+tenant UAT remain open. No Ready, merge, flags, dispatch or deployment.
+
 ## Authenticated Table Restore Browser Gate 2026-09-15
 
 Harness commit `5641e751a4c1d197d8158919b978018c9393550d`, tree
