@@ -225,3 +225,12 @@ Exact code `5522d0467e17c43eeafb910854d63bde2973b2c6`, tree `079470ea9da2126d968
 - Restored implementation: four worker/application/facade/server unit files 83/83 PASS. Mutation breaking only on idle instead of every non-completed outcome: 2 RED/24 PASS. Restored direct worker suite 26/26 PASS. Core tsc, worker source ESLint and diff-check exit 0.
 - Logs: `/private/tmp/tm-derived-batch-{before,final,mutation,restored}.log`. No new DB claim: persistence/locking SQL is unchanged; preceding 89-test real-DB evidence binds its recorded code SHA. This scheduling test is not a production performance benchmark.
 - Local-only commit, no push/PR/flags/deployment. Capacity/indexing, canonical restart composition and provider decisions remain open.
+
+### Pending Index Verification
+
+Code `027ff1ef7309306e88ce3d4797da3658b1298812`, tree `51cf0c7654bc4b94b248baf1006c1ae0c4ea54c4`; two files, 28 additions.
+
+- Fresh isolated PG15 migration PASS; full restore-jobs real-DB suite 39/39 PASS, including real process restart. Three new index drift negatives pin default NULLS LAST, missing partial predicate and wrong key sequence. Core tsc, migration ESLint and diff-check PASS.
+- Neutralizing the index audit yields 3 RED. The initial mutation left test index drift committed; cleanup was corrected by forcing rollback even when a weakened migration accepts the index. After restoring the owned test index, final rollback-safe mutation again yields 3 RED; restored migration tests 8/8 PASS (31 intentionally unselected). Full 39/39 preceded only this test-cleanup hardening; no production change followed that full run.
+- Source logs: `/private/tmp/tm-derived-index-{migrate,full,mutation-final,restored-final}.log`. Effects/sheets/jobs zero, dedicated DB dropped, prefix DB/backends zero, PG stopped. Initial startup omitted the dedicated port and failed to bind; corrected explicit loopback port was used before any database creation, with no shared database operation.
+- Remote main rechecked `3af8f12f73feedd517bfe97a92697cb1bb15536d`. Local only, no push/PR/flag/deployment. No query-latency benchmark or connection-capacity completion is claimed.

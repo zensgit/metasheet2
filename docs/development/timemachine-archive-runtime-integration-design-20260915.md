@@ -108,3 +108,7 @@ Actual SIGKILL before and after first-chunk COMMIT now has combined durable-queu
 ### Bounded Derived Drain
 
 Code `5522d0467e17c43eeafb910854d63bde2973b2c6` replaces the one-effect-per-timer scheduling limit with at most 32 sequential completed effects per tick before normal restore selection. Idle or retry ends the batch immediately; stop is checked between effects and after the batch. Infrastructure exceptions retain the existing failed-tick behavior. No new parallel transaction, permission, flag or retry semantics are introduced. The internal count is a fairness bound, not a throughput SLA or a time limit on one processor call. Pending-index and pool-capacity validation remain necessary.
+
+### Pending Queue Index
+
+Code `027ff1ef7309306e88ce3d4797da3658b1298812` adds a partial btree index matching the existing pending-effect ordering (last attempt NULLS FIRST, creation time, revision) and completed-at-NULL predicate. The unpublished ledger migration owns its creation and exact definition/validity/readiness audit. Wrong predicate, column order or NULL ordering is rejected rather than silently accepted by IF NOT EXISTS. This does not change queue eligibility or authorization. Pool-capacity remains open: consumer and processor use separate simultaneous transactions; the main pool defaults to 20 but is configurable, so default capacity is not sufficient acceptance proof.
