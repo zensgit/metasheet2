@@ -1,6 +1,9 @@
 import { Pool } from 'pg'
 import { createRecoveryArchiveDerivedProcessor, createRecoveryArchiveWorkerAuthorization } from '../../src/routes/univer-meta'
-import { createRecoveryArchiveRestoreWorker, type RecoveryArchiveRestoreWorkerRunResult } from '../../src/multitable/recovery-archive-restore-worker'
+import type { RecoveryArchiveRestoreWorkerRunResult } from '../../src/multitable/recovery-archive-restore-worker'
+import { createRecoveryArchiveApplication } from '../../src/multitable/recovery-archive-application'
+import type { RecoveryArchiveWorkerLifecycle } from '../../src/multitable/recovery-archive-observability'
+import type { RecoveryArchiveDerivedWork } from '../../src/multitable/recovery-archive-derived-effects'
 
 import { executeRecoveryArchiveAsyncRestoreChunk } from '../../src/multitable/recovery-archive-async-restore'
 import type {
@@ -34,13 +37,14 @@ export interface ArchiveProcessWorkerInput {
 
 export type ArchiveProcessWorkerMessage =
   | { kind: 'read-object'; requestId: number; request: RecoveryArchiveObjectReadRequest }
-  | { kind: 'drained'; pid: number; attempts: number; completed: number; batches: number[]; ticks: RecoveryArchiveRestoreWorkerRunResult[] }
+  | { kind: 'drained'; pid: number; attempts: number; completed: number; batches: number[]; ticks: RecoveryArchiveRestoreWorkerRunResult[]; lifecycle: RecoveryArchiveWorkerLifecycle[] }
   | { kind: 'boundary'; phase: 'before_commit' | 'after_commit'; pid: number; claim: ArchiveProcessClaimSnapshot }
   | {
       kind: 'done'
       pid: number
       claim: Pick<ArchiveProcessClaimSnapshot, 'blockFence' | 'workerFence'>
       outcome: RecoveryArchiveRestoreWorkerRunResult
+      lifecycle: RecoveryArchiveWorkerLifecycle[]
       terminal: { state: string; completedCount: string }
     }
   | { kind: 'error'; code: string }
@@ -122,6 +126,49 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     transactionDepth: { currentTransactionDepth: () => depth },
   }
   const authorization = createRecoveryArchiveWorkerAuthorization()
+  const runApplication = async (
+    tickCount: number,
+    processDerivedWork: (work: RecoveryArchiveDerivedWork) => Promise<boolean>,
+    onTick: (result: RecoveryArchiveRestoreWorkerRunResult) => void,
+  ) => {
+    const lifecycle: RecoveryArchiveWorkerLifecycle[] = []
+    let ticks = 0
+    let done!: () => void
+    const completed = new Promise<void>((resolve) => { done = resolve })
+    const application = createRecoveryArchiveApplication(() => ({
+      keyCustody: runtime.keyCustody, objectStore: runtime.objectStore,
+      auditedReplayHorizonMs: 0, asyncResumeHorizonMs: 300_000, workerIntervalMs: 5,
+      worker: {
+        leaseMs: 240_000, replayHorizonMs: 0, workerOwnerId: input.applicationName,
+        recheckAuthority: authorization.recheckAuthority, apply: authorization.apply, processDerivedWork,
+      },
+    }), () => ({ query, transaction, transactionDepthProbe: runtime.transactionDepth }), {
+      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+    }, {
+      recordLifecycle: event => { lifecycle.push(event) },
+      recordRun: result => {
+        onTick(result)
+        ticks += 1
+        if (ticks >= tickCount) done()
+      },
+    })
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      application.startWorker()
+      await Promise.race([completed, new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('archive_process_application_timer_timeout')), 150_000)
+      })])
+    } finally {
+      clearTimeout(timeout)
+      await application.stopWorker()
+    }
+    const stoppedTicks = ticks
+    await new Promise(resolve => setTimeout(resolve, 25))
+    if (ticks !== stoppedTicks || ticks !== tickCount || lifecycle.join(',') !== 'started,drained') {
+      throw new Error('archive_process_application_lifecycle_invalid')
+    }
+    return lifecycle
+  }
   try {
     if (input.phase === 'drain') {
       const tickCount = input.drainTicks ?? 0
@@ -131,28 +178,21 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       const processDerived = createRecoveryArchiveDerivedProcessor({ query, transaction })
       let attempts = 0
       let completed = 0
-      const worker = createRecoveryArchiveRestoreWorker({
-        query, transaction, leaseMs: 240_000, replayHorizonMs: 0,
-        workerOwnerId: input.applicationName,
-        runtime,
-        recheckAuthority: authorization.recheckAuthority,
-        apply: authorization.apply,
-        processDerivedWork: async work => {
-          attempts += 1
-          if (work.identity.jobId !== input.jobId) throw new Error('archive_process_derived_job_mismatch')
-          const result = await processDerived(work)
-          if (result) completed += 1
-          return result
-        },
-      })
       const ticks: RecoveryArchiveRestoreWorkerRunResult[] = []
       const batches: number[] = []
-      for (let tick = 0; tick < tickCount; tick += 1) {
-        const before = completed
-        ticks.push(await worker.runOnce())
-        batches.push(completed - before)
-      }
-      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, ticks })
+      let previousCompleted = 0
+      const lifecycle = await runApplication(tickCount, async work => {
+        attempts += 1
+        if (work.identity.jobId !== input.jobId) throw new Error('archive_process_derived_job_mismatch')
+        const result = await processDerived(work)
+        if (result) completed += 1
+        return result
+      }, result => {
+        ticks.push(result)
+        batches.push(completed - previousCompleted)
+        previousCompleted = completed
+      })
+      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, ticks, lifecycle })
       return
     }
     if (input.priorClaim) {
@@ -169,20 +209,14 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
     if (candidate?.jobId !== input.jobId) throw new Error('archive_process_candidate_mismatch')
     if (input.phase === 'finish') {
-      const worker = createRecoveryArchiveRestoreWorker({
-        query, transaction, runtime, leaseMs: 240_000, replayHorizonMs: 0,
-        workerOwnerId: input.applicationName,
-        recheckAuthority: authorization.recheckAuthority,
-        apply: authorization.apply,
-        processDerivedWork: createRecoveryArchiveDerivedProcessor({ query, transaction }),
-      })
-      const outcome = await worker.runOnce()
+      let outcome!: RecoveryArchiveRestoreWorkerRunResult
+      const lifecycle = await runApplication(1, createRecoveryArchiveDerivedProcessor({ query, transaction }), result => { outcome = result })
       const terminal = await query(`SELECT state, completed_count::text AS completed_count,
         block_fence::text AS block_fence, worker_fence::text AS worker_fence
         FROM meta_recovery_archive_jobs WHERE id=$1::uuid`, [input.jobId])
       const row = terminal.rows[0] as { state: string; completed_count: string; block_fence: string; worker_fence: string } | undefined
       if (!row) throw new Error('archive_process_terminal_missing')
-      await send({ kind: 'done', pid: process.pid, outcome,
+      await send({ kind: 'done', pid: process.pid, outcome, lifecycle,
         claim: { blockFence: row.block_fence, workerFence: row.worker_fence },
         terminal: { state: row.state, completedCount: row.completed_count },
       })

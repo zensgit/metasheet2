@@ -2483,6 +2483,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         expect(resumed.outcome).toEqual({
           kind: 'completed', swept: 0, chunks: committedBeforeRestart === 0 ? 2 : 1,
         })
+        expect(resumed.lifecycle).toEqual(['started', 'drained'])
         terminal = resumed.terminal
       } else {
         await expect(executeChunk(resumedClaim!)).resolves.toEqual({
@@ -2503,7 +2504,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         const denied = await runArchiveProcessWorker({
           phase: 'drain', drainTicks: 1, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
         }, provider)
-        expect(denied).toMatchObject({ kind: 'drained', attempts: 1, completed: 0, batches: [0],
+        expect(denied).toMatchObject({ kind: 'drained', attempts: 1, completed: 0, batches: [0], lifecycle: ['started', 'drained'],
           ticks: [{ kind: 'idle', swept: 0, chunks: 0 }] })
         expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
           .toBe('stale-derived-value')
@@ -2516,7 +2517,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         const drained = await runArchiveProcessWorker({
           phase: 'drain', drainTicks: 158, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
         }, provider)
-        expect(drained).toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001,
+        expect(drained).toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001, lifecycle: ['started', 'drained'],
           batches: [...Array.from({ length: 156 }, () => 32), 9, 0],
           ticks: Array.from({ length: 158 }, () => ({ kind: 'idle', swept: 0, chunks: 0 })) })
         await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
