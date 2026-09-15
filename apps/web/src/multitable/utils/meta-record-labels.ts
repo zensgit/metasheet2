@@ -67,6 +67,7 @@ export type MetaRecordLabelKey =
   | 'record.configHistoryEntityField' | 'record.configHistoryEntityView' | 'record.configHistoryEntityPermission'
   | 'record.configHistoryEntitySheetConfig' | 'record.configHistoryActionCreate' | 'record.configHistoryActionUpdate'
   | 'record.configHistoryActionDelete' | 'record.configHistoryEmpty' | 'record.configHistoryLoading' | 'record.configHistoryBy'
+  | 'record.configHistoryDetailsUnavailable'
   // --- T9-W config-restore (revert a config change) ---
   | 'record.configRestoreAction' | 'record.configRestoreTitle' | 'record.configRestoreWillRevert'
   | 'record.configRestoreDrift' | 'record.configRestoreGated' | 'record.configRestoreConfirm'
@@ -233,7 +234,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.configHistoryEntityField': { en: 'Field', zh: '字段' },
   'record.configHistoryEntityView': { en: 'View', zh: '视图' },
   'record.configHistoryEntityPermission': { en: 'Permission', zh: '权限' },
-  'record.configHistoryEntitySheetConfig': { en: 'Sheet config', zh: '数据表配置' },
+  'record.configHistoryEntitySheetConfig': { en: 'Table settings', zh: '表级设置' },
+  'record.configHistoryDetailsUnavailable': { en: 'Configuration details are unavailable for this entry.', zh: '此条历史未保存可显示的配置详情。' },
   'record.configHistoryActionCreate': { en: 'Created', zh: '新建' },
   'record.configHistoryActionUpdate': { en: 'Updated', zh: '更新' },
   'record.configHistoryActionDelete': { en: 'Deleted', zh: '删除' },

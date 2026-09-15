@@ -10000,6 +10000,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/bases/{baseId}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List restorable deleted tables in a base
+         * @description Requires sheet lifecycle authority and read access. Returns only eligible soft-deleted user tables; managed and system projections are excluded. Authorization is applied before pagination. No total count is exposed. Missing, deleted, and inaccessible bases return 403. The opaque cursor is bound to the base and uses a stable table-id keyset.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Opaque nextCursor from the preceding page of this base. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    baseId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Authorized deleted tables, possibly empty. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                sheets: {
+                                    id: string;
+                                    baseId: string;
+                                    name: string;
+                                    description: string | null;
+                                    /** Format: date-time */
+                                    deletedAt: string;
+                                }[];
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/templates": {
         parameters: {
             query?: never;
@@ -10343,7 +10405,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a multitable sheet */
+        /**
+         * Soft-delete a multitable sheet
+         * @description Marks the table deleted while retaining its fields, records, and views. It is no longer accessible through live table reads or writes. Authorized users can restore it from the table recycle bin; this is not a record deletion or field deletion.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -10375,6 +10440,63 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a soft-deleted multitable sheet
+         * @description Clears the table deletion marker under the same lifecycle authority as table deletion. Retained fields, records, views, and inbound links become available again. Does not restore an earlier data version or recreate a table that was permanently deleted. Live or missing tables return 404; a concurrent recovery fence returns 409. No feature flag is changed.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Table restored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                restored: string;
+                                sheet: {
+                                    id: string;
+                                    baseId: string | null;
+                                    name: string;
+                                    description: string | null;
+                                };
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
