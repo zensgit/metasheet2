@@ -789,7 +789,13 @@ function normalizeRecordSubscriptionNotification(
       : payload?.eventType === 'notification.sent' ? 'notification.sent'
         : payload?.eventType === 'record.updated' ? 'record.updated'
           : null
-  if (!id || !sheetId || !recordId || !userId || !eventType) return null
+  // recordId is REQUIRED for record-scoped rows (comment.created / record.updated always carry the
+  // record they point at) but OPTIONAL for notification.sent: a send_notification action fired by a
+  // record-less trigger (approval.completed / approval.task_created / schedule / webhook) persists a
+  // row with recordId '' — the server's unread-count already counts it, so dropping it here made the
+  // bell badge say "1" while the panel said "暂无通知" (#5745 §5.4).
+  if (!id || !sheetId || !userId || !eventType) return null
+  if (!recordId && eventType !== 'notification.sent') return null
   return {
     id,
     sheetId,
