@@ -4663,6 +4663,8 @@ watch(() => grid.conflict.value, (current, previous) => {
 })
 
 async function refreshDialogMeta() {
+  // A background poll must not supersede a pending base-context switch.
+  if (workbench.loading.value) return
   const activeSheetId = workbench.activeSheetId.value
   if (!activeSheetId) return
   if (dialogMetaRefreshInFlight) {
