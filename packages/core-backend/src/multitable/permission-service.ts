@@ -1777,8 +1777,16 @@ export async function resolveSheetCapabilities(
  * transaction-bound access snapshot so an expired JWT/RBAC cache cannot survive a revoke that committed
  * before the destructive transaction. Keeping the scope composition here gives both callers one policy
  * implementation instead of cloning the permission rules in the recovery route.
+ *
+ * Overloaded (not a single `skipLiveness?: boolean` signature) so the return type's `sheetLiveness`
+ * field is discriminated on the literal argument at the CALL SITE, by construction: a default call
+ * (omit the argument, or pass `false`) is typed to always carry a real `SheetLiveness` verdict, and
+ * only a call that opts out with the literal `true` is typed as possibly-absent. This keeps every one
+ * of the ~80 downstream `sheetLiveness !== 'live'` checks — which all reach this resolver through a
+ * default call — statically guaranteed non-optional; only the one opt-out call site (`GET /context`,
+ * which never reads the field) sees `undefined` in its type.
  */
-export async function resolveSheetCapabilitiesForAccess(
+export function resolveSheetCapabilitiesForAccess(
   query: QueryFn,
   sheetId: string,
   access: ResolvedRequestAccess,
@@ -1787,13 +1795,9 @@ export async function resolveSheetCapabilitiesForAccess(
   // the map for its own sibling-list decision over a set that includes sheetId passes it here instead of
   // this function re-querying it. Absent, this loads it itself exactly as before.
   preloadedScopeMap?: Map<string, SheetPermissionScope>,
-  // P2-02 (gate-2, C1 /context re-gate): a caller that will NEVER read the returned `sheetLiveness` —
-  // e.g. GET /context, which reads only `.sheetScope` / `.capabilities` / `.capabilityOrigin` off this
-  // result and has its OWN, separate existence check earlier in the request — can opt out of the
-  // `loadSheetLiveness` query entirely. Every other existing caller omits this (default `false`) and
-  // keeps loading it exactly as before; `sheetLiveness` is `undefined` ONLY when the caller passed
-  // `true` here, so a caller that reads the field without opting out is unaffected either way.
-  skipLiveness?: boolean,
+  // Default (omitted) or explicit `false`: this overload — the one every existing caller but one binds
+  // to — types `sheetLiveness` as a real, always-present verdict.
+  skipLiveness?: false,
 ): Promise<{
   access: ResolvedRequestAccess
   capabilities: MultitableCapabilities
@@ -1805,13 +1809,43 @@ export async function resolveSheetCapabilitiesForAccess(
    * path that only ever asked "may this actor?" and never "is there a sheet?". Capabilities are NOT
    * zeroed for a dead sheet: callers must answer 404 (a coded refusal), not 403, and the restore flow
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
-   *
-   * `undefined` iff the caller passed `skipLiveness: true` above — no query is made and no value is
-   * fabricated in its place. Every caller that does not opt out keeps getting a real verdict.
-   * Only a caller that has ALREADY established the sheet's liveness itself (e.g. resolved the sheet
-   * through a `deleted_at IS NULL` filter before calling) may opt out; opting out anywhere else
-   * re-opens the liveness closure this resolver exists to keep.
    */
+  sheetLiveness: SheetLiveness
+}>
+// P2-02 (gate-2, C1 /context re-gate) opt-out overload: ONLY a caller passing the literal `true` here
+// gets `sheetLiveness: undefined` in its return type — e.g. GET /context, which reads only
+// `.sheetScope` / `.capabilities` / `.capabilityOrigin` off this result and has its OWN, separate
+// existence check earlier in the request, so the `loadSheetLiveness` query is pure waste for it. Only
+// a caller that has ALREADY established the sheet's liveness itself (e.g. resolved the sheet through a
+// `deleted_at IS NULL` filter before calling) may bind to this overload; doing so anywhere else
+// re-opens the liveness closure this resolver exists to keep.
+export function resolveSheetCapabilitiesForAccess(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+  preloadedScopeMap: Map<string, SheetPermissionScope> | undefined,
+  skipLiveness: true,
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+  /** `undefined` — no query is made and no value is fabricated in its place. See the overload above. */
+  sheetLiveness: undefined
+}>
+export async function resolveSheetCapabilitiesForAccess(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+  preloadedScopeMap?: Map<string, SheetPermissionScope>,
+  skipLiveness?: boolean,
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+  // Implementation signature only (not visible to callers, who see one of the two overloads above):
+  // genuinely `SheetLiveness | undefined` here, so the `return` below needs no cast.
   sheetLiveness: SheetLiveness | undefined
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
