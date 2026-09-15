@@ -182,3 +182,15 @@ Code `089dec4c2d94ff5de28374d7b27451b5dbb30558`, tree `d0a5c9212b58fef7340a04d09
 - No business event emission; realtime payloads contain no record patches; Yjs receives source/affected related IDs. Mutation dropping saved link invalidations: delete, related-scope denial and cross-base denial are exactly RED (3 fail/3 pass); restored full suite 49/49.
 - Fixture record/sheet/extra-base counts zero; dedicated DB dropped, prefix/backends zero, PG stopped. Session-local logs: `/private/tmp/tm-derived-processor-{migrate,target-final,mutation,full,tsc-final,lint}.log`.
 - This is actual processor/DB evidence, not queue-to-worker or process-restart proof. Concurrent permission/input changes, bounded lifecycle, provider/startup and current-main replay remain open. No push/PR/enablement/deployment action.
+
+### Durable Runtime Wiring Checkpoint
+
+Code `a4436047b0f98c8e0bcc081850ec67c97fc90a5a`, tree `bc53d3527c7292158786baf981903d078d3de376`: nine code/test files; mandatory async transaction enqueue, worker consumption, canonical callback binding and enabled-composition validation.
+
+- Fresh isolated PG15 migration: 403 ledger entries. Combined restore-jobs and exact-anchor route suites: 2 files / 83 tests PASS, zero skips. After adding an explicit Vitest import, the two changed encrypted-facade cases were rerun and passed; the other 32 were intentionally unselected in that targeted run.
+- Real encrypted revert/reset facade proves post-enqueue failure rolls back source version and queue row, successful commit persists an actual revision-bound queue row, and applying jobs are ineligible. The revert terminal path proves consumption after finalization. Its processor is a spy: canonical computed behavior is separately covered by the route suite, not claimed as full end-to-end server acceptance here.
+- Initial full run exposed cross-case pending queue pollution; each facade case now removes only its own job's effects in finally. Final effects/sheet/job fixtures zero; disposable database dropped, prefix databases/backends zero, PG stopped.
+- Unit/boot neighbors: 4 files / 59 tests PASS. Covers enqueue failure, ordering before event hook, snapshot stability, missing processor fail-closed before database resolution, derived idle/success/retry scheduling, failure containment and stop boundaries. Core tsc and three modified small runtime modules' ESLint PASS; no megafile-wide lint claim. Diff-check PASS.
+- Mutation omitting mandatory enqueue: both real encrypted facade cases RED. Mutation omitting worker consumption: five worker assertions RED. Restored unit matrix 59/59 and combined real-DB matrix 83/83 PASS.
+- Logs are session-local `/private/tmp/tm-derived-runtime-{migrate,unit-restored,combined-final,target-restored,enqueue-mutation,worker-mutation,tsc-final,lint-final}.log`, not remote CI evidence.
+- Live remote main was `3af8f12f73feedd517bfe97a92697cb1bb15536d` during this checkpoint. The integration branch has not yet replayed that main. Remaining read/write races, throughput, provider/standard startup and real process-restart gates remain open. No push, PR, Ready, merge, flags, dispatch or deployment occurred.
