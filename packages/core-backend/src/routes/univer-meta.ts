@@ -75,6 +75,7 @@ import {
   createRecoveryPlanAuthorization,
 } from '../multitable/recovery-plan-authorization'
 import { bindRecoveryArchiveWorkerAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveDerivedProcessor } from '../multitable/recovery-archive-derived-processor'
 import {
   acquireTrustCheckpointActivationLease,
   assertTrustCheckpointActivationAuthority,
@@ -7082,6 +7083,41 @@ export function createRecoveryArchiveWorkerAuthorization() {
   return bindRecoveryArchiveWorkerAuthorization((query, sheetId, authority) => (
     hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities)
   ))
+}
+
+/** Requestless terminal recomputation; callers cannot supply a permissive authorization adapter. */
+export function createRecoveryArchiveDerivedProcessor(database: Pick<RecoveryArchiveRouterDatabaseRuntime, 'query'>) {
+  const authorization = createRecoveryArchiveWorkerAuthorization()
+  const query = database.query
+  return bindRecoveryArchiveDerivedProcessor({
+    query,
+    authorize: work => authorization.recheckAuthority(query, work.identity),
+    resolveAuthority: async (sheetId, identity) => {
+      const scope = await query(`SELECT sheet.base_id FROM public.meta_sheets sheet
+        JOIN public.meta_bases base ON base.id=sheet.base_id
+        WHERE sheet.id=$1 AND sheet.deleted_at IS NULL AND base.deleted_at IS NULL`, [sheetId])
+      if (scope.rows.length !== 1) return null
+      const baseId = (scope.rows[0] as { base_id: string }).base_id
+      if (sheetId === identity.sheetId && baseId !== identity.baseId) return null
+      const authority = await resolveDatabaseRecoverySheetAuthority(query, sheetId, identity.actorId)
+      if (!authority.capabilities.canRead ||
+        (baseIdsAreCrossBase(identity.baseId, baseId) && !(await resolveBaseReadableForAccess(query, baseId, authority.access))) ||
+        !(await hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities))) return null
+      return authority
+    },
+    helpers: authority => ({
+      ...createRecoveryComputedHelpers(authority.access, true),
+      loadLinkValuesByRecord, parseLinkFieldConfig, normalizeJson,
+    }),
+    invalidate: async groups => {
+      for (const group of groups) publishMultitableSheetRealtime({
+        spreadsheetId: group.sheetId, source: 'multitable', kind: 'record-updated',
+        recordIds: group.recordIds, fieldIds: group.fieldIds,
+      })
+      const ids = [...new Set(groups.flatMap(group => group.recordIds))]
+      if (yjsInvalidator && ids.length) await yjsInvalidator(ids)
+    },
+  })
 }
 
 /** Canonical background callbacks; this factory accepts no caller-supplied authorization policy. */
