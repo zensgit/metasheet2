@@ -5,11 +5,11 @@ import { join } from 'node:path'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
-import { consumeRecoveryArchiveDerivedEffect, enqueueRecoveryArchiveDerivedEffect } from '../../src/multitable/recovery-archive-derived-effects'
+import { consumeRecoveryArchiveDerivedEffect, enqueueRecoveryArchiveDerivedEffect, type RecoveryArchiveDerivedWork } from '../../src/multitable/recovery-archive-derived-effects'
 import {
   abandonRecoveryArchiveRestoreJob,
   acceptRecoveryArchiveRestoreJob,
@@ -966,6 +966,11 @@ async function cleanupFixtures(): Promise<void> {
       await client.query(`DELETE FROM public.meta_recovery_archive_restore_plans WHERE sheet_id=ANY($1::text[])`, [sheetIds])
       await client.query(
         `DELETE FROM public.meta_recovery_archive_job_chunks
+          WHERE job_id IN (SELECT id FROM public.meta_recovery_archive_jobs WHERE sheet_id=ANY($1::text[]))`,
+        [sheetIds],
+      )
+      await client.query(
+        `DELETE FROM public.meta_recovery_archive_derived_effects
           WHERE job_id IN (SELECT id FROM public.meta_recovery_archive_jobs WHERE sheet_id=ANY($1::text[]))`,
         [sheetIds],
       )
@@ -1926,6 +1931,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     let durable: RecoveryArchiveDurableFixture | undefined
     let fieldId = ''
     let recordIds: string[] = []
+    let derivedJobId: string | undefined
 
     try {
       const fixture = await seedVerifiedArchive(
@@ -2075,6 +2081,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           recheckAuthority: async () => true,
         },
       )
+      derivedJobId = accepted.id
       const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
       expect(candidate?.jobId).toBe(accepted.id)
       const firstClaim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
@@ -2093,7 +2100,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         expect(Object.isFrozen(identity)).toBe(true)
         identityStages.add(stage)
       }
-      const executeChunk = (claim: RecoveryArchiveRestoreJobWorkerClaim) =>
+      const executeChunk = (claim: RecoveryArchiveRestoreJobWorkerClaim, failAfterEnqueue = false) =>
         executeRecoveryArchiveAsyncRestoreChunk({
           transaction,
           query: q,
@@ -2128,12 +2135,30 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
             },
             onMutationApplied: async (_query, _mutation, identity) => {
               checkWorkerIdentity('mutation', identity)
+              if (failAfterEnqueue) throw new Error('synthetic_after_enqueue_failure')
             },
           },
         })
 
+      await expect(executeChunk(firstClaim, true)).rejects.toThrow('synthetic_after_enqueue_failure')
+      expect((await q('SELECT revision_id FROM public.meta_recovery_archive_derived_effects WHERE job_id=$1', [accepted.id])).rows).toEqual([])
+      expect((await q('SELECT version FROM public.meta_records WHERE sheet_id=$1 AND id=$2', [fixture.sheetId, recordIds[0]])).rows)
+        .toEqual([{ version: 2 }])
       const result = await executeChunk(firstClaim)
       expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
+      const pendingDerived = await q(
+        `SELECT effect.record_id, effect.completed_at,
+                revision.id IS NOT NULL AS revision_present
+           FROM public.meta_recovery_archive_derived_effects effect
+           LEFT JOIN public.meta_record_revisions revision ON revision.id=effect.revision_id
+          WHERE effect.job_id=$1`, [accepted.id],
+      )
+      expect(pendingDerived.rows).toEqual([{
+        record_id: recordIds[0], completed_at: null, revision_present: true,
+      }])
+      const processDerived = vi.fn(async (_work: RecoveryArchiveDerivedWork) => true)
+      await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
+      expect(processDerived).not.toHaveBeenCalled()
       expect([...identityStages].sort()).toEqual(['final', 'mutation', 'plan', 'preliminary', 'recheck', 'stabilize'])
       expect(durable.custodyCalls).toEqual(expect.arrayContaining(['verify', 'unwrap']))
 
@@ -2232,6 +2257,11 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         replayHorizonMs: 0,
       })
       expect(terminal).toMatchObject({ state: 'done', completedCount: '5001' })
+      await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('completed')
+      expect(processDerived).toHaveBeenCalledTimes(1)
+      expect(processDerived.mock.calls[0]?.[0]).toMatchObject({
+        identity: { jobId: accepted.id, sheetId: fixture.sheetId, actorId: fixture.actorId },
+      })
 
       const terminalEvidence = await q(
         `SELECT job.state, job.completed_count::text AS completed_count,
@@ -2301,6 +2331,9 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         version: 3,
       }])
     } finally {
+      if (derivedJobId) {
+        await q('DELETE FROM public.meta_recovery_archive_derived_effects WHERE job_id=$1', [derivedJobId])
+      }
       await rm(root, { recursive: true, force: true })
     }
   })

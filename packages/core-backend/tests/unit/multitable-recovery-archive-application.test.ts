@@ -43,6 +43,15 @@ afterEach(() => {
 })
 
 describe('recovery archive application composition', () => {
+  it('rejects an enabled composition without a durable derived processor', () => {
+    const composition = fakeComposition(fakeProviders())
+    delete (composition.worker as { processDerivedWork?: unknown }).processDerivedWork
+    const resolveDatabase = vi.fn(() => fakeDatabaseRuntime().runtime)
+    expect(() => createRecoveryArchiveApplication(() => composition, resolveDatabase, ENABLED_ENV))
+      .toThrow('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED')
+    expect(resolveDatabase).not.toHaveBeenCalled()
+    expect(workerMocks.createRecoveryArchiveRestoreWorker).not.toHaveBeenCalled()
+  })
   it.each([
     [{}, 'both absent'],
     [{ MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true' }, 'writer fence absent'],
@@ -180,6 +189,7 @@ describe('recovery archive application composition', () => {
     const originalApply = originalWorker.apply
     const expectedWorker = {
       recheckAuthority: originalWorker.recheckAuthority,
+      processDerivedWork: originalWorker.processDerivedWork,
       now: originalWorker.now,
       preliminaryFullRead: originalApply.preliminaryFullRead,
       stabilizeAuthorization: originalApply.stabilizeAuthorization,
@@ -205,6 +215,7 @@ describe('recovery archive application composition', () => {
     })
     Object.assign(originalWorker as unknown as Record<string, unknown>, {
       recheckAuthority: replacementWorker.recheckAuthority,
+      processDerivedWork: replacementWorker.processDerivedWork,
       leaseMs: 4,
       replayHorizonMs: 5,
       sweepLimit: 6,
@@ -252,6 +263,7 @@ describe('recovery archive application composition', () => {
     expect(workerInput?.apply.finalLockedFullRead).toBe(expectedWorker.finalLockedFullRead)
     expect(workerInput?.apply.evaluatePlanAuthorization).toBe(expectedWorker.evaluatePlanAuthorization)
     expect(workerInput?.apply.afterCommit).toBe(expectedWorker.afterCommit)
+    expect(workerInput?.processDerivedWork).toBe(expectedWorker.processDerivedWork)
     expect(Object.isFrozen(workerInput?.apply)).toBe(true)
     expect(schedule).toHaveBeenCalledWith(expect.any(Function), 60_000)
   })
@@ -434,6 +446,7 @@ function fakeDatabaseRuntime(): {
 
 function fakeWorkerDependencies(): RecoveryArchiveApplicationWorkerDependencies {
   return {
+    processDerivedWork: vi.fn(async () => true),
     recheckAuthority: vi.fn(async () => true),
     apply: {
       preliminaryFullRead: vi.fn(async () => true),

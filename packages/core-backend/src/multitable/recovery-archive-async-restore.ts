@@ -1,3 +1,4 @@
+import { enqueueRecoveryArchiveDerivedEffect } from './recovery-archive-derived-effects'
 import {
   acquireMaterializedArchiveAsyncFencesInternal,
   applyMaterializedExactArchiveRecoveryAsyncChunkInternal,
@@ -234,6 +235,7 @@ function bindWorkerApply(
     finalLockedFullRead: (query, scope) => apply.finalLockedFullRead(query, scope, identity),
     evaluatePlanAuthorization: (query, context) => apply.evaluatePlanAuthorization(query, context, identity),
     onMutationApplied: async (query, mutation) => {
+      await enqueueRecoveryArchiveDerivedEffect(query, identity, mutation)
       await onMutationApplied?.(query, mutation, identity)
       committedMutations.push(mutation)
     },

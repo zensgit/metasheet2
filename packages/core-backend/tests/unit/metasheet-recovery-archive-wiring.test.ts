@@ -81,6 +81,7 @@ describe('MetaSheetServer recovery archive wiring', () => {
       asyncResumeHorizonMs: 3_600_000,
       workerIntervalMs: 60_000,
       worker: {
+        processDerivedWork: async () => true,
         recheckAuthority: async () => true,
         apply: {
           preliminaryFullRead: async () => true,

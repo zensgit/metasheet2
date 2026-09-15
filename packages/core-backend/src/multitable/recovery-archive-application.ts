@@ -23,6 +23,7 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
   CreateRecoveryArchiveRestoreWorkerInput,
   | 'recheckAuthority'
   | 'apply'
+  | 'processDerivedWork'
   | 'leaseMs'
   | 'replayHorizonMs'
   | 'sweepLimit'
@@ -99,6 +100,7 @@ export function createRecoveryArchiveApplication(
     runtime,
     recheckAuthority: composition.worker.recheckAuthority,
     apply: composition.worker.apply,
+    processDerivedWork: composition.worker.processDerivedWork,
     leaseMs: composition.worker.leaseMs,
     replayHorizonMs: composition.worker.replayHorizonMs,
     sweepLimit: composition.worker.sweepLimit,
@@ -242,6 +244,7 @@ function snapshotWorkerDependencies(
   const apply = snapshotApplyDependencies(source.apply)
   const worker: RecoveryArchiveApplicationWorkerDependencies = {
     recheckAuthority: source.recheckAuthority,
+    processDerivedWork: source.processDerivedWork,
     apply,
     leaseMs: source.leaseMs,
     replayHorizonMs: source.replayHorizonMs,
@@ -252,6 +255,7 @@ function snapshotWorkerDependencies(
   }
   if (
     typeof worker.recheckAuthority !== 'function' ||
+    typeof worker.processDerivedWork !== 'function' ||
     !Number.isSafeInteger(worker.leaseMs) || worker.leaseMs < 1 ||
     !Number.isSafeInteger(worker.replayHorizonMs) || worker.replayHorizonMs < 0 ||
     (worker.sweepLimit !== undefined &&

@@ -7152,7 +7152,7 @@ export function createRecoveryArchiveWorkerCallbacks(database: Pick<RecoveryArch
       if (yjsInvalidator && yjsIds.length) await yjsInvalidator([...new Set(yjsIds)])
     },
   }
-  return { recheckAuthority: authorization.recheckAuthority, apply }
+  return { recheckAuthority: authorization.recheckAuthority, apply, processDerivedWork: createRecoveryArchiveDerivedProcessor(database) }
 }
 
 /**

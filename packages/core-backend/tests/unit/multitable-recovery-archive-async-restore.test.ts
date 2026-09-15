@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const dependencies = vi.hoisted(() => ({
   acquireFences: vi.fn(),
   applyChunk: vi.fn(),
+  enqueueDerived: vi.fn(),
   loadArchive: vi.fn(),
   loadChunk: vi.fn(),
   loadPlan: vi.fn(),
@@ -10,6 +11,10 @@ const dependencies = vi.hoisted(() => ({
   readCompleteState: vi.fn(),
   readWorkerBinding: vi.fn(),
   runChunk: vi.fn(),
+}))
+
+vi.mock('../../src/multitable/recovery-archive-derived-effects', () => ({
+  enqueueRecoveryArchiveDerivedEffect: dependencies.enqueueDerived,
 }))
 
 vi.mock('../../src/multitable/exact-anchor-recovery-execute', async () => {
@@ -291,15 +296,20 @@ function mockIdentityPipeline(
 describe('Time Machine async archive restore facade', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    dependencies.enqueueDerived.mockReset().mockResolvedValue(undefined)
   })
 
-  it.each(['committed', 'rollback', 'already_committed', 'no_pending_chunk', 'effect_failure'] as const)(
+  it.each(['committed', 'rollback', 'already_committed', 'no_pending_chunk', 'effect_failure', 'enqueue_failure'] as const)(
     'post-commit effects respect %s outcome', async (outcome) => {
       const order: string[] = []
       const input = makeInput(order)
       mockIdentityPipeline([binding])
       const pipeline = dependencies.runChunk.getMockImplementation()!
       const mutation = { kind: 'delete' as const, recordId: 'record-effect', revisionId: 'revision-effect', linkInvalidations: [] }
+      dependencies.enqueueDerived.mockImplementation(async () => {
+        order.push('enqueue')
+        if (outcome === 'enqueue_failure') throw new Error('derived_enqueue_failed')
+      })
       dependencies.applyChunk.mockImplementation(async (fresh, apply: MaterializedArchiveAsyncChunkApplyInput) => {
         await apply.onMutationApplied?.(fresh, mutation)
         order.push('mutation')
@@ -323,7 +333,11 @@ describe('Time Machine async archive restore facade', () => {
       const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
       try {
         const configured = { ...input, apply: { ...input.apply, afterCommit } }
-        if (outcome === 'rollback') {
+        if (outcome === 'enqueue_failure') {
+          await expect(executeRecoveryArchiveAsyncRestoreChunk(configured)).rejects.toThrow('derived_enqueue_failed')
+          expect(order).not.toContain('commit')
+          expect(input.apply.onMutationApplied).not.toHaveBeenCalled()
+        } else if (outcome === 'rollback') {
           await expect(executeRecoveryArchiveAsyncRestoreChunk(configured)).rejects.toThrow('synthetic_commit_failure')
         } else {
           const result = await executeRecoveryArchiveAsyncRestoreChunk(configured)
@@ -336,6 +350,12 @@ describe('Time Machine async archive restore facade', () => {
             [mutation],
           )
           expect(order.indexOf('afterCommit')).toBeGreaterThan(order.indexOf('commit'))
+          expect(order.indexOf('enqueue')).toBeLessThan(order.indexOf('mutation'))
+          expect(dependencies.enqueueDerived).toHaveBeenCalledWith(
+            expect.any(Function),
+            { jobId: binding.jobId, workspaceId: binding.workspaceId, baseId: binding.baseId, sheetId: binding.sheetId, actorId: binding.actorId },
+            mutation,
+          )
         } else expect(afterCommit).not.toHaveBeenCalled()
         if (outcome === 'effect_failure') expect(warning).toHaveBeenCalledWith('RECOVERY_ARCHIVE_POST_COMMIT_EFFECT_FAILED')
         else expect(warning).not.toHaveBeenCalled()
