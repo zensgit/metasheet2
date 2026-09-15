@@ -84,6 +84,7 @@ import type {
   MetaApprovalTemplateDetail,
   MetaApprovalFormField,
   MetaApprovalFormOption,
+  MetaRecordApprovalListPage,
   MetaRecordApprovalSubmission,
   MetaRecordApprovalDrift,
 } from '../types'
@@ -2114,13 +2115,28 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   /**
-   * 记录级送审 (design 4.1): this record's submissions, newest first, each with the server-computed
-   * `drift` (changed flag + changed FIELD IDS, never values). Needs only `canRead`; an unreadable or
-   * empty answer normalizes to `[]` so the panel shows its empty state instead of breaking.
+   * 记录级送审 (design 4.1): ONE PAGE of this record's submissions, newest first, each with the
+   * server-computed `drift` (changed flag + changed FIELD IDS, never values). Needs only `canRead`; an
+   * unreadable or empty answer normalizes to `{ submissions: [], hasMore: false }` so the panel shows its
+   * empty state instead of breaking.
+   *
+   * `limit` is forwarded as `?limit=` and is the CALLER's page size, not a promise: the route clamps it to
+   * [1, 100] and falls back to its own default when it is absent, so an omitted/garbage value must NOT be
+   * sent as `?limit=` at all (an empty `?limit=` is "said nothing" on the server and a 0 would be clamped
+   * up to a one-row page). `hasMore` comes from the route's `limit + 1` probe and is FALSE when the field
+   * is absent — an old server that does not send it must not make the UI claim a truncation it cannot
+   * prove.
    */
-  async listRecordApprovals(sheetId: string, recordId: string): Promise<MetaRecordApprovalSubmission[]> {
+  async listRecordApprovals(
+    sheetId: string,
+    recordId: string,
+    options: { limit?: number } = {},
+  ): Promise<MetaRecordApprovalListPage> {
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.trunc(options.limit)
+      : undefined
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/approvals`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/approvals${qs({ limit })}`,
     )
     const body = await this.parseJson<unknown>(res)
     const rows = Array.isArray(body)
@@ -2132,9 +2148,12 @@ export class MultitableApiClient implements CommentsApiClient {
           : isPlainObject(body) && Array.isArray(body.data)
             ? body.data
             : []
-    return rows
+    const submissions = rows
       .map((row: unknown) => normalizeRecordApprovalSubmission(row))
       .filter((row): row is MetaRecordApprovalSubmission => row !== null)
+    // Strictly boolean-true: a string 'false' / a count / a missing field all mean "do not claim more".
+    const hasMore = isPlainObject(body) && (body.hasMore === true || body.has_more === true)
+    return { submissions, hasMore }
   }
 
   /**

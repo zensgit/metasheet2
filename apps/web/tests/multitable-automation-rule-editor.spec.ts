@@ -4797,6 +4797,13 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  // Explicit per-test timeout for the two #5739 泛化 describes below: every case mounts the FULL rule
+  // editor and drives a load → save round trip, 0.3-1.7s each on an idle dev box. On the CI web-tests
+  // lane (457 spec files sharing the runner) that overran vitest's 5s default and turned the
+  // backend-only PR #5763 red on a case it did not touch. Scoped here on purpose — the global
+  // testTimeout stays 5s so an actually-hung editor still fails fast everywhere else.
+  const ROUND_TRIP_TIMEOUT_MS = 30_000
+
   // --------------------------------------------------------------------------------------------
   // #5739 泛化 — EVERY action type's save must start from the RAW loaded config, not from the
   // modelled fields alone.
@@ -5033,7 +5040,7 @@ describe('MetaAutomationRuleEditor', () => {
         const config = await saveAndReadConfig(container, saved)
         // FAIL-FIRST: revert any one type's rebuild to the modelled-keys-only object and THIS case goes red.
         expect(stableJson(config)).toBe(stableJson(testCase.config))
-      })
+      }, ROUND_TRIP_TIMEOUT_MS)
     }
 
     // ---- the other half of the contract: a key the UI OWNS and the author CLEARED must be DELETED,
@@ -5057,7 +5064,7 @@ describe('MetaAutomationRuleEditor', () => {
       // Unowned keys are untouched by the clear.
       expect(config.targetBaseId).toBe('base_x')
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('create_record: clearing the target sheet DELETES `sheetId` (the loaded one is not restored)', async () => {
       const { container, saved } = mountWithAction('create_record', {
@@ -5073,7 +5080,7 @@ describe('MetaAutomationRuleEditor', () => {
       expect(config).not.toHaveProperty('sheetId')
       expect(config.targetBaseId).toBe('base_x')
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('send_notification: a legacy `userId` string is consumed by the recipient model, not re-emitted', async () => {
       const { container, saved } = mountWithAction('send_notification', {
@@ -5089,7 +5096,7 @@ describe('MetaAutomationRuleEditor', () => {
       expect(config).not.toHaveProperty('userId')
       expect(config.userIds).toEqual(['user_1'])
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('send_email: dropping a recipient shrinks `recipients` (no merge with the loaded list)', async () => {
       const { container, saved } = mountWithAction('send_email', {
@@ -5104,7 +5111,7 @@ describe('MetaAutomationRuleEditor', () => {
       const config = await saveAndReadConfig(container, saved)
       expect(config.recipients).toEqual(['ops@example.com'])
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('send_dingtalk_group_message: clearing the public-form link DELETES `publicFormViewId`', async () => {
       const { container, saved } = mountWithAction('send_dingtalk_group_message', {
@@ -5121,7 +5128,7 @@ describe('MetaAutomationRuleEditor', () => {
       const config = await saveAndReadConfig(container, saved)
       expect(config).not.toHaveProperty('publicFormViewId')
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('send_dingtalk_person_message: clearing the public-form link DELETES `publicFormViewId`', async () => {
       const { container, saved } = mountWithAction('send_dingtalk_person_message', {
@@ -5137,7 +5144,7 @@ describe('MetaAutomationRuleEditor', () => {
       const config = await saveAndReadConfig(container, saved)
       expect(config).not.toHaveProperty('publicFormViewId')
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('switching an action type drops the loaded snapshot — no cross-type key bleed', async () => {
       // The snapshot belongs to the type it was LOADED as: an update_record cross-base triple must not
@@ -5159,7 +5166,7 @@ describe('MetaAutomationRuleEditor', () => {
       await flushPromises()
       const config = await saveAndReadConfig(container, saved)
       expect(config).toEqual({ recipients: ['ops@example.com'], subjectTemplate: 'S', bodyTemplate: 'B' })
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
   })
 
   // -----------------------------------------------------------------------------------------------
@@ -5233,7 +5240,7 @@ describe('MetaAutomationRuleEditor', () => {
       const { container, saved } = mountWithAction('update_record', config)
       await flushPromises()
       expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('update_record: editing ONE row stringifies that row only — untouched rows keep their raw values', async () => {
       const { container, saved } = mountWithAction('update_record', {
@@ -5248,7 +5255,7 @@ describe('MetaAutomationRuleEditor', () => {
       await flushPromises()
       const config = await saveAndReadConfig(container, saved)
       expect(config.fields).toEqual({ fld_score: 42, fld_1: 'shipped' })
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('create_record: non-string `data` values survive an untouched load → save', async () => {
       const config = {
@@ -5259,7 +5266,7 @@ describe('MetaAutomationRuleEditor', () => {
       const { container, saved } = mountWithAction('create_record', config)
       await flushPromises()
       expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     // ---- (2) an untouched save must not ADD a mirror key ------------------------------------------
 
@@ -5270,14 +5277,14 @@ describe('MetaAutomationRuleEditor', () => {
       const { container, saved } = mountWithAction('send_dingtalk_group_message', config)
       await flushPromises()
       expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('send_dingtalk_group_message: a plural-only destinationIds config does not grow `destinationId`', async () => {
       const config = { destinationIds: ['dt_1', 'dt_2'], titleTemplate: 'T', bodyTemplate: 'B' }
       const { container, saved } = mountWithAction('send_dingtalk_group_message', config)
       await flushPromises()
       expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('send_dingtalk_person_message: a field-path-only config grows neither `userIds` nor `userIdFieldPaths`', async () => {
       const config = {
@@ -5289,7 +5296,7 @@ describe('MetaAutomationRuleEditor', () => {
       const { container, saved } = mountWithAction('send_dingtalk_person_message', config)
       await flushPromises()
       expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     // Create-mode (no loaded shape) is already pinned by the authoring specs above — e.g. "saves a
     // DingTalk group message rule" expects BOTH destinationId and destinationIds, and the person-message
@@ -5315,7 +5322,7 @@ describe('MetaAutomationRuleEditor', () => {
       expect(config.titleTemplate).toBe('NEW')
       expect(config.bodyTemplate).toBe('NEWBODY')
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('start_approval: outcomeValues are TRIMMED on save — the one documented exception to byte-identity', async () => {
       // #5742 canonicalises the mapping on the way IN and on the way OUT (MetaAutomationRuleEditor.vue
@@ -5331,7 +5338,7 @@ describe('MetaAutomationRuleEditor', () => {
       const config = await saveAndReadConfig(container, saved)
       expect(config.resultWriteback).toEqual({ statusField: 'fld_1', outcomeValues: { approved: 'PASS' } })
       expect(config.x_customerExtension).toEqual(extension)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     // ---- (3) the screen must tell the truth about a preserved cross-base target -------------------
 
@@ -5363,7 +5370,7 @@ describe('MetaAutomationRuleEditor', () => {
       ack.dispatchEvent(new Event('change'))
       await flushPromises()
       expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('delete_record: a SAME-base delete keeps its pre-checked acknowledgement and shows no banner', async () => {
       const { container } = mountWithAction('delete_record', {})
@@ -5373,7 +5380,7 @@ describe('MetaAutomationRuleEditor', () => {
       expect(ack.checked).toBe(true)
       const warning = container.querySelector('[data-action-index="0"] [data-field="deleteRecordWarning"]') as HTMLElement
       expect(warning.textContent).toContain('trigger record')
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('update_record: a cross-base target shows the banner on a non-delete action too', async () => {
       const { container } = mountWithAction('update_record', {
@@ -5388,7 +5395,7 @@ describe('MetaAutomationRuleEditor', () => {
       expect(banner.textContent).toContain('sheet_x')
       expect(banner.textContent).toContain('rec_x')
       expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     it('update_record: an INCOMPLETE cross-base triple blocks save instead of arriving as a server 400', async () => {
       // automation-service.ts validateCrossBaseWriteConfig rejects targetBaseId without its two siblings
@@ -5402,7 +5409,7 @@ describe('MetaAutomationRuleEditor', () => {
       expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).not.toBeNull()
       expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
       expect(blockKeys(container)).toContain('action-0-crossBaseTarget')
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
 
     // ---- structural: a future rebuild branch cannot forget its owned-key entry ---------------------
 
@@ -5435,6 +5442,6 @@ describe('MetaAutomationRuleEditor', () => {
       // Sanity: the scan actually found the branches (a regex that matches nothing must not pass).
       expect(rebuilt.size).toBeGreaterThanOrEqual(8)
       expect([...rebuilt].filter((type) => !declared.has(type))).toEqual([])
-    })
+    }, ROUND_TRIP_TIMEOUT_MS)
   })
 })

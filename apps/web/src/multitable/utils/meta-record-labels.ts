@@ -163,6 +163,12 @@ export type MetaRecordLabelKey =
   | 'approval.errorTemplateNotPublished' | 'approval.errorRecordNotFound'
   | 'approval.errorCreateFailed' | 'approval.errorValidation'
   | 'approval.templateDraftPending'
+  // --- 2a 后续前端 / list page follow-up (backend PR #5763: the list route now answers
+  //     `{ submissions, hasMore }` and stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a row whose
+  //     terminal write is CORRECT but whose requester bell was never written). The panel shows at most
+  //     one page, so `hasMore` needs copy that says so, and the row marker needs a label for that code
+  //     — an unlabelled code renders NOTHING (see recordApprovalErrorLabel), i.e. a silent miss. ---
+  | 'approval.errorNotificationFailed' | 'approval.errorNotificationFailedTerminal'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -454,6 +460,12 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.errorCreateFailed': { en: 'Could not create the approval. Please try again.', zh: '创建审批实例失败，请稍后重试。' },
   'approval.errorValidation': { en: 'The form does not match this template. Check the required fields.', zh: '表单内容不符合模板要求，请检查必填项。' },
   'approval.templateDraftPending': { en: 'This template has unpublished changes — the form below may differ from the one the approval will use.', zh: '该模板有未发布的改动，下方表单可能与实际审批表单不一致。' },
+  // The ROW-LEVEL marker (`RECORD_APPROVAL_NOTIFICATION_FAILED`): the submission is terminal and correct,
+  // only the requester's bell is missing. Two variants because the outcome differs: the auto-approve path
+  // that stamps it is usually `approved`, but the same compensation runs for any terminal outcome, and a
+  // rejected row must not be told it 「已通过」.
+  'approval.errorNotificationFailed': { en: 'Approved, but the notification could not be sent.', zh: '已通过，但通知发送失败' },
+  'approval.errorNotificationFailedTerminal': { en: 'Completed, but the notification could not be sent.', zh: '已结束，但通知发送失败' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -726,6 +738,7 @@ const RECORD_APPROVAL_ERROR_LABELS: Record<string, MetaRecordLabelKey> = {
   RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED: 'approval.errorTemplateNotPublished',
   RECORD_APPROVAL_RECORD_NOT_FOUND: 'approval.errorRecordNotFound',
   RECORD_APPROVAL_CREATE_FAILED: 'approval.errorCreateFailed',
+  RECORD_APPROVAL_NOTIFICATION_FAILED: 'approval.errorNotificationFailed',
   VALIDATION_ERROR: 'approval.errorValidation',
   FORBIDDEN: 'approval.errorPermissionDenied',
 }
@@ -745,6 +758,64 @@ export function recordApprovalSubmissionStatusLabel(status: string, isZh: boolea
   if (status === 'creating') return recordLabel('approval.statusCreating', isZh)
   if (status === 'failed') return recordLabel('approval.statusFailed', isZh)
   return null
+}
+
+/**
+ * The ROW error code the backend stamps on a submission whose terminal write landed but whose requester
+ * notification did not (`RECORD_APPROVAL_ROW_ERROR_CODES.notificationFailed` in
+ * record-approval-submission-service.ts). Exported so the panel matches the CODE, never a message.
+ */
+export const RECORD_APPROVAL_NOTIFICATION_FAILED_CODE = 'RECORD_APPROVAL_NOTIFICATION_FAILED'
+
+/**
+ * Statuses that mean "this submission is over" — the four approval completion outcomes the backend's
+ * `RECORD_APPROVAL_TERMINAL_OUTCOMES` lists. `failed` is NOT one of them: it is the submission's own
+ * refusal state and already explains itself through `approval.failureReason`.
+ */
+const RECORD_APPROVAL_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'approved',
+  'rejected',
+  'revoked',
+  'cancelled',
+])
+
+/**
+ * The row marker for a TERMINAL submission that still owes its requester notification. Returns null for
+ * every other (status, code) pair, so:
+ *   - a clean terminal row renders nothing,
+ *   - an in-flight row carrying the code renders nothing (the backend only stamps it on a terminal
+ *     promote; showing it on a `pending` row would assert an outcome we do not have),
+ *   - a `failed` row keeps its existing failure line instead of gaining a second one.
+ * The APPROVED copy is the marker the design asked for; the other three terminal outcomes get the
+ * outcome-neutral variant, because 「已通过」 about a rejected row would be a lie.
+ */
+export function recordApprovalNotificationFailedNotice(
+  status: string,
+  code: string | undefined,
+  isZh: boolean,
+): string | null {
+  if (code !== RECORD_APPROVAL_NOTIFICATION_FAILED_CODE) return null
+  if (!RECORD_APPROVAL_TERMINAL_STATUSES.has(status)) return null
+  // Through the SAME code→label map every other coded row uses, so an unlabelled code still renders
+  // nothing rather than a raw token.
+  return status === 'approved'
+    ? recordApprovalErrorLabel(code, isZh)
+    : recordLabel('approval.errorNotificationFailedTerminal', isZh)
+}
+
+/**
+ * The panel reads ONE page (`?limit=`) and the route answers `hasMore` when this record has more
+ * submissions than that page. There is no paging UI here on purpose (design §5 ships a section, not a
+ * list view), so the honest thing is to say what is on screen: the most recent `shown`.
+ */
+export function recordApprovalHasMoreNotice(shown: number, isZh: boolean): string {
+  const count = Number.isFinite(shown) && shown > 0 ? Math.trunc(shown) : 0
+  if (count <= 0) {
+    return isZh ? '还有更多（仅显示最近一页）' : 'More exist (showing the most recent page only)'
+  }
+  return isZh
+    ? `还有更多（仅显示最近 ${count} 条）`
+    : `More exist (showing the ${count} most recent only)`
 }
 
 // The picker asks for at most `shown` published templates (the route's ceiling). When the answer is
