@@ -11,6 +11,22 @@ deployment, production or real customer data.
 
 ## Contract
 
+### Authenticated Browser Acceptance
+
+The manual harness `packages/core-backend/scripts/verify-timemachine-browser.mts`
+must use canonical password login, persisted sessions, JWT middleware, the real
+multitable router/client and `SheetTrashModal`. No injected request user, minted
+fixture token, intercepted API or fake restore result qualifies. Use a dedicated
+loopback PostgreSQL test database; refuse general/shared database names and ports.
+Compare retained field, record and view rows independently in PostgreSQL; a UI
+success message alone is insufficient. Deny reader and anonymous restores while
+the table is still deleted. Assert viewer-local time, close servers and pools,
+and prove fixture/session cleanup. This is manual component-to-real-backend
+acceptance, not a claim that the full workbench, row/config restore, archive
+worker, staging or production has passed. No new recovery authority is added.
+
+### Product Behavior
+
 1. Recycle bin lists soft-deleted sheets in the selected base, including name and
    deletion time. Listing admits only the same sheet lifecycle authority as the
    existing restore route. Hidden sheets and their counts must not leak. Restore

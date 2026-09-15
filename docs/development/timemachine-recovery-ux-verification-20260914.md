@@ -1,5 +1,51 @@
 # Time Machine Recovery UX Verification
 
+## Authenticated Table Restore Browser Gate 2026-09-15
+
+Harness commit `5641e751a4c1d197d8158919b978018c9393550d`, tree
+`6e51b0758e66c78493b7c769dac193a77136dc20`, parent
+`5864b3e21768296e519e6d4acbc2cefb75360034`. The sole code delta is
+`packages/core-backend/scripts/verify-timemachine-browser.mts`; production source,
+workflows, migrations and OpenAPI are unchanged. This report/design update is a
+documentation-only child. Existing Draft #5709 remains the publication carrier.
+
+Fresh dedicated PostgreSQL: 402 migrations applied. Final exact-head manual
+browser run exits 0 with six checks: canonical password login persists a session;
+canonical delete retains exact 2 fields/2 records/1 view; deletion time matches
+the browser's America/New_York zone; a real reader cannot list or restore the
+still-deleted table (403); anonymous restore returns 401; the real modal's explicit
+confirmation restores the table and every retained row is byte/shape-equivalent
+to the pre-delete database snapshot. Positive-flow API failures and browser
+request/page errors are fatal. Desktop restore and mobile refusal screenshots
+are generated in `artifacts/timemachine-browser/`, with a SHA-bound `result.json`.
+
+Discriminating mutation on this harness: change only the restore SQL assignment
+from `deleted_at = NULL` to `deleted_at = deleted_at`. Although the API and modal
+report success, the independent DB null assertion fails (exit 1). Restore the
+production file to SHA-256 `0054ef6d22c27a3f2a57a2324e4c3184f3dfb7adaab369c5cbfd2eeac11a05da`;
+the exact-head run returns PASS again. Standalone harness/dependency TypeScript
+check passes with the repository Express augmentation included; diff-check passes.
+
+Cleanup: tables, fields, records, views, grants, users and real sessions all zero;
+independent config-history and other-backend census zero; dedicated database
+dropped, database-prefix/backend residue zero, owned PostgreSQL stopped. Initial
+harness attempts exposed a fixture activation enum mismatch, missing explicit
+session cleanup and a MessageBus shutdown omission; those attempts are not final
+gate evidence. The final script uses canonical activation and explicit cleanup.
+
+Reproduce against an already freshly migrated dedicated test database:
+
+```sh
+NODE_ENV=test DATABASE_URL="$TM_BROWSER_DATABASE_URL" pnpm --filter @metasheet/core-backend exec tsx scripts/verify-timemachine-browser.mts
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --module esnext --moduleResolution bundler --target es2022 --lib ES2022,DOM --esModuleInterop --resolveJsonModule --experimentalDecorators --skipLibCheck src/types/express.d.ts scripts/verify-timemachine-browser.mts
+```
+
+Local logs: `/private/tmp/tm-browser-acceptance-{migrate,exact,exact-mutation,tsc}.log`.
+This script is manual acceptance, not a newly enrolled required-CI test. Fresh
+published-head CI is still required. Full-workbench navigation, authenticated
+record/config restore, archive startup/storage, staging and tenant UAT remain
+separate open gates. No flags, Ready, merge, dispatch or deployment occurred.
+
 ## Current-Main Replay At 28d11496
 
 True merge `4711d94e29d75bb037642f178cca1a9b1f9fa3da`, tree `8f329eb60701373bb272c729373bde954d6eeccb`, ordered parents `d883a3a3d0b2f36f963f43573c4c59af1a39a182` and main `28d11496bb4281738c3dd13096fe317ff42e8780`. Incoming ten paths comprise attendance Web, the approval-template client fix/test and one unrelated document. Exactly one path overlaps the 47-file candidate: `apps/web/src/multitable/api/client.ts`. Its first-parent delta is only main's `listApprovalTemplates` envelope repair; all other owned blobs remain identical. Merge is automatic, no manual conflict resolution. Backend, OpenAPI, plugins, workflows and required-web are byte-identical to the first parent.
