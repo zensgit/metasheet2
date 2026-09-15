@@ -226,17 +226,55 @@ function toOptionalContext(input: ContextSnapshot) {
   }
 }
 
+// #5750 follow-up: hosts commonly answer `mt:navigated` with another `mt:navigate` (the "keep my
+// outer URL in sync" reflex). Each re-send carries a NEW requestId, so nothing upstream recognises
+// it as a repeat at the message layer, and the workbench happily answers 'applied' again -- #5750
+// already stopped the HTTP behind that from refetching, but the ECHO kept ping-ponging forever.
+// Two guards, both on the echo only:
+//   - no `mt:navigated` for the triple that was just echoed (the re-send still gets its
+//     `mt:navigate-result` -- results stay 1:1 with requests, so a host awaiting a reply is never
+//     starved -- but nothing that could trigger the next re-send);
+//   - no requestId echoed twice: a request is answered once, and a SECOND result carrying an
+//     already-answered requestId is not that request's answer.
+// Two deliberate non-choices, because a dropped echo is its own bug (the parent stops tracking
+// where the frame is):
+//   - "the LAST echoed triple", not "every triple ever echoed" -- navigating A -> B -> A is real
+//     movement the host must hear about; only the back-to-back repeat is the loop;
+//   - a repeated requestId whose triple is NEW still posts, just without the requestId (it is an
+//     ordinary navigation echo, not a reply), so the frame moving is never silently swallowed.
+const ECHOED_NAVIGATION_REQUEST_ID_LIMIT = 200
+const echoedNavigationRequestIds = new Set<string | number>()
+let lastEchoedNavigatedContext: ContextSnapshot | null = null
+
+function rememberEchoedNavigationRequestId(requestId: string | number) {
+  echoedNavigationRequestIds.add(requestId)
+  // Set iteration is insertion-ordered, so dropping the first entry is a FIFO trim: a long-lived
+  // frame cannot grow this set without bound, and a requestId that old can no longer be in flight.
+  while (echoedNavigationRequestIds.size > ECHOED_NAVIGATION_REQUEST_ID_LIMIT) {
+    const oldest = echoedNavigationRequestIds.values().next()
+    if (oldest.done) break
+    echoedNavigationRequestIds.delete(oldest.value)
+  }
+}
+
 function emitNavigated(context: ContextSnapshot, requestId?: string | number) {
+  // An already-answered requestId is dropped from the payload, not used to drop the payload.
+  const echoRequestId = requestId != null && echoedNavigationRequestIds.has(requestId) ? undefined : requestId
+  if (requestId != null) rememberEchoedNavigationRequestId(requestId)
+  // The identical echo is already out; this request is answered by it.
+  if (lastEchoedNavigatedContext && contextMatches(lastEchoedNavigatedContext, context)) return false
+  lastEchoedNavigatedContext = context
   const payload = {
     type: 'mt:navigated',
     ...toOptionalContext(context),
-    requestId,
+    requestId: echoRequestId,
   }
   emit('navigated', {
     sheetId: context.sheetId || undefined,
     viewId: context.viewId || undefined,
   })
   postToParent(payload)
+  return true
 }
 
 function flushPendingNavigationEcho(context: ContextSnapshot) {
@@ -245,6 +283,10 @@ function flushPendingNavigationEcho(context: ContextSnapshot) {
   }
   const requestId = pendingNavigationEcho.value.requestId
   pendingNavigationEcho.value = null
+  // `true` means "this pending echo is settled", not "a message went out": when emitNavigated
+  // suppresses a duplicate the request is still answered (by the identical echo already sent plus
+  // its own mt:navigate-result), so callers must keep taking their early return -- re-running the
+  // generic watch echo below it would post exactly the duplicate this suppresses.
   emitNavigated(context, requestId)
   return true
 }

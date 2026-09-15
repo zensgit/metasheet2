@@ -3915,8 +3915,15 @@ async function replayPendingExternalContextIfReady() {
   const ok = await applyExternalContext(replay.context)
   emit('external-context-result', ok
     ? {
+      // #5750 follow-up: echo what is ACTUALLY on screen, not what was asked for. The loaded
+      // context decides the active triple (syncContextState overwrites activeBaseId with
+      // ctx.base.id / ctx.sheet.baseId and falls activeViewId back to views[0] when the requested
+      // view is not in ctx.views), so a request naming a dead view applies successfully while the
+      // workbench lands on another view. Echoing the request made the embed host pin that dead
+      // triple into the URL and re-send it forever; the resolved triple round-trips. FAILURES keep
+      // echoing the request -- there is no applied context to report for them.
       status: 'applied',
-      context: replay.context,
+      context: getCurrentExternalContext(),
       requestId: replay.requestId,
     }
     : {
@@ -4008,7 +4015,10 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
-  return { status: 'applied', context: nextContext, requestId: options?.requestId }
+  // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple (getCurrent...),
+  // never the requested one. The fast-path 'applied' return at the top of this function already
+  // does, so a caller could otherwise get two different shapes of 'applied' for the same context.
+  return { status: 'applied', context: getCurrentExternalContext(), requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {

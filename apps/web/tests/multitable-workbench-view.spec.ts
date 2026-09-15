@@ -1473,6 +1473,87 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
   })
 
+  // #5750 follow-up: the LOADED context, not the caller, decides the active triple --
+  // useMultitableWorkbench.syncContextState falls activeViewId back to views[0] when the requested
+  // view is not in ctx.views (a deleted/renamed view id in the host's URL is the common case). The
+  // sync SUCCEEDS there, so the request is 'applied' while the workbench sits on another view; an
+  // echo carrying the REQUESTED view hands the embed host a dead triple to pin into the URL and
+  // re-send forever. The echo has to report what is on screen.
+  it('#5750 follow-up echoes the RESOLVED context (dead viewId falls back to views[0]) instead of the requested one', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    // The composable's real view fallback, in mock form.
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view' },
+    )
+    await flushUi()
+
+    // The request still goes out verbatim -- only the ECHO is resolved.
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_deleted',
+    })
+    expect(workbenchMock.activeViewId.value).toBe('view_grid')
+    expect(result.context.viewId).not.toBe('view_deleted')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view',
+    })
+  })
+
+  // Same resolution for the DEFERRED path: the replay echo (an emitted event, not a return value)
+  // is the only answer a host gets for a request that was parked, so it must resolve too.
+  it('#5750 follow-up echoes the RESOLVED context on the deferred replay path as well', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    // Park the request behind an open dirty draft, then clear it so the replay runs.
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    const deferred = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view_replay' },
+    )
+    expect(deferred.status).toBe('deferred')
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-clean="true"]')!.click()
+    await flushUi()
+
+    expect(hostState.externalContextResults).toContainEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view_replay',
+    })
+  })
+
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
       { id: 'fld_title', name: 'Title', type: 'string' },

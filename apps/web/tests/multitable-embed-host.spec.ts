@@ -910,6 +910,137 @@ describe('multitable embed host guards', () => {
       requestId: 'req_replay',
     })
   })
+
+  // #5750 follow-up: a host that answers mt:navigated with another mt:navigate ping-pongs forever.
+  // Each re-send is a NEW requestId, so nothing at the message layer recognises it as a repeat, and
+  // #5750's HTTP convergence does not help -- the workbench answers 'applied' again and the applied
+  // branch posted a fresh mt:navigated, which triggered the next re-send. mt:navigate-result must
+  // stay 1:1 with requests (a host awaiting a reply is never starved); mt:navigated must not repeat.
+  it('#5750 follow-up posts one mt:navigate-result per request but only ONE mt:navigated for an identical repeated triple', async () => {
+    const host = await mountRouteHost()
+    const postedOfType = (type: string) =>
+      parentPostMessageSpy.mock.calls
+        .map(([payload]) => payload)
+        .filter((payload) => (payload as { type?: string })?.type === type)
+
+    for (let i = 1; i <= 5; i += 1) {
+      window.dispatchEvent(new MessageEvent('message', {
+        origin: window.location.origin,
+        data: {
+          type: 'mt:navigate',
+          baseId: 'base_people',
+          sheetId: 'sheet_people',
+          viewId: 'view_gallery',
+          requestId: `req_pingpong_${i}`,
+        },
+      }))
+      await vi.waitFor(() => expect(requestExternalContextSyncSpy).toHaveBeenCalledTimes(i))
+      await vi.waitFor(() => expect(host.navigationResults.length).toBe(i))
+    }
+
+    // Every request got its own reply, with its own requestId.
+    const resultCalls = postedOfType('mt:navigate-result')
+    expect(resultCalls).toHaveLength(5)
+    expect(resultCalls.map((payload) => (payload as { requestId?: string }).requestId)).toEqual([
+      'req_pingpong_1',
+      'req_pingpong_2',
+      'req_pingpong_3',
+      'req_pingpong_4',
+      'req_pingpong_5',
+    ])
+    expect(host.navigationResults.map((result) => result.status)).toEqual(
+      ['applied', 'applied', 'applied', 'applied', 'applied'],
+    )
+
+    // ...but the echo that would feed the next re-send went out exactly once.
+    expect(postedOfType('mt:navigated')).toEqual([{
+      type: 'mt:navigated',
+      baseId: 'base_people',
+      sheetId: 'sheet_people',
+      viewId: 'view_gallery',
+      requestId: 'req_pingpong_1',
+    }])
+    expect(host.navigated).toEqual([{ sheetId: 'sheet_people', viewId: 'view_gallery' }])
+
+    // A genuinely different triple is still a navigation the host has to hear about.
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: {
+        type: 'mt:navigate',
+        baseId: 'base_ops',
+        sheetId: 'sheet_deals',
+        viewId: 'view_board',
+        requestId: 'req_pingpong_other',
+      },
+    }))
+    await vi.waitFor(() => expect(requestExternalContextSyncSpy).toHaveBeenCalledTimes(6))
+    await vi.waitFor(() => expect(postedOfType('mt:navigated')).toHaveLength(2))
+
+    expect(postedOfType('mt:navigate-result')).toHaveLength(6)
+    expect(postedOfType('mt:navigated').at(-1)).toEqual({
+      type: 'mt:navigated',
+      baseId: 'base_ops',
+      sheetId: 'sheet_deals',
+      viewId: 'view_board',
+      requestId: 'req_pingpong_other',
+    })
+    expect(host.navigated).toEqual([
+      { sheetId: 'sheet_people', viewId: 'view_gallery' },
+      { sheetId: 'sheet_deals', viewId: 'view_board' },
+    ])
+  })
+
+  // #5750 follow-up, second guard: a requestId is answered by exactly one mt:navigated. A workbench
+  // result repeated under an already-answered requestId (the host re-sends the external-context
+  // echo on a timer, #5750) must not produce a second reply for it -- but it must not be swallowed
+  // either when it really moved the frame, or the parent loses track of where the frame is. The
+  // repeat is therefore echoed as an ordinary navigation, WITHOUT the spent requestId.
+  it('#5750 follow-up never echoes the same requestId twice, yet still reports the move it caused', async () => {
+    const host = await mountRouteHost()
+    const navigatedPosts = () =>
+      parentPostMessageSpy.mock.calls
+        .map(([payload]) => payload as { type?: string; baseId?: string; sheetId?: string; viewId?: string; requestId?: string | number })
+        .filter((payload) => payload?.type === 'mt:navigated')
+
+    replayExternalContextResult?.({
+      status: 'applied',
+      context: { baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery' },
+      requestId: 'req_dup',
+    })
+    await vi.waitFor(() => expect(navigatedPosts()).toHaveLength(1))
+    expect(navigatedPosts()[0]?.requestId).toBe('req_dup')
+
+    // Something else moves the frame, so the repeat below cannot be caught by the triple guard.
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: window.location.origin,
+      data: { type: 'mt:navigate', baseId: 'base_ops', sheetId: 'sheet_deals', viewId: 'view_board', requestId: 'req_move' },
+    }))
+    await vi.waitFor(() => expect(navigatedPosts()).toHaveLength(2))
+
+    replayExternalContextResult?.({
+      status: 'applied',
+      context: { baseId: 'base_people', sheetId: 'sheet_people', viewId: 'view_gallery' },
+      requestId: 'req_dup',
+    })
+    await vi.waitFor(() => expect(navigatedPosts()).toHaveLength(3))
+
+    // The frame really went back, and the parent was told...
+    expect(navigatedPosts().at(-1)).toEqual({
+      type: 'mt:navigated',
+      baseId: 'base_people',
+      sheetId: 'sheet_people',
+      viewId: 'view_gallery',
+      requestId: undefined,
+    })
+    expect(container?.querySelector('[data-workbench-sheet-id]')?.getAttribute('data-workbench-sheet-id')).toBe('sheet_people')
+    expect(host.navigated).toEqual([
+      { sheetId: 'sheet_people', viewId: 'view_gallery' },
+      { sheetId: 'sheet_deals', viewId: 'view_board' },
+      { sheetId: 'sheet_people', viewId: 'view_gallery' },
+    ])
+    // ...but 'req_dup' was answered exactly once.
+    expect(navigatedPosts().filter((payload) => payload.requestId === 'req_dup')).toHaveLength(1)
+  })
 })
 
 // P3-D2: positive coverage for the two owner-named origin fixes -- the wildcard is no longer honored
