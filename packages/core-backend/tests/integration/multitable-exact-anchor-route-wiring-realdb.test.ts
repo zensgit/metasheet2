@@ -1167,6 +1167,40 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     }
   })
 
+  test('AUTH-EXPLICIT: foreign-base revoke masks formula inputs despite stale request grants', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const foreignBase = `base_earw_foreign_${TS}`
+    const originalPermissions = [...curPerms]
+    try {
+      await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$1)', [SHEET, F_FOL, F_SRC_LOOKUP])
+      await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [foreignBase, 'EARW foreign'])
+      await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [TGT_SHEET, foreignBase])
+      curPerms = [...originalPermissions, 'multitable:base:read']
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(curPerms)])
+      const preview = await revertPreview({ anchorOperationId: anchorOp })
+      expect(preview.status).toBe(200)
+      const token = preview.body.data.previewIdentity as string
+
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(originalPermissions)])
+      const denied = await revertExecute({ previewIdentity: token })
+      expect(denied.status).toBe(403)
+      expect(denied.body.error.code).toBe('FORBIDDEN')
+      expect((await q('SELECT data, version FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([
+        { data: { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }, version: 2 },
+      ])
+      expect(await burnCountForToken(token)).toBe(0)
+
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(curPerms)])
+      expect((await revertPreview({ anchorOperationId: anchorOp })).status).toBe(200)
+    } finally {
+      await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [TGT_SHEET, BASE])
+      await q('DELETE FROM meta_bases WHERE id=$1', [foreignBase])
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(originalPermissions)])
+      curPerms = originalPermissions
+    }
+  })
+
   test('AUTHORITY-LOCKS: related user/role revokes fail fast, while unrelated last-login writes remain unblocked', async () => {
     await q(
       'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',

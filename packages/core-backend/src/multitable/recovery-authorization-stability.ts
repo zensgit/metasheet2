@@ -553,6 +553,9 @@ export async function resolveRecoverySheetAuthority(
     userId: requestAccess.userId,
     permissions: databaseAccess.permissions,
     isAdminRole: requestAccess.isAdminRole && databaseAccess.isAdminRole,
+    ...(requestAccess.authenticatedTenantId
+      ? { authenticatedTenantId: requestAccess.authenticatedTenantId }
+      : {}),
   }
   return {
     access,

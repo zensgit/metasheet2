@@ -1887,6 +1887,17 @@ export async function resolveBaseReadable(
   if (!normalizedBaseId) return false
 
   const access = await resolveRequestAccess(req)
+  return resolveBaseReadableForAccess(query, normalizedBaseId, access)
+}
+
+/** Same base-read policy for an already-adjudicated, transaction-bound access snapshot. */
+export async function resolveBaseReadableForAccess(
+  query: QueryFn,
+  baseId: string,
+  access: ResolvedRequestAccess,
+): Promise<boolean> {
+  const normalizedBaseId = baseId.trim()
+  if (!normalizedBaseId) return false
 
   // Symmetry with `resolveBaseWritable`'s NIT-1: resolve target-base EXISTENCE FIRST. A missing /
   // soft-deleted base is NOT readable by ANYONE — including an admin / base-read-grant holder — which is
