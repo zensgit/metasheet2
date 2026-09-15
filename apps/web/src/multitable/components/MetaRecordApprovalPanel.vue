@@ -28,9 +28,10 @@
   names a field and never shows a value (the route does not return one).
 
   ONE PAGE (backend #5763): the GET asks for an EXPLICIT `?limit=` and the route answers
-  `{ submissions, hasMore }`. `hasMore` is the SERVER's truncation flag (a limit+1 probe), rendered as a
-  「还有更多」 notice — never inferred from the row count, and never a total. There is no paging UI here
-  on purpose (design §5 ships a section); the approval centre owns the full history.
+  `{ submissions, hasMore }`. `hasMore` is the SERVER's truncation flag (a limit+1 probe) and is never
+  inferred from the row count; the notice it renders counts the rows actually on screen and is never a
+  total. There is no paging UI here on purpose (design §5 ships a section); the approval centre owns the
+  full history.
   The same PR stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a submission whose terminal write landed but
   whose requester notification did not; a terminal row carrying it gets a one-line marker, because
   otherwise the missing bell is invisible on a row that looks perfectly approved.
@@ -143,9 +144,13 @@
       >{{ l('approval.panelEmpty') }}</div>
       <!-- The route returned `hasMore` for the page we asked for: say so instead of presenting a
            truncated list as the whole history. No paging UI by design (§5 ships a section, not a list
-           view) - the approval centre is where the rest lives. -->
+           view) - the approval centre is where the rest lives.
+           GATED ON THE LIST BEING ON SCREEN: `hasMore` survives a reload (it is the last answer the
+           server gave, not a guess), but while the next read is in flight - or after it failed - the
+           rows it counts are NOT rendered, and 「加载中」 + 「还有更多（仅显示最近 N 条）」 in the same
+           body describes a list nobody can see. -->
       <div
-        v-if="hasMore"
+        v-if="hasMore && !loading && !loadFailed"
         class="meta-record-approval__hint meta-record-approval__more"
         data-test="record-approval-has-more"
       >{{ hasMoreNotice }}</div>
@@ -190,9 +195,9 @@ const hasRouter = !!useRouter()
 
 /**
  * The page this panel asks for. EXPLICIT on purpose: the route has its own default and clamps to
- * [1, 100], but the 「仅显示最近 N 条」 notice has to name the number actually on screen - which we can
- * only do honestly if we are the one who chose it. Raising it here is the whole knob; there is no
- * paging UI (design §5), the approval centre owns the full history.
+ * [1, 100], and a UI that never names its page size inherits whatever the server later changes that
+ * default to. Raising it here is the whole knob; there is no paging UI (design §5), the approval centre
+ * owns the full history. It is NOT what the 「仅显示最近 N 条」 notice counts — see `hasMoreNotice`.
  */
 const RECORD_APPROVAL_PAGE_SIZE = 20
 
@@ -223,7 +228,10 @@ const failureReason = (submission: MetaRecordApprovalSubmission): string | null 
 const notificationNotice = (submission: MetaRecordApprovalSubmission): string | null =>
   recordApprovalNotificationFailedNotice(submission.status, submission.error, isZh.value)
 
-const hasMoreNotice = computed(() => recordApprovalHasMoreNotice(RECORD_APPROVAL_PAGE_SIZE, isZh.value))
+// 「仅显示最近 N 条」 counts the rows RENDERED, never the page size we asked for: the client normaliser
+// drops rows it cannot identify and a server is free to answer short, either of which would turn the
+// requested 20 into a claim about rows that are not on screen.
+const hasMoreNotice = computed(() => recordApprovalHasMoreNotice(submissions.value.length, isZh.value))
 
 // Stale-response guard (same closure-counter idiom as MetaRecordProvenancePanel): a load whose captured
 // version no longer matches when its await settles was superseded by a record switch, a refresh or the

@@ -26,9 +26,14 @@
  *     Collapse the source back into one getter returning an array ⇒ red.
  * 10. PAGE (backend #5763): the panel asks for ONE page with an EXPLICIT `{ limit }` and renders the
  *     server's `hasMore` as a 「还有更多」 notice. Drop the notice (or infer it from row count) ⇒ red.
+ *     The notice counts the rows RENDERED (not the requested limit — count the limit ⇒ red) and is
+ *     gated on the list being on screen: a reload in flight shows 「加载中」 alone, never a count of
+ *     rows nobody can see (move the notice back out of the loading/error chain ⇒ red).
  * 11. MARKER (backend #5763): a TERMINAL row carrying `RECORD_APPROVAL_NOTIFICATION_FAILED` renders the
  *     「已通过，但通知发送失败」 line — the miss is otherwise invisible. A terminal row WITHOUT the
- *     code renders nothing. Drop the marker branch ⇒ red.
+ *     code renders nothing. Drop the marker branch ⇒ red. The backend compensates every terminal
+ *     outcome, so a rejected/cancelled row gets outcome-neutral copy (use the approved copy for all
+ *     four ⇒ red).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, reactive, type App } from 'vue'
@@ -433,13 +438,46 @@ describe('MetaRecordApprovalPanel - one page + the notification marker (backend 
     const { container, client } = mountPanel({ client: fakeClient(SUBMISSIONS, true) })
     await flushUi()
     await expand(container)
-    // The limit is the PANEL's choice (the notice names it), not the route's default.
+    // The page size is the PANEL's choice, not the route's default (which it must not assume).
     expect(client!.listRecordApprovals).toHaveBeenCalledWith('sheet_1', 'rec_1', { limit: 20 })
     const notice = container.querySelector('[data-test="record-approval-has-more"]')
     expect(notice).not.toBeNull()
-    expect(notice!.textContent).toBe('还有更多（仅显示最近 20 条）')
+    // The count is what is ON SCREEN (2 entries here), NOT the 20 we asked for: a page the client
+    // normaliser trimmed, or a server answering short, must not be described as 20 rows.
+    expect(entries(container)).toHaveLength(2)
+    expect(notice!.textContent).toBe('还有更多（仅显示最近 2 条）')
     // Values-free: a truncation notice, never a total.
     expect(container.textContent).not.toContain('fld_qty')
+  })
+
+  it('en parity for the truncation notice', async () => {
+    const { container } = mountPanel({ client: fakeClient(SUBMISSIONS, true) })
+    await flushUi()
+    await expand(container)
+    expect(container.querySelector('[data-test="record-approval-has-more"]')!.textContent)
+      .toBe('More exist (showing the 2 most recent only)')
+  })
+
+  it('a reload IN FLIGHT drops the previous page\'s truncation notice (no 加载中 + 还有更多 together)', async () => {
+    // The notice is a claim about a list that is not on screen while the next read is running: the body
+    // would show 「加载中」 and 「还有更多（仅显示最近 2 条）」 at the same time, i.e. a count of rows
+    // nobody can see. It must live inside the loading/error/list chain, not beside it.
+    useLocale().setLocale('zh-CN')
+    type Page = { submissions: MetaRecordApprovalSubmission[]; hasMore: boolean }
+    const listRecordApprovals = vi.fn()
+      .mockResolvedValueOnce({ submissions: SUBMISSIONS, hasMore: true })
+      .mockReturnValueOnce(new Promise<Page>(() => { /* never settles: the reload is in flight */ }))
+    const { container, state } = mountPanel({ client: { listRecordApprovals } as never })
+    await flushUi()
+    await expand(container)
+    expect(container.querySelector('[data-test="record-approval-has-more"]')).not.toBeNull()
+
+    state.refreshToken += 1
+    await flushUi(6)
+    expect(listRecordApprovals).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[data-test="record-approval-loading"]')).not.toBeNull()
+    expect(container.querySelector('[data-test="record-approval-has-more"]')).toBeNull()
+    expect(container.textContent).not.toContain('还有更多')
   })
 
   it('shows NO notice when hasMore is false, even with a full-looking page', async () => {
@@ -497,6 +535,25 @@ describe('MetaRecordApprovalPanel - one page + the notification marker (backend 
     const marks = Array.from(container.querySelectorAll('[data-test="record-approval-notification-failed"]'))
     expect(marks).toHaveLength(1)
     expect(marks[0].textContent).toBe('Approved, but the notification could not be sent.')
+  })
+
+  it('a NON-approved terminal row carrying the code never claims 「已通过」', async () => {
+    // The backend compensates the missing bell for ANY terminal outcome
+    // (record-approval-submission-service.ts RECORD_APPROVAL_TERMINAL_OUTCOMES = approved/rejected/
+    // revoked/cancelled), so the approved copy is not usable for all four: telling the operator a
+    // REJECTED row 「已通过」 would be a lie produced by our own marker.
+    useLocale().setLocale('zh-CN')
+    const rows: MetaRecordApprovalSubmission[] = [
+      { id: 'sub_r', templateId: 'tpl_leave', status: 'rejected', error: 'RECORD_APPROVAL_NOTIFICATION_FAILED', drift: { changed: false, changedFieldIds: [] } },
+      { id: 'sub_c', templateId: 'tpl_leave', status: 'cancelled', error: 'RECORD_APPROVAL_NOTIFICATION_FAILED', drift: { changed: false, changedFieldIds: [] } },
+    ]
+    const { container } = mountPanel({ client: fakeClient(rows) })
+    await flushUi()
+    await expand(container)
+    const marks = Array.from(container.querySelectorAll('[data-test="record-approval-notification-failed"]'))
+    expect(marks).toHaveLength(2)
+    expect(marks.map((mark) => mark.textContent)).toEqual(['已结束，但通知发送失败', '已结束，但通知发送失败'])
+    expect(container.textContent).not.toContain('已通过')
   })
 })
 
