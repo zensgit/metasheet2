@@ -52,7 +52,7 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  test('COMMIT persists the outbox row + the exact manifest fan-out (approval family → 3 consumers)', async () => {
+  test('COMMIT persists the outbox row + the exact manifest fan-out (approval family → 5 consumers)', async () => {
     const client = await db().getInternalPool().connect()
     let outboxId = ''
     try {

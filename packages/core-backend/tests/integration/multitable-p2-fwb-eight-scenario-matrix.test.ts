@@ -297,14 +297,24 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
 
   test('S5 version mismatch: unknown consumer_key stays pending + alerted, never terminated', async () => {
     const evt = track(`evt_${RUN}_s5`)
-    const res = await enqueueCommitted({ eventType: 'approval.task_created', eventId: evt, payload: {} }) // routes to approval-task-trigger
+    // manifest v3 routes this family to TWO keys (approval-task-trigger + dingtalk-todo-mirror); this
+    // N-1 worker knows neither, so BOTH rows must survive the tick untouched.
+    const res = await enqueueCommitted({ eventType: 'approval.task_created', eventId: evt, payload: {} })
     const reg = new ConsumerAdapterRegistry()
     reg.register({ key: `ck_${RUN}_other`, handle: async () => ({ outcome: 'success' }) }) // N-1 worker: doesn't know the key
     const alerted: string[] = []
     await runDispatchTick(db(), reg, { onUnknownConsumerKeys: (k) => alerted.push(...k), batchSize: 500 })
     expect(alerted).toContain('approval-task-trigger')
-    const st = await db().query('SELECT status, attempts FROM meta_automation_outbox_consumer WHERE outbox_id=$1', [res.outboxId])
-    expect(st.rows[0]).toMatchObject({ status: 'pending', attempts: 0 })
+    expect(alerted).toContain('dingtalk-todo-mirror')
+    const st = await db().query(
+      'SELECT consumer_key, status, attempts FROM meta_automation_outbox_consumer WHERE outbox_id=$1 ORDER BY consumer_key',
+      [res.outboxId],
+    )
+    const states = st.rows as Array<{ consumer_key: string; status: string; attempts: number }>
+    expect(states.map((r) => [r.consumer_key, r.status, Number(r.attempts)])).toEqual([
+      ['approval-task-trigger', 'pending', 0],
+      ['dingtalk-todo-mirror', 'pending', 0],
+    ])
   })
 
   // ── S6-S8: the production FWB chain (real template + real rule + real instances; NO seams, NO fake gates) ──

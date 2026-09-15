@@ -79,6 +79,8 @@ interface HarnessOptions {
   createTodoTask?: ReturnType<typeof vi.fn>
   completeTodoTask?: ReturnType<typeof vi.fn>
   readConfig?: () => Promise<typeof CONFIG>
+  /** Injected app-access-token fetch (the READ tier before the create request). */
+  fetchAccessToken?: () => Promise<string>
   maxAttempts?: number
   /** post-create liveness probe: is the approval seat still an ACTIVE assignment? */
   seatLive?: boolean
@@ -87,8 +89,15 @@ interface HarnessOptions {
 
 function harness(options: HarnessOptions = {}) {
   const calls: Call[] = []
+  /** Ordered stage trace — the only way to see a NON-query stage (the token fetch) in the sequence. */
+  const trace: string[] = []
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params })
+    if (sql.includes('UPDATE dingtalk_todo_mirrors')) {
+      trace.push(
+        sql.includes('WITH claim AS') ? 'claim' : sql.includes('SET send_issued_at') ? 'send_issued_at' : 'mirror_write',
+      )
+    }
     if (sql.includes('WITH claim AS')) return { rows: options.claimed ?? [], rowCount: (options.claimed ?? []).length }
     // checked BEFORE the generic `SELECT EXISTS` branch: this is the post-create seat probe
     if (sql.includes('AS seat_live')) {
@@ -113,7 +122,10 @@ function harness(options: HarnessOptions = {}) {
     env: { PUBLIC_APP_URL: 'https://app.example.com' } as NodeJS.ProcessEnv,
     logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
     readConfig: options.readConfig ?? (async () => CONFIG),
-    fetchAccessToken: async () => 'access-token',
+    fetchAccessToken: async () => {
+      trace.push('token')
+      return options.fetchAccessToken ? options.fetchAccessToken() : 'access-token'
+    },
     resolveOperatorUnionId: async () => (options.operatorUnionId === undefined ? 'op-union-1' : options.operatorUnionId),
     createTodoTask: createTodoTask as never,
     completeTodoTask: completeTodoTask as never,
@@ -124,7 +136,7 @@ function harness(options: HarnessOptions = {}) {
   // its own - exclude both so `writes()` is the terminal/retry/created write only
   const writes = () => mirrorUpdates().filter((c) => !c.sql.includes('SET send_issued_at'))
   const sendStamps = () => mirrorUpdates().filter((c) => c.sql.includes('SET send_issued_at'))
-  return { worker, query, calls, writes, sendStamps, createTodoTask, completeTodoTask }
+  return { worker, query, calls, trace, writes, sendStamps, createTodoTask, completeTodoTask }
 }
 
 describe('todo mirror worker — claim', () => {
@@ -176,7 +188,7 @@ describe('todo mirror worker — create phase', () => {
     expect(write.params[4]).toBe('dt-task-1')
   })
 
-  it('stamps send_issued_at under the SAME CAS immediately BEFORE the request is issued', async () => {
+  it('stamps send_issued_at under the SAME CAS AFTER the token fetch and immediately BEFORE the request', async () => {
     const h = harness({ claimed: [pendingRow()], linked: [{ integration_id: 'integ-1', union_id: 'u' }] })
     await h.worker.runBatch()
     const stamp = h.sendStamps()[0]
@@ -184,11 +196,14 @@ describe('todo mirror worker — create phase', () => {
     expect(stamp.sql).toContain("AND status = 'sending'")
     expect(stamp.sql).toContain('AND claim_worker_id = $3')
     expect(stamp.sql).toContain('AND attempt_count = $4::int')
-    // it really is BEFORE the send: the stamp is the first mirror write of the batch
+    // it really is BEFORE the send: the stamp is the first non-claim mirror write of the batch
     const stampIdx = h.calls.findIndex((c) => c.sql.includes('SET send_issued_at'))
     const createdIdx = h.calls.findIndex((c) => c.sql.includes("SET status = 'created'"))
     expect(stampIdx).toBeGreaterThan(0)
     expect(stampIdx).toBeLessThan(createdIdx)
+    // ...and AFTER the READ-tier token fetch (Q19 judge item): the stamp means "a create request left
+    // this process", so no stage that issues nothing may run between it and createTodoTask.
+    expect(h.trace).toEqual(['claim', 'token', 'send_issued_at', 'mirror_write'])
   })
 
   it('a stolen lease (CAS matches 0 rows) sends NOTHING and reports lost-lease', async () => {
@@ -197,6 +212,33 @@ describe('todo mirror worker — create phase', () => {
     expect(result).toMatchObject({ claimed: 1, created: 0, lostLease: 1 })
     // the pre-send stamp IS the lease check: a worker whose lease was stolen must not reach DingTalk
     expect(h.createTodoTask).not.toHaveBeenCalled()
+  })
+
+  // Q19 judge item: the token fetch is a READ-tier call that issues NO create request. Both shapes below
+  // must be retried like any other pre-send stage failure and must leave `send_issued_at` NULL — otherwise
+  // a crash/timeout at the token stage is later judged "request issued" (terminal `outcome_unknown`,
+  // never resent) for a todo that was never asked for. The AMBIGUOUS shape is the load-bearing one: with
+  // the token fetch inside the create's try/catch it lands on the outcome_unknown arm.
+  it.each([
+    ['a transient token endpoint failure', () => new DingTalkRequestError('token endpoint unavailable', 503, { code: 'x' })],
+    ['an AMBIGUOUS token failure (outcomeUnknown-marked)', () => Object.assign(new TypeError('fetch failed'), { outcomeUnknown: true })],
+  ])('%s issues NOTHING: normal retry, never outcome_unknown, send_issued_at never stamped', async (_label, makeError) => {
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'u' }],
+      fetchAccessToken: async () => { throw makeError() },
+    })
+    const result = await h.worker.runBatch()
+    expect(result).toMatchObject({ claimed: 1, retrying: 1, created: 0, outcomeUnknown: 0, failed: 0 })
+    expect(h.createTodoTask).not.toHaveBeenCalled()
+    // the token stage WAS reached, and still nothing was stamped: a re-claim of this row is a normal
+    // create attempt (`deliver`'s NULL branch), not an ambiguous one.
+    expect(h.trace).toEqual(['claim', 'token', 'mirror_write'])
+    expect(h.sendStamps()).toHaveLength(0)
+    const write = h.writes()[0]
+    expect(write.sql).toContain('SET status = $7')
+    expect(write.params[6]).toBe('pending')
+    expect(write.params[2]).toBe(TODO_MIRROR_ERROR_CODES.tokenUnavailable)
   })
 
   it('no DingTalk identity + an ACTIVE org integration => terminal `skipped`, nothing sent', async () => {

@@ -65,6 +65,8 @@ export const TODO_MIRROR_ERROR_CODES = {
   orgIntegrationInactive: 'todo_org_integration_inactive',
   operatorMissing: 'todo_operator_union_id_missing',
   configUnavailable: 'todo_config_unavailable',
+  /** The READ-tier app access token could not be fetched — nothing was issued, so a plain retry. */
+  tokenUnavailable: 'todo_token_unavailable',
   missingTaskId: 'todo_missing_task_id',
   createFailed: 'todo_create_failed',
   createOutcomeUnknown: 'todo_create_outcome_unknown',
@@ -405,12 +407,25 @@ export class DingTalkTodoMirrorWorker {
     })
     const detailUrl = buildTodoMirrorDetailUrl(resolveTodoMirrorAppBaseUrl(this.env), row.instance_id)
 
-    // EVIDENCE BEFORE THE SEND (and a free lease check): if this CAS matches 0 rows our lease was
-    // stolen, so we must NOT send at all — the holder will. See `deliver` for why the stamp matters.
+    // The app access token comes from a READ-tier endpoint that issues NO todo request, so it gets its
+    // OWN try: inside the create's catch, an AMBIGUOUS-shaped token failure (a timeout marked
+    // `outcomeUnknown`) would terminate the row as `outcome_unknown` — "a create request may have been
+    // issued" — when nothing was sent at all. Retry it like any other pre-send stage failure.
+    let accessToken: string
+    try {
+      accessToken = await this.fetchAccessToken(config)
+    } catch {
+      return this.retryOrFail(row, attemptCount, TODO_MIRROR_ERROR_CODES.tokenUnavailable, true)
+    }
+
+    // EVIDENCE IMMEDIATELY BEFORE THE SEND (and a free lease check): if this CAS matches 0 rows our
+    // lease was stolen, so we must NOT send at all — the holder will. Stamping HERE, after every
+    // pre-send stage (recipient / operator / config / token), is what makes `send_issued_at` mean
+    // exactly "a create request left this process": a crash in any earlier stage is re-claimed as a
+    // normal create instead of being judged ambiguous. See `deliver` for the discriminator.
     if (!await this.markSendIssued(row.id, attemptCount)) return 'lost-lease'
 
     try {
-      const accessToken = await this.fetchAccessToken(config)
       const sent = await this.createTodoTask(
         accessToken,
         operatorUnionId,
