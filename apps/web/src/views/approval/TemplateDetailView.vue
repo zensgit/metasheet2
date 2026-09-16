@@ -97,12 +97,13 @@
               </el-button>
             </template>
             <template v-else>
-              <el-input
+              <!-- approval-form-ux-slice1 (20260916 design §3): same candidate wiring as the
+                   authoring surface — see CategoryCandidateInput.vue's own doc comment. -->
+              <CategoryCandidateInput
                 v-model="categoryDraft"
-                size="small"
                 :placeholder="t.categoryPlaceholder"
                 class="ms-w-240 ms-mr-8"
-                maxlength="64"
+                :maxlength="64"
                 data-testid="template-detail-category-input"
                 @keyup.enter="saveCategory"
                 @keyup.escape="cancelEditCategory"
@@ -745,6 +746,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
+import CategoryCandidateInput from '../../approvals/components/CategoryCandidateInput.vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Flag,

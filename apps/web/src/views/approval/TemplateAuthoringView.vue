@@ -213,7 +213,10 @@
             <el-input v-model="draft.name" :disabled="readOnly" data-testid="approval-template-name" />
           </el-form-item>
           <el-form-item label="分类">
-            <el-input
+            <!-- approval-form-ux-slice1 (20260916 design §3): candidate dropdown backed by
+                 GET /api/approval-templates/categories, still a plain free-text field
+                 (allow-create — see CategoryCandidateInput.vue's own doc comment). -->
+            <CategoryCandidateInput
               v-model="draft.category"
               :disabled="readOnly"
               placeholder="如 请假 / 采购 / 报销"
@@ -1438,6 +1441,7 @@ import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import CategoryCandidateInput from '../../approvals/components/CategoryCandidateInput.vue'
 import ApprovalFormInlineEditor from '../../approvals/components/ApprovalFormInlineEditor.vue'
 import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
 import ApprovalFormPalette from '../../approvals/components/ApprovalFormPalette.vue'
