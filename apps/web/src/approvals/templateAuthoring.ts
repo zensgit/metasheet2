@@ -2507,8 +2507,16 @@ let templateKeySeq = 0
  * either — a real collision falls through to a raw Postgres unique-violation, which the backend
  * does not currently map to a clean 400; see the PR body for this residual risk), but the
  * collision probability is astronomically small for a single-author authoring session.
+ *
+ * Exported (approval-form-ux-slice1, 20260916 design §1.2) so the View can seed `draft.key` alone
+ * at DRAFT-CREATION time (before the key input is ever rendered, since it is now read-only and
+ * would otherwise show a permanently-blank, permanently-uneditable field) — `name` is deliberately
+ * NOT seeded there; it stays a normal blank required input the author fills in, exactly as before
+ * this slice. `seedDraftIdentityForSave` (below) still seeds BOTH at save time as a safety net —
+ * unchanged — but by then `key` is already non-blank for every draft created through the View, so
+ * that call is a no-op on `key` and only ever fills `name` if the author left it blank.
  */
-function generateTemplateKey(): string {
+export function generateTemplateKey(): string {
   templateKeySeq += 1
   return `draft_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${templateKeySeq}`
 }
@@ -2552,8 +2560,19 @@ export function buildCreateTemplatePayload(draft: TemplateAuthoringDraft): Creat
   }
 }
 
+/**
+ * approval-form-ux-slice1 (20260916 design §1.2): PATCH never sends `key` — the key input is now
+ * read-only, so the author cannot have changed it, and the backend guard `if (request.key !==
+ * undefined)` (`ApprovalProductService.ts:5948`) means an omitted `key` never enters the SET
+ * clause: an existing row's `key` column is left byte-for-byte unchanged (design §1 acceptance A1).
+ * `UpdateApprovalTemplateRequest.key` is optional (no `required` array on that schema — verified
+ * directly against `packages/openapi/src/base.yml`), so omitting it is contract-legal. POST is
+ * UNCHANGED: `buildCreateTemplatePayload` still includes `key` (`CreateApprovalTemplateRequest.key`
+ * stays required), so a NEW template's front-end-generated key is still sent exactly as before.
+ */
 export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): UpdateApprovalTemplateRequest {
-  return buildCreateTemplatePayload(draft)
+  const { key: _omittedKey, ...update } = buildCreateTemplatePayload(draft)
+  return update
 }
 
 /**

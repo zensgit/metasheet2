@@ -203,7 +203,11 @@
         </template>
         <el-form label-position="top" class="template-authoring__grid">
           <el-form-item label="模板 Key">
-            <el-input v-model="draft.key" :disabled="readOnly" data-testid="approval-template-key" />
+            <!-- approval-form-ux-slice1 (20260916 design §1.2): read-only display, not editable by
+                 anyone (`readonly`, not `:disabled`, so the value stays selectable/copyable — see
+                 design §1.2 point 1). Value is seeded at draft-creation time (createSeededTemplateDraft),
+                 never blank. PATCH never sends this field (buildUpdateTemplatePayload). -->
+            <el-input v-model="draft.key" readonly data-testid="approval-template-key" />
           </el-form-item>
           <el-form-item label="模板名称">
             <el-input v-model="draft.name" :disabled="readOnly" data-testid="approval-template-name" />
@@ -1459,6 +1463,7 @@ import {
   createEmptyTemplateDraft,
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
+  generateTemplateKey,
   graphReadOnlyReason,
   insertStepAt,
   parseIdsText,
@@ -1594,7 +1599,16 @@ const unsupportedReason = ref<string | null>(null)
 // G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
-const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+
+// approval-form-ux-slice1 (20260916 design §1.2 point 3): the key input is now read-only (below),
+// so a brand-new draft must never render with a blank, permanently-uneditable key — seed it at
+// DRAFT-CREATION time, not at save time. `name` is deliberately left blank here (unlike
+// `seedDraftIdentityForSave`, which seeds both): the name input stays a normal editable field the
+// author fills in, and `basicInfoIssues`'s `模板名称必填` badge is UNCHANGED for a new draft.
+function createSeededTemplateDraft(): TemplateAuthoringDraft {
+  return { ...createEmptyTemplateDraft(), key: generateTemplateKey() }
+}
+const draft = ref<TemplateAuthoringDraft>(createSeededTemplateDraft())
 
 // ── F4 production mount (delta §5 F4, FB-D8) ──
 // The hardened Designer 2.0 builder mounts behind the EXISTING `approvalCanvasV2` flag — no new
@@ -3871,7 +3885,7 @@ async function loadTemplateForEdit() {
     // TemplateCenterView), but one router.push('/approval-templates/new') from this view would
     // have made it live: a permanently unsaveable new-template page with no error.
     loading.value = false
-    draft.value = createEmptyTemplateDraft()
+    draft.value = createSeededTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
     formFieldFocusLocalId.value = null

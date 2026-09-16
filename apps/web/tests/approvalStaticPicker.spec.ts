@@ -340,7 +340,6 @@ describe('TemplateAuthoringView static assignee picker', () => {
       { id: 'u2', name: 'Bob', email: 'b@x.io' },
     ]
     await mountView()
-    setTopInput('approval-template-key', 'leave')
     setTopInput('approval-template-name', '请假审批')
 
     setInputValueOnSelect('static_user') // switch sourceKind
@@ -371,7 +370,6 @@ describe('TemplateAuthoringView static assignee picker', () => {
 
   it('free-text input remains editable as a fallback and feeds the same carrier', async () => {
     await mountView()
-    setTopInput('approval-template-key', 'leave')
     setTopInput('approval-template-name', '请假审批')
     setInputValueOnSelect('static_user')
     await flushUi()
