@@ -424,3 +424,20 @@ dispatch-only 的 workflow 里执行,PR 上没有任何检查会碰它**,不接�
 脚本侧 pin 的是 `scripts/ops/multitable-onprem-package-{verify,build}.sh`。
 **本轮改动的 `stock-prep-staging-window-rehearsal.yml` 与四个 `attendance-*` 脚本都不在
 pin 集**,因此不需要重算 pin(也未改动任何 pin 集内文件)。
+
+### owner 复核第二轮返修（2026-09-16，F5 残余：读取器）
+
+**问题**：守卫本身已正确，但两个 env-file 入口的 `get_env_value` 只 grep `^KEY=` 的最后一行。而本轮 F6 已经承认 `export KEY=` 与缩进声明**同样是有效声明**（package-verify 据此拒绝非空模板声明），两者不同步 ⇒ 「先一条合法 KEY，后 `export KEY=<哨兵>`」「先一条合法 SALT，后缩进 `  SALT=`」两种形状**预检 exit 0，而 `source`（即 runtime）拿到的是哨兵/空**。
+
+**归因**：这是 F5 修复不完整（该读取器限制在本 PR 之前就存在），**不是 d88 新增的运行时回归**；bootstrap/runtime 仍会拒绝，所以属**早退门假绿**。
+
+**修法**：新增**材料专用**读取器 `get_env_material_value`——识别可选前导空白 + 可选 `export `，并按文件顺序取**最终**值（与 `source` 的 last-wins 一致）。
+- **刻意只用于 `ENCRYPTION_KEY`/`ENCRYPTION_SALT`**：JWT/DB/PRODUCT_MODE 等字段继续走原 `get_env_value`，本次改动因此**不会**改变其它 env 字段的解释规则（测试里有断言钉住这条边界）。
+- **不新增 eval/source，不改变实际材料字节**；两个入口的读取器函数体逐字节一致（有守卫断言）。
+
+### 裁决二入档（owner 复核）
+
+接受明确的**材料表示语法**收紧，**但不接受把更换既有 KEY/SALT 当作兼容方案**。既有部署升级前应：①做 values-free 检查；②必要时**仅调整表示方式并证明有效字节不变**；③若表达方式不受支持且无法保持字节，**暂停该部署升级**。默认材料旧密文仍**无**可用迁移通道（见 #5711 的 F1 更正）。
+
+**一处过宽表述的纠正**：本 PR 的收紧**不是**「所有特殊字符一律禁用」——env-file 视图保留了**单引号字面量**分支（单引号内的内容在 `source` 与 compose 下都是字面量），sourced 视图也允许有效值中的普通特殊字符。应按**实际解析合同**说明，**不得笼统要求操作员重新生成材料**。
+

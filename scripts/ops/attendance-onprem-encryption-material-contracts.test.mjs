@@ -370,6 +370,99 @@ test('F5 attendance-onprem-env-check.sh end to end: the whole check agrees with 
 //   rehearsal workflow "Compose the env file" step  ->  real bootstrap-admin.sh material gate.
 // ---------------------------------------------------------------------------------------------
 
+// F5-reader (owner re-review 2026-09-16): the guard was already correct, but both env-file
+// entry points READ the material with `grep "^KEY="`, so a good first declaration followed by
+// `export KEY=<sentinel>` or an indented override passed the preflight while `source` -- and
+// therefore the runtime -- loaded the overriding value. The negatives below must travel through
+// the READER as well as the guard; calling the guard directly cannot catch this class at all.
+test('F5-reader attendance-onprem-env-check.sh end to end: a later export/indented declaration is what the runtime loads', () => {
+  withTempDir('enc-material-reader-', dir => {
+    const envFile = path.join(dir, 'app.env')
+    const script = path.join(OPS, 'attendance-onprem-env-check.sh')
+    const run = () => runBash({ file: script, env: { ENV_FILE: shellPath(envFile) } })
+
+    // Positive control: a plain later override to another VALID value must still pass, so a
+    // blanket "any repeated declaration is rejected" fix cannot masquerade as this test.
+    writeFileSync(
+      envFile,
+      `${syntheticEnvFile({ ENCRYPTION_KEY: 'synthetic-earlier-value' })}ENCRYPTION_KEY=${SYNTHETIC_HEX}\n`,
+    )
+    const overridden = run()
+    assert.equal(overridden.status, 0, `a later override to a valid value must pass: ${overridden.output}`)
+
+    // `export KEY=<sentinel>` after a valid declaration: `source` keeps the sentinel.
+    writeFileSync(envFile, `${syntheticEnvFile()}export ENCRYPTION_KEY=${KEY_SENTINEL}\n`)
+    const exported = run()
+    assert.notEqual(exported.status, 0, `export override must be rejected: ${exported.output}`)
+    assert.match(exported.output, /ENCRYPTION_KEY/)
+
+    // Indented `  SALT=` after a valid declaration: `source` resolves it to empty.
+    writeFileSync(envFile, `${syntheticEnvFile()}  ENCRYPTION_SALT=\n`)
+    const indented = run()
+    assert.notEqual(indented.status, 0, `indented override must be rejected: ${indented.output}`)
+    assert.match(indented.output, /ENCRYPTION_SALT/)
+  })
+})
+
+// attendance-preflight.sh cannot be run whole against a synthetic fixture (it also demands
+// compose volume mounts, nginx and the validator), so its reader is exercised as READER + GUARD
+// composed from the real script body -- still not a guard-only test, which is the class that
+// missed this bug.
+test('F5-reader attendance-preflight.sh reader+guard: a later export/indented declaration is what the runtime loads', () => {
+  withTempDir('enc-material-reader-pf-', dir => {
+    const envFile = path.join(dir, 'app.env')
+    const source = read(path.join(OPS, 'attendance-preflight.sh'))
+    const functions = shellFunctions(source, ['die', 'get_env_material_value', 'require_encryption_material'])
+    const readerAndGuard = () =>
+      runBash({
+        input: [
+          'set -euo pipefail',
+          `ENV_FILE=${shellQuote(shellPath(envFile))}`,
+          functions,
+          'ENCRYPTION_KEY="$(get_env_material_value ENCRYPTION_KEY)"',
+          'ENCRYPTION_SALT="$(get_env_material_value ENCRYPTION_SALT)"',
+          `require_encryption_material ENCRYPTION_KEY "$ENCRYPTION_KEY" ${shellQuote(KEY_SENTINEL)} env-file`,
+          `require_encryption_material ENCRYPTION_SALT "$ENCRYPTION_SALT" ${shellQuote(SALT_SENTINEL)} env-file`,
+          'echo READER_GUARD_ACCEPTED',
+          '',
+        ].join('\n'),
+      })
+
+    writeFileSync(
+      envFile,
+      `${syntheticEnvFile({ ENCRYPTION_KEY: 'synthetic-earlier-value' })}ENCRYPTION_KEY=${SYNTHETIC_HEX}\n`,
+    )
+    const overridden = readerAndGuard()
+    assert.equal(overridden.status, 0, `a later override to a valid value must pass: ${overridden.output}`)
+
+    writeFileSync(envFile, `${syntheticEnvFile()}export ENCRYPTION_KEY=${KEY_SENTINEL}\n`)
+    const exported = readerAndGuard()
+    assert.notEqual(exported.status, 0, `export override must be rejected: ${exported.output}`)
+    assert.match(exported.output, /ENCRYPTION_KEY/)
+
+    writeFileSync(envFile, `${syntheticEnvFile()}  ENCRYPTION_SALT=\n`)
+    const indented = readerAndGuard()
+    assert.notEqual(indented.status, 0, `indented override must be rejected: ${indented.output}`)
+    assert.match(indented.output, /ENCRYPTION_SALT/)
+  })
+})
+
+test('F5-reader the material reader is one contract across both env-file entry points', () => {
+  const bodies = ENV_FILE_VIEW_SCRIPTS.map(file =>
+    shellFunctions(read(path.join(OPS, file)), ['get_env_material_value']),
+  )
+  assert.equal(bodies[1], bodies[0], 'get_env_material_value has drifted between entry points')
+  // Scope guard: the material reader must not become the reader for every env field, or this
+  // change would silently alter how JWT/DB/etc. are interpreted.
+  for (const file of ENV_FILE_VIEW_SCRIPTS) {
+    const source = read(path.join(OPS, file))
+    assert.match(source, /ENCRYPTION_KEY="\$\(get_env_material_value ENCRYPTION_KEY\)"/)
+    assert.match(source, /ENCRYPTION_SALT="\$\(get_env_material_value ENCRYPTION_SALT\)"/)
+    assert.match(source, /JWT_SECRET="\$\(get_env_value JWT_SECRET\)"/)
+    assert.doesNotMatch(source, /get_env_material_value (JWT|POSTGRES|DATABASE|PRODUCT|ATTENDANCE)/)
+  }
+})
+
 test('F4 rehearsal caller: the composed env file carries run-scoped material and clears the bootstrap gate', () => {
   const workflow = read(REHEARSAL_WORKFLOW)
   const composeRun = workflowStepRun(workflow, 'Compose the env file')

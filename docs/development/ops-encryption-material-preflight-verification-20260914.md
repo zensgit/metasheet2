@@ -528,3 +528,19 @@ M4 F6:声明正则退回行首精确形式                       -> exit=1 pass=
   文件);preflight 侧用的是真实函数体 + 与 env-check 逐字节一致性守卫双重覆盖。
 - 没有碰 222、真实 env、pin 集内文件、`packages/`、`plugins/`、任何 `.ps1`。
 - 设计文档上一节登记的「`source` 会执行 env 里的命令替换」仍按原结论不改。
+
+### owner 复核第二轮返修验证（2026-09-16，F5 读取器）
+
+合成 fixture（值均为合成假值 `3f`×32）经 **读取器 + 守卫** 组合，并与同一文件 `source` 后的真实值对照：
+
+| fixture | 修前(d88) | 修后 | `source` 后真实值 |
+|---|---|---|---|
+| 合法 KEY/SALT，末尾 `export ENCRYPTION_KEY=<哨兵>` | **ACCEPT（假绿）** | REJECT `insecure built-in default` | `KEY=<哨兵>` |
+| 合法 KEY/SALT，末尾缩进 `  ENCRYPTION_SALT=` | **ACCEPT（假绿）** | REJECT `is missing (empty)` | `SALT=`（空） |
+| 合法 KEY 被后续**合法**值覆盖（正控制） | ACCEPT | ACCEPT | 后一个合法值 |
+
+- 契约测试：原 13 例 + 新增 3 例 = **16/16 通过**。env-check 走**整脚本端到端**；`attendance-preflight.sh` 无法整脚本跑合成 fixture（它还要求 compose 卷挂载、nginx 与 validator 一整套），故以**读取器+守卫**组合自真实脚本函数体取出运行——仍不是「只测守卫」的那类（正是该类漏掉了本问题）。
+- **变异**：把读取器改回 `^KEY=` 仅行首精确 → 新增两条 F5-reader 用例 **2/2 红**（其余 14 例仍绿），还原后 16/16。
+- 另加**范围守卫**断言：两入口的 `get_env_material_value` 函数体逐字节一致；材料字段确实走新读取器、`JWT_SECRET` 仍走 `get_env_value`、且新读取器**未**被用于 JWT/POSTGRES/DATABASE/PRODUCT/ATTENDANCE 任何字段。
+- `bash -n` 四脚本全过。**未** 改动 `.github/workflows/**`（本轮无需切账号推送）。
+

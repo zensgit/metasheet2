@@ -68,6 +68,32 @@ function require_bcrypt_salt_rounds() {
 # This function is byte-identical in attendance-onprem-env-check.sh, attendance-preflight.sh and
 # attendance-onprem-bootstrap-admin.sh; the three copies are pinned against drift by
 # scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs.
+function get_env_material_value() {
+  # Material-only reader (owner re-review 2026-09-16, F5 residual). `source` honours the LAST
+  # assignment and accepts `export KEY=` plus indented declarations -- package-verify already
+  # treats those as valid declarations. Reading only line-start `KEY=` therefore judged a value
+  # the runtime would never load (a good first line followed by `export KEY=<sentinel>` passed).
+  # Deliberately scoped to the encryption material: every other env field keeps its old reader,
+  # so this cannot change how JWT/DB/etc. are interpreted. No eval, no source, bytes untouched.
+  local key="$1"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo ""
+    return 0
+  fi
+  local line
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" | tail -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    echo ""
+    return 0
+  fi
+  line="${line#"${line%%[![:space:]]*}"}"
+  if [[ "$line" == export[[:space:]]* ]]; then
+    line="${line#export}"
+    line="${line#"${line%%[![:space:]]*}"}"
+  fi
+  echo "${line#${key}=}"
+}
+
 function require_encryption_material() {
   local var_name="$1"
   local raw="$2"
@@ -181,8 +207,8 @@ UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
 CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
 PREFLIGHT_MAX_CSV_ROWS="${ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS:-100000}"
 BCRYPT_SALT_ROUNDS="$(get_env_value BCRYPT_SALT_ROUNDS)"
-ENCRYPTION_KEY="$(get_env_value ENCRYPTION_KEY)"
-ENCRYPTION_SALT="$(get_env_value ENCRYPTION_SALT)"
+ENCRYPTION_KEY="$(get_env_material_value ENCRYPTION_KEY)"
+ENCRYPTION_SALT="$(get_env_material_value ENCRYPTION_SALT)"
 
 require_strong_jwt_secret "$JWT_SECRET"
 require_bcrypt_salt_rounds "$BCRYPT_SALT_ROUNDS"
