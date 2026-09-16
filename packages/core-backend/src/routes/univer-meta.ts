@@ -98,7 +98,12 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // stock-preparation port because that port is the only reader that has to tell an operator's row
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
-import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
+import {
+  SYSTEM_PEOPLE_SHEET_DESCRIPTION,
+  SYSTEM_PEOPLE_SHEET_KIND,
+  isHiddenSystemSheet,
+  isSystemPeopleSheetDescription,
+} from '../multitable/system-sheet-predicate'
 import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
@@ -578,8 +583,8 @@ type UniverMetaViewConfig = {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
-/** Server-owned `meta_sheets.system_kind` stamped on a People sheet at provisioning (never from a client). */
-const SYSTEM_PEOPLE_SHEET_KIND = 'people_directory'
+// SYSTEM_PEOPLE_SHEET_KIND (server-owned `meta_sheets.system_kind` of the People sheet) lives in
+// ../multitable/system-sheet-predicate next to the #5825 list-visibility predicate.
 /** Values-free refusal for a client create that asks for the reserved People sentinel description (#5807). */
 const RESERVED_SHEET_DESCRIPTION_MESSAGE = 'This description is reserved for a system-managed sheet'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
@@ -1123,8 +1128,10 @@ function normalizeJsonArray(value: unknown): string[] {
   return []
 }
 
-function filterVisibleSheetRows<T extends { description?: unknown }>(rows: T[]): T[] {
-  return rows.filter((row) => !isSystemPeopleSheetDescription(row.description))
+// #5825: rows should carry `system_kind` (read column-tolerantly: `to_jsonb(<row>) ->> 'system_kind'`) so a
+// People sheet whose description was edited is still hidden. Visibility only — never a trust decision.
+function filterVisibleSheetRows<T extends { description?: unknown; system_kind?: unknown }>(rows: T[]): T[] {
+  return rows.filter((row) => !isHiddenSystemSheet(row))
 }
 
 type LinkFieldConfig = {
@@ -7408,7 +7415,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       )
       const visibleSheetRows = filterVisibleSheetRows((
         await pool.query(
-          'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
+          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
         )
       ).rows as any[])
       const readableSheetRows = await filterReadableSheetRowsForAccess(
@@ -7663,7 +7670,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // 排在第 51 位的表会先被 LIMIT 截掉,事后再过滤等于把用户明确点名的那张表误判成「不存在」
       // (回 404)。收窄语义由 `base_id = $1` 保住:别的 Base / 别的租户的 sheetId 一张都匹配不到。
       const sheetResult = await pool.query(
-        `SELECT id, base_id, name, description
+        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
          FROM meta_sheets
          WHERE base_id = $1 AND deleted_at IS NULL
            AND ($2::text[] IS NULL OR id = ANY($2::text[]))
@@ -8068,7 +8075,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const sheetRowResult = resolvedSheetId
         ? await pool.query(
-          `SELECT s.id, s.base_id, s.name, s.description, b.id AS base_ref_id, b.name AS base_name, b.icon AS base_icon,
+          `SELECT s.id, s.base_id, s.name, s.description, (to_jsonb(s) ->> 'system_kind') AS system_kind,
+                  b.id AS base_ref_id, b.name AS base_name, b.icon AS base_icon,
                   b.color AS base_color, b.owner_id AS base_owner_id, b.workspace_id AS base_workspace_id
            FROM meta_sheets s
            LEFT JOIN meta_bases b ON b.id = s.base_id
@@ -8098,7 +8106,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const baseRow = (baseRowResult as any).rows?.[0]
       const sheetListResult = resolvedBaseId
         ? await pool.query(
-          `SELECT id, base_id, name, description
+          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
            FROM meta_sheets
            WHERE base_id = $1 AND deleted_at IS NULL
            ORDER BY created_at ASC`,
@@ -8145,7 +8153,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         access.isAdminRole,
       )
       const selectedSheet =
-        (!isSystemPeopleSheetDescription(sheetRow?.description) ? sheetRow : null) ??
+        (!isHiddenSystemSheet(sheetRow) ? sheetRow : null) ??
         readableSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
         null
 
@@ -8221,15 +8229,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               description: typeof selectedSheet.description === 'string' ? selectedSheet.description : null,
             }
             : null,
-          sheets: (sheetListResult as any).rows.map((row: any) => ({
+          // #5825: filter the RAW rows (they carry `system_kind`; the serialized shape below does not).
+          sheets: ((sheetListResult as any).rows as any[]).filter((row: any) =>
+            !isHiddenSystemSheet(row)
+            && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
+          ).map((row: any) => ({
             id: String(row.id),
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
-          })).filter((row: any) =>
-            !isSystemPeopleSheetDescription(row.description)
-            && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
-          ),
+          })),
           views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
           // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
           // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
@@ -8285,7 +8294,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       const result = await pool.query(
-        'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
+        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
       )
       const readableSheetRows = await filterReadableSheetRowsForAccess(
         pool.query.bind(pool),

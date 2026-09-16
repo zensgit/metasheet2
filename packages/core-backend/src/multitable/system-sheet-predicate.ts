@@ -15,7 +15,8 @@
  * `SYSTEM_PEOPLE_SHEET_DESCRIPTION` + `isSystemPeopleSheetDescription` still live HERE (single source of
  * truth) and remain exported for the People-sheet LIST-FILTERING display concern in `routes/univer-meta.ts`
  * (`filterVisibleSheetRows`) — that is a cosmetic "hide the system People sheet from a user's sheet list"
- * filter, NOT a trust boundary, so it may key off the description. The description must NEVER re-enter the
+ * filter, NOT a trust boundary, so it may key off the description (#5825: via `isHiddenSystemSheet`, which
+ * also recognises `system_kind`, same rule as the delete guard). The description must NEVER re-enter the
  * TRUST predicate (`isSystemSheet`) — the golden `system-identity is not forgeable` in
  * `multitable-history-trust-checkpoint-realdb.test.ts` reds if it does.
  */
@@ -28,6 +29,34 @@ export const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
  *  by the trust predicate (`isSystemSheet`). A `description` is user-writable via `POST /sheets` (P1-a). */
 export function isSystemPeopleSheetDescription(value: unknown): boolean {
   return typeof value === 'string' && value.trim() === SYSTEM_PEOPLE_SHEET_DESCRIPTION
+}
+
+/** Server-owned `meta_sheets.system_kind` stamped on the People directory sheet at provisioning (never from a
+ *  client request). */
+export const SYSTEM_PEOPLE_SHEET_KIND = 'people_directory'
+
+/**
+ * #5825 — the ONE "hide this system sheet from sheet lists / the selected-sheet slot" predicate, used by every
+ * list-filtering site in `routes/univer-meta.ts` (`GET /bases`, `GET /bases/:baseId/context`, `GET /context`,
+ * `GET /sheets`). It recognises the People directory sheet the same way the delete guard
+ * (`sheet-delete-guard.ts` `isSystemManagedSheet`) does: the server-owned `system_kind`, OR the description
+ * sentinel (People sheets provisioned before `system_kind` existed carry only the sentinel — no backfill).
+ *
+ * VISIBILITY ONLY — NOT a trust signal. It grants nothing and is never consulted by `isSystemSheet`; a forged
+ * sentinel can only make a sheet disappear from its creator's list (same as before #5825).
+ *
+ * Scope is the People kind only, deliberately narrower than `isSystemSheetKind`: the approval / e-learning
+ * projection sheets (`approval_projection`, `elearning_projection`) are read-models that authorized users are
+ * meant to SEE in listings (admin-only / org-scoped fences decide who), so they must not be hidden here.
+ *
+ * `system_kind` is optional on the row: callers read it column-tolerantly (`to_jsonb(<row>) ->> 'system_kind'`)
+ * so a database without the column yields `undefined` and the sentinel rule alone applies.
+ */
+export function isHiddenSystemSheet(
+  row: { system_kind?: unknown; description?: unknown } | null | undefined,
+): boolean {
+  if (!row) return false
+  return row.system_kind === SYSTEM_PEOPLE_SHEET_KIND || isSystemPeopleSheetDescription(row.description)
 }
 
 /**
