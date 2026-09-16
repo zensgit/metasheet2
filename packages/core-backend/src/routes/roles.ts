@@ -1,14 +1,21 @@
 import type { Request, Response} from 'express';
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
+import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin, userHasPermission } from '../rbac/service'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { parsePagination } from '../util/response'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('RolesRoute')
 
 // 简易内存存储占位
 const roles = new Map<string, { id: string; name: string; permissions: string[] }>()
+
+/** The transaction/pool client shape both writers here run their statements through. */
+type SqlClient = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }
 
 /**
  * Upper bound on how many offending codes a 4xx body echoes back.
@@ -19,10 +26,19 @@ const roles = new Map<string, { id: string; name: string; permissions: string[] 
  * (routes/permissions.ts: "Permission code '<x>' does not exist"). Without it an admin
  * who mistyped one checkbox out of fifty has no way to find it. The cap keeps a hostile
  * body from turning the error into an unbounded reflection, and `unknownCount` always
- * reports the true total. Nothing unvalidated ever reaches the audit log: the 4xx paths
- * return before `auditLog` runs.
+ * reports the true total. Nothing unvalidated ever reaches the audit log: the refusal
+ * audit entry below records COUNTS only, never the codes.
  */
 const REJECTED_CODE_ECHO_LIMIT = 20
+
+/**
+ * The seeded platform-administrator role (migrations/054_create_users_table.sql seeds it
+ * with `*:*`). Membership in it is what `rbac/service.isAdmin` tests, so its permission
+ * set is the platform's root of trust: emptying it de-administrates everyone, and
+ * deleting it removes the only row `isAdmin` looks for. Both are therefore reserved for a
+ * platform administrator, independently of which individual codes move.
+ */
+const PLATFORM_ADMIN_ROLE_ID = 'admin'
 
 /** A caller-fault refusal raised from inside the write transaction, so it rolls back. */
 class RolePermissionRequestError extends Error {
@@ -41,6 +57,93 @@ function sendRolePermissionRequestError(res: Response, error: RolePermissionRequ
   return res.status(error.status).json({
     ok: false,
     error: { code: error.httpCode, message: error.message, details: error.details },
+  })
+}
+
+/** Keep log tokens to a conservative charset — a role id is caller-controlled text. */
+function logToken(value: unknown): string {
+  const normalized = String(value ?? '').replace(/[^A-Za-z0-9_.:*-]/g, '_').slice(0, 64)
+  return normalized || 'UNKNOWN'
+}
+
+/**
+ * Every REFUSAL on this RBAC write path leaves a trace. Before this, a caller could probe
+ * the gate all afternoon — wildcard, then `admin:*`, then a list of guessed codes — and
+ * the audit trail would hold only the grants that SUCCEEDED, because `auditLog` was
+ * reached solely after a successful commit and the file instantiated no logger at all.
+ *
+ * Values-free by construction: the entry records the refusal code and the COUNT of
+ * offending codes, never the codes themselves (the 4xx BODY echoes them back to the
+ * caller that sent them — see REJECTED_CODE_ECHO_LIMIT — but the durable record does not).
+ * `action` is suffixed `_denied` so a refusal can never be mistaken for a write when
+ * reading the trail, and so tests can assert "no WRITE-shaped entry" rather than
+ * "no entry".
+ */
+async function recordRoleWriteRefusal(params: {
+  action: 'create' | 'update' | 'delete'
+  actorId?: string
+  roleId: string
+  error: RolePermissionRequestError
+}): Promise<void> {
+  const { action, actorId, roleId, error } = params
+  const offendingCount = Number(
+    error.details?.unknownCount ?? error.details?.escalatingCount ?? 0,
+  ) || 0
+  logger.warn(
+    `role write refused (action=${action} role=${logToken(roleId)}`
+    + ` refusal=${logToken(error.httpCode)} status=${error.status}`
+    + ` actor=${logToken(actorId)} offending_codes=${offendingCount})`,
+  )
+  await auditLog({
+    actorId,
+    actorType: 'user',
+    action: `${action}_denied`,
+    resourceType: 'role',
+    resourceId: roleId,
+    meta: { refusalCode: error.httpCode, status: error.status, offendingCount },
+  })
+}
+
+/**
+ * The unclassified-error backstop. This router has NO async error wrapper (it is mounted
+ * bare in src/index.ts and uses no asyncHandler), so a rethrow here escapes as an
+ * unhandled rejection with NO response at all — the caller sees a hung request until its
+ * own timeout, not an error. That is the failure mode the catalog probe below exists to
+ * avoid for one specific cause; leaving every OTHER cause (a concurrent role delete
+ * tripping `role_permissions_role_id_fkey`, a dropped connection, a deadlock) to hang was
+ * the same bug with a different trigger.
+ *
+ * Values-free: the body is a fixed code/message and the log line carries the SQLSTATE
+ * only — never the driver message, which routinely echoes row values.
+ */
+function sendRoleWriteFailure(
+  res: Response,
+  error: unknown,
+  action: 'create' | 'update' | 'delete',
+  roleId: string,
+): Response {
+  const sqlstate = typeof (error as { code?: unknown })?.code === 'string'
+    ? String((error as { code: string }).code)
+    : ''
+  if (sqlstate === '23503') {
+    // A foreign key vanished under the write: the role (or a permission code) was
+    // deleted concurrently. Retryable from the caller's point of view — reload and redo.
+    logger.warn(`role write lost a foreign key (action=${action} role=${logToken(roleId)} sqlstate=23503)`)
+    return res.status(409).json({
+      ok: false,
+      error: {
+        code: 'ROLE_WRITE_CONFLICT',
+        message: 'The role or one of its permission codes changed while this write was running; reload and retry',
+        details: { retryable: true },
+      },
+    })
+  }
+  logger.error(
+    `role write failed (action=${action} role=${logToken(roleId)} sqlstate=${logToken(sqlstate || 'UNKNOWN')})`,
+  )
+  return res.status(500).json({
+    ok: false,
+    error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' },
   })
 }
 
@@ -63,9 +166,15 @@ function readDesiredPermissionSet(body: unknown): string[] | null {
       'permissions must be an array of permission codes (omit the key to leave permissions unchanged)',
     )
   }
+  return normalizePermissionCodes(raw, { strict: true })
+}
+
+/** Trim, drop duplicates, sort. `strict` turns a malformed entry into a 400 instead of a skip. */
+function normalizePermissionCodes(raw: unknown[], options: { strict: boolean }): string[] {
   const codes: string[] = []
   for (const entry of raw) {
     if (typeof entry !== 'string' || !entry.trim()) {
+      if (!options.strict) continue
       throw new RolePermissionRequestError(
         400,
         'PERMISSIONS_INVALID',
@@ -79,14 +188,74 @@ function readDesiredPermissionSet(body: unknown): string[] | null {
 }
 
 /**
+ * OPTIMISTIC CONCURRENCY token. The role editor submits the WHOLE checkbox grid it loaded
+ * earlier, so without a token a stale tab silently resurrects a revocation: admin A loads
+ * {a,b}, admin B revokes b, admin A saves the stale grid and b is granted again — the
+ * fail-OPEN direction, and nobody is told. When the client echoes the `updatedAt` it
+ * loaded, a mid-air collision becomes a 409 and the grid is reloaded instead of replayed.
+ *
+ * Optional on purpose: a client that does not send it keeps the previous last-writer-wins
+ * behaviour rather than being locked out (this is a compatibility floor, not a widening —
+ * nothing about WHO may write changes). The row lock taken inside the transaction serializes
+ * two concurrent PUTs regardless, so the interleaving half of the race is closed for
+ * everyone; the token closes the stale-read half for clients that carry it.
+ */
+function readExpectedUpdatedAt(body: unknown): number | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as { expectedUpdatedAt?: unknown }).expectedUpdatedAt
+  if (raw === undefined || raw === null || raw === '') return null
+  const parsed = raw instanceof Date ? raw.getTime() : Date.parse(String(raw))
+  if (!Number.isFinite(parsed)) {
+    throw new RolePermissionRequestError(
+      400,
+      'EXPECTED_UPDATED_AT_INVALID',
+      'expectedUpdatedAt must be an ISO 8601 timestamp (omit it to skip the concurrency check)',
+    )
+  }
+  return parsed
+}
+
+/**
+ * The COMPANION baseline, and the reason `expectedUpdatedAt` alone is not enough: the
+ * plugin provisioner (services/PluginRbacProvisioningService.applyRoleMatrix) grants codes
+ * by writing `role_permissions` DIRECTLY, without touching `roles.updated_at`. A grid
+ * loaded before an install/upgrade would therefore carry a still-valid timestamp and its
+ * DELETE would revoke codes the admin never unchecked and never saw. Comparing the set the
+ * client LOADED against the set actually stored catches any writer, in-process or not.
+ *
+ * Optional, like the timestamp: absent means the previous last-writer-wins behaviour.
+ */
+function readExpectedPermissionSet(body: unknown): string[] | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as { expectedPermissions?: unknown }).expectedPermissions
+  if (raw === undefined || raw === null) return null
+  if (!Array.isArray(raw)) {
+    throw new RolePermissionRequestError(
+      400,
+      'EXPECTED_PERMISSIONS_INVALID',
+      'expectedPermissions must be an array of permission codes (omit the key to skip the concurrency check)',
+    )
+  }
+  return normalizePermissionCodes(raw, { strict: false })
+}
+
+function sameCodeSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false
+  return left.every((code, index) => code === right[index])
+}
+
+function toEpochMillis(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
  * Codes whose blast radius is wider than one resource action. The all-permissions
  * wildcard is a real row in the permissions catalog and `GET /api/permissions` returns
- * the catalog unfiltered, so the role editor already renders it as a checkbox; the moment
- * this route starts WRITING the set, checking that box would mint an everything-role.
+ * the catalog unfiltered, so the role editor already renders it as a checkbox.
  * rbacGuard expands both the global wildcard and a per-resource one (rbac/rbac.ts
- * hasPermissionCode), so all of those shapes count as elevation. ADDING one therefore
- * additionally requires platform admin — this NARROWS the write; it does not change who
- * may call the route (the rbacGuard above is untouched).
+ * hasPermissionCode), so all of those shapes count as elevation.
  */
 function isElevatedPermissionCode(code: string): boolean {
   const normalized = code.trim().toLowerCase()
@@ -95,6 +264,109 @@ function isElevatedPermissionCode(code: string): boolean {
   if (normalized.endsWith(':*')) return true
   const resource = normalized.split(':')[0]
   return resource === '*' || resource === 'admin'
+}
+
+/**
+ * The platform-admin test this route gates elevated grants on. It is deliberately the
+ * SAME population `ensurePlatformAdmin` admits for `GET /api/admin/roles` — the read side
+ * of this very editor (routes/admin-users.ts) — plus the wildcard holder:
+ *
+ *   - `hasLegacyAdminClaim(req)`: the shared request-claim predicate (rbac/platform-admin.ts,
+ *     imported by admin-users.ts too so the two cannot drift). Without this leg an
+ *     administrator whose status comes from the legacy claim — `users.role='admin'`, a
+ *     token `roles` claim, or the no-DB fallback user — is refused by the write side
+ *     while the read side serves them the editor: the exact "the owner cannot grant a
+ *     permission through any UI, it has to be done with SQL" symptom this route exists to
+ *     remove;
+ *   - `isAdmin(actorId)`: LIVE SQL on user_roles, never the 60s permission memo;
+ *   - `userHasPermission(actorId, '*:*')`: also live; holding the all-permissions
+ *     wildcard is what makes someone an owner here and does not imply membership in the
+ *     seeded `admin` role.
+ *
+ * Still strictly narrower than `roles:write`, which is all this route demanded before.
+ */
+async function actorIsPlatformAdmin(req: Request, actorId?: string): Promise<boolean> {
+  if (hasLegacyAdminClaim(req)) return true
+  if (!actorId) return false
+  if (await isAdmin(actorId)) return true
+  return await userHasPermission(actorId, '*:*')
+}
+
+/**
+ * The ONE authority gate over role permission writes, applied by BOTH writers.
+ *
+ * It lives in a helper precisely because a gate on a single verb is not a boundary: PUT
+ * refusing `*:*` while POST accepts the same body with `{id: '<existing role>'}` — same
+ * router, same rbacGuard, ON CONFLICT DO NOTHING on the role row and an additive grant on
+ * the role_permissions row — would be a 403 its own sibling dissolves in one request.
+ *
+ * SYMMETRIC in both directions. Removing an elevated code is not "less dangerous" than
+ * adding one: emptying the seeded `admin` role de-administrates the platform and reads as
+ * `ok: true`, and quietly dropping `stock-prep:*` revokes a whole team — with the cache
+ * fan-out below making it effective immediately. `added` and `removed` are therefore both
+ * examined, and any write that touches the platform-admin role's set at all is reserved
+ * for a platform administrator regardless of which codes move.
+ */
+async function assertRoleGrantAuthority(params: {
+  req: Request
+  actorId?: string
+  roleId: string
+  added: readonly string[]
+  removed: readonly string[]
+}): Promise<void> {
+  const { req, actorId, roleId, added, removed } = params
+  const elevating = [...added, ...removed].filter(isElevatedPermissionCode)
+  const touchesPlatformAdminRole = roleId === PLATFORM_ADMIN_ROLE_ID
+    && (added.length > 0 || removed.length > 0)
+  if (!elevating.length && !touchesPlatformAdminRole) return
+  if (await actorIsPlatformAdmin(req, actorId)) return
+  if (!elevating.length) {
+    throw new RolePermissionRequestError(
+      403,
+      'PROTECTED_ROLE_FORBIDDEN',
+      'Only a platform administrator may change the permissions of the platform administrator role',
+      { roleId },
+    )
+  }
+  throw new RolePermissionRequestError(
+    403,
+    'PERMISSION_ESCALATION_FORBIDDEN',
+    'Only a platform administrator may add or remove wildcard or admin permission codes on a role',
+    { escalatingCount: elevating.length, escalating: elevating.slice(0, REJECTED_CODE_ECHO_LIMIT) },
+  )
+}
+
+/**
+ * Explicit refusal instead of letting `role_permissions_permission_code_fkey`
+ * (SQLSTATE 23503) fire. Only the codes being ADDED need probing: every code already on
+ * the role is in the catalog by that same foreign key.
+ */
+async function assertCodesInCatalog(client: SqlClient, codes: readonly string[]): Promise<void> {
+  if (!codes.length) return
+  const known = await client.query('SELECT code FROM permissions WHERE code = ANY($1::text[])', [codes])
+  const knownCodes = new Set((known.rows as Array<{ code: string }>).map((row) => row.code))
+  const unknown = codes.filter((code) => !knownCodes.has(code))
+  if (!unknown.length) return
+  throw new RolePermissionRequestError(
+    400,
+    'UNKNOWN_PERMISSION_CODE',
+    `${unknown.length} permission code(s) are not in the permissions catalog`,
+    { unknownCount: unknown.length, unknown: unknown.slice(0, REJECTED_CODE_ECHO_LIMIT) },
+  )
+}
+
+/** Drop the per-user permission memo for exactly the role's members. */
+async function invalidateRoleMembers(roleId: string): Promise<number> {
+  if (!pool) return 0
+  const members = await pool.query('SELECT user_id FROM user_roles WHERE role_id=$1', [roleId])
+  let invalidated = 0
+  for (const row of members.rows as Array<{ user_id: string }>) {
+    const memberId = String(row.user_id ?? '')
+    if (!memberId) continue
+    invalidateUserPerms(memberId)
+    invalidated += 1
+  }
+  return invalidated
 }
 
 export function rolesRouter(): Router {
@@ -114,29 +386,60 @@ export function rolesRouter(): Router {
     return res.json({ ok: true, data: { items, page, pageSize, total } })
   })
 
+  /**
+   * POST is ADDITIVE and, on an id that already exists, is a permission GRANT on that
+   * existing role (`INSERT INTO roles … ON CONFLICT (id) DO NOTHING` leaves the row alone,
+   * the per-code INSERT still lands). It therefore runs the SAME authority gate and the
+   * SAME catalog probe as PUT — a gate only PUT enforced would deny legitimate edits while
+   * denying no attack, because the identical intent re-sent as POST would land.
+   */
   r.post('/api/roles', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
-    const id = req.body?.id || `role_${Date.now()}`
+    const id = String(req.body?.id || `role_${Date.now()}`)
     const name = req.body?.name || 'unnamed'
-    const perms: string[] = Array.isArray(req.body?.permissions) ? req.body.permissions : []
+    const actorId = req.user?.id?.toString()
+    const perms: string[] = Array.isArray(req.body?.permissions)
+      ? normalizePermissionCodes(req.body.permissions as unknown[], { strict: false })
+      : []
     if (pool) {
+      let added: string[] = []
       try {
-        await pool.query('INSERT INTO roles(id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [id, name])
-        for (const p of perms) {
-          await pool.query('INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING', [id, p])
-        }
+        // ONE transaction over the role row and its grants: a refused or failed grant must
+        // not leave a freshly created role behind, and the gate's read of the CURRENT set
+        // must see the same snapshot the write does.
+        await transaction(async (client) => {
+          await client.query('INSERT INTO roles(id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [id, name])
+          if (!perms.length) return
+          // Serializes against a concurrent PUT/POST on the same role.
+          await client.query('SELECT id FROM roles WHERE id=$1 FOR UPDATE', [id])
+          const current = await client.query('SELECT permission_code FROM role_permissions WHERE role_id=$1', [id])
+          const currentCodes = new Set(
+            (current.rows as Array<{ permission_code: string }>).map((row) => row.permission_code),
+          )
+          added = perms.filter((code) => !currentCodes.has(code))
+          if (!added.length) return
+          await assertRoleGrantAuthority({ req, actorId, roleId: id, added, removed: [] })
+          await assertCodesInCatalog(client, added)
+          for (const p of added) {
+            await client.query('INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING', [id, p])
+          }
+        })
       } catch (error) {
+        if (error instanceof RolePermissionRequestError) {
+          await recordRoleWriteRefusal({ action: 'create', actorId, roleId: id, error })
+          return sendRolePermissionRequestError(res, error)
+        }
         // O2-S2: role_permissions is a recovery-authority table — a marker 40001 under a
-        // held recovery lease is a retryable 409. Every other error rethrows unchanged
-        // (the handler had no catch before, so the rejection path is byte-identical).
+        // held recovery lease is a retryable 409.
         if (sendIfRecoveryConflict(res, error)) return
-        throw error
+        return sendRoleWriteFailure(res, error, 'create', id)
       }
-      await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms } })
+      const membersInvalidated = added.length ? await invalidateRoleMembers(id) : 0
+      await auditLog({ actorId, actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms, permissionsAdded: added, membersInvalidated } })
       const { rows } = await pool.query('SELECT id, name, created_at, updated_at FROM roles WHERE id=$1', [id])
       return res.json({ ok: true, data: rows[0] })
     }
     roles.set(id, { id, name, permissions: perms })
-    await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms } })
+    await auditLog({ actorId, actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms } })
     return res.json({ ok: true, data: roles.get(id) })
   })
 
@@ -147,51 +450,70 @@ export function rolesRouter(): Router {
    * nothing was written, and the only working remedy was raw SQL.
    *
    * Semantics vs POST: POST's write is ADDITIVE (`INSERT … ON CONFLICT DO NOTHING`, no
-   * DELETE), which on its own path — creating a role that has no prior set — is
-   * indistinguishable from replace. PUT edits a role that already HAS a set and is driven
-   * by a checkbox grid, so unchecking must revoke; PUT therefore adds the DELETE that
-   * replace requires, and DIVERGES from POST's additive-on-an-existing-id behaviour by
-   * design. Everything else follows POST: the same INSERT statement and conflict clause,
-   * and the same `permissions` key in the audit meta.
+   * DELETE). PUT edits a role that already HAS a set and is driven by a checkbox grid, so
+   * unchecking must revoke; PUT therefore adds the DELETE that replace requires, and
+   * DIVERGES from POST's additive behaviour by design. The AUTHORITY rules do not diverge:
+   * both run assertRoleGrantAuthority + assertCodesInCatalog.
+   *
+   * Statement set, and why a pure rename stays lease-proof: when the submitted set equals
+   * the stored one (`added` and `removed` both empty — what the editor produces on a
+   * rename, since the page always sends the whole grid) the DELETE/INSERT pair is SKIPPED
+   * entirely, so the transaction degenerates to `UPDATE roles`. `roles` carries none of
+   * the nine recovery-authority triggers, so such a rename cannot raise the 40001 marker;
+   * a real permission change can, and answers the uniform retryable 409.
    */
   r.put('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
     const actorId = req.user?.id?.toString()
     let desired: string[] | null
+    let expectedUpdatedAt: number | null
+    let expectedPermissions: string[] | null
     try {
       desired = readDesiredPermissionSet(req.body)
+      expectedUpdatedAt = readExpectedUpdatedAt(req.body)
+      expectedPermissions = readExpectedPermissionSet(req.body)
     } catch (error) {
-      if (error instanceof RolePermissionRequestError) return sendRolePermissionRequestError(res, error)
+      if (error instanceof RolePermissionRequestError) {
+        await recordRoleWriteRefusal({ action: 'update', actorId, roleId: id, error })
+        return sendRolePermissionRequestError(res, error)
+      }
       throw error
     }
     if (pool) {
-      const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
-      if (!rows.length) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Role not found' } })
-      const before = rows[0]
-      const name = req.body?.name ?? before.name
-
-      // An actor-side fact, so it is resolved outside the write transaction, and only
-      // when the desired set actually carries an elevated code. Both legs are LIVE SQL,
-      // never the 60s permission memo, so the gate cannot be opened by a stale cache.
-      // The second leg exists so the gate cannot FALSELY deny a real owner: holding the
-      // all-permissions wildcard is what makes someone an owner here, and it is not
-      // necessarily accompanied by membership in the seeded `admin` role. It is still
-      // strictly narrower than `roles:write`, which is all this route demanded before.
-      const actorMayElevate = desired?.some(isElevatedPermissionCode)
-        ? Boolean(actorId) && (
-            await isAdmin(actorId as string) || await userHasPermission(actorId as string, '*:*')
-          )
-        : false
-
+      let before: { id: string; name: string } = { id, name: '' }
+      let name = ''
       let beforeCodes: string[] = []
       let added: string[] = []
       let removed: string[] = []
       try {
-        // ONE transaction over the rename AND the permission replacement: a rejected or
-        // failed permission write must not leave a renamed role behind, and the catalog
-        // probe reads the SAME snapshot as the write, so the 4xx path is a rollback
-        // rather than a best-effort abort.
+        // ONE transaction over the lookup, the rename AND the permission replacement: a
+        // rejected or failed permission write must not leave a renamed role behind, the
+        // catalog probe reads the SAME snapshot as the write, and the row lock below is
+        // only a lock if the read that takes it is inside the transaction.
         await transaction(async (client) => {
+          // FOR UPDATE, as the FIRST statement: two overlapping saves of the same role
+          // would otherwise both read the pre-state under READ COMMITTED and interleave
+          // their DELETE/INSERT pairs into the union of both desired sets.
+          const locked = await client.query('SELECT id, name, updated_at FROM roles WHERE id=$1 FOR UPDATE', [id])
+          const lockedRow = (locked.rows as Array<{ id: string; name: string; updated_at?: unknown }>)[0]
+          if (!lockedRow) {
+            throw new RolePermissionRequestError(404, 'NOT_FOUND', 'Role not found')
+          }
+          before = { id: lockedRow.id, name: lockedRow.name }
+          name = req.body?.name ?? lockedRow.name
+
+          const storedUpdatedAt = toEpochMillis(lockedRow.updated_at)
+          // A row with no usable timestamp carries no token to compare against; the lock
+          // above is then the only arbitration available (documented on readExpectedUpdatedAt).
+          if (expectedUpdatedAt !== null && storedUpdatedAt !== null && expectedUpdatedAt !== storedUpdatedAt) {
+            throw new RolePermissionRequestError(
+              409,
+              'ROLE_MODIFIED',
+              'This role changed since it was loaded; reload it and re-apply the change',
+              { retryable: true },
+            )
+          }
+
           if (!desired) {
             await client.query('UPDATE roles SET name=$1, updated_at=now() WHERE id=$2', [name, id])
             return
@@ -201,19 +523,12 @@ export function rolesRouter(): Router {
             .map((row) => row.permission_code)
             .sort()
 
-          const known = await client.query('SELECT code FROM permissions WHERE code = ANY($1::text[])', [desired])
-          const knownCodes = new Set((known.rows as Array<{ code: string }>).map((row) => row.code))
-          const unknown = desired.filter((code) => !knownCodes.has(code))
-          if (unknown.length) {
-            // Explicit refusal instead of letting role_permissions_permission_code_fkey
-            // (SQLSTATE 23503) fire: this router has no async error wrapper, so an
-            // unclassified rejection escapes as an unhandled rejection with no response
-            // at all — the caller would see a hung request, not a 4xx.
+          if (expectedPermissions && !sameCodeSet(expectedPermissions, beforeCodes)) {
             throw new RolePermissionRequestError(
-              400,
-              'UNKNOWN_PERMISSION_CODE',
-              `${unknown.length} permission code(s) are not in the permissions catalog`,
-              { unknownCount: unknown.length, unknown: unknown.slice(0, REJECTED_CODE_ECHO_LIMIT) },
+              409,
+              'ROLE_MODIFIED',
+              'This role changed since it was loaded; reload it and re-apply the change',
+              { retryable: true },
             )
           }
 
@@ -221,29 +536,30 @@ export function rolesRouter(): Router {
           added = desired.filter((code) => !beforeSet.has(code))
           removed = beforeCodes.filter((code) => !desired.includes(code))
 
-          const escalating = added.filter(isElevatedPermissionCode)
-          if (escalating.length && !actorMayElevate) {
-            throw new RolePermissionRequestError(
-              403,
-              'PERMISSION_ESCALATION_FORBIDDEN',
-              'Only a platform administrator may add wildcard or admin permission codes to a role',
-              { escalatingCount: escalating.length, escalating: escalating.slice(0, REJECTED_CODE_ECHO_LIMIT) },
-            )
-          }
+          // Authority BEFORE the catalog probe: a refused caller learns nothing about
+          // which of its guessed codes exist.
+          await assertRoleGrantAuthority({ req, actorId, roleId: id, added, removed })
+          await assertCodesInCatalog(client, added)
 
           await client.query('UPDATE roles SET name=$1, updated_at=now() WHERE id=$2', [name, id])
+          if (!added.length && !removed.length) return
           // An empty desired set makes the NOT-IN predicate true for every row, i.e. it
           // clears the role — which is exactly what a fully unchecked grid means.
           await client.query('DELETE FROM role_permissions WHERE role_id=$1 AND permission_code <> ALL($2::text[])', [id, desired])
-          for (const p of desired) {
+          for (const p of added) {
             await client.query('INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING', [id, p])
           }
         })
       } catch (error) {
-        if (error instanceof RolePermissionRequestError) return sendRolePermissionRequestError(res, error)
-        // O2-S2: marker 40001 → retryable 409; all else rethrows unchanged.
+        if (error instanceof RolePermissionRequestError) {
+          if (error.status !== 404) {
+            await recordRoleWriteRefusal({ action: 'update', actorId, roleId: id, error })
+          }
+          return sendRolePermissionRequestError(res, error)
+        }
+        // O2-S2: marker 40001 → retryable 409.
         if (sendIfRecoveryConflict(res, error)) return
-        throw error
+        return sendRoleWriteFailure(res, error, 'update', id)
       }
 
       // Post-commit side effect, not part of the atomic write set (the same split
@@ -255,19 +571,10 @@ export function rolesRouter(): Router {
       // change reaches a user only through user_roles. The memo is process-local, so in a
       // multi-instance deployment the OTHER instances still carry their own stale entries
       // until the TTL expires; this fan-out cannot reach them.
-      let membersInvalidated = 0
-      if (added.length || removed.length) {
-        const members = await pool.query('SELECT user_id FROM user_roles WHERE role_id=$1', [id])
-        for (const row of members.rows as Array<{ user_id: string }>) {
-          const memberId = String(row.user_id ?? '')
-          if (!memberId) continue
-          invalidateUserPerms(memberId)
-          membersInvalidated += 1
-        }
-      }
+      const membersInvalidated = (added.length || removed.length) ? await invalidateRoleMembers(id) : 0
 
       await auditLog({
-        actorId: req.user?.id?.toString(),
+        actorId,
         actorType: 'user',
         action: 'update',
         resourceType: 'role',
@@ -283,38 +590,56 @@ export function rolesRouter(): Router {
       })
       return res.json({ ok: true, data: desired ? { id, name, permissions: desired } : { id, name } })
     }
-    const before = roles.get(id)
-    if (!before) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Role not found' } })
-    const name = req.body?.name ?? before.name
-    // The same absent-vs-present contract as the DB branch. Catalog validation and the
-    // elevation gate are DB-backed and have no counterpart here: this branch only runs
-    // with no pool at all, where there is no permissions catalog to check against.
-    const next = { ...before, name, ...(desired ? { permissions: desired } : {}) }
+    const beforeMemory = roles.get(id)
+    if (!beforeMemory) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Role not found' } })
+    const memoryName = req.body?.name ?? beforeMemory.name
+    // The same absent-vs-present contract as the DB branch. The catalog probe and the
+    // authority gate are DB-backed and have no counterpart here: this branch only runs
+    // with no pool at all, where there is no permissions catalog to check against — and
+    // where this Map grants nothing, because rbac/service answers every authorization
+    // question `false` without a pool.
+    const next = { ...beforeMemory, name: memoryName, ...(desired ? { permissions: desired } : {}) }
     roles.set(id, next)
-    await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'update', resourceType: 'role', resourceId: id, meta: { before, after: next } })
+    await auditLog({ actorId, actorType: 'user', action: 'update', resourceType: 'role', resourceId: id, meta: { before: beforeMemory, after: next } })
     return res.json({ ok: true, data: next })
   })
 
   r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
+    const actorId = req.user?.id?.toString()
     if (pool) {
       const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
       const before = rows[0] || null
+      // Deleting the seeded platform-admin role removes the only row `isAdmin` looks for,
+      // i.e. it de-administrates the platform — the same blast radius as emptying its
+      // permission set, which the PUT gate reserves for a platform administrator. A
+      // surgical revoke and a delete must not have different admit sets, or the gate is
+      // just a detour.
+      if (before && id === PLATFORM_ADMIN_ROLE_ID && !await actorIsPlatformAdmin(req, actorId)) {
+        const refusal = new RolePermissionRequestError(
+          403,
+          'PROTECTED_ROLE_FORBIDDEN',
+          'Only a platform administrator may delete the platform administrator role',
+          { roleId: id },
+        )
+        await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error: refusal })
+        return sendRolePermissionRequestError(res, refusal)
+      }
       try {
         // The FK cascade from roles → role_permissions deletes recovery-authority rows,
         // so this DELETE can also surface the marker 40001.
         await pool.query('DELETE FROM roles WHERE id=$1', [id])
       } catch (error) {
-        // O2-S2: marker 40001 → retryable 409; all else rethrows unchanged.
+        // O2-S2: marker 40001 → retryable 409.
         if (sendIfRecoveryConflict(res, error)) return
-        throw error
+        return sendRoleWriteFailure(res, error, 'delete', id)
       }
-      await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
+      await auditLog({ actorId, actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
       return res.json({ ok: true, data: { id } })
     }
     const before = roles.get(id)
     roles.delete(id)
-    await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
+    await auditLog({ actorId, actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
     return res.json({ ok: true, data: { id } })
   })
 

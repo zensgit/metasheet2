@@ -14,6 +14,7 @@ import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
   deriveDelegatedAdminNamespace,
   deriveGrantNamespaces,
@@ -97,6 +98,8 @@ type AdminRoleCatalogRow = {
   name: string
   permissions: string[] | null
   member_count: number | string
+  /** Optimistic-concurrency token for PUT /api/roles/:id (`expectedUpdatedAt`). */
+  updated_at: string | Date | null
 }
 
 type AdminAuditLogRow = {
@@ -437,21 +440,19 @@ function getRequestUserId(req: Request): string {
   return typeof userId === 'string' ? userId.trim() : ''
 }
 
-function hasLegacyAdminClaim(req: Request): boolean {
-  const raw = req.user as Record<string, unknown> | undefined
-  if (!raw) return false
-  if (raw.role === 'admin') return true
-  if (Array.isArray(raw.roles) && raw.roles.includes('admin')) return true
-  if (Array.isArray(raw.perms) && (raw.perms.includes('*:*') || raw.perms.includes('admin:all'))) return true
-  return false
-}
+// `hasLegacyAdminClaim` used to be a private copy right here. It moved VERBATIM to
+// ../rbac/platform-admin.ts (and is imported above) when routes/roles.ts needed the same
+// question answered on its write path: a second, independently drifting admin predicate is an
+// auth bug, and the roles editor would have refused a principal that THIS file's
+// `GET /api/admin/roles` serves as an administrator. Behaviour here is unchanged — same
+// function body, same call sites.
 
-// Exported IN PLACE (not extracted to a shared guard module — there is no such module today;
-// the sibling `requireOrgMemberAccess` is itself a local function in routes/api-tokens.ts) so the
-// attendance-admin redelivery route can reuse the SAME platform-admin check rather than
-// reimplementing it. Two drifting admin checks would be an auth bug. Behavior and the ~20 existing
-// in-file call sites are unchanged. Contract: returns the userId on success, or null AFTER already
-// writing the 401/403 response — callers MUST return early on null.
+// Exported IN PLACE (the sibling `requireOrgMemberAccess` is itself a local function in
+// routes/api-tokens.ts) so the attendance-admin redelivery route can reuse the SAME
+// platform-admin check rather than reimplementing it. Two drifting admin checks would be an auth
+// bug. Behavior and the ~20 existing in-file call sites are unchanged. Contract: returns the
+// userId on success, or null AFTER already writing the 401/403 response — callers MUST return
+// early on null.
 export async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
   const userId = getRequestUserId(req)
   if (!userId) {
@@ -494,12 +495,13 @@ async function fetchRoleCatalog() {
     `SELECT
         r.id,
         r.name,
+        r.updated_at,
         COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions,
         COUNT(DISTINCT ur.user_id)::int AS member_count
      FROM roles r
      LEFT JOIN role_permissions rp ON rp.role_id = r.id
      LEFT JOIN user_roles ur ON ur.role_id = r.id
-     GROUP BY r.id, r.name
+     GROUP BY r.id, r.name, r.updated_at
      ORDER BY r.id ASC`,
   )
 
@@ -508,6 +510,11 @@ async function fetchRoleCatalog() {
     name: row.name,
     permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
     memberCount: Number(row.member_count || 0),
+    // Additive field: the role editor echoes it back as `expectedUpdatedAt` so a stale tab
+    // cannot silently replay a grid that has since been revoked (routes/roles.ts).
+    updatedAt: row.updated_at instanceof Date
+      ? row.updated_at.toISOString()
+      : (row.updated_at ?? null),
   }))
 }
 
