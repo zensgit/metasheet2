@@ -36,6 +36,7 @@
  * Zero-DB: the kysely chain is a stub and liveness is answered by a fake queryFn, so the suite runs
  * anywhere. No supertest / app-mode here (CI tripwire #4154).
  */
+import pg from 'pg'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { Logger } from '../../src/core/logger'
 import { AutomationService } from '../../src/multitable/automation-service'
@@ -343,6 +344,31 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
 
     expect(rules.map((r) => r.id)).toEqual(['atr_blip_tc'])
     expect(mentions(warn, 'atr_blip_tc')[0]?.[1]).toMatchObject({ reason: 'liveness_lookup_failed' })
+  })
+
+  it('FAIL-OPEN on a real pg server error: the WARN carries the driver class + SQLSTATE (not "error"), never the text', async () => {
+    // node-postgres's DatabaseError sets `name` to the protocol message type 'error', so logging
+    // `err.name` made a statement timeout, a permission failure and a connection cap all read the same.
+    const { service, queryFn } = makeService([ruleRow({ id: 'atr_pg', sheet_id: 'sheet_live' })], { sheet_live: 'live' })
+    const inner = queryFn.getMockImplementation()!
+    queryFn.mockImplementation(async (sqlText: string, params: unknown[]) => {
+      if (LIVENESS_BATCH_SQL.test(sqlText)) {
+        const err = new pg.DatabaseError('permission denied for table meta_sheets: host=db.internal', 80, 'error')
+        err.code = '42501'
+        throw err
+      }
+      return inner(sqlText, params)
+    })
+
+    const rules = await service.loadEnabledApprovalCompletedRules('tpl_1')
+
+    expect(rules.map((r) => r.id)).toEqual(['atr_pg'])
+    const failOpenWarns = warn.mock.calls.filter((c) => String((c[1] as { reason?: string })?.reason) === 'liveness_lookup_failed')
+    expect(failOpenWarns).toHaveLength(1)
+    expect(failOpenWarns[0][1]).toMatchObject({ errorClass: 'DatabaseError', errorCode: '42501' })
+    const serialized = JSON.stringify([...warn.mock.calls, ...debug.mock.calls])
+    expect(serialized).not.toContain('db.internal')
+    expect(serialized).not.toContain('permission denied')
   })
 
   it('parity (verdict): the record lane AND the scheduled lane refuse the SAME deleted sheet', async () => {

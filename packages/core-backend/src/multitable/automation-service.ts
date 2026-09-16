@@ -115,7 +115,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
-import { loadSheetLiveness, loadSheetLivenessBatch, type SheetLiveness } from './sheet-liveness'
+import { loadSheetLiveness, loadSheetLivenessBatch, SHEET_DELETED_CODE, type SheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -266,6 +266,59 @@ function sampleIds(ids: readonly string[]): string[] {
   return unique.length <= LOG_ID_SAMPLE_LIMIT
     ? unique
     : [...unique.slice(0, LOG_ID_SAMPLE_LIMIT), `+${unique.length - LOG_ID_SAMPLE_LIMIT} more`]
+}
+
+/**
+ * Values-free description of a THROWN lookup error, for a WARN: the constructor name (a code identifier)
+ * and, when present and identifier-shaped, the driver's `code` (a PostgreSQL SQLSTATE such as `57014`, or
+ * a Node errno such as `ECONNREFUSED`). Never `message` / `detail` / `hint` — those can carry connection
+ * details or row values. `err.name` alone is not enough: node-postgres's `DatabaseError` sets `name` to the
+ * protocol message type `'error'`, so every server-side failure (timeout, permission, too many
+ * connections) would log the same class.
+ */
+const LOOKUP_ERROR_CLASS_SHAPE = /^[A-Za-z_$][\w$]{0,63}$/
+const LOOKUP_ERROR_CODE_SHAPE = /^[0-9A-Z_]{2,32}$/
+export function describeLookupError(err: unknown): { errorClass: string; errorCode?: string } {
+  let errorClass: string = typeof err
+  if (err instanceof Error) {
+    const ctorName = (err as { constructor?: { name?: unknown } }).constructor?.name
+    errorClass = typeof ctorName === 'string' && LOOKUP_ERROR_CLASS_SHAPE.test(ctorName)
+      ? ctorName
+      : LOOKUP_ERROR_CLASS_SHAPE.test(err.name) ? err.name : 'Error'
+  }
+  const code = err !== null && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' && LOOKUP_ERROR_CODE_SHAPE.test(code) ? { errorClass, errorCode: code } : { errorClass }
+}
+
+/**
+ * Prefix of the reason persisted on the failed execution (and its start_approval step) when an approval
+ * bridge is not resumed because its sheet is soft-deleted. The full reason is built by
+ * {@link bridgeSheetDeletedMessage}. Values-free: no ids — the execution row already names the rule and
+ * sheet.
+ */
+export const BRIDGE_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; approval bridge not resumed`
+
+const APPROVAL_OUTCOME_LABELS: ReadonlySet<string> = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
+/** The approval outcome as a closed enum label (values-free even if an event carried something else). */
+export function approvalOutcomeLabel(outcome: unknown): string {
+  return typeof outcome === 'string' && APPROVAL_OUTCOME_LABELS.has(outcome) ? outcome : 'unknown'
+}
+
+/**
+ * The full refusal reason. It keeps the approval OUTCOME (the old "Approval completed with <outcome>"
+ * text is replaced by this one, and a later restore does not replay the run, so the run history is where
+ * an operator decides whether anything must be applied by hand) and says exactly what was WITHHELD — which
+ * depends on the outcome: the tail only ever runs on `approved`, and a non-approved outcome only writes
+ * back with the `onNonApproved` opt-in. A rejected run with no opt-in withheld nothing, and says so, so it
+ * is not mistaken for a lost write.
+ */
+export function bridgeSheetDeletedMessage(outcome: unknown, withheld: { writeback: boolean; tail: boolean }): string {
+  const parts: string[] = []
+  if (withheld.writeback) parts.push('declared result writeback not applied')
+  if (withheld.tail) parts.push('remaining actions not run')
+  const what = parts.length > 0 ? parts.join(', ') : 'nothing was pending to write back or run'
+  return `${BRIDGE_SHEET_DELETED_MESSAGE} (approval outcome: ${approvalOutcomeLabel(outcome)}; ${what})`
 }
 
 function hasRetryableFwbFailure(execution: AutomationExecution): boolean {
@@ -610,6 +663,21 @@ function resultWritebackTargetId(
 // string. The save gate has already enforced the FULL triple when any is set, so runtime can read all three.)
 function isCrossBaseWriteback(writeback: Record<string, unknown>): boolean {
   return RESULT_WRITEBACK_TARGET_KEYS.some((key) => resultWritebackTargetId(writeback, key) !== null)
+}
+
+// W7-1 gate, shared by the writeback itself and by the deleted-sheet refusal reason (so the reason's
+// "writeback not applied" can never disagree with whether a writeback would have been attempted): the
+// declared `resultWriteback`, or null when this bridge + outcome would not write back at all. The approved
+// branch writes whenever configured; a non-approved outcome needs the explicit `onNonApproved` opt-in.
+function declaredApprovalResultWriteback(
+  bridge: Pick<AutomationApprovalBridgeRow, 'recordId' | 'sheetId'>,
+  startApprovalConfig: Record<string, unknown>,
+  outcome: string,
+): Record<string, unknown> | null {
+  const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
+  if (!writeback || !bridge.recordId || !bridge.sheetId) return null
+  if (outcome !== 'approved' && writeback.onNonApproved !== true) return null
+  return writeback
 }
 
 // Discriminated result of a backwrite: same-base returns the `patch` (merged into the resume tail context);
@@ -3383,9 +3451,36 @@ export class AutomationService {
   /**
    * The bridge resume continuation — extracted VERBATIM so the legacy (terminal-early) path and the P1#1 lease
    * path share ONE body. Its early `return`s are the DETERMINISTIC failures (missing execution, missing/disabled
-   * rule, changed fingerprint, non-approved outcome, record gone); each settles the execution and returns
-   * normally (no throw), so the caller then writes the terminal bridge state (legacy: already done by
-   * claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the caller's reclaim path.
+   * rule, changed fingerprint, soft-deleted sheet, non-approved outcome, record gone); each settles the
+   * execution and returns normally (no throw), so the caller then writes the terminal bridge state (legacy:
+   * already done by claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the
+   * caller's reclaim path.
+   *
+   * SHEET LIVENESS (soft delete, #5800). This lane is reached from `multitable_automation_approval_bridges`,
+   * not from the template-keyed rule loaders, so `dropRulesOnDeletedSheets` never saw it — and its record
+   * read keys `meta_records` on `sheet_id` without joining `meta_sheets`, which a soft delete does not
+   * cascade into. Unchecked, an approval completing after its sheet was soft-deleted wrote the result back
+   * onto that sheet and ran the rest of the rule. The check (`approvalBridgeSheetLive`) sits after the
+   * rule/fingerprint gates (they write nothing to the sheet, and the rule supplies the sheet-id fallback)
+   * and BEFORE the outcome branch, because the non-approved branch can write too. A deleted sheet is one
+   * more deterministic failure: execution `failed` with a coded reason, tail steps `skipped`, bridge
+   * terminal `resumed` ("completion consumed") through the caller's normal path. Terminal rather than
+   * parked: nothing re-drives a parked bridge (the completion event is one-shot, no sweeper reads this
+   * table, and on the legacy path the row is already `resumed` before this body runs), so "leave it for a
+   * restore" would in practice be "neither run nor recorded". A later restore therefore does NOT replay it.
+   *
+   * RESTORE GAP (known, disclosed — #5800 accepts "terminal in place"; a replay is an owner decision).
+   * Delete → approval completes → restore: before #5800 the writeback landed on the hidden records and
+   * reappeared with the restore; now the result and the tail are withheld for good. Nothing re-drives it:
+   * a redelivery reads the terminal bridge as consumed ('none'), a whole-execution retry is refused
+   * (START_APPROVAL_ALREADY_CREATED), and the restore route only clears `deleted_at`. What survives, so it
+   * can be found and applied by hand: the execution is `failed` with a reason starting `SHEET_DELETED:`
+   * that names the approval outcome and what was withheld (`bridgeSheetDeletedMessage`); the
+   * start_approval step output keeps the approval ids and outcome; the bridge row keeps `outcome`; the
+   * WARN (`reason: 'sheet_deleted'`) carries the outcome. To list them for a sheet: the admin runs API
+   * `GET /api/multitable/automation-executions?sheetId=<id>&status=failed`, keeping entries whose
+   * `error` starts with `SHEET_DELETED:`. A restore-time re-drive would key on bridges with `outcome` set,
+   * status `resumed`, and such an execution.
    */
   private async resumeApprovalBridgeContinuation(bridge: AutomationApprovalBridgeRow, event: ApprovalCompletionEventV1): Promise<void> {
     const execution = await this.logService.getById(bridge.executionId)
@@ -3407,8 +3502,26 @@ export class AutomationService {
     }
 
     const result = this.approvalCompletionStepResult(event)
+    // The ONE sheet this continuation addresses: the record read below keys on it, the same-base
+    // writeback targets it, and the tail's ExecutionContext.sheetId is set to it. Checked BEFORE the
+    // outcome branch because the non-approved branch writes too (`resultWriteback.onNonApproved`).
+    const bridgeSheetId = bridge.sheetId ?? execRule.sheetId
+    const startApprovalConfig = execRule.actions[bridge.stepIndex]?.config ?? {}
+    if (!(await this.approvalBridgeSheetLive(bridge, bridgeSheetId, event.transition.toStatus))) {
+      // The reason keeps the outcome and names exactly what was withheld (see bridgeSheetDeletedMessage).
+      const reason = bridgeSheetDeletedMessage(event.transition.toStatus, {
+        writeback: declaredApprovalResultWriteback(bridge, startApprovalConfig, event.transition.toStatus) !== null,
+        tail: event.transition.toStatus === 'approved' && execRule.actions.length > bridge.stepIndex + 1,
+      })
+      await this.failApprovalBridgeExecution(execution, bridge, reason, {
+        ...result,
+        status: 'failed',
+        error: reason,
+      })
+      return
+    }
     if (event.transition.toStatus !== 'approved') {
-      await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
+      await this.tryWriteApprovalResultBack(bridge, startApprovalConfig, event, result)
       await this.failApprovalBridgeExecution(execution, bridge, result.error ?? `Approval completed with ${event.transition.toStatus}`, result)
       return
     }
@@ -3417,7 +3530,7 @@ export class AutomationService {
     if (bridge.recordId) {
       const rec = await this.queryFn(
         `SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2`,
-        [bridge.recordId, bridge.sheetId ?? execRule.sheetId],
+        [bridge.recordId, bridgeSheetId],
       )
       const row = (rec.rows[0] ?? null) as { data?: Record<string, unknown> } | null
       if (!row) {
@@ -3430,7 +3543,7 @@ export class AutomationService {
     // W7-1: declared approval-result backwrite to the SOURCE record (fixed mapping, values from the
     // event, through the lock guard). Best-effort — a locked/missing record logs + skips rather than
     // crashing the resume, so the automation's remaining actions still run.
-    const backwritten = await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
+    const backwritten = await this.tryWriteApprovalResultBack(bridge, startApprovalConfig, event, result)
     // W7-1a: merge the backwrite into the resume snapshot so the TAIL actions (send_webhook /
     // update_record / ...) see the just-written result, not the pre-approval record.
     if (backwritten) recordData = { ...recordData, ...backwritten }
@@ -3439,7 +3552,7 @@ export class AutomationService {
     const context: ExecutionContext = {
       executionId: execution.id,
       ruleId: execRule.id,
-      sheetId: execRule.sheetId,
+      sheetId: bridgeSheetId,
       recordId: bridge.recordId ?? '',
       recordData,
       ruleCreatedBy: execRule.createdBy,
@@ -3701,9 +3814,8 @@ export class AutomationService {
     startApprovalConfig: Record<string, unknown>,
     event: ApprovalCompletionEventV1,
   ): Promise<ApprovalBackwriteOutcome | null> {
-    const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
+    const writeback = declaredApprovalResultWriteback(bridge, startApprovalConfig, event.transition.toStatus)
     if (!writeback || !bridge.recordId || !bridge.sheetId) return null
-    if (event.transition.toStatus !== 'approved' && writeback.onNonApproved !== true) return null
 
     // T3-5: a configured cross-base target routes the backwrite to the TARGET record in another base
     // (gated by the shared executor cross-base write gate). The SOURCE record is NOT mutated.
@@ -4320,8 +4432,9 @@ export class AutomationService {
    *        Whoever turns durable delivery on deployment-wide should revisit this trade, not inherit it.
    * The cost of the choice is paid in the log: every fail-open keep is reported with the affected rule
    * ids and a coded reason, so a persistently failing lookup is read off the log rather than inferred
-   * from absent runs. VALUES-FREE: rule/sheet ids and the error CLASS name only — never the error text,
-   * which can carry connection details.
+   * from absent runs. VALUES-FREE: rule/sheet ids, the error CLASS and, when identifier-shaped, the
+   * driver code (SQLSTATE / errno) via `describeLookupError` — never the error text, which can carry
+   * connection details.
    *
    * ── Log VOLUME is bounded by the call, not by the rule count ──────────────────────────────────
    * A template can route 50 rules; a failing `meta_sheets` read is exactly the moment the log pipeline
@@ -4335,11 +4448,11 @@ export class AutomationService {
     // durable consumer's lease is ticking, and a serial per-sheet loop made an approval event's wall
     // time scale with the sheet count under exactly the pool pressure that makes each checkout slow.
     let livenessBySheet: Map<string, SheetLiveness> | null = null
-    let errorClass: string | null = null
+    let lookupError: ReturnType<typeof describeLookupError> | null = null
     try {
       livenessBySheet = await loadSheetLivenessBatch(this.queryFn, rules.map((rule) => rule.sheet_id))
     } catch (err) {
-      errorClass = err instanceof Error ? err.name : typeof err
+      lookupError = describeLookupError(err)
     }
 
     if (livenessBySheet === null) {
@@ -4350,7 +4463,7 @@ export class AutomationService {
         ruleCount: rules.length,
         ruleIds: sampleIds(rules.map((rule) => rule.id)),
         sheetIds: sampleIds(rules.map((rule) => rule.sheet_id)),
-        ...(errorClass === null ? {} : { errorClass }),
+        ...(lookupError ?? {}),
       })
       for (const rule of rules) {
         logger.debug(`${channel} rule ${rule.id} kept: sheet ${rule.sheet_id} liveness unknown (lookup failed)`, {
@@ -4392,6 +4505,78 @@ export class AutomationService {
       })
     }
     return kept
+  }
+
+  /**
+   * SHEET LIVENESS for the approval-bridge continuation (#5800) — the third `approval.*` lane, which is
+   * driven by the bridge table and so never passes through `dropRulesOnDeletedSheets`.
+   *
+   * Same definition as every other lane: `loadSheetLiveness` from sheet-liveness.ts, refuse on EXACTLY
+   * `'deleted'`. `absent` (a successful lookup that found no row) proceeds as it does on the siblings.
+   * `absent` is reachable: neither `automation_rules.sheet_id` nor the bridge table's `sheet_id` has a
+   * foreign key to `meta_sheets`, so a hard-deleted (or never-existing) sheet id survives on both rows.
+   * Whether the continuation itself then stops an `absent` run depends on its shape — its record read
+   * stops only ONE of them:
+   *   · approved WITH a recordId — stopped: `meta_records.sheet_id` cascades on a hard delete, so the
+   *     record read that follows finds no row and fails the run as "Record no longer exists" before any
+   *     writeback or remaining action.
+   *   · non-approved outcome — NOT stopped: it skips the record read. With the `onNonApproved` opt-in the
+   *     writeback is still attempted; a same-base one has no row to land on (the patch is keyed on
+   *     `id` + `sheet_id`), but a CROSS-BASE one reaches the cross-base write gate and, if the gate
+   *     authorizes it, writes the other base's record.
+   *   · record-less bridge (`recordId` null, e.g. a scheduled workflow_job_v1 rule) — NOT stopped: it
+   *     skips the record read too, and on `approved` the remaining actions run.
+   *
+   * Returns false ONLY on positive proof of a soft delete; the caller then fails the execution with
+   * `BRIDGE_SHEET_DELETED_MESSAGE` and the bridge goes terminal through its normal path.
+   *
+   * FAIL-OPEN when the lookup THROWS — the same choice as `dropRulesOnDeletedSheets`, re-derived for
+   * THIS lane rather than copied, because this lane writes records:
+   *   · PROPAGATE is a stranded run on the default path. With durable delivery OFF (the default),
+   *     `claimCompletion` has already flipped the bridge to terminal `resumed` before this body runs, so a
+   *     throw leaves the execution suspended forever under a consumed bridge — exactly "neither run nor
+   *     recorded". (With delivery ON a throw would be reclaimed and retried; the one-path choice is named
+   *     here so whoever turns durable delivery on deployment-wide can revisit it.)
+   *   · FAIL-CLOSED-TERMINAL turns a transient `meta_sheets` read error into the permanent loss of a
+   *     LIVE sheet's approval writeback: the completion event is one-shot, and a whole-execution retry is
+   *     refused once an approval exists (START_APPROVAL_ALREADY_CREATED).
+   *   · The residual window is narrow: the record read and the writeback transaction right after this use
+   *     the same database, so a real outage surfaces there as a throw (legacy: logged; lease: reclaimed).
+   *     Only a failure confined to this one read lets a run through, and the data it could then touch is a
+   *     soft-deleted sheet's records — hidden and restorable, not destroyed; the lock guard and the
+   *     cross-base write gate downstream are unchanged and still fail closed.
+   * The keep is logged at WARN with the bridge id, the error CLASS and the driver code
+   * (`describeLookupError`, shared with `dropRulesOnDeletedSheets`) — never the text, which can carry
+   * connection details. One bridge per call, so there is nothing to aggregate.
+   */
+  private async approvalBridgeSheetLive(bridge: AutomationApprovalBridgeRow, sheetId: string, outcome: unknown): Promise<boolean> {
+    let liveness: SheetLiveness
+    try {
+      liveness = await loadSheetLiveness(this.queryFn, sheetId)
+    } catch (err) {
+      logger.warn(`approval bridge ${bridge.id}: sheet liveness lookup failed, failing OPEN and resuming`, {
+        bridgeId: bridge.id,
+        ruleId: bridge.ruleId,
+        sheetId,
+        reason: 'liveness_lookup_failed',
+        ...describeLookupError(err),
+      })
+      return true
+    }
+    if (liveness === 'deleted') {
+      // `outcome` rides on the WARN so a refusal that withheld an APPROVED result is told apart from one
+      // that withheld nothing, straight from the log (a restore does not replay it).
+      logger.warn(`approval bridge ${bridge.id} not resumed: sheet ${sheetId} is not live (soft-deleted); marking the run failed`, {
+        bridgeId: bridge.id,
+        ruleId: bridge.ruleId,
+        executionId: bridge.executionId,
+        sheetId,
+        outcome: approvalOutcomeLabel(outcome),
+        reason: 'sheet_deleted',
+      })
+      return false
+    }
+    return true
   }
 
   private mapRow(row: Record<string, unknown>): AutomationRule {
