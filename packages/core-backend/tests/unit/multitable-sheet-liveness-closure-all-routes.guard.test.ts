@@ -59,6 +59,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, posix, relative, sep } from 'node:path'
 
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -68,7 +69,9 @@ import {
   checkerRegistrations,
   codeOf,
   findFunctionsNamed,
+  isFnNode,
   namedImports,
+  normalizeEol,
   resolveInjectedFunctions,
   scanRouteSource,
   sheetTableLivenessFilter,
@@ -255,11 +258,85 @@ const readsNoSheetData = (h: RouteHandler) => !NO_SHEET_DATA.test(everything(h))
 const touchesNoSheetTable = (h: RouteHandler) => !/\b(meta_(records|fields|sheets|views)|sheet_id|resolveSheet\w*Capabilities\w*|loadSheet\w*|requireRecordReadable)\b/.test(everything(h))
   && !/\b(pool|poolManager|db|query)\b/.test(h.code)
 
-/** #5832: the in-process bulk generate loop calls the model per row and never asks whether the sheet is live. */
-const bulkWorkerStillLivenessBlind = () => {
-  const code = functionCode('services/ai-bulk-job-service.ts', 'runGeneratePhase')
-  return /\brunShortcutCore\(/.test(code)
-    && !/\b(loadSheetLiveness|assertSheetLive|sheetLiveness|loadSheetRow|resolveSheet\w*Capabilities\w*)\b|deleted_at/.test(code)
+/**
+ * #5832 (fixed): the in-process bulk generate loop sends prompts built from the sheet's records row by
+ * row, long after the start route's own liveness check. It must ask the shared helper about the JOB'S
+ * OWN sheet before EVERY provider call and stop on anything but proof of a live sheet. Proven on the
+ * tree (not by name), so the cancel exemption that relies on it cannot outlive the fix:
+ *  · `loadSheetLiveness` is imported from multitable/sheet-liveness.ts;
+ *  · the `for (… of plan.rows)` body has, as a direct statement AFTER the per-row cancel (job status)
+ *    check and BEFORE the one that calls runShortcutCore,
+ *    `if (!(await jobSheetIsLive(query, jobId, plan.sheetId))) { …; return }`, whose branch marks the
+ *    remainder not generated and the job errored;
+ *  · `jobSheetIsLive` answers true only as its last statement, after `loadSheetLiveness(query, sheetId)`
+ *    ran inside a try whose catch answers false (fail-closed) and after `if (liveness !== 'live')`
+ *    answered false (so `absent` stops too).
+ */
+const BULK_WORKER_FILE = 'services/ai-bulk-job-service.ts'
+const BULK_WORKER_GATE = '!(await jobSheetIsLive(query, jobId, plan.sheetId))'
+
+function bulkWorkerLivenessProblems(source: string): string[] {
+  const sf = scanRouteSource(BULK_WORKER_FILE, source).sourceFile
+  const text = (node: ts.Node) => codeOf(node, sf)
+  const lastIs = (node: ts.Statement | undefined, expected: string) => !!node && ts.isBlock(node)
+    && node.statements.length > 0 && text(node.statements[node.statements.length - 1]!) === expected
+  const problems: string[] = []
+
+  const imported = namedImports(sf).get('loadSheetLiveness')
+  if (!imported || imported.imported !== 'loadSheetLiveness' || resolveImport(BULK_WORKER_FILE, imported.module) !== 'multitable/sheet-liveness.ts') {
+    problems.push('loadSheetLiveness must be imported from multitable/sheet-liveness')
+  }
+
+  const phases = findFunctionsNamed(sf, 'runGeneratePhase')
+  if (phases.length !== 1) return [...problems, `runGeneratePhase: expected 1 definition, found ${phases.length}`]
+  const loops: ts.ForOfStatement[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isForOfStatement(node) && text(node.expression) === 'plan.rows') loops.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(phases[0]!)
+  const loopBody = loops.length === 1 && ts.isBlock(loops[0]!.statement) ? loops[0]!.statement.statements : null
+  if (!loopBody) return [...problems, `runGeneratePhase: expected exactly one \`for (… of plan.rows) { … }\`, found ${loops.length}`]
+  const sendAt = loopBody.findIndex((st) => /\brunShortcutCore\(/.test(text(st)))
+  if (sendAt < 0) problems.push('the plan.rows loop no longer calls runShortcutCore — re-derive what this check protects')
+  const gateAt = loopBody.findIndex((st) => ts.isIfStatement(st) && text(st.expression) === BULK_WORKER_GATE)
+  if (gateAt < 0) {
+    problems.push(`the plan.rows loop must stop on \`if (${BULK_WORKER_GATE})\` as a direct statement of its body`)
+  } else {
+    const stop = loopBody[gateAt] as ts.IfStatement
+    if (stop.elseStatement || !lastIs(stop.thenStatement, 'return;')) problems.push('the liveness stop must end in `return` (and have no else)')
+    const stopCode = text(stop.thenStatement)
+    if (!/\bmarkRemainingPendingNotGenerated\(query, jobId\)/.test(stopCode)) problems.push('the liveness stop must mark the remainder pending_not_generated')
+    if (!/\bmarkErroredIfRunning\(query, jobId\)/.test(stopCode)) problems.push('the liveness stop must mark the job errored (guarded on running)')
+    if (sendAt >= 0 && gateAt > sendAt) problems.push('the liveness stop must come BEFORE the provider call in the loop body')
+    // After the cancel check, so a cancelled job stays `rejected` and is not asked about its sheet again.
+    const cancelAt = loopBody.findIndex((st) => ts.isIfStatement(st) && /\breadJobStatus\(query, jobId\)/.test(text(st.expression)))
+    if (cancelAt < 0 || cancelAt > gateAt) problems.push('the liveness stop must follow the per-row cancel (job status) check')
+  }
+
+  const gates = findFunctionsNamed(sf, 'jobSheetIsLive')
+  const gate = gates.length === 1 ? gates[0]! : null
+  const gateBody = gate?.body && ts.isBlock(gate.body) ? gate.body.statements : null
+  if (!gate || !gateBody) return [...problems, `jobSheetIsLive: expected 1 definition with a block body, found ${gates.length}`]
+  const tryAt = gateBody.findIndex((st) => ts.isTryStatement(st)
+    && st.tryBlock.statements.length === 1
+    && text(st.tryBlock.statements[0]!) === 'liveness = await loadSheetLiveness(query, sheetId);'
+    && !!st.catchClause && lastIs(st.catchClause.block, 'return false;')
+    && !st.finallyBlock)
+  if (tryAt < 0) problems.push('jobSheetIsLive: `loadSheetLiveness(query, sheetId)` must run in a try whose catch answers false (fail-closed)')
+  const refuseAt = gateBody.findIndex((st) => ts.isIfStatement(st) && text(st.expression) === 'liveness !== \'live\''
+    && !st.elseStatement && lastIs(st.thenStatement, 'return false;'))
+  if (refuseAt < 0 || refuseAt < tryAt) problems.push('jobSheetIsLive: `if (liveness !== \'live\') { …; return false }` must follow the lookup')
+  const returnsTrue: ts.ReturnStatement[] = []
+  const collect = (node: ts.Node): void => {
+    if (ts.isReturnStatement(node) && node.expression && text(node.expression) !== 'false') returnsTrue.push(node)
+    if (node === gate || !isFnNode(node)) ts.forEachChild(node, collect)
+  }
+  collect(gate)
+  if (returnsTrue.length !== 1 || returnsTrue[0] !== gateBody[gateBody.length - 1] || text(returnsTrue[0]!) !== 'return true;') {
+    problems.push('jobSheetIsLive: the only non-false answer must be its final `return true`')
+  }
+  return problems
 }
 
 const ownJobGate = (h: RouteHandler) => {
@@ -443,13 +520,16 @@ const COVERED: Record<string, CoveredFile> = {
         stillTrue: ownJobGate,
       },
       'POST /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/cancel': {
-        reason: 'MUST WORK ON A DELETED SHEET — cancel is the only brake on an in-flight job whose sheet was '
-          + 'deleted mid-run. Owner + cross-sheet gated by resolveBulkJobForActor (asserted); it only flips '
-          + 'the job state via cancelBulkJob and never touches the sheet. The worker it brakes is itself a '
-          + 'GAP — tracked in #5832 — services/ai-bulk-job-service.ts runGeneratePhase keeps sending the '
-          + 'deleted sheet’s rows to the model (runShortcutCore, row by row, only re-reading the JOB status) and '
-          + 'never re-checks sheet liveness (asserted still true); until that is fixed, cancel is the only stop.',
-        stillTrue: (h) => ownJobGate(h) && /\bcancelBulkJob\(/.test(h.code) && bulkWorkerStillLivenessBlind(),
+        reason: 'MUST WORK ON A DELETED SHEET — the owner must still be able to stop and release their own job '
+          + 'after the sheet is deleted: a SUSPENDED job (generation done, awaiting review) holds the active-job '
+          + 'slot until it is cancelled or committed, and commit is refused on a deleted sheet. Owner + '
+          + 'cross-sheet gated by resolveBulkJobForActor (asserted); it only flips the job state via '
+          + 'cancelBulkJob and never touches the sheet. Cancel is no longer the only brake on generation: since '
+          + '#5832 the worker (services/ai-bulk-job-service.ts runGeneratePhase) asks loadSheetLiveness about '
+          + 'the job’s own sheet before every provider call and stops the job as errored once the sheet is not '
+          + 'live (asserted on the tree, bulkWorkerLivenessProblems).',
+        stillTrue: (h) => ownJobGate(h) && /\bcancelBulkJob\(/.test(h.code)
+          && bulkWorkerLivenessProblems(readSource(BULK_WORKER_FILE)).length === 0,
       },
     },
   },
@@ -1410,6 +1490,42 @@ describe('sheet-liveness closure over EVERY route file', () => {
     const resolverCode = codeOf(resolver[0]!, auth.sourceFile)
     expect(resolverCode).toMatch(/FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL/)
     expect(resolverCode).toMatch(/membershipOk/)
+  })
+
+  it('#5832: the bulk generate worker stops on a non-live sheet before every provider call (the cancel exemption rests on it)', () => {
+    const source = normalizeEol(readSource(BULK_WORKER_FILE))
+    expect(bulkWorkerLivenessProblems(source)).toEqual([])
+
+    // Sharpness: each way the fix could quietly rot is caught (mutated in memory, never on disk).
+    const stop = /\n( *)if \(!\(await jobSheetIsLive\(query, jobId, plan\.sheetId\)\)\) \{\n[\s\S]*?\n\1\}\n/.exec(source)
+    expect(stop, 'the stop block must be locatable for the self-test').not.toBeNull()
+    const withoutStop = source.replace(stop![0], '\n')
+    const send = 'const outcome = await runShortcutCore(this.aiClient, ctx, row.prompt)\n'
+    expect(source).toContain(send)
+    expect(source).toContain('for (const row of plan.rows) {\n')
+    const redFor = (mutated: string) => bulkWorkerLivenessProblems(mutated).join('\n')
+    // no check at all
+    expect(redFor(withoutStop)).toMatch(/must stop on/)
+    // checked once, before the loop
+    expect(redFor(withoutStop.replace('for (const row of plan.rows) {\n', `${stop![0].slice(1)}for (const row of plan.rows) {\n`))).toMatch(/must stop on/)
+    // checked after the provider call
+    expect(redFor(withoutStop.replace(send, `${send}${stop![0].slice(1)}`))).toMatch(/BEFORE the provider call/)
+    // checked ahead of the cancel check
+    const cancelCheck = "      if ((await readJobStatus(query, jobId)) !== 'running') {\n"
+    expect(source).toContain(cancelCheck)
+    expect(redFor(withoutStop.replace(cancelCheck, `${stop![0].slice(1)}${cancelCheck}`))).toMatch(/follow the per-row cancel/)
+    // asks about another id
+    expect(redFor(source.replace('jobSheetIsLive(query, jobId, plan.sheetId)', 'jobSheetIsLive(query, jobId, plan.fieldId)'))).toMatch(/must stop on/)
+    // stops without leaving the active state
+    expect(redFor(source.replace(stop![0], stop![0].replace('markErroredIfRunning(query, jobId)', 'suspendIfRunning(query, jobId)')))).toMatch(/mark the job errored/)
+    // fail-open on a lookup error
+    expect(redFor(source.replace(/(\} catch \(err\) \{[\s\S]*?)return false\n/, '$1return true\n'))).toMatch(/catch answers false/)
+    // only `deleted` refused (`absent` would keep sending)
+    expect(redFor(source.replace("if (liveness !== 'live') {", "if (liveness === 'deleted') {"))).toMatch(/must follow the lookup/)
+    // a second way to answer true
+    expect(redFor(source.replace("liveness = await loadSheetLiveness(query, sheetId)\n", "liveness = await loadSheetLiveness(query, sheetId)\n    if (liveness === 'absent') return true\n"))).toMatch(/must run in a try|only non-false answer/)
+    // a different liveness helper spelling
+    expect(redFor(source.replace("from '../multitable/sheet-liveness'", "from '../multitable/sheet-liveness-copy'"))).toMatch(/must be imported from multitable\/sheet-liveness/)
   })
 
   it('COLLAB CHECKERS: every set…Checker seam that resolves sheet capabilities refuses a non-live sheet with its own refusal value', () => {
