@@ -22,6 +22,8 @@
  *   4. the refusal reason            → keeps the outcome; says "nothing was pending" when nothing was
  *                                      (rejected, no opt-in), so it is not read as a lost write.
  *   5. bridge.sheetId null           → the rule's sheet is the one checked (same fallback as the read).
+ *   5b. bridge.recordId null         → still refused (approved + remaining actions): that shape skips the
+ *      (scheduled workflow_job_v1)     record read, so the continuation has no later stop before the tail.
  *   6. live sheet                    → unchanged: record read, writeback, tail, bridge `resumed`.
  *   7. absent sheet                  → same as the other lanes (`=== 'deleted'`): the run proceeds.
  *   8. lookup THROWS                 → FAIL-OPEN, like the template-keyed lanes: the run proceeds, the
@@ -146,9 +148,12 @@ function makeHarness(opts: {
   bridgeSheetId?: string | null
   ruleSheetId?: string
   writeback?: Record<string, unknown> | null
+  /** `null` = a RECORD-LESS bridge (e.g. a scheduled workflow_job_v1 rule: `record_id` is stored null). */
+  recordId?: string | null
 }): Harness {
   const ruleSheetId = opts.ruleSheetId ?? 'sheet_a'
   const bridgeSheetId = opts.bridgeSheetId === undefined ? ruleSheetId : opts.bridgeSheetId
+  const recordId = opts.recordId === undefined ? 'rec_1' : opts.recordId
   const order: string[] = []
   const sql: string[] = []
   const livenessSheetIds: string[] = []
@@ -195,7 +200,7 @@ function makeHarness(opts: {
     ledgerKind: 'execution',
     ruleId: rule.id,
     sheetId: bridgeSheetId,
-    recordId: 'rec_1',
+    recordId,
     stepIndex: 0,
     approvalInstanceId: 'ai_bridge_1',
     approvalRequestNo: 'REQ-1',
@@ -206,7 +211,7 @@ function makeHarness(opts: {
     outcome: null,
     fence: '0',
     actionFingerprint: computeActionFingerprint(toExecutorRule(rule as never).actions),
-    triggerEvent: { actorId: 'u_creator', recordId: 'rec_1' },
+    triggerEvent: { actorId: 'u_creator', ...(recordId === null ? {} : { recordId }) },
   }
 
   // In-memory bridge table mirroring the SQL: legacy claim flips pending→resumed (terminal-early); the
@@ -516,6 +521,21 @@ describe('approval bridge continuation — sheet liveness (soft delete, #5800)',
     expect(h.sql).toEqual(['liveness'])
     expect(h.tail).not.toHaveBeenCalled()
     expect(h.bridge.status).toBe('resumed')
+  })
+
+  it('RECORD-LESS bridge (recordId null), approved with remaining actions: the check still refuses — no record read would have caught it', async () => {
+    // Reachable: a scheduled workflow_job_v1 rule that calls start_approval stores `record_id = null`
+    // (its trigger payload has no recordId). On that shape the continuation skips the record read, so on
+    // the continuation path the liveness check is the only stop before the remaining actions are dispatched.
+    const h = makeHarness({ sheet: 'deleted', recordId: null })
+
+    await h.service.handleApprovalCompletionEvent(completion(), LEASE_ENV)
+
+    expect(h.order).toEqual(['liveness', 'persist:failed'])
+    expectNothingTouched(h)
+    // A resultWriteback IS declared in the config (harness default), but with no recordId the approved
+    // branch would not write back (declaredApprovalResultWriteback → null), so only the tail is named.
+    expectRecordedAsSheetDeleted(h, `${BRIDGE_SHEET_DELETED_MESSAGE} (approval outcome: approved; remaining actions not run)`)
   })
 
   it('LIVE sheet: behaviour unchanged — record read, writeback, tail, bridge resumed; the check reads the SAME sheet as the record read', async () => {

@@ -3503,8 +3503,8 @@ export class AutomationService {
 
     const result = this.approvalCompletionStepResult(event)
     // The ONE sheet this continuation addresses: the record read below keys on it, the same-base
-    // writeback targets it, and the tail runs in its context. Checked BEFORE the outcome branch because
-    // the non-approved branch writes too (`resultWriteback.onNonApproved`).
+    // writeback targets it, and the tail's ExecutionContext.sheetId is set to it. Checked BEFORE the
+    // outcome branch because the non-approved branch writes too (`resultWriteback.onNonApproved`).
     const bridgeSheetId = bridge.sheetId ?? execRule.sheetId
     const startApprovalConfig = execRule.actions[bridge.stepIndex]?.config ?? {}
     if (!(await this.approvalBridgeSheetLive(bridge, bridgeSheetId, event.transition.toStatus))) {
@@ -3552,7 +3552,7 @@ export class AutomationService {
     const context: ExecutionContext = {
       executionId: execution.id,
       ruleId: execRule.id,
-      sheetId: execRule.sheetId,
+      sheetId: bridgeSheetId,
       recordId: bridge.recordId ?? '',
       recordData,
       ruleCreatedBy: execRule.createdBy,
@@ -4512,9 +4512,20 @@ export class AutomationService {
    * driven by the bridge table and so never passes through `dropRulesOnDeletedSheets`.
    *
    * Same definition as every other lane: `loadSheetLiveness` from sheet-liveness.ts, refuse on EXACTLY
-   * `'deleted'`. `absent` (a successful lookup that found no row) proceeds as it does on the siblings; on
-   * this lane a hard-deleted sheet has also cascaded its records away, so the record read that follows
-   * already fails the run as "Record no longer exists".
+   * `'deleted'`. `absent` (a successful lookup that found no row) proceeds as it does on the siblings.
+   * `absent` is reachable: neither `automation_rules.sheet_id` nor the bridge table's `sheet_id` has a
+   * foreign key to `meta_sheets`, so a hard-deleted (or never-existing) sheet id survives on both rows.
+   * Whether the continuation itself then stops an `absent` run depends on its shape — its record read
+   * stops only ONE of them:
+   *   · approved WITH a recordId — stopped: `meta_records.sheet_id` cascades on a hard delete, so the
+   *     record read that follows finds no row and fails the run as "Record no longer exists" before any
+   *     writeback or remaining action.
+   *   · non-approved outcome — NOT stopped: it skips the record read. With the `onNonApproved` opt-in the
+   *     writeback is still attempted; a same-base one has no row to land on (the patch is keyed on
+   *     `id` + `sheet_id`), but a CROSS-BASE one reaches the cross-base write gate and, if the gate
+   *     authorizes it, writes the other base's record.
+   *   · record-less bridge (`recordId` null, e.g. a scheduled workflow_job_v1 rule) — NOT stopped: it
+   *     skips the record read too, and on `approved` the remaining actions run.
    *
    * Returns false ONLY on positive proof of a soft delete; the caller then fails the execution with
    * `BRIDGE_SHEET_DELETED_MESSAGE` and the bridge goes terminal through its normal path.
