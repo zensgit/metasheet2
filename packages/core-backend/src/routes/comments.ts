@@ -164,11 +164,25 @@ type CommentReadContext = {
 /**
  * The one "not permitted" answer of the comment surface. #5831: a comment-id route gives this SAME body
  * for an unknown comment id, a comment on a sheet the caller cannot read and a comment on a row the
- * caller is denied, so a comment id carries no existence oracle.
+ * caller is denied, so the comment-id routes answer no "does this comment exist?" question. (This
+ * router's other comment-id input, `parentId` on POST /api/comments, gives one answer for an unknown
+ * parent and a parent outside the caller's record thread — see CommentService.createComment.)
  */
 const COMMENT_ACCESS_FORBIDDEN_MESSAGE = 'Not permitted to access comments on this sheet'
 
-async function resolveCommentReadContext(req: Request, res: Response, spreadsheetId: string): Promise<CommentReadContext | null> {
+/**
+ * @param denyScopeRowIds #5831 — when given, the row-level read deny is evaluated for THESE rows only
+ *   (loadDeniedRecordIds' `recordIds` bound), so the returned `deniedRowIds` answers for them alone and
+ *   must not be used as the sheet's deny set. Only the single-comment gate (`resolveCommentIdContext`)
+ *   passes it — a one-comment action must not scan a large sheet's rows. Every sheet-addressed route
+ *   omits it: its list/summary/mark-read filters need the complete set.
+ */
+async function resolveCommentReadContext(
+  req: Request,
+  res: Response,
+  spreadsheetId: string,
+  denyScopeRowIds?: readonly string[],
+): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
   const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
@@ -189,7 +203,7 @@ async function resolveCommentReadContext(req: Request, res: Response, spreadshee
 
   const deniedRowIds = new Set<string>()
   if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(query, spreadsheetId)) {
-    for (const rowId of await loadDeniedRecordIds(query, spreadsheetId, access.userId)) {
+    for (const rowId of await loadDeniedRecordIds(query, spreadsheetId, access.userId, denyScopeRowIds)) {
       deniedRowIds.add(rowId)
     }
   }
@@ -216,6 +230,9 @@ type CommentIdContext = CommentReadContext & { address: CommentAddressRecord }
  * caller without read access with 403 — and the closed-world guard requires that 403 to come before the
  * liveness 404 — so an unknown id has to look like that. A caller who CAN read the sheet still learns
  * that it was deleted (404 SHEET_DELETED), exactly as on the sheet-addressed routes.
+ *
+ * The row deny is evaluated for the comment's own row only (`[address.rowId]`), so the context's
+ * `deniedRowIds` covers that row alone; the comment-id routes never use it as a sheet-wide set.
  */
 async function resolveCommentIdContext(
   req: Request,
@@ -228,7 +245,7 @@ async function resolveCommentIdContext(
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
     return null
   }
-  const context = await resolveCommentReadContext(req, res, address.spreadsheetId)
+  const context = await resolveCommentReadContext(req, res, address.spreadsheetId, [address.rowId])
   if (!context) return null
   if (isRowDenied(context, address.rowId)) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
@@ -244,6 +261,10 @@ async function resolveCommentIdContext(
  * `comments:write` and being able to read the sheet is no longer enough to close someone else's thread.
  * Authorship is matched on the authenticated user only — never the `x-user-id` header. Runs after the
  * sheet gate, so the caller can already read the comment.
+ *
+ * Record locks are NOT consulted: a lock makes the record's data read-only, and comments are a separate
+ * path that stays allowed on a locked record (multitable/record-lock.ts, decision d). "May edit the
+ * record" here means the sheet/row write authority above, not "may edit it right now".
  */
 async function mayResolveComment(context: CommentIdContext): Promise<boolean> {
   const actorId = context.authenticatedUserId.trim()

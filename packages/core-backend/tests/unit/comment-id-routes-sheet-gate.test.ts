@@ -9,6 +9,7 @@
  *   - a deleted sheet refuses (404 SHEET_DELETED) before the service is reached;
  *   - an unknown comment id, a comment on a sheet the caller cannot read and a comment on a row the caller
  *     is denied are indistinguishable (the same 403 body);
+ *   - the row deny is loaded for the comment's own row only, while sheet-addressed routes keep the full set;
  *   - a readable, live comment behaves as before;
  *   - resolve needs the author or the right to edit the comment's record (owner-visible decision);
  *   - API tokens still reach exactly the comment routes they reached before (none of these).
@@ -305,6 +306,65 @@ describe('comment-id routes gate on the comment’s own sheet (#5831)', () => {
     const res = await request(pinned.url()).post(`/api/comments/${COMMENT_ID}/read`)
     expect(res.status).toBe(204)
     expect(service.markCommentRead).toHaveBeenCalledWith(COMMENT_ID, ACTOR)
+  })
+
+  describe('the row deny is evaluated for the comment’s own row only (no whole-sheet scan)', () => {
+    for (const route of ID_ROUTES) {
+      it(route.name, async () => {
+        mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+        const res = await route.send(request(pinned.url()))
+        expect(res.status).toBe(route.okStatus)
+        expect(mocks.loadRowLevelReadDenyEnabled).toHaveBeenCalledWith(expect.any(Function), COMMENT_SHEET)
+        expect(mocks.loadDeniedRecordIds.mock.calls).toEqual([[expect.any(Function), COMMENT_SHEET, ACTOR, [ROW]]])
+      })
+    }
+
+    it('the bound still refuses the comment’s row when it is denied', async () => {
+      mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+      mocks.loadDeniedRecordIds.mockImplementation(async (_q: unknown, _s: string, _u: string, ids?: string[]) =>
+        new Set((ids ?? [ROW, 'row-fake-other']).filter((id) => id === ROW)))
+      const res = await request(pinned.url()).post(`/api/comments/${COMMENT_ID}/reactions`).send({ emoji: '👍' })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual(ACCESS_FORBIDDEN)
+      expect(service.addReaction).not.toHaveBeenCalled()
+    })
+
+    it('an admin, or a sheet without row-level deny, loads no deny set at all', async () => {
+      const off = await request(pinned.url()).post(`/api/comments/${COMMENT_ID}/read`)
+      expect(off.status).toBe(204)
+      expect(mocks.loadRowLevelReadDenyEnabled).toHaveBeenCalledTimes(1)
+      expect(mocks.loadDeniedRecordIds).not.toHaveBeenCalled()
+
+      vi.clearAllMocks()
+      isAdmin = true
+      mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+      const admin = await request(pinned.url()).post(`/api/comments/${COMMENT_ID}/read`)
+      expect(admin.status).toBe(204)
+      expect(mocks.loadRowLevelReadDenyEnabled).not.toHaveBeenCalled()
+      expect(mocks.loadDeniedRecordIds).not.toHaveBeenCalled()
+    })
+
+    it('the sheet-addressed routes still load the sheet’s COMPLETE deny set (their filters need it)', async () => {
+      mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+      const sheetRoutes: Array<(a: Agent) => request.Test> = [
+        (a) => a.get('/api/comments').query({ spreadsheetId: COMMENT_SHEET }),
+        (a) => a.get('/api/comments').query({ spreadsheetId: COMMENT_SHEET, rowId: ROW }),
+        (a) => a.post('/api/comments').send({ spreadsheetId: COMMENT_SHEET, rowId: ROW, content: 'x' }),
+        (a) => a.get('/api/comments/mention-summary').query({ spreadsheetId: COMMENT_SHEET }),
+        (a) => a.post('/api/comments/summary').send({ spreadsheetId: COMMENT_SHEET, rowIds: [ROW] }),
+        (a) => a.post('/api/comments/mention-summary/mark-read').send({ spreadsheetId: COMMENT_SHEET }),
+        (a) => a.post(`/api/multitable/${COMMENT_SHEET}/comments/mark-all-read`).send({}),
+        (a) => a.get(`/api/multitable/${COMMENT_SHEET}/comments/presence`).query({ rowIds: ROW }),
+      ]
+      for (const send of sheetRoutes) {
+        mocks.loadDeniedRecordIds.mockClear()
+        const res = await send(request(pinned.url()))
+        expect(res.status, res.text).toBeLessThan(300)
+        expect(mocks.loadDeniedRecordIds.mock.calls).toHaveLength(1)
+        expect(mocks.loadDeniedRecordIds.mock.calls[0]!.slice(1, 3)).toEqual([COMMENT_SHEET, ACTOR])
+        expect(mocks.loadDeniedRecordIds.mock.calls[0]![3]).toBeUndefined()
+      }
+    })
   })
 
   it('a service refusal after the gate keeps its own answer (author check on edit stays in the service)', async () => {

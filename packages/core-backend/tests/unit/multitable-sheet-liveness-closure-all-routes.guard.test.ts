@@ -1331,10 +1331,21 @@ describe('sheet-liveness closure over EVERY route file', () => {
     // "no such comment", "may not read its sheet" and "may not read its row".
     const gate = functionCode(file, 'resolveCommentIdContext')
     expect(gate).toMatch(/^async function resolveCommentIdContext\([^)]*\)[^{]*\{\s*const address = await commentService\.getCommentAddress\(commentId\);/)
-    expect(gate).toMatch(/await resolveCommentReadContext\(req, res, address\.spreadsheetId\)/)
+    expect(gate).toMatch(/await resolveCommentReadContext\(req, res, address\.spreadsheetId, \[address\.rowId\]\)/)
     expect(gate).toMatch(/if \(isRowDenied\(context, address\.rowId\)\)/)
     expect(gate).not.toMatch(/\breq\.(query|body|params)\b|\bsheetId\b/)
     const readGate = functionCode(file, 'resolveCommentReadContext')
+
+    // Row deny bound (#5831 fix round): only the id gate bounds the deny lookup, to the comment's own row;
+    // every sheet-addressed caller still loads the complete set its filters rely on; and an id route never
+    // treats its (bounded) deny set as a sheet-wide one.
+    expect(readGate.match(/\bloadDeniedRecordIds\(/g)).toHaveLength(1)
+    expect(readGate).toMatch(/await loadDeniedRecordIds\(query, spreadsheetId, access\.userId, denyScopeRowIds\)/)
+    const readGateCalls = [...codeOf(s.sourceFile, s.sourceFile).matchAll(/await resolveCommentReadContext\(([^()]*)\)/g)].map((m) => m[1]!)
+    expect(readGateCalls.length).toBeGreaterThanOrEqual(10)
+    for (const args of readGateCalls) expect(args, args).toMatch(/^req, res, [^,]+$|^req, res, address\.spreadsheetId, \[address\.rowId\]$/)
+    expect(readGateCalls.filter((args) => args.split(',').length !== 3)).toEqual(['req, res, address.spreadsheetId, [address.rowId]'])
+    for (const h of idRoutes) expect(h.code, h.key).not.toMatch(/\b(deniedRows|filterDeniedRows|deniedRowIds)\b/)
     const refusals = [...`${gate}\n${readGate}`.matchAll(/res\.status\(403\)\.json\(([^\n]*)\);/g)].map((m) => m[1])
     expect(refusals).toHaveLength(3)
     expect(new Set(refusals).size).toBe(1)
@@ -1367,7 +1378,7 @@ describe('sheet-liveness closure over EVERY route file', () => {
     const authority = resolve.helpers.get('mayResolveComment') ?? ''
     expect(authority).toMatch(/context\.authenticatedUserId/)
     expect(authority).toMatch(/return ensureRecordWriteAllowed\(context\.capabilities, context\.sheetScope, context\.access, /)
-    expect(authority).not.toMatch(/\bgetUserId\(|x-user-id/)
+    expect(authority).not.toMatch(/\bgetUserId\(|x-user-id|\bdeniedRowIds\b/)
   })
 
   it('vetted external guards refuse a non-live sheet (their bodies, not their names)', () => {

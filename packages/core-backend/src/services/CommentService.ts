@@ -93,6 +93,12 @@ export class CommentConflictError extends Error {
   }
 }
 
+/**
+ * #5831 — the one answer to a reply whose `parentId` is unknown OR names a comment outside the reply's
+ * own record thread (another sheet or another row). Keeps "same record thread" for existing clients.
+ */
+export const REPLY_PARENT_OUTSIDE_THREAD_MESSAGE = 'Reply must target an existing comment in the same record thread'
+
 export interface Comment {
   id: string
   spreadsheetId: string
@@ -318,14 +324,15 @@ export class CommentService {
         .where('id', '=', data.parentId)
         .executeTakeFirst()
 
-      if (!parent) {
-        throw new CommentValidationError('Parent comment not found')
+      // #5831: the route gated only THIS record thread (its sheet and row). An unknown parent and a
+      // parent anywhere else get the same answer, and the reply-depth check runs only on a parent inside
+      // the thread — otherwise the message would tell whether a comment id exists on a sheet or row the
+      // caller may not read (the approval-comment parent check follows the same rule).
+      if (!parent || parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
+        throw new CommentValidationError(REPLY_PARENT_OUTSIDE_THREAD_MESSAGE)
       }
       if (parent.parent_id) {
         throw new CommentValidationError('Replying to replies is not supported')
-      }
-      if (parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
-        throw new CommentValidationError('Reply must target the same record thread')
       }
 
       const parentFieldId = parent.field_id ?? undefined

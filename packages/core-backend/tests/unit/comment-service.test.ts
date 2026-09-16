@@ -97,7 +97,14 @@ vi.mock('../../src/multitable/record-subscription-service', () => ({
 
 // ── Import SUT after mocks ──────────────────────────────────────────────────
 
-import { CommentService, CommentValidationError, CommentNotFoundError, CommentAccessError, CommentConflictError } from '../../src/services/CommentService'
+import {
+  CommentService,
+  CommentValidationError,
+  CommentNotFoundError,
+  CommentAccessError,
+  CommentConflictError,
+  REPLY_PARENT_OUTSIDE_THREAD_MESSAGE,
+} from '../../src/services/CommentService'
 import type { CollabService } from '../../src/services/CollabService'
 
 // ── Get the shared result queues ────────────────────────────────────────────
@@ -661,6 +668,62 @@ describe('CommentService', () => {
 
     it('returns null for an unknown comment id', async () => {
       await expect(service.getCommentAddress('cmt_missing')).resolves.toBeNull()
+    })
+  })
+
+  // ── createComment: reply parent (#5831) ───────────────────────────────
+
+  describe('createComment reply parent gives no existence answer outside the thread (#5831)', () => {
+    const reply = (parentId: string) => service.createComment({
+      spreadsheetId: 'sheet-1',
+      rowId: 'row-1',
+      content: 'a reply',
+      authorId: 'user-author',
+      parentId,
+    })
+
+    async function insertCalls(): Promise<number> {
+      const { db } = await import('../../src/db/db') as unknown as { db: { insertInto: ReturnType<typeof vi.fn> } }
+      return db.insertInto.mock.calls.length
+    }
+
+    it('an unknown parent and a parent on another sheet or row — root or reply — all get the same answer', async () => {
+      const outside = [
+        undefined, // unknown id
+        makeCommentRow({ id: 'cmt_p_sheet', spreadsheet_id: 'sheet-other' }),
+        makeCommentRow({ id: 'cmt_p_row', row_id: 'row-other' }),
+        // A REPLY outside the thread must not answer "Replying to replies" (that would reveal it).
+        makeCommentRow({ id: 'cmt_p_sheet_reply', spreadsheet_id: 'sheet-other', parent_id: 'cmt_root_elsewhere' }),
+        makeCommentRow({ id: 'cmt_p_row_reply', row_id: 'row-other', parent_id: 'cmt_root_elsewhere' }),
+      ]
+      const answers: string[] = []
+      for (const parent of outside) {
+        pushTakeFirst(parent)
+        const error = await reply('cmt_p_any').catch((e: unknown) => e)
+        expect(error).toBeInstanceOf(CommentValidationError)
+        answers.push((error as Error).message)
+      }
+      expect(answers).toEqual(outside.map(() => REPLY_PARENT_OUTSIDE_THREAD_MESSAGE))
+      // Existing clients match on this phrase (tests/integration/comments.api.test.ts).
+      expect(REPLY_PARENT_OUTSIDE_THREAD_MESSAGE).toContain('same record thread')
+      expect(await insertCalls()).toBe(0)
+    })
+
+    it('inside the caller’s own thread a reply to a reply is still refused as such', async () => {
+      pushTakeFirst(makeCommentRow({ id: 'cmt_p_nested', parent_id: 'cmt_root' }))
+      await expect(reply('cmt_p_nested')).rejects.toThrow('Replying to replies is not supported')
+      expect(await insertCalls()).toBe(0)
+    })
+
+    it('a root comment in the same thread is a valid parent', async () => {
+      pushTakeFirst(makeCommentRow({ id: 'cmt_root' })) // parent lookup
+      pushExec([]) // insert
+      pushTakeFirst(makeCommentRow({ id: 'cmt_reply', parent_id: 'cmt_root' })) // reload
+      pushExec([]) // markCommentRead
+
+      const comment = await reply('cmt_root')
+      expect(comment.id).toBe('cmt_reply')
+      expect(await insertCalls()).toBeGreaterThan(0)
     })
   })
 
