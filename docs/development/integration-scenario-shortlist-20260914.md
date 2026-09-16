@@ -276,8 +276,14 @@ pipeline 定期把结果写进一张多维表供业务查看；频率小时级�
      （变异：删 `bridge-agent-readonly-adapter.cjs:263-265` 的循环 → 必须红。已有测试
      `plugins/plugin-integration-core/__tests__/bridge-agent-readonly-adapter.test.cjs`。）
   2. baseUrl 指向非 localhost → `:133` 拒绝。
-  3. Agent `maxLimit=20` 而假表 500 行 → 完整性证明不成立，run 失败而非吞下截断结果
-     （`stock-preparation-readonly-source-run.cjs:67-70` 的 `adapter_reported` 契约）。
+  3. ⚠️ **待实现缺口，不是现有保证**（2026-09-16 owner 审阅 F2 更正）。原文引用
+     `stock-preparation-readonly-source-run.cjs:67-70` 的 `adapter_reported` 完整性契约，但**场景 C 走
+     的是 PipelineRunner，根本不经过备料 feeder 那条链**。owner 用真实 Bridge adapter + 真实
+     PipelineRunner 实测：源表 500 行、`requestLimit=20` → `targetRowCount=20`、`status=succeeded`、
+     `rowsFailed=0`（adapter `:457-466` 回 `done:true` 与 `metadata.limit`，runner `:1141-1144` 见
+     `done` 即退出、`:1163` 标成功）。**limit 回显真实 ≠ 源数据完整。**
+     这条只能作为**将来**「先红后绿」的验收目标；在 PipelineRunner 侧补出完整性判据之前，C 的演示
+     只能承诺**人为限定的小样本**，不得宣称能自动拒绝截断。
   4. pipeline 重跑 → `human_preserved` 字段的人工值不被覆盖
      （变异：给守卫喂一个读不到字段元数据的 reader → 必须整单拒，不得静默写）。
   5. 同一批次重跑 → 行级幂等键不产生重复行。
@@ -311,10 +317,18 @@ Bridge 无 raw SQL：既有守卫不动，验收断言 1 就是它 ✔；
 
 理由，按审阅第 2 条建议的三个尺子：
 
-1. **最能验证「受控连接器 → MetaSheet 受控操作 →（可选）外部 n8n 调用」这条完整路，且第三跳零新端点。**
-   A 与 B 的前两跳证据同样扎实，但它们落进插件内部 MVP 表后，n8n 那一跳要么要会话 JWT（运维动作），
-   要么要新开一个触发入口 —— 而新开入口正是审阅 R6 要求单独提交 ADR 的那类授权边界决策，
-   把它塞进「第一个可验收增量」会让这个增量同时变成一次安全边界变更。
+1. **最能验证「受控连接器 → MetaSheet 受控操作 →（可选）外部 n8n 调用」这条完整路。**
+   ⚠️ **原推荐理由的比较轴不等价，已按 owner 审阅 F3 更正**：原文把 A/B 的「n8n **触发上游拉取**」
+   与 C 的「n8n **读取已落库的多维表**」当成同一把尺子比，据此得出「只有 C 零新端点」——这不成立。
+   A/B 的「插件内部 MVP 表」本身就是真实多维表（`stock-preparation-erp-material-sync-persist.cjs:253-277,474-475`、
+   `stock-preparation-sync-run-persist.cjs:154-182,634-636` 都解析 sheetId 并绑定 records API；
+   本文 A.4 `:85-87` 也已承认 `mst_` 读口），所以**读结果这一跳 A/B 同样零新端点**；
+   反过来，C 若要让 n8n **触发** pipeline，同样要面对 integration JWT 边界（C.6 已承认）。
+   统一后的四条轴应是：**谁触发源同步 / 谁读取结果 / 谁写目标 / 各用什么身份**——按这四条，
+   三个场景在「读结果」上等价，差异只在「触发」与「源侧连接器档位」。
+   因此 C 是否值得先做，理由应来自**现场拓扑与客户实际需要**（是否已有 SQL Server 旧系统要接），
+   而不是这个已被证伪的「只有 C 零新端点」推断。另注：pipeline 幂等、死信与账本**不是** Bridge
+   连接器独享，A/B 走 pipeline 时同样具备。
    C 的三跳全部落在已命名、已挂守卫的现成端点上：
    Bridge 只读 → PipelineRunner → `metasheet:multitable` → n8n 用 `mst_` 读写 → 出站 webhook 推回。
 
@@ -326,7 +340,10 @@ Bridge 无 raw SQL：既有守卫不动，验收断言 1 就是它 ✔；
 3. **风险形态最可控。** C 的主要成本是**一次性环境搭建**（SQL Server + 本机 Agent），
    而 A 的主要成本是**动冻结的读预设上限**、C 之外两条的 n8n 跳是**动授权边界**——
    后两类是不可逆的安全决策，前一类只是工时。
-   C 要动的守卫是零：验收断言 1/2/4 全部是对既有守卫的确认，不是对它们的放宽。
+   C 要**放宽**的守卫是零：验收断言 1/2/4 全部是对既有守卫的确认，不是对它们的放宽。
+   但「C 只需环境工作、零 runtime 工作」这个说法本轮被证伪（见上面断言 3 的 F2 更正）：
+   若要让「截断必须失败」成为真保证，PipelineRunner 侧需要新增完整性判据——那是 runtime 工作，
+   必须计入工时；若坚持零 runtime 改动，则只能做小样本演示。
 
 **推荐的同时必须说清的两件事**：
 - C 的连接器档位是**薄**（不能分页、单页受现场 Agent 配置钳制），
