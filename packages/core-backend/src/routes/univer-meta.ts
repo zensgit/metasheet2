@@ -5504,33 +5504,55 @@ const ensureLegacyBase = ensureLegacyBaseShared
 /*
  * People system sheet (legacy link-backed person fields) — what #5807 does and does NOT close.
  *
- * The sheet is created / re-synced ONLY by `POST /person-fields/prepare` (gate: canManageFields). It
- * mirrors every ACTIVE user as one row. Readers get it through the generic read paths with no special
- * gate (e.g. `/records-summary` returns a displayMap for every matching record, whatever `limit` is).
+ * The sheet is created / re-synced ONLY by `POST /person-fields/prepare` (gate: canManageFields). Each
+ * sync adds a row for every ACTIVE user that has none; a user can still end up with more than one row
+ * (two concurrent first syncs, or `POST /records/:recordId/duplicate` on a People row), and rows are
+ * never removed. Readers get it through the generic read paths with no special gate (e.g.
+ * `/records-summary` returns a displayMap for every matching record, whatever `limit` is).
  *
  * CLOSED going forward:
  *   - the sync no longer writes the `Email` or `Avatar URL` cells, and `Name` no longer falls back to the
  *     email (it falls back to the user id, which the `User ID` column already holds);
- *   - an explicit re-sync rewrites a row that still carries an `Email` / `Avatar URL` key, dropping them;
+ *   - an explicit re-sync rewrites EVERY row of an active user in the sheet it targets that still carries
+ *     an `Email` / `Avatar URL` key (or a stale `User ID` / `Name`), removing only those two keys and
+ *     setting the two synced ones — any other key on the row is kept; a second re-sync writes nothing;
  *   - `POST /sheets` refuses the reserved sentinel description (a sweep of every `INSERT INTO meta_sheets`
  *     found no other route that takes a sheet description from the client: `PATCH /sheets/:id` is
  *     name-only, template installs and plugin descriptors use server-defined descriptions, and "save as
  *     template" stores sheet descriptions as null);
  *   - the sync prefers the server-owned `system_kind` sheet over a sentinel-only one in the same base.
- * NOT closed:
- *   - existing rows keep their email / avatar values until someone re-syncs that base or an
- *     owner-approved scrub runs (no migration here); rows of DEACTIVATED users are never re-synced, so
- *     they keep them until such a scrub;
+ * NOT closed — each of these keeps old email / avatar values (and an email-valued `Name`) until an
+ * owner-approved scrub, which must cover all of them (no migration here):
+ *   - rows in a base nobody re-syncs;
+ *   - rows the re-sync never matches to an active user: deactivated or deleted users, rows without a
+ *     string `User ID`;
+ *   - every People sheet other than the ONE live sheet the plan picks (`system_kind` first, else the
+ *     oldest sentinel sheet): soft-deleted People sheets (restorable via `POST /sheets/:sheetId/restore`,
+ *     which the delete guard deliberately does not cover), a second live People sheet in the same base
+ *     (e.g. two concurrent first syncs), and sentinel-only sheets shadowed by a `system_kind` sheet;
+ *   - copies outside the live row: `meta_record_revisions` snapshots / patches of People rows written by
+ *     earlier record edits (readable through `GET /sheets/:sheetId/records/:recordId/history`), formula
+ *     values stored in other sheets that were computed from a lookup of People `Email`, snapshots,
+ *     recovery archives and exported files.
+ * Other NOT closed:
+ *   - after a re-sync, anything that reads the `Email` / `Avatar URL` cells of a rewritten row gets ''
+ *     (lookups / rollups / formulas over a legacy person link, API-token `/records-summary` reads with
+ *     that display field, and the web importer's email match for legacy person fields until its
+ *     fallback ships — name and User ID still match);
  *   - the four column definitions stay (the `Email` / `Avatar URL` columns are simply left empty);
  *   - user names and user ids stay readable, all of them in one request, by any reader of this sheet —
  *     the read gate needs an owner decision on who may read it (#5807 stays open for that);
  *   - sentinel-only sheets are NOT stamped with `system_kind` (owner: the user-writable sentinel is never
- *     a trust source), and sheets created with the sentinel before this change still exist.
+ *     a trust source).
  */
 async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetProvisionPlan> {
+  // `system_kind` is read column-tolerantly (same form as history-integrity-precheck.ts): before the
+  // zzzz20260715180000 migration has run the column is absent, the expression yields NULL, and the pick
+  // below degrades to the sentinel-only lookup this function used before — no sheet can carry
+  // `system_kind` in that window anyway — instead of a 42703 on every re-sync.
   const existingSheets = await query(
-    `SELECT id, base_id, name, description, system_kind
-     FROM meta_sheets
+    `SELECT id, base_id, name, description, (to_jsonb(s) ->> 'system_kind') AS system_kind
+     FROM meta_sheets s
      WHERE base_id = $1 AND deleted_at IS NULL
      ORDER BY created_at ASC`,
     [baseId],
@@ -5636,14 +5658,20 @@ async function ensurePeopleSheetPreset(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
       [peopleSheetId],
     )
-    const recordByUserId = new Map<string, { id: string; data: Record<string, unknown> }>()
+    // Every row of this sheet, grouped by the user id it mirrors. A user can own more than one row (two
+    // concurrent first syncs, or `POST /records/:recordId/duplicate` on a People row); each of them is
+    // compared and, if stale, rewritten below — not just the newest one.
+    const recordsByUserId = new Map<string, Array<{ id: string; data: Record<string, unknown> }>>()
     for (const row of existingRecords.rows as any[]) {
       const data = normalizeJson(row.data)
       const userId = typeof data[userIdFieldId] === 'string' ? String(data[userIdFieldId]) : ''
       if (userId) {
-        recordByUserId.set(userId, { id: String(row.id), data })
+        const rows = recordsByUserId.get(userId)
+        if (rows) rows.push({ id: String(row.id), data })
+        else recordsByUserId.set(userId, [{ id: String(row.id), data }])
       }
     }
+    const retiredFieldIds = [emailFieldId, avatarFieldId]
 
     for (const user of userRows) {
       // A user without a name shows as their id — a value this row already exposes in `User ID` — never
@@ -5652,8 +5680,8 @@ async function ensurePeopleSheetPreset(
         [userIdFieldId]: user.id,
         [nameFieldId]: user.name?.trim() || user.id,
       }
-      const existing = recordByUserId.get(user.id)
-      if (!existing) {
+      const existingRows = recordsByUserId.get(user.id)
+      if (!existingRows) {
         // revision-exempt: internal people-directory sync (INSERT) — system sheet, mirror of `users`, regenerable.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version)
@@ -5663,25 +5691,30 @@ async function ensurePeopleSheetPreset(
         continue
       }
 
-      // A row written before #5807 still carries an `Email` / `Avatar URL` key (Avatar is '' when unset):
-      // count that as a change so this explicit re-sync rewrites the row once, without them. The UPDATE
-      // below replaces `data` wholesale, which is what drops the keys.
-      const carriesRetiredCell =
-        Object.prototype.hasOwnProperty.call(existing.data, emailFieldId) ||
-        Object.prototype.hasOwnProperty.call(existing.data, avatarFieldId)
-      const changed =
-        existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
-        existing.data[nameFieldId] !== nextData[nameFieldId] ||
-        carriesRetiredCell
+      for (const existing of existingRows) {
+        // A row written before #5807 still carries an `Email` / `Avatar URL` key (Avatar is '' when unset):
+        // count that as a change so this explicit re-sync rewrites the row once, without them.
+        const carriesRetiredCell = retiredFieldIds.some((fieldId) =>
+          Object.prototype.hasOwnProperty.call(existing.data, fieldId),
+        )
+        const changed =
+          existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
+          existing.data[nameFieldId] !== nextData[nameFieldId] ||
+          carriesRetiredCell
+        if (!changed) continue
 
-      if (changed) {
+        // The rewrite removes ONLY the two retired keys and sets the two synced ones; every other key on
+        // the row (a column someone added through the API, a stored formula / auto-number value) is kept.
+        // A row whose stored `data` is not a JSON object (e.g. a JSON-encoded string, which normalizeJson
+        // above still parses) cannot take `-`, so it is replaced wholesale, as every rewrite used to be.
         // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
         // revision-exempt: internal people-directory sync (UPDATE) — system sheet, not a user-content edit.
         await query(
           `UPDATE meta_records
-           SET data = $1::jsonb, version = version + 1, updated_at = now()
+           SET data = (CASE WHEN jsonb_typeof(data) = 'object' THEN data - $3::text[] ELSE '{}'::jsonb END) || $1::jsonb,
+               version = version + 1, updated_at = now()
            WHERE id = $2`,
-          [JSON.stringify(nextData), existing.id],
+          [JSON.stringify(nextData), existing.id, retiredFieldIds],
         )
       }
     }

@@ -11,16 +11,25 @@
  *                                no write carries an email or avatar value; the users read asks for
  *                                neither
  *   §2 explicit re-sync       — a row that still carries an Email and/or Avatar URL key is rewritten ONCE
- *                                (same full-replace UPDATE shape: version + 1, updated_at = now()); a
- *                                second re-sync is a no-op; a deactivated user's row is left as it is
+ *                                (version + 1, updated_at = now()), removing only those two keys: any
+ *                                other key on the row survives; EVERY row of a user is rewritten, not
+ *                                just the newest; a row whose stored data is a JSON-encoded string is
+ *                                still rewritten; a second re-sync is a no-op; a deactivated user's row
+ *                                is left as it is
  *   §3 reserved sentinel      — `POST /sheets` refuses the People sentinel description (exact or
  *                                whitespace-padded) with a values-free 400 and writes nothing
  *   §4 target selection       — the sync prefers the server-owned `system_kind` sheet over an EARLIER
- *                                sentinel-only sheet, and still falls back to a sentinel-only sheet
- *                                without stamping `system_kind` on it
+ *                                sentinel-only sheet, still falls back to a sentinel-only sheet without
+ *                                stamping `system_kind` on it, and still re-syncs a sentinel sheet on a
+ *                                database where the `system_kind` column does not exist yet
  *
- * NOT covered here because it is NOT closed: rows nobody re-syncs keep their old values, and names /
- * user ids stay readable by any reader of the sheet (#5807 stays open for the read gate).
+ * NOT covered here because it is NOT closed: rows nobody re-syncs keep their old values (other People
+ * sheets in the base, soft-deleted ones, rows of deactivated users), and names / user ids stay readable
+ * by any reader of the sheet (#5807 stays open for the read gate).
+ *
+ * The mock pool EVALUATES the `SET data = …` expression of the People UPDATE (plain replace, `data ||`,
+ * `data - keys ||`, and the jsonb_typeof-guarded form) and refuses any other shape, so a change to that
+ * expression changes what the store ends up holding.
  *
  * Fixtures are obviously fake (`*.example.test`). TRANSPORT: one pinned listener per file —
  * `request(app)` is banned in tests/unit by supertest-app-mode-tripwire.test.ts (#4154).
@@ -41,6 +50,10 @@ const FLD_UID = 'fld_p5807_uid'
 const FLD_NAME = 'fld_p5807_name'
 const FLD_EMAIL = 'fld_p5807_email'
 const FLD_AVATAR = 'fld_p5807_avatar'
+/** A column someone added to the People sheet through the API (not one the sync owns). */
+const FLD_DEPT = 'fld_p5807_dept'
+/** A stored formula value on a People row (also not one the sync owns). */
+const FLD_FORMULA = 'fld_p5807_formula'
 
 const ADMIN_USER = { id: 'u_p5807_admin', roles: ['admin'], perms: [] as string[] }
 
@@ -75,7 +88,8 @@ interface FieldRow {
 interface RecordRow {
   id: string
   sheet_id: string
-  data: Record<string, unknown>
+  /** A JSON object, or (to model a JSON-encoded string stored in the jsonb column) a string. */
+  data: Record<string, unknown> | string
   version: number
   created_at: string
 }
@@ -98,6 +112,8 @@ interface Store {
   writes: Array<{ sql: string; params: unknown[] }>
   /** The raw SQL of every read against `users`. */
   userReads: string[]
+  /** Model a database the `system_kind` migration has not reached yet: naming the column is a 42703. */
+  sheetsLackSystemKind?: boolean
 }
 
 function sheet(id: string, createdAt: string, extra: Partial<SheetRow> = {}): SheetRow {
@@ -131,15 +147,57 @@ function freshStore(): Store {
 
 /** Project a row onto the column list of `SELECT <cols> FROM`, so a query that stops asking for a
  *  column really stops seeing it (a mock that returned whole rows could hide a dropped column). */
-function projectSelected(sql: string, row: Record<string, unknown>): Record<string, unknown> {
+function projectSelected(sql: string, row: Record<string, unknown>, lacking: string[] = []): Record<string, unknown> {
   const match = /SELECT\s+([\s\S]+?)\s+FROM\s/i.exec(sql)
   if (!match) return { ...row }
   const out: Record<string, unknown> = {}
   for (const raw of match[1].split(',')) {
-    const col = raw.trim().replace(/"/g, '')
+    const expr = raw.trim()
+    // `(to_jsonb(alias) ->> 'col') AS name` — NULL when the column does not exist (as in PG).
+    const jsonPick = /^\(\s*to_jsonb\(\w+\)\s*->>\s*'(\w+)'\s*\)\s+AS\s+(\w+)$/i.exec(expr)
+    if (jsonPick) {
+      const [, source, alias] = jsonPick
+      const value = lacking.includes(source) ? null : row[source]
+      out[alias] = value === null || value === undefined ? null : String(value)
+      continue
+    }
+    const col = expr.replace(/"/g, '')
     if (col in row) out[col] = row[col]
   }
   return out
+}
+
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+function pgScalarError(): Error {
+  return Object.assign(new Error('cannot delete from scalar'), { code: '22023' })
+}
+
+/** Evaluate the `SET data = <expr>` of a People-sync UPDATE the way PostgreSQL would. */
+function evaluateDataUpdate(sql: string, current: RecordRow['data'], params: unknown[]): RecordRow['data'] {
+  const exprMatch = /SET\s+data\s*=\s*([\s\S]+?),\s*version\s*=\s*version\s*\+\s*1/i.exec(sql)
+  const expr = (exprMatch?.[1] ?? '').replace(/\s+/g, ' ').trim()
+  const next = JSON.parse(String(params[0])) as Record<string, unknown>
+  const minusKeys = (keys: unknown): Record<string, unknown> => {
+    if (!isJsonObject(current)) throw pgScalarError()
+    const copy = { ...current }
+    for (const key of keys as string[]) delete copy[key]
+    return copy
+  }
+  switch (expr) {
+    case '$1::jsonb':
+      return next
+    case 'data || $1::jsonb':
+      // jsonb `||` with a non-object operand builds an array.
+      return isJsonObject(current) ? { ...current, ...next } : ([current, next] as unknown as RecordRow['data'])
+    case '(data - $3::text[]) || $1::jsonb':
+      return { ...minusKeys(params[2]), ...next }
+    case "(CASE WHEN jsonb_typeof(data) = 'object' THEN data - $3::text[] ELSE '{}'::jsonb END) || $1::jsonb":
+      return { ...(isJsonObject(current) ? minusKeys(params[2]) : {}), ...next }
+    default:
+      throw new Error(`mock pool cannot evaluate People UPDATE expression: ${expr}`)
+  }
 }
 
 function createMockPool(store: Store) {
@@ -150,6 +208,13 @@ function createMockPool(store: Store) {
     const p = (i: number) => String(params[i] ?? '')
     const isWrite = /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)
     if (isWrite) store.writes.push({ sql, params: [...params] })
+
+    if (store.sheetsLackSystemKind && /\bmeta_sheets\b/i.test(sql)) {
+      const withoutTolerantRead = sql.replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s+AS\s+system_kind/gi, '')
+      if (/\bsystem_kind\b/i.test(withoutTolerantRead)) {
+        throw Object.assign(new Error('column "system_kind" does not exist'), { code: '42703' })
+      }
+    }
 
     // Capability / guard lookups: no sheet-scoped grants, nothing is a projection sheet.
     if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
@@ -182,7 +247,7 @@ function createMockPool(store: Store) {
     if (/^\s*UPDATE\s+meta_records\s+SET\s+data\s*=/i.test(sql)) {
       const row = store.records.find((r) => r.id === p(1))
       if (!row) return { rows: [], rowCount: 0 }
-      row.data = JSON.parse(p(0))
+      row.data = evaluateDataUpdate(sql, row.data, params)
       row.version += 1
       return { rows: [], rowCount: 1 }
     }
@@ -217,7 +282,7 @@ function createMockPool(store: Store) {
         rows: store.sheets
           .filter((s) => s.base_id === p(0) && s.deleted_at === null)
           .sort((a, b) => a.created_at.localeCompare(b.created_at))
-          .map((s) => projectSelected(sql, s as unknown as Record<string, unknown>)),
+          .map((s) => projectSelected(sql, s as unknown as Record<string, unknown>, store.sheetsLackSystemKind ? ['system_kind'] : [])),
       }
     }
     if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) {
@@ -377,10 +442,11 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       expect(store.writes.filter((w) => /INSERT\s+INTO\s+meta_fields/i.test(w.sql))).toEqual([])
       expect(writes.map((w) => w.params[1]).sort()).toEqual(['rec_amy', 'rec_cy', 'rec_dee', 'rec_nameless'])
       for (const write of writes) {
-        // The existing full-replace shape: whole data, version bump, updated_at.
-        expect(write.sql).toMatch(/UPDATE meta_records\s+SET data = \$1::jsonb, version = version \+ 1, updated_at = now\(\)\s+WHERE id = \$2/)
+        // Remove the two retired keys, set the two synced ones; version bump + updated_at as before.
+        expect(write.sql).toMatch(/UPDATE meta_records\s+SET data = \(CASE WHEN jsonb_typeof\(data\) = 'object' THEN data - \$3::text\[\] ELSE '\{\}'::jsonb END\) \|\| \$1::jsonb,\s+version = version \+ 1, updated_at = now\(\)\s+WHERE id = \$2/)
         const payload = JSON.parse(String(write.params[0]))
         expect(Object.keys(payload).sort()).toEqual([FLD_NAME, FLD_UID].sort())
+        expect(write.params[2]).toEqual([FLD_EMAIL, FLD_AVATAR])
       }
 
       const byId = new Map(store.records.map((r) => [r.id, r]))
@@ -403,6 +469,97 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       expect(second.status).toBe(200)
       expect(store.writes.slice(writesBefore)).toEqual([])
       expect(store.records.map((r) => r.version)).toEqual([4, 4, 3, 4, 4, 3])
+    })
+
+    it('keeps every key the sync does not own on a rewritten row (API-added column, stored formula value)', async () => {
+      const store = seededStore()
+      store.fields.push(
+        { id: FLD_DEPT, sheet_id: PEOPLE_SHEET_ID, name: 'Dept', type: 'string', property: {}, order: 4 },
+        { id: FLD_FORMULA, sheet_id: PEOPLE_SHEET_ID, name: 'Badge', type: 'formula', property: {}, order: 5 },
+      )
+      const extras: Record<string, Record<string, unknown>> = {
+        // retired keys only → rewritten
+        rec_amy: { [FLD_DEPT]: 'Dept A', [FLD_FORMULA]: 'A-1' },
+        // email-valued Name + retired keys → rewritten
+        rec_nameless: { [FLD_DEPT]: 'Dept B' },
+        // clean → not rewritten at all
+        rec_blank: { [FLD_DEPT]: 'Dept C' },
+        // retired key only → rewritten
+        rec_dee: { [FLD_DEPT]: 'Dept D', [FLD_FORMULA]: 7 },
+      }
+      for (const row of store.records) Object.assign(row.data as Record<string, unknown>, extras[row.id] ?? {})
+      // A stale Name with NO retired key is rewritten too, and keeps its extra key as well.
+      store.users.find((u) => u.id === 'u_cy')!.name = 'Cy Renamed'
+      Object.assign(store.records.find((r) => r.id === 'rec_cy')!.data as Record<string, unknown>, { [FLD_DEPT]: 'Dept E' })
+      delete (store.records.find((r) => r.id === 'rec_cy')!.data as Record<string, unknown>)[FLD_AVATAR]
+      const app = await buildApp(store)
+
+      const first = await prepare(app)
+      expect(first.status).toBe(200)
+      expect(recordWrites(store).map((w) => w.params[1]).sort()).toEqual(['rec_amy', 'rec_cy', 'rec_dee', 'rec_nameless'])
+
+      const dataOf = (id: string) => store.records.find((r) => r.id === id)!.data
+      expect(dataOf('rec_amy')).toEqual({ [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example', [FLD_DEPT]: 'Dept A', [FLD_FORMULA]: 'A-1' })
+      expect(dataOf('rec_nameless')).toEqual({ [FLD_UID]: 'u_nameless', [FLD_NAME]: 'u_nameless', [FLD_DEPT]: 'Dept B' })
+      expect(dataOf('rec_blank')).toEqual({ [FLD_UID]: 'u_blank', [FLD_NAME]: 'u_blank', [FLD_DEPT]: 'Dept C' })
+      expect(dataOf('rec_cy')).toEqual({ [FLD_UID]: 'u_cy', [FLD_NAME]: 'Cy Renamed', [FLD_DEPT]: 'Dept E' })
+      expect(dataOf('rec_dee')).toEqual({ [FLD_UID]: 'u_dee', [FLD_NAME]: 'Dee Example', [FLD_DEPT]: 'Dept D', [FLD_FORMULA]: 7 })
+
+      const writesBefore = store.writes.length
+      const second = await prepare(app)
+      expect(second.status).toBe(200)
+      expect(store.writes.slice(writesBefore)).toEqual([])
+      expect(dataOf('rec_amy')).toMatchObject({ [FLD_DEPT]: 'Dept A', [FLD_FORMULA]: 'A-1' })
+    })
+
+    it('rewrites EVERY stale row of a user that owns more than one, not only the newest', async () => {
+      const store = seededStore()
+      const legacy = (id: string, data: Record<string, unknown>, at: string): RecordRow =>
+        ({ id, sheet_id: PEOPLE_SHEET_ID, data, version: 2, created_at: at })
+      store.records.push(
+        // A newer stale duplicate (e.g. from a record duplicate): a first-wins map skips it, and a last-wins map
+        // (the pre-fix code) compares only the clean newest row below and skips BOTH stale rows.
+        legacy('rec_amy_dup_new', { [FLD_UID]: 'u_amy', [FLD_NAME]: 'amy@people.example.test', [FLD_EMAIL]: 'amy@people.example.test', [FLD_AVATAR]: '' }, '2026-01-04T00:00:01.000Z'),
+        // A clean duplicate is left alone.
+        legacy('rec_amy_dup_clean', { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example' }, '2026-01-04T00:00:02.000Z'),
+      )
+      const app = await buildApp(store)
+
+      const first = await prepare(app)
+      expect(first.status).toBe(200)
+      expect(recordWrites(store).map((w) => w.params[1]).sort()).toEqual([
+        'rec_amy', 'rec_amy_dup_new', 'rec_cy', 'rec_dee', 'rec_nameless',
+      ])
+      // No extra row is added for a user who already has rows.
+      expect(store.writes.filter((w) => /INSERT\s+INTO\s+meta_records/i.test(w.sql))).toEqual([])
+      for (const id of ['rec_amy', 'rec_amy_dup_new', 'rec_amy_dup_clean']) {
+        expect(store.records.find((r) => r.id === id)!.data).toEqual({ [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example' })
+      }
+      expect(store.records.find((r) => r.id === 'rec_amy_dup_clean')!.version).toBe(2)
+      expect(JSON.stringify(store.records.filter((r) => r.id !== 'rec_gone').map((r) => r.data))).not.toContain('example.test')
+
+      const writesBefore = store.writes.length
+      const second = await prepare(app)
+      expect(second.status).toBe(200)
+      expect(store.writes.slice(writesBefore)).toEqual([])
+    })
+
+    it('still rewrites a row whose stored data is a JSON-encoded string instead of an object', async () => {
+      const store = seededStore()
+      const amy = store.records.find((r) => r.id === 'rec_amy')!
+      amy.data = JSON.stringify(amy.data)
+      const app = await buildApp(store)
+
+      const first = await prepare(app)
+      expect(first.status).toBe(200)
+      expect(recordWrites(store).map((w) => w.params[1]).sort()).toEqual(['rec_amy', 'rec_cy', 'rec_dee', 'rec_nameless'])
+      expect(amy).toMatchObject({ version: 4, data: { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example' } })
+      expect(Object.keys(amy.data).sort()).toEqual([FLD_NAME, FLD_UID].sort())
+
+      const writesBefore = store.writes.length
+      const second = await prepare(app)
+      expect(second.status).toBe(200)
+      expect(store.writes.slice(writesBefore)).toEqual([])
     })
   })
 
@@ -473,7 +630,7 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       expect(sheetWrites(store)).toEqual([])
       expect(store.writes.filter((w) => /INSERT\s+INTO\s+meta_fields/i.test(w.sql))).toEqual([])
       const inserted = store.records.filter((r) => r.sheet_id === PEOPLE_SHEET_ID)
-      expect(inserted.map((r) => r.data[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
+      expect(inserted.map((r) => (r.data as Record<string, unknown>)[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
       expect(store.records.filter((r) => r.sheet_id === FORGED_SHEET_ID)).toEqual([])
       expect(recordWrites(store).every((w) => w.params[1] === PEOPLE_SHEET_ID)).toBe(true)
     })
@@ -489,7 +646,33 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       expect(res.body.data.targetSheet.id).toBe(FORGED_SHEET_ID)
       expect(sheetWrites(store)).toEqual([])
       expect(store.sheets.find((s) => s.id === FORGED_SHEET_ID)!.system_kind).toBeNull()
-      expect(store.records.filter((r) => r.sheet_id === FORGED_SHEET_ID).map((r) => r.data[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
+      expect(store.records.filter((r) => r.sheet_id === FORGED_SHEET_ID).map((r) => (r.data as Record<string, unknown>)[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
+    })
+
+    it('re-syncs an existing sentinel sheet on a database where the system_kind column does not exist yet', async () => {
+      const store = freshStore()
+      store.sheetsLackSystemKind = true
+      store.sheets.push(sheet(PEOPLE_SHEET_ID, '2026-01-02T00:00:00.000Z', { name: 'People', description: SYSTEM_PEOPLE_SHEET_DESCRIPTION }))
+      store.fields.push(...peopleFields(PEOPLE_SHEET_ID))
+      store.records.push({
+        id: 'rec_amy',
+        sheet_id: PEOPLE_SHEET_ID,
+        data: { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example', [FLD_EMAIL]: 'amy@people.example.test', [FLD_AVATAR]: '' },
+        version: 1,
+        created_at: '2026-01-03T00:00:00.000Z',
+      })
+      const app = await buildApp(store)
+
+      const res = await prepare(app)
+      expect(res.status).toBe(200)
+      expect(res.body.data.targetSheet.id).toBe(PEOPLE_SHEET_ID)
+      expect(sheetWrites(store)).toEqual([])
+      expect(store.records.find((r) => r.id === 'rec_amy')).toMatchObject({
+        version: 2,
+        data: { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example' },
+      })
+      expect(store.records.find((r) => r.id === 'rec_amy')!.data).not.toHaveProperty([FLD_EMAIL])
+      expect(store.records.filter((r) => r.sheet_id === PEOPLE_SHEET_ID).map((r) => (r.data as Record<string, unknown>)[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
     })
   })
 })
