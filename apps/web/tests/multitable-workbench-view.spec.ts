@@ -599,6 +599,7 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
             onCommentSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
             onCommentEdit: (commentId: string) => this.$emit('comment-edit', commentId),
             onCommentCancelEdit: () => this.$emit('comment-cancel-edit'),
+            onToggleComments: () => this.$emit('toggle-comments'),
             'onUpdate:commentDraft': (value: string) => this.$emit('update:comment-draft', value),
           }),
         ])
@@ -3299,6 +3300,53 @@ describe('MultitableWorkbench view wiring', () => {
         expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
         await roundTripTabs()
         expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+      })
+
+      it('edit: the header Comments button ends the edit and clears its text, so no mention-less copy is sent', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_toggle_5813',
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        headerCommentsButton!.click()
+        await flushUi()
+
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('new comment: the header Comments button keeps an unsent draft and its picked mention', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')!.click()
+        await flushUi()
+
+        expect(composerTextarea()!.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
       })
 
       it('a pick made before leaving the tab is not mentioned on the next record, switched to while the tab was away', async () => {

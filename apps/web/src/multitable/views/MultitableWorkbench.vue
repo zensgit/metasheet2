@@ -3832,6 +3832,10 @@ function onToggleComments() {
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
+  // #5813 follow-up: ending an active EDIT here must also drop the edited text, as
+  // `onCancelCommentEdit` does — otherwise the composer keeps the body but loses the edit's mention
+  // snapshot, and Send posts it as a NEW comment with `mentions: []`. A new-comment draft is kept.
+  if (selectedEditingCommentId.value) commentDraft.value = ''
   selectedEditingCommentId.value = null
   void commentInboxState.refreshUnreadCount().catch(() => undefined)
 }
