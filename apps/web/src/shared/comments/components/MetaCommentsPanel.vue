@@ -181,12 +181,14 @@
         :suggestions="mentionSuggestions"
         :mention-search="mentionSearch"
         :initial-mentions="composerInitialMentions"
+        :mention-selection="composerMentionSelection"
         :disabled="!canComment"
         :submitting="submitting"
         :placeholder="composerPlaceholder"
         :submit-label="composerSubmitLabel"
         :submit-kind="composerSubmitKind"
         @submit="submitComment"
+        @update:mention-selection="(value: MetaCommentMentionSelection) => emit('update:composerMentionSelection', value)"
       />
     </div>
   </div>
@@ -195,7 +197,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
-import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion, MultitableComment } from '../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSelection, MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { normalizeMultitableComment } from '../normalize'
 import {
   commentLabel,
@@ -234,6 +236,11 @@ const props = withDefaults(defineProps<{
   currentUserId?: string | null
   mentionSuggestions?: MetaCommentMentionSuggestion[]
   composerInitialMentions?: MetaCommentMentionSuggestion[]
+  /**
+   * #5813: opt-in pass-through of the composer's `mentionSelection` (see MetaCommentComposer). Left out
+   * (undefined) the composer keeps its picks to itself, as before.
+   */
+  composerMentionSelection?: MetaCommentMentionSelection | null
   mentionCandidates?: MentionCandidateInput[]
   /** #5795: host-supplied server-side mention search, forwarded to the composer untouched. */
   mentionSearch?: MetaCommentMentionSearch | null
@@ -273,6 +280,7 @@ const emit = defineEmits<{
   (e: 'cancel-reply'): void
   (e: 'cancel-edit'): void
   (e: 'update:draft', value: string): void
+  (e: 'update:composerMentionSelection', value: MetaCommentMentionSelection): void
   (e: 'retry'): void
   (e: 'react', commentId: string, emoji: string): void
   (e: 'unreact', commentId: string, emoji: string): void
