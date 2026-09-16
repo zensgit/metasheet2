@@ -151,6 +151,11 @@ function makeFakeDb(options: {
       const id = String(params[0])
       const existed = state.roleNames.delete(id)
       state.rolePermissions.delete(id)
+      // ON DELETE CASCADE on BOTH children (migrations/033_create_rbac_core.sql:17 and :36).
+      // Modelling the user_roles half is what makes "read the members before the delete"
+      // a testable property instead of a code-shape preference: a fan-out that looked them
+      // up afterwards finds nobody here, exactly as it would in Postgres.
+      state.members.delete(id)
       return { rows: [], rowCount: existed ? 1 : 0 }
     }
     if (/^SELECT user_id FROM user_roles WHERE role_id=/i.test(norm)) {
@@ -272,9 +277,15 @@ function invokeHandler(
 
 const CATALOG = ['stock-prep:read', 'stock-prep:write', 'stock-prep:*', 'roles:read', 'roles:write', 'admin:users', '*:*']
 
-function seed(overrides: Partial<{ permissions: string[]; members: string[]; adminPermissions: string[] }> = {}) {
+function seed(overrides: Partial<{
+  permissions: string[]
+  members: string[]
+  adminPermissions: string[]
+  failOn: (sql: string, params: unknown[]) => Error | null
+}> = {}) {
   return makeFakeDb({
     catalog: CATALOG,
+    failOn: overrides.failOn,
     state: {
       roleNames: new Map([['role-1', '备料角色'], ['role-other', '其它角色'], ['admin', 'platform admin']]),
       roleUpdatedAt: new Map([
@@ -836,6 +847,84 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
     expect(db.nameOf('role-1')).toBeUndefined()
   })
 
+  it('CACHE: DELETE drops the memo for exactly the deleted role members, and nobody else', async () => {
+    const db = seed({ members: ['user-a', 'user-b'] })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    // Deleting a role is the WIDEST revocation this router offers — every code it carried,
+    // for every member — and it is open to any roles:write holder for every role but
+    // `admin`. Without the fan-out its members keep the whole revoked set for up to
+    // RBAC_CACHE_TTL_MS (rbac/service.ts:13, default 60s): a revoke that fails OPEN.
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort())
+      .toEqual(['user-a', 'user-b'])
+    // scoped by role_id, like PUT's: a member of the OTHER role is untouched.
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalledWith('user-z')
+    // and the trail records the COUNT, never the member ids.
+    const entry = auditMocks.auditLog.mock.calls[0][0] as { action: string; meta: Record<string, unknown> }
+    expect(entry.action).toBe('delete')
+    expect(entry.meta.membersInvalidated).toBe(2)
+    expect(JSON.stringify(entry.meta)).not.toContain('user-a')
+  })
+
+  it('CACHE: DELETE reads the members BEFORE the row goes (user_roles cascades with it)', async () => {
+    const db = seed({ members: ['user-a', 'user-b'] })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    const memberRead = db.statements.findIndex((s) => /FROM user_roles WHERE role_id=/i.test(s.sql))
+    const roleDelete = db.statements.findIndex((s) => /^DELETE FROM roles WHERE id=/i.test(s.sql.trim()))
+    expect(memberRead).toBeGreaterThanOrEqual(0)
+    expect(roleDelete).toBeGreaterThanOrEqual(0)
+    // The ordering is the whole fix: user_roles.role_id REFERENCES roles(id) ON DELETE
+    // CASCADE, so a fan-out placed after the DELETE reads an empty set and invalidates
+    // nobody while still looking like a fan-out.
+    expect(memberRead).toBeLessThan(roleDelete)
+    expect(rbacServiceMocks.invalidateUserPerms).toHaveBeenCalledWith('user-a')
+  })
+
+  it('DELETE: a failing member snapshot refuses BEFORE deleting anything (the read is pre-commit)', async () => {
+    const db = seed({
+      members: ['user-a'],
+      failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
+        ? Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' })
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    // The snapshot is a statement this fix ADDED to the handler; it must not become a new
+    // way to hang the caller. It runs inside the try, so its failure is an answer.
+    await expect(deleteRole(res, 'role-1')).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(500)
+    expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_WRITE_FAILED')
+    // and nothing was deleted: the failure is pre-commit, so refusing is the honest answer.
+    expect(db.nameOf('role-1')).toBe('备料角色')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    expect(JSON.stringify(res.body)).not.toContain('connection slots')
+  })
+
+  it('POST-COMMIT: DELETE still answers when the memo drop itself throws (the row is already gone)', async () => {
+    const db = seed({ members: ['user-a'] })
+    wire(db)
+    rbacServiceMocks.invalidateUserPerms.mockImplementation(() => {
+      throw new Error('memo backend down')
+    })
+    const res = mockResponse()
+
+    await expect(deleteRole(res, 'role-1')).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toContain('memo backend down')
+  })
+
   it('ADMIT SET: an administrator known only by the legacy claim is NOT refused', async () => {
     // isAdmin() and userHasPermission() both false — this principal has no user_roles row
     // and no '*:*' grant. It is exactly the population `ensurePlatformAdmin` admits for
@@ -861,6 +950,50 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
 
     expect(res.statusCode).toBe(200)
     expect(db.permissionsOf('role-1')).toEqual(['admin:users', 'roles:read'])
+  })
+
+  it('POST-COMMIT: a failing cache fan-out still ANSWERS 200 — the write is already committed', async () => {
+    const db = seed({
+      members: ['user-a'],
+      failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
+        ? Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' })
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    // The handler must RESOLVE. This router is mounted bare in src/index.ts — no
+    // asyncHandler, Express 4 — so a rejection in the post-commit tail is an unhandled
+    // rejection and the caller gets NO response at all: a hung request until its own
+    // timeout, which is the exact failure sendRoleWriteFailure exists to prevent.
+    await expect(putRole({ permissions: ['roles:read', 'stock-prep:write'] }, res)).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect((res.body as { ok: boolean }).ok).toBe(true)
+    // ...and 200 is the TRUTH: the row really is committed. A 500 here would report a
+    // landed write as a failed one and invite a retry whose delta is empty.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:write'])
+    // the audit entry still lands, with the fan-out reported as UNKNOWN rather than as 0
+    // (0 is the "no members / nothing changed" value and would read as a clean run).
+    const entry = auditMocks.auditLog.mock.calls[0][0] as { meta: Record<string, unknown> }
+    expect(entry.meta.membersInvalidated).toBeNull()
+    // values-free: no driver text reaches the caller.
+    expect(JSON.stringify(res.body)).not.toContain('connection slots')
+  })
+
+  it('POST-COMMIT: a failing AUDIT write answers 200 too, and the fan-out already ran', async () => {
+    const db = seed({ members: ['user-a'] })
+    wire(db)
+    auditMocks.auditLog.mockRejectedValue(Object.assign(new Error('audit sink down'), { code: '57P01' }))
+    const res = mockResponse()
+
+    await expect(putRole({ permissions: ['roles:read'] }, res)).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+    // ordering matters: the fan-out runs FIRST, so a dead audit sink cannot leave the
+    // revocation effective-for-60s on top of losing the record.
+    expect(rbacServiceMocks.invalidateUserPerms).toHaveBeenCalledWith('user-a')
   })
 
   it('GUARD: every write verb is still registered BEHIND rbacGuard, and the guard refuses an unauthenticated request', async () => {
@@ -957,6 +1090,29 @@ describe('POST /api/roles — the same authority boundary as PUT', () => {
     // and the members' permission memo is dropped, exactly as on PUT.
     expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort())
       .toEqual(['user-a', 'user-b'])
+  })
+
+  it('POST-COMMIT: POST answers when its fan-out AND its read-back fail (both are past the commit)', async () => {
+    const db = seed({
+      failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
+        || /^SELECT id, name, created_at, updated_at FROM roles/i.test(sql.trim())
+        ? Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' })
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await expect(postRole({ id: 'role-1', name: '备料角色', permissions: ['stock-prep:write'] }, res))
+      .resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect((res.body as { ok: boolean }).ok).toBe(true)
+    // the grant landed; only the tail failed.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read', 'stock-prep:write'])
+    // with the read-back gone, the id is all the handler can state as FACT: POST's
+    // `ON CONFLICT (id) DO NOTHING` means the submitted name need not be the stored one,
+    // so echoing it back would be a guess.
+    expect((res.body as { data: unknown }).data).toEqual({ id: 'role-1' })
   })
 
   it('an uncatalogued code is a 400 here too, not a foreign-key rejection with no response', async () => {

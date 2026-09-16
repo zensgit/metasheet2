@@ -128,6 +128,17 @@ function sendRoleWriteFailure(
   if (sqlstate === '23503') {
     // A foreign key vanished under the write: the role (or a permission code) was
     // deleted concurrently. Retryable from the caller's point of view — reload and redo.
+    //
+    // SCHEMA CAVEAT, so this mapping is not read as a guarantee: the role_id side of that
+    // foreign key — `role_permissions.role_id REFERENCES roles(id) ON DELETE CASCADE`, and
+    // the matching one on `user_roles` — exists only in the SQL migration set
+    // (migrations/033_create_rbac_core.sql:17 and :36). The Kysely set,
+    // src/db/migrations/20250924190000_create_rbac_tables.ts, creates role_permissions and
+    // user_roles with the permission_code foreign key ONLY (:105-115) and no role_id one at
+    // all — it does not even create `roles`. On a database built that way a concurrent role
+    // delete raises nothing here and leaves orphan rows instead; that is also why the DELETE
+    // handler snapshots its members with an explicit read rather than relying on the cascade
+    // having fired (a snapshot that is correct under BOTH shapes).
     logger.warn(`role write lost a foreign key (action=${action} role=${logToken(roleId)} sqlstate=23503)`)
     return res.status(409).json({
       ok: false,
@@ -216,12 +227,26 @@ function readExpectedUpdatedAt(body: unknown): number | null {
 }
 
 /**
- * The COMPANION baseline, and the reason `expectedUpdatedAt` alone is not enough: the
- * plugin provisioner (services/PluginRbacProvisioningService.applyRoleMatrix) grants codes
- * by writing `role_permissions` DIRECTLY, without touching `roles.updated_at`. A grid
- * loaded before an install/upgrade would therefore carry a still-valid timestamp and its
- * DELETE would revoke codes the admin never unchecked and never saw. Comparing the set the
- * client LOADED against the set actually stored catches any writer, in-process or not.
+ * The COMPANION baseline, and the reason `expectedUpdatedAt` alone is not enough: other
+ * writers grant codes by writing `role_permissions` DIRECTLY, without touching
+ * `roles.updated_at`, so the concurrency token cannot move even though the set did.
+ *
+ * The in-repo example is `ensureAttendanceRoleTemplates`
+ * (routes/attendance-admin.ts:439-466, called on three admin request paths): it INSERTs
+ * role_permissions rows for FIXED role ids — `attendance_employee`, `attendance_approver`,
+ * `attendance_importer`, `attendance_admin` — and never writes the `roles` row at all.
+ * Those ids are real `roles` rows (seeded by
+ * src/db/migrations/zzzz20260208100000_create_roles_table.ts:71-79), so `GET /api/roles`
+ * lists them and THIS editor edits them. A grid loaded before one of those calls therefore
+ * carries a still-valid timestamp, and its DELETE would revoke codes the admin never
+ * unchecked and never saw. Comparing the set the client LOADED against the set actually
+ * stored catches any writer, in-process or not.
+ *
+ * NOT the plugin provisioner, which an earlier revision of this comment cited and which
+ * does not fit on either half: services/PluginRbacProvisioningService.applyRoleMatrix DOES
+ * move the token (`ON CONFLICT (id) DO UPDATE SET name, updated_at = now()`, :111-118), and
+ * it confines itself to `${pluginId}:${appId}:${roleSlug}` ids (:78) that this editor never
+ * edits. The FEATURE is unchanged — only the example was wrong.
  *
  * Optional, like the timestamp: absent means the previous last-writer-wins behaviour.
  */
@@ -306,6 +331,18 @@ async function actorIsPlatformAdmin(req: Request, actorId?: string): Promise<boo
  * fan-out below making it effective immediately. `added` and `removed` are therefore both
  * examined, and any write that touches the platform-admin role's set at all is reserved
  * for a platform administrator regardless of which codes move.
+ *
+ * LOCK SHAPE worth recording: on the elevated / platform-admin-role path only, this helper
+ * calls `actorIsPlatformAdmin`, i.e. `isAdmin` and `userHasPermission` (rbac/service), which
+ * run their own statements through the module pool — a SECOND pool checkout taken while the
+ * caller is still holding the `SELECT … FOR UPDATE` row lock inside `transaction()`. Both
+ * callers reach it from inside their transaction. It is rare (an ordinary edit short-circuits
+ * at the `!elevating.length && !touchesPlatformAdminRole` return, and a legacy-claim admin
+ * short-circuits before any query) and short, but it is the lock-held-across-an-independent-
+ * checkout shape: with the pool saturated by concurrent elevated edits, the lock holder waits
+ * on a client that the waiters are holding. Recorded, not restructured — whether the check is
+ * needed at all is only known after `added`/`removed` are computed from the LOCKED snapshot,
+ * so hoisting it out of the transaction means running it unconditionally on every write.
  */
 async function assertRoleGrantAuthority(params: {
   req: Request
@@ -355,18 +392,81 @@ async function assertCodesInCatalog(client: SqlClient, codes: readonly string[])
   )
 }
 
-/** Drop the per-user permission memo for exactly the role's members. */
-async function invalidateRoleMembers(roleId: string): Promise<number> {
-  if (!pool) return 0
+/**
+ * The role's current members. Split out of `invalidateRoleMembers` because DELETE must take
+ * this snapshot BEFORE the role row goes: `user_roles.role_id REFERENCES roles(id) ON DELETE
+ * CASCADE` (migrations/033_create_rbac_core.sql:36), so after the DELETE the lookup returns
+ * nobody and the fan-out would silently invalidate no one.
+ */
+async function readRoleMemberIds(roleId: string): Promise<string[]> {
+  if (!pool) return []
   const members = await pool.query('SELECT user_id FROM user_roles WHERE role_id=$1', [roleId])
-  let invalidated = 0
+  const memberIds: string[] = []
   for (const row of members.rows as Array<{ user_id: string }>) {
     const memberId = String(row.user_id ?? '')
-    if (!memberId) continue
-    invalidateUserPerms(memberId)
-    invalidated += 1
+    if (memberId) memberIds.push(memberId)
   }
-  return invalidated
+  return memberIds
+}
+
+/** Drop the per-user permission memo for a snapshot of members. Returns how many were dropped. */
+function invalidateMembers(memberIds: readonly string[]): number {
+  for (const memberId of memberIds) invalidateUserPerms(memberId)
+  return memberIds.length
+}
+
+/** Drop the per-user permission memo for exactly the role's members (read + drop, for PUT/POST). */
+async function invalidateRoleMembers(roleId: string): Promise<number> {
+  return invalidateMembers(await readRoleMemberIds(roleId))
+}
+
+/**
+ * The POST-COMMIT tail of a writer, made individually non-fatal.
+ *
+ * Everything a handler does below its `transaction()` runs AFTER the data is committed: the
+ * cache fan-out, the audit entry, POST's read-back of the stored row. Those awaits used to
+ * sit OUTSIDE the handler's catch, and this router is mounted bare in src/index.ts — no
+ * asyncHandler, Express 4 — so a rejection there became an unhandled rejection and the caller
+ * got NO response at all. That is precisely the hang `sendRoleWriteFailure` above exists to
+ * prevent, reintroduced two lines past the point where it stops watching.
+ *
+ * Swallow-and-log rather than a widened catch, and the direction matters: the row is ALREADY
+ * committed when these run. Turning a failed memo drop into a 500 would report a write that
+ * happened as a write that did not, and invite a retry of an applied change — on PUT that
+ * retry computes an EMPTY delta and skips the fan-out entirely, so the "safe" answer is the
+ * one that loses the invalidation permanently. The caller is told the truth (the write
+ * landed); the operator is told the rest, at error level, and the audit entry distinguishes
+ * "no members" (0) from "the fan-out did not run" (null).
+ *
+ * Values-free like every other log line here: the effect label, the action, the role id token
+ * and the SQLSTATE — never the driver message, which routinely echoes row values.
+ *
+ * Bounded claim: this covers the SUCCESS tail. `recordRoleWriteRefusal` is still awaited
+ * un-wrapped from inside each handler's CATCH block, where a throw escapes that same catch;
+ * `auditLog` swallows its own write failures (audit/audit.ts:62-72) so that path is not
+ * reachable today, but it is not guarded here either.
+ */
+async function settlePostCommitEffect<T>(
+  context: {
+    label: 'cache_fanout' | 'audit' | 'readback'
+    action: 'create' | 'update' | 'delete'
+    roleId: string
+  },
+  effect: () => Promise<T>,
+  fallback: T,
+): Promise<T> {
+  try {
+    return await effect()
+  } catch (error) {
+    const sqlstate = typeof (error as { code?: unknown })?.code === 'string'
+      ? String((error as { code: string }).code)
+      : ''
+    logger.error(
+      `role write post-commit effect failed (effect=${context.label} action=${context.action}`
+      + ` role=${logToken(context.roleId)} sqlstate=${logToken(sqlstate || 'UNKNOWN')})`,
+    )
+    return fallback
+  }
 }
 
 export function rolesRouter(): Router {
@@ -433,10 +533,33 @@ export function rolesRouter(): Router {
         if (sendIfRecoveryConflict(res, error)) return
         return sendRoleWriteFailure(res, error, 'create', id)
       }
-      const membersInvalidated = added.length ? await invalidateRoleMembers(id) : 0
-      await auditLog({ actorId, actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms, permissionsAdded: added, membersInvalidated } })
-      const { rows } = await pool.query('SELECT id, name, created_at, updated_at FROM roles WHERE id=$1', [id])
-      return res.json({ ok: true, data: rows[0] })
+      // Post-commit tail — the role row and its grants are committed, so nothing below may
+      // turn this into a failure, and nothing below may reject unanswered. See
+      // settlePostCommitEffect.
+      const membersInvalidated = added.length
+        ? await settlePostCommitEffect<number | null>(
+          { label: 'cache_fanout', action: 'create', roleId: id },
+          () => invalidateRoleMembers(id),
+          null,
+        )
+        : 0
+      await settlePostCommitEffect<void>(
+        { label: 'audit', action: 'create', roleId: id },
+        () => auditLog({ actorId, actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms, permissionsAdded: added, membersInvalidated } }),
+        undefined,
+      )
+      const stored = await settlePostCommitEffect<Record<string, unknown> | null>(
+        { label: 'readback', action: 'create', roleId: id },
+        async () => {
+          const { rows } = await pool.query('SELECT id, name, created_at, updated_at FROM roles WHERE id=$1', [id])
+          return (rows[0] as Record<string, unknown> | undefined) ?? null
+        },
+        null,
+      )
+      // The read-back is a convenience, not the write. When it fails the id is the only thing
+      // this handler can state as FACT: `ON CONFLICT (id) DO NOTHING` means the submitted
+      // `name` is not necessarily the stored one, so echoing it back would be a guess.
+      return res.json({ ok: true, data: stored ?? { id } })
     }
     roles.set(id, { id, name, permissions: perms })
     await auditLog({ actorId, actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms } })
@@ -571,23 +694,36 @@ export function rolesRouter(): Router {
       // change reaches a user only through user_roles. The memo is process-local, so in a
       // multi-instance deployment the OTHER instances still carry their own stale entries
       // until the TTL expires; this fan-out cannot reach them.
-      const membersInvalidated = (added.length || removed.length) ? await invalidateRoleMembers(id) : 0
+      // ...and it runs through settlePostCommitEffect, because the row is already committed:
+      // a rejection here would otherwise escape this handler unanswered (no asyncHandler on
+      // this router), and a 500 would report a landed write as a failed one.
+      const membersInvalidated = (added.length || removed.length)
+        ? await settlePostCommitEffect<number | null>(
+          { label: 'cache_fanout', action: 'update', roleId: id },
+          () => invalidateRoleMembers(id),
+          null,
+        )
+        : 0
 
-      await auditLog({
-        actorId,
-        actorType: 'user',
-        action: 'update',
-        resourceType: 'role',
-        resourceId: id,
-        meta: {
-          before: desired ? { ...before, permissions: beforeCodes } : before,
-          after: desired ? { id, name, permissions: desired } : { id, name },
-          permissionsChanged: added.length > 0 || removed.length > 0,
-          permissionsAdded: added,
-          permissionsRemoved: removed,
-          membersInvalidated,
-        },
-      })
+      await settlePostCommitEffect<void>(
+        { label: 'audit', action: 'update', roleId: id },
+        () => auditLog({
+          actorId,
+          actorType: 'user',
+          action: 'update',
+          resourceType: 'role',
+          resourceId: id,
+          meta: {
+            before: desired ? { ...before, permissions: beforeCodes } : before,
+            after: desired ? { id, name, permissions: desired } : { id, name },
+            permissionsChanged: added.length > 0 || removed.length > 0,
+            permissionsAdded: added,
+            permissionsRemoved: removed,
+            membersInvalidated,
+          },
+        }),
+        undefined,
+      )
       return res.json({ ok: true, data: desired ? { id, name, permissions: desired } : { id, name } })
     }
     const beforeMemory = roles.get(id)
@@ -608,33 +744,58 @@ export function rolesRouter(): Router {
     const id = req.params.id
     const actorId = req.user?.id?.toString()
     if (pool) {
-      const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
-      const before = rows[0] || null
-      // Deleting the seeded platform-admin role removes the only row `isAdmin` looks for,
-      // i.e. it de-administrates the platform — the same blast radius as emptying its
-      // permission set, which the PUT gate reserves for a platform administrator. A
-      // surgical revoke and a delete must not have different admit sets, or the gate is
-      // just a detour.
-      if (before && id === PLATFORM_ADMIN_ROLE_ID && !await actorIsPlatformAdmin(req, actorId)) {
-        const refusal = new RolePermissionRequestError(
-          403,
-          'PROTECTED_ROLE_FORBIDDEN',
-          'Only a platform administrator may delete the platform administrator role',
-          { roleId: id },
-        )
-        await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error: refusal })
-        return sendRolePermissionRequestError(res, refusal)
-      }
+      let before: unknown = null
+      let memberIds: string[] = []
       try {
+        const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
+        before = rows[0] ?? null
+        // Deleting the seeded platform-admin role removes the only row `isAdmin` looks for,
+        // i.e. it de-administrates the platform — the same blast radius as emptying its
+        // permission set, which the PUT gate reserves for a platform administrator. A
+        // surgical revoke and a delete must not have different admit sets, or the gate is
+        // just a detour.
+        if (before && id === PLATFORM_ADMIN_ROLE_ID && !await actorIsPlatformAdmin(req, actorId)) {
+          throw new RolePermissionRequestError(
+            403,
+            'PROTECTED_ROLE_FORBIDDEN',
+            'Only a platform administrator may delete the platform administrator role',
+            { roleId: id },
+          )
+        }
+        // The member snapshot, taken BEFORE the row goes and INSIDE this try. Before,
+        // because `user_roles.role_id → roles(id)` is ON DELETE CASCADE
+        // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
+        // because a read that failed out here would escape unanswered exactly like the tail
+        // used to — and unlike the tail this one is PRE-commit, so its honest answer is the
+        // 500 below, with nothing deleted.
+        memberIds = await readRoleMemberIds(id)
         // The FK cascade from roles → role_permissions deletes recovery-authority rows,
         // so this DELETE can also surface the marker 40001.
         await pool.query('DELETE FROM roles WHERE id=$1', [id])
       } catch (error) {
+        if (error instanceof RolePermissionRequestError) {
+          await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error })
+          return sendRolePermissionRequestError(res, error)
+        }
         // O2-S2: marker 40001 → retryable 409.
         if (sendIfRecoveryConflict(res, error)) return
         return sendRoleWriteFailure(res, error, 'delete', id)
       }
-      await auditLog({ actorId, actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
+      // The revocation this router offers with the WIDEST blast radius — every code the role
+      // carried, for every member — and until now the only write path with no fan-out at all:
+      // the members kept the whole revoked set for up to RBAC_CACHE_TTL_MS (rbac/service.ts:13,
+      // default 60s), because rbacGuard trusts the per-user memo before it asks the DB. Same
+      // process-local limit as PUT's: other instances expire on their own TTL.
+      const membersInvalidated = await settlePostCommitEffect<number | null>(
+        { label: 'cache_fanout', action: 'delete', roleId: id },
+        async () => invalidateMembers(memberIds),
+        null,
+      )
+      await settlePostCommitEffect<void>(
+        { label: 'audit', action: 'delete', roleId: id },
+        () => auditLog({ actorId, actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before, membersInvalidated } }),
+        undefined,
+      )
       return res.json({ ok: true, data: { id } })
     }
     const before = roles.get(id)
