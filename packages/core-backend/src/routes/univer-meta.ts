@@ -8266,14 +8266,43 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // canEditRecord on ANY sheet could call this with no search term and receive that whole roster
   // hydrated to id + name + email, unlimited; the sibling /permission-candidates, which answers the
   // same shape, requires canManageSheetAccess AND clamps to 50.
-  // So this route now (a) requires a search term of at least PERSON_DIRECTORY_MIN_QUERY_LENGTH and
-  // answers a term-less call with an empty list plus `requiresQuery` (a values-free marker the picker
-  // renders as "type to search"), and (b) clamps to PERSON_DIRECTORY_MAX_ITEMS with `hasMore`.
+  // So this route now (a) requires a search term of at least PERSON_DIRECTORY_MIN_QUERY_LENGTH ON THE
+  // UNRESTRICTED BRANCH — the one whose allowed set IS that deployment-wide roster — and answers such
+  // a term-less call with an empty list plus `requiresQuery` (a values-free marker the picker renders
+  // as "type to search"), and (b) clamps EVERY answer to PERSON_DIRECTORY_MAX_ITEMS with `hasMore`.
+  // A field carrying restrictToMemberGroupIds keeps its term-less browse: its set is (sheet members ∩
+  // the configured groups), an intersection that can only narrow, and the clamp still applies. See the
+  // gate itself below for why that grants no new capability.
   // It deliberately leaves the eligible SET alone: that set is shared with the write validator
   // (createPersonMemberResolver — same file documents the single-source-of-truth contract), so
   // narrowing it on the read side only would make the picker offer less than a save accepts.
   // Narrowing the set on BOTH sides (i.e. making listSheetPermissionCandidates actually sheet-scoped)
   // is tracked separately under #5781 and is NOT done here.
+  //
+  // RESIDUALS this change does NOT close (stated so the next reader does not over-read the bound):
+  //  (1) THE BOUND IS PER REQUEST, NOT AGGREGATE. With a 1-character minimum, a deterministic order
+  //      and no rate limiter or audit row on this route, a scripted actor can still walk the set by
+  //      varying the term ('a'..'z', '0'..'9', then two-character combinations) and reassemble most of
+  //      a few-thousand-user roster in a few hundred calls. What this removes is the ZERO-EFFORT
+  //      one-request dump; the durable fix is still the set-narrowing follow-up named above.
+  //  (2) A PARALLEL, WEAKER-GATED READ OF THE SAME ROSTER REMAINS. GET /api/comments/mention-candidates
+  //      (routes/comments.ts, -> CommentService.listMentionCandidates) answers a TERM-LESS call with up
+  //      to 100 users as label + email subtitle, plus `total` = the deployment-wide active-user count,
+  //      behind rbacGuard('comments','read') (seeded onto the generic `user` role) + sheet read: a
+  //      WIDER set (no permission filter at all) behind a WEAKER gate than this route. Until that
+  //      endpoint gets the same three bounds (require a term, keep the clamp, and drop `total` or
+  //      report the clamped count), the value of this change is limited to the person-picker path --
+  //      do NOT read it as "the roster is now bounded deployment-wide". Widening this PR to touch the
+  //      comments surface was deliberately rejected (different router, different gate, its own tests);
+  //      it is FILED as #5795 with those same three bounds so the two surfaces converge.
+  //  (3) WHERE THE BOUNDS ARE PROVEN. The route-level behaviour is pinned by
+  //      tests/unit/multitable-person-directory-bounded.test.ts (which MOCKS the resolver) and the
+  //      generated SQL by tests/unit/multitable-person-directory-resolver.test.ts (which asserts on the
+  //      SQL STRING). Neither executes that SQL, so the ILIKE predicate, the LIKE-escape convention and
+  //      the `LIMIT $n` are additionally executed against real Postgres in
+  //      tests/integration/multitable-person-member-group-restrict.test.ts (registered in
+  //      plugin-tests.yml, which hard-fails without DATABASE_URL). That lane is the ONLY place the
+  //      DB-side bound is actually run — it cannot run on a developer box without a local Postgres.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
@@ -8298,11 +8327,24 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Person field not found: ${fieldId}` } })
       }
 
+      // Resolved BEFORE the term gate because the gate only applies to the unrestricted branch (below).
+      const restrictGroupIds = personRestrictGroupIds(field)
+
       // #5781: no term ⇒ no roster. Answered BEFORE the directory is resolved, so a term-less call
       // hydrates nothing — no name/email ever leaves the users table for it. Deliberately a 200 with a
       // values-free marker rather than a 400: MetaPersonPicker opens with an empty search box and
       // fires this immediately, and a 400 would render as a load FAILURE instead of "type to search".
-      if (q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+      //
+      // The requirement applies ONLY to the unrestricted branch, which is the one that leaks: an
+      // unrestricted field's allowed set IS the deployment-wide roster (see above). A field with
+      // restrictToMemberGroupIds resolves to (sheet members ∩ the explicitly configured groups) — a
+      // strictly narrower, deliberately configured set (person-field-restriction.ts intersects, never
+      // widens) — so it keeps its browse affordance: the picker on a 3-person reviewer group shows the
+      // 3 names instead of making the user guess a first letter. This grants NO new capability: the
+      // same actor can already retrieve up to PERSON_DIRECTORY_MAX_ITEMS rows of that same restricted
+      // set with any one-character term, and the term-less answer is clamped by the same ceiling (so a
+      // huge "All staff" group stays bounded). The gate is narrowed in scope, never in strength.
+      if (restrictGroupIds.length === 0 && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
         return res.json({
           ok: true,
           data: {
@@ -8320,7 +8362,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const page = await resolvePersonAssignableDirectory(
         pool.query.bind(pool),
         sheetId,
-        personRestrictGroupIds(field),
+        restrictGroupIds,
         undefined, // keep the canonical (write-validator) allowed-set resolver — eligibility unchanged
         // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
         // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never

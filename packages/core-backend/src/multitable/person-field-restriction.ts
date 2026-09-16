@@ -86,8 +86,16 @@ export interface PersonDirectoryHydrationOptions {
    *  filter in memory before #5781. LIKE metacharacters in the term are escaped, so it stays a literal
    *  substring match (a bare `%` matches a literal percent sign, not everything). */
   search?: string
-  /** Hard ceiling on hydrated rows, applied as SQL `LIMIT` so the bound holds for the DB round trip —
-   *  names/emails beyond the ceiling never enter the process, not just never leave it. */
+  /** Hard ceiling on hydrated rows, applied as SQL `LIMIT` so the bound holds for THIS query's DB
+   *  round trip.
+   *
+   *  SCOPE — do not over-read this (the earlier wording overclaimed): it bounds the DISPLAY HYDRATION
+   *  only. The allowed-set resolution that runs FIRST (loadSheetMemberUserIdSet →
+   *  listSheetPermissionCandidates with `{ limit: 10000 }`, multitable/permission-service.ts:618)
+   *  already pulls up to 10,000 candidate rows INCLUDING u.name / u.email out of the DB and
+   *  materializes them, so names/emails past this ceiling DO still enter the process on every bounded
+   *  request — they just never leave it. Bounding that first read is part of the tracked set-narrowing
+   *  follow-up, not this option. */
   limit?: number
 }
 
@@ -108,9 +116,11 @@ function escapeLikeTerm(term: string): string {
  * the existing restriction seam (reuses createPersonMemberResolver — single source of truth).
  *
  * #5781: `options` bounds the HYDRATION (search term + LIMIT) so a caller that can only show N rows
- * never pulls the whole roster's names/emails out of the DB. The allowed set itself is resolved
- * exactly as before and is still the write validator's set — the bounds filter the display rows, they
- * do not decide eligibility.
+ * does not ship the whole roster's names/emails to the client. SCOPE: that is a DISCLOSURE bound, not
+ * an end-to-end DB-read bound — `resolveAllowed` runs first and, on the default (route) path, reads up
+ * to 10,000 candidate rows with name/email into the process (see the `limit` doc above). The allowed
+ * set itself is resolved exactly as before and is still the write validator's set — the bounds filter
+ * the display rows, they do not decide eligibility.
  */
 export async function resolvePersonAssignableDirectory(
   query: QueryFn,

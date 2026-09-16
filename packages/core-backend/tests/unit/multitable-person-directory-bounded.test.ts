@@ -16,6 +16,10 @@
  *   §4 eligibility unchanged: the route still resolves the field's restrict groups through the
  *      CANONICAL write-validator resolver (4th arg left undefined) and a user who was eligible before
  *      is still returned for a matching term
+ *   §5 the term requirement is scoped to the branch that actually leaks: a field with
+ *      restrictToMemberGroupIds resolves to (sheet members ∩ configured groups) — a strictly narrower,
+ *      deliberately configured set — so it KEEPS its term-less browse (still clamped by the ceiling),
+ *      while the unrestricted (deployment-wide) branch still requires a term
  *
  * Fixtures are obviously fake (fake.invalid). TRANSPORT: one pinned listener per file + request(url())
  * — `request(app)` app-mode is banned by tests/unit/supertest-app-mode-tripwire.test.ts (#4154).
@@ -298,6 +302,93 @@ describe('#5781 person-field directory — bounded disclosure', () => {
     it('still refuses an actor without canEditRecord (the pre-existing gate is untouched)', async () => {
       pinned.setApp(await buildApp({ sheetAccess: 'spreadsheet:read' }))
       const res = await request(pinned.url()).get(url('?q=fake'))
+      expect(res.status).toBe(403)
+      expect(directoryCalls).toHaveLength(0)
+    })
+  })
+
+  // §5 — the term requirement is scoped to the branch that leaks, not applied blind.
+  //
+  // An UNRESTRICTED person field's allowed set IS the deployment-wide roster (the whole reason for
+  // this fix), so it must require a term. A field carrying restrictToMemberGroupIds resolves through
+  // createPersonMemberResolver to (sheet members ∩ the explicitly configured groups) — an
+  // intersection, never a widening (person-field-restriction.ts) — so the term-less answer for it is
+  // that configured group, not the roster, and it is still clamped by the SAME ceiling. Applying the
+  // requirement there cost the picker its browse affordance (the user must guess a first letter to
+  // discover a 3-person reviewer group) for zero disclosure benefit: the same actor can already pull
+  // up to the ceiling from that same restricted set with any one-character term.
+  describe('§5 the term requirement is scoped to the UNRESTRICTED (deployment-wide) branch', () => {
+    it('a RESTRICTED field answers a term-less call with its (clamped) group directory — browse survives', async () => {
+      pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['grp_reviewers'] }))
+      directoryRows = fakeDirectory(3, 'rev')
+
+      const res = await request(pinned.url()).get(url())
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.requiresQuery).toBe(false)
+      expect(res.body.data.items).toHaveLength(3)
+      expect(res.body.data.hasMore).toBe(false)
+      // Resolved through the same canonical resolver, with the field's groups forwarded unchanged.
+      expect(directoryCalls).toHaveLength(1)
+      expect(directoryCalls[0].restrictGroupIds).toEqual(['grp_reviewers'])
+      expect(directoryCalls[0].resolveAllowed).toBeUndefined()
+    })
+
+    it('the term-less RESTRICTED answer is still clamped by the SAME ceiling (a huge group stays bounded)', async () => {
+      pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['grp_all_staff'] }))
+      directoryRows = fakeDirectory(400, 'staff')
+
+      const res = await request(pinned.url()).get(url())
+
+      expect(res.body.data.items).toHaveLength(MAX_ITEMS)
+      expect(res.body.data.hasMore).toBe(true)
+      expect(res.body.data.limit).toBe(MAX_ITEMS)
+      // The clamp still lives BELOW the hydration on this path too.
+      expect(directoryCalls[0].options?.limit).toBe(MAX_ITEMS + 1)
+    })
+
+    it('an UNRESTRICTED field still refuses a term-less call (the leak this fix closes is untouched)', async () => {
+      pinned.setApp(await buildApp()) // no restrictToMemberGroupIds
+      directoryRows = fakeDirectory(500)
+
+      const res = await request(pinned.url()).get(url())
+
+      expect(res.body.data.requiresQuery).toBe(true)
+      expect(res.body.data.items).toEqual([])
+      expect(directoryCalls).toHaveLength(0)
+    })
+
+    it('a restrict list of only blank entries is NOT a restriction — it still requires a term', async () => {
+      // The browse exemption keys off the SANITIZED list, so a blank-only `restrictToMemberGroupIds`
+      // cannot be used to re-open the term-less roster dump. Two layers already strip it (stated so
+      // nobody removes one believing the other is the guard): field-codecs.sanitizeFieldProperty drops
+      // the key entirely when it sanitizes to empty (field-codecs.ts:345-348, applied by
+      // serializeFieldRow inside loadFieldsForSheet), and personRestrictGroupIds re-sanitizes at use.
+      // This pins the ROUTE-level outcome regardless of which layer does the work.
+      pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['', '   '] }))
+      directoryRows = fakeDirectory(500)
+
+      const res = await request(pinned.url()).get(url())
+
+      expect(res.body.data.requiresQuery).toBe(true)
+      expect(res.body.data.items).toEqual([])
+      expect(directoryCalls).toHaveLength(0)
+    })
+
+    it('a RESTRICTED field still honours a term when one is given (search is forwarded, not dropped)', async () => {
+      pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['grp_reviewers'] }))
+      directoryRows = fakeDirectory(2, 'rev')
+
+      const res = await request(pinned.url()).get(url('?q=fake'))
+
+      expect(res.body.data.requiresQuery).toBe(false)
+      expect(directoryCalls[0].options?.search).toBe('fake')
+      expect(res.body.data.items).toHaveLength(2)
+    })
+
+    it('the browse exemption does NOT bypass the permission gate (no canEditRecord ⇒ 403, no hydration)', async () => {
+      pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['grp_reviewers'], sheetAccess: 'spreadsheet:read' }))
+      const res = await request(pinned.url()).get(url())
       expect(res.status).toBe(403)
       expect(directoryCalls).toHaveLength(0)
     })

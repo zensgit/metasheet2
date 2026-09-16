@@ -79,6 +79,15 @@ const props = defineProps<{
   field?: MetaField | null
   sheetId: string
   currentValue?: unknown
+  /** #5781 follow-up — the display names the OPENER already holds for `currentValue`
+   *  (grid.personSummaries[recordId][fieldId]). Load-bearing since #5781: the directory endpoint no
+   *  longer answers the term-less open call with the roster, so the fetch below can no longer be the
+   *  place an ALREADY-ASSIGNED id learns its name. Without this the "Selected" chip — and, on
+   *  confirm, the grid cell and the drawer — fall back to the raw userId for every assignee the user
+   *  did not happen to type a search for. Passing summaries the client ALREADY has discloses nothing
+   *  new (deliberately NOT an ids→names lookup on the server, which would re-widen the read #5781
+   *  just bounded). Optional: an opener with nothing cached keeps the raw-id fallback. */
+  currentSummaries?: PersonSummary[] | null
 }>()
 
 const emit = defineEmits<{
@@ -117,9 +126,19 @@ watch(() => props.visible, async (visible) => {
   Object.keys(summaryById).forEach((id) => delete summaryById[id])
   const currentValue = props.currentValue
   const ids = Array.isArray(currentValue) ? currentValue.map(String) : currentValue ? [String(currentValue)] : []
+  // Seed from the opener's cached summaries (see `currentSummaries`): since #5781 the term-less open
+  // fetch returns NOTHING, so this is the only display source a pre-selected id has. A cached entry
+  // that is itself a raw-id placeholder is NOT pinned — it stays the same fallback, so a later
+  // directory answer can still upgrade it. `inactive` rides along (2c-S4 cue survives a confirm).
+  const known = new Map(
+    (Array.isArray(props.currentSummaries) ? props.currentSummaries : [])
+      .filter((entry): entry is PersonSummary => !!entry && typeof entry.id === 'string')
+      .map((entry) => [entry.id, entry] as const),
+  )
   ids.forEach((id) => {
     selected.add(id)
-    summaryById[id] = { id, display: id }
+    const cached = known.get(id)
+    summaryById[id] = cached && cached.display && cached.display !== id ? { ...cached, id } : { id, display: id }
   })
   search.value = ''
   await loadMembers()

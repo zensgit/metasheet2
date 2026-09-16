@@ -56,8 +56,16 @@ describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read mo
   })
 
   /**
-   * #5781 — the hydration BOUNDS (search + LIMIT). These live in the SQL, so the ceiling holds for the
-   * DB round trip: names/emails past the ceiling never enter the process, not just never leave it.
+   * #5781 — the hydration BOUNDS (search + LIMIT). These live in the SQL, so the ceiling holds for
+   * THIS query's DB round trip.
+   *
+   * SCOPE (the first wording of this docstring overclaimed): the bound is on the DISPLAY hydration
+   * only. On the route path the allowed-set resolution runs first (loadSheetMemberUserIdSet →
+   * listSheetPermissionCandidates with `{ limit: 10000 }`) and reads up to 10,000 candidate rows
+   * INCLUDING name/email into the process, so "names/emails past the ceiling never enter the process"
+   * is NOT true end to end — only "they never leave it". Bounding that first read is the tracked
+   * set-narrowing follow-up.
+   *
    * The bounds must NOT touch the allowed set — $1 stays the full eligible set on every path, because
    * that set is shared with the write validator (createPersonMemberResolver).
    */
