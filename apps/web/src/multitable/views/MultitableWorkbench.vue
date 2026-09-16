@@ -726,7 +726,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, shallowRef, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
@@ -1512,8 +1512,8 @@ const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
 // #5795: NOT a roster any more. The mention-candidate endpoint is search-required and capped, so this
 // only remembers people the mention editors' searches returned on the active sheet (newest first,
-// capped) — it keeps already-picked labels resolvable (buildEditingMentionSuggestions) without a
-// term-less fetch. Cleared on sheet switch.
+// capped) — a secondary label source for buildEditingMentionSuggestions (the list response's own
+// `mentionLabels` is the primary one, #5808), without a term-less fetch. Cleared on sheet switch.
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
 const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
@@ -2020,9 +2020,17 @@ const activeEditingComment = computed(() => (
     ? commentsState.comments.value.find((comment) => comment.id === selectedEditingCommentId.value) ?? null
     : null
 ))
-const commentComposerInitialMentions = computed(() => (
-  activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
-))
+// #5808: the composer's starting mentions are a SNAPSHOT taken when an edit starts (onEditComment).
+// Deriving them live re-sent a new array whenever `commentMentionSuggestions` changed (every mention
+// search) or the comment list did (realtime), and the composer restarts its selection from each new
+// `initialMentions` — dropping whatever the user had picked or removed since the edit began.
+const editingMentionSnapshot = shallowRef<{ commentId: string; mentions: MetaCommentMentionSuggestion[] } | null>(null)
+const NO_COMPOSER_INITIAL_MENTIONS: MetaCommentMentionSuggestion[] = []
+const commentComposerInitialMentions = computed(() => {
+  const comment = activeEditingComment.value
+  const snapshot = editingMentionSnapshot.value
+  return comment && snapshot?.commentId === comment.id ? snapshot.mentions : NO_COMPOSER_INITIAL_MENTIONS
+})
 const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
   fmtPresenceLabel(sheetPresenceState.activeCollaboratorCount.value, isZh.value)
@@ -2150,20 +2158,45 @@ function formatCommentDraftContent(content: string): string {
   return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
 }
 
-function buildEditingMentionSuggestions(comment: { content: string; mentions: string[] }): MetaCommentMentionSuggestion[] {
+// #5808: a mention id is any non-empty string the create route accepted, so it can be an
+// Object.prototype key ("constructor", "toString", "__proto__"). Only the map's OWN string entries count.
+function ownMentionLabel(labels: Record<string, string> | undefined, mentionId: string): string {
+  if (!labels || !Object.hasOwn(labels, mentionId)) return ''
+  const label: unknown = labels[mentionId]
+  return typeof label === 'string' ? label.trim() : ''
+}
+
+function buildEditingMentionSuggestions(comment: {
+  content: string
+  mentions: string[]
+  mentionLabels?: Record<string, string>
+}): MetaCommentMentionSuggestion[] {
   const byId = new Map<string, MetaCommentMentionSuggestion>()
   for (const token of parseCommentMentionTokens(comment.content)) {
     byId.set(token.id, token)
   }
+  // A token's own label is what the draft text shows (formatCommentDraftContent), so it stays the chip
+  // label — the composer matches chips against the text by label. A remembered search hit only adds
+  // its subtitle; letting it replace the label (e.g. after a rename) unbound the chip from the text.
   for (const suggestion of commentMentionSuggestions.value) {
-    if (byId.has(suggestion.id)) {
-      byId.set(suggestion.id, { ...suggestion })
+    const token = byId.get(suggestion.id)
+    if (token) {
+      byId.set(suggestion.id, { ...suggestion, label: token.label })
     }
   }
+  // #5808: a mention that is not a token in the body (e.g. created through the API with an explicit
+  // `mentions` array) is named by the list response's own `mentionLabels`, else by a person a search
+  // already returned. Nobody to name it: the composer shows a neutral placeholder — never the raw id —
+  // and still keeps the id, so saving the edit does not silently remove the mention.
   for (const mentionId of comment.mentions) {
     if (byId.has(mentionId)) continue
+    const serverLabel = ownMentionLabel(comment.mentionLabels, mentionId)
+    if (serverLabel) {
+      byId.set(mentionId, { id: mentionId, label: serverLabel })
+      continue
+    }
     const suggestion = commentMentionSuggestions.value.find((item) => item.id === mentionId)
-    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: mentionId })
+    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: '', unresolved: true })
   }
   return [...byId.values()]
 }
@@ -3080,6 +3113,8 @@ async function onResolveComment(commentId: string) {
 function onEditComment(commentId: string) {
   const comment = commentsState.comments.value.find((item) => item.id === commentId)
   if (!comment) return
+  // #5808: taken once, here — see commentComposerInitialMentions.
+  editingMentionSnapshot.value = { commentId: comment.id, mentions: buildEditingMentionSuggestions(comment) }
   selectedEditingCommentId.value = comment.id
   selectedReplyCommentId.value = null
   selectedCommentFieldId.value = comment.targetFieldId ?? comment.fieldId ?? null

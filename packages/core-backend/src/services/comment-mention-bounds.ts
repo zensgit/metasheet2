@@ -37,3 +37,12 @@ export const MENTION_CANDIDATES_MIN_QUERY_LENGTH = 1
 export function escapeMentionLikeTerm(term: string): string {
   return term.replace(/[\\%_]/g, (ch) => `\\${ch}`)
 }
+
+/**
+ * #5808 — edit-time mention labels (CommentService.getComments `mentionLabelsAuthorId`). One comment
+ * list response names at most this many DISTINCT mentioned people — the same per-request ceiling a
+ * mention search already has, so the list can never name more people in one answer than one search
+ * could. Ids past the ceiling simply get no label (the composer keeps them under a neutral
+ * placeholder); nothing is dropped from `mentions`.
+ */
+export const MENTION_LABELS_MAX_IDS = MENTION_CANDIDATES_MAX_ITEMS

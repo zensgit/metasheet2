@@ -137,6 +137,12 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  */
 type CommentReadContext = {
   userId: string
+  /**
+   * #5808: the id `resolveRequestAccess` derived from `req.user` ONLY — empty when there is no
+   * authenticated user. Unlike `userId` it never falls back to the `x-user-id` header, so it is the
+   * only id allowed to decide whose comments get mention labels.
+   */
+  authenticatedUserId: string
   deniedRowIds: Set<string>
 }
 
@@ -155,7 +161,20 @@ async function resolveCommentReadContext(req: Request, res: Response, spreadshee
       deniedRowIds.add(rowId)
     }
   }
-  return { userId: access.userId || getUserId(req), deniedRowIds }
+  return { userId: access.userId || getUserId(req), authenticatedUserId: access.userId || '', deniedRowIds }
+}
+
+/**
+ * #5808 — whose comments on a list page get `mentionLabels` (see CommentService.getComments). Only an
+ * interactive session caller's own comments, i.e. the comments the edit UI can open: an API-token
+ * request (`apiTokenId`, set by apiTokenAuth) gets none — the token surface cannot reach the mention
+ * search either, so labels there would be a new disclosure — and so does a request without an
+ * authenticated user id.
+ */
+function mentionLabelsAuthorFor(req: Request, context: CommentReadContext): string | undefined {
+  if (typeof req.apiTokenId === 'string' && req.apiTokenId.length > 0) return undefined
+  const authorId = context.authenticatedUserId.trim()
+  return authorId.length > 0 ? authorId : undefined
 }
 
 function isRowDenied(context: CommentReadContext, rowId?: string): boolean {
@@ -287,6 +306,8 @@ export function commentsRouter(injector?: Injector): Router {
         viewerId: context.userId,
         excludeRowIds: deniedRows(context),
       }
+      const mentionLabelsAuthorId = mentionLabelsAuthorFor(req, context)
+      if (mentionLabelsAuthorId) options.mentionLabelsAuthorId = mentionLabelsAuthorId
       const result = await commentService.getComments(spreadsheetId, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {

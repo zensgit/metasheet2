@@ -20,7 +20,18 @@ import {
   escapeMentionLikeTerm,
   MENTION_CANDIDATES_MAX_ITEMS,
   MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+  MENTION_LABELS_MAX_IDS,
 } from './comment-mention-bounds'
+
+/**
+ * The label a mention editor shows for a user — ONE derivation shared by the mention search
+ * (listMentionCandidates) and the edit-time labels (#5808), so the name a picked person gets written
+ * into `@[label](id)` with is the name an old comment's untokenised mention is shown with. Empty when
+ * the row has neither a name nor an email.
+ */
+function mentionUserLabel(row: { name?: string | null; email?: string | null }): string {
+  return row.name?.trim() || row.email?.trim() || ''
+}
 
 /**
  * Server-side emoji allowlist for comment reactions (B6, design-lock §3.2).
@@ -100,6 +111,8 @@ export interface Comment {
   mentions: string[]
   /** Aggregated emoji reactions (B6); populated by getComments, else undefined. */
   reactions?: CommentReactionSummary[]
+  /** #5808: labels for this comment's own `mentions`; see CommentQueryOptions.mentionLabelsAuthorId. */
+  mentionLabels?: Record<string, string>
 }
 
 export interface CommentPresenceSummary {
@@ -452,7 +465,72 @@ export class CommentService {
       item.reactions = reactionsByComment.get(item.id) ?? []
     }
 
+    // #5808: edit-time mention labels — see hydrateOwnMentionLabels.
+    const labelAuthorId = options?.mentionLabelsAuthorId?.trim()
+    if (labelAuthorId) {
+      await this.hydrateOwnMentionLabels(items, labelAuthorId)
+    }
+
     return { items, total }
+  }
+
+  /**
+   * #5808 — labels for mentions an edit has to keep.
+   *
+   * A comment created with an explicit `mentions` array (e.g. through the API) need not carry its
+   * mentions as `@[label](id)` tokens in the body, and since #5795 the UI no longer preloads a roster
+   * to find their names. This puts the name next to the id the caller already receives.
+   *
+   * WHAT IT CAN NAME (all four hold):
+   *  - only ids in the `mentions` of a comment ON THIS PAGE — a page the route has already filtered
+   *    by the G-8 sheet-read gate and the row-level read deny;
+   *  - only on comments AUTHORED BY `authorId` (the only comments the UI lets that user edit), and
+   *    each comment gets labels for its OWN mentions only;
+   *  - only ACTIVE users (`is_active = true`, the same set the mention search returns). A deactivated
+   *    or deleted user gets no entry, deterministically — the client shows a neutral placeholder;
+   *  - at most MENTION_LABELS_MAX_IDS distinct ids per page (first appearance in page order), the
+   *    mention search's own per-request ceiling. Later ids get no entry.
+   * The label is the one the mention search already returns for the same person (name, else email).
+   * ONE batched `users` query per page; none when there is nothing to resolve.
+   */
+  private async hydrateOwnMentionLabels(items: Comment[], authorId: string): Promise<void> {
+    const ownItems = items.filter((item) => item.authorId === authorId)
+    for (const item of ownItems) {
+      item.mentionLabels = {}
+    }
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const item of ownItems) {
+      for (const id of item.mentions) {
+        if (seen.has(id)) continue
+        if (ids.length >= MENTION_LABELS_MAX_IDS) break
+        seen.add(id)
+        ids.push(id)
+      }
+    }
+    if (ids.length === 0) return
+
+    const rows = await db
+      .selectFrom('users')
+      .select(['id', 'name', 'email'])
+      .where('id', 'in', ids)
+      .where('is_active', '=', true)
+      .execute()
+
+    // Only ids this call asked for, and only a non-empty label (never the raw id as a "name").
+    const labelById = new Map<string, string>()
+    for (const row of rows) {
+      const label = mentionUserLabel(row)
+      if (label && seen.has(row.id)) labelById.set(row.id, label)
+    }
+    for (const item of ownItems) {
+      const labels: Record<string, string> = {}
+      for (const id of item.mentions) {
+        const label = labelById.get(id)
+        if (label !== undefined) labels[id] = label
+      }
+      item.mentionLabels = labels
+    }
   }
 
   /**
@@ -522,7 +600,7 @@ export class CommentService {
 
     return {
       items: rows.map((row) => {
-        const label = row.name?.trim() || row.email.trim() || row.id
+        const label = mentionUserLabel(row) || row.id
         const subtitle = row.name?.trim() && row.email.trim() && row.name.trim() !== row.email.trim()
           ? row.email.trim()
           : undefined
