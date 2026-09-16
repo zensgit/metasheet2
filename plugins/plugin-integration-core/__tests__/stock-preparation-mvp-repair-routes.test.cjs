@@ -250,7 +250,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems', 'getExternalSystemForAdapter']),
     adapterRegistry: {
       createAdapter() { throw new Error('unexpected adapter creation') },
       listAdapterKinds() { return [] },
