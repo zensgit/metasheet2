@@ -21,6 +21,19 @@
 > | §3.1 "Pending decisions (`O-1..O-5`) — not resolved by this draft" | five decisions still open | **Superseded** — all five resolved by bundle A (`49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, `53=(i)`) |
 > | §4 step 1 "Merge this document as **PROPOSED** with no runtime code" | the execution sequence's first step | **Spent** — that merge happened (`d1bed9d640…`) and the ratify followed; the remaining steps' own scope limits still stand |
 >
+> | §1 supersession list / §1.6 `:1564` "Until `O-1` is ratified, no implementation may acquire class `01`" | a prohibition contingent on `O-1` | **Superseded** — `O-1`/`OD-W4C-49` resolved `=(a)`; the governing rule is now the one quoted in the lock's four rewritten sites |
+> | §1.1.1 (`O-3`/`OD-W4C-50`), §1.3 (`O-2`/`OD-W4C-51`), §1.7.1 (`O-4`/`OD-W4C-52`) section headings and their "Pending" framing | three more open decisions | **Superseded** — `50=(a)`, `51=(a)`, `52=(a)` |
+> | §2.1 "two pending gates, 20-21, inert until `O-3`/`O-4` rule" | gates 20–21 not required | **Superseded and ACCEPTANCE-BEARING** — `O-3`/`O-4` are ratified, so gates 20–21 are **required**, not inert. This one is not merely historical: it governs what an implementation must pass |
+> | §5 declared residuals referring to `O-3`/`O-4` as unapproved or to gates 20–21 as inert | residual framing | **Superseded** on the same basis |
+>
+> **Blanket rule (so this table need not be provably exhaustive).** Anywhere in this document — table,
+> prose, heading, gate description or residual — a statement that any of `OD-W4C-44` … `OD-W4C-53` is
+> pending, conditional, unresolved, or not yet authorized, **and every consequence drawn from that
+> state** (including "no implementation may acquire class `01`" and any gate described as pending,
+> inert or not-required on that basis), is **pre-approval history and is NOT operative**. Bundle A
+> resolved all ten on 2026-07-27. Where such a statement bears on acceptance — gates 20–21 above are
+> the known case — the ratified option governs and the gate is required.
+>
 > What is NOT changed by this back-fill: the ratify comment authorizes starting P1-2 implementation
 > on PR #4612 under `53=(i)`, preceded by the fresh exact-head review section 4 step 4 mandates and
 > followed by an independent exact-head gate. It does **not** authorize merging #4612, nor any
@@ -737,6 +750,9 @@ Rules:
 
 #### 1.1.1 Pending `O-3`/`OD-W4C-50`: per-`generate`-target permanent failure
 
+> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+
+
 `chk_asr_terminal_shape` above encodes only the all-or-nothing shape:
 `completed` requires `completed_user_count = expected_user_count`. As
 drafted, this amendment defines **no** outcome for a `generate` target
@@ -1173,6 +1189,8 @@ Properties this lock requires:
 - Ordinal is included explicitly so that two runs with the same membership but
   different resolution order are distinguishable.
 
+> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+
 **Pending `O-2`/`OD-W4C-51`.** Section 1.7 step 3's resume guard requires
 byte-equality between a freshly recomputed `target_set_fingerprint` and the
 frozen one — and because the fingerprint is order-sensitive (above), that
@@ -1561,6 +1579,8 @@ snapshot.
 > amendment proposes. It supersedes red line `W4C-R42` and the three
 > digest-seam/gate clauses named in section 1's supersession list, none of
 > which this amendment is authorized to rewrite on its own — see section 3.
+> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+>
 > Until `O-1` is ratified, no implementation may acquire class `01`.
 
 `OD-W4C-40` reserved class `01`. This amendment assigns it to the scheduled
@@ -1745,6 +1765,9 @@ A run that cannot progress (section 1.1.1) is closed by the explicit
 `abandoned` transition.
 
 #### 1.7.1 Pending `O-4`/`OD-W4C-52`: does a `running` run block shadow/eligible promotion?
+
+> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+
 
 Section 0.5 names the mid-run-promotion trigger: the governing lock's
 shadow/eligible promotion-block predicate (lock lines 2689-2690, 2250)
@@ -2403,6 +2426,8 @@ that marks the run `completed`, while per-user outbox rows remain inserted
 before their operation seal.
 
 ### 2.1 CI gate home
+
+> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
 
 Twenty-one required gates (plus two pending gates, 20-21, inert until
 `O-3`/`O-4` rule — the required count above includes the new gates 22-23,
@@ -3244,6 +3269,9 @@ own framing).
    premise.
 
 ## 5. Declared residuals
+
+> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+
 
 These are stated rather than hidden; each is either an owner decision above or
 an accepted bound:
