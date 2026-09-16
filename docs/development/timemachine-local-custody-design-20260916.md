@@ -55,3 +55,31 @@ KMS admission remain unchanged. No adapter to the existing application is includ
 
 Reference: https://nodejs.org/api/crypto.html (createCipheriv/createDecipheriv,
 setAAD, setAuthTag and final). No new dependency.
+
+## Encrypted package file layer
+
+The explicit store takes existing owner-private local POSIX custody and archive
+directories. Neither may contain the other, including canonical ancestor aliases.
+It creates neither directory, saves no recovery secret, and never unlocks a session.
+Both roots are pinned and revalidated; no NAS or unknown filesystem admission.
+Linux admission also reads mountinfo and rejects subdirectory mounts and any
+duplicate mount of either selected device, conservatively including legitimate
+bind mounts. Missing/unreadable mount metadata refuses. Synthetic mountinfo tests
+exercise this policy without mounting anything or changing a root identity.
+
+Each package uses a caller-supplied UUID and immutable filename scoped by custody
+UUID. Publication writes a private temporary file, syncs it, links exclusively to
+the final name, compares final bytes, and syncs the directory. Same ID/same bytes
+replay succeeds; same ID/different bytes refuses without replacing the winner.
+The returned receipt binds package ID, exact size and SHA-256. Reading requires
+that receipt and rejects unsafe permissions, symlinks, malformed envelopes and
+digest/size mismatch. Envelope validation is structural, NOT authentication;
+the custody core must still authenticate the package during explicit unlock.
+
+No mutable active-version pointer, overwrite or deletion API is provided. A caller
+must retain the receipt and adopt a saved rotation package explicitly. Storage
+success does not prove independent offline backup, freshness or full restoration.
+Root/path protection assumes no hostile same-UID/root process. Failed publication
+may leave an encrypted orphan after filesystem/root failure, but must not return
+success or destroy a previous package; cleanup must not traverse a replaced root.
+Catalog/object/custody application recovery and startup composition remain pending.
