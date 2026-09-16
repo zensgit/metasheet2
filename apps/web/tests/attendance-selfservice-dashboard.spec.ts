@@ -1745,7 +1745,9 @@ describe('Attendance self-service dashboard', () => {
     // competing "Track pending approvals" copy for the same fixture.
     expect(attentionBand).toContain('Resolve anomaly reminders')
     expect(attentionBand).not.toContain('Track pending approvals')
-    expect(requestsCard).toContain('Summarizes the current request backlog from the visible date range.')
+    expect(requestsCard).toContain('My applications')
+    expect(requestsCard).not.toContain('Summarizes the current request backlog from the visible date range.')
+    expect(requestsCard).not.toContain('汇总当前可见日期区间')
     expect(requestsCard).toContain('Pending follow-up')
     expect(requestsCard).toContain('waiting for approval')
     expect(requestsCard).toContain('Pending · 1')
