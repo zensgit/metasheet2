@@ -1404,7 +1404,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           views.set(viewId, row)
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+        // #5807: the People sync reads only id + name from users.
+        if (sql.includes('SELECT id, name') && sql.includes('FROM users')) {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
