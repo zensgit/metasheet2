@@ -578,6 +578,10 @@ type UniverMetaViewConfig = {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
+/** Server-owned `meta_sheets.system_kind` stamped on a People sheet at provisioning (never from a client). */
+const SYSTEM_PEOPLE_SHEET_KIND = 'people_directory'
+/** Values-free refusal for a client create that asks for the reserved People sentinel description (#5807). */
+const RESERVED_SHEET_DESCRIPTION_MESSAGE = 'This description is reserved for a system-managed sheet'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
 // history-exclusion predicate); imported at the top of this file.
@@ -671,6 +675,12 @@ type PeopleSheetPreset = {
     description: string | null
   }
   fieldProperty: Record<string, unknown>
+  /**
+   * #5807 — internal only, never serialized: ids of the EXISTING People rows this call rewrote with an
+   * UPDATE (rows it inserted are not listed — a fresh id has no Yjs state). The prepare route purges
+   * their Yjs state after the transaction commits.
+   */
+  rewrittenRecordIds: string[]
 }
 
 type PeopleSheetProvisionPlan = {
@@ -5497,16 +5507,91 @@ function serializeBaseRow(row: any): UniverMetaBase {
 
 const ensureLegacyBase = ensureLegacyBaseShared
 
+/*
+ * People system sheet (legacy link-backed person fields) — what #5807 does and does NOT close.
+ *
+ * The sheet is created / re-synced ONLY by `POST /person-fields/prepare` (gate: canManageFields). Each
+ * sync adds a row for every ACTIVE user that has none; a user can still end up with more than one row
+ * (two concurrent first syncs, or `POST /records/:recordId/duplicate` on a People row), and rows are
+ * never removed. Readers get it through the generic read paths with no special gate (e.g.
+ * `/records-summary` returns a displayMap for every matching record, whatever `limit` is).
+ *
+ * CLOSED going forward:
+ *   - the sync no longer writes the `Email` or `Avatar URL` cells, and `Name` no longer falls back to the
+ *     email (it falls back to the user id, which the `User ID` column already holds);
+ *   - an explicit re-sync rewrites EVERY row of an active user in the sheet it targets that still carries
+ *     an `Email` / `Avatar URL` key (or a stale `User ID` / `Name`), removing only those two keys and
+ *     setting the two synced ones — any other key on the row is kept; a second re-sync writes nothing;
+ *   - `POST /sheets` refuses the reserved sentinel description (a sweep of every `INSERT INTO meta_sheets`
+ *     found no other route that takes a sheet description from the client: `PATCH /sheets/:id` is
+ *     name-only, template installs and plugin descriptors use server-defined descriptions, and "save as
+ *     template" stores sheet descriptions as null);
+ *   - the sync prefers the server-owned `system_kind` sheet over a sentinel-only one in the same base;
+ *   - after the sync transaction commits, the prepare route purges the Yjs state of exactly the rows it
+ *     rewrote (only when the Yjs path is wired in this process; best-effort — a failed purge is logged,
+ *     the request still succeeds, and a later re-sync does not retry it because the row is clean by then).
+ * NOT closed — each of these keeps old email / avatar values (and an email-valued `Name`) until an
+ * owner-approved scrub (no migration here). This is the list known today, not a proven-complete one:
+ *   - rows in a base nobody re-syncs;
+ *   - rows the re-sync never matches to an active user: deactivated or deleted users, rows without a
+ *     string `User ID`;
+ *   - every People sheet other than the ONE live sheet the plan picks (`system_kind` first, else the
+ *     oldest sentinel sheet): soft-deleted People sheets (restorable via `POST /sheets/:sheetId/restore`,
+ *     which the delete guard deliberately does not cover), a second live People sheet in the same base
+ *     (e.g. two concurrent first syncs), and sentinel-only sheets shadowed by a `system_kind` sheet;
+ *   - copies outside the live row: `meta_record_revisions` snapshots / patches of People rows written by
+ *     earlier record edits (readable through `GET /sheets/:sheetId/records/:recordId/history`), formula
+ *     values stored in other sheets that were computed from a lookup of People `Email`, snapshots,
+ *     recovery archives and exported files;
+ *   - values under a column the sync does not resolve by name. The sync finds its four columns by their
+ *     CURRENT trimmed name (first by `order`, then id), but cell values are keyed by field id, so it never
+ *     touches: a renamed `Email` / `Avatar URL` column (a new column of that name is created and only
+ *     that one's key is removed); a second column with the same name; a renamed `User ID` column (no row
+ *     matches any user any more, so every old row is left as it is and a new row is inserted per user);
+ *     a deleted column — field delete strips the values from live rows, but with tombstone capture on
+ *     they are kept in `meta_field_value_tombstones`, and a field undelete (`recreateFieldFromConfig`)
+ *     writes them back under the old id. A scrub must pick the columns by field id / field history, never
+ *     by current name;
+ *   - `meta_records_trash` rows (deleted People rows keep their full `data` and can be restored) and
+ *     `meta_field_value_tombstones` rows;
+ *   - Yjs copies (`meta_record_yjs_states` / `meta_record_yjs_updates`) of every row this sync does NOT
+ *     rewrite — rows of deactivated / deleted users, rows in other, soft-deleted or shadowed People
+ *     sheets — and of rewritten rows whose purge failed, or that were rewritten by a process with no Yjs
+ *     path wired (no purge runs there; Yjs state persisted while it was wired stays).
+ * Other NOT closed:
+ *   - after a re-sync, anything that reads the `Email` / `Avatar URL` cells of a rewritten row gets ''
+ *     (lookups / rollups / formulas over a legacy person link, API-token `/records-summary` reads with
+ *     that display field, and the web importer's email match for legacy person fields until its
+ *     fallback ships — name and User ID still match);
+ *   - the four column definitions stay (the `Email` / `Avatar URL` columns are simply left empty);
+ *   - user names and user ids stay readable, all of them in one request, by any reader of this sheet —
+ *     the read gate needs an owner decision on who may read it (#5807 stays open for that);
+ *   - the roster is not tenant-scoped: the `users` read below has no tenant predicate, so a sync mirrors
+ *     every active user of the deployment into the People sheet of whichever base it targets;
+ *   - sentinel-only sheets are NOT stamped with `system_kind` (owner: the user-writable sentinel is never
+ *     a trust source).
+ */
 async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetProvisionPlan> {
+  // `system_kind` is read column-tolerantly (same form as history-integrity-precheck.ts): before the
+  // zzzz20260715180000 migration has run the column is absent, the expression yields NULL, and the pick
+  // below degrades to the sentinel-only lookup this function used before — no sheet can carry
+  // `system_kind` in that window anyway — instead of a 42703 on every re-sync.
   const existingSheets = await query(
-    `SELECT id, base_id, name, description
-     FROM meta_sheets
+    `SELECT id, base_id, name, description, (to_jsonb(s) ->> 'system_kind') AS system_kind
+     FROM meta_sheets s
      WHERE base_id = $1 AND deleted_at IS NULL
      ORDER BY created_at ASC`,
     [baseId],
   )
 
-  const peopleSheetRow = (existingSheets.rows as any[]).find((row) => isSystemPeopleSheetDescription(row.description)) ?? null
+  // Prefer the sheet the server itself provisioned (`system_kind`, non-forgeable) over an older sheet
+  // that merely carries the user-writable sentinel description; the sentinel stays only as the
+  // fallback for People sheets provisioned before `system_kind` existed (never backfilled).
+  const candidateRows = existingSheets.rows as any[]
+  const peopleSheetRow =
+    candidateRows.find((row) => row.system_kind === SYSTEM_PEOPLE_SHEET_KIND) ??
+    candidateRows.find((row) => isSystemPeopleSheetDescription(row.description)) ??
+    null
   const peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
   return { peopleSheetRow, peopleSheetId }
 }
@@ -5569,22 +5654,24 @@ async function ensurePeopleSheetPreset(
 
   const userIdFieldId = await ensureField('User ID', 0)
   const nameFieldId = await ensureField('Name', 1)
+  // #5807: the `Email` / `Avatar URL` columns are still ensured (dropping them would drag in the field
+  // delete / history paths) but the sync no longer writes either cell — see the block comment above
+  // `planPeopleSheetPreset`. Their ids are only used to recognise rows that still carry old values.
   const emailFieldId = await ensureField('Email', 2)
   const avatarFieldId = await ensureField('Avatar URL', 3)
 
-  let userRows: Array<{ id: string; email: string; name: string | null; avatar_url: string | null }> = []
+  // Only what the sync writes is read: no email, no avatar.
+  let userRows: Array<{ id: string; name: string | null }> = []
   try {
     const result = await query(
-      `SELECT id, email, name, avatar_url
+      `SELECT id, name
        FROM users
        WHERE is_active = TRUE
        ORDER BY created_at ASC, id ASC`,
     )
     userRows = (result.rows as any[]).map((row) => ({
       id: String(row.id),
-      email: String(row.email),
       name: typeof row.name === 'string' ? row.name : null,
-      avatar_url: typeof row.avatar_url === 'string' ? row.avatar_url : null,
     }))
   } catch (err: any) {
     if (!(typeof err?.code === 'string' && err.code === '42P01')) {
@@ -5592,29 +5679,36 @@ async function ensurePeopleSheetPreset(
     }
   }
 
+  const rewrittenRecordIds: string[] = []
   if (userRows.length > 0) {
     const existingRecords = await query(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
       [peopleSheetId],
     )
-    const recordByUserId = new Map<string, { id: string; data: Record<string, unknown> }>()
+    // Every row of this sheet, grouped by the user id it mirrors. A user can own more than one row (two
+    // concurrent first syncs, or `POST /records/:recordId/duplicate` on a People row); each of them is
+    // compared and, if stale, rewritten below — not just the newest one.
+    const recordsByUserId = new Map<string, Array<{ id: string; data: Record<string, unknown> }>>()
     for (const row of existingRecords.rows as any[]) {
       const data = normalizeJson(row.data)
       const userId = typeof data[userIdFieldId] === 'string' ? String(data[userIdFieldId]) : ''
       if (userId) {
-        recordByUserId.set(userId, { id: String(row.id), data })
+        const rows = recordsByUserId.get(userId)
+        if (rows) rows.push({ id: String(row.id), data })
+        else recordsByUserId.set(userId, [{ id: String(row.id), data }])
       }
     }
+    const retiredFieldIds = [emailFieldId, avatarFieldId]
 
     for (const user of userRows) {
+      // A user without a name shows as their id — a value this row already exposes in `User ID` — never
+      // as their email (#5807).
       const nextData = {
         [userIdFieldId]: user.id,
-        [nameFieldId]: user.name?.trim() || user.email,
-        [emailFieldId]: user.email,
-        [avatarFieldId]: user.avatar_url ?? '',
+        [nameFieldId]: user.name?.trim() || user.id,
       }
-      const existing = recordByUserId.get(user.id)
-      if (!existing) {
+      const existingRows = recordsByUserId.get(user.id)
+      if (!existingRows) {
         // revision-exempt: internal people-directory sync (INSERT) — system sheet, mirror of `users`, regenerable.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version)
@@ -5624,21 +5718,34 @@ async function ensurePeopleSheetPreset(
         continue
       }
 
-      const changed =
-        existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
-        existing.data[nameFieldId] !== nextData[nameFieldId] ||
-        existing.data[emailFieldId] !== nextData[emailFieldId] ||
-        existing.data[avatarFieldId] !== nextData[avatarFieldId]
+      for (const existing of existingRows) {
+        // A row written before #5807 still carries an `Email` / `Avatar URL` key (Avatar is '' when unset):
+        // count that as a change so this explicit re-sync rewrites the row once, without them.
+        const carriesRetiredCell = retiredFieldIds.some((fieldId) =>
+          Object.prototype.hasOwnProperty.call(existing.data, fieldId),
+        )
+        const changed =
+          existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
+          existing.data[nameFieldId] !== nextData[nameFieldId] ||
+          carriesRetiredCell
+        if (!changed) continue
 
-      if (changed) {
+        // The rewrite removes ONLY the two retired keys and sets the two synced ones; every other key on
+        // the row (a column someone added through the API, a stored formula / auto-number value) is kept.
+        // A row whose stored `data` is not a JSON object (e.g. a JSON-encoded string, which normalizeJson
+        // above still parses) cannot take `-`, so it is replaced wholesale, as every rewrite used to be.
         // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
         // revision-exempt: internal people-directory sync (UPDATE) — system sheet, not a user-content edit.
         await query(
           `UPDATE meta_records
-           SET data = $1::jsonb, version = version + 1, updated_at = now()
+           SET data = (CASE WHEN jsonb_typeof(data) = 'object' THEN data - $3::text[] ELSE '{}'::jsonb END) || $1::jsonb,
+               version = version + 1, updated_at = now()
            WHERE id = $2`,
-          [JSON.stringify(nextData), existing.id],
+          [JSON.stringify(nextData), existing.id, retiredFieldIds],
         )
+        // A persisted Y.Doc of this row would still hold the old Email / Avatar / Name and win over the
+        // rewritten `data` on the next open; the route purges it after COMMIT (never from in here).
+        rewrittenRecordIds.push(existing.id)
       }
     }
   }
@@ -5655,6 +5762,7 @@ async function ensurePeopleSheetPreset(
       limitSingleRecord: true,
       refKind: 'user',
     },
+    rewrittenRecordIds,
   }
 }
 
@@ -8303,13 +8411,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      email only by prefix) changes search behaviour and is an OWNER DECISION, not taken here; the
   //      durable fix is still the set-narrowing follow-up named above (plus, if wanted, a rate limit /
   //      audit row).
+  //  (1b) #5809 `?match=exact` ON THIS ROUTE MATCHES THE USER ID BY EQUALITY. The substring search
+  //      never looks at the id; exact mode does (lower(id::text) = lower(term)), so a caller with
+  //      canEditRecord who already holds an eligible user's id (from a person cell, an export or a
+  //      created_by value) gets back that user's name and email in one call. That is not a new
+  //      disclosure where comments:read is held (seeded onto the generic `user` role): mention
+  //      candidates below already match ids by substring across ALL active users and return the
+  //      name and email. It IS new for an edit-capable caller WITHOUT comments:read — a narrower
+  //      audience than the one mention candidates already serves, and limited to ids of this field's
+  //      eligible set. API tokens cannot reach this route (oapi-read-allowlist.ts). A blank exact
+  //      term never browses: the route answers it with `requiresQuery` and the helper returns [].
   //  (2) THE TWO PARALLEL READS OF THE SAME ROSTER NOW CARRY THE SAME PER-REQUEST BOUNDS (#5795).
   //      - GET /api/comments/mention-candidates (routes/comments.ts -> CommentService
   //        .listMentionCandidates), and its sibling GET /api/multitable/:spreadsheetId/mention-candidates
   //        which reads the same service behind the same gate: a term is required (term-less ⇒ empty +
   //        `requiresQuery`, no query issued), at most 50 rows with `hasMore`, the term is matched
   //        literally, and the deployment-wide active-user `total` is no longer computed — `total` is
-  //        the clamped page size. What #5795 still leaves open there: the gate is unchanged
+  //        the clamped page size. #5809 adds an opt-in `?match=exact-email` to the first of the two
+  //        (email EQUALITY instead of the substring; same gate, term requirement and ceiling), whose
+  //        rows are a subset of the substring rows for the same term.
+  //        What #5795 still leaves open there: the gate is unchanged
   //        (rbacGuard('comments','read'), seeded onto the generic `user` role, + sheet read), and so is
   //        the set — every ACTIVE user in the deployment, with no permission filter at all, i.e. a
   //        superset of this route's set (equal only where every active user holds multitable
@@ -8345,8 +8466,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      bounded.test.ts and tests/unit/multitable-form-share-candidates-bounded.test.ts (both mock the
   //      roster read) and, for the mention SQL, by tests/unit/comment-service.test.ts (which inspects
   //      the query-builder calls: LIMIT, escaped term, no COUNT). As far as a grep of tests/integration
-  //      shows, no wired real-Postgres lane executes the mention SQL at all (comments.api.test.ts is
-  //      deliberately unwired), nor listSheetPermissionCandidates WITH a search term — its term-less
+  //      shows, no wired real-Postgres lane executes the mention SQL's SUBSTRING search
+  //      (comments.api.test.ts is deliberately unwired; only the #5809 exact-email arm runs, in the
+  //      person-member-group-restrict suite), nor listSheetPermissionCandidates WITH a search term — its term-less
   //      form does run for real via the person-member-group-restrict suite, the escaped-term path does not.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -8356,6 +8478,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     // Case folding now happens in SQL (ILIKE), so keep the term as typed for the echo.
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    // #5809 — opt-in EXACT lookup for the import resolver (`?match=exact`): the same gate, allowed set,
+    // ceiling and response shape, but the hydration keeps only rows whose id / name / email EQUALS the
+    // term (resolvePersonAssignableDirectory `exact`). Any other `match` value keeps the substring
+    // search below byte-for-byte. Exact mode never browses: it requires a term even on a restricted
+    // field (a strictly tighter rule than the §5 browse exemption, which stays substring-only).
+    const exactMatch = req.query.match === 'exact'
     try {
       const pool = poolManager.get()
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
@@ -8389,7 +8517,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // same actor can already retrieve up to PERSON_DIRECTORY_MAX_ITEMS rows of that same restricted
       // set with any one-character term, and the term-less answer is clamped by the same ceiling (so a
       // huge "All staff" group stays bounded). The gate is narrowed in scope, never in strength.
-      if (restrictGroupIds.length === 0 && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+      if ((exactMatch || restrictGroupIds.length === 0) && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
         return res.json({
           ok: true,
           data: {
@@ -8412,7 +8540,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
         // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never
         // hands back more than PERSON_DIRECTORY_MAX_ITEMS + 1 rows of display data.
-        { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
+        exactMatch
+          ? { exact: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 }
+          : { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
       )
       const hasMore = page.length > PERSON_DIRECTORY_MAX_ITEMS
       const items = hasMore ? page.slice(0, PERSON_DIRECTORY_MAX_ITEMS) : page
@@ -11760,12 +11890,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     return false
   }
 
-  const bestEffortYjsInvalidate = async (recordIds: string[]) => {
+  /** Post-commit only. `context` labels the log line (recovery keeps its original wording). */
+  const bestEffortYjsInvalidate = async (recordIds: string[], context = 'recovery') => {
     if (!yjsInvalidator || recordIds.length === 0) return
     try {
       await yjsInvalidator(recordIds)
     } catch (err) {
-      console.warn('[univer-meta] yjs invalidation after recovery failed (non-fatal):', err)
+      console.warn(`[univer-meta] yjs invalidation after ${context} failed (non-fatal):`, err)
     }
   }
 
@@ -13094,6 +13225,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const preset = await pool.transaction(async ({ query }) => {
         return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId, plan)
       })
+      // #5807: the transaction has COMMITTED. Purge the Yjs state of exactly the existing People rows the
+      // re-sync rewrote, so a persisted Y.Doc cannot re-serve their old Email / Avatar / Name. Nothing on
+      // first provisioning (inserts only) or on a re-sync that rewrote nothing; a failure is logged, never
+      // fails the request (same contract as the record post-commit hook).
+      await bestEffortYjsInvalidate(preset.rewrittenRecordIds, 'people-sheet sync')
 
       return res.json({ ok: true, data: { targetSheet: preset.sheet, fieldProperty: preset.fieldProperty } })
     } catch (err) {
@@ -14918,6 +15054,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = parsed.data.id ?? buildId('sheet').slice(0, 50)
     const name = parsed.data.name ?? `Univer Sheet ${new Date().toISOString()}`
     const description = parsed.data.description ?? null
+    // #5807: the People sentinel description is how pre-`system_kind` People sheets are still found by
+    // the People sync and hidden from sheet lists, so a client may not mint it. Same trim as the
+    // predicate that reads it. Refused before any read or write; the message never echoes the input.
+    if (isSystemPeopleSheetDescription(description)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: RESERVED_SHEET_DESCRIPTION_MESSAGE } })
+    }
     const requestedBaseId = parsed.data.baseId?.trim()
     const seed = parsed.data.seed === true
     if (

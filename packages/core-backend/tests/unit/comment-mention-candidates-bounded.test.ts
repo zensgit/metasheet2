@@ -398,4 +398,58 @@ describe('#5795 comment mention candidates — bounded disclosure', () => {
       })
     }
   })
+
+  // §8 — #5809: `?match=exact-email` (the legacy person importer's email-owner lookup) only changes the
+  // predicate the service applies; the gate, the term requirement and the ceiling are the same.
+  describe('§8 #5809 opt-in email equality (?match=exact-email)', () => {
+    it('forwards match: exact-email under the same ceiling', async () => {
+      candidateRows = fakeCandidates(1)
+
+      const res = await request(pinned.url()).get(mainUrl).query({
+        spreadsheetId: SHEET, q: ' fake.person1@example.invalid ', limit: '50', match: 'exact-email',
+      })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.items).toEqual(fakeCandidates(1))
+      expect(res.body.data.hasMore).toBe(false)
+      expect(calls.map((call) => call.options)).toEqual([
+        { q: 'fake.person1@example.invalid', limit: MAX_ITEMS + 1, match: 'exact-email' },
+      ])
+    })
+
+    it('still clamps: more rows than the ceiling ⇒ 50 items + hasMore', async () => {
+      candidateRows = fakeCandidates(400)
+
+      const res = await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET, q: 'x@example.invalid', limit: '200', match: 'exact-email' })
+
+      expect(res.body.data.items).toHaveLength(MAX_ITEMS)
+      expect(res.body.data.hasMore).toBe(true)
+      expect(calls[0].options?.limit).toBe(MAX_ITEMS + 1)
+    })
+
+    it('still requires a term and still answers the G-8 gate first', async () => {
+      const blank = await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET, match: 'exact-email' })
+      expect(blank.status).toBe(200)
+      expect(blank.body.data.requiresQuery).toBe(true)
+      expect(service.listMentionCandidates).not.toHaveBeenCalled()
+
+      mocks.resolveSheetReadableCapabilities.mockResolvedValue({
+        access: { userId: 'actor_plain_user', isAdminRole: false },
+        capabilities: { canRead: false },
+      })
+      const denied = await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET, q: 'x@example.invalid', match: 'exact-email' })
+      expect(denied.status).toBe(403)
+      expect(service.listMentionCandidates).not.toHaveBeenCalled()
+    })
+
+    it('any other match value, and the namespaced sibling route, keep the substring search', async () => {
+      await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET, q: 'fake', match: 'exact' })
+      await request(pinned.url()).get(nsUrl).query({ q: 'fake', match: 'exact-email' })
+
+      expect(calls.map((call) => call.options)).toEqual([
+        { q: 'fake', limit: MAX_ITEMS + 1 },
+        { q: 'fake', limit: 11 },
+      ])
+    })
+  })
 })

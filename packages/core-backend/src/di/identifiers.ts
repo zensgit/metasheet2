@@ -196,6 +196,13 @@ export interface CommentQueryOptions {
      * paging. This is not a public API query parameter.
      */
     excludeRowIds?: string[];
+    /**
+     * #5808 — internal, route-set only (never a query parameter). When present, comments on the page
+     * AUTHORED BY this user get `mentionLabels` for their own `mentions` (the only comments the UI lets
+     * that user edit). One batched lookup per page, active users only, at most MENTION_LABELS_MAX_IDS
+     * distinct ids. The route sets it only for an authenticated session user (never for API tokens).
+     */
+    mentionLabelsAuthorId?: string;
 }
 
 /** Aggregated emoji-reaction summary attached to a comment (B6). */
@@ -298,6 +305,13 @@ export interface CommentRecord {
      * the viewer reacted. Undefined when reactions were not hydrated.
      */
     reactions?: CommentReactionSummary[];
+    /**
+     * #5808 — display labels for this comment's OWN `mentions`, keyed by user id. Only on list
+     * responses (`getComments` with `mentionLabelsAuthorId`) and only on the caller's own comments;
+     * an id with no active user (deactivated / deleted) or past the per-response ceiling is simply
+     * absent. Undefined when labels were not requested.
+     */
+    mentionLabels?: Record<string, string>;
 }
 
 /** An inbox entry extends CommentRecord with read/mention state and navigation context. */
@@ -425,10 +439,12 @@ export interface ICommentService {
      * #5795: bounded — a term is required (term-less ⇒ empty, no query), the term is a literal
      * substring, at most MENTION_CANDIDATES_MAX_ITEMS + 1 rows come back, and there is deliberately
      * NO `total` (it used to be a deployment-wide active-user count).
+     * #5809: `match: 'exact-email'` narrows the substring search to trimmed, case-insensitive EMAIL
+     * EQUALITY (same term requirement, ceiling and ordering).
      */
     listMentionCandidates(
       spreadsheetId: string,
-      options?: { q?: string; limit?: number },
+      options?: { q?: string; limit?: number; match?: 'exact-email' },
     ): Promise<{ items: CommentMentionCandidate[] }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
     /** @deprecated Use `getUnreadSummary()` for richer unread data. */

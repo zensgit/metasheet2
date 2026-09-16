@@ -115,7 +115,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
-import { loadSheetLiveness, loadSheetLivenessBatch, SHEET_DELETED_CODE, type SheetLiveness } from './sheet-liveness'
+import { loadSheetLiveness, loadSheetLivenessBatch, SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE, type SheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -190,6 +190,15 @@ export class AutomationTestRunRejectedError extends Error {
     this.name = 'AutomationTestRunRejectedError'
   }
 }
+
+/**
+ * testRun's rule gate (#5812 follow-up). ONE code and ONE fixed, values-free message for a missing rule,
+ * a rule bound to another sheet and a disabled rule, so the refusal is not an oracle for rule ids or for
+ * which sheet owns a rule. Thrown as a typed rejection so the route passes it through by CODE — the route
+ * no longer recognises this refusal by matching message text.
+ */
+export const TEST_RUN_RULE_NOT_FOUND_CODE = 'TEST_RUN_RULE_NOT_FOUND'
+export const TEST_RUN_RULE_NOT_FOUND_MESSAGE = 'Automation rule not found or not enabled'
 
 function valuesFreeSimulationStep(step: AutomationStepResult): AutomationStepResult {
   return {
@@ -4288,7 +4297,20 @@ export class AutomationService {
     // rule owned by sheet B. Bind the rule to the gated sheet, mirroring updateRule/deleteRule
     // (`existing.sheet_id !== sheetId → not found`).
     if (!rule || rule.sheet_id !== sheetId || !rule.enabled) {
-      throw new Error(`Rule ${ruleId} not found or not enabled`)
+      throw new AutomationTestRunRejectedError(404, TEST_RUN_RULE_NOT_FOUND_CODE, TEST_RUN_RULE_NOT_FOUND_MESSAGE)
+    }
+    // SHEET LIVENESS (#5812 follow-up), defence in depth: the route refuses a non-live sheet first (after its
+    // capability 403, so an unauthorized caller learns nothing) and stays authoritative; this NARROWS (does not
+    // close) the check-then-run window and covers any direct caller. A soft-delete landing after this check but
+    // before/while executeRule runs still proceeds (real_fire included — the executor's same-sheet fast path never
+    // reads meta_sheets). Accepted residual, no lock: identical check-then-run shape to the webhook/retry/resume
+    // lanes, and a soft-deleted sheet is restorable. Both modes, before input validation, any
+    // execution and any persistence — nothing is run or recorded. Same helper and semantics as the other
+    // direct-execute lanes (#5803/#5810): refuse on EXACTLY 'deleted'; 'absent' passes; a THROWN lookup fails
+    // OPEN with the values-free WARN. `rule.sheet_id === sheetId` here, so this is the gated sheet. The body is
+    // the route's own SHEET_DELETED refusal, so the client cannot tell which layer answered.
+    if (!(await this.ruleSheetLive(rule, 'automation.test_run'))) {
+      throw new AutomationTestRunRejectedError(404, SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE)
     }
     const execRule = toExecutorRule(rule)
     let testRunRoot: string | undefined

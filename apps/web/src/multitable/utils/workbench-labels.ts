@@ -78,6 +78,8 @@ export type WorkbenchLabelKey =
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
   | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
+  // #5813: the header Comments button ends an in-progress comment edit (see onToggleComments).
+  | 'confirm.discardCommentEdit'
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // B1-S1 D0-A: default confirm copy for a side-effecting button run (used when
   // the button's own confirm.message is blank).
@@ -274,6 +276,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'confirm.discardRecordChanges': {
     en: 'Discard unsaved record changes?',
     zh: '放弃未保存的记录更改吗？',
+  },
+  'confirm.discardCommentEdit': {
+    en: 'Discard your unsaved edit to this comment?',
+    zh: '放弃对这条评论未保存的修改吗？',
   },
   'confirm.buttonRun': {
     en: 'Run this button action?',

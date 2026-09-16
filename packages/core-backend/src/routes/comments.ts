@@ -137,6 +137,12 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  */
 type CommentReadContext = {
   userId: string
+  /**
+   * #5808: the id `resolveRequestAccess` derived from `req.user` ONLY — empty when there is no
+   * authenticated user. Unlike `userId` it never falls back to the `x-user-id` header, so it is the
+   * only id allowed to decide whose comments get mention labels.
+   */
+  authenticatedUserId: string
   deniedRowIds: Set<string>
 }
 
@@ -155,7 +161,20 @@ async function resolveCommentReadContext(req: Request, res: Response, spreadshee
       deniedRowIds.add(rowId)
     }
   }
-  return { userId: access.userId || getUserId(req), deniedRowIds }
+  return { userId: access.userId || getUserId(req), authenticatedUserId: access.userId || '', deniedRowIds }
+}
+
+/**
+ * #5808 — whose comments on a list page get `mentionLabels` (see CommentService.getComments). Only an
+ * interactive session caller's own comments, i.e. the comments the edit UI can open: an API-token
+ * request (`apiTokenId`, set by apiTokenAuth) gets none — the token surface cannot reach the mention
+ * search either, so labels there would be a new disclosure — and so does a request without an
+ * authenticated user id.
+ */
+function mentionLabelsAuthorFor(req: Request, context: CommentReadContext): string | undefined {
+  if (typeof req.apiTokenId === 'string' && req.apiTokenId.length > 0) return undefined
+  const authorId = context.authenticatedUserId.trim()
+  return authorId.length > 0 ? authorId : undefined
 }
 
 function isRowDenied(context: CommentReadContext, rowId?: string): boolean {
@@ -194,12 +213,17 @@ function filterDeniedRows(rowIds: string[] | undefined, context: CommentReadCont
  * ELIGIBILITY IS UNCHANGED: who can be returned for a matching term is still every active user
  * (CommentService.listMentionCandidates's predicate is untouched). Narrowing that set — e.g. to the
  * sheet's readers — is a separate change and is NOT done here.
+ *
+ * #5809 — `exactEmail` (GET /api/comments/mention-candidates?match=exact-email) asks the service for
+ * EMAIL EQUALITY instead of the substring search. (a)–(c) apply unchanged — a term is still required
+ * and the ceiling still clamps — and the rows can only be fewer (see CommentService).
  */
 async function loadBoundedMentionCandidates(
   commentService: ICommentService,
   spreadsheetId: string,
   rawQuery: string | undefined,
   requestedLimit: number,
+  exactEmail = false,
 ): Promise<{
   items: CommentMentionCandidate[]
   limit: number
@@ -213,7 +237,10 @@ async function loadBoundedMentionCandidates(
   if (query.length < MENTION_CANDIDATES_MIN_QUERY_LENGTH) {
     return { items: [], limit, query: '', hasMore: false, requiresQuery: true, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
   }
-  const result = await commentService.listMentionCandidates(spreadsheetId, { q: query, limit: limit + 1 })
+  const result = await commentService.listMentionCandidates(
+    spreadsheetId,
+    exactEmail ? { q: query, limit: limit + 1, match: 'exact-email' } : { q: query, limit: limit + 1 },
+  )
   const hasMore = result.items.length > limit
   const items = hasMore ? result.items.slice(0, limit) : result.items
   return { items, limit, query, hasMore, requiresQuery: false, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
@@ -287,6 +314,8 @@ export function commentsRouter(injector?: Injector): Router {
         viewerId: context.userId,
         excludeRowIds: deniedRows(context),
       }
+      const mentionLabelsAuthorId = mentionLabelsAuthorFor(req, context)
+      if (mentionLabelsAuthorId) options.mentionLabelsAuthorId = mentionLabelsAuthorId
       const result = await commentService.getComments(spreadsheetId, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
@@ -309,6 +338,9 @@ export function commentsRouter(injector?: Injector): Router {
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
+    // #5809: opt-in email-equality lookup (legacy person import). Any other `match` value keeps the
+    // substring search exactly as before.
+    const exactEmail = readQueryValue(req.query.match) === 'exact-email'
 
     try {
       const context = await resolveCommentReadContext(req, res, parsed.data.spreadsheetId)
@@ -320,6 +352,7 @@ export function commentsRouter(injector?: Injector): Router {
         parsed.data.spreadsheetId,
         parsed.data.q,
         clampLimit(parsed.data.limit),
+        exactEmail,
       )
       return res.json({
         ok: true,

@@ -16,11 +16,23 @@ import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 import { insertCommittedAuditKysely, type OapiWriteAuditContext } from '../multitable/oapi-write-audit'
 import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
+import { JS_TRIM_WHITESPACE } from '../utils/js-trim-whitespace'
 import {
   escapeMentionLikeTerm,
   MENTION_CANDIDATES_MAX_ITEMS,
   MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+  MENTION_LABELS_MAX_IDS,
 } from './comment-mention-bounds'
+
+/**
+ * The label a mention editor shows for a user — ONE derivation shared by the mention search
+ * (listMentionCandidates) and the edit-time labels (#5808), so the name a picked person gets written
+ * into `@[label](id)` with is the name an old comment's untokenised mention is shown with. Empty when
+ * the row has neither a name nor an email.
+ */
+function mentionUserLabel(row: { name?: string | null; email?: string | null }): string {
+  return row.name?.trim() || row.email?.trim() || ''
+}
 
 /**
  * Server-side emoji allowlist for comment reactions (B6, design-lock §3.2).
@@ -100,6 +112,8 @@ export interface Comment {
   mentions: string[]
   /** Aggregated emoji reactions (B6); populated by getComments, else undefined. */
   reactions?: CommentReactionSummary[]
+  /** #5808: labels for this comment's own `mentions`; see CommentQueryOptions.mentionLabelsAuthorId. */
+  mentionLabels?: Record<string, string>
 }
 
 export interface CommentPresenceSummary {
@@ -452,7 +466,72 @@ export class CommentService {
       item.reactions = reactionsByComment.get(item.id) ?? []
     }
 
+    // #5808: edit-time mention labels — see hydrateOwnMentionLabels.
+    const labelAuthorId = options?.mentionLabelsAuthorId?.trim()
+    if (labelAuthorId) {
+      await this.hydrateOwnMentionLabels(items, labelAuthorId)
+    }
+
     return { items, total }
+  }
+
+  /**
+   * #5808 — labels for mentions an edit has to keep.
+   *
+   * A comment created with an explicit `mentions` array (e.g. through the API) need not carry its
+   * mentions as `@[label](id)` tokens in the body, and since #5795 the UI no longer preloads a roster
+   * to find their names. This puts the name next to the id the caller already receives.
+   *
+   * WHAT IT CAN NAME (all four hold):
+   *  - only ids in the `mentions` of a comment ON THIS PAGE — a page the route has already filtered
+   *    by the G-8 sheet-read gate and the row-level read deny;
+   *  - only on comments AUTHORED BY `authorId` (the only comments the UI lets that user edit), and
+   *    each comment gets labels for its OWN mentions only;
+   *  - only ACTIVE users (`is_active = true`, the same set the mention search returns). A deactivated
+   *    or deleted user gets no entry, deterministically — the client shows a neutral placeholder;
+   *  - at most MENTION_LABELS_MAX_IDS distinct ids per page (first appearance in page order), the
+   *    mention search's own per-request ceiling. Later ids get no entry.
+   * The label is the one the mention search already returns for the same person (name, else email).
+   * ONE batched `users` query per page; none when there is nothing to resolve.
+   */
+  private async hydrateOwnMentionLabels(items: Comment[], authorId: string): Promise<void> {
+    const ownItems = items.filter((item) => item.authorId === authorId)
+    for (const item of ownItems) {
+      item.mentionLabels = {}
+    }
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const item of ownItems) {
+      for (const id of item.mentions) {
+        if (seen.has(id)) continue
+        if (ids.length >= MENTION_LABELS_MAX_IDS) break
+        seen.add(id)
+        ids.push(id)
+      }
+    }
+    if (ids.length === 0) return
+
+    const rows = await db
+      .selectFrom('users')
+      .select(['id', 'name', 'email'])
+      .where('id', 'in', ids)
+      .where('is_active', '=', true)
+      .execute()
+
+    // Only ids this call asked for, and only a non-empty label (never the raw id as a "name").
+    const labelById = new Map<string, string>()
+    for (const row of rows) {
+      const label = mentionUserLabel(row)
+      if (label && seen.has(row.id)) labelById.set(row.id, label)
+    }
+    for (const item of ownItems) {
+      const labels: Record<string, string> = {}
+      for (const id of item.mentions) {
+        const label = labelById.get(id)
+        if (label !== undefined) labels[id] = label
+      }
+      item.mentionLabels = labels
+    }
   }
 
   /**
@@ -478,10 +557,20 @@ export class CommentService {
    *  - no COUNT. The old `total` was a deployment-wide count of matching active users (for a
    *    term-less call: the size of the whole user base) and was returned to any comments:read
    *    holder. It is no longer computed at all; the routes report the clamped page size instead.
+   *
+   * #5809 — `match: 'exact-email'` swaps the substring predicate for EMAIL EQUALITY: the stored email,
+   * trimmed with the characters JS `trim()` strips (JS_TRIM_WHITESPACE, bound as a parameter) and
+   * lower-cased, must equal the trimmed, lower-cased term. It is used by the legacy person importer,
+   * which must know whether THE owner of an address exists — a substring page of 50 can be filled by
+   * `wangli@…`, `zhangli@…` before `li@…` shows up. It only narrows: a row whose trimmed email equals
+   * the term also contains it, so (with per-character case folding) the exact rows for a term are a
+   * subset of the substring rows for the same term. Everything else is shared: the term requirement,
+   * `is_active`, the LIMIT ceiling, the ordering and the row mapping. Any other `match` is the
+   * substring search.
    */
   async listMentionCandidates(
     spreadsheetId: string,
-    options?: { q?: string; limit?: number },
+    options?: { q?: string; limit?: number; match?: 'exact-email' },
   ): Promise<{ items: CommentMentionCandidate[] }> {
     const normalizedSheetId = spreadsheetId.trim()
     if (!normalizedSheetId) return { items: [] }
@@ -497,15 +586,18 @@ export class CommentService {
     const escapedQuery = escapeMentionLikeTerm(normalizedQuery)
     const likeQuery = `%${escapedQuery}%`
     const startsWithQuery = `${escapedQuery}%`
+    const exactEmail = options?.match === 'exact-email'
 
     const rows = await db
       .selectFrom('users')
       .where('is_active', '=', true)
-      .where((eb) => eb.or([
-        sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
-        sql<boolean>`lower(email) like ${likeQuery}`,
-        sql<boolean>`lower(id) like ${likeQuery}`,
-      ]))
+      .where((eb) => eb.or(exactEmail
+        ? [sql<boolean>`lower(btrim(coalesce(email, ''), ${JS_TRIM_WHITESPACE})) = ${normalizedQuery}`]
+        : [
+          sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
+          sql<boolean>`lower(email) like ${likeQuery}`,
+          sql<boolean>`lower(id) like ${likeQuery}`,
+        ]))
       .select(['id', 'name', 'email'])
       .orderBy(
         sql<number>`case
@@ -522,7 +614,7 @@ export class CommentService {
 
     return {
       items: rows.map((row) => {
-        const label = row.name?.trim() || row.email.trim() || row.id
+        const label = mentionUserLabel(row) || row.id
         const subtitle = row.name?.trim() && row.email.trim() && row.name.trim() !== row.email.trim()
           ? row.email.trim()
           : undefined

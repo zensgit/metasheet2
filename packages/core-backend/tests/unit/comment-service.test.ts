@@ -685,6 +685,97 @@ describe('CommentService', () => {
 
       expect(result.total).toBe(0)
     })
+
+    // #5808: an old comment whose mentions are not `@[label](id)` tokens in its body must still show
+    // (and keep) those mentions when its author edits it. The list names them — for the caller's OWN
+    // comments only, active users only, one batched lookup, bounded per page. Fake ids/emails only.
+    describe('#5808 edit-time mention labels', () => {
+      type Chain = Record<string, ReturnType<typeof vi.fn>>
+      async function usersChains(): Promise<Chain[]> {
+        const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+        return db.selectFrom.mock.calls
+          .map((args, index) => ({ table: args[0], chain: db.selectFrom.mock.results[index]?.value as Chain }))
+          .filter((entry) => entry.table === 'users')
+          .map((entry) => entry.chain)
+      }
+
+      function queuePage(rows: Array<Record<string, unknown>>, userRows?: Array<Record<string, unknown>>) {
+        pushTakeFirst({ c: rows.length })
+        pushExec(rows)
+        pushExec([]) // reactions
+        if (userRows) pushExec(userRows)
+      }
+
+      it("labels only the caller's own comments, each with its own mentions, via ONE batched active-user query", async () => {
+        queuePage([
+          makeCommentRow({ id: 'cmt_own_1', author_id: 'user-author', mentions: JSON.stringify(['u-alpha', 'u-beta']) }),
+          makeCommentRow({ id: 'cmt_other', author_id: 'user-other', mentions: JSON.stringify(['u-zeta']) }),
+          makeCommentRow({ id: 'cmt_own_2', author_id: 'user-author', mentions: JSON.stringify(['u-beta', 'u-gone', 'u-blank']) }),
+        ], [
+          { id: 'u-alpha', name: 'Fake Alpha', email: 'alpha@example.invalid' },
+          { id: 'u-beta', name: null, email: 'beta@example.invalid' },
+          // not asked for (only on someone else's comment) — a stray row must never be attached
+          { id: 'u-zeta', name: 'Fake Zeta', email: 'zeta@example.invalid' },
+          // a row with neither a name nor an email yields no label (never the raw id)
+          { id: 'u-blank', name: '  ', email: '' },
+          // u-gone: no row (deactivated or deleted) ⇒ deterministically absent
+        ])
+
+        const { items } = await service.getComments('sheet-1', { mentionLabelsAuthorId: 'user-author' })
+        const byId = new Map(items.map((item) => [item.id, item]))
+
+        expect(byId.get('cmt_own_1')!.mentionLabels).toEqual({ 'u-alpha': 'Fake Alpha', 'u-beta': 'beta@example.invalid' })
+        expect(byId.get('cmt_own_2')!.mentionLabels).toEqual({ 'u-beta': 'beta@example.invalid' })
+        expect(byId.get('cmt_other')!.mentionLabels).toBeUndefined()
+        // labels never rewrite the mention list itself
+        expect(byId.get('cmt_own_2')!.mentions).toEqual(['u-beta', 'u-gone', 'u-blank'])
+
+        const chains = await usersChains()
+        expect(chains).toHaveLength(1)
+        const [chain] = chains
+        expect(chain.select.mock.calls).toEqual([[['id', 'name', 'email']]])
+        expect(chain.where.mock.calls).toEqual([
+          ['id', 'in', ['u-alpha', 'u-beta', 'u-gone', 'u-blank']],
+          ['is_active', '=', true],
+        ])
+        expect(chain.execute).toHaveBeenCalledTimes(1)
+      })
+
+      it("issues no user lookup without an author, or when the author's comments mention nobody", async () => {
+        queuePage([makeCommentRow({ id: 'cmt_a', author_id: 'user-author', mentions: JSON.stringify(['u-alpha']) })])
+        const unlabelled = await service.getComments('sheet-1')
+        expect(unlabelled.items[0].mentionLabels).toBeUndefined()
+
+        queuePage([
+          makeCommentRow({ id: 'cmt_b', author_id: 'user-author', mentions: '[]' }),
+          makeCommentRow({ id: 'cmt_c', author_id: 'user-other', mentions: JSON.stringify(['u-alpha']) }),
+        ])
+        const nobody = await service.getComments('sheet-1', { mentionLabelsAuthorId: 'user-author' })
+        expect(nobody.items[0].mentionLabels).toEqual({})
+        expect(nobody.items[1].mentionLabels).toBeUndefined()
+
+        expect(await usersChains()).toHaveLength(0)
+      })
+
+      it('asks for at most MENTION_LABELS_MAX_IDS distinct ids per page (first appearance order)', async () => {
+        const { MENTION_LABELS_MAX_IDS } = await import('../../src/services/comment-mention-bounds')
+        expect(MENTION_LABELS_MAX_IDS).toBe(50)
+        const many = Array.from({ length: 120 }, (_unused, index) => `u-${index + 1}`)
+        queuePage([
+          makeCommentRow({ id: 'cmt_many_1', author_id: 'user-author', mentions: JSON.stringify(many.slice(0, 30)) }),
+          makeCommentRow({ id: 'cmt_many_2', author_id: 'user-author', mentions: JSON.stringify(many) }),
+        ], many.map((id) => ({ id, name: `Fake ${id}`, email: `${id}@example.invalid` })))
+
+        const { items } = await service.getComments('sheet-1', { mentionLabelsAuthorId: 'user-author' })
+
+        const [chain] = await usersChains()
+        const asked = chain.where.mock.calls.find((args) => args[0] === 'id')![2] as string[]
+        expect(asked).toEqual(many.slice(0, 50))
+        // even though the (mocked) DB returned every row, nothing past the ceiling gets a label
+        expect(Object.keys(items[1].mentionLabels!)).toEqual(many.slice(0, 50))
+        expect(items[1].mentions).toHaveLength(120)
+      })
+    })
   })
 
   // ── getMentionSummary ─────────────────────────────────────────────────
@@ -1002,6 +1093,52 @@ describe('CommentService', () => {
           expect(likeParams(chain)).toEqual([`%${universal}%`, `%${universal}%`, `%${universal}%`])
           expect(chain.limit.mock.calls[0][0]).toBe(51)
         }
+      })
+
+      // #5809 — the legacy person importer's email-owner lookup. It must be EQUALITY on the trimmed,
+      // lower-cased email only: a substring page of 50 can be filled by `wangli@…` before `li@…`.
+      describe('#5809 match: exact-email', () => {
+        function whereFragments(chain: Chain): Array<{ text: string; params: unknown[] }> {
+          const callback = chain.where.mock.calls.map((args) => args[0]).find((arg) => typeof arg === 'function') as
+            | ((eb: { or: (xs: unknown[]) => unknown[] }) => unknown[])
+            | undefined
+          expect(callback).toBeTypeOf('function')
+          return callback!({ or: (xs) => xs }).map((fragment) => {
+            const node = (fragment as {
+              toOperationNode: () => { sqlFragments: string[]; parameters: Array<{ value: unknown }> }
+            }).toOperationNode()
+            return { text: node.sqlFragments.join('?'), params: node.parameters.map((p) => p.value) }
+          })
+        }
+
+        it('swaps the three LIKE arms for ONE trimmed email equality, with the JS trim() set bound', async () => {
+          const { JS_TRIM_WHITESPACE } = await import('../../src/utils/js-trim-whitespace')
+          pushExec([])
+          await service.listMentionCandidates('sheet-1', { q: '  Fake.Person@Example.Invalid ', limit: 100000, match: 'exact-email' })
+          const chain = await lastUsersChain()
+          const fragments = whereFragments(chain)
+          expect(fragments).toEqual([
+            { text: "lower(btrim(coalesce(email, ''), ?)) = ?", params: [JS_TRIM_WHITESPACE, 'fake.person@example.invalid'] },
+          ])
+          expect(fragments[0].text).not.toMatch(/like/i)
+          // Same ceiling and same active-only filter as the substring search.
+          expect(chain.limit.mock.calls[0][0]).toBe(51)
+          expect(chain.where.mock.calls[0]).toEqual(['is_active', '=', true])
+        })
+
+        it('still requires a term (no query for a blank one)', async () => {
+          pushExec([{ id: 'user-9', name: 'Fake', email: 'fake@example.invalid' }])
+          const result = await service.listMentionCandidates('sheet-1', { q: '   ', match: 'exact-email' })
+          expect(result.items).toEqual([])
+          const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+          expect(db.selectFrom).not.toHaveBeenCalled()
+        })
+
+        it('any other match value is the substring search, unchanged', async () => {
+          pushExec([])
+          await service.listMentionCandidates('sheet-1', { q: 'fake', match: 'exact' as unknown as 'exact-email' })
+          expect(likeParams(await lastUsersChain())).toEqual(['%fake%', '%fake%', '%fake%'])
+        })
       })
     })
   })
