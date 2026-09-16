@@ -5572,6 +5572,17 @@ const ensureLegacyBase = ensureLegacyBaseShared
  *     a trust source).
  */
 async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetProvisionPlan> {
+  const peopleSheetRow = await selectPeopleSheetRow(query, baseId)
+  const peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
+  return { peopleSheetRow, peopleSheetId }
+}
+
+/**
+ * The ONE rule for "which sheet is the People directory of this base" - shared by the People sync
+ * (`planPeopleSheetPreset`) and `GET /people-search`, so the search reads the sheet the sync maintains
+ * and not a shadowed or forged sentinel-only sheet. Returns the live row, or null when the base has none.
+ */
+async function selectPeopleSheetRow(query: QueryFn, baseId: string): Promise<any | null> {
   // `system_kind` is read column-tolerantly (same form as history-integrity-precheck.ts): before the
   // zzzz20260715180000 migration has run the column is absent, the expression yields NULL, and the pick
   // below degrades to the sentinel-only lookup this function used before — no sheet can carry
@@ -5588,12 +5599,11 @@ async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<Pe
   // that merely carries the user-writable sentinel description; the sentinel stays only as the
   // fallback for People sheets provisioned before `system_kind` existed (never backfilled).
   const candidateRows = existingSheets.rows as any[]
-  const peopleSheetRow =
+  return (
     candidateRows.find((row) => row.system_kind === SYSTEM_PEOPLE_SHEET_KIND) ??
     candidateRows.find((row) => isSystemPeopleSheetDescription(row.description)) ??
     null
-  const peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
-  return { peopleSheetRow, peopleSheetId }
+  )
 }
 
 async function ensurePeopleSheetPreset(
@@ -13259,11 +13269,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       const query = pool.query.bind(pool)
 
-      const sheetsRes = await query(
-        `SELECT id FROM meta_sheets WHERE base_id = $1 AND description = $2 AND deleted_at IS NULL LIMIT 1`,
-        [baseId, SYSTEM_PEOPLE_SHEET_DESCRIPTION],
-      )
-      const peopleSheetId = (sheetsRes.rows[0] as any)?.id
+      // Same selection rule as the People sync (system_kind first, then the earliest trimmed sentinel).
+      const peopleSheetRow = await selectPeopleSheetRow(query as unknown as QueryFn, baseId)
+      const peopleSheetId: string | undefined = typeof peopleSheetRow?.id === 'string' ? peopleSheetRow.id : undefined
 
       if (!peopleSheetId) {
         return res.json({ ok: true, data: { items: [] } })

@@ -99,7 +99,7 @@ paths:
   /api/comments/mention-candidates:
     get:
       summary: List comment mention candidates
-      description: Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. The term is a literal case-insensitive substring of name, email or id; `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
+      description: Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. By default the term is a literal case-insensitive substring of name, email or id. When `match=exact-email` (#5819) is set, the term is instead matched against the stored email by trimmed, case-insensitive equality - still requires a non-blank `q`, and the returned rows are a subset of what the substring search would return for the same term. `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -109,6 +109,12 @@ paths:
         - in: query
           name: q
           schema: { type: string }
+        - in: query
+          name: match
+          schema:
+            type: string
+            enum: [exact-email]
+          description: Optional. When set to `exact-email`, switches from substring search to trimmed, case-insensitive email equality (#5819).
         - in: query
           name: limit
           schema: { type: integer, default: 50 }
