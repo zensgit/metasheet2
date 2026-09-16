@@ -13,6 +13,13 @@ export interface MetaCommentMentionSuggestion {
   id: string
   label: string
   subtitle?: string
+  /**
+   * #5808: the host could not name this person (an already-mentioned id with no label from the server
+   * or the search cache). The composer shows a neutral placeholder instead of `label`, keeps the id in
+   * `mentions`, and never writes it into the body as an `@[label](id)` token. A blank `label` is
+   * treated the same way.
+   */
+  unresolved?: boolean
 }
 
 /**
@@ -81,4 +88,12 @@ export interface MultitableComment {
    * ADDITIVE, same multitable-inert reasoning as `deleted` above.
    */
   editedAt?: string | null
+  /**
+   * #5808: display labels for THIS comment's own `mentions`, keyed by user id — sent by
+   * GET /api/comments for the caller's own comments only (the ones the edit UI opens), active users
+   * only. An id missing here has no nameable user. ADDITIVE: absent on every other payload (create /
+   * update responses, realtime, approval comments), and `upsertComment` keeps an existing value when
+   * an incoming payload lacks it.
+   */
+  mentionLabels?: Record<string, string>
 }

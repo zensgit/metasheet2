@@ -16480,6 +16480,10 @@ export interface components {
             updatedAt?: string;
             /** @description Mentioned user identifiers parsed from comment content. */
             mentions?: string[];
+            /** @description Display labels for this comment's own mentions, keyed by user id. Only in GET /api/comments responses to an interactive session caller, only on that caller's own comments, only for active users, and for at most 50 distinct ids per response. Never sent to API-token callers. An id without an entry has no nameable user. */
+            mentionLabels?: {
+                [key: string]: string;
+            };
         };
         CommentsListResponse: {
             /** @example true */

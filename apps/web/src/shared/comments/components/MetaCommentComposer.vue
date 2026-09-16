@@ -17,7 +17,7 @@
         :disabled="disabled || submitting"
         @click="removeMention(mention.id)"
       >
-        <span>@{{ mention.label }}</span>
+        <span>@{{ mentionChipLabel(mention) }}</span>
         <span aria-hidden="true">&times;</span>
       </button>
     </div>
@@ -282,7 +282,22 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * #5808: a mention the host could not name (flagged `unresolved`, or handed over with a blank label).
+ * It is shown under a neutral placeholder — never its raw id — is never looked for in the text, and is
+ * never written into the body as an `@[label](id)` token (the placeholder is not the person's name).
+ * Its id still travels in `mentions`.
+ */
+function isUnresolvedMention(mention: MetaCommentMentionSuggestion): boolean {
+  return mention.unresolved === true || !mention.label?.trim()
+}
+
+function mentionChipLabel(mention: MetaCommentMentionSuggestion): string {
+  return isUnresolvedMention(mention) ? l('comment.mentionUnknownUser') : mention.label
+}
+
 function hasMentionText(content: string, mention: MetaCommentMentionSuggestion): boolean {
+  if (isUnresolvedMention(mention)) return false
   const plainMentionRegex = new RegExp(`(^|\\s)@${escapeRegex(mention.label)}(?=\\s|$)`)
   const tokenMentionRegex = new RegExp(`@\\[${escapeRegex(mention.label)}\\]\\(${escapeRegex(mention.id)}\\)`)
   return plainMentionRegex.test(content) || tokenMentionRegex.test(content)
@@ -291,6 +306,7 @@ function hasMentionText(content: string, mention: MetaCommentMentionSuggestion):
 function serializeContent(content: string): string {
   let next = content
   for (const mention of selectedMentions.value) {
+    if (isUnresolvedMention(mention)) continue
     const token = `@[${mention.label}](${mention.id})`
     const tokenRegex = new RegExp(`@\\[${escapeRegex(mention.label)}\\]\\(${escapeRegex(mention.id)}\\)`)
     if (tokenRegex.test(next)) continue
@@ -302,7 +318,14 @@ function serializeContent(content: string): string {
 
 function onInput(event: Event) {
   const value = (event.target as HTMLTextAreaElement).value
-  selectedMentions.value = selectedMentions.value.filter((mention) => hasMentionText(value, mention))
+  // #5808: drop a mention only when THIS edit removed its `@label` text. A mention whose text was never
+  // in the draft (an edited comment created with an explicit `mentions` array, or one whose label
+  // could not be resolved) has nothing to remove: it stays until its chip is clicked. Filtering on
+  // "present in the new text" alone dropped every such mention on the first keystroke.
+  const previous = props.modelValue
+  selectedMentions.value = selectedMentions.value.filter(
+    (mention) => hasMentionText(value, mention) || !hasMentionText(previous, mention),
+  )
   activeSuggestionIndex.value = 0
   suggestionsDismissed.value = false
   emit('update:modelValue', value)

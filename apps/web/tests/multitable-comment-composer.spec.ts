@@ -298,4 +298,119 @@ describe('MetaCommentComposer', () => {
       app.unmount()
     })
   })
+
+  // #5808 — editing a comment whose mentions are NOT in the text (created with an explicit `mentions`
+  // array). The composer used to drop, on every input, each selected mention whose `@label` was absent
+  // from the NEW text — so such a mention vanished on the first keystroke and the save removed it.
+  describe('edit keeps mentions that are not in the text (#5808)', () => {
+    type Mention = { id: string; label: string; unresolved?: boolean }
+
+    function mountEditing(initial: string, initialMentions: Mention[]) {
+      const draft = ref(initial)
+      const submitSpy: Array<{ content: string; mentions: string[] }> = []
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        setup() {
+          return () => h(MetaCommentComposer, {
+            modelValue: draft.value,
+            initialMentions,
+            submitKind: 'save',
+            'onUpdate:modelValue': (value: string) => {
+              draft.value = value
+            },
+            onSubmit: (payload: { content: string; mentions: string[] }) => {
+              submitSpy.push(payload)
+            },
+          })
+        },
+      })
+      app.mount(container)
+      return { app, draft, submitSpy }
+    }
+
+    function chipLabels(): string[] {
+      return Array.from(container!.querySelectorAll('.meta-comment-composer__mention-chip span:first-child'))
+        .map((node) => node.textContent?.trim() ?? '')
+    }
+
+    async function type(value: string) {
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      textarea.value = value
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+    }
+
+    async function submit() {
+      ;(container!.querySelector('.meta-comment-composer__submit') as HTMLButtonElement).click()
+      await nextTick()
+    }
+
+    it('a keystroke keeps a labelled and an unresolved mention that are absent from the text, and save sends both ids', async () => {
+      const { app, submitSpy } = mountEditing('Please double-check', [
+        { id: 'user_fake_robin', label: 'Robin Example' },
+        { id: 'user_fake_gone', label: '', unresolved: true },
+      ])
+      await nextTick()
+      expect(chipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+      expect(container!.textContent).not.toContain('user_fake_gone')
+
+      await type('Please double-check!')
+      expect(chipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+
+      await submit()
+      expect(submitSpy).toEqual([{
+        content: 'Please double-check!',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+      }])
+      app.unmount()
+    })
+
+    it('deleting the text of a mention that WAS in the text still drops it', async () => {
+      const { app, submitSpy } = mountEditing('@Jamie hello', [{ id: 'user_jamie', label: 'Jamie' }])
+      await nextTick()
+      expect(chipLabels()).toEqual(['@Jamie'])
+
+      await type('@Jami hello')
+      expect(chipLabels()).toEqual([])
+
+      await submit()
+      expect(submitSpy).toEqual([{ content: '@Jami hello', mentions: [] }])
+      app.unmount()
+    })
+
+    it('an unresolved mention is never written into the body as a token, and its chip still removes it', async () => {
+      // neither the placeholder text nor a bare `@ ` may turn into an `@[…](user_fake_gone)` token
+      const { app, submitSpy } = mountEditing('@Unknown user cc @ later', [{ id: 'user_fake_gone', label: '', unresolved: true }])
+      await nextTick()
+      await type('@Unknown user cc @ later!')
+      await submit()
+      expect(submitSpy[0]).toEqual({ content: '@Unknown user cc @ later!', mentions: ['user_fake_gone'] })
+
+      ;(container!.querySelector('.meta-comment-composer__mention-chip') as HTMLButtonElement).click()
+      await nextTick()
+      expect(chipLabels()).toEqual([])
+      await submit()
+      expect(submitSpy[1]).toEqual({ content: '@Unknown user cc @ later!', mentions: [] })
+      app.unmount()
+    })
+
+    it('an unresolved mention is never matched against the text, so editing a bare @ does not drop it', async () => {
+      const { app, submitSpy } = mountEditing('ping @ there', [{ id: 'user_fake_gone', label: '', unresolved: true }])
+      await nextTick()
+      await type('ping there')
+      expect(chipLabels()).toEqual(['@Unknown user'])
+      await submit()
+      expect(submitSpy).toEqual([{ content: 'ping there', mentions: ['user_fake_gone'] }])
+      app.unmount()
+    })
+
+    it('a blank label counts as unresolved even without the flag (never renders an empty chip or the id)', async () => {
+      const { app } = mountEditing('x', [{ id: 'user_fake_blank', label: '   ' }])
+      await nextTick()
+      expect(chipLabels()).toEqual(['@Unknown user'])
+      expect(container!.textContent).not.toContain('user_fake_blank')
+      app.unmount()
+    })
+  })
 })

@@ -65,6 +65,25 @@ export function normalizeMultitableCommentMentions(payload: MultitableCommentMen
 }
 
 /**
+ * #5808: carry the list response's `mentionLabels`, keeping only string labels for ids that are in the
+ * comment's own (normalized) `mentions`. Undefined when absent, so an unlabelled payload is
+ * distinguishable from "labelled, nobody nameable".
+ */
+export function normalizeMultitableCommentMentionLabels(
+  payload: { mentionLabels?: unknown } | null | undefined,
+  mentions: string[],
+): Record<string, string> | undefined {
+  const raw = payload?.mentionLabels
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const labels: Record<string, string> = {}
+  for (const id of mentions) {
+    const label = (raw as Record<string, unknown>)[id]
+    if (typeof label === 'string' && label.trim().length > 0) labels[id] = label.trim()
+  }
+  return labels
+}
+
+/**
  * Normalize the per-comment `reactions` aggregate (B6). The whitelist normalizer
  * drops unknown raw fields, so reactions MUST be carried explicitly here or the
  * backend's reactions array is silently lost on the wire (wire-vs-fixture drift).
@@ -92,6 +111,8 @@ export function normalizeMultitableCommentReactions(
 export function normalizeMultitableComment(payload: RawComment | null | undefined): MultitableComment {
   const identity = normalizeMultitableCommentIdentity(payload)
   const fieldId = normalizeMultitableCommentFieldId(payload)
+  const mentions = normalizeMultitableCommentMentions(payload)
+  const mentionLabels = normalizeMultitableCommentMentionLabels(payload, mentions)
   return {
     id: normalizeCommentId(payload?.id),
     containerId: identity.containerId,
@@ -101,7 +122,7 @@ export function normalizeMultitableComment(payload: RawComment | null | undefine
     fieldId,
     targetFieldId: fieldId,
     parentId: normalizeOptionalCommentId(payload?.parentId),
-    mentions: normalizeMultitableCommentMentions(payload),
+    mentions,
     authorId: normalizeCommentId(payload?.authorId),
     authorName: typeof payload?.authorName === 'string' ? payload.authorName : undefined,
     content: typeof payload?.content === 'string' ? payload.content : '',
@@ -117,5 +138,7 @@ export function normalizeMultitableComment(payload: RawComment | null | undefine
     editedAt: typeof (payload as { editedAt?: unknown } | null | undefined)?.editedAt === 'string'
       ? (payload as { editedAt?: unknown }).editedAt as string
       : undefined,
+    // #5808: only present when the payload carried it (list responses) — see the helper above.
+    ...(mentionLabels ? { mentionLabels } : {}),
   }
 }
