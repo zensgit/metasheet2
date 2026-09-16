@@ -1382,35 +1382,48 @@ describe('TemplateAuthoringView', () => {
   // `validateTemplateBasicInfo(draft, unsupportedReason)` (`TemplateAuthoringView.vue`
   // `basicInfoIssueCount`). This exercises the LIVE component derivation (not the pure helper in
   // isolation — a helper-only test would pass even if the view's binding were broken/hardcoded), at
-  // three states: 1 known issue, 0 issues, 1 different known issue. A mutation that hardcodes the
-  // badge number or drops `.length` fails at least one of these three assertions.
+  // three states: 2 known issues, 0 issues, 1 different known issue. A mutation that hardcodes the
+  // badge number, clamps it, or drops `.length` fails at least one of these three assertions.
   //
   // Re-pinned (approval-form-ux-slice1, 20260916 design §1.2/A4): `key` is now seeded at
-  // draft-creation time, so a brand-new draft carries exactly ONE typed issue (blank `name`), not
-  // two — this is the same badge this slice's A4 acceptance requires to NOT show 模板 Key 必填 for
-  // an unsaved new draft. State 1's count is the direct, mutation-provable observation of A4.
+  // draft-creation time, so a brand-new draft no longer carries the 模板 Key 必填 issue — this is
+  // the same badge this slice's A4 acceptance requires to NOT show that issue for an unsaved new
+  // draft. That alone would leave State 1 at a single typed issue (blank `name`), which is
+  // insufficient to distinguish a genuinely-derived `.length` from a hand-counted/clamped constant
+  // (e.g. `Math.min(basicInfoIssues.value.length, 1)` reads identically to a real 1-issue count).
+  // Re-pinned again (remedy round 1, gate condition 3, 20260916): State 1 additionally types an
+  // invalid SLA before the first read, so it observes TWO simultaneous issues (blank name + bad
+  // SLA text) — a count that a `Math.min(..., 1)` clamp cannot reproduce. State 2 now clears both
+  // issues (fills name AND repairs the SLA text) to reach 0, and State 3 reintroduces the SLA
+  // issue alone to prove the count still tracks the CURRENT typed array, not a first-seen value.
   it('P1-A0: the 基础信息 step-nav issue count is DERIVED from typed issues, not hand-counted', async () => {
     await mountView()
 
-    // State 1 (A4): brand-new draft — key is pre-seeded (non-blank), only name is empty →
-    // exactly 1 typed issue, and it must NOT be the key one.
+    // State 1 (A4 + discriminating power): brand-new draft — key is pre-seeded (non-blank), name
+    // is empty, and SLA is typed as invalid text → exactly 2 typed issues, neither of them the key
+    // one. A clamp/hand-count that caps at 1 cannot reproduce '2 项不完善'.
+    setInput('approval-template-sla-hours', 'abc')
+    await flushUi()
     let badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
-    expect(badge?.textContent?.trim()).toBe('1 项不完善')
+    expect(badge?.textContent?.trim()).toBe('2 项不完善')
     // The count also folds into the step button's aria-label (it OVERRIDES inner text for
     // assistive tech, so a visual-only badge would be silently unannounced — see P1-A0 view diff).
     const basicStepButton = container!.querySelector('[data-testid="approval-template-section-basic"]')
-    expect(basicStepButton?.getAttribute('aria-label')).toContain('1 项不完善')
+    expect(basicStepButton?.getAttribute('aria-label')).toContain('2 项不完善')
 
-    // State 2: fill both required fields → count derives to 0, badge disappears entirely (not "0
-    // 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for a zero state).
+    // State 2: fill the name AND repair the SLA text → count derives to 0, badge disappears
+    // entirely (not "0 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for
+    // a zero state).
     setInput('approval-template-name', '出差审批')
+    setInput('approval-template-sla-hours', '24')
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge).toBeNull()
     expect(basicStepButton?.getAttribute('aria-label')).not.toContain('项不完善')
 
-    // State 3: introduce exactly ONE different issue (bad SLA text) → count derives to 1, proving
-    // the badge tracks the CURRENT typed array rather than being stuck at its first-seen value.
+    // State 3: introduce exactly ONE different issue (bad SLA text again) → count derives to 1,
+    // proving the badge tracks the CURRENT typed array rather than being stuck at its first-seen
+    // value (and rules out a badge that merely never goes back below 2 once it has been there).
     setInput('approval-template-sla-hours', 'abc')
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
