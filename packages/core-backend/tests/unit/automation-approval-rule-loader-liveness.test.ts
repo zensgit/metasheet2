@@ -5,23 +5,33 @@
  * trigger_type + enabled + trigger_config.templateId and NOTHING else. The record lane
  * (`loadEnabledRules`) and the scheduled lane both ask `loadSheetLiveness` and suppress on exactly
  * `'deleted'`; these two did not, so a rule attached to a soft-deleted sheet stayed armed on the
- * approval channels — it could still send a webhook / email / DingTalk message, and could still reach
- * OTHER live sheets through a cross-sheet action.
+ * approval channels: it could still send a webhook / email / DingTalk message, and — only with the
+ * default-OFF `APPROVAL_FWB_WRITEBACK_ENABLED` flag AND durable delivery on — still write to a live
+ * target sheet via `write_approval_form_values`. Every other record-writing action is save-rejected on
+ * these two channels, so in a default deployment an armed dead-sheet rule is an outbound-message bug.
  *
  * What is pinned here:
  *   1. deleted sheet  → the rule is NOT returned, on BOTH channels (the fix).
  *   2. live sheet     → the rule IS still returned, on BOTH channels (the fix is not an outage).
- *   3. mixed batch    → the question is asked PER RULE, not once per call (one call spans many sheets).
+ *   3. mixed batch    → the DECISION is per rule (one call spans many sheets), while the LOOKUP is ONE
+ *                       batched round trip carrying the distinct sheet ids — asserted, not assumed,
+ *                       because this runs inside a durable consumer's lease.
  *   4. absent sheet   → still returned. `=== 'deleted'`, NOT `!== 'live'` — the same comparison the
  *                       sibling record lane makes. Widening it here would be a second, stricter rule
  *                       that nobody chose.
- *   5. lookup THROWS  → FAIL-OPEN: the rule stays armed and the keep is logged with the rule id and a
- *                       coded reason. Fail-closed would turn a transient DB error into a silent,
- *                       deployment-wide outage of every approval automation — no error, no execution
- *                       row, and (because a dropped rule never reaches its per-rule dedup claim) no
- *                       redelivery to repair it.
- *   6. parity         → the same deleted sheet is refused identically by the sibling `loadEnabledRules`,
- *                       so the three lanes cannot drift into three definitions of "live".
+ *   5. lookup THROWS  → FAIL-OPEN: the rule stays armed and the keep is logged with the rule ids and a
+ *                       coded reason. This is a DELIBERATE DIVERGENCE from the sibling lanes, which do
+ *                       not catch at all — case 9 pins both sides of it so the difference cannot be
+ *                       read as an accident (or silently removed from one side).
+ *   6. log volume     → aggregated: one WARN per distinct dead sheet / one per failed call, carrying
+ *                       `ruleCount` + a capped id sample; the per-rule line is DEBUG. A 50-rule
+ *                       template must not write 50 warn lines per approval event.
+ *   7. housekeeping   → the dedup-ledger sweep is still kicked when the filter empties the rule list
+ *                       (it used to be reached on every such event, before the filter existed).
+ *   8. parity (verdict) → the SAME deleted sheet is refused identically by the sibling record lane AND
+ *                       by the scheduled-dispatch lane, so the three lanes share one "live".
+ *   9. parity (errors)  → and they deliberately DIFFER on a failed lookup: record lane propagates
+ *                       (nothing runs, durable delivery redelivers), approval lane catches and keeps.
  *
  * Zero-DB: the kysely chain is a stub and liveness is answered by a fake queryFn, so the suite runs
  * anywhere. No supertest / app-mode here (CI tripwire #4154).
@@ -31,9 +41,12 @@ import { Logger } from '../../src/core/logger'
 import { AutomationService } from '../../src/multitable/automation-service'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 
-const LIVENESS_SQL = /SELECT\s+deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*\$1/i
+const LIVENESS_ONE_SQL = /SELECT\s+deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*\$1/i
+const LIVENESS_BATCH_SQL = /SELECT\s+id,\s*deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*ANY/i
 
 type SheetState = 'live' | 'deleted' | 'absent' | 'throws'
+/** One entry per liveness ROUND TRIP: `one` = the per-sheet sibling form, `batch` = the loader form. */
+type LivenessCall = { kind: 'one' | 'batch'; ids: string[] }
 
 function ruleRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -57,22 +70,35 @@ function ruleRow(overrides: Record<string, unknown> = {}) {
 
 /**
  * The db stub returns `rows` for every `.execute()`, so the SAME fixture drives the completed loader,
- * the task_created loader and the sibling record loader — that is what makes the parity case (6) real
- * rather than three fixtures that happen to agree.
+ * the task_created loader and the sibling record loader — that is what makes the parity cases (8, 9)
+ * real rather than three fixtures that happen to agree.
  */
 function makeService(rows: Record<string, unknown>[], sheets: Record<string, SheetState>) {
-  const livenessCalls: string[] = []
+  const livenessCalls: LivenessCall[] = []
+  const stateOf = (sheetId: string): SheetState => sheets[sheetId] ?? 'absent'
+  const rowFor = (sheetId: string, withId: boolean) => ({
+    ...(withId ? { id: sheetId } : {}),
+    deleted_at: stateOf(sheetId) === 'deleted' ? new Date('2026-09-01T00:00:00Z') : null,
+  })
   const queryFn = vi.fn(async (sqlText: string, params: unknown[]) => {
-    if (!LIVENESS_SQL.test(sqlText)) return { rows: [], rowCount: 0 }
-    const sheetId = String(params?.[0] ?? '')
-    livenessCalls.push(sheetId)
-    const state = sheets[sheetId] ?? 'absent'
-    if (state === 'throws') throw new Error('connection terminated: host=db.internal user=svc')
-    if (state === 'absent') return { rows: [], rowCount: 0 }
-    return {
-      rows: [{ deleted_at: state === 'deleted' ? new Date('2026-09-01T00:00:00Z') : null }],
-      rowCount: 1,
+    if (LIVENESS_ONE_SQL.test(sqlText)) {
+      const sheetId = String(params?.[0] ?? '')
+      livenessCalls.push({ kind: 'one', ids: [sheetId] })
+      // The error text carries connection details on purpose: nothing may echo it into a log.
+      if (stateOf(sheetId) === 'throws') throw new Error('connection terminated: host=db.internal user=svc')
+      if (stateOf(sheetId) === 'absent') return { rows: [], rowCount: 0 }
+      return { rows: [rowFor(sheetId, false)], rowCount: 1 }
     }
+    if (LIVENESS_BATCH_SQL.test(sqlText)) {
+      const ids = (params?.[0] as string[]) ?? []
+      livenessCalls.push({ kind: 'batch', ids: [...ids] })
+      if (ids.some((id) => stateOf(id) === 'throws')) {
+        throw new Error('connection terminated: host=db.internal user=svc')
+      }
+      const found = ids.filter((id) => stateOf(id) !== 'absent').map((id) => rowFor(id, true))
+      return { rows: found, rowCount: found.length }
+    }
+    return { rows: [], rowCount: 0 }
   })
 
   const chain: Record<string, unknown> = {}
@@ -89,19 +115,36 @@ function makeService(rows: Record<string, unknown>[], sheets: Record<string, She
   return { service, livenessCalls, queryFn }
 }
 
+/** A minimal, in-contract `approval.approved` completion — enough to reach the dispatch body. */
+function completionEvent(templateId = 'tpl_1') {
+  return {
+    version: 1,
+    source: 'approval-product',
+    eventType: 'approval.approved',
+    eventId: 'evt_1',
+    occurredAt: new Date().toISOString(),
+    approval: { instanceId: 'ai_1', templateId },
+    transition: { toStatus: 'approved' },
+    requester: { id: 'u1' },
+  } as never
+}
+
 describe('approval rule loaders — sheet liveness (soft delete)', () => {
   let warn: ReturnType<typeof vi.spyOn>
+  let debug: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
     warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {}) as ReturnType<typeof vi.spyOn>
+    debug = vi.spyOn(Logger.prototype, 'debug').mockImplementation(() => {}) as ReturnType<typeof vi.spyOn>
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  const warnedAbout = (ruleId: string) =>
-    warn.mock.calls.filter((call) => String(call[0]).includes(ruleId))
+  /** A log line is "about" a rule when the rule id is in the message OR in the structured meta. */
+  const mentions = (spy: ReturnType<typeof vi.spyOn>, id: string) =>
+    spy.mock.calls.filter((call) => JSON.stringify([call[0], call[1] ?? null]).includes(id))
 
   it('completed: a rule on a SOFT-DELETED sheet is not returned, and the skip names the rule + reason', async () => {
     const { service, livenessCalls } = makeService(
@@ -112,11 +155,19 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     const rules = await service.loadEnabledApprovalCompletedRules('tpl_1')
 
     expect(rules, 'a soft-deleted sheet must contribute NO rules to the approval.completed channel').toEqual([])
-    expect(livenessCalls, 'the loader must actually ask about the rule sheet').toContain('sheet_dead')
-    const [message, meta] = warnedAbout('atr_dead')[0] ?? []
-    expect(message, 'the skip must be observable and name the rule').toContain('atr_dead')
-    expect(String(message)).toContain('approval.completed')
-    expect(meta).toMatchObject({ ruleId: 'atr_dead', sheetId: 'sheet_dead', reason: 'sheet_deleted' })
+    expect(livenessCalls, 'the loader must actually ask about the rule sheet').toEqual([
+      { kind: 'batch', ids: ['sheet_dead'] },
+    ])
+    const [message, meta] = mentions(warn, 'atr_dead')[0] ?? []
+    expect(message, 'the skip must be observable and name the channel + sheet').toContain('approval.completed')
+    expect(String(message)).toContain('sheet_dead')
+    expect(meta).toMatchObject({
+      channel: 'approval.completed',
+      sheetId: 'sheet_dead',
+      reason: 'sheet_deleted',
+      ruleCount: 1,
+      ruleIds: ['atr_dead'],
+    })
   })
 
   it('task_created: a rule on a SOFT-DELETED sheet is not returned either', async () => {
@@ -128,9 +179,9 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     const rules = await service.loadEnabledApprovalTaskCreatedRules('tpl_1')
 
     expect(rules, 'a soft-deleted sheet must contribute NO rules to the approval.task_created channel').toEqual([])
-    const [message, meta] = warnedAbout('atr_dead_tc')[0] ?? []
+    const [message, meta] = mentions(warn, 'atr_dead_tc')[0] ?? []
     expect(String(message)).toContain('approval.task_created')
-    expect(meta).toMatchObject({ ruleId: 'atr_dead_tc', sheetId: 'sheet_dead', reason: 'sheet_deleted' })
+    expect(meta).toMatchObject({ sheetId: 'sheet_dead', reason: 'sheet_deleted', ruleIds: ['atr_dead_tc'] })
   })
 
   it('a rule on a LIVE sheet is still returned on both channels (the guard is not an outage)', async () => {
@@ -143,13 +194,13 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     )
     expect((await taskCreated.service.loadEnabledApprovalTaskCreatedRules('tpl_1')).map((r) => r.id)).toEqual(['atr_ok_tc'])
 
-    expect(warn.mock.calls.filter((c) => String(c[0]).includes('atr_ok')), 'a live sheet logs nothing').toEqual([])
+    expect(mentions(warn, 'atr_ok'), 'a live sheet logs nothing').toEqual([])
   })
 
-  it('the question is asked PER RULE: one call mixing a live and a deleted sheet keeps only the live one', async () => {
-    // These loaders are template-keyed, so a single call spans many sheets — a once-per-call check
+  it('the DECISION is per rule: one call mixing a live and a deleted sheet keeps only the live one', async () => {
+    // These loaders are template-keyed, so a single call spans many sheets — a once-per-call decision
     // would either keep the dead rule or drop the live one. Both failures are covered by this case.
-    const { service } = makeService(
+    const { service, livenessCalls } = makeService(
       [
         ruleRow({ id: 'atr_a', sheet_id: 'sheet_dead' }),
         ruleRow({ id: 'atr_b', sheet_id: 'sheet_live' }),
@@ -161,9 +212,49 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     const rules = await service.loadEnabledApprovalCompletedRules('tpl_1')
 
     expect(rules.map((r) => r.id)).toEqual(['atr_b'])
-    // Per-rule LOG even though the deleted sheet is looked up once: both affected rules are named.
-    expect(warnedAbout('atr_a')).toHaveLength(1)
-    expect(warnedAbout('atr_c')).toHaveLength(1)
+    // ARITY, pinned rather than described: ONE round trip, naming each DISTINCT sheet exactly once.
+    expect(
+      livenessCalls,
+      'one batched lookup per call — a per-sheet (or per-rule) loop runs inside a durable lease',
+    ).toEqual([{ kind: 'batch', ids: ['sheet_dead', 'sheet_live'] }])
+    // Both affected rules are still individually named — at DEBUG, with the WARN aggregated.
+    expect(mentions(debug, 'atr_a')).toHaveLength(1)
+    expect(mentions(debug, 'atr_c')).toHaveLength(1)
+  })
+
+  it('ONE round trip even when a template routes many rules across many distinct sheets', async () => {
+    // The cost of an approval event must not scale with the number of distinct sheets: these loaders
+    // have no base/tenant predicate (#5780), so that count is deployment-wide for the template.
+    const sheets: Record<string, SheetState> = {}
+    const rows = Array.from({ length: 12 }, (_unused, i) => {
+      sheets[`sheet_${i}`] = i % 2 === 0 ? 'live' : 'deleted'
+      return ruleRow({ id: `atr_${i}`, sheet_id: `sheet_${i}` })
+    })
+    const { service, livenessCalls } = makeService(rows, sheets)
+
+    const rules = await service.loadEnabledApprovalCompletedRules('tpl_1')
+
+    expect(rules.map((r) => r.sheet_id)).toEqual(['sheet_0', 'sheet_2', 'sheet_4', 'sheet_6', 'sheet_8', 'sheet_10'])
+    expect(livenessCalls, '12 distinct sheets, ONE query').toHaveLength(1)
+    expect(livenessCalls[0].ids).toHaveLength(12)
+  })
+
+  it('LOG VOLUME is bounded by the call, not the rule count: 50 rules on one dead sheet warn ONCE', async () => {
+    // A failing/deleted sheet must not multiply the log by the template's rule count on every approval
+    // event. The aggregate carries the count and a capped id sample; the per-rule line is DEBUG.
+    const rows = Array.from({ length: 50 }, (_unused, i) => ruleRow({ id: `atr_n${i}`, sheet_id: 'sheet_dead' }))
+    const { service } = makeService(rows, { sheet_dead: 'deleted' })
+
+    expect(await service.loadEnabledApprovalCompletedRules('tpl_1')).toEqual([])
+
+    const warnsAboutSheet = warn.mock.calls.filter((c) => String(c[0]).includes('sheet_dead'))
+    expect(warnsAboutSheet, 'one WARN per distinct dead sheet — not one per rule').toHaveLength(1)
+    const meta = warnsAboutSheet[0][1] as { ruleCount: number; ruleIds: string[] }
+    expect(meta.ruleCount, 'the aggregate carries the exact count').toBe(50)
+    expect(meta.ruleIds, 'the id sample is capped, with the remainder counted').toEqual([
+      'atr_n0', 'atr_n1', 'atr_n2', 'atr_n3', 'atr_n4', '+45 more',
+    ])
+    expect(debug.mock.calls.filter((c) => String(c[0]).includes('skipped')), 'per-rule detail survives at DEBUG').toHaveLength(50)
   })
 
   it("an ABSENT sheet still fires — `=== 'deleted'`, the same comparison the record lane makes", async () => {
@@ -181,27 +272,37 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     ).toEqual(['atr_absent'])
   })
 
-  it('FAIL-OPEN: when the liveness lookup THROWS the rule stays armed, and the keep is logged', async () => {
-    // The alternative (fail-closed) is a silent, deployment-wide outage: fewer rules returned, no error
-    // raised, no execution row written, and no dedup claim to drive a redelivery. This assertion IS the
-    // decision — inverting the choice in dropRulesOnDeletedSheets must turn this case red.
-    const { service } = makeService([ruleRow({ id: 'atr_blip', sheet_id: 'sheet_unreadable' })], {
-      sheet_unreadable: 'throws',
-    })
+  it('FAIL-OPEN: when the liveness lookup THROWS the rules stay armed, and the keep is logged ONCE', async () => {
+    // The alternative (swallow and drop) is a silent, deployment-wide outage: fewer rules returned, no
+    // error raised, no execution row written, and no dedup claim to drive a redelivery. This assertion
+    // IS the decision — inverting the choice in dropRulesOnDeletedSheets must turn this case red.
+    const { service } = makeService(
+      [
+        ruleRow({ id: 'atr_blip', sheet_id: 'sheet_unreadable' }),
+        ruleRow({ id: 'atr_blip2', sheet_id: 'sheet_other' }),
+      ],
+      { sheet_unreadable: 'throws' },
+    )
 
     const rules = await service.loadEnabledApprovalCompletedRules('tpl_1')
 
-    expect(rules.map((r) => r.id), 'a transient liveness failure must not silently disarm the rule').toEqual(['atr_blip'])
-    const [message, meta] = warnedAbout('atr_blip')[0] ?? []
-    expect(message, 'the fail-open keep must be observable, not inferred from absent runs').toContain('atr_blip')
+    expect(
+      rules.map((r) => r.id),
+      'a transient liveness failure must not silently disarm the rules',
+    ).toEqual(['atr_blip', 'atr_blip2'])
+    const failOpenWarns = warn.mock.calls.filter((c) => String((c[1] as { reason?: string })?.reason) === 'liveness_lookup_failed')
+    expect(failOpenWarns, 'one failed query, one WARN — even mid-incident with many rules').toHaveLength(1)
+    const [message, meta] = failOpenWarns[0]
+    expect(message, 'the fail-open keep must be observable, not inferred from absent runs').toContain('failing OPEN')
     expect(meta).toMatchObject({
-      ruleId: 'atr_blip',
-      sheetId: 'sheet_unreadable',
+      channel: 'approval.completed',
       reason: 'liveness_lookup_failed',
+      ruleCount: 2,
+      ruleIds: ['atr_blip', 'atr_blip2'],
       errorClass: 'Error',
     })
     // VALUES-FREE: the error CLASS is logged, never the error text (it carried connection details here).
-    const serialized = JSON.stringify({ message, meta })
+    const serialized = JSON.stringify([...warn.mock.calls, ...debug.mock.calls])
     expect(serialized).not.toContain('db.internal')
     expect(serialized).not.toContain('connection terminated')
   })
@@ -215,11 +316,61 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     const rules = await service.loadEnabledApprovalTaskCreatedRules('tpl_1')
 
     expect(rules.map((r) => r.id)).toEqual(['atr_blip_tc'])
-    expect(warnedAbout('atr_blip_tc')[0]?.[1]).toMatchObject({ reason: 'liveness_lookup_failed' })
+    expect(mentions(warn, 'atr_blip_tc')[0]?.[1]).toMatchObject({ reason: 'liveness_lookup_failed' })
   })
 
-  it('parity: the sibling record lane refuses the SAME deleted sheet, so the lanes share one definition', async () => {
+  it('parity (verdict): the record lane AND the scheduled lane refuse the SAME deleted sheet', async () => {
+    const { service } = makeService([ruleRow({ id: 'atr_dead', sheet_id: 'sheet_dead' })], {
+      sheet_dead: 'deleted',
+      sheet_live: 'live',
+    })
+    expect(await service.loadEnabledRules('sheet_dead'), 'record lane').toEqual([])
+
+    // SCHEDULED lane: the dispatch callback the scheduler fires on its own clock. Reached directly so
+    // this pin does not depend on timers — without it, deleting the scheduler's `=== 'deleted'` check
+    // leaves every case in this file green while a cron rule on a dead sheet keeps firing.
+    const scheduled = (service as never as { scheduler: { callback: (rule: unknown) => Promise<void> } }).scheduler
+    const execute = vi.spyOn(service, 'executeRule').mockResolvedValue({} as never)
+
+    await scheduled.callback({ id: 'sch_dead', sheetId: 'sheet_dead', trigger: { type: 'schedule.cron' }, actions: [] })
+    expect(execute, 'scheduled lane: a soft-deleted sheet must not fire').not.toHaveBeenCalled()
+
+    await scheduled.callback({ id: 'sch_live', sheetId: 'sheet_live', trigger: { type: 'schedule.cron' }, actions: [] })
+    expect(execute, 'control: a live sheet still fires, so the assertion above is not vacuous').toHaveBeenCalledTimes(1)
+  })
+
+  it('parity (errors): the record lane PROPAGATES a failed lookup, the approval lane catches it — a deliberate divergence', async () => {
+    // The two lanes agree on the VERDICT and disagree on the ERROR, on purpose. Pinned from BOTH sides:
+    // aligning either one silently (making the record lane fail-open, or removing the catch here) turns
+    // this case red, so the divergence can only be changed on purpose.
+    const recordLane = makeService([ruleRow({ id: 'atr_blip', sheet_id: 'sheet_unreadable' })], {
+      sheet_unreadable: 'throws',
+    })
+    await expect(
+      recordLane.service.loadEnabledRules('sheet_unreadable'),
+      'record lane: the throw propagates — no rule of that sheet runs, and under durable delivery the handler throw is a retryable adapter_error that redelivers',
+    ).rejects.toThrow()
+
+    const approvalLane = makeService([ruleRow({ id: 'atr_blip', sheet_id: 'sheet_unreadable' })], {
+      sheet_unreadable: 'throws',
+    })
+    await expect(
+      approvalLane.service.loadEnabledApprovalCompletedRules('tpl_1'),
+      'approval lane: caught and kept armed (durable delivery is default OFF here, so a propagated throw would be a lost event on the legacy bus)',
+    ).resolves.toHaveLength(1)
+  })
+
+  it('housekeeping still runs when the filter empties the rule list', async () => {
+    // Before the filter existed, every completion with a matched rule reached the dedup-ledger sweep.
+    // A dead-sheet-only template must not quietly stop that sweep: the kick sits ABOVE the empty guard.
     const { service } = makeService([ruleRow({ id: 'atr_dead', sheet_id: 'sheet_dead' })], { sheet_dead: 'deleted' })
-    expect(await service.loadEnabledRules('sheet_dead')).toEqual([])
+    const kick = vi.spyOn(
+      service as never as { kickEventDedupLedgerSweepIfDue: (nowMs: number) => void },
+      'kickEventDedupLedgerSweepIfDue',
+    ).mockImplementation(() => {})
+
+    await service.handleApprovalCompletionTrigger(completionEvent())
+
+    expect(kick, 'the retention sweep must not become conditional on this channel contributing rules').toHaveBeenCalledTimes(1)
   })
 })
