@@ -685,6 +685,97 @@ describe('CommentService', () => {
 
       expect(result.total).toBe(0)
     })
+
+    // #5808: an old comment whose mentions are not `@[label](id)` tokens in its body must still show
+    // (and keep) those mentions when its author edits it. The list names them — for the caller's OWN
+    // comments only, active users only, one batched lookup, bounded per page. Fake ids/emails only.
+    describe('#5808 edit-time mention labels', () => {
+      type Chain = Record<string, ReturnType<typeof vi.fn>>
+      async function usersChains(): Promise<Chain[]> {
+        const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+        return db.selectFrom.mock.calls
+          .map((args, index) => ({ table: args[0], chain: db.selectFrom.mock.results[index]?.value as Chain }))
+          .filter((entry) => entry.table === 'users')
+          .map((entry) => entry.chain)
+      }
+
+      function queuePage(rows: Array<Record<string, unknown>>, userRows?: Array<Record<string, unknown>>) {
+        pushTakeFirst({ c: rows.length })
+        pushExec(rows)
+        pushExec([]) // reactions
+        if (userRows) pushExec(userRows)
+      }
+
+      it("labels only the caller's own comments, each with its own mentions, via ONE batched active-user query", async () => {
+        queuePage([
+          makeCommentRow({ id: 'cmt_own_1', author_id: 'user-author', mentions: JSON.stringify(['u-alpha', 'u-beta']) }),
+          makeCommentRow({ id: 'cmt_other', author_id: 'user-other', mentions: JSON.stringify(['u-zeta']) }),
+          makeCommentRow({ id: 'cmt_own_2', author_id: 'user-author', mentions: JSON.stringify(['u-beta', 'u-gone', 'u-blank']) }),
+        ], [
+          { id: 'u-alpha', name: 'Fake Alpha', email: 'alpha@example.invalid' },
+          { id: 'u-beta', name: null, email: 'beta@example.invalid' },
+          // not asked for (only on someone else's comment) — a stray row must never be attached
+          { id: 'u-zeta', name: 'Fake Zeta', email: 'zeta@example.invalid' },
+          // a row with neither a name nor an email yields no label (never the raw id)
+          { id: 'u-blank', name: '  ', email: '' },
+          // u-gone: no row (deactivated or deleted) ⇒ deterministically absent
+        ])
+
+        const { items } = await service.getComments('sheet-1', { mentionLabelsAuthorId: 'user-author' })
+        const byId = new Map(items.map((item) => [item.id, item]))
+
+        expect(byId.get('cmt_own_1')!.mentionLabels).toEqual({ 'u-alpha': 'Fake Alpha', 'u-beta': 'beta@example.invalid' })
+        expect(byId.get('cmt_own_2')!.mentionLabels).toEqual({ 'u-beta': 'beta@example.invalid' })
+        expect(byId.get('cmt_other')!.mentionLabels).toBeUndefined()
+        // labels never rewrite the mention list itself
+        expect(byId.get('cmt_own_2')!.mentions).toEqual(['u-beta', 'u-gone', 'u-blank'])
+
+        const chains = await usersChains()
+        expect(chains).toHaveLength(1)
+        const [chain] = chains
+        expect(chain.select.mock.calls).toEqual([[['id', 'name', 'email']]])
+        expect(chain.where.mock.calls).toEqual([
+          ['id', 'in', ['u-alpha', 'u-beta', 'u-gone', 'u-blank']],
+          ['is_active', '=', true],
+        ])
+        expect(chain.execute).toHaveBeenCalledTimes(1)
+      })
+
+      it("issues no user lookup without an author, or when the author's comments mention nobody", async () => {
+        queuePage([makeCommentRow({ id: 'cmt_a', author_id: 'user-author', mentions: JSON.stringify(['u-alpha']) })])
+        const unlabelled = await service.getComments('sheet-1')
+        expect(unlabelled.items[0].mentionLabels).toBeUndefined()
+
+        queuePage([
+          makeCommentRow({ id: 'cmt_b', author_id: 'user-author', mentions: '[]' }),
+          makeCommentRow({ id: 'cmt_c', author_id: 'user-other', mentions: JSON.stringify(['u-alpha']) }),
+        ])
+        const nobody = await service.getComments('sheet-1', { mentionLabelsAuthorId: 'user-author' })
+        expect(nobody.items[0].mentionLabels).toEqual({})
+        expect(nobody.items[1].mentionLabels).toBeUndefined()
+
+        expect(await usersChains()).toHaveLength(0)
+      })
+
+      it('asks for at most MENTION_LABELS_MAX_IDS distinct ids per page (first appearance order)', async () => {
+        const { MENTION_LABELS_MAX_IDS } = await import('../../src/services/comment-mention-bounds')
+        expect(MENTION_LABELS_MAX_IDS).toBe(50)
+        const many = Array.from({ length: 120 }, (_unused, index) => `u-${index + 1}`)
+        queuePage([
+          makeCommentRow({ id: 'cmt_many_1', author_id: 'user-author', mentions: JSON.stringify(many.slice(0, 30)) }),
+          makeCommentRow({ id: 'cmt_many_2', author_id: 'user-author', mentions: JSON.stringify(many) }),
+        ], many.map((id) => ({ id, name: `Fake ${id}`, email: `${id}@example.invalid` })))
+
+        const { items } = await service.getComments('sheet-1', { mentionLabelsAuthorId: 'user-author' })
+
+        const [chain] = await usersChains()
+        const asked = chain.where.mock.calls.find((args) => args[0] === 'id')![2] as string[]
+        expect(asked).toEqual(many.slice(0, 50))
+        // even though the (mocked) DB returned every row, nothing past the ceiling gets a label
+        expect(Object.keys(items[1].mentionLabels!)).toEqual(many.slice(0, 50))
+        expect(items[1].mentions).toHaveLength(120)
+      })
+    })
   })
 
   // ── getMentionSummary ─────────────────────────────────────────────────

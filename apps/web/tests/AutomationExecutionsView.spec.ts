@@ -268,4 +268,35 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     expect(inline?.textContent ?? '').toContain('changed') // RULE_CHANGED → localized inline message
     confirmSpy.mockRestore()
   })
+
+  // #5803: resumeExecution() refuses a rule whose sheet is soft-deleted with 409 SHEET_DELETED, before the
+  // single-use token is claimed. The view must show its own localized copy, not the raw English sentence.
+  const RESUME_SHEET_DELETED_SERVER_TEXT = "SHEET_DELETED: the rule's sheet has been deleted; suspended execution not resumed."
+  for (const locale of [
+    { name: 'zh', set: 'zh-CN', expected: '规则所在的表已被删除，未恢复执行。请先恢复该表后重试。' },
+    { name: 'en', set: 'en', expected: "The rule's sheet has been deleted, so nothing was resumed. Restore the sheet and try again." },
+  ] as const) {
+    it(`#5803 (${locale.name}): a 409 SHEET_DELETED resume refusal renders the sheet-deleted copy inline`, async () => {
+      useLocale().setLocale(locale.set)
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const err = Object.assign(new Error(RESUME_SHEET_DELETED_SERVER_TEXT), { code: 'SHEET_DELETED' })
+      const client = makeClient({
+        listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),
+        getAutomationRun: vi.fn().mockResolvedValue(SUSPENDED_DETAIL),
+        resumeAutomation: vi.fn().mockRejectedValue(err),
+      })
+      mounted = mount(client)
+      await settle()
+      ;(mounted.container.querySelector('[data-run-id="axe_s"]') as HTMLElement).click()
+      await settle()
+      ;(mounted.container.querySelector('[data-action="resume"]') as HTMLElement).click()
+      await settle()
+      expect(client.resumeAutomation).toHaveBeenCalledTimes(1)
+      const inline = mounted.container.querySelector('[data-field="resume-error"]')
+      expect(inline?.textContent ?? '').toBe(locale.expected)
+      expect(mounted.container.textContent).not.toContain(RESUME_SHEET_DELETED_SERVER_TEXT)
+      confirmSpy.mockRestore()
+      useLocale().setLocale('en')
+    })
+  }
 })

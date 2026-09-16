@@ -1,6 +1,9 @@
 // View-layer-only helpers for the employee overview chrome.
 // Do not use these to change punch, policy, approval, or API contracts.
 
+import type { AttendanceOverviewAttentionKey } from './attendanceOverviewPriority'
+import type { WorkspaceDisplayIconId } from './attendanceEmployeeWorkspaceCommonIcons'
+
 export type WorkspaceTranslateFn = (en: string, zh: string) => string
 
 const EMPTY_WINDOW = new Set(['', '—', '-', '–', '—'])
@@ -106,4 +109,42 @@ export function isClockedIn(
   timeline: { checkIn: string | null; checkOut: string | null } | null | undefined,
 ): boolean {
   return Boolean(timeline?.checkIn && !timeline.checkOut)
+}
+
+export type HeroPunchEmphasis = 'check_in' | 'check_out' | 'complete'
+
+/** Next punch CTA only — never disables a button or changes emit payloads. */
+export function resolveHeroPunchEmphasis(
+  timeline: { checkIn: string | null; checkOut: string | null } | null | undefined,
+): HeroPunchEmphasis {
+  if (timeline?.checkIn && timeline.checkOut) return 'complete'
+  if (isClockedIn(timeline)) return 'check_out'
+  return 'check_in'
+}
+
+export type TodoMarkTone = 'makeup' | 'leave' | 'review' | 'setup' | 'clear'
+
+export interface TodoMarkPresentation {
+  icon: WorkspaceDisplayIconId
+  tone: TodoMarkTone
+}
+
+/** 缺卡 / anomaly (and punch-failure) rows keep the makeup 面性 icon. */
+export function resolveTodoMark(key: AttendanceOverviewAttentionKey): TodoMarkPresentation {
+  switch (key) {
+    case 'anomaly':
+    case 'punch_failure':
+      return { icon: 'clock-plus', tone: 'makeup' }
+    case 'request_pending':
+    case 'request_rejected':
+      return { icon: 'calendar', tone: 'leave' }
+    case 'record_review':
+    case 'unknown_status':
+      return { icon: 'pin', tone: 'review' }
+    case 'setup_needed':
+      return { icon: 'user', tone: 'setup' }
+    case 'all_clear':
+    default:
+      return { icon: 'check', tone: 'clear' }
+  }
 }
