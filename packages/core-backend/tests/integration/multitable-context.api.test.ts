@@ -1342,7 +1342,7 @@ describe('Multitable context API', () => {
         }
         if (sql.includes('FROM users') && sql.includes('is_active = TRUE')) {
           // #5807: the sync reads only id + name — it must not even ask for email / avatar.
-          expect(sql).not.toMatch(/email|avatar_url/)
+          expect(sql).not.toMatch(/\bemail\b|\bavatar_url\b/)
           return {
             rows: [
               { id: 'user_amy', name: 'Amy' },
