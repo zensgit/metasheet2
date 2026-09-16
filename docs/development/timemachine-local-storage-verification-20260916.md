@@ -42,3 +42,21 @@ The requested root device/inode guard mutation was rejected by the tool safety r
 Independent Sol high read-only review identified overlapping provider/result-wrapper responsibility and potentially lossy numeric inode/device binding. Follow-up confirmed raw-provider and bigint fixes, but retained a mismatch-error classification finding. Final correction shares the existing local binding-mismatch subtype and reconstructs a fresh values-free exception before the outer wrapper maps it. The repeated-put mismatch test now asserts the exact error code, not a broad prefix. Added adjacent-inode-above-MAX_SAFE_INTEGER and raw-provider invalid identity/hash negatives. Final 73-test execution is the implementation task's closure evidence; no final external 0/0/0 verdict is claimed. Reviewer session closed.
 
 No DB, customer storage, credentials, activation, deployment, or recovery operation was used. Runtime composition remains unconnected; key custody and NAS acceptance remain explicit next steps.
+
+## Cross-process retention follow-up
+
+Test-only local commit: `78bbd18134030c504040a27b2c390be223418e53`,
+parent published candidate `2de92ac69ed1936abe5428c9f16f4e284b977dbb`.
+Production provider bytes are unchanged. Two independently launched Node processes
+attempt pin and expired deletion for the same synthetic object. Only pinned/retained
+or refused/deleted outcomes are accepted; a fresh provider then proves the persisted
+winner and rejects deletion or resurrection as appropriate. This is concurrent process
+launch coverage, not a deterministic barrier at the filesystem publication instruction,
+physical power-loss evidence, or NAS acceptance.
+
+The same three-file focused command passed 74/74 (22 file-store, 19 object-store,
+33 application). `git diff --check` passed. No guard-removal mutation was attempted.
+The original 73-test result above remains bound to its original implementation commit.
+At this follow-up, published-head Node18/20 integration jobs were still running with
+their core-backend test steps successful; no remote result is claimed for this local
+test-only child. The separate local-custody proposal remains PROPOSED/NOT RATIFIED.
