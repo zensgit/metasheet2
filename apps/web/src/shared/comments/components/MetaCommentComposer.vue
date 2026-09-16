@@ -123,6 +123,27 @@ const emit = defineEmits<{
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const selectedMentions = ref<MetaCommentMentionSuggestion[]>([])
+/**
+ * #5808: ids of the chips that are TIED TO THE DRAFT TEXT — picked from the suggestions (the pick wrote
+ * `@label ` into the draft), or already named in the draft when the host handed the chip over (an
+ * edit's starting text). Only these chips follow the text: whenever the draft changes (the user typing,
+ * or the host clearing / replacing it after a send or a record switch) a tied chip whose text is gone
+ * is dropped. Any other chip — a mention stored only in `mentions`, or an unresolved one — is removed
+ * only by clicking it, so text that merely spells its name can neither tie nor drop it.
+ */
+const textBoundMentionIds = new Set<string>()
+/**
+ * #5808: what may follow a mention's `@label` in the text — whitespace, the end of the text, or
+ * punctuation ("@Alice Fake, please"; "@张三，请看"). Without the punctuation the name was never found,
+ * so its `@[label](id)` token was lost on save and deleting its text did not drop the chip.
+ * A full stop ends a name only when the text ends or whitespace follows it ("thanks @wang."): inside a
+ * word it is part of a longer name or an address ("@wang.li@corp.invalid" is not wang's text).
+ * (Declared up here, with the mask below: the immediate `initialMentions` watcher already matches text.)
+ */
+const MENTION_TEXT_END = '(?=$|\\s|[,;:!?)，。、；：！？）]|\\.(?=$|\\s))'
+// #5808: what a matched `@label` is blanked out with while shorter labels are looked for (see
+// mentionIdsWithText). A NUL is neither `@` nor whitespace, so blanked text never becomes another mention.
+const MENTION_TEXT_MASK = String.fromCharCode(0)
 const activeSuggestionIndex = ref(0)
 const suggestionsDismissed = ref(false)
 const { isZh } = useLocale()
@@ -253,6 +274,8 @@ watch(
       seen.add(mention.id)
       return true
     })
+    textBoundMentionIds.clear()
+    for (const id of mentionIdsWithText(props.modelValue, selectedMentions.value)) textBoundMentionIds.add(id)
   },
   { immediate: true, deep: true },
 )
@@ -273,13 +296,29 @@ watch(
 
 watch(
   () => props.modelValue,
-  () => {
+  (nextValue) => {
     suggestionsDismissed.value = false
+    // #5808: runs for every draft change, the host's own included — a host that clears the draft after
+    // a send (or replaces it on a record switch) must not leave the sent comment's picks behind.
+    dropTextBoundMentionsMissingFrom(nextValue)
   },
 )
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function plainMentionPattern(mention: MetaCommentMentionSuggestion, flags?: string): RegExp {
+  return new RegExp(`(^|\\s)@${escapeRegex(mention.label)}${MENTION_TEXT_END}`, flags)
+}
+
+// A dropped id may stay in textBoundMentionIds: a chip only comes back through a pick (which ties it
+// again) or an `initialMentions` reset (which rebuilds the set), so a stale id is never consulted.
+function dropTextBoundMentionsMissingFrom(content: string) {
+  const withText = mentionIdsWithText(content, selectedMentions.value)
+  selectedMentions.value = selectedMentions.value.filter(
+    (mention) => !textBoundMentionIds.has(mention.id) || withText.has(mention.id),
+  )
 }
 
 /**
@@ -298,19 +337,54 @@ function mentionChipLabel(mention: MetaCommentMentionSuggestion): string {
 
 function hasMentionText(content: string, mention: MetaCommentMentionSuggestion): boolean {
   if (isUnresolvedMention(mention)) return false
-  const plainMentionRegex = new RegExp(`(^|\\s)@${escapeRegex(mention.label)}(?=\\s|$)`)
+  const plainMentionRegex = plainMentionPattern(mention)
   const tokenMentionRegex = new RegExp(`@\\[${escapeRegex(mention.label)}\\]\\(${escapeRegex(mention.id)}\\)`)
   return plainMentionRegex.test(content) || tokenMentionRegex.test(content)
 }
 
+/**
+ * #5808: `mentions` with the longest label first (otherwise in their given order). One label can be the
+ * start of another ("Alice" / "Alice Fake", "wang" / "wang.li@corp.invalid"); the longer one has to
+ * claim its text first, or the shorter one turns "@Alice Fake" into Alice's token plus " Fake".
+ */
+function longestLabelFirst(mentions: MetaCommentMentionSuggestion[]): MetaCommentMentionSuggestion[] {
+  return [...mentions].sort((a, b) => (b.label?.length ?? 0) - (a.label?.length ?? 0))
+}
+
+/**
+ * #5808: ids of the `mentions` whose text (`@label`, or its `@[label](id)` token) is in `content`.
+ * Labels are tried longest first, and a label's plain text is blanked out before any shorter label is
+ * tried, so text that serializes as "Alice Fake" never also counts as Alice's. Mentions that share one
+ * label are all tried against the same text (either may be the person meant).
+ */
+function mentionIdsWithText(content: string, mentions: MetaCommentMentionSuggestion[]): Set<string> {
+  const byLabel = new Map<string, MetaCommentMentionSuggestion[]>()
+  for (const mention of longestLabelFirst(mentions)) {
+    if (isUnresolvedMention(mention)) continue
+    const sameLabel = byLabel.get(mention.label)
+    if (sameLabel) sameLabel.push(mention)
+    else byLabel.set(mention.label, [mention])
+  }
+  const found = new Set<string>()
+  let rest = content
+  for (const sameLabel of byLabel.values()) {
+    for (const mention of sameLabel) {
+      if (hasMentionText(rest, mention)) found.add(mention.id)
+    }
+    rest = rest.replace(plainMentionPattern(sameLabel[0], 'g'), (_match, prefix: string) => prefix + MENTION_TEXT_MASK)
+  }
+  return found
+}
+
 function serializeContent(content: string): string {
   let next = content
-  for (const mention of selectedMentions.value) {
+  // Longest label first — see longestLabelFirst.
+  for (const mention of longestLabelFirst(selectedMentions.value)) {
     if (isUnresolvedMention(mention)) continue
     const token = `@[${mention.label}](${mention.id})`
     const tokenRegex = new RegExp(`@\\[${escapeRegex(mention.label)}\\]\\(${escapeRegex(mention.id)}\\)`)
     if (tokenRegex.test(next)) continue
-    const plainMentionRegex = new RegExp(`(^|\\s)@${escapeRegex(mention.label)}(?=\\s|$)`, 'g')
+    const plainMentionRegex = plainMentionPattern(mention, 'g')
     next = next.replace(plainMentionRegex, (_match, prefix: string) => `${prefix}${token}`)
   }
   return next
@@ -318,14 +392,10 @@ function serializeContent(content: string): string {
 
 function onInput(event: Event) {
   const value = (event.target as HTMLTextAreaElement).value
-  // #5808: drop a mention only when THIS edit removed its `@label` text. A mention whose text was never
-  // in the draft (an edited comment created with an explicit `mentions` array, or one whose label
-  // could not be resolved) has nothing to remove: it stays until its chip is clicked. Filtering on
-  // "present in the new text" alone dropped every such mention on the first keystroke.
-  const previous = props.modelValue
-  selectedMentions.value = selectedMentions.value.filter(
-    (mention) => hasMentionText(value, mention) || !hasMentionText(previous, mention),
-  )
+  // #5808: chips are no longer filtered here against the typed text. Filtering every chip on "present
+  // in the new text" dropped, on the first keystroke, each mention whose text was never in the draft
+  // (an edited comment created with an explicit `mentions` array, or an unresolved one). Chips tied to
+  // the text are dropped by the `modelValue` watcher instead (see textBoundMentionIds).
   activeSuggestionIndex.value = 0
   suggestionsDismissed.value = false
   emit('update:modelValue', value)
@@ -337,9 +407,13 @@ function removeMention(id: string) {
 
 function selectSuggestion(suggestion: MetaCommentMentionSuggestion) {
   const nextValue = props.modelValue.replace(/(?:^|\s)@([^\s@]*)$/, (match) => {
-    const prefix = match.startsWith(' ') ? ' ' : ''
+    // Keep whichever whitespace preceded the `@` (a newline too): the picked chip is tied to its
+    // `@label` text, and "line@label" would not count as that text.
+    const prefix = /^\s/.test(match) ? match[0] : ''
     return `${prefix}@${suggestion.label} `
   })
+  // #5808: a pick writes `@label ` into the draft, so the chip follows that text from now on.
+  textBoundMentionIds.add(suggestion.id)
   selectedMentions.value = [...selectedMentions.value, suggestion]
   activeSuggestionIndex.value = 0
   suggestionsDismissed.value = false

@@ -75,8 +75,11 @@ export function normalizeMultitableCommentMentionLabels(
 ): Record<string, string> | undefined {
   const raw = payload?.mentionLabels
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const labels: Record<string, string> = {}
+  // Own entries only, into a prototype-less map: a mention id may be "constructor" / "__proto__" etc.,
+  // which must neither read an inherited member nor write the map's prototype.
+  const labels = Object.create(null) as Record<string, string>
   for (const id of mentions) {
+    if (!Object.hasOwn(raw, id)) continue
     const label = (raw as Record<string, unknown>)[id]
     if (typeof label === 'string' && label.trim().length > 0) labels[id] = label.trim()
   }

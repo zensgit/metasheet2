@@ -3027,6 +3027,104 @@ describe('MultitableWorkbench view wiring', () => {
         mentions: ['user_fake_robin', 'user_jamie'],
       })
     })
+
+    it('mention ids that are Object.prototype keys open the edit and are kept under a placeholder', async () => {
+      // an own non-string value and an inherited string are not labels either (read by own string key only)
+      const labels = Object.assign(Object.create({ user_fake_inherited: 'Fake Inherited' }), { user_fake_numeric: 42 })
+      const textarea = await openEditOf({
+        id: 'comment_proto_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Odd ids',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+        mentionLabels: labels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+      expect(textarea.value).toBe('Odd ids')
+      expect(composerChipLabels()).toEqual(Array(5).fill('@Unknown user'))
+
+      await typeInto(textarea, 'Odd ids!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_proto_1', {
+        content: 'Odd ids!',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+      })
+    })
+
+    // Fix round: a person picked for one NEW comment must not be mentioned again by the next one. The
+    // workbench clears the draft after a send and on a record switch but keeps passing the same empty
+    // `initialMentions`, so only the composer can drop the picked chip.
+    async function openNewCommentOn(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-open-comments="${recordId}"]`)!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function pickJamie(textarea: HTMLTextAreaElement) {
+      await typeInto(textarea, '@ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Jamie'])
+    }
+
+    it('after sending a comment that mentions someone, the next comment mentions nobody', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        targetId: 'rec_1',
+        content: '@[Jamie](user_jamie)',
+        mentions: ['user_jamie'],
+      }))
+      expect(textarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(textarea, 'thanks everyone')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(2)
+      expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        targetId: 'rec_1',
+        content: 'thanks everyone',
+        mentions: [],
+      }))
+    })
+
+    it('a person picked on one record is not mentioned by a note sent on the next record', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const nextTextarea = await openNewCommentOn('rec_2')
+      const confirmMessages = confirmSpy.mock.calls.map((call) => call[0])
+      confirmSpy.mockRestore()
+      expect(confirmMessages).toEqual(['Discard unsaved record changes?'])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(nextTextarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(nextTextarea, 'note for record two')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(1)
+      expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+        targetId: 'rec_2',
+        content: 'note for record two',
+        mentions: [],
+      }))
+    })
   })
 
   it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {
