@@ -60,3 +60,15 @@ The original 73-test result above remains bound to its original implementation c
 At this follow-up, published-head Node18/20 integration jobs were still running with
 their core-backend test steps successful; no remote result is claimed for this local
 test-only child. The separate local-custody proposal remains PROPOSED/NOT RATIFIED.
+
+## Published-head Node18 collection evidence
+
+Published SHA: `2de92ac69ed1936abe5428c9f16f4e284b977dbb`.
+Plugin System Tests run `35045855879`, Node18 job `104635395222`, terminal SUCCESS.
+Downloaded job log contains exactly 21 successful test-case entries for
+`tests/unit/multitable-recovery-archive-file-store.test.ts`, including separate-process
+read, immutable retention, directory-flush failure/replay, and bigint root identity.
+This verifies actual remote collection rather than inferring it from an aggregate
+green check. Node20 remained in progress at this evidence checkpoint. The newer
+22nd test in local commit `78bbd18134030c504040a27b2c390be223418e53` was not part of
+this remote SHA and is not covered by this job.
