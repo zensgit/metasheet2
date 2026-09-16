@@ -149,6 +149,45 @@ describe('persistent local archive object store', () => {
     expect(JSON.parse(stdout)).toEqual({ pinned: true, sha256: object.sha256, size: object.size })
   })
 
+  test('separate Node writers arbitrate pin and deletion using persisted authority', async () => {
+    const { options, store, object } = await setup()
+    await store.put(object)
+    const source = path.resolve('src/multitable/recovery-archive-file-store.ts')
+    const script = `
+      const { createRecoveryArchiveFileStoreProvider } = require(${JSON.stringify(source)});
+      (async () => {
+        const store = await createRecoveryArchiveFileStoreProvider({
+          ...JSON.parse(process.env.TM_FILE_OPTIONS), transactionDepth: { currentTransactionDepth: () => 0 }
+        });
+        const expected = JSON.parse(process.env.TM_FILE_EXPECTED);
+        if (process.env.TM_FILE_ACTION === 'pin') {
+          try { await store.pin(expected); process.stdout.write('pinned'); }
+          catch { process.stdout.write('refused'); }
+        } else {
+          const result = await store.deleteExpired({ ...expected, now: ${JSON.stringify(NOW)} });
+          process.stdout.write(result.outcome);
+        }
+      })().catch(() => process.exit(1));`
+    const run = (action: string) => promisify(execFile)(process.execPath, [require.resolve('tsx/cli'), '-e', script], {
+      env: {
+        ...process.env, TM_FILE_OPTIONS: JSON.stringify(options),
+        TM_FILE_EXPECTED: JSON.stringify(expected(object)), TM_FILE_ACTION: action,
+      },
+      timeout: 15_000,
+    })
+    const results = await Promise.all([run('pin'), run('delete')])
+    const outcomes = results.map((result) => result.stdout)
+    expect([['pinned', 'retained'], ['refused', 'deleted']]).toContainEqual(outcomes)
+    const restarted = await openStore(options)
+    if (outcomes[0] === 'pinned') {
+      expect((await restarted.get(expected(object))).pinned).toBe(true)
+      expect((await restarted.deleteExpired({ ...expected(object), now: NOW })).outcome).toBe('retained')
+    } else {
+      expect(await restarted.head(expected(object))).toBeNull()
+      await expect(restarted.put(object)).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE')
+    }
+  })
+
   test('failed publication directory flush does not report success and replay recovers', async () => {
     const { options, store, object } = await setup()
     const open = fs.open
