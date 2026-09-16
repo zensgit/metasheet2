@@ -8,6 +8,24 @@
 > and rule bundle A (`OD-W4C-44=(a)`, `45=(a)`, `46=(a)`, `47=(a)`, `48=(a)`,
 > `49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, `53=(i)`). Effective 2026-07-27.
 >
+> **Supersession table for this document's own body (added 2026-09-16).** This file was written
+> BEFORE the ratify and its body still argues the pre-ratify position in several places. The owner
+> comment governs; the passages below are retained **only as pre-approval history** and are NOT
+> operative. Each one also carries an inline marker at its own location, so a reader who lands there
+> directly is not misled.
+>
+> | Passage | What it says | Status after the ratify |
+> |---|---|---|
+> | §0 framing (`OD-W4C-49..53` "does **not** resolve") | the draft leaves these open | **Superseded** — bundle A resolved all of them on 2026-07-27 |
+> | §1.6 "Pending `O-1`/`OD-W4C-49`" | the class-`01` assignment is a proposal | **Superseded** — `OD-W4C-49=(a)` + `OD-W4C-46=(a)` ratified; the assignment is in force |
+> | §3.1 "Pending decisions (`O-1..O-5`) — not resolved by this draft" | five decisions still open | **Superseded** — all five resolved by bundle A (`49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, `53=(i)`) |
+> | §4 step 1 "Merge this document as **PROPOSED** with no runtime code" | the execution sequence's first step | **Spent** — that merge happened (`d1bed9d640…`) and the ratify followed; the remaining steps' own scope limits still stand |
+>
+> What is NOT changed by this back-fill: the ratify comment authorizes starting P1-2 implementation
+> on PR #4612 under `53=(i)`, preceded by the fresh exact-head review section 4 step 4 mandates and
+> followed by an independent exact-head gate. It does **not** authorize merging #4612, nor any
+> W4C-3a/3b/3c/4 slice.
+>
 > (Status back-filled 2026-09-16, docs-only: the RATIFY existed only as the PR
 > comment above, so this header still read PROPOSED. The comment governs; this
 > line now records it. The ratify comment's own scope limits are unchanged by
@@ -1537,6 +1555,8 @@ snapshot.
 
 ### 1.6 Advisory class `01` and lock order
 
+> **[Superseded 2026-07-27 — retained as pre-approval history.** Owner comment `5090978124` ratified bundle A; see the supersession table at the top of this file.**]**
+>
 > **Pending `O-1`/`OD-W4C-49`.** This section describes the assignment this
 > amendment proposes. It supersedes red line `W4C-R42` and the three
 > digest-seam/gate clauses named in section 1's supersession list, none of
@@ -2429,6 +2449,7 @@ a recommendation against `48(b)` but a **structural exclusion**
 (`D0c`, section 3.3), for the reasons stated there in full.
 
 ### 3.1 Pending decisions (`O-1..O-5`) — not resolved by this draft
+> **[Superseded 2026-07-27 — retained as pre-approval history.** Owner comment `5090978124` ratified bundle A; see the supersession table at the top of this file.**]**
 
 `OD-W4C-44..48` above are ordinary recommendations this draft makes and
 argues for. The five decisions below are different in kind: each is a
@@ -3170,6 +3191,8 @@ remains the owner's, per this document's standing boundary (section 3.1's
 own framing).
 
 ## 4. Execution sequence
+
+> **[Superseded 2026-07-27 — retained as pre-approval history.** Owner comment `5090978124` ratified bundle A; see the supersession table at the top of this file.**]**
 
 1. Merge this document as **PROPOSED** with no runtime code. PR #4612 stays
    Draft under OWNER-AUTHORIZATION-HOLD and is not touched by this merge.
