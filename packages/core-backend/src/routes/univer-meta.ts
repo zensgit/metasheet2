@@ -578,6 +578,10 @@ type UniverMetaViewConfig = {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
+/** Server-owned `meta_sheets.system_kind` stamped on a People sheet at provisioning (never from a client). */
+const SYSTEM_PEOPLE_SHEET_KIND = 'people_directory'
+/** Values-free refusal for a client create that asks for the reserved People sentinel description (#5807). */
+const RESERVED_SHEET_DESCRIPTION_MESSAGE = 'This description is reserved for a system-managed sheet'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
 // history-exclusion predicate); imported at the top of this file.
@@ -5497,16 +5501,49 @@ function serializeBaseRow(row: any): UniverMetaBase {
 
 const ensureLegacyBase = ensureLegacyBaseShared
 
+/*
+ * People system sheet (legacy link-backed person fields) — what #5807 does and does NOT close.
+ *
+ * The sheet is created / re-synced ONLY by `POST /person-fields/prepare` (gate: canManageFields). It
+ * mirrors every ACTIVE user as one row. Readers get it through the generic read paths with no special
+ * gate (e.g. `/records-summary` returns a displayMap for every matching record, whatever `limit` is).
+ *
+ * CLOSED going forward:
+ *   - the sync no longer writes the `Email` or `Avatar URL` cells, and `Name` no longer falls back to the
+ *     email (it falls back to the user id, which the `User ID` column already holds);
+ *   - an explicit re-sync rewrites a row that still carries an `Email` / `Avatar URL` key, dropping them;
+ *   - `POST /sheets` refuses the reserved sentinel description (a sweep of every `INSERT INTO meta_sheets`
+ *     found no other route that takes a sheet description from the client: `PATCH /sheets/:id` is
+ *     name-only, template installs and plugin descriptors use server-defined descriptions, and "save as
+ *     template" stores sheet descriptions as null);
+ *   - the sync prefers the server-owned `system_kind` sheet over a sentinel-only one in the same base.
+ * NOT closed:
+ *   - existing rows keep their email / avatar values until someone re-syncs that base or an
+ *     owner-approved scrub runs (no migration here); rows of DEACTIVATED users are never re-synced, so
+ *     they keep them until such a scrub;
+ *   - the four column definitions stay (the `Email` / `Avatar URL` columns are simply left empty);
+ *   - user names and user ids stay readable, all of them in one request, by any reader of this sheet —
+ *     the read gate needs an owner decision on who may read it (#5807 stays open for that);
+ *   - sentinel-only sheets are NOT stamped with `system_kind` (owner: the user-writable sentinel is never
+ *     a trust source), and sheets created with the sentinel before this change still exist.
+ */
 async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetProvisionPlan> {
   const existingSheets = await query(
-    `SELECT id, base_id, name, description
+    `SELECT id, base_id, name, description, system_kind
      FROM meta_sheets
      WHERE base_id = $1 AND deleted_at IS NULL
      ORDER BY created_at ASC`,
     [baseId],
   )
 
-  const peopleSheetRow = (existingSheets.rows as any[]).find((row) => isSystemPeopleSheetDescription(row.description)) ?? null
+  // Prefer the sheet the server itself provisioned (`system_kind`, non-forgeable) over an older sheet
+  // that merely carries the user-writable sentinel description; the sentinel stays only as the
+  // fallback for People sheets provisioned before `system_kind` existed (never backfilled).
+  const candidateRows = existingSheets.rows as any[]
+  const peopleSheetRow =
+    candidateRows.find((row) => row.system_kind === SYSTEM_PEOPLE_SHEET_KIND) ??
+    candidateRows.find((row) => isSystemPeopleSheetDescription(row.description)) ??
+    null
   const peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
   return { peopleSheetRow, peopleSheetId }
 }
@@ -5569,22 +5606,24 @@ async function ensurePeopleSheetPreset(
 
   const userIdFieldId = await ensureField('User ID', 0)
   const nameFieldId = await ensureField('Name', 1)
+  // #5807: the `Email` / `Avatar URL` columns are still ensured (dropping them would drag in the field
+  // delete / history paths) but the sync no longer writes either cell — see the block comment above
+  // `planPeopleSheetPreset`. Their ids are only used to recognise rows that still carry old values.
   const emailFieldId = await ensureField('Email', 2)
   const avatarFieldId = await ensureField('Avatar URL', 3)
 
-  let userRows: Array<{ id: string; email: string; name: string | null; avatar_url: string | null }> = []
+  // Only what the sync writes is read: no email, no avatar.
+  let userRows: Array<{ id: string; name: string | null }> = []
   try {
     const result = await query(
-      `SELECT id, email, name, avatar_url
+      `SELECT id, name
        FROM users
        WHERE is_active = TRUE
        ORDER BY created_at ASC, id ASC`,
     )
     userRows = (result.rows as any[]).map((row) => ({
       id: String(row.id),
-      email: String(row.email),
       name: typeof row.name === 'string' ? row.name : null,
-      avatar_url: typeof row.avatar_url === 'string' ? row.avatar_url : null,
     }))
   } catch (err: any) {
     if (!(typeof err?.code === 'string' && err.code === '42P01')) {
@@ -5607,11 +5646,11 @@ async function ensurePeopleSheetPreset(
     }
 
     for (const user of userRows) {
+      // A user without a name shows as their id — a value this row already exposes in `User ID` — never
+      // as their email (#5807).
       const nextData = {
         [userIdFieldId]: user.id,
-        [nameFieldId]: user.name?.trim() || user.email,
-        [emailFieldId]: user.email,
-        [avatarFieldId]: user.avatar_url ?? '',
+        [nameFieldId]: user.name?.trim() || user.id,
       }
       const existing = recordByUserId.get(user.id)
       if (!existing) {
@@ -5624,11 +5663,16 @@ async function ensurePeopleSheetPreset(
         continue
       }
 
+      // A row written before #5807 still carries an `Email` / `Avatar URL` key (Avatar is '' when unset):
+      // count that as a change so this explicit re-sync rewrites the row once, without them. The UPDATE
+      // below replaces `data` wholesale, which is what drops the keys.
+      const carriesRetiredCell =
+        Object.prototype.hasOwnProperty.call(existing.data, emailFieldId) ||
+        Object.prototype.hasOwnProperty.call(existing.data, avatarFieldId)
       const changed =
         existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
         existing.data[nameFieldId] !== nextData[nameFieldId] ||
-        existing.data[emailFieldId] !== nextData[emailFieldId] ||
-        existing.data[avatarFieldId] !== nextData[avatarFieldId]
+        carriesRetiredCell
 
       if (changed) {
         // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
@@ -14918,6 +14962,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = parsed.data.id ?? buildId('sheet').slice(0, 50)
     const name = parsed.data.name ?? `Univer Sheet ${new Date().toISOString()}`
     const description = parsed.data.description ?? null
+    // #5807: the People sentinel description is how pre-`system_kind` People sheets are still found by
+    // the People sync and hidden from sheet lists, so a client may not mint it. Same trim as the
+    // predicate that reads it. Refused before any read or write; the message never echoes the input.
+    if (isSystemPeopleSheetDescription(description)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: RESERVED_SHEET_DESCRIPTION_MESSAGE } })
+    }
     const requestedBaseId = parsed.data.baseId?.trim()
     const seed = parsed.data.seed === true
     if (
