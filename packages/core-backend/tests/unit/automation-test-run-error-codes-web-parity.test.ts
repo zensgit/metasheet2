@@ -8,19 +8,29 @@
  * server code without a label would silently lose its meaning. Modelled on
  * automation-retry-resume-refusal-codes-web-parity.test.ts.
  *
- * The codes are read with the TypeScript parser, never retyped here:
+ * The codes are read with the TypeScript parser, never retyped here. What the parse cannot read fails the
+ * test; it is never skipped:
  *   route handler (routes/automation.ts):
- *     - every `return` is `undefined`/bare or a call; every `.json(x)` body is an object literal (its
- *       `error.code`, a conditional of object literals, or a string `error` with no code) or the sample
- *       loader's `loaded.body`; anything else fails the test;
- *     - a call that passes `res` must be a known responder helper, whose own `.json` bodies are read the
+ *     - every `return` is `undefined`/bare or a call; every `.json(x)` body is an object literal with an
+ *       `error` (its `error.code`, a conditional of object literals, or a string `error` with no code) or
+ *       the sample loader's `loaded.body`. The ONE body allowed without `error` is the handler's final
+ *       success call — found by position and shape (the `return res.json({…})` ending the `try` that ends
+ *       the handler, with no `error`/`ok` key), not by "has no error key";
+ *     - a call that passes the bare `res` must be a known responder helper, whose own bodies are read the
  *       same way (a helper parameter used as a code is bound to the call's string-literal argument);
+ *     - a raw writer (`.send`/`.end`/`.sendStatus`/… on any receiver), a computed member access `x[k]`, an
+ *       argument that mentions `res` without being it (`res as Response`, `req.res`, a callback), and `res`
+ *       (or `req.res`) used as anything but a receiver or a bare argument (`const r = res`,
+ *       `const { res: r } = req`) fail the test;
  *     - `err.code` is the pass-through of `AutomationTestRunRejectedError`, resolved from testRun;
  *   testRun (multitable/automation-service.ts): every `throw` must be `new AutomationTestRunRejectedError(
  *     <number>, <code>, …)`; `eligibility.code` resolves to realFireTestRunEligibility()'s returned codes;
  *     and no other place in src may construct that error;
  *   sample loader (routes/automation-test-run-sample.ts): every return is `{ ok:true, … }` or carries a
  *     `body` read like a `.json` body.
+ * Nested functions are not walked (their returns/throws are not the enclosing function's), so a nested
+ * function that could answer or reject — it calls `.json`, names AutomationTestRunRejectedError, or (in a
+ * responder) mentions `res` or calls a raw writer — fails the test instead of being skipped.
  * A code is a string literal, a same-file `const NAME = '<literal>'`, or an identifier resolved from its
  * real export (`SHEET_DELETED_CODE`). Anything else fails the test.
  *
@@ -56,6 +66,13 @@ const RESPONDER_HELPERS: Readonly<Record<string, string>> = {
   sendFailClosedResolutionError: ROUTE_FILE,
   getService: ROUTE_FILE,
 }
+
+/** Express response methods that write a body this test does not read. A call to one fails the test. */
+const RESPONSE_WRITERS: ReadonlySet<string> = new Set([
+  'send', 'end', 'sendStatus', 'jsonp', 'write', 'redirect', 'render', 'sendFile', 'download', 'format',
+])
+
+const REJECTION_CLASS = 'AutomationTestRunRejectedError'
 
 /** Responses whose `error` is a plain string (no code). The web client keys them by that text. */
 const KNOWN_UNCODED_ERRORS: readonly string[] = [
@@ -97,10 +114,40 @@ function findFunction(rel: string, name: string): ts.FunctionDeclaration {
   return fn
 }
 
-/** Walk `body` without entering nested functions (their returns/throws are not this function's). */
-function walk(body: ts.Node, visit: (node: ts.Node) => void): void {
+/** The member a call invokes (`x.m()`, `x?.m()`, `x['m']()`), '' for a plain call, null for `x[k]()`. */
+function calledMember(call: ts.CallExpression): string | null {
+  const callee = call.expression
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text
+  if (ts.isElementAccessExpression(callee)) {
+    return ts.isStringLiteralLike(callee.argumentExpression) ? callee.argumentExpression.text : null
+  }
+  return ''
+}
+
+/** Why a nested function could answer or reject, if it could. */
+type NestedCheck = (fn: ts.Node) => string | undefined
+
+function nestedAnswerOrRejection(fn: ts.Node): string | undefined {
+  const text = fn.getText()
+  if (text.includes('.json(')) return 'calls .json('
+  if (text.includes(REJECTION_CLASS)) return `names ${REJECTION_CLASS}`
+  const json = findNode(fn, (n): n is ts.CallExpression => ts.isCallExpression(n) && calledMember(n) === 'json')
+  return json ? `calls ${json.getText()}` : undefined
+}
+
+/**
+ * Walk `body` without entering nested functions (their returns/throws are not this function's). A nested
+ * function that could still answer or reject for this one fails the test instead of being skipped.
+ */
+function walk(body: ts.Node, visit: (node: ts.Node) => void, nestedCheck?: NestedCheck): void {
   const step = (node: ts.Node): void => {
-    if (ts.isFunctionLike(node)) return
+    if (ts.isFunctionLike(node)) {
+      const reason = nestedAnswerOrRejection(node) ?? nestedCheck?.(node)
+      if (reason) {
+        throw new Error(`${body.getSourceFile().fileName}: a nested function ${reason}, which the test does not read: ${node.getText()}`)
+      }
+      return
+    }
     visit(node)
     ts.forEachChild(node, step)
   }
@@ -171,11 +218,9 @@ function readBody(expr: ts.Expression, ctx: Ctx, out: Collected): void {
   if (!ts.isObjectLiteralExpression(expr)) throw new Error(`${where}: not an object literal`)
   const props = propMap(expr, where)
   const error = initializerOf(props.get('error'), where)
-  if (!error) {
-    const ok = initializerOf(props.get('ok'), where)
-    if (ok && ok.kind === ts.SyntaxKind.FalseKeyword) throw new Error(`${where}: ok:false without error`)
-    return // success body
-  }
+  // The handler's final success call is never read (collectResponses skips it); any other body must answer
+  // with `error`, or the test cannot tell what the client receives.
+  if (!error) throw new Error(`${where}: a body without error that is not the handler's final success call`)
   const readError = (e: ts.Expression): void => {
     if (ts.isParenthesizedExpression(e)) return readError(e.expression)
     if (ts.isConditionalExpression(e)) {
@@ -195,30 +240,126 @@ function readBody(expr: ts.Expression, ctx: Ctx, out: Collected): void {
   readError(error)
 }
 
-/** `.json(...)` bodies and responder-helper calls inside one function body. */
-function collectResponses(body: ts.Node, ctx: Ctx, out: Collected): void {
+type ResponseCtx = Ctx & {
+  /** The response parameter's name in this function (the handler's or the helper's). */
+  resName: string
+  /** The handler's final success call (see finalSuccessCall), the one `.json` whose body is not read. */
+  successCall?: ts.CallExpression
+}
+
+/**
+ * A name in an object-literal key or member-declaration position, not a reference (`{ res: 1 }`). A
+ * destructuring `{ res: out } = req` is NOT one: it takes the response out under another name.
+ */
+function isDeclaredName(id: ts.Identifier): boolean {
+  const p = id.parent
+  if (ts.isQualifiedName(p)) return p.right === id
+  return (ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p)
+    || ts.isPropertySignature(p) || ts.isGetAccessor(p) || ts.isSetAccessor(p) || ts.isEnumMember(p)) && p.name === id
+}
+
+/**
+ * Every response one function body can write. `.json(x)` bodies are read (except the handler's final
+ * success call); a call passing the bare response to a known responder helper reads that helper. Anything
+ * else that could write or hand off the response fails the test: a raw writer on any receiver, a computed
+ * member access `x[k]`, an argument that mentions the response without being it, the response (or
+ * `req.res`) used other than as a receiver or a bare argument, and a nested function that mentions it or
+ * writes.
+ */
+function collectResponses(body: ts.Node, ctx: ResponseCtx, out: Collected): void {
+  const { rel, resName } = ctx
+  const mentionsRes = (node: ts.Node): boolean =>
+    findNode(node, (n): n is ts.Identifier => ts.isIdentifier(n) && n.text === resName) !== undefined
+  const nestedCheck: NestedCheck = (fn) => {
+    if (mentionsRes(fn)) return `mentions ${resName}`
+    const writer = findNode(fn, (n): n is ts.CallExpression => ts.isCallExpression(n) && RESPONSE_WRITERS.has(calledMember(n) ?? ''))
+    return writer ? `calls ${writer.getText()}` : undefined
+  }
   walk(body, (node) => {
-    if (!ts.isCallExpression(node)) return
-    const callee = node.expression
-    if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'json') {
-      if (node.arguments.length !== 1) throw new Error(`${ctx.rel}: .json call with ${node.arguments.length} args`)
-      readBody(node.arguments[0], ctx, out)
+    if (
+      ts.isElementAccessExpression(node)
+      && !ts.isStringLiteralLike(node.argumentExpression)
+      && !ts.isNumericLiteral(node.argumentExpression)
+    ) {
+      throw new Error(`${rel}: a computed member access the test cannot read: ${node.getText()}`)
+    }
+    if (ts.isIdentifier(node) && node.text === resName && !isDeclaredName(node)) {
+      // `res` itself, or a `.res` member (`req.res` is the same response): only a receiver or a bare argument.
+      const use = ts.isPropertyAccessExpression(node.parent) && node.parent.name === node ? node.parent : node
+      const p = use.parent
+      const receiver = (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && p.expression === use
+      const bareArgument = use === node && ts.isCallExpression(p) && p.arguments.some((a) => a === node)
+      if (!receiver && !bareArgument) {
+        throw new Error(`${rel}: ${use.getText()} is used where the test cannot follow it: ${p.getText()}`)
+      }
       return
     }
-    const passesRes = node.arguments.some((a) => ts.isIdentifier(a) && a.text === 'res')
-    if (!passesRes) return
+    if (!ts.isCallExpression(node)) return
+    // A computed callee (`x[k]()`, null here) fails the test when the walk reaches its element access.
+    const member = calledMember(node) ?? ''
+    if (RESPONSE_WRITERS.has(member)) {
+      throw new Error(`${rel}: .${member}() writes a response the test does not read: ${node.getText()}`)
+    }
+    let resIndex = -1
+    node.arguments.forEach((arg, index) => {
+      if (ts.isIdentifier(arg) && arg.text === resName) {
+        if (resIndex < 0) resIndex = index
+      } else if (mentionsRes(arg)) {
+        throw new Error(`${rel}: an argument mentions ${resName} without being it: ${arg.getText()} in ${node.getText()}`)
+      }
+    })
+    if (member === 'json') {
+      if (node.arguments.length !== 1) throw new Error(`${rel}: .json call with ${node.arguments.length} args`)
+      if (node !== ctx.successCall) readBody(node.arguments[0], ctx, out)
+      return
+    }
+    if (resIndex < 0) return
+    const callee = node.expression
     if (!ts.isIdentifier(callee) || !(callee.text in RESPONDER_HELPERS)) {
-      throw new Error(`${ctx.rel}: res passed to an unknown responder ${node.getText()}`)
+      throw new Error(`${rel}: ${resName} passed to an unknown responder ${node.getText()}`)
     }
     const helperFile = RESPONDER_HELPERS[callee.text]
     const helper = findFunction(helperFile, callee.text)
+    const resParam = helper.parameters[resIndex]
+    if (!resParam || !ts.isIdentifier(resParam.name)) {
+      throw new Error(`${helperFile}: ${callee.text} has no named parameter at ${resName}'s position`)
+    }
     const bindings = new Map<string, string>()
     helper.parameters.forEach((param, index) => {
       const arg = node.arguments[index]
       if (ts.isIdentifier(param.name) && arg && ts.isStringLiteral(arg)) bindings.set(param.name.text, arg.text)
     })
-    collectResponses(helper.body!, { ...ctx, rel: helperFile, bindings }, out)
-  })
+    collectResponses(helper.body!, { ...ctx, rel: helperFile, bindings, resName: resParam.name.text, successCall: undefined }, out)
+  }, nestedCheck)
+}
+
+/**
+ * The handler's final success call: the `return <res>.json({…})` ending the `try` block that ends the
+ * handler, with no `error` and no `ok` key. A call of that shape anywhere else, or a last call of another
+ * shape, is not it — its body is read like any other (and fails the test if it has no `error`).
+ */
+function finalSuccessCall(handler: ts.FunctionLikeDeclaration & { body: ts.Block }, resName: string): ts.CallExpression | undefined {
+  const statements = handler.body.statements
+  const last = statements[statements.length - 1]
+  if (!last || !ts.isTryStatement(last)) return undefined
+  const tried = last.tryBlock.statements
+  const ret = tried[tried.length - 1]
+  const call = ret && ts.isReturnStatement(ret) ? ret.expression : undefined
+  if (!call || !ts.isCallExpression(call) || call.arguments.length !== 1) return undefined
+  const callee = call.expression
+  if (
+    !ts.isPropertyAccessExpression(callee)
+    || callee.questionDotToken
+    || callee.name.text !== 'json'
+    || !ts.isIdentifier(callee.expression)
+    || callee.expression.text !== resName
+  ) {
+    return undefined
+  }
+  const body = call.arguments[0]
+  if (!ts.isObjectLiteralExpression(body)) return undefined
+  const props = propMap(body, `${ROUTE_FILE}: success body ${body.getText()}`)
+  return props.has('error') || props.has('ok') ? undefined : call
 }
 
 function eligibilityCodes(): string[] {
@@ -356,9 +497,14 @@ function routeResponses(): Collected {
     if (!ts.isCallExpression(expr)) throw new Error(`test-run handler: unreadable return ${node.getText()}`)
   })
   const handlerText = handler.body.getText()
+  const resParam = handler.parameters[1]
+  if (!resParam || !ts.isIdentifier(resParam.name)) throw new Error('test-run handler: no named response parameter')
+  const resName = resParam.name.text
   collectResponses(handler.body, {
     rel: ROUTE_FILE,
     bindings: new Map(),
+    resName,
+    successCall: finalSuccessCall(handler, resName),
     passThrough: () => {
       if (!handlerText.includes('err instanceof AutomationTestRunRejectedError')) {
         throw new Error('err.code pass-through is not gated on AutomationTestRunRejectedError')

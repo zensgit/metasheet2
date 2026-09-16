@@ -2760,9 +2760,11 @@ describe('MetaAutomationManager', () => {
   // server's message for a known code, and never the code itself. The client still carries both.
   const TYPED_TEST_RUN_REFUSALS = [
     {
+      // The test button is clickable for a DISABLED rule and the service answers that with this 404 too,
+      // so the copy cannot only say "refresh".
       testError: { status: 404, code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
-      en: 'Test run request failed: The rule was not found or is disabled. Refresh and try again.',
-      zh: '测试运行请求失败：规则不存在或已停用，请刷新后重试。',
+      en: 'Test run request failed: The rule was not found or is disabled. Enable it, or refresh and try again.',
+      zh: '测试运行请求失败：规则不存在或已停用。请确认规则已启用，或刷新后重试。',
     },
     {
       testError: {
@@ -2815,6 +2817,89 @@ describe('MetaAutomationManager', () => {
         expect(text).not.toContain(locale === 'en' ? refusal.zh : refusal.en)
         expect(text).not.toContain(testError.message)
         expect(text).not.toContain(testError.code)
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  function clientAnsweringTestRun(response: () => Response) {
+    const { fetchFn } = mockClient([fakeRule()])
+    return new MultitableApiClient({
+      fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
+        ? Promise.resolve(response())
+        : fetchFn(url, init)),
+    })
+  }
+
+  // A gateway / proxy failure carries no code (an nginx HTML page, an empty body): the service is
+  // unavailable, which the button says instead of the generic label.
+  const GATEWAY_FAILURES = [
+    { name: 'an HTML 502', status: 502, body: '<html><body><h1>502 Bad Gateway</h1></body></html>', contentType: 'text/html', code: undefined },
+    { name: 'an empty 503', status: 503, body: '', contentType: 'text/plain', code: undefined },
+    { name: 'a 504 with an empty object', status: 504, body: '{}', contentType: 'application/json', code: undefined },
+    {
+      // A blank code is no code.
+      name: 'a 503 with a blank code',
+      status: 503,
+      body: JSON.stringify({ ok: false, error: { code: ' ', message: '' } }),
+      contentType: 'application/json',
+      code: ' ',
+    },
+  ] as const
+
+  for (const failure of GATEWAY_FAILURES) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} service-unavailable label for ${failure.name}`, async () => {
+        useLocale().setLocale(locale)
+        const client = clientAnsweringTestRun(() => new Response(failure.body, {
+          status: failure.status,
+          headers: { 'Content-Type': failure.contentType },
+        }))
+        await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+          name: 'MultitableApiError',
+          status: failure.status,
+          code: failure.code,
+        })
+
+        const status = await clickTestRun(client)
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en'
+          ? 'Test run request failed: The service is temporarily unavailable. Try again later.'
+          : '测试运行请求失败：服务暂时不可用，请稍后重试。')
+        expect(text).not.toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
+        expect(text).not.toContain('Bad Gateway')
+        expect(text).not.toContain(String(failure.status))
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  const GENERIC_NOT_UNAVAILABLE = [
+    {
+      // Only the gateway statuses mean "unavailable": a code-less 500 stays generic.
+      name: 'a 500 without a code',
+      response: () => new Response('', { status: 500 }),
+    },
+    {
+      // A code this build does not know stays generic even on a 503.
+      name: 'a 503 with an unknown code',
+      response: () => new Response(
+        JSON.stringify({ ok: false, error: { code: 'TEST_RUN_SOMETHING_NEW', message: 'Some new English refusal' } }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } },
+      ),
+    },
+  ] as const
+
+  for (const answer of GENERIC_NOT_UNAVAILABLE) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} generic label, not service-unavailable, for ${answer.name}`, async () => {
+        useLocale().setLocale(locale)
+        const status = await clickTestRun(clientAnsweringTestRun(answer.response))
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
+        expect(text).not.toContain(locale === 'en' ? 'temporarily unavailable' : '服务暂时不可用')
+        expect(text).not.toContain('TEST_RUN_SOMETHING_NEW')
+        expect(text).not.toContain('Some new English refusal')
         expect(status?.getAttribute('data-status')).toBe('failed')
       })
     }

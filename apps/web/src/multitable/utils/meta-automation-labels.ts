@@ -1029,7 +1029,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.testRunError.unauthenticated': { en: 'Your session has expired. Sign in again and retry.', zh: '登录已失效，请重新登录后重试。' },
   'manager.testRunError.sheetDeleted': { en: 'This sheet has been deleted, so the test did not run. Restore the sheet and try again.', zh: '该表已被删除，测试未运行。请先恢复该表后重试。' },
   'manager.testRunError.notFound': { en: 'The sheet or the sample record was not found.', zh: '表或样例记录不存在。' },
-  'manager.testRunError.ruleNotFound': { en: 'The rule was not found or is disabled. Refresh and try again.', zh: '规则不存在或已停用，请刷新后重试。' },
+  'manager.testRunError.ruleNotFound': { en: 'The rule was not found or is disabled. Enable it, or refresh and try again.', zh: '规则不存在或已停用。请确认规则已启用，或刷新后重试。' },
   'manager.testRunError.serviceUnavailable': { en: 'The service is temporarily unavailable. Try again later.', zh: '服务暂时不可用，请稍后重试。' },
   'manager.testRunError.permissionCheckFailed': { en: 'Your permissions could not be verified. Try again later.', zh: '无法校验你的权限，请稍后重试。' },
   'manager.testRunError.invalidMode': { en: 'The test run mode is invalid.', zh: '测试运行模式无效。' },

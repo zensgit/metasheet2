@@ -1846,19 +1846,29 @@ const TEST_RUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
 }
 
 /**
- * An API refusal (the client's MultitableApiError) shows the label of its code, or the generic label for
- * an unknown / missing code — never the server's message and never the code. Anything else (a network
+ * Statuses a gateway / proxy answers when the backend is down or slow. Without a code (an nginx HTML page,
+ * an empty body) such a failure means the service is unavailable, not an unknown refusal.
+ */
+const TEST_RUN_GATEWAY_UNAVAILABLE_STATUSES: ReadonlySet<unknown> = new Set([502, 503, 504])
+
+/**
+ * An API refusal (the client's MultitableApiError) shows the label of its code; with no code, a 502/503/504
+ * shows the service-unavailable label; anything else (an unknown code, or no code on another status)
+ * shows the generic label — never the server's message and never the code. Anything else (a network
  * failure, a non-API error) keeps showing its own message behind the localized prefix, as before.
  */
 function describeTestRunRequestError(err: unknown): string {
   if (err instanceof Error && err.name === 'MultitableApiError') {
-    const code = (err as { code?: unknown }).code
+    const { code, status } = err as { code?: unknown; status?: unknown }
     const key = typeof code === 'string' && Object.prototype.hasOwnProperty.call(TEST_RUN_ERROR_LABELS, code)
       ? TEST_RUN_ERROR_LABELS[code]
       : undefined
-    return key
-      ? automationTestRunRequestFailed(l(key), isZh.value)
-      : l('manager.testRunError.generic')
+    if (key) return automationTestRunRequestFailed(l(key), isZh.value)
+    const hasCode = typeof code === 'string' && code.trim() !== ''
+    if (!hasCode && TEST_RUN_GATEWAY_UNAVAILABLE_STATUSES.has(status)) {
+      return automationTestRunRequestFailed(l('manager.testRunError.serviceUnavailable'), isZh.value)
+    }
+    return l('manager.testRunError.generic')
   }
   return automationTestRunRequestFailed(readErrorMessage(err), isZh.value)
 }
