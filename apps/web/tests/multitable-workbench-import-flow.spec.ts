@@ -949,7 +949,8 @@ describe('MultitableWorkbench import flow', () => {
       return { items, total: items.length, limit: 50, query: '' }
     }
 
-    async function runImport(text: string, recordCount: number) {
+    /** Opens the modal, maps the pasted table and clicks Import — without waiting for the build. */
+    async function startImport(text: string, recordCount: number) {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
       await flushUi()
@@ -963,8 +964,26 @@ describe('MultitableWorkbench import flow', () => {
         .find((button) => button.textContent?.includes(`Import ${recordCount} record`))
       expect(importButton).toBeTruthy()
       importButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+    }
+
+    async function runImport(text: string, recordCount: number) {
+      await startImport(text, recordCount)
       await vi.advanceTimersByTimeAsync(1000)
       await flushUi(30)
+    }
+
+    /** Wraps a lookup mock so it takes 50 ms and records the peak number of calls in flight. */
+    function trackInFlight<A extends unknown[], R>(inner: (...args: A) => Promise<R>) {
+      const state = { inFlight: 0, peak: 0 }
+      const fn = vi.fn(async (...args: A) => {
+        state.inFlight += 1
+        state.peak = Math.max(state.peak, state.inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        state.inFlight -= 1
+        return inner(...args)
+      })
+      return { fn, state }
     }
 
     function expectCreated(data: Record<string, unknown>) {
@@ -1131,6 +1150,137 @@ describe('MultitableWorkbench import flow', () => {
           fld_assignee: ['usr_fake_01', 'usr_fake_02', 'usr_fake_03', 'usr_fake_04', 'usr_fake_05', 'usr_fake_06'],
         })
       })
+
+      // Refuter round: the whole-cell token of an exported ~200-person cell is ~8 KB — as `?q=` it would
+      // 414 at the proxy and fail a row whose every segment resolves.
+      it('never sends a token past the lookup ceiling: a 200-id export cell imports without the whole-cell query', async () => {
+        mountNative(NATIVE_FIELDS.map((field) => (field.id === 'fld_assignee' ? { ...field, property: { limitSingleRecord: false } } : field)))
+        const roster: FakePerson[] = Array.from({ length: 200 }, (_, index) => {
+          const n = String(index + 1).padStart(3, '0')
+          return { userId: `usr_fake_bulk_${n}_00000000-0000`, name: `Fake Bulk ${n}`, email: `fake.bulk${n}@example.invalid` }
+        })
+        workbenchMock.client.listPersonFieldDirectory = fakeDirectory(roster)
+        const cell = roster.map((person) => person.userId).join(', ')
+        expect(cell.length).toBeGreaterThan(512)
+
+        await runImport(table(['Title', 'Assignee'], ['Alpha', cell]), 1)
+
+        const terms = workbenchMock.client.listPersonFieldDirectory.mock.calls
+          .map((call: unknown[]) => (call[2] as { q: string }).q)
+        expect(terms).toHaveLength(200)
+        expect(Math.max(...terms.map((term: string) => term.length))).toBeLessThanOrEqual(512)
+        expectCreated({ fld_title: 'Alpha', fld_assignee: roster.map((person) => person.userId) })
+      })
+
+      // Refuter round: rows used to resolve strictly one after another, so the ≤ 4 gate only ever
+      // applied inside a single cell.
+      it('looks ahead across rows: different people on different rows are fetched in parallel, once each', async () => {
+        mountNative()
+        const tracked = trackInFlight(fakeDirectory(FAKE_ROSTER))
+        workbenchMock.client.listPersonFieldDirectory = tracked.fn
+
+        await runImport(table(
+          ['Title', 'Assignee'],
+          ['Alpha', 'Fake Person 01'],
+          ['Beta', 'Fake Person 02'],
+          ['Gamma', 'Fake Person 03'],
+          ['Delta', 'fake person 01'],
+        ), 4)
+
+        expect(tracked.fn).toHaveBeenCalledTimes(3)
+        expect(tracked.state.peak).toBe(3)
+        expect(workbenchMock.client.createRecord).toHaveBeenCalledTimes(4)
+        expectCreated({ fld_title: 'Delta', fld_assignee: ['usr_fake_01'] })
+      })
+
+      // Refuter round: "Cancel import" during the build used to be lost (the workbench's abort
+      // controller only exists once records are submitted), so every resolved row was still created.
+      it('"Cancel import" while people are still being looked up writes nothing and drops queued lookups', async () => {
+        mountNative()
+        const release: Array<() => void> = []
+        const directory = fakeDirectory(FAKE_ROSTER)
+        workbenchMock.client.listPersonFieldDirectory = vi.fn((sheetId: string, fieldId: string, params?: { q?: string; match?: string }) =>
+          new Promise((resolve) => {
+            release.push(() => resolve(directory(sheetId, fieldId, params)))
+          }))
+        const rows = ['01', '02', '03', '04', '05', '06'].map((n) => [`Row ${n}`, `Fake Person ${n}`])
+
+        await startImport(table(['Title', 'Assignee'], ...rows), 6)
+
+        // Four lookups in flight, two queued, nothing written yet.
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(4)
+        const cancelButton = Array.from(document.body.querySelectorAll('.meta-import__btn'))
+          .find((button) => button.textContent?.includes('Cancel import'))
+        expect(cancelButton).toBeTruthy()
+        cancelButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi()
+        for (const settle of release.splice(0)) settle()
+        await vi.advanceTimersByTimeAsync(1000)
+        await flushUi(30)
+
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(4)
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+        expect(document.body.querySelector('.meta-import__build-cancelled')?.textContent).toContain('Import cancelled')
+        // Back at the mapping step, ready to try again.
+        expect(Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+          .some((button) => button.textContent?.includes('Import 6 record'))).toBe(true)
+      })
+
+      it('leaving the workbench mid-build drops the queued lookups and writes nothing', async () => {
+        mountNative()
+        const release: Array<() => void> = []
+        const directory = fakeDirectory(FAKE_ROSTER)
+        workbenchMock.client.listPersonFieldDirectory = vi.fn((sheetId: string, fieldId: string, params?: { q?: string; match?: string }) =>
+          new Promise((resolve) => {
+            release.push(() => resolve(directory(sheetId, fieldId, params)))
+          }))
+        const rows = ['01', '02', '03', '04', '05', '06'].map((n) => [`Row ${n}`, `Fake Person ${n}`])
+
+        await startImport(table(['Title', 'Assignee'], ...rows), 6)
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(4)
+
+        app!.unmount()
+        app = null
+        for (const settle of release.splice(0)) settle()
+        await vi.advanceTimersByTimeAsync(1000)
+        await flushUi(30)
+
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(4)
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+      })
+
+      it('a cancel also drops the lookups a later row re-queues after an earlier failure', async () => {
+        mountNative(NATIVE_FIELDS.map((field) => (field.id === 'fld_assignee' ? { ...field, property: { limitSingleRecord: false } } : field)))
+        const release: Array<() => void> = []
+        workbenchMock.client.listPersonFieldDirectory = vi.fn(() => new Promise((_resolve, reject) => {
+          release.push(() => reject(Object.assign(new Error('Fake forbidden'), { status: 403, code: 'FORBIDDEN' })))
+        }))
+        const settleAll = async () => {
+          for (const settle of release.splice(0)) settle()
+          await flushUi(10)
+        }
+        const six = ['Fake Person 01', 'Fake Person 02', 'Fake Person 03', 'Fake Person 04', 'Fake Person 05', 'Fake Person 06'].join(', ')
+
+        await startImport(table(['Title', 'Assignee'], ['Alpha', six], ['Beta', six]), 2)
+        // The look-ahead asked for the 7 unique tokens: 4 in flight, 3 queued.
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(4)
+        await settleAll()
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(7)
+        // All 7 fail: row Alpha fails, and row Beta asks again (failures are not cached): 4 run, 3 wait.
+        await settleAll()
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(11)
+
+        Array.from(document.body.querySelectorAll('.meta-import__btn'))
+          .find((button) => button.textContent?.includes('Cancel import'))
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi()
+        await settleAll()
+        await settleAll()
+
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(11)
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+        expect(document.body.querySelector('.meta-import__build-cancelled')).not.toBeNull()
+      })
     })
 
     describe('legacy (People-sheet) person fields — email fallback', () => {
@@ -1180,9 +1330,12 @@ describe('MultitableWorkbench import flow', () => {
         await runImport(table(['Title', 'Owner'], ['Alpha', 'fake.person02@example.invalid']), 1)
 
         expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
+        // Email equality, with the row ceiling stated explicitly (never a server default).
         expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledWith({
           spreadsheetId: 'sheet_orders',
           q: 'fake.person02@example.invalid',
+          limit: 50,
+          match: 'exact-email',
         })
         expectCreated({ fld_title: 'Alpha', fld_owner: ['rec_people_2'] })
         expect(workbenchMock.client.listSheetPermissionCandidates).not.toHaveBeenCalled()
@@ -1275,6 +1428,131 @@ describe('MultitableWorkbench import flow', () => {
         expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
         expect(document.body.textContent).toContain('Multiple people match "fake.person01@example.invalid". Please verify the email value.')
         expect(document.body.textContent).toContain('People value for Owner is too broad')
+      })
+
+      // Refuter round: pinyin local parts make "50+ addresses contain li@…" common; a substring page
+      // can be full before the owner shows up, which used to read as "too broad".
+      it('finds the owner through match=exact-email even when 50+ other addresses merely contain the term', async () => {
+        mountLegacy()
+        const owner = { id: 'usr_fake_02', label: 'Fake Person 02', subtitle: 'fake.person02@example.invalid' }
+        const flood = Array.from({ length: 60 }, (_, index) => ({
+          id: `usr_flood_${index}`, label: `Fake Flood ${index}`, subtitle: `x${index}fake.person02@example.invalid`,
+        }))
+        workbenchMock.client.listCommentMentionSuggestions.mockImplementation(
+          async ({ q, limit, match }: { q?: string; limit?: number; match?: string }) => {
+            const term = (q ?? '').trim().toLowerCase()
+            const all = [...flood, owner]
+            const hits = match === 'exact-email'
+              ? all.filter((item) => item.subtitle.toLowerCase() === term)
+              : all.filter((item) => item.subtitle.toLowerCase().includes(term))
+            const size = Math.min(limit ?? 50, 50)
+            const items = hits.slice(0, size)
+            return { items, total: items.length, limit: size, query: term, hasMore: hits.length > size, requiresQuery: false, minQueryLength: 1 }
+          },
+        )
+
+        await runImport(table(['Title', 'Owner'], ['Alpha', 'fake.person02@example.invalid']), 1)
+
+        expectCreated({ fld_title: 'Alpha', fld_owner: ['rec_people_2'] })
+        expect(document.body.textContent).not.toContain('too broad')
+      })
+
+      it('still does not trust a single email hit on a truncated page from a server that ignores the mode', async () => {
+        mountLegacy()
+        workbenchMock.client.listCommentMentionSuggestions.mockResolvedValue({
+          items: [
+            { id: 'usr_fake_02', label: 'Fake Person 02', subtitle: 'fake.person02@example.invalid' },
+            ...Array.from({ length: 49 }, (_, index) => ({
+              id: `usr_flood_${index}`, label: `Fake Flood ${index}`, subtitle: `x${index}fake.person02@example.invalid`,
+            })),
+          ],
+          total: 50, limit: 50, query: 'fake.person02@example.invalid', hasMore: true, requiresQuery: false, minQueryLength: 1,
+        })
+
+        await runImport(table(['Title', 'Owner'], ['Alpha', 'fake.person02@example.invalid']), 1)
+
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+        expect(document.body.textContent).toContain('People value for Owner is too broad')
+      })
+
+      // Refuter round: an unmatched token never failed a cell whose other tokens resolved; a too-broad
+      // email must not either. It is the row's error only when nothing else in the cell resolved.
+      it('a too-broad email does not fail a cell whose other token resolves', async () => {
+        mountLegacy()
+        workbenchMock.client.listCommentMentionSuggestions.mockResolvedValue({
+          items: [{ id: 'usr_fake_09', label: 'Fake Person 09', subtitle: 'other.fake.person02@example.invalid' }],
+          total: 1, limit: 50, query: '', hasMore: true, requiresQuery: false, minQueryLength: 1,
+        })
+
+        await runImport(table(
+          ['Title', 'Owner'],
+          ['Alpha', 'usr_fake_01; fake.person02@example.invalid'],
+          ['Beta', 'fake.person02@example.invalid'],
+        ), 2)
+
+        expect(workbenchMock.client.createRecord).toHaveBeenCalledTimes(1)
+        expectCreated({ fld_title: 'Alpha', fld_owner: ['rec_people_1'] })
+        expect(document.body.textContent).toContain('People value for Owner is too broad')
+      })
+
+      it('never sends an over-long email-shaped cell as a lookup term', async () => {
+        mountLegacy()
+        const cell = `fake.person02@example.invalid,${'x'.repeat(600)}`
+
+        await runImport(table(['Title', 'Owner'], ['Alpha', cell]), 1)
+
+        const terms = workbenchMock.client.listCommentMentionSuggestions.mock.calls
+          .map((call: unknown[]) => (call[0] as { q: string }).q)
+        expect(terms).toEqual(['fake.person02@example.invalid'])
+        expectCreated({ fld_title: 'Alpha', fld_owner: ['rec_people_2'] })
+      })
+
+      it('looks ahead across rows for the email lookups too (once per address)', async () => {
+        mountLegacy()
+        const inner = workbenchMock.client.listCommentMentionSuggestions.getMockImplementation()
+        const tracked = trackInFlight(async (params: { q?: string }) => inner(params))
+        workbenchMock.client.listCommentMentionSuggestions = tracked.fn
+
+        await runImport(table(
+          ['Title', 'Owner'],
+          ['Alpha', 'fake.person02@example.invalid'],
+          ['Beta', 'fake.nobody1@example.invalid'],
+          ['Gamma', 'fake.nobody2@example.invalid'],
+          ['Delta', 'FAKE.PERSON02@example.invalid'],
+        ), 4)
+
+        expect(tracked.fn).toHaveBeenCalledTimes(3)
+        expect(tracked.state.peak).toBe(3)
+        expect(workbenchMock.client.createRecord).toHaveBeenCalledTimes(2)
+        expectCreated({ fld_title: 'Delta', fld_owner: ['rec_people_2'] })
+      })
+
+      it('a cancel during the People-sheet read sends no email lookup at all', async () => {
+        mountLegacy()
+        const release: Array<() => void> = []
+        const summaries = workbenchMock.client.listRecordSummaries.getMockImplementation()
+        workbenchMock.client.listRecordSummaries.mockImplementation((args: { displayFieldId: string }) =>
+          new Promise((resolve) => {
+            release.push(() => resolve(summaries(args)))
+          }))
+
+        await startImport(table(
+          ['Title', 'Owner'],
+          ['Alpha', 'fake.person02@example.invalid'],
+          ['Beta', 'fake.nobody1@example.invalid'],
+        ), 2)
+        expect(release.length).toBeGreaterThan(0)
+        Array.from(document.body.querySelectorAll('.meta-import__btn'))
+          .find((button) => button.textContent?.includes('Cancel import'))
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi()
+        for (const settle of release.splice(0)) settle()
+        await vi.advanceTimersByTimeAsync(1000)
+        await flushUi(30)
+
+        expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+        expect(document.body.querySelector('.meta-import__build-cancelled')).not.toBeNull()
       })
 
       it('adds no People-sheet read of its own: without a hydrated User ID column there is no fallback request', async () => {

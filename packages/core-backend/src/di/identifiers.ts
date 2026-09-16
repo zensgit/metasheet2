@@ -425,10 +425,12 @@ export interface ICommentService {
      * #5795: bounded — a term is required (term-less ⇒ empty, no query), the term is a literal
      * substring, at most MENTION_CANDIDATES_MAX_ITEMS + 1 rows come back, and there is deliberately
      * NO `total` (it used to be a deployment-wide active-user count).
+     * #5809: `match: 'exact-email'` narrows the substring search to trimmed, case-insensitive EMAIL
+     * EQUALITY (same term requirement, ceiling and ordering).
      */
     listMentionCandidates(
       spreadsheetId: string,
-      options?: { q?: string; limit?: number },
+      options?: { q?: string; limit?: number; match?: 'exact-email' },
     ): Promise<{ items: CommentMentionCandidate[] }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
     /** @deprecated Use `getUnreadSummary()` for richer unread data. */

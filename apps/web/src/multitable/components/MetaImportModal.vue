@@ -45,6 +45,9 @@
           <div v-if="parseWarning" class="meta-import__warning">
             <span>{{ parseWarning }}</span>
           </div>
+          <div v-if="buildCancelled" class="meta-import__warning meta-import__build-cancelled">
+            <span>{{ importCancelled(isZh) }}</span>
+          </div>
           <p class="meta-import__hint">{{ detectedRows(parsedRows.length, isZh) }}</p>
           <div v-if="hasImportDraftIssues" class="meta-import__warning">
             <span>{{ importDraftIssueText }}</span>
@@ -210,6 +213,7 @@ import {
   fieldNoLongerImportable,
   fileTooLarge,
   fixRowLabel,
+  importCancelled,
   importComplete,
   importLabel,
   importRecords,
@@ -313,6 +317,11 @@ const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
 const pickerVisible = ref(false)
 const restoredDraft = ref(false)
 const createFieldsDropped = ref(false)
+// #5809: the record build (person / link lookups) runs BEFORE the workbench receives anything, so the
+// workbench's own AbortController does not exist yet. This one covers that window: "Cancel import",
+// closing the modal and unmounting all abort it, and an aborted build never emits `import`.
+let buildController: AbortController | null = null
+const buildCancelled = ref(false)
 
 const canCreateFields = computed(() => props.canCreateFields === true)
 const createFieldsErrorText = computed(() => props.createFieldsError ?? '')
@@ -857,7 +866,7 @@ function effectiveFieldMapping(): Record<number, string> {
   return mapping
 }
 
-async function buildRecords(): Promise<ImportBuildResult> {
+async function buildRecords(signal?: AbortSignal): Promise<ImportBuildResult> {
   return buildImportedRecords({
     parsedRows: parsedRows.value,
     fieldMapping: effectiveFieldMapping(),
@@ -865,18 +874,42 @@ async function buildRecords(): Promise<ImportBuildResult> {
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: manualFieldOverrides.value,
     isZh: isZh.value,
+    signal,
   })
 }
 
+function abortBuild() {
+  buildController?.abort()
+}
+
 async function doImport() {
+  const controller = new AbortController()
+  buildController = controller
+  buildCancelled.value = false
   step.value = 'importing'
   pendingRecordCount.value = parsedRows.value.length
-  const result = await buildRecords()
+  let result: ImportBuildResult
+  try {
+    // An aborted build always rejects (buildImportedRecords checks the signal before every row and
+    // once more before returning), so a result here is never a cancelled one.
+    result = await buildRecords(controller.signal)
+  } catch (error) {
+    // Anything that is not the cancel stays the error it was.
+    if (!controller.signal.aborted) throw error
+    // Cancelled while building: no record was written. Back to the mapping. (If the modal was closed
+    // meanwhile, reopening it runs resetState, which clears both again.)
+    step.value = 'preview'
+    buildCancelled.value = true
+    return
+  } finally {
+    if (buildController === controller) buildController = null
+  }
   emitImport(result)
 }
 
 function requestClose() {
   if (isImporting.value) {
+    abortBuild()
     emit('cancel-import')
     return
   }
@@ -1077,6 +1110,8 @@ function emitImport(payload: ImportBuildResult) {
 }
 
 function resetState() {
+  abortBuild()
+  buildCancelled.value = false
   step.value = 'paste'
   rawText.value = ''
   parsedHeaders.value = []
@@ -1096,6 +1131,7 @@ function resetState() {
 }
 
 onBeforeUnmount(() => {
+  abortBuild()
   emit('update:dirty', false)
 })
 </script>

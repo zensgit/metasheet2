@@ -194,12 +194,17 @@ function filterDeniedRows(rowIds: string[] | undefined, context: CommentReadCont
  * ELIGIBILITY IS UNCHANGED: who can be returned for a matching term is still every active user
  * (CommentService.listMentionCandidates's predicate is untouched). Narrowing that set — e.g. to the
  * sheet's readers — is a separate change and is NOT done here.
+ *
+ * #5809 — `exactEmail` (GET /api/comments/mention-candidates?match=exact-email) asks the service for
+ * EMAIL EQUALITY instead of the substring search. (a)–(c) apply unchanged — a term is still required
+ * and the ceiling still clamps — and the rows can only be fewer (see CommentService).
  */
 async function loadBoundedMentionCandidates(
   commentService: ICommentService,
   spreadsheetId: string,
   rawQuery: string | undefined,
   requestedLimit: number,
+  exactEmail = false,
 ): Promise<{
   items: CommentMentionCandidate[]
   limit: number
@@ -213,7 +218,10 @@ async function loadBoundedMentionCandidates(
   if (query.length < MENTION_CANDIDATES_MIN_QUERY_LENGTH) {
     return { items: [], limit, query: '', hasMore: false, requiresQuery: true, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
   }
-  const result = await commentService.listMentionCandidates(spreadsheetId, { q: query, limit: limit + 1 })
+  const result = await commentService.listMentionCandidates(
+    spreadsheetId,
+    exactEmail ? { q: query, limit: limit + 1, match: 'exact-email' } : { q: query, limit: limit + 1 },
+  )
   const hasMore = result.items.length > limit
   const items = hasMore ? result.items.slice(0, limit) : result.items
   return { items, limit, query, hasMore, requiresQuery: false, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
@@ -309,6 +317,9 @@ export function commentsRouter(injector?: Injector): Router {
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
+    // #5809: opt-in email-equality lookup (legacy person import). Any other `match` value keeps the
+    // substring search exactly as before.
+    const exactEmail = readQueryValue(req.query.match) === 'exact-email'
 
     try {
       const context = await resolveCommentReadContext(req, res, parsed.data.spreadsheetId)
@@ -320,6 +331,7 @@ export function commentsRouter(injector?: Injector): Router {
         parsed.data.spreadsheetId,
         parsed.data.q,
         clampLimit(parsed.data.limit),
+        exactEmail,
       )
       return res.json({
         ok: true,

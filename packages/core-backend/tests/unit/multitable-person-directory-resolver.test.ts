@@ -10,6 +10,7 @@ import { describe, expect, test } from 'vitest'
 
 import { resolvePersonAssignableDirectory } from '../../src/multitable/person-field-restriction'
 import type { QueryFn } from '../../src/multitable/permission-service'
+import { JS_TRIM_WHITESPACE } from '../../src/utils/js-trim-whitespace'
 
 describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read model)', () => {
   test('hydrates the allowed set into display entries (id/name/email); active-only + ordered SQL', async () => {
@@ -165,13 +166,40 @@ describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read mo
       expect(seen).toHaveLength(1)
       expect(seen[0].sql).not.toMatch(/LIKE/i)
       expect(seen[0].sql).toContain('lower(id::text) = lower($2::text)')
-      expect(seen[0].sql).toContain("lower(btrim(COALESCE(name, ''))) = lower($2::text)")
-      expect(seen[0].sql).toContain("lower(btrim(COALESCE(email, ''))) = lower($2::text)")
+      expect(seen[0].sql).toContain("lower(btrim(COALESCE(name, ''), $3::text)) = lower($2::text)")
+      expect(seen[0].sql).toContain("lower(btrim(COALESCE(email, ''), $3::text)) = lower($2::text)")
       // Bound as a trimmed parameter, never interpolated.
       expect(seen[0].params[1]).toBe('Fake.Person@example.invalid')
       expect(seen[0].sql).not.toContain('example.invalid')
-      expect(seen[0].sql).toMatch(/LIMIT \$3/)
-      expect(seen[0].params[2]).toBe(51)
+      // The trim set is a bound parameter as well.
+      expect(seen[0].params[2]).toBe(JS_TRIM_WHITESPACE)
+      expect(seen[0].sql).toMatch(/LIMIT \$4/)
+      expect(seen[0].params[3]).toBe(51)
+    })
+
+    // Refuter round: PG `btrim(x)` strips only U+0020, while the pre-#5809 client matched on JS
+    // `trim()` of both sides. A name stored as "Name<U+3000>" / "Name<NBSP>" / "Name<TAB>" must still
+    // EQUAL the trimmed term, so both stored-side trims take the JS trim set, never the one-arg form.
+    test('trims the STORED name and email with the JS trim() set, not btrim\'s ASCII-space default', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), { exact: 'Fake Person', limit: 51 })
+      const sql = seen[0].sql
+      expect(sql).not.toMatch(/btrim\(COALESCE\((name|email), ''\)\)/)
+      expect(sql.match(/btrim\(COALESCE\((name|email), ''\), \$3::text\)/g)).toHaveLength(2)
+      const trimSet = seen[0].params[2] as string
+      for (const ch of ['\u3000', '\u00A0', '\t', '\u2003', '\uFEFF', ' ']) {
+        expect(trimSet).toContain(ch)
+      }
+    })
+
+    test('JS_TRIM_WHITESPACE is exactly the set String.prototype.trim() strips (every code point)', () => {
+      const expected: string[] = []
+      for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+        if (cp >= 0xd800 && cp <= 0xdfff) continue
+        const ch = String.fromCodePoint(cp)
+        if (ch.trim() === '') expected.push(ch)
+      }
+      expect([...JS_TRIM_WHITESPACE]).toEqual(expected)
     })
 
     test('exact wins over search when both are given (one predicate, no substring arm)', async () => {
@@ -182,7 +210,7 @@ describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read mo
         limit: 51,
       })
       expect(seen[0].sql).not.toMatch(/ILIKE/)
-      expect(seen[0].params).toEqual([['u1'], 'Fake Person', 51])
+      expect(seen[0].params).toEqual([['u1'], 'Fake Person', JS_TRIM_WHITESPACE, 51])
     })
 
     test('the exact mode never touches the ALLOWED set or the active-only filter', async () => {
@@ -193,12 +221,31 @@ describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read mo
       expect(seen[0].sql).toMatch(/is_active = TRUE/)
     })
 
-    test('a blank exact term is no exact term (the substring path, byte-identical)', async () => {
-      const exactBlank = capture()
-      const plain = capture()
-      await resolvePersonAssignableDirectory(exactBlank.query, 's', [], async () => new Set(['u1']), { exact: '   ', search: 'ali', limit: 51 })
-      await resolvePersonAssignableDirectory(plain.query, 's', [], async () => new Set(['u1']), { search: 'ali', limit: 51 })
-      expect(exactBlank.seen).toEqual(plain.seen)
+    // Refuter round: a blank exact term used to fall through to "no predicate at all" and hand back
+    // the first `limit` rows of the allowed set — the browse exact mode must never be. It now fails
+    // closed before ANY query, including the allowed-set resolution.
+    test('a blank exact term matches nobody: [] with no query and no allowed-set resolution', async () => {
+      for (const blank of ['', '   ', '\u3000\t']) {
+        for (const search of [undefined, 'ali']) {
+          const { seen, query } = capture()
+          let resolved = false
+          const out = await resolvePersonAssignableDirectory(query, 's', [], async () => {
+            resolved = true
+            return new Set(['u1', 'u2'])
+          }, { exact: blank, search, limit: 51 })
+          expect(out).toEqual([])
+          expect(seen).toHaveLength(0)
+          expect(resolved).toBe(false)
+        }
+      }
+    })
+
+    test('without an exact key the substring path is unchanged', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), { exact: undefined, search: 'ali', limit: 51 })
+      expect(seen).toHaveLength(1)
+      expect(seen[0].sql).toContain("(COALESCE(name, '') ILIKE $2 OR COALESCE(email, '') ILIKE $2)")
+      expect(seen[0].params).toEqual([['u1'], '%ali%', 51])
     })
 
     test('an empty allowed set still short-circuits in exact mode', async () => {

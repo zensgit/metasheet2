@@ -3527,11 +3527,17 @@ export class MultitableApiClient implements CommentsApiClient {
    * without `q` answers 200 with no items and `requiresQuery: true` — render "type to search", never
    * "no match". `hasMore` is set when the answer was clamped to the server ceiling; `total` is only the
    * size of the returned page (the server no longer discloses a deployment-wide count).
+   *
+   * #5809: `match: 'exact-email'` asks for users whose (trimmed, case-folded) EMAIL EQUALS `q` instead of
+   * the name/email/id substring search — used by the legacy person importer. Same gate, term requirement
+   * and ceiling. A server that predates the mode ignores it and answers the substring search, so callers
+   * must still filter for exact matches themselves.
    */
   async listCommentMentionSuggestions(params: {
     spreadsheetId: string
     q?: string
     limit?: number
+    match?: 'exact-email'
   }): Promise<{
     items: MetaCommentMentionSuggestion[]
     total: number

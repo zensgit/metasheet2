@@ -25,6 +25,7 @@ import { RecordWriteService, RecordValidationError, type RecordPatchInput } from
 import { createRecordWriteHelpers } from '../../src/routes/univer-meta'
 import { deriveCapabilities } from '../../src/multitable/sheet-capabilities'
 import { resolvePersonAssignableDirectory } from '../../src/multitable/person-field-restriction'
+import { CommentService } from '../../src/services/CommentService'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -45,6 +46,11 @@ const U_INACTIVE = `u_pmg_inactive_${TS}` // 2c-S2: in G_ALLOW but is_active=FAL
 const U_EXACT = `u_pmg_exact_${TS}`
 const U_EXACT_NAME = `Fake Exact ${TS}`
 const U_EXACT_EMAIL = `fake.exact.${TS}@t.local`
+// #5809 refuter round: a member whose STORED name / email carry whitespace JS trim() strips but PG's
+// one-argument btrim() does not (U+3000 ideographic space, NBSP, tab).
+const U_PADDED = `u_pmg_padded_${TS}`
+const U_PADDED_NAME = `Fake Padded ${TS}`
+const U_PADDED_EMAIL = `fake.padded.${TS}@t.local`
 
 const F_PERSON = 'fld_person_restricted'
 const F_PERSON_FREE = 'fld_person_free'
@@ -119,6 +125,8 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     // #5809 fixture: an eligible, active sheet member in NO group (unrestricted fields only).
     await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin) VALUES ($1,$2,$3,'x','user','[]'::jsonb,TRUE,FALSE) ON CONFLICT (id) DO NOTHING`, [U_EXACT, U_EXACT_EMAIL, U_EXACT_NAME])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [U_EXACT])
+    await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin) VALUES ($1,$2,$3,'x','user','[]'::jsonb,TRUE,FALSE) ON CONFLICT (id) DO NOTHING`, [U_PADDED, `\u00A0${U_PADDED_EMAIL}\t`, `${U_PADDED_NAME}\u3000`])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [U_PADDED])
   })
   beforeEach(async () => {
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = 1', [REC_ID, SHEET_ID, JSON.stringify({})])
@@ -132,8 +140,8 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
     await q('DELETE FROM platform_member_group_members WHERE group_id = ANY($1)', [[G_ALLOW, G_OTHER]]).catch(() => {})
     await q('DELETE FROM platform_member_groups WHERE id = ANY($1)', [[G_ALLOW, G_OTHER]]).catch(() => {})
-    await q('DELETE FROM user_permissions WHERE user_id = ANY($1)', [[ACTOR, U_IN, U_OUT, U_EXACT]]).catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1)', [[ACTOR, U_IN, U_OUT, U_EXACT]]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = ANY($1)', [[ACTOR, U_IN, U_OUT, U_EXACT, U_PADDED]]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1)', [[ACTOR, U_IN, U_OUT, U_EXACT, U_PADDED]]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -289,5 +297,29 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     expect(inside.map((e) => e.userId)).toEqual([U_IN])
     const inactive = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { exact: U_INACTIVE, limit: 51 })
     expect(inactive).toEqual([])
+  })
+
+  test('#5809 exact (real DB): a stored name/email padded with U+3000 / NBSP / tab still equals the trimmed term', async () => {
+    const byName = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { exact: U_PADDED_NAME.toLowerCase(), limit: 51 })
+    expect(byName.map((e) => e.userId)).toEqual([U_PADDED])
+    const byEmail = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { exact: U_PADDED_EMAIL, limit: 51 })
+    expect(byEmail.map((e) => e.userId)).toEqual([U_PADDED])
+  })
+
+  // The mention SQL has no other wired real-Postgres lane; this runs the #5809 exact-email arm for real.
+  test('#5809 mention candidates exact-email (real DB): email EQUALITY only, trimmed like JS trim()', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new CommentService({} as any, { info() {}, warn() {}, error() {}, debug() {} } as any)
+    const exactEmail = (term: string) => service.listMentionCandidates(SHEET_ID, { q: term, limit: 51, match: 'exact-email' })
+    expect((await exactEmail(U_EXACT_EMAIL.toUpperCase())).items.map((item) => item.id)).toEqual([U_EXACT])
+    expect((await exactEmail(U_PADDED_EMAIL)).items.map((item) => item.id)).toEqual([U_PADDED])
+    // A fragment the substring search matches is not an email owner.
+    const fragment = `exact.${TS}@t.local`
+    const substring = await service.listMentionCandidates(SHEET_ID, { q: fragment, limit: 51 })
+    expect(substring.items.map((item) => item.id)).toContain(U_EXACT)
+    expect((await exactEmail(fragment)).items).toEqual([])
+    // Names and ids are not matched in this mode.
+    expect((await exactEmail(U_EXACT_NAME)).items).toEqual([])
+    expect((await exactEmail(U_EXACT)).items).toEqual([])
   })
 })

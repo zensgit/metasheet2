@@ -259,6 +259,95 @@ describe('multitable import parsing', () => {
     ])
   })
 
+  // #5809 refuter round — the build is cancellable and lets resolvers look ahead.
+  it('stops at the next row once the signal aborts and rejects with AbortError (no records returned)', async () => {
+    const controller = new AbortController()
+    const seen: string[] = []
+    const resolver = vi.fn(async (rawValue: string, _field: unknown, context?: { signal?: AbortSignal }) => {
+      seen.push(rawValue)
+      expect(context?.signal).toBe(controller.signal)
+      if (rawValue === 'Fake B') controller.abort()
+      return ['u_fake']
+    })
+
+    await expect(buildImportedRecords({
+      parsedRows: [['Fake A'], ['Fake B'], ['Fake C']],
+      fieldMapping: { 0: 'fld_owner' },
+      fields: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: {} }],
+      fieldResolvers: { fld_owner: resolver },
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError', message: 'Import cancelled' })
+    expect(seen).toEqual(['Fake A', 'Fake B'])
+  })
+
+  it('does not record an abort-caused resolver error as a row failure', async () => {
+    const controller = new AbortController()
+    const resolver = vi.fn(async () => {
+      controller.abort()
+      throw Object.assign(new Error('dropped'), { name: 'AbortError' })
+    })
+
+    await expect(buildImportedRecords({
+      parsedRows: [['Fake A']],
+      fieldMapping: { 0: 'fld_owner' },
+      fields: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: {} }],
+      fieldResolvers: { fld_owner: resolver },
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('primes each resolver once, before any row, with its column values (blanks and overridden cells left out)', async () => {
+    const order: string[] = []
+    const resolver = Object.assign(
+      vi.fn(async (rawValue: string) => {
+        order.push(`resolve:${rawValue}`)
+        return ['u_fake']
+      }),
+      {
+        prime: vi.fn((rawValues: string[]) => {
+          order.push(`prime:${rawValues.join('|')}`)
+        }),
+      },
+    )
+    const plainText = Object.assign(vi.fn(), { prime: vi.fn() })
+
+    const result = await buildImportedRecords({
+      parsedRows: [['Fake A', 'x'], ['  ', 'y'], ['Fake C', 'z'], [' Fake D ', 'w']],
+      fieldMapping: { 0: 'fld_owner', 1: 'fld_note' },
+      fields: [
+        { id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: false } },
+        { id: 'fld_note', name: 'Note', type: 'string' },
+      ],
+      fieldResolvers: { fld_owner: resolver, fld_note: plainText },
+      fieldOverrides: { 2: { fld_owner: ['u_override'] } },
+    })
+
+    expect(resolver.prime).toHaveBeenCalledTimes(1)
+    expect(order[0]).toBe('prime:Fake A|Fake D')
+    expect(order.slice(1)).toEqual(['resolve:Fake A', 'resolve:Fake D'])
+    // A column that is not a link/person column is never primed.
+    expect(plainText.prime).not.toHaveBeenCalled()
+    expect(result.records).toHaveLength(4)
+  })
+
+  it('ignores a throwing prime (the rows still resolve)', async () => {
+    const resolver = Object.assign(vi.fn(async () => ['u_fake']), {
+      prime: vi.fn(() => {
+        throw new Error('look-ahead broke')
+      }),
+    })
+
+    const result = await buildImportedRecords({
+      parsedRows: [['Fake A']],
+      fieldMapping: { 0: 'fld_owner' },
+      fields: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: {} }],
+      fieldResolvers: { fld_owner: resolver },
+    })
+
+    expect(result.failures).toEqual([])
+    expect(result.records).toEqual([{ fld_owner: ['u_fake'] }])
+  })
+
   it('skips duplicate rows using the primary import field against existing and in-batch values', () => {
     const result = skipDuplicateImportRows({
       records: [
