@@ -53,6 +53,7 @@ import {
 } from '../../src/multitable/recovery-archive-reader'
 import { buildRecoveryArchiveSealedSnapshotManifest } from '../../src/multitable/recovery-archive-sealed-snapshot-manifest'
 import { buildRecoveryArchiveSnapshotPlan } from '../../src/multitable/recovery-archive-snapshot-plan'
+import { createLocalCustodyBackup, createLocalCustodySession, type LocalArchiveCustodyAdmission } from '../../src/multitable/recovery-local-custody'
 
 const SENTINEL = 'reader-sensitive-sentinel'
 const KEY_ID = 'kms-key-0001'
@@ -213,13 +214,15 @@ type DurableArchive = {
 
 async function buildDurableArchive(options: {
   custody?: RecoveryArchiveKeyCustodyAdapter
+  local?: LocalArchiveCustodyAdmission
   mutateManifest?: (manifest: RecoveryArchiveManifest) => RecoveryArchiveManifest
   tamperSignedManifest?: (manifest: RecoveryArchiveManifest) => RecoveryArchiveManifest
   replaceRecordsPlaintext?: Uint8Array
 } = {}): Promise<DurableArchive> {
   const generationId = randomUUID()
   const binding = makeBinding(generationId)
-  const produceCustody = createBoundCustody({ produceDek: randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES) })
+  const produceCustody = options.local ?? createBoundCustody({ produceDek: randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES) })
+  const keyId = options.local?.keyId ?? KEY_ID
   const plan = makePlan()
   const sections = plan.map((section) => {
     if (options.replaceRecordsPlaintext && section.sectionName === 'records') {
@@ -245,7 +248,7 @@ async function buildDurableArchive(options: {
       anchorOperationId: binding.anchor_operation_id,
       anchorSeq: binding.anchor_seq,
       checkpointId: binding.checkpoint_id,
-      keyId: KEY_ID,
+      keyId,
       aeadAlgorithm: RECOVERY_ARCHIVE_AEAD_ALGORITHM,
     },
     keyCustody: produceCustody,
@@ -265,7 +268,7 @@ async function buildDurableArchive(options: {
       ? null
       : buildRecoveryArchiveSealedSnapshotManifest({
           binding,
-          keyId: KEY_ID,
+          keyId,
           plan,
           sealResult,
         })
@@ -288,7 +291,7 @@ async function buildDurableArchive(options: {
           row_count: section.sectionName === 'records' ? '1' : section.rowCount,
           plaintext_sha256: recoveryArchivePlaintextSha256(plaintext),
           aead_algorithm: RECOVERY_ARCHIVE_V1_AEAD_ALGORITHM_VALUE,
-          key_id: KEY_ID,
+          key_id: keyId,
           wrapped_dek_id: sealResult.wrappedDekId,
           dek_fingerprint: sealResult.dekFingerprint,
           nonce: Buffer.from(section.nonce).toString('hex'),
@@ -349,13 +352,13 @@ async function buildDurableArchive(options: {
   } else {
     const unsigned = buildRecoveryArchiveSealedSnapshotManifest({
       binding,
-      keyId: KEY_ID,
+      keyId,
       plan,
       sealResult,
     })
     const authenticated = await authenticateRecoveryArchiveSealedSnapshotManifest({
       sealedManifest: unsigned,
-      keyCustody: options.custody ?? createBoundCustody(),
+      keyCustody: options.local ?? options.custody ?? createBoundCustody(),
       transactionDepth: depthProbe(0),
     })
     envelopeBytes = authenticated.envelopeBytes
@@ -467,6 +470,44 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test('local admission seals and authenticates real sections, then recovers retained records in a fresh session', async () => {
+    const custodyId = randomUUID()
+    const recoverySecret = randomBytes(32)
+    const transactionDepth = depthProbe(0)
+    const backup = createLocalCustodyBackup({ custodyId, recoverySecret, transactionDepth })
+    const writer = createLocalCustodySession(transactionDepth)
+    writer.unlock({ custodyId, recoverySecret, backup })
+    const admission = writer.admitForArchive(custodyId)
+    const durable = await buildDurableArchive({ local: admission })
+    const persisted = await persistDurable(durable)
+    const rotated = writer.exportRotatedBackup(recoverySecret)
+    writer.lock()
+    const reader = createLocalCustodySession(transactionDepth)
+    expect(reader.isUnlocked()).toBe(false)
+    reader.unlock({ custodyId, recoverySecret, backup: rotated })
+    const input = {
+      ...persisted,
+      transactionDepth,
+      keyCustody: reader.admitForArchive(custodyId),
+    }
+    try {
+      const opened = await readRecoveryArchiveCompleteSectionsInternal(input)
+      expect(opened.manifest.format_version).toBe(1)
+      expect(opened.manifest.sections.every(section => section.key_id === admission.keyId)).toBe(true)
+      expect(opened.sections.records.map(row => row.payload)).toEqual([
+        { record_id: 'record-1', exists: true, version: 1, data: { text: 'value' } },
+        { record_id: 'record-2', exists: false, version: 2, data: null },
+      ])
+      await expect(readRecoveryArchiveCompleteSectionsInternal({ ...input, keyCustody: admission })).rejects.toBeInstanceOf(RecoveryArchiveReaderError)
+      await expect(readRecoveryArchiveCompleteSectionsInternal({ ...input, keyCustody: createBoundCustody() })).rejects.toBeInstanceOf(RecoveryArchiveReaderError)
+      reader.lock()
+      await expect(readRecoveryArchiveCompleteSectionsInternal(input)).rejects.toBeInstanceOf(RecoveryArchiveReaderError)
+    } finally {
+      writer.lock()
+      reader.lock()
+      recoverySecret.fill(0)
+    }
+  })
   test('opens the authenticated ten-section snapshot with defensive copies and exact bigint seq', async () => {
     const durable = await buildDurableArchive()
     const persisted = await persistDurable(durable)
