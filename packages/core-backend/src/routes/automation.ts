@@ -234,6 +234,32 @@ function isTestRunRuleNotFoundError(err: unknown): boolean {
     && /^Rule .+ not found or not enabled$/s.test(err.message)
 }
 
+/**
+ * Transient-DB classification for a failure thrown out of `svc.testRun` ONLY.
+ *
+ * Unlike the permission/sample-record reads above, testRun runs the simulated planner and real
+ * executors, whose own error prose routinely says "unavailable" / "not ready" / "does not exist"
+ * about a target, view or field. Matching English message text here would relabel those as
+ * 503 DB_NOT_READY. So the 503 decision uses only language-independent codes: SQLSTATE
+ * (42P01/42703, connection-exception class 08, 53300 too_many_connections, 57P01-57P03 shutdown/
+ * cannot-connect) and Node socket codes. The single message test is node-pg's own fixed driver
+ * string, anchored at the start, which planner prose does not produce.
+ */
+const TEST_RUN_TRANSIENT_NODE_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'])
+const TEST_RUN_TRANSIENT_SQLSTATES = new Set(['53300', '57P01', '57P02', '57P03'])
+
+function isTestRunTransientDbError(err: unknown): boolean {
+  if (isDbNotReadySqlState(err)) return true
+  if (!err || typeof err !== 'object') return false
+  const code = (err as { code?: unknown }).code
+  if (typeof code === 'string') {
+    if (TEST_RUN_TRANSIENT_NODE_CODES.has(code)) return true
+    if (TEST_RUN_TRANSIENT_SQLSTATES.has(code)) return true
+    if (/^08[0-9A-Z]{3}$/.test(code)) return true
+  }
+  return err instanceof Error && /^Connection terminated/.test(err.message)
+}
+
 function shouldUsePersistedJobs(
   execution: AutomationExecution,
   jobs: ReturnType<typeof toWorkflowJobView>[] | undefined,
@@ -874,8 +900,15 @@ export function createAutomationRoutes(
           error: { code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
         })
       }
-      // Same responder as the fail-closed sites above: SQLSTATE-first DB-not-ready → 503, else 500.
-      return sendFailClosedResolutionError(res, err, 'TEST_RUN_FAILED', 'Test run failed')
+      // Code-only DB-not-ready → 503 (no English prose matching — planner/executor errors say
+      // "unavailable"/"does not exist" about targets), else 500. Same fixed bodies as elsewhere.
+      const transient = isTestRunTransientDbError(err)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: transient
+          ? { code: 'DB_NOT_READY', message: 'Service temporarily unavailable' }
+          : { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+      })
     }
   })
 

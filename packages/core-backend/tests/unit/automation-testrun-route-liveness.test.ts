@@ -206,6 +206,45 @@ describe('#5803 follow-up — test-run route values-free failures', () => {
     expect(JSON.stringify(res.body)).not.toContain('view_secret')
   })
 
+  for (const prose of [
+    'Target view_secret is unavailable',
+    'Planner not ready for field fld_secret',
+    'Field fld_secret does not exist on target sheet',
+    'Upstream webhook ECONNREFUSED-like text too many clients',
+  ]) {
+    it(`keeps a planner/executor error whose prose looks transient at 500 (not 503): ${prose}`, async () => {
+      const svc = makeService()
+      svc.testRun.mockRejectedValue(new Error(prose))
+      pinned.setApp(buildApp(svc))
+
+      const res = await request(pinned.url()).post(URL_PATH).send({})
+
+      expect(res.status).toBe(500)
+      expect(res.body).toEqual({ ok: false, error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
+      expect(JSON.stringify(res.body)).not.toMatch(/secret/)
+    })
+  }
+
+  for (const [label, err] of [
+    ['socket code ECONNREFUSED', Object.assign(new Error('connect db.internal.host:5432'), { code: 'ECONNREFUSED' })],
+    ['SQLSTATE 57P03 cannot_connect_now', Object.assign(new Error('数据库系统正在启动'), { code: '57P03' })],
+    ['SQLSTATE 08006 connection_failure', Object.assign(new Error('x'), { code: '08006' })],
+    ['SQLSTATE 53300 too_many_connections', Object.assign(new Error('x'), { code: '53300' })],
+    ['node-pg driver Connection terminated', new Error('Connection terminated unexpectedly')],
+  ] as const) {
+    it(`answers a code-classified transient DB error (${label}) with the fixed 503`, async () => {
+      const svc = makeService()
+      svc.testRun.mockRejectedValue(err)
+      pinned.setApp(buildApp(svc))
+
+      const res = await request(pinned.url()).post(URL_PATH).send({})
+
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ ok: false, error: { code: 'DB_NOT_READY', message: 'Service temporarily unavailable' } })
+      expect(JSON.stringify(res.body)).not.toMatch(/db\.internal\.host|5432|启动|terminated/)
+    })
+  }
+
   it('answers a non-Error rejection with the fixed 500 body', async () => {
     const svc = makeService()
     svc.testRun.mockRejectedValue('raw string secret-token')
