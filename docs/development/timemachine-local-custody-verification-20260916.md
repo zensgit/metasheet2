@@ -85,3 +85,29 @@ readback on supported local filesystems. Full catalog/object/keyring application
 restore, explicit local-assurance admission, independent offline-copy rehearsal
 and standard startup composition remain OPEN. File sync calls and local tests do
 not establish NAS, physical power-loss or malicious-host guarantees.
+
+## Explicit admission local checkpoint (not yet published)
+
+Code commit `ada94eca13f5a272e3e4e883241549a34d2d2ae7`, on main replay
+`5dda8b077d7816ce42d938cfb60c742b9e598233`, adds explicit opaque local admission.
+Seven bounded files; no manifest format, migration, object-store or startup edit.
+The session supplies a namespaced key ID and revocable runtime identity. The existing
+transaction guard resolves it without treating it as a KMS adapter or selecting a
+provider from archive bytes. Expected custody is supplied out-of-band.
+
+Local gates: seven unit/neighbor files, 127/127 PASS; core typecheck and six-source
+ESLint PASS; diff-check PASS. Added positives/negatives cover explicit guarded
+wrap/unwrap/MAC/fingerprint, forged/copied/raw session rejection, wrong expected
+custody, noncanonical/cross-custody IDs, lock/re-unlock revocation, old-key reads
+after rotation and inactive production-key refusal.
+
+Mutation removing epoch equality made the re-unlock stale-admission test RED.
+Restored core source SHA-256:
+`e779b41af17aded3e72c0205a369f69553ceee2610f4a4e7af45dbc953a836f8`.
+The full 127-test run above followed restoration. Prior remote green remains bound
+to `0d063ab7d2e457314fffabf4c8407e2c2273e4c8`, not this local checkpoint.
+
+Still pending before publishing this follow-up: independent exact-code review and
+real local seal/authenticated-manifest/reader chain test. Full synthetic database
+catalog/object/custody restoration remains a subsequent acceptance gate. No new
+CI, runtime enablement, customer storage or deployment proof is claimed.
