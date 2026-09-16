@@ -183,14 +183,14 @@
             </ul>
           </template>
           <footer class="mt-save-tpl__footer">
-            <router-link
+            <RouterLink
               class="mt-save-tpl__link"
               :to="{ name: TemplateCenterRouteName }"
               data-testid="save-sheet-as-template-center-link"
               @click="closeSaveSheetAsTemplate"
             >
               {{ wb('saveTpl.openCenter', isZh) }}
-            </router-link>
+            </RouterLink>
             <MtButton data-action="save-sheet-as-template-done" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.close', isZh) }}</MtButton>
           </footer>
         </div>
@@ -438,6 +438,7 @@
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
+        :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
@@ -478,6 +479,7 @@
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
+        @approval-submitted="onRecordApprovalSubmitted"
         @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
@@ -576,10 +578,12 @@
       @confirm="onLinkPickerConfirm"
     />
     <MetaPersonPicker
+      v-if="personPickerVisible || workbench.activeSheetId.value"
       :visible="personPickerVisible"
       :field="personPickerField"
       :sheet-id="workbench.activeSheetId.value"
       :current-value="personPickerCurrentValue"
+      :current-summaries="personPickerCurrentSummaries"
       @close="personPickerVisible = false"
       @confirm="onPersonPickerConfirm"
     />
@@ -615,12 +619,14 @@
       @committed="onBulkFillCommitted"
     />
     <MetaViewManager
+      v-if="showViewManager || workbench.activeSheetId.value"
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value" :field-permissions="effectiveFieldPermissions"
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
     <MetaSheetPermissionManager
+      v-if="showPermissionManager || workbench.activeSheetId.value"
       :visible="showPermissionManager"
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
@@ -637,6 +643,7 @@
          it maintains its own list state in place; only an explicit close does. Closing on every
          update forced users to reopen the modal after each toggle/delete/save. -->
     <MetaAutomationManager
+      v-if="showAutomationManager || workbench.activeSheetId.value"
       :visible="showAutomationManager"
       :sheet-id="workbench.activeSheetId.value"
       :fields="grid.fields.value"
@@ -645,6 +652,7 @@
       @close="showAutomationManager = false"
     />
     <MetaFormShareManager
+      v-if="showFormShareManager || workbench.activeSheetId.value"
       :visible="showFormShareManager"
       :sheet-id="workbench.activeSheetId.value"
       :view-id="workbench.activeViewId.value"
@@ -661,6 +669,7 @@
     />
 
     <TrashModal
+      v-if="showTrash || workbench.activeSheetId.value"
       :open="showTrash"
       :sheet-id="workbench.activeSheetId.value"
       :fields="twoLayerVisibleFields"
@@ -693,6 +702,7 @@
       @reverted="onConfigReverted"
     />
     <RecoveryArchiveModal
+      v-if="showRecoveryArchive || workbench.activeSheetId.value"
       :visible="showRecoveryArchive"
       :sheet-id="workbench.activeSheetId.value"
       :is-zh="isZh"
@@ -715,7 +725,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
+import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
@@ -746,11 +756,13 @@ import {
   recordNotFound as fmtRecordNotFound,
   sheetDeleteConfirm as fmtSheetDeleteConfirm,
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
+  fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
 } from '../utils/workbench-labels'
-import { recordLabel } from '../utils/meta-record-labels'
+import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
   bulkFailureSamples as fmtBulkFailureSamples,
@@ -772,6 +784,7 @@ import type {
   MetaFieldCreateType,
   MetaFieldType,
   MetaRecord,
+  MetaRecordApprovalSubmission,
   MetaRowActions,
   MetaViewPermission,
   MetaFieldPermissionEntry,
@@ -983,6 +996,13 @@ const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEna
 // pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
 // so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
 const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
+// 记录级送审 (多维表 × 审批 阶段二 §4.2/§5): server-derived `multitable:submit-approval`, read with the
+// SAME shape as canDeleteSheet/pitResetEnabled above — straight off the /context capabilities object
+// (`=== true`), never a role fallback, so an old backend, a legacy role-string source or a stale object
+// all fail CLOSED (送审 entry hidden). `useMultitableCapabilities` exposes the same key for any other
+// consumer (composable-tier contract, see that file); this view deliberately reads the source object so a
+// capability the server has not sent is `undefined`, not a lookup on a partially-shaped capabilities bag.
+const canSubmitApproval = computed(() => capabilitySource.value?.canSubmitApproval === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
@@ -1289,6 +1309,12 @@ const personPickerVisible = ref(false)
 const personPickerField = ref<MetaField | null>(null)
 const personPickerRecordId = ref<string | null>(null)
 const personPickerCurrentValue = ref<unknown>(null)
+// #5781 follow-up: the display names we ALREADY hold for the cell being edited, handed to the picker
+// so its "Selected" chips (and the summaries it echoes back on confirm) are real names. Since #5781
+// the picker's own term-less open fetch returns nothing, so it can no longer learn them itself, and
+// an un-searched assignee would round-trip into the grid as a raw userId. Snapshot (not a computed)
+// so a background refetch mid-dialog cannot swap the set under the open picker.
+const personPickerCurrentSummaries = ref<PersonSummary[]>([])
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
@@ -1592,6 +1618,11 @@ const workbenchReady = ref(false)
 let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
+let dialogMetaVisibilityListener: (() => void) | null = null
+// Cleared on unmount so an idle-deferred callback scheduled during mount, or a dialog-meta refresh
+// that was still in flight, can never fire into a torn-down workbench (or eat a later test's
+// mocked fetch). Declared up here because refreshDialogMeta() below reads it.
+let workbenchAlive = true
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
@@ -1616,6 +1647,14 @@ function showSuccess(msg: string, action?: ToastAction) {
 function historyLinkAction(batchId: string | null): ToastAction | undefined {
   if (!batchId) return undefined
   return { label: wb('toast.viewInHistory', isZh.value), onClick: () => openHistoryForBatch(batchId) }
+}
+
+// 记录级送审 (多维表 × 审批 阶段二 §5): the inspector owns the dialog and its own panel refresh; the
+// workbench's whole job here is the toast, so a user who submitted from a drawer that is about to close
+// still sees the server-issued request number. No capability decision is made here — `canSubmitApproval`
+// (passed to the inspector above) already gated the entry, and the route re-enforces it.
+function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
+  showSuccess(recordApprovalSubmittedToast(submission.requestNo, isZh.value))
 }
 
 function ensureCanCreateRecord(): boolean {
@@ -2032,20 +2071,37 @@ function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: L
   }
 }
 
+// #5781 follow-up — a raw-id placeholder must never EVICT a display name we already had. `patchCell`
+// does not re-hydrate personSummaries, so whatever this writes is what the grid/drawer show until the
+// next full refetch: an entry that is still `{ id, display: <the id> }` (the picker's fallback for an
+// id it could not resolve) is downgraded to the previously known summary for the same id, if any.
+// Belt-and-braces behind the `currentSummaries` prop: that seam stops the placeholder from being
+// produced, this one stops any future producer's placeholder from overwriting a good name.
+function mergePersonSummaryDisplays(prev: PersonSummary[] | undefined, next: PersonSummary[]): PersonSummary[] {
+  if (!prev?.length) return next
+  const prevById = new Map(prev.map((entry) => [entry.id, entry] as const))
+  return next.map((entry) => {
+    if (entry.display && entry.display !== entry.id) return entry
+    const known = prevById.get(entry.id)
+    return known && known.display && known.display !== entry.id ? known : entry
+  })
+}
+
 // Native person (人员): mirror applyLocalLinkSummaries so a just-picked person shows its display
 // name immediately (grid + drawer) instead of a raw userId until the next refetch.
 function applyLocalPersonSummaries(recordId: string, fieldId: string, summaries: PersonSummary[]) {
+  const gridNext = mergePersonSummaryDisplays(grid.personSummaries.value[recordId]?.[fieldId], summaries)
   grid.personSummaries.value = {
     ...grid.personSummaries.value,
     [recordId]: {
       ...(grid.personSummaries.value[recordId] ?? {}),
-      [fieldId]: summaries,
+      [fieldId]: gridNext,
     },
   }
   if (deepLinkedRecord.value?.id === recordId) {
     deepLinkedRecordPersonSummaries.value = {
       ...deepLinkedRecordPersonSummaries.value,
-      [fieldId]: summaries,
+      [fieldId]: mergePersonSummaryDisplays(deepLinkedRecordPersonSummaries.value[fieldId], summaries),
     }
   }
 }
@@ -3103,6 +3159,8 @@ function openPersonPicker(field: MetaField) {
   personPickerField.value = field
   personPickerRecordId.value = selectedRecordId.value
   personPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null
+  // Drawer/form open: same summaries the drawer itself renders from (grid first, deep-record fallback).
+  personPickerCurrentSummaries.value = selectedRecordPersonSummaries.value[field.id] ?? []
   personPickerVisible.value = true
 }
 function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
@@ -3110,6 +3168,8 @@ function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
   personPickerField.value = ctx.field
   personPickerRecordId.value = ctx.recordId
   personPickerCurrentValue.value = row?.data[ctx.field.id] ?? null
+  // Grid open: same summaries MetaCellRenderer is displaying for this cell right now.
+  personPickerCurrentSummaries.value = grid.personSummaries.value[ctx.recordId]?.[ctx.field.id] ?? []
   personPickerVisible.value = true
 }
 async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: PersonSummary[] }) {
@@ -3177,12 +3237,16 @@ async function onUpdateField(fieldId: string, input: { name?: string; order?: nu
   } catch (e: any) { showError(e.message ?? wb('toast.fieldUpdateFailed', isZh.value)) }
 }
 
+// #5707 follow-up: the server refuses a field delete on a plugin-managed sheet with a coded 409
+// (MANAGED_FIELD_DELETE_REFUSED) whose message is English. Pick the copy by CODE -- same shape as
+// onDeleteSheet -- so zh-CN users get a Chinese sentence; every other failure still surfaces the
+// server's own message (and the generic toast when it sent none).
 async function onDeleteField(fieldId: string) {
   try {
     await workbench.client.deleteField(fieldId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? wb('toast.fieldDeleteFailed', isZh.value)) }
+  } catch (e: any) { showError(fmtFieldDeleteErrorMessage(e, isZh.value)) }
 }
 
 // --- View management ---
@@ -3818,8 +3882,32 @@ function serializeExternalContext(input: { baseId: string; sheetId: string; view
   return `${input.baseId}::${input.sheetId}::${input.viewId}`
 }
 
+// #5750: the incoming baseId is what the embedding host / URL says, while activeBaseId is what the
+// LOADED CONTEXT said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+// ctx.sheet.baseId). Comparing the two verbatim makes this fast path miss forever whenever they
+// spell the same base differently, and a host that re-sends the same context on a timer then
+// re-enters applyExternalContext -- plus the busy / unsaved-draft defer toasts -- every tick.
+// A sheet belongs to exactly one base, so once the ACTIVE sheet is known (from the loaded sheet
+// list) to live in the active base, the requested base id carries nothing the sheet id does not
+// already carry. It is only ignored, never trusted: the caller still requires the sheet id (and the
+// view id) to equal the active one, so a foreign base can never select a sheet through this path,
+// and an unknown active sheet (empty/not-yet-loaded sheet list) keeps the strict comparison.
+function externalContextBaseMatchesWorkbench(inputBaseId: string) {
+  const activeBaseId = workbench.activeBaseId.value ?? ''
+  if (inputBaseId === activeBaseId || !inputBaseId) return true
+  if (!activeBaseId) return false
+  // A base id this workbench KNOWS (it is in the loaded base list) is never a different spelling of
+  // the active base -- it is a real base switch request. Ignoring it would answer 'applied' to a
+  // host that posted only { baseId } (handleNavigateMessage fills sheetId/viewId in from the
+  // current ones) while nothing switched; that request has to go down the normal path and fail
+  // loudly, as it did before this fast path existed.
+  if (bases.value.some((base) => base.id === inputBaseId)) return false
+  const activeSheet = workbench.sheets.value.find((sheet) => sheet.id === (workbench.activeSheetId.value ?? ''))
+  return !!activeSheet && activeSheet.baseId === activeBaseId
+}
+
 function externalContextMatchesWorkbench(input: { baseId: string; sheetId: string; viewId: string }) {
-  return input.baseId === (workbench.activeBaseId.value ?? '') &&
+  return externalContextBaseMatchesWorkbench(input.baseId) &&
     input.sheetId === (workbench.activeSheetId.value ?? '') &&
     input.viewId === (workbench.activeViewId.value ?? '')
 }
@@ -3830,6 +3918,34 @@ function getCurrentExternalContext() {
     sheetId: workbench.activeSheetId.value ?? '',
     viewId: workbench.activeViewId.value ?? '',
   }
+}
+
+// #5750 follow-up (review round 2): which triple an 'applied' result echoes. getCurrentExternalContext()
+// reads the LIVE refs, and every caller below reads them AFTER an await -- loadBaseContext applies the
+// context and only THEN awaits /fields, so a rail click (selectSheet/selectView) or a second overlapping
+// sync can move the active triple inside that window. useMultitableWorkbench documents exactly this hazard
+// and keeps per-sync `inFlightExternalSyncs` so its memo never records another writer's result as this
+// request's; tests/multitable-external-context-sync.spec.ts pins the window as reachable (a sync for
+// sheet_orders resolves true while the rail click's sheet_deals is on screen).
+// So: echo the live triple only when it is still a RESOLUTION OF THIS REQUEST --
+//   - the base the request named is the one in effect (or a spelling of it: the fast-path matcher),
+//   - the sheet the request named is the one in effect,
+//   - the view the request named is in effect, or is not a view this sheet HAS (the dead/renamed view
+//     the loaded context legitimately falls back to views[0] for -- the case this echo change is for).
+// Otherwise this request lost a race: echo the REQUEST, which is what shipped before, so the embed host
+// pins the requested triple and the props watcher carries the frame back to it.
+function resolveAppliedExternalContextEcho(request: { baseId: string; sheetId: string; viewId: string }) {
+  const current = getCurrentExternalContext()
+  if (!externalContextBaseMatchesWorkbench(request.baseId)) return request
+  if (request.sheetId && request.sheetId !== current.sheetId) return request
+  if (
+    request.viewId
+    && request.viewId !== current.viewId
+    && workbench.views.value.some((view) => view.id === request.viewId)
+  ) {
+    return request
+  }
+  return current
 }
 
 async function applyExternalContext(input: { baseId: string; sheetId: string; viewId: string }) {
@@ -3862,8 +3978,16 @@ async function replayPendingExternalContextIfReady() {
   const ok = await applyExternalContext(replay.context)
   emit('external-context-result', ok
     ? {
+      // #5750 follow-up: echo what is ACTUALLY on screen, not what was asked for. The loaded
+      // context decides the active triple (syncContextState overwrites activeBaseId with
+      // ctx.base.id / ctx.sheet.baseId and falls activeViewId back to views[0] when the requested
+      // view is not in ctx.views), so a request naming a dead view applies successfully while the
+      // workbench lands on another view. Echoing the request made the embed host pin that dead
+      // triple into the URL and re-send it forever; the resolved triple round-trips -- but only
+      // when it IS this request's resolution (see resolveAppliedExternalContextEcho). FAILURES keep
+      // echoing the request -- there is no applied context to report for them.
       status: 'applied',
-      context: replay.context,
+      context: resolveAppliedExternalContextEcho(replay.context),
       requestId: replay.requestId,
     }
     : {
@@ -3955,7 +4079,12 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
-  return { status: 'applied', context: nextContext, requestId: options?.requestId }
+  // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple, never the requested
+  // one, whenever what is on screen is this request's own resolution. The fast-path 'applied' return
+  // at the top of this function already reports the live triple (it has just proved the refs equal the
+  // request, synchronously), so a caller could otherwise get two different shapes of 'applied' for the
+  // same context.
+  return { status: 'applied', context: resolveAppliedExternalContextEcho(nextContext), requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {
@@ -4634,14 +4763,27 @@ async function refreshDialogMeta() {
   try {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
-    if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
+    // workbenchAlive: this write lands AFTER an await, so a refresh still in flight when the
+    // workbench unmounted must not write into a torn-down grid.
+    if (refreshed && workbenchAlive && workbench.activeSheetId.value === activeSheetId) {
+      // #5743: an unchanged poll no longer replaces workbench.fields, so the computed hands back the
+      // very same field objects — reseating grid.fields anyway would invalidate every grid computed
+      // and re-render the table on each keep-alive tick for nothing.
+      const nextFields = propertyVisibleWorkbenchFields.value
+      const currentFields = grid.fields.value
+      const sameFields = currentFields.length === nextFields.length
+        && currentFields.every((field, index) => field === nextFields[index])
+      if (!sameFields) grid.fields.value = [...nextFields]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    // workbenchAlive: the dialog refs dialogMetaRefreshWanted() reads survive unmount and the
+    // "sheet changed mid-flight" clause below is true by construction after a teardown that
+    // switched sheets, so without this a refresh in flight during teardown would issue one more
+    // GET /fields + GET /context into a dead component.
+    const shouldRefresh = workbenchAlive && dialogMetaRefreshWanted()
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -4649,20 +4791,60 @@ async function refreshDialogMeta() {
   }
 }
 
+// Same predicate the watch below uses to arm/disarm the keep-alive — the visibility listener has to
+// re-check it because a dialog can close between a tab being hidden and it coming back.
+function dialogMetaRefreshWanted(): boolean {
+  return Boolean(
+    (showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value)
+    && workbench.activeSheetId.value,
+  )
+}
+
 function stopDialogMetaRefresh() {
   if (dialogMetaRefreshTimer != null) {
     window.clearInterval(dialogMetaRefreshTimer)
     dialogMetaRefreshTimer = null
   }
+  if (dialogMetaVisibilityListener) {
+    document.removeEventListener('visibilitychange', dialogMetaVisibilityListener)
+    dialogMetaVisibilityListener = null
+  }
   dialogMetaRefreshQueued = false
 }
 
+// #5743 follow-up: a refresh that is NOT an interval tick (dialog open, visibility catch-up) also
+// RESTARTS the cadence. Without the re-arm the interval kept the phase it had before the tab went
+// hidden, so "hidden 20 s -> visible" fired the catch-up and then let the pre-existing tick land a
+// few seconds later: two refreshes inside one 15 s window. The re-arm lives in this helper instead
+// of inline in the listener body so the listener closure identity never changes (the very function
+// object that was added is what stopDialogMetaRefresh must hand removeEventListener), and so at
+// most one interval is ever alive: the previous id is cleared before the new one lands in the same
+// slot stopDialogMetaRefresh reads.
+function armDialogMetaRefreshTimer() {
+  if (dialogMetaRefreshTimer != null) window.clearInterval(dialogMetaRefreshTimer)
+  dialogMetaRefreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    void refreshDialogMeta()
+  }, DIALOG_META_REFRESH_INTERVAL_MS)
+}
+
+// #5743: open → refresh once, then a SLOW keep-alive (15 s), skipped entirely while the tab is
+// hidden and re-fired once the moment it comes back. The old 1200 ms cadence pinned an idle admin
+// tab at ~1 req/s per open dialog forever; the composable's fingerprint check now also keeps an
+// unchanged answer from re-seating sheets/views/fields identities on every tick.
 function startDialogMetaRefresh() {
   stopDialogMetaRefresh()
   void refreshDialogMeta()
-  dialogMetaRefreshTimer = window.setInterval(() => {
-    void refreshDialogMeta()
-  }, 1200)
+  armDialogMetaRefreshTimer()
+  if (typeof document !== 'undefined') {
+    dialogMetaVisibilityListener = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!dialogMetaRefreshWanted()) return
+      void refreshDialogMeta()
+      armDialogMetaRefreshTimer()
+    }
+    document.addEventListener('visibilitychange', dialogMetaVisibilityListener)
+  }
 }
 
 // --- Bulk delete ---
@@ -5179,10 +5361,6 @@ watch(
     void replayPendingExternalContextIfReady()
   },
 )
-
-// Cleared on unmount so an idle-deferred callback scheduled during mount can
-// never fire into a torn-down workbench (or eat a later test's mocked fetch).
-let workbenchAlive = true
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)

@@ -119,6 +119,10 @@ const ROUTES = [
   // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
   ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
   ['POST', '/api/integration/stock-preparation/mvp/ensure', 'stockPreparationMvpEnsure'],
+  // #5721 终审 / W2 repair: ADDITIVE-ONLY column repair for an already-provisioned MVP table — adds
+  // only the template fields the host's DB read says are missing (the same oracle as the mvp-persist
+  // probe), never touches an existing column or a row, admin-gated, tenant from the principal only.
+  ['POST', '/api/integration/stock-preparation/mvp/repair', 'stockPreparationMvpRepair'],
   ['POST', '/api/integration/stock-preparation/mvp/options/sync', 'stockPreparationMvpOptionsSync'],
   ['POST', '/api/integration/stock-preparation/mvp/sync/plan', 'stockPreparationMvpSyncPlan'],
   // #3751 MVP: COMMIT a previewed sync-run plan — persist its rows into the 9 internal MVP tables
@@ -571,6 +575,7 @@ const {
 const {
   inspectStockPreparationMvpTargets,
   ensureStockPreparationMvpTargets,
+  repairStockPreparationMvpTargets,
   syncStockPreparationMvpOptions,
 } = require('./stock-preparation-mvp-provisioning.cjs')
 // #3751 MVP: readonly BOM-snapshot sync-RUN PLAN orchestrator. Pure/deterministic; composes the landed
@@ -1607,6 +1612,17 @@ const VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS = new Set([
   'baseId',
   'objectIds',
 ])
+// #5721 终审: the MVP REPAIR route's closed allowlist. Deliberately NARROWER than the ensure one — a
+// repair is a structure write against an EXISTING customer table, so the three steering axes
+// (tenantId / projectId / baseId) are not even accepted-and-ignored: a request that carries one is
+// refused 400 before any host call (assertNoRequestBaseId + assertStockPreparationMvpRepairNoSteering),
+// and a caller-supplied field list has no key to arrive through — the repair set is always the
+// template's missing set, computed server-side. 反驳 r1: `workspaceId` was accepted-and-ignored here
+// (the handler never used it, the verb has no such parameter) — on a route whose design point is
+// "no accepted-and-ignored key", it is gone: `objectIds` is the ONLY key.
+const VALID_STOCK_PREPARATION_MVP_REPAIR_REQUEST_KEYS = new Set([
+  'objectIds',
+])
 const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
   'workspaceId',
@@ -2360,6 +2376,64 @@ function stockPreparationMvpTargetWriteInput(req, rawInput = {}) {
   }
 }
 
+// #5721 终审: the MVP repair route's steering wall. Same discipline as assertNoRequestBaseId and the
+// T3a ERP auto-persist guard: an explicit tenantId / projectId / baseId anywhere on the request (body,
+// query, params) is a steering vector into ANOTHER tenant's table structure, so it is refused 400
+// fail-closed BEFORE any host call — never accepted-and-ignored. Only the AUTHENTICATED principal
+// decides which `${tenant}:integration-core` project gets repaired.
+function assertStockPreparationMvpRepairNoSteering(req, rawInput) {
+  const steeringKeys = ['tenantId', 'projectId', 'baseId']
+  const steers = (src) =>
+    Boolean(src) && typeof src === 'object' && steeringKeys.some((key) => `${src[key] ?? ''}`.trim() !== '')
+  if (steers(rawInput) || steers(requestBody(req)) || steers(requestQuery(req)) || steers(requestParams(req))) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_MVP_REPAIR_STEERING_NOT_ALLOWED',
+      'an explicit tenantId/projectId/baseId is not allowed on the MVP repair route; the repaired staging project is derived from the authenticated principal',
+    )
+  }
+}
+
+function normalizeStockPreparationMvpRepairRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_MVP_REPAIR_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const objectIds = normalizeRequestedMvpObjectIds(input.objectIds)
+  if (input.objectIds !== undefined && input.objectIds !== null && objectIds === undefined) {
+    // 反驳 r1: an objectIds key that names NOTHING ([] / [123, null] / '') must not widen into
+    // "all 9 MVP tables" — that is the OMITTED-key meaning, and only an omitted key may mean it.
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID',
+      'objectIds must name at least one MVP objectId when present; omit the key to repair every MVP table',
+      { field: 'objectIds' },
+    )
+  }
+  return { objectIds }
+}
+
+// #5721 终审: WRITE-path input for the MVP repair route. The tenant/project derivation is byte-identical
+// to stockPreparationMvpTargetWriteInput (assertNoRequestBaseId, resolveAuthUserTenantId,
+// resolveIntegrationStagingProjectId(tenantId, undefined)); the ONE deliberate difference is that a
+// request tenantId/projectId is refused rather than allowlisted-and-ignored (see the steering wall).
+function stockPreparationMvpRepairInput(req, rawInput = {}) {
+  assertNoRequestBaseId(rawInput)
+  assertStockPreparationMvpRepairNoSteering(req, rawInput)
+  const input = normalizeStockPreparationMvpRepairRequest(rawInput)
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+  return {
+    tenantId,
+    projectId,
+    objectIds: input.objectIds,
+  }
+}
+
 function stockPreparationMvpTargetInput(req, rawInput = {}) {
   const input = normalizeStockPreparationMvpTargetRequest(rawInput)
   const tenantId = resolveTenantId(req, input)
@@ -2785,6 +2859,28 @@ function sandboxTargetRouteError(error) {
     'sandbox stock-preparation target provisioning failed',
     { reason: 'provisioning_failed' },
   )
+}
+
+// #5721 终审: the MVP repair route's status projection. Every refusal the verb raises already carries
+// its own status (409 MVP_REPAIR_TARGET_ABSENT / 422 MVP_TARGET_OBJECT_ID_INVALID / 409
+// REPAIR_CONCURRENT_FIELD_APPEARED / 409 MVP_REPAIR_SCOPE_UNAVAILABLE — the verb's own values-free
+// re-cast of the host's status-less MultitableObjectScopeError, 反驳 r1 / …) and passes through
+// sendError unchanged. The ONE re-cast: a
+// host without the atomic repair runner (runObjectFieldsRepairTransaction) is "this server cannot
+// perform the repair" — 501 Not Implemented at the route, on the verb's own code/message/details, so
+// an old host is refused explicitly and values-free, never answered 200 as if the table had been
+// repaired. The verb keeps its 503 (its unit pin (c2)); only the HTTP face differs.
+function mvpRepairRouteError(error) {
+  if (error instanceof HttpRouteError) return error
+  if (error instanceof StockPreparationTargetProvisioningError && error.code === 'MVP_REPAIR_API_UNAVAILABLE') {
+    return new HttpRouteError(
+      501,
+      'MVP_REPAIR_API_UNAVAILABLE',
+      error.message || 'stock-preparation MVP repair requires multitable.provisioning.runObjectFieldsRepairTransaction (atomic repair)',
+      error.details || { requiredMethods: ['runObjectFieldsRepairTransaction'] },
+    )
+  }
+  return error
 }
 
 // THE BACKGROUND LANE'S OWN CAPS, not the interactive dry-run's. This used to
@@ -3493,7 +3589,15 @@ function createHandlers(services, options = {}) {
     return service
   }
 
-  const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
+  // G4/M2 (#5553 §3): `getExternalSystemForAdapter` is a HARD registration dependency, not an
+  // optional capability. Before this line every adapter load point read
+  //   typeof externalSystems.getExternalSystemForAdapter === 'function' ? ForAdapter : getExternalSystem
+  // so a services object that simply omitted the accessor silently downgraded EVERY credential load
+  // to the credential-stripped PUBLIC projection — with no error, no log, and no failing test. That
+  // is the #5538 shape: the guard held only because each call site remembered to ask for it.
+  // Requiring it here makes the omission unrepresentable at mount time instead of invisible at
+  // request time. Registration is the right place: it runs once, before any route can be called.
+  const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems'])
   // W5b (#3890): the stock-prep audit store is OPTIONAL at registration (environments without the
   // SQL db can still register read routes), but every W5b human-decision write fails closed without
   // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
@@ -3970,6 +4074,12 @@ function requireStockPreparationAudit() {
    *
    * `undefined` (no ledger, no pack installed, or any read failure) means the caller must OMIT the
    * parameter, which is byte-identical to the pre-pack behaviour.
+   *
+   * FIVE call sites: the small-BOM dry-run, the confirmation-decision route and the small-BOM apply
+   * resolve it per request, immediately before one in-process plan/apply. The large-BOM family
+   * resolves it twice — once when a plan is built, once when an apply job is APPROVED — and the
+   * apply resolution is stored on the job so that the many HTTP chunks of one approved run cannot
+   * drift apart.
    */
   async function resolveInstalledFieldProperties(req, action) {
     const objectId = (action && action.target && action.target.objectId)
@@ -3985,19 +4095,56 @@ function requireStockPreparationAudit() {
     })
   }
 
+  /**
+   * 目标表字段存在性探针 — the plan layer's input for `assertTargetFieldsExist`
+   * (stock-preparation-table-actions.cjs, run first thing inside `computeDryRun`). Threaded EXACTLY
+   * like `installedFieldProperties` above: the host's own provisioning surface plus the caller's
+   * STAGING project derived from the tenant the route already authenticated —
+   * `resolveIntegrationStagingProjectId(tenantId, undefined)`, the same locator readiness/ensure and
+   * the pack read-back resolve their project through — and never a request field (the table-action
+   * body allowlists cannot name it). The probe decides for itself whether the host can answer: only a
+   * host exposing the DB-backed `resolveExistingObjectFieldIds` can, and only its `db` verdict
+   * refuses. A host without provisioning gets `undefined` here and plans byte for byte as before.
+   *
+   * FOUR call sites, one per entry point that plans through `computeDryRun`: the small-BOM dry-run,
+   * the confirmation-decision reconcile, mvp-persist and the small-BOM apply. Each passes the tenant
+   * it already derived for its own B2a/adapter scope, so the probe's project and the source read's
+   * tenant are one value.
+   *
+   * THREE MORE on the large-BOM lane, which never plans through `computeDryRun`: the expansion-job
+   * PLAN route (plans against the target from the stored artifact), the apply-job START route
+   * (approves a write) and the apply-job RUN route (writes a chunk). Each calls the SAME exported
+   * probe on the STORED expansion job's action snapshot — the target the plan was built for and the
+   * target the checkpoint job writes, never the live binding — before the existing-row read, the
+   * approval, and the chunk write respectively. The judgement is still the one function; the lane
+   * has no shared plan seam to hang it on, so its entry points call it the way they thread
+   * `installedFieldProperties`.
+   */
+  function targetFieldExistenceForTenant(tenantId) {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning) return undefined
+    return { provisioning, projectId: resolveIntegrationStagingProjectId(tenantId, undefined) }
+  }
+
   // FRESHNESS-DIVERGENCE NOTICE for the large-BOM job family.
   //
   // The two small-BOM refresh routes apply the configured source->`ext_` mapping. The large-BOM
-  // routes do NOT: they expand into a stored job and plan out of that artifact, and neither call
-  // supplies `extFieldMapping` or `installedFieldProperties` (the latter has never been supplied on
-  // this path — see the note above `computeDryRun` in stock-preparation-table-actions.cjs).
+  // routes still do NOT: they expand into a stored job and plan out of that artifact, and no call in
+  // this family supplies `extFieldMapping`. `installedFieldProperties` IS supplied now — the plan
+  // route resolves it per request and the apply-job START route freezes it into the job — so the
+  // two inputs no longer travel together on this path, which is exactly why the notice below is
+  // still conditional on a configured MAPPING and only on that.
   //
-  // The consequence is NOT "no `ext_` write". Without `installedFieldProperties` the planner's
-  // writable band is template-only (derivePackAwarePlmWritableFields, packAware=false), so
-  // `pickFields` leaves every `ext_` id out of the update patch — and a patch does not blank what it
-  // omits. Any `ext_` value an earlier SMALL-path refresh wrote therefore SURVIVES while every
-  // canonical column around it moves to today's source. The row reads as fresh while its tenant
-  // columns sit at an older epoch, which in a 备料 table is a worse failure than a missing value.
+  // The consequence is NOT "no `ext_` write", and for MAPPER-TERRITORY `ext_` ids it did not change
+  // when the band arrived: with no mapping the expansion rows carry no mapper-filled `ext_` key, so
+  // `pickFields` (which skips `row[field] === undefined`) leaves those ids out of the update patch.
+  // What the band DID open on this path is the (<=5) F1c/F1c-b planner-derived pack columns, which
+  // reach the patch only when the action declares them, the pack classifies them plm_system and
+  // the incoming cell is blank — pinned by the installed-fields-wiring suite. A patch does not
+  // blank what it omits. Any `ext_` value an earlier
+  // SMALL-path refresh wrote therefore SURVIVES while every canonical column around it moves to
+  // today's source. The row reads as fresh while its tenant columns sit at an older epoch, which in
+  // a 备料 table is a worse failure than a missing value.
   //
   // Which path a project takes is not the operator's choice and is not monotonic either:
   // `read_time_limit_exceeded` is in LARGE_BOM_BOUNDED_ERROR_TYPES, so one unchanged project can go
@@ -4075,9 +4222,7 @@ function requireStockPreparationAudit() {
       })
     }
 
-    const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-      ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      : externalSystems.getExternalSystem.bind(externalSystems)
+    const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
     let system
     try {
       system = await loadSystem(scopedAdapterInput(req, {
@@ -4463,9 +4608,7 @@ function requireStockPreparationAudit() {
    * (pre-F3) behaviour — no new failure mode, just the old one, in an already-rare window.
    */
   async function loadTableActionSourceAdapter(req, action, options = {}) {
-    const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-      ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      : externalSystems.getExternalSystem.bind(externalSystems)
+    const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
     const sourceScope = { id: action.source.externalSystemId }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) {
@@ -4769,9 +4912,7 @@ function requireStockPreparationAudit() {
 
     async externalSystemsTest(req, res) {
       requireAccess(req, 'write')
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       let result
@@ -4811,9 +4952,7 @@ function requireStockPreparationAudit() {
       }
       const preset = getReadSmokePreset(contract.presetId)
       // Backend credential context — NOT the public, credential-stripped system response.
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       // Kind must match the preset (fail-closed). Read-only: the system role/config is never modified here.
       if (!system || system.kind !== preset.requiredKind) {
@@ -4852,9 +4991,7 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(409, 'READ_SOURCE_PROBE_SYSTEM_MISMATCH', 'probe config does not reference this external system')
       }
       // Backend credential context — NOT the public, credential-stripped system response.
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       if (!system || system.kind !== probe.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
@@ -5002,9 +5139,7 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
       }
       // Backend credential context via the stored systemId reference — resolution stays dynamic (lock 5).
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
       if (!system || system.kind !== prepared.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
@@ -5149,9 +5284,7 @@ function requireStockPreparationAudit() {
       // throws NOT_APPROVED) + its backend system (dynamic credential context via the stored systemId
       // reference). The bundle carries status:'approved' by construction (getForRuntime only returns
       // approved rows); the C-R2 planner re-validates it as defense-in-depth.
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const steps = composition && composition.config && Array.isArray(composition.config.steps)
         ? composition.config.steps
         : []
@@ -5249,9 +5382,7 @@ function requireStockPreparationAudit() {
 
     async externalSystemObjects(req, res) {
       requireAccess(req, 'read')
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       const adapterObjects = typeof adapter.listObjects === 'function'
@@ -5274,9 +5405,7 @@ function requireStockPreparationAudit() {
       if (!object) {
         throw new HttpRouteError(400, 'OBJECT_REQUIRED', 'object is required')
       }
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const template = findDocumentTemplate(system, object)
       if (template) {
@@ -5475,9 +5604,7 @@ function requireStockPreparationAudit() {
         purpose: B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
         runId: b2aRunId('c6-external-write-dry-run'),
       })
-      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSourceSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const sourceSystem = await loadSourceSystem(scopedAdapterInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
@@ -5501,7 +5628,6 @@ function requireStockPreparationAudit() {
       if (
         targetSystem
         && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
-        && typeof externalSystems.getExternalSystemForAdapter === 'function'
       ) {
         targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
       }
@@ -5623,9 +5749,7 @@ function requireStockPreparationAudit() {
         purpose: B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
         runId: b2aRunId('c6-external-write-apply'),
       })
-      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSourceSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
@@ -5636,7 +5760,6 @@ function requireStockPreparationAudit() {
       if (
         targetSystem
         && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
-        && typeof externalSystems.getExternalSystemForAdapter === 'function'
       ) {
         targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
       }
@@ -5818,6 +5941,8 @@ function requireStockPreparationAudit() {
         // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
         // The apply route below resolves it the SAME way so the two agree on the plan revision.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+        // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
+        targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
         // The source->`ext_` mapping, from server config. null when unconfigured, which
         // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
         // Configured: the SAME object the apply route passes, so both routes expand the same rows
@@ -5972,6 +6097,7 @@ function requireStockPreparationAudit() {
         policyStore: context.storage,
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
         extFieldMapping: stockPreparationExtFieldMapping,
+        targetFieldExistence: targetFieldExistenceForTenant(tenantId),
       })
       // The audit table's action vocabulary is migration-frozen (9 actions). Decision-candidate
       // generation is a generation run with a fixed operation subtype, not a new action. Audit the
@@ -6064,6 +6190,7 @@ function requireStockPreparationAudit() {
         parameters,
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
+        targetFieldExistence: targetFieldExistenceForTenant(tenantId),
         // B2a. `tenantId` here is the authenticated-user tenant this route already resolved and
         // already scoped the adapter load with — never a query/body carrier.
         b2aTrialRegistry,
@@ -6176,6 +6303,8 @@ function requireStockPreparationAudit() {
         // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
         // plan and compares revisions, so the two routes must read the bands from one seam.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+        // Same probe input the dry-run route threaded, from the same tenant derivation.
+        targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
         // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
         // compares its revision against the token. A mapping on one route and not the other would
         // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
@@ -6347,6 +6476,9 @@ function requireStockPreparationAudit() {
       })
       assertAuthoritativeLargeBomExpansion(job)
       const action = assertStockPreparationTargetReady(job.actionSnapshot)
+      // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
+      // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
+      await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
       const projectNo = job.parameters && job.parameters.projectNo
       const existingRows = await tableActionInternals.readExistingStockPreparationRows(
         getMultitableRecordsApi(),
@@ -6371,6 +6503,32 @@ function requireStockPreparationAudit() {
         jobId,
         existingRows,
         conflictPolicyReview,
+        // The pack-aware ownership band, resolved against the STORED job's action snapshot
+        // (`job.actionSnapshot.target.objectId` — the same sheet this plan will be applied to,
+        // never the live binding, which may have been re-pointed since the expansion was sealed).
+        // `undefined` => the frozen-template bands, i.e. byte-identical to the pre-wiring plan.
+        //
+        // WHAT IT COST BEFORE X6, AND WHY THAT COST IS GONE. Until #5686 (`caf8128ad`) this note
+        // disclosed a real price in two halves: a pack's `ext_` plm_system column joins the
+        // COMPARED band while this family still supplies no `extFieldMapping`, so the expansion
+        // rows carry no such cell, and `changedFields` read an existing value against an ABSENT
+        // incoming one as CHANGED. (a) On a deployment with a production policy the resulting
+        // add+update count could push a one-row refresh past `maxCleanRows` and 403 it every round.
+        // (b) On the DEFAULT deployment nothing refused it: every row already holding an `ext_`
+        // value flipped from SKIP to a REAL patchRecord on every refresh, stamped
+        // `lastPlmRefreshDecision: 'update'` and a `lastPlmConflictSummary` naming the `ext_`
+        // column — a reason `pickFields` had left out of that very patch.
+        //
+        // X6 narrowed `changedFields` to cells the incoming row actually DEFINES
+        // (`intakeProvidesField`, stock-preparation-conflict-planner.cjs), which is the same
+        // predicate `pickFields` projects on. An absent incoming cell is no longer a change, so
+        // BOTH (a) and (b) are eliminated at the root, for the small-BOM path as well as this one.
+        // What remains on this path is the band itself: the human wall enforced BY NAME at write
+        // time, and the planner-derived pack columns (F1c) reaching `pickFields` at all. Pinned by
+        // `the default deployment only rewrites rows the intake really changed` and `the production
+        // clean-row bound is not moved by the pack-aware band` in
+        // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
+        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(planned)))
     },
@@ -6386,6 +6544,27 @@ function requireStockPreparationAudit() {
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+      // THE BAND IS RESOLVED ONCE PER APPLY JOB, HERE — at the moment a human approves it — and is
+      // then FROZEN INTO the stored job (same family as planRevision / targetRevision). A checkpoint
+      // apply advances across MANY HTTP requests, so a live ledger read inside `.../run` would let
+      // an install (or a column deleted in the UI) mid-run give two chunks of ONE approved job two
+      // different writable bands. Chunks read the snapshot and nothing else.
+      //
+      // Resolved against the STORED expansion job's action snapshot, which is the same objectId
+      // `tableActionLargeBomExpansionJobPlan` planned with and the same target
+      // `createLargeBomCheckpointApplyJob` copies into `job.target` — plan band and write band
+      // cannot address different sheets. Reading the LIVE binding here instead would resolve a band
+      // for a sheet this job is not going to write to if the binding moved after the expansion.
+      const expansionJob = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        jobId,
+      })
+      const snapshotAction = assertStockPreparationTargetReady(expansionJob.actionSnapshot)
+      // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
+      // checkpoint job that would write to it exists.
+      await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6394,6 +6573,7 @@ function requireStockPreparationAudit() {
         principal: requestPrincipal(req),
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+        installedFieldProperties: await resolveInstalledFieldProperties(req, snapshotAction),
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
@@ -6428,6 +6608,18 @@ function requireStockPreparationAudit() {
         applyJobId: firstString(requestParams(req).applyJobId),
       })
       assertApplyJobMatchesExpansion(pendingJob, jobId)
+      // 目标表字段存在性探针 per chunk, against the STORED expansion job's snapshot (the target this
+      // checkpoint job writes — `pendingJob.target` is copied from it). A chunk runs as its own HTTP
+      // request, so a column deleted mid-run stops the next chunk instead of writing around it.
+      await tableActionInternals.assertTargetFieldsExist(
+        assertStockPreparationTargetReady((await loadLargeBomBackgroundExpansionJob({
+          storage: context.storage,
+          ...routeScope,
+          actionId,
+          jobId,
+        })).actionSnapshot),
+        targetFieldExistenceForTenant(routeScope.tenantId),
+      )
       // FOS-4b-3-prod P2: the large-BOM checkpoint apply funnels through here. Shared apply gate before any
       // write — no production policy → sandbox gate (canonical rejected, fail-closed); a configured
       // production policy may authorize the canonical (large route) per the controlled exception.
@@ -6440,6 +6632,24 @@ function requireStockPreparationAudit() {
       })
       // FOS-4b-3-prod P2: post-plan production bound. The plan's clean (add/update) row count is fixed across
       // chunked runs, so checking it on each chunk consistently rejects an over-bound run before any write.
+      //
+      // WHAT THE PACK-AWARE BAND DOES TO THIS NUMBER — disclosed here because this is where it is
+      // consumed. The answer since #5686 (`caf8128ad`) is NOTHING. Before it, the plan route's
+      // `installedFieldProperties` put a customer pack's `ext_` plm_system columns into the COMPARED
+      // band while this family supplied (and still supplies) no `extFieldMapping`, so its expansion
+      // rows carried no `ext_` key and an existing value against an absent incoming one read as
+      // CHANGED: a row that used to be SKIPped became an UPDATE and was counted here, which on a
+      // deployment with a configured production policy could push a refresh past `maxCleanRows` and
+      // 403 it every round. X6 narrowed `changedFields` to cells the incoming row actually DEFINES
+      // (`intakeProvidesField`), which is `pickFields`'s own predicate, so that flip no longer
+      // happens and this count is the same with the band as without it.
+      //
+      // THE BOUND ITSELF IS UNCHANGED and still bites on a genuine delta: the refusal is fail-closed
+      // and lands BEFORE any write, so an over-bound refresh costs a refresh and never a row. Both
+      // halves are pinned by `the production clean-row bound is not moved by the pack-aware band` in
+      // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs — one arm for band ==
+      // no band, one arm for two genuinely changed rows against a one-row window still taking the
+      // 403, so a green here can never mean the gate went dormant.
       const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
       const largeBomCleanRowCount = planDecisions.filter((d) => d && (d.decision === 'add' || d.decision === 'update')).length
       assertProductionCleanRowsWithinBound(applyGate, largeBomCleanRowCount)
@@ -6614,9 +6824,7 @@ function requireStockPreparationAudit() {
         )
       }
 
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       if (!adapter || typeof adapter.read !== 'function') {
@@ -6697,6 +6905,11 @@ function requireStockPreparationAudit() {
         projectId: input.projectId,
         baseId: input.baseId,
         permission: 'admin',
+        // B3: the own-base opt-in, and the ONLY tenant the derivation may eat — the authenticated
+        // principal's (`stockPreparationTargetWriteInput` -> `resolveAuthUserTenantId`), never a
+        // body/query/projectId value. `assertNoRequestBaseId` above is untouched.
+        tenantId: input.tenantId,
+        resolveOwnBase: true,
       })
       return sendOk(res, publicStockPreparationTargetResult(result), result.mode === 'canonical_create' ? 201 : 200)
     },
@@ -6909,6 +7122,39 @@ function requireStockPreparationAudit() {
       })
       const created = result.tables.some((table) => table.created)
       return sendOk(res, result, created ? 201 : 200)
+    },
+
+    // #5721 终审 / W2 repair: the production entry of repairStockPreparationMvpTargets — until now the
+    // verb had no route and no script, so the 422 TARGET_SCHEMA_INCOMPLETE the mvp-persist probe
+    // raises pointed at a dead end. ADDITIVE-ONLY: inside ONE host transaction the verb adds exactly
+    // the template fields the DB read says are missing (ensureMissingObjectFields, ON CONFLICT DO
+    // NOTHING), re-verifies completeness and proves every existing column byte-unchanged. It never
+    // creates a table (409 MVP_REPAIR_TARGET_ABSENT), never touches a row, never takes a field list
+    // from the request. Always 200 (nothing is created); the response names, per objectId, the
+    // LOGICAL field ids added — no sheet/physical ids, no values.
+    async stockPreparationMvpRepair(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpRepairInput(req, requestBody(req))
+      let result
+      try {
+        result = await repairStockPreparationMvpTargets({
+          context,
+          projectId: input.projectId,
+          permission: 'admin',
+          objectIds: input.objectIds,
+        })
+      } catch (error) {
+        throw mvpRepairRouteError(error)
+      }
+      if (routeLogger && typeof routeLogger.info === 'function') {
+        // Counts only — never a project id, a sheet id or a field value.
+        routeLogger.info('[plugin-integration-core] stock-preparation MVP repair completed', {
+          tableCount: result.tables.length,
+          repairedTableCount: result.evidence.repairedTableCount,
+          addedFieldCount: result.tables.reduce((sum, table) => sum + table.addedFieldCount, 0),
+        })
+      }
+      return sendOk(res, result)
     },
 
     // #3751 MVP: sync caller-supplied option sets onto the MVP tables' select fields (field
@@ -8090,6 +8336,10 @@ function requireStockPreparationAudit() {
         context,
         projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         permission: 'admin',
+        // B3: same opt-in and same tenant source as the main table's ensure route, so the ledger
+        // resolves to the main table's base (anchor) or to the same derived id.
+        tenantId,
+        resolveOwnBase: true,
       })
       return sendOk(res, result, result.created ? 201 : 200)
     },
@@ -9488,9 +9738,7 @@ function requireStockPreparationAudit() {
       const sources = normalizeReferenceMappingSources(body.referenceMappingSources)
       let previewOptions = {}
       if (sources.length > 0) {
-        const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-          ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-          : externalSystems.getExternalSystem.bind(externalSystems)
+        const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         const referenceMappingIndexes = {}
         const adapterBySystem = new Map()
         for (const source of sources) {

@@ -220,6 +220,8 @@ export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
   canExport: false,
   // Anonymous public-form submitter must NEVER be able to send notifications.
   canSendNotification: false,
+  // ... nor start an approval instance in someone else's name (no identity, no approvals:write).
+  canSubmitApproval: false,
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -1487,6 +1489,9 @@ export function applySheetPermissionScope(
     // Notify = full sheet write/admin only (scope.canWrite), NOT write-own: a
     // record-scoped write must not imply notifying members from any row.
     canSendNotification: capabilities.canSendNotification && scope.canWrite,
+    // Submit-for-approval rides the READ plane (you submit a record you can read) AND still needs the
+    // global `multitable:submit-approval` code — a sheet grant alone never confers it.
+    canSubmitApproval: capabilities.canSubmitApproval && scope.canRead,
   }
 }
 
@@ -1561,6 +1566,7 @@ const MULTITABLE_CAPABILITY_KEYS: Array<keyof MultitableCapabilities> = [
   'canComment',
   'canManageAutomation',
   'canSendNotification',
+  'canSubmitApproval',
 ]
 
 export function deriveCapabilityOrigin(

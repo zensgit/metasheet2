@@ -733,8 +733,10 @@ describe('MetaAutomationRuleEditor', () => {
     const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
     expect(epSelectValue(actionSelect)).toBe('send_notification')
     expect(epOptions(actionSelect).map((option) => option.value)).toContain('send_notification')
-    const recipientInput = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-config input') as HTMLInputElement
+    // Recipient picker: the persisted ids back the manual textarea and render as chips.
+    const recipientInput = container.querySelector('[data-action-index="0"] [data-field="notificationUserIds"]') as HTMLTextAreaElement
     expect(recipientInput.value).toBe('u1')
+    expect(container.querySelector('[data-notification-recipient="u1"]')).toBeTruthy()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -945,6 +947,408 @@ describe('MetaAutomationRuleEditor', () => {
     // §4 Guarantee: the original (stale) ids reach the backend verbatim for assertResultWritebackFields fail-fast
     // — never silently UI-dropped/omitted.
     expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({ statusField: 'fld_score', approverField: 'fld_gone' })
+  })
+
+  it('#5724: preserves unmodelled start_approval config keys (onNonApproved + cross-base triple + unknown) across an edit+save', async () => {
+    const saved = vi.fn()
+    const writeback = {
+      statusField: 'fld_1',
+      approverField: 'fld_2',
+      // NOT modelled by the editor UI, but accepted by the backend validator
+      // (packages/core-backend/src/multitable/automation-service.ts:459-489).
+      onNonApproved: true,
+      targetBaseId: 'base_x',
+      targetSheetId: 'sheet_x',
+      targetRecordId: 'rec_x',
+    }
+    const rule = {
+      id: 'atr_5724', sheetId: 'sheet_1', name: 'keep', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: writeback,
+        // a key this editor version knows nothing about at all
+        futureBackendOnlyKey: { nested: ['a', 1, true] },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    // Edit something completely UNRELATED to the approval action config.
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'keep renamed'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const cfg = saved.mock.calls[0][0].actions[0].config
+    expect(saved.mock.calls[0][0].name).toBe('keep renamed')
+    // The unmodelled keys survive byte-equal (the from-scratch rebuild used to drop them).
+    expect(cfg.resultWriteback).toEqual(writeback)
+    expect(cfg.futureBackendOnlyKey).toEqual({ nested: ['a', 1, true] })
+    // ... and no UI-only draft key leaks into the saved config.
+    expect(Object.keys(cfg).sort()).toEqual(['formDataMapping', 'futureBackendOnlyKey', 'resultWriteback', 'templateId'])
+  })
+
+  it('#5724: modelled start_approval fields still OVERRIDE the preserved original', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5724_ovr', sheetId: 'sheet_1', name: 'override', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_old',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_1', onNonApproved: true },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const templateInput = container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement
+    templateInput.value = 'tmpl_new'
+    templateInput.dispatchEvent(new Event('input'))
+    const mappingKey = container.querySelector('[data-field="approvalMappingKey"]') as HTMLInputElement
+    mappingKey.value = 'total'
+    mappingKey.dispatchEvent(new Event('input'))
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_2')
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const cfg = saved.mock.calls[0][0].actions[0].config
+    expect(cfg.templateId).toBe('tmpl_new')
+    expect(cfg.formDataMapping).toEqual({ total: 'fld_2' })
+    // the edited picker wins over the loaded value, while the unmodelled sibling still rides along
+    expect(cfg.resultWriteback).toEqual({ statusField: 'fld_2', onNonApproved: true })
+  })
+
+  // ── #5742 审批结果 → 写入值 (resultWriteback.outcomeValues) ────────────────────────────────────────
+  // A zh single-select status field: its options are the customer's own, and NONE of them is literally
+  // named 'approved' — which is exactly the shape that used to force 待审批/approved/rejected mixed options.
+  const fieldsWithZhStatus = [
+    ...fields,
+    {
+      id: 'fld_zh',
+      name: '审批状态',
+      type: 'select',
+      options: [
+        { value: '待审批', label: '待审批' },
+        { value: '已通过', label: '已通过' },
+        { value: '已拒绝', label: '已拒绝' },
+      ],
+    },
+  ]
+
+  function saveBlockKeys(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('[data-action="save-block-reason"]'))
+      .map((el) => el.getAttribute('data-reason-key') ?? '')
+  }
+
+  it('#5742: round-trips a loaded outcomeValues + onNonApproved untouched on an unedited save', async () => {
+    const saved = vi.fn()
+    const writeback = {
+      statusField: 'fld_zh',
+      onNonApproved: true,
+      outcomeValues: { approved: '已通过', rejected: '已拒绝' },
+    }
+    const rule = {
+      id: 'atr_5742_rt', sheetId: 'sheet_1', name: '写回', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' }, resultWriteback: writeback },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    // the mapping backfilled into the pickers (approved + rejected rows, the latter because onNonApproved is on)
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    expect(onNonApproved.checked).toBe(true)
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'))).toBe('已通过')
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]'))).toBe('已拒绝')
+    // revoked / cancelled rows exist (checkbox on) and default to "write the raw outcome"
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-revoked"]'))).toBe('')
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-approved')
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual(writeback)
+  })
+
+  it('#5742: picking an option for 通过 emits resultWriteback.outcomeValues {approved}', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_zh')
+    await flushPromises()
+    // the 通过 row is always shown; 拒绝/撤销/取消 only after the non-approved opt-in
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]')).not.toBeNull()
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]')).toBeNull()
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'), '已通过')
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({
+      statusField: 'fld_zh',
+      outcomeValues: { approved: '已通过' },
+    })
+  })
+
+  it('#5742: unchecking 非通过结果也写回 DELETES onNonApproved even when the loaded config had it', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5742_off', sheetId: 'sheet_1', name: '关掉', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', onNonApproved: true, outcomeValues: { approved: '已通过', rejected: '已拒绝' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    onNonApproved.checked = false
+    onNonApproved.dispatchEvent(new Event('change'))
+    await flushPromises()
+    // the non-approved rows are gone from the UI…
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]')).toBeNull()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const writeback = saved.mock.calls[0][0].actions[0].config.resultWriteback as Record<string, unknown>
+    // …and the saved config does NOT keep the loaded onNonApproved (modelled fields override the #5724 spread).
+    expect(writeback).not.toHaveProperty('onNonApproved')
+    expect(writeback.statusField).toBe('fld_zh')
+    expect(writeback.outcomeValues).toEqual({ approved: '已通过', rejected: '已拒绝' })
+  })
+
+  it('#5742: blocks save when the select status field has no option for the resolved 通过 value, and clears after picking', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_zh')
+    await flushPromises()
+    // Nothing mapped yet ⇒ the raw literal 'approved' would be written, and 审批状态 has no such option.
+    expect(saveBlockKeys(container)).toContain('action-0-writebackOutcome-approved')
+    const reason = container.querySelector('[data-reason-key="action-0-writebackOutcome-approved"]') as HTMLElement
+    expect(reason.textContent).toContain('审批状态')
+    expect(reason.textContent).toContain('approved')
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'), '已通过')
+    await flushPromises()
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-approved')
+    expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(1)
+  })
+
+  it('#5742: also blocks on 拒绝 once 非通过结果也写回 is on, per outcome', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus })
+    await flushPromises()
+    await selectStartApproval(container)
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_zh')
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'), '已通过')
+    await flushPromises()
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-rejected')
+
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    onNonApproved.checked = true
+    onNonApproved.dispatchEvent(new Event('change'))
+    await flushPromises()
+    // 撤销 / 取消 are authored here but only enforced at fire time — the client mirror stays scoped to the
+    // two outcomes the backend hard-fails at SAVE time.
+    expect(saveBlockKeys(container)).toContain('action-0-writebackOutcome-rejected')
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-revoked')
+    expect(saveBlockKeys(container)).not.toContain('action-0-writebackOutcome-cancelled')
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackOutcomeValue-rejected"]'), '已拒绝')
+    await flushPromises()
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+  })
+
+  it('#5742: an empty mapping is OMITTED from the payload (absence = write the raw outcome)', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+    // fld_1 is a select whose option set this editor does NOT know (no `options` on the field) — the client
+    // mirror must not block on missing knowledge; the backend gate stays the authority.
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_1')
+    await flushPromises()
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const writeback = saved.mock.calls[0][0].actions[0].config.resultWriteback as Record<string, unknown>
+    expect(writeback).toEqual({ statusField: 'fld_1' })
+    expect(writeback).not.toHaveProperty('outcomeValues')
+    expect(writeback).not.toHaveProperty('onNonApproved')
+  })
+
+  it('#5742: a text status field takes a free-text written value (no option set to pick from)', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), 'fld_2') // Name (string)
+    await flushPromises()
+
+    const input = container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]') as HTMLInputElement
+    expect(input.tagName).toBe('INPUT')
+    input.value = ' 已通过 '
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    // trimmed on the way out — the same trimmed value the backend resolver writes
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({
+      statusField: 'fld_2',
+      outcomeValues: { approved: '已通过' },
+    })
+  })
+
+  it('#5742: a T3-5 CROSS-BASE writeback is never blocked client-side (its status field lives in the TARGET sheet)', async () => {
+    const saved = vi.fn()
+    // The backend save gate short-circuits cross-base writebacks (isCrossBaseWriteback → continue) because the
+    // target field is not in THIS sheet's schema. Without the same short-circuit here, a cross-base rule that
+    // the server accepts could not be saved from the editor at all — not even to rename it.
+    const writeback = {
+      statusField: 'fld_zh',
+      targetBaseId: 'base_x', targetSheetId: 'sheet_x', targetRecordId: 'rec_x',
+    }
+    const rule = {
+      id: 'atr_5742_xbase', sheetId: 'sheet_1', name: '跨库', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' }, resultWriteback: writeback },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    // fld_zh (the SOURCE sheet's select) has no 'approved' option, so a same-base rule WOULD be blocked here.
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual(writeback)
+  })
+
+  it('#5742: an out-of-list written VALUE is marked "not an option", not "unknown field" (that marker names a FIELD)', async () => {
+    const rule = {
+      id: 'atr_5742_mark', sheetId: 'sheet_1', name: '标记', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', outcomeValues: { approved: '已归档' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule })
+    await flushPromises()
+
+    const marked = epOptions(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'))
+      .find((option) => option.value === '已归档')
+    // (this suite runs in the en locale; the zh pair is 不在选项中 / 未知字段)
+    expect(marked?.textContent).toContain('not an option')
+    expect(marked?.textContent).not.toContain('unknown field')
+  })
+
+  it('#5742: clearing the status field keeps the 非通过结果也写回 checkbox editable and drops the now-dead mapping', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5742_clear', sheetId: 'sheet_1', name: '清空', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', approverField: 'fld_2', onNonApproved: true, outcomeValues: { approved: '已通过' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    epSetSelect(container.querySelector('[data-field="resultWritebackStatusField"]'), '')
+    await flushPromises()
+    // The mapping rows are gone (they only apply to the status field)…
+    expect(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]')).toBeNull()
+    // …but onNonApproved gates the WHOLE backwrite (the approver field still writes on rejection), so its
+    // checkbox stays visible and checked instead of becoming an invisible live key.
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    expect(onNonApproved).not.toBeNull()
+    expect(onNonApproved.checked).toBe(true)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({ approverField: 'fld_2', onNonApproved: true })
+  })
+
+  it('#5742: an EXPLICIT onNonApproved:false round-trips verbatim (the #4196 fingerprint hashes the raw config)', async () => {
+    const saved = vi.fn()
+    const writeback = { statusField: 'fld_zh', onNonApproved: false, outcomeValues: { approved: '已通过' } }
+    const rule = {
+      id: 'atr_5742_false', sheetId: 'sheet_1', name: '显式false', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' }, resultWriteback: writeback },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+    const onNonApproved = container.querySelector('[data-field="resultWritebackOnNonApproved"] input') as HTMLInputElement
+    expect(onNonApproved.checked).toBe(false)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual(writeback)
+  })
+
+  it('#5742: a stored value with surrounding whitespace loads TRIMMED, so it matches its option', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_5742_trim', sheetId: 'sheet_1', name: '空白', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_zh', outcomeValues: { approved: '  已通过  ' } },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: fieldsWithZhStatus, rule, onSave: saved })
+    await flushPromises()
+
+    // the picker shows the real option (not an extra 不在选项中 entry) and nothing is blocked
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]'))).toBe('已通过')
+    expect(epOptions(container.querySelector('[data-field="resultWritebackOutcomeValue-approved"]')).map((o) => o.value))
+      .toEqual(['', '待审批', '已通过', '已拒绝'])
+    expect(saveBlockKeys(container).filter((key) => key.startsWith('action-0-writebackOutcome'))).toEqual([])
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({
+      statusField: 'fld_zh',
+      outcomeValues: { approved: '已通过' },
+    })
   })
 
   it('can add and remove conditions', async () => {
@@ -2184,7 +2588,8 @@ describe('MetaAutomationRuleEditor', () => {
     epSetSelect(followUpSelect, 'send_notification')
     await flushPromises()
 
-    const [userInput, messageInput] = Array.from(followUpRow.querySelectorAll('.el-input__inner, textarea')) as Array<HTMLInputElement | HTMLTextAreaElement>
+    const userInput = followUpRow.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+    const messageInput = followUpRow.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
     userInput.value = 'user_1, user_2'
     userInput.dispatchEvent(new Event('input'))
     messageInput.value = 'Resume completed'
@@ -4087,6 +4492,14 @@ describe('MetaAutomationRuleEditor', () => {
     epSetSelect(actionSelect, 'send_notification')
     await flushPromises()
 
+    // A notification with no recipients is refused by the backend save gate (NO_RECIPIENTS) — the
+    // editor now mirrors that inline, so give the action a recipient before expecting Save to open.
+    expect(saveBtn.disabled).toBe(true)
+    const recipientIdsInput = container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+    recipientIdsInput.value = 'user_1'
+    recipientIdsInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
     // Outcomes default to approved-only; add "rejected".
     const approvedBox = container.querySelector('[data-field="approvalOutcome-approved"] input') as HTMLInputElement
     const rejectedBox = container.querySelector('[data-field="approvalOutcome-rejected"] input') as HTMLInputElement
@@ -4191,5 +4604,1032 @@ describe('MetaAutomationRuleEditor', () => {
     saveBtn.click()
     expect(saved).toHaveBeenCalledTimes(2)
     expect(saved.mock.calls[1][0].triggerConfig).toEqual({ secret: 'rotated-secret' })
+  })
+
+  describe('send_notification recipient picker', () => {
+    // A q-aware candidate stub: only user_1 ("Lin Lan" / lin@example.com) is a roster member, so an
+    // id like "4" resolves to nothing — the shape of the customer's failing rule.
+    function rosterClient() {
+      const client = mockClient()
+      client.listFormShareCandidates = vi.fn(async (_sheetId: string, params: { q?: string; limit?: number }) => {
+        const q = (params.q ?? '').toLowerCase()
+        const linLan = {
+          subjectType: 'user',
+          subjectId: 'user_1',
+          label: 'Lin Lan',
+          subtitle: 'lin@example.com',
+          isActive: true,
+          dingtalkBound: true,
+          dingtalkGrantEnabled: true,
+          dingtalkPersonDeliveryAvailable: true,
+        }
+        const matches = ['user_1', 'lin lan', 'lin@example.com'].some((value) => value.includes(q)) ? [linLan] : []
+        return { items: matches, total: matches.length, limit: params.limit ?? 8, query: params.q ?? '' }
+      })
+      return client
+    }
+
+    it('searches users by name/email, shows name + email, and saves only user ids', async () => {
+      const saved = vi.fn()
+      const client = mockClient()
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onSave: saved })
+      await flushPromises()
+
+      const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+      nameInput.value = 'Notify picked users'
+      nameInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+
+      const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+      epSetSelect(actionSelect, 'send_notification')
+      await flushPromises()
+
+      // No recipients yet: the client-side gate mirrors the backend NO_RECIPIENTS 400.
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+
+      const searchInput = container.querySelector('[data-field="notificationRecipientSearch"]') as HTMLInputElement
+      searchInput.value = 'lin'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'lin', limit: 8 })
+
+      const suggestion = container.querySelector('[data-notification-recipient-suggestion="user_1"]') as HTMLButtonElement
+      expect(suggestion).toBeTruthy()
+      expect(suggestion.textContent).toContain('Lin Lan')
+      expect(suggestion.textContent).toContain('lin@example.com')
+      // Member groups are not valid send_notification recipients — never offered.
+      expect(container.querySelector('[data-notification-recipient-suggestion="group_1"]')).toBeNull()
+      suggestion.click()
+      await flushPromises()
+
+      const chip = container.querySelector('[data-notification-recipient="user_1"]') as HTMLElement
+      expect(chip).toBeTruthy()
+      expect(chip.textContent).toContain('Lin Lan')
+      expect(chip.textContent).toContain('lin@example.com')
+      expect(chip.getAttribute('data-notification-recipient-unresolved')).toBeNull()
+      expect(searchInput.value).toBe('')
+      expect((container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement).value).toBe('user_1')
+
+      searchInput.value = 'zhao'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      ;(container.querySelector('[data-notification-recipient-suggestion="user_2"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(container.querySelectorAll('[data-notification-recipient]').length).toBe(2)
+      expect((container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement).value).toBe('user_1, user_2')
+
+      const messageInput = container.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
+      messageInput.value = 'Hello'
+      messageInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+
+      expect(saveBtn.disabled).toBe(false)
+      saveBtn.click()
+      await flushPromises()
+      expect(saved).toHaveBeenCalledTimes(1)
+      const payload = saved.mock.calls[0][0]
+      expect(payload.actions).toEqual([
+        { type: 'send_notification', config: { userIds: ['user_1', 'user_2'], message: 'Hello' } },
+      ])
+      // Storage stays ids-only: no name/email leaves the picker.
+      const serialized = JSON.stringify(payload)
+      expect(serialized).not.toContain('Lin Lan')
+      expect(serialized).not.toContain('lin@example.com')
+    })
+
+    it('keeps an unresolvable stored id as a raw chip with an unmatched hint, lets it be removed, and gates save until a user is picked', async () => {
+      const saved = vi.fn()
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['4'], message: 'Ping' },
+        actions: [{ type: 'send_notification', config: { userIds: ['4'], message: 'Ping' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule, onSave: saved })
+      await flushPromises()
+
+      // Persisted ids are resolved by exact-id lookup on open.
+      expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: '4', limit: 50 })
+      const rawChip = container.querySelector('[data-notification-recipient="4"]') as HTMLElement
+      expect(rawChip).toBeTruthy()
+      expect(rawChip.textContent).toContain('4')
+      expect(rawChip.getAttribute('data-notification-recipient-unresolved')).toBe('true')
+      expect(rawChip.textContent).toContain('No matching user for this ID')
+
+      // Still deletable.
+      rawChip.click()
+      await flushPromises()
+      expect(container.querySelector('[data-notification-recipient="4"]')).toBeNull()
+      expect((container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement).value).toBe('')
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+
+      // Pick a real member; the save payload carries the id list only.
+      const searchInput = container.querySelector('[data-field="notificationRecipientSearch"]') as HTMLInputElement
+      searchInput.value = 'lin@'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      ;(container.querySelector('[data-notification-recipient-suggestion="user_1"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(saveBtn.disabled).toBe(false)
+      saveBtn.click()
+      await flushPromises()
+      expect(saved.mock.calls[0][0].actions).toEqual([
+        { type: 'send_notification', config: { userIds: ['user_1'], message: 'Ping' } },
+      ])
+    })
+
+    it('opens an existing rule with resolved recipients shown by name and email', async () => {
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['user_1'], message: 'Ping' },
+        actions: [{ type: 'send_notification', config: { userIds: ['user_1'], message: 'Ping' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+
+      const chip = container.querySelector('[data-notification-recipient="user_1"]') as HTMLElement
+      expect(chip.textContent).toContain('Lin Lan')
+      expect(chip.textContent).toContain('lin@example.com')
+      expect(chip.getAttribute('data-notification-recipient-unresolved')).toBeNull()
+    })
+
+    it('surfaces a candidate search failure instead of an empty list and keeps the manual id entry usable', async () => {
+      const saved = vi.fn()
+      const client = mockClient()
+      client.listFormShareCandidates = vi.fn(async () => { throw new Error('Forbidden') })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onSave: saved })
+      await flushPromises()
+
+      const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+      nameInput.value = 'Notify without search permission'
+      nameInput.dispatchEvent(new Event('input'))
+      const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+      epSetSelect(actionSelect, 'send_notification')
+      await flushPromises()
+
+      const searchInput = container.querySelector('[data-field="notificationRecipientSearch"]') as HTMLInputElement
+      searchInput.value = 'lin'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect((container.querySelector('[data-field="notificationRecipientSearchError"]') as HTMLElement).textContent).toContain('Forbidden')
+
+      const userIdsInput = container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+      userIdsInput.value = 'user_9'
+      userIdsInput.dispatchEvent(new Event('input'))
+      const messageInput = container.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
+      messageInput.value = 'Hi'
+      messageInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+
+      // Lookup failed rather than "not found": plain raw chip, no unmatched badge.
+      const chip = container.querySelector('[data-notification-recipient="user_9"]') as HTMLElement
+      expect(chip).toBeTruthy()
+      expect(chip.getAttribute('data-notification-recipient-unresolved')).toBeNull()
+
+      ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(saved.mock.calls[0][0].actions).toEqual([
+        { type: 'send_notification', config: { userIds: ['user_9'], message: 'Hi' } },
+      ])
+    })
+  })
+
+  // Explicit per-test timeout for the two #5739 泛化 describes below: every case mounts the FULL rule
+  // editor and drives a load → save round trip, 0.3-1.7s each on an idle dev box. On the CI web-tests
+  // lane (457 spec files sharing the runner) that overran vitest's 5s default and turned the
+  // backend-only PR #5763 red on a case it did not touch. Scoped here on purpose — the global
+  // testTimeout stays 5s so an actually-hung editor still fails fast everywhere else.
+  const ROUND_TRIP_TIMEOUT_MS = 30_000
+
+  // --------------------------------------------------------------------------------------------
+  // #5739 泛化 — EVERY action type's save must start from the RAW loaded config, not from the
+  // modelled fields alone.
+  //
+  // #5739 fixed start_approval only. Every other type rebuilt its config from the UI model, so a rule
+  // authored by the API, the quick form, or an older editor silently lost every key this editor does
+  // not model on an UNTOUCHED load → save: update_record/delete_record's T3-5 cross-base triple,
+  // create_record's targetBaseId, and any key a newer backend adds. Those keys are legal — the save
+  // path never whitelists config keys (validateActionObject in
+  // packages/core-backend/src/multitable/automation-service.ts persists `config` verbatim) — and
+  // load-bearing at runtime (automation-executor.ts reads the triples). They are also HASHED by the
+  // #4196 raw-config action fingerprint, so a silent drop makes an unrelated edit look like a config
+  // change on a rule nobody touched.
+  //
+  // Each round-trip case carries BOTH (a) one REAL optional key the backend types but this editor does
+  // not model and (b) an unknown `x_customerExtension: { nested: true }`, and asserts SORTED-KEY JSON
+  // equality — byte-identity across all keys, not a "contains" check.
+  describe('#5739 泛化: unmodelled action config keys survive an untouched load → save', () => {
+    /** JSON with every object's keys sorted → order-independent byte-identity of the whole config. */
+    function stableJson(value: unknown): string {
+      return JSON.stringify(value, (_key, raw) => {
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          return Object.fromEntries(
+            Object.entries(raw as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          )
+        }
+        return raw
+      })
+    }
+
+    function mountWithAction(type: string, config: Record<string, unknown>) {
+      const saved = vi.fn()
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        views,
+        onSave: saved,
+        rule: fakeRule({
+          name: `preserve ${type}`,
+          // Both the legacy single-action columns and the actions[] array carry the same config, exactly
+          // as the API returns them.
+          actionType: type,
+          actionConfig: config,
+          actions: [{ type, config }],
+        } as unknown as Partial<AutomationRule>),
+      })
+      return { container, saved }
+    }
+
+    async function saveAndReadConfig(container: HTMLElement, saved: ReturnType<typeof vi.fn>) {
+      const btn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(btn.disabled).toBe(false)
+      btn.click()
+      await flushPromises()
+      expect(saved).toHaveBeenCalledTimes(1)
+      return saved.mock.calls[0][0].actions[0].config as Record<string, unknown>
+    }
+
+    function setInput(container: HTMLElement, selector: string, value: string) {
+      const host = container.querySelector(selector) as HTMLElement
+      const el = (host instanceof HTMLInputElement || host instanceof HTMLTextAreaElement
+        ? host
+        : host.querySelector('input, textarea')) as HTMLInputElement | HTMLTextAreaElement
+      el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    const extension = { nested: true }
+
+    // (a) = the REAL legal optional key, quoted from the backend type/validator it comes from.
+    const roundTripCases: Array<{ type: string; unmodelled: string; config: Record<string, unknown> }> = [
+      {
+        type: 'update_record',
+        // automation-actions.ts UpdateRecordConfig targetBaseId?/targetSheetId?/targetRecordId?,
+        // gated by automation-service.ts validateCrossBaseWriteConfig.
+        unmodelled: 'cross-base triple',
+        config: {
+          fields: { fld_1: 'done' },
+          targetBaseId: 'base_x',
+          targetSheetId: 'sheet_x',
+          targetRecordId: 'rec_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'create_record',
+        // automation-actions.ts CreateRecordConfig.targetBaseId (executor re-verifies base-WRITE on it).
+        unmodelled: 'targetBaseId',
+        config: {
+          sheetId: 'sheet_2',
+          data: { fld_1: 'a' },
+          targetBaseId: 'base_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'delete_record',
+        // Worst case before this fix: buildPayload emitted a literal `{}` — EVERY key discarded.
+        unmodelled: 'cross-base triple',
+        config: {
+          targetBaseId: 'base_x',
+          targetSheetId: 'sheet_x',
+          targetRecordId: 'rec_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_webhook',
+        // automation-actions.ts SendWebhookConfig headers?/body?/secret? (secret = HMAC-SHA256 signing).
+        unmodelled: 'headers/body/secret',
+        config: {
+          url: 'https://example.test/hook',
+          method: 'POST',
+          headers: { 'X-Trace': '1' },
+          body: { payload: 'custom' },
+          secret: 's3cr3t',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_notification',
+        // SendNotificationConfig types no optional key, so the honest unmodelled case is the extension
+        // key validateActionObject persists verbatim.
+        unmodelled: 'extension key only',
+        config: { userIds: ['user_1', 'user_2'], message: 'hi', x_customerExtension: extension },
+      },
+      {
+        type: 'send_email',
+        unmodelled: 'extension key only',
+        config: {
+          recipients: ['ops@example.com', 'owner@example.com'],
+          subjectTemplate: 'S',
+          bodyTemplate: 'B',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_dingtalk_group_message',
+        unmodelled: 'extension key only',
+        config: {
+          destinationId: 'dt_1',
+          destinationIds: ['dt_1'],
+          // Stored recipient field paths must come back with their `record.` prefix intact, not re-prefixed.
+          destinationIdFieldPath: 'record.fld_2',
+          destinationIdFieldPaths: ['record.fld_2'],
+          titleTemplate: 'T',
+          bodyTemplate: 'B',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'send_dingtalk_person_message',
+        unmodelled: 'extension key only',
+        config: {
+          userIds: ['user_1'],
+          userIdFieldPath: 'record.assigneeUserIds',
+          userIdFieldPaths: ['record.assigneeUserIds'],
+          titleTemplate: 'T',
+          bodyTemplate: 'B',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'lock_record',
+        // automation-actions.ts LockRecordConfig cross-base LOCK opt-in (full explicit addressing).
+        unmodelled: 'cross-base triple',
+        config: {
+          locked: true,
+          targetBaseId: 'base_x',
+          targetSheetId: 'sheet_x',
+          targetRecordId: 'rec_x',
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'wait_for_callback',
+        // automation-actions.ts WaitForCallbackConfig.reason?: 'external_event'.
+        unmodelled: 'reason',
+        config: { reason: 'external_event', x_customerExtension: extension },
+      },
+      {
+        type: 'start_approval',
+        // T3-5 cross-base writeback target + requester.mode (#5724/#5739 — kept green through the
+        // generalisation, which moved this branch onto the shared snapshot).
+        unmodelled: 'resultWriteback cross-base triple + requester',
+        config: {
+          templateId: 'tmpl_9',
+          formDataMapping: { amount: 'fld_2' },
+          resultWriteback: {
+            statusField: 'fld_1',
+            targetBaseId: 'base_x',
+            targetSheetId: 'sheet_x',
+            targetRecordId: 'rec_x',
+          },
+          requester: { mode: 'form_field_user', fieldId: 'reviewerUserId' },
+          x_customerExtension: extension,
+        },
+      },
+      {
+        type: 'condition_branch',
+        // conditionBranchUnsupportedReason does NOT reject unknown TOP-LEVEL keys, so such a config opens
+        // EDITABLE and the rebuild used to drop them. (Nested branch actions are safe by construction: an
+        // unmodelled nested key makes the whole branch non-round-trippable → read-only → re-emitted
+        // verbatim. parallel_branch rejects unknown top-level keys the same way, which is why it has no
+        // case here — it can never reach the editable rebuild with one.)
+        unmodelled: 'extension key only',
+        config: {
+          branches: [
+            {
+              key: 'b1',
+              conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_1', operator: 'eq', value: 'x' }] },
+              actions: [{ type: 'update_record', config: { fields: { fld_2: 'y' } } }],
+            },
+          ],
+          x_customerExtension: extension,
+        },
+      },
+    ]
+
+    for (const testCase of roundTripCases) {
+      it(`${testCase.type}: an untouched load → save is byte-identical (${testCase.unmodelled} + x_customerExtension)`, async () => {
+        const { container, saved } = mountWithAction(testCase.type, testCase.config)
+        await flushPromises()
+        // round-2: a CROSS-BASE delete_record re-asks its destructive acknowledgement (the pre-checked one
+        // was given against the "trigger record in this table" wording, which is false for it). Ticking the
+        // box is the only interaction — the config itself is still untouched.
+        const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement | null
+        if (ack && !ack.checked) {
+          ack.checked = true
+          ack.dispatchEvent(new Event('change'))
+          await flushPromises()
+        }
+        const config = await saveAndReadConfig(container, saved)
+        // FAIL-FIRST: revert any one type's rebuild to the modelled-keys-only object and THIS case goes red.
+        expect(stableJson(config)).toBe(stableJson(testCase.config))
+      }, ROUND_TRIP_TIMEOUT_MS)
+    }
+
+    // ---- the other half of the contract: a key the UI OWNS and the author CLEARED must be DELETED,
+    // never resurrected from the preserved original. One case per type that has something clearable.
+    // (delete_record owns nothing; start_approval's clear semantics are pinned by the #5739/#5742 cases
+    // above; the passthrough types edit their modelled keys in place.)
+
+    it('update_record: removing the last field row empties `fields` without resurrecting the loaded value', async () => {
+      const { container, saved } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      ;(container.querySelector('[data-action-index="0"] .meta-rule-editor__field-pair .meta-rule-editor__btn--icon') as HTMLButtonElement).click()
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.fields).toEqual({})
+      // Unowned keys are untouched by the clear.
+      expect(config.targetBaseId).toBe('base_x')
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('create_record: clearing the target sheet DELETES `sheetId` (the loaded one is not restored)', async () => {
+      const { container, saved } = mountWithAction('create_record', {
+        sheetId: 'sheet_2',
+        data: { fld_1: 'a' },
+        targetBaseId: 'base_x',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      setInput(container, '[data-field="createRecordTargetSheetId"]', '')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('sheetId')
+      expect(config.targetBaseId).toBe('base_x')
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('send_notification: a legacy `userId` string is consumed by the recipient model, not re-emitted', async () => {
+      const { container, saved } = mountWithAction('send_notification', {
+        userIds: ['user_1'],
+        // v0/quick-form legacy mirror of userIds: OWNED (the picker parses it), so it must not ride back
+        // out next to the canonical array it was folded into.
+        userId: 'user_9',
+        message: 'hi',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('userId')
+      expect(config.userIds).toEqual(['user_1'])
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('send_email: dropping a recipient shrinks `recipients` (no merge with the loaded list)', async () => {
+      const { container, saved } = mountWithAction('send_email', {
+        recipients: ['ops@example.com', 'owner@example.com'],
+        subjectTemplate: 'S',
+        bodyTemplate: 'B',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      setInput(container, '[data-field="emailRecipients"]', 'ops@example.com')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.recipients).toEqual(['ops@example.com'])
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('send_dingtalk_group_message: clearing the public-form link DELETES `publicFormViewId`', async () => {
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1'],
+        titleTemplate: 'T',
+        bodyTemplate: 'B',
+        publicFormViewId: 'view_form',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      epSetSelect(container.querySelector('[data-action-index="0"] [data-field="publicFormViewId"]'), '')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('publicFormViewId')
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('send_dingtalk_person_message: clearing the public-form link DELETES `publicFormViewId`', async () => {
+      const { container, saved } = mountWithAction('send_dingtalk_person_message', {
+        userIds: ['user_1'],
+        titleTemplate: 'T',
+        bodyTemplate: 'B',
+        publicFormViewId: 'view_form',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      epSetSelect(container.querySelector('[data-action-index="0"] [data-field="dingtalkPersonPublicFormViewId"]'), '')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('publicFormViewId')
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('switching an action type drops the loaded snapshot — no cross-type key bleed', async () => {
+      // The snapshot belongs to the type it was LOADED as: an update_record cross-base triple must not
+      // reappear inside a send_email config just because the author re-picked the action type.
+      const { container, saved } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+      epSetSelect(actionSelect, 'send_email')
+      await flushPromises()
+      setInput(container, '[data-field="emailRecipients"]', 'ops@example.com')
+      setInput(container, '[data-field="emailSubjectTemplate"]', 'S')
+      setInput(container, '[data-field="emailBodyTemplate"]', 'B')
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).toEqual({ recipients: ['ops@example.com'], subjectTemplate: 'S', bodyTemplate: 'B' })
+    }, ROUND_TRIP_TIMEOUT_MS)
+  })
+
+  // -----------------------------------------------------------------------------------------------
+  // #5739 泛化 round-2 — the adversarial review of the first pass found two ways the "byte-identical
+  // round-trip" guarantee still broke, plus a truth gap the preservation itself opened:
+  //   (1) the rebuild is only as lossless as the DRAFT it overlays: `fields`/`data` values were re-derived
+  //       from a TEXT box, so 42 → "42", false → "false", null → "" on a save that changed nothing;
+  //   (2) the DingTalk singular/plural twins were always BOTH written back, so a config that carried only
+  //       one of them GREW a key on an untouched save (the #4196 fingerprint hashes the raw config);
+  //   (3) preserving the cross-base triple made the delete warning/ack text ("the trigger record in this
+  //       table") false for such a rule, and an INCOMPLETE triple now reaches the backend, which rejects
+  //       the whole save with a 400 the author cannot act on.
+  describe('#5739 泛化 round-2: lossless drafts, no added keys, a truthful cross-base screen', () => {
+    /** JSON with every object's keys sorted → order-independent byte-identity of the whole config. */
+    function stableJson(value: unknown): string {
+      return JSON.stringify(value, (_key, raw) => {
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          return Object.fromEntries(
+            Object.entries(raw as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          )
+        }
+        return raw
+      })
+    }
+
+    function mountWithAction(type: string, config: Record<string, unknown>) {
+      const saved = vi.fn()
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        views,
+        onSave: saved,
+        rule: fakeRule({
+          name: `round2 ${type}`,
+          actionType: type,
+          actionConfig: config,
+          actions: [{ type, config }],
+        } as unknown as Partial<AutomationRule>),
+      })
+      return { container, saved }
+    }
+
+    async function saveAndReadConfig(container: HTMLElement, saved: ReturnType<typeof vi.fn>) {
+      const btn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(btn.disabled).toBe(false)
+      btn.click()
+      await flushPromises()
+      expect(saved).toHaveBeenCalledTimes(1)
+      return saved.mock.calls[0][0].actions[0].config as Record<string, unknown>
+    }
+
+    function blockKeys(container: HTMLElement): string[] {
+      return Array.from(container.querySelectorAll('[data-action="save-block-reason"]'))
+        .map((el) => el.getAttribute('data-reason-key') ?? '')
+    }
+
+    const extension = { nested: true }
+
+    // ---- (1) the draft must not rewrite values it only SHOWS as text -----------------------------
+
+    it('update_record: non-string `fields` values survive an untouched load → save', async () => {
+      // All five shapes are backend-legal (automation-actions.ts types `fields` as Record<string, unknown>)
+      // and backend-PRODUCED: automation-service.ts normalizeLegacyActionPair writes `null` into `fields`
+      // for a legacy update_field rule, where null means "clear the cell" — "" would mean "write an empty
+      // string", a different record mutation.
+      const config = {
+        fields: { fld_score: 42, fld_done: false, fld_note: null, fld_tags: ['red', 'blue'], fld_1: { a: 1 } },
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('update_record', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('update_record: editing ONE row stringifies that row only — untouched rows keep their raw values', async () => {
+      const { container, saved } = mountWithAction('update_record', {
+        fields: { fld_score: 42, fld_1: 'done' },
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const rows = container.querySelectorAll('[data-action-index="0"] .meta-rule-editor__field-pair')
+      const edited = rows[1].querySelector('.meta-rule-editor__input--sm input') as HTMLInputElement
+      edited.value = 'shipped'
+      edited.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.fields).toEqual({ fld_score: 42, fld_1: 'shipped' })
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('create_record: non-string `data` values survive an untouched load → save', async () => {
+      const config = {
+        sheetId: 'sheet_2',
+        data: { fld_score: 0, fld_done: false, fld_note: null, fld_tags: ['red'] },
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('create_record', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    // ---- (2) an untouched save must not ADD a mirror key ------------------------------------------
+
+    it('send_dingtalk_group_message: a singular-only destinationId config does not grow `destinationIds`', async () => {
+      // automation-actions.ts SendDingTalkGroupMessageConfig types BOTH destinationId? and destinationIds?
+      // as optional, so carrying only the singular is a legal API/quick-form shape.
+      const config = { destinationId: 'dt_1', titleTemplate: 'T', bodyTemplate: 'B', x_customerExtension: extension }
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('send_dingtalk_group_message: a plural-only destinationIds config does not grow `destinationId`', async () => {
+      const config = { destinationIds: ['dt_1', 'dt_2'], titleTemplate: 'T', bodyTemplate: 'B' }
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('send_dingtalk_person_message: a field-path-only config grows neither `userIds` nor `userIdFieldPaths`', async () => {
+      const config = {
+        userIdFieldPath: 'record.assigneeUserIds',
+        titleTemplate: 'T',
+        bodyTemplate: 'B',
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('send_dingtalk_person_message', config)
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    // Create-mode (no loaded shape) is already pinned by the authoring specs above — e.g. "saves a
+    // DingTalk group message rule" expects BOTH destinationId and destinationIds, and the person-message
+    // authoring specs expect `userIds: []` next to the field-path twins. The no-ADD rule keys off the
+    // LOADED config precisely so those stay green.
+
+    it('send_dingtalk_group_message: the legacy `title`/`content` aliases are consumed, not re-emitted', async () => {
+      // dingtalk-automation-link-validation.ts promotes title → titleTemplate / content → bodyTemplate
+      // whenever the modelled key is blank, so an unowned alias could re-publish text the author cleared.
+      const { container, saved } = mountWithAction('send_dingtalk_group_message', {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1'],
+        title: 'OLD',
+        content: 'OLDBODY',
+        titleTemplate: 'NEW',
+        bodyTemplate: 'NEWBODY',
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config).not.toHaveProperty('title')
+      expect(config).not.toHaveProperty('content')
+      expect(config.titleTemplate).toBe('NEW')
+      expect(config.bodyTemplate).toBe('NEWBODY')
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('start_approval: outcomeValues are TRIMMED on save — the one documented exception to byte-identity', async () => {
+      // #5742 canonicalises the mapping on the way IN and on the way OUT (MetaAutomationRuleEditor.vue
+      // readResultWritebackOutcomeValues). Pinned so "byte-identical for all keys" is never read as
+      // covering this deliberate trim.
+      const { container, saved } = mountWithAction('start_approval', {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_1', outcomeValues: { approved: ' PASS ' } },
+        x_customerExtension: extension,
+      })
+      await flushPromises()
+      const config = await saveAndReadConfig(container, saved)
+      expect(config.resultWriteback).toEqual({ statusField: 'fld_1', outcomeValues: { approved: 'PASS' } })
+      expect(config.x_customerExtension).toEqual(extension)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    // ---- (3) the screen must tell the truth about a preserved cross-base target -------------------
+
+    it('delete_record: a cross-base target shows the banner, re-asks the acknowledgement, keeps the triple', async () => {
+      const config = {
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+        x_customerExtension: extension,
+      }
+      const { container, saved } = mountWithAction('delete_record', config)
+      await flushPromises()
+
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner).not.toBeNull()
+      expect(banner.textContent).toContain('ANOTHER base')
+      expect(banner.textContent).toContain('base_x')
+      expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).toBeNull()
+      // The warning + ack must stop claiming this deletes "the trigger record in this table".
+      const warning = container.querySelector('[data-action-index="0"] [data-field="deleteRecordWarning"]') as HTMLElement
+      expect(warning.textContent).toContain('another base')
+      const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement
+      expect(ack.checked).toBe(false)
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+      expect(blockKeys(container)).toContain('action-0-deleteAck')
+
+      ack.checked = true
+      ack.dispatchEvent(new Event('change'))
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('delete_record: a SAME-base delete keeps its pre-checked acknowledgement and shows no banner', async () => {
+      const { container } = mountWithAction('delete_record', {})
+      await flushPromises()
+      expect(container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]')).toBeNull()
+      const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement
+      expect(ack.checked).toBe(true)
+      const warning = container.querySelector('[data-action-index="0"] [data-field="deleteRecordWarning"]') as HTMLElement
+      expect(warning.textContent).toContain('trigger record')
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('update_record: a cross-base target shows the banner on a non-delete action too', async () => {
+      const { container } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+        targetSheetId: 'sheet_x',
+        targetRecordId: 'rec_x',
+      })
+      await flushPromises()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner).not.toBeNull()
+      expect(banner.textContent).toContain('sheet_x')
+      expect(banner.textContent).toContain('rec_x')
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    it('update_record: an INCOMPLETE cross-base triple blocks save instead of arriving as a server 400', async () => {
+      // automation-service.ts validateCrossBaseWriteConfig rejects targetBaseId without its two siblings
+      // (HTTP 400). Preserving the key made that reachable, so the editor now says it inline and anchors it.
+      const { container } = mountWithAction('update_record', {
+        fields: { fld_1: 'done' },
+        targetBaseId: 'base_x',
+      })
+      await flushPromises()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).not.toBeNull()
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+      expect(blockKeys(container)).toContain('action-0-crossBaseTarget')
+    }, ROUND_TRIP_TIMEOUT_MS)
+
+    // ---- (3b) create_record is the FOURTH cross-base writer, and it opts in with targetBaseId ALONE --
+    //
+    // automation-actions.ts CreateRecordConfig types `targetBaseId?` with NO targetSheetId/targetRecordId
+    // siblings (the target sheet is its own `sheetId`), and automation-service.ts
+    // validateCrossBaseWriteConfig lists only update/delete/lock — so the server saves targetBaseId alone
+    // and #5756 now preserves it. Before this change the editor rendered NO banner for such a rule while
+    // its target-sheet dropdown offered the whole readable-sheet roster (GET /api/multitable/sheets spans
+    // every base and automationTargetSheetOptions drops each row's baseId) against a sheet id that may
+    // address a different base.
+    //
+    // round-3 (adversarial review): what the banner SAYS has to match what the executor DOES.
+    // executeCreateRecord writes to `config.sheetId || context.sheetId`, and evaluateCrossBaseWriteGate
+    // returns `{crossBase:false}` as soon as that sheet's REAL base equals the trigger base — before the
+    // declared claim is ever compared — so a blank or local sheet id creates the record HERE and the step
+    // SUCCEEDS (backend XW-3b in multitable-cross-base-automation-write.test.ts pins exactly that, with an
+    // actor holding base-write nowhere). Copy promising "creates in ANOTHER base" / "the run fails" would
+    // be false in the common case, so these cases assert the honest wording instead. The roster rows also
+    // DO carry `baseId`, so the dropdown is SCOPED to the declared base rather than withheld: withholding
+    // it stripped the control from the legal `targetBaseId == this base` shape XW-3b exercises.
+
+    /**
+     * create_record mount WITH a sheet roster spanning two bases plus a legacy row that has no base at
+     * all, so the scoped-dropdown, the off-base-id and the degrade-to-text branches are all reachable.
+     * `sheet_x` is a deliberate lookalike: a readable sheet in THIS base whose id a cross-base rule might
+     * name, which the scoped list must refuse to offer as if it were the declared base's sheet.
+     */
+    function mountCreateRecord(
+      config: Record<string, unknown>,
+      listSheetsImpl?: () => Promise<{ sheets: unknown[] }>,
+    ) {
+      const saved = vi.fn()
+      const listSheets = vi.fn(listSheetsImpl ?? (async () => ({
+        sheets: [
+          { id: 'sheet_2', name: 'Tasks', baseId: 'base_1' },
+          { id: 'sheet_x', name: 'Local lookalike', baseId: 'base_1' },
+          { id: 'sheet_far', name: 'Remote table', baseId: 'base_x' },
+          { id: 'sheet_legacy', name: 'No base row' },
+        ],
+      })))
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        views,
+        client: { ...mockClient(), listSheets },
+        onSave: saved,
+        rule: fakeRule({
+          name: 'round2 create_record',
+          actionType: 'create_record',
+          actionConfig: config,
+          actions: [{ type: 'create_record', config }],
+        } as unknown as Partial<AutomationRule>),
+      })
+      return { container, saved, listSheets }
+    }
+
+    function sheetField(container: HTMLElement): HTMLElement {
+      return container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetId"]') as HTMLElement
+    }
+
+    /** Offered sheet ids, placeholder option dropped. */
+    function offeredSheetIds(container: HTMLElement): string[] {
+      return epOptions(sheetField(container)).map((o) => o.value).filter((v) => v !== '')
+    }
+
+    function typeTargetSheetId(container: HTMLElement, value: string) {
+      const el = sheetField(container) as HTMLInputElement
+      expect(el.tagName).toBe('INPUT')
+      el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    it('create_record: a cross-base targetBaseId shows the banner, scopes the dropdown to that base, and still round-trips', async () => {
+      const config = { sheetId: 'sheet_far', data: { fld_1: 'a' }, targetBaseId: 'base_x', x_customerExtension: extension }
+      const { container, saved, listSheets } = mountCreateRecord(config)
+      await flushPromises()
+      expect(listSheets).toHaveBeenCalledTimes(1) // the roster loaded — the dropdown branch was reachable
+
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner).not.toBeNull()
+      expect(banner.textContent).toContain('base_x')
+      expect(banner.textContent).toContain('sheet_far')
+      // No target RECORD exists for a create — the mutate ids row would print a bogus "targetRecordId: —".
+      expect(banner.textContent).not.toContain('targetRecordId')
+      expect(banner.querySelector('[data-field="crossBaseTargetIncomplete"]')).toBeNull()
+
+      // Honesty: the destination is decided by the target SHEET, not by this declaration. The banner may
+      // not promise the record leaves this base, nor that a mismatch fails the run (it does not — the gate
+      // short-circuits to same-base whenever the target sheet resolves into the trigger base).
+      expect(banner.textContent).toContain('does not by itself send the record to that base')
+      expect(banner.textContent).toContain('A target sheet in THIS base is created here')
+      expect(banner.textContent).not.toContain('the run fails')
+
+      // The dropdown is kept but SCOPED: only the declared base's readable sheets are offered. The local
+      // lookalike `sheet_x` and the base-less legacy row are not — an option here is provably in base_x.
+      expect(sheetField(container).tagName).not.toBe('INPUT') // el-select wrapper
+      expect(offeredSheetIds(container)).toEqual(['sheet_far'])
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordCrossBaseSheetHint"]')).not.toBeNull()
+
+      // The manual escape hatch survives, and the banner quotes the LIVE draft value, so it cannot go
+      // stale while the id is edited.
+      ;(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]') as HTMLButtonElement).click()
+      await flushPromises()
+      typeTargetSheetId(container, 'sheet_y')
+      await flushPromises()
+      expect((container.querySelector('[data-action-index="0"] [data-field="crossBaseTargetIds"]') as HTMLElement).textContent).toContain('sheet_y')
+
+      // ...and the whole config still saves byte-identically once the edit is undone (targetBaseId is NOT
+      // owned by this editor: no control clears it, so nothing may delete it).
+      typeTargetSheetId(container, 'sheet_far')
+      await flushPromises()
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('create_record: a targetBaseId equal to THIS base keeps its ordinary picker (the legal same-base shape)', async () => {
+      // multitable-cross-base-automation-write.test.ts XW-3b: a create carrying targetBaseId == the trigger
+      // base is a plain same-base create the gate never touches. Reporting it is fine; taking the sheet
+      // picker away from it (and telling the author the record leaves this base) is not.
+      const { container } = mountCreateRecord({ sheetId: 'sheet_2', data: {}, targetBaseId: 'base_1' })
+      await flushPromises()
+      expect(sheetField(container).tagName).not.toBe('INPUT')
+      expect(offeredSheetIds(container)).toEqual(['sheet_2', 'sheet_x']) // base_1 only — sheet_far is elsewhere
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]')).not.toBeNull()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      expect(banner.textContent).toContain('A target sheet in THIS base is created here')
+      expect(banner.textContent).not.toContain('the run fails')
+    })
+
+    it('create_record: a sheet id that is not provably in the declared base is never offered by the scoped list', async () => {
+      // `sheet_x` is readable but lives in base_1, while the rule declares base_x. The dropdown must not
+      // present it (labelled with THIS base's name) as the target; it stays visible/editable as text.
+      const { container } = mountCreateRecord({ sheetId: 'sheet_x', data: {}, targetBaseId: 'base_x' })
+      await flushPromises()
+      expect(sheetField(container).tagName).toBe('INPUT') // manual default: the id isn't in the scoped list
+      expect((sheetField(container) as HTMLInputElement).value).toBe('sheet_x')
+
+      ;(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(offeredSheetIds(container)).toEqual(['sheet_far'])
+      expect(offeredSheetIds(container)).not.toContain('sheet_x')
+    })
+
+    it('create_record: a SAME-base create keeps the whole roster and shows no banner', async () => {
+      const { container } = mountCreateRecord({ sheetId: 'sheet_2', data: {} })
+      await flushPromises()
+      expect(container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]')).toBeNull()
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordCrossBaseSheetHint"]')).toBeNull()
+      expect(sheetField(container).tagName).not.toBe('INPUT') // el-select wrapper, unchanged behaviour
+      expect(offeredSheetIds(container)).toEqual(['sheet_2', 'sheet_x', 'sheet_far', 'sheet_legacy'])
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]')).not.toBeNull()
+    })
+
+    it('create_record: targetBaseId with no sheetId is flagged inline, does NOT block save, and does not promise a failed run', async () => {
+      // The mutate rule blocks save because validateCrossBaseWriteConfig 400s the incomplete triple.
+      // create_record is skipped by that validator, so blocking here would make a server-legal rule
+      // permanently unsavable in this editor. And the run does not fail either: with no sheetId the
+      // executor targets the TRIGGER sheet, the gate sees the same base on both sides and returns
+      // `{crossBase:false}` before looking at the claim, so the record is created here and the step
+      // succeeds. The inline note has to say that, not the opposite.
+      const config = { data: {}, targetBaseId: 'base_x', x_customerExtension: extension }
+      const { container, saved } = mountCreateRecord(config)
+      await flushPromises()
+      const banner = container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]') as HTMLElement
+      const incomplete = banner.querySelector('[data-field="crossBaseTargetIncomplete"]') as HTMLElement
+      expect(incomplete).not.toBeNull()
+      expect(incomplete.textContent).toContain('the run does NOT fail')
+      expect(incomplete.textContent).toContain('the record is created here')
+      expect(incomplete.textContent).not.toContain('the run fails')
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+      expect(blockKeys(container)).not.toContain('action-0-crossBaseTarget')
+      expect(stableJson(await saveAndReadConfig(container, saved))).toBe(stableJson(config))
+    })
+
+    it('create_record: with no roster at all the cross-base hint still describes the field that IS there', async () => {
+      // listSheets rejected — availableSheets is empty, so there is no dropdown to scope and the field
+      // degrades to the plain text input. The hint must not describe a control that does not exist.
+      const { container } = mountCreateRecord(
+        { sheetId: 'sheet_far', data: {}, targetBaseId: 'base_x' },
+        async () => { throw new Error('offline') },
+      )
+      await flushPromises()
+      expect(sheetField(container).tagName).toBe('INPUT')
+      expect(container.querySelector('[data-action-index="0"] [data-field="createRecordTargetSheetToggle"]')).toBeNull()
+      const hint = container.querySelector('[data-action-index="0"] [data-field="createRecordCrossBaseSheetHint"]') as HTMLElement
+      expect(hint).not.toBeNull()
+      expect(hint.textContent).toContain('the field stays a text box')
+    })
+
+    // ---- structural: a future rebuild branch cannot forget its owned-key entry ---------------------
+
+    it('every buildPayload branch that rebuilds a config declares its OWNED keys', async () => {
+      // `ACTION_OWNED_CONFIG_KEYS[action.type] ?? []` silently means "this type owns nothing", so a rebuild
+      // branch added without an entry would overlay the full original and resurrect keys the author
+      // cleared. The invariant lived only in a comment; this reads the component source and enforces it.
+      const { existsSync, readFileSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+      // cwd is apps/web when vitest runs from there (run-required-web-tests.sh) and the repo root in some
+      // IDE runners — resolve both instead of import.meta.url, which vitest does not expose as a file: URL.
+      const file = [
+        resolve(process.cwd(), 'src/multitable/components/MetaAutomationRuleEditor.vue'),
+        resolve(process.cwd(), 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'),
+      ].find((candidate) => existsSync(candidate))
+      expect(file, `component source not found from cwd ${process.cwd()}`).toBeTruthy()
+      const source = readFileSync(file as string, 'utf8')
+      const ownedStart = source.indexOf('const ACTION_OWNED_CONFIG_KEYS')
+      const ownedEnd = source.indexOf('function buildActionConfigFromOriginal')
+      expect(ownedStart).toBeGreaterThan(0)
+      expect(ownedEnd).toBeGreaterThan(ownedStart)
+      const declared = new Set(
+        Array.from(source.slice(ownedStart, ownedEnd).matchAll(/^ {2}([a-z_]+): \[/gm), (m) => m[1]),
+      )
+      const payloadSource = source.slice(source.indexOf('function buildPayload('))
+      const rebuilt = new Set<string>()
+      for (const match of payloadSource.matchAll(/if \(action\.type === '([a-z_]+)'\) \{([\s\S]*?)\n {4}\}/g)) {
+        if (match[2].includes('buildActionConfigFromOriginal(')) rebuilt.add(match[1])
+      }
+      // Sanity: the scan actually found the branches (a regex that matches nothing must not pass).
+      expect(rebuilt.size).toBeGreaterThanOrEqual(8)
+      expect([...rebuilt].filter((type) => !declared.has(type))).toEqual([])
+    }, ROUND_TRIP_TIMEOUT_MS)
   })
 })

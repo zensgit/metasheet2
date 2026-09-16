@@ -19,7 +19,7 @@ import './styles/calendar-source-palette.css'
 // approval/workflow surface set so the no-static-style= gate has a home.
 import './styles/form-layout-utilities.css'
 import App from './App.vue'
-import { useAuth } from './composables/useAuth'
+import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
 import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'
@@ -139,6 +139,11 @@ router.beforeEach(async (to, _from, next) => {
 })
 
 async function bootstrap(): Promise<void> {
+  // Once per document, before the first view mounts: re-reads the user's permissions from the
+  // server when the window regains focus (rate-limited to the server's own RBAC cache TTL), so a
+  // tab left open picks up a newly granted permission without a reload. Deliberately here and not
+  // in a component: a component can mount many times, and this must install exactly one listener.
+  installPermissionSnapshotRefresh()
   const app = createApp(App)
   app.use(ElementPlus)
   app.use(createPinia())

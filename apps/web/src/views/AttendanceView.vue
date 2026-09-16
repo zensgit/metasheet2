@@ -220,6 +220,17 @@
             @cancel="closeDedicatedOvertimeRequestCard"
             @submit="submitDedicatedOvertimeRequestCard"
           />
+          <AttendanceEmployeeShiftSwapRequestCard
+            v-if="shiftSwapRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :requester-assignments="requesterShiftSwapCardOptions"
+            :counterparty-assignments="counterpartyShiftSwapCardOptions"
+            :has-published-assignments="shiftSwapAssignmentOptions.length > 0"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedShiftSwapRequestCard"
+            @submit="submitDedicatedShiftSwapRequestCard"
+          />
         </template>
         <template #historyFilters>
           <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
@@ -10167,6 +10178,7 @@ import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspac
 import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
 import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
+import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
@@ -14953,6 +14965,7 @@ const overviewRequestToolsOpen = ref(false)
 const leaveRequestCardOpen = ref(false)
 const makeupRequestCardOpen = ref(false)
 const overtimeRequestCardOpen = ref(false)
+const shiftSwapRequestCardOpen = ref(false)
 
 const eligibleMakeupAnomalies = computed(() =>
   anomalies.value.filter(item => item.state !== 'pending'),
@@ -17295,13 +17308,14 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
     await openDedicatedOvertimeRequestCard()
     return
   }
+  if (action === 'shift_swap') {
+    await openDedicatedShiftSwapRequestCard()
+    return
+  }
   if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
   if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
   if (overtimeRequestCardOpen.value) closeDedicatedOvertimeRequestCard()
-  if (action === 'shift_swap') {
-    await openQuickRequestDraft('shift_swap')
-    return
-  }
+  if (shiftSwapRequestCardOpen.value) closeDedicatedShiftSwapRequestCard()
   if (action === 'records') {
     await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)
     return
@@ -17313,6 +17327,7 @@ async function openDedicatedLeaveRequestCard(): Promise<void> {
   prepareRequestDraft('leave', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
   makeupRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
   leaveRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17341,17 +17356,6 @@ async function submitDedicatedLeaveRequestCard(): Promise<void> {
   if (statusKind.value !== 'error') closeDedicatedLeaveRequestCard()
 }
 
-async function openQuickRequestDraft(requestType: AttendanceRequest['request_type']): Promise<void> {
-  prepareRequestDraft(requestType, activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
-  setStatus(
-    appendStatusContext(
-      tr(`Request form ready for ${formatRequestType(requestType)}.`, `已为${formatRequestType(requestType)}准备申请表单。`),
-      requestTimezoneContextHint.value,
-    ),
-  )
-  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
-}
-
 function prepareRequestDraft(requestType: AttendanceRequest['request_type'], workDate: string): void {
   const typeChanged = requestForm.requestType !== requestType
   const dateChanged = requestForm.workDate !== workDate
@@ -17378,6 +17382,7 @@ async function openDedicatedMakeupRequestCard(): Promise<void> {
   prepareRequestDraft(draft.requestType, draft.workDate)
   leaveRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
   makeupRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17413,6 +17418,7 @@ async function openDedicatedOvertimeRequestCard(): Promise<void> {
   prepareRequestDraft('overtime', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
   leaveRequestCardOpen.value = false
   makeupRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
   overtimeRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17439,6 +17445,39 @@ function closeDedicatedOvertimeRequestCard(): void {
 async function submitDedicatedOvertimeRequestCard(): Promise<void> {
   await submitRequest()
   if (statusKind.value !== 'error') closeDedicatedOvertimeRequestCard()
+}
+
+async function openDedicatedShiftSwapRequestCard(): Promise<void> {
+  prepareRequestDraft('shift_swap', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('shift_swap')}.`, `已为${formatRequestType('shift_swap')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-shift-swap-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const requesterField = document.getElementById('attendance-shift-swap-card-requester')
+  if (requesterField instanceof HTMLElement && typeof requesterField.focus === 'function') {
+    requesterField.focus()
+  }
+}
+
+function closeDedicatedShiftSwapRequestCard(): void {
+  shiftSwapRequestCardOpen.value = false
+}
+
+async function submitDedicatedShiftSwapRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedShiftSwapRequestCard()
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
@@ -23785,6 +23824,18 @@ const counterpartyShiftSwapAssignmentOptions = computed(() => {
     && (!requesterUserId || item.assignment.userId !== requesterUserId),
   )
 })
+
+function toShiftSwapCardOption(item: AttendanceAssignmentItem): { id: string; label: string } {
+  return { id: item.assignment.id, label: formatShiftSwapAssignmentOption(item) }
+}
+
+const requesterShiftSwapCardOptions = computed(() =>
+  requesterShiftSwapAssignmentOptions.value.map(toShiftSwapCardOption),
+)
+
+const counterpartyShiftSwapCardOptions = computed(() =>
+  counterpartyShiftSwapAssignmentOptions.value.map(toShiftSwapCardOption),
+)
 
 function applyTemporaryReplacementDefaults(item: AttendanceAssignmentItem | null): void {
   if (!item) return

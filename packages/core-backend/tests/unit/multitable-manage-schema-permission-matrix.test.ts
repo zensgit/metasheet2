@@ -55,6 +55,10 @@ const PEOPLE_SHEET_ID = 'sheet_ms_people'
 const MANAGED_SHEET_ID = 'sheet_ms_managed'
 const BASE_ID = 'base_ms'
 const FLD_QTY = 'fld_qty'
+/** fld_ + 24 hex: the exact shape `getObjectFieldId` mints for a plugin-provisioned column (the incident's template columns). */
+const MANAGED_FLD_TEMPLATE = 'fld_0123456789abcdef01234567'
+/** fld_<uuid>: the shape `POST /fields` mints for a user-created column — this one sits on the managed sheet too. */
+const MANAGED_FLD_USER = 'fld_9f1c2a3b-4d5e-4f60-8a7b-1c2d3e4f5a6b'
 const REVISION_ID = 'rev_field_update_1'
 const TARGET_USER = 'u_ms_target'
 
@@ -103,6 +107,10 @@ function freshFields(): Map<string, Field> {
     ['fld_person_name', { id: 'fld_person_name', sheet_id: PEOPLE_SHEET_ID, name: 'Name', type: 'string', property: {}, order: 1 }],
     ['fld_person_email', { id: 'fld_person_email', sheet_id: PEOPLE_SHEET_ID, name: 'Email', type: 'string', property: {}, order: 2 }],
     ['fld_person_avatar', { id: 'fld_person_avatar', sheet_id: PEOPLE_SHEET_ID, name: 'Avatar URL', type: 'string', property: {}, order: 3 }],
+    // Managed-table columns (field-delete guard): one provisioned-shaped, one user-created-shaped — both
+    // refused, because the SHEET decides, not the id shape (src/multitable/managed-field-delete-guard.ts).
+    [MANAGED_FLD_TEMPLATE, { id: MANAGED_FLD_TEMPLATE, sheet_id: MANAGED_SHEET_ID, name: 'Component source', type: 'string', property: {}, order: 0 }],
+    [MANAGED_FLD_USER, { id: MANAGED_FLD_USER, sheet_id: MANAGED_SHEET_ID, name: 'Operator note', type: 'string', property: {}, order: 1 }],
   ])
 }
 
@@ -812,6 +820,139 @@ describe('DELETE /sheets/:sheetId — managed sheets are refused even for whole-
     const res = await on(app).post(`/api/multitable/sheets/${MANAGED_SHEET_ID}/restore`)
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+})
+
+// ── managed-table guard on DELETE /fields/:fieldId ───────────────────────────
+// The field-level twin of the block above. 2026-09-14 incident: five template columns of a
+// plugin-provisioned stock-preparation target table were deleted through "manage fields" — the route
+// answered 200, every record's value for those keys was stripped and the drop went into the ordinary
+// tombstone/revision ledger that the plugin never reads — while DELETE /sheets on the SAME table was
+// already refused 409. Same registry row, same ordering (after the authority gate, before any write),
+// same values-free coded 409. The predicate is the SHEET: the host cannot prove which fields a plugin
+// provisioned (no field-level registry, forgeable id shape, operator-mapped fieldIdMap), so EVERY
+// field on a registered sheet is refused — src/multitable/managed-field-delete-guard.ts carries the
+// argument and the stated cost.
+describe('DELETE /fields/:fieldId — fields on managed tables are refused even for schema authority', () => {
+  const REFUSED_CODE = 'MANAGED_FIELD_DELETE_REFUSED'
+
+  /** Every statement the fence / dropFieldCascade would issue: none may appear on a refused delete. */
+  const fieldDeleteWrites = (pool: ReturnType<typeof createMockPool>) =>
+    pool.query.mock.calls.filter((c) => {
+      const sql = String(c[0])
+      return (
+        /^\s*DELETE\s+FROM\s+meta_fields\b/i.test(sql) ||
+        /^\s*DELETE\s+FROM\s+meta_links\b/i.test(sql) ||
+        /^\s*DELETE\s+FROM\s+meta_field_auto_number_sequences\b/i.test(sql) ||
+        /^\s*INSERT\s+INTO\s+meta_config_revisions\b/i.test(sql) ||
+        /^\s*INSERT\s+INTO\s+meta_field_value_tombstones\b/i.test(sql) ||
+        /^\s*INSERT\s+INTO\s+meta_field_link_tombstones\b/i.test(sql) ||
+        /^\s*UPDATE\s+meta_records\b/i.test(sql) ||
+        /^\s*UPDATE\s+meta_fields\b/i.test(sql) ||
+        /pg_advisory_xact_lock/i.test(sql)
+      )
+    })
+  const metaFieldDeletes = (pool: ReturnType<typeof createMockPool>) =>
+    pool.query.mock.calls.filter((c) => /^\s*DELETE\s+FROM\s+meta_fields\b/i.test(String(c[0])))
+
+  for (const tier of SCHEMA_TIERS) {
+    it(`${TIER_LABEL[tier]}: provisioned-shaped column on the managed sheet => 409 ${REFUSED_CODE}, transaction never opened, zero writes`, async () => {
+      const { app, pool } = await buildAppWithPool(tier, freshFields())
+      const res = await on(app).delete(`/api/multitable/fields/${MANAGED_FLD_TEMPLATE}`)
+      expect(res.status).toBe(409)
+      expect(res.body.ok).toBe(false)
+      expect(res.body.error.code).toBe(REFUSED_CODE)
+      // values-free: the refusal names no plugin, project, object, sheet or field
+      expect(res.body.error.message).not.toContain(MANAGED_SHEET_ID)
+      expect(res.body.error.message).not.toContain(MANAGED_FLD_TEMPLATE)
+      expect(res.body.error.message).not.toMatch(/plugin-integration-core|stock[-_ ]?prep/i)
+      // zero-write is literal: the refusal sits before prepareFieldLinkDropFencePlan and the transaction
+      expect(pool.transaction).not.toHaveBeenCalled()
+      expect(fieldDeleteWrites(pool)).toEqual([])
+      // and the column is still there
+      const after = await on(app).get('/api/multitable/fields').query({ sheetId: MANAGED_SHEET_ID })
+      expect(after.status).toBe(200)
+      expect((after.body.data.fields as Array<{ id: string }>).map((f) => f.id)).toContain(MANAGED_FLD_TEMPLATE)
+    })
+  }
+
+  // The predicate is the SHEET, not the id shape: a user-created-shaped column on the managed sheet is
+  // refused too. This is the conservative all-fields criterion; the guard module explains why the
+  // narrower "provisioned fields only" criterion cannot be proven host-side and what it would leave open.
+  it('T1 admin: user-created-shaped column (fld_<uuid>) on the managed sheet => 409 as well — the sheet decides, not the id, zero writes', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const res = await on(app).delete(`/api/multitable/fields/${MANAGED_FLD_USER}`)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe(REFUSED_CODE)
+    expect(res.body.error.message).not.toContain(MANAGED_FLD_USER)
+    expect(pool.transaction).not.toHaveBeenCalled()
+    expect(fieldDeleteWrites(pool)).toEqual([])
+  })
+
+  // Positive control (non-managed behaviour is byte-identical): the guard is not "everything is 409".
+  // FLD_QTY sits on the ORDINARY sheet — R3 in SCHEMA_ROUTES and the LEGACY-flag cells above exercise
+  // the same route on the same field and stay green untouched; this cell pins that the DELETE is issued.
+  it('ordinary sheet (no registry row) => 200 for T1 admin, and DELETE FROM meta_fields IS issued exactly once', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const res = await on(app).delete(`/api/multitable/fields/${FLD_QTY}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: { deleted: FLD_QTY, sheetId: SHEET_ID } })
+    expect(pool.transaction).toHaveBeenCalledTimes(1)
+    expect(metaFieldDeletes(pool)).toHaveLength(1)
+  })
+
+  // AUTHZ-FIRST: managed-ness is not disclosed to an actor who could not delete the column anyway.
+  it('T2 write-only operator on the managed sheet => 403 (authority first), never 409, zero writes', async () => {
+    const { app, pool } = await buildAppWithPool('T2_write_only', freshFields())
+    const res = await on(app).delete(`/api/multitable/fields/${MANAGED_FLD_TEMPLATE}`)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual(FORBIDDEN_BODY)
+    expect(fieldDeleteWrites(pool)).toEqual([])
+    // the guard was never consulted: no registry read for an unauthorised actor
+    expect(pool.query.mock.calls.filter((c) => /FROM\s+plugin_multitable_object_registry/i.test(String(c[0])))).toEqual([])
+  })
+
+  // One truth source: the registry read the guard makes is keyed by the FIELD'S SHEET (the same
+  // `isPluginManagedSheet` predicate the sheet-delete refusal uses), never by field id.
+  it('the registry read is keyed by the field\'s sheet id (shared sheet-level predicate)', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    await on(app).delete(`/api/multitable/fields/${MANAGED_FLD_TEMPLATE}`)
+    const registryReads = pool.query.mock.calls.filter((c) => /FROM\s+plugin_multitable_object_registry/i.test(String(c[0])))
+    expect(registryReads.length).toBeGreaterThanOrEqual(1)
+    expect(new Set(registryReads.map((c) => (c[1] as unknown[])[0]))).toEqual(new Set([MANAGED_SHEET_ID]))
+  })
+
+  // Missing / unreadable registry: the lookup error PROPAGATES (same as resolveSheetDeleteRefusal),
+  // which for a DELETE is already fail-closed — the route answers 5xx and nothing was written. This is
+  // deliberately NOT the swallow-and-answer-managed shape: that would make every column on every sheet
+  // undeletable wherever the migration has not run.
+  it('registry table missing => the delete fails 503 DB_NOT_READY with zero writes (fail-closed by propagation, not by pretending "managed")', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const original = pool.query.getMockImplementation()!
+    pool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (/FROM\s+plugin_multitable_object_registry/i.test(sql)) throw new Error('relation "plugin_multitable_object_registry" does not exist')
+      return original(sql, params)
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await on(app).delete(`/api/multitable/fields/${MANAGED_FLD_TEMPLATE}`)
+      // getDbNotReadyMessage recognises the missing relation and answers 503 DB_NOT_READY
+      expect(res.status).toBe(503)
+      expect(res.body.error.code).toBe('DB_NOT_READY')
+      expect(pool.transaction).not.toHaveBeenCalled()
+      expect(fieldDeleteWrites(pool)).toEqual([])
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  // The guard sits on the field-DELETE route only. Rename/retype of a managed column goes through
+  // PATCH /fields and is not this PR's subject (the capability-layer fence on the sibling branch covers
+  // non-admins there); pinning it here keeps the guard's scope honest.
+  it('PATCH /fields/:fieldId on the managed sheet is NOT refused by this guard (scope: delete only)', async () => {
+    const { app } = await buildAppWithPool('T1_admin', freshFields())
+    const res = await on(app).patch(`/api/multitable/fields/${MANAGED_FLD_USER}`).send({ name: 'Operator note (renamed)' })
+    expect(res.status).toBe(200)
   })
 })
 

@@ -1,0 +1,131 @@
+name: Multitable record-approval real-DB (record-level submit for approval)
+
+# EVIDENCE LANE for multitable × approval phase 2 (record-level 送审):
+#   - packages/core-backend/tests/integration/multitable-record-approval-realdb.test.ts
+#     G1 no `multitable:submit-approval` → 403 + ZERO rows; G2 draft template → 400; G2b unknown record
+#     → 404; G3 success → one `pending` row bound to a REAL approval_instances row; G4 duplicate submit
+#     → 409 on the PARTIAL unique index with the in-flight instance named, still one in-flight row;
+#     G4b the index is PARTIAL (a terminal row does not block the next submission — two raw INSERTs);
+#     G5 completion through the REAL durable adapter (buildDurableConsumerHandlers'
+#     `multitable-record-approval`) → row `approved` + exactly ONE notification row, and a REDELIVERY
+#     changes nothing (the `WHERE status = 'pending'` guard, proven against real rowcounts);
+#     G6 drift returns the changed READABLE field id only, with a field-permission-denied field masked.
+# Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry:
+# plugin-tests.yml is an s6a sha256-pinned provenance input
+# (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so every edit forces an s6a re-pin and a
+# merge-serialisation race. This file mirrors approval-realdb-directory-resolve.yml, the in-repo
+# precedent for exactly this rationale, and leaves plugin-tests.yml byte-identical to main.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts test.exclude) in the SAME commit that adds it, so the required
+# `test (20.x)` job no longer collect-and-skip-greens it. THIS workflow is where the suite actually
+# EXECUTES. DATABASE_URL is unconditionally hardcoded below; the suite's own top-level sentinel
+# ("sentinel: DATABASE_URL is set") sits inside describeIfDatabase, which is sufficient in THIS lane
+# because there is no no-DB variant of this job — and a dead Postgres service throws in beforeAll (a hard
+# red, not a skip), which is the actual protection.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # No `branches:` filter (s6a precedent): a brand-new workflow cannot be workflow_dispatch-ed until it
+    # has run once via a trigger it responds to, and a stacked-base PR would silently skip a
+    # branch-filtered trigger. The `paths` filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/multitable-record-approval-realdb.test.ts'
+      - 'packages/core-backend/src/multitable/record-approval-submission-service.ts'
+      - 'packages/core-backend/src/routes/multitable-record-approvals.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260915120000_create_multitable_record_approval_submissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260915121000_add_multitable_submit_approval_permission.ts'
+      - 'packages/core-backend/src/multitable/automation-routing-manifest.ts'
+      - 'packages/core-backend/src/multitable/automation-durable-consumer-handlers.ts'
+      - '.github/workflows/multitable-record-approval-realdb.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/multitable-record-approval-realdb.test.ts'
+      - 'packages/core-backend/src/multitable/record-approval-submission-service.ts'
+      - 'packages/core-backend/src/routes/multitable-record-approvals.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260915120000_create_multitable_record_approval_submissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260915121000_add_multitable_submit_approval_permission.ts'
+      - 'packages/core-backend/src/multitable/automation-routing-manifest.ts'
+      - 'packages/core-backend/src/multitable/automation-durable-consumer-handlers.ts'
+      - '.github/workflows/multitable-record-approval-realdb.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  multitable-record-approval-realdb:
+    name: multitable-record-approval-realdb
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step (see the T8
+          # note there and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md for the per-item detail) —
+          # this lane provisions the identical schema the other real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run multitable record-approval real-DB acceptance (whole file)
+        id: multitable-record-approval-realdb
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and hide
+        # regressions; verbose prints every collected test so an empty collection shows in the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/multitable-record-approval-realdb.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=multitable-record-approval-realdb.test.ts"
+            echo "design=multitable-approval-phase2-record-submit-design-20260915"
+            echo "gates=403-without-code, 400-unpublished-template, 404-unknown-record, success-pending-row+instance, 409-partial-unique-index, partial-index-allows-resubmit-after-terminal, durable-completion-approved+one-notification, redelivery-no-op, drift-field-ids-masked"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

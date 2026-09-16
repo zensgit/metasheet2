@@ -2687,6 +2687,13 @@ export async function updateDirectoryIntegration(
   const rawCurrentConfig = parseJsonRecord(current.config)
   const carriedApprovalCardLinkSecret = normalizeText(rawCurrentConfig.approvalCardLinkSecret) || null
   const carriedApprovalCardPublicAppUrl = normalizeText(rawCurrentConfig.approvalCardPublicAppUrl) || null
+  // Same carry-through, same reason, for the DingTalk todo mirror's operator unionId
+  // (`todoOperatorUnionId`, design §8.2): there is no FE field for it — the owner sets it directly on
+  // the integration row — so the rebuild below would WIPE it on the next unrelated integration-form
+  // save and every mirrored todo would fail `todo_operator_union_id_missing` until someone noticed.
+  // Carry-through ONLY: this is deliberately not a writable input of the generic form, so the PUT's
+  // key whitelist is not widened by one character.
+  const carriedTodoOperatorUnionId = normalizeText(rawCurrentConfig.todoOperatorUnionId) || null
   // Roadmap §7.8: unlike `scheduleCron` (the existing FE form always resends it verbatim, so
   // a plain "always overwrite from input" is safe), there is no FE field for `scheduleTimezone`
   // yet. An absent key (the FE's payload shape today) must PRESERVE whatever is already saved,
@@ -2732,6 +2739,7 @@ export async function updateDirectoryIntegration(
         memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
         approvalCardLinkSecret: carriedApprovalCardLinkSecret,
         approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
+        todoOperatorUnionId: carriedTodoOperatorUnionId,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,

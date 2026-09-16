@@ -50,6 +50,11 @@ export type WorkbenchLabelKey =
   | 'toast.buttonRunSuccess' | 'toast.buttonRunFailed'
   | 'toast.linkedRecordsUpdateFailed'
   | 'toast.fieldCreateFailed' | 'toast.fieldUpdateFailed' | 'toast.fieldDeleteFailed'
+  // #5707 follow-up: DELETE /api/multitable/fields/:fieldId answers a CODED 409
+  // MANAGED_FIELD_DELETE_REFUSED when the field sits on a plugin-managed sheet. The server prose
+  // is English and values-free; this is the localized copy the field manager shows instead --
+  // picked by CODE, exactly like the sheet-level toast.sheetPluginManaged above.
+  | 'toast.fieldManagedRefused'
   | 'toast.viewCreateFailed' | 'toast.viewUpdateFailed' | 'toast.viewDeleteFailed'
   | 'toast.sheetAccessRefreshFailed'
   | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
@@ -201,6 +206,12 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.fieldCreateFailed': { en: 'Failed to create field', zh: '创建字段失败' },
   'toast.fieldUpdateFailed': { en: 'Failed to update field', zh: '更新字段失败' },
   'toast.fieldDeleteFailed': { en: 'Failed to delete field', zh: '删除字段失败' },
+  // Values-free on purpose: no plugin id, no sheet/field name, no server prose -- the same
+  // discipline the backend message keeps, so the copy cannot leak what the refusal is about.
+  'toast.fieldManagedRefused': {
+    en: "This table is managed by an application; its fields cannot be deleted here. Use the application's own flow.",
+    zh: '这张表由应用托管，字段不能在这里删除；请通过应用侧流程处理。',
+  },
   'toast.viewCreateFailed': { en: 'Failed to create view', zh: '创建视图失败' },
   'toast.viewUpdateFailed': { en: 'Failed to update view', zh: '更新视图失败' },
   'toast.viewDeleteFailed': { en: 'Failed to delete view', zh: '删除视图失败' },
@@ -463,6 +474,21 @@ export function sheetDeleteErrorMessage(
     case 'SHEET_SYSTEM_MANAGED': return workbenchLabel('toast.sheetSystemManaged', isZh)
     case 'SHEET_DELETED': return workbenchLabel('toast.sheetAlreadyDeleted', isZh)
     default: return error?.message || workbenchLabel('toast.sheetDeleteFailed', isZh)
+  }
+}
+
+// Field-delete failure copy, chosen by the server's error CODE, mirroring sheetDeleteErrorMessage.
+// #5707 made DELETE /api/multitable/fields/:fieldId answer 409 MANAGED_FIELD_DELETE_REFUSED for a
+// field on a plugin-managed sheet; its message is English (and values-free), so surfacing it raw
+// left zh-CN users reading English. Unknown codes keep the previous behaviour: the server's own
+// message when it sent one, else the generic failure toast.
+export function fieldDeleteErrorMessage(
+  error: { code?: string; message?: string } | null | undefined,
+  isZh: boolean,
+): string {
+  switch (error?.code) {
+    case 'MANAGED_FIELD_DELETE_REFUSED': return workbenchLabel('toast.fieldManagedRefused', isZh)
+    default: return error?.message || workbenchLabel('toast.fieldDeleteFailed', isZh)
   }
 }
 

@@ -491,6 +491,16 @@ export interface MultitableProvisioningAPI {
   runObjectFieldsRepairTransaction<T>(
     fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
   ): Promise<T>
+  /**
+   * B3: create-or-adopt a plugin-owned SYSTEM base (owner_id / workspace_id NULL) so a plugin's
+   * managed tables need not land in the shared `base_legacy`. The plugin-scope wrapper enforces
+   * `baseId` starts with `base_<pluginSlug>_` (MultitableBaseScopeError otherwise); core refuses
+   * `base_legacy`, malformed ids and blank/oversized names (MultitableSystemBaseInputError), and
+   * FAILS CLOSED on adopting an owned / workspace-scoped / soft-deleted row
+   * (409 MULTITABLE_BASE_ADOPTION_REFUSED). OPTIONAL like `findObjectView`: a plugin newer than
+   * its host must degrade, never crash.
+   */
+  ensureSystemBase?(input: { baseId: string; name: string }): Promise<{ baseId: string; created: boolean }>
   ensureObject(input: {
     projectId: string
     baseId?: string | null

@@ -52,8 +52,31 @@ export interface SaveBlockEmailSnapshot {
   bodyTemplate: string
 }
 
+/**
+ * send_notification: the backend refuses an empty recipient list at save (400 NO_RECIPIENTS) and at
+ * run (AUTOMATION_NO_RECIPIENTS_ERROR). Mirroring that one rule here turns the 400 into an inline
+ * "why is Save disabled" reason; membership/authorization of each id stays a server decision.
+ */
+export interface SaveBlockNotificationSnapshot {
+  userIdCount: number
+}
+
 export interface SaveBlockDeleteRecordSnapshot {
   acknowledged: boolean
+}
+
+/**
+ * #5739 泛化 round-2 — the cross-base target triple of a record-mutating action (update_record /
+ * delete_record / lock_record), read from the config as LOADED. The editor does not author these keys but
+ * preserves them on save, so an INCOMPLETE triple (targetBaseId without targetSheetId + targetRecordId)
+ * now reaches the backend, which refuses it at save time (automation-service.ts validateCrossBaseWriteConfig
+ * → HTTP 400) and would fail the step at run time. Mirroring that one shape rule here turns the opaque 400
+ * into an inline, anchored "why is Save disabled" line; authority over the target base stays server-side.
+ */
+export interface SaveBlockCrossBaseTargetSnapshot {
+  targetBaseId: string
+  targetSheetId: string
+  targetRecordId: string
 }
 
 export interface SaveBlockFwbWritebackSnapshot {
@@ -62,13 +85,26 @@ export interface SaveBlockFwbWritebackSnapshot {
   readOnly: boolean
 }
 
+/**
+ * #5742 — one "the status select has no such option" blocker for a start_approval action, pre-evaluated by
+ * the editor (it owns the field list + the label catalogue). `outcome` is the approval outcome the value
+ * would be written for; it keys both the reason and the anchor, so two failing outcomes are two lines.
+ */
+export interface StartApprovalOutcomeValueBlock {
+  actionIndex: number
+  outcome: string
+  message: string
+}
+
 export interface SaveBlockActionSnapshot {
   index: number
   type: AutomationActionType
   groupMessage?: SaveBlockGroupMessageSnapshot
   personMessage?: SaveBlockPersonMessageSnapshot
   email?: SaveBlockEmailSnapshot
+  notification?: SaveBlockNotificationSnapshot
   deleteRecord?: SaveBlockDeleteRecordSnapshot
+  crossBaseTarget?: SaveBlockCrossBaseTargetSnapshot
   fwbWriteback?: SaveBlockFwbWritebackSnapshot
 }
 
@@ -99,6 +135,8 @@ export interface SaveBlockReasonsInput {
   /** Selector for the first incomplete condition/group, when one can be identified. */
   firstIncompleteConditionAnchor?: string
   actions: SaveBlockActionSnapshot[]
+  /** #5742: pre-evaluated result-writeback outcome→value blockers (empty / omitted when none). */
+  startApprovalOutcomeValueBlocks?: StartApprovalOutcomeValueBlock[]
 }
 
 export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlockReason[] {
@@ -323,6 +361,30 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
       }
     }
 
+    if (action.notification && action.notification.userIdCount === 0) {
+      reasons.push({
+        key: `action-${action.index}-recipients`,
+        message: zh
+          ? `「${label}」未设置通知接收人，请搜索并选择至少一个用户。`
+          : `"${label}" has no recipients — search and select at least one user.`,
+        anchor: `${scope} [data-field="notificationRecipientSearch"]`,
+      })
+    }
+
+    if (
+      action.crossBaseTarget
+      && action.crossBaseTarget.targetBaseId
+      && (!action.crossBaseTarget.targetSheetId || !action.crossBaseTarget.targetRecordId)
+    ) {
+      reasons.push({
+        key: `action-${action.index}-crossBaseTarget`,
+        message: zh
+          ? `「${label}」跨 base 目标不完整：设置 targetBaseId 后必须同时有 targetSheetId 与 targetRecordId，服务端会拒绝保存。请通过 API 修复该规则。`
+          : `"${label}" has an incomplete cross-base target: targetSheetId and targetRecordId are both required once targetBaseId is set, and the server refuses to save it. Fix the rule through the API.`,
+        anchor: `${scope} [data-field="crossBaseTarget"]`,
+      })
+    }
+
     if (action.deleteRecord && !action.deleteRecord.acknowledged) {
       reasons.push({
         key: `action-${action.index}-deleteAck`,
@@ -356,6 +418,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
         })
       }
     }
+  }
+
+  // #5742: mirrors the backend save gate (a select status field must contain the value the backwrite would
+  // write). The message arrives pre-composed; the anchor points at the very picker that fixes it.
+  for (const block of input.startApprovalOutcomeValueBlocks ?? []) {
+    reasons.push({
+      key: `action-${block.actionIndex}-writebackOutcome-${block.outcome}`,
+      message: block.message,
+      anchor: `[data-action-index="${block.actionIndex}"] [data-field="resultWritebackOutcomeValue-${block.outcome}"]`,
+    })
   }
 
   return reasons

@@ -383,13 +383,14 @@ describe('MetaAutomationManager', () => {
       'send_dingtalk_person_message',
     ])
     expect(actionSelect.textContent).toContain('发送通知')
+    expect((container.querySelector('[data-automation-field="notifyRecipientSearch"]') as HTMLInputElement).placeholder).toBe('输入姓名或邮箱搜索')
     expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).placeholder).toBe('用户 ID，逗号或换行分隔')
     expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
     // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
     // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
     expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
-    expect(container.querySelectorAll('[placeholder]')).toHaveLength(3) // name + recipients + message
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(4) // name + recipient search + manual recipient ids + message
 
     epSetSelect(actionSelect, 'update_record')
     await nextTick()
@@ -3128,5 +3129,55 @@ describe('MetaAutomationManager', () => {
     expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
     expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle Sample field value')
     expect(container.textContent).toContain('Copied')
+  })
+
+  it('quick form: picks notification recipients by name/email search and saves user ids only', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Picked recipients'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const searchInput = container.querySelector('[data-automation-field="notifyRecipientSearch"]') as HTMLInputElement
+    searchInput.value = 'lin'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'lin', limit: 8 })
+
+    const suggestion = container.querySelector('[data-automation-notify-suggestion="user_1"]') as HTMLButtonElement
+    expect(suggestion).toBeTruthy()
+    expect(suggestion.textContent).toContain('Lin Lan')
+    expect(suggestion.textContent).toContain('lin@example.com')
+    expect(container.querySelector('[data-automation-notify-suggestion="group_1"]')).toBeNull()
+    suggestion.click()
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-notify-recipient="user_1"]') as HTMLElement
+    expect(chip.textContent).toContain('Lin Lan')
+    expect(chip.getAttribute('data-automation-notify-recipient-unresolved')).toBeNull()
+    expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).value).toBe('user_1')
+
+    const msgInput = container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement
+    msgInput.value = 'Hello!'
+    msgInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionType).toBe('send_notification')
+    expect(body.actionConfig).toEqual({ userIds: ['user_1'], message: 'Hello!' })
+    expect(JSON.stringify(body)).not.toContain('lin@example.com')
   })
 })

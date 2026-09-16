@@ -787,9 +787,9 @@ export function describeRoleCascadeRow(row) {
 export const NOT_DRIVEN_SITES = Object.freeze([
   {
     site: 'roles:update',
-    reason: 'no-trigger-on-target-table',
+    reason: 'orthogonal-fixture-cost',
     detail:
-      "PUT /api/roles/:id writes only the `roles` table, which carries none of the nine recovery-authority triggers (they sit on role_permissions, not roles). No 40001 is constructible here; the sendIfRecoveryConflict call is defensive-only.",
+      "PUT /api/roles/:id no longer writes only `roles`: when the request carries a `permissions` array whose set DIFFERS from the stored one, the handler now DELETEs and INSERTs `role_permissions` inside the same transaction as the rename, and that table DOES carry a recovery-authority trigger (trg_role_permissions_recovery_authority_lock). A 40001 IS therefore constructible on this site — the earlier 'writes only the roles table, no 40001 possible' excuse was disproved by that change and must not be read as a safety claim. Undriven here only for fixture cost: it needs a seeded role plus a catalogued permission code whose presence actually CHANGES. The blocking statement it would reach — INSERT INTO role_permissions, trg_role_permissions_recovery_authority_lock, lease kind 'role', key role_id — is the very statement the DRIVEN `roles-create` surface above already proves end-to-end against a real held lease. NOTE for readers of this evidence file: a rename that submits the SAME set (added and removed both empty) skips the DELETE/INSERT entirely and stays a pure `roles` UPDATE, which is why the rename path still cannot 409.",
   },
   {
     site: 'roles:delete',

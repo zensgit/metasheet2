@@ -49,6 +49,8 @@ function originalCanSave(input: SaveBlockReasonsInput): boolean {
       const m = action.email
       if (m.recipientCount === 0 || !m.subjectTemplate.trim() || !m.bodyTemplate.trim()) return false
     }
+    // send_notification recipient gate (mirrors the backend NO_RECIPIENTS 400 at save time).
+    if (action.notification && action.notification.userIdCount === 0) return false
     if (action.deleteRecord && !action.deleteRecord.acknowledged) return false
   }
   return true
@@ -493,5 +495,37 @@ describe('computeSaveBlockReasons — exhaustive top-level guard coverage', () =
       actionsCount: 1,
     }
     expect(computeSaveBlockReasons(input).map((r) => r.key)).toContain('webhookSecret')
+  })
+
+  describe('send_notification recipients', () => {
+    function notificationAction(userIdCount: number, index = 0): SaveBlockActionSnapshot {
+      return { index, type: 'send_notification', notification: { userIdCount } }
+    }
+
+    it('blocks save with an anchored reason when the notification has no recipients', () => {
+      const input: SaveBlockReasonsInput = { ...baseInput(), actions: [notificationAction(0)], actionsCount: 1 }
+      const reasons = computeSaveBlockReasons(input)
+      expect(reasons.map((r) => r.key)).toEqual(['action-0-recipients'])
+      expect(reasons[0].anchor).toBe('[data-action-index="0"] [data-field="notificationRecipientSearch"]')
+      expect(reasons.length === 0).toBe(originalCanSave(input))
+
+      const zhReasons = computeSaveBlockReasons({ ...input, isZh: true })
+      expect(zhReasons[0].message).toContain('未设置通知接收人')
+    })
+
+    it('does not block once at least one recipient id is present', () => {
+      const input: SaveBlockReasonsInput = { ...baseInput(), actions: [notificationAction(1)], actionsCount: 1 }
+      expect(computeSaveBlockReasons(input)).toEqual([])
+      expect(originalCanSave(input)).toBe(true)
+    })
+
+    it('reports the reason per action index', () => {
+      const input: SaveBlockReasonsInput = {
+        ...baseInput(),
+        actions: [notificationAction(2, 0), notificationAction(0, 1)],
+        actionsCount: 2,
+      }
+      expect(computeSaveBlockReasons(input).map((r) => r.key)).toEqual(['action-1-recipients'])
+    })
   })
 })

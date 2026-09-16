@@ -138,6 +138,47 @@ export type MetaRecordLabelKey =
   //     round-1 `record.fieldsInView` key). ---
   | 'record.hideEmpty'
   | 'record.editLinks'
+  // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
+  //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
+  //     kebab row (+ its own title key, button-suffix pattern above); every `approval.*` key belongs to
+  //     MetaRecordApprovalSubmitDialog.vue or MetaRecordApprovalPanel.vue. Counts/identifiers are
+  //     interpolated by the helpers at the foot of this file, never concatenated in a template. ---
+  | 'record.submitApproval' | 'record.submitApprovalTitle'
+  | 'approval.dialogTitle' | 'approval.close' | 'approval.cancel' | 'approval.submit' | 'approval.submitting'
+  | 'approval.template' | 'approval.templatePlaceholder' | 'approval.templatesLoading'
+  | 'approval.templatesUnavailable' | 'approval.formLoading' | 'approval.formLoadFailed'
+  | 'approval.unsupportedField' | 'approval.requiredMissing' | 'approval.requiredMark'
+  | 'approval.inFlight' | 'approval.viewInstance' | 'approval.submitFailed'
+  | 'approval.panelTitle' | 'approval.panelExpand' | 'approval.panelCollapse'
+  | 'approval.panelLoading' | 'approval.panelError' | 'approval.panelEmpty'
+  | 'approval.requestNo' | 'approval.submittedBy' | 'approval.submittedAt' | 'approval.unknownActor'
+  // --- 评审第二轮补齐 / round-2 gaps. The route's refusals are fixed ENGLISH strings and its
+  //     submission statuses include two values the shared approvalInstance status table does not
+  //     know ('creating'/'failed'), so both were reaching a zh UI as raw English. These keys are the
+  //     localization layer for exactly those two gaps, plus the two "what you see may not be what
+  //     the server uses" notices (truncated roster / unpublished template draft). ---
+  | 'approval.statusCreating' | 'approval.statusFailed' | 'approval.failureReason'
+  | 'approval.errorPermissionDenied' | 'approval.errorTemplateForbidden'
+  | 'approval.errorTemplateNotPublished' | 'approval.errorRecordNotFound'
+  | 'approval.errorCreateFailed' | 'approval.errorValidation'
+  | 'approval.errorOrgUnresolved'
+  | 'approval.templateDraftPending'
+  // --- 2a 后续前端 / list page follow-up (backend PR #5763: the list route now answers
+  //     `{ submissions, hasMore }` and stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a row whose
+  //     terminal write is CORRECT but whose requester bell was never written). The panel shows at most
+  //     one page, so `hasMore` needs copy that says so, and the row marker needs a label for that code
+  //     — an unlabelled code renders NOTHING (see recordApprovalErrorLabel), i.e. a silent miss. ---
+  | 'approval.errorNotificationFailed' | 'approval.errorNotificationFailedTerminal'
+  // --- 审批进度卡片 / record-drawer approval PROGRESS card. The panel already lists a record's
+  //     submissions; the progress card is the collapsed, approvals:read-gated read of the approval
+  //     INSTANCE behind one of them (步骤 / 当前待处理人 / 历史). Every string here is either chrome or a
+  //     values-free degradation notice — the card renders identifiers, the display names the approval
+  //     centre already shows, a step COUNT and a localized action verb, never a form value. ---
+  | 'approval.progressExpand' | 'approval.progressCollapse' | 'approval.progressLoading'
+  | 'approval.progressApprovers' | 'approval.progressHistory' | 'approval.progressHistoryEmpty'
+  | 'approval.progressForbidden' | 'approval.progressNotParticipant' | 'approval.progressFailed'
+  | 'approval.progressMismatch'
+  | 'approval.progressRetry' | 'approval.completedAt'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -383,6 +424,94 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
   'record.hideEmpty': { en: 'Hide empty fields', zh: '隐藏空字段' },
   'record.editLinks': { en: 'Edit links', zh: '编辑关联' },
+  // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
+  // convention as every other block in this table.
+  'record.submitApproval': { en: 'Submit for approval', zh: '送审' },
+  'record.submitApprovalTitle': { en: 'Submit this record for approval', zh: '将此记录提交审批' },
+  'approval.dialogTitle': { en: 'Submit for approval', zh: '送审' },
+  'approval.close': { en: 'Close submit dialog', zh: '关闭送审对话框' },
+  'approval.cancel': { en: 'Cancel', zh: '取消' },
+  'approval.submit': { en: 'Submit', zh: '提交' },
+  'approval.submitting': { en: 'Submitting…', zh: '正在提交…' },
+  'approval.template': { en: 'Approval template', zh: '审批模板' },
+  'approval.templatePlaceholder': { en: 'Pick a template', zh: '请选择模板' },
+  'approval.templatesLoading': { en: 'Loading templates…', zh: '正在加载模板…' },
+  // Empty published-template roster and a 403 on the roster read collapse to the SAME notice by design
+  // (MetaRecordApprovalSubmitDialog.vue loadTemplates — no free-text template-id fallback either way),
+  // and that collapse is pinned by its own spec ("shows the same notice when the roster read is
+  // refused (403)"), so this stays ONE sentence covering both causes rather than asserting either one —
+  // it only adds the actionable next step (ask an administrator to check both).
+  'approval.templatesUnavailable': { en: 'No available template, or no approval read permission — ask an administrator to confirm a template is published for this table and that you have approval read permission.', zh: '无可用模板或无审批读取权限，请联系管理员确认已发布审批模板，并核实你是否有审批读取权限。' },
+  'approval.formLoading': { en: 'Loading form…', zh: '正在加载表单…' },
+  'approval.formLoadFailed': { en: 'Failed to load the template form.', zh: '加载模板表单失败。' },
+  'approval.unsupportedField': { en: 'This template contains an unsupported field type — please start it from the approval centre.', zh: '该模板含不支持的字段类型，请到审批中心发起。' },
+  'approval.requiredMissing': { en: 'Fill in every required field first.', zh: '请先填写所有必填项。' },
+  'approval.requiredMark': { en: 'Required', zh: '必填' },
+  'approval.inFlight': { en: 'This record is already in approval with this template.', zh: '该记录已在此模板审批中。' },
+  'approval.viewInstance': { en: 'Open the approval', zh: '查看审批' },
+  'approval.submitFailed': { en: 'Submit failed.', zh: '送审失败。' },
+  'approval.panelTitle': { en: 'Approvals', zh: '审批' },
+  'approval.panelExpand': { en: 'Show approvals', zh: '展开审批' },
+  'approval.panelCollapse': { en: 'Hide approvals', zh: '收起审批' },
+  'approval.panelLoading': { en: 'Loading approvals…', zh: '正在加载审批…' },
+  'approval.panelError': { en: 'Failed to load approvals.', zh: '加载审批失败。' },
+  'approval.panelEmpty': { en: 'This record has never been submitted for approval.', zh: '此记录尚未送审。' },
+  'approval.requestNo': { en: 'Request', zh: '编号' },
+  'approval.submittedBy': { en: 'Submitted by', zh: '申请人' },
+  'approval.submittedAt': { en: 'Submitted at', zh: '送审时间' },
+  'approval.unknownActor': { en: 'Unknown', zh: '未知' },
+  // Submission statuses the shared `approvalInstance` StatusTag domain does not carry (they describe
+  // the SUBMISSION, not an approval instance) — localized here rather than widening that shared table.
+  'approval.statusCreating': { en: 'Submitting', zh: '提交中' },
+  'approval.statusFailed': { en: 'Submit failed', zh: '提交失败' },
+  'approval.failureReason': { en: 'Reason', zh: '失败原因' },
+  // The route's coded refusals (multitable-record-approvals.ts / record-approval-submission-service.ts).
+  // Their server messages are fixed ENGLISH sentences; we render these by CODE instead.
+  // `RECORD_APPROVAL_PERMISSION_DENIED` is one code shared by THREE different gates (routes/
+  // multitable-record-approvals.ts: the record read gate, the multitable submit-approval capability
+  // gate, and the approval-side approvals:write actor gate) — the copy is deliberately generic about
+  // WHICH of the three refused (naming only two, as an earlier version did, told a caller refused for
+  // being unable to READ THE RECORD to go ask for the wrong two permissions instead).
+  'approval.errorPermissionDenied': { en: 'You do not have permission to submit this record for approval — this can be missing record read access, missing multitable submit-approval permission, or missing approval-write permission. Ask an administrator to check your access.', zh: '没有送审权限（可能是记录读取权限、多维表送审权限或审批发起权限之一缺失），请联系管理员核实相关权限。' },
+  'approval.errorTemplateForbidden': { en: 'You may not use this approval template.', zh: '无权使用该审批模板。' },
+  'approval.errorTemplateNotPublished': { en: 'This approval template is not published.', zh: '该审批模板未发布。' },
+  'approval.errorRecordNotFound': { en: 'This record no longer exists.', zh: '记录不存在或已被删除。' },
+  'approval.errorCreateFailed': { en: 'Could not create the approval. Please try again.', zh: '创建审批实例失败，请稍后重试。' },
+  'approval.errorValidation': { en: 'The form does not match this template. Check the required fields.', zh: '表单内容不符合模板要求，请检查必填项。' },
+  // `APPROVAL_ORG_UNRESOLVED` (approval-instance-org-derivation.ts): the submitter's active `user_orgs`
+  // membership count is not exactly one. Values-free by construction upstream (no count, no org id, no
+  // user id) — the copy stays that way and only names the fix: an administrator must correct the
+  // account's organization membership.
+  'approval.errorOrgUnresolved': { en: "Your account's organization membership could not be resolved to a single organization. Ask an administrator to fix your organization membership before submitting.", zh: '你的账号无法解析到唯一所属组织，请联系管理员修正账号的组织归属后再送审。' },
+  'approval.templateDraftPending': { en: 'This template has unpublished changes — the form below may differ from the one the approval will use.', zh: '该模板有未发布的改动，下方表单可能与实际审批表单不一致。' },
+  // The ROW-LEVEL marker (`RECORD_APPROVAL_NOTIFICATION_FAILED`): the submission is terminal and correct,
+  // only the requester's bell is missing. Two variants because the outcome differs: the auto-approve path
+  // that stamps it is usually `approved`, but the same compensation runs for any terminal outcome, and a
+  // rejected row must not be told it 「已通过」.
+  'approval.errorNotificationFailed': { en: 'Approved, but the notification could not be sent.', zh: '已通过，但通知发送失败' },
+  'approval.errorNotificationFailedTerminal': { en: 'Completed, but the notification could not be sent.', zh: '已结束，但通知发送失败' },
+  // 审批进度卡片. The two failure notices below are DELIBERATELY different sentences: 403 is "this
+  // account may not read approvals at all" (the rbacGuard on GET /api/approvals/:id, which runs BEFORE
+  // any per-instance check), while 404 is the values-free answer the instance-scope predicate gives a
+  // NON-PARTICIPANT of an approval that does exist. Telling a non-participant 「无权」 would misreport a
+  // scope answer as a role answer, and telling a role-less account 「不是参与人」 would send them hunting
+  // for a CC that would not help.
+  'approval.progressExpand': { en: 'Show progress', zh: '查看进度' },
+  'approval.progressCollapse': { en: 'Hide progress', zh: '收起进度' },
+  'approval.progressLoading': { en: 'Loading progress…', zh: '正在加载进度…' },
+  'approval.progressApprovers': { en: 'Pending with', zh: '当前待处理人' },
+  'approval.progressHistory': { en: 'History', zh: '历史' },
+  'approval.progressHistoryEmpty': { en: 'No history yet.', zh: '暂无历史记录。' },
+  'approval.progressForbidden': { en: 'You may not view approval progress.', zh: '无权查看审批进度' },
+  'approval.progressNotParticipant': { en: 'You are not a participant of this approval — progress is not visible.', zh: '你不是该审批的参与人，进度不可见' },
+  'approval.progressFailed': { en: 'Failed to load progress.', zh: '进度加载失败' },
+  // The read SUCCEEDED but the answer is not about the instance the card asked for (`detail.id` !== the
+  // id we passed). Printing it would attach one approval's timeline to another approval's row, so the
+  // card says so and — like 403/404 — offers no 重试: a second read returns the same wrong instance.
+  // Values-free on purpose: neither the requested nor the answered id appears in the sentence.
+  'approval.progressMismatch': { en: 'Progress data does not match this approval — not shown.', zh: '返回的进度与该审批不一致，已隐藏' },
+  'approval.progressRetry': { en: 'Retry', zh: '重试' },
+  'approval.completedAt': { en: 'Completed at', zh: '完成时间' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -617,4 +746,230 @@ export function resetConfirmWarnAfterNot(asOf: string, isZh: boolean): string {
   return isZh
     ? `一次普通恢复。如果需要保留 ${asOf} 之后新建的记录，请使用`
     : `a normal restore. Need to keep records created after ${asOf}? Use`
+}
+
+// 记录级送审 (design §5): "送审后数据已变更（N 个字段）" — the drift notice on a submission row. A COUNT,
+// never a field name and never a value: the server only ever returns changed field IDs, and even those
+// are not rendered here.
+//
+// COUNT-FREE when the id list is empty. `{ changed: true, changedFieldIds: [] }` is a LEGITIMATE server
+// answer, not a bug: `changed` is anchored on the record version, while the id list is filtered through
+// the caller's own field-read mask (record-approval-submission-service.ts computeRecordApprovalDrift),
+// so a viewer who may not read the changed fields gets the warning with no ids. Rendering that as
+// "已变更（0 个字段）" would contradict itself.
+export function recordApprovalDriftNotice(changedCount: number, isZh: boolean): string {
+  if (!Number.isFinite(changedCount) || changedCount <= 0) {
+    return isZh ? '送审后数据已变更' : 'Record changed after submit'
+  }
+  return isZh
+    ? `送审后数据已变更（${changedCount} 个字段）`
+    : `Record changed after submit (${changedCount} field${changedCount === 1 ? '' : 's'})`
+}
+
+// The success toast after a submit. `requestNo` is the server-issued display number (e.g. AP-2026-0001);
+// when the backend has not assigned one yet the toast degrades to the plain verb.
+export function recordApprovalSubmittedToast(requestNo: string | undefined, isZh: boolean): string {
+  if (!requestNo) return isZh ? '已送审' : 'Submitted for approval'
+  return isZh ? `已送审 ${requestNo}` : `Submitted for approval ${requestNo}`
+}
+
+// 记录级送审 round-2: map the record-approval route's REFUSAL CODES to localized copy. The route's
+// own messages are fixed English sentences ('Insufficient permissions', 'Approval template is not
+// published', …) which the shared client surfaces verbatim, so a zh operator would read English. Codes
+// are identifiers, never values — an unknown one returns null and the caller falls back to its generic
+// copy rather than printing a raw token.
+const RECORD_APPROVAL_ERROR_LABELS: Record<string, MetaRecordLabelKey> = {
+  RECORD_APPROVAL_PERMISSION_DENIED: 'approval.errorPermissionDenied',
+  RECORD_APPROVAL_TEMPLATE_FORBIDDEN: 'approval.errorTemplateForbidden',
+  RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED: 'approval.errorTemplateNotPublished',
+  RECORD_APPROVAL_RECORD_NOT_FOUND: 'approval.errorRecordNotFound',
+  RECORD_APPROVAL_CREATE_FAILED: 'approval.errorCreateFailed',
+  RECORD_APPROVAL_NOTIFICATION_FAILED: 'approval.errorNotificationFailed',
+  VALIDATION_ERROR: 'approval.errorValidation',
+  FORBIDDEN: 'approval.errorPermissionDenied',
+  // Passed through verbatim by mapCreateApprovalFailure (record-approval-submission-service.ts) from
+  // ApprovalProductService's createApproval (approval-instance-org-derivation.ts) — without this entry
+  // the dialog fell back to the route's fixed English sentence ("Approval creation was rejected").
+  APPROVAL_ORG_UNRESOLVED: 'approval.errorOrgUnresolved',
+}
+
+export function recordApprovalErrorLabel(code: string | undefined, isZh: boolean): string | null {
+  if (!code) return null
+  const key = RECORD_APPROVAL_ERROR_LABELS[code]
+  return key ? recordLabel(key, isZh) : null
+}
+
+// The two submission statuses that are NOT approval-instance statuses ('creating' = the durable row
+// exists but the instance is not created yet; 'failed' = createApproval refused). The shared
+// `approvalInstance` StatusTag domain deliberately does not carry them, and its raw-status fallback
+// would print the English token in a zh UI — so the panel renders THESE two itself. Returns null for
+// every status StatusTag does own, which is the panel's signal to use StatusTag.
+export function recordApprovalSubmissionStatusLabel(status: string, isZh: boolean): string | null {
+  if (status === 'creating') return recordLabel('approval.statusCreating', isZh)
+  if (status === 'failed') return recordLabel('approval.statusFailed', isZh)
+  return null
+}
+
+/**
+ * The ROW error code the backend stamps on a submission whose terminal write landed but whose requester
+ * notification did not (`RECORD_APPROVAL_ROW_ERROR_CODES.notificationFailed` in
+ * record-approval-submission-service.ts). Exported so the panel matches the CODE, never a message.
+ */
+export const RECORD_APPROVAL_NOTIFICATION_FAILED_CODE = 'RECORD_APPROVAL_NOTIFICATION_FAILED'
+
+/**
+ * Statuses that mean "this submission is over" — the four approval completion outcomes the backend's
+ * `RECORD_APPROVAL_TERMINAL_OUTCOMES` lists. `failed` is NOT one of them: it is the submission's own
+ * refusal state and already explains itself through `approval.failureReason`.
+ */
+const RECORD_APPROVAL_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'approved',
+  'rejected',
+  'revoked',
+  'cancelled',
+])
+
+/**
+ * The SAME set as above, exposed as a predicate so the panel's 「完成时间」 line and the notification
+ * marker agree on what "over" means by construction. A second literal list in the component would be
+ * free to drift (and a `completedAt` printed next to a `pending` row would assert an outcome the server
+ * never gave — the column is populated only on the terminal promote).
+ */
+export function isRecordApprovalTerminalStatus(status: string): boolean {
+  return RECORD_APPROVAL_TERMINAL_STATUSES.has(status)
+}
+
+/**
+ * The row marker for a TERMINAL submission that still owes its requester notification. Returns null for
+ * every other (status, code) pair, so:
+ *   - a clean terminal row renders nothing,
+ *   - an in-flight row carrying the code renders nothing (the backend only stamps it on a terminal
+ *     promote; showing it on a `pending` row would assert an outcome we do not have),
+ *   - a `failed` row keeps its existing failure line instead of gaining a second one.
+ * The APPROVED copy is the marker the design asked for; the other three terminal outcomes get the
+ * outcome-neutral variant, because 「已通过」 about a rejected row would be a lie.
+ */
+export function recordApprovalNotificationFailedNotice(
+  status: string,
+  code: string | undefined,
+  isZh: boolean,
+): string | null {
+  if (code !== RECORD_APPROVAL_NOTIFICATION_FAILED_CODE) return null
+  if (!RECORD_APPROVAL_TERMINAL_STATUSES.has(status)) return null
+  // Through the SAME code→label map every other coded row uses, so an unlabelled code still renders
+  // nothing rather than a raw token.
+  return status === 'approved'
+    ? recordApprovalErrorLabel(code, isZh)
+    : recordLabel('approval.errorNotificationFailedTerminal', isZh)
+}
+
+/**
+ * The panel reads ONE page (`?limit=`) and the route answers `hasMore` when this record has more
+ * submissions than that page. There is no paging UI here on purpose (design §5 ships a section, not a
+ * list view), so the honest thing is to say what is on screen: the most recent `shown`.
+ */
+export function recordApprovalHasMoreNotice(shown: number, isZh: boolean): string {
+  const count = Number.isFinite(shown) && shown > 0 ? Math.trunc(shown) : 0
+  if (count <= 0) {
+    return isZh ? '还有更多（仅显示最近一页）' : 'More exist (showing the most recent page only)'
+  }
+  return isZh
+    ? `还有更多（仅显示最近 ${count} 条）`
+    : `More exist (showing the ${count} most recent only)`
+}
+
+// The picker asks for at most `shown` published templates (the route's ceiling). When the answer is
+// exactly that full, more may exist and there is no paging and no free-text id fallback here — say so
+// instead of silently presenting a truncated roster as the whole list.
+export function recordApprovalTemplatesTruncatedNotice(shown: number, isZh: boolean): string {
+  return isZh
+    ? `仅显示前 ${shown} 个已发布模板，其余请到审批中心发起。`
+    : `Showing the first ${shown} published templates only — start the rest from the approval centre.`
+}
+
+// ---------------------------------------------------------------------------
+// 审批进度卡片 / record approval PROGRESS card. The panel's per-submission, approvals:read-gated read of
+// the approval INSTANCE (GET /api/approvals/:id + /history). Every helper below is copy only: it takes a
+// COUNT, a CODE or an ORDINAL and never a form value.
+// ---------------------------------------------------------------------------
+
+/**
+ * 「第 N / M 步」 — the instance's step position, mirroring ApprovalCenterDetailPane's own line so the
+ * two surfaces read identically. Returns null unless BOTH numbers are real: the DTO types both as
+ * `number | null` (a non-pending instance has no current step), and 「第 - / 2 步」 is chrome pretending
+ * to be data.
+ */
+export function recordApprovalProgressStepNotice(
+  currentStep: unknown,
+  totalSteps: unknown,
+  isZh: boolean,
+): string | null {
+  if (typeof currentStep !== 'number' || !Number.isFinite(currentStep)) return null
+  if (typeof totalSteps !== 'number' || !Number.isFinite(totalSteps)) return null
+  return isZh ? `第 ${currentStep} / ${totalSteps} 步` : `Step ${currentStep} of ${totalSteps}`
+}
+
+/**
+ * The values-free, still-distinguishable fallback for an assignee whose display name the shared
+ * directory resolver could not confirm — the SAME convention (and the same wording in zh) as
+ * ApprovalCenterDetailPane's `assigneeLabel`. Never the raw internal user id.
+ */
+export function recordApprovalApproverFallbackLabel(ordinal: number, isZh: boolean): string {
+  const n = Number.isFinite(ordinal) && ordinal > 0 ? Math.trunc(ordinal) : 1
+  return isZh ? `成员 ${n}` : `Member ${n}`
+}
+
+/**
+ * The history rows the card renders are capped (the card is a summary, not the timeline — the approval
+ * centre owns that). The notice counts the CAP, which is also the number of rows actually on screen.
+ */
+export function recordApprovalProgressHistoryCapNotice(cap: number, isZh: boolean): string {
+  const count = Number.isFinite(cap) && cap > 0 ? Math.trunc(cap) : 0
+  return isZh
+    ? `仅显示最近 ${count} 条`
+    : `Showing the ${count} most recent only`
+}
+
+/**
+ * The history `action` vocabulary the platform writes (enumerated from the backend's own
+ * `action: '...'` literals in services/Approval*.ts + routes/approval*.ts). Copy carried over verbatim
+ * from ApprovalDetailView's local `actionLabel` map so the drawer and the approval centre name the same
+ * event the same way; that map is a component-local function with no export, so this is a deliberate
+ * second copy of the STRINGS, not of a mechanism.
+ *
+ * An UNKNOWN code is returned RAW (never dropped, never guessed): a server that adds a verb tomorrow
+ * shows the verb rather than a blank row, which is the same forward-compatible rule
+ * `recordBatchReasonLabel` already follows.
+ */
+const RECORD_APPROVAL_HISTORY_ACTION_LABELS: Record<string, { en: string; zh: string }> = {
+  created: { en: 'Submitted', zh: '发起' },
+  approve: { en: 'Approved', zh: '通过' },
+  auto_approve: { en: 'Auto-approved', zh: '自动通过' },
+  reject: { en: 'Rejected', zh: '驳回' },
+  transfer: { en: 'Transferred', zh: '转交' },
+  revoke: { en: 'Revoked', zh: '撤回' },
+  comment: { en: 'Commented', zh: '评论' },
+  return: { en: 'Returned', zh: '退回' },
+  sign: { en: 'Signed', zh: '签字' },
+  add_sign: { en: 'Approver added', zh: '加签' },
+  reduce_sign: { en: 'Approver removed', zh: '减签' },
+  cc: { en: 'Copied to', zh: '抄送' },
+  handle: { en: 'Handled', zh: '办理' },
+  remind: { en: 'Reminded', zh: '催办' },
+  reassign: { en: 'Reassigned', zh: '改派' },
+  jump: { en: 'Jumped', zh: '跳转' },
+}
+
+export function recordApprovalHistoryActionLabel(action: string, isZh: boolean): string {
+  // OWN keys only. The table above is a bare object literal, so it INHERITS `Object.prototype`: an action
+  // code that happens to be `toString` / `constructor` / `valueOf` / `hasOwnProperty` / `__proto__` would
+  // find a TRUTHY inherited member, skip the `return action` fallback and render `entry.zh === undefined`
+  // as an EMPTY cell — a blank row where the contract right above promises the RAW code. Reachability is
+  // not the argument (today's server writes an enumerated verb); the contract is stated, so it holds for
+  // every string rather than for the strings we happened to think of.
+  const entry = Object.prototype.hasOwnProperty.call(RECORD_APPROVAL_HISTORY_ACTION_LABELS, action)
+    ? RECORD_APPROVAL_HISTORY_ACTION_LABELS[action]
+    : undefined
+  if (!entry) return action
+  return isZh ? entry.zh : entry.en
 }

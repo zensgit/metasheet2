@@ -12,9 +12,9 @@
 // This suite is that rehearsal, run end to end against an in-memory fake of the
 // host multitable provisioning API:
 //
-//   a. normalize the 21-column rehearsal pack
+//   a. normalize the 19-column rehearsal pack
 //   b. install run #1 onto a table that already carries the frozen 33 canonical
-//      columns  ->  54 logical columns, ownership-stamped
+//      columns  ->  52 logical columns, ownership-stamped
 //   c. install run #2  ->  nothing created, nothing destroyed, same wire
 //   d. REFRESH-PRESERVATION PROOF: seed a row with BOTH bands filled, project a
 //      PLM refresh through the ownership filter DERIVED FROM THE INSTALLED FIELD
@@ -282,18 +282,20 @@ function rehearsalPackNormalizes() {
 
   assert.equal(pack.packId, 'factory-a-rehearsal')
   assert.equal(pack.targetObjectId, OBJECT_ID)
-  assert.equal(pack.extensionFields.length, 21, 'the rehearsal pack carries 21 extension columns')
-  assert.equal(PACK_FIELD_COUNT, 21)
+  assert.equal(pack.extensionFields.length, 19, 'the rehearsal pack carries 19 extension columns')
+  assert.equal(PACK_FIELD_COUNT, 19)
   // 25 -> 28: 备料主表 gained parentComponentCode / parentComponentName / componentSpec, the three
   // PLM columns the working sheet was missing (they reached the sheet only through THIS pack's
-  // ext_parentDrawingNo / ext_parentName / ext_spec until now). The pack is unchanged: the frozen
-  // ids deliberately avoid those ext_ suffixes, because a frozen id equal to an installed pack's
-  // suffix is refused outright (FIELD_ID_TEMPLATE_COLLISION) and would break this very install.
+  // ext_parentDrawingNo / ext_parentName / ext_spec until then). The frozen ids deliberately avoid
+  // those ext_ suffixes, because a frozen id equal to an installed pack's suffix is refused
+  // outright (FIELD_ID_TEMPLATE_COLLISION) and would break this very install.
+  // 21 -> 19 (规格 P, owner 2026-09-15): the pack no longer declares its 父组件图号 / 父组件名称
+  // copy -- the template pair is the one holder. ext_spec stays (the owner ruled on the pair only).
     // 28 -> 33: on top of those three PLM columns, the template ALSO gained 自制/外购 plus the
   // four departmental response columns. All five are human_preserved, so the PLM band is unmoved
   // by them; the two growths are independent and both land here.
   assert.equal(CANONICAL_FIELD_COUNT, 33, 'the frozen canonical template carries 33 columns')
-  assert.equal(LANDING_SHEET_FIELD_COUNT, 54)
+  assert.equal(LANDING_SHEET_FIELD_COUNT, 52)
 
   const byOwnership = { plm_system: [], human_preserved: [] }
   for (const field of pack.extensionFields) {
@@ -308,8 +310,24 @@ function rehearsalPackNormalizes() {
     )
     assert.ok(field.id.startsWith('ext_'), `${field.id} must live in the tenant namespace`)
   }
-  assert.equal(byOwnership.plm_system.length, 13, '13 PLM-derived extension columns')
+  assert.equal(byOwnership.plm_system.length, 11, '11 PLM-derived extension columns')
   assert.equal(byOwnership.human_preserved.length, 8, '8 human-preserved extension columns')
+
+  // 规格 P (owner 2026-09-15): the pack declares NEITHER 父组件图号 / 父组件名称 copy -- and still
+  // declares the three PLM-derived ext_ columns the planner keeps deriving. Both halves pinned, so
+  // re-adding the pair (or over-trimming the pack) fails here by name.
+  const declaredIds = new Set(pack.extensionFields.map((field) => field.id))
+  for (const retiredId of ['ext_parentDrawingNo', 'ext_parentName']) {
+    assert.equal(declaredIds.has(retiredId), false, `规格 P: the pack no longer declares ${retiredId}`)
+  }
+  for (const keptId of ['ext_parentSortNo', 'ext_componentSortNo', 'ext_nameAndSpec', 'ext_spec']) {
+    assert.equal(declaredIds.has(keptId), true, `规格 P: the pack still declares ${keptId}`)
+  }
+  for (const view of pack.roleViews || []) {
+    for (const retiredId of ['ext_parentDrawingNo', 'ext_parentName']) {
+      assert.equal((view.hideFieldIds || []).includes(retiredId), false, `规格 P: role view ${view.viewId} no longer names ${retiredId}`)
+    }
+  }
 
   // No extension id may shadow a canonical one (the normalizer enforces it; this
   // asserts the rehearsal pack actually exercises a disjoint 51-column shape).
@@ -400,7 +418,7 @@ async function installRunOneRegeneratesTheSheet(pack) {
   assert.deepEqual(
     summary.createdFields,
     FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => field.id),
-    'every one of the 21 pack columns is created, in pack order',
+    'every one of the 19 pack columns is created, in pack order',
   )
   assert.equal(summary.createdFields.length, PACK_FIELD_COUNT)
   assert.deepEqual(summary.skippedFields, [])
@@ -409,7 +427,7 @@ async function installRunOneRegeneratesTheSheet(pack) {
   assert.equal(
     fake.fields.size,
     LANDING_SHEET_FIELD_COUNT,
-    'canonical + pack = 46 logical columns on the landing sheet',
+    'canonical + pack = 52 logical columns on the landing sheet',
   )
 
   // Options synced on all five selects; the canonical three keep the TEMPLATE's
@@ -528,7 +546,7 @@ async function installRunTwoIsInert() {
   })
 
   assert.deepEqual(second.createdFields, [], 'a re-run creates no column')
-  assert.deepEqual(second.skippedFields, first.createdFields, 'all 21 report as already present')
+  assert.deepEqual(second.skippedFields, first.createdFields, 'all 19 report as already present')
   assert.deepEqual(fake.destructiveCalls, [], 'a re-run must still reach no destructive primitive')
   assert.equal(
     fieldStoreSnapshot(fake.fields),
@@ -612,7 +630,7 @@ async function refreshPreservesHumanCells() {
   // 16 -> 21: the five new canonical human columns land on the human side of the
   // ownership wall, which is the point — a PLM refresh must not be able to write them.
   assert.equal(humanFieldIds.length, 21, '13 canonical + 8 pack human columns')
-  assert.equal(plmFieldIds.length, 33, '20 canonical + 13 pack PLM columns')
+  assert.equal(plmFieldIds.length, 31, '20 canonical + 11 pack PLM columns')
   assert.deepEqual([...writable].sort(), [...plmFieldIds].sort(), 'the guard admits exactly the PLM band')
   for (const fieldId of humanFieldIds) {
     assert.equal(writableSet.has(fieldId), false, `a refresh must not be allowed to write ${fieldId}`)
@@ -669,9 +687,9 @@ async function refreshPreservesHumanCells() {
     depth: 2,
     componentCode: 'GJ-0007',
     componentName: '筒体',
-    // The three PLM columns 备料主表 gained: 父组件图号 / 父组件名称 / 规格. The pack's own
-    // ext_parentDrawingNo / ext_parentName / ext_spec below still carry the same data on this
-    // deployment — both bands coexist, and both are plm_system, so BOTH must move on a refresh.
+    // The three PLM columns 备料主表 gained: 父组件图号 / 父组件名称 / 规格. The pack's own ext_spec
+    // below still carries the same 规格 on this deployment (both plm_system, both move on a
+    // refresh); the pack's 父组件 copy was retired on 2026-09-15 and is not seeded here.
     parentComponentCode: 'TZ-0001',
     parentComponentName: '主体组件',
     componentSpec: 'DN1200',
@@ -685,8 +703,6 @@ async function refreshPreservesHumanCells() {
     lastPlmRefreshDecision: 'update',
     lastPlmConflictSummary: '',
     // pack PLM band
-    ext_parentDrawingNo: 'TZ-0001',
-    ext_parentName: '主体组件',
     ext_spec: 'DN1200',
     ext_nameAndSpec: '筒体 DN1200',
     ext_standard: 'GB/T 150',
@@ -730,7 +746,7 @@ async function refreshPreservesHumanCells() {
   assert.deepEqual(
     Object.keys(seededRow).sort(),
     [...allFieldIds].sort(),
-    'the seeded row must cover the whole 54-column sheet, or the proof has blind spots',
+    'the seeded row must cover the whole 52-column sheet, or the proof has blind spots',
   )
 
   // A refresh payload shaped like the SHEET, not like the PLM band — this is
@@ -794,7 +810,7 @@ async function refreshPreservesHumanCells() {
   )
 
   // BOTH HALVES of the guard have to carry weight. On a correctly written sheet
-  // `ownership` and `preserveOnRefresh` agree on all 46 columns, so the two
+  // `ownership` and `preserveOnRefresh` agree on all 52 columns, so the two
   // clauses are redundant and either could rot unnoticed. They stop agreeing on
   // a sheet a person has touched: a deployer pins a hand-maintained column by
   // setting preserveOnRefresh WITHOUT restating ownership. The flag must win.
@@ -879,7 +895,7 @@ async function summaryAndLogsAreValuesFree() {
 
   assert.equal(fake.logs.length, 1, 'one values-free line per install')
   // stamped/alreadyStamped come from the installer's pre-existing-column
-  // classification: this rehearsal installs all 21 ext_ columns fresh onto a
+  // classification: this rehearsal installs all 19 ext_ columns fresh onto a
   // canonical-only sheet, so both are 0 — the takeover case (hand-built columns
   // needing an ownership stamp) is covered by the installer suite.
   // `operatorMustClearWriteScopes=unchecked` is the honest reading for a pack that declared nothing:
@@ -888,7 +904,7 @@ async function summaryAndLogsAreValuesFree() {
   // `removedWriteScopes=unreconciled` (not `=0`) is the honest token for a pack that declares no
   // fieldWritePolicies: no region was governed, so no reconcile was even requested — which is a
   // different fact from "reconciled and retired nothing".
-  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 removedWriteScopes=unreconciled operatorHeldWriteScopes=unclassified otherPackWriteScopes=unclassified operatorMustClearWriteScopes=unchecked legacyAdoption=no_ledger/)
+  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=19 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 removedWriteScopes=unreconciled operatorHeldWriteScopes=unclassified otherPackWriteScopes=unclassified operatorMustClearWriteScopes=unchecked legacyAdoption=no_ledger/)
   assert.deepEqual(Object.keys(summary).sort(), [
     'alreadyStampedFields',
     // COLUMN WRITE SCOPING. This rehearsal pack declares NO `fieldWritePolicies`, which is
@@ -905,7 +921,7 @@ async function summaryAndLogsAreValuesFree() {
     'governedByOtherPackCount',
     'governedByOtherPacks',
     // F5 closure: the summary now carries the OWNERSHIP BAND per id, so a CLI/route no longer has to
-    // re-normalize the pack to say "13 PLM / 8 human columns added". `ledger` is absent here because
+    // re-normalize the pack to say "11 PLM / 8 human columns added". `ledger` is absent here because
     // this rehearsal installs without an install store — the ledger stays optional.
     'installedFields',
     // WHY pack-less rows were or were not adoptable on this sheet, in the ledger's own terms

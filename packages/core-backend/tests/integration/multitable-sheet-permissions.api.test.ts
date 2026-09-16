@@ -234,6 +234,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canManageAutomation: false,
       canExport: true,
       canSendNotification: false,
+      canSubmitApproval: false,
       pitResetEnabled: false, // T8-2: flag-off default ⇒ false (this actor is also not a sheet-admin, so false regardless)
       sheetRevertEnabled: false, // interim revert-execute master gate: flag-off default ⇒ false (also not a sheet-admin, so false regardless)
       personalViewsEnabled: false, // Slice 3: flag-off default ⇒ false (available to all readers when the flag is on)

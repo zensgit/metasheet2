@@ -61,6 +61,7 @@ vi.mock('../src/composables/usePlugins', () => ({
 
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
+    resolveHomePath: () => '/home', // App.vue brand link (#5700) reads it; the brand target itself is pinned in App.spec.ts
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
     isAttendanceFocused: () => false,
     isPlmWorkbenchFocused: () => false,
