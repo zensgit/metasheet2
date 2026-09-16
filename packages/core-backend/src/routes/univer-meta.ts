@@ -8411,13 +8411,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      email only by prefix) changes search behaviour and is an OWNER DECISION, not taken here; the
   //      durable fix is still the set-narrowing follow-up named above (plus, if wanted, a rate limit /
   //      audit row).
+  //  (1b) #5809 `?match=exact` ON THIS ROUTE MATCHES THE USER ID BY EQUALITY. The substring search
+  //      never looks at the id; exact mode does (lower(id::text) = lower(term)), so a caller with
+  //      canEditRecord who already holds an eligible user's id (from a person cell, an export or a
+  //      created_by value) gets back that user's name and email in one call. That is not a new
+  //      disclosure where comments:read is held (seeded onto the generic `user` role): mention
+  //      candidates below already match ids by substring across ALL active users and return the
+  //      name and email. It IS new for an edit-capable caller WITHOUT comments:read — a narrower
+  //      audience than the one mention candidates already serves, and limited to ids of this field's
+  //      eligible set. API tokens cannot reach this route (oapi-read-allowlist.ts). A blank exact
+  //      term never browses: the route answers it with `requiresQuery` and the helper returns [].
   //  (2) THE TWO PARALLEL READS OF THE SAME ROSTER NOW CARRY THE SAME PER-REQUEST BOUNDS (#5795).
   //      - GET /api/comments/mention-candidates (routes/comments.ts -> CommentService
   //        .listMentionCandidates), and its sibling GET /api/multitable/:spreadsheetId/mention-candidates
   //        which reads the same service behind the same gate: a term is required (term-less ⇒ empty +
   //        `requiresQuery`, no query issued), at most 50 rows with `hasMore`, the term is matched
   //        literally, and the deployment-wide active-user `total` is no longer computed — `total` is
-  //        the clamped page size. What #5795 still leaves open there: the gate is unchanged
+  //        the clamped page size. #5809 adds an opt-in `?match=exact-email` to the first of the two
+  //        (email EQUALITY instead of the substring; same gate, term requirement and ceiling), whose
+  //        rows are a subset of the substring rows for the same term.
+  //        What #5795 still leaves open there: the gate is unchanged
   //        (rbacGuard('comments','read'), seeded onto the generic `user` role, + sheet read), and so is
   //        the set — every ACTIVE user in the deployment, with no permission filter at all, i.e. a
   //        superset of this route's set (equal only where every active user holds multitable
@@ -8453,8 +8466,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      bounded.test.ts and tests/unit/multitable-form-share-candidates-bounded.test.ts (both mock the
   //      roster read) and, for the mention SQL, by tests/unit/comment-service.test.ts (which inspects
   //      the query-builder calls: LIMIT, escaped term, no COUNT). As far as a grep of tests/integration
-  //      shows, no wired real-Postgres lane executes the mention SQL at all (comments.api.test.ts is
-  //      deliberately unwired), nor listSheetPermissionCandidates WITH a search term — its term-less
+  //      shows, no wired real-Postgres lane executes the mention SQL's SUBSTRING search
+  //      (comments.api.test.ts is deliberately unwired; only the #5809 exact-email arm runs, in the
+  //      person-member-group-restrict suite), nor listSheetPermissionCandidates WITH a search term — its term-less
   //      form does run for real via the person-member-group-restrict suite, the escaped-term path does not.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -8464,6 +8478,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     // Case folding now happens in SQL (ILIKE), so keep the term as typed for the echo.
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    // #5809 — opt-in EXACT lookup for the import resolver (`?match=exact`): the same gate, allowed set,
+    // ceiling and response shape, but the hydration keeps only rows whose id / name / email EQUALS the
+    // term (resolvePersonAssignableDirectory `exact`). Any other `match` value keeps the substring
+    // search below byte-for-byte. Exact mode never browses: it requires a term even on a restricted
+    // field (a strictly tighter rule than the §5 browse exemption, which stays substring-only).
+    const exactMatch = req.query.match === 'exact'
     try {
       const pool = poolManager.get()
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
@@ -8497,7 +8517,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // same actor can already retrieve up to PERSON_DIRECTORY_MAX_ITEMS rows of that same restricted
       // set with any one-character term, and the term-less answer is clamped by the same ceiling (so a
       // huge "All staff" group stays bounded). The gate is narrowed in scope, never in strength.
-      if (restrictGroupIds.length === 0 && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+      if ((exactMatch || restrictGroupIds.length === 0) && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
         return res.json({
           ok: true,
           data: {
@@ -8520,7 +8540,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
         // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never
         // hands back more than PERSON_DIRECTORY_MAX_ITEMS + 1 rows of display data.
-        { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
+        exactMatch
+          ? { exact: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 }
+          : { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
       )
       const hasMore = page.length > PERSON_DIRECTORY_MAX_ITEMS
       const items = hasMore ? page.slice(0, PERSON_DIRECTORY_MAX_ITEMS) : page

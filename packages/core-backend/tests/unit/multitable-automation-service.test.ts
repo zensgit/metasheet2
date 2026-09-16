@@ -26,7 +26,16 @@ vi.mock('../../src/multitable/automation-log-service', () => ({
   },
 }))
 
-import { AutomationService, type AutomationRule, type AutomationEventPayload, type AutomationQueryFn } from '../../src/multitable/automation-service'
+import {
+  AutomationService,
+  AutomationTestRunRejectedError,
+  TEST_RUN_RULE_NOT_FOUND_CODE,
+  TEST_RUN_RULE_NOT_FOUND_MESSAGE,
+  type AutomationRule,
+  type AutomationEventPayload,
+  type AutomationQueryFn,
+} from '../../src/multitable/automation-service'
+import { SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE } from '../../src/multitable/sheet-liveness'
 import { EventBus } from '../../src/integration/events/event-bus'
 
 function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
@@ -422,7 +431,12 @@ describe('AutomationService', () => {
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
-      await expect(service.testRun('atr_x', 'sheet2')).rejects.toThrow(/not found or not enabled/)
+      await expect(service.testRun('atr_x', 'sheet2')).rejects.toMatchObject({
+        name: 'AutomationTestRunRejectedError',
+        status: 404,
+        code: TEST_RUN_RULE_NOT_FOUND_CODE,
+        message: TEST_RUN_RULE_NOT_FOUND_MESSAGE,
+      })
       // the real execution never ran
       expect(emitSpy).not.toHaveBeenCalled()
       expect(automationLogMocks.record).not.toHaveBeenCalled()
@@ -646,6 +660,139 @@ describe('AutomationService', () => {
       })
       expect(execution.dryRun).toBeUndefined()
       expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({ id: execution.id }))
+    })
+  })
+
+  describe('testRun typed rejections (#5812 follow-up)', () => {
+    const LIVENESS_BATCH_SQL = /SELECT\s+id,\s*deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*ANY/i
+    const WRITE_SQL = /^\s*(WITH\b[\s\S]*\b)?(UPDATE|INSERT|DELETE)\b/i
+    const REAL_FIRE_OPTIONS = {
+      mode: 'real_fire' as const,
+      sampleRecord: { recordId: 'rec_real_fire', data: {}, actorId: 'server_actor' },
+      actorId: 'u1',
+      testRunOperationId: 'op_liveness',
+      confirmSideEffects: true,
+    }
+
+    /** Liveness answers per sheet; every other statement is recorded and answered with the rule rows. */
+    function livenessQuery(
+      rules: AutomationRule[],
+      sheetState: 'live' | 'deleted' | 'absent' | 'throws',
+    ): { query: AutomationQueryFn; statements: string[]; livenessParams: unknown[][] } {
+      const statements: string[] = []
+      const livenessParams: unknown[][] = []
+      const query = vi.fn(async (sql: string, params?: unknown[]) => {
+        statements.push(sql)
+        if (LIVENESS_BATCH_SQL.test(sql)) {
+          livenessParams.push(params ?? [])
+          if (sheetState === 'throws') {
+            throw Object.assign(new Error('connect db.internal.host:5432 failed'), { code: 'ECONNREFUSED' })
+          }
+          if (sheetState === 'absent') return { rows: [], rowCount: 0 }
+          const ids = (params?.[0] ?? []) as string[]
+          return {
+            rows: ids.map((id) => ({ id, deleted_at: sheetState === 'deleted' ? '2026-09-16T00:00:00.000Z' : null })),
+            rowCount: ids.length,
+          }
+        }
+        const roster = memberRosterRows(sql)
+        if (roster) return roster
+        return { rows: rules, rowCount: rules.length }
+      }) as unknown as AutomationQueryFn
+      return { query, statements, livenessParams }
+    }
+
+    function build(rules: AutomationRule[], sheetState: 'live' | 'deleted' | 'absent' | 'throws') {
+      const { query, statements, livenessParams } = livenessQuery(rules, sheetState)
+      const svc = new AutomationService(bus, createMockDb(rules) as never, query)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const executeRule = vi.spyOn(svc as any, 'executeRule')
+      return { svc, statements, livenessParams, executeRule }
+    }
+
+    for (const [label, options, actionType] of [
+      ['simulate', {}, 'send_notification'],
+      ['real_fire', REAL_FIRE_OPTIONS, 'record_click'],
+    ] as const) {
+      it(`refuses a soft-deleted sheet in ${label} with a typed 404 SHEET_DELETED — nothing executed or persisted`, async () => {
+        const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: actionType })
+        const { svc, statements, livenessParams, executeRule } = build([rule], 'deleted')
+        const emitSpy = vi.spyOn(bus, 'emit')
+
+        const err = await svc.testRun('atr_x', 'sheet1', options).then(() => null, (e: unknown) => e)
+
+        expect(err).toBeInstanceOf(AutomationTestRunRejectedError)
+        expect(err).toMatchObject({ status: 404, code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE })
+        expect(executeRule).not.toHaveBeenCalled()
+        expect(emitSpy).not.toHaveBeenCalled()
+        expect(automationLogMocks.record).not.toHaveBeenCalled()
+        expect(statements.some((sql) => WRITE_SQL.test(sql))).toBe(false)
+        // the check asked about the rule's (== the gated) sheet
+        expect(statements.filter((sql) => LIVENESS_BATCH_SQL.test(sql))).toHaveLength(1)
+        // ...and asked about EXACTLY that sheet id, not a different one — a mutant that queries
+        // `{ ...rule, sheet_id: sheetId + '_other' }` must not slip through on the query COUNT alone.
+        expect(livenessParams).toEqual([[['sheet1']]])
+      })
+
+      it(`control: a live sheet in ${label} runs`, async () => {
+        const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: actionType })
+        const { svc, executeRule } = build([rule], 'live')
+
+        const execution = await svc.testRun('atr_x', 'sheet1', options)
+
+        expect(execution.status).toBe('success')
+        expect(executeRule).toHaveBeenCalledTimes(1)
+      })
+    }
+
+    it('refuses before input validation: a deleted sheet answers SHEET_DELETED even for an unconfirmed real_fire', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: 'record_click' })
+      const { svc, executeRule } = build([rule], 'deleted')
+
+      await expect(svc.testRun('atr_x', 'sheet1', { mode: 'real_fire' }))
+        .rejects.toMatchObject({ status: 404, code: SHEET_DELETED_CODE })
+      expect(executeRule).not.toHaveBeenCalled()
+    })
+
+    for (const state of ['absent', 'throws'] as const) {
+      it(`follows the sibling lanes for a ${state} lookup: the run proceeds (only positive proof of a delete refuses)`, async () => {
+        const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
+        const { svc, executeRule } = build([rule], state)
+
+        const execution = await svc.testRun('atr_x', 'sheet1')
+
+        expect(execution.status).toBe('success')
+        expect(executeRule).toHaveBeenCalledTimes(1)
+      })
+    }
+
+    it('answers a missing rule, a rule of another sheet and a disabled rule with the IDENTICAL typed 404 (no oracle)', async () => {
+      const cases: Array<{ rules: AutomationRule[]; sheetId: string }> = [
+        { rules: [], sheetId: 'sheet1' },
+        { rules: [createMockRule({ id: 'atr_secret_9c1', sheet_id: 'sheet_other', enabled: true })], sheetId: 'sheet1' },
+        { rules: [createMockRule({ id: 'atr_secret_9c1', sheet_id: 'sheet1', enabled: false })], sheetId: 'sheet1' },
+      ]
+      const answers: unknown[] = []
+      for (const { rules, sheetId } of cases) {
+        // Even with the sheet deleted, the rule gate answers first — the liveness lookup is never issued.
+        const { svc, statements, executeRule } = build(rules, 'deleted')
+        const err = await svc.testRun('atr_secret_9c1', sheetId, REAL_FIRE_OPTIONS).then(() => null, (e: unknown) => e)
+        expect(err).toBeInstanceOf(AutomationTestRunRejectedError)
+        const { name, status, code, message } = err as AutomationTestRunRejectedError
+        answers.push({ name, status, code, message })
+        expect(message).not.toContain('atr_secret_9c1')
+        expect(executeRule).not.toHaveBeenCalled()
+        expect(statements.some((sql) => LIVENESS_BATCH_SQL.test(sql))).toBe(false)
+      }
+      expect(answers[0]).toEqual({
+        name: 'AutomationTestRunRejectedError',
+        status: 404,
+        code: TEST_RUN_RULE_NOT_FOUND_CODE,
+        message: TEST_RUN_RULE_NOT_FOUND_MESSAGE,
+      })
+      expect(answers[1]).toEqual(answers[0])
+      expect(answers[2]).toEqual(answers[0])
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
     })
   })
 

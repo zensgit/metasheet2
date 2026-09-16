@@ -20,6 +20,8 @@
  *      restrictToMemberGroupIds resolves to (sheet members ∩ configured groups) — a strictly narrower,
  *      deliberately configured set — so it KEEPS its term-less browse (still clamped by the ceiling),
  *      while the unrestricted (deployment-wide) branch still requires a term
+ *   §6 #5809 `?match=exact` (the import resolver's per-token lookup) swaps only the hydration
+ *      predicate — same gate, set, ceiling and 404 — and never browses, even on a restricted field
  *
  * Fixtures are obviously fake (fake.invalid). TRANSPORT: one pinned listener per file + request(url())
  * — `request(app)` app-mode is banned by tests/unit/supertest-app-mode-tripwire.test.ts (#4154).
@@ -390,6 +392,76 @@ describe('#5781 person-field directory — bounded disclosure', () => {
       pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['grp_reviewers'], sheetAccess: 'spreadsheet:read' }))
       const res = await request(pinned.url()).get(url())
       expect(res.status).toBe(403)
+      expect(directoryCalls).toHaveLength(0)
+    })
+  })
+
+  // §6 — #5809: `?match=exact` is the import resolver's per-token lookup. It only swaps the hydration
+  // predicate (search → exact); the gate, the allowed set, the ceiling and the response shape are the
+  // route's own, and it never browses.
+  describe('§6 #5809 opt-in exact lookup (?match=exact)', () => {
+    it('forwards the trimmed term as `exact` (not `search`) under the same ceiling', async () => {
+      pinned.setApp(await buildApp())
+      directoryRows = fakeDirectory(1)
+
+      const res = await request(pinned.url()).get(url('?q=%20Fake%20Person%201%20&match=exact'))
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.items).toHaveLength(1)
+      expect(res.body.data.requiresQuery).toBe(false)
+      expect(directoryCalls).toHaveLength(1)
+      expect(directoryCalls[0].options).toEqual({ exact: 'Fake Person 1', limit: MAX_ITEMS + 1 })
+      // Still the canonical write-validator resolver and the field's own restriction.
+      expect(directoryCalls[0].resolveAllowed).toBeUndefined()
+      expect(directoryCalls[0].restrictGroupIds).toEqual([])
+    })
+
+    it('any other match value keeps the substring search exactly as before', async () => {
+      pinned.setApp(await buildApp())
+
+      await request(pinned.url()).get(url('?q=fake&match=prefix'))
+      await request(pinned.url()).get(url('?q=fake'))
+
+      expect(directoryCalls).toHaveLength(2)
+      expect(directoryCalls[0].options).toEqual({ search: 'fake', limit: MAX_ITEMS + 1 })
+      expect(directoryCalls[1].options).toEqual({ search: 'fake', limit: MAX_ITEMS + 1 })
+    })
+
+    it('never browses: a RESTRICTED field still requires a term in exact mode', async () => {
+      pinned.setApp(await buildApp({ restrictToMemberGroupIds: ['grp_reviewers'] }))
+      directoryRows = fakeDirectory(3, 'rev')
+
+      const res = await request(pinned.url()).get(url('?match=exact'))
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.items).toEqual([])
+      expect(res.body.data.requiresQuery).toBe(true)
+      expect(directoryCalls).toHaveLength(0)
+    })
+
+    it('keeps the ceiling and the hasMore signal', async () => {
+      pinned.setApp(await buildApp())
+      directoryRows = fakeDirectory(400)
+
+      const res = await request(pinned.url()).get(url('?q=Fake&match=exact'))
+
+      expect(res.body.data.items).toHaveLength(MAX_ITEMS)
+      expect(res.body.data.hasMore).toBe(true)
+      expect(res.body.data.limit).toBe(MAX_ITEMS)
+    })
+
+    it('keeps the canEditRecord gate (403, no hydration)', async () => {
+      pinned.setApp(await buildApp({ sheetAccess: 'spreadsheet:read' }))
+      const res = await request(pinned.url()).get(url('?q=fake&match=exact'))
+      expect(res.status).toBe(403)
+      expect(directoryCalls).toHaveLength(0)
+    })
+
+    it('keeps the person-field 404 for a non-person field', async () => {
+      pinned.setApp(await buildApp())
+      const res = await request(pinned.url())
+        .get(`/api/multitable/sheets/${SHEET_ID}/person-fields/${TEXT_FIELD_ID}/directory?q=fake&match=exact`)
+      expect(res.status).toBe(404)
       expect(directoryCalls).toHaveLength(0)
     })
   })

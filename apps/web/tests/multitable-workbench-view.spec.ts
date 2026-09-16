@@ -53,6 +53,13 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
 const { inspectorStubAnchor } = vi.hoisted(() => ({
   inspectorStubAnchor: vi.fn((_recordId: string, _fieldId: string) => true),
 }))
+// #5808: when `enabled`, the MetaRecordInspector stub renders the REAL shared MetaCommentsPanel (and so
+// the real MetaCommentComposer) with the same comment props/emits the real inspector forwards, so the
+// workbench's comment-edit path can be driven end to end. Off by default: every other test keeps the
+// plain stand-in buttons. Reset in the top-level beforeEach.
+const { inspectorStubRealComments } = vi.hoisted(() => ({
+  inspectorStubRealComments: { enabled: false },
+}))
 vi.mock('../src/multitable/import/xlsx-mapping', async () => {
   const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
   return { ...actual, buildXlsxBuffer: buildXlsxBufferMock }
@@ -501,7 +508,9 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
 // comments has no close chrome of its own now, lock §2 "不含它自己的 __header...close 钮"; the two
 // tests that exercised it were removed, see below). Everything else is otherwise unchanged from the
 // pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
-vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
+  const { default: RealMetaCommentsPanel } = await import('../src/shared/comments/components/MetaCommentsPanel.vue')
+  return {
   default: defineComponent({
     name: 'MetaRecordInspector',
     props: {
@@ -525,10 +534,19 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       // binding arrives as a typed prop and is rendered below as the same `[data-test=
       // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
       fieldErrors: { type: Object as PropType<Record<string, string> | null>, default: null },
+      // #5808: the comment-tab props the real inspector forwards to MetaCommentsPanel, declared so the
+      // opt-in real panel below receives them typed (see `inspectorStubRealComments`).
+      comments: { type: Array, default: () => [] },
+      commentDraft: { type: String, default: '' },
+      commentEditingId: { type: String, default: null },
+      commentComposerInitialMentions: { type: Array, default: () => [] },
+      currentUserId: { type: String, default: null },
+      canComment: { type: Boolean, default: false },
     },
     emits: [
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+      'comment-edit',
       // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the real inspector's copy-link icon
       // emits `copy-link`; the workbench owns the clipboard write (`onCopyRecordLink`). The
       // `data-copy-link` button below is this stub's stand-in for that icon.
@@ -662,10 +680,31 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
           },
           'cancel-reply',
         ),
+        // #5808: same bindings as MetaRecordInspector.vue's own <MetaCommentsPanel> (comments tab).
+        inspectorStubRealComments.enabled
+          ? h('div', { 'data-real-comments-panel': 'true' }, [
+            h(RealMetaCommentsPanel, {
+              comments: this.$props.comments as never,
+              loading: false,
+              canComment: this.$props.canComment,
+              canResolve: false,
+              draft: this.$props.commentDraft,
+              editingCommentId: this.$props.commentEditingId,
+              currentUserId: this.$props.currentUserId,
+              mentionSuggestions: this.$props.mentionSuggestions as never,
+              mentionSearch: this.$props.mentionSearch as never,
+              composerInitialMentions: this.$props.commentComposerInitialMentions as never,
+              onSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
+              onEdit: (commentId: string) => this.$emit('comment-edit', commentId),
+              'onUpdate:draft': (value: string) => this.$emit('update:comment-draft', value),
+            }),
+          ])
+          : null,
       ])
     },
   }),
-}))
+  }
+})
 vi.mock('../src/multitable/components/MetaMentionPopover.vue', () => ({
   default: defineComponent({
     name: 'MetaMentionPopover',
@@ -1320,6 +1359,7 @@ describe('MultitableWorkbench view wiring', () => {
     inspectorStubSeen.renders = 0
     inspectorStubSeen.fieldLayout = undefined
     inspectorStubSeen.fetchRecord = undefined
+    inspectorStubRealComments.enabled = false
     gridStubSeen.fetchRecord = undefined
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -2840,6 +2880,251 @@ describe('MultitableWorkbench view wiring', () => {
     })
     await flushUi()
     expect(container!.querySelector('[data-mention-suggestions-count="1"]')).not.toBeNull()
+  })
+
+  // #5808: an old comment whose mentions are NOT `@[label](id)` tokens in its body (e.g. created via the
+  // API with an explicit `mentions` array). Since #5795 there is no roster to find their names in, so
+  // the list response carries `mentionLabels`; a mention nobody could name must still survive the edit.
+  // Driven through the REAL MetaCommentsPanel + MetaCommentComposer (see inspectorStubRealComments).
+  describe('#5808 editing a comment keeps mentions that are not tokens in its body', () => {
+    const MENTION_SEARCH_SETTLE_MS = 220
+
+    function composerChipLabels(): string[] {
+      return Array.from(container!.querySelectorAll('.meta-comment-composer__mention-chip span:first-child'))
+        .map((node) => node.textContent?.trim() ?? '')
+    }
+
+    async function openEditOf(comment: Record<string, unknown>) {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+      await flushUi()
+      commentsStateMock.comments.value = [comment]
+      await flushUi()
+      const editButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+        .find((button) => button.textContent?.trim() === 'Edit')
+      expect(editButton).toBeTruthy()
+      editButton!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function typeInto(textarea: HTMLTextAreaElement, value: string) {
+      textarea.value = value
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function submitComposer() {
+      container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__submit')!.click()
+      await flushUi()
+    }
+
+    it('shows the server label or a neutral placeholder, and a keystroke + save keeps both ids', async () => {
+      const textarea = await openEditOf({
+        id: 'comment_api_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Please double-check the totals',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+        mentionLabels: { user_fake_robin: 'Robin Example' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      expect(textarea.value).toBe('Please double-check the totals')
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+      const composer = container!.querySelector('[data-real-comments-panel] .meta-comment-composer')!
+      expect(composer.textContent).not.toContain('user_fake_gone')
+      expect(composer.textContent).not.toContain('user_fake_robin')
+
+      await typeInto(textarea, 'Please double-check the totals!')
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_1', {
+        content: 'Please double-check the totals!',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+      })
+      // resolving a label never issues a mention search
+      expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+    })
+
+    it('a body token keeps its own label even when a remembered search hit names the same id differently', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+      await flushUi()
+      // a search remembers `user_jamie` as "Jamie" (the default client mock)
+      await inspectorStubSeen.mentionSearch!('ja')
+      await flushUi()
+      commentsStateMock.comments.value = [{
+        id: 'comment_token_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: '@[J. Example](user_jamie) hi',
+        mentions: ['user_jamie'],
+        mentionLabels: { user_jamie: 'Jamie' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      }]
+      await flushUi()
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+        .find((button) => button.textContent?.trim() === 'Edit')!
+        .click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')!
+      expect(textarea.value).toBe('@J. Example hi')
+      expect(composerChipLabels()).toEqual(['@J. Example'])
+
+      await typeInto(textarea, '@J. Example hi!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_token_1', {
+        content: '@[J. Example](user_jamie) hi!',
+        mentions: ['user_jamie'],
+      })
+    })
+
+    it('a mention picked during the edit survives later searches (the edit starts from a snapshot)', async () => {
+      const textarea = await openEditOf({
+        id: 'comment_api_2',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Totals',
+        mentions: ['user_fake_robin'],
+        mentionLabels: { user_fake_robin: 'Robin Example' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      await typeInto(textarea, 'Totals @ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Jamie'])
+
+      // a second search refreshes the workbench's remembered-people cache
+      await typeInto(textarea, `${textarea.value}@jo`)
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledTimes(2)
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Jamie'])
+
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_2', {
+        content: 'Totals @[Jamie](user_jamie) @jo',
+        mentions: ['user_fake_robin', 'user_jamie'],
+      })
+    })
+
+    it('mention ids that are Object.prototype keys open the edit and are kept under a placeholder', async () => {
+      // an own non-string value and an inherited string are not labels either (read by own string key only)
+      const labels = Object.assign(Object.create({ user_fake_inherited: 'Fake Inherited' }), { user_fake_numeric: 42 })
+      const textarea = await openEditOf({
+        id: 'comment_proto_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Odd ids',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+        mentionLabels: labels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+      expect(textarea.value).toBe('Odd ids')
+      expect(composerChipLabels()).toEqual(Array(5).fill('@Unknown user'))
+
+      await typeInto(textarea, 'Odd ids!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_proto_1', {
+        content: 'Odd ids!',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+      })
+    })
+
+    // Fix round: a person picked for one NEW comment must not be mentioned again by the next one. The
+    // workbench clears the draft after a send and on a record switch but keeps passing the same empty
+    // `initialMentions`, so only the composer can drop the picked chip.
+    async function openNewCommentOn(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-open-comments="${recordId}"]`)!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function pickJamie(textarea: HTMLTextAreaElement) {
+      await typeInto(textarea, '@ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Jamie'])
+    }
+
+    it('after sending a comment that mentions someone, the next comment mentions nobody', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        targetId: 'rec_1',
+        content: '@[Jamie](user_jamie)',
+        mentions: ['user_jamie'],
+      }))
+      expect(textarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(textarea, 'thanks everyone')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(2)
+      expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        targetId: 'rec_1',
+        content: 'thanks everyone',
+        mentions: [],
+      }))
+    })
+
+    it('a person picked on one record is not mentioned by a note sent on the next record', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const nextTextarea = await openNewCommentOn('rec_2')
+      const confirmMessages = confirmSpy.mock.calls.map((call) => call[0])
+      confirmSpy.mockRestore()
+      expect(confirmMessages).toEqual(['Discard unsaved record changes?'])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(nextTextarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(nextTextarea, 'note for record two')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(1)
+      expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+        targetId: 'rec_2',
+        content: 'note for record two',
+        mentions: [],
+      }))
+    })
   })
 
   it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {

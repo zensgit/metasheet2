@@ -158,6 +158,32 @@ describe('MultitableApiClient', () => {
     })
   })
 
+  // #5809: the import resolvers rely on the server's exact modes; a client that silently dropped
+  // `match` would fall back to the substring search and the ceiling could hide the real owner.
+  it('sends match=exact on the person-field directory lookup', async () => {
+    const fetchFn = vi.fn(async (_input: string) => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [], total: 0, query: 'x', hasMore: false, requiresQuery: false, minQueryLength: 1 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listPersonFieldDirectory('s', 'f', { q: 'x', match: 'exact' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/s/person-fields/f/directory?q=x&match=exact')
+  })
+
+  it('sends match=exact-email on the mention-candidate lookup', async () => {
+    const fetchFn = vi.fn(async (_input: string) => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [], total: 0, limit: 50, query: 'a@b.c', hasMore: false, requiresQuery: false, minQueryLength: 1 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listCommentMentionSuggestions({ spreadsheetId: 's', q: 'a@b.c', limit: 50, match: 'exact-email' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/comments/mention-candidates?spreadsheetId=s&q=a%40b.c&limit=50&match=exact-email')
+  })
+
   it('normalizes automation rule list responses from snake_case API rows', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       expect(input).toBe('/api/multitable/sheets/sheet_1/automations')

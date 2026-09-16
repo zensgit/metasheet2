@@ -2346,11 +2346,16 @@ export class MultitableApiClient implements CommentsApiClient {
    * #5781: the endpoint is now SEARCH-REQUIRED and capped. A call with no `q` answers 200 with an
    * empty list and `requiresQuery: true` (not an error) — render "type to search", not "no members".
    * `hasMore` is set when the answer was clamped to the server ceiling.
+   *
+   * #5809: `match: 'exact'` asks for an EXACT lookup (id / name / email equal to `q`, case-insensitive)
+   * instead of the substring search — used by the import resolver. Same gate, set and ceiling. A server
+   * that predates the mode ignores the parameter and answers the substring search, so callers must still
+   * filter for exact matches themselves.
    */
   async listPersonFieldDirectory(
     sheetId: string,
     fieldId: string,
-    params?: { q?: string },
+    params?: { q?: string; match?: 'exact' },
   ): Promise<{
     items: Array<{ userId: string; name: string | null; email: string | null }>
     total: number
@@ -3522,11 +3527,17 @@ export class MultitableApiClient implements CommentsApiClient {
    * without `q` answers 200 with no items and `requiresQuery: true` — render "type to search", never
    * "no match". `hasMore` is set when the answer was clamped to the server ceiling; `total` is only the
    * size of the returned page (the server no longer discloses a deployment-wide count).
+   *
+   * #5809: `match: 'exact-email'` asks for users whose (trimmed, case-folded) EMAIL EQUALS `q` instead of
+   * the name/email/id substring search — used by the legacy person importer. Same gate, term requirement
+   * and ceiling. A server that predates the mode ignores it and answers the substring search, so callers
+   * must still filter for exact matches themselves.
    */
   async listCommentMentionSuggestions(params: {
     spreadsheetId: string
     q?: string
     limit?: number
+    match?: 'exact-email'
   }): Promise<{
     items: MetaCommentMentionSuggestion[]
     total: number
@@ -3860,7 +3871,7 @@ export class MultitableApiClient implements CommentsApiClient {
    * The single-use `resumeToken` comes from the suspended step's C1 descriptor in the run detail.
    * `confirmSideEffects:true` is always sent (the UI confirm-gates this call). parseJson throws an
    * Error with `.code` (NOT_FOUND / ALREADY_RESUMED / RULE_CHANGED / RULE_MISSING_OR_DISABLED /
-   * RECORD_GONE) so the caller can map it to an inline message rather than a generic toast.
+   * RECORD_GONE / SHEET_DELETED) so the caller can map it to an inline message rather than a generic toast.
    */
   async resumeAutomation(resumeToken: string): Promise<AutomationRunView> {
     const res = await this.fetch('/api/multitable/automation/resume', {
@@ -3879,7 +3890,7 @@ export class MultitableApiClient implements CommentsApiClient {
    * contract as resumeAutomation). parseJson throws an Error with `.code` (NOT_FOUND /
    * NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT / RETRY_WINDOW_EXPIRED /
    * START_APPROVAL_ALREADY_CREATED / RULE_MISSING_OR_DISABLED / RULE_CHANGED /
-   * RETRY_LEDGER_EVIDENCE_MISSING) so the caller can map it to an inline message.
+   * RETRY_LEDGER_EVIDENCE_MISSING / SHEET_DELETED) so the caller can map it to an inline message.
    */
   async retryAutomationExecution(executionId: string): Promise<AutomationRunView> {
     const res = await this.fetch(

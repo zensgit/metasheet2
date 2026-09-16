@@ -726,7 +726,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, shallowRef, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
@@ -869,7 +869,13 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportValueResolver } from '../import/delimited'
+import {
+  createImportAbortError,
+  extractImportTokens,
+  type ImportBuildFailure,
+  type ImportResolveContext,
+  type ImportValueResolver,
+} from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import {
   MAX_FIELD_NAME_LENGTH,
@@ -884,6 +890,7 @@ import {
   createFieldLimitReached as fmtCreateFieldLimitReached,
   createFieldNameInvalid as fmtCreateFieldNameInvalid,
   createFieldNameTooLong as fmtCreateFieldNameTooLong,
+  importPersonValueTooBroad as fmtImportPersonValueTooBroad,
 } from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
@@ -1512,8 +1519,8 @@ const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
 // #5795: NOT a roster any more. The mention-candidate endpoint is search-required and capped, so this
 // only remembers people the mention editors' searches returned on the active sheet (newest first,
-// capped) — it keeps already-picked labels resolvable (buildEditingMentionSuggestions) without a
-// term-less fetch. Cleared on sheet switch.
+// capped) — a secondary label source for buildEditingMentionSuggestions (the list response's own
+// `mentionLabels` is the primary one, #5808), without a term-less fetch. Cleared on sheet switch.
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
 const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
@@ -1582,9 +1589,26 @@ const columnWidthOverrides = ref<Record<string, number>>({})
 const collapsedGroupKeys = ref<string[]>([])
 const peopleResolverCache = new Map<string, Promise<ImportValueResolver | null>>()
 const linkResolverCache = new Map<string, Map<string, Promise<string[] | null>>>()
-// Native person (人员) import: resolve tokens (userId / name / email) → USERIDs against the
-// sheet member candidates (member-scoped, NOT the People-sheet recordIds). Keyed by sheetId.
-const nativePersonResolverCache = new Map<string, Promise<ImportValueResolver>>()
+// Native person (人员) import (#5809): one bounded, exact directory lookup per UNIQUE token, keyed by
+// sheet + field + normalized token, so a token repeated across the whole import costs one request.
+const nativePersonTokenCache = new Map<string, Promise<ImportPersonTokenOutcome>>()
+// Legacy person email fallback (#5807 sibling): People-sheet id + active sheet + normalized email.
+const legacyPersonEmailCache = new Map<string, Promise<ImportPersonTokenOutcome>>()
+// Every per-token person lookup of the import path shares this gate (≤ 4 requests in flight).
+const IMPORT_PERSON_LOOKUP_CONCURRENCY = 4
+const runImportPersonLookup = createBoundedLookupRunner(IMPORT_PERSON_LOOKUP_CONCURRENCY)
+// Rows per person lookup — the servers' own ceiling (PERSON_DIRECTORY_MAX_ITEMS /
+// MENTION_CANDIDATES_MAX_ITEMS), stated explicitly so the request never relies on a server default.
+const IMPORT_PERSON_LOOKUP_PAGE_SIZE = 50
+// #5809 refuter round — the longest token a person lookup is sent for. users.id / name / email are
+// TEXT, so this is a policy ceiling, not a schema bound: it sits well above what the app writes (the
+// admin user create/update routes cap a name at 100 characters; RFC 5321 caps an address at 254) and
+// low enough that the request line stays inside common proxy limits (nginx's default 8 KiB) even when
+// every UTF-16 unit percent-encodes to 9 bytes (512 × 9 = 4608). A longer token cannot be one person's
+// id / name / email under that policy, so it counts as "no match" without a request. In practice it is
+// the whole-cell token extractImportTokens adds for a multi-person cell (an exported list of ~200 user
+// ids is ~8 KB and would otherwise 414 at the proxy and fail the whole row).
+const IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH = 512
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
@@ -1895,19 +1919,33 @@ const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() =>
     // Native person (人员) OR link (incl. legacy link-backed person). isLinkField no longer
     // matches native person, so include it explicitly.
     if (!isLinkField(field) && !isNativePersonField(field)) continue
-    resolvers[field.id] = async (rawValue, currentField) => {
+    const resolver: ImportValueResolver = async (rawValue, currentField, context) => {
       // Kind-aware switch: native person → USERIDs (member candidates); legacy person → People-sheet
       // recordIds (getPeopleResolver); plain link → linked recordIds.
       if (isNativePersonField(currentField)) {
-        const resolver = await getNativePersonResolver()
-        return resolver(rawValue, currentField)
+        return resolveNativePersonImportValue(rawValue, currentField, context)
       }
       if (isPersonField(currentField)) {
-        const resolver = await getPeopleResolver(currentField)
-        return resolver ? resolver(rawValue, currentField) : null
+        const peopleResolver = await getPeopleResolver(currentField)
+        return peopleResolver ? peopleResolver(rawValue, currentField, context) : null
       }
       return resolveLinkedImportValue(rawValue, currentField)
     }
+    // #5809: queue the person lookups of the WHOLE import up front (still one request per unique
+    // token, still ≤ 4 in flight), so rows are not resolved one lookup at a time. Plain link fields
+    // keep their per-row lookups.
+    resolver.prime = (rawValues, currentField, context) => {
+      if (isNativePersonField(currentField)) {
+        primeNativePersonImport(rawValues, currentField, context)
+        return
+      }
+      if (isPersonField(currentField)) {
+        void getPeopleResolver(currentField)
+          .then((peopleResolver) => peopleResolver?.prime?.(rawValues, currentField, context))
+          .catch(() => undefined)
+      }
+    }
+    resolvers[field.id] = resolver
   }
   return resolvers
 })
@@ -2020,9 +2058,17 @@ const activeEditingComment = computed(() => (
     ? commentsState.comments.value.find((comment) => comment.id === selectedEditingCommentId.value) ?? null
     : null
 ))
-const commentComposerInitialMentions = computed(() => (
-  activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
-))
+// #5808: the composer's starting mentions are a SNAPSHOT taken when an edit starts (onEditComment).
+// Deriving them live re-sent a new array whenever `commentMentionSuggestions` changed (every mention
+// search) or the comment list did (realtime), and the composer restarts its selection from each new
+// `initialMentions` — dropping whatever the user had picked or removed since the edit began.
+const editingMentionSnapshot = shallowRef<{ commentId: string; mentions: MetaCommentMentionSuggestion[] } | null>(null)
+const NO_COMPOSER_INITIAL_MENTIONS: MetaCommentMentionSuggestion[] = []
+const commentComposerInitialMentions = computed(() => {
+  const comment = activeEditingComment.value
+  const snapshot = editingMentionSnapshot.value
+  return comment && snapshot?.commentId === comment.id ? snapshot.mentions : NO_COMPOSER_INITIAL_MENTIONS
+})
 const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
   fmtPresenceLabel(sheetPresenceState.activeCollaboratorCount.value, isZh.value)
@@ -2150,20 +2196,45 @@ function formatCommentDraftContent(content: string): string {
   return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
 }
 
-function buildEditingMentionSuggestions(comment: { content: string; mentions: string[] }): MetaCommentMentionSuggestion[] {
+// #5808: a mention id is any non-empty string the create route accepted, so it can be an
+// Object.prototype key ("constructor", "toString", "__proto__"). Only the map's OWN string entries count.
+function ownMentionLabel(labels: Record<string, string> | undefined, mentionId: string): string {
+  if (!labels || !Object.hasOwn(labels, mentionId)) return ''
+  const label: unknown = labels[mentionId]
+  return typeof label === 'string' ? label.trim() : ''
+}
+
+function buildEditingMentionSuggestions(comment: {
+  content: string
+  mentions: string[]
+  mentionLabels?: Record<string, string>
+}): MetaCommentMentionSuggestion[] {
   const byId = new Map<string, MetaCommentMentionSuggestion>()
   for (const token of parseCommentMentionTokens(comment.content)) {
     byId.set(token.id, token)
   }
+  // A token's own label is what the draft text shows (formatCommentDraftContent), so it stays the chip
+  // label — the composer matches chips against the text by label. A remembered search hit only adds
+  // its subtitle; letting it replace the label (e.g. after a rename) unbound the chip from the text.
   for (const suggestion of commentMentionSuggestions.value) {
-    if (byId.has(suggestion.id)) {
-      byId.set(suggestion.id, { ...suggestion })
+    const token = byId.get(suggestion.id)
+    if (token) {
+      byId.set(suggestion.id, { ...suggestion, label: token.label })
     }
   }
+  // #5808: a mention that is not a token in the body (e.g. created through the API with an explicit
+  // `mentions` array) is named by the list response's own `mentionLabels`, else by a person a search
+  // already returned. Nobody to name it: the composer shows a neutral placeholder — never the raw id —
+  // and still keeps the id, so saving the edit does not silently remove the mention.
   for (const mentionId of comment.mentions) {
     if (byId.has(mentionId)) continue
+    const serverLabel = ownMentionLabel(comment.mentionLabels, mentionId)
+    if (serverLabel) {
+      byId.set(mentionId, { id: mentionId, label: serverLabel })
+      continue
+    }
     const suggestion = commentMentionSuggestions.value.find((item) => item.id === mentionId)
-    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: mentionId })
+    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: '', unresolved: true })
   }
   return [...byId.values()]
 }
@@ -2194,6 +2265,136 @@ async function loadAllRecordSummaries(sheetId: string, displayFieldId: string) {
   return { records, displayMap }
 }
 
+// #5809 — what ONE bounded person lookup says about ONE import token.
+type ImportPersonTokenOutcome =
+  | { kind: 'match'; id: string }
+  | { kind: 'none' }
+  | { kind: 'ambiguous' }
+  | { kind: 'too-broad' }
+
+// #5809 — at most `limit` lookups run at once; the rest wait in FIFO order. A lookup whose `signal`
+// is aborted before it starts is dropped (rejected with an AbortError, its task never runs); one that
+// has already started runs to completion.
+function createBoundedLookupRunner(limit: number) {
+  let active = 0
+  const waiting: Array<() => void> = []
+  const release = () => {
+    active -= 1
+    waiting.shift()?.()
+  }
+  return function runLookup<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(createImportAbortError(isZh.value))
+        return
+      }
+      const onAbort = () => {
+        const index = waiting.indexOf(start)
+        if (index < 0) return
+        waiting.splice(index, 1)
+        reject(createImportAbortError(isZh.value))
+      }
+      function start() {
+        signal?.removeEventListener('abort', onAbort)
+        active += 1
+        let pending: Promise<T>
+        try {
+          pending = Promise.resolve(task())
+        } catch (error) {
+          pending = Promise.reject(error)
+        }
+        pending.then(resolve, reject).finally(release)
+      }
+      if (active < limit) {
+        start()
+        return
+      }
+      waiting.push(start)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+}
+
+// #5809 — the tokens of one cell that are worth a person lookup: non-blank and no longer than
+// IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH.
+function importPersonLookupTokens(rawValue: string): string[] {
+  return extractImportTokens(rawValue).filter((token) => {
+    const trimmed = token.trim()
+    return trimmed.length > 0 && trimmed.length <= IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH
+  })
+}
+
+// #5809 — exact matching only: a row counts when its user id, name or email EQUALS the token after
+// trim + case folding; a partial match never resolves. Two or more distinct users ⇒ ambiguous. A
+// clamped answer (`hasMore`) cannot prove that nobody past the ceiling also equals the token, so
+// there only a user-id match (unique by construction) is trusted, and anything else is reported as
+// too broad — never silently as an unknown person.
+function classifyPersonLookupAnswer(
+  token: string,
+  answer: { items: Array<{ userId: string; name: string | null; email: string | null }>; hasMore: boolean },
+): ImportPersonTokenOutcome {
+  const key = normalizeImportLookupKey(token)
+  const exactUserIds = new Set<string>()
+  let matchedById = false
+  for (const item of answer.items) {
+    const byId = normalizeImportLookupKey(item.userId) === key
+    const byName = typeof item.name === 'string' && normalizeImportLookupKey(item.name) === key
+    const byEmail = typeof item.email === 'string' && normalizeImportLookupKey(item.email) === key
+    if (!byId && !byName && !byEmail) continue
+    exactUserIds.add(item.userId)
+    if (byId) matchedById = true
+  }
+  if (exactUserIds.size > 1) return { kind: 'ambiguous' }
+  const only = [...exactUserIds][0]
+  if (only !== undefined && (!answer.hasMore || matchedById)) return { kind: 'match', id: only }
+  return answer.hasMore ? { kind: 'too-broad' } : { kind: 'none' }
+}
+
+const EMAIL_SHAPED_IMPORT_TOKEN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+// #5807 sibling — resolves an email-shaped token the People sheet could not match locally through the
+// comment @-mention directory of the sheet being imported into (GET /api/comments/mention-candidates,
+// gated on comments:read + reading that sheet). It is a request this caller can already send there —
+// term required, at most 50 rows (asked for explicitly) — in the server's `match=exact-email` mode,
+// which only NARROWS the substring search the comment composer uses to rows whose email EQUALS the
+// term: a substring page could be filled by `wangli@…` / `zhangli@…` before the owner of `li@…`.
+// The answer carries no separate email field: a candidate's email is its `subtitle`, or its `label`
+// when it has no subtitle — no name, a name equal to the email, or a name with an EMPTY email (then the
+// label is the name; a server that honours the mode never returns such a row, an older one might).
+// Returns the matched USER id; the caller maps it to a People record through the sheet's own User ID
+// column, so only people already on the People sheet resolve. A 403 (no comment access here) is "not
+// matched", never a load failure, and is remembered like any other miss.
+function lookupLegacyPersonEmail(
+  peopleSheetId: string,
+  sourceSheetId: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ImportPersonTokenOutcome> {
+  const cacheKey = JSON.stringify([peopleSheetId, sourceSheetId, normalizeImportLookupKey(token)])
+  const cached = legacyPersonEmailCache.get(cacheKey)
+  if (cached) return cached
+  const promise = runImportPersonLookup(
+    () => workbench.client.listCommentMentionSuggestions({
+      spreadsheetId: sourceSheetId,
+      q: token.trim(),
+      limit: IMPORT_PERSON_LOOKUP_PAGE_SIZE,
+      match: 'exact-email',
+    }),
+    signal,
+  )
+    .then((answer) => classifyPersonLookupAnswer(token, {
+      items: answer.items.map((item) => ({ userId: item.id, name: null, email: item.subtitle ?? item.label })),
+      hasMore: answer.hasMore,
+    }))
+    .catch((error: unknown): ImportPersonTokenOutcome => {
+      if ((error as { status?: unknown } | null)?.status === 403) return { kind: 'none' }
+      legacyPersonEmailCache.delete(cacheKey)
+      throw error
+    })
+  legacyPersonEmailCache.set(cacheKey, promise)
+  return promise
+}
+
 async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver | null> {
   if (!isPersonField(field)) return null
   const targetSheetId = typeof field.property?.foreignSheetId === 'string' ? field.property.foreignSheetId.trim() : ''
@@ -2211,22 +2412,37 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
     const fallbackAliasFieldId = stringFields.find(
       (targetField) => !emailFieldIds.includes(targetField.id) && !nameFieldIds.includes(targetField.id),
     )?.id
+    const aliasHydrateFieldIds = [
+      ...aliasFieldIds,
+      ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
+    ]
+    // The email fallback maps userId → People record through the sheet's own `User ID` column, and
+    // only when that column is one this resolver already reads (the preset sheet's fallback alias) —
+    // it adds no read of its own to the People sheet.
+    const userIdFieldId = stringFields.find(
+      (targetField) => /^user\s*id$/i.test(targetField.name.trim())
+        && [...emailFieldIds, ...nameFieldIds, ...aliasHydrateFieldIds].includes(targetField.id),
+    )?.id
 
     const recordIdLookup = new Map<string, string | null>()
     const emailLookup = new Map<string, string | null>()
     const nameLookup = new Map<string, string | null>()
     const aliasLookup = new Map<string, string | null>()
+    const userIdLookup = new Map<string, string | null>()
 
     async function hydrateLookup(fieldIds: string[], targetLookup: Map<string, string | null>) {
       await Promise.all(fieldIds.map(async (displayFieldId) => {
         const summary = await loadAllRecordSummaries(targetSheetId, displayFieldId)
+        const isUserIdColumn = displayFieldId === userIdFieldId
         for (const record of summary.records ?? []) {
           addPeopleLookupToken(recordIdLookup, record.id, record.id)
           addPeopleLookupToken(targetLookup, record.display, record.id)
+          if (isUserIdColumn) addPeopleLookupToken(userIdLookup, record.display, record.id)
         }
         for (const [recordId, display] of Object.entries(summary.displayMap ?? {})) {
           addPeopleLookupToken(recordIdLookup, recordId, recordId)
           addPeopleLookupToken(targetLookup, display, recordId)
+          if (isUserIdColumn) addPeopleLookupToken(userIdLookup, display, recordId)
         }
       }))
     }
@@ -2234,17 +2450,41 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
     await Promise.all([
       hydrateLookup(emailFieldIds, emailLookup),
       hydrateLookup(nameFieldIds, nameLookup),
-      hydrateLookup(
-        [
-          ...aliasFieldIds,
-          ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
-        ],
-        aliasLookup,
-      ),
+      hydrateLookup(aliasHydrateFieldIds, aliasLookup),
     ])
 
-    return async (rawValue: string, currentField?: MetaField) =>
-      resolvePeopleImportValue({
+    const matchedLocally = (key: string) =>
+      recordIdLookup.has(key) || emailLookup.has(key) || nameLookup.has(key) || aliasLookup.has(key)
+
+    const pendingEmailTokens = (rawValue: string) => importPersonLookupTokens(rawValue).filter((token) =>
+      EMAIL_SHAPED_IMPORT_TOKEN.test(token.trim()) && !matchedLocally(normalizeImportLookupKey(token)))
+
+    const resolver: ImportValueResolver = async (rawValue: string, currentField?: MetaField, context?: ImportResolveContext) => {
+      // #5807 sibling: the People sheet no longer carries emails, so an email-shaped token nothing
+      // local matches is looked up once (per token, bounded) and, on an exact hit, recorded in the
+      // email bucket — resolvePeopleImportValue then applies its usual email-first priority to it.
+      let tooBroad = false
+      if (userIdFieldId) {
+        const sourceSheetId = workbench.activeSheetId.value
+        const pending = pendingEmailTokens(rawValue)
+        const outcomes = await Promise.allSettled(
+          pending.map((token) => lookupLegacyPersonEmail(targetSheetId, sourceSheetId, token, context?.signal)),
+        )
+        for (const [index, outcome] of outcomes.entries()) {
+          if (outcome.status === 'rejected') throw outcome.reason
+          const key = normalizeImportLookupKey(pending[index])
+          const result = outcome.value
+          if (result.kind === 'ambiguous') {
+            emailLookup.set(key, null)
+          } else if (result.kind === 'too-broad') {
+            tooBroad = true
+          } else if (result.kind === 'match') {
+            const recordId = userIdLookup.get(normalizeImportLookupKey(result.id))
+            if (recordId !== undefined) emailLookup.set(key, recordId)
+          }
+        }
+      }
+      const resolved = resolvePeopleImportValue({
         rawValue,
         currentField,
         lookups: {
@@ -2255,6 +2495,24 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
         },
         isZh: isZh.value,
       })
+      // A too-broad email is ignored like any other unmatched token when the rest of the cell resolves
+      // (what an unmatched token always did here); it becomes the row's error only when nothing did.
+      if (resolved === null && tooBroad) {
+        throw new Error(fmtImportPersonValueTooBroad(currentField?.name ?? field.name, isZh.value))
+      }
+      return resolved
+    }
+    if (userIdFieldId) {
+      resolver.prime = (rawValues, _currentField, context) => {
+        const sourceSheetId = workbench.activeSheetId.value
+        for (const rawValue of rawValues) {
+          for (const token of pendingEmailTokens(rawValue)) {
+            void lookupLegacyPersonEmail(targetSheetId, sourceSheetId, token, context?.signal).catch(() => undefined)
+          }
+        }
+      }
+    }
+    return resolver
   })().catch((error) => {
     peopleResolverCache.delete(targetSheetId)
     throw error
@@ -2264,60 +2522,74 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
   return promise
 }
 
-// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
-// returns People-sheet recordIds). Resolves each token to a member USERID by matching the sheet's
-// permission-candidate users on userId / label (name) / subtitle (email). Member-scoped: only the
-// candidate set the picker offers is resolvable; an unknown token fails the row (no egress).
-async function getNativePersonResolver(): Promise<ImportValueResolver> {
-  const sheetId = workbench.activeSheetId.value
-  const cached = nativePersonResolverCache.get(sheetId)
+function lookupNativePersonToken(
+  sheetId: string,
+  fieldId: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ImportPersonTokenOutcome> {
+  const cacheKey = JSON.stringify([sheetId, fieldId, normalizeImportLookupKey(token)])
+  const cached = nativePersonTokenCache.get(cacheKey)
   if (cached) return cached
-
-  const promise = (async (): Promise<ImportValueResolver> => {
-    const { items } = await workbench.client.listSheetPermissionCandidates(sheetId, { limit: 10000 })
-    const userIdByToken = new Map<string, string | null>()
-    const register = (token: string | null | undefined, userId: string) => {
-      if (!token) return
-      const key = normalizeImportLookupKey(token)
-      if (!key) return
-      const current = userIdByToken.get(key)
-      if (current !== undefined && current !== userId) {
-        userIdByToken.set(key, null) // ambiguous
-        return
-      }
-      userIdByToken.set(key, userId)
-    }
-    for (const item of items) {
-      if (item.subjectType !== 'user' || !item.isActive) continue
-      register(item.subjectId, item.subjectId)
-      register(item.label, item.subjectId)
-      register(item.subtitle ?? undefined, item.subjectId)
-    }
-
-    return async (rawValue: string, currentField?: MetaField): Promise<string[] | null> => {
-      const tokens = extractImportTokens(rawValue)
-      if (!tokens.length) return null
-      const resolved: string[] = []
-      for (const token of tokens) {
-        const key = normalizeImportLookupKey(token)
-        if (!key) continue
-        const match = userIdByToken.get(key)
-        if (match === null) throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
-        if (typeof match === 'string') pushUniqueIds(resolved, [match])
-      }
-      if (!resolved.length) return null
-      if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
-        throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
-      }
-      return resolved
-    }
-  })().catch((error) => {
-    nativePersonResolverCache.delete(sheetId)
-    throw error
-  })
-
-  nativePersonResolverCache.set(sheetId, promise)
+  const promise = runImportPersonLookup(
+    () => workbench.client.listPersonFieldDirectory(sheetId, fieldId, { q: token.trim(), match: 'exact' }),
+    signal,
+  )
+    .then((answer) => classifyPersonLookupAnswer(token, answer))
+    .catch((error: unknown) => {
+      // A failed lookup is not cached (the next row / a retry pass asks again) and propagates as-is,
+      // so a 403 reads as the permission refusal it is, not as an unknown person.
+      nativePersonTokenCache.delete(cacheKey)
+      throw error
+    })
+  nativePersonTokenCache.set(cacheKey, promise)
   return promise
+}
+
+// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
+// returns People-sheet recordIds). Resolves each token to a member USERID through the field's own
+// directory (GET /sheets/:sheetId/person-fields/:fieldId/directory?match=exact): the same
+// canEditRecord gate as filling the cell, the same candidate set the write validator accepts, at most
+// 50 rows per request, one request per unique token across the import (#5809 — this used to pull the
+// canManageSheetAccess-gated /permission-candidates once, which the server clamps to 50 people).
+// Member-scoped: an unknown token fails the row (no egress).
+async function resolveNativePersonImportValue(
+  rawValue: string,
+  currentField: MetaField,
+  context?: ImportResolveContext,
+): Promise<string[] | null> {
+  const sheetId = workbench.activeSheetId.value
+  const tokens = importPersonLookupTokens(rawValue)
+  if (!tokens.length) return null
+  const outcomes = await Promise.allSettled(
+    tokens.map((token) => lookupNativePersonToken(sheetId, currentField.id, token, context?.signal)),
+  )
+  const resolved: string[] = []
+  // Token order, not completion order, decides which failure a row reports.
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status === 'rejected') throw outcome.reason
+    const token = tokens[index]
+    const result = outcome.value
+    if (result.kind === 'ambiguous') throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
+    if (result.kind === 'too-broad') throw new Error(fmtImportPersonValueTooBroad(currentField.name, isZh.value))
+    if (result.kind === 'match') pushUniqueIds(resolved, [result.id])
+  }
+  if (!resolved.length) return null
+  if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
+    throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
+  }
+  return resolved
+}
+
+// #5809 — look-ahead for a native person column: queue the lookup of every unique token of the import
+// (cached, bounded, dropped on cancel). Errors are left to the row that resolves the token.
+function primeNativePersonImport(rawValues: string[], field: MetaField, context?: ImportResolveContext) {
+  const sheetId = workbench.activeSheetId.value
+  for (const rawValue of rawValues) {
+    for (const token of importPersonLookupTokens(rawValue)) {
+      void lookupNativePersonToken(sheetId, field.id, token, context?.signal).catch(() => undefined)
+    }
+  }
 }
 
 async function resolveLinkToken(field: MetaField, token: string): Promise<string[] | null> {
@@ -3080,6 +3352,8 @@ async function onResolveComment(commentId: string) {
 function onEditComment(commentId: string) {
   const comment = commentsState.comments.value.find((item) => item.id === commentId)
   if (!comment) return
+  // #5808: taken once, here — see commentComposerInitialMentions.
+  editingMentionSnapshot.value = { commentId: comment.id, mentions: buildEditingMentionSuggestions(comment) }
   selectedEditingCommentId.value = comment.id
   selectedReplyCommentId.value = null
   selectedCommentFieldId.value = comment.targetFieldId ?? comment.fieldId ?? null
