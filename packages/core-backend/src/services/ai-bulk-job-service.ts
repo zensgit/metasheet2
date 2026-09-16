@@ -436,9 +436,16 @@ async function suspendIfRunning(query: AiUsageQueryFn, jobId: string, quotaPause
 /**
  * Mark the job `errored` (BJ-5) — GUARDED on `running` so a concurrent cancel (→ rejected)
  * is never clobbered. Generated rows are untouched and stay committable (errored ∈ the
- * commit committable set). Used for the plan-absent case (an in-process plan loss) and any
- * unexpected worker crash after the queued→running claim. (Does NOT cover a hard process
- * restart — runJob is never re-invoked then; that reconciliation is a B-4 follow-up.)
+ * commit committable set). Three callers:
+ *  · the plan-absent case (an in-process plan loss);
+ *  · any unexpected worker crash after the queued→running claim — rows are left as the crash
+ *    found them (typically the remainder still raw `pending`);
+ *  · DELIBERATELY, the sheet-not-live stop in runGeneratePhase (#5832, `jobSheetIsLive`): the
+ *    worker returns normally, and it has already flipped the remainder to
+ *    `pending_not_generated` before this call.
+ * So `errored` does not by itself mean "crashed".
+ * (Does NOT cover a hard process restart — runJob is never re-invoked then; that
+ * reconciliation is a B-4 follow-up.)
  */
 async function markErroredIfRunning(query: AiUsageQueryFn, jobId: string): Promise<void> {
   await query(
@@ -747,6 +754,13 @@ export class BulkFillJobService {
       // becomes `pending_not_generated` (uncharged), and the job goes `errored`, a terminal state the
       // UI already shows, whose generated rows stay committable once the sheet is restored.
       // `markErroredIfRunning` is guarded on `running`, so a cancel landing meanwhile still wins.
+      // RESIDUAL WINDOW: a delete that commits after this check answers live still lets THIS row out.
+      // The window is not just check-to-send: it spans runShortcutCore's whole quota reservation
+      // transaction, including the wait for the instance-wide advisory lock that serializes every AI
+      // reservation, so it grows with concurrent AI use. Narrowing it does not need a lock held across
+      // the provider call: re-checking liveness inside runShortcutCore after the reservation and right
+      // before `aiClient.complete` would leave the lock wait outside the window (ai-bulk-shared.ts,
+      // not changed here). The inline bulk-preview loop has no per-row check at all (#5838).
       if (!(await jobSheetIsLive(query, jobId, plan.sheetId))) {
         await markRemainingPendingNotGenerated(query, jobId)
         await setHeaderProgress(query, jobId, generated, settledCost)
