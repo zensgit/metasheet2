@@ -135,13 +135,35 @@ function rejectInvalidDingTalkGroupScope(
   return false
 }
 
+// Same shape rule as automation-service `describeLookupError`: only an identifier-shaped driver code
+// (SQLSTATE such as `57P01`, errno such as `ECONNREFUSED`) is logged; anything else is 'unknown'.
+const CHECK_ERROR_CODE_SHAPE = /^[0-9A-Z_]{2,32}$/
+function describeCheckErrorCode(err: unknown): string {
+  const code = err !== null && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' && CHECK_ERROR_CODE_SHAPE.test(code) ? code : 'unknown'
+}
+
 async function requireSheetAutomationAccess(res: Response, userId: string, sheetId: string): Promise<boolean> {
   if (!sheetId) {
     res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     return false
   }
-  const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
-  if (!capabilities.canManageAutomation) {
+  let canManageAutomation: boolean
+  try {
+    const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
+    canManageAutomation = capabilities.canManageAutomation
+  } catch (err) {
+    // FAIL CLOSED with a handled, values-free 500: previously a throw here was an unhandled
+    // rejection on the read routes (request hung under Express 4) and echoed the raw driver
+    // message through serviceErrorResponse on the write routes.
+    logger.error(`DingTalk group sheet capability lookup failed (code=${describeCheckErrorCode(err)})`)
+    res.status(500).json({
+      ok: false,
+      error: { code: 'SHEET_ACCESS_CHECK_FAILED', message: 'Failed to resolve sheet access' },
+    })
+    return false
+  }
+  if (!canManageAutomation) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
     return false
   }
@@ -157,8 +179,7 @@ async function requireSheetAutomationAccess(res: Response, userId: string, sheet
   } catch (err) {
     // FAIL CLOSED for every caller (send, write AND read): an unknown sheet state never reaches the
     // service. Values-free: no sheet id, no raw driver message in the response or the log.
-    const sqlState = typeof (err as { code?: unknown } | null)?.code === 'string' ? (err as { code: string }).code : 'unknown'
-    logger.error(`DingTalk group sheet liveness lookup failed (sqlstate=${sqlState})`)
+    logger.error(`DingTalk group sheet liveness lookup failed (code=${describeCheckErrorCode(err)})`)
     res.status(500).json({
       ok: false,
       error: { code: 'SHEET_STATE_CHECK_FAILED', message: 'Failed to resolve sheet state' },

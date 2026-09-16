@@ -32,7 +32,12 @@ function makeDestination(overrides: Record<string, unknown> = {}) {
   }
 }
 
-async function buildApp(options: { liveness: Liveness; canManageAutomation?: boolean }) {
+async function buildApp(options: {
+  liveness: Liveness
+  canManageAutomation?: boolean
+  capabilityError?: Error
+  livenessErrorCode?: unknown
+}) {
   vi.resetModules()
 
   const service = {
@@ -44,17 +49,21 @@ async function buildApp(options: { liveness: Liveness; canManageAutomation?: boo
     listDeliveries: vi.fn(async () => []),
     testSend: vi.fn(async () => ({ ok: true })),
   }
-  const resolveSheetCapabilitiesForUser = vi.fn(async () => ({
+  const resolveSheetCapabilitiesForUser = vi.fn(async () => {
+    if (options.capabilityError) throw options.capabilityError
+    return {
     capabilities: { canManageAutomation: options.canManageAutomation ?? true },
     isAdminRole: false,
     permissions: [],
-  }))
+    }
+  })
   const livenessCalls: string[] = []
   const query = vi.fn(async (sql: string, params: unknown[]) => {
     if (/FROM meta_sheets/.test(sql)) {
       livenessCalls.push(String(params[0]))
       if (options.liveness === 'error') {
-        throw Object.assign(new Error('connection terminated secret-host'), { code: '57P01' })
+        const code = 'livenessErrorCode' in options ? options.livenessErrorCode : '57P01'
+        throw Object.assign(new Error('connection terminated secret-host'), { code })
       }
       if (options.liveness === 'absent') return { rows: [], rowCount: 0 }
       return {
@@ -78,11 +87,14 @@ async function buildApp(options: { liveness: Liveness; canManageAutomation?: boo
   }))
 
   const { apiTokensRouter } = await import('../../src/routes/api-tokens')
+  // Same module instance the router just loaded (registry was reset above, not since).
+  const { Logger } = await import('../../src/core/logger')
+  const loggerError = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
   const app = express()
   app.use(express.json())
   app.use(apiTokensRouter())
   pinned.setApp(app)
-  return { service, resolveSheetCapabilitiesForUser, livenessCalls }
+  return { service, resolveSheetCapabilitiesForUser, livenessCalls, loggerError }
 }
 
 type Service = Awaited<ReturnType<typeof buildApp>>['service']
@@ -213,6 +225,44 @@ describe('DingTalk group sheet-scoped routes refuse non-live sheets (capability 
       })
       expect(JSON.stringify(res.body)).not.toContain('secret-host')
       expectNoServiceCall(service)
+    })
+
+    it('capability lookup failure -> handled values-free 500 (no hang, no raw message), no liveness, service never called', async () => {
+      const { service, livenessCalls, loggerError } = await buildApp({
+        liveness: 'live',
+        capabilityError: Object.assign(new Error('permission lookup exploded secret-host'), { code: '53300' }),
+      })
+      const res = await route.call().timeout(3000)
+      expect(res.status).toBe(500)
+      expect(res.body).toEqual({
+        ok: false,
+        error: { code: 'SHEET_ACCESS_CHECK_FAILED', message: 'Failed to resolve sheet access' },
+      })
+      expect(livenessCalls).toEqual([])
+      expectNoServiceCall(service)
+      const logged = loggerError.mock.calls.map((call) => String(call[0])).join(' ')
+      expect(logged).toContain('capability lookup failed (code=53300)')
+      expect(logged).not.toContain('secret-host')
+      expect(logged).not.toContain(SHEET_ID)
+    })
+  })
+
+  describe('liveness failure log only carries an identifier-shaped code', () => {
+    it.each([
+      ['57P01', 'code=57P01'],
+      ['ECONNREFUSED', 'code=ECONNREFUSED'],
+      ['connect to secret-host:5432 failed', 'code=unknown'],
+      ['57P01 secret-host', 'code=unknown'],
+      [42, 'code=unknown'],
+      [undefined, 'code=unknown'],
+    ])('code %j -> %s', async (code, expected) => {
+      const { loggerError } = await buildApp({ liveness: 'error', livenessErrorCode: code })
+      const res = await base().get('/api/multitable/dingtalk-groups').query({ sheetId: SHEET_ID })
+      expect(res.status).toBe(500)
+      const logged = loggerError.mock.calls.map((call) => String(call[0]))
+      expect(logged).toEqual([`DingTalk group sheet liveness lookup failed (${expected})`])
+      expect(logged.join('')).not.toContain('secret-host')
+      expect(logged.join('')).not.toContain(SHEET_ID)
     })
   })
 
