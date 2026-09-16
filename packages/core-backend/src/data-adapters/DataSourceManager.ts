@@ -30,6 +30,10 @@ export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_
 // config.dataSourceId refuses a plain delete with this code.
 export const DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE = 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS'
 export const DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE = 'DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY'
+// Durable-first delete (PERM-04): the soft/hard delete row write failed, so the delete did NOT
+// happen — neither in memory nor on disk. Values-free by construction: the driver's text (host,
+// port, database, login) stays in the log; the client gets this code and a fixed sentence.
+export const DATA_SOURCE_DELETE_NOT_PERSISTED_CODE = 'DATA_SOURCE_DELETE_NOT_PERSISTED'
 
 /**
  * Actor context for data-source access decisions (the authority model).
@@ -816,22 +820,63 @@ export class DataSourceManager extends EventEmitter {
     }
   }
 
-  async removeDataSource(id: string, options?: { hardDelete?: boolean }): Promise<void> {
+  /**
+   * Remove a data source — DURABLE-FIRST ordering (PERM-04; minimal-plan §5 PR-2
+   * acceptance: "删除失败不会改变内存状态，重启后不会复活").
+   *
+   * The previous order was fail-OPEN: disconnect → drop adapter /
+   * connectionPool / scope → only THEN write the soft delete, whose failure was
+   * swallowed by console.warn. A delete that failed at the database therefore
+   * returned a 200-looking success, stopped answering in-process, and CAME BACK
+   * at the next restart (loadFromDatabase re-observes is_active = true AND
+   * deleted_at IS NULL) — memory and row disagreed in the dangerous direction.
+   *
+   * The order is now:
+   *   ① referential check — refuse (coded 409) while an integration external
+   *      system still references this source, unless the caller carries the
+   *      route's already-authorized `force` break. Runs before ANY mutation,
+   *      and while `scopes` still holds the owner that
+   *      countExternalSystemReferences attributes against.
+   *   ② persist the (soft|hard) delete. A failure THROWS a coded, values-free
+   *      refusal — the driver's own text (host/port/database/login) goes to the
+   *      log only — and no in-memory byte has been touched yet.
+   *   ③ only after the durable write committed: drop adapter / connectionPool /
+   *      scope, so memory can no longer outlive or predate the row.
+   *   ④ release the connection LAST, listeners muted first so the adapter's
+   *      'disconnected' event cannot write status back onto the row that was
+   *      just deleted. A disconnect failure is warn-only: the source is already
+   *      gone durably AND in memory, and rolling the delete back for a leaked
+   *      socket would resurrect exactly the ghost this fix removes.
+   *
+   * `force` is NOT a new escape hatch: the route still decides it (platform
+   * admins only, audited — routes/data-sources.ts DELETE). The manager re-runs
+   * the count itself rather than trusting a caller-supplied number, so a direct
+   * (non-route) caller cannot dangle a reference by skipping the check.
+   */
+  async removeDataSource(id: string, options?: { hardDelete?: boolean; force?: boolean }): Promise<void> {
     const adapter = this.adapters.get(id)
     if (!adapter) {
       throw new Error(`Data source with id '${id}' not found`)
     }
 
-    if (adapter.isConnected()) {
-      await adapter.disconnect()
+    // ① REFERENTIAL CHECK — before any mutation, in memory or durable.
+    if (options?.force !== true) {
+      const referenceCount = await this.countExternalSystemReferences(id)
+      if (referenceCount > 0) {
+        throw Object.assign(
+          new Error(
+            `Data source '${id}' is referenced by ${referenceCount} external system(s) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`
+          ),
+          {
+            status: 409,
+            code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+            details: { referenceCount }
+          }
+        )
+      }
     }
 
-    adapter.removeAllListeners()
-    this.adapters.delete(id)
-    this.connectionPool.delete(id)
-    this.scopes.delete(id)
-
-    // Soft delete from database (or hard delete if specified)
+    // ② DURABLE WRITE FIRST — soft delete (or hard delete if specified).
     if (this.db) {
       try {
         if (options?.hardDelete) {
@@ -851,7 +896,31 @@ export class DataSourceManager extends EventEmitter {
             .execute()
         }
       } catch (err) {
+        // Cause to the log ONLY — a kysely/driver failure embeds host, port,
+        // database and login. The client gets a fixed sentence and the id it
+        // already supplied.
         console.warn(`[DataSourceManager] Failed to delete from database: ${id}`, err)
+        throw Object.assign(
+          new Error(
+            `Data source '${id}' was not deleted: the deletion could not be persisted. Nothing was changed; retry.`
+          ),
+          { status: 500, code: DATA_SOURCE_DELETE_NOT_PERSISTED_CODE }
+        )
+      }
+    }
+
+    // ③ in-memory state only after the row is durably gone.
+    this.adapters.delete(id)
+    this.connectionPool.delete(id)
+    this.scopes.delete(id)
+
+    // ④ resource release last, and never a reason to undo ② / ③.
+    adapter.removeAllListeners()
+    if (adapter.isConnected()) {
+      try {
+        await adapter.disconnect()
+      } catch (err) {
+        console.warn(`[DataSourceManager] Failed to disconnect removed data source: ${id}`, err)
       }
     }
   }

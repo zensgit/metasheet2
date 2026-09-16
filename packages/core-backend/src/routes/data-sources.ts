@@ -854,7 +854,11 @@ export function dataSourcesRouter(): Router {
         }
       }
 
-      await manager.removeDataSource(id)
+      // Durable-first removal (PERM-04): the manager writes the row FIRST and only then
+      // clears memory, and it re-runs the referential count itself. `force` is forwarded
+      // ONLY for a break this route already authorized (references present AND platform
+      // admin) — never as a blanket bypass of the manager's own check.
+      await manager.removeDataSource(id, { force: forcedReferenceBreak })
 
       await auditLog({
         actorId: req.user?.id?.toString(),
@@ -880,6 +884,13 @@ export function dataSourcesRouter(): Router {
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
+      }
+      // The manager's own durable-first refusals (referential 409 on a TOCTOU race, and the
+      // values-free DATA_SOURCE_DELETE_NOT_PERSISTED when the row write fails) keep their code
+      // and status instead of collapsing into a generic 500 that reads like a partial delete.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
       return res.status(500).json({
         ok: false,
