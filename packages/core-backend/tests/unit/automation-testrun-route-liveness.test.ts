@@ -306,11 +306,18 @@ describe('#5812 follow-up — test-run route through the REAL service', () => {
     chain.execute = vi.fn(async () => (rule ? [rule] : []))
     chain.executeTakeFirst = vi.fn(async () => rule)
     const db = { selectFrom: vi.fn(() => chain) }
+    // The rule's OWN sheet id is the only one that should ever come back "deleted" here: a query for
+    // any other id (e.g. a mutant asking about `rule.sheet_id + '_other'`) must read as live, so a
+    // wrong-id query lets the run proceed and the assertions below catch it.
+    const gatedSheetId = rule?.sheet_id as string | undefined
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       if (LIVENESS_BATCH_SQL.test(sql)) {
         const ids = (params?.[0] ?? []) as string[]
         return {
-          rows: ids.map((id) => ({ id, deleted_at: sheetDeletedInService ? '2026-09-16T00:00:00.000Z' : null })),
+          rows: ids.map((id) => ({
+            id,
+            deleted_at: sheetDeletedInService && id === gatedSheetId ? '2026-09-16T00:00:00.000Z' : null,
+          })),
           rowCount: ids.length,
         }
       }

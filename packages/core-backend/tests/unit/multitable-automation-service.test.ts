@@ -678,11 +678,13 @@ describe('AutomationService', () => {
     function livenessQuery(
       rules: AutomationRule[],
       sheetState: 'live' | 'deleted' | 'absent' | 'throws',
-    ): { query: AutomationQueryFn; statements: string[] } {
+    ): { query: AutomationQueryFn; statements: string[]; livenessParams: unknown[][] } {
       const statements: string[] = []
+      const livenessParams: unknown[][] = []
       const query = vi.fn(async (sql: string, params?: unknown[]) => {
         statements.push(sql)
         if (LIVENESS_BATCH_SQL.test(sql)) {
+          livenessParams.push(params ?? [])
           if (sheetState === 'throws') {
             throw Object.assign(new Error('connect db.internal.host:5432 failed'), { code: 'ECONNREFUSED' })
           }
@@ -697,15 +699,15 @@ describe('AutomationService', () => {
         if (roster) return roster
         return { rows: rules, rowCount: rules.length }
       }) as unknown as AutomationQueryFn
-      return { query, statements }
+      return { query, statements, livenessParams }
     }
 
     function build(rules: AutomationRule[], sheetState: 'live' | 'deleted' | 'absent' | 'throws') {
-      const { query, statements } = livenessQuery(rules, sheetState)
+      const { query, statements, livenessParams } = livenessQuery(rules, sheetState)
       const svc = new AutomationService(bus, createMockDb(rules) as never, query)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const executeRule = vi.spyOn(svc as any, 'executeRule')
-      return { svc, statements, executeRule }
+      return { svc, statements, livenessParams, executeRule }
     }
 
     for (const [label, options, actionType] of [
@@ -714,7 +716,7 @@ describe('AutomationService', () => {
     ] as const) {
       it(`refuses a soft-deleted sheet in ${label} with a typed 404 SHEET_DELETED — nothing executed or persisted`, async () => {
         const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: actionType })
-        const { svc, statements, executeRule } = build([rule], 'deleted')
+        const { svc, statements, livenessParams, executeRule } = build([rule], 'deleted')
         const emitSpy = vi.spyOn(bus, 'emit')
 
         const err = await svc.testRun('atr_x', 'sheet1', options).then(() => null, (e: unknown) => e)
@@ -727,6 +729,9 @@ describe('AutomationService', () => {
         expect(statements.some((sql) => WRITE_SQL.test(sql))).toBe(false)
         // the check asked about the rule's (== the gated) sheet
         expect(statements.filter((sql) => LIVENESS_BATCH_SQL.test(sql))).toHaveLength(1)
+        // ...and asked about EXACTLY that sheet id, not a different one — a mutant that queries
+        // `{ ...rule, sheet_id: sheetId + '_other' }` must not slip through on the query COUNT alone.
+        expect(livenessParams).toEqual([[['sheet1']]])
       })
 
       it(`control: a live sheet in ${label} runs`, async () => {
