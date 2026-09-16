@@ -22,7 +22,7 @@ describe('validateDelegationForm', () => {
     expect(validateDelegationForm({ ...base, delegateeUserId: 'A' })).toBe('委托人与被委托人不能相同')
   })
   it("requires a template for scope='template'", () => {
-    expect(validateDelegationForm({ ...base, scope: 'template' })).toBe('指定模板范围需要选择模板')
+    expect(validateDelegationForm({ ...base, scope: 'template' })).toBe('指定表单范围需要选择表单')
   })
   it('rejects an inverted / empty window', () => {
     expect(validateDelegationForm({ ...base, startAt: '2026-06-23T00:00', endAt: '2026-06-22T00:00' })).toBe('结束时间必须晚于开始时间')

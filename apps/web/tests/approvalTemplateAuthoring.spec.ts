@@ -1485,7 +1485,7 @@ describe('TemplateAuthoringView', () => {
     expect(refusalIdx).toBeGreaterThan(-1)
     expect(validateIdx).toBeGreaterThan(-1)
     expect(refusalIdx).toBeLessThan(validateIdx)
-    expect(executable).toMatch(/模板尚未加载成功/)
+    expect(executable).toMatch(/表单尚未加载成功/)
     // …and the refusal actually RETURNS (gate NIT-8 on 696c7459a3, measured: dropping only the
     // `return null` kept this pin green at 137/137 while the defence stopped defending — the if
     // fired, set the message, and fell straight through into the create branch anyway).

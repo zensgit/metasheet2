@@ -2,10 +2,10 @@
   <PageShell width="wide">
     <PageHeader
       class="template-authoring__header"
-      :title="isEditMode ? '编辑审批模板' : '新建审批模板'"
+      :title="isEditMode ? '编辑审批表单' : '新建审批表单'"
       subtitle="分步完成基础信息、表单、流程与发布校验"
       back
-      back-label="返回模板列表"
+      back-label="返回表单列表"
       @back="goBack"
     >
       <template #meta>
@@ -71,7 +71,7 @@
 
     <el-alert
       v-if="!canManageTemplates"
-      title="你没有模板管理权限"
+      title="你没有表单管理权限"
       type="warning"
       show-icon
       :closable="false"
@@ -81,7 +81,7 @@
     <el-alert
       v-if="unsupportedReason"
       :title="unsupportedReason"
-      description="该模板包含当前 MVP 不支持编辑的结构。为避免静默覆盖，页面只允许查看，不能保存。"
+      description="该表单包含当前 MVP 不支持编辑的结构。为避免静默覆盖，页面只允许查看，不能保存。"
       type="warning"
       show-icon
       :closable="false"
@@ -125,7 +125,7 @@
 
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
-        <nav class="template-authoring__steps" aria-label="模板配置步骤">
+        <nav class="template-authoring__steps" aria-label="表单配置步骤">
           <el-button
             v-for="(section, index) in authoringSections"
             :key="section.id"
@@ -169,7 +169,7 @@
       >
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>常用审批模板</strong>
+            <strong>常用审批表单</strong>
             <span class="template-authoring__hint">创建为草稿，发布前可继续调整字段和审批人。</span>
           </div>
         </template>
@@ -191,7 +191,7 @@
               :data-testid="`approval-template-preset-${preset.id}`"
               @click="createFromPreset(preset.id)"
             >
-              使用模板
+              使用表单
             </el-button>
           </div>
         </div>
@@ -273,7 +273,7 @@
       <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>表单设计</strong>
+            <strong>字段设计</strong>
             <div class="template-authoring__form-toolbar">
               <el-button
                 size="small"
@@ -1791,10 +1791,10 @@ const authoringSections: Array<{
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
-  { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
+  { id: 'basic', label: '基础信息', description: '名称、范围与表单起点' },
+  { id: 'fields', label: '字段设计', description: '字段、校验与显隐规则' },
   { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
-  { id: 'more-settings', label: '更多设置', description: '审批人去重等模板级策略' },
+  { id: 'more-settings', label: '更多设置', description: '审批人去重等表单级策略' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -1850,7 +1850,7 @@ const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
 const editRouteLoaded = computed(() => !isEditMode.value || draft.value.templateId === templateId.value)
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value && editRouteLoaded.value)
 const draftStateLabel = computed(() => {
-  if (!isEditMode.value && !isDraftDirty.value) return '新模板'
+  if (!isEditMode.value && !isDraftDirty.value) return '新表单'
   return isDraftDirty.value ? '有未保存更改' : '已保存'
 })
 const authoringFlowNodeCount = computed(() => (
@@ -3926,7 +3926,7 @@ async function loadTemplateForEdit() {
     reseedFormBuilderSessionIfActive()
   } catch (error: unknown) {
     if (seq !== templateLoadSeq) return // a superseded load's failure is not THIS route's failure
-    loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '加载审批表单失败')
   } finally {
     if (seq !== templateLoadSeq) {
       // the newer navigation owns loading/hydration state now
@@ -3977,7 +3977,7 @@ async function validate(): Promise<boolean> {
   validationErrors.value = minimum.all
   if (validationErrors.value.length > 0) {
     activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
-    ElMessage.warning('请先修正模板配置')
+    ElMessage.warning('请先修正表单配置')
     await nextTick()
     scrollAuthoringTarget(validationSummaryRef.value, true)
     return false
@@ -3991,7 +3991,7 @@ async function persistDraft() {
   // (`'' !== 'tpl_b'`, would fall through to CREATE and mint a duplicate) and stale-after-
   // route-switch (`'tpl_a' !== 'tpl_b'`, would UPDATE the wrong template from tpl_b's URL).
   if (isEditMode.value && draft.value.templateId !== templateId.value) {
-    loadError.value = '模板尚未加载成功，无法保存 — 请刷新重试'
+    loadError.value = '表单尚未加载成功，无法保存 — 请刷新重试'
     return null
   }
   if (!(await validate())) return null
@@ -4023,7 +4023,7 @@ async function persistDraft() {
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '保存模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '保存表单失败')
     return null
   } finally {
     saving.value = false
@@ -4049,9 +4049,9 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
-    ElMessage.success('模板草稿已创建')
+    ElMessage.success('表单草稿已创建')
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '创建常用模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '创建常用表单失败')
   } finally {
     creatingPresetId.value = null
   }
@@ -4106,10 +4106,10 @@ async function confirmPublish() {
       policy: policyToPublish,
       ...(note ? { note } : {}),
     })
-    ElMessage.success('模板已发布')
+    ElMessage.success('表单已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '发布模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '发布表单失败')
   } finally {
     publishing.value = false
   }

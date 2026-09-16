@@ -533,10 +533,10 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     const root = await mountView()
 
     expect(root.querySelector('.ms-page-header__title')?.textContent).toBe('出差申请')
-    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回模板列表')
+    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回表单列表')
     expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
     expect(root.querySelector('[data-testid="template-detail-archive-button"]')?.textContent).toBe('停用')
-    expect(root.querySelector('.template-detail__category-label')?.textContent).toBe('模板分类:')
+    expect(root.querySelector('.template-detail__category-label')?.textContent).toBe('表单分类:')
     expect(root.querySelector('.template-detail__visibility')?.textContent).toContain('按部门')
     expect(root.querySelector('[data-testid="template-detail-visibility-ids"]')?.textContent).toBe('部门 1')
     expect(root.querySelector('.template-detail__node-assignee')?.textContent).toContain('用户:')
@@ -572,7 +572,7 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     setLocale('zh-CN')
     mockActiveTemplate.value = buildTemplate({})
     const root = await mountView()
-    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回模板列表')
+    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回表单列表')
     expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
     expect(root.querySelector('.template-detail__section h2')?.textContent).toBe('表单字段')
 
@@ -584,7 +584,7 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
 
     setLocale('zh-CN')
     await nextTick()
-    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回模板列表')
+    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回表单列表')
     expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
     expect(root.querySelector('.template-detail__section h2')?.textContent).toBe('表单字段')
   })
@@ -683,9 +683,9 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     const root2 = await mountView()
     root2.querySelector<HTMLButtonElement>('[data-testid="template-detail-archive-button"]')!.click()
     await flushUi()
-    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用模板')
+    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用表单')
     await flushUi()
-    expect(elSuccessSpy).toHaveBeenCalledWith('已停用模板')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已停用表单')
   })
 
   it('unarchive dialog title/buttons and success toast follow the locale', async () => {
