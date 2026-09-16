@@ -57,8 +57,11 @@ const { inspectorStubAnchor } = vi.hoisted(() => ({
 // the real MetaCommentComposer) with the same comment props/emits the real inspector forwards, so the
 // workbench's comment-edit path can be driven end to end. Off by default: every other test keeps the
 // plain stand-in buttons. Reset in the top-level beforeEach.
+// #5813: `realInspector` goes one step further — the stub renders the REAL MetaRecordInspector (and so its
+// real tab bar, which unmounts the comments tabpanel on every switch) instead of the bare panel, inside
+// the same `data-real-comments-panel` wrapper so the #5808 helpers keep working.
 const { inspectorStubRealComments } = vi.hoisted(() => ({
-  inspectorStubRealComments: { enabled: false },
+  inspectorStubRealComments: { enabled: false, realInspector: false },
 }))
 vi.mock('../src/multitable/import/xlsx-mapping', async () => {
   const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
@@ -159,6 +162,8 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getAccessSnapshot: () => authAccessSnapshot,
     getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+    // #5813: read only by the real inspector's provenance section (opt-in `realInspector` harness).
+    hasPermission: () => false,
   }),
 }))
 
@@ -510,6 +515,7 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
 // pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
   const { default: RealMetaCommentsPanel } = await import('../src/shared/comments/components/MetaCommentsPanel.vue')
+  const { default: RealMetaRecordInspector } = await vi.importActual<{ default: Component }>('../src/multitable/components/MetaRecordInspector.vue')
   return {
   default: defineComponent({
     name: 'MetaRecordInspector',
@@ -542,11 +548,13 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       commentComposerInitialMentions: { type: Array, default: () => [] },
       currentUserId: { type: String, default: null },
       canComment: { type: Boolean, default: false },
+      // #5813: forwarded to the opt-in real inspector (its default tab / later switch to comments).
+      openComments: { type: Boolean, default: false },
     },
     emits: [
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
-      'comment-edit',
+      'comment-edit', 'comment-cancel-edit',
       // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the real inspector's copy-link icon
       // emits `copy-link`; the workbench owns the clipboard write (`onCopyRecordLink`). The
       // `data-copy-link` button below is this stub's stand-in for that icon.
@@ -569,6 +577,33 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
       inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
       inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
+      if (inspectorStubRealComments.realInspector) {
+        // #5813: stays mounted while hidden, like the real shell at the workbench call site.
+        const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
+        return h('div', { 'data-real-comments-panel': 'true', 'data-record-drawer': shownRecordId || undefined }, [
+          h(RealMetaRecordInspector, {
+            visible: this.$props.visible,
+            record: this.$props.record,
+            fields: [],
+            canEdit: false,
+            canComment: this.$props.canComment,
+            canDelete: false,
+            comments: this.$props.comments,
+            commentDraft: this.$props.commentDraft,
+            commentEditingId: this.$props.commentEditingId,
+            currentUserId: this.$props.currentUserId,
+            mentionSuggestions: this.$props.mentionSuggestions,
+            mentionSearch: this.$props.mentionSearch,
+            commentComposerInitialMentions: this.$props.commentComposerInitialMentions,
+            openComments: this.$props.openComments,
+            onCommentSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
+            onCommentEdit: (commentId: string) => this.$emit('comment-edit', commentId),
+            onCommentCancelEdit: () => this.$emit('comment-cancel-edit'),
+            onToggleComments: () => this.$emit('toggle-comments'),
+            'onUpdate:commentDraft': (value: string) => this.$emit('update:comment-draft', value),
+          }),
+        ])
+      }
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
       return h('div', {
@@ -1360,6 +1395,7 @@ describe('MultitableWorkbench view wiring', () => {
     inspectorStubSeen.fieldLayout = undefined
     inspectorStubSeen.fetchRecord = undefined
     inspectorStubRealComments.enabled = false
+    inspectorStubRealComments.realInspector = false
     gridStubSeen.fetchRecord = undefined
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -3124,6 +3160,352 @@ describe('MultitableWorkbench view wiring', () => {
         content: 'note for record two',
         mentions: [],
       }))
+    })
+
+    // #5813: the REAL inspector unmounts its comments tabpanel on every tab switch; the picked (or
+    // removed) mentions must come back with the tab, and still be cleared by a send / record switch /
+    // another edit — including one that happens while the comments tab is away.
+    describe('#5813 switching inspector tabs keeps the picked and removed mentions', () => {
+      const DISCARD_COMMENT_EDIT_PROMPT = 'Discard your unsaved edit to this comment?'
+
+      function inspectorTab(label: string): HTMLButtonElement {
+        const tab = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] [role="tab"]'))
+          .find((button) => button.textContent?.trim() === label)
+        expect(tab).toBeTruthy()
+        return tab!
+      }
+
+      function composerTextarea(): HTMLTextAreaElement | null {
+        return container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] .meta-comment-composer textarea')
+      }
+
+      async function switchToTab(label: string) {
+        inspectorTab(label).click()
+        await flushUi()
+      }
+
+      async function roundTripTabs(): Promise<HTMLTextAreaElement> {
+        await switchToTab('Details')
+        expect(composerTextarea()).toBeNull()
+        await switchToTab('Comments')
+        const textarea = composerTextarea()
+        expect(textarea).not.toBeNull()
+        return textarea!
+      }
+
+      async function mountRealInspector() {
+        inspectorStubRealComments.enabled = true
+        inspectorStubRealComments.realInspector = true
+        mountWorkbench()
+        await flushUi()
+      }
+
+      async function removeChip(label: string) {
+        const chip = Array.from(container!.querySelectorAll<HTMLButtonElement>('.meta-comment-composer__mention-chip'))
+          .find((button) => button.querySelector('span')?.textContent?.trim() === label)
+        expect(chip).toBeTruthy()
+        chip!.click()
+        await flushUi()
+      }
+
+      async function openEditInRealInspector(comment: Record<string, unknown>) {
+        commentsStateMock.comments.value = [...(commentsStateMock.comments.value as unknown[]), comment] as never
+        await flushUi()
+        const editButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+          .filter((button) => button.textContent?.trim() === 'Edit')
+          .at(-1)
+        expect(editButton).toBeTruthy()
+        editButton!.click()
+        await flushUi()
+      }
+
+      const apiComment = (id: string, content: string, mentions: string[], mentionLabels: Record<string, string>) => ({
+        id,
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content,
+        mentions,
+        mentionLabels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      it('new comment: a person picked before a tab switch is still mentioned after it', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        const textarea = await roundTripTabs()
+        expect(textarea.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+          targetId: 'rec_1',
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
+
+        // after the send, the next comment mentions nobody — tab switch or not
+        expect(composerChipLabels()).toEqual([])
+        const next = await roundTripTabs()
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(next, 'thanks everyone')
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+          content: 'thanks everyone',
+          mentions: [],
+        }))
+      })
+
+      it('edit: a mention removed before a tab switch stays removed and is not saved', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_api_5813',
+          'Please double-check the totals',
+          ['user_fake_robin', 'user_fake_gone'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+        await removeChip('@Robin Example')
+        expect(composerChipLabels()).toEqual(['@Unknown user'])
+
+        const textarea = await roundTripTabs()
+        expect(textarea.value).toBe('Please double-check the totals')
+        expect(composerChipLabels()).toEqual(['@Unknown user'])
+
+        await typeInto(textarea, 'Please double-check the totals!')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+        expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_5813', {
+          content: 'Please double-check the totals!',
+          mentions: ['user_fake_gone'],
+        })
+      })
+
+      it("edit: opening a different comment after a tab switch starts from that comment's mentions", async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_a', 'First', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        await removeChip('@Robin Example')
+        expect(composerChipLabels()).toEqual([])
+        await roundTripTabs()
+        expect(composerChipLabels()).toEqual([])
+
+        await openEditInRealInspector(apiComment('comment_b', 'Second', ['user_fake_robin', 'user_fake_sam'], {
+          user_fake_robin: 'Robin Example',
+          user_fake_sam: 'Sam Example',
+        }))
+        expect(composerTextarea()!.value).toBe('Second')
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+        await roundTripTabs()
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+      })
+
+      it('edit: the header Comments button ends the edit and clears its text, so no mention-less copy is sent', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_toggle_5813',
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        // the edit has text, so dropping it is confirmed first (accepted here)
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        try {
+          headerCommentsButton!.click()
+          await flushUi()
+          expect(confirmSpy.mock.calls).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+        } finally {
+          confirmSpy.mockRestore()
+        }
+
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      // #5813 final review: the header Comments button is also reachable from the Details tab, where
+      // the inspector does not switch back to Comments (the edit already set `openComments`), so the
+      // edited text must not vanish there without a question.
+      async function pressHeaderCommentsAnswering(answer: boolean): Promise<unknown[][]> {
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(answer)
+        try {
+          headerCommentsButton!.click()
+          await flushUi()
+          return confirmSpy.mock.calls.map((call) => [...call])
+        } finally {
+          confirmSpy.mockRestore()
+        }
+      }
+
+      async function openMentionEditThenGoToDetails(id: string) {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          id,
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await switchToTab('Details')
+        expect(composerTextarea()).toBeNull()
+      }
+
+      it('edit, from Details: cancelling the header Comments prompt keeps the edit, its text and its mention', async () => {
+        await openMentionEditThenGoToDetails('comment_keep_5813')
+
+        expect(await pressHeaderCommentsAnswering(false)).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await typeInto(textarea, 'Hi @Robin Example, thanks')
+        await submitComposer()
+        expect(addCommentSpy).not.toHaveBeenCalled()
+        expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+        expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_keep_5813', {
+          content: 'Hi @[Robin Example](user_fake_robin), thanks',
+          mentions: ['user_fake_robin'],
+        })
+      })
+
+      it('edit, from Details: accepting the header Comments prompt drops the edit, and the next send is a new comment', async () => {
+        await openMentionEditThenGoToDetails('comment_drop_5813')
+
+        expect(await pressHeaderCommentsAnswering(true)).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledTimes(1)
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('edit with an emptied text: the header Comments button ends it without asking', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_empty_5813', 'Totals', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        await typeInto(composerTextarea()!, '   ')
+        await switchToTab('Details')
+
+        expect(await pressHeaderCommentsAnswering(false)).toEqual([])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('new comment: the header Comments button keeps an unsent draft and its picked mention', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        // nothing is discarded on this path, so nothing is asked
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+        try {
+          container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')!.click()
+          await flushUi()
+          expect(confirmSpy).not.toHaveBeenCalled()
+        } finally {
+          confirmSpy.mockRestore()
+        }
+
+        expect(composerTextarea()!.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
+      })
+
+      it('a pick made before leaving the tab is not mentioned on the next record, switched to while the tab was away', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+        await switchToTab('Details')
+
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+        await flushUi()
+        confirmSpy.mockRestore()
+        expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'note for record two')
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_2',
+          content: 'note for record two',
+          mentions: [],
+        }))
+      })
+
+      it('an edit ended by a record switch while the tab was away does not carry its mentions into a new comment', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_c', 'Totals', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await switchToTab('Details')
+
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+        await flushUi()
+        confirmSpy.mockRestore()
+
+        await switchToTab('Comments')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(composerTextarea()!, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_2',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
     })
   })
 

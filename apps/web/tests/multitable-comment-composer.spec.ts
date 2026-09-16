@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, ref } from 'vue'
+import { createApp, h, nextTick, ref, shallowRef } from 'vue'
 import MetaCommentComposer from '../src/multitable/components/MetaCommentComposer.vue'
 
 describe('MetaCommentComposer', () => {
@@ -734,6 +734,168 @@ describe('MetaCommentComposer', () => {
       await submit()
       expect(submitSpy).toEqual([{ content: 'please look', mentions: [] }])
       app.unmount()
+    })
+  })
+
+  // #5813: a host that unmounts the composer (the record inspector's comments tab) keeps its selection.
+  describe('a host-kept selection survives a remount (#5813)', () => {
+    type Mention = { id: string; label: string; unresolved?: boolean }
+    type Selection = { initialMentions: readonly Mention[]; mentions: Mention[]; textBoundIds: string[] }
+
+    function chipLabels(): string[] {
+      return Array.from(container!.querySelectorAll('.meta-comment-composer__mention-chip span:first-child'))
+        .map((node) => node.textContent?.trim() ?? '')
+    }
+
+    async function type(value: string) {
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      textarea.value = value
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+    }
+
+    async function pickFirstSuggestion(expected: string) {
+      const suggestion = container!.querySelector('.meta-comment-composer__suggestion') as HTMLButtonElement | null
+      expect(suggestion?.textContent).toContain(expected)
+      suggestion!.click()
+      await nextTick()
+    }
+
+    async function submit() {
+      ;(container!.querySelector('.meta-comment-composer__submit') as HTMLButtonElement).click()
+      await nextTick()
+    }
+
+    const NO_INITIAL: Mention[] = []
+
+    function mountTabbedHost(options: { keepSelection: boolean; initial?: Mention[]; draft?: string }) {
+      const shown = ref(true)
+      const draft = ref(options.draft ?? '')
+      const initialMentions = shallowRef<Mention[]>(options.initial ?? NO_INITIAL)
+      const kept = shallowRef<Selection | null>(null)
+      const events: Selection[] = []
+      const submitSpy: Array<{ content: string; mentions: string[] }> = []
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        setup() {
+          return () => (shown.value
+            ? h(MetaCommentComposer, {
+              modelValue: draft.value,
+              initialMentions: initialMentions.value,
+              suggestions: [{ id: 'user_jamie', label: 'Jamie' }],
+              // the prop is what opts in; the listener is there either way, to prove nothing is sent without it
+              ...(options.keepSelection ? { mentionSelection: kept.value } : {}),
+              'onUpdate:mentionSelection': (value: Selection) => {
+                events.push(value)
+                if (options.keepSelection) kept.value = value
+              },
+              'onUpdate:modelValue': (value: string) => {
+                draft.value = value
+              },
+              onSubmit: (payload: { content: string; mentions: string[] }) => {
+                submitSpy.push(payload)
+              },
+            })
+            : null)
+        },
+      })
+      app.mount(container)
+      const remount = async (between?: () => void) => {
+        shown.value = false
+        await nextTick()
+        expect(container!.querySelector('textarea')).toBeNull()
+        between?.()
+        shown.value = true
+        await nextTick()
+      }
+      return { app, draft, initialMentions, kept, events, submitSpy, remount }
+    }
+
+    it('reports nothing unless the host opts in, and reports every change when it does', async () => {
+      const plain = mountTabbedHost({ keepSelection: false })
+      await nextTick()
+      await type('@ja')
+      await pickFirstSuggestion('Jamie')
+      expect(plain.events).toEqual([])
+      // a host that does not keep the selection still loses it on a remount, as before
+      await plain.remount()
+      expect(chipLabels()).toEqual([])
+      plain.app.unmount()
+      container!.remove()
+
+      const keeping = mountTabbedHost({ keepSelection: true })
+      await nextTick()
+      expect(keeping.events.at(-1)).toEqual({ initialMentions: NO_INITIAL, mentions: [], textBoundIds: [] })
+      expect(keeping.events.at(-1)!.initialMentions).toBe(NO_INITIAL)
+      await type('@ja')
+      await pickFirstSuggestion('Jamie')
+      expect(keeping.events.at(-1)).toEqual({
+        initialMentions: NO_INITIAL,
+        mentions: [{ id: 'user_jamie', label: 'Jamie' }],
+        textBoundIds: ['user_jamie'],
+      })
+      keeping.app.unmount()
+    })
+
+    it('a pick comes back after a remount, and still follows its text afterwards', async () => {
+      const host = mountTabbedHost({ keepSelection: true })
+      await nextTick()
+      await type('@ja')
+      await pickFirstSuggestion('Jamie')
+      await host.remount()
+      expect(chipLabels()).toEqual(['@Jamie'])
+      await submit()
+      expect(host.submitSpy).toEqual([{ content: '@[Jamie](user_jamie)', mentions: ['user_jamie'] }])
+      // restored as text-bound: deleting its text drops it
+      await type('never mind')
+      expect(chipLabels()).toEqual([])
+      host.app.unmount()
+    })
+
+    it('a draft cleared while unmounted drops the picks tied to it', async () => {
+      const host = mountTabbedHost({ keepSelection: true })
+      await nextTick()
+      await type('@ja')
+      await pickFirstSuggestion('Jamie')
+      await host.remount(() => {
+        host.draft.value = ''
+      })
+      expect(chipLabels()).toEqual([])
+      await type('note')
+      await submit()
+      expect(host.submitSpy).toEqual([{ content: 'note', mentions: [] }])
+      host.app.unmount()
+    })
+
+    it('a removed edit mention stays removed after a remount, and a new initialMentions array resets the selection', async () => {
+      const robin = { id: 'user_fake_robin', label: 'Robin Example' }
+      const gone = { id: 'user_fake_gone', label: '', unresolved: true }
+      const host = mountTabbedHost({ keepSelection: true, initial: [robin, gone], draft: 'Totals' })
+      await nextTick()
+      expect(chipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+      ;(container!.querySelector('.meta-comment-composer__mention-chip') as HTMLButtonElement).click()
+      await nextTick()
+      expect(chipLabels()).toEqual(['@Unknown user'])
+
+      await host.remount()
+      expect(chipLabels()).toEqual(['@Unknown user'])
+      await submit()
+      expect(host.submitSpy).toEqual([{ content: 'Totals', mentions: ['user_fake_gone'] }])
+
+      // another edit (a new snapshot array) started while unmounted: its own mentions, not the kept ones
+      await host.remount(() => {
+        host.initialMentions.value = [robin]
+        host.draft.value = 'Other'
+      })
+      expect(chipLabels()).toEqual(['@Robin Example'])
+      // the edit ended while unmounted (the shared empty array again): nothing is kept
+      await host.remount(() => {
+        host.initialMentions.value = NO_INITIAL
+        host.draft.value = ''
+      })
+      expect(chipLabels()).toEqual([])
+      host.app.unmount()
     })
   })
 })

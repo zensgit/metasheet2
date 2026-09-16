@@ -436,6 +436,8 @@
           :mention-suggestions="mentionSuggestions"
           :mention-search="mentionSearch"
           :composer-initial-mentions="commentComposerInitialMentions"
+          :composer-mention-selection="commentMentionSelection"
+          @update:composer-mention-selection="onCommentMentionSelection"
           @submit="(payload: { content: string; mentions: string[] }) => emit('comment-submit', payload)"
           @resolve="(commentId: string) => emit('comment-resolve', commentId)"
           @reply="(commentId: string) => emit('comment-reply', commentId)"
@@ -514,7 +516,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
 import { RouterLink, routerKey } from 'vue-router'
 import type {
   LinkedRecordSummary,
@@ -535,6 +537,7 @@ import type {
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import type { MetaCommentMentionSelection } from '../../shared/comments/types'
 import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
@@ -892,6 +895,16 @@ const activeTab = ref<InspectorTab>(resolveDefaultTab())
 watch(() => props.openComments, (isOpen) => {
   if (isOpen) activeTab.value = 'comments'
 })
+
+// #5813: the comments tabpanel is `v-else-if`, so every tab switch unmounts the comment composer. The
+// draft lives in the workbench and survives; the composer's picked (or removed) mentions are kept here,
+// in this always-mounted shell, and handed back when the tab remounts. The composer itself decides
+// whether they still apply (same `initialMentions`, text-bound chips still in the draft), so a send, a
+// record switch or another edit made while the tab was away clears them as it does on the tab.
+const commentMentionSelection = shallowRef<MetaCommentMentionSelection | null>(null)
+function onCommentMentionSelection(value: MetaCommentMentionSelection) {
+  commentMentionSelection.value = value
+}
 const tabRefs = ref<Partial<Record<InspectorTab, HTMLButtonElement | null>>>({})
 const inspectorId = useId()
 

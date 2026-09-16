@@ -3008,7 +3008,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     const { app } = await createApp({
       tokenPerms: [],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200')) {
+        if (sql.includes("SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200")) {
           return {
             rows: [
               { id: 'sheet_allowed', base_id: 'base_allowed', name: 'Visible Orders', description: 'Ops records' },
@@ -3060,7 +3060,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200')) {
+        if (sql.includes("SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200")) {
           return {
             rows: [
               { id: 'sheet_allowed', base_id: 'base_allowed', name: 'Visible Orders', description: 'Ops records' },
