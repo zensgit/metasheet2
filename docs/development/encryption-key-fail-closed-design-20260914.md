@@ -126,14 +126,27 @@ session-scoped 的，看不见 nssm 服务自己的 `AppEnvironmentExtra`，把�
    不能拿 `validate-windows-runtime.ps1` 的退出码当依据：它对默认哨兵值只 WARN、仍然 exit 0（见 §5）。
    也不能拿健康检查当依据：缺材料时进程照样起得来（见「延迟爆炸形状」）。
 3. **如果某套生产环境此前一直在用内置默认密钥**（即 env 里没配），那里已有的 `enc:` 密文是用默认密钥加
-   的。直接补上新的 `ENCRYPTION_KEY` 会让这些旧密文解不开（authTag 校验失败）。迁移路径二选一：
-   - 在仍未设置 env 的进程里调
-     `SecretManager.rotateKey(DEFAULT_ENCRYPTION_KEY, 新密钥, { newSalt: 新盐 })`，它会用默认材料读、用
-     新材料写；跑完再把新值写进服务环境（见 §3 的 F1 说明）；或
-   - 用 `packages/core-backend/scripts/encrypt-dingtalk-*-secrets.ts` 那套流程重新落密文。
+   的。直接补上新的 `ENCRYPTION_KEY` 会让这些旧密文解不开（authTag 校验失败）。
+   **⚠️ 这类部署目前没有经验证的迁移通道，暂停升级。**（2026-09-16 owner 审阅 F1 更正；初版曾把
+   `rotateKey` 写成可执行的升级方案，那是错的。）
 
-   注意 `rotateKey` 只覆盖 `system_configs` 表。钉钉 / 数据源 / 考勤集成的密文在各自的表里，需要各自的
-   重加密流程。这些都需要停机窗口和 owner 决策，**不在本次改动范围内**。
+   原因是 `system_configs` 的**存储格式与 `rotateKey` 的读写口不匹配**，且该缺陷在 merge-base 就已存在、
+   不是本 PR 引入：
+   - 正常读口 `ConfigService.decryptValue()`（`:474-478`）先剥掉 `enc:` 前缀再解密；
+   - 但 `rotateKey`（`:526`）把**带前缀的整值**直接交给 `decrypt()`（它期待裸 base64）→ 真实 `enc:` 行
+     在轮换第一步就抛 `Failed to decrypt value`，零更新；
+   - 即使绕过读这一步，回写用的 `encrypt()` 返回的是**裸 base64、不带 `enc:` 前缀**，写回后正常读口会
+     把它当明文原样返回 → 配置读出来是乱码/undefined。
+   - 本 PR 新增的 `encryption-material-fail-closed.test.ts:380-401` 只验证了 `SecretManager` 直接
+     解密，**没有**验证经正常配置读口的往返——所以它绿不能证明迁移可用。
+
+   `packages/core-backend/scripts/encrypt-dingtalk-*-secrets.ts` 也**不是**旧密文轮换工具：它们是明文
+   回填脚本，遇到已有 `enc:` 会跳过，换新材料后还会在 canary 检查处拒绝。
+
+   要让这类部署可升级，需要另开一单，并给出三样端到端证据：真实存储格式（带前缀）的读取、轮换后经
+   **正常配置读口**的往返、以及失败回滚。**在那之前，不要仅因本 PR 的 helper 测试通过就去换生产
+   KEY/SALT。** 另注：`rotateKey` 本来也只覆盖 `system_configs`，钉钉 / 数据源 / 考勤集成的密文在各自
+   的表里，各需各自的重加密流程。
 4. 长度建议 ≥32 字符随机值；代码不强制，`validate-windows-runtime.ps1` 只会 WARN。
 
 ## 7. 没做 / 留给后续

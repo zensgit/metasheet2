@@ -288,3 +288,11 @@ M4（去掉 `encrypt/decrypt` 的重抛）重跑：**4 failed / 26 passed**（�
 建议后续给前三个加 die、给最后一个加"模板必须声明 `ENCRYPTION_KEY=` / `ENCRYPTION_SALT=`"的断言。
 本 PR 内该契约由 `tests/unit/deploy-template-encryption-material.test.ts` 单独守住，但那是 CI 侧，
 **不覆盖装机现场**。
+
+## owner 审阅返修（2026-09-16，F1）
+
+- **未验证的断言已撤回**：设计文档第 3 条原来把 `SecretManager.rotateKey(默认材料, 新密钥, { newSalt })` 写成默认密钥部署的升级路径。实证不成立：`ConfigService.ts:526` 把**带 `enc:` 前缀的整值**交给期待裸 base64 的 `decrypt()`（真实行第一步即抛 `Failed to decrypt value`、零更新），而回写用的 `encrypt()` 返回**裸 base64、无前缀**，写回后正常读口 `decryptValue()`（`:474-478`）会把它当明文原样返回。两处都断。
+- **本 PR 新增用例的覆盖边界**：`encryption-material-fail-closed.test.ts:380-401` 的轮换用例走的是 `SecretManager` 直接解密，**不经正常配置读口**，因此它绿**不能**背书迁移可用——这一点原验证文档没写清，现补。
+- **归因**：格式不匹配在 merge-base 已存在，不是本 PR 引入的运行时回归；本 PR 的错误是把它写成了可执行方案。
+- **现结论**：默认材料部署**暂停升级**，迁移通道另开一单，验收须含「带前缀存储格式的读取 + 轮换后经正常读口往返 + 失败回滚」三项端到端证据。
+
