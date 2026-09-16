@@ -113,7 +113,7 @@ const ROUTES: Array<{ name: string; send: (a: Agent) => request.Test; forbidden:
  * table plus this list must equal the closed-world scan, so a new AI route reds here until it is placed.
  */
 const COVERED_ELSEWHERE: Record<string, string> = {
-  'POST /sheets/:sheetId/ai/shortcut/preview': 'per-record gate requireRecordReadable (routes/univer-meta.ts), vetted by the closed-world guard; its liveness-before-403 order is the guard RECORD_GATE_ORDER_GAP',
+  'POST /sheets/:sheetId/ai/shortcut/preview': 'per-record gate requireRecordReadable (routes/univer-meta.ts), vetted by the closed-world guard under the route order rule (403 before 404); behaviour in multitable-record-gate-capability-before-liveness.test.ts',
   'POST /sheets/:sheetId/ai/shortcut/run': 'per-record gate requireRecordReadable, as preview',
   'GET /sheets/:sheetId/ai/shortcut/bulk-job/:jobId': 'exempt by name in the closed-world guard: the caller-owned job, kept readable after a delete',
   'GET /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/rows': 'exempt by name in the closed-world guard: the caller-owned job rows',

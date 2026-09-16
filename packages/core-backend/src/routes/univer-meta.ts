@@ -174,6 +174,7 @@ import { checkDisplayNameHygiene } from '../multitable/display-name-hygiene'
 import {
   SHEET_DELETED_CODE,
   SHEET_DELETED_MESSAGE,
+  SHEET_NOT_FOUND_MESSAGE,
   SheetNotLiveError,
   assertSheetLive,
 } from '../multitable/sheet-liveness'
@@ -4636,6 +4637,32 @@ export async function requireRecordReadable(
   capabilityOrigin: MultitableCapabilityOrigin
   sheetScope?: SheetPermissionScope
 } | { status: number; body: unknown }> {
+  // ORDER (#5830): authority, then sheet liveness, then the record. The capability lookup is the FIRST
+  // thing this gate does, and a caller it refuses (401/403) learns nothing else: the same answer for a
+  // live, a soft-deleted and an absent sheet, and for a record that exists or not — no record row is
+  // read on their behalf. Only a caller who may read this sheet is told that it is gone (404) or that
+  // the record is not on it (404). Every route that relies on this gate alone inherits the order.
+  const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  if (!access.userId) {
+    return { status: 401, body: { error: 'Authentication required' } }
+  }
+  if (!capabilities.canRead) {
+    return {
+      status: 403,
+      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+    }
+  }
+  // Soft delete: the record row survives a sheet delete, so the record check below cannot stand in for
+  // "this sheet is still a thing". Guarding HERE covers every record-addressed caller of this helper at
+  // once (subscriptions, record history, duplicate's source read, restore previews) rather than leaving
+  // each to remember. The absent-sheet body is the shared values-free one (sheet-refusals.ts), because
+  // with the record check no longer ahead of it this is the answer an absent sheet actually gets.
+  if (sheetLiveness !== 'live') {
+    return sheetLiveness === 'deleted'
+      ? { status: 404, body: { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } } }
+      : { status: 404, body: { ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } } }
+  }
+
   const recordCheck = await query(
     'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [recordId, sheetId],
@@ -4644,26 +4671,6 @@ export async function requireRecordReadable(
     return {
       status: 404,
       body: { ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } },
-    }
-  }
-
-  const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
-  // Soft delete: the record row survives a sheet delete, so the existence check above can no longer
-  // stand in for "this sheet is still a thing". Guarding HERE covers every record-addressed caller of
-  // this helper at once (subscriptions, record history, duplicate's source read, restore previews)
-  // rather than leaving each to remember.
-  if (sheetLiveness !== 'live') {
-    return sheetLiveness === 'deleted'
-      ? { status: 404, body: { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } } }
-      : { status: 404, body: { ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } } }
-  }
-  if (!access.userId) {
-    return { status: 401, body: { error: 'Authentication required' } }
-  }
-  if (!capabilities.canRead) {
-    return {
-      status: 403,
-      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
     }
   }
 
