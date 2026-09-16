@@ -9,6 +9,8 @@ import {
   greetingHeadline,
   isClockedIn,
   parseClockHour,
+  resolveHeroPunchEmphasis,
+  resolveTodoMark,
   suggestOffDutyTime,
   workWindowShortLabel,
 } from '../src/views/attendance/attendanceEmployeeWorkspacePresentation'
@@ -89,6 +91,24 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(isClockedIn(null)).toBe(false)
   })
 
+  it('emphasizes the next punch CTA without inventing a third action', () => {
+    expect(resolveHeroPunchEmphasis(null)).toBe('check_in')
+    expect(resolveHeroPunchEmphasis({ checkIn: null, checkOut: null })).toBe('check_in')
+    expect(resolveHeroPunchEmphasis({ checkIn: '09:18', checkOut: null })).toBe('check_out')
+    expect(resolveHeroPunchEmphasis({ checkIn: '09:18', checkOut: '18:02' })).toBe('complete')
+  })
+
+  it('keeps the makeup 面性 icon on 缺卡 / anomaly rows and varies other todo marks', () => {
+    expect(resolveTodoMark('anomaly')).toEqual({ icon: 'clock-plus', tone: 'makeup' })
+    expect(resolveTodoMark('punch_failure')).toEqual({ icon: 'clock-plus', tone: 'makeup' })
+    expect(resolveTodoMark('request_pending')).toEqual({ icon: 'calendar', tone: 'leave' })
+    expect(resolveTodoMark('request_rejected')).toEqual({ icon: 'calendar', tone: 'leave' })
+    expect(resolveTodoMark('record_review')).toEqual({ icon: 'pin', tone: 'review' })
+    expect(resolveTodoMark('setup_needed')).toEqual({ icon: 'user', tone: 'setup' })
+    expect(resolveTodoMark('all_clear')).toEqual({ icon: 'check', tone: 'clear' })
+    expect(resolveTodoMark('unknown_status')).toEqual({ icon: 'pin', tone: 'review' })
+  })
+
   it('renders work dates and punch clocks in the resolved attendance rule timezone', () => {
     const instant = new Date('2026-09-10T19:15:49.000Z')
     expect(formatAttendanceDateKey(instant, 'Asia/Shanghai')).toBe('2026-09-11')
@@ -118,12 +138,87 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     app.mount(container)
     await nextTick()
 
-    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toBe('Clocked out')
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked out')
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('complete')
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance__btn--hero')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance__btn--primary')).toBe(true)
     const metricText = container.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
     expect(metricText).toContain('In09:18')
     expect(metricText).toContain('Out18:02')
     expect(metricText).toContain('Hours')
     expect(metricText).not.toContain("Today's hours")
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('promotes Check Out as the next CTA after an open check-in', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('empty'),
+      tr: en,
+      heroTimeline: { checkIn: '09:18', checkOut: null },
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance-ew__punch-btn--rest')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.classList.contains('attendance-ew__punch-btn--next')).toBe(true)
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('check_out')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('keeps first-viewport IA: punch next-action, anomaly makeup mark, empty request footer, 常用 after primary', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('missing'),
+      tr: zh,
+    })
+    app.mount(container)
+    await nextTick()
+
+    const primary = container.querySelector('[data-attendance-overview-primary]')
+    const common = container.querySelector('[data-selfservice-card="actions"]')
+    expect(primary?.contains(container.querySelector('[data-testid="attendance-hero-punch"]')!)).toBe(true)
+    expect(primary?.contains(container.querySelector('[data-attendance-overview-attention]')!)).toBe(true)
+    expect(primary?.contains(container.querySelector('[data-selfservice-card="requests"]')!)).toBe(true)
+    expect(primary?.contains(common)).toBe(false)
+    expect(common?.previousElementSibling).toBe(primary)
+
+    const todoMark = container.querySelector('[data-attendance-todo-mark]')
+    expect(todoMark?.getAttribute('data-attendance-todo-tone')).toBe('makeup')
+    expect(todoMark?.textContent?.trim()).toBe('')
+    expect(todoMark?.querySelector('svg')).toBeTruthy()
+    expect(container.querySelector('[data-attendance-todo-empty]')).toBeNull()
+    expect(container.querySelector('[data-attendance-request-empty]')?.textContent).toContain('暂无待审批')
+    expect(container.querySelector('[data-selfservice-action="missing-punch"]')?.querySelector('.attendance-ew__tile-label')?.textContent).toContain('补卡')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('renders a calm empty 今日待办 with a check mark, not the makeup icon', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('normal'),
+      tr: zh,
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-attendance-todo-empty]')).toBeTruthy()
+    expect(container.querySelector('[data-attendance-todo-mark]')?.getAttribute('data-attendance-todo-tone')).toBe('clear')
+    expect(container.querySelector('[data-attendance-overview-attention]')?.textContent).toContain('当前已处理完毕')
+    expect(container.querySelector('[data-attendance-overview-attention-action]')).toBeNull()
 
     app.unmount()
     container.remove()

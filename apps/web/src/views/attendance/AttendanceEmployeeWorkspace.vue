@@ -18,23 +18,26 @@
   after this component so the reports-only sections between them (zero DOM
   nodes in overview mode) do not break that adjacency.
 
-  `afterCommon` is a layout-only slot immediately below the frozen 常用
-  band. The parent owns any dedicated request card; this component still
-  fetches nothing and does not restyle the first viewport.
+  `afterCommon` is a layout-only slot immediately below the 常用 band.
+  The parent owns any dedicated request card; this component still
+  fetches nothing and does not own those write paths.
 
   Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
   DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.
 
-  Owner lock (2026-08-24): first-viewport IA is frozen.
+  Owner lock (2026-08-24, IA only): first-viewport *layout* stays
   Desktop: punch|待办 + compact 申请 footer; 常用 full-width below.
   Mobile: punch → 待办+申请 footer → 常用.
-  缺卡 row uses the makeup 面性 icon; never the character 缺.
-  No employee 自定义. Admin-only icon settings. Do not restyle further.
+  缺卡 / anomaly rows use the makeup 面性 icon; never the character 缺.
+  No employee 自定义. Admin-only icon settings.
+
+  Visual unfreeze (2026-09-16): polish hierarchy / spacing / empty
+  states / punch CTA emphasis / 常用 tiles only. Do not change IA,
+  afterCommon wiring, or dedicated-card behavior.
 
   Below-the-fold follow-up (owner, 2026-08-25): history filters stay a
   collapsed-by-default disclosure (OD-O2) but show the active range while
-  closed; expanded fields use a wrap-safe toolbar. Do not restyle the
-  locked first viewport.
+  closed; expanded fields use a wrap-safe toolbar.
 -->
 <template>
   <div class="attendance-ew">
@@ -56,11 +59,21 @@
         <div class="attendance-ew__hero-top">
           <div class="attendance__hero-clock">
             <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
-            <p class="attendance-ew__clock-status">{{ clockStatusLine }}</p>
+            <p class="attendance-ew__clock-status" :data-attendance-clock-state="punchEmphasis">
+              <span
+                class="attendance-ew__clock-dot"
+                :class="`attendance-ew__clock-dot--${punchEmphasis}`"
+                aria-hidden="true"
+              />
+              {{ clockStatusLine }}
+            </p>
           </div>
           <div class="attendance__actions attendance__hero-actions">
             <button
               class="attendance__btn attendance__btn--primary attendance__btn--hero"
+              :class="punchButtonClass('check_in')"
+              data-attendance-hero-cta="check_in"
+              :data-attendance-hero-next="punchEmphasis === 'check_in' ? 'true' : undefined"
               :disabled="punching"
               @click="$emit('punch', 'check_in')"
             >
@@ -68,6 +81,9 @@
             </button>
             <button
               class="attendance__btn attendance__btn--hero-secondary"
+              :class="punchButtonClass('check_out')"
+              data-attendance-hero-cta="check_out"
+              :data-attendance-hero-next="punchEmphasis === 'check_out' ? 'true' : undefined"
               :disabled="punching"
               @click="$emit('punch', 'check_out')"
             >
@@ -199,16 +215,31 @@
       <div
         v-if="attentionItem.key === 'all_clear'"
         class="attendance-ew__todo-empty"
+        data-attendance-todo-empty
       >
-        <strong>{{ attentionItem.title }}</strong>
-        <p>{{ attentionItem.detail }}</p>
+        <span
+          class="attendance-ew__todo-mark"
+          :class="`attendance-ew__todo-mark--${todoMark.tone}`"
+          data-attendance-todo-mark
+          :data-attendance-todo-tone="todoMark.tone"
+          aria-hidden="true"
+        >
+          <AttendanceEmployeeCommonIcon :name="todoMark.icon" />
+        </span>
+        <div class="attendance-ew__todo-copy">
+          <strong>{{ attentionItem.title }}</strong>
+          <p>{{ attentionItem.detail }}</p>
+        </div>
       </div>
       <div v-else class="attendance-ew__todo-row">
         <span
-          class="attendance-ew__todo-mark attendance-ew__todo-mark--makeup"
+          class="attendance-ew__todo-mark"
+          :class="`attendance-ew__todo-mark--${todoMark.tone}`"
+          data-attendance-todo-mark
+          :data-attendance-todo-tone="todoMark.tone"
           aria-hidden="true"
         >
-          <AttendanceEmployeeCommonIcon name="clock-plus" />
+          <AttendanceEmployeeCommonIcon :name="todoMark.icon" />
         </span>
         <div class="attendance-ew__todo-copy">
           <strong>{{ attentionItem.title }}</strong>
@@ -227,14 +258,17 @@
 
       <div class="attendance-ew__request-footer" data-selfservice-card="requests">
         <div class="attendance-ew__request-footer-row">
-          <div>
-            <h3>{{ tr('My applications', '我的申请') }}</h3>
-            <small v-if="hasRequestBody" class="attendance__field-hint">
-              {{ tr('Summarizes the current request backlog from the visible date range.', '汇总当前可见日期区间内的申请处理状态。') }}
-            </small>
-          </div>
-          <strong v-if="hasRequestBody">{{ requestsTotal }}</strong>
-          <span v-else class="attendance-ew__request-empty">{{ tr('No pending approvals', '暂无待审批') }}</span>
+          <h3>{{ tr('My applications', '我的申请') }}</h3>
+          <strong
+            v-if="hasRequestBody"
+            class="attendance-ew__request-count"
+            data-attendance-request-count
+          >{{ requestsTotal }}</strong>
+          <span
+            v-else
+            class="attendance-ew__request-empty"
+            data-attendance-request-empty
+          >{{ tr('No pending approvals', '暂无待审批') }}</span>
         </div>
         <template v-if="hasRequestBody">
           <div class="attendance__chip-list">
@@ -319,7 +353,7 @@
             <span class="attendance-ew__tile-icon" :class="`attendance-ew__tile-icon--${tile.tone}`" aria-hidden="true">
               <AttendanceEmployeeCommonIcon :name="tile.icon" />
             </span>
-            <span>{{ tile.label }}</span>
+            <span class="attendance-ew__tile-label">{{ tile.label }}</span>
           </button>
         </div>
         <p class="attendance-ew__common-hint">{{ selfServiceQuickActionHint }}</p>
@@ -476,6 +510,8 @@ import {
   formatWorkDurationMinutes,
   greetingHeadline,
   isClockedIn,
+  resolveHeroPunchEmphasis,
+  resolveTodoMark,
   suggestOffDutyTime,
   workWindowShortLabel,
 } from './attendanceEmployeeWorkspacePresentation'
@@ -678,6 +714,17 @@ const clockedIn = computed(() => isClockedIn(props.heroTimeline))
 
 const clockedOut = computed(() => Boolean(props.heroTimeline?.checkOut))
 
+const punchEmphasis = computed(() => resolveHeroPunchEmphasis(props.heroTimeline))
+
+const todoMark = computed(() => resolveTodoMark(props.attentionItem.key))
+
+function punchButtonClass(which: 'check_in' | 'check_out'): string {
+  if (punchEmphasis.value === 'complete') return 'attendance-ew__punch-btn--rest'
+  return punchEmphasis.value === which
+    ? 'attendance-ew__punch-btn--next'
+    : 'attendance-ew__punch-btn--rest'
+}
+
 const offDutySuggest = computed(() => suggestOffDutyTime(props.selfRulesWorkWindowSummary))
 const workbenchHoursLabel = computed(() => props.workbenchFocusDateLabel
   ? `${props.tr('Hours', '工时')} · ${props.workbenchFocusDateLabel}`
@@ -723,8 +770,8 @@ const hasRequestBody = computed(() =>
 </script>
 
 <style scoped>
-/* Employee-workspace chrome only. First viewport: desktop punch|待办+申请 footer,
-   常用 full-width below; mobile punch → 待办+申请 footer → 常用. */
+/* Employee-workspace chrome only. First-viewport IA: desktop punch|待办+申请
+   footer, 常用 full-width below; mobile punch → 待办+申请 footer → 常用. */
 .attendance-ew {
   display: flex;
   flex-direction: column;
@@ -783,10 +830,34 @@ const hasRequestBody = computed(() =>
 }
 
 .attendance-ew__clock-status {
-  margin: 6px 0 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.4;
   color: #646a73;
+}
+
+.attendance-ew__clock-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c9cdd4;
+}
+
+.attendance-ew__clock-dot--check_in {
+  background: #ff7d00;
+}
+
+.attendance-ew__clock-dot--check_out {
+  background: #3370ff;
+  box-shadow: 0 0 0 4px rgba(51, 112, 255, 0.16);
+}
+
+.attendance-ew__clock-dot--complete {
+  background: #00b42a;
 }
 
 .attendance-ew__metrics {
@@ -794,8 +865,8 @@ const hasRequestBody = computed(() =>
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  padding-top: 14px;
-  margin-top: 4px;
+  padding-top: 12px;
+  margin-top: 6px;
   border-top: 1px solid rgba(31, 35, 41, 0.06);
 }
 
@@ -873,6 +944,23 @@ const hasRequestBody = computed(() =>
   background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
 }
 
+.attendance-ew__todo-mark--leave {
+  background: linear-gradient(180deg, #34c759 0%, #00b42a 100%);
+}
+
+.attendance-ew__todo-mark--review {
+  background: linear-gradient(180deg, #ff9a2e 0%, #ff7d00 100%);
+}
+
+.attendance-ew__todo-mark--setup {
+  background: linear-gradient(180deg, #86909c 0%, #646a73 100%);
+}
+
+.attendance-ew__todo-mark--clear {
+  background: #e8ffea;
+  color: #00b42a;
+}
+
 .attendance-ew__todo-mark :deep(svg) {
   width: 18px;
   height: 18px;
@@ -903,15 +991,28 @@ const hasRequestBody = computed(() =>
 .attendance-ew__todo-link {
   flex: 0 0 auto;
   border: none;
-  background: none;
-  padding: 0;
+  background: #e8f3ff;
+  padding: 6px 12px;
+  border-radius: 999px;
   color: #3370ff;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
 
+.attendance-ew__todo-link:hover {
+  background: #d6e8ff;
+}
+
+.attendance-ew__todo-link:focus-visible {
+  outline: 2px solid #3370ff;
+  outline-offset: 2px;
+}
+
 .attendance-ew__todo-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -921,7 +1022,7 @@ const hasRequestBody = computed(() =>
   border-top: 1px solid rgba(31, 35, 41, 0.06);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -940,17 +1041,42 @@ const hasRequestBody = computed(() =>
   color: #1f2329;
 }
 
+.attendance-ew__request-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #e8f3ff;
+  color: #3370ff;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 20px;
+  text-align: center;
+}
+
 .attendance-ew__request-empty {
   color: #8f959e;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .attendance-ew__common {
   min-width: 0;
 }
 
-.attendance-ew__common-hint {
+.attendance-ew__common .attendance__requests-header {
   margin: 0;
+}
+
+.attendance-ew__common h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: #1f2329;
+}
+
+.attendance-ew__common-hint {
+  margin: 2px 0 0;
   color: #8f959e;
   font-size: 12px;
   line-height: 1.4;
@@ -980,13 +1106,38 @@ const hasRequestBody = computed(() =>
   gap: 8px;
   width: 100%;
   min-width: 0;
-  padding: 4px 0;
+  min-height: 88px;
+  padding: 8px 4px 6px;
   border: none;
+  border-radius: 14px;
   background: transparent;
   color: #1f2329;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.3;
   cursor: pointer;
+}
+
+.attendance-ew__tile:hover {
+  background: #f7f9fc;
+}
+
+.attendance-ew__tile:hover .attendance-ew__tile-icon {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 16px rgba(31, 45, 82, 0.18);
+}
+
+.attendance-ew__tile:active .attendance-ew__tile-icon {
+  transform: translateY(0);
+}
+
+.attendance-ew__tile:focus-visible {
+  outline: 2px solid #3370ff;
+  outline-offset: 2px;
+}
+
+.attendance-ew__tile-label {
+  font-weight: 600;
+  color: #1f2329;
 }
 
 .attendance-ew__tile-icon {
@@ -998,6 +1149,7 @@ const hasRequestBody = computed(() =>
   justify-content: center;
   color: #fff;
   box-shadow: 0 6px 14px rgba(31, 45, 82, 0.14);
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
 }
 
 .attendance-ew__tile-icon :deep(svg) {
@@ -1200,7 +1352,7 @@ const hasRequestBody = computed(() =>
   border: none;
   border-radius: 12px;
   background: #f7f9fc;
-  padding: 12px;
+  padding: 10px 12px;
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -1254,10 +1406,10 @@ const hasRequestBody = computed(() =>
 }
 
 .attendance__chip-list {
-  margin-top: 10px;
+  margin-top: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .attendance__status-chip {
@@ -1331,7 +1483,7 @@ const hasRequestBody = computed(() =>
   flex-direction: column;
   gap: 4px;
   min-width: 0;
-  padding: 20px 22px 16px;
+  padding: 22px 22px 16px;
   border: none;
   border-radius: 18px;
   background: #fff;
@@ -1380,6 +1532,26 @@ const hasRequestBody = computed(() =>
   background: #e8f3ff;
   color: #3370ff;
   box-shadow: none;
+}
+
+.attendance-ew__punch-btn--next {
+  background: linear-gradient(180deg, #4c83ff 0%, #3370ff 100%);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(51, 112, 255, 0.28);
+  font-weight: 650;
+}
+
+.attendance-ew__punch-btn--rest {
+  background: #f2f3f5;
+  border-color: transparent;
+  color: #646a73;
+  box-shadow: none;
+}
+
+.attendance-ew__punch-btn--rest.attendance__btn--primary {
+  background: #f2f3f5;
+  color: #646a73;
 }
 
 .attendance__hero-timeline-node {
