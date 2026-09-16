@@ -1094,6 +1094,52 @@ describe('CommentService', () => {
           expect(chain.limit.mock.calls[0][0]).toBe(51)
         }
       })
+
+      // #5809 — the legacy person importer's email-owner lookup. It must be EQUALITY on the trimmed,
+      // lower-cased email only: a substring page of 50 can be filled by `wangli@…` before `li@…`.
+      describe('#5809 match: exact-email', () => {
+        function whereFragments(chain: Chain): Array<{ text: string; params: unknown[] }> {
+          const callback = chain.where.mock.calls.map((args) => args[0]).find((arg) => typeof arg === 'function') as
+            | ((eb: { or: (xs: unknown[]) => unknown[] }) => unknown[])
+            | undefined
+          expect(callback).toBeTypeOf('function')
+          return callback!({ or: (xs) => xs }).map((fragment) => {
+            const node = (fragment as {
+              toOperationNode: () => { sqlFragments: string[]; parameters: Array<{ value: unknown }> }
+            }).toOperationNode()
+            return { text: node.sqlFragments.join('?'), params: node.parameters.map((p) => p.value) }
+          })
+        }
+
+        it('swaps the three LIKE arms for ONE trimmed email equality, with the JS trim() set bound', async () => {
+          const { JS_TRIM_WHITESPACE } = await import('../../src/utils/js-trim-whitespace')
+          pushExec([])
+          await service.listMentionCandidates('sheet-1', { q: '  Fake.Person@Example.Invalid ', limit: 100000, match: 'exact-email' })
+          const chain = await lastUsersChain()
+          const fragments = whereFragments(chain)
+          expect(fragments).toEqual([
+            { text: "lower(btrim(coalesce(email, ''), ?)) = ?", params: [JS_TRIM_WHITESPACE, 'fake.person@example.invalid'] },
+          ])
+          expect(fragments[0].text).not.toMatch(/like/i)
+          // Same ceiling and same active-only filter as the substring search.
+          expect(chain.limit.mock.calls[0][0]).toBe(51)
+          expect(chain.where.mock.calls[0]).toEqual(['is_active', '=', true])
+        })
+
+        it('still requires a term (no query for a blank one)', async () => {
+          pushExec([{ id: 'user-9', name: 'Fake', email: 'fake@example.invalid' }])
+          const result = await service.listMentionCandidates('sheet-1', { q: '   ', match: 'exact-email' })
+          expect(result.items).toEqual([])
+          const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+          expect(db.selectFrom).not.toHaveBeenCalled()
+        })
+
+        it('any other match value is the substring search, unchanged', async () => {
+          pushExec([])
+          await service.listMentionCandidates('sheet-1', { q: 'fake', match: 'exact' as unknown as 'exact-email' })
+          expect(likeParams(await lastUsersChain())).toEqual(['%fake%', '%fake%', '%fake%'])
+        })
+      })
     })
   })
 })

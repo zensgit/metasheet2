@@ -1,3 +1,4 @@
+import { JS_TRIM_WHITESPACE } from '../utils/js-trim-whitespace'
 import { loadSheetMemberUserIdSet, type QueryFn } from './permission-service'
 
 /**
@@ -86,6 +87,19 @@ export interface PersonDirectoryHydrationOptions {
    *  filter in memory before #5781. LIKE metacharacters in the term are escaped, so it stays a literal
    *  substring match (a bare `%` matches a literal percent sign, not everything). */
   search?: string
+  /** #5809 — EXACT lookup, used by the import resolver instead of `search`. When `exact` is present
+   *  (even blank), `search` is ignored. Case-insensitive EQUALITY against the user id, the trimmed
+   *  name or the trimmed email — never a substring — so a lookup hands back only the rows that ARE the
+   *  token, not the up-to-`limit` neighbours a substring term would. It is one more predicate on the
+   *  same row set: `$1` (the allowed set) and `is_active` are untouched, so every row it can return
+   *  is drawn from the same eligible set a `search` call reads (the id arm included). No LIKE, so no
+   *  escaping is needed; the term is bound as a parameter.
+   *  - The stored name/email are trimmed with the character set JS `trim()` strips (JS_TRIM_WHITESPACE,
+   *    bound as a parameter), not with `btrim`'s default of U+0020 only, so a value stored with a
+   *    trailing U+3000 / NBSP / tab still equals the term the client trimmed.
+   *  - A term that is blank after trimming matches NOBODY: the call returns [] without issuing any
+   *    query (fail closed). It never degrades into a predicate-less read of the allowed set. */
+  exact?: string
   /** Hard ceiling on hydrated rows, applied as SQL `LIMIT` so the bound holds for THIS query's DB
    *  round trip.
    *
@@ -134,13 +148,25 @@ export async function resolvePersonAssignableDirectory(
    *  behavior every non-route caller still gets. Never affects the allowed set itself. */
   options?: PersonDirectoryHydrationOptions,
 ): Promise<PersonDirectoryEntry[]> {
+  const exact = options?.exact?.trim() ?? ''
+  // #5809: an exact lookup of nothing is an answer of nothing — decided before ANY query (the allowed
+  // set included), so a caller that forgot to check its term can never turn exact mode into a browse.
+  if (typeof options?.exact === 'string' && !exact) return []
   const allowed = await resolveAllowed(restrictGroupIds)
   if (allowed.size === 0) return []
   // $1 is ALWAYS the full allowed set — the eligibility answer is unchanged by the bounds below.
   const params: unknown[] = [Array.from(allowed)]
   const conditions = ['id::text = ANY($1::text[])', 'is_active = TRUE']
-  const search = options?.search?.trim() ?? ''
-  if (search) {
+  const search = exact ? '' : (options?.search?.trim() ?? '')
+  if (exact) {
+    params.push(exact)
+    const term = `$${params.length}::text`
+    params.push(JS_TRIM_WHITESPACE)
+    const trimSet = `$${params.length}::text`
+    conditions.push(
+      `(lower(id::text) = lower(${term}) OR lower(btrim(COALESCE(name, ''), ${trimSet})) = lower(${term}) OR lower(btrim(COALESCE(email, ''), ${trimSet})) = lower(${term}))`,
+    )
+  } else if (search) {
     params.push(`%${escapeLikeTerm(search)}%`)
     conditions.push(`(COALESCE(name, '') ILIKE $${params.length} OR COALESCE(email, '') ILIKE $${params.length})`)
   }
