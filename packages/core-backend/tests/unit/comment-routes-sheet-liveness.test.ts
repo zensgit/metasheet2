@@ -4,13 +4,16 @@
  * soft-deleted sheet. `resolveCommentReadContext` now refuses a non-live sheet — AFTER the read gate,
  * so a caller who may not read the sheet gets the same 403 for a live and a deleted one.
  *
- * The route table below is the ten handlers the all-routes closed-world guard classifies as
- * sheet-addressed in routes/comments.ts (multitable-sheet-liveness-closure-all-routes.guard.test.ts).
+ * The route table below is pinned to the handlers the all-routes closed-world guard classifies as
+ * sheet-addressed in routes/comments.ts (`sheetAddressedRouteKeys`, the scan behind
+ * multitable-sheet-liveness-closure-all-routes.guard.test.ts): a route added to that file reds here until
+ * it gets a row. The comment-id and cross-sheet routes are not sheet-addressed; the guard names them.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { sheetAddressedRouteKeys } from '../utils/sheet-liveness-route-scan'
 
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
@@ -128,8 +131,9 @@ describe('comments routes refuse a non-live sheet', () => {
     pinned.setApp(buildApp(service))
   })
 
-  it('covers the ten sheet-addressed comment routes', () => {
-    expect(new Set(ROUTES.map((r) => r.name)).size).toBe(10)
+  it('covers exactly the sheet-addressed routes the closed-world scan finds in routes/comments.ts', () => {
+    expect(new Set(ROUTES.map((r) => r.name)).size).toBe(ROUTES.length)
+    expect(ROUTES.map((r) => r.name).sort()).toEqual(sheetAddressedRouteKeys('routes/comments.ts').sort())
   })
 
   for (const route of ROUTES) {

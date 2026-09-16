@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { sheetAddressedRouteKeys } from '../utils/sheet-liveness-route-scan'
 import { AI_ROUTING_FIXTURE_ENV_KEYS, armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
 import { SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE, SHEET_NOT_FOUND_MESSAGE } from '../../src/multitable/sheet-liveness'
 
@@ -86,26 +87,38 @@ type Agent = ReturnType<typeof request>
 const BASE = `/api/multitable/sheets/${SHEET_ID}/ai`
 const ROUTES: Array<{ name: string; send: (a: Agent) => request.Test; forbidden: string }> = [
   {
-    name: 'POST bulk-preview',
+    name: 'POST /sheets/:sheetId/ai/shortcut/bulk-preview',
     send: (a) => a.post(`${BASE}/shortcut/bulk-preview`).send({ fieldId: 'fld_target', scope: 'sheet' }),
     forbidden: 'Insufficient permissions',
   },
   {
-    name: 'POST bulk-commit',
+    name: 'POST /sheets/:sheetId/ai/shortcut/bulk-commit',
     send: (a) => a.post(`${BASE}/shortcut/bulk-commit`).send({ runId: 'aibulk_run_1', recordIds: ['rec_1'] }),
     forbidden: 'Insufficient permissions',
   },
   {
-    name: 'POST bulk-job/:jobId/commit',
+    name: 'POST /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/commit',
     send: (a) => a.post(`${BASE}/shortcut/bulk-job/${JOB_ID}/commit`).send({ recordIds: ['rec_1'] }),
     forbidden: 'Insufficient permissions',
   },
   {
-    name: 'POST suggest-formula',
+    name: 'POST /sheets/:sheetId/ai/suggest-formula',
     send: (a) => a.post(`${BASE}/suggest-formula`).send({ instruction: 'price times tax' }),
     forbidden: 'You cannot manage fields on this sheet',
   },
 ]
+
+/**
+ * The other sheet-addressed routes of routes/multitable-ai.ts, each with why it has no row above. The
+ * table plus this list must equal the closed-world scan, so a new AI route reds here until it is placed.
+ */
+const COVERED_ELSEWHERE: Record<string, string> = {
+  'POST /sheets/:sheetId/ai/shortcut/preview': 'per-record gate requireRecordReadable (routes/univer-meta.ts), vetted by the closed-world guard; its liveness-before-403 order is the guard RECORD_GATE_ORDER_GAP',
+  'POST /sheets/:sheetId/ai/shortcut/run': 'per-record gate requireRecordReadable, as preview',
+  'GET /sheets/:sheetId/ai/shortcut/bulk-job/:jobId': 'exempt by name in the closed-world guard: the caller-owned job, kept readable after a delete',
+  'GET /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/rows': 'exempt by name in the closed-world guard: the caller-owned job rows',
+  'POST /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/cancel': 'exempt by name in the closed-world guard: cancel must work on a deleted sheet',
+}
 
 const pinned = usePinnedServer()
 const savedEnv = new Map<string, string | undefined>()
@@ -137,6 +150,12 @@ describe('AI sheet-level gates refuse a non-live sheet', () => {
       else process.env[key] = value
     }
     vi.restoreAllMocks()
+  })
+
+  it('covers every sheet-addressed route the closed-world scan finds in routes/multitable-ai.ts (a row or a named reason)', () => {
+    const placed = [...ROUTES.map((r) => r.name), ...Object.keys(COVERED_ELSEWHERE)]
+    expect(new Set(placed).size).toBe(placed.length)
+    expect(placed.sort()).toEqual(sheetAddressedRouteKeys('routes/multitable-ai.ts').sort())
   })
 
   for (const route of ROUTES) {

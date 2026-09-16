@@ -4,13 +4,16 @@
  * `requireSheetRead` / `requireSheetManageViews` now refuse a non-live sheet, in the order
  * 401 → 403 → 404, so an unauthorized caller cannot tell a live sheet from a deleted one.
  *
- * The route table is the twelve handlers the all-routes closed-world guard classifies as sheet-addressed
- * in routes/dashboard.ts (multitable-sheet-liveness-closure-all-routes.guard.test.ts).
+ * The route table is pinned to the handlers the all-routes closed-world guard classifies as
+ * sheet-addressed in routes/dashboard.ts (`sheetAddressedRouteKeys`, the scan behind
+ * multitable-sheet-liveness-closure-all-routes.guard.test.ts): a route added to that file reds here until
+ * it gets a row.
  */
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { sheetAddressedRouteKeys } from '../utils/sheet-liveness-route-scan'
 
 const mocks = vi.hoisted(() => ({
   query: vi.fn(async () => ({ rows: [] as unknown[] })),
@@ -55,18 +58,18 @@ const barChart = {
 type Agent = ReturnType<typeof request>
 type Gate = 'read' | 'manage'
 const ROUTES: Array<{ name: string; gate: Gate; send: (agent: Agent) => request.Test }> = [
-  { name: 'GET /charts', gate: 'read', send: (a) => a.get(`${BASE}/charts`) },
-  { name: 'POST /charts', gate: 'manage', send: (a) => a.post(`${BASE}/charts`).send(barChart) },
-  { name: 'POST /charts/preview-data', gate: 'read', send: (a) => a.post(`${BASE}/charts/preview-data`).send(barChart) },
-  { name: 'GET /charts/:id', gate: 'read', send: (a) => a.get(`${BASE}/charts/chart-1`) },
-  { name: 'PATCH /charts/:id', gate: 'manage', send: (a) => a.patch(`${BASE}/charts/chart-1`).send({ name: 'x' }) },
-  { name: 'DELETE /charts/:id', gate: 'manage', send: (a) => a.delete(`${BASE}/charts/chart-1`) },
-  { name: 'GET /charts/:id/data', gate: 'read', send: (a) => a.get(`${BASE}/charts/chart-1/data`) },
-  { name: 'GET /dashboards', gate: 'read', send: (a) => a.get(`${BASE}/dashboards`) },
-  { name: 'POST /dashboards', gate: 'manage', send: (a) => a.post(`${BASE}/dashboards`).send({ name: 'd' }) },
-  { name: 'GET /dashboards/:id', gate: 'read', send: (a) => a.get(`${BASE}/dashboards/dash-1`) },
-  { name: 'PATCH /dashboards/:id', gate: 'manage', send: (a) => a.patch(`${BASE}/dashboards/dash-1`).send({ name: 'x' }) },
-  { name: 'DELETE /dashboards/:id', gate: 'manage', send: (a) => a.delete(`${BASE}/dashboards/dash-1`) },
+  { name: 'GET /sheets/:sheetId/charts', gate: 'read', send: (a) => a.get(`${BASE}/charts`) },
+  { name: 'POST /sheets/:sheetId/charts', gate: 'manage', send: (a) => a.post(`${BASE}/charts`).send(barChart) },
+  { name: 'POST /sheets/:sheetId/charts/preview-data', gate: 'read', send: (a) => a.post(`${BASE}/charts/preview-data`).send(barChart) },
+  { name: 'GET /sheets/:sheetId/charts/:id', gate: 'read', send: (a) => a.get(`${BASE}/charts/chart-1`) },
+  { name: 'PATCH /sheets/:sheetId/charts/:id', gate: 'manage', send: (a) => a.patch(`${BASE}/charts/chart-1`).send({ name: 'x' }) },
+  { name: 'DELETE /sheets/:sheetId/charts/:id', gate: 'manage', send: (a) => a.delete(`${BASE}/charts/chart-1`) },
+  { name: 'GET /sheets/:sheetId/charts/:id/data', gate: 'read', send: (a) => a.get(`${BASE}/charts/chart-1/data`) },
+  { name: 'GET /sheets/:sheetId/dashboards', gate: 'read', send: (a) => a.get(`${BASE}/dashboards`) },
+  { name: 'POST /sheets/:sheetId/dashboards', gate: 'manage', send: (a) => a.post(`${BASE}/dashboards`).send({ name: 'd' }) },
+  { name: 'GET /sheets/:sheetId/dashboards/:id', gate: 'read', send: (a) => a.get(`${BASE}/dashboards/dash-1`) },
+  { name: 'PATCH /sheets/:sheetId/dashboards/:id', gate: 'manage', send: (a) => a.patch(`${BASE}/dashboards/dash-1`).send({ name: 'x' }) },
+  { name: 'DELETE /sheets/:sheetId/dashboards/:id', gate: 'manage', send: (a) => a.delete(`${BASE}/dashboards/dash-1`) },
 ]
 
 function grant(opts: { userId?: string; canRead?: boolean; canManageViews?: boolean; sheetLiveness: 'live' | 'deleted' | 'absent' }) {
@@ -103,8 +106,9 @@ describe('dashboard routes refuse a non-live sheet', () => {
     expect(mocks.loadFieldsForSheet).not.toHaveBeenCalled()
   }
 
-  it('covers the twelve sheet-addressed dashboard routes', () => {
-    expect(new Set(ROUTES.map((r) => r.name)).size).toBe(12)
+  it('covers exactly the sheet-addressed routes the closed-world scan finds in routes/dashboard.ts', () => {
+    expect(new Set(ROUTES.map((r) => r.name)).size).toBe(ROUTES.length)
+    expect(ROUTES.map((r) => r.name).sort()).toEqual(sheetAddressedRouteKeys('routes/dashboard.ts').sort())
   })
 
   for (const route of ROUTES) {
