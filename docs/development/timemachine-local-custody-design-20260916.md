@@ -1,7 +1,8 @@
 # Local custody: LC-1 through LC-6
 
-Status: owner-ratified development boundary, 2026-09-16. Implementation candidate;
-no startup, flags, deployment, customer storage or format-v1 admission authorized.
+Status: owner-ratified LC development boundary, 2026-09-16. Implementation candidate;
+explicit local admission preserves format-v1 bytes. No startup activation, flags,
+deployment or customer storage authorized.
 Baseline: `021647c9ef5587a2796eccafafecc426067b63a2`.
 
 The owner explicitly approved LC-1..6: separately identified non-KMS local custody;
@@ -51,7 +52,8 @@ outside archive roots, protect offline recovery secrets separately, and exercise
 actual separate-environment catalog/object/custody restore. Anti-rollback freshness
 needs external trusted state; possession of an old valid backup is not prevented here.
 No root-admin/same-UID compromise, NAS or power-loss claim. Existing format-v1 and
-KMS admission remain unchanged. No adapter to the existing application is included.
+KMS admission remain unchanged. Explicit local admission is described below;
+standard startup is not wired or activated.
 
 Reference: https://nodejs.org/api/crypto.html (createCipheriv/createDecipheriv,
 setAAD, setAuthTag and final). No new dependency.
@@ -84,11 +86,12 @@ may leave an encrypted orphan after filesystem/root failure, but must not return
 success or destroy a previous package; cleanup must not traverse a replaced root.
 Catalog/object/custody application recovery and startup composition remain pending.
 
-## Next bounded integration: explicit assurance admission
+## Explicit assurance admission
 
 Compatibility review at `0d063ab7d2e457314fffabf4c8407e2c2273e4c8` confirms
 that local admission can preserve the existing format-v1 wire bytes and validation.
-This is an implementation plan, not evidence that integration is already present.
+This compatibility contract is implemented by the bounded admission follow-up;
+exact implementation and test checkpoints are in the verification report.
 LC-1 through LC-6 remain approved; no additional activation authority is inferred.
 
 - Keep the existing KMS adapter type and callers intact. Extract common operations,
