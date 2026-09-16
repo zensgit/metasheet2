@@ -675,6 +675,12 @@ type PeopleSheetPreset = {
     description: string | null
   }
   fieldProperty: Record<string, unknown>
+  /**
+   * #5807 — internal only, never serialized: ids of the EXISTING People rows this call rewrote with an
+   * UPDATE (rows it inserted are not listed — a fresh id has no Yjs state). The prepare route purges
+   * their Yjs state after the transaction commits.
+   */
+  rewrittenRecordIds: string[]
 }
 
 type PeopleSheetProvisionPlan = {
@@ -5520,9 +5526,12 @@ const ensureLegacyBase = ensureLegacyBaseShared
  *     found no other route that takes a sheet description from the client: `PATCH /sheets/:id` is
  *     name-only, template installs and plugin descriptors use server-defined descriptions, and "save as
  *     template" stores sheet descriptions as null);
- *   - the sync prefers the server-owned `system_kind` sheet over a sentinel-only one in the same base.
+ *   - the sync prefers the server-owned `system_kind` sheet over a sentinel-only one in the same base;
+ *   - after the sync transaction commits, the prepare route purges the Yjs state of exactly the rows it
+ *     rewrote (only when the Yjs path is wired in this process; best-effort — a failed purge is logged,
+ *     the request still succeeds, and a later re-sync does not retry it because the row is clean by then).
  * NOT closed — each of these keeps old email / avatar values (and an email-valued `Name`) until an
- * owner-approved scrub, which must cover all of them (no migration here):
+ * owner-approved scrub (no migration here). This is the list known today, not a proven-complete one:
  *   - rows in a base nobody re-syncs;
  *   - rows the re-sync never matches to an active user: deactivated or deleted users, rows without a
  *     string `User ID`;
@@ -5533,7 +5542,22 @@ const ensureLegacyBase = ensureLegacyBaseShared
  *   - copies outside the live row: `meta_record_revisions` snapshots / patches of People rows written by
  *     earlier record edits (readable through `GET /sheets/:sheetId/records/:recordId/history`), formula
  *     values stored in other sheets that were computed from a lookup of People `Email`, snapshots,
- *     recovery archives and exported files.
+ *     recovery archives and exported files;
+ *   - values under a column the sync does not resolve by name. The sync finds its four columns by their
+ *     CURRENT trimmed name (first by `order`, then id), but cell values are keyed by field id, so it never
+ *     touches: a renamed `Email` / `Avatar URL` column (a new column of that name is created and only
+ *     that one's key is removed); a second column with the same name; a renamed `User ID` column (no row
+ *     matches any user any more, so every old row is left as it is and a new row is inserted per user);
+ *     a deleted column — field delete strips the values from live rows, but with tombstone capture on
+ *     they are kept in `meta_field_value_tombstones`, and a field undelete (`recreateFieldFromConfig`)
+ *     writes them back under the old id. A scrub must pick the columns by field id / field history, never
+ *     by current name;
+ *   - `meta_records_trash` rows (deleted People rows keep their full `data` and can be restored) and
+ *     `meta_field_value_tombstones` rows;
+ *   - Yjs copies (`meta_record_yjs_states` / `meta_record_yjs_updates`) of every row this sync does NOT
+ *     rewrite — rows of deactivated / deleted users, rows in other, soft-deleted or shadowed People
+ *     sheets — and of rewritten rows whose purge failed, or that were rewritten by a process with no Yjs
+ *     path wired (no purge runs there; Yjs state persisted while it was wired stays).
  * Other NOT closed:
  *   - after a re-sync, anything that reads the `Email` / `Avatar URL` cells of a rewritten row gets ''
  *     (lookups / rollups / formulas over a legacy person link, API-token `/records-summary` reads with
@@ -5542,6 +5566,8 @@ const ensureLegacyBase = ensureLegacyBaseShared
  *   - the four column definitions stay (the `Email` / `Avatar URL` columns are simply left empty);
  *   - user names and user ids stay readable, all of them in one request, by any reader of this sheet —
  *     the read gate needs an owner decision on who may read it (#5807 stays open for that);
+ *   - the roster is not tenant-scoped: the `users` read below has no tenant predicate, so a sync mirrors
+ *     every active user of the deployment into the People sheet of whichever base it targets;
  *   - sentinel-only sheets are NOT stamped with `system_kind` (owner: the user-writable sentinel is never
  *     a trust source).
  */
@@ -5653,6 +5679,7 @@ async function ensurePeopleSheetPreset(
     }
   }
 
+  const rewrittenRecordIds: string[] = []
   if (userRows.length > 0) {
     const existingRecords = await query(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
@@ -5716,6 +5743,9 @@ async function ensurePeopleSheetPreset(
            WHERE id = $2`,
           [JSON.stringify(nextData), existing.id, retiredFieldIds],
         )
+        // A persisted Y.Doc of this row would still hold the old Email / Avatar / Name and win over the
+        // rewritten `data` on the next open; the route purges it after COMMIT (never from in here).
+        rewrittenRecordIds.push(existing.id)
       }
     }
   }
@@ -5732,6 +5762,7 @@ async function ensurePeopleSheetPreset(
       limitSingleRecord: true,
       refKind: 'user',
     },
+    rewrittenRecordIds,
   }
 }
 
@@ -11837,12 +11868,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     return false
   }
 
-  const bestEffortYjsInvalidate = async (recordIds: string[]) => {
+  /** Post-commit only. `context` labels the log line (recovery keeps its original wording). */
+  const bestEffortYjsInvalidate = async (recordIds: string[], context = 'recovery') => {
     if (!yjsInvalidator || recordIds.length === 0) return
     try {
       await yjsInvalidator(recordIds)
     } catch (err) {
-      console.warn('[univer-meta] yjs invalidation after recovery failed (non-fatal):', err)
+      console.warn(`[univer-meta] yjs invalidation after ${context} failed (non-fatal):`, err)
     }
   }
 
@@ -13171,6 +13203,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const preset = await pool.transaction(async ({ query }) => {
         return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId, plan)
       })
+      // #5807: the transaction has COMMITTED. Purge the Yjs state of exactly the existing People rows the
+      // re-sync rewrote, so a persisted Y.Doc cannot re-serve their old Email / Avatar / Name. Nothing on
+      // first provisioning (inserts only) or on a re-sync that rewrote nothing; a failure is logged, never
+      // fails the request (same contract as the record post-commit hook).
+      await bestEffortYjsInvalidate(preset.rewrittenRecordIds, 'people-sheet sync')
 
       return res.json({ ok: true, data: { targetSheet: preset.sheet, fieldProperty: preset.fieldProperty } })
     } catch (err) {

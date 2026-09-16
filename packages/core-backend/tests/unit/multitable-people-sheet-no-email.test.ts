@@ -17,15 +17,22 @@
  *                                still rewritten; a second re-sync is a no-op; a deactivated user's row
  *                                is left as it is
  *   §3 reserved sentinel      — `POST /sheets` refuses the People sentinel description (exact or
- *                                whitespace-padded) with a values-free 400 and writes nothing
- *   §4 target selection       — the sync prefers the server-owned `system_kind` sheet over an EARLIER
- *                                sentinel-only sheet, still falls back to a sentinel-only sheet without
- *                                stamping `system_kind` on it, and still re-syncs a sentinel sheet on a
- *                                database where the `system_kind` column does not exist yet
+ *                                whitespace-padded) with a values-free 400, before issuing any query, and
+ *                                writes nothing
+ *   §4 target selection       — the sync prefers the server-owned `people_directory` sheet over an
+ *                                EARLIER sentinel-only sheet and an even earlier sheet of another
+ *                                `system_kind`, falls back to the OLDEST of several sentinel-only sheets
+ *                                without stamping `system_kind` on it, and still re-syncs a sentinel sheet
+ *                                on a database where the `system_kind` column does not exist yet
+ *   §5 Yjs state              — after the sync transaction has committed, the Yjs invalidator is called
+ *                                once with exactly the rows the re-sync rewrote (not clean rows, not
+ *                                inserted rows, not a deactivated user's row); never on first provisioning
+ *                                or when nothing was rewritten; a failing invalidator does not fail the
+ *                                request or change its response
  *
  * NOT covered here because it is NOT closed: rows nobody re-syncs keep their old values (other People
- * sheets in the base, soft-deleted ones, rows of deactivated users), and names / user ids stay readable
- * by any reader of the sheet (#5807 stays open for the read gate).
+ * sheets in the base, soft-deleted ones, rows of deactivated users — and their Yjs copies), and names /
+ * user ids stay readable by any reader of the sheet (#5807 stays open for the read gate).
  *
  * The mock pool EVALUATES the `SET data = …` expression of the People UPDATE (plain replace, `data ||`,
  * `data - keys ||`, and the jsonb_typeof-guarded form) and refuses any other shape, so a change to that
@@ -38,6 +45,7 @@ import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { YjsInvalidator } from '../../src/multitable/post-commit-hooks'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -45,6 +53,8 @@ const BASE_ID = 'base_p5807'
 const SOURCE_SHEET_ID = 'sheet_p5807_orders'
 const PEOPLE_SHEET_ID = 'sheet_p5807_people'
 const FORGED_SHEET_ID = 'sheet_p5807_forged'
+const NEWER_FORGED_SHEET_ID = 'sheet_p5807_forged_newer'
+const APPROVAL_SHEET_ID = 'sheet_p5807_approval'
 
 const FLD_UID = 'fld_p5807_uid'
 const FLD_NAME = 'fld_p5807_name'
@@ -112,6 +122,10 @@ interface Store {
   writes: Array<{ sql: string; params: unknown[] }>
   /** The raw SQL of every read against `users`. */
   userReads: string[]
+  /** The raw SQL of EVERY statement issued (reads and writes), in order. */
+  queries: string[]
+  /** Transactions opened on the mock pool and not yet finished (0 ⇒ everything so far has committed). */
+  openTransactions: number
   /** Model a database the `system_kind` migration has not reached yet: naming the column is a 42703. */
   sheetsLackSystemKind?: boolean
 }
@@ -142,7 +156,50 @@ function freshStore(): Store {
     ],
     writes: [],
     userReads: [],
+    queries: [],
+    openTransactions: 0,
   }
+}
+
+/** A People sheet (system_kind) holding rows written before #5807, plus two more active users. */
+function seededStore(): Store {
+  const store = freshStore()
+  store.sheets.push(sheet(PEOPLE_SHEET_ID, '2026-01-02T00:00:00.000Z', {
+    name: 'People',
+    description: SYSTEM_PEOPLE_SHEET_DESCRIPTION,
+    system_kind: 'people_directory',
+  }))
+  store.fields.push(...peopleFields(PEOPLE_SHEET_ID))
+  store.users.push(
+    { id: 'u_cy', email: 'cy@people.example.test', name: 'Cy Example', avatar_url: null, is_active: true, created_at: '2026-01-01T00:00:05.000Z' },
+    { id: 'u_dee', email: 'dee@people.example.test', name: 'Dee Example', avatar_url: null, is_active: true, created_at: '2026-01-01T00:00:06.000Z' },
+  )
+  const legacy = (id: string, data: Record<string, unknown>, at: string): RecordRow =>
+    ({ id, sheet_id: PEOPLE_SHEET_ID, data, version: 3, created_at: at })
+  store.records.push(
+    // Same id + name as today: ONLY the retired Email/Avatar keys make it stale.
+    legacy('rec_amy', { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example', [FLD_EMAIL]: 'amy@people.example.test', [FLD_AVATAR]: '' }, '2026-01-03T00:00:01.000Z'),
+    // Old fallback wrote the email into Name.
+    legacy('rec_nameless', { [FLD_UID]: 'u_nameless', [FLD_NAME]: 'nameless@people.example.test', [FLD_EMAIL]: 'nameless@people.example.test', [FLD_AVATAR]: '' }, '2026-01-03T00:00:02.000Z'),
+    // Already clean — must never be touched.
+    legacy('rec_blank', { [FLD_UID]: 'u_blank', [FLD_NAME]: 'u_blank' }, '2026-01-03T00:00:03.000Z'),
+    // Only an Avatar key left.
+    legacy('rec_cy', { [FLD_UID]: 'u_cy', [FLD_NAME]: 'Cy Example', [FLD_AVATAR]: 'https://avatars.example.test/cy.png' }, '2026-01-03T00:00:04.000Z'),
+    // Only an Email key left.
+    legacy('rec_dee', { [FLD_UID]: 'u_dee', [FLD_NAME]: 'Dee Example', [FLD_EMAIL]: 'dee@people.example.test' }, '2026-01-03T00:00:05.000Z'),
+    // Deactivated user: today's behaviour is to leave the row alone (a residual an owner scrub must cover).
+    legacy('rec_gone', { [FLD_UID]: 'u_gone', [FLD_NAME]: 'Gone Example', [FLD_EMAIL]: 'gone@people.example.test', [FLD_AVATAR]: '' }, '2026-01-03T00:00:06.000Z'),
+  )
+  return store
+}
+
+/** The prepare response for a sync that targets PEOPLE_SHEET_ID — nothing else may appear in it. */
+const PEOPLE_SHEET_BODY = {
+  ok: true,
+  data: {
+    targetSheet: { id: PEOPLE_SHEET_ID, baseId: BASE_ID, name: 'People', description: SYSTEM_PEOPLE_SHEET_DESCRIPTION },
+    fieldProperty: { foreignSheetId: PEOPLE_SHEET_ID, limitSingleRecord: true, refKind: 'user' },
+  },
 }
 
 /** Project a row onto the column list of `SELECT <cols> FROM`, so a query that stops asking for a
@@ -205,6 +262,7 @@ function createMockPool(store: Store) {
   const nextStamp = () => `2026-02-01T00:00:${String(seq++).padStart(2, '0')}.000Z`
 
   const query = vi.fn(async (sql: string, params: unknown[] = []): Promise<QueryResult> => {
+    store.queries.push(sql)
     const p = (i: number) => String(params[i] ?? '')
     const isWrite = /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)
     if (isWrite) store.writes.push({ sql, params: [...params] })
@@ -299,13 +357,21 @@ function createMockPool(store: Store) {
     return { rows: [] }
   })
 
-  const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
+  // The transaction counts as finished (committed, or rolled back on a throw) only once `fn` has settled.
+  const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => {
+    store.openTransactions += 1
+    try {
+      return await fn({ query })
+    } finally {
+      store.openTransactions -= 1
+    }
+  })
   return { query, transaction }
 }
 
 // ── app harness ────────────────────────────────────────────────────────────────
 
-async function buildApp(store: Store): Promise<Express> {
+async function buildApp(store: Store, options: { yjsInvalidator?: YjsInvalidator } = {}): Promise<Express> {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockResolvedValue(false),
@@ -315,7 +381,10 @@ async function buildApp(store: Store): Promise<Express> {
   }))
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
-  const { univerMetaRouter } = await import('../../src/routes/univer-meta')
+  const { univerMetaRouter, setYjsInvalidatorForRoutes } = await import('../../src/routes/univer-meta')
+  // Module-level seam `index.ts` sets when the Yjs path is wired; null = Yjs off. The module instance is
+  // fresh per test (vi.resetModules), so nothing leaks between tests.
+  setYjsInvalidatorForRoutes(options.yjsInvalidator ?? null)
   vi.spyOn(poolManager, 'get').mockReturnValue(createMockPool(store) as any)
 
   const app = express()
@@ -339,7 +408,24 @@ function prepare(app: Express) {
   return on(app).post('/api/multitable/person-fields/prepare').send({ sheetId: SOURCE_SHEET_ID })
 }
 
+/**
+ * A Yjs invalidator spy. Each call records the ids it got, how many transactions were still open, and
+ * how many writes had been issued by then; `fail` makes it reject after recording.
+ */
+function invalidatorSpy(store: Store, fail?: Error) {
+  const calls: Array<{ recordIds: string[]; openTransactions: number; writesSoFar: number }> = []
+  const fn = vi.fn(async (recordIds: string[]) => {
+    calls.push({ recordIds: [...recordIds], openTransactions: store.openTransactions, writesSoFar: store.writes.length })
+    if (fail) throw fail
+  })
+  return { fn, calls }
+}
+
 const recordWrites = (store: Store) => store.writes.filter((w) => /meta_records/i.test(w.sql))
+const recordUpdateIds = (store: Store) =>
+  store.writes.filter((w) => /^\s*UPDATE\s+meta_records\b/i.test(w.sql)).map((w) => String(w.params[1]))
+const recordInsertIds = (store: Store) =>
+  store.writes.filter((w) => /^\s*INSERT\s+INTO\s+meta_records\b/i.test(w.sql)).map((w) => String(w.params[0]))
 const sheetWrites = (store: Store) => store.writes.filter((w) => /^\s*(INSERT\s+INTO|UPDATE)\s+meta_sheets\b/i.test(w.sql))
 const allWrittenText = (store: Store) => JSON.stringify(store.writes.map((w) => w.params))
 
@@ -397,37 +483,6 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
   })
 
   describe('§2 explicit re-sync of rows written before the change', () => {
-    function seededStore(): Store {
-      const store = freshStore()
-      store.sheets.push(sheet(PEOPLE_SHEET_ID, '2026-01-02T00:00:00.000Z', {
-        name: 'People',
-        description: SYSTEM_PEOPLE_SHEET_DESCRIPTION,
-        system_kind: 'people_directory',
-      }))
-      store.fields.push(...peopleFields(PEOPLE_SHEET_ID))
-      store.users.push(
-        { id: 'u_cy', email: 'cy@people.example.test', name: 'Cy Example', avatar_url: null, is_active: true, created_at: '2026-01-01T00:00:05.000Z' },
-        { id: 'u_dee', email: 'dee@people.example.test', name: 'Dee Example', avatar_url: null, is_active: true, created_at: '2026-01-01T00:00:06.000Z' },
-      )
-      const legacy = (id: string, data: Record<string, unknown>, at: string): RecordRow =>
-        ({ id, sheet_id: PEOPLE_SHEET_ID, data, version: 3, created_at: at })
-      store.records.push(
-        // Same id + name as today: ONLY the retired Email/Avatar keys make it stale.
-        legacy('rec_amy', { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example', [FLD_EMAIL]: 'amy@people.example.test', [FLD_AVATAR]: '' }, '2026-01-03T00:00:01.000Z'),
-        // Old fallback wrote the email into Name.
-        legacy('rec_nameless', { [FLD_UID]: 'u_nameless', [FLD_NAME]: 'nameless@people.example.test', [FLD_EMAIL]: 'nameless@people.example.test', [FLD_AVATAR]: '' }, '2026-01-03T00:00:02.000Z'),
-        // Already clean — must never be touched.
-        legacy('rec_blank', { [FLD_UID]: 'u_blank', [FLD_NAME]: 'u_blank' }, '2026-01-03T00:00:03.000Z'),
-        // Only an Avatar key left.
-        legacy('rec_cy', { [FLD_UID]: 'u_cy', [FLD_NAME]: 'Cy Example', [FLD_AVATAR]: 'https://avatars.example.test/cy.png' }, '2026-01-03T00:00:04.000Z'),
-        // Only an Email key left.
-        legacy('rec_dee', { [FLD_UID]: 'u_dee', [FLD_NAME]: 'Dee Example', [FLD_EMAIL]: 'dee@people.example.test' }, '2026-01-03T00:00:05.000Z'),
-        // Deactivated user: today's behaviour is to leave the row alone (a residual an owner scrub must cover).
-        legacy('rec_gone', { [FLD_UID]: 'u_gone', [FLD_NAME]: 'Gone Example', [FLD_EMAIL]: 'gone@people.example.test', [FLD_AVATAR]: '' }, '2026-01-03T00:00:06.000Z'),
-      )
-      return store
-    }
-
     it('rewrites each row that still carries Email or Avatar once, then a second re-sync is a no-op', async () => {
       const store = seededStore()
       const app = await buildApp(store)
@@ -586,6 +641,8 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
         expect(res.status).toBe(400)
         expect(res.body).toEqual(RESERVED_BODY)
         expect(JSON.stringify(res.body)).not.toContain('__metasheet_system')
+        // Refused before ANY statement — not even a read (the positive control below shows reads are seen).
+        expect(store.queries).toEqual([])
         expect(store.writes).toEqual([])
         expect(store.sheets).toEqual(sheetsBefore)
       })
@@ -604,14 +661,18 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
         expect(res.body.data.sheet).toMatchObject({ id, baseId: BASE_ID, description })
         expect(store.sheets.find((s) => s.id === id)).toMatchObject({ description, system_kind: null })
       }
+      // The harness does see the route's reads (so the "no query" assertion above is not vacuous).
+      expect(store.queries.some((sql) => /FROM meta_bases/i.test(sql))).toBe(true)
     })
   })
 
   describe('§4 which People sheet the sync targets', () => {
-    it('prefers the system_kind sheet over an earlier-created sentinel-only sheet in the same base', async () => {
+    it('prefers the people_directory sheet over an earlier sentinel-only sheet and an earlier sheet of another system_kind', async () => {
       const store = freshStore()
-      // The sentinel-only sheet is OLDER, so a sentinel-first pick would land on it.
+      // The sentinel-only sheet is OLDER, so a sentinel-first pick would land on it; the approval projection
+      // sheet is older still, so a pick that takes ANY non-null system_kind would land on that one.
       store.sheets.push(
+        sheet(APPROVAL_SHEET_ID, '2026-01-01T12:00:00.000Z', { name: 'Approvals', system_kind: 'approval_projection' }),
         sheet(FORGED_SHEET_ID, '2026-01-02T00:00:00.000Z', { name: 'People', description: SYSTEM_PEOPLE_SHEET_DESCRIPTION }),
         sheet(PEOPLE_SHEET_ID, '2026-01-05T00:00:00.000Z', {
           name: 'People',
@@ -632,13 +693,19 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       const inserted = store.records.filter((r) => r.sheet_id === PEOPLE_SHEET_ID)
       expect(inserted.map((r) => (r.data as Record<string, unknown>)[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
       expect(store.records.filter((r) => r.sheet_id === FORGED_SHEET_ID)).toEqual([])
+      expect(store.records.filter((r) => r.sheet_id === APPROVAL_SHEET_ID)).toEqual([])
+      expect(store.fields.filter((f) => f.sheet_id === APPROVAL_SHEET_ID)).toEqual([])
       expect(recordWrites(store).every((w) => w.params[1] === PEOPLE_SHEET_ID)).toBe(true)
     })
 
-    it('still falls back to a sentinel-only sheet and does not stamp system_kind on it', async () => {
+    it('falls back to the OLDEST of several sentinel-only sheets and does not stamp system_kind on it', async () => {
       const store = freshStore()
-      store.sheets.push(sheet(FORGED_SHEET_ID, '2026-01-02T00:00:00.000Z', { name: 'People', description: ` ${SYSTEM_PEOPLE_SHEET_DESCRIPTION}` }))
-      store.fields.push(...peopleFields(FORGED_SHEET_ID))
+      store.sheets.push(
+        sheet(FORGED_SHEET_ID, '2026-01-02T00:00:00.000Z', { name: 'People', description: ` ${SYSTEM_PEOPLE_SHEET_DESCRIPTION}` }),
+        // A newer sentinel-only sheet: a "newest wins" pick would land here.
+        sheet(NEWER_FORGED_SHEET_ID, '2026-01-04T00:00:00.000Z', { name: 'People', description: SYSTEM_PEOPLE_SHEET_DESCRIPTION }),
+      )
+      store.fields.push(...peopleFields(FORGED_SHEET_ID), ...peopleFields(NEWER_FORGED_SHEET_ID, 'newer_'))
       const app = await buildApp(store)
 
       const res = await prepare(app)
@@ -646,7 +713,9 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       expect(res.body.data.targetSheet.id).toBe(FORGED_SHEET_ID)
       expect(sheetWrites(store)).toEqual([])
       expect(store.sheets.find((s) => s.id === FORGED_SHEET_ID)!.system_kind).toBeNull()
+      expect(store.sheets.find((s) => s.id === NEWER_FORGED_SHEET_ID)!.system_kind).toBeNull()
       expect(store.records.filter((r) => r.sheet_id === FORGED_SHEET_ID).map((r) => (r.data as Record<string, unknown>)[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
+      expect(store.records.filter((r) => r.sheet_id === NEWER_FORGED_SHEET_ID)).toEqual([])
     })
 
     it('re-syncs an existing sentinel sheet on a database where the system_kind column does not exist yet', async () => {
@@ -674,5 +743,99 @@ describe('#5807 People system sheet — email and avatar are no longer stored', 
       expect(store.records.find((r) => r.id === 'rec_amy')!.data).not.toHaveProperty([FLD_EMAIL])
       expect(store.records.filter((r) => r.sheet_id === PEOPLE_SHEET_ID).map((r) => (r.data as Record<string, unknown>)[FLD_UID])).toEqual(['u_amy', 'u_nameless', 'u_blank'])
     })
+  })
+
+  describe('§5 the Yjs state of rewritten rows is purged after the sync commits', () => {
+    // The invalidator contract is `(recordIds) => …` — it takes no sheet id.
+    const REWRITTEN = ['rec_amy', 'rec_amy_dup_new', 'rec_cy', 'rec_dee', 'rec_nameless']
+
+    /** seededStore + a stale and a clean duplicate row for Amy + one active user with no row yet. */
+    function mixedStore(): Store {
+      const store = seededStore()
+      store.records.push(
+        { id: 'rec_amy_dup_new', sheet_id: PEOPLE_SHEET_ID, data: { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example', [FLD_EMAIL]: 'amy@people.example.test' }, version: 2, created_at: '2026-01-04T00:00:01.000Z' },
+        { id: 'rec_amy_dup_clean', sheet_id: PEOPLE_SHEET_ID, data: { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example' }, version: 2, created_at: '2026-01-04T00:00:02.000Z' },
+      )
+      store.users.push({ id: 'u_eve', email: 'eve@people.example.test', name: 'Eve Example', avatar_url: null, is_active: true, created_at: '2026-01-01T00:00:07.000Z' })
+      return store
+    }
+
+    it('calls the invalidator once, after COMMIT, with exactly the rewritten rows; a second re-sync calls nothing', async () => {
+      const store = mixedStore()
+      const spy = invalidatorSpy(store)
+      const app = await buildApp(store, { yjsInvalidator: spy.fn })
+
+      const first = await prepare(app)
+      expect(first.status).toBe(200)
+      // The response carries no record ids (shape unchanged).
+      expect(first.body).toEqual(PEOPLE_SHEET_BODY)
+
+      // Fixture sanity: this sync both rewrote and inserted.
+      expect([...recordUpdateIds(store)].sort()).toEqual(REWRITTEN)
+      const inserted = recordInsertIds(store)
+      expect(inserted).toHaveLength(1)
+
+      expect(spy.fn).toHaveBeenCalledTimes(1)
+      const [call] = spy.calls
+      expect([...call.recordIds].sort()).toEqual(REWRITTEN)
+      // Not the clean duplicate, the clean row, the deactivated user's row, or the inserted row.
+      for (const id of ['rec_amy_dup_clean', 'rec_blank', 'rec_gone', inserted[0]]) {
+        expect(call.recordIds).not.toContain(id)
+      }
+      // After the transaction finished, and after every write of the request had been issued.
+      expect(call.openTransactions).toBe(0)
+      expect(call.writesSoFar).toBe(store.writes.length)
+
+      const writesBefore = store.writes.length
+      const second = await prepare(app)
+      expect(second.status).toBe(200)
+      expect(second.body).toEqual(PEOPLE_SHEET_BODY)
+      expect(store.writes.slice(writesBefore)).toEqual([])
+      expect(spy.fn).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not call the invalidator on first provisioning, nor on a later sync that only inserts', async () => {
+      const store = freshStore()
+      const spy = invalidatorSpy(store)
+      const app = await buildApp(store, { yjsInvalidator: spy.fn })
+
+      const first = await prepare(app)
+      expect(first.status).toBe(200)
+      expect(recordInsertIds(store)).toHaveLength(3)
+      expect(recordUpdateIds(store)).toEqual([])
+      expect(spy.fn).not.toHaveBeenCalled()
+
+      // A user activated later: the next sync inserts one row and rewrites nothing.
+      store.users.push({ id: 'u_later', email: 'later@people.example.test', name: 'Later Example', avatar_url: null, is_active: true, created_at: '2026-01-01T00:00:09.000Z' })
+      const second = await prepare(app)
+      expect(second.status).toBe(200)
+      expect(recordInsertIds(store)).toHaveLength(4)
+      expect(recordUpdateIds(store)).toEqual([])
+      expect(spy.fn).not.toHaveBeenCalled()
+    })
+
+    const failures: Array<[string, () => YjsInvalidator]> = [
+      ['rejects', () => async () => { throw new Error('yjs purge unavailable') }],
+      ['throws synchronously', () => () => { throw new Error('yjs purge unavailable') }],
+    ]
+    for (const [label, makeInvalidator] of failures) {
+      it(`a failing invalidator (${label}) neither fails the request nor changes its response`, async () => {
+        const store = mixedStore()
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const failing = vi.fn(makeInvalidator())
+        const app = await buildApp(store, { yjsInvalidator: failing })
+
+        const res = await prepare(app)
+        expect(res.status).toBe(200)
+        expect(res.body).toEqual(PEOPLE_SHEET_BODY)
+        expect(failing).toHaveBeenCalledTimes(1)
+        expect([...(failing.mock.calls[0][0] as string[])].sort()).toEqual(REWRITTEN)
+        // The rewrite itself stands.
+        expect(store.records.find((r) => r.id === 'rec_amy')).toMatchObject({ version: 4, data: { [FLD_UID]: 'u_amy', [FLD_NAME]: 'Amy Example' } })
+        expect(store.records.find((r) => r.id === 'rec_amy')!.data).not.toHaveProperty([FLD_EMAIL])
+        // The failure is logged as non-fatal.
+        expect(warn.mock.calls.some((args) => /non-fatal/.test(String(args[0])))).toBe(true)
+      })
+    }
   })
 })
