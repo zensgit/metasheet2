@@ -115,7 +115,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
-import { loadSheetLiveness, loadSheetLivenessBatch, type SheetLiveness } from './sheet-liveness'
+import { loadSheetLiveness, loadSheetLivenessBatch, SHEET_DELETED_CODE, type SheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -267,6 +267,14 @@ function sampleIds(ids: readonly string[]): string[] {
     ? unique
     : [...unique.slice(0, LOG_ID_SAMPLE_LIMIT), `+${unique.length - LOG_ID_SAMPLE_LIMIT} more`]
 }
+
+/**
+ * Persisted on the failed execution (and its start_approval step) when an approval bridge is not resumed
+ * because its sheet is soft-deleted. Values-free: no ids — the execution row already names the rule and
+ * sheet. It says what did NOT happen, because a later restore of the sheet does not replay the run.
+ */
+export const BRIDGE_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; approval bridge not resumed (result not written back, remaining actions not run)`
 
 function hasRetryableFwbFailure(execution: AutomationExecution): boolean {
   return execution.steps.some((step) => {
@@ -3383,9 +3391,23 @@ export class AutomationService {
   /**
    * The bridge resume continuation — extracted VERBATIM so the legacy (terminal-early) path and the P1#1 lease
    * path share ONE body. Its early `return`s are the DETERMINISTIC failures (missing execution, missing/disabled
-   * rule, changed fingerprint, non-approved outcome, record gone); each settles the execution and returns
-   * normally (no throw), so the caller then writes the terminal bridge state (legacy: already done by
-   * claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the caller's reclaim path.
+   * rule, changed fingerprint, soft-deleted sheet, non-approved outcome, record gone); each settles the
+   * execution and returns normally (no throw), so the caller then writes the terminal bridge state (legacy:
+   * already done by claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the
+   * caller's reclaim path.
+   *
+   * SHEET LIVENESS (soft delete, #5800). This lane is reached from `multitable_automation_approval_bridges`,
+   * not from the template-keyed rule loaders, so `dropRulesOnDeletedSheets` never saw it — and its record
+   * read keys `meta_records` on `sheet_id` without joining `meta_sheets`, which a soft delete does not
+   * cascade into. Unchecked, an approval completing after its sheet was soft-deleted wrote the result back
+   * onto that sheet and ran the rest of the rule. The check (`approvalBridgeSheetLive`) sits after the
+   * rule/fingerprint gates (they write nothing to the sheet, and the rule supplies the sheet-id fallback)
+   * and BEFORE the outcome branch, because the non-approved branch can write too. A deleted sheet is one
+   * more deterministic failure: execution `failed` with a coded reason, tail steps `skipped`, bridge
+   * terminal `resumed` ("completion consumed") through the caller's normal path. Terminal rather than
+   * parked: nothing re-drives a parked bridge (the completion event is one-shot, no sweeper reads this
+   * table, and on the legacy path the row is already `resumed` before this body runs), so "leave it for a
+   * restore" would in practice be "neither run nor recorded". A later restore therefore does NOT replay it.
    */
   private async resumeApprovalBridgeContinuation(bridge: AutomationApprovalBridgeRow, event: ApprovalCompletionEventV1): Promise<void> {
     const execution = await this.logService.getById(bridge.executionId)
@@ -3407,6 +3429,18 @@ export class AutomationService {
     }
 
     const result = this.approvalCompletionStepResult(event)
+    // The ONE sheet this continuation addresses: the record read below keys on it, the same-base
+    // writeback targets it, and the tail runs in its context. Checked BEFORE the outcome branch because
+    // the non-approved branch writes too (`resultWriteback.onNonApproved`).
+    const bridgeSheetId = bridge.sheetId ?? execRule.sheetId
+    if (!(await this.approvalBridgeSheetLive(bridge, bridgeSheetId))) {
+      await this.failApprovalBridgeExecution(execution, bridge, BRIDGE_SHEET_DELETED_MESSAGE, {
+        ...result,
+        status: 'failed',
+        error: BRIDGE_SHEET_DELETED_MESSAGE,
+      })
+      return
+    }
     if (event.transition.toStatus !== 'approved') {
       await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
       await this.failApprovalBridgeExecution(execution, bridge, result.error ?? `Approval completed with ${event.transition.toStatus}`, result)
@@ -3417,7 +3451,7 @@ export class AutomationService {
     if (bridge.recordId) {
       const rec = await this.queryFn(
         `SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2`,
-        [bridge.recordId, bridge.sheetId ?? execRule.sheetId],
+        [bridge.recordId, bridgeSheetId],
       )
       const row = (rec.rows[0] ?? null) as { data?: Record<string, unknown> } | null
       if (!row) {
@@ -4392,6 +4426,63 @@ export class AutomationService {
       })
     }
     return kept
+  }
+
+  /**
+   * SHEET LIVENESS for the approval-bridge continuation (#5800) — the third `approval.*` lane, which is
+   * driven by the bridge table and so never passes through `dropRulesOnDeletedSheets`.
+   *
+   * Same definition as every other lane: `loadSheetLiveness` from sheet-liveness.ts, refuse on EXACTLY
+   * `'deleted'`. `absent` (a successful lookup that found no row) proceeds as it does on the siblings; on
+   * this lane a hard-deleted sheet has also cascaded its records away, so the record read that follows
+   * already fails the run as "Record no longer exists".
+   *
+   * Returns false ONLY on positive proof of a soft delete; the caller then fails the execution with
+   * `BRIDGE_SHEET_DELETED_MESSAGE` and the bridge goes terminal through its normal path.
+   *
+   * FAIL-OPEN when the lookup THROWS — the same choice as `dropRulesOnDeletedSheets`, re-derived for
+   * THIS lane rather than copied, because this lane writes records:
+   *   · PROPAGATE is a stranded run on the default path. With durable delivery OFF (the default),
+   *     `claimCompletion` has already flipped the bridge to terminal `resumed` before this body runs, so a
+   *     throw leaves the execution suspended forever under a consumed bridge — exactly "neither run nor
+   *     recorded". (With delivery ON a throw would be reclaimed and retried; the one-path choice is named
+   *     here so whoever turns durable delivery on deployment-wide can revisit it.)
+   *   · FAIL-CLOSED-TERMINAL turns a transient `meta_sheets` read error into the permanent loss of a
+   *     LIVE sheet's approval writeback: the completion event is one-shot, and a whole-execution retry is
+   *     refused once an approval exists (START_APPROVAL_ALREADY_CREATED).
+   *   · The residual window is narrow: the record read and the writeback transaction right after this use
+   *     the same database, so a real outage surfaces there as a throw (legacy: logged; lease: reclaimed).
+   *     Only a failure confined to this one read lets a run through, and the data it could then touch is a
+   *     soft-deleted sheet's records — hidden and restorable, not destroyed; the lock guard and the
+   *     cross-base write gate downstream are unchanged and still fail closed.
+   * The keep is logged at WARN with the bridge id and the error CLASS only (the text can carry connection
+   * details). One bridge per call, so there is nothing to aggregate.
+   */
+  private async approvalBridgeSheetLive(bridge: AutomationApprovalBridgeRow, sheetId: string): Promise<boolean> {
+    let liveness: SheetLiveness
+    try {
+      liveness = await loadSheetLiveness(this.queryFn, sheetId)
+    } catch (err) {
+      logger.warn(`approval bridge ${bridge.id}: sheet liveness lookup failed, failing OPEN and resuming`, {
+        bridgeId: bridge.id,
+        ruleId: bridge.ruleId,
+        sheetId,
+        reason: 'liveness_lookup_failed',
+        errorClass: err instanceof Error ? err.name : typeof err,
+      })
+      return true
+    }
+    if (liveness === 'deleted') {
+      logger.warn(`approval bridge ${bridge.id} not resumed: sheet ${sheetId} is not live (soft-deleted); marking the run failed`, {
+        bridgeId: bridge.id,
+        ruleId: bridge.ruleId,
+        executionId: bridge.executionId,
+        sheetId,
+        reason: 'sheet_deleted',
+      })
+      return false
+    }
+    return true
   }
 
   private mapRow(row: Record<string, unknown>): AutomationRule {
