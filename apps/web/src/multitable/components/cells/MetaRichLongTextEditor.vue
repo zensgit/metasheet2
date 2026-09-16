@@ -78,6 +78,8 @@
         @keydown.meta.enter.prevent="onConfirm"
         @keydown.ctrl.enter.prevent="onConfirm"
         @keydown.escape="onEscape($event)"
+        @keyup="onEditableKeyup($event)"
+        @mouseup="onCaretMoved"
       />
       <!-- B5 people-mention popover. Renders ONLY when the host fed candidates
            (authenticated hosts: cell editor + drawer). MetaFormView passes no
@@ -396,12 +398,38 @@ function selectMention(suggestion: MetaCommentMentionSuggestion): void {
   emitLive()
 }
 
+// Keys whose default action moves the caret WITHOUT an `input` event (so `onInput` never re-detects).
+const CARET_MOVE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'])
+/** Set when ArrowUp/ArrowDown was left to its default (caret move) rather than consumed by the list. */
+let verticalKeyMovedCaret = false
+
 function onMentionNavigate(direction: 1 | -1, event: KeyboardEvent): void {
-  if (!showMentionSuggestions.value) return
-  event.preventDefault()
   const len = mentionSuggestionsFiltered.value.length
-  if (len === 0) return // hint-only popover (#5795): nothing to move to
+  // #5795: the "type to search" prompt is not a list. With no option to move to, the arrow keeps its
+  // normal caret-moving job (checked BEFORE preventDefault), exactly as when no popover is showing.
+  if (!showMentionSuggestions.value || len === 0) {
+    verticalKeyMovedCaret = true
+    return
+  }
+  event.preventDefault()
   activeMentionIndex.value = (activeMentionIndex.value + direction + len) % len
+}
+
+/**
+ * #5795: a caret move (click, arrow, Home/End) fires no `input`, so an open `@query` would otherwise
+ * outlive the caret leaving it — with the bare-`@` prompt that is now the common case. Re-check an
+ * OPEN mention only: a caret move can close it (or re-scope its term), never open a new one, so
+ * walking the caret through existing text never pops a suggester that typing did not.
+ */
+function onCaretMoved(): void {
+  if (mentionQuery.value === null) return
+  refreshMentionQuery()
+}
+
+function onEditableKeyup(event: KeyboardEvent): void {
+  const vertical = verticalKeyMovedCaret && (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+  verticalKeyMovedCaret = false
+  if (vertical || CARET_MOVE_KEYS.has(event.key)) onCaretMoved()
 }
 
 function onMentionEnter(event: KeyboardEvent): void {
@@ -423,6 +451,9 @@ function onMentionTab(event: KeyboardEvent): void {
 function onEscape(event: KeyboardEvent): void {
   // Esc dismisses the popover first (one Esc closes the suggester); a second Esc (or
   // Esc with no popover) cancels the edit, matching the textarea's Esc contract.
+  // #5795: this deliberately includes the prompt-only popover — a visible popover is closed first so
+  // an Esc aimed at it never throws away the edit; the prompt also closes by itself once the caret
+  // leaves the `@` run (onCaretMoved), after which the first Esc cancels as before.
   if (showMentionSuggestions.value) {
     event.preventDefault()
     dismissMention()

@@ -5689,25 +5689,34 @@ const loadFieldsForSheet = loadFieldsForSheetShared
 /**
  * #5781 — disclosure bounds for GET /sheets/:sheetId/person-fields/:fieldId/directory.
  *
- * Ceiling: the SAME 50 the sibling /permission-candidates clamps to (`Math.min(50, ...)`), so the two
- * roster-shaped reads of this file cannot disclose different volumes.
+ * Ceiling: the SAME 50 the sibling /permission-candidates clamps to (it now reads this constant through
+ * the PERMISSION_CANDIDATES_MAX_ITEMS alias below), so the roster-shaped reads of this file share one
+ * per-request volume.
  *
  * Minimum term length: 1. The sibling has NO minimum (its `q` is optional), so there is nothing to
- * copy; 1 is the smallest bound that removes the zero-effort "open the picker, get the deployment
- * roster" dump while keeping every search the picker can actually issue — MetaPersonPicker debounces
- * and re-queries on EVERY keystroke, so a minimum of 2+ would make a legitimate 1-character search
- * (common for CJK surnames) silently answer nothing.
+ * copy; 1 is the smallest bound that removes the picker's AUTOMATIC "open the picker, get the deployment
+ * roster" request (it does not stop a deliberate one-character term from matching everyone — see
+ * residual (1) on the route) while keeping every search the picker can actually issue —
+ * MetaPersonPicker debounces and re-queries on EVERY keystroke, so a minimum of 2+ would make a
+ * legitimate 1-character search (common for CJK surnames) silently answer nothing.
  */
 export const PERSON_DIRECTORY_MAX_ITEMS = 50
 export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
 
 /**
  * #5795 follow-up — the SAME two bounds, applied to GET /sheets/:sheetId/form-share-candidates (it reads
- * the same listSheetPermissionCandidates roster). Aliases rather than new numbers so the three
- * roster-shaped reads of this file cannot drift apart; the route already clamped to 50 before this.
+ * the same listSheetPermissionCandidates roster). Aliases rather than new numbers, so the three
+ * roster-shaped reads of THIS file (person directory, form-share candidates, /permission-candidates via
+ * PERMISSION_CANDIDATES_MAX_ITEMS below) share one ceiling by construction; the form-share route already
+ * clamped to 50 before this. The comment @-mention reads live in another module
+ * (services/comment-mention-bounds.ts) with their own literals — equal today and pinned equal by
+ * tests/unit/multitable-form-share-candidates-bounded.test.ts, not tied by construction.
  */
 export const FORM_SHARE_CANDIDATES_MAX_ITEMS = PERSON_DIRECTORY_MAX_ITEMS
 export const FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH = PERSON_DIRECTORY_MIN_QUERY_LENGTH
+/** Ceiling of GET /sheets/:sheetId/permission-candidates (previously a literal `Math.min(50, ...)`;
+ *  its `q` stays optional — that route is gated on canManageSheetAccess and is not term-bounded). */
+export const PERMISSION_CANDIDATES_MAX_ITEMS = PERSON_DIRECTORY_MAX_ITEMS
 
 async function ensureAttachmentIdsExist(
   query: QueryFn,
@@ -8214,7 +8223,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(PERMISSION_CANDIDATES_MAX_ITEMS, Math.max(1, Math.floor(rawLimit as number)))
+      : 20
 
     try {
       const pool = poolManager.get()
@@ -8267,19 +8278,37 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // is tracked separately under #5781 and is NOT done here.
   //
   // RESIDUALS this change does NOT close (stated so the next reader does not over-read the bound):
-  //  (1) THE BOUND IS PER REQUEST, NOT AGGREGATE — on this route AND on the two same-shaped reads
-  //      named in (2). With a 1-character minimum, a deterministic order and no rate limiter or audit
-  //      row on any of the three, a scripted actor can still walk the set by varying the term
-  //      ('a'..'z', '0'..'9', then two-character combinations) and reassemble most of a
-  //      few-thousand-user roster in a few hundred calls. What the bounds remove is the ZERO-EFFORT
-  //      one-request dump; the aggregate is only made INCONVENIENT, not bounded. The durable fix is
-  //      still the set-narrowing follow-up named above (plus, if wanted, a rate limit / audit row).
+  //  (1) THE ROW CAP IS THE ONLY PER-REQUEST BOUND; "TERM REQUIRED" DOES NOT GUARANTEE NARROWING — on
+  //      this route AND on the two same-shaped reads named in (2). The term is a plain substring, so a
+  //      character that (almost) every row contains passes the 1-character minimum and matches
+  //      (almost) the whole set: `@` matches every user with a well-formed email address (all three
+  //      reads match email), and on the two reads that also match the id (mention candidates,
+  //      form-share candidates) `-` matches every UUID-shaped id, which is what the in-app
+  //      user-creation paths mint (crypto.randomUUID in admin-users.ts, dingtalk-oauth.ts,
+  //      directory-sync.ts and AuthService.register; seeded or bootstrap accounts may carry other
+  //      ids). Such a term does not reorder anything: here and on
+  //      form-share the order is by name regardless of the term, and the mention read's prefix rank
+  //      only lifts rows whose name/email/id STARTS with the character — never a UUID or an email for
+  //      `-`/`@` — so the rest tie and fall back to created_at, id, the old term-less order. `q=-` /
+  //      `q=@` therefore return essentially the first page a term-less call used to. What the term
+  //      requirement removes is the UI's AUTOMATIC term-less request when a picker/composer opens
+  //      (privacy hygiene); against a caller who types one character on purpose, the per-request
+  //      bound is the 50-row cap (plus `hasMore`) and nothing else. The LIKE-escaping of `%` / `_`
+  //      keeps the search literal; it is search correctness, not a disclosure bound, for the same
+  //      reason.
+  //      Across requests: with a deterministic order and no rate limiter or audit row on any of the
+  //      three, a scripted actor can walk the set by varying the term and reassemble most of a
+  //      few-thousand-user roster in a few hundred calls; the aggregate is only made INCONVENIENT, not
+  //      bounded. Making the term actually narrow (e.g. match the id only exactly or by prefix, the
+  //      email only by prefix) changes search behaviour and is an OWNER DECISION, not taken here; the
+  //      durable fix is still the set-narrowing follow-up named above (plus, if wanted, a rate limit /
+  //      audit row).
   //  (2) THE TWO PARALLEL READS OF THE SAME ROSTER NOW CARRY THE SAME PER-REQUEST BOUNDS (#5795).
   //      - GET /api/comments/mention-candidates (routes/comments.ts -> CommentService
   //        .listMentionCandidates), and its sibling GET /api/multitable/:spreadsheetId/mention-candidates
   //        which reads the same service behind the same gate: a term is required (term-less ⇒ empty +
-  //        `requiresQuery`, no query issued), at most 50 rows with `hasMore`, the term is a literal
-  //        substring, and the deployment-wide active-user `total` is no longer computed — `total` is
+  //        `requiresQuery`, no query issued), at most 50 rows with `hasMore`, the term is matched
+  //        literally, and the deployment-wide active-user `total` is no longer computed — `total` is
   //        the clamped page size. What #5795 still leaves open there: the gate is unchanged
   //        (rbacGuard('comments','read'), seeded onto the generic `user` role, + sheet read), and so is
   //        the set — every ACTIVE user in the deployment, with no permission filter at all, i.e. a
@@ -8287,11 +8316,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //        read/write). Residual (1) therefore bites hardest on that endpoint.
   //      - GET /sheets/:sheetId/form-share-candidates (further down THIS file; gate canManageViews,
   //        which a sheet-level full-write grant alone turns on): same term requirement + marker, its
-  //        existing clamp (50, default 20) now with `hasMore`, literal term. Its set is unchanged
+  //        existing clamp (50, default 20) now with `hasMore`, literal term. It was already capped at
+  //        50 before #5795, so against a deliberate caller its term requirement removes nothing (see
+  //        (1)); the change there is UI / privacy hygiene. Its set is unchanged
   //        (listSheetPermissionCandidates users + member groups), and so is the DingTalk-binding
   //        enrichment it adds per user — whether that dimension should be visible to a full-write
   //        holder is an open owner question, recorded on that route.
-  //      Neither is re-scoped: "the roster is now bounded deployment-wide" is true PER REQUEST only.
+  //      Neither is re-scoped. Do NOT read this as "the roster is now bounded deployment-wide":
+  //  (2b) AT LEAST ONE MORE READ OF THE SAME USER SET IS NOT BOUNDED THIS WAY. GET
+  //      /api/approvals/directory/users (routes/approvals.ts, gate rbacGuardAny approvals:read |
+  //      approvals:write | approvals:act — e.g. the plm-collaborator access preset carries
+  //      approvals:read) answers a TERM-LESS call with up to 50 (default 20) active users (id, name,
+  //      email) ordered by name, via services/approval-directory.ts searchDirectoryUsers: it has the
+  //      50-row cap only —
+  //      no term requirement, no `hasMore` — and ApprovalUserPicker issues that term-less request on
+  //      mount and every time the picker opens. It is owned by the approvals surface and deliberately
+  //      not touched here; it is a follow-up for its owners. The reads named in this block are the
+  //      ones found, not a proven-complete inventory of user-directory reads.
   //  (3) WHERE THE BOUNDS ARE PROVEN. The route-level behaviour is pinned by
   //      tests/unit/multitable-person-directory-bounded.test.ts (which MOCKS the resolver) and the
   //      generated SQL by tests/unit/multitable-person-directory-resolver.test.ts (which asserts on the
@@ -14348,8 +14389,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      matches hidden behind ineligible users inside the first limit+1 rows — the same
   //      under-return the route already had before this change.
   //  (c) the term is handed down as a LITERAL substring (LIKE metacharacters escaped here, so the
-  //      shared listSheetPermissionCandidates stays byte-identical); otherwise a bare `%` or `_`
-  //      would pass the one-character minimum and still return the unfiltered first page.
+  //      shared listSheetPermissionCandidates stays byte-identical), so a typed `%` or `_` searches
+  //      for that character. This is search correctness, NOT a disclosure bound: that function also
+  //      matches `u.id`, so `-` (in every UUID-shaped id) or `@` (in every well-formed email address)
+  //      still matches (almost) every user and, because it orders by name regardless of the term,
+  //      returns essentially the first page a term-less call did. Against a deliberate caller this route's per-request bound is the 50-row
+  //      cap it already had; what (a) removes is MetaFormShareManager's automatic term-less request
+  //      when the allowlist section opens (UI / privacy hygiene). See residual (1) on the
+  //      person-directory route.
   // NOT changed: who is eligible (listSheetPermissionCandidates, its eligibility filter, and the
   // user/member-group filter below are untouched) and the DingTalk enrichment's fields. Whether a
   // sheet full-write holder should see colleagues' DingTalk-binding / auth-grant flags at all is an

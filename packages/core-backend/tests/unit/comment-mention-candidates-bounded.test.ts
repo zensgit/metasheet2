@@ -16,6 +16,9 @@
  *      the pre-existing gates (G-8 sheet read) still answer first
  *   §5 the deployment-wide count is no longer disclosed: `total` is the clamped page size
  *   §6 the sibling /api/multitable/:spreadsheetId/mention-candidates route carries the same bounds
+ *   §7 the term is NOT a narrowing guarantee: a one-character term every row contains (`-` is in every
+ *      UUID-shaped id, `@` in every email) matches the whole set, so the ceiling is the only per-request
+ *      bound against a deliberate caller — it must hold for exactly those terms
  *
  * The service is mocked here; the service's own SQL bound (LIMIT, escaped term, no COUNT) is pinned in
  * tests/unit/comment-service.test.ts. Fixtures are obviously fake (example.invalid). TRANSPORT: one
@@ -371,5 +374,28 @@ describe('#5795 comment mention candidates — bounded disclosure', () => {
       expect(res.status).toBe(403)
       expect(service.listMentionCandidates).not.toHaveBeenCalled()
     })
+  })
+
+  describe('§7 a term that matches everyone is still capped (the ceiling, not the term, is the bound)', () => {
+    for (const universal of ['-', '@']) {
+      it(`q=${universal} (a character every row contains) is passed through and answered with at most the ceiling`, async () => {
+        candidateRows = fakeCandidates(400) // the service matches the whole set for such a term
+
+        const res = await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET, q: universal, limit: '200' })
+        const ns = await request(pinned.url()).get(nsUrl).query({ q: universal, limit: '200' })
+
+        expect(res.status).toBe(200)
+        expect(res.body.data.requiresQuery).toBe(false)
+        expect(res.body.data.query).toBe(universal)
+        expect(res.body.data.items).toHaveLength(MAX_ITEMS)
+        expect(res.body.data.hasMore).toBe(true)
+        expect(ns.body.data.items).toHaveLength(MAX_ITEMS)
+        expect(ns.body.data.hasMore).toBe(true)
+        expect(calls.map((call) => call.options)).toEqual([
+          { q: universal, limit: MAX_ITEMS + 1 },
+          { q: universal, limit: MAX_ITEMS + 1 },
+        ])
+      })
+    }
   })
 })

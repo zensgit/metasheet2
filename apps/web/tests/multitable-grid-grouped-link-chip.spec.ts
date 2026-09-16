@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, type App, type VNode } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
+import MetaCellEditor from '../src/multitable/components/cells/MetaCellEditor.vue'
 import type { MetaField, MetaRecordContext } from '../src/multitable/types'
 
 // A3 regression (review block #1 + #2): MetaGridTable renders THREE
@@ -89,4 +90,61 @@ describe('MetaGridTable — A3 fetch-record threads to GROUPED rows', () => {
     // Summaries still render as read-only text.
     expect(root.textContent).toContain('Acme Supply')
   })
+})
+
+// #5795 refuter round: the grid hands the host's server-side mention search to BOTH of its MetaCellEditor
+// instances (flat rows and GROUPED rows), the same two-path shape as the fetchRecord wire above. Only
+// MetaCellEditor's rich-longText branch consumes it, and the grid's EDITABLE set does not include
+// `longText` today, so no typed `@term` can reach it through the grid yet; this pins the prop hand-off
+// itself (the REAL editor instance's props), so the wire is not silently lost before that changes.
+function findComponentProps(vnode: VNode | null | undefined, target: unknown): Record<string, unknown> | null {
+  if (!vnode) return null
+  if (vnode.type === target && vnode.component) return vnode.component.props as Record<string, unknown>
+  if (vnode.component) return findComponentProps(vnode.component.subTree, target)
+  if (Array.isArray(vnode.children)) {
+    for (const child of vnode.children) {
+      const found = findComponentProps(child as VNode, target)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+describe('MetaGridTable — #5795 mentionSearch threads to the cell editor on BOTH render paths', () => {
+  const EDIT_FIELDS: MetaField[] = [{ id: 'status', name: 'Status', type: 'string' }]
+  const EDIT_ROWS = [{ id: 'r1', version: 1, data: { status: 'Open' } }]
+
+  async function openEditor(grouped: boolean, mentionSearch: unknown) {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(MetaGridTable, {
+          rows: EDIT_ROWS, visibleFields: EDIT_FIELDS, sortRules: [], loading: false,
+          currentPage: 1, totalPages: 1, startIndex: 0, canEdit: true,
+          searchText: '', rowDensity: 'normal',
+          ...(grouped ? { groupField: EDIT_FIELDS[0] } : {}),
+          mentionSearch,
+        })
+      },
+    })
+    app.mount(container)
+    await nextTick()
+    expect(container.querySelectorAll('.meta-grid__group-header').length > 0).toBe(grouped)
+    const cell = container.querySelector('tr.meta-grid__row .meta-grid__cell') as HTMLElement
+    cell.click()
+    cell.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await nextTick()
+    await nextTick()
+    return findComponentProps(app._instance?.subTree, MetaCellEditor)
+  }
+
+  for (const grouped of [false, true]) {
+    it(`${grouped ? 'grouped' : 'flat'} rows: the mounted MetaCellEditor receives the host's mentionSearch`, async () => {
+      const search = vi.fn(async () => ({ items: [], requiresQuery: false, hasMore: false }))
+      const props = await openEditor(grouped, search)
+      expect(props).not.toBeNull()
+      expect(props!.mentionSearch).toBe(search)
+    })
+  }
 })

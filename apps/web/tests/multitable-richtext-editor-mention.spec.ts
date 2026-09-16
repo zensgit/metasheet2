@@ -200,6 +200,125 @@ describe('MetaRichLongTextEditor — #5795 server-side mention search', () => {
     expect(container!.querySelectorAll('[data-test="rich-longtext-mention-option"]')).toHaveLength(0)
   })
 
+  // Refuter round (#5795 consumer regression): the prompt-only popover must not hijack the caret keys,
+  // and must not outlive the caret leaving the `@` run (a caret move fires no `input`).
+  const key = (editable: HTMLElement, type: 'keydown' | 'keyup', k: string) => {
+    const event = new KeyboardEvent(type, { key: k, bubbles: true, cancelable: true })
+    editable.dispatchEvent(event)
+    return event
+  }
+  const placeCaret = (editable: HTMLElement, offset: number) => {
+    const range = document.createRange()
+    range.setStart(editable.firstChild!, offset)
+    range.collapse(true)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+  }
+  const popover = () => container!.querySelector('[data-test="rich-longtext-mention-popover"]')
+  const prompt = () => container!.querySelector('[data-test="rich-longtext-mention-search-required"]')
+
+  it('prompt only (bare @): ArrowUp / ArrowDown are NOT default-prevented, so they still move the caret', async () => {
+    mount({ modelValue: '', mentionSearch: fakeSearch() })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, 'line one @')
+    await settle()
+    expect(prompt()).not.toBeNull()
+
+    expect(key(editable, 'keydown', 'ArrowDown').defaultPrevented).toBe(false)
+    expect(key(editable, 'keydown', 'ArrowUp').defaultPrevented).toBe(false)
+  })
+
+  it('with real options showing, ArrowDown is still consumed by the list (navigation unchanged)', async () => {
+    mount({ modelValue: '', mentionSuggestions: SUGGESTIONS, mentionSearch: fakeSearch() })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, '@j')
+    await settle()
+    const options = () => Array.from(container!.querySelectorAll('[data-test="rich-longtext-mention-option"]'))
+    expect(options().length).toBeGreaterThan(1)
+    expect(options()[0].getAttribute('aria-selected')).toBe('true')
+
+    expect(key(editable, 'keydown', 'ArrowDown').defaultPrevented).toBe(true)
+    key(editable, 'keyup', 'ArrowDown')
+    await nextTick()
+    expect(options()[1].getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('moving the caret out of the @ run with an arrow key closes the prompt, and the next Esc cancels the edit', async () => {
+    const onCancel = vi.fn()
+    mount({ modelValue: '', mentionSearch: fakeSearch(), onCancel })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, 'x @')
+    await settle()
+    expect(popover()).not.toBeNull()
+
+    placeCaret(editable, 0)
+    key(editable, 'keydown', 'ArrowLeft')
+    key(editable, 'keyup', 'ArrowLeft')
+    await settle()
+    expect(popover()).toBeNull()
+
+    key(editable, 'keydown', 'Escape')
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('a vertical arrow that moved the caret out of the @ run closes the prompt on keyup', async () => {
+    mount({ modelValue: '', mentionSearch: fakeSearch() })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, 'x @')
+    await settle()
+    expect(prompt()).not.toBeNull()
+
+    key(editable, 'keydown', 'ArrowUp')
+    placeCaret(editable, 0) // where the browser's default ArrowUp would have put the caret
+    key(editable, 'keyup', 'ArrowUp')
+    await settle()
+    expect(popover()).toBeNull()
+  })
+
+  it('placing the caret elsewhere with the mouse closes the prompt', async () => {
+    mount({ modelValue: '', mentionSearch: fakeSearch() })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, 'x @')
+    await settle()
+    expect(prompt()).not.toBeNull()
+
+    placeCaret(editable, 1)
+    editable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    await settle()
+    expect(popover()).toBeNull()
+  })
+
+  it('a caret move never OPENS a suggester: walking back into existing "@jo" text asks nothing', async () => {
+    const search = fakeSearch()
+    mount({ modelValue: '', mentionSearch: search })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, 'hi @jo more')
+    await settle()
+    expect(popover()).toBeNull()
+    expect(search).not.toHaveBeenCalled()
+
+    placeCaret(editable, 'hi @jo'.length)
+    key(editable, 'keydown', 'ArrowLeft')
+    key(editable, 'keyup', 'ArrowLeft')
+    editable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    await settle()
+    expect(popover()).toBeNull()
+    expect(search).not.toHaveBeenCalled()
+  })
+
   it('HOST GATE still holds: neither candidates nor a search ⇒ no popover and nothing is asked', async () => {
     mount({ modelValue: '' })
     await nextTick()

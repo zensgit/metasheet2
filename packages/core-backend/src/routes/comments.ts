@@ -180,7 +180,11 @@ function filterDeniedRows(rowIds: string[] | undefined, context: CommentReadCont
  *  (a) TERM REQUIRED. A term shorter than MENTION_CANDIDATES_MIN_QUERY_LENGTH (after trim) is answered
  *      with an empty page and `requiresQuery: true`, and the service is NOT called — zero hydration.
  *      A 200 marker rather than a 400 because the composer asks as soon as the user types a bare `@`;
- *      the UI renders the marker as "type to search", not as a failure.
+ *      the UI renders the marker as "type to search", not as a failure. NOT a narrowing guarantee: a
+ *      one-character term (almost) every row contains (`-` in every UUID-shaped id, `@` in every
+ *      well-formed email address) still matches (almost) everyone, so against a deliberate caller (b)
+ *      is the only per-request bound; (a) removes
+ *      the UI's automatic term-less request (see comment-mention-bounds.ts).
  *  (b) CEILING. `limit` is clamped to MENTION_CANDIDATES_MAX_ITEMS and the service is asked for ONE
  *      row past it; `hasMore` is true iff that probe row came back (the queryRecordsWithCursor /
  *      #5781 convention — no second COUNT query).

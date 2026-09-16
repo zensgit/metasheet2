@@ -24,6 +24,10 @@ import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
+import {
+  MENTION_CANDIDATES_MAX_ITEMS,
+  MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+} from '../../src/services/comment-mention-bounds'
 
 const SHEET_ID = 'sheet_form_share'
 const BASE_ID = 'base_form_share'
@@ -64,6 +68,7 @@ let MAX_ITEMS = 0
 let MIN_QUERY_LENGTH = 0
 let PERSON_MAX = 0
 let PERSON_MIN = 0
+let PERMISSION_CANDIDATES_MAX = 0
 
 async function buildApp(opts?: { sheetAccess?: string; sheetExists?: boolean }): Promise<Express> {
   vi.resetModules()
@@ -104,6 +109,7 @@ async function buildApp(opts?: { sheetAccess?: string; sheetExists?: boolean }):
   MIN_QUERY_LENGTH = univerMeta.FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH
   PERSON_MAX = univerMeta.PERSON_DIRECTORY_MAX_ITEMS
   PERSON_MIN = univerMeta.PERSON_DIRECTORY_MIN_QUERY_LENGTH
+  PERMISSION_CANDIDATES_MAX = univerMeta.PERMISSION_CANDIDATES_MAX_ITEMS
 
   const query = vi.fn(async (sql: string, _params?: unknown[]): Promise<QueryResult> => {
     if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
@@ -213,6 +219,49 @@ describe('#5795 form-share candidates — bounded disclosure', () => {
       expect(MAX_ITEMS).toBe(PERSON_MAX)
       expect(MIN_QUERY_LENGTH).toBe(PERSON_MIN)
     })
+
+    // Refuter round (#5795 nit): the comment @-mention bounds are separate literals in a service module
+    // (it must not import this route file), so only this assertion keeps the roster-shaped reads on one
+    // volume: move PERSON_DIRECTORY_* and this fails until the mention pair moves with it.
+    it('the comment @-mention bounds equal the person-directory bounds (separate literals, pinned here)', async () => {
+      pinned.setApp(await buildApp())
+      expect(MENTION_CANDIDATES_MAX_ITEMS).toBe(PERSON_MAX)
+      expect(MENTION_CANDIDATES_MIN_QUERY_LENGTH).toBe(PERSON_MIN)
+    })
+
+    it('/permission-candidates clamps to the same shared ceiling (no private literal)', async () => {
+      pinned.setApp(await buildApp({ sheetAccess: 'spreadsheet:admin' }))
+      rosterRows = fakeUsers(400)
+
+      const res = await request(pinned.url()).get(`/api/multitable/sheets/${SHEET_ID}/permission-candidates?q=fake&limit=500`)
+
+      expect(res.status).toBe(200)
+      expect(PERMISSION_CANDIDATES_MAX).toBe(PERSON_MAX)
+      expect(rosterCalls).toHaveLength(1)
+      expect(rosterCalls[0].params.limit).toBe(PERSON_MAX)
+      expect(res.body.data.limit).toBe(PERSON_MAX)
+      expect(res.body.data.items).toHaveLength(PERSON_MAX)
+    })
+
+    // Refuter round (#5795): the route already had this cap before the term requirement, and a
+    // one-character term every row contains (`-` in every UUID-shaped id, `@` in every email) matches the
+    // whole roster — so the cap, not the term, is what a deliberate caller runs into.
+    for (const universal of ['-', '@']) {
+      it(`q=${universal} (a character every row contains) is still answered with at most the ceiling`, async () => {
+        pinned.setApp(await buildApp())
+        rosterRows = fakeUsers(400)
+
+        const res = await request(pinned.url()).get(`${url}?q=${encodeURIComponent(universal)}&limit=500`)
+
+        expect(res.status).toBe(200)
+        expect(res.body.data.requiresQuery).toBe(false)
+        expect(res.body.data.items).toHaveLength(MAX_ITEMS)
+        expect(res.body.data.hasMore).toBe(true)
+        expect(rosterCalls).toEqual([{ sheetId: SHEET_ID, params: { q: universal, limit: MAX_ITEMS + 1 } }])
+        expect(enrichCalls).toHaveLength(1)
+        expect(enrichCalls[0]).toHaveLength(MAX_ITEMS)
+      })
+    }
 
     it('clamps an over-large limit to 50 and reports hasMore', async () => {
       pinned.setApp(await buildApp())

@@ -980,7 +980,7 @@ describe('CommentService', () => {
         expect(params).toEqual(['%fake%', '%fake%', '%fake%'])
       })
 
-      it('escapes LIKE metacharacters so `%` / `_` are literal, not "match everyone"', async () => {
+      it('escapes LIKE metacharacters so a typed `%` / `_` searches literally (search correctness)', async () => {
         pushExec([])
         await service.listMentionCandidates('sheet-1', { q: '%' })
         expect(likeParams(await lastUsersChain())).toEqual(['%\\%%', '%\\%%', '%\\%%'])
@@ -988,6 +988,20 @@ describe('CommentService', () => {
         pushExec([])
         await service.listMentionCandidates('sheet-1', { q: 'a_b\\' })
         expect(likeParams(await lastUsersChain())).toEqual(['%a\\_b\\\\%', '%a\\_b\\\\%', '%a\\_b\\\\%'])
+      })
+
+      // Refuter round (#5795): escaping is NOT what bounds a deliberate caller. `-` (in every UUID-shaped
+      // id) and `@` (in every email) are ordinary characters that reach the name/email/id predicate as-is
+      // and match every active user; the SQL LIMIT is the only thing standing between such a term and the
+      // whole set, so it must apply to exactly these terms too.
+      it('a term every row contains (`-`, `@`) is not narrowed by escaping — the LIMIT still caps it', async () => {
+        for (const universal of ['-', '@']) {
+          pushExec([])
+          await service.listMentionCandidates('sheet-1', { q: universal, limit: 100000 })
+          const chain = await lastUsersChain()
+          expect(likeParams(chain)).toEqual([`%${universal}%`, `%${universal}%`, `%${universal}%`])
+          expect(chain.limit.mock.calls[0][0]).toBe(51)
+        }
       })
     })
   })

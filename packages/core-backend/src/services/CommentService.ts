@@ -466,8 +466,13 @@ export class CommentService {
    *    WITHOUT issuing any query. The routes answer such a
    *    call before reaching here (with a `requiresQuery` marker); this is the second layer, so the
    *    service stays bounded for any other caller.
-   *  - the term is a LITERAL substring (LIKE metacharacters escaped), so `%` / `_` cannot stand in
-   *    for "match everyone".
+   *  - the term is a LITERAL substring (LIKE metacharacters escaped), so a typed `%` / `_` searches
+   *    for that character. That is search correctness, not a disclosure bound: the term is matched
+   *    against name, email AND id, so `-` (in every UUID-shaped id) or `@` (in every well-formed
+   *    email address) still matches (almost) every active user, and — since only a name/email/id that
+   *    STARTS with the character ranks earlier below, which a UUID or an email never does — comes back
+   *    essentially in the old term-less created_at, id order. Against a deliberate caller the
+   *    per-request bound is the LIMIT alone (see comment-mention-bounds.ts).
    *  - SQL LIMIT is capped at MENTION_CANDIDATES_MAX_ITEMS + 1 (the +1 is the route's `hasMore`
    *    probe row), so no call hydrates more than that many names/emails.
    *  - no COUNT. The old `total` was a deployment-wide count of matching active users (for a
