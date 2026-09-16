@@ -4638,10 +4638,17 @@ export async function requireRecordReadable(
   sheetScope?: SheetPermissionScope
 } | { status: number; body: unknown }> {
   // ORDER (#5830): authority, then sheet liveness, then the record. The capability lookup is the FIRST
-  // thing this gate does, and a caller it refuses (401/403) learns nothing else: the same answer for a
-  // live, a soft-deleted and an absent sheet, and for a record that exists or not — no record row is
-  // read on their behalf. Only a caller who may read this sheet is told that it is gone (404) or that
-  // the record is not on it (404). Every route that relies on this gate alone inherits the order.
+  // thing this gate does. A caller it refuses (401/403) on a sheet id gets that same refusal whether the
+  // sheet is live or soft-deleted (a soft delete only sets meta_sheets.deleted_at, which no capability
+  // input reads) and whether the record exists or not; no record row is read on their behalf. Only a
+  // caller who may read this sheet is told that it is gone (404) or that the record is not on it (404).
+  // Every route that relies on this gate alone inherits the order.
+  // NOT promised: that an ABSENT id answers like an existing one. An absent id has no sheet-bound
+  // permission input, so global RBAC alone decides it; where such an input narrows an existing sheet
+  // (the approval-projection base in permission-service.ts), a caller refused there with 403 gets 404
+  // for an absent id. That holds for every route that resolves sheet capabilities, not just this gate.
+  // A caller who passes this gate but is then refused by the ROUTE (no edit / submit capability) may
+  // read the sheet, so it is told a deleted sheet is gone, as every read route tells it.
   const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
   if (!access.userId) {
     return { status: 401, body: { error: 'Authentication required' } }

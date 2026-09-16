@@ -19,6 +19,10 @@
  *   - a caller who may read learns 404 for a deleted / absent sheet, still without a record read;
  *   - for that caller on a live sheet nothing changed: a missing record is 404, row-level read deny is
  *     403, an admin bypasses row-level deny, and the request goes on past the gate.
+ *   - the scope of the promise (review of #5830): for the SAME id, live and soft-deleted answer alike
+ *     even where a sheet-bound rule refuses (approval-projection base); an absent id is judged by
+ *     global RBAC alone, so there it can differ. A reader the ROUTE refuses (no edit / submit) is told
+ *     a deleted sheet is gone — intended, since any read route tells a reader the same.
  *
  * The fake answers "live" for any sheet id it does not know as deleted or absent, so a gate that asks
  * about the wrong id cannot pass the deleted/absent cases by accident.
@@ -39,8 +43,13 @@ const ABSENT = 'sht_gate_absent'
 const SHEETS = [LIVE, DELETED, ABSENT] as const
 const RECORD = 'rec_gate_1'
 const MISSING = 'rec_gate_missing'
+// Sheets in the admin-only approval-projection base (permission-service.ts narrows a non-participant
+// non-admin to no read there). Its lookup does not filter deleted_at, so both ids are projection sheets.
+const PROJ_LIVE = 'sht_gate_proj_live'
+const PROJ_DELETED = 'sht_gate_proj_deleted'
+const PROJECTION_SHEETS = new Set([PROJ_LIVE, PROJ_DELETED])
 // Record rows survive a SOFT delete; nothing can sit on a sheet that never existed.
-const RECORD_ROWS = new Set([`${LIVE}/${RECORD}`, `${DELETED}/${RECORD}`])
+const RECORD_ROWS = new Set([`${LIVE}/${RECORD}`, `${DELETED}/${RECORD}`, `${PROJ_LIVE}/${RECORD}`, `${PROJ_DELETED}/${RECORD}`])
 
 type GateUser = { id: string; roles: string[]; perms: string[] }
 const READER: GateUser = { id: 'u_gate_reader', roles: ['member'], perms: ['multitable:write', 'multitable:submit-approval'] }
@@ -48,6 +57,8 @@ const READER: GateUser = { id: 'u_gate_reader', roles: ['member'], perms: ['mult
 // submit code: that alone must not open the record gate.
 const OUTSIDER: GateUser = { id: 'u_gate_outsider', roles: ['member'], perms: ['comments:read', 'multitable:submit-approval'] }
 const ADMIN: GateUser = { id: 'u_gate_admin', roles: ['admin'], perms: [] }
+// May read every ordinary sheet, may neither edit a record nor submit one for approval.
+const READ_ONLY: GateUser = { id: 'u_gate_read_only', roles: ['member'], perms: ['multitable:read'] }
 
 const FIELDS = [
   { id: 'fld_text', name: 'Text', type: 'string', property: {}, order: 1 },
@@ -71,7 +82,18 @@ async function fakeQuery(sql: string, params: unknown[] = []): Promise<{ rows: a
   if (/SELECT deleted_at FROM meta_sheets WHERE id = \$1/.test(sql)) {
     const id = params[0]
     if (id === ABSENT) return { rows: [] }
-    return { rows: [{ deleted_at: id === DELETED ? new Date('2026-09-01T00:00:00Z') : null }] }
+    return { rows: [{ deleted_at: id === DELETED || id === PROJ_DELETED ? new Date('2026-09-01T00:00:00Z') : null }] }
+  }
+  if (/SELECT id FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\) AND base_id = \$2/.test(sql)) {
+    const [ids, baseId] = params as [string[], string]
+    // Honour a deleted_at filter if the lookup ever grows one: the "same 403 for live and deleted" case
+    // below rests on this lookup NOT filtering it.
+    const liveOnly = /deleted_at IS NULL/.test(sql)
+    return {
+      rows: baseId === 'base_apr_projection'
+        ? ids.filter((id) => PROJECTION_SHEETS.has(id) && !(liveOnly && id === PROJ_DELETED)).map((id) => ({ id }))
+        : [],
+    }
   }
   if (/SELECT row_level_read_permissions_enabled/.test(sql)) {
     return { rows: params[0] === LIVE ? [{ enabled: rowLevel.enabled, base_id: 'base_gate' }] : [] }
@@ -185,6 +207,31 @@ describe('requireRecordReadable: authority first, then sheet liveness, then the 
 
     // Row-level deny is decided only for a live sheet: a denied reader of a deleted sheet is told it is gone.
     expect((await gate(READER, DELETED)).result).toEqual({ status: 404, body: SHEET_DELETED })
+  })
+
+  it('the promise is live vs soft-deleted for the SAME id: on an approval-projection sheet a refused reader gets one 403 for both, while an absent id is judged by global RBAC alone', async () => {
+    // What the gate guarantees: soft delete changes nothing the capability lookup reads, so a caller
+    // refused on a projection sheet is refused identically whether that sheet is live or deleted.
+    for (const recordId of [RECORD, MISSING]) {
+      const live = await gate(READER, PROJ_LIVE, recordId)
+      const deleted = await gate(READER, PROJ_DELETED, recordId)
+      expect(live.result, `live/${recordId}`).toEqual({ status: 403, body: FORBIDDEN })
+      expect(deleted.result, `deleted/${recordId}`).toEqual(live.result)
+      expect(live.sql).toEqual(await capabilitySql(READER, PROJ_LIVE))
+      expect(deleted.sql).toEqual(await capabilitySql(READER, PROJ_DELETED))
+      expect([...live.sql, ...deleted.sql].some((s) => /FROM meta_records WHERE id = \$1/.test(s))).toBe(false)
+    }
+    // What it does NOT promise (requireRecordReadable's ORDER comment): an absent id has no projection
+    // row, so global RBAC decides it, and this reader holds global read. The difference is decided by the
+    // capability lookup that every sheet-addressed route shares, before this gate's own order matters.
+    const absent = await gate(READER, ABSENT)
+    expect(absent.result).toEqual({ status: 404, body: SHEET_ABSENT })
+    expect(absent.sql).toEqual(await capabilitySql(READER, ABSENT))
+    const absentCapabilities = await resolveSheetReadableCapabilities(reqFor(READER), fakeQuery, ABSENT)
+    const projectionCapabilities = await resolveSheetReadableCapabilities(reqFor(READER), fakeQuery, PROJ_DELETED)
+    expect([absentCapabilities.capabilities.canRead, projectionCapabilities.capabilities.canRead]).toEqual([true, false])
+    // An admin bypasses the projection fence, so it is told the deleted projection sheet is gone.
+    expect((await gate(ADMIN, PROJ_DELETED)).result).toEqual({ status: 404, body: SHEET_DELETED })
   })
 })
 
@@ -376,4 +423,39 @@ describe('the five routes guarded by requireRecordReadable alone (#5830)', () =>
       })
     })
   }
+
+  it('INTENDED: a reader refused by the ROUTE (no edit / submit) gets that 403 on a live sheet and the gate 404 on a deleted or absent one; the same reader is told so by the read-only route', async () => {
+    // Not an oracle: this caller passes the gate, i.e. may read the sheet, and a reader is told that a
+    // sheet is gone on every read route (GET …/approvals below). The route's own capability check runs
+    // after the gate, as the all-routes closure guard allows (a permission 403 before the existence 404).
+    currentUser = READ_ONLY
+    const byName = (name: string) => ROUTES.find((r) => r.name === name)!
+    const run = byName('POST /sheets/:sheetId/ai/shortcut/run')
+    const submit = byName('POST /sheets/:sheetId/records/:recordId/approvals')
+    const list = byName('GET /sheets/:sheetId/records/:recordId/approvals')
+
+    const answers = async (route: RouteCase) => {
+      const out: Record<string, [number, unknown]> = {}
+      for (const sheetId of SHEETS) {
+        const { res } = await call(route, sheetId)
+        out[sheetId] = [res.status, res.body]
+      }
+      return out
+    }
+    expect(await answers(run)).toEqual({
+      [LIVE]: [403, FORBIDDEN],
+      [DELETED]: [404, SHEET_DELETED],
+      [ABSENT]: [404, SHEET_ABSENT],
+    })
+    expect(await answers(submit)).toEqual({
+      [LIVE]: [403, APPROVAL_FORBIDDEN],
+      [DELETED]: [404, APPROVAL_NOT_FOUND],
+      [ABSENT]: [404, APPROVAL_NOT_FOUND],
+    })
+    const listed = await answers(list)
+    expect(listed[LIVE]![0]).toBe(200)
+    expect(listed[DELETED]).toEqual([404, APPROVAL_NOT_FOUND])
+    expect(listed[ABSENT]).toEqual([404, APPROVAL_NOT_FOUND])
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
 })
