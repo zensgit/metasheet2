@@ -11,6 +11,7 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  buildUpdateTemplatePayload,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
   draftFromTemplate,
@@ -759,14 +760,22 @@ describe('approval template authoring helpers', () => {
 
   // P1-A0 publish-payload-shape pin — basic-info fields never travel through `publishTemplate`
   // (which sends only `{ policy }`, see `approval-template-authoring-policy-carrier.test.ts`); they
-  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (identical function,
-  // `templateAuthoring.ts`) at save time. This slice touches no basic-info persistence code — this
-  // pin exists to prove that stays true. A mutation renaming/dropping/reshaping a basic-info payload
-  // key reds either assertion below. NOTE for future authors: the `Object.keys(...).sort()`
-  // assertion is a full shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated
-  // later slice (e.g. a new top-level payload field) — that is expected; update the expected key
-  // list rather than assume this test caught a regression.
-  it('P1-A0: pins the exact basic-info shape of the create/update payload (no key renamed, dropped, or reshaped)', () => {
+  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (`templateAuthoring.ts`)
+  // at save time. This slice touches no basic-info persistence code — this pin exists to prove that
+  // stays true. A mutation renaming/dropping/reshaping a basic-info payload key reds either
+  // assertion below. NOTE for future authors: the `Object.keys(...).sort()` assertion is a full
+  // shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated later slice (e.g. a
+  // new top-level payload field) — that is expected; update the expected key list rather than
+  // assume this test caught a regression.
+  //
+  // Correction (remedy round 3, gate 2 P3-3): the two builders are NOT "an identical function" —
+  // since approval-form-ux-slice1 §1.2, `buildUpdateTemplatePayload` is `buildCreateTemplatePayload`
+  // with `key` destructured off (`templateAuthoring.ts:2573-2574`). The two pins below are
+  // therefore separate tests: the CREATE pin (full shape, key included) and the UPDATE pin (full
+  // shape, key absent) — the update pin is a full-shape assertion, not only the key-absence check
+  // that existed before this round (a mutation that added an unrelated field to the update payload,
+  // e.g. `category` staying an extra un-omitted field, previously reds nothing here).
+  it('P1-A0: pins the exact basic-info shape of the CREATE payload (no key renamed, dropped, or reshaped)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'travel'
     draft.name = '出差审批'
@@ -797,6 +806,43 @@ describe('approval template authoring helpers', () => {
       visibilityScope: payload.visibilityScope,
     }).toEqual({
       key: 'travel',
+      name: '出差审批',
+      category: '差旅',
+      description: '跨部门出差需要审批',
+      slaHours: 24,
+      visibilityScope: { type: 'dept', ids: ['dept_a', 'dept_b'] },
+    })
+  })
+
+  it('P1-A0: pins the exact basic-info shape of the UPDATE payload (identical to CREATE minus key)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'travel'
+    draft.name = '出差审批'
+    draft.category = '差旅'
+    draft.description = '跨部门出差需要审批'
+    draft.slaHoursText = '24'
+    draft.visibilityType = 'dept'
+    draft.visibilityIdsText = 'dept_a, dept_b'
+
+    const payload = buildUpdateTemplatePayload(draft)
+
+    expect(Object.keys(payload).sort()).toEqual([
+      'approvalGraph',
+      'category',
+      'description',
+      'formSchema',
+      'name',
+      'slaHours',
+      'visibilityScope',
+    ])
+    expect(Object.prototype.hasOwnProperty.call(payload, 'key')).toBe(false)
+    expect({
+      name: payload.name,
+      category: payload.category,
+      description: payload.description,
+      slaHours: payload.slaHours,
+      visibilityScope: payload.visibilityScope,
+    }).toEqual({
       name: '出差审批',
       category: '差旅',
       description: '跨部门出差需要审批',
