@@ -8262,7 +8262,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // Plainly: the underlying eligible set is DEPLOYMENT-WIDE, not sheet-scoped. It comes from
   // loadSheetMemberUserIdSet → listSheetPermissionCandidates, whose `user_candidates` CTE carries the
   // sheet id only in the LEFT JOIN ON clause and filters on nothing but the search term — so "sheet
-  // members" is really "every active user in the deployment". Before this change, any actor with
+  // members" is really "every active user in the deployment HOLDING A GLOBAL multitable:read/write
+  // grant" (loadCandidateUserEligibilityMap, multitable/permission-service.ts:239-269, consumed at
+  // :584-597 — direct or via a role). In a deployment that puts multitable:read on the generic `user`
+  // role that is effectively everyone, but the predicate is a real one and the earlier unqualified
+  // wording was falsifiable. Before this change, any actor with
   // canEditRecord on ANY sheet could call this with no search term and receive that whole roster
   // hydrated to id + name + email, unlimited; the sibling /permission-candidates, which answers the
   // same shape, requires canManageSheetAccess AND clamps to 50.
@@ -8295,6 +8299,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      do NOT read it as "the roster is now bounded deployment-wide". Widening this PR to touch the
   //      comments surface was deliberately rejected (different router, different gate, its own tests);
   //      it is FILED as #5795 with those same three bounds so the two surfaces converge.
+  //      A THIRD surface of the same shape lives in THIS file: GET /sheets/:sheetId/form-share-candidates
+  //      (route further down), gated on canManageFormShareForSheet -> capabilities.canManageViews —
+  //      which multitable/permission-service.ts:1543-1549 grants to ANY holder of a sheet-level
+  //      full-write grant, i.e. exactly the actor shape this route's own tests use. It reads the SAME
+  //      listSheetPermissionCandidates and answers a TERM-LESS call with 20-50 rows of name + email.
+  //      It is already clamped to 50, so it does NOT restore the unlimited dump; what it lacks is the
+  //      "must supply a term" half. Named here so the next reader does not read residual (2) as
+  //      "only the comments surface is left".
   //  (3) WHERE THE BOUNDS ARE PROVEN. The route-level behaviour is pinned by
   //      tests/unit/multitable-person-directory-bounded.test.ts (which MOCKS the resolver) and the
   //      generated SQL by tests/unit/multitable-person-directory-resolver.test.ts (which asserts on the
