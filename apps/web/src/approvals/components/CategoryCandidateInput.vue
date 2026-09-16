@@ -47,6 +47,23 @@
   </div>
 </template>
 
+<script lang="ts">
+// Bug fix (round 4, advisor review): a plain `let instanceSeq = 0` written directly inside
+// `<script setup>` re-initializes to 0 on EVERY component instance — `<script setup>` compiles to
+// the body of a per-instance `setup()` function, it is NOT module-scope, despite reading like a
+// top-level declaration. A companion (non-`setup`) `<script>` block IS genuine module scope in an
+// SFC — evaluated once when the module first loads, shared by every instance — which is what a
+// cross-instance uniqueness counter actually requires. Without this fix, two fields mounted at once
+// (e.g. TemplateAuthoringView.vue's and TemplateDetailView.vue's, in an unlikely but not impossible
+// simultaneous-mount case) would both compute `uid = 'category-candidate-input-1'` and collide on
+// `id`/`aria-controls`/`aria-activedescendant`.
+let instanceSeq = 0
+export function nextCategoryCandidateInputInstanceId(): number {
+  instanceSeq += 1
+  return instanceSeq
+}
+</script>
+
 <script setup lang="ts">
 // approval-form-ux-slice1 (20260916 design §3) — wires the two free-text category inputs
 // (TemplateAuthoringView.vue create-time, TemplateDetailView.vue edit-time) to the already-shipped
@@ -140,13 +157,37 @@ let candidatesRequested = false
 // `aria-expanded`, and the keydown handler below all read, so they can never disagree.
 const listboxVisible = computed(() => open.value && filteredCandidates.value.length > 0)
 
-const activeIndex = ref(-1)
+// The active item is tracked by VALUE (`activeCandidateValue`), not by a raw numeric index —
+// advisor review: `candidates`/`filteredCandidates` can legitimately change shape while an index is
+// held (the lazy fetch resolving asynchronously after an ArrowDown already moved the index — see
+// `pendingFirst` below), and a raw index re-applied against a LATER version of the list can end up
+// pointing at a DIFFERENT candidate than the one the user actually navigated to. Re-deriving the
+// position by `indexOf` against the CURRENT list on every read makes this self-healing: if the
+// previously-active candidate is no longer present (filtered out, or — not reachable from the two
+// production call sites today, but not ruled out — the fetched list itself changing a second time),
+// `activeIndex` below simply reports -1 (nothing active) rather than silently relabelling a
+// different candidate as active.
+const activeCandidateValue = ref<string | null>(null)
+// True for the brief window between an ArrowDown that opens a still-loading list and that fetch
+// resolving: there is no real candidate to point at yet, but the user's "highlight the first item"
+// intent should apply the instant one exists, without requiring a second keypress. Cleared the
+// moment a real `activeCandidateValue` is set (by `moveActive`) or the field's content changes.
+const pendingFirst = ref(false)
+const activeIndex = computed<number>(() => {
+  if (activeCandidateValue.value !== null) return filteredCandidates.value.indexOf(activeCandidateValue.value)
+  if (pendingFirst.value && filteredCandidates.value.length > 0) return 0
+  return -1
+})
+function resetActive(): void {
+  activeCandidateValue.value = null
+  pendingFirst.value = false
+}
 
-// Stable per-instance id prefix (module-level counter, not a random string) so two mounted fields
-// in the same document — e.g. this component under both TemplateAuthoringView.vue and
-// TemplateDetailView.vue — never collide on `id`/`aria-controls`/`aria-activedescendant`.
-let instanceSeq = 0
-const uid = `category-candidate-input-${(instanceSeq += 1)}`
+// Stable per-instance id prefix — see the companion `<script>` block above for why the counter
+// lives there and not here — so two mounted fields in the same document — e.g. this component
+// under both TemplateAuthoringView.vue and TemplateDetailView.vue — never collide on
+// `id`/`aria-controls`/`aria-activedescendant`.
+const uid = `category-candidate-input-${nextCategoryCandidateInputInstanceId()}`
 const listboxId = `${uid}-listbox`
 function optionId(index: number): string {
   return `${uid}-option-${index}`
@@ -166,17 +207,20 @@ const activeOptionId = computed<string | undefined>(() =>
 // `stopPropagation`.
 let consumedKey: 'Enter' | 'Escape' | null = null
 
-// Moves `activeIndex` by `delta` over the currently visible candidates, WRAPPING at both ends
+// Moves the active candidate by `delta` over the currently visible list, WRAPPING at both ends
 // (design §'s "clamp or wrap — pick one and document it": wrap, matching the WAI-ARIA combobox
-// authoring-practice listbox pattern). Returns -1 (no active item) when there is nothing to move
-// over, e.g. the candidate fetch has not resolved yet.
-function moveActiveIndex(delta: number): void {
-  const length = filteredCandidates.value.length
-  if (length === 0) {
-    activeIndex.value = -1
+// authoring-practice listbox pattern). With nothing currently active, ArrowDown (delta>0) starts at
+// the first item and ArrowUp (delta<0) starts at the last — the conventional combobox convention.
+function moveActive(delta: number): void {
+  const list = filteredCandidates.value
+  if (list.length === 0) {
+    resetActive()
     return
   }
-  activeIndex.value = (activeIndex.value + delta + length) % length
+  const current = activeIndex.value
+  const next = current === -1 ? (delta > 0 ? 0 : list.length - 1) : (current + delta + list.length) % list.length
+  pendingFirst.value = false
+  activeCandidateValue.value = list[next]
 }
 
 function ensureCandidatesLoaded(): void {
@@ -204,7 +248,7 @@ const filteredCandidates = computed<string[]>(() => {
 function onInput(event: Event): void {
   emit('update:modelValue', (event.target as HTMLInputElement).value)
   open.value = true
-  activeIndex.value = -1 // the typed text just changed which candidates match; drop any stale highlight
+  resetActive() // the typed text just changed which candidates match; drop any stale highlight
   ensureCandidatesLoaded()
 }
 
@@ -219,7 +263,7 @@ function onBlur(): void {
   // the timeout is kept as a second guard for any pointer path that reaches blur first anyway.
   window.setTimeout(() => {
     open.value = false
-    activeIndex.value = -1
+    resetActive()
   }, 150)
 }
 
@@ -230,18 +274,18 @@ function selectCandidate(candidate: string): void {
   // reintroducing a re-focus call here reopens the dropdown immediately after every selection).
   emit('update:modelValue', candidate)
   open.value = false
-  activeIndex.value = -1
+  resetActive()
 }
 
 // Remedy round 4 (P2-B). ArrowDown OPENS a closed list (kicking off the same lazy fetch as
-// focus/input — see the file doc comment) and always seeds `activeIndex` at 0, even before the
-// fetch has resolved: `filteredCandidates` is empty at that synchronous instant, so nothing is
-// rendered as active yet, but the index is already correct once the candidates arrive on the next
-// render — a second ArrowDown right after (once the fetch settles) lands on index 1, not back on
-// index 0. ArrowUp is deliberately inert while the list is closed (design: only ArrowDown opens
-// it). Enter accepts the active candidate ONLY when one is actually valid for the CURRENT
-// (possibly just-filtered) list — `activeIndex` alone is not enough, since typing can shrink the
-// list out from under a previously-valid index; that same guard is what makes Enter a no-op (pass
+// focus/input — see the file doc comment) and sets `pendingFirst`, even before the fetch has
+// resolved: `filteredCandidates` is empty at that synchronous instant, so nothing is rendered as
+// active yet, but `activeIndex` (via `pendingFirst`) is already 0 the instant the candidates arrive
+// — a second ArrowDown right after (once the fetch settles) lands on index 1, not back on index 0.
+// ArrowUp is deliberately inert while the list is closed (design: only ArrowDown opens it). Enter
+// accepts the active candidate ONLY when one is actually valid for the CURRENT (possibly
+// just-filtered) list — `activeIndex` alone is not enough, since typing can shrink the list out
+// from under a previously-active candidate; that same guard is what makes Enter a no-op (pass
 // through to the parent's `keyup.enter` save shortcut — see `onKeyup`) whenever the list is closed
 // or empty. Escape closes the list only when it is actually VISIBLE (`listboxVisible`, not the
 // broader `open`) — `open` alone goes true on plain focus, before anything has rendered or matched,
@@ -253,16 +297,17 @@ function onKeydown(event: KeyboardEvent): void {
     if (!open.value) {
       open.value = true
       ensureCandidatesLoaded()
-      activeIndex.value = 0
+      resetActive()
+      pendingFirst.value = true
     } else {
-      moveActiveIndex(1)
+      moveActive(1)
     }
     return
   }
   if (event.key === 'ArrowUp') {
     if (!open.value) return
     event.preventDefault()
-    moveActiveIndex(-1)
+    moveActive(-1)
     return
   }
   if (event.key === 'Enter') {
@@ -278,7 +323,7 @@ function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     if (listboxVisible.value) {
       open.value = false
-      activeIndex.value = -1
+      resetActive()
       consumedKey = 'Escape'
       event.preventDefault()
       event.stopPropagation()

@@ -349,5 +349,102 @@ describe('CategoryCandidateInput', () => {
       const options = Array.from(list.querySelectorAll('li'))
       expect(options[2].getAttribute('aria-selected')).toBe('true')
     })
+
+    // Advisor review: the active item is tracked by VALUE (`activeCandidateValue`, re-resolved by
+    // `indexOf` against the CURRENT list on every read), not by a raw numeric index re-applied
+    // against a possibly-different-shaped LATER list. This is the genuinely discriminating
+    // repro: an EXTERNAL `v-model` write (bypassing this component's own `onInput` — which already
+    // resets on every keystroke the user types through the field itself, so ordinary typing is safe
+    // under either design) changes which candidates match while an index is already active. Filter
+    // narrowing only ever REMOVES entries (never reorders — `candidates` is fetched once and never
+    // reshuffled), so with 5 candidates and the active one sitting at position 2, narrowing to 4
+    // OTHER matching candidates leaves position 2 of the NEW list occupied by a candidate the user
+    // never navigated to. A raw stored index would silently relabel that different candidate as
+    // active; this component must not. NOT reachable from the two real call sites today (neither
+    // reassigns its `v-model` while this field is open — see the design's own file doc comment) —
+    // this locks the underlying mechanism directly rather than relying on that being permanently
+    // true. This is genuinely a different code path than the isolated Host's normal `mountInput`
+    // (which only ever writes `modelValue` back FROM the component's own `update:modelValue` emit),
+    // so it mounts its own Host that exposes the ref for a direct EXTERNAL write.
+    it('an EXTERNAL v-model write that shrinks the list (bypassing onInput) drops a now-absent active item — never relabels a different one at the same index', async () => {
+      listTemplateCategoriesSpy.mockReset().mockResolvedValue(['出差1', '出差2', '报销', '出差3', '出差4'])
+      const externalValue = ref('')
+      const Host = defineComponent({
+        setup() {
+          return () =>
+            h(CategoryCandidateInput, {
+              'data-testid': 'category-input',
+              modelValue: externalValue.value,
+              'onUpdate:modelValue': (v: string) => {
+                externalValue.value = v
+              },
+            })
+        },
+      })
+      app = createApp(Host)
+      app.mount(container!)
+      await flushUi()
+      const el = input()
+
+      fireKey(el, 'keydown', 'ArrowDown')
+      await flushUi()
+      fireKey(el, 'keydown', 'ArrowDown')
+      await flushUi()
+      fireKey(el, 'keydown', 'ArrowDown')
+      await flushUi() // index 2 of the unfiltered 5-item list: '报销'
+      let list = container!.querySelector('[data-testid="category-candidate-list"]') as HTMLUListElement
+      expect(Array.from(list.querySelectorAll('li'))[2].textContent).toBe('报销')
+      expect(Array.from(list.querySelectorAll('li'))[2].getAttribute('aria-selected')).toBe('true')
+
+      // EXTERNAL write — not through this component's own onInput — to a query matching the four
+      // '出差N' candidates and excluding '报销'. Position 2 of the NEW filtered list is '出差3', a
+      // candidate the user never navigated to.
+      externalValue.value = '出差'
+      await flushUi()
+
+      list = container!.querySelector('[data-testid="category-candidate-list"]') as HTMLUListElement
+      const options = Array.from(list.querySelectorAll('li'))
+      expect(options.map((o) => o.textContent)).toEqual(['出差1', '出差2', '出差3', '出差4'])
+      expect(options.every((o) => o.getAttribute('aria-selected') === 'false')).toBe(true)
+      expect(el.hasAttribute('aria-activedescendant')).toBe(false)
+    })
+  })
+
+  // Advisor review, bug fix: a plain `let instanceSeq = 0` written directly inside `<script setup>`
+  // re-initializes to 0 on EVERY component instance (it compiles into the per-instance `setup()`
+  // function body, not module scope) — so two mounted fields would both compute the SAME `uid` and
+  // collide on `id`/`aria-controls`/`aria-activedescendant`. Mounts two instances side by side and
+  // asserts their `aria-controls` targets differ.
+  it('two mounted instances never collide on id/aria-controls (module-scope instance counter)', async () => {
+    const containerB = document.createElement('div')
+    document.body.appendChild(containerB)
+    const appB = createApp(
+      defineComponent({
+        setup() {
+          const value = ref('')
+          return () =>
+            h(CategoryCandidateInput, {
+              'data-testid': 'category-input-b',
+              modelValue: value.value,
+              'onUpdate:modelValue': (v: string) => {
+                value.value = v
+              },
+            })
+        },
+      }),
+    )
+    appB.mount(containerB)
+    await flushUi()
+    try {
+      await mountInput('') // instance A, uses this describe's own `container`/`app`
+      const elA = input()
+      const elB = containerB.querySelector('[data-testid="category-input-b"]') as HTMLInputElement
+      expect(elA.getAttribute('aria-controls')).toBeTruthy()
+      expect(elB.getAttribute('aria-controls')).toBeTruthy()
+      expect(elA.getAttribute('aria-controls')).not.toBe(elB.getAttribute('aria-controls'))
+    } finally {
+      appB.unmount()
+      containerB.remove()
+    }
   })
 })
