@@ -83,3 +83,24 @@ Remote main remained `38caaf17bfc8eeca23e23f6dfe796683d35ab525` and the PR branc
 remained the exact published SHA before preparing the follow-up push. These results
 do not cover the newer 22nd test, local custody, NAS, physical power loss or deployment.
 The local 74-test follow-up also passed core-backend `type-check` before publication.
+
+## Follow-up terminal matrix and docs-only main replay
+
+Published follow-up `c7842136b99b288020bae1162765a9e8e6c1c0fe` reached 34 SUCCESS,
+1 expected SKIPPED, zero pending/failure. Run `35048705215` Node18 job
+`104644174509` and Node20 job `104644174685` each logged 22 successful file-store
+cases, explicitly including separate-process pin/delete arbitration. Coverage job
+`104650293622` also succeeded. Sol high read-only review at that exact head returned
+0 P1 / 0 P2 / 0 P3 within the local-store contract; it ran no tests and did not
+claim NAS, custody, startup, power-loss or mutation acceptance. Session closed;
+the verdict is also recorded in PR #5744 comment 5691261776.
+
+Final-main recheck found docs-only #5789. True merge
+`1f0a4ed720360896c29db0bdfb7716730eced3c7`, tree
+`a70644fbe60a0ff25faeaff5665fc9811d782b4e`, has ordered parents
+`c7842136b99b288020bae1162765a9e8e6c1c0fe` and
+`857e29dd392cc6ff05619b8549f9ea83ead941c3`. No conflict/manual resolution.
+Its sole first-parent delta is the incoming frontline-role permission-plan MD;
+all runtime/test/provider/workflow bytes are unchanged. Focused three-file tests
+pass 74/74 again. The successor needs its own published-head checks; the prior
+matrix is not relabeled as successor CI.
