@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { useAuth } from '../src/composables/useAuth'
+import { installPermissionSnapshotRefresh, useAuth } from '../src/composables/useAuth'
 import { effectScope } from 'vue'
 import { onAuthPrincipalChange } from '../src/composables/authPrincipal'
 
@@ -435,5 +435,207 @@ describe('useAuth', () => {
     expect(store.user_roles).toBeUndefined()
     expect(store.user_permissions).toBeUndefined()
     expect(getAccessSnapshot().roles).toEqual([])
+  })
+
+  /**
+   * The inert half of the refresh design: `src/approvals/permissions.ts` already re-reads the
+   * stored snapshot on `storage` / `focus`, but nothing rewrote that snapshot after boot, so a
+   * tab left open could not see a permission granted while it was open. These pin the writer.
+   */
+  describe('permission snapshot refresh on window focus', () => {
+    type FetchMock = ReturnType<typeof vi.fn>
+
+    // The rate-limit timestamp and the listener are module-level BY DESIGN (one document, one
+    // listener), so they outlive a single test. Every test therefore starts on a clock far past
+    // the window instead of pretending the module is fresh.
+    let clock = Date.UTC(2026, 8, 15, 9, 0, 0)
+
+    const flush = async () => {
+      for (let i = 0; i < 20; i += 1) await Promise.resolve()
+    }
+    const meCalls = (fetchMock: FetchMock): number =>
+      fetchMock.mock.calls.filter((call: unknown[]) => String(call[0]).includes('/api/auth/me')).length
+    const focus = () => window.dispatchEvent(new Event('focus'))
+    const okSession = (permissions: string[]) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: { user: { id: 'u1', email: 'u1@example.com', role: 'user', permissions } },
+      }),
+    })
+
+    beforeEach(() => {
+      clock += 10 * 60_000
+      vi.useFakeTimers()
+      vi.setSystemTime(clock)
+      installPermissionSnapshotRefresh()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('re-reads permissions from the server and tells the in-tab listeners', async () => {
+      store.jwt = 'session-token'
+      store.user_permissions = JSON.stringify(['stock-prep:read'])
+      const fetchMock = vi.fn().mockResolvedValue(okSession(['stock-prep:read', 'stock-prep:write']))
+      vi.stubGlobal('fetch', fetchMock)
+      const announced: Array<string | null> = []
+      const listener = (event: Event) => {
+        const storageEvent = event as StorageEvent
+        if (storageEvent.key === 'user_permissions') announced.push(storageEvent.newValue)
+      }
+      window.addEventListener('storage', listener)
+      try {
+        focus()
+        await flush()
+
+        expect(meCalls(fetchMock)).toBe(1)
+        expect(JSON.parse(store.user_permissions)).toEqual(['stock-prep:read', 'stock-prep:write'])
+        expect(useAuth().hasPermission('stock-prep:write')).toBe(true)
+        // A same-document localStorage write emits no `storage` event of its own, so without the
+        // re-emission the already-installed listeners would not see this until the NEXT focus.
+        expect(announced).toEqual([JSON.stringify(['stock-prep:read', 'stock-prep:write'])])
+      } finally {
+        window.removeEventListener('storage', listener)
+      }
+    })
+
+    it('makes at most one request per 60s interval however often the window is focused', async () => {
+      store.jwt = 'session-token'
+      const fetchMock = vi.fn().mockResolvedValue(okSession(['stock-prep:read']))
+      vi.stubGlobal('fetch', fetchMock)
+      // Requirement: several installs still mean one listener, hence one refresh.
+      installPermissionSnapshotRefresh()
+      installPermissionSnapshotRefresh()
+
+      focus()
+      await flush()
+      expect(meCalls(fetchMock)).toBe(1)
+
+      vi.advanceTimersByTime(59_999)
+      focus()
+      await flush()
+      focus()
+      await flush()
+
+      expect(meCalls(fetchMock)).toBe(1)
+    })
+
+    it('refreshes again once the interval has elapsed', async () => {
+      store.jwt = 'session-token'
+      const fetchMock = vi.fn().mockResolvedValue(okSession(['stock-prep:read']))
+      vi.stubGlobal('fetch', fetchMock)
+
+      focus()
+      await flush()
+      expect(meCalls(fetchMock)).toBe(1)
+
+      vi.advanceTimersByTime(60_000)
+      focus()
+      await flush()
+
+      expect(meCalls(fetchMock)).toBe(2)
+    })
+
+    it('never requests, and never resets the session, when there is no token', async () => {
+      store.user_permissions = JSON.stringify(['stock-prep:read'])
+      const fetchMock = vi.fn().mockResolvedValue(okSession(['stock-prep:write']))
+      vi.stubGlobal('fetch', fetchMock)
+      const changed = vi.fn()
+      const unsubscribe = onAuthPrincipalChange(changed)
+      try {
+        focus()
+        await flush()
+
+        expect(fetchMock).not.toHaveBeenCalled()
+        // `bootstrapSession`'s no-token branch clears the stored snapshot and announces a
+        // principal change. A background refresh must return before reaching it.
+        expect(store.user_permissions).toBe(JSON.stringify(['stock-prep:read']))
+        expect(changed).not.toHaveBeenCalled()
+      } finally {
+        unsubscribe()
+      }
+    })
+
+    it('never requests while hidden, and a hidden focus does not consume the interval', async () => {
+      store.jwt = 'session-token'
+      const fetchMock = vi.fn().mockResolvedValue(okSession(['stock-prep:read']))
+      vi.stubGlobal('fetch', fetchMock)
+      let visibility = 'hidden'
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
+      try {
+        focus()
+        await flush()
+        expect(meCalls(fetchMock)).toBe(0)
+
+        visibility = 'visible'
+        focus()
+        await flush()
+        expect(meCalls(fetchMock)).toBe(1)
+      } finally {
+        Reflect.deleteProperty(document, 'visibilityState')
+      }
+    })
+
+    it('keeps token, snapshot and cached session when the refresh answers 401', async () => {
+      const auth = useAuth()
+      auth.setToken('session-token')
+      store.user_permissions = JSON.stringify(['stock-prep:read'])
+      store.user_roles = JSON.stringify(['operator'])
+      auth.primeSession({ success: true, data: { user: { id: 'u1', permissions: ['stock-prep:read'] } } })
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: async () => ({ success: false, error: 'Invalid token' }),
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const changed = vi.fn()
+      const unsubscribe = onAuthPrincipalChange(changed)
+      try {
+        focus()
+        await flush()
+
+        expect(meCalls(fetchMock)).toBe(1)
+        // Today a mid-session 401 on this path could not happen at all; it must not start
+        // signing people out now.
+        expect(auth.getToken()).toBe('session-token')
+        expect(store.user_permissions).toBe(JSON.stringify(['stock-prep:read']))
+        expect(store.user_roles).toBe(JSON.stringify(['operator']))
+        expect(changed).not.toHaveBeenCalled()
+
+        // ...and the next route guard still sees the last good session, from cache: a poisoned
+        // `sessionCache` would redirect the user to the login page on their next navigation.
+        const session = await auth.bootstrapSession()
+        expect(session.ok).toBe(true)
+        expect(meCalls(fetchMock)).toBe(1)
+      } finally {
+        unsubscribe()
+      }
+    })
+
+    it('does not start a second request while one is still unanswered', async () => {
+      store.jwt = 'session-token'
+      let finish!: (value: unknown) => void
+      const fetchMock = vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+      vi.stubGlobal('fetch', fetchMock)
+      try {
+        focus()
+        await flush()
+        expect(meCalls(fetchMock)).toBe(1)
+
+        // The interval has elapsed but the server has not answered: a slow server must not be
+        // able to accumulate overlapping refreshes.
+        vi.advanceTimersByTime(120_000)
+        focus()
+        await flush()
+
+        expect(meCalls(fetchMock)).toBe(1)
+      } finally {
+        finish(okSession(['stock-prep:read']))
+        await flush()
+      }
+    })
   })
 })
