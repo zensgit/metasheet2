@@ -752,7 +752,7 @@
           class="template-authoring__placeholder-hint"
           data-testid="approval-node-placeholder-hint"
           title="此为占位审批角色，发布前请替换为真实角色 ID"
-          description="占位角色无人可认领，未替换将无法发布该表单。"
+          description="占位角色无人可认领，未替换将无法发布该审批表单。"
         />
         <!-- P1-B remove affordance: fail-closed — a node must always keep ≥1 source. `disabled` here
              is the UX signal; the actual guard lives in `removeApprovalSourceCard` itself (refuses

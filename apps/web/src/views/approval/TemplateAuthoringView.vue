@@ -1795,10 +1795,10 @@ const authoringSections: Array<{
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础信息', description: '名称、范围与表单起点' },
+  { id: 'basic', label: '基础信息', description: '名称、可见范围与创建起点' },
   { id: 'fields', label: '字段设计', description: '字段、校验与显隐规则' },
   { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
-  { id: 'more-settings', label: '更多设置', description: '审批人去重等表单级策略' },
+  { id: 'more-settings', label: '更多设置', description: '审批人去重等流程策略' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
