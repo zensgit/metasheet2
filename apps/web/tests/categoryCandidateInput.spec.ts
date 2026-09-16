@@ -71,11 +71,25 @@ describe('CategoryCandidateInput', () => {
     return container!.querySelector('[data-testid="category-input"]') as HTMLInputElement
   }
 
-  // C1 — "两处输入均从端点取候选": the endpoint is actually hit on mount, not just wired-but-unused
-  // (the exact gap design §3.1 identified: listTemplateCategories had zero callers before this
-  // slice, and the two writer surfaces are the ONLY new call sites this component introduces).
-  it('C1: fetches candidates from listTemplateCategories on mount', async () => {
+  // C1 — "两处输入均从端点取候选": the endpoint is actually hit, not just wired-but-unused (the
+  // exact gap design §3.1 identified: before this slice the two WRITER surfaces — this component's
+  // two call sites — had zero callers of it; `TemplateCenterView.vue` was already a reader).
+  //
+  // Remedy round 3 (gate 2, P1-1): the fetch must be LAZY — first focus/open, never on mount. A
+  // mount-time fetch reds the required `approval-browser-verify` Playwright lane, which mounts
+  // production views without stubbing this endpoint. Two independently load-bearing pins:
+  // reverting to a mount-time fetch reds the first (spy called with zero interaction); reverting to
+  // no fetch at all reds the second (spy never called even after focus).
+  it('C1: does NOT fetch candidates on mount', async () => {
     await mountInput('')
+    expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
+  })
+
+  it('C1: fetches candidates from listTemplateCategories on first focus (not before)', async () => {
+    await mountInput('')
+    expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
+    input().dispatchEvent(new Event('focus'))
+    await flushUi()
     expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
   })
 

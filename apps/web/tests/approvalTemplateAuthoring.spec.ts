@@ -68,12 +68,14 @@ const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
-// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3): CategoryCandidateInput.vue
-// calls this on every mount; the mock module previously omitted it entirely, so every mounted
-// instance's bare `catch {}` silently swallowed a vitest "no export defined on mock" error and the
-// dropdown always rendered zero candidates. Default resolves to a small non-empty list so tests
-// that mount the authoring view can observe both "the endpoint was called" (C1 first conjunct) and
-// "a fetched candidate renders" without each test having to configure it individually.
+// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3; lazy-fetch corrected round 3,
+// gate 2 P1-1): CategoryCandidateInput.vue calls this lazily, on the field's first focus/open —
+// never on mount (see the component's own doc comment for why). The mock module previously omitted
+// this export entirely, so any mounted instance that DID reach the fetch had its bare `catch {}`
+// silently swallow a vitest "no export defined on mock" error and the dropdown always rendered zero
+// candidates. Default resolves to a small non-empty list so tests that focus/open the field can
+// observe both "the endpoint was called" (C1 first conjunct) and "a fetched candidate renders"
+// without each test having to configure it individually.
 const listTemplateCategoriesSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
@@ -1388,21 +1390,26 @@ describe('TemplateAuthoringView', () => {
     expect(payload.visibilityScope).toEqual({ type: 'dept', ids: ['dept_a', 'dept_b'] })
   })
 
-  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4): the category field
-  // must actually be wired to `GET /api/approval-templates/categories`, not merely still work as a
-  // free-text input if the wiring is ripped out (a plain `<el-input>` renders identically and
-  // passes every OTHER test in this file — see the gate's G-M6 mutation, which reverted both call
-  // sites to `<el-input>` and found zero red tests before this pin existed). This observes the
-  // fetch call directly, then confirms a fetched candidate actually reaches the rendered dropdown
-  // (proving the round-trip end-to-end, not just that SOME function got invoked at import time).
-  it('C1: the category field fetches candidates from listTemplateCategories on mount and renders one', async () => {
+  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4; lazy-fetch corrected
+  // round 3, gate 2 P1-1): the category field must actually be wired to
+  // `GET /api/approval-templates/categories`, not merely still work as a free-text input if the
+  // wiring is ripped out (a plain `<el-input>` renders identically and passes every OTHER test in
+  // this file — see the gate's G-M6 mutation, which reverted both call sites to `<el-input>` and
+  // found zero red tests before this pin existed). The fetch must NOT fire on mount (a mount-time
+  // fetch reds the required `approval-browser-verify` Playwright lane — see
+  // CategoryCandidateInput.vue's own doc comment); it fires on the field's first focus. This
+  // observes both: no call right after mount, then a call on focus, then confirms a fetched
+  // candidate actually reaches the rendered dropdown (proving the round-trip end-to-end, not just
+  // that SOME function got invoked at import time).
+  it('C1: the category field does not fetch on mount, fetches from listTemplateCategories on first focus, and renders one', async () => {
     await mountView()
     await flushUi()
-    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
 
     const categoryInput = container!.querySelector('[data-testid="approval-template-category"]') as HTMLInputElement
     categoryInput.dispatchEvent(new Event('focus'))
     await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
     const list = container!.querySelector('[data-testid="category-candidate-list"]')
     expect(list?.textContent).toContain('差旅')
   })
