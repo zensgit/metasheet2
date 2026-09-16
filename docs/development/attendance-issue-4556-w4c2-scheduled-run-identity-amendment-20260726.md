@@ -10,9 +10,10 @@
 >
 > **Supersession table for this document's own body (added 2026-09-16).** This file was written
 > BEFORE the ratify and its body still argues the pre-ratify position in several places. The owner
-> comment governs; the passages below are retained **only as pre-approval history** and are NOT
-> operative. Each one also carries an inline marker at its own location, so a reader who lands there
-> directly is not misled.
+> comment governs. The passages listed below each carry an inline marker at their own location, so a
+> reader who lands there directly is not misled. **The list is not exhaustive** — scattered
+> references to a decision being pending remain in the prose, and the blanket rule below is what
+> covers them; read that rule before relying on any "pending" wording anywhere in this file.
 >
 > | Passage | What it says | Status after the ratify |
 > |---|---|---|
@@ -21,7 +22,7 @@
 > | §3.1 "Pending decisions (`O-1..O-5`) — not resolved by this draft" | five decisions still open | **Superseded** — all five resolved by bundle A (`49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, `53=(i)`) |
 > | §4 step 1 "Merge this document as **PROPOSED** with no runtime code" | the execution sequence's first step | **Spent** — that merge happened (`d1bed9d640…`) and the ratify followed; the remaining steps' own scope limits still stand |
 >
-> | §1 supersession list / §1.6 `:1564` "Until `O-1` is ratified, no implementation may acquire class `01`" | a prohibition contingent on `O-1` | **Superseded** — `O-1`/`OD-W4C-49` resolved `=(a)`; the governing rule is now the one quoted in the lock's four rewritten sites |
+> | §1 supersession list / §1.6 "Until `O-1` is ratified, no implementation may acquire class `01`" | a prohibition contingent on `O-1` | **Superseded** — `O-1`/`OD-W4C-49` resolved `=(a)`; the governing rule is now the one quoted in the lock's four rewritten sites |
 > | §1.1.1 (`O-3`/`OD-W4C-50`), §1.3 (`O-2`/`OD-W4C-51`), §1.7.1 (`O-4`/`OD-W4C-52`) section headings and their "Pending" framing | three more open decisions | **Superseded** — `50=(a)`, `51=(a)`, `52=(a)` |
 > | §2.1 "two pending gates, 20-21, inert until `O-3`/`O-4` rule" | gates 20–21 not required | **Superseded and ACCEPTANCE-BEARING** — `O-3`/`O-4` are ratified, so gates 20–21 are **required**, not inert. This one is not merely historical: it governs what an implementation must pass |
 > | §5 declared residuals referring to `O-3`/`O-4` as unapproved or to gates 20–21 as inert | residual framing | **Superseded** on the same basis |
@@ -503,6 +504,8 @@ decisions (`O-3`, `O-4`) required to close it.
 
 ### 0.5 A defect this amendment does not yet close (pending `O-3`/`O-4`)
 
+> **[Status marker, 2026-07-27.** The "pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
+
 Two structurally distinct triggers can make the finalization transaction
 (section 1.8) permanently inadmissible for a `running` run even though
 every per-user operation that *can* complete already has:
@@ -589,7 +592,7 @@ This amendment supersedes these parts of the governing lock:
   (15) wholesale;
 - `OD-W4C-40`'s "class `01` is reserved", which this amendment assigns —
   **subject to `O-1`/`OD-W4C-49` ratifying the red-line rewrite immediately
-  below**. **[Evaluated 2026-07-27: `49=(a)` ratified, so the assignment is IN FORCE.]**;
+  below** **[Evaluated 2026-07-27: `49=(a)` ratified, so the assignment is IN FORCE]**;
 - red line **W4C-R42** (lock line 214, "`01` is forbidden", including its
   "crossing a rollout/operation/target class ... fails independently"
   clause), lock lines **2049-2050** ("Prefix `01` is reserved and forbidden
@@ -776,7 +779,6 @@ Rules:
 #### 1.1.1 Pending `O-3`/`OD-W4C-50`: per-`generate`-target permanent failure
 
 > **[Status marker, 2026-07-27.** The "Pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification below is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
-
 
 `chk_asr_terminal_shape` above encodes only the all-or-nothing shape:
 `completed` requires `completed_user_count = expected_user_count`. As
@@ -1598,7 +1600,11 @@ snapshot.
 
 ### 1.6 Advisory class `01` and lock order
 
-> **[Superseded 2026-07-27 — retained as pre-approval history.** Owner comment `5090978124` ratified bundle A; see the supersession table at the top of this file.**]**
+> **[Scoped marker, 2026-07-27.** This marker covers **only** the pending framing in this
+> blockquote. **The body of section 1.6 below is OPERATIVE**: `OD-W4C-46=(a)` assigns class `01` to
+> the scheduled-run helper, and this section's key construction, canonical order
+> `00 → 01 → 10 → 11`, values-free `503 ATTENDANCE_SCHEDULED_RUN_BUSY` mapping and gate-16 rewrite
+> requirement are all in force. See the supersession table at the top of this file.**]**
 >
 > **Pending `O-1`/`OD-W4C-49`.** This section describes the assignment this
 > amendment proposes. It supersedes red line `W4C-R42` and the three
@@ -1793,7 +1799,6 @@ A run that cannot progress (section 1.1.1) is closed by the explicit
 
 > **[Status marker, 2026-07-27.** The "Pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification below is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
-
 Section 0.5 names the mid-run-promotion trigger: the governing lock's
 shadow/eligible promotion-block predicate (lock lines 2689-2690, 2250)
 blocks promotion only while an *operation* row is frozen in another
@@ -1850,6 +1855,8 @@ frozen posture" mutation leg. Section 2 gate 21 is written to accept
 whichever is selected; neither leg exists in this draft until `O-4` picks.
 
 ### 1.8 Finalization transaction
+
+> **[Status marker, 2026-07-27.** The "pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
 Exactly one transaction, containing **no** source DML, **no** calculation
 write, and **no** class-`11` target lock:
@@ -1937,6 +1944,8 @@ stored bytes, so external consumers observe the same event names, the same
 payload keys, and one event per run.
 
 ### 1.9 Posture matrix
+
+> **[Status marker, 2026-07-27.** The "pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
 | Effective posture | Run row | Target rows | Per-user operations | Outbox | Emit |
 | --- | --- | --- | --- | --- | --- |
@@ -2330,6 +2339,12 @@ accepted as the exclusive reason.
     either emission, fails this leg without touching gates 8/15's other
     legs.
 
+> **[Scoped marker, 2026-07-27.** Bundle A ratified `OD-W4C-50=(a)`, `51=(a)` and `52=(a)`, so the
+> "not required today" framing below has lapsed: **gates 20 and 21 are REQUIRED**, each in its
+> ratified `(a)` form. Gate 21's `(b)` leg is the **unchosen** option and is not operative. Gate 4's
+> `reasons`-ordering scope and gate 10's "or one ordinal" leg are settled by `51=(a)`. See the
+> supersession table at the top of this file.**]**
+
 **Pending, activate on ratification of the named decision — not required
 today, but the amendment must not implement `O-3`/`O-4` without them:**
 
@@ -2452,10 +2467,10 @@ before their operation seal.
 
 ### 2.1 CI gate home
 
-> **[Scoped marker, 2026-07-27.** This marker covers **only** the clause "two pending gates, 20-21, inert until `O-3`/`O-4` rule" in the sentence below: bundle A ratified both items, so **gates 20–21 are REQUIRED, not inert**. Everything else in this CI-gate-home section — the required-gate count, the gate table and its homes — is unaffected by this marker.**]**
+> **[Scoped marker, 2026-07-27.** This marker covers **only** the clause "two pending gates, 20-21, inert until `O-3`/`O-4` rule" in the sentence below: bundle A ratified both items, so **gates 20–21 are REQUIRED, not inert**. The required-gate **count** in the sentence below **does** change with this marker: bundle A makes it **twenty-three**. The gate table and its homes are unaffected.**]**
 
-Twenty-one required gates (plus two pending gates, 20-21, inert until
-`O-3`/`O-4` rule — the required count above includes the new gates 22-23,
+Twenty-three required gates (`O-3`/`O-4` ratified, so former gates 20-21 are required
+rather than pending — the required count above includes the new gates 22-23,
 neither of which is pending on anything) that are only "mutation-proven on
 real PostgreSQL" in prose, with no suite or workflow step named, is this
 repo's own documented false-green shape (real-DB integration suites that
@@ -2499,7 +2514,13 @@ a recommendation against `48(b)` but a **structural exclusion**
 (`D0c`, section 3.3), for the reasons stated there in full.
 
 ### 3.1 Pending decisions (`O-1..O-5`) — not resolved by this draft
-> **[Superseded 2026-07-27 — retained as pre-approval history.** Owner comment `5090978124` ratified bundle A; see the supersession table at the top of this file.**]**
+
+> **[Scoped marker, 2026-07-27.** This marker covers **only** this section's "Pending" / "not
+> resolved by this draft" framing. **The decision table below is OPERATIVE and definitional:** it is
+> where each ratified option's content is stated, so `49=(a)`, `50=(a)`, `51=(a)`, `52=(a)` and
+> `53=(i)` are read from their option cells. Only the **unchosen** options — and the
+> "Recommendation" column, now spent — are not operative. See the supersession table at the top of
+> this file.**]**
 
 `OD-W4C-44..48` above are ordinary recommendations this draft makes and
 argues for. The five decisions below are different in kind: each is a
@@ -2523,6 +2544,8 @@ one-pass ratification — see the scope note at the top of this document.
 | `OD-W4C-53` (`O-5`) — lock §8.2 step 7's "source-definition fingerprint equality": which domain does it hold on (section 3.2) | **Two unconditional tokens, one conditional token:** (i) ratify a narrow comparison domain, `{resolvedAt, reasonCode}` excluded, as a **second**, permanently-maintained fingerprint distinct from the storage column — unconditional; **(ii-wide)** re-resolve before the legacy write or reorder lock §8.2 steps 3/4 (safe by construction, but reopens RATIFIED step-numbering text with an unaudited citation surface) — unconditional; **(ii-narrow)** exclude the operation's own just-written row from the resolver's `openPreviousMatches` match — **conditional**: section 3.2 demonstrates by executed counterexample that the mechanism *as specified in this document* flips both `workDate` and `shiftId` (not only `reasonCode`) when this operation's write touches a pre-existing open record it did not create; a ruling of `(ii-narrow)` authorizes the *direction* (eliminate self-observation at the resolver, not by widening the fingerprint domain) but is **void as an implementation authorization unless and until** the four preconditions in section 3.2's "Gate shape this option needs" (corrected, `matching.length === 1`-gated mechanism spec; positive control; the negative control from the counterexample above; a check-out/disappearance analysis) are supplied and gated — implementation does not start on the mechanism as currently specified | (i) over (ii-wide) among the two unconditional tokens — see reasoning in section 3.2. No recommendation is made on `(ii-narrow)`'s *direction* (that remains the owner's to prefer, per section 3.2's closing paragraph) or on whether its voidness condition will ever be satisfied — only that today's specified mechanism does not clear it |
 
 ### 3.2 `O-5`/`OD-W4C-53` — a fifth pending decision, bundled from outside this document's own schema
+
+> **[Status marker, 2026-07-27.** The "pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
 **Provenance, stated plainly.** This decision is not raised against
 anything in section 1's schema. It is raised against a commit on the
@@ -3242,7 +3265,14 @@ own framing).
 
 ## 4. Execution sequence
 
-> **[Superseded 2026-07-27 — retained as pre-approval history.** Owner comment `5090978124` ratified bundle A; see the supersession table at the top of this file.**]**
+> **[Scoped marker, 2026-07-27.** This marker covers **only** step 1's "Merge this document as
+> **PROPOSED** with no runtime code", which is **spent** — that merge happened
+> (`d1bed9d640f8ee634975c70a6c981d2f49a97832`) and the owner RATIFY followed — and step 2's
+> "nothing below starts before all ten are ratified", which is **satisfied**: bundle A ratified all
+> ten on 2026-07-27. **The remaining steps are OPERATIVE and unchanged**, including the mandatory
+> fresh exact-head independent adversarial review and the prohibition on arming, flag enablement,
+> org enablement, deployment, or closure of #4556. See the supersession table at the top of this
+> file.**]**
 
 1. Merge this document as **PROPOSED** with no runtime code. PR #4612 stays
    Draft under OWNER-AUTHORIZATION-HOLD and is not touched by this merge.
@@ -3294,7 +3324,6 @@ own framing).
    premise.
 
 ## 5. Declared residuals
-
 
 These are stated rather than hidden; each is either an owner decision above or
 an accepted bound:
@@ -3348,7 +3377,10 @@ an accepted bound:
   call is a new generation" on the table; this note makes explicit that
   the recommended option (a) carries this per-user identity amplification
   as its accepted cost.
-> **[Scoped marker, 2026-07-27.** This marker covers **only** the residual immediately below, whose stated ground is that `O-3`/`O-4` were unratified: bundle A ratified both (`50=(a)`, `52=(a)`), so that ground has lapsed and the chosen options' requirements are operative. **Every other residual in this section is unaffected** and stands as written.**]**
+
+> **[Scoped marker, 2026-07-27.** This marker covers **only** the residual immediately below, whose stated ground is that `O-3`/`O-4` were unratified: bundle A ratified both (`50=(a)`, `52=(a)`), so that ground has lapsed and the chosen options' requirements are operative. Every other residual in this section stands **except** the `50=(b)` + `52=(a)` cost-interaction
+entry below, whose premise `50=(b)` is an **unchosen** option — bundle A ratified `50=(a)`, so that
+interaction cannot arise and the entry is retained only as pre-approval history.**]**
 
 - **The finalization-reachability gap (section 0.5) is not closed by this
   draft.** Until `O-3`/`OD-W4C-50` and `O-4`/`OD-W4C-52` are ratified and
