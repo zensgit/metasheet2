@@ -10,7 +10,6 @@ import {
   deriveRecordPermissions,
   deriveViewPermissions,
   type FieldPermissionScope,
-  type RecordPermissionScope,
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
   isFieldWriteForbidden,
@@ -56,19 +55,30 @@ import {
   loadViewPermissionScopeMap,
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
+  resolveBaseReadableForAccess,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
+  resolveSheetCapabilitiesForAccess,
   resolveSheetReadableCapabilities,
+  SHEET_ADMIN_PERMISSION_CODES,
+  SHEET_READ_PERMISSION_CODES,
   type MultitableCapabilityOrigin,
   type MultitableRowActions,
   type MultitableSheetPermissionCandidate,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
 import {
-  acquireRecoveryAuthorityLease,
   isRecoveryAuthorityBusyError,
+  resolveDatabaseRecoverySheetAuthority,
   resolveRecoverySheetAuthority,
 } from '../multitable/recovery-authorization-stability'
+import {
+  createRecoveryAuthorizationStabilizer,
+  createRecoveryPlanAuthorization,
+} from '../multitable/recovery-plan-authorization'
+import { bindRecoveryArchiveWorkerAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveDerivedProcessor, runRecoveryArchiveDerivedTransaction } from '../multitable/recovery-archive-derived-processor'
+import type { RecoveryArchiveDerivedWork } from '../multitable/recovery-archive-derived-effects'
 import {
   acquireTrustCheckpointActivationLease,
   assertTrustCheckpointActivationAuthority,
@@ -111,6 +121,7 @@ import {
   isElearningProjectionSheetIdCandidate,
 } from '../multitable/elearning-projection-constants'
 import { isPluginSystemBaseIdCandidate } from '../multitable/plugin-scope'
+import { APPROVAL_PROJECTION_BASE_ID } from '../multitable/approval-projection-constants'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
@@ -126,10 +137,8 @@ import {
   type ExactAnchorBody,
 } from '../multitable/exact-anchor-recovery-route'
 import {
-  resolveForeignSheetIdFromProperty,
   type ExactAnchorAppliedMutation,
   type ExactAnchorLinkInvalidation,
-  type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
 import {
   listRecoveryArchiveCatalog,
@@ -301,6 +310,8 @@ import {
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from '../multitable/automation-producer-emit'
+import { createRecoveryArchiveWorkerRecordEvents, enqueueRecoveryMutationEvent } from '../multitable/recovery-mutation-events'
+import type { RecoveryArchiveWorkerApplyCallbacks } from '../multitable/recovery-archive-async-restore'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
@@ -1568,13 +1579,14 @@ function resolveRelationCriteriaValue(valueExpr: string, recordData: Record<stri
 // aggregate, or a fail-LOUD sentinel: #PERM! (boundary made it unknowable for this actor), #LIMIT! (a §5
 // cap was hit), #ERROR! (misconfig / operator-incompatible criteria). NEVER a silent null on a boundary.
 async function resolveRelationAggregation(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceSheetId: string,
   recordId: string,
   recordData: Record<string, unknown>,
   call: RelationAggregationCall,
   fields: UniverMetaField[],
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<number | string | boolean | null | unknown[]> {
   const linkField = fields.find((f) => f.id === call.linkFieldId && f.type === 'link')
   const linkCfg = linkField ? parseLinkFieldConfig(linkField.property) : null
@@ -1589,7 +1601,7 @@ async function resolveRelationAggregation(
   if (linkIds.length > MAX_RELATION_SCAN_RECORDS) return REL_AGG_LIMIT_SENTINEL
 
   // Sheet-level read gate.
-  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId])
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId], authorityAccess)
   if (!readableForeignSheetIds.has(foreignSheetId)) return REL_AGG_PERM_SENTINEL
 
   // Foreign-FIELD readability — cross-base flows through the SAME per-field gate as lookup/rollup, not a
@@ -1601,12 +1613,13 @@ async function resolveRelationAggregation(
   // criteria over an unreadable field is a side-channel — the match count would leak it).
   const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId])
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId], authorityAccess)
   if (shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false)) return REL_AGG_PERM_SENTINEL
   if (shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)) return REL_AGG_PERM_SENTINEL
 
   // Materialize the foreign records, excluding row-level-denied ones (absent → never matched/counted).
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRes = await query(
     'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
     [foreignSheetId, linkIds],
@@ -3010,7 +3023,7 @@ async function recalculateFormulaFields(
   // §2a.3 B1: `req` is the WRITING actor — needed to resolve write-side formula taint so a
   // foreign-field-denied writer never recomputes (and persists) a permission-degraded formula
   // value into shared meta_records.data. See the taint skip below.
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   fields: UniverMetaField[],
@@ -3033,6 +3046,8 @@ async function recalculateFormulaFields(
   // Everything downstream (taint skip, relation-agg/pure split, per-record materialization) is
   // unchanged — the SAME taint discipline applies byte-for-byte to both callers.
   explicitFormulaFieldIds?: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
+  requireComplete = false,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
   if (updatedRecordIds.length === 0) return []
   if (!explicitFormulaFieldIds && changedFieldIds.length === 0) return []
@@ -3093,7 +3108,8 @@ async function recalculateFormulaFields(
   // whose deps (transitively) reach a lookup/rollup masked for THIS writer, leaving the previously
   // stored AUTHORIZED value untouched — symmetric to the export/aggregate/read taint sinks. An
   // authorized writer (nothing masked) gets an empty tainted set → recompute is unchanged.
-  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds)
+  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds, authorityAccess)
+  if (requireComplete && taintedForWriter.size > 0) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
   for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
@@ -3128,6 +3144,7 @@ async function recalculateFormulaFields(
       const nextData = hydrated
         ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, pureFormulaFieldIds)
         : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, pureFormulaFieldIds)
+      if (requireComplete && !nextData) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
       if (nextData) {
         for (const fieldId of pureFormulaFieldIds) {
           if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
@@ -3139,7 +3156,7 @@ async function recalculateFormulaFields(
       if (recData) {
         const updates: Record<string, unknown> = {}
         for (const [fieldId, call] of relationAggByField) {
-          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields, authorityAccess)
         }
         for (const fieldId of cliffFieldIds) {
           updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
@@ -3159,6 +3176,7 @@ async function recalculateFormulaFields(
             Object.assign(formulaData, updates)
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
+              if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               derivedWriteBlocked = true
               console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
             } else {
@@ -3305,22 +3323,26 @@ async function recalcNewRecordFormulas(
 type ForeignFieldReadability = { readableFieldIds: Set<string>; crossBase: boolean }
 
 async function resolveForeignFieldReadability(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceBaseId: string | null,
   foreignSheetIds: Iterable<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Map<string, ForeignFieldReadability>> {
   const out = new Map<string, ForeignFieldReadability>()
   const unique = Array.from(new Set(Array.from(foreignSheetIds).filter(Boolean)))
   if (unique.length === 0) return out
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   for (const foreignSheetId of unique) {
     const [foreignSheet, foreignFields, capabilities, fieldScopeMap] = await Promise.all([
       loadSheetRowShared(query, foreignSheetId),
       loadFieldsForSheetShared(query, foreignSheetId),
       // Capabilities don't affect field VISIBILITY (only readOnly), but resolve them so the
       // foreign-sheet derivation matches the export/view path exactly.
-      resolveSheetReadableCapabilities(req, query, foreignSheetId).then((r) => r.capabilities),
+      (authorityAccess || !req
+        ? resolveSheetCapabilitiesForAccess(query, foreignSheetId, access)
+        : resolveSheetReadableCapabilities(req, query, foreignSheetId)).then((r) => r.capabilities),
       access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
     ])
     let readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
@@ -3335,7 +3357,9 @@ async function resolveForeignFieldReadability(
     // foreign base is unreadable by definition (can't opt in / can't grant) → mask (also crash-safe:
     // resolveBaseReadable would throw on null).
     if (crossBase) {
-      const baseReadable = foreignBaseId != null && (await resolveBaseReadable(req, query, foreignBaseId))
+      const baseReadable = foreignBaseId != null && (authorityAccess || !req
+        ? await resolveBaseReadableForAccess(query, foreignBaseId, access)
+        : await resolveBaseReadable(req, query, foreignBaseId))
       if (!baseReadable) {
         readableFieldIds = new Set<string>()
       }
@@ -3389,10 +3413,11 @@ function shouldMaskForeignField(
  * taint-skipped) recompute output and never raw stored formula values.
  */
 async function resolveTaintedFormulaFieldIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   candidateFormulaFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   if (candidateFormulaFieldIds.size === 0) return new Set()
 
@@ -3449,6 +3474,18 @@ async function resolveTaintedFormulaFieldIds(
     dependsOnByField.set(fieldId, set)
   }
 
+  // Recompute also discovers dependencies from authoritative expressions when the index is stale.
+  // Taint must include the same edges or masked hydration could overwrite a stored authorized value.
+  for (const field of fields) {
+    if (field.type !== 'formula') continue
+    const expression = formulaExpressionOf(field)
+    if (!expression) continue
+    const refs = multitableFormulaEngine.extractFieldReferences(expression)
+    const deps = dependsOnByField.get(field.id) ?? new Set<string>()
+    for (const ref of refs) deps.add(ref)
+    dependsOnByField.set(field.id, deps)
+  }
+
   // Resolve foreign-field readability ONCE for every foreign sheet any computed field references.
   const sourceSheet = await loadSheetRowShared(query, sheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
@@ -3460,7 +3497,7 @@ async function resolveTaintedFormulaFieldIds(
   for (const { foreignSheetId } of relAggByField.values()) {
     if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
   }
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds)
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds, authorityAccess)
 
   // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
   const maskedComputedFieldIds = new Set<string>()
@@ -3542,11 +3579,12 @@ async function resolveTaintedFormulaFieldIds(
  * `filterRecordDataByFieldIds` call over stored record data is reachable without it.
  */
 async function maskStoredRecordFieldIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   fields: Array<{ id: string; type: string }> | undefined,
   baseAllowedFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   const candidateFormulaIds = fields
     ? new Set(
@@ -3555,7 +3593,7 @@ async function maskStoredRecordFieldIds(
           .map((field) => field.id),
       )
     : new Set(baseAllowedFieldIds)
-  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds)
+  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds, authorityAccess)
   if (tainted.size === 0) return new Set(baseAllowedFieldIds)
   const masked = new Set(baseAllowedFieldIds)
   for (const id of tainted) masked.delete(id)
@@ -3594,13 +3632,14 @@ async function resolveDisplayFieldTaint(
 }
 
 async function applyLookupRollup(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceSheetId: string,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
   linkValuesByRecord: Map<string, Map<string, string[]>>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<void> {
   const lookupFieldIds = fields.filter((f) => f.type === 'lookup').map((f) => f.id)
   const rollupFieldIds = fields.filter((f) => f.type === 'rollup').map((f) => f.id)
@@ -3658,7 +3697,7 @@ async function applyLookupRollup(
     }
   }
 
-  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys(), authorityAccess)
 
   // §2a.3 — resolve foreign-FIELD-level readability + cross-base for every readable foreign sheet
   // (one scope-map load per foreign sheet, batched — never per record). Source base_id is needed
@@ -3670,6 +3709,7 @@ async function applyLookupRollup(
     query,
     sourceBaseId,
     Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
+    authorityAccess,
   )
 
   // #18 row-level read-deny (cross-record): when a FOREIGN sheet opts in (its
@@ -3679,7 +3719,8 @@ async function applyLookupRollup(
   // lookup values AND never counted by rollup — so a rollup count equals the count of READABLE foreign
   // records, never the true total (no cardinality leak). Resolved once per read; flag-OFF on the foreign
   // sheet → no exclusion → byte-identical; admins bypass.
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -3854,13 +3895,15 @@ function mergeComputedRecords(
 }
 
 async function computeDependentLookupRollupRecords(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   // A-full (design #2410): the edited (source) sheet + its changed field ids gate which related
   // lookup/rollup fields count as "affected" for the one-hop formula recompute below.
   sourceSheetId: string,
   updatedRecordIds: string[],
   changedFieldIds: string[],
+  authorityAccess?: ResolvedRequestAccess,
+  requireComplete = false,
 ): Promise<RelatedComputedRecord[]> {
   if (updatedRecordIds.length === 0) return []
 
@@ -3921,13 +3964,24 @@ async function computeDependentLookupRollupRecords(
     const relatedSheet = await loadSheetRowShared(query, sheetId)
     const relatedBaseId = relatedSheet?.baseId ?? null
     if (baseIdsAreCrossBase(sourceBaseId, relatedBaseId)) {
-      const baseReadable = relatedBaseId != null && (await resolveBaseReadable(req, query, relatedBaseId))
-      if (!baseReadable) continue
+      const baseReadable = relatedBaseId != null && (authorityAccess
+        ? await resolveBaseReadableForAccess(query, relatedBaseId, authorityAccess)
+        : req ? await resolveBaseReadable(req, query, relatedBaseId) : false)
+      if (!baseReadable) {
+        if (requireComplete) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+        continue
+      }
     }
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
-    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
-    if (!access.userId || !capabilities.canRead) continue
+    if (!authorityAccess && !req) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+    const { access, capabilities } = authorityAccess
+      ? await resolveSheetCapabilitiesForAccess(query, sheetId, authorityAccess)
+      : await resolveSheetReadableCapabilities(req!, query, sheetId)
+    if (!access.userId || !capabilities.canRead) {
+      if (requireComplete) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+      continue
+    }
     const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
     allowedFieldIdsBySheet.set(sheetId, computeAllowedFieldIds(fields, capabilities, fieldScopeMap))
   }
@@ -3955,7 +4009,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord, authorityAccess)
 
     // A-full (design #2410): one-hop formula recompute on the related records. A related
     // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
@@ -4028,6 +4082,9 @@ async function computeDependentLookupRollupRecords(
         Array.from(affectedFieldIdsByRecord.keys()),
         Array.from(affectedComputedFieldIds),
         hydratedDataByRecord,
+        undefined,
+        authorityAccess,
+        requireComplete,
       )
       formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
     }
@@ -4041,7 +4098,8 @@ async function computeDependentLookupRollupRecords(
     if (relAggAffectedByRecord.size > 0) {
       const candidateRel = new Set<string>()
       for (const s of relAggAffectedByRecord.values()) for (const id of s) candidateRel.add(id)
-      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel)
+      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel, authorityAccess)
+      if (requireComplete && taintedRel.size > 0) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
       for (const [recordId, fieldIds] of relAggAffectedByRecord) {
         const recData = rows.find((r) => r.id === recordId)?.data ?? (await loadRecordDataById(query, sheetId, recordId))
         if (!recData) continue
@@ -4052,7 +4110,7 @@ async function computeDependentLookupRollupRecords(
           const expr = f ? formulaExpressionOf(f) : null
           const call = expr ? parseRelationAggregationCall(expr) : null
           if (!call) continue
-          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields, authorityAccess)
         }
         // W0-1 L4-cov follow-up (post-merge review of #4438): the fan-out materialization joins the
         // canonical fence via the SHARED derived-write seam, keyed on the DEPENDENT sheet being written
@@ -4068,6 +4126,7 @@ async function computeDependentLookupRollupRecords(
             formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
+              if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
               break
             }
@@ -4743,6 +4802,19 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
  * (`createRecordWriteHelpers(req, pool)`); every helper receives its query
  * function per-call from RecordWriteService, so the pool is not consumed here.
  */
+export function createRecoveryComputedHelpers(authorityAccess: ResolvedRequestAccess, requireComplete = false): Pick<RecordWriteHelpers,
+  'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields'> {
+  if (!authorityAccess.userId) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+  return {
+    applyLookupRollup: (query, sheetId, fields, rows, links, values) =>
+      applyLookupRollup(undefined, query, sheetId, fields, rows, links, values, authorityAccess),
+    computeDependentLookupRollupRecords: (query, sheetId, ids, changed) =>
+      computeDependentLookupRollupRecords(undefined, query, sheetId, ids, changed, authorityAccess, requireComplete),
+    recalculateFormulaFields: (query, sheetId, fields, ids, changed, hydrated) =>
+      recalculateFormulaFields(undefined, query, sheetId, fields, ids, changed, hydrated, undefined, authorityAccess, requireComplete),
+  }
+}
+
 export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn }): RecordWriteHelpers {
   return {
     normalizeLinkIds,
@@ -7005,7 +7077,7 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
  */
 async function hasFullTableReadAccess(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   access: ResolvedRequestAccess,
@@ -7019,23 +7091,232 @@ async function hasFullTableReadAccess(
   const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
   if (scoped.size !== unscoped.size) return false
   for (const id of unscoped) if (!scoped.has(id)) return false
-  // Formula-taint resolution traverses foreign-sheet/base readability through request-shaped helpers.
-  // Recovery must not feed those helpers the original JWT/cache claims after DB-fresh adjudication:
-  // expose only the transaction-fresh access snapshot while inheriting the request's non-auth surface.
-  const authorityReq = Object.create(req) as Request
-  Object.defineProperty(authorityReq, 'user', {
-    value: {
-      id: access.userId,
-      perms: access.permissions,
-      permissions: access.permissions,
-      roles: access.isAdminRole ? ['admin'] : [],
-      role: access.isAdminRole ? 'admin' : 'user',
-    },
-    enumerable: true,
-    configurable: true,
-  })
-  const masked = await maskStoredRecordFieldIds(authorityReq, query, sheetId, undefined, scoped)
+  // Keep the adjudicated snapshot through foreign-field/base checks; never reconstruct JWT claims.
+  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped, access)
   return masked.size === scoped.size
+}
+
+/** One APPLIED revert's internal post-commit facts; patch never serializes into HTTP. */
+type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
+
+/**
+ * Post-commit recovery side effects (best-effort, non-fatal — a committed recovery must never turn into
+ * an HTTP 500 here): RecordWriteService-parity formula/related recompute over the recovered source rows
+ * (derived values are NOT restored history — they are recomputed AFTER the source commit), then
+ * source-sheet true-delta realtime (+ recomputed formula keys; the shared publisher strips patch values
+ * before broadcast), subscriber notifications, and related-sheet PURE-INVALIDATION fan-out (fieldIds +
+ * recordIds only, no recordPatches). Returns the Yjs record-id set to invalidate.
+ */
+const runRecoveryPostCommitSideEffects = async (
+  query: QueryFn,
+  sheetId: string,
+  actorId: string,
+  appliedReverts: AppliedRevertFact[],
+  linkInvalidations: ExactAnchorLinkInvalidation[],
+  helpers: Pick<RecordWriteHelpers, 'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields' | 'loadLinkValuesByRecord'>,
+): Promise<{ yjsRecordIds: string[] }> => {
+  const formulaByRecord = new Map<string, Record<string, unknown>>()
+  let relatedRecords: RelatedComputedRecord[] = []
+  try {
+    const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+    const recordIds = appliedReverts.map((r) => r.recordId)
+    const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
+    if (changedFieldIds.length > 0 && recordIds.length > 0) {
+      // RWS Step 4 parity: hydrate the recovered source rows BEFORE formula recompute so a
+      // formula-over-lookup sees the real lookup value (load rows → link values → applyLookupRollup →
+      // snapshot hydrated data → related recompute → recalculateFormulaFields(hydrated)).
+      const recordRes = await query(
+        'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [sheetId, recordIds],
+      )
+      const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+        id: String(row.id),
+        version: Number(row.version ?? 0),
+        data: normalizeJson(row.data),
+      })) as UniverMetaRecord[]
+
+      let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+      if (rows.length > 0) {
+        const relationalLinkFields = fields
+          .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+          .filter((v): v is { fieldId: string; cfg: NonNullable<ReturnType<typeof parseLinkFieldConfig>> } => !!v && !!v.cfg)
+        const linkValuesByRecord = await helpers.loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+        await helpers.applyLookupRollup(query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+        hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+      }
+
+      relatedRecords = await helpers.computeDependentLookupRollupRecords(query, sheetId, recordIds, changedFieldIds)
+
+      const formulaRecords = await helpers.recalculateFormulaFields(query, sheetId, fields, recordIds, changedFieldIds, hydratedDataByRecord)
+      for (const fr of formulaRecords) formulaByRecord.set(fr.recordId, fr.data)
+    }
+  } catch (err) {
+    console.warn('[univer-meta] recovery post-commit formula/related recompute failed (non-fatal):', err)
+  }
+
+  // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
+  // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
+  if (appliedReverts.length > 0) {
+    try {
+      const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: appliedReverts.map((r) => r.recordId),
+        fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
+        recordPatches: appliedReverts.map((r) => ({
+          recordId: r.recordId,
+          version: r.version,
+          patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
+        })),
+      })
+    } catch (err) {
+      console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
+    }
+  }
+
+  for (const r of appliedReverts) {
+    await notifyRecordSubscribersBestEffort(
+      query,
+      { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
+      'exact-anchor-recovery',
+    )
+  }
+
+  // Related-sheet fan-out is PURE INVALIDATION (no recordPatches / no snapshots — RWS FOL-1 parity).
+  const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
+  for (const record of relatedRecords) {
+    if (!Array.isArray(record.affectedFieldIds) || record.affectedFieldIds.length === 0) continue
+    let group = affectedRelatedBySheet.get(record.sheetId)
+    if (!group) {
+      group = { recordIds: [], fieldIds: new Set<string>() }
+      affectedRelatedBySheet.set(record.sheetId, group)
+    }
+    group.recordIds.push(record.recordId)
+    for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+  }
+  // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
+  // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
+  // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
+  // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
+  for (const invalidation of linkInvalidations) {
+    let group = affectedRelatedBySheet.get(invalidation.sheetId)
+    if (!group) {
+      group = { recordIds: [], fieldIds: new Set<string>() }
+      affectedRelatedBySheet.set(invalidation.sheetId, group)
+    }
+    const seen = new Set(group.recordIds)
+    for (const recordId of invalidation.recordIds) {
+      if (seen.has(recordId)) continue
+      seen.add(recordId)
+      group.recordIds.push(recordId)
+    }
+    for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
+  }
+  try {
+    for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
+      publishMultitableSheetRealtime({
+        spreadsheetId: relatedSheetId,
+        ...(relatedSheetId === sheetId ? { actorId } : {}),
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: group.recordIds,
+        fieldIds: [...group.fieldIds],
+      })
+    }
+  } catch (err) {
+    console.warn('[univer-meta] recovery related-sheet invalidation publish failed (non-fatal):', err)
+  }
+
+  const yjsRecordIds = [
+    ...appliedReverts.map((r) => r.recordId),
+    ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
+  ]
+  return { yjsRecordIds: [...new Set(yjsRecordIds)] }
+}
+
+/** Production worker authorization uses the same conservative read policy as HTTP recovery. */
+export function createRecoveryArchiveWorkerAuthorization() {
+  return bindRecoveryArchiveWorkerAuthorization((query, sheetId, authority) => (
+    hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities)
+  ))
+}
+
+/** Requestless terminal recomputation; callers cannot supply a permissive authorization adapter. */
+export function createRecoveryArchiveDerivedProcessor(database: Pick<RecoveryArchiveRouterDatabaseRuntime, 'query' | 'transaction'>) {
+  const authorization = createRecoveryArchiveWorkerAuthorization()
+  return async (work: RecoveryArchiveDerivedWork): Promise<boolean> => {
+    let notifications: Array<{ sheetId: string; recordIds: string[]; fieldIds: string[] }> = []
+    const completed = await runRecoveryArchiveDerivedTransaction(database.transaction, work, query =>
+      bindRecoveryArchiveDerivedProcessor({
+        query,
+        authorize: candidate => authorization.recheckAuthority(query, candidate.identity),
+        resolveAuthority: async (sheetId, identity) => {
+          const scope = await query(`SELECT sheet.base_id FROM public.meta_sheets sheet
+            JOIN public.meta_bases base ON base.id=sheet.base_id
+            WHERE sheet.id=$1 AND sheet.deleted_at IS NULL AND base.deleted_at IS NULL`, [sheetId])
+          if (scope.rows.length !== 1) return null
+          const baseId = (scope.rows[0] as { base_id: string }).base_id
+          if (sheetId === identity.sheetId && baseId !== identity.baseId) return null
+          const authority = await resolveDatabaseRecoverySheetAuthority(query, sheetId, identity.actorId)
+          if (!authority.capabilities.canRead ||
+            (baseIdsAreCrossBase(identity.baseId, baseId) && !(await resolveBaseReadableForAccess(query, baseId, authority.access))) ||
+            !(await hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities))) return null
+          return authority
+        },
+        helpers: authority => ({
+          ...createRecoveryComputedHelpers(authority.access, true),
+          loadLinkValuesByRecord, parseLinkFieldConfig, normalizeJson,
+        }),
+        invalidate: async groups => { notifications = groups },
+      })(work))
+    if (completed) {
+      for (const group of notifications) publishMultitableSheetRealtime({
+        spreadsheetId: group.sheetId, source: 'multitable', kind: 'record-updated',
+        recordIds: group.recordIds, fieldIds: group.fieldIds,
+      })
+      const ids = [...new Set(notifications.flatMap(group => group.recordIds))]
+      if (yjsInvalidator && ids.length) await yjsInvalidator(ids)
+    }
+    return completed
+  }
+}
+
+/** Canonical background callbacks; this factory accepts no caller-supplied authorization policy. */
+export function createRecoveryArchiveWorkerCallbacks(database: Pick<RecoveryArchiveRouterDatabaseRuntime, 'query' | 'transaction'>) {
+  const authorization = createRecoveryArchiveWorkerAuthorization()
+  const events = createRecoveryArchiveWorkerRecordEvents(eventBus)
+  const apply: RecoveryArchiveWorkerApplyCallbacks = {
+    ...authorization.apply,
+    onMutationApplied: events.onMutationApplied,
+    afterCommit: async (identity, mutations) => {
+      await events.afterCommit!(identity, mutations)
+      const reverted = mutations.filter((m): m is Extract<ExactAnchorAppliedMutation, { kind: 'revert' }> => m.kind === 'revert')
+      const deleted = mutations.filter(m => m.kind === 'delete').map(m => m.recordId)
+      const invalidations = mutations.flatMap(m => m.linkInvalidations)
+      let yjsIds = [...mutations.map(m => m.recordId), ...invalidations.flatMap(i => i.recordIds)]
+      if (await authorization.recheckAuthority(database.query, identity)) {
+        const authority = await resolveDatabaseRecoverySheetAuthority(database.query, identity.sheetId, identity.actorId)
+        const side = await runRecoveryPostCommitSideEffects(
+          database.query, identity.sheetId, identity.actorId,
+          reverted.map(m => ({ recordId: m.recordId, version: m.version, fieldIds: m.changedFieldIds, patch: m.patch, revisionId: m.revisionId })),
+          invalidations,
+          { ...createRecoveryComputedHelpers(authority.access), loadLinkValuesByRecord },
+        )
+        yjsIds = [...yjsIds, ...side.yjsRecordIds]
+      } else {
+        // The write committed before revocation. Invalidate IDs without reading or computing values.
+        for (const target of [{ sheetId: identity.sheetId, recordIds: reverted.map(m => m.recordId), fieldIds: [] as string[] }, ...invalidations]) {
+          if (target.recordIds.length) publishMultitableSheetRealtime({ spreadsheetId: target.sheetId, source: 'multitable', kind: 'record-updated', recordIds: target.recordIds, fieldIds: target.fieldIds })
+        }
+      }
+      if (deleted.length) publishMultitableSheetRealtime({ spreadsheetId: identity.sheetId, actorId: identity.actorId, source: 'multitable', kind: 'record-deleted', recordIds: deleted })
+      if (yjsInvalidator && yjsIds.length) await yjsInvalidator([...new Set(yjsIds)])
+    },
+  }
+  return { recheckAuthority: authorization.recheckAuthority, apply, processDerivedWork: createRecoveryArchiveDerivedProcessor(database) }
 }
 
 /**
@@ -7440,6 +7721,111 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list bases failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list bases' } })
+    }
+  })
+
+  router.get('/bases/:baseId/trash', async (req: Request, res: Response) => {
+    const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+    const parsed = z.object({
+      limit: z.string().max(3).regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().max(100)).optional(),
+      cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    }).safeParse(req.query)
+    let afterId: string | null = null
+    if (!baseId || baseId.length > 50 || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid trash pagination' } })
+    }
+    if (parsed.data.cursor) {
+      try {
+        const decoded = z.tuple([z.literal(1), z.literal(baseId), z.string().min(1).max(50)])
+          .parse(JSON.parse(Buffer.from(parsed.data.cursor, 'base64url').toString('utf8')))
+        if (Buffer.from(JSON.stringify(decoded)).toString('base64url') !== parsed.data.cursor) throw new Error('Invalid cursor')
+        afterId = decoded[2]
+      } catch {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid trash pagination' } })
+      }
+    }
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      if (isElearningProjectionBaseIdCandidate(baseId) || baseId === APPROVAL_PROJECTION_BASE_ID) return sendForbidden(res)
+      const globalCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const limit = parsed.data.limit ?? 20
+      const data = await pool.transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        // Pre-filter BEFORE LIMIT. Mirror the shared scope loader's user > group > role
+        // precedence, using its permission-code sets; confirm each result with restore's resolver.
+        // Match ECMAScript trim(), including BOM/NBSP, not PostgreSQL's locale-dependent space class.
+        const trimCharacters = '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+        const eligibleSheets = `
+          FROM meta_sheets s
+          JOIN meta_bases b ON b.id = s.base_id AND b.deleted_at IS NULL
+          LEFT JOIN LATERAL (
+            SELECT array_agg(btrim(sp.perm_code, $9::text)) AS codes
+            FROM spreadsheet_permissions sp
+            WHERE sp.sheet_id = s.id
+              AND btrim(sp.perm_code, $9::text) <> '' AND (
+              (sp.subject_type = 'user' AND sp.subject_id = $2)
+              OR (sp.subject_type = 'member-group' AND EXISTS (
+                SELECT 1 FROM platform_member_group_members gm
+                WHERE gm.user_id = $2 AND gm.group_id::text = sp.subject_id
+              ))
+              OR (sp.subject_type = 'role' AND EXISTS (
+                SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = sp.subject_id
+              ))
+            )
+            GROUP BY sp.subject_type
+            ORDER BY CASE sp.subject_type WHEN 'user' THEN 0 WHEN 'member-group' THEN 1 ELSE 2 END
+            LIMIT 1
+          ) grants ON true
+          WHERE s.base_id = $1
+            AND s.system_kind IS NULL
+            AND s.id !~ '^sht_el_stats_[a-f0-9]{32}$'
+            AND btrim(coalesce(s.description, ''), $9::text) <> $8
+            AND NOT EXISTS (SELECT 1 FROM plugin_multitable_object_registry pr WHERE pr.sheet_id = s.id)
+            AND ($3::boolean OR grants.codes && $7::text[])
+            AND ($4::boolean OR grants.codes && $6::text[] OR (grants.codes IS NULL AND $5::boolean))`
+        const params = [baseId, access.userId, globalCapabilities.canManageFields,
+          access.isAdminRole, globalCapabilities.canRead, [...SHEET_READ_PERMISSION_CODES],
+          [...SHEET_ADMIN_PERMISSION_CODES], SYSTEM_PEOPLE_SHEET_DESCRIPTION, trimCharacters]
+        const admission = await query(`SELECT s.id ${eligibleSheets} ORDER BY s.id ASC LIMIT 1`, params)
+        const proof = admission.rows[0] as { id: string } | undefined
+        if (proof) {
+          const resolved = await resolveSheetCapabilitiesForAccess(query, proof.id, access)
+          if (!resolved.capabilities.canRead || !hasSheetLifecycleAuthority(resolved.access, resolved.sheetScope)) return null
+        } else if (!globalCapabilities.canManageFields || !(await resolveBaseReadable(req, query, baseId))) {
+          // Missing, deleted and inaccessible bases have the same refusal. Ownership never
+          // grants lifecycle authority, but an authorized empty base can have an empty bin.
+          return null
+        }
+        const result = await query(
+          `SELECT s.id, s.base_id, s.name, s.description,
+                  to_char(s.deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deleted_at
+           ${eligibleSheets}
+             AND s.deleted_at IS NOT NULL AND ($10::text IS NULL OR s.id > $10)
+           ORDER BY s.id ASC LIMIT $11`,
+          [...params, afterId, limit + 1],
+        )
+        const sheets: Array<{ id: string; baseId: string; name: string; description: string | null; deletedAt: string }> = []
+        for (const row of result.rows as Array<{ id: string; base_id: string; name: string; description: string | null; deleted_at: string }>) {
+          const resolved = await resolveSheetCapabilitiesForAccess(query, row.id, access)
+          if (!resolved.capabilities.canRead || !hasSheetLifecycleAuthority(resolved.access, resolved.sheetScope)) return null
+          sheets.push({ id: row.id, baseId: row.base_id, name: row.name, description: row.description, deletedAt: row.deleted_at })
+        }
+        const hasMore = sheets.length > limit
+        sheets.splice(limit)
+        // Stable ID keyset: no JavaScript Date conversion or deletion-time precision loss.
+        const nextCursor = hasMore
+          ? Buffer.from(JSON.stringify([1, baseId, sheets[sheets.length - 1].id])).toString('base64url')
+          : null
+        return { sheets, nextCursor }
+      })
+      if (!data) return sendForbidden(res)
+      return res.json({ ok: true, data })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list deleted sheets' } })
     }
   })
 
@@ -9918,14 +10304,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (entityType === 'sheet_config') return redactConditionalReadRuleLiterals(val as { conditionalReadRules?: unknown }, allowedFieldIds)
         return val
       }
+      // Resolve only actors from rows that survived the per-entity permission predicate above. This stays a
+      // single batched directory read, after the authorization/redaction-sensitive row selection is complete.
+      const actorNames = await resolveUserDisplayNames(
+        pool.query.bind(pool),
+        rows.map((r) => typeof r.actor_id === 'string' ? r.actor_id : null),
+      )
       return res.json({ ok: true, data: { items: rows.map((r) => {
         const et = String(r.entity_type)
+        const actorId = typeof r.actor_id === 'string' ? r.actor_id : null
         return {
           id: String(r.id), entityType: et, entityId: String(r.entity_id), action: String(r.action),
           before: redactPayload(et, r.before),
           after: redactPayload(et, r.after),
           changedKeys: r.changed_keys ?? [],
-          batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
+          batchId: r.batch_id ?? null, actorId, actorName: actorId ? (actorNames.get(actorId) ?? null) : null, createdAt: r.created_at,
         }
       }), limit, offset } })
     } catch (err: unknown) {
@@ -11730,176 +12123,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   }
 
-  const makeAuthorizationStabilizer = () =>
-    async (
-      query: TrustCheckpointQueryFn,
-      ctx: ExactAnchorPlanAuthContext,
-    ): Promise<'ready' | 'busy' | 'unavailable'> => {
-      const fields = (await loadFieldsForSheet(query, ctx.sheetId)) as UniverMetaField[]
-      const fieldById = new Map(fields.map((field) => [field.id, field]))
-      const authorityUserIds = new Set<string>([ctx.actorId])
-      for (const write of ctx.revertWrites) {
-        for (const fieldId of write.changedFieldIds) {
-          if (fieldById.get(fieldId)?.type !== 'person') continue
-          const value = write.patch[fieldId]
-          if (!Array.isArray(value)) continue
-          for (const candidate of value) {
-            if (typeof candidate !== 'string' && typeof candidate !== 'number') continue
-            const userId = String(candidate).trim()
-            if (userId) authorityUserIds.add(userId)
-          }
-        }
-      }
-      return acquireRecoveryAuthorityLease(query, authorityUserIds)
-    }
-
-  /**
-   * REQUIRED in-fence WRITE authorization over the TRUE restorable delta (kernel `EvaluatePlanAuthorization`).
-   * Runs INSIDE the destructive transaction, after the L7 plan + restorable projection and BEFORE any
-   * value/existence validator, so a denied actor receives one uniform `forbidden` (no value/target oracle).
-   * WHOLE-refuses unless ALL hold, re-resolved FRESH from the in-fence query (never pre-fence closures):
-   *   1. canManageSheetAccess + conservative full-table read (same floor as preview);
-   *   2. per-source-row edit (reverts) / delete (reset deletes) authority against CURRENT created_by,
-   *      sheet own-write scope, and record permission scopes;
-   *   3. layer-3 writable field permission for every true changedFieldId (visible ∧ not readOnly ∧ not
-   *      always-read-only);
-   *   4. native person membership / restrict-group validity for every changed person value;
-   *   5. for every changed forward link: an unambiguous foreign sheet the actor can CURRENTLY read + edit,
-   *      and every target record readable (row-deny) + editable (created_by / record scopes).
-   */
+  const makeAuthorizationStabilizer = createRecoveryAuthorizationStabilizer
   const makePlanAuthorization = (req: Request, sheetId: string) =>
-    async (query: TrustCheckpointQueryFn, ctx: ExactAnchorPlanAuthContext): Promise<boolean> => {
-      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
-      const fieldByIdFull = new Map(fields.map((f) => [f.id, f]))
-
-      const { access, capabilities, sheetScope } = await resolveRecoverySheetAuthority(req, query, sheetId)
-      if (access.userId !== ctx.actorId) return false
-      if (!access.userId || !capabilities.canManageSheetAccess) return false
-      if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) return false
-
-      // 2. Source-row authority: CURRENT created_by + record permission scopes, whole-refuse.
-      const sourceIds = [...new Set([...ctx.revertWrites.map((rw) => rw.recordId), ...ctx.deleteRecordIds])]
-      const createdByById = new Map<string, string | null>()
-      if (sourceIds.length > 0) {
-        const rows = (await query(
-          'SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-          [sheetId, sourceIds],
-        )).rows as Array<{ id: unknown; created_by: unknown }>
-        for (const r of rows) createdByById.set(String(r.id), typeof r.created_by === 'string' ? r.created_by : null)
-      }
-      const recordScopeMap = sourceIds.length > 0
-        ? await loadRecordPermissionScopeMap(query, sheetId, sourceIds, access.userId)
-        : new Map<string, RecordPermissionScope>()
-      for (const rw of ctx.revertWrites) {
-        if (!createdByById.has(rw.recordId)) return false
-        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdByById.get(rw.recordId) ?? null, 'edit', recordScopeMap, rw.recordId)) return false
-      }
-      for (const recordId of ctx.deleteRecordIds) {
-        if (!capabilities.canDeleteRecord) return false
-        if (!createdByById.has(recordId)) return false
-        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdByById.get(recordId) ?? null, 'delete', recordScopeMap, recordId)) return false
-      }
-
-      // 3. Layer-3 field-write gate over the TRUE changed set.
-      const changedFieldIds = new Set(ctx.revertWrites.flatMap((rw) => rw.changedFieldIds))
-      if (changedFieldIds.size > 0) {
-        const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
-        const fieldPermissions = deriveFieldPermissions(fields, capabilities, { fieldScopeMap: scopeMap })
-        for (const fid of changedFieldIds) {
-          const field = fieldByIdFull.get(fid)
-          if (!field) return false
-          if (isFieldAlwaysReadOnly(field)) return false
-          if (isFieldWriteForbidden(fieldPermissions[fid])) return false
-        }
-      }
-
-      // 4. Person membership / restrict-group validity for every changed person value.
-      const resolvePersonMemberUserIds = createPersonMemberResolver(query, sheetId)
-      for (const rw of ctx.revertWrites) {
-        for (const fid of rw.changedFieldIds) {
-          const field = fieldByIdFull.get(fid)
-          if (!field || field.type !== 'person') continue
-          const value = rw.patch[fid]
-          if (value === null || value === undefined) continue
-          try {
-            const allowed = await resolvePersonMemberUserIds(personRestrictGroupIds(field))
-            validatePersonValue(value, fid, allowed, isPersonSingleRecord(field.property))
-          } catch {
-            return false
-          }
-        }
-      }
-
-      // 5. Forward-link foreign authority (read + edit on the CURRENT foreign sheet + target records).
-      const linkTargetsByField = new Map<string, string[]>()
-      for (const rw of ctx.revertWrites) {
-        for (const lu of rw.linkUpdates) {
-          if (lu.targetIds.length === 0) continue
-          linkTargetsByField.set(lu.fieldId, [...(linkTargetsByField.get(lu.fieldId) ?? []), ...lu.targetIds])
-        }
-      }
-      if (linkTargetsByField.size > 0) {
-        // RAW property blobs — alias ambiguity must fail closed (serializeFieldRow collapses aliases).
-        const rawPropRes = await query(
-          'SELECT id, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
-          [sheetId, [...linkTargetsByField.keys()]],
-        )
-        const rawPropById = new Map<string, Record<string, unknown>>()
-        for (const r of rawPropRes.rows as Array<{ id: unknown; property: unknown }>) {
-          let prop: Record<string, unknown> = {}
-          if (r.property && typeof r.property === 'object' && !Array.isArray(r.property)) {
-            prop = r.property as Record<string, unknown>
-          } else if (typeof r.property === 'string' && r.property.trim()) {
-            try {
-              const parsed = JSON.parse(r.property) as unknown
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) prop = parsed as Record<string, unknown>
-            } catch { /* malformed property JSON → empty bag → fail closed below */ }
-          }
-          rawPropById.set(String(r.id), prop)
-        }
-        const targetsByForeignSheet = new Map<string, Set<string>>()
-        for (const [fieldId, rawTargets] of linkTargetsByField) {
-          const foreignSheetId = resolveForeignSheetIdFromProperty(rawPropById.get(fieldId))
-          if (!foreignSheetId) return false
-          const targets = targetsByForeignSheet.get(foreignSheetId) ?? new Set<string>()
-          for (const id of rawTargets) targets.add(id)
-          targetsByForeignSheet.set(foreignSheetId, targets)
-        }
-
-        for (const foreignSheetId of [...targetsByForeignSheet.keys()].sort()) {
-          const targetIds = [...(targetsByForeignSheet.get(foreignSheetId) ?? [])].sort()
-          // Establish foreign-sheet authority before any target-row lookup, preserving the no-oracle
-          // order for an actor who can manage the source sheet but cannot inspect the foreign sheet.
-          const resolved = await resolveRecoverySheetAuthority(req, query, foreignSheetId)
-          if (!resolved.access.userId || !resolved.capabilities.canRead || !resolved.capabilities.canEditRecord) {
-            return false
-          }
-          // Lock target rows BEFORE reading data-dependent row denial or created_by authority. FOR UPDATE
-          // (not KEY SHARE) blocks both delete and ordinary data updates through COMMIT; all targets for a
-          // sheet are acquired in one deterministic statement to avoid per-field lock-order drift.
-          const targetRows = (await query(
-            `SELECT id, created_by FROM meta_records
-              WHERE sheet_id = $1 AND id = ANY($2::text[])
-              ORDER BY id
-              FOR UPDATE`,
-            [foreignSheetId, targetIds],
-          )).rows as Array<{ id: unknown; created_by: unknown }>
-          const foreignCreatedBy = new Map(targetRows.map((r) => [String(r.id), typeof r.created_by === 'string' ? r.created_by : null]))
-          // A missing target cannot be authority-proven — uniform forbidden HERE keeps the later
-          // link-integrity validator from becoming an existence oracle for unauthorized actors.
-          if (foreignCreatedBy.size !== targetIds.length) return false
-          if (!resolved.access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, foreignSheetId))) {
-            const denied = await loadDeniedRecordIds(query, foreignSheetId, resolved.access.userId)
-            if (targetIds.some((id) => denied.has(id))) return false
-          }
-          const foreignScopeMap = await loadRecordPermissionScopeMap(query, foreignSheetId, targetIds, resolved.access.userId)
-          for (const id of targetIds) {
-            if (!ensureRecordWriteAllowed(resolved.capabilities, resolved.sheetScope, resolved.access, foreignCreatedBy.get(id) ?? null, 'edit', foreignScopeMap, id)) return false
-          }
-        }
-      }
-      return true
-    }
+    createRecoveryPlanAuthorization(
+      sheetId,
+      (query, targetSheetId) => resolveRecoverySheetAuthority(req, query, targetSheetId),
+      (query, targetSheetId, authority) => hasFullTableReadAccess(
+        req, query, targetSheetId, authority.access, authority.capabilities,
+      ),
+    )
 
   /** Trust pair (fence + CONTIGUITY_STRICT), env-only + values-free: 409 RECOVERY_TRUST_REQUIRED. */
   const requireRecoveryTrust = (res: Response): boolean => {
@@ -11941,148 +12173,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   }
 
-  /** One APPLIED revert's post-commit facts (route-memory only — patch NEVER serializes into HTTP). */
-  type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
-
-  /**
-   * Post-commit recovery side effects (best-effort, non-fatal — a committed recovery must never turn into
-   * an HTTP 500 here): RecordWriteService-parity formula/related recompute over the recovered source rows
-   * (derived values are NOT restored history — they are recomputed AFTER the source commit), then
-   * source-sheet true-delta realtime (+ recomputed formula keys; the shared publisher strips patch values
-   * before broadcast), subscriber notifications, and related-sheet PURE-INVALIDATION fan-out (fieldIds +
-   * recordIds only, no recordPatches). Returns the Yjs record-id set to invalidate.
-   */
-  const runRecoveryPostCommitSideEffects = async (
-    req: Request,
-    query: QueryFn,
-    sheetId: string,
-    actorId: string,
-    appliedReverts: AppliedRevertFact[],
-    linkInvalidations: ExactAnchorLinkInvalidation[],
-  ): Promise<{ yjsRecordIds: string[] }> => {
-    const formulaByRecord = new Map<string, Record<string, unknown>>()
-    let relatedRecords: RelatedComputedRecord[] = []
-    try {
-      const helpers = createRecordWriteHelpers(req, { query })
-      const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
-      const recordIds = appliedReverts.map((r) => r.recordId)
-      const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
-      if (changedFieldIds.length > 0 && recordIds.length > 0) {
-        // RWS Step 4 parity: hydrate the recovered source rows BEFORE formula recompute so a
-        // formula-over-lookup sees the real lookup value (load rows → link values → applyLookupRollup →
-        // snapshot hydrated data → related recompute → recalculateFormulaFields(hydrated)).
-        const recordRes = await query(
-          'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-          [sheetId, recordIds],
-        )
-        const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
-          id: String(row.id),
-          version: Number(row.version ?? 0),
-          data: normalizeJson(row.data),
-        })) as UniverMetaRecord[]
-
-        let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
-        if (rows.length > 0) {
-          const relationalLinkFields = fields
-            .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
-            .filter((v): v is { fieldId: string; cfg: NonNullable<ReturnType<typeof parseLinkFieldConfig>> } => !!v && !!v.cfg)
-          const linkValuesByRecord = await helpers.loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
-          await helpers.applyLookupRollup(query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
-          hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
-        }
-
-        relatedRecords = await helpers.computeDependentLookupRollupRecords(query, sheetId, recordIds, changedFieldIds)
-
-        const formulaRecords = await helpers.recalculateFormulaFields(query, sheetId, fields, recordIds, changedFieldIds, hydratedDataByRecord)
-        for (const fr of formulaRecords) formulaByRecord.set(fr.recordId, fr.data)
-      }
-    } catch (err) {
-      console.warn('[univer-meta] recovery post-commit formula/related recompute failed (non-fatal):', err)
-    }
-
-    // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
-    // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
-    if (appliedReverts.length > 0) {
-      try {
-        const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
-        publishMultitableSheetRealtime({
-          spreadsheetId: sheetId,
-          actorId,
-          source: 'multitable',
-          kind: 'record-updated',
-          recordIds: appliedReverts.map((r) => r.recordId),
-          fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
-          recordPatches: appliedReverts.map((r) => ({
-            recordId: r.recordId,
-            version: r.version,
-            patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
-          })),
-        })
-      } catch (err) {
-        console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
-      }
-    }
-
-    for (const r of appliedReverts) {
-      await notifyRecordSubscribersBestEffort(
-        query,
-        { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
-        'exact-anchor-recovery',
-      )
-    }
-
-    // Related-sheet fan-out is PURE INVALIDATION (no recordPatches / no snapshots — RWS FOL-1 parity).
-    const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
-    for (const record of relatedRecords) {
-      if (!Array.isArray(record.affectedFieldIds) || record.affectedFieldIds.length === 0) continue
-      let group = affectedRelatedBySheet.get(record.sheetId)
-      if (!group) {
-        group = { recordIds: [], fieldIds: new Set<string>() }
-        affectedRelatedBySheet.set(record.sheetId, group)
-      }
-      group.recordIds.push(record.recordId)
-      for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
-    }
-    // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
-    // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
-    // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
-    // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
-    for (const invalidation of linkInvalidations) {
-      let group = affectedRelatedBySheet.get(invalidation.sheetId)
-      if (!group) {
-        group = { recordIds: [], fieldIds: new Set<string>() }
-        affectedRelatedBySheet.set(invalidation.sheetId, group)
-      }
-      const seen = new Set(group.recordIds)
-      for (const recordId of invalidation.recordIds) {
-        if (seen.has(recordId)) continue
-        seen.add(recordId)
-        group.recordIds.push(recordId)
-      }
-      for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
-    }
-    try {
-      for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
-        publishMultitableSheetRealtime({
-          spreadsheetId: relatedSheetId,
-          ...(relatedSheetId === sheetId ? { actorId } : {}),
-          source: 'multitable',
-          kind: 'record-updated',
-          recordIds: group.recordIds,
-          fieldIds: [...group.fieldIds],
-        })
-      }
-    } catch (err) {
-      console.warn('[univer-meta] recovery related-sheet invalidation publish failed (non-fatal):', err)
-    }
-
-    const yjsRecordIds = [
-      ...appliedReverts.map((r) => r.recordId),
-      ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
-    ]
-    return { yjsRecordIds: [...new Set(yjsRecordIds)] }
-  }
-
   const createRecoveryMutationObserver = (
     req: Request,
     database: RecoveryArchiveRouteDatabase,
@@ -12100,17 +12190,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       mutation: ExactAnchorAppliedMutation,
     ): Promise<void> => {
       appliedLinkInvalidations.push(...mutation.linkInvalidations)
-      const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
-        const result = await query(sql, params)
-        return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
-      })
+      const { payload } = await enqueueRecoveryMutationEvent(query, sheetId, actorId, mutation)
       if (mutation.kind === 'revert') {
-        const payload = withAutomationEventId({
-          sheetId,
-          recordId: mutation.recordId,
-          changes: mutation.patch,
-          actorId,
-        })
         updatedEventPayloads.push(payload)
         appliedReverts.push({
           recordId: mutation.recordId,
@@ -12119,28 +12200,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           patch: mutation.patch,
           revisionId: mutation.revisionId,
         })
-        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
       } else {
-        const payload = withAutomationEventId({
-          sheetId,
-          recordId: mutation.recordId,
-          actorId,
-        })
         deletedEventPayloads.push(payload)
         appliedDeleteIds.push(mutation.recordId)
-        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
       }
     }
 
     const afterCommit = async (): Promise<void> => {
       try {
         const side = await runRecoveryPostCommitSideEffects(
-          req,
           database.query,
           sheetId,
           actorId,
           appliedReverts,
           appliedLinkInvalidations,
+          createRecordWriteHelpers(req, { query: database.query }),
         )
         for (const payload of updatedEventPayloads) {
           emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', payload)
@@ -14892,8 +14966,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * capability gate runs BEFORE that distinction is drawn, so a caller without schema authority never
    * learns whether a given id is deleted, live, or absent.
    *
-   * NOTE (deliberate, stated in the PR): this is the API half only. There is no recycle-bin UI in
-   * this slice — listing and browsing soft-deleted sheets is a follow-up.
+   * The base-scoped table recycle bin lists eligible soft-deleted sheets and calls this endpoint.
    */
   router.post('/sheets/:sheetId/restore', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''

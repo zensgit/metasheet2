@@ -42,6 +42,11 @@ export interface RecoveryArchiveDurableFixture {
   readonly objects: readonly RecoveryArchiveDurableFixtureObject[]
 }
 
+export interface RecoveryArchiveFixtureKeyMaterial {
+  readonly dek: Uint8Array
+  readonly wrappedDek: Uint8Array
+}
+
 export async function createRecoveryArchiveDurableFixture(input: {
   readonly binding: RecoveryArchiveManifestBinding
   readonly keyId: string
@@ -49,9 +54,10 @@ export async function createRecoveryArchiveDurableFixture(input: {
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly transactionDepth: RecoveryArchiveTransactionDepthProbe
   readonly objectExpiresAt: string
+  readonly keyMaterial?: RecoveryArchiveFixtureKeyMaterial
 }): Promise<RecoveryArchiveDurableFixture> {
   const custodyCalls: string[] = []
-  const keyCustody = createFixtureKeyCustody(input.keyId, custodyCalls)
+  const keyCustody = createFixtureKeyCustody(input.keyId, custodyCalls, input.keyMaterial)
   const plan = buildRecoveryArchiveSnapshotPlan({
     sectionRows: input.sectionRows,
     coverageCandidates: [],
@@ -147,12 +153,13 @@ export async function createRecoveryArchiveDurableFixture(input: {
   })
 }
 
-function createFixtureKeyCustody(
+export function createFixtureKeyCustody(
   keyId: string,
   calls: string[],
+  material?: RecoveryArchiveFixtureKeyMaterial,
 ): RecoveryArchiveKeyCustodyAdapter {
-  const dek = randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES)
-  const wrappedDek = randomBytes(48)
+  const dek = material ? Buffer.from(material.dek) : randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES)
+  const wrappedDek = material ? Buffer.from(material.wrappedDek) : randomBytes(48)
   return {
     async produceGenerationDek(request) {
       calls.push('produce')
