@@ -1057,6 +1057,34 @@ describe('MultitableWorkbench import flow', () => {
         expectCreated({ fld_title: 'Gamma', fld_assignee: ['usr_fake_07'] })
       })
 
+      // Final review: the token cache is keyed per FIELD. Each person column asks its own directory (its
+      // own candidate set, e.g. a member-group restriction), so the same text may name different people
+      // in two columns and one column must never reuse the other column's answer.
+      it('gives each person column its own answer for the same token (the lookup cache is per field)', async () => {
+        mountNative([...NATIVE_FIELDS, { id: 'fld_reviewer', name: 'Reviewer', type: 'person', property: {} }])
+        const rosterByField: Record<string, FakePerson[]> = {
+          fld_assignee: [{ userId: 'usr_fake_shared_a', name: 'Fake Shared', email: 'fake.shared.a@example.invalid' }],
+          fld_reviewer: [{ userId: 'usr_fake_shared_r', name: 'Fake Shared', email: 'fake.shared.r@example.invalid' }],
+        }
+        workbenchMock.client.listPersonFieldDirectory = vi.fn(async (sheetId: string, fieldId: string, params?: { q?: string; match?: string }) =>
+          fakeDirectory(rosterByField[fieldId] ?? [])(sheetId, fieldId, params))
+
+        await runImport(table(['Title', 'Assignee', 'Reviewer'], ['Alpha', 'Fake Shared', 'Fake Shared']), 1)
+
+        expectCreated({ fld_title: 'Alpha', fld_assignee: ['usr_fake_shared_a'], fld_reviewer: ['usr_fake_shared_r'] })
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledTimes(2)
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledWith(
+          'sheet_orders',
+          'fld_assignee',
+          { q: 'fake shared', match: 'exact' },
+        )
+        expect(workbenchMock.client.listPersonFieldDirectory).toHaveBeenCalledWith(
+          'sheet_orders',
+          'fld_reviewer',
+          { q: 'fake shared', match: 'exact' },
+        )
+      })
+
       it('never resolves a partial match, even when the server returns it first', async () => {
         mountNative()
         workbenchMock.client.listPersonFieldDirectory = fakeDirectory(FAKE_ROSTER, { honourExact: false })
@@ -1306,11 +1334,11 @@ describe('MultitableWorkbench import flow', () => {
         ],
       }
 
-      function mountLegacy(peopleFields = PEOPLE_FIELDS) {
+      function mountLegacy(peopleFields = PEOPLE_FIELDS, peopleRows = PEOPLE_ROWS) {
         mountWorkbench(LEGACY_FIELDS)
         workbenchMock.client.listFields.mockResolvedValue({ fields: peopleFields })
         workbenchMock.client.listRecordSummaries.mockImplementation(async ({ displayFieldId }: { displayFieldId: string }) => {
-          const records = PEOPLE_ROWS[displayFieldId] ?? []
+          const records = peopleRows[displayFieldId] ?? []
           return { records, displayMap: {}, page: { offset: 0, limit: 200, total: records.length, hasMore: false } }
         })
         workbenchMock.client.listCommentMentionSuggestions.mockImplementation(async ({ q }: { q?: string }) => {
@@ -1359,6 +1387,56 @@ describe('MultitableWorkbench import flow', () => {
         expectCreated({ fld_title: 'Beta', fld_owner: ['rec_people_2'] })
         expectCreated({ fld_title: 'Gamma', fld_owner: ['rec_people_1'] })
         expect(document.body.textContent).toContain('Unable to resolve people value for Owner: Fake.Nobody@example.invalid')
+      })
+
+      // Final review: the People sheet is asked first. An email its own Email column already carries
+      // never reaches the mention directory, even when that directory would name someone else.
+      it('matches an email the People sheet still stores locally and sends no mention lookup for it', async () => {
+        mountLegacy(PEOPLE_FIELDS, {
+          ...PEOPLE_ROWS,
+          fld_people_uid: [...PEOPLE_ROWS.fld_people_uid, { id: 'rec_people_3', display: 'usr_fake_03' }],
+          fld_people_email: [{ id: 'rec_people_3', display: 'fake.local03@example.invalid' }],
+        })
+        workbenchMock.client.listCommentMentionSuggestions.mockResolvedValue({
+          items: [{ id: 'usr_fake_02', label: 'Fake Person 02', subtitle: 'fake.local03@example.invalid' }],
+          total: 1, limit: 50, query: 'fake.local03@example.invalid', hasMore: false, requiresQuery: false, minQueryLength: 1,
+        })
+
+        await runImport(table(['Title', 'Owner'], ['Alpha', 'fake.local03@example.invalid']), 1)
+
+        expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+        expectCreated({ fld_title: 'Alpha', fld_owner: ['rec_people_3'] })
+      })
+
+      // Final review: the User ID column maps a directory hit back to a People record. Two People rows
+      // with the same User ID make that hit ambiguous; the last row must not silently win.
+      it('reports an email as ambiguous when its owner User ID is on two People rows', async () => {
+        mountLegacy(PEOPLE_FIELDS, {
+          ...PEOPLE_ROWS,
+          fld_people_uid: [...PEOPLE_ROWS.fld_people_uid, { id: 'rec_people_2_dup', display: 'usr_fake_02' }],
+        })
+
+        await runImport(table(['Title', 'Owner'], ['Alpha', 'fake.person02@example.invalid']), 1)
+
+        expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+        expect(document.body.textContent).toContain('Multiple people match "fake.person02@example.invalid". Please verify the email value.')
+      })
+
+      // Final review: only an email-shaped token may take the fallback. A name the People sheet does not
+      // know stays unmatched, even when a directory entry is labelled with exactly that text.
+      it('never sends a non-email token the People sheet cannot match to the mention directory', async () => {
+        mountLegacy()
+        workbenchMock.client.listCommentMentionSuggestions.mockResolvedValue({
+          items: [{ id: 'usr_fake_02', label: 'Fake Nobody' }],
+          total: 1, limit: 50, query: 'fake nobody', hasMore: false, requiresQuery: false, minQueryLength: 1,
+        })
+
+        await runImport(table(['Title', 'Owner'], ['Alpha', 'Fake Nobody']), 1)
+
+        expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+        expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+        expect(document.body.textContent).toContain('Unable to resolve people value for Owner: Fake Nobody')
       })
 
       it('treats a mention-directory 403 as "not matched", not as a load failure', async () => {
