@@ -38,7 +38,11 @@ function mockClient(
   rules: AutomationRule[] = [],
   options: {
     testExecution?: Record<string, unknown> | Promise<Record<string, unknown>>
-    testErrorMessage?: string
+    /**
+     * The test-run route's failure body (#5812 and its follow-up): `{ ok:false, error:{ code, message } }`
+     * with a FIXED, values-free message — the route never echoes raw error text any more.
+     */
+    testError?: { status: number; code: string; message: string }
     groupDeliveryErrorMessage?: string
     personDeliveryErrorMessage?: string
     rulesErrorMessage?: string | null
@@ -121,10 +125,11 @@ function mockClient(
       })
     }
     if (method === 'POST' && url.includes('/automations/') && url.endsWith('/test')) {
-      if (options.testErrorMessage) {
+      if (options.testError) {
+        const { status, code, message } = options.testError
         return new Response(
-          JSON.stringify({ error: options.testErrorMessage }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } },
+          JSON.stringify({ ok: false, error: { code, message } }),
+          { status, headers: { 'Content-Type': 'application/json' } },
         )
       }
       return ok(await (options.testExecution ?? {
@@ -2630,7 +2635,7 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('测试运行成功 (32 ms)。')
   })
 
-  it('localizes zh-CN automation test run request failures with raw backend messages', async () => {
+  it('localizes the zh-CN automation test run request failure prefix around the fixed backend message', async () => {
     useLocale().setLocale('zh-CN')
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
@@ -2640,7 +2645,7 @@ describe('MetaAutomationManager', () => {
         actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
         actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
       }),
-    ], { testErrorMessage: 'Automation service unavailable' })
+    ], { testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2650,7 +2655,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('测试运行请求失败：Automation service unavailable')
+      .toContain('测试运行请求失败：Test run failed')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
@@ -2735,7 +2740,7 @@ describe('MetaAutomationManager', () => {
         actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
         actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
       }),
-    ], { testErrorMessage: 'Automation service unavailable' })
+    ], { testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2744,9 +2749,46 @@ describe('MetaAutomationManager', () => {
     ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
     await flushPromises()
 
-    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Automation service unavailable')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
+      .toContain('Test run request failed: Test run failed')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
+
+  // #5812 follow-up: the service now refuses with TYPED rejections the route passes through as
+  // `{ ok:false, error:{ code, message } }`. This component has no code→label mapping for the test-run
+  // button, so what the user sees is the server's fixed English message (via normalizeApiErrorPayload);
+  // the code itself is never rendered.
+  for (const testError of [
+    { status: 404, code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
+    {
+      status: 404,
+      code: 'SHEET_DELETED',
+      message: 'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.',
+    },
+    { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+  ]) {
+    it(`shows the fixed message of a typed ${testError.code} test-run refusal`, async () => {
+      const { client } = mockClient([fakeRule()], { testError })
+      await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+        name: 'MultitableApiError',
+        status: testError.status,
+        code: testError.code,
+        message: testError.message,
+      })
+
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+      await flushPromises()
+
+      const status = container.querySelector('[data-field="testRunStatus"]')
+      expect(status?.textContent).toContain(`Test run request failed: ${testError.message}`)
+      expect(status?.textContent).not.toContain(testError.code)
+      expect(status?.getAttribute('data-status')).toBe('failed')
+    })
+  }
 
   it('applies DingTalk group presets in the inline create form', async () => {
     const { client } = mockClient([])
