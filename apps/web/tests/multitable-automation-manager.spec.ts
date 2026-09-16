@@ -2635,7 +2635,7 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('测试运行成功 (32 ms)。')
   })
 
-  it('localizes the zh-CN automation test run request failure prefix around the fixed backend message', async () => {
+  it('localizes a zh-CN automation test run request failure by its code, not the English backend message', async () => {
     useLocale().setLocale('zh-CN')
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
@@ -2655,7 +2655,8 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('测试运行请求失败：Test run failed')
+      .toContain('测试运行请求失败：测试运行在服务端失败，请稍后重试。')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).not.toContain('Test run failed')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
@@ -2750,45 +2751,86 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('Test run request failed: Test run failed')
+      .toContain('Test run request failed: The test run failed on the server. Try again later.')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
-  // #5812 follow-up: the service now refuses with TYPED rejections the route passes through as
-  // `{ ok:false, error:{ code, message } }`. This component has no code→label mapping for the test-run
-  // button, so what the user sees is the server's fixed English message (via normalizeApiErrorPayload);
-  // the code itself is never rendered.
-  for (const testError of [
-    { status: 404, code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
+  // #5817 follow-up: the route answers `{ ok:false, error:{ code, message } }` with FIXED English
+  // messages. The button maps the code to localized copy (TEST_RUN_ERROR_LABELS); it never shows the
+  // server's message for a known code, and never the code itself. The client still carries both.
+  const TYPED_TEST_RUN_REFUSALS = [
     {
-      status: 404,
-      code: 'SHEET_DELETED',
-      message: 'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.',
+      testError: { status: 404, code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
+      en: 'Test run request failed: The rule was not found or is disabled. Refresh and try again.',
+      zh: '测试运行请求失败：规则不存在或已停用，请刷新后重试。',
     },
-    { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' },
-  ]) {
-    it(`shows the fixed message of a typed ${testError.code} test-run refusal`, async () => {
-      const { client } = mockClient([fakeRule()], { testError })
-      await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
-        name: 'MultitableApiError',
-        status: testError.status,
-        code: testError.code,
-        message: testError.message,
-      })
+    {
+      testError: {
+        status: 404,
+        code: 'SHEET_DELETED',
+        message: 'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.',
+      },
+      en: 'Test run request failed: This sheet has been deleted, so the test did not run. Restore the sheet and try again.',
+      zh: '测试运行请求失败：该表已被删除，测试未运行。请先恢复该表后重试。',
+    },
+    {
+      testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+      en: 'Test run request failed: The test run failed on the server. Try again later.',
+      zh: '测试运行请求失败：测试运行在服务端失败，请稍后重试。',
+    },
+    {
+      // A code this build does not know gets the generic label, not the message and not the code.
+      testError: { status: 409, code: 'TEST_RUN_SOMETHING_NEW', message: 'Some new English refusal' },
+      en: 'Test run request failed. Try again later.',
+      zh: '测试运行请求失败，请稍后重试。',
+    },
+  ] as const
 
-      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
-      await flushPromises()
-      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
-      await flushPromises()
-      ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
-      await flushPromises()
-
-      const status = container.querySelector('[data-field="testRunStatus"]')
-      expect(status?.textContent).toContain(`Test run request failed: ${testError.message}`)
-      expect(status?.textContent).not.toContain(testError.code)
-      expect(status?.getAttribute('data-status')).toBe('failed')
-    })
+  async function clickTestRun(client: MultitableApiClient) {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+    return container.querySelector('[data-field="testRunStatus"]')
   }
+
+  for (const refusal of TYPED_TEST_RUN_REFUSALS) {
+    const { testError } = refusal
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} label of a typed ${testError.code} test-run refusal, not its message or code`, async () => {
+        useLocale().setLocale(locale)
+        const { client } = mockClient([fakeRule()], { testError })
+        await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+          name: 'MultitableApiError',
+          status: testError.status,
+          code: testError.code,
+          message: testError.message,
+        })
+
+        const status = await clickTestRun(client)
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en' ? refusal.en : refusal.zh)
+        expect(text).not.toContain(locale === 'en' ? refusal.zh : refusal.en)
+        expect(text).not.toContain(testError.message)
+        expect(text).not.toContain(testError.code)
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  it('keeps showing a network failure behind the localized prefix', async () => {
+    const { fetchFn } = mockClient([fakeRule()])
+    const client = new MultitableApiClient({
+      fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : fetchFn(url, init)),
+    })
+    const status = await clickTestRun(client)
+    expect(status?.textContent).toContain('Test run request failed: Failed to fetch')
+    expect(status?.getAttribute('data-status')).toBe('failed')
+  })
 
   it('applies DingTalk group presets in the inline create form', async () => {
     const { client } = mockClient([])

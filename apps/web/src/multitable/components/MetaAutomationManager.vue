@@ -1809,9 +1809,58 @@ async function onTestRule(ruleId: string) {
   } catch (err: unknown) {
     setRuleTestRunState(ruleId, {
       status: 'failed',
-      message: automationTestRunRequestFailed(readErrorMessage(err), isZh.value),
+      message: describeTestRunRequestError(err),
     })
   }
+}
+
+/**
+ * #5817 follow-up: every `error.code` the test-run route (`POST .../automations/:ruleId/test`,
+ * packages/core-backend/src/routes/automation.ts) and `AutomationService.testRun()` can answer with,
+ * mapped to localized copy. The server's messages are fixed English sentences (SHEET_DELETED even names
+ * a restore API with a literal `{sheetId}`), so a known code never shows them. This button only sends
+ * simulate today; the real-fire codes are mapped too because the route answers them to any caller.
+ * Kept equal to the server's codes by
+ * packages/core-backend/tests/unit/automation-test-run-error-codes-web-parity.test.ts.
+ */
+const TEST_RUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
+  FORBIDDEN: 'manager.testRunError.forbidden',
+  UNAUTHENTICATED: 'manager.testRunError.unauthenticated',
+  SHEET_DELETED: 'manager.testRunError.sheetDeleted',
+  // The sheet-liveness 404 and the sample-record 404 share this code.
+  NOT_FOUND: 'manager.testRunError.notFound',
+  TEST_RUN_RULE_NOT_FOUND: 'manager.testRunError.ruleNotFound',
+  DB_NOT_READY: 'manager.testRunError.serviceUnavailable',
+  PERMISSION_CHECK_FAILED: 'manager.testRunError.permissionCheckFailed',
+  INVALID_TEST_RUN_MODE: 'manager.testRunError.invalidMode',
+  CONFIRM_SIDE_EFFECTS_REQUIRED: 'manager.testRunError.confirmSideEffectsRequired',
+  TEST_RUN_SAMPLE_RECORD_REQUIRED: 'manager.testRunError.sampleRecordRequired',
+  INVALID_TEST_RUN_RECORD_ID: 'manager.testRunError.invalidRecordId',
+  SAMPLE_RECORD_READ_FAILED: 'manager.testRunError.sampleRecordReadFailed',
+  INVALID_SAMPLE_RECORD_DATA: 'manager.testRunError.sampleRecordDataInvalid',
+  INVALID_TEST_RUN_OPERATION_ID: 'manager.testRunError.invalidOperationId',
+  TEST_RUN_ACTION_UNSUPPORTED: 'manager.testRunError.actionUnsupported',
+  TEST_RUN_CLASS_A_PROTECTION_DISABLED: 'manager.testRunError.recordWriteProtectionDisabled',
+  TEST_RUN_CLASS_B_PROTECTION_DISABLED: 'manager.testRunError.outboundProtectionDisabled',
+  TEST_RUN_FAILED: 'manager.testRunError.failed',
+}
+
+/**
+ * An API refusal (the client's MultitableApiError) shows the label of its code, or the generic label for
+ * an unknown / missing code — never the server's message and never the code. Anything else (a network
+ * failure, a non-API error) keeps showing its own message behind the localized prefix, as before.
+ */
+function describeTestRunRequestError(err: unknown): string {
+  if (err instanceof Error && err.name === 'MultitableApiError') {
+    const code = (err as { code?: unknown }).code
+    const key = typeof code === 'string' && Object.prototype.hasOwnProperty.call(TEST_RUN_ERROR_LABELS, code)
+      ? TEST_RUN_ERROR_LABELS[code]
+      : undefined
+    return key
+      ? automationTestRunRequestFailed(l(key), isZh.value)
+      : l('manager.testRunError.generic')
+  }
+  return automationTestRunRequestFailed(readErrorMessage(err), isZh.value)
 }
 
 function setRuleTestRunState(ruleId: string, state: AutomationTestRunState) {
