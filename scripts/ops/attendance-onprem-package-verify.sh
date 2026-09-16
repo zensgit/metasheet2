@@ -95,26 +95,33 @@ function verify_onprem_env_templates() {
   # the `required` package contents checked above). Templates are not required
   # to declare these keys (this repo state predates #5711 adding the placeholder
   # lines), but if a key is declared at all, EVERY declaration of it in the file
-  # must be an empty placeholder line — not just at least one. A file with both
+  # must be an empty placeholder line -- not just at least one. A file with both
   # an empty placeholder line and a duplicate real-value line would otherwise
   # pass a naive "any line matches empty" check. `[[:space:]]*$` (rather than a
   # bare `$`) also tolerates trailing whitespace or a `\r` left by a CRLF save.
+  #
+  # Owner review F6 (2026-09-16): match the declaration syntaxes the loader honours, not just
+  # one. The on-prem path is `set -a; . ./docker/app.env`, and Bash exports `  KEY=v` (indented)
+  # and `export KEY=v` exactly like `KEY=v`; the previous line-anchored `^ENCRYPTION_KEY=` scan
+  # saw neither, so a real value could ride into the package through either form. Accept and
+  # reject syntaxes symmetrically: optional leading blanks and an optional `export ` prefix count
+  # as a declaration for BOTH the "is it declared" and the "is it empty" test.
+  local var
   for rel in \
     "docker/app.env.attendance-onprem.template" \
     "docker/app.env.attendance-onprem.ready.env" \
     "docker/app.env.example"
   do
     local abs="${root}/${rel}"
-    if grep -qE '^ENCRYPTION_KEY=' "$abs"; then
-      if grep -E '^ENCRYPTION_KEY=' "$abs" | grep -vqE '^ENCRYPTION_KEY=[[:space:]]*$'; then
-        die "${rel} must keep every ENCRYPTION_KEY= line empty (no real value committed to template)"
+    for var in ENCRYPTION_KEY ENCRYPTION_SALT; do
+      local declaration="^[[:space:]]*(export[[:space:]]+)?${var}="
+      local empty_declaration="^[[:space:]]*(export[[:space:]]+)?${var}=[[:space:]]*$"
+      if grep -qE "$declaration" "$abs"; then
+        if grep -E "$declaration" "$abs" | grep -vqE "$empty_declaration"; then
+          die "${rel} must keep every ${var}= declaration empty, including indented and 'export' forms (no real value committed to template)"
+        fi
       fi
-    fi
-    if grep -qE '^ENCRYPTION_SALT=' "$abs"; then
-      if grep -E '^ENCRYPTION_SALT=' "$abs" | grep -vqE '^ENCRYPTION_SALT=[[:space:]]*$'; then
-        die "${rel} must keep every ENCRYPTION_SALT= line empty (no real value committed to template)"
-      fi
-    fi
+    done
   done
 }
 

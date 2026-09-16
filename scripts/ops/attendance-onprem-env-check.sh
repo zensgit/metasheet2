@@ -42,30 +42,90 @@ function require_bcrypt_salt_rounds() {
 # These must be present and must not equal the built-in insecure default sentinels, otherwise
 # any secret encrypted with the fallback key is trivially decryptable. We deliberately never
 # echo the configured value back to the operator (values-free diagnostics).
+#
+# THE NORMALIZATION BELOW IS A VALIDATION VIEW ONLY: it decides accept/reject. It never rewrites
+# the env file and never changes the bytes the runtime derives a key from (owner review F5,
+# 2026-09-16 -- preflight and runtime must not disagree about the SAME material, and the fix for
+# that disagreement must not touch key derivation).
+#
+# Two views exist because the callers hold two different things:
+#   env-file  RAW line text straight out of get_env_value, never re-parsed by a shell. Quotes, a
+#             trailing '#' comment, '$VAR' and blanks after '=' still mean whatever `source` /
+#             `docker compose --env-file` would make of them, so this view must REJECT any
+#             expression whose runtime value it cannot know. It deliberately does not eval or
+#             source the (untrusted) env file to resolve them -- rejecting is the safe answer.
+#   sourced   the value AFTER `source`, i.e. already the runtime effective value. Expressions are
+#             gone and '$' / '#' are ordinary characters of a real operator secret here, so this
+#             view only normalizes whitespace and a surrounding quote pair before the empty and
+#             sentinel compares. Rejecting expressions here would fail-closed on a legitimate key.
+#
+# This function is byte-identical in attendance-onprem-env-check.sh, attendance-preflight.sh and
+# attendance-onprem-bootstrap-admin.sh; the three copies are pinned against drift by
+# scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs.
 function require_encryption_material() {
   local var_name="$1"
-  local value="$2"
+  local raw="$2"
   local default_sentinel="$3"
+  local view="${4:-}"
+  local hint="Generate one with: openssl rand -hex 32"
 
-  # get_env_value does a literal `${line#KEY=}` with no shell re-parsing, unlike
-  # `docker compose --env-file` / `source` (bootstrap-admin's actual runtime path
-  # for this file). Without normalizing the same way here, a quoted value
-  # (ENCRYPTION_KEY="default-key-change-in-production"), a whitespace-only value
-  # (ENCRYPTION_KEY=   ), or a sentinel with a trailing \r left by a CRLF-saved
-  # env file would all sail past a byte-for-byte `==` compare below even though
-  # Compose/source would treat them as the bare default/empty value at runtime.
-  value="${value%$'\r'}"
+  case "$view" in
+    env-file|sourced) ;;
+    *)
+      die "internal error: require_encryption_material needs an explicit view (env-file|sourced) for ${var_name}"
+      ;;
+  esac
+
+  # A CRLF-saved env file leaves a trailing \r on every value and `source` keeps it, so strip it
+  # in both views before anything else.
+  raw="${raw%$'\r'}"
+  local value="$raw"
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
-  if (( ${#value} >= 2 )); then
-    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. ${hint}"
+
+  local mark="${value:0:1}"
+  if [[ "$view" == "env-file" ]]; then
+    # 'KEY=   value' assigns an EMPTY value -- the blanks terminate the assignment word -- so the
+    # text visible here is not what the runtime gets.
+    if [[ "$raw" == [[:space:]]* ]]; then
+      die "${var_name} in ${ENV_FILE} has blanks between '=' and the value, which assigns an empty value at runtime. Put the value directly after '='. ${hint}"
+    fi
+
+    if [[ "$mark" == '"' || "$mark" == "'" ]]; then
+      if (( ${#value} < 2 )) || [[ "${value: -1}" != "$mark" ]] || [[ "${value:1:-1}" == *"$mark"* ]]; then
+        die "${var_name} in ${ENV_FILE} uses an unsupported env expression (unbalanced or embedded quote). Write a plain unquoted literal value. ${hint}"
+      fi
+      value="${value:1:-1}"
+    else
+      if [[ "$value" == *'"'* || "$value" == *"'"* ]]; then
+        die "${var_name} in ${ENV_FILE} uses an unsupported env expression (a quote inside an unquoted value). Write a plain unquoted literal value. ${hint}"
+      fi
+      if [[ "$value" == *[[:space:]]#* ]]; then
+        die "${var_name} in ${ENV_FILE} uses an unsupported env expression (trailing '#' comment); source keeps only the text before it, so the preflight would be judging a different value than the runtime. Write a plain unquoted literal value. ${hint}"
+      fi
+    fi
+
+    # Single quotes are literal under both `source` and compose; everything else expands at load
+    # time, and resolving that here would mean executing an untrusted file.
+    if [[ "$mark" != "'" ]] && { [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]]; }; then
+      die "${var_name} in ${ENV_FILE} uses an unsupported env expression (variable expansion, command substitution or a backslash escape). Write a plain unquoted literal value. ${hint}"
+    fi
+  else
+    if (( ${#value} >= 2 )) && [[ "$mark" == '"' || "$mark" == "'" ]] && [[ "${value: -1}" == "$mark" ]]; then
       value="${value:1:-1}"
     fi
   fi
 
-  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  # Re-trim AFTER de-quoting. Without this, '"   "' reads as non-empty and a sentinel padded
+  # inside its quotes reads as "not the default", while the runtime value is empty/default.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. ${hint}"
   if [[ "$value" == "$default_sentinel" ]]; then
-    die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+    die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. ${hint}"
   fi
 }
 
@@ -99,8 +159,8 @@ ENCRYPTION_SALT="$(get_env_value ENCRYPTION_SALT)"
 
 require_strong_jwt_secret "$JWT_SECRET"
 require_bcrypt_salt_rounds "$BCRYPT_SALT_ROUNDS"
-require_encryption_material "ENCRYPTION_KEY" "$ENCRYPTION_KEY" "default-key-change-in-production"
-require_encryption_material "ENCRYPTION_SALT" "$ENCRYPTION_SALT" "default-salt-change-in-production"
+require_encryption_material "ENCRYPTION_KEY" "$ENCRYPTION_KEY" "default-key-change-in-production" "env-file"
+require_encryption_material "ENCRYPTION_SALT" "$ENCRYPTION_SALT" "default-salt-change-in-production" "env-file"
 
 [[ -n "$POSTGRES_PASSWORD" ]] || die "POSTGRES_PASSWORD is missing in ${ENV_FILE}"
 [[ "$POSTGRES_PASSWORD" != "change-me" ]] || die "POSTGRES_PASSWORD is still 'change-me' in ${ENV_FILE}"

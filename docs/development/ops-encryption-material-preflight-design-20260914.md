@@ -310,3 +310,117 @@ shell 脚本执行。如果 env 文件里某一行写成 `SOME_VAR=$(curl ...)` 
 替换形式,`source` 会真的执行这条命令。这是该脚本既有的行为,不是本次
 W5-G/返修引入的,超出本次任务范围,不改;记录在此供后续单独评估(风险取决于
 env 文件的写入/审核权限模型,不属于本 PR 判断范围)。
+
+## owner 审阅返修(F4/F5/F6)
+
+> 编号说明:本节的 F4/F5/F6 指 **2026-09-16 owner 审阅报告**里的三条发现,与本文
+> 上一节「轻核返修」里的 F1–F4 不是同一套编号。上一节的 F4(`source` 会执行 env
+> 里的命令替换)仍然按登记不改处理,本节不改变那条结论。
+
+### F4(必修):新必填门中断了现有 staging rehearsal 调用方
+
+**根因(实读调用链)。** `attendance-onprem-bootstrap-admin.sh` 在上一轮新增了无条件
+的 `require_encryption_material ENCRYPTION_KEY/ENCRYPTION_SALT`。该脚本在 CI 里只有
+一个调用方:`.github/workflows/stock-prep-staging-window-rehearsal.yml`(recipe step 5)。
+而同一份 workflow 的 recipe step 3「Compose the env file」是从
+`docker/app.env.multitable-onprem.template` 复制后再追加 override 行,只补了
+PORT/HOST/JWT_SECRET/POSTGRES_PASSWORD/DATABASE_URL/BCRYPT_SALT_ROUNDS/
+ATTENDANCE_IMPORT_REQUIRE_TOKEN/UPLOAD_DIR —— **没有** ENCRYPTION_KEY/ENCRYPTION_SALT;
+实读确认该模板本身也一行 ENCRYPTION_* 都没有(本仓库状态早于 #5711 的空占位行)。
+于是 rehearsal 在 step 5 直接 `exit 1`,连数据库都没碰。
+
+**修法:选 (a) —— 在 rehearsal 的 env 生成步骤即时铸造一次性合成材料。**
+
+```
+REHEARSAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+REHEARSAL_ENCRYPTION_SALT="$(openssl rand -hex 32)"
+```
+再在追加块末尾写入 `ENCRYPTION_KEY=` / `ENCRYPTION_SALT=` 两行(override 追加在最后,
+`source` 时后写的赢)。
+
+**为什么不选 (b)(给 bootstrap-admin 一个豁免开关)。**
+
+1. (b) 会在生产可达的脚本里留一个「声明即跳过材料检查」的开关。这个脚本同时是操作员
+   在客户机上手工执行的入口,任何按开关名照抄命令行的人都能把 fail-closed 门关掉。
+   为了让 CI 绿而在**写入口**放宽守卫,与本轮的红线相反。
+2. rehearsal 的价值正是「把首次运行的失败烧在这里,而不是客户窗口里」。真实操作员必须
+   提供材料;让 rehearsal 走豁免路径,就等于让预演**不再预演**这一步。(a) 让 rehearsal
+   走与真实操作员完全相同的代码路径。
+3. 材料是 `openssl rand -hex 32` 每次运行现场生成,不是提交进仓库的字面量:仓库里没有
+   任何可被复制进真实部署的值;它不打印、不上传(artifact 步骤只收日志),随一次性 PG
+   服务一起销毁。审阅原话也是「应给 rehearsal 的**本次运行**生成合成 KEY/SALT」。
+
+**调用方回归验证(新增,必须)。** 新增
+`scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs`,它不是对 workflow
+文本的静态断言,而是**真的把这条链跑一遍**:解析 workflow 里「Compose the env file」步骤
+的 `run:` 脚本 → 在合成包根(内含真实模板副本)上执行它 → 用 `source` 判定产出的 env 里
+两项材料既非空也非哨兵 → 再用**真实的** `attendance-onprem-bootstrap-admin.sh` 跑该 env,
+`node`/`psql` 用 PATH 桩替换(桩只打标记并退出,漏网的守卫也碰不到数据库)。只要有人再从
+那个步骤里删掉材料行,这条测试立刻红。另有一条静态断言禁止把材料写成 workflow 里的字面量。
+
+新增 `.github/workflows/attendance-onprem-encryption-material-contracts.yml` 把它接到 PR 泳道
+(路径过滤 + push main),理由与既有的
+`multitable-onprem-package-verify-static-contracts.yml` 完全同形:**被守护的脚本只在
+dispatch-only 的 workflow 里执行,PR 上没有任何检查会碰它**,不接线的测试等于没有测试。
+
+### F5(必修):预检与 runtime 对同一份材料判定不一致(fail-early 假绿)
+
+**根因。** 三个入口拿到的东西不是一回事:
+
+| 入口 | 拿到的是什么 | 上一轮的判定 |
+|---|---|---|
+| `attendance-onprem-env-check.sh` / `attendance-preflight.sh` | `get_env_value` 的**原始行文本**(`${line#KEY=}`,从未经 shell 解析) | 先 trim 再脱引号,**脱引号后不再判空/不再归一化**就去比哨兵 |
+| `attendance-onprem-bootstrap-admin.sh` | `source` 之后的**运行时有效值** | 只判非空 + 精确等于哨兵 |
+
+于是 `ENCRYPTION_KEY="   "` 脱引号后得到三个空格,`-n` 为真、又不等于哨兵 → 放行;
+`" default-key-change-in-production "` 脱引号后带前后空格 → 不等于哨兵 → 放行。行尾注释
+与 `$VAR` 则是另一类:原始文本与 `source` 之后的值根本不是同一个字符串。
+
+**修法:按「运行时有效值语义」对齐,并把两种视图显式化。** 三个脚本里的
+`require_encryption_material` 改成**逐字节相同**的一份实现,新增第 4 个必填参数 `view`:
+
+- `env-file`:原始行文本。脱引号 → **再 trim** → 判空 → 归一化后再比哨兵;对「`=` 与值之间
+  有空白」(`source` 下实际赋空值)、行尾 `#` 注释、`$`/反引号/反斜杠、引号不配对或引号
+  内嵌同类引号,一律 **die 并写明不支持该写法**,不去猜。
+- `sourced`:已经是运行时有效值。只做 trim / 脱一对包裹引号 / 再 trim,然后判空与比哨兵。
+  **不**套表达式拒绝 —— 这里的 `$`、`#` 就是真实密钥里的普通字符,在此拒绝等于对合法的
+  操作员密钥 fail-closed。
+
+`view` 不给默认值:漏传直接 die(测试里有这条负例)。三份副本的逐字节一致由契约测试守住。
+
+**红线:只在校验视图里归一化,绝不改变实际派生密钥的字节。** 本节所有归一化都发生在
+`require_encryption_material` 的局部变量上,只用于 accept/reject 判定;不回写 env 文件、
+不 export、不改 `source` 的结果,`encrypted-secrets.ts` 拿到的 `process.env.ENCRYPTION_KEY`
+与改动前完全相同。也**没有**为了消除假绿而对不可信 env 文件新增 `eval`/`source`
+——「无法判定」的写法一律拒绝,而不是执行它来求值。
+
+**负例清单(env-file 视图,必须 die)。** `"   "`;`" default-key-change-in-production "`
+(引号内带空格);`default-key-change-in-production # comment`;`$SOME_VAR`;`$(...)`;
+反引号;引号不配对;`=` 后带前导空白;` # comment`(只有注释);外加上一轮的既有负例
+(裸空、裸哨兵、成对引号哨兵、单引号哨兵、纯空白、CRLF 哨兵)。
+**正例(必须仍然放行)**:裸 hex、双引号 hex、单引号 hex、CRLF 结尾的 hex。
+**sourced 视图负例**:`   `、` <哨兵> `、`"<哨兵>"`、`" <哨兵> "`、空、哨兵、CRLF 哨兵;
+**正例**:裸 hex、含 `$` 的值、含 `#` 的值(证明没有过度收紧)。
+
+### F6(补齐):包模板检查只覆盖一种声明形式
+
+**根因。** `verify_onprem_env_templates` 只扫行首精确的 `^ENCRYPTION_KEY=` /
+`^ENCRYPTION_SALT=`。而 on-prem 实际装载路径是 `set -a; . ./docker/app.env`,Bash 对
+`  KEY=v`(缩进)和 `export KEY=v` 与 `KEY=v` 一视同仁 —— 这两种写法能把真实材料带进包里
+而断言看不见。
+
+**修法。** 「是否声明」与「是否为空占位」两个判定用**同一套**语法:可选前导空白 +
+可选 `export `,即 `^[[:space:]]*(export[[:space:]]+)?${var}=`(空占位再加 `[[:space:]]*$`)。
+两个变量合并成一个循环,避免两份分叉。负例:`export ENCRYPTION_KEY=synthetic-value`、
+`export ENCRYPTION_SALT=...`、缩进声明(空格与 TAB)、缩进 + `export`、`export` 后多空格、
+以及上一轮的裸声明与「空占位 + 重复真实值」;正例:四种空占位写法(裸/`export`/缩进/
+缩进 + `export`)与三份真实模板原样(它们当前一行 ENCRYPTION_* 都没有,是真正的正控制)。
+
+### Pin 核查(本轮)
+
+`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`
+的 pin 名册在 `sealed-export-package-provenance.cjs` 里定义:workflow 只 pin 了
+`.github/workflows/sealed-export-s5-sqlserver.yml` 与 `.github/workflows/plugin-tests.yml`;
+脚本侧 pin 的是 `scripts/ops/multitable-onprem-package-{verify,build}.sh`。
+**本轮改动的 `stock-prep-staging-window-rehearsal.yml` 与四个 `attendance-*` 脚本都不在
+pin 集**,因此不需要重算 pin(也未改动任何 pin 集内文件)。

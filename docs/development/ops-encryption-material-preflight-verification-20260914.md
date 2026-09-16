@@ -389,3 +389,142 @@ exit=0          # 红:本该 die 却放行了,证明脱引号这段代码确实�
   (该文件实测**不在**当前 pin 集里)。
 - F4:确认 `attendance-onprem-bootstrap-admin.sh` 的 `source` 会执行 env 里
   的命令替换,按指示登记不改。
+
+## owner 审阅返修验证(F4/F5/F6,2026-09-16)
+
+> 编号同设计文档:本节 F4/F5/F6 = 2026-09-16 owner 审阅报告的三条发现,与上一节
+> 「轻核返修」的 F1–F4 不是同一套编号。
+
+**方法。** 全部合成、values-free:env fixture 由测试现场生成,`node`/`psql` 用 PATH 桩
+替换(打标记后退出,漏网守卫也到不了数据库),不联网、不起 Docker、不读任何真实 env、
+不碰 222。变异探针跑在 scratchpad 的**镜像树**上(把被改文件复制出去再改),仓库工作树
+全程未被变异污染。
+
+### 0. `bash -n`(四脚本,改动后)
+
+```
+OK scripts/ops/attendance-onprem-env-check.sh
+OK scripts/ops/attendance-preflight.sh
+OK scripts/ops/attendance-onprem-bootstrap-admin.sh
+OK scripts/ops/attendance-onprem-package-verify.sh
+```
+
+### 1. 先红:新契约测试在修复前的结果
+
+`node --test scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs`
+(HEAD `0f7771ffb`,只有测试文件存在、四脚本与 workflow 未改):
+
+```
+ℹ tests 13
+ℹ pass 5
+ℹ fail 8
+AssertionError: quoted-whitespace must be rejected, got: GUARD_ACCEPTED        (env-check)
+AssertionError: quoted-whitespace must be rejected, got: GUARD_ACCEPTED        (preflight)
+AssertionError: sourced-whitespace-only must be rejected, got: GUARD_ACCEPTED  (bootstrap-admin)
+AssertionError: require_encryption_material has drifted between entry points
+AssertionError: quoted-whitespace: env-check must fail, got:
+  [attendance-onprem-env-check] Env check OK (REQUIRE_ATTENDANCE_ONLY=1)
+AssertionError: composed env lacks usable material: MISSING:ENCRYPTION_KEY     (F4 调用链)
+AssertionError: rehearsal material must be generated per run, not hardcoded
+AssertionError: export-key in docker/app.env.attendance-onprem.template must be rejected:
+  TEMPLATES_ACCEPTED                                                           (F6)
+```
+
+5 条通过的都是正控制(合法材料仍被放行、真实模板原样通过、空占位各写法通过),说明
+harness 确实走到了每一道门,不是因为够不着才「全红」。
+
+### 2. F4 先红:直接复现 rehearsal 调用链中断
+
+按 workflow recipe step 3 的写法合成 env(真实 multitable 模板 + 同样的 override 行),
+再跑真实的 bootstrap-admin(桩 node/psql):
+
+```
+composed lines: 44
+[attendance-onprem-bootstrap-admin] ERROR: ENCRYPTION_KEY is missing (empty) in .../docker/app.env.
+  Generate one with: openssl rand -hex 32
+BOOTSTRAP_EXIT=1
+```
+
+与审阅报告 F4 的描述一致:exit 1,尚未执行任何 DB 操作。
+
+### 3. 修后转绿
+
+```
+ℹ tests 13
+ℹ pass 13
+ℹ fail 0
+```
+
+### 4. F5 四类负例:逐入口修前/修后(函数级,真实函数体)
+
+base = 冻结的 `0f7771ffb`,head = 本次改动后。
+
+```
+A  "   "                  | env-check: ACCEPT(假绿) -> REJECT | preflight: ACCEPT(假绿) -> REJECT | bootstrap: ACCEPT(假绿) -> REJECT
+B  " <哨兵> "(引号内空格) | env-check: ACCEPT(假绿) -> REJECT | preflight: ACCEPT(假绿) -> REJECT | bootstrap: ACCEPT(假绿) -> REJECT
+C  <哨兵> # comment       | env-check: ACCEPT(假绿) -> REJECT | preflight: ACCEPT(假绿) -> REJECT | bootstrap: 见下
+D  $SOME_VAR              | env-check: ACCEPT(假绿) -> REJECT | preflight: ACCEPT(假绿) -> REJECT | bootstrap: 见下
+```
+
+C/D 在 bootstrap 这一格必须用端到端路径判定,不能把原始行文本喂给 `sourced` 视图 ——
+bootstrap 永远看不到原始文本,它 `source` 之后拿到的是解析结果。真实 env 文件 → 真实
+脚本(桩 node/psql):
+
+```
+A  "   "                 base: ACCEPT(到 node 桩, exit 77)  head: REJECT exit 1  ENCRYPTION_KEY is missing (empty)
+B  " <哨兵> " padded     base: ACCEPT(到 node 桩, exit 77)  head: REJECT exit 1  uses the insecure built-in default value
+C  <哨兵> # comment      base: REJECT exit 1                head: REJECT exit 1  uses the insecure built-in default value
+D  $SOME_UNSET_VAR       base: REJECT exit 1                head: REJECT exit 1  is missing (empty)
++  <合成 hex>(正控制)   base: ACCEPT(到 node 桩, exit 77)  head: ACCEPT(到 node 桩, exit 77)
+```
+
+即 C/D 在 bootstrap 侧**本来就**被 runtime 拦住 —— 这正是审阅所说「影响是 fail-early
+假绿」:假绿发生在 env-check/preflight 这两道**早退**门上,操作员要到第一次真正使用加密
+时才会撞墙。修后三个入口对同一份材料给出一致判定。正控制两侧都放行,证明没有过度收紧。
+
+### 5. F6 负例:修前/修后
+
+```
+export ENCRYPTION_KEY=synthetic-value | ACCEPT(假绿) -> REJECT
+  ENCRYPTION_SALT=synthetic-value(缩进) | ACCEPT(假绿) -> REJECT
+export ENCRYPTION_KEY=(空占位,应放行) | ACCEPT -> ACCEPT(预期,正控制)
+```
+
+契约测试里 8 类拒绝负例 × 3 份模板、4 类空占位写法、以及三份真实模板原样的正控制全部
+按预期。
+
+### 6. 变异测试(去掉修复 → 假绿/中断复现)
+
+镜像树上逐条去掉修复后重跑整套契约测试:
+
+```
+M0 控制:镜像未变异                                   -> exit=0 pass=13 fail=0
+M1 F4:删掉 rehearsal compose 步骤里两行合成材料      -> exit=1 pass=12 fail=1
+     红:F4 rehearsal caller(调用链再次断在材料门上)
+M2 F5:删掉「脱引号之后的再 trim」                    -> exit=1 pass=9  fail=4
+     红:env-check 负例 / preflight 负例 / bootstrap sourced 负例 / env-check 端到端
+M3 F5:让 env-file 视图的表达式拒绝全部失效           -> exit=1 pass=10 fail=3
+     红:env-check 负例 / preflight 负例 / env-check 端到端
+M4 F6:声明正则退回行首精确形式                       -> exit=1 pass=12 fail=1
+     红:F6 rejects every declaration syntax
+```
+
+### 7. 行尾与 pin
+
+- 四个脚本 + 新测试文件 + 两份文档在 index 中的 CR 计数均为 0
+  (`git show :<path> | tr -cd '\r' | wc -c`)。
+- workflow:`stock-prep-staging-window-rehearsal.yml` 的 index blob 原本就是纯 LF
+  (工作区因 `core.autocrlf=true` 呈 CRLF),改动后 index 仍为 0 CR。
+- pin:`s6a-package-provenance-pins.json` 的名册里 workflow 只有
+  `sealed-export-s5-sqlserver.yml` 与 `plugin-tests.yml`,脚本只有
+  `multitable-onprem-package-{verify,build}.sh`。本轮改的文件**都不在 pin 集**,
+  未重算 pin,也未改动任何 pin 集内文件。
+
+### 8. 本轮没做的事
+
+- 没有真跑 `stock-prep-staging-window-rehearsal.yml`(dispatch-only,需要完整打包 + PG 服务);
+  F4 的证据是「解析真实 workflow 步骤 + 真实脚本 + 合成底座」的链路级验证,不等于一次真实预演。
+- 没有跑 `attendance-preflight.sh` 的整脚本端到端(它还要求 compose/nginx/validator 等一整套
+  文件);preflight 侧用的是真实函数体 + 与 env-check 逐字节一致性守卫双重覆盖。
+- 没有碰 222、真实 env、pin 集内文件、`packages/`、`plugins/`、任何 `.ps1`。
+- 设计文档上一节登记的「`source` 会执行 env 里的命令替换」仍按原结论不改。
