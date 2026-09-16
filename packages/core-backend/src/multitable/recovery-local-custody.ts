@@ -1,5 +1,21 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
+import type { RecoveryArchiveCustodyOperations, RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
+
+const admissionBrand: unique symbol = Symbol('local-custody-admission')
+export interface LocalArchiveCustodyAdmission {
+  readonly assurance: 'local-v1'
+  readonly custodyId: string
+  readonly keyId: string
+  readonly [admissionBrand]: true
+}
+const admissions = new WeakMap<LocalArchiveCustodyAdmission, RecoveryArchiveCustodyOperations>()
+
+/** Internal guard entry: no structural/manifest-driven fallback for local claims. */
+export function resolveLocalArchiveCustody(input: object): RecoveryArchiveCustodyOperations | undefined {
+  const operations = admissions.get(input as LocalArchiveCustodyAdmission)
+  if (!operations && 'assurance' in input) refuse()
+  return operations
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_VERSIONS = 64
@@ -162,6 +178,7 @@ export interface LocalWrappedDek {
 export function createLocalCustodySession(probe: RecoveryArchiveTransactionDepthProbe) {
   let ring: Keyring = new Map()
   let custodyId: string | null = null
+  let epoch = 0
   const activeKey = () => {
     if (!custodyId || ring.size === 0) refuse()
     return [...ring.keys()][ring.size - 1]
@@ -180,10 +197,11 @@ export function createLocalCustodySession(probe: RecoveryArchiveTransactionDepth
     if (!(preimage instanceof Uint8Array) || preimage.byteLength > 16 * 1024 * 1024) refuse()
     return createHmac('sha256', material.subarray(32)).update(context('manifest', custodyId!, keyId)).update(preimage).digest()
   }
-  return Object.freeze({
+  const session = Object.freeze({
     assurance: 'local-v1' as const,
     isUnlocked: () => custodyId !== null,
     lock() {
+      epoch++
       scrub(ring)
       custodyId = null
     },
@@ -245,5 +263,48 @@ export function createLocalCustodySession(probe: RecoveryArchiveTransactionDepth
         return signature instanceof Uint8Array && signature.byteLength === 32 && timingSafeEqual(expected, signature)
       })
     },
+    admitForArchive(expectedCustodyId: string): LocalArchiveCustodyAdmission {
+      return guarded(probe, () => {
+        const active = activeKey()
+        if (uuid(expectedCustodyId) !== custodyId) refuse()
+        const admittedEpoch = epoch
+        const prefix = `local-v1:${custodyId}:`
+        const parse = (id: string) => {
+          if (epoch !== admittedEpoch || custodyId !== expectedCustodyId || typeof id !== 'string' || !id.startsWith(prefix)) refuse()
+          const localId = uuid(id.slice(prefix.length))
+          key(localId)
+          return localId
+        }
+        const capability: LocalArchiveCustodyAdmission = Object.freeze({
+          assurance: 'local-v1', custodyId: expectedCustodyId, keyId: `${prefix}${active}`, [admissionBrand]: true as const,
+        })
+        admissions.set(capability, Object.freeze({
+          async produceGenerationDek(request) {
+            return guarded(probe, () => {
+              if (parse(request.keyId) !== activeKey()) refuse()
+              const issued = session.issueLocalDek(request.generationId)
+              return { dek: issued.dek, wrappedDekId: issued.wrappedId, wrappedDek: issued.wrapped }
+            })
+          },
+          async unwrapGenerationDek(request) {
+            return guarded(probe, () => ({
+              dek: session.openLocalDek({ keyId: parse(request.keyId), generationId: request.generationId, wrappedId: request.wrappedDekId, wrapped: request.wrappedDek }),
+              wrappedDekId: request.wrappedDekId, wrappedDek: new Uint8Array(request.wrappedDek),
+            }))
+          },
+          async deriveDekFingerprint(request) {
+            return guarded(probe, () => { parse(request.keyId); return session.localDekIdentity(request.dek) })
+          },
+          async macManifestRoot(request) {
+            return guarded(probe, () => session.signLocalManifest(parse(request.keyId), request.preimage))
+          },
+          async verifyManifestRootMac(request) {
+            return guarded(probe, () => session.verifyLocalManifest(parse(request.keyId), request.preimage, request.mac))
+          },
+        }))
+        return capability
+      })
+    },
   })
+  return session
 }

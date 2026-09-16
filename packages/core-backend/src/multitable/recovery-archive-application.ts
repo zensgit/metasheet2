@@ -2,7 +2,7 @@ import type {
   RecoveryArchiveRouterDatabaseRuntime,
   UniverMetaRouterOptions,
 } from '../routes/univer-meta'
-import type { RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
+import type { RecoveryArchiveCustodyInput } from './recovery-archive-crypto'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
 import type {
   RecoveryArchiveObservability,
@@ -32,7 +32,7 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
 >
 
 export interface RecoveryArchiveApplicationComposition {
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly auditedReplayHorizonMs: number
   readonly asyncResumeHorizonMs: number

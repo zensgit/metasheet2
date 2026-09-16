@@ -6,6 +6,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createLocalCustodyBackup, createLocalCustodySession } from '../../src/multitable/recovery-local-custody'
+import { createTransactionGuardedKeyCustody } from '../../src/multitable/recovery-archive-crypto'
 
 const probe = { currentTransactionDepth: () => 0 }
 const error = { message: 'RECOVERY_LOCAL_CUSTODY_REFUSED' }
@@ -21,6 +22,62 @@ function fixture() {
 }
 
 describe('explicit local custody core', () => {
+  test('explicit admission wraps, authenticates and unwraps through the existing transaction guard', async () => {
+    const f = fixture()
+    const admitted = f.session.admitForArchive(f.custodyId)
+    expect(admitted.keyId).toMatch(new RegExp(`^local-v1:${f.custodyId}:`))
+    expect('produceGenerationDek' in admitted).toBe(false)
+    const guarded = createTransactionGuardedKeyCustody(admitted, probe)
+    const generationId = randomUUID()
+    const issued = await guarded.produceGenerationDek({ keyId: admitted.keyId, generationId })
+    const request = { keyId: admitted.keyId, generationId, wrappedDekId: issued.wrappedDekId, wrappedDek: issued.wrappedDek }
+    expect((await guarded.unwrapGenerationDek(request)).dek).toEqual(issued.dek)
+    const preimage = Buffer.from('synthetic archive preimage')
+    const mac = await guarded.macManifestRoot({ keyId: admitted.keyId, preimage })
+    expect(await guarded.verifyManifestRootMac({ keyId: admitted.keyId, preimage, mac })).toBe(true)
+    expect(await guarded.deriveDekFingerprint({ keyId: admitted.keyId, dek: issued.dek })).toBe(f.session.localDekIdentity(issued.dek))
+    f.session.lock()
+    await expect(guarded.unwrapGenerationDek(request)).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED')
+  })
+
+  test('rejects wrong expected identity, raw sessions and forged/copied admissions', () => {
+    const f = fixture()
+    expect(() => f.session.admitForArchive(randomUUID())).toThrow(error.message)
+    const admitted = f.session.admitForArchive(f.custodyId)
+    for (const fake of [{ ...admitted }, { assurance: 'local-v1' }, f.session]) {
+      expect(() => createTransactionGuardedKeyCustody(fake as never, probe)).toThrow('RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED')
+    }
+    f.session.lock()
+    expect(() => f.session.admitForArchive(f.custodyId)).toThrow(error.message)
+  })
+
+  test('re-unlock revokes old admission while new admission can read retained old versions', async () => {
+    const f = fixture()
+    const admitted = f.session.admitForArchive(f.custodyId)
+    const old = createTransactionGuardedKeyCustody(admitted, probe)
+    const generationId = randomUUID()
+    const issued = await old.produceGenerationDek({ keyId: admitted.keyId, generationId })
+    const rotated = f.session.exportRotatedBackup(f.secret)
+    f.session.lock()
+    f.session.unlock({ custodyId: f.custodyId, recoverySecret: f.secret, backup: rotated })
+    await expect(old.macManifestRoot({ keyId: admitted.keyId, preimage: Buffer.from('old') })).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED')
+    const replacement = f.session.admitForArchive(f.custodyId)
+    const current = createTransactionGuardedKeyCustody(replacement, probe)
+    expect((await current.unwrapGenerationDek({ ...issued, keyId: admitted.keyId, generationId })).dek).toEqual(issued.dek)
+    await expect(current.produceGenerationDek({ keyId: admitted.keyId, generationId })).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED')
+    await expect(current.produceGenerationDek({ keyId: replacement.keyId, generationId })).resolves.toHaveProperty('dek')
+    f.session.lock()
+  })
+
+  test('explicit admission rejects cross-custody and unqualified local key IDs', async () => {
+    const f = fixture()
+    const admitted = f.session.admitForArchive(f.custodyId)
+    const guarded = createTransactionGuardedKeyCustody(admitted, probe)
+    for (const keyId of [admitted.keyId.replace(f.custodyId, randomUUID()), admitted.keyId.split(':')[2], ` ${admitted.keyId}`]) {
+      await expect(guarded.produceGenerationDek({ keyId, generationId: randomUUID() })).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED')
+    }
+    f.session.lock()
+  })
   test('starts locked and is not structurally the KMS adapter', () => {
     const session = createLocalCustodySession(probe)
     expect(session.assurance).toBe('local-v1')
