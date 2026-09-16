@@ -37,6 +37,7 @@ export async function seedVerifiedArchive(input: {
   readonly query: RecoveryArchiveRestoreJobQuery
   readonly transaction: RecoveryArchiveRestoreJobTransaction
   readonly label: string
+  readonly keyId?: string
   readonly expiresAt?: string
   readonly materialize?: (
     fixture: Fixture,
@@ -59,7 +60,7 @@ export async function seedVerifiedArchive(input: {
     sheetId: `${prefix}_${suffix}_sheet`,
     actorId: `${prefix}_${suffix}_actor`,
     checkpointId: `${prefix}_${suffix}_checkpoint`,
-    keyId: `${prefix}_${suffix}_key`,
+    keyId: input.keyId ?? `${prefix}_${suffix}_key`,
     generationId: randomUUID(),
     rootHash: sha(`${prefix}|${suffix}|root`),
     sourceVectorHash: '',

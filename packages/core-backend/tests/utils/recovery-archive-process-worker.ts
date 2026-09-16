@@ -20,6 +20,10 @@ import {
   type RecoveryArchiveRestoreJobWorkerClaim,
 } from '../../src/multitable/recovery-archive-restore-jobs'
 import { createFixtureKeyCustody, type RecoveryArchiveFixtureKeyMaterial } from './recovery-archive-durable-fixture'
+import type { RecoveryArchiveCustodyInput } from '../../src/multitable/recovery-archive-crypto'
+import { createLocalCustodySession } from '../../src/multitable/recovery-local-custody'
+import { createLocalCustodyStore, type LocalCustodyReceipt } from '../../src/multitable/recovery-local-custody-store'
+import { createRecoveryArchiveFileStoreProvider } from '../../src/multitable/recovery-archive-file-store'
 
 export type ArchiveProcessClaimSnapshot = Pick<RecoveryArchiveRestoreJobWorkerClaim,
   'jobId' | 'sheetId' | 'keyId' | 'archiveGenerationId' | 'blockFence' | 'workerOwnerId'
@@ -33,6 +37,14 @@ export interface ArchiveProcessWorkerInput {
   readonly keyMaterial: RecoveryArchiveFixtureKeyMaterial
   readonly jobId: string
   readonly priorClaim?: ArchiveProcessClaimSnapshot
+  readonly local?: {
+    archivePath: string
+    custodyPath: string
+    custodyId: string
+    storeId: string
+    receipt: LocalCustodyReceipt
+    recoverySecret: Uint8Array
+  }
 }
 
 export type ArchiveProcessWorkerMessage =
@@ -120,7 +132,7 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       client.release()
     }
   }
-  const runtime = {
+  const runtime: { keyCustody: RecoveryArchiveCustodyInput; objectStore: RecoveryArchiveObjectStoreProvider; transactionDepth: { currentTransactionDepth: () => number } } = {
     keyCustody: createFixtureKeyCustody(input.keyId, [], input.keyMaterial),
     objectStore,
     transactionDepth: { currentTransactionDepth: () => depth },
@@ -169,7 +181,15 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     }
     return lifecycle
   }
+  const localSession = input.local ? createLocalCustodySession(runtime.transactionDepth) : undefined
   try {
+    if (input.local && localSession) {
+      const local = input.local
+      const store = await createLocalCustodyStore({ archivePath: local.archivePath, custodyPath: local.custodyPath, custodyId: local.custodyId, transactionDepth: runtime.transactionDepth })
+      localSession.unlock({ custodyId: local.custodyId, recoverySecret: local.recoverySecret, backup: await store.readBackup(local.receipt) })
+      runtime.keyCustody = localSession.admitForArchive(local.custodyId)
+      runtime.objectStore = await createRecoveryArchiveFileStoreProvider({ basePath: local.archivePath, storeId: local.storeId, maxObjectBytes: 16 * 1024 * 1024, transactionDepth: runtime.transactionDepth })
+    }
     if (input.phase === 'drain') {
       const tickCount = input.drainTicks ?? 0
       if (!Number.isSafeInteger(tickCount) || tickCount < 1 || tickCount > 158) {
@@ -249,6 +269,8 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
     }
     throw new Error('archive_process_chunk_bound_exceeded')
   } finally {
+    localSession?.lock()
+    input.local?.recoverySecret.fill(0)
     await pool.end()
   }
 }

@@ -1,6 +1,6 @@
 import { fork } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -104,6 +104,10 @@ import {
   type MaterializedArchiveObjects,
 } from '../utils/recovery-archive-verified-fixture'
 import type { ArchiveProcessClaimSnapshot, ArchiveProcessWorkerInput, ArchiveProcessWorkerMessage } from '../utils/recovery-archive-process-worker'
+import { createLocalCustodyBackup, createLocalCustodySession, type LocalArchiveCustodyAdmission } from '../../src/multitable/recovery-local-custody'
+import { createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
+import { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } from '../../src/multitable/recovery-archive-file-store'
+import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 
 const runRealDb =
   Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
@@ -117,6 +121,8 @@ test('sentinel: the D5 real-DB step must provide DATABASE_URL', () => {
 
 const RUN = randomUUID().replaceAll('-', '').slice(0, 16)
 const PREFIX = `tm_d5_${RUN}`
+const localFixtureKeyIds = new Set<string>()
+const localFixtureNonceGenerations = new Set<string>()
 const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
 const future = (milliseconds: number): string => new Date(Date.now() + milliseconds).toISOString()
 
@@ -191,6 +197,10 @@ async function runArchiveProcessWorker(
       child.once('exit', () => reject(new Error('archive_process_exited_without_result')))
       child.on('message', (result: ArchiveProcessWorkerMessage) => {
         if (result.kind === 'read-object') {
+          if (input.local) {
+            reject(new Error('archive_local_process_must_read_own_objects'))
+            return
+          }
           const read = provider.get(result.request).then(
             (object) => {
               if (child.connected) child.send({ kind: 'object-result', requestId: result.requestId, result: object }, () => {})
@@ -272,8 +282,9 @@ async function seedVerifiedArchive(
   label: string,
   expiresAt = '2099-12-31T00:00:00.000Z',
   materialize?: (fixture: Fixture) => Promise<MaterializedArchiveObjects>,
+  keyId?: string,
 ): Promise<Fixture> {
-  return seedVerifiedArchiveFixture({ prefix: PREFIX, query: q, transaction, label, expiresAt, materialize })
+  return seedVerifiedArchiveFixture({ prefix: PREFIX, query: q, transaction, label, expiresAt, materialize, keyId })
 }
 function compilePlan(
   fixture: Fixture,
@@ -865,6 +876,7 @@ async function cleanupFixtures(): Promise<void> {
   try {
     await client.query('BEGIN')
     await client.query('SET LOCAL session_replication_role = replica')
+    await client.query('DELETE FROM public.meta_recovery_archive_nonce_reservations WHERE generation_id=ANY($1::uuid[])', [[...localFixtureNonceGenerations]])
     const sheets = await client.query<{ id: string }>(
       `SELECT id FROM public.meta_sheets WHERE id LIKE $1`,
       [`${PREFIX}%`],
@@ -919,9 +931,16 @@ async function cleanupFixtures(): Promise<void> {
       await client.query(`DELETE FROM public.meta_sheets WHERE id=ANY($1::text[])`, [sheetIds])
     }
     await client.query(`DELETE FROM public.meta_recovery_archive_keys WHERE key_id LIKE $1`, [`${PREFIX}%`])
+    await client.query('DELETE FROM public.meta_recovery_archive_keys WHERE key_id=ANY($1::text[])', [[...localFixtureKeyIds]])
     await client.query(`DELETE FROM public.meta_bases WHERE id LIKE $1`, [`${PREFIX}%`])
     await client.query(`DELETE FROM public.users WHERE id LIKE $1`, [`${PREFIX}%`])
     await client.query('COMMIT')
+    expect((await client.query(`SELECT
+      (SELECT count(*)::int FROM meta_recovery_archive_nonce_reservations WHERE generation_id=ANY($1::uuid[])) AS nonces,
+      (SELECT count(*)::int FROM meta_recovery_archive_keys WHERE key_id=ANY($2::text[])) AS keys`,
+    [[...localFixtureNonceGenerations], [...localFixtureKeyIds]])).rows).toEqual([{ nonces: 0, keys: 0 }])
+    localFixtureNonceGenerations.clear()
+    localFixtureKeyIds.clear()
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
     throw error
@@ -1888,15 +1907,27 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       resumeAfterCrash: true,
       processBoundary: 'after_commit' as const,
     },
+    {
+      label: 'local custody and persistent objects after SIGKILL and independent-process reopening',
+      recoveryMode: 'revert' as const,
+      resumeAfterCrash: true,
+      processBoundary: 'after_commit' as const,
+      localStorage: true,
+    },
   ])('runs one real encrypted archive $label through the production facade', async ({
     recoveryMode,
     resumeAfterCrash,
     processBoundary,
+    localStorage,
   }) => {
     const expiresAt = '2099-12-31T00:00:00.000Z'
     const root = await mkdtemp(join(tmpdir(), `tm-composed-async-${recoveryMode}-`))
-    const provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
     const depthProbe = { currentTransactionDepth: () => transactionDepth }
+    let provider: RecoveryArchiveObjectStoreProvider
+    let local: ArchiveProcessWorkerInput['local']
+    let admission: LocalArchiveCustodyAdmission | undefined
+    const localWriter = localStorage ? createLocalCustodySession(depthProbe) : undefined
+    const localSecret = localStorage ? randomBytes(32) : undefined
     let durable: RecoveryArchiveDurableFixture | undefined
     let fieldId = ''
     let recordIds: string[] = []
@@ -1905,6 +1936,26 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const keyMaterial = { dek: randomBytes(32), wrappedDek: randomBytes(48) }
 
     try {
+      if (localWriter && localSecret) {
+        const archivePath = join(root, 'objects')
+        const custodyPath = join(root, 'custody')
+        const custodyId = randomUUID()
+        const storeId = randomUUID()
+        await mkdir(archivePath, { mode: 0o700 })
+        await mkdir(custodyPath, { mode: 0o700 })
+        await provisionRecoveryArchiveFileRoot({ basePath: archivePath, storeId, transactionDepth: depthProbe })
+        provider = await createRecoveryArchiveFileStoreProvider({ basePath: archivePath, storeId, maxObjectBytes: 16 * 1024 * 1024, transactionDepth: depthProbe })
+        const store = await createLocalCustodyStore({ archivePath, custodyPath, custodyId, transactionDepth: depthProbe })
+        const backup = createLocalCustodyBackup({ custodyId, recoverySecret: localSecret, transactionDepth: depthProbe })
+        await store.putBackup(randomUUID(), backup)
+        localWriter.unlock({ custodyId, recoverySecret: localSecret, backup })
+        admission = localWriter.admitForArchive(custodyId)
+        localFixtureKeyIds.add(admission.keyId)
+        const receipt = await store.putBackup(randomUUID(), localWriter.exportRotatedBackup(localSecret))
+        local = { archivePath, custodyPath, custodyId, storeId, receipt, recoverySecret: localSecret }
+      } else {
+        provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
+      }
       const fixture = await seedVerifiedArchive(
         `composed_async_facade_${recoveryMode}`,
         expiresAt,
@@ -1973,10 +2024,26 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
             transactionDepth: depthProbe,
             objectExpiresAt: archiveExpiresAt,
             keyMaterial,
+            keyCustody: admission,
+            reserveNonces: admission ? async reservations => transaction(async query => {
+              for (const r of reservations) {
+                localFixtureNonceGenerations.add(r.generationId)
+                await query(
+                  'SELECT meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,$5,$6::integer)',
+                  [r.dekFingerprint, r.nonceHex, r.generationId, r.sectionName, r.aeadAlgorithm, r.formatVersion],
+                )
+              }
+            }) : undefined,
           })
           return durable
         },
+        admission?.keyId,
       )
+      if (localWriter) {
+        localWriter.lock()
+        expect((await q('SELECT count(*)::int AS n FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1::uuid', [fixture.generationId])).rows)
+          .toEqual([{ n: RECOVERY_ARCHIVE_V1_SECTION_NAMES.length }])
+      }
       if (!durable || !fieldId || recordIds.length !== 5001) {
         throw new Error('recovery_archive_composed_fixture_not_materialized')
       }
@@ -2130,7 +2197,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       let crashedSnapshot: ArchiveProcessClaimSnapshot | undefined
       if (processBoundary) {
         const boundary = await runArchiveProcessWorker({
-          phase: processBoundary, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
+          phase: processBoundary, keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
         if (boundary.kind !== 'boundary') throw new Error('archive_process_boundary_missing')
         crashedPid = boundary.pid
@@ -2292,7 +2359,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       let terminal: { state: string; completedCount: string }
       if (processBoundary) {
         const resumed = await runArchiveProcessWorker({
-          phase: 'finish', keyId: fixture.keyId, keyMaterial, jobId: accepted.id, priorClaim: crashedSnapshot,
+          phase: 'finish', keyId: fixture.keyId, keyMaterial, jobId: accepted.id, priorClaim: crashedSnapshot, local,
         }, provider)
         if (resumed.kind !== 'done') throw new Error('archive_process_completion_missing')
         expect(resumed.pid).not.toBe(crashedPid)
@@ -2320,7 +2387,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           [recordIds[0], JSON.stringify({ [formulaId]: 'stale-derived-value' })])
         await q('UPDATE users SET is_active=FALSE WHERE id=$1', [fixture.actorId])
         const denied = await runArchiveProcessWorker({
-          phase: 'drain', drainTicks: 1, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
+          phase: 'drain', drainTicks: 1, keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
         expect(denied).toMatchObject({ kind: 'drained', attempts: 1, completed: 0, batches: [0], lifecycle: ['started', 'drained'],
           ticks: [{ kind: 'idle', swept: 0, chunks: 0 }] })
@@ -2333,7 +2400,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       }
       if (processBoundary) {
         const drained = await runArchiveProcessWorker({
-          phase: 'drain', drainTicks: 158, keyId: fixture.keyId, keyMaterial, jobId: accepted.id,
+          phase: 'drain', drainTicks: 158, keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
         expect(drained).toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001, lifecycle: ['started', 'drained'],
           batches: [...Array.from({ length: 156 }, () => 32), 9, 0],
@@ -2422,6 +2489,8 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         version: 3,
       }])
     } finally {
+      localWriter?.lock()
+      localSecret?.fill(0)
       if (derivedJobId) {
         await q('DELETE FROM public.meta_recovery_archive_derived_effects WHERE job_id=$1', [derivedJobId])
       }

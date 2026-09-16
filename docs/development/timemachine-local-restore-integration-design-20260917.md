@@ -46,6 +46,32 @@ Stages 1-3 alone do not prove stage 4. The reader fixture uses an in-memory
 selected binding and a no-op nonce reservation; it is not a durable catalog or
 nonce-allocation acceptance test.
 
+## Real Database and Independent Worker Case
+
+Extend the already-wired restore-jobs real-DB suite with one local-storage case,
+preserving all existing KMS fixture cases. Its catalog and frozen restore plan
+are synthetic fixtures in a fully migrated disposable PostgreSQL database.
+The local case supplies a real custody capability and a transaction-scoped
+`meta_recovery_archive_reserve_nonce` sink instead of the fixture defaults.
+
+Archive objects and encrypted custody packages are persisted under separate
+private directories. The writer locks after sealing. Child processes receive
+only synthetic location/receipt identity and the independently held random
+secret over private IPC; they open the real file providers and unlock their own
+sessions. In local mode, the parent rejects any child request to proxy object
+reads. Existing SIGKILL-after-commit, lease takeover, exactly-once 5,001-row
+restore, authority revocation and derived-effect drain assertions remain active.
+
+This is a process-restart recovery acceptance, not a clean-machine installation,
+PG backup/import, live archive capture pipeline, customer NAS or production UAT.
+The catalog remains in the disposable database throughout the process restart.
+Production nonce tombstones remain immutable. Synthetic fixture teardown uses
+the suite's existing transaction-local replication-role bypass, deletes only
+exact nonce generation IDs and local key IDs captured by this test process,
+asserts zero residue, and restores normal enforcement at transaction end.
+The dedicated database is additionally dropped after acceptance. No production
+retention/rollback API or immutable constraint is changed.
+
 ## Preserved Boundaries
 
 No standard-startup local provider selection, flags, dispatch, deployment,
