@@ -699,7 +699,9 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   fields: [
     field('projectNo', 'Project No', 'string', 'plm_system', { required: true, labelZh: '项目号' }),
     field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true, labelZh: '唯一键' }),
-    field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true, labelZh: '部件源ID' }),
+    // 规格 P(owner 2026-09-15):PLM 物料ID / BOM 路径 / 组件规格 三个中文名只影响**新装**的建表名 —— labelZh
+    // 只在 pickTemplateLabel 建表那一刻被读,从不当改名用;既有安装(222)按现有名字不动。
+    field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true, labelZh: 'PLM 物料ID' }),
     field('parentSourceId', 'Parent Source ID', 'string', 'plm_system', { labelZh: '父件源ID' }),
     // 父组件图号 / 父组件名称. The WORKING SHEET has always denormalized the PLM columns a human
     // needs in front of their eyes (图号/名称/材料/总用量 below); the parent was the exception —
@@ -719,15 +721,21 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // `ext_` extension ids are governed as a DISJOINT namespace whose suffix may never equal a
     // frozen template field id (stock-preparation-extension-namespace.cjs, FIELD_ID_TEMPLATE_
     // COLLISION — the rule exists precisely for "a NEW frozen template field added under the same
-    // bare name"). Until today these three columns reached the sheet ONLY as pack columns, and the
-    // shipped pack owns `ext_parentDrawingNo`, `ext_parentName` and `ext_spec`
-    // (lib/customer-packs/factory-a.rehearsal.cjs). Freezing `parentName` or `spec` would make
-    // every install carrying that pack fail its own pack validation. So the ids follow the main
+    // bare name"). When these three columns were added they reached the sheet ONLY as pack columns,
+    // and the pack of that day owned `ext_parentDrawingNo`, `ext_parentName` and `ext_spec`
+    // (lib/customer-packs/factory-a.rehearsal.cjs; the parent pair was retired from the pack on
+    // 2026-09-15, but it stays INSTALLED on existing deployments). Freezing `parentName` or `spec`
+    // would make every install carrying those columns fail its own pack validation. So the ids follow the main
     // table's OWN vocabulary instead — `componentCode` is 图号 here, therefore 父组件图号 is
     // `parentComponentCode` — which collides with nothing and reads as a first-class column.
+    //
+    // 正本(owner 2026-09-15 裁决「留模板对,改中文名,备料包去掉那一对,导出改读模板对」):这两列是
+    // 父组件图号 / 父组件名称 的唯一持有者。客户包曾另声明一对同名派生副本(`ext_parentDrawingNo` /
+    // `ext_parentName`,F1c-b,由规划器从这两列抄值),现已从包声明、规划器派生与导出读侧一起撤掉。
+    // 既有安装上那两列与其值原样保留(受管字段守卫也不允许删),只是不再有写手。
     field('parentComponentCode', 'Parent Component Code', 'string', 'plm_system', { labelZh: '父组件图号' }),
     field('parentComponentName', 'Parent Component Name', 'string', 'plm_system', { labelZh: '父组件名称' }),
-    field('path', 'BOM Path', 'string', 'plm_system', { required: true, labelZh: 'BOM路径' }),
+    field('path', 'BOM Path', 'string', 'plm_system', { required: true, labelZh: 'BOM 路径' }),
     field('depth', 'BOM Depth', 'number', 'plm_system', { labelZh: 'BOM层级' }),
     // 图号, deliberately NOT a translation of "Component Code". The customer's own
     // PLM calls this column `IdentityNo` 图号 and the legacy 备料 system used the
@@ -741,7 +749,9 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // from (readPlan.part.specField, absent by default — stock-preparation-bom-expansion.cjs).
     // A deployment that declares no spec column persists no spec: an empty column, never a
     // guessed source column.
-    field('componentSpec', 'Component Specification', 'string', 'plm_system', { labelZh: '规格' }),
+    // labelZh 「组件规格」 而不是 「规格」(owner 2026-09-15):导出表头仍是 规格(prep-line-export 自己的
+    // label,不读这里);模板列名与客户包 `ext_spec` 的 「规格」 不再同名,新装的表两列分得开。
+    field('componentSpec', 'Component Specification', 'string', 'plm_system', { labelZh: '组件规格' }),
     field('material', 'Material', 'string', 'plm_system', { labelZh: '材料' }),
     field('sourceVersion', 'PLM Source Version', 'string', 'plm_system', { labelZh: '源版本' }),
     field('rawQuantity', 'Raw Quantity', 'number', 'plm_system', { labelZh: '单层用量' }),
@@ -868,17 +878,16 @@ const STOCK_PREPARATION_FILL_VIEW_LABEL = Object.freeze({
 // The 12 plm_system columns the fill view hides — the exact set the customer pointed at.
 // Every id is asserted below to be a plm_system column of the frozen main template, so this
 // list can never hide a human-owned column (the band a person fills) by a typo or a rename.
-// F1c 看过这张清单,并且**没有**往里加 `parentComponentCode` / `parentComponentName` /
-// `componentSpec` —— 理由记在这里,免得下一个人以为是漏了:
-//   * 客户包装了 父组件图号 / 父组件名称 / 规格 三个同义 ext_ 列,222 上两套并存确实重复;但这张
-//     清单是**全局常量**,对没装包的部署一样生效。把模板的 规格/父组件名称 藏掉,在无包部署上就是
-//     把那两列**彻底藏了**(包列根本不存在),填表的人再也看不到规格。
+// `parentComponentCode` / `parentComponentName` / `componentSpec` 不在这张清单里,而且不该在:
+//   * 它们是填表人要看的列(父组件图号 / 父组件名称 / 组件规格),这张清单是**全局常量**,藏了就是
+//     对所有部署都藏。
 //   * `parentComponentCode` 更是藏不得:这张视图按它分组、按它排序,`assertFillViewContract` 明文
-//     拒绝「排序/分组用一列却把它藏起来」。为了藏它去放宽那条守卫,是把守卫改松。
-//   结论(替 owner 定,写进 PR):**只在装了包的部署上**才该藏,而藏的判断需要「这张表到底装了哪些
-//   列」这条信息 —— 视图描述符今天拿不到(它只有 provisioning.getFieldId,那是个纯算法,不回答
-//   「存在与否」)。所以 F1c 先把包列的值补上(那才是它们空着的真正原因),藏列留给能读到已装字段
-//   的那一版做。
+//     拒绝「排序/分组用一列却把它藏起来」。
+//   历史:F1c 时客户包另装着一对同名派生副本(`ext_parentDrawingNo` / `ext_parentName`),222 上两套
+//   并存确实重复;当时替 owner 定的口径是「只在装了包的部署上藏包列」,而视图描述符读不到已装字段,
+//   所以没动。owner 2026-09-15 裁决走了另一条路:**留模板对做正本,包不再声明那一对副本**(声明、
+//   规划器派生、导出读侧一起撤),于是这里没有东西要藏;既有安装上那两列由运维在 All Records 视图
+//   里隐藏,不归这张清单管(它只能点名模板 id,`ensureStockPreparationFillView` 会拒掉 ext_ id)。
 const STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS = Object.freeze([
   'idempotencyKey',
   'componentSourceId',

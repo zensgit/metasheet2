@@ -17,6 +17,7 @@ const DENIED_KEYS = [
   'canComment',
   'canManageAutomation',
   'canSendNotification',
+  'canSubmitApproval',
 ] as const
 
 function identityDigest(value: string): string {

@@ -381,6 +381,44 @@
                   <span class="meta-rule-editor__action-summary" data-field="actionSummary">{{ actionSummaries[idx] }}</span>
                 </template>
 
+            <!-- #5739 泛化 round-2: the cross-base target triple is not authored here but IS preserved on
+                 save, so the screen must say so — otherwise the delete warning ("the trigger record in this
+                 table") is simply false for such a rule. An incomplete triple is called out too: the
+                 backend rejects it at save (400) and the executor fails the step at run.
+                 #5756 follow-up: create_record opts in with `targetBaseId` ALONE (its target sheet is
+                 `sheetId`, there is no target record), so it renders the same banner with create-shaped
+                 copy, and its target-sheet dropdown below is SCOPED to the declared base.
+                 round-3: that copy no longer promises "creates in ANOTHER base" / "the run fails". The
+                 executor picks the destination from the target SHEET, not from this declaration
+                 (executeCreateRecord -> evaluateCrossBaseWriteGate returns `{crossBase:false}` as soon as
+                 the target sheet's REAL base equals the trigger base, before the claim is ever compared),
+                 so a blank/local sheet id creates the record HERE and the step succeeds - pinned by the
+                 integration test XW-3b (same-base create carrying targetBaseId, actor with base-write
+                 nowhere, asserts success). -->
+            <div
+              v-if="crossBaseTargets[action.draftId]"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="crossBaseTarget"
+            >
+              <div v-if="crossBaseTargets[action.draftId].kind === 'create'">{{ automationLabel('actionConfig.crossBaseCreateTargetWarning', isZh) }}</div>
+              <div v-else>{{ automationLabel('actionConfig.crossBaseTargetWarning', isZh) }}</div>
+              <div v-if="crossBaseTargets[action.draftId].kind === 'create'" data-field="crossBaseTargetIds">
+                targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
+                sheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }}
+              </div>
+              <div v-else data-field="crossBaseTargetIds">
+                targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
+                targetSheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }} ·
+                targetRecordId: {{ crossBaseTargets[action.draftId].targetRecordId || '—' }}
+              </div>
+              <div
+                v-if="crossBaseTargetIncomplete(crossBaseTargets[action.draftId])"
+                data-field="crossBaseTargetIncomplete"
+              >
+                {{ automationLabel(crossBaseTargets[action.draftId].kind === 'create' ? 'actionConfig.crossBaseCreateTargetIncomplete' : 'actionConfig.crossBaseTargetIncomplete', isZh) }}
+              </div>
+            </div>
+
             <!-- update_record config -->
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
@@ -402,8 +440,25 @@
                    may omit cross-base/future sheets (isManualTargetSheetEntry defaults to manual when
                    the currently-configured id isn't in the fetched list, so a stale/foreign value is
                    never silently hidden). A missing/failed/empty listSheets() falls all the way back
-                   to the plain text input in the v-else branch below. -->
-              <template v-if="targetSheetOptions.length > 0">
+                   to the plain text input in the v-else branch below.
+                   #5756 follow-up (round-3): the REQUEST is not scoped to `targetBaseId` - client.listSheets()
+                   takes no baseId and GET /api/multitable/sheets returns every readable sheet across bases -
+                   but every row carries `baseId` (univer-meta.ts GET /sheets; MetaSheet.baseId); only
+                   automationTargetSheetOptions drops it. So for a create that declares `targetBaseId` the
+                   list is SCOPED to that base here (targetSheetOptionsFor) rather than taken away: every
+                   offered option is provably inside the declared base, and a declaration equal to THIS base
+                   - a legal same-base shape the backend explicitly supports (XW-3b) - keeps its ordinary
+                   picker instead of losing the control. When no readable sheet is in that base the scoped
+                   list is empty and the field degrades to the v-else free-text input below, which stays the
+                   only way to author an id you cannot see; the hint states the scoping in both states. -->
+              <div
+                v-if="crossBaseTargets[action.draftId]"
+                class="meta-rule-editor__hint"
+                data-field="createRecordCrossBaseSheetHint"
+              >
+                {{ automationLabel('actionConfig.crossBaseCreateSheetScoped', isZh) }}
+              </div>
+              <template v-if="targetSheetOptionsFor(action).length > 0">
                 <el-select
                   v-if="!isManualTargetSheetEntry(action)"
                   v-model="(action.config.targetSheetId as string)"
@@ -413,7 +468,7 @@
                   data-field="createRecordTargetSheetId"
                 >
                   <el-option value="" data-value="" :label="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
-                  <el-option v-for="opt in targetSheetOptions" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
+                  <el-option v-for="opt in targetSheetOptionsFor(action)" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
                 </el-select>
                 <el-input
                   v-else
@@ -636,6 +691,50 @@
                 <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
                 <el-option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
               </el-select>
+
+              <!-- #5742. The 非通过结果也写回 checkbox is shown whenever ANY writeback field is mapped: it gates
+                   the WHOLE backwrite (approver/completedAt included, automation-service writeApprovalResultBack),
+                   so hiding it behind the status picker would leave a live key the author cannot see or edit.
+                   The 审批结果 → 写入值 rows need a status field — that is the only field the mapping applies to.
+                   An empty row keeps the legacy behaviour — the RAW outcome literal. -->
+              <div v-if="resultWritebackAnyFieldSelected(action)" class="meta-rule-editor__writeback-outcomes" data-field="resultWritebackOutcomeValues">
+                <el-checkbox
+                  class="meta-rule-editor__toggle-label"
+                  data-field="resultWritebackOnNonApproved"
+                  :model-value="action.config.resultWritebackOnNonApproved === true"
+                  @change="setResultWritebackOnNonApproved(action, $event === true)"
+                >
+                  {{ automationLabel('resultWriteback.onNonApproved', isZh) }}
+                </el-checkbox>
+                <template v-if="resultWritebackStatusFieldSelected(action)">
+                <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.outcomeValuesTitle', isZh) }}</label>
+                <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.outcomeValuesHint', isZh) }}</div>
+                <div v-for="outcome in resultWritebackOutcomeRows(action)" :key="outcome" class="meta-rule-editor__field-pair">
+                  <span class="meta-rule-editor__preset-label">{{ automationResultWritebackOutcomeLabel(outcome, isZh) }}</span>
+                  <el-select
+                    v-if="resultWritebackStatusIsSelect(action)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    :model-value="resultWritebackOutcomeValue(action, outcome)"
+                    :placeholder="resultWritebackRawOutcomeLabel(outcome)"
+                    :data-field="`resultWritebackOutcomeValue-${outcome}`"
+                    @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
+                  >
+                    <el-option value="" data-value="" :label="resultWritebackRawOutcomeLabel(outcome)" />
+                    <el-option v-for="opt in resultWritebackOutcomeOptions(action, outcome)" :key="opt.value" :value="opt.value" :data-value="opt.value" :data-marked="opt.marked || undefined" :label="opt.label" />
+                  </el-select>
+                  <el-input
+                    v-else
+                    class="meta-rule-editor__input--sm"
+                    type="text"
+                    :model-value="resultWritebackOutcomeValue(action, outcome)"
+                    :placeholder="resultWritebackRawOutcomeLabel(outcome)"
+                    :data-field="`resultWritebackOutcomeValue-${outcome}`"
+                    @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
+                  />
+                </div>
+                </template>
+              </div>
+
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.approverField', isZh) }}</label>
               <el-select v-model="action.config.resultWritebackApproverField" class="meta-rule-editor__select" :placeholder="automationLabel('resultWriteback.none', isZh)" data-field="resultWritebackApproverField">
                 <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
@@ -1272,10 +1371,12 @@
               </el-checkbox>
             </div>
 
-            <!-- delete_record config (T0-3): same-base trigger-record only; acknowledgement is UI-only. -->
+            <!-- delete_record config (T0-3): authors the same-base trigger-record delete; acknowledgement is
+                 UI-only. A config LOADED with the cross-base triple keeps it (#5739 泛化) and switches the
+                 warning + ack to the cross-base wording, with the ack re-asked. -->
             <div v-if="action.type === 'delete_record'" class="meta-rule-editor__action-config" data-action-config="delete_record">
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="deleteRecordWarning">
-                {{ automationLabel('actionConfig.deleteRecordWarning', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId] ? 'actionConfig.deleteRecordWarningCrossBase' : 'actionConfig.deleteRecordWarning', isZh) }}
               </div>
               <el-checkbox
                 class="meta-rule-editor__toggle-label"
@@ -1283,7 +1384,7 @@
                 :model-value="isDeleteRecordAcknowledged(action)"
                 @change="setDeleteRecordAcknowledged(action, $event === true)"
               >
-                {{ automationLabel('actionConfig.deleteRecordAck', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId] ? 'actionConfig.deleteRecordAckCrossBase' : 'actionConfig.deleteRecordAck', isZh) }}
               </el-checkbox>
             </div>
 
@@ -1693,8 +1794,12 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationResultWritebackOptionMissingMessage,
+  automationResultWritebackOutcomeLabel,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
+  AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
+  type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
 import {
   type BranchActionDraft,
@@ -1719,16 +1824,29 @@ import {
   computeSaveBlockReasons,
   type SaveBlockActionSnapshot,
   type SaveBlockReason,
+  type StartApprovalOutcomeValueBlock,
 } from '../automationSaveBlockReasons'
 import {
   summarizeAutomationAction,
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
-import { automationTargetSheetOptions } from '../utils/automation-target-sheet-options'
+import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
 
 interface FieldPair {
   fieldId: string
   value: string
+  // #5739 泛化 round-2 — the RAW loaded value plus the row identity it was parsed from.
+  // `update_record.fields` / `create_record.data` are `Record<string, unknown>` server-side
+  // (automation-actions.ts), and the backend's own legacy fold writes a `null` into `fields`
+  // (automation-service.ts normalizeLegacyActionPair), but this editor's value control is a plain text
+  // box. Re-deriving the saved value from that text rewrote 42 → "42", false → "false", null → "" and
+  // ["a","b"] → "a,b" on a load → save that changed NOTHING: the #4196 fingerprint hashes the RAW config,
+  // and "clear this cell" (null) silently became "write an empty string". So the raw value rides along and
+  // is re-emitted VERBATIM while the row is untouched (same fieldId AND same text); the moment the author
+  // edits either, the text box becomes authoritative and the value is the string they see.
+  rawFieldId?: string
+  rawText?: string
+  rawValue?: unknown
 }
 
 type DraftActionConfig = Record<string, unknown> & {
@@ -1755,10 +1873,17 @@ type DraftActionConfig = Record<string, unknown> & {
   bodyTemplate?: string
   publicFormViewId?: string
   internalViewId?: string
+  // (#5739 泛化) The raw-config snapshot that used to live here as `startApprovalOriginal` now lives on
+  // DraftAction.originalConfig — one field for EVERY action type, and outside `config` so the passthrough
+  // branch of buildPayload cannot leak it into a saved config. See DraftAction below.
   // W7 start_approval result-writeback pickers (UI-only bindings; assembled into config.resultWriteback on save).
   resultWritebackStatusField?: string
   resultWritebackApproverField?: string
   resultWritebackCompletedAtField?: string
+  // #5742: 审批结果 → 写入值. Both are MODELLED now, so they OVERRIDE the preserved-original spread on save
+  // (clearing the checkbox must delete resultWriteback.onNonApproved, not silently re-emit the loaded true).
+  resultWritebackOnNonApproved?: boolean
+  resultWritebackOutcomeValues?: Record<string, string>
   locked?: boolean
   // A6-3-2a condition_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
   branches?: BranchDraft[]
@@ -1786,6 +1911,18 @@ interface DraftAction {
   type: AutomationActionType
   config: DraftActionConfig
   persisted?: boolean
+  // #5739 泛化: the RAW persisted config of this action as loaded (deep-cloned), for EVERY action type.
+  // buildPayload rebuilds each action's config from THIS snapshot and overlays only the keys the UI owns
+  // (ACTION_OWNED_CONFIG_KEYS), so every key the backend accepts but this editor does not model — the
+  // cross-base triples on update/delete/lock/create, send_webhook headers/body/secret, wait_for_callback's
+  // `reason`, customer extension keys, anything a newer backend adds — survives an untouched load → save
+  // BYTE-IDENTICALLY. That matters beyond data loss: the #4196 action fingerprint hashes the RAW config, so
+  // a rebuild that silently drops keys makes an unrelated edit look like a config change.
+  // Lives on the ACTION, not inside `config`: the passthrough branch of buildPayload emits `action.config`
+  // as the saved config, so a snapshot stored there would be persisted as a config key of its own.
+  // `null` for a brand-new action and for one whose type the author just switched (the previous type's
+  // config must never bleed into the new type's payload).
+  originalConfig?: Record<string, unknown> | null
 }
 
 interface Draft {
@@ -1864,12 +2001,34 @@ const targetSheetOptions = computed(() => automationTargetSheetOptions(available
 // is always visible/editable rather than silently swallowed by a dropdown that can't represent it.
 const manualTargetSheetOverride = ref<Record<string, boolean>>({})
 
+/**
+ * The target-sheet options for ONE create_record action. Default: the whole readable-sheet roster
+ * (unchanged G-B2-27 behaviour). #5756 follow-up round-3 - when the action declares `targetBaseId`, the
+ * roster is SCOPED to that base: GET /api/multitable/sheets returns sheets from every base the author can
+ * read, but each row carries `baseId`, which `automationTargetSheetOptions` drops. Scoping here makes an
+ * offered option provably inside the declared base (a pick cannot silently address a different one)
+ * WITHOUT withholding the control from the legal `targetBaseId == this base` shape (XW-3b). Rows with no
+ * baseId (legacy/null) are excluded rather than assumed local: unprovable is not the same as local. An
+ * empty result degrades the field to the free-text input below - the only way to author an id you cannot
+ * see. Hoisted `function` (not a computed) so it can call the equally hoisted crossBaseTargetOf without a
+ * TDZ on the consts declared further down.
+ */
+function targetSheetOptionsFor(action: DraftAction): AutomationTargetSheetOption[] {
+  const target = crossBaseTargetOf(action)
+  if (!target || target.kind !== 'create') return targetSheetOptions.value
+  return automationTargetSheetOptions(
+    availableSheets.value.filter((sheet) => typeof sheet.baseId === 'string' && sheet.baseId.trim() === target.targetBaseId),
+  )
+}
+
 function isManualTargetSheetEntry(action: DraftAction): boolean {
   const override = manualTargetSheetOverride.value[action.draftId]
   if (override !== undefined) return override
   const current = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
   if (!current) return false
-  return !targetSheetOptions.value.some((opt) => opt.value === current)
+  // Against the SCOPED list for a cross-base create: an id that is not provably in the declared base
+  // must stay visible in the text box, not be swallowed by a dropdown that cannot represent it.
+  return !targetSheetOptionsFor(action).some((opt) => opt.value === current)
 }
 
 function toggleManualTargetSheetEntry(action: DraftAction) {
@@ -2036,8 +2195,12 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_person_message',
   // A-2b: approval card — recipient comes from the approval.task_created event, config is empty.
   'send_dingtalk_approval_card',
-  // T0-3: expose only the safe authoring shape — same-base trigger-record delete, config: {}.
-  // Cross-base delete remains backend/runtime-only and is not surfaced in this editor.
+  // T0-3: the editor AUTHORS only the safe shape — a same-base trigger-record delete; there are no
+  // cross-base target inputs here. #5739 泛化 changed what a SAVE does, not what it authors: a config
+  // loaded with the cross-base triple (targetBaseId/targetSheetId/targetRecordId) is now PRESERVED
+  // verbatim instead of being flattened to `{}` (flattening silently retargeted a foreign delete onto
+  // the local trigger record). Such an action renders the cross-base banner + the cross-base warning and
+  // ack wording, and its acknowledgement is NOT pre-checked — see crossBaseTargetOf().
   'delete_record',
   'wait_for_callback',
   'condition_branch',
@@ -2879,9 +3042,11 @@ function createDraftAction(
   type: AutomationActionType,
   config: DraftActionConfig = defaultConfigForActionType(type),
   persisted = false,
+  // #5739 泛化: raw loaded config snapshot; null for actions the author just added (nothing to preserve).
+  originalConfig: Record<string, unknown> | null = null,
 ): DraftAction {
   draftActionIdSequence += 1
-  return { draftId: `draft-action-${draftActionIdSequence}`, type, config, persisted }
+  return { draftId: `draft-action-${draftActionIdSequence}`, type, config, persisted, originalConfig }
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
@@ -2911,7 +3076,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : {}
     const fieldUpdates = Array.isArray(config.fieldUpdates)
       ? config.fieldUpdates
-      : Object.entries(fields).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+      : Object.entries(fields).map(([fieldId, value]) => fieldPairFromStored(fieldId, value))
     return { ...config, fieldUpdates }
   }
   if (type === 'create_record') {
@@ -2922,7 +3087,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : {}
     const fieldValues = Array.isArray(config.fieldValues)
       ? config.fieldValues
-      : Object.entries(data).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+      : Object.entries(data).map(([fieldId, value]) => fieldPairFromStored(fieldId, value))
     return {
       ...config,
       targetSheetId: typeof config.sheetId === 'string' ? config.sheetId : typeof config.targetSheetId === 'string' ? config.targetSheetId : '',
@@ -2956,6 +3121,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       resultWritebackStatusField: typeof writeback.statusField === 'string' ? writeback.statusField : '',
       resultWritebackApproverField: typeof writeback.approverField === 'string' ? writeback.approverField : '',
       resultWritebackCompletedAtField: typeof writeback.completedAtField === 'string' ? writeback.completedAtField : '',
+      // #5742: the non-approved opt-in and the outcome→value mapping are now edited by the UI.
+      resultWritebackOnNonApproved: writeback.onNonApproved === true,
+      resultWritebackOutcomeValues: readResultWritebackOutcomeValues(writeback.outcomeValues),
+      // (#5739 泛化) The loaded-config snapshot that the save rebuild spreads back is no longer stored here:
+      // `draftActionFromStored` puts it on DraftAction.originalConfig for every action type.
     }
   }
   if (type === 'send_dingtalk_group_message') {
@@ -3037,7 +3207,16 @@ function normalizeLegacyEditorAction(
 
 function draftActionFromStored(type: AutomationActionType, config: Record<string, unknown> | null | undefined): DraftAction {
   const normalized = normalizeLegacyEditorAction(type, config)
-  return createDraftAction(normalized.type, draftConfigFromAction(normalized.type, normalized.config), true)
+  return createDraftAction(
+    normalized.type,
+    draftConfigFromAction(normalized.type, normalized.config),
+    true,
+    // #5739 泛化: snapshot the config BEFORE the per-type draft overlay — `draftConfigFromAction` returns
+    // `{ ...config, <UI-only draft keys> }` for most types, so the draft config is NOT a clean original.
+    // Taken from the NORMALIZED config so a folded v0 alias (notify / update_field) preserves the keys of
+    // the shape the editor actually renders.
+    cloneRawActionConfig(normalized.config),
+  )
 }
 
 function draftFromRule(rule: AutomationRule): Draft {
@@ -3419,7 +3598,13 @@ async function requestClose(): Promise<void> {
 function resetDeleteRecordAcknowledgements(): void {
   const next: Record<string, boolean> = {}
   for (const action of draft.value.actions) {
-    if (action.type === 'delete_record') next[action.draftId] = action.persisted === true
+    // #5739 泛化 round-2: a persisted same-base delete keeps its acknowledgement (the author already
+    // confirmed exactly this action). A CROSS-BASE delete does not: the confirmation the author gave was
+    // for "the trigger record in this table" — the wording this screen showed while the triple was being
+    // dropped on save — so it must be re-asked against the cross-base wording before the rule can be saved.
+    if (action.type === 'delete_record') {
+      next[action.draftId] = action.persisted === true && !crossBaseTargetOf(action)
+    }
   }
   deleteRecordAcknowledgements.value = next
 }
@@ -3441,6 +3626,71 @@ function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): voi
 // that can be unit-tested without this 3000+ line component. The parsing calls themselves
 // (parseGroupDestinationIds etc.) stay here unchanged: this is exactly what canSave read before,
 // just captured instead of immediately branching on it.
+// #5739 泛化 round-2 — the T3-5 cross-base target triple. update_record / delete_record / lock_record may
+// carry `targetBaseId` (+ the required `targetSheetId`/`targetRecordId`) to mutate a record in ANOTHER base
+// (automation-actions.ts, gated by automation-service.ts validateCrossBaseWriteConfig and re-checked per run
+// by the executor write-gate). This editor authors none of the three and preserves all three on save, so it
+// must at least TELL the author the action leaves this table — the delete warning/ack text is otherwise a
+// false statement, and an incomplete triple would arrive as an opaque 400.
+// #5756 follow-up — create_record is the FOURTH cross-base writer and it opts in with `targetBaseId`
+// ALONE: automation-actions.ts CreateRecordConfig types no targetSheetId/targetRecordId siblings (the
+// target sheet is its own `sheetId`, and there is no target record — the run creates one), and
+// automation-service.ts validateCrossBaseWriteConfig lists only update/delete/lock, so the server saves
+// `targetBaseId` without demanding anything else. `kind` keeps the two shapes apart everywhere the
+// mutate wording would be false for a create (no record id, and the sheet id IS editable on this screen).
+interface CrossBaseTarget {
+  kind: 'mutate' | 'create'
+  targetBaseId: string
+  targetSheetId: string
+  /** Always '' for kind === 'create': the record does not exist yet. */
+  targetRecordId: string
+}
+
+/**
+ * The cross-base target of a LOADED action config, or null for a same-base / newly authored action.
+ * Deliberately a hoisted function over a literal list (NOT a module-level `const Set`): the immediate
+ * `props.rule` watcher calls this through resetDeleteRecordAcknowledgements during setup, i.e. before a
+ * const declared further down would be initialized (TDZ ReferenceError, caught the first time by the
+ * "pre-checks the destructive acknowledgement" spec).
+ */
+function crossBaseTargetOf(action: DraftAction): CrossBaseTarget | null {
+  const isMutate = action.type === 'update_record' || action.type === 'delete_record' || action.type === 'lock_record'
+  if (!isMutate && action.type !== 'create_record') return null
+  const config = isPlainRecord(action.originalConfig) ? action.originalConfig : null
+  if (!config) return null
+  const text = (key: string): string => (typeof config[key] === 'string' ? (config[key] as string).trim() : '')
+  const targetBaseId = text('targetBaseId')
+  if (!targetBaseId) return null
+  if (!isMutate) {
+    // create_record: the target sheet is `sheetId` (CreateRecordConfig.sheetId), which the draft loads
+    // into `config.targetSheetId` (see draftConfigFromAction) and this editor DOES author — so read
+    // the LIVE draft value, not the loaded one, or the banner would keep quoting a sheet id the author
+    // just replaced. targetBaseId itself is unauthorable here and stays read from originalConfig.
+    const draftSheetId = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
+    return { kind: 'create', targetBaseId, targetSheetId: draftSheetId, targetRecordId: '' }
+  }
+  return { kind: 'mutate', targetBaseId, targetSheetId: text('targetSheetId'), targetRecordId: text('targetRecordId') }
+}
+
+/**
+ * Is the cross-base target missing an id the RUN needs? The mutate triple needs both siblings (and the
+ * server 400s without them); a create needs only the target sheet id (the server accepts it either way —
+ * see the 'actionConfig.crossBaseCreateTargetIncomplete' copy for what the run does instead).
+ */
+function crossBaseTargetIncomplete(target: CrossBaseTarget): boolean {
+  if (target.kind === 'create') return !target.targetSheetId
+  return !target.targetSheetId || !target.targetRecordId
+}
+
+const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
+  const out: Record<string, CrossBaseTarget> = {}
+  for (const action of draft.value.actions) {
+    const target = crossBaseTargetOf(action)
+    if (target) out[action.draftId] = target
+  }
+  return out
+})
+
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   return draft.value.actions.map((action, index) => {
     const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
@@ -3486,6 +3736,13 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
     if (action.type === 'delete_record') {
       snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
     }
+    const crossBaseTarget = crossBaseTargetOf(action)
+    // Only the MUTATE triple is a SAVE blocker. computeSaveBlockReasons blocks on "targetBaseId without
+    // BOTH siblings" because automation-service.ts validateCrossBaseWriteConfig 400s exactly that shape —
+    // and that validator skips create_record, so a cross-base create (targetBaseId alone, no targetRecordId
+    // ever) saves fine on the server. Handing it to the save gate would make such a rule permanently
+    // unsavable in this editor; the create case is surfaced by the banner instead (#5756 follow-up).
+    if (crossBaseTarget && crossBaseTarget.kind === 'mutate') snapshot.crossBaseTarget = crossBaseTarget
     if (action.type === 'write_approval_form_values') {
       snapshot.fwbWriteback = {
         mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
@@ -3667,6 +3924,8 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     conditionsComplete: draft.value.conditions.conditions.every(areConditionsComplete),
     firstIncompleteConditionAnchor: firstIncompleteConditionAnchor.value,
     actions: saveBlockActionSnapshots.value,
+    // #5742: client mirror of the backend select-option check on the approval-result writeback.
+    startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
   })
 })
 
@@ -3737,6 +3996,30 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+/**
+ * #5739 泛化 round-2: one editable row for a stored `fields` / `data` entry. The row SHOWS the value as
+ * text (this editor has no typed value control), but remembers what was actually stored so an untouched
+ * row saves back exactly that — see the FieldPair comment for why the stringification is lossy.
+ */
+function fieldPairFromStored(fieldId: string, value: unknown): FieldPair {
+  const text = String(value ?? '')
+  return { fieldId, value: text, rawFieldId: fieldId, rawText: text, rawValue: value }
+}
+
+/**
+ * The value one row contributes to the saved config: the RAW loaded value while the row is UNTOUCHED
+ * (same fieldId, same text as loaded), otherwise the text the author typed. Rows the author added have no
+ * raw value and always save as text, exactly as before.
+ */
+function savedFieldPairValue(pair: Record<string, unknown>, fieldId: string): unknown {
+  const rawText = typeof pair.rawText === 'string' ? pair.rawText : null
+  const rawFieldId = typeof pair.rawFieldId === 'string' ? pair.rawFieldId : null
+  if (rawText !== null && rawFieldId === fieldId && pair.value === rawText && pair.rawValue !== undefined) {
+    return pair.rawValue
+  }
+  return pair.value ?? ''
+}
+
 function fieldPairsToRecord(value: unknown): Record<string, unknown> {
   if (!Array.isArray(value)) return {}
   const fields: Record<string, unknown> = {}
@@ -3744,7 +4027,7 @@ function fieldPairsToRecord(value: unknown): Record<string, unknown> {
     if (!isPlainRecord(pair)) continue
     const fieldId = typeof pair.fieldId === 'string' ? pair.fieldId.trim() : ''
     if (!fieldId) continue
-    fields[fieldId] = pair.value ?? ''
+    fields[fieldId] = savedFieldPairValue(pair, fieldId)
   }
   return fields
 }
@@ -4459,6 +4742,10 @@ function onDraftActionTypeChange(action: DraftAction) {
   advanceFwbConfirmationGeneration(action.draftId)
   action.config = defaultConfigForActionType(action.type)
   action.persisted = false
+  // #5739 泛化: the raw-config snapshot belongs to the type it was LOADED as. Switching the type must drop
+  // it, or buildPayload's preserve-unmodelled-keys spread would carry the old type's keys (an update_record
+  // cross-base triple, a webhook secret, …) into a config of a completely different action type.
+  action.originalConfig = null
   // G-B2-25: a type change clears any manual collapse override so isActionExpanded() falls back
   // to its persisted-based default — which just went false, so the card re-expands to show the
   // (now empty) config for the newly-picked type instead of staying collapsed on stale text.
@@ -4498,6 +4785,40 @@ function addFieldUpdate(action: DraftAction) {
 
 function removeFieldUpdate(action: DraftAction, idx: number) {
   ;(action.config.fieldUpdates as FieldPair[]).splice(idx, 1)
+}
+
+// #5739 泛化 (was cloneStartApprovalOriginal, start_approval only): deep-clone an action config as LOADED so
+// the save-time rebuild can spread it back without aliasing — later draft edits must not mutate the snapshot,
+// and two saves in a row must produce two independent objects. No key filtering happens here: the UI-only
+// draft keys a legacy rule may carry are removed at SAVE time by that type's ACTION_OWNED_CONFIG_KEYS entry,
+// which is the single place the owned/unowned split is declared.
+// (A function DECLARATION, not a const: it runs from the `rule` watcher's immediate pass, which fires before
+// later top-level consts in <script setup> are initialized.)
+function cloneRawActionConfig(config: unknown): Record<string, unknown> {
+  if (!isPlainRecord(config)) return {}
+  const clone: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config)) {
+    clone[key] = value === null || typeof value !== 'object' ? value : JSON.parse(JSON.stringify(value))
+  }
+  return clone
+}
+
+// #5742: read the persisted `resultWriteback.outcomeValues` into the editable draft object. Only the four
+// known outcomes with non-empty string values are taken — an unknown key would be rejected by the backend
+// validator anyway, so carrying it into the picker model would build an unsaveable draft. (A function
+// DECLARATION, like cloneStartApprovalOriginal above: this runs from the `rule` watcher's immediate pass,
+// before later top-level consts in <script setup> are initialized.)
+function readResultWritebackOutcomeValues(raw: unknown): Record<string, string> {
+  const source = isPlainRecord(raw) ? raw : {}
+  const values: Record<string, string> = {}
+  for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+    const value = source[outcome]
+    // TRIMMED on the way in, exactly as the save trims on the way out and as the backend resolver trims
+    // before writing/validating — one canonical form for the draft, the picker options, the blocker and the
+    // payload, so a stored ' 已通过 ' does not render an unmatched el-select modelValue.
+    if (typeof value === 'string' && value.trim()) values[outcome] = value.trim()
+  }
+  return values
 }
 
 // start_approval: formDataMapping rows reuse the FieldPair shape (fieldId = the approval-form field key,
@@ -4548,6 +4869,167 @@ function resultWritebackFieldOptions(
   return options
 }
 
+// ── #5742 审批结果 → 写入值 ────────────────────────────────────────────────────────────────────────
+// The optional declared outcome → written-value mapping (`resultWriteback.outcomeValues`). Same posture as
+// the pickers above: the editor AUTHORS it, the backend validator is the authority. An empty row means the
+// RAW outcome literal is written, which is exactly what every rule saved before #5742 already does.
+type ResultWritebackOutcomeOption = { value: string; label: string; marked: boolean }
+
+function resultWritebackStatusFieldId(action: DraftAction): string {
+  return typeof action.config.resultWritebackStatusField === 'string'
+    ? action.config.resultWritebackStatusField.trim()
+    : ''
+}
+
+function resultWritebackStatusFieldSelected(action: DraftAction): boolean {
+  return resultWritebackStatusFieldId(action).length > 0
+}
+
+// Is ANY of the three writeback pickers filled? (Same condition as the save-time `hasMappedWritebackField`:
+// with none of them set the whole resultWriteback object is dropped, so nothing below it applies either.)
+function resultWritebackAnyFieldSelected(action: DraftAction): boolean {
+  return (['resultWritebackStatusField', 'resultWritebackApproverField', 'resultWritebackCompletedAtField'] as const)
+    .some((key) => typeof action.config[key] === 'string' && (action.config[key] as string).trim().length > 0)
+}
+
+// T3-5 cross-base target. The editor does not MODEL the triple, so it is read off the preserved original
+// config (#5724) — the same place an unedited load→save carries it from.
+const RESULT_WRITEBACK_TARGET_KEYS = ['targetBaseId', 'targetSheetId', 'targetRecordId'] as const
+
+function resultWritebackIsCrossBase(action: DraftAction): boolean {
+  const original = isPlainRecord(action.originalConfig) ? action.originalConfig : {}
+  const writeback = isPlainRecord(original.resultWriteback) ? original.resultWriteback : {}
+  return RESULT_WRITEBACK_TARGET_KEYS.some((key) => {
+    const value = writeback[key]
+    return typeof value === 'string' && value.trim().length > 0
+  })
+}
+
+function resultWritebackStatusField(action: DraftAction): AutomationRuleEditorField | undefined {
+  const id = resultWritebackStatusFieldId(action)
+  return id ? props.fields.find((field) => field.id === id) : undefined
+}
+
+function resultWritebackStatusIsSelect(action: DraftAction): boolean {
+  return resultWritebackStatusField(action)?.type === 'select'
+}
+
+// The declared option set of the chosen select status field. Read from `options` (the shape this editor's
+// `fields` prop uses) with a `property.options` fallback (the raw field-property shape). An UNKNOWN option
+// set (neither present) returns [] — callers treat that as "cannot judge", never as "no options".
+function resultWritebackStatusOptions(action: DraftAction): ResultWritebackOutcomeOption[] {
+  const field = resultWritebackStatusField(action)
+  if (!field || field.type !== 'select') return []
+  const property = field.property as { options?: unknown } | undefined
+  const raw = Array.isArray(field.options)
+    ? (field.options as unknown[])
+    : Array.isArray(property?.options)
+      ? (property?.options as unknown[])
+      : []
+  const options: ResultWritebackOutcomeOption[] = []
+  for (const item of raw) {
+    if (!isPlainRecord(item)) continue
+    const value = item.value
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    const text = String(value)
+    if (!text) continue
+    const label = typeof item.label === 'string' && item.label ? item.label : text
+    options.push({ value: text, label, marked: false })
+  }
+  return options
+}
+
+function resultWritebackOutcomeOptions(action: DraftAction, outcome: string): ResultWritebackOutcomeOption[] {
+  const options = resultWritebackStatusOptions(action)
+  const current = resultWritebackOutcomeValue(action, outcome).trim()
+  if (current && !options.some((option) => option.value === current)) {
+    // Same P2 rule as resultWritebackFieldOptions: a configured value that is not (or no longer) an option
+    // is appended as a MARKED option so the picker never renders empty and an unedited save carries it back.
+    // NOTE the marker key: this entry is a written VALUE, so it uses 'markUnknownOption' ("not an option"),
+    // NOT the field pickers' 'markUnknown' ("unknown field") — that one would mislabel a value as a field.
+    const marker = automationLabel('resultWriteback.markUnknownOption', isZh.value)
+    options.push({
+      value: current,
+      label: isZh.value ? `${current}（${marker}）` : `${current} (${marker})`,
+      marked: true,
+    })
+  }
+  return options
+}
+
+function resultWritebackOutcomeRows(action: DraftAction): AutomationResultWritebackOutcome[] {
+  return action.config.resultWritebackOnNonApproved === true
+    ? [...AUTOMATION_RESULT_WRITEBACK_OUTCOMES]
+    : ['approved']
+}
+
+function resultWritebackRawOutcomeLabel(outcome: string): string {
+  return `${automationLabel('resultWriteback.rawValuePrefix', isZh.value)} ${outcome}`
+}
+
+function resultWritebackOutcomeValue(action: DraftAction, outcome: string): string {
+  const values = action.config.resultWritebackOutcomeValues
+  const value = isPlainRecord(values) ? values[outcome] : undefined
+  return typeof value === 'string' ? value : ''
+}
+
+function setResultWritebackOutcomeValue(action: DraftAction, outcome: string, raw: unknown): void {
+  const next: Record<string, string> = { ...(action.config.resultWritebackOutcomeValues ?? {}) }
+  const value = typeof raw === 'string' ? raw : ''
+  // Empty ⇒ REMOVE the entry (the row then means "write the raw outcome"), never persist an empty string —
+  // the backend rejects one and the resolver would fall back to the raw outcome anyway.
+  if (value.trim()) next[outcome] = value
+  else delete next[outcome]
+  action.config.resultWritebackOutcomeValues = next
+}
+
+function setResultWritebackOnNonApproved(action: DraftAction, value: boolean): void {
+  action.config.resultWritebackOnNonApproved = value
+}
+
+/**
+ * Client mirror of the backend select-option check (resultWritebackFieldTypeError): if the status field is a
+ * select and the value that WOULD be written for an outcome is not one of its options, the save is blocked
+ * with an actionable message instead of a server 400.
+ *
+ * Scope, stated plainly: only 'approved' (always) and 'rejected' (when 非通过结果也写回 is on) — the pair the
+ * backend checks at SAVE time (on createRule; updateRule does not run that gate at all, so on the edit path
+ * this blocker is a HINT that is strictly stronger than the server). 'revoked'/'cancelled' are authored here
+ * but only enforced at fire time. Two more cases are deliberately NOT blocked, because the server accepts
+ * them and a blocker the server disagrees with is an unfixable dead end:
+ *   - a select whose option set this editor does not know (no `options` on the field);
+ *   - a T3-5 CROSS-BASE writeback — its status field lives in the TARGET sheet, not in `props.fields`, and
+ *     the backend gate skips it for exactly that reason (assertResultWritebackFieldsAtSave →
+ *     `if (isCrossBaseWriteback(writeback)) continue`), deferring to the runtime cross-base check.
+ */
+const resultWritebackOutcomeBlocks = computed<StartApprovalOutcomeValueBlock[]>(() => {
+  const blocks: StartApprovalOutcomeValueBlock[] = []
+  for (const [index, action] of draft.value.actions.entries()) {
+    if (action.type !== 'start_approval') continue
+    if (resultWritebackIsCrossBase(action)) continue
+    const field = resultWritebackStatusField(action)
+    if (!field || field.type !== 'select') continue
+    const optionValues = resultWritebackStatusOptions(action).map((option) => option.value)
+    if (optionValues.length === 0) continue
+    const outcomes: AutomationResultWritebackOutcome[] = action.config.resultWritebackOnNonApproved === true
+      ? ['approved', 'rejected']
+      : ['approved']
+    for (const outcome of outcomes) {
+      const value = resultWritebackOutcomeValue(action, outcome).trim() || outcome
+      if (optionValues.includes(value)) continue
+      blocks.push({
+        actionIndex: index,
+        outcome,
+        message: automationResultWritebackOptionMissingMessage(
+          { fieldName: field.name, value, outcome },
+          isZh.value,
+        ),
+      })
+    }
+  }
+  return blocks
+})
+
 function addCreateFieldValue(action: DraftAction) {
   if (!Array.isArray(action.config.fieldValues)) action.config.fieldValues = []
   ;(action.config.fieldValues as FieldPair[]).push({ fieldId: '', value: '' })
@@ -4555,6 +5037,165 @@ function addCreateFieldValue(action: DraftAction) {
 
 function removeCreateFieldValue(action: DraftAction, idx: number) {
   ;(action.config.fieldValues as FieldPair[]).splice(idx, 1)
+}
+
+// #5739 泛化 — the ONE place that declares, per action type, which config keys this editor OWNS.
+//
+// "Owns" = buildPayload re-derives the key from the draft below. Everything else in the loaded config is
+// the backend's/another client's business and must pass through untouched: the cross-base triples
+// (targetBaseId/targetSheetId/targetRecordId on update_record/delete_record/lock_record, targetBaseId on
+// create_record), send_webhook headers/body/secret, wait_for_callback `reason`, customer extension keys,
+// and every key a newer backend adds before this editor learns to model it.
+//
+// Save-time semantics (buildActionConfigFromOriginal):
+//   1. start from a deep clone of the RAW loaded config (DraftAction.originalConfig);
+//   2. DELETE every owned key — so a key the UI cleared can never be resurrected from the original;
+//   3. overlay the values the UI produced, skipping `undefined` (= "the author cleared this" → stays absent).
+// An untouched load → save therefore round-trips byte-identically (the #4196 action fingerprint hashes the
+// RAW config, so an unrelated edit must not drift it), while clearing a modelled field still drops its key.
+//
+// Each list also contains that type's UI-ONLY draft mirrors (fieldUpdates / targetSheetId / userId /
+// userIdsText / recipientsText / …): a legacy or hand-authored rule may have them PERSISTED, and they must
+// not ride back out alongside the canonical key they were parsed into (that was the pre-#5739 behaviour and
+// several specs pin it).
+//
+// Types with NO entry are the passthrough types (send_webhook, lock_record, wait_for_callback,
+// send_dingtalk_approval_card, record_click): buildPayload has no rebuild branch for them, it emits the
+// draft config — which IS the loaded config plus the few keys the template writes in place — so they are
+// already lossless. write_approval_form_values runs the same pattern inside
+// fwbRuleAuthoring.ts::buildFwbActionConfigForSave (its own fwbPersistedRawConfig snapshot + explicit
+// delete of the keys create-mode must not resurrect).
+const ACTION_OWNED_CONFIG_KEYS: Partial<Record<AutomationActionType, readonly string[]>> = {
+  // `fieldId`/`value` are the v0 `update_field` pair that normalizeLegacyEditorAction FOLDS into `fields`
+  // (F9). The fold consumes them, so they are owned and dropped on save — re-emitting them would leave a
+  // stale duplicate of the same instruction the moment the author edits the row it was folded into.
+  update_record: ['fields', 'fieldUpdates', 'fieldId', 'value'],
+  create_record: ['sheetId', 'data', 'targetSheetId', 'fieldValues'],
+  // The destructive-acknowledgement checkbox is component state, never a config key → the UI owns NOTHING
+  // here and the save is a pure passthrough of whatever was loaded.
+  delete_record: [],
+  send_notification: ['userIds', 'message', 'userId'],
+  send_email: ['recipients', 'subjectTemplate', 'bodyTemplate', 'recipientsText'],
+  send_dingtalk_group_message: [
+    // `title` / `content` are the LEGACY aliases of titleTemplate / bodyTemplate: the backend promotes
+    // them into the modelled keys whenever those are blank (dingtalk-automation-link-validation.ts), so
+    // leaving them unowned would let a cleared title be re-published from the alias. The editor owns the
+    // message text → the aliases are consumed by the same rebuild (this is also the pre-#5739 behaviour).
+    'title',
+    'content',
+    'destinationId',
+    'destinationIds',
+    'destinationIdFieldPath',
+    'destinationIdFieldPaths',
+    'titleTemplate',
+    'bodyTemplate',
+    'publicFormViewId',
+    'internalViewId',
+    'destinationFieldPath',
+    'destinationPickerId',
+  ],
+  send_dingtalk_person_message: [
+    // See the group entry: legacy titleTemplate / bodyTemplate aliases, owned by the message-text UI.
+    'title',
+    'content',
+    'userIds',
+    'memberGroupIds',
+    'userIdFieldPath',
+    'userIdFieldPaths',
+    'memberGroupIdFieldPath',
+    'memberGroupIdFieldPaths',
+    'titleTemplate',
+    'bodyTemplate',
+    'publicFormViewId',
+    'internalViewId',
+    'userIdsText',
+    'memberGroupIdsText',
+    'recipientFieldPath',
+    'memberGroupRecipientFieldPath',
+    'userIdsSearch',
+  ],
+  // `requester` is deliberately NOT owned (no UI in this slice → it must pass through); the writeback
+  // sub-object's own owned/unowned split is handled inside the start_approval branch.
+  start_approval: [
+    'templateId',
+    'formDataMapping',
+    'resultWriteback',
+    'formDataMappingPairs',
+    'resultWritebackStatusField',
+    'resultWritebackApproverField',
+    'resultWritebackCompletedAtField',
+    'resultWritebackOnNonApproved',
+    'resultWritebackOutcomeValues',
+    'startApprovalOriginal',
+  ],
+  condition_branch: ['branches', 'defaultBranch', 'branchUnsupportedReason', 'branchOriginal'],
+  parallel_branch: [
+    'joinMode',
+    'branches',
+    'parallelBranches',
+    'parallelBranchUnsupportedReason',
+    'parallelBranchOriginal',
+  ],
+}
+
+/**
+ * #5739 泛化 round-2: "did the LOADED config carry this key?" — the question every no-key-may-be-ADDED
+ * rule below asks. A newly authored action has no snapshot and therefore no loaded shape to preserve, so
+ * it answers YES for every key: such an action keeps emitting the editor's canonical shape unchanged.
+ */
+function originalConfigHasKey(action: DraftAction, key: string): boolean {
+  if (!isPlainRecord(action.originalConfig)) return true
+  return Object.prototype.hasOwnProperty.call(action.originalConfig, key)
+}
+
+/**
+ * #5739 泛化 round-2 — singular/plural TWIN keys (destinationId/destinationIds,
+ * userIdFieldPath/userIdFieldPaths, memberGroupIdFieldPath/memberGroupIdFieldPaths). BOTH members are
+ * optional server-side (automation-actions.ts SendDingTalk*MessageConfig), so an API / quick-form / older
+ * rule may legitimately carry only one of them. This editor parses either into ONE list; writing both
+ * back would ADD a key on a save nobody meant as an edit — and the #4196 action fingerprint hashes the RAW
+ * config, so an untouched load → save would drift exactly the way this slice exists to prevent.
+ *
+ * Rule: emit the twin(s) the loaded config had, and add the missing twin only once the list is no longer
+ * the plain mirror of what was loaded (i.e. the author actually changed that control). An empty list emits
+ * NEITHER key — both are owned, so both stay deleted, which is the pre-existing "cleared → dropped" shape.
+ */
+function twinListKeys(
+  action: DraftAction,
+  singularKey: string,
+  pluralKey: string,
+  values: string[],
+): Record<string, unknown> {
+  if (!values.length) return {}
+  const original = isPlainRecord(action.originalConfig) ? action.originalConfig : null
+  const hadSingular = originalConfigHasKey(action, singularKey)
+  const hadPlural = originalConfigHasKey(action, pluralKey)
+  const mirrorsLoadedSingular = hadSingular
+    && !hadPlural
+    && values.length === 1
+    && values[0] === original?.[singularKey]
+  const out: Record<string, unknown> = {}
+  if (hadSingular || !hadPlural) out[singularKey] = values[0]
+  if (!mirrorsLoadedSingular) out[pluralKey] = values
+  return out
+}
+
+/**
+ * #5739 泛化: rebuild one action's saved config = raw loaded config − owned keys + what the UI produced.
+ * `undefined` in `modelled` means the author cleared that key: it stays DELETED (never restored from the
+ * original). Every unowned key of the original passes through untouched.
+ */
+function buildActionConfigFromOriginal(
+  action: DraftAction,
+  modelled: Record<string, unknown>,
+): Record<string, unknown> {
+  const config = cloneRawActionConfig(action.originalConfig)
+  for (const key of ACTION_OWNED_CONFIG_KEYS[action.type] ?? []) delete config[key]
+  for (const [key, value] of Object.entries(modelled)) {
+    if (value === undefined) continue
+    config[key] = value
+  }
+  return config
 }
 
 function buildPayload(): Partial<AutomationRule> {
@@ -4594,24 +5235,36 @@ function buildPayload(): Partial<AutomationRule> {
       if (action.config.branchUnsupportedReason && action.config.branchOriginal) {
         return { type: action.type, config: action.config.branchOriginal }
       }
+      // #5739 泛化: the editable path owns `branches` + `defaultBranch` only — a top-level key the v1 UI
+      // does not model (conditionBranchUnsupportedReason does NOT reject unknown top-level keys, so such a
+      // config opens EDITABLE) rides through instead of being dropped. Removing a defaultBranch still
+      // deletes the key, because buildConditionBranchConfig simply omits it.
       return {
         type: action.type,
-        config: buildConditionBranchConfig({
-          branches: action.config.branches ?? [],
-          defaultBranch: action.config.defaultBranch ?? null,
-        }),
+        config: buildActionConfigFromOriginal(
+          action,
+          buildConditionBranchConfig({
+            branches: action.config.branches ?? [],
+            defaultBranch: action.config.defaultBranch ?? null,
+          }),
+        ),
       }
     }
     if (action.type === 'update_record') {
+      // #5739 泛化: `fields` is the only key the UI owns; the T3-5 cross-base triple
+      // (targetBaseId/targetSheetId/targetRecordId — automation-actions.ts UpdateRecordConfig, gated by
+      // validateCrossBaseWriteConfig) and any other stored key survive an untouched save.
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           fields: fieldPairsToRecord(action.config.fieldUpdates),
-        },
+        }),
       }
     }
     if (action.type === 'delete_record') {
-      return { type: action.type, config: {} }
+      // #5739 泛化: was a literal `{}` — which discarded EVERY key, cross-base triple included. The UI owns
+      // nothing here (the ack checkbox is component state), so the loaded config passes straight through.
+      return { type: action.type, config: buildActionConfigFromOriginal(action, {}) }
     }
     if (action.type === 'start_approval') {
       // Assemble the {key: value} formDataMapping the backend requires from the editable rows. templateId +
@@ -4623,20 +5276,66 @@ function buildPayload(): Partial<AutomationRule> {
       // load→save silently drops it (the lossy round-trip the W7 lock exists to fix). Assemble resultWriteback
       // from the three pickers, emit only non-empty trimmed fields, and OMIT the key entirely when all three are
       // empty — the backend rejects an empty `{}` mapping, so "nothing configured" must round-trip to ABSENCE.
-      const resultWriteback: Record<string, string> = {}
+      // #5724 第一期: the rebuild now starts from the PRESERVED ORIGINAL config, so every key the backend
+      // accepts but this editor does not model (resultWriteback.onNonApproved, the T3-5 cross-base triple
+      // targetBaseId/targetSheetId/targetRecordId, and anything a newer backend adds) survives a
+      // load → edit-something-else → save round-trip byte-equal. Modelled fields are overlaid AFTER the
+      // spread, so the UI still wins for what it does edit.
+      const original = cloneRawActionConfig(action.originalConfig)
+      const originalWriteback = isPlainRecord(original.resultWriteback) ? original.resultWriteback : {}
+      const resultWriteback: Record<string, unknown> = {}
       const statusField = typeof action.config.resultWritebackStatusField === 'string' ? action.config.resultWritebackStatusField.trim() : ''
       const approverField = typeof action.config.resultWritebackApproverField === 'string' ? action.config.resultWritebackApproverField.trim() : ''
       const completedAtField = typeof action.config.resultWritebackCompletedAtField === 'string' ? action.config.resultWritebackCompletedAtField.trim() : ''
       if (statusField) resultWriteback.statusField = statusField
       if (approverField) resultWriteback.approverField = approverField
       if (completedAtField) resultWriteback.completedAtField = completedAtField
-      const config: Record<string, unknown> = {
+      // A writeback with no mapped FIELD is invalid server-side, so the field pickers alone decide whether the
+      // object is emitted at all — onNonApproved / outcomeValues can never resurrect it on their own.
+      const hasMappedWritebackField = Object.keys(resultWriteback).length > 0
+      // #5742: onNonApproved + outcomeValues are MODELLED now, so they are emitted from the DRAFT and never
+      // from the preserved original — unchecking 非通过结果也写回 must DELETE resultWriteback.onNonApproved,
+      // and an emptied mapping must drop resultWriteback.outcomeValues entirely (absence = write the raw
+      // outcome, which is the pre-#5742 behaviour).
+      // The mapping applies to the STATUS field only (the backend validator rejects one without a
+      // statusField), so a cleared status picker drops it. onNonApproved is NOT dropped with it — it gates
+      // the WHOLE backwrite, approver/completedAt included — and its checkbox stays visible for exactly that
+      // reason, so an approver-only rule keeps its opt-in instead of silently losing it here.
+      const outcomeValues: Record<string, string> = {}
+      if (statusField) {
+        for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+          const value = resultWritebackOutcomeValue(action, outcome).trim()
+          if (value) outcomeValues[outcome] = value
+        }
+      }
+      if (action.config.resultWritebackOnNonApproved === true) resultWriteback.onNonApproved = true
+      // An EXPLICIT stored `false` is re-emitted verbatim: it is inert server-side (`onNonApproved === true`
+      // is what runtime reads), but the #4196 action fingerprint hashes the RAW config, so silently dropping
+      // it on an unrelated edit would change the persisted JSON of a rule nobody touched.
+      else if (originalWriteback.onNonApproved === false) resultWriteback.onNonApproved = false
+      if (Object.keys(outcomeValues).length > 0) resultWriteback.outcomeValues = outcomeValues
+      // #5739 泛化: the spread-the-original rebuild this branch pioneered is now the shared
+      // buildActionConfigFromOriginal + ACTION_OWNED_CONFIG_KEYS path (same snapshot, one declaration of the
+      // owned keys). "nothing configured" must round-trip to ABSENCE — the backend rejects an empty `{}`
+      // mapping — so when all three pickers are empty `resultWriteback` is simply left out of `modelled`,
+      // and the owned-key delete drops the loaded one, its unmodelled siblings included.
+      const modelled: Record<string, unknown> = {
         templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
         formDataMapping: fieldPairsToRecord(action.config.formDataMappingPairs),
       }
-      if (Object.keys(resultWriteback).length > 0) config.resultWriteback = resultWriteback
-      // W7 §6: no `requester` UI in this slice, but carry a backend-valid hand-authored `requester` through so
-      // the from-scratch rebuild stays lossless for any valid config (not just the keys this slice surfaces).
+      if (hasMappedWritebackField) {
+        const preservedWriteback: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(originalWriteback)) {
+          // Modelled keys are rebuilt above; preserving the ORIGINAL here would make clearing them impossible.
+          if (key === 'statusField' || key === 'approverField' || key === 'completedAtField') continue
+          if (key === 'onNonApproved' || key === 'outcomeValues') continue
+          preservedWriteback[key] = value
+        }
+        modelled.resultWriteback = { ...preservedWriteback, ...resultWriteback }
+      }
+      const config = buildActionConfigFromOriginal(action, modelled)
+      // W7 §6: no `requester` UI in this slice — a hand-authored `requester` rides through on the spread above;
+      // an explicit draft value (if a later slice adds the UI) still wins.
       if (action.config.requester !== undefined) config.requester = action.config.requester
       return { type: action.type, config }
     }
@@ -4646,29 +5345,39 @@ function buildPayload(): Partial<AutomationRule> {
       }
       return {
         type: action.type,
-        config: buildParallelBranchConfig({
-          branches: action.config.parallelBranches ?? [],
-        }),
+        config: buildActionConfigFromOriginal(
+          action,
+          buildParallelBranchConfig({
+            branches: action.config.parallelBranches ?? [],
+          }),
+        ),
       }
     }
     if (action.type === 'create_record') {
+      // #5739 泛化: `targetBaseId` (cross-base create; the executor re-verifies base-WRITE on it) is not
+      // modelled here and must survive. #5756 follow-up: it stays OUT of ACTION_OWNED_CONFIG_KEYS above
+      // deliberately — this screen has no control that clears it (the banner only REPORTS it), so there is
+      // no "cleared to empty" state to translate into a delete; making the editor own a key it cannot
+      // author would turn every save of a legacy cross-base create into a silent downgrade to same-base.
+      // A cleared sheet picker still DELETES `sheetId` (undefined is skipped
+      // by the overlay), instead of falling back to the loaded one.
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           sheetId: typeof action.config.targetSheetId === 'string' && action.config.targetSheetId.trim()
             ? action.config.targetSheetId.trim()
             : undefined,
           data: fieldPairsToRecord(action.config.fieldValues),
-        },
+        }),
       }
     }
     if (action.type === 'send_notification') {
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           userIds: parseUserIdsText(action.config.userId),
           message: typeof action.config.message === 'string' ? action.config.message.trim() : '',
-        },
+        }),
       }
     }
     if (action.type === 'send_dingtalk_group_message') {
@@ -4677,11 +5386,11 @@ function buildPayload(): Partial<AutomationRule> {
         .map((path) => `record.${path}`)
       return {
         type: action.type,
-        config: {
-          destinationId: destinationIds[0] || undefined,
-          destinationIds: destinationIds.length ? destinationIds : undefined,
-          ...(destinationIdFieldPaths[0] ? { destinationIdFieldPath: destinationIdFieldPaths[0] } : {}),
-          ...(destinationIdFieldPaths.length ? { destinationIdFieldPaths } : {}),
+        config: buildActionConfigFromOriginal(action, {
+          // #5739 泛化 round-2: singular + plural are TWINS — emit the shape that was loaded, never grow it
+          // on an untouched save (see twinListKeys).
+          ...twinListKeys(action, 'destinationId', 'destinationIds', destinationIds),
+          ...twinListKeys(action, 'destinationIdFieldPath', 'destinationIdFieldPaths', destinationIdFieldPaths),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -4690,7 +5399,7 @@ function buildPayload(): Partial<AutomationRule> {
           internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
             ? action.config.internalViewId.trim()
             : undefined,
-        },
+        }),
       }
     }
     if (action.type === 'send_dingtalk_person_message') {
@@ -4712,13 +5421,14 @@ function buildPayload(): Partial<AutomationRule> {
         .map((path) => `record.${path}`)
       return {
         type: action.type,
-        config: {
-          userIds,
+        config: buildActionConfigFromOriginal(action, {
+          // `userIds` is required in SendDingTalkPersonMessageConfig, so a newly authored action still
+          // emits it even when empty; a PERSISTED config that legitimately never carried it (recipients
+          // come from a record field path) must not GROW the key on an untouched save.
+          userIds: userIds.length || originalConfigHasKey(action, 'userIds') ? userIds : undefined,
           memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
-          ...(userIdFieldPaths[0] ? { userIdFieldPath: userIdFieldPaths[0] } : {}),
-          ...(userIdFieldPaths.length ? { userIdFieldPaths } : {}),
-          ...(memberGroupIdFieldPaths[0] ? { memberGroupIdFieldPath: memberGroupIdFieldPaths[0] } : {}),
-          ...(memberGroupIdFieldPaths.length ? { memberGroupIdFieldPaths } : {}),
+          ...twinListKeys(action, 'userIdFieldPath', 'userIdFieldPaths', userIdFieldPaths),
+          ...twinListKeys(action, 'memberGroupIdFieldPath', 'memberGroupIdFieldPaths', memberGroupIdFieldPaths),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -4727,17 +5437,17 @@ function buildPayload(): Partial<AutomationRule> {
           internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
             ? action.config.internalViewId.trim()
             : undefined,
-        },
+        }),
       }
     }
     if (action.type === 'send_email') {
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           recipients: parseEmailRecipientsText(action.config.recipientsText),
           subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
-        },
+        }),
       }
     }
     if (action.type === 'write_approval_form_values') {
@@ -4774,7 +5484,13 @@ function buildPayload(): Partial<AutomationRule> {
         config: built.config,
       }
     }
-    return { type: action.type, config: action.config }
+    // Passthrough types (send_webhook, lock_record, wait_for_callback, send_dingtalk_approval_card,
+    // record_click): there is NO rebuild, so nothing can be dropped — `draftConfigFromAction` returns
+    // `{ ...loadedConfig }` for them and the template edits the few modelled keys (url/method/locked) in
+    // place. Copied rather than emitted by reference so the saved payload can never alias (and be mutated
+    // by) live draft state. #5739 泛化 note: the raw-config snapshot deliberately lives on DraftAction, not
+    // in `config` — a snapshot stored in `config` would be persisted as a config key by THIS line.
+    return { type: action.type, config: { ...action.config } }
   })
   const payload: Partial<AutomationRule> = {
     name: d.name.trim(),

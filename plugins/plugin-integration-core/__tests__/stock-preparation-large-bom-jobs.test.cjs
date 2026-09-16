@@ -2452,7 +2452,7 @@ async function main() {
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()
   await testPlannerHandoffStoresValuesFreePlanEvidence()
-  await testBackgroundPlanFillsTheParentPackColumns()
+  await testBackgroundPlanNoLongerFillsTheRetiredParentPackColumns()
   await testCheckpointApplyRequiresDurablePlanPermissionAndManualAck()
   await testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree()
   await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
@@ -2464,25 +2464,19 @@ async function main() {
   await testApplyJobWithoutABandIsShapedExactlyAsBefore()
 }
 
-// F1c-b — 后台大 BOM 链上的 父组件图号 / 父组件名称 包列。与上面那条 当前组件排序号 的绑定同形:
-// 两条真实调用链经过同一个规划器,但各自从不同的 seam 取「动作声明的扩展列」——交互链是
-// `action.extensionFieldIds`(table-actions computeDryRun),这一条是
-// `job.actionSnapshot.extensionFieldIds`(planLargeBomBackgroundExpansionJob)。
+// 规格 P(owner 2026-09-15)— 后台大 BOM 链上,已撤的 父组件图号 / 父组件名称 包列
+// (ext_parentDrawingNo / ext_parentName)。与上面那条 当前组件排序号 的绑定同形:两条真实调用链
+// 经过同一个规划器,但各自从不同的 seam 取「动作声明的扩展列」——交互链是 `action.extensionFieldIds`
+// (table-actions computeDryRun),这一条是 `job.actionSnapshot.extensionFieldIds`
+// (planLargeBomBackgroundExpansionJob)。
 //
-// 本用例证到哪儿,以及证不到哪儿 —— 别把它读成「大 BOM 项目今天这两列有值」:
-//  · 证到的是**规划器层的接线**:动作快照的 extensionFieldIds 是这条链上派生的**必要条件**,
-//    断掉 lib/stock-preparation-large-bom-jobs.cjs 里那一行 ⇒ 本用例红(下面的 undeclared 负控
-//    就是同一件事的正面形状)。
-//  · 证不到的是 plan-time 的**包感知可写 band**:`installedFieldProperties` 是本用例**自己**手传
-//    进 planLargeBomBackgroundExpansionJob 的。真实 HTTP 路由上那一路至今没接线 ——
-//    lib/http-routes.cjs 全文只有三处 `resolveInstalledFieldProperties`(5820 / 5973 / 6178),
-//    大 BOM 规划路由(6367 `planLargeBomBackgroundExpansionJob({ storage, ...routeScope, actionId,
-//    jobId, existingRows, conflictPolicyReview })`)与后台 apply 分片路由都不在其中。band 因此
-//    是模板-only,`pickFields` 把每一个 `ext_` id 都留在外面:**大 BOM 走后台链的项目,今天这两列
-//    (以及 F1c 那三列)仍然是空的**,分歧不会因为本次改动消失。
-//  · 所以「小 BOM 有值 / 大 BOM 空着」这条分歧的根在路由层,不在规划器层;http-routes.cjs 本轮
-//    不可动,已列进 PR 正文 owner 待办。
-async function testBackgroundPlanFillsTheParentPackColumns() {
+// F1c-b 曾在这里证「后台链把父行图号写进客户包列」;owner 裁决「留模板对做正本,备料包去掉那一对」
+// 之后本用例反过来钉:动作快照**仍然**声明那两列、`installedFieldProperties` **仍然**把它们放在
+// plm_system 可写 band(222 上既有安装今晚就是这个形状)⇒ 后台计划一个键都不派生,而模板对照旧
+// 从父行解析。band 的处理是按归属分类、不点名 id,所以对这两列的处理随声明消失而自然消失 —— 硬约束
+// (d) 要的「大 BOM 用例仍绿」就是这一条 + stock-preparation-large-bom-installed-fields-wiring。
+// 负控(动作快照不声明 ⇒ 零 ext_ 键)原样保留:接线本身没动。
+async function testBackgroundPlanNoLongerFillsTheRetiredParentPackColumns() {
   const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
   const installedFieldProperties = PARENT_PACK_COLUMN_IDS.map((fieldId) => ({
     logicalId: fieldId,
@@ -2522,15 +2516,17 @@ async function testBackgroundPlanFillsTheParentPackColumns() {
   const rootRecord = declared.addRecords.find((record) => record.depth === 0)
   const childRecord = declared.addRecords.find((record) => record.depth === 1)
   assert.ok(rootRecord && childRecord)
-  // 值本身是 fixture 里的 *_SHOULD_NOT_APPEAR 串,这里不复述它,只断言「就是父行那一个值」——
-  // 同源要证的正是这件事。
-  assert.equal(childRecord.ext_parentDrawingNo, rootRecord.componentCode, '后台链把父行图号写进客户包列')
-  assert.equal(childRecord.ext_parentDrawingNo, childRecord.parentComponentCode, '包列 = 模板列 parentComponentCode(同一个值)')
-  assert.equal(childRecord.ext_parentName, childRecord.parentComponentName, '包列 = 模板列 parentComponentName(同一个值)')
-  assert.equal(typeof childRecord.ext_parentDrawingNo, 'string')
-  assert.ok(childRecord.ext_parentDrawingNo.length > 0, '写进去的是真值,不是空串')
-  for (const fieldId of PARENT_PACK_COLUMN_IDS) {
-    assert.equal(Object.prototype.hasOwnProperty.call(rootRecord, fieldId), false, '根行无父 ⇒ ' + fieldId + ' 连键都没有')
+  // 正本:模板对照旧从父行解析。值本身是 fixture 里的 *_SHOULD_NOT_APPEAR 串,这里不复述它,只断言
+  // 「就是父行那一个值」。
+  assert.equal(childRecord.parentComponentCode, rootRecord.componentCode, '后台链把父行图号写进模板列 parentComponentCode')
+  assert.equal(typeof childRecord.parentComponentName, 'string')
+  assert.ok(childRecord.parentComponentName.length > 0, '模板列 parentComponentName 是真值,不是空串')
+  // 已撤的那一对:声明了、装了(band 里有),也一个键都不派生 —— 根行、子行都没有。
+  for (const record of declared.addRecords) {
+    for (const fieldId of PARENT_PACK_COLUMN_IDS) {
+      assert.equal(Object.prototype.hasOwnProperty.call(record, fieldId), false, '已撤的 ' + fieldId + ' 在后台链上不再派生(声明了也不)')
+    }
+    assert.deepEqual(Object.keys(record).filter((key) => key.startsWith('ext_')), [], '只声明那两列 ⇒ 记录上没有任何 ext_ 键')
   }
   assertValuesFree(publicBackgroundExpansionJob(declared.planned))
 
@@ -2546,7 +2542,7 @@ async function testBackgroundPlanFillsTheParentPackColumns() {
   assert.equal(
     undeclared.addRecords.find((record) => record.depth === 1).parentComponentCode,
     rootRecord.componentCode,
-    '模板列照旧 —— 这次改动是纯加法',
+    '模板列照旧 —— 不声明与声明在这两列上同判',
   )
 }
 

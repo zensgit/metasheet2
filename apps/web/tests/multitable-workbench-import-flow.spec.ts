@@ -140,6 +140,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -614,7 +615,7 @@ describe('MultitableWorkbench import flow', () => {
       return true
     })
 
-    await vi.advanceTimersByTimeAsync(1300)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS + 100) // #5743 keep-alive tick
     await flushUi(12)
 
     const refreshedSelect = document.body.querySelector('.meta-import__field-select') as HTMLSelectElement | null
@@ -696,7 +697,7 @@ describe('MultitableWorkbench import flow', () => {
       return true
     })
 
-    await vi.advanceTimersByTimeAsync(1300)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS + 100) // #5743 keep-alive tick
     await flushUi(16)
 
     expect(document.body.textContent).toContain('A selected linked-record repair for Owner Repair is no longer valid because the field changed type.')

@@ -54,4 +54,91 @@ describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read mo
     const out = await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']))
     expect(out).toEqual([{ userId: 'u1', name: null, email: null }])
   })
+
+  /**
+   * #5781 — the hydration BOUNDS (search + LIMIT). These live in the SQL, so the ceiling holds for
+   * THIS query's DB round trip.
+   *
+   * SCOPE (the first wording of this docstring overclaimed): the bound is on the DISPLAY hydration
+   * only. On the route path the allowed-set resolution runs first (loadSheetMemberUserIdSet →
+   * listSheetPermissionCandidates with `{ limit: 10000 }`) and reads up to 10,000 candidate rows
+   * INCLUDING name/email into the process, so "names/emails past the ceiling never enter the process"
+   * is NOT true end to end — only "they never leave it". Bounding that first read is the tracked
+   * set-narrowing follow-up.
+   *
+   * The bounds must NOT touch the allowed set — $1 stays the full eligible set on every path, because
+   * that set is shared with the write validator (createPersonMemberResolver).
+   */
+  describe('#5781 hydration bounds', () => {
+    function capture() {
+      const seen: Array<{ sql: string; params: unknown[] }> = []
+      const query: QueryFn = async (sql, params) => {
+        seen.push({ sql, params: (params ?? []) as unknown[] })
+        return { rows: [] }
+      }
+      return { seen, query }
+    }
+
+    test('no options ⇒ byte-identical pre-#5781 behavior (no search predicate, no LIMIT)', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1', 'u2']))
+      expect(seen[0].sql).not.toMatch(/ILIKE/)
+      expect(seen[0].sql).not.toMatch(/LIMIT/)
+      expect(seen[0].params).toEqual([['u1', 'u2']])
+    })
+
+    test('limit is applied as SQL LIMIT with the value bound as a param', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), { limit: 51 })
+      expect(seen[0].sql).toMatch(/LIMIT \$\d+/)
+      expect(seen[0].params[seen[0].params.length - 1]).toBe(51)
+    })
+
+    test('search is applied as a name/email ILIKE predicate in SQL — not a post-hoc filter', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), { search: 'ali', limit: 51 })
+      expect(seen[0].sql).toMatch(/name, ''\) ILIKE \$2/)
+      expect(seen[0].sql).toMatch(/email, ''\) ILIKE \$2/)
+      expect(seen[0].params[1]).toBe('%ali%')
+    })
+
+    test('LIKE metacharacters in the term are escaped — `%` stays a literal, it cannot re-open the roster', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), { search: '%_\\', limit: 51 })
+      expect(seen[0].params[1]).toBe('%\\%\\_\\\\%')
+    })
+
+    test('the bounds never touch the ALLOWED set — $1 is still exactly the eligible ids', async () => {
+      const { seen, query } = capture()
+      const allowed = new Set(['u1', 'u2', 'u3'])
+      await resolvePersonAssignableDirectory(query, 's', ['g1'], async () => allowed, { search: 'a', limit: 1 })
+      expect(seen[0].params[0]).toEqual(['u1', 'u2', 'u3'])
+      expect(seen[0].sql).toMatch(/id::text = ANY\(\$1::text\[\]\)/)
+      expect(seen[0].sql).toMatch(/is_active = TRUE/) // active-only, unchanged
+      expect(seen[0].sql).toMatch(/ORDER BY name/) // stable order, unchanged
+    })
+
+    test('the restrict groups still reach the canonical allowed-set resolver unchanged', async () => {
+      const { query } = capture()
+      let received: string[] | undefined
+      await resolvePersonAssignableDirectory(
+        query,
+        's',
+        ['g1', 'g2'],
+        async (groupIds) => {
+          received = groupIds
+          return new Set(['u1'])
+        },
+        { search: 'a', limit: 51 },
+      )
+      expect(received).toEqual(['g1', 'g2'])
+    })
+
+    test('an empty allowed set still short-circuits with the bounds present (fail-closed preserved)', async () => {
+      const { seen, query } = capture()
+      const out = await resolvePersonAssignableDirectory(query, 's', ['g1'], async () => new Set(), { search: 'a', limit: 51 })
+      expect(out).toEqual([])
+      expect(seen).toHaveLength(0)
+    })
+  })
 })

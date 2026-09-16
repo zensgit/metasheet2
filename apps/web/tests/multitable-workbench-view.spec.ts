@@ -1088,6 +1088,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -1366,6 +1367,297 @@ describe('MultitableWorkbench view wiring', () => {
     app.mount(container!)
     return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
+
+  // #5750: an embedding host re-sends the same mt:navigate context on a timer (once a second in the
+  // report). The host/URL base id is a slug, while workbench.activeBaseId is whatever the LOADED
+  // context said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+  // ctx.sheet.baseId) -- so a verbatim comparison of the two can miss forever and every tick
+  // re-enters applyExternalContext (and, when the user is busy or has drafts open, the defer toast).
+  async function replayExternalContextSync(
+    hostState: any,
+    context: { baseId: string; sheetId: string; viewId: string },
+    times: number,
+  ) {
+    const results: Array<{ status: string; context: { baseId: string; sheetId: string; viewId: string } }> = []
+    for (let i = 0; i < times; i += 1) {
+      results.push(await hostState.workbenchRef.requestExternalContextSync(context, { requestId: `req_${i}` }))
+      await flushUi()
+    }
+    return results
+  }
+
+  it('#5750 short-circuits repeated external context syncs whose base id is spelled differently from the loaded base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    // What the first load already wrote into the state: the CONTEXT's base id, not the URL slug.
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    const results = await replayExternalContextSync(
+      hostState,
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      5,
+    )
+
+    expect(workbenchMock.syncExternalContext).not.toHaveBeenCalled()
+    expect(results.map((result) => result.status)).toEqual(['applied', 'applied', 'applied', 'applied', 'applied'])
+    // The echo carries the base the workbench is really on, so the embed host can pin it in the URL.
+    expect(results[0].context).toEqual({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+  })
+
+  it('#5750 keeps syncing when the base id is not the only difference, or when the active sheet is not known to live in the active base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // A different sheet is never ignored, whatever the base id says.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_deals', viewId: 'view_grid' },
+      { requestId: 'req_other_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // Neither is a different view.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_other_view' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(2)
+
+    // And the base id is only ignored when the loaded sheet list PROVES the active sheet lives in
+    // the active base: an unknown active sheet keeps the strict comparison.
+    workbenchMock.sheets.value = []
+    await flushUi()
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_unknown_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(3)
+  })
+
+  // #5750 review: a host that posts only { baseId } gets sheetId/viewId filled in from the CURRENT
+  // ones (MultitableEmbedHost.handleNavigateMessage), so it lands on exactly the comparison above.
+  // A base id the workbench knows is a real base switch and must never be ignored -- otherwise that
+  // request is answered 'applied' while the frame stays where it was.
+  it('#5750 never ignores a base id that names another KNOWN base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // base_sales comes from the listBases() mock -- a known base, same sheet/view as now.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_known_other_base' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // An UNKNOWN id for the base the active sheet already lives in is still ignored (that is the
+    // URL-slug case this fast path exists for).
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_slug' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+  })
+
+  // #5750 follow-up: the LOADED context, not the caller, decides the active triple --
+  // useMultitableWorkbench.syncContextState falls activeViewId back to views[0] when the requested
+  // view is not in ctx.views (a deleted/renamed view id in the host's URL is the common case). The
+  // sync SUCCEEDS there, so the request is 'applied' while the workbench sits on another view; an
+  // echo carrying the REQUESTED view hands the embed host a dead triple to pin into the URL and
+  // re-send forever. The echo has to report what is on screen.
+  it('#5750 follow-up echoes the RESOLVED context (dead viewId falls back to views[0]) instead of the requested one', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    // The composable's real view fallback, in mock form.
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view' },
+    )
+    await flushUi()
+
+    // The request still goes out verbatim -- only the ECHO is resolved.
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_deleted',
+    })
+    expect(workbenchMock.activeViewId.value).toBe('view_grid')
+    expect(result.context.viewId).not.toBe('view_deleted')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view',
+    })
+  })
+
+  // Same resolution for the DEFERRED path: the replay echo (an emitted event, not a return value)
+  // is the only answer a host gets for a request that was parked, so it must resolve too.
+  it('#5750 follow-up echoes the RESOLVED context on the deferred replay path as well', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    // Park the request behind an open dirty draft, then clear it so the replay runs.
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    const deferred = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view_replay' },
+    )
+    expect(deferred.status).toBe('deferred')
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-clean="true"]')!.click()
+    await flushUi()
+
+    expect(hostState.externalContextResults).toContainEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view_replay',
+    })
+  })
+
+  // #5750 follow-up, review round 2: echoing "what is on screen" is only honest while what is on
+  // screen is still THIS request's resolution. applyExternalContext awaits, and the composable
+  // documents that window as reachable (loadBaseContext applies the context and only then awaits
+  // /fields, so a rail click or a second sync can move the active triple inside it -- pinned green by
+  // tests/multitable-external-context-sync.spec.ts, where a sheet_orders sync resolves true with
+  // sheet_deals on screen). An intruder's triple echoed as 'applied' would make the embed host pin
+  // the sheet the host never asked for and drop the navigation while reporting success.
+  it('#5750 follow-up echoes the REQUEST, not the intruding triple, when another sheet lands during the apply', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        // This sync's own application...
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        // ...then the rail click that lands inside the /fields await window.
+        workbenchMock.selectSheet('sheet_orders')
+        workbenchMock.selectView('view_grid')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      { requestId: 'req_raced_sheet' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeSheetId.value).toBe('sheet_orders')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      requestId: 'req_raced_sheet',
+    })
+  })
+
+  // Same race, one level finer: the intruder stays on the sheet and only changes the VIEW. The view
+  // the request named EXISTS here, so the views[0] fallback cannot explain the difference -- someone
+  // else moved, and the echo must not report their view as this request's result.
+  it('#5750 follow-up echoes the REQUEST when a concurrent writer switches to another existing view', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectView('view_timeline')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_raced_view' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeViewId.value).toBe('view_timeline')
+    // view_gallery is a real view of this sheet, so nothing about it licenses the swap.
+    expect(workbenchMock.views.value.some((view) => view.id === 'view_gallery')).toBe(true)
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      requestId: 'req_raced_view',
+    })
+  })
+
+  // ...and the base half. A host that posts only { baseId } has the sheet/view filled in from the
+  // current ones, so a base switch that is stomped back leaves a triple whose sheet AND view still
+  // match the request -- only the base gives the race away.
+  it('#5750 follow-up echoes the REQUEST when the base switch is stomped back by another writer', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectBase('base_ops')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_raced_base' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeBaseId.value).toBe('base_ops')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_raced_base',
+    })
+  })
 
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
@@ -2672,6 +2964,8 @@ describe('MultitableWorkbench view wiring', () => {
     expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
+  // #5743: same contract (refresh while open, silence after close), slower clock — the cadence now
+  // comes from DIALOG_META_REFRESH_INTERVAL_MS instead of a hard-coded 1200 ms.
   it('refreshes sheet metadata while the view manager is open and stops after close', async () => {
     vi.useFakeTimers()
     mountWorkbench()
@@ -2686,7 +2980,7 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
     expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_orders')
 
-    await vi.advanceTimersByTimeAsync(1200)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
@@ -2696,7 +2990,7 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
     workbenchMock.loadSheetMeta.mockClear()
 
-    await vi.advanceTimersByTimeAsync(2400)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS * 2)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()

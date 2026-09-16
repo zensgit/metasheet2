@@ -36,7 +36,18 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
-  return { ...actual, useRouter: () => ({ push: mocks.push }) }
+  return {
+    ...actual,
+    useRouter: () => ({ push: mocks.push }),
+    // F7's success footer renders a real <RouterLink> (workbench.vue extended its existing
+    // `useRouter` import to also pull `RouterLink` from 'vue-router', matching
+    // MetaRecordInspector.vue / MetaRecordApprovalPanel.vue). A real RouterLink's setup()
+    // injects the router instance directly (bypassing the mocked `useRouter` above), which
+    // throws when no router plugin is installed -- same stub already used by
+    // multitable-workbench-1672-1673.spec.ts / -history-field-scope-wiring.spec.ts /
+    // -permission-wiring.spec.ts for the same reason.
+    RouterLink: defineComponent({ props: ['to'], setup(_, { slots }) { return () => h('a', {}, slots.default?.()) } }),
+  }
 })
 
 // 只换掉 `multitableClient` 这一个单例,模块里别的导出(MultitableApiClient 类、

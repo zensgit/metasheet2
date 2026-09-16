@@ -176,8 +176,10 @@ function hostDirectory() {
 
 // The pack columns a real provisioning run binds alongside the frozen template's (same list the
 // prep-line export suite uses) — the export refuses a target that does not bind the whole band.
+// `ext_parentDrawingNo` / `ext_parentName` are deliberately NOT bound here: since 2026-09-15 the
+// export reads the template pair alone, so a target without them must be exactly as good.
 const PACK_FIELD_IDS = Object.freeze([
-  'ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
+  'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
 ])
 
 /**

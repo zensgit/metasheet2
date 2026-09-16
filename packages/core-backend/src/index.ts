@@ -399,6 +399,7 @@ import { automationWebhookJsonParser, createAutomationRoutes } from './routes/au
 import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
+import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -592,6 +593,19 @@ export class MetaSheetServer {
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
   private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+  /** Record-level submit-for-approval completion sink (eventBus leg + durable consumer share this object). */
+  private recordApprovalCompletionSink:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSink | null = null
+  /**
+   * DingTalk approval-todo ONE-WAY mirror sink (eventBus leg + durable consumer_key
+   * `dingtalk-todo-mirror` share this object). Built unconditionally — the sink itself is a no-op
+   * while DINGTALK_TODO_MIRROR_ENABLED is not exactly 'true', and the durable registry REQUIRES the
+   * adapter to exist (manifest v3 completeness) regardless of the flag.
+   */
+  private dingtalkTodoMirrorSink:
+    import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSink | null = null
+  /** Mirror delivery worker interval handle — only ever set when the mirror flag is ON. */
+  private stopDingTalkTodoMirrorWorker?: () => void
   private readonly recoveryArchiveApplication: RecoveryArchiveApplication
 
   // IoC Container
@@ -1856,6 +1870,9 @@ export class MetaSheetServer {
     this.app.use('/api/multitable', createMultitableAiRoutes({ queue: new QueueServiceImpl() }))
     // B1-a1 button field run endpoint. See routes/multitable-button.ts header.
     this.app.use('/api/multitable', createMultitableButtonRoutes())
+    // Record-level submit-for-approval (multitable x approval phase 2):
+    //   POST/GET /sheets/:sheetId/records/:recordId/approvals. See routes/multitable-record-approvals.ts.
+    this.app.use('/api/multitable', createMultitableRecordApprovalRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
@@ -3427,6 +3444,14 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopDingTalkTodoMirrorWorker?.()
+        this.stopDingTalkTodoMirrorWorker = undefined
+      } catch (err) {
+        this.logger.warn(`DingTalk todo mirror worker stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         if (this.yjsCleanupTimer) {
           clearInterval(this.yjsCleanupTimer)
           this.yjsCleanupTimer = undefined
@@ -3774,6 +3799,81 @@ export class MetaSheetServer {
       this.logger.error('Approval record projection initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // Multitable x approval phase 2: the RECORD-LEVEL submit-for-approval completion sink. TWO LEGS, ONE
+    // idempotent handler, exactly like the bridge/projection consumers above: this eventBus subscription
+    // (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF, because `emitApprovalCompletionEvent` returns
+    // early when it is ON) and the durable consumer_key `multitable-record-approval` wired in the
+    // durable-delivery block below (manifest v2). The sink's UPDATE is guarded on `status = 'pending'`, so
+    // a double delivery through both legs cannot double-notify.
+    try {
+      const { createRecordApprovalCompletionSink, createPoolTransactionRunner, subscribeRecordApprovalCompletionBus } = await import(
+        './multitable/record-approval-submission-service'
+      )
+      const recordApprovalPool = poolManager.get()
+      this.recordApprovalCompletionSink = createRecordApprovalCompletionSink(
+        recordApprovalPool.query.bind(recordApprovalPool),
+        // ATOMIC completion: the terminal UPDATE and the requester's notification INSERT share one
+        // transaction. Without it a notification INSERT that fails after the UPDATE committed is lost for
+        // good — the durable retry re-runs the guarded UPDATE, matches zero rows and ACKs.
+        { runInTransaction: createPoolTransactionRunner(recordApprovalPool) },
+      )
+      subscribeRecordApprovalCompletionBus(
+        eventBus,
+        this.recordApprovalCompletionSink,
+        (eventType, error) => this.logger.warn(
+          `Record approval completion handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      this.logger.info('Record approval completion sink initialized')
+    } catch (e) {
+      this.logger.error('Record approval completion sink initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk approval-todo ONE-WAY mirror (plan B). TWO LEGS, ONE SINK, exactly like the record-approval
+    // consumer above: this eventBus subscription (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF)
+    // and the durable consumer_key `dingtalk-todo-mirror` (manifest v3) wired in the block below. The sink
+    // carries its OWN gate — with DINGTALK_TODO_MIRROR_ENABLED not exactly 'true' every handler returns
+    // before touching the database, so both legs are inert and no ledger row is ever written.
+    //
+    // The delivery WORKER is a different matter: it is the only thing that can talk to DingTalk, so it is
+    // started ONLY when the flag is ON (and never under vitest, like the other interval workers here).
+    try {
+      const { createDingTalkTodoMirrorSink, subscribeDingTalkTodoMirrorBus } = await import(
+        './services/dingtalk-todo-mirror-service'
+      )
+      const todoMirrorPool = poolManager.get()
+      this.dingtalkTodoMirrorSink = createDingTalkTodoMirrorSink(todoMirrorPool.query.bind(todoMirrorPool))
+      subscribeDingTalkTodoMirrorBus(
+        eventBus,
+        this.dingtalkTodoMirrorSink,
+        (eventType, error) => this.logger.warn(
+          `DingTalk todo mirror handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      const { isDingTalkTodoMirrorEnabled } = await import('./integrations/dingtalk/todo-mirror-flag')
+      if (isDingTalkTodoMirrorEnabled() && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+        const { DingTalkTodoMirrorWorker } = await import('./services/dingtalk-todo-mirror-worker')
+        const todoMirrorWorker = new DingTalkTodoMirrorWorker({
+          query: todoMirrorPool.query.bind(todoMirrorPool) as never,
+        })
+        const intervalMs = Math.max(5_000, Number(process.env.DINGTALK_TODO_MIRROR_INTERVAL_MS) || 30_000)
+        const timer = setInterval(() => {
+          todoMirrorWorker.runBatch().catch((err) => {
+            this.logger.warn(`DingTalk todo mirror worker tick error: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }, intervalMs)
+        timer.unref?.()
+        this.stopDingTalkTodoMirrorWorker = () => clearInterval(timer)
+        this.logger.info('DingTalk todo mirror worker started (DINGTALK_TODO_MIRROR_ENABLED)')
+      }
+      this.logger.info('DingTalk todo mirror sink initialized')
+    } catch (e) {
+      // Degrade-and-continue is the RIGHT posture here and not a copy-paste: the mirror is an OUTBOUND
+      // convenience with its own ledger — a missing mirror loses no platform state, and the durable
+      // consumer keeps ACKing through the registry entry below.
+      this.logger.error('DingTalk todo mirror initialization failed; continuing in degraded mode', e as Error)
+    }
+
     // Bind external data-source manager to DB and load persisted sources (A0)
     try {
       const { db: kyselyDbDataSources } = await import('./db/db')
@@ -3940,10 +4040,31 @@ export class MetaSheetServer {
         this.automationServiceReady && Boolean(this.automationService),
       )
       if (this.automationServiceReady && this.automationService) {
+        const {
+          createRecordApprovalCompletionSink: createRecordApprovalSink,
+          createPoolTransactionRunner: createRecordApprovalTxnRunner,
+        } = await import('./multitable/record-approval-submission-service')
+        const { createDingTalkTodoMirrorSink: createDingTalkTodoMirrorSinkForDurable } = await import(
+          './services/dingtalk-todo-mirror-service'
+        )
+        // Reuse the SAME sink object the eventBus leg subscribed (built above); fall back to a fresh one
+        // only if that init degraded — the durable leg must never be missing its handler (the manifest v2
+        // completeness assertion would abort boot, which is the intended fail-closed outcome).
+        const durablePool = poolManager.get()
+        const recordApprovalSink = this.recordApprovalCompletionSink
+          ?? createRecordApprovalSink(durablePool.query.bind(durablePool), {
+            runInTransaction: createRecordApprovalTxnRunner(durablePool),
+          })
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
           projectionService: getApprovalRecordProjectionService(),
           webhookService: new WebhookService(kyselyDbDurable),
+          recordApprovalService: recordApprovalSink,
+          // Manifest v3 consumer. Reuse the SAME sink the eventBus leg subscribed; fall back to a fresh
+          // one only if that init degraded — the durable leg must never be missing its handler (the
+          // completeness assertion would abort boot, which is the intended fail-closed outcome).
+          todoMirrorService: this.dingtalkTodoMirrorSink
+            ?? createDingTalkTodoMirrorSinkForDurable(durablePool.query.bind(durablePool)),
         })
         this.durableDeliveryLoop = bootDurableDelivery(poolManager.get(), handlers, {
           onUnknownConsumerKeys: (keys) => this.logger.warn(`Durable delivery: unknown consumer keys parked pending: ${keys.join(', ')}`),

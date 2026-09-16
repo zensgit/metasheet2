@@ -30,8 +30,9 @@
 //            `required: true` is plugin metadata the multitable layer does not enforce) are still
 //            totally ordered, by 名称 then by record id, and two scans that differ only in order
 //            produce byte-identical workbooks.
-//       R16e a target that binds NEITHER `parentComponentCode` NOR `ext_parentDrawingNo` (an install
-//            predating that column, before the repair verb heals it) does not throw: key 1 is blank
+//       R16e a target that does not bind `parentComponentCode` (an install predating that column,
+//            before the repair verb heals it; a bound `ext_parentDrawingNo` no longer counts since
+//            2026-09-15) does not throw: key 1 is blank
 //            for every row, the workbook degrades to a pure 图号 order — deterministic but NOT
 //            hierarchical — and says so through unresolvedColumns.
 //
@@ -106,8 +107,10 @@ function mainRow(projectNo, overrides = {}, id) {
     projectNo,
     active: true,
     // The three PLM columns 备料主表 gained (父组件图号 / 父组件名称 / 规格) AND the customer-pack
-    // ext_ columns that carried the same data until now — a real sheet on a pack-carrying
-    // deployment holds both bands, so the seed does too.
+    // ext_ columns that carried the same data before them. A real sheet on a pack-carrying
+    // deployment still holds both bands (the retired ext_ pair is kept, never deleted), so the
+    // seed does too — the export must be proven to read the TEMPLATE pair alone while the pack
+    // pair is sitting right there, populated.
     parentComponentCode: 'TZ-A0',
     parentComponentName: 'A项目主体',
     componentSpec: 'DN100',
@@ -163,8 +166,10 @@ function seededRows() {
     mainRow(PROJECT_EMPTY, { componentCode: 'DWG-E1', componentName: '已停用部件', active: false }, 'rec_e1'),
     mainRow(PROJECT_EMPTY, { componentCode: 'DWG-E2', componentName: '已停用部件二', active: false }, 'rec_e2'),
     // NATIVE-vs-PACK. Row 1 carries both bands, disagreeing — the native column is the one the pull
-    // maintains, so it must win. Row 2 is every row that exists on the day this ships: pack only.
-    // Row 3 pins that an EMPTY native cell is blank, not a value that shadows the pack column.
+    // maintains, so it must win. Row 2 is a row never re-pulled since #5446: pack only — since
+    // 2026-09-15 its 父组件 cells print BLANK (规格 still falls back to ext_spec). Row 3 pins that an
+    // EMPTY native cell is blank (规格 falls back; the parent pair does not). Row 4 is the ruling's
+    // positive shape: the retired pack pair EMPTY, the template pair populated ⇒ both cells print.
     mainRow(PROJECT_MIXED, {
       componentCode: 'DWG-M-NATIVE',
       parentComponentCode: 'TZ-NATIVE', parentComponentName: '主体-NATIVE', componentSpec: 'DN200-NATIVE',
@@ -180,6 +185,11 @@ function seededRows() {
       parentComponentCode: '', parentComponentName: '   ', componentSpec: '',
       ext_parentDrawingNo: 'TZ-PACK2', ext_parentName: '主体-PACK2', ext_spec: 'DN400-PACK',
     }, 'rec_m3'),
+    mainRow(PROJECT_MIXED, {
+      componentCode: 'DWG-M-TEMPLATE-ONLY',
+      parentComponentCode: 'TZ-TEMPLATE-ONLY', parentComponentName: '主体-TEMPLATE-ONLY', componentSpec: 'DN500-NATIVE',
+      ext_parentDrawingNo: '', ext_parentName: '', ext_spec: '',
+    }, 'rec_m4'),
 
     // R16 ORDER SEEDS, in an order no comparator would produce (this is the random-UUID scan the
     // export used to inherit verbatim). Their expected order is spelled out in the R16 tests.
@@ -201,8 +211,11 @@ function seededRows() {
     // 图号 would make the 图号 comparison dead code that no assertion could ever catch.
     mainRow(PROJECT_ORDER, { componentCode: 'DWG-1', componentName: 'A组一号件', idempotencyKey: 'idk-o-aaa', parentComponentCode: 'TZ-A', parentComponentName: 'A主体', ext_parentDrawingNo: 'TZ-A', ext_parentName: 'A主体' }, 'rec_o4'),
     mainRow(PROJECT_ORDER, { componentCode: 'DWG-2', componentName: '二号路径A', idempotencyKey: 'idk-o-p2', parentComponentCode: 'TZ-A', parentComponentName: 'A主体', ext_parentDrawingNo: 'TZ-A', ext_parentName: 'A主体' }, 'rec_o5'),
-    // A pack-only parent: the printed 父组件图号 comes from ext_parentDrawingNo, so it must sort
-    // into the TZ-A group rather than into the blank band.
+    // A pack-only parent (never re-pulled since #5446). Until 2026-09-15 its printed 父组件图号 came
+    // from ext_parentDrawingNo and it sorted into the TZ-A group; the export now reads the template
+    // pair alone, so it prints BLANK and sorts into the blank-last band — the M2 witness on ORDER
+    // (restore the fallback ⇒ this row jumps back into TZ-A ⇒ R16 red). It keeps its 唯一键 running
+    // AGAINST its 图号 (DWG-0 → idk-o-zzz) so the 图号 key still has a witness inside the blank band.
     mainRow(PROJECT_ORDER, {
       componentCode: 'DWG-0', componentName: 'A组零号件', idempotencyKey: 'idk-o-zzz',
       parentComponentCode: undefined, parentComponentName: undefined,
@@ -263,6 +276,9 @@ const SANDBOX_SHEET = 'sheet_stock_prep_sandbox_twin'
 // module level below.)
 // F1c 追加了六个包列(名称及规格/交接工段/毛胚宽度/厚度/数量/质量)和 当前组件排序号 —— 一个装了
 // 客户包的部署这些列本来就在,所以「全量 provisioned」的 target 也要绑它们。
+// `ext_parentDrawingNo` / `ext_parentName` stay BOUND here on purpose: a 222-shaped target still
+// binds the retired pair (the columns are kept, never deleted), and the export must ignore them
+// while they are bound and populated — not merely when they are absent.
 const PACK_FIELD_IDS = Object.freeze([
   'ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
   'ext_nameAndSpec', 'ext_handoverSection', 'ext_blankWidth', 'ext_blankThickness', 'ext_blankQuantity', 'ext_blankMass',
@@ -741,9 +757,14 @@ async function routeRefusedCallerAppendsNoAuditRow() {
 //
 // R6 the workbook carries ALL SEVEN PLM fields for a seeded project:
 //    父组件图号 / 父组件名称 / 图号 / 名称 / 规格 / 材料 / 总数量
-// R7 规格 / 父组件图号 / 父组件名称 come from the NATIVE columns, with the customer-pack ext_
-//    column as a PER-ROW fallback (native wins where both are present; the pack value fills a row
-//    that has no native one — the state every existing sheet is in on the day this ships)
+// R7 规格 comes from the NATIVE column with the customer-pack `ext_spec` as a PER-ROW fallback
+//    (native wins where both are present; the pack value fills a row that has no native one).
+//    父组件图号 / 父组件名称 come from the TEMPLATE pair ALONE since 2026-09-15 (owner ruling: 留模板对
+//    做正本,备料包去掉那一对,导出改读模板对): a bound, populated `ext_parentDrawingNo` /
+//    `ext_parentName` is NOT read — a row with a blank template cell prints blank.
+// R7b (M2 tripwire) one row with the retired pack pair EMPTY and the template pair populated prints
+//    both cells; one row with the pack pair populated and the template pair empty prints BLANK.
+//    Restoring the two fallbackIds turns the second half red.
 // R8 an install that has not yet been healed by the additive repair verb (no native columns) still
 //    exports: those cells are empty and the absence is REPORTED, never a 500
 // R9 a deployment with no customer pack at all (no ext_ columns) also exports — the ext_ tier was
@@ -798,15 +819,60 @@ async function moduleNativeWinsAndThePackColumnIsThePerRowFallback() {
   assert.equal(native[columnIndex('parentComponentCode')], 'TZ-NATIVE', 'R7: native 父组件图号 wins')
   assert.equal(native[columnIndex('parentComponentName')], '主体-NATIVE', 'R7: native 父组件名称 wins')
 
-  // A row written BEFORE this change: no native value at all. Without the fallback these three
-  // cells would go blank on a sheet where they are populated today.
+  // A row never re-pulled since #5446: no native value at all. 规格 still falls back to ext_spec;
+  // the parent pair does NOT — its retired pack copy is bound and populated, and is not read.
   assert.equal(legacy[columnIndex('componentSpec')], 'DN300-PACK', 'R7: the pack column fills a row with no native 规格')
-  assert.equal(legacy[columnIndex('parentComponentCode')], 'TZ-PACK', 'R7: pack fallback for 父组件图号')
-  assert.equal(legacy[columnIndex('parentComponentName')], '主体-PACK', 'R7: pack fallback for 父组件名称')
+  assert.equal(legacy[columnIndex('parentComponentCode')], null, 'R7: no pack fallback for 父组件图号 — the template pair is the only source')
+  assert.equal(legacy[columnIndex('parentComponentName')], null, 'R7: no pack fallback for 父组件名称')
 
-  // An empty-string native cell is BLANK, not a value — it must not shadow the pack column.
+  // An empty-string native cell is BLANK, not a value — 规格 falls back; the parent pair stays blank.
   const blanked = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-M-BLANK')
   assert.equal(blanked[columnIndex('componentSpec')], 'DN400-PACK', 'R7: an empty native cell falls back, it does not win')
+  // A fallback-less column prints its raw cell (like 图号 does), so '' / '   ' come out as they are
+  // stored; what matters is that the cell is BLANK and never the populated pack value.
+  const isBlankCell = (value) => value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+  assert.ok(isBlankCell(blanked[columnIndex('parentComponentCode')]), 'R7: a blank template 父组件图号 prints blank even with ext_parentDrawingNo populated')
+  assert.notEqual(blanked[columnIndex('parentComponentCode')], 'TZ-PACK2', 'R7: the populated ext_parentDrawingNo is not read')
+  assert.ok(isBlankCell(blanked[columnIndex('parentComponentName')]), 'R7: a whitespace template 父组件名称 prints blank even with ext_parentName populated')
+  assert.notEqual(blanked[columnIndex('parentComponentName')], '主体-PACK2', 'R7: the populated ext_parentName is not read')
+}
+
+// R7b — 规格 P (owner 2026-09-15): 父组件图号 / 父组件名称 are read from the template pair ALONE.
+// M2 (put `fallbackId: 'ext_parentDrawingNo'` / `'ext_parentName'` back on EXPORT_COLUMNS) ⇒ the
+// pack-populated row below prints 'TZ-PACK' instead of blank ⇒ red. The headers are asserted
+// unchanged in the same breath (23 列表头不变: the ruling moved a SOURCE, never a header).
+async function moduleParentPairIsReadFromTheTemplateColumnsAlone() {
+  const { records, target } = moduleSubstrate()
+  assert.ok(target.fieldIdMap.ext_parentDrawingNo && target.fieldIdMap.ext_parentName, 'R7b precondition: the retired pair IS bound on this target')
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target,
+    projectNo: PROJECT_MIXED,
+    permission: 'admin',
+  })
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R7b: the header row is byte-identical to the agreed 28')
+  assert.equal(result.headers[columnIndex('parentComponentCode')], '父组件图号', 'R7b: the Chinese header is unchanged')
+  assert.equal(result.headers[columnIndex('parentComponentName')], '父组件名称', 'R7b: the Chinese header is unchanged')
+
+  // The ruling's positive shape: retired pack pair EMPTY, template pair populated ⇒ both cells print.
+  const templateOnly = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-M-TEMPLATE-ONLY')
+  assert.ok(templateOnly, 'the template-only row is exported')
+  assert.equal(templateOnly[columnIndex('parentComponentCode')], 'TZ-TEMPLATE-ONLY', 'R7b: 父组件图号 comes from parentComponentCode')
+  assert.equal(templateOnly[columnIndex('parentComponentName')], '主体-TEMPLATE-ONLY', 'R7b: 父组件名称 comes from parentComponentName')
+
+  // The M2 tripwire: pack pair populated, template pair absent ⇒ BLANK, never the pack value.
+  const packOnly = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-M-LEGACY')
+  assert.equal(packOnly[columnIndex('parentComponentCode')], null, 'R7b/M2: a populated ext_parentDrawingNo is NOT read')
+  assert.equal(packOnly[columnIndex('parentComponentName')], null, 'R7b/M2: a populated ext_parentName is NOT read')
+  // ...and neither retired id is a column the export resolves any more, so it cannot surface as unresolved.
+  assert.equal(EXPORT_SOURCE_FIELD_IDS.includes('ext_parentDrawingNo'), false, 'R7b: ext_parentDrawingNo is no longer an export source id')
+  assert.equal(EXPORT_SOURCE_FIELD_IDS.includes('ext_parentName'), false, 'R7b: ext_parentName is no longer an export source id')
+  for (const column of EXPORT_COLUMNS) {
+    if (column.id === 'parentComponentCode' || column.id === 'parentComponentName') {
+      assert.equal(column.fallbackId, undefined, 'R7b/M2: ' + column.id + ' carries no fallbackId')
+    }
+  }
+  assert.deepEqual(result.unresolvedColumns, [], 'R7b: a fully provisioned target reports nothing unresolved')
 }
 
 async function moduleUnhealedInstallStillExportsAndSaysWhatIsMissing() {
@@ -826,18 +892,19 @@ async function moduleUnhealedInstallStillExportsAndSaysWhatIsMissing() {
     ['componentSpec', 'parentComponentCode', 'parentComponentName'],
     'R8: the missing columns are named (config ids, never values)',
   )
-  // ...and the three columns still come out, through the pack columns this deployment DOES have.
-  // This is the continuity the fallback exists for: nothing that works today goes blank while an
-  // operator gets round to running the repair verb.
+  // ...规格 still comes out through the pack column this deployment DOES have (the continuity the
+  // ext_spec fallback exists for). The parent pair does NOT: since 2026-09-15 an unhealed install
+  // prints those two cells blank until the repair verb binds parentComponentCode — and SAYS SO above.
   const row = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A1')
   assert.equal(row[columnIndex('componentSpec')], 'DN100', 'R8: the pack fallback carries 规格 on an unhealed install')
-  assert.equal(row[columnIndex('parentComponentCode')], 'TZ-A0', 'R8: and 父组件图号')
-  assert.equal(row[columnIndex('parentComponentName')], 'A项目主体', 'R8: and 父组件名称')
+  assert.equal(row[columnIndex('parentComponentCode')], null, 'R8: 父组件图号 is blank on an unhealed install — no pack fallback')
+  assert.equal(row[columnIndex('parentComponentName')], null, 'R8: 父组件名称 likewise')
 
   // The genuinely bare case — unhealed AND packless. Empty cells, a full header row, still a 200.
+  // (Only ext_spec needs removing: the retired parent pair is not a source any more.)
   const bare = await exportStockPreparationPrepLines({
     recordsApi: records,
-    target: targetWithout(unhealed, ['ext_spec', 'ext_parentDrawingNo', 'ext_parentName']),
+    target: targetWithout(unhealed, ['ext_spec']),
     projectNo: PROJECT_A,
     permission: 'admin',
   })
@@ -1121,13 +1188,10 @@ async function moduleExportOrderIsTheAgreedHierarchyOrder() {
   assert.deepEqual(
     orderedTriples(result),
     [
-      // TZ-A first (码点序: 'TZ-A' < 'TZ-B'), and the PACK-ONLY row joins its group: its native
-      // 父组件图号 is empty and the value the workbook prints comes from ext_parentDrawingNo, so the
-      // comparator must read the same fallback the projection does — sorting on the native column
-      // alone would exile this row to the blank band.
-      // 图号 decides these two, and it has to: their 唯一键 runs the other way (DWG-0 → idk-o-zzz,
-      // DWG-1 → idk-o-aaa), so a comparator that lost the 图号 key would emit DWG-1 first.
-      ['TZ-A', 'DWG-0', 'A组零号件'],
+      // TZ-A first (码点序: 'TZ-A' < 'TZ-B'). The PACK-ONLY row (rec_o6, DWG-0) is NOT in this group
+      // any more: since 2026-09-15 the projection reads the template pair alone, the comparator reads
+      // the same column object, so a row whose native 父组件图号 is blank prints blank AND sorts into
+      // the blank-last band (see the tail of this list). M2 witness on ORDER.
       ['TZ-A', 'DWG-1', 'A组一号件'],
       // Same parent AND same 图号 (one component reached through two BOM paths — the 反馈1 shape
       // this change does NOT fix): ordered by 唯一键 (idk-o-p1 before idk-o-p2), never by scan order,
@@ -1135,11 +1199,14 @@ async function moduleExportOrderIsTheAgreedHierarchyOrder() {
       ['TZ-A', 'DWG-2', '二号路径Z'],
       ['TZ-A', 'DWG-2', '二号路径A'],
       ['TZ-B', 'DWG-9', 'B组第一件'],
-      // BLANK PARENT LAST — a row with no parent trails the grouped ones instead of sitting between
+      // BLANK PARENT LAST — rows with no parent trail the grouped ones instead of sitting between
       // two groups (code-unit order would otherwise put '' first and split the workbook's head).
+      // Inside the band 图号 decides, and it has to: the 唯一键 runs the other way (DWG-0 → idk-o-zzz,
+      // DWG-1 → idk-PRJ-ORDER-DWG-1), so a comparator that lost the 图号 key would emit DWG-1 first.
+      [null, 'DWG-0', 'A组零号件'],
       [null, 'DWG-1', '无父件行'],
     ],
-    'R16: 父组件图号 → 图号 → 唯一键 → 名称, blank parent last, pack fallback inside its own group',
+    'R16: 父组件图号 → 图号 → 唯一键 → 名称, blank parent last, the pack-only row in the blank band (no fallback since 2026-09-15)',
   )
   assert.deepEqual(result.unresolvedColumns, [], 'R16: the order-only ids never surface as unresolved COLUMNS')
 }
@@ -1246,13 +1313,14 @@ async function moduleExportOrderIsTotalEvenForRowsWithNoIdempotencyKey() {
 
 async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
   // R16e — the PRECONDITION on the first key, made a test rather than an assumption. An install
-  // provisioned before 父组件图号 shipped binds neither the canonical column nor a pack one until the
-  // additive repair verb heals it and the action target is rebound. Then key 1 is blank for EVERY
+  // provisioned before 父组件图号 shipped does not bind the canonical column until the additive
+  // repair verb heals it and the action target is rebound (a bound pack `ext_parentDrawingNo` no
+  // longer counts — it is left bound here to prove exactly that). Then key 1 is blank for EVERY
   // row: the workbook is still deterministic (this change's actual guarantee) but it is a flat 图号
   // list, not the 层级 反馈2 asked for — which is a deployment fact an operator has to be able to
   // see, not a silent degradation.
   const { records, target } = moduleSubstrate()
-  const unhealed = targetWithout(target, ['parentComponentCode', 'ext_parentDrawingNo'])
+  const unhealed = targetWithout(target, ['parentComponentCode'])
   const result = await exportStockPreparationPrepLines({
     recordsApi: records,
     target: unhealed,
@@ -1263,7 +1331,7 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
   assert.deepEqual(
     result.rows.map((cells) => cells[columnIndex('parentComponentCode')]),
     [null, null, null, null, null, null],
-    'R16e: with neither binding every 父组件图号 cell is blank — there is no band to group by',
+    'R16e: without the template binding every 父组件图号 cell is blank (the bound pack column is not read) — there is no band to group by',
   )
   assert.deepEqual(
     result.rows.map((cells) => [cells[columnIndex('componentCode')], cells[columnIndex('componentName')]]),
@@ -1280,8 +1348,8 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
   )
   assert.deepEqual(
     result.unresolvedColumns.slice().sort(),
-    ['ext_parentDrawingNo', 'parentComponentCode'],
-    'R16e: the missing hierarchy source is REPORTED, so "no parents bound" is distinguishable from "this project has no parents"',
+    ['parentComponentCode'],
+    'R16e: the missing hierarchy source is REPORTED (the template id alone — the retired pack id is no longer a source), so "no parents bound" is distinguishable from "this project has no parents"',
   )
 }
 
@@ -1423,8 +1491,9 @@ async function moduleExportWithoutSourceIdentityKeepsTheFlatOrder() {
   const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
   assert.deepEqual(
     result.rows.map((row) => row[codeColumn]),
-    ['DWG-0', 'DWG-1', 'DWG-2', 'DWG-2', 'DWG-9', 'DWG-1'],
-    'R20: F1b 的顺序原样保留(TZ-A 组 -> TZ-B 组 -> 无父件行)',
+    // 2026-09-15 起 rec_o6(DWG-0,只有包列有父图号)落进无父件带:导出只读模板对,比较器读同一列。
+    ['DWG-1', 'DWG-2', 'DWG-2', 'DWG-9', 'DWG-0', 'DWG-1'],
+    'R20: F1b 的顺序原样保留(TZ-A 组 -> TZ-B 组 -> 无父件行,含只有包列的那一行)',
   )
 }
 
@@ -2018,6 +2087,7 @@ async function main() {
   await moduleMissingTargetIsAConfigRefusalNotA500()
   await moduleCarriesAllSevenPlmFields()
   await moduleNativeWinsAndThePackColumnIsThePerRowFallback()
+  await moduleParentPairIsReadFromTheTemplateColumnsAlone()
   await moduleUnhealedInstallStillExportsAndSaysWhatIsMissing()
   await modulePacklessDeploymentStillExports()
   await moduleRefusesWhenTheSCOPEFieldsAreUnbound()

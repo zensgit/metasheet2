@@ -115,7 +115,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
-import { loadSheetLiveness } from './sheet-liveness'
+import { loadSheetLiveness, loadSheetLivenessBatch, type SheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -255,6 +255,19 @@ const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
   'approval.cancelled',
 ]
 
+/**
+ * Capped id sample for AGGREGATED log lines (sheet liveness). Identifiers only — never values — and
+ * capped so one template's 50 rules cannot turn one incident into 50 lines' worth of payload; the exact
+ * count always rides alongside as `ruleCount`, and the full per-rule list is available at DEBUG.
+ */
+const LOG_ID_SAMPLE_LIMIT = 5
+function sampleIds(ids: readonly string[]): string[] {
+  const unique = Array.from(new Set(ids))
+  return unique.length <= LOG_ID_SAMPLE_LIMIT
+    ? unique
+    : [...unique.slice(0, LOG_ID_SAMPLE_LIMIT), `+${unique.length - LOG_ID_SAMPLE_LIMIT} more`]
+}
+
 function hasRetryableFwbFailure(execution: AutomationExecution): boolean {
   return execution.steps.some((step) => {
     if (step.actionType !== FWB_ACTION_TYPE || step.status !== 'failed') return false
@@ -377,6 +390,11 @@ type ResultWritebackField = typeof RESULT_WRITEBACK_FIELDS[number]
 // T3-5: optional cross-base target on a resultWriteback — a LITERAL triple (no expression templating).
 // When any is set the save gate requires all three; runtime routes the backwrite to the target record.
 const RESULT_WRITEBACK_TARGET_KEYS = ['targetBaseId', 'targetSheetId', 'targetRecordId'] as const
+// #5742: the four terminal approval outcomes a backwrite can carry. They are the ONLY legal keys of the
+// optional `resultWriteback.outcomeValues` declared mapping (outcome → the literal value written into the
+// status field), so a Chinese single-select does not have to grow an option literally named 'approved'.
+const RESULT_WRITEBACK_OUTCOMES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
+export type ResultWritebackOutcome = typeof RESULT_WRITEBACK_OUTCOMES[number]
 const TEXT_RESULT_WRITEBACK_TYPES = new Set(['string', 'longText'])
 const STATUS_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'select'])
 const COMPLETED_AT_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'dateTime'])
@@ -434,7 +452,7 @@ function validateSendEmailActionConfigs(
   return null
 }
 
-function validateStartApprovalConfig(config: Record<string, unknown>, path: string): string | null {
+export function validateStartApprovalConfig(config: Record<string, unknown>, path: string): string | null {
   const templateId = typeof config.templateId === 'string' ? config.templateId.trim() : ''
   if (!templateId) return `${path}.templateId is required`
   const mapping = isRecord(config.formDataMapping) ? config.formDataMapping : null
@@ -453,7 +471,10 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
   }
   // W7-1 approval-result backwrite: a DECLARED, FIXED outcome→field mapping. The admin picks WHICH
   // source field receives `outcome` / `approver` / `completedAt` — NOT a free template expression — so
-  // the write path stays values-constrained (values come from the completion event, never user strings).
+  // the write path stays values-constrained: the approver/completedAt values come from the completion
+  // EVENT only, and the status value comes from the event OR (since #5742) from the declared
+  // `outcomeValues` LITERAL — which for a select must be one of that field's own options (save + fire-time
+  // check), and for string/longText may be any declared literal. Never a template evaluated on record data.
   // Optional; ≥1 field if present. The mapping is part of the action config, so it is covered by the
   // resume-time action-fingerprint drift guard (cannot be swapped after the approval suspends).
   if (config.resultWriteback !== undefined) {
@@ -461,6 +482,23 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
     const onNonApproved = config.resultWriteback.onNonApproved
     if (onNonApproved !== undefined && typeof onNonApproved !== 'boolean') {
       return `${path}.resultWriteback.onNonApproved must be a boolean`
+    }
+    // #5742 outcomeValues: an OPTIONAL declared outcome→written-value mapping. Keys are restricted to the
+    // four terminal outcomes (an unknown key is a typo that would silently never apply — reject it loudly);
+    // each present value must be a non-empty string. An EMPTY object is allowed and means "absent" (the raw
+    // outcome is written), which is exactly the pre-#5742 behaviour every saved rule already has.
+    const outcomeValues = config.resultWriteback.outcomeValues
+    if (outcomeValues !== undefined) {
+      if (!isRecord(outcomeValues)) return `${path}.resultWriteback.outcomeValues must be an object`
+      for (const key of Object.keys(outcomeValues)) {
+        if (!(RESULT_WRITEBACK_OUTCOMES as readonly string[]).includes(key)) {
+          return `${path}.resultWriteback.outcomeValues key ${key} is not one of ${RESULT_WRITEBACK_OUTCOMES.join('/')}`
+        }
+        const value = outcomeValues[key]
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          return `${path}.resultWriteback.outcomeValues.${key} must be a non-empty string`
+        }
+      }
     }
     let mapped = 0
     for (const field of RESULT_WRITEBACK_FIELDS) {
@@ -470,6 +508,17 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
       mapped += 1
     }
     if (mapped === 0) return `${path}.resultWriteback must map at least one of statusField/approverField/completedAtField`
+    // #5742: the mapping ONLY applies to the status field (buildResultWritebackPatch reads it under
+    // `if (statusField)`), so `outcomeValues` without a `statusField` is dead config that silently never
+    // fires — reject it loudly. Checked AFTER the field loop so the more specific "must map at least one
+    // of …" error still wins for a writeback that maps no field at all. `{}` stays legal (= absent).
+    if (
+      isRecord(outcomeValues)
+      && Object.keys(outcomeValues).length > 0
+      && resultWritebackFieldId(config.resultWriteback, 'statusField') === null
+    ) {
+      return `${path}.resultWriteback.outcomeValues requires ${path}.resultWriteback.statusField (the mapping only applies to the status field)`
+    }
     // T3-5 cross-base target: an OPTIONAL literal triple. If ANY of the three target ids is present, require
     // the FULL triple as non-empty strings (Q4). No expression templating — literal ids only. Target
     // field-type/read validation AND the author's target-base write authority are DEFERRED to runtime (the
@@ -527,6 +576,25 @@ function resultWritebackFieldId(writeback: Record<string, unknown>, field: Resul
   return trimmed.length > 0 ? trimmed : null
 }
 
+/**
+ * #5742 — the VALUE a backwrite writes into `statusField` for one terminal outcome.
+ *
+ * Pure. `resultWriteback.outcomeValues[outcome]` wins when it is a non-empty (trimmed) string; otherwise
+ * the RAW outcome string is returned, which is byte-identical to the pre-#5742 behaviour — so every saved
+ * rule without the mapping keeps writing 'approved'/'rejected'/'revoked'/'cancelled' exactly as before.
+ *
+ * The TRIMMED value is what gets written AND what the save/fire-time select-option check validates, so the
+ * two can never disagree (a mapping of ' 已通过 ' is validated and written as '已通过').
+ */
+export function resolveWritebackStatusValue(writeback: Record<string, unknown>, outcome: string): string {
+  const outcomeValues = writeback.outcomeValues
+  if (!isRecord(outcomeValues)) return outcome
+  const mapped = outcomeValues[outcome]
+  if (typeof mapped !== 'string') return outcome
+  const trimmed = mapped.trim()
+  return trimmed.length > 0 ? trimmed : outcome
+}
+
 // T3-5: read one cross-base target id (trimmed non-empty string, else null).
 function resultWritebackTargetId(
   writeback: Record<string, unknown>,
@@ -550,9 +618,12 @@ type ApprovalBackwriteOutcome =
   | { kind: 'same-base'; patch: Record<string, unknown> }
   | { kind: 'cross-base'; target: { targetBaseId: string; targetSheetId: string; targetRecordId: string } }
 
-// The backwrite patch: DECLARED fixed field→value mapping, VALUES sourced from the completion EVENT only
-// (status = outcome, approver = the approval actor, completedAt = the event time). Never the trigger actor.
-function buildResultWritebackPatch(
+// The backwrite patch: DECLARED fixed field→value mapping. approver = the approval actor and completedAt =
+// the event time come from the completion EVENT only (never the trigger actor); status = the RESOLVED
+// outcome value (#5742: the declared `outcomeValues` literal when present, else the raw outcome).
+// Exported for unit coverage: this is the single line where the mapping becomes user-visible, so it needs
+// its own test rather than leaning on the shared resolver's cases.
+export function buildResultWritebackPatch(
   writeback: Record<string, unknown>,
   event: ApprovalCompletionEventV1,
 ): Record<string, unknown> {
@@ -560,7 +631,7 @@ function buildResultWritebackPatch(
   const statusField = resultWritebackFieldId(writeback, 'statusField')
   const approverField = resultWritebackFieldId(writeback, 'approverField')
   const completedAtField = resultWritebackFieldId(writeback, 'completedAtField')
-  if (statusField) patch[statusField] = event.transition.toStatus
+  if (statusField) patch[statusField] = resolveWritebackStatusValue(writeback, event.transition.toStatus)
   if (approverField) patch[approverField] = event.actor?.id ?? null
   if (completedAtField) patch[completedAtField] = event.occurredAt
   return patch
@@ -593,19 +664,23 @@ function normalizeFieldProperty(value: unknown): Record<string, unknown> | undef
   return undefined
 }
 
-function resultWritebackFieldTypeError(
+export function resultWritebackFieldTypeError(
   field: ResultWritebackField,
   target: ResultWritebackTargetField,
   outcome: string,
+  // #5742: the whole writeback, so the select-option check validates the RESOLVED value (outcomeValues
+  // mapping applied) instead of the raw outcome literal. Defaults to an empty mapping = raw outcome.
+  writeback: Record<string, unknown> = {},
 ): string | null {
   if (field === 'statusField') {
     if (!STATUS_RESULT_WRITEBACK_TYPES.has(target.type)) {
       return `resultWriteback.statusField target ${target.id} must be string/longText/select, got ${target.type}`
     }
     if (target.type === 'select') {
+      const resolved = resolveWritebackStatusValue(writeback, outcome)
       const options = new Set((extractSelectOptions(target.property) ?? []).map((option) => option.value))
-      if (!options.has(outcome)) {
-        return `resultWriteback.statusField select ${target.id} does not include option ${outcome}`
+      if (!options.has(resolved)) {
+        return `resultWriteback.statusField select ${target.id} does not include option '${resolved}' (for outcome ${outcome})`
       }
     }
     return null
@@ -3460,6 +3535,11 @@ export class AutomationService {
       return
     }
     const rules = await this.loadEnabledApprovalCompletedRules(templateId)
+    // Housekeeping BEFORE the empty-list return: the dedup-ledger retention sweep is due-throttled and
+    // fire-and-forget, and it must not become conditional on this channel happening to contribute rules
+    // — the sheet-liveness filter inside the loader can now empty the list, which would otherwise have
+    // silently stopped the sweep on a deployment whose approval rules all sit on soft-deleted sheets.
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
     if (rules.length === 0) return
 
     // Q4(b): thread the automation chain depth — a bridge-originated approval (started by start_approval)
@@ -3473,7 +3553,6 @@ export class AutomationService {
       return
     }
 
-    this.kickEventDedupLedgerSweepIfDue(Date.now())
     const outcome = event.transition.toStatus
     let retryableFailure = false
     for (const rule of rules) {
@@ -3539,6 +3618,8 @@ export class AutomationService {
       return
     }
     const rules = await this.loadEnabledApprovalTaskCreatedRules(templateId)
+    // Housekeeping before the empty-list return, for the same reason as the completion twin.
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
     if (rules.length === 0) return
 
     const parentDepth = await this.approvalBridgeAutomationDepth(event.approval.instanceId)
@@ -3548,7 +3629,6 @@ export class AutomationService {
       return
     }
 
-    this.kickEventDedupLedgerSweepIfDue(Date.now())
     for (const rule of rules) {
       if (!(await this.approvalCompletedCreatorAuthorized(rule.created_by))) {
         logger.warn(`approval.task_created rule ${rule.id} skipped: creator lacks approvals:read at fire time`)
@@ -3607,8 +3687,10 @@ export class AutomationService {
   /**
    * W7-1 approval-result backwrite: write the DECLARED fixed outcome→field mapping (from the
    * start_approval action's `resultWriteback`) onto the SOURCE record, using values from the completion
-   * event ONLY (never user-templated strings — that keeps the write path values-constrained, the whole
-   * reason this was gated). Goes through the record lock guard (B1: an automation does not implicitly own
+   * event — plus, since #5742, the DECLARED `outcomeValues` literal for the status field (a select literal
+   * is constrained to that field's own options by the save/fire-time check; a string/longText one is any
+   * declared literal). Never a user-templated string evaluated against record data — that is what keeps the
+   * write path values-constrained, the whole reason this was gated. Goes through the record lock guard (B1: an automation does not implicitly own
    * a lock). Null-safe: `approver` is null on auto/system approval (the field is written null, not
    * crashed). Same-base only (the source record that started the approval). The approved branch always
    * writes when configured; non-approved terminal outcomes require the explicit `onNonApproved` opt-in so
@@ -3908,14 +3990,26 @@ export class AutomationService {
       if (!target) {
         throw new Error(`resultWriteback.${entry.field} target field not found: ${entry.id}`)
       }
-      const typeError = resultWritebackFieldTypeError(entry.field, target, outcome)
+      const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
       if (typeError) throw new Error(typeError)
     }
   }
 
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
-  // rule's source sheet. Returns an error message (→ AutomationRuleValidationError) or null. 'approved'
-  // is the only outcome the backwrite writes (approval-only path), so it matches the runtime check.
+  // rule's source sheet. Returns an error message (→ AutomationRuleValidationError) or null.
+  //
+  // WIRING, stated exactly (it is narrower than "save"): the ONLY caller is createRule (:1397). updateRule
+  // does NOT run this gate — it never has — so editing an existing rule is NOT hard-failed here; the editor's
+  // client blocker is the hint on that path and the FIRE-TIME check (assertResultWritebackFields) is the
+  // fail-closed authority for every path. Widening it to updateRule is an owner call (it would make an
+  // already-saved rule whose select lost an option unsaveable until the mapping is fixed), not this issue's.
+  //
+  // #5742 outcome coverage: 'approved' is always checked (the path every backwrite rule has). When the rule
+  // opts into `onNonApproved`, 'rejected' is checked TOO, so a mapped-but-missing option fails where the
+  // author can still fix it. 'revoked' / 'cancelled' stay on the FIRE-TIME check only: save-time strictness
+  // is deliberately scoped to the outcomes the editor gates, so an existing rule whose select lacks a
+  // 撤销/取消 option is not retroactively unsaveable (it still fails closed at fire time, which is where
+  // those rare terminal states actually occur).
   private async assertResultWritebackFieldsAtSave(
     sheetId: string,
     actions: AutomationAction[] | null,
@@ -3949,8 +4043,13 @@ export class AutomationService {
         // skip-missing posture). We only fail-fast on a TYPE mismatch for a field that ALREADY exists,
         // which is an unambiguous misconfiguration the admin should fix now.
         if (!target) continue
-        const typeError = resultWritebackFieldTypeError(entry.field, target, 'approved')
-        if (typeError) return typeError
+        const outcomes: ResultWritebackOutcome[] = writeback.onNonApproved === true
+          ? ['approved', 'rejected']
+          : ['approved']
+        for (const outcome of outcomes) {
+          const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
+          if (typeError) return typeError
+        }
       }
     }
     return null
@@ -4115,6 +4214,32 @@ export class AutomationService {
   /**
    * T1-3 Q1: cross-sheet routing for approval.completed rules by REQUIRED trigger_config.templateId.
    * JSONB expression filter with no index in v1 by design (small table); revisit only on a perf signal.
+   *
+   * SHEET LIVENESS (soft delete). This SELECT keys on trigger_type + enabled + templateId ONLY, so the
+   * rows it returns can name sheets that are no longer live — the gap `loadEnabledRules` closes on the
+   * record lane and the scheduler dispatch closes on the scheduled lane was simply absent here, leaving
+   * a soft-deleted sheet's rules armed on the approval channels. `dropRulesOnDeletedSheets` applies the
+   * SAME comparison from the same module (batched, since one call spans many sheets) — and deliberately
+   * differs from the siblings on ONE axis, error behaviour: see its own doc for why it catches where
+   * they propagate. It sits in the LOADER rather than in the dispatch loops so that both channels and
+   * every future caller of these loaders inherit it (the task_created lane has no outcome filter to
+   * hide behind, and a caller that forgets is how this gap opened in the first place). The price, named:
+   * a completion whose outcome the caller would have discarded for free at
+   * `approvalCompletedConfiguredOutcomes` now costs ONE extra query — one, not one per sheet, which is
+   * why the lookup is batched.
+   *
+   * NOT scoped by base / workspace / tenant — that is #5780, and it is deliberately NOT fixed here: an
+   * enabled rule bound to this template fires wherever in the deployment it lives. What is missing is a
+   * RULING, not a column: ownership is already reachable on both sides in one join —
+   * `approval_instances.org_id` (written on every instance, and its resolution fail-closes with
+   * APPROVAL_ORG_UNRESOLVED) on the completion side, and `automation_rules.sheet_id` → `meta_sheets.
+   * base_id` → `meta_bases.workspace_id` / `owner_id` on the rule side. What nobody has decided is
+   * whether the org axis and the workspace/base axis are the SAME ownership, which pair is
+   * authoritative, and what a rule whose base has no workspace should do. That decision is the owner's
+   * (#5780); picking one inside a liveness fix would be inventing a tenancy model. The current
+   * (wrong-looking, deliberately unchanged) behaviour is pinned by the cross-base characterization case
+   * in tests/integration/automation-approval-completed-trigger.test.ts; when #5780 lands that assertion
+   * is expected to INVERT, and the inversion is the signal, not a regression.
    */
   async loadEnabledApprovalCompletedRules(templateId: string): Promise<AutomationRule[]> {
     const rows = await this.db
@@ -4125,10 +4250,14 @@ export class AutomationService {
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')
       .execute()
-    return rows.map((r) => this.mapRow(r))
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), APPROVAL_COMPLETED_TRIGGER)
   }
 
-  /** A-2a: same template-keyed routing for approval.task_created rules (see loadEnabledApprovalCompletedRules). */
+  /**
+   * A-2a: same template-keyed routing for approval.task_created rules (see
+   * loadEnabledApprovalCompletedRules) — including the same sheet-liveness filter, and the same
+   * deliberate absence of a base/tenant predicate (#5780).
+   */
   async loadEnabledApprovalTaskCreatedRules(templateId: string): Promise<AutomationRule[]> {
     const rows = await this.db
       .selectFrom('automation_rules')
@@ -4138,10 +4267,132 @@ export class AutomationService {
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')
       .execute()
-    return rows.map((r) => this.mapRow(r))
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), APPROVAL_TASK_CREATED_TRIGGER)
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * SHEET LIVENESS (soft delete) for the TEMPLATE-keyed approval channels.
+   *
+   * ── Same definition of "live" — and TWO deliberate divergences, named ─────────────────────────
+   * The record lane refuses inside `loadEnabledRules` and the scheduled lane refuses in the scheduler
+   * dispatch callback. All three read the same column through the same module
+   * (src/multitable/sheet-liveness.ts) and suppress on EXACTLY `'deleted'`, so the VERDICT is one
+   * definition. Two things here are NOT the same as the siblings, and both are choices, not spellings:
+   *
+   *   (a) ARITY. These loaders select by trigger_type + templateId, so ONE call spans MANY sheets. The
+   *       DECISION is therefore per rule, while the LOOKUP is one batched round trip for the whole call
+   *       (`loadSheetLivenessBatch`, same module, same comparison). The siblings ask about one sheet.
+   *   (b) ERROR BEHAVIOUR. The siblings do NOT catch: a throw out of `loadSheetLiveness` propagates —
+   *       on the record lane it leaves `loadEnabledRules` and `handleEvent` rejects, so NO rule of that
+   *       sheet runs and (under durable delivery) the consumer adapter maps the handler throw to a
+   *       retryable `adapter_error` and the dispatch loop redelivers. THIS lane catches instead and
+   *       keeps the rule armed. That is a behavioural divergence from the siblings, with reasons below.
+   *
+   * `=== 'deleted'` and not `!== 'live'`: that closes the soft-delete gap exactly and leaves `absent`
+   * (no `meta_sheets` row at all) behaving as it does on the sibling lane, rather than quietly widening
+   * this into a stricter rule than the one the record lane chose. Note `absent` is a SUCCESSFUL lookup
+   * that found no row — not the same thing as the failed lookup below.
+   *
+   * ── FAIL-OPEN when the lookup THROWS: the rule stays armed, and the keep is LOGGED ────────────
+   *   1. Only POSITIVE proof of a soft delete suppresses a rule anywhere in this file. A failed lookup
+   *      is not proof; it is the absence of an answer.
+   *   2. This guard is hygiene, not authorization. The authorization gates on these channels — the
+   *      creator `approvals:read` re-check, the template-visibility re-check, the record-less action
+   *      allowlist and the cross-base write gate in the executor — sit DOWNSTREAM of this filter, are
+   *      unchanged, and fail CLOSED. Nothing here is a last line of defence, so nothing here should buy
+   *      safety with availability.
+   *   3. The two alternatives were both considered and rejected:
+   *      · SWALLOW AND DROP (catch, return fewer rules) turns a transient DB error into a
+   *        deployment-wide SILENT outage: no error reaches any caller, no execution row is written, and
+   *        because a dropped rule never reaches its per-rule `runWithEventDedup` claim, nothing marks
+   *        the work as owed — the runs simply never happened, with nothing anywhere saying so.
+   *      · PROPAGATE (the siblings' behaviour: no catch, let `handleApprovalCompletionTrigger` reject)
+   *        IS repairable under durable delivery — the adapter's retryable `adapter_error` redelivers.
+   *        It was not taken because the durable path is default OFF
+   *        (`AUTOMATION_DURABLE_DELIVERY_ENABLED`), so on the legacy bus the same throw is an ERROR log
+   *        and a permanently lost event; and because a `meta_sheets` read failing mid-incident would
+   *        then take out every approval automation deployment-wide, to protect against a rule whose
+   *        worst case on these two channels is an outbound message (see the action allowlists above:
+   *        record-writing actions are save-rejected here, and the one exception,
+   *        `write_approval_form_values`, needs a default-OFF flag AND durable delivery).
+   *        Whoever turns durable delivery on deployment-wide should revisit this trade, not inherit it.
+   * The cost of the choice is paid in the log: every fail-open keep is reported with the affected rule
+   * ids and a coded reason, so a persistently failing lookup is read off the log rather than inferred
+   * from absent runs. VALUES-FREE: rule/sheet ids and the error CLASS name only — never the error text,
+   * which can carry connection details.
+   *
+   * ── Log VOLUME is bounded by the call, not by the rule count ──────────────────────────────────
+   * A template can route 50 rules; a failing `meta_sheets` read is exactly the moment the log pipeline
+   * is already under stress. So the WARN is aggregated — one per distinct dead sheet, one per failed
+   * call — carrying `ruleCount` plus a capped `ruleIds` sample, and the per-rule line is DEBUG. An
+   * operator still sees "these rules stopped / stayed armed, for this reason" without O(rules × events).
+   */
+  private async dropRulesOnDeletedSheets(rules: AutomationRule[], channel: string): Promise<AutomationRule[]> {
+    if (rules.length === 0) return rules
+    // ONE round trip for the whole call, whatever the number of distinct sheets: this runs while the
+    // durable consumer's lease is ticking, and a serial per-sheet loop made an approval event's wall
+    // time scale with the sheet count under exactly the pool pressure that makes each checkout slow.
+    let livenessBySheet: Map<string, SheetLiveness> | null = null
+    let errorClass: string | null = null
+    try {
+      livenessBySheet = await loadSheetLivenessBatch(this.queryFn, rules.map((rule) => rule.sheet_id))
+    } catch (err) {
+      errorClass = err instanceof Error ? err.name : typeof err
+    }
+
+    if (livenessBySheet === null) {
+      // FAIL-OPEN, reported ONCE for the call (the failure was one query, not one per rule).
+      logger.warn(`${channel}: sheet liveness lookup failed, failing OPEN and keeping ${rules.length} rule(s)`, {
+        channel,
+        reason: 'liveness_lookup_failed',
+        ruleCount: rules.length,
+        ruleIds: sampleIds(rules.map((rule) => rule.id)),
+        sheetIds: sampleIds(rules.map((rule) => rule.sheet_id)),
+        ...(errorClass === null ? {} : { errorClass }),
+      })
+      for (const rule of rules) {
+        logger.debug(`${channel} rule ${rule.id} kept: sheet ${rule.sheet_id} liveness unknown (lookup failed)`, {
+          channel,
+          ruleId: rule.id,
+          sheetId: rule.sheet_id,
+          reason: 'liveness_lookup_failed',
+        })
+      }
+      return rules
+    }
+
+    const kept: AutomationRule[] = []
+    const droppedBySheet = new Map<string, string[]>()
+    for (const rule of rules) {
+      if (livenessBySheet.get(rule.sheet_id) === 'deleted') {
+        const seen = droppedBySheet.get(rule.sheet_id)
+        if (seen) seen.push(rule.id)
+        else droppedBySheet.set(rule.sheet_id, [rule.id])
+        logger.debug(`${channel} rule ${rule.id} skipped: sheet ${rule.sheet_id} is not live (soft-deleted)`, {
+          channel,
+          ruleId: rule.id,
+          sheetId: rule.sheet_id,
+          reason: 'sheet_deleted',
+        })
+        continue
+      }
+      kept.push(rule)
+    }
+    // One WARN per distinct dead sheet — that is the actionable unit ("this sheet is deleted but still
+    // has armed rules"), and it is bounded by sheets, not by rules × events.
+    for (const [sheetId, ruleIds] of droppedBySheet) {
+      logger.warn(`${channel}: ${ruleIds.length} rule(s) skipped — sheet ${sheetId} is not live (soft-deleted)`, {
+        channel,
+        sheetId,
+        reason: 'sheet_deleted',
+        ruleCount: ruleIds.length,
+        ruleIds: sampleIds(ruleIds),
+      })
+    }
+    return kept
+  }
 
   private mapRow(row: Record<string, unknown>): AutomationRule {
     return {

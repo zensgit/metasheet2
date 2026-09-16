@@ -613,6 +613,21 @@ export default defineConfig({
       // P1#2e producer family 1 (approval completion + task_created) REPLACE site goldens: real DB, same shape.
       // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
       'tests/integration/multitable-automation-producer-family1-realdb.test.ts',
+      // multitable x approval phase 2 — record-level submit-for-approval end-to-end (403 without the
+      // code / 400 unpublished template / success -> pending row + real instance / 409 on the PARTIAL
+      // unique index / completion through the REAL durable adapter -> approved + one notification /
+      // drift masked by field permissions). Needs real Postgres: the 409 IS an index violation and the
+      // idempotent completion is a real rowcount. Excluded here so it cannot skip-green; it EXECUTES in
+      // the standalone .github/workflows/multitable-record-approval-realdb.yml lane (a standalone file,
+      // not a plugin-tests.yml entry, because that workflow is an s6a sha256-pinned provenance input --
+      // same precedent as approval-realdb-directory-resolve.yml).
+      // NOTE (PR 2a): that workflow file could NOT be pushed with this commit -- the pushing token has no
+      // `workflow` OAuth scope -- so it must be added by a workflow-scoped push before this suite has a
+      // lane. Until then the suite runs ONLY on demand (vitest.integration.config.ts + DATABASE_URL), and
+      // the ROUTE GATES it proves end-to-end are covered in THIS lane by
+      // tests/unit/multitable-record-approval-routes.test.ts (real router, faked collaborators) so the
+      // contract is not entirely unexecuted while the lane is missing.
+      'tests/integration/multitable-record-approval-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
@@ -1347,6 +1362,21 @@ export default defineConfig({
       // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
       // precedent the sibling approval-realdb-* lanes above cite.
       'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // P3-1 CSV export read-parity. Needs real PostgreSQL for the same reason its sibling above
+      // does: the assertions that matter are the ones only a real row can establish — that a row the
+      // list scope admits but `canReadApprovalInstance` refuses is absent from the CSV (with its
+      // positive control on the same instance), that the per-viewer record-link sentinel and the
+      // hidden-field redaction survive serialization, and that the org conjunct is inherited rather
+      // than re-derived. Excluded here so describeIfDatabase cannot skip-green it. The measurement
+      // that motivated this entry was taken BEFORE the exclusion existed and on an earlier revision
+      // of the suite: without the entry the no-DB config collected this file and reported every test
+      // SKIPPED while the run still exited 0. With the entry in place the no-DB config does not
+      // collect it at all (`No test files found`), which is the state this line ships — do not read
+      // the historical skip count as a description of the shipped artifact. Wired as a WHOLE
+      // FILE into the standalone .github/workflows/approval-realdb-export-csv.yml lane, which arms
+      // EXPECT_DB=1 so a missing DATABASE_URL reds that lane instead of skipping green.
+      // plugin-tests.yml is left byte-identical for the same s6a re-pin reason cited above.
+      'tests/integration/approval-export-csv.db.test.ts',
       // P1b round 3 item 6 — the approval-administrator CAPABILITY predicate
       // (`is_active = TRUE AND (is_admin = TRUE OR role = 'admin')`) executed against real
       // PostgreSQL, plus its route and its agreement with the list scope's admin arm on one seeded

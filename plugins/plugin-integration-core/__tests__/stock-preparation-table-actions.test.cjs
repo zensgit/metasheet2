@@ -1338,7 +1338,7 @@ async function main() {
   testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
   await testRootSelectionIsReachableFromTheActionConfig()
   await testCollapsedSiblingCountReachesDryRunEvidence()
-  await testParentPackColumnsReachTheInteractiveChain()
+  await testRetiredParentPackColumnsDoNotReachTheInteractiveChain()
   // X4 — canonical order for the hashed arrays (222/r34 revision churn -> apply 409).
   await testDryRunRevisionIsBlindToExpandedRowOrder()
   await testDryRunRevisionIsBlindToExistingRowOrder()
@@ -1921,12 +1921,13 @@ async function testCollapsedSiblingCountReachesDryRunEvidence() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F1c-b — 客户包的 父组件图号 / 父组件名称 走完**交互链**,而且两道闸都在。
+// 规格 P(owner 2026-09-15)— 已撤的客户包 父组件图号 / 父组件名称 副本在**交互链**上不再落地。
 //
 // 与 large-bom-jobs 那条(后台链)同形:两条真实调用链经过同一个规划器,但各自从不同的 seam 取
 // 「动作声明的扩展列」——交互链是 computeDryRun 里的 `extensionFieldIds: action.extensionFieldIds`,
-// 后台链是 `job.actionSnapshot.extensionFieldIds`。任何一条断线,对应链上的这两列就永远空着,而
-// 纯函数用例照样绿。所以这里从**动作配置**出发,一路走到写进目标表的那条记录上。
+// 后台链是 `job.actionSnapshot.extensionFieldIds`。F1c-b 曾在这里证「声明了就写进包列」;裁决之后
+// 从**动作配置**出发一路走到写进目标表的那条记录上,钉的是:动作仍声明那两列、表上仍装着包
+// (222 的既有形状)⇒ 记录上一个键都没有,模板对照旧有值;不声明的负控原样保留。
 // ---------------------------------------------------------------------------------------------
 const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
 
@@ -1992,19 +1993,24 @@ async function pullParentPackRowsWith(action) {
   return records.calls.filter((call) => call[0] === 'createRecord').map((call) => call[1].data)
 }
 
-async function testParentPackColumnsReachTheInteractiveChain() {
+async function testRetiredParentPackColumnsDoNotReachTheInteractiveChain() {
   const declared = await pullParentPackRowsWith(normalizeStockPreparationActionConfig(
     baseAction({ extensionFieldIds: PARENT_PACK_COLUMN_IDS }),
   ))
   const child = declared.find((data) => data.componentSourceId === 'PART-B')
   const root = declared.find((data) => data.componentSourceId === 'PART-A')
   assert.ok(child && root, '这批写进目标表的是一根一子')
-  assert.equal(child.ext_parentDrawingNo, 'A-001', '交互链把 父组件图号 写进客户包列')
-  assert.equal(child.ext_parentName, 'Assembly DN1200', '父组件名称 是父件**未切分**的全串(老系统 754-755 口径)')
-  // 同源:包列与模板列是同一个值,不是两套取值规则各算一遍。
-  assert.equal(child.ext_parentDrawingNo, child.parentComponentCode, '包列 = 模板列 parentComponentCode')
-  assert.equal(child.ext_parentName, child.parentComponentName, '包列 = 模板列 parentComponentName')
-  for (const fieldId of PARENT_PACK_COLUMN_IDS.concat(['parentComponentCode', 'parentComponentName'])) {
+  // 正本:模板对照旧。
+  assert.equal(child.parentComponentCode, 'A-001', '交互链把 父组件图号 写进模板列 parentComponentCode')
+  assert.equal(child.parentComponentName, 'Assembly DN1200', '父组件名称 是父件**未切分**的全串(老系统 754-755 口径)')
+  // 已撤的那一对:动作声明了、表上装着包,写进目标表的记录上仍然一个键都没有。
+  for (const data of declared) {
+    for (const fieldId of PARENT_PACK_COLUMN_IDS) {
+      assert.equal(Object.prototype.hasOwnProperty.call(data, fieldId), false, data.componentSourceId + ': 已撤的 ' + fieldId + ' 不再写进目标表')
+    }
+    assert.deepEqual(Object.keys(data).filter((key) => key.startsWith('ext_')), [], data.componentSourceId + ': 只声明那两列 ⇒ 没有任何 ext_ 键')
+  }
+  for (const fieldId of ['parentComponentCode', 'parentComponentName']) {
     assert.equal(
       Object.prototype.hasOwnProperty.call(root, fieldId),
       false,
@@ -2012,8 +2018,8 @@ async function testParentPackColumnsReachTheInteractiveChain() {
     )
   }
 
-  // 负控 = 这条断线的证据:动作没声明这两列(表上照样装着包)⇒ 交互链一个 ext_ 键都不写。
-  // 声明才是「目标表 fieldIdMap 已绑定」的凭据,派进没绑的列会让整行写入被 apply-writer 硬拒。
+  // 负控原样保留:动作没声明这两列(表上照样装着包)⇒ 交互链一个 ext_ 键都不写,模板对照旧。
+  // 声明与不声明在这两列上如今同判 —— 都不写。
   const undeclared = await pullParentPackRowsWith(normalizeStockPreparationActionConfig(baseAction()))
   for (const data of undeclared) {
     assert.deepEqual(
@@ -2025,7 +2031,7 @@ async function testParentPackColumnsReachTheInteractiveChain() {
   assert.equal(
     undeclared.find((data) => data.componentSourceId === 'PART-B').parentComponentCode,
     'A-001',
-    '模板列照旧 —— 这次改动是纯加法',
+    '模板列照旧 —— 不声明与声明在这两列上同判',
   )
 }
 
