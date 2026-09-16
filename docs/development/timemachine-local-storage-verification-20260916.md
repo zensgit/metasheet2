@@ -72,3 +72,14 @@ This verifies actual remote collection rather than inferring it from an aggregat
 green check. Node20 remained in progress at this evidence checkpoint. The newer
 22nd test in local commit `78bbd18134030c504040a27b2c390be223418e53` was not part of
 this remote SHA and is not covered by this job.
+
+### Terminal published-head matrix
+
+The same published SHA subsequently reached 35 completed checks: 34 SUCCESS,
+1 expected SKIPPED, zero pending/failure. Node20 job `104635395152` and coverage
+job `104642273699` completed successfully. The Node20 log independently contains
+21 successful file-store test-case entries, with no failing entry for that file.
+Remote main remained `38caaf17bfc8eeca23e23f6dfe796683d35ab525` and the PR branch
+remained the exact published SHA before preparing the follow-up push. These results
+do not cover the newer 22nd test, local custody, NAS, physical power loss or deployment.
+The local 74-test follow-up also passed core-backend `type-check` before publication.
