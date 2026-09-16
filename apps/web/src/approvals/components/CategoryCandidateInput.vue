@@ -5,6 +5,13 @@
   >
     <input
       ref="inputEl"
+      role="combobox"
+      aria-autocomplete="list"
+      :aria-expanded="listboxVisible"
+      :aria-controls="listboxId"
+      :aria-activedescendant="activeOptionId"
+      @keydown="onKeydown"
+      @keyup="onKeyup"
       v-bind="inputAttrs"
       :value="modelValue"
       :disabled="disabled"
@@ -18,14 +25,20 @@
       @blur="onBlur"
     />
     <ul
-      v-if="open && filteredCandidates.length > 0"
+      v-if="listboxVisible"
+      :id="listboxId"
+      role="listbox"
       class="category-candidate-input__list"
       data-testid="category-candidate-list"
     >
       <li
-        v-for="candidate in filteredCandidates"
+        v-for="(candidate, index) in filteredCandidates"
+        :id="optionId(index)"
         :key="candidate"
+        role="option"
+        :aria-selected="index === activeIndex ? 'true' : 'false'"
         class="category-candidate-input__item"
+        :class="{ 'category-candidate-input__item--active': index === activeIndex }"
         @mousedown.prevent="selectCandidate(candidate)"
       >
         {{ candidate }}
@@ -63,7 +76,11 @@
 // the user types. The fetch is fully fail-soft: any rejection leaves the candidate list empty, never
 // blocks typing or saving, and is never awaited by a caller — category input remains fully usable
 // with zero candidates (e.g. offline, the endpoint erroring, or simply never focused), exactly as
-// the plain `<el-input>` it replaces always was.
+// the plain `<el-input>` it replaces always was. ArrowDown (below) is a THIRD fetch trigger, on the
+// same lazy/at-most-once contract as focus/input — verified there is no Playwright verification
+// spec anywhere under `apps/web/verification/` that focuses or keys either `[data-testid=
+// "approval-template-category"]` or `[data-testid="template-detail-category-input"]` (`git grep`),
+// so this new trigger cannot newly red the required lane.
 import { computed, ref, useAttrs } from 'vue'
 import { listTemplateCategories } from '../api'
 
@@ -113,6 +130,55 @@ const open = ref(false)
 // collapse into one in-flight call rather than firing a duplicate.
 let candidatesRequested = false
 
+// Remedy round 4 (P2-B, owner-supplied): keyboard + combobox semantics.
+//
+// `open` alone is NOT "the listbox is visible to the user" — it goes true on plain focus, before
+// any candidates have arrived, and stays true for a query that matches nothing (advisor review:
+// gating Escape/ARIA on `open` alone lets a focused-but-empty field swallow Escape and never reach
+// the parent's `cancelEditCategory`, and dangles `aria-controls`/`aria-expanded="true"` at a listbox
+// that was never rendered). `listboxVisible` is the ONE predicate the template's `v-if`, the ARIA
+// `aria-expanded`, and the keydown handler below all read, so they can never disagree.
+const listboxVisible = computed(() => open.value && filteredCandidates.value.length > 0)
+
+const activeIndex = ref(-1)
+
+// Stable per-instance id prefix (module-level counter, not a random string) so two mounted fields
+// in the same document — e.g. this component under both TemplateAuthoringView.vue and
+// TemplateDetailView.vue — never collide on `id`/`aria-controls`/`aria-activedescendant`.
+let instanceSeq = 0
+const uid = `category-candidate-input-${(instanceSeq += 1)}`
+const listboxId = `${uid}-listbox`
+function optionId(index: number): string {
+  return `${uid}-option-${index}`
+}
+// Absent (not merely falsy) when there is no active item — `undefined` makes Vue remove the
+// attribute entirely, which is what `aria-activedescendant` requires when nothing is active
+// (a present-but-empty value is not the same thing to assistive tech).
+const activeOptionId = computed<string | undefined>(() =>
+  listboxVisible.value && activeIndex.value >= 0 && activeIndex.value < filteredCandidates.value.length
+    ? optionId(activeIndex.value)
+    : undefined,
+)
+
+// Tracks which key's DOWN half this component itself acted on (selected a candidate / closed the
+// list), so the MATCHING keyup — and only that key — can be suppressed for the forwarded parent
+// shortcut. See `onKeyup` below for why suppressing requires `stopImmediatePropagation`, not
+// `stopPropagation`.
+let consumedKey: 'Enter' | 'Escape' | null = null
+
+// Moves `activeIndex` by `delta` over the currently visible candidates, WRAPPING at both ends
+// (design §'s "clamp or wrap — pick one and document it": wrap, matching the WAI-ARIA combobox
+// authoring-practice listbox pattern). Returns -1 (no active item) when there is nothing to move
+// over, e.g. the candidate fetch has not resolved yet.
+function moveActiveIndex(delta: number): void {
+  const length = filteredCandidates.value.length
+  if (length === 0) {
+    activeIndex.value = -1
+    return
+  }
+  activeIndex.value = (activeIndex.value + delta + length) % length
+}
+
 function ensureCandidatesLoaded(): void {
   if (candidatesRequested) return
   candidatesRequested = true
@@ -138,6 +204,7 @@ const filteredCandidates = computed<string[]>(() => {
 function onInput(event: Event): void {
   emit('update:modelValue', (event.target as HTMLInputElement).value)
   open.value = true
+  activeIndex.value = -1 // the typed text just changed which candidates match; drop any stale highlight
   ensureCandidatesLoaded()
 }
 
@@ -152,6 +219,7 @@ function onBlur(): void {
   // the timeout is kept as a second guard for any pointer path that reaches blur first anyway.
   window.setTimeout(() => {
     open.value = false
+    activeIndex.value = -1
   }, 150)
 }
 
@@ -162,6 +230,82 @@ function selectCandidate(candidate: string): void {
   // reintroducing a re-focus call here reopens the dropdown immediately after every selection).
   emit('update:modelValue', candidate)
   open.value = false
+  activeIndex.value = -1
+}
+
+// Remedy round 4 (P2-B). ArrowDown OPENS a closed list (kicking off the same lazy fetch as
+// focus/input — see the file doc comment) and always seeds `activeIndex` at 0, even before the
+// fetch has resolved: `filteredCandidates` is empty at that synchronous instant, so nothing is
+// rendered as active yet, but the index is already correct once the candidates arrive on the next
+// render — a second ArrowDown right after (once the fetch settles) lands on index 1, not back on
+// index 0. ArrowUp is deliberately inert while the list is closed (design: only ArrowDown opens
+// it). Enter accepts the active candidate ONLY when one is actually valid for the CURRENT
+// (possibly just-filtered) list — `activeIndex` alone is not enough, since typing can shrink the
+// list out from under a previously-valid index; that same guard is what makes Enter a no-op (pass
+// through to the parent's `keyup.enter` save shortcut — see `onKeyup`) whenever the list is closed
+// or empty. Escape closes the list only when it is actually VISIBLE (`listboxVisible`, not the
+// broader `open`) — `open` alone goes true on plain focus, before anything has rendered or matched,
+// and gating Escape on it would swallow the key on a focused-but-empty-match field and never reach
+// the parent's `keyup.escape` cancel shortcut.
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    if (!open.value) {
+      open.value = true
+      ensureCandidatesLoaded()
+      activeIndex.value = 0
+    } else {
+      moveActiveIndex(1)
+    }
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    if (!open.value) return
+    event.preventDefault()
+    moveActiveIndex(-1)
+    return
+  }
+  if (event.key === 'Enter') {
+    if (activeIndex.value >= 0 && activeIndex.value < filteredCandidates.value.length) {
+      selectCandidate(filteredCandidates.value[activeIndex.value])
+      consumedKey = 'Enter'
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    // else: nothing valid to accept — pass through untouched, including on the matching keyup.
+    return
+  }
+  if (event.key === 'Escape') {
+    if (listboxVisible.value) {
+      open.value = false
+      activeIndex.value = -1
+      consumedKey = 'Escape'
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    // else: nothing visibly open — pass through untouched, including on the matching keyup.
+    return
+  }
+}
+
+function onKeyup(event: KeyboardEvent): void {
+  if ((event.key === 'Enter' && consumedKey === 'Enter') || (event.key === 'Escape' && consumedKey === 'Escape')) {
+    // The parent's `@keyup.enter="saveCategory"` / `@keyup.escape="cancelEditCategory"`
+    // (TemplateDetailView.vue) are NOT on an ancestor element: `inheritAttrs: false` plus this
+    // component's own `inputAttrs` forwards them onto this SAME native <input>, where Vue's
+    // compiler merges them with this handler into ONE `onKeyup` prop array (`mergeProps`, checked
+    // against this repo's installed `@vue/runtime-core@3.5.24`: `ret[key] = existing ? [].concat
+    // (existing, incoming) : incoming`, with this handler ordered first because it is written
+    // BEFORE `v-bind="inputAttrs"` in the template above). Vue's own invoker only skips LATER
+    // entries in that array when `stopImmediatePropagation()` is called
+    // (`patchStopImmediatePropagation` in `@vue/runtime-dom`, which wraps `_stopped` and checks it
+    // per array entry) — a plain `stopPropagation()` only stops bubbling to ANCESTOR elements and
+    // has zero effect on sibling handlers Vue merged into this same array. See
+    // `categoryCandidateInput.spec.ts`'s parent-isolation mutation pair for the reproduction: a
+    // plain `stopPropagation()` here leaves the parent-save assertion red.
+    event.stopImmediatePropagation()
+    consumedKey = null
+  }
 }
 </script>
 
@@ -265,6 +409,12 @@ function selectCandidate(candidate: string): void {
 }
 
 .category-candidate-input__item:hover {
+  background-color: var(--el-fill-color-light, #f5f7fa);
+}
+
+/* Remedy round 4 (P2-B): keyboard-active item, same tint as :hover so ArrowDown/Up gives the same
+   visual feedback a mouse hover already does. */
+.category-candidate-input__item--active {
   background-color: var(--el-fill-color-light, #f5f7fa);
 }
 </style>

@@ -662,6 +662,45 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     expect(list?.textContent).toContain('采购')
   })
 
+  // P2-B (round 4, owner review) — parent-shortcut isolation proven against the REAL production
+  // wiring, not just the isolated Host in categoryCandidateInput.spec.ts. This view is the one that
+  // actually writes `@keyup.enter="saveCategory" @keyup.escape="cancelEditCategory"` onto
+  // <CategoryCandidateInput> (`TemplateDetailView.vue:109-110`); `saveCategory` calls
+  // `updateTemplateCategory` (mocked below as `updateTemplateCategorySpy`) and, on success,
+  // `ElMessage.success` (`elSuccessSpy`) — either firing here would mean the isolation broke
+  // against the real handler, not merely a test double standing in for it.
+  it('P2-B: ArrowDown x2 + Enter selects the second fetched candidate WITHOUT invoking the real saveCategory handler', async () => {
+    mockActiveTemplate.value = buildTemplate({ category: null })
+    const root = await mountView()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="template-detail-category-edit-button"]')!.click()
+    await flushUi()
+    const input = root.querySelector<HTMLInputElement>('[data-testid="template-detail-category-input"]')!
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await flushUi() // now on the second fetched candidate ('采购', of ['差旅', '采购'] — see beforeEach)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi()
+
+    expect(input.value).toBe('采购')
+    expect(updateTemplateCategorySpy).not.toHaveBeenCalled()
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+
+    // Positive control, in the SAME real wiring (pass-through): the dropdown is closed now (a
+    // keyboard-accepted selection closes it, same as a mouse click), so Enter must reach the real
+    // saveCategory handler — proving the isolation above suppresses the shortcut ONLY while a
+    // candidate is actually being accepted, not Enter in general on this field.
+    updateTemplateCategorySpy.mockResolvedValueOnce(buildTemplate({ category: '采购' }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(updateTemplateCategorySpy).toHaveBeenCalledTimes(1)
+  })
+
   it('SLA edit: invalid-value error and update-success toast follow the locale', async () => {
     setLocale('en')
     mockActiveTemplate.value = buildTemplate({ slaHours: null })

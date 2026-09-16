@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, withKeys, type App as VueApp } from 'vue'
 
 // approval-form-ux-slice1 (20260916 design §3) — CategoryCandidateInput's OWN contract, isolated
 // from the two views that mount it (TemplateAuthoringView.vue, TemplateDetailView.vue; those two
@@ -174,5 +174,180 @@ describe('CategoryCandidateInput', () => {
     const el = input()
     expect(el.disabled).toBe(true)
     expect(el.maxLength).toBe(64)
+  })
+
+  // Remedy round 4 (P2-B, owner review) — keyboard + combobox semantics, and the "parent-shortcut
+  // isolation" problem: TemplateDetailView.vue wires `@keyup.enter="saveCategory"
+  // @keyup.escape="cancelEditCategory"` directly onto <CategoryCandidateInput>. Because this
+  // component declares `inheritAttrs: false` and forwards `$attrs` (everything but `class`) onto
+  // its OWN inner <input> via `inputAttrs`, those two parent handlers land on the SAME native
+  // <input> element as this component's own listeners: two `@keyup.x` bindings on one template
+  // element compile to ONE `onKeyup` prop holding an ARRAY of handlers, and Vue's `mergeProps`
+  // concatenates that array onto whatever this component's own `@keyup` binding already put there
+  // — they are not two separate DOM listeners on two different elements, so ordinary
+  // `stopPropagation()` (which only stops bubbling to ANCESTOR elements) cannot isolate one from
+  // the other. `mountWithParentShortcuts` below reproduces that exact compiled shape with `withKeys`
+  // (not `container.addEventListener`, which would exercise real DOM bubbling — a different code
+  // path with different stopPropagation semantics) so these tests exercise the real mechanism.
+  describe('P2-B: keyboard + combobox semantics', () => {
+    function mountWithParentShortcuts(saveSpy: (e: Event) => void, cancelSpy: (e: Event) => void, initial = '') {
+      return mountInput(initial, {
+        onKeyup: [withKeys(saveSpy, ['enter']), withKeys(cancelSpy, ['escape'])],
+      })
+    }
+
+    function fireKey(el: HTMLElement, type: 'keydown' | 'keyup', key: string): void {
+      el.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true }))
+    }
+
+    it('(a) ArrowDown x2 + Enter selects the SECOND candidate, and the parent keyup.enter save shortcut is NOT invoked', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      const updates = await mountWithParentShortcuts(saveSpy, cancelSpy)
+      const el = input()
+
+      fireKey(el, 'keydown', 'ArrowDown') // opens the list, kicks off the fetch, seeds index 0
+      await flushUi()
+      fireKey(el, 'keydown', 'ArrowDown') // candidates have resolved by now: index 0 -> 1 (second)
+      await flushUi()
+      fireKey(el, 'keydown', 'Enter')
+      fireKey(el, 'keyup', 'Enter')
+      await flushUi()
+
+      expect(updates).toEqual(['采购']) // second of ['请假', '采购', '报销']
+      expect(saveSpy).not.toHaveBeenCalled()
+    })
+
+    it('(b) positive control: Enter with the list CLOSED still reaches the parent keyup.enter save shortcut', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      await mountWithParentShortcuts(saveSpy, cancelSpy)
+      const el = input()
+
+      fireKey(el, 'keydown', 'Enter')
+      fireKey(el, 'keyup', 'Enter')
+      await flushUi()
+
+      expect(saveSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('(c) Escape with the list open closes it, and the parent keyup.escape cancel shortcut is NOT invoked', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      await mountWithParentShortcuts(saveSpy, cancelSpy)
+      const el = input()
+
+      el.dispatchEvent(new Event('focus'))
+      await flushUi()
+      expect(container!.querySelector('[data-testid="category-candidate-list"]')).not.toBeNull()
+
+      fireKey(el, 'keydown', 'Escape')
+      fireKey(el, 'keyup', 'Escape')
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="category-candidate-list"]')).toBeNull()
+      expect(cancelSpy).not.toHaveBeenCalled()
+    })
+
+    it('(d) positive control: Escape with the list CLOSED still reaches the parent keyup.escape cancel shortcut', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      await mountWithParentShortcuts(saveSpy, cancelSpy)
+      const el = input()
+
+      fireKey(el, 'keydown', 'Escape')
+      fireKey(el, 'keyup', 'Escape')
+      await flushUi()
+
+      expect(cancelSpy).toHaveBeenCalledTimes(1)
+    })
+
+    // Advisor-flagged gap in (c)/(d) as originally scoped: `open` alone is not "the list is
+    // visible" — it goes true on plain focus, before anything has matched. Gating Escape-consume on
+    // `open` (instead of `listboxVisible`) would let a focused-but-empty-match field swallow Escape
+    // and never reach the parent's cancel shortcut.
+    it('Escape reaches the parent cancel shortcut when focused but the list has no match (nothing visibly open)', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      await mountWithParentShortcuts(saveSpy, cancelSpy, 'zzz-no-match')
+      const el = input()
+
+      el.dispatchEvent(new Event('focus'))
+      await flushUi()
+      expect(container!.querySelector('[data-testid="category-candidate-list"]')).toBeNull()
+
+      fireKey(el, 'keydown', 'Escape')
+      fireKey(el, 'keyup', 'Escape')
+      await flushUi()
+
+      expect(cancelSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('(e) ARIA: combobox/listbox/option attributes reflect open state and the active item, absent when none', async () => {
+      await mountInput('')
+      const el = input()
+      expect(el.getAttribute('role')).toBe('combobox')
+      expect(el.getAttribute('aria-autocomplete')).toBe('list')
+      expect(el.getAttribute('aria-expanded')).toBe('false')
+      expect(el.hasAttribute('aria-activedescendant')).toBe(false)
+      const listboxId = el.getAttribute('aria-controls')
+      expect(listboxId).toBeTruthy()
+
+      fireKey(el, 'keydown', 'ArrowDown')
+      await flushUi()
+      fireKey(el, 'keydown', 'ArrowDown') // now on the second candidate
+      await flushUi()
+
+      expect(el.getAttribute('aria-expanded')).toBe('true')
+      const list = container!.querySelector('[data-testid="category-candidate-list"]') as HTMLUListElement
+      expect(list.getAttribute('role')).toBe('listbox')
+      expect(list.id).toBe(listboxId)
+      const options = Array.from(list.querySelectorAll('li'))
+      expect(options.every((o) => o.getAttribute('role') === 'option')).toBe(true)
+      expect(options[0].getAttribute('aria-selected')).toBe('false')
+      expect(options[1].getAttribute('aria-selected')).toBe('true')
+      expect(el.getAttribute('aria-activedescendant')).toBe(options[1].id)
+
+      // Selecting closes the list — aria-activedescendant must go back to absent, not merely empty.
+      options[1].dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      await flushUi()
+      expect(el.getAttribute('aria-expanded')).toBe('false')
+      expect(el.hasAttribute('aria-activedescendant')).toBe(false)
+    })
+
+    it('(f) mouse selection still works alongside the new keyboard wiring (regression, mirrors the existing C1 click test)', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      const updates = await mountWithParentShortcuts(saveSpy, cancelSpy)
+      const el = input()
+      el.dispatchEvent(new Event('focus'))
+      await flushUi()
+      const item = container!.querySelector('[data-testid="category-candidate-list"] li') as HTMLLIElement
+      item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      await flushUi()
+      expect(updates).toEqual(['请假'])
+      expect(container!.querySelector('[data-testid="category-candidate-list"]')).toBeNull()
+    })
+
+    it('ArrowUp does nothing while the list is closed (only ArrowDown opens it)', async () => {
+      await mountInput('')
+      const el = input()
+      fireKey(el, 'keydown', 'ArrowUp')
+      await flushUi()
+      expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
+      expect(container!.querySelector('[data-testid="category-candidate-list"]')).toBeNull()
+    })
+
+    it('ArrowDown/ArrowUp wrap at both ends of the visible candidate list', async () => {
+      await mountInput('')
+      const el = input()
+      fireKey(el, 'keydown', 'ArrowDown')
+      await flushUi() // index 0 (请假)
+      fireKey(el, 'keydown', 'ArrowUp')
+      await flushUi() // wraps to the LAST candidate (报销), index 2
+      const list = container!.querySelector('[data-testid="category-candidate-list"]') as HTMLUListElement
+      const options = Array.from(list.querySelectorAll('li'))
+      expect(options[2].getAttribute('aria-selected')).toBe('true')
+    })
   })
 })
