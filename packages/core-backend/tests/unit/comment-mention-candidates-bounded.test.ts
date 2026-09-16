@@ -37,7 +37,8 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../../src/integration/db/connection-pool', () => ({
-  poolManager: { get: () => ({ query: mocks.query }) },
+  // getInternalPool: read at load time by src/db/pg.ts (routes/comments.ts -> multitable/access -> rbac/service).
+  poolManager: { get: () => ({ query: mocks.query, getInternalPool: () => null }) },
 }))
 
 vi.mock('../../src/multitable/permission-service', () => ({

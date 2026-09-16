@@ -106,6 +106,10 @@ import {
   REPLY_PARENT_OUTSIDE_THREAD_MESSAGE,
 } from '../../src/services/CommentService'
 import type { CollabService } from '../../src/services/CollabService'
+import type { CommentInboxScope } from '../../src/di/identifiers'
+
+/** #5831 part B: the cross-sheet aggregates need the route's scope; these fixtures live on sheet-1. */
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet-1'], deniedRows: [] }
 
 // ── Get the shared result queues ────────────────────────────────────────────
 
@@ -360,7 +364,7 @@ describe('CommentService', () => {
       pushTakeFirst({ c: 1 })
       pushExec([inboxRow])
 
-      const result = await service.getInbox('user-viewer')
+      const result = await service.getInbox('user-viewer', undefined, INBOX_SCOPE)
 
       expect(result.total).toBe(1)
       expect(result.items).toHaveLength(1)
@@ -398,7 +402,7 @@ describe('CommentService', () => {
       pushTakeFirst({ c: 2 })
       pushExec([mentionedUnread, mentionedRead])
 
-      const result = await service.getInbox('user-viewer')
+      const result = await service.getInbox('user-viewer', undefined, INBOX_SCOPE)
 
       expect(result.total).toBe(2)
       expect(result.items[0].unread).toBe(true)
@@ -411,7 +415,7 @@ describe('CommentService', () => {
       pushTakeFirst({ c: 0 })
       pushExec([])
 
-      const result = await service.getInbox('user-author')
+      const result = await service.getInbox('user-author', undefined, INBOX_SCOPE)
 
       expect(result.total).toBe(0)
       expect(result.items).toHaveLength(0)
@@ -424,7 +428,7 @@ describe('CommentService', () => {
     it('counts only comments where user has no read record', async () => {
       pushTakeFirst({ c: 5 })
 
-      const count = await service.getUnreadCount('user-viewer')
+      const count = await service.getUnreadCount('user-viewer', INBOX_SCOPE)
 
       expect(count).toBe(5)
     })
@@ -432,7 +436,7 @@ describe('CommentService', () => {
     it("excludes user's own comments from unread count", async () => {
       pushTakeFirst({ c: 0 })
 
-      const count = await service.getUnreadCount('user-author')
+      const count = await service.getUnreadCount('user-author', INBOX_SCOPE)
 
       expect(count).toBe(0)
     })
@@ -440,7 +444,7 @@ describe('CommentService', () => {
     it('returns 0 when no unread comments', async () => {
       pushTakeFirst({ c: 0 })
 
-      const count = await service.getUnreadCount('user-1')
+      const count = await service.getUnreadCount('user-1', INBOX_SCOPE)
 
       expect(count).toBe(0)
     })
@@ -448,9 +452,83 @@ describe('CommentService', () => {
     it('returns 0 when query returns undefined', async () => {
       pushTakeFirst(undefined)
 
-      const count = await service.getUnreadCount('user-1')
+      const count = await service.getUnreadCount('user-1', INBOX_SCOPE)
 
       expect(count).toBe(0)
+    })
+  })
+
+  // ── #5831 part B: the inbox scope ─────────────────────────────────────
+
+  describe('cross-sheet aggregates need an admitted scope (#5831 part B)', () => {
+    async function selectFromMock() {
+      const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+      return db.selectFrom
+    }
+
+    it('a missing, empty or malformed scope answers empty WITHOUT a query (never "every sheet")', async () => {
+      const selectFrom = await selectFromMock()
+      selectFrom.mockClear()
+      const nothing: unknown[] = [
+        undefined,
+        { sheetIds: [], deniedRows: [] },
+        { sheetIds: [''], deniedRows: [] },
+        { sheetIds: 'sheet-1', deniedRows: [] },
+        { deniedRows: [{ spreadsheetId: 'sheet-1', rowId: 'row-1' }] },
+      ]
+      for (const scope of nothing) {
+        await expect(service.getInbox('user-viewer', { limit: 5, offset: 0 }, scope as never)).resolves.toEqual({ items: [], total: 0 })
+        await expect(service.getUnreadSummary('user-viewer', scope as never)).resolves.toEqual({ unreadCount: 0, mentionUnreadCount: 0 })
+        await expect(service.getUnreadCount('user-viewer', scope as never)).resolves.toBe(0)
+      }
+      // A blank user never queries either.
+      await expect(service.getInbox('  ', undefined, INBOX_SCOPE)).resolves.toEqual({ items: [], total: 0 })
+      await expect(service.getUnreadSummary('', INBOX_SCOPE)).resolves.toEqual({ unreadCount: 0, mentionUnreadCount: 0 })
+      expect(selectFrom).not.toHaveBeenCalled()
+    })
+
+    it('an admitted scope is put on every aggregate query (COUNT and page)', async () => {
+      const selectFrom = await selectFromMock()
+      selectFrom.mockClear()
+      pushTakeFirst({ c: 0 })
+      pushExec([])
+      await service.getInbox('user-viewer', { limit: 5, offset: 0 }, INBOX_SCOPE)
+      pushTakeFirst({ unread_count: 0, mention_unread_count: 0 })
+      await service.getUnreadSummary('user-viewer', INBOX_SCOPE)
+      pushTakeFirst({ c: 0 })
+      await service.getUnreadCount('user-viewer', INBOX_SCOPE)
+      const chains = selectFrom.mock.results.map((r) => r.value as Record<string, ReturnType<typeof vi.fn>>)
+      expect(chains).toHaveLength(4)
+      // author filter + inbox/unread predicate + the scope predicate, on each query
+      for (const chain of chains) expect(chain.where).toHaveBeenCalledTimes(3)
+    })
+
+    it('candidate listers: ids only, grouped, and no query without a user or sheets', async () => {
+      const selectFrom = await selectFromMock()
+      selectFrom.mockClear()
+      await expect(service.listInboxCandidateSheetIds(' ')).resolves.toEqual([])
+      await expect(service.listInboxCandidateRowIds('user-viewer', [])).resolves.toEqual(new Map())
+      await expect(service.listInboxCandidateRowIds('', ['sheet-1'])).resolves.toEqual(new Map())
+      expect(selectFrom).not.toHaveBeenCalled()
+
+      pushExec([{ spreadsheet_id: 'sheet-1' }, { spreadsheet_id: 'sheet-2' }, { spreadsheet_id: null }])
+      await expect(service.listInboxCandidateSheetIds('user-viewer')).resolves.toEqual(['sheet-1', 'sheet-2'])
+      pushExec([
+        { spreadsheet_id: 'sheet-1', row_id: 'row-1' },
+        { spreadsheet_id: 'sheet-1', row_id: 'row-2' },
+        { spreadsheet_id: 'sheet-2', row_id: 'row-9' },
+        { spreadsheet_id: 'sheet-2', row_id: '' },
+      ])
+      await expect(service.listInboxCandidateRowIds('user-viewer', ['sheet-1', 'sheet-2', 'sheet-1'])).resolves.toEqual(new Map([
+        ['sheet-1', ['row-1', 'row-2']],
+        ['sheet-2', ['row-9']],
+      ]))
+      const [sheets, rows] = selectFrom.mock.results.map((r) => r.value as Record<string, ReturnType<typeof vi.fn>>)
+      expect(sheets!.select).toHaveBeenCalledWith('c.spreadsheet_id')
+      expect(sheets!.groupBy).toHaveBeenCalledWith('c.spreadsheet_id')
+      expect(rows!.select).toHaveBeenCalledWith(['c.spreadsheet_id', 'c.row_id'])
+      expect(rows!.groupBy).toHaveBeenCalledWith(['c.spreadsheet_id', 'c.row_id'])
+      expect(rows!.selectAll).not.toHaveBeenCalled()
     })
   })
 
@@ -649,18 +727,17 @@ describe('CommentService', () => {
       return { table: calls[calls.length - 1]?.[0], chain: results[results.length - 1]?.value as Record<string, ReturnType<typeof vi.fn>> }
     }
 
-    it('returns only the sheet, row and author of the comment, read by id', async () => {
-      pushTakeFirst({ spreadsheet_id: 'sheet-9', row_id: 'row-9', author_id: 'user-9' })
+    it('returns only the sheet and row of the comment, read by id', async () => {
+      pushTakeFirst({ spreadsheet_id: 'sheet-9', row_id: 'row-9' })
 
       await expect(service.getCommentAddress('cmt_addr')).resolves.toEqual({
         spreadsheetId: 'sheet-9',
         rowId: 'row-9',
-        authorId: 'user-9',
       })
 
       const { table, chain } = await lastSelectChain()
       expect(table).toBe('meta_comments')
-      expect(chain.select).toHaveBeenCalledWith(['spreadsheet_id', 'row_id', 'author_id'])
+      expect(chain.select).toHaveBeenCalledWith(['spreadsheet_id', 'row_id'])
       expect(chain.selectAll).not.toHaveBeenCalled()
       expect(chain.where).toHaveBeenCalledTimes(1)
       expect(chain.where).toHaveBeenCalledWith('id', '=', 'cmt_addr')

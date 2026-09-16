@@ -2,21 +2,32 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Injector } from '@wendellhu/redi'
-import { ICommentService, type CommentAddressRecord, type CommentQueryOptions } from '../di/identifiers'
+import {
+  ICommentService,
+  type CommentAddressRecord,
+  type CommentInboxDeniedRow,
+  type CommentInboxScope,
+  type CommentQueryOptions,
+} from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { poolManager } from '../integration/db/connection-pool'
+import { resolveRequestAccess, type ResolvedRequestAccess } from '../multitable/access'
 import {
-  ensureRecordWriteAllowed,
+  canAccessElearningProjectionSheet,
+  loadElearningProjectionSheetOrgMap,
+} from '../multitable/elearning-projection-access'
+import {
+  filterReadableSheetRowsForAccess,
   loadDeniedRecordIds,
-  loadRecordCreatorMap,
-  loadRecordPermissionScopeMap,
   loadRowLevelReadDenyEnabled,
   resolveSheetReadableCapabilities,
+  type QueryFn,
 } from '../multitable/permission-service'
+import { loadSheetLivenessBatch } from '../multitable/sheet-liveness'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   CommentAccessError,
@@ -140,25 +151,19 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  * attacker-supplied surface — list/summary/presence/mention-candidates/mention-summary read + create/
  * mark-read/mark-all-read write) and, through `resolveCommentIdContext` (#5831), the `:commentId`-
  * addressed routes (patch/delete/read/reactions/resolve), which gate on the sheet the COMMENT lives on.
- * NOT gated here (tracked in #5831, part B): the user-scoped cross-sheet `inbox`/`unread-count`
- * aggregates (they need result filtering by the actor's readable, live sheet set, not a single-sheet 403).
+ * The user-scoped cross-sheet `inbox`/`unread-count` aggregates name no sheet, so they cannot answer
+ * with a single-sheet 403; they are FILTERED instead (#5831 part B, `resolveCommentInboxScope`): only
+ * comments on sheets this gate would let the caller read, that are live, on rows it would not deny.
  */
-type SheetReadableResolution = Awaited<ReturnType<typeof resolveSheetReadableCapabilities>>
-
 type CommentReadContext = {
   userId: string
   /**
    * #5808: the id `resolveRequestAccess` derived from `req.user` ONLY — empty when there is no
    * authenticated user. Unlike `userId` it never falls back to the `x-user-id` header, so it is the
-   * only id allowed to decide whose comments get mention labels (and, #5831, who counts as a
-   * comment's author when resolving it).
+   * only id allowed to decide whose comments get mention labels.
    */
   authenticatedUserId: string
   deniedRowIds: Set<string>
-  /** #5831: the resolved sheet authority, for decisions after the gate (who may resolve). */
-  access: SheetReadableResolution['access']
-  capabilities: SheetReadableResolution['capabilities']
-  sheetScope?: SheetReadableResolution['sheetScope']
 }
 
 /**
@@ -185,7 +190,7 @@ async function resolveCommentReadContext(
 ): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
-  const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
   if (!capabilities.canRead) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
     return null
@@ -207,14 +212,7 @@ async function resolveCommentReadContext(
       deniedRowIds.add(rowId)
     }
   }
-  return {
-    userId: access.userId || getUserId(req),
-    authenticatedUserId: access.userId || '',
-    deniedRowIds,
-    access,
-    capabilities,
-    ...(sheetScope ? { sheetScope } : {}),
-  }
+  return { userId: access.userId || getUserId(req), authenticatedUserId: access.userId || '', deniedRowIds }
 }
 
 type CommentIdContext = CommentReadContext & { address: CommentAddressRecord }
@@ -255,35 +253,88 @@ async function resolveCommentIdContext(
 }
 
 /**
- * #5831 — WHO MAY RESOLVE A COMMENT (owner-visible decision): its author, or anyone who may edit the
- * record the comment is on (the same row-level write decision as a record edit: sheet write authority,
- * narrowed by an own-records-only sheet grant, widened by a record-level write grant). Holding
- * `comments:write` and being able to read the sheet is no longer enough to close someone else's thread.
- * Authorship is matched on the authenticated user only — never the `x-user-id` header. Runs after the
- * sheet gate, so the caller can already read the comment.
- *
- * Record locks are NOT consulted: a lock makes the record's data read-only, and comments are a separate
- * path that stays allowed on a locked record (multitable/record-lock.ts, decision d). "May edit the
- * record" here means the sheet/row write authority above, not "may edit it right now".
+ * #5831 part B — the readable subset of `liveSheetIds` for the cross-sheet aggregates, by the rule the
+ * sheet gate above applies to ONE sheet (resolveSheetReadableCapabilities → resolveSheetCapabilitiesForAccess),
+ * computed once for the whole set. `filterReadableSheetRowsForAccess` is that rule for a list — the sheet
+ * and base list routes use it: sheet grants over the global codes, approval-projection sheets only for
+ * their participants, e-learning projection sheets only for their org. It lets an ADMIN through before
+ * its e-learning check, which the single-sheet gate does not (restrictElearningProjectionCapabilities
+ * applies to admins too), so for an admin that one check is repeated here with the gate's own two
+ * helpers — otherwise an admin's inbox could list a comment whose `/read` answers 403.
  */
-async function mayResolveComment(context: CommentIdContext): Promise<boolean> {
-  const actorId = context.authenticatedUserId.trim()
-  if (actorId.length > 0 && context.address.authorId === actorId) return true
+async function resolveInboxReadableSheetIds(
+  query: QueryFn,
+  access: ResolvedRequestAccess,
+  liveSheetIds: string[],
+): Promise<string[]> {
+  const readable = (await filterReadableSheetRowsForAccess(query, liveSheetIds.map((id) => ({ id })), access))
+    .map((row) => row.id)
+  if (!access.isAdminRole || readable.length === 0) return readable
+  const elearningOrgBySheet = await loadElearningProjectionSheetOrgMap(query, readable)
+  return readable.filter((id) => !elearningOrgBySheet.has(id)
+    || canAccessElearningProjectionSheet(access, id, elearningOrgBySheet.get(id) ?? null))
+}
+
+/**
+ * #5831 part B — WHICH comments the cross-sheet aggregates (GET /api/comments/inbox and GET
+ * /api/comments/unread-count) may list and count for the caller: the ones a comment-id route would let
+ * the same caller act on, so every listed item can be marked read.
+ *
+ *  - IDENTITY: the authenticated user only (`resolveRequestAccess`, i.e. `req.user`), never the
+ *    `x-user-id` header. No authenticated user ⇒ an empty scope: nothing is listed and no query runs.
+ *  - LIVE: sheets whose `meta_sheets` row exists and is not soft-deleted (loadSheetLivenessBatch, the
+ *    batched twin of the gate's loadSheetLiveness). Admins included, as on the sheet-addressed routes.
+ *  - READABLE: resolveInboxReadableSheetIds, the gate's read rule for the whole set.
+ *  - ROW DENY: for a non-admin, on every readable live sheet with row-level read deny switched on
+ *    (loadRowLevelReadDenyEnabled), the rows loadDeniedRecordIds denies — asked only about the rows that
+ *    carry a candidate comment for this caller. Admins skip it, as on the sheet-addressed routes.
+ *
+ * The service applies the scope in SQL, in the WHERE of the COUNT and of the page query (before
+ * LIMIT/OFFSET), so `total`, the unread counts and the pages all agree with what is listed.
+ *
+ * COST, once per request: 1 query for the candidate sheets (the distinct sheets holding a comment by
+ * someone else that the caller has not read or is mentioned in), 1 liveness query, a fixed number of
+ * batched readable-set queries (independent of the number of sheets; one more for an admin), then, for
+ * a non-admin, one row-deny flag lookup per readable live candidate sheet (K) and — only when at least
+ * one of them has row deny on — 1 query for their candidate rows plus one row-bounded
+ * loadDeniedRecordIds per such sheet. K is at most the number of live sheets that hold a comment
+ * addressed to the caller.
+ */
+async function resolveCommentInboxScope(
+  req: Request,
+  commentService: ICommentService,
+): Promise<{ userId: string; scope: CommentInboxScope }> {
+  const access = await resolveRequestAccess(req)
+  const userId = access.userId
+  if (userId.trim().length === 0) return { userId: '', scope: { sheetIds: [], deniedRows: [] } }
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
-  const { spreadsheetId, rowId } = context.address
-  const creators = await loadRecordCreatorMap(query, spreadsheetId, [rowId])
-  const recordScopes = await loadRecordPermissionScopeMap(query, spreadsheetId, [rowId], context.access.userId)
-  return ensureRecordWriteAllowed(
-    context.capabilities,
-    context.sheetScope,
-    context.access,
-    creators.get(rowId) ?? null,
-    'edit',
-    recordScopes,
-    rowId,
-  )
+  const candidateSheetIds = await commentService.listInboxCandidateSheetIds(userId)
+  const liveness = await loadSheetLivenessBatch(query, candidateSheetIds)
+  const liveSheetIds = candidateSheetIds.filter((sheetId) => liveness.get(sheetId) === 'live')
+  const readableSheetIds = await resolveInboxReadableSheetIds(query, access, liveSheetIds)
+  const deniedRows: CommentInboxDeniedRow[] = []
+  if (!access.isAdminRole) {
+    const rowDenySheetIds: string[] = []
+    for (const sheetId of readableSheetIds) {
+      if (await loadRowLevelReadDenyEnabled(query, sheetId)) rowDenySheetIds.push(sheetId)
+    }
+    const candidateRows = rowDenySheetIds.length > 0
+      ? await commentService.listInboxCandidateRowIds(userId, rowDenySheetIds)
+      : new Map<string, string[]>()
+    for (const sheetId of rowDenySheetIds) {
+      const rowIds = candidateRows.get(sheetId) ?? []
+      if (rowIds.length === 0) continue
+      for (const rowId of await loadDeniedRecordIds(query, sheetId, userId, rowIds)) {
+        deniedRows.push({ spreadsheetId: sheetId, rowId })
+      }
+    }
+  }
+  return { userId, scope: { sheetIds: readableSheetIds, deniedRows } }
 }
+
+/** #5840 — the refusal for a mark-all-read that names someone other than the caller. Values-free. */
+const MARK_READ_OTHER_USER_MESSAGE = 'Comments can only be marked read for the signed-in user'
 
 /**
  * #5808 — whose comments on a list page get `mentionLabels` (see CommentService.getComments). Only an
@@ -509,7 +560,9 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const limit = clampLimit(parsed.data.limit)
       const offset = clampOffset(parsed.data.offset)
-      const result = await commentService.getInbox(getUserId(req), { limit, offset })
+      // #5831 part B: only readable, live sheets and non-denied rows, filtered before COUNT/LIMIT.
+      const inbox = await resolveCommentInboxScope(req, commentService)
+      const result = await commentService.getInbox(inbox.userId, { limit, offset }, inbox.scope)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
       logger.error('Failed to load comment inbox', error as Error)
@@ -519,7 +572,9 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.get('/api/comments/unread-count', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     try {
-      const summary = await commentService.getUnreadSummary(getUserId(req))
+      // #5831 part B: counts the same comments the inbox can list (see resolveCommentInboxScope).
+      const inbox = await resolveCommentInboxScope(req, commentService)
+      const summary = await commentService.getUnreadSummary(inbox.userId, inbox.scope)
       return res.json({
         ok: true,
         data: {
@@ -820,14 +875,10 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      // #5831 (coordinator decision): resolving needs read access to the comment's live sheet and row
+      // (this gate) plus comments:write (rbacGuard above). A stricter rule is tracked in #5841.
       const context = await resolveCommentIdContext(req, res, commentService, commentId)
       if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
-      if (!(await mayResolveComment(context))) {
-        return res.status(403).json({
-          ok: false,
-          error: { code: 'FORBIDDEN', message: 'Only the comment author or someone who can edit this record can resolve this comment' },
-        })
-      }
       await commentService.resolveComment(commentId)
       return res.status(204).end()
     } catch (error) {
@@ -902,9 +953,15 @@ export function commentsRouter(injector?: Injector): Router {
 
   /**
    * POST /api/multitable/:spreadsheetId/comments/mark-all-read
-   * Body: { userId: string }
+   * Body: { userId?: string } — optional and only accepted when it names the signed-in user.
    *
-   * Batch-mark all unread comments in this spreadsheet as read for the user.
+   * Batch-mark all unread comments in this spreadsheet as read for the signed-in user.
+   *
+   * #5840: the body `userId` used to pick WHOSE read state was written, so any comments:write holder who
+   * could read the sheet could clear another user's unread comments (and the row deny applied was the
+   * caller's, not the target's). The write now always targets the caller; a body `userId` naming anyone
+   * else is refused with 403 (an authorization refusal — the request is well-formed but asks to act for
+   * another principal) instead of being silently ignored, so a client relying on it notices.
    */
   router.post('/api/multitable/:spreadsheetId/comments/mark-all-read', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const spreadsheetId = req.params.spreadsheetId?.trim()
@@ -923,9 +980,11 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentReadContext(req, res, spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      // Prefer body userId; fall back to authenticated user
-      const userId = parsed.data.userId?.trim() || context.userId
-      const count = await commentService.markAllCommentsRead(spreadsheetId, userId, deniedRows(context))
+      const requestedUserId = parsed.data.userId?.trim()
+      if (requestedUserId && requestedUserId !== context.userId.trim()) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: MARK_READ_OTHER_USER_MESSAGE } })
+      }
+      const count = await commentService.markAllCommentsRead(spreadsheetId, context.userId, deniedRows(context))
       return res.json({ ok: true, data: { markedRead: count } })
     } catch (error) {
       logger.error('Failed to mark all comments as read', error as Error)

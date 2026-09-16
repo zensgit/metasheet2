@@ -11,7 +11,9 @@
  *     is denied are indistinguishable (the same 403 body);
  *   - the row deny is loaded for the comment's own row only, while sheet-addressed routes keep the full set;
  *   - a readable, live comment behaves as before;
- *   - resolve needs the author or the right to edit the comment's record (owner-visible decision);
+ *   - resolve needs read access to the comment's live sheet and row (the gate) plus comments:write — the
+ *     coordinator's decision; a stricter "author or record editor" rule is tracked in #5841;
+ *   - a forged x-user-id header never becomes the identity of an authorization decision;
  *   - API tokens still reach exactly the comment routes they reached before (none of these).
  */
 import express, { type Express } from 'express'
@@ -24,8 +26,6 @@ const mocks = vi.hoisted(() => ({
   resolveSheetReadableCapabilities: vi.fn(),
   loadRowLevelReadDenyEnabled: vi.fn(),
   loadDeniedRecordIds: vi.fn(),
-  loadRecordCreatorMap: vi.fn(),
-  loadRecordPermissionScopeMap: vi.fn(),
 }))
 
 vi.mock('../../src/integration/db/connection-pool', () => ({
@@ -33,23 +33,21 @@ vi.mock('../../src/integration/db/connection-pool', () => ({
   poolManager: { get: () => ({ query: mocks.query, getInternalPool: () => null }) },
 }))
 
-vi.mock('../../src/multitable/permission-service', async () => {
-  const actual = await vi.importActual<typeof import('../../src/multitable/permission-service')>(
-    '../../src/multitable/permission-service',
-  )
-  return {
-    // The row-level write decision itself is the real one (own-write scope, record grants).
-    ensureRecordWriteAllowed: actual.ensureRecordWriteAllowed,
-    resolveSheetReadableCapabilities: (...args: unknown[]) => mocks.resolveSheetReadableCapabilities(...args),
-    loadRowLevelReadDenyEnabled: (...args: unknown[]) => mocks.loadRowLevelReadDenyEnabled(...args),
-    loadDeniedRecordIds: (...args: unknown[]) => mocks.loadDeniedRecordIds(...args),
-    loadRecordCreatorMap: (...args: unknown[]) => mocks.loadRecordCreatorMap(...args),
-    loadRecordPermissionScopeMap: (...args: unknown[]) => mocks.loadRecordPermissionScopeMap(...args),
-  }
-})
+vi.mock('../../src/multitable/permission-service', () => ({
+  resolveSheetReadableCapabilities: (...args: unknown[]) => mocks.resolveSheetReadableCapabilities(...args),
+  loadRowLevelReadDenyEnabled: (...args: unknown[]) => mocks.loadRowLevelReadDenyEnabled(...args),
+  loadDeniedRecordIds: (...args: unknown[]) => mocks.loadDeniedRecordIds(...args),
+}))
 
 vi.mock('../../src/rbac/rbac', () => ({
-  rbacGuard: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  // The real guard's contract, read from req.user: 401 without an authenticated id, 403 without the code.
+  // (The real one also consults namespace admission; that is not what these tests are about.)
+  rbacGuard: (resource: string, action: string) => (req: any, res: any, next: () => void) => {
+    if (!req.user?.id) return res.status(401).json({ error: 'Authentication required' })
+    const perms: string[] = Array.isArray(req.user.perms) ? req.user.perms : []
+    if (!perms.includes(`${resource}:${action}`)) return res.status(403).json({ error: 'Insufficient permissions' })
+    return next()
+  },
 }))
 
 vi.mock('../../src/middleware/api-token-auth', () => ({
@@ -85,7 +83,7 @@ const ROW = 'row-fake-1'
 const AUTHOR = 'user-fake-author'
 const ACTOR = 'user-fake-actor'
 
-type Sheet = { canRead: boolean; canEditRecord?: boolean; liveness: 'live' | 'deleted' | 'absent'; scope?: Record<string, unknown> }
+type Sheet = { canRead: boolean; canEditRecord?: boolean; liveness: 'live' | 'deleted' | 'absent' }
 let sheets: Record<string, Sheet>
 let isAdmin: boolean
 
@@ -95,10 +93,9 @@ function buildCommentService() {
     listMentionCandidates: vi.fn(async () => ({ items: [] })),
     getInbox: vi.fn(),
     getUnreadSummary: vi.fn(),
-    getCommentAddress: vi.fn(async (_id: string): Promise<{ spreadsheetId: string; rowId: string; authorId: string } | null> => ({
+    getCommentAddress: vi.fn(async (_id: string): Promise<{ spreadsheetId: string; rowId: string } | null> => ({
       spreadsheetId: COMMENT_SHEET,
       rowId: ROW,
-      authorId: AUTHOR,
     })),
     getMentionSummary: vi.fn(async () => ({ items: [] })),
     getCommentPresenceSummary: vi.fn(async () => ({ items: [], total: 0 })),
@@ -117,14 +114,15 @@ function buildCommentService() {
 }
 type Service = ReturnType<typeof buildCommentService>
 
-type Caller = { userId: string | null; apiToken?: boolean }
+type Caller = { userId: string | null; apiToken?: boolean; perms?: string[] }
+const FULL_PERMS = ['comments:read', 'comments:write', 'multitable:read']
 
 function buildApp(service: Service, caller: Caller = { userId: ACTOR }): Express {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
     if (caller.userId !== null) {
-      ;(req as any).user = { id: caller.userId, roles: [], perms: ['comments:read', 'comments:write', 'multitable:read'] }
+      ;(req as any).user = { id: caller.userId, roles: [], perms: caller.perms ?? FULL_PERMS }
     }
     if (caller.apiToken) {
       ;(req as any).apiTokenId = 'tok-fake-1'
@@ -204,7 +202,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   isAdmin = false
   sheets = {
-    // For the generic route checks the actor may edit records here, so resolve is authorised.
     [COMMENT_SHEET]: { canRead: true, canEditRecord: true, liveness: 'live' },
     [OTHER_SHEET]: { canRead: true, canEditRecord: true, liveness: 'live' },
   }
@@ -215,13 +212,10 @@ beforeEach(() => {
       access: { userId, permissions: [], isAdminRole: isAdmin },
       capabilities: { canRead: sheet.canRead, canEditRecord: sheet.canEditRecord ?? false, canDeleteRecord: sheet.canEditRecord ?? false },
       sheetLiveness: sheet.liveness,
-      ...(sheet.scope ? { sheetScope: sheet.scope } : {}),
     }
   })
   mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(false)
   mocks.loadDeniedRecordIds.mockResolvedValue(new Set())
-  mocks.loadRecordCreatorMap.mockResolvedValue(new Map([[ROW, AUTHOR]]))
-  mocks.loadRecordPermissionScopeMap.mockResolvedValue(new Map())
 })
 
 describe('comment-id routes gate on the comment’s own sheet (#5831)', () => {
@@ -248,7 +242,7 @@ describe('comment-id routes gate on the comment’s own sheet (#5831)', () => {
       it('absent sheet (orphan comment) → 404 NOT_FOUND, values-free', async () => {
         delete sheets[COMMENT_SHEET]
         sheets.__absent_but_readable = { canRead: true, liveness: 'absent' }
-        service.getCommentAddress.mockResolvedValue({ spreadsheetId: '__absent_but_readable', rowId: ROW, authorId: AUTHOR })
+        service.getCommentAddress.mockResolvedValue({ spreadsheetId: '__absent_but_readable', rowId: ROW })
         const res = await route.send(request(pinned.url()))
         expect(res.status).toBe(404)
         expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
@@ -276,7 +270,6 @@ describe('comment-id routes gate on the comment’s own sheet (#5831)', () => {
           expect(res.body).toEqual(ACCESS_FORBIDDEN)
         }
         expect(service[route.service]).not.toHaveBeenCalled()
-        expect(mocks.loadRecordCreatorMap).not.toHaveBeenCalled()
         expect(resolverCalls()).toEqual([COMMENT_SHEET, COMMENT_SHEET, COMMENT_SHEET])
         expect(service.getCommentAddress.mock.calls.map((c) => c[0])).toEqual([COMMENT_ID, COMMENT_ID, COMMENT_ID, COMMENT_ID])
       })
@@ -376,95 +369,108 @@ describe('comment-id routes gate on the comment’s own sheet (#5831)', () => {
   })
 })
 
-describe('who may resolve a comment (#5831 owner decision: author, or whoever may edit its record)', () => {
-  const RESOLVE_FORBIDDEN = {
-    ok: false,
-    error: { code: 'FORBIDDEN', message: 'Only the comment author or someone who can edit this record can resolve this comment' },
-  }
-  const OWN_WRITE_SCOPE = { hasAssignments: true, canRead: true, canWrite: false, canWriteOwn: true, canAdmin: false }
-
-  async function resolveAs(caller: Caller, headers: Record<string, string> = {}) {
+describe('who may resolve a comment (#5831 decision: read access to its sheet + comments:write; stricter rule → #5841)', () => {
+  async function resolveAs(caller: Caller) {
     const service = buildCommentService()
     pinned.setApp(buildApp(service, caller))
-    let req = request(pinned.url()).post(`/api/comments/${COMMENT_ID}/resolve`)
-    for (const [k, v] of Object.entries(headers)) req = req.set(k, v)
-    const res = await req
+    const res = await request(pinned.url()).post(`/api/comments/${COMMENT_ID}/resolve`)
     return { res, service }
   }
 
-  it('the author may resolve without any record edit right (no record lookups needed)', async () => {
-    sheets[COMMENT_SHEET] = { canRead: true, canEditRecord: false, liveness: 'live' }
-    const { res, service } = await resolveAs({ userId: AUTHOR })
-    expect(res.status).toBe(204)
-    expect(service.resolveComment).toHaveBeenCalledWith(COMMENT_ID)
-    expect(mocks.loadRecordCreatorMap).not.toHaveBeenCalled()
-  })
-
-  it('a reader who holds comments:write but may not edit records is refused, and nothing is resolved', async () => {
+  it('a reader who is not the author and may not edit records resolves with comments:write', async () => {
     sheets[COMMENT_SHEET] = { canRead: true, canEditRecord: false, liveness: 'live' }
     const { res, service } = await resolveAs({ userId: ACTOR })
+    expect(res.status).toBe(204)
+    expect(service.resolveComment).toHaveBeenCalledWith(COMMENT_ID)
+    expect(resolverCalls()).toEqual([COMMENT_SHEET])
+    // No record-level write lookup is made (nothing but the mocked gate touched the pool).
+    expect(mocks.query).not.toHaveBeenCalled()
+  })
+
+  it('without comments:write the route refuses before the gate runs', async () => {
+    const { res, service } = await resolveAs({ userId: ACTOR, perms: ['comments:read', 'multitable:read'] })
     expect(res.status).toBe(403)
-    expect(res.body).toEqual(RESOLVE_FORBIDDEN)
+    expect(service.resolveComment).not.toHaveBeenCalled()
+    expect(service.getCommentAddress).not.toHaveBeenCalled()
+    expect(resolverCalls()).toEqual([])
+  })
+
+  it('a caller who cannot read the comment’s sheet cannot resolve it — author or not, live or deleted — with the access 403', async () => {
+    for (const liveness of ['live', 'deleted'] as const) {
+      for (const userId of [ACTOR, AUTHOR]) {
+        sheets[COMMENT_SHEET] = { canRead: false, liveness }
+        const { res, service } = await resolveAs({ userId })
+        expect(res.status, `${userId} ${liveness}`).toBe(403)
+        expect(res.body).toEqual(ACCESS_FORBIDDEN)
+        expect(service.resolveComment).not.toHaveBeenCalled()
+      }
+    }
+  })
+
+  it('a deleted sheet → 404 SHEET_DELETED for a reader; nothing is resolved', async () => {
+    sheets[COMMENT_SHEET] = { canRead: true, liveness: 'deleted' }
+    const { res, service } = await resolveAs({ userId: ACTOR })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } })
     expect(service.resolveComment).not.toHaveBeenCalled()
   })
 
-  it('a record editor may resolve someone else’s comment; the decision is asked about the comment’s own row', async () => {
+  it('a row the reader is denied → the access 403; nothing is resolved', async () => {
+    mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+    mocks.loadDeniedRecordIds.mockResolvedValue(new Set([ROW]))
     const { res, service } = await resolveAs({ userId: ACTOR })
-    expect(res.status).toBe(204)
-    expect(service.resolveComment).toHaveBeenCalledWith(COMMENT_ID)
-    expect(mocks.loadRecordCreatorMap).toHaveBeenCalledWith(expect.any(Function), COMMENT_SHEET, [ROW])
-    expect(mocks.loadRecordPermissionScopeMap).toHaveBeenCalledWith(expect.any(Function), COMMENT_SHEET, [ROW], ACTOR)
-  })
-
-  it('an admin may resolve anyone’s comment', async () => {
-    isAdmin = true
-    const { res } = await resolveAs({ userId: ACTOR })
-    expect(res.status).toBe(204)
-  })
-
-  it('an own-records-only writer may resolve on a record they created, not on someone else’s', async () => {
-    sheets[COMMENT_SHEET] = { canRead: true, canEditRecord: true, liveness: 'live', scope: OWN_WRITE_SCOPE }
-    const other = await resolveAs({ userId: ACTOR })
-    expect(other.res.status).toBe(403)
-    expect(other.res.body).toEqual(RESOLVE_FORBIDDEN)
-    expect(other.service.resolveComment).not.toHaveBeenCalled()
-
-    mocks.loadRecordCreatorMap.mockResolvedValue(new Map([[ROW, ACTOR]]))
-    const own = await resolveAs({ userId: ACTOR })
-    expect(own.res.status).toBe(204)
-    expect(own.service.resolveComment).toHaveBeenCalledWith(COMMENT_ID)
-  })
-
-  it('a record-level write grant on the comment’s row lets an own-records-only writer resolve there', async () => {
-    sheets[COMMENT_SHEET] = { canRead: true, canEditRecord: true, liveness: 'live', scope: OWN_WRITE_SCOPE }
-    mocks.loadRecordPermissionScopeMap.mockResolvedValue(new Map([[ROW, { recordId: ROW, accessLevel: 'write' }]]))
-    const { res } = await resolveAs({ userId: ACTOR })
-    expect(res.status).toBe(204)
-
-    // …and a grant on a DIFFERENT row does not.
-    mocks.loadRecordPermissionScopeMap.mockResolvedValue(new Map([['row-fake-other', { recordId: 'row-fake-other', accessLevel: 'write' }]]))
-    const elsewhere = await resolveAs({ userId: ACTOR })
-    expect(elsewhere.res.status).toBe(403)
-  })
-
-  it('authorship is never taken from the x-user-id header', async () => {
-    sheets[COMMENT_SHEET] = { canRead: true, canEditRecord: false, liveness: 'live' }
-    const spoofed = await resolveAs({ userId: null }, { 'x-user-id': AUTHOR })
-    expect(spoofed.res.status).toBe(403)
-    expect(spoofed.res.body).toEqual(RESOLVE_FORBIDDEN)
-    expect(spoofed.service.resolveComment).not.toHaveBeenCalled()
-
-    const real = await resolveAs({ userId: AUTHOR })
-    expect(real.res.status).toBe(204)
-  })
-
-  it('the resolve authority is asked only AFTER the sheet gate (an unreadable comment gets the access 403, not the resolve one)', async () => {
-    sheets[COMMENT_SHEET] = { canRead: false, liveness: 'live' }
-    const { res, service } = await resolveAs({ userId: AUTHOR })
     expect(res.status).toBe(403)
     expect(res.body).toEqual(ACCESS_FORBIDDEN)
     expect(service.resolveComment).not.toHaveBeenCalled()
-    expect(mocks.loadRecordCreatorMap).not.toHaveBeenCalled()
+  })
+
+  it('an admin resolves like any reader (the gate still applies liveness)', async () => {
+    isAdmin = true
+    const ok = await resolveAs({ userId: ACTOR })
+    expect(ok.res.status).toBe(204)
+    sheets[COMMENT_SHEET] = { canRead: true, liveness: 'deleted' }
+    const deleted = await resolveAs({ userId: ACTOR })
+    expect(deleted.res.status).toBe(404)
+    expect(deleted.service.resolveComment).not.toHaveBeenCalled()
+  })
+})
+
+describe('a forged x-user-id never becomes the identity of an authorization decision (#5831)', () => {
+  const FORGED = { 'x-user-id': AUTHOR }
+
+  for (const route of ID_ROUTES) {
+    it(`${route.name}: the signed-in caller is the identity everywhere, the header nowhere`, async () => {
+      const service = buildCommentService()
+      pinned.setApp(buildApp(service))
+      mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+      const res = await route.send(request(pinned.url())).set(FORGED)
+      expect(res.status).toBe(route.okStatus)
+      // The gate resolved the signed-in user's authority …
+      const gateReq = mocks.resolveSheetReadableCapabilities.mock.calls[0]![0] as { user?: { id?: string } }
+      expect(gateReq.user?.id).toBe(ACTOR)
+      // … the row-level authorization query was asked about that user …
+      expect(mocks.loadDeniedRecordIds.mock.calls).toEqual([[expect.any(Function), COMMENT_SHEET, ACTOR, [ROW]]])
+      // … and the service acted as that user.
+      expect(service[route.service]).toHaveBeenCalledWith(...route.args)
+      const everyArg = JSON.stringify([
+        ...mocks.loadDeniedRecordIds.mock.calls.map((c) => c.slice(1)),
+        ...mocks.loadRowLevelReadDenyEnabled.mock.calls.map((c) => c.slice(1)),
+        ...(service[route.service] as ReturnType<typeof vi.fn>).mock.calls,
+      ])
+      expect(everyArg).not.toContain(AUTHOR)
+    })
+  }
+
+  it('without a signed-in user the header does not authenticate anyone (401 before any lookup)', async () => {
+    const service = buildCommentService()
+    pinned.setApp(buildApp(service, { userId: null }))
+    for (const route of ID_ROUTES) {
+      const res = await route.send(request(pinned.url())).set(FORGED)
+      expect(res.status, route.name).toBe(401)
+    }
+    expect(service.getCommentAddress).not.toHaveBeenCalled()
+    expect(resolverCalls()).toEqual([])
+    expect(mocks.loadDeniedRecordIds).not.toHaveBeenCalled()
   })
 })
 

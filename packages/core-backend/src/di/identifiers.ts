@@ -418,12 +418,30 @@ export interface CommentUnreadSummary {
 
 /**
  * #5831 — where a comment lives: the only columns a comment-id-addressed route needs to decide WHICH
- * sheet gate applies (and, for resolve, who wrote it). Immutable after create; no content.
+ * sheet gate applies. Immutable after create; no content.
  */
 export interface CommentAddressRecord {
     spreadsheetId: string;
     rowId: string;
-    authorId: string;
+}
+
+/** #5831 part B — one row a cross-sheet comment aggregate must leave out (row-level read deny). */
+export interface CommentInboxDeniedRow {
+    spreadsheetId: string;
+    rowId: string;
+}
+
+/**
+ * #5831 part B — which comments a user-scoped cross-sheet aggregate (inbox, unread counts) may include,
+ * computed by the route from the caller's authority (routes/comments.ts resolveCommentInboxScope).
+ * The service applies it in SQL before counting and before LIMIT/OFFSET. REQUIRED: an empty or missing
+ * `sheetIds` means "nothing" — the service returns an empty result without querying.
+ */
+export interface CommentInboxScope {
+    /** Sheets the caller may read AND that are live. */
+    sheetIds: readonly string[];
+    /** Rows on those sheets the caller is row-level read-denied on. */
+    deniedRows: readonly CommentInboxDeniedRow[];
 }
 
 export interface ICommentService {
@@ -456,18 +474,35 @@ export interface ICommentService {
       spreadsheetId: string,
       options?: { q?: string; limit?: number; match?: 'exact-email' },
     ): Promise<{ items: CommentMentionCandidate[] }>;
-    getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
-    /** @deprecated Use `getUnreadSummary()` for richer unread data. */
-    getUnreadCount(userId: string): Promise<number>;
+    /**
+     * #5831 part B — the distinct sheets holding a comment the caller's inbox would list (by someone
+     * else; unread by the caller or mentioning them), BEFORE any authority filter. Ids only; the route
+     * turns them into a CommentInboxScope and never returns them.
+     */
+    listInboxCandidateSheetIds(userId: string): Promise<string[]>;
+    /**
+     * #5831 part B — the same candidates' distinct rows on `sheetIds` (sheet id → row ids), for the
+     * row-bounded row-level read deny. Ids only.
+     */
+    listInboxCandidateRowIds(userId: string, sheetIds: readonly string[]): Promise<Map<string, string[]>>;
+    /** #5831 part B: `scope` is required and applied before COUNT and LIMIT/OFFSET. */
+    getInbox(
+      userId: string,
+      options: Pick<CommentQueryOptions, 'limit' | 'offset'> | undefined,
+      scope: CommentInboxScope,
+    ): Promise<{ items: CommentInboxItem[]; total: number }>;
+    /** @deprecated Use `getUnreadSummary()` for richer unread data. #5831 part B: `scope` is required. */
+    getUnreadCount(userId: string, scope: CommentInboxScope): Promise<number>;
     /**
      * Return combined unread summary with both general unread count
      * and mention-specific unread count in a single call.
+     * #5831 part B: counts only comments inside `scope` (required).
      */
-    getUnreadSummary(userId: string): Promise<CommentUnreadSummary>;
+    getUnreadSummary(userId: string, scope: CommentInboxScope): Promise<CommentUnreadSummary>;
     /**
-     * #5831 — the sheet, row and author of one comment, or null when no comment has this id. Reads
-     * nothing else (no content, no sheet data); the comment-id routes call it BEFORE their sheet gate
-     * to learn which sheet to gate on.
+     * #5831 — the sheet and row of one comment, or null when no comment has this id. Reads nothing
+     * else (no content, no sheet data); the comment-id routes call it BEFORE their sheet gate to learn
+     * which sheet to gate on.
      */
     getCommentAddress(commentId: string): Promise<CommentAddressRecord | null>;
     markCommentRead(commentId: string, userId: string): Promise<void>;

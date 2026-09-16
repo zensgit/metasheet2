@@ -117,7 +117,10 @@ import {
   CommentConflictError,
 } from '../../src/services/CommentService'
 import type { CollabService } from '../../src/services/CollabService'
-import type { CommentUnreadSummary } from '../../src/di/identifiers'
+import type { CommentInboxScope, CommentUnreadSummary } from '../../src/di/identifiers'
+
+/** #5831 part B: the cross-sheet aggregates need the route's (readable, live) sheet scope. */
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_a'], deniedRows: [] }
 
 // Queue accessors — retrieved in beforeEach to get the live arrays
 let queueExec: unknown[]
@@ -347,19 +350,19 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
   describe('2. Unread semantics', () => {
     it('getUnreadCount returns correct count for non-author', async () => {
       qFirst({ c: 3 })
-      const count = await svc.getUnreadCount('user_other')
+      const count = await svc.getUnreadCount('user_other', INBOX_SCOPE)
       expect(count).toBe(3)
     })
 
     it('getUnreadCount returns 0 when everything is read', async () => {
       qFirst({ c: 0 })
-      const count = await svc.getUnreadCount('user_other')
+      const count = await svc.getUnreadCount('user_other', INBOX_SCOPE)
       expect(count).toBe(0)
     })
 
     it('getUnreadCount returns 0 when query returns undefined (no rows)', async () => {
       qFirst(undefined)
-      const count = await svc.getUnreadCount('user_other')
+      const count = await svc.getUnreadCount('user_other', INBOX_SCOPE)
       expect(count).toBe(0)
     })
 
@@ -384,34 +387,34 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
 
     it("author's own comment does NOT appear as unread (markCommentRead clears it)", async () => {
       qFirst({ c: 0 })
-      const count = await svc.getUnreadCount('user_a')
+      const count = await svc.getUnreadCount('user_a', INBOX_SCOPE)
       expect(count).toBe(0)
     })
 
     it('getUnreadSummary returns both unreadCount and mentionUnreadCount', async () => {
       qFirst({ unread_count: 5, mention_unread_count: 2 })
-      const summary: CommentUnreadSummary = await svc.getUnreadSummary('user_other')
+      const summary: CommentUnreadSummary = await svc.getUnreadSummary('user_other', INBOX_SCOPE)
       expect(summary.unreadCount).toBe(5)
       expect(summary.mentionUnreadCount).toBe(2)
     })
 
     it('getUnreadSummary returns zeros when no unread comments exist', async () => {
       qFirst({ unread_count: 0, mention_unread_count: 0 })
-      const summary = await svc.getUnreadSummary('user_other')
+      const summary = await svc.getUnreadSummary('user_other', INBOX_SCOPE)
       expect(summary.unreadCount).toBe(0)
       expect(summary.mentionUnreadCount).toBe(0)
     })
 
     it('getUnreadSummary defaults to zeros when query returns undefined', async () => {
       qFirst(undefined)
-      const summary = await svc.getUnreadSummary('user_other')
+      const summary = await svc.getUnreadSummary('user_other', INBOX_SCOPE)
       expect(summary.unreadCount).toBe(0)
       expect(summary.mentionUnreadCount).toBe(0)
     })
 
     it('getUnreadSummary: mentionUnreadCount is always <= unreadCount', async () => {
       qFirst({ unread_count: 10, mention_unread_count: 3 })
-      const summary = await svc.getUnreadSummary('user_other')
+      const summary = await svc.getUnreadSummary('user_other', INBOX_SCOPE)
       expect(summary.mentionUnreadCount).toBeLessThanOrEqual(summary.unreadCount)
     })
 
@@ -527,14 +530,14 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
 
     it('getUnreadSummary reflects non-zero mentionUnreadCount for mentioned user', async () => {
       qFirst({ unread_count: 4, mention_unread_count: 2 })
-      const summary = await svc.getUnreadSummary('user_alice')
+      const summary = await svc.getUnreadSummary('user_alice', INBOX_SCOPE)
       expect(summary.mentionUnreadCount).toBe(2)
       expect(summary.unreadCount).toBe(4)
     })
 
     it('getUnreadSummary returns mentionUnreadCount=0 for non-mentioned user', async () => {
       qFirst({ unread_count: 4, mention_unread_count: 0 })
-      const summary = await svc.getUnreadSummary('user_nobody')
+      const summary = await svc.getUnreadSummary('user_nobody', INBOX_SCOPE)
       expect(summary.mentionUnreadCount).toBe(0)
       expect(summary.unreadCount).toBe(4)
     })
@@ -622,7 +625,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
 
     it('getUnreadSummary returns the full CommentUnreadSummary shape', async () => {
       qFirst({ unread_count: 3, mention_unread_count: 1 })
-      const summary = await svc.getUnreadSummary('user_test')
+      const summary = await svc.getUnreadSummary('user_test', INBOX_SCOPE)
       expect(summary).toHaveProperty('unreadCount')
       expect(summary).toHaveProperty('mentionUnreadCount')
     })
@@ -643,7 +646,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 1 })
       qExec([mentionedItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
 
       expect(result.total).toBe(1)
       expect(result.items).toHaveLength(1)
@@ -661,7 +664,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 1 })
       qExec([unreadItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
       expect(result.items[0].unread).toBe(true)
     })
 
@@ -676,7 +679,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 1 })
       qExec([readItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
       expect(result.items[0].unread).toBe(false)
     })
 
@@ -684,7 +687,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 0 })
       qExec([])
 
-      const result = await svc.getInbox('user_author')
+      const result = await svc.getInbox('user_author', undefined, INBOX_SCOPE)
 
       expect(result.total).toBe(0)
       expect(result.items).toHaveLength(0)
@@ -700,7 +703,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 3 })
       qExec(items)
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
 
       expect(result.total).toBe(3)
       expect(result.items).toHaveLength(3)
@@ -720,7 +723,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 1 })
       qExec([metaItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
       const item = result.items[0]
 
       expect(item.baseId).toBe('base_xyz')
@@ -746,7 +749,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 1 })
       qExec([metaItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
       const item = result.items[0]
 
       // additive: the existing id fields are untouched by the name projection
@@ -778,7 +781,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 2 })
       qExec([fieldItem, recordItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
       expect(result.items.find((i) => i.id === 'cmt_field_named')?.fieldName).toBe('Status')
       expect(result.items.find((i) => i.id === 'cmt_record_level')?.fieldName).toBeNull()
     })
@@ -794,7 +797,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       qFirst({ c: 1 })
       qExec([activityItem])
 
-      const result = await svc.getInbox('user_viewer')
+      const result = await svc.getInbox('user_viewer', undefined, INBOX_SCOPE)
       expect(result.items[0].mentioned).toBe(false)
       expect(result.items[0].unread).toBe(true)
     })

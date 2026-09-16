@@ -5,6 +5,7 @@ import {
   ILogger,
   type CommentAddressRecord,
   type CommentInboxItem,
+  type CommentInboxScope,
   type CommentMentionCandidate,
   type CommentPresenceViewer,
   type CommentQueryOptions,
@@ -193,6 +194,76 @@ type CommentActivityPayload = {
   fieldId?: string
   commentId: string
   authorId?: string
+}
+
+/** #5831 part B — a CommentInboxScope that admits at least one sheet, as the SQL predicate takes it. */
+type AdmittedInboxScope = {
+  sheetIds: string[]
+  deniedSheetIds: string[]
+  deniedRowIds: string[]
+}
+
+/**
+ * #5831 part B — null when the scope admits nothing (missing, malformed or without a sheet): the
+ * cross-sheet aggregates then answer empty WITHOUT a query, so a caller that forgets the scope gets
+ * nothing rather than every sheet. Ids are taken as given (they come from the database through the
+ * route); only non-strings and empty strings are dropped.
+ */
+function admitInboxScope(scope: CommentInboxScope | undefined): AdmittedInboxScope | null {
+  const rawSheetIds: readonly unknown[] = Array.isArray(scope?.sheetIds) ? scope.sheetIds : []
+  const sheetIds = [...new Set(rawSheetIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+  if (sheetIds.length === 0) return null
+  const deniedSheetIds: string[] = []
+  const deniedRowIds: string[] = []
+  const rawDenied: readonly unknown[] = Array.isArray(scope?.deniedRows) ? scope.deniedRows : []
+  for (const entry of rawDenied) {
+    const denied = entry as { spreadsheetId?: unknown; rowId?: unknown } | null
+    const sheetId = typeof denied?.spreadsheetId === 'string' ? denied.spreadsheetId : ''
+    const rowId = typeof denied?.rowId === 'string' ? denied.rowId : ''
+    if (sheetId.length === 0 || rowId.length === 0) continue
+    deniedSheetIds.push(sheetId)
+    deniedRowIds.push(rowId)
+  }
+  return { sheetIds, deniedSheetIds, deniedRowIds }
+}
+
+/**
+ * #5831 part B — the WHERE fragment every user-scoped cross-sheet aggregate applies to `meta_comments as c`
+ * (in the COUNT and in the page query, i.e. before LIMIT/OFFSET): the comment's sheet is one of the
+ * admitted (readable, live) sheets, and its row is not a denied row of that sheet. The row is compared
+ * trimmed the way the comment-id gate compares it (`isRowDenied` trims the stored row id; JS_TRIM_WHITESPACE
+ * is JS `trim()` for SQL).
+ */
+function inboxScopePredicate(scope: AdmittedInboxScope) {
+  const deniedRowPredicate = scope.deniedRowIds.length > 0
+    ? sql`and not exists (
+        select 1
+        from unnest(${scope.deniedSheetIds}::text[], ${scope.deniedRowIds}::text[]) as denied(spreadsheet_id, row_id)
+        where denied.spreadsheet_id = c.spreadsheet_id
+          and denied.row_id = btrim(c.row_id, ${JS_TRIM_WHITESPACE})
+      )`
+    : sql``
+  return sql<boolean>`(c.spreadsheet_id = any(${scope.sheetIds}::text[]) ${deniedRowPredicate})`
+}
+
+/**
+ * The inbox's own selection: a comment by someone else that `userId` is @-mentioned in or has no read
+ * record for. The unread counts use the unread half only.
+ */
+function inboxMentionPredicate(userId: string) {
+  return sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+}
+
+/**
+ * #5831 part B — parenthesized AS A WHOLE. Kysely joins successive `.where()` calls with a bare `and`,
+ * so the former unwrapped `(mentioned) or r.comment_id is null` compiled to
+ * `author_id != $u and (mentioned) or r.comment_id is null and …`, i.e. `(… and mentioned) or (unread and …)`:
+ * the unread branch skipped the author filter (the caller's own unread comments were listed) and any
+ * filter placed before it, and the mentioned branch skipped every filter placed after it — the inbox
+ * scope included.
+ */
+function inboxCandidatePredicate(userId: string) {
+  return sql<boolean>`((${inboxMentionPredicate(userId)}) or r.comment_id is null)`
 }
 
 export type CommentTargetReadChecker = (input: {
@@ -636,31 +707,77 @@ export class CommentService {
   }
 
   /**
-   * G-10 (docket #68, G-10 audit #4323) name-projection note:
-   *
-   * This method's WHERE clause is UNCHANGED by the name projection below — every predicate line is
-   * untouched, so the row set returned is identical, row for row, to what it was before this change.
-   * The new `base_name`/`sheet_name`/`view_name`/`field_name` columns are pure SELECT-list additions
-   * (LEFT JOINs / correlated scalar subqueries keyed off ids already in the row), so they cannot
-   * surface a row that wasn't already being returned, and cannot attach a name to any row this
-   * endpoint wasn't already serializing the id (and content) for.
-   *
-   * That said: unlike `getComments`/`getCommentPresenceSummary`/etc., THIS aggregate has no per-sheet
-   * `resolveSheetReadableCapabilities` gate — see the G-8 doc comment on `ensureSheetReadable` in
-   * `routes/comments.ts` ("user-scoped cross-sheet `inbox`/`unread-count` aggregates... would need
-   * result filtering by the actor's readable-sheet set") and
-   * `docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md` ("Residual
-   * follow-up... NOT in this PR"). That gap is pre-existing, already tracked, and out of scope here —
-   * this change does not widen it (no WHERE relaxation), and the projected names carry exactly the
-   * same boundary the existing id/content fields already have on this endpoint today, no more and no
-   * less. This PR makes no independent claim, positive or negative, about this method's row-selection
-   * robustness beyond that — it is verified unchanged, not verified correct.
+   * #5831 part B — the distinct sheets holding an inbox candidate for `userId` (a comment by someone
+   * else that `userId` has not read or is mentioned in), BEFORE any authority filter. The route turns
+   * them into the CommentInboxScope (readable, live) and never returns them; one grouped query.
    */
-  async getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }> {
+  async listInboxCandidateSheetIds(userId: string): Promise<string[]> {
+    if (userId.trim().length === 0) return []
+    const rows = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
+      .select('c.spreadsheet_id')
+      .where('c.author_id', '!=', userId)
+      .where(inboxCandidatePredicate(userId))
+      .groupBy('c.spreadsheet_id')
+      .execute()
+    return rows
+      .map((row) => (row as { spreadsheet_id?: unknown }).spreadsheet_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  }
+
+  /**
+   * #5831 part B — the same candidates' distinct rows, for `sheetIds` only (sheet id → row ids): the
+   * bound the route hands to the row-level read deny, so it never evaluates a whole sheet. One grouped
+   * query; nothing when `sheetIds` is empty.
+   */
+  async listInboxCandidateRowIds(userId: string, sheetIds: readonly string[]): Promise<Map<string, string[]>> {
+    const result = new Map<string, string[]>()
+    const ids = [...new Set(sheetIds.filter((id) => typeof id === 'string' && id.length > 0))]
+    if (userId.trim().length === 0 || ids.length === 0) return result
+    const rows = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
+      .select(['c.spreadsheet_id', 'c.row_id'])
+      .where('c.author_id', '!=', userId)
+      .where(inboxCandidatePredicate(userId))
+      .where(sql<boolean>`c.spreadsheet_id = any(${ids}::text[])`)
+      .groupBy(['c.spreadsheet_id', 'c.row_id'])
+      .execute()
+    for (const row of rows as Array<{ spreadsheet_id?: unknown; row_id?: unknown }>) {
+      if (typeof row.spreadsheet_id !== 'string' || typeof row.row_id !== 'string' || row.row_id.length === 0) continue
+      const list = result.get(row.spreadsheet_id) ?? []
+      list.push(row.row_id)
+      result.set(row.spreadsheet_id, list)
+    }
+    return result
+  }
+
+  /**
+   * The caller's comment inbox: comments by someone else that `userId` is @-mentioned in or has not
+   * read, newest first.
+   *
+   * #5831 part B — ONLY inside `scope` (required; see CommentInboxScope): the comment's sheet is
+   * readable by the caller and live, and its row is not row-level denied to them. The scope is part of
+   * the WHERE of BOTH the COUNT and the page query, so `total` counts exactly what the pages list and
+   * no page comes back short. A missing or empty scope returns nothing, without a query.
+   *
+   * G-10 (docket #68, G-10 audit #4323): the `base_name`/`sheet_name`/`view_name`/`field_name` columns
+   * are pure SELECT-list additions (LEFT JOINs / correlated scalar subqueries keyed off ids already in the
+   * row); they cannot add a row, and they are now served only for rows inside the scope.
+   */
+  async getInbox(
+    userId: string,
+    options: Pick<CommentQueryOptions, 'limit' | 'offset'> | undefined,
+    scope: CommentInboxScope,
+  ): Promise<{ items: CommentInboxItem[]; total: number }> {
     const limit = Math.min(200, Math.max(1, Number(options?.limit ?? 50)))
     const offset = Math.max(0, Number(options?.offset ?? 0))
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
-    const inboxPredicate = sql<boolean>`(${mentionPredicate}) or r.comment_id is null`
+    const admitted = admitInboxScope(scope)
+    if (!admitted || userId.trim().length === 0) return { items: [], total: 0 }
+    const mentionPredicate = inboxMentionPredicate(userId)
+    const inboxPredicate = inboxCandidatePredicate(userId)
+    const scopePredicate = inboxScopePredicate(admitted)
 
     const totalRow = await db
       .selectFrom('meta_comments as c')
@@ -668,6 +785,7 @@ export class CommentService {
       .select(({ fn }) => fn.countAll<number>().as('c'))
       .where('c.author_id', '!=', userId)
       .where(inboxPredicate)
+      .where(scopePredicate)
       .executeTakeFirst()
     const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
 
@@ -732,6 +850,7 @@ export class CommentService {
       ])
       .where('c.author_id', '!=', userId)
       .where(inboxPredicate)
+      .where(scopePredicate)
       .orderBy('c.created_at', 'desc')
       .limit(limit)
       .offset(offset)
@@ -743,13 +862,17 @@ export class CommentService {
     }
   }
 
-  async getUnreadCount(userId: string): Promise<number> {
+  /** #5831 part B: counts only inside `scope` (required; missing or empty ⇒ 0 without a query). */
+  async getUnreadCount(userId: string, scope: CommentInboxScope): Promise<number> {
+    const admitted = admitInboxScope(scope)
+    if (!admitted || userId.trim().length === 0) return 0
     const row = await db
       .selectFrom('meta_comments as c')
       .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
       .select(({ fn }) => fn.countAll<number>().as('c'))
       .where('c.author_id', '!=', userId)
       .where(sql<boolean>`r.comment_id is null`)
+      .where(inboxScopePredicate(admitted))
       .executeTakeFirst()
 
     return row ? Number((row as { c: string | number }).c) : 0
@@ -761,9 +884,14 @@ export class CommentService {
    *
    * - `unreadCount`: comments the user has not read (no read record, excluding own).
    * - `mentionUnreadCount`: subset of the above where the user is @-mentioned.
+   *
+   * #5831 part B: both count only comments inside `scope` (required; the same scope the inbox lists
+   * with, so the badge never counts an item the inbox cannot show). Missing or empty ⇒ zeros, no query.
    */
-  async getUnreadSummary(userId: string): Promise<CommentUnreadSummary> {
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+  async getUnreadSummary(userId: string, scope: CommentInboxScope): Promise<CommentUnreadSummary> {
+    const admitted = admitInboxScope(scope)
+    if (!admitted || userId.trim().length === 0) return { unreadCount: 0, mentionUnreadCount: 0 }
+    const mentionPredicate = inboxMentionPredicate(userId)
 
     const row = await db
       .selectFrom('meta_comments as c')
@@ -776,6 +904,7 @@ export class CommentService {
       ])
       .where('c.author_id', '!=', userId)
       .where(sql<boolean>`r.comment_id is null`)
+      .where(inboxScopePredicate(admitted))
       .executeTakeFirst()
 
     return {
@@ -785,19 +914,19 @@ export class CommentService {
   }
 
   /**
-   * #5831 — the comment's sheet, row and author (or null for an unknown id). The comment-id routes
+   * #5831 — the comment's sheet and row (or null for an unknown id). The comment-id routes
    * (edit/delete/read/reactions/resolve) call this BEFORE their sheet gate, so it deliberately reads
-   * only these three immutable addressing columns of `meta_comments` by primary key: no content, no
-   * other table. The closure guard pins that shape (PRE_GATE_CALLS).
+   * only these two immutable addressing columns of `meta_comments` by primary key: no content, no
+   * author, no other table. The closure guard pins that shape (PRE_GATE_CALLS).
    */
   async getCommentAddress(commentId: string): Promise<CommentAddressRecord | null> {
     const row = await db
       .selectFrom('meta_comments')
-      .select(['spreadsheet_id', 'row_id', 'author_id'])
+      .select(['spreadsheet_id', 'row_id'])
       .where('id', '=', commentId)
       .executeTakeFirst()
     if (!row) return null
-    return { spreadsheetId: row.spreadsheet_id, rowId: row.row_id, authorId: row.author_id }
+    return { spreadsheetId: row.spreadsheet_id, rowId: row.row_id }
   }
 
   async markCommentRead(commentId: string, userId: string): Promise<void> {
@@ -1368,8 +1497,8 @@ export class CommentService {
       sheetId: row.sheet_id ?? row.spreadsheet_id,
       viewId: row.view_id,
       recordId: row.record_id ?? row.row_id,
-      // G-10 (docket #68): additive display names — see getInbox()'s doc comment for the
-      // no-WHERE-relaxation boundary and the pre-existing G-8 caveat these inherit.
+      // G-10 (docket #68): additive display names — see getInbox()'s doc comment (they add no row, and
+      // since #5831 part B they are served only inside the caller's readable, live scope).
       baseName: row.base_name,
       sheetName: row.sheet_name,
       viewName: row.view_name,

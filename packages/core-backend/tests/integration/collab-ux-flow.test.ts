@@ -149,6 +149,10 @@ import {
   CommentService,
 } from '../../src/services/CommentService'
 import type { CollabService } from '../../src/services/CollabService'
+import type { CommentInboxScope } from '../../src/di/identifiers'
+
+/** #5831 part B: the cross-sheet aggregates need the route's (readable, live) sheet scope. */
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_a'], deniedRows: [] }
 import type { CommentMentionCandidate, CommentUnreadSummary } from '../../src/di/identifiers'
 
 // Queue accessors — retrieved in beforeEach to get the live arrays
@@ -383,7 +387,7 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
 
       // Then: getUnreadSummary returns 0 for mentionUnreadCount
       qFirst({ unread_count: 0, mention_unread_count: 0 })
-      const summary = await svc.getUnreadSummary('user_b')
+      const summary = await svc.getUnreadSummary('user_b', INBOX_SCOPE)
       expect(summary.mentionUnreadCount).toBe(0)
     })
 
@@ -394,7 +398,7 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
 
       // UserC's unread count is unaffected
       qFirst({ unread_count: 3, mention_unread_count: 1 })
-      const summaryC = await svc.getUnreadSummary('user_c')
+      const summaryC = await svc.getUnreadSummary('user_c', INBOX_SCOPE)
       expect(summaryC.unreadCount).toBe(3)
       expect(summaryC.mentionUnreadCount).toBe(1)
     })
@@ -403,7 +407,7 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       // The author creates a comment — it's auto-marked read for them
       // so their getUnreadSummary count is already 0
       qFirst({ unread_count: 0, mention_unread_count: 0 })
-      const summary = await svc.getUnreadSummary('user_author')
+      const summary = await svc.getUnreadSummary('user_author', INBOX_SCOPE)
       expect(summary.unreadCount).toBe(0)
     })
 
@@ -534,7 +538,7 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       qFirst({ c: 1 })
       qExec([mentionedUnread])
 
-      const inbox = await svc.getInbox('user_b')
+      const inbox = await svc.getInbox('user_b', undefined, INBOX_SCOPE)
 
       expect(inbox.total).toBe(1)
       expect(inbox.items[0].mentioned).toBe(true)
@@ -558,7 +562,7 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       await svc.markMentionsRead('sheet_a', 'user_b')
 
       qFirst({ unread_count: 0, mention_unread_count: 0 })
-      const summary = await svc.getUnreadSummary('user_b')
+      const summary = await svc.getUnreadSummary('user_b', INBOX_SCOPE)
       expect(summary.unreadCount).toBe(0)
       expect(summary.mentionUnreadCount).toBe(0)
     })
