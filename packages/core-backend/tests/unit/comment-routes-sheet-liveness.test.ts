@@ -145,6 +145,9 @@ describe('comments routes refuse a non-live sheet', () => {
         expect(res.body).toEqual({ ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } })
         expect(service[route.service]).not.toHaveBeenCalled()
         expect(mocks.loadRowLevelReadDenyEnabled).not.toHaveBeenCalled()
+        // Nothing touches the database between the capability lookup and the refusal (the lookup itself
+        // is mocked, so ANY pool query on this path is a read or write against a deleted sheet).
+        expect(mocks.query).not.toHaveBeenCalled()
         expect(mocks.resolveSheetReadableCapabilities).toHaveBeenCalledWith(expect.anything(), expect.any(Function), SHEET)
       })
 
@@ -155,6 +158,7 @@ describe('comments routes refuse a non-live sheet', () => {
         expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
         expect(JSON.stringify(res.body)).not.toContain(SHEET)
         expect(service[route.service]).not.toHaveBeenCalled()
+        expect(mocks.query).not.toHaveBeenCalled()
       })
 
       it('no read access → the same 403 for a live and a deleted sheet (no liveness oracle)', async () => {
@@ -166,6 +170,7 @@ describe('comments routes refuse a non-live sheet', () => {
         expect(deleted.status).toBe(403)
         expect(deleted.body).toEqual(live.body)
         expect(service[route.service]).not.toHaveBeenCalled()
+        expect(mocks.query).not.toHaveBeenCalled()
       })
 
       it('live sheet → the route proceeds (positive control)', async () => {

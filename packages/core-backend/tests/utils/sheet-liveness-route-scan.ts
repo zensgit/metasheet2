@@ -12,11 +12,15 @@
  * supertest-app-mode-scan.ts):
  *
  *   - a REGISTRATION is `<expr>.<get|post|put|patch|delete|all>(<path>, …, <handler>)` (or
- *     `<expr>['get'](…)`) where <path> is a '/'-rooted string or template, an array of strings, or an
- *     identifier bound to one of those in scope; or `<expr>.addRoute('<VERB>', '<path>', <handler>)` (the
- *     plugin HTTP API). A call whose last argument is a data literal (object, string, number) is an HTTP
- *     CLIENT call, not a registration. A handler behind a path that cannot be read (`P.list`,
- *     `buildPath(…)`) is still recorded — as OPAQUE, below.
+ *     `<expr>['get'](…)`, or `<expr>[VERB](…)` with `const VERB = 'get'`) where <path> is a '/'-rooted
+ *     string or template, an array of strings, or an identifier bound to one of those in scope;
+ *     `<expr>.route(<path>).<verb>(<handler>)` (chains included); `<expr>.use([<path>,] …)` with an inline
+ *     function or a spread among its arguments (verb `USE`; without a path it is `USE <every path>`); or
+ *     `<expr>.addRoute('<VERB>', '<path>', <handler>)` (the plugin HTTP API). A call whose last argument is
+ *     a data literal (object, string, number) is an HTTP CLIENT call, not a registration. A handler behind
+ *     a path that cannot be read (`P.list`, `buildPath(…)`), a spread handler list, and any
+ *     `<expr>[<non-constant>](…)` call that could be a registration (`app[method](path, fn)`) are still
+ *     recorded — as OPAQUE, below — with the enclosing function's name in the key.
  *   - the HANDLER is the last argument: an inline function, an identifier bound to a same-file function
  *     (or to a const holding one of these), a wrapper call around function arguments (`asyncHandler(fn)`,
  *     `run(fn)`), which is unwrapped, or a call to a same-file handler factory, whose body is read.
@@ -30,7 +34,15 @@
  *   - LIVENESS is decided on the tree (`analyzeHandler`), not on text: a refusal is an `if` whose test is
  *     exactly `<liveness> !== 'live'`, whose branch always leaves, and which runs whenever the binding
  *     ran; a gate's result must be acted on by the very next statement; the gate runs before any other
- *     awaited work; and (routes) a capability 403 sits between the resolver call and the liveness 404.
+ *     awaited work (its own arguments included); and (routes) a capability 403 sits between the resolver
+ *     call and the liveness 404.
+ *   - THE WINDOW between a liveness binding and its refusal may hold only an exiting 401/403 check
+ *     (checkers: an `if` that returns the checker's refusal value) and await-free declarations or
+ *     assignments that make no data or response call — plus, for a liveness-blind resolver, the
+ *     `loadSheetLiveness` load the refusal reads. Anything else runs on a deleted sheet.
+ *   - A REFUSAL MUST REFUSE: on a route its branch answers 403/404/410 (or `sendSheetNotLive`), awaits
+ *     nothing and calls no data source; on a checker (`refusalReturn`) it returns exactly the checker's
+ *     refusal value — `true` is not a refusal, and `null` where the checker means "not found" is an oracle.
  *
  * CRLF: the source is normalized to LF before parsing. The parser would cope with CRLF, but the printed
  * code and every regex the guard applies to it would then carry `\r` — and a per-line `(.*)$` pattern
@@ -90,10 +102,18 @@ export interface RouteHandler {
 export interface OpaqueRegistration {
   file: string
   verb: string
+  /**
+   * `<VERB> <path>`; when the path cannot be read or the verb is dynamic, ` in <owner>` is appended
+   * (two bridges in one file print the same `<dynamic m> <path path>`).
+   */
   key: string
   line: number
   /** What the handler argument is, printed. */
   handler: string
+  /** Code-only text of the function arguments that COULD be read (empty when none). */
+  code: string
+  /** The nearest named function, method or property the registration sits in (`<module>` at top level). */
+  owner: string
 }
 
 export interface ScannedRouteFile {
@@ -257,6 +277,8 @@ function isDataLiteral(expr: ts.Expression): boolean {
 
 interface Registration {
   call: ts.CallExpression
+  /** `route`: a verb registration; `use`: middleware mount; `dynamic`: `x[<non-constant>](…)`, always opaque. */
+  kind: 'route' | 'use' | 'dynamic'
   verb: string
   label: string
   paths: string[]
@@ -274,8 +296,21 @@ function methodNameOf(callee: ts.Expression): string | null {
   return null
 }
 
+/** The string a `const` identifier is bound to (`const VERB = 'get' as const`), else null. */
+function constStringOf(expr: ts.Expression): string | null {
+  const e = unwrap(expr)
+  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text
+  if (!ts.isIdentifier(e)) return null
+  const resolved = resolveIdentifier(e, e.text)
+  if (resolved.kind !== 'value' || !resolved.declaration.initializer) return null
+  if ((ts.getCombinedNodeFlags(resolved.declaration) & ts.NodeFlags.Const) === 0) return null
+  const init = unwrap(resolved.declaration.initializer)
+  return ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init) ? init.text : null
+}
+
 /** Does this argument read as a request handler (so an unreadable path must not hide the route)? */
 function looksLikeHandler(arg: ts.Expression): boolean {
+  if (ts.isSpreadElement(arg)) return true
   const expr = unwrap(arg)
   if (isFnNode(expr)) return true
   if (ts.isIdentifier(expr)) return resolveIdentifier(expr, expr.text).kind === 'function'
@@ -283,34 +318,117 @@ function looksLikeHandler(arg: ts.Expression): boolean {
   return false
 }
 
+/**
+ * `X.route(p)` under a verb call — possibly through earlier chain links (`X.route(p).get(a).post(b)`).
+ * Returns the `p` argument, or undefined when the receiver is not such a chain.
+ */
+function routeChainPath(receiver: ts.Expression): ts.Expression | undefined {
+  let current = unwrap(receiver)
+  while (ts.isCallExpression(current)) {
+    const callee = current.expression
+    if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return undefined
+    const name = methodNameOf(callee)
+    if (name === 'route' && current.arguments.length === 1) return current.arguments[0]
+    if (name === null || !ROUTE_VERBS.has(name)) return undefined
+    current = unwrap(callee.expression)
+  }
+  return undefined
+}
+
+const printedText = (node: ts.Node): string => normalizeEol(node.getText()).replace(/\s+/g, ' ')
+
+function withPath(
+  call: ts.CallExpression,
+  kind: Registration['kind'],
+  verb: string,
+  pathArg: ts.Expression,
+  handlerArgs: ts.Expression[],
+): Registration {
+  const path = ts.isSpreadElement(pathArg) ? null : routePathsOf(pathArg)
+  if (path) return { call, kind, verb, label: path.label, paths: path.paths, handlerArgs, unreadablePath: null }
+  const written = printedText(pathArg)
+  return { call, kind, verb, label: `<path ${written}>`, paths: [], handlerArgs, unreadablePath: written }
+}
+
 function registrationOf(node: ts.Node): Registration | null {
   if (!ts.isCallExpression(node)) return null
-  const method = methodNameOf(node.expression)
+  const callee = node.expression
+  const args = [...node.arguments]
+  let method = methodNameOf(callee)
+  if (method === null && ts.isElementAccessExpression(callee)) {
+    method = constStringOf(callee.argumentExpression)
+    if (method === null) {
+      // `app[method](path, handler)`: which method runs cannot be read. Recorded whenever the call could
+      // be a registration (two or more arguments, or a handler-like one) — never silently dropped.
+      if (args.length < 2 && !args.some(looksLikeHandler)) return null
+      const verb = `<dynamic ${printedText(unwrap(callee.argumentExpression))}>`
+      if (args.length < 2 || ts.isSpreadElement(args[0]!)) {
+        const written = args.length > 0 ? printedText(args[0]!) : ''
+        return { call: node, kind: 'dynamic', verb, label: `<path ${written}>`, paths: [], handlerArgs: args, unreadablePath: written }
+      }
+      return withPath(node, 'dynamic', verb, args[0]!, args.slice(1))
+    }
+  }
   if (method === null) return null
-  const args = node.arguments
-  let verb: string
-  let pathArg: ts.Expression
-  let handlerArgs: ts.Expression[]
   if (method === 'addRoute') {
     if (args.length < 3) return null
     const verbArg = unwrap(args[0]!)
     if (!ts.isStringLiteral(verbArg) || !ROUTE_VERBS.has(verbArg.text.toLowerCase())) return null
-    verb = verbArg.text.toUpperCase()
-    pathArg = args[1]!
-    handlerArgs = args.slice(2)
+    const handlerArgs = args.slice(2)
+    if (isDataLiteral(unwrap(handlerArgs[handlerArgs.length - 1]!))) return null
+    const registration = withPath(node, 'route', verbArg.text.toUpperCase(), args[1]!, handlerArgs)
+    if (registration.unreadablePath !== null && !looksLikeHandler(handlerArgs[handlerArgs.length - 1]!)) return null
+    return registration
+  }
+  if (method === 'use') {
+    // Middleware mount. Only a mount that carries its own code (an inline function) or hides it (a
+    // spread) is a request surface of THIS file; `use(p, subRouter)` is scanned where the router is built.
+    if (!args.some((a) => ts.isSpreadElement(a) || isFnNode(unwrap(a)))) return null
+    const first = args[0]!
+    if (!ts.isSpreadElement(first) && looksLikeHandler(first)) {
+      return { call: node, kind: 'use', verb: 'USE', label: '<every path>', paths: [], handlerArgs: args, unreadablePath: null }
+    }
+    if (ts.isSpreadElement(first)) {
+      return { call: node, kind: 'use', verb: 'USE', label: `<path ${printedText(first)}>`, paths: [], handlerArgs: args, unreadablePath: printedText(first) }
+    }
+    return withPath(node, 'use', 'USE', first, args.slice(1))
+  }
+  if (!ROUTE_VERBS.has(method)) return null
+  const chained = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
+    ? routeChainPath(callee.expression)
+    : undefined
+  let pathArg: ts.Expression
+  let handlerArgs: ts.Expression[]
+  if (chained !== undefined) {
+    if (args.length < 1) return null
+    pathArg = chained
+    handlerArgs = args
   } else {
-    if (!ROUTE_VERBS.has(method) || args.length < 2) return null
-    verb = method.toUpperCase()
+    if (args.length < 2) return null
     pathArg = args[0]!
     handlerArgs = args.slice(1)
   }
   if (isDataLiteral(unwrap(handlerArgs[handlerArgs.length - 1]!))) return null
-  const path = routePathsOf(pathArg)
-  if (path) return { call: node, verb, label: path.label, paths: path.paths, handlerArgs, unreadablePath: null }
+  const registration = withPath(node, 'route', method.toUpperCase(), pathArg, handlerArgs)
   // A handler behind a path we cannot read is still a route: record it (opaque) instead of dropping it.
-  if (!looksLikeHandler(handlerArgs[handlerArgs.length - 1]!)) return null
-  const written = normalizeEol(pathArg.getText())
-  return { call: node, verb, label: `<path ${written}>`, paths: [], handlerArgs, unreadablePath: written }
+  if (registration.unreadablePath !== null && !looksLikeHandler(handlerArgs[handlerArgs.length - 1]!)) return null
+  return registration
+}
+
+/** The nearest named function / method / property holding `node` — `<module>` at top level. */
+function ownerOf(node: ts.Node): string {
+  for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
+    if ((ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current)) && current.name) {
+      return normalizeEol(current.name.getText())
+    }
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      const holder = current.parent
+      if (ts.isVariableDeclaration(holder) || ts.isPropertyAssignment(holder) || ts.isPropertyDeclaration(holder)) {
+        return normalizeEol(holder.name.getText())
+      }
+    }
+  }
+  return '<module>'
 }
 
 /**
@@ -401,11 +519,32 @@ export function scanRouteSource(file: string, rawSource: string): ScannedRouteFi
     if (registration) {
       const roots: FnNode[] = []
       const middleware: string[] = []
-      const key = `${registration.verb} ${registration.label}`
+      const owner = ownerOf(registration.call)
+      const baseKey = `${registration.verb} ${registration.label}`
+      const key = registration.unreadablePath !== null || registration.kind === 'dynamic' ? `${baseKey} in ${owner}` : baseKey
       const line = sf.getLineAndCharacterOfPosition(registration.call.getStart(sf)).line + 1
       let opaqueHandler: string | null = null
       registration.handlerArgs.forEach((arg, index) => {
         const isLast = index === registration.handlerArgs.length - 1
+        if (ts.isSpreadElement(arg)) {
+          // A spread HANDLER list (or any spread in a mount) hides code: opaque. A spread of middleware
+          // ahead of a readable handler keeps the narrow middleware reading.
+          if (isLast || registration.kind === 'use') opaqueHandler = codeOf(arg, sf)
+          else middleware.push(codeOf(arg, sf))
+          return
+        }
+        if (registration.kind === 'use') {
+          // Every function in a mount may answer the request: all readable ones are roots; the rest
+          // (imported middleware, sub-routers) is middleware text.
+          const found = handlerFunctionsOf(arg)
+          if (found) {
+            roots.push(...found.roots)
+            if (found.wrapper) middleware.push(found.wrapper)
+          } else {
+            middleware.push(codeOf(arg, sf))
+          }
+          return
+        }
         // Middleware positions keep the narrow reading (an inline function or a same-file function
         // name); only the HANDLER position unwraps wrappers, consts and factories.
         const found = isLast ? handlerFunctionsOf(arg) : middlewareFunctionOf(arg)
@@ -418,8 +557,16 @@ export function scanRouteSource(file: string, rawSource: string): ScannedRouteFi
           middleware.push(codeOf(arg, sf))
         }
       })
-      if (registration.unreadablePath !== null || opaqueHandler !== null || roots.length === 0) {
-        opaque.push({ file, verb: registration.verb, key, line, handler: opaqueHandler ?? roots.map((r) => codeOf(r, sf).slice(0, 40)).join(', ') })
+      if (registration.kind === 'dynamic' || registration.unreadablePath !== null || opaqueHandler !== null || roots.length === 0) {
+        opaque.push({
+          file,
+          verb: registration.verb,
+          key,
+          line,
+          handler: opaqueHandler ?? roots.map((r) => codeOf(r, sf).slice(0, 40)).join(', '),
+          code: roots.map((r) => codeOf(r, sf)).join('\n'),
+          owner,
+        })
       } else {
         const { units, helpers, referenced } = collectUnitsAndReferences(sf, roots)
         const handlerRoots = units.filter((u) => u.label === 'handler')
@@ -489,14 +636,30 @@ export function sheetAddressedRouteKeys(rel: string): string[] {
 
 // ── Syntax-tree helpers ─────────────────────────────────────────────────────
 
-/** Named ES imports of the file: local binding name → module specifier as written. */
-export function namedImports(sf: ts.SourceFile): Map<string, string> {
-  const out = new Map<string, string>()
+export interface NamedImport {
+  /** Module specifier as written. */
+  module: string
+  /** The name EXPORTED by that module (`import { x as y }` → `x`). */
+  imported: string
+}
+
+/**
+ * Named VALUE imports of the file: local binding name → where it comes from. Type-only imports are left
+ * out (they bind nothing callable). The exported name is kept so `import { other as trustedGuard }` can
+ * never pass for `trustedGuard`.
+ */
+export function namedImports(sf: ts.SourceFile): Map<string, NamedImport> {
+  const out = new Map<string, NamedImport>()
   for (const statement of sf.statements) {
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue
+    if (statement.importClause?.isTypeOnly) continue
     const bindings = statement.importClause?.namedBindings
     if (bindings && ts.isNamedImports(bindings)) {
-      for (const element of bindings.elements) out.set(element.name.text, statement.moduleSpecifier.text)
+      for (const element of bindings.elements) {
+        if (element.isTypeOnly) continue
+        const imported = element.propertyName ? element.propertyName.text : element.name.text
+        out.set(element.name.text, { module: statement.moduleSpecifier.text, imported })
+      }
     }
   }
   return out
@@ -561,15 +724,37 @@ export function checkerRegistrations(sf: ts.SourceFile): Array<{ name: string; l
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const callee = node.expression
-      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : ''
+      const name = ts.isIdentifier(callee) ? callee.text : (methodNameOf(callee) ?? '')
       if (/^set\w*Checker$/.test(name)) {
-        const receiver = ts.isPropertyAccessExpression(callee) ? `${normalizeEol(callee.expression.getText())}.` : ''
+        const receiver = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
+          ? `${normalizeEol(callee.expression.getText())}.`
+          : ''
         for (const arg of node.arguments) {
           const found = handlerFunctionsOf(arg)
           for (const fn of found?.roots ?? []) {
             out.push({ name: `${receiver}${name}`, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, fn })
           }
         }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return out
+}
+
+/** Calls made under one of `names` (`f(…)`, `x.f(…)`, `x['f'](…)`), with the receiver as written. */
+export function callSitesNamed(sf: ts.SourceFile, names: Set<string>): Array<{ name: string; receiver: string; line: number }> {
+  const out: Array<{ name: string; receiver: string; line: number }> = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      const name = ts.isIdentifier(callee) ? callee.text : (methodNameOf(callee) ?? '')
+      if (names.has(name)) {
+        const receiver = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
+          ? normalizeEol(callee.expression.getText())
+          : ''
+        out.push({ name, receiver, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 })
       }
     }
     ts.forEachChild(node, visit)
@@ -737,15 +922,23 @@ export interface GateSite {
   line: number
 }
 
-/** `FROM meta_sheets [alias] … <alias.>deleted_at IS NULL` — a liveness filter on the SHEET table only. */
+/**
+ * `FROM meta_sheets [alias] … <alias.>id = $n … <alias.>deleted_at IS NULL` — a liveness filter on the
+ * SHEET table only, for ONE sheet bound by id (a filter over "any live sheet" proves nothing about the
+ * sheet the request names).
+ */
 export function sheetTableLivenessFilter(sql: string): boolean {
   const re = /\bFROM\s+(?:public\.)?meta_sheets\b(?:\s+(?:AS\s+)?(?!WHERE\b|JOIN\b|LEFT\b|INNER\b|ON\b)(\w+))?([^;]*)/gi
+  const bareLive = /(?<![.\w])deleted_at\s+IS\s+NULL\b/i
+  const bareId = /(?<![.\w])id\s*=\s*\$\d+/i
   for (let m = re.exec(sql); m; m = re.exec(sql)) {
     const alias = m[1]
     const tail = m[2] ?? ''
-    const qualified = alias ? new RegExp(String.raw`\b${alias}\.deleted_at\s+IS\s+NULL\b`, 'i') : null
-    const bare = /(?<![.\w])deleted_at\s+IS\s+NULL\b/i
-    if ((qualified && qualified.test(tail)) || bare.test(tail)) return true
+    const qualifiedLive = alias ? new RegExp(String.raw`\b${alias}\.deleted_at\s+IS\s+NULL\b`, 'i') : null
+    const qualifiedId = alias ? new RegExp(String.raw`\b${alias}\.id\s*=\s*\$\d+`, 'i') : null
+    const live = (qualifiedLive !== null && qualifiedLive.test(tail)) || bareLive.test(tail)
+    const bound = (qualifiedId !== null && qualifiedId.test(tail)) || bareId.test(tail)
+    if (live && bound) return true
   }
   return false
 }
@@ -770,6 +963,13 @@ export interface AnalyzeOptions {
   requireOrder: boolean
   /** Routes: nothing but `preGateCalls` is awaited (and no service/pool/db call is made) before the gate. */
   gateFirst: boolean
+  /**
+   * Checkers: the exact value (printed, e.g. `false` or `{ canRead: false, canWrite: false }`) that every
+   * liveness refusal — and every refusal between the capability lookup and it — must return. Unset for
+   * routes, whose refusals must answer 403/404/410 instead. Either way the window rule applies whenever
+   * this is set or `requireOrder` is on.
+   */
+  refusalReturn?: string
 }
 
 export interface HandlerAnalysis {
@@ -911,6 +1111,152 @@ function honourOf(site: GateSite, sf: ts.SourceFile): Honour | string {
   return `the result of ${site.name}(…) is ignored`
 }
 
+// ── The window between a liveness binding and its refusal ──────────────────
+
+const DATA_RECEIVER = /(?:service|Service|pool|Pool|db|Db|client|Client|trx|tx)$/
+
+/** A call that can read or write data: `query(…)`, `x.query(…)`, `<…service|pool|db|client>.m(…)`. */
+function isDataCall(call: ts.CallExpression): boolean {
+  const callee = stripParens(call.expression)
+  if (ts.isIdentifier(callee)) return /^(?:query|exec|execute)$/.test(callee.text)
+  if (ts.isPropertyAccessExpression(callee)) {
+    if (/^(?:query|exec|execute)$/.test(callee.name.text)) return true
+    return DATA_RECEIVER.test(normalizeEol(callee.expression.getText()))
+  }
+  return false
+}
+
+/** A call on the response (`res.json(…)`, `res.status(404).json(…)`). */
+function isResponseCall(call: ts.CallExpression): boolean {
+  let root: ts.Expression = call.expression
+  while (ts.isPropertyAccessExpression(root) || ts.isCallExpression(root) || ts.isElementAccessExpression(root)) {
+    root = root.expression
+  }
+  return ts.isIdentifier(root) && /^(?:res|response)$/.test(root.text)
+}
+
+/**
+ * No await / yield / delete, and no data call — and, unless `allowResponse`, no response call — outside
+ * nested function bodies (defining a function runs nothing).
+ */
+function inert(node: ts.Node, allowResponse = false): boolean {
+  let ok = true
+  const visit = (n: ts.Node): void => {
+    if (!ok || isFnNode(n) || ts.isClassLike(n)) return
+    if (ts.isAwaitExpression(n) || ts.isYieldExpression(n) || ts.isDeleteExpression(n)) { ok = false; return }
+    if (ts.isCallExpression(n) && (isDataCall(n) || (!allowResponse && isResponseCall(n)))) { ok = false; return }
+    ts.forEachChild(n, visit)
+  }
+  if (isFnNode(node)) return true
+  visit(node)
+  return ok
+}
+
+/** `return X` or `{ return X }` → X (null for a bare return); undefined for anything else. */
+function soleReturn(stmt: ts.Statement): ts.Expression | null | undefined {
+  let current = stmt
+  if (ts.isBlock(current)) {
+    if (current.statements.length !== 1) return undefined
+    current = current.statements[0]!
+  }
+  if (!ts.isReturnStatement(current)) return undefined
+  return current.expression ?? null
+}
+
+const collapsed = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
+function returnsExactly(stmt: ts.Statement, expected: string, sf: ts.SourceFile): boolean {
+  const returned = soleReturn(stmt)
+  if (returned === undefined || returned === null) return false
+  return collapsed(codeOf(stripParens(returned), sf)) === collapsed(expected)
+}
+
+const AUTHORITY_REFUSAL = /\b40[13]\b|\bsendForbidden\(|\bsendUnauthorized\(|'FORBIDDEN'|'UNAUTHORIZED'|'UNAUTHENTICATED'/
+const NOT_LIVE_ANSWER = /\bsendSheetNotLive\(|\bstatus\(\s*(?:403|404|410)\s*\)|\bstatus:\s*(?:403|404|410)\b|^\s*throw\b|[;{]\s*throw\b/
+
+/** Why the branch of a liveness refusal does not really refuse (null when it does). */
+function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile): string | null {
+  const branch = refusal.thenStatement
+  const text = collapsed(codeOf(branch, sf))
+  if (options.refusalReturn !== undefined) {
+    if (returnsExactly(branch, options.refusalReturn, sf)) return null
+    return `its liveness refusal does \`${text.slice(0, 80)}\` — it must be exactly \`return ${options.refusalReturn}\``
+  }
+  if (!inert(branch, true)) return `its liveness refusal branch awaits or calls a data source (\`${text.slice(0, 80)}\`) — a refusal only answers`
+  if (!NOT_LIVE_ANSWER.test(text) || /\bok:\s*true\b/.test(text)) {
+    return `its liveness refusal branch does not answer 403/404/410 (\`${text.slice(0, 80)}\`)`
+  }
+  return null
+}
+
+function isLivenessLoadExpr(expr: ts.Expression): boolean {
+  let e = stripParens(expr)
+  if (ts.isAwaitExpression(e)) e = stripParens(e.expression)
+  return ts.isCallExpression(e)
+    && ts.isIdentifier(e.expression)
+    && e.expression.text === 'loadSheetLiveness'
+    && e.arguments.every((a) => inert(a))
+}
+
+/** `const <subject> = await loadSheetLiveness(…)`, or `try { <subject> = await loadSheetLiveness(…) } catch { …leave }`. */
+function isPairedLoad(stmt: ts.Statement, subject: string): boolean {
+  if (ts.isVariableStatement(stmt)) {
+    const [decl, ...more] = stmt.declarationList.declarations
+    return !!decl && more.length === 0 && ts.isIdentifier(decl.name) && decl.name.text === subject
+      && !!decl.initializer && isLivenessLoadExpr(decl.initializer)
+  }
+  if (ts.isTryStatement(stmt)) {
+    if (stmt.finallyBlock || !stmt.catchClause || stmt.tryBlock.statements.length !== 1) return false
+    const catchExit = exitOf(stmt.catchClause.block)
+    if (!catchExit || catchExit === 'loop' || !inert(stmt.catchClause.block, true)) return false
+    const only = stmt.tryBlock.statements[0]!
+    if (!ts.isExpressionStatement(only)) return false
+    const e = stripParens(only.expression)
+    return ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isIdentifier(e.left) && e.left.text === subject && isLivenessLoadExpr(e.right)
+  }
+  return false
+}
+
+/** Statements that run after `from` and before the refusal on the path that reaches it. */
+function windowBetween(from: ts.Node, refusal: { block: ts.Block; index: number }): ts.Statement[] {
+  const out: ts.Statement[] = []
+  for (const { block, index } of flowChain(from)) {
+    if (block === refusal.block) {
+      out.push(...block.statements.slice(index + 1, refusal.index))
+      return out
+    }
+    out.push(...block.statements.slice(index + 1))
+  }
+  return out
+}
+
+function windowStatementOk(stmt: ts.Statement, options: AnalyzeOptions, sf: ts.SourceFile, pairedLoad: string | null): boolean {
+  if (ts.isEmptyStatement(stmt)) return true
+  if (pairedLoad !== null && isPairedLoad(stmt, pairedLoad)) return true
+  if (ts.isVariableStatement(stmt)) return inert(stmt)
+  if (ts.isExpressionStatement(stmt)) {
+    const e = stripParens(stmt.expression)
+    return ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isIdentifier(e.left) && inert(e.right)
+  }
+  if (ts.isIfStatement(stmt)) {
+    if (stmt.elseStatement || !inert(stmt.expression)) return false
+    const exit = exitOf(stmt.thenStatement)
+    if (!exit || exit === 'loop' || !inert(stmt.thenStatement, true)) return false
+    if (options.refusalReturn !== undefined) return returnsExactly(stmt.thenStatement, options.refusalReturn, sf)
+    return AUTHORITY_REFUSAL.test(codeOf(stmt.thenStatement, sf))
+  }
+  return false
+}
+
+/** The declaration list a bound call sits in has more than one declarator (`const a = await f(), b = await g()`). */
+function sharesDeclaration(holder: ts.Node): boolean {
+  return ts.isVariableDeclaration(holder)
+    && ts.isVariableDeclarationList(holder.parent)
+    && holder.parent.declarations.length !== 1
+}
+
 /**
  * Tree-level liveness analysis of one route handler (or any function set: pass a synthetic handler).
  * See the header for the rules; `sources` is empty when nothing proven stops the handler.
@@ -920,6 +1266,7 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
   const roles = new Map<string, 'gate' | 'decision' | 'plain'>()
   const roots = new Set(h.units.filter((u) => u.label === 'handler').map((u) => u.node))
   const gateHelpers = new Map<FnNode, string>()
+  const windowRule = options.requireOrder || options.refusalReturn !== undefined
 
   interface UnitResult { unit: HandlerUnit; sites: GateSite[]; exits: Array<{ site: GateSite; exit: Exit | 'tail' | 'throws' }> }
   const evaluate = (): UnitResult[] => {
@@ -933,6 +1280,10 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
         const where = `${unit.label}: ${site.name}(…) at line ${site.line}`
         if (site.kind === 'resolver' || site.kind === 'blind-resolver' || site.kind === 'liveness-load') {
           let refusal: ReturnType<typeof findRefusal> = null
+          /** Where the window starts: the resolver call, or the statement that binds the loaded liveness. */
+          let from: ts.Node = site.call
+          /** For a liveness-blind resolver: the variable its paired load binds (allowed inside the window). */
+          let pairedLoad: string | null = null
           if (site.kind === 'resolver') {
             const subject = livenessBinding(site.call)
             if (!subject) { violations.add(`${where} does not bind the sheetLiveness it returns`); continue }
@@ -941,6 +1292,7 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
             const bound = boundName(site.call)
             if (!bound) { violations.add(`${where} does not bind the liveness it loads`); continue }
             refusal = findRefusal(bound.holder, (e) => ts.isIdentifier(e) && e.text === bound.name)
+            from = bound.holder
           } else {
             const loads = sites.filter((s) => s.kind === 'liveness-load' && s.enclosing === site.enclosing)
             if (loads.length === 0) {
@@ -950,7 +1302,7 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
             for (const load of loads) {
               const bound = boundName(load.call)
               refusal = bound ? findRefusal(bound.holder, (e) => ts.isIdentifier(e) && e.text === bound.name) : null
-              if (refusal) break
+              if (refusal) { pairedLoad = bound!.name; break }
             }
             if (refusal && !flowChain(site.call).some((c) => c.block === refusal!.block)) {
               violations.add(`${where}: its liveness refusal is not on the same path as the capability lookup`)
@@ -962,6 +1314,22 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
             continue
           }
           exits.push({ site, exit: refusal.exit })
+          if (windowRule) {
+            // A REFUSAL MUST REFUSE, and nothing but an authority refusal or an inert declaration may run
+            // between the binding and it (a write there lands on a deleted sheet).
+            const branch = refusalBranchProblem(refusal.stmt, options, sf)
+            if (branch) violations.add(`${where}: ${branch}`)
+            let holder: ts.Node = site.call.parent
+            while (ts.isAwaitExpression(holder) || ts.isParenthesizedExpression(holder) || ts.isAsExpression(holder) || ts.isNonNullExpression(holder)) {
+              holder = holder.parent
+            }
+            if (sharesDeclaration(holder)) violations.add(`${where}: its result shares a declaration with other work — bind it alone`)
+            for (const stmt of windowBetween(from, refusal)) {
+              if (!windowStatementOk(stmt, options, sf, pairedLoad)) {
+                violations.add(`${where}: \`${collapsed(codeOf(stmt, sf)).slice(0, 80)}\` runs between the binding and its liveness refusal — only ${options.refusalReturn !== undefined ? `an \`if\` returning \`${options.refusalReturn}\`` : 'an exiting 401/403 check'} and await-free declarations may`)
+              }
+            }
+          }
           if (options.requireOrder && site.kind !== 'liveness-load') {
             const at = flowChain(site.call).find((c) => c.block === refusal!.block)
             const between = at ? refusal.block.statements.slice(at.index + 1, refusal.index) : []
@@ -1030,14 +1398,16 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
     if (own.length === 0) continue
     const first = own.reduce((a, b) => (a.call.getStart(sf) <= b.call.getStart(sf) ? a : b))
     const firstAt = first.call.getStart(sf)
+    // The gate's own arguments are evaluated before it runs, so they count as "before" too.
+    const inFirstArgs = (node: ts.Node) => first.call.arguments.some((arg) => contains(arg, node))
     const visit = (node: ts.Node): void => {
-      if (node.getStart(sf) >= firstAt) return
       if (isFnNode(node)) return
-      if (ts.isCallExpression(node) && !contains(node, first.call)) {
+      if (node.getStart(sf) >= firstAt && node !== first.call && !inFirstArgs(node)) return
+      if (ts.isCallExpression(node) && node !== first.call && !contains(node, first.call)) {
         const name = calleeName(node)
         const awaited = ts.isAwaitExpression(node.parent)
         const serviceCall = ts.isPropertyAccessExpression(node.expression) && /(?:service|Service|pool|db)$/.test(normalizeEol(node.expression.expression.getText()))
-        if ((awaited || serviceCall) && !options.preGateCalls.has(name)) {
+        if ((awaited || serviceCall || isDataCall(node)) && !options.preGateCalls.has(name)) {
           violations.add(`${r.unit.label}: \`${normalizeEol(node.getText()).slice(0, 60)}\` runs before the sheet gate ${first.name}(…) at line ${first.line}`)
         }
       }

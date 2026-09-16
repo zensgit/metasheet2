@@ -12,11 +12,13 @@
  * authorization checkers in index.ts, fixed in the same change.
  *
  * ── What is closed ────────────────────────────────────────────────────────────
- *  1. FILES. Every module under src/ that registers a route is scanned. A file with at least one
- *     sheet-addressed handler must be listed in COVERED below (or be univer-meta.ts, which the sibling
- *     guard owns). A new route file that addresses a sheet reds here until someone decides about it.
- *     A registration whose handler cannot be read (imported handler, `controller.method`) is OPAQUE and
- *     must be named — nothing is skipped silently.
+ *  1. FILES. Every module under src/ is parsed — no text pre-filter decides which ones — and every
+ *     registration shape is read (`x.get(…)`, `x['get'](…)`, `x[CONST_VERB](…)`, `x.route(p).get(…)`,
+ *     `x.use(p, inlineFn)`, `x.addRoute(…)`). A file with at least one sheet-addressed handler must be
+ *     listed in COVERED below (or be univer-meta.ts, which the sibling guard owns). A new route file that
+ *     addresses a sheet reds here until someone decides about it. A registration whose handler, path or
+ *     verb cannot be read (imported handler, `controller.method`, a spread handler list,
+ *     `app[method](path, fn)`) is OPAQUE and must be named — nothing is skipped silently.
  *  2. HANDLERS. In a covered file every sheet-addressed handler is GUARDED or EXEMPT BY NAME with a
  *     reason. Exemption by omission is not possible; an exemption whose route disappeared, or whose
  *     route became guarded, reds too. Exemptions that rest on a checkable fact carry a `stillTrue`
@@ -25,7 +27,9 @@
  *     - every capability-resolver call binds the liveness IT returned, and an `if (<that> !== 'live')`
  *       whose branch always leaves follows on the same path (no extra condition, no wrapping branch);
  *     - a capability 403 sits between the resolver call and that refusal (403 first, then the liveness
- *       404 — no liveness oracle);
+ *       404 — no liveness oracle), and NOTHING ELSE runs in that window but exiting 401/403 checks and
+ *       await-free declarations (a write there lands on a deleted sheet);
+ *     - the refusal really refuses: it answers 403/404/410, awaits nothing and reads nothing;
  *     - the result of every gate (a same-file gate helper, a vetted imported guard, the injected
  *       resolver) is acted on by the very next statement, or the gate is the last thing the function
  *       does — a gate whose `null` is ignored does not count;
@@ -38,7 +42,11 @@
  *     until it gets a behaviour row.
  *  5. COLLAB CHECKERS. The `set…Checker(fn)` seams (socket sheet/comment rooms, comment-mention
  *     notify, Yjs subscribe) are sheet-addressed request surfaces without being routes: each one that
- *     resolves sheet capabilities must also refuse a non-live sheet.
+ *     resolves sheet capabilities must also refuse a non-live sheet, with EXACTLY the value it uses for
+ *     "not permitted" (CHECKER_REFUSALS) — `return true` is not a refusal, and a Yjs `null` would read
+ *     as NOT_FOUND where a caller without read gets FORBIDDEN (a liveness oracle).
+ *  6. GAPS. A known hole stays visible as a named exemption whose reason says
+ *     "GAP — tracked in #<issue> — …"; a placeholder tracker (TBD) is refused.
  *
  * A handler is SHEET-ADDRESSED if its path has a sheet-id param (`:sheetId`, `:spreadsheetId`,
  * `:…SheetId`, `:tableId`), or it (or a same-file helper it calls) reads such an id from the request
@@ -56,6 +64,7 @@ import { describe, expect, it } from 'vitest'
 import {
   addressesASheet,
   analyzeHandler,
+  callSitesNamed,
   checkerRegistrations,
   codeOf,
   findFunctionsNamed,
@@ -148,13 +157,24 @@ function resolveImport(fromFile: string, specifier: string): string | null {
   return `${posix.normalize(posix.join(posix.dirname(fromFile), specifier))}.ts`
 }
 
-function optionsFor(file: string): AnalyzeOptions {
-  const imports = namedImports(scan(file).sourceFile)
+/**
+ * The vetted guards `file` really imports: same local name, same EXPORTED name (`import { x as
+ * requireRecordReadable }` is not the guard), from the vetted module, as a value import.
+ */
+function vettedGuardsFor(file: string, sf: ScannedRouteFile['sourceFile']): Map<string, string> {
+  const imports = namedImports(sf)
   const vetted = new Map<string, string>()
   for (const [name, guard] of Object.entries(VETTED_EXTERNAL_GUARDS)) {
-    const spec = imports.get(name)
-    if (spec && resolveImport(file, spec) === guard.file) vetted.set(name, `${name} (${guard.file})`)
+    const imported = imports.get(name)
+    if (imported && imported.imported === name && resolveImport(file, imported.module) === guard.file) {
+      vetted.set(name, `${name} (${guard.file})`)
+    }
   }
+  return vetted
+}
+
+function optionsFor(file: string): AnalyzeOptions {
+  const vetted = vettedGuardsFor(file, scan(file).sourceFile)
   return {
     vetted,
     delegated: DELEGATED_GUARDS[file]?.delegated ?? null,
@@ -202,16 +222,25 @@ interface CoveredFile {
   behaviourTest?: string
 }
 
-const GAP_TRACKER = /^GAP — tracked in (?:#(?:\d+|TBD-[a-z0-9-]+)|(docs\/[\w./-]+\.md)(?: §[\w-]+)?) — \S/
+/**
+ * Every "GAP" in a reason must be followed by a REAL issue number (optionally with the design note it
+ * refers to): `GAP — tracked in #5830 — why` or `GAP — tracked in #5831 (see docs/….md §Section) — why`.
+ * A placeholder (`#TBD-…`) is not a tracker: nobody is ever notified by it.
+ */
+const GAP_TRACKER = /^GAP — tracked in #([1-9]\d*)(?: \(see (docs\/[\w./-]+\.md)(?: §[\w-]+)?\))? — \S/
 
-function reasonProblems(key: string, exemption: Exemption): string[] {
+function reasonProblems(key: string, exemption: { reason: string }): string[] {
   const problems: string[] = []
   const reason = typeof exemption.reason === 'string' ? exemption.reason.trim() : ''
   if (reason.length < 80) problems.push(`${key}: exemption reason missing or too thin`)
-  if (reason.startsWith('GAP')) {
-    const m = GAP_TRACKER.exec(reason)
-    if (!m) problems.push(`${key}: a GAP exemption must name its tracker: "GAP — tracked in #<issue> | docs/<file>.md — <why>"`)
-    else if (m[1] && !existsSync(join(REPO_ROOT, ...m[1].split('/')))) problems.push(`${key}: tracker document ${m[1]} does not exist`)
+  if (/\bTBD\b/i.test(reason)) problems.push(`${key}: "TBD" is not a tracker — open the issue and name it`)
+  for (const occurrence of reason.matchAll(/\bGAP\b/g)) {
+    const m = GAP_TRACKER.exec(reason.slice(occurrence.index))
+    if (!m) {
+      problems.push(`${key}: every GAP must name its issue: "GAP — tracked in #<issue> [(see docs/<file>.md §<section>)] — <why>"`)
+    } else if (m[2] && !existsSync(join(REPO_ROOT, ...m[2].split('/')))) {
+      problems.push(`${key}: tracker document ${m[2]} does not exist`)
+    }
   }
   return problems
 }
@@ -226,6 +255,13 @@ const readsNoSheetData = (h: RouteHandler) => !NO_SHEET_DATA.test(everything(h))
 const touchesNoSheetTable = (h: RouteHandler) => !/\b(meta_(records|fields|sheets|views)|sheet_id|resolveSheet\w*Capabilities\w*|loadSheet\w*|requireRecordReadable)\b/.test(everything(h))
   && !/\b(pool|poolManager|db|query)\b/.test(h.code)
 
+/** #5832: the in-process bulk generate loop calls the model per row and never asks whether the sheet is live. */
+const bulkWorkerStillLivenessBlind = () => {
+  const code = functionCode('services/ai-bulk-job-service.ts', 'runGeneratePhase')
+  return /\brunShortcutCore\(/.test(code)
+    && !/\b(loadSheetLiveness|assertSheetLive|sheetLiveness|loadSheetRow|resolveSheet\w*Capabilities\w*)\b|deleted_at/.test(code)
+}
+
 const ownJobGate = (h: RouteHandler) => {
   const gate = h.helpers.get('resolveBulkJobForActor') ?? ''
   return /\bheader\.actorId !== userId\b/.test(gate)
@@ -233,12 +269,12 @@ const ownJobGate = (h: RouteHandler) => {
     && !/\b(meta_records|meta_fields|requireRecordReadable|readRecordOnce|resolveSheet\w*Capabilities)\b/.test(everything(h))
 }
 
-const LEGACY_SHEET_GAP = 'GAP — tracked in #TBD-legacy-sheet-parent-liveness — LEGACY spreadsheet API: `:sheetId` names a row of '
+const LEGACY_SHEET_GAP = 'GAP — tracked in #5828 — LEGACY spreadsheet API: `:sheetId` names a row of '
   + 'the legacy `sheets` table (kysely `selectFrom(\'sheets\')`), not `meta_sheets`, so multitable/sheet-liveness.ts '
   + 'does not apply. But DELETE /api/spreadsheets/:id soft-deletes the parent (`spreadsheets.deleted_at`) and this '
   + 'handler never checks it, so a soft-deleted spreadsheet'
 
-const LEGACY_PERMISSION_GAP = 'GAP — tracked in #TBD-legacy-spreadsheet-permissions — `:id` is read from / written to '
+const LEGACY_PERMISSION_GAP = 'GAP — tracked in #5829 — `:id` is read from / written to '
   + '`spreadsheet_permissions.sheet_id`, the SAME table multitable reads as per-sheet grants '
   + '(permission-service loadSheetPermissionScopeMap). Gated only by rbacGuard(\'spreadsheet-permissions\', …): no '
   + 'sheet liveness and no canManageSheetAccess, so it '
@@ -252,8 +288,8 @@ const LEGACY_PERMISSION_NOT_FIXED = '. `:id` IS a meta_sheets id on the kysely s
   + 'names a legacy spreadsheet and a meta-sheet liveness refusal would break it. Proposed once production is '
   + 'confirmed: canManageSheetAccess + a liveness refusal on grant/revoke.'
 
-const COMMENT_RESIDUAL = 'GAP — tracked in docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md '
-  + '§Residual — '
+const COMMENT_RESIDUAL = 'GAP — tracked in #5831 (see docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md '
+  + '§Residual) — '
 
 /** A service method whose body still selects without a liveness or readable-sheet filter. */
 const commentServiceUnfiltered = (method: string) => {
@@ -366,6 +402,12 @@ const COVERED: Record<string, CoveredFile> = {
     minInScope: 12,
     exempt: {},
     behaviourTest: 'dashboard-routes-sheet-liveness.test.ts',
+    // Charts and dashboards are sheet-keyed rows: a route that reaches them by chart/dashboard id alone
+    // (`/charts/:chartId/…`) is not sheet-addressed, so it must be named here instead of being invisible.
+    unaddressed: {
+      touches: /\bdashboardService\.\w+\(|\bmeta_(?:records|fields|views|sheets)\b|\b(?:pool|db)\.query\(/,
+      named: {},
+    },
   },
   'routes/federation.ts': {
     minHandlers: 20,
@@ -397,15 +439,17 @@ const COVERED: Record<string, CoveredFile> = {
           + 'read the sheet; owner + cross-sheet gated by resolveBulkJobForActor (asserted), no live record '
           + 'read in the handler or a same-file helper (asserted). Kept readable after a soft delete for the '
           + 'same reason as the poll. The diff does carry record values captured at generation time; if that '
-          + 'is judged a disclosure, this becomes a GAP.',
+          + 'is judged a disclosure, this exemption turns into a tracked gap.',
         stillTrue: ownJobGate,
       },
       'POST /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/cancel': {
         reason: 'MUST WORK ON A DELETED SHEET — cancel is the only brake on an in-flight job whose sheet was '
-          + 'deleted mid-run (the in-process generate worker, ai-bulk-job-service runGeneratePhase, does not '
-          + 're-check liveness). Owner + cross-sheet gated by resolveBulkJobForActor (asserted); it only flips '
-          + 'the job state via cancelBulkJob and never touches the sheet.',
-        stillTrue: (h) => ownJobGate(h) && /\bcancelBulkJob\(/.test(h.code),
+          + 'deleted mid-run. Owner + cross-sheet gated by resolveBulkJobForActor (asserted); it only flips '
+          + 'the job state via cancelBulkJob and never touches the sheet. The worker it brakes is itself a '
+          + 'GAP — tracked in #5832 — services/ai-bulk-job-service.ts runGeneratePhase keeps sending the '
+          + 'deleted sheet’s rows to the model (runShortcutCore, row by row, only re-reading the JOB status) and '
+          + 'never re-checks sheet liveness (asserted still true); until that is fixed, cancel is the only stop.',
+        stillTrue: (h) => ownJobGate(h) && /\bcancelBulkJob\(/.test(h.code) && bulkWorkerStillLivenessBlind(),
       },
     },
   },
@@ -447,9 +491,45 @@ const SIBLING_GUARDED: Record<string, string> = {
   'routes/univer-meta.ts': 'multitable-sheet-liveness-closure.guard.test.ts',
 }
 
+const PLUGIN_ROUTE_BRIDGE = 'PLUGIN ROUTE BRIDGE — out of scope by design: method, path and handler are handed in at '
+  + 'runtime by a plugin (plugins/**), whose code this closed world does not read (it scans src/ only). The bridge '
+  + 'function itself only wraps the plugin handler with error handling and metrics and reads no sheet and no request '
+  + 'params/query/body (asserted on its body). Known GAP — tracked in #5833 — the plugin SDK getRecord path reads a '
+  + 'record without asking whether its sheet is live.'
+
+/** The bridge wrapper forwards to the plugin handler and does nothing sheet-shaped itself. */
+const pluginBridgeStillTrue = (o: OpaqueRegistration) => /\bawait handler\(req, res, next\)/.test(o.code)
+  && !/sheet|req\.(params|query|body)|\bquery\(/i.test(o.code)
+
+/** Callees that mount an APIGateway endpoint. */
+const GATEWAY_REGISTRARS = new Set(['registerEndpoint', 'registerEndpoints', 'registerVersionedEndpoint', 'registerBulkEndpoints'])
+
 /** Registrations whose handler cannot be read, each named with the fact that makes it harmless. */
-const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; reason: string; stillTrue: () => boolean }>> = {
+const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; reason: string; stillTrue: (o: OpaqueRegistration) => boolean }>> = {
+  'gateway/APIGateway.ts': {
+    '<dynamic method> <path endpoint.path> in registerEndpoint': {
+      handler: '...middlewares',
+      reason: 'DORMANT GATEWAY — APIGateway.registerEndpoint mounts an APIEndpoint config (auth, rate-limit, validation '
+        + 'and cache middlewares, then endpoint.handler or a proxy) under a runtime method and path. index.ts builds the '
+        + 'gateway only for its circuit-breaker store; nothing under src/ outside gateway/ mounts an endpoint through it '
+        + '(asserted on every call site; data-adapters/HTTPAdapter.ts has an unrelated registerEndpoint of its own). An '
+        + 'endpoint mounted through it would be invisible here — the first one makes this entry untrue.',
+      stillTrue: () => allFacts().every((f) => f.rel.startsWith('gateway/') || f.gatewayCalls.every((c) => (
+        f.rel === 'data-adapters/HTTPAdapter.ts' && c.name === 'registerEndpoint' && c.receiver === 'this'
+      ))),
+    },
+  },
   'index.ts': {
+    '<dynamic methodLower> <path path> in addRoute': {
+      handler: 'async (req: Request, res: Response, next',
+      reason: `${PLUGIN_ROUTE_BRIDGE} (CoreAPI http.addRoute, the unscoped variant.)`,
+      stillTrue: pluginBridgeStillTrue,
+    },
+    '<dynamic methodLower> <path path> in registerPluginRoute': {
+      handler: 'async (req: Request, res: Response, next',
+      reason: `${PLUGIN_ROUTE_BRIDGE} (registerPluginRoute, the per-plugin variant that can be switched off.)`,
+      stillTrue: (o) => pluginBridgeStillTrue(o) && /\bregistration\.active\b/.test(o.code),
+    },
     'POST /api/approval/attachments/refs': {
       handler: 'approvalAttachmentRefsJsonParser',
       reason: 'BODY-PARSER MOUNT, not a handler: the 64 KB JSON parser (routes/approval-attachments.ts, owned by the '
@@ -491,7 +571,7 @@ const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; rea
  * inherits a liveness oracle; they are enumerated here so the list cannot grow unnoticed.
  */
 const RECORD_GATE_ORDER_GAP = {
-  reason: 'GAP — tracked in #TBD-record-gate-liveness-order — OWNED BY THE univer-meta.ts BRANCH (not edited from here): '
+  reason: 'GAP — tracked in #5830 — OWNED BY THE univer-meta.ts BRANCH (not edited from here): '
     + 'requireRecordReadable answers 404 (record missing, SHEET_DELETED, `Sheet not found`) BEFORE its 401/403, so a '
     + 'caller without read access can tell a live sheet from a deleted one through each route below. The '
     + '"same 403 for live and deleted" property of this closed world holds only where the route’s own gate is '
@@ -511,6 +591,96 @@ const CHECKER_OPTIONS: AnalyzeOptions = {
   preGateCalls: new Set(),
   requireOrder: false,
   gateFirst: false,
+}
+
+/**
+ * What each collab checker returns to REFUSE — the same value it already uses for "may not read", so a
+ * deleted sheet is indistinguishable from a forbidden one. Key: `<file under src/> <receiver.setter>`.
+ */
+const CHECKER_REFUSALS: Record<string, { refusal: string; why: string }> = {
+  'index.ts collabService.setSheetRoomAuthChecker': { refusal: 'false', why: 'boolean: false = may not join the sheet room' },
+  'index.ts collabService.setCommentRoomAuthChecker': { refusal: 'false', why: 'boolean: false = may not join the comment room' },
+  'index.ts commentService.setCommentTargetReadChecker': { refusal: 'false', why: 'boolean: false = no mention notification' },
+  'index.ts yjsWsAdapter.setAuthChecker': {
+    refusal: '{ canRead: false, canWrite: false }',
+    why: 'null means "record not found" (NOT_FOUND) to the adapter; a caller without read gets this object (FORBIDDEN)',
+  },
+}
+
+function checkerFindings(rel: string, sf: ScannedRouteFile['sourceFile'], refusals = CHECKER_REFUSALS): { found: string[]; keys: string[]; problems: string[] } {
+  const found: string[] = []
+  const keys: string[] = []
+  const problems: string[] = []
+  for (const reg of checkerRegistrations(sf)) {
+    const code = codeOf(reg.fn, sf)
+    if (!/\bresolveSheet\w*Capabilities\w*\(/.test(code)) continue
+    const where = `src/${rel}:${reg.line} ${reg.name}`
+    found.push(where)
+    keys.push(`${rel} ${reg.name}`)
+    const entry = refusals[`${rel} ${reg.name}`]
+    if (!entry) {
+      problems.push(`${where}: resolves sheet capabilities but has no CHECKER_REFUSALS entry — what does it return to refuse?`)
+      continue
+    }
+    const analysis = analyzeHandler({ units: [{ label: 'handler', node: reg.fn, code }] }, sf, { ...CHECKER_OPTIONS, refusalReturn: entry.refusal })
+    for (const v of analysis.violations) problems.push(`${where}: ${v}`)
+    if (!analysis.sources.some((x) => /^(resolver|blind-resolver|liveness-load) /.test(x))) {
+      problems.push(`${where}: resolves sheet capabilities but never refuses a non-live sheet`)
+    }
+  }
+  return { found, keys, problems }
+}
+
+// ── Discovery over every source file (no text pre-filter) ───────────────────
+
+interface FileFacts {
+  rel: string
+  handlers: number
+  sheetAddressing: boolean
+  opaque: OpaqueRegistration[]
+  checkers: ReturnType<typeof checkerFindings>
+  gatewayCalls: ReturnType<typeof callSitesNamed>
+}
+
+/** Everything the closed world needs from one file, read from its syntax tree (the tree is not kept). */
+function factsOf(rel: string, source: string, refusals = CHECKER_REFUSALS): FileFacts {
+  const scanned = scanRouteSource(rel, source)
+  return {
+    rel,
+    handlers: scanned.handlers.length,
+    sheetAddressing: scanned.handlers.some(addressesASheet),
+    opaque: scanned.opaque,
+    checkers: checkerFindings(rel, scanned.sourceFile, refusals),
+    gatewayCalls: callSitesNamed(scanned.sourceFile, GATEWAY_REGISTRARS),
+  }
+}
+
+/** Route modules that address a sheet but belong to no closed world. */
+function uncoveredSheetModules(facts: FileFacts[]): string[] {
+  const known = new Set([...Object.keys(COVERED), ...Object.keys(SIBLING_GUARDED)])
+  return facts.filter((f) => f.sheetAddressing && !known.has(f.rel)).map((f) => f.rel)
+}
+
+let factsMemo: FileFacts[] | null = null
+function allFacts(): FileFacts[] {
+  if (!factsMemo) factsMemo = listSourceFiles().map((rel) => factsOf(rel, readSource(rel)))
+  return factsMemo
+}
+
+/** Handlers of a covered file that touch sheet-keyed data without naming a sheet, against the file's ledger. */
+function unaddressedProblems(all: RouteHandler[], ledger: NonNullable<CoveredFile['unaddressed']>): { touching: RouteHandler[]; problems: string[] } {
+  const touching = all.filter((h) => !addressesASheet(h) && ledger.touches.test(everything(h)))
+  const problems: string[] = []
+  for (const h of touching) {
+    if (!(h.key in ledger.named)) problems.push(`${h.key} (line ${h.line}) touches sheet-keyed data without a sheet id and is not named`)
+  }
+  for (const [key, entry] of Object.entries(ledger.named)) {
+    const h = touching.find((x) => x.key === key)
+    if (!h) { problems.push(`${key}: no such unaddressed route (dead entry)`); continue }
+    problems.push(...reasonProblems(key, entry))
+    if (entry.stillTrue && !entry.stillTrue(h)) problems.push(`${key}: the fact this entry rests on is no longer true`)
+  }
+  return { touching, problems }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -610,8 +780,8 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(lf.opaque.map((o) => `${o.key} <- ${o.handler}`)).toEqual([
       'DELETE /api/imported <- importedHandler',
       'PATCH /api/member <- controller.update',
-      "GET <path buildPath('x')> <- async (req, res) => { res.json({}); }",
-      'GET <path cacheKey> <- () => compute()',
+      "GET <path buildPath('x')> in build <- async (req, res) => { res.json({}); }",
+      'GET <path cacheKey> in build <- () => compute()',
     ])
     expect(crlf.handlers.map((h) => h.key)).toEqual(lf.handlers.map((h) => h.key))
     expect(crlf.opaque).toEqual(lf.opaque)
@@ -749,54 +919,340 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(decided.roles.get('perRow')).toBe('decision')
   })
 
-  it('FILES: every router module that addresses a sheet is covered here or by the sibling guard; no dead file entries', () => {
-    const sheetAddressing: string[] = []
-    let routerModules = 0
-    for (const rel of listSourceFiles()) {
-      const raw = readSource(rel)
-      if (!/\.(get|post|put|patch|delete|all|addRoute)\(/.test(raw)) continue
-      const scanned = scan(rel)
-      if (scanned.handlers.length === 0 && scanned.opaque.length === 0) continue
-      routerModules += 1
-      if (scanned.handlers.some(addressesASheet)) sheetAddressing.push(rel)
+  it('checker refusals self-test: a liveness refusal returns EXACTLY the checker’s refusal value (J1, J1b, J2, J3)', () => {
+    const rel = 'collab-fixture.ts'
+    const refusals = Object.fromEntries(Object.entries(CHECKER_REFUSALS).map(([key, entry]) => [key.replace(/^index\.ts /, `${rel} `), entry]))
+    const run = (parts: { sheetRoom?: string; commentRoom?: string; commentRoomWindow?: string; target?: string; yjs?: string }, map = refusals) => {
+      const source = [
+        "import { loadSheetLiveness } from './multitable/sheet-liveness'",
+        'export function wire(collabService, commentService, yjsWsAdapter, pool, query) {',
+        '  collabService.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {',
+        '    try {',
+        '      const { capabilities } = await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, userId)',
+        '      if (!capabilities.canRead) return false',
+        '      const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)',
+        `      if (liveness !== 'live') return ${parts.sheetRoom ?? 'false'}`,
+        '      return true',
+        '    } catch {',
+        '      return false',
+        '    }',
+        '  })',
+        '  collabService.setCommentRoomAuthChecker(async ({ spreadsheetId, rowId, userId }) => {',
+        '    try {',
+        '      const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(query, spreadsheetId, userId)',
+        '      if (!capabilities.canRead) return false',
+        ...(parts.commentRoomWindow ? [parts.commentRoomWindow] : []),
+        '      const liveness = await loadSheetLiveness(query, spreadsheetId)',
+        `      if (liveness !== 'live') return ${parts.commentRoom ?? 'false'}`,
+        '      if (isAdminRole) return true',
+        '      return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))',
+        '    } catch {',
+        '      return false',
+        '    }',
+        '  })',
+        '  commentService.setCommentTargetReadChecker(async ({ spreadsheetId, rowId, userId }) => {',
+        '    try {',
+        '      const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(query, spreadsheetId, userId)',
+        '      if (!capabilities.canRead) return false',
+        '      const liveness = await loadSheetLiveness(query, spreadsheetId)',
+        `      if (liveness !== 'live') return ${parts.target ?? 'false'}`,
+        '      if (isAdminRole) return true',
+        '      return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))',
+        '    } catch {',
+        '      return false',
+        '    }',
+        '  })',
+        '  yjsWsAdapter.setAuthChecker(async (userId, recordId) => {',
+        '    try {',
+        "      const rec = await pool.query('SELECT id, sheet_id FROM meta_records WHERE id = $1', [recordId])",
+        '      if (rec.rows.length === 0) return null',
+        '      const sheetId = String(rec.rows[0].sheet_id)',
+        '      const { capabilities } = await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, userId)',
+        '      const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)',
+        `      if (liveness !== 'live') return ${parts.yjs ?? '{ canRead: false, canWrite: false }'}`,
+        '      return { canRead: capabilities.canRead, canWrite: false }',
+        '    } catch {',
+        '      return null',
+        '    }',
+        '  })',
+        '}',
+      ].join('\n')
+      return checkerFindings(rel, scanRouteSource(rel, source).sourceFile, map)
     }
-    const known = new Set([...Object.keys(COVERED), ...Object.keys(SIBLING_GUARDED)])
-    const uncovered = sheetAddressing.filter((rel) => !known.has(rel))
+    const base = run({})
+    expect(base.found.map((f) => f.replace(/^src\/collab-fixture\.ts:\d+ /, ''))).toEqual([
+      'collabService.setSheetRoomAuthChecker',
+      'collabService.setCommentRoomAuthChecker',
+      'commentService.setCommentTargetReadChecker',
+      'yjsWsAdapter.setAuthChecker',
+    ])
+    expect(base.problems).toEqual([])
+    // J1 / J1b: a boolean checker whose liveness branch says "allowed".
+    expect(run({ sheetRoom: 'true' }).problems.join('\n')).toMatch(/setSheetRoomAuthChecker: .*must be exactly `return false`/)
+    expect(run({ commentRoom: 'true' }).problems.join('\n')).toMatch(/setCommentRoomAuthChecker: .*must be exactly `return false`/)
+    expect(run({ target: 'undefined' }).problems.join('\n')).toMatch(/setCommentTargetReadChecker: .*must be exactly `return false`/)
+    // J2: Yjs full access on a deleted sheet. J3: Yjs `null` — NOT_FOUND where a forbidden caller gets FORBIDDEN.
+    expect(run({ yjs: '{ canRead: true, canWrite: true, canReadAllFields: true }' }).problems.join('\n'))
+      .toMatch(/setAuthChecker: .*must be exactly `return \{ canRead: false, canWrite: false \}`/)
+    expect(run({ yjs: 'null' }).problems.join('\n')).toMatch(/setAuthChecker: .*does `return null;`/)
+    // WINDOW: an admin short-circuit (or any work) between the capability lookup and the liveness refusal.
+    expect(run({ commentRoomWindow: '      if (isAdminRole) return true' }).problems.join('\n'))
+      .toMatch(/setCommentRoomAuthChecker: .*`if \(isAdminRole\) return true;` runs between the binding and its liveness refusal/)
+    expect(run({ commentRoomWindow: "      await query('UPDATE meta_comments SET read = true WHERE spreadsheet_id = $1', [spreadsheetId])" }).problems.join('\n'))
+      .toMatch(/setCommentRoomAuthChecker: .*runs between the binding and its liveness refusal/)
+    // A checker nobody declared a refusal value for is itself a finding.
+    expect(run({}, {}).problems.join('\n')).toMatch(/no CHECKER_REFUSALS entry/)
+  })
+
+  it('window and refusal self-test: nothing but a 401/403 check or an inert declaration runs between binding and refusal (J4, J5), and the refusal only refuses (J11)', () => {
+    const analyzeRoute = (lines: string[], helper = GATE_HELPER) => {
+      const { h, s } = fixtureHandler([
+        ...helper,
+        'export function build(router) {',
+        "  router.post('/sheets/:sheetId/x', async (req, res) => {",
+        ...lines,
+        '  })',
+        '}',
+      ])
+      return analyzeHandler(h, s.sourceFile, ROUTE_TEST_OPTIONS)
+    }
+    const RESOLVE = '    const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, req.params.sheetId)'
+    const FORBID = "    if (!capabilities.canRead) return res.status(403).json({ code: 'FORBIDDEN' })"
+    const REFUSE = "    if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)"
+    const BETWEEN = /runs between the binding and its liveness refusal/
+    // Positive twins.
+    expect(analyzeRoute([RESOLVE, FORBID, REFUSE, '    await svc.write()']).violations).toEqual([])
+    expect(analyzeRoute([
+      RESOLVE,
+      "    if (!access.userId) return res.status(401).json({ code: 'UNAUTHENTICATED' })",
+      FORBID,
+      '    const userId = access.userId',
+      '    let label',
+      '    label = `sheet ${req.params.sheetId}`',
+      REFUSE,
+    ]).violations).toEqual([])
+    // J4: a write between the 403 and the liveness refusal (awaited, fired, assigned, or sent).
+    for (const write of [
+      "    await query('DELETE FROM meta_fields WHERE sheet_id = $1', [req.params.sheetId])",
+      "    query('DELETE FROM meta_fields WHERE sheet_id = $1', [req.params.sheetId])",
+      "    const pending = pool.query('DELETE FROM meta_fields WHERE sheet_id = $1', [req.params.sheetId])",
+      '    const sent = res.json({ fields: [] })',
+      '    const fields = await loadFieldsForSheet(query, req.params.sheetId)',
+      "    if (req.query.dryRun) return res.json({ ok: true })",
+      '    if (!capabilities.canWrite) { res.status(403).end(); return } else { await svc.write() }',
+      '    for (const id of ids) await svc.write(id)',
+    ]) {
+      expect(analyzeRoute([RESOLVE, FORBID, write, REFUSE]).violations.join('\n'), write).toMatch(BETWEEN)
+    }
+    // A second declarator in the resolver's own statement.
+    expect(analyzeRoute([
+      '    const { capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, req.params.sheetId), later = await svc.write()',
+      FORBID,
+      REFUSE,
+    ]).violations.join('\n')).toMatch(/shares a declaration/)
+    // The gate's own arguments run before it.
+    expect(analyzeRoute([
+      '    const { capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, await svc.touch(req.params.sheetId))',
+      FORBID,
+      REFUSE,
+    ]).violations.join('\n')).toMatch(/runs before the sheet gate/)
+    // J5: the write sits in the gate HELPER's window.
+    const helperWithWrite = [
+      ...GATE_HELPER.slice(0, 3),
+      "  await query('UPDATE meta_comments SET resolved = true WHERE spreadsheet_id = $1', [sheetId])",
+      ...GATE_HELPER.slice(3),
+    ]
+    const j5 = analyzeRoute(['    const auth = await gate(req, res, req.params.sheetId)', '    if (!auth) return', '    await svc.write()'], helperWithWrite)
+    expect(j5.violations.join('\n')).toMatch(/^gate: .*runs between the binding and its liveness refusal/m)
+    // J11: the refusal branch serves data (awaited), or answers 200 without awaiting.
+    const j11 = analyzeRoute([RESOLVE, FORBID, "    if (sheetLiveness !== 'live') { return res.json({ ok: true, data: { fields: await loadFieldsForSheet(query, req.params.sheetId) } }) }"])
+    expect(j11.violations.join('\n')).toMatch(/refusal branch awaits or calls a data source/)
+    const cached = analyzeRoute([RESOLVE, FORBID, "    if (sheetLiveness !== 'live') return res.json({ ok: true, data: cachedSchema })"])
+    expect(cached.violations.join('\n')).toMatch(/refusal branch does not answer 403\/404\/410/)
+    const quiet = analyzeRoute([RESOLVE, FORBID, "    if (sheetLiveness !== 'live') { return }"])
+    expect(quiet.violations.join('\n')).toMatch(/refusal branch does not answer 403\/404\/410/)
+    const thrown = analyzeRoute([RESOLVE, FORBID, "    if (sheetLiveness !== 'live') throw new SheetNotLiveError(sheetLiveness)"])
+    expect(thrown.violations).toEqual([])
+  })
+
+  it('route collection self-test: fails closed on every registration shape (J7 route chains, J8 mounts, J9d no text filter, J10 dynamic verbs, J12 child-id routes)', () => {
+    const s = scanRouteSource('routes/zz-fixture.ts', [
+      "import { Router } from 'express'",
+      "const VERB = 'get' as const",
+      "let mutableVerb = 'get'",
+      'export function judgeRouter(pool, pickVerb, mws, subRouter, routeArgs) {',
+      '  const router = Router()',
+      "  router.route('/sheets/:sheetId/judge-export').get(async (req, res) => { res.json(await pool.query('SELECT data FROM meta_records WHERE sheet_id = $1', [req.params.sheetId])) })",
+      "  router.route('/sheets/:sheetId/chain').get(async (req, res) => { res.json({}) }).post(async (req, res) => { res.json({}) })",
+      "  router.use('/sheets/:sheetId/judge-raw', async (req, res) => { res.json(await pool.query('SELECT data FROM meta_records WHERE sheet_id = $1', [req.params.sheetId])) })",
+      "  router.use('/sheets/:sheetId/spread', ...mws, async (req, res, next) => next())",
+      "  router.use('/api/sub', subRouter)",
+      "  router[VERB]('/sheets/:sheetId/judge-rows', async (req, res) => { res.json(await pool.query('SELECT data FROM meta_records WHERE sheet_id = $1', [req.params.sheetId])) })",
+      "  router[pickVerb('x')]('/sheets/:sheetId/dyn', async (req, res) => { res.json({}) })",
+      "  router[mutableVerb]('/sheets/:sheetId/mutable', async (req, res) => { res.json({}) })",
+      "  router[pickVerb('y')](...routeArgs)",
+      '  return router',
+      '}',
+      'export class Bridge {',
+      '  addRoute(method, path, handler) {',
+      '    const methodLower = method.toLowerCase()',
+      '    this.app[methodLower](path, async (req, res, next) => { await handler(req, res, next) })',
+      '  }',
+      '}',
+    ].join('\n'))
+    expect(s.handlers.map((h) => h.key)).toEqual([
+      'GET /sheets/:sheetId/judge-export',
+      'POST /sheets/:sheetId/chain',
+      'GET /sheets/:sheetId/chain',
+      'USE /sheets/:sheetId/judge-raw',
+      'GET /sheets/:sheetId/judge-rows',
+    ])
+    expect(s.opaque.map((o) => `${o.key} <- ${o.handler}`)).toEqual([
+      'USE /sheets/:sheetId/spread <- ...mws',
+      "<dynamic pickVerb('x')> /sheets/:sheetId/dyn in judgeRouter <- async (req, res) => { res.json({}); }",
+      '<dynamic mutableVerb> /sheets/:sheetId/mutable in judgeRouter <- async (req, res) => { res.json({}); }',
+      "<dynamic pickVerb('y')> <path ...routeArgs> in judgeRouter <- ...routeArgs",
+      '<dynamic methodLower> <path path> in addRoute <- async (req, res, next) => { await handle',
+    ])
+    // The readable ones are sheet-addressed and, having no gate, unguarded.
+    for (const key of ['GET /sheets/:sheetId/judge-export', 'USE /sheets/:sheetId/judge-raw', 'GET /sheets/:sheetId/judge-rows']) {
+      const h = s.handlers.find((x) => x.key === key)!
+      expect(addressesASheet(h), key).toBe(true)
+      expect(analyzeHandler(h, s.sourceFile, ROUTE_TEST_OPTIONS).sources, key).toEqual([])
+    }
+    // J9d: a module whose ONLY registration is `router['get'](` — none of the text an old pre-filter looked
+    // for — is still discovered as an uncovered sheet-addressing module.
+    const bracketOnly = [
+      "import { Router } from 'express'",
+      'declare const pool: { query: (sql: string, params: unknown[]) => Promise<unknown> }',
+      'export function judgeRouter() {',
+      '  const router = Router()',
+      "  router['get']('/sheets/:sheetId/judge-rows', async (req: any, res: any) => { res.json(await pool.query('SELECT data FROM meta_records WHERE sheet_id = $1', [req.params.sheetId])) })",
+      '  return router',
+      '}',
+    ].join('\n')
+    expect(/\.(get|post|put|patch|delete|all|addRoute)\(/.test(bracketOnly)).toBe(false)
+    expect(uncoveredSheetModules([factsOf('routes/zz-judge-bracket2.ts', bracketOnly)])).toEqual(['routes/zz-judge-bracket2.ts'])
+    // J10: a constant verb is read like a literal one; a computed verb is opaque (and so must be named).
+    const constVerb = bracketOnly.replace("router['get']", 'router[VERB]').replace('export function', "const VERB = 'get' as const\nexport function")
+    expect(uncoveredSheetModules([factsOf('routes/zz-judge-dyn.ts', constVerb)])).toEqual(['routes/zz-judge-dyn.ts'])
+    const computedVerb = bracketOnly.replace("router['get']", 'router[pickVerb()]')
+    expect(factsOf('routes/zz-judge-dyn2.ts', computedVerb).opaque.map((o) => o.key)).toEqual(['<dynamic pickVerb()> /sheets/:sheetId/judge-rows in judgeRouter'])
+    expect(OPAQUE_REGISTRATIONS['routes/zz-judge-dyn2.ts']).toBeUndefined()
+    // J12: a chart-id route in dashboard.ts reaches sheet-keyed rows without naming the sheet — the
+    // file's ledger (kept on COVERED, asserted present) names every such route.
+    const ledger = COVERED['routes/dashboard.ts']?.unaddressed
+    expect(ledger, 'routes/dashboard.ts must keep its unaddressed-route ledger').toBeDefined()
+    const dash = scanRouteSource('routes/dashboard.ts', [
+      'export function dashboardRouter() {',
+      '  const router = Router()',
+      "  router.get('/sheets/:sheetId/charts', async (req, res) => { const auth = await requireSheetRead(req, res, req.params.sheetId); if (!auth) return; res.json(await dashboardService.listCharts(req.params.sheetId)) })",
+      "  router.get('/charts/:chartId/judge-data', async (req, res) => {",
+      '    const chart = await dashboardService.getChart(req.params.chartId)',
+      '    if (!chart) return res.status(404).end()',
+      '    res.json(await dashboardService.getChartData(chart.id))',
+      '  })',
+      '  return router',
+      '}',
+    ].join('\n'))
+    const j12 = unaddressedProblems(dash.handlers, ledger!)
+    expect(j12.touching.map((h) => h.key)).toEqual(['GET /charts/:chartId/judge-data'])
+    expect(j12.problems.join('\n')).toMatch(/GET \/charts\/:chartId\/judge-data \(line \d+\) touches sheet-keyed data without a sheet id and is not named/)
+  })
+
+  it('GAP trackers self-test: every GAP names a real issue; TBD placeholders and untracked GAPs red', () => {
+    const why = ` — ${'x'.repeat(90)}`
+    const doc = 'docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md'
+    expect(reasonProblems('k', { reason: `GAP — tracked in #5830${why}` })).toEqual([])
+    expect(reasonProblems('k', { reason: `GAP — tracked in #5831 (see ${doc} §Residual)${why}` })).toEqual([])
+    expect(reasonProblems('k', { reason: `MUST WORK${why}. The worker is a GAP — tracked in #5832${why}` })).toEqual([])
+    expect(reasonProblems('k', { reason: `GAP — tracked in #TBD-record-gate-liveness-order${why}` }).join('\n')).toMatch(/TBD/)
+    expect(reasonProblems('k', { reason: `GAP — tracked in ${doc} §Residual${why}` }).join('\n')).toMatch(/every GAP must name its issue/)
+    expect(reasonProblems('k', { reason: `NOT A HOLE${why}, but the worker is a GAP nobody tracks` }).join('\n')).toMatch(/every GAP must name its issue/)
+    expect(reasonProblems('k', { reason: `GAP — tracked in #5831 (see docs/development/no-such-doc.md)${why}` }).join('\n')).toMatch(/does not exist/)
+    // Every reason in this file passes — including the ones nested in ledgers and the OPAQUE list.
+    const reasons: Array<[string, { reason: string }]> = [
+      ['RECORD_GATE_ORDER_GAP', RECORD_GATE_ORDER_GAP],
+      ...Object.entries(COVERED).flatMap(([file, c]) => [
+        ...Object.entries(c.exempt).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e]),
+        ...Object.entries(c.unaddressed?.named ?? {}).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e]),
+      ]),
+      ...Object.entries(OPAQUE_REGISTRATIONS).flatMap(([file, entries]) => Object.entries(entries).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e])),
+    ]
+    expect(reasons.flatMap(([key, entry]) => reasonProblems(key, entry))).toEqual([])
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(15)
+  })
+
+  it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
+    const vettedOf = (line: string) => [...vettedGuardsFor('routes/fixture.ts', scanRouteSource('routes/fixture.ts', `${line}\nexport const x = 1\n`).sourceFile).keys()]
+    expect(vettedOf("import { requireRecordReadable } from './univer-meta'")).toEqual(['requireRecordReadable'])
+    expect(vettedOf("import { requireRecordWritable as requireRecordReadable } from './univer-meta'")).toEqual([])
+    expect(vettedOf("import { requireRecordReadable } from './univer-meta-copy'")).toEqual([])
+    expect(vettedOf("import type { requireRecordReadable } from './univer-meta'")).toEqual([])
+    expect(vettedOf("import { loadSheetRow } from '../multitable/loaders'")).toEqual(['loadSheetRow'])
+    const aliased = scanRouteSource('routes/fixture.ts', [
+      "import { requireRecordWritable as requireRecordReadable } from './univer-meta'",
+      'export function build(router) {',
+      "  router.get('/sheets/:sheetId/d', async (req, res) => { const r = await requireRecordReadable(req, q, req.params.sheetId, 'r'); if ('status' in r) return res.status(r.status).json(r.body); res.json(r) })",
+      '}',
+    ].join('\n'))
+    const options = { ...ROUTE_TEST_OPTIONS, vetted: vettedGuardsFor('routes/fixture.ts', aliased.sourceFile) }
+    expect(analyzeHandler(aliased.handlers[0]!, aliased.sourceFile, options).sources).toEqual([])
+    // Inline sheet filters: one sheet, by id.
+    expect(sheetTableLivenessFilter('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')).toBe(true)
+    expect(sheetTableLivenessFilter('SELECT id FROM meta_sheets WHERE deleted_at IS NULL LIMIT 1')).toBe(false)
+    expect(sheetTableLivenessFilter('SELECT s.id FROM meta_sheets s WHERE s.base_id = $1 AND s.deleted_at IS NULL')).toBe(false)
+    expect(sheetTableLivenessFilter('SELECT 1 FROM meta_sheets s JOIN meta_records r ON r.sheet_id = s.id WHERE r.id = $1 AND s.deleted_at IS NULL')).toBe(false)
+  })
+
+  it('FILES: every router module that addresses a sheet is covered here or by the sibling guard; no dead file entries', () => {
+    const facts = allFacts()
+    const routerModules = facts.filter((f) => f.handlers > 0 || f.opaque.length > 0)
+    const sheetAddressing = facts.filter((f) => f.sheetAddressing).map((f) => f.rel)
+    const uncovered = uncoveredSheetModules(facts)
     expect(
       uncovered,
       `${uncovered.length} route module(s) address a sheet but are not in this closed world:\n`
       + uncovered.map((r) => `  - src/${r}`).join('\n')
       + '\nAdd each to COVERED (and guard or exempt its handlers).',
     ).toEqual([])
+    const known = new Set([...Object.keys(COVERED), ...Object.keys(SIBLING_GUARDED)])
     const dead = [...known].filter((rel) => !sheetAddressing.includes(rel))
     expect(dead, `closed-world entries that no longer address a sheet: ${dead.join(', ')}`).toEqual([])
-    // Tripwire for the discovery walk itself.
-    expect(routerModules).toBeGreaterThan(40)
+    // Tripwires for the discovery walk itself: every source file was parsed, and the walk found routers.
+    expect(facts.length).toBe(listSourceFiles().length)
+    expect(facts.length).toBeGreaterThan(500)
+    expect(routerModules.length).toBeGreaterThan(40)
     expect(sheetAddressing.length).toBeGreaterThanOrEqual(Object.keys(COVERED).length)
   })
 
-  it('OPAQUE: every registration whose handler cannot be read is named, with a fact that still holds', () => {
-    const found: OpaqueRegistration[] = []
-    for (const rel of listSourceFiles()) {
-      const raw = readSource(rel)
-      if (!/\.(get|post|put|patch|delete|all|addRoute)\(/.test(raw)) continue
-      found.push(...scan(rel).opaque)
-    }
+  it('OPAQUE: every registration whose handler, path or verb cannot be read is named, with a fact that still holds', () => {
+    const found = allFacts().flatMap((f) => f.opaque)
     const problems: string[] = []
+    const seen = new Set<string>()
     for (const o of found) {
+      const id = `${o.file} ${o.key}`
+      if (seen.has(id)) problems.push(`src/${o.file}:${o.line} ${o.key}: a second opaque registration under the same key — the entry would name both`)
+      seen.add(id)
       const named = OPAQUE_REGISTRATIONS[o.file]?.[o.key]
       if (!named) { problems.push(`src/${o.file}:${o.line} ${o.key} <- ${o.handler} is not named (read its handler and add a reason)`); continue }
       if (named.handler !== o.handler) problems.push(`${o.file} ${o.key}: handler is now \`${o.handler}\`, entry says \`${named.handler}\``)
+      if (!named.stillTrue(o)) problems.push(`${o.file} ${o.key}: the fact this entry rests on is no longer true`)
     }
     for (const [file, entries] of Object.entries(OPAQUE_REGISTRATIONS)) {
       for (const [key, entry] of Object.entries(entries)) {
         if (!found.some((o) => o.file === file && o.key === key)) problems.push(`${file} ${key}: no such opaque registration (dead entry)`)
         problems.push(...reasonProblems(`${file} ${key}`, entry))
-        if (!entry.stillTrue()) problems.push(`${file} ${key}: the fact this entry rests on is no longer true`)
       }
     }
     expect(problems, problems.join('\n')).toEqual([])
-    expect(found.length).toBeGreaterThan(0)
+    // The dynamic registrations that exist today are among them (a scanner that stops seeing
+    // `app[method](…)` would otherwise pass by finding nothing).
+    expect(found.filter((o) => o.verb.startsWith('<dynamic ')).map((o) => `${o.file} ${o.key}`).sort()).toEqual([
+      'gateway/APIGateway.ts <dynamic method> <path endpoint.path> in registerEndpoint',
+      'index.ts <dynamic methodLower> <path path> in addRoute',
+      'index.ts <dynamic methodLower> <path path> in registerPluginRoute',
+    ])
   })
 
   it('the sibling guard still owns univer-meta.ts', () => {
@@ -857,17 +1313,7 @@ describe('sheet-liveness closure over EVERY route file', () => {
       if (config.unaddressed) {
         const ledger = config.unaddressed
         it('handlers that touch sheet-keyed data WITHOUT naming a sheet are each named (cross-sheet listings, child-id routes)', () => {
-          const touching = handlers().filter((h) => !addressesASheet(h) && ledger.touches.test(everything(h)))
-          const problems: string[] = []
-          for (const h of touching) {
-            if (!(h.key in ledger.named)) problems.push(`${h.key} (line ${h.line}) touches sheet-keyed data without a sheet id and is not named`)
-          }
-          for (const [key, entry] of Object.entries(ledger.named)) {
-            const h = touching.find((x) => x.key === key)
-            if (!h) { problems.push(`${key}: no such unaddressed route (dead entry)`); continue }
-            problems.push(...reasonProblems(key, entry))
-            if (entry.stillTrue && !entry.stillTrue(h)) problems.push(`${key}: the fact this entry rests on is no longer true`)
-          }
+          const { touching, problems } = unaddressedProblems(handlers(), ledger)
           expect(problems, `${file}:\n${problems.join('\n')}`).toEqual([])
           expect(touching.length).toBe(Object.keys(ledger.named).length)
         })
@@ -905,6 +1351,7 @@ describe('sheet-liveness closure over EVERY route file', () => {
 
   it(`GAP ledger: the routes that inherit requireRecordReadable's liveness-before-403 order are exactly the named ones`, () => {
     expect(RECORD_GATE_ORDER_GAP.reason).toMatch(GAP_TRACKER)
+    expect(reasonProblems('RECORD_GATE_ORDER_GAP', RECORD_GATE_ORDER_GAP)).toEqual([])
     const inheriting: string[] = []
     for (const [file, config] of Object.entries(COVERED)) {
       for (const h of scan(file).handlers.filter(addressesASheet)) {
@@ -965,24 +1412,13 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(resolverCode).toMatch(/membershipOk/)
   })
 
-  it('COLLAB CHECKERS: every set…Checker seam that resolves sheet capabilities also refuses a non-live sheet', () => {
-    const found: string[] = []
-    const problems: string[] = []
-    for (const rel of listSourceFiles()) {
-      const raw = readSource(rel)
-      if (!/\bset\w*Checker\(/.test(raw)) continue
-      const s = scan(rel)
-      for (const reg of checkerRegistrations(s.sourceFile)) {
-        const code = codeOf(reg.fn, s.sourceFile)
-        if (!/\bresolveSheet\w*Capabilities\w*\(/.test(code)) continue
-        const where = `src/${rel}:${reg.line} ${reg.name}`
-        found.push(where)
-        const analysis = analyzeHandler({ units: [{ label: 'handler', node: reg.fn, code }] }, s.sourceFile, CHECKER_OPTIONS)
-        for (const v of analysis.violations) problems.push(`${where}: ${v}`)
-        if (!analysis.sources.some((x) => /^(resolver|blind-resolver|liveness-load) /.test(x))) {
-          problems.push(`${where}: resolves sheet capabilities but never refuses a non-live sheet`)
-        }
-      }
+  it('COLLAB CHECKERS: every set…Checker seam that resolves sheet capabilities refuses a non-live sheet with its own refusal value', () => {
+    const facts = allFacts()
+    const found = facts.flatMap((f) => f.checkers.found)
+    const problems = facts.flatMap((f) => f.checkers.problems)
+    const keys = new Set(facts.flatMap((f) => f.checkers.keys))
+    for (const key of Object.keys(CHECKER_REFUSALS)) {
+      if (!keys.has(key)) problems.push(`CHECKER_REFUSALS ${key}: no such checker (dead entry)`)
     }
     expect(problems, problems.join('\n')).toEqual([])
     // Population: the four index.ts seams (sheet room, comment room, comment-mention notify, Yjs subscribe).
