@@ -275,15 +275,46 @@ describe('createAutomationRoutes HTTP mounting', () => {
       .expect(200)
   })
 
-  it('missing ruleId returns 400', async () => {
+  /**
+   * The handler-level parameter guard, exercised at the ROUTER level on purpose.
+   *
+   * Express 4 `:param` never matches an EMPTY segment, so no HTTP request can reach this branch —
+   * which is exactly why it used to carry a test that asserted nothing (`expect(svc).toBeTruthy()`)
+   * under a name promising coverage. The branch is still worth holding: it is the guard that makes
+   * `sheetId` non-empty before the capability resolution runs, so it is invoked directly with the
+   * params a future re-mount (a different framework, a programmatic call) could produce.
+   *
+   * Whitespace-only segments, which the HTTP path CAN produce (`/sheets/%20/…`), are covered over in
+   * automation-rule-log-read-authz.test.ts.
+   */
+  it('empty :sheetId/:ruleId → 400 with the exact message, before any capability resolution', async () => {
     const svc = makeMockService()
-    // Express won't match the route if :ruleId is empty in the URL,
-    // so this guards the handler-level check by sending an obviously-empty
-    // param that Express can't route. Just ensure one real 400 path works.
-    // (An internal null resolver still serves a 503, not a 400, so this
-    // case is really about the handler's parameter guard — exercised by
-    // the route signature validation.)
-    // No assertion beyond compile-check — kept for symmetry with logs guard.
-    expect(svc).toBeTruthy()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router: any = createAutomationRoutes(svc as any)
+    const layer = router.stack.find(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (l: any) => l.route?.path === '/sheets/:sheetId/automations/:ruleId/logs',
+    )
+    expect(layer).toBeTruthy()
+
+    const seen: { status?: number; body?: unknown } = {}
+    const res = {
+      status(code: number) { seen.status = code; return res },
+      json(body: unknown) { seen.body = body; return res },
+    }
+    resolveSheetCapabilities.mockReset()
+
+    await layer.route.stack[0].handle(
+      { params: { sheetId: '', ruleId: '' }, query: {} },
+      res,
+      () => undefined,
+    )
+
+    expect(seen.status).toBe(400)
+    expect(seen.body).toEqual({ error: 'sheetId and ruleId are required' })
+    // The guard runs FIRST: no permission resolution, no service call.
+    expect(resolveSheetCapabilities).not.toHaveBeenCalled()
+    expect(svc.getRule).not.toHaveBeenCalled()
+    expect(svc.logs.getByRule).not.toHaveBeenCalled()
   })
 })

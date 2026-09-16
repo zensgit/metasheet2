@@ -31,11 +31,10 @@ import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-co
 import { requireAdminRole } from '../guards/audit-integration'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
-import {
-  SHEET_DELETED_CODE,
-  SHEET_DELETED_MESSAGE,
-  SHEET_NOT_FOUND_MESSAGE,
-} from '../multitable/sheet-liveness'
+// The 403 body and the two liveness-404 bodies are a CLIENT CONTRACT (clients switch on
+// `error.code`), so they come from one shared module instead of being hand-copied per route. See
+// multitable/sheet-refusals.ts for the drift those copies used to invite.
+import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import { poolManager } from '../integration/db/connection-pool'
 import {
   INBOUND_WEBHOOK_BODY_LIMIT,
@@ -313,8 +312,39 @@ export function createAutomationRoutes(
    * handler read only `:ruleId` — the `:sheetId` segment was decorative. The log service filters on
    * `rule_id` alone and `multitable_automation_executions` has no tenant column, so the only layer in
    * front of them was the global session JWT gate (index.ts), which AUTHENTICATES but does not
-   * AUTHORIZE. Any logged-in caller holding a rule id could read another sheet's — another tenant's —
-   * execution history.
+   * AUTHORIZE: any logged-in caller — including one holding NO automation authority anywhere — could
+   * read any rule's execution history, raw `triggerEvent` / `ruleSnapshot` blobs included.
+   *
+   * WHAT IS CLOSED, EXACTLY — deliberately stated narrowly:
+   *   - a caller with no automation capability at all is refused (403, nothing read), and
+   *   - a rule that does not belong to the PATH sheet is refused (404), so `:sheetId` is load-bearing.
+   *
+   * WHAT IS **NOT** CLOSED (residual, and not this route's to close): `canManageAutomation` is a
+   * GLOBAL capability tier — multitable/access.ts `deriveCapabilities()` derives it from the caller's
+   * own permission codes (`workflow:all|write|create|execute`, and via `hasPermission()` also
+   * `workflow:*` / `*:*`) or an admin role. `resolveSheetCapabilities()` narrows that tier by the
+   * caller's per-sheet grants ONLY IF the caller holds grant rows on that sheet:
+   * permission-service.ts `applySheetPermissionScope` returns early on `!scope.hasAssignments`, and
+   * the narrowing line (`canManageAutomation && scope.canWrite`) is reached only below that early
+   * return. So a workflow-capable principal with NO relationship to the sheet keeps the full tier and
+   * reads that rule's history from a sheetId + ruleId pair alone — exactly as that same principal can
+   * already list / PATCH / DELETE the sheet's rules through the sibling routes in
+   * routes/univer-meta.ts, which run this identical composition. Do NOT read the cross-sheet 404
+   * below as tenant isolation: it binds rule -> path-sheet, and nothing more.
+   *
+   * Its inverted corollary, stated plainly rather than left to be discovered: holding a READ-ONLY
+   * share on the sheet makes the caller hold grant rows, which takes the `scope.canWrite` branch and
+   * REFUSES them (403) — strictly less access than the same caller with no relationship at all. Both
+   * halves are the platform composition shared by every automation surface, not something introduced
+   * here, and neither is this route's to change unilaterally: narrowing the no-grant case would 403
+   * every operator on a deployment that keeps no per-sheet grant rows (222 grants through roles), and
+   * widening the read-only case would be a relaxation. Both are pinned as "RESIDUAL SCOPE" tests in
+   * tests/unit/automation-rule-log-read-authz.test.ts so neither can be mistaken for a guarantee.
+   *
+   * BEHAVIOUR CHANGE, disclosed: step 5 also refuses a DELETED rule's history (no rule row -> 404),
+   * which this endpoint used to serve out of the orphaned execution rows. The post-mortem path is
+   * `GET /api/multitable/automation-executions?ruleId=…` (platform-admin only, below); the FE only
+   * ever opens this panel from a live rule card.
    *
    * The gate below is the one the sibling rule-scoped reads already run
    * (`routes/univer-meta.ts` → `/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries`),
@@ -323,7 +353,7 @@ export function createAutomationRoutes(
    *   2. `canManageAutomation` — run history is part of the rule-authoring surface
    *   3. sheet liveness — a soft-deleted/absent sheet is a coded 404, not a 403
    *   4. service readiness (the pre-existing 503, unchanged)
-   *   5. `rule.sheet_id === :sheetId` — step 2 only proves authority on the PATH sheet, and
+   *   5. `rule.sheet_id === :sheetId` — step 2 only proves the capability TIER, and
    *      `getRule(ruleId)` is not sheet-bound, so a rule owned by another sheet must still 404.
    *
    * Returns null when it has already answered the request.
@@ -332,8 +362,11 @@ export function createAutomationRoutes(
     req: Request,
     res: Response,
   ): Promise<{ svc: AutomationService; sheetId: string; ruleId: string } | null> {
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    // TRIMMED: `/sheets/%20/automations/<id>/logs` decodes to a truthy single space, which would
+    // otherwise skip this 400 and be answered by the liveness lookup as 'Sheet not found' — two
+    // refusals for one malformed request. Matches the `.trim()` on the /fwb/confirm sibling below.
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
     if (!sheetId || !ruleId) {
       res.status(400).json({ error: 'sheetId and ruleId are required' })
       return null
@@ -343,16 +376,11 @@ export function createAutomationRoutes(
       const pool = poolManager.get()
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) {
-        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        sendForbidden(res)
         return null
       }
       if (sheetLiveness !== 'live') {
-        res.status(404).json({
-          ok: false,
-          error: sheetLiveness === 'deleted'
-            ? { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE }
-            : { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE },
-        })
+        sendSheetNotLive(res, sheetLiveness)
         return null
       }
     } catch (err) {
@@ -701,25 +729,14 @@ export function createAutomationRoutes(
       const pool = poolManager.get()
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) {
-        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        return sendForbidden(res)
       }
     } catch (err) {
-      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through
-      // to an ungated testRun. Review P3: never echo the raw error message (it can carry DB
-      // host/port/user) — surface a generic, values-free message. A connection / not-ready error
-      // is a transient 503; anything else is a 500. Either way the real run never fired.
-      const raw = err instanceof Error ? err.message : ''
-      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
-      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
-      const transient = isDbNotReadySqlState(err)
-        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
-      return res.status(transient ? 503 : 500).json({
-        ok: false,
-        error: {
-          code: transient ? 'DB_NOT_READY' : 'PERMISSION_CHECK_FAILED',
-          message: transient ? 'Service temporarily unavailable' : 'Failed to resolve permissions',
-        },
-      })
+      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through to
+      // an ungated testRun. Same responder as the rule-scoped reads: SQLSTATE先判 (42P01/42703 在
+      // 中文 locale 下散文匹配不到) -> 值无关的 503/500,绝不回显原始报错。ONE copy, so the
+      // fail-closed sites in this file cannot drift apart. Either way the real run never fired.
+      return sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
     }
 
     const svc = getService(res)
@@ -837,8 +854,11 @@ export function createAutomationRoutes(
       // the rule-scoped view (no ruleSnapshot / triggerEvent), never the raw persisted row.
       return res.json({ executions: executions.map(toRuleScopedExecutionView) })
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load logs'
-      return res.status(500).json({ error: message })
+      // VALUES-FREE, like the gate three screens up: a pg/kysely failure carries host, port, role and
+      // SQL text in `err.message`, and this handler used to hand that to the browser verbatim. The
+      // operator keeps the detail server-side.
+      console.error('[automation] rule log read failed:', err)
+      return sendFailClosedResolutionError(res, err, 'LOG_READ_FAILED', 'Failed to load execution logs')
     }
   })
 
@@ -855,8 +875,9 @@ export function createAutomationRoutes(
       // Flat shape — client does parseJson<AutomationStats>(res)
       return res.json(stats)
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load stats'
-      return res.status(500).json({ error: message })
+      // VALUES-FREE — same reason as /logs above.
+      console.error('[automation] rule stats read failed:', err)
+      return sendFailClosedResolutionError(res, err, 'STATS_READ_FAILED', 'Failed to load execution stats')
     }
   })
 
