@@ -24,8 +24,17 @@
  *   5. webhook NO-ORACLE: a bad / missing / stale signature on a deleted sheet gets the SIGNATURE refusal, and
  *      the liveness lookup is never even issued for an unauthenticated delivery.
  *   6. one definition: every lane goes through `dropRulesOnDeletedSheets` with exactly its one rule.
+ *   7. NO NARROWING of the check (each has a live-sheet control, so the refusal is not a fixture artifact):
+ *        · resume: a `condition_branch` cursor is refused like a top-level one — before the claim, and
+ *          `continueBranchExecution` never runs;
+ *        · webhook + retry: an EGRESS-ONLY rule (`[send_webhook]`, no write to the dead sheet) is refused too —
+ *          the push would still carry the deleted sheet's data out;
+ *        · webhook: the sheet checked is the RULE's; a `sheetId` inside the signed body steers nothing, in
+ *          either direction.
  *
  * Zero-DB: liveness and every other statement go through a fake queryFn that RECORDS what it is sent.
+ * The item-7 cases (except resume, whose tail is stubbed as elsewhere) run the REAL executor behind a recording
+ * fetch, so a narrowed check fails as the INSERT into the deleted sheet / the outbound push it really causes.
  * HTTP cases use the pinned-server transport (`request(pinned.url())`), never `request(app)` (CI #4154).
  */
 import express from 'express'
@@ -64,12 +73,32 @@ const LIVENESS_ONE_SQL = /SELECT\s+deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\
 const RECORD_READ_SQL = /SELECT\s+data\s+FROM\s+meta_records\s+WHERE\s+id\s*=\s*\$1\s+AND\s+sheet_id\s*=\s*\$2/i
 const FIRST_RETRY_MARKER_SQL = /first_retry_attempted_at\s+IS\s+NULL/i
 const WRITE_SQL = /^\s*(WITH\b[\s\S]*\b)?(UPDATE|INSERT|DELETE)\b/i
+const RECORD_INSERT_SQL = /^\s*INSERT\s+INTO\s+meta_records\s*\(/i
 
 type SheetState = 'live' | 'deleted' | 'absent' | 'throws'
+/** Per-sheet answers, for the cases where two sheets must answer differently; an unlisted id is absent. */
+type SheetLivenessMap = Readonly<Record<string, 'live' | 'deleted'>>
+
+interface HarnessOptions {
+  /**
+   * Run the REAL executor: `executeRule` stays a pass-through spy and outbound pushes go to a recording fetch,
+   * so a regression shows as the INSERT / the push it would really cause, not only as a stub call.
+   */
+  realExecutor?: boolean
+}
 
 const SECRET = 'fixture-inbound-secret'
 const SHEET = 'sheet_dx'
+/** A sheet a webhook SENDER names in its body — never the rule's. */
+const BODY_SHEET = 'sheet_named_in_body'
 const RESUME_TOKEN = 'fixture-resume-token-value'
+const OUTBOUND_URL = 'https://hooks.example.invalid/out'
+/** An egress-only rule: nothing is written to the sheet, but its data still leaves the system. */
+const EGRESS_ONLY = {
+  action_type: 'send_webhook',
+  action_config: { url: OUTBOUND_URL },
+  actions: [{ type: 'send_webhook', config: { url: OUTBOUND_URL } }],
+}
 
 /** A REAL node-postgres server error, as the driver builds it; its text must never reach a log. */
 function pgStatementTimeout(): Error {
@@ -123,6 +152,50 @@ function resumeRuleRow() {
   })
 }
 
+/** A rule whose only top-level action is a `condition_branch`; branch `b1` waits, then writes and pushes. */
+function branchResumeRuleRow() {
+  return ruleRow({
+    id: 'atr_br',
+    execution_mode: 'workflow_job_v1',
+    actions: [
+      {
+        type: 'condition_branch',
+        config: {
+          branches: [
+            {
+              key: 'b1',
+              actions: [
+                { type: 'wait_for_callback', config: {} },
+                { type: 'create_record', config: { fields: { fld_title: 'after branch wait' } } },
+                { type: 'send_webhook', config: { url: OUTBOUND_URL } },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  })
+}
+
+/** The cursor of a suspension on `b1`'s wait — consistent with every pre-claim branch gate of `resumeExecution`. */
+function branchResumeCursor(rule: Record<string, unknown>) {
+  const parent = toExecutorRule(rule as never).actions[0].config as { branches: Array<{ actions: unknown[] }> }
+  return {
+    kind: 'condition_branch' as const,
+    cursor: {
+      kind: 'condition_branch' as const,
+      parentStepIndex: 0,
+      branchKey: 'b1',
+      branchActionIndex: 0,
+      branchActionFingerprint: computeActionFingerprint(parent.branches[0].actions as never),
+      stepKey: '0.branch.b1.0',
+      parentJobId: 'axe_susp:job:0',
+      branchJobId: 'axe_susp:job:0:branch:b1:0',
+      upstreamJobId: 'axe_susp:job:0',
+    },
+  }
+}
+
 function execution(over: Partial<AutomationExecution> = {}): AutomationExecution {
   return {
     id: 'axe_orig',
@@ -143,18 +216,30 @@ interface Harness {
   /** Every statement sent through queryFn, classified. */
   sql: string[]
   livenessIds: string[][]
+  /** `sheet_id` of every `INSERT INTO meta_records` (only a real executor issues any). */
+  recordInserts: string[]
+  /** URL of every outbound push (only a real executor makes any). */
+  outbound: string[]
   executeRule: ReturnType<typeof vi.spyOn>
   dropSpy: ReturnType<typeof vi.spyOn>
 }
 
-function makeHarness(sheet: SheetState): Harness {
+function makeHarness(sheet: SheetState | SheetLivenessMap, opts: HarnessOptions = {}): Harness {
   const sql: string[] = []
   const livenessIds: string[][] = []
+  const recordInserts: string[] = []
+  const outbound: string[] = []
   const queryFn = vi.fn(async (sqlText: string, params: unknown[]) => {
     if (LIVENESS_BATCH_SQL.test(sqlText)) {
       const ids = [...((params?.[0] as string[]) ?? [])]
       sql.push('liveness')
       livenessIds.push(ids)
+      if (typeof sheet === 'object') {
+        const rows = ids
+          .filter((id) => id in sheet)
+          .map((id) => ({ id, deleted_at: sheet[id] === 'deleted' ? new Date('2026-09-10T00:00:00Z') : null }))
+        return { rows, rowCount: rows.length }
+      }
       if (sheet === 'throws') throw pgStatementTimeout()
       if (sheet === 'absent') return { rows: [], rowCount: 0 }
       const deletedAt = sheet === 'deleted' ? new Date('2026-09-10T00:00:00Z') : null
@@ -174,24 +259,41 @@ function makeHarness(sheet: SheetState): Harness {
       sql.push('first-retry-marker')
       return { rows: [{ first_retry_attempt: true }], rowCount: 1 }
     }
+    if (RECORD_INSERT_SQL.test(sqlText)) recordInserts.push(String(params?.[1]))
     const head = sqlText.trim().split(/\s+/).slice(0, 3).join(' ')
     sql.push(WRITE_SQL.test(sqlText) ? `write:${head}` : `other:${head}`)
     return { rows: [], rowCount: 0 }
   })
+  const fetchFn = vi.fn(async (url: unknown) => {
+    outbound.push(String(url))
+    return new Response('{}', { status: 200 })
+  })
 
-  const service = new AutomationService(new EventBus(), {} as never, queryFn as never)
+  const service = new AutomationService(new EventBus(), {} as never, queryFn as never, fetchFn as never)
   const internals = service as never as Record<string, unknown>
   // Fire-and-forget housekeeping on the retry lane; not what this suite is about.
   internals.sweepAutomationRetryLedger = vi.fn(async () => 0)
   internals.approvalBridgeService = { hasCreatedApprovalForAnyExecution: vi.fn(async () => false) }
-  const executeRule = vi.spyOn(service, 'executeRule').mockImplementation(
-    async (rule) => execution({ id: 'axe_new', ruleId: rule.id, status: 'success' }),
-  ) as ReturnType<typeof vi.spyOn>
+  let executeRule: ReturnType<typeof vi.spyOn>
+  if (opts.realExecutor) {
+    // The executor's write path runs inside `deps.transaction`, which the constructor wires to the real pool:
+    // route it through the recording queryFn. Persisting the run's log row is not what is under test.
+    ;(internals.executor as { deps: { transaction?: unknown } }).deps.transaction = async (
+      handler: (tx: { query: unknown }) => Promise<unknown>,
+    ) => handler({ query: queryFn })
+    vi.spyOn(service.logs, 'record').mockResolvedValue(undefined)
+    vi.spyOn(service.logs, 'updateRecordedExecution').mockResolvedValue(undefined)
+    executeRule = vi.spyOn(service, 'executeRule') as ReturnType<typeof vi.spyOn>
+  } else {
+    executeRule = vi.spyOn(service, 'executeRule').mockImplementation(
+      async (rule) => execution({ id: 'axe_new', ruleId: rule.id, status: 'success' }),
+    ) as ReturnType<typeof vi.spyOn>
+  }
   const dropSpy = vi.spyOn(
     internals as never as { dropRulesOnDeletedSheets: (...args: unknown[]) => Promise<unknown[]> },
     'dropRulesOnDeletedSheets',
   ) as ReturnType<typeof vi.spyOn>
-  return { service, internals, sql, livenessIds, executeRule, dropSpy }
+  return { service, internals, sql, livenessIds, recordInserts, outbound, executeRule, dropSpy }
 }
 
 let warn: ReturnType<typeof vi.spyOn>
@@ -373,6 +475,59 @@ describe('inbound webhook — sheet liveness (#5803)', () => {
     expect(h.sql).not.toContain('liveness-one')
   })
 
+  it('EGRESS-ONLY rule (`[send_webhook]` only) + deleted sheet → refused all the same; nothing is pushed out (real executor)', async () => {
+    const h = makeHarness('deleted', { realExecutor: true })
+    withRule(h, webhookRuleRow(EGRESS_ONLY))
+    const req = signed(BODY, NOW)
+
+    const result = await h.service.handleInboundWebhook('atr_wh', req.rawBody, req.parsed, req.headers, NOW)
+
+    expect(result).toEqual({ accepted: false, reason: 'sheet_deleted' })
+    expect(h.executeRule, 'no write action is no exemption: the push still carries data out').not.toHaveBeenCalled()
+    expect(h.outbound).toEqual([])
+    expect(h.sql).toEqual(['liveness'])
+  })
+
+  it('EGRESS-ONLY rule + LIVE sheet (control) → the real executor pushes exactly once, so the zero above is the refusal', async () => {
+    const h = makeHarness('live', { realExecutor: true })
+    withRule(h, webhookRuleRow(EGRESS_ONLY))
+    const req = signed(BODY, NOW)
+
+    await expect(h.service.handleInboundWebhook('atr_wh', req.rawBody, req.parsed, req.headers, NOW))
+      .resolves.toMatchObject({ accepted: true })
+    expect(h.executeRule).toHaveBeenCalledTimes(1)
+    expect(h.outbound).toEqual([OUTBOUND_URL])
+    expect(h.recordInserts).toEqual([])
+  })
+
+  it('a `sheetId` in the SIGNED body cannot steer the check: rule sheet deleted, body names a LIVE sheet → still `sheet_deleted` (real executor)', async () => {
+    const h = makeHarness({ [SHEET]: 'deleted', [BODY_SHEET]: 'live' }, { realExecutor: true })
+    withRule(h)
+    const req = signed({ ...BODY, sheetId: BODY_SHEET }, NOW)
+
+    const result = await h.service.handleInboundWebhook('atr_wh', req.rawBody, req.parsed, req.headers, NOW)
+
+    expect(result).toEqual({ accepted: false, reason: 'sheet_deleted' })
+    expect(h.executeRule).not.toHaveBeenCalled()
+    expect(h.livenessIds, "the sheet asked about is the RULE's, never one the sender names").toEqual([[SHEET]])
+    expect(h.recordInserts).toEqual([])
+    expect(h.outbound).toEqual([])
+  })
+
+  it("… nor the other way (control): rule sheet LIVE, body names a DELETED sheet → accepted, and the write lands on the rule's sheet", async () => {
+    const h = makeHarness({ [SHEET]: 'live', [BODY_SHEET]: 'deleted' }, { realExecutor: true })
+    withRule(h)
+    const req = signed({ ...BODY, sheetId: BODY_SHEET }, NOW)
+
+    await expect(h.service.handleInboundWebhook('atr_wh', req.rawBody, req.parsed, req.headers, NOW))
+      .resolves.toMatchObject({ accepted: true })
+    expect(h.livenessIds).toEqual([[SHEET]])
+    expect(h.executeRule).toHaveBeenCalledTimes(1)
+    expect(h.executeRule.mock.calls[0][1]).toMatchObject({ sheetId: SHEET })
+    expect(h.recordInserts).toEqual([SHEET])
+    expect(h.outbound).toEqual([OUTBOUND_URL])
+  })
+
   describe('over HTTP (real router + raw-body parser, pinned server)', () => {
     const pinned = usePinnedServer()
     let h: Harness
@@ -441,13 +596,13 @@ describe('inbound webhook — sheet liveness (#5803)', () => {
 // ── ADMIN RETRY ──────────────────────────────────────────────────────────────────────────────────
 
 describe('admin retry — sheet liveness (#5803)', () => {
-  function retryHarness(state: SheetState) {
-    const h = makeHarness(state)
+  function retryHarness(state: SheetState, ruleOver: Record<string, unknown> = {}, opts: HarnessOptions = {}) {
+    const h = makeHarness(state, opts)
     const original = execution()
     vi.spyOn(h.service.logs, 'getById').mockResolvedValue(original)
     const record = vi.spyOn(h.service.logs, 'record').mockResolvedValue(undefined)
     const update = vi.spyOn(h.service.logs, 'updateRecordedExecution').mockResolvedValue(undefined)
-    vi.spyOn(h.service, 'getRule').mockResolvedValue(ruleRow() as never)
+    vi.spyOn(h.service, 'getRule').mockResolvedValue(ruleRow(ruleOver) as never)
     return { ...h, original, record, update }
   }
 
@@ -492,6 +647,29 @@ describe('admin retry — sheet liveness (#5803)', () => {
     expect(reasonWarns('sheet_deleted')).toHaveLength(0)
   })
 
+  it('EGRESS-ONLY rule (`[send_webhook]` only) + deleted sheet → the same 409; nothing runs or is pushed, the marker is NOT spent (real executor)', async () => {
+    const h = retryHarness('deleted', EGRESS_ONLY, { realExecutor: true })
+
+    const result = await h.service.retryExecution('axe_orig', 'admin1')
+
+    expect(result).toEqual({ status: 409, code: SHEET_DELETED_CODE, message: RETRY_SHEET_DELETED_MESSAGE })
+    expect(h.executeRule, 'no write action is no exemption: the push still carries data out').not.toHaveBeenCalled()
+    expect(h.outbound).toEqual([])
+    expect(h.sql).toEqual(['liveness'])
+    expect(h.record).not.toHaveBeenCalled()
+  })
+
+  it('EGRESS-ONLY rule + LIVE sheet (control) → the retry really pushes once, so the zero above is the refusal', async () => {
+    const h = retryHarness('live', EGRESS_ONLY, { realExecutor: true })
+
+    await expect(h.service.retryExecution('axe_orig', 'admin1')).resolves.toHaveProperty('execution')
+
+    expect(h.sql.slice(0, 2)).toEqual(['liveness', 'first-retry-marker'])
+    expect(h.executeRule).toHaveBeenCalledTimes(1)
+    expect(h.outbound).toEqual([OUTBOUND_URL])
+    expect(h.recordInserts).toEqual([])
+  })
+
   it('absent sheet → passes', async () => {
     const h = retryHarness('absent')
     await expect(h.service.retryExecution('axe_orig', 'admin1')).resolves.toHaveProperty('execution')
@@ -526,10 +704,11 @@ describe('admin retry — sheet liveness (#5803)', () => {
 // ── ADMIN RESUME ─────────────────────────────────────────────────────────────────────────────────
 
 describe('admin resume — sheet liveness (#5803)', () => {
-  function resumeHarness(state: SheetState) {
+  function resumeHarness(state: SheetState, cursorKind: 'top_level' | 'condition_branch' = 'top_level') {
     const h = makeHarness(state)
-    const rule = resumeRuleRow()
+    const rule = cursorKind === 'condition_branch' ? branchResumeRuleRow() : resumeRuleRow()
     vi.spyOn(h.service, 'getRule').mockResolvedValue(rule as never)
+    const resumeCursor = cursorKind === 'condition_branch' ? branchResumeCursor(rule) : { kind: 'top_level' as const }
     const suspension = {
       id: 'asp_1',
       executionId: 'axe_susp',
@@ -543,7 +722,7 @@ describe('admin resume — sheet liveness (#5803)', () => {
       reason: 'wait_for_callback',
       actionFingerprint: computeActionFingerprint(toExecutorRule(rule as never).actions),
       triggerEvent: { recordId: 'rec_1', actorId: 'u_actor' },
-      resumeCursor: { kind: 'top_level' },
+      resumeCursor,
       status: 'pending',
     }
     const claim = vi.fn(async () => true)
@@ -566,7 +745,7 @@ describe('admin resume — sheet liveness (#5803)', () => {
     const contBranch = vi.spyOn(executor, 'continueBranchExecution').mockImplementation(
       async (exec: unknown) => ({ ...(exec as object), status: 'success' }),
     )
-    return { ...h, claim, getById, update, cont, contBranch, onSettled }
+    return { ...h, resumeCursor, claim, getById, update, cont, contBranch, onSettled }
   }
 
   it('deleted sheet → 409 SHEET_DELETED; token NOT claimed, record NOT re-read, tail NOT run, nothing persisted', async () => {
@@ -613,6 +792,35 @@ describe('admin resume — sheet liveness (#5803)', () => {
     expect(h.cont).toHaveBeenCalledTimes(1)
     expect(h.update).toHaveBeenCalledTimes(1)
     expect(reasonWarns('sheet_deleted')).toHaveLength(0)
+  })
+
+  it('`condition_branch` cursor + deleted sheet → the same 409 before the claim; continueBranchExecution NOT run', async () => {
+    const h = resumeHarness('deleted', 'condition_branch')
+
+    const result = await h.service.resumeExecution(RESUME_TOKEN, 'admin1')
+
+    expect(result).toEqual({ status: 409, code: SHEET_DELETED_CODE, message: RESUME_SHEET_DELETED_MESSAGE })
+    expect(h.claim, 'a branch suspension keeps its token too').not.toHaveBeenCalled()
+    expect(h.contBranch, 'the branch tail must not slip past the check').not.toHaveBeenCalled()
+    expect(h.cont).not.toHaveBeenCalled()
+    expect(h.sql).toEqual(['liveness'])
+    expect(h.getById).not.toHaveBeenCalled()
+    expect(h.update).not.toHaveBeenCalled()
+    expect(reasonWarns('sheet_deleted')).toHaveLength(1)
+    expect(reasonWarns('sheet_deleted')[0][1]).toMatchObject({ executionId: 'axe_susp', channel: 'automation.resume', ruleIds: ['atr_br'] })
+  })
+
+  it('`condition_branch` cursor + LIVE sheet (control) → passes every branch gate, claims the token and continues the BRANCH tail', async () => {
+    const h = resumeHarness('live', 'condition_branch')
+
+    const result = await h.service.resumeExecution(RESUME_TOKEN, 'admin1')
+
+    expect(result).toMatchObject({ execution: { id: 'axe_susp', status: 'success' } })
+    expect(h.sql).toEqual(['liveness', 'record-read'])
+    expect(h.claim).toHaveBeenCalledWith(RESUME_TOKEN)
+    expect(h.contBranch).toHaveBeenCalledTimes(1)
+    expect(h.contBranch.mock.calls[0][3]).toEqual((h.resumeCursor as ReturnType<typeof branchResumeCursor>).cursor)
+    expect(h.cont).not.toHaveBeenCalled()
   })
 
   it('absent sheet → passes', async () => {
