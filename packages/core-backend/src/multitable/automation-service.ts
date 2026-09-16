@@ -115,7 +115,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
-import { loadSheetLiveness } from './sheet-liveness'
+import { loadSheetLiveness, type SheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -4196,6 +4196,20 @@ export class AutomationService {
   /**
    * T1-3 Q1: cross-sheet routing for approval.completed rules by REQUIRED trigger_config.templateId.
    * JSONB expression filter with no index in v1 by design (small table); revisit only on a perf signal.
+   *
+   * SHEET LIVENESS (soft delete). This SELECT keys on trigger_type + enabled + templateId ONLY, so the
+   * rows it returns can name sheets that are no longer live — the gap `loadEnabledRules` closes on the
+   * record lane and the scheduler dispatch closes on the scheduled lane was simply absent here, leaving
+   * a soft-deleted sheet's rules armed on the approval channels. `dropRulesOnDeletedSheets` applies the
+   * SAME predicate, from the same helper, with the same `=== 'deleted'` comparison.
+   *
+   * NOT scoped by base / workspace / tenant — that is #5780, and it is deliberately NOT fixed here: an
+   * enabled rule bound to this template fires wherever in the deployment it lives. `automation_rules`
+   * carries only `sheet_id` and `approval_templates` carries no owning-org column, so WHICH column
+   * expresses ownership is an owner decision, not a predicate to invent inside a liveness fix. The
+   * current (wrong-looking, deliberately unchanged) behaviour is pinned by the cross-base
+   * characterization case in tests/integration/automation-approval-completed-trigger.test.ts; when
+   * #5780 lands that assertion is expected to INVERT, and the inversion is the signal, not a regression.
    */
   async loadEnabledApprovalCompletedRules(templateId: string): Promise<AutomationRule[]> {
     const rows = await this.db
@@ -4206,10 +4220,14 @@ export class AutomationService {
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')
       .execute()
-    return rows.map((r) => this.mapRow(r))
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), APPROVAL_COMPLETED_TRIGGER)
   }
 
-  /** A-2a: same template-keyed routing for approval.task_created rules (see loadEnabledApprovalCompletedRules). */
+  /**
+   * A-2a: same template-keyed routing for approval.task_created rules (see
+   * loadEnabledApprovalCompletedRules) — including the same sheet-liveness filter, and the same
+   * deliberate absence of a base/tenant predicate (#5780).
+   */
   async loadEnabledApprovalTaskCreatedRules(templateId: string): Promise<AutomationRule[]> {
     const rows = await this.db
       .selectFrom('automation_rules')
@@ -4219,10 +4237,86 @@ export class AutomationService {
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')
       .execute()
-    return rows.map((r) => this.mapRow(r))
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), APPROVAL_TASK_CREATED_TRIGGER)
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * SHEET LIVENESS (soft delete) for the TEMPLATE-keyed approval channels.
+   *
+   * ── Same definition of "live", not a second spelling of it ────────────────────
+   * The record lane refuses inside `loadEnabledRules` and the scheduled lane refuses in the scheduler
+   * dispatch callback; both ask `loadSheetLiveness` (src/multitable/sheet-liveness.ts) and suppress on
+   * EXACTLY `'deleted'`. These loaders select by trigger_type + templateId, so ONE call spans MANY
+   * sheets and the question has to be asked per rule instead of once per call — that arity is the only
+   * difference. Same helper, same comparison, one definition.
+   *
+   * `=== 'deleted'` and not `!== 'live'`: that closes the soft-delete gap exactly and leaves `absent`
+   * (no `meta_sheets` row at all) behaving as it does on the sibling lane, rather than quietly widening
+   * this into a stricter rule than the one the record lane chose.
+   *
+   * ── FAIL-OPEN when the lookup THROWS: the rule stays armed, and the keep is LOGGED ────────────
+   *   1. It matches the sibling's stance that only POSITIVE proof of a soft delete suppresses a rule —
+   *      the no-answer case (`absent`) already keeps firing there.
+   *   2. This guard is hygiene, not authorization. The authorization gates on these channels — the
+   *      creator `approvals:read` re-check, the template-visibility re-check, the record-less action
+   *      allowlist and the cross-base write gate in the executor — sit DOWNSTREAM of this filter, are
+   *      unchanged, and fail CLOSED. Nothing here is a last line of defence, so nothing here should buy
+   *      safety with availability.
+   *   3. Fail-closed would convert a transient DB error into a deployment-wide SILENT outage of every
+   *      approval automation: the loader would just return fewer rules, no error would reach any caller,
+   *      no execution row would be written — and because a dropped rule never reaches its per-rule
+   *      `runWithEventDedup` claim, nothing would mark the work as owed, so no redelivery would repair
+   *      it. The runs would simply never have happened, with nothing anywhere saying so.
+   * The cost of (3) is paid in the log instead: EVERY fail-open keep names the rule, its sheet and the
+   * reason, so a persistently failing lookup is read off the log rather than inferred from absent runs.
+   * VALUES-FREE: rule/sheet ids and the error CLASS name only — never the error text, which can carry
+   * connection details.
+   */
+  private async dropRulesOnDeletedSheets(rules: AutomationRule[], channel: string): Promise<AutomationRule[]> {
+    if (rules.length === 0) return rules
+    // One lookup per DISTINCT sheet (a template's rules cluster on a handful of sheets), but the LOG
+    // stays per rule, so one deleted/unreadable sheet still names every rule it affected.
+    const livenessBySheet = new Map<string, SheetLiveness | 'lookup_failed'>()
+    const kept: AutomationRule[] = []
+    for (const rule of rules) {
+      const cached = livenessBySheet.get(rule.sheet_id)
+      let liveness: SheetLiveness | 'lookup_failed'
+      let errorClass: string | null = null
+      if (cached !== undefined) {
+        liveness = cached
+      } else {
+        try {
+          liveness = await loadSheetLiveness(this.queryFn, rule.sheet_id)
+        } catch (err) {
+          liveness = 'lookup_failed'
+          errorClass = err instanceof Error ? err.name : typeof err
+        }
+        livenessBySheet.set(rule.sheet_id, liveness)
+      }
+      if (liveness === 'deleted') {
+        logger.warn(`${channel} rule ${rule.id} skipped: its sheet is not live (soft-deleted)`, {
+          channel,
+          ruleId: rule.id,
+          sheetId: rule.sheet_id,
+          reason: 'sheet_deleted',
+        })
+        continue
+      }
+      if (liveness === 'lookup_failed') {
+        logger.warn(`${channel} rule ${rule.id} kept: sheet liveness lookup failed, failing OPEN`, {
+          channel,
+          ruleId: rule.id,
+          sheetId: rule.sheet_id,
+          reason: 'liveness_lookup_failed',
+          ...(errorClass === null ? {} : { errorClass }),
+        })
+      }
+      kept.push(rule)
+    }
+    return kept
+  }
 
   private mapRow(row: Record<string, unknown>): AutomationRule {
     return {

@@ -25,6 +25,10 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const BASE_ID = `base_act_${TS}`
 const SHEET_ID = `sheet_act_${TS}`
+// #5780 characterization fixture: a SECOND base, so the cross-base case below cannot pass merely
+// because everything happens to live in one base. See the last test in this file.
+const BASE_B_ID = `base_act_b_${TS}`
+const SHEET_B_ID = `sheet_act_b_${TS}`
 const CREATOR = `u_act_creator_${TS}`
 const REQUESTER = `u_act_req_${TS}`
 const APPROVER = `u_act_appr_${TS}`
@@ -93,6 +97,8 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'ACT Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'ACT Sheet'])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_B_ID, 'ACT Base B'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_B_ID, BASE_B_ID, 'ACT Sheet B'])
 
     await q(
       `INSERT INTO permissions (code, name, description)
@@ -151,9 +157,9 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
       await q('DELETE FROM approval_templates WHERE id = $1', [tid]).catch(() => {})
     }
     // F9b: the rule path now writes durable notification rows for this sheet — clean them up too.
-    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
-    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
-    await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = ANY($1::text[])', [[SHEET_ID, SHEET_B_ID]]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SHEET_ID, SHEET_B_ID]]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_ID, BASE_B_ID]]).catch(() => {})
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, OUTSIDER]]).catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, OUTSIDER]]).catch(() => {})
   })
@@ -383,5 +389,93 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
     await svc.handleApprovalCompletionTrigger(nullTemplateEvent)
     const after = await q('SELECT COUNT(*)::int AS count FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [ruleIds])
     expect((after.rows[0] as { count: number }).count).toBe((before.rows[0] as { count: number }).count)
+  })
+
+  /**
+   * #5780 — CURRENT BEHAVIOUR, PINNED DELIBERATELY. THIS IS NOT AN ENDORSEMENT.
+   *
+   * `loadEnabledApprovalCompletedRules` (and its `approval.task_created` twin) filter on
+   * trigger_type + enabled + trigger_config.templateId and NOTHING ELSE. There is no base, workspace
+   * or tenant predicate anywhere on the approval lane, so one completion for template T fires EVERY
+   * enabled rule bound to T ANYWHERE in the deployment: a rule sitting on a sheet in base A fires for
+   * a completion raised in base B whose only relationship to base A is that both name the same
+   * template. That is what this test asserts — as the bug it is, not as a contract.
+   *
+   * Note what "raised in base B" can even mean today: nothing, structurally. The completion event
+   * (`ApprovalCompletionEventV1.approval`) carries instanceId / requestNo / templateId /
+   * templateVersionId / publishedDefinitionId / businessKey / workflowKey and NO base or tenant
+   * discriminator at all — asserted below, because that absence is precisely why the predicate cannot
+   * merely be "added". `automation_rules` carries only `sheet_id` and `approval_templates` carries no
+   * owning-org column either, so WHICH column expresses ownership is a design decision: that is #5780,
+   * and it belongs to the owner, not to a liveness bug fix.
+   *
+   * WHEN #5780 LANDS, THIS ASSERTION IS EXPECTED TO INVERT: the loader will return only the rules that
+   * belong to the completion's own base, `routedBases` will collapse to ONE, and the base-A rule will
+   * NOT execute. That inversion is the SIGNAL that the fix arrived — flip the expectations here and
+   * delete this note. Do NOT read a red here as a regression, and above all do NOT "repair" it by
+   * widening the loader again.
+   */
+  test('#5780 current behaviour, pinned deliberately: the approval rule loaders have NO base/tenant predicate — a rule on a base-A sheet fires for a completion raised in base B', async () => {
+    const makeCrossBaseRule = async (sheetId: string, name: string): Promise<string> => {
+      const rule = await svc.createRule(sheetId, {
+        name,
+        triggerType: 'approval.completed',
+        triggerConfig: { templateId },
+        actionType: 'send_notification',
+        actionConfig: { userIds: [CREATOR], message: `cross-base probe ${name}` },
+        createdBy: CREATOR,
+      } as never)
+      const id = (rule as { id: string }).id
+      ruleIds.push(id)
+      return id
+    }
+    // The rule under test lives in base A. The base-B rule is the completion's only base-local anchor,
+    // i.e. the rule a per-base predicate would keep — it exists so this case cannot be satisfied by a
+    // single-base fixture, where "spans every base" and "spans its own base" are indistinguishable.
+    const ruleInBaseA = await makeCrossBaseRule(SHEET_ID, 'cross-base probe (base A)')
+    const ruleInBaseB = await makeCrossBaseRule(SHEET_B_ID, 'cross-base probe (base B)')
+
+    // (1) LOADER level. Assert on the DISTINCT BASE IDS behind the routed rules rather than on a rule
+    // count: a count could be satisfied by two rules in one base, which would prove nothing.
+    const routed = await svc.loadEnabledApprovalCompletedRules(templateId)
+    const routedSheetIds = routed.map((r) => r.sheet_id)
+    expect(routedSheetIds, 'the base-A rule is routed by templateId alone').toContain(SHEET_ID)
+    expect(routedSheetIds, 'so is the base-B rule — same template, different base').toContain(SHEET_B_ID)
+    const baseRows = await q(
+      'SELECT DISTINCT base_id FROM meta_sheets WHERE id = ANY($1::text[])',
+      [Array.from(new Set(routedSheetIds))],
+    )
+    const routedBases = (baseRows.rows as Array<{ base_id: string }>).map((r) => r.base_id)
+    expect(
+      new Set(routedBases).size,
+      '#5780 pin: template-keyed routing spans EVERY base today; when the ownership predicate lands this becomes 1 and this expectation inverts',
+    ).toBeGreaterThan(1)
+
+    // (2) WHY it spans every base: the completion event carries no base/tenant key to filter on.
+    const completionEvents: ApprovalCompletionEventV1[] = []
+    integrationEventBus.subscribe('approval.approved', (payload) => {
+      completionEvents.push(payload as ApprovalCompletionEventV1)
+    })
+
+    // (3) END TO END: one completion, and the rule that lives in base A executes.
+    const instanceId = await startApprovalInstance()
+    await approvals.dispatchAction(instanceId, { action: 'approve', comment: 'ok' } as never, approverActor())
+
+    expect(
+      await waitForExecutionCount(ruleInBaseA, 1),
+      '#5780 pin: the base-A rule executes for a completion it has no base relationship to',
+    ).toBeGreaterThanOrEqual(1)
+    expect(
+      await waitForExecutionCount(ruleInBaseB, 1),
+      'control: the base-local rule executes too, so a zero above would mean a broken fixture rather than a fixed loader',
+    ).toBeGreaterThanOrEqual(1)
+
+    const observed = completionEvents.find((e) => e.approval.instanceId === instanceId)
+    expect(observed, 'the completion must have reached the bus for the routing above to be the real path').toBeTruthy()
+    const approvalKeys = Object.keys(observed!.approval)
+    expect(
+      approvalKeys.filter((k) => /base|tenant|workspace|org/i.test(k)),
+      '#5780: the completion event carries NO base/tenant discriminator — this is why the loader has no predicate to apply. When #5780 lands, expect this list to become non-empty (or ownership to arrive on another column) and the pin above to invert.',
+    ).toEqual([])
   })
 })
