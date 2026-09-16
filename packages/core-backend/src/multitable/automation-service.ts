@@ -4300,8 +4300,11 @@ export class AutomationService {
       throw new AutomationTestRunRejectedError(404, TEST_RUN_RULE_NOT_FOUND_CODE, TEST_RUN_RULE_NOT_FOUND_MESSAGE)
     }
     // SHEET LIVENESS (#5812 follow-up), defence in depth: the route refuses a non-live sheet first (after its
-    // capability 403, so an unauthorized caller learns nothing) and stays authoritative; this closes the window
-    // between that check and here, and covers any direct caller. Both modes, before input validation, any
+    // capability 403, so an unauthorized caller learns nothing) and stays authoritative; this NARROWS (does not
+    // close) the check-then-run window and covers any direct caller. A soft-delete landing after this check but
+    // before/while executeRule runs still proceeds (real_fire included — the executor's same-sheet fast path never
+    // reads meta_sheets). Accepted residual, no lock: identical check-then-run shape to the webhook/retry/resume
+    // lanes, and a soft-deleted sheet is restorable. Both modes, before input validation, any
     // execution and any persistence — nothing is run or recorded. Same helper and semantics as the other
     // direct-execute lanes (#5803/#5810): refuse on EXACTLY 'deleted'; 'absent' passes; a THROWN lookup fails
     // OPEN with the values-free WARN. `rule.sheet_id === sheetId` here, so this is the gated sheet. The body is
