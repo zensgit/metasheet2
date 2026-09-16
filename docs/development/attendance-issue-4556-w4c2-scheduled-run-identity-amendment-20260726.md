@@ -26,13 +26,27 @@
 > | §2.1 "two pending gates, 20-21, inert until `O-3`/`O-4` rule" | gates 20–21 not required | **Superseded and ACCEPTANCE-BEARING** — `O-3`/`O-4` are ratified, so gates 20–21 are **required**, not inert. This one is not merely historical: it governs what an implementation must pass |
 > | §5 declared residuals referring to `O-3`/`O-4` as unapproved or to gates 20–21 as inert | residual framing | **Superseded** on the same basis |
 >
-> **Blanket rule (so this table need not be provably exhaustive).** Anywhere in this document — table,
-> prose, heading, gate description or residual — a statement that any of `OD-W4C-44` … `OD-W4C-53` is
-> pending, conditional, unresolved, or not yet authorized, **and every consequence drawn from that
-> state** (including "no implementation may acquire class `01`" and any gate described as pending,
-> inert or not-required on that basis), is **pre-approval history and is NOT operative**. Bundle A
-> resolved all ten on 2026-07-27. Where such a statement bears on acceptance — gates 20–21 above are
-> the known case — the ratified option governs and the gate is required.
+> **Blanket rule — read it as "evaluate the branches", not "delete the section"** (so this table need
+> not be provably exhaustive). Bundle A resolved all ten items on 2026-07-27:
+> `OD-W4C-44=(a)`, `45=(a)`, `46=(a)`, `47=(a)`, `48=(a)`, `49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`,
+> `53=(i)`. Therefore, anywhere in this document:
+>
+> 1. **Status assertions lapse.** A statement that any of those items is *still* pending, conditional,
+>    unresolved or not yet authorized — and a prohibition whose only stated ground is that pending
+>    state, such as "no implementation may acquire class `01`" — is pre-approval history and is **not
+>    operative**.
+> 2. **Conditional branches are evaluated, not voided.** Wherever this document writes "if `OD-W4C-NN`
+>    resolves to (x) then …", substitute the ratified answer above: **the chosen option's
+>    specification and every requirement it imposes are OPERATIVE**; only the **unchosen** options are
+>    not. Known operative consequences include `46=(a)`'s class-`01` assignment over
+>    `(org, initiator, work_date)` ordered `00 → 01 → 10 → 11`, `49=(a)`'s red-line rewrite,
+>    `50=(a)`'s append-only outcome side table, `51=(a)`'s canonical ordering, `52=(a)`'s
+>    promotion-block predicate, and `53=(i)`'s second, permanently maintained fingerprint.
+> 3. **Acceptance follows the same rule.** Gates described as pending or inert *because* an item was
+>    unresolved are **required**, not inert — gates 20–21 (section 2.1) are the known case.
+>
+> This rule lapses status claims only. It nullifies **no** requirement that a ratified option imposes,
+> and it does not touch any statement that does not depend on one of `OD-W4C-44` … `OD-W4C-53`.
 >
 > What is NOT changed by this back-fill: the ratify comment authorizes starting P1-2 implementation
 > on PR #4612 under `53=(i)`, preceded by the fresh exact-head review section 4 step 4 mandates and
@@ -122,6 +136,8 @@
 > 1.2.1, 2). Author-fixable items are corrected in place; four items that
 > require an owner reading are stated as pending decisions
 > (`O-1..O-4`/`OD-W4C-49..52`, section 3) rather than resolved unilaterally.
+> **[Evaluated 2026-07-27: all four, plus `O-5`/`OD-W4C-53`, were resolved by bundle A; see the
+> supersession table at the top of this file.]**
 >
 > **Addendum (this pass).** `O-5`/`OD-W4C-53` (section 3.2) is added
 > afterward to bundle a fifth pending owner decision — the governing lock's
@@ -519,6 +535,8 @@ failure shape red line `W4C-R27` (governing lock line 199) exists to
 forbid, reintroduced at the run level by conditioning run-level durability
 on finalization reachability instead of on commit.
 
+> **[Scoped marker, 2026-07-27.** The paragraph below still describes `O-1`/`O-3`/`O-4` as pending and states branches as conditional. Bundle A ratified all ten items, so: the **status** wording has lapsed (including "this amendment authorizes no implementation that acquires it" for class `01`), and every conditional branch here is **evaluated** — the chosen option's supersession takes effect, the unchosen one does not. The list's non-conditional entries are unaffected. See the supersession table at the top of this file.**]**
+
 Sections 1.1.1, 1.7.1, and 1.8 below state the two provisional fixes in
 full and name the owner decisions — `O-3` = `OD-W4C-50`, `O-4` =
 `OD-W4C-52` — that must be ratified, alongside `OD-W4C-44..48` and `O-1`
@@ -535,6 +553,8 @@ gap this section discloses.)
 
 ## 1. Locked correction
 
+> **[Scoped marker, 2026-07-27.** The list below still describes `O-1`/`O-3`/`O-4` as pending and states branches as conditional. Bundle A ratified all ten items, so: the **status** wording has lapsed (including "this amendment authorizes no implementation that acquires it" for class `01`), and every conditional branch here is **evaluated** — the chosen option's supersession takes effect, the unchosen one does not. The list's non-conditional entries are unaffected. See the supersession table at the top of this file.**]**
+
 This amendment supersedes these parts of the governing lock:
 
 - section 7.1a's single-shape outbox identity
@@ -548,13 +568,14 @@ This amendment supersedes these parts of the governing lock:
   the run reaching finalization (section 1.8) rather than on the
   run-creation commit. **This conditioning is not yet fully closed by this
   draft** — see section 0.5 and the pending decisions `O-3`/`O-4`
-  (`OD-W4C-50`, `OD-W4C-52`) below. Per-user event durability (the six
+  (`OD-W4C-50`, `OD-W4C-52`) below. **[Evaluated 2026-07-27: both ratified `=(a)`; the fixes those
+  sections specify are in force, so this "not yet closed" status has lapsed.]** Per-user event durability (the six
   existing kinds) is unchanged and remains commit-conditioned only, per
   `W4C-R27` as written;
 - section 7.1's sentence "Scheduled absence gains a durable
   scheduled-run/user/date source row", which is refined into a durable run
   row plus immutable target rows plus the unchanged per-user operations
-  (plus, **if `O-3`/`OD-W4C-50` ratifies `(a)`**, the append-only
+  (plus — **[Evaluated 2026-07-27: `50=(a)` ratified, so this branch is IN FORCE]** — the append-only
   per-target outcome rows section 1.1.1 specifies — an addition to this
   refinement, not a further change to the per-user operations themselves);
 - section 8.2's lock order and step 14, by inserting the reserved class-`01`
@@ -568,7 +589,7 @@ This amendment supersedes these parts of the governing lock:
   (15) wholesale;
 - `OD-W4C-40`'s "class `01` is reserved", which this amendment assigns —
   **subject to `O-1`/`OD-W4C-49` ratifying the red-line rewrite immediately
-  below**;
+  below**. **[Evaluated 2026-07-27: `49=(a)` ratified, so the assignment is IN FORCE.]**;
 - red line **W4C-R42** (lock line 214, "`01` is forbidden", including its
   "crossing a rollout/operation/target class ... fails independently"
   clause), lock lines **2049-2050** ("Prefix `01` is reserved and forbidden
@@ -577,9 +598,13 @@ This amendment supersedes these parts of the governing lock:
   construction cannot inject it and class `01` is never acquired") — all
   four are proposed to be superseded together, **pending `O-1`/`OD-W4C-49`**
   (section 3). Until ratified, class `01` remains forbidden as written and
-  this amendment authorizes no implementation that acquires it;
+  this amendment authorizes no implementation that acquires it. **[Evaluated 2026-07-27: `49=(a)`
+  ratified; all four lock sites have been rewritten accordingly, so the
+  prohibition in the previous sentence has lapsed and class `01` is acquired
+  only by the scheduled-run helper.]**;
 - the governing lock's shadow/eligible promotion-block predicate (lock
-  lines 2689-2690, 2250) — **only if `O-4`/`OD-W4C-52` selects option (a)**,
+  lines 2689-2690, 2250) — **only if `O-4`/`OD-W4C-52` selects option (a)**
+  (**[Evaluated 2026-07-27: `52=(a)` ratified, so this supersession is IN FORCE]**),
   extending it to cover a `running` `attendance_scheduled_runs` row (section
   1.7.1). If `O-4` selects option (b), this predicate is **not** superseded,
   and the gap in section 0.5 is instead closed by the finalization mechanism
@@ -750,7 +775,7 @@ Rules:
 
 #### 1.1.1 Pending `O-3`/`OD-W4C-50`: per-`generate`-target permanent failure
 
-> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+> **[Status marker, 2026-07-27.** The "Pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification below is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
 
 `chk_asr_terminal_shape` above encodes only the all-or-nothing shape:
@@ -1189,7 +1214,7 @@ Properties this lock requires:
 - Ordinal is included explicitly so that two runs with the same membership but
   different resolution order are distinguishable.
 
-> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+> **[Status marker, 2026-07-27.** The "Pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification below is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
 **Pending `O-2`/`OD-W4C-51`.** Section 1.7 step 3's resume guard requires
 byte-equality between a freshly recomputed `target_set_fingerprint` and the
@@ -1766,7 +1791,7 @@ A run that cannot progress (section 1.1.1) is closed by the explicit
 
 #### 1.7.1 Pending `O-4`/`OD-W4C-52`: does a `running` run block shadow/eligible promotion?
 
-> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+> **[Status marker, 2026-07-27.** The "Pending" framing of this section lapsed: bundle A ratified the item. The **chosen** option's specification below is **OPERATIVE**; only the unchosen options are not. See the supersession table at the top of this file.**]**
 
 
 Section 0.5 names the mid-run-promotion trigger: the governing lock's
@@ -2427,7 +2452,7 @@ before their operation seal.
 
 ### 2.1 CI gate home
 
-> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
+> **[Scoped marker, 2026-07-27.** This marker covers **only** the clause "two pending gates, 20-21, inert until `O-3`/`O-4` rule" in the sentence below: bundle A ratified both items, so **gates 20–21 are REQUIRED, not inert**. Everything else in this CI-gate-home section — the required-gate count, the gate table and its homes — is unaffected by this marker.**]**
 
 Twenty-one required gates (plus two pending gates, 20-21, inert until
 `O-3`/`O-4` rule — the required count above includes the new gates 22-23,
@@ -3270,8 +3295,6 @@ own framing).
 
 ## 5. Declared residuals
 
-> **[Superseded 2026-07-27 — pre-approval history, not operative.** Bundle A ratified by owner comment `5090978124`; see the supersession table at the top of this file.**]**
-
 
 These are stated rather than hidden; each is either an owner decision above or
 an accepted bound:
@@ -3325,6 +3348,8 @@ an accepted bound:
   call is a new generation" on the table; this note makes explicit that
   the recommended option (a) carries this per-user identity amplification
   as its accepted cost.
+> **[Scoped marker, 2026-07-27.** This marker covers **only** the residual immediately below, whose stated ground is that `O-3`/`O-4` were unratified: bundle A ratified both (`50=(a)`, `52=(a)`), so that ground has lapsed and the chosen options' requirements are operative. **Every other residual in this section is unaffected** and stands as written.**]**
+
 - **The finalization-reachability gap (section 0.5) is not closed by this
   draft.** Until `O-3`/`OD-W4C-50` and `O-4`/`OD-W4C-52` are ratified and
   implemented, a `running` run can, on the paths section 0.5 names, only
