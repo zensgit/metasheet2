@@ -8356,6 +8356,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     // Case folding now happens in SQL (ILIKE), so keep the term as typed for the echo.
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    // #5809 — opt-in EXACT lookup for the import resolver (`?match=exact`): the same gate, allowed set,
+    // ceiling and response shape, but the hydration keeps only rows whose id / name / email EQUALS the
+    // term (resolvePersonAssignableDirectory `exact`). Any other `match` value keeps the substring
+    // search below byte-for-byte. Exact mode never browses: it requires a term even on a restricted
+    // field (a strictly tighter rule than the §5 browse exemption, which stays substring-only).
+    const exactMatch = req.query.match === 'exact'
     try {
       const pool = poolManager.get()
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
@@ -8389,7 +8395,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // same actor can already retrieve up to PERSON_DIRECTORY_MAX_ITEMS rows of that same restricted
       // set with any one-character term, and the term-less answer is clamped by the same ceiling (so a
       // huge "All staff" group stays bounded). The gate is narrowed in scope, never in strength.
-      if (restrictGroupIds.length === 0 && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+      if ((exactMatch || restrictGroupIds.length === 0) && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
         return res.json({
           ok: true,
           data: {
@@ -8412,7 +8418,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
         // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never
         // hands back more than PERSON_DIRECTORY_MAX_ITEMS + 1 rows of display data.
-        { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
+        exactMatch
+          ? { exact: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 }
+          : { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
       )
       const hasMore = page.length > PERSON_DIRECTORY_MAX_ITEMS
       const items = hasMore ? page.slice(0, PERSON_DIRECTORY_MAX_ITEMS) : page

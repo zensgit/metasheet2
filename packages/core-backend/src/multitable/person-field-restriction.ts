@@ -86,6 +86,14 @@ export interface PersonDirectoryHydrationOptions {
    *  filter in memory before #5781. LIKE metacharacters in the term are escaped, so it stays a literal
    *  substring match (a bare `%` matches a literal percent sign, not everything). */
   search?: string
+  /** #5809 — EXACT lookup, used by the import resolver instead of `search` (when both are given,
+   *  `exact` wins and `search` is ignored). Case-insensitive EQUALITY against the user id, the trimmed
+   *  name or the trimmed email — never a substring — so a lookup hands back only the rows that ARE the
+   *  token, not the up-to-`limit` neighbours a substring term would. It is one more predicate on the
+   *  same row set: `$1` (the allowed set) and `is_active` are untouched, so every row it can return
+   *  is drawn from the same eligible set a `search` call reads (the id arm included). No LIKE, so no
+   *  escaping is needed; the term is bound as a parameter. */
+  exact?: string
   /** Hard ceiling on hydrated rows, applied as SQL `LIMIT` so the bound holds for THIS query's DB
    *  round trip.
    *
@@ -139,8 +147,15 @@ export async function resolvePersonAssignableDirectory(
   // $1 is ALWAYS the full allowed set — the eligibility answer is unchanged by the bounds below.
   const params: unknown[] = [Array.from(allowed)]
   const conditions = ['id::text = ANY($1::text[])', 'is_active = TRUE']
-  const search = options?.search?.trim() ?? ''
-  if (search) {
+  const exact = options?.exact?.trim() ?? ''
+  const search = exact ? '' : (options?.search?.trim() ?? '')
+  if (exact) {
+    params.push(exact)
+    const term = `$${params.length}::text`
+    conditions.push(
+      `(lower(id::text) = lower(${term}) OR lower(btrim(COALESCE(name, ''))) = lower(${term}) OR lower(btrim(COALESCE(email, ''))) = lower(${term}))`,
+    )
+  } else if (search) {
     params.push(`%${escapeLikeTerm(search)}%`)
     conditions.push(`(COALESCE(name, '') ILIKE $${params.length} OR COALESCE(email, '') ILIKE $${params.length})`)
   }

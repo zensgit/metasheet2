@@ -2346,11 +2346,16 @@ export class MultitableApiClient implements CommentsApiClient {
    * #5781: the endpoint is now SEARCH-REQUIRED and capped. A call with no `q` answers 200 with an
    * empty list and `requiresQuery: true` (not an error) — render "type to search", not "no members".
    * `hasMore` is set when the answer was clamped to the server ceiling.
+   *
+   * #5809: `match: 'exact'` asks for an EXACT lookup (id / name / email equal to `q`, case-insensitive)
+   * instead of the substring search — used by the import resolver. Same gate, set and ceiling. A server
+   * that predates the mode ignores the parameter and answers the substring search, so callers must still
+   * filter for exact matches themselves.
    */
   async listPersonFieldDirectory(
     sheetId: string,
     fieldId: string,
-    params?: { q?: string },
+    params?: { q?: string; match?: 'exact' },
   ): Promise<{
     items: Array<{ userId: string; name: string | null; email: string | null }>
     total: number

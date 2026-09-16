@@ -287,6 +287,18 @@ export function importValueResolveFailed(
     : `Unable to resolve linked value for ${fieldName}: ${rawValue}`
 }
 
+/**
+ * #5809 — a person token the bounded directory could not settle: the answer was clamped (more
+ * candidates than one lookup returns) and nothing in it matched the token exactly, so the importer
+ * cannot tell "not a member" from "not in this page". Deliberately distinct from
+ * importValueResolveFailed ("unknown person") and values-free: no token, no directory data.
+ */
+export function importPersonValueTooBroad(fieldName: string, isZh: boolean): string {
+  return isZh
+    ? `${fieldName} 的人员值过于宽泛：部分匹配的人员过多且没有完全一致的，请改用完整姓名、邮箱或用户 ID`
+    : `People value for ${fieldName} is too broad: too many people partially match and none matches exactly. Use the full name, email or user ID.`
+}
+
 export function importCancelled(isZh: boolean): string {
   return isZh ? '导入已取消' : 'Import cancelled'
 }

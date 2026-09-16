@@ -141,4 +141,71 @@ describe('2c-S2 resolvePersonAssignableDirectory (member-group directory read mo
       expect(seen).toHaveLength(0)
     })
   })
+
+  /**
+   * #5809 — the EXACT lookup mode the import resolver uses. An extra equality predicate on the same row
+   * set: `$1` stays the full eligible set, `is_active` and the LIMIT stay, and no LIKE is issued.
+   */
+  describe('#5809 exact lookup mode', () => {
+    function capture() {
+      const seen: Array<{ sql: string; params: unknown[] }> = []
+      const query: QueryFn = async (sql, params) => {
+        seen.push({ sql, params: (params ?? []) as unknown[] })
+        return { rows: [] }
+      }
+      return { seen, query }
+    }
+
+    test('matches id / trimmed name / trimmed email by case-insensitive EQUALITY, never by LIKE', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), {
+        exact: '  Fake.Person@example.invalid ',
+        limit: 51,
+      })
+      expect(seen).toHaveLength(1)
+      expect(seen[0].sql).not.toMatch(/LIKE/i)
+      expect(seen[0].sql).toContain('lower(id::text) = lower($2::text)')
+      expect(seen[0].sql).toContain("lower(btrim(COALESCE(name, ''))) = lower($2::text)")
+      expect(seen[0].sql).toContain("lower(btrim(COALESCE(email, ''))) = lower($2::text)")
+      // Bound as a trimmed parameter, never interpolated.
+      expect(seen[0].params[1]).toBe('Fake.Person@example.invalid')
+      expect(seen[0].sql).not.toContain('example.invalid')
+      expect(seen[0].sql).toMatch(/LIMIT \$3/)
+      expect(seen[0].params[2]).toBe(51)
+    })
+
+    test('exact wins over search when both are given (one predicate, no substring arm)', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(['u1']), {
+        exact: 'Fake Person',
+        search: 'fake',
+        limit: 51,
+      })
+      expect(seen[0].sql).not.toMatch(/ILIKE/)
+      expect(seen[0].params).toEqual([['u1'], 'Fake Person', 51])
+    })
+
+    test('the exact mode never touches the ALLOWED set or the active-only filter', async () => {
+      const { seen, query } = capture()
+      await resolvePersonAssignableDirectory(query, 's', ['g1'], async () => new Set(['u1', 'u2']), { exact: 'u9', limit: 51 })
+      expect(seen[0].params[0]).toEqual(['u1', 'u2'])
+      expect(seen[0].sql).toMatch(/id::text = ANY\(\$1::text\[\]\)/)
+      expect(seen[0].sql).toMatch(/is_active = TRUE/)
+    })
+
+    test('a blank exact term is no exact term (the substring path, byte-identical)', async () => {
+      const exactBlank = capture()
+      const plain = capture()
+      await resolvePersonAssignableDirectory(exactBlank.query, 's', [], async () => new Set(['u1']), { exact: '   ', search: 'ali', limit: 51 })
+      await resolvePersonAssignableDirectory(plain.query, 's', [], async () => new Set(['u1']), { search: 'ali', limit: 51 })
+      expect(exactBlank.seen).toEqual(plain.seen)
+    })
+
+    test('an empty allowed set still short-circuits in exact mode', async () => {
+      const { seen, query } = capture()
+      const out = await resolvePersonAssignableDirectory(query, 's', [], async () => new Set(), { exact: 'u1', limit: 51 })
+      expect(out).toEqual([])
+      expect(seen).toHaveLength(0)
+    })
+  })
 })
