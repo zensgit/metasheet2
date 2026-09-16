@@ -64,4 +64,5 @@ Guides: `AGENTS.md` (includes Local Dev & Troubleshooting).
   - 新增操作：新端点、新动作（route/action/RPC）。
   - 新增插件消费者：某插件首次拿到宿主 facade，或已有插件的 facade 能力范围被扩大。
   - 部署边界或授权边界变更，例如：把某路径加入全局门豁免表、扩大 `mst_` allowlist、给 fail-closed 门加旁路开关。
-  - 自查：本 PR 若命中以上任一类型但未在描述中链接对应 ADR，视为未完成，需拆分 PR 或补 ADR 后再合并。
+  - **决策文档落在哪**：本仓**没有** `docs/adr/` 目录或 ADR 编号惯例（已核：`git ls-files | grep -i adr` 无实质命中），现行惯例是 `docs/development/<主题>-design-<YYYYMMDD>.md`（仓内 1250+ 份）。**本条门指的就是这类独立决策文档**，不要求先建 ADR 体系；若 owner 日后建立 `docs/adr/`，把本条指向那里即可。
+  - 自查：本 PR 若命中以上任一类型，而描述里没有链接到对应的独立决策文档，视为未完成——拆分 PR，或补一份决策文档再合并。

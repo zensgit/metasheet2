@@ -77,3 +77,16 @@
    GitHub 上正常渲染——可通过本地 Markdown 预览或 `git show` 后目视检查缩进层级。
 5. 确认改动未涉及 `packages/`、`plugins/`、`scripts/`、任何 `.yml` workflow 文件（`git diff --stat main`
    核对改动文件列表）。
+
+## 协调方复核补充（2026-09-16）：ADR 本身不能是第二个悬空引用
+
+代理正确地修掉了模板里指向不存在的 `.github/CODEOWNERS` 的引用，但新写的门要求「配套独立 ADR」时，
+落入了**同一类错误**：本仓**没有** `docs/adr/` 目录，也没有 ADR 编号惯例（`git ls-files | grep -i adr`
+无实质命中）；而 `docs/development/` 下已有 **1250+** 份 `*-design-*.md`，这才是现行的事实惯例。
+
+要求一个仓库里不存在的产物，等于把门写成不可执行——与 CODEOWNERS 那处是同构缺陷。因此两份模板都
+已改为：**本条门指的是 `docs/development/<主题>-design-<YYYYMMDD>.md` 这类独立决策文档**，并显式说明
+「不要求先建 ADR 体系；若 owner 日后建立 `docs/adr/`，把本条指向那里即可」。
+
+教训同 owner 复核第二轮给 #5715 的那条：**只追加新要求而不核对它在本仓能否落地，会制造新的悬空依赖**。
+
