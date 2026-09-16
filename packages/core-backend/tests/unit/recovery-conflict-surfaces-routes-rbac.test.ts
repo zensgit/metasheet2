@@ -194,9 +194,10 @@ describe('routes/roles.ts', () => {
   })
 
   it('[recovery-census:roles:update] PUT /api/roles/:id: marker 40001 on the UPDATE → exact uniform retryable 409', async () => {
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] }) // SELECT before
-      .mockRejectedValueOnce(markerError()) // UPDATE roles
+    pgMocks.poolQuery.mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] }) // SELECT before
+    // The UPDATE now runs inside the rename+permission-replacement transaction, so the
+    // marker surfaces out of `transaction()` rather than out of a bare `pool.query`.
+    pgMocks.transaction.mockRejectedValueOnce(markerError()) // UPDATE roles (in transaction)
     const res = mockResponse()
     await invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
       params: { id: 'role-1' },
@@ -209,9 +210,8 @@ describe('routes/roles.ts', () => {
 
   it('PUT /api/roles/:id: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
     const original = otherDbError()
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] })
-      .mockRejectedValueOnce(original)
+    pgMocks.poolQuery.mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] })
+    pgMocks.transaction.mockRejectedValueOnce(original)
     const res = mockResponse()
     await expect(invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
       params: { id: 'role-1' },

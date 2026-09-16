@@ -209,15 +209,26 @@ async function loadCatalog(): Promise<void> {
   }
 }
 
+function sameCodeSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  const left = [...a].sort()
+  const right = [...b].sort()
+  return left.every((code, index) => code === right[index])
+}
+
 async function saveRole(): Promise<void> {
   if (!canSave.value) return
   busy.value = true
+  // `isEditing` is derived from selectedRoleId, which applyRole() rewrites below — read
+  // it here so the closing message still describes the action that was actually taken.
+  const wasEditing = isEditing.value
   try {
     const payload = {
       id: draftRoleId.value.trim(),
       name: draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
+    const submittedPermissions = [...payload.permissions]
 
     const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(draftRoleId.value.trim())}` : '/api/roles', {
       method: isEditing.value ? 'PUT' : 'POST',
@@ -232,7 +243,20 @@ async function saveRole(): Promise<void> {
     await loadCatalog()
     const latest = roles.value.find((role) => role.id === currentId) || null
     applyRole(latest)
-    setStatus(isEditing.value ? '角色已更新' : '角色已创建')
+
+    // Do not claim success on the strength of `ok: true` alone. This page used to report
+    // 角色已更新 while the reloaded role still showed the OLD checkboxes, because the
+    // backend silently dropped the permission set on edit; the reverted grid was the only
+    // signal, and it looked like a rendering quirk. Re-reading the persisted set and
+    // saying so when it disagrees with what was submitted makes that class of silent drop
+    // visible here — including against a server that has not been updated yet.
+    if (!latest) {
+      setStatus('已保存，但重新加载后未找到该角色，请刷新确认', 'error')
+    } else if (!sameCodeSet(latest.permissions || [], submittedPermissions)) {
+      setStatus(`已保存名称，但服务端记录的权限为 ${latest.permissions?.length ?? 0} 项，与提交的 ${submittedPermissions.length} 项不一致，请刷新确认`, 'error')
+    } else {
+      setStatus(wasEditing ? '角色已更新' : '角色已创建')
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
   } finally {
