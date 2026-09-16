@@ -333,6 +333,8 @@ export type AutomationLabelKey =
   | 'runs.resumeError.ruleChanged'
   | 'runs.resumeError.ruleMissingOrDisabled'
   | 'runs.resumeError.recordGone'
+  // #5803: the rule's sheet is soft-deleted; nothing ran and the resume token was not consumed.
+  | 'runs.resumeError.sheetDeleted'
   | 'runs.resumeError.generic'
   // P3-4: whole-execution re-run button (distinct from Resume above, which only continues a
   // suspended step's remaining actions). Confirm dialog enumerates the consequences from data
@@ -362,6 +364,8 @@ export type AutomationLabelKey =
   | 'runs.rerunError.ruleMissingOrDisabled'
   | 'runs.rerunError.ruleChanged'
   | 'runs.rerunError.ledgerEvidenceMissing'
+  // #5803: the rule's sheet is soft-deleted; nothing ran or was recorded.
+  | 'runs.rerunError.sheetDeleted'
   // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
   // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
   // string would otherwise render verbatim in a zh session.
@@ -666,6 +670,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.resumeError.ruleChanged',
   'runs.resumeError.ruleMissingOrDisabled',
   'runs.resumeError.recordGone',
+  'runs.resumeError.sheetDeleted',
   'runs.resumeError.generic',
   'runs.rerun',
   'runs.rerunConfirmTitle',
@@ -689,6 +694,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunError.ruleMissingOrDisabled',
   'runs.rerunError.ruleChanged',
   'runs.rerunError.ledgerEvidenceMissing',
+  'runs.rerunError.sheetDeleted',
   'runs.rerunError.adminRequired',
   'runs.rerunError.generic',
   'resultWriteback.title',
@@ -1092,6 +1098,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.resumeError.ruleChanged': { en: 'The rule changed since it was suspended; cannot resume safely.', zh: '规则在挂起后已变更，无法安全恢复。' },
   'runs.resumeError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot resume.', zh: '规则缺失或已停用，无法恢复。' },
   'runs.resumeError.recordGone': { en: 'The record no longer exists; cannot resume.', zh: '记录已不存在，无法恢复。' },
+  'runs.resumeError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was resumed. Restore the sheet and try again.", zh: '规则所在的表已被删除，未恢复执行。请先恢复该表后重试。' },
   'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
   // P3-4 — whole-execution re-run. Textually distinct from the load-error "Retry" (log.retry, which
   // only reloads the list) and from Resume above (which continues one suspended step).
@@ -1130,6 +1137,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.rerunError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot re-run.', zh: '规则缺失或已停用，无法重新执行。' },
   'runs.rerunError.ruleChanged': { en: "The rule's actions changed since this run; cannot re-run safely.", zh: '规则动作在此次运行后已变更，无法安全重新执行。' },
   'runs.rerunError.ledgerEvidenceMissing': { en: 'Retry evidence for this execution is missing.', zh: '该执行的重试证据缺失。' },
+  'runs.rerunError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again.", zh: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
   'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
   'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },

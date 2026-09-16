@@ -299,6 +299,19 @@ export function describeLookupError(err: unknown): { errorClass: string; errorCo
 export const BRIDGE_SHEET_DELETED_MESSAGE =
   `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; approval bridge not resumed`
 
+/**
+ * The admin-facing refusals for a whole-execution RETRY and a suspended-execution RESUME whose rule's sheet
+ * is soft-deleted (#5803). They start with the same `SHEET_DELETED:` prefix as the bridge refusal and are
+ * returned as `{ status: 409, code: SHEET_DELETED_CODE, message }`. Values-free: no ids (the admin already
+ * holds the execution id / resume token they sent). Each says what did NOT happen, so a restore-then-redo is
+ * the obvious next step: neither refusal writes anything, consumes the first-retry marker, or claims the
+ * resume token (see `retryExecution` / `resumeExecution`).
+ */
+export const RETRY_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; execution not retried. Nothing was run or recorded and the original execution is unchanged; restore the sheet, then retry it.`
+export const RESUME_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; suspended execution not resumed. Nothing was run and the resume token was not consumed; restore the sheet, then resume it.`
+
 const APPROVAL_OUTCOME_LABELS: ReadonlySet<string> = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
 /** The approval outcome as a closed enum label (values-free even if an event carried something else). */
 export function approvalOutcomeLabel(outcome: unknown): string {
@@ -2920,10 +2933,27 @@ export class AutomationService {
   /**
    * T1-2 inbound webhook dispatch.
    *
-   * The caller is anonymous; only possession of the per-rule secret authorizes delivery. The request body is
-   * exposed as `recordData`, but record context is intentionally synthetic (`recordId=''`, `actorId=null`):
+   * The caller is NOT anonymous as mounted: `POST /api/multitable/automation/webhooks/:ruleId` is neither a
+   * declared exception to the global session gate (auth/api-path-policy.ts `GLOBAL_GATE_EXCEPTIONS`; the
+   * gate is in index.ts) nor matched by its two request-shaped exceptions (public-form token, OAPI `mst_`
+   * allowlist), so the request must carry a valid session JWT before it reaches this method. That
+   * session is then IGNORED: there is no table-permission check here, and possession of the per-rule secret
+   * (a verified signature) is the only thing that authorizes delivery. The request body is exposed as
+   * `recordData`, but record context is intentionally synthetic (`recordId=''`, `actorId=null`):
    * caller-supplied `recordId` / `sheetId` / actor-shaped fields are data only and cannot retarget actions
    * or impersonate a user. Side effects run under the stored rule author, matching scheduled triggers.
+   *
+   * Every refusal is the same uniform `401 { ok:false }` at the route (design-lock decision 3: no
+   * existence/state oracle); only the metric label and the log line carry the reason.
+   *
+   * SHEET LIVENESS (soft delete, #5803). This lane hands the rule straight to `executeRule`, so neither
+   * `loadEnabledRules` nor the rule loaders ever see it — and the executor's same-sheet fast path does not
+   * look at `meta_sheets`, so a `create_record` on the rule's own sheet INSERTed into a soft-deleted sheet
+   * and `send_webhook` kept pushing data out. The check runs AFTER the signature verified, never before:
+   * ahead of it, a caller without the secret would drive a `meta_sheets` read per request and take a
+   * different code path depending on the sheet's state (a deleted sheet's rule would skip the HMAC check
+   * altogether), leaving only timing noise between that state and the caller. After it, the only caller who
+   * can reach the lookup already holds the rule's secret, and still gets the same uniform 401.
    */
   async handleInboundWebhook(
     ruleId: string,
@@ -2952,6 +2982,11 @@ export class AutomationService {
       nowMs,
     })
     if (verified.ok === false) return this.rejectInboundWebhook(ruleId, verified.reason)
+
+    // #5803: AFTER the signature check (see the doc above). Fail-OPEN on a failed lookup, like the siblings.
+    if (!(await this.ruleSheetLive(rule, WEBHOOK_RECEIVED_TRIGGER))) {
+      return this.rejectInboundWebhook(ruleId, 'sheet_deleted')
+    }
 
     const triggerEvent: AutomationEventPayload & Record<string, unknown> = {
       sheetId: rule.sheet_id,
@@ -3213,6 +3248,21 @@ export class AutomationService {
         message: 'Rule actions changed since the original execution; cannot retry safely',
       }
     }
+    // SHEET LIVENESS (soft delete, #5803). A retry hands the CURRENT rule straight to `executeRule`, so no
+    // rule loader ever filtered it, and the executor's same-sheet fast path never reads `meta_sheets`.
+    // Checked after the rule/fingerprint gates (they write nothing) and BEFORE the first-retry marker below:
+    // that claim is a one-shot CAS on the lineage root, and spending it on a refused attempt would make the
+    // post-restore retry a "not the first retry" — which, with the Class-A/B ledger families on, must show
+    // ledger evidence the original may never have written.
+    // Answered like every other refusal on this lane — a coded 409, nothing persisted. It is NOT recorded as
+    // a new execution row (the #5800 bridge refusal is recorded because no caller is there to answer; here
+    // the admin is): the original run is immutable (A5), and a refusal row would join the lineage — a later
+    // retry of THAT row is never "first", so with the ledger families on and no evidence it would be refused
+    // AND spend the marker — and it would count as a failed run in the rule's stats. The WARN carries the
+    // execution id. Fail-OPEN on a failed lookup, like every other lane in this file.
+    if (!(await this.ruleSheetLive(rule, 'automation.retry', { executionId: original.id }))) {
+      return { status: 409, code: SHEET_DELETED_CODE, message: RETRY_SHEET_DELETED_MESSAGE }
+    }
     const firstRetryAttempt = await claimFirstAutomationRetryAttempt(this.queryFn, rootExecutionId)
     const isGenuinelyFirstRetry = firstRetryAttempt && original.rerunOfExecutionId == null
     const retryLedgerFamilies = retryLedgerFamiliesForActions(execRule.actions)
@@ -3339,6 +3389,23 @@ export class AutomationService {
       ) {
         return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Resume cursor ids are inconsistent with the branch position; cannot resume safely' }
       }
+    }
+    // SHEET LIVENESS (soft delete, #5803). Resume continues the tail through the executor directly, past every
+    // rule loader. Checked after the rule/cursor/fingerprint gates (they write nothing) and BEFORE the record
+    // re-fetch below: that read keys `meta_records` on `sheet_id` without joining `meta_sheets`, and a soft
+    // delete leaves the records in place, so it would find the row and go on. The sheet checked is the
+    // rule's, which is the one the tail's context addresses; `suspension.sheetId` is written from the same
+    // rule at suspend time and a rule never changes sheet (`updateRule` is sheet-scoped and never sets it).
+    // Like every other validation failure here it precedes the single-use claim, so the refusal writes
+    // nothing and the token stays `pending`: after a restore the same resume works. It is NOT recorded on the
+    // execution the way the #5800 bridge refusal is: that lane has no caller to answer and nothing re-drives
+    // it, so it goes terminal; here the admin gets the reason synchronously and IS the re-driver. Recording
+    // would need the claim first (an unclaimed write can clobber a concurrent resume's steps), and the claim
+    // is terminal — it would mark the suspension `resumed` although nothing resumed, and forfeit the
+    // post-restore resume. The WARN carries the execution id (never the token). Fail-OPEN on a failed
+    // lookup, like every other lane in this file.
+    if (!(await this.ruleSheetLive(rule, 'automation.resume', { executionId: suspension.executionId }))) {
+      return { status: 409, code: SHEET_DELETED_CODE, message: RESUME_SHEET_DELETED_MESSAGE }
     }
     // Re-fetch the live record (D4); fail closed if it was deleted during the wait (T9).
     let recordData: Record<string, unknown> = {}
@@ -4385,7 +4452,8 @@ export class AutomationService {
   // ── Private helpers ─────────────────────────────────────────────────────
 
   /**
-   * SHEET LIVENESS (soft delete) for the TEMPLATE-keyed approval channels.
+   * SHEET LIVENESS (soft delete) for the TEMPLATE-keyed approval channels — and, one rule at a time through
+   * `ruleSheetLive`, for the direct-execute lanes (inbound webhook, admin retry, admin resume; #5803).
    *
    * ── Same definition of "live" — and TWO deliberate divergences, named ─────────────────────────
    * The record lane refuses inside `loadEnabledRules` and the scheduled lane refuses in the scheduler
@@ -4442,7 +4510,13 @@ export class AutomationService {
    * call — carrying `ruleCount` plus a capped `ruleIds` sample, and the per-rule line is DEBUG. An
    * operator still sees "these rules stopped / stayed armed, for this reason" without O(rules × events).
    */
-  private async dropRulesOnDeletedSheets(rules: AutomationRule[], channel: string): Promise<AutomationRule[]> {
+  private async dropRulesOnDeletedSheets(
+    rules: AutomationRule[],
+    channel: string,
+    // Extra VALUES-FREE identifiers for the log lines (the single-rule lanes pass the execution id). Spread
+    // FIRST so it can never overwrite a field below. The loaders pass nothing: their log lines are unchanged.
+    logContext: Readonly<Record<string, string>> = {},
+  ): Promise<AutomationRule[]> {
     if (rules.length === 0) return rules
     // ONE round trip for the whole call, whatever the number of distinct sheets: this runs while the
     // durable consumer's lease is ticking, and a serial per-sheet loop made an approval event's wall
@@ -4458,6 +4532,7 @@ export class AutomationService {
     if (livenessBySheet === null) {
       // FAIL-OPEN, reported ONCE for the call (the failure was one query, not one per rule).
       logger.warn(`${channel}: sheet liveness lookup failed, failing OPEN and keeping ${rules.length} rule(s)`, {
+        ...logContext,
         channel,
         reason: 'liveness_lookup_failed',
         ruleCount: rules.length,
@@ -4467,6 +4542,7 @@ export class AutomationService {
       })
       for (const rule of rules) {
         logger.debug(`${channel} rule ${rule.id} kept: sheet ${rule.sheet_id} liveness unknown (lookup failed)`, {
+          ...logContext,
           channel,
           ruleId: rule.id,
           sheetId: rule.sheet_id,
@@ -4484,6 +4560,7 @@ export class AutomationService {
         if (seen) seen.push(rule.id)
         else droppedBySheet.set(rule.sheet_id, [rule.id])
         logger.debug(`${channel} rule ${rule.id} skipped: sheet ${rule.sheet_id} is not live (soft-deleted)`, {
+          ...logContext,
           channel,
           ruleId: rule.id,
           sheetId: rule.sheet_id,
@@ -4497,6 +4574,7 @@ export class AutomationService {
     // has armed rules"), and it is bounded by sheets, not by rules × events.
     for (const [sheetId, ruleIds] of droppedBySheet) {
       logger.warn(`${channel}: ${ruleIds.length} rule(s) skipped — sheet ${sheetId} is not live (soft-deleted)`, {
+        ...logContext,
         channel,
         sheetId,
         reason: 'sheet_deleted',
@@ -4505,6 +4583,42 @@ export class AutomationService {
       })
     }
     return kept
+  }
+
+  /**
+   * SHEET LIVENESS for the three DIRECT-EXECUTE lanes (#5803): the inbound webhook, the admin whole-execution
+   * retry and the admin resume. Each holds ONE already-loaded rule and hands it to the executor itself, so
+   * none of them passes through `loadEnabledRules`, the scheduler callback or the template-keyed loaders —
+   * and the executor's same-sheet fast path never reads `meta_sheets`.
+   *
+   * Deliberately a one-rule call of `dropRulesOnDeletedSheets`, not a new check: the same lookup (one
+   * batched round trip, here of one id), the same verdict (refuse on EXACTLY `'deleted'`; `absent` passes),
+   * the same FAIL-OPEN on a thrown lookup with the same values-free WARN (`describeLookupError`: class +
+   * driver code, never the text), and the same `sheet_deleted` WARN. `channel` names the lane in every log
+   * line. `false` means positive proof of a soft delete and nothing else; each caller turns it into its own
+   * refusal (webhook: the uniform 401; retry / resume: a coded 409 with nothing written).
+   *
+   * Why fail-open holds on these lanes too, re-derived rather than copied:
+   *   · What a wrongly-kept run can touch is a soft-deleted sheet's records (hidden and restorable, not
+   *     destroyed; the cross-base write gate downstream is unchanged and still refuses a deleted TARGET) or
+   *     an outbound message — on retry / resume, one the admin explicitly confirmed (`confirmSideEffects`).
+   *   · A real outage rarely stops at this read. Resume issues the execution read and the token claim before
+   *     any action; retry issues the first-retry CAS; record-writing actions and a `workflow_job_v1` rule's
+   *     execution row hit the same database. NOT covered: a legacy rule whose actions are outbound-only can
+   *     act without touching the database, so for it the keep is paid for in the WARN — the same trade the
+   *     approval loader lanes made.
+   *   · Failing CLOSED on the webhook would answer a LIVE sheet's sender with the uniform 401 ("not
+   *     ingestable": a sender has no reason to retry it) and lose the delivery with no execution row
+   *     anywhere. On retry / resume a fail-closed refusal would only cost a re-click; it was not taken there
+   *     so that every lane keeps ONE failure rule behind ONE helper, and the admin confirmed the side effects
+   *     either way.
+   */
+  private async ruleSheetLive(
+    rule: AutomationRule,
+    channel: string,
+    logContext: Readonly<Record<string, string>> = {},
+  ): Promise<boolean> {
+    return (await this.dropRulesOnDeletedSheets([rule], channel, logContext)).length > 0
   }
 
   /**
