@@ -1,7 +1,18 @@
 # Attendance Issue #4556 W4C-2 Scheduled-Run Identity Amendment (section 7.1a)
 
-> Status: **PROPOSED** — requires owner RATIFY of the exact merged SHA before
-> any runtime code is written.
+> Status: **RATIFIED** — owner comment `5090978124` (`zensgit`,
+> `author_association=OWNER`, 2026-07-27), "Owner RATIFY — #4556 W4C-2 (b2)
+> scheduled-run identity amendment", ratifying this document at merged SHA
+> `d1bed9d640f8ee634975c70a6c981d2f49a97832` together with its post-merge
+> provenance erratum at merged SHA `d449aa7e6d02f94df2738a77cafffa778b12fde0`,
+> and rule bundle A (`OD-W4C-44=(a)`, `45=(a)`, `46=(a)`, `47=(a)`, `48=(a)`,
+> `49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, `53=(i)`). Effective 2026-07-27.
+>
+> (Status back-filled 2026-09-16, docs-only: the RATIFY existed only as the PR
+> comment above, so this header still read PROPOSED. The comment governs; this
+> line now records it. The ratify comment's own scope limits are unchanged by
+> this edit — it authorizes starting P1-2 implementation on PR #4612 under
+> `53=(i)` and does not authorize merging #4612 or any W4C-3a/3b/3c/4 slice.)
 >
 > Date: 2026-07-26
 >

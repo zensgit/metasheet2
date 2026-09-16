@@ -1,5 +1,25 @@
 # Attendance Issue #4556 W4 Segment Calculation and Immutable Snapshot Design Lock
 
+> **Supersession / provenance note (added 2026-09-16, docs-only back-fill).**
+> Red line `W4C-R42` and its three dependent clauses in this document originally read
+> "class `01` is forbidden". That wording was **superseded by an owner RATIFY** and has been
+> rewritten in place, exactly as the ratified option mandates.
+>
+> - Ratifying instrument: owner comment `5090978124` (`zensgit`, `author_association=OWNER`,
+>   2026-07-27), "Owner RATIFY — #4556 W4C-2 (b2) scheduled-run identity amendment".
+> - Ratified artefact: `docs/development/attendance-issue-4556-w4c2-scheduled-run-identity-amendment-20260726.md`
+>   at merged SHA `d1bed9d640f8ee634975c70a6c981d2f49a97832`, together with its post-merge
+>   provenance erratum at merged SHA `d449aa7e6d02f94df2738a77cafffa778b12fde0`.
+> - Operative rules: bundle A, specifically `OD-W4C-49=(a)` (rewrite this red line and the three
+>   dependent clauses) and `OD-W4C-46=(a)` (assign class `01` over `(org, initiator, work_date)`,
+>   ordered `00 → 01 → 10 → 11`, with its own values-free `503 ATTENDANCE_SCHEDULED_RUN_BUSY`).
+> - Effective from the ratify date, 2026-07-27.
+>
+> Rewritten sites in this document: the `W4C-R42` row, the `Prefix 01` clause, the exact-gate
+> mutation list, and the test-seam clause. Nothing else in this document is changed by this
+> back-fill, and no runtime behaviour is changed by it.
+
+
 > Status: **RATIFIED**
 >
 > Pinned baseline: `origin/main@e0defbe26d7f2e1747e74aa908ca710422812bf7`
@@ -211,7 +231,7 @@ against W1 group-membership tables is a scope violation.
 | W4C-R39 | Closing a pre-W4 import rollback window is immutable, and rollback is serialized with closure, rollout transition, and writes to the same import batch. | Removing the append-only close witness, common rollout/operation-identity-advisory/operation-row/batch/target lock order, or final in-transaction eligibility recheck fails dual-connection races. For a legacy batch closed without preimage, close/transition first makes rollback return 409 with zero delete/reversal DML; rollback first makes transition wait and then re-evaluate. For source versus rollback on one batch, exactly one commits first and the waiter rechecks committed batch state before zero conflicting source/reversal DML. A batch with a valid frozen preimage retains its specified W4 reversal path. |
 | W4C-R40 | Operation lifecycle follows rollout posture and supplied identity without an implicit retry hole. | A new legacy request with no supplied stable operation ID creates no operation/outbox row; legacy with a supplied ID claims/seals a compatibility operation but still creates no outbox; every new `shadow|eligible|authoritative` request requires, claims, and seals its operation plus required outbox. Independent mutations that create a legacy operation without an ID, omit the legacy-with-ID compatibility operation, or skip claim/seal outside legacy fail. |
 | W4C-R41 | Rollout posture is frozen against every source transaction and durable async enqueue, including null-ID legacy work, through one fail-closed advisory-key helper, a rollout-only `00` bigint key class, and one rollout-first lock order. | A completed congruent replay may use an authorization-gated non-locking read and return with zero DML. Every request that continues and every P07 enqueue acquires the org rollout shared transaction advisory lock through the single canonical helper before resolving an operation's accepted rollout state or a job's normalized accepted write posture, or before locking/writing operation, source, or job rows, and holds it through commit; transition/closure use that helper's matching exclusive mode before their rows. Removing either lock, changing one caller's namespace/key or two-bit key class, swallowing acquisition failure, or restoring operation/job-row-first locking fails an independent dual-connection leg. |
-| W4C-R42 | Concurrent reservation or first claim of one batch or operation identity serializes before any unique-row insert through an operation-only `10` bigint key class; target locks use disjoint class `11`, and `01` is forbidden. | When the first holder commits within the closed lock budget, two connections presenting the same all-new identity both complete with the one stored response and exactly one source/result effect. P07 enqueue also acquires the same class-`10` locks before inserting its job reservation, without creating operation rows; an enqueue racing a synchronous/non-worker caller in either commit order cannot leave both a retryable job and a committed operation/source effect for the same tuple. When a holder exceeds the budget, the waiter returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero DML and a later retry returns the stored response. Neither case exposes raw `23505` or `55P03`. Removing the canonical identity advisory lock from a claimant or enqueue reservation, changing one caller's key derivation, crossing a rollout/operation/target class, sorting by tuple instead of final signed key, or acquiring identity/target locks in a different final-key order fails independently. |
+| W4C-R42 | Concurrent reservation or first claim of one batch or operation identity serializes before any unique-row insert through an operation-only `10` bigint key class; target locks use disjoint class `11`, and `01` is acquired only by the scheduled-run helper; any other caller acquiring `01`, or that helper acquiring `00`/`10`/`11`, fails independently (class `01` is a fifth reserved-then-assigned class, not a forbidden one — see the supersession note at the top of this document). | When the first holder commits within the closed lock budget, two connections presenting the same all-new identity both complete with the one stored response and exactly one source/result effect. P07 enqueue also acquires the same class-`10` locks before inserting its job reservation, without creating operation rows; an enqueue racing a synchronous/non-worker caller in either commit order cannot leave both a retryable job and a committed operation/source effect for the same tuple. When a holder exceeds the budget, the waiter returns values-free `409 ATTENDANCE_OPERATION_IN_PROGRESS` with zero DML and a later retry returns the stored response. Neither case exposes raw `23505` or `55P03`. Removing the canonical identity advisory lock from a claimant or enqueue reservation, changing one caller's key derivation, crossing a rollout/operation/target class, sorting by tuple instead of final signed key, or acquiring identity/target locks in a different final-key order fails independently. |
 | W4C-R43 | A durable asynchronous job pauses before operation claim and resumes through one canonical queue execution path. | P07 enqueue freezes `accepted_write_posture` and source identity while holding class-`00` shared, then class-`10` identity locks, through job insert commit, but creates no batch/item operation row. While the org is suspended, the effective state is the durable job plus the durable suspended rollout state: P07/P08 lock only that job row, perform zero operation/source/result DML, record only the closed values-free retry posture allowed by P25, and leave the job retryable. After `suspended->authoritative` commits, startup recovery may re-enqueue and only the private queue processor enters the same job as an all-new batch under the ordinary section 8.2 identity locks; synchronous routes cannot adopt or reserve its identities. A null-version job can become terminal only atomically with its legacy source effect under class-`00` shared. Duplicate workers, another frozen write posture, a partial batch/item claim, a split legacy-effect/terminal commit, or any persisted `paused` operation state fails independently. |
 
 ## 4. Canonical intent, prepared plan, and evidence
@@ -2047,7 +2067,7 @@ error, timeout-to-continue, or row-lock fallback. Collision may reduce
 concurrency but cannot weaken correctness. This `00` class is disjoint from
 operation class `10` and target class `11` below, so a source never attempts
 an exclusive upgrade of the rollout key it already holds shared. Prefix `01`
-is reserved and forbidden in W4.
+is reserved and assigned to the scheduled-run helper: `01` is acquired only by the scheduled-run helper; any other caller acquiring `01`, or that helper acquiring `00`/`10`/`11`, fails independently.
 
 W4C-0 also exports the only operation-identity key builder and acquisition
 helper:
@@ -2125,9 +2145,10 @@ forces two identities onto one final key and proves one acquisition; and it
 forces equal raw eight-byte digests for rollout, operation, and target builders
 and proves the two-bit classes keep all three PostgreSQL keys distinct.
 Production construction cannot inject or replace the SHA-256 implementation.
-Mutating any class prefix, admitting reserved class `01`, sorting before
-derivation, omitting final-key de-duplication, or exposing the test seam to
-production makes an exact gate fail.
+Mutating any class prefix, admitting class `01` from any caller other than
+the scheduled-run helper (or that helper acquiring `00`/`10`/`11`), sorting
+before derivation, omitting final-key de-duplication, or exposing the test seam
+to production makes an exact gate fail.
 
 That stable org rollout advisory key has shared/exclusive transaction modes.
 Every new source/result transaction, including null-ID legacy work, and every
@@ -2567,7 +2588,8 @@ Gates:
   target hash or taking a target before operation/batch locks fails. A
   test-only digest seam forces crossed final-key order, same-key collisions,
   and equal rollout/operation/target raw digests; production construction
-  cannot inject it and class `01` is never acquired. Helper-origin rollout and
+  cannot inject it, and class `01` is never acquired by this path — it is
+  acquired only by the scheduled-run helper. Helper-origin rollout and
   target lock timeouts map to their exact values-free 503 codes with zero DML;
   relabeling another query's `55P03` fails;
 - direct, verified-channel, import, integration, and scheduled identity tests
