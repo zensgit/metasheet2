@@ -49,18 +49,25 @@ async function buildApp(options: {
     listDeliveries: vi.fn(async () => []),
     testSend: vi.fn(async () => ({ ok: true })),
   }
-  const resolveSheetCapabilitiesForUser = vi.fn(async () => {
+  // Both lookups are ID-AWARE: the configured answer belongs to SHEET_ID only. Any other sheet id is
+  // unauthorized (capability) and reads as LIVE (liveness — the dangerous default), so a route that
+  // checks a different sheet than the one it was asked about cannot pass the refusal cases below.
+  const resolveSheetCapabilitiesForUser = vi.fn(async (_query: unknown, sheetId: string, _userId: string) => {
+    if (sheetId !== SHEET_ID) {
+      return { capabilities: { canManageAutomation: false }, isAdminRole: false, permissions: [] }
+    }
     if (options.capabilityError) throw options.capabilityError
     return {
-    capabilities: { canManageAutomation: options.canManageAutomation ?? true },
-    isAdminRole: false,
-    permissions: [],
+      capabilities: { canManageAutomation: options.canManageAutomation ?? true },
+      isAdminRole: false,
+      permissions: [],
     }
   })
   const livenessCalls: string[] = []
   const query = vi.fn(async (sql: string, params: unknown[]) => {
     if (/FROM meta_sheets/.test(sql)) {
       livenessCalls.push(String(params[0]))
+      if (params[0] !== SHEET_ID) return { rows: [{ deleted_at: null }], rowCount: 1 }
       if (options.liveness === 'error') {
         const code = 'livenessErrorCode' in options ? options.livenessErrorCode : '57P01'
         throw Object.assign(new Error('connection terminated secret-host'), { code })
@@ -194,19 +201,24 @@ describe('DingTalk group sheet-scoped routes refuse non-live sheets (capability 
     })
 
     it('live sheet -> reaches the service', async () => {
-      const { service } = await buildApp({ liveness: 'live' })
+      const { service, livenessCalls, resolveSheetCapabilitiesForUser } = await buildApp({ liveness: 'live' })
       const res = await route.call()
       expect(res.status).toBeLessThan(300)
       expect(service[route.serviceMethod]).toHaveBeenCalledTimes(1)
+      // Both gates ran on the requested sheet (a gate that asked about another id would read "live").
+      expect(resolveSheetCapabilitiesForUser).toHaveBeenCalledWith(expect.any(Function), SHEET_ID, 'user_1')
+      expect(livenessCalls).toEqual([SHEET_ID])
     })
 
     it('capability denied -> identical 403 for live and deleted sheets (no liveness oracle)', async () => {
       const bodies: unknown[] = []
       for (const liveness of ['live', 'deleted', 'absent'] as const) {
-        const { service, livenessCalls } = await buildApp({ liveness, canManageAutomation: false })
+        const { service, livenessCalls, resolveSheetCapabilitiesForUser } = await buildApp({ liveness, canManageAutomation: false })
         const res = await route.call()
         expect(res.status).toBe(403)
         bodies.push(res.body)
+        // The denial is the requested sheet's, not some other id's.
+        expect(resolveSheetCapabilitiesForUser).toHaveBeenCalledWith(expect.any(Function), SHEET_ID, 'user_1')
         expect(livenessCalls).toEqual([])
         expectNoServiceCall(service)
       }
@@ -228,7 +240,7 @@ describe('DingTalk group sheet-scoped routes refuse non-live sheets (capability 
     })
 
     it('capability lookup failure -> handled values-free 500 (no hang, no raw message), no liveness, service never called', async () => {
-      const { service, livenessCalls, loggerError } = await buildApp({
+      const { service, livenessCalls, loggerError, resolveSheetCapabilitiesForUser } = await buildApp({
         liveness: 'live',
         capabilityError: Object.assign(new Error('permission lookup exploded secret-host'), { code: '53300' }),
       })
@@ -238,6 +250,7 @@ describe('DingTalk group sheet-scoped routes refuse non-live sheets (capability 
         ok: false,
         error: { code: 'SHEET_ACCESS_CHECK_FAILED', message: 'Failed to resolve sheet access' },
       })
+      expect(resolveSheetCapabilitiesForUser).toHaveBeenCalledWith(expect.any(Function), SHEET_ID, 'user_1')
       expect(livenessCalls).toEqual([])
       expectNoServiceCall(service)
       const logged = loggerError.mock.calls.map((call) => String(call[0])).join(' ')
@@ -273,5 +286,100 @@ describe('DingTalk group sheet-scoped routes refuse non-live sheets (capability 
     expect(service.listDestinations).toHaveBeenCalledWith('user_1', undefined, undefined)
     expect(livenessCalls).toEqual([])
     expect(resolveSheetCapabilitiesForUser).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The deliveries route loads history by destination id alone, so after the sheet gate passes it
+   * must also require the destination to be bound to the sheet the gate just checked. Otherwise a
+   * caller authorized on one live sheet reads the delivery history (subjects and bodies) of a
+   * destination bound to another — possibly soft-deleted — sheet.
+   */
+  it('GET /dingtalk-groups/:id/deliveries refuses a destination bound to another sheet even though the queried sheet is live and authorized', async () => {
+    const { service, livenessCalls, resolveSheetCapabilitiesForUser } = await buildApp({ liveness: 'live' })
+    service.getDestinationById.mockResolvedValue(makeDestination({ sheetId: 'sheet_other' }))
+    const res = await base()
+      .get(`/api/multitable/dingtalk-groups/${DESTINATION_ID}/deliveries`)
+      .query({ sheetId: SHEET_ID })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN' } })
+    // The gate PASSED for the queried sheet: the refusal comes from the binding check.
+    expect(resolveSheetCapabilitiesForUser).toHaveBeenCalledWith(expect.any(Function), SHEET_ID, 'user_1')
+    expect(livenessCalls).toEqual([SHEET_ID])
+    expect(service.getDestinationById).toHaveBeenCalledWith(DESTINATION_ID)
+    expect(service.listDeliveries).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Pin for the array-form query `?sheetId=a&sheetId=b`. Express parses it as string[], and the
+   * route's `getSheetId` reads any non-string as '' — so the request is handled as if it carried NO
+   * sheetId: neither the capability nor the liveness lookup runs (even though SHEET_ID is configured
+   * as deleted here), and the service receives `undefined`.
+   *
+   * That is safe only because of the second boundary:
+   *   - PATCH / DELETE / test-send: the service refuses a sheet-bound destination when no sheetId is
+   *     supplied — dingtalk-group-destination-service.test.ts, "a destination bound to a soft-deleted
+   *     sheet refuses no sheetId". The mocked service below rejects the way the real one does for
+   *     such a row.
+   *   - deliveries: the route's own binding check compares the row's sheet with '' and refuses.
+   *   - list: the service's no-sheet branch lists only org rows the caller is an active member of and
+   *     the caller's own private rows; it has no sheet-bound branch.
+   * If the parsing ever changes (say, to take the first element), this pin goes red on purpose: the
+   * gate must then run on whatever value is used.
+   */
+  describe('array-form sheetId (?sheetId=a&sheetId=b) is handled as no sheetId', () => {
+    const ARRAY_QUERY = `sheetId=${SHEET_ID}&sheetId=sheet_other`
+    const destinationPath = `/api/multitable/dingtalk-groups/${DESTINATION_ID}`
+
+    it('GET /dingtalk-groups (list) -> no lookups, service gets undefined sheetId', async () => {
+      const { service, livenessCalls, resolveSheetCapabilitiesForUser } = await buildApp({ liveness: 'deleted' })
+      const res = await base().get('/api/multitable/dingtalk-groups').query(ARRAY_QUERY)
+      expect(res.status).toBe(200)
+      expect(resolveSheetCapabilitiesForUser).not.toHaveBeenCalled()
+      expect(livenessCalls).toEqual([])
+      expect(service.listDestinations).toHaveBeenCalledTimes(1)
+      expect(service.listDestinations).toHaveBeenCalledWith('user_1', undefined, undefined)
+    })
+
+    it.each([
+      {
+        name: 'PATCH /dingtalk-groups/:id (update)',
+        method: 'updateDestination' as const,
+        call: () => base().patch(destinationPath).query(ARRAY_QUERY).send({ name: 'Renamed' }),
+        args: [DESTINATION_ID, 'user_1', expect.objectContaining({ name: 'Renamed' }), undefined, undefined],
+      },
+      {
+        name: 'DELETE /dingtalk-groups/:id (delete)',
+        method: 'deleteDestination' as const,
+        call: () => base().delete(destinationPath).query(ARRAY_QUERY),
+        args: [DESTINATION_ID, 'user_1', undefined, undefined],
+      },
+      {
+        name: 'POST /dingtalk-groups/:id/test-send',
+        method: 'testSend' as const,
+        call: () => base().post(`${destinationPath}/test-send`).query(ARRAY_QUERY).send({ subject: 'T', content: 'B' }),
+        args: [DESTINATION_ID, 'user_1', { subject: 'T', content: 'B' }, undefined, undefined],
+      },
+    ])('$name -> no lookups, service gets undefined sheetId and refuses the sheet-bound row', async ({ method, call, args }) => {
+      const { service, livenessCalls, resolveSheetCapabilitiesForUser } = await buildApp({ liveness: 'deleted' })
+      service[method].mockRejectedValue(new Error('Not authorized'))
+      const res = await call()
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('FORBIDDEN')
+      expect(resolveSheetCapabilitiesForUser).not.toHaveBeenCalled()
+      expect(livenessCalls).toEqual([])
+      expect(service[method]).toHaveBeenCalledTimes(1)
+      expect(service[method]).toHaveBeenCalledWith(...args)
+    })
+
+    it('GET /dingtalk-groups/:id/deliveries -> no lookups, the route binding check refuses the sheet-bound row', async () => {
+      const { service, livenessCalls, resolveSheetCapabilitiesForUser } = await buildApp({ liveness: 'deleted' })
+      const res = await base().get(`${destinationPath}/deliveries`).query(ARRAY_QUERY)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN' } })
+      expect(resolveSheetCapabilitiesForUser).not.toHaveBeenCalled()
+      expect(livenessCalls).toEqual([])
+      expect(service.getDestinationById).toHaveBeenCalledWith(DESTINATION_ID)
+      expect(service.listDeliveries).not.toHaveBeenCalled()
+    })
   })
 })
