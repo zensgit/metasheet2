@@ -16,6 +16,7 @@ import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 import { insertCommittedAuditKysely, type OapiWriteAuditContext } from '../multitable/oapi-write-audit'
 import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
+import { JS_TRIM_WHITESPACE } from '../utils/js-trim-whitespace'
 import {
   escapeMentionLikeTerm,
   MENTION_CANDIDATES_MAX_ITEMS,
@@ -556,10 +557,20 @@ export class CommentService {
    *  - no COUNT. The old `total` was a deployment-wide count of matching active users (for a
    *    term-less call: the size of the whole user base) and was returned to any comments:read
    *    holder. It is no longer computed at all; the routes report the clamped page size instead.
+   *
+   * #5809 — `match: 'exact-email'` swaps the substring predicate for EMAIL EQUALITY: the stored email,
+   * trimmed with the characters JS `trim()` strips (JS_TRIM_WHITESPACE, bound as a parameter) and
+   * lower-cased, must equal the trimmed, lower-cased term. It is used by the legacy person importer,
+   * which must know whether THE owner of an address exists — a substring page of 50 can be filled by
+   * `wangli@…`, `zhangli@…` before `li@…` shows up. It only narrows: a row whose trimmed email equals
+   * the term also contains it, so (with per-character case folding) the exact rows for a term are a
+   * subset of the substring rows for the same term. Everything else is shared: the term requirement,
+   * `is_active`, the LIMIT ceiling, the ordering and the row mapping. Any other `match` is the
+   * substring search.
    */
   async listMentionCandidates(
     spreadsheetId: string,
-    options?: { q?: string; limit?: number },
+    options?: { q?: string; limit?: number; match?: 'exact-email' },
   ): Promise<{ items: CommentMentionCandidate[] }> {
     const normalizedSheetId = spreadsheetId.trim()
     if (!normalizedSheetId) return { items: [] }
@@ -575,15 +586,18 @@ export class CommentService {
     const escapedQuery = escapeMentionLikeTerm(normalizedQuery)
     const likeQuery = `%${escapedQuery}%`
     const startsWithQuery = `${escapedQuery}%`
+    const exactEmail = options?.match === 'exact-email'
 
     const rows = await db
       .selectFrom('users')
       .where('is_active', '=', true)
-      .where((eb) => eb.or([
-        sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
-        sql<boolean>`lower(email) like ${likeQuery}`,
-        sql<boolean>`lower(id) like ${likeQuery}`,
-      ]))
+      .where((eb) => eb.or(exactEmail
+        ? [sql<boolean>`lower(btrim(coalesce(email, ''), ${JS_TRIM_WHITESPACE})) = ${normalizedQuery}`]
+        : [
+          sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
+          sql<boolean>`lower(email) like ${likeQuery}`,
+          sql<boolean>`lower(id) like ${likeQuery}`,
+        ]))
       .select(['id', 'name', 'email'])
       .orderBy(
         sql<number>`case
