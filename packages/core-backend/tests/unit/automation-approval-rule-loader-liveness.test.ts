@@ -129,6 +129,32 @@ function completionEvent(templateId = 'tpl_1') {
   } as never
 }
 
+/**
+ * A minimal, in-contract `ApprovalTaskCreatedEventV1` — same envelope shape the real emitter builds
+ * (`buildApprovalTaskCreatedEvent` in `services/ApprovalTaskCreatedEvent.ts`), enough to clear the
+ * handler's version/source/eventType/templateId gates and reach the dispatch body.
+ */
+function taskCreatedEvent(templateId = 'tpl_1') {
+  return {
+    version: 1,
+    eventId: 'evt_tc_1',
+    eventType: 'approval.task_created',
+    occurredAt: new Date().toISOString(),
+    source: 'approval-product',
+    approval: {
+      instanceId: 'ai_1',
+      requestNo: null,
+      templateId,
+      templateVersionId: null,
+      publishedDefinitionId: null,
+      businessKey: null,
+      workflowKey: null,
+    },
+    task: { nodeKey: 'node_1', entryEpoch: 1, assigneeUserId: 'u1', sourceStep: 0 },
+    requester: { id: 'u1' },
+  } as never
+}
+
 describe('approval rule loaders — sheet liveness (soft delete)', () => {
   let warn: ReturnType<typeof vi.spyOn>
   let debug: ReturnType<typeof vi.spyOn>
@@ -372,5 +398,27 @@ describe('approval rule loaders — sheet liveness (soft delete)', () => {
     await service.handleApprovalCompletionTrigger(completionEvent())
 
     expect(kick, 'the retention sweep must not become conditional on this channel contributing rules').toHaveBeenCalledTimes(1)
+  })
+
+  it('housekeeping still runs when the filter empties the rule list — task_created channel too', async () => {
+    // Mirrors the completion-channel case above: the same sweep-kick hoist was made on the task_created
+    // twin (`handleApprovalTaskCreatedTrigger`), above ITS empty-list return. A dead-sheet-only template
+    // must not quietly stop the sweep on this channel either — pinned separately because the two dispatch
+    // methods are independent hoists, not one shared code path.
+    const { service } = makeService(
+      [ruleRow({ id: 'atr_dead_tc', sheet_id: 'sheet_dead', trigger_type: 'approval.task_created' })],
+      { sheet_dead: 'deleted' },
+    )
+    const kick = vi.spyOn(
+      service as never as { kickEventDedupLedgerSweepIfDue: (nowMs: number) => void },
+      'kickEventDedupLedgerSweepIfDue',
+    ).mockImplementation(() => {})
+
+    await service.handleApprovalTaskCreatedTrigger(taskCreatedEvent())
+
+    expect(
+      kick,
+      'the retention sweep must not become conditional on the task_created channel contributing rules',
+    ).toHaveBeenCalledTimes(1)
   })
 })
