@@ -157,6 +157,7 @@ describe('#5795 comment mention candidates — bounded disclosure', () => {
     mocks.resolveSheetReadableCapabilities.mockResolvedValue({
       access: { userId: 'actor_plain_user', isAdminRole: false },
       capabilities: { canRead: true },
+      sheetLiveness: 'live',
     })
     mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(false)
     mocks.loadDeniedRecordIds.mockResolvedValue(new Set())
@@ -202,6 +203,7 @@ describe('#5795 comment mention candidates — bounded disclosure', () => {
       mocks.resolveSheetReadableCapabilities.mockResolvedValue({
         access: { userId: 'actor_plain_user', isAdminRole: false },
         capabilities: { canRead: false },
+        sheetLiveness: 'live',
       })
 
       const res = await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET })
@@ -367,6 +369,7 @@ describe('#5795 comment mention candidates — bounded disclosure', () => {
       mocks.resolveSheetReadableCapabilities.mockResolvedValue({
         access: { userId: 'actor_plain_user', isAdminRole: false },
         capabilities: { canRead: false },
+        sheetLiveness: 'live',
       })
 
       const res = await request(pinned.url()).get(nsUrl)
@@ -436,6 +439,7 @@ describe('#5795 comment mention candidates — bounded disclosure', () => {
       mocks.resolveSheetReadableCapabilities.mockResolvedValue({
         access: { userId: 'actor_plain_user', isAdminRole: false },
         capabilities: { canRead: false },
+        sheetLiveness: 'live',
       })
       const denied = await request(pinned.url()).get(mainUrl).query({ spreadsheetId: SHEET, q: 'x@example.invalid', match: 'exact-email' })
       expect(denied.status).toBe(403)
