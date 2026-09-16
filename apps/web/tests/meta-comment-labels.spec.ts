@@ -38,6 +38,8 @@ describe('meta-comment-labels static keys', () => {
       ['comment.mentionSuggestionsAria', 'Comment mention suggestions', '评论提及建议'],
       ['comment.hintBase', 'Ctrl/Cmd + Enter to send', 'Ctrl/Cmd + Enter 发送'],
       ['comment.hintWithMention', 'Tab to mention, Ctrl/Cmd + Enter to send', 'Tab 提及，Ctrl/Cmd + Enter 发送'],
+      // #5795: server-side, term-required mention search prompt
+      ['comment.mentionTypeToSearch', 'Type a name or email to mention someone', '输入姓名或邮箱以提及成员'],
       ['comment.discardDraftConfirm', 'Discard unsaved comment draft?', '放弃未保存的评论草稿吗？'],
       ['comment.errorLoad', 'Failed to load comments', '加载评论失败'],
       ['comment.errorAdd', 'Failed to add comment', '添加评论失败'],

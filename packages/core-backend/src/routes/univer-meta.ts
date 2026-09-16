@@ -86,7 +86,7 @@ import {
   TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE,
   TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE,
 } from '../multitable/trust-checkpoint-activation-authz'
-import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
+import { createPersonMemberResolver, escapeLikeTerm, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import {
   lockRecordLinkAuthorityRowsOnQuery,
@@ -5701,6 +5701,14 @@ const loadFieldsForSheet = loadFieldsForSheetShared
 export const PERSON_DIRECTORY_MAX_ITEMS = 50
 export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
 
+/**
+ * #5795 follow-up — the SAME two bounds, applied to GET /sheets/:sheetId/form-share-candidates (it reads
+ * the same listSheetPermissionCandidates roster). Aliases rather than new numbers so the three
+ * roster-shaped reads of this file cannot drift apart; the route already clamped to 50 before this.
+ */
+export const FORM_SHARE_CANDIDATES_MAX_ITEMS = PERSON_DIRECTORY_MAX_ITEMS
+export const FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH = PERSON_DIRECTORY_MIN_QUERY_LENGTH
+
 async function ensureAttachmentIdsExist(
   query: QueryFn,
   sheetId: string,
@@ -8259,29 +8267,31 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // is tracked separately under #5781 and is NOT done here.
   //
   // RESIDUALS this change does NOT close (stated so the next reader does not over-read the bound):
-  //  (1) THE BOUND IS PER REQUEST, NOT AGGREGATE. With a 1-character minimum, a deterministic order
-  //      and no rate limiter or audit row on this route, a scripted actor can still walk the set by
-  //      varying the term ('a'..'z', '0'..'9', then two-character combinations) and reassemble most of
-  //      a few-thousand-user roster in a few hundred calls. What this removes is the ZERO-EFFORT
-  //      one-request dump; the durable fix is still the set-narrowing follow-up named above.
-  //  (2) A PARALLEL, WEAKER-GATED READ OF THE SAME ROSTER REMAINS. GET /api/comments/mention-candidates
-  //      (routes/comments.ts, -> CommentService.listMentionCandidates) answers a TERM-LESS call with up
-  //      to 100 users as label + email subtitle, plus `total` = the deployment-wide active-user count,
-  //      behind rbacGuard('comments','read') (seeded onto the generic `user` role) + sheet read: a
-  //      WIDER set (no permission filter at all) behind a WEAKER gate than this route. Until that
-  //      endpoint gets the same three bounds (require a term, keep the clamp, and drop `total` or
-  //      report the clamped count), the value of this change is limited to the person-picker path --
-  //      do NOT read it as "the roster is now bounded deployment-wide". Widening this PR to touch the
-  //      comments surface was deliberately rejected (different router, different gate, its own tests);
-  //      it is FILED as #5795 with those same three bounds so the two surfaces converge.
-  //      A THIRD surface of the same shape lives in THIS file: GET /sheets/:sheetId/form-share-candidates
-  //      (route further down), gated on canManageFormShareForSheet -> capabilities.canManageViews —
-  //      which multitable/permission-service.ts:1543-1549 grants to ANY holder of a sheet-level
-  //      full-write grant, i.e. exactly the actor shape this route's own tests use. It reads the SAME
-  //      listSheetPermissionCandidates and answers a TERM-LESS call with 20-50 rows of name + email.
-  //      It is already clamped to 50, so it does NOT restore the unlimited dump; what it lacks is the
-  //      "must supply a term" half. Named here so the next reader does not read residual (2) as
-  //      "only the comments surface is left".
+  //  (1) THE BOUND IS PER REQUEST, NOT AGGREGATE — on this route AND on the two same-shaped reads
+  //      named in (2). With a 1-character minimum, a deterministic order and no rate limiter or audit
+  //      row on any of the three, a scripted actor can still walk the set by varying the term
+  //      ('a'..'z', '0'..'9', then two-character combinations) and reassemble most of a
+  //      few-thousand-user roster in a few hundred calls. What the bounds remove is the ZERO-EFFORT
+  //      one-request dump; the aggregate is only made INCONVENIENT, not bounded. The durable fix is
+  //      still the set-narrowing follow-up named above (plus, if wanted, a rate limit / audit row).
+  //  (2) THE TWO PARALLEL READS OF THE SAME ROSTER NOW CARRY THE SAME PER-REQUEST BOUNDS (#5795).
+  //      - GET /api/comments/mention-candidates (routes/comments.ts -> CommentService
+  //        .listMentionCandidates), and its sibling GET /api/multitable/:spreadsheetId/mention-candidates
+  //        which reads the same service behind the same gate: a term is required (term-less ⇒ empty +
+  //        `requiresQuery`, no query issued), at most 50 rows with `hasMore`, the term is a literal
+  //        substring, and the deployment-wide active-user `total` is no longer computed — `total` is
+  //        the clamped page size. What #5795 still leaves open there: the gate is unchanged
+  //        (rbacGuard('comments','read'), seeded onto the generic `user` role, + sheet read), and so is
+  //        the set — every ACTIVE user in the deployment, with no permission filter at all, i.e. a
+  //        superset of this route's set (equal only where every active user holds multitable
+  //        read/write). Residual (1) therefore bites hardest on that endpoint.
+  //      - GET /sheets/:sheetId/form-share-candidates (further down THIS file; gate canManageViews,
+  //        which a sheet-level full-write grant alone turns on): same term requirement + marker, its
+  //        existing clamp (50, default 20) now with `hasMore`, literal term. Its set is unchanged
+  //        (listSheetPermissionCandidates users + member groups), and so is the DingTalk-binding
+  //        enrichment it adds per user — whether that dimension should be visible to a full-write
+  //        holder is an open owner question, recorded on that route.
+  //      Neither is re-scoped: "the roster is now bounded deployment-wide" is true PER REQUEST only.
   //  (3) WHERE THE BOUNDS ARE PROVEN. The route-level behaviour is pinned by
   //      tests/unit/multitable-person-directory-bounded.test.ts (which MOCKS the resolver) and the
   //      generated SQL by tests/unit/multitable-person-directory-resolver.test.ts (which asserts on the
@@ -8290,6 +8300,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //      tests/integration/multitable-person-member-group-restrict.test.ts (registered in
   //      plugin-tests.yml, which hard-fails without DATABASE_URL). That lane is the ONLY place the
   //      DB-side bound is actually run — it cannot run on a developer box without a local Postgres.
+  //      The two #5795 surfaces are pinned at route level by tests/unit/comment-mention-candidates-
+  //      bounded.test.ts and tests/unit/multitable-form-share-candidates-bounded.test.ts (both mock the
+  //      roster read) and, for the mention SQL, by tests/unit/comment-service.test.ts (which inspects
+  //      the query-builder calls: LIMIT, escaped term, no COUNT). As far as a grep of tests/integration
+  //      shows, no wired real-Postgres lane executes the mention SQL at all (comments.api.test.ts is
+  //      deliberately unwired), nor listSheetPermissionCandidates WITH a search term — its term-less
+  //      form does run for real via the person-member-group-restrict suite, the escaped-term path does not.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
@@ -14310,6 +14327,34 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
+  // #5795 follow-up — SAME THREE BOUNDS AS THE #5781 PERSON DIRECTORY; ELIGIBILITY UNCHANGED.
+  // Gate: canManageFormShareForSheet -> capabilities.canManageViews, which a sheet-level full-write
+  // grant alone is enough to turn on (permission-service applyContextSheetSchemaWriteGrant, not an
+  // admin-only capability). It reads the same listSheetPermissionCandidates roster as the person
+  // directory, and before this change a term-less call answered with 20-50 users + member groups
+  // (name + email + DingTalk-binding flags). It was already clamped to 50; what it lacked was "must
+  // supply a term". Now:
+  //  (a) a term shorter than FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH (after trim) is answered with an
+  //      empty list + the values-free `requiresQuery` marker, AFTER the existing 404 / permission /
+  //      liveness gates and BEFORE any candidate or DingTalk lookup (zero hydration). 200, not 400:
+  //      MetaFormShareManager asks with an empty search box as soon as the allowlist section opens.
+  //  (b) the existing clamp stays (FORM_SHARE_CANDIDATES_MAX_ITEMS = 50, default 20), and the roster
+  //      read is asked for ONE row past it so `hasMore` needs no second query. The SQL LIMIT lives
+  //      inside listSheetPermissionCandidates, so the clamp is below the name/email hydration. The
+  //      probe row is dropped BEFORE the DingTalk enrichment, which therefore only ever runs on the
+  //      page actually returned. CAVEAT, stated so nobody over-reads `hasMore`: that function applies
+  //      its SQL LIMIT before its eligibility filter (and this route then drops role rows), so
+  //      `hasMore: true` is exact ("more eligible matches exist"), but `hasMore: false` can miss
+  //      matches hidden behind ineligible users inside the first limit+1 rows — the same
+  //      under-return the route already had before this change.
+  //  (c) the term is handed down as a LITERAL substring (LIKE metacharacters escaped here, so the
+  //      shared listSheetPermissionCandidates stays byte-identical); otherwise a bare `%` or `_`
+  //      would pass the one-character minimum and still return the unfiltered first page.
+  // NOT changed: who is eligible (listSheetPermissionCandidates, its eligibility filter, and the
+  // user/member-group filter below are untouched) and the DingTalk enrichment's fields. Whether a
+  // sheet full-write holder should see colleagues' DingTalk-binding / auth-grant flags at all is an
+  // open question for the owner; it is bounded by (a)/(b) now but deliberately not removed here.
+  // Aggregate bound: still only "inconvenient" — see residual (1) on the person-directory route.
   router.get('/sheets/:sheetId/form-share-candidates', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
@@ -14318,7 +14363,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(FORM_SHARE_CANDIDATES_MAX_ITEMS, Math.max(1, Math.floor(rawLimit as number)))
+      : 20
 
     try {
       const pool = poolManager.get()
@@ -14330,10 +14377,41 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
-      const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
+      if (q.length < FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH) {
+        return res.json({
+          ok: true,
+          data: {
+            items: [],
+            total: 0,
+            limit,
+            query: '',
+            hasMore: false,
+            requiresQuery: true,
+            minQueryLength: FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH,
+          },
+        })
+      }
+
+      const page = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, {
+        q: escapeLikeTerm(q),
+        limit: limit + 1,
+      }))
         .filter((candidate) => candidate.subjectType === 'user' || candidate.subjectType === 'member-group')
+      const hasMore = page.length > limit
+      const candidates = hasMore ? page.slice(0, limit) : page
       const items = await enrichFormShareCandidatesWithDingTalkStatus(pool.query.bind(pool), candidates)
-      return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          total: items.length,
+          limit,
+          query: q,
+          hasMore,
+          requiresQuery: false,
+          minQueryLength: FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH,
+        },
+      })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

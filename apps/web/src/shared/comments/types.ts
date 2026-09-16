@@ -15,6 +15,25 @@ export interface MetaCommentMentionSuggestion {
   subtitle?: string
 }
 
+/**
+ * #5795 — one server-side @-mention search. The candidate endpoint no longer hands out a term-less
+ * roster: an empty/too-short term answers `requiresQuery: true` with no items (render "type to
+ * search", not "no match"), and a match set larger than the server ceiling answers `hasMore: true`.
+ */
+export interface MetaCommentMentionSearchResult {
+  items: MetaCommentMentionSuggestion[]
+  requiresQuery: boolean
+  hasMore: boolean
+}
+
+/**
+ * A host-supplied mention search (the multitable workbench binds it to its sheet + API client).
+ * Components that receive one query the server as the user types instead of filtering a preloaded
+ * roster; components that don't keep their static `suggestions` behaviour (approval comments, the
+ * anonymous public form's rich-text editor).
+ */
+export type MetaCommentMentionSearch = (query: string) => Promise<MetaCommentMentionSearchResult>
+
 /** Aggregated emoji reaction on a comment (B6). Mirrors the backend CommentReactionSummary. */
 export interface MultitableCommentReaction {
   emoji: string

@@ -100,8 +100,9 @@ export interface PersonDirectoryHydrationOptions {
 }
 
 /** Escapes the LIKE metacharacters so `search` behaves as a literal substring (PG's default LIKE
- *  escape character is the backslash). */
-function escapeLikeTerm(term: string): string {
+ *  escape character is the backslash). Exported so the form-share candidate read (univer-meta.ts)
+ *  can hand listSheetPermissionCandidates a literal term without that shared function changing. */
+export function escapeLikeTerm(term: string): string {
   return term.replace(/[\\%_]/g, (ch) => `\\${ch}`)
 }
 

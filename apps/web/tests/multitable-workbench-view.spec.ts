@@ -34,8 +34,13 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
     renders: 0,
     fieldLayout: undefined as { ordered: Array<{ id: string }>; hiddenInView: Array<{ id: string }> } | null | undefined,
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+    // #5795: the server-side mention search the workbench hands the inspector.
+    mentionSearch: undefined as ((query: string) => Promise<{ items: unknown[]; requiresQuery: boolean; hasMore: boolean }>) | undefined,
   },
-  gridStubSeen: { fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined },
+  gridStubSeen: {
+    fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+    mentionSearch: undefined as ((query: string) => Promise<unknown>) | undefined,
+  },
 }))
 // PR-B2 round 2 (2026-09-05, record inspector v3 §1.3): the stub's answer to the workbench's
 // `canAnchorFieldError(recordId, fieldId)` query (the real MetaRecordInspector exposes it via
@@ -347,6 +352,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       // PR-B1 round 2: the grid's own `:fetch-record="fetchLinkedRecordFn"` binding, recorded into
       // `gridStubSeen` so the inspector's binding can be asserted IDENTICAL to it (HI-1).
       fetchRecord: { type: Function, default: undefined },
+      mentionSearch: { type: Function, default: undefined },
     },
     // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` added to this stub's emits —
     // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
@@ -355,6 +361,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
     emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
     render() {
       gridStubSeen.fetchRecord = this.$props.fetchRecord as typeof gridStubSeen.fetchRecord
+      gridStubSeen.mentionSearch = this.$props.mentionSearch as typeof gridStubSeen.mentionSearch
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
         'data-grid-collapsed-keys': JSON.stringify(this.$props.collapsedGroupKeys ?? []),
@@ -513,6 +520,7 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       commentTargetFieldId: { type: String, default: null },
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
+      mentionSearch: { type: Function, default: undefined },
       // PR-B2 (2026-09-05, record inspector v3 §1.3): declared so the workbench's `:field-errors`
       // binding arrives as a typed prop and is rendered below as the same `[data-test=
       // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
@@ -542,6 +550,7 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       inspectorStubSeen.renders += 1
       inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
       inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
+      inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
       return h('div', {
@@ -2790,17 +2799,46 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
-  it('loads comment mention suggestions for the active sheet when opening comments', async () => {
+  // #5795: the mention-candidate endpoint is search-required, so opening a thread must NOT fetch a
+  // term-less roster any more; instead the workbench hands every mention editor a search bound to the
+  // active sheet (the SAME function to the grid and the inspector), and remembers what it returned.
+  it('opens comments without a term-less mention request and wires a sheet-bound mention search', async () => {
     mountWorkbench()
     await flushUi()
 
     container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
     await flushUi()
 
-    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledWith({
-      spreadsheetId: 'sheet_orders',
-      limit: 100,
+    expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-mention-suggestions-count="0"]')).not.toBeNull()
+    const search = inspectorStubSeen.mentionSearch
+    expect(typeof search).toBe('function')
+    expect(gridStubSeen.mentionSearch).toBe(search)
+
+    // An empty term is asked of the server, whose `requiresQuery` marker is passed through untouched.
+    workbenchMock.client.listCommentMentionSuggestions.mockResolvedValueOnce({
+      items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1,
     })
+    await expect(search!('')).resolves.toEqual({ items: [], requiresQuery: true, hasMore: false })
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenLastCalledWith({
+      spreadsheetId: 'sheet_orders',
+      q: '',
+      limit: 20,
+    })
+
+    // A real term returns the matches and remembers them (labels of picked people stay resolvable).
+    const found = await search!('ja')
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenLastCalledWith({
+      spreadsheetId: 'sheet_orders',
+      q: 'ja',
+      limit: 20,
+    })
+    expect(found).toEqual({
+      items: [{ id: 'user_jamie', label: 'Jamie', subtitle: 'jamie@example.com' }],
+      requiresQuery: false,
+      hasMore: false,
+    })
+    await flushUi()
     expect(container!.querySelector('[data-mention-suggestions-count="1"]')).not.toBeNull()
   })
 

@@ -1924,7 +1924,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         if (sql.includes('WITH user_candidates AS') && sql.includes('role_candidates AS')) {
-          expect(params).toEqual(['sheet_ops', '', '%', 20])
+          // #5795: a term is required; the route asks for one row past its page (hasMore probe).
+          expect(params).toEqual(['sheet_ops', 'e', '%e%', 21])
           return {
             rows: [
               {
@@ -1988,7 +1989,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
 
     const response = await request(app)
-      .get('/api/multitable/sheets/sheet_ops/form-share-candidates')
+      .get('/api/multitable/sheets/sheet_ops/form-share-candidates?q=e')
       .expect(200)
 
     expect(response.body.data).toEqual({
@@ -2040,7 +2041,10 @@ describe('Multitable sheet-scoped permissions API', () => {
       ],
       total: 4,
       limit: 20,
-      query: '',
+      query: 'e',
+      hasMore: false,
+      requiresQuery: false,
+      minQueryLength: 1,
     })
   })
 

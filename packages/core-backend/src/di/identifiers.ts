@@ -421,10 +421,15 @@ export interface ICommentService {
     updateComment(commentId: string, userId: string, data: CommentUpdateInput): Promise<CommentRecord>;
     deleteComment(commentId: string, userId: string): Promise<void>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
+    /**
+     * #5795: bounded — a term is required (term-less ⇒ empty, no query), the term is a literal
+     * substring, at most MENTION_CANDIDATES_MAX_ITEMS + 1 rows come back, and there is deliberately
+     * NO `total` (it used to be a deployment-wide active-user count).
+     */
     listMentionCandidates(
       spreadsheetId: string,
       options?: { q?: string; limit?: number },
-    ): Promise<{ items: CommentMentionCandidate[]; total: number }>;
+    ): Promise<{ items: CommentMentionCandidate[] }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
     /** @deprecated Use `getUnreadSummary()` for richer unread data. */
     getUnreadCount(userId: string): Promise<number>;

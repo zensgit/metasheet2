@@ -43,6 +43,14 @@
         role="listbox"
         :aria-label="l('comment.mentionSuggestionsAria')"
       >
+        <!-- #5795: the mention search is server-side and refuses a term-less roster. A bare `@` gets the
+             `requiresQuery` marker back: a prompt, not an empty result. -->
+        <div
+          v-if="showMentionSearchHint"
+          class="meta-comment-composer__suggestion-hint"
+          data-test="comment-mention-search-required"
+          aria-live="polite"
+        >{{ l('comment.mentionTypeToSearch') }}</div>
         <button
           v-for="suggestion in filteredSuggestions"
           :key="suggestion.id"
@@ -67,9 +75,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
-import type { MetaCommentMentionSuggestion } from '../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion } from '../types'
 import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
 // Disclosed real coupling (S3a): the submit button still comes from multitable/ui's MtButton —
 // a presentation-only, token-styled design-system primitive with no comment/multitable business
@@ -90,9 +98,17 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   submitLabel?: string
   submitKind?: 'send' | 'save'
+  /**
+   * #5795: server-side mention search supplied by the host (the multitable workbench). When present,
+   * the `@query` being typed is sent to it (debounced) and its answer is merged ahead of the static
+   * `suggestions`; a term-less `@` renders the "type to search" hint the server's `requiresQuery`
+   * marker asks for. When absent (approval comments) the static list behaves exactly as before.
+   */
+  mentionSearch?: MetaCommentMentionSearch | null
 }>(), {
   suggestions: () => [],
   initialMentions: () => [],
+  mentionSearch: null,
   submitting: false,
   disabled: false,
   placeholder: 'Add a comment...',
@@ -114,20 +130,101 @@ const l = (key: MetaCommentLabelKey) => commentLabel(key, isZh.value)
 const mentionMatch = computed(() => props.modelValue.match(/(?:^|\s)@([^\s@]*)$/))
 const mentionQuery = computed(() => mentionMatch.value?.[1] ?? '')
 
+// #5795 server-side mention search state. `remoteQuery` is the (trimmed) term `remoteSuggestions`
+// answer; while a newer term is in flight the older answer is still shown, narrowed client-side.
+const MENTION_SEARCH_DEBOUNCE_MS = 150
+const remoteSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const remoteQuery = ref<string | null>(null)
+const remoteRequiresQuery = ref(false)
+let mentionSearchSeq = 0
+let mentionSearchTimer: ReturnType<typeof setTimeout> | null = null
+
 const filteredSuggestions = computed(() => {
   const query = mentionQuery.value.trim().toLowerCase()
-  const available = props.suggestions.filter((suggestion) => !selectedMentions.value.some((item) => item.id === suggestion.id))
-  if (!query) return available.slice(0, 6)
-  return available.filter((suggestion) => {
+  const matchesQuery = (suggestion: MetaCommentMentionSuggestion) => {
     return suggestion.label.toLowerCase().includes(query) || suggestion.id.toLowerCase().includes(query)
-  }).slice(0, 6)
+  }
+  // The server already matched the CURRENT term (name / email / id), so its answer is not re-filtered:
+  // an email-only match must not vanish client-side. A stale answer is narrowed like the static list
+  // (and dropped entirely under a bare `@`, where it would otherwise show unfiltered).
+  const remoteIsCurrent = remoteQuery.value !== null && remoteQuery.value.toLowerCase() === query
+  const remote = remoteIsCurrent
+    ? remoteSuggestions.value
+    : query ? remoteSuggestions.value.filter(matchesQuery) : []
+  const local = query ? props.suggestions.filter(matchesQuery) : props.suggestions
+  const seen = new Set<string>()
+  return [...remote, ...local]
+    .filter((suggestion) => {
+      if (seen.has(suggestion.id)) return false
+      seen.add(suggestion.id)
+      return !selectedMentions.value.some((item) => item.id === suggestion.id)
+    })
+    .slice(0, 6)
 })
+
+const showMentionSearchHint = computed(() => (
+  Boolean(props.mentionSearch)
+  && Boolean(mentionMatch.value)
+  && remoteRequiresQuery.value
+  && remoteQuery.value === mentionQuery.value.trim()
+))
 
 const showSuggestions = computed(() => {
   if (!props.modelValue.trim()) return false
   if (props.disabled || props.submitting) return false
   if (suggestionsDismissed.value) return false
-  return Boolean(mentionMatch.value) && filteredSuggestions.value.length > 0
+  return Boolean(mentionMatch.value) && (filteredSuggestions.value.length > 0 || showMentionSearchHint.value)
+})
+
+function resetMentionSearch() {
+  mentionSearchSeq += 1
+  remoteSuggestions.value = []
+  remoteQuery.value = null
+  remoteRequiresQuery.value = false
+}
+
+async function runMentionSearch(search: MetaCommentMentionSearch, query: string) {
+  const seq = ++mentionSearchSeq
+  try {
+    const result = await search(query)
+    if (seq !== mentionSearchSeq) return
+    remoteSuggestions.value = Array.isArray(result?.items) ? result.items : []
+    remoteRequiresQuery.value = result?.requiresQuery === true
+    remoteQuery.value = query
+  } catch {
+    if (seq !== mentionSearchSeq) return
+    remoteSuggestions.value = []
+    remoteRequiresQuery.value = false
+    remoteQuery.value = query
+  }
+}
+
+watch(
+  () => (props.mentionSearch && mentionMatch.value ? mentionQuery.value.trim() : null),
+  (query) => {
+    if (mentionSearchTimer !== null) {
+      clearTimeout(mentionSearchTimer)
+      mentionSearchTimer = null
+    }
+    const search = props.mentionSearch
+    if (query === null || !search) {
+      resetMentionSearch()
+      return
+    }
+    mentionSearchTimer = setTimeout(() => {
+      mentionSearchTimer = null
+      void runMentionSearch(search, query)
+    }, MENTION_SEARCH_DEBOUNCE_MS)
+  },
+  // A draft restored/edited with a trailing `@term` searches on mount too (the static list already
+  // shows suggestions for such a draft on mount).
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  if (mentionSearchTimer !== null) clearTimeout(mentionSearchTimer)
+  mentionSearchTimer = null
+  mentionSearchSeq += 1
 })
 
 const submitButtonLabel = computed(() => {
@@ -144,7 +241,7 @@ const activeSuggestion = computed(() => {
 const activeSuggestionId = computed(() => activeSuggestion.value?.id ?? null)
 
 const composerHint = computed(() => (
-  showSuggestions.value ? l('comment.hintWithMention') : l('comment.hintBase')
+  showSuggestions.value && filteredSuggestions.value.length > 0 ? l('comment.hintWithMention') : l('comment.hintBase')
 ))
 
 watch(
@@ -310,6 +407,7 @@ function submit() {
 .meta-comment-composer__suggestion:hover { background: #f8fafc; }
 .meta-comment-composer__suggestion--active { background: #eff6ff; }
 .meta-comment-composer__suggestion small { color: #64748b; }
+.meta-comment-composer__suggestion-hint { padding: 8px 10px; color: #64748b; font-size: 12px; }
 .meta-comment-composer__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .meta-comment-composer__hint { color: #6b7280; font-size: 12px; }
 /* .meta-comment-composer__submit: the submit control is now <MtButton variant="primary"> (token-styled

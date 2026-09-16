@@ -262,12 +262,12 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
         userRow({ id: 'user_alice', name: 'Alice Smith', email: 'alice@example.com' }),
         userRow({ id: 'user_alan', name: 'Alan Doe', email: 'alan@example.com' }),
       ]
-      qFirst({ c: 2 })      // count query
-      qExec(candidates)     // rows query
+      qExec(candidates)     // rows query (#5795: no COUNT query any more)
 
       const result = await svc.listMentionCandidates('sheet_a', { q: 'al', limit: 10 })
 
-      expect(result.total).toBe(2)
+      // #5795: the deployment-wide `total` is gone — only the page itself comes back.
+      expect(result).not.toHaveProperty('total')
       expect(result.items).toHaveLength(2)
       // label maps to name when available
       expect(result.items[0].label).toBe('Alice Smith')
@@ -277,32 +277,32 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       const candidates = [
         userRow({ id: 'user_bob', name: 'Bob Jones', email: 'bob@company.io' }),
       ]
-      qFirst({ c: 1 })
       qExec(candidates)
 
       const result = await svc.listMentionCandidates('sheet_a', { q: 'company.io' })
 
-      expect(result.total).toBe(1)
+      expect(result).not.toHaveProperty('total')
       expect(result.items[0].id).toBe('user_bob')
     })
 
-    it('returns empty array for blank/whitespace query', async () => {
-      // blank query: all active users; service returns them normally
-      qFirst({ c: 0 })
-      qExec([])
+    it('returns empty array for blank/whitespace query WITHOUT querying (#5795: a term is required)', async () => {
+      // Before #5795 a blank query returned the first page of ALL active users. It now returns
+      // nothing and issues no query: the queued row below must still be in the queue afterwards.
+      qExec([userRow({ id: 'user_should_not_ship', name: 'Fake Person', email: 'fake@example.invalid' })])
 
-      const result = await svc.listMentionCandidates('sheet_a', { q: '' })
+      const blank = await svc.listMentionCandidates('sheet_a', { q: '' })
+      const whitespace = await svc.listMentionCandidates('sheet_a', { q: '   ' })
 
-      expect(result.total).toBe(0)
-      expect(result.items).toHaveLength(0)
+      expect(blank.items).toHaveLength(0)
+      expect(whitespace.items).toHaveLength(0)
+      expect(queueExec).toHaveLength(1)
     })
 
     it('respects limit parameter — returns at most limit candidates', async () => {
-      // Simulate service returning exactly `limit` items even if total > limit
+      // Simulate the DB returning exactly `limit` rows
       const candidates = Array.from({ length: 5 }, (_, i) =>
         userRow({ id: `user_${i}`, name: `User ${i}`, email: `u${i}@example.com` }),
       )
-      qFirst({ c: 20 })
       qExec(candidates)
 
       const result = await svc.listMentionCandidates('sheet_a', { q: 'user', limit: 5 })
@@ -314,7 +314,6 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       const candidates = [
         userRow({ id: 'user_carol', name: 'Carol White', email: 'carol@example.com' }),
       ]
-      qFirst({ c: 1 })
       qExec(candidates)
 
       const result = await svc.listMentionCandidates('sheet_a', { q: 'carol' })
@@ -330,7 +329,6 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       const candidates = [
         userRow({ id: 'user_dave', name: 'Dave Brown', email: 'dave@example.com' }),
       ]
-      qFirst({ c: 1 })
       qExec(candidates)
 
       const result = await svc.listMentionCandidates('sheet_a', { q: 'dave' })
@@ -346,7 +344,6 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
       const candidates = [
         userRow({ id: 'user_eve', name: 'eve@example.com', email: 'eve@example.com' }),
       ]
-      qFirst({ c: 1 })
       qExec(candidates)
 
       const result = await svc.listMentionCandidates('sheet_a', { q: 'eve' })
@@ -357,7 +354,7 @@ describe('Week-2 collab UX integration — collab-ux-flow', () => {
 
     it('returns empty list when spreadsheetId is blank', async () => {
       const result = await svc.listMentionCandidates('   ')
-      expect(result.total).toBe(0)
+      expect(result).not.toHaveProperty('total')
       expect(result.items).toHaveLength(0)
     })
   })
