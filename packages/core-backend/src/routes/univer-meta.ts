@@ -169,11 +169,10 @@ import { checkDisplayNameHygiene } from '../multitable/display-name-hygiene'
 import {
   SHEET_DELETED_CODE,
   SHEET_DELETED_MESSAGE,
-  SHEET_NOT_FOUND_MESSAGE,
   SheetNotLiveError,
   assertSheetLive,
-  type SheetLiveness,
 } from '../multitable/sheet-liveness'
+import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -4443,34 +4442,10 @@ async function tryResolveView(
   )
 }
 
-function sendForbidden(res: Response, message = 'Insufficient permissions') {
-  return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
-}
-
-/**
- * SHEET LIVENESS refusal — the 404 that soft delete made necessary.
- *
- * The hard delete was safe by construction: the row and (by FK cascade) every `meta_records` row were
- * gone, so a path that addressed records by `sheet_id` and never joined `meta_sheets` still found
- * nothing. Soft delete removed that guarantee — a deleted sheet stays fully addressable to anyone
- * holding its id — so every sheet-addressed path now refuses explicitly.
- *
- * 404, not 403: the actor's authority is not the problem; there is no live sheet to act on.
- * `SHEET_DELETED` is distinct from `NOT_FOUND` so a client can offer the restore instead of
- * reporting a phantom.
- */
-/**
- * VALUES-FREE by construction: this helper takes NO sheet id, so it cannot echo one. That is
- * deliberate rather than conventional — the #L5-wire no-leak golden pins that a refusal never pastes
- * the requested id back (an owner fix on 2026-08-25 removed exactly that from the checkpoint route,
- * and my first version re-introduced it). Not having the value is the only way not to leak it.
- */
-function sendSheetNotLive(res: Response, liveness: SheetLiveness) {
-  if (liveness === 'deleted') {
-    return res.status(404).json({ ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } })
-  }
-  return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
-}
+// `sendForbidden` / `sendSheetNotLive` USED TO BE DEFINED HERE, module-private, and were hand-copied
+// into every new sheet-addressed route (routes/automation.ts most recently, #5779). Both now come
+// from multitable/sheet-refusals.ts so the copies cannot drift: the refusal SHAPE is a client
+// contract (clients switch on `error.code`), not a per-file detail. Call sites are unchanged.
 
 // ── F21: display-name rename (sheet + base) ────────────────────────────────────
 // The delivery contract (§12/§15 of the multitable application model) says display names are the
