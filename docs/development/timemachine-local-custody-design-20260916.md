@@ -83,3 +83,35 @@ Root/path protection assumes no hostile same-UID/root process. Failed publicatio
 may leave an encrypted orphan after filesystem/root failure, but must not return
 success or destroy a previous package; cleanup must not traverse a replaced root.
 Catalog/object/custody application recovery and startup composition remain pending.
+
+## Next bounded integration: explicit assurance admission
+
+Compatibility review at `0d063ab7d2e457314fffabf4c8407e2c2273e4c8` confirms
+that local admission can preserve the existing format-v1 wire bytes and validation.
+This is an implementation plan, not evidence that integration is already present.
+LC-1 through LC-6 remain approved; no additional activation authority is inferred.
+
+- Keep the existing KMS adapter type and callers intact. Extract common operations,
+  and accept an opaque local capability as a separate discriminated input.
+- Mint local capabilities only from a real unlocked session, bound to an explicit
+  expected custody UUID supplied out-of-band. Runtime identity must be unforgeable
+  by copying fields. Lock/re-unlock or custody replacement must revoke stale admission.
+- Use canonical `local-v1:<custody-uuid>:<key-uuid>` key IDs. The existing manifest
+  contract accepts opaque nonblank key IDs and authenticates them in AAD/root/MAC.
+  Do not add envelope fields or modify domains, canonical ordering or old key IDs.
+- Resolve the selected capability only inside the transaction-guarded custody path;
+  retain every per-call transaction check, result validation and buffer cleanup.
+  Never select or probe a provider from an unverified manifest key ID.
+- Production must compare the requested local key with the session's active key.
+  Actual-DEK fingerprints stay independent of wrapping version and custody identity.
+- Bound source changes to crypto, local custody, application, preview, reader and
+  authenticated-manifest modules, plus focused tests. No standard-startup changes.
+
+Required negatives: forged/copied capability, wrong expected custody, locked or
+revoked session, noncanonical/local cross-custody key IDs, inactive production key,
+transaction refusal and KMS/local mismatch. Required positives: unchanged legacy
+KMS tests, real local seal/authenticate/read chain, retained old-key read after
+rotation, stable fingerprint and unchanged format-v1 canonical output rules.
+
+Sol high independently reviewed this compatibility plan read-only; it did not run
+tests or approve an implementation. This plan does not close full recovery acceptance.
