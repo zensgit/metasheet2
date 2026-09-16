@@ -222,19 +222,6 @@ function sendFailClosedResolutionError(
 }
 
 /**
- * AutomationService.testRun's rule gate throws a plain Error (`Rule <id> not found or not enabled`)
- * rather than a typed rejection, and automation-service.ts is out of this change's scope. Match that
- * exact sentence shape — anchored on both ends — so a deeper "... not found" (a missing view, field
- * or target record inside the simulated plan) is NOT reclassified as a missing rule; those stay a
- * values-free 500.
- */
-function isTestRunRuleNotFoundError(err: unknown): boolean {
-  return err instanceof Error
-    && !(err instanceof AutomationTestRunRejectedError)
-    && /^Rule .+ not found or not enabled$/s.test(err.message)
-}
-
-/**
  * Transient-DB classification for a failure thrown out of `svc.testRun` ONLY.
  *
  * Unlike the permission/sample-record reads above, testRun runs the simulated planner and real
@@ -887,21 +874,19 @@ export function createAutomationRoutes(
       const response = redactAutomationExecutionForResponse(execution)
       return res.json({ ...response, dryRun: rawMode !== 'real_fire' })
     } catch (err) {
+      // Typed rejections carry a fixed, values-free message chosen by the service, and pass through
+      // with their status and code. That includes the rule gate (no rule / rule of another sheet /
+      // disabled rule → one 404 TEST_RUN_RULE_NOT_FOUND, not an oracle for rule ids or the owning
+      // sheet) and the service's own liveness refusal (404 SHEET_DELETED, the same body as the check
+      // above) for a sheet deleted after that check. Refusals are recognised by TYPE, never by text.
       if (err instanceof AutomationTestRunRejectedError) {
         return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message } })
       }
-      // Values-free for BOTH modes: the thrown message may carry the rule id or a raw DB error
-      // (host/user/SQL), so it is only CLASSIFIED here, never echoed. The service's rule gate
-      // (no rule / rule of another sheet / disabled rule) is one refusal with one fixed body, so it
-      // is not an oracle for rule ids or the owning sheet.
-      if (isTestRunRuleNotFoundError(err)) {
-        return res.status(404).json({
-          ok: false,
-          error: { code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
-        })
-      }
-      // Code-only DB-not-ready → 503 (no English prose matching — planner/executor errors say
+      // Anything else is values-free for BOTH modes: the thrown message may carry the rule id or a
+      // raw DB error (host/user/SQL), so it is only CLASSIFIED here, never echoed. Code-only
+      // DB-not-ready → 503 (no English prose matching — planner/executor errors say
       // "unavailable"/"does not exist" about targets), else 500. Same fixed bodies as elsewhere.
+      // A plain Error — even one that reads like the rule gate — is a 500 here.
       const transient = isTestRunTransientDbError(err)
       return res.status(transient ? 503 : 500).json({
         ok: false,

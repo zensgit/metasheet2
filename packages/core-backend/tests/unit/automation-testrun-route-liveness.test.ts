@@ -4,14 +4,25 @@
  *   1. capability → liveness, in that order: a soft-deleted (or absent) sheet refuses BOTH modes
  *      with the shared sheet-refusals body, before the sample-record read and before testRun; an
  *      unauthorized caller gets the same 403 whether the sheet is live or deleted (no oracle).
- *   2. failures are values-free: the service's rule gate maps to a fixed 404
- *      TEST_RUN_RULE_NOT_FOUND, anything else to a fixed 503/500 — the thrown text never reaches
- *      the client.
+ *   2. failures are values-free: the service's TYPED rejections (rule gate 404
+ *      TEST_RUN_RULE_NOT_FOUND, service-side 404 SHEET_DELETED) pass through with their fixed
+ *      message; anything else — including a plain Error that reads like the rule gate — is a fixed
+ *      503/500, and the thrown text never reaches the client.
+ *   3. #5812 follow-up, through the REAL service: a missing / other-sheet / disabled rule answers one
+ *      identical 404, and a sheet deleted after the route's liveness check is refused by the service
+ *      with the route's own SHEET_DELETED body.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
+import {
+  AutomationService,
+  AutomationTestRunRejectedError,
+  TEST_RUN_RULE_NOT_FOUND_CODE,
+  TEST_RUN_RULE_NOT_FOUND_MESSAGE,
+} from '../../src/multitable/automation-service'
+import { EventBus } from '../../src/integration/events/event-bus'
 import { SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE, SHEET_NOT_FOUND_MESSAGE } from '../../src/multitable/sheet-liveness'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -148,21 +159,32 @@ describe('#5803 follow-up — test-run route values-free failures', () => {
     allowSampleRecord()
   })
 
-  const RULE_GATE_MESSAGE = 'Rule rule-secret-7f3a not found or not enabled'
-
   for (const [label, body] of [['simulate', SIMULATE], ['real_fire', REAL_FIRE]] as const) {
-    it(`maps the service rule gate to a fixed 404 for ${label} without echoing the thrown text`, async () => {
+    for (const [code, message] of [
+      [TEST_RUN_RULE_NOT_FOUND_CODE, TEST_RUN_RULE_NOT_FOUND_MESSAGE],
+      [SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE],
+    ] as const) {
+      it(`passes the service's typed ${code} rejection through for ${label} with its code and fixed message`, async () => {
+        const svc = makeService()
+        svc.testRun.mockRejectedValue(new AutomationTestRunRejectedError(404, code, message))
+        pinned.setApp(buildApp(svc))
+
+        const res = await request(pinned.url()).post(URL_PATH).send(body)
+
+        expect(res.status).toBe(404)
+        expect(res.body).toEqual({ ok: false, error: { code, message } })
+      })
+    }
+
+    it(`no longer recognises the rule gate by its text for ${label}: a plain Error with that sentence is a fixed 500`, async () => {
       const svc = makeService()
-      svc.testRun.mockRejectedValue(new Error(RULE_GATE_MESSAGE))
+      svc.testRun.mockRejectedValue(new Error('Rule rule-secret-7f3a not found or not enabled'))
       pinned.setApp(buildApp(svc))
 
       const res = await request(pinned.url()).post(URL_PATH).send(body)
 
-      expect(res.status).toBe(404)
-      expect(res.body).toEqual({
-        ok: false,
-        error: { code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
-      })
+      expect(res.status).toBe(500)
+      expect(res.body).toEqual({ ok: false, error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
       expect(JSON.stringify(res.body)).not.toContain('rule-secret-7f3a')
     })
 
@@ -255,4 +277,95 @@ describe('#5803 follow-up — test-run route values-free failures', () => {
     expect(res.status).toBe(500)
     expect(res.body).toEqual({ ok: false, error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
   })
+})
+
+describe('#5812 follow-up — test-run route through the REAL service', () => {
+  const LIVENESS_BATCH_SQL = /SELECT\s+id,\s*deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*ANY/i
+
+  function ruleRow(over: Record<string, unknown> = {}) {
+    return {
+      id: 'rule-1',
+      sheet_id: 'sheet-a',
+      name: 'Rule',
+      trigger_type: 'record.created',
+      trigger_config: {},
+      action_type: 'record_click',
+      action_config: {},
+      enabled: true,
+      created_at: '2026-09-01T00:00:00.000Z',
+      updated_at: '2026-09-01T00:00:00.000Z',
+      created_by: 'u_author',
+      ...over,
+    }
+  }
+
+  /** getRule() reads through the Kysely chain; the rule row (or none) is what it finds. */
+  function realService(rule: Record<string, unknown> | undefined, sheetDeletedInService: boolean) {
+    const chain: Record<string, unknown> = {}
+    for (const method of ['selectAll', 'where', 'orderBy']) chain[method] = vi.fn(() => chain)
+    chain.execute = vi.fn(async () => (rule ? [rule] : []))
+    chain.executeTakeFirst = vi.fn(async () => rule)
+    const db = { selectFrom: vi.fn(() => chain) }
+    // The rule's OWN sheet id is the only one that should ever come back "deleted" here: a query for
+    // any other id (e.g. a mutant asking about `rule.sheet_id + '_other'`) must read as live, so a
+    // wrong-id query lets the run proceed and the assertions below catch it.
+    const gatedSheetId = rule?.sheet_id as string | undefined
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (LIVENESS_BATCH_SQL.test(sql)) {
+        const ids = (params?.[0] ?? []) as string[]
+        return {
+          rows: ids.map((id) => ({
+            id,
+            deleted_at: sheetDeletedInService && id === gatedSheetId ? '2026-09-16T00:00:00.000Z' : null,
+          })),
+          rowCount: ids.length,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const svc = new AutomationService(new EventBus(), db as never, query as never)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const executeRule = vi.spyOn(svc as any, 'executeRule')
+    return { svc, executeRule }
+  }
+
+  beforeEach(() => {
+    resolveSheetCapabilities.mockReset()
+    requireRecordReadable.mockReset()
+    poolQuery.mockReset()
+    // The route's own liveness check sees a LIVE sheet: the service is the layer under test.
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
+    allowSampleRecord()
+  })
+
+  for (const [label, body] of [['simulate', SIMULATE], ['real_fire', REAL_FIRE]] as const) {
+    it(`answers a missing, an other-sheet and a disabled rule identically for ${label}`, async () => {
+      const answers: Array<{ status: number; body: unknown }> = []
+      for (const rule of [undefined, ruleRow({ sheet_id: 'sheet-b' }), ruleRow({ enabled: false })]) {
+        const { svc, executeRule } = realService(rule, false)
+        pinned.setApp(buildApp(svc))
+        const res = await request(pinned.url()).post(URL_PATH).send(body)
+        answers.push({ status: res.status, body: res.body })
+        expect(executeRule).not.toHaveBeenCalled()
+      }
+      expect(answers[0]).toEqual({
+        status: 404,
+        body: { ok: false, error: { code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' } },
+      })
+      expect(answers[1]).toEqual(answers[0])
+      expect(answers[2]).toEqual(answers[0])
+      expect(JSON.stringify(answers)).not.toMatch(/rule-1|sheet-b/)
+    })
+
+    it(`refuses a sheet deleted after the route check for ${label} with the route's SHEET_DELETED body`, async () => {
+      const { svc, executeRule } = realService(ruleRow(), true)
+      pinned.setApp(buildApp(svc))
+
+      const res = await request(pinned.url()).post(URL_PATH).send(body)
+
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual({ ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } })
+      expect(executeRule).not.toHaveBeenCalled()
+    })
+  }
 })
