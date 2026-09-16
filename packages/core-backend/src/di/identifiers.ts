@@ -416,6 +416,16 @@ export interface CommentUnreadSummary {
     mentionUnreadCount: number;
 }
 
+/**
+ * #5831 — where a comment lives: the only columns a comment-id-addressed route needs to decide WHICH
+ * sheet gate applies (and, for resolve, who wrote it). Immutable after create; no content.
+ */
+export interface CommentAddressRecord {
+    spreadsheetId: string;
+    rowId: string;
+    authorId: string;
+}
+
 export interface ICommentService {
     setCommentTargetReadChecker(checker: (input: { spreadsheetId: string; rowId: string; userId: string }) => Promise<boolean>): void;
     /**
@@ -454,6 +464,12 @@ export interface ICommentService {
      * and mention-specific unread count in a single call.
      */
     getUnreadSummary(userId: string): Promise<CommentUnreadSummary>;
+    /**
+     * #5831 — the sheet, row and author of one comment, or null when no comment has this id. Reads
+     * nothing else (no content, no sheet data); the comment-id routes call it BEFORE their sheet gate
+     * to learn which sheet to gate on.
+     */
+    getCommentAddress(commentId: string): Promise<CommentAddressRecord | null>;
     markCommentRead(commentId: string, userId: string): Promise<void>;
     /**
      * Add an emoji reaction by `userId` to a comment (B6). Idempotent: re-adding

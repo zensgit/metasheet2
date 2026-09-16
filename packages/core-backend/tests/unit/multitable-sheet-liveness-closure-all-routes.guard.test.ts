@@ -150,6 +150,9 @@ const DELEGATED_GUARDS: Record<string, { helper: string; delegated: string; wiri
 const PRE_GATE_CALLS: Record<string, string> = {
   applyBurstLimiter: 'per-caller AI rate limiting (multitable-ai.ts) — consumes a burst token, touches no sheet data',
   resolveBulkJobForActor: 'the caller’s OWN job header (multitable-ai.ts; owner + cross-sheet 404) — reads no record',
+  getCommentAddress: 'WHICH sheet a comment-id route must gate on (#5831; comments.ts resolveCommentIdContext only) — '
+    + 'CommentService.getCommentAddress reads the three addressing columns of one meta_comments row by id, no content and '
+    + 'no sheet data (both asserted in "COMMENT-ID ROUTES")',
 }
 
 function resolveImport(fromFile: string, specifier: string): string | null {
@@ -297,7 +300,15 @@ const commentServiceUnfiltered = (method: string) => {
   return code.length > 0 && !/deleted_at|resolveReadableSheetIds|readableSheetIds|resolveSheet\w*Capabilities/.test(code)
 }
 
-const noSheetGate = (h: RouteHandler) => !/\b(resolveCommentReadContext|resolveSheet\w*Capabilities|loadSheetLiveness)\b/.test(everything(h))
+/** #5831 part A: the `:commentId` routes of comments.ts, each gated on the comment's own sheet. */
+const COMMENT_ID_ROUTES = [
+  'PATCH /api/comments/:commentId',
+  'DELETE /api/comments/:commentId',
+  'POST /api/comments/:commentId/read',
+  'POST /api/comments/:commentId/reactions',
+  'DELETE /api/comments/:commentId/reactions',
+  'POST /api/comments/:commentId/resolve',
+]
 
 const COVERED: Record<string, CoveredFile> = {
   'routes/api-tokens.ts': {
@@ -344,7 +355,8 @@ const COVERED: Record<string, CoveredFile> = {
   },
   'routes/comments.ts': {
     minHandlers: 18,
-    minInScope: 10,
+    // 10 sheet-addressed + the 6 comment-id routes, which gate on the comment's own sheet (#5831 part A).
+    minInScope: 16,
     exempt: {},
     behaviourTest: 'comment-routes-sheet-liveness.test.ts',
     unaddressed: {
@@ -362,37 +374,6 @@ const COVERED: Record<string, CoveredFile> = {
             + 'comments across ALL sheets with no per-sheet read filter and no deleted-sheet filter — the same '
             + 'residual as the inbox (asserted still unfiltered).',
           stillTrue: (h) => /\bcommentService\.getUnreadSummary\(/.test(h.code) && commentServiceUnfiltered('getUnreadSummary'),
-        },
-        'PATCH /api/comments/:commentId': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): the service finds the comment by id and checks `
-            + 'only authorship, never the comment’s sheet — no per-sheet read gate and no liveness, so an author can '
-            + 'still edit a comment on a soft-deleted sheet.',
-          stillTrue: noSheetGate,
-        },
-        'DELETE /api/comments/:commentId': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): authorship only, never the comment’s sheet — `
-            + 'an author can still delete a comment on a soft-deleted sheet.',
-          stillTrue: noSheetGate,
-        },
-        'POST /api/comments/:commentId/read': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): marks a read receipt by comment id for any `
-            + 'comments:read holder, without resolving the comment’s sheet (no read gate, no liveness).',
-          stillTrue: noSheetGate,
-        },
-        'POST /api/comments/:commentId/reactions': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): adds a reaction by comment id for any `
-            + 'comments:write holder, without resolving the comment’s sheet (no read gate, no liveness).',
-          stillTrue: noSheetGate,
-        },
-        'DELETE /api/comments/:commentId/reactions': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): removes the caller’s reaction by comment id `
-            + 'without resolving the comment’s sheet (no read gate, no liveness).',
-          stillTrue: noSheetGate,
-        },
-        'POST /api/comments/:commentId/resolve': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): resolves ANY comment by id for any `
-            + 'comments:write holder — no authorship check, no read gate, no liveness.',
-          stillTrue: noSheetGate,
         },
       },
     },
@@ -1180,7 +1161,8 @@ describe('sheet-liveness closure over EVERY route file', () => {
       ...Object.entries(OPAQUE_REGISTRATIONS).flatMap(([file, entries]) => Object.entries(entries).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e])),
     ]
     expect(reasons.flatMap(([key, entry]) => reasonProblems(key, entry))).toEqual([])
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(15)
+    // 12 since #5831 part A closed the six comment-id GAPs (they are GUARDED now, see COMMENT-ID ROUTES).
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(12)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
@@ -1328,6 +1310,64 @@ describe('sheet-liveness closure over EVERY route file', () => {
       const text = readFileSync(join(__dirname, config.behaviourTest!), 'utf8')
       expect(text, `${config.behaviourTest} must assert its route table against the scan`).toContain(`sheetAddressedRouteKeys('${file}')`)
     }
+  })
+
+  it('COMMENT-ID ROUTES (#5831): gated on the comment’s OWN sheet, through one pre-gate lookup that reads only the comment’s address', () => {
+    const file = 'routes/comments.ts'
+    const s = scan(file)
+    // Population: exactly these routes are addressed by comment id, and each one is GUARDED by the id gate.
+    const idRoutes = s.handlers.filter((h) => h.paths.some((p) => p.includes(':commentId')))
+    expect(idRoutes.map((h) => h.key).sort()).toEqual([...COMMENT_ID_ROUTES].sort())
+    for (const h of idRoutes) {
+      expect(addressesASheet(h), h.key).toBe(true)
+      expect(guardOf(file, h), h.key).toBe('gate-helper resolveCommentIdContext')
+      expect(analysisOf(file, h).violations, h.key).toEqual([])
+      // The gate is asked about the very id the service then acts on.
+      expect(h.code, h.key).toMatch(/const commentId = req\.params\.commentId;/)
+      expect(h.code, h.key).toMatch(/await resolveCommentIdContext\(req, res, commentService, commentId\)/)
+    }
+
+    // The gate: the comment's stored sheet, never a sheet id from the request; one refusal body for
+    // "no such comment", "may not read its sheet" and "may not read its row".
+    const gate = functionCode(file, 'resolveCommentIdContext')
+    expect(gate).toMatch(/^async function resolveCommentIdContext\([^)]*\)[^{]*\{\s*const address = await commentService\.getCommentAddress\(commentId\);/)
+    expect(gate).toMatch(/await resolveCommentReadContext\(req, res, address\.spreadsheetId\)/)
+    expect(gate).toMatch(/if \(isRowDenied\(context, address\.rowId\)\)/)
+    expect(gate).not.toMatch(/\breq\.(query|body|params)\b|\bsheetId\b/)
+    const readGate = functionCode(file, 'resolveCommentReadContext')
+    const refusals = [...`${gate}\n${readGate}`.matchAll(/res\.status\(403\)\.json\(([^\n]*)\);/g)].map((m) => m[1])
+    expect(refusals).toHaveLength(3)
+    expect(new Set(refusals).size).toBe(1)
+
+    // The pre-gate lookup (PRE_GATE_CALLS.getCommentAddress) is called from that gate only, and reads the
+    // three addressing columns of one meta_comments row by id — nothing else.
+    const callers: string[] = []
+    for (const rel of listSourceFiles()) {
+      const source = readSource(rel)
+      if (!source.includes('getCommentAddress')) continue
+      const sf = scanRouteSource(rel, source).sourceFile
+      for (const call of callSitesNamed(sf, new Set(['getCommentAddress']))) {
+        const owner = findFunctionsNamed(sf, 'resolveCommentIdContext').find((fn) => {
+          const from = sf.getLineAndCharacterOfPosition(fn.getStart(sf)).line + 1
+          const to = sf.getLineAndCharacterOfPosition(fn.getEnd()).line + 1
+          return call.line >= from && call.line <= to
+        })
+        callers.push(`${rel} ${owner ? 'resolveCommentIdContext' : `line ${call.line}`}`)
+      }
+    }
+    expect(callers).toEqual(['routes/comments.ts resolveCommentIdContext'])
+    const lookup = functionCode('services/CommentService.ts', 'getCommentAddress')
+    expect(lookup).toMatch(/\.selectFrom\('meta_comments'\)\s*\.select\(\['spreadsheet_id', 'row_id', 'author_id'\]\)\s*\.where\('id', '=', commentId\)\s*\.executeTakeFirst\(\)/)
+    expect(lookup.match(/\bselectFrom\(/g)).toHaveLength(1)
+    expect(lookup).not.toMatch(/\b(selectAll|join|leftJoin|innerJoin|sql|query|insertInto|updateTable|deleteFrom|content)\b/)
+
+    // Resolve: after the gate, a defined authority (author, or record edit rights) — not any comments:write holder.
+    const resolve = idRoutes.find((h) => h.key === 'POST /api/comments/:commentId/resolve')!
+    expect(resolve.code).toMatch(/if \(!\(await mayResolveComment\(context\)\)\) \{\s*return res\.status\(403\)/)
+    const authority = resolve.helpers.get('mayResolveComment') ?? ''
+    expect(authority).toMatch(/context\.authenticatedUserId/)
+    expect(authority).toMatch(/return ensureRecordWriteAllowed\(context\.capabilities, context\.sheetScope, context\.access, /)
+    expect(authority).not.toMatch(/\bgetUserId\(|x-user-id/)
   })
 
   it('vetted external guards refuse a non-live sheet (their bodies, not their names)', () => {

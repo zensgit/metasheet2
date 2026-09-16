@@ -7,7 +7,9 @@
  * The route table below is pinned to the handlers the all-routes closed-world guard classifies as
  * sheet-addressed in routes/comments.ts (`sheetAddressedRouteKeys`, the scan behind
  * multitable-sheet-liveness-closure-all-routes.guard.test.ts): a route added to that file reds here until
- * it gets a row. The comment-id and cross-sheet routes are not sheet-addressed; the guard names them.
+ * it gets a row. Since #5831 the comment-id routes are sheet-addressed too — they gate on the sheet the
+ * comment lives on (`getCommentAddress` below answers it). The cross-sheet inbox/unread-count routes are
+ * not; the guard names them.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -68,6 +70,8 @@ function buildCommentService() {
     listMentionCandidates: vi.fn(async () => ({ items: [], total: 0 })),
     getInbox: vi.fn(),
     getUnreadSummary: vi.fn(),
+    // #5831: the comment-id routes' comment lives on SHEET, written by the actor.
+    getCommentAddress: vi.fn(async () => ({ spreadsheetId: SHEET, rowId: 'r1', authorId: 'actor-1' })),
     getMentionSummary: vi.fn(async () => ({ items: [] })),
     getCommentPresenceSummary: vi.fn(async () => ({ items: [], total: 0 })),
     createComment: vi.fn(async () => ({ id: 'c-new' })),
@@ -108,6 +112,13 @@ const ROUTES: Array<{ name: string; send: (agent: Agent) => request.Test; servic
   { name: 'GET /api/multitable/:spreadsheetId/mention-candidates', send: (a) => a.get(`/api/multitable/${SHEET}/mention-candidates`).query({ q: 'al' }), service: 'listMentionCandidates', okStatus: 200 },
   { name: 'POST /api/multitable/:spreadsheetId/comments/mark-all-read', send: (a) => a.post(`/api/multitable/${SHEET}/comments/mark-all-read`).send({}), service: 'markAllCommentsRead', okStatus: 200 },
   { name: 'GET /api/multitable/:spreadsheetId/comments/presence', send: (a) => a.get(`/api/multitable/${SHEET}/comments/presence`), service: 'getCommentPresenceSummaryWithViewers', okStatus: 200 },
+  // #5831: addressed by comment id; the gate resolves the comment's sheet (SHEET) first.
+  { name: 'PATCH /api/comments/:commentId', send: (a) => a.patch('/api/comments/c1').send({ content: 'edited' }), service: 'updateComment', okStatus: 200 },
+  { name: 'DELETE /api/comments/:commentId', send: (a) => a.delete('/api/comments/c1'), service: 'deleteComment', okStatus: 204 },
+  { name: 'POST /api/comments/:commentId/read', send: (a) => a.post('/api/comments/c1/read'), service: 'markCommentRead', okStatus: 204 },
+  { name: 'POST /api/comments/:commentId/reactions', send: (a) => a.post('/api/comments/c1/reactions').send({ emoji: '👍' }), service: 'addReaction', okStatus: 201 },
+  { name: 'DELETE /api/comments/:commentId/reactions', send: (a) => a.delete('/api/comments/c1/reactions').send({ emoji: '👍' }), service: 'removeReaction', okStatus: 204 },
+  { name: 'POST /api/comments/:commentId/resolve', send: (a) => a.post('/api/comments/c1/resolve'), service: 'resolveComment', okStatus: 204 },
 ]
 
 const pinned = usePinnedServer()

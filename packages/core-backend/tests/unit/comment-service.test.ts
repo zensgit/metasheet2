@@ -632,6 +632,38 @@ describe('CommentService', () => {
     })
   })
 
+  // ── getCommentAddress (#5831) ─────────────────────────────────────────
+
+  describe('getCommentAddress', () => {
+    async function lastSelectChain() {
+      const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+      const calls = db.selectFrom.mock.calls
+      const results = db.selectFrom.mock.results
+      return { table: calls[calls.length - 1]?.[0], chain: results[results.length - 1]?.value as Record<string, ReturnType<typeof vi.fn>> }
+    }
+
+    it('returns only the sheet, row and author of the comment, read by id', async () => {
+      pushTakeFirst({ spreadsheet_id: 'sheet-9', row_id: 'row-9', author_id: 'user-9' })
+
+      await expect(service.getCommentAddress('cmt_addr')).resolves.toEqual({
+        spreadsheetId: 'sheet-9',
+        rowId: 'row-9',
+        authorId: 'user-9',
+      })
+
+      const { table, chain } = await lastSelectChain()
+      expect(table).toBe('meta_comments')
+      expect(chain.select).toHaveBeenCalledWith(['spreadsheet_id', 'row_id', 'author_id'])
+      expect(chain.selectAll).not.toHaveBeenCalled()
+      expect(chain.where).toHaveBeenCalledTimes(1)
+      expect(chain.where).toHaveBeenCalledWith('id', '=', 'cmt_addr')
+    })
+
+    it('returns null for an unknown comment id', async () => {
+      await expect(service.getCommentAddress('cmt_missing')).resolves.toBeNull()
+    })
+  })
+
   // ── Error classes ─────────────────────────────────────────────────────
 
   describe('error classes', () => {

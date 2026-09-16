@@ -3,6 +3,7 @@ import { sql } from 'kysely'
 import {
   ICollabService,
   ILogger,
+  type CommentAddressRecord,
   type CommentInboxItem,
   type CommentMentionCandidate,
   type CommentPresenceViewer,
@@ -774,6 +775,22 @@ export class CommentService {
       unreadCount: row ? Number((row as { unread_count: string | number }).unread_count) : 0,
       mentionUnreadCount: row ? Number((row as { mention_unread_count: string | number }).mention_unread_count) : 0,
     }
+  }
+
+  /**
+   * #5831 — the comment's sheet, row and author (or null for an unknown id). The comment-id routes
+   * (edit/delete/read/reactions/resolve) call this BEFORE their sheet gate, so it deliberately reads
+   * only these three immutable addressing columns of `meta_comments` by primary key: no content, no
+   * other table. The closure guard pins that shape (PRE_GATE_CALLS).
+   */
+  async getCommentAddress(commentId: string): Promise<CommentAddressRecord | null> {
+    const row = await db
+      .selectFrom('meta_comments')
+      .select(['spreadsheet_id', 'row_id', 'author_id'])
+      .where('id', '=', commentId)
+      .executeTakeFirst()
+    if (!row) return null
+    return { spreadsheetId: row.spreadsheet_id, rowId: row.row_id, authorId: row.author_id }
   }
 
   async markCommentRead(commentId: string, userId: string): Promise<void> {

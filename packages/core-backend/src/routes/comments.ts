@@ -2,14 +2,21 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Injector } from '@wendellhu/redi'
-import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
+import { ICommentService, type CommentAddressRecord, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { poolManager } from '../integration/db/connection-pool'
-import { loadDeniedRecordIds, loadRowLevelReadDenyEnabled, resolveSheetReadableCapabilities } from '../multitable/permission-service'
+import {
+  ensureRecordWriteAllowed,
+  loadDeniedRecordIds,
+  loadRecordCreatorMap,
+  loadRecordPermissionScopeMap,
+  loadRowLevelReadDenyEnabled,
+  resolveSheetReadableCapabilities,
+} from '../multitable/permission-service'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   CommentAccessError,
@@ -131,28 +138,42 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  *
  * SCOPE: this gates the routes that take an explicit `spreadsheetId`/`containerId` (the enumerable,
  * attacker-supplied surface — list/summary/presence/mention-candidates/mention-summary read + create/
- * mark-read/mark-all-read write). NOT gated here (distinct mechanism, tracked as follow-up): the
- * `:commentId`-addressed mutations (patch/delete/read/reactions/resolve — would need a per-comment
- * sheet-id lookup) and the user-scoped cross-sheet `inbox`/`unread-count` aggregates (would need result
- * filtering by the actor's readable-sheet set, not a single-sheet 403).
+ * mark-read/mark-all-read write) and, through `resolveCommentIdContext` (#5831), the `:commentId`-
+ * addressed routes (patch/delete/read/reactions/resolve), which gate on the sheet the COMMENT lives on.
+ * NOT gated here (tracked in #5831, part B): the user-scoped cross-sheet `inbox`/`unread-count`
+ * aggregates (they need result filtering by the actor's readable, live sheet set, not a single-sheet 403).
  */
+type SheetReadableResolution = Awaited<ReturnType<typeof resolveSheetReadableCapabilities>>
+
 type CommentReadContext = {
   userId: string
   /**
    * #5808: the id `resolveRequestAccess` derived from `req.user` ONLY — empty when there is no
    * authenticated user. Unlike `userId` it never falls back to the `x-user-id` header, so it is the
-   * only id allowed to decide whose comments get mention labels.
+   * only id allowed to decide whose comments get mention labels (and, #5831, who counts as a
+   * comment's author when resolving it).
    */
   authenticatedUserId: string
   deniedRowIds: Set<string>
+  /** #5831: the resolved sheet authority, for decisions after the gate (who may resolve). */
+  access: SheetReadableResolution['access']
+  capabilities: SheetReadableResolution['capabilities']
+  sheetScope?: SheetReadableResolution['sheetScope']
 }
+
+/**
+ * The one "not permitted" answer of the comment surface. #5831: a comment-id route gives this SAME body
+ * for an unknown comment id, a comment on a sheet the caller cannot read and a comment on a row the
+ * caller is denied, so a comment id carries no existence oracle.
+ */
+const COMMENT_ACCESS_FORBIDDEN_MESSAGE = 'Not permitted to access comments on this sheet'
 
 async function resolveCommentReadContext(req: Request, res: Response, spreadsheetId: string): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
-  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
+  const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
   if (!capabilities.canRead) {
-    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not permitted to access comments on this sheet' } })
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
     return null
   }
   // Sheet liveness, AFTER the read gate (a caller who may not read the sheet gets the same 403 whether
@@ -172,7 +193,75 @@ async function resolveCommentReadContext(req: Request, res: Response, spreadshee
       deniedRowIds.add(rowId)
     }
   }
-  return { userId: access.userId || getUserId(req), authenticatedUserId: access.userId || '', deniedRowIds }
+  return {
+    userId: access.userId || getUserId(req),
+    authenticatedUserId: access.userId || '',
+    deniedRowIds,
+    access,
+    capabilities,
+    ...(sheetScope ? { sheetScope } : {}),
+  }
+}
+
+type CommentIdContext = CommentReadContext & { address: CommentAddressRecord }
+
+/**
+ * #5831 — the gate of every `:commentId`-addressed route. Those routes name no sheet, so the comment's
+ * OWN sheet (its stored `spreadsheet_id`, never a sheet id from the request) is looked up first and then
+ * put through exactly the sheet-addressed gate above: capability 403, then the liveness 404, then the
+ * row-level read deny.
+ *
+ * NO EXISTENCE ORACLE: an unknown comment id, a comment on a sheet the caller cannot read and a comment
+ * on a row the caller is denied all get the same 403 body. 403 (not 404) because the sheet gate answers a
+ * caller without read access with 403 — and the closed-world guard requires that 403 to come before the
+ * liveness 404 — so an unknown id has to look like that. A caller who CAN read the sheet still learns
+ * that it was deleted (404 SHEET_DELETED), exactly as on the sheet-addressed routes.
+ */
+async function resolveCommentIdContext(
+  req: Request,
+  res: Response,
+  commentService: ICommentService,
+  commentId: string,
+): Promise<CommentIdContext | null> {
+  const address = await commentService.getCommentAddress(commentId)
+  if (!address) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
+    return null
+  }
+  const context = await resolveCommentReadContext(req, res, address.spreadsheetId)
+  if (!context) return null
+  if (isRowDenied(context, address.rowId)) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
+    return null
+  }
+  return { ...context, address }
+}
+
+/**
+ * #5831 — WHO MAY RESOLVE A COMMENT (owner-visible decision): its author, or anyone who may edit the
+ * record the comment is on (the same row-level write decision as a record edit: sheet write authority,
+ * narrowed by an own-records-only sheet grant, widened by a record-level write grant). Holding
+ * `comments:write` and being able to read the sheet is no longer enough to close someone else's thread.
+ * Authorship is matched on the authenticated user only — never the `x-user-id` header. Runs after the
+ * sheet gate, so the caller can already read the comment.
+ */
+async function mayResolveComment(context: CommentIdContext): Promise<boolean> {
+  const actorId = context.authenticatedUserId.trim()
+  if (actorId.length > 0 && context.address.authorId === actorId) return true
+  const pool = poolManager.get()
+  const query = pool.query.bind(pool)
+  const { spreadsheetId, rowId } = context.address
+  const creators = await loadRecordCreatorMap(query, spreadsheetId, [rowId])
+  const recordScopes = await loadRecordPermissionScopeMap(query, spreadsheetId, [rowId], context.access.userId)
+  return ensureRecordWriteAllowed(
+    context.capabilities,
+    context.sheetScope,
+    context.access,
+    creators.get(rowId) ?? null,
+    'edit',
+    recordScopes,
+    rowId,
+  )
 }
 
 /**
@@ -593,6 +682,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       const comment = await commentService.updateComment(commentId, getUserId(req), parsed.data)
       return res.json({ ok: true, data: { comment } })
     } catch (error) {
@@ -608,6 +699,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.deleteComment(commentId, getUserId(req))
       return res.status(204).end()
     } catch (error) {
@@ -623,6 +716,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.markCommentRead(commentId, getUserId(req))
       return res.status(204).end()
     } catch (error) {
@@ -646,6 +741,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.addReaction(commentId, getUserId(req), parsed.data.emoji)
       return res.status(201).json({ ok: true, data: {} })
     } catch (error) {
@@ -665,6 +762,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.removeReaction(commentId, getUserId(req), parsed.data.emoji)
       return res.status(204).end()
     } catch (error) {
@@ -700,6 +799,14 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
+      if (!(await mayResolveComment(context))) {
+        return res.status(403).json({
+          ok: false,
+          error: { code: 'FORBIDDEN', message: 'Only the comment author or someone who can edit this record can resolve this comment' },
+        })
+      }
       await commentService.resolveComment(commentId)
       return res.status(204).end()
     } catch (error) {
