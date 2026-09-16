@@ -101,6 +101,7 @@
                    authoring surface — see CategoryCandidateInput.vue's own doc comment. -->
               <CategoryCandidateInput
                 v-model="categoryDraft"
+                size="small"
                 :placeholder="t.categoryPlaceholder"
                 class="ms-w-240 ms-mr-8"
                 :maxlength="64"
