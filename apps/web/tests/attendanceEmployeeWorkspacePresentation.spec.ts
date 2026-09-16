@@ -144,6 +144,8 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
     expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance__btn--hero')).toBe(true)
     expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance__btn--primary')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance-ew__punch-btn--complete')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.classList.contains('attendance-ew__punch-btn--complete')).toBe(true)
     const metricText = container.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
     expect(metricText).toContain('In09:18')
     expect(metricText).toContain('Out18:02')

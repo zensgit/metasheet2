@@ -719,7 +719,7 @@ const punchEmphasis = computed(() => resolveHeroPunchEmphasis(props.heroTimeline
 const todoMark = computed(() => resolveTodoMark(props.attentionItem.key))
 
 function punchButtonClass(which: 'check_in' | 'check_out'): string {
-  if (punchEmphasis.value === 'complete') return 'attendance-ew__punch-btn--rest'
+  if (punchEmphasis.value === 'complete') return 'attendance-ew__punch-btn--complete'
   return punchEmphasis.value === which
     ? 'attendance-ew__punch-btn--next'
     : 'attendance-ew__punch-btn--rest'
@@ -1552,6 +1552,14 @@ const hasRequestBody = computed(() =>
 .attendance-ew__punch-btn--rest.attendance__btn--primary {
   background: #f2f3f5;
   color: #646a73;
+}
+
+.attendance-ew__punch-btn--complete,
+.attendance-ew__punch-btn--complete.attendance__btn--primary {
+  background: #e8f3ff;
+  border-color: transparent;
+  color: #3370ff;
+  box-shadow: none;
 }
 
 .attendance__hero-timeline-node {
