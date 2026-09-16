@@ -105,6 +105,7 @@ describe('comments routes row-deny gate', () => {
     mocks.resolveSheetReadableCapabilities.mockResolvedValue({
       access: { userId: 'actor-row-denied', isAdminRole: false },
       capabilities: { canRead: true },
+      sheetLiveness: 'live',
     })
     mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
     mocks.loadDeniedRecordIds.mockResolvedValue(new Set(['row-denied']))
@@ -256,6 +257,7 @@ describe('comments list — edit-time mention labels (#5808)', () => {
     mocks.resolveSheetReadableCapabilities.mockResolvedValue({
       access: { userId: 'actor-row-denied', isAdminRole: false },
       capabilities: { canRead: true },
+      sheetLiveness: 'live',
     })
     mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
     mocks.loadDeniedRecordIds.mockResolvedValue(new Set(['row-denied']))
@@ -292,6 +294,7 @@ describe('comments list — edit-time mention labels (#5808)', () => {
     mocks.resolveSheetReadableCapabilities.mockResolvedValue({
       access: { userId: '', isAdminRole: false },
       capabilities: { canRead: true },
+      sheetLiveness: 'live',
     })
     const commentService = buildCommentService()
     pinned.setApp(buildApp(commentService, { noUser: true }))
@@ -320,6 +323,7 @@ describe('comments list — edit-time mention labels (#5808)', () => {
     mocks.resolveSheetReadableCapabilities.mockResolvedValue({
       access: { userId: 'actor-row-denied', isAdminRole: false },
       capabilities: { canRead: false },
+      sheetLiveness: 'live',
     })
     const sheetDenied = await request(pinned.url()).get('/api/comments').query({ spreadsheetId: 'sheet-1' })
     expect(sheetDenied.status).toBe(403)
