@@ -123,3 +123,36 @@ this does not establish production capture or clean-machine catalog import.
 Independent-process restart within the same host is distinct from restoring a
 database backup onto another host. No secret is written into source/evidence:
 the synthetic random recovery secret crosses only private parent/child IPC.
+
+## Current-main Integration Gates
+
+Checkpoint `2a9ae319870d3da2d385c931ab108ffd917da5a0` is a conflict-free
+true merge of `3d7a8b6c946788c583a6012ee1ed2a5d7230df8b` and main
+`d732f62b65f63f93a20114807fa4484fb98d1265`. The new main delta is record-read
+sheet-liveness enforcement and its unit test. No source PR was rewritten.
+
+- Latest-tree focused neighbors: four files / 80 tests PASS, including all nine
+  record-liveness cases. Core typecheck and diff-check PASS.
+- Required-web script: exit 0; all 19 groups PASS, final group 464 files / 7,138
+  tests. Group counts overlap and must not be presented as unique test totals.
+- Six recovery/archive wiring scripts: 101/101 PASS before this merge; their
+  source bytes are unchanged by the merge.
+- Multitable OpenAPI parity: 1/1 PASS. Official OpenAPI build/generation/guard
+  PASS with no tracked generated drift.
+- Full sealed-export S5 chain PASS, including live/frozen provenance comparison.
+- Web app-only `vue-tsc --noEmit -p tsconfig.app.json` PASS with a private
+  temporary build-info file. Full web `type-check` is NOT PASS locally: the
+  shared installed dependencies produce TS2769 in `vite.config.ts(28,29)` from
+  Vite 5/7 plugin type incompatibility. Config and root/web manifests and lockfile
+  are byte-identical to main. No product/config workaround was applied.
+- Missing isolated-worktree CLI dependency entries were supplied using existing
+  ignored dependency links and temporary NODE_PATH; no install or lockfile edit.
+- Terra high read-only integration audit, session
+  `01a0abfe-86a3-7aa2-99db-3224e328a714`: 0 P1 / 0 P2 / 0 P3. It verified web
+  selector union, local-custody unit discovery, whole-file real-DB CI wiring and
+  application lifecycle/admission preservation. Session closed; this is static
+  review, not an additional runtime test.
+
+The prior 40/40 real-DB evidence remains bound to `7dfbec510`, not a fresh DB run
+on this replay. Remote successor exact-head CI is still required; publication
+as Draft/HOLD is not merge approval or a claim of complete product readiness.
