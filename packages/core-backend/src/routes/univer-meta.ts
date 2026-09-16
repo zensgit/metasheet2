@@ -5686,6 +5686,21 @@ async function normalizeFieldWriteInput(
 const loadSheetRow = loadSheetRowShared
 const loadFieldsForSheet = loadFieldsForSheetShared
 
+/**
+ * #5781 — disclosure bounds for GET /sheets/:sheetId/person-fields/:fieldId/directory.
+ *
+ * Ceiling: the SAME 50 the sibling /permission-candidates clamps to (`Math.min(50, ...)`), so the two
+ * roster-shaped reads of this file cannot disclose different volumes.
+ *
+ * Minimum term length: 1. The sibling has NO minimum (its `q` is optional), so there is nothing to
+ * copy; 1 is the smallest bound that removes the zero-effort "open the picker, get the deployment
+ * roster" dump while keeping every search the picker can actually issue — MetaPersonPicker debounces
+ * and re-queries on EVERY keystroke, so a minimum of 2+ would make a legitimate 1-character search
+ * (common for CJK surnames) silently answer nothing.
+ */
+export const PERSON_DIRECTORY_MAX_ITEMS = 50
+export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
+
 async function ensureAttachmentIdsExist(
   query: QueryFn,
   sheetId: string,
@@ -8217,13 +8232,72 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // resolvePersonAssignableDirectory read model for ONE person field — the same allowed set the write
   // validator accepts, hydrated + active-only. Gated on canEditRecord (the picker is used while editing
   // a record's person field), NOT canManageSheetAccess like /permission-candidates.
+  //
+  // #5781 — THIS CHANGE BOUNDS DISCLOSURE ONLY; IT DOES NOT NARROW WHO IS ELIGIBLE.
+  // Plainly: the underlying eligible set is DEPLOYMENT-WIDE, not sheet-scoped. It comes from
+  // loadSheetMemberUserIdSet → listSheetPermissionCandidates, whose `user_candidates` CTE carries the
+  // sheet id only in the LEFT JOIN ON clause and filters on nothing but the search term — so "sheet
+  // members" is really "every active user in the deployment HOLDING A GLOBAL multitable:read/write
+  // grant" (loadCandidateUserEligibilityMap, multitable/permission-service.ts:239-269, consumed at
+  // :584-597 — direct or via a role). In a deployment that puts multitable:read on the generic `user`
+  // role that is effectively everyone, but the predicate is a real one and the earlier unqualified
+  // wording was falsifiable. Before this change, any actor with
+  // canEditRecord on ANY sheet could call this with no search term and receive that whole roster
+  // hydrated to id + name + email, unlimited; the sibling /permission-candidates, which answers the
+  // same shape, requires canManageSheetAccess AND clamps to 50.
+  // So this route now (a) requires a search term of at least PERSON_DIRECTORY_MIN_QUERY_LENGTH ON THE
+  // UNRESTRICTED BRANCH — the one whose allowed set IS that deployment-wide roster — and answers such
+  // a term-less call with an empty list plus `requiresQuery` (a values-free marker the picker renders
+  // as "type to search"), and (b) clamps EVERY answer to PERSON_DIRECTORY_MAX_ITEMS with `hasMore`.
+  // A field carrying restrictToMemberGroupIds keeps its term-less browse: its set is (sheet members ∩
+  // the configured groups), an intersection that can only narrow, and the clamp still applies. See the
+  // gate itself below for why that grants no new capability.
+  // It deliberately leaves the eligible SET alone: that set is shared with the write validator
+  // (createPersonMemberResolver — same file documents the single-source-of-truth contract), so
+  // narrowing it on the read side only would make the picker offer less than a save accepts.
+  // Narrowing the set on BOTH sides (i.e. making listSheetPermissionCandidates actually sheet-scoped)
+  // is tracked separately under #5781 and is NOT done here.
+  //
+  // RESIDUALS this change does NOT close (stated so the next reader does not over-read the bound):
+  //  (1) THE BOUND IS PER REQUEST, NOT AGGREGATE. With a 1-character minimum, a deterministic order
+  //      and no rate limiter or audit row on this route, a scripted actor can still walk the set by
+  //      varying the term ('a'..'z', '0'..'9', then two-character combinations) and reassemble most of
+  //      a few-thousand-user roster in a few hundred calls. What this removes is the ZERO-EFFORT
+  //      one-request dump; the durable fix is still the set-narrowing follow-up named above.
+  //  (2) A PARALLEL, WEAKER-GATED READ OF THE SAME ROSTER REMAINS. GET /api/comments/mention-candidates
+  //      (routes/comments.ts, -> CommentService.listMentionCandidates) answers a TERM-LESS call with up
+  //      to 100 users as label + email subtitle, plus `total` = the deployment-wide active-user count,
+  //      behind rbacGuard('comments','read') (seeded onto the generic `user` role) + sheet read: a
+  //      WIDER set (no permission filter at all) behind a WEAKER gate than this route. Until that
+  //      endpoint gets the same three bounds (require a term, keep the clamp, and drop `total` or
+  //      report the clamped count), the value of this change is limited to the person-picker path --
+  //      do NOT read it as "the roster is now bounded deployment-wide". Widening this PR to touch the
+  //      comments surface was deliberately rejected (different router, different gate, its own tests);
+  //      it is FILED as #5795 with those same three bounds so the two surfaces converge.
+  //      A THIRD surface of the same shape lives in THIS file: GET /sheets/:sheetId/form-share-candidates
+  //      (route further down), gated on canManageFormShareForSheet -> capabilities.canManageViews —
+  //      which multitable/permission-service.ts:1543-1549 grants to ANY holder of a sheet-level
+  //      full-write grant, i.e. exactly the actor shape this route's own tests use. It reads the SAME
+  //      listSheetPermissionCandidates and answers a TERM-LESS call with 20-50 rows of name + email.
+  //      It is already clamped to 50, so it does NOT restore the unlimited dump; what it lacks is the
+  //      "must supply a term" half. Named here so the next reader does not read residual (2) as
+  //      "only the comments surface is left".
+  //  (3) WHERE THE BOUNDS ARE PROVEN. The route-level behaviour is pinned by
+  //      tests/unit/multitable-person-directory-bounded.test.ts (which MOCKS the resolver) and the
+  //      generated SQL by tests/unit/multitable-person-directory-resolver.test.ts (which asserts on the
+  //      SQL STRING). Neither executes that SQL, so the ILIKE predicate, the LIKE-escape convention and
+  //      the `LIMIT $n` are additionally executed against real Postgres in
+  //      tests/integration/multitable-person-member-group-restrict.test.ts (registered in
+  //      plugin-tests.yml, which hard-fails without DATABASE_URL). That lane is the ONLY place the
+  //      DB-side bound is actually run — it cannot run on a developer box without a local Postgres.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
     if (!sheetId || !fieldId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and fieldId are required' } })
     }
-    const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : ''
+    // Case folding now happens in SQL (ILIKE), so keep the term as typed for the echo.
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     try {
       const pool = poolManager.get()
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
@@ -8240,11 +8314,64 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Person field not found: ${fieldId}` } })
       }
 
-      const directory = await resolvePersonAssignableDirectory(pool.query.bind(pool), sheetId, personRestrictGroupIds(field))
-      const items = q
-        ? directory.filter((e) => (e.name ?? '').toLowerCase().includes(q) || (e.email ?? '').toLowerCase().includes(q))
-        : directory
-      return res.json({ ok: true, data: { items, total: items.length, query: q } })
+      // Resolved BEFORE the term gate because the gate only applies to the unrestricted branch (below).
+      const restrictGroupIds = personRestrictGroupIds(field)
+
+      // #5781: no term ⇒ no roster. Answered BEFORE the directory is resolved, so a term-less call
+      // hydrates nothing — no name/email ever leaves the users table for it. Deliberately a 200 with a
+      // values-free marker rather than a 400: MetaPersonPicker opens with an empty search box and
+      // fires this immediately, and a 400 would render as a load FAILURE instead of "type to search".
+      //
+      // The requirement applies ONLY to the unrestricted branch, which is the one that leaks: an
+      // unrestricted field's allowed set IS the deployment-wide roster (see above). A field with
+      // restrictToMemberGroupIds resolves to (sheet members ∩ the explicitly configured groups) — a
+      // strictly narrower, deliberately configured set (person-field-restriction.ts intersects, never
+      // widens) — so it keeps its browse affordance: the picker on a 3-person reviewer group shows the
+      // 3 names instead of making the user guess a first letter. This grants NO new capability: the
+      // same actor can already retrieve up to PERSON_DIRECTORY_MAX_ITEMS rows of that same restricted
+      // set with any one-character term, and the term-less answer is clamped by the same ceiling (so a
+      // huge "All staff" group stays bounded). The gate is narrowed in scope, never in strength.
+      if (restrictGroupIds.length === 0 && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+        return res.json({
+          ok: true,
+          data: {
+            items: [],
+            total: 0,
+            limit: PERSON_DIRECTORY_MAX_ITEMS,
+            query: '',
+            hasMore: false,
+            requiresQuery: true,
+            minQueryLength: PERSON_DIRECTORY_MIN_QUERY_LENGTH,
+          },
+        })
+      }
+
+      const page = await resolvePersonAssignableDirectory(
+        pool.query.bind(pool),
+        sheetId,
+        restrictGroupIds,
+        undefined, // keep the canonical (write-validator) allowed-set resolver — eligibility unchanged
+        // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
+        // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never
+        // hands back more than PERSON_DIRECTORY_MAX_ITEMS + 1 rows of display data.
+        { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
+      )
+      const hasMore = page.length > PERSON_DIRECTORY_MAX_ITEMS
+      const items = hasMore ? page.slice(0, PERSON_DIRECTORY_MAX_ITEMS) : page
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          total: items.length,
+          limit: PERSON_DIRECTORY_MAX_ITEMS,
+          query: q,
+          // `hasMore` = the truncation signal used by the record-approval list
+          // (routes/multitable-record-approvals.ts) and by this file's own paged reads; no new convention.
+          hasMore,
+          requiresQuery: false,
+          minQueryLength: PERSON_DIRECTORY_MIN_QUERY_LENGTH,
+        },
+      })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

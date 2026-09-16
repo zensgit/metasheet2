@@ -583,6 +583,7 @@
       :field="personPickerField"
       :sheet-id="workbench.activeSheetId.value"
       :current-value="personPickerCurrentValue"
+      :current-summaries="personPickerCurrentSummaries"
       @close="personPickerVisible = false"
       @confirm="onPersonPickerConfirm"
     />
@@ -1308,6 +1309,12 @@ const personPickerVisible = ref(false)
 const personPickerField = ref<MetaField | null>(null)
 const personPickerRecordId = ref<string | null>(null)
 const personPickerCurrentValue = ref<unknown>(null)
+// #5781 follow-up: the display names we ALREADY hold for the cell being edited, handed to the picker
+// so its "Selected" chips (and the summaries it echoes back on confirm) are real names. Since #5781
+// the picker's own term-less open fetch returns nothing, so it can no longer learn them itself, and
+// an un-searched assignee would round-trip into the grid as a raw userId. Snapshot (not a computed)
+// so a background refetch mid-dialog cannot swap the set under the open picker.
+const personPickerCurrentSummaries = ref<PersonSummary[]>([])
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
@@ -2064,20 +2071,37 @@ function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: L
   }
 }
 
+// #5781 follow-up — a raw-id placeholder must never EVICT a display name we already had. `patchCell`
+// does not re-hydrate personSummaries, so whatever this writes is what the grid/drawer show until the
+// next full refetch: an entry that is still `{ id, display: <the id> }` (the picker's fallback for an
+// id it could not resolve) is downgraded to the previously known summary for the same id, if any.
+// Belt-and-braces behind the `currentSummaries` prop: that seam stops the placeholder from being
+// produced, this one stops any future producer's placeholder from overwriting a good name.
+function mergePersonSummaryDisplays(prev: PersonSummary[] | undefined, next: PersonSummary[]): PersonSummary[] {
+  if (!prev?.length) return next
+  const prevById = new Map(prev.map((entry) => [entry.id, entry] as const))
+  return next.map((entry) => {
+    if (entry.display && entry.display !== entry.id) return entry
+    const known = prevById.get(entry.id)
+    return known && known.display && known.display !== entry.id ? known : entry
+  })
+}
+
 // Native person (人员): mirror applyLocalLinkSummaries so a just-picked person shows its display
 // name immediately (grid + drawer) instead of a raw userId until the next refetch.
 function applyLocalPersonSummaries(recordId: string, fieldId: string, summaries: PersonSummary[]) {
+  const gridNext = mergePersonSummaryDisplays(grid.personSummaries.value[recordId]?.[fieldId], summaries)
   grid.personSummaries.value = {
     ...grid.personSummaries.value,
     [recordId]: {
       ...(grid.personSummaries.value[recordId] ?? {}),
-      [fieldId]: summaries,
+      [fieldId]: gridNext,
     },
   }
   if (deepLinkedRecord.value?.id === recordId) {
     deepLinkedRecordPersonSummaries.value = {
       ...deepLinkedRecordPersonSummaries.value,
-      [fieldId]: summaries,
+      [fieldId]: mergePersonSummaryDisplays(deepLinkedRecordPersonSummaries.value[fieldId], summaries),
     }
   }
 }
@@ -3135,6 +3159,8 @@ function openPersonPicker(field: MetaField) {
   personPickerField.value = field
   personPickerRecordId.value = selectedRecordId.value
   personPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null
+  // Drawer/form open: same summaries the drawer itself renders from (grid first, deep-record fallback).
+  personPickerCurrentSummaries.value = selectedRecordPersonSummaries.value[field.id] ?? []
   personPickerVisible.value = true
 }
 function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
@@ -3142,6 +3168,8 @@ function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
   personPickerField.value = ctx.field
   personPickerRecordId.value = ctx.recordId
   personPickerCurrentValue.value = row?.data[ctx.field.id] ?? null
+  // Grid open: same summaries MetaCellRenderer is displaying for this cell right now.
+  personPickerCurrentSummaries.value = grid.personSummaries.value[ctx.recordId]?.[ctx.field.id] ?? []
   personPickerVisible.value = true
 }
 async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: PersonSummary[] }) {

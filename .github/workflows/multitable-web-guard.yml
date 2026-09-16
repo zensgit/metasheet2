@@ -184,6 +184,15 @@ on:
       - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
       - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
       - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
+      # #5781 follow-up (person picker display names): the workbench<->picker wiring spec. Its two
+      # source triggers (MetaPersonPicker.vue above, MultitableWorkbench.vue earlier in this list)
+      # already fire this guard, so only the NEW spec file needs a path entry of its own.
+      # Deliberately NO new run-list token: vitest filters by path SUBSTRING and the existing
+      # `multitable-person-picker` token (in the run list below AND in run-required-web-tests.sh)
+      # already selects multitable-person-picker-summary-wiring.spec.ts -- verified by running
+      # `vitest run multitable-person-picker`, which collects BOTH files. Adding a redundant token
+      # would only re-touch the two most conflict-prone lines in the repo.
+      - 'apps/web/tests/multitable-person-picker-summary-wiring.spec.ts'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
@@ -606,6 +615,15 @@ on:
       - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
       - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
       - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
+      # #5781 follow-up (person picker display names): the workbench<->picker wiring spec. Its two
+      # source triggers (MetaPersonPicker.vue above, MultitableWorkbench.vue earlier in this list)
+      # already fire this guard, so only the NEW spec file needs a path entry of its own.
+      # Deliberately NO new run-list token: vitest filters by path SUBSTRING and the existing
+      # `multitable-person-picker` token (in the run list below AND in run-required-web-tests.sh)
+      # already selects multitable-person-picker-summary-wiring.spec.ts -- verified by running
+      # `vitest run multitable-person-picker`, which collects BOTH files. Adding a redundant token
+      # would only re-touch the two most conflict-prone lines in the repo.
+      - 'apps/web/tests/multitable-person-picker-summary-wiring.spec.ts'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'

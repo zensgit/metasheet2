@@ -2321,14 +2321,32 @@ export class MultitableApiClient implements CommentsApiClient {
    * 2c-S3 — the assignable directory for ONE person field (source = B member-group directory).
    * Returns the same allowed set the write validator accepts (active-only, member-group-scoped),
    * so the picker offers exactly what a save will accept. Gated server-side on canEditRecord.
+   *
+   * #5781: the endpoint is now SEARCH-REQUIRED and capped. A call with no `q` answers 200 with an
+   * empty list and `requiresQuery: true` (not an error) — render "type to search", not "no members".
+   * `hasMore` is set when the answer was clamped to the server ceiling.
    */
   async listPersonFieldDirectory(
     sheetId: string,
     fieldId: string,
     params?: { q?: string },
-  ): Promise<{ items: Array<{ userId: string; name: string | null; email: string | null }>; total: number; query: string }> {
+  ): Promise<{
+    items: Array<{ userId: string; name: string | null; email: string | null }>
+    total: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/person-fields/${encodeURIComponent(fieldId)}/directory${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>; total?: number; query?: string }>(res)
+    const data = await this.parseJson<{
+      items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>
+      total?: number
+      query?: string
+      hasMore?: unknown
+      requiresQuery?: unknown
+      minQueryLength?: unknown
+    }>(res)
     const items = (data.items ?? [])
       .map((it) => ({
         userId: String(it.userId ?? ''),
@@ -2336,7 +2354,14 @@ export class MultitableApiClient implements CommentsApiClient {
         email: typeof it.email === 'string' ? it.email : null,
       }))
       .filter((it) => it.userId.length > 0)
-    return { items, total: typeof data.total === 'number' ? data.total : items.length, query: typeof data.query === 'string' ? data.query : '' }
+    return {
+      items,
+      total: typeof data.total === 'number' ? data.total : items.length,
+      query: typeof data.query === 'string' ? data.query : '',
+      hasMore: data.hasMore === true,
+      requiresQuery: data.requiresQuery === true,
+      minQueryLength: typeof data.minQueryLength === 'number' ? data.minQueryLength : 1,
+    }
   }
 
   async updateSheetPermission(

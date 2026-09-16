@@ -191,4 +191,61 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     expect(ids).toEqual(expect.arrayContaining([ACTOR, U_IN, U_OUT])) // all active sheet members
     expect(ids).not.toContain(U_INACTIVE) // inactive → not a sheet member, not in the directory
   })
+
+  // -- #5781: the HYDRATION BOUNDS, executed against real Postgres ------------------------------
+  //
+  // Why here and not in a unit test: tests/unit/multitable-person-directory-resolver.test.ts proves
+  // the bounds by asserting on the SQL STRING produced for a fake query fn, and
+  // tests/unit/multitable-person-directory-bounded.test.ts mocks resolvePersonAssignableDirectory
+  // wholesale. Neither ever executes the ILIKE predicate, the LIKE-escape convention or the
+  // `LIMIT $n` against a real engine, so a shape PG rejects or case-folds differently (the 222 box
+  // runs a Chinese locale) would leave every suite green and fail first on the deployment. These are
+  // the only assertions that run the #5781 SQL for real.
+  test('#5781 bound (real DB): the LIMIT is executed by PG, not applied in memory', async () => {
+    const all = await resolvePersonAssignableDirectory(q, SHEET_ID, [])
+    expect(all.length).toBeGreaterThanOrEqual(3) // ACTOR + U_IN + U_OUT are all active sheet members
+    const bounded = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { limit: 2 })
+    expect(bounded).toHaveLength(2)
+  })
+
+  test('#5781 bound (real DB): the search term is a case-insensitive SUBSTRING match on name/email', async () => {
+    // U_IN's fixture name/email both contain this fragment; upper-cased to prove ILIKE case folding
+    // actually happens in the engine (the route lower-cases nothing).
+    const term = `_IN_${TS}`
+    const hit = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: term, limit: 50 })
+    expect(hit.map((e) => e.userId)).toEqual([U_IN])
+    expect(hit[0]?.email).toBe(`${U_IN}@t.local`) // still hydrated, just bounded
+
+    const miss = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: `no_such_person_${TS}`, limit: 50 })
+    expect(miss).toEqual([])
+  })
+
+  test('#5781 bound (real DB): LIKE metacharacters in the term stay LITERAL (a bare % is not "everything")', async () => {
+    // The term is deliberately FIXTURE-SCOPED rather than a bare '%': this suite shares a database
+    // with the rest of the real-DB lane, so `search: '%'` + `toEqual([])` would be an assertion
+    // about every row in that database (and, with a 50-row ceiling, would not even be a reliable
+    // probe — the fixtures sort late). `<U_IN's id>%` decides it both ways with no ambiguity:
+    //   escaped   → a literal trailing percent sign, which no row has          ⇒ []
+    //   unescaped → a prefix wildcard, which matches U_IN's name AND email      ⇒ [U_IN]
+    // so this is the assertion that catches escapeLikeTerm being dropped.
+    const literalPct = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: `${U_IN}%`, limit: 50 })
+    expect(literalPct).toEqual([])
+    // `_` is the OTHER LIKE metacharacter: as a wildcard `u_pmg` would match any 5-char prefix, but as
+    // a literal it must still match the fixture ids (which genuinely contain underscores).
+    const underscore = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: `u_pmg_in_${TS}`, limit: 50 })
+    expect(underscore.map((e) => e.userId)).toEqual([U_IN])
+  })
+
+  test('#5781 bound (real DB): the bounds NEVER widen the allowed set (a term cannot reach outside it)', async () => {
+    // The whole safety property of #5781's hydration bounds: $1 stays the write-validator's allowed
+    // set. Searching a RESTRICTED field for a user who is a sheet member but NOT in the group must
+    // still return nothing - the term filters within the allowed set, it does not select from users.
+    const outside = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { search: U_OUT, limit: 50 })
+    expect(outside).toEqual([])
+    const inside = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { search: U_IN, limit: 50 })
+    expect(inside.map((e) => e.userId)).toEqual([U_IN])
+    // ... and an INACTIVE member of the allowed group stays excluded even when searched for by name.
+    const inactive = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { search: U_INACTIVE, limit: 50 })
+    expect(inactive).toEqual([])
+  })
 })
