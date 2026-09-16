@@ -111,3 +111,19 @@ Still pending before publishing this follow-up: independent exact-code review an
 real local seal/authenticated-manifest/reader chain test. Full synthetic database
 catalog/object/custody restoration remains a subsequent acceptance gate. No new
 CI, runtime enablement, customer storage or deployment proof is claimed.
+
+### Admission follow-up gates closed
+
+The two local follow-up gates above are now closed. Independent Sol high read-only
+review of `ada94eca13f5a272e3e4e883241549a34d2d2ae7`: 0 P1 / 0 P2 / 0 P3;
+session closed, no reviewer-run tests claimed. Reader-chain test commit
+`2089bd08a` uses the real reserve/seal, manifest authentication and complete-section
+reader functions with a local admission. A fresh session using a rotated backup
+recovers the original two record payloads and retained key ID. Old revoked
+admission, wrong KMS provider and locked session all refuse.
+
+Seven focused/neighbor suites now pass 128/128; core typecheck and diff-check pass.
+The test uses synthetic nonce reservation and a test object provider: it is NOT
+a PostgreSQL catalog plus durable object/custody recovery drill. That integrated
+gate, independent offline-copy rehearsal and startup remain OPEN. Remote checks
+on earlier `0d063ab7d` do not prove this follow-up until its own matrix completes.
