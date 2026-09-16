@@ -356,6 +356,9 @@ const RESUME_ERROR_LABELS: Record<string, AutomationLabelKey> = {
   RULE_CHANGED: 'runs.resumeError.ruleChanged',
   RULE_MISSING_OR_DISABLED: 'runs.resumeError.ruleMissingOrDisabled',
   RECORD_GONE: 'runs.resumeError.recordGone',
+  // #5803: 409 from resumeExecution() when the rule's sheet is soft-deleted. The token is NOT claimed, so
+  // the same resume works once the sheet is restored. Without this entry a zh session saw the raw English.
+  SHEET_DELETED: 'runs.resumeError.sheetDeleted',
 }
 
 /** Map the resume endpoint's discriminated code → an inline localized message (never a generic toast). */
@@ -419,6 +422,8 @@ const RERUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
   RULE_MISSING_OR_DISABLED: 'runs.rerunError.ruleMissingOrDisabled',
   RULE_CHANGED: 'runs.rerunError.ruleChanged',
   RETRY_LEDGER_EVIDENCE_MISSING: 'runs.rerunError.ledgerEvidenceMissing',
+  // #5803: item 10 of the enumeration below.
+  SHEET_DELETED: 'runs.rerunError.sheetDeleted',
   // Round-2 B5 — the route guard's 403 body is `{ error: 'AccessDenied', code: 'ADMIN_REQUIRED',
   // message: '<English>' }` (routes/automation.ts:793 requireAdminRole). The SHARED normalizer
   // (multitable/api/client.ts normalizeApiErrorPayload) only reads a top-level `code` when `error`
@@ -444,6 +449,9 @@ function mapRerunError(err: unknown): string {
  * COMPLETE enumeration of the refusals `retryExecution()` can return
  * (packages/core-backend/src/multitable/automation-service.ts), and which of them this view can
  * predict from data it has ALREADY loaded. Nothing here guesses at state the client cannot see.
+ * The SET of codes (not the `:NNNN` line references, which predate later edits to automation-service.ts;
+ * search by code) is pinned against retryExecution() by
+ * packages/core-backend/tests/unit/automation-retry-resume-refusal-codes-web-parity.test.ts.
  *
  *  PREDICTABLE (mirrored below — never sent):
  *   1. 409 NOT_RETRYABLE            automation-service.ts:2723-2729 — status ∉ {failed, skipped}.
@@ -477,6 +485,10 @@ function mapRerunError(err: unknown): string {
  *   8. 409 RULE_CHANGED                  :2775-2781 — fingerprint of the CURRENT rule vs the one
  *      stored at run time; the stored fingerprint is not on the run view at all.
  *   9. 409 RETRY_LEDGER_EVIDENCE_MISSING :2790-2795 — retry-ledger evidence query.
+ *  10. 409 SHEET_DELETED                 #5803, `ruleSheetLive` in retryExecution (code
+ *      `SHEET_DELETED_CODE`) — the rule's sheet is soft-deleted. Sheet state is not on the run
+ *      view, and the sheet can be deleted between list and click. Nothing runs or is recorded and the
+ *      first-retry marker is not spent, so the same re-run works once the sheet is restored.
  *  (400 CONFIRM_SIDE_EFFECTS_REQUIRED is not a row property — this client always sends the flag;
  *   403 ADMIN_REQUIRED is mirrored by `isAdmin`, an approximation — see the B4 disclosure.)
  */

@@ -1,7 +1,10 @@
 /**
  * T1-2 inbound webhook trigger — real mounted route + real DB.
  *
- * Drives the public unauthenticated route end to end:
+ * Drives the mounted route end to end. In production this route sits behind the global session gate
+ * (index.ts; it is not in api-path-policy.ts GLOBAL_GATE_EXCEPTIONS), and the handler then ignores the
+ * session: only the per-rule secret authorizes delivery. This harness mounts the router on a bare express
+ * app WITHOUT that gate, so the session requirement is not exercised here:
  *   POST /api/multitable/automation/webhooks/:ruleId
  *     → raw-body HMAC verification
  *     → AutomationService.handleInboundWebhook
