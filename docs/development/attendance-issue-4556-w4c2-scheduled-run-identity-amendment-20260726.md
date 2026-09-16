@@ -21,7 +21,6 @@
 > | §1.6 "Pending `O-1`/`OD-W4C-49`" | the class-`01` assignment is a proposal | **Superseded** — `OD-W4C-49=(a)` + `OD-W4C-46=(a)` ratified; the assignment is in force |
 > | §3.1 "Pending decisions (`O-1..O-5`) — not resolved by this draft" | five decisions still open | **Superseded** — all five resolved by bundle A (`49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, `53=(i)`) |
 > | §4 step 1 "Merge this document as **PROPOSED** with no runtime code" | the execution sequence's first step | **Spent** — that merge happened (`d1bed9d640…`) and the ratify followed; the remaining steps' own scope limits still stand |
->
 > | §1 supersession list / §1.6 "Until `O-1` is ratified, no implementation may acquire class `01`" | a prohibition contingent on `O-1` | **Superseded** — `O-1`/`OD-W4C-49` resolved `=(a)`; the governing rule is now the one quoted in the lock's four rewritten sites |
 > | §1.1.1 (`O-3`/`OD-W4C-50`), §1.3 (`O-2`/`OD-W4C-51`), §1.7.1 (`O-4`/`OD-W4C-52`) section headings and their "Pending" framing | three more open decisions | **Superseded** — `50=(a)`, `51=(a)`, `52=(a)` |
 > | §2.1 "two pending gates, 20-21, inert until `O-3`/`O-4` rule" | gates 20–21 not required | **Superseded and ACCEPTANCE-BEARING** — `O-3`/`O-4` are ratified, so gates 20–21 are **required**, not inert. This one is not merely historical: it governs what an implementation must pass |

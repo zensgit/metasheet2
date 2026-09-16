@@ -3147,5 +3147,5 @@ multi-segment authoritative calculation remains off.
 > - Effective from the ratify date, 2026-07-27.
 >
 > Rewritten sites in this document: the `W4C-R42` row, the `Prefix 01` clause, the exact-gate
-> mutation list, and the test-seam clause. Nothing else in this document is changed by this
-> back-fill, and no runtime behaviour is changed by it.
+> mutation list, and the test-seam clause. **No other operative requirement changes**; the
+> `OD-W4C-40` decision row receives only a provenance pointer, and no runtime behaviour changes.
