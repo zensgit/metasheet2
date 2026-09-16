@@ -77,7 +77,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
-import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion } from '../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSelection, MetaCommentMentionSuggestion } from '../types'
 import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
 // Disclosed real coupling (S3a): the submit button still comes from multitable/ui's MtButton —
 // a presentation-only, token-styled design-system primitive with no comment/multitable business
@@ -105,6 +105,14 @@ const props = withDefaults(defineProps<{
    * marker asks for. When absent (approval comments) the static list behaves exactly as before.
    */
   mentionSearch?: MetaCommentMentionSearch | null
+  /**
+   * #5813: opt-in, for a host that unmounts this composer while its draft lives on (the record
+   * inspector's comments tab). When the prop is passed (`null` included) the composer reports its picked
+   * mentions through `update:mentionSelection`, and a remount restores them from here — see
+   * MetaCommentMentionSelection for when a restore is refused. Hosts that leave it out (approval
+   * comments, the comments drawer) keep the old behaviour and receive no such event.
+   */
+  mentionSelection?: MetaCommentMentionSelection | null
 }>(), {
   suggestions: () => [],
   initialMentions: () => [],
@@ -119,6 +127,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'submit', payload: { content: string; mentions: string[] }): void
+  (e: 'update:mentionSelection', value: MetaCommentMentionSelection): void
 }>()
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -265,20 +274,48 @@ const composerHint = computed(() => (
   showSuggestions.value && filteredSuggestions.value.length > 0 ? l('comment.hintWithMention') : l('comment.hintBase')
 ))
 
+// #5813: hand the current selection to a host that keeps it across a remount (see `mentionSelection`).
+function publishMentionSelection() {
+  if (props.mentionSelection === undefined) return
+  const selectedIds = new Set(selectedMentions.value.map((mention) => mention.id))
+  emit('update:mentionSelection', {
+    initialMentions: props.initialMentions,
+    mentions: [...selectedMentions.value],
+    textBoundIds: [...textBoundMentionIds].filter((id) => selectedIds.has(id)),
+  })
+}
+
 watch(
   () => props.initialMentions,
-  (nextMentions) => {
-    const seen = new Set<string>()
-    selectedMentions.value = (nextMentions ?? []).filter((mention) => {
-      if (!mention?.id || seen.has(mention.id)) return false
-      seen.add(mention.id)
-      return true
-    })
-    textBoundMentionIds.clear()
-    for (const id of mentionIdsWithText(props.modelValue, selectedMentions.value)) textBoundMentionIds.add(id)
+  (nextMentions, previousMentions) => {
+    // #5813: on mount only, pick up where an unmounted composer left off — if the host still passes the
+    // `initialMentions` that selection was built from. A different array means a new or ended edit (or a
+    // record switch) happened meanwhile, which resets the selection exactly as it would have here.
+    const kept = previousMentions === undefined ? props.mentionSelection : null
+    if (kept && kept.initialMentions === nextMentions) {
+      selectedMentions.value = [...kept.mentions]
+      textBoundMentionIds.clear()
+      for (const id of kept.textBoundIds) textBoundMentionIds.add(id)
+      // The draft may have been cleared (a send, a record switch) while this composer was unmounted.
+      dropTextBoundMentionsMissingFrom(props.modelValue)
+    } else {
+      const seen = new Set<string>()
+      selectedMentions.value = (nextMentions ?? []).filter((mention) => {
+        if (!mention?.id || seen.has(mention.id)) return false
+        seen.add(mention.id)
+        return true
+      })
+      textBoundMentionIds.clear()
+      for (const id of mentionIdsWithText(props.modelValue, selectedMentions.value)) textBoundMentionIds.add(id)
+    }
+    publishMentionSelection()
   },
   { immediate: true, deep: true },
 )
+
+// #5813: every later change (a pick, a removed chip, a chip dropped with its text) is published too.
+// `selectedMentions` is only ever reassigned, never mutated in place.
+watch(selectedMentions, publishMentionSelection)
 
 watch(
   filteredSuggestions,

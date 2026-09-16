@@ -23,6 +23,20 @@ export interface MetaCommentMentionSuggestion {
 }
 
 /**
+ * #5813: the composer's picked mentions, kept by a host that outlives the composer (the record
+ * inspector unmounts its comments tab on every tab switch). `initialMentions` is the exact
+ * `initialMentions` array the selection was built from: a remounted composer restores the selection
+ * only while the host still passes that same array, and first drops the text-bound chips whose text
+ * left the draft meanwhile — so a send, a record switch, or a new/ended edit that happened while the
+ * composer was unmounted clears the chips exactly as it would have with the composer mounted.
+ */
+export interface MetaCommentMentionSelection {
+  initialMentions: readonly MetaCommentMentionSuggestion[]
+  mentions: MetaCommentMentionSuggestion[]
+  textBoundIds: string[]
+}
+
+/**
  * #5795 — one server-side @-mention search. The candidate endpoint no longer hands out a term-less
  * roster: an empty/too-short term answers `requiresQuery: true` with no items (render "type to
  * search", not "no match"), and a match set larger than the server ceiling answers `hasMore: true`.
