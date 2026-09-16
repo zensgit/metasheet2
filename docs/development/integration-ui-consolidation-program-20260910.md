@@ -367,4 +367,67 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 
 网络恢复（09-14 08:30，根因是用户级代理未被 CLI 工具读取，加 `https_proxy` 环境变量即通）后重建：**main 9fb29831c + 全部 39 支在飞 PR**（第二窗口 20 + #5638 + 第三窗口 6 + #5665 + 第四窗口 11）→ `3b89ae700`，37 次合并干净、2 处已知冲突由 rerere 复放；草稿 **#5692** CI **64 绿 / 0 红 / 1 skipped**，按约定关闭、分支保留。同时 11 支第四窗口 PR 各自 CI 全部定格零红（#5677 25 / #5679 29 / #5682 25 / #5687 25 / #5688 21 / #5689 21 / #5690 25 / #5691 11 / #5680 10 / #5681 11 / #5601 21）。
 
+### 9.7 更正说明（09-16 补记，零代码）
+
+第四窗口小节完稿时本文尚未收录第五窗口内容。窗口内曾有一次口头/账本层面的过头汇报——把第五窗口六支 PR 记成「六支终审可合／CI 全绿」；这句话**从未写入本文件**，但为避免同一措辞被误当作本报告的既有结论沿用，这里明确记一笔：远端准确状态是 **145 SUCCESS + 4 SKIPPED**（四条 Strict E2E 为 skip，不是「全部执行成功」），且六支中有三支（#5711/#5715/#5718）在 owner 第一轮复核里被判「需修订」而非「可合」。完整的第五窗口交付表与 owner 两轮复核结论见 §10。
+
+## 10. 第五个 24h 窗口（2026-09-14 18:30 → 09-15 18:30）与 owner 两轮复核
+
+> 授权原话同前："接下去 24 小时我不在电脑前，你能帮我不间断的持续开发么？并根据代码难度来选择模型，完成后给出设计及验证MD"。选题继续取缺口审计矩阵（112 条，详见 §10.4 与 `docs/development/dev-plan-gap-audit-20260916.md`，PR #5787）里登记过且不需 owner 裁决的缺口。窗口内产出 6 支新 PR（#5710/#5711/#5715/#5716/#5717/#5718），全部 base=main；窗口到期（09-15 18:30）时 6 支均 MERGEABLE、CI 全绿，**但这只是我方内部复核的终审状态，不是 owner 复核的结论**——owner 两轮复核（09-16）对其中三支给出了不同判断，见 10.2。窗口内零合并、零部署、未碰 222。
+
+### 10.1 交付表
+
+| # | 项 | PR | 复核裁决 | 设计 / 验证文档 |
+|---|---|---|---|---|
+| W5-A | `GET /api/admin/dlq` + protection-rules 两条 GET 加平台管理员门（#5678 批次 1，叠加在 #5677 分支上） | **#5710**（c3179a582，收口 33271de4c） | 内部：25 代理缩水复核，"终审可合"——中途发现叠加 PR base 不在 `[main, develop]` 时 CI 不跑单测泳道（通用教训，见 10.5），改 base=main 后 26 绿。owner 第一轮：**无新增阻断项，可排队**（非对未来组合状态的无条件保证；与父 #5677 的合并路线需先定，若先 squash 父 PR 须重整子分支重跑，不能只看双方绿色就盲合）。owner 第二轮：未单独复查，结论沿用 | `admin-read-gates-batch1-{design,verification}-20260914.md` |
+| W5-B | 生产默认加密密钥/盐 fail-closed：三条管线同口径 + `rotateKey` 旁路 + 五个出厂模板占位 | **#5711**（4b885ef27，三轮返修至 313f6090c） | 内部："终审 X 已全修"（三轮返修：rotateKey 死锁、plugin-attendance 第三条管线、空表轮换不校验新材料、插件门 trim、五个出厂模板缺材料占位、ConfigService 两处 catch-all 吞门）。owner 第一轮 **F1（需修订）**：新增迁移指引把 `rotateKey(默认材料, 新密钥, {newSalt})` 写成可执行升级路径，实际 `enc:` 前缀读口与轮换写口两头都不匹配，格式缺陷在 merge-base 已存在，本 PR 的错在于写成了可执行方案。owner 第二轮：**F1 已关闭，可进入合并队列**（999b73892）；部署前置保留——升级前 values-free 检查，不接受把更换既有 KEY/SALT 当兼容方案 | `encryption-key-fail-closed-{design,verification}-20260914.md` |
+| W5-H | 首个集成增量候选场景短名单（推荐场景 C：Bridge 只读→多维表）+ 入站 webhook 匿名不可达实跑验证 | **#5715**（a61d6de56，两轮修订至 f524a33c9） | 内部：零代码设计件；webhook 缺口三选项待 owner ADR。owner 第一轮 **F2/F3（需修订）**：F2——完整性断言引用了备料 feeder 的 `adapter_reported` 契约，但场景 C 实走 PipelineRunner、不经该链，owner 实测 500 行源表 `requestLimit=20` 仍 `succeeded`/`targetRowCount:20`；F3——推荐理由把 A/B「触发上游拉取」与 C「读取已落库多维表」当同一把尺子比较，不等价；PR 正文另把 webhook 缺口影响面写反（原写「影响 A/B、C 不受影响」，与自带探针矛盾）。owner 第二轮：**F2 关闭**（撤回「C 零 runtime 工作」承诺，改记为待实现缺口）；**F3 有残留**（正文仍留「C 之外两条 n8n 跳动授权边界」「B 的 n8n 一跳几乎全无」两处与新勘误矛盾的旧结论）→ 已修（f524a33c9，删除矛盾旧结论 + 同步更正 PR 正文 webhook 影响面） | `integration-scenario-shortlist-20260914.md`、`automation-webhook-auth-probe-20260914.md` |
+| W5-D | 平台管理员门三种「拿不到角色」情形 fail-closed 钉桩（纯测试） | **#5716**（ad4a304b3，tripwire 修后 719492abc） | 内部：无 fail-open 发现；踩中 supertest app-mode 零容忍 tripwire（#4154，6 处 `request(app)`）已改 `usePinnedServer()+request(pinned.url())`。owner 第一轮/第二轮：**均无新增阻断项，可排队** | `require-admin-role-fail-closed-pins-{design,verification}-20260914.md` |
+| W5-F | `DeadLetterQueueService.list()` 对 `limit:0` 只计数不拉行 | **#5717**（9e0716625） | 内部：轻核可合；retry-all 写端点行为变化（`{limit:0}` 从重试 50 变重试 0）已在正文声明。owner 第一轮/第二轮：**均无新增阻断项，可排队** | `dlq-list-limit-zero-{design,verification}-20260914.md` |
+| W5-G | 四个 on-prem 运维脚本对 `ENCRYPTION_KEY`/`SALT` 空值或默认哨兵 fail-early | **#5718**（ced5a84fa，两轮返修至 d88e93895、0ef95dfc7） | 内部：轻核「修完 F1 再合」→ 已修（带引号/CR/空白哨兵放行、package-verify 双声明漏）。owner 第一轮 **F4/F5/F6（需修订）**：F4——新必填门会中断 `stock-prep-staging-window-rehearsal.yml` 的调用方（其 env 生成不含这两项）；F5——预检（trim+脱引号）与 runtime 判定不一致，纯空白/引号内空格哨兵/行尾注释默认值在预检假绿；F6——package-verify 只扫行首精确声明形式，`export`/缩进声明可绕过。owner 第二轮：**F4/F6 关闭**（rehearsal 现场 `openssl rand` 铸造一次性材料 + 新增调用方回归契约测试 13/13；package-verify 归一化声明语法判定）；**F5 仍有残留**（`get_env_value` 只取行首精确形式的最后一行，未同步 F6 已承认的 `export`/缩进声明，导致"先合法值、后被覆盖成默认/空值"两种形状预检仍 exit 0）→ 已修（0ef95dfc7，新增专用 `get_env_material_value`，仅用于 `ENCRYPTION_KEY`/`SALT`，不新增 eval/source、不改材料字节） | `ops-encryption-material-preflight-{design,verification}-20260914.md` |
+
+### 10.2 owner 两轮复核结论
+
+**第一轮（`artifacts/reviews/window5-20260916/review.md`，冻结于 main `38caaf17b`）**：**不是「六支均终审可合」**。裁决按 PR 分三类——
+
+- #5710、#5716、#5717：本轮**未发现新增阻断项**，可进入合并队列；这**不是**对未来组合状态的无条件保证，MERGEABLE 只表示 Git 可合并，不证明组合语义或当前 main 的部署链已验证。
+- #5711：生产材料 fail-closed 方向正确，但 F1（见 10.1/10.3）需先更正文档/PR 说明。
+- #5715：设计件需要修订 F2 完整性缺口和 F3 场景比较口径。
+- #5718：需修复 F4 调用方回归与 F5/F6 预检假绿，再复跑。
+
+远端准确状态是六支合计 **145 SUCCESS、4 SKIPPED、0 失败**；四条 skip 是 Strict E2E with Enhanced Gates 泳道，**不能写成「149 条全部执行成功」**。
+
+**第二轮（`artifacts/reviews/window5-rereview-20260916/review.md`，冻结于 main `857e29dd3`）**：#5711 F1 关闭、可进合并队列；#5715 F2 关闭、F3 有残留（已清理，f524a33c9）；#5718 F4/F6 关闭、F5 有残留（已修，0ef95dfc7）。**因此尚不能认定三支全部一次性收敛**——F3、F5 都是「第一次只修了表面、留下残留」被第二轮抓到。owner 同时给出两项取舍裁决：
+
+1. **保留**新增 CI 泳道 `attendance-onprem-encryption-material-contracts.yml`：它把 rehearsal 调用方的真实回归测试接入 PR，只有 `contents:read`、无 DB/部署/生产 secret 接线，属于修复的验证接线，不是新平台建设，没有理由只留本地测试、删掉接线。
+2. **接受**材料表示语法的明确收紧（hex/base64 等新写法），**但不接受**把更换既有 KEY/SALT 当作兼容方案：升级前应做 values-free 检查，必要时仅调整表示方式并证明有效字节不变；若某种表达不受支持且不能保证字节不变，则暂停该部署升级。默认材料的旧密文仍然没有可用的迁移通道。
+
+### 10.3 被复核纠正的具体错误（如实记，不粉饰）
+
+1. **#5711**：设计文档曾把 `rotateKey(默认材料, 新密钥, { newSalt })` 写成默认材料部署的升级路径。实际配置读口 `ConfigService.ts` 只认 `enc:` 前缀解密，轮换把整个带前缀值交给裸 base64 解密函数——合法 `enc:` 行轮换前能读、轮换后立刻 `Failed to decrypt value`；按裸 base64 行构造轮换能"成功"，但写回仍无前缀，正常读口读到的是 `undefined`。**格式缺陷在 merge-base 已经存在，不是本 PR 新增的运行时回归；本 PR 真正的错误是把这条读写两头都不通的路径写成了一份可执行的生产升级方案**，且新增测试只验证 SecretManager 直接解密，从未验证正常配置读口，其绿不能背书迁移。
+2. **#5715**：完整性断言引用的是备料 feeder 的 `adapter_reported` 契约，而场景 C 实际走 PipelineRunner、根本不经过该链；owner 用真实 adapter + runner 实测 500 行源表、`requestLimit=20`，结果仍是 `targetRowCount:20`/`status:succeeded`/`rowsFailed:0`——截断没有被拒绝。推荐理由用来对比 A/B 与 C 的坐标轴本身不等价（比较了"谁触发上游拉取"与"谁读取已落库结果"两件不同的事）。PR 正文还把 webhook 缺口的影响面写反了：原文写"影响 A/B、C 不受影响"，但 A/B 的拉取走的是另一条 JWT 路由（mvp/source-runs），并不受这个 webhook 缺口影响，真正受影响的是规则编辑器里选了 `webhook.received` 触发器的最终用户。
+3. **#5718** 三条：①新必填门（bootstrap-admin 无条件要求 `ENCRYPTION_KEY`/`SALT`）会中断现有 `stock-prep-staging-window-rehearsal.yml` 的调用方，因为它生成的 env 本来就不含这两项；②预检脚本 fail-early 假绿——纯空白哨兵、引号内带空格的哨兵、带行尾注释的默认值都能在预检通过，但 source 后其实是默认值/空值，首次真正使用加密时才失败；③包模板检查只扫描行首精确 `ENCRYPTION_KEY=`/`ENCRYPTION_SALT=`，`export` 前缀或缩进声明能绕过检查。**F5（预检假绿）第一次没有修干净**：第一轮返修只统一了"值"的形态（去 CR/trim/脱引号），但没有同步第六项（F6）已经承认的"声明形式"也可以是 `export`/缩进——于是"先写一行合法值，后面又被同名声明覆盖成默认值"这种形状，预检读取器仍然只看行首精确形式的最后一行，第二轮复核才抓到这个残留，第二次返修（0ef95dfc7）才把读取器与守卫真正对齐。
+
+### 10.4 累计待裁决（缺口审计矩阵 26 条）
+
+缺口审计矩阵（112 条：done 13 / partial 41 / not_started 21 / **blocked_ruling 26** / deferred 11，`scratchpad/gap-audit-matrix.json`，摘要 `gap-audit-digest.txt`）里 `status=blocked_ruling` 的 26 条待裁决，按类别汇总如下；完整逐条清单见 `docs/development/dev-plan-gap-audit-20260916.md`（PR #5787）。
+
+- **admin-security（11 条）**：ADM-05（#5678 读侧无门 GET 批次 2 是否加门）、ADM-06（admin bulk 路由是否把 `data_sources` 摘出只走专用门）、ADM-07（`requireAdminRole` 与 `ensurePlatformAdmin` 认 `*:*` 两套判据宽度差是否收紧统一）、ADM-09（`/evaluate` 保持 admin-only 是否符合产品预期）、ADM-10（限流器是否移到 admin 门后）、ADM-11（非生产 dev-token 端点可达范围是否需要额外显式开关）、ADM-12（#5665 另 8 条端点是否保留仅管理员门）、ADM-14（kanban `view_states.user_id` integer 与 `users.id` text 的 `parseInt` 跨用户串状态怎么处理）、ADM-15（`smoke-kanban.sh` 默认 `VIEW_ID=board1` 非 UUID 时行为）、ADM-20（#5682 任意评论者可 resolve 是否收紧到作者/owner）、ADM-23（孤儿 openapi 文档删除还是补回引用）。
+- **credentials（4 条）**：CRED-03（已落库 PLM 令牌与审计副本只吊销还是清洗迁移）、CRED-05（秘密键粘连限定词白名单范围 + 真库道 B 词表同步职责）、CRED-08（connection URL userinfo 迁移剩余阶段七项裁决）、CRED-09（`credentials.bearerToken`/`credentials.token` 死字段是否单开处理）。
+- **bridge（3 条）**：BR-09（记录验收后 K3 API Profile 如何演进）、SC-03（是否投入改 Bridge 协议支持分页，还是接受单页上限）、SC-05（是否单开 PR 让 pipeline 也校验外接系统 kind，会影响所有既存 pipeline）。
+- **governance-storage（2 条）**：GOV-06（`meta_comment_reads` 历史冒名已读行是否清理）、GOV-07（商业多客户 sealed 交付：每客户独立部署 vs 共享实例多租户）。
+- **stock-prep（2 条）**：SP-05（场景 A K3 只读上限是否放宽超过约 100 行，涉及安全边界）、SP-08（场景 B 字段映射等客户提供 PLM 字典，还是先用合成列名做可验收增量）。
+- **triggers（1 条）**：TRG-02（入站 webhook 是纳入全局门豁免表只靠 HMAC，还是新建带独立授权边界的受控入口，需 ADR）。
+- **permissions（1 条）**：PERM-03（共享档按 #5620 设计的 tenant_shared 落地，还是按 minimal-plan §5 PR-2 的 workspace 共享落地）。
+- **other（1 条）**：SC-01（首个集成增量场景选 A/B/C；shortlist 推荐 C，B 为备选）。
+- **docs（1 条）**：DOC-05（路线图草稿先修订能力基线，还是搁置不改）。
+
+### 10.5 教训
+
+- **只追加勘误而不清理与之矛盾的旧结论，反而更误导**：#5715 第一轮返修只加了新勘误段落，没删掉与之矛盾的旧推荐正文，第二轮复核照样把矛盾结论当成"仍在用的结论"抓出来（F3 残留）。修订时要么改到底、要么明确标注"以下已被上文替代"，不能新旧并存。
+- **叠加 PR 的 base 不在 `[main, develop]` 时 CI 不跑单测泳道**：#5710 base 建在 `#5677` 分支上，10 条 CI 里没有测试泳道，靠肉眼看"绿"会漏掉真实测试执行——所有叠加 PR（#5680/#5691/#5593/#5594 等）都吃过这个亏，要么 base=main，要么进组合树验证。
+- **supertest app-mode 零容忍 tripwire（#4154）本机单跑看不到**：#5716 本机跑测试时没暴露，CI 才红；新 spec 一律用 `usePinnedServer()+request(pinned.url())`，不能用 `request(app)`。
+- **代理在同一处卡死（600s 零进展）一次就别再反复续跑**：#5718 F5 残留的修复代理在同一处卡死两次，第二次改为协调方直接接手修完（0ef95dfc7），没有再续跑第三次。
+- **账号级 400（"当前绑定账号暂不可用"）会一次打死所有在飞代理**：09-15 10:49 派出的 W5-I/K/L/M/N/J 六项全部死于同一次账号 400，会话随即中断到第五窗口到期；账本随时可交接、worktree 建完即断的零脏文件项可直接复用重派。
+
 补记：W4-H..L 五支已推为 **#5687/#5688/#5689/#5690/#5691**；#5691 缩水版复核（1+1+judge）抓到一条真反例——`extractUrlUserinfo` 预切 `[?#]` 吞掉 `@`，口令含 `#`/`?` 时值层空转、真实 fetch 复跑泄漏——已修（15ca4c5b8）并加两形状钉子；W4-N（**#5694**，零源码）：`smoke-kanban.sh` 改走 dev-token、全步骤按状态码判（不再假绿；默认 `VIEW_ID=board1` 非 UUID 会如实退出，待定），sprint2 两份文档的 `safety/rules` 示例改管理员 Bearer。
