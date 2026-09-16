@@ -1,4 +1,6 @@
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createLocalCustodyBackup, createLocalCustodySession } from '../../src/multitable/recovery-local-custody'
 
 const workerMocks = vi.hoisted(() => ({
   createRecoveryArchiveRestoreWorker: vi.fn(),
@@ -56,6 +58,27 @@ afterEach(() => {
 })
 
 describe('recovery archive application composition', () => {
+  it('accepts authentic local custody admission without accepting a copied capability', async () => {
+    const custodyId = randomUUID()
+    const recoverySecret = randomBytes(32)
+    const transactionDepth = fakeProbe()
+    const session = createLocalCustodySession(transactionDepth)
+    try {
+      session.unlock({ custodyId, recoverySecret, backup: createLocalCustodyBackup({ custodyId, recoverySecret, transactionDepth }) })
+      const admission = session.admitForArchive(custodyId)
+      const composition = { ...fakeComposition(fakeProviders()), keyCustody: admission }
+      const application = createRecoveryArchiveApplication(() => composition, () => fakeDatabaseRuntime().runtime, ENABLED_ENV)
+      expect(application.routerOptions?.recoveryArchiveRuntime?.keyCustody).toBe(admission)
+      await application.stopWorker()
+      const resolveDatabase = vi.fn(() => fakeDatabaseRuntime().runtime)
+      expect(() => createRecoveryArchiveApplication(() => ({ ...composition, keyCustody: { ...admission } }), resolveDatabase, ENABLED_ENV))
+        .toThrow('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED')
+      expect(resolveDatabase).not.toHaveBeenCalled()
+    } finally {
+      session.lock()
+      recoverySecret.fill(0)
+    }
+  })
   it('rejects an enabled composition without a durable derived processor', () => {
     const composition = fakeComposition(fakeProviders())
     delete (composition.worker as { processDerivedWork?: unknown }).processDerivedWork

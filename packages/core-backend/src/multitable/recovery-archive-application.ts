@@ -2,7 +2,8 @@ import type {
   RecoveryArchiveRouterDatabaseRuntime,
   UniverMetaRouterOptions,
 } from '../routes/univer-meta'
-import type { RecoveryArchiveCustodyInput } from './recovery-archive-crypto'
+import type { RecoveryArchiveCustodyInput, RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
+import { resolveLocalArchiveCustody } from './recovery-local-custody'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
 import type {
   RecoveryArchiveObservability,
@@ -199,14 +200,16 @@ function snapshotComposition(
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
   }
+  if (!composition.keyCustody || typeof composition.keyCustody !== 'object') throw new Error(COMPOSITION_INVALID)
+  // Resolve only authentic local capabilities; preserve the original input and its revocation checks.
+  const custody = resolveLocalArchiveCustody(composition.keyCustody)
+    ?? composition.keyCustody as RecoveryArchiveKeyCustodyAdapter
   if (
-    !composition.keyCustody ||
-    typeof composition.keyCustody !== 'object' ||
-    typeof composition.keyCustody.produceGenerationDek !== 'function' ||
-    typeof composition.keyCustody.unwrapGenerationDek !== 'function' ||
-    typeof composition.keyCustody.deriveDekFingerprint !== 'function' ||
-    typeof composition.keyCustody.macManifestRoot !== 'function' ||
-    typeof composition.keyCustody.verifyManifestRootMac !== 'function' ||
+    typeof custody.produceGenerationDek !== 'function' ||
+    typeof custody.unwrapGenerationDek !== 'function' ||
+    typeof custody.deriveDekFingerprint !== 'function' ||
+    typeof custody.macManifestRoot !== 'function' ||
+    typeof custody.verifyManifestRootMac !== 'function' ||
     !composition.objectStore ||
     typeof composition.objectStore !== 'object' ||
     typeof composition.objectStore.put !== 'function' ||
