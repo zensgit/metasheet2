@@ -221,6 +221,19 @@ function sendFailClosedResolutionError(
   })
 }
 
+/**
+ * AutomationService.testRun's rule gate throws a plain Error (`Rule <id> not found or not enabled`)
+ * rather than a typed rejection, and automation-service.ts is out of this change's scope. Match that
+ * exact sentence shape — anchored on both ends — so a deeper "... not found" (a missing view, field
+ * or target record inside the simulated plan) is NOT reclassified as a missing rule; those stay a
+ * values-free 500.
+ */
+function isTestRunRuleNotFoundError(err: unknown): boolean {
+  return err instanceof Error
+    && !(err instanceof AutomationTestRunRejectedError)
+    && /^Rule .+ not found or not enabled$/s.test(err.message)
+}
+
 function shouldUsePersistedJobs(
   execution: AutomationExecution,
   jobs: ReturnType<typeof toWorkflowJobView>[] | undefined,
@@ -452,13 +465,18 @@ export function createAutomationRoutes(
     let authoringUserId = ''
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation || !capabilities.canManageSheetAccess) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
       authoringUserId = access.userId
       if (!authoringUserId) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // #5803 follow-up: authority first (no liveness oracle), then liveness — a soft-deleted rule
+      // sheet must not mint a confirmation hash nor write the confirmation audit row.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
     } catch (err) {
       const raw = err instanceof Error ? err.message : ''
@@ -616,6 +634,15 @@ export function createAutomationRoutes(
             error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
           })
         }
+        // The `SELECT base_id FROM meta_sheets` above does not filter deleted_at, so a soft-deleted
+        // update target would otherwise be confirmed. Answered with the route's existing values-free
+        // "target unavailable" body (the PATH sheet is live; SHEET_DELETED would name the wrong one).
+        if (targetAccess.sheetLiveness !== 'live') {
+          return res.status(404).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+          })
+        }
       }
 
       const fieldResult = await pool.query(
@@ -713,8 +740,10 @@ export function createAutomationRoutes(
   // ── Test run ────────────────────────────────────────────────────────────
 
   router.post('/sheets/:sheetId/automations/:ruleId/test', async (req: Request, res: Response) => {
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    // TRIMMED like authorizeRuleScopedRead: a whitespace-only segment is a malformed request (400),
+    // not a sheet the liveness lookup below would answer as 'Sheet not found'.
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
     if (!sheetId || !ruleId) {
       return res.status(400).json({ error: 'sheetId and ruleId are required' })
     }
@@ -727,9 +756,17 @@ export function createAutomationRoutes(
     // the route additionally makes the safe simulation default authoritative server-side.
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) {
         return sendForbidden(res)
+      }
+      // #5803 follow-up: capability FIRST, then liveness — same order as authorizeRuleScopedRead, so
+      // an unauthorized caller gets the same 403 for a live and a soft-deleted sheet (no liveness
+      // oracle). A soft-deleted sheet refuses BOTH modes here, before the sample-record read and
+      // before testRun: simulate would otherwise plan against a dead sheet, and real_fire must not
+      // rely on the sample-record read happening to join meta_sheets.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
     } catch (err) {
       // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through to
@@ -827,15 +864,18 @@ export function createAutomationRoutes(
       if (err instanceof AutomationTestRunRejectedError) {
         return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message } })
       }
-      if (rawMode === 'real_fire') {
-        return res.status(500).json({
+      // Values-free for BOTH modes: the thrown message may carry the rule id or a raw DB error
+      // (host/user/SQL), so it is only CLASSIFIED here, never echoed. The service's rule gate
+      // (no rule / rule of another sheet / disabled rule) is one refusal with one fixed body, so it
+      // is not an oracle for rule ids or the owning sheet.
+      if (isTestRunRuleNotFoundError(err)) {
+        return res.status(404).json({
           ok: false,
-          error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+          error: { code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
         })
       }
-      const message = err instanceof Error ? err.message : 'Test run failed'
-      const code = message.includes('not found') ? 404 : 500
-      return res.status(code).json({ error: message })
+      // Same responder as the fail-closed sites above: SQLSTATE-first DB-not-ready → 503, else 500.
+      return sendFailClosedResolutionError(res, err, 'TEST_RUN_FAILED', 'Test run failed')
     }
   })
 
