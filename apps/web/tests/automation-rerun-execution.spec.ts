@@ -750,6 +750,36 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     useLocale().setLocale('en')
   })
 
+  // #5803: retryExecution() refuses a rule whose sheet is soft-deleted with 409 SHEET_DELETED. The client
+  // throws it with `.code`. That refusal is not predictable from the row (sheet state is not on the run view),
+  // so the request is sent, and the answer must render as its own localized copy. It must not show the raw
+  // English server sentence, and it must not look like a success.
+  const SHEET_DELETED_SERVER_TEXT = "SHEET_DELETED: the rule's sheet has been deleted; execution not retried."
+  for (const locale of [
+    { name: 'zh', set: 'zh-CN', expected: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
+    { name: 'en', set: 'en', expected: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again." },
+  ] as const) {
+    it(`#5803 (${locale.name}): a 409 SHEET_DELETED refusal renders the sheet-deleted copy inline, not the server sentence`, async () => {
+      useLocale().setLocale(locale.set)
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const err = Object.assign(new Error(SHEET_DELETED_SERVER_TEXT), { code: 'SHEET_DELETED' })
+      const client = makeClient({ retryAutomationExecution: vi.fn().mockRejectedValue(err) })
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_f')
+      ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+      await settle()
+      expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
+      const inline = mounted.container.querySelector('[data-field="rerun-error"]')
+      expect(inline?.textContent ?? '').toBe(locale.expected)
+      expect(mounted.container.textContent).not.toContain(SHEET_DELETED_SERVER_TEXT)
+      expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+      expect(mounted.container.querySelector('[data-run-id="axe_f"]')).not.toBeNull()
+      confirmSpy.mockRestore()
+      useLocale().setLocale('en')
+    })
+  }
+
   it('zh: the button label and confirm dialog switch to the zh copy', async () => {
     useLocale().setLocale('zh-CN')
     const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))

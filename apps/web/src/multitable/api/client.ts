@@ -3860,7 +3860,7 @@ export class MultitableApiClient implements CommentsApiClient {
    * The single-use `resumeToken` comes from the suspended step's C1 descriptor in the run detail.
    * `confirmSideEffects:true` is always sent (the UI confirm-gates this call). parseJson throws an
    * Error with `.code` (NOT_FOUND / ALREADY_RESUMED / RULE_CHANGED / RULE_MISSING_OR_DISABLED /
-   * RECORD_GONE) so the caller can map it to an inline message rather than a generic toast.
+   * RECORD_GONE / SHEET_DELETED) so the caller can map it to an inline message rather than a generic toast.
    */
   async resumeAutomation(resumeToken: string): Promise<AutomationRunView> {
     const res = await this.fetch('/api/multitable/automation/resume', {
@@ -3879,7 +3879,7 @@ export class MultitableApiClient implements CommentsApiClient {
    * contract as resumeAutomation). parseJson throws an Error with `.code` (NOT_FOUND /
    * NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT / RETRY_WINDOW_EXPIRED /
    * START_APPROVAL_ALREADY_CREATED / RULE_MISSING_OR_DISABLED / RULE_CHANGED /
-   * RETRY_LEDGER_EVIDENCE_MISSING) so the caller can map it to an inline message.
+   * RETRY_LEDGER_EVIDENCE_MISSING / SHEET_DELETED) so the caller can map it to an inline message.
    */
   async retryAutomationExecution(executionId: string): Promise<AutomationRunView> {
     const res = await this.fetch(

@@ -75,7 +75,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('defaults an authorized caller to simulate and marks the response dryRun', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     const svc = makeService()
 
     pinned.setApp(buildApp(svc))
@@ -89,7 +89,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('loads a readable sample record and derives the simulation actor server-side', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       access: { userId: 'server_actor' },
       capabilities: { canRead: true },
@@ -125,7 +125,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('returns a values-free record-read denial and never invokes testRun', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       status: 403,
       body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
@@ -147,7 +147,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('does not echo a missing sample record id from the shared read gate', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       status: 404,
       body: { ok: false, error: { code: 'NOT_FOUND', message: 'Record not found: rec-sensitive' } },
@@ -170,7 +170,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('rejects malformed sample record ids before any record lookup or simulation', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     const svc = makeService()
 
     pinned.setApp(buildApp(svc))
@@ -185,7 +185,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('fails closed when the sample row disappears after its read gate', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       access: { userId: 'server_actor' },
       capabilities: { canRead: true },
@@ -205,7 +205,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('rejects an unknown mode before testRun is invoked', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     const svc = makeService()
 
     pinned.setApp(buildApp(svc))
@@ -219,7 +219,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('requires explicit side-effect confirmation before invoking real_fire', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     const svc = makeService()
 
     pinned.setApp(buildApp(svc))
@@ -233,7 +233,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('requires a readable sample record before invoking real_fire', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     const svc = makeService()
 
     pinned.setApp(buildApp(svc))
@@ -254,7 +254,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('passes the authenticated actor and opaque operation key to the real-fire service gate', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       access: { userId: 'server_actor' },
       capabilities: { canRead: true },
@@ -284,7 +284,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('keeps unexpected real-fire failures values-free', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       access: { userId: 'server_actor' },
       capabilities: { canRead: true },
@@ -308,7 +308,7 @@ describe('G8 — test-run route capability gate', () => {
   })
 
   it('preserves a stable typed real-fire rejection from the service gate', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true }, sheetLiveness: 'live' })
     requireRecordReadable.mockResolvedValue({
       access: { userId: 'server_actor' },
       capabilities: { canRead: true },
