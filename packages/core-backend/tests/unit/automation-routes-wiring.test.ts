@@ -11,18 +11,22 @@
  * and assert the response shapes match the frontend's parseJson<T>
  * contracts.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
 import { usePinnedServer } from '../utils/pinned-server'
 
-// G8: the /test route now enforces canManageAutomation on the sheet. These wiring tests exercise
-// the AUTHORIZED path (they assert response redaction/shape, not the auth gate — that gate has its
-// own suite in automation-testrun-gate.test.ts), so grant the capability and stub the pool.
-vi.mock('../../src/multitable/permission-service', () => ({
-  resolveSheetCapabilities: vi.fn().mockResolvedValue({ capabilities: { canManageAutomation: true } }),
-}))
+// G8 + #5779: /test, /logs and /stats all enforce canManageAutomation on the PATH sheet. These wiring
+// tests exercise the AUTHORIZED path (they assert response shape/redaction, not the gate itself —
+// the gates have their own suites in automation-testrun-gate.test.ts and
+// automation-rule-log-read-authz.test.ts, the latter running the REAL permission service).
+//
+// The capability resolution is therefore DRIVEN per test, not mocked to a blanket true: `beforeEach`
+// installs the authorized+live answer, and the denial test below flips it. A blanket true would make
+// every "200 + shape" assertion here vacuous — it could not tell an authorized read from an ungated one.
+const resolveSheetCapabilities = vi.hoisted(() => vi.fn())
+vi.mock('../../src/multitable/permission-service', () => ({ resolveSheetCapabilities }))
 vi.mock('../../src/integration/db/connection-pool', () => {
   const client = { query: vi.fn().mockResolvedValue({ rows: [] }), getInternalPool: () => null }
   return { poolManager: { get: () => client } }
@@ -38,6 +42,8 @@ function buildApp(service: unknown) {
 function makeMockService() {
   return {
     testRun: vi.fn(),
+    // #5779: the rule-scoped reads bind the rule to the PATH sheet before reading anything.
+    getRule: vi.fn().mockResolvedValue({ id: 'rule-1', sheet_id: 'sheet-a' }),
     logs: {
       getByRule: vi.fn(),
       getStats: vi.fn(),
@@ -49,6 +55,15 @@ function makeMockService() {
 const pinned = usePinnedServer()
 
 describe('createAutomationRoutes HTTP mounting', () => {
+  beforeEach(() => {
+    resolveSheetCapabilities.mockReset()
+    // Authorized on THIS sheet, and the sheet is live — the state every shape assertion below assumes.
+    resolveSheetCapabilities.mockResolvedValue({
+      capabilities: { canManageAutomation: true },
+      sheetLiveness: 'live',
+    })
+  })
+
   it('POST /test returns flat AutomationExecution (not envelope)', async () => {
     const svc = makeMockService()
     svc.testRun.mockResolvedValue({
@@ -140,7 +155,7 @@ describe('createAutomationRoutes HTTP mounting', () => {
     expect(serialized).not.toContain('SECRETPW')
   })
 
-  it('GET /logs returns shape { executions: [...] } — NOT { logs }', async () => {
+  it('GET /logs returns shape { executions: [...] } — NOT { logs } — for an AUTHORIZED caller', async () => {
     const svc = makeMockService()
     svc.logs.getByRule.mockResolvedValue([
       { id: 'exec-a', ruleId: 'rule-1', status: 'success' },
@@ -161,6 +176,9 @@ describe('createAutomationRoutes HTTP mounting', () => {
     // empty array — explicitly guard against it.
     expect(res.body.logs).toBeUndefined()
     expect(res.body.data).toBeUndefined()
+    // #5779: the 200 above is an AUTHORIZED 200 — the gate ran, and it ran on the PATH sheet.
+    expect(resolveSheetCapabilities).toHaveBeenCalledWith(expect.anything(), expect.any(Function), 'sheet-a')
+    expect(svc.getRule).toHaveBeenCalledWith('rule-1')
   })
 
   it('GET /logs respects limit query param, clamped to [1,200]', async () => {
@@ -175,7 +193,7 @@ describe('createAutomationRoutes HTTP mounting', () => {
     expect(svc.logs.getByRule).toHaveBeenCalledWith('rule-1', 200)
   })
 
-  it('GET /stats returns flat AutomationStats (not envelope)', async () => {
+  it('GET /stats returns flat AutomationStats (not envelope) — for an AUTHORIZED caller', async () => {
     const svc = makeMockService()
     svc.logs.getStats.mockResolvedValue({
       total: 10,
@@ -191,6 +209,31 @@ describe('createAutomationRoutes HTTP mounting', () => {
     expect(res.body.total).toBe(10)
     expect(res.body.success).toBe(8)
     expect(res.body.data).toBeUndefined()
+    expect(resolveSheetCapabilities).toHaveBeenCalledWith(expect.anything(), expect.any(Function), 'sheet-a')
+    expect(svc.getRule).toHaveBeenCalledWith('rule-1')
+  })
+
+  // #5779 — discriminator for the shape tests above: the capability answer they rely on is a per-test
+  // setting, not a blanket true. Flip it and BOTH reads refuse without touching the log service.
+  it('GET /logs and /stats refuse a caller WITHOUT canManageAutomation (the shape tests are not vacuous)', async () => {
+    resolveSheetCapabilities.mockResolvedValue({
+      capabilities: { canManageAutomation: false },
+      sheetLiveness: 'live',
+    })
+    const svc = makeMockService()
+
+    pinned.setApp(buildApp(svc))
+    const logs = await request(pinned.url())
+      .get('/api/multitable/sheets/sheet-a/automations/rule-1/logs')
+      .expect(403)
+    const stats = await request(pinned.url())
+      .get('/api/multitable/sheets/sheet-a/automations/rule-1/stats')
+      .expect(403)
+
+    expect(logs.body?.error?.code).toBe('FORBIDDEN')
+    expect(stats.body?.error?.code).toBe('FORBIDDEN')
+    expect(svc.logs.getByRule).not.toHaveBeenCalled()
+    expect(svc.logs.getStats).not.toHaveBeenCalled()
   })
 
   it('returns 503 when automation service has not yet initialized', async () => {
@@ -219,8 +262,13 @@ describe('createAutomationRoutes HTTP mounting', () => {
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/stats')
       .expect(503)
 
-    // Simulate post-init
-    late = { testRun: vi.fn(), logs: { getByRule: vi.fn(), getStats: vi.fn().mockResolvedValue({ total: 0 }) } }
+    // Simulate post-init (the real AutomationService exposes getRule — the #5779 gate binds the
+    // rule to the path sheet before reading its history).
+    late = {
+      testRun: vi.fn(),
+      getRule: vi.fn().mockResolvedValue({ id: 'rule-1', sheet_id: 'sheet-a' }),
+      logs: { getByRule: vi.fn(), getStats: vi.fn().mockResolvedValue({ total: 0 }) },
+    }
 
     await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/automations/rule-1/stats')

@@ -31,6 +31,11 @@ import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-co
 import { requireAdminRole } from '../guards/audit-integration'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
+import {
+  SHEET_DELETED_CODE,
+  SHEET_DELETED_MESSAGE,
+  SHEET_NOT_FOUND_MESSAGE,
+} from '../multitable/sheet-liveness'
 import { poolManager } from '../integration/db/connection-pool'
 import {
   INBOUND_WEBHOOK_BODY_LIMIT,
@@ -166,6 +171,57 @@ function toRunView(
   }
 }
 
+/**
+ * #5779 — rule-scoped execution view for the per-rule `/logs` read.
+ *
+ * The route used to serialize the persisted row verbatim, which carries `triggerEvent` (the values of
+ * the record that fired the rule) and `ruleSnapshot` (the rule as configured at run time, action
+ * config included). Those two blobs are a governance/diagnosis surface: the cross-sheet runs API
+ * keeps them behind `requireAdminRole()` AND only emits them on its DETAIL view
+ * (`toRunView(..., { includeSnapshot: true })`). A per-rule log panel has no use for them.
+ *
+ * Why `redactAutomationExecutionForResponse` + two deletes, and NOT `toRunView(e, { includeSnapshot:
+ * false })`: `toRunView` is the A2 runs-API projection — it re-states `status` in the C1
+ * WorkflowJobStatus vocabulary and rewrites `steps` into WorkflowJob views. The rule log panel
+ * (apps/web/src/multitable/components/MetaAutomationLogViewer.vue) filters on the LEGACY
+ * success/failed/skipped values and renders `step.actionType` / `step.durationMs` / `step.output`,
+ * none of which survive that projection. This keeps the pinned flat `AutomationExecution` shape
+ * (and the secret-shape scrubbing the /test route already applies) and drops only the two blobs.
+ */
+function toRuleScopedExecutionView(execution: AutomationExecution): AutomationExecution {
+  // redactAutomationExecutionForResponse returns a NEW object, so these deletes never mutate
+  // the caller's row (and never the persisted one).
+  const view = redactAutomationExecutionForResponse(execution)
+  delete view.triggerEvent
+  delete view.ruleSnapshot
+  return view
+}
+
+/**
+ * Fail-CLOSED refusal for a permission/rule resolution that threw.
+ *
+ * Never echo the raw error message (it can carry DB host/port/user). SQLSTATE is checked FIRST:
+ * PG prose is `lc_messages`-dependent (222 runs a Chinese locale, where `does not exist` never
+ * matches), and only the 503-vs-500 choice depends on it — neither branch admits the caller.
+ */
+function sendFailClosedResolutionError(
+  res: Response,
+  err: unknown,
+  nonTransientCode: string,
+  nonTransientMessage: string,
+) {
+  const raw = err instanceof Error ? err.message : ''
+  const transient = isDbNotReadySqlState(err)
+    || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+  return res.status(transient ? 503 : 500).json({
+    ok: false,
+    error: {
+      code: transient ? 'DB_NOT_READY' : nonTransientCode,
+      message: transient ? 'Service temporarily unavailable' : nonTransientMessage,
+    },
+  })
+}
+
 function shouldUsePersistedJobs(
   execution: AutomationExecution,
   jobs: ReturnType<typeof toWorkflowJobView>[] | undefined,
@@ -248,6 +304,80 @@ export function createAutomationRoutes(
       return null
     }
     return svc
+  }
+
+  /**
+   * #5779 — authorization for the rule-addressed READS (`/logs`, `/stats`).
+   *
+   * THE GAP THIS CLOSES: both routes were registered with a single handler and NO middleware, and the
+   * handler read only `:ruleId` — the `:sheetId` segment was decorative. The log service filters on
+   * `rule_id` alone and `multitable_automation_executions` has no tenant column, so the only layer in
+   * front of them was the global session JWT gate (index.ts), which AUTHENTICATES but does not
+   * AUTHORIZE. Any logged-in caller holding a rule id could read another sheet's — another tenant's —
+   * execution history.
+   *
+   * The gate below is the one the sibling rule-scoped reads already run
+   * (`routes/univer-meta.ts` → `/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries`),
+   * in the SAME order:
+   *   1. resolve capabilities for the PATH sheet (fail-CLOSED if the resolution throws)
+   *   2. `canManageAutomation` — run history is part of the rule-authoring surface
+   *   3. sheet liveness — a soft-deleted/absent sheet is a coded 404, not a 403
+   *   4. service readiness (the pre-existing 503, unchanged)
+   *   5. `rule.sheet_id === :sheetId` — step 2 only proves authority on the PATH sheet, and
+   *      `getRule(ruleId)` is not sheet-bound, so a rule owned by another sheet must still 404.
+   *
+   * Returns null when it has already answered the request.
+   */
+  async function authorizeRuleScopedRead(
+    req: Request,
+    res: Response,
+  ): Promise<{ svc: AutomationService; sheetId: string; ruleId: string } | null> {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      res.status(400).json({ error: 'sheetId and ruleId are required' })
+      return null
+    }
+
+    try {
+      const pool = poolManager.get()
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        return null
+      }
+      if (sheetLiveness !== 'live') {
+        res.status(404).json({
+          ok: false,
+          error: sheetLiveness === 'deleted'
+            ? { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE }
+            : { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE },
+        })
+        return null
+      }
+    } catch (err) {
+      sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
+      return null
+    }
+
+    const svc = getService(res)
+    if (!svc) return null
+
+    let rule: Awaited<ReturnType<AutomationService['getRule']>>
+    try {
+      rule = await svc.getRule(ruleId)
+    } catch (err) {
+      sendFailClosedResolutionError(res, err, 'RULE_LOOKUP_FAILED', 'Failed to resolve the automation rule')
+      return null
+    }
+    // Values-free and identical for "no such rule" and "rule belongs to another sheet": the refusal
+    // must not become an oracle for rule ids or for the owning sheet.
+    if (!rule || rule.sheet_id !== sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      return null
+    }
+
+    return { svc, sheetId, ruleId }
   }
 
   // ── T1-2 inbound webhook trigger ───────────────────────────────────────
@@ -695,19 +825,17 @@ export function createAutomationRoutes(
   // ── Execution logs ──────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/logs', async (req: Request, res: Response) => {
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!ruleId) {
-      return res.status(400).json({ error: 'ruleId is required' })
-    }
-
-    const svc = getService(res)
-    if (!svc) return undefined
+    // #5779: capability → liveness → readiness → rule-owns-this-sheet. Nothing is read before it passes.
+    const authorized = await authorizeRuleScopedRead(req, res)
+    if (!authorized) return undefined
+    const { svc, ruleId } = authorized
 
     try {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200)
       const executions = await svc.logs.getByRule(ruleId, limit)
-      // Client does parseJson<{ executions: AutomationExecution[] }>(res)
-      return res.json({ executions })
+      // Client does parseJson<{ executions: AutomationExecution[] }>(res) — shape pinned; each row is
+      // the rule-scoped view (no ruleSnapshot / triggerEvent), never the raw persisted row.
+      return res.json({ executions: executions.map(toRuleScopedExecutionView) })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load logs'
       return res.status(500).json({ error: message })
@@ -717,13 +845,10 @@ export function createAutomationRoutes(
   // ── Execution stats ─────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/stats', async (req: Request, res: Response) => {
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!ruleId) {
-      return res.status(400).json({ error: 'ruleId is required' })
-    }
-
-    const svc = getService(res)
-    if (!svc) return undefined
+    // #5779: same gate as /logs — aggregate counts for a rule are still that rule's history.
+    const authorized = await authorizeRuleScopedRead(req, res)
+    if (!authorized) return undefined
+    const { svc, ruleId } = authorized
 
     try {
       const stats = await svc.logs.getStats(ruleId)
