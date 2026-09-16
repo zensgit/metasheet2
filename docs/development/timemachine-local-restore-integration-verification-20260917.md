@@ -1,6 +1,7 @@
 # Local Restore Integration Verification
 
-Status: LOCAL CHECKPOINT; full database/process restore acceptance remains open.
+Status: LOCAL CHECKPOINT; seeded-catalog database/process restore passes.
+Production capture, clean-machine backup/import and remote integration CI remain open.
 
 ## Binding
 
@@ -63,6 +64,62 @@ restart, actual row writes, or restore-job completion.
 
 ## Remaining Gates
 
-- Full isolated PostgreSQL + persistent objects + custody restore drill.
+- Production capture and clean-machine catalog backup/import are not established
+  by the seeded-catalog process drill below.
 - Broad merged-tree gates and remote exact-head CI before publication claims.
 - No Ready, merge, flag, dispatch, deployment or customer-storage action.
+
+## Database/Process Follow-up
+
+On local parent `8e2832f60`, dedicated PostgreSQL 15 initialized with UTF8 and
+the C locale applied all 406 migrations; second replay succeeded without new
+migrations. The unmodified restore-jobs suite passed 39/39, zero skips.
+An initial invocation incorrectly used the no-DB default config and collected
+no tests; it failed and is not counted. The real run used the workflow's
+`vitest.integration.config.ts` with `METASHEET_REAL_DB_TEST_STEP=1`.
+
+Four test/helper files then add a local-storage variant to that already-wired
+suite. The new selected case passed 1/1 (39 intentionally unselected), exercising
+the persistent providers, real transactional nonce reservation, locked parent
+custody, SIGKILL after a committed chunk, independent-process reopening, and
+exactly-once 5,001-row restoration plus derived-effect drain. An initial missing
+test constant import was corrected before the passing run.
+
+Mutation: remove the child's persistent object-provider assignment, leaving
+the prior IPC provider active. The case fails with
+`archive_local_process_must_read_own_objects`. Restore the assignment and verify
+the worker helper SHA-256 returns to
+`856aabb4361cec7b1dd7d91954803dc25d113ddcb000afbadcb0bfa030f60bb3`.
+The worker was subsequently narrowed to pass only location/identity fields to
+the custody store (never the recovery secret); its final SHA-256 is
+`29511de71e4d60eb37e673aa2b636a3e493833de0214b113c984c5ca521808a7`.
+
+Independent Sol review found a real P2: old fixture cleanup did not include
+nonce reservations or namespaced local key IDs. Independent old-database census
+confirmed 40 nonce rows and four local keys after the exploratory runs. That
+disposable database was dropped, not treated as a clean final baseline.
+
+Code checkpoint `7dfbec510a48eeff143aec8fd438a232fbfc49f4` tracks the exact
+identities it creates, cleans them under the existing test-only transaction
+bypass, and asserts zero counts before clearing tracking sets. Sol's narrow
+follow-up verdict was 0 P1 / 0 P2 / 0 P3; static only, session
+`01a0abd7-691f-77a1-827e-a8413767d994` closed. No production invariant changed.
+
+Final newly created PostgreSQL database: fresh 406 migrations + no-op replay
+PASS; restored full suite **40/40, zero skipped**, 208.981 seconds; local unit
+neighbors **8 files / 174 tests PASS**. Acceptance-script TypeScript config
+(`tsc -p scripts/tsconfig.recovery-archive-acceptance.json --noEmit`) and diff-check
+PASS. The four test/helper runtime blobs match that code checkpoint; only this
+verification report differs afterward. No product source changed in this round.
+
+Final independent census: archives, restore jobs, derived effects, nonce
+reservations, local keys, fixture sheets, fixture users and other database
+connections all zero (`0|0|0|0|0|0|0|0`). Both task-owned databases dropped;
+database-prefix/backend census `0|0`; dedicated PG stopped and PGDATA removed.
+The two source PRs and their remote branches were not modified.
+
+The synthetic catalog and frozen plan are seeded using existing test helpers;
+this does not establish production capture or clean-machine catalog import.
+Independent-process restart within the same host is distinct from restoring a
+database backup onto another host. No secret is written into source/evidence:
+the synthetic random recovery secret crosses only private parent/child IPC.
