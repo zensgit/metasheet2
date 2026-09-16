@@ -14,6 +14,8 @@ import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
 import { DingTalkGroupDestinationService } from '../multitable/dingtalk-group-destination-service'
 import { toDingTalkGroupDestinationResponse } from '../multitable/dingtalk-group-destination-response'
 import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
+import { loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
+import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import { WebhookService } from '../multitable/webhook-service'
 import {
   CreateWebhookSchema,
@@ -141,6 +143,30 @@ async function requireSheetAutomationAccess(res: Response, userId: string, sheet
   const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
   if (!capabilities.canManageAutomation) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+    return false
+  }
+  // #5812 final-review follow-up: capability FIRST, then liveness — same order as the automation
+  // rule-scoped reads (#5779) and test-run (#5812), so an unauthorized caller gets the identical
+  // 403 for a live and a soft-deleted sheet (no liveness oracle). Every sheet-scoped DingTalk group
+  // route goes through here: a destination bound to a soft-deleted sheet can no longer be
+  // test-sent (a REAL outbound message), created, updated, deleted, listed or have its delivery
+  // history read — the reads follow the #5779 precedent (rule-scoped reads on a deleted sheet 404).
+  let liveness: SheetLiveness
+  try {
+    liveness = await loadSheetLiveness(query, sheetId)
+  } catch (err) {
+    // FAIL CLOSED for every caller (send, write AND read): an unknown sheet state never reaches the
+    // service. Values-free: no sheet id, no raw driver message in the response or the log.
+    const sqlState = typeof (err as { code?: unknown } | null)?.code === 'string' ? (err as { code: string }).code : 'unknown'
+    logger.error(`DingTalk group sheet liveness lookup failed (sqlstate=${sqlState})`)
+    res.status(500).json({
+      ok: false,
+      error: { code: 'SHEET_STATE_CHECK_FAILED', message: 'Failed to resolve sheet state' },
+    })
+    return false
+  }
+  if (liveness !== 'live') {
+    sendSheetNotLive(res, liveness)
     return false
   }
   return true
