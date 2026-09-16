@@ -121,7 +121,8 @@ DELETE FROM spreadsheet_permissions
 | c | 送审对话框把"库里没有模板"与"你没有 `approvals:read`"折叠成同一句 | `MetaRecordApprovalSubmitDialog.vue:392-398` |
 | d | 请求号深链 `/approvals/:id` 未按 `approvals:read` 门控，而两层之下的进度卡片门控了；部分授权状态下点进去得到原始英文错误横幅 | 路由 `appRoutes.ts:369-372`（对比 `:345-348`） |
 | e | 角色管理页**加不了权限**：`PUT /api/roles/:id` 只更新角色名，静默丢弃 `permissions` 数组然后回「角色已更新」 | `routes/roles.ts:55-78` |
-| f | 授权后后端 60 秒内生效（`rbac/service.ts:13` 的 TTL，直连 SQL 不触发 `invalidateUserPerms`），但**前端必须退出重登**——权限快照只在登录时写进 localStorage | `useAuth.ts:320-337`；写入点 `LoginView.vue:227` |
+| f | 授权后后端 60 秒内生效（`rbac/service.ts:13` 的 TTL，直连 SQL 不触发 `invalidateUserPerms`）；前端**刷新页面即可**，不需要退出重登——应用启动时 `apps/web/src/main.ts:61` 调 `bootstrapSession()` → `GET /api/auth/me` → `persistUserSnapshot()`（`composables/useAuth.ts:393`、`:471`）把权限写回 localStorage，而 token 本身不带权限声明。**但在不刷新的长会话标签页里不会自动生效**：快照只在启动时写，`approvals/permissions.ts` 的 `storage`/`focus` 监听因此观察不到变化。（本行 2026-09-16 更正：初版写作「必须退出重登」，追代码后为误，已改。） |
+| f2 | **授权即时、收权不即时**：`getAccessSnapshot` 把 localStorage 快照与 **JWT 声明取并集**（`useAuth.ts:330-334`），而 token 里烤进了 `role`，`hasPermission` 又对 `roles.includes('admin')` 短路。所以把一个管理员在库里降级或收回权限，**刷新页面不会体现**，要等重新登录或 token 过期。只影响界面门控，服务端仍按库判定。另两种刷新也不够的情形：直接写 `user_permissions` 的授予会被命名空间准入丢掉（必须经角色，与 §4.2 的做法一致），以及非生产的 `RBAC_TOKEN_TRUST=1` / `/api/auth/dev-token`（烤进 `*:*`）。 |
 | g | 想要"只能从记录送审、不能在审批中心自由发起"，现有码做不到（`approvals:write` 同时是 `POST /api/approvals` 的门） | `routes/approvals.ts:1684`；窄码提案见 #5734 |
 | h | 申请人/参与人若无 `approvals:read` 看不到自己那条审批的进度 | 提案见 #5776 |
 
@@ -129,7 +130,7 @@ DELETE FROM spreadsheet_permissions
 
 Claude 不接触凭据，这一步必须由 owner 或客户执行。每步一个可证伪的观察点：
 
-1. 以一线身份登录（**授权后第一次必须重新登录**），打开备料表 → 应能看到网格（表级授权生效）。
+1. 以一线身份登录（若该标签页在授权之前就开着，**刷新一次页面**；不需要退出重登，理由见 §7f），打开备料表 → 应能看到网格（表级授权生效）。
 2. 打开记录抽屉 → kebab 里应出现「送审」（`multitable:submit-approval` 生效）。
 3. 点「送审」→ 模板下拉应出现「备料送审示例」（`approvals:read` 生效；若显示「无可用模板或无审批读取权限」说明第 5 道门没过）。
 4. 提交 → 应创建成功并出现 `pending` 行（`approvals:write` 与组织派生都过）。若 422 且文案是英文，见 §7a。
