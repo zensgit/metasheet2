@@ -1,13 +1,41 @@
 # Attendance #4556 W4C-5 Transition Safety Amendment
 
 Date: 2026-08-04
-Status: **PROPOSED / staging HOLD**
-Decision: `OD-W4C-61`
+Status: **RATIFIED / staging HOLD** (core transition-boundary hardening,
+sections 1-6, only)
+Decision: `OD-W4C-61` — resolved `(a)`
 Baseline: `783eb72fe038083e21d896bc220c7afcaffaf88d`
 
-This amendment was discovered while preparing the owner-authorized W4C-5 tools
-and runbook. It authorizes no transition, flag, staging access, deployment,
-soak, production/customer data use, external notification, or issue closure.
+Ratified: 2026-08-05, merged SHA
+`2a2a5eee4f00abceff94ed6360e8c051708e35f7` — the commit that landed this
+document on `main` (PR 4747) — with `OD-W4C-61=(a)`. Durable owner record
+(relayed transcription): PR 4747 comment `5189421034`,
+<https://github.com/zensgit/metasheet2/pull/4747#issuecomment-5189421034>.
+
+Scope of what the ratification authorizes: **only** the core
+transition-boundary hardening in sections 1-6, written from fresh `main` in one
+**Draft/HOLD** PR, with real-PostgreSQL, concurrency, mutation, and fresh
+exact-head independent gates, stopping after that gate for a separate merge
+decision.
+
+Ratification of a design lock authorizes the slice it names and nothing
+downstream. **Staging remains HOLD.** This amendment was discovered while
+preparing the owner-authorized W4C-5 tools and runbook, and it still authorizes
+no hardening merge, no executable operator tooling, no transition, no staging
+access, no flag change, no deployment, no seven-day soak, no
+production/customer data use, no external notification, and no closure of issue
+4556; nor does it retroactively authorize any earlier runtime action. Each of
+those remains a separate, un-granted owner act.
+
+**Status reconciliation note (2026-08-09):** this header previously read
+`PROPOSED / staging HOLD`. Only the `PROPOSED` half was in-repo status drift —
+the owner record cited above resolved `OD-W4C-61=(a)` on 2026-08-05, before
+this correction, and is unchanged by it. **The staging HOLD is not drift and is
+not lifted:** nothing in this ratification, and nothing in this edit,
+authorizes staging, soak, flags, or deployment. This edit transcribes an
+existing record and confers no new authority; the linked owner comment is the
+authority, not this document and not the pull request carrying this edit. If
+any line here misstates that record, it must not merge.
 
 ## 0. Finding
 
@@ -165,7 +193,12 @@ passed a separate exact-head gate.
 
 ## 7. Owner Decision
 
-`OD-W4C-61` remains **OPEN**.
+`OD-W4C-61` is **RESOLVED = (a)** by the owner record of 2026-08-05; see the
+ratification record in this document's header. The ballot below is retained
+verbatim as the options that were put to the owner. Section 8 step 3 is the
+authorized step; steps 4 and 5 remain un-granted, and staging access,
+flag changes, transitions, the seven-day soak, and issue closure stay owner
+gated.
 
 - **(a) RECOMMENDED:** harden the canonical transition boundary according to
   sections 1-6 before any executable W4C-5 transition tooling is accepted.

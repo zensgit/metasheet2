@@ -1,9 +1,40 @@
 # Attendance Issue #4556 W4C-2 Scheduled-Run Identity Amendment (section 7.1a)
 
-> Status: **PROPOSED** — requires owner RATIFY of the exact merged SHA before
-> any runtime code is written.
+> Status: **RATIFIED** (Bundle A; P1-2 implementation on PR 4612 only)
 >
 > Date: 2026-07-26
+>
+> Ratified: 2026-07-27, merged SHA
+> `d1bed9d640f8ee634975c70a6c981d2f49a97832` — the commit that landed this
+> document on `main` (PR 4617) — together with its post-merge provenance
+> erratum at merged SHA `d449aa7e6d02f94df2738a77cafffa778b12fde0` (PR 4637),
+> which is the commit that produced this document's current content on `main`.
+> Resolution is rule **bundle A**: `OD-W4C-44=(a)`, `45=(a)`, `46=(a)`,
+> `47=(a)`, `48=(a)`, `49=(a)`, `50=(a)`, `51=(a)`, `52=(a)`, **`53=(i)`** —
+> note that `53` resolves to `(i)`, not `(a)`; bundle A is not uniformly `(a)`.
+> Durable owner record: PR 4617 comment `5090978124`,
+> <https://github.com/zensgit/metasheet2/pull/4617#issuecomment-5090978124>.
+>
+> Scope of what the ratification authorizes: per section 4, starting the P1-2
+> implementation on PR 4612 under `53=(i)` (the narrow comparison domain is
+> ratified as a second, permanently maintained fingerprint distinct from the
+> storage column), preceded by the fresh exact-head review that section 4
+> step 4 mandates, and followed by a full independent exact-head gate on
+> PR 4612's resulting head.
+>
+> Ratification authorizes the slice it names and nothing downstream: it does
+> not authorize merging PR 4612 (a separate ruling after the final gate), any
+> W4C-3a/3b/3c/4 slice (lock section 12 — the prior slice must merge first),
+> the staging soak (separately gated), any flag enablement or deployment, or
+> closure of issue 4556 (lock section 14-10).
+>
+> **Status reconciliation note (2026-08-09):** this header previously read
+> `PROPOSED — requires owner RATIFY of the exact merged SHA before any runtime
+> code is written`. That was in-repo status drift, not a pending decision — the
+> owner record cited above predates this correction and is unchanged by it. This
+> edit transcribes that existing record and confers no new authority; the linked
+> owner comment is the authority, not this document and not the pull request
+> carrying this edit. If any line here misstates that record, it must not merge.
 >
 > **Provenance correction (post-merge erratum, 2026-07-27):** PR #4612 was
 > rebased onto `origin/main` `e4509ab71e6061e7d1188d24f9b30f09fb71c435` on
