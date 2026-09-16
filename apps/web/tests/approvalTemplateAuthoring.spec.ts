@@ -68,6 +68,13 @@ const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
+// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3): CategoryCandidateInput.vue
+// calls this on every mount; the mock module previously omitted it entirely, so every mounted
+// instance's bare `catch {}` silently swallowed a vitest "no export defined on mock" error and the
+// dropdown always rendered zero candidates. Default resolves to a small non-empty list so tests
+// that mount the authoring view can observe both "the endpoint was called" (C1 first conjunct) and
+// "a fetched candidate renders" without each test having to configure it individually.
+const listTemplateCategoriesSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
@@ -101,6 +108,7 @@ vi.mock('../src/approvals/api', () => ({
     return template
   },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
+  listTemplateCategories: () => listTemplateCategoriesSpy(),
 }))
 
 vi.mock('element-plus', () => ({
@@ -1235,6 +1243,8 @@ describe('TemplateAuthoringView', () => {
     publishTemplateSpy.mockReset()
     getTemplateSpy.mockReset()
     dryRunApprovalConditionFormulaSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue(['差旅', '采购'])
     pushSpy.mockClear()
     replaceSpy.mockClear()
     createTemplateSpy.mockImplementation(async (payload) => ({
@@ -1376,6 +1386,25 @@ describe('TemplateAuthoringView', () => {
     expect(payload.slaHours).toBe(24)
     expect(payload.description).toBe('跨部门出差需要审批')
     expect(payload.visibilityScope).toEqual({ type: 'dept', ids: ['dept_a', 'dept_b'] })
+  })
+
+  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4): the category field
+  // must actually be wired to `GET /api/approval-templates/categories`, not merely still work as a
+  // free-text input if the wiring is ripped out (a plain `<el-input>` renders identically and
+  // passes every OTHER test in this file — see the gate's G-M6 mutation, which reverted both call
+  // sites to `<el-input>` and found zero red tests before this pin existed). This observes the
+  // fetch call directly, then confirms a fetched candidate actually reaches the rendered dropdown
+  // (proving the round-trip end-to-end, not just that SOME function got invoked at import time).
+  it('C1: the category field fetches candidates from listTemplateCategories on mount and renders one', async () => {
+    await mountView()
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+
+    const categoryInput = container!.querySelector('[data-testid="approval-template-category"]') as HTMLInputElement
+    categoryInput.dispatchEvent(new Event('focus'))
+    await flushUi()
+    const list = container!.querySelector('[data-testid="category-candidate-list"]')
+    expect(list?.textContent).toContain('差旅')
   })
 
   // P1-A0 validation-count derivation — the 基础信息 step-nav badge reads `.length` off
@@ -1747,6 +1776,15 @@ describe('TemplateAuthoringView', () => {
     expect(keyInput.value).not.toBe('')
     expect(keyInput.readOnly).toBe(true)
 
+    // C1 second conjunct (approval-form-ux-slice1 design §3.3, gate condition 4): type an
+    // off-list category — NOT one of the fetched candidates — before the ordinary save below, to
+    // pin that (a) the candidate wiring is genuinely allow-create (never degrades to a closed
+    // set), and (b) `buildUpdateTemplatePayload`'s new omit-destructure carries `category` through
+    // to the PATCH body rather than silently dropping it (see the gate's G-M5 mutation, which
+    // added `category` to that destructure's omit list and found zero red tests before this pin
+    // existed — a newly-typed category would then vanish from every save with no error).
+    setInput('approval-template-category', '临时借款')
+
     // NEW mechanism (A6/A1): an ordinary, untouched save of an existing template — PATCH must not
     // carry `key` at all, not merely carry the same value.
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
@@ -1754,6 +1792,7 @@ describe('TemplateAuthoringView', () => {
     expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
     const normalSavePayload = updateTemplateSpy.mock.calls[0]?.[1] as Record<string, unknown>
     expect(Object.prototype.hasOwnProperty.call(normalSavePayload, 'key')).toBe(false)
+    expect(normalSavePayload.category).toBe('临时借款')
     updateTemplateSpy.mockClear()
 
     // ORIGINAL mechanism (pre-slice1 gate P2-1), kept verbatim: the pure validator still blocks a

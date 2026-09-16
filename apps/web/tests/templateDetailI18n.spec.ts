@@ -103,6 +103,12 @@ const unarchiveTemplateSpy = vi.fn()
 const listTemplateVersionsSpy = vi.fn().mockResolvedValue([])
 const getTemplateVersionSpy = vi.fn()
 const restoreTemplateVersionSpy = vi.fn()
+// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3): CategoryCandidateInput.vue
+// calls this on every mount; the mock module previously omitted it entirely, so every mounted
+// instance's bare `catch {}` silently swallowed a vitest "no export defined on mock" error and the
+// dropdown always rendered zero candidates. Default resolves to a small non-empty list so tests
+// can observe both "the endpoint was called" (C1 first conjunct) and "a fetched candidate renders".
+const listTemplateCategoriesSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   updateTemplateCategory: (id: string, category: string | null) => updateTemplateCategorySpy(id, category),
@@ -114,6 +120,7 @@ vi.mock('../src/approvals/api', () => ({
   listTemplateVersions: (id: string) => listTemplateVersionsSpy(id),
   getTemplateVersion: (id: string, versionId: string) => getTemplateVersionSpy(id, versionId),
   restoreTemplateVersion: (id: string, versionId: string, req: unknown) => restoreTemplateVersionSpy(id, versionId, req),
+  listTemplateCategories: () => listTemplateCategoriesSpy(),
 }))
 
 const elSuccessSpy = vi.fn()
@@ -409,6 +416,7 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     listTemplateVersionsSpy.mockReset().mockResolvedValue([])
     getTemplateVersionSpy.mockReset()
     restoreTemplateVersionSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset().mockResolvedValue(['差旅', '采购'])
     confirmSpy.mockClear().mockResolvedValue(undefined)
     elSuccessSpy.mockClear()
     elErrorSpy.mockClear()
@@ -620,6 +628,31 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     root2.querySelector<HTMLButtonElement>('[data-testid="template-detail-category-save-button"]')!.click()
     await flushUi()
     expect(elSuccessSpy).toHaveBeenCalledWith('已更新分类为 报销')
+  })
+
+  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4): the detail-view
+  // category field must actually be wired to `GET /api/approval-templates/categories`, not merely
+  // still work as a free-text input if the wiring is ripped out (see G-M6 in the gate report,
+  // which reverted BOTH call sites — authoring AND this one — to plain `<el-input>` and found zero
+  // red tests anywhere in the suite before this pin existed). `CategoryCandidateInput` only mounts
+  // once editing begins (`v-else` branch, `beginEditCategory`), so the fetch is observed after
+  // entering edit mode, then a fetched candidate is confirmed to reach the rendered dropdown.
+  it('C1: entering category edit mode fetches candidates from listTemplateCategories and renders one', async () => {
+    // category: null so categoryDraft starts empty and the candidate filter (which narrows by the
+    // CURRENT typed value) shows the full fetched list rather than only entries containing the
+    // template's existing category.
+    mockActiveTemplate.value = buildTemplate({ category: null })
+    const root = await mountView()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="template-detail-category-edit-button"]')!.click()
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+
+    const input = root.querySelector<HTMLInputElement>('[data-testid="template-detail-category-input"]')!
+    input.dispatchEvent(new Event('focus'))
+    await flushUi()
+    const list = root.querySelector('[data-testid="category-candidate-list"]')
+    expect(list?.textContent).toContain('采购')
   })
 
   it('SLA edit: invalid-value error and update-success toast follow the locale', async () => {
