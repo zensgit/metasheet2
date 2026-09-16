@@ -37,7 +37,7 @@ export const SYSTEM_PEOPLE_SHEET_KIND = 'people_directory'
 
 /**
  * #5825 — the ONE "hide this system sheet from sheet lists / the selected-sheet slot" predicate, used by every
- * list-filtering site in `routes/univer-meta.ts` (`GET /bases`, `GET /bases/:baseId/context`, `GET /context`,
+ * list-filtering site in `routes/univer-meta.ts` (`GET /bases`, `POST /templates`, `GET /context`,
  * `GET /sheets`). It recognises the People directory sheet the same way the delete guard
  * (`sheet-delete-guard.ts` `isSystemManagedSheet`) does: the server-owned `system_kind`, OR the description
  * sentinel (People sheets provisioned before `system_kind` existed carry only the sentinel — no backfill).
