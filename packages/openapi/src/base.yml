@@ -246,10 +246,28 @@ components:
                 $ref: '#/components/schemas/CommentMentionCandidate'
             total:
               type: integer
+              description: Number of items in this (clamped) page - never a deployment-wide count.
               example: 1
             limit:
               type: integer
+              description: Effective page size after the server ceiling (50).
               example: 50
+            query:
+              type: string
+              description: The trimmed search term that was applied (empty when `requiresQuery` is true).
+              example: jam
+            hasMore:
+              type: boolean
+              description: True when more candidates matched than this page holds.
+              example: false
+            requiresQuery:
+              type: boolean
+              description: True when the call carried no usable search term; `items` is then empty.
+              example: false
+            minQueryLength:
+              type: integer
+              description: Minimum trimmed search-term length the server accepts.
+              example: 1
     CommentUnreadCountResponse:
       type: object
       properties:

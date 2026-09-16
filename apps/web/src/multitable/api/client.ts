@@ -673,8 +673,24 @@ function normalizeCommentMentionSummary(
 }
 
 function normalizeCommentMentionSuggestions(
-  payload: { items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number } | null | undefined,
-): { items: MetaCommentMentionSuggestion[]; total: number; limit: number } {
+  payload: {
+    items?: Array<Partial<MetaCommentMentionSuggestion>>
+    total?: number
+    limit?: number
+    query?: unknown
+    hasMore?: unknown
+    requiresQuery?: unknown
+    minQueryLength?: unknown
+  } | null | undefined,
+): {
+  items: MetaCommentMentionSuggestion[]
+  total: number
+  limit: number
+  query: string
+  hasMore: boolean
+  requiresQuery: boolean
+  minQueryLength: number
+} {
   return {
     items: Array.isArray(payload?.items)
       ? payload.items
@@ -687,6 +703,11 @@ function normalizeCommentMentionSuggestions(
       : [],
     total: typeof payload?.total === 'number' ? payload.total : 0,
     limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+    // #5795 markers (see listCommentMentionSuggestions).
+    query: typeof payload?.query === 'string' ? payload.query : '',
+    hasMore: payload?.hasMore === true,
+    requiresQuery: payload?.requiresQuery === true,
+    minQueryLength: typeof payload?.minQueryLength === 'number' ? payload.minQueryLength : 1,
   }
 }
 
@@ -3496,13 +3517,27 @@ export class MultitableApiClient implements CommentsApiClient {
     }
   }
 
+  /**
+   * #5795: the endpoint is SEARCH-REQUIRED and capped (same contract as listPersonFieldDirectory). A call
+   * without `q` answers 200 with no items and `requiresQuery: true` — render "type to search", never
+   * "no match". `hasMore` is set when the answer was clamped to the server ceiling; `total` is only the
+   * size of the returned page (the server no longer discloses a deployment-wide count).
+   */
   async listCommentMentionSuggestions(params: {
     spreadsheetId: string
     q?: string
     limit?: number
-  }): Promise<{ items: MetaCommentMentionSuggestion[]; total: number; limit: number }> {
+  }): Promise<{
+    items: MetaCommentMentionSuggestion[]
+    total: number
+    limit: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/comments/mention-candidates${qs(params)}`)
-    const data = await this.parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
+    const data = await this.parseJson<Parameters<typeof normalizeCommentMentionSuggestions>[0]>(res)
     return normalizeCommentMentionSuggestions(data)
   }
 
@@ -3628,13 +3663,38 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
+  /**
+   * #5795: search-required like listPersonFieldDirectory — no `q` ⇒ 200 + no items + `requiresQuery`
+   * (render "type to search"); `hasMore` ⇒ the page was clamped (at most 50).
+   */
   async listFormShareCandidates(
     sheetId: string,
     params?: { q?: string; limit?: number },
-  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+  ): Promise<{
+    items: MetaSheetPermissionCandidate[]
+    total: number
+    limit: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/form-share-candidates${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
-    return normalizeSheetPermissionCandidates(data)
+    const data = await this.parseJson<{
+      items?: Array<Partial<MetaSheetPermissionCandidate>>
+      total?: number
+      limit?: number
+      query?: string
+      hasMore?: unknown
+      requiresQuery?: unknown
+      minQueryLength?: unknown
+    }>(res)
+    return {
+      ...normalizeSheetPermissionCandidates(data),
+      hasMore: data.hasMore === true,
+      requiresQuery: data.requiresQuery === true,
+      minQueryLength: typeof data.minQueryLength === 'number' ? data.minQueryLength : 1,
+    }
   }
 
   // --- API Tokens ---

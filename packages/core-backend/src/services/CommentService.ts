@@ -16,6 +16,11 @@ import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 import { insertCommittedAuditKysely, type OapiWriteAuditContext } from '../multitable/oapi-write-audit'
 import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
+import {
+  escapeMentionLikeTerm,
+  MENTION_CANDIDATES_MAX_ITEMS,
+  MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+} from './comment-mention-bounds'
 
 /**
  * Server-side emoji allowlist for comment reactions (B6, design-lock §3.2).
@@ -450,51 +455,66 @@ export class CommentService {
     return { items, total }
   }
 
+  /**
+   * @-mention candidates: active users matching `q` (name / email / id substring).
+   *
+   * #5795 — BOUNDED DISCLOSURE, ELIGIBILITY UNCHANGED. The candidate set is still "every active user
+   * in the deployment" (the predicate below is untouched: `is_active = true` plus the term); what
+   * changed is how much of it one call can see:
+   *  - no term ⇒ no rows. A term-less call used to return the first active users of the deployment
+   *    (50 by default, up to 100 on request; label + email subtitle); it now returns an empty list
+   *    WITHOUT issuing any query. The routes answer such a
+   *    call before reaching here (with a `requiresQuery` marker); this is the second layer, so the
+   *    service stays bounded for any other caller.
+   *  - the term is a LITERAL substring (LIKE metacharacters escaped), so a typed `%` / `_` searches
+   *    for that character. That is search correctness, not a disclosure bound: the term is matched
+   *    against name, email AND id, so `-` (in every UUID-shaped id) or `@` (in every well-formed
+   *    email address) still matches (almost) every active user, and — since only a name/email/id that
+   *    STARTS with the character ranks earlier below, which a UUID or an email never does — comes back
+   *    essentially in the old term-less created_at, id order. Against a deliberate caller the
+   *    per-request bound is the LIMIT alone (see comment-mention-bounds.ts).
+   *  - SQL LIMIT is capped at MENTION_CANDIDATES_MAX_ITEMS + 1 (the +1 is the route's `hasMore`
+   *    probe row), so no call hydrates more than that many names/emails.
+   *  - no COUNT. The old `total` was a deployment-wide count of matching active users (for a
+   *    term-less call: the size of the whole user base) and was returned to any comments:read
+   *    holder. It is no longer computed at all; the routes report the clamped page size instead.
+   */
   async listMentionCandidates(
     spreadsheetId: string,
     options?: { q?: string; limit?: number },
-  ): Promise<{ items: CommentMentionCandidate[]; total: number }> {
+  ): Promise<{ items: CommentMentionCandidate[] }> {
     const normalizedSheetId = spreadsheetId.trim()
-    if (!normalizedSheetId) return { items: [], total: 0 }
+    if (!normalizedSheetId) return { items: [] }
 
-    const limit = Math.min(100, Math.max(1, Number(options?.limit ?? 50)))
     const normalizedQuery = options?.q?.trim().toLowerCase() ?? ''
-    const likeQuery = `%${normalizedQuery}%`
-    const startsWithQuery = `${normalizedQuery}%`
+    if (normalizedQuery.length < MENTION_CANDIDATES_MIN_QUERY_LENGTH) return { items: [] }
 
-    let baseQuery = db
+    const requestedLimit = Number(options?.limit ?? MENTION_CANDIDATES_MAX_ITEMS)
+    const limit = Math.min(
+      MENTION_CANDIDATES_MAX_ITEMS + 1,
+      Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : MENTION_CANDIDATES_MAX_ITEMS),
+    )
+    const escapedQuery = escapeMentionLikeTerm(normalizedQuery)
+    const likeQuery = `%${escapedQuery}%`
+    const startsWithQuery = `${escapedQuery}%`
+
+    const rows = await db
       .selectFrom('users')
       .where('is_active', '=', true)
-
-    if (normalizedQuery) {
-      baseQuery = baseQuery.where((eb) => eb.or([
+      .where((eb) => eb.or([
         sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
         sql<boolean>`lower(email) like ${likeQuery}`,
         sql<boolean>`lower(id) like ${likeQuery}`,
       ]))
-    }
-
-    const totalRow = await baseQuery
-      .select(({ fn }) => fn.countAll<number>().as('c'))
-      .executeTakeFirst()
-    const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
-
-    let rowsQuery = baseQuery
       .select(['id', 'name', 'email'])
-
-    if (normalizedQuery) {
-      rowsQuery = rowsQuery
-        .orderBy(
-          sql<number>`case
-            when lower(coalesce(name, '')) like ${startsWithQuery} then 0
-            when lower(email) like ${startsWithQuery} then 1
-            when lower(id) like ${startsWithQuery} then 2
-            else 3
-          end`,
-        )
-    }
-
-    const rows = await rowsQuery
+      .orderBy(
+        sql<number>`case
+          when lower(coalesce(name, '')) like ${startsWithQuery} then 0
+          when lower(email) like ${startsWithQuery} then 1
+          when lower(id) like ${startsWithQuery} then 2
+          else 3
+        end`,
+      )
       .orderBy('created_at', 'asc')
       .orderBy('id', 'asc')
       .limit(limit)
@@ -512,7 +532,6 @@ export class CommentService {
           subtitle,
         }
       }),
-      total,
     }
   }
 

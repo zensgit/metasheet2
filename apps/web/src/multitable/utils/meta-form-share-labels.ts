@@ -47,6 +47,9 @@ export type MetaFormShareLabelKey =
   | 'candidate.addSection'
   | 'candidate.loading'
   | 'candidate.empty'
+  // #5795: the candidate endpoint is search-required and capped.
+  | 'candidate.typeToSearch'
+  | 'candidate.refineSearch'
   | 'candidate.user'
   | 'candidate.memberGroup'
   | 'candidate.inactiveUser'
@@ -150,6 +153,11 @@ const LABELS: Record<MetaFormShareLabelKey, { en: string; zh: string }> = {
   'candidate.addSection': { en: 'Add from eligible people and groups', zh: '从可添加人员和组中选择' },
   'candidate.loading': { en: 'Searching users and member groups...', zh: '正在搜索用户和成员组...' },
   'candidate.empty': { en: 'No matching candidates.', zh: '没有匹配的候选项。' },
+  'candidate.typeToSearch': { en: 'Type a name, email or group to search.', zh: '输入姓名、邮箱或成员组名称以搜索。' },
+  'candidate.refineSearch': {
+    en: 'Showing the first matches only — narrow your search.',
+    zh: '仅显示前若干条匹配结果，请细化搜索。',
+  },
   'candidate.user': { en: 'User', zh: '用户' },
   'candidate.memberGroup': { en: 'Member group', zh: '成员组' },
   'candidate.inactiveUser': { en: 'Inactive users cannot be added', zh: '已停用用户不能添加' },

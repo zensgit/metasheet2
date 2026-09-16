@@ -356,6 +356,7 @@
           :ai-shortcut="aiShortcut"
           :button-run-pending="buttonRunPending"
           :mention-suggestions="mentionSuggestions"
+          :mention-search="mentionSearch"
           :field-errors="fieldErrors"
           @patch="(fieldId, value) => emit('patch', fieldId, value)"
           @ai-preview="(field) => emit('ai-preview', field)"
@@ -433,6 +434,7 @@
           :reacting-keys="commentReactingKeys"
           :current-user-id="currentUserId"
           :mention-suggestions="mentionSuggestions"
+          :mention-search="mentionSearch"
           :composer-initial-mentions="commentComposerInitialMentions"
           @submit="(payload: { content: string; mentions: string[] }) => emit('comment-submit', payload)"
           @resolve="(commentId: string) => emit('comment-resolve', commentId)"
@@ -520,6 +522,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableComment,
   MultitableCommentPresenceSummary,
@@ -604,6 +607,8 @@ const props = withDefaults(defineProps<{
    *  `commentMentionSuggestions` ref the workbench already threads in for the fields panel, no
    *  second copy. */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   // --- W2 S4 (design-lock §2 评论面板 row, §7 S4): comments-tab pass-through props. All sourced
   // from the workbench's existing `commentsState` (useMultitableComments) + `selectedRecordCommentsScope`
   // (server G-8 gated) -- the SAME data the pre-S4 second `<MetaCommentsDrawer>` consumed; only the

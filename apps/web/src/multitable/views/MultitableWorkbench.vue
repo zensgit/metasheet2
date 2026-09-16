@@ -407,6 +407,7 @@
           :button-run-pending="buttonRunPending"
           :fetch-record="fetchLinkedRecordFn"
           :mention-suggestions="commentMentionSuggestions"
+          :mention-search="searchCommentMentions"
           :remote-cursors-by-cell="sheetPresenceState.remoteCursorsByCell.value"
           @cursor-focus="onCellCursorFocus"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
@@ -452,6 +453,7 @@
         :ai-shortcut="aiShortcut.state"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
+        :mention-search="searchCommentMentions"
         :comments="commentsState.comments.value"
         :comments-loading="commentsState.loading.value"
         :can-resolve-comments="effectiveRowActions.canComment"
@@ -777,6 +779,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadContext,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearchResult,
   MetaCommentMentionSuggestion,
   MetaCommentsScope,
   MetaFieldPermission,
@@ -1507,8 +1510,11 @@ const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
+// #5795: NOT a roster any more. The mention-candidate endpoint is search-required and capped, so this
+// only remembers people the mention editors' searches returned on the active sheet (newest first,
+// capped) — it keeps already-picked labels resolvable (buildEditingMentionSuggestions) without a
+// term-less fetch. Cleared on sheet switch.
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
-const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
@@ -2419,10 +2425,9 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
       containerType: 'meta_sheet',
       containerId: workbench.activeSheetId.value,
     }
-  await Promise.all([
-    commentsState.loadComments(scope),
-    ensureCommentMentionSuggestions(),
-  ])
+  // #5795: no mention-roster preload here any more — the composer searches as the user types
+  // (searchCommentMentions), so opening a thread issues no term-less candidate request.
+  await commentsState.loadComments(scope)
   highlightedCommentId.value = options?.highlightCommentId ?? null
   if (!selectedCommentFieldId.value && options?.highlightCommentId) {
     const derivedFieldId = resolveCommentThreadFieldId(options.highlightCommentId)
@@ -2455,28 +2460,37 @@ function resolveCommentThreadFieldId(commentId: string): string | null {
   return null
 }
 
-async function ensureCommentMentionSuggestions(force = false) {
-  const sheetId = workbench.activeSheetId.value
-  if (!sheetId) {
-    commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
-    return
-  }
-  if (!force && commentMentionSuggestionsLoadedForSheetId.value === sheetId) return
+// #5795 — server-side @-mention search, handed to every mention editor the workbench hosts (comment
+// composer via the inspector, rich-longText editors via the grid and the inspector's fields panel).
+// The endpoint answers a term-less call with `requiresQuery` (the editors render "type to search")
+// and caps every answer; 20 leaves headroom over the 6 rows an editor shows once already-picked
+// people are excluded. Errors propagate: the editors treat a failed search as "no remote matches".
+const COMMENT_MENTION_SEARCH_LIMIT = 20
+const COMMENT_MENTION_REMEMBERED_MAX = 50
 
-  try {
-    const result = await workbench.client.listCommentMentionSuggestions({
-      spreadsheetId: sheetId,
-      limit: 100,
+function rememberCommentMentionSuggestions(items: MetaCommentMentionSuggestion[]) {
+  const seen = new Set<string>()
+  commentMentionSuggestions.value = [...items, ...commentMentionSuggestions.value]
+    .filter((item) => {
+      if (seen.has(item.id)) return false
+      seen.add(item.id)
+      return true
     })
-    if (workbench.activeSheetId.value !== sheetId) return
-    commentMentionSuggestions.value = result.items
-    commentMentionSuggestionsLoadedForSheetId.value = sheetId
-  } catch {
-    if (workbench.activeSheetId.value !== sheetId) return
-    commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
-  }
+    .slice(0, COMMENT_MENTION_REMEMBERED_MAX)
+}
+
+async function searchCommentMentions(query: string): Promise<MetaCommentMentionSearchResult> {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return { items: [], requiresQuery: false, hasMore: false }
+  const result = await workbench.client.listCommentMentionSuggestions({
+    spreadsheetId: sheetId,
+    q: query,
+    limit: COMMENT_MENTION_SEARCH_LIMIT,
+  })
+  // A sheet switch while the request was in flight: the answer belongs to the old sheet's editors.
+  if (workbench.activeSheetId.value !== sheetId) return { items: [], requiresQuery: false, hasMore: false }
+  if (result.items.length > 0) rememberCommentMentionSuggestions(result.items)
+  return { items: result.items, requiresQuery: result.requiresQuery === true, hasMore: result.hasMore === true }
 }
 
 // Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line "every selectRecord(...,
@@ -5273,7 +5287,6 @@ watch(
     unsubscribeMentionRealtime?.()
     unsubscribeMentionRealtime = null
     commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
 
     if (!sheetId) {
       mentionInboxState.clearSummary()
@@ -5281,11 +5294,8 @@ watch(
     }
 
     void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
-    // Mention candidates are NOT loaded eagerly here: the reset above cleared
-    // commentMentionSuggestionsLoadedForSheetId, so the on-demand call inside
-    // loadCommentsForRecord fetches a fresh list the first time a comment
-    // composer actually opens on this sheet. Eager-loading added a request to
-    // every sheet open for a list most sessions never use.
+    // Mention candidates are never loaded as a list (#5795): the endpoint is search-required, and the
+    // mention editors query it through searchCommentMentions as the user types.
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
       onCommentUpdated: mentionInboxState.onRealtimeCommentUpdated,

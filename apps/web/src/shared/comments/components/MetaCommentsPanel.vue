@@ -179,6 +179,7 @@
       <MetaCommentComposer
         v-model="draftModel"
         :suggestions="mentionSuggestions"
+        :mention-search="mentionSearch"
         :initial-mentions="composerInitialMentions"
         :disabled="!canComment"
         :submitting="submitting"
@@ -194,7 +195,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
-import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { normalizeMultitableComment } from '../normalize'
 import {
   commentLabel,
@@ -234,6 +235,8 @@ const props = withDefaults(defineProps<{
   mentionSuggestions?: MetaCommentMentionSuggestion[]
   composerInitialMentions?: MetaCommentMentionSuggestion[]
   mentionCandidates?: MentionCandidateInput[]
+  /** #5795: host-supplied server-side mention search, forwarded to the composer untouched. */
+  mentionSearch?: MetaCommentMentionSearch | null
   /**
    * S3b: gates the reactions block (picker + existing chips) independent of `canComment`.
    * Defaults `true` so every existing multitable mount (which never passes this prop) is
@@ -257,6 +260,7 @@ const props = withDefaults(defineProps<{
   mentionSuggestions: () => [],
   composerInitialMentions: () => [],
   mentionCandidates: () => [],
+  mentionSearch: null,
   enableReactions: true,
 })
 

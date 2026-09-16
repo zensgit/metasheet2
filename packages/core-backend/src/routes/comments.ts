@@ -16,6 +16,11 @@ import {
   CommentNotFoundError,
   CommentValidationError,
 } from '../services/CommentService'
+import {
+  MENTION_CANDIDATES_MAX_ITEMS,
+  MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+} from '../services/comment-mention-bounds'
+import type { CommentMentionCandidate } from '../di/identifiers'
 
 const logger = new Logger('CommentsRoutes')
 const DEFAULT_LIMIT = 50
@@ -166,6 +171,54 @@ function filterDeniedRows(rowIds: string[] | undefined, context: CommentReadCont
   return rowIds.filter((rowId) => !isRowDenied(context, rowId))
 }
 
+/**
+ * #5795 — the ONE place both @-mention candidate routes apply their disclosure bounds (same three
+ * bounds #5781 put on GET /api/multitable/sheets/:sheetId/person-fields/:fieldId/directory, same
+ * response markers). Called only AFTER the route's existing gates (rbacGuard + the G-8 sheet-read
+ * gate), so a caller that could not read the sheet still gets the same 403 as before.
+ *
+ *  (a) TERM REQUIRED. A term shorter than MENTION_CANDIDATES_MIN_QUERY_LENGTH (after trim) is answered
+ *      with an empty page and `requiresQuery: true`, and the service is NOT called — zero hydration.
+ *      A 200 marker rather than a 400 because the composer asks as soon as the user types a bare `@`;
+ *      the UI renders the marker as "type to search", not as a failure. NOT a narrowing guarantee: a
+ *      one-character term (almost) every row contains (`-` in every UUID-shaped id, `@` in every
+ *      well-formed email address) still matches (almost) everyone, so against a deliberate caller (b)
+ *      is the only per-request bound; (a) removes
+ *      the UI's automatic term-less request (see comment-mention-bounds.ts).
+ *  (b) CEILING. `limit` is clamped to MENTION_CANDIDATES_MAX_ITEMS and the service is asked for ONE
+ *      row past it; `hasMore` is true iff that probe row came back (the queryRecordsWithCursor /
+ *      #5781 convention — no second COUNT query).
+ *  (c) NO DEPLOYMENT-WIDE COUNT. The service no longer computes one; callers report `total` as the
+ *      clamped page size (the #5781 / sibling /permission-candidates convention), never a population.
+ *
+ * ELIGIBILITY IS UNCHANGED: who can be returned for a matching term is still every active user
+ * (CommentService.listMentionCandidates's predicate is untouched). Narrowing that set — e.g. to the
+ * sheet's readers — is a separate change and is NOT done here.
+ */
+async function loadBoundedMentionCandidates(
+  commentService: ICommentService,
+  spreadsheetId: string,
+  rawQuery: string | undefined,
+  requestedLimit: number,
+): Promise<{
+  items: CommentMentionCandidate[]
+  limit: number
+  query: string
+  hasMore: boolean
+  requiresQuery: boolean
+  minQueryLength: number
+}> {
+  const limit = Math.min(requestedLimit, MENTION_CANDIDATES_MAX_ITEMS)
+  const query = (rawQuery ?? '').trim()
+  if (query.length < MENTION_CANDIDATES_MIN_QUERY_LENGTH) {
+    return { items: [], limit, query: '', hasMore: false, requiresQuery: true, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
+  }
+  const result = await commentService.listMentionCandidates(spreadsheetId, { q: query, limit: limit + 1 })
+  const hasMore = result.items.length > limit
+  const items = hasMore ? result.items.slice(0, limit) : result.items
+  return { items, limit, query, hasMore, requiresQuery: false, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
+}
+
 export function commentsRouter(injector?: Injector): Router {
   const router = Router()
   const commentService = injector?.get(ICommentService)
@@ -260,12 +313,26 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentReadContext(req, res, parsed.data.spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      const limit = clampLimit(parsed.data.limit)
-      const result = await commentService.listMentionCandidates(parsed.data.spreadsheetId, {
-        q: parsed.data.q,
-        limit,
+      // #5795: term required, clamped to the ceiling, no deployment-wide count — see
+      // loadBoundedMentionCandidates. `total` is the size of THIS (clamped) page, never a population.
+      const bounded = await loadBoundedMentionCandidates(
+        commentService,
+        parsed.data.spreadsheetId,
+        parsed.data.q,
+        clampLimit(parsed.data.limit),
+      )
+      return res.json({
+        ok: true,
+        data: {
+          items: bounded.items,
+          total: bounded.items.length,
+          limit: bounded.limit,
+          query: bounded.query,
+          hasMore: bounded.hasMore,
+          requiresQuery: bounded.requiresQuery,
+          minQueryLength: bounded.minQueryLength,
+        },
       })
-      return res.json({ ok: true, data: { items: result.items, total: result.total, limit } })
     } catch (error) {
       logger.error('Failed to load comment mention candidates', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment mention candidates' } })
@@ -604,6 +671,12 @@ export function commentsRouter(injector?: Injector): Router {
    *
    * Search for @-mention candidates scoped to a spreadsheet.
    * Query params: q (search string), limit (max 10 by default for composer UX)
+   *
+   * #5795: same bounds as /api/comments/mention-candidates (loadBoundedMentionCandidates) — this route
+   * reads the SAME service behind the SAME gate, so leaving it term-optional would have kept the
+   * roster one request away. No in-repo UI calls it; the additive `limit`/`query`/`hasMore`/
+   * `requiresQuery`/`minQueryLength` fields let an external caller tell "type to search" apart from
+   * "no match".
    */
   router.get('/api/multitable/:spreadsheetId/mention-candidates', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const spreadsheetId = req.params.spreadsheetId?.trim()
@@ -626,18 +699,29 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentReadContext(req, res, spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      const limit = clampLimit(parsed.data.limit ?? 10)
-      const result = await commentService.listMentionCandidates(spreadsheetId, {
-        q: parsed.data.q,
-        limit,
-      })
+      const bounded = await loadBoundedMentionCandidates(
+        commentService,
+        spreadsheetId,
+        parsed.data.q,
+        clampLimit(parsed.data.limit ?? 10),
+      )
       // Map to { userId, displayName } shape expected by the mention composer
-      const items = result.items.map((candidate) => ({
+      const items = bounded.items.map((candidate) => ({
         userId: candidate.id,
         displayName: candidate.label,
         avatarUrl: undefined as string | undefined,
       }))
-      return res.json({ ok: true, data: { items } })
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          limit: bounded.limit,
+          query: bounded.query,
+          hasMore: bounded.hasMore,
+          requiresQuery: bounded.requiresQuery,
+          minQueryLength: bounded.minQueryLength,
+        },
+      })
     } catch (error) {
       logger.error('Failed to load mention candidates', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load mention candidates' } })

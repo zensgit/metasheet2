@@ -38,6 +38,7 @@
     :ai-shortcut="aiShortcut"
     :button-run-pending="buttonRunPending"
     :mention-suggestions="mentionSuggestions"
+    :mention-search="mentionSearch"
     :opener-el="openerEl"
     @close="emit('close')"
     @delete="emit('delete')"
@@ -66,6 +67,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableCommentPresenceSummary,
   MetaFieldPermission,
@@ -118,6 +120,8 @@ withDefaults(defineProps<{
   /** B5: people-mention candidates for rich-`longText` field editing in the drawer.
    *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   /** Record inspector v3 (2026-09-05, PR-A §1.1): forwarded 1:1 to MetaRecordInspector's own
    *  `openerEl` prop — see that component's doc comment. Optional; a caller that never opens this
    *  deprecated shell via a workbench-owned `openRecord(id, opener)` simply omits it. */

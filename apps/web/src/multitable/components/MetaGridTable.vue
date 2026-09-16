@@ -109,6 +109,7 @@
                   :upload-context="{ recordId: item.row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
+                  :mention-search="props.mentionSearch"
                   :host-commit-policy="'grid'"
                   @update:model-value="editCell!.value = $event"
                   @confirm="onEditorConfirm"
@@ -263,6 +264,7 @@
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
+                  :mention-search="props.mentionSearch"
                   :host-commit-policy="'grid'"
                   @update:model-value="editCell!.value = $event"
                   @confirm="onEditorConfirm"
@@ -396,6 +398,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MetaField,
   MetaRecordContext,
@@ -525,6 +528,8 @@ const props = defineProps<{
   // B5: people-mention candidates for rich-`longText` in-cell editing. Forwarded to
   // MetaCellEditor; the workbench feeds its already-loaded commentMentionSuggestions.
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   // Live cell-cursors: cellKey (`${recordId}:${fieldId}`) → remote collaborator userIds on that cell.
   // Presentational highlight only; absent/empty → no cursors rendered.
   remoteCursorsByCell?: Map<string, string[]>

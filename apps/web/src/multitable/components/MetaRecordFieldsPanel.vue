@@ -136,6 +136,7 @@
             :model-value="controlValue(field.id)"
             :is-zh="isZh"
             :mention-suggestions="mentionSuggestions"
+            :mention-search="mentionSearch"
             @change="emitPatch(field.id, $event)"
           />
           <!-- plain longText: same textarea, same @change-only commit (record inspector resizable-panel
@@ -385,6 +386,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableCommentPresenceSummary,
   MetaFieldPermission,
@@ -464,6 +466,8 @@ const props = withDefaults(defineProps<{
   /** B5: people-mention candidates for rich-`longText` field editing.
    *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   /** Server rejection messages for the current record, owned by the workbench. */
   fieldErrors?: Record<string, string> | null
   /** Optional view-ordered sections; absent keeps the legacy flat path. */

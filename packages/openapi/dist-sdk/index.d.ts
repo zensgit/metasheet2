@@ -7606,7 +7606,7 @@ export interface paths {
         };
         /**
          * List comment mention candidates
-         * @description Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.
+         * @description Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. The term is a literal case-insensitive substring of name, email or id; `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
          */
         get: {
             parameters: {
@@ -16529,10 +16529,36 @@ export interface components {
             ok?: boolean;
             data?: {
                 items?: components["schemas"]["CommentMentionCandidate"][];
-                /** @example 1 */
+                /**
+                 * @description Number of items in this (clamped) page - never a deployment-wide count.
+                 * @example 1
+                 */
                 total?: number;
-                /** @example 50 */
+                /**
+                 * @description Effective page size after the server ceiling (50).
+                 * @example 50
+                 */
                 limit?: number;
+                /**
+                 * @description The trimmed search term that was applied (empty when `requiresQuery` is true).
+                 * @example jam
+                 */
+                query?: string;
+                /**
+                 * @description True when more candidates matched than this page holds.
+                 * @example false
+                 */
+                hasMore?: boolean;
+                /**
+                 * @description True when the call carried no usable search term; `items` is then empty.
+                 * @example false
+                 */
+                requiresQuery?: boolean;
+                /**
+                 * @description Minimum trimmed search-term length the server accepts.
+                 * @example 1
+                 */
+                minQueryLength?: number;
             };
         };
         CommentUnreadCountResponse: {

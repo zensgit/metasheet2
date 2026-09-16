@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref } from 'vue'
 import MetaCommentComposer from '../src/multitable/components/MetaCommentComposer.vue'
 
@@ -153,5 +153,149 @@ describe('MetaCommentComposer', () => {
     expect(container.querySelector('.meta-comment-composer__suggestions')).not.toBeNull()
 
     app.unmount()
+  })
+
+  // #5795 — the mention candidate endpoint is search-required: the composer queries the host-supplied
+  // search as the user types and renders the server's `requiresQuery` marker as a prompt.
+  describe('server-side mention search (#5795)', () => {
+    const settle = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220))
+      await nextTick()
+      await nextTick()
+    }
+
+    function mountWithSearch(initial: string, search: (q: string) => Promise<unknown>, suggestions: Array<{ id: string; label: string; subtitle?: string }> = []) {
+      const draft = ref(initial)
+      const submitSpy: Array<{ content: string; mentions: string[] }> = []
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        setup() {
+          return () => h(MetaCommentComposer, {
+            modelValue: draft.value,
+            suggestions,
+            mentionSearch: search,
+            'onUpdate:modelValue': (value: string) => {
+              draft.value = value
+            },
+            onSubmit: (payload: { content: string; mentions: string[] }) => {
+              submitSpy.push(payload)
+            },
+          })
+        },
+      })
+      app.mount(container)
+      return { app, draft, submitSpy }
+    }
+
+    const fakeSearch = () => vi.fn(async (q: string) => (q
+      ? {
+          items: [{ id: 'u_fake_1', label: 'Fake Mentionable', subtitle: 'fake.mentionable@example.invalid' }],
+          requiresQuery: false,
+          hasMore: false,
+        }
+      : { items: [], requiresQuery: true, hasMore: false }))
+
+    it('a bare @ asks the server with an empty term and renders the type-to-search hint, not a roster', async () => {
+      const search = fakeSearch()
+      const { app } = mountWithSearch('@', search)
+      await settle()
+
+      expect(search).toHaveBeenCalledWith('')
+      const hint = container!.querySelector('[data-test="comment-mention-search-required"]')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent).toMatch(/Type a name or email|输入姓名或邮箱/)
+      expect(container!.querySelectorAll('.meta-comment-composer__suggestion')).toHaveLength(0)
+      app.unmount()
+    })
+
+    it('a real term shows the server answer (even an email-only match) and selecting it still mentions', async () => {
+      const search = fakeSearch()
+      const { app, submitSpy } = mountWithSearch('ping @', search)
+      await settle()
+
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      textarea.value = 'ping @example'
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+      await settle()
+
+      expect(search).toHaveBeenLastCalledWith('example')
+      expect(container!.querySelector('[data-test="comment-mention-search-required"]')).toBeNull()
+      const option = container!.querySelector('.meta-comment-composer__suggestion') as HTMLButtonElement | null
+      expect(option).not.toBeNull()
+      expect(option!.textContent).toContain('Fake Mentionable')
+      option!.click()
+      await nextTick()
+      ;(container!.querySelector('.meta-comment-composer__submit') as HTMLButtonElement).click()
+      await nextTick()
+
+      expect(submitSpy).toEqual([{ content: 'ping @[Fake Mentionable](u_fake_1)', mentions: ['u_fake_1'] }])
+      app.unmount()
+    })
+
+    it('a slower answer for an older term never replaces the newer one', async () => {
+      let releaseOld: (() => void) | null = null
+      const search = vi.fn((q: string) => {
+        if (q === 'fa') {
+          return new Promise((resolve) => {
+            releaseOld = () => resolve({ items: [{ id: 'u_old', label: 'Fake Old' }], requiresQuery: false, hasMore: false })
+          })
+        }
+        return Promise.resolve({ items: [{ id: 'u_new', label: 'Fake Newer' }], requiresQuery: false, hasMore: false })
+      })
+      const { app } = mountWithSearch('@fa', search)
+      await settle()
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      textarea.value = '@fake'
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await settle()
+      releaseOld!()
+      await settle()
+
+      const labels = Array.from(container!.querySelectorAll('.meta-comment-composer__suggestion')).map((el) => el.textContent)
+      expect(labels.join(' ')).toContain('Fake Newer')
+      expect(labels.join(' ')).not.toContain('Fake Old')
+      app.unmount()
+    })
+
+    it('erasing back to a bare @ never shows the answer for the previous term while the new ask is pending', async () => {
+      const search = vi.fn((q: string) => (q
+        ? Promise.resolve({ items: [{ id: 'u_prev', label: 'Fake Previous' }], requiresQuery: false, hasMore: false })
+        : new Promise(() => {}))) // the term-less ask never settles in this test
+      const { app } = mountWithSearch('@fa', search)
+      await settle()
+      expect(container!.querySelector('.meta-comment-composer__suggestion')!.textContent).toContain('Fake Previous')
+
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      textarea.value = '@'
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await settle()
+
+      expect(search).toHaveBeenLastCalledWith('')
+      expect(container!.querySelectorAll('.meta-comment-composer__suggestion')).toHaveLength(0)
+      expect(container!.textContent).not.toContain('Fake Previous')
+      app.unmount()
+    })
+
+    it('without a host search the static list is unchanged and no hint ever renders', async () => {
+      const draft = ref('@')
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        setup() {
+          return () => h(MetaCommentComposer, {
+            modelValue: draft.value,
+            suggestions: [{ id: 'user_jamie', label: 'Jamie' }],
+          })
+        },
+      })
+      app.mount(container)
+      await settle()
+
+      expect(container.querySelector('[data-test="comment-mention-search-required"]')).toBeNull()
+      expect(container.querySelector('.meta-comment-composer__suggestion')!.textContent).toContain('Jamie')
+      app.unmount()
+    })
   })
 })

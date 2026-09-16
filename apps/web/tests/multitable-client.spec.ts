@@ -95,6 +95,66 @@ describe('MultitableApiClient', () => {
       total: 2,
       limit: 8,
       query: 'lin',
+      // #5795 markers default to "not truncated / term given" when the server omits them
+      hasMore: false,
+      requiresQuery: false,
+      minQueryLength: 1,
+    })
+  })
+
+  // #5795: both roster-shaped candidate reads are search-required and capped; the client passes the
+  // server's values-free markers through so the UI can tell "type to search" from "no match".
+  it('passes the form-share candidate requiresQuery / hasMore markers through', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      const q = new URL(input, 'http://fake.invalid').searchParams.get('q')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: q
+          ? { items: [], total: 0, limit: 20, query: q, hasMore: true, requiresQuery: false, minQueryLength: 1 }
+          : { items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    const blank = await client.listFormShareCandidates('sheet_1', { q: '' })
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/sheet_1/form-share-candidates')
+    expect(blank).toMatchObject({ items: [], requiresQuery: true, hasMore: false, minQueryLength: 1 })
+    const typed = await client.listFormShareCandidates('sheet_1', { q: 'f' })
+    expect(typed).toMatchObject({ requiresQuery: false, hasMore: true, query: 'f' })
+  })
+
+  it('passes the comment mention-candidate markers through and never invents a population count', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      const q = new URL(input, 'http://fake.invalid').searchParams.get('q')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: q
+          ? {
+              items: [{ id: 'u_fake', label: 'Fake Person', subtitle: 'fake@example.invalid' }],
+              total: 1,
+              limit: 20,
+              query: q,
+              hasMore: true,
+              requiresQuery: false,
+              minQueryLength: 1,
+            }
+          : { items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listCommentMentionSuggestions({ spreadsheetId: 'sheet_1', q: '', limit: 20 })).resolves.toEqual({
+      items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1,
+    })
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/comments/mention-candidates?spreadsheetId=sheet_1&limit=20')
+    await expect(client.listCommentMentionSuggestions({ spreadsheetId: 'sheet_1', q: 'fa', limit: 20 })).resolves.toEqual({
+      items: [{ id: 'u_fake', label: 'Fake Person', subtitle: 'fake@example.invalid' }],
+      total: 1,
+      limit: 20,
+      query: 'fa',
+      hasMore: true,
+      requiresQuery: false,
+      minQueryLength: 1,
     })
   })
 

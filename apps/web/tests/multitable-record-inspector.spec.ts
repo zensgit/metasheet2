@@ -663,6 +663,137 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
     })
   })
 
+  // #5795 refuter round: the workbench no longer preloads a term-less roster, so the host-bound
+  // `mentionSearch` is the ONLY way these editors reach people beyond the thread / earlier results. Each
+  // test mounts the REAL intermediate components (no stubs) and proves the search the host handed to the
+  // shell is the one a typed `@term` reaches:
+  //   comments tab: MetaRecordInspector -> MetaCommentsPanel -> MetaCommentComposer
+  //   details tab:  MetaRecordInspector -> MetaRecordFieldsPanel -> MetaRichLongTextEditor
+  //   shell:        MetaRecordDrawer -> MetaRecordInspector -> (details tab chain above)
+  describe('#5795: the host mentionSearch reaches the real mention editors (hand-off wiring)', () => {
+    const RICH_FIELDS = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_notes', name: 'Notes', type: 'longText', property: { rich: true } },
+    ] as unknown as MetaField[]
+    const RICH_RECORD = { id: 'rec_1', version: 1, data: { fld_title: 'Alpha', fld_notes: '' } } as unknown as MetaRecord
+
+    const fakeMentionSearch = () => vi.fn(async (_q: string) => ({ items: [], requiresQuery: false, hasMore: false }))
+    const waitForMentionDebounce = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220))
+      await flushUi()
+    }
+    function typeIntoEditable(editable: HTMLElement, text: string) {
+      editable.textContent = text
+      const range = document.createRange()
+      range.setStart(editable.firstChild!, text.length)
+      range.collapse(true)
+      const sel = window.getSelection()!
+      sel.removeAllRanges()
+      sel.addRange(range)
+      editable.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    it('comments tab: typing "@term" in the composer calls the search handed to the inspector', async () => {
+      const search = fakeMentionSearch()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        data: () => ({ draft: '' }),
+        render(this: { draft: string }) {
+          return h(MetaRecordInspector, {
+            visible: true,
+            record: RECORD,
+            fields: FIELDS,
+            canEdit: true,
+            canComment: true,
+            canDelete: false,
+            sheetId: 'sheet_1',
+            apiClient: fakeApiClient() as any,
+            openComments: true,
+            comments: [],
+            commentDraft: this.draft,
+            mentionSearch: search,
+            'onUpdate:commentDraft': (value: string) => { this.draft = value },
+          })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+      expect(activeTabButton(container)!.textContent?.trim()).toBe('Comments')
+
+      const textarea = container.querySelector('textarea.meta-comment-composer__textarea') as HTMLTextAreaElement
+      expect(textarea).toBeTruthy()
+      textarea.value = 'hello @fakeperson'
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await waitForMentionDebounce()
+
+      expect(search).toHaveBeenCalledWith('fakeperson')
+      app.unmount()
+    })
+
+    it('details tab: typing "@term" in a rich longText field calls the search handed to the inspector', async () => {
+      const search = fakeMentionSearch()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaRecordInspector, {
+            visible: true,
+            record: RICH_RECORD,
+            fields: RICH_FIELDS,
+            canEdit: true,
+            canComment: false,
+            canDelete: false,
+            sheetId: 'sheet_1',
+            apiClient: fakeApiClient() as any,
+            mentionSearch: search,
+          })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+
+      const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+      expect(editable).toBeTruthy()
+      editable.focus()
+      typeIntoEditable(editable, 'see @fakefield')
+      await waitForMentionDebounce()
+
+      expect(search).toHaveBeenCalledWith('fakefield')
+      app.unmount()
+    })
+
+    it('deprecated MetaRecordDrawer shell: the search still reaches the rich longText editor', async () => {
+      const search = fakeMentionSearch()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaRecordDrawer, {
+            visible: true,
+            record: RICH_RECORD,
+            fields: RICH_FIELDS,
+            canEdit: true,
+            canComment: false,
+            canDelete: false,
+            mentionSearch: search,
+          })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+
+      const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+      expect(editable).toBeTruthy()
+      editable.focus()
+      typeIntoEditable(editable, '@fakeshell')
+      await waitForMentionDebounce()
+
+      expect(search).toHaveBeenCalledWith('fakeshell')
+      app.unmount()
+    })
+  })
+
   describe('delegation: MetaRecordDrawer (deprecated thin shell) renders the same ARIA structure', () => {
     it('mounting MetaRecordDrawer produces the identical tablist/tabpanel pairing + roving tabindex (S5: now 4 tabs)', async () => {
       const { container, app } = mountDrawer()

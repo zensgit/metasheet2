@@ -873,18 +873,17 @@ describe('CommentService', () => {
       const result = await service.listMentionCandidates('  ')
 
       expect(result.items).toEqual([])
-      expect(result.total).toBe(0)
+      // #5795: no count of any kind is returned any more.
+      expect(result).not.toHaveProperty('total')
     })
 
     it('maps user rows to candidate shape', async () => {
-      // total count
-      pushTakeFirst({ c: 1 })
-      // row data
+      // #5795: no COUNT query any more — only the row query.
       pushExec([{ id: 'user-1', name: 'Alice', email: 'alice@example.com' }])
 
       const result = await service.listMentionCandidates('sheet-1', { q: 'alic', limit: 10 })
 
-      expect(result.total).toBe(1)
+      expect(result).not.toHaveProperty('total')
       expect(result.items).toHaveLength(1)
       expect(result.items[0].id).toBe('user-1')
       expect(result.items[0].label).toBe('Alice')
@@ -892,13 +891,118 @@ describe('CommentService', () => {
     })
 
     it('uses email as label when name is missing', async () => {
-      pushTakeFirst({ c: 1 })
       pushExec([{ id: 'user-2', name: null, email: 'bob@example.com' }])
 
-      const result = await service.listMentionCandidates('sheet-1')
+      // #5795: a term is required, so this mapping case supplies one.
+      const result = await service.listMentionCandidates('sheet-1', { q: 'bob' })
 
       expect(result.items[0].label).toBe('bob@example.com')
       expect(result.items[0].subtitle).toBeUndefined()
+    })
+
+    it('#5795: a term-less call returns nothing and issues no query', async () => {
+      pushExec([{ id: 'user-3', name: 'Fake Person', email: 'fake.person@example.invalid' }])
+
+      const result = await service.listMentionCandidates('sheet-1')
+      const whitespace = await service.listMentionCandidates('sheet-1', { q: '   ', limit: 100 })
+
+      expect(result.items).toEqual([])
+      expect(whitespace.items).toEqual([])
+      // the queued row was never consumed ⇒ no row query ran
+      expect(queueExec).toHaveLength(1)
+      const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+      expect(db.selectFrom).not.toHaveBeenCalled()
+    })
+
+    describe('#5795 SQL-level bounds (what the DB is ASKED for)', () => {
+      type Chain = Record<string, ReturnType<typeof vi.fn>>
+      async function lastUsersChain(): Promise<Chain> {
+        const { db } = await import('../../src/db/db') as unknown as { db: { selectFrom: ReturnType<typeof vi.fn> } }
+        const results = db.selectFrom.mock.results
+        expect(results.length).toBeGreaterThan(0)
+        return results[results.length - 1].value as Chain
+      }
+      /** Evaluates the `where((eb) => eb.or([...]))` callback and returns the bound LIKE parameters. */
+      function likeParams(chain: Chain): unknown[] {
+        const callback = chain.where.mock.calls.map((args) => args[0]).find((arg) => typeof arg === 'function') as
+          | ((eb: { or: (xs: unknown[]) => unknown[] }) => unknown[])
+          | undefined
+        expect(callback).toBeTypeOf('function')
+        const fragments = callback!({ or: (xs) => xs })
+        return fragments.flatMap((fragment) => {
+          const node = (fragment as { toOperationNode: () => { parameters: Array<{ value: unknown }> } }).toOperationNode()
+          return node.parameters.map((p) => p.value)
+        })
+      }
+
+      it('caps the SQL LIMIT at ceiling + 1 no matter what the caller asks for', async () => {
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: 'fake', limit: 100000 })
+        const chain = await lastUsersChain()
+        expect(chain.limit).toHaveBeenCalledTimes(1)
+        expect(chain.limit.mock.calls[0][0]).toBe(51)
+      })
+
+      it('defaults to the ceiling (50) and never below 1', async () => {
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: 'fake' })
+        expect((await lastUsersChain()).limit.mock.calls[0][0]).toBe(50)
+
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: 'fake', limit: 0 })
+        expect((await lastUsersChain()).limit.mock.calls[0][0]).toBe(1)
+
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: 'fake', limit: Number.NaN })
+        expect((await lastUsersChain()).limit.mock.calls[0][0]).toBe(50)
+      })
+
+      it('issues NO count query (the deployment-wide total is gone)', async () => {
+        pushTakeFirst({ c: 4321 })
+        pushExec([{ id: 'user-1', name: 'Fake Person', email: 'fake@example.invalid' }])
+
+        const result = await service.listMentionCandidates('sheet-1', { q: 'fake' })
+
+        expect(result).not.toHaveProperty('total')
+        expect(JSON.stringify(result)).not.toContain('4321')
+        const chain = await lastUsersChain()
+        expect(chain.executeTakeFirst).not.toHaveBeenCalled()
+        // the only select is the row projection, never an aggregate builder callback
+        expect(chain.select.mock.calls).toEqual([[['id', 'name', 'email']]])
+        // the queued count row was never consumed
+        expect(queueTakeFirst).toHaveLength(1)
+      })
+
+      it('always applies the term predicate, lower-cased and trimmed', async () => {
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: '  FaKe  ' })
+        const params = likeParams(await lastUsersChain())
+        expect(params).toEqual(['%fake%', '%fake%', '%fake%'])
+      })
+
+      it('escapes LIKE metacharacters so a typed `%` / `_` searches literally (search correctness)', async () => {
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: '%' })
+        expect(likeParams(await lastUsersChain())).toEqual(['%\\%%', '%\\%%', '%\\%%'])
+
+        pushExec([])
+        await service.listMentionCandidates('sheet-1', { q: 'a_b\\' })
+        expect(likeParams(await lastUsersChain())).toEqual(['%a\\_b\\\\%', '%a\\_b\\\\%', '%a\\_b\\\\%'])
+      })
+
+      // Refuter round (#5795): escaping is NOT what bounds a deliberate caller. `-` (in every UUID-shaped
+      // id) and `@` (in every email) are ordinary characters that reach the name/email/id predicate as-is
+      // and match every active user; the SQL LIMIT is the only thing standing between such a term and the
+      // whole set, so it must apply to exactly these terms too.
+      it('a term every row contains (`-`, `@`) is not narrowed by escaping — the LIMIT still caps it', async () => {
+        for (const universal of ['-', '@']) {
+          pushExec([])
+          await service.listMentionCandidates('sheet-1', { q: universal, limit: 100000 })
+          const chain = await lastUsersChain()
+          expect(likeParams(chain)).toEqual([`%${universal}%`, `%${universal}%`, `%${universal}%`])
+          expect(chain.limit.mock.calls[0][0]).toBe(51)
+        }
+      })
     })
   })
 })
