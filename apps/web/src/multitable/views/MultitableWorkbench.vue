@@ -4068,6 +4068,10 @@ function onCloseDrawer() {
 // inspector via its own × already discards a comment draft the same way, `hasRecordScopedDrafts`
 // already includes `hasCommentDraft`, see `confirmDiscardRecordChanges`).
 function onToggleComments() {
+  // #5813 final review: this button is reachable from the Details tab too, and while an edit is open
+  // `showComments` is already true, so the inspector stays on Details — dropping the edited text below
+  // would be invisible there. Ask first (non-empty edit only); on cancel nothing changes at all.
+  if (!confirmDiscardCommentEdit()) return
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
@@ -4130,6 +4134,13 @@ function confirmDiscardContextChanges() {
 function confirmDiscardRecordChanges() {
   if (!hasRecordScopedDrafts.value) return true
   return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
+}
+
+// #5813: only an in-progress EDIT with text is at stake (a new-comment draft is kept by
+// `onToggleComments`); `hasRecordScopedDrafts` is not reused because a dirty form alone must not prompt.
+function confirmDiscardCommentEdit() {
+  if (!selectedEditingCommentId.value || !hasCommentDraft.value) return true
+  return window.confirm(wb('confirm.discardCommentEdit', isZh.value))
 }
 
 function discardWorkbenchDraftsForExternalContextChange() {
