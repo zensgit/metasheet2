@@ -10,6 +10,7 @@ import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { poolManager } from '../integration/db/connection-pool'
 import { loadDeniedRecordIds, loadRowLevelReadDenyEnabled, resolveSheetReadableCapabilities } from '../multitable/permission-service'
+import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -149,9 +150,19 @@ type CommentReadContext = {
 async function resolveCommentReadContext(req: Request, res: Response, spreadsheetId: string): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
-  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
   if (!capabilities.canRead) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not permitted to access comments on this sheet' } })
+    return null
+  }
+  // Sheet liveness, AFTER the read gate (a caller who may not read the sheet gets the same 403 whether
+  // it is live or soft-deleted — no liveness oracle). Comments are stored by `spreadsheet_id` and never
+  // join `meta_sheets`, so without this every comment route kept reading and writing a DELETED sheet's
+  // threads: list/summary/presence served them, create added new ones. Every sheet-addressed comment
+  // route passes through here. (Sheet-liveness closed world: tests/unit/
+  // multitable-sheet-liveness-closure-all-routes.guard.test.ts.)
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
     return null
   }
 

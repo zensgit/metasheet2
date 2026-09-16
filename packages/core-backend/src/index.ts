@@ -103,7 +103,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
-import { SheetNotLiveError, assertSheetLive } from './multitable/sheet-liveness'
+import { SheetNotLiveError, assertSheetLive, loadSheetLiveness } from './multitable/sheet-liveness'
 import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
@@ -4353,7 +4353,15 @@ export class MetaSheetServer {
             sheetId,
             userId,
           )
-          return capabilities.canRead
+          if (!capabilities.canRead) return false
+          // SHEET LIVENESS (soft delete). resolveSheetCapabilitiesForUser does not report it, so a
+          // soft-deleted sheet's room stayed joinable. Same `false` as a caller who may not read the
+          // sheet, so the answer is not a liveness oracle. The three sibling checkers below and the Yjs
+          // subscribe checker do the same (closed world: tests/unit/
+          // multitable-sheet-liveness-closure-all-routes.guard.test.ts, "collab auth checkers").
+          const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)
+          if (liveness !== 'live') return false
+          return true
         } catch {
           return false
         }
@@ -4368,6 +4376,9 @@ export class MetaSheetServer {
             userId,
           )
           if (!capabilities.canRead) return false
+          // Liveness before the admin short-circuit: a deleted sheet's comment rooms are closed to all.
+          const liveness = await loadSheetLiveness(query, spreadsheetId)
+          if (liveness !== 'live') return false
           if (isAdminRole) return true
           if (rowId) {
             return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
@@ -4390,6 +4401,9 @@ export class MetaSheetServer {
             userId,
           )
           if (!capabilities.canRead) return false
+          // No mention notification about a comment on a soft-deleted sheet.
+          const liveness = await loadSheetLiveness(query, spreadsheetId)
+          if (liveness !== 'live') return false
           if (isAdminRole) return true
           return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
         } catch {
@@ -4483,6 +4497,10 @@ export class MetaSheetServer {
               sheetId,
               userId,
             )
+            // Soft delete: a deleted sheet's records are not subscribable (the flush below already
+            // refuses writes). Same answer as a caller without read, so not a liveness oracle.
+            const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)
+            if (liveness !== 'live') return { canRead: false, canWrite: false }
             // T36-1 review P1: sheet-level canRead is not enough — the doc seeder loads the
             // record's FULL data, so a row-level-denied record (projection non-participant row,
             // or any row-deny-flagged sheet) must not be subscribable at all. DENY-WINS.

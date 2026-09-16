@@ -47,6 +47,7 @@ import {
   type QueryFn,
 } from '../multitable/permission-service'
 import type { ResolvedRequestAccess } from '../multitable/access'
+import { sendSheetNotLive } from '../multitable/sheet-refusals'
 
 const dashboardService = new DashboardService()
 const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table', 'area', 'funnel', 'gauge', 'scatter'])
@@ -121,19 +122,33 @@ async function loadChartRecords(
   })
 }
 
+/**
+ * The two sheet gates every chart/dashboard route passes through. Order: 401 → 403 → liveness 404.
+ *
+ * LIVENESS: charts and dashboards are keyed by `sheet_id`, and `loadChartRecords` reads `meta_records`
+ * without joining `meta_sheets`, so a soft-deleted sheet used to stay fully addressable here — chart
+ * data was still aggregated over its records and charts/dashboards could still be created, edited and
+ * deleted. The refusal comes AFTER the capability check so an unauthorized caller gets the same 403
+ * for a live and a deleted sheet (no liveness oracle). (Sheet-liveness closed world:
+ * tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts.)
+ */
 async function requireSheetRead(
   req: Request,
   res: Response,
   sheetId: string,
 ): Promise<SheetAuthContext | null> {
   const query = getQuery()
-  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
   if (!access.userId) {
     sendUnauthorized(res)
     return null
   }
   if (!capabilities.canRead) {
     sendForbidden(res)
+    return null
+  }
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
     return null
   }
   return { query, userId: access.userId, capabilities, access }
@@ -145,13 +160,17 @@ async function requireSheetManageViews(
   sheetId: string,
 ): Promise<SheetAuthContext | null> {
   const query = getQuery()
-  const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
   if (!access.userId) {
     sendUnauthorized(res)
     return null
   }
   if (!capabilities.canManageViews) {
     sendForbidden(res)
+    return null
+  }
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
     return null
   }
   return { query, userId: access.userId, capabilities, access }
