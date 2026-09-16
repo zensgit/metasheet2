@@ -156,3 +156,27 @@ sheet-liveness enforcement and its unit test. No source PR was rewritten.
 The prior 40/40 real-DB evidence remains bound to `7dfbec510`, not a fresh DB run
 on this replay. Remote successor exact-head CI is still required; publication
 as Draft/HOLD is not merge approval or a claim of complete product readiness.
+
+## Published CI and Liveness Replay
+
+Draft successor PR #5837 at `d38218d9c0f1100694516ac22fb25c3c6203733b`
+reached 34 SUCCESS / 1 intentional SKIPPED / 0 pending / 0 failure.
+Node20 job `104975610932`, run `35150001895`, logs explicitly report
+`multitable-recovery-archive-restore-jobs-realdb.test.ts` passing all 40 tests
+at 2026-09-16T21:23:46Z (375092 ms). The exact source includes the local-custody
+independent-process variant; no per-case verbose log is claimed. This is remote
+whole-file execution evidence in addition to the earlier local process drill.
+
+Main then advanced to `b0dc808493c32fcfdacbe8dc21f56eba504faa0b` through #5836.
+True merge `e4daffc9aaa29619d44cd0556792cfdb8fddc864` has ordered parents
+`d38218d9c0f1100694516ac22fb25c3c6203733b` and that main SHA. It is conflict-free,
+with no manual resolutions. Main contributes sheet-liveness guards for comment,
+dashboard, AI and collaboration routes plus their tests. Recovery application,
+local custody, restore-jobs test and required backend/web invocation files are
+byte-identical to the previous published head.
+
+Replay gates: five files / 207 tests PASS (66 route-census, 41 comment, 49
+dashboard, 17 AI, 34 recovery application); core typecheck and diff-check PASS.
+The former published green matrix must not be relabeled as CI for this new
+replay. The successor remains Draft/HOLD pending its new exact-head checks;
+no Ready, merge, flag, dispatch or deployment was performed.
