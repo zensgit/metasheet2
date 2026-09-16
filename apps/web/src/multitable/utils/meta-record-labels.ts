@@ -161,6 +161,7 @@ export type MetaRecordLabelKey =
   | 'approval.errorPermissionDenied' | 'approval.errorTemplateForbidden'
   | 'approval.errorTemplateNotPublished' | 'approval.errorRecordNotFound'
   | 'approval.errorCreateFailed' | 'approval.errorValidation'
+  | 'approval.errorOrgUnresolved'
   | 'approval.templateDraftPending'
   // --- 2a 后续前端 / list page follow-up (backend PR #5763: the list route now answers
   //     `{ submissions, hasMore }` and stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a row whose
@@ -435,7 +436,12 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.template': { en: 'Approval template', zh: '审批模板' },
   'approval.templatePlaceholder': { en: 'Pick a template', zh: '请选择模板' },
   'approval.templatesLoading': { en: 'Loading templates…', zh: '正在加载模板…' },
-  'approval.templatesUnavailable': { en: 'No available template, or no approval read permission.', zh: '无可用模板或无审批读取权限。' },
+  // Empty published-template roster and a 403 on the roster read collapse to the SAME notice by design
+  // (MetaRecordApprovalSubmitDialog.vue loadTemplates — no free-text template-id fallback either way),
+  // and that collapse is pinned by its own spec ("shows the same notice when the roster read is
+  // refused (403)"), so this stays ONE sentence covering both causes rather than asserting either one —
+  // it only adds the actionable next step (ask an administrator to check both).
+  'approval.templatesUnavailable': { en: 'No available template, or no approval read permission — ask an administrator to confirm a template is published for this table and that you have approval read permission.', zh: '无可用模板或无审批读取权限，请联系管理员确认已发布审批模板，并核实你是否有审批读取权限。' },
   'approval.formLoading': { en: 'Loading form…', zh: '正在加载表单…' },
   'approval.formLoadFailed': { en: 'Failed to load the template form.', zh: '加载模板表单失败。' },
   'approval.unsupportedField': { en: 'This template contains an unsupported field type — please start it from the approval centre.', zh: '该模板含不支持的字段类型，请到审批中心发起。' },
@@ -461,12 +467,22 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.failureReason': { en: 'Reason', zh: '失败原因' },
   // The route's coded refusals (multitable-record-approvals.ts / record-approval-submission-service.ts).
   // Their server messages are fixed ENGLISH sentences; we render these by CODE instead.
-  'approval.errorPermissionDenied': { en: 'You do not have permission to submit this record for approval.', zh: '没有送审权限（需多维表送审权限与审批发起权限）。' },
+  // `RECORD_APPROVAL_PERMISSION_DENIED` is one code shared by THREE different gates (routes/
+  // multitable-record-approvals.ts: the record read gate, the multitable submit-approval capability
+  // gate, and the approval-side approvals:write actor gate) — the copy is deliberately generic about
+  // WHICH of the three refused (naming only two, as an earlier version did, told a caller refused for
+  // being unable to READ THE RECORD to go ask for the wrong two permissions instead).
+  'approval.errorPermissionDenied': { en: 'You do not have permission to submit this record for approval — this can be missing record read access, missing multitable submit-approval permission, or missing approval-write permission. Ask an administrator to check your access.', zh: '没有送审权限（可能是记录读取权限、多维表送审权限或审批发起权限之一缺失），请联系管理员核实相关权限。' },
   'approval.errorTemplateForbidden': { en: 'You may not use this approval template.', zh: '无权使用该审批模板。' },
   'approval.errorTemplateNotPublished': { en: 'This approval template is not published.', zh: '该审批模板未发布。' },
   'approval.errorRecordNotFound': { en: 'This record no longer exists.', zh: '记录不存在或已被删除。' },
   'approval.errorCreateFailed': { en: 'Could not create the approval. Please try again.', zh: '创建审批实例失败，请稍后重试。' },
   'approval.errorValidation': { en: 'The form does not match this template. Check the required fields.', zh: '表单内容不符合模板要求，请检查必填项。' },
+  // `APPROVAL_ORG_UNRESOLVED` (approval-instance-org-derivation.ts): the submitter's active `user_orgs`
+  // membership count is not exactly one. Values-free by construction upstream (no count, no org id, no
+  // user id) — the copy stays that way and only names the fix: an administrator must correct the
+  // account's organization membership.
+  'approval.errorOrgUnresolved': { en: "Your account's organization membership could not be resolved to a single organization. Ask an administrator to fix your organization membership before submitting.", zh: '你的账号无法解析到唯一所属组织，请联系管理员修正账号的组织归属后再送审。' },
   'approval.templateDraftPending': { en: 'This template has unpublished changes — the form below may differ from the one the approval will use.', zh: '该模板有未发布的改动，下方表单可能与实际审批表单不一致。' },
   // The ROW-LEVEL marker (`RECORD_APPROVAL_NOTIFICATION_FAILED`): the submission is terminal and correct,
   // only the requester's bell is missing. Two variants because the outcome differs: the auto-approve path
@@ -771,6 +787,10 @@ const RECORD_APPROVAL_ERROR_LABELS: Record<string, MetaRecordLabelKey> = {
   RECORD_APPROVAL_NOTIFICATION_FAILED: 'approval.errorNotificationFailed',
   VALIDATION_ERROR: 'approval.errorValidation',
   FORBIDDEN: 'approval.errorPermissionDenied',
+  // Passed through verbatim by mapCreateApprovalFailure (record-approval-submission-service.ts) from
+  // ApprovalProductService's createApproval (approval-instance-org-derivation.ts) — without this entry
+  // the dialog fell back to the route's fixed English sentence ("Approval creation was rejected").
+  APPROVAL_ORG_UNRESOLVED: 'approval.errorOrgUnresolved',
 }
 
 export function recordApprovalErrorLabel(code: string | undefined, isZh: boolean): string | null {

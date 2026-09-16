@@ -449,6 +449,31 @@ describe('送审对话框 / MetaRecordApprovalSubmitDialog', () => {
     expect(notice.textContent).not.toContain('Insufficient permissions')
   })
 
+  // B1 (2026-09-15): APPROVAL_ORG_UNRESOLVED (approval-instance-org-derivation.ts, surfaced through
+  // ApprovalProductService.createApproval → mapCreateApprovalFailure, passed through verbatim) had NO
+  // entry in RECORD_APPROVAL_ERROR_LABELS, so the dialog fell back to the route's fixed English sentence
+  // ("Approval creation was rejected") even in a zh UI. Before the fix this test's `.toContain('请联系
+  // 管理员')` assertion fails and the English fallback assertion below fails to fail.
+  it('a CODED APPROVAL_ORG_UNRESOLVED refusal renders actionable localized copy, not the route\'s English sentence', async () => {
+    useLocale().setLocale('zh-CN')
+    const orgUnresolved = Object.assign(new Error('Approval creation was rejected'), {
+      status: 422,
+      code: 'APPROVAL_ORG_UNRESOLVED',
+    })
+    const client = fakeApiClient({ submitRecordApproval: vi.fn().mockRejectedValue(orgUnresolved) })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    const notice = document.querySelector('[data-testid="record-approval-submit-error"]')!
+    expect(notice.textContent).toContain('请联系管理员')
+    expect(notice.textContent).not.toContain('Approval creation was rejected')
+  })
+
   it('a VALIDATION_ERROR (form does not match the template) is localized too', async () => {
     useLocale().setLocale('zh-CN')
     const invalid = Object.assign(new Error('Approval creation was rejected'), {
