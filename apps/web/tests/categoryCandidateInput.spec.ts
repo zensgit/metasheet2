@@ -218,6 +218,29 @@ describe('CategoryCandidateInput', () => {
       expect(saveSpy).not.toHaveBeenCalled()
     })
 
+    it('(b2) gate-4 P3-1: a consumed Enter whose keyup is LOST (blur before keyup) must not swallow the NEXT Enter once the list is closed', async () => {
+      const saveSpy = vi.fn()
+      const cancelSpy = vi.fn()
+      await mountWithParentShortcuts(saveSpy, cancelSpy)
+      const el = input()
+
+      fireKey(el, 'keydown', 'ArrowDown') // opens the list, kicks off the fetch, seeds index 0
+      await flushUi()
+      fireKey(el, 'keydown', 'Enter') // consumed: selects candidate 0 and marks the Enter as consumed
+      // The matching keyup never arrives: focus leaves mid-press. onBlur closes the list after 150ms.
+      el.dispatchEvent(new Event('blur'))
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      await flushUi()
+      // No refocus on purpose: a `focus` would reopen the (cached) candidate list, and the point
+      // under test is the CLOSED-list pass-through — the stale consumption marker must not
+      // swallow this fresh Enter's keyup.
+      fireKey(el, 'keydown', 'Enter')
+      fireKey(el, 'keyup', 'Enter')
+      await flushUi()
+
+      expect(saveSpy).toHaveBeenCalledTimes(1)
+    })
+
     it('(b) positive control: Enter with the list CLOSED still reaches the parent keyup.enter save shortcut', async () => {
       const saveSpy = vi.fn()
       const cancelSpy = vi.fn()

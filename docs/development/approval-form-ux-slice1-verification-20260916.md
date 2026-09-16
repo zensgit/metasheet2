@@ -60,3 +60,15 @@
 ## 7. 未做 / 边界
 
 无 DDL;无路由、请求、响应形状变更;`.github/**` 零改动;`run-required-web-tests.sh` 只追加一个 token(`categoryCandidateInput`,双向子串碰撞对全部既有 token 为零);未跑 PG 轴(本切片无真库测试);服务端生成 key 不在本切片(设计件 §1.4)。
+
+## 8. 第四轮(owner 审阅两条 P2)→ 闸 4:ACCEPT WITH CONDITIONS,零 P1/P2
+
+| 项 | 内容 | 闸 4 亲跑的证据 |
+|---|---|---|
+| P2-A 第二处 CI 接线 | `approval-web-guard.yml` 两处 `paths:` + run 过滤加入新组件、新 spec、`templateDetailLabels.ts`、`delegations.ts`、`templateDetailI18n.spec.ts`(其 token) | 以**执行文件集差**证实:新−旧 = {`categoryCandidateInput.spec.ts`, `templateDetailI18n.spec.ts`},旧−新 = ∅;99→101 文件、1890→1927 测试;两向子串碰撞零;`run-required-web-tests.sh` 逐字节未变;`plugin-tests.yml` 哈希 == s6a 钉 |
+| P2-B 键盘/combobox | ArrowUp/Down 环绕、Enter 接受、Escape 按 `listboxVisible` 门控、`role=combobox/listbox/option` + `aria-activedescendant`;父级快捷键隔离用 **`stopImmediatePropagation`**——父级 `@keyup.enter/escape` 经 `inheritAttrs:false` 落在**同一个** `<input>` 上,与组件自己的 `@keyup` 合并成一个 `onKeyup` 处理器**数组**(`@vue/runtime-core` `mergeProps`),Vue 只对 `stopImmediatePropagation` 跳过数组后项,plain `stopPropagation` 是空操作 | M-A(改回 `stopPropagation`)⇒ 恰 3 红,全在父级 spy 断言上;M-B 去 keydown ⇒ 6 红;M-C 去 keyup 吞并 ⇒ 3 红;M-D 去 `aria-activedescendant` 守卫 ⇒ 2 红;M-E 指错 option ⇒ 1 红;M-F/M-G 回退自审两处修复各 1 红;M-H Escape 门控改 `open` ⇒ 1 红 |
+| 真实父级集成 | `templateDetailI18n.spec.ts` 挂载真实 `TemplateDetailView`:ArrowDown×2+Enter 选中第二候选且**不**触发 `updateTemplateCategory`;正控 Enter 闭态触发 | 闸另写两段探针证 Escape:列表可见 ⇒ 收起且保持编辑态;闭态 ⇒ 退出编辑态 |
+| 三句文案 | `TemplateAuthoringView.vue:1798,1801`、`ApprovalGraphNodeConfigEditor.vue:755` 按审阅方措辞(**非 owner ratify**) | 旧/新字面量在 tests/verification/backend tests 零命中 ⇒ 零断言覆盖(NIT-2) |
+| 总量 | Playwright 必需 lane **38/38**;必需 vitest **463 文件 / 6903 测试**(本轮 +12:两 spec 25→37);`vue-tsc`、`tsc` 0;三处裸 DOM spec 183/183 | — |
+
+**闸 4 条件的处置**:P3-1 **已应用**(`consumedKey = null` 作 `onKeydown` 首句 + 钉测 (b2):被吞 Enter 的 keyup 丢失后,列表闭态的下一次 Enter 仍到父级;mutation 去掉该行 ⇒ 恰 (b2) 红,其余 21 绿);P3-2 测试数按闸实测更正;NIT-1(Escape 对真实详情页无**提交**覆盖,闸探针已验)、NIT-2、NIT-3(ArrowDown 成第三个懒取触发,Playwright 绿仍靠避开而非 stub,`page.route` stub 作后续)、NIT-4(`approval-ui-workspace.spec.ts:40` 的重钉位于隔离文件且 `:37` 先红,不可达)均如实披露。闸 3 的条件原样延续。

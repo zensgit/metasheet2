@@ -292,6 +292,10 @@ function selectCandidate(candidate: string): void {
 // and gating Escape on it would swallow the key on a focused-but-empty-match field and never reach
 // the parent's `keyup.escape` cancel shortcut.
 function onKeydown(event: KeyboardEvent): void {
+  // Gate-4 P3-1: a consumed Enter/Escape whose matching keyup never arrives (focus moved away
+  // mid-press) must not poison the NEXT key — reset the consumption marker on every keydown so
+  // only a keyup that follows its own consumed keydown is swallowed.
+  consumedKey = null
   if (event.key === 'ArrowDown') {
     event.preventDefault()
     if (!open.value) {
