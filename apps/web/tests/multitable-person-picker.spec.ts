@@ -122,4 +122,56 @@ describe('MetaPersonPicker (field member-group directory)', () => {
     })
     app.unmount(); container.remove()
   })
+
+  // #5781: the directory endpoint is now SEARCH-REQUIRED (it no longer answers a term-less call with
+  // the deployment-wide roster) and CAPPED. The picker opens with an empty search box, so the very
+  // first call it makes gets `requiresQuery` — that must read as a prompt, never as "no members" and
+  // never as a load failure.
+  describe('#5781 bounded directory', () => {
+    const emptyLabels = { en: 'No members found', zh: '未找到成员' }
+
+    it('renders the "type to search" prompt (NOT the empty-result message) when the server requires a term', async () => {
+      mockListDirectory.mockResolvedValue({ items: [], total: 0, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 })
+      const { container, app, vm } = mount({ id: 'f', name: 'Owner', type: 'person' }, [])
+      vm.visible = true
+      await flush()
+      expect(container.querySelector('[data-test="person-picker-search-required"]')).not.toBeNull()
+      expect(container.querySelectorAll('[data-test="person-picker-member"]').length).toBe(0)
+      expect(container.textContent).not.toContain(emptyLabels.en)
+      expect(container.textContent).not.toContain(emptyLabels.zh)
+      expect(container.querySelector('.meta-person-picker__error')).toBeNull()
+      app.unmount(); container.remove()
+    })
+
+    it('renders the truncation hint when the answer hit the server ceiling', async () => {
+      mockListDirectory.mockResolvedValue({ ...directory, hasMore: true, requiresQuery: false, minQueryLength: 1 })
+      const { container, app, vm } = mount({ id: 'f', name: 'Owner', type: 'person' }, [])
+      vm.visible = true
+      await flush()
+      expect(container.querySelector('[data-test="person-picker-truncated"]')).not.toBeNull()
+      expect(container.querySelectorAll('[data-test="person-picker-member"]').length).toBe(2)
+      app.unmount(); container.remove()
+    })
+
+    it('shows neither hint for a normal bounded answer', async () => {
+      mockListDirectory.mockResolvedValue({ ...directory, hasMore: false, requiresQuery: false, minQueryLength: 1 })
+      const { container, app, vm } = mount({ id: 'f', name: 'Owner', type: 'person' }, [])
+      vm.visible = true
+      await flush()
+      expect(container.querySelector('[data-test="person-picker-search-required"]')).toBeNull()
+      expect(container.querySelector('[data-test="person-picker-truncated"]')).toBeNull()
+      expect(container.querySelectorAll('[data-test="person-picker-member"]').length).toBe(2)
+      app.unmount(); container.remove()
+    })
+
+    it('a genuinely empty MATCH still shows the empty-result message (prompt and empty stay distinct)', async () => {
+      mockListDirectory.mockResolvedValue({ items: [], total: 0, query: 'zz', hasMore: false, requiresQuery: false, minQueryLength: 1 })
+      const { container, app, vm } = mount({ id: 'f', name: 'Owner', type: 'person' }, [])
+      vm.visible = true
+      await flush()
+      expect(container.querySelector('[data-test="person-picker-search-required"]')).toBeNull()
+      expect(container.querySelector('.meta-person-picker__empty')).not.toBeNull()
+      app.unmount(); container.remove()
+    })
+  })
 })

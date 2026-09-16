@@ -5711,6 +5711,21 @@ async function normalizeFieldWriteInput(
 const loadSheetRow = loadSheetRowShared
 const loadFieldsForSheet = loadFieldsForSheetShared
 
+/**
+ * #5781 — disclosure bounds for GET /sheets/:sheetId/person-fields/:fieldId/directory.
+ *
+ * Ceiling: the SAME 50 the sibling /permission-candidates clamps to (`Math.min(50, ...)`), so the two
+ * roster-shaped reads of this file cannot disclose different volumes.
+ *
+ * Minimum term length: 1. The sibling has NO minimum (its `q` is optional), so there is nothing to
+ * copy; 1 is the smallest bound that removes the zero-effort "open the picker, get the deployment
+ * roster" dump while keeping every search the picker can actually issue — MetaPersonPicker debounces
+ * and re-queries on EVERY keystroke, so a minimum of 2+ would make a legitimate 1-character search
+ * (common for CJK surnames) silently answer nothing.
+ */
+export const PERSON_DIRECTORY_MAX_ITEMS = 50
+export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
+
 async function ensureAttachmentIdsExist(
   query: QueryFn,
   sheetId: string,
@@ -8242,13 +8257,31 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // resolvePersonAssignableDirectory read model for ONE person field — the same allowed set the write
   // validator accepts, hydrated + active-only. Gated on canEditRecord (the picker is used while editing
   // a record's person field), NOT canManageSheetAccess like /permission-candidates.
+  //
+  // #5781 — THIS CHANGE BOUNDS DISCLOSURE ONLY; IT DOES NOT NARROW WHO IS ELIGIBLE.
+  // Plainly: the underlying eligible set is DEPLOYMENT-WIDE, not sheet-scoped. It comes from
+  // loadSheetMemberUserIdSet → listSheetPermissionCandidates, whose `user_candidates` CTE carries the
+  // sheet id only in the LEFT JOIN ON clause and filters on nothing but the search term — so "sheet
+  // members" is really "every active user in the deployment". Before this change, any actor with
+  // canEditRecord on ANY sheet could call this with no search term and receive that whole roster
+  // hydrated to id + name + email, unlimited; the sibling /permission-candidates, which answers the
+  // same shape, requires canManageSheetAccess AND clamps to 50.
+  // So this route now (a) requires a search term of at least PERSON_DIRECTORY_MIN_QUERY_LENGTH and
+  // answers a term-less call with an empty list plus `requiresQuery` (a values-free marker the picker
+  // renders as "type to search"), and (b) clamps to PERSON_DIRECTORY_MAX_ITEMS with `hasMore`.
+  // It deliberately leaves the eligible SET alone: that set is shared with the write validator
+  // (createPersonMemberResolver — same file documents the single-source-of-truth contract), so
+  // narrowing it on the read side only would make the picker offer less than a save accepts.
+  // Narrowing the set on BOTH sides (i.e. making listSheetPermissionCandidates actually sheet-scoped)
+  // is tracked separately under #5781 and is NOT done here.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
     if (!sheetId || !fieldId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and fieldId are required' } })
     }
-    const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : ''
+    // Case folding now happens in SQL (ILIKE), so keep the term as typed for the echo.
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     try {
       const pool = poolManager.get()
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
@@ -8265,11 +8298,51 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Person field not found: ${fieldId}` } })
       }
 
-      const directory = await resolvePersonAssignableDirectory(pool.query.bind(pool), sheetId, personRestrictGroupIds(field))
-      const items = q
-        ? directory.filter((e) => (e.name ?? '').toLowerCase().includes(q) || (e.email ?? '').toLowerCase().includes(q))
-        : directory
-      return res.json({ ok: true, data: { items, total: items.length, query: q } })
+      // #5781: no term ⇒ no roster. Answered BEFORE the directory is resolved, so a term-less call
+      // hydrates nothing — no name/email ever leaves the users table for it. Deliberately a 200 with a
+      // values-free marker rather than a 400: MetaPersonPicker opens with an empty search box and
+      // fires this immediately, and a 400 would render as a load FAILURE instead of "type to search".
+      if (q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+        return res.json({
+          ok: true,
+          data: {
+            items: [],
+            total: 0,
+            limit: PERSON_DIRECTORY_MAX_ITEMS,
+            query: '',
+            hasMore: false,
+            requiresQuery: true,
+            minQueryLength: PERSON_DIRECTORY_MIN_QUERY_LENGTH,
+          },
+        })
+      }
+
+      const page = await resolvePersonAssignableDirectory(
+        pool.query.bind(pool),
+        sheetId,
+        personRestrictGroupIds(field),
+        undefined, // keep the canonical (write-validator) allowed-set resolver — eligibility unchanged
+        // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
+        // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never
+        // hands back more than PERSON_DIRECTORY_MAX_ITEMS + 1 rows of display data.
+        { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
+      )
+      const hasMore = page.length > PERSON_DIRECTORY_MAX_ITEMS
+      const items = hasMore ? page.slice(0, PERSON_DIRECTORY_MAX_ITEMS) : page
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          total: items.length,
+          limit: PERSON_DIRECTORY_MAX_ITEMS,
+          query: q,
+          // `hasMore` = the truncation signal used by the record-approval list
+          // (routes/multitable-record-approvals.ts) and by this file's own paged reads; no new convention.
+          hasMore,
+          requiresQuery: false,
+          minQueryLength: PERSON_DIRECTORY_MIN_QUERY_LENGTH,
+        },
+      })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
