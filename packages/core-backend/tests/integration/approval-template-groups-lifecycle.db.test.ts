@@ -588,9 +588,16 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   // behaviour (§2/G), but it has ZERO discriminating power for EITHER of the two named
   // candidate mutations individually — a true single-line mutation gate for G would require
   // removing BOTH layers at once, which neither this test nor the taskbook's per-row mutation
-  // column contemplates. This is a lock-vs-implementation contract gap (defense-in-depth wasn't
-  // anticipated), not a test bug to silently paper over — flagged to the gate/owner rather than
-  // "fixed" here, since strengthening it would mean inventing a new mutation not in the lock.
+  // column contemplates. CORRECTED (fix round 2, gate `impl-gate-A-slice1-round1-20260918.md`
+  // P2-2): this is NOT a lock-vs-implementation contract gap — the lock's G row only requires
+  // the observable behaviour ("same-name blocks unarchive"), it does not require two independent
+  // layers, and does not need a new mutation invented to discriminate it; layer (1) (the
+  // pre-check in unarchiveApprovalTemplateGroup) is this implementation's own addition on top of
+  // layer (2) (the shared mapGroupConstraintError branch A already depends on), so removing
+  // layer (1) alone would restore single-mutation discriminating power without touching anything
+  // the lock text names. That removal is an implementation choice, not made in this fix round —
+  // see verification MD §15.1/§17 item 10 for the reasoning kept for keeping both layers and the
+  // ask for owner to accept or reject it.
   it('G: unarchive — clean case; blocked by another ACTIVE group with the same name; blocked by a group renamed into that name', async () => {
     const org = trackOrg(`atg-g-${TS}`)
     const admin = await tok(base, `g-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
