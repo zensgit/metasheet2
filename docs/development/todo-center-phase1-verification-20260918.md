@@ -1720,3 +1720,384 @@ $ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packag
 
 这份清单本身**不是**本轮新产生的普查——全部照抄门审报告 §7 的编号与描述,只是把"哪些已处理/哪些没有"
 显式记下来,避免下一步重新读一遍整份门审报告才能确认起点。
+
+## FIX-ROUND 2 PASS (2026-09-18, second lane-continuation step). Base at start of this pass: HEAD =
+## `5c8283131585a73e199c64271dec2f7ee02fcf82`. This pass's implementer session has outbound network
+## (`curl`/`gh` both reachable — verified below), unlike the round-1 gate agent's sandbox — exactly
+## the network gap the FIX-ROUND PASS's P2-0 flagged as owner/network-gated. That unblocks P2-0 for
+## real resolution (not just documentation) this round. This pass addresses P2-0, P2-2, P2-3, and
+## (bundled into the same lines as P2-2, per the gate report's own "no reason to defer" framing) P3-4.
+## It does not touch or re-litigate the FINALIZATION PASS or first FIX-ROUND PASS sections above
+## (repo convention: mark the sentence, don't void the section).
+
+### P2-0 — GitHub required-check status, RESOLVED (not merely unblocked): the todo-center lane is
+### confirmed advisory, not required, as of this check
+
+Gate report: sandboxed, no network, could not query `zensgit/metasheet2`'s branch-protection required
+contexts; raised as a hinge condition controlling P2-2/P2-3's severity classification. This session
+has network:
+
+```
+$ curl -s -m 5 -o /dev/null -w "curl_exit=%{http_code}\n" https://api.github.com
+curl_exit=200
+$ gh auth status 2>&1 | head -3
+github.com
+  ✓ Logged in to github.com account zensgit (keyring)
+```
+
+**The actual API call the gate report named**:
+
+```
+$ gh api repos/zensgit/metasheet2/branches/main/protection --jq '.required_status_checks | {strict, contexts}'
+{"contexts":["contracts (strict)","contracts (dashboard)","pr-validate","test (20.x)","contracts (openapi)","web-tests","stock-prep PowerShell 5.1 acceptance","attendance-web-guard","integration-guard","ssh host-key pin contract (fail-closed known_hosts)","observation-kit contract (read-only SQL census + runbook gating)","recovery-schema-drift","Approval browser verify (chromium)"],"strict":false}
+```
+Checked 2026-09-18T01:57:27+08:00 (`2026-09-17T17:57:27Z`). 13 required contexts, `strict: false`.
+`approval-realdb-todo-center-pending-query` (the standalone lane this slice's evidence lives in) is
+**not** one of the 13 names.
+
+**Per the memory note this repo already carries ("被触发≠被验证" — a bare name-absence is not
+sufficient; the discriminating fact is whether ANY required context's workflow actually executes the
+gate file), the absence claim is backed by an enumeration, not just a name check.** Each of the 13
+contexts is produced by exactly one workflow file (job id, or job id + `matrix.<key>` for the three
+that fan out):
+
+| Required context | Producing workflow (job id) |
+|---|---|
+| `contracts (strict)` / `contracts (dashboard)` / `contracts (openapi)` | `.github/workflows/attendance-gate-contract-matrix.yml` (job `contracts`, `matrix.case_id: [strict, dashboard, openapi]`) |
+| `pr-validate` | `.github/workflows/phase5-validate.yml` (job `pr-validate`) |
+| `test (20.x)` | `.github/workflows/plugin-tests.yml` (job `test`, `matrix.node-version: [18.x, 20.x]`, no `name:` override — GitHub renders `test (20.x)`) |
+| `stock-prep PowerShell 5.1 acceptance` | `.github/workflows/plugin-tests.yml` (separate job) |
+| `web-tests` | `.github/workflows/web-tests.yml` (job `web-tests`) |
+| `attendance-web-guard` | `.github/workflows/attendance-web-guard.yml` (job `attendance-web-guard`) |
+| `integration-guard` | `.github/workflows/integration-guard.yml` (job `integration-guard`) |
+| `ssh host-key pin contract (fail-closed known_hosts)` | `.github/workflows/ssh-hostkey-pin-contract.yml` |
+| `observation-kit contract (read-only SQL census + runbook gating)` | `.github/workflows/multitable-o2-observation-kit.yml` (job `contract`) |
+| `recovery-schema-drift` | `.github/workflows/multitable-recovery-schema-drift.yml` (job `recovery-schema-drift`) |
+| `Approval browser verify (chromium)` | `.github/workflows/approval-browser-verify.yml` (job `browser-verify`) |
+
+10 distinct workflow files back the 13 contexts (the two 3-context / 2-context rows share one file
+each). Enumerating whether ANY of them ever mentions the gate file:
+
+```
+$ grep -rln "todo-center-pending-gate" .github/workflows/
+.github/workflows/approval-realdb-todo-center-pending-query.yml
+$ for f in attendance-gate-contract-matrix.yml phase5-validate.yml plugin-tests.yml web-tests.yml \
+           attendance-web-guard.yml integration-guard.yml ssh-hostkey-pin-contract.yml \
+           multitable-o2-observation-kit.yml multitable-recovery-schema-drift.yml \
+           approval-browser-verify.yml; do
+  echo "--- $f ---"; grep -c "todo-center" .github/workflows/$f
+done
+--- attendance-gate-contract-matrix.yml ---
+0
+--- phase5-validate.yml ---
+0
+[... all ten print 0 ...]
+```
+Zero hits in all ten required-context files, for even the bare substring `todo-center` (a superset of
+the gate-file name check, so this also rules out an indirect reference by directory or config name).
+
+**The one context worth checking beyond a name grep** is `test (20.x)`, because `plugin-tests.yml`'s
+`test` job runs the core-backend package's default `vitest` invocation, and vitest collects files by
+config glob rather than by literal filename appearing in the workflow YAML — a false negative here
+would be the one place a grep-only check could miss something real. Confirmed it does not collect the
+gate file, by the same two-point wiring already established in this document's own "两点接线" table
+(§4.1 of the gate report; reproduced here against current HEAD, not inherited):
+
+```
+$ grep -n '"test"' packages/core-backend/package.json
+    "test": "vitest",
+$ grep -n "todo-center" packages/core-backend/vitest.config.ts
+      // todo-center-design-lock v2.14 §3.0/§5 — the shared "pending" query production-path gate.
+      // Runs under its OWN vitest.todo-center-pending-gate.config.ts (RBAC_BYPASS=false,
+      // FILE into .github/workflows/approval-realdb-todo-center-pending-query.yml, which arms
+      'tests/todo-center-pending-gate/todo-center-pending-gate.ts',
+```
+`vitest.config.ts` explicitly excludes the file by exact path (the second half of the two-point wiring
+this document already verified); the file's name also carries no `.test.ts`/`.spec.ts` suffix, so it
+is never collected by vitest's default include glob in the first place (the first half, also already
+verified). Both halves hold on current HEAD, independent of anything this round's `paths:` edits touch.
+
+**Verdict**: the todo-center real-DB gate is confirmed **advisory, not required**, at merge time, as
+of this check. This is not a hypothetical the gate report left open — it is now a fact with a
+timestamp. Per the gate report's own framing (its §1 P2-0 block): this **controls** P2-2/P2-3's severity, and it is worse than either of them
+individually — the entire 26-case real-DB evidence surface for this slice (all fourteen viewer
+classes, the eight mutations the gate agent proved load-bearing) is **not enforced by branch
+protection**. A PR that regresses `approval-pending-query.ts`'s WHERE clause, or any of the modules
+this pass adds to its trigger set, can merge to `main` with this lane simply never having run (it is
+`pull_request`-triggered with a `paths:` filter and no `merge_group:` — see the workflow's own header
+comment for why `merge_group:` was deliberately omitted — so a PR whose diff happens to miss the
+trigger set, or a reviewer who doesn't notice an un-run optional check, both merge clean).
+
+**What this pass does NOT do**: change branch protection, or decide that the lane *should* become
+required. That is an infrastructure change with a merge-cost trade-off (this repo's own memory notes
+the s6a-pin / merge-serialisation cost of adding lanes to required sets) — an owner call, not an
+implementer call, and out of scope for a code-review worktree with no mandate to touch repo settings.
+**Owner decision this forces, stated plainly**: either (i) add
+`approval-realdb-todo-center-pending-query` to `main`'s required status checks (accepting its
+merge-serialisation cost, now measurably higher after this pass's P2-2 trigger-set widening — see
+below), or (ii) explicitly accept that this slice's real-DB evidence is advisory-only at merge time.
+Left unsigned here.
+
+### P2-2 (bundled with P3-4) — trigger set (`paths:`) widened to the six production RBAC/auth modules
+### the gate report's mutation M8 proved load-bearing; the one over-inclusive entry removed in the
+### same edit
+
+Gate report: this lane runs on the PRODUCTION RBAC axis (`RBAC_BYPASS=false` / `RBAC_TOKEN_TRUST=false`
+/ `PRODUCT_MODE=plm-workbench`), not the default token-trust harness every other suite in this repo
+runs on — so `AuthService.ts`, `rbac/rbac.ts`, `rbac/service.ts`, `rbac/namespace-admission.ts`,
+`config/product-mode.ts`, and `routes/auth.ts` are not merely imported, they are **executed and
+load-bearing for specific classes' golden values** (the gate report's own mutation M8:
+`AuthService.ts:742`'s `if (admin) role = 'admin'` flipped to `if (false && admin) role = 'admin'`
+turned class ③′ from a pass into the suite's only failure). None of the six was in the 13-entry
+trigger set.
+
+**Precondition check (fail-silent glob risk — a typo'd `paths:` entry never matches and never
+errors, same defect class as the finding being fixed)**: confirmed each of the six files exists at
+the exact path before adding it:
+
+```
+$ for f in "src/auth/AuthService.ts" "src/rbac/rbac.ts" "src/rbac/service.ts" \
+           "src/rbac/namespace-admission.ts" "src/config/product-mode.ts" "src/routes/auth.ts"; do
+  p="packages/core-backend/$f"
+  [ -f "$p" ] && echo "OK  $p" || echo "MISSING  $p"
+done
+OK  packages/core-backend/src/auth/AuthService.ts
+OK  packages/core-backend/src/rbac/rbac.ts
+OK  packages/core-backend/src/rbac/service.ts
+OK  packages/core-backend/src/rbac/namespace-admission.ts
+OK  packages/core-backend/src/config/product-mode.ts
+OK  packages/core-backend/src/routes/auth.ts
+```
+All six present, no typo risk.
+
+**P3-4 bundled in the same edit** (gate report: "建议同 PR 把六个模块补进两处 paths;顺手摘掉
+`tests/helpers/approval-schema-bootstrap.ts`" — over-inclusion, the gate file never imports it):
+
+```
+$ grep -rn "approval-schema-bootstrap" packages/core-backend/tests/todo-center-pending-gate/ \
+                                        packages/core-backend/vitest.todo-center-pending-gate.config.ts
+(no output, exit 1)
+```
+Confirmed zero references before removing the line.
+
+**Diff** (both `pull_request.paths` and `push.paths` blocks — the file has two byte-identical blocks
+by design, one per trigger):
+
+```diff
+-      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+       - 'packages/core-backend/vitest.todo-center-pending-gate.config.ts'
+       - 'packages/core-backend/vitest.config.ts'
++      # Gate report impl-gate-B-slice1-round1-20260918.md P2-2: this lane runs on the PRODUCTION
++      # RBAC axis (RBAC_BYPASS=false / RBAC_TOKEN_TRUST=false / PRODUCT_MODE=plm-workbench below),
++      # not the default token-trust harness, so these six modules are not merely imported — the
++      # gate agent's mutation M8 (AuthService.ts:742 admin-role upgrade) proved one of them is
++      # load-bearing for a specific class (③′) the suite's golden values depend on. A change to
++      # any of the six can silently flip this gate's expected counts without ever triggering it.
++      # Known cost, accepted per the same fail-closed-over-narrow-trigger-set precedent this repo
++      # already applies elsewhere (feedback_lock_taking_port_needs_lock_order_census and siblings):
++      # these are high-churn, widely-shared modules, so this lane's Postgres job will now spin up
++      # more often than the narrower 13-path trigger set it replaces — the alternative (missing a
++      # real behavior change) is worse for an advisory-only real-DB evidence lane (see P2-0 below).
++      - 'packages/core-backend/src/auth/AuthService.ts'
++      - 'packages/core-backend/src/rbac/rbac.ts'
++      - 'packages/core-backend/src/rbac/service.ts'
++      - 'packages/core-backend/src/rbac/namespace-admission.ts'
++      - 'packages/core-backend/src/config/product-mode.ts'
++      - 'packages/core-backend/src/routes/auth.ts'
+       - '.github/workflows/approval-realdb-todo-center-pending-query.yml'
+```
+This is the full first (`pull_request.paths`) hunk verbatim from `git diff`; the second (`push.paths`)
+hunk is byte-identical, confirmed by the block-identity check further below rather than pasted twice.
+
+**Named cost, not silently accepted**: `AuthService.ts` / `rbac/rbac.ts` / `routes/auth.ts` are
+high-churn, widely-shared modules across the whole backend, not approval-specific — this lane's
+Postgres job (a ~25-minute-budget job per its `timeout-minutes: 25`) will now spin up on a materially
+larger set of PRs than the narrow 13-path set it replaces. Fail-closed (spin up the job on a change
+that MIGHT matter) wins over the alternative (miss a real regression this gate exists to catch)
+because — per the P2-0 finding directly above — this lane is advisory, not required, so its actual
+merge-time cost of "running more often" is zero blocking-time cost to anyone; the only cost is CI
+minutes. Had P2-0 resolved the other way (lane IS required), this same trade-off would need an
+explicit owner sign-off on the added required-lane latency; it does not, given P2-0's actual result.
+
+### P2-3 — `approval-pending-query.ts` added to the p7r1 lane's trigger set (the only regression
+### coverage of the module this slice extracted `/pending-count`'s WHERE clause into)
+
+Gate report: `approval-realdb-p7r1-coverage-repair.yml` is the only lane that regression-tests
+`approval-wp3-pending-count.api.test.ts` (unmodified by this branch — see the FINALIZATION PASS
+section's independent-oracle run). Before this slice's extraction, `/pending-count`'s WHERE clause
+lived inline in `routes/approvals.ts`, already in that lane's `paths:`. After extraction, the WHERE
+clause and both aggregate outputs live in `approval-pending-query.ts`, which was not.
+
+**Mirror-image completeness check (the report applies "every module the suite actually executes" to
+P2-2; the same ruler applied to P2-3 asks: does `/pending-count`'s handler pull in anything else from
+the modules this slice touched, besides the one module already being added?)**:
+
+```
+$ grep -n "resolveApprovalActorId\|resolveApprovalActorRoles\|resolveApprovalActorPermissions\|countApprovalPendingForViewer" \
+    packages/core-backend/src/routes/approvals.ts | head -5
+48:import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
+49:import { countApprovalPendingForViewer } from '../services/approval-pending-query'
+267:export function resolveApprovalActorId(req: Request): string | null {
+282:export function resolveApprovalActorPermissions(req: Request): string[] {
+```
+`resolveApprovalActorId` and `resolveApprovalActorPermissions` are defined inline in `routes/
+approvals.ts` itself (already in p7r1's `paths:`). `resolveApprovalActorRoles` is imported from
+`approval-actor-roles.ts`, which is **not** in p7r1's `paths:` either — but that import, and that gap,
+both **pre-date this slice**:
+
+```
+$ git log --oneline --follow -- packages/core-backend/src/services/approval-actor-roles.ts | tail -1
+85b2dd30a test+fix(approval): residual sweep — carried gate gaps from the 20260821-22 wave (#5096)
+$ git show 89f1ecdee2c3b70205a318074824c834bc6a5c7e:packages/core-backend/src/services/approval-actor-roles.ts >/dev/null 2>&1 && echo "EXISTS on merge-base"
+EXISTS on merge-base
+$ grep -c "approval-actor-roles" .github/workflows/approval-realdb-p7r1-coverage-repair.yml
+0
+```
+`approval-actor-roles.ts` already existed on `origin/main` at this branch's merge-base, already was
+NOT in p7r1's `paths:`, and this slice did not touch that file at all (`git diff --stat
+89f1ecdee2c3b70205a318074824c834bc6a5c7e HEAD -- packages/core-backend/src/services/
+approval-actor-roles.ts` is empty). **This is an honest disclosure, not a fix**: the gate report named
+only `approval-pending-query.ts` for P2-3 (the module THIS slice extracted); widening the same ruler
+to every pre-existing gap in a workflow this pass did not otherwise author (e.g. `rbac.ts` is also
+imported by every route p7r1 exercises and is also absent from its `paths:`) is an unbounded,
+separate audit of a lane predating this design-lock entirely, not a bounded fix of a finding this gate
+report raised. Left as a named, out-of-scope observation rather than silently expanded into or
+silently omitted from this pass.
+
+**Diff** (both blocks):
+
+```diff
+       - 'packages/core-backend/src/routes/approvals.ts'
+       - 'packages/core-backend/src/types/approval-product.ts'
+       - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
++      # Gate report impl-gate-B-slice1-round1-20260918.md P2-3: approval-wp3-pending-count.api.test.ts
++      # (this lane's only regression coverage of GET /api/approvals/pending-count) now exercises a
++      # WHERE clause and both aggregate outputs that live entirely in this extracted module, not in
++      # routes/approvals.ts's handler body. Before the extraction this path was already covered by
++      # the routes/approvals.ts entry above; after it, a change to ONLY this module (leaving the
++      # handler byte-identical) would not retrigger this lane without this line.
++      - 'packages/core-backend/src/services/approval-pending-query.ts'
+       # Gate P3-2 (2026-08-18): the other half of the two-point wiring — a rebase or PR that
+```
+This is the full first hunk verbatim from `git diff`; the second hunk (the `push.paths` block) is
+byte-identical, confirmed by the block-identity check below rather than pasted twice.
+
+### Both blocks stay byte-identical per file, and both YAML files re-parse cleanly
+
+```
+$ python3 - <<'EOF'
+import re
+for fn in ['.github/workflows/approval-realdb-todo-center-pending-query.yml',
+           '.github/workflows/approval-realdb-p7r1-coverage-repair.yml']:
+    text = open(fn).read()
+    pr = re.search(r'\n  pull_request:\n(.*?)\n  push:', text, re.S).group(1)
+    push = re.search(r'\n  push:\n(.*?)\n\npermissions:', text, re.S).group(1)
+    getp = lambda b: [l.strip() for l in b.split('\n') if l.strip().startswith('- ')]
+    prp, pushp = getp(pr), getp(push)
+    print(fn, 'pr=%d push=%d identical=%s' % (len(prp), len(pushp), prp == pushp))
+EOF
+.github/workflows/approval-realdb-todo-center-pending-query.yml pr=18 push=18 identical=True
+.github/workflows/approval-realdb-p7r1-coverage-repair.yml pr=20 push=20 identical=True
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/approval-realdb-todo-center-pending-query.yml')); print('todo-center OK')"
+todo-center OK
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/approval-realdb-p7r1-coverage-repair.yml')); print('p7r1 OK')"
+p7r1 OK
+```
+todo-center: 13 → 18 (−1 `approval-schema-bootstrap.ts`, +6 RBAC/auth modules). p7r1: 19 → 20 (+1
+`approval-pending-query.ts`). Both files parse as valid YAML after the edit.
+
+### Regression: full 26-case gate suite re-run (workflow-literal shell shape, existing migrated
+### `metasheet2_lock_b`); typecheck; s6a / judge F unaffected; mutation ledger carries forward by
+### construction
+
+This pass touches only `.github/workflows/*.yml` — zero bytes under `packages/core-backend/src` or
+`packages/core-backend/tests` — so the M1–M8 mutation ledger's red/green verdicts cannot have changed;
+confirmed rather than assumed:
+
+```
+$ git diff --stat 5c8283131585a73e199c64271dec2f7ee02fcf82 HEAD -- packages/core-backend/src packages/core-backend/tests
+(empty)
+```
+(HEAD here is the pre-commit working tree at the point this was run, diffed against this pass's own
+starting commit — zero output confirms no `src`/`tests` file changed in this pass, distinct from the
+prior pass's docblock-only change, which IS captured going further back: `git diff --stat
+9a416b9ba HEAD -- packages/core-backend/src` shows only the round-1 `approval-pending-query.ts`
+docblock addition, nothing from this round.)
+
+Full suite, workflow-literal shell shape (node 20.x via nvm, matching CI):
+
+```
+$ export NVM_DIR="$HOME/.nvm" && source "$NVM_DIR/nvm.sh" && nvm use 20
+Now using node v20.20.2
+$ cd packages/core-backend && DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" \
+  EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+    tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+```
+26/26, unchanged — a workflow-trigger-only edit cannot and did not change any test's behavior.
+
+```
+$ npx tsc --noEmit -p tsconfig.json; echo "TSC-EXIT=$?"
+TSC-EXIT=0
+```
+
+```
+$ git diff --stat -- .github/workflows/plugin-tests.yml
+(empty)
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?
+0
+```
+s6a stays N/A (byte-identical `plugin-tests.yml`), judge F stays green (empty migrations diff) —
+unaffected, as expected for a change confined to two non-pinned workflow files.
+
+### 未做 / 未验 表新增一行(本轮)
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| `approval-actor-roles.ts` 缺失于 p7r1 `paths:`(邻接 P2-3 但范围外) | **如实登记,未修**——这是先存于本切片之前的独立缺口(`approval-actor-roles.ts` 在 merge-base 已存在,本切片未改动该文件),门审报告 P2-3 只点名 `approval-pending-query.ts`;把同一把尺子推广到 p7r1 workflow 里每个先存缺口是无边界的独立普查,不是本条发现的修复范围 | 见本节 P2-3 小节 mirror-image 完整性检查 |
+
+### 绝对断言自扫(本轮新增)
+
+| 断言 | 命令 | 结果 |
+|---|---|---|
+| 13 个 required contexts 里没有 todo-center 的 lane 名 | 见本节 `gh api ... --jq` 完整输出 | 13 个名字逐一列出,均不含 `approval-realdb-todo-center-pending-query` |
+| 10 份 required-context workflow 文件全部零命中 `todo-center` 子串(非仅门文件名) | 见本节 for 循环完整输出(10 份全 0) | 全 0 |
+| `test (20.x)` 这一条(经 vitest 默认 glob 收集,而非字面文件名出现)也不会收集门文件 | `grep -n '"test"' packages/core-backend/package.json`;`grep -n "todo-center" packages/core-backend/vitest.config.ts` | `"test": "vitest"`;命中 4 行,含精确路径排除项 |
+| 六个新增模块路径全部真实存在(防 `paths:` glob 静默不匹配) | 见本节 for 循环 `[ -f ... ]` 完整输出 | 6/6 `OK` |
+| `approval-schema-bootstrap.ts` 未被门套件导入,移除前确认零命中 | `grep -rn "approval-schema-bootstrap" packages/core-backend/tests/todo-center-pending-gate/ packages/core-backend/vitest.todo-center-pending-gate.config.ts` | 无输出,exit 1 |
+| todo-center workflow 两处 `paths:` 编辑后仍逐字相同 | 见本节 python3 对照脚本输出 | `pr=18 push=18 identical=True` |
+| p7r1 workflow 两处 `paths:` 编辑后仍逐字相同 | 同上 | `pr=20 push=20 identical=True` |
+| 两份 workflow 编辑后仍是合法 YAML | 见本节 `yaml.safe_load` 两次调用 | 均打印 `OK`,零异常 |
+| `approval-actor-roles.ts` 确系先存缺口、非本切片引入 | `git diff --stat 89f1ecdee2c3b70205a318074824c834bc6a5c7e HEAD -- packages/core-backend/src/services/approval-actor-roles.ts` | 空输出 |
+| 本轮零字节触碰 `src`/`tests` | `git diff --stat 5c8283131585a73e199c64271dec2f7ee02fcf82 HEAD -- packages/core-backend/src packages/core-backend/tests` | 空输出 |
+| 全套件在本轮 workflow 编辑后仍 26/26 | 见本节"Regression"小节完整输出 | 26 passed / 26 |
+| `npx tsc --noEmit` 本轮仍 exit 0 | 同上 | `TSC-EXIT=0` |
+| `plugin-tests.yml` 与迁移目录本轮仍未被触碰(s6a / 判据 F 不受影响) | 见本节"Regression"小节完整输出 | 空输出;`0` |
+| 工作树在提交前只列出本轮改动的 3 个文件,无其它路径 | `git status --short` | ` M .github/workflows/approval-realdb-p7r1-coverage-repair.yml`<br>` M .github/workflows/approval-realdb-todo-center-pending-query.yml`<br>` M docs/development/todo-center-phase1-verification-20260918.md` |
+
+### P3-1 重新归类:BLOCKED-by-constraint,不是"remaining"
+
+上一轮的"本轮未处理"清单把 P3-1(squash 两条 `wip:` 提交 `a2cf836b5`、`01759832a`)与其余五项并列
+为"留给下一步"。这个归类不准确:这两条提交**已经 push 到 `origin/feat/todo-center-shared-pending-
+query`**(`git log`/`git status` 显示分支与远端同步),squash 它们需要改写已推送的历史 = force-push,
+而本 lane 的硬规矩明确禁止 force-push。⇒ **P3-1 在本 lane 现有约束下不可达,不是"排期未到"，是
+"这条路径被规矩本身挡死"**——继续把它记成"remaining"会让下一步再次尝试、再次撞到同一条硬规矩。
+正确状态:**BLOCKED-by-constraint**(不是 BLOCKED-需 owner 裁决——这不是设计分歧,是本 lane 自己的
+安全规矩产生的必然结果,undraft/PR 阶段如需要可由不同规矩下的流程处理,例如开 PR 前用
+`git rebase -i` 在**尚未推送**的副本上整理,或直接在 PR description 里说明这两条是过程性提交)。
+
+### 本轮未处理、留给下一步的项(更新后的清单,如实列出)
+
+本轮处理了 P2-0(RESOLVED)、P2-2(FIXED)、P2-3(FIXED)、P3-4(FIXED,随 P2-2 同一编辑)。以下项
+**仍未在任何一轮触碰**:
+
+- **P3-1**:两条 `wip:` 提交(`a2cf836b5`、`01759832a`)——**BLOCKED-by-constraint**(见上一小节),
+  不是排期未到。
+- **P3-2**:`approval-ci-coverage-enumeration.test.ts` 发现式守卫的闭世界边界未登记
+  `todo-center-pending-gate.ts`。
+- **P3-3**:设计 MD §5 的 HEAD 钉点(`63fc3d699`)已过期,当前 HEAD 已进一步前移(锚点仍字节有效,
+  只是钉点数字过期)。
+
+这份清单同样**不是**本轮新产生的普查——沿用上一轮的记账方式,只更新已处理/未处理的状态。
