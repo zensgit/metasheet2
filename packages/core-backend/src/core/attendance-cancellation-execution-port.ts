@@ -27,7 +27,62 @@
  * `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` already takes.
  */
 
+import crypto from 'node:crypto'
+
 import type { AttendanceRequestOperationBoundaryV1 } from '../attendance/w4c3b-request-operation-boundary'
+
+/**
+ * Lock §3 C-2 step ④'s replay key, derived — and NOT the round id itself.
+ *
+ * ⛔ WHY THIS EXISTS (a defect this branch shipped and this commit fixes). The redemption hook
+ * passed `approval_rounds.id` straight through as the W4 `operationId`, with a comment asserting
+ * 「`operationId` … must be a UUID … The round row's own id is exactly the right identity」. The
+ * first half is true; the second is FALSE. `approval_rounds.id` is `text` (migration
+ * `approval_rounds_pkey` over `id text NOT NULL`, its only shape constraint being
+ * `chk_approval_rounds_id_nonblank`), and `createCancelRoundInstance` mints it as
+ * `apr_${crypto.randomUUID()}` — 40 characters with an `apr_` prefix. The boundary's
+ * `normalizeExternalTransactionInput` → `normalizeInput` → `uuidOrNull` refuses it
+ * (`W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`, 500), so EVERY redemption against the real boundary
+ * failed. Four acceptance cases were green over it because a test double never normalizes its
+ * input — which is exactly the class of gap the end-to-end case in
+ * `approval-cancel-round-redemption.db.test.ts` was written to find, and did, on its first run.
+ *
+ * WHY v5 AND NOT PREFIX-STRIPPING. `apr_<uuid>` is what the generator produces TODAY; nothing in
+ * the schema enforces it, and a round row whose id does not match would silently fall back to
+ * something else or throw at redemption time. A UUIDv5 over the round id is total (every non-blank
+ * id maps), deterministic (the same round always replays under the same key — which is the ONLY
+ * property step ④ needs: a round passes outlet #5 at most once, so a retry after a rolled-back
+ * attempt must not mint a second operation) and injective for practical purposes.
+ *
+ * Same construction as `w4c0-identity.ts:281-291` (sha1 over namespace‖name, version and RFC 4122
+ * variant bits stamped) — copied rather than imported because that module's derivations are bound
+ * to the source-matrix `idRule` families and their TS/SQL golden-parity gate, and this key is
+ * neither: it is minted by the APPROVAL side, has no SQL twin, and adding a namespace to that
+ * matrix would put a non-matrix derivation under a gate that does not describe it.
+ *
+ * ⚠️ FLAGGED FOR OWNER REGISTRATION: the lock fixes 「同一轮次重试必须复用同一 operation」 but does
+ * not name the derivation. This namespace UUID is an implementer choice and is FROZEN from here on
+ * — changing it would make every already-redeemed round replay under a new key.
+ */
+export const CANCEL_ROUND_W4_OPERATION_NAMESPACE_V1 = '9d3bd35e-6a0f-5c2e-9a1c-0a0bd6f3a7c4'
+
+export function deriveCancelRoundW4OperationIdV1(roundId: string): string {
+  // Fail closed rather than derive a stable key for an empty identity: two different rounds must
+  // never share one, and `''` would give them one.
+  if (typeof roundId !== 'string' || roundId.length === 0) {
+    throw new Error('deriveCancelRoundW4OperationIdV1: roundId must be a non-empty string')
+  }
+  const namespaceBytes = Buffer.from(CANCEL_ROUND_W4_OPERATION_NAMESPACE_V1.replace(/-/g, ''), 'hex')
+  const digest = crypto
+    .createHash('sha1')
+    .update(Buffer.concat([namespaceBytes, Buffer.from(roundId, 'utf8')]))
+    .digest()
+    .subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50 // version 5
+  digest[8] = (digest[8] & 0x3f) | 0x80 // RFC 4122 variant
+  const hex = digest.toString('hex')
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
+}
 
 /**
  * The port. Structurally the request-operation boundary; the approval side uses only

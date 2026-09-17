@@ -6,6 +6,7 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { eventBus } from '../../src/integration/events/event-bus'
 import {
+  deriveCancelRoundW4OperationIdV1,
   getAttendanceCancellationExecutionPort,
   registerAttendanceCancellationExecutionProvider,
   unregisterAttendanceCancellationExecutionProvider,
@@ -129,6 +130,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   // 判据 II fixtures attach a real `attendance_requests` row to the original document; cleaned up
   // alongside the approval rows so a shared DB is left as it was found.
   const createdRequestIds = new Set<string>()
+  // The END-TO-END case (bottom of this file) needs a REAL directory identity: the W4 preflight's
+  // `recheckAttendanceActorLivenessInTransactionV1` requires an active `users` row AND an active
+  // `user_orgs` membership for the acting id. A dev token is not a directory row, so the double-
+  // backed cases never needed these.
+  const createdDirectoryUserIds = new Set<string>()
 
   const pool = () => poolManager.get()
 
@@ -164,6 +170,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         await pool().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      if (createdDirectoryUserIds.size > 0) {
+        await pool().query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [[...createdDirectoryUserIds]])
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...createdDirectoryUserIds]])
       }
       if (grantedUserIds.size > 0) {
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])
@@ -612,6 +622,30 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   }
 
   /**
+   * The acting identity as a REAL directory row. `attendanceResultOperationPreflightV1` calls
+   * `recheckAttendanceActorLivenessInTransactionV1`, which requires an active `users` row for the
+   * actor AND an active `user_orgs` membership in the operation's org — a witness minted for an
+   * identity that has since been deprovisioned must not be honoured. The dev token this harness
+   * mints is not a directory row, so only the END-TO-END case (which runs the real preflight)
+   * needs this; every double-backed case above short-circuits before it.
+   */
+  async function seedDirectoryIdentity(userId: string, orgId: string): Promise<void> {
+    createdDirectoryUserIds.add(userId)
+    await pool().query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       VALUES ($1, $2, $1, 'cancel-round e2e actor', 'x', 'user', '[]'::jsonb, TRUE, FALSE, 'activated')
+       ON CONFLICT (id) DO NOTHING`,
+      [userId, `wi13-e2e-${userId}@example.test`],
+    )
+    await pool().query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT DO NOTHING`,
+      [userId, orgId],
+    )
+  }
+
+  /**
    * A test double for the C-1 PROVIDER, bound through the production registry
    * (`registerAttendanceCancellationExecutionProvider`) so the code under test resolves it exactly
    * as it resolves the attendance plugin's real boundary.
@@ -873,9 +907,15 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const call = portStub.calls[0]
       expect(call.kind).toBe('request_cancel')
       expect(call.routeVariant).toBeNull()
-      // The replay key is the ROUND's own id — deterministic, so a retry replays rather than
-      // minting a second operation.
-      expect(call.operationId).toBe(roundId)
+      // The replay key is DERIVED from the round's own id — deterministic, so a retry replays
+      // rather than minting a second operation, and UUID-shaped, which the round id is not (it is
+      // `text`, minted `apr_<uuid>`; passing it raw made the REAL boundary 500 on
+      // `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID` — see the end-to-end case at the bottom of this
+      // file, which found it). Asserted against the production derivation AND against its two
+      // properties, so a future change of namespace cannot pass by re-deriving both sides.
+      expect(call.operationId).toBe(deriveCancelRoundW4OperationIdV1(roundId))
+      expect(call.operationId).not.toBe(roundId)
+      expect(call.operationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
       const routeInput = call.routeInput as Record<string, unknown>
       // Pinned to the SAME row the rollout lock was taken for (both id and org are passed, so the
       // entry's own lookup cannot drift to another row).
@@ -1057,6 +1097,165 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const round = await roundOutcome(fixture.roundInstanceId)
       expect(round.outcome).toBe('pending')
       expect(round.ended_at).toBeNull()
+    },
+  )
+
+  /**
+   * 判据 II END-TO-END, against the plugin's REAL W4 request-operation boundary — the one case in
+   * this file that binds NO double.
+   *
+   * Why this is possible here at all, and how it was established rather than assumed: the server
+   * is constructed with `pluginDirs: []`, which does NOT mean 「no plugins」. `PluginLoader`'s
+   * constructor only adopts `options.pluginDirs` when `length` is truthy, so an EMPTY array leaves
+   * `basePath = './plugins'`, which makes `allowFallback` true, which makes `discover()` scan
+   * `cwd/plugins`, `cwd/../plugins` and `cwd/../../plugins` — and vitest runs with
+   * `cwd = packages/core-backend`, so the third root IS the repo's `plugins/`. plugin-attendance
+   * therefore activates in this process and `registerCancelRoundExecutionBoundary` binds the real
+   * boundary (`src/index.ts:2758-2759`). That binding is also the source of the
+   * 'AttendanceCancellationExecutionPort provider is being replaced' warning the sibling cases'
+   * save/restore helper exists for.
+   *
+   * What this case adds over the four double-backed cases above — each of these is a MEASUREMENT
+   * that a double cannot make, and together they are why §3.11.3's org-key CONSTRUCTION argument
+   * stops being an argument:
+   *   - `assertExternalTransactionIsolationV1` passed: the caller's transaction really is an open,
+   *     non-aborted block at SERIALIZABLE (`dispatchAction`'s `BEGIN ISOLATION LEVEL SERIALIZABLE`
+   *     branch), and the probe savepoint it takes and releases did not disturb it.
+   *   - `assertExternalTransactionRolloutLockHeldV1` passed: the class-`00` rollout advisory key
+   *     built from the org `prepareIdentity` read off the `attendance_requests` row is HELD by
+   *     this backend — i.e. it is the same key `dispatchAction` locked before its row locks.
+   *   - The connection handed over is the one that issued `BEGIN` and took the locks (it is
+   *     `pool.connect()`'s client, `ApprovalProductService.ts` dispatchAction), not the pool: a
+   *     pool would have put the savepoint and the `pg_backend_pid()` predicate on arbitrary
+   *     backends and both asserts would have failed.
+   *   - The two inputs the double could not refuse (phase-2 MD §4): the replay preflight accepts an
+   *     `operationId` it has never registered (the round id), and `requestBody: {}` — whose
+   *     `expectedSnapshotVersion`/`expectedSnapshotHash` defaults `loadLatestRequestSnapshotToken`
+   *     sees — is tolerated.
+   *
+   * POSITIVE CONTROL that this really ran against the real boundary rather than a leftover double:
+   * the assertions below are on rows only the real adapter writes — the ORIGINAL document going
+   * `approved → cancelled` with its `revoke` audit row carrying `w4ActorPosture`, and
+   * `attendance_requests.status = 'cancelled'` with `resolved_by`/`resolved_at`. Every double in
+   * this file returns `{ kind: 'executed' }` and writes nothing at all, so none of them can make
+   * these green.
+   *
+   * What this case does NOT prove, so no green here is read for more than it is:
+   *   - 账侧完整取消结果逐字节等价 (lock §8 期 1). This is DB END-STATE parity with what the W4
+   *     path writes; byte equivalence needs the HTTP `POST /api/attendance/requests/:id/cancel`
+   *     path run on a twin fixture and a field-by-field compare of both results. Still open.
+   *   - `unrecoverableExpired` presentation: this fixture seeds no leave-balance lots, so
+   *     `reverseLeaveBalanceDeduction` finds no `deduct` events and writes nothing. Still open.
+   *   - The P14 approved-leave cancellation CALCULATION. The org resolves to a legacy write
+   *     posture here, and the adapter's P14 branch is `approvedLeave && acceptedWritePosture !==
+   *     'legacy_projection_only'` — so the calculation append is SKIPPED on this fixture. That is
+   *     asserted below (zero `approval_reversal` calculations) rather than left ambiguous.
+   */
+  it(
+    '判据 II END-TO-END (no double): the redemption runs the REAL W4 external-transaction entry — ' +
+      'its isolation and rollout-lock preconditions pass by MEASUREMENT, and the original ' +
+      'document + attendance request are really cancelled inside the approver\'s transaction',
+    async () => {
+      const suffix = `iie2e-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+      await seedDirectoryIdentity(fixture.requesterId, attached!.orgId)
+
+      // The provider under test is the plugin's, bound at activate. Asserted before the action so
+      // a future harness change that stops loading the plugin fails HERE, naming the reason,
+      // instead of failing on a redemption assertion that would read as a regression in the code
+      // under test.
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+
+      const capture = captureCompletionEvents(fixture.roundInstanceId)
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        capture.stop()
+      }
+
+      // 恰一个完成事件 (判据 II), on the channel 判据 IV's zeros are measured on.
+      expect(capture.seen).toEqual(['approval.approved'])
+
+      // 轮次 applied + the cancel round's own instance approved — same as the double-backed case,
+      // but now downstream of a real C-1.
+      const round = await roundOutcome(fixture.roundInstanceId)
+      expect(round.outcome).toBe('applied')
+      expect(round.ended_at).not.toBeNull()
+      const roundInstance = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(roundInstance.rows[0]?.status).toBe('approved')
+
+      // ── The positive control, and the 账侧 END-STATE. Only the real adapter writes these. ──
+      const original = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.documentId],
+      )
+      expect(original.rows[0]?.status).toBe('cancelled')
+
+      const revoke = await pool().query<{
+        actor_id: string
+        from_status: string
+        to_status: string
+        metadata: Record<string, unknown>
+      }>(
+        `SELECT actor_id, from_status, to_status, metadata FROM approval_records
+          WHERE instance_id = $1 AND action = 'revoke'`,
+        [fixture.documentId],
+      )
+      expect(revoke.rows.length).toBe(1)
+      expect(revoke.rows[0].from_status).toBe('approved')
+      expect(revoke.rows[0].to_status).toBe('cancelled')
+      // The acting identity the hook chose (flagged for owner registration, phase-2 MD §3.11.4):
+      // the cancel round's requester, NOT the approver who pressed approve.
+      expect(revoke.rows[0].actor_id).toBe(fixture.requesterId)
+      expect(revoke.rows[0].actor_id).not.toBe(fixture.approverId)
+      // Written only by the real adapter, from the posture IT resolved inside the transaction —
+      // lock §3 C-1 「运行模式与授权凭据由边界在锁内解析，不得由普通请求参数指定」.
+      expect(revoke.rows[0].metadata.w4ActorPosture).toBe('self')
+
+      const request = await pool().query<{ status: string; resolved_by: string | null; resolved_at: Date | null }>(
+        `SELECT status, resolved_by, resolved_at FROM attendance_requests WHERE id = $1::uuid`,
+        [attached!.requestId],
+      )
+      expect(request.rows.length).toBe(1)
+      expect(request.rows[0].status).toBe('cancelled')
+      expect(request.rows[0].resolved_by).toBe(fixture.requesterId)
+      expect(request.rows[0].resolved_at).not.toBeNull()
+
+      // The original document's seats are deactivated by the adapter as well — stated as an end
+      // state, not as evidence that its own call is load-bearing.
+      const originalSeats = await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`,
+        [fixture.documentId],
+      )
+      expect(originalSeats.rows[0].count).toBe('0')
+
+      // The P14 branch is NOT taken on this fixture (see the doc comment): zero
+      // `approval_reversal` calculations for this operation id. Asserted so a later posture change
+      // that starts exercising P14 here cannot pass unnoticed.
+      const roundIdRow = await pool().query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      const calculations = await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM attendance_record_calculations
+          WHERE entrypoint = 'approval_reversal' AND operation_id = $1::uuid`,
+        [deriveCancelRoundW4OperationIdV1(roundIdRow.rows[0].id)],
+      )
+      expect(calculations.rows[0].count).toBe('0')
     },
   )
 })

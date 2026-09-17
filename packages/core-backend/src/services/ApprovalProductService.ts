@@ -170,7 +170,10 @@ import {
 // Lock §3 C-1 — the PORT the cancel-round redemption reaches 完整业务取消 through. Approval takes
 // no runtime dependency on the attendance PLUGIN; the plugin binds its boundary here at activate.
 // (`AttendanceW4TransactionClientV1`, the entry's client contract, is already imported below.)
-import { getAttendanceCancellationExecutionPort } from '../core/attendance-cancellation-execution-port'
+import {
+  deriveCancelRoundW4OperationIdV1,
+  getAttendanceCancellationExecutionPort,
+} from '../core/attendance-cancellation-execution-port'
 import {
   acquireAttendanceCalculationRolloutLock,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -9055,12 +9058,19 @@ export class ApprovalProductService {
       // will not match structurally across the overload set.
       client: client as unknown as AttendanceW4TransactionClientV1,
       kind: 'request_cancel',
-      // Deterministic, and deterministic ON PURPOSE. `operationId` is the W4 replay key and must be
-      // a UUID (`normalizeInput` → `uuidOrNull`). The round row's own id is exactly the right
-      // identity: a round passes outlet #5 at most once (the `WHERE outcome='pending'` partial
-      // unique index plus this method's own `applied` write), so a retry of the SAME round after a
-      // rolled-back attempt replays under the same key rather than minting a second operation.
-      operationId: roundId,
+      // Deterministic, and deterministic ON PURPOSE: a round passes outlet #5 at most once (the
+      // `WHERE outcome='pending'` partial unique index plus this method's own `applied` write), so
+      // a retry of the SAME round after a rolled-back attempt must replay under the same key
+      // rather than mint a second operation.
+      //
+      // ⛔ RETRACTION (this commit). An earlier revision passed `roundId` itself here, over a
+      // comment claiming the round id 「is exactly the right identity」. It is not: `operationId`
+      // must be UUID-shaped (`normalizeInput` → `uuidOrNull`) and `approval_rounds.id` is `text`,
+      // minted as `apr_${crypto.randomUUID()}`. Every redemption against the REAL boundary 500ed
+      // with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`; only the double-backed acceptance cases were
+      // green. The key is now DERIVED from the round id — same determinism, valid UUID. See
+      // `deriveCancelRoundW4OperationIdV1`.
+      operationId: deriveCancelRoundW4OperationIdV1(roundId),
       correlationId: `approval-cancel-round:${roundId}`,
       // The generic (non-specialized) cancellation route family — the same `null` the ordinary
       // `POST /api/attendance/requests/:id/cancel` entry passes. `schedule_dispatch_cancel` /
