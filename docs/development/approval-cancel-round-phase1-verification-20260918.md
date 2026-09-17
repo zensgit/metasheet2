@@ -1687,8 +1687,12 @@ $ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1
    → expected undefined to be 'all'
 ```
 
-Red fires **only** at the new assertion (line 405), nothing else in the file turns red — the same
-"red at exactly the added line, nothing else" shape Parts D/E's mutation ledgers record. Restored
+Red fires **only** at the newly added `approvalMode` assertion — no other assertion in the file turns
+red — the same "red at exactly the added assertion, nothing else" shape Parts D/E's mutation ledgers
+record. (Deliberately not citing a line number here: this document's own G3, two sections below,
+closes a finding about a comment that went stale by citing a line number instead of a durable
+description — repeating that shape in the same pass would be the wrong lesson to draw from it.)
+Restored
 from the backed-up JSON text and re-`SELECT`ed into a second file:
 
 ```
@@ -1707,10 +1711,9 @@ undisclosed, so the mapping table gets the row, not just this narrative section.
 
 ## G2. Disposition — the round-2 gate review's other four findings (P3-A/P3-B/P3-C/P3-D)
 
-See the second commit of this pass for the code/doc changes; disposition recorded here to keep this
-document's per-pass narrative complete. Full detail lives in **Part G, continued below**
-(the same Part, extended by the second commit rather than opened as a new Part, since both commits
-are one response to one gate review).
+Detail for each finding is below (§G3-P3-A, §G4-P3-B, §G5-P3-C/P3-D); the authoritative one-table
+summary is §G6. All of this pass's changes — G1's test assertion, the two comment fixes, and the
+design MD header narrowing — landed in a single commit; there is no second commit to point to.
 
 ---
 
@@ -1737,11 +1740,17 @@ $ grep -n "rejectIfCancelRound(instance, 'bulkReassignApprovals')" packages/core
 8916:          rejectIfCancelRound(instance, 'bulkReassignApprovals')
 ```
 
-`:9637` (not `:9320`, the other hit) is the correct absorption line — `:9320` is inside
-`applyApprovalDepartureTransfer`'s own manager-resolution error handling, a different call site than
-the one `ApprovalBridgeService.ts`'s comment is discussing (the outlet-#12/#13 pairing the comment's
-surrounding paragraph is about is the bulk-reassign / departure-transfer pair whose shared absorption
-point is `:9637`'s block, confirmed by reading the enclosing function name at each hit).
+`:9637` (not `:9320`, the other `instanceof AttendanceCentralApprovalError` hit) is the correct
+absorption line, verified against the comment's own words rather than against a name: the comment
+says the failure mode is "silently absorbed into **`skipped_stale`**" — that is a specific outcome
+literal, not a description of "some catch block somewhere". `:9320`'s catch (inside
+`applyApprovalDepartureTransfer`, confirmed by `grep -n "async applyApprovalDepartureTransfer"` →
+`:9217`, no closing brace/next method boundary between `:9217` and `:9320`) resolves to
+`skipDepartureTransfer(instanceId, 'attendance-central-unsupported')` (`:9322`) — a **different**
+named outcome. `:9637`'s catch (inside `applyNodeTimeoutEffect`, `:9568`) resolves to `return
+'skipped_stale'` literally (`:9640`) — the exact string the comment names. Only one of the file's two
+`instanceof AttendanceCentralApprovalError` hits produces the literal outcome the comment is warning
+about, and it is the one this pass cites.
 
 **Comment-text safety check before editing** (a comment-only change is not automatically inert — round
 1's own P1-A was a sync-pin regex breaking on a comment block): grepped for any guard that parses
