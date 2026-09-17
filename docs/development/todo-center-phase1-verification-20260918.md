@@ -849,19 +849,23 @@ Four real HTTP round trips against the live server, added as permanent test cont
    — the healthy stub's own contribution, not `0` (folded-into-zero) and not `2` (stale approval
    count leaking through).
 3. **Retained viewer-shape probe, row B's own parenthetical** — "保留探针 viewer 形状要求:class ②
-   的形状,持恰一个 role 型席位且是其计数的唯一来源". `approval` alone is re-registered throwing
-   (both methods), as the **only** registered source (no healthy sibling this time — the exact
-   production shape, since `index.ts` registers exactly one source today), for class ②'s `v2` — the
-   viewer whose real count (1) comes from exactly one role-type seat and no other arm. Assert both
-   endpoints' `sources` equal exactly `{ approval: 'unavailable' }` (via `toEqual`) and `items`/
-   `count` are `0`. This is the "不得变成更小的数字" clause's actual content: the number DOES drop
-   (class ②'s own A0 assertion earlier in the same file reads `count: 1` from this identical viewer
-   and fixture, `sources.approval` implicitly `'ok'`) — the requirement is that the drop is flagged,
-   not that a genuinely-unreachable seat reports a phantom count. Byte-for-byte against test 4 below
+   的形状,持恰一个 role 型席位且是其计数的唯一来源;正控:读正常 ⇒ ok + 1". For class ②'s `v2`
+   (the viewer whose real count (1) comes from exactly one role-type seat and no other arm), the
+   **positive control is asserted LIVE, in the same test, before any registry mutation** — not
+   inherited from class ②'s A0 assertion, which observes a different route
+   (`/api/approvals/pending-count`): `fetchTodoItems`/`fetchTodoCount` are called first and must
+   show `sources: { approval: 'ok' }`, `count: 1`, and `instance2.id` present in `items`. Only then
+   is `approval` re-registered throwing (both methods) as the **only** registered source (no healthy
+   sibling this time — the exact production shape, since `index.ts` registers exactly one source
+   today), and the SAME viewer/endpoints are fetched again. Assert both endpoints' `sources` now
+   equal exactly `{ approval: 'unavailable' }` (via `toEqual`) and `items`/`count` are `0`. This is
+   the "不得变成更小的数字" clause's actual content, measured rather than inherited: the number DOES
+   drop, 1 → 0, on the same viewer/endpoint/run — the requirement is that the drop is flagged, not
+   that a genuinely-unreachable seat reports a phantom count. Byte-for-byte against test 4 below
    (also `count: 0`), the `sources.approval` value is the ONLY signal distinguishing "1 pending,
    unreachable" from "genuinely 0 pending" — the count alone cannot carry that distinction, which is
    why tests 1/2 alone (where the count differs, 1 vs 1 vs 0) were insufficient to discharge this
-   row on their own.
+   row on their own, and why test 3 needed its own live baseline rather than borrowing test 1's.
 4. **Negative control** — class ④ (`v4`, genuinely zero pending, no registry mutation at all):
    both endpoints answer `sources: { approval: 'ok' }` (via `toEqual`, so no stray `unavailable` key
    can hide), `items` has length `0`, `count` is `0`, and `Object.values(sources)` contains no
