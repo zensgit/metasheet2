@@ -51,6 +51,14 @@
       </template>
     </PageHeader>
 
+    <!-- Design lock v2.13 (RATIFIED 2026-09-18) §6 phase 1 / A-2 scope item 2 — admin-only minimal
+         group management entry point; the panel itself owns the acceptance J session-org 403
+         retry flow. Gated the same as the management table below (approvalTemplateAdminGuard on
+         every write endpoint the panel calls; the read endpoint's broader `approvals:read` guard
+         is intentionally not exercised by non-admins in this slice — phase 3 wires the two
+         template write faces to a group picker for every writer). -->
+    <ApprovalTemplateGroupsPanel v-if="canManageTemplates" :tr="tr" />
+
     <!-- B1-08: 最近使用 — 发起热路径从「进模板全表找行」降到 1 击。localStorage per-user，
          点击已删除/已归档模板时由填单页的加载错误 + 返回兜底。 -->
     <div
@@ -265,6 +273,7 @@ import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
 import EmptyState from '../../components/status/EmptyState.vue'
+import ApprovalTemplateGroupsPanel from './ApprovalTemplateGroupsPanel.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
@@ -297,6 +306,10 @@ const recentTemplates = ref<RecentTemplateEntry[]>([])
 // the ZH/EN + computed convention ApprovalBatchTransferView.vue established in this directory.
 const { isZh } = useLocale()
 const t = computed(() => (isZh.value ? ZH : EN))
+// A-2 scope item 2 — the shared `SessionOrgSwitcher`/`ApprovalTemplateGroupsPanel` take a plain
+// `tr(en, zh)` function (same shape `AttendanceView.vue:10468` uses), not the whole-object `t`
+// convention this file otherwise uses.
+const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 
 const statusTab = ref<'all' | ApprovalTemplateStatus>('all')
 const searchText = ref('')
