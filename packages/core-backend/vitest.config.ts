@@ -1827,6 +1827,19 @@ export default defineConfig({
       // standalone .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to the
       // WI-0 census above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-creation.db.test.ts',
+      // WI-13 cancel-round redemption acceptance, 判据 III ONLY (revoke A4 / reject A7
+      // terminating the round row in the same transaction as the instance transition; §5 I3's
+      // pending-slot release and §5 I6's "not count-limited" via a 3-round chain on one document;
+      // a discriminating two-document control proving the UPDATE keys on `engine_instance_id`,
+      // not `document_id` or "any pending round"). 判据 II (final approve, C-1's real attendance
+      // cancellation) and 判据 IV (C-3's system-side expire/block) are NOT covered — both depend
+      // on WI-10/11/12, which do not exist on this branch (separate follow-up files once they
+      // land). Real DB (poolManager + a real dispatch transaction, driven through the running
+      // server exactly like the creation acceptance file). Excluded here so `describeIfDatabase`
+      // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to WI-0/WI-4 above),
+      // which arms EXPECT_DB=1.
+      'tests/integration/approval-cancel-round-redemption.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
