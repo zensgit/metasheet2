@@ -34,6 +34,7 @@ import {
 } from '../services/ApprovalCardDeliveryAction'
 import {
   ApprovalProductService,
+  applyTemplateVisibilityFilter,
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
@@ -388,6 +389,29 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
       || permissions.includes('approvals:admin-templates')
       || permissions.includes('approval-templates:manage'),
   }
+}
+
+// §2 (ratified) "模板可见性仍走原权限谓词……一个组织只能给自己能看到的模板归组(挂接时按原谓词
+// 校验可见)": exported (not inlined at the one call site) so a real-DB test can exercise the
+// predicate directly with a NON-manager actor — `approvalTemplateAdminGuard` makes every actor
+// that can reach the link endpoint today `isTemplateManager` (guard population ⊆ manager ⊆ sees
+// everything, so `applyTemplateVisibilityFilter` short-circuits to an existence-only check for
+// them), which is why this is intentionally testable OUTSIDE the guard rather than only through
+// it — see the lifecycle suite's "§2 link-time visibility" block. LINK ONLY (the lock's clause
+// names 挂接, not unlink) — an implementer's choice to mask "exists but invisible" the SAME way
+// as every other actor-gated template lookup in this router (`:897`'s `APPROVAL_TEMPLATE_NOT_FOUND`),
+// not a second ratified code; a nonexistent template also returns `false` here (the `id = $1`
+// predicate matches nobody), so this doubles as the group-link path's template-existence check —
+// today unreachable another way (`mapGroupConstraintError` has no 23503 branch for `template_id`).
+export async function isApprovalTemplateVisibleForGroupLink(
+  templateId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+): Promise<boolean> {
+  const conditions: string[] = ['id = $1']
+  const params: unknown[] = [templateId]
+  applyTemplateVisibilityFilter(conditions, params, 2, actor)
+  const result = await query(`SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`, params)
+  return (result.rowCount ?? 0) > 0
 }
 
 function approvalVersionConflictResponse(currentVersion: number) {
@@ -1161,6 +1185,12 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : ''
       if (!groupId) {
         return res.status(400).json(approvalErrorResponse('APPROVAL_GROUP_ID_REQUIRED', 'groupId is required'))
+      }
+      // §2 "挂接时按原谓词校验可见" (ratified) — zero rows written if the caller cannot see the
+      // template under the ordinary visibility predicate (see isApprovalTemplateVisibleForGroupLink).
+      const visibilityActor = resolveApprovalTemplateVisibilityActor(req)
+      if (!(await isApprovalTemplateVisibleForGroupLink(req.params.id, visibilityActor))) {
+        return res.status(404).json(approvalErrorResponse('APPROVAL_TEMPLATE_NOT_FOUND', 'Approval template not found'))
       }
       const link = await linkApprovalTemplateToGroup(orgId, req.params.id, groupId, actorId)
       res.status(201).json({ link })
