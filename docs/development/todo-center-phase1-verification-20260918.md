@@ -267,3 +267,146 @@ todo:counts-updated alongside approval:counts-updated") is instead covered by
 `packages/core-backend/tests/unit/approval-realtime.test.ts`, an always-on no-DB unit suite (not
 excluded in `vitest.config.ts`, collected by `plugin-tests.yml`'s required `test (20.x)` job by
 default — no special wiring needed or added).
+
+## Judging criterion C (list dedup, list/count arm-set parity) — DISCHARGED, both mutations run for real
+
+Design-lock §5 row C: "列表按实例去重,与计数口径对齐" (`routes/approvals.ts`'s badge query is
+`COUNT(DISTINCT a.instance_id)`; the list — an instance can carry multiple active seats — must
+dedupe the same way, one row per instance, and must not silently diverge from the count on WHICH
+instances qualify). Row C's own 正控 column names the observation point: `GET /api/todo/items`, not
+`/pending-count`. Before this step that route had never been exercised by any test:
+
+```
+$ grep -rn "api/todo" packages/core-backend/tests apps/web
+(no output, exit 1)
+```
+
+Two `it()` blocks were added under a new `describe('Judge C — ...')` inside
+`todo-center-pending-gate.ts`, reusing existing fixtures rather than seeding new ones (lock's own
+"用⑪的双席位夹具" instruction):
+
+- **Dedup positive control** — class ⑪'s instance (`instance11`, TWO simultaneously-active seats:
+  a `('user', v11.id)` seat and a `('role', ROLE_NAME_CLASS_11)` seat, both on the SAME instance)
+  must appear exactly once in `/api/todo/items`'s `items` array (filtered by `item.id ===
+  instance11.id`), not twice.
+- **Arm-set parity** — class ⑥'s instance (`instance6`, reached only via the `source_queue`
+  assignee-match arm) must be present in `/api/todo/items` AND `/pending-count` must report `count:
+  1`, both asserted back-to-back in one `it` with no intervening write — the "同一测试事务/同一快照"
+  scope the lock's line 96 caveat requires for a list/count equality claim (two independent HTTP
+  requests are not guaranteed to agree across time, only within one).
+
+Positive-control run (both new tests green, all 18 prior A0 tests unaffected):
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+```
+
+### Mutation 1 — drop `DISTINCT` from `matching_instances` (real cp/edit/run/restore/cmp)
+
+```
+$ F=packages/core-backend/src/services/approval-pending-query.ts
+$ cp "$F" "$F.mutprobe-c1.bak"
+```
+Edit: `approval-pending-query.ts:196`, `SELECT DISTINCT a.instance_id` → `SELECT a.instance_id`
+(the `matching_instances` CTE inside `listApprovalPendingRowsForViewer` only — the count query
+never reads this CTE, it issues its own `SELECT COUNT(DISTINCT a.instance_id) ...` directly).
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts
+ Test Files  1 failed (1)
+      Tests  1 failed | 19 passed (20)
+```
+Failing test (the ONLY one): `Judge C ... class ⑪'s two-simultaneously-active-seat instance appears
+EXACTLY ONCE in /api/todo/items`:
+```
+AssertionError: expected [ { source: 'approval', …(5) }, …(1) ] to have a length of 1 but got 2
+```
+Isolation check: all 18 A0 count tests (including ⑥'s and ⑪'s own count assertions) AND the ⑥
+arm-parity test stayed green — the DISTINCT removal is confined to the list path, exactly as the
+lock's own reasoning predicts (count and list compute dedup independently, via two different SQL
+statements).
+
+Restore:
+```
+$ cp "$F.mutprobe-c1.bak" "$F"
+$ cmp "$F" "$F.mutprobe-c1.bak"; echo $?
+0
+$ rm "$F.mutprobe-c1.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+### Mutation 2 — arm-set divergence (count keeps `source_queue`, list drops it)
+
+Row C's own text: "让 count 与列表的臂集合不一致(count 保留 `source_queue` 臂而列表漏掉)⇒ ⑥ 的
+count 1、列表 0 行,红". This drift is UNREACHABLE by editing a single shared literal:
+`approvalPendingAssigneeMatchCondition(alias)` is the ONE three-arm match text both
+`countApprovalPendingForViewer` and `listApprovalPendingRowsForViewer` call (parameterised only by
+table alias) — there is no second copy to accidentally diverge, which is precisely what that
+extraction was for (see the module's own docblock, ":63" — "Do not inline a second copy of this
+string anywhere: that is precisely the drift judging criterion C's mutation looks for"). Discharging
+this mutation honestly therefore requires an ARTIFICIAL single-call-site fork, not a one-token edit:
+
+```
+$ F=packages/core-backend/src/services/approval-pending-query.ts
+$ cp "$F" "$F.mutprobe-c2.bak"
+```
+Edit: inside `listApprovalPendingRowsForViewer` only, renamed `buildApprovalPendingConditions`'s
+returned `whereSql` to `baseWhereSql` and derived a mutated `whereSql` via
+`baseWhereSql.replace("OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))", '')`
+before it feeds the `matching_instances` CTE — `countApprovalPendingForViewer` was not touched, so
+it keeps calling `buildApprovalPendingConditions` with the unmodified three-arm text.
+
+```
+$ npx tsc --noEmit -p tsconfig.json   # no new errors
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts
+ Test Files  1 failed (1)
+      Tests  1 failed | 19 passed (20)
+```
+Failing test (the ONLY one): `Judge C ... class ⑥'s source_queue-arm instance is present in
+/api/todo/items AND /pending-count reports count 1`:
+```
+AssertionError: expected [] to have a length of 1 but got +0
+```
+— `matches` (list) went from length 1 to 0, exactly row C's "列表 0 行" half. The test throws on
+that first assertion before reaching `expect(countResult.body.count).toBe(1)`, so "count 保留 1"
+under this mutation is evidenced by the SIBLING test that stayed green in the same run: `A0 ... class
+⑥ ... ⇒ 1` (still passing, `count: 1`) — same `fetchPendingCount` call, same fixture, unmodified
+code path. Isolation check: every other test (all 18 A0 counts, the ⑪ dedup test) stayed green —
+only the ⑥ arm-parity test moved.
+
+Restore:
+```
+$ cp "$F.mutprobe-c2.bak" "$F"
+$ cmp "$F" "$F.mutprobe-c2.bak"; echo $?
+0
+$ rm "$F.mutprobe-c2.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+Post-restore confirmation (back to the pre-mutation baseline):
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+```
+
+No CI wiring change needed for this step: `routes/todo.ts`, `services/approval-pending-query.ts`,
+`services/pending-source-registry.ts`, and `services/approval-pending-source.ts` are already members
+of `approval-realdb-todo-center-pending-query.yml`'s trigger `paths:` (`on.push.paths` /
+`on.pull_request.paths`, verified earlier in this doc), and the two new `it()` blocks live inside the
+already-wired `todo-center-pending-gate.ts` file itself.
+
+Judge C is DISCHARGED. Judges A/B/C'/D remain deferred — see the gate file's own docblock for the
+current status line.
