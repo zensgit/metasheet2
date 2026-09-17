@@ -322,10 +322,31 @@ SHIPPED   (closer: doc -> round, after the fix)            = { a: 'A:23505', b: 
 outcome in both runs (it is what `createCancelRoundInstance` already translates into
 `CANCEL_ROUND_ALREADY_PENDING`); only B differs.
 
-**Fix**: the evaluator now reads `document_id` from the round row **without a lock** (that column is
-immutable — no writer anywhere updates it), locks the **ORIGINAL DOCUMENT INSTANCE first**, then
-takes the round row `FOR UPDATE` as the authority, and cross-checks `round.document_id ===
-original.id` so the unlocked probe cannot mislead the locked read.
+**Fix**: the evaluator now reads `document_id` from the round row **without a lock**, locks the
+**ORIGINAL DOCUMENT INSTANCE first**, then takes the round row `FOR UPDATE` as the authority, and
+cross-checks `round.document_id === original.id` so the unlocked probe cannot mislead the locked
+read.
+
+The unlocked probe is only sound if `document_id` is immutable, and that is **load-bearing**: a
+writer that could change it would send the lock to the wrong document row, and the cross-check
+would then turn a live cancel round into a 409 instead of closing it. So it is measured, not
+asserted — the first version of this comment cited a grep it had never run:
+
+```
+$ git grep -nE "UPDATE approval_rounds" -- packages plugins scripts
+…/ApprovalProductService.ts:8632    <- this very comment, not a statement
+…/ApprovalProductService.ts:8808    <- the C-3 closure (outcome, ended_at, block_reason, policy_snapshot_at_decision)
+…/ApprovalProductService.ts:10929   <- 判据 III revoke   (outcome, ended_at)
+…/ApprovalProductService.ts:11416   <- 判据 III reject   (outcome, ended_at)
+…/approval-cancel-round-lock-order-census.db.test.ts:773, :811   <- tests
+…/approval-cancel-round-redemption.db.test.ts:489                <- test
+
+$ git grep -nE "SET .*document_id|document_id *=" -- packages/core-backend/src plugins | grep -v WHERE
+(no output)
+```
+
+**THREE** production writers, all setting only `outcome`/`ended_at` (+ the closure's two extra
+columns); **ZERO** assignments to `document_id` anywhere in `src` or `plugins`.
 
 **Census**: the pair is now a real leg — **Q-D** in
 `tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, three cases in the same
@@ -519,6 +540,11 @@ they are.
   refused by the partial unique index with 23505/409) is not built. M-7 mutates the outcome's
   *value*, not its presence.
 - **卡片失效 for a carded cancel round** — see §3.8: possible, pre-existing, unswept.
+- **判据 II's remaining census legs** — Q-D covers {document row, round row}. 判据 II adds two more
+  resources on the same path: `attendance_requests` and the rollout advisory lock. §3 C-2's global
+  order puts `attendance_requests` AFTER the original document instance, while the existing adapter
+  takes `attendance_requests → approval_instances(原单)` — the **opposite** — and the lock says
+  「现有适配器改为同序」. Q-D's three-leg technique is the template; the legs are not built.
 - **R1 for the new guard point** — #5′ is an outlet anchor, not a chokepoint guard, so it takes no
   `CANCEL_ROUND_OUTLET_FORBIDDEN` negative control; whether §8 期 1's R1 count (9 sites) should grow
   to include it is an owner registration question, raised with the #5′ registration itself.
