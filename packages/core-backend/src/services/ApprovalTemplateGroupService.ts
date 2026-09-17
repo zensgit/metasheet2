@@ -31,10 +31,11 @@
  *   input-shape validation (same footing as this router's `APPROVAL_GROUP_ID_REQUIRED` /
  *   `APPROVAL_ACTOR_REQUIRED`), not an eighth ratified outcome.
  *
- * `GROUP_NAME_TAKEN` on ARCHIVE is this implementer's choice, not lock text: the lock defines
- * archive-of-an-already-archived-group behaviour nowhere and no acceptance row exercises it: reusing
- * an existing code (rather than inventing an eighth) for "this group is archived" reads correctly
- * for both the link-time and archive-time cases of the same underlying fact.
+ * `GROUP_ARCHIVED` on re-archiving an already-archived group is this implementer's choice, not
+ * lock text: the lock defines archive-of-an-already-archived-group behaviour nowhere and no
+ * acceptance row exercises it. Reusing the SAME code the lock already assigns to the link-time
+ * "this group is archived" case (rather than inventing an eighth code) reads correctly for both
+ * the link-time and archive-time occurrences of the same underlying fact.
  */
 
 import { randomUUID } from 'node:crypto'
