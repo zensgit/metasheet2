@@ -439,6 +439,39 @@ function normalizeExternalTransactionInput(input: unknown): {
 async function assertExternalTransactionIsolationV1(
   client: AttendanceW4TransactionClientV1,
 ): Promise<void> {
+  // Order matters. `current_setting('transaction_isolation')` also answers for the IMPLICIT
+  // single-statement transaction of an autocommit connection, and it answers with
+  // `default_transaction_isolation` — so on a deployment configured
+  // `default_transaction_isolation = serializable` an autocommit caller would PASS an
+  // isolation-only check and then run this whole protocol statement-by-statement autocommitted:
+  // no atomicity at all, partial business cancellation, exactly what 判据 II (lock §14.2, "同一
+  // 事务内 … COMMIT") forbids. That is a fail-OPEN gate in a check whose entire value is failing
+  // closed, so prove an open transaction block FIRST.
+  //
+  // `SAVEPOINT` is only legal inside a transaction block: outside one PostgreSQL raises
+  // `25P01 no_active_sql_transaction`. Same probe statement and same SQLSTATEs as the in-repo
+  // precedent `assertConnectionIsIdleV1` (`w4c0-identity.ts:1424-1449`) — that one asserts NOT in
+  // a transaction, this one asserts IN one, so the success/`25P01` branches are its mirror image.
+  // A `25P02` (open but already aborted) is also refused: the caller's transaction can no longer
+  // commit anything, so running the protocol in it could only produce a doomed write.
+  try {
+    await client.query('SAVEPOINT w4c3b_external_txn_probe', [])
+  } catch (error) {
+    const sqlState = typeof error === 'object' && error !== null
+      ? (error as { code?: unknown }).code
+      : undefined
+    if (sqlState === '25P01' || sqlState === '25P02') {
+      fail('W4C3B_REQUEST_EXTERNAL_TRANSACTION_NOT_OPEN', 500)
+    }
+    throw error // never mask an unrelated failure as either answer
+  }
+  // Probe succeeded: an open, non-aborted transaction block. Clean the probe savepoint out of the
+  // caller's subtransaction stack fully before going on — `ROLLBACK TO SAVEPOINT` alone leaves it
+  // DEFINED (see the precedent's own empirically-verified note), so RELEASE as well. The caller
+  // must be left inside no subtransaction it never created, on the success path too.
+  await client.query('ROLLBACK TO SAVEPOINT w4c3b_external_txn_probe', []).catch(() => undefined)
+  await client.query('RELEASE SAVEPOINT w4c3b_external_txn_probe', []).catch(() => undefined)
+
   const result = await client.query("SELECT current_setting('transaction_isolation') AS isolation", [])
   const isolation = (result.rows[0] as { isolation?: unknown } | undefined)?.isolation
   if (typeof isolation !== 'string' || isolation.toLowerCase() !== 'serializable') {
@@ -562,8 +595,13 @@ export function createAttendanceRequestOperationBoundaryV1(
  * connection; `executeInExternalTransaction` runs the SAME body on a caller-owned client inside a
  * caller-owned transaction. Lock §3 C-1: the external entry "仅移交连接与事务生命周期的所有权" —
  * nothing else about the protocol may differ between the two entries, which is why this is one
- * function and not two. `mode.externalTransaction` therefore steers NOTHING inside the body; it
- * exists only so the two ownership-specific preconditions can name themselves in errors.
+ * function and not two.
+ *
+ * `mode.externalTransaction` therefore steers no PROTOCOL STEP: its only effect is one
+ * external-only precondition (the rollout-lock check below, which needs the org that
+ * `prepareIdentity` resolves and so cannot be hoisted to the entry). That check can only REFUSE —
+ * it never changes which steps run, in which order, or with what inputs. Every step after it is
+ * reached identically by both entries.
  */
 async function runRequestOperationProtocolV1(
   trx: AttendanceW4TransactionClientV1,
