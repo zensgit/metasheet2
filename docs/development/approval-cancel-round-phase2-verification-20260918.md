@@ -1,6 +1,10 @@
 # Cancel round — phase 2 (C-2 兑现与收口) verification
 
-Branch `feat/approval-cancel-round-phase2`, stacked on `feat/approval-cancel-round-phase1`.
+Branch `feat/approval-cancel-round-phase2`, stacked on `feat/approval-cancel-round-phase1`
+**at `7ef8e610e`** — pinned, because `feat/approval-cancel-round-phase1` has since moved on to
+`dce9e16df` (six further commits: five docs + `a166f5ca0`, whose code half touches
+`ApprovalBridgeService.ts` and `apps/web/src/approvals/api.ts`, neither of which this slice edits).
+The branch name alone no longer resolves to this slice's base, so the SHA is the citation.
 Lock: `approval-change-request-design-lock-draft-20260915.md` (v5.9, RATIFIED).
 Private database: **`metasheet2_lock_c2`**, PostgreSQL **15.17 (Homebrew)**, created for this slice
 and migrated from empty including the phase-1 migrations. No shared, staging or production
@@ -666,6 +670,182 @@ round, an `expired` close leaves a still-`sent` card, which is the thing 「避�
 
 ---
 
+---
+
+## 3.9 判据 II's prerequisite, IMPLEMENTED: the `dispatchAction` entry restructure (this unit)
+
+§3.3b registered this as 判据 II's blocker and §3.3c answered its org question with rows. This unit
+builds the restructure those two describe. **判据 II itself is still not implemented** — no W4 call,
+no `outcome = 'applied'`, no `blocked` half. What lands here is only the thing that made them
+impossible: the global lock order at the hook.
+
+### 3.9.1 What landed
+
+| Piece | Where | Lock clause |
+|---|---|---|
+| `classifyAttendanceRequestForInstanceV1(client, instance, { lock })` | `w4c3b-central-approval-hooks.ts` | §3 C-2 — the ONE instance→request predicate, now with the lock mode as a parameter |
+| `classifyAndLockAttendanceRequestForInstance` → a thin wrapper pinning `lock: 'for_update'` | same | pure extraction: every existing caller keeps its behaviour with no call-site edit |
+| `resolveCancelRoundRolloutLockRequirementV1` | `ApprovalProductService.ts` | §3 C-2 — 「does this dispatch take the rollout lock, and on WHICH org key?」, three hops per §3.3c |
+| pre-read before `BEGIN` + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + the rollout lock as the transaction's FIRST lock | `dispatchAction` | §3 C-2 全局锁序 `rollout/advisory → 轮次引擎实例 → 原单据实例` |
+| fail-closed re-assert after the instance row lock (`CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED`, 409) | same | §3.3c point 4 — load-bearing, because `attendance_requests.org_id` is NOT immutable |
+| `CANCEL_ROUND_DISPATCH_CONTENDED` (503) for 40001/40P01, scoped to the `required` branch | same | the new error surface this restructure opens |
+
+### 3.9.2 ONE predicate, evaluated twice — the asymmetric trap, named
+
+The pre-read and the re-assert are **the same function called twice**, never two hand-written
+conditions. The failure mode if they diverge is silent and one-directional: a re-assert that asked
+the WIDER question 「is this a cancel round?」 would fail closed on a **non-attendance** cancel round
+— a legitimate round that can never be decided again. **Q-F leg 2 is that control**: a cancel round
+whose ORIGINAL is not attendance-owned, built by the same seeder as leg 1, must resolve
+`{ kind: 'none' }`.
+
+That fixture also turned up a schema fact worth recording rather than widening past:
+`attendance_requests` carries a COMPOSITE FK `(approval_instance_id, approval_workflow_key) →
+approval_instances (id, workflow_key)` (`attendance_requests_instance_workflow_fkey`). The first
+draft of leg 2 moved only the instance's column and was refused with `23503`, so 「一个字段之差」 is
+not literally available on this table; the seeder feeds both columns and the test's own comment
+says so.
+
+### 3.9.3 The 40001 question §3.3d left open, ANSWERED
+
+§3.3d said whether `dispatchAction` maps `40001` 「is unchecked and is the next unit's first
+question」. Checked, mechanically, on this tree:
+
+```
+$ (packages/core-backend) grep -rn "40001\|serialization_failure\|SERIALIZABLE" src/services/ApprovalProductService.ts
+(no output — ZERO hits before this unit)
+```
+
+Nothing mapped it, and `dispatchAction`'s catch is a bare `await rollbackQuietly(client); throw
+error`. So a 40001 would have surfaced as an unmapped 500 on a path that had never produced one.
+
+**Decision, and its scope.** The mapping is added, and **gated on `rolloutLock.kind === 'required'`**
+— only the branch this restructure newly puts under SERIALIZABLE (and newly gives an advisory lock
+edge) can raise either code because of it. A non-cancel-round dispatch keeps the bare rethrow it
+had, byte for byte. That gate is deliberate: `40P01` was already reachable on the ordinary path,
+and mapping it repo-wide would be a retry-semantics change to the hottest approval endpoint
+smuggled in under a cancel-round commit (`feedback_retry_semantics_not_verbs.md`). The predicate is
+the repo's single one, `isRetryableSqlState` — exported by `w4c0-operation-registry.ts` precisely so
+two layers cannot drift.
+
+**Second new surface, disclosed not fixed:** `acquireAttendanceCalculationRolloutLock` runs through
+`acquireKeysWithDeadline`, which raises `AttendanceW4OperationError` /
+`503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` on budget exhaustion. A cancel-round dispatch can
+therefore now return a 503 it never could. That is the correct semantics (the org's calculation
+rollout is genuinely busy), but whether the approval route surfaces that error object's status or
+flattens it to 500 is **NOT verified here** — it is a route-layer question with its own fixture.
+Registered as an open item, not claimed as working.
+
+### 3.9.4 Census Q-F — four legs, appended to the already-wired file
+
+`tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, **17 → 21 passed (21)**.
+Still zero new `.db.test.ts`, so no `plugin-tests.yml` entry, no `ci-realdb-step-contract.mjs`
+`FILES` edit, no s6a re-pin (§3.4's discipline, unchanged).
+
+| Leg | What it establishes | How |
+|---|---|---|
+| 1 | The production resolver returns the **REQUEST row's** org, not the round's own `org_id` | drives the real exported `resolveCancelRoundRolloutLockRequirementV1` over the full three-hop fixture |
+| 2 | A cancel round over a NON-attendance original demands **no lock at all** | the fail-closed-in-the-wrong-direction control (§3.9.2) |
+| 3 | In `dispatchAction`'s source: pre-read **before both `BEGIN` forms**, rollout acquire **before** the instance `FOR UPDATE`, re-assert **after** it | source scan, slice anchored at BOTH ends (`async dispatchAction(` … its own `rollbackQuietly`) |
+| 4 | The pre-read's `lock: 'none'` and the LOCKING wrapper resolve the **same row** on a two-candidate fixture | calls both real functions, not a transcription |
+
+Leg 3 is a **source-order** proof, and that is all it is: it does not show that a live concurrent
+dispatch cannot deadlock against a counterparty. That needs Q-A/Q-D's two-connection technique
+over a driveable cancel-round dispatch on an attendance-owned original — 判据 II's own fixture.
+Stated here so the leg is not read as more than it is.
+
+### 3.9.5 Mutation ledger (this unit)
+
+Every probe: `cp` backup → edit PRODUCTION source → run alone → `cp` restore → `cmp`. All three
+printed `RESTORED-IDENTICAL`.
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-11 | delete the business-key preference from the SHARED `ORDER BY` in `classifyAttendanceRequestForInstanceV1` | **TWO** legs red — Q-E leg 3 (the pre-existing binding) **and** Q-F leg 4 — which is the proof the pre-read binds to the same production predicate rather than a copy | **exactly 2 red**, exactly those two; 19 green |
+| M-12 | resolver takes the org from the ORIGINAL INSTANCE's `org_id` instead of the request row's | Q-F leg 1 red, and only it | **exactly 1 red**, leg 1, on the named symptom: `AssertionError: expected 'e11508d7-…' to be '6ad22b46-…'`; 20 green |
+| M-13 | move `acquireAttendanceCalculationRolloutLock` to AFTER the instance `FOR UPDATE` (the pre-restructure order) | Q-F leg 3 red, and only it | **exactly 1 red**, leg 3: `AssertionError: expected 2772 to be less than 1933`; 20 green |
+
+M-11 is the one that matters here, for the same reason M-10 mattered in §3.3c: it is the probe that
+distinguishes 「the pre-read reuses the production predicate」 from 「the pre-read has a second copy
+that agrees today」.
+
+### 3.9.6 「零行为变化 for every other dispatch」 — what it cost, and what it does NOT claim
+
+The pre-read runs on EVERY `dispatchAction`, so the claim needed measuring rather than asserting.
+It cost **two unit-test mock edits**, and they are disclosed rather than buried:
+
+- `tests/unit/approval-product-service.test.ts` — the shared `commonApprovalClientMockResult`
+  whitelist raised `Unhandled query` on the new pre-read; **8 tests were red** before the mock knew
+  about it.
+- `tests/unit/approval-admin-jump-service.test.ts` — `mockDispatchQueriesForOldAssignee`, same
+  cause, 1 test.
+
+Both now return a real row carrying a NON-cancel-round `workflow_key`, which short-circuits the
+resolver on its first query — exactly what production does for those fixtures. The three further
+reads a cancel round would make are **deliberately left unmocked**, so a fixture that ever reached
+them fails loudly instead of silently taking the `none` branch.
+
+**This is a mock, not the contract** (`feedback_mock_is_not_the_contract.md`). Nothing about the
+resolver's real behaviour is established by those files; Q-F legs 1/2 are where it is measured.
+
+**NOT claimed**: that the extra round trip is free. Every dispatch now does one additional
+primary-key lookup before `BEGIN` and one after the row lock (the re-assert). No latency
+measurement was taken, and none is asserted.
+
+### 3.9.7 Absolutes, each with its command
+
+```
+$ git grep -n "resolveCancelRoundRolloutLockRequirementV1" -- packages plugins scripts | grep -v tests/
+…/ApprovalProductService.ts:899    <- the definition
+…/ApprovalProductService.ts:10326  <- the pre-read
+…/ApprovalProductService.ts:10354  <- the re-assert
+```
+⇒ **TWO** production call sites, both in `dispatchAction`, which is the 「one function called twice」
+claim of §3.9.2 stated mechanically.
+
+```
+$ git grep -n "classifyAndLockAttendanceRequestForInstance" -- packages plugins scripts \
+    | grep -v tests/ | grep -vE ":[0-9]+: *[*/]" | grep -v "^.*:16[23]:"
+…/w4c3b-central-approval-hooks.ts:224  <- the wrapper's own definition
+…/w4c3b-central-approval-hooks.ts:247  <- production call site 1
+…/ApprovalProductService.ts:9329       <- production call site 2
+```
+⇒ **TWO** production call sites of the locking wrapper, **both unedited by this unit**.
+
+```
+$ git grep -c "CASE WHEN \$1::text IS NOT NULL AND id::text = \$1::text THEN 0 ELSE 1 END" \
+    -- packages/core-backend/src plugins
+packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts:1
+```
+⇒ **ONE** copy of the row-selection predicate in `src`/`plugins`. The parameterisation added a lock
+mode, not a second query.
+
+### 3.9.8 Commands and results
+
+```
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+  (no output, exit 0)
+
+$ (packages/core-backend) EXPECT_DB=1 \
+  DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  ATTENDANCE_TEST_DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-lock-order-census.db.test.ts
+  Test Files  1 passed (1)
+        Tests  21 passed (21)          (17 -> 21)
+
+$ … run tests/integration/approval-cancel-round-{creation,outlet-guards,seat-guards,redemption,\
+      node-timeout-effect}.db.test.ts tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts
+  Test Files  6 passed (6)
+        Tests  34 passed (34)
+
+$ (packages/core-backend) npx vitest run tests/unit
+  Test Files  796 passed (796)
+        Tests  12742 passed (12742)
+```
+
+---
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -679,12 +859,13 @@ they are.
 - **`filterBulkReassignDiscoveryForAttendance`'s nondeterministic org** (§3.3d) — a real defect
   found by this census, deliberately OUT of scope here, owed to the attendance line as a finding.
   Nothing on this branch depends on it.
-- **判据 II's prerequisite** — the rollout advisory lock ordering blocker in §3.3b. **Partially
-  resolved**: census Q-E (§3.3c) settles WHICH org key the lock must be taken on, and the
-  immutability censuses say which half of the post-lock re-assert is load-bearing. The
-  `dispatchAction` restructure itself — pre-read before `BEGIN`, conditional
-  `BEGIN ISOLATION LEVEL SERIALIZABLE`, the lock, the fail-closed re-assert, and `40001`
-  handling — is **still not implemented**.
+- **判据 II's prerequisite** — the rollout advisory lock ordering blocker in §3.3b. **RESOLVED in
+  §3.9**: the `dispatchAction` restructure (pre-read before `BEGIN`, conditional
+  `BEGIN ISOLATION LEVEL SERIALIZABLE`, the rollout lock as the transaction's first lock, the
+  fail-closed re-assert, and the `40001` mapping) is implemented and covered by census Q-F.
+  What is still NOT established about it: leg 3 is a **source-order** proof, not a live concurrent
+  deadlock construction (§3.9.4), and the new `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` surface's
+  route-layer handling is unverified (§3.9.3).
 - **判据 IV's `blocked` half** and C-3 row 4 — see §3.7.
 - **R2** (锁内最终评估失败 ⇒ 零业务取消、零 `approved` 完成事件、C-3 收口已持久化) and its named
   mutation (move the evaluation after the enqueue ⇒ must go red) — **not built.** M-5 is 判据 IV's

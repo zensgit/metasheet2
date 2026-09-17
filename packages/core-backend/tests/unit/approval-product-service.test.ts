@@ -250,6 +250,21 @@ function mockInsertOnlyClient() {
 // per-test mock router's "Unhandled" throw. This keeps the strict routers useful without copying
 // infrastructure-only fixtures into every behavioral test.
 function commonApprovalClientMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+  // dispatchAction's cancel-round rollout-lock pre-read (lock §3 C-2 全局锁序). It runs BEFORE
+  // `BEGIN` on EVERY dispatch and short-circuits on the first row for anything that is not a
+  // cancel round, which is what every fixture in this file is — so the honest mock is a real row
+  // carrying a non-cancel-round `workflow_key`, and the three further reads the resolver would do
+  // for a cancel round are deliberately NOT mocked: a fixture that ever reached them would fail
+  // loudly here rather than silently taking the `none` branch.
+  //
+  // This is a MOCK, not the contract (`feedback_mock_is_not_the_contract.md`). The production
+  // behaviour of that resolver — including WHICH org it returns and when it demands no lock at
+  // all — is measured against real PostgreSQL in the Q-F census legs of
+  // `tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, not here.
+  if (statement.startsWith('SELECT id, workflow_key FROM approval_instances')) {
+    return { rows: [{ id: 'approval-1', workflow_key: null }], rowCount: 1 }
+  }
+
   // nodeEntryEpoch (2026-07-03): use a stable activation sequence and keep legacy mock instances
   // on the NULL cutoff fallback so pre-existing round-scoping assertions stay unchanged.
   if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
