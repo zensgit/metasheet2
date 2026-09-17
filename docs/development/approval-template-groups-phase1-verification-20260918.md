@@ -5,7 +5,8 @@
 - 补充清单:`impl-supplementary-gate-checklist-20260918.md` #1–#3
 - 子单元:u3「CI 接线 + s6a 重钉」
 - worktree HEAD(§1–§9 原始记录时):`dba46e7c1ad5c6092943029e96d8f5ad30c11f42`(分支 `feat/approval-template-groups-phase1-u3`,当时未提交)
-- worktree HEAD(§10 二次核验时,即本文件所在提交的父提交):`fbcf62caa08fc429d3158c77bfab4d0d2e7bc8f3`
+- worktree HEAD(§10 二次核验的起点,即本节改动前的父提交):`fbcf62caa08fc429d3158c77bfab4d0d2e7bc8f3`
+- 本节(§10)自身所在提交:`a2254950a`(见 §10.1 末尾的逐字 diffstat 核对)
 - `origin/main`:`23dfdf417686b931a515bf03abbce1d6471c3098`
 - 环境:node `v25.9.0`,python3 `/usr/bin/python3` `Python 3.9.6`
 - **§5 的「45」计数已被 §10 核实为错误,原句保留但视为已撤回,更正值见 §10.3**
@@ -216,7 +217,15 @@ $ git diff --exit-code origin/main..fbcf62caa -- \
 exit=0
 ```
 
-本节(§10)写入后的提交只改动本文档一处(`docs/development/**`),不再触碰 §1/§2/§4 已核验的三个 wiring 文件字节,因此本节之后 §4 的 s6a 值与 §1/§2 的接线核对结果不会因为本次提交而失效——回归终止于此,不再需要下一轮「HEAD 是否还成立」的追问。
+**这一句本身也不能只用「即将怎样」的承诺来写**——上一版在提交发生前就断言了它的效果,而验证纪律的教训正是「verdict 必须绑 SHA」,不能靠预告。§10(本节)实际落地为提交 `a2254950a` 之后,现场核对该提交的 diffstat:
+
+```
+$ git show --stat a2254950a | tail -n +5
+ ...template-groups-phase1-verification-20260918.md | 121 ++++++++++++++++++++-
+ 1 file changed, 119 insertions(+), 2 deletions(-)
+```
+
+`a2254950a` 改动的唯一路径就是本文档,不含 `vitest.config.ts` / `plugin-tests.yml` / s6a 钉三者中任何一个字节——这是**已发生的核对结果**,不是写在提交之前的预告。因此 §4 的 s6a 值与 §1/§2 的接线核对结果在 `a2254950a` 之后依然成立,回归终止于此。若再有下一次追加编辑,须对那次追加编辑重复同样的「diffstat 落地后再核对」顺序,不能重犯本节修正前的错误(先写「将不失效」,后才提交)。
 
 ### 10.2 任务书 CI 接线 #7 — 分支保护 required contexts(push 前核对,不得沿用锁文数字)
 
