@@ -447,7 +447,7 @@ apps/web/src/composables/useSessionOrg.ts
 | 三线共用 #1 | `*-ci-wiring` 闭世界 | 未收口,见 §9/§13.5,披露维持 |
 | 三线共用 #2 | `vitest.config.ts:42-45` 惯例覆盖需 PR body 写明 | 已在 `vitest.config.ts` 对应位置写入覆盖说明注释(§3 已记),PR body 需重申 |
 | 三线共用 #3 | s6a 重钉 | 已重钉且现场核对匹配(§13.4);合并前时效性披露见 §4/§9 |
-| 三线共用 #4 | 错误码不得降级成裸 HTTP 状态 | 机械核对(现场 grep,非目测):两文件负例状态断言(`.status).toBe(4xx\|500)`)共 **11** 处(`grep -noE ".status\).toBe\((40[0-9]\|500)\)"` 两文件合计),配对的 `error.code).toBe(...)` 断言共 **9** 处——**逐行核对差额的 2 处**是 F 用例(`lifecycle.db.test.ts:487,492`)对非管理员/非读者的两个 403;这两处**不是**本锁引入的七个专用码之一,它们命中的是仓内既有、本锁未改动的共享中间件 `rbacGuardAny`(`src/rbac/rbac.ts:172-175`),该中间件对全仓所有路由(含 `/api/approval-templates` 自身)一律返回裸 `{ error: 'Insufficient permissions' }`(无 `code` 字段)——检查过该文件确认这不是本切片的选择,是复用既有守卫的既有行为,不在补充清单 #4「本锁错误码」的适用范围内。本锁自己新增的全部 10 个码(§3.3,设计 MD)在测试里逐条都有对应的 `error.code` 断言,mutation 台账(§15)每条红也均以「专用码不等」或「状态不等」精确报告,未见任何一条只查裸状态码就断言通过。 |
+| 三线共用 #4 | 错误码不得降级成裸 HTTP 状态 | **修复轮 1(2026-09-18,见 §18)重算,替换本行原「全部 10 个码逐条都有断言」的过强全称句——gate `impl-gate-A-slice1-round1-20260918.md` P2-4 机械计数(4 码零命中)证伪了原句,原句已撤回。** 机械核对(现场 grep,非目测):两文件负例状态断言(`.status).toBe(4xx\|500)`)共 **15** 处(`grep -noE "\.status\)\.toBe\((40[0-9]\|500)\)"` 两文件合计),配对的 `error.code).toBe(...)` 断言共 **13** 处——**逐行核对差额的 2 处**是 F 用例(`lifecycle.db.test.ts:492,497`)对非管理员/非读者的两个 403;这两处**不是**本锁引入的专用码之一,命中的是仓内既有、本锁未改动的共享中间件 `rbacGuardAny`(`src/rbac/rbac.ts:172-175`),该中间件对全仓所有路由(含 `/api/approval-templates` 自身)一律返回裸 `{ error: 'Insufficient permissions' }`(无 `code` 字段)——不在补充清单 #4「本锁错误码」的适用范围内。**逐码核对**(命令 `grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 \| wc -l` 逐码跑,§3.3 设计 MD 的 10 个码全表):`GROUP_NOT_FOUND` 1、`GROUP_ARCHIVED` 1、`GROUP_NAME_TAKEN` 3、`GROUP_NOT_ARCHIVED` **1**(修复轮 1 新增,此前 **0**——§18)、`GROUP_SORT_CONFLICT` 1、`ORG_ID_NOT_ACCEPTED` 2、`SESSION_ORG_REQUIRED` 1、`GROUP_NAME_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_GROUP_ID_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_ACTOR_REQUIRED` **0**(仍无断言——`resolveApprovalActorId` 只在 `authenticate` 中间件已放行之后才被调用,触发它要求一个已验签但 `user.id`/`userId`/`sub` 三者皆缺的 token,本文件的 `tok()` helper 经 `/api/auth/dev-token` 铸造,不产出这种 token;记为「无断言,理由:本测试 harness 内不可达」,不当作遗漏補)。**10 码中 9 码有 `error.code` 断言、1 码(`APPROVAL_ACTOR_REQUIRED`)harness 内不可达而无断言。** mutation 台账(§15/§18)每条红也均以「专用码不等」或「状态不等」精确报告,未见任何一条只查裸状态码就断言通过。 |
 | lane A #5 | J/C 的「未知 `section=` ⇒ 400」挪分期 3 请示 | 已在设计 MD §1.2/§6 与 A‴ 测试注释(`:386-387`)双重记录,owner 尚未回应,不阻塞本切片 |
 | lane A #6 | 「1 落地」求值 = Draft PR 过门审 | 已按此定义推进(目标文档亦如此记录),本 MD 不重复裁决 |
 | lane A #7 | 前端 spec 位置 `apps/web/tests/` | 不适用——本切片零前端改动(§13.6),留给 A-2 核对 |
@@ -551,3 +551,72 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 6. **重排端点(分期 3)的 E 后半判据** —— 代码尚未实现,自然也未验证。
 7. **§15.6 揭示的测试文件头部注释机制描述偏差** —— 不属于代码缺陷(测试判定本身仍是有效的红/绿门),但建议后续修订 `serialization.db.test.ts:19-33` 的头部注释,把「哪一层 try/catch 是真正防线」写准确;本次遵守「不改代码」未做这处编辑,留给门审决定是否值得单独一个小改动 PR。
 8. **§3.4(设计 MD)记录的实现者裁量**(重复归档复用 `GROUP_ARCHIVED`)—— 未获锁文文本背书,无验收行覆盖,门审需明确认可或要求改动。
+9. **§3.5(设计 MD,修复轮 1 新增)记录的实现者裁量**(挂接可见性失败形状复用 `APPROVAL_TEMPLATE_NOT_FOUND`,404 而非发明新码)—— 同 #8,未获锁文文本背书(锁文只 ratify「要校验」,未点名失败码),无独立验收字母覆盖(附属于 I5/§2,不是锁文 §4 表的一行),门审需明确认可或要求改动;可达性披露见 §18.1。
+
+## 18. 修复轮 1(2026-09-18)—— gate `impl-gate-A-slice1-round1-20260918.md` P2-1 / P2-4 收口
+
+被审 head `252d01865`;本轮只动 `packages/core-backend/src/routes/approvals.ts`(+1 处 import、+1 处导出函数、+1 处调用点)与 `packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts`(+4 处 import、+4 个新 `it()`、G 用例内 +3 行)——**不改 DDL、不改 `ApprovalTemplateGroupService.ts`、不改 `plugin-tests.yml`/`vitest.config.ts`**(两点接线与 s6a 钉不受影响,两文件仍是同一对既接线的文件,§1/§2/§4 结论不变)。P2-2/P2-3/P2-5/P3-* 本轮未处理,原状见 gate 报告。
+
+### 18.1 P2-1 —— 挂接时按原谓词校验可见(§2 ratified 条款,此前既未实现也未披露)
+
+**实现**(设计 MD §3.5 记录为实现者裁量的两点:落点与失败形状):
+- `routes/approvals.ts` 新增导出函数 `isApprovalTemplateVisibleForGroupLink(templateId, actor)`——对 `approval_templates` 跑 `id = $1` 加 `applyTemplateVisibilityFilter`(复用 `ApprovalProductService.ts:4383-4419`,与列表/详情端点同一函数,不是新逻辑)。
+- 链接端点(`POST /api/approval-templates/:id/group`,`:1153`)在校验 `groupId` 之后、调用 `linkApprovalTemplateToGroup` 之前调用它;不可见 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`(复用 `:897` 同码),零行写入(`linkApprovalTemplateToGroup` 完全不被调用)。
+
+**可达性披露(与设计 MD §3.5 一致,不重复夸大)**:`approvalTemplateAdminGuard` 的人口 ⊆ `isTemplateManager`,而 manager 让 `applyTemplateVisibilityFilter` 短路、不加条件——今天没有 HTTP 可达路径能让这条检查因「看不见该模板」而拒绝;它在生产流量下退化为「模板是否存在」的检查(附带修好了一个既有空白:`mapGroupConstraintError` 未映射 `atgl_template_fk` 的 23503,此前对不存在的模板 id 会 500,现在 404)。真正的可见性判别力只在**直接调用**导出函数时才被验证(两条腿,理由见「判据本身也要被攻击/单一定义防漂移不防定义太窄」两条纪律——纯 HTTP 测试在当前 guard 形状下无法制造一个「过 guard 但非 manager」的反例)。
+
+**两腿测试**(`approval-template-groups-lifecycle.db.test.ts`,新增两个 `it()`,紧接 F 之后):
+- `§2(a)`(`:521-552`,含双腿说明的块注释)——谓词直调:手写一个 `isTemplateManager: false` 的 actor(不经 HTTP/guard),对 dept 作用域内的模板返回 `true`、作用域外的返回 `false`、不存在的 `randomUUID()` 返回 `false`;并证明同一 hidden 模板对 `isTemplateManager: true` 的同一 actor 返回 `true`(manager 短路的机制证据,不只是断言)。
+- `§2(b)`(`:554-568`)——端点调用点:admin token(guard 内唯一可达的 actor 形状)对一个 `randomUUID()`(不存在)的模板 id 发起挂接 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`,`approval_template_group_links` 零行。
+
+**Mutation 探针(两条,`cp` 备份 → 改 → 单独跑受影响用例 → `cp` 还原 → `cmp` → 全量重跑确认回绿;`/tmp/gateA-fix1-probe-backups/`)**:
+
+| # | 目标 | 改动 | 命令关键结果 | 判定 |
+|---|---|---|---|---|
+| P2-1-M1 | `isApprovalTemplateVisibleForGroupLink` 内的 `applyTemplateVisibilityFilter` 调用 | 注释掉该行(只留 `id = $1`) | `-t "§2"`:`§2(a)` 红,`expected true to be false`(hidden 模板被判可见) | **RED ✓**——谓词半判别 |
+| P2-1-M2 | 链接端点的可见性前置调用块 | 整块删除(不再调用 `isApprovalTemplateVisibleForGroupLink`) | `-t "§2"`:`§2(b)` 红,`expected 500 to be 404`(不存在的模板落到未映射的 `atgl_template_fk` 23503,`handleApprovalsError` 兜底 500) | **RED ✓**——调用点半判别 |
+
+两条探针均单独执行、单独还原:`cmp approvals.ts.orig approvals.ts` 均 `OK`;还原后 `-t "§2"` 重跑均回绿;全文件套件收尾重跑 `Test Files 2 passed (2) / Tests 26 passed (26)`;`git status --porcelain` 在还原后为空。
+
+### 18.2 P2-4 —— 10 个错误码的绝对断言(4 码零命中)+ `GROUP_NOT_ARCHIVED` 零覆盖
+
+**补的三格**(均在 `approval-template-groups-lifecycle.db.test.ts`):
+- `GROUP_NOT_ARCHIVED`——在既有 G 用例(`:594-`)开头插入:对刚建的、仍活跃的 `g1` 直接调 `/unarchive` ⇒ 409 `GROUP_NOT_ARCHIVED`(`:598-602`),再继续 G 原有的归档/解档/同名冲突流程,不改动 G 原有断言。
+- `GROUP_NAME_REQUIRED` / `APPROVAL_GROUP_ID_REQUIRED`——新增独立用例 `request-shape codes: ...`(`:507-519`,紧接 F 之后、`§2` 系列之前):建组传全空白 `name` ⇒ 400 `GROUP_NAME_REQUIRED`;链接端点传空 body(无 `groupId`)⇒ 400 `APPROVAL_GROUP_ID_REQUIRED`。
+- `APPROVAL_ACTOR_REQUIRED` 保持零覆盖,理由见 §14(修复轮 1)行:`authenticate` 中间件已放行之后才可能调用 `resolveApprovalActorId`,触发它要求一个已验签但 `user.id/userId/sub` 三者皆缺的 token,本文件的 `tok()` helper 铸不出这种 token——harness 内不可达,不是遗漏。
+
+**§14 全称句撤回**——原句「本锁自己新增的全部 10 个码……逐条都有对应的 `error.code` 断言」为假(gate 机械计数:`GROUP_NOT_ARCHIVED`/`GROUP_NAME_REQUIRED`/`APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 四码原为零命中),已在 §14 表格原地改写为逐码计数 + grep 命令(`grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 | wc -l`,逐码跑),不再是全称句。
+
+**Mutation 探针(三条,同一 `cp`/改/跑/还原/`cmp` 流程,`ApprovalTemplateGroupService.ts` 与 `approvals.ts` 均为既有生产代码、非本轮新写,探针用于证明新测试断言本身有判别力而非摆设)**:
+
+| # | 目标 | 改动 | 命令关键结果 | 判定 |
+|---|---|---|---|---|
+| P2-4-M1 | `unarchiveApprovalTemplateGroup` 的 `archived_at === null` 分支(`:307`) | `if (false && row.archived_at === null)` | `-t "G:"`:`expected 200 to be 409` | **RED ✓** |
+| P2-4-M2 | `requireName` 的空名判断(`:157`) | `if (false && !trimmed)` | `-t "request-shape codes"`:`expected 500 to be 400`(空名落到 DB 层 `atg_name_nonblank` CHECK,未映射码,兜底 500) | **RED ✓** |
+| P2-4-M3 | 链接端点的 `groupId` 必填判断(`routes/approvals.ts:1186`) | `if (false && !groupId)` | `-t "request-shape codes"`:`expected 400 to be 404`(空 `groupId` 落到组行 `SELECT ... WHERE id = ''` 0 行 ⇒ `GROUP_NOT_FOUND`) | **RED ✓** |
+
+三条探针逐条单独执行、单独还原、`cmp` 逐字节核对 `OK`;每条还原后单独重跑回绿;全部三条完成后,全文件套件收尾重跑 `Test Files 2 passed (2) / Tests 26 passed (26)`(与 §18.1 收尾共用同一次全量重跑);`git status --porcelain` 为空。
+
+### 18.3 收尾证据(本轮结束时现场执行)
+
+```
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  2 passed (2)
+      Tests  26 passed (26)
+```
+（此前 23/23,本轮 +4:`§2(a)`、`§2(b)`、`request-shape codes`、G 用例内新增的一条 `expect` 不新增用例计数——只有前三个是新 `it()`,第 4 处改动在既有 G 用例内部,故 23 + 3 = 26。）
+
+```
+$ pnpm exec tsc --noEmit -p .
+```
+（`packages/core-backend` 目录,exit 0,无输出;两个 `.db.test.ts` 仍在 `tsconfig.json` 的 `exclude` 里、不受此次 typecheck 覆盖——与 P3-10 记录的既有边界一致,未改变。）
+
+```
+$ git status --porcelain    (本轮全部 mutation 探针还原后)
+(空)
+```
+
+本轮**不涉及** DDL、`plugin-tests.yml`、`vitest.config.ts`、s6a 钉——两点接线与 §1/§2/§4 的核对结论对本轮改动后的 HEAD 依然成立(新增的两个 `it()` 在既有已接线文件内,未新增文件)。
