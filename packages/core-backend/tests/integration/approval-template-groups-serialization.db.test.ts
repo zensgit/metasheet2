@@ -267,11 +267,16 @@ describeIfDatabase('approval template groups — L0 serialization + DEFERRABLE C
     expect(rows.rows.map((r) => Number(r.sort_order))).toEqual([1, 2])
   })
 
-  it('E: L0 absence makes the second creator NOT block at all (mechanism check for the L0 mutation direction)', async () => {
-    // This test exercises the CORRECT implementation (which DOES take L0) by proving the
-    // holder itself — which deliberately does NOT take the advisory lock, only a plain table
-    // lock the production path never takes — does not block a concurrent production create.
-    // It is the mechanism half of mutation (2)'s red signature: absence of L0 ⇒ absence of block.
+  // CORRECTED LABEL (prior title/comment overclaimed): this does NOT probe mutation-2 ("去掉 L0
+  // 顾问锁 ⇒ B 不停车") — it asserts that an UNRELATED advisory key never blocks a concurrent
+  // create, which is true regardless of whether the production path takes L0 on the correct
+  // `atg:${org}` key or takes no lock at all, so it has zero power to discriminate mutation-2's
+  // removal. Its actual job is a negative control on the `pg_blocking_pids` polling query itself
+  // (proving it does not false-positive on an unrelated holder). Mutation-2's real, verified
+  // discriminator is the three K it()s below (`waitUntilBackendBlockedByHolder` against a holder
+  // that DOES take the real `atg:${org}` L0 key): if production dropped its own L0 acquisition,
+  // those three would stall waiting for a block that production never causes and fail on timeout.
+  it('E: negative control — an unrelated advisory key never blocks a concurrent create (sanity check on the pg_blocking_pids probe, not a mutation-2 gate — see K below for that)', async () => {
     const org = trackOrg(`atg-enol0-${TS}`)
     const admin = await tok(base, `enol0-admin-${TS}`, org)
 
