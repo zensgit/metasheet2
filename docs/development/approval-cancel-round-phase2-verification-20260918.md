@@ -391,6 +391,109 @@ so a stale one must not be able to skip the lock silently). Deriving the org id 
 own hazard — this repo has a live attendance `org` fall-through to `'default'`. **Not attempted
 here; 判据 II must start from it.** The in-code note lives on `evaluateCancelRoundFinalInLock`.
 
+### 3.3c 判据 II's org question, answered with rows — census Q-E (this unit)
+
+§3.3b named the rollout-lock ordering as 判据 II's prerequisite and said 「判据 II must start from
+it」. Starting from it turned up a question §3.3b had not asked, and whose answer decides what the
+`dispatchAction` pre-read must SELECT: **which org is the rollout lock keyed by?** The lock's own
+rule is 「census 未做前不实现」 — §3.3 is the in-branch scar from breaking it — so it is settled here,
+with rows, before the restructure.
+
+**The intuitive answer is wrong.** `approval_instances.org_id` is the column the approval side
+thinks in: `createCancelRoundInstance` copies `original.org_id` into the round
+(`ApprovalProductService.ts:8514`), and it is one hop from the instance `dispatchAction` already
+loads. But the demand does not come from the approval side. It comes from
+
+```
+w4c3b-request-operation-boundary.ts:814
+  await assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)
+```
+
+— the org the **adapter** resolved in `prepareIdentity`, whose interface contract restricts it to
+「durable route identity (for example request org/subject)」, i.e. the `attendance_requests` row.
+The entry's own input type carries no `orgId` field at all, so the caller cannot declare one.
+
+**Q-E**, four legs appended to the already-wired
+`tests/integration/approval-cancel-round-lock-order-census.db.test.ts` (13 → **17 passed (17)**):
+
+| Leg | What it establishes |
+|---|---|
+| 1 | On the exact row shape a cancel round runs on, `approval_instances.org_id` and `attendance_requests.org_id` **can hold different values**, and they derive **different class-`00` keys** through the real production builder. A pre-read on the instance column would take key(A) while the entry demands key(B) ⇒ `W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD` (500) |
+| 2 | POSITIVE CONTROL for leg 1's inequality — the same org derives the same key, so leg 1 is a real divergence and not a builder that never repeats |
+| 3 | The repo's **two** existing instance→request joins **disagree**. Calls the REAL `classifyAndLockAttendanceRequestForInstance` (not a transcription of its SQL) against the LEFT JOIN in `filterBulkReassignDiscoveryForAttendance` (`w4c3b-central-approval-hooks.ts:452-463`) on a two-candidate fixture: the classifier pins row B by an explicit `ORDER BY … LIMIT 1`; the LEFT JOIN returns **both** rows and its consumer folds them into a Map keyed by instance id, so whichever row Postgres hands back last silently wins |
+| 4 | Source scan, both ends anchored: the assert is fed `identityPrepared.orgId`, the `prepareIdentity` call **precedes** it, and the entry's input type contains no `orgId` |
+
+Leg 3 is why 「reuse the existing helper」 was not an executable instruction: there are two helpers
+and they answer differently. Per
+`feedback_single_definition_does_not_make_a_narrow_predicate_correct.md`, picking one by name would
+have inherited its predicate silently.
+
+**Mutation ledger (this unit).** Both probes `cp`-backed up, applied to PRODUCTION source, run
+alone, restored, `cmp`-verified clean.
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-9 | boundary: `assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)` → `(trx, input.correlationId)` | leg 4 red, and only it | **exactly 1 red**, leg 4: `AssertionError: expected 'async function runRequestOperationPro…' to contain 'await assertExternalTransactionRollou…'`; 16 green |
+| M-10 | classifier: delete the business-key preference from its `ORDER BY` (keep `created_at ASC`) | leg 3 red, and only it — proving it binds to the REAL production ordering, not a copy | **exactly 1 red**, leg 3, on the named symptom: `AssertionError: expected 'b492baab-…' to be 'ebd946e5-…'`; 16 green |
+
+M-10 is the one that matters: an earlier draft of leg 3 re-typed the classifier's SQL into the test,
+which would have gone on passing while production drifted. It now calls the function.
+
+**Immutability censuses** (the pre-read will sit OUTSIDE the transaction, so its soundness rests on
+these — commands and counts, not recollection):
+
+```
+$ git grep -nE "UPDATE approval_instances" -- packages plugins scripts | wc -l
+97
+$ git grep -nE "SET [^;]*workflow_key|workflow_key *=" -- packages/core-backend/src plugins \
+    | grep -v WHERE | grep -v "\.test\." | wc -l
+9
+$ git grep -nE "SET [^;]*org_id|org_id *= *EXCLUDED" -- packages/core-backend/src plugins \
+    | grep -v "/migrations/" | grep -v "\.test\." | grep -v WHERE | wc -l
+4
+```
+
+- **`workflow_key`** — of the 9 hits, exactly **two** are real writers, both `ON CONFLICT DO UPDATE`
+  upserts, and **neither can address a cancel-round row**: `ApprovalBridgeService.ts:1404` conflicts
+  on `(source_system, external_approval_id) WHERE external_approval_id IS NOT NULL` and a cancel
+  round is inserted with `external_approval_id = NULL`; `plugins/plugin-attendance/index.cjs:24336`
+  conflicts on `(id)` with an id the attendance plugin mints for its own request instance. The
+  remaining 7, enumerated rather than summarised (I miscounted them once — the first draft of this
+  sentence called one of them a `SELECT`): a predicate (`hooks:37`), a join condition
+  (`hooks:457`), two comments (`migration…110000:244`, `ApprovalProductService.ts:8331`), a
+  `WHERE`-clause builder (`ApprovalBridgeService.ts:466`), and **two writes to a DIFFERENT column**
+  — `attendance_requests.approval_workflow_key` (`migration…110000:285`,
+  `plugins/plugin-attendance/index.cjs:34819`), which is the FK mirror, not
+  `approval_instances.workflow_key`. ⇒ for the cancel-round pre-read, `workflow_key` is
+  **effectively immutable**, and the post-lock re-assert on it is belt-and-braces.
+- **`attendance_requests.org_id`** — **4** `org_id = EXCLUDED.org_id` writers in the attendance
+  plugin's upserts. Nothing pins them to the approval instance's stamp. ⇒ the org half is **NOT**
+  immutable, so the post-lock re-assert on the org is **LOAD-BEARING**, not cosmetic. This is the
+  distinction §3.3's `document_id` census got to answer the other way; it does not carry over.
+
+**What 判据 II must therefore do** (revises §3.3b's last paragraph, which said only 「a cheap
+non-locking pre-read to detect a cancel round」):
+
+1. The pre-read must run **before `BEGIN`** — PostgreSQL fixes the isolation level at the
+   transaction's first statement, and the entry requires SERIALIZABLE
+   (`assertExternalTransactionIsolationV1`), so a pre-read inside the transaction would foreclose
+   `BEGIN ISOLATION LEVEL SERIALIZABLE`.
+2. It must resolve the org through **`attendance_requests`**, three hops (round instance →
+   `business_key` → original document instance → request row), not from either instance's
+   `org_id`.
+3. It must reuse ONE predicate for that last hop rather than minting a third — and leg 3 says the
+   two candidates are not interchangeable, so which one is adopted is a decision to record, not a
+   detail.
+4. The re-assert after the row lock must fail **closed** on an org mismatch (load-bearing, per the
+   census above), with a named values-free code.
+
+None of that is implemented in this unit. Q-E is the census; the restructure is the next one.
+
+**Not claimed here**: that `dispatchAction`'s restructure is safe. It changes the isolation level
+for cancel-round dispatches, which admits `40001` serialization failures on a path that has never
+seen them — whether `dispatchAction`'s catch maps `40001` to a named code or lets it surface as a
+bare 500 is **unchecked** and is the next unit's first question.
+
 ### 3.4 Acceptance — where it lives, and why not in a new file
 
 Appended to the already-wired `tests/integration/approval-cancel-round-redemption.db.test.ts`
@@ -521,7 +624,12 @@ they are.
   `approved` — an §5 I3 gap inherited from phase 1. It is **asserted as-is** in the paired open-
   window case, so the change is forced to be noticed when 判据 II flips it to `'applied'`, rather
   than being silently satisfied.
-- **判据 II's prerequisite** — the rollout advisory lock ordering blocker in §3.3. Unresolved.
+- **判据 II's prerequisite** — the rollout advisory lock ordering blocker in §3.3b. **Partially
+  resolved**: census Q-E (§3.3c) settles WHICH org key the lock must be taken on, and the
+  immutability censuses say which half of the post-lock re-assert is load-bearing. The
+  `dispatchAction` restructure itself — pre-read before `BEGIN`, conditional
+  `BEGIN ISOLATION LEVEL SERIALIZABLE`, the lock, the fail-closed re-assert, and `40001`
+  handling — is **still not implemented**.
 - **判据 IV's `blocked` half** and C-3 row 4 — see §3.7.
 - **R2** (锁内最终评估失败 ⇒ 零业务取消、零 `approved` 完成事件、C-3 收口已持久化) and its named
   mutation (move the evaluation after the enqueue ⇒ must go red) — **not built.** M-5 is 判据 IV's
