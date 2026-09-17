@@ -252,7 +252,7 @@ in the verification MD's §1 table; this section is the design mapping, not the 
 
 ## 5. 判据 III — the two allowed non-approve terminal outlets (lock §14.2, lock:344)
 
-**A4 (revoke)** — `ApprovalProductService.ts:10625-10653`: inside the same transaction as the
+**A4 (revoke)** — `ApprovalProductService.ts:10641-10654`: inside the same transaction as the
 instance's `revoked` state write, when `isCancelRoundInstance(instance)`:
 ```
 UPDATE approval_rounds SET outcome = 'withdrawn', ended_at = now()
@@ -260,15 +260,43 @@ WHERE engine_instance_id = $1 AND outcome = 'pending'
 ```
 `rowCount !== 1` throws `CANCEL_ROUND_INVARIANT_VIOLATION` (409) rather than silently committing an
 orphaned `pending` round — an **implementer erratum** (no lock-anchored code for this branch,
-disclosed in-code at `:10638-10639` with the same discipline as WI-16's create-time check).
+disclosed in-code at `:10638-10640` with the same discipline as WI-16's create-time check).
 
-**A7 (reject)** — `ApprovalProductService.ts:11119-11142`, same shape: `outcome = 'rejected'` on the
+**A7 (reject)** — `ApprovalProductService.ts:11128-11141`, same shape: `outcome = 'rejected'` on the
 matching pending round, same invariant-violation guard, same erratum disclosure.
 
-Both writes happen **before** the same-transaction `COMMIT` that also writes the instance's own
-terminal state and its `approval_records` audit row (§14.2's "同一事务" requirement, lock:344) —
-confirmed by reading: no intervening `COMMIT`/`BEGIN` between the round-row UPDATE and the
-instance-transition COMMIT in either branch.
+**Exact sequence, both branches (re-derived against this document's own HEAD `8b8aa8a5e`, not
+carried over from an earlier commit) — status write → audit row → completion-event build → in-txn
+durable enqueue → round-row write → `COMMIT`:**
+
+| Step | A4 (revoke) | A7 (reject) |
+|---|---|---|
+| Instance status write | `:10592-10602` | `:11079-11088` |
+| `insertApprovalRecord` (audit row) | `:10603-10613` | `:11090-11104` |
+| `buildCompletionEvent` | `:10614-10625` | `:11105-11116` |
+| `enqueueApprovalEventIfDurable` (in-txn durable enqueue) | `:10627` | `:11118` |
+| **Round-row `UPDATE approval_rounds SET outcome = …`** | `:10641-10654` | `:11128-11141` |
+| `COMMIT` | `:10655` | `:11142` |
+
+All six rows in each column share one `client` and one transaction — no intervening `COMMIT`/`BEGIN`
+between the round-row UPDATE and the instance-transition COMMIT in either branch — but the round
+write is the **last** write before `COMMIT`, not the first, and not "before" the status write.
+
+**Gate finding P3-A — disclosed, OPEN, owner 备案 (not accepted, no code changed by this document):**
+lock:344 ratifies "挂点 = 各自状态写之前、同事务" — literally, before each branch's own instance
+status write, same transaction. The table above shows the actual hook point sits **after** the
+status write, the audit row, and the completion-event enqueue — a literal deviation from the ratified
+text, found by the independent gate review (`impl-gate-C-slice1-round1-20260918.md`, finding P3-A)
+and reconfirmed here against the current tree. The reviewer walked the rollback path and could not
+construct a behavioral difference: all six writes share the transaction, so the round write's own
+fail-closed 409 (`CANCEL_ROUND_INVARIANT_VIOLATION`) rolls back the status write, the audit row, and
+the in-txn event enqueue together — there is no window where the instance transitions without its
+round terminating, or vice versa. Whether that absence-of-observed-difference is enough to accept the
+literal deviation as-is, or whether the write should be moved to match lock:344's text exactly, is an
+interpretation of the ratified clause and is **left to the owner**, not decided by this document. If
+a reorder is ever made, it must be re-verified against the real-DB redemption suite — mutation M2 in
+the gate report already showed the round write is load-bearing at its current position, which does
+not by itself prove it stays load-bearing (or safe) at a different position in the same transaction.
 
 Legacy `/reject` (#7′) is explicitly excluded from ever reaching A7's round-terminating write (it is
 rejected at the route layer per §4's outlet #7′ row) — per lock:368, "cancel 轮的 reject **只**经 A7,
@@ -448,6 +476,33 @@ implementation):
   *this* lane's files; the checklist's broader caution about all 45 sibling `*-ci-wiring` guards is a
   different failure mode (a sibling guard's own hardcoded array missing this lane's files) and was
   not swept in this slice — left for the pre-PR door review.
+- **Seed-visibility exposure in the template center (gate P2-B) — disclosed here as the deployment
+  note the future PR body must carry; no code change made, narrowing decision left to the owner.**
+  The dedicated seed migration
+  (`zzzz20260918100000_seed_approval_cancel_round_published_definition.ts:73-81`) inserts the
+  `approval_templates` row via `INSERT INTO approval_templates (id, key, name, description, status)`
+  — it does **not** list `visibility_scope`, so the column takes its table-wide default, set by an
+  unrelated, earlier migration:
+  `zzzz20260423162000_add_approval_template_visibility_scope.ts:7`,
+  `DEFAULT '{"type":"all","ids":[]}'::jsonb`. `applyTemplateVisibilityFilter`
+  (`ApprovalProductService.ts:4469-4497`) passes any row whose `visibility_scope->>'type' = 'all'`
+  unconditionally (`:4485`), and `listTemplates` (`:5757-5797`) calls it with no other visibility
+  gate. First verified live on a fresh DB by the gate review
+  (`impl-gate-C-slice1-round1-20260918.md`, finding P2-B, at HEAD `95eccb89b`); reconfirmed unchanged
+  at this document's own HEAD (`git diff 95eccb89b..HEAD --stat` over the seed migration file and the
+  whole `migrations/` directory is empty — the load-bearing facts have not moved). Net effect once
+  this migration is *applied* (it is not applied anywhere today — this slice's DDL is Draft-only per
+  the ratify header, and this document does not change that): the dedicated "撤销审批" template
+  becomes visible to, and launchable by, every user in the template center, not only reachable
+  through `createCancelRoundInstance`'s dedicated, code-only path. The node's own
+  `requester_choice`/`scope:{type:'company'}` assignee configuration means a user-launched instance
+  is a real, completable approval (not inert) — see the gate review's three-branch reachability
+  argument for why the other two branches (missing choice, `emptyAssigneePolicy`) are unreachable via
+  `createApproval` but this one is not. Nothing in lock §14.1 specifies template-center visibility
+  for this seed, so this is not a lock violation — but it is a real, previously-undisclosed
+  user-visible behavior change at apply time. Whether to narrow `visibility_scope` (e.g. an
+  `ids`-scoped empty set, or a new "system template, hidden from the template center" category) is a
+  scope addition beyond what lock §14.1 specifies, and is an **owner decision**, not made here.
 
 Full status of every checklist line (including which of the above are 未做 vs. 已做-with-caveat) is
 in the companion verification document, §10 ("checklist" table).
