@@ -20,6 +20,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | # | Where the wrong claim is | The claim | Status |
 |---|---|---|---|
 | R-1 | commit `042d92e02` message, 2nd bullet | "typecheck then acts as the census over every `result.response` / `.lifecycleEvents` / `.resolvedRequestId` access **(13 sites, all narrowed)**" | **RETRACTED — the number is wrong.** I wrote 13 without counting. Mechanical count below: **7** sites for exactly those three properties. The substantive half (typecheck is clean, so every one of them is narrowed) stands; only the count was invented. The commit message cannot be edited without a force-push, so the correction lives here. |
+| R-3 | commit `56d517127` message, 2nd paragraph, and §3.10.3's first draft | "that inversion is a cycle on the same (request, instance) pair today" … the reorder "closes" the live defect | **RETRACTED IN PART — the reorder closes it for the CANCEL path only.** My own census leg contradicts the word "closes": Q-G LEG 4 shows the DECISION adapter (`index.cjs:37596`/`:37617`) is also `attendance_requests → approval_instances` and is also gated on `requestRow.status === 'pending'` — exactly the population `bulkReassignApprovals` reaches `classifyAndLockAttendanceRequestForInstance` on with the instance row held. So the same cycle, same shape, is **still live** after this commit via the decision adapter. Leaving that adapter to the attendance line is the right scope call; calling the defect closed was not. The commit message cannot be edited without a force-push, so the correction lives here. |
 | R-2 | my own working notes for this step | "the `w7-w6r5-guard` classification test ran and passed" | **RETRACTED — it never ran.** A combined run of three targets printed `Test Files 2 passed (2)` and I inferred which two. Checked directly: `npx vitest run tests/unit/w7-w6r5-guard` prints **`No test files found, exiting with code 1`** — that path holds `classification.ts` and `walk.ts`, which are corpora, not suites. Their real consumers are named in §2.5 and were run there. A directory that collects zero files is not a green. |
 
 ```
@@ -964,10 +965,28 @@ $ git grep -n "attendance_requests[^;]*FOR UPDATE" -- packages/core-backend/src
  rather than transcribing its SQL)
 ```
 
-Three plugin sites lock `attendance_requests`, three lock `approval_instances`; **two** functions
-lock BOTH (`executeRequestCancel`, the decision adapter), and the shift-swap consent path locks
-`attendance_shift_swap_requests` + `approval_instances`, not `attendance_requests`. Q-G LEG 4 pins
-those two counts (3 and 3) so a fourth site cannot appear without reddening this census.
+Three plugin sites take an explicit `attendance_requests … FOR UPDATE` (`executeRequestPendingEdit`
+at `:34751`, the cancel adapter, the decision adapter) and three take an explicit
+`approval_instances … FOR UPDATE`; **two** functions take BOTH (`executeRequestCancel`, the decision
+adapter), and the shift-swap consent path takes `attendance_shift_swap_requests` +
+`approval_instances`, not `attendance_requests`. Q-G LEG 4 pins those two counts (3 and 3) so a
+fourth `FOR UPDATE` site cannot appear without reddening this census.
+
+⚠️ **Scope of that enumeration, stated rather than left to be assumed** (memory:
+`feedback_writer_audit_both_query_syntaxes.md`): it covers the **`FOR UPDATE` read syntax only**. A
+bare `UPDATE` takes a row lock just as surely, and the plugin has more of those:
+
+```
+$ git grep -cn "UPDATE approval_instances" -- plugins/plugin-attendance/index.cjs
+plugins/plugin-attendance/index.cjs:3
+$ git grep -cn "UPDATE attendance_requests" -- plugins/plugin-attendance/index.cjs
+plugins/plugin-attendance/index.cjs:5
+```
+
+Those 3 + 5 writer statements are **NOT** enumerated, **NOT** ordered by this commit, and are a
+**residual**, not a cleared population. This unit implements lock:110's named pair on the named
+adapter; a writer-syntax lock-order census over the whole attendance plugin is a separate piece of
+work and is listed in §4.
 
 **Only the cancel adapter was reordered.** The decision adapter is the approve/reject path and runs
 only while the request is `pending` (`if (requestRow.status !== 'pending') throw INVALID_STATUS`),
@@ -989,9 +1008,18 @@ are production code today:
 
 Both are reachable on a **pending** request (a user cancelling it vs. a bulk reassign / admin jump
 on its pending instance), i.e. on the same `(request, instance)` pair at the same time. LEG 1
-constructs exactly that and it deadlocks **deterministically** with `40P01`. This is therefore a
-pre-existing live defect that the lock's 「改为同序」 closes, not only a 判据 II prerequisite —
-recorded as such rather than folded into the slice's own narrative.
+constructs exactly that and it deadlocks **deterministically** with `40P01`. So this is a
+pre-existing **live** defect, not only a 判据 II prerequisite.
+
+⚠️ **What this commit does NOT do — and my own LEG 4 is the evidence against the stronger claim.**
+The reorder closes that cycle **for the cancel path only**. The DECISION adapter
+(`index.cjs:37596`/`:37617`) is *also* `attendance_requests → approval_instances`, and it is gated on
+`requestRow.status === 'pending'` — which is precisely the population `bulkReassignApprovals`
+reaches `classifyAndLockAttendanceRequestForInstance` on with the instance row already held. The
+same cycle, same shape, therefore **remains live** via that adapter after this commit. Reordering it
+is an attendance-line change with its own blast radius and is deliberately not taken here; LEG 4 is
+what keeps it from being silently closed or silently forgotten. See §0 R-3 for the retraction of the
+stronger wording that shipped in the commit message.
 
 ### 3.10.4 The four legs
 
@@ -1012,8 +1040,20 @@ disclosure, not a claim that the leg exercises production.
 |---|---|---|---|
 | M-11 | restore the PRE-FIX `executeRequestCancel` (the whole file, `cp` from the pre-edit backup) and re-run Q-G | LEG 3 red; LEGs 1/2/4 still green | **RED exactly as predicted**: `AssertionError: 原单据实例 must be locked BEFORE attendance_requests: expected 1563 to be less than 238`, `Tests 1 failed | 3 passed | 23 skipped (27)`. Restored with `cp` and `cmp` proved byte-identical (`RESTORED-IDENTICAL`). |
 
+| M-12 | in LEG 2 only, point the adapter at a **different** seeded `(request, instance)` pair, so the two sides contend with nothing | LEG 2 red — a "no deadlock" leg that never contended has proved nothing | **RED**: `Error: backend 55248 never blocked on a lock within 5000ms — the two sides did not contend, so this leg proved nothing`, `Tests 1 failed | 26 skipped (27)`. Restored with `cp`, `cmp` identical, full file back to 27 passed. |
+
 LEG 1's own discriminating power needs no separate mutation: it is a constructed race that produces
 a real `40P01`, and LEG 2 is its paired negative — the same harness, the shipped order, no deadlock.
+
+⚠️ **M-12 caught a vacuous assertion of mine before it shipped, and that is worth recording.** LEG 2's
+first contention proof was a JS-side `settled` flag flipped in `adapterRun.then(...)` and asserted
+still `false` before the core side committed. M-12 left it **green**: with the adapter pointed at an
+unrelated pair it finished immediately, yet the flag was still `false`, because the `.then` callback
+had not been scheduled by the time the assertion ran. A first mutation attempt was also invalid —
+dropping the core side's instance lock did not remove contention, it only moved it to the request
+row (memory: `feedback_ineffective_mutation_looks_like_a_useless_test.md`). The shipped version asks
+**PostgreSQL** instead: `expectBackendBlockedOnLock` polls `pg_stat_activity.wait_event_type = 'Lock'`
+for the adapter's own backend pid and throws on timeout, which is what M-12 now reddens.
 
 ### 3.10.6 The one behaviour change, disclosed
 
@@ -1156,4 +1196,12 @@ they are.
 - **R1 for the new guard point** — #5′ is an outlet anchor, not a chokepoint guard, so it takes no
   `CANCEL_ROUND_OUTLET_FORBIDDEN` negative control; whether §8 期 1's R1 count (9 sites) should grow
   to include it is an owner registration question, raised with the #5′ registration itself.
+- **The same cycle via the DECISION adapter** (§3.10.3, §0 R-3) — still live after this commit,
+  deliberately out of scope, pinned by Q-G LEG 4 and owed to the attendance line as a finding.
+- **A writer-syntax (`UPDATE …`) lock-order census over the attendance plugin** (§3.10.2) — 3
+  `UPDATE approval_instances` + 5 `UPDATE attendance_requests` statements are unenumerated; Q-G's
+  counts cover `FOR UPDATE` reads only.
+- **The two relations the cancel adapter locks BETWEEN the ratified pair** —
+  `attendance_schedule_dispatch_requests` and `attendance_request_calculation_snapshots` have no
+  rank in lock:227's class list (§3.10.1); flagged for owner registration, not ordered.
 - **FE / notification side** — C-3's 「卡片失效、端点返回一致」 column is untouched.

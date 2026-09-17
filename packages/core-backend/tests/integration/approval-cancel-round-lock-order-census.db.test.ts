@@ -1506,6 +1506,31 @@ describeIfDatabase(
       )
     }
 
+    /**
+     * Polls until PostgreSQL itself reports the given backend as waiting on a lock. Throws (rather
+     * than returning false) on timeout, so a leg that silently stopped contending goes RED with a
+     * message that says what it failed to establish instead of quietly proving nothing.
+     */
+    async function expectBackendBlockedOnLock(pid: number, timeoutMs = 5000): Promise<void> {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const probe = await pool.query<{ blocked: boolean }>(
+          `SELECT count(*) > 0 AS blocked
+             FROM pg_stat_activity
+            WHERE pid = $1 AND wait_event_type = 'Lock'`,
+          [pid],
+        )
+        if (probe.rows[0]?.blocked === true) return
+        if (Date.now() > deadline) {
+          throw new Error(
+            `backend ${pid} never blocked on a lock within ${timeoutMs}ms — the two sides did not `
+              + 'contend, so this leg proved nothing',
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
+
     it('LEG 1: the PRE-FIX adapter order (attendance_requests before the instance row) deadlocks DETERMINISTICALLY (40P01) against the core order', async () => {
       const { instanceId, requestId } = await seedAttendanceRequestWithInstance()
       const core = await pool.connect()
@@ -1515,9 +1540,11 @@ describeIfDatabase(
         await adapter.query('BEGIN')
         // CORE (ratified order): 原单据实例 first.
         await core.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
-        // ADAPTER as it stood BEFORE this commit: `attendance_requests` first. Written out here
-        // deliberately — this is the order the fix REMOVED, so it cannot be read off production
-        // source any more, and the leg says so rather than pretending to call live code.
+        // ADAPTER as it stood BEFORE the reorder: `attendance_requests` first. Written out by
+        // hand deliberately. NOT because the order is gone from the repo — LEG 4 reads it off the
+        // DECISION adapter, which still runs request-first — but so that this leg stays
+        // independent of any one production site: it proves the SHAPE deadlocks, and LEG 4
+        // separately reports who still has that shape.
         await adapter.query('SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE', [requestId])
 
         // Each side now reaches for the row the other holds — the cycle.
@@ -1551,6 +1578,7 @@ describeIfDatabase(
 
         // The adapter, in its SHIPPED order, blocks on the INSTANCE row before it can touch the
         // request row — so it can never hold half the cycle.
+        const adapterPid = (await adapter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
         const adapterRun = (async () => {
           await adapter.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
           const locked = await adapter.query(
@@ -1563,6 +1591,17 @@ describeIfDatabase(
         // The core side proceeds on its own merits: it takes the request row and returns the
         // attendance classification — a DEFINED outcome, not merely "nothing happened".
         await expect(coreLocksRequestForInstance(core, instanceId)).resolves.toBeUndefined()
+        // CONTENTION PROOF, MEASURED on the server rather than inferred from JS timing. Without it
+        // this leg would pass just as happily on a fixture where the two sides never overlapped,
+        // and "no deadlock" would have no discriminating power at all.
+        //
+        // An earlier draft used a `settled` flag flipped in `adapterRun.then(...)` and asserted it
+        // was still false here. That was VACUOUS and was caught by its own mutation: pointing the
+        // adapter at a DIFFERENT (request, instance) pair — so it contends with nothing and
+        // finishes immediately — left the flag `false` anyway, because the callback had not been
+        // scheduled yet. `pg_stat_activity.wait_event_type` is the server's own answer and does
+        // not depend on which promise the event loop happened to reach first.
+        await expectBackendBlockedOnLock(adapterPid)
         await core.query('COMMIT')
 
         await expect(adapterRun).resolves.toBe(1)
@@ -1595,13 +1634,19 @@ describeIfDatabase(
       expect(instanceLock, '原单据实例 must be locked BEFORE attendance_requests').toBeLessThan(requestLock)
     })
 
-    it('LEG 4 (registered, NOT buried): the plugin`s OTHER both-row path is still in the pre-fix order — this fix is one site, not a repo-wide sweep', () => {
+    it('LEG 4 (registered, NOT buried): among the `FOR UPDATE` sites, the plugin`s OTHER both-row path is still in the pre-fix order — this fix is one site, not a repo-wide sweep', () => {
       const source = readFileSync(
         join(__dirname, '../../../../plugins/plugin-attendance/index.cjs'),
         'utf8',
       )
       // Mechanical enumeration, so the claim is a count and not a memory. Comment/doc lines are
       // excluded by requiring the quoted statement form the adapters actually execute.
+      //
+      // SCOPE, stated so the counts are not read as the whole population: this enumerates
+      // EXPLICIT `FOR UPDATE` reads ONLY. A bare `UPDATE approval_instances …` / `UPDATE
+      // attendance_requests …` takes a row lock too (`feedback_writer_audit_both_query_syntaxes`),
+      // and the plugin has 3 and 5 of those respectively. They are NOT enumerated here and NOT
+      // ordered by this commit — registered as a residual in the phase-2 verification MD §3.10.2.
       const requestLocks = [...source.matchAll(/SELECT \* FROM attendance_requests WHERE id = \$1(?:::uuid)? FOR UPDATE/g)]
       const instanceLocks = [...source.matchAll(/SELECT \* FROM approval_instances WHERE id = \$1 FOR UPDATE/g)]
       expect(requestLocks.length, 'attendance_requests FOR UPDATE site count changed').toBe(3)
@@ -1609,9 +1654,15 @@ describeIfDatabase(
 
       // The decision adapter (`attendance_requests` → `approval_instances`) is the residual: it is
       // the approve/reject path, which runs only while the request is `pending`, so it is NOT on
-      // 判据 II's approved-document path and is deliberately left to the attendance line. If this
-      // assertion ever reddens because someone reordered it, the phase-2 verification MD's
-      // residual list must be updated in the same commit.
+      // 判据 II's approved-document path and is deliberately left to the attendance line.
+      //
+      // ⚠️ READ THE FAILURE MESSAGE BEFORE "FIXING" ANYTHING. This leg pins PRODUCTION SOURCE to a
+      // state that is known-wrong-but-out-of-scope, which is the opposite polarity from every other
+      // leg in this file. A RED here does NOT mean something broke: it almost certainly means
+      // someone correctly reordered the decision adapter, and the right response is to DELETE this
+      // assertion and update the phase-2 verification MD's residual list in the same commit — not
+      // to put the old order back. It exists only so that the residual cannot be silently closed
+      // while the MD goes on calling it open.
       const decisionStart = source.indexOf('const decisionReferenceSegments = operation?.referenceSegments === true')
       expect(decisionStart, 'the decision adapter anchor was not found').toBeGreaterThan(-1)
       const decisionEnd = source.indexOf('const requestMetadata = normalizeMetadata(requestRow.metadata)', decisionStart)
@@ -1621,7 +1672,11 @@ describeIfDatabase(
       const dInstance = decisionBody.indexOf("'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE'")
       expect(dRequest).toBeGreaterThan(-1)
       expect(dInstance).toBeGreaterThan(-1)
-      expect(dRequest, 'the decision adapter is expected to STILL be request-first (residual)').toBeLessThan(dInstance)
+      expect(
+        dRequest,
+        'the decision adapter is no longer request-first: if that was a deliberate reorder, DELETE '
+          + 'this assertion and update the phase-2 verification MD residual list — do not revert it',
+      ).toBeLessThan(dInstance)
     })
   },
 )
