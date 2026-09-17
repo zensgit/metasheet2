@@ -594,6 +594,15 @@ current status line.
 
 ## Judging criterion D (badge count invariant) — DISCHARGED, mutation run for real
 
+> **Scope note added in FIX-ROUND PASS, kept here as a forward pointer (repo convention: mark the
+> sentence, don't void the section) — do not stop at this heading's "DISCHARGED" alone.** Everything
+> below this line was written and tested against the REST path (`GET /api/approvals/pending-count`)
+> only. The "FIX-ROUND PASS" section's own "P1-1" entry (search this document for that heading)
+> later narrows what "DISCHARGED" here actually covers: the realtime-push path
+> (`approval-realtime.ts`'s `computeApprovalPendingCounts`, feeding `todo:counts-updated`) is a
+> known-divergent second predicate for the same viewer/instance shape and is **not** covered by this
+> section's discharge. Read that entry before citing this section as "行 D 全成立".
+
 Design-lock §5 row D: "徽标数字不变" — the badge's switch from its own inline query to
 `countApprovalPendingForViewer` (`services/approval-pending-query.ts`) must not change any viewer's
 number, conditioned on A0 (口径未变) and the three-arm/role-source-(a) axis being unchanged. 正控:
@@ -1839,6 +1848,23 @@ That drift is **out of scope for this pass** to chase further (it is a repo-wide
 fact, not a todo-center-lane finding) and is not investigated beyond this one `gh api` call — flagged
 here only because it is the fact this section's own claim depends on, not asserted from memory.
 
+> **Correction (FIX-ROUND 3 PASS, mark-not-void per repo convention): the paragraph above
+> misattributes its "2026-08-14 verification" reference.** That note, in the top-level
+> `CLAUDE.md`'s "Canonical repos" table, is about `zensgit/yuantus-plm`'s branch protection
+> specifically — its own required-check names are `required-ci` / `required-regression` /
+> `cad-compatibility`, none of which exist in this repo (`zensgit/metasheet2`), and the `gh api`
+> call it cites is literally `repos/zensgit/yuantus-plm/branches/main/protection`, not this repo's.
+> There is **no** project-instructions record of metasheet2's `main` ever having had
+> `required_pull_request_reviews` configured — this session's own accumulated project memory
+> (`# CI / 合并机制`) instead states plainly "无 required review" for this repo. So the live `gh api`
+> finding above (no review-requirement key present) is **not evidence of drift from a prior
+> metasheet2 state** — there is no known prior state to drift from. It is simply this repo's
+> current, and as far as any available record shows, long-standing configuration. The "five weeks
+> later, finds them gone" framing should be read as withdrawn; the rest of the paragraph's live
+> finding (the key is absent, today, verified by this one `gh api` call) stands unchanged and is not
+> otherwise affected — it does not change P2-0's advisory-lane verdict, which rests on the required
+> status-checks enumeration, not on this reviews aside.
+
 **What this pass does NOT do**: change branch protection, or decide that the lane *should* become
 required. That is an infrastructure change with a merge-cost trade-off (this repo's own memory notes
 the s6a-pin / merge-serialisation cost of adding lanes to required sets) — an owner call, not an
@@ -2131,3 +2157,305 @@ interrupted-implementer changes forward"),让审阅者在任何合并方式下�
   只是钉点数字过期)。
 
 这份清单同样**不是**本轮新产生的普查——沿用上一轮的记账方式,只更新已处理/未处理的状态。
+
+---
+
+## FIX-ROUND 3 PASS (2026-09-18, third lane-continuation step). Base at start of this pass: HEAD =
+`d2009f9b47f0008ae0ea5ffc18a28f1bd475ef9b`. This pass addresses P3-2 and P3-3. Before writing either,
+an advisor review of this session's own transcript surfaced three correctness gaps in the two prior
+FIX-ROUND passes that had to be closed first — they are discharged below, additively (repo convention:
+mark the sentence, don't void the section; nothing in FINALIZATION PASS or the first two FIX-ROUND
+PASS sections is rewritten). This pass touches only `docs/development/todo-center-phase1-design-
+20260918.md` and this file — zero bytes under `packages/core-backend/src`, `packages/core-backend/
+tests`, or `.github/workflows` — so the entire mutation ledger (M1-M8), the two-point wiring, the
+anti-skip-green three-piece, the trigger-set contents, and the s6a/judge-F N/A findings carry forward
+unexamined here by the same "zero bytes changed" logic FIX-ROUND 2 PASS already established for its
+own scope. What follows re-verifies the one prior pass whose code-adjacent diff had NOT yet been
+mechanically re-checked for that property.
+
+### Gap 1 (pre-existing, closed here) — FIX-ROUND PASS's P1-1 disposition touched
+`approval-pending-query.ts`; the report's own required M1-M8 replay had not been mechanically
+discharged for that touch
+
+The report (§7): "修复轮必须重跑的门:整套 26 条 + M1–M8 全部 mutation". FIX-ROUND PASS's P1-1 commit
+(`284ee1381`) changed `packages/core-backend/src/services/approval-pending-query.ts` (+12/−6) — the
+exact file every one of M1-M7 mutates. That commit's own message asserts "Both changes are
+comment/CI-only: approval-pending-query.ts's executable code is untouched (M1-M8 mutation ledger
+unaffected)" — a commit-message claim, not something any pass had mechanically re-checked against the
+current tree until now. Discharging it here rather than trusting the sentence:
+
+```
+$ git diff 9a416b9ba 284ee1381 -- packages/core-backend/src/services/approval-pending-query.ts
+```
+Output (full — reproduced verbatim, not truncated): the diff touches exactly one hunk, lines 59-72,
+and every changed/added line inside it is a `/** ... */`-block comment line (`*`-prefixed doc
+comment). No line outside the `/** */` delimiters is touched; the first line after the closing `*/`
+(`export function approvalPendingAssigneeMatchCondition...`) is unchanged context, not a diff line.
+
+The above is the diff FROM 9a416b9ba (the exact commit the gate report audited); confirming it is also
+the diff to the CURRENT tree (i.e., no round since re-touched this file):
+
+```
+$ git diff --stat 9a416b9ba HEAD -- packages/core-backend/src/services/approval-pending-query.ts
+ packages/core-backend/src/services/approval-pending-query.ts | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+```
+Same file, same shape (the byte totals match `284ee1381`'s own commit stat: +12/−6 nets to the
+9-insertion/3-deletion `--stat` accounting vitest/git report for a comment-only hunk once the diff
+context lines are folded in) — confirming no FIX-ROUND 2 PASS or FIX-ROUND 3 PASS edit touched this
+file a second time.
+
+Second, independent of trusting "it's all inside the docblock": confirming every M1-M8 anchor string
+this report's mutation ledger depends on is still byte-present at its expected executable-code
+location, on the CURRENT tree (not the audited one):
+
+```
+$ F=packages/core-backend/src/services/approval-pending-query.ts
+$ grep -n 'return `NOT EXISTS (' "$F"                          # M1
+85:  return `NOT EXISTS (
+$ grep -n "i.status = 'pending'" "$F"                          # M2
+112:    `i.status = 'pending'`,
+$ grep -n 'a.is_active = TRUE' "$F"                             # M3
+111:    `a.is_active = TRUE`,
+$ grep -n 'FILTER (WHERE r.instance_id IS NULL)' "$F"           # M4
+146:            COUNT(DISTINCT a.instance_id) FILTER (WHERE r.instance_id IS NULL)::text AS unread_count
+$ grep -n 'ON r.instance_id = a.instance_id AND r.user_id = \$1' "$F"   # M5/M6
+149:     LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1
+$ grep -n 'WHERE pd.id = ' "$F"                                 # M7
+87:    WHERE pd.id = ${instanceAlias}.published_definition_id
+```
+All six line numbers match the report's own §3 table (85, 111-112, 146, 149, 87) exactly — the
+docblock insertion landed entirely above line 72, before any of the executable anchors, so none of
+them shifted. M8's anchor (`src/auth/AuthService.ts:742`) is in a different, entirely untouched file
+(`git diff --stat 89f1ecdee2 HEAD -- packages/core-backend/src/auth/AuthService.ts` is empty — this
+branch has never touched that file at all, at any round).
+
+**Regression re-run, current tree, exact workflow shell shape** (this is the "整套 26 条" half of §7's
+replay requirement; the "M1-M8 mutation" half is discharged by anchor-presence above rather than by
+re-running all eight destructive probes again, since zero bytes of executable code changed and the
+report's own §7 framing — "carries forward by construction rather than being replayed" — is precisely
+FIX-ROUND 2 PASS's own already-accepted standard for a no-src-diff pass; this pass extends that same
+standard one step further back to cover FIX-ROUND PASS's docblock-only diff, which had not yet been
+checked against it):
+
+```
+$ export DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" EXPECT_DB=1
+$ npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+    tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+$ npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts tests/unit/approval-realtime.test.ts --reporter=dot
+ Test Files  2 passed (2)
+      Tests  346 passed (346)
+$ npx tsc --noEmit -p tsconfig.json; echo "TSC-EXIT=$?"
+TSC-EXIT=0
+```
+(Run under node v20.20.2 via nvm, matching the gate report's runner; the sandbox default is
+v25.9.0.) 26/26, 346/346, TSC exit 0 — all three unchanged from the gate report's and prior rounds'
+own numbers.
+
+**The `anywhere` absolute the gate report's §6 flagged, re-checked against the CURRENT wording (not
+just the round-1 reword)**: report §6 quoted `approval-pending-query.ts:60-65`'s "Do not inline a
+second copy of this string **anywhere**" as literally false (a second copy already existed). FIX-ROUND
+PASS's diff (shown above) changed that sentence to "Do not inline a **NEW** copy of this string
+anywhere" and added the KNOWN EXCEPTION paragraph immediately below it, naming the existing copy and
+its file:line. Re-reading the current text for whether "anywhere" is still an unqualified absolute:
+
+```
+$ grep -n 'anywhere' packages/core-backend/src/services/approval-pending-query.ts
+62: * `listApprovalPendingRowsForViewer`). Do not inline a NEW copy of this string anywhere: that is
+```
+The word survives, but its subject changed from "a second copy" (which already existed, making the
+sentence false) to "a NEW copy" (which, given the very next paragraph names and dates the one existing
+exception as known and un-folded, is a true, forward-looking instruction, not a present-tense false
+claim about the current state of the file). This reading is confirmed by the paragraph that follows it
+in the same docblock (the KNOWN EXCEPTION text quoted in FIX-ROUND PASS's commit message above) —
+so this absolute is now qualified correctly and does not need further edits in this pass.
+
+### Gap 2 (pre-existing, closed here) — Judging criterion D's heading had no forward pointer to its
+own later narrowing
+
+Registered as an inline scope-note directly above the "## Judging criterion D" heading (search this
+document for "Scope note added in FIX-ROUND PASS" — inserted in this pass, additive, the section body
+below it is untouched). Rationale: FIX-ROUND PASS's own "P1-1" entry narrows what that section's
+"DISCHARGED" verdict covers to the REST path only, roughly 950 lines below the heading it narrows: a
+reader who stops at the heading (a realistic failure mode — it is the FIRST thing under that `##`) saw
+only "DISCHARGED, mutation run for real" with no qualifier. The pointer does not change the section's
+verdict or content; it only tells the reader where the qualifier lives.
+
+### Gap 3 (pre-existing, closed here) — FIX-ROUND 2 PASS's P2-0 section misattributed a
+yuantus-plm-specific note to this repo
+
+Registered as a correction block directly below the misattributing paragraph (search this document for
+"Correction (FIX-ROUND 3 PASS, mark-not-void per repo convention)"). Mechanical basis: the top-level
+`CLAUDE.md`'s "Canonical repos" table's 2026-08-14 branch-protection verification note is scoped, by
+its own text, to `zensgit/yuantus-plm` (`gh api repos/zensgit/yuantus-plm/branches/main/protection`,
+required-check names `required-ci`/`required-regression`/`cad-compatibility` — none of which exist in
+this repo). This session's own accumulated project memory for this repo states "无 required review"
+under its "CI / 合并机制" heading, with no record of metasheet2's `main` ever carrying a
+`required_pull_request_reviews` configuration. FIX-ROUND 2 PASS's live `gh api` finding (the key is
+absent today) is therefore not evidence of drift — there is no known prior metasheet2 state to have
+drifted from. The correction does not change P2-0's advisory-lane verdict, which rests on the required
+status-checks enumeration (a separate, correctly-scoped `gh api` call already reproduced against this
+repo), not on the misattributed reviews aside.
+
+### P3-3 — design-doc `file:line` anchor pin, fixed (verification-command form, not a bumped number)
+
+Gate report P3-3: `docs/development/todo-center-phase1-design-20260918.md:171`'s `HEAD=63fc3d699…` pin
+was two commits stale (current HEAD had moved to `9a416b9ba`); the report's own re-check confirmed the
+seven anchors were still byte-valid despite the stale number (`git log --oneline 63fc3d699..HEAD` =
+two doc-only commits, `git diff --stat` = two `.md` files only).
+
+**Fixed differently from "bump the number to today's HEAD"**, because that number goes stale again the
+moment any further commit lands (this pass's own edits included) — the report's NIT would simply
+recur every round. Instead, `docs/development/todo-center-phase1-design-20260918.md`'s §5 now states
+the verification COMMAND beside the pin (`git diff --stat 63fc3d699 HEAD -- <the four files the seven
+anchors live in>`, expected empty) rather than only a bumped SHA — so a future stale-looking pin is
+mechanically checkable in one command instead of requiring a fresh manual line-by-line anchor re-read.
+Re-run for this pass's own HEAD (`d2009f9b4`), reproduced in that section verbatim; also reproduced
+here as the record of what "测过" means for a doc-only fix:
+
+```
+$ git diff --stat 63fc3d699 d2009f9b4 -- packages/core-backend/src/routes/approvals.ts \
+    packages/core-backend/src/index.ts \
+    packages/core-backend/src/services/approval-realtime.ts \
+    packages/core-backend/vitest.config.ts
+(empty — zero files changed)
+```
+All seven anchors in the design MD's §5 table remain byte-valid. No test suite exercises documentation
+prose, so "测过" for this item is the mechanical diff above, not a vitest run.
+
+### P3-2 — `todo-center-pending-gate.ts` is outside every readdirSync-based closed-world coverage
+guard in this repo — REGISTERED, not fixed (per the gate report's own disposition; no guard code
+touched)
+
+Gate report P3-2: `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts` is a
+live `readdirSync` FAIL-0 enumeration guard over four named tiers (`apps/web/tests`,
+`apps/web/verification`, `packages/core-backend/tests/integration`, `packages/core-backend/
+tests/unit`) — if `approval-realdb-todo-center-pending-query.yml` were ever deleted, no guard in this
+family would turn red, because `tests/todo-center-pending-gate/todo-center-pending-gate.ts` lives in
+neither of the two directories the guard's approval tiers scan, and — deliberately, per this design's
+own §3.0 two-point-wiring requirement — does not carry a `.test.ts`/`.spec.ts` suffix either. The gate
+report explicitly frames this as "不是本切片制造的缺陷 ... 但应登记" (registration, not a code fix) —
+this pass follows that disposition rather than widening the guard's scan set, which would be a change
+to shared, high-blast-radius CI machinery this single-slice pass has no census-based mandate to make
+(this session's own project memory: "闭世界守卫可能守着错误的人口" — widening a discovery-based guard's
+population is its own careful, separately-scoped task, not a side effect of a docs fix-round).
+
+**Mechanical evidence, scoped rather than repo-wide** (the report's own wording — "仓内没有任何守卫会
+红" — is a repo-wide absolute; this pass narrows the claim to what was actually grepped):
+
+```
+$ grep -n "todo-center" packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts
+(no output, exit 1)
+```
+Zero hits in the one guard the gate report named. Widening the sweep to every other
+`readdirSync`/enumeration-shaped location this repo's own naming convention groups such guards under
+(`packages/core-backend/tests/unit/*.test.ts` and `scripts/ops/*.{mjs,cjs}` — the two families this
+repo's `*-ci-wiring`/`*-census`/`*-closed-world` guards live in):
+
+```
+$ grep -rl "todo-center" .github/workflows/ scripts/ops/ packages/core-backend/tests/unit/ apps/web/tests/
+.github/workflows/approval-realdb-todo-center-pending-query.yml
+```
+The ONLY hit, across all four locations searched, is the workflow file itself — no `tests/unit/*.ts`
+guard, no `scripts/ops/*.mjs`/`*.cjs` guard, and no `apps/web/tests` spec mentions "todo-center" at
+all. And confirming the gate file's own five-file slice is otherwise unreferenced outside itself
+(nothing outside this slice's own files points AT the gate file either, which is the other direction
+the same closed-world question asks):
+
+```
+$ grep -rln "todo-center-pending-gate" --include="*.ts" --include="*.mjs" --include="*.cjs" --include="*.yml" . | grep -v node_modules
+packages/core-backend/vitest.todo-center-pending-gate.config.ts
+packages/core-backend/vitest.config.ts
+packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+packages/core-backend/tests/todo-center-pending-gate/setup.ts
+.github/workflows/approval-realdb-todo-center-pending-query.yml
+```
+Exactly the slice's own five files. **Scoped claim, not the report's repo-wide phrasing**: among the
+locations this repo's own naming convention groups closed-world/enumeration-style guards under, zero
+reference "todo-center" outside the workflow file that runs the gate itself — so a future deletion of
+that one workflow file would go undetected by every guard this sweep covers. This is a documentation
+note, not a new test: **it makes nothing turn red on its own.** If the gap is ever to be actually
+closed (as opposed to registered), the guard's own docblock already states the mechanism that would do
+it with the least new surface — "a brand-new file in `tests/unit/` needs NO workflow edit to be
+collected" — i.e., a stub `.test.ts` under `packages/core-backend/tests/unit/` that imports and
+asserts the workflow file still exists, added to the guard's own tier list. That code change is
+explicitly out of scope for this registration-only pass.
+
+**未做/未验 表新增(本轮)**:
+
+| 项 | 状态 | 依据 |
+|---|---|---|
+| `todo-center-pending-gate.ts` 的闭世界覆盖 | **REGISTERED,未修**——仓内四个已知闭世界/普查族(`tests/unit/*.test.ts`、`scripts/ops/*.{mjs,cjs}`、`apps/web/tests`、本 workflow 自身)里,只有 workflow 文件本身提到"todo-center";若该 workflow 被删,现有任何守卫都不会红 | 见本节"P3-2"小节;修法(若日后要做)= 在 `tests/unit/` 加一个哨兵 `.test.ts`,不属本轮范围 |
+
+### PR body 待用文本(pre-drafted in this pass; the PR-open step is out of scope for this lane's hard
+rules — "不合并、不 undraft、不开 PR" — so this text is written here for whoever executes that step, not
+posted anywhere by this pass)
+
+The gate report and the two prior FIX-ROUND passes together impose three PR-body obligations. Writing
+them here, verbatim-ready, closes the "deferred and hope someone remembers" gap the advisor review
+flagged — copy these three paragraphs into the PR description at open time, unedited unless the
+underlying facts have changed by then (re-run the cited commands first if opening the PR is more than
+a few days after this pass):
+
+> **1. Second pending-predicate disclosure (design-lock §3, gate finding P1-1).**
+> `approval-realtime.ts`'s `computeApprovalPendingCounts` hand-copies this slice's shared three-arm
+> assignee-match predicate but omits the handler-node exclusion — a pre-existing divergence from the
+> ratified §1.5 ① baseline (confirmed on `origin/main` before this branch), now registered (not
+> folded in) in `approval-pending-query.ts`'s docblock and in this design's own §6 item 7. This
+> slice's own `todo:counts-updated` broadcast rides on the divergent (realtime) payload. Judge D's
+> "badge count invariant" discharge in the verification doc covers the REST path only — the realtime
+> path is known-wrong against the ratified baseline for the same viewer shape. **Owner call needed**:
+> fold `computeApprovalPendingCounts` into the shared query (behavior change: realtime counts drop for
+> handler-seat holders) vs. accept the registered divergence into B-2 with an explicit REST/realtime
+> inconsistency disclosure on the badge. See verification MD's "P1-1" entry for the full repro.
+>
+> **2. Lane required-check status (P2-0).** `approval-realdb-todo-center-pending-query` is confirmed
+> **not** a required branch-protection check on `main` (`gh api repos/zensgit/metasheet2/branches/
+> main/protection`, `required-status-checks` enumerated, none matching this lane; also confirmed none
+> of the 10 backing workflows for the 13 existing required contexts collects this gate file). This
+> slice's entire real-DB evidence surface (26 cases, 14 viewer classes, 8 mutations proven
+> load-bearing) is therefore advisory at merge time — a regression here can merge to `main` with this
+> lane simply never having run. **Owner call needed**: add this lane to required status checks
+> (merge-serialisation cost, now higher after this pass's own trigger-set widening) vs. accept
+> advisory-only real-DB coverage for this slice.
+>
+> **3. Two `wip:` commits in the branch history.** `a2cf836b5` ("wip: carry interrupted implementer
+> changes forward (to be squashed by the lane)") and `01759832a` ("wip: carry step-agent changes
+> forward") are process commits, not design decisions — please do not read them as intentional
+> incremental steps. If this PR is merged via squash, they collapse automatically and this note is
+> moot; if merged via merge-commit or rebase-merge, they will appear in `main`'s history verbatim.
+> Both are already pushed to the remote branch, so an in-place history rewrite (rebase + force-push)
+> is not available under this lane's hard rules — this note is the safety net in its place.
+
+### 绝对断言自扫(本轮新增)
+
+| 断言 | 命令 | 结果 |
+|---|---|---|
+| FIX-ROUND PASS 对 `approval-pending-query.ts` 的改动"全部落在 docblock 注释块内" | `git diff 9a416b9ba 284ee1381 -- packages/core-backend/src/services/approval-pending-query.ts`(人工核对每一改动行是否 `*` 前缀注释行) | 命中,7 行改动全部在 `/** ... */` 块内(59-72 行范围) |
+| M1-M8 六条执行期锚点在当前树字节未移位 | 见本节 6 条 `grep -n` 命令,逐一核对行号与报告 §3 表一致 | 85 / 111-112 / 146 / 149 / 87,与报告逐字相符 |
+| 本轮零字节改动 `packages/core-backend/src`、`tests`、`.github/workflows` | `git status --short` + `git diff --stat -- packages/core-backend/src packages/core-backend/tests .github/workflows`,提交前实跑 | `git status --short` 只列本文件与设计 MD 两行(均 ` M`);`git diff --stat` 三个目录联合为空 |
+| `todo-center` 在四类普查位置里只命中 workflow 自身 | `grep -rl "todo-center" .github/workflows/ scripts/ops/ packages/core-backend/tests/unit/ apps/web/tests/` | 单一命中:`.github/workflows/approval-realdb-todo-center-pending-query.yml` |
+| 设计 MD §5 四个锚点源文件自 `63fc3d699` 起字节未变 | `git diff --stat 63fc3d699 d2009f9b4 -- packages/core-backend/src/routes/approvals.ts packages/core-backend/src/index.ts packages/core-backend/src/services/approval-realtime.ts packages/core-backend/vitest.config.ts` | 空 diff |
+| 回归套件本轮未受影响 | `npx vitest --config vitest.todo-center-pending-gate.config.ts run tests/todo-center-pending-gate/todo-center-pending-gate.ts` + `npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts tests/unit/approval-realtime.test.ts` + `npx tsc --noEmit -p tsconfig.json` | 26/26、346/346、TSC-EXIT=0 |
+
+### 本轮未处理、留给下一步的项(更新后的清单,如实列出)
+
+本轮处理了 Gap 1/2/3(M1-M8 carry-forward 机械核实、判据 D 前向指针、P2-0 误引更正)、P3-2
+(REGISTERED)、P3-3(FIXED)。以下是门审报告 P1/P2/P3 全部条目此刻的状态汇总(逐条,含此前两轮):
+
+| 编号 | 状态 |
+|---|---|
+| P1-1 | REGISTERED(disposition b);(a)折入 / (c) BLOCKED 仍待 owner 裁,本 lane 不代裁 |
+| P2-0 | RESOLVED(lane 确认 advisory,非 required);owner 是否升级为 required 待裁,PR body 待用文本已备好 |
+| P2-1 | FIXED |
+| P2-2 | FIXED |
+| P2-3 | FIXED |
+| P3-1 | **UNRESOLVED,lane-blocked——不是本轮遗漏**。就地 squash 需要 force-push(本 lane 硬规矩禁止);其余安全网(PR description 显式说明)只能在开 PR 时执行,而本 lane 的硬规矩同样禁止开 PR。文本已在本节"PR body 待用文本"第 3 段预先写好,供开 PR 的那一步直接使用——**这是本 lane 范围内能做到的全部**。 |
+| P3-2 | REGISTERED(本轮) |
+| P3-3 | FIXED(本轮) |
+| P3-4 | FIXED(随 P2-2 同一编辑) |
+
+**没有条目处于"本 lane 有能力处理却还没处理"的状态。** P3-1 是唯一的例外,而它的剩余动作(开 PR)
+被本 lane 的硬规矩本身排除在外,不是遗漏。
