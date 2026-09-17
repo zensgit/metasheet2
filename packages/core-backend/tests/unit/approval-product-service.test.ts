@@ -8578,6 +8578,15 @@ describe('ApprovalProductService', () => {
 
       // Fail closed rather than hand every empty identity one shared key.
       expect(() => deriveCancelRoundW4OperationIdV1('')).toThrow()
+
+      // ── GOLDEN VALUE. The three assertions above are self-consistency: they hold for ANY
+      // derivation, including one whose namespace, name-bytes framing or hash changed. This one
+      // pins the ACTUAL key. It matters because the key is durable state: a round that already
+      // cancelled real business rows must replay under the same W4 operation, so a silent change
+      // here would make every already-redeemed round mint a second operation. The port module
+      // calls the namespace 「frozen from here on」 — this is the test that makes that sentence
+      // more than an asserted invariant.
+      expect(derived).toBe('46c05da2-ae5a-53c4-ac85-61190e0571ff')
     })
   })
 })
