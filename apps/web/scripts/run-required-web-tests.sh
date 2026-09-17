@@ -1279,6 +1279,20 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # substring of none (`python3` bidirectional scan, 394 tokens, zero collisions); `npx vitest run
 # approvalTemplateGroupsClient --reporter=verbose` locally confirms it resolves to exactly this one
 # spec file (8/8 tests). This token covers the client functions in isolation only.
+#
+# A-2 scope item 4 (approval form grouping lock v2.13 §4 acceptance J, 2026-09-18):
+# `ApprovalTemplateGroupsPanel` — the integration spec this line's earlier `SessionOrgSwitcher`
+# comment deferred: `ApprovalTemplateGroupsPanel.vue` (mounted from `TemplateCenterView.vue` for
+# `canManageTemplates`) is the panel that actually calls the seven group endpoints, and its own
+# spec exercises the full 403 `SESSION_ORG_REQUIRED` → shared switcher → retry → 201 loop end to
+# end through the real `useSessionOrg`/`useAuth` composables (only `apiFetch` is mocked), plus
+# that a single-org member (never 403'd) never sees the selector and never calls
+# `/api/auth/session-org*`. Mutation-verified (removing the panel's `err.code ===
+# 'SESSION_ORG_REQUIRED'` branch leaves the retry test stuck on the first 403, confirmed red, then
+# restored via `cp` backup/diff/cmp). Verified against every existing token above: none is a
+# substring of it, it is a substring of none (`python3` bidirectional scan, 395 tokens, zero
+# collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it
+# resolves to exactly this one spec file (2/2 tests).
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1362,6 +1376,7 @@ exec npx vitest run \
   approvalTemplateCenterCategory \
   approvalTemplateGovernance \
   approvalTemplateGroupsClient \
+  ApprovalTemplateGroupsPanel \
   approvalTemplateRouteGuard \
   approvalTemplateVersionHistory \
   approvalUserPicker \
