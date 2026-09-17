@@ -60,26 +60,35 @@
  * on cannot decide"), restored and re-run 41/41 green. Judge B (fail-closed AND discriminable,
  * design-lock §5 row B's API-layer half) is now DISCHARGED by the `describe('Judge B — ...')` block
  * below (observation points: `GET /api/todo/items` AND `GET /api/todo/count` — the latter had ZERO
- * prior coverage anywhere in the repo, confirmed via `grep -rn "api/todo/count" packages/core-backend/tests
- * apps/web` returning no hit before this commit). Rather than mutating a source file on disk, this
- * uses the registry's own test-only `clear()` escape hatch (`pending-source-registry.ts`'s own
- * docblock names this exact use) to swap in a deliberately-throwing stub in the SAME process the
- * running server's routes read from — a live substitution of the "审批源抛错" the lock's wording
- * asks for, not a simulation. Three real requests, no mutation ledger entry needed (the fault IS the
- * test body, not a reverted edit): (1) a second, additionally-registered stub source throws
- * alongside the real `approval` source ⇒ `approval` stays `ok` and its class-① item/count are
- * unaffected, the stub source alone reports `unavailable`; (2) the `approval` NAME itself is
- * re-registered with a throwing implementation (replacing the real source, per `Map.set` semantics
- * in `register()`) while a second, healthy stub source is registered alongside it ⇒ `approval`
- * reports `unavailable` and class ①'s item disappears entirely (not a stale copy, not folded into a
- * smaller total — the healthy stub's own item/count is the ONLY thing left), proving the failure
- * does not degrade into a quietly-smaller number; (3) negative control, class ④ (genuinely zero
- * pending, no registry mutation) ⇒ both endpoints answer `sources: { approval: 'ok' }` with 0
- * items/count and neither response's `sources` map contains the string `'unavailable'` anywhere —
- * the shape §5 row B calls out as required to stay distinguishable from (1)/(2) above. An `afterEach`
- * restores the registry to production shape (`clear()` then `register(approvalPendingSource)`)
- * after every test in the block, defensive against this ceasing to be the last describe block in a
- * future edit.
+ * prior coverage under `packages/core-backend/tests/` or `apps/web/`, confirmed via
+ * `grep -rn "api/todo/count" packages/core-backend/tests apps/web` returning no hit before this
+ * commit). Rather than mutating a source file on disk, this uses the registry's own test-only
+ * `clear()` escape hatch (`pending-source-registry.ts`'s own docblock names this exact use) to swap
+ * in a deliberately-throwing stub in the SAME process the running server's routes read from — a live
+ * substitution of the "审批源抛错" the lock's wording asks for, authorized by row B's own "同一机制,
+ * 合并执行" merge clause (not just the registry docblock, which is an implementation comment, not
+ * the lock itself). Four real requests, no mutation ledger entry needed (the fault IS the test body,
+ * not a reverted edit): (1) a second, additionally-registered stub source throws alongside the real
+ * `approval` source ⇒ `approval` stays `ok` and its class-① item/count are unaffected, the stub
+ * source alone reports `unavailable` (this stub omits `countPendingForUser`, exercising the
+ * registry's list-derived-count catch branch; test (2) below defines both methods, exercising the
+ * other catch branch — between the two, both of `pending-source-registry.ts`'s per-source try/catch
+ * sites are hit); (2) the `approval` NAME itself is re-registered with a throwing implementation
+ * (replacing the real source, per `Map.set` semantics in `register()`) while a second, healthy stub
+ * source is registered alongside it ⇒ `approval` reports `unavailable` and class ①'s item disappears
+ * entirely (not a stale copy, not folded into a smaller total — the healthy stub's own item/count is
+ * the ONLY thing left); (3) row B's own retained viewer-shape parenthetical ("保留探针 viewer 形状
+ * 要求:class ② 的形状,持恰一个 role 型席位且是其计数的唯一来源") — `approval` alone throws, as the
+ * ONLY registered source (no healthy sibling), for class ②, whose real count (1) comes from exactly
+ * one role-type seat — the production shape today, since `index.ts` registers exactly one source:
+ * the count DOES drop (1 → 0), but flagged `unavailable`, distinguishable byte-for-byte from (4)'s
+ * genuine zero by the `sources` map alone, never by the count; (4) negative control, class ④
+ * (genuinely zero pending, no registry mutation) ⇒ both endpoints answer `sources: { approval: 'ok'
+ * }` with 0 items/count and neither response's `sources` map contains the string `'unavailable'`
+ * anywhere — the shape §5 row B calls out as required to stay distinguishable from (1)/(2)/(3) above.
+ * An `afterEach` restores the registry to production shape (`clear()` then
+ * `register(approvalPendingSource)`) after every test in the block, defensive against this ceasing
+ * to be the last describe block in a future edit.
  *
  * (See the fixture-plumbing docblock below for the S9 note.)
  *
@@ -524,8 +533,9 @@ interface TodoCountResponse {
 /** Judging criterion B's second observation point (design-lock §5 row B): `GET /api/todo/count` —
  *  the aggregated count `routes/todo.ts` serves off the SAME `pendingSourceRegistry` as
  *  `fetchTodoItems` above, distinct from `/api/approvals/pending-count`. Zero prior coverage of this
- *  route anywhere in the repo before this commit (`grep -rn "api/todo/count" packages/core-backend/tests
- *  apps/web` returns no hit on the pre-commit tree — verified in the verification doc). */
+ *  route under `packages/core-backend/tests/` or `apps/web/` before this commit (`grep -rn
+ *  "api/todo/count" packages/core-backend/tests apps/web` returns no hit on the pre-commit tree —
+ *  verified in the verification doc). */
 async function fetchTodoCount(baseUrl: string, token: string): Promise<{ status: number; body: TodoCountResponse }> {
   const response = await fetch(`${baseUrl}/api/todo/count`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -1411,6 +1421,40 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(countResult.body.sources[okStubName]).toBe('ok')
       // Exactly the healthy stub's contribution (1) — not folded into 0, not inflated.
       expect(countResult.body.count).toBe(1)
+    })
+
+    it("retained viewer-shape probe (design-lock §5 row B's own parenthetical: \"保留探针 viewer 形状要求:class ② 的形状,持恰一个 role 型席位且是其计数的唯一来源\") — `approval` alone throws, ONLY source registered, for class ② whose real count (1) comes from that ONE role-type seat: the response's count DOES get smaller (1 → 0), but is flagged `unavailable`, not silently folded in", async () => {
+      pendingSourceRegistry.register({
+        name: APPROVAL_PENDING_SOURCE_NAME,
+        async listPendingForUser(): Promise<PendingItem[]> {
+          throw new Error('todo-center-gate-stub-b: approval source itself failing for judging criterion B (class ② shape)')
+        },
+        async countPendingForUser(): Promise<number> {
+          throw new Error('todo-center-gate-stub-b: approval source itself failing for judging criterion B (class ② shape)')
+        },
+      })
+
+      const token = await devToken(baseUrl, v2.id)
+      const itemsResult = await fetchTodoItems(baseUrl, token)
+      const countResult = await fetchTodoCount(baseUrl, token)
+
+      expect(itemsResult.status).toBe(200)
+      expect(countResult.status).toBe(200)
+      // `approval` is the ONLY registered source in this test (no healthy sibling) — the response
+      // carries nothing else to fall back on, the exact shape a real production outage would have
+      // (`index.ts` registers exactly one source today).
+      expect(itemsResult.body.sources).toEqual({ approval: 'unavailable' })
+      expect(countResult.body.sources).toEqual({ approval: 'unavailable' })
+      expect(itemsResult.body.items).toHaveLength(0)
+      // Positive control for "不得变成更小的数字" (byte-for-byte, not paraphrased): class ②'s own
+      // A0 assertion earlier in this file reads `count: 1` from the SAME viewer with the SAME
+      // fixture, `sources.approval: 'ok'` implied by 200 + no `unavailable` key. Here the number
+      // DOES drop, 1 → 0 — the lock's own wording is about the number staying flagged when it
+      // drops, not about it never dropping (an unreachable seat cannot report a phantom count) —
+      // and byte-for-byte against the negative control below (also `count: 0`), the ONLY
+      // distinguishing signal between "1 pending, unreachable" and "genuinely 0 pending" is this
+      // `sources.approval === 'unavailable'` flag, never the count itself.
+      expect(countResult.body.count).toBe(0)
     })
 
     it('negative control: a genuinely zero-pending viewer (class ④, no registry mutation) gets `ok` + 0 from every source — a shape distinguishable from both `unavailable` cases above (no `unavailable` value anywhere in `sources`)', async () => {
