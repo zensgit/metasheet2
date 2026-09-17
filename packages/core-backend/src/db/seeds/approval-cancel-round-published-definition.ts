@@ -11,12 +11,26 @@
  *
  * Runtime-policy values are pinned per lock:334 (v5.2, 复核 P2-C) — every key that has a
  * production default is written EXPLICITLY here so the seed never depends on that default:
- *   - `allowRevoke: true` — absent/false would 409 `APPROVAL_REVOKE_DISABLED` at
- *     `ApprovalProductService.ts:10159-10160` before the revoke branch (`:10191-10199`) is ever
- *     reached, so 判据 III's revoke half would never fire.
+ *   - `allowRevoke: true` — absent/false would 409 `APPROVAL_REVOKE_DISABLED` before the revoke
+ *     branch is ever reached, so 判据 III's revoke half would never fire. (This module previously
+ *     cited `ApprovalProductService.ts:10159-10160` / revoke branch `:10191-10199` / window gate
+ *     `:10169-10174` — those are the LOCK's own baseline line numbers (ratify header: "锁文正文
+ *     保留基线行号"), not this tree's, and this lane's own edits to that file have since pushed the
+ *     current-HEAD locations elsewhere — gate round-4 P3-1 (`impl-gate-C-slice1-round4-20260918.md`).
+ *     Deliberately NOT re-pinned as a fresh line-number literal here (a fresh literal would just go
+ *     stale the same way on the next edit to that file, reproducing the exact defect this note is
+ *     fixing); re-derive on demand with
+ *     `grep -n "APPROVAL_REVOKE_DISABLED\|APPROVAL_REVOKE_WINDOW_CLOSED"
+ *     packages/core-backend/src/services/ApprovalProductService.ts`.)
  *   - `revokeBeforeNodeKeys` intentionally ABSENT from `CANCEL_ROUND_RUNTIME_POLICY` (nil ⇒
- *     fail-open / unrestricted per `:10169-10174`, NOT an empty array — an empty array is a
- *     different, more restrictive value).
+ *     fail-open / unrestricted). The window gate is `revokeBeforeNodeKeys?.length && …`, so an
+ *     ABSENT key and an EMPTY array short-circuit identically — both fail-open. Gate round-4 P3-2
+ *     (`impl-gate-C-slice1-round4-20260918.md`) WITHDRAWS this module's prior claim that "an empty
+ *     array is a different, more restrictive value" — it is not, on the code as written. What
+ *     actually pins this key's fail-open default is R4-M3's real-DB behavioural mutation (setting
+ *     `revokeBeforeNodeKeys` to a NON-matching NON-empty array — genuinely more restrictive — and
+ *     observing all 4 redemption-chain revoke assertions flip to 409
+ *     `APPROVAL_REVOKE_WINDOW_CLOSED`), not a length comparison written here as prose.
  *   - the node's `nodeOperationPolicy.commentRequired` is written explicitly as `'reject_only'`
  *     (not left absent) even though the pinned value happens to equal the engine's own default
  *     (`approval-effective-node-operations.ts:99-106`) — lock:334 is explicit that the seed must

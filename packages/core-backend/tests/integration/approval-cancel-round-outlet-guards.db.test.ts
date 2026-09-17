@@ -7,6 +7,7 @@ import { ApprovalProductService } from '../../src/services/ApprovalProductServic
 import { ApprovalBridgeService } from '../../src/services/ApprovalBridgeService'
 import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
 import { CANCEL_ROUND_APPROVAL_NODE_KEY } from '../../src/db/seeds/approval-cancel-round-published-definition'
+import { APPROVAL_ACTION_TYPES, type ApprovalActionRequest } from '../../src/types/approval-product'
 
 /**
  * Approval change-request design lock v5.9 §14.3 outlets #2/#4/#6/#7/#7′/#8 (lock:359,362-369
@@ -380,6 +381,72 @@ describeIfDatabase('cancel-round outlet guards (§14.3 #2/#4/#6/#7/#7′/#8): a 
     )
     expect(finalRow.rows[0]?.current_node_key).toBe(CANCEL_ROUND_APPROVAL_NODE_KEY)
     expect(finalRow.rows[0]?.status).toBe('pending')
+  })
+
+  /**
+   * Gate round-4 P2-1 (`impl-gate-C-slice1-round4-20260918.md` §3/§9 item 1) — the `#4/#6` test
+   * above only ever dispatches `'handle'`/`'return'`, so the ratified §9-9 allow-set
+   * `{approve, reject, revoke, comment}` had ZERO discriminative power at the MEMBER level: widening
+   * `CANCEL_ROUND_ALLOWED_ACTIONS` by adding `'transfer'` left all 47 acceptance tests green (gate
+   * mutation R4-M5). Per `feedback_trap_enumeration_does_not_converge`, the fix is NOT a hand-listed
+   * literal array of the three ratify-named verbs (`transfer`/`add_sign`/`reduce_sign`) — a
+   * hand-listed array drifts the moment a new verb is added to `APPROVAL_ACTION_TYPES` without
+   * anyone remembering to also add it here (see `finding_approval_action_verb_pinned_copy_blast_radius`).
+   * Instead this test MECHANICALLY enumerates the real exported `APPROVAL_ACTION_TYPES` union and
+   * asserts every member NOT in a locally-declared copy of the ratified allow-set is rejected. The
+   * local allow-set copy is deliberately NOT imported from `ApprovalProductService`'s own
+   * `CANCEL_ROUND_ALLOWED_ACTIONS` — importing the production constant would make this test
+   * tautological against exactly the widening regression it exists to catch.
+   */
+  it('§9-9 allow-set MEMBER pin — every ApprovalActionType NOT in the ratified allow-set {approve,reject,revoke,comment} is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN, enumerated mechanically over the exported union (not hand-listed)', async () => {
+    const suffix = `member-pin-${TS}`
+    const approverId = `wi-outlet-pin-apr-${suffix}`
+    const requesterId = `wi-outlet-pin-req-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, `wi-outlet-pin-admin-${suffix}`)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const approverToken = await authToken(baseUrl, approverId)
+
+    const templateA = await publishTemplate(adminToken, oneNodeGraph(approverId), 'pin')
+    const documentA = await createPendingInstance(requesterToken, templateA)
+    await approve(approverToken, documentA)
+    const cancelRoundInstanceId = await createCancelRound(requesterId, documentA)
+
+    const service = new ApprovalProductService()
+
+    // The RATIFIED literal (lock §9-9 ratify header, verbatim): {approve, reject, revoke, comment}.
+    // Kept as an independent local copy — see doc comment above for why.
+    const RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS = new Set<string>(['approve', 'reject', 'revoke', 'comment'])
+    const forbiddenActions = APPROVAL_ACTION_TYPES.filter(
+      (action) => !RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS.has(action),
+    )
+    // Guard the guard: if this enumeration ever comes back empty (e.g. someone deletes members
+    // from `APPROVAL_ACTION_TYPES`, or widens the local allow-set copy to match), the loop below
+    // would silently assert nothing and this test would pass vacuously. Fail loudly instead, and
+    // pin that the three ratify-named verbs are actually present in the exported union today.
+    expect(forbiddenActions.length).toBeGreaterThanOrEqual(5)
+    expect(forbiddenActions).toEqual(expect.arrayContaining(['transfer', 'add_sign', 'reduce_sign']))
+
+    for (const action of forbiddenActions) {
+      const before = await pool().query<{ version: number; status: string }>(
+        `SELECT version, status FROM approval_instances WHERE id = $1`,
+        [cancelRoundInstanceId],
+      )
+      await expect(
+        service.dispatchAction(
+          cancelRoundInstanceId,
+          { action } as ApprovalActionRequest,
+          { userId: approverId, userName: 'member-pin actor', roles: [] },
+        ),
+        `action=${action}`,
+      ).rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' })
+
+      const after = await pool().query<{ version: number; status: string }>(
+        `SELECT version, status FROM approval_instances WHERE id = $1`,
+        [cancelRoundInstanceId],
+      )
+      expect(after.rows[0], `action=${action}`).toEqual(before.rows[0])
+    }
   })
 
   it('#7 legacy POST /:id/approve — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN via handleApprovalsError; the row is unchanged', async () => {
