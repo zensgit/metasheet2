@@ -2705,22 +2705,37 @@ $ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packag
 
 ### Changed-file census, before and after this pass
 
-**File count and deletion count, exact; insertion count as of just before this section's own text
-(self-referential otherwise — this file's line count includes whatever this sentence says, so an
-"exact final" insertions figure quoted inside the file that produces it cannot both be written and be
-correct at once; re-run the command below for the true current figure, it will be slightly higher than
-what's quoted here purely from this section's own prose length):**
+**File count and deletion count, exact and stable; insertion count deliberately omitted from the
+prose below (self-referential otherwise — this file's own line count is part of what `git diff
+--stat` would report, so a written "current" insertions figure is stale the instant this sentence is
+saved; re-run the command yourself for that number, it isn't load-bearing for anything this pass
+claims):**
 ```
 $ git diff origin/main --stat | tail -1
-14 files changed, 5492 insertions(+), 43 deletions(-)
+14 files changed, NNNN insertions(+), 43 deletions(-)
 ```
 Down from the round-2 report's audited **16 files** (`approval-realtime.ts` and its unit test both
 drop out of the diff entirely, net zero change each — not "still listed with a smaller diff"). The
-`43` deletions figure differs from the report's `44` because this pass's revert removed the one
-deletion line the original commit `6fba6e01e` had introduced in `approval-realtime.ts` (the
-single-line broadcast call it replaced with the multi-line `room` + two-broadcast form) — restoring
-that line's original single-statement form nets to zero for that file, so it no longer contributes to
-either the insertion or deletion count.
+`43` deletions figure differs from the report's `44` — verified mechanically, not asserted from the
+general shape of the edit:
+```
+$ git diff origin/main 41d58d93f --numstat -- packages/core-backend/src/services/approval-realtime.ts \
+    packages/core-backend/tests/unit/approval-realtime.test.ts
+8	1	packages/core-backend/src/services/approval-realtime.ts
+23	0	packages/core-backend/tests/unit/approval-realtime.test.ts
+$ git diff origin/main 41d58d93f --numstat | awk '{ins+=$1; del+=$2} END {print ins, del}'
+5258 44
+$ git diff origin/main HEAD --numstat | awk '{ins+=$1; del+=$2} END {print ins, del}'
+5497 43
+```
+`approval-realtime.ts` alone carried exactly one deletion line against `origin/main` at the round-2
+head (the single-line `broadcastTo` call the original commit replaced with the multi-line `room` +
+two-broadcast form) and zero against `origin/main` now (this pass restored that single line
+verbatim) — that one line accounts for the entire 44→43 drop; `approval-realtime.test.ts` contributed
+0 deletions either way, consistent with it being a pure test-body addition originally and a pure
+removal now (23 insertions removed nets to 0 insertions and 0 deletions in a `--stat` summary of the
+current diff, since the lines never differed from `origin/main` to begin with — they simply don't
+exist in either tree's diff anymore).
 
 ### Design MD updated in the same pass, not left to drift (cross-referenced, not restated in full
 ### here)
