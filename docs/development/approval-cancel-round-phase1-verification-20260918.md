@@ -1,5 +1,13 @@
 # Approval Cancel-Round Phase 1 — Verification (2026-09-18, finalized)
 
+**Bottom line up front, so it cannot be missed by skimming to a later table**: this slice is
+**not** a clean pass. One test this lane authored is currently RED on this tree —
+`apps/web/tests/approvalBatchTransferView.spec.ts`'s FE/BE sync-pin guard for outlet #12 (§A4)
+under-extracts the backend's error-code union because of a regex defect, and per this task's
+"不改代码" instruction it was reported, not fixed. Checklist item 15 is therefore **not closed**.
+Everything else in Part A is green, but this one item should be the door review's first line item,
+not a footnote.
+
 This document is finalized in two layers, kept separate rather than merged into one narrative:
 
 - **Part A (this pass, 2026-09-18)**: a fresh rerun against the private DB **`metasheet2_lock_c`**
@@ -7,16 +15,16 @@ This document is finalized in two layers, kept separate rather than merged into 
   walk, a live mutation ledger with genuine backup→edit→run→restore→cmp cycles run in this pass, the
   lock's verification-table rows mapped to test file + case name + lane, and — because the task
   requires reporting defects rather than silently fixing them — two findings this pass surfaced on
-  the current tree that were not in the prior record.
+  the current tree that were not in the prior record (§A2's shared-DB residue, §A4's red FE guard).
 - **Part B (preserved, round 2, 2026-09-18 earlier)**: the existing content of this file at the time
   this task started, kept **verbatim, not discarded**, as the record of round 2's own virgin-DB rerun
   (against `metasheet2_lock_c_virgin`, HEAD `296a47acb`). Its numbers are **not** carried forward as
-  today's evidence — Part A supersedes it for "is it green right now" — but its narrative (the
-  virgin-migration proof, the Q-B/Q-C census construction story, the decision-3 boundary reasoning)
-  remains correct and is not restated.
+  today's evidence — Part A supersedes it for "is it green right now" (see the supersession notes
+  added at the top of Part B's §9/§10) — but its narrative (the virgin-migration proof, the Q-B/Q-C
+  census construction story, the decision-3 boundary reasoning) remains correct and is not restated.
 
 HEAD at the time of Part A: `b2f2d3ac3` (after this same commit's design-MD sibling; no code
-changes are part of this commit — see §3's mutation ledger for the two temporary, fully-restored
+changes are part of this commit — see §A3's mutation ledger for the two temporary, fully-restored
 edits made and reverted *during* this verification pass, confirmed byte-identical by `cmp`).
 
 ---
@@ -295,15 +303,19 @@ six of the eight members and never reaching `'cancel_round'` or `'error'`.
   narrative (quoted in the design MD) describes the guard's *shape* being correct without having
   executed it.
 
-**Disposition**: per the "不改代码" rule, the regex was **not** fixed. This is reported here as a
-CONFIRMED defect (in the *test*, not in the shipped FE/BE code, which line up correctly) for the door
-review to register and decide how to fix (the minimal fix would let the repeated group also skip a
-`/** ... */` block, or split the match on the closing `*/` before applying the per-literal `matchAll`).
-
-## A5. Genuine finding #2 (this pass) — see §A2 above (shared-DB residue, not a code defect)
-
-Already covered in full in §A2; listed here only so the "两条私自发现" instruction has both findings
-visible from one place.
+**Disposition — this is a BLOCKING open item, not a closed one**: per the task's "不改代码" rule
+(applied here without carving out test files this lane itself authored, since the instruction drew
+no such line), the regex was **not** fixed. This means **checklist item 15 is NOT closed**: the
+lock's own requirement for outlet #12 ("同 PR 必改三处…同步钉") includes a *working* sync guard, and
+this one currently cannot prove what it exists to prove. The underlying FE/BE data (the union member,
+the label map entry) are correct — only the guard is broken — but a broken guard is not a substitute
+for a working one, and this document does not present it as such. Reported here as a CONFIRMED
+defect for the door review to register and fix (the minimal fix would let the repeated group also
+skip a `/** ... */` block, or split the match on the closing `*/` before applying the per-literal
+`matchAll`) — a fix that touches only this test file, not the FE/BE code it verifies. See §A9 for
+this item restated as the lead blocking entry, and see the note this adds to Part B's §9/§10 below
+(this finding also means the "second finding" this pass required is §A2, immediately above — the two
+genuine findings this pass surfaced are §A2 and this section, not a separate third section).
 
 ## A6. Lock verification-table → test file + case name + lane (full mapping)
 
@@ -395,16 +407,22 @@ vectors file shows no delta since the pin recorded in `e394c9e9c`); re-run in §
 | 14 | Four attendance census pins re-checked on push | **Closed, re-run fresh this pass** (§A1.6, 60/60, including "exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML" and "hard zero-bypass: current-tree open-debt set is exactly empty"). |
 | 15 | FE sync pin must read backend source, not hand-transcribe | **Structurally closed (the guard is a `readFileSync` source pin, not a hand-transcribed array, and both FE files it checks against already carry `cancel_round`), but the guard itself is currently RED due to a regex defect — see §A4. Not "done", reported as a live finding.** |
 | 16 | §5 I6 "撤销不限次" needs an explicit acceptance row | **Closed.** `approval-cancel-round-redemption.db.test.ts`'s `chain (§5 I6, 撤销不限次)` case is exactly this row; §A3 Mutation 2 proves it is load-bearing (disabling the round-close write turns it red). |
-| 17 | §14.1 CJS mirror constant / §14.3 legacy-catch-500 mutation / §2-G2 time anchor — "zero mapping" in the taskbook | **Two of three closed, one N/A for this slice.** §14.1 CJS mirror constant: closed, pinned by `approval-cancel-round-plugin-mirror-constant.test.ts` (9 cases, green in §A1.2), and independently re-verified live in this pass via Mutation 1's sibling reasoning (the legacy-catch pass-through, not the mirror constant itself, but the same "removing the guard turns the specific mutation red" discipline). §14.3 legacy-catch-500 mutation: **closed and re-verified live in this pass** — §A3 Mutation 1 is exactly this mutation (disable outlet #7's pass-through ⇒ observe 500 instead of 409), run fresh, not merely cited. §2-G2 time anchor (the amend-only "generation" time-anchor field): **N/A to this slice** — G2 applies to amend rounds, out of scope per lock §7 (see design MD §1.1); this slice's `approval_rounds` schema has no amend-specific columns to anchor. |
+| 17 | §14.1 CJS mirror constant / §14.3 legacy-catch-500 mutation / §2-G2 time anchor — "zero mapping" in the taskbook | **Two of three closed, one N/A for this slice.** §14.1 CJS mirror constant: closed — pinned by `approval-cancel-round-plugin-mirror-constant.test.ts`'s 9 cases, green fresh in §A1.2 (no separate mutation was run against the mirror constant specifically in this pass; the 9 cases already include the "positive control: a renamed/absent identifier would fail" case, which is itself a mutation-shaped assertion). §14.3 legacy-catch-500 mutation: **closed and re-verified live in this pass** — §A3 Mutation 1 is exactly this mutation (disable outlet #7's pass-through ⇒ observe 500 instead of 409), run fresh, not merely cited. §2-G2 time anchor (the amend-only "generation" time-anchor field): **N/A to this slice** — G2 applies to amend rounds, out of scope per lock §7 (see design MD §1.1); this slice's `approval_rounds` schema has no amend-specific columns to anchor. |
 
 ## A9. What remains open, unverified, or blocked (honest list — not silently closed)
 
+- **BLOCKING — the FE sync-pin regex defect (§A4)**: `apps/web/tests/approvalBatchTransferView.spec.ts`
+  is CONFIRMED red on the current tree, right now, in this lane's own diff. This means **checklist
+  item 15 is not closed** and outlet #12's FE half has no currently-working verification (the FE/BE
+  *data* line up correctly — the union member and label map both already carry `cancel_round` — but a
+  broken guard cannot be credited as proof of that). Not fixed here, per the task's "不改代码"
+  instruction applied literally (no carve-out for a test file this lane authored). This is the one
+  item in this document that keeps the slice from being a clean "红的不交付" pass — it IS red, and it
+  is being delivered anyway per the instruction to report rather than fix; the door review's first
+  action item should be this row.
 - **判据 II / 判据 IV / `attendance-parity.db.test.ts`**: not implemented in this slice (design MD
   §1.1, unchanged from Part B's Decision 3). Deferred to C-2, per the goal document's own slice
   ordering.
-- **The FE sync-pin regex defect (§A4)**: CONFIRMED red on the current tree. Not fixed (不改代码).
-  Registered for door review; the underlying FE/BE data (the union members and label map) are
-  actually correct — only the guard's own extraction is broken.
 - **§14.3 outlet #9's negative control** (upsertPlmMirror constant assertion): the design MD §4 notes
   this is "not independently re-verified by a dedicated test in this slice beyond the creation test's
   own row read-back" — i.e., no dedicated mutation test exists for this specific outlet row; the
@@ -728,6 +746,15 @@ to close it); it is noted here only so a reader of this verification does not mi
 
 ## 9. Grand total, this document
 
+> **SUPERSEDED for currency, not for validity (round 3 / Part A note)**: the "Attendance
+> Q1c-pairing spot-check × 7 / 298" row below was true against `metasheet2_lock_c_virgin` at
+> `296a47acb`. A fresh rerun of the same seven files against `metasheet2_lock_c` in Part A §A1.7
+> shows **1 file failed, 2 tests failed (296 passed)** — traced in Part A §A2 to shared-DB residue
+> in that long-lived database, not to a code regression (a freshly migrated isolated DB reruns all
+> 166 of `attendance-plugin.test.ts` clean, including both previously-failing cases). The row below
+> is left as originally written for historical accuracy; do not quote it as today's state — quote
+> Part A §A1.7/§A2 instead.
+
 | Leg | Files | Tests | DB state |
 |---|---|---|---|
 | Cancel-round `.db.test.ts` × 7 (incl. lock-order-census standalone rerun) | 7 | 44 | virgin, first leg |
@@ -739,6 +766,12 @@ to close it); it is noted here only so a reader of this verification does not mi
 `npx tsc --noEmit -p .` clean. `git status` clean at HEAD `296a47acb` before this commit.
 
 ## 10. Checklist status
+
+> **SUPERSEDED for currency, not for validity (round 3 / Part A note)**: "all six round-2 items are
+> closed" was true at `296a47acb` for round 2's own six-item scope. Part A above performs the full
+> 17-item supplementary-checklist walk this task additionally required and finds **one item (15,
+> the FE sync-pin guard) currently red** — see Part A §A4/§A8/§A9. Read this section as "round 2's
+> own six items, closed" — a narrower and still-true claim — not as "the checklist is fully closed."
 
 All six round-2 items are closed: five by prior commits (traced in §1's table with commit SHAs), the
 sixth (this document) by the virgin-DB rerun recorded in §2/§7 above. Decision 3 is closed as
