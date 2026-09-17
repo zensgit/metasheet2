@@ -1,10 +1,15 @@
 # Approval Cancel-Round — Phase 1 (C-1) Design (2026-09-18)
 
-Branch `feat/approval-cancel-round-phase1`, HEAD as of the round-8 fix pass (2026-09-18, see the
-verification MD's Part G) `7ef8e610e08b23181aece95ac4c82f4cde1f082f`. (Originally written at HEAD
-`a32b2e015`; this document has been edited by several later passes — Part F's fix and this one among
-them — without this header line being kept current each time, which is itself a finding the
-verification MD's Part F1 and Part G's G3 record; see those for the specific citations that drifted.)
+Branch `feat/approval-cancel-round-phase1`. Originally written at HEAD `a32b2e015`; edited by several
+later fix passes since (Part F's fix, round-2's Part G, round-3's Part H among them), each of which
+re-derived the file:line citations below against its own HEAD at the time. **This header
+deliberately no longer pins a single "HEAD as of" SHA** — every prior version of that line went stale
+the moment a later pass landed without also rewriting it here, which is itself a finding the
+verification MD's Part F1 and Part G's G3 both record, and which round-3's gate report §9 item 8
+suggested resolving exactly this way ("改成「见 git 历史」这种不会腐烂的写法"), adopted here in
+round-3's own fix pass (verification MD's Part H4). For the citations' actual currency, read the
+verification document's own Part covering the pass in question (each Part states and verifies its own
+starting HEAD) rather than this header.
 Source of authority: `approval-change-request-design-lock-draft-20260915.md` v5.9 (RATIFIED
 2026-09-18; see its own 抬头 RATIFY record, quoted verbatim in §7 below — this document does not
 restate or paraphrase it). Goal definition: `goal-three-locks-full-implementation-20260918.md`
