@@ -499,6 +499,29 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   })
 
   // ── G ──────────────────────────────────────────────────────────────────────────────────────
+  // FINDING (verified by actual mutation probe on `src/services/ApprovalTemplateGroupService.ts`
+  // unarchiveApprovalTemplateGroup, cp-backup → edit → run this file → cp-restore → cmp — not
+  // just read from the source comment): unarchive's name-conflict path is defense-in-depth, TWO
+  // independent layers, and this black-box endpoint test cannot discriminate which layer is
+  // load-bearing because either one alone reproduces the same 409 GROUP_NAME_TAKEN:
+  //   (1) an explicit pre-check SELECT before the UPDATE, throwing a typed ServiceError directly
+  //       (this is the check the lock's G row names as "去掉同名复核" — removing ONLY this,
+  //       confirmed by probe, does NOT turn the test red: the ensuing UPDATE hits the raw
+  //       `uq_atg_org_name_active` 23505, which `mapGroupConstraintError` remaps to the SAME 409
+  //       — matching the source's own comment at unarchiveApprovalTemplateGroup's docblock);
+  //   (2) `mapGroupConstraintError`'s `uq_atg_org_name_active` branch (shared with A's own
+  //       mutation proof) — removing ONLY this branch, confirmed by probe just now, ALSO does
+  //       NOT turn G red, because layer (1)'s pre-check throws a `ServiceError` that short-
+  //       circuits `mapGroupConstraintError` entirely (`if (error instanceof ServiceError) return
+  //       error` is the first line) before the UPDATE — and hence before the removed branch —
+  //       is ever reached. A's own create path has no such pre-check, so A DOES red on this one.
+  // Net: this it() block is a correct ACCEPTANCE test for the "same-name blocks unarchive"
+  // behaviour (§2/G), but it has ZERO discriminating power for EITHER of the two named
+  // candidate mutations individually — a true single-line mutation gate for G would require
+  // removing BOTH layers at once, which neither this test nor the taskbook's per-row mutation
+  // column contemplates. This is a lock-vs-implementation contract gap (defense-in-depth wasn't
+  // anticipated), not a test bug to silently paper over — flagged to the gate/owner rather than
+  // "fixed" here, since strengthening it would mean inventing a new mutation not in the lock.
   it('G: unarchive — clean case; blocked by another ACTIVE group with the same name; blocked by a group renamed into that name', async () => {
     const org = trackOrg(`atg-g-${TS}`)
     const admin = await tok(base, `g-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
