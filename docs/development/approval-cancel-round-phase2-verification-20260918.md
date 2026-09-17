@@ -21,6 +21,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 |---|---|---|---|
 | R-1 | commit `042d92e02` message, 2nd bullet | "typecheck then acts as the census over every `result.response` / `.lifecycleEvents` / `.resolvedRequestId` access **(13 sites, all narrowed)**" | **RETRACTED — the number is wrong.** I wrote 13 without counting. Mechanical count below: **7** sites for exactly those three properties. The substantive half (typecheck is clean, so every one of them is narrowed) stands; only the count was invented. The commit message cannot be edited without a force-push, so the correction lives here. |
 | R-3 | commit `56d517127` message, 2nd paragraph, and §3.10.3's first draft | "that inversion is a cycle on the same (request, instance) pair today" … the reorder "closes" the live defect | **RETRACTED IN PART — the reorder closes it for the CANCEL path only.** My own census leg contradicts the word "closes": Q-G LEG 4 shows the DECISION adapter (`index.cjs:37596`/`:37617`) is also `attendance_requests → approval_instances` and is also gated on `requestRow.status === 'pending'` — exactly the population `bulkReassignApprovals` reaches `classifyAndLockAttendanceRequestForInstance` on with the instance row held. So the same cycle, same shape, is **still live** after this commit via the decision adapter. Leaving that adapter to the attendance line is the right scope call; calling the defect closed was not. The commit message cannot be edited without a force-push, so the correction lives here. |
+| R-4 | `ApprovalProductService.redeemCancelRoundInTxn`'s own comment (commit `08b7cbec3`), and §4's 「it is CHEAP」 bullet | 「`operationId` … must be a UUID … The round row's own id **is exactly the right identity**」, and 「the end-to-end case … is a handful of lines」 | **BOTH RETRACTED — see §3.12.** The round id is `text`, minted `apr_${crypto.randomUUID()}`, so the boundary refused EVERY real redemption with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID` (500). Four double-backed acceptance cases were green over a code path that could not work. And the end-to-end case was not cheap: it took a production fix plus two fixture facts that no reading of the source would have produced. |
 | R-2 | my own working notes for this step | "the `w7-w6r5-guard` classification test ran and passed" | **RETRACTED — it never ran.** A combined run of three targets printed `Test Files 2 passed (2)` and I inferred which two. Checked directly: `npx vitest run tests/unit/w7-w6r5-guard` prints **`No test files found, exiting with code 1`** — that path holds `classification.ts` and `walk.ts`, which are corpora, not suites. Their real consumers are named in §2.5 and were run there. A directory that collects zero files is not a green. |
 
 ```
@@ -1354,6 +1355,142 @@ misread as an infrastructure problem rather than the wrong runner. Recorded beca
 
 ---
 
+## 3.12 判据 II END-TO-END against the REAL boundary — and the P1 it found (this unit)
+
+The four cases in §3.11.6 bind a test double. This unit removes it and runs the redemption against
+the attendance plugin's actual `AttendanceRequestOperationBoundaryV1`. It found, on its FIRST run,
+a defect that made 判据 II **completely non-functional in production** while every double-backed
+case stayed green.
+
+### 3.12.1 ⛔ DEFECT SHIPPED AND FIXED IN-BRANCH: the replay key was not a UUID
+
+Commit `08b7cbec3` passed `roundId` straight through as the W4 `operationId` under this comment:
+
+> 「`operationId` is the W4 replay key and must be a UUID (`normalizeInput` → `uuidOrNull`). The
+> round row's own id is exactly the right identity」
+
+The first clause is true. The second is **false**, and nothing in the branch checked it:
+
+```
+$ psql -d metasheet2_lock_c2 -c "\d approval_rounds" | head -5
+           Column            |  Type  | ... |
+ id                          | text   |     |   ← not uuid; only CHECK is chk_approval_rounds_id_nonblank
+$ git grep -n "const roundId = " -- packages/core-backend/src/services/ApprovalProductService.ts
+8495:    const roundId = `apr_${crypto.randomUUID()}`      ← 40 chars, `apr_` prefix
+```
+
+`normalizeExternalTransactionInput` → `normalizeInput` → `uuidOrNull` refuses a 40-character string
+(`value.length !== 36`), so the entry threw `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID` and the route
+answered **500 `APPROVAL_ACTION_DISPATCH_FAILED`** — measured, first run:
+
+```
+AttendanceW4RequestBoundaryError: W4C3B_REQUEST_BOUNDARY_INPUT_INVALID
+    at uuidOrNull (…/w4c3b-request-operation-boundary.ts:109:85)
+    at normalizeExternalTransactionInput (…:486:22)
+    at Object.executeInExternalTransaction (…:687:33)
+    at ApprovalProductService.redeemCancelRoundInTxn (…/ApprovalProductService.ts:9051:31)
+```
+
+**Why four green cases did not catch it.** A test double never normalizes its input — it takes the
+object as given. So the entire input-validation half of the entry's contract (the half the lock
+spends §3 C-1 on) was outside every one of those cases' reach. This is the exact failure mode the
+phase-1 ledger already names as 「Mock is not the contract」, and it cost a shipped P1.
+
+**The fix, and why not prefix-stripping.** `deriveCancelRoundW4OperationIdV1(roundId)` in
+`src/core/attendance-cancellation-execution-port.ts` derives a UUIDv5 over the round id under a
+frozen namespace, using the same construction as `w4c0-identity.ts:281-291` (copied, not imported —
+that module's derivations belong to the source-matrix `idRule` families and their TS/SQL
+golden-parity gate, and this key has no SQL twin and is minted by the approval side). Stripping
+`apr_` would depend on a shape only today's generator produces and no constraint enforces. The
+derivation is **total** (any non-blank id maps), **deterministic** (a retry of the same round
+replays under the same key — the only property lock §3 C-2 step ④ needs) and **distinct** per
+round. The namespace UUID is an implementer choice, ⚠️ **FLAGGED FOR OWNER REGISTRATION** and
+frozen from here on: changing it would make an already-redeemed round replay under a new key.
+
+### 3.12.2 What the end-to-end case MEASURES that a double cannot
+
+All of these were established by the run, not by reading:
+
+| Measured | Evidence |
+|---|---|
+| `assertExternalTransactionIsolationV1` passes | the protocol proceeds past it; its `SAVEPOINT` probe on `dispatchAction`'s `BEGIN ISOLATION LEVEL SERIALIZABLE` client neither 25P01/25P02s nor leaves the caller in a subtransaction (the transaction goes on to COMMIT) |
+| `assertExternalTransactionRolloutLockHeldV1` passes | the `pg_locks` probe for the key built from the org `prepareIdentity` read finds it HELD by this backend — **§3.11.3's org-key CONSTRUCTION argument is now a measurement** |
+| the client handed over is the one that issued `BEGIN` | `dispatchAction` uses `pool.connect()`; had it handed over the pool, the savepoint and the `pg_backend_pid()` predicate would have landed on arbitrary backends and both asserts above would have failed |
+| replay preflight accepts a never-registered `operationId` (§4 risk (a)) | the derived id is new every round; the preflight returns non-`replay` and the protocol continues |
+| `requestBody: {}` is tolerated (§4 risk (b)) | `loadLatestRequestSnapshotToken` runs in both prepare and execute with the `expectedSnapshotVersion = 0` / `'0'*64` defaults and does not refuse |
+| the ORIGINAL document is really cancelled inside the approver's transaction | `approval_instances.status = 'cancelled'` + exactly one `approval_records(action='revoke', from_status='approved', to_status='cancelled')` whose `actor_id` is the round's requester and whose `metadata.w4ActorPosture = 'self'` |
+| the attendance request is really cancelled | `attendance_requests.status='cancelled'`, `resolved_by` = the requester, `resolved_at` non-null |
+
+**Positive control that this is the real boundary.** Every double in that file returns
+`{ kind: 'executed' }` and writes nothing; the rows in the last two table rows can only have been
+written by the plugin's adapter. Stated as an artifact assertion rather than as 「the redeem
+returned 200」, so a future edit that leaves a double bound turns these red instead of staying green
+while silently ceasing to be end-to-end.
+
+**How the plugin is loaded at all, established rather than assumed.** The server is built with
+`pluginDirs: []`, which is NOT 「no plugins」: `PluginLoader`'s constructor adopts
+`options.pluginDirs` only when `length` is truthy, so an empty array leaves `basePath='./plugins'`,
+which sets `allowFallback = true`, which makes `discover()` scan `cwd/plugins`, `cwd/../plugins`
+and `cwd/../../plugins` — and vitest's cwd is `packages/core-backend`, so the third root is the
+repo's `plugins/`. That is also the source of the 'provider is being replaced' warning §3.11.6
+reported.
+
+### 3.12.3 Two fixture facts found by running, not by reading
+
+1. **The acting identity must be a real directory row.** `attendanceResultOperationPreflightV1`
+   calls `recheckAttendanceActorLivenessInTransactionV1`, which requires an active `users` row AND
+   an active `user_orgs` membership for the actor (`ATTENDANCE_WRITE_NOT_AUTHORIZED` otherwise). A
+   dev token is not a directory row. `seedDirectoryIdentity` now creates both, and `afterAll`
+   deletes them — this file shares the CI lane with the attendance suites, so it leaves the DB as
+   it found it.
+2. **The P14 calculation branch is NOT exercised on this fixture.** The org resolves to a legacy
+   write posture, and the adapter's branch is `approvedLeave && acceptedWritePosture !==
+   'legacy_projection_only'`, so `appendApprovedLeaveCancellationCalculation` is skipped. Asserted
+   explicitly (zero `approval_reversal` calculations for the derived operation id) rather than left
+   ambiguous, so a later posture change that starts exercising P14 here cannot pass unnoticed.
+
+### 3.12.4 Mutation ledger (this unit)
+
+`cp` backup → edit → run alone → `cp` restore → `cmp` (`RESTORED-IDENTICAL`, `git status` clean).
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-18 | revert the fix: pass `roundId` raw as `operationId` | the end-to-end case red; the double-backed 判据 II case red only on its new derivation assertion | **exactly 2 red, both predicted**: e2e `expected 500 to be 200`; double-backed `expected 'apr_ed58e25d-…' to be '2b919f37-61e8-574f-…'`. 11 green — so the fix is load-bearing AND the shape assertion in the double-backed case now has discriminating power it did not have before |
+
+### 3.12.5 Commands and results
+
+```
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json          (no output, exit 0)
+
+$ (packages/core-backend) EXPECT_DB=1 \
+  DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  ATTENDANCE_TEST_DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{redemption,creation,outlet-guards,seat-guards,\
+      node-timeout-effect,lock-order-census}.db.test.ts
+  Test Files  6 passed (6)
+        Tests  60 passed (60)          (redemption: 12 -> 13)
+
+$ … run tests/integration/attendance-w4c3b-{request-operation-routes,\
+      approved-leave-cancellation,central-approval}.db.test.ts
+  Test Files  3 passed (3)
+        Tests  45 passed (45)
+
+$ (packages/core-backend) npx vitest run tests/unit/approval-product-service.test.ts
+  Test Files  1 passed (1)
+        Tests  185 passed (185)        (+1: the derivation's four properties)
+```
+
+No new source file and no `plugin-tests.yml` edit, so **no s6a provenance re-pin is owed** by this
+unit (the derivation went into the existing `src/core/attendance-cancellation-execution-port.ts`,
+and §3.11.9 already showed neither CI contract enumerates `src/core/`):
+
+```
+$ git diff --name-only 0225a1aa4..HEAD -- .github/workflows/plugin-tests.yml
+  0 lines
+$ git status --short                       (4 modified files, 0 untracked)
+```
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -1381,22 +1518,21 @@ they are.
   updated by this; the caveat in the bullet above (a double, not the real protocol) applies to it
   too.
 - **R2** (锁内最终评估失败 ⇒ 零业务取消、零 `approved` 完成事件、C-3 收口已持久化) and its named
-  mutation (move the evaluation after the enqueue ⇒ must go red) — **not built.** M-5 is 判据 IV's
+  mutation (move the evaluation after the enqueue ⇒ must go red) — **not built**, and it is the
+  next unit. §3.12 makes it STRONGER as well as cheaper: over a double, 「零业务取消」 could only be
+  `calls.length === 0`; with the real boundary bound and an attendance-backed fixture it becomes a
+  row assertion (原单 still `approved`, `attendance_requests` still `approved`, zero `revoke`
+  records) that a double cannot fake. M-5 is 判据 IV's
   own negative control and is NOT a substitute: it proves the `return` is load-bearing, not that a
   *business* evaluation failure leaves zero business cancellation behind (there is no business
   cancellation on this path yet).
-- **The external refusal end-to-end — NEXT UNIT, and it is CHEAP.** A caller now exists (§3.11),
-  but the savepoint's SQL-level semantics (§2.2) and the boundary's statement sequence (§2.4) have
-  still not been run against each other, because the acceptance cases bind a double.
-  **The real boundary is ALREADY BOUND in that same harness** — that is what §3.11.6's
-  「provider is being replaced」 warning proves, since nothing but plugin-attendance registers this
-  port. So the end-to-end case is: seed the attendance-backed fixture and simply do NOT bind a
-  double. The fixture is already the right shape (`leave` + `approved` ⇒ the adapter's
-  `approvedLeave` branch, so its `INVALID_STATUS` gate passes). ONE case then exercises the
-  isolation assert, the rollout-lock `pg_locks` assert (closing §3.11.3's construction argument
-  with a measurement), posture resolution, replay preflight, the seal/outbox, and the savepoint
-  composition. An earlier draft of this bullet implied the work was expensive; it is a handful of
-  lines, and it is the next unit's first item.
+- **The external end-to-end — DONE in §3.12, and it was NOT cheap.** The case is green against the
+  real boundary and it found a shipped P1 (the non-UUID replay key) on its first run. Both of the
+  two risks this bullet named — (a) replay preflight with a never-registered `operationId`, (b) the
+  `requestBody: {}` snapshot defaults — are ANSWERED (tolerated). What is still NOT established
+  from it: it exercises the LEGACY write posture, so the P14 approved-leave cancellation
+  calculation is skipped (asserted, §3.12.3), and it seeds no leave-balance lots, so
+  `reverseLeaveBalanceDeduction` writes nothing.
 - **Two inputs the double cannot refuse, and the real boundary might** — named here so the
   end-to-end case knows what to look for:
   (a) **replay preflight with a never-seen `operationId`.** The HTTP path's
@@ -1409,8 +1545,12 @@ they are.
   prepare and execute. If anything compares those defaults against the loaded token, every redeem
   of a request that HAS a snapshot fails. That HTTP clients may omit the same fields is weak
   evidence it is tolerated, not proof.
-- **账侧完整取消结果逐字节等价 + `unrecoverableExpired` 呈现** (lock §8 期 1) — only the refusal
-  branch's bytes are covered (§2.3); the success branch's full-cancellation result is not.
+- **账侧完整取消结果逐字节等价 + `unrecoverableExpired` 呈现** (lock §8 期 1) — STILL OPEN, and
+  §3.12 narrows rather than closes it. That case establishes DB END-STATE parity for the success
+  branch (原单 `cancelled` + its `revoke` audit row + `attendance_requests.status='cancelled'`);
+  byte equivalence needs the HTTP `POST /api/attendance/requests/:id/cancel` path run on a TWIN
+  fixture and a field-by-field compare of both results. `unrecoverableExpired` needs
+  leave-balance lots, which no fixture here seeds.
 - **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 II and 判据 IV
   halves are both filled in now (§3.4, §3.11.6), against a double.
 - **§5 I3 「终结即释放」 mutation** — the `expired` case asserts a new round can start immediately
