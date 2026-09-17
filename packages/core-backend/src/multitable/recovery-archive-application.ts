@@ -54,6 +54,7 @@ const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
 const COMPOSITION_FACTORY_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED'
 const DATABASE_RUNTIME_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_DATABASE_RUNTIME_FAILED'
 const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
+const WORKER_STOPPED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
 const WORKER_STOP_TIMEOUT_MS = 10_000
 
@@ -115,15 +116,17 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
   })
-  let workerStarted = false
+  let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
 
   return Object.freeze({
     routerOptions,
     startWorker() {
-      if (workerStarted) return
-      workerStarted = true
+      if (workerState === 'stopped') throw new Error(WORKER_STOPPED)
+      if (workerState === 'failed') throw new Error(WORKER_BOOT_FAILED)
+      if (workerState === 'started') return
+      workerState = 'started'
       try {
         workerLoop = bootRecoveryArchiveRestoreWorker({
           env: activationEnv,
@@ -131,13 +134,15 @@ export function createRecoveryArchiveApplication(
           createWorker: () => createRecoveryArchiveRestoreWorker(workerInput),
           onResult: (result) => observability?.recordRun(result),
         })
+        if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       } catch {
+        workerState = 'failed'
         throw new Error(WORKER_BOOT_FAILED)
       }
-      if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       recordLifecycleSafely(observability, 'started')
     },
     async stopWorker() {
+      workerState = 'stopped'
       if (workerStop) return workerStop
       if (!workerLoop) return
       const loop = workerLoop

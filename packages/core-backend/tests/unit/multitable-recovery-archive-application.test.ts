@@ -58,6 +58,33 @@ afterEach(() => {
 })
 
 describe('recovery archive application composition', () => {
+  it('makes stop-before-start terminal without creating a worker', async () => {
+    const application = createRecoveryArchiveApplication(
+      () => fakeComposition(fakeProviders()), () => fakeDatabaseRuntime().runtime, ENABLED_ENV,
+    )
+    await application.stopWorker()
+    try {
+      expect(() => application.startWorker()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED')
+      expect(workerMocks.createRecoveryArchiveRestoreWorker).not.toHaveBeenCalled()
+    } finally {
+      await application.stopWorker()
+    }
+  })
+
+  it('keeps failed boot terminal rather than silently accepting another start', async () => {
+    workerMocks.createRecoveryArchiveRestoreWorker.mockImplementation(() => {
+      throw new Error('private provider failure')
+    })
+    const application = createRecoveryArchiveApplication(
+      () => fakeComposition(fakeProviders()), () => fakeDatabaseRuntime().runtime, ENABLED_ENV,
+    )
+    expect(() => application.startWorker()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED')
+    expect(() => application.startWorker()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED')
+    expect(workerMocks.createRecoveryArchiveRestoreWorker).toHaveBeenCalledTimes(1)
+    await application.stopWorker()
+    expect(() => application.startWorker()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED')
+  })
+
   it('accepts authentic local custody admission without accepting a copied capability', async () => {
     const custodyId = randomUUID()
     const recoverySecret = randomBytes(32)
@@ -335,6 +362,8 @@ describe('recovery archive application composition', () => {
 
     expect(firstStopped).toBe(false)
     expect(secondStopped).toBe(false)
+    expect(() => application.startWorker()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED')
+    expect(workerMocks.createRecoveryArchiveRestoreWorker).toHaveBeenCalledTimes(1)
 
     chunk.resolve({ kind: 'idle', swept: 0, chunks: 0 })
     await Promise.all([firstStop, secondStop])
@@ -342,6 +371,7 @@ describe('recovery archive application composition', () => {
     expect(firstStopped).toBe(true)
     expect(secondStopped).toBe(true)
     expect(vi.getTimerCount()).toBe(0)
+    expect(() => application.startWorker()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED')
   })
 
   it('forwards closed worker results and lifecycle events without changing worker state', async () => {
