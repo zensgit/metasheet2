@@ -410,3 +410,128 @@ already-wired `todo-center-pending-gate.ts` file itself.
 
 Judge C is DISCHARGED. Judges A/B/C'/D remain deferred — see the gate file's own docblock for the
 current status line.
+
+## Judging criterion A (center does not widen visibility) — DISCHARGED, both mutations run for real
+
+Design-lock §5 row A: "中心不放宽可见性" — mutation: turn the shared "pending" predicate into an
+always-false constant ⇒ every approval item disappears, a named test goes red; turn it into an
+always-true constant ⇒ a non-seat-holder viewer sees someone else's item, a **different** named test
+goes red. 正控: both directions must redden.
+
+The shared "pending" predicate is the ONE thing `buildApprovalPendingConditions` in
+`packages/core-backend/src/services/approval-pending-query.ts` returns as `whereSql`; both
+`countApprovalPendingForViewer` and `listApprovalPendingRowsForViewer` build their query around it —
+this is the single call site the lock's row A targets. No new test content was added: the lock's
+own two named A0 tests already serve as row A's positive control (class ① for the always-false
+direction, class ④ for the always-true direction), so mutating and re-running the existing suite is
+the whole gate — adding a second copy of either assertion under a `describe('Judge A — ...')` label
+would duplicate, not strengthen, the check.
+
+Baseline (before either mutation, same DB/fixtures the classes-⑫⑬ step already brought to the
+current state):
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+```
+
+### Mutation 1 — predicate forced to always-FALSE (real cp/edit/run/restore/cmp)
+
+```
+$ F=packages/core-backend/src/services/approval-pending-query.ts
+$ cp "$F" "$F.mutprobe-a1.bak"
+```
+Edit: `approval-pending-query.ts:113`, `return { whereSql: conditions.join(' AND '), params }` →
+`return { whereSql: \`(${conditions.join(' AND ')}) AND FALSE\`, params }`. (The literal string
+`'FALSE'` alone would have worked for the count query, but would have left `$1`/`$2`/`$3` unreferenced
+in the query text while `params` still supplied three values — Postgres's extended query protocol
+rejects a parameter count that does not match the placeholders actually present in the SQL text, so
+wrapping the real conditions in `(...) AND FALSE` keeps every placeholder referenced while making the
+whole expression evaluate constant-false, a faithful in-protocol rendering of "谓词改恒 false".)
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 failed (1)
+      Tests  9 failed | 11 passed (20)
+```
+The named test row A points at reddens as expected, among the 9:
+```
+× A0 … class ① — user seat, pending, published, non-handler node ⇒ count 1
+```
+(every other count>0 A0/Judge-C assertion — ②⑥⑦⑪⑫⑬ and both Judge C tests — reddens alongside it,
+which is the expected shape of "全部消失": the mutation is not scoped to class ①, it zeroes the
+WHOLE shared predicate, so every instance that used to qualify for anyone now qualifies for no one.
+Row A's own wording asks for "全部消失, 指名测试红" — a named test red, not a single-test-only
+isolation claim the way Judge C's own two mutations were checked; the 9-test spread is the "全部消失"
+half made concrete, not an isolation failure.)
+
+Restore:
+```
+$ cp "$F.mutprobe-a1.bak" "$F"
+$ cmp "$F" "$F.mutprobe-a1.bak"; echo $?
+0
+$ rm "$F.mutprobe-a1.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+### Mutation 2 — predicate forced to always-TRUE (real cp/edit/run/restore/cmp)
+
+```
+$ F=packages/core-backend/src/services/approval-pending-query.ts
+$ cp "$F" "$F.mutprobe-a2.bak"
+```
+Edit: same line, `return { whereSql: conditions.join(' AND '), params }` →
+`return { whereSql: \`(${conditions.join(' AND ')}) OR TRUE\`, params }` — same protocol-safety
+reasoning as mutation 1, mirrored for the always-true direction.
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 failed (1)
+      Tests  16 failed | 4 passed (20)
+```
+The named test row A points at for this direction — a viewer who holds NO seat at all seeing other
+people's instances:
+```
+× A0 … class ④ — employee, no seat ⇒ 0
+  → expected 12 to be +0 // Object.is equality
+```
+`count: 12` is not an arbitrary large number: with the predicate always true, the query no longer
+filters by assignee/status/handler-node/source_system at all, so it counts every OTHER fixture
+viewer's qualifying `approval_assignments` row across the whole shared DB — exactly "非席位持有者看
+到别人的单" (a non-seat-holder sees someone else's order), not a crash or an unrelated error shape.
+(16 of 20 tests redden under this direction — only the bogus-sourceSystem-400 test, the dev-mock
+probe, the EXPECT_DB sentinel, and one Judge-C test that already expected a positive count stayed
+green — again the expected shape of a predicate that no longer discriminates at all, not a scoping
+defect in the mutation.)
+
+Restore:
+```
+$ cp "$F.mutprobe-a2.bak" "$F"
+$ cmp "$F" "$F.mutprobe-a2.bak"; echo $?
+0
+$ rm "$F.mutprobe-a2.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+Post-restore confirmation (back to the pre-mutation baseline):
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+$ git status --short
+(no output)
+```
+
+Judge A is DISCHARGED. Judges B/C'/D remain deferred — see the gate file's own docblock for the
+current status line.

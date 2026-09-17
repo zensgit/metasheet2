@@ -22,8 +22,19 @@
  * `source_queue` arm (an artificial single-call-site fork — `approvalPendingAssigneeMatchCondition`
  * is otherwise shared byte-for-byte between count and list, so the drift the lock names is
  * unreachable without deliberately breaking that sharing) reddens ONLY the ⑥ arm-parity test,
- * leaving ⑥'s own A0 count assertion (and everything else) green. Judges A/B/C'/D remain deferred
- * (see the fixture-plumbing docblock below for the S9 note).
+ * leaving ⑥'s own A0 count assertion (and everything else) green. Judge A (center does not widen
+ * visibility) is now DISCHARGED — not by new test content in this file, but by a recorded
+ * cp/edit/run/restore mutation ledger in the verification doc against `buildApprovalPendingConditions`
+ * in `services/approval-pending-query.ts` (the ONE shared predicate both `countApprovalPendingForViewer`
+ * and `listApprovalPendingRowsForViewer` call): forcing it to `(...) AND FALSE` reddened every
+ * count>0 A0 assertion (9 tests, including the named class ① test — "审批项全部消失" per the lock's
+ * own wording); forcing it to `(...) OR TRUE` reddened class ④'s "employee, no seat ⇒ 0" test with
+ * `count: 12` (the non-seat-holder "看到别人的单" direction — 12 is every OTHER fixture viewer's
+ * qualifying instance, seen because the predicate no longer filters by assignee at all). Both
+ * mutations were restored (`cmp` exit 0, `git diff --stat` empty) before the suite was re-run green
+ * (20/20). No permanent test content was added for judge A because the two existing named A0 tests
+ * (class ①, class ④) already serve as row A's positive control without a second copy of the same
+ * assertion. Judges B/C'/D remain deferred (see the fixture-plumbing docblock below for the S9 note).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
