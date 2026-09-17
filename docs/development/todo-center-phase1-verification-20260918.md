@@ -599,9 +599,20 @@ current status line.
 > below this line was written and tested against the REST path (`GET /api/approvals/pending-count`)
 > only. The "FIX-ROUND PASS" section's own "P1-1" entry (search this document for that heading)
 > later narrows what "DISCHARGED" here actually covers: the realtime-push path
-> (`approval-realtime.ts`'s `computeApprovalPendingCounts`, feeding `todo:counts-updated`) is a
-> known-divergent second predicate for the same viewer/instance shape and is **not** covered by this
-> section's discharge. Read that entry before citing this section as "行 D 全成立".
+> (`approval-realtime.ts`'s `computeApprovalPendingCounts`) is a known-divergent second predicate
+> for the same viewer/instance shape and is **not** covered by this section's discharge. Read that
+> entry before citing this section as "行 D 全成立".
+>
+> **Correction (FIX-ROUND 4 PASS, mark-not-void per repo convention): the parenthetical "feeding
+> `todo:counts-updated`" above is now stale.** That event no longer exists on this branch — see the
+> "P1-1" entry's own FIX-ROUND 4 PASS correction (this document, search for that heading) for the
+> removal. The underlying fact this note exists to flag is unchanged and still worth reading:
+> `computeApprovalPendingCounts` still diverges from the REST shared query, still feeds the
+> pre-existing `approval:counts-updated` broadcast (unrelated to todo-center), and this section's
+> "DISCHARGED" still covers the REST path only. What changed is narrower than it first reads: the
+> divergent predicate is no longer wired to anything this slice delivers, so citing this section as
+> "行 D 全成立" was always wrong for the reason stated, and is now *also* not at risk of being
+> misread as "…except for a todo-center event that no longer exists."
 
 Design-lock §5 row D: "徽标数字不变" — the badge's switch from its own inline query to
 `countApprovalPendingForViewer` (`services/approval-pending-query.ts`) must not change any viewer's
@@ -1578,6 +1589,23 @@ item 7 registers this residual (added in this pass) — it must stay registered 
 resolves (a)/(c) per the gate report's three-way framing. This document's own "未做/未验" table
 (below) gets a matching row.
 
+> **Correction (FIX-ROUND 4 PASS, mark-not-void per repo convention): disposition (b) above did NOT
+> hold up under independent re-review and this P1-1 entry is superseded, not merely revisited.**
+> `impl-gate-B-slice1-round2-20260918.md` re-audited this exact disposition and returned NEEDS-FIX,
+> stating plainly that registering the divergence is disclosure, not satisfaction, and that §3's
+> "只准一份" is a hard constraint, not a best-effort one — and, independently, that wiring
+> `todo:counts-updated` onto this divergent payload was itself out of B-1's scope (the target doc
+> assigns that event to B-2), a fact this pass's own P1-1 write-up above never checked. Both
+> findings hold: everything above this blockquote (the registration, the docblock KNOWN EXCEPTION
+> text, the psql repro, the pre-existing-on-`origin/main` confirmation) remains an accurate record of
+> what this pass did and found — it is the *disposition choice*, not the *facts*, that this
+> correction changes. See this document's new "## FIX-ROUND 4 PASS" section (end of file) for the
+> closure: the `todo:counts-updated` broadcast added by commit `6fba6e01e` and referenced throughout
+> this entry has been removed, not folded in and not left registered-only. The pre-existing
+> `computeApprovalPendingCounts`/REST divergence itself is untouched by that removal and remains
+> exactly as documented above — still real, still not this slice's fix to make, now simply
+> disconnected from anything B-1 delivers.
+
 ### P2-1 — workflow-level `DATABASE_URL:?` guard added to the todo-center gate step (design-lock
 ### §3.0 "反 skip-green 三件", first of three; the other two — import-time asserts, `EXPECT_DB`
 ### sentinel — were already in place per the earlier "反 skip-green 三件" section above)
@@ -1690,6 +1718,13 @@ $ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packag
 |---|---|---|
 | `approval-realtime.ts` 第二份 pending 谓词(P1-1) | **REGISTERED,未折入**——(a) 折入 / (c) BLOCKED 仍待 owner 裁决;本轮取 (b):如实登记 + 收窄判据 D 证据范围,不代 owner 选边 | 见本节"P1-1"小节;设计 MD §6 第 7 条同步登记;`approval-pending-query.ts` docblock 已加 KNOWN EXCEPTION 指针(comment-only,`git diff` 已证零行为改动) |
 | 判据 D 的证据范围 | 本文档对行 D 的证据面**只覆盖 REST 路径**(`/pending-count`);锁 §5 行 D 字面范围更宽(未改锁文本身),差额 = 实时推送路径,该路径已知与 REST 路径不一致(见 P1-1 复现) | 同上;不是把行 D 改窄,是记录本文档证据面与锁文字面范围之间的一条已知缺口 |
+
+> **上面两行由 FIX-ROUND 4 PASS 更正(mark-not-void):** 第一行的 "REGISTERED,未折入…本轮取 (b)"
+> 是 round-1 的处置,已被 round-2 门审判 NEEDS-FIX 并被 FIX-ROUND 4 PASS 改取 (i)(见文末新增小节)
+> ——`todo:counts-updated` 广播已撤,不再是"登记但保留"。第二行(判据 D 证据范围只覆盖 REST 路径)
+> **不受影响、原样成立**:这一直是本文档证据面的事实,与广播是否存在无关——广播撤掉之后,"差额 =
+> 实时推送路径"这句里的"该路径"现在纯粹指向先存的、与待办中心无关的 `approval:counts-updated`
+> 消费方,不再有任何 todo-center 事件依赖它。
 
 ### 绝对断言自扫(本轮新增)
 
@@ -2460,19 +2495,30 @@ The gate report and the two prior FIX-ROUND passes together impose three PR-body
 them here, verbatim-ready, closes the "deferred and hope someone remembers" gap the advisor review
 flagged — copy these three paragraphs into the PR description at open time, unedited unless the
 underlying facts have changed by then (re-run the cited commands first if opening the PR is more than
-a few days after this pass):
+a few days after this pass).
 
-> **1. Second pending-predicate disclosure (design-lock §3, gate finding P1-1).**
-> `approval-realtime.ts`'s `computeApprovalPendingCounts` hand-copies this slice's shared three-arm
-> assignee-match predicate but omits the handler-node exclusion — a pre-existing divergence from the
-> ratified §1.5 ① baseline (confirmed on `origin/main` before this branch), now registered (not
-> folded in) in `approval-pending-query.ts`'s docblock and in this design's own §6 item 7. This
-> slice's own `todo:counts-updated` broadcast rides on the divergent (realtime) payload. Judge D's
-> "badge count invariant" discharge in the verification doc covers the REST path only — the realtime
-> path is known-wrong against the ratified baseline for the same viewer shape. **Owner call needed**:
-> fold `computeApprovalPendingCounts` into the shared query (behavior change: realtime counts drop for
-> handler-seat holders) vs. accept the registered divergence into B-2 with an explicit REST/realtime
-> inconsistency disclosure on the badge. See verification MD's "P1-1" entry for the full repro.
+**Paragraph 1 revised by FIX-ROUND 4 PASS (2026-09-18)**: the round-2 gate report
+(`impl-gate-B-slice1-round2-20260918.md`) judged the original paragraph below's disposition
+insufficient and out of scope besides; FIX-ROUND 4 PASS closed it by removing the broadcast rather
+than registering it. The paragraph is replaced, not merely annotated, because — unlike the mutation
+ledger and psql repros elsewhere in this document — this text was never a record of a past state; it
+was instructions for a future PR-body paste, and pasting the version below now would put a resolved
+item into the PR as if it were still open.
+
+> **1. A pre-existing second pending-predicate, briefly wired into this slice and then unwired
+> (design-lock §3, gate finding P1-1).** `approval-realtime.ts`'s `computeApprovalPendingCounts`
+> hand-copies the shared three-arm assignee-match predicate but omits the handler-node exclusion — a
+> divergence from the ratified §1.5 ① baseline that predates this branch (confirmed present on
+> `origin/main` at the merge-base) and is not this slice's to fix (design MD §6 item 7). This slice's
+> commit `6fba6e01e` briefly wired a new `todo:counts-updated` broadcast onto that divergent payload;
+> a later commit on this same branch removed it after independent gate review found the linkage both
+> a §3 "only one predicate" violation and outside B-1's assigned scope (the target doc places
+> real-time `todo:counts-updated` in B-2). `approval-realtime.ts` and its unit test are
+> byte-identical to `origin/main` in this PR's diff — `git diff origin/main...HEAD -- <those two
+> files>` is empty. **No owner call needed on this item for B-1.** The pre-existing divergence itself
+> is untouched and remains a fact for whoever implements B-2's real-time badge wiring to reckon with
+> before reintroducing `todo:counts-updated` — see verification MD's "P1-1" entry and its FIX-ROUND 4
+> PASS correction for the full repro and disposition history.
 >
 > **2. Lane required-check status (P2-0).** `approval-realdb-todo-center-pending-query` is confirmed
 > **not** a required branch-protection check on `main` (`gh api repos/zensgit/metasheet2/branches/
@@ -2523,3 +2569,208 @@ a few days after this pass):
 
 **没有条目处于"本 lane 有能力处理却还没处理"的状态。** P3-1 是唯一的例外,而它的剩余动作(开 PR)
 被本 lane 的硬规矩本身排除在外,不是遗漏。
+
+> **上表 P1-1 行由 FIX-ROUND 4 PASS 更正(mark-not-void):** 这是 round-1 门审(`impl-gate-B-slice1-
+> round1-20260918.md`)编号体系下的 P1-1 状态快照,当时准确。round-2 门审
+> (`impl-gate-B-slice1-round2-20260918.md`)复核同一条(其报告称"carried forward")后判 NEEDS-FIX,
+> 理由与本节前面的"P1-1"小节更正段一致:登记不满足硬约束,且超范围本身独立成立。**当前状态 =
+> CLOSED via disposition (i)**(撤回广播,见文末"## FIX-ROUND 4 PASS"新增小节),不再是
+> "REGISTERED(disposition b)"。round-2 门审同批的其它编号(P2-1「共享查询读失败零覆盖」、P2-2
+> 「lane 非 required + 闭世界叠加」、P3-1「wip 提交」、P3-2~P3-5)与本表的 round-1 编号**同名不同指**
+> ——round-2 的 P2-1/P3-1 不是本表的 P2-1/P3-1,读者须按报告文件名区分,不能假设编号跨轮次对应
+> 同一发现。
+
+## FIX-ROUND 4 PASS (2026-09-18, fourth lane-continuation step). Base at start of this pass: HEAD =
+`41d58d93ff9ce5451e04faa5ee309de87bcd2f99` (the exact commit `impl-gate-B-slice1-round2-20260918.md`
+audited), merge-base with `origin/main` unchanged at `89f1ecdee2c3b70205a318074824c834bc6a5c7e`
+(`git merge-base origin/main HEAD` re-run this pass, same value). This pass addresses that report's
+**P1-1 only** — its single "must-fix-before-Draft-PR" item — by taking the path it itself recommended
+("我建议的路径"): disposition **(i)**, in-lane deletion, not (ii) (owner ratifies a/b/c). It does not
+touch or re-litigate FINALIZATION PASS, FIX-ROUND PASS, FIX-ROUND 2 PASS, or FIX-ROUND 3 PASS above
+(repo convention: mark the sentence, don't void the section) — every prior pass's inline correction
+markers pointing forward to this section are cross-referenced from their own locations, not repeated
+here.
+
+### What the report actually required, restated precisely before claiming it's done
+
+`impl-gate-B-slice1-round2-20260918.md` §7 item 1: pick (i) or (ii); if (i), delete
+`approval-realtime.ts:124`'s `todo:counts-updated` broadcast and
+`tests/unit/approval-realtime.test.ts`'s +23-line test, then **"整套件 + M1–M9 全部重跑"** — the
+report's own stated reason for the full replay despite the edit sitting outside the M1-M9 anchor
+files: "改的是 `approval-realtime.ts`,不在 M1–M9 的锚点文件里,但锁 §6「修复轮必重跑闸」是硬规矩,
+且 26 条里有一条单元用例直接钉这条广播" — the last clause is now moot (that unit test is deleted, not
+merely re-run), but the "锁 §6 硬规矩" half stands regardless of anchor-file overlap, so the full 26 +
+unit-suite + typecheck replay below is not optional ceremony.
+
+### The edit itself — both files restored to byte-identical with `origin/main`, not merely "reverted
+### looking"
+
+```
+$ git diff origin/main -- packages/core-backend/src/services/approval-realtime.ts; echo "EXIT=$?"
+EXIT=0
+$ git diff origin/main -- packages/core-backend/tests/unit/approval-realtime.test.ts; echo "EXIT=$?"
+EXIT=0
+```
+Both exit 0 with empty output — `git diff` against a ref, not `git diff --cached` or a stale index,
+so this is the working-tree state that will be committed, checked against the true merge-base. This is
+a stronger claim than "the diff shrank": these two files now carry **zero** net change from
+`origin/main`, the same standard the design MD's own §5 self-cert table already uses for its three
+untouched anchor files (`approvals.ts`/`index.ts`/`vitest.config.ts`).
+
+Removed, verbatim, from `approval-realtime.ts`'s `publishApprovalCountsUpdate`:
+```
+    const room = buildAuthenticatedUserRoom(input.userId)
+    collabService.broadcastTo(room, 'approval:counts-updated', payload)
+    // todo-center-design-lock §4: the center reuses the same per-user room and broadcast call —
+    // it does not open a second channel or re-derive its own pending predicate. v1 registers only
+    // the approval source (`pending-source-registry.ts`), so the approval payload IS the total
+    // todo count today; this is an ADDITIONAL event alongside `approval:counts-updated` (kept for
+    // its existing subscribers, e.g. `useApprovalCountsRealtime.ts`), not a replacement.
+    collabService.broadcastTo(room, 'todo:counts-updated', payload)
+```
+restored to the merge-base's single-line form:
+```
+    collabService.broadcastTo(buildAuthenticatedUserRoom(input.userId), 'approval:counts-updated', payload)
+```
+Removed, verbatim, from `tests/unit/approval-realtime.test.ts`: the entire `it('also broadcasts
+todo:counts-updated on the same per-user room (design-lock §4)', ...)` block (23 lines, the same test
+the round-2 report's anchor cites), leaving the `describe` block's closing `})` immediately after the
+prior test.
+
+### Consumer sweep — zero references left anywhere in source or tests, not just "the two edited files
+### look clean"
+
+```
+$ grep -rn "todo:counts-updated" packages/core-backend/src packages/core-backend/tests
+(no output, exit 1)
+$ grep -rln "todo:counts-updated" apps/web
+(no output, exit 1)
+```
+The string does not exist anywhere in the tree after this pass — not merely absent from the two edited
+files. (It still exists in prose form inside this verification MD and the design MD, by design — those
+are historical/planning records, not executable code; both documents were updated in this same pass to
+stop asserting it as delivered, see the correction markers cross-referenced above and the design MD
+diff.)
+
+### Full regression replay (the report's explicit requirement, run despite the edit being outside
+### M1-M9's anchor files)
+
+Real-DB gate, workflow-literal shell shape, existing migrated `metasheet2_lock_b` (no new migration —
+this pass touches no schema):
+```
+$ export DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" EXPECT_DB=1 \
+    RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0
+$ : "${DATABASE_URL:?DATABASE_URL is required for the todo-center pending-query gate}"
+$ pnpm --filter @metasheet/core-backend exec vitest \
+    --config vitest.todo-center-pending-gate.config.ts run \
+    tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+```
+All 26 cases pass unchanged — expected and mechanically confirmed, not assumed: none of the M1-M9
+anchor strings live in `approval-realtime.ts` (M1-M8 are in `approval-pending-query.ts`, M9 in
+`approval-seat-authorization.ts`, per the report's own §3 table), and this pass's diff to
+`approval-realtime.ts` nets to zero against `origin/main`, so there is no mutation to re-verify on the
+edited file itself — the replay's job here is confirming the *deletion* didn't regress anything
+upstream or downstream of `publishApprovalCountsUpdate`, which it did not (same 26/26).
+
+Unit suites (no DB):
+```
+$ npx vitest run tests/unit/approval-can-decide-current-node.test.ts \
+    tests/unit/approval-realtime.test.ts tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot
+ ✓ tests/unit/approval-realtime.test.ts (3 tests) 3ms
+ ✓ tests/unit/approval-ci-coverage-enumeration.test.ts (342 tests) 50ms
+ ✓ tests/unit/approval-can-decide-current-node.test.ts (41 tests) 5ms
+ Test Files  3 passed (3)
+      Tests  386 passed (386)
+```
+`approval-realtime.test.ts` goes from 4 tests to 3 (the deleted test, not a broken one); the combined
+total the design/verification MDs' prior passes reported as 387 (= 342 + 41 + 4) is now **386**
+(= 342 + 41 + 3) — stated here as the new number, not silently left at 387 anywhere this pass touched.
+
+Typecheck:
+```
+$ npx tsc --noEmit; echo "TSC_EXIT=$?"; wc -l < /tmp/tsc-out-p1.txt
+TSC_EXIT=0
+0
+```
+
+s6a / judge F, unaffected (same commands as every prior pass, re-run rather than assumed):
+```
+$ git diff --stat -- .github/workflows/plugin-tests.yml
+(empty)
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?
+0
+```
+
+### Changed-file census, before and after this pass
+
+**File count and deletion count, exact; insertion count as of just before this section's own text
+(self-referential otherwise — this file's line count includes whatever this sentence says, so an
+"exact final" insertions figure quoted inside the file that produces it cannot both be written and be
+correct at once; re-run the command below for the true current figure, it will be slightly higher than
+what's quoted here purely from this section's own prose length):**
+```
+$ git diff origin/main --stat | tail -1
+14 files changed, 5492 insertions(+), 43 deletions(-)
+```
+Down from the round-2 report's audited **16 files** (`approval-realtime.ts` and its unit test both
+drop out of the diff entirely, net zero change each — not "still listed with a smaller diff"). The
+`43` deletions figure differs from the report's `44` because this pass's revert removed the one
+deletion line the original commit `6fba6e01e` had introduced in `approval-realtime.ts` (the
+single-line broadcast call it replaced with the multi-line `room` + two-broadcast form) — restoring
+that line's original single-statement form nets to zero for that file, so it no longer contributes to
+either the insertion or deletion count.
+
+### Design MD updated in the same pass, not left to drift (cross-referenced, not restated in full
+### here)
+
+`docs/development/todo-center-phase1-design-20260918.md` §1.1 (row 7 removed from in-scope, moved to
+§1.2 as a new row), §3.3 (rewritten to state the withdrawal), §5 (anchor table's
+`approval-realtime.ts` row removed, self-cert file list narrowed from four files to three, re-verified
+empty against `63fc3d699`), and §6 item 1 and item 7 (item 7 rewritten to state disposition (i) was
+taken, not (b); item 1 updated to note the backend broadcast, not just the frontend subscription, is
+now B-2's to (re-)deliver, contingent on an owner call this pass does not make). All of that document's
+own self-cert commands were re-run in this pass, not copied from memory — see that file's own diff.
+
+### 绝对断言自扫(本轮新增)
+
+| 断言 | 命令 | 结果 |
+|---|---|---|
+| `approval-realtime.ts` 与 `origin/main` 逐字节相同 | `git diff origin/main -- packages/core-backend/src/services/approval-realtime.ts; echo $?` | 空输出,exit 0 |
+| `tests/unit/approval-realtime.test.ts` 与 `origin/main` 逐字节相同 | `git diff origin/main -- packages/core-backend/tests/unit/approval-realtime.test.ts; echo $?` | 空输出,exit 0 |
+| 字符串 `todo:counts-updated` 在 `src`/`tests`/`apps/web` 全仓零命中 | `grep -rn "todo:counts-updated" packages/core-backend/src packages/core-backend/tests`;`grep -rln "todo:counts-updated" apps/web` | 两条均空输出,exit 1 |
+| 真库门 26 条不受影响 | 本节 workflow 逐字形态重跑 | `Tests 26 passed (26)` |
+| 三个单元 suite 由 387 降为 386(不是仍写 387) | `npx vitest run tests/unit/approval-can-decide-current-node.test.ts tests/unit/approval-realtime.test.ts tests/unit/approval-ci-coverage-enumeration.test.ts` | `386 passed (386)`,`approval-realtime.test.ts` 由 4 变 3 |
+| typecheck 仍 exit 0 | `npx tsc --noEmit; echo $?` | 0 |
+| `plugin-tests.yml` 与迁移目录本轮仍未被触碰 | `git diff --stat -- .github/workflows/plugin-tests.yml`;`git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?` | 空输出;`0` |
+| 改动文件普查由 16 降为 14(文件数/删除数精确;插入数见上方自指说明) | `git diff origin/main --stat \| tail -1` | `14 files changed` / `43 deletions(-)` |
+| M1-M9 锚点均不在本轮改动文件内(无需重跑 mutation 探针本身) | 对照报告 §3 表:M1-M8 锚点文件 = `approval-pending-query.ts`,M9 = `approval-seat-authorization.ts`;本轮改动文件 = `approval-realtime.ts` + 其单测 + 两份 MD | 无交集 |
+| 提交前工作树只含本轮预期的 4 个文件 | `git status --short` | 恰好 4 行:2 份 MD `M`、`approval-realtime.ts` `M`、`approval-realtime.test.ts` `M` |
+
+### 本轮未处理、留给下一步的项(如实列出,按 round-2 门审报告 §7 编号)
+
+本轮只处理 **P1-1**(唯一的"必须"项之一,报告 §7 明确列出必须闭合的三项里的第 1 项)。以下项**未在
+本轮触碰**,原样留给后续修复步骤,不是遗漏而是范围选择(任务书本轮只要求择一到两条):
+
+- **P2-1**(round-2 编号,与 round-1 的 P2-1 不是同一发现——见前文的编号消歧说明):判据 B 的
+  「共享查询自己的读失败」这一格今天零常驻测试守护,四条既有 Judge B 用例只测 registry 的
+  try/catch。报告要求的判别性检验:先确认 `listApprovalPendingRowsForViewer` /
+  `approval-pending-source.ts` 是否有类似 `computeApprovalPendingCounts` 那样的可注入 `query` 端口
+  ——若有,补一条走 approval 源本身、真实 DB 读失败(如把行版查询的 SELECT 打坏一列)的常驻用例;
+  若无该缝,诚实降级验证 MD 的判据 B 小节标题(去掉 "DISCHARGED, no source-file mutation needed" 的
+  过强表述)。**不得**再次在 registry 注入点造探针——那正是本发现点名的错法。
+- **P2-2**(round-2 编号,写进 PR body 首段,不必改代码):lane 非 required + 门文件在 38 个
+  `*-ci-wiring` 闭世界之外,两洞叠加;PR body 待用文本已在文末小节起草,须在开 PR 前更新为闭合
+  P1-1 之后的措辞(去掉对 P1-1 的"owner call needed"框架,已在本节"PR body 待用文本"段落 1 完成)。
+- **P3-1**(round-2 编号):两条 `wip:` 提交(`a2cf836b5`/`01759832a`)仍在历史里,PR body 需点名——
+  与 round-1 报告的同一发现在本文档"P3-1 重新归类"小节的处置一致,未变。
+- **P3-2/P3-3/P3-4**(round-2 编号):验证 MD 一行过期未标失效(已在本轮的"上面两行由 FIX-ROUND 4
+  PASS 更正"等多处标记纠正,但报告点名的具体行——`:1425` 附近关于 `approval-schema-bootstrap.ts`
+  的那行——**未在本轮触碰**,留给下一步);FIX-ROUND 3 锚点表 grep 输出不完整;docblock "the six" 应为
+  "five"。三条均为文档级 NIT,可与下一步任何一条一起顺手改。
+- **P3-5**(round-2 编号,记录性,无需动代码):`.env` 回填架空探针 A 形态的事实已被 round-2 报告
+  自己记录并确认;`metasheet_v2`(本地开发库,非本 lane 私有库)里另三批更早残留
+  (`2dc296f1`/`fff0fcca`/`e4b091bd`)**不是本轮或本 lane 产生的**,原样不动,留给该库的所有者自查。
+
+这份清单严格照抄 round-2 门审报告 §7 的编号与描述,只标记本轮处理了哪一条,不预判下一步该选哪条。
