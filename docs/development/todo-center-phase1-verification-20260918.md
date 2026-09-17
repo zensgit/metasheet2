@@ -673,14 +673,33 @@ wrapping aggregate `SELECT` and the `params` array construction) got a second me
 than being eyeballed off the diff hunk above, run the same way (script written to
 `packages/core-backend/`, executed, then deleted — not committed):
 
+Full script, not condensed — every line below is present in the file that was actually run (written
+to `packages/core-backend/judge-d-full-compare.ts`, executed, then `rm -f`'d; not committed):
+
 ```ts
 // packages/core-backend/judge-d-full-compare.ts
 import { buildApprovalPendingConditions, countApprovalPendingForViewer } from './src/services/approval-pending-query'
 
-// Pre-extraction SELECT, verbatim from /tmp/pre-extraction-approvals.ts:2047-2053 (sed -n
-// '2040,2060p'), interpolation point replaced with the literal placeholder __WHERE__ — the JS
-// template expression itself (`${conditions.join(' AND ')}` vs `${whereSql}`) differs
-// syntactically even though both evaluate to the identical string the first script already proved.
+// ---- WHERE clause (already proven EQUAL by judge-d-sql-compare.ts above) ----
+const oldConditionsJoined = [
+  `a.is_active = TRUE`,
+  `i.status = 'pending'`,
+  `(
+          (a.assignment_type = 'user' AND a.assignee_id = $1)
+          OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
+          OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
+        )`,
+  `NOT EXISTS (
+          SELECT 1 FROM approval_published_definitions pd
+          WHERE pd.id = i.published_definition_id
+            AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler')))
+        )`,
+].join(' AND ')
+
+// ---- Full SELECT (pre-extraction, verbatim from /tmp/pre-extraction-approvals.ts:2047-2053,
+// interpolation point replaced with the literal placeholder __WHERE__ since the JS template
+// expression itself (`${conditions.join(' AND ')}` vs `${whereSql}`) differs syntactically even
+// though both evaluate to the identical string proven above) ----
 const oldSelect = `SELECT COUNT(DISTINCT a.instance_id)::text AS count,
                 COUNT(DISTINCT a.instance_id) FILTER (WHERE r.instance_id IS NULL)::text AS unread_count
          FROM approval_assignments a
@@ -688,23 +707,49 @@ const oldSelect = `SELECT COUNT(DISTINCT a.instance_id)::text AS count,
          LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1
          WHERE __WHERE__`
 
+// ---- Full SELECT (post-extraction, read directly from approval-pending-query.ts's
+// countApprovalPendingForViewer body, same placeholder substitution) ----
+const newSelect = `SELECT COUNT(DISTINCT a.instance_id)::text AS count,
+            COUNT(DISTINCT a.instance_id) FILTER (WHERE r.instance_id IS NULL)::text AS unread_count
+     FROM approval_assignments a
+     INNER JOIN approval_instances i ON i.id = a.instance_id
+     LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1
+     WHERE __WHERE__`
+
 const normalize = (s: string) => s.replace(/\s+/g, ' ').trim()
+const selectEqual = normalize(oldSelect) === normalize(newSelect)
+console.log('SELECT EQUAL:', selectEqual)
+if (!selectEqual) process.exit(1)
 
-// params: run the ACTUAL current function (not a hand-copy) for the old code's own input shape
-// (no sourceSystem, empty roles/permissions -> ['__none__'] fallback in both versions) and diff
-// against the OLD code's literal construction ([userId, actorRolesParam, actorPermissionsParam]).
+// ---- params construction: run the ACTUAL new function and compare its params array shape
+// against the old code's literal construction for the same inputs (no sourceSystem, empty
+// roles/permissions -> the ['__none__'] fallback in both versions) ----
 const { params: newParams } = buildApprovalPendingConditions({ actorId: 'x', roles: [], permissions: [] }, null)
-const oldParams: unknown[] = ['x', ['__none__'], ['__none__']]
-console.log('PARAMS EQUAL:', JSON.stringify(newParams) === JSON.stringify(oldParams))
+const oldParams: unknown[] = ['x', ['__none__'], ['__none__']] // old: [userId, actorRolesParam, actorPermissionsParam]
+const paramsEqual = JSON.stringify(newParams) === JSON.stringify(oldParams)
+console.log('PARAMS EQUAL:', paramsEqual, JSON.stringify(newParams))
+if (!paramsEqual) process.exit(1)
 
-// SELECT + full live query text: intercept a stub pool so the ACTUAL SQL string
-// countApprovalPendingForViewer sends is captured, not a hand-copy of its source — the strongest
-// form of "not merely eyeballed" available without a real DB connection.
+// ---- countApprovalPendingForViewer must build its query with the SAME shape (SELECT text with
+// whereSql interpolated) as the old inline pool.query call -- read its actual query template by
+// intercepting a stub pool ----
 let capturedSql = ''
-const stubPool = { query: async (sql: string) => { capturedSql = sql; return { rows: [{ count: '0', unread_count: '0' }] } } } as any
+let capturedParams: unknown[] = []
+const stubPool = {
+  query: async (sql: string, params: unknown[]) => {
+    capturedSql = sql
+    capturedParams = params
+    return { rows: [{ count: '0', unread_count: '0' }] }
+  },
+} as any
+
 countApprovalPendingForViewer(stubPool, { actorId: 'x', roles: [], permissions: [] }, null).then(() => {
-  const oldConditionsJoined = /* the same joined string from judge-d-sql-compare.ts above */ ''
-  console.log('LIVE QUERY TEXT EQUAL TO OLD (fully substituted):', normalize(capturedSql) === normalize(oldSelect.replace('__WHERE__', oldConditionsJoined)))
+  const capturedNorm = normalize(capturedSql)
+  const expectedNorm = normalize(oldSelect.replace('__WHERE__', oldConditionsJoined))
+  const liveEqual = capturedNorm === expectedNorm
+  console.log('LIVE QUERY TEXT EQUAL TO OLD (fully substituted):', liveEqual)
+  console.log('LIVE PARAMS:', JSON.stringify(capturedParams))
+  if (!liveEqual) process.exit(1)
 })
 ```
 ```
@@ -714,20 +759,18 @@ PARAMS EQUAL: true ["x",["__none__"],["__none__"]]
 LIVE QUERY TEXT EQUAL TO OLD (fully substituted): true
 LIVE PARAMS: ["x",["__none__"],["__none__"]]
 ```
-(The `SELECT EQUAL`/`LIVE PARAMS` lines come from an earlier static-string comparison and the
-stub-pool capture respectively, both present in the actually-executed script — condensed here for
-length; `oldConditionsJoined` in the snippet above is the full literal from the first script, not
-re-typed.) The third line is the load-bearing one: it does not compare two copies of source text at
-all, it calls the real, currently-shipping `countApprovalPendingForViewer` through a stub `Pool` and
+
+The third line is the load-bearing one: it does not compare two copies of source text at all, it
+calls the real, currently-shipping `countApprovalPendingForViewer` through a stub `Pool` and
 captures the exact SQL string it would send to Postgres, then diffs THAT against the pre-extraction
-literal — closing the "read the diff, trust the diff" gap a source-text-only comparison would leave.
-`PARAMS EQUAL`/`LIVE PARAMS` confirm the params array construction (`[actorId, rolesParam,
-permissionsParam]`, the `roles.length > 0 ? roles : ['__none__']` fallback, `sourceSystem` appended
-identically) is unchanged, from the same live call rather than a hand-read of the two function
-bodies. This is what "改接前后逐字相等,黄金值" actually requires evidence of — the WHERE, the
-wrapping SELECT, and the params are each shown identical to their pre-extraction originals via a
-live call, independent of the mutation test below (which shows load-bearing-ness of the CURRENT
-code, not equivalence to the OLD code).
+literal (with `oldConditionsJoined` substituted in) — closing the "read the diff, trust the diff"
+gap a source-text-only comparison would leave. `PARAMS EQUAL`/`LIVE PARAMS` confirm the params array
+construction (`[actorId, rolesParam, permissionsParam]`, the `roles.length > 0 ? roles : ['__none__']`
+fallback, `sourceSystem` appended identically) is unchanged, from the same live call rather than a
+hand-read of the two function bodies. This is what "改接前后逐字相等,黄金值" actually requires
+evidence of — the WHERE, the wrapping SELECT, and the params are each shown identical to their
+pre-extraction originals via a live call, independent of the mutation test below (which shows
+load-bearing-ness of the CURRENT code, not equivalence to the OLD code).
 
 Baseline (immediately before the mutation, same DB/fixtures as judge A's entry above — unaffected by
 that entry, since both of judge A's mutations were fully restored and re-verified green before this
