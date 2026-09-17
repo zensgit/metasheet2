@@ -7,7 +7,7 @@ name: Approval real-DB acceptance (cancel-round)
 # new independent workflow file, not a job folded into approval-realdb-acceptance.yml", precisely
 # so this file's own edits do not collide with that lane's).
 #
-# AS OF THIS COMMIT, four jobs are wired (one landed per commit, each adding its own sibling job
+# AS OF THIS COMMIT, five jobs are wired (one landed per commit, each adding its own sibling job
 # rather than rewriting the others — see git history for which commit added which):
 #   1. WI-0's lock-order census, Q-A slice 1
 #      (tests/integration/approval-cancel-round-lock-order-census.db.test.ts) — two real Postgres
@@ -27,6 +27,12 @@ name: Approval real-DB acceptance (cancel-round)
 #      instance's seat is skipped `cancel_round` via the typed catch while a sibling ordinary
 #      pending instance on the same assignee/departed user reassigns/transfers normally in the
 #      same call.
+#   5. WI-3's Q1c attendance FK migration acceptance, §14.3 #10/#11
+#      (tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts) — the
+#      migration's own preflight guard, the two `atr_*` CHECK constraints discriminated by
+#      `.constraint` name, #11's outcome-level dependency-on-#10 claim, and a source-text sweep
+#      of the five production writer sites. Runs against throwaway `CREATE DATABASE` scratch
+#      databases it provisions itself, not this job's own migrated `metasheet_approval_realdb`.
 # Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no flag
 # change.
 #
@@ -64,6 +70,8 @@ on:
       - 'packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts'
       - 'packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_rounds.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260918100000_seed_approval_cancel_round_published_definition.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts'
       - 'plugins/plugin-attendance/index.cjs'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -82,6 +90,8 @@ on:
       - 'packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts'
       - 'packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_rounds.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260918100000_seed_approval_cancel_round_published_definition.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts'
       - 'plugins/plugin-attendance/index.cjs'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -394,6 +404,87 @@ jobs:
             echo "suites=approval-cancel-round-seat-guards.db.test.ts"
             echo "scope=§14.3 outlets #12 (bulkReassignApprovals) and #13 (applyApprovalDepartureTransfer) — the two seat-write chokepoints: a cancel-round instance's seat is skipped with the typed CancelRoundOutletForbiddenError -> reason='cancel_round' catch, seat byte-identical before/after; a sibling ordinary pending instance on the SAME assignee/departed user reassigns/transfers normally in the SAME call (discriminating positive control)"
             echo "notCovered=outlets #2/#3/#7/#7'/#8 (separate outlet-guards file — decide/dispatch/legacy-route paths, not seat-writers); attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-cancel-round-attendance-fk-migration:
+    name: approval-cancel-round-attendance-fk-migration (WI-3, §14.3 #10/#11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against. This job's own suite does
+          # NOT read this migrated schema (it provisions its own throwaway CREATE DATABASE
+          # scratch databases per test — see the suite file's own header for why), but the step
+          # is kept for parity with every sibling job in this workflow and because a broken
+          # migration set here would still be a real signal.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run WI-3 Q1c attendance FK migration acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-cancel-round-attendance-fk-migration.db.test.ts"
+            echo "scope=WI-3 Q1c package (§14.3 #10/#11) — the migration's own preflight guard (dangling reference aborts before any constraint exists), the two atr_* CHECK constraints discriminated by .constraint name (atr_instance_key_pair, atr_not_cancel_round — both share SQLSTATE 23514), #11's outcome-level dependency-on-#10 claim (the row never lands), and a source-text sweep pairing approval_instance_id with approval_workflow_key at each of the five known production writer sites in index.cjs. Runs against throwaway CREATE DATABASE scratch databases it provisions itself, not the shared migrated public schema"
+            echo "notCovered=WI-0 lock-order census, WI-4 creation, WI-7/8 outlet/seat guards, WI-12/13/14 redemption — separate sibling files/jobs; attendance-parity (blocked on WI-10/11, themselves blocked on WI-0's Q-B/Q-C closing — not attempted on this branch)"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
