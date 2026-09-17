@@ -26,6 +26,22 @@
  * path and pins the route's CURRENT response for that viewer as-is; the other is seeded in the
  * shape the shared predicate reads and proves that /context defers to the predicate's decision.
  * Neither test asserts anything about the predicate beyond what it decides today.
+ *
+ * REBASE ABSORPTION (main 7c73f5276 / #5767, "read approval-projection participants by the key the
+ * writer stores"): landed on main AFTER this file's fixtures were first written, it moved the
+ * shared participant predicate from a bare-column comparison (`data->>'requesterId'`) to the
+ * namespaced key the writer (`buildRecordData` / `deriveProjectionFieldId`) actually stores under
+ * (`${sheetId}__requesterId`). This branch's /context wiring calls that SAME canonical predicate
+ * (via `filterReadableSheetRowsForAccess` / `resolveSheetCapabilitiesForAccess` in
+ * `permission-service.ts` — no private copy lives in `univer-meta.ts`), so absorbing #5767
+ * flips two fixtures here: (1) the real-reconcile() "CURRENT-BEHAVIOUR PIN" fixture below, whose
+ * requester now genuinely matches the (now-correct) predicate — 404 -> 200, an ABSORPTION of
+ * main's ratified T36-1 Plan A semantics, not a loosening (the non-participant / stranger negative
+ * controls elsewhere in this file, and the STRANGER->404 control this fix adds to the sibling
+ * `approval-projection-key-parity.db.test.ts`, are untouched or newly strengthened); and (2) the two
+ * hand-seeded "shape the shared predicate reads" fixtures (WIRING positive control,
+ * CAPABILITY-PLANE discriminator), which now seed the namespaced key via `deriveProjectionFieldId`
+ * instead of a bare column name, so they no longer describe a shape the writer never stores under.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -38,7 +54,19 @@ import {
   getApprovalRecordProjectionService,
   deriveProjectionSheetId,
 } from '../../src/multitable/approval-record-projection-service'
-import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
+import {
+  APPROVAL_PROJECTION_BASE_ID,
+  // THE canonical key derivation (approval-projection-constants.ts) — the same function the WRITER
+  // (`ApprovalRecordProjectionService.buildRecordData`) and every canonical READER
+  // (`approvalProjectionParticipantPredicateSql`) derive their namespaced key from. Two fixtures
+  // below hand-seed a raw `meta_records` row (rather than going through `reconcile()`) precisely to
+  // isolate "/context obeys the shared resolver" from "the shared resolver's own predicate is
+  // correct" (see the note above the WIRING positive control test) — importing this from here,
+  // rather than re-spelling `${sheetId}__requesterId` at the call site, is what keeps those
+  // hand-seeded fixtures from drifting onto a shape the writer does not store under (exactly the
+  // #5767 defect: main 7c73f5276).
+  deriveProjectionFieldId,
+} from '../../src/multitable/approval-projection-constants'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -304,27 +332,60 @@ describeIfDatabase('C1 — GET /context fenced capability resolution (real DB)',
     expect(res.body.data.base?.id).toBe(APPROVAL_PROJECTION_BASE_ID)
   })
 
-  test('CURRENT-BEHAVIOUR PIN (unchanged by this change): a viewer whose id is the requester on a record produced by the real reconcile() path receives the same NOT_FOUND shape at this head', async () => {
+  test('PIN FLIPPED (rebase absorption of main 7c73f5276 / #5767): a viewer whose id is the requester on a record produced by the real reconcile() path now matches the shared predicate\'s namespaced-key comparison and gets 200 with the read-only projection capability set', async () => {
+    // This is the exact fixture the file's own former pin named: "If the shared predicate's decision
+    // for this fixture changes on another line, this pin is expected to flip to 200; update it
+    // deliberately there, not here." That other line is main's #5767 — PARTICIPANT_ID is the real
+    // `requester_snapshot.id` on INST_A1, materialized onto SHEET_A by the REAL reconcile() path
+    // (buildRecordData → deriveProjectionFieldId), so it now satisfies
+    // approvalProjectionParticipantPredicateSql's namespaced-key match. This flip could not have been
+    // made at 7c73f5276 itself: this pin exists only on this branch, so that commit never saw it.
     currentUser = { id: PARTICIPANT_ID, perms: ['multitable:read'] }
     const res = await contextRequest({ sheetId: SHEET_A })
-    // If the shared predicate's decision for this fixture changes on another line, this pin is
-    // expected to flip to 200; update it deliberately there, not here.
-    expect(res.status).toBe(404)
+    expect(res.status).toBe(200)
+    expect(res.body.data.sheet?.id).toBe(SHEET_A)
+    expect(res.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canExport: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canManageViews: false,
+      canManageAutomation: false,
+      canSendNotification: false,
+    })
+    // Per-sheet granularity, over REAL reconcile() output this time (the WIRING positive control
+    // test below proves the same shape over a hand-seeded row): PARTICIPANT_ID is a participant on
+    // SHEET_A only — INST_B1's requester is a different, unrelated actor — so the sibling sheet
+    // must stay excluded from this base's sheets[] listing for this viewer.
+    const ids = (res.body.data.sheets as Array<{ id: string }>).map((s) => s.id)
+    expect(ids).toContain(SHEET_A)
+    expect(ids).not.toContain(SHEET_B)
   })
 
   test('WIRING positive control: when the shared predicate DOES report participant status, /context defers to it and returns 200 with the read-only projection capability set (not a locally reimplemented judgment)', async () => {
     // Seeded in whatever shape the shared predicate (loadApprovalProjectionParticipantSheetIds) itself
     // currently reads — same convention as approval-projection-participant-read.db.test.ts's own
-    // fixtures, and NOT necessarily what production reconcile() writes today (see the characterization
-    // test above). This isolates "does /context's NEW wiring correctly obey the shared resolver" from
-    // "is the shared resolver's own predicate correct on real data" — two different questions, only the
-    // first is this PR's claim.
+    // fixtures. As of main 7c73f5276 (#5767) that shape IS what production reconcile() writes (the
+    // namespaced key via `deriveProjectionFieldId`) — the bare-column shape this fixture used to seed
+    // stopped matching the predicate once #5767 landed (this is not a hand-rolled shape independent of
+    // production; the two have converged). This still hand-seeds rather than running reconcile() itself
+    // so the isolation this test documents stays intact: "does /context's NEW wiring correctly obey the
+    // shared resolver" is proven independently of "does reconcile() itself produce a matching row" —
+    // that second question is the real-reconcile() companion, the CURRENT-BEHAVIOUR / PIN FLIPPED test
+    // above and `approval-projection-key-parity.db.test.ts`.
     const wiredParticipant = `u_c1_wired_participant_${TS}`
     const rawRecordId = `rec_c1_raw_${TS}`
     await q(
       `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
        VALUES ($1,$2,$3::jsonb,1,'system:approval-projection','system:approval-projection')`,
-      [rawRecordId, SHEET_B, JSON.stringify({ status: 'approved', requesterId: wiredParticipant, approverId: 'someone_else' })],
+      [rawRecordId, SHEET_B, JSON.stringify({
+        [deriveProjectionFieldId(SHEET_B, 'status')]: 'approved',
+        [deriveProjectionFieldId(SHEET_B, 'requesterId')]: wiredParticipant,
+        [deriveProjectionFieldId(SHEET_B, 'approverId')]: 'someone_else',
+      })],
     )
     try {
       currentUser = { id: wiredParticipant, perms: ['multitable:read'] }
@@ -362,12 +423,19 @@ describeIfDatabase('C1 — GET /context fenced capability resolution (real DB)',
     // resolveSheetCapabilitiesForAccess's restrictApprovalProjectionCapabilitiesPerRow forces it back
     // to false. A non-participant already gets 404 before any capabilities are computed (proven
     // above), so this needs a real WRITER PARTICIPANT to exercise the capability-plane fence at all.
+    // Namespaced key (deriveProjectionFieldId) — see the WIRING positive control test's comment above
+    // on why this is now the shape that matches BOTH the shared predicate and production reconcile()
+    // output post main 7c73f5276 (#5767).
     const writerParticipant = `u_c1_writer_participant_${TS}`
     const rawRecordId = `rec_c1_writer_${TS}`
     await q(
       `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
        VALUES ($1,$2,$3::jsonb,1,'system:approval-projection','system:approval-projection')`,
-      [rawRecordId, SHEET_B, JSON.stringify({ status: 'approved', requesterId: writerParticipant, approverId: 'someone_else' })],
+      [rawRecordId, SHEET_B, JSON.stringify({
+        [deriveProjectionFieldId(SHEET_B, 'status')]: 'approved',
+        [deriveProjectionFieldId(SHEET_B, 'requesterId')]: writerParticipant,
+        [deriveProjectionFieldId(SHEET_B, 'approverId')]: 'someone_else',
+      })],
     )
     try {
       currentUser = { id: writerParticipant, perms: ['multitable:write', 'workflow:write'] }
