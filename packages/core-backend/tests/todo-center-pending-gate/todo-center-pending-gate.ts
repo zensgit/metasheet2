@@ -34,7 +34,17 @@
  * mutations were restored (`cmp` exit 0, `git diff --stat` empty) before the suite was re-run green
  * (20/20). No permanent test content was added for judge A because the two existing named A0 tests
  * (class ①, class ④) already serve as row A's positive control without a second copy of the same
- * assertion. Judges B/C'/D remain deferred (see the fixture-plumbing docblock below for the S9 note).
+ * assertion. Judge D (badge count invariant) is now DISCHARGED — same no-new-content pattern: its
+ * positive control ("class ①/②/⑥ 前后相等") is already the three existing named A0 tests (the
+ * "前" = this table's own golden values, the "后" = what those tests assert live, per row A0's own
+ * "不存在运行时的「前」" note — there is nothing further to diff). Its mutation ("共享查询漏掉 role
+ * 臂 ⇒ class ② 变 0") was run for real (cp/edit/run/restore/cmp, ledger in the verification doc)
+ * against `approvalPendingAssigneeMatchCondition`'s role arm in `services/approval-pending-query.ts`:
+ * short-circuiting it with a leading `FALSE AND` (keeping `$2` referenced so the parameter count
+ * still matches the query text — the same protocol-safety concern judge A's ledger entry explains)
+ * reddened ONLY class ②'s named test (`expected +0 to be 1`), leaving all 19 other tests — including
+ * ①/⑥'s own A0 assertions and both Judge C tests — green. Restored and re-run 20/20 before this
+ * commit. Judges B/C' remain deferred (see the fixture-plumbing docblock below for the S9 note).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
