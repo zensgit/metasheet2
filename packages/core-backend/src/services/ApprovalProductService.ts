@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
   ApprovalActionRequest,
+  ApprovalActionType,
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
   ApprovalAutoApprovalReason,
@@ -141,7 +142,7 @@ import type {
   UnifiedApprovalDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
-import { ServiceError } from './ApprovalBridgeService'
+import { ServiceError, CancelRoundOutletForbiddenError, rejectIfCancelRound } from './ApprovalBridgeService'
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
@@ -150,6 +151,7 @@ import {
   filterBulkReassignDiscoveryForAttendance,
   type AttendanceReassignAuditWitnessV1,
   AttendanceCentralApprovalError,
+  isCancelRoundInstance,
 } from '../attendance/w4c3b-central-approval-hooks'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
@@ -4178,6 +4180,41 @@ function toUnifiedApprovalDTO(
  * every existing importer and `path:line` reference keeps resolving.
  */
 export { assignmentMatchesActor } from './approval-seat-authorization'
+
+/**
+ * Approval change-request design lock v5.9 §14.1 (判据 I, lock:104) — the cancel-round identity
+ * predicate. The BODY lives in `../attendance/w4c3b-central-approval-hooks` (a deliberate leaf
+ * module with zero imports of its own): `ApprovalBridgeService.ts` needs it too (outlet #8,
+ * `Bridge:1077`), and `ApprovalProductService` already imports `ApprovalBridgeService` for
+ * `ServiceError` — so the other direction would be a cycle, same reasoning as
+ * `assignmentMatchesActor` above. Re-exported from here so `createCancelRoundInstance` and every
+ * chokepoint in this file can import it as `./ApprovalProductService`.
+ */
+export { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'
+
+/**
+ * Lock §9-9 (lock:143 area) — the allowed action set on a cancel-round instance:
+ * `{approve, reject, revoke, comment}`. Everything else (`handle`, `return`, `transfer`,
+ * `add_sign`, `reduce_sign`) is rejected here, at `dispatchAction`'s single action-judgment call
+ * site (outlets #4/#5/#6 in lock §14.3 share this one call point — #5 is the one action this
+ * function LETS THROUGH, not a separate branch). No-op for a non-cancel-round instance.
+ */
+const CANCEL_ROUND_ALLOWED_ACTIONS: ReadonlySet<ApprovalActionType> = new Set([
+  'approve',
+  'reject',
+  'revoke',
+  'comment',
+])
+
+function assertCancelRoundActionAllowed(
+  instance: { workflow_key?: string | null },
+  action: ApprovalActionType,
+): void {
+  if (!isCancelRoundInstance(instance) || CANCEL_ROUND_ALLOWED_ACTIONS.has(action)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances do not accept action "${action}"`,
+  )
+}
 
 /**
  * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
@@ -8230,6 +8267,8 @@ export class ApprovalProductService {
       }
       // P17/P26: admin jump mutates assignments — attendance fails closed before DML.
       await guardAttendanceCentralMutationOrThrow(client, instance)
+      // Lock §14.3 outlet #2 — a cancel-round instance is never admin-jumped.
+      rejectIfCancelRound(instance, 'adminJump')
       if (instance.version !== request.version) {
         throw new ServiceError(
           'Approval instance version mismatch',
@@ -9531,6 +9570,10 @@ export class ApprovalProductService {
       // P17/P22/P26: attendance instances fail closed before assignment/instance DML
       // (including adversarial rows carrying published_definition_id).
       await guardAttendanceCentralMutationOrThrow(client, instance)
+      // Lock §14.3 outlets #4/#6 (and the allow-branch that becomes #5) — the single action-
+      // judgment call site for a cancel-round instance: `{approve,reject,revoke,comment}` pass,
+      // everything else (`handle`/`return`/`transfer`/`add_sign`/`reduce_sign`) is rejected here.
+      assertCancelRoundActionAllowed(instance, request.action)
       if (!instance.published_definition_id) {
         throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
       }
