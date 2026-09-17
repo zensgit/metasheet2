@@ -482,12 +482,64 @@ non-locking pre-read to detect a cancel round」):
    `business_key` → original document instance → request row), not from either instance's
    `org_id`.
 3. It must reuse ONE predicate for that last hop rather than minting a third — and leg 3 says the
-   two candidates are not interchangeable, so which one is adopted is a decision to record, not a
-   detail.
+   two candidates are not interchangeable. **Naming the default now, rather than leaving a slot the
+   next unit fills by convenience**: `classifyAndLockAttendanceRequestForInstance` is the predicate
+   the LOCKING path already uses, so the pre-read adopts **it**. Leg 3 shows the other one ADMITS an
+   org the classifier REJECTS, so adopting it would widen what the pre-read accepts — a
+   contract-shaped change under
+   `feedback_second_narrower_artifact_is_contract_narrowing.md` (same rule, opposite direction), and
+   therefore an owner escalation, not an implementation choice.
 4. The re-assert after the row lock must fail **closed** on an org mismatch (load-bearing, per the
    census above), with a named values-free code.
 
 None of that is implemented in this unit. Q-E is the census; the restructure is the next one.
+
+**What leg 1 does and does NOT establish.** It stamps the two orgs differently by hand, so it proves
+divergence is REPRESENTABLE and that the key builder discriminates it — enough to reject
+`approval_instances.org_id` as the pre-read source. It does **not** exhibit a real cancel round that
+has diverged. Chasing that one hop further (this was going to be the next unit's first grep; it is
+cheap enough to have done here) makes the answer sharper than "nothing pins them":
+
+```
+$ grep -n "deriveAttendanceApprovalOrgStampV1" plugins/plugin-attendance/index.cjs
+14405:  async function deriveAttendanceApprovalOrgStampV1(client, orgDerivation)
+24322:  const stampOrgId = await deriveAttendanceApprovalOrgStampV1(client, payload.orgDerivation)
+```
+
+`approval_instances.org_id` is stamped by
+`port.deriveApprovalInstanceOrgIdForAttendanceSubjectV1({ subjectUserId, requestNamedOrgId })` — a
+**SUBJECT-based** derivation (which org the user belongs to, plus a permitted named selector). It
+does not read the `attendance_requests` row's `org_id`. So the two columns are **two independent
+derivations that happen to agree**, not one copied from the other with a drift window afterwards.
+
+That is a strictly stronger reason to use the request row: agreement is not structurally guaranteed
+at creation either, so the re-assert is load-bearing against a routine mismatch and not only against
+the 4 `EXCLUDED` writers. **Not claimed**: that production rows actually diverge today — that would
+need a query over real data, which this private DB does not have.
+
+### 3.3d ⚠️ Registered, not buried: a live nondeterminism found by leg 3
+
+Leg 3 uses `filterBulkReassignDiscoveryForAttendance` as the second of two disagreeing predicates.
+On its own terms it is also a **defect in a production path unrelated to this lock**, and it is
+recorded here explicitly so it is not discovered-and-buried inside a cancel-round census table.
+
+`w4c3b-central-approval-hooks.ts:452-463` LEFT JOINs `attendance_requests` with no
+`approval_instance_id IS NULL OR = i.id` safety clause, **no `ORDER BY` and no `LIMIT`**. When one
+approval instance has more than one candidate request row, the query returns them all, and the
+consumer folds them into a `Map` keyed by instance id — so **whichever row Postgres hands back last
+silently wins the org**. Leg 3 demonstrates it with rows: two candidates, two different orgs, both
+returned.
+
+Why it is worth someone's time: the org it resolves is what gates the bulk-reassign authorization
+decision downstream, and this repo already has a registered finding for the shape 「two
+authorization sources diverging」
+(`finding_attendance_two_authorization_sources_diverge.md`). A nondeterministic org resolution on an
+authorization path is the same family.
+
+**Scope**: OUT of this lock. The cancel-round pre-read adopts the classifier (§3.3c point 3), so
+nothing on this branch depends on the buggy predicate, and changing it would be an
+attendance-line behaviour change with its own census. **Owed**: a one-line finding handed to the
+attendance line — not a fix on this branch. Flagged here as an open handoff, not as work done.
 
 **Not claimed here**: that `dispatchAction`'s restructure is safe. It changes the isolation level
 for cancel-round dispatches, which admits `40001` serialization failures on a path that has never
@@ -624,6 +676,9 @@ they are.
   `approved` — an §5 I3 gap inherited from phase 1. It is **asserted as-is** in the paired open-
   window case, so the change is forced to be noticed when 判据 II flips it to `'applied'`, rather
   than being silently satisfied.
+- **`filterBulkReassignDiscoveryForAttendance`'s nondeterministic org** (§3.3d) — a real defect
+  found by this census, deliberately OUT of scope here, owed to the attendance line as a finding.
+  Nothing on this branch depends on it.
 - **判据 II's prerequisite** — the rollout advisory lock ordering blocker in §3.3b. **Partially
   resolved**: census Q-E (§3.3c) settles WHICH org key the lock must be taken on, and the
   immutability censuses say which half of the post-lock re-assert is load-bearing. The
