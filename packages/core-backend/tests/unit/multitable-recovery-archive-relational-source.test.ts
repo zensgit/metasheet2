@@ -19,7 +19,7 @@ describe('manual archive relational source projection', () => {
     expect(query).toHaveBeenCalledTimes(1)
     expect(query.mock.calls[0][1]).toEqual(['sheet', 'base', 'workspace'])
     expect(query.mock.calls[0][0]).toMatch(
-      /WHERE s\.id = \$1 AND s\.base_id = \$2 AND b\.workspace_id = \$3\s+AND s\.deleted_at IS NULL\s*\), fields AS/,
+      /WHERE s\.id = \$1 AND s\.base_id = \$2 AND b\.workspace_id = \$3\s+AND s\.deleted_at IS NULL AND b\.deleted_at IS NULL\s*\), fields AS/,
     )
     expect(result).toEqual(input)
     expect(Object.keys(result)).toHaveLength(7)

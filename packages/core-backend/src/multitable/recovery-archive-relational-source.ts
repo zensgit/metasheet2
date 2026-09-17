@@ -36,7 +36,7 @@ WITH scope AS (
   SELECT s.id FROM public.meta_sheets s
   JOIN public.meta_bases b ON b.id = s.base_id
   WHERE s.id = $1 AND s.base_id = $2 AND b.workspace_id = $3
-    AND s.deleted_at IS NULL
+    AND s.deleted_at IS NULL AND b.deleted_at IS NULL
 ), fields AS (
   SELECT f.* FROM public.meta_fields f JOIN scope s ON s.id = f.sheet_id
 ), records AS (
