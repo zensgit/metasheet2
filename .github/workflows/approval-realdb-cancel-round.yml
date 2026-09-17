@@ -152,3 +152,80 @@ jobs:
             echo "flagChanged=false"
             echo "externalWrite=false"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-cancel-round-creation:
+    name: approval-cancel-round-creation (WI-4/WI-6/WI-16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run WI-4 cancel-round creation acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-cancel-round-creation.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-cancel-round-creation.db.test.ts"
+            echo "scope=WI-4 createCancelRoundInstance creation only — dedicated-instance shape (judgment I/I″), one active seat resolved via requester_choice, one pending approval_rounds row (kind=cancel), §5 I3 (uq_approval_rounds_pending_document), WI-16 requester-only creation authz, §14.3 #14 suite gate (CancelRoundSuiteForbiddenError, zero rows on reject)"
+            echo "notCovered=outlet guards (#2/#3/#7/#7'/#8/#12/#13), seat guards, redemption (判据 II/IV), attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
