@@ -1000,6 +1000,35 @@ a `comment` field, asserts `400` + `body.error.code === 'REJECT_COMMENT_REQUIRED
 round is still `pending`/`ended_at === null`, then — POSITIVE CONTROL — the same reject **with** a
 comment succeeds and terminates the round (`outcome === 'rejected'`).
 
+**Self-correction, same pass, caught by advisor review before this step returned**: the HTTP
+assertion above does NOT, by itself, discriminate the lock's actual requirement — "节点操作的评论要求
+= 显式值 ... 不靠默认" (the node must carry the comment requirement EXPLICITLY, not rely on a
+default). `effectiveCommentRequired` (`approval-effective-node-operations.ts:95-104`) falls back an
+ABSENT node-level `commentRequired` to the instance's `policy_snapshot.rejectCommentRequired`, and an
+absent snapshot value ALSO resolves to `'reject_only'` (`snapshotValue === false ? 'never' :
+'reject_only'`) — so the 400 fires whether the seed wrote the key explicitly or omitted it entirely.
+Confirmed by a live DB-row mutation probe (not a source-code `cp` probe, since the seed's
+`runtime_graph` is materialized into `approval_published_definitions` at migration time, not
+re-evaluated per test run): backed up the definition row's `runtime_graph` JSON
+(`psql -tAc "select runtime_graph::text from approval_published_definitions where
+id='00000000-0000-4000-8000-000000000003'"` to a file), `jsonb_set` the `cancel_approval` node's
+`nodeOperationPolicy` to `{}` (removing the `commentRequired` key), reran the case — **stayed
+green** (`1 passed`), confirming the HTTP-only assertion is confounded exactly as predicted. Restored
+the row from the backed-up JSON text and re-`SELECT`ed it back into a second file; `diff` against the
+original was empty.
+
+**Fix, same commit**: added a direct read of the seed's own `approval_published_definitions` row at
+the top of this test — `SELECT pd.runtime_graph FROM approval_instances i JOIN
+approval_published_definitions pd ON pd.id = i.published_definition_id WHERE i.id = $1`, then
+`expect(...cancel_approval node's config.nodeOperationPolicy.commentRequired).toBe('reject_only')` —
+the same discipline as this lane's existing CJS mirror-constant pin, reading the actual seeded value
+rather than inferring it from the HTTP response. Re-ran the SAME `jsonb_set`-to-`{}` mutation against
+this updated test: now **red** at the new assertion (`expected undefined to be 'reject_only'`), then
+restored the row again (`diff` empty a second time) and reran the full case clean. The combination of
+this explicitness pin (proves the seed writes the value, not the default) plus the HTTP 400 (proves
+the value is load-bearing at the reject gate) together satisfy the lock's full sentence; neither
+alone would have.
+
 ## D3. 判据 I(两向), reverse direction — a publicly-created instance does NOT satisfy the cancel-round predicate
 
 Lock text (§14.1, verbatim): "判据 I(两向):经专用路径 ⇒ 谓词真;**经公开 `createApproval` ⇒ 谓词假**。"
@@ -1099,21 +1128,32 @@ Backup directory `/tmp/gate-c-slice1-backups/`.
 | # | Mutated | Change | Observed red | Restore |
 |---|---|---|---|---|
 | P1B-1 | `ApprovalProductService.ts` | Public `createApproval`'s hardcoded `workflow_key` SQL literal (line 8079) changed from `'approval-product-template'` to `'approval.cancel-round'` | `1 failed \| 5 skipped (6)`; `expected true to be false` at the new §D3 reverse-direction assertion | `cmp` identical to backup |
+| P1B-2a | `approval_published_definitions.runtime_graph` row (DB-row probe, not source — see D2's self-correction) | `cancel_approval` node's `nodeOperationPolicy` set to `{}` via `jsonb_set`, dropping the explicit `commentRequired: 'reject_only'` key | Ran BEFORE the D2 fix's explicitness pin existed: `1 passed` — confirmed the confound (HTTP-only assertion stays green with the key gone) | `diff` against the pre-mutation `runtime_graph` JSON text, empty |
+| P1B-2b | same row, same mutation, re-run AFTER the D2 fix's explicitness pin was added | (same `jsonb_set` to `{}`) | `1 failed \| 5 skipped (6)`; `expected undefined to be 'reject_only'` at the new pin — now catches it | `diff` against the pre-mutation `runtime_graph` JSON text, empty (second restore, second `diff`) |
 
-D1/D2/D4's own POSITIVE CONTROL steps (see D1/D2/D4 above) serve the same discriminating-power role
-for those three rows without a source mutation: D1 and D2's positive controls prove the surrounding
-action (revoke/reject) genuinely still works on the same fixture immediately after the negative
-assertion, and D4's raw-SQL bypass is itself the discriminating mechanism — no code deletion could
-make it "more red," since the constraint either exists in the schema or it does not.
+D1 and D4's own POSITIVE CONTROL / bypass-construction steps (see D1/D4 above) serve the same
+discriminating-power role for those two rows without a source mutation: D1's positive control proves
+revoke genuinely still works on the same fixture immediately after the negative assertion, and D4's
+raw-SQL bypass is itself the discriminating mechanism — no code deletion could make it "more red,"
+since the constraint either exists in the schema or it does not. D2 needed an actual probe (P1B-2a/2b
+above) because its first draft's HTTP-only assertion turned out NOT to discriminate the lock's real
+requirement — see D2's self-correction paragraph.
 
 ## D7. Working-tree discipline, this pass
 
 - `git status --porcelain` was empty at the start of this pass (matching HEAD `cd2de9622`'s clean
   state); the only paths staged before commit are the two `.db.test.ts` files plus this document;
   `git status --porcelain` is empty again after the commit.
-- One `cp`-backup → edit → run → restore → `cmp` cycle (§D3/D6); zero `git checkout --`.
-- No lock file, no `reviews/` file, no `origin/main` state, no CI-config file, no DDL/migration
-  touched.
+- One `cp`-backup → edit → run → restore → `cmp` cycle on `ApprovalProductService.ts` source (§D3,
+  P1B-1 in §D6). Two `psql`-backup → `jsonb_set` → run → restore → `diff` cycles on the
+  `approval_published_definitions.runtime_graph` DB row (§D2's self-correction, P1B-2a/2b in §D6) —
+  a DB-row mutation rather than a source-code one, since the seed is materialized into that row at
+  migration time and is not re-read from `approval-cancel-round-published-definition.ts` per test
+  run; each restore was diffed byte-for-byte against the pre-mutation `SELECT ...::text` capture.
+  Zero `git checkout --` anywhere in either discipline.
+- No lock file, no `reviews/` file, no `origin/main` state, no CI-config file, no migration file
+  touched (the DB-row mutation above changed a row's data in the private `metasheet2_lock_c`
+  database, not any migration file, and was fully restored).
 
 ## D8. §A6 / §A9 correction and gate finding P1-B — final disposition
 
