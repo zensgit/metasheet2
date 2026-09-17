@@ -59,8 +59,18 @@ export type ApprovalPendingSourceSystemFilter = 'platform' | 'plm' | null
  * The three-arm seat-assignee match, parameterised by the table alias so the count query and the
  * row-version query's correlated subquery use the IDENTICAL text (`$1`/`$2`/`$3` bind the same three
  * params in both call sites — see `buildApprovalPendingConditions` and
- * `listApprovalPendingRowsForViewer`). Do not inline a second copy of this string anywhere: that is
+ * `listApprovalPendingRowsForViewer`). Do not inline a NEW copy of this string anywhere: that is
  * precisely the drift judging criterion C's mutation looks for.
+ *
+ * KNOWN EXCEPTION, not created by this module and not yet folded in: `approval-realtime.ts`'s
+ * `computeApprovalPendingCounts` (top of that file) hand-copies this same three-arm disjunction but
+ * OMITS `handlerNodeExclusionCondition` below — it is a pre-existing, known-divergent second copy
+ * relative to the ratified §1.5 ① baseline (todo-center-design-lock v2.14), not an equivalent
+ * alternate source of truth. Its presence is not license to add a third. See
+ * `docs/development/todo-center-phase1-verification-20260918.md`'s "P1-1" entry for the
+ * reproduction (same viewer/instance shape, REST vs. realtime side by side) and the three
+ * disposition options (fold in / register + narrow judge D's scope / BLOCKED), still pending an
+ * owner call.
  */
 export function approvalPendingAssigneeMatchCondition(alias: string): string {
   return `(

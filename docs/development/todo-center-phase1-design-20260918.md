@@ -193,6 +193,23 @@ $ grep -inE "BEGIN|COMMIT|ROLLBACK|transaction|FOR UPDATE|pg_advisory|advisory" 
    §7-6 登记为平台授权线独立发现,不是本切片的验收前提。
 6. **评论源(v1.1)/云课堂「待处理」定义/任务源**:锁 §4「不做」段,分别等 owner 裁决(§7-3/§7-4)
    与任务线落地(§7-5)。
+7. **`approval-realtime.ts` 的第二份 pending 谓词(P1-1,门审 `impl-gate-B-slice1-round1-20260918.md`
+   点名,锁 §3 硬约束「只准一份」)**:`services/approval-realtime.ts` 的 `computeApprovalPendingCounts`
+   是审批域一份**独立于本切片提取的共享查询**的手抄三臂谓词,**缺办理节点排除**——本切片新增的
+   `todo:counts-updated` 广播(commit `6fba6e01e`)复用的正是这份分叉 payload,把先存分叉扩张到了待办
+   中心自己的事件表面。**同库实测**(`metasheet2_lock_b`,事务内 seed 一个 class ⑧ 形状后 `ROLLBACK`,
+   同一 viewer/instance,两条查询并排跑):REST 共享查询(4 条件,含排除)⇒ `count=0`;
+   `computeApprovalPendingCounts`(3 条件,无排除)⇒ `count=1`。按已 ratify 的 §1.5 ①(RATIFY 记录
+   §7-2「基准口径 = §1.5 的 ①」)基准,**实时推送这条路是 known-wrong**,不是"两条路各说各话、择一即可"。
+   **未在本切片折入**(折入会改变持办理节点席位者收到的实时推送数字,是公开合同变更,需 owner 一句 ——
+   门审报告三选一里的 (a) 项;本切片未获该授权,故不做行为改动)。**处置(按门审报告 (b) 项如实登记,
+   不代 owner 裁定 (a)/(c))**:`services/approval-pending-query.ts` 的
+   `approvalPendingAssigneeMatchCondition` docblock 已加"KNOWN EXCEPTION"段指名这份分叉(不内嵌其
+   SQL 片段,避免撞判据 C 的 drift-string mutation 探针);验证 MD 的判据 D 证据范围收窄为
+   "仅 REST 路径"(锁 §5 行 D 字面范围更宽,差额 = 实时推送路径,登记为未验 + known-wrong)。
+   **(a) 折入 / (c) BLOCKED 两项终裁仍待 owner**,本条目不构成该终裁。B-2 的既定内容含"徽标改读
+   `todo/count`"与"`todo:counts-updated` 的前端订阅"(本节第 1 条)——落地前必须先看到 (a)/(b)/(c) 的
+   owner 终裁,否则徽标会消费这份 known-wrong 的数字。
 
 ## 7. owner 待裁项(锁文 §7/§9 已 ratify 的裁决——原样引用抬头 RATIFY 记录,不改写)
 
