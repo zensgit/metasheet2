@@ -4,33 +4,48 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import { ApprovalBridgeService } from '../../src/services/ApprovalBridgeService'
 import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
 import { CANCEL_ROUND_APPROVAL_NODE_KEY } from '../../src/db/seeds/approval-cancel-round-published-definition'
 
 /**
- * Approval change-request design lock v5.9 §14.3 outlets #2/#4/#6 (lock:359,362-363 area;
- * table rows #2/#4/#6) — real-DB acceptance for the FIRST SLICE of the "outlet-guards" file the
- * taskbook's own split promised (seat-guards.db.test.ts's header: "a separate outlet-guards file
- * per the taskbook split — those chokepoints sit on the decide/dispatch/legacy-route paths, not
- * seat-writers"). Per the sub-unit handoff's advisor guidance this is split further, by shared
- * oracle, into THREE slices rather than one file:
- *   - THIS FILE: #2 (`adminJump`, `rejectIfCancelRound` at `APS:8582`) and #4/#6 (`dispatchAction`
- *     action gate, `assertCancelRoundActionAllowed` at `APS:9928`) — both throw the SAME
- *     `CancelRoundOutletForbiddenError` (409 `CANCEL_ROUND_OUTLET_FORBIDDEN`) IN-PROCESS, before
- *     any DML, with no route-catch translation step to verify.
- *   - NOT covered by this file (separate slices): #3 (`applyNodeTimeoutEffect` — a two-part
+ * Approval change-request design lock v5.9 §14.3 outlets #2/#4/#6/#7/#7′/#8 (lock:359,362-369
+ * area; taskbook `impl-taskbook-C-change-request-20260918.md:235` names this ONE file as the home
+ * for #2/#3/#4/#6/#7/#7′/#8) — real-DB acceptance, landing in TWO slices by shared oracle
+ * (sub-unit handoff's advisor guidance):
+ *   - SLICE 1 (this file, first commit): #2 (`adminJump`, `rejectIfCancelRound` at `APS:8582`)
+ *     and #4/#6 (`dispatchAction` action gate, `assertCancelRoundActionAllowed` at `APS:9928`) —
+ *     both throw the SAME `CancelRoundOutletForbiddenError` (409
+ *     `CANCEL_ROUND_OUTLET_FORBIDDEN`) IN-PROCESS, before any DML, with no route-catch
+ *     translation step to verify.
+ *   - SLICE 2 (this file, WI-7 slice 2, taskbook lines 150-152/322-324): #7 legacy
+ *     `POST /:id/approve` (`routes:2954` guard call, negative anchor `routes:2900-2954`,
+ *     registered `:2862`) and #7′ legacy `POST /:id/reject` (`routes:3126`, negative anchor
+ *     `routes:3040-3126`, registered `:3012`) — a DIFFERENT oracle from slice 1: the 409 must
+ *     survive each legacy route's own `catch` translation (`routes:3015`/`:3187`, which do NOT
+ *     call `handleApprovalsError` for most errors and would otherwise fall through to a generic
+ *     500 — lock v5.1 finding), exercised over REAL HTTP, not an in-process service call. Also
+ *     #8 `ApprovalBridgeService.dispatchAction` (`Bridge:1077`, negative anchor `Bridge:1103`) —
+ *     reached (per taskbook line 312 / lock §14.1) only when a cancel-round instance is
+ *     HALF-FORMED (`published_definition_id IS NULL`), which routes it past
+ *     `isTemplateRuntimeInstance` (`routes:2796-2799`) into the legacy bridge dispatch instead of
+ *     `ApprovalProductService.dispatchAction`; exercised in-process (calling
+ *     `ApprovalBridgeService.dispatchAction` directly), matching the taskbook's own named test
+ *     "half-formed instance ... is rejected AND fails isTemplateRuntimeInstance" / "positive:
+ *     full instance reaches dispatchAction".
+ *   - NOT covered by this file (separate slice): #3 (`applyNodeTimeoutEffect` — a two-part
  *     oracle, outcome literal AND deadline-consumption, needing an env-flag-gated scanner call
- *     and a two-round re-pickup negative control — "这是判据不是括号", lock:363); #7/#7′/#8
- *     (legacy `POST /:id/approve`/`/:id/reject` and `ApprovalBridgeService.dispatchAction` — a
- *     different oracle: the 409 must survive each route's own catch translation, not merely be
- *     thrown in-process); #12/#13 (seat-write chokepoints — `approval-cancel-round-seat-guards
+ *     and a two-round re-pickup negative control — "这是判据不是括号", lock:363).
+ *   - Covered elsewhere: #12/#13 (seat-write chokepoints — `approval-cancel-round-seat-guards
  *     .db.test.ts`); attendance-parity and attendance-FK-migration (separate files); 判据 II/IV
  *     of redemption (depend on WI-10/11/12, not on this branch).
  *
- * Both outlets in this file are asserted with a PAIRED positive control on the SAME service
- * method against an ORDINARY (non-cancel-round) instance, so a future regression that turns the
- * guard into a blanket disable of `adminJump`/`dispatchAction` (rather than a cancel-round-
- * specific rejection) fails this file too, not just the negative half.
+ * All outlets in this file are asserted with a PAIRED positive control (either an ORDINARY
+ * non-cancel-round instance on the SAME method, or — for #8, which has no ordinary-instance
+ * analogue since only a cancel-round instance is ever deliberately half-formed — the SAME
+ * instance's own well-formed state observed before the mutation that half-forms it), so a future
+ * regression that turns a guard into a blanket disable (rather than a cancel-round-specific
+ * rejection) fails this file too, not just the negative half.
  *
  * Fixture reuse: same harness as `approval-cancel-round-seat-guards.db.test.ts` (real one-node
  * template, real create+approve through the running server, `createCancelRoundInstance` called
@@ -126,7 +141,7 @@ function threeNodeGraph(approverA: string, approverB: string, approverC: string)
   }
 }
 
-describeIfDatabase('cancel-round outlet guards (§14.3 #2, #4/#6): a cancel-round instance cannot be admin-jumped or dispatched a non-allowed action', () => {
+describeIfDatabase('cancel-round outlet guards (§14.3 #2/#4/#6/#7/#7′/#8): a cancel-round instance cannot be admin-jumped, dispatched a non-allowed action, actioned via the legacy routes, or (half-formed) actioned via the generic bridge', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   const createdTemplateIds = new Set<string>()
@@ -364,5 +379,169 @@ describeIfDatabase('cancel-round outlet guards (§14.3 #2, #4/#6): a cancel-roun
     )
     expect(finalRow.rows[0]?.current_node_key).toBe(CANCEL_ROUND_APPROVAL_NODE_KEY)
     expect(finalRow.rows[0]?.status).toBe('pending')
+  })
+
+  it('#7 legacy POST /:id/approve — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN via handleApprovalsError; the row is unchanged', async () => {
+    const suffix = `legacy-approve-${TS}`
+    const approverId = `wi-outlet-legacy-apr-${suffix}`
+    const requesterId = `wi-outlet-legacy-req-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, `wi-outlet-legacy-admin-${suffix}`)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const approverToken = await authToken(baseUrl, approverId)
+
+    const templateA = await publishTemplate(adminToken, oneNodeGraph(approverId), 'la')
+    const documentA = await createPendingInstance(requesterToken, templateA)
+    await approve(approverToken, documentA)
+    const cancelRoundInstanceId = await createCancelRound(requesterId, documentA)
+
+    const before = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(before.rows[0]?.status).toBe('pending')
+
+    // Real HTTP round-trip — this is the point of slice 2: the guard's `ServiceError` subclass
+    // must survive `routes:2996-3008`'s catch (which does NOT call `handleApprovalsError` for
+    // most errors, and would otherwise fall through to a generic 500).
+    const response = await jsonRequest(baseUrl, `/api/approvals/${cancelRoundInstanceId}/approve`, approverToken, {
+      method: 'POST',
+      body: { version: before.rows[0]!.version },
+    })
+    expect(response.status, await response.clone().text()).toBe(409)
+    const payload = (await response.json()) as { error?: { code?: string } }
+    expect(payload.error?.code).toBe('CANCEL_ROUND_OUTLET_FORBIDDEN')
+
+    // Byte-identical before/after: rejected before the UPDATE, not merely rolled back after it.
+    const after = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(after.rows[0]).toEqual(before.rows[0])
+
+    // Paired positive control: the SAME endpoint, an ORDINARY instance, succeeds.
+    const documentB = await createPendingInstance(requesterToken, templateA)
+    const documentBVersion = await pool().query<{ version: number }>(
+      `SELECT version FROM approval_instances WHERE id = $1`,
+      [documentB],
+    )
+    const controlResponse = await jsonRequest(baseUrl, `/api/approvals/${documentB}/approve`, approverToken, {
+      method: 'POST',
+      body: { version: documentBVersion.rows[0]!.version },
+    })
+    expect(controlResponse.status, await controlResponse.clone().text()).toBe(200)
+  })
+
+  it("#7′ legacy POST /:id/reject — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN via handleApprovalsError; the round stays pending, not orphaned", async () => {
+    const suffix = `legacy-reject-${TS}`
+    const approverId = `wi-outlet-legacy-rej-apr-${suffix}`
+    const requesterId = `wi-outlet-legacy-rej-req-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, `wi-outlet-legacy-rej-admin-${suffix}`)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const approverToken = await authToken(baseUrl, approverId)
+
+    const templateA = await publishTemplate(adminToken, oneNodeGraph(approverId), 'lr')
+    const documentA = await createPendingInstance(requesterToken, templateA)
+    await approve(approverToken, documentA)
+    const cancelRoundInstanceId = await createCancelRound(requesterId, documentA)
+
+    const before = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(before.rows[0]?.status).toBe('pending')
+    const roundBefore = await pool().query<{ outcome: string }>(
+      `SELECT outcome FROM approval_rounds WHERE engine_instance_id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(roundBefore.rows[0]?.outcome).toBe('pending')
+
+    const response = await jsonRequest(baseUrl, `/api/approvals/${cancelRoundInstanceId}/reject`, approverToken, {
+      method: 'POST',
+      body: { version: before.rows[0]!.version, reason: 'legacy reject probe' },
+    })
+    expect(response.status, await response.clone().text()).toBe(409)
+    const payload = (await response.json()) as { error?: { code?: string } }
+    expect(payload.error?.code).toBe('CANCEL_ROUND_OUTLET_FORBIDDEN')
+
+    const after = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(after.rows[0]).toEqual(before.rows[0])
+    // The round row is what this guard protects: had the legacy route been allowed to write the
+    // instance `rejected` directly, `approval_rounds.outcome` would still read `pending` (only
+    // `dispatchAction`'s 判据 III writes it) — a permanent placeholder blocking re-issue of a
+    // cancel round for the same document (§5 I3). Confirm it never moved.
+    const roundAfter = await pool().query<{ outcome: string }>(
+      `SELECT outcome FROM approval_rounds WHERE engine_instance_id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(roundAfter.rows[0]?.outcome).toBe('pending')
+
+    // Paired positive control: the SAME endpoint, an ORDINARY instance, succeeds.
+    const documentB = await createPendingInstance(requesterToken, templateA)
+    const documentBVersion = await pool().query<{ version: number }>(
+      `SELECT version FROM approval_instances WHERE id = $1`,
+      [documentB],
+    )
+    const controlResponse = await jsonRequest(baseUrl, `/api/approvals/${documentB}/reject`, approverToken, {
+      method: 'POST',
+      body: { version: documentBVersion.rows[0]!.version, reason: 'ordinary reject positive control' },
+    })
+    expect(controlResponse.status, await controlResponse.clone().text()).toBe(200)
+  })
+
+  it('#8 ApprovalBridgeService.dispatchAction — a half-formed cancel-round instance (no published_definition_id) fails isTemplateRuntimeInstance and is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN by the generic bridge', async () => {
+    const suffix = `bridge-${TS}`
+    const approverId = `wi-outlet-bridge-apr-${suffix}`
+    const requesterId = `wi-outlet-bridge-req-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, `wi-outlet-bridge-admin-${suffix}`)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const approverToken = await authToken(baseUrl, approverId)
+
+    const templateA = await publishTemplate(adminToken, oneNodeGraph(approverId), 'br')
+    const documentA = await createPendingInstance(requesterToken, templateA)
+    await approve(approverToken, documentA)
+    const cancelRoundInstanceId = await createCancelRound(requesterId, documentA)
+
+    const productService = new ApprovalProductService()
+
+    // Positive/baseline: as WI-4 creates it, the instance IS a full runtime instance — the state
+    // the real `/actions` route's `:2796-2799` dispatch would route into
+    // `ApprovalProductService.dispatchAction` (already exercised by the #4/#6 case above), never
+    // reaching the bridge at all.
+    expect(await productService.isTemplateRuntimeInstance(cancelRoundInstanceId)).toBe(true)
+
+    // Half-form it (lock §14.1 / taskbook line 312): the ONLY way #8 becomes reachable for a
+    // cancel-round instance is `published_definition_id IS NULL`, which `isTemplateRuntimeInstance`
+    // reads directly (`APS:11866-11868`).
+    await pool().query(`UPDATE approval_instances SET published_definition_id = NULL WHERE id = $1`, [
+      cancelRoundInstanceId,
+    ])
+    expect(await productService.isTemplateRuntimeInstance(cancelRoundInstanceId)).toBe(false)
+
+    const before = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(before.rows[0]?.status).toBe('pending')
+
+    const bridgeService = new ApprovalBridgeService()
+    await expect(
+      bridgeService.dispatchAction(
+        cancelRoundInstanceId,
+        { action: 'approve' },
+        { userId: approverId, userName: 'bridge outlet actor' },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' })
+
+    const after = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(after.rows[0]).toEqual(before.rows[0])
   })
 })

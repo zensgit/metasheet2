@@ -33,12 +33,21 @@ name: Approval real-DB acceptance (cancel-round)
 #      `.constraint` name, #11's outcome-level dependency-on-#10 claim, and a source-text sweep
 #      of the five production writer sites. Runs against throwaway `CREATE DATABASE` scratch
 #      databases it provisions itself, not this job's own migrated `metasheet_approval_realdb`.
-#   6. §14.3 outlets #2/#4/#6's outlet-guard acceptance, FIRST slice
-#      (tests/integration/approval-cancel-round-outlet-guards.db.test.ts) — `adminJump` (#2) and
-#      `dispatchAction`'s single action-judgment call site (#4/#6, `handle`/`return` rejected,
-#      `comment` allowed) both throw `CancelRoundOutletForbiddenError` in-process before any DML;
-#      each paired with a positive control on the SAME method against an ordinary instance. #3
-#      (two-part oracle) and #7/#7′/#8 (route-catch translation) are separate later slices.
+#   6. §14.3 outlets #2/#4/#6/#7/#7′/#8's outlet-guard acceptance
+#      (tests/integration/approval-cancel-round-outlet-guards.db.test.ts), landed in two slices
+#      (same job, same file — no workflow edit needed for slice 2, since the job already runs the
+#      whole file):
+#        - slice 1: `adminJump` (#2) and `dispatchAction`'s single action-judgment call site
+#          (#4/#6, `handle`/`return` rejected, `comment` allowed) both throw
+#          `CancelRoundOutletForbiddenError` in-process before any DML; each paired with a
+#          positive control on the SAME method against an ordinary instance.
+#        - slice 2: legacy `POST /:id/approve` (#7) and `POST /:id/reject` (#7′) over REAL HTTP,
+#          proving the guard's `ServiceError` survives each route's own catch translation instead
+#          of falling through to a generic 500; and `ApprovalBridgeService.dispatchAction` (#8),
+#          exercised in-process against a deliberately half-formed instance
+#          (`published_definition_id` nulled) — the only way #8 is reachable, since a well-formed
+#          cancel-round instance is always routed to `ApprovalProductService.dispatchAction`
+#          instead. #3 (two-part oracle, `applyNodeTimeoutEffect`) is a separate later slice.
 # Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no flag
 # change.
 #
