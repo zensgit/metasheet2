@@ -814,6 +814,85 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     },
   )
 
+  /**
+   * §5 I3 「终结即释放」, as its OWN case rather than as the tail of the 判据 IV one.
+   *
+   * WHY A SEPARATE CASE, and it is not tidiness. The mutation the lock's I3 names is 「the C-3
+   * closure does not write the round's terminal `outcome`」 — instance `rejected` while the round
+   * stays `pending`, which is the exact shape lock:368's outlet-7′ row describes
+   * (「实例 `rejected` 而轮次仍 `pending`、同单据再发起被唯一索引拒,红」). Under that mutation the
+   * 判据 IV case above dies at its `expect(round.rows[0].outcome).toBe('expired')` line, which sits
+   * BEFORE its I3 block — so the I3 clause there is never evaluated and carries no mutation. That
+   * is the phase-2 MD's own §0 R-5 trap (an argument presented as a measurement), recurring two
+   * units later. Here the `createCancelRoundInstance` call is the FIRST statement after the close,
+   * so the mutation's red lands on the I3 clause itself. The block above is KEPT (an end-state
+   * check that costs nothing); M-21 therefore reddens two cases, and the discriminating one is
+   * this one.
+   *
+   * WHICH DOOR ACTUALLY REFUSES THE SECOND ROUND, measured rather than recalled. Lock:149 says I3
+   * is 「由索引 + C-3 共同保证」, and the phase-2 MD's §4 predicted a 23505 from
+   * `uq_approval_rounds_pending_document`. In the SEQUENTIAL shape this case drives, the index is
+   * never reached: `createCancelRoundInstance`'s own pre-check
+   * (`ApprovalProductService.ts:8558-8568`, `SELECT id FROM approval_rounds WHERE document_id = $1
+   * AND outcome = 'pending'`) fires first and throws the named `CANCEL_ROUND_ALREADY_PENDING`
+   * (409) — measured, the M-21 stack frame is `ApprovalProductService.ts:8563:15`. The 23505
+   * backstop (`:8697-8705`, which maps the raw constraint violation onto the SAME named error)
+   * belongs to the CONCURRENT-insert race only. So what this case proves is: C-3's outcome write
+   * is what releases the slot, and the pre-check is what guards it. It proves nothing about the
+   * partial unique index itself, which would need a constructed race.
+   */
+  it(
+    '§5 I3 「终结即释放」 (the C-3 half): after the #5′ system close the document has NO pending ' +
+      'round, so a new cancel round starts immediately — asserted as the FIRST post-close ' +
+      'statement, which is what makes the I3 clause carry its own mutation (M-21)',
+    async () => {
+      const suffix = `i3rel-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        // Same closure cause as the 判据 IV case: 200 days > the `leave` suite's 90-day window.
+        await ageApprovedAnchor(documentId, 200)
+      })
+
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, await approve.clone().text()).toBe(200)
+
+      // ── THE I3 CLAUSE, FIRST. Under M-21 this line throws `CANCEL_ROUND_ALREADY_PENDING` and
+      // nothing below it is evaluated, which is the point of the ordering.
+      const next = await new ApprovalProductService().createCancelRoundInstance(fixture.documentId, {
+        userId: fixture.requesterId,
+      })
+      createdApprovalIds.add(next.id)
+
+      const nextRound = await pool().query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+        [next.id],
+      )
+      expect(nextRound.rows.length).toBe(1)
+      createdRoundIds.add(nextRound.rows[0].id)
+
+      // The released round is a DIFFERENT row that reached a terminal outcome — not the same row
+      // re-opened, and not a second `pending` row that the pre-check happened to miss.
+      const closed = await pool().query<{ id: string; outcome: string }>(
+        `SELECT id, outcome FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(closed.rows.length).toBe(1)
+      expect(closed.rows[0].outcome).toBe('expired')
+      expect(closed.rows[0].id).not.toBe(nextRound.rows[0].id)
+
+      // 「同一单据至多一轮在途」 read off the document, which is the column the partial unique index
+      // is declared on — exactly one pending round, and it is the new one.
+      const pendingForDocument = await pool().query<{ id: string; engine_instance_id: string }>(
+        `SELECT id, engine_instance_id FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`,
+        [fixture.documentId],
+      )
+      expect(pendingForDocument.rows.length).toBe(1)
+      expect(pendingForDocument.rows[0].engine_instance_id).toBe(next.id)
+    },
+  )
+
   it(
     '判据 IV fail-closed (implementer choice, flagged for owner registration): a document with no ' +
       '§2-G2 anchor is NOT closed as `expired` — the named code CANCEL_ROUND_WINDOW_ANCHOR_MISSING ' +
