@@ -91,6 +91,10 @@ removed after an independent zero-database/zero-backend census.
 
 This proves explicit unlock across a graceful process restart, not interruption
 mid-restore, production deployment, customer NAS permissions or automatic capture.
+Fresh Sol high read-only review of the driver and matching source hashes found
+no P1/P2. This driver covers unauthenticated refusal and owner-admin success, not
+authenticated non-owner/cross-tenant negatives. Residue census is run-owned, not
+a claim about all host processes. The review did not independently run tests.
 The driver is an explicit local acceptance command, not a remotely collected CI
 test. New unit suites are collected by the existing default backend test lane.
 

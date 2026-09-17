@@ -65,7 +65,8 @@ no independently supplied release callback can substitute for it. Old admission
 release cannot revoke a later session epoch. Release requires a successful worker
 drain, and the server invokes it only after the accepted HTTP and completion drains.
 
-Implementation and focused synthetic process tests now exist. Full successful
-launcher-to-HTTP recovery plus process restart against isolated PostgreSQL remains
-a release gate; the prior injected-server and backup drill are not substitutes.
+Implementation, focused tests and actual launcher-to-HTTP recovery plus graceful
+restart against isolated PostgreSQL now pass; see the SHA-bound verification
+report. Remote exact-head CI remains a release gate. In-flight crash/takeover and
+customer-environment verification are not established by this local proof.
 Capture policy is separately PROPOSED, not activated.
