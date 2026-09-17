@@ -1,19 +1,31 @@
 # Approval Cancel-Round — Phase 1 (C-1) Design (2026-09-18)
 
-Branch `feat/approval-cancel-round-phase1`, HEAD at time of writing `a32b2e015`. Source of authority:
-`approval-change-request-design-lock-draft-20260915.md` v5.9 (RATIFIED 2026-09-18; see its own
-抬头 RATIFY record, quoted verbatim in §7 below — this document does not restate or paraphrase it).
-Goal definition: `goal-three-locks-full-implementation-20260918.md` (slice "C 撤销 / C-1 合同层").
-Supplementary gate checklist: `impl-supplementary-gate-checklist-20260918.md`.
+Branch `feat/approval-cancel-round-phase1`, HEAD as of the round-8 fix pass (2026-09-18, see the
+verification MD's Part G) `7ef8e610e08b23181aece95ac4c82f4cde1f082f`. (Originally written at HEAD
+`a32b2e015`; this document has been edited by several later passes — Part F's fix and this one among
+them — without this header line being kept current each time, which is itself a finding the
+verification MD's Part F1 and Part G's G3 record; see those for the specific citations that drifted.)
+Source of authority: `approval-change-request-design-lock-draft-20260915.md` v5.9 (RATIFIED
+2026-09-18; see its own 抬头 RATIFY record, quoted verbatim in §7 below — this document does not
+restate or paraphrase it). Goal definition: `goal-three-locks-full-implementation-20260918.md`
+(slice "C 撤销 / C-1 合同层"). Supplementary gate checklist:
+`impl-supplementary-gate-checklist-20260918.md`.
 
 All lock line-number citations below use the form `lock:NNN`, meaning "line NNN of the lock file as
 it stands today" (the lock's own §-numbers are the stable identity; line numbers can drift between
 lock revisions, so every citation here was re-read against the copy on disk at the time of writing,
-not carried over from an older draft). All *code* file:line citations are against **this worktree's
-actual tree at HEAD `a32b2e015`**, re-derived by `grep`/`sed`, not copied from the lock's own
-evidence table (§10/§14), which is pinned to the lock's pre-implementation baseline `f274316f6` and
-is now stale by `+447` lines in `ApprovalProductService.ts` alone (`git diff --stat
-89f1ecdee...HEAD`). Where a lock citation gives a baseline line number for context, this is marked.
+not carried over from an older draft). All *code* file:line citations **in this document's own
+prose** were re-derived by `grep`/`sed` against the tree at the HEAD named above at the time each
+passage was last edited, not copied from the lock's own evidence table (§10/§14), which is pinned to
+the lock's pre-implementation baseline `f274316f6` and was stale by `+447` lines in
+`ApprovalProductService.ts` alone as of `a32b2e015` (`git diff --stat 89f1ecdee...HEAD`). This
+claim covers citations written into *this file*; it is not a claim that every `file:line` comment
+anywhere in the source tree has been swept for accuracy — that broader sweep is what
+`impl-gate-C-slice1-round2-20260918.md` did mechanically (121 citations across this document and the
+verification MD), and it is what found the two source-code comment pointers this document does not
+itself contain (fixed instead in `ApprovalBridgeService.ts` and `apps/web/src/approvals/api.ts`
+directly; see verification MD Part G, §G3). Where a lock citation gives a baseline line number for
+context, this is marked.
 
 ## 1. Scope of this slice (C-1 合同层)
 
