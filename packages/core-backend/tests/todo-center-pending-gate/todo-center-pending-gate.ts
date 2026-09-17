@@ -7,7 +7,7 @@
  * REPLACEMENT semantics in `AuthService.resolveRbacProfile`, `user_roles`/`user_permissions` reads
  * — is never exercised there), `GET /api/approvals/pending-count` must return the fourteen
  * lock-mandated golden values in §5's A0 row for the fourteen viewer classes (①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬). This
- * step adds class ⑩; ⑪⑫⑬ remain deferred (see the fixture-plumbing docblock below).
+ * step adds class ⑪; ⑫⑬ remain deferred (see the fixture-plumbing docblock below).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -75,8 +75,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧⑨⑩ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
-// these classes and is deferred to a later step, along with classes ⑪⑫⑬).
+// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧⑨⑩⑪ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
+// these classes and is deferred to a later step, along with classes ⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -146,18 +146,21 @@ const NAMESPACE_ADMISSION_CLASS_6 = 'attendance'
 // and is left for the platform-authorization line (§7-6 territory), not adjudicated here.
 const SOURCE_QUEUE_PERMISSION_CODE_CLASS_6 = `attendance:approve-c6-${suffix}`
 
-// FORWARD NOTE for whichever step adds class ⑪ (its own instance, `('user', id)` PLUS
-// `('role','employee')` on itself): design-lock §5 A0 writes ⑪'s role seat as the bare literal
-// `'employee'`. Every OTHER `users.role='employee'` class already seeded here (①④⑤⑥, and later
-// ⑦⑨⑩⑫⑬) resolves `resolveApprovalActorRoles(req)` to `['employee']` too — seeding ⑪'s role-type
-// seat as literal `'employee'` would therefore match ALL of their `('role', $2)` arms, inflating ①
-// 1→2, ④ 0→1, ⑥ 1→2, exactly the ②/③′ cross-contamination class this file's own `ROLE_NAME_CLASS_2`
-// comment (above) already worked around. ⑪ MUST use its own suffixed role string for BOTH its
-// `users.role` column and its `('role', <string>)` seat's `assignee_id` (mirroring `ROLE_NAME_CLASS_2`
-// / `ROLE_NAME_CLASS_3B`), never the bare `'employee'` literal, even though the lock text writes it
-// unsuffixed — `git grep -n "'employee'"` under `src/` turns up no RBAC-load-bearing read of that
+// **Deliberate, flagged divergence from the lock's literal wording — surfaced for the Opus gate,
+// not silently absorbed.** §5 A0 ⑪ writes its role-type seat as the bare literal `'employee'` (its
+// own `users.role` value, since ⑪ is otherwise an ordinary employee viewer). Every OTHER
+// `users.role='employee'` class already seeded in this file (①④⑤⑥⑦⑨⑩, and ⑫⑬ later) resolves
+// `resolveApprovalActorRoles(req)` to `['employee']` too — seeding ⑪'s role-type seat as literal
+// `'employee'` would therefore match ALL of their `('role', $2)` arms, inflating ① 1→2, ④ 0→1, ⑥
+// 1→2, exactly the ②/③′ cross-contamination class this file's own `ROLE_NAME_CLASS_2` comment
+// (above) already worked around. Fix: keep the MECHANISM verbatim (⑪ is still an employee-shaped
+// viewer with a `('role', <its own role string>)` seat matching its own resolved role) but use its
+// own suffixed role string for BOTH its `users.role` column and its `('role', <string>)` seat's
+// `assignee_id` (mirroring `ROLE_NAME_CLASS_2`/`ROLE_NAME_CLASS_3B`), never the bare `'employee'`
+// literal — `git grep -n "'employee'"` under `src/` turns up no RBAC-load-bearing read of that
 // exact string (unlike `role_id='admin'`), so suffixing it changes nothing the query under test
 // reads.
+const ROLE_NAME_CLASS_11 = `employee-c11-${suffix}`
 
 function pool(): Pool {
   return poolManager.get()
@@ -481,6 +484,14 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // keeping it separate means the eventual "drop the join key" mutation for ⑦/⑧ cannot brush past
   // ⑩'s independently-zeroing `is_active = FALSE` row by coincidence.
   const v10 = viewer('c10-inactive-seat', 'employee')
+  // Class ⑪ — its OWN viewer, on its OWN instance, holding TWO simultaneously-active seats: a
+  // `('user', id)` seat AND a `('role', <its own suffixed role string>)` seat (see
+  // `ROLE_NAME_CLASS_11`'s own docblock above for why the role string is suffixed rather than the
+  // lock's literal `'employee'`), both at the SAME node key (the instance's `current_node_key`) ⇒
+  // count 1, not 2: the badge query is `COUNT(DISTINCT a.instance_id)` — two qualifying seats on
+  // ONE instance still dedupe to one instance (design-lock §5 A0 ⑪). The "1 row, not 2" half of
+  // this same fixture is judging criterion C's, not A0's — A0 only pins the scalar count.
+  const v11 = viewer('c11-double-active-seat', ROLE_NAME_CLASS_11)
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -564,14 +575,27 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null, // filled in beforeAll
     currentNodeKey: `todo-center-pending-gate-node-10-${suffix}`,
   }
+  // Class ⑪'s own instance — `status='pending'`, non-handler published definition (needs a
+  // non-null `published_definition_id`, per design-lock §3.0 S6: "需要非空 `published_definition_id`
+  // 的类 = …⑪…"). Own, distinct node key — BOTH of ⑪'s two seats (below) target this SAME key,
+  // matching the instance's `current_node_key` (design-lock §3.0 S7: "`current_node_key` = 该类席位
+  // 的 `node_key`"). Not `SHARED_SEAT_NODE_KEY`: ⑪ is not part of the ①②⑥⑦-vs-⑧ join-key
+  // population those classes pin.
+  const instance11: InstanceFixture = {
+    id: `todo-center-pending-gate-i11-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: `todo-center-pending-gate-node-11-${suffix}`,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id, v10.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id, instance10.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id, v10.id, v11.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id, instance10.id, instance11.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9, v10]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9, v10, v11]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -605,6 +629,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     instance8.publishedDefinitionId = await seedHandlerPublishedDefinition('c8', SHARED_SEAT_NODE_KEY)
     instance9.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c9')
     instance10.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c10')
+    instance11.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c11')
 
     await seedInstance(instance1)
     await seedInstance(instance2)
@@ -617,6 +642,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     await seedInstance(instance8)
     await seedInstance(instance9)
     await seedInstance(instance10)
+    await seedInstance(instance11)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -675,6 +701,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       nodeKey: instance10.currentNodeKey!,
       isActive: false,
     })
+    // Class ⑪'s TWO simultaneously-active seats on its ONE instance, both at the same node key —
+    // a `('user', id)` seat and a `('role', <ROLE_NAME_CLASS_11>)` seat (design-lock §5 A0 ⑪: two
+    // active seats, `count` still dedupes to 1 via `COUNT(DISTINCT a.instance_id)`).
+    await seedAssignment({
+      instanceId: instance11.id,
+      assignmentType: 'user',
+      assigneeId: v11.id,
+      nodeKey: instance11.currentNodeKey!,
+    })
+    await seedAssignment({
+      instanceId: instance11.id,
+      assignmentType: 'role',
+      assigneeId: ROLE_NAME_CLASS_11,
+      nodeKey: instance11.currentNodeKey!,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
 
@@ -701,6 +742,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
           instance8.publishedDefinitionId,
           instance9.publishedDefinitionId,
           instance10.publishedDefinitionId,
+          instance11.publishedDefinitionId,
         ]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
@@ -928,6 +970,23 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(body).toHaveProperty('count')
       expect(body.count).toBe(0)
       expect(body.unreadCount).toBe(0)
+    })
+
+    it('class ⑪ — own viewer, own instance, TWO simultaneously-active seats (user + role) ⇒ count 1 (DISTINCT dedupes, not 2)', async () => {
+      const token = await devToken(baseUrl, v11.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v11.email)
+      expect(me.username).toBe(v11.username)
+      expect(me.name).toBe(v11.name)
+      // Role assertion deliberately does NOT read `'employee'` literally — see
+      // `ROLE_NAME_CLASS_11`'s own docblock for why this class's `users.role` value is suffixed.
+      expect(me.role).toBe(ROLE_NAME_CLASS_11)
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(1)
     })
   })
 })
