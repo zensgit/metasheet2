@@ -1646,13 +1646,13 @@ export async function listPendingApprovalsForApprover(
  * `cancel_round` (design lock §14.3 #12,
  * approval-change-request-design-lock-draft-20260915.md v5.9): the backend's
  * `rejectIfCancelRound` guard on `bulkReassignApprovals` (`APS:8561`) reports a
- * skipped seat for an instance that is mid cancel-round via this literal —
- * ADDED HERE AHEAD OF the backend union member landing (tracked separately;
- * `ApprovalProductService.ts`'s own `ApprovalBulkReassignSkipReason` does not
- * declare it yet), so the readFileSync sync-pin in
- * `apps/web/tests/approvalBatchTransferView.spec.ts` is EXPECTED to fail until
- * that backend PR lands — the pin is bidirectional, and an FE label with no
- * server literal reds it exactly as an unmapped server literal would.
+ * skipped seat for an instance that is mid cancel-round via this literal.
+ * `ApprovalProductService.ts`'s own `ApprovalBulkReassignSkipReason` now
+ * declares it too (both landed on this branch), so the readFileSync sync-pin
+ * in `apps/web/tests/approvalBatchTransferView.spec.ts` compares this literal
+ * against the backend union byte-for-byte — the pin is bidirectional, and an
+ * FE label with no server literal reds it exactly as an unmapped server
+ * literal would.
  */
 export type ApprovalBulkReassignSkipReason =
   | 'not-found'
