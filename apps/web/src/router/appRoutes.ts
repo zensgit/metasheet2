@@ -375,7 +375,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-templates',
     name: 'approval-template-list',
     component: () => import('../views/approval/TemplateCenterView.vue'),
-    meta: { title: 'Approval Templates', titleZh: '审批模板', requiresAuth: true }
+    meta: { title: 'Approval Templates', titleZh: '审批表单', requiresAuth: true }
   },
   {
     path: '/approval-delegations',
@@ -395,19 +395,19 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-templates/new',
     name: 'approval-template-create',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),
-    meta: { title: 'New Approval Template', titleZh: '新建审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'New Approval Template', titleZh: '新建审批表单', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     path: '/approval-templates/:id/edit',
     name: 'approval-template-edit',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),
-    meta: { title: 'Edit Approval Template', titleZh: '编辑审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'Edit Approval Template', titleZh: '编辑审批表单', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     path: '/approval-templates/:id',
     name: 'approval-template-detail',
     component: () => import('../views/approval/TemplateDetailView.vue'),
-    meta: { title: 'Template Detail', titleZh: '模板详情', requiresAuth: true }
+    meta: { title: 'Template Detail', titleZh: '表单详情', requiresAuth: true }
   },
   {
     path: '/approvals/metrics',

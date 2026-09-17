@@ -11,6 +11,7 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  buildUpdateTemplatePayload,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
   draftFromTemplate,
@@ -68,6 +69,15 @@ const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
+// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3; lazy-fetch corrected round 3,
+// gate 2 P1-1): CategoryCandidateInput.vue calls this lazily, on the field's first focus/open —
+// never on mount (see the component's own doc comment for why). The mock module previously omitted
+// this export entirely, so any mounted instance that DID reach the fetch had its bare `catch {}`
+// silently swallow a vitest "no export defined on mock" error and the dropdown always rendered zero
+// candidates. Default resolves to a small non-empty list so tests that focus/open the field can
+// observe both "the endpoint was called" (C1 first conjunct) and "a fetched candidate renders"
+// without each test having to configure it individually.
+const listTemplateCategoriesSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
@@ -101,6 +111,7 @@ vi.mock('../src/approvals/api', () => ({
     return template
   },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
+  listTemplateCategories: () => listTemplateCategoriesSpy(),
 }))
 
 vi.mock('element-plus', () => ({
@@ -749,14 +760,22 @@ describe('approval template authoring helpers', () => {
 
   // P1-A0 publish-payload-shape pin — basic-info fields never travel through `publishTemplate`
   // (which sends only `{ policy }`, see `approval-template-authoring-policy-carrier.test.ts`); they
-  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (identical function,
-  // `templateAuthoring.ts`) at save time. This slice touches no basic-info persistence code — this
-  // pin exists to prove that stays true. A mutation renaming/dropping/reshaping a basic-info payload
-  // key reds either assertion below. NOTE for future authors: the `Object.keys(...).sort()`
-  // assertion is a full shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated
-  // later slice (e.g. a new top-level payload field) — that is expected; update the expected key
-  // list rather than assume this test caught a regression.
-  it('P1-A0: pins the exact basic-info shape of the create/update payload (no key renamed, dropped, or reshaped)', () => {
+  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (`templateAuthoring.ts`)
+  // at save time. This slice touches no basic-info persistence code — this pin exists to prove that
+  // stays true. A mutation renaming/dropping/reshaping a basic-info payload key reds either
+  // assertion below. NOTE for future authors: the `Object.keys(...).sort()` assertion is a full
+  // shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated later slice (e.g. a
+  // new top-level payload field) — that is expected; update the expected key list rather than
+  // assume this test caught a regression.
+  //
+  // Correction (remedy round 3, gate 2 P3-3): the two builders are NOT "an identical function" —
+  // since approval-form-ux-slice1 §1.2, `buildUpdateTemplatePayload` is `buildCreateTemplatePayload`
+  // with `key` destructured off (`templateAuthoring.ts:2573-2574`). The two pins below are
+  // therefore separate tests: the CREATE pin (full shape, key included) and the UPDATE pin (full
+  // shape, key absent) — the update pin is a full-shape assertion, not only the key-absence check
+  // that existed before this round (a mutation that added an unrelated field to the update payload,
+  // e.g. `category` staying an extra un-omitted field, previously reds nothing here).
+  it('P1-A0: pins the exact basic-info shape of the CREATE payload (no key renamed, dropped, or reshaped)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'travel'
     draft.name = '出差审批'
@@ -787,6 +806,43 @@ describe('approval template authoring helpers', () => {
       visibilityScope: payload.visibilityScope,
     }).toEqual({
       key: 'travel',
+      name: '出差审批',
+      category: '差旅',
+      description: '跨部门出差需要审批',
+      slaHours: 24,
+      visibilityScope: { type: 'dept', ids: ['dept_a', 'dept_b'] },
+    })
+  })
+
+  it('P1-A0: pins the exact basic-info shape of the UPDATE payload (identical to CREATE minus key)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'travel'
+    draft.name = '出差审批'
+    draft.category = '差旅'
+    draft.description = '跨部门出差需要审批'
+    draft.slaHoursText = '24'
+    draft.visibilityType = 'dept'
+    draft.visibilityIdsText = 'dept_a, dept_b'
+
+    const payload = buildUpdateTemplatePayload(draft)
+
+    expect(Object.keys(payload).sort()).toEqual([
+      'approvalGraph',
+      'category',
+      'description',
+      'formSchema',
+      'name',
+      'slaHours',
+      'visibilityScope',
+    ])
+    expect(Object.prototype.hasOwnProperty.call(payload, 'key')).toBe(false)
+    expect({
+      name: payload.name,
+      category: payload.category,
+      description: payload.description,
+      slaHours: payload.slaHours,
+      visibilityScope: payload.visibilityScope,
+    }).toEqual({
       name: '出差审批',
       category: '差旅',
       description: '跨部门出差需要审批',
@@ -1235,6 +1291,8 @@ describe('TemplateAuthoringView', () => {
     publishTemplateSpy.mockReset()
     getTemplateSpy.mockReset()
     dryRunApprovalConditionFormulaSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue(['差旅', '采购'])
     pushSpy.mockClear()
     replaceSpy.mockClear()
     createTemplateSpy.mockImplementation(async (payload) => ({
@@ -1301,7 +1359,6 @@ describe('TemplateAuthoringView', () => {
   it('reveals and focuses field validation errors when saving from another section', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'travel')
     setInput('approval-template-name', '出差审批')
     ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
     await flushUi()
@@ -1330,14 +1387,18 @@ describe('TemplateAuthoringView', () => {
   it('creates a draft through the existing backend endpoint wrapper path', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'travel')
+    // approval-form-ux-slice1 (20260916 design §1.2): `key` is read-only and already seeded at
+    // draft-creation time — re-pinned from a hand-typed literal to the seeded/displayed value, same
+    // discriminating power (POST still round-trips whatever key the form currently holds).
+    const seededKey = (container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value
+    expect(seededKey).toBeTruthy()
     setInput('approval-template-name', '出差审批')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = createTemplateSpy.mock.calls[0]?.[0] as any
-    expect(payload.key).toBe('travel')
+    expect(payload.key).toBe(seededKey)
     expect(payload.name).toBe('出差审批')
     expect(payload.approvalGraph.nodes.map((node: any) => node.key)).toEqual(['start', 'approval_1', 'end'])
     expect(replaceSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created/edit' })
@@ -1350,7 +1411,8 @@ describe('TemplateAuthoringView', () => {
   it('P1-A0: every basic-info control commits its typed value through to the save payload (positive control)', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'travel')
+    // key is read-only/seeded at creation (approval-form-ux-slice1) — capture it instead of typing.
+    const seededKey = (container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value
     setInput('approval-template-name', '出差审批')
     setInput('approval-template-category', '差旅')
     setInput('approval-template-sla-hours', '24')
@@ -1366,7 +1428,7 @@ describe('TemplateAuthoringView', () => {
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = createTemplateSpy.mock.calls[0]?.[0] as any
-    expect(payload.key).toBe('travel')
+    expect(payload.key).toBe(seededKey)
     expect(payload.name).toBe('出差审批')
     expect(payload.category).toBe('差旅')
     expect(payload.slaHours).toBe(24)
@@ -1374,16 +1436,56 @@ describe('TemplateAuthoringView', () => {
     expect(payload.visibilityScope).toEqual({ type: 'dept', ids: ['dept_a', 'dept_b'] })
   })
 
+  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4; lazy-fetch corrected
+  // round 3, gate 2 P1-1): the category field must actually be wired to
+  // `GET /api/approval-templates/categories`, not merely still work as a free-text input if the
+  // wiring is ripped out (a plain `<el-input>` renders identically and passes every OTHER test in
+  // this file — see the gate's G-M6 mutation, which reverted both call sites to `<el-input>` and
+  // found zero red tests before this pin existed). The fetch must NOT fire on mount (a mount-time
+  // fetch reds the required `approval-browser-verify` Playwright lane — see
+  // CategoryCandidateInput.vue's own doc comment); it fires on the field's first focus. This
+  // observes both: no call right after mount, then a call on focus, then confirms a fetched
+  // candidate actually reaches the rendered dropdown (proving the round-trip end-to-end, not just
+  // that SOME function got invoked at import time).
+  it('C1: the category field does not fetch on mount, fetches from listTemplateCategories on first focus, and renders one', async () => {
+    await mountView()
+    await flushUi()
+    expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
+
+    const categoryInput = container!.querySelector('[data-testid="approval-template-category"]') as HTMLInputElement
+    categoryInput.dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    const list = container!.querySelector('[data-testid="category-candidate-list"]')
+    expect(list?.textContent).toContain('差旅')
+  })
+
   // P1-A0 validation-count derivation — the 基础信息 step-nav badge reads `.length` off
   // `validateTemplateBasicInfo(draft, unsupportedReason)` (`TemplateAuthoringView.vue`
   // `basicInfoIssueCount`). This exercises the LIVE component derivation (not the pure helper in
   // isolation — a helper-only test would pass even if the view's binding were broken/hardcoded), at
   // three states: 2 known issues, 0 issues, 1 different known issue. A mutation that hardcodes the
-  // badge number or drops `.length` fails at least one of these three assertions.
+  // badge number, clamps it, or drops `.length` fails at least one of these three assertions.
+  //
+  // Re-pinned (approval-form-ux-slice1, 20260916 design §1.2/A4): `key` is now seeded at
+  // draft-creation time, so a brand-new draft no longer carries the 模板 Key 必填 issue — this is
+  // the same badge this slice's A4 acceptance requires to NOT show that issue for an unsaved new
+  // draft. That alone would leave State 1 at a single typed issue (blank `name`), which is
+  // insufficient to distinguish a genuinely-derived `.length` from a hand-counted/clamped constant
+  // (e.g. `Math.min(basicInfoIssues.value.length, 1)` reads identically to a real 1-issue count).
+  // Re-pinned again (remedy round 1, gate condition 3, 20260916): State 1 additionally types an
+  // invalid SLA before the first read, so it observes TWO simultaneous issues (blank name + bad
+  // SLA text) — a count that a `Math.min(..., 1)` clamp cannot reproduce. State 2 now clears both
+  // issues (fills name AND repairs the SLA text) to reach 0, and State 3 reintroduces the SLA
+  // issue alone to prove the count still tracks the CURRENT typed array, not a first-seen value.
   it('P1-A0: the 基础信息 step-nav issue count is DERIVED from typed issues, not hand-counted', async () => {
     await mountView()
 
-    // State 1: brand-new draft — key + name both empty → exactly 2 typed issues.
+    // State 1 (A4 + discriminating power): brand-new draft — key is pre-seeded (non-blank), name
+    // is empty, and SLA is typed as invalid text → exactly 2 typed issues, neither of them the key
+    // one. A clamp/hand-count that caps at 1 cannot reproduce '2 项不完善'.
+    setInput('approval-template-sla-hours', 'abc')
+    await flushUi()
     let badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge?.textContent?.trim()).toBe('2 项不完善')
     // The count also folds into the step button's aria-label (it OVERRIDES inner text for
@@ -1391,17 +1493,19 @@ describe('TemplateAuthoringView', () => {
     const basicStepButton = container!.querySelector('[data-testid="approval-template-section-basic"]')
     expect(basicStepButton?.getAttribute('aria-label')).toContain('2 项不完善')
 
-    // State 2: fill both required fields → count derives to 0, badge disappears entirely (not "0
-    // 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for a zero state).
-    setInput('approval-template-key', 'travel')
+    // State 2: fill the name AND repair the SLA text → count derives to 0, badge disappears
+    // entirely (not "0 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for
+    // a zero state).
     setInput('approval-template-name', '出差审批')
+    setInput('approval-template-sla-hours', '24')
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge).toBeNull()
     expect(basicStepButton?.getAttribute('aria-label')).not.toContain('项不完善')
 
-    // State 3: introduce exactly ONE different issue (bad SLA text) → count derives to 1, proving
-    // the badge tracks the CURRENT typed array rather than being stuck at its first-seen value.
+    // State 3: introduce exactly ONE different issue (bad SLA text again) → count derives to 1,
+    // proving the badge tracks the CURRENT typed array rather than being stuck at its first-seen
+    // value (and rules out a badge that merely never goes back below 2 once it has been there).
     setInput('approval-template-sla-hours', 'abc')
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
@@ -1476,7 +1580,7 @@ describe('TemplateAuthoringView', () => {
     expect(refusalIdx).toBeGreaterThan(-1)
     expect(validateIdx).toBeGreaterThan(-1)
     expect(refusalIdx).toBeLessThan(validateIdx)
-    expect(executable).toMatch(/模板尚未加载成功/)
+    expect(executable).toMatch(/表单尚未加载成功/)
     // …and the refusal actually RETURNS (gate NIT-8 on 696c7459a3, measured: dropping only the
     // `return null` kept this pin green at 137/137 while the defence stopped defending — the if
     // fired, set the message, and fell straight through into the create branch anyway).
@@ -1699,11 +1803,22 @@ describe('TemplateAuthoringView', () => {
     expect(createTemplateSpy).toHaveBeenCalledTimes(1) // unchanged from control 1
   })
 
-  it('B0 (gate P2-1 on 9948f3be5a): saving an EXISTING template with cleared key/name BLOCKS with 必填 — it must never be silently re-keyed', async () => {
+  it('B0 (gate P2-1 on 9948f3be5a; re-pinned onto approval-form-ux-slice1 §1.2 for A6): saving an EXISTING template never sends `key` in the PATCH body, AND cleared key/name still BLOCKS with 必填 — it must never be silently re-keyed', async () => {
     // The ungated seeder silently re-keyed an existing template to a draft_* placeholder and
     // renamed it 未命名审批 on save — and template.key is the business_key stamped on every
     // initiated instance. Proven by the gate with an old-implementation control; pinned here:
     // seeding is for NEW drafts only, existing templates block exactly as they did before B0.
+    //
+    // approval-form-ux-slice1 (20260916 design §1.2/§5-D1): the key input is now read-only, so a
+    // real user cannot reproduce "cleared key" through the UI any more — the invariant this gate
+    // protects ("an existing template's key is never silently replaced by a save") is now ALSO
+    // enforced structurally: PATCH never carries `key` at all (buildUpdateTemplatePayload), so the
+    // column cannot change regardless of what `draft.key` holds. The block below pins THAT
+    // mechanism first (mutation M1: reintroducing `key` in the update payload reds this). The
+    // original clearing scenario is kept AFTER it, unmodified — the pure-validator invariant
+    // ('模板 Key 必填'/'模板名称必填' still block an existing template's save) is untouched by this
+    // slice and remains a valid defense-in-depth regression pin even though the key half of it is
+    // no longer keyboard-reachable.
     setRouteParams({ id: 'tpl_seed_gate' })
     getTemplateSpy.mockResolvedValue(buildTemplate({}))
     await mountView()
@@ -1712,6 +1827,31 @@ describe('TemplateAuthoringView', () => {
     const keyInput = container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement
     const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
     expect(keyInput.value).not.toBe('')
+    expect(keyInput.readOnly).toBe(true)
+
+    // C1 second conjunct (approval-form-ux-slice1 design §3.3, gate condition 4): type an
+    // off-list category — NOT one of the fetched candidates — before the ordinary save below, to
+    // pin that (a) the candidate wiring is genuinely allow-create (never degrades to a closed
+    // set), and (b) `buildUpdateTemplatePayload`'s new omit-destructure carries `category` through
+    // to the PATCH body rather than silently dropping it (see the gate's G-M5 mutation, which
+    // added `category` to that destructure's omit list and found zero red tests before this pin
+    // existed — a newly-typed category would then vanish from every save with no error).
+    setInput('approval-template-category', '临时借款')
+
+    // NEW mechanism (A6/A1): an ordinary, untouched save of an existing template — PATCH must not
+    // carry `key` at all, not merely carry the same value.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const normalSavePayload = updateTemplateSpy.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(normalSavePayload, 'key')).toBe(false)
+    expect(normalSavePayload.category).toBe('临时借款')
+    updateTemplateSpy.mockClear()
+
+    // ORIGINAL mechanism (pre-slice1 gate P2-1), kept verbatim: the pure validator still blocks a
+    // genuinely blank key/name on an existing template, even though a real user can no longer
+    // reach a blank key through this readonly input (this exercises the model layer directly, the
+    // same way the 445-505 unit tests exercise validateTemplateBasicInfo directly).
     for (const input of [keyInput, nameInput]) {
       input.value = ''
       input.dispatchEvent(new Event('input'))
@@ -2467,7 +2607,6 @@ describe('TemplateAuthoringView', () => {
     ) as HTMLSelectElement
     field.value = 'field_1'
     field.dispatchEvent(new Event('change'))
-    setInput('approval-template-key', 'conditional')
     setInput('approval-template-name', '条件审批')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -2496,7 +2635,6 @@ describe('TemplateAuthoringView', () => {
     ) as HTMLSelectElement
     joinMode.value = 'any'
     joinMode.dispatchEvent(new Event('change'))
-    setInput('approval-template-key', 'parallel')
     setInput('approval-template-name', '并行审批')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -2933,7 +3071,6 @@ describe('TemplateAuthoringView', () => {
   it('publishes with an explicit allowRevoke policy after saving', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
     // B2-03: publish now opens the pre-flight checklist FIRST; the real persist/publish sequence
     // only runs once the dialog's own confirm button is clicked (a fresh linear draft with just
@@ -2974,7 +3111,6 @@ describe('TemplateAuthoringView', () => {
   // click -> persistDraft -> publish sequence).
   it('CREATE mode: unchecking allowRevoke and publishing in the SAME sitting reaches the server (was silently discarded)', async () => {
     await mountView()
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
 
     const checkbox = container!.querySelector('[data-testid="approval-template-allow-revoke"]') as HTMLInputElement
@@ -3047,7 +3183,6 @@ describe('TemplateAuthoringView', () => {
   it('B3-09: publishes with a trimmed note when one is typed in the checklist dialog', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
     ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -3066,7 +3201,6 @@ describe('TemplateAuthoringView', () => {
   it('B3-09: reopening the publish dialog clears the previous note; whitespace-only sends no note key', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
 
     // First open: type a note, then close WITHOUT publishing.
@@ -3095,9 +3229,13 @@ describe('TemplateAuthoringView', () => {
     expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', { policy: { allowRevoke: true } })
   })
 
-  it('B2-03: an invalid draft (blank key/name) opens the publish checklist with a failing "表单字段" item and disables the confirm button', async () => {
+  it('B2-03: an invalid draft (blank name) opens the publish checklist with a failing "表单字段" item and disables the confirm button', async () => {
     await mountView()
-    // leave key/name blank — validateTemplateFormFields fails ('模板 Key 必填' / '模板名称必填').
+    // approval-form-ux-slice1 (20260916 design §1.2): `key` is now seeded at DRAFT-CREATION time
+    // (createSeededTemplateDraft), so a fresh draft's key is never blank — only `name` is left
+    // blank, which still fails validateTemplateFormFields ('模板名称必填'). Re-pinned from the
+    // pre-slice1 blank-key/blank-name premise onto the ONE field that can still be blank on a
+    // fresh draft; the checklist-item-fails-and-blocks-confirm mechanism under test is unchanged.
 
     ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -3108,7 +3246,8 @@ describe('TemplateAuthoringView', () => {
     expect(fieldsItem).not.toBeNull()
     expect(fieldsItem!.getAttribute('data-ok')).toBe('false')
     expect(fieldsItem!.textContent).toContain('✗')
-    expect(fieldsItem!.textContent).toContain('模板 Key 必填')
+    expect(fieldsItem!.textContent).not.toContain('模板 Key 必填')
+    expect(fieldsItem!.textContent).toContain('模板名称必填')
 
     const confirmButton = dialog!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
     expect(confirmButton.disabled).toBe(true)
@@ -3229,7 +3368,6 @@ describe('TemplateAuthoringView', () => {
 
     it('selecting a tier (immediate-apply, no separate save transaction) and publishing carries autoApproval alongside allowRevoke', async () => {
       await mountView()
-      setInput('approval-template-key', 'purchase')
       setInput('approval-template-name', '采购审批')
       ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
       await flushUi()
@@ -3381,7 +3519,6 @@ describe('TemplateAuthoringView', () => {
   it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'leave')
     setInput('approval-template-name', '请假审批')
     const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
     mergeToggle.checked = true
@@ -4141,7 +4278,6 @@ describe('TemplateAuthoringView', () => {
       const chip = container!.querySelector('[data-testid="approval-form-palette-chip-text"]') as HTMLElement
       chip.click()
       await flushUi()
-      setInput('approval-template-key', 'expense')
       setInput('approval-template-name', '费用审批')
       await flushUi()
 

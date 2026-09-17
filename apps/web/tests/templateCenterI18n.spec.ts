@@ -20,7 +20,7 @@
  * entry to Chinese reddens only the matching 'en' assertion + the CJK guard sweep". That was
  * FALSE for most keys. The mount tests below only assert the STRINGS THEY RENDER, and 13 of the
  * 42 EN values (and 16 of the 42 ZH values) are never rendered by any test here — e.g. setting
- * `EN.colName` to '模板名称' or `EN.visibilityAll` to '' reddened nothing across this spec,
+ * `EN.colName` to '表单名称' or `EN.visibilityAll` to '' reddened nothing across this spec,
  * approvalCenterDesktopEmptyTextI18n, approvalTemplateCenterCategory, templateGalleryFilter and
  * statusTag (verified by mutation). The CJK guard does NOT cover it either: it scans
  * TemplateCenterView.vue, not templateCenterLabels.ts. `EN: Record<keyof typeof ZH, string>`
@@ -463,10 +463,10 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     ]
     const root = await mountView()
 
-    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批表单')
     expect(root.querySelector('[data-el-select] option')?.textContent).toBe('全部分类')
-    expect(root.querySelector('[data-el-input]')?.getAttribute('placeholder')).toBe('搜索模板名称')
-    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('[data-el-input]')?.getAttribute('placeholder')).toBe('搜索表单名称')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建表单')
     expect(root.querySelector('[data-testid="template-center-delegations-link"]')?.textContent).toBe('委托管理')
 
     const tabLabels = Array.from(root.querySelectorAll('[data-tab-pane]')).map((p) => p.getAttribute('data-tab-label'))
@@ -491,7 +491,7 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     setLocale('zh-CN')
     mockTemplates.value = []
     const root = await mountView()
-    expect(root.querySelector('[data-el-empty]')?.textContent).toBe('暂无审批模板，点击新建模板开始')
+    expect(root.querySelector('[data-el-empty]')?.textContent).toBe('暂无审批表单，点击新建表单开始')
   })
 
   it('requester gallery (non-manager) renders English chrome, including the start button and empty state', async () => {
@@ -524,7 +524,7 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     if (app) app.unmount()
     mockTemplates.value = []
     const root2 = await mountView()
-    expect(root2.querySelector('[data-testid="template-center-gallery-empty"]')?.textContent?.trim()).toBe('暂无可用的审批模板')
+    expect(root2.querySelector('[data-testid="template-center-gallery-empty"]')?.textContent?.trim()).toBe('暂无可用的审批表单')
   })
 
   it('archive dialog title/buttons and the success toast are English under "en"', async () => {
@@ -555,12 +555,12 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     root.querySelector<HTMLButtonElement>('[data-testid="template-center-archive-button"]')!.click()
     await flushUi()
 
-    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用模板')
+    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用表单')
     expect((confirmSpy.mock.calls[0][2] as any).confirmButtonText).toBe('停用')
     expect((confirmSpy.mock.calls[0][2] as any).cancelButtonText).toBe('取消')
 
     await flushUi()
-    expect(elSuccessSpy).toHaveBeenCalledWith('已停用模板')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已停用表单')
   })
 
   it('unarchive dialog title/buttons and the success toast are English under "en"', async () => {
@@ -593,7 +593,7 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     const root2 = await mountView()
     root2.querySelector<HTMLButtonElement>('[data-testid="template-center-clone-button"]')!.click()
     await flushUi()
-    expect(elSuccessSpy).toHaveBeenCalledWith('已克隆模板：出差申请 (副本)')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已克隆表单：出差申请 (副本)')
   })
 
   // Round-2 fix (C1): every test above seeds the locale BEFORE mounting, so none of them can
@@ -608,8 +608,8 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     setLocale('zh-CN')
     mockTemplates.value = [buildTemplate({ id: 'tpl_pub', status: 'published' })]
     const root = await mountView()
-    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
-    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批表单')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建表单')
     expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('全部')
 
     setLocale('en')
@@ -620,8 +620,8 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
 
     setLocale('zh-CN')
     await flushUi()
-    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
-    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批表单')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建表单')
     expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('全部')
   })
 

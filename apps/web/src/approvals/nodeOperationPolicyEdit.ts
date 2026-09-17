@@ -44,7 +44,7 @@ export type OperationPolicyControlState =
 /** Honest copy for the `mixed` state (M8: the label must not claim the control is authoring
  *  something it is not). Exported so the spec pins the exact string rather than a paraphrase. */
 export const OPERATION_POLICY_MIXED_HINT =
-  '该模板对加签与减签设置了不同的开关，当前编辑器无法表达这种组合，已锁定为只读（保存不会改动它）。'
+  '该表单对加签与减签设置了不同的开关，当前编辑器无法表达这种组合，已锁定为只读（保存不会改动它）。'
 
 /**
  * Lock-5 §1.1 (A-4) honest scope copy. An instance pins its own frozen `published_definition_id`,

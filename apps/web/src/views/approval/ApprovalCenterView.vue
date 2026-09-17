@@ -90,7 +90,7 @@
                via the route query (see `applyDeepLinkFilters` below). -->
           <el-select
             v-model="templateFilter"
-            placeholder="模板筛选"
+            placeholder="表单筛选"
             clearable
             filterable
             class="approval-center__toolbar-select approval-center__toolbar-select--wide"

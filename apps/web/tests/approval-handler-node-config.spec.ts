@@ -3,7 +3,7 @@
  * Lock-3 §1.5 — handler-node config surface + inspector tab strip (direct mount).
  *
  * Proves:
- *  - G-14: an inspector on a HANDLER node renders exactly `办理人设置` + `表单权限` (NO `操作权限`);
+ *  - G-14: an inspector on a HANDLER node renders exactly `办理人设置` + `字段权限` (NO `操作权限`);
  *          positive control — a registry declaring a ratified operation policy renders the third tab,
  *          proving two tabs is the registry's doing.
  *  - the config editor renders the handler roster (seven kinds), the 办理模式 (会签/或签) picker, the
@@ -194,11 +194,11 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
   // and the tab renders. The mechanism assertion G-14 exists to prove — that the strip is the
   // registry's doing, not hardcoded — is unchanged and is carried by the empty-registry test below,
   // which is Lock-5 gate E-1's own positive control.
-  it('G-14 (Lock-5 §1.6 landed): a handler inspector renders 办理人设置 + 表单权限 + 操作权限 with the shipped registry', () => {
+  it('G-14 (Lock-5 §1.6 landed): a handler inspector renders 办理人设置 + 字段权限 + 操作权限 with the shipped registry', () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
     const c = mountInspector(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
     const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((t) => t.textContent?.trim())
-    expect(tabs).toEqual(['办理人设置', '表单权限', '操作权限'])
+    expect(tabs).toEqual(['办理人设置', '字段权限', '操作权限'])
   })
 
   it('G-14 mechanism control: a registry declaring NO handler operation policy renders no 操作权限 tab', () => {
@@ -209,7 +209,7 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
     const c = mountInspector(handlerNode(), registryWithoutOps, api)
     const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((t) => t.textContent?.trim())
-    expect(tabs).toEqual(['办理人设置', '表单权限'])
+    expect(tabs).toEqual(['办理人设置', '字段权限'])
     expect(c.textContent).not.toContain('操作权限')
   })
 
