@@ -334,12 +334,24 @@ function resolveApprovalTenantId(req: Request): string | undefined {
  * Returns the resolved org id, or `undefined` after already writing the error response — callers
  * must `return` immediately in that case without writing anything else.
  */
+// Any appearance of `orgId` counts as "supplied", not just a non-empty string — Express's default
+// query parser turns a repeated `?orgId=a&orgId=b` into an array, and a JSON body can carry any
+// shape. Treating only `typeof value === 'string'` as detectable would let `?orgId=a&orgId=b` (an
+// array) or a non-string body value through un-rejected even though the lock's text is "orgId
+// appears in the body or query string" with no type qualifier. Blank is still tolerated (an empty
+// string, or an array of only empty strings) since that is indistinguishable from the field simply
+// not being set by a client that always includes the key.
+function isOrgIdValuePresent(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.some((entry) => isOrgIdValuePresent(entry))
+  return true
+}
+
 function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
   const bodyOrgId = isPlainRecord(req.body) ? req.body.orgId : undefined
   const queryOrgId = (req.query as Record<string, unknown> | undefined)?.orgId
-  const orgIdSupplied =
-    (typeof bodyOrgId === 'string' && bodyOrgId.trim().length > 0)
-    || (typeof queryOrgId === 'string' && queryOrgId.trim().length > 0)
+  const orgIdSupplied = isOrgIdValuePresent(bodyOrgId) || isOrgIdValuePresent(queryOrgId)
   if (orgIdSupplied) {
     res.status(400).json(
       approvalErrorResponse('ORG_ID_NOT_ACCEPTED', 'orgId is not accepted in the request body or query string'),
