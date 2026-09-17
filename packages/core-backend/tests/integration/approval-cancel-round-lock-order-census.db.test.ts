@@ -191,6 +191,7 @@ import {
   parseCanonicalAttendanceRolloutOrgKeyV1,
 } from '../../src/attendance/w4c0-identity'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../../src/services/approval-record-link-row-auth-lock'
+import { classifyAndLockAttendanceRequestForInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
 const dbUrl = process.env.DATABASE_URL
@@ -859,3 +860,247 @@ describeIfDatabase(
     })
   },
 )
+
+/**
+ * Q-E (2026-09-18) — WHICH org key must 判据 II take the rollout lock on?
+ *
+ * Opened because §3.3b of the phase-2 verification MD named the rollout-lock ordering as 判据 II's
+ * prerequisite but did NOT say which org the lock is keyed by, and the lock's own rule is
+ * 「census 未做前不实现」. The answer decides what the `dispatchAction` pre-read must SELECT, so it
+ * is settled here — with rows, not by reading one line of a type — BEFORE the restructure.
+ *
+ * The naive answer is `approval_instances.org_id`: the cancel round carries one
+ * (`createCancelRoundInstance` copies `original.org_id`), it is one hop from the instance
+ * `dispatchAction` already loads, and it is the column the approval side thinks in. **It is the
+ * wrong column.** The demand comes from `assertExternalTransactionRolloutLockHeldV1`, which the
+ * protocol calls with `identityPrepared.orgId` — the org the ADAPTER resolved in
+ * `prepareIdentity`, whose contract (`AttendanceRequestOperationAdapterV1`) restricts it to
+ * 「durable route identity (for example request org/subject)」, i.e. the `attendance_requests`
+ * row. Leg 1 proves the two columns can hold different values on the very row shape a cancel
+ * round runs on, so this is a live divergence and not a naming quibble.
+ *
+ * Leg 3 is the reason this census could not be answered by 「reuse the existing helper」: the repo
+ * already contains TWO joins from an approval instance to its attendance request, and they do not
+ * agree. Per `feedback_single_definition_does_not_make_a_narrow_predicate_correct.md`, picking one
+ * by name would have inherited its predicate silently.
+ */
+describeIfDatabase('WI-0 lock-order census (Q-E): which org key 判据 II must take the rollout lock on', () => {
+  let pool: Pool
+  const createdInstanceIds: string[] = []
+  const createdRequestIds: string[] = []
+  const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
+  const CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
+  beforeAll(async () => {
+    await ensureApprovalSchemaReady()
+    pool = new Pool({ connectionString: dbUrl })
+  }, 60000)
+
+  afterAll(async () => {
+    if (createdRequestIds.length > 0) {
+      await pool
+        .query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds])
+        .catch(() => undefined)
+    }
+    if (createdInstanceIds.length > 0) {
+      await pool
+        .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+        .catch(() => undefined)
+    }
+    await pool?.end().catch(() => undefined)
+  })
+
+  function rolloutKeyFor(orgId: string): bigint {
+    return buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(orgId))
+  }
+
+  /**
+   * The row shape a cancel round actually runs on: an ORIGINAL attendance approval instance whose
+   * `org_id` is stamped independently of the `attendance_requests` row it points at, plus the
+   * cancel-round engine instance that `createCancelRoundInstance` builds from it (`business_key`
+   * = the original's id, `org_id` copied from the original).
+   *
+   * `instanceOrg` and `requestOrg` are deliberately DIFFERENT canonical UUIDs. That is not a
+   * contrived fixture: §the immutability census in the phase-2 verification MD found FOUR
+   * `org_id = EXCLUDED.org_id` writers on `attendance_requests` and none on this path that keeps
+   * the two in step, so nothing in the schema or the code pins them together.
+   */
+  async function seedCancelRoundOverAttendanceRequest(): Promise<{
+    roundInstanceId: string
+    originalInstanceId: string
+    requestId: string
+    instanceOrg: string
+    requestOrg: string
+  }> {
+    const instanceOrg = randomUUID()
+    const requestOrg = randomUUID()
+    const originalInstanceId = `census-qe-original-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, org_id) VALUES ($1, 'approved', $2, $3)`,
+      [originalInstanceId, ATTENDANCE_WORKFLOW_KEY, instanceOrg],
+    )
+    createdInstanceIds.push(originalInstanceId)
+
+    const requestId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+       VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+      [requestId, `census-qe-user-${randomUUID()}`, requestOrg, originalInstanceId, ATTENDANCE_WORKFLOW_KEY],
+    )
+    createdRequestIds.push(requestId)
+
+    const roundInstanceId = `census-qe-round-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'pending', $2, $3, $4)`,
+      [roundInstanceId, CANCEL_ROUND_WORKFLOW_KEY, originalInstanceId, instanceOrg],
+    )
+    createdInstanceIds.push(roundInstanceId)
+
+    return { roundInstanceId, originalInstanceId, requestId, instanceOrg, requestOrg }
+  }
+
+  it('LEG 1: the cancel round`s own org_id and the attendance request`s org_id can DIVERGE — so a pre-read on approval_instances.org_id would take the WRONG rollout lock', async () => {
+    const seeded = await seedCancelRoundOverAttendanceRequest()
+
+    // What the approval side would reach for (one hop from the instance dispatchAction loads).
+    const roundRow = await pool.query<{ org_id: string | null; business_key: string | null }>(
+      `SELECT org_id::text AS org_id, business_key::text AS business_key FROM approval_instances WHERE id = $1`,
+      [seeded.roundInstanceId],
+    )
+    expect(roundRow.rows[0]?.org_id).toBe(seeded.instanceOrg)
+    expect(roundRow.rows[0]?.business_key).toBe(seeded.originalInstanceId)
+
+    // What `prepareIdentity` resolves, and therefore what the entry demands.
+    const requestRow = await pool.query<{ org_id: string }>(
+      `SELECT org_id::text AS org_id FROM attendance_requests WHERE id = $1`,
+      [seeded.requestId],
+    )
+    expect(requestRow.rows[0]?.org_id).toBe(seeded.requestOrg)
+
+    // The two orgs are different, and — the part that actually bites — they derive DIFFERENT
+    // class-`00` advisory keys through the real production builder. A pre-read on the instance
+    // column would take key(instanceOrg); the entry would then look for key(requestOrg) in
+    // `pg_locks` and fail closed with W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD.
+    expect(seeded.instanceOrg).not.toBe(seeded.requestOrg)
+    expect(rolloutKeyFor(seeded.instanceOrg)).not.toBe(rolloutKeyFor(seeded.requestOrg))
+  })
+
+  it('LEG 2 (POSITIVE CONTROL for leg 1`s key comparison): the SAME org derives the SAME key, so leg 1`s inequality is a real divergence and not a builder that never repeats', async () => {
+    const org = randomUUID()
+    expect(rolloutKeyFor(org)).toBe(rolloutKeyFor(org))
+    // …and the builder is the production one, so a formula change cannot leave this census stale.
+    expect(typeof rolloutKeyFor(org)).toBe('bigint')
+  })
+
+  it('LEG 3: the repo`s TWO existing instance→request joins DISAGREE on a two-candidate fixture — so 「reuse the existing helper」 is not a single well-defined instruction', async () => {
+    // Both rows point at the SAME original instance, with different orgs. Row A is reachable only
+    // through `approval_instance_id`; row B is reachable through BOTH `approval_instance_id` and
+    // the `attendance-request:<id>` business_key form.
+    const instanceOrg = randomUUID()
+    const orgA = randomUUID()
+    const orgB = randomUUID()
+    const originalInstanceId = `census-qe3-original-${randomUUID()}`
+    const requestB = randomUUID()
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'approved', $2, $3, $4)`,
+      [originalInstanceId, ATTENDANCE_WORKFLOW_KEY, `attendance-request:${requestB}`, instanceOrg],
+    )
+    createdInstanceIds.push(originalInstanceId)
+
+    const requestA = randomUUID()
+    for (const [id, org] of [
+      [requestA, orgA],
+      [requestB, orgB],
+    ] as const) {
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+         VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+        [id, `census-qe3-user-${randomUUID()}`, org, originalInstanceId, ATTENDANCE_WORKFLOW_KEY],
+      )
+      createdRequestIds.push(id)
+    }
+
+    // Derivation 1 — the REAL production function, called, not transcribed. (An earlier draft of
+    // this leg re-typed its SQL into the test; that would have gone on passing if production
+    // drifted, which is the whole failure mode this census exists to prevent.) It takes
+    // `FOR UPDATE`, so it needs a transaction of its own.
+    const classifierClient = await pool.connect()
+    let classified: Awaited<ReturnType<typeof classifyAndLockAttendanceRequestForInstance>>
+    try {
+      await classifierClient.query('BEGIN')
+      classified = await classifyAndLockAttendanceRequestForInstance(classifierClient, {
+        id: originalInstanceId,
+        workflow_key: ATTENDANCE_WORKFLOW_KEY,
+        business_key: `attendance-request:${requestB}`,
+      })
+      await classifierClient.query('COMMIT')
+    } finally {
+      await classifierClient.query('ROLLBACK').catch(() => undefined)
+      classifierClient.release()
+    }
+    expect(classified.kind).toBe('attendance')
+    const classifiedRequest = classified.kind === 'attendance' ? classified.request : null
+    expect(classifiedRequest).not.toBeNull()
+    // Business-key match is PREFERRED by its explicit ORDER BY, then LIMIT 1. Deterministic: row B.
+    expect(classifiedRequest?.requestId).toBe(requestB)
+    expect(classifiedRequest?.orgId).toBe(orgB)
+
+    // Derivation 2 — `filterBulkReassignDiscoveryForAttendance`'s LEFT JOIN (hooks:452-463). It
+    // carries NO `approval_instance_id IS NULL OR = i.id` safety clause, NO ORDER BY and NO LIMIT,
+    // so on this fixture it returns BOTH rows. Its consumer folds them into a Map keyed by
+    // instance id, so whichever row Postgres hands back LAST silently wins the org.
+    const joined = await pool.query<{ id: string; org_id: string }>(
+      `SELECT r.id::text AS id, r.org_id::text AS org_id
+         FROM approval_instances i
+         LEFT JOIN attendance_requests r
+           ON i.workflow_key = $2
+          AND ((i.business_key IS NOT NULL AND i.business_key = ($3 || r.id::text))
+               OR r.approval_instance_id = i.id)
+        WHERE i.id = ANY($1::text[])`,
+      [[originalInstanceId], ATTENDANCE_WORKFLOW_KEY, 'attendance-request:'],
+    )
+    expect(joined.rows).toHaveLength(2)
+    const joinedOrgs = new Set(joined.rows.map((row) => row.org_id))
+    expect(joinedOrgs).toEqual(new Set([orgA, orgB]))
+
+    // The discriminating claim: one derivation pins a single org, the other admits an org the
+    // first one REJECTED. A pre-read built on derivation 2 could take key(orgA) while the entry
+    // demands key(orgB).
+    expect(joinedOrgs.has(orgA)).toBe(true)
+    expect(classifiedRequest?.orgId).not.toBe(orgA)
+  })
+
+  it('LEG 4: the entry demands the org `prepareIdentity` resolved — source scan, anchored at both ends', () => {
+    const source = readFileSync(
+      join(__dirname, '../../src/attendance/w4c3b-request-operation-boundary.ts'),
+      'utf8',
+    )
+    const protocolStart = source.indexOf('async function runRequestOperationProtocolV1(')
+    expect(protocolStart, 'the protocol runner was not found').toBeGreaterThan(-1)
+    const body = source.slice(protocolStart)
+    expect(body.length).toBeGreaterThan(500)
+
+    // The assert is fed `identityPrepared.orgId` — NOT any approval-side column, and not a field
+    // of the caller-supplied input (which `normalizeExternalTransactionInput` has no org in).
+    expect(body).toContain('await assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)')
+    const prepareIdentityCall = body.indexOf('await adapter.prepareIdentity(')
+    const assertCall = body.indexOf('assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)')
+    expect(prepareIdentityCall).toBeGreaterThan(-1)
+    expect(assertCall).toBeGreaterThan(-1)
+    // The org cannot be known before the adapter resolves it — which is exactly why the approval
+    // side has to derive the SAME org itself, one transaction earlier, to take the lock in order.
+    expect(prepareIdentityCall).toBeLessThan(assertCall)
+
+    // And the entry's own input type carries no org field to short-circuit that derivation.
+    const inputType = source.slice(
+      source.indexOf('export interface AttendanceRequestOperationExternalTransactionInputV1 {'),
+    )
+    const inputBody = inputType.slice(0, inputType.indexOf('\n}'))
+    expect(inputBody.length).toBeGreaterThan(100)
+    expect(inputBody).not.toContain('orgId')
+  })
+})
