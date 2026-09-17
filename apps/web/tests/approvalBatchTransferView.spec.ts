@@ -281,12 +281,37 @@ describe('批量转交 outcome helpers', () => {
     })
   })
 
-  it('names every skip code the server declares, and falls back for an unrecognised one', () => {
-    // The server union, transcribed from ApprovalProductService's ApprovalBulkReassignSkipReason.
-    const serverCodes = [
-      'not-found', 'not-pending', 'not-assigned',
-      'target-is-requester', 'target-already-assignee', 'target-user-invalid', 'error',
-    ]
+  // Design lock §14.3 #12 (approval-change-request-design-lock-draft-20260915.md, v5.9): "同 PR
+  // 必改三处——后端字面量、FE 联合 api.ts:1646 + 映射 batchTransfer.ts:28、同步钉
+  // approvalBatchTransferView.spec.ts:284-298". This used to be a HAND-TRANSCRIBED literal array
+  // (the comment it replaces said so itself: "transcribed") — a server-side addition (e.g. the
+  // lock's own `cancel_round` skip reason, landing separately for #12/#13) would silently miss
+  // this guard until someone remembered to edit the array by hand. Converted to a readFileSync
+  // source pin, modeled on approval-comments-client.spec.ts:430-450's cross-package regex read —
+  // `join(__dirname, '../../../packages/core-backend/…')`, NOT
+  // AttendanceReportFieldsSection.spec.ts's `resolve(process.cwd(), …)` (only resolves correctly
+  // under the CI working-directory convention; supplementary checklist item 15, lock v5.5).
+  // `apps/web` has zero cross-package import specifiers (only `@metasheet/sdk` and the `@` → src
+  // alias), so this reads the backend's SOURCE TEXT, not a compiled/runtime import.
+  it('names every skip code the server declares, and falls back for an unrecognised one', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const serviceSrc = readFileSync(
+      join(__dirname, '../../../packages/core-backend/src/services/ApprovalProductService.ts'),
+      'utf8',
+    )
+    const unionMatch = serviceSrc.match(
+      /export type ApprovalBulkReassignSkipReason\s*=\s*((?:\s*\|\s*'[^']+')+)/,
+    )
+    expect(
+      unionMatch,
+      "ApprovalBulkReassignSkipReason union not found in ApprovalProductService.ts — update this guard's regex if the type was renamed or reshaped",
+    ).toBeTruthy()
+    const serverCodes = Array.from(unionMatch![1].matchAll(/'([^']+)'/g)).map((m) => m[1])
+    expect(serverCodes.length, 'regex matched the union header but extracted zero literals').toBeGreaterThan(0)
+    // Bidirectional by construction (toEqual on two sorted arrays): a server literal with no FE
+    // label reds this exactly as much as an FE label with no server literal — that symmetry is the
+    // mechanism §14.3 #12's mutation relies on ("mutation: 去掉 FE 映射 ⇒ 同步钉红").
     expect(Object.keys(APPROVAL_BATCH_TRANSFER_SKIP_LABELS).sort()).toEqual([...serverCodes].sort())
     const rendered = serverCodes.map((code) => describeSkipReason(code, true))
     expect(new Set(rendered).size).toBe(serverCodes.length)
