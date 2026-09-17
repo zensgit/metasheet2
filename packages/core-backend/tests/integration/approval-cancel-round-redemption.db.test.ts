@@ -5,6 +5,16 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor, ensureLocalUserRow } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { eventBus } from '../../src/integration/events/event-bus'
+import {
+  getAttendanceCancellationExecutionPort,
+  registerAttendanceCancellationExecutionProvider,
+  unregisterAttendanceCancellationExecutionProvider,
+  type AttendanceCancellationExecutionPort,
+} from '../../src/core/attendance-cancellation-execution-port'
+import type {
+  AttendanceRequestOperationExternalTransactionInputV1,
+  AttendanceRequestOperationExternalTransactionResultV1,
+} from '../../src/attendance/w4c3b-request-operation-boundary'
 
 /**
  * Approval change-request design lock v5.9 §14.2 — real-DB acceptance for 判据 III (WI-13,
@@ -16,12 +26,18 @@ import { eventBus } from '../../src/integration/events/event-bus'
  * new file — deliberately: a new `.db.test.ts` would have to be wired into `plugin-tests.yml`,
  * into `scripts/ops/ci-realdb-step-contract.mjs`'s hard-coded `FILES` array (a closed world that
  * stays green for a file it does not list) and would force an s6a provenance re-pin, none of
- * which buys coverage this file's already-wired fixture cannot give. What is STILL not covered:
- *   - 判据 II (the `redeem` branch runs C-1 through the W4 external transaction entry and writes
- *     `approval_rounds.outcome = 'applied'`) — not implemented yet; the `redeem` case below
- *     asserts what the branch does TODAY, including the round row it leaves `pending`.
- *   - 判据 IV's `blocked` half — it is produced by C-1's `business_refused` return, so it lands
- *     with 判据 II, not before it.
+ * which buys coverage this file's already-wired fixture cannot give. The 判据 II cases and 判据 IV's
+ * `blocked` half were appended by the same reasoning once the redemption hook landed.
+ *
+ * What is STILL not covered here, stated so no green below is read for more than it is:
+ *   - The REAL W4 protocol. The 判据 II cases bind a test double through the production registry,
+ *     so they prove the APPROVAL side's half of the contract — 「C-1 was called through the
+ *     external-transaction entry with these inputs, and the round/instance/event writes followed
+ *     from its answer」 — and nothing about prepare/prepareIdentity, the isolation assert, the
+ *     rollout-lock `pg_locks` assert, posture resolution, replay preflight or the seal/outbox.
+ *   - 账侧完整取消结果逐字节等价 (lock §8 期 1) and the `unrecoverableExpired` presentation, which
+ *     only an end-to-end run against the plugin's real boundary can establish.
+ *   - R2 (锁内最终评估失败 ⇒ 零业务取消) and its named mutation.
  *
  * 判据 III (lock:passim, wired at `ApprovalProductService.ts` — see the in-code comments at the
  * revoke (A4) and reject (A7) branches, `git grep -n "判据 III"`): a cancel-round instance's own
@@ -123,6 +139,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   const createdApprovalIds = new Set<string>()
   const createdRoundIds = new Set<string>()
   const grantedUserIds = new Set<string>()
+  // 判据 II fixtures attach a real `attendance_requests` row to the original document; cleaned up
+  // alongside the approval rows so a shared DB is left as it was found.
+  const createdRequestIds = new Set<string>()
 
   const pool = () => poolManager.get()
 
@@ -142,6 +161,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const approvalIds = [...createdApprovalIds]
       const roundIds = [...createdRoundIds]
       const templateIds = [...createdTemplateIds]
+      if (createdRequestIds.size > 0) {
+        await pool().query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [[...createdRequestIds]])
+      }
       if (roundIds.length > 0) {
         await pool().query('DELETE FROM approval_rounds WHERE id = ANY($1::text[])', [roundIds])
       }
@@ -570,6 +592,93 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * durable delivery OFF, which is this lane's configuration — counting the durable outbox instead
    * would be vacuous here, since it is empty either way when the flag is off.
    */
+  /**
+   * 判据 II needs the original document to be an ATTENDANCE document with a request behind it —
+   * that is what `resolveCancelRoundRolloutLockRequirementV1` walks (instance → round →
+   * original instance → `attendance_requests`) to answer `{ kind: 'required', orgId, requestId }`,
+   * and without it `dispatchAction` takes no rollout lock and the redemption refuses with
+   * `CANCEL_ROUND_BUSINESS_TARGET_MISSING`. Run BEFORE the cancel round is created so the round's
+   * creation sees the same shape the decision will.
+   *
+   * `org_id` is left at the table default `'default'` (a canonical rollout org key); the business
+   * key is the SAME `attendance-request:<uuid>` shape `parseAttendanceRequestIdFromBusinessKey`
+   * parses, so the classifier binds by business key and not merely by the reverse join.
+   */
+  async function attachAttendanceRequest(
+    documentId: string,
+    userId: string,
+  ): Promise<{ requestId: string; orgId: string }> {
+    // ORDER MATTERS, and the DB says so: `attendance_requests_instance_workflow_fkey` is a
+    // COMPOSITE foreign key `(approval_instance_id, approval_workflow_key)` →
+    // `approval_instances (id, workflow_key)` (lock §14.3 #10's Q1c package). Inserting the request
+    // first fails 23503, so the instance is re-keyed as an attendance document BEFORE the request
+    // row exists, and the business key — which needs the generated request id — is written after.
+    const rekeyed = await pool().query(
+      `UPDATE approval_instances SET workflow_key = 'attendance.request' WHERE id = $1`,
+      [documentId],
+    )
+    expect(rekeyed.rowCount).toBe(1)
+    const inserted = await pool().query<{ id: string; org_id: string }>(
+      `INSERT INTO attendance_requests
+         (user_id, work_date, request_type, status, approval_instance_id, approval_workflow_key)
+       VALUES ($1, CURRENT_DATE, 'leave', 'approved', $2, 'attendance.request')
+       RETURNING id::text AS id, org_id`,
+      [userId, documentId],
+    )
+    const requestId = inserted.rows[0].id
+    createdRequestIds.add(requestId)
+    const updated = await pool().query(
+      `UPDATE approval_instances SET business_key = $2 WHERE id = $1`,
+      [documentId, `attendance-request:${requestId}`],
+    )
+    expect(updated.rowCount).toBe(1)
+    return { requestId, orgId: inserted.rows[0].org_id }
+  }
+
+  /**
+   * A test double for the C-1 PROVIDER, bound through the production registry
+   * (`registerAttendanceCancellationExecutionProvider`) so the code under test resolves it exactly
+   * as it resolves the attendance plugin's real boundary.
+   *
+   * ⚠️ What this does NOT prove, stated here rather than in a summary: the real W4 protocol. The
+   * plugin's boundary would additionally run prepare/prepareIdentity, the isolation assert, the
+   * rollout-lock `pg_locks` assert, posture resolution, authorization, replay preflight and the
+   * seal/outbox. This double stands in for all of it and answers the approval side's contract
+   * only: 「C-1 was called with these inputs, and it answered X」. The end-to-end run against the
+   * real boundary (and therefore 账侧 byte-equivalence) is NOT covered by this suite — see the
+   * phase-2 verification MD §4.
+   */
+  function bindCancellationPort(
+    respond: (
+      input: AttendanceRequestOperationExternalTransactionInputV1,
+    ) => Promise<AttendanceRequestOperationExternalTransactionResultV1>,
+  ): { calls: AttendanceRequestOperationExternalTransactionInputV1[]; stop: () => void } {
+    const calls: AttendanceRequestOperationExternalTransactionInputV1[] = []
+    const port: AttendanceCancellationExecutionPort = {
+      execute: async () => {
+        throw new Error('the HTTP entry must not be reached from the approval side')
+      },
+      executeInExternalTransaction: async (input) => {
+        calls.push(input)
+        return respond(input)
+      },
+    }
+    // SAVE AND RESTORE, not bind-then-unbind. The registry is process-wide and this harness DOES
+    // already have a provider bound when these cases run (the console warning
+    // 'AttendanceCancellationExecutionPort provider is being replaced' is how that was found — it
+    // was not assumed). Unbinding on teardown would therefore leave later cases running against a
+    // registry this helper emptied, which is a state no production process is ever in.
+    const previous = getAttendanceCancellationExecutionPort()
+    registerAttendanceCancellationExecutionProvider(port)
+    return {
+      calls,
+      stop: () => {
+        if (previous) registerAttendanceCancellationExecutionProvider(previous)
+        else unregisterAttendanceCancellationExecutionProvider()
+      },
+    }
+  }
+
   function captureCompletionEvents(instanceId: string): { seen: string[]; stop: () => void } {
     const seen: string[] = []
     const ids = (['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'] as const).map(
@@ -744,18 +853,28 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   )
 
   it(
-    '判据 IV 正控 / 隔离对照 (same fixture, only `windowDays` differs): an OPEN window is NOT ' +
-      'closed by outlet #5′ — the instance goes `approved`, EXACTLY ONE completion event is ' +
-      'emitted (so the sibling case’s zero is a measurement, not an inert channel), and the ' +
-      'round row is left `pending` — the DISCLOSED 判据 II gap, asserted as it is today',
+    '判据 II (§14.2, outlet #5): an attendance-backed cancel round whose window is OPEN redeems — ' +
+      'C-1 is invoked through the W4 external transaction entry with the round id as its ' +
+      'operation id, the round row goes `applied` + `ended_at`, the instance goes `approved`, and ' +
+      'EXACTLY ONE completion event is emitted (so 判据 IV/R2 zeros are measurements, not an ' +
+      'inert channel)',
     async () => {
-      const suffix = `ivopen-${TS}`
+      const suffix = `iiok-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
         await ageApprovedAnchor(documentId, 200)
-        // The ONLY difference from the case above: 365 > 200, so the window is still open.
+        // 365 > 200 — the window is OPEN, so the in-lock evaluation answers `redeem`.
         await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
+      expect(attached).toBeTruthy()
+      const roundIdRow = await pool().query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      const roundId = roundIdRow.rows[0].id
 
+      const portStub = bindCancellationPort(async () => ({ kind: 'executed', response: { ok: true } }))
       const capture = captureCompletionEvents(fixture.roundInstanceId)
       let approve: Response
       try {
@@ -766,9 +885,30 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         expect(approve.status, await approve.clone().text()).toBe(200)
       } finally {
         capture.stop()
+        portStub.stop()
       }
 
+      // 「恰一个完成事件」 — the positive control that pairs with 判据 IV's zero.
       expect(capture.seen).toEqual(['approval.approved'])
+
+      // C-1 was reached, exactly once, through the EXTERNAL-TRANSACTION entry (the double throws
+      // if the HTTP `execute` entry is touched), and with the inputs the lock fixes.
+      expect(portStub.calls.length).toBe(1)
+      const call = portStub.calls[0]
+      expect(call.kind).toBe('request_cancel')
+      expect(call.routeVariant).toBeNull()
+      // The replay key is the ROUND's own id — deterministic, so a retry replays rather than
+      // minting a second operation.
+      expect(call.operationId).toBe(roundId)
+      const routeInput = call.routeInput as Record<string, unknown>
+      // Pinned to the SAME row the rollout lock was taken for (both id and org are passed, so the
+      // entry's own lookup cannot drift to another row).
+      expect(routeInput.requestId).toBe(attached!.requestId)
+      expect(routeInput.orgId).toBe(attached!.orgId)
+      // The acting identity is the cancel round's requester, and the boundary's own
+      // `tokenSubjectUserId === actorId` precondition is satisfied.
+      expect(routeInput.actorId).toBe(fixture.requesterId)
+      expect(routeInput.tokenSubjectUserId).toBe(fixture.requesterId)
 
       const instanceRow = await pool().query<{ status: string }>(
         `SELECT status FROM approval_instances WHERE id = $1`,
@@ -776,7 +916,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       )
       expect(instanceRow.rows[0]?.status).toBe('approved')
 
-      // No system-sentinel record exists on this path.
+      // No system-sentinel record on the redeemed path — this is an ordinary approver decision.
       const sentinel = await pool().query<{ count: string }>(
         `SELECT count(*)::text AS count FROM approval_records
           WHERE instance_id = $1 AND actor_id = 'system:approval-cancel-round'`,
@@ -784,10 +924,160 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       )
       expect(sentinel.rows[0].count).toBe('0')
 
-      // DISCLOSED GAP, not an endorsement: 判据 II is not implemented, so the redeemed round's row
-      // is still `pending` after its engine instance reached a terminal state. When 判据 II lands,
-      // this expectation must flip to `'applied'` — it is written this way so the change is
-      // FORCED to be noticed rather than silently satisfied.
+      // 轮次 `applied` (lock §3 C-2 step ⑤) + I3 「终结即释放」. This expectation is the one phase 1
+      // deliberately left asserting `'pending'` so 判据 II could not land silently.
+      const round = await roundOutcome(fixture.roundInstanceId)
+      expect(round.outcome).toBe('applied')
+      expect(round.ended_at).not.toBeNull()
+    },
+  )
+
+  it(
+    '判据 IV `blocked` half + C-3 row 4 (业务不可逆): C-1 RETURNS a business refusal instead of ' +
+      'throwing it, so the same transaction still persists the close — engine `rejected` by the ' +
+      'system sentinel with reason `business_blocked:<code>`, round `blocked` + `block_reason`, ' +
+      'ZERO completion events',
+    async () => {
+      const suffix = `iiblk-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'business_refused',
+        code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+        detail: 'frozen parent calculation missing',
+      }))
+      const capture = captureCompletionEvents(fixture.roundInstanceId)
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        capture.stop()
+        portStub.stop()
+      }
+
+      // 零完成事件 — measured on the channel the sibling case above proves live.
+      expect(capture.seen).toEqual([])
+
+      const instanceRow = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(instanceRow.rows[0]?.status).toBe('rejected')
+
+      // 系统终结身份 + the bounded reason token, with the fine cause BESIDE it, never concatenated
+      // into it.
+      const sentinel = await pool().query<{ metadata: Record<string, unknown> | null }>(
+        `SELECT metadata FROM approval_records
+          WHERE instance_id = $1 AND actor_id = 'system:approval-cancel-round'`,
+        [fixture.roundInstanceId],
+      )
+      expect(sentinel.rows.length).toBe(1)
+      expect(sentinel.rows[0].metadata?.cancelRoundCloseReason)
+        .toBe('business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
+      expect(sentinel.rows[0].metadata?.cancelRoundOutcome).toBe('blocked')
+      expect(sentinel.rows[0].metadata?.cancelRoundBlockDetail).toBe('frozen parent calculation missing')
+
+      const round = await pool().query<{ outcome: string; ended_at: Date | null; block_reason: string | null }>(
+        `SELECT outcome, ended_at, block_reason FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(round.rows[0].outcome).toBe('blocked')
+      expect(round.rows[0].ended_at).not.toBeNull()
+      expect(round.rows[0].block_reason).toBe('business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
+    },
+  )
+
+  it(
+    '判据 II fail-closed (C-3 row 5): with NO cancellation provider bound, the redemption must ' +
+      'NOT mark the round `applied` — it throws CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE (409), ' +
+      'the transaction rolls back, and the round keeps its seat',
+    async () => {
+      const suffix = `iinoport-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+
+      // Deliberately NOT bound. The provider is cleared for the duration of this case only, and
+      // restored in `finally` — this harness has one bound by default (see `bindCancellationPort`),
+      // and leaving it cleared would silently change what every later case runs against.
+      const previousPort = getAttendanceCancellationExecutionPort()
+      unregisterAttendanceCancellationExecutionProvider()
+      expect(getAttendanceCancellationExecutionPort()).toBeUndefined()
+      const capture = captureCompletionEvents(fixture.roundInstanceId)
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+      } finally {
+        capture.stop()
+        if (previousPort) registerAttendanceCancellationExecutionProvider(previousPort)
+      }
+      expect(approve.status).toBe(409)
+      const body = (await approve.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE')
+      expect(capture.seen).toEqual([])
+
+      const round = await roundOutcome(fixture.roundInstanceId)
+      expect(round.outcome).toBe('pending')
+      expect(round.ended_at).toBeNull()
+      const instanceRow = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(instanceRow.rows[0]?.status).toBe('pending')
+      const seats = await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`,
+        [fixture.roundInstanceId],
+      )
+      expect(seats.rows[0].count).toBe('1')
+    },
+  )
+
+  it(
+    '判据 II scope fail-closed (lock §8 期 1 = 请假撤销): a cancel round whose ORIGINAL document ' +
+      'has no attendance request behind it has no C-1 to run — it is refused with ' +
+      'CANCEL_ROUND_BUSINESS_TARGET_MISSING (409), never redeemed as `applied`',
+    async () => {
+      const suffix = `iinoatt-${TS}`
+      // The SAME fixture shape as the redeeming case above, minus `attachAttendanceRequest` — the
+      // isolated variant that makes the attendance backing the only difference.
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+      })
+
+      const portStub = bindCancellationPort(async () => {
+        throw new Error('C-1 must not be reached for a non-attendance original')
+      })
+      const capture = captureCompletionEvents(fixture.roundInstanceId)
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+      } finally {
+        capture.stop()
+        portStub.stop()
+      }
+      expect(approve.status).toBe(409)
+      const body = (await approve.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('CANCEL_ROUND_BUSINESS_TARGET_MISSING')
+      expect(portStub.calls.length).toBe(0)
+      expect(capture.seen).toEqual([])
+
       const round = await roundOutcome(fixture.roundInstanceId)
       expect(round.outcome).toBe('pending')
       expect(round.ended_at).toBeNull()

@@ -1562,6 +1562,17 @@ export interface PluginServices {
     createRequestOperationBoundary(config: {
       adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
     }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /**
+     * Approval-change-request lock §3 C-1 — bind the boundary built by `createRequestOperationBoundary`
+     * as the process-wide 完整业务取消 provider, so the approval side's cancel-round redemption can
+     * reach it through `attendance-cancellation-execution-port` without a compile-time dependency on
+     * this plugin. Registers the WHOLE boundary (lock §3 C-1 「复用同一套 W4 操作协议 … 仅移交连接与
+     * 事务生命周期的所有权」 — never a narrower cancel-only entry). Unbound ⇒ the approval side FAILS
+     * CLOSED (the round stays `pending`), unlike `workdayCalendar`, which fails open.
+     */
+    registerCancelRoundExecutionBoundary(
+      boundary: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1,
+    ): void
     /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
     createRecordOperationBoundary(config: {
       adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
