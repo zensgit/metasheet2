@@ -135,7 +135,19 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     await grantApprovalWriteForIntegrationActor(userId)
   }
 
-  async function publishOneNodeTemplate(adminToken: string, approverId: string, label: string): Promise<string> {
+  async function publishOneNodeTemplate(
+    adminToken: string,
+    approverId: string,
+    label: string,
+    // P3-D (gate impl-gate-C-slice1-round1-20260918.md): defaults to `true` for every existing
+    // caller. The ONE caller that needs the original document's own policy to DIFFER from the
+    // cancel round's own runtime policy (`allowRevoke: true`, `buildCancelRoundRuntimeGraph`)
+    // passes `false` explicitly, so a `definitionPolicy` deep-equal in that test can actually
+    // distinguish "froze the original's policy_snapshot" from "froze the round's own" — with both
+    // values equal, as they are for every other caller here, the two are indistinguishable and the
+    // assertion would pass by construction regardless of which one the source actually froze.
+    allowRevoke = true,
+  ): Promise<string> {
     const templateKey = `wi4-creation-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
     const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
       method: 'POST',
@@ -152,7 +164,7 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     createdTemplateIds.add(template.id)
     const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
       method: 'POST',
-      body: { policy: { allowRevoke: true } },
+      body: { policy: { allowRevoke } },
     })
     expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
     return template.id
@@ -196,7 +208,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     const requesterToken = await authToken(baseUrl, requesterId)
     const approverToken = await authToken(baseUrl, approverId)
 
-    const templateId = await publishOneNodeTemplate(adminToken, approverId, 'ok')
+    // allowRevoke=false: deliberately DIFFERENT from the cancel round's own runtime policy
+    // (`allowRevoke: true`, `buildCancelRoundRuntimeGraph`) — see `publishOneNodeTemplate`'s doc
+    // comment. Only affects the ORIGINAL document's own template; the cancel round's dedicated
+    // published definition (a separate, fixed seed row) is untouched.
+    const templateId = await publishOneNodeTemplate(adminToken, approverId, 'ok', false)
     const documentId = await createApprovedOriginal(requesterId, requesterToken, approverToken, templateId)
 
     // Judgment I (两向), REVERSE direction (lock §14.1: "经公开 createApproval ⇒ 谓词假") — the
