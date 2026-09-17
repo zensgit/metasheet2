@@ -315,6 +315,15 @@ The fourth test is the one that asserts `6fba6e01e`'s own change (`collabService
 the same room) — a no-DB unit test, run here with no `DATABASE_URL`/`EXPECT_DB` needed, matching
 its always-on classification above.
 
+**Scope pointer, added in the fix-round pass below (repo convention: mark the sentence, don't void
+the section) — this N/A verdict answers ONE question only: should `approval-realtime.ts` be added to
+this lane's `paths:` trigger-set? It does not, and was never intended to, answer a different
+question: does `computeApprovalPendingCounts` inside that file comply with design-lock §3's "只准
+一份" hard constraint (reuse each domain's existing predicate; the center — and, by the same
+principle, any consumer — must not hand-carry a second copy of the pending predicate)? It does not
+comply; that is a separate, real finding, not cleared by this section. See the "Judging criterion
+P1-1" entry in the FINALIZATION PASS section below for the reproduction and disposition.**
+
 ## Judging criterion C (list dedup, list/count arm-set parity) — DISCHARGED, both mutations run for real
 
 Design-lock §5 row C: "列表按实例去重,与计数口径对齐" (`routes/approvals.ts`'s badge query is
@@ -1427,3 +1436,287 @@ $ grep -n "^## 8\|^## 9" /Users/chouhua/.claude/projects/-Users-chouhua-Download
 | `.env` 文件已提交进 git | `git ls-files packages/core-backend/.env; echo $?` | 命中,exit 0 |
 | `DATABASE_URL=`(空串)探针能触发真正的哨兵抛错 | 见"反 skip-green 三件"小节完整输出 | `Error: todo-center pending-query gate requires DATABASE_URL; refusing skip-shaped green` |
 | 工作树在本轮结束时干净 | `git status --short` | 无输出 |
+
+## FIX-ROUND PASS (2026-09-18, gate round 1 remediation). Base at start of this pass: HEAD =
+## `9a416b9ba3a5b77e984de04b251e5985c23c02fb` (the exact commit the independent gate report
+## `impl-gate-B-slice1-round1-20260918.md` audited), merge-base with `origin/main` unchanged at
+## `89f1ecdee2c3b70205a318074824c834bc6a5c7e`. This pass addresses 2 of that report's items (P1-1,
+## P2-1); it does not touch or re-litigate the FINALIZATION PASS section above (repo convention:
+## mark the sentence, don't void the section).
+
+### Judging criterion P1-1 — second pending predicate in `approval-realtime.ts` (design-lock §3
+### "只准一份" hard constraint) — REGISTERED per gate report disposition (b); (a)/(c) remain an
+### owner call, not decided here
+
+The gate report's finding, restated precisely: `services/approval-realtime.ts`'s
+`computeApprovalPendingCounts` hand-copies the same three-arm assignee-match disjunction
+`approval-pending-query.ts`'s `approvalPendingAssigneeMatchCondition` implements, but **omits** the
+handler-node exclusion (`handlerNodeExclusionCondition`). This is a pre-existing divergence — it
+predates this branch (confirmed below) — but this slice's own commit `6fba6e01e` ("broadcast
+todo:counts-updated alongside approval:counts-updated") wires the todo-center's own new event onto
+this divergent payload, and neither this document's earlier passes nor the design MD's §6 registered
+it. The gate report frames three dispositions and states explicitly it does not pick one ("处置(三选
+一,不由我裁)"). This pass takes disposition **(b)** ("不折。则必须…登记…收窄成仅 REST 路径") because,
+unlike (a), it carries no "需 owner 一句" qualifier in the report's own wording — it changes no
+runtime behavior and forecloses neither future option. **This is NOT an owner ratification of (b)
+over (a)/(c)**: (a) (fold the exclusion into the realtime path) would change the delivered
+`todo:counts-updated`/`approval:counts-updated` numbers for viewers holding a handler-node seat — a
+public-contract change the report correctly gates behind an explicit owner word — and that
+authorization was not sought or given in this pass. (c) (BLOCKED) is not taken either, because (b)
+is available and does not require stopping work. Phrased per the report's own instruction (NOT as
+"REST 与 realtime 有差异,待二切片", which the report explicitly rejects as misleading): **the
+realtime-push predicate is known-wrong against the ratified §1.5 ① baseline, and B-2's badge is
+slated to consume it.**
+
+**Confirmed pre-existing, not introduced by this branch** (git blame would also show this, but the
+mechanical check the "verify against current main" doctrine asks for is a content diff against the
+merge-base, already run by the gate report and re-confirmed here at the unchanged merge-base):
+
+```
+$ git show 89f1ecdee2c3b70205a318074824c834bc6a5c7e:packages/core-backend/src/services/approval-realtime.ts | grep -n "assignment_type = 'source_queue'"
+      OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
+```
+Present on `origin/main` at the merge-base already — this branch did not create the divergent
+predicate, it only pointed a new event name at it.
+
+**Reproduced independently in this pass** (not inherited from the gate report's psql output — a
+fresh transaction against `metasheet2_lock_b`, seeding a class-⑧-equivalent shape: one active `user`
+seat on a `pending` instance whose `published_definition_id` classifies the seat's `current_node_key`
+as a `handler` node, matching `seedHandlerPublishedDefinition`'s fixture shape in
+`todo-center-pending-gate.ts:393-419`; `ROLLBACK`ed, `metasheet2_lock_b` confirmed back to 0 rows in
+`approval_instances` afterward — no residual state):
+
+```sql
+BEGIN;
+INSERT INTO approval_templates (key, name, status) VALUES ('p1-1-repro-tmpl', 'P1-1 Repro Template', 'published') RETURNING id \gset tmpl_
+INSERT INTO approval_template_versions (template_id, version, status) VALUES (:'tmpl_id', 1, 'published') RETURNING id \gset ver_
+INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active)
+  VALUES (:'tmpl_id', :'ver_id', '{"nodes":[{"key":"p1-1-repro-node","type":"handler"}]}'::jsonb, TRUE) RETURNING id \gset def_
+INSERT INTO approval_instances (id, status, source_system, published_definition_id, current_node_key, org_id)
+  VALUES ('p1-1-repro-instance', 'pending', 'platform', :'def_id', 'p1-1-repro-node', 'p1-1-repro-org');
+INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+  VALUES ('p1-1-repro-instance', 'user', 'p1-1-repro-viewer', 'p1-1-repro-node', TRUE);
+-- A) REST shared query (approval-pending-query.ts buildApprovalPendingConditions: 4 conditions incl. handler exclusion)
+SELECT COUNT(DISTINCT a.instance_id)::text FROM approval_assignments a
+  INNER JOIN approval_instances i ON i.id = a.instance_id
+  WHERE a.is_active = TRUE AND i.status = 'pending'
+    AND (a.assignment_type = 'user' AND a.assignee_id = 'p1-1-repro-viewer')
+    AND NOT EXISTS (SELECT 1 FROM approval_published_definitions pd WHERE pd.id = i.published_definition_id
+      AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler'))));
+-- B) realtime path (approval-realtime.ts computeApprovalPendingCounts: 3 conditions, NO handler exclusion)
+SELECT COUNT(DISTINCT a.instance_id)::text FROM approval_assignments a
+  INNER JOIN approval_instances i ON i.id = a.instance_id
+  LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = 'p1-1-repro-viewer'
+  WHERE a.is_active = TRUE AND i.status = 'pending' AND (a.assignment_type = 'user' AND a.assignee_id = 'p1-1-repro-viewer');
+ROLLBACK;
+```
+```
+--- A) --- count: 0
+--- B) --- count: 1
+$ psql "postgresql://localhost/metasheet2_lock_b" -c "select count(*) from approval_instances;"   # after ROLLBACK
+ count
+-------
+     0
+```
+Same viewer, same instance, same database: REST gives 0, the realtime path gives 1. This matches
+the gate report's own reproduction in shape and outcome (independent re-run, not a copy of its
+numbers).
+
+**Anchored against the ratified basis, not asserted freestanding**: design-lock v2.14 §1.5 row ①
+names `routes/approvals.ts:1990`'s WHERE (four conditions including the handler-node exclusion) as
+the badge's ground truth ("三路身份输入…∧ `NOT EXISTS` 办理节点排除"); §3.0 requires the extraction to
+reproduce "整条语句…WHERE 四个条件…办理节点排除"; the RATIFY record atop the lock confirms "§7-2 基准
+口径 = §1.5 的 ①(活动席位)= **确认**". `approval-realtime.ts`'s three-condition query has no basis
+in any of those three citations — it is not a second legitimate reading of an ambiguous spec, it is
+short of the ratified one condition.
+
+**Judge D's evidence scope, narrowed here rather than the lock's ratified row redefined** (per this
+repo's own doctrine that a single ratified predicate's scope cannot be silently narrowed by a
+downstream document): design-lock §5 row D ("徽标数字不变") is not edited — its ratified text and
+scope stand as written, wider than what this document can attest to. What THIS document's evidence
+for row D actually covers, stated precisely: the `GET /api/approvals/pending-count` REST path only
+(the three named A0 tests for classes ①/②/⑥, per the "Judging criterion D" section above). The
+`todo:counts-updated`/`approval:counts-updated` realtime-push path is **not** covered by row D's
+positive control in this document, and is now known, not merely unverified, to disagree with the
+REST path for class-⑧-shaped viewers (handler-node seat holders) — registered as a declared evidence
+gap, not folded into a restated (and narrower) row D.
+
+**Source docblock's absolute claim, corrected** (this repo's "绝对断言必须自扫" doctrine, applied to
+a source docblock, not just this document's own prose): `approval-pending-query.ts`'s
+`approvalPendingAssigneeMatchCondition` docblock read "Do not inline a second copy of this string
+anywhere" — literally false as written, since `approval-realtime.ts:41-49` already is a second copy
+(missing one condition). Fixed in this pass (comment-only; verified below the change carries zero
+behavioral delta) to name the known exception by file reference rather than restate it as universal,
+and without pasting its SQL text into the comment (that would create a THIRD textual occurrence of
+the three-arm disjunction and falsely trip judging criterion C's own drift-detection grep):
+
+```
+$ git diff -- packages/core-backend/src/services/approval-pending-query.ts | head -30
+```
+(see the actual diff in this commit; it touches only the docblock above
+`approvalPendingAssigneeMatchCondition`, zero lines of executable code)
+```
+$ git grep -c "assignment_type = 'source_queue'" -- packages/core-backend/src | awk -F: '{s+=$2} END {print s}'
+12
+```
+Same count before and after this pass's docblock edit (12 — this repo-wide count includes
+`ApprovalBridgeService.ts`'s own, unrelated "visible" predicate ③ and doc-comment mentions, not just
+the two pending-predicate call sites the gate report highlighted with `…` elision) — the fix added a
+file:line pointer, not a new inline copy of the drift string.
+
+**Disposition recorded, not closed**: `docs/development/todo-center-phase1-design-20260918.md` §6
+item 7 registers this residual (added in this pass) — it must stay registered until an owner
+resolves (a)/(c) per the gate report's three-way framing. This document's own "未做/未验" table
+(below) gets a matching row.
+
+### P2-1 — workflow-level `DATABASE_URL:?` guard added to the todo-center gate step (design-lock
+### §3.0 "反 skip-green 三件", first of three; the other two — import-time asserts, `EXPECT_DB`
+### sentinel — were already in place per the earlier "反 skip-green 三件" section above)
+
+Gate report: `.github/workflows/approval-realdb-todo-center-pending-query.yml`'s single test step
+had no shell-level `: "${DATABASE_URL:?…}"` guard (the `plugin-tests.yml:1176,:1186` shape every
+sibling real-DB step carries), and this document's own earlier "反 skip-green 三件的哨兵证据" section
+(above) had just shown WHY that specific gap matters here: the checked-in `packages/core-backend/.env`
+backfills `DATABASE_URL` before `setup.ts`'s own import-time check runs, so an `env -u DATABASE_URL`
+probe shape does not trigger the intended refusal — a shell-level guard runs before node starts and
+`.env` cannot reach it.
+
+**Fix** (mechanical, comment-only elsewhere): the step's `run:` changed from a folded scalar
+(`run: >-`) to a literal block (`run: |`) with the guard as its first line:
+
+```diff
+-        run: >-
+-          pnpm --filter @metasheet/core-backend exec vitest
+-          --config vitest.todo-center-pending-gate.config.ts run
+-          tests/todo-center-pending-gate/todo-center-pending-gate.ts
+-          --reporter=verbose
++        run: |
++          : "${DATABASE_URL:?DATABASE_URL is required for the todo-center pending-query gate}"
++          pnpm --filter @metasheet/core-backend exec vitest \
++            --config vitest.todo-center-pending-gate.config.ts run \
++            tests/todo-center-pending-gate/todo-center-pending-gate.ts \
++            --reporter=verbose
+```
+
+**YAML parse verified locally** (this sandbox cannot run Actions, so a folded→literal scalar
+conversion with wrong indentation — a documented silent-break shape — is checked the only way
+available: parse it and print the resolved multiline string back):
+
+```
+$ python3 -c "
+import yaml
+d = yaml.safe_load(open('.github/workflows/approval-realdb-todo-center-pending-query.yml'))
+step = next(s for s in d['jobs']['approval-realdb-todo-center-pending-query']['steps'] if s.get('name','').startswith('Run todo-center'))
+print(repr(step['run']))
+"
+': "${DATABASE_URL:?DATABASE_URL is required for the todo-center pending-query gate}"\npnpm --filter @metasheet/core-backend exec vitest \\\n  --config vitest.todo-center-pending-gate.config.ts run \\\n  tests/todo-center-pending-gate/todo-center-pending-gate.ts \\\n  --reporter=verbose\n'
+```
+Resolves to the intended four-line shell script, correctly joined by `\` line continuations, guard
+line first.
+
+**Guard's actual triggering behavior confirmed** (this exact multi-line block, run verbatim outside
+YAML, with an empty `DATABASE_URL` — the shape the earlier "反 skip-green 三件" section showed
+`env -u DATABASE_URL` alone does NOT trigger, because of the `.env` backfill):
+
+```
+$ cd packages/core-backend && DATABASE_URL= EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 bash -c '
+: "${DATABASE_URL:?DATABASE_URL is required for the todo-center pending-query gate}"
+pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts run tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+'
+bash: line 1: DATABASE_URL: DATABASE_URL is required for the todo-center pending-query gate
+```
+Refuses before `pnpm`/`vitest` is even invoked — the shell-level guard fires ahead of anything
+`applyDotEnv` could backfill, closing the specific gap the earlier section identified. (This guard
+does not retroactively fix the `.env`-backfill weakness for the `env -u DATABASE_URL` LOCAL probe
+shape recorded earlier — that remains an accurate, unresolved, non-CI-blocking record, per this
+repo's convention of not rewriting prior accurate sections.)
+
+**Real run, fresh database, workflow-verbatim shell shape, with the new guard line present** (not
+skipped past — a genuinely non-empty `DATABASE_URL` this time):
+
+```
+$ dropdb metasheet2_lock_b && createdb metasheet2_lock_b
+$ cd packages/core-backend && DATABASE_URL=postgresql://localhost/metasheet2_lock_b \
+  MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql \
+  pnpm run db:migrate
+# ... completes without error, last line:
+migration "zzzz20260916120000_create_dingtalk_todo_mirrors" was executed successfully
+
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 bash -c '
+: "${DATABASE_URL:?DATABASE_URL is required for the todo-center pending-query gate}"
+pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts run tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+'
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+```
+26/26, unchanged from every prior pass in this document — the guard line is a pure addition ahead of
+the existing command, not a behavioral change to it.
+
+**`npx tsc --noEmit -p tsconfig.json`**: `TSC-EXIT=0` (unaffected — this pass touches no `.ts` source
+behavior, only a docblock comment and a workflow YAML).
+
+**Mutation ledger (M1–M8, `approval-pending-query.ts` and `AuthService.ts`) not replayed in this
+pass, and why that is checkable rather than hand-waved**: the ONLY change to `approval-pending-query.ts`
+in this pass is the docblock addition shown above (`git diff` output, zero lines outside a `/** */`
+comment block) — the file every M1–M8 mutation targets is otherwise byte-identical to what the gate
+report already exercised. A comment-only diff cannot change any mutation's red/green verdict; replaying
+them would re-verify a file this pass did not touch. `.github/workflows/approval-realdb-todo-center-pending-query.yml`
+is not an M1–M8 target either (those mutate `src/services/approval-pending-query.ts` and, for M8 only,
+`src/auth/AuthService.ts`).
+
+**s6a / judge F unaffected** (per the advisor consult ahead of this pass): neither file this pass
+touched is `plugin-tests.yml` or a migration —
+
+```
+$ git diff --stat -- .github/workflows/plugin-tests.yml
+(empty)
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?
+0
+```
+— so s6a stays N/A and judge F stays green, unchanged from every earlier pass.
+
+### 未做 / 未验 表新增两行(本轮)
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| `approval-realtime.ts` 第二份 pending 谓词(P1-1) | **REGISTERED,未折入**——(a) 折入 / (c) BLOCKED 仍待 owner 裁决;本轮取 (b):如实登记 + 收窄判据 D 证据范围,不代 owner 选边 | 见本节"Judging criterion P1-1";设计 MD §6 第 7 条同步登记;`approval-pending-query.ts` docblock 已加 KNOWN EXCEPTION 指针(comment-only,`git diff` 已证零行为改动) |
+| 判据 D 的证据范围 | 本文档对行 D 的证据面**只覆盖 REST 路径**(`/pending-count`);锁 §5 行 D 字面范围更宽(未改锁文本身),差额 = 实时推送路径,该路径已知与 REST 路径不一致(见 P1-1 复现) | 同上;不是把行 D 改窄,是记录本文档证据面与锁文字面范围之间的一条已知缺口 |
+
+### 绝对断言自扫(本轮新增)
+
+| 断言 | 命令 | 结果 |
+|---|---|---|
+| `approval-realtime.ts` 的分叉谓词在本分支 merge-base 之前已存在(非本切片引入) | `git show 89f1ecdee2c3b70205a318074824c834bc6a5c7e:packages/core-backend/src/services/approval-realtime.ts \| grep -n "assignment_type = 'source_queue'"` | 命中 1 行(`source_queue` 臂),确认已在 `origin/main` 合并基点存在 |
+| 同库 REST vs realtime 计数分叉(class ⑧ 形状) | 见本节 P1-1 psql 复现完整输出 | A) 0 / B) 1 |
+| 复现事务已 `ROLLBACK`,库无残留 | `psql "postgresql://localhost/metasheet2_lock_b" -c "select count(*) from approval_instances;"`(复现后) | 0 |
+| docblock 修复未新增第三处内嵌 SQL 片段(判据 C drift-string 计数不变) | `git grep -c "assignment_type = 'source_queue'" -- packages/core-backend/src \| awk -F: '{s+=$2} END {print s}'` | 12(修复前后一致) |
+| `approval-pending-query.ts` 本轮唯一改动是 docblock 注释,零可执行代码行 | `git diff -- packages/core-backend/src/services/approval-pending-query.ts` | 仅 `/** */` 注释块内增删,`export function` 及其函数体逐字未变 |
+| P2-1 新 guard 行在 YAML 折叠→字面转换后解析正确 | 见本节 python3 yaml.safe_load 复现 | 解析出的多行脚本与预期逐字一致,guard 行在 pnpm 命令之前 |
+| P2-1 guard 对空 `DATABASE_URL` 真正触发拒绝(而非 `.env` 回填绕过) | 见本节 `DATABASE_URL= ... bash -c '...'` 完整输出 | `bash: line 1: DATABASE_URL: DATABASE_URL is required for the todo-center pending-query gate` |
+| 全套件在新 guard 加入后仍 26/26(workflow 逐字调用形态,全新迁移库) | 见本节"Real run, fresh database"小节完整输出 | 26 passed / 26 |
+| `npx tsc --noEmit` 本轮仍 exit 0 | `npx tsc --noEmit -p tsconfig.json; echo $?` | 0 |
+| `plugin-tests.yml` 与迁移目录本轮仍未被触碰(s6a / 判据 F 不受影响) | `git diff --stat -- .github/workflows/plugin-tests.yml`;`git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?` | 空输出;`0` |
+| 工作树在本轮结束时干净(改动已提交前的中间检查点) | `git status --short` | 见提交前记录 |
+
+### 本轮未处理、留给下一步的项(如实列出,避免下一步重新普查)
+
+按门审报告 `impl-gate-B-slice1-round1-20260918.md` 的优先级列表,本轮只处理了 P1-1(disposition (b))
+与 P2-1;以下项**未在本轮触碰**,原样留给后续修复轮:
+
+- **P2-0**(悬置条件):GitHub required-check 状态未核——沙箱无网络,需 owner 或有网会话核实
+  `approval-realdb-todo-center-pending-query.yml` 是否在 branch-protection required checks 内,
+  其结果同时决定 P2-2/P2-3 的严重度归类。
+- **P2-2**:触发集(`paths:`)漏掉六个生产 RBAC/auth 模块(`AuthService.ts`、`rbac/rbac.ts`、
+  `rbac/service.ts`、`rbac/namespace-admission.ts`、`config/product-mode.ts`、`routes/auth.ts`)。
+- **P2-3**:`approval-realdb-p7r1-coverage-repair.yml` 的 `paths:` 未列
+  `services/approval-pending-query.ts`。
+- **P3-1**:两条 `wip:` 提交(`a2cf836b5`、`01759832a`)未 squash。
+- **P3-2**:`approval-ci-coverage-enumeration.test.ts` 发现式守卫的闭世界边界未登记
+  `todo-center-pending-gate.ts`。
+- **P3-3**:设计 MD §5 的 HEAD 钉点(`63fc3d699`)已过期,当前 HEAD 为 `9a416b9ba`(锚点仍字节有效,
+  只是钉点数字过期)。
+- **P3-4**:workflow 的 `paths:` 多列未被实际导入的 `tests/helpers/approval-schema-bootstrap.ts`
+  (over-inclusion,不破坏 fail-closed;门审建议与 P2-2 同批处理)。
+
+这份清单本身**不是**本轮新产生的普查——全部照抄门审报告 §7 的编号与描述,只是把"哪些已处理/哪些没有"
+显式记下来,避免下一步重新读一遍整份门审报告才能确认起点。
