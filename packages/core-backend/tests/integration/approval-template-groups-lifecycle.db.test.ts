@@ -1,17 +1,22 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
+import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { query } from '../../src/db/pg'
 import type { Request } from 'express'
-import { resolveApprovalTemplateVisibilityActor } from '../../src/routes/approvals'
+import {
+  isApprovalTemplateVisibleForGroupLink,
+  resolveApprovalTemplateVisibilityActor,
+} from '../../src/routes/approvals'
 import { loadApprovalTemplateVisibilityActorOnQuery } from '../../src/services/approval-record-link-txn-auth'
 import {
   loadApprovalTemplateReader,
   loadReadableApprovalTemplateNames,
 } from '../../src/multitable/automation-approval-template-access'
 import type { QueryFn } from '../../src/multitable/permission-service'
+import type { ApprovalTemplateVisibilityActor } from '../../src/services/ApprovalProductService'
 
 /**
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 real-DB
@@ -498,6 +503,70 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect(listAsReader.status).toBe(200)
   })
 
+  // ── request-shape codes (gate P2-4) ───────────────────────────────────────────────────────────
+  it('request-shape codes: GROUP_NAME_REQUIRED (blank name) and APPROVAL_GROUP_ID_REQUIRED (missing groupId)', async () => {
+    const org = trackOrg(`atg-shape-${TS}`)
+    const admin = await tok(base, `shape-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    const blankName = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: '   ' } })
+    expect(blankName.status).toBe(400)
+    expect((await blankName.json()).error.code).toBe('GROUP_NAME_REQUIRED')
+
+    const tpl = await createTemplate(`atg-shape-tpl-${TS}`)
+    const missingGroupId = await httpReq(base, `/api/approval-templates/${tpl}/group`, admin, { method: 'POST', body: {} })
+    expect(missingGroupId.status).toBe(400)
+    expect((await missingGroupId.json()).error.code).toBe('APPROVAL_GROUP_ID_REQUIRED')
+  })
+
+  // ── §2 link-time visibility (ratified, gate P2-1) ─────────────────────────────────────────────
+  // Two legs, per the finding this closes: `approvalTemplateAdminGuard`'s permission codes are a
+  // SUBSET of `isTemplateManager`'s derivation (`resolveApprovalTemplateVisibilityActor` above), so
+  // every actor able to reach the link ENDPOINT today is a manager and `applyTemplateVisibilityFilter`
+  // short-circuits for them — an HTTP-only test could never turn red on the visibility half of the
+  // predicate. Leg (a) therefore calls the exported predicate directly with a hand-built NON-manager
+  // actor (real judgement: mutating `isApprovalTemplateVisibleForGroupLink` to drop the
+  // `applyTemplateVisibilityFilter` call turns the "hidden" assertion red). Leg (b) goes through the
+  // real HTTP endpoint to prove the call SITE is wired (mutating the route handler to remove the call
+  // turns this red too — a nonexistent template's INSERT falls through to a raw 23503, which
+  // `mapGroupConstraintError` does not map, landing on the generic 500 fallback instead of 404).
+  it('§2(a): the exported visibility predicate — visible to a non-manager in its own scope, hidden outside it, and false for a nonexistent id', async () => {
+    const deptId = `vis-dept-${TS}`
+    const visibleTpl = await createTemplate(`atg-vis-visible-${TS}`, { type: 'dept', ids: [deptId] })
+    const hiddenTpl = await createTemplate(`atg-vis-hidden-${TS}`, { type: 'dept', ids: [`${deptId}-other`] })
+    const nonManagerActor: ApprovalTemplateVisibilityActor = {
+      userId: `vis-user-${TS}`,
+      departmentIds: [deptId],
+      roles: [],
+      permissions: [],
+      isTemplateManager: false,
+    }
+    expect(await isApprovalTemplateVisibleForGroupLink(visibleTpl, nonManagerActor)).toBe(true)
+    expect(await isApprovalTemplateVisibleForGroupLink(hiddenTpl, nonManagerActor)).toBe(false)
+    expect(await isApprovalTemplateVisibleForGroupLink(randomUUID(), nonManagerActor)).toBe(false)
+
+    // Manager short-circuit (documents WHY leg (b) below can only probe existence, not scope):
+    // `applyTemplateVisibilityFilter` adds no conditions for a manager, so the otherwise-hidden
+    // template becomes visible — this IS the guard-population fact the block comment names.
+    const managerActor: ApprovalTemplateVisibilityActor = { ...nonManagerActor, isTemplateManager: true }
+    expect(await isApprovalTemplateVisibleForGroupLink(hiddenTpl, managerActor)).toBe(true)
+  })
+
+  it('§2(b): the link endpoint 404s APPROVAL_TEMPLATE_NOT_FOUND (zero rows written) for a template id that does not exist', async () => {
+    const org = trackOrg(`atg-vis2-${TS}`)
+    const admin = await tok(base, `vis2-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+    const group = (await (await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `Vis2 ${TS}` } })).json()).group
+    const missingId = randomUUID()
+
+    const res = await httpReq(base, `/api/approval-templates/${missingId}/group`, admin, { method: 'POST', body: { groupId: group.id } })
+    expect(res.status).toBe(404)
+    expect((await res.json()).error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+    const row = await query(
+      `SELECT 1 FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
+      [org, missingId],
+    )
+    expect(row.rowCount).toBe(0)
+  })
+
   // ── G ──────────────────────────────────────────────────────────────────────────────────────
   // FINDING (verified by actual mutation probe on `src/services/ApprovalTemplateGroupService.ts`
   // unarchiveApprovalTemplateGroup, cp-backup → edit → run this file → cp-restore → cmp — not
@@ -527,6 +596,12 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     const admin = await tok(base, `g-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
 
     const g1 = (await (await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `G1 ${TS}` } })).json()).group
+    // I8 (gate P2-4): unarchiving a group that is still ACTIVE is rejected with 409
+    // GROUP_NOT_ARCHIVED — the lock's ratified code for this branch had zero coverage.
+    const unarchiveActive = await httpReq(base, `/api/approval-template-groups/${g1.id}/unarchive`, admin, { method: 'POST' })
+    expect(unarchiveActive.status).toBe(409)
+    expect((await unarchiveActive.json()).error.code).toBe('GROUP_NOT_ARCHIVED')
+
     const arch1 = await httpReq(base, `/api/approval-template-groups/${g1.id}/archive`, admin, { method: 'POST' })
     expect(arch1.status).toBe(200)
     const unarch1 = await httpReq(base, `/api/approval-template-groups/${g1.id}/unarchive`, admin, { method: 'POST' })
