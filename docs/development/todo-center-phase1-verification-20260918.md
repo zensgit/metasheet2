@@ -535,3 +535,88 @@ $ git status --short
 
 Judge A is DISCHARGED. Judges B/C'/D remain deferred — see the gate file's own docblock for the
 current status line.
+
+## Judging criterion D (badge count invariant) — DISCHARGED, mutation run for real
+
+Design-lock §5 row D: "徽标数字不变" — the badge's switch from its own inline query to
+`countApprovalPendingForViewer` (`services/approval-pending-query.ts`) must not change any viewer's
+number, conditioned on A0 (口径未变) and the three-arm/role-source-(a) axis being unchanged. 正控:
+class ①/②/⑥ before/after equal. mutation: the shared query drops the `:2027` role arm ⇒ class ②
+becomes 0, red.
+
+正控 is discharged WITHOUT new test content, for the same reason judge A's was: row D's "前" is not
+a runtime snapshot to diff against — it is this file's own A0 golden-value table (row D's own text:
+"成立的前提是 A0"), and the three existing named tests for classes ①/②/⑥ already assert those exact
+golden values live against `countApprovalPendingForViewer`. A second copy of the same three
+assertions under a `describe('Judge D — ...')` label would duplicate, not strengthen, the check —
+the same reasoning judge A's entry above gives for reusing classes ①/④ rather than re-asserting them.
+
+Baseline (immediately before the mutation, same DB/fixtures as judge A's entry above — unaffected by
+that entry, since both of judge A's mutations were fully restored and re-verified green before this
+one started):
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+```
+
+### Mutation — drop the role arm from `approvalPendingAssigneeMatchCondition` (real cp/edit/run/restore/cmp)
+
+```
+$ F=packages/core-backend/src/services/approval-pending-query.ts
+$ cp "$F" "$F.mutprobe-d1.bak"
+```
+Edit: `approval-pending-query.ts:68`,
+`OR (${alias}.assignment_type = 'role' AND ${alias}.assignee_id = ANY($2))` →
+`OR (FALSE AND ${alias}.assignment_type = 'role' AND ${alias}.assignee_id = ANY($2))`. A bare
+deletion of the whole `OR (...)` clause would leave `$2` unreferenced in the query text while
+`params` still supplies three values — the same Postgres extended-query-protocol parameter-count
+rejection judge A's mutation-1 entry above already worked around — so the role arm is short-circuited
+in place (`FALSE AND ...`) rather than removed, keeping every placeholder referenced while making the
+arm contribute no matches, a faithful rendering of "共享查询漏掉 role 臂".
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 failed (1)
+      Tests  1 failed | 19 passed (20)
+```
+The named test row D points at reddens, and ONLY it:
+```
+× A0 … class ② — role seat (manager), pending, published, non-handler node ⇒ count 1
+  → expected +0 to be 1 // Object.is equality
+```
+Every other test — including class ①'s and class ⑥'s own A0 assertions, class ③′ (which also carries
+a role-seat fixture but is asserted to be 0 either way, so the mutation is inert for it), and both
+Judge C tests — stays green. This is the tight isolation shape row D's own wording implies (a single
+named class going red, not a broad spread the way judge A's whole-predicate mutations were): the role
+arm is the SOLE thing that qualifies class ②'s seat, so short-circuiting only it drops exactly one
+class to 0 while leaving the user-arm (①) and source_queue-arm (⑥) classes untouched.
+
+Restore:
+```
+$ cp "$F.mutprobe-d1.bak" "$F"
+$ cmp "$F" "$F.mutprobe-d1.bak"; echo $?
+0
+$ rm "$F.mutprobe-d1.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+Post-restore confirmation (back to the pre-mutation baseline):
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+$ git status --short
+(no output)
+```
+
+Judge D is DISCHARGED. Judges B/C' remain deferred — see the gate file's own docblock for the
+current status line.
