@@ -1,4 +1,64 @@
 /**
+ * ============================================================================================
+ * ADDENDUM (2026-09-17) — the four attendance-lane census pins, run against this lane's changes
+ * (`plugins/plugin-attendance/index.cjs`'s five writer edits, `w4c3b-central-approval-hooks.ts`'s
+ * new `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`/`isCancelRoundInstance`, this migration, and the
+ * sibling `zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts` migration).
+ * Memory `feedback_attendance_new_file_census_trio.md` requires all four be checked before a
+ * push touching attendance writers/new migrations; run here, retroactively, for the commits that
+ * already landed this lane's writer/migration edits. Each is a NEGATIVE finding (not triggered /
+ * already covered) — recorded with the evidence rather than left as an unstated assumption.
+ *
+ *   1. s6a hash (`sealed-export-package-provenance.cjs` PINNED_EVIDENCE_FILES, 32 entries):
+ *      `grep -n "plugin-attendance\|db/migrations\|approval_rounds\|attendance_requests"
+ *      plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs`
+ *      -> zero matches. The one entry that WOULD apply, `.github/workflows/plugin-tests.yml`
+ *      (id `pluginTestsWorkflow`), is untouched by this lane — `git diff --stat
+ *      origin/main..HEAD -- .github/workflows/plugin-tests.yml` is empty (this lane's real-DB
+ *      evidence lane is the standalone `approval-realdb-cancel-round.yml`, by design — see that
+ *      file's own header). No re-pin needed.
+ *   2. W7-R10 (`w7-w6r5-guard-root-set.ts`'s THREE WALKED ROOTS — a directory-root list, not a
+ *      file list; per-checklist item 13, a basename grep proves nothing here, containment does):
+ *      `plugins/plugin-attendance/index.cjs` falls under root 1
+ *      (`plugins/plugin-attendance/**`, `presentAtW7Zero: true`) — already in the walked domain,
+ *      no new root introduced. `w4c3b-central-approval-hooks.ts` falls under root 2
+ *      (`packages/core-backend/src/attendance/**`) — likewise already walked. This migration and
+ *      its sibling live under `packages/core-backend/src/db/migrations/**`, which is OUTSIDE all
+ *      three roots — correctly: W7-R10 walks group-policy/frozen-context REFERENCE sites, not
+ *      schema DDL, and `ApprovalProductService.ts`/`ApprovalBridgeService.ts`/`routes/approvals.ts`
+ *      (also touched this lane) sit under `src/services/`/`src/routes/`, likewise outside all
+ *      three roots for the same reason (they are approval-side, not attendance-side).
+ *   3. CI corpus (`attendance-w4c2-ci-wiring.test.mjs`'s disk-derived attendance corpus, basename
+ *      PREFIX match `attendance-` — `scripts/ops/attendance-w4c2-ci-wiring.test.mjs:161`,
+ *      `base.startsWith(ATTENDANCE_BASENAME_PREFIX)`): this lane's three new suites
+ *      (`approval-cancel-round-creation.db.test.ts`,
+ *      `approval-cancel-round-lock-order-census.db.test.ts`,
+ *      `approval-cancel-round-redemption.db.test.ts`) do not carry that prefix, so they are
+ *      correctly outside this corpus (they are approval suites, not attendance ones, and run via
+ *      the standalone `approval-realdb-cancel-round.yml` lane instead). The six EXISTING
+ *      `attendance-*.db.test.ts` fixture files this lane edited (Q1c fixture-pairing) were
+ *      already corpus members by basename before this lane touched their content — a content
+ *      edit does not change corpus membership, which is derived from disk at CI time.
+ *   4. DML table-classification (`scripts/attendance/w4c0-dml-inventory/`): `approval_rounds` is
+ *      a brand-new table but is OUT OF SCOPE for this collector — its scope gate
+ *      (`collector.cjs` `isAttendanceOwnedCandidate`) only tracks `attendance_*`-prefixed tables
+ *      plus a named `SHARED_TABLE_NAMES` set of exactly `{approval_instances, approval_records,
+ *      approval_assignments}` (`collector.cjs:882-891`) — `approval_rounds` is in neither, so its
+ *      `CREATE TABLE` site is not reported and not counted as unclassified (by the collector's
+ *      own documented scope-gate rule, not by omission). The sibling migration's backfill
+ *      `UPDATE attendance_requests` IS in scope and is claimed by curated entry `X08`
+ *      (`curated-debt-entries.cjs`, added this lane). `createCancelRoundInstance`'s own new
+ *      `approval_instances`/`approval_assignments` writes (in `ApprovalProductService.ts`) fall
+ *      under the existing broad `P26` entry, `claims: byPathPrefix('.../ApprovalProductService.ts')`
+ *      (`curated-debt-entries.cjs:512`) — a whole-file claim already covering every DML site in
+ *      that file, landed before this lane. Verified empirically, not just read: `node --test
+ *      scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs` -> `tests 60`, `pass 60`,
+ *      `fail 0`, including `exact-head HEAD scan: zero new/unclassified/out-of-boundary
+ *      attendance DML` and `W4C-3c hard zero-bypass: current-tree open-debt set is exactly
+ *      empty`.
+ * ---- end 2026-09-17 addendum ----
+ * ============================================================================================
+ *
  * Approval change-request design lock v5.9 §4 — first-slice DDL, table 1 of 3.
  *
  * `approval_rounds` tracks a cancel/amend ATTEMPT against a business document that already has
