@@ -1821,6 +1821,231 @@ settled that a new file under this step owes `ci-realdb-step-contract.mjs` nothi
 top-level `EXPECT_DB` sentinel and the two-point wiring were already in place for this file.
 
 
+## 3.15 账侧验收, ROW-LEVEL HALF IMPLEMENTED — and the twin compare found a real divergence (this unit)
+
+Lock §8 期 1's second acceptance line: 「账侧(完整取消结果**逐字节等价于现有 W4 路径** +
+`unrecoverableExpired` 呈现)」(lock:169). This unit builds the twin-fixture comparison and closes
+the ROW-LEVEL half. It does **not** close `unrecoverableExpired` 呈现 — see §3.15.6, which is the
+headline.
+
+### 3.15.0 ⛔ PROVENANCE CORRECTION: `attendance-parity.db.test.ts` is NOT named by the lock
+
+The phase-1 design MD says, at `:61-62`, that `attendance-parity.db.test.ts` is 「named in the
+lock's phase-1 door, lock:169」. **That attribution is false.** lock:169 names 账侧, 逐字节等价,
+现有 W4 路径 and `unrecoverableExpired` — it names no filename at all:
+
+```
+grep -c "attendance-parity" \
+  ~/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/approval-change-request-design-lock-draft-20260915.md
+# → 0
+```
+
+The filename is an IMPLEMENTER INVENTION mis-attributed to the lock, and the phase-1 verification
+MD then carried it forward as a blocked-with-reason deliverable (`:518`, `:679-715`). Consequences,
+both acted on here:
+
+1. **The acceptance goes in the already-wired file**, `approval-cancel-round-redemption.db.test.ts`
+   — the same call §3.4 made for the 判据 IV half, and now made for the same reason: the lock
+   names a REQUIREMENT, not an artefact, and satisfying it in a file that is already in the
+   required lane costs no new census pins and no s6a re-pin. Creating a second file to match an
+   invented name would be 另造同类物 in the literal sense — a new artefact whose only justification
+   was a misquote.
+2. **Phase-1's blocked-with-reason item is discharged, not deferred again.** The requirement it
+   stood for is implemented below; the FILENAME it named is retired.
+
+### 3.15.1 Base drift, closed FIRST — this branch was building on a stale phase 1
+
+Found at this unit's inventory, before any code was written: phase 2 branched at `7ef8e610e`, and
+phase 1 had since moved to `74a387dad` — 8 commits, and **not** docs-only. The intersection with
+phase 2's own touched paths was real:
+
+```
+git log --oneline --name-only 7ef8e610e..feat/approval-cancel-round-phase1 | sort -u
+# apps/web/src/approvals/api.ts
+# packages/core-backend/src/services/ApprovalBridgeService.ts
+# packages/core-backend/src/db/seeds/approval-cancel-round-published-definition.ts
+# packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts   ← this unit's file
+# packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts
+```
+
+`a166f5ca0 fix(approval): close cancel-round gate round-2 P2-1 and P3-A` is a CODE fix, and it
+touches the very file this unit appends to. Writing the parity case first would have meant writing
+it against superseded code and resolving a conflict afterwards. Phase 1 was therefore MERGED into
+phase 2 (`git merge`, not rebase — the branch is pushed and force-push is out of scope) as the
+first commit of this unit; the merge was clean (`ort`, no conflicts) and `tsc --noEmit` passed on
+the result.
+
+⚠️ **Consequence for every absolute in this file above §3.15**: those counts were measured at
+`7ef8e610e`-based heads and are head-scoped to them. They are NOT re-measured by this unit. Before
+LANE-DONE they must be re-run against the merged head.
+
+### 3.15.2 What 「现有 W4 路径」 is, as a running thing — and why the comparison needs TWO fixtures
+
+The existing path is `POST /api/attendance/requests/:id/cancel` (route registered at
+`plugins/plugin-attendance/index.cjs:38634`), which runs the W4 operation protocol over a
+boundary-owned connection. The redemption path runs the SAME protocol over the approver's
+transaction. There is exactly ONE production caller of the external-transaction entry:
+
+```
+grep -rn "executeInExternalTransaction(" packages/core-backend/src | grep -v tests
+# w4c3b-request-operation-boundary.ts:361   ← interface declaration
+# w4c3b-request-operation-boundary.ts:686   ← implementation
+# ApprovalProductService.ts:9054            ← the ONLY call site
+```
+
+A request can be cancelled only once, so parity cannot be a before/after on one row; it needs two
+structurally identical fixtures differing only in which channel cancels them. Fixture B is built
+from the SAME helpers in the SAME order (`publishOneNodeTemplate` → `createApprovedOriginal` →
+`attachAttendanceRequest` → `seedDirectoryIdentity`). **The one deliberate difference is
+disclosed in the case**: B has no cancel round, because 「现有 W4 路径」 means the path as a user
+walks it today, and that user has no round.
+
+### 3.15.3 How 「逐字节」 was made measurable — normalise, don't exclude
+
+Byte equality cannot hold literally: different primary keys, different users, different clocks. The
+comparison therefore NORMALISES wherever it honestly can and excludes only what it cannot, with
+every exclusion carried as DATA (`DECLARED_DIVERGENCES`, 13 entries, each with `table`, `column`
+and a written `reason`) rather than as a comment that rots.
+
+**The integrity rule, stated because it is the whole method**: a substitution pair may only be
+sourced from a FIXTURE-CONSTRUCTION fact — an identifier this test chose, or one minted by the
+template publication it drove, looked up from the TEMPLATE tables. A pair read off the rows being
+compared would not normalise a column, it would silently EXCLUDE it, and could mask a real
+divergence anywhere else that value appears. The first draft violated this (it read `template_id`
+off `approval_instances`); it was corrected by making `seedPendingCancelRound` RETURN its
+`templateId`, so A's template identity is a fixture input exactly as B's is.
+
+Eight substitution pairs: `documentId`, `requestId`, `requesterId`, `approverId`, `templateId`,
+template `key`, `template_version_id`, `published_definition_id`. Each is asserted non-empty and
+DISTINCT before use — an empty map would normalise nothing and the compare would pass by doing no
+work.
+
+### 3.15.4 What the compare found, measured rather than assumed
+
+Three rows compared: `attendance_requests`, the ORIGINAL `approval_instances`, and the
+`approval_records(action='revoke')` audit row. Each pass narrowed the declared table by MEASURING
+the residual divergence and then deciding — the values were printed, not guessed:
+
+| Column | A (redemption) | B (W4 HTTP) | Disposition |
+|---|---|---|---|
+| `approval_instances.metadata` | `templateKey: …parity-a-…` | `…parity-b-…` | **normalised** (template key is a fixture fact) |
+| `approval_instances.subject_snapshot` | `templateKey: …parity-a-…` | `…parity-b-…` | **normalised** |
+| `approval_instances.published_definition_id` | `5dd80580-…` | `fd86fc6c-…` | **normalised** |
+| `approval_instances.template_version_id` | `3c44b6c7-…` | `1d86b25d-…` | **normalised** |
+| `approval_instances.request_no` | `AP-101319` | `AP-101321` | **declared** — global counter, no fixture-side source |
+| `approval_records.id` | `2529` | `2531` | **declared** — global sequence |
+| `approval_records.ip_address` | `null` | `127.0.0.1` | ⚠️ **SUBSTANTIVE** — see §3.15.5 |
+| `approval_records.user_agent` | `null` | `node` | ⚠️ **SUBSTANTIVE** — see §3.15.5 |
+
+Everything else is byte-equal after normalisation, including `status`, `business_key`,
+`requester_snapshot`, `resolved_by`, `approval_instance_id`, `from_status`/`to_status` and
+`metadata.w4ActorPosture` (`'self'` on BOTH paths — the posture the boundary resolved in-lock, lock
+§3 C-1 「运行模式与授权凭据由边界在锁内解析」).
+
+### 3.15.5 ⚠️ THE DIVERGENCE THIS CASE FOUND: 「逐字节等价」 does NOT hold for request provenance
+
+`approval_records.ip_address` / `user_agent` are `null` on the redemption path and populated on the
+W4 HTTP path. This is not a clock or key artefact and it is not swallowed by the exclusion table —
+the values are asserted EXACTLY (`recA.ip_address` is null, `recB.ip_address` is not), so they
+cannot change quietly.
+
+**Why `null` is the honest value and not a gap to fill.** The redemption carries no HTTP request of
+its own to attribute. The only HTTP request in play is the APPROVER's, against a DIFFERENT instance;
+carrying its address onto the requester's cancellation audit row would attribute one person's
+action to another person's browser — an invented audit value.
+
+**FLAGGED FOR OWNER REGISTRATION**: whether 账侧 parity is satisfied by this, or whether the audit
+row must instead carry a synthetic provenance marker (e.g. an `approval-cancel-round` sentinel) so
+the two paths are distinguishable by INTENT rather than by an absence. Nothing on this branch
+depends on which way it is settled; the case pins today's behaviour either way.
+
+### 3.15.6 ⚠️ HEADLINE: `unrecoverableExpired` 呈现 IS NOT CLOSED, for two independent reasons
+
+Lock:86 says C-1's execution includes `reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,
+**必须呈现**). Neither half is closed by this unit, and both are MEASURED rather than argued:
+
+- **(a) No leave-balance lots are seeded.** `reverseLeaveBalanceDeduction`
+  (`plugins/plugin-attendance/index.cjs:19392-19445`) has nothing to reverse, so both paths produce
+  zero counters. Parity of a zero is parity; it is not the `unrecoverableExpired > 0` presentation
+  the lock demands. Closing it needs a fixture that seeds an EXPIRED lot **and** a paired control
+  where the value is absent — asserting presence on one fixture proves nothing about the
+  presentation path.
+- **(b) The approval side has no channel to present it on.** `redeemCancelRoundInTxn` receives
+  `{ kind: 'executed', response }` from the entry (`ApprovalProductService.ts:9054`) and returns
+  `{ kind: 'applied' }` — **the W4 response payload, `reversal` and all, is DISCARDED**. The redeemed
+  round's DTO is an ordinary `UnifiedApprovalDTO` with no field carrying it.
+
+(b) is asserted as a NEGATIVE in the case (the DTO has no `reversal` / `cancellationResult` key and
+its JSON does not contain `unrecoverableExpired`), so the day a channel IS added, the line goes red
+and this OPEN item must be revisited rather than quietly staying open. The B-side payload shape is
+pinned in the same case so the target shape is on record.
+
+**This is a contract gap, not a test gap**, and it is NOT fixed here on purpose: where the payload
+should surface (the DTO, the round row, the `approve` audit row's metadata) is a design decision the
+lock does not make, and inventing one would be 另造合同. Registered for owner decision.
+
+### 3.15.7 ⚠️ This case's green is CONDITIONAL on an open owner decision
+
+§3.11.4 flagged the C-1 audit row's acting identity as an implementer choice: the hook acts as the
+cancel round's REQUESTER, not the approver. Parity with the W4 path is precisely the argument that
+choice was made on, so this case is that argument's MEASUREMENT — and if the owner rules that the
+audit row must carry the approver or a system sentinel, `approval_records.actor_id` stops
+normalising onto B's and **this case goes RED BY DESIGN**. That is stated in the case itself so
+nobody later "fixes" the red by adding `actor_id` to the exclusion table. It is not swallowing the
+dispute; it is the dispute's oracle.
+
+### 3.15.8 Mutation ledger (this unit)
+
+| id | mutation | site | expected | measured |
+|---|---|---|---|---|
+| M-22 | `ipAddress: null, userAgent: null` → `'10.0.0.1'` / `'mutant'` in the redemption's `routeInput` | `ApprovalProductService.ts` (the sole production caller, `:9054`) | the parity case red on the provenance assertion, everything else green | **1 red / 15 green**, red at `approval-cancel-round-redemption.db.test.ts:1809:31`, `AssertionError: expected '10.0.0.1' to be null` |
+
+M-22 is the right probe for a parity case and the reason is worth stating: a mutation to code SHARED
+by both paths changes both fixtures and the compare stays green — that is what parity means. The
+discriminating power of this case is exactly against things the APPROVAL path does DIFFERENTLY, and
+M-22 is such a change. Detected by 1 assertion of 16 cases in this corpus.
+
+Restored with `cp` and verified byte-identical (`cmp` → identical; `git diff --stat` after restore
+shows the test file only, zero production lines).
+
+The case also carries its OWN positive control, because the assertions above it are
+absence-shaped and would pass vacuously if the comparator compared nothing: a deliberately
+perturbed COPY of row A must be reported as divergent (`status`), and the identity columns must NOT
+be reported — which is what proves normalisation RAN rather than that the rows happened to match.
+
+### 3.15.9 Commands and results
+
+```
+# merge the stale base first
+git merge feat/approval-cancel-round-phase1 --no-edit        # clean, ort strategy
+npx tsc --noEmit -p tsconfig.json                            # clean
+
+# the new case
+DATABASE_URL=…/metasheet2_lock_c2 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-cancel-round-redemption.db.test.ts -t '账侧' --reporter=dot
+# → 1 passed | 15 skipped (16)
+
+# the whole file (the `seedPendingCancelRound` signature change touches every case)
+DATABASE_URL=…/metasheet2_lock_c2 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+# → 16 passed (16)
+```
+
+⚠️ The file is run with `--config vitest.integration.config.ts`. The DEFAULT vitest config EXCLUDES
+every `tests/integration/*` file in the required lane's run-list, so a bare
+`npx vitest run tests/integration/…` prints `No test files found, exiting with code 1` — a
+skip-green shape. Recorded because it cost this unit a run: an operator who checks these cases with
+the bare command sees a non-zero exit and no tests, not a green.
+
+### 3.15.10 Wiring — nothing new to pin
+
+The acceptance lives in `approval-cancel-round-redemption.db.test.ts`, already wired into the
+required lane at `.github/workflows/plugin-tests.yml:1668`. **No new file, no new lib, no new table
+⇒ none of the four attendance census pins and no s6a re-pin are triggered by this unit.** This is
+the saving §3.15.0's provenance correction bought.
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -1879,14 +2104,29 @@ they are.
   prepare and execute. If anything compares those defaults against the loaded token, every redeem
   of a request that HAS a snapshot fails. That HTTP clients may omit the same fields is weak
   evidence it is tolerated, not proof.
-- **账侧完整取消结果逐字节等价 + `unrecoverableExpired` 呈现** (lock §8 期 1) — STILL OPEN, and
-  §3.12 narrows rather than closes it. That case establishes DB END-STATE parity for the success
-  branch (原单 `cancelled` + its `revoke` audit row + `attendance_requests.status='cancelled'`);
-  byte equivalence needs the HTTP `POST /api/attendance/requests/:id/cancel` path run on a TWIN
-  fixture and a field-by-field compare of both results. `unrecoverableExpired` needs
-  leave-balance lots, which no fixture here seeds.
-- **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 II and 判据 IV
-  halves are both filled in now (§3.4, §3.11.6), against a double.
+- **账侧完整取消结果逐字节等价** (lock §8 期 1) — **ROW-LEVEL HALF CLOSED in §3.15**: a twin-fixture
+  compare against the real `POST /api/attendance/requests/:id/cancel` path, with eight identity
+  substitutions sourced from fixture facts and 13 declared divergences carried as data. Every other
+  column is byte-equal after normalisation. M-22 red at the named site, 1 of 16.
+  ⚠️ What is NOT closed by it, and both are measured rather than argued: (a) **request provenance
+  is a SUBSTANTIVE divergence** — `approval_records.ip_address`/`user_agent` are `null` on the
+  redemption path and populated on the HTTP path (§3.15.5), flagged for owner registration rather
+  than excluded; (b) the case's green is **CONDITIONAL** on §3.11.4's open acting-identity decision
+  and goes red by design if the owner rules the other way (§3.15.7).
+- **`unrecoverableExpired` 呈现** (lock:86 「必须呈现」) — **STILL OPEN, and it is a CONTRACT GAP, not
+  a test gap** (§3.15.6). Two independent reasons: no fixture seeds leave-balance lots, so both
+  paths produce zero counters; and `redeemCancelRoundInTxn` **DISCARDS** the entry's
+  `{ kind: 'executed', response }` payload, so the approval side has no channel to present it on at
+  all. The absence is asserted as a negative so the day a channel is added the line goes red. Where
+  the payload should surface is a design decision the lock does not make — registered for owner
+  decision, deliberately not invented here.
+- **`attendance-parity.db.test.ts`** — **RETIRED as a deliverable, and the reason is a provenance
+  correction** (§3.15.0): the filename appears **zero** times in the lock
+  (`grep -c "attendance-parity" <lock>` → 0); phase-1's design MD `:61-62` mis-attributed it to
+  lock:169, which names a REQUIREMENT and no artefact. The requirement is implemented in the
+  already-wired `approval-cancel-round-redemption.db.test.ts` (§3.15), which is why this unit
+  triggers no new census pins and no s6a re-pin. Phase-1's blocked-with-reason item is discharged,
+  not deferred again.
 - **§5 I3 「终结即释放」 mutation** — **BUILT in §3.14** for the C-3 closure, as its own case
   (`:817-894`) whose `createCancelRoundInstance` call is the first statement after the close, so the
   clause carries the mutation instead of dying behind an earlier assertion. M-21 (delete the round

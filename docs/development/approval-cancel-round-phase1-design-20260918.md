@@ -77,8 +77,13 @@ verification record (round-2 doc, §5 "Decision 3"):
   edits (the mirror constant + the defensive assertion in `upsertAttendanceApprovalInstance`, and
   the five FK-pairing writer edits) — no new external-entry-point function, no call into
   `w4c3b-request-operation-boundary.ts` from this slice's own code.
-- **`attendance-parity.db.test.ts`** (byte-identical-outcome test named in the lock's phase-1 door,
-  lock:169). Does not exist in this tree: `find . -iname "*attendance-parity*"` → 0 results.
+- **`attendance-parity.db.test.ts`** (byte-identical-outcome test). Does not exist in this tree:
+  `find . -iname "*attendance-parity*"` → 0 results.
+  > ⛔ **ERRATUM (phase 2, §3.15.0).** This bullet originally read 「named in the lock's phase-1
+  > door, lock:169」. **That attribution is false** — `grep -c "attendance-parity" <lock>` → **0**.
+  > lock:169 names a REQUIREMENT (账侧 / 逐字节等价 / 现有 W4 路径 / `unrecoverableExpired`) and no
+  > filename at all; the filename was an implementer invention. The requirement is implemented in
+  > the already-wired `approval-cancel-round-redemption.db.test.ts`; no file by this name is owed.
 - **R1's #14 suite-forbidden negative control's production `suite` source** (lock §9-5, lock:176):
   phase 1 reads `suite` off the *original instance's own* `metadata.suite`
   (`ApprovalProductService.ts:8365`), defaulting to `'leave'` when absent — a fixture/seed
