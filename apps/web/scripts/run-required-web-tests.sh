@@ -1254,6 +1254,21 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 #
 # 解析本文件的守卫必须「去注释 → 拼接续行 → 取唯一 exec 逻辑行」，不能按物理行 startsWith。
 # ============================================================================================
+# A-2 slice 1 (approval form grouping lock v2.13 §2 "多 org 成员", 第 8 轮 P3-b, 2026-09-18):
+# `SessionOrgSwitcher.spec.ts` — the isolated unit spec for the new shared
+# `apps/web/src/components/SessionOrgSwitcher.vue` (copied and generalized from
+# `views/attendance/AttendanceSessionOrgSwitcher.vue`, which stays untouched — moving/editing it
+# would narrow `attendance-web-guard.yml:297-301,:397-400`'s closed-world session-spec census).
+# Full-filename token (not the bare `SessionOrgSwitcher` basename): verified against every existing
+# token below (none is a substring of it, it is a substring of none) — no coverage silently drops.
+# It still incidentally ALSO matches `tests/AttendanceSessionOrgSwitcher.spec.ts` (the token is a
+# suffix of that sibling filename: `Attendance` + `SessionOrgSwitcher.spec.ts`; `npx vitest run
+# SessionOrgSwitcher.spec.ts --reporter=verbose` locally confirms exactly these 2 files, 4 tests) —
+# harmless duplication, not a gap: that file already runs required via its OWN dedicated token at
+# line 477 above, so this line re-running it changes no coverage, just re-executes an already-gated
+# file. This token covers the new shared component in isolation only; the acceptance-J integration
+# spec (403 SESSION_ORG_REQUIRED → selector → retry → 201, wired into the approval template center
+# page) lands in a later slice with its own token.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1597,6 +1612,7 @@ exec npx vitest run \
   roleManagementSave \
   routePreviewErrors \
   searchApprovalDirectoryUsers \
+  SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \
   StockPreparationCodeHelp \
