@@ -141,6 +141,38 @@ lists in the same commit that introduces it.
   this CI wiring into the same PR-1), not a defect in this workflow. Anyone reading this lane red
   on its own should check whether the gate file has landed before treating the red as a wiring bug.
 
+  **SUPERSEDED (2026-09-18, lane-continuation step)** — pinned to this bullet specifically, not
+  voiding the section: the gate-content sibling landed on this branch several commits ago (classes
+  ①–⑬, judges A0/A/B/C/C′/D/F all discharged above), so "not run" / "does not exist yet" no longer
+  describes this branch's state. Re-ran the workflow step's `run:` line **verbatim**, character for
+  character against `.github/workflows/approval-realdb-todo-center-pending-query.yml`'s own step
+  (only `DATABASE_URL` substituted for the private DB; `EXPECT_DB` / `RBAC_BYPASS` / `RBAC_TOKEN_TRUST`
+  / `PRODUCT_MODE` / `RBAC_CACHE_TTL_MS` copied from the same step's job-level `env:` block) — not the
+  `npx vitest --config ... run tests/todo-center-pending-gate/` (directory arg) form used by the
+  per-judge mutation sections above, which differs from the workflow in three ways (`npx` vs
+  `pnpm --filter @metasheet/core-backend exec`, a directory arg vs the explicit file arg, no RBAC/
+  PRODUCT_MODE env):
+  ```
+  $ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 RBAC_BYPASS=false \
+    RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+    pnpm --filter @metasheet/core-backend exec vitest \
+    --config vitest.todo-center-pending-gate.config.ts run \
+    tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+   Test Files  1 passed (1)
+        Tests  26 passed (26)
+  ```
+  DB provenance for this run: `metasheet2_lock_b` (this lane's assigned private DB) was found with
+  six `MIGRATION_EXCLUDE`'d migrations (`008_plugin_infrastructure` etc.) already recorded as
+  executed from a prior, non-excluding migrate call — `db:migrate` with `MIGRATION_EXCLUDE` set
+  against that copy failed closed (`corrupted migrations: previously executed migration
+  008_plugin_infrastructure is missing`, kysely's own drift guard) rather than silently diverging.
+  Dropped and recreated it (`dropdb metasheet2_lock_b && createdb metasheet2_lock_b`), then ran
+  `db:migrate` with the exact `MIGRATION_EXCLUDE` value from the workflow file against the fresh
+  copy — completed without error — before the run above. This is a closer analog to the workflow's
+  own `postgres:16` service container (which is created fresh on every job run) than the earlier
+  `metasheet_lock_b_u3` entry two bullets above, which was a separate, since-discarded DB used only
+  to prove the migrate command's syntax before the gate-content sibling had landed.
+
 ## Explicitly not decided or asserted here
 
 - **Required-check status**: whether `approval-realdb-todo-center-pending-query` will be a GitHub
@@ -266,7 +298,22 @@ not added. The commit that changed this file's behavior (`6fba6e01e`, "broadcast
 todo:counts-updated alongside approval:counts-updated") is instead covered by
 `packages/core-backend/tests/unit/approval-realtime.test.ts`, an always-on no-DB unit suite (not
 excluded in `vitest.config.ts`, collected by `plugin-tests.yml`'s required `test (20.x)` job by
-default — no special wiring needed or added).
+default — no special wiring needed or added) — not merely by attribution, run directly:
+
+```
+$ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/approval-realtime.test.ts --reporter=verbose
+ ✓ tests/unit/approval-realtime.test.ts > approval realtime count publisher > computes pending and unread counts with user, role, and source filters
+ ✓ tests/unit/approval-realtime.test.ts > approval realtime count publisher > publishes all/platform/plm count snapshots to the current user room
+ ✓ tests/unit/approval-realtime.test.ts > approval realtime count publisher > uses the authenticated user room and suppresses publish failures
+ ✓ tests/unit/approval-realtime.test.ts > approval realtime count publisher > also broadcasts todo:counts-updated on the same per-user room (design-lock §4)
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+```
+The fourth test is the one that asserts `6fba6e01e`'s own change (`collabService.broadcastTo(room,
+'todo:counts-updated', payload)` alongside the pre-existing `approval:counts-updated` broadcast on
+the same room) — a no-DB unit test, run here with no `DATABASE_URL`/`EXPECT_DB` needed, matching
+its always-on classification above.
 
 ## Judging criterion C (list dedup, list/count arm-set parity) — DISCHARGED, both mutations run for real
 
@@ -550,6 +597,87 @@ a runtime snapshot to diff against — it is this file's own A0 golden-value tab
 golden values live against `countApprovalPendingForViewer`. A second copy of the same three
 assertions under a `describe('Judge D — ...')` label would duplicate, not strengthen, the check —
 the same reasoning judge A's entry above gives for reusing classes ①/④ rather than re-asserting them.
+
+**Addendum (2026-09-18, lane-continuation step)**: the paragraph above discharges "the number is
+load-bearing" (a mutation reddens it) but, on its own, does not discharge "前后逐字相等" against the
+literal PRE-extraction implementation — A0's golden values are asserted against
+`countApprovalPendingForViewer` itself (the POST-extraction code), so a mutation of that same
+function cannot show the extraction preserved the ORIGINAL route's SQL. Closing that gap
+mechanically rather than by re-reading the diff: extracted the pre-extraction `GET
+/api/approvals/pending-count` WHERE-clause construction verbatim from the commit that did the
+extraction's parent, and diffed it (whitespace-normalized, since the extraction re-indented the
+same template literals — Postgres's parser does not distinguish the two, but a raw byte diff of the
+JS source would falsely flag re-indentation as a change) against `buildApprovalPendingConditions`'s
+live output for the same aliases:
+
+```
+$ git show 54136b8c3^:packages/core-backend/src/routes/approvals.ts > /tmp/pre-extraction-approvals.ts
+$ grep -n "pending-count\|const conditions: string\[\]" /tmp/pre-extraction-approvals.ts
+1990:  r.get('/api/approvals/pending-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+2022:      const conditions: string[] = [
+...
+$ sed -n '2022,2039p' /tmp/pre-extraction-approvals.ts
+      const conditions: string[] = [
+        `a.is_active = TRUE`,
+        `i.status = 'pending'`,
+        `(
+          (a.assignment_type = 'user' AND a.assignee_id = $1)
+          OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
+          OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
+        )`,
+        `NOT EXISTS (
+          SELECT 1 FROM approval_published_definitions pd
+          WHERE pd.id = i.published_definition_id
+            AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler')))
+        )`,
+      ]
+```
+(line 1990 confirms this is the `/pending-count` handler specifically — `routes/approvals.ts` has a
+second, unrelated `conditions` block later in the file, for a different route, with different
+`$n` numbering and no handler-node exclusion; extracting the wrong block would have silently proven
+nothing.)
+
+```ts
+// /tmp/judge-d-sql-compare.ts
+import { buildApprovalPendingConditions } from '<repo>/packages/core-backend/src/services/approval-pending-query'
+
+const oldConditionsJoined = [
+  `a.is_active = TRUE`,
+  `i.status = 'pending'`,
+  `(
+          (a.assignment_type = 'user' AND a.assignee_id = $1)
+          OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
+          OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
+        )`,
+  `NOT EXISTS (
+          SELECT 1 FROM approval_published_definitions pd
+          WHERE pd.id = i.published_definition_id
+            AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler')))
+        )`,
+].join(' AND ')
+
+const { whereSql: newWhereSql } = buildApprovalPendingConditions({ actorId: 'x', roles: [], permissions: [] }, null)
+const normalize = (s: string) => s.replace(/\s+/g, ' ').trim()
+console.log('EQUAL:', normalize(oldConditionsJoined) === normalize(newWhereSql))
+if (normalize(oldConditionsJoined) !== normalize(newWhereSql)) process.exit(1)
+```
+```
+$ npx tsx /tmp/judge-d-sql-compare.ts
+EQUAL: true
+```
+The `SELECT` shape wrapping this `WHERE` (`SELECT COUNT(DISTINCT a.instance_id)::text AS count,
+COUNT(DISTINCT a.instance_id) FILTER (WHERE r.instance_id IS NULL)::text AS unread_count FROM
+approval_assignments a INNER JOIN approval_instances i ON i.id = a.instance_id LEFT JOIN
+approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1 WHERE ${...}`) and the params
+array construction (`[actorId, rolesParam, permissionsParam]` with the same `roles.length > 0 ?
+roles : ['__none__']` fallback, `sourceSystem` conjunct appended identically) are also unchanged
+between the two commits — confirmed by direct comparison of `countApprovalPendingForViewer`'s body
+(`packages/core-backend/src/services/approval-pending-query.ts`) against the pre-extraction
+`pool.query` call in the same extracted file, not merely eyeballed from the original commit's diff
+hunk. This is what "改接前后逐字相等,黄金值" actually requires evidence of — the WHERE, the
+aggregate SELECT, and the params are each shown identical to their pre-extraction originals,
+independent of the mutation test below (which shows load-bearing-ness of the CURRENT code, not
+equivalence to the OLD code).
 
 Baseline (immediately before the mutation, same DB/fixtures as judge A's entry above — unaffected by
 that entry, since both of judge A's mutations were fully restored and re-verified green before this
