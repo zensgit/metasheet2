@@ -44,7 +44,21 @@
  * still matches the query text — the same protocol-safety concern judge A's ledger entry explains)
  * reddened ONLY class ②'s named test (`expected +0 to be 1`), leaving all 19 other tests — including
  * ①/⑥'s own A0 assertions and both Judge C tests — green. Restored and re-run 20/20 before this
- * commit. Judges B/C' remain deferred (see the fixture-plumbing docblock below for the S9 note).
+ * commit. Judging criterion C′ (actionable reuses the decision door's own predicate) is now
+ * DISCHARGED by the `describe("Judge C′ — ...")` block below (endpoint-level half: class ①
+ * `actionable=true`, class ⑥ `actionable=false`, both new test content — row C′'s own 正控 column
+ * names class ①'s value, and nothing asserted the field before this commit, confirmed via `grep -rn
+ * "actionable" packages/core-backend/tests apps/web` returning no hit under this suite or any
+ * `apps/web` todo-center spec) plus a real cp/edit/run/restore/cmp mutation forcing `actionable` to
+ * an unconditional `true` in `approval-pending-source.ts` (ledger in the verification doc: reddens
+ * ONLY the ⑥ test, 21/22 green). The predicate's unit-level mutation (row C′'s second, per-function
+ * mutation — swap `resolveCanDecideCurrentNode`'s whole body for the "seat type ∈ {user, role}"
+ * simplified version) is also run for real, against
+ * `tests/unit/approval-can-decide-current-node.test.ts` (not this file — that suite has no DB):
+ * 19/41 redden, including both of row C′'s named unit-level param sets ("非 pending 实例" — the six
+ * non-pending-status tests — and "席位不在可决节点" — "a seat at a node the instance is NOT stopped
+ * on cannot decide"), restored and re-run 41/41 green. Judge B remains deferred (see the
+ * fixture-plumbing docblock below for the S9 note).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -1221,6 +1235,52 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       // call site rather than flipping an existing literal.
       expect(matches).toHaveLength(1)
       expect(countResult.body.count).toBe(1)
+    })
+  })
+
+  // Judging criterion C′ (design-lock §5 row C′): the endpoint-level half. `actionable` on each
+  // `/api/todo/items` row reuses `resolveCanDecideCurrentNode` — the SAME predicate the decision
+  // door enforces (`approval-pending-source.ts`'s own docblock) — fed by the seat rows the shared
+  // row-version query already carries.
+  //
+  // Class ①'s `true` here is EARNED through the seat arm, not an early return: `instance1` has
+  // `sourceSystem: 'platform'`, a non-null `publishedDefinitionId` (seeded via
+  // `seedNonHandlerPublishedDefinition` in `beforeAll`), and an id that does not start with `plm:`
+  // (`todo-center-pending-gate-i1-<suffix>`) — so `decisionDoorIsSeatGated(instance1)` is true and
+  // `resolveCanDecideCurrentNode` falls through to the seat-membership arm instead of the
+  // non-seat-gated-door `return true` at `approval-seat-authorization.ts:189-196`. Row C′'s own
+  // wording makes this point about class ⑥ ("否则 :189-196 早返回 true,与席位类型无关"); the same
+  // burden applies to ① and is recorded here rather than left implicit.
+  //
+  // Class ⑥'s instance is the SAME `source_queue`-seat fixture Judge C's arm-parity test above
+  // uses: `source_system='platform'`, `published_definition_id` non-null, decision door seat-gated
+  // — so its `actionable=false` also comes from the seat-membership arm (a `'source_queue'` seat
+  // matches no arm in `assignmentMatchesActor`), not from the non-seat-gated-door early return.
+  describe("Judge C′ — actionable reuses the decision door's own predicate (observation point: GET /api/todo/items)", () => {
+    it('class ①\'s item is actionable=true (earned via the seat arm, not the non-seat-gated-door early return)', async () => {
+      const token = await devToken(baseUrl, v1.id)
+      const { status, body } = await fetchTodoItems(baseUrl, token)
+      expect(status).toBe(200)
+      const match = body.items.find((item) => item.id === instance1.id)
+      expect(match).toBeDefined()
+      expect(match?.actionable).toBe(true)
+    })
+
+    it('class ⑥\'s item is actionable=false (a source_queue seat matches no arm resolveCanDecideCurrentNode checks; mutation record below)', async () => {
+      const token = await devToken(baseUrl, v6.id)
+      const { status, body } = await fetchTodoItems(baseUrl, token)
+      expect(status).toBe(200)
+      const match = body.items.find((item) => item.id === instance6.id)
+      expect(match).toBeDefined()
+      // Endpoint-level mutation recorded in
+      // docs/development/todo-center-phase1-verification-20260918.md: forcing `actionable` to an
+      // unconditional `true` in `approval-pending-source.ts` turns this into `toBe(true)` while
+      // leaving class ①'s assertion above (already `true`) unaffected — verified there, not
+      // re-run on every CI pass. The unit-level mutation against `resolveCanDecideCurrentNode`
+      // itself (§5 row C′'s second, per-function mutation) is recorded in the same doc against
+      // `tests/unit/approval-can-decide-current-node.test.ts`, not here — that suite has no DB and
+      // is not part of this real-DB gate file.
+      expect(match?.actionable).toBe(false)
     })
   })
 })
