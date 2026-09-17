@@ -424,15 +424,15 @@ closure case's `[]` a measurement rather than a dead listener.
 
 ### 3.6 Mutation ledger (this unit)
 
-Every probe: `cp` backup → edit → run → `cp` restore → `cmp` (all three restores verified identical
-— `RESTORED-IDENTICAL` printed each time).
+Every probe: `cp` backup → edit → run → `cp` restore → `cmp`. **Four** probes in this unit
+(M-5…M-8); all four restores verified identical — `RESTORED-IDENTICAL` printed each time. (The
+「three」 in §2.4's ledger refers to that unit's own three probes, not to these.)
 
 | # | Mutation | Expected | Observed |
 |---|---|---|---|
 | M-5 | **the lock's own 判据 IV negative control** — delete the closure branch's early `return` (`return closedApproval` → `void closedApproval`), keeping every write | the status is overwritten back to `approved` **and** a completion event appears ⇒ the 判据 IV case red, nothing else | **exactly 1 red**, and on the named symptom: `AssertionError: expected [ 'approval.approved' ] to deeply equal []`; 7 green |
 | M-6 | delete `deactivateAllActiveAssignments` from the closure | the seat assertion red | **GREEN — the mutation is INEFFECTIVE.** See below; the assertion is reclassified, not kept as if it had passed a probe |
 | M-7 | round write `outcome = evaluation.decision` → hard-coded `'rejected'` (collapse `expired` into 判据 III's outcome) | the round-outcome assertion red, and only it | **exactly 1 red**: `AssertionError: expected 'rejected' to be 'expired'`; 7 green |
-
 | M-8 | reverse the evaluator's lock order back to round-row-first (the shape `78d41fb4c` shipped) | the Q-D source-scan leg red, and only it | **exactly 1 red**: `AssertionError: expected 1841 to be less than 1650`; 12 green |
 
 **M-6 is a finding, not a footnote.** Removing the closure's own seat release leaves the acceptance
