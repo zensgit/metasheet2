@@ -711,24 +711,39 @@ export function createAttendanceRequestOperationBoundaryV1(
       // rows and the xact advisory lock taken INSIDE the savepoint are gone; and the caller's own
       // rollout advisory lock, taken BEFORE the savepoint, survives — so a caller that makes a
       // second call in the same transaction still passes the rollout-lock precondition.
-      await client.query('SAVEPOINT w4c3b_external_txn_attempt', [])
-      const result = await runRequestOperationProtocolV1(
-        client,
-        deps.adapters,
-        input,
-        { externalTransaction: true },
-      )
-      // Deliberately NOT in a `finally`/`catch`: an infrastructure exception is the OTHER path
-      // (lock §3 C-3 「两条路径、两种返回」). It propagates with the whole transaction left for the
-      // caller to roll back — and after a database error the transaction is aborted, so issuing
-      // RELEASE here would itself fail and would mask the real error.
-      if (result.kind === 'business_refused') {
-        await client.query('ROLLBACK TO SAVEPOINT w4c3b_external_txn_attempt', [])
-      }
-      await client.query('RELEASE SAVEPOINT w4c3b_external_txn_attempt', [])
-      return result
+      return runExternalTransactionAttemptInSavepointV1(client, () =>
+        runRequestOperationProtocolV1(client, deps.adapters, input, { externalTransaction: true }))
     },
   }
+}
+
+/**
+ * The savepoint discipline of the external entry, in ONE place so that what it does on a refusal
+ * and what it deliberately does NOT do on an infrastructure exception are both directly testable
+ * without a database. `executeInExternalTransaction` is its only production caller; `run` is the
+ * protocol.
+ *
+ * On a BUSINESS refusal the attempt is rolled back and the savepoint released, so the refused
+ * attempt leaves nothing in the caller's transaction and the caller is left inside no
+ * subtransaction it did not create — `ROLLBACK TO` alone leaves the savepoint DEFINED, so the
+ * RELEASE is not optional. The caller can then write and COMMIT its C-3 closure.
+ *
+ * On an infrastructure exception nothing is issued at all: that is the OTHER path (lock §3 C-3
+ * 「两条路径、两种返回」). The error propagates with the whole transaction left for the caller to
+ * roll back, and after a database error the transaction is aborted, so a RELEASE here would itself
+ * fail and would mask the real error. Hence no `finally` and no `catch`.
+ */
+export async function runExternalTransactionAttemptInSavepointV1(
+  client: AttendanceW4TransactionClientV1,
+  run: () => Promise<AttendanceRequestOperationExternalTransactionResultV1>,
+): Promise<AttendanceRequestOperationExternalTransactionResultV1> {
+  await client.query('SAVEPOINT w4c3b_external_txn_attempt', [])
+  const result = await run()
+  if (result.kind === 'business_refused') {
+    await client.query('ROLLBACK TO SAVEPOINT w4c3b_external_txn_attempt', [])
+  }
+  await client.query('RELEASE SAVEPOINT w4c3b_external_txn_attempt', [])
+  return result
 }
 
 /**
