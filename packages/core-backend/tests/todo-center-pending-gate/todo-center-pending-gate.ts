@@ -74,15 +74,16 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S8 for classes ①②③③′④⑤⑥⑦ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
-// these classes and is deferred to a later step, along with classes ⑧⑨⑩⑪⑫⑬).
+// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
+// these classes and is deferred to a later step, along with classes ⑨⑩⑪⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
 /** ①②⑥⑦ share this literal node-key string (design-lock §5 A0, "跨类 node_key 关系写死") — ⑧'s
- *  handler-classified published definition (a later step) uses the SAME string as its handler
- *  node, so the `pd.id = i.published_definition_id` join-key mutation has a live population to
- *  break. Defined here, now, so a later step cannot let the two drift apart. */
+ *  handler-classified published definition (below) uses the SAME string as its handler node, so the
+ *  `pd.id = i.published_definition_id` join-key mutation has a live population to break: dropping
+ *  that join key lets ⑧'s handler definition match ①②⑥⑦'s instances by `node_key` alone, wrongly
+ *  excluding all four, not just flipping ⑧ itself. */
 const SHARED_SEAT_NODE_KEY = `todo-center-pending-gate-seat-${suffix}`
 
 // Distinct role-name strings for classes ② and ③′ (rather than a shared literal like `'manager'`)
@@ -287,6 +288,37 @@ async function seedNonHandlerPublishedDefinition(tag: string): Promise<string> {
   return definitionResult.rows[0].id
 }
 
+// S6 (⑧'s variant) — same three-table chain as `seedNonHandlerPublishedDefinition` above, but
+// `runtime_graph` classifies `nodeKey` as a `handler` node: `{"nodes":[{"key":<nodeKey>,
+// "type":"handler"}]}`, matching production `buildRuntimeGraph`
+// (`ApprovalProductService.ts:6247→:4496-4504`, `types/approval-product.ts:677-680`) so the
+// `@>` containment test in `handlerNodeExclusionCondition` (`approval-pending-query.ts:74-80`)
+// actually fires. Own template/version (globally-unique `key`, per `seedNonHandlerPublishedDefinition`'s
+// own comment) — no need to share a template with another class's definition and juggle the
+// `UNIQUE (template_id) WHERE is_active = TRUE` constraint (design-lock §3.0 S6), since a fresh
+// template's first (and only) definition can stay `is_active = TRUE`.
+async function seedHandlerPublishedDefinition(tag: string, nodeKey: string): Promise<string> {
+  const templateResult = await pool().query<{ id: string }>(
+    `INSERT INTO approval_templates (key, name, status) VALUES ($1, $2, 'published') RETURNING id`,
+    [`todo-center-pending-gate-${tag}-${suffix}`, `Todo Center Gate ${tag} Template`],
+  )
+  const templateId = templateResult.rows[0].id
+
+  const versionResult = await pool().query<{ id: string }>(
+    `INSERT INTO approval_template_versions (template_id, version, status) VALUES ($1, 1, 'published') RETURNING id`,
+    [templateId],
+  )
+  const versionId = versionResult.rows[0].id
+
+  const runtimeGraph = JSON.stringify({ nodes: [{ key: nodeKey, type: 'handler' }] })
+  const definitionResult = await pool().query<{ id: string }>(
+    `INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active)
+     VALUES ($1, $2, $3::jsonb, TRUE) RETURNING id`,
+    [templateId, versionId, runtimeGraph],
+  )
+  return definitionResult.rows[0].id
+}
+
 interface InstanceFixture {
   id: string
   status: string
@@ -421,6 +453,14 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // `pd.id = i.published_definition_id` join-key mutation has ①②⑥⑦ to wrongly exclude, not just ⑧
   // itself.
   const v7 = viewer('c7-null-published-definition', 'employee')
+  // Class ⑧ — same viewer/seat shape as ①, but its instance's published definition classifies the
+  // seat's node (`SHARED_SEAT_NODE_KEY`) as a `handler` node ⇒ count 0: the handler-node exclusion
+  // (`NOT EXISTS ... type = 'handler'`) is now FALSE for this row, so it never qualifies (design-
+  // lock §5 A0 ⑧). The "flip `NOT EXISTS` to `EXISTS 已发布定义`" mutation is ONE code change with
+  // TWO directions of wrongness on the SAME `NOT EXISTS` clause — ⑦'s NULL/dangling row would then
+  // wrongly become excluded (1→0) while ⑧'s handler row would wrongly become included (0→1); the
+  // lock requires both classes be re-checked under that one mutation, not just one of them.
+  const v8 = viewer('c8-handler-node-excluded', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -472,14 +512,26 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null,
     currentNodeKey: SHARED_SEAT_NODE_KEY,
   }
+  // Class ⑧'s own instance — published definition is the HANDLER-classified one (built in
+  // `beforeAll` via `seedHandlerPublishedDefinition`), current node key = `SHARED_SEAT_NODE_KEY`,
+  // shared with ①②⑥⑦ (design-lock §5 A0 "跨类 node_key 关系写死": see `v8`'s docblock and
+  // `SHARED_SEAT_NODE_KEY`'s own docblock above for why this must stay the SAME string, not a
+  // distinct one).
+  const instance8: InstanceFixture = {
+    id: `todo-center-pending-gate-i8-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll (the HANDLER definition, not the non-handler helper)
+    currentNodeKey: SHARED_SEAT_NODE_KEY,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -508,6 +560,9 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     instance3b.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c3b')
     instance5.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c5')
     instance6.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c6')
+    // Class ⑧'s definition classifies `SHARED_SEAT_NODE_KEY` as a handler node — the ONLY call to
+    // `seedHandlerPublishedDefinition` in this file.
+    instance8.publishedDefinitionId = await seedHandlerPublishedDefinition('c8', SHARED_SEAT_NODE_KEY)
 
     await seedInstance(instance1)
     await seedInstance(instance2)
@@ -517,6 +572,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     // instance7's `published_definition_id` is left NULL — no `seedNonHandlerPublishedDefinition`
     // call for it, on purpose (class ⑦'s whole point, see its docblock above).
     await seedInstance(instance7)
+    await seedInstance(instance8)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -554,6 +610,12 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       assigneeId: v7.id,
       nodeKey: SHARED_SEAT_NODE_KEY,
     })
+    await seedAssignment({
+      instanceId: instance8.id,
+      assignmentType: 'user',
+      assigneeId: v8.id,
+      nodeKey: SHARED_SEAT_NODE_KEY,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
 
@@ -577,6 +639,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
           instance3b.publishedDefinitionId,
           instance5.publishedDefinitionId,
           instance6.publishedDefinitionId,
+          instance8.publishedDefinitionId,
         ]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
@@ -759,6 +822,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(body).toHaveProperty('count')
       expect(body.count).toBe(1)
       expect(body.unreadCount).toBe(1)
+    })
+
+    it('class ⑧ — user seat, pending, but the seat\'s node is classified handler ⇒ count 0 (handler exclusion active)', async () => {
+      const token = await devToken(baseUrl, v8.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v8.email)
+      expect(me.username).toBe(v8.username)
+      expect(me.name).toBe(v8.name)
+      expect(me.role).toBe('employee')
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(0)
+      expect(body.unreadCount).toBe(0)
     })
   })
 })
