@@ -3,7 +3,7 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
-import { deriveProjectionSheetId } from '../../src/multitable/approval-record-projection-service'
+import { deriveProjectionSheetId, deriveProjectionRecordId, deriveProjectionFieldId } from '../../src/multitable/approval-record-projection-service'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
 
 /**
@@ -26,8 +26,10 @@ import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-proje
  *     `meta_records`), not a stand-in;
  *   - the returned `viewId` is whatever this suite seeded as the sheet's (oldest) view row —
  *     nothing the client could have guessed or hardcoded;
- *   - a readable instance whose template has NO projection sheet materialized yet still returns
- *     `null`, not a 500 — the "reconcile hasn't run yet" case a live approval always starts in.
+ *   - a readable instance whose projection ROW is (still, or again) absent — the create hook is
+ *     AWAITED on every create (design-lock §2), so this is never observable at create time; it is
+ *     the §6b "best-effort write got lost, the sweep hasn't healed it yet" window, reproduced here
+ *     by deleting the create hook's own row right after it lands — still returns `null`, not a 500.
  *
  * Requires real PostgreSQL: the participant predicate's JOIN and the default-view lookup are
  * genuine SQL, not something a mocked pool can stand in for without re-implementing them.
@@ -177,24 +179,33 @@ describeIfDatabase('approval detail projectionEntry (P3-2a) — real HTTP + real
     })
     expect(created.status, await created.clone().text()).toBeLessThan(300)
     const aid = await extractId(created)
+    // The T3-6 create hook is AWAITED synchronously (design-lock §2: "awaiting BEFORE the emit
+    // makes auto-approve-at-create deterministic"), so by the time `created` above resolved, the
+    // create hook's own row (`deriveProjectionRecordId(aid)`) already correctly names REQUESTER
+    // as this row's namespaced `requesterId` — there is no create-time race to observe from the
+    // outside. What §6b's own doc-comment DOES describe as reachable is a best-effort write that
+    // never landed (or was later lost) and the sweep has not yet healed — reproduced directly by
+    // deleting that one row so the sheet + view exist but the row genuinely does not.
+    const pool = poolManager.get()
+    await pool.query(`DELETE FROM meta_records WHERE id = $1`, [deriveProjectionRecordId(aid)])
     const read = await req(base, `/api/approvals/${aid}`, requesterTok)
     expect(read.status).toBe(200)
     const dto = (await read.json()) as { projectionEntry?: unknown }
     expect(dto.projectionEntry ?? null).toBeNull()
   })
 
-  it('B: the REQUESTER, seeded as the projection row participant, gets the handle with the SERVER-resolved sheetId/viewId', async () => {
+  it('B: the REQUESTER, made a participant by the T3-6 create hook itself, gets the handle with the SERVER-resolved sheetId/viewId', async () => {
+    // No manual seed here — the create hook is AWAITED synchronously (design-lock §2), and
+    // `buildRecordData` namespaces `requesterId` under THIS row's own sheetId via
+    // `deriveProjectionFieldId`, the exact key `approvalProjectionParticipantPredicateSql` reads
+    // back (T36-1 review P1, the drift PR #5767 closed). Seeding a second, hand-built row here
+    // would be redundant with — and could mask a regression in — that real writer<->reader path,
+    // so this test exercises production's own create-hook row directly, end to end.
     const created = await req(base, '/api/approvals', requesterTok, {
       method: 'POST',
       body: { templateId: tid, formData: { reason: 'req-is-participant' } },
     })
     const aid = await extractId(created)
-    const pool = poolManager.get()
-    await pool.query(
-      `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
-       VALUES ($1,$2,$3::jsonb,1,'system:approval-projection','system:approval-projection')`,
-      [`rec-pe-req-${aid}`, sheetId, JSON.stringify({ requesterId: REQUESTER, approverId: 'someone-unrelated' })],
-    )
     const read = await req(base, `/api/approvals/${aid}`, requesterTok)
     expect(read.status).toBe(200)
     const dto = (await read.json()) as { projectionEntry?: { sheetId: string; viewId: string } | null }
@@ -212,7 +223,14 @@ describeIfDatabase('approval detail projectionEntry (P3-2a) — real HTTP + real
     await pool.query(
       `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
        VALUES ($1,$2,$3::jsonb,1,'system:approval-projection','system:approval-projection')`,
-      [recId, sheetId, JSON.stringify({ requesterId: 'someone-unrelated', approverId: 'also-unrelated' })],
+      [
+        recId,
+        sheetId,
+        JSON.stringify({
+          [deriveProjectionFieldId(sheetId, 'requesterId')]: 'someone-unrelated',
+          [deriveProjectionFieldId(sheetId, 'approverId')]: 'also-unrelated',
+        }),
+      ],
     )
 
     // The APPROVER can read this instance at all (S1 SEAT arm — they hold the active assignment
@@ -225,15 +243,25 @@ describeIfDatabase('approval detail projectionEntry (P3-2a) — real HTTP + real
     expect(beforeDto.projectionEntry ?? null).toBeNull()
 
     // Positive control (design-lock §3/B): make APPROVER the projection row's approverId -> the
-    // SAME instance, the SAME viewer now gets the handle.
+    // SAME instance, the SAME viewer now gets the handle. Keyed through `deriveProjectionFieldId`
+    // (never hand-spelled), the same namespaced key the writer stores under and
+    // `approvalProjectionParticipantPredicateSql` reads back.
     await pool.query(
-      `UPDATE meta_records SET data = data || jsonb_build_object('approverId', $2::text) WHERE id = $1`,
-      [recId, APPROVER],
+      `UPDATE meta_records SET data = data || jsonb_build_object($2::text, $3::text) WHERE id = $1`,
+      [recId, deriveProjectionFieldId(sheetId, 'approverId'), APPROVER],
     )
     const after = await req(base, `/api/approvals/${aid}`, approverTok)
     expect(after.status).toBe(200)
     const afterDto = (await after.json()) as { projectionEntry?: { sheetId: string; viewId: string } | null }
     expect(afterDto.projectionEntry).toEqual({ sheetId, viewId: VIEW_ID })
+
+    // This sheet is shared by every test in this describe block, and the participant predicate is
+    // SHEET-scoped, not instance-scoped (`loadApprovalProjectionParticipantSheetIds` joins on
+    // `sheet_id` alone, across every row) — leaving APPROVER named on this row would make them a
+    // participant of the WHOLE sheet for every later test in this file, which would let the P3-1
+    // regression test below pass even if ITS OWN fixture were broken. Delete it so that test's
+    // fixture is the only thing naming APPROVER.
+    await pool.query(`DELETE FROM meta_records WHERE id = $1`, [recId])
   })
 
   it('P3-1 regression: the DISPATCH ACTION response (POST .../actions) carries projectionEntry too, not only a fresh GET', async () => {
@@ -256,7 +284,14 @@ describeIfDatabase('approval detail projectionEntry (P3-2a) — real HTTP + real
     await pool.query(
       `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
        VALUES ($1,$2,$3::jsonb,1,'system:approval-projection','system:approval-projection')`,
-      [`rec-pe-dispatch-${aid}`, sheetId, JSON.stringify({ requesterId: 'someone-unrelated', approverId: APPROVER })],
+      [
+        `rec-pe-dispatch-${aid}`,
+        sheetId,
+        JSON.stringify({
+          [deriveProjectionFieldId(sheetId, 'requesterId')]: 'someone-unrelated',
+          [deriveProjectionFieldId(sheetId, 'approverId')]: APPROVER,
+        }),
+      ],
     )
 
     const approved = await req(base, `/api/approvals/${aid}/actions`, approverTok, {
