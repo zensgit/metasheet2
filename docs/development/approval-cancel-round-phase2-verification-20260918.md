@@ -636,7 +636,7 @@ Stated per-row so 「五种情形逐行落测试」 is not inflated by this comm
 | 审批人驳回 | `rejected` | **covered — phase 1**, 判据 III (this file's `chain` case) |
 | 发起人撤回本轮 | `withdrawn` | **covered — phase 1**, 判据 III (same case) |
 | 最终评估:窗口/策略已关 | `expired` | **covered — this unit** |
-| 最终评估:业务不可逆 | `blocked` | **NOT covered.** It is produced by C-1's `business_refused` return, so it lands with 判据 II. The writer (`closeCancelRoundSystemTerminalInTxn`) already takes it and is shared by both causes; nothing exercises it yet |
+| 最终评估:业务不可逆 | `blocked` | **covered — §3.11.6** (updated; this row read 「NOT covered」 before the redemption hook landed). Produced by C-1's `business_refused` return and written by the SAME `closeCancelRoundSystemTerminalInTxn` the `expired` cause uses. Caveat: driven through a test double, not the real boundary — §4 |
 | 基础设施异常 | stays `pending` | **covered through #5′** — the `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` case drives the throw from inside the evaluator and asserts the full rollback shape: 409 with the NAMED code, round still `pending` with `ended_at` null, instance still `pending`, the seat still active (count 1), zero completion events. The two `CANCEL_ROUND_INVARIANT_VIOLATION` throws take the same path by construction but are not separately driven through #5′ |
 
 ---
@@ -1146,16 +1146,194 @@ effect; the file is reported here rather than omitted from the run list.
 
 ---
 
+## 3.11 判据 II, IMPLEMENTED: the redemption hook and its C-1 port (this unit)
+
+Commit `08b7cbec3`. This is the unit §3.3b flagged as blocked and §3.9/§3.10 unblocked: both
+prerequisites (the rollout advisory lock ordered at `dispatchAction`'s entry, the cancel adapter's
+two row locks reordered) had landed, so the hook itself could finally be built.
+
+### 3.11.1 The channel did not exist — and the repo's own shape for it did
+
+There was no core←plugin direction at all. The forward one is well established
+(`attendanceW4SegmentCalculationPort`: core exposes, plugin pulls — that is how the plugin builds
+`w4RequestOperationBoundary` at `index.cjs:35767`), but approval calling INTO attendance had no
+precedent in the attendance modules. Rather than invent one, the search was widened first:
+
+```
+$ git grep -n "register\|provide\|setPlugin" -- packages/core-backend/src/types/plugin.ts
+  … packages/core-backend/src/types/plugin.ts:1201-1207
+    T3-2 — host→plugin surface for binding the process-wide working-day calendar provider that the
+    approval SLA path consults through the WorkdayCalendarPort.
+```
+
+That is exactly this direction, for exactly this consumer (the approval path), and it already has a
+module: `core/workday-calendar-port.ts`. The new port is modelled on it line for line — a
+single-provider singleton registry with `register` / `unregister` / `get` / `has` / `clear`, a
+warning on replacement, and a convenience register/unregister pair.
+
+| Piece | Where | Lock clause |
+|---|---|---|
+| `AttendanceCancellationExecutionPort` + its registry | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` (new) | §3 C-1 — 「审批侧只调用」 |
+| `registerCancelRoundExecutionBoundary` on the W4 port | `types/plugin.ts`, wired in `index.ts` | the one-line host surface |
+| the plugin's bind, right where the boundary is built | `plugins/plugin-attendance/index.cjs` (after `w4RequestOperationBoundary = …`) | — |
+| `redeemCancelRoundInTxn` | `ApprovalProductService.ts` | §3 C-2 steps ④–⑤ |
+| the `redeem` branch + the `blocked` hand-off | same, at outlet #5 | §14.2 判据 II, 判据 IV `blocked` half |
+
+**The registered surface is the WHOLE boundary, not a cancel-only entry.** Lock §3 C-1 「接口形态」
+says 「**外部事务入口复用同一套 W4 操作协议** … **仅移交连接与事务生命周期的所有权**——不是把
+`requestCancelAdapter.execute` 搬出来单独调」, and review P1-A rejected precisely that shape. A
+`cancelForApproval(...)` port would have re-introduced it under a new name, so the port TYPE is
+`AttendanceRequestOperationBoundaryV1` itself and is deliberately not even narrowed to a `Pick<>`.
+
+### 3.11.2 It fails CLOSED when unbound — the one deliberate divergence from the precedent
+
+`workday-calendar-port.ts` fails OPEN (no calendar ⇒ natural elapsed arithmetic). Copying that here
+would have been the worst defect in this slice: with no provider bound, the redemption would write
+`approval_rounds.outcome = 'applied'` and take the engine instance to `approved` having performed
+**zero business cancellation** — a round that says the leave was cancelled when it was not. Unbound
+⇒ `ServiceError(409, 'CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE')` ⇒ the caller's transaction rolls
+back ⇒ the round keeps `pending` and its seat: lock §3 C-3 row 5, the same shape
+`CANCEL_ROUND_WINDOW_ANCHOR_MISSING` already takes. This is asserted, and the assertion is probed
+(M-16 below), not merely written.
+
+### 3.11.3 The org-key hazard, closed by CONSTRUCTION rather than by agreement
+
+The entry asserts the rollout advisory lock on `identityPrepared.orgId` — resolved INSIDE the
+boundary, by the cancel adapter's `prepareIdentity` → `loadRequestOperationIdentityRow`.
+`dispatchAction` took that lock on `rolloutLock.orgId`, resolved by
+`resolveCancelRoundRolloutLockRequirementV1` → `classifyAttendanceRequestForInstanceV1`. Census Q-E
+leg 1 (§3.3c) already proved `approval_instances.org_id` and `attendance_requests.org_id` can hold
+different values and derive different class-`00` keys, so "both read the request row's org" is NOT
+by itself enough — it would still depend on both resolving the SAME request row, and Q-E leg 3
+proved the repo already has two joins that disagree about which row that is.
+
+So the call passes **both** `requestId` and `orgId`. `loadRequestOperationIdentityRow`
+(`index.cjs:34602-34617`) branches on `route.orgId` and, when present, looks up
+`WHERE id = $1::uuid AND org_id = $2`. Its returned `org_id` therefore cannot be anything but
+`rolloutLock.orgId`; a request whose org moved in between 404s inside the entry instead of silently
+asserting a different advisory key. (`dispatchAction`'s own `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED`
+re-assert, §3.9.1, already covers a move that happens before the row lock.)
+
+⚠️ This is a **construction** argument about a query predicate, not a live end-to-end measurement.
+It is strong precisely because it does not rest on two derivations agreeing — but the real boundary
+has still never been run from this call site. See §4.
+
+### 3.11.4 Two inputs pinned, one decision flagged
+
+- **`operationId` = the round row's own id.** It must be a UUID (`normalizeInput` → `uuidOrNull`,
+  `w4c3b-request-operation-boundary.ts:459`) and it is the W4 REPLAY key. A round passes outlet #5
+  at most once (the `WHERE outcome='pending'` partial unique index, plus this method's `applied`
+  write), so the round id makes a retry after a rolled-back attempt replay under the same key
+  instead of minting a second operation.
+- **`tokenSubjectUserId` = `actorId`.** Not a choice: `resolveRequestCancellationActorPosture`
+  (`index.cjs:34878-34880`) 403s unless they are equal.
+- **⚠️ FLAGGED FOR OWNER REGISTRATION — the acting identity.** Lock §3 C-1 fixes the audit row's
+  shape (`action='revoke', from_status='approved', to_status='cancelled'`) but never says whose
+  actor id it carries. This unit passes the **cancel round's requester**, for two reasons that are
+  arguments rather than the lock's own words: (1) lock §8 期 1 demands the result be 逐字节等价 with
+  the existing W4 path, whose actor is the person whose request it is; (2) the approver would be
+  cross-user, and `prepareRequestCancelIdentity` would then demand `attendance_admin`
+  (`resolveStableCrossUserPosture`), which an ordinary approver does not have — the branch would be
+  dead for exactly the population it exists for. WI-16 guarantees the cancel round's
+  `requester_snapshot.id` IS the original requester. An owner who wants the approver or a system
+  sentinel there must say so.
+
+### 3.11.5 What this unit does NOT write, on purpose
+
+The redemption writes the round row and nothing else. 原单 `approved → cancelled`, its
+`approval_records('revoke'/'cancelled')`, `reverseLeaveBalanceDeduction` and
+`attendance.request.cancelled` all belong to C-1 — lock §3 C-1's 「`status` 只允许 `approved →
+cancelled` 且只能经 C-1」 makes writing any of them on the approval side a contract violation.
+
+And unlike the C-3 branch, the `redeem` branch **falls through**: the cancel round's OWN instance
+gets its `approved` status write, its approve audit row and the 恰一个 completion event from
+`dispatchAction`'s ordinary path (lock §3 C-2 step ⑥). The early `return` is C-3-only.
+
+### 3.11.6 Acceptance — four cases, in the already-wired file
+
+Appended to `approval-cancel-round-redemption.db.test.ts` (same reasoning as §3.4: a new
+`.db.test.ts` would need `plugin-tests.yml`, the `ci-realdb-step-contract.mjs` `FILES` array and an
+s6a re-pin, for no coverage this fixture cannot give).
+
+| Case | What it establishes |
+|---|---|
+| 判据 II redeems | round `applied` + `ended_at`; instance `approved`; **exactly one** completion event; and the C-1 call's `kind` / `operationId === roundId` / `routeVariant === null` / `routeInput.{requestId,orgId,actorId,tokenSubjectUserId}` each asserted — so 「C-1 was called」 is not 「something was called」 |
+| 判据 IV `blocked` half (C-3 row 4) | a `business_refused` return persists the close in the SAME transaction: engine `rejected`, system sentinel with `business_blocked:<code>`, `cancelRoundBlockDetail` BESIDE the bounded token (never concatenated into it), round `blocked` + `block_reason`, **zero** completion events |
+| unbound port | 409 `CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE`, round still `pending` with `ended_at` null, instance still `pending`, seat count still 1, zero events |
+| non-attendance original | 409 `CANCEL_ROUND_BUSINESS_TARGET_MISSING`, **C-1 never called** (`calls.length === 0`), round untouched — the isolated variant of the redeeming case, differing only in the attendance backing |
+
+**The phase-1 case that asserted the round left `pending` is REPLACED, not deleted.** §4 of the
+previous revision said it was written that way so 判据 II 「is FORCED to be noticed rather than
+being silently satisfied」. It was: the fixture had to gain an attendance request and a bound
+provider, and the expectation flipped to `'applied'`.
+
+**Two harness facts found rather than assumed.** (1) The composite FK
+`attendance_requests_instance_workflow_fkey` `(approval_instance_id, approval_workflow_key)` →
+`approval_instances (id, workflow_key)` means the instance must be re-keyed BEFORE the request row
+is inserted — the first draft failed `23503` and the ordering is now commented at the helper.
+(2) This harness **already has a provider bound** when these cases run — discovered from the
+console warning `AttendanceCancellationExecutionPort provider is being replaced`, not reasoned
+about. The helper therefore SAVES and RESTORES the previous provider rather than unbinding, and the
+unbound-port case restores it in `finally`; otherwise every later case would have run against a
+registry this suite emptied, a state no production process is ever in.
+
+### 3.11.7 Mutation ledger (this unit)
+
+Both probes: `cp` backup → edit → run alone → `cp` restore → `cmp` (`RESTORED-IDENTICAL`, and
+`git status` clean against HEAD afterwards).
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-16 | the fail-closed guard treats an unbound provider as 「nothing to cancel」 (`return { kind: 'applied' }` instead of the throw) — i.e. the fail-OPEN shape the precedent would have given | the unbound-port case red, and only it | **exactly 1 red**, that case, on the named symptom: `AssertionError: expected 200 to be 409`; 11 green |
+| M-17 | drop the `redemption.kind === 'blocked'` hand-off, so a business refusal falls through to the ordinary approve path as if C-1 had succeeded | the `blocked` case red, and only it | **exactly 1 red**, that case: `AssertionError: expected [ 'approval.approved' ] to deeply equal []`; 11 green |
+
+M-17's symptom is worth naming: the mutation's visible effect is a completion event appearing where
+判据 IV requires none — which is also the proof that this case's 「零完成事件」 is measured on the
+channel the sibling 判据 II case shows firing exactly once, not on an inert one.
+
+### 3.11.8 Commands and results
+
+```
+$ node --check plugins/plugin-attendance/index.cjs
+  node --check OK
+
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+  (no output, exit 0)
+
+$ (packages/core-backend) EXPECT_DB=1 \
+  DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  ATTENDANCE_TEST_DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{redemption,creation,outlet-guards,seat-guards,\
+      node-timeout-effect,lock-order-census}.db.test.ts
+  Test Files  6 passed (6)
+        Tests  59 passed (59)          (redemption: 8 -> 12)
+
+$ … run tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
+      tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+      tests/integration/attendance-w4c3b-central-approval.db.test.ts
+  Test Files  3 passed (3)
+        Tests  45 passed (45)
+```
+
+⚠️ The suite is EXCLUDED from the default vitest config and reports `No test files found, exiting
+with code 1` when run without `--config vitest.integration.config.ts` — an exit-1 that is easy to
+misread as an infrastructure problem rather than the wrong runner. Recorded because it cost a run.
+
+---
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
 they are.
 
-- **判据 II** (C-2 兑现挂点) — **not implemented.** The `redeem` branch falls through to today's
-  approve path, so a redeemed round's row is left `pending` after its engine instance reaches
-  `approved` — an §5 I3 gap inherited from phase 1. It is **asserted as-is** in the paired open-
-  window case, so the change is forced to be noticed when 判据 II flips it to `'applied'`, rather
-  than being silently satisfied.
+- **判据 II** (C-2 兑现挂点) — **IMPLEMENTED in §3.11**, with the C-1 port, the `blocked`
+  hand-off and four acceptance cases. What is still NOT established about it: every one of those
+  cases binds a TEST DOUBLE through the production registry, so they prove the approval side's half
+  of the contract and nothing about the real W4 protocol (prepare/prepareIdentity, the isolation
+  assert, the rollout-lock `pg_locks` assert, posture resolution, authorization, replay preflight,
+  seal/outbox). The org-key match (§3.11.3) is argued from a query predicate, which is a
+  construction argument, not a live run.
 - **`filterBulkReassignDiscoveryForAttendance`'s nondeterministic org** (§3.3d) — a real defect
   found by this census, deliberately OUT of scope here, owed to the attendance line as a finding.
   Nothing on this branch depends on it.
@@ -1166,19 +1344,23 @@ they are.
   What is still NOT established about it: leg 3 is a **source-order** proof, not a live concurrent
   deadlock construction (§3.9.4), and the new `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` surface's
   route-layer handling is unverified (§3.9.3).
-- **判据 IV's `blocked` half** and C-3 row 4 — see §3.7.
+- **判据 IV's `blocked` half** and C-3 row 4 — **COVERED in §3.11.6**, driven by C-1's
+  `business_refused` return through the same closure writer as `expired`. §3.7's table row 4 is
+  updated by this; the caveat in the bullet above (a double, not the real protocol) applies to it
+  too.
 - **R2** (锁内最终评估失败 ⇒ 零业务取消、零 `approved` 完成事件、C-3 收口已持久化) and its named
   mutation (move the evaluation after the enqueue ⇒ must go red) — **not built.** M-5 is 判据 IV's
   own negative control and is NOT a substitute: it proves the `return` is load-bearing, not that a
   *business* evaluation failure leaves zero business cancellation behind (there is no business
   cancellation on this path yet).
-- **The external refusal end-to-end** — unchanged from the previous revision: the savepoint's
-  SQL-level semantics (§2.2) and the boundary's statement sequence (§2.4) are proven separately and
-  have still not been run against each other, because no caller exists yet.
+- **The external refusal end-to-end** — a caller now EXISTS (§3.11), but the savepoint's SQL-level
+  semantics (§2.2) and the boundary's statement sequence (§2.4) have still not been run against each
+  other, because the acceptance cases bind a double in place of the real boundary. This is the
+  single highest-value thing the next unit can close, and it subsumes the org-key question.
 - **账侧完整取消结果逐字节等价 + `unrecoverableExpired` 呈现** (lock §8 期 1) — only the refusal
   branch's bytes are covered (§2.3); the success branch's full-cancellation result is not.
-- **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 IV half is now
-  filled in (§3.4); its 判据 II half is not.
+- **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 II and 判据 IV
+  halves are both filled in now (§3.4, §3.11.6), against a double.
 - **§5 I3 「终结即释放」 mutation** — the `expired` case asserts a new round can start immediately
   after the close, but the lock's named mutation (drop the `outcome` write ⇒ the next create is
   refused by the partial unique index with 23505/409) is not built. M-7 mutates the outcome's
@@ -1193,6 +1375,9 @@ they are.
   reorder must update this file), and the two relations the cancel adapter locks BETWEEN the pair
   (`attendance_schedule_dispatch_requests`, `attendance_request_calculation_snapshots`) have no rank
   in lock:227's class list — flagged for owner registration in §3.10.1, not silently ordered.
+- **The acting identity for C-1's audit row** (§3.11.4) — an implementer choice the lock does not
+  name, FLAGGED for owner registration with its reasoning. Nothing else on this branch depends on
+  which way it is settled, but the C-1 audit row's `actor_id` does.
 - **R1 for the new guard point** — #5′ is an outlet anchor, not a chokepoint guard, so it takes no
   `CANCEL_ROUND_OUTLET_FORBIDDEN` negative control; whether §8 期 1's R1 count (9 sites) should grow
   to include it is an owner registration question, raised with the #5′ registration itself.
