@@ -8927,9 +8927,14 @@ export class ApprovalProductService {
     // original document FIRST and only then touches `approval_rounds`, so a closer that took the
     // round row first would invert the pair. That inversion is not theoretical — it was CONSTRUCTED
     // and deadlocked deterministically (see `approval-cancel-round-lock-order-census.db.test.ts`,
-    // Q-D). The `document_id` needed to get there is read WITHOUT a lock first; it is immutable on
-    // a round row (no writer anywhere updates it — `git grep -n "UPDATE approval_rounds"`), so this
-    // read cannot go stale in a way that matters, and the locked re-read below is the authority.
+    // Q-D). The `document_id` needed to get there is read WITHOUT a lock first, which is only sound
+    // because `document_id` is immutable on a round row — MEASURED, not assumed (an earlier version
+    // of this comment cited a grep it had never run): the repo has exactly THREE production
+    // `UPDATE approval_rounds` statements — this closure's and 判据 III's revoke/reject at `:10929`
+    // and `:11416` — all setting only `outcome`/`ended_at` (+ this one's `block_reason` and
+    // `policy_snapshot_at_decision`), and `git grep -nE "SET .*document_id|document_id *=" --
+    // packages/core-backend/src plugins` minus WHERE clauses returns ZERO. The locked re-read below
+    // is still the authority, and `round.document_id !== original.id` fails closed if that changes.
     const roundProbe = await client.query<{ document_id: string }>(
       `SELECT document_id FROM approval_rounds
         WHERE engine_instance_id = $1 AND outcome = 'pending'`,
