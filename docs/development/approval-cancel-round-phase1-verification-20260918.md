@@ -1783,9 +1783,12 @@ two source comments were wrong (`:9246` is `applyApprovalDepartureTransfer`'s ma
 catch, not `applyNodeTimeoutEffect`'s absorption branch at `:9637`). The round-2 gate's P3-A finding
 therefore reached the design MD as well as the two comments; this document's defense of the design
 MD's own citation was itself an error, fixed in Part H1, not a correct narrowing. Its staleness (the
-"HEAD at time of writing" line lagging six commits, per Part F1's own observation) remains real and
-still compounds the confusion — Part H1 does not update the header line (see Part H1's own note on
-why not). This pass updates the design MD header's HEAD line to this pass's
+"HEAD at time of writing" line lagging six commits, per Part F1's own observation) remained real
+through this pass — **and is retired, not merely re-dated, by round-3's own fix pass**: Part H4 below
+converts the header from a single pinned "HEAD as of" SHA (which goes stale on every subsequent pass,
+this narrowing included) to a non-decaying "see the verification MD's own per-Part HEAD claims"
+pointer, per the round-3 gate report's own §9 item 8 suggestion. This pass (round 2) updates the
+design MD header's HEAD line to this pass's
 own starting HEAD (`7ef8e610e`) and narrows the re-derivation clause to name what it actually covers:
 prose citations inside the design MD, re-checked against the HEAD named in the same sentence — not a
 claim that every source-code comment anywhere in the tree has been swept (that sweep is what the gate
@@ -1930,19 +1933,33 @@ is the same wrong-line-number defect round-2's own P3-A found in the two source 
 because it only swept the two comments the gate report named, not its own prose.
 
 **Comment/prose-text safety check before editing** (same discipline as round-2's G3, rerun fresh, not
-copied): does anything parse the design MD's own text as a source-of-truth pin?
+copied, and deliberately **not** scoped to a handful of test directories the way round-2's G3 was —
+round-3's own P3-2 finding showed that a directory-scoped, `readFileSync`-co-occurrence grep is
+structurally blind to `read('…')`-wrapped and variable-path guards; the fix is to widen the *scope*,
+not just the *pattern*): does anything anywhere in the tree parse the design MD's own text as a
+source-of-truth pin?
 
 ```
-$ grep -rln "approval-cancel-round-phase1-design-20260918" packages/core-backend/tests apps/web/tests scripts/ops 2>/dev/null
-(no output)
+$ grep -rln "approval-cancel-round-phase1-design-20260918" . --exclude-dir=node_modules --exclude-dir=.git
+docs/development/approval-cancel-round-phase1-verification-20260918.md
 ```
 
-No hit — nothing in the test suites reads this design MD as a sync-pin source, so editing its prose
-is behavior-inert. (This grep is broader than round-2's G3 one — it matches on the filename itself,
-not on `readFileSync` co-occurring with a target filename on the same line — precisely because
-round-3's own P3-2 finding showed that narrower shape misses `read('…')`-wrapped and variable-path
-guards. See §H4's carried-forward note on P3-2 for why this document does not yet also fix G3's
-argument text.)
+One hit, and it is this verification document itself — which cites the design MD's filename in prose
+(exactly as this sentence does), not a test or script that opens the file to extract a behavioral
+pin. Confirmed by a second, independent check for the shape P3-2 actually found (a directory walker
+or `readFileSync`/`readdirSync` call built from a `docs/development` path fragment, which would not
+name this file's basename at all):
+
+```
+$ grep -rln "readdirSync.*docs/development\|readFileSync.*docs/development\|join.*docs.*development" . --exclude-dir=node_modules --exclude-dir=.git
+```
+
+11 hits, all inspected: every one reads a *different*, specifically-named runbook/report file
+(dingtalk staging runbooks, multitable onprem deploy runbooks, etc.) or is `dingtalk-p4-final-closeout.mjs`'s
+`DEFAULT_DOCS_DIR` constant, which is a **write** target for that script's own generated output, not a
+read-and-pin walker. None constructs a path toward
+`approval-cancel-round-phase1-design-20260918.md`, and none walks `docs/development/` generically
+extracting citations from every file in it. Editing the design MD's prose is behavior-inert.
 
 **Fix, this pass**: one edit, `docs/development/approval-cancel-round-phase1-design-20260918.md:206`
 — the design MD's *citation* changed from `ApprovalProductService.ts:9246` to
@@ -1971,6 +1988,29 @@ per this repo's own discipline that a supersession marker evaluates the specific
 voiding the section around it. P3-A's disposition is re-affirmed **CLOSED**, now listing all three
 fix points (the two source comments from round-2, plus this pass's design MD:206 edit) rather than
 two.
+
+**"A third, independent instance" — is it exactly three, not four or more?** A whole-tree sweep for
+any other live citation of the wrong line number, run before asserting a specific count:
+
+```
+$ grep -rn "9246" . --exclude-dir=node_modules --exclude-dir=.git
+```
+
+Every hit is one of: (a) the two docs' own retraction/finding narrative (this Part, §G3, §G6 — all
+past-tense, describing what was wrong, not asserting it as current), (b) one unrelated substring match
+in a different document's `:29246` token (a five-digit line-number list in an unrelated attendance
+design doc — `29246`, not `9246`), or (c) design MD:209-210's own trailing clause (this pass's
+addition, also past-tense). Zero hits in any source file (`packages/**`) or test file
+(`**/*.test.*`, `**/*.spec.*`). The count is exactly three: the two comments round-2 fixed
+(`a166f5ca0`) and this pass's design MD:206 fix — no fourth site exists.
+
+**Header fix, same commit**: the design MD's own provenance header (the line the gate report's §9
+item 8 flagged as chronically stale, most recently one commit behind at round-3's own HEAD) is
+rewritten this pass from a single pinned "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" SHA to a
+pointer at the verification document's own per-Part HEAD claims, which do not go stale the way a
+hardcoded SHA does. This closes round-3's P3-3 (see §H4) in the same commit as P2-1, since both
+touch the same document's header region and the gate's own §9 recipe treats the header line as
+"cost zero" to fix once already editing this paragraph.
 
 **Rerun, this pass, `metasheet2_lock_c`** (docs-only change; rerun to confirm no incidental
 regression, not because the edit could plausibly move a test):
@@ -2021,11 +2061,24 @@ $ find . -path ./node_modules -prune -o -name "*ci-wiring*" -print | grep -v nod
 45
 ```
 
-45, matching the supplementary checklist's item-1 population and round-2/round-3's own closure of
-"45/45." (This pass does not rerun all 45 — that was already done fresh in round-3's §1.6, one commit
-back, and nothing in this pass's two-file docs-only diff touches CI config or any `*-ci-wiring` test
-file, so there is nothing for those suites to exercise differently. Scoped-diff check, same method as
-Part C3 used: `git diff 6c5b06f7d HEAD --name-only -- packages plugins scripts .github` → empty.)
+45, matching the supplementary checklist's own population count, quoted rather than assumed
+(`reviews/impl-supplementary-gate-checklist-20260918.md:6`: "同族 `*-ci-wiring` 共 45 个") and
+round-2/round-3's own closure of "45/45." **Was "38" simply stale drift, or wrong from the moment
+Part C3 wrote it (HEAD `95eccb89b`)?** Checked, not assumed — the population was already 45 at that
+exact HEAD, before any of this lane's own `*-ci-wiring` files existed to inflate a later count:
+
+```
+$ git ls-tree -r 95eccb89b --name-only | grep -E '[^/]*ci-wiring[^/]*$' | wc -l
+45
+```
+
+"38" was wrong the moment Part C3 wrote it — the round-1 gate report's own §1.6 explains why (its
+glob missed 7 files that existed all along), not a later drift this lane introduced. (This pass does
+not rerun all 45 — that was already done fresh in round-3's §1.6, one commit back, and nothing in
+this pass's docs-only diff touches CI config or any `*-ci-wiring` test file, so there is nothing for
+those suites to exercise differently. Scoped-diff check, same method as Part C3 used, pinned to this
+pass's first commit rather than the moving `HEAD` symbol so the claim does not drift on a later
+commit: `git diff 6c5b06f7d c1586411d --name-only -- packages plugins scripts .github` → empty.)
 
 **Fix, this pass**: `docs/development/approval-cancel-round-phase1-verification-20260918.md:900` —
 "the 38 sibling `*-ci-wiring` guards" → "the 45 sibling `*-ci-wiring` guards," struck through in place
@@ -2054,21 +2107,35 @@ Line 900 no longer asserts "38" as the live population count; it is struck throu
 - All work happened in the assigned worktree (`wt-cancel-round`) on the assigned branch
   (`feat/approval-cancel-round-phase1`); no `git checkout --`, `git reset --hard`, or stash discard
   was used or needed.
-- No lock file or `reviews/` document was opened for editing this pass:
-  `git diff --name-only 6c5b06f7d HEAD | grep -iE "review|lock-draft|\.claude"` → 0 hits (checked
-  after this pass's commit, against this pass's own starting HEAD rather than `origin/main`, since
-  `origin/main` has not moved and the wider `origin/main..HEAD` diff is checked the same way in every
-  earlier Part of this document).
+- No lock file or `reviews/` document was opened for editing this pass. Checked against this pass's
+  own starting HEAD rather than `origin/main` (`origin/main` has not moved; the wider
+  `origin/main..HEAD` diff is checked the same way in every earlier Part of this document), pinned to
+  a fixed commit rather than the moving `HEAD` symbol so the claim does not silently start covering a
+  later, unrelated commit once this branch gets its next fix-round commit:
+  `git diff --name-only 6c5b06f7d c1586411d | grep -iE "review|lock-draft|\.claude"` → 0 hits.
 - No migration was applied anywhere in this pass (no new migration exists to run); the private DB
   (`metasheet2_lock_c`) was already migrated by an earlier pass and only read (test runs), never
   written outside those tests' own transactions.
 - No PR opened, no branch merged or undrafted, no force-push.
-- Files touched, this pass, in full:
-  `docs/development/approval-cancel-round-phase1-design-20260918.md` (1 citation, §3.2/design MD:206)
-  and `docs/development/approval-cancel-round-phase1-verification-20260918.md` (this Part H, plus the
-  `SUPERSEDED` annotations to §G3/§G5/§G6 and the "Net after this pass" paragraph). Zero non-`.md`
-  files. `git status --porcelain` is clean after this pass's commit and push (no stray edits, no
-  leftover mutation-probe state — none were run this pass; see §H1/§H2's own notes on why not).
+- **Two commits this pass**, following Part G's own convention of naming commits by role rather than
+  by a SHA a commit would have to predict for itself: the first (`c1586411d`) is the P2-1/P2-2 fixes
+  and this Part H (H1-H4) as originally written; the second (this pass's own advisor-reviewed
+  follow-up, landing after `c1586411d`) corrects four claims Part H itself made too loosely on first
+  writing — widening the P2-1 safety-check sweep from a directory-scoped grep to a whole-tree one,
+  adding the whole-tree "exactly three, not four" sweep for `:9246`, verifying "38 was already wrong
+  when Part C3 wrote it" against `95eccb89b` instead of asserting it, quoting the supplementary
+  checklist's own population line instead of citing it from memory, pinning the two SHA-relative diff
+  commands above to fixed commits instead of the moving `HEAD` symbol, and resolving P3-3 (the design
+  MD header) instead of deferring it. Verified before staging the second commit, the same way as the
+  first: `git status --porcelain` and `git diff --stat` show only the same two
+  `docs/development/*.md` paths, zero other files.
+- Files touched, across both of this pass's commits: `docs/development/approval-cancel-round-phase1-design-20260918.md`
+  (the §3.2/design MD:206 citation fix, the header rewrite, and the trailing historical clause) and
+  `docs/development/approval-cancel-round-phase1-verification-20260918.md` (this Part H in full, the
+  `SUPERSEDED` annotations to §G3/§G5/§G6, and the "Net after this pass" paragraph). Zero non-`.md`
+  files across either commit. `git status --porcelain` is clean after each commit and push (no stray
+  edits, no leftover mutation-probe state — none were run this pass; see §H1/§H2's own notes on why
+  not).
 
 ## H4. What this pass does not close — carried forward, not silently dropped
 
@@ -2084,11 +2151,12 @@ a later fix-round step, not abandoned:
   instead of repeating G3's narrower one, but does not yet go back and fix G3's own argument text.
   Not touched this pass.
 - **P3-3** (design MD header's "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" is one commit
-  behind this pass's own starting HEAD) — deliberately left untouched this pass. Updating it to name
-  *this* pass's HEAD would go stale again the instant this pass's own commit lands (the header would
-  need to cite a SHA that does not exist until after the edit that writes it) — the same
-  self-reference problem the header's own parenthetical already discloses. Left for whichever pass
-  (a Draft-PR-opening step, most likely) can write a final, non-drifting HEAD reference.
+  behind this pass's own starting HEAD) — **fixed this pass, per the gate report's own §9 item 8
+  suggestion** ("改成「见 git 历史」这种不会腐烂的写法"): the header no longer pins a single "HEAD as
+  of" SHA at all (pinning *this* pass's HEAD would only recreate the identical self-reference problem
+  the moment this pass's own commit lands — a header can never cite the SHA of the commit that writes
+  it). It now points to "read the verification MD's own Part covering the pass in question," which
+  does not decay on the next pass the way a hardcoded SHA does. See §H1's closing note.
 - **P3-4** (two `wip` commits, closure depends on a lane instruction outside the gate reviewer's
   readable authorization chain) — not this implementer's to close; round-2's §G4 already recorded the
   correct disposition (self-resolves at the Draft-PR-opening step). No action item for any fix-round
