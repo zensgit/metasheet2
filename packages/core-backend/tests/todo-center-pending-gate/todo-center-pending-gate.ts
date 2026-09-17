@@ -74,9 +74,9 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S4 and S6–S8 for classes ①②③③′④ only — S5 (`user_namespace_admissions`, class ⑥
+// through S1–S4 and S6–S8 for classes ①②③③′④⑤ only — S5 (`user_namespace_admissions`, class ⑥
 // only) and S9 (`approval_reads`, classes ⑫⑬ only) are not needed by these classes and are
-// deferred to a later step, along with classes ⑤⑥⑦⑧⑨⑩⑪⑫⑬).
+// deferred to a later step, along with classes ⑥⑦⑧⑨⑩⑪⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -95,6 +95,12 @@ const SHARED_SEAT_NODE_KEY = `todo-center-pending-gate-seat-${suffix}`
 // run) can never collide.
 const ROLE_NAME_CLASS_2 = `manager-c2-${suffix}`
 const ROLE_NAME_CLASS_3B = `manager-c3b-${suffix}`
+
+// Class ⑤'s `user_roles.role_id` value. Unlike `'admin'` (load-bearing literal `isRbacAdmin`
+// reads) this string is arbitrary — `role_id` carries no FK (design-lock §3.0) — but it is
+// suffixed anyway, consistent with every other fixture value in this file, so no two runs (or two
+// classes within one run) can ever collide on it.
+const ROLE_NAME_CLASS_5 = `reviewer-c5-${suffix}`
 
 function pool(): Pool {
   return poolManager.get()
@@ -297,6 +303,13 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   const v3b = viewer('c3prime-admin-upgrade-drops-role-seat', ROLE_NAME_CLASS_3B)
   // Class ④ — `users.role='employee'`, no seat at all ⇒ 0 (§5 A0 ④).
   const v4 = viewer('c4-employee-no-seat', 'employee')
+  // Class ⑤ — `users.role='employee'`, `user_roles` holds a NON-admin `reviewer` role, holding a
+  // `('role', 'reviewer')` seat on its own pending platform instance ⇒ (a) = 0: (a)'s role source
+  // is `users.role` (+ admin upgrade) ONLY, never `user_roles`, so a role held solely via
+  // `user_roles` is invisible to the shared query under (a) — a pre-existing, deliberately-
+  // unfixed, record-only behavior this class pins as-is (§5 A0 ⑤; §3.0 "记录性:(b) 会是 1,这就
+  // 是 (b) 的加宽人口,也是 actionable 与门分叉的人口").
+  const v5 = viewer('c5-reviewer-role-seat', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -319,14 +332,23 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null,
     currentNodeKey: `todo-center-pending-gate-node-3b-${suffix}`,
   }
+  // Class ⑤'s own instance (design-lock §3.0 S7: "③′/⑤ 需要实例 … 但定义形状随意") — a distinct
+  // node key from `SHARED_SEAT_NODE_KEY` (⑤ is not part of the ①②⑥⑦-vs-⑧ join-key population).
+  const instance5: InstanceFixture = {
+    id: `todo-center-pending-gate-i5-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: `todo-center-pending-gate-node-5-${suffix}`,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -337,14 +359,19 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     // literally), seeded AFTER the plain S2/S4 seeding above so it reads clearly as the class's
     // distinguishing fixture, not an artifact of shared setup.
     await seedUserRole(v3b.id, 'admin')
+    // Class ⑤'s NON-admin `user_roles` row — (a) never reads `user_roles` for role resolution, so
+    // this row is exactly what the class is pinning as invisible under (a).
+    await seedUserRole(v5.id, ROLE_NAME_CLASS_5)
 
     instance1.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c1')
     instance2.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c2')
     instance3b.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c3b')
+    instance5.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c5')
 
     await seedInstance(instance1)
     await seedInstance(instance2)
     await seedInstance(instance3b)
+    await seedInstance(instance5)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -364,6 +391,12 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       assigneeId: ROLE_NAME_CLASS_3B,
       nodeKey: instance3b.currentNodeKey!,
     })
+    await seedAssignment({
+      instanceId: instance5.id,
+      assignmentType: 'role',
+      assigneeId: ROLE_NAME_CLASS_5,
+      nodeKey: instance5.currentNodeKey!,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
 
@@ -381,7 +414,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       await p.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [seededInstanceIds])
       await p.query(
         'DELETE FROM approval_published_definitions WHERE id = ANY($1::uuid[])',
-        [[instance1.publishedDefinitionId, instance2.publishedDefinitionId, instance3b.publishedDefinitionId]],
+        [[instance1.publishedDefinitionId, instance2.publishedDefinitionId, instance3b.publishedDefinitionId, instance5.publishedDefinitionId]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
       await p.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [seededUserIds])
@@ -489,6 +522,23 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(me.email).toBe(v4.email)
       expect(me.username).toBe(v4.username)
       expect(me.name).toBe(v4.name)
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(0)
+      expect(body.unreadCount).toBe(0)
+    })
+
+    it('class ⑤ — user_roles-only reviewer role seat is invisible under (a) (role source is users.role only, not user_roles) ⇒ 0', async () => {
+      const token = await devToken(baseUrl, v5.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v5.email)
+      expect(me.username).toBe(v5.username)
+      expect(me.name).toBe(v5.name)
+      // (a) resolves role from `users.role` only — v5 was NOT given an admin `user_roles` row, so
+      // no upgrade fires and `/me` reads back the seeded 'employee', not 'admin' (unlike ③′).
+      expect(me.role).toBe('employee')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
       expect(status).toBe(200)
