@@ -39,13 +39,19 @@ import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approv
  * control actually goes red under the lock's own named regression.
  *
  * The lock's negative-control CELL for this row also names a second construction: "开旗标
- * （`:731-733` 调用时读 env）+ 去 skip ⇒ 写 approved，红" — i.e. the mutation that would matter
- * MOST is one made while `APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS` is open, since that is the one
- * env state where a `jump` could otherwise cascade a real instance to a terminal `approved`
- * state. The "env order robustness" test below flips that flag ON for a cancel-round instance and
- * re-asserts `skipped_cancel_round` — proving `isCancelRoundInstance` (`:9244`-area) is checked
- * BEFORE the terminal-effects gate is ever consulted, not merely that it happens to win today by
- * accident of branch order.
+ * （`:731-733` 调用时读 env）+ 去 skip ⇒ 写 approved，红". That construction is
+ * UNCONSTRUCTIBLE against a real cancel-round instance, recorded here rather than silently
+ * substituted: the round's own seed graph carries NO node `timeout` config at all —
+ * `grep -n "timeout" src/db/seeds/approval-cancel-round-published-definition.ts` → 0 hits — so
+ * `nodeTimeoutForKey(runtimeGraph, currentNodeKey)` can never match, and a de-skipped
+ * cancel-round instance would fall through to `skipped_invalid_config`/`skipped_stale`, never
+ * `approved`, with or without the flag. The "env flag inert" test below flips
+ * `APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS` ON and re-asserts `skipped_cancel_round` — this shows
+ * only that the OUTCOME is unaffected by the flag's state, NOT that `isCancelRoundInstance`
+ * wins BECAUSE it is checked first: the terminal-effects branch is unreached here for the
+ * unrelated reason above (no timeout config to match), so the test cannot discriminate "checked
+ * before the gate" from "the gate is never reached in this graph shape". Do not read it as
+ * discharging that lock cell.
  *
  * Not covered here (covered in `approval-cancel-round-outlet-guards.db.test.ts`): outlets
  * #2/#4/#6/#7/#7′/#8, which all throw the shared `CancelRoundOutletForbiddenError`.
@@ -289,15 +295,27 @@ describeIfDatabase('cancel-round outlet guard §14.3 #3 (applyNodeTimeoutEffect)
   }
 
   /**
-   * `createCancelRoundInstance` never inserts an `approval_metrics` row for the round (it reuses
-   * `insertAssignments`/`insertApprovalRecord`/`bumpNodeActivationSeq`/… — metrics is not among
-   * them, and the cancel round's own seed graph carries no node `timeout` config to begin with) —
-   * so in production the scanner's `WHERE current_node_deadline_at IS NOT NULL` predicate can
-   * never even SELECT a cancel-round instance; outlet #3's `isCancelRoundInstance` branch is
+   * `createCancelRoundInstance` never inserts an `approval_metrics` row for the round: read the
+   * FULL method body start (`:8308`-area) to its `return approval` (past `COMMIT`,
+   * `projectApprovalOnCreate`, `emitApprovalTaskCreatedEventsPostCommit`, `getApproval`) — zero
+   * hits for `recordInstanceStart`/`approval_metrics` inside it
+   * (`grep -n "recordInstanceStart\|approval_metrics" src/services/ApprovalProductService.ts`
+   * finds them only inside `createApproval`, the ORDINARY path, and inside
+   * `applyNodeTimeoutEffect` itself — never between `createCancelRoundInstance`'s own `BEGIN`
+   * and its post-commit calls). The cancel round's own seed graph also carries no node `timeout`
+   * config (`grep -n "timeout" src/db/seeds/approval-cancel-round-published-definition.ts` → 0
+   * hits). So in production the scanner's `WHERE current_node_deadline_at IS NOT NULL` predicate
+   * can never even SELECT a cancel-round instance; outlet #3's `isCancelRoundInstance` branch is
    * pure defense-in-depth against a future seed/activation-logic change, not a reachable-today
-   * path. Arming it for this test therefore has to CREATE the row (via the real production
-   * `recordInstanceStart`, `ON CONFLICT (instance_id) DO NOTHING` — ordinary `UPDATE` finds zero
-   * rows here, unlike `forceDeadlineOverdue` above for a real graph-driven instance).
+   * path. (The three readers the lock names as needing byte-identical behavior — detail GET,
+   * pending-count projection, `canDecideCurrentNode` — are unaffected: none of them read
+   * `approval_metrics`, per the same grep. The instance IS invisible to the separate
+   * SLA-breach/node-timeout-reminder dashboards that DO read `approval_metrics`
+   * (`ApprovalSlaScheduler.ts`, `ApprovalBreachNotifier.ts`) — not a lock-named reader, flagged
+   * here rather than silently absorbed.) Arming it for this test therefore has to CREATE the row
+   * (via the real production `recordInstanceStart`, `ON CONFLICT (instance_id) DO NOTHING` —
+   * ordinary `UPDATE` finds zero rows here, unlike `forceDeadlineOverdue` above for a real
+   * graph-driven instance).
    */
   async function armCancelRoundDeadline(instanceId: string, effect: 'transfer' | 'jump'): Promise<void> {
     const metrics = new ApprovalMetricsService(rawQuery)
@@ -432,7 +450,7 @@ describeIfDatabase('cancel-round outlet guard §14.3 #3 (applyNodeTimeoutEffect)
     expect(secondOutcome).toBe('skipped_stale')
   })
 
-  it('env order robustness: with APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS flipped ON, a cancel-round instance still short-circuits to skipped_cancel_round — isCancelRoundInstance is checked BEFORE the terminal-effects gate is ever consulted, not merely first by branch-order accident', async () => {
+  it('env flag inert: with APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS flipped ON, the outcome for a cancel-round instance is unchanged — NOT proof isCancelRoundInstance is checked before the terminal-effects gate (see file header: the gate is unreached here for an unrelated reason — the round graph has no timeout config)', async () => {
     const suffix = `env-${TS}`
     const approverId = `wi-nte-envapr-${suffix}`
     const requesterId = `wi-nte-envreq-${suffix}`
