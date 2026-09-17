@@ -1,15 +1,21 @@
 # 任务功能线 M0 交付报告（切片 A）
 
-PR 链接与 head SHA 在开 PR 后填入本节首段（开 PR 前本文件与普查、锁草案一并提交；PR 号回填见开 PR 后的 `gh pr view` 摘录）。
+PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 §0 为准。
 
 ## 0. 头
 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / 分支起点：`c6679d0f6990572139fd604c7cfe6f6427d47aa7`（`git fetch origin main` 后的 `origin/main`；相对计划基线已前进。普查机械核在 `00781e68b`，ff 到本 SHA 仅 attendance docs）
-- head SHA：开 PR 后与 `git rev-parse HEAD` 相同（docs-only，应等于基线或再加本三文件 commit）
-- PR #：开 PR 后回填
-- mergeable_state：开 PR 后粘贴 `gh pr view <N> --json mergeable,mergeStateStatus,statusCheckRollup` 原始输出
+- head SHA（开 PR 时）：`6a6a63d165d904a501c6fd4ec57fb5d5fe865f64`（本回填 commit 会再前进一次）
+- PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
+- `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
+
+```json
+{"mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"name":"web-tests","status":"QUEUED","workflowName":"Web Tests"},{"name":"test (20.x)","status":"QUEUED","workflowName":"Plugin System Tests"},{"name":"pr-validate","status":"IN_PROGRESS"}]}
+```
+
+完整 rollup 数组更长（attendance-web-guard / plugin-tests 多 job 等，当时 QUEUED 或 IN_PROGRESS）。`mergeable=MERGEABLE` 表示无冲突。
 - 一句话：在独立 worktree `grok/tasks-m0` 上写了普查、PROPOSED 锁草案（elearning §0–§15 编号、§8 N/A、39 题建议答案）、本报告；开 docs-only Draft PR-0，不合并。
 
 按简报 §2 / 用户 §四 **明确没做什么**：
@@ -65,7 +71,7 @@ PR 链接与 head SHA 在开 PR 后填入本节首段（开 PR 前本文件与�
 
 - **本地**：本切片 docs-only，**没有**新增/运行产品测试。未跑 `pnpm test`、未跑 vitest、未跑浏览器。
 - **收集用例数**：本地 0（未收集）。CI：纯 `docs/**` PR 按 `docker-build.yml:6-7` 不跑 build；`web-tests.yml` 无 paths 会跑 required web 闸（既有 392 token，与本 diff 无关）。**不得把 web-tests 绿当成任务 spec 已接线。**
-- **CI lane**：开 PR 后把 run URL 与日志收集数回填。本报告写成时无 run URL。
+- **CI lane**：开 PR 当时 `web-tests` QUEUED（run `https://github.com/zensgit/metasheet2/actions/runs/35171274285`）；`test (20.x)` QUEUED（plugin-tests 工作流 `35171274259`）。日志收集用例数当时尚未写出。纯 docs 变更不证明任务 spec 已接线。
 - **mutation 探针**：未改生产守卫。docs-only 无「neuter 守卫 → 测试红」探针。
 - **正控**：双语法正控见断言 #6；token 行正控见 census §4 首尾 token；`user_orgs` 正控为 QUERY A/B 分母等于 `COUNT(*) FROM users`（115）。
 
@@ -117,6 +123,6 @@ PR 链接与 head SHA 在开 PR 后填入本节首段（开 PR 前本文件与�
 9. 未对 133 条计划锚点逐条把 `sed -n` 全文贴进本报告（census §5 给了 §8 全表 + 承重抽查；完整 JSON 在本地 `/tmp/task-m0-anchor-results2.json`，不入库）。
 10. 未把 392 token 全文列入仓库文件。
 11. 飞书 IM/P2 篇在锁 §2 用计划已蒸馏的承重机制，未在本报告逐篇贴原文行。
-12. 开 PR 前无 `mergeable` JSON（开 PR 后回填到 §0）。
+12. `mergeable` JSON 已回填 §0；当时 checks 未完成，未把 QUEUED 当绿。
 
 不许写「全部完成」。本切片交付 = 三份 docs + Draft PR-0。
