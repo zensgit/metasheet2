@@ -2,10 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
 // P1b slice 1 — the app-level 待办 badge on the top-nav 审批中心 entry.
+// B-2 (todo-center-design-lock v2.14 §4/判据 B) — the badge now reads the todo-center's own
+// aggregation endpoint instead of the approvals-only one:
 //
-// The badge reuses the SERVER-OWNED pending count that 审批中心 already renders: the initial
-// `getPendingCount` read plus the `approval:counts-updated` realtime push routed through
-// `useApprovalCountsRealtime`. Both are mocked here so the two halves can be driven independently:
+// The badge reuses the SERVER-OWNED pending count `/api/todo/count` (`getTodoCount`) exposes, plus
+// the `approval:counts-updated` realtime push routed through `useApprovalCountsRealtime` (not yet
+// repointed at `todo:counts-updated` — that requires the realtime trigger point to be rebuilt on
+// top of the shared query, a separate unit). Both are mocked here so the two halves can be driven
+// independently:
 //   * the initial read proves the badge is bound to the fetched count (not a constant), and
 //   * the captured `onCountsUpdated` callback proves a later push moves the rendered number.
 //
@@ -14,12 +18,12 @@ import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 
 // to reach the callback at all, and it also keeps the badge's own contract (which bucket of the
 // payload it reads) pinned.
 
-const getPendingCountSpy = vi.fn()
-vi.mock('../src/approvals/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/approvals/api')>()
+const getTodoCountSpy = vi.fn()
+vi.mock('../src/todo/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/todo/api')>()
   return {
     ...actual,
-    getPendingCount: (...args: unknown[]) => getPendingCountSpy(...args),
+    getTodoCount: (...args: unknown[]) => getTodoCountSpy(...args),
   }
 })
 
@@ -115,8 +119,8 @@ describe('app-level approval todo badge', () => {
     mocks.routeMeta = { requiresAuth: true }
     capturedOnCountsUpdated = null
     realtimeCallCount.value = 0
-    getPendingCountSpy.mockReset()
-    getPendingCountSpy.mockResolvedValue({ count: 0, unreadCount: 0 })
+    getTodoCountSpy.mockReset()
+    getTodoCountSpy.mockResolvedValue({ count: 0, sources: { approval: 'ok' } })
   })
 
   afterEach(() => {
@@ -148,19 +152,23 @@ describe('app-level approval todo badge', () => {
     return root.querySelector('[data-testid="approval-todo-badge"]')
   }
 
+  function unavailableBadgeOf(root: HTMLElement): HTMLElement | null {
+    return root.querySelector('[data-testid="approval-todo-badge-unavailable"]')
+  }
+
   it('renders the fetched pending count beside the 审批中心 nav entry', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 2 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     const root = await mountApp()
 
-    expect(getPendingCountSpy).toHaveBeenCalledWith('all')
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
     const badge = badgeOf(root)
     expect(badge).toBeTruthy()
-    // The badge is the TOTAL 待办 count (the figure 审批中心 shows beside 待办), not the 未读 count.
     expect(badge?.textContent?.trim()).toBe('7')
+    expect(unavailableBadgeOf(root)).toBeNull()
   })
 
   it('leaves the nav link text itself untouched (the badge is a sibling, not a child)', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 2 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     const root = await mountApp()
 
     const link = Array.from(root.querySelectorAll('a')).find((a) => a.getAttribute('href') === '/approvals')
@@ -170,7 +178,7 @@ describe('app-level approval todo badge', () => {
   })
 
   it('groups the badge with its own nav link in ONE flex item, not as a peer nav entry', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 2 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     const root = await mountApp()
 
     const badge = badgeOf(root)!
@@ -184,18 +192,18 @@ describe('app-level approval todo badge', () => {
   })
 
   it('updates from the realtime counts composable without any further fetch', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 1, unreadCount: 1 })
+    getTodoCountSpy.mockResolvedValue({ count: 1, sources: { approval: 'ok' } })
     const root = await mountApp()
     expect(badgeOf(root)?.textContent?.trim()).toBe('1')
 
-    const fetchCallsBefore = getPendingCountSpy.mock.calls.length
+    const fetchCallsBefore = getTodoCountSpy.mock.calls.length
     expect(capturedOnCountsUpdated).toBeTypeOf('function')
     capturedOnCountsUpdated!({ count: 4, unreadCount: 3 })
     await flushUi()
 
     expect(badgeOf(root)?.textContent?.trim()).toBe('4')
     // No-auto-reload discipline: a push moves the number and triggers no additional read.
-    expect(getPendingCountSpy.mock.calls.length).toBe(fetchCallsBefore)
+    expect(getTodoCountSpy.mock.calls.length).toBe(fetchCallsBefore)
   })
 
   it('prefers the "all" bucket of a per-source realtime payload', async () => {
@@ -214,25 +222,70 @@ describe('app-level approval todo badge', () => {
   })
 
   it('hides the badge when there is nothing pending', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 0, unreadCount: 0 })
+    getTodoCountSpy.mockResolvedValue({ count: 0, sources: { approval: 'ok' } })
     const root = await mountApp()
+    expect(badgeOf(root)).toBeNull()
+    expect(unavailableBadgeOf(root)).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 判据 B (badge cell), todo-center-design-lock v2.14 §4/§5: a response that is not
+  // trustworthy — a thrown read, a legacy `degraded: true` flag, or any source reporting
+  // `unavailable` — must render a DISCRIMINABLE "不可用" state, never the same "0" (no badge)
+  // that a genuinely empty todo list renders as. The first of these three is also the mutation
+  // guard: reverting the badge's catch block to the old `applyCount(0)` (i.e. dropping
+  // `isUnavailable`) makes this test red, because the unavailable testid would never appear.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('renders a discriminable unavailable state when the count read throws (mutation guard: catch must not collapse to applyCount(0))', async () => {
+    getTodoCountSpy.mockRejectedValue(new Error('network error'))
+    const root = await mountApp()
+
+    const unavailable = unavailableBadgeOf(root)
+    expect(unavailable).toBeTruthy()
+    expect(unavailable?.textContent?.trim()).toBe('!')
+    // Not the same shape as "zero pending" — the plain numeric badge must be absent.
     expect(badgeOf(root)).toBeNull()
   })
 
-  it('hides the badge when the count read fails (no invented figure in the shell chrome)', async () => {
-    getPendingCountSpy.mockRejectedValue(new Error('unavailable'))
+  it('renders a discriminable unavailable state when the response carries a stubbed `degraded: true` flag (backend cannot emit this in this lane — see todo/api.ts)', async () => {
+    getTodoCountSpy.mockResolvedValue({ count: 0, sources: { approval: 'ok' }, degraded: true })
     const root = await mountApp()
+
+    expect(unavailableBadgeOf(root)).toBeTruthy()
     expect(badgeOf(root)).toBeNull()
+  })
+
+  it('renders a discriminable unavailable state when any source reports `unavailable`, even with a nonzero count (does not trust the number)', async () => {
+    getTodoCountSpy.mockResolvedValue({ count: 3, sources: { approval: 'unavailable' } })
+    const root = await mountApp()
+
+    expect(unavailableBadgeOf(root)).toBeTruthy()
+    // The stale/untrustworthy count must not leak through as a plain numeric badge either.
+    expect(badgeOf(root)).toBeNull()
+  })
+
+  it('carries the label in the unavailable state\'s aria-label so it stays anchored to the same nav entry', async () => {
+    getTodoCountSpy.mockRejectedValue(new Error('network error'))
+    let root = await mountApp()
+    expect(unavailableBadgeOf(root)?.getAttribute('aria-label')).toBe('待办审批(数据不可用)')
+    if (app) app.unmount()
+    app = null
+    container?.remove()
+    container = null
+
+    mocks.isZh = false
+    root = await mountApp()
+    expect(unavailableBadgeOf(root)?.getAttribute('aria-label')).toBe('Pending approvals (data unavailable)')
   })
 
   it('caps the rendered figure at 99+', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 1200, unreadCount: 3 })
+    getTodoCountSpy.mockResolvedValue({ count: 1200, sources: { approval: 'ok' } })
     const root = await mountApp()
     expect(badgeOf(root)?.textContent?.trim()).toBe('99+')
   })
 
   it('carries a values-free label in zh and en', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 3, unreadCount: 1 })
+    getTodoCountSpy.mockResolvedValue({ count: 3, sources: { approval: 'ok' } })
 
     let root = await mountApp()
     expect(badgeOf(root)?.getAttribute('aria-label')).toBe('待办审批')
@@ -250,11 +303,11 @@ describe('app-level approval todo badge', () => {
 
   it('renders no badge (and reads no count) for a principal without approvals:read', async () => {
     mocks.permissions = []
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 7 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     const root = await mountApp()
 
     expect(badgeOf(root)).toBeNull()
-    expect(getPendingCountSpy).not.toHaveBeenCalled()
+    expect(getTodoCountSpy).not.toHaveBeenCalled()
   })
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -270,10 +323,10 @@ describe('app-level approval todo badge', () => {
   it('issues no count read on a public route (non-path arm: requiresAuth === false)', async () => {
     mocks.routePath = '/public-thing'
     mocks.routeMeta = { requiresAuth: false }
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 7 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     const root = await mountApp()
 
-    expect(getPendingCountSpy).not.toHaveBeenCalled()
+    expect(getTodoCountSpy).not.toHaveBeenCalled()
     expect(badgeOf(root)).toBeNull()
     // Positive control that the shell itself DID render here — the absence above is the guard,
     // not a nav that failed to mount.
@@ -281,11 +334,11 @@ describe('app-level approval todo badge', () => {
   })
 
   it('issues no count read on /login, and DOES on an ordinary gated route (positive control)', async () => {
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 7 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     mocks.routePath = '/login'
     mocks.routeMeta = {}
     let root = await mountApp()
-    expect(getPendingCountSpy).not.toHaveBeenCalled()
+    expect(getTodoCountSpy).not.toHaveBeenCalled()
     if (app) app.unmount()
     app = null
     container?.remove()
@@ -294,7 +347,7 @@ describe('app-level approval todo badge', () => {
     mocks.routePath = '/multitable'
     mocks.routeMeta = { requiresAuth: true }
     root = await mountApp()
-    expect(getPendingCountSpy).toHaveBeenCalledWith('all')
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
     expect(badgeOf(root)).toBeTruthy()
   })
 
@@ -306,7 +359,7 @@ describe('app-level approval todo badge', () => {
   // ───────────────────────────────────────────────────────────────────────────
   it('(a) a THROWING realtime composable leaves the nav AND the badge intact', async () => {
     mocks.realtimeThrows = true
-    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 2 })
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
     const root = await mountApp()
 
     // The throw really happened — otherwise this test asserts nothing.
