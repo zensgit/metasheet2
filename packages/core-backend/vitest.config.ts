@@ -1954,6 +1954,24 @@ export default defineConfig({
       // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to the
       // seven cancel-round files above, no EXPECT_DB).
       'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
+      // acceptance (normal-pool half: A/A'/A''/A'''/B/B'/B''/F/G/H/I'). Requires real PostgreSQL
+      // (composite-FK archive/reattach concurrency, org-scoped uniqueness). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it. NOTE: this deliberately OVERRIDES
+      // the local convention stated just above at "NOT plugin-tests.yml (s6a sha256-pinned
+      // provenance input)" — lock §6 explicitly assigns phase 1's two new suites into
+      // plugin-tests.yml (the only real-DB step that runs on the required `test (20.x)` leg), so
+      // both files ARE wired there and the sealed-export S6-A provenance pin
+      // (plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json,
+      // evidenceFiles.pluginTestsWorkflow) was recomputed in the same change.
+      'tests/integration/approval-template-groups-lifecycle.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
+      // acceptance (RR-default-pool half: E/K). Runs the ENTIRE service pool under
+      // default_transaction_isolation=repeatable read (vi.hoisted DATABASE_URL amendment) to
+      // prove the export/serialization goldens hold under the isolation level production uses.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it. Same
+      // plugin-tests.yml override and s6a re-pin note as the lifecycle file above.
+      'tests/integration/approval-template-groups-serialization.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
