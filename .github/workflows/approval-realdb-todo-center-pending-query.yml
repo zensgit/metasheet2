@@ -149,11 +149,12 @@ jobs:
         # branch (`vitest run` with zero matched files exits non-zero) — that is the correct
         # fail-closed behavior for a wiring-only slice landing ahead of the gate-content slice in
         # the same design-lock PR sequence, not a bug in this workflow.
-        run: >-
-          pnpm --filter @metasheet/core-backend exec vitest
-          --config vitest.todo-center-pending-gate.config.ts run
-          tests/todo-center-pending-gate/todo-center-pending-gate.ts
-          --reporter=verbose
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for the todo-center pending-query gate}"
+          pnpm --filter @metasheet/core-backend exec vitest \
+            --config vitest.todo-center-pending-gate.config.ts run \
+            tests/todo-center-pending-gate/todo-center-pending-gate.ts \
+            --reporter=verbose
 
       - name: Values-free evidence (this job)
         run: |
