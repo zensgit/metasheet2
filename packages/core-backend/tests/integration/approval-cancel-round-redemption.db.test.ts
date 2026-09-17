@@ -1391,17 +1391,6 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       // ── R2 clause 2: 零 `approved` 完成事件 (in-process channel — the live one in this lane).
       expect(capture.seen).toEqual([])
 
-      // ── R2's MUTATION-CARRYING assertion (implementer addition, see the doc comment): the
-      // persisted `approved` half of step ⑥ never happened on the round's own instance.
-      const roundRecords = await pool().query<{ approve_rows: string; approved_rows: string }>(
-        `SELECT
-           count(*) FILTER (WHERE action = 'approve')::text AS approve_rows,
-           count(*) FILTER (WHERE to_status = 'approved')::text AS approved_rows
-         FROM approval_records WHERE instance_id = $1`,
-        [fixture.roundInstanceId],
-      )
-      expect(roundRecords.rows[0].approve_rows).toBe('0')
-      expect(roundRecords.rows[0].approved_rows).toBe('0')
 
       // ── R2 clause 1: 零业务取消. Every row the real adapter would have written, absent.
       const original = await pool().query<{ status: string }>(
@@ -1451,6 +1440,22 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(closeRecord.rows[0].metadata.cancelRoundCloseReason).toBe('round_expired')
       const dto = (await approve.json()) as { status?: string }
       expect(dto.status).toBe('rejected')
+
+      // ── LAST ON PURPOSE. This is R2's MUTATION-CARRYING assertion and it is an IMPLEMENTER
+      // ADDITION, not one of the lock's three R2 clauses (see the doc comment). It is ordered
+      // after all three so that ONE run of mutation M-20 evaluates the literal clauses first —
+      // otherwise a red here short-circuits them and 「they stayed green」 would be an argument
+      // wearing a measurement's label. The persisted `approved` half of step ⑥ never happened
+      // on the round's own instance.
+      const roundRecords = await pool().query<{ approve_rows: string; approved_rows: string }>(
+        `SELECT
+           count(*) FILTER (WHERE action = 'approve')::text AS approve_rows,
+           count(*) FILTER (WHERE to_status = 'approved')::text AS approved_rows
+         FROM approval_records WHERE instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(roundRecords.rows[0].approve_rows).toBe('0')
+      expect(roundRecords.rows[0].approved_rows).toBe('0')
     },
   )
 })
