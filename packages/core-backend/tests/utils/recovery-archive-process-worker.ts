@@ -36,6 +36,7 @@ export interface ArchiveProcessWorkerInput {
   readonly keyId: string
   readonly keyMaterial: RecoveryArchiveFixtureKeyMaterial
   readonly jobId: string
+  readonly expectedDatabaseName?: string
   readonly priorClaim?: ArchiveProcessClaimSnapshot
   readonly local?: {
     archivePath: string
@@ -126,6 +127,10 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       return result
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
+      if (input.expectedDatabaseName && error && typeof error === 'object' && 'code' in error
+        && typeof error.code === 'string' && /^RECOVERY_[A-Z0-9_]+$/.test(error.code)) {
+        await send({ kind: 'error', code: error.code })
+      }
       throw error
     } finally {
       depth -= 1
@@ -183,6 +188,12 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
   }
   const localSession = input.local ? createLocalCustodySession(runtime.transactionDepth) : undefined
   try {
+    if (input.expectedDatabaseName) {
+      const identity = await query('SELECT current_database() AS database_name')
+      if ((identity.rows[0] as { database_name?: unknown } | undefined)?.database_name !== input.expectedDatabaseName) {
+        throw new Error('archive_process_database_identity_mismatch')
+      }
+    }
     if (input.local && localSession) {
       const local = input.local
       const store = await createLocalCustodyStore({ archivePath: local.archivePath, custodyPath: local.custodyPath, custodyId: local.custodyId, transactionDepth: runtime.transactionDepth })
