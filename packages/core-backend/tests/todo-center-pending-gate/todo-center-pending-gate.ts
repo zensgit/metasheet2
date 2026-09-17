@@ -7,7 +7,9 @@
  * REPLACEMENT semantics in `AuthService.resolveRbacProfile`, `user_roles`/`user_permissions` reads
  * — is never exercised there), `GET /api/approvals/pending-count` must return the fourteen
  * lock-mandated golden values in §5's A0 row for the fourteen viewer classes (①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬). This
- * step adds class ⑪; ⑫⑬ remain deferred (see the fixture-plumbing docblock below).
+ * step adds classes ⑫⑬ (the `approval_reads` pair) — every A0 class now has a fixture and a
+ * golden-value assertion. Judges A/B/C/C'/D/F remain deferred (see the fixture-plumbing docblock
+ * below for the S9 note).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -74,9 +76,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 })
 
 // -------------------------------------------------------------------------------------------
-// Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧⑨⑩⑪ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
-// these classes and is deferred to a later step, along with classes ⑫⑬).
+// Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file now seeds S1–S9,
+// classes ①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬ — the full fourteen-class A0 population).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -371,6 +372,24 @@ async function seedAssignment(opts: {
   )
 }
 
+// S9 — `approval_reads`. Composite PK `(user_id, instance_id)`, `instance_id` FK-cascades on
+// `approval_instances` delete (`zzzz20260423140000:12-13`) — no FK on `user_id`, so any user id
+// string (including a fixture's own, or — deliberately, for class ⑬ — ANOTHER class's viewer id)
+// is insertable without a matching row existing yet at insert time. Design-lock §3.0 S9: "⑬ 一行
+// (user_id = ① 的 viewer, instance_id = ⑬ 的实例)" — the "other user" is pinned to ① specifically
+// (not an arbitrary third viewer) so that dropping the join's `r.instance_id = a.instance_id` leg
+// (one of the two mutations this pair is designed to kill) makes ①'s OWN `unreadCount` regress
+// from 1 to 0 — a single read row on ⑬'s instance would then falsely mark ①'s unrelated instance
+// as read too, purely because both rows share `user_id = v1.id`. An arbitrary unrelated third
+// viewer's read row could not produce that cross-class regression, since no OTHER class's A0
+// assertion reads that viewer's id.
+async function seedApprovalRead(userId: string, instanceId: string): Promise<void> {
+  await pool().query(
+    `INSERT INTO approval_reads (user_id, instance_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [userId, instanceId],
+  )
+}
+
 async function devToken(baseUrl: string, userId: string): Promise<string> {
   const response = await fetch(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}`)
   expect(response.status).toBe(200)
@@ -497,6 +516,24 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // ONE instance still dedupe to one instance (design-lock §5 A0 ⑪). The "1 row, not 2" half of
   // this same fixture is judging criterion C's, not A0's — A0 only pins the scalar count.
   const v11 = viewer('c11-double-active-seat', ROLE_NAME_CLASS_11)
+  // Class ⑫ — same user-seat shape as ①, on its OWN instance, PLUS an `approval_reads` row this
+  // SAME viewer wrote for this SAME instance ⇒ count 1, unreadCount 0: the `FILTER (WHERE
+  // r.instance_id IS NULL)` clause excludes an already-read instance from the unread aggregate
+  // without touching `count` (design-lock §5 A0 ⑫; mutation "drop the FILTER" would flip
+  // `unreadCount` back to 1, red). Only a `('user', id)` seat (no role-type seat), so the bare
+  // `'employee'` role literal is safe here — unlike ⑪, nothing in this class matches a
+  // `('role', 'employee')` assignee arm.
+  const v12 = viewer('c12-own-read', 'employee')
+  // Class ⑬ — same user-seat shape as ①, on its OWN instance, but the ONLY `approval_reads` row
+  // touching this instance was written by ①'s viewer (`v1.id`), not ⑬'s own ⇒ ⑬'s OWN
+  // `unreadCount` stays 1 (someone else's read must not count as mine — design-lock §5 A0 ⑬;
+  // mutation "drop `r.user_id = $1`" would flip ⑬'s `unreadCount` to 0, red). The SAME read row
+  // doubles as the negative control for the join's OTHER leg: dropping `r.instance_id =
+  // a.instance_id` instead would make v1's read (recorded against ⑬'s instance) wrongly match
+  // v1's OWN query too, since both rows would then agree on `user_id` alone — flipping ①'s
+  // (already-asserted, above) `unreadCount` from 1 to 0. That second mutation is verified against
+  // class ① itself, not re-asserted here as a class of its own.
+  const v13 = viewer('c13-other-read', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -593,14 +630,31 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null, // filled in beforeAll
     currentNodeKey: `todo-center-pending-gate-node-11-${suffix}`,
   }
+  // Class ⑫'s own instance — own, distinct node key (not part of the ①②⑥⑦-vs-⑧ join-key
+  // population). Non-handler published definition, same as every other counted class.
+  const instance12: InstanceFixture = {
+    id: `todo-center-pending-gate-i12-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: `todo-center-pending-gate-node-12-${suffix}`,
+  }
+  // Class ⑬'s own instance — same shape as ⑫'s, own distinct node key.
+  const instance13: InstanceFixture = {
+    id: `todo-center-pending-gate-i13-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: `todo-center-pending-gate-node-13-${suffix}`,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id, v10.id, v11.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id, instance10.id, instance11.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id, v10.id, v11.id, v12.id, v13.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id, instance10.id, instance11.id, instance12.id, instance13.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9, v10, v11]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
