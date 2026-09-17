@@ -72,4 +72,27 @@ describe('approval realtime count publisher', () => {
     }))
     expect(warn).not.toHaveBeenCalled()
   })
+
+  it('also broadcasts todo:counts-updated on the same per-user room (design-lock §4)', async () => {
+    const broadcastTo = vi.fn()
+    const query = vi.fn<ApprovalCountQuery>(async () => ({ rows: [{ count: '5', unread_count: '3' }] }))
+
+    await publishApprovalCountsUpdate({
+      collabService: { broadcastTo },
+      userId: 'u2',
+      reason: 'decision',
+      query,
+    })
+
+    // Exactly two broadcasts, both on the same room, with the same payload — the center reuses
+    // the existing per-user room and payload rather than opening a second channel or shape.
+    expect(broadcastTo).toHaveBeenCalledTimes(2)
+    const [approvalCall, todoCall] = broadcastTo.mock.calls
+    expect(approvalCall[0]).toBe('auth-user:u2')
+    expect(approvalCall[1]).toBe('approval:counts-updated')
+    expect(todoCall[0]).toBe('auth-user:u2')
+    expect(todoCall[1]).toBe('todo:counts-updated')
+    expect(todoCall[2]).toEqual(approvalCall[2])
+    expect(todoCall[2]).toMatchObject({ count: 5, unreadCount: 3, reason: 'decision' })
+  })
 })
