@@ -25,6 +25,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-2 | my own working notes for this step | "the `w7-w6r5-guard` classification test ran and passed" | **RETRACTED — it never ran.** A combined run of three targets printed `Test Files 2 passed (2)` and I inferred which two. Checked directly: `npx vitest run tests/unit/w7-w6r5-guard` prints **`No test files found, exiting with code 1`** — that path holds `classification.ts` and `walk.ts`, which are corpora, not suites. Their real consumers are named in §2.5 and were run there. A directory that collects zero files is not a green. |
 | R-5 | commit `5dbbf5f6b` message, 3rd paragraph, and §3.13.2's first draft | "under M-20 **ALL THREE** of R2's literal clauses stayed GREEN (**measured** — the `ivexp` case … passed)" | **RETRACTED IN PART — clause 1 was NOT measured by that run.** `ivexp` has no attendance target, so it asserts nothing about 零业务取消; the only case that does is R2 itself, and in that run R2 died at the `approve_rows` assertion, which the first draft ordered BEFORE the 零业务取消 rows — so those rows were never evaluated. Clauses 2 and 3 were genuinely measured; clause 1 was an argument labelled as a measurement, in a file whose whole discipline is the opposite. FIXED by the follow-up commit: the case now orders the three literal clauses first and the implementer addition last, and M-20 re-run puts the red on the file's last line (`:1433:49`) with all three evaluated and green. The original commit message cannot be edited without a force-push, so the correction lives here. |
 | R-6 | §3.4, §3.11.6 and the redemption suite's own header (phase 2, all three units) | a new `.db.test.ts` would owe 「the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102` — a closed world that stays green for a file it does not list」 | **RETRACTED — that is not what lives at `:99-102`, and the script holds no file list at all.** Read this session: `:99-102` is `REAL_DB_STEP_IDS = Object.freeze({ approval: 'approval-real-db-integration', multitable: 'multitable-real-db-integration' })` — a frozen map of two **step ids**, not test files. The file population is DERIVED from the workflow at check time (`wholeFileVitestArgs`, `:521-525`, reads the parsed step's own vitest invocations), so it cannot go stale against `plugin-tests.yml` the way a hard-coded list would. `grep -c 'db.test.ts'` over the whole script ⇒ **1** (a doc-comment example at `:513`), `grep -c cancel-round` ⇒ **0**. Consequence for this line: a new `.db.test.ts` under the existing `approval` step owes `plugin-tests.yml` + the s6a re-pin, and owes this script **nothing**. The three places carrying the wrong description are corrected in place; the two commit messages that repeated it cannot be, so this row is their correction. |
+| R-7 | §4's 「§5 I3 『终结即释放』 mutation」 bullet (previous revision) | the mutation's red would be 「the next create is **refused by the partial unique index** with 23505/409」 | **RETRACTED — the index is never reached in the sequential shape.** Measured in §3.14.2: `createCancelRoundInstance` has an application pre-check at `ApprovalProductService.ts:8558-8568` that runs before the `INSERT`, and M-21's stack frame is `ApprovalProductService.ts:8563:15` — `CANCEL_ROUND_ALREADY_PENDING` (409). The 23505 backstop at `:8697-8705` is the CONCURRENT-race path and this case does not construct one. The half that stands: C-3's outcome write is what releases the slot. The half that does not: any claim about `uq_approval_rounds_pending_document` itself. |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -1680,6 +1681,135 @@ of. Recorded because 「a closed world that stays green for a file it does not l
 own named hazard, and the hazard turned out to be in the DESCRIPTION, not the script.
 
 
+---
+
+## 3.14 §5 I3 「终结即释放」, WITH its own mutation — and the door that fires is NOT the index (this unit)
+
+### 3.14.1 Why this needed a separate case, not one more assertion
+
+The 判据 IV `expired` case (§3.4) already ended with 「a new cancel round starts immediately」. That
+line was an **end-state check with no mutation behind it**, and §4 has listed it as owed since the
+unit landed. The lock's I3 mutation is 「the C-3 closure does not write the round's terminal
+`outcome`」 — instance `rejected` while the round stays `pending`, which is exactly the shape
+lock:368's outlet-7′ row spells out (「实例 `rejected` 而轮次仍 `pending`、同单据再发起被唯一索引拒,
+红」).
+
+Run that mutation against the 判据 IV case and it **never reaches the I3 line**: the case dies 23
+lines earlier, at `expect(round.rows[0].outcome).toBe('expired')` (`:780`), while its
+`createCancelRoundInstance` call sits at `:804-806`. That is §0 R-5's trap — an argument presented
+as a measurement — recurring two units later in the same file. So the I3 clause gets its own case
+(`:817-894`), in which the create is the **first statement after the close**, and the 判据 IV case
+keeps its line as the cheap end-state check it always was.
+
+### 3.14.2 The door that actually refuses the second round — measured, and it is not the one §4 predicted
+
+Lock:149 says I3 is 「由索引 + C-3 共同保证」, and this file's own §4 predicted the mutant's red would
+be 「refused by the partial unique index with 23505」. **That is wrong for the sequential shape**, and
+the probe says so with a stack frame:
+
+```
+ServiceError: This document already has a cancel round in progress
+ ❯ ApprovalProductService.createCancelRoundInstance src/services/ApprovalProductService.ts:8563:15
+ ❯ tests/integration/approval-cancel-round-redemption.db.test.ts:863:20
+Serialized Error: { statusCode: 409, code: 'CANCEL_ROUND_ALREADY_PENDING', details: undefined }
+```
+
+`:8563` is the **application pre-check**'s throw (`:8558-8568`,
+`SELECT id FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`), which runs before
+the `INSERT` ever reaches the constraint. The 23505 backstop at `:8697-8705` maps the raw unique
+violation onto the SAME named 409 and belongs to the **concurrent-insert race only**.
+
+Consequence for what this case may be said to prove, stated narrowly:
+
+- **PROVEN** — C-3's terminal `outcome` write is what releases the document's pending slot: remove
+  it and the next create is refused; keep it and the next create succeeds.
+- **PROVEN** — the named 409 `CANCEL_ROUND_ALREADY_PENDING` is what a caller sees when the slot is
+  still held.
+- **NOT proven** — anything about `uq_approval_rounds_pending_document` itself. Reaching the index
+  needs a constructed race (two concurrent `createCancelRoundInstance` calls), which this case does
+  not build. §4's 「23505」 sentence is corrected accordingly (§0 R-7).
+
+### 3.14.3 What the case asserts, in order
+
+`:817-894`, `§5 I3 「终结即释放」 (the C-3 half)`. Same closure cause as 判据 IV (200-day-aged
+`approved_at` anchor > the `leave` suite's 90-day window), driven through the real
+`POST /api/approvals/:id/actions` approve.
+
+| # | Assertion | Why it is here |
+|---|---|---|
+| 1 | `createCancelRoundInstance(documentId)` **succeeds** | the I3 clause itself; **carries M-21** |
+| 2 | exactly one `pending` round for the NEW engine instance | the create actually opened a round, not just returned a DTO |
+| 3 | the closed round is still exactly one row, `outcome = 'expired'` | it was released by reaching a terminal outcome, not deleted |
+| 4 | the closed round's id ≠ the new round's id | a **different** row — not the same row re-opened |
+| 5 | exactly one `pending` round **for the document** (`WHERE document_id = $1`), and its `engine_instance_id` is the new instance | 「同一单据至多一轮在途」 read off the column the partial unique index is declared on |
+
+Assertion 5 is deliberately keyed on `document_id` rather than on the instance: that is the index's
+own predicate, so it is the read that would catch a second pending row the pre-check happened to
+miss.
+
+### 3.14.4 Mutation ledger (this unit)
+
+`cp` backup → edit → run → `cp` restore → `cmp`. One probe. `RESTORED-IDENTICAL` printed;
+`git status` after restore shows the test file as the only modification.
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-21 | **the lock's I3 mutation** — in `closeCancelRoundSystemTerminalInTxn`, delete BOTH the `UPDATE approval_rounds … SET outcome = $2, ended_at = now(), …` (`:8946-8959`) AND its `if (roundResult.rowCount !== 1) throw` guard (`:8960-8966`) — 21 lines, replaced by a one-line marker | the I3 case red **at its create line**, i.e. the clause is evaluated and fails | **4 red, 11 green**, and the I3 case's red is on the named site: `redemption.db.test.ts:863:20`, `ServiceError … CANCEL_ROUND_ALREADY_PENDING` (409). The other three reds are 判据 IV `expired` (`:780`), 判据 IV `blocked` (`:1092`) and R2 (`:1482`), each on its own round-outcome assertion — which is the direct confirmation of §3.14.1: **all three die before their own I3/round lines**, so none of them could have carried this mutation |
+
+Both lines were removed **together** on purpose: deleting only the `UPDATE` leaves `roundResult`
+undefined and the probe would have produced a `TypeError`, which is a different red than the one
+claimed here.
+
+M-21's 4/15 detection rate is reported rather than trimmed. The alternative — deleting the 判据 IV
+case's I3 line to make the row read 「exactly 1 red」 — would have removed a working assertion to
+tidy a count, which is the move this file's §0 keeps retracting.
+
+### 3.14.5 Scope — ONE of the two terminal outcome writers
+
+`grep -n "UPDATE approval_rounds" packages/core-backend/src/services/ApprovalProductService.ts` ⇒
+**6 lines, of which 2 are prose comments** (`:899`, `:8768`), leaving **4 statements**:
+
+| Site | Outcome written | I3 mutation built? |
+|---|---|---|
+| `:8947` — `closeCancelRoundSystemTerminalInTxn` (C-3 system close) | `expired` / `blocked` | **YES — M-21, this unit** |
+| `:9108` — `redeemCancelRoundInTxn` (C-2 success) | `applied` | **NO.** The test file comments it as I3 at `:1027`, but no probe exists. Building it needs the attendance target and the double, so it is registered in §4, not smuggled in here |
+| `:11263` — 判据 III, 发起人撤回 | `withdrawn` | out of this slice (phase 1) |
+| `:11750` — 判据 III, 审批人驳回 | `rejected` | out of this slice (phase 1) |
+
+### 3.14.6 Commands and results
+
+```
+$ npx tsc --noEmit -p tsconfig.json
+[exited with code 0]
+
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+ ✓ tests/integration/approval-cancel-round-redemption.db.test.ts  (15 tests) 955ms
+ Test Files  1 passed (1)
+      Tests  15 passed (15)
+
+# M-21 applied
+      Tests  4 failed | 11 passed (15)
+ ❯ …redemption.db.test.ts:863:20   ServiceError … CANCEL_ROUND_ALREADY_PENDING   ← the I3 clause
+ ❯ …redemption.db.test.ts:780:37   expected 'pending' to be 'expired'
+ ❯ …redemption.db.test.ts:1092:37  expected 'pending' to be 'blocked'
+ ❯ …redemption.db.test.ts:1482:38  expected 'pending' to be 'expired'
+
+# restored
+$ cmp /tmp/APS-m21-backup.ts packages/core-backend/src/services/ApprovalProductService.ts
+RESTORED-IDENTICAL
+$ …/vitest … redemption.db.test.ts --reporter=dot
+      Tests  15 passed (15)
+```
+
+**Wiring: none owed.** No new `.db.test.ts` file — the case is appended to
+`approval-cancel-round-redemption.db.test.ts`, which `plugin-tests.yml:1668` already runs in the
+`approval-real-db-integration` step. So no workflow edit and no s6a provenance re-pin (§0 R-6
+settled that a new file under this step owes `ci-realdb-step-contract.mjs` nothing either). The
+top-level `EXPECT_DB` sentinel and the two-point wiring were already in place for this file.
+
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -1746,10 +1876,18 @@ they are.
   leave-balance lots, which no fixture here seeds.
 - **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 II and 判据 IV
   halves are both filled in now (§3.4, §3.11.6), against a double.
-- **§5 I3 「终结即释放」 mutation** — the `expired` case asserts a new round can start immediately
-  after the close, but the lock's named mutation (drop the `outcome` write ⇒ the next create is
-  refused by the partial unique index with 23505/409) is not built. M-7 mutates the outcome's
-  *value*, not its presence.
+- **§5 I3 「终结即释放」 mutation** — **BUILT in §3.14** for the C-3 closure, as its own case
+  (`:817-894`) whose `createCancelRoundInstance` call is the first statement after the close, so the
+  clause carries the mutation instead of dying behind an earlier assertion. M-21 (delete the round
+  `outcome` write AND its rowCount guard) ⇒ 4 red / 11 green, the I3 case's red on the named site.
+  ⚠️ Two things this does NOT establish, both corrected from the sentence that used to be here
+  (§0 R-7): (a) **the partial unique index is never reached** — the refusal comes from
+  `createCancelRoundInstance`'s own pre-check (`:8558-8568`, measured frame `:8563:15`,
+  `CANCEL_ROUND_ALREADY_PENDING` 409), and reaching `uq_approval_rounds_pending_document` needs a
+  constructed race this case does not build; (b) **only ONE of the two terminal outcome writers is
+  probed** — the C-2 success writer at `:9108` (`outcome = 'applied'`) is commented as I3 in the
+  test file at `:1027` but has **no** probe, and building one needs the attendance target plus the
+  double (§3.14.5's table). M-7 remains a mutation of the outcome's *value*, not its presence.
 - **卡片失效 for a carded cancel round** — see §3.8: possible, pre-existing, unswept.
 - **判据 II's remaining census legs** — **RESOLVED in §3.10** for the {原单据实例,
   `attendance_requests`} pair: the adapter is reordered and census Q-G's four legs are built (the
