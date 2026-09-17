@@ -399,7 +399,7 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
 // them), which is why this is intentionally testable OUTSIDE the guard rather than only through
 // it — see the lifecycle suite's "§2 link-time visibility" block. LINK ONLY (the lock's clause
 // names 挂接, not unlink) — an implementer's choice to mask "exists but invisible" the SAME way
-// as every other actor-gated template lookup in this router (`:897`'s `APPROVAL_TEMPLATE_NOT_FOUND`),
+// as every other actor-gated template lookup in this router (`:921`'s `APPROVAL_TEMPLATE_NOT_FOUND`),
 // not a second ratified code; a nonexistent template also returns `false` here (the `id = $1`
 // predicate matches nobody), so this doubles as the group-link path's template-existence check —
 // today unreachable another way (`mapGroupConstraintError` has no 23503 branch for `template_id`).
