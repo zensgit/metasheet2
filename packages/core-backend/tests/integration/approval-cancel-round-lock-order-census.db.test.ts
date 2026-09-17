@@ -1225,6 +1225,7 @@ describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restr
       const requirement = await resolveCancelRoundRolloutLockRequirementV1(
         client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
         seeded.roundInstanceId,
+        'approve',
       )
       expect(requirement.kind).toBe('required')
       if (requirement.kind !== 'required') throw new Error('unreachable — narrowed above')
@@ -1257,6 +1258,7 @@ describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restr
       const requirement = await resolveCancelRoundRolloutLockRequirementV1(
         client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
         seeded.roundInstanceId,
+        'approve',
       )
       expect(requirement.kind).toBe('none')
     } finally {
@@ -1277,12 +1279,12 @@ describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restr
     expect(methodEnd).toBeGreaterThan(methodStart)
     const body = source.slice(methodStart, methodEnd)
 
-    const preRead = body.indexOf('rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id)')
+    const preRead = body.indexOf('rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)')
     const serializableBegin = body.indexOf("await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')")
     const plainBegin = body.indexOf("await client.query('BEGIN')")
     const rolloutAcquire = body.indexOf('await acquireAttendanceCalculationRolloutLock(')
     const instanceRowLock = body.indexOf('FROM approval_instances WHERE id = $1')
-    const reAssert = body.indexOf('const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id)')
+    const reAssert = body.indexOf('const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)')
 
     for (const offset of [preRead, serializableBegin, plainBegin, rolloutAcquire, instanceRowLock, reAssert]) {
       expect(offset).toBeGreaterThan(-1)
@@ -1351,5 +1353,67 @@ describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restr
     } finally {
       client.release()
     }
+  })
+
+  it('LEG 5 (the ACTION axis — the control for 判据 III`s already-shipped behaviour): the SAME fixture leg 1 resolves `required` for demands NO lock on revoke/reject/comment/a forbidden verb', async () => {
+    // Leg 2 varies the DOCUMENT axis (attendance-owned or not). This leg varies the ACTION axis on
+    // a fixture leg 1 has already proven resolves `required`, so the two together say the resolver
+    // is narrow on BOTH and not merely on one.
+    //
+    // Why it is load-bearing rather than tidy: only the approve fall-through (outlet #5/#5′) can
+    // reach W4. 判据 III's revoke/reject terminate the round row with a bare UPDATE and shipped in
+    // phase 1. A resolver keyed on the instance alone would have moved them to SERIALIZABLE, given
+    // them an org-wide advisory lock and a 40001 failure mode they never had, made a FORBIDDEN verb
+    // take an org lock before `assertCancelRoundActionAllowed` refuses it, and put the re-assert's
+    // 409 ahead of §14.3 #4/#6's outlet-guard codes. None of that is 判据 II's to change.
+    const seeded = await seedResolvableCancelRound(ATTENDANCE_WORKFLOW_KEY)
+    const client = await pool.connect()
+    try {
+      // Positive control FIRST, on this very fixture: without it a green `none` below could mean
+      // 「the fixture never demanded a lock」 rather than 「the action axis refused it」.
+      const onApprove = await resolveCancelRoundRolloutLockRequirementV1(
+        client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+        seeded.roundInstanceId,
+        'approve',
+      )
+      expect(onApprove.kind).toBe('required')
+
+      for (const action of ['reject', 'revoke', 'comment', 'transfer', 'handle'] as const) {
+        const requirement = await resolveCancelRoundRolloutLockRequirementV1(
+          client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+          seeded.roundInstanceId,
+          action,
+        )
+        expect(requirement, `action ${action} must demand no rollout lock`).toEqual({ kind: 'none' })
+      }
+    } finally {
+      client.release()
+    }
+  })
+
+  it('LEG 6: the 40001/40P01 mapping exists, is gated on the branch that created the surface, and uses the repo`s single predicate (source scan, both ends anchored)', () => {
+    // DISCLOSURE, so this leg is not read as more than it is: this is a SOURCE scan, not a driven
+    // serialization failure. `CANCEL_ROUND_DISPATCH_CONTENDED` has no runtime coverage — no test
+    // in this repo makes a real 40001 reach it. The leg exists so that DELETING the mapping
+    // reddens something (the `finding_o2_x2_fix_site_has_zero_test_coverage.md` shape), not so
+    // that anyone can call the mapping exercised.
+    const source = readFileSync(
+      join(__dirname, '../../src/services/ApprovalProductService.ts'),
+      'utf8',
+    )
+    const methodStart = source.indexOf('  async dispatchAction(')
+    expect(methodStart).toBeGreaterThan(-1)
+    const catchStart = source.indexOf('      await rollbackQuietly(client)', methodStart)
+    expect(catchStart).toBeGreaterThan(methodStart)
+    // Both ends anchored: the catch block only, ending at its own rethrow.
+    const catchEnd = source.indexOf('    } finally {', catchStart)
+    expect(catchEnd).toBeGreaterThan(catchStart)
+    const catchBody = source.slice(catchStart, catchEnd)
+
+    expect(catchBody).toContain('CANCEL_ROUND_DISPATCH_CONTENDED')
+    // Gated on the branch that opened SERIALIZABLE — NOT a repo-wide retry-semantics change.
+    expect(catchBody).toContain("rolloutLock.kind === 'required' && isRetryableSqlState(error)")
+    // The ordinary dispatch's bare rethrow survives the mapping.
+    expect(catchBody).toContain('throw error')
   })
 })
