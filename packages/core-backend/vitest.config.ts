@@ -1840,6 +1840,20 @@ export default defineConfig({
       // .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to WI-0/WI-4 above),
       // which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-redemption.db.test.ts',
+      // §14.3 outlets #12/#13 (lock:373-374) — the two SEAT-WRITE chokepoints
+      // (`bulkReassignApprovals`, `applyApprovalDepartureTransfer`): a cancel-round instance's
+      // seat is skipped with the typed `CancelRoundOutletForbiddenError` -> `reason: 'cancel_round'`
+      // catch (not the method's own generic catch, which would render an unnamed skip), while a
+      // sibling ordinary pending instance on the SAME assignee/departed-user reassigns/transfers
+      // normally in the same call (the discriminating positive control proving the guard is
+      // selective, not a blanket freeze of that user's seats). NOT covered here: #2/#3/#7/#7'/#8
+      // (separate "outlet-guards" file per the taskbook split — decide/dispatch/legacy-route
+      // paths, not seat-writers). Real DB (poolManager + a real dispatch transaction, driven
+      // through the running server exactly like the creation/redemption acceptance files).
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into the standalone .github/workflows/approval-realdb-cancel-round.yml lane
+      // (sibling job to WI-0/WI-4/WI-13 above), which arms EXPECT_DB=1.
+      'tests/integration/approval-cancel-round-seat-guards.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
