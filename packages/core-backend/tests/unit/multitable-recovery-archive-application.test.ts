@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createLocalCustodyBackup, createLocalCustodySession } from '../../src/multitable/recovery-local-custody'
+import { createLocalCustodyBackup, createLocalCustodySession, resolveLocalArchiveCustody, resolveLocalArchiveCustodyRelease } from '../../src/multitable/recovery-local-custody'
 
 const workerMocks = vi.hoisted(() => ({
   createRecoveryArchiveRestoreWorker: vi.fn(),
@@ -96,7 +96,15 @@ describe('recovery archive application composition', () => {
       const composition = { ...fakeComposition(fakeProviders()), keyCustody: admission }
       const application = createRecoveryArchiveApplication(() => composition, () => fakeDatabaseRuntime().runtime, ENABLED_ENV)
       expect(application.routerOptions?.recoveryArchiveRuntime?.keyCustody).toBe(admission)
+      const operations = resolveLocalArchiveCustody(admission)!
+      const request = { keyId: admission.keyId, generationId: randomUUID() }
+      expect(() => application.releaseCustody()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED')
+      const dek = await operations.produceGenerationDek(request)
+      dek.dek.fill(0)
       await application.stopWorker()
+      application.releaseCustody()
+      expect(session.isUnlocked()).toBe(false)
+      await expect(operations.produceGenerationDek(request)).rejects.toThrow('RECOVERY_LOCAL_CUSTODY_REFUSED')
       const resolveDatabase = vi.fn(() => fakeDatabaseRuntime().runtime)
       expect(() => createRecoveryArchiveApplication(() => ({ ...composition, keyCustody: { ...admission } }), resolveDatabase, ENABLED_ENV))
         .toThrow('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED')
@@ -105,6 +113,28 @@ describe('recovery archive application composition', () => {
       session.lock()
       recoverySecret.fill(0)
     }
+  })
+  it('cannot release a new session epoch through an old or copied admission', async () => {
+    const custodyId = randomUUID()
+    const recoverySecret = randomBytes(32)
+    const transactionDepth = fakeProbe()
+    const backup = createLocalCustodyBackup({ custodyId, recoverySecret, transactionDepth })
+    const session = createLocalCustodySession(transactionDepth)
+    try {
+      session.unlock({ custodyId, recoverySecret, backup })
+      const old = session.admitForArchive(custodyId)
+      const releaseOld = resolveLocalArchiveCustodyRelease(old)!
+      expect(() => resolveLocalArchiveCustodyRelease({ ...old })).toThrow('RECOVERY_LOCAL_CUSTODY_REFUSED')
+      releaseOld()
+      session.unlock({ custodyId, recoverySecret, backup })
+      releaseOld()
+      expect(session.isUnlocked()).toBe(true)
+      const current = session.admitForArchive(custodyId)
+      const issued = await resolveLocalArchiveCustody(current)!.produceGenerationDek({ keyId: current.keyId, generationId: randomUUID() })
+      issued.dek.fill(0)
+      resolveLocalArchiveCustodyRelease(current)!()
+      expect(session.isUnlocked()).toBe(false)
+    } finally { session.lock(); recoverySecret.fill(0) }
   })
   it('rejects an enabled composition without a durable derived processor', () => {
     const composition = fakeComposition(fakeProviders())

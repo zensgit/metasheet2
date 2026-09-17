@@ -9,6 +9,13 @@ export interface LocalArchiveCustodyAdmission {
   readonly [admissionBrand]: true
 }
 const admissions = new WeakMap<LocalArchiveCustodyAdmission, RecoveryArchiveCustodyOperations>()
+const releases = new WeakMap<LocalArchiveCustodyAdmission, () => void>()
+
+/** Release authority is tied to the same opaque admission, not to a caller-supplied callback. */
+export function resolveLocalArchiveCustodyRelease(input: object): (() => void) | undefined {
+  resolveLocalArchiveCustody(input)
+  return releases.get(input as LocalArchiveCustodyAdmission)
+}
 
 /** Internal guard entry: no structural/manifest-driven fallback for local claims. */
 export function resolveLocalArchiveCustody(input: object): RecoveryArchiveCustodyOperations | undefined {
@@ -302,6 +309,9 @@ export function createLocalCustodySession(probe: RecoveryArchiveTransactionDepth
             return guarded(probe, () => session.verifyLocalManifest(parse(request.keyId), request.preimage, request.mac))
           },
         }))
+        releases.set(capability, () => {
+          if (epoch === admittedEpoch) session.lock()
+        })
         return capability
       })
     },

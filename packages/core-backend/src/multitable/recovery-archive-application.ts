@@ -3,7 +3,7 @@ import type {
   UniverMetaRouterOptions,
 } from '../routes/univer-meta'
 import type { RecoveryArchiveCustodyInput, RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
-import { resolveLocalArchiveCustody } from './recovery-local-custody'
+import { resolveLocalArchiveCustody, resolveLocalArchiveCustodyRelease } from './recovery-local-custody'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
 import type {
   RecoveryArchiveObservability,
@@ -48,6 +48,7 @@ export interface RecoveryArchiveApplication {
   readonly routerOptions: UniverMetaRouterOptions | undefined
   startWorker(): void
   stopWorker(): Promise<void>
+  releaseCustody(): void
 }
 
 const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
@@ -73,6 +74,7 @@ export function createRecoveryArchiveApplication(
       routerOptions: undefined,
       startWorker() {},
       async stopWorker() {},
+      releaseCustody() {},
     })
   }
   if (!factory) throw new Error(COMPOSITION_INVALID)
@@ -119,6 +121,8 @@ export function createRecoveryArchiveApplication(
   let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
+  let workerDrained = false
+  const releaseCustody = resolveLocalArchiveCustodyRelease(composition.keyCustody)
 
   return Object.freeze({
     routerOptions,
@@ -144,10 +148,14 @@ export function createRecoveryArchiveApplication(
     async stopWorker() {
       workerState = 'stopped'
       if (workerStop) return workerStop
-      if (!workerLoop) return
+      if (!workerLoop) {
+        workerDrained = true
+        return
+      }
       const loop = workerLoop
       workerStop = stopRecoveryArchiveWorkerLoop(loop).then(
         () => {
+          workerDrained = true
           recordLifecycleSafely(observability, 'drained')
         },
         (error: unknown) => {
@@ -160,6 +168,10 @@ export function createRecoveryArchiveApplication(
       } finally {
         workerLoop = null
       }
+    },
+    releaseCustody() {
+      if (!workerDrained) throw new Error(WORKER_STOP_FAILED)
+      releaseCustody?.()
     },
   })
 }
