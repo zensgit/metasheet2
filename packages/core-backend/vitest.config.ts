@@ -1808,6 +1808,15 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // Approval cancel-round WI-0 lock-order census (Q-A, slice 1) — two real Postgres
+      // connections constructing the class-`00` rollout advisory lock (real production key
+      // derivation) against a real `approval_instances` row lock, both the §9-4 forward order
+      // and a deliberately reversed order proven to deadlock deterministically (40P01). Real
+      // DB (two raw `pg.Pool` connections). Excluded here so describeIfDatabase cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-cancel-round.yml lane, which arms EXPECT_DB=1. This
+      // slice covers Q-A only, not Q-B/Q-C/Q-D — see the file's own header.
+      'tests/integration/approval-cancel-round-lock-order-census.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
