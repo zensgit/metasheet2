@@ -368,6 +368,28 @@ describeIfDatabase('cancel-round redemption (WI-13, 判据 III only): revoke/rej
       const suffix = `reject-comment-${TS}`
       const fixture = await seedPendingCancelRound(suffix)
 
+      // EXPLICITNESS PIN (lock §14.1: "节点操作的评论要求 = 显式值 ... 不靠默认") — the 400 below is
+      // reachable via TWO independent routes: the node's own explicit `commentRequired` OR (if that
+      // key were ever dropped) `effectiveCommentRequired`'s fallback to the instance snapshot, which
+      // ALSO resolves an absent value to `'reject_only'` (`approval-effective-node-operations.ts`).
+      // A `cp`/raw-SQL mutation probe on `metasheet2_lock_c` confirmed the fallback alone keeps the
+      // 400-below green (see the verification MD Part D's D2 update) — so the HTTP assertion by
+      // itself does NOT discriminate "seed wrote it explicitly" from "seed omitted it and the
+      // fallback covered". This assertion reads the seed's own published-definition row and pins the
+      // explicit value directly, the same discipline as the CJS mirror-constant test elsewhere in
+      // this lane.
+      const publishedDefinition = await pool().query<{ runtime_graph: { nodes: Array<{ key: string; config?: { nodeOperationPolicy?: { commentRequired?: string } } }> } }>(
+        `SELECT pd.runtime_graph
+           FROM approval_instances i
+           JOIN approval_published_definitions pd ON pd.id = i.published_definition_id
+          WHERE i.id = $1`,
+        [fixture.roundInstanceId],
+      )
+      const cancelApprovalNode = publishedDefinition.rows[0]?.runtime_graph.nodes.find(
+        (node) => node.key === 'cancel_approval',
+      )
+      expect(cancelApprovalNode?.config?.nodeOperationPolicy?.commentRequired).toBe('reject_only')
+
       const reject = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
         method: 'POST',
         body: { action: 'reject' },
