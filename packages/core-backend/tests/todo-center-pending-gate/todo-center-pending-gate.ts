@@ -1423,7 +1423,23 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(countResult.body.count).toBe(1)
     })
 
-    it("retained viewer-shape probe (design-lock §5 row B's own parenthetical: \"保留探针 viewer 形状要求:class ② 的形状,持恰一个 role 型席位且是其计数的唯一来源\") — `approval` alone throws, ONLY source registered, for class ② whose real count (1) comes from that ONE role-type seat: the response's count DOES get smaller (1 → 0), but is flagged `unavailable`, not silently folded in", async () => {
+    it("retained viewer-shape probe (design-lock §5 row B's own parenthetical: \"保留探针 viewer 形状要求:class ② 的形状,持恰一个 role 型席位且是其计数的唯一来源;正控:读正常 ⇒ ok + 1\") — the SAME viewer, SAME run: baseline `ok`+1 asserted live first, THEN `approval` alone throws (ONLY source registered) and the response's count drops 1 → 0 flagged `unavailable`, not silently folded in", async () => {
+      const token = await devToken(baseUrl, v2.id)
+
+      // Positive control, asserted live (row B's own "正控:读正常 ⇒ ok + 1", not inherited from a
+      // different route's A0 assertion — this is `/api/todo/items` and `/api/todo/count`
+      // specifically, before any registry mutation in this test): without this, an unrelated bug
+      // that made class ②'s count 0 for the wrong reason (a role-arm regression in the shared
+      // query, or a viewer-resolution divergence between `resolveTodoViewer` and the badge's own
+      // resolver) would make the mutation assertion below pass vacuously.
+      const baselineItems = await fetchTodoItems(baseUrl, token)
+      const baselineCount = await fetchTodoCount(baseUrl, token)
+      expect(baselineItems.status).toBe(200)
+      expect(baselineCount.status).toBe(200)
+      expect(baselineCount.body.sources).toEqual({ approval: 'ok' })
+      expect(baselineCount.body.count).toBe(1)
+      expect(baselineItems.body.items.some((item) => item.id === instance2.id)).toBe(true)
+
       pendingSourceRegistry.register({
         name: APPROVAL_PENDING_SOURCE_NAME,
         async listPendingForUser(): Promise<PendingItem[]> {
@@ -1434,7 +1450,6 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
         },
       })
 
-      const token = await devToken(baseUrl, v2.id)
       const itemsResult = await fetchTodoItems(baseUrl, token)
       const countResult = await fetchTodoCount(baseUrl, token)
 
@@ -1446,13 +1461,12 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(itemsResult.body.sources).toEqual({ approval: 'unavailable' })
       expect(countResult.body.sources).toEqual({ approval: 'unavailable' })
       expect(itemsResult.body.items).toHaveLength(0)
-      // Positive control for "不得变成更小的数字" (byte-for-byte, not paraphrased): class ②'s own
-      // A0 assertion earlier in this file reads `count: 1` from the SAME viewer with the SAME
-      // fixture, `sources.approval: 'ok'` implied by 200 + no `unavailable` key. Here the number
-      // DOES drop, 1 → 0 — the lock's own wording is about the number staying flagged when it
-      // drops, not about it never dropping (an unreachable seat cannot report a phantom count) —
-      // and byte-for-byte against the negative control below (also `count: 0`), the ONLY
-      // distinguishing signal between "1 pending, unreachable" and "genuinely 0 pending" is this
+      // "不得变成更小的数字": the number DOES drop, 1 → 0 (measured against the baseline fetched
+      // moments ago on this SAME viewer/endpoint, not inherited from a different route's golden
+      // value) — the lock's own wording is about the number staying flagged when it drops, not
+      // about it never dropping (an unreachable seat cannot report a phantom count) — and
+      // byte-for-byte against the negative control below (also `count: 0`), the ONLY distinguishing
+      // signal between "1 pending, unreachable" and "genuinely 0 pending" is this
       // `sources.approval === 'unavailable'` flag, never the count itself.
       expect(countResult.body.count).toBe(0)
     })
