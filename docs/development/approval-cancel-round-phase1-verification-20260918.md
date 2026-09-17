@@ -1715,8 +1715,16 @@ undisclosed, so the mapping table gets the row, not just this narrative section.
 ## G2. Disposition — the round-2 gate review's other four findings (P3-A/P3-B/P3-C/P3-D)
 
 Detail for each finding is below (§G3-P3-A, §G4-P3-B, §G5-P3-C/P3-D); the authoritative one-table
-summary is §G6. All of this pass's changes — G1's test assertion, the two comment fixes, and the
-design MD header narrowing — landed in a single commit; there is no second commit to point to.
+summary is §G6. ~~All of this pass's changes — G1's test assertion, the two comment fixes, and the
+design MD header narrowing — landed in a single commit; there is no second commit to point to.~~
+**SUPERSEDED (round-3 gate finding P3-1, fixed in §I1): this sentence and §G7's "Two commits this
+pass" a few paragraphs below flatly contradicted each other — one of them had to be wrong, and it was
+this one.** The round-2 fix landed across two commits: `a166f5ca0` (G1's test assertion and mutation
+ledger, both P3-A comment fixes, the design MD header narrowing, and this document's G1–G7 as first
+drafted) and `6c5b06f7d` (three narrowing fixes to this Part's own prose, made after an advisor pass
+and caught before push — see §G7 for what each one fixed). §G7's "two" was the correct count; this
+sentence's "single commit" and "no second commit to point to" were written before `6c5b06f7d` landed
+and never updated afterward.
 
 ---
 
@@ -1764,7 +1772,13 @@ $ grep -rn "readFileSync" apps/web/tests packages/core-backend/tests scripts/ops
 (no output)
 ```
 
-No hit — no sync-pin or source-text guard reads either file, so editing only the comment body is safe.
+~~No hit — no sync-pin or source-text guard reads either file, so editing only the comment body is
+safe.~~ **SUPERSEDED (round-3 gate finding P3-2, fixed in §I2): the grep's own shape is the problem,
+not its result.** `grep -rn "readFileSync" … | grep -iE "api\.ts|ApprovalBridgeService"` can only ever
+match a line where the literal token `readFileSync` and a filename co-occur — it is structurally
+blind to a `read(...)` helper defined on one line and called with the filename on another, or to a
+path built by joining a variable. Both shapes exist in this tree and both read one of the two files
+this pass's comment edits touched; §I2 replaces this narrative with the actual guards found and rerun.
 
 **Fix, this pass**: two one-line comment edits (no code, no behavior change):
 
@@ -1877,9 +1891,18 @@ P3-A is CLOSED with three fix points, P3-C is fixed (one prose line), not merely
   migration exists to run; `metasheet2_lock_c` was already migrated by an earlier pass) — the two DB
   mutation probes (G1-M1's `runtime_graph` edit) were row-level `UPDATE`s against the lane's own
   private DB, backed up and restored, not migrations.
-- Two commits this pass: one for G1 (P2-1's assertion + mutation ledger + this document's G1/§A6
+- ~~Two commits this pass: one for G1 (P2-1's assertion + mutation ledger + this document's G1/§A6
   updates), one for G3–G6 (the two comment fixes, the design MD header narrowing, and this document's
-  G2–G7). Both follow the same conventional-commit and push discipline as Parts C–F.
+  G2–G7).~~ **SUPERSEDED (round-3 gate finding P3-1, fixed in §I1): the count (two) was right; the
+  split by content was wrong.** Both P3-A comment fixes and the design MD header narrowing landed in
+  the **first** commit alongside G1, not the second. The true split: `a166f5ca0` (G1's P2-1 assertion
+  and mutation ledger, both P3-A comment fixes, the design MD header narrowing, and this document's
+  G1–G7 as first drafted) and `6c5b06f7d` (three narrowing fixes to this Part's own prose, caught by
+  an advisor pass before push: G3's absorption-line claim backed by the mechanically distinguishing
+  grep instead of a name-read, G1's mutation-ledger line-number reference replaced with a
+  drift-immune description, and G2's dangling forward-reference to a nonexistent second commit
+  replaced with a same-document pointer to G6). Both commits follow the same conventional-commit and
+  push discipline as Parts C–F.
 
 ---
 
@@ -2167,16 +2190,24 @@ Line 900 no longer asserts "38" as the live population count; it is struck throu
 ## H4. What this pass does not close — carried forward, not silently dropped
 
 The round-3 gate report's five P3 findings are **not** addressed by this pass; they are the scope of
-a later fix-round step, not abandoned:
+a later fix-round step, not abandoned. (As written when this bullet list was first drafted — the
+P3-3 bullet further down this same list is itself the fix for P3-3, and two more, P3-1/P3-2, are
+fixed in a subsequent pass on this branch; see each bullet's own current text or `SUPERSEDED`
+annotation for present state, not this introductory sentence.)
 
-- **P3-1** (Part G self-contradicts: §G2 says "single commit," §G7 says "Two commits this pass") —
+- ~~**P3-1** (Part G self-contradicts: §G2 says "single commit," §G7 says "Two commits this pass") —
   unresolved; needs both sentences reconciled against the true two-commit history
-  (`a166f5ca0` + `6c5b06f7d`), per the gate's own §9 recipe. Not touched this pass.
-- **P3-2** (§G3's `readFileSync`-co-occurrence grep is structurally blind to `read('…')`-wrapped and
+  (`a166f5ca0` + `6c5b06f7d`), per the gate's own §9 recipe. Not touched this pass.~~ **SUPERSEDED —
+  fixed in a later pass on this branch, §I1**: this bullet was accurate when Part H was first
+  written; it does not describe the document's current state. §I1 reconciles §G2 and §G7 against the
+  true two-commit history and corrects the content split, not just the count.
+- ~~**P3-2** (§G3's `readFileSync`-co-occurrence grep is structurally blind to `read('…')`-wrapped and
   variable-path guards, and two such guards exist in this tree reading the exact files G3 edited) —
   unresolved; §H1 above deliberately used a broader filename-based grep for its own safety check
   instead of repeating G3's narrower one, but does not yet go back and fix G3's own argument text.
-  Not touched this pass.
+  Not touched this pass.~~ **SUPERSEDED — fixed in a later pass on this branch, §I2**: §G3's own
+  argument text is corrected there, naming the two guards and disclosing that one of them does not
+  strip comments.
 - **P3-3** (design MD header's "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" is one commit
   behind this pass's own starting HEAD) — **fixed this pass, per the gate report's own §9 item 8
   suggestion** ("改成「见 git 历史」这种不会腐烂的写法"): the header no longer pins a single "HEAD as
@@ -2195,3 +2226,171 @@ a later fix-round step, not abandoned:
 
 This pass's own two fixes (§H1, §H2) are commit-scoped and complete against the round-3 gate's own
 §9 closure criteria for P2-1 and P2-2. The round's zero P1 findings needed no action.
+
+---
+
+# Part I — round-3 gate's remaining two open P3 findings, fixed (later pass on this branch)
+
+Part H (above) closed round-3's two P2 findings and one of its five P3 findings (P3-3) but explicitly
+left P3-1, P3-2, P3-4, and P3-5 as carried forward (§H4). P3-4 and P3-5 already carried a correct
+final disposition in §H4 ("not this implementer's to close" / "already disclosed, not a regression")
+— nothing to fix there, only to leave standing. P3-1 and P3-2 did not: both named a live defect in
+this document's own prose (§G2/§G7's self-contradiction; §G3's non-covering grep). This Part fixes
+those two, in place at §G2/§G3/§G7 (not narrated separately here, to avoid the exact "narrative
+covers the sentence instead of the sentence being fixed" failure this document has already flagged in
+itself twice — see §G3's and §G5's `SUPERSEDED` annotations). **Docs-only: zero production or test
+code touched.**
+
+## I1. P3-1 (round-3) — §G2/§G7's commit-count self-contradiction, reconciled
+
+**The finding**: §G2 said the round-2 fix "landed in a single commit; there is no second commit to
+point to." §G7, a few dozen lines later in the same document, said "Two commits this pass." Both
+cannot be true.
+
+**Re-derived against this branch's actual history, not copied from either sentence**:
+```
+$ git show --stat a166f5ca0 | tail -6
+ apps/web/src/approvals/api.ts                      |   2 +-
+ ...approval-cancel-round-phase1-design-20260918.md |  32 ++-
+ ...al-cancel-round-phase1-verification-20260918.md | 240 +++++++++++++++++++++
+ .../src/services/ApprovalBridgeService.ts          |   2 +-
+ .../approval-cancel-round-redemption.db.test.ts    |   8 +-
+ 5 files changed, 271 insertions(+), 13 deletions(-)
+$ git show --stat 6c5b06f7d | tail -3
+ ...al-cancel-round-phase1-verification-20260918.md | 31 ++++++++++++++--------
+ 1 file changed, 20 insertions(+), 11 deletions(-)
+```
+`a166f5ca0` touched both source comments (`ApprovalBridgeService.ts`, `api.ts`) and the design MD —
+so the two P3-A comment fixes and the design MD header narrowing are in the **first** commit, not a
+second one. `6c5b06f7d` touched only the verification MD, 31 lines — consistent with its own message
+("Three narrowing fixes to the round-8 fix pass just committed"), i.e. it corrects three sentences
+**inside** Part G, it does not add the comment fixes or header narrowing. So: two commits is the right
+count (§G7), but §G7's own description of what landed in which commit was also wrong — it attributed
+the comment fixes and header narrowing to the *second* commit ("one for G3–G6 … the two comment
+fixes, the design MD header narrowing"), when they are in the first.
+
+**Fix, this pass**: §G2 and §G7 both corrected in place (struck through, `SUPERSEDED` annotation
+naming this finding and this Part, then the true two-commit split with per-commit content) rather
+than silently rewritten — per this document's own established practice for a finding that turns out
+to have been recorded wrong (see §G3/§G5's `SUPERSEDED` blocks, and memory
+`feedback_supersession_marker_must_evaluate_not_void`: evaluate the specific false sentence, don't
+void the whole section).
+
+**Deliberately not restated as a hardcoded fact in this Part**: this Part does not itself assert "two
+commits, split X/Y" as a freestanding claim outside of what §G2/§G7 now say — that would recreate a
+second copy of the same claim for a future pass to find drifted from the first, the identical failure
+shape `dce9e16df` diagnosed for the design MD's "HEAD as of" header and its own commit-count bullet.
+§I1 points at §G2/§G7; it does not duplicate them.
+
+**Rerun**: none required — no code or test file is touched by this fix (`git diff --stat` for this
+commit, see §I3, shows only the verification MD). The seven-suite cancel-round set and `tsc --noEmit`
+were rerun anyway, unchanged from every prior rerun this branch (`Test Files 7 passed (7) / Tests 47
+passed (47)`; `TSC-EXIT:0`).
+
+## I2. P3-2 (round-3) — §G3's safety-check grep replaced with the actual guards, named and rerun
+
+**The finding**: §G3 justified editing two source comments with `grep -rn "readFileSync" … | grep
+-iE "api\.ts|ApprovalBridgeService"` returning no hits, concluding "no sync-pin or source-text guard
+reads either file." The grep's shape can only match a line where the literal token `readFileSync` and
+a filename co-occur; it is blind to a `read(...)` helper whose body is on a different line from its
+call site, or to a path built from a variable. Two such guards exist in this tree and both read one
+of the two files §G3 edited:
+
+```
+$ grep -n "read('services/ApprovalBridgeService.ts')" packages/core-backend/tests/unit/approval-admin-capability.test.ts
+366:    const arms = extractAdminArms(read('services/ApprovalBridgeService.ts'))
+$ sed -n '343,345p' packages/core-backend/tests/unit/approval-admin-capability.test.ts
+343:  function read(rel: string): string {
+344:    return readFileSync(join(src, rel), 'utf8')
+345:  }
+$ grep -n "'src/approvals/api.ts'," apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts
+852:      'src/approvals/api.ts',
+```
+
+**Whether either guard could actually have been tripped by §G3's edits, checked directly rather than
+assumed from "reads the file"**:
+
+- `approval-admin-capability.test.ts`'s guard extracts SQL-arm shapes via
+  `ADMIN_ARM_RE` against `source.replace(/\s+/g, ' ')` (`:356`) — **it does not strip comments before
+  matching**, and says so in its own docblock: "a whole-file `toContain` … can be satisfied by a
+  **DOCBLOCK** restating the arm" (`:350`). So "editing only the comment body is inherently inert" is
+  **not a true general claim about this file** — a comment containing the `ADMIN_ARM_RE` SQL shape
+  would turn this guard red regardless of being a comment. The edit §G3 actually made (a `file:line`
+  citation number, `:9246` → `:9637`, inside a *different* docblock) does not contain that shape, so
+  it stayed green for that reason, not for "comments are inert."
+- `approval-member-identity-coverage-enumeration.spec.ts`'s guard at `:852` reads `api.ts` but its
+  assertion (`:857-858`) checks for role-name-resolution identifiers
+  (`ensureRoleNamesResolved|getResolvedRoleName|resolveApprovalDirectoryRoles|resolvedRoleNames`),
+  unrelated in content to the `APS:8561`→`APS:8916` citation §G3 edited in that file — so this guard
+  was never at risk from that specific edit, but again because of what it checks, not because
+  comments are categorically safe.
+
+**Actual safety evidence, rerun this pass** — the two guards that read these files, green:
+```
+$ npx vitest run tests/unit/approval-admin-capability.test.ts --reporter=dot
+ Test Files  1 passed (1)   Tests  15 passed (15)
+$ npx vitest run approval-member-identity-coverage-enumeration --reporter=dot
+ Test Files  1 passed (1)   Tests  16 passed (16)
+```
+Both counts match the round-3 gate report's own P3-2 finding text verbatim
+(`reviews/impl-gate-C-slice1-round3-20260918.md`, lines 294-295: "→ Test Files 1 passed / Tests 15
+passed" / "16 passed") — this Part reruns the gate reviewer's own commands, not new ones. This
+supersedes §G3's grep-based inertness argument with actual-guard evidence, and names the file where
+"comment edits are inert" does not hold as a general property (`approval-admin-capability.test.ts`),
+per the gate's own §9 item 7 instruction.
+
+**Fix, this pass**: §G3's "No hit — … editing only the comment body is safe" sentence struck through
+and annotated `SUPERSEDED`, pointing here.
+
+**Rerun**: seven-suite cancel-round set and `tsc --noEmit`, unchanged (`Test Files 7 passed (7) /
+Tests 47 passed (47)`; `TSC-EXIT:0`) — this fix touches only prose in the verification MD, no source
+or test file.
+
+## I3. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree (`wt-cancel-round`) on the assigned branch; no
+  `git checkout --`, `git reset --hard`, or stash discard was used or needed.
+- No lock file or `reviews/` document was opened for editing: `git diff --name-only
+  origin/main..HEAD | grep -iE "review|lock-draft|\.claude"` → 0 hits, checked after this pass's
+  commit.
+- No migration applied anywhere this pass (none exists to run); the private DB (`metasheet2_lock_c`)
+  was written to by neither §I1 nor §I2 (docs-only) — it was read (never written outside those tests'
+  own transactions) by the seven-suite integration rerun cited in §I1/§I2's own "Rerun" notes, the
+  same suite set every earlier pass on this branch has used.
+- No PR opened, no branch merged or undrafted, no force-push.
+- Every commit in this pass is docs-only and touches only this one file — verified before staging
+  each one via `git status --porcelain` / `git diff --stat`, and (for the pass as a whole, in case
+  more than one commit lands) via `git diff --name-only dce9e16df..HEAD` (`git log --oneline
+  dce9e16df..` lists the commits; each message states its own scope). Deliberately **not** a commit
+  count pinned into this prose — the same lesson `dce9e16df`'s own message already drew from an
+  earlier version of exactly this bullet ("a self-count inside a document every one of its own
+  commits edits cannot survive the next commit that edits it") and §I1 applies to itself above.
+  Neither source comment nor the design MD is touched by this pass's fixes (P3-1's fix corrects this
+  document's *account* of what landed where in `a166f5ca0`/`6c5b06f7d`; it does not re-touch those
+  files themselves).
+
+## I4. Net status — round-3 gate report (`impl-gate-C-slice1-round3-20260918.md`) fully processed
+
+Round-3's verdict was NEEDS-FIX, 0 P1 / 2 P2 / 5 P3 — re-derived from the report's own section
+headings, not copied from its header line:
+```
+$ grep -cE "^### P[23]-" reviews/impl-gate-C-slice1-round3-20260918.md
+7
+```
+matching `grep -nE "^### P"` listing exactly P2-1, P2-2, P3-1, P3-2, P3-3, P3-4, P3-5 and no others —
+7, agreeing with the header's "2 P2 / 5 P3". Disposition after this Part:
+
+| Finding | Status | Where |
+|---|---|---|
+| P2-1 | CLOSED | §H1 |
+| P2-2 | CLOSED | §H2 |
+| P3-1 | CLOSED | §I1 (this pass) |
+| P3-2 | CLOSED | §I2 (this pass) |
+| P3-3 | CLOSED | §H4 (design MD header converted to a non-decaying pointer) |
+| P3-4 | Recorded, no implementer action — outside this document's readable authorization chain, self-resolves at the Draft-PR-opening step per round-2's §G4 | §H4 |
+| P3-5 | Recorded, no implementer action — already disclosed as open across all three gate rounds, not a regression | §H4 |
+
+Every finding the round-3 gate report named now has a terminal disposition recorded in this document:
+five fixed (two P2, three P3), two P3 findings correctly recorded as open-and-not-actionable-here
+rather than closed. This does not constitute a fourth gate pass approving the fixes — that is the
+next independent reviewer's call, not this document's own.
