@@ -207,8 +207,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // for the DEDICATED instance). Discriminating power confirmed by a source mutation probe (cp
     // backup -> edit ApprovalProductService.ts's public-path `workflow_key` literal to the
     // dedicated value -> rerun -> restore -> cmp identical; recorded in the verification MD).
-    const originalInstanceRow = await pool().query<{ workflow_key: string | null }>(
-      `SELECT workflow_key FROM approval_instances WHERE id = $1`,
+    const originalInstanceRow = await pool().query<{
+      workflow_key: string | null
+      policy_snapshot: Record<string, unknown>
+    }>(
+      `SELECT workflow_key, policy_snapshot FROM approval_instances WHERE id = $1`,
       [documentId],
     )
     expect(isCancelRoundInstance(originalInstanceRow.rows[0]!)).toBe(false)
@@ -281,6 +284,19 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(Object.keys(roundRows.rows[0].policy_snapshot_at_create.roundPolicy as object).sort()).toEqual(['suite', 'windowDays'])
     expect(roundPolicy.suite).toBe('leave')
     expect(roundPolicy.windowDays).toBe(90)
+    // Gate review impl-gate-C-slice1-round1-20260918.md P3-D: `policy_snapshot_at_create` (lock §4,
+    // v5.4) is `{ definitionPolicy: <原样>, roundPolicy: {...} }` — only the `roundPolicy` half had
+    // an assertion anywhere in the corpus. `definitionPolicy` must freeze the ORIGINAL document's
+    // OWN `policy_snapshot` column value VERBATIM (`ApprovalProductService.ts:8505`,
+    // `definitionPolicy: original.policy_snapshot`) — a deep-equal against the row read directly off
+    // the original instance BEFORE `createCancelRoundInstance` ran, not a re-derived/hardcoded shape,
+    // so this assertion cannot pass by construction if the freeze point ever moves or the value is
+    // re-serialized. Discriminating power confirmed by a source mutation probe (cp backup -> replace
+    // `definitionPolicy: original.policy_snapshot` with `definitionPolicy: {}` -> rerun -> restore ->
+    // cmp identical; recorded in the verification MD).
+    expect(roundRows.rows[0].policy_snapshot_at_create.definitionPolicy).toEqual(
+      originalInstanceRow.rows[0]!.policy_snapshot,
+    )
   })
 
   it('§5 I3 — a second cancel round cannot be started while one is pending (uq_approval_rounds_pending_document)', async () => {
