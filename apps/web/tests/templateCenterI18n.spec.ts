@@ -107,6 +107,18 @@ vi.mock('../src/approvals/api', () => ({
   getTemplateUsage: (id: string) => getTemplateUsageSpy(id),
   archiveTemplate: (id: string) => archiveTemplateSpy(id),
   unarchiveTemplate: (id: string) => unarchiveTemplateSpy(id),
+  // A-2 scope item 2 (design lock v2.13 §6 phase 1) — TemplateCenterView.vue now always mounts
+  // ApprovalTemplateGroupsPanel.vue when canManageTemplates is true (the default in this file),
+  // and that panel calls these two on mount/submit plus does an `instanceof ApprovalApiError`
+  // check in its catch branch — all three must exist on this replacement mock or the panel's
+  // onMounted throws unhandled (this spec makes no assertions about groups, so an empty resolved
+  // list is enough).
+  ApprovalApiError: class ApprovalApiError extends Error {},
+  listApprovalTemplateGroups: () => Promise.resolve([]),
+  createApprovalTemplateGroup: (name: string) => Promise.resolve({
+    id: 'atg_test', orgId: 'org_test', name, sortOrder: 1,
+    createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
+  }),
 }))
 
 const elSuccessSpy = vi.fn()
