@@ -297,3 +297,17 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 ## 10. 本步交付物与下一步
 
 本步(worktree/私有库建立后的第一个可提交单元)只交付本文档,不写任何实现代码——taskbook `:72`/`:227` 明确 W7/W8/W9(preview/execute/rollback)在"设计提案过独立门审"之前不进入实现队列。**下一步是把本文档送独立门审**(§6.2 的 guard 冲突、§8.4 的 `WithClient` 重构落点都是需要门审/owner 表态的输入项,不是已定案——门审通过或给出修法意见之后,才按 §9 的验证计划纲要开始写 DDL + 服务层 + 端点)。
+
+## 11. 附录(2026-09-18,续做步骤 2):§3.0 `WithClient` 抽取已先行落地,W7/W8/W9 仍未解禁
+
+咨询了独立复核(advisor,非本文档所称的"独立门审"——见下方澄清)后确认:§3.0 描述的 `...WithClient` 抽取是 W7/W8/W9 存在的**硬前提**(没有它,execute/rollback 一旦组合调用现有导出函数就会在同一会话跨连接死锁,§3.0 已论证),而这个抽取本身**不提交**任何 §6.2/§8.4/批次表 DDL 的裁决——所以它被单独实现并提交,而**预览/执行/回滚三个端点、三张批次表 DDL、新增 `.db.test.ts`、CI 两点接线与 s6a 重钉仍然在门之外**,taskbook `:72`/`:227` 的门未变。
+
+**已实现**(`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`):`createApprovalTemplateGroup`/`linkApprovalTemplateToGroup`/`archiveApprovalTemplateGroup` 各自拆成 `...WithClient(client, …)`(内部原语)+ 原导出名薄封装(`transaction(client => …)`),与本文档 §3.0 的决策一致。
+
+**对 §3.0 原文的一处修正(不是静默偏离)**:§3.0 原文承诺"语句、顺序、错误映射逐字不变"——这句对**组合调用**(execute 在同一个 `transaction` 里连续调用两个 `...WithClient`)不成立,原因是 `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` 必须是 `BEGIN` 后的第一条语句(§2);若把 SET 留在 `createApprovalTemplateGroupWithClient`/`archiveApprovalTemplateGroupWithClient` 的函数体里,execute 组合调用两次时第二次 SET 会晚于第一次调用已经跑过的查询语句,在 RR 默认池下报 `25001` 并中止整个事务,在 RC 服务器上又会静默成功从而验证空转——两种后果都不可接受。**改正**:SET 从这两个 `...WithClient` 函数体中**移出**,只由目前仍是单操作路径的薄封装在 `transaction(...)` 回调的第一条语句里发出(与重构前的物理位置完全相同,§3.0 的"下一步"部分因此改写)——`linkApprovalTemplateToGroupWithClient` 本来就不发 SET(link 不取 L0),不受影响。`pg_advisory_xact_lock` 在同一会话内可重入,`...WithClient` 内部保留自己的 L0 获取语句不会因组合调用而阻塞或出错。这意味着**未来** execute/rollback 组合这些 `...WithClient` 原语时,必须自己在其唯一的 `transaction(...)` 回调顶部发一次 SET,而不是指望被组合的原语各自带一份——这条义务记入本条附录,供门审核实,门审通过前不假设为已解决。
+
+**验证**(零行为变化,两条证据,均见 commit 的验证记录):
+1. **行为对照**:A-1 已落地的两个真库测试文件 `approval-template-groups-lifecycle.db.test.ts`(16 用例)与 `approval-template-groups-serialization.db.test.ts`(10 用例,RR 默认池,含 E/K 的顺序/停车敏感断言)在私有库 `metasheet2_lock_a3` 上**原样重跑**(`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run <file> --reporter=dot`),重构前后**均 26/26 全绿**——这条覆盖了运行时语句顺序(E/K 两个用例专门断言 L0 停车与 COMMIT 阶段异常映射,若 SET/L0 顺序被打乱会直接观察到红)。
+2. **机械 SQL 抽取对照**:对重构前后的文件各自用正则抽取全部 `client.query(<字符串字面量>)` 的 SQL 文本(21 条),排序后逐条 `JSON.stringify` 比较——**排序后的多重集合逐字相同**(21 = 21,零增删)。**已知局限,如实披露**:抽取脚本按源码文本定义顺序读取,不是按运行时调用顺序——由于 `...WithClient` 函数在源码中定义于其薄封装**之前**,原始"SET 紧跟在 L0 锁语句前"的相邻关系在**文本order**里看起来被拆开了(SET 现在文本上出现在其消费者之后);这不代表运行时顺序变化,运行时顺序仍由第 1 条的真库测试兜底证明,不由这条机械抽取兜底——两条证据分别覆盖"语句集合未变"与"语句顺序未变"两件不同的事,不能互相替代。
+
+**澄清"独立门审"未被满足**:上一句的 advisor 咨询**不是**记忆库 `feedback_authorization_source_must_be_owner_authored` 意义上的独立门审——advisor 看到的是本会话自己的记录,不是外部裁量;把它当成门审通过会构成自证循环。本文档第 8 节列出的全部待裁决项(§6.2 guard 冲突、§8.2 归一化、§4.4 两处倾向)与 W7/W8/W9 三个端点仍然**原样待裁**,本条附录不改变这一点。
