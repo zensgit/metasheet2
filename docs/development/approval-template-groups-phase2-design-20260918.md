@@ -311,3 +311,20 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 2. **机械 SQL 抽取对照**:对重构前后的文件各自用正则抽取全部 `client.query(<字符串字面量>)` 的 SQL 文本(21 条),排序后逐条 `JSON.stringify` 比较——**排序后的多重集合逐字相同**(21 = 21,零增删)。**已知局限,如实披露**:抽取脚本按源码文本定义顺序读取,不是按运行时调用顺序——由于 `...WithClient` 函数在源码中定义于其薄封装**之前**,原始"SET 紧跟在 L0 锁语句前"的相邻关系在**文本order**里看起来被拆开了(SET 现在文本上出现在其消费者之后);这不代表运行时顺序变化,运行时顺序仍由第 1 条的真库测试兜底证明,不由这条机械抽取兜底——两条证据分别覆盖"语句集合未变"与"语句顺序未变"两件不同的事,不能互相替代。
 
 **澄清"独立门审"未被满足**:上一句的 advisor 咨询**不是**记忆库 `feedback_authorization_source_must_be_owner_authored` 意义上的独立门审——advisor 看到的是本会话自己的记录,不是外部裁量;把它当成门审通过会构成自证循环。本文档第 8 节列出的全部待裁决项(§6.2 guard 冲突、§8.2 归一化、§4.4 两处倾向)与 W7/W8/W9 三个端点仍然**原样待裁**,本条附录不改变这一点。
+
+## 12. 附录二(2026-09-18,续做步骤 3):对 §11 的独立复核 + 三处未覆盖点(不写任何 W7/W8/W9 代码)
+
+本步在同一个 worktree/私有库上,**独立于 §11 的原始记录**重新执行了两条验证(不是重述 §11 的文字,是本会话自己重新跑出的结果,逐行标 provenance):
+
+- **私有库状态**(本会话现场核对):`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 npx tsx src/db/migrate.ts --list` → `Applied: 407 / Pending: 0`(含分期 1 迁移,与其它并行 lane 共用同一私有库、迁移基线一致)。
+- **typecheck**:`npx tsc --noEmit -p .`(`packages/core-backend`)零输出,干净。
+- **26/26 真库回归,本会话重跑**(HEAD = `68aead6db`):`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run tests/integration/approval-template-groups-lifecycle.db.test.ts tests/integration/approval-template-groups-serialization.db.test.ts --reporter=dot` → `Test Files 2 passed (2)` / `Tests 26 passed (26)`。这条独立复现了 §11 第 1 条证据,不是转述上一步 commit message 的说法。
+- **SQL 多重集合比对,本会话重新实现并重跑**(不是重述 §11 第 2 条的"21=21",是用一个新写的、独立的正则状态机脚本对 `git show 417320f08:.../ApprovalTemplateGroupService.ts`(重构前)与当前 HEAD 的同文件分别提取全部 `client.query(...)` 首参数、归一化空白后排序比较):`before count: 21` / `after count: 21` / `multiset equal: True`。与 §11 报告的结论一致,但这次是两条独立方法各自得出同一结论,不是同一次计算被复述两次。
+
+**三处 §11 未覆盖、本步核实后需要如实记入的残留(供门审输入,不现场修复——修复会触碰门外代码)**:
+
+1. **26/26 只证明了"三个导出函数单独调用时零行为变化",没有证明"组合调用安全"**——A-1 的两个 `.db.test.ts` 测的是**薄封装**(每次一个独立 `transaction()`),这正是重构前就存在、重构后仍然存在的调用形状;§3.0 论证的死锁风险和这条修复,针对的是**execute/rollback 在同一个 `transaction(...)` 回调里连续调用多个 `...WithClient`**这个全新的调用形状——今天仓库里没有任何调用点走这条路径,所以 26/26 对"组合调用是否真的不再死锁、SET 顺序是否真的正确"是**零判别力**的(同族问题见记忆 `feedback_verified_one_link_generalised_to_the_chain`:验证了一环不能推广到整条链)。这条证据只能等 W8/W9 自己的真库测试(在组合调用路径上真正跑一次)来补,不是本步能补的——本步没有调用点可以测。
+2. **§11 移出 SET 的义务目前无人强制,失败模式是静默通过而不是报错**:§11 自己论证过"忘记在组合调用顶部发 SET"这个错误在 RR 默认池下会 `25001`(响亮的红),但在 READ COMMITTED 服务器配置下会**静默成功**——即以后 W8/W9 的作者如果漏发这条 SET,本地开发库(如果不是显式配了默认 RR)可能测试全绿却带着错误的隔离级别上线。今天没有任何代码或 lint 检查这条义务(纯文档承诺)。这不是本步能修的(修复方案——比如给 `...WithClient` 加一个"调用者必须已在本次事务发过 SET"的运行时断言——本身就是 W8/W9 范围内的实现决策,门审未过不能写),但必须显式记入,不能让它只活在 §11 的散文里等下一个实现者重新发现。
+3. **provenance 澄清**:§11 的"21=21"结论本身没有错(本步用独立脚本复现了同一结论),但 §11 原文把它写成"均见 commit 的验证记录"——那条记录是**上一步**做出的判断,本文档直到本步之前从未被**另一个**独立方法验证过。现在两条独立方法(不同脚本、不同会话)都得到同一结果,置信度比 §11 单独成立时更高,但这个提升本身是本步才发生的事实,不应该被合并写成"一直都验证充分"。
+
+**本步交付物**:仅本节文字(§12),**不新增/不修改任何 `.ts`/迁移文件**——W7/W8/W9(预览/执行/回滚端点、三张批次表 DDL、新增 `.db.test.ts`、CI 两点接线、s6a 重钉)按 taskbook `impl-taskbook-A-grouping-20260918.md:72,:227` 仍在门外,本步不解禁、不视图绕过。下一步仍然是:把本文档(含本节)整体送独立(非本 lane 自己的)门审,门审需要对以下四点给出裁决,实现队列才能开始:§6.2(preview 挂 `approvalTemplateAdminGuard` 还是 I7 字面的 `rbacGuard('approvals:read')`)、§8 第 2 条(legacy category 归一化范围)、§4.4-1(rollback 幂等 200 vs 409)、§4.4-2(批次头 FK `CASCADE` vs `NO ACTION`);以及是否认可 `WithClient` 重构已经提交在本分支(而不是应该重新排到别处)。
