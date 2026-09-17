@@ -3,8 +3,8 @@
 Base: `23dfdf417686b931a515bf03abbce1d6471c3098`.
 Implementation head: `705473bbafc0c6cb9159c1d97d5dda3cd3c17f77`.
 Implementation tree: `09ddad7b4aaa60670e45b1c9c9bd25ce222a9656`.
-Scope: local launcher implementation and focused verification; full successful
-PostgreSQL/HTTP/restart acceptance remains a gate.
+Scope: local launcher implementation, focused verification and isolated real-process
+PostgreSQL/HTTP/restart acceptance. Remote exact-head CI remains a gate.
 
 ## Evidence
 
@@ -63,13 +63,37 @@ pre-fix failures above; no remote CI or real-DB evidence is claimed for this del
   fixed. A fresh bounded Sol read-only review returned no remaining P1/P2; it did
   not run tests and explicitly excluded the remaining real-DB E2E gate.
 
+## Real Launcher Acceptance
+
+`scripts/verify-recovery-local-startup.mts` uses a task-owned PostgreSQL 15 cluster,
+verifies its data-directory/owner identity, and creates a unique disposable DB.
+It does not instantiate an injected `MetaSheetServer`.
+
+- Fresh full migration and second replay both pass.
+- The child runs the actual direct Node launcher with an inherited FD3 pipe.
+  An outbound socket allowlist permits only the dedicated local PostgreSQL port.
+- Wrong secret exits 1 without a listener; before explicit input the successful
+  child also has no listener.
+- Real authentication, catalog, preview, and job acceptance drive the canonical
+  asynchronous restore. All 5,001 rows match the archived values and version 3.
+- Graceful stop exits 0. A new process remains locked until a fresh FD3 delivery;
+  after re-unlock the terminal job remains done with completedCount 5001.
+- Database, backend, temporary directory and child process residue are all zero.
+- Evidence under `artifacts/recovery-local-startup/evidence.json` records source
+  hashes, HEAD/tree and dirty-diff hash. Early pre-commit runs are not represented
+  as clean exact-head evidence.
+
+This proves explicit unlock across a graceful process restart, not interruption
+mid-restore, production deployment, customer NAS permissions or automatic capture.
+The driver is an explicit local acceptance command, not a remotely collected CI
+test. New unit suites are collected by the existing default backend test lane.
+
 ## Remaining Gates
 
 The launcher now exists; the original ordinary server entry remains unchanged.
-Before considering the startup slice merge-ready, run the actual launcher with
-an isolated PostgreSQL instance, canonical HTTP restore and restart requiring
-fresh operator input. Then publish/verify exact-head CI. Prior seeded/injected
-server and backup-drill evidence does not replace this new entry-point proof.
+Before considering the startup slice merge-ready, publish and verify exact-head
+CI. Prior seeded/injected server and backup-drill evidence is separate from the
+new real entry-point proof above.
 
 Capture policy is a separate PROPOSED design with no numeric defaults selected.
 No flags outside synthetic test processes, dispatch, deployment, customer storage,
