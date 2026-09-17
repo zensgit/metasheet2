@@ -1723,8 +1723,10 @@ Consequence for what this case may be said to prove, stated narrowly:
 
 - **PROVEN** — C-3's terminal `outcome` write is what releases the document's pending slot: remove
   it and the next create is refused; keep it and the next create succeeds.
-- **PROVEN** — the named 409 `CANCEL_ROUND_ALREADY_PENDING` is what a caller sees when the slot is
-  still held.
+- **PROVEN** — the named 409 `CANCEL_ROUND_ALREADY_PENDING` is what an **in-process** caller sees
+  when the slot is still held. Narrowed deliberately: there is no HTTP route for
+  `createCancelRoundInstance` (this file's own header says so), so 「a caller sees」 unqualified
+  would have read as an API-surface claim this case does not make.
 - **NOT proven** — anything about `uq_approval_rounds_pending_document` itself. Reaching the index
   needs a constructed race (two concurrent `createCancelRoundInstance` calls), which this case does
   not build. §4's 「23505」 sentence is corrected accordingly (§0 R-7).
@@ -1766,8 +1768,17 @@ tidy a count, which is the move this file's §0 keeps retracting.
 
 ### 3.14.5 Scope — ONE of the two terminal outcome writers
 
-`grep -n "UPDATE approval_rounds" packages/core-backend/src/services/ApprovalProductService.ts` ⇒
-**6 lines, of which 2 are prose comments** (`:899`, `:8768`), leaving **4 statements**:
+The population is **repo-wide and both-syntax**, not a single-file single-syntax grep — kysely
+builders and the attendance plugin are inside the window:
+
+```
+$ git grep -nE "UPDATE approval_rounds|approval_rounds['\"]?\)?[[:space:]]*\.set|updateTable\(['\"]approval_rounds" \
+    -- packages plugins | grep -v '\.test\.' | wc -l
+6
+```
+
+All **6** hits are in `ApprovalProductService.ts`; **2 are prose comments** (`:899`, `:8768`),
+leaving **4 statements**, and zero hits under `plugins/` or in builder syntax:
 
 | Site | Outcome written | I3 mutation built? |
 |---|---|---|
