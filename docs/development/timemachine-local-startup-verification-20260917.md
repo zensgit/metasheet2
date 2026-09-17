@@ -69,6 +69,12 @@ pre-fix failures above; no remote CI or real-DB evidence is claimed for this del
 verifies its data-directory/owner identity, and creates a unique disposable DB.
 It does not instantiate an injected `MetaSheetServer`.
 
+Clean acceptance head: `54751a46d9eb71de82931e05c196579f44485e83`.
+Tree: `f9450e126d6622ff2fdded5921f3a65520daf2e4`.
+Dirty diff SHA-256: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+(empty diff). The dedicated cluster was stopped and its owned data directory
+removed after an independent zero-database/zero-backend census.
+
 - Fresh full migration and second replay both pass.
 - The child runs the actual direct Node launcher with an inherited FD3 pipe.
   An outbound socket allowlist permits only the dedicated local PostgreSQL port.
