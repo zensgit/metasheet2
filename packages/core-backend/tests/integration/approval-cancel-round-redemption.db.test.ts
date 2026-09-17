@@ -691,6 +691,59 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   )
 
   it(
+    '判据 IV fail-closed (implementer choice, flagged for owner registration): a document with no ' +
+      '§2-G2 anchor is NOT closed as `expired` — the named code CANCEL_ROUND_WINDOW_ANCHOR_MISSING ' +
+      '(409) rolls the whole transaction back, leaving the round `pending` and retryable',
+    async () => {
+      const fixture = await seedPendingCancelRound(`ivanchor-${TS}`, async (documentId) => {
+        // Erase the anchor the window is measured from, WITHOUT changing the document's status —
+        // the legacy/bridge shape the guard exists for: `approved` with no approved transition on
+        // its own audit trail.
+        const erased = await pool().query(
+          `UPDATE approval_records SET to_status = 'pending'
+            WHERE instance_id = $1 AND to_status = 'approved'`,
+          [documentId],
+        )
+        expect(erased.rowCount).toBe(1)
+      })
+
+      const capture = captureCompletionEvents(fixture.roundInstanceId)
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+      } finally {
+        capture.stop()
+      }
+      expect(approve.status).toBe(409)
+      // The NAMED code, not a bare 409 — the instance-level 409s on this route
+      // (`APPROVAL_RUNTIME_UNSUPPORTED`, `CANCEL_ROUND_OUTLET_FORBIDDEN`, …) must stay tellable
+      // apart from this one.
+      const body = (await approve.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('CANCEL_ROUND_WINDOW_ANCHOR_MISSING')
+      expect(capture.seen).toEqual([])
+
+      // C-3 row 5 (基础设施异常): the transaction rolled back, so the round keeps its seat and the
+      // instance is untouched — retryable, not irreversibly closed.
+      const round = await roundOutcome(fixture.roundInstanceId)
+      expect(round.outcome).toBe('pending')
+      expect(round.ended_at).toBeNull()
+      const instanceRow = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(instanceRow.rows[0]?.status).toBe('pending')
+      const seats = await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`,
+        [fixture.roundInstanceId],
+      )
+      expect(seats.rows[0].count).toBe('1')
+    },
+  )
+
+  it(
     '判据 IV 正控 / 隔离对照 (same fixture, only `windowDays` differs): an OPEN window is NOT ' +
       'closed by outlet #5′ — the instance goes `approved`, EXACTLY ONE completion event is ' +
       'emitted (so the sibling case’s zero is a measurement, not an inert channel), and the ' +

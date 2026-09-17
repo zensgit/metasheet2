@@ -674,3 +674,188 @@ describeIfDatabase(
     })
   },
 )
+
+describeIfDatabase(
+  'WI-0 lock-order census (Q-D, phase 2): the NEW pair — original document instance row vs. the ' +
+    '`approval_rounds` pending row, introduced by the 判据 IV close at outlet #5′',
+  () => {
+    /**
+     * Why this leg exists, and why it is not covered by Q-A/Q-B/Q-C.
+     *
+     * Phase 2's `evaluateCancelRoundFinalInLock` is the first site in the tree that takes a
+     * `FOR UPDATE` on an `approval_rounds` row at all (`git grep -n "FROM approval_rounds" -- src`
+     * before it: every other read is unlocked, and 判据 III's terminations are bare `UPDATE`s). It
+     * takes that lock in the same transaction as a `FOR UPDATE` on the ORIGINAL document instance,
+     * so it creates a lock PAIR that no census leg had a denominator for — precisely the closed-
+     * world hazard this lane keeps hitting. Q-A/Q-B/Q-C are all {row lock, advisory lock} pairs;
+     * this one is {row lock, row lock} across two different tables.
+     *
+     * The counterparty is `createCancelRoundInstance`, which locks the original document FIRST and
+     * only then touches `approval_rounds` — and its INSERT does not merely "touch" it: the partial
+     * unique index `uq_approval_rounds_pending_document … WHERE outcome = 'pending'` makes that
+     * INSERT WAIT on any uncommitted change to that document's pending round. That is the second
+     * edge, and it is invisible to a reading that only looks for explicit `FOR UPDATE`s.
+     *
+     * The three legs below are the same technique as Q-A/Q-B: the reversed order proven to
+     * deadlock deterministically (the standing proof), the shipped order proven not to, and the
+     * shipped order's own outcome asserted so the "no deadlock" is not just "nothing happened".
+     */
+    let pool: Pool
+    const createdInstanceIds: string[] = []
+    const createdRoundIds: string[] = []
+
+    beforeAll(async () => {
+      await ensureApprovalSchemaReady()
+      pool = new Pool({ connectionString: dbUrl })
+    }, 60000)
+
+    afterAll(async () => {
+      if (createdRoundIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_rounds WHERE id = ANY($1::text[])', [createdRoundIds])
+          .catch(() => undefined)
+      }
+      if (createdInstanceIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+          .catch(() => undefined)
+      }
+      await pool?.end().catch(() => undefined)
+    })
+
+    /** An `approved` document with one `pending` cancel round on it, and its engine instance. */
+    async function seedDocumentWithPendingRound(): Promise<{ documentId: string; engineId: string }> {
+      const documentId = `census-qd-doc-${randomUUID()}`
+      const engineId = `census-qd-eng-${randomUUID()}`
+      const roundId = `apr_qd_${randomUUID().replace(/-/g, '')}`
+      await pool.query(
+        `INSERT INTO approval_instances (id, status) VALUES ($1, 'approved'), ($2, 'pending')`,
+        [documentId, engineId],
+      )
+      createdInstanceIds.push(documentId, engineId)
+      await pool.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', $3, 'census-qd', 'pending', '{}'::jsonb)`,
+        [roundId, documentId, engineId],
+      )
+      createdRoundIds.push(roundId)
+      return { documentId, engineId }
+    }
+
+    /** The creator's side: lock the original document, then INSERT a second pending round for it. */
+    async function creatorInsert(client: PoolClient, documentId: string): Promise<void> {
+      const roundId = `apr_qd2_${randomUUID().replace(/-/g, '')}`
+      createdRoundIds.push(roundId)
+      await client.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', NULL, 'census-qd', 'pending', '{}'::jsonb)`,
+        [roundId, documentId],
+      )
+    }
+
+    it('the REVERSED order (closer takes the ROUND row before the document row) deadlocks DETERMINISTICALLY (40P01)', async () => {
+      const { documentId, engineId } = await seedDocumentWithPendingRound()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        // A = creator: document row FIRST.
+        await a.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+        // B = closer, REVERSED: the round row first, then the document row.
+        await b.query(
+          `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending' FOR UPDATE`,
+          [engineId],
+        )
+        await b.query(
+          `UPDATE approval_rounds SET outcome = 'expired', ended_at = now()
+            WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+          [engineId],
+        )
+        const bSecond = b.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+        // A's INSERT now waits on B's uncommitted change to the SAME document's pending round,
+        // via the partial unique index — closing the cycle.
+        const aSecond = creatorInsert(a, documentId)
+
+        const outcomes = await Promise.allSettled([aSecond, bSecond])
+        const deadlocks = outcomes.filter(
+          (outcome) => outcome.status === 'rejected' && (outcome.reason as { code?: string }).code === '40P01',
+        )
+        expect(deadlocks.length, 'the constructed reverse order did not deadlock').toBe(1)
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+
+    it('POSITIVE CONTROL — the SHIPPED order (closer takes the document row before the round row) does NOT deadlock, and BOTH sides reach a defined outcome', async () => {
+      const { documentId, engineId } = await seedDocumentWithPendingRound()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        await a.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+        // B follows the shipped order: it blocks on the DOCUMENT row before it can touch the round.
+        const bClose = (async () => {
+          await b.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+          await b.query(
+            `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending' FOR UPDATE`,
+            [engineId],
+          )
+          await b.query(
+            `UPDATE approval_rounds SET outcome = 'expired', ended_at = now()
+              WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [engineId],
+          )
+        })()
+
+        // A's INSERT does NOT wait on B (B has not touched the round row — it is still queued on
+        // the document row), so A resolves on its own merits: the existing pending round makes it
+        // a 23505 on the partial unique index, which `createCancelRoundInstance` already
+        // translates into `CANCEL_ROUND_ALREADY_PENDING`.
+        const aOutcome = await creatorInsert(a, documentId).then(
+          () => 'inserted',
+          (error: { code?: string }) => error.code,
+        )
+        expect(aOutcome).toBe('23505')
+        await a.query('COMMIT')
+
+        // Neither side deadlocked: B proceeds once A releases the document row.
+        await expect(bClose).resolves.toBeUndefined()
+        await b.query('COMMIT')
+
+        const round = await pool.query<{ outcome: string }>(
+          `SELECT outcome FROM approval_rounds WHERE engine_instance_id = $1`,
+          [engineId],
+        )
+        expect(round.rows[0]?.outcome).toBe('expired')
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+
+    it('the production closer takes the two in the shipped order (source scan, anchored at both ends)', () => {
+      const source = readFileSync(
+        join(__dirname, '../../src/services/ApprovalProductService.ts'),
+        'utf8',
+      )
+      const method = source.slice(source.indexOf('private async evaluateCancelRoundFinalInLock('))
+      const body = method.slice(0, method.indexOf('private async closeCancelRoundSystemTerminalInTxn('))
+      expect(body.length).toBeGreaterThan(500)
+      const docLock = body.indexOf('FROM approval_instances WHERE id = $1 FOR UPDATE')
+      const roundLock = body.indexOf("WHERE engine_instance_id = $1 AND outcome = 'pending'\n        FOR UPDATE")
+      expect(docLock, 'the document-instance FOR UPDATE was not found in the evaluator').toBeGreaterThan(-1)
+      expect(roundLock, 'the round-row FOR UPDATE was not found in the evaluator').toBeGreaterThan(-1)
+      // The whole point of Q-D: document row FIRST.
+      expect(docLock).toBeLessThan(roundLock)
+    })
+  },
+)
