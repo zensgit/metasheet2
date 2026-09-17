@@ -7,12 +7,22 @@ name: Approval real-DB acceptance (cancel-round)
 # new independent workflow file, not a job folded into approval-realdb-acceptance.yml", precisely
 # so this file's own edits do not collide with that lane's).
 #
-# THIS COMMIT wires exactly one job: WI-0's lock-order census, Q-A slice 1
-# (tests/integration/approval-cancel-round-lock-order-census.db.test.ts) — two real Postgres
-# connections constructing the attendance class-`00` rollout advisory lock (real production key
-# derivation, `w4c0-identity.ts`) against a real `approval_instances` row lock, in both the
-# §9-4 order and a deliberately reversed order proven to deadlock deterministically (40P01).
-# Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
+# AS OF THIS COMMIT, three jobs are wired (one landed per commit, each adding its own sibling job
+# rather than rewriting the others — see git history for which commit added which):
+#   1. WI-0's lock-order census, Q-A slice 1
+#      (tests/integration/approval-cancel-round-lock-order-census.db.test.ts) — two real Postgres
+#      connections constructing the attendance class-`00` rollout advisory lock (real production
+#      key derivation, `w4c0-identity.ts`) against a real `approval_instances` row lock, in both
+#      the §9-4 order and a deliberately reversed order proven to deadlock deterministically
+#      (40P01).
+#   2. WI-4/WI-6/WI-16's creation acceptance
+#      (tests/integration/approval-cancel-round-creation.db.test.ts).
+#   3. WI-13's redemption acceptance, 判据 III ONLY
+#      (tests/integration/approval-cancel-round-redemption.db.test.ts) — revoke/reject
+#      terminating the round; 判据 II/IV are NOT covered (depend on WI-10/11/12, not on this
+#      branch).
+# Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no flag
+# change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
@@ -223,7 +233,84 @@ jobs:
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
             echo "suites=approval-cancel-round-creation.db.test.ts"
             echo "scope=WI-4 createCancelRoundInstance creation only — dedicated-instance shape (judgment I/I″), one active seat resolved via requester_choice, one pending approval_rounds row (kind=cancel), §5 I3 (uq_approval_rounds_pending_document), WI-16 requester-only creation authz, §14.3 #14 suite gate (CancelRoundSuiteForbiddenError, zero rows on reject)"
-            echo "notCovered=outlet guards (#2/#3/#7/#7'/#8/#12/#13), seat guards, redemption (判据 II/IV), attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split"
+            echo "notCovered=outlet guards (#2/#3/#7/#7'/#8/#12/#13), seat guards, attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split; redemption 判据 III now covered by the sibling job below, 判据 II/IV still not covered (depend on WI-10/11/12)"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-cancel-round-redemption:
+    name: approval-cancel-round-redemption (WI-13, 判据 III only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run WI-13 cancel-round redemption acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-cancel-round-redemption.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-cancel-round-redemption.db.test.ts"
+            echo "scope=WI-13 判据 III only — revoke (A4) and reject (A7) each terminate their OWN approval_rounds row (engine_instance_id-keyed) in the same transaction as the instance's terminal-status write; §5 I3 pending-slot release; §5 I6 (撤销不限次) via a 3-round chain on one document; a two-document discriminating control proving the UPDATE does not key on document_id or terminate any pending round; the CANCEL_ROUND_INVARIANT_VIOLATION erratum path (implementer choice, not a lock quote, flagged for owner registration)"
+            echo "notCovered=判据 II (final approve / C-1 real attendance cancellation) and 判据 IV (C-3 system-side expire/block) — both depend on WI-10/WI-11/WI-12, not on this branch; outlet guards, seat guards, attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
