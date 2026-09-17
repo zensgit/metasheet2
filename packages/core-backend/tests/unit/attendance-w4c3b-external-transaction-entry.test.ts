@@ -52,18 +52,35 @@ function stubAdapters(): AttendanceRequestOperationAdaptersV1 {
   }) as unknown as AttendanceRequestOperationAdaptersV1
 }
 
+/** A PostgreSQL error as the driver surfaces it: the SQLSTATE lives on `.code`. */
+function pgError(code: string): Error & { code: string } {
+  return Object.assign(new Error(`stub pg error ${code}`), { code })
+}
+
 /**
- * Answers only the isolation probe; every other statement returns zero rows. The statements this
- * file's tests can reach are exactly: the isolation probe, and (once isolation passes) nothing —
- * the stub adapter throws first. `seen` records the SQL so a test can assert a probe ran at all
- * (a probe that never runs would make an "isolation is checked" claim vacuous).
+ * Models the two things the entry's preconditions actually interrogate: whether a transaction
+ * block is open (via the SAVEPOINT probe's SQLSTATE) and the transaction isolation level. Every
+ * other statement returns zero rows — the stub adapter throws before anything else is reached.
+ *
+ * `txnState` mirrors real PostgreSQL: `'open'` lets SAVEPOINT succeed; `'none'` raises 25P01
+ * (autocommit — no transaction block); `'aborted'` raises 25P02 (open but already failed).
+ * `seen` records the SQL so a test can assert a probe ran at all — a probe that never runs makes
+ * an "it is checked" claim vacuous.
  */
-function stubClient(isolation: string): AttendanceW4TransactionClientV1 & { seen: string[] } {
+function stubClient(
+  isolation: string,
+  txnState: 'open' | 'none' | 'aborted' = 'open',
+): AttendanceW4TransactionClientV1 & { seen: string[] } {
   const seen: string[] = []
   return {
     seen,
     async query(sqlText: string) {
       seen.push(sqlText)
+      if (sqlText.startsWith('SAVEPOINT ')) {
+        if (txnState === 'none') throw pgError('25P01')
+        if (txnState === 'aborted') throw pgError('25P02')
+        return { rows: [] }
+      }
       if (sqlText.includes('transaction_isolation')) {
         return { rows: [{ isolation }] }
       }
@@ -129,6 +146,54 @@ describe('W4 external transaction entry (lock §3 C-1) — input surface', () =>
     expect(await codeOf(() =>
       boundary.executeInExternalTransaction(validExternalInput(stubClient('repeatable read')))))
       .toBe('W4C3B_REQUEST_EXTERNAL_TRANSACTION_ISOLATION_INVALID')
+  })
+
+  it('refuses an autocommit caller even when the isolation level READS as serializable', async () => {
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => {
+        throw new Error('the external entry must never acquire a connection')
+      },
+      adapters: stubAdapters(),
+    })
+
+    // The fail-OPEN case an isolation-only check cannot see. `current_setting` also answers for
+    // the implicit single-statement transaction of an autocommit connection, reporting
+    // `default_transaction_isolation` — so on a deployment configured
+    // `default_transaction_isolation = serializable` this input satisfies the isolation predicate
+    // while having no transaction at all: every protocol statement would autocommit separately.
+    // Note the fixture: isolation SAYS serializable, so a green here could only come from the
+    // open-transaction probe, not from the isolation check.
+    const autocommit = stubClient('serializable', 'none')
+    expect(await codeOf(() => boundary.executeInExternalTransaction(validExternalInput(autocommit))))
+      .toBe('W4C3B_REQUEST_EXTERNAL_TRANSACTION_NOT_OPEN')
+    expect(autocommit.seen.some((sql) => sql.startsWith('SAVEPOINT '))).toBe(true)
+
+    // An open-but-aborted transaction (25P02) can no longer commit anything, so running the
+    // protocol in it could only produce a doomed write. Same refusal.
+    expect(await codeOf(() =>
+      boundary.executeInExternalTransaction(validExternalInput(stubClient('serializable', 'aborted')))))
+      .toBe('W4C3B_REQUEST_EXTERNAL_TRANSACTION_NOT_OPEN')
+  })
+
+  it('leaves no probe savepoint behind in the caller’s subtransaction stack', async () => {
+    const client = stubClient('serializable')
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => {
+        throw new Error('the external entry must never acquire a connection')
+      },
+      adapters: stubAdapters(),
+    })
+    await expect(boundary.executeInExternalTransaction(validExternalInput(client)))
+      .rejects.toThrow(PAST_THE_GATES)
+
+    // ROLLBACK TO alone leaves the savepoint DEFINED, so RELEASE must follow it — the caller owns
+    // this transaction and must be left inside no subtransaction the boundary created.
+    const probeStatements = client.seen.filter((sql) => sql.includes('w4c3b_external_txn_probe'))
+    expect(probeStatements).toEqual([
+      'SAVEPOINT w4c3b_external_txn_probe',
+      'ROLLBACK TO SAVEPOINT w4c3b_external_txn_probe',
+      'RELEASE SAVEPOINT w4c3b_external_txn_probe',
+    ])
   })
 
   it('refuses a null operationId — the legacy branch skips the very W4 protocol this entry reuses', async () => {
