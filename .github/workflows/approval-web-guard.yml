@@ -77,7 +77,10 @@ on:
       # J front-end half, 2026-09-18): this lane's own two-point gap (AGENTS.md "Testing
       # Guidelines" — a new spec needs BOTH the domain web-guard workflow AND
       # run-required-web-tests.sh; these three specs were already on the latter's exec line but
-      # absent here, same shape as the categoryCandidateInput/templateDetailI18n gap above).
+      # absent here, same shape as the categoryCandidateInput/templateDetailI18n gap above). THIS
+      # file is the advisory/targeted half of the pair — its own header above ("Scope
+      # (deliberately TARGETED...)") says it is NOT a required check; the REQUIRED gating for
+      # these three specs already comes from run-required-web-tests.sh -> web-tests.yml.
       # `SessionOrgSwitcher.vue` is the shared component copied and generalized from
       # `views/attendance/AttendanceSessionOrgSwitcher.vue` (that file and `useSessionOrg.ts` stay
       # untouched — moving/editing either would narrow attendance-web-guard.yml's closed-world
@@ -492,7 +495,10 @@ on:
       # J front-end half, 2026-09-18): this lane's own two-point gap (AGENTS.md "Testing
       # Guidelines" — a new spec needs BOTH the domain web-guard workflow AND
       # run-required-web-tests.sh; these three specs were already on the latter's exec line but
-      # absent here, same shape as the categoryCandidateInput/templateDetailI18n gap above).
+      # absent here, same shape as the categoryCandidateInput/templateDetailI18n gap above). THIS
+      # file is the advisory/targeted half of the pair — its own header above ("Scope
+      # (deliberately TARGETED...)") says it is NOT a required check; the REQUIRED gating for
+      # these three specs already comes from run-required-web-tests.sh -> web-tests.yml.
       # `SessionOrgSwitcher.vue` is the shared component copied and generalized from
       # `views/attendance/AttendanceSessionOrgSwitcher.vue` (that file and `useSessionOrg.ts` stay
       # untouched — moving/editing either would narrow attendance-web-guard.yml's closed-world
@@ -1011,6 +1017,10 @@ jobs:
         # two-point gap for the three new A-2 specs (paths above; same shape as the
         # categoryCandidateInput/templateDetailI18n gap fixed earlier in this file). Checked against
         # every existing token in this exact command (103 before, 106 after) with a bidirectional
-        # substring scan (`python3`, extracting this run line verbatim): zero collisions among the
-        # 103 pre-existing tokens or among the 3 new ones.
+        # substring scan (`python3`, extracting this run line verbatim): each of the 3 new tokens
+        # is a substring of none of the 103 pre-existing ones and none of the 103 is a substring of
+        # any new one. NOT claiming the 103 are collision-free among THEMSELVES — they are not
+        # (pre-existing, untouched by this change: `approval-record-link`/
+        # `approval-record-link-picker`, `approval-center`/`approval-center-master-detail`/
+        # `approval-center-detail-pane-controller`).
         run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry categoryCandidateInput templateDetailI18n SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel --reporter=dot
