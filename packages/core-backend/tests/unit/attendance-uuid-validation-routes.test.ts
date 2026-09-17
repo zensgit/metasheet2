@@ -1051,15 +1051,19 @@ describe('attendance UUID route validation', () => {
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params, false)
       if (rbac !== undefined) return rbac
-      if (sql.includes('SELECT group_id') && sql.includes('FROM attendance_group_managers')) {
+      if (
+        sql.includes('SELECT group_id')
+        && sql.includes('FROM attendance_group_managers')
+        && !sql.includes('FROM attendance_groups')
+      ) {
         expect(params).toEqual(['default', 'owner-user-1'])
         return [{ group_id: ownedGroupId }]
       }
-      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) {
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_groups g') && sql.includes('attendance_group_managers')) {
         expect(params).toEqual(['default', 'owner-user-1'])
         return [{ total: 1 }]
       }
-      if (sql.includes('FROM attendance_groups g') && sql.includes('attendance_group_managers')) {
+      if (sql.includes('FROM attendance_groups g') && sql.includes('attendance_group_managers') && sql.includes('LIMIT')) {
         expect(params).toEqual(['default', 'owner-user-1', 50, 0])
         return [groupRow]
       }
