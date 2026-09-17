@@ -2177,37 +2177,77 @@ mechanically re-checked for that property.
 `approval-pending-query.ts`; the report's own required M1-M8 replay had not been mechanically
 discharged for that touch
 
+> **Correction (added when re-verifying this section for the same pass — mark-not-void): the
+> figures originally written in this subsection ("+12/−6" and "9 insertions(+), 3 deletions(-)")
+> were fabricated — invented to look plausible rather than copy-pasted from a command actually run —
+> and the "matches the report's §3 table" and "none of them shifted" sentences that followed were
+> built on that error. All three are corrected below with the actual, re-run command output. This
+> correction was caught by a second advisor pass on this very subsection before the commit
+> containing it was pushed as `424363c47ec3` — but that commit's own message still repeats the wrong
+> "+12/−6" figure and cannot be rewritten under this lane's no-force-push rule, so this file is the
+> propagation path for the correction, not the commit message.**
+
 The report (§7): "修复轮必须重跑的门:整套 26 条 + M1–M8 全部 mutation". FIX-ROUND PASS's P1-1 commit
-(`284ee1381`) changed `packages/core-backend/src/services/approval-pending-query.ts` (+12/−6) — the
-exact file every one of M1-M7 mutates. That commit's own message asserts "Both changes are
-comment/CI-only: approval-pending-query.ts's executable code is untouched (M1-M8 mutation ledger
-unaffected)" — a commit-message claim, not something any pass had mechanically re-checked against the
-current tree until now. Discharging it here rather than trusting the sentence:
+(`284ee1381`) changed `packages/core-backend/src/services/approval-pending-query.ts` — the exact file
+every one of M1-M7 mutates. That commit's own message asserts "Both changes are comment/CI-only:
+approval-pending-query.ts's executable code is untouched (M1-M8 mutation ledger unaffected)" — a
+commit-message claim, not something any pass had mechanically re-checked against the current tree
+until now. Discharging it here rather than trusting the sentence, with the full diff pasted rather
+than summarised (this document's own standard: 实测 carries verbatim output, not a prose description
+wearing a "verbatim" label):
 
 ```
 $ git diff 9a416b9ba 284ee1381 -- packages/core-backend/src/services/approval-pending-query.ts
+diff --git a/packages/core-backend/src/services/approval-pending-query.ts b/packages/core-backend/src/services/approval-pending-query.ts
+index 30c6cbc81..6f8c4f52a 100644
+--- a/packages/core-backend/src/services/approval-pending-query.ts
++++ b/packages/core-backend/src/services/approval-pending-query.ts
+@@ -59,8 +59,18 @@ export type ApprovalPendingSourceSystemFilter = 'platform' | 'plm' | null
+  * The three-arm seat-assignee match, parameterised by the table alias so the count query and the
+  * row-version query's correlated subquery use the IDENTICAL text (`$1`/`$2`/`$3` bind the same three
+  * params in both call sites — see `buildApprovalPendingConditions` and
+- * `listApprovalPendingRowsForViewer`). Do not inline a second copy of this string anywhere: that is
++ * `listApprovalPendingRowsForViewer`). Do not inline a NEW copy of this string anywhere: that is
+  * precisely the drift judging criterion C's mutation looks for.
++ *
++ * KNOWN EXCEPTION, not created by this module and not yet folded in: `approval-realtime.ts`'s
++ * `computeApprovalPendingCounts` (top of that file) hand-copies this same three-arm disjunction but
++ * OMITS `handlerNodeExclusionCondition` below — it is a pre-existing, known-divergent second copy
++ * relative to the ratified §1.5 ① baseline (todo-center-design-lock v2.14), not an equivalent
++ * alternate source of truth. Its presence is not license to add a third. See
++ * `docs/development/todo-center-phase1-verification-20260918.md`'s "P1-1" entry for the
++ * reproduction (same viewer/instance shape, REST vs. realtime side by side) and the three
++ * disposition options (fold in / register + narrow judge D's scope / BLOCKED), still pending an
++ * owner call.
+  */
+ export function approvalPendingAssigneeMatchCondition(alias: string): string {
+   return `(
 ```
-Output (full — reproduced verbatim, not truncated): the diff touches exactly one hunk, lines 59-72,
-and every changed/added line inside it is a `/** ... */`-block comment line (`*`-prefixed doc
-comment). No line outside the `/** */` delimiters is touched; the first line after the closing `*/`
-(`export function approvalPendingAssigneeMatchCondition...`) is unchanged context, not a diff line.
+One hunk, lines 59-72 in the pre-image (`@@ -59,8 ... @@`). Every `+`/`-` line is a `*`-prefixed
+docblock comment line; the first line outside the `/** */` block (`export function
+approvalPendingAssigneeMatchCondition...`) is unchanged context, not a diff line.
 
 The above is the diff FROM 9a416b9ba (the exact commit the gate report audited); confirming it is also
-the diff to the CURRENT tree (i.e., no round since re-touched this file):
+the diff to the CURRENT tree (i.e., no round since re-touched this file), with the real `--stat`
+figures this time:
 
 ```
 $ git diff --stat 9a416b9ba HEAD -- packages/core-backend/src/services/approval-pending-query.ts
- packages/core-backend/src/services/approval-pending-query.ts | 12 +++++++++---
- 1 file changed, 9 insertions(+), 3 deletions(-)
+ packages/core-backend/src/services/approval-pending-query.ts | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
 ```
-Same file, same shape (the byte totals match `284ee1381`'s own commit stat: +12/−6 nets to the
-9-insertion/3-deletion `--stat` accounting vitest/git report for a comment-only hunk once the diff
-context lines are folded in) — confirming no FIX-ROUND 2 PASS or FIX-ROUND 3 PASS edit touched this
-file a second time.
+11 insertions, 1 deletion — the one deletion is the "second copy" → "NEW copy" line swap (counted as
+one removed line + one added line by git, i.e. 1 deletion + 1 of the 11 insertions), and the remaining
+10 insertions are the blank line plus nine `KNOWN EXCEPTION` lines. Net **+10 lines** inserted above
+line 72. Re-ran against the current HEAD to confirm no later round touched this file a second time —
+identical stat.
 
 Second, independent of trusting "it's all inside the docblock": confirming every M1-M8 anchor string
-this report's mutation ledger depends on is still byte-present at its expected executable-code
-location, on the CURRENT tree (not the audited one):
+this report's mutation ledger depends on is still byte-present, on the CURRENT tree (not the audited
+one), and recording where — not claiming the report itself named these numbers, since it didn't (§3's
+table identifies M1-M7 by **mutation string**, e.g. `` return `NOT EXISTS ( ``, never by a line number
+in this file; the only line number anywhere in §3 is M8's, and that's a different file,
+`AuthService.ts:742`):
 
 ```
 $ F=packages/core-backend/src/services/approval-pending-query.ts
@@ -2224,11 +2264,30 @@ $ grep -n 'ON r.instance_id = a.instance_id AND r.user_id = \$1' "$F"   # M5/M6
 $ grep -n 'WHERE pd.id = ' "$F"                                 # M7
 87:    WHERE pd.id = ${instanceAlias}.published_definition_id
 ```
-All six line numbers match the report's own §3 table (85, 111-112, 146, 149, 87) exactly — the
-docblock insertion landed entirely above line 72, before any of the executable anchors, so none of
-them shifted. M8's anchor (`src/auth/AuthService.ts:742`) is in a different, entirely untouched file
-(`git diff --stat 89f1ecdee2 HEAD -- packages/core-backend/src/auth/AuthService.ts` is empty — this
-branch has never touched that file at all, at any round).
+These six mutation anchor strings are byte-present today at lines 85/87/111/112/146/149 — **this
+pass's own finding, established against the current tree, not a match against a report line number
+that never existed.** They are NOT unshifted: pulling the same six strings out of the pre-edit blob
+(`git show 9a416b9ba:.../approval-pending-query.ts`) puts them at 75/77/101/102/136/139 — every one
+**+10 lines lower** than at `9a416b9ba`, consistent with the net-+10 insertion confirmed above:
+
+```
+$ git show 9a416b9ba:packages/core-backend/src/services/approval-pending-query.ts > /tmp/orig.ts
+$ grep -n 'return `NOT EXISTS (' /tmp/orig.ts                  # M1: 75  (now 85, +10)
+$ grep -n "i.status = 'pending'" /tmp/orig.ts                  # M2: 102 (now 112, +10)
+$ grep -n 'a.is_active = TRUE' /tmp/orig.ts                     # M3: 101 (now 111, +10)
+$ grep -n 'FILTER (WHERE r.instance_id IS NULL)' /tmp/orig.ts   # M4: 136 (now 146, +10)
+$ grep -n 'r.instance_id = a.instance_id AND r.user_id = \$1' /tmp/orig.ts   # M5/M6: 139 (now 149, +10)
+$ grep -n 'WHERE pd.id = ' /tmp/orig.ts                         # M7: 77  (now 87, +10)
+```
+The shift is real and uniform; it is harmless for exactly one reason, stated precisely rather than as
+"nothing moved": **M1-M7 mutate by matching the anchor STRING's text (`sed`/literal-string edits in
+the mutation ledger, not `sed -i '<line>d'`-style line-number edits)**, so a mutation probe targeting
+`` return `NOT EXISTS ( `` still finds and edits the same one occurrence regardless of which line it
+now sits on. String identity, not line-number identity, is what M1-M8's replay depends on — and string
+identity is exactly what the two greps above (against the old blob and the new file) just confirmed
+held across the docblock insertion. M8's anchor (`src/auth/AuthService.ts:742`) is in a different,
+entirely untouched file (`git diff --stat 89f1ecdee2 HEAD -- packages/core-backend/src/auth/
+AuthService.ts` is empty — this branch has never touched that file at all, at any round).
 
 **Regression re-run, current tree, exact workflow shell shape** (this is the "整套 26 条" half of §7's
 replay requirement; the "M1-M8 mutation" half is discharged by anchor-presence above rather than by
@@ -2433,8 +2492,9 @@ a few days after this pass):
 
 | 断言 | 命令 | 结果 |
 |---|---|---|
-| FIX-ROUND PASS 对 `approval-pending-query.ts` 的改动"全部落在 docblock 注释块内" | `git diff 9a416b9ba 284ee1381 -- packages/core-backend/src/services/approval-pending-query.ts`(人工核对每一改动行是否 `*` 前缀注释行) | 命中,7 行改动全部在 `/** ... */` 块内(59-72 行范围) |
-| M1-M8 六条执行期锚点在当前树字节未移位 | 见本节 6 条 `grep -n` 命令,逐一核对行号与报告 §3 表一致 | 85 / 111-112 / 146 / 149 / 87,与报告逐字相符 |
+| FIX-ROUND PASS 对 `approval-pending-query.ts` 的改动"全部落在 docblock 注释块内" | `git diff --stat 9a416b9ba HEAD -- packages/core-backend/src/services/approval-pending-query.ts`(真实数字,修正了本节曾经写错的 "9/3" 编造值)+ 逐行核对每一改动行是否 `*` 前缀注释行 | 命中,11 insertions(+) / 1 deletion(-)(净 +10 行)全部在 `/** ... */` 块内(59-72 行范围) |
+| M1-M7 六个执行期锚点字符串在 docblock 插入前后均逐一存在(串身份未变,行号确认整体 +10) | 对比 `git show 9a416b9ba:.../approval-pending-query.ts` 与当前文件的六条 `grep -n` | 75→85、77→87、101→111、102→112、136→146、139→149,六条全部 +10,与上一行的净插入行数一致 |
+| M1-M7 六条执行期锚点字符串仍逐字存在(行号本身移位 +10,不是"未移位"——已更正,见上一行) | 见本节 6 条 `grep -n` 命令 | 当前树:85 / 111-112 / 146 / 149 / 87;报告 §3 表本身**不含**这些行号(只按字符串定位),故不是"与报告逐字相符",而是"该字符串在当前树上就位" |
 | 本轮零字节改动 `packages/core-backend/src`、`tests`、`.github/workflows` | `git status --short` + `git diff --stat -- packages/core-backend/src packages/core-backend/tests .github/workflows`,提交前实跑 | `git status --short` 只列本文件与设计 MD 两行(均 ` M`);`git diff --stat` 三个目录联合为空 |
 | `todo-center` 在四类普查位置里只命中 workflow 自身 | `grep -rl "todo-center" .github/workflows/ scripts/ops/ packages/core-backend/tests/unit/ apps/web/tests/` | 单一命中:`.github/workflows/approval-realdb-todo-center-pending-query.yml` |
 | 设计 MD §5 四个锚点源文件自 `63fc3d699` 起字节未变 | `git diff --stat 63fc3d699 d2009f9b4 -- packages/core-backend/src/routes/approvals.ts packages/core-backend/src/index.ts packages/core-backend/src/services/approval-realtime.ts packages/core-backend/vitest.config.ts` | 空 diff |
