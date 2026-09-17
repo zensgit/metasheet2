@@ -35202,12 +35202,31 @@ module.exports = {
             mode: operation.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow',
           })
           if (cancellationCalculation.kind === 'review_required') {
-            throw new HttpError(
-              409,
-              'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
-              'Approved leave cancellation requires attendance review',
-              singleValidationDetail('calculation', cancellationCalculation.reason),
-            )
+            // Lock §3 C-3 / §11-④ (approval-change-request lock:126-130). This used to `throw` the
+            // 409 straight from here. A throw is the WRONG shape for a business outcome that the
+            // approval side has to be able to decide on: an approved document's cancel round must
+            // be able to PERSIST a `blocked` closure in the same transaction, and a throw unwinds
+            // the transaction it would have to be written in. So the business outcome is RETURNED,
+            // and the boundary — which is the only thing that knows which entry it is serving —
+            // decides what to do with it.
+            //
+            // The HTTP entry is unchanged in observable behaviour: the boundary throws THIS error
+            // object, constructed here with the same four arguments as before (status 409, code,
+            // message, `singleValidationDetail('calculation', reason)`), so the response body is
+            // byte-for-byte what it was. Oracle:
+            // `attendance-w4c3b-request-operation-routes.db.test.ts`, "rolls back approved-leave
+            // cancellation when P14 has no frozen parent calculation".
+            return {
+              kind: 'business_refused',
+              code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+              detail: cancellationCalculation.reason,
+              httpError: new HttpError(
+                409,
+                'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+                'Approved leave cancellation requires attendance review',
+                singleValidationDetail('calculation', cancellationCalculation.reason),
+              ),
+            }
           }
         }
 
