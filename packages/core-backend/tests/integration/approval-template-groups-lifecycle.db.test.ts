@@ -495,6 +495,12 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   })
 
   // ── F ──────────────────────────────────────────────────────────────────────────────────────
+  // Lock row F names three write actions — 建组/归档/挂接 (create / archive / link) — plus the
+  // list read. Gate P3-6 (round 1): this test previously covered only create + list; the other
+  // two actions shared the SAME literal guard constant (`approvalTemplateAdminGuard`) so the gate
+  // treated the coverage gap as inert today, but asked for the per-action rows anyway since the
+  // lock names them individually and a future slice could split the guard per action without any
+  // test catching the split. Archive and link legs added below, same actor fixtures.
   it('F: authorization — write endpoints require approvalTemplateAdminGuard, the list endpoint requires approvals:read; denial writes zero rows', async () => {
     const org = trackOrg(`atg-f-${TS}`)
     const admin = await tok(base, `f-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
@@ -512,8 +518,26 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     // positive controls: admin can write, a bare reader can list.
     const createAsAdmin = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `F ${TS}` } })
     expect(createAsAdmin.status).toBe(201)
+    const group = (await createAsAdmin.json()).group
     const listAsReader = await httpReq(base, '/api/approval-template-groups', reader)
     expect(listAsReader.status).toBe(200)
+
+    // 归档 (archive) leg — same admin-created group above is the fixture; denial must not flip
+    // archived_at.
+    const archiveAsNobody = await httpReq(base, `/api/approval-template-groups/${group.id}/archive`, nobody, { method: 'POST' })
+    expect(archiveAsNobody.status).toBe(403)
+    const archivedAtAfterDenied = await query(`SELECT archived_at FROM approval_template_groups WHERE id = $1`, [group.id])
+    expect(archivedAtAfterDenied.rows[0].archived_at).toBeNull()
+
+    // 挂接 (link) leg — a fresh template, denial must write zero link rows.
+    const tplForLink = await createTemplate(`atg-f-tpl-${TS}`)
+    const linkAsNobody = await httpReq(base, `/api/approval-templates/${tplForLink}/group`, nobody, { method: 'POST', body: { groupId: group.id } })
+    expect(linkAsNobody.status).toBe(403)
+    const linkRowsAfterDenied = await query(
+      `SELECT count(*)::int AS n FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
+      [org, tplForLink],
+    )
+    expect(linkRowsAfterDenied.rows[0].n).toBe(0)
   })
 
   // ── request-shape codes (gate P2-4) ───────────────────────────────────────────────────────────
