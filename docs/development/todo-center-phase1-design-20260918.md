@@ -26,9 +26,12 @@ RATIFY 记录)。本文档只覆盖目标文档
 | 4 | 响应含每源状态(`ok`/`unavailable`);fail-closed 且可判别 | 锁 §3 硬约束「fail-closed 且可判别」+ 锁 §4「响应含每源状态」 |
 | 5 | 列表项带 `actionable`,复用 `resolveCanDecideCurrentNode` | 锁 §3.0「列表项必须带 `actionable`」段 |
 | 6 | 列表按实例去重,与计数口径对齐(同一份共享谓词) | 锁 §3 硬约束「列表按实例去重」+ 判据 C |
-| 7 | 实时:复用按用户 room,追加 `todo:counts-updated` 广播 | 锁 §4「实时:复用按用户 room,发 `todo:counts-updated`」 |
-| 8 | 独立 vitest project(反 skip-green 三件 + RBAC posture)+ 十四类 viewer 夹具 + 判据 A0/A/B(API 层半边)/C/C′/D/F | 锁 §3.0「测试约束」段 + §6「交付形态」 |
-| 9 | 两点 CI 接线 + 触发集(`on.push.paths`/`pull_request.paths`) | 锁 §6 |
+| 7 | 独立 vitest project(反 skip-green 三件 + RBAC posture)+ 十四类 viewer 夹具 + 判据 A0/A/B(API 层半边)/C/C′/D/F | 锁 §3.0「测试约束」段 + §6「交付形态」 |
+| 8 | 两点 CI 接线 + 触发集(`on.push.paths`/`pull_request.paths`) | 锁 §6 |
+
+**行 7 的撤回(修复轮第 1 步,2026-09-18,门审 `impl-gate-B-slice1-round2-20260918.md` P1-1)**:
+原第 7 行「实时:复用按用户 room,追加 `todo:counts-updated` 广播」在这一步**被移出范围表**,理由
+见 §1.2 新增行与 §3.3/§6 item 7 的改写——不是重新编号掩盖删除,是本切片实际不再交付这条广播。
 
 ### 1.2 不在范围(逐条引用锁文 § 与分期,以及目标文档的切片切分)
 
@@ -41,6 +44,7 @@ RATIFY 记录)。本文档只覆盖目标文档
 | 5 | 角色来源 (b)(`viewerRoles` 加宽)与决策门同步加宽 | 锁 §7-2′ ——独立裁决,需与门同步加宽一起裁,本锁不承担 |
 | 6 | AuthService 层静默收窄(`isRbacAdmin`/`listUserPermissions` 抛错吞 `logger.warn`)的修复 | 锁 §7-6——登记为平台授权线独立发现,本锁验收不以它为前提 |
 | 7 | `routes/todo.ts` 的 `approvals:read` 单一权限门槛在第二个源注册后收窄为按源判权限 | 本切片自身代码的已知局限(见 §6「留给后续切片的项」),锁文未点名,由实现记录 |
+| 8 | 实时 `todo:counts-updated` 广播(后端发送 + 前端订阅,一并留给 B-2) | 锁 §4 原文把广播列在 v1 范围;本切片修复轮第 1 步(2026-09-18)按门审 `impl-gate-B-slice1-round2-20260918.md` P1-1 的处置 (i) **撤回了已交付的广播**(commit 见本文档修订历史),不是从未做过——见 §3.3/§6 item 7 |
 
 ## 2. 数据模型与约束(只读;无新表)
 
@@ -137,12 +141,20 @@ rbac.ts:64,108`)——这是仓库既有共享中间件的既定形状,被全仓
 - 改接调用点:`routes/approvals.ts:2027-2034`(`countApprovalPendingForViewer(pool, { actorId, roles,
   permissions }, sourceSystem)`,`sed -n '2027,2034p'` 核对过起止行)。
 
-### 3.3 实时事件(不新增路由,追加广播)
+### 3.3 实时事件(修复轮第 1 步撤回,2026-09-18;本切片不再交付)
 
-`services/approval-realtime.ts:118-124`——`publishApprovalCountsUpdate` 在既有的
-`approval:counts-updated` 广播之后,对同一 room(`buildAuthenticatedUserRoom`)追加广播
-`todo:counts-updated`,payload 相同,不新开频道、不重新计算(锁 §4「实时:复用按用户 room,发
-`todo:counts-updated`」)。
+`services/approval-realtime.ts:118-124` 曾在既有的 `approval:counts-updated` 广播之后,对同一 room
+追加广播 `todo:counts-updated`(commit `6fba6e01e`);门审 `impl-gate-B-slice1-round2-20260918.md`
+P1-1 指出该广播复用的是 `computeApprovalPendingCounts` 一份**独立于 §3.0 共享查询、缺办理节点排除**
+的手抄谓词(锁 §3 硬约束「只准一份」),且锁文把这条广播列在 B-2 而非 B-1(超范围)。门审给出两条
+出路(择一,不由门审代裁):(i) 本 lane 内删除该广播,把整条争议随 B-2 交 owner;(ii) owner 亲写一句
+裁 (a)/(b)/(c)。**本切片取 (i)**:`approval-realtime.ts` 与其单测已在这一步整体还原为
+`git diff origin/main -- <两文件>` 空(见本文档修订历史的 commit),即 `publishApprovalCountsUpdate`
+恢复为只发 `approval:counts-updated` 一条广播,与合并基点 `origin/main` 逐字节相同——本切片对这两个
+文件**零净改动**。`approval-realtime.ts` 里那份缺办理节点排除的谓词本身**先于本分支存在**(见 §6
+item 7 的复现记录),不是本切片引入,也不是本切片的修复义务;`todo:counts-updated` 广播(若要恢复)
+与其前端订阅一并留给 B-2,且必须先有 owner 对 (a)/(b)/(c) 的裁决,不得原样重新接上这份已知分叉的
+谓词。
 
 ## 4. 事务与锁序
 
@@ -170,22 +182,22 @@ $ grep -inE "BEGIN|COMMIT|ROLLBACK|transaction|FOR UPDATE|pg_advisory|advisory" 
 
 ## 5. 与既有代码的接缝(file:line)
 
-**锚点最后一次机械核对(门审 P3-3 修复,2026-09-18):** 下表七个 file:line 锚点最初写于工作树
+**锚点最后一次机械核对(修复轮第 1 步,2026-09-18,门审 `impl-gate-B-slice1-round2-20260918.md`
+P1-1 处置 (i) 之后重算):** 下表六个 file:line 锚点最初写于工作树
 `HEAD=63fc3d699550e5d39cb95536c7e99d99314d4346`,此后分支又前进了若干轮修复提交,钉死单个数字会
-在下一次提交时立刻过期(正是门审 P3-3 指出的问题)。改为可自证的形式:锚点所在的四个源文件
-(`routes/approvals.ts`、`src/index.ts`、`services/approval-realtime.ts`、`vitest.config.ts`)
-自 `63fc3d699` 起在本分支上字节未变,核对命令与结果如下——**任何编辑此表的人,先跑同一条命令确认
-仍为空 diff 再改数字,空 diff 就不用改**:
+在下一次提交时立刻过期(门审 P3-3 指出的问题)。改为可自证的形式:锚点所在的三个源文件
+(`routes/approvals.ts`、`src/index.ts`、`vitest.config.ts`)自 `63fc3d699` 起在本分支上字节未变,
+核对命令与结果如下——**任何编辑此表的人,先跑同一条命令确认仍为空 diff 再改数字,空 diff 就不用改**:
 
 ```
 $ git diff --stat 63fc3d699 HEAD -- packages/core-backend/src/routes/approvals.ts \
     packages/core-backend/src/index.ts \
-    packages/core-backend/src/services/approval-realtime.ts \
     packages/core-backend/vitest.config.ts
 (空,exit 0 diff --stat 无输出)
 ```
-（本次核对时 `HEAD=d2009f9b47f0008ae0ea5ffc18a28f1bd475ef9b`;`63fc3d699..HEAD` 之间的六条提交
-只碰了两个 workflow 文件、一个 docblock 注释块和两份验证/设计 MD,均不在上面四个文件之列。）
+**`services/approval-realtime.ts` 从这份「四个源文件」清单里被移除,不是漏列**:本切片这一步把该
+文件整体还原为与 `origin/main` 字节相同(`git diff --quiet origin/main -- packages/core-backend/
+src/services/approval-realtime.ts` exit 0),它不再是本切片的接缝,见 §3.3 与 §6 item 7。
 
 | 接缝 | 位置 |
 |---|---|
@@ -194,14 +206,15 @@ $ git diff --stat 63fc3d699 HEAD -- packages/core-backend/src/routes/approvals.t
 | `resolveApprovalActorPermissions` 导出(同上) | `packages/core-backend/src/routes/approvals.ts:282` |
 | `/pending-count` 改接调用点 | `packages/core-backend/src/routes/approvals.ts:2027-2034` |
 | 服务器启动时注册审批源 + 挂载 `todoRouter` | `packages/core-backend/src/index.ts:242-244`(import)、`:1799-1800`(`pendingSourceRegistry.register(approvalPendingSource); this.app.use(todoRouter())`) |
-| 实时广播追加 `todo:counts-updated` | `packages/core-backend/src/services/approval-realtime.ts:118,124` |
 | 默认 no-DB vitest 配置排除本切片的独立 project 文件(双重保险,见 §7) | `packages/core-backend/vitest.config.ts:87-94` |
 
 ## 6. 留给后续切片的项
 
-1. **B-2(前端)**:待办中心页、徽标改读 `todo/count`、判据 B 徽标层半边(stub 今天
+1. **B-2(前端 + 后端广播)**:待办中心页、徽标改读 `todo/count`、判据 B 徽标层半边(stub 今天
    `ApprovalTodoBadge.vue:82-86` 的 `applyCount(0)` catch 分支)、判据 E 代数守卫、`todo:
-   counts-updated` 的前端订阅——本文档 §1.2 已逐条列出对应锁文依据。
+   counts-updated` **后端广播的重新接入 + 前端订阅**——注意后端广播不是"从未做过",而是本切片
+   修复轮第 1 步**撤回了已交付的实现**(见 §3.3、本节 item 7);B-2 重新接入前必须先有 owner 对
+   item 7 (a)/(b)/(c) 的裁决,不得原样重接已知分叉的谓词——本文档 §1.2 已逐条列出对应锁文依据。
 2. **`routes/todo.ts` 的权限门槛**:第二个源注册前必须从 `rbacGuard('approvals','read')` 改为按源判
    权限或 `rbacGuardAny`(文件自身文档已提示,见 §3.1)。
 3. **角色来源 (b)**:锁 §7-2′ 的独立裁决,须与决策门同步加宽一起裁,不由本切片单方面推进。
@@ -211,22 +224,28 @@ $ git diff --stat 63fc3d699 HEAD -- packages/core-backend/src/routes/approvals.t
 6. **评论源(v1.1)/云课堂「待处理」定义/任务源**:锁 §4「不做」段,分别等 owner 裁决(§7-3/§7-4)
    与任务线落地(§7-5)。
 7. **`approval-realtime.ts` 的第二份 pending 谓词(P1-1,门审 `impl-gate-B-slice1-round1-20260918.md`
-   点名,锁 §3 硬约束「只准一份」)**:`services/approval-realtime.ts` 的 `computeApprovalPendingCounts`
-   是审批域一份**独立于本切片提取的共享查询**的手抄三臂谓词,**缺办理节点排除**——本切片新增的
-   `todo:counts-updated` 广播(commit `6fba6e01e`)复用的正是这份分叉 payload,把先存分叉扩张到了待办
-   中心自己的事件表面。**同库实测**(`metasheet2_lock_b`,事务内 seed 一个 class ⑧ 形状后 `ROLLBACK`,
+   点名、`impl-gate-B-slice1-round2-20260918.md` 判「未闭合、只登记不够」,锁 §3 硬约束「只准一份」)
+   ——修复轮第 1 步按处置 (i) 撤回,不是折入也不是继续登记**:`services/approval-realtime.ts` 的
+   `computeApprovalPendingCounts` 是审批域一份**独立于本切片提取的共享查询**的手抄三臂谓词,**缺
+   办理节点排除**,且这份分叉**先于本分支存在**(`git show 89f1ecdee2:…approval-realtime.ts` 已可见,
+   不是本切片引入)。**同库实测**(`metasheet2_lock_b`,事务内 seed 一个 class ⑧ 形状后 `ROLLBACK`,
    同一 viewer/instance,两条查询并排跑):REST 共享查询(4 条件,含排除)⇒ `count=0`;
-   `computeApprovalPendingCounts`(3 条件,无排除)⇒ `count=1`。按已 ratify 的 §1.5 ①(RATIFY 记录
-   §7-2「基准口径 = §1.5 的 ①」)基准,**实时推送这条路是 known-wrong**,不是"两条路各说各话、择一即可"。
-   **未在本切片折入**(折入会改变持办理节点席位者收到的实时推送数字,是公开合同变更,需 owner 一句 ——
-   门审报告三选一里的 (a) 项;本切片未获该授权,故不做行为改动)。**处置(按门审报告 (b) 项如实登记,
-   不代 owner 裁定 (a)/(c))**:`services/approval-pending-query.ts` 的
-   `approvalPendingAssigneeMatchCondition` docblock 已加"KNOWN EXCEPTION"段指名这份分叉(不内嵌其
-   SQL 片段,避免撞判据 C 的 drift-string mutation 探针);验证 MD 的判据 D 证据范围收窄为
-   "仅 REST 路径"(锁 §5 行 D 字面范围更宽,差额 = 实时推送路径,登记为未验 + known-wrong)。
-   **(a) 折入 / (c) BLOCKED 两项终裁仍待 owner**,本条目不构成该终裁。B-2 的既定内容含"徽标改读
-   `todo/count`"与"`todo:counts-updated` 的前端订阅"(本节第 1 条)——落地前必须先看到 (a)/(b)/(c) 的
-   owner 终裁,否则徽标会消费这份 known-wrong 的数字。
+   `computeApprovalPendingCounts`(3 条件,无排除)⇒ `count=1`——这份分叉本身按已 ratify 的 §1.5 ①
+   基准是 known-wrong,但**分叉的存在**不是本切片的问题;本切片第一轮修复曾新增
+   `todo:counts-updated` 广播(commit `6fba6e01e`)去**复用**这份分叉 payload,把先存分叉扩张到了待办
+   中心自己的事件表面——**这才是门审 round 2 判 NEEDS-FIX 的对象**:锁 §3「只准一份」+ 超范围(锁文把
+   该广播列在 B-2,不在 B-1)两条独立成立,登记披露不构成满足。
+   **本步处置 = 门审给出的路径 (i)**:整段撤回——`approval-realtime.ts`
+   与 `tests/unit/approval-realtime.test.ts` 已还原为与 `origin/main` 字节相同(见 §3.3、§5),B-1 回到
+   零越界、零 §3 破口。**先存的谓词分叉本身未被修复,仍然存在于 `approval-realtime.ts`**,继续服务
+   既有的 `approval:counts-updated` 单一广播,不受本步影响,也不是本切片的修复义务——它先于本分支、
+   目前只服务一个与 todo-center 无关的既有消费方(`useApprovalCountsRealtime.ts`)。`services/
+   approval-pending-query.ts` 的 `approvalPendingAssigneeMatchCondition` docblock 里第一轮修复加的
+   "KNOWN EXCEPTION" 段**予以保留**(它记录的是这份先存分叉的事实,与本步是否接上它无关);验证 MD
+   判据 D 的证据范围收窄仍然成立(该文档范围本来就只覆盖 REST 路径,与实时路径是否被待办中心消费
+   无关)。**(a) 折入 / (c) BLOCKED 两项终裁仍待 owner,但已不是 B-1 的阻断项**:B-2 若要重新接入
+   `todo:counts-updated`(后端广播 + 前端订阅,均已移入本文档 §1.2/§6 item 1),必须先拿到该终裁,
+   不得原样复用这份已知分叉的谓词。
 
 ## 7. owner 待裁项(锁文 §7/§9 已 ratify 的裁决——原样引用抬头 RATIFY 记录,不改写)
 
