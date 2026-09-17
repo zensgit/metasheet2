@@ -89,26 +89,28 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 ## 3. 接口与错误码(全部专用码;标注 ratified vs 实现者新增)
 
-### 3.1 七个端点(`packages/core-backend/src/routes/approvals.ts`,当前 HEAD 行号)
+### 3.1 七个端点(`packages/core-backend/src/routes/approvals.ts`,行号已按修复轮 1 后的 HEAD 重算——见脚注)
 
 | 方法 + 路径 | 行 | Guard | 服务函数 |
 |---|---|---|---|
-| `GET /api/approval-template-groups` | `:1091` | `rbacGuard('approvals:read')` | `listApprovalTemplateGroups` |
-| `POST /api/approval-template-groups` | `:1102` | `approvalTemplateAdminGuard` | `createApprovalTemplateGroup` |
-| `PATCH /api/approval-template-groups/:id` | `:1118` | `approvalTemplateAdminGuard` | `renameApprovalTemplateGroup` |
-| `POST /api/approval-template-groups/:id/archive` | `:1130` | `approvalTemplateAdminGuard` | `archiveApprovalTemplateGroup` |
-| `POST /api/approval-template-groups/:id/unarchive` | `:1141` | `approvalTemplateAdminGuard` | `unarchiveApprovalTemplateGroup` |
-| `POST /api/approval-templates/:id/group` | `:1153` | `approvalTemplateAdminGuard` | `linkApprovalTemplateToGroup` |
-| `DELETE /api/approval-templates/:id/group` | `:1174` | `approvalTemplateAdminGuard` | `unlinkApprovalTemplateFromGroup` |
+| `GET /api/approval-template-groups` | `:1115` | `rbacGuard('approvals:read')` | `listApprovalTemplateGroups` |
+| `POST /api/approval-template-groups` | `:1126` | `approvalTemplateAdminGuard` | `createApprovalTemplateGroup` |
+| `PATCH /api/approval-template-groups/:id` | `:1142` | `approvalTemplateAdminGuard` | `renameApprovalTemplateGroup` |
+| `POST /api/approval-template-groups/:id/archive` | `:1154` | `approvalTemplateAdminGuard` | `archiveApprovalTemplateGroup` |
+| `POST /api/approval-template-groups/:id/unarchive` | `:1165` | `approvalTemplateAdminGuard` | `unarchiveApprovalTemplateGroup` |
+| `POST /api/approval-templates/:id/group` | `:1177` | `approvalTemplateAdminGuard` | `linkApprovalTemplateToGroup`(**+ 一处新增的可见性前置检查,见 §3.5**) |
+| `DELETE /api/approval-templates/:id/group` | `:1204` | `approvalTemplateAdminGuard` | `unlinkApprovalTemplateFromGroup` |
 
-`approvalTemplateAdminGuard`(`routes/approvals.ts:198`)= `rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`,与模板写端点(`:863` 等)同一常量,非本切片新建。所有七个端点先 `authenticate` 中间件,再各自的 guard,再 handler 内部第一行调用 `resolveApprovalTemplateGroupOrgId`(`routes/approvals.ts:351`)。
+**行号脚注(修复轮 1,`impl-gate-A-slice1-round1-20260918.md` 反馈)**:本切片首次门审(head `252d01865`)之后,修复轮 1 在 `routes/approvals.ts` 顶部加了 1 行 import、在 `resolveApprovalTemplateVisibilityActor` 之后加了 23 行(§3.5 的导出函数),在链接端点内部又加了 6 行(可见性调用点)——本表与下文 §3.2/§3.3 的行号已用 `git diff 252d01865..HEAD -- packages/core-backend/src/routes/approvals.ts` 现场核对过位移量(391 行之前 +1;391–1164 行 +24;1165 行及以后 +30)并重新 `grep -n` 逐条验证,不是手工套算术。
+
+`approvalTemplateAdminGuard`(`routes/approvals.ts:199`)= `rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`,与模板写端点(`:887` 等)同一常量,非本切片新建。所有七个端点先 `authenticate` 中间件,再各自的 guard,再 handler 内部第一行调用 `resolveApprovalTemplateGroupOrgId`(`routes/approvals.ts:352`)。
 
 ### 3.2 org 来源解析(A‴)
 
-`resolveApprovalTemplateGroupOrgId(req, res)`(`routes/approvals.ts:351-369`):
-1. `isOrgIdValuePresent`(`:344-349`)检测 body/query 的 `orgId`——**任何形态**(字符串、数组、其他类型)只要非空/非全空数组即算「出现」,不仅是 `typeof === 'string'`(注释 `:337-343` 解释了为何要挡 `?orgId=a&orgId=b` 这类数组穿透);命中 ⇒ 400 `ORG_ID_NOT_ACCEPTED`(`:355-358`),直接 `return undefined`,handler 不再往下走。
-2. 否则读 `req.authenticatedTenantId`(`:361`;`jwt-middleware.ts:101-104`,只从已验签 token 的 `tenantId` 铸造);为空/非字符串 ⇒ 403 `SESSION_ORG_REQUIRED`(`:362-366`)。
-3. 否则返回 trim 后的值(`:368`)。
+`resolveApprovalTemplateGroupOrgId(req, res)`(`routes/approvals.ts:352-370` —— **行号在修复轮 1 后 +1**,该函数早于新增的可见性辅助函数,只吃了顶部新增 import 那一行的位移;下方 §3.1/§3.3 引到链接端点内部的行号位移更大,见各自脚注):
+1. `isOrgIdValuePresent`(`:345-350`)检测 body/query 的 `orgId`——**任何形态**(字符串、数组、其他类型)只要非空/非全空数组即算「出现」,不仅是 `typeof === 'string'`(注释 `:338-344` 解释了为何要挡 `?orgId=a&orgId=b` 这类数组穿透);命中 ⇒ 400 `ORG_ID_NOT_ACCEPTED`(`:356-361`),直接 `return undefined`,handler 不再往下走。
+2. 否则读 `req.authenticatedTenantId`(`:362`;`jwt-middleware.ts:101-104`,只从已验签 token 的 `tenantId` 铸造);为空/非字符串 ⇒ 403 `SESSION_ORG_REQUIRED`(`:363-368`)。
+3. 否则返回 trim 后的值(`:369`)。
 
 `jwt-middleware.ts:101-104` 现场核对:`authenticatedTenantId` **只**在 `user.tenantId` 是非空字符串时被设置到 `req.authenticatedTenantId`(`:101-104`);紧接着的 `:106-109`(`extractTenantFromHeaders` 回填)只在 `!user.tenantId` 时把请求头值写回 **`user.tenantId`**,从不触碰 `req.authenticatedTenantId`——这正是 A‴(ii)「有效 token + 伪造头 ⇒ 头被忽略」成立的机制证据,不是靠约定。
 
@@ -123,20 +125,20 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 | `GROUP_NAME_TAKEN` | 409 | 建组/改名/解档撞 `uq_atg_org_name_active`(`mapGroupConstraintError:137-138`,由 `:199-201`/`:230-232`/`:333-335` 的 catch 触发)、解档显式复核(`:311-316`) | §2/I8「409 GROUP_NAME_TAKEN」 |
 | `GROUP_NOT_ARCHIVED` | 409 | unarchive `:308` | I8「否则 409 GROUP_NOT_ARCHIVED」 |
 | `GROUP_SORT_CONFLICT` | 500 | 建组/解档撞 `atg_sort_unique`(COMMIT 时,`mapGroupConstraintError:140-141`) | §2 DEFERRABLE 副作用③;验收 E |
-| `ORG_ID_NOT_ACCEPTED` | 400 | `resolveApprovalTemplateGroupOrgId` `:355-358`(`routes/approvals.ts`) | §2「org 从哪来」 |
-| `SESSION_ORG_REQUIRED` | 403 | `resolveApprovalTemplateGroupOrgId` `:362-366` | §2「多 org 成员」;验收 J |
+| `ORG_ID_NOT_ACCEPTED` | 400 | `resolveApprovalTemplateGroupOrgId` `:356-361`(`routes/approvals.ts`;修复轮 1 后 +1,见 §3.1 脚注) | §2「org 从哪来」 |
+| `SESSION_ORG_REQUIRED` | 403 | `resolveApprovalTemplateGroupOrgId` `:363-368` | §2「多 org 成员」;验收 J |
 
 **实现者新增的请求形状校验码**(锁文未点名,不算第八个 ratified 结果——`ApprovalTemplateGroupService.ts:26-32` 文件头自述这一区分):
 
 | 码 | HTTP | 触发点 | 性质 |
 |---|---|---|---|
-| `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts:155-161`,抛出于 `:158`),建组/改名 name 为空/纯空白 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
-| `APPROVAL_GROUP_ID_REQUIRED` | 400 | link 端点 `routes/approvals.ts:1161-1164`,`groupId` 缺失/空白 | 同上 |
-| `APPROVAL_ACTOR_REQUIRED` | 401 | 建组 `:1106-1109`、link `:1157-1160`,`resolveApprovalActorId` 返回 null | 沿用本路由既有惯例 |
+| `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts:155-161`,抛出于 `:158`,该文件本轮未改),建组/改名 name 为空/纯空白 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
+| `APPROVAL_GROUP_ID_REQUIRED` | 400 | link 端点 `routes/approvals.ts:1185-1188`(修复轮 1 后 +24),`groupId` 缺失/空白 | 同上 |
+| `APPROVAL_ACTOR_REQUIRED` | 401 | 建组 `:1130-1133`、link `:1181-1184`(均 +24),`resolveApprovalActorId` 返回 null | 沿用本路由既有惯例 |
 
-**七个 `handleApprovalsError` 兜底码**(数据库故障/未预期异常时的 500 fallback,不是业务语义码,而是「这条请求处理失败」的通用标签,7 个端点各一个、名字含端点动作):
+**七个 `handleApprovalsError` 兜底码**(数据库故障/未预期异常时的 500 fallback,不是业务语义码,而是「这条请求处理失败」的通用标签,7 个端点各一个、名字含端点动作;修复轮 1 后行号见括号):
 
-`APPROVAL_TEMPLATE_GROUP_LIST_FAILED`(`:1098`)、`_CREATE_FAILED`(`:1114`)、`_RENAME_FAILED`(`:1126`)、`_ARCHIVE_FAILED`(`:1137`)、`_UNARCHIVE_FAILED`(`:1148`)、`_LINK_FAILED`(`:1168`)、`_UNLINK_FAILED`(`:1181`)。这七个只在 `ServiceError` 之外的异常(如连接失败)时出现——正常路径下的所有已知失败都会先命中上表的专用码。
+`APPROVAL_TEMPLATE_GROUP_LIST_FAILED`(`:1122`,原 `:1098` +24)、`_CREATE_FAILED`(`:1138`,原 `:1114` +24)、`_RENAME_FAILED`(`:1150`,原 `:1126` +24)、`_ARCHIVE_FAILED`(`:1161`,原 `:1137` +24)、`_UNARCHIVE_FAILED`(`:1172`,原 `:1148` +24)、`_LINK_FAILED`(`:1198`,原 `:1168` +30——在链接端点内部的第二处插入点之后)、`_UNLINK_FAILED`(`:1211`,原 `:1181` +30)。这七个只在 `ServiceError` 之外的异常(如连接失败)时出现——正常路径下的所有已知失败都会先命中上表的专用码。
 
 ### 3.4 一处实现者裁量(未获锁文文本背书,写明供门审核实)
 
@@ -148,7 +150,7 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 - **落点**:`routes/approvals.ts`(新增导出函数 `isApprovalTemplateVisibleForGroupLink`,紧邻 `resolveApprovalTemplateVisibilityActor` 之后),不是 `ApprovalTemplateGroupService.ts`——后者的文件头注释(`:5-8`)自陈「never reads `req` and never defaults the org」,这个不变量延伸到「不做可见性判定」:可见性判定需要 actor(依赖 `req.user`),放进这个刻意不碰 `req` 的服务模块会违反它自己的边界,所以校验点选在路由层,链接前置检查,链接本身的服务函数不变。
 - **谓词复用,非新逻辑**:直接调用锁文/§1.6(I5/I6)已经点名不得新造的 `applyTemplateVisibilityFilter`(`ApprovalProductService.ts:4383-4419`,与列表/详情端点同一个函数),对 `approval_templates` 的 `id = $1` 加同样的析取条件——**不是**又发明一条独立的可见性判定。
-- **失败形状(实现者选择,非 ratified 码)**:不可见 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`(零行写入,链接服务函数完全不被调用)——复用本路由既有的同名码(`:897`,模板详情端点在 actor 看不到时的同一 404),不是发明第 11 个专用码。选择 404 而非 403 的理由:与仓内其它 actor 门控的模板查找同构——「存在但看不见」与「不存在」对调用方呈现相同响应,不额外暴露「有一个你看不到的模板」这一事实。
+- **失败形状(实现者选择,非 ratified 码)**:不可见 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`(零行写入,链接服务函数完全不被调用)——复用本路由既有的同名码(`:921`,模板详情端点在 actor 看不到时的同一 404),不是发明第 11 个专用码。选择 404 而非 403 的理由:与仓内其它 actor 门控的模板查找同构——「存在但看不见」与「不存在」对调用方呈现相同响应,不额外暴露「有一个你看不到的模板」这一事实。
 - **范围仅限挂接**(锁文原文点名的动作是「挂接」,不含解除关联)——`unlinkApprovalTemplateFromGroup` 未加此校验,解除关联对可见性的语义锁文未定义,不在本条修复范围内。
 - **可达性披露(如实,不夸大)**:`approvalTemplateAdminGuard`(`rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`)能通过守卫的每个 actor,`resolveApprovalTemplateVisibilityActor` 都会把它判成 `isTemplateManager = true`(两个 guard 码都在 `isTemplateManager` 的判定并集里),而 `applyTemplateVisibilityFilter` 对 manager 直接短路、不加任何条件——所以今天**没有**任何 HTTP 可达路径能让这条校验因「看不见该模板」而 404;它今天在生产流量下只等价于「模板是否存在」的检查(对不存在的模板 id 同样 404,顺带堵上了 `mapGroupConstraintError` 未映射 `template_id` 上 `atgl_template_fk` 23503 的既有空白——那种情况下之前会 500)。真正的判别力(非 manager actor 命中 dept/role 作用域外的模板)只在直接调用导出的 `isApprovalTemplateVisibleForGroupLink` 时被验证——见验证 MD §2 新增 mutation 台账两条(§2(a) 谓词直调、§2(b) 端点调用点)。
 
@@ -187,11 +189,11 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 | 挂载点 | `packages/core-backend/src/index.ts:1791` `this.app.use(approvalsRouter({...}))` | I7「全部新端点落在 `routes/approvals.ts`,经 `app.use` 挂载,不走插件 `http.addRoute`」——验收 E 的「无响应/超时」mutation 形态以此为前提 |
 | org 铸造 | `packages/core-backend/src/auth/jwt-middleware.ts:101-103` | `authenticatedTenantId` 唯一写入点(§3.2 已核对) |
 | 多 org 脱困入口(后端) | `packages/core-backend/src/auth/AuthService.ts:387`(`resolveSessionTenantId` 起始行,与锁文引用一致) | J 的机制来源;前端接线属 A-2 |
-| `approvalTemplateAdminGuard` 复用 | `routes/approvals.ts:198`(定义)、`:863` 等既有模板写端点共用同一常量 | I7 |
-| `rbacGuard('approvals:read')` 复用 | 既有读端点 `routes/approvals.ts:549`(`GET /api/approval-templates`)同一 guard 工厂——本切片源码注释 `:1087` 写的「`:531`」是该注释自身相对旧行号基线的漂移,现场行号以 `:549` 为准 | I7 |
-| `ServiceError` / `sendServiceError` 复用 | `ApprovalBridgeService.ts:1559`(类定义)、`routes/approvals.ts:422`(`sendServiceError`)、`:485`(`handleApprovalsError`) | 专用码经既有错误管道输出,未新建平行错误体系 |
+| `approvalTemplateAdminGuard` 复用 | `routes/approvals.ts:199`(定义,修复轮 1 后 +1)、`:887` 等既有模板写端点共用同一常量(+24) | I7 |
+| `rbacGuard('approvals:read')` 复用 | 既有读端点 `routes/approvals.ts:573`(`GET /api/approval-templates`,修复轮 1 后 +24)同一 guard 工厂——本切片源码注释 `:1111`(+24)写的「`:531`」是该注释自身相对旧行号基线的漂移,现场行号以 `:573` 为准 | I7 |
+| `ServiceError` / `sendServiceError` 复用 | `ApprovalBridgeService.ts:1559`(类定义,本轮未改)、`routes/approvals.ts:446`(`sendServiceError`,修复轮 1 后 +24)、`:509`(`handleApprovalsError`,+24) | 专用码经既有错误管道输出,未新建平行错误体系 |
 | I6 零改动的两文件 | `packages/core-backend/src/multitable/automation-service.ts`、`packages/core-backend/src/multitable/automation-approval-template-access.ts` | 验收 I(本地 diff 取证,见验证 MD) |
-| I′(b) 三个 actor 构造器现场行号 | `routes/approvals.ts:374`(`resolveApprovalTemplateVisibilityActor`,锁文基线写 `:314-330`,现场已核对函数仍在、行号因中间提交平移到 `:374` 起)、`approval-record-link-txn-auth.ts:588`(与锁文引用行号**一致**)、`automation-approval-template-access.ts:91`(构造字面量起始行,锁文基线写 `:91-102`) | 三处均未被本切片触碰,I′(b) 断言其 `Object.keys` 集合运行时不变 |
+| I′(b) 三个 actor 构造器现场行号 | `routes/approvals.ts:375`(`resolveApprovalTemplateVisibilityActor`,修复轮 1 后 +1;锁文基线写 `:314-330`,现场已核对函数仍在)、`approval-record-link-txn-auth.ts:588`(与锁文引用行号**一致**,本轮未改该文件)、`automation-approval-template-access.ts:91`(构造字面量起始行,锁文基线写 `:91-102`,本轮未改该文件) | 三处均未被本切片触碰,I′(b) 断言其 `Object.keys` 集合运行时不变 |
 | `ApprovalTemplateVisibilityActor` 接口 + manager 短路 | `ApprovalProductService.ts:237-242`(接口字段)、`:4389`(`applyTemplateVisibilityFilter` 的 `isTemplateManager` 短路) | 与锁文引用行号一致;I′(a) 夹具设计围绕这条短路展开 |
 
 ## 6. 留给后续切片的项
