@@ -293,7 +293,48 @@ round stays `pending` with its seats, retryable) rather than closing the round a
 would be irreversible on the strength of missing evidence. Same flag class as the redemption
 suite's existing `erratum (not a lock quote — implementer choice…)` case.
 
-### 3.3 ⚠️ Open blocker for 判据 II: the rollout advisory lock cannot be ordered at this hook
+### 3.3 ⛔ DEFECT SHIPPED AND FIXED IN-BRANCH: the #5′ hook deadlocked against round creation
+
+**This is a defect commit `78d41fb4c` introduced and the follow-up commit fixes.** It is recorded
+here rather than rewritten out of history, because the lock's own rule is 「census 未做前不实现」 and
+I implemented a new lock pair before opening the census — the exact failure mode the lock names.
+
+`evaluateCancelRoundFinalInLock` is the **first site in the tree that takes `FOR UPDATE` on an
+`approval_rounds` row at all** (every other read of that table is unlocked; 判据 III's terminations
+are bare `UPDATE`s). It takes that lock in the same transaction as a `FOR UPDATE` on the ORIGINAL
+document instance — a **{row lock, row lock}** pair across two tables that no census leg had a
+denominator for (Q-A/Q-B/Q-C are all {row lock, advisory lock}).
+
+The counterparty is `createCancelRoundInstance`, which locks the original document **first** and only
+then INSERTs into `approval_rounds`. That INSERT is the hidden second edge: the partial unique index
+`uq_approval_rounds_pending_document … WHERE outcome = 'pending'` makes it **wait on any uncommitted
+change to that document's pending round**. `78d41fb4c` had the closer take the round row first ⇒ a
+cycle.
+
+Constructed on `metasheet2_lock_c2` against the shipped code, two connections, real rows:
+
+```
+REVERSED  (closer: round -> doc, AS SHIPPED IN 78d41fb4c)  = { a: 'A:23505', b: 'B:40P01 deadlock detected' }
+SHIPPED   (closer: doc -> round, after the fix)            = { a: 'A:23505', b: 'B:closed' }
+```
+
+`40P01 deadlock detected`, deterministic. Not a timing curiosity: A's 23505 is the *correct*
+outcome in both runs (it is what `createCancelRoundInstance` already translates into
+`CANCEL_ROUND_ALREADY_PENDING`); only B differs.
+
+**Fix**: the evaluator now reads `document_id` from the round row **without a lock** (that column is
+immutable — no writer anywhere updates it), locks the **ORIGINAL DOCUMENT INSTANCE first**, then
+takes the round row `FOR UPDATE` as the authority, and cross-checks `round.document_id ===
+original.id` so the unlocked probe cannot mislead the locked read.
+
+**Census**: the pair is now a real leg — **Q-D** in
+`tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, three cases in the same
+technique as Q-A/Q-B: the reversed order proven to deadlock (`40P01`, the standing proof), the
+shipped order proven not to *and* both sides asserted to reach a defined outcome, and a both-ends-
+anchored source scan of `evaluateCancelRoundFinalInLock` asserting the document lock precedes the
+round lock in production code. Suite: **13 passed (13)**, up from 10.
+
+### 3.3b ⚠️ Open blocker for 判据 II: the rollout advisory lock cannot be ordered at this hook
 
 Recorded now because it is a property of **this** wiring site, not of the next unit's code.
 
@@ -336,11 +377,12 @@ Appended to the already-wired `tests/integration/approval-cancel-round-redemptio
 workflow list, the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102`
 (a closed world that stays green for a file it does not list — supplementary checklist item 1), and
 an s6a provenance re-pin (items 3 / 14). None of that buys coverage this fixture already gives.
-**Zero new files and zero workflow edits in this commit**, so the four attendance census pins and
-the s6a pin are untouched:
+**Zero new files and zero workflow edits in either of this unit's two commits** — the follow-up
+commit modifies the existing `approval-cancel-round-lock-order-census.db.test.ts` (Q-D, §3.3) and
+the same two files again — so the four attendance census pins and the s6a pin are untouched:
 
 ```
-$ git show --name-only --format= <this commit>
+$ git show --name-only --format= 78d41fb4c   # 3 files, 0 *.yml / *.json
 docs/development/approval-cancel-round-phase2-verification-20260918.md
 packages/core-backend/src/services/ApprovalProductService.ts
 packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
@@ -391,6 +433,8 @@ Every probe: `cp` backup → edit → run → `cp` restore → `cmp` (all three 
 | M-6 | delete `deactivateAllActiveAssignments` from the closure | the seat assertion red | **GREEN — the mutation is INEFFECTIVE.** See below; the assertion is reclassified, not kept as if it had passed a probe |
 | M-7 | round write `outcome = evaluation.decision` → hard-coded `'rejected'` (collapse `expired` into 判据 III's outcome) | the round-outcome assertion red, and only it | **exactly 1 red**: `AssertionError: expected 'rejected' to be 'expired'`; 7 green |
 
+| M-8 | reverse the evaluator's lock order back to round-row-first (the shape `78d41fb4c` shipped) | the Q-D source-scan leg red, and only it | **exactly 1 red**: `AssertionError: expected 1841 to be less than 1650`; 12 green |
+
 **M-6 is a finding, not a footnote.** Removing the closure's own seat release leaves the acceptance
 GREEN, because every approve mode already deactivates the acting seat before the terminal advance
 is reached (`ApprovalProductService.ts:11470` for `'all'`, the mode §14.1 gives the cancel-round
@@ -412,7 +456,37 @@ Stated per-row so 「五种情形逐行落测试」 is not inflated by this comm
 | 发起人撤回本轮 | `withdrawn` | **covered — phase 1**, 判据 III (same case) |
 | 最终评估:窗口/策略已关 | `expired` | **covered — this unit** |
 | 最终评估:业务不可逆 | `blocked` | **NOT covered.** It is produced by C-1's `business_refused` return, so it lands with 判据 II. The writer (`closeCancelRoundSystemTerminalInTxn`) already takes it and is shared by both causes; nothing exercises it yet |
-| 基础设施异常 | stays `pending` | **partially** — the two `CANCEL_ROUND_INVARIANT_VIOLATION` throws and `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` take this path by construction (throw ⇒ the caller's transaction rolls back), and phase 1's `erratum` case asserts the rollback shape on the revoke branch; no case drives it through **#5′** |
+| 基础设施异常 | stays `pending` | **covered through #5′** — the `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` case drives the throw from inside the evaluator and asserts the full rollback shape: 409 with the NAMED code, round still `pending` with `ended_at` null, instance still `pending`, the seat still active (count 1), zero completion events. The two `CANCEL_ROUND_INVARIANT_VIOLATION` throws take the same path by construction but are not separately driven through #5′ |
+
+---
+
+### 3.8 卡片失效 (C-3 row 3's third column) — grepped, not assumed
+
+C-3 情形 3 requires 「席位失效、**卡片失效**、端点返回一致」, and the lock's stated reason for
+rejecting 可恢复阻塞 is 「避免旧卡仍可提交」. The closure does **not** call
+`supersedeCardDeliveriesPostCommit`, so this had to be settled rather than waved past:
+
+```
+$ git grep -nE "INSERT INTO [a-z_]*card_deliver" -- 'packages/**' 'plugins/**' | grep -v tests/
+packages/core-backend/src/integrations/dingtalk/approval-card-deliveries.ts:112
+
+$ git grep -n "insertDingTalkApprovalCardDelivery" -- packages/core-backend/src plugins | grep -v approval-card-deliveries.ts
+packages/core-backend/src/multitable/automation-executor.ts:104   <- the import
+packages/core-backend/src/multitable/automation-executor.ts:4849  <- the ONE call site
+
+$ git grep -n "supersedeCardDeliveriesPostCommit" -- packages/core-backend/src
+…ApprovalProductService.ts:11993   <- the ONE production call (the approve fall-through)
+…ApprovalProductService.ts:12640   <- its definition
+```
+
+So: cards are DingTalk-only, written by exactly one production writer, reached through exactly one
+call site — the **multitable automation executor**. Nothing in the cancel-round path creates one;
+a cancel round gets a card only if an org configured an automation that fires on its
+`task_created`. **Not vacuous, therefore, but not automatic either**, and the gap is **pre-existing
+rather than introduced here**: the approver-reject terminal this closure mirrors does not sweep
+cards either (the sweep has exactly one caller, on the approve fall-through). Registered as an
+open item for the #5′ registration, not silently inherited — if an org's automation cards a cancel
+round, an `expired` close leaves a still-`sent` card, which is the thing 「避免旧卡仍可提交」 names.
 
 ---
 
@@ -444,6 +518,7 @@ they are.
   after the close, but the lock's named mutation (drop the `outcome` write ⇒ the next create is
   refused by the partial unique index with 23505/409) is not built. M-7 mutates the outcome's
   *value*, not its presence.
+- **卡片失效 for a carded cancel round** — see §3.8: possible, pre-existing, unswept.
 - **R1 for the new guard point** — #5′ is an outlet anchor, not a chokepoint guard, so it takes no
   `CANCEL_ROUND_OUTLET_FORBIDDEN` negative control; whether §8 期 1's R1 count (9 sites) should grow
   to include it is an owner registration question, raised with the #5′ registration itself.
