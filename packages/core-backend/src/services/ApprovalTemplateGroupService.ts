@@ -42,11 +42,60 @@
  * `mapGroupConstraintError`'s doc comment. It exists ONLY because the ratified §2 non-blank CHECKs
  * reject non-ASCII input; it does not widen, and must not be read as widening, what those CHECKs
  * accept.
+ *
+ * §3.0 `...WithClient` split (added for the A-3 backfill design proposal,
+ * `docs/development/approval-template-groups-phase2-design-20260918.md` §3.0 — the split itself
+ * ships here ahead of any A-3 handler code because it is a hard prerequisite for A-3's
+ * execute/rollback to exist at all, not because A-3 is implemented in this commit; A-3's
+ * preview/execute/rollback endpoints, batch tables, and CI wiring remain OUT of scope pending
+ * independent gate review of that design proposal — see taskbook
+ * `impl-taskbook-A-grouping-20260918.md:72,:227`):
+ *
+ * `createApprovalTemplateGroup` / `linkApprovalTemplateToGroup` / `archiveApprovalTemplateGroup`
+ * each open their OWN `transaction(...)` call, which — per `connection-pool.ts`'s
+ * `pool.connect()` — hands out a NEW connection every time. A future composed caller (backfill's
+ * execute/rollback) that itself opened a `transaction(...)` and then `await`ed one of these
+ * exported functions FROM INSIDE that callback would acquire a SECOND connection and attempt to
+ * re-take the SAME org's L0 advisory lock from it while the first connection still holds that lock
+ * open (waiting on the inner call to resolve) — a confirmed same-session cross-connection
+ * deadlock, not a theoretical one (same failure shape as memory note
+ * `feedback_lock_taking_port_needs_lock_order_census`, #4899). Each of the three functions above is
+ * therefore split into a `...WithClient(client, ...)` primitive carrying the body that used to live
+ * inside its `transaction(async (client) => { ... })` callback, plus the original exported name
+ * kept as a thin wrapper: `transaction(async (client) => { ...; return xWithClient(client, ...) })`.
+ * A composed caller opens exactly ONE `transaction(...)` and calls the `...WithClient` primitives
+ * directly on that single `client`/connection.
+ *
+ * **One statement is NOT byte-identical inside the split, by necessity, not oversight**:
+ * `createApprovalTemplateGroupWithClient` and `archiveApprovalTemplateGroupWithClient` do NOT
+ * themselves issue `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` — only their thin wrappers do,
+ * as the first statement inside the `transaction(...)` callback, exactly where it sat before this
+ * split. Reason: §2 requires that SET to be the very FIRST statement after `BEGIN` on the
+ * connection (a later SET aborts the whole transaction with `25001` under a REPEATABLE READ
+ * default pool). If the SET lived inside the `...WithClient` body instead, a composed caller
+ * chaining two such primitives on the same connection (e.g. a future create-then-link) would issue
+ * it a SECOND time after the first primitive's own queries had already run on that connection —
+ * exactly the failure this paragraph exists to prevent. `linkApprovalTemplateToGroupWithClient`
+ * needs no SET at all (link takes no L0 — see the lock-order table above — so no MAX()/uniqueness
+ * read on this path is isolation-sensitive). Re-acquiring the L0 advisory lock itself IS safe to
+ * repeat inside `...WithClient` bodies: `pg_advisory_xact_lock` is reentrant within one
+ * session/transaction and returns immediately once already held by it, so a composed caller that
+ * takes L0 once at the top of its own transaction and then calls a `...WithClient` primitive that
+ * re-takes the SAME key does not block on itself.
+ *
+ * `requireName`'s validation stays in the thin `createApprovalTemplateGroup` wrapper, BEFORE
+ * `transaction(...)` is even invoked — same as before this split — so an invalid name still fails
+ * synchronously with zero connections acquired, rather than opening and rolling back a transaction.
+ * `createApprovalTemplateGroupWithClient` therefore takes an already-validated/trimmed `name`.
  */
 
 import { randomUUID } from 'node:crypto'
+import type { QueryResult } from 'pg'
 import { query, transaction } from '../db/pg'
 import { ServiceError } from './ApprovalBridgeService'
+
+/** Matches `transaction()`'s handler-client shape (`db/pg.ts`) — the connection a `...WithClient` primitive runs its statements on. */
+type TxClient = { query: (sql: string, params?: unknown[]) => Promise<QueryResult> }
 
 export interface ApprovalTemplateGroupRow {
   id: string
@@ -214,7 +263,34 @@ export async function listApprovalTemplateGroups(orgId: string): Promise<Approva
   return result.rows.map(mapGroupRow)
 }
 
-/** L0 only. sort_order = COALESCE(MAX(sort_order), 0) + 1 within the org (archived rows are NULL, MAX ignores them). */
+/**
+ * L0 body only — no SET (see §3.0 file-header note: the wrapper below issues it). Caller must
+ * already hold (or be about to take) this connection's L0 for `orgId`; this function takes it
+ * itself (idempotently) so it is safe to call standalone via the wrapper below.
+ */
+export async function createApprovalTemplateGroupWithClient(
+  client: TxClient,
+  orgId: string,
+  name: string,
+  createdBy: string,
+): Promise<ApprovalTemplateGroupRow> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
+  const maxRow = await client.query(
+    `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM approval_template_groups WHERE org_id = $1`,
+    [orgId],
+  )
+  const nextSortOrder = Number((maxRow.rows[0] as { next: number | string })?.next ?? 1)
+  const id = newGroupId()
+  const inserted = await client.query(
+    `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING ${GROUP_COLUMNS}`,
+    [id, orgId, name, nextSortOrder, createdBy],
+  )
+  return mapGroupRow(inserted.rows[0] as RawGroupRow)
+}
+
+/** L0 only. sort_order = COALESCE(MAX(sort_order), 0) + 1 within the org (archived rows are NULL, MAX ignores them). Thin wrapper over `createApprovalTemplateGroupWithClient` — see §3.0 file-header note. */
 export async function createApprovalTemplateGroup(
   orgId: string,
   name: string,
@@ -224,20 +300,7 @@ export async function createApprovalTemplateGroup(
   try {
     return await transaction(async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
-      const maxRow = await client.query(
-        `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM approval_template_groups WHERE org_id = $1`,
-        [orgId],
-      )
-      const nextSortOrder = Number((maxRow.rows[0] as { next: number | string })?.next ?? 1)
-      const id = newGroupId()
-      const inserted = await client.query(
-        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING ${GROUP_COLUMNS}`,
-        [id, orgId, trimmedName, nextSortOrder, createdBy],
-      )
-      return mapGroupRow(inserted.rows[0] as RawGroupRow)
+      return createApprovalTemplateGroupWithClient(client, orgId, trimmedName, createdBy)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -280,40 +343,50 @@ export async function renameApprovalTemplateGroup(
  * never a DELETE — I2′), THEN clear sort_order and set archived_at. Concurrent link/re-link
  * attempts block on the SAME group row's FOR UPDATE (their own L1 acquire in
  * `linkApprovalTemplateToGroup`) and re-check `archived_at` after this commits (acceptance B).
+ * Body only — no SET (see §3.0 file-header note: the wrapper below issues it).
  */
+export async function archiveApprovalTemplateGroupWithClient(
+  client: TxClient,
+  orgId: string,
+  groupId: string,
+): Promise<ApprovalTemplateGroupRow> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
+  const locked = await client.query(
+    `SELECT ${GROUP_COLUMNS} FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+    [orgId, groupId],
+  )
+  if (locked.rows.length === 0) {
+    throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
+  }
+  if ((locked.rows[0] as RawGroupRow).archived_at !== null) {
+    throw new ServiceError('Group is already archived', 409, 'GROUP_ARCHIVED')
+  }
+
+  // I2 / I2′: unlink (UPDATE, not DELETE) every member of this group before archiving it.
+  // org_id = $1 is carried here too (every other write/read in this file does — §2 "SELECT
+  // 必须带 org 谓词"), even though `atg_<uuid>` ids are already globally unique and the
+  // composite `atgl_group_fk` makes a cross-org link row for this exact groupId impossible
+  // today: correctness should rest on this predicate, not on an invariant enforced elsewhere.
+  await client.query(
+    `UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2`,
+    [orgId, groupId],
+  )
+
+  const updated = await client.query(
+    `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
+       WHERE org_id = $1 AND id = $2
+       RETURNING ${GROUP_COLUMNS}`,
+    [orgId, groupId],
+  )
+  return mapGroupRow(updated.rows[0] as RawGroupRow)
+}
+
+/** Thin wrapper over `archiveApprovalTemplateGroupWithClient` — see §3.0 file-header note. */
 export async function archiveApprovalTemplateGroup(orgId: string, groupId: string): Promise<ApprovalTemplateGroupRow> {
   try {
     return await transaction(async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
-      const locked = await client.query(
-        `SELECT ${GROUP_COLUMNS} FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
-        [orgId, groupId],
-      )
-      if (locked.rows.length === 0) {
-        throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
-      }
-      if ((locked.rows[0] as RawGroupRow).archived_at !== null) {
-        throw new ServiceError('Group is already archived', 409, 'GROUP_ARCHIVED')
-      }
-
-      // I2 / I2′: unlink (UPDATE, not DELETE) every member of this group before archiving it.
-      // org_id = $1 is carried here too (every other write/read in this file does — §2 "SELECT
-      // 必须带 org 谓词"), even though `atg_<uuid>` ids are already globally unique and the
-      // composite `atgl_group_fk` makes a cross-org link row for this exact groupId impossible
-      // today: correctness should rest on this predicate, not on an invariant enforced elsewhere.
-      await client.query(
-        `UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2`,
-        [orgId, groupId],
-      )
-
-      const updated = await client.query(
-        `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
-           WHERE org_id = $1 AND id = $2
-           RETURNING ${GROUP_COLUMNS}`,
-        [orgId, groupId],
-      )
-      return mapGroupRow(updated.rows[0] as RawGroupRow)
+      return archiveApprovalTemplateGroupWithClient(client, orgId, groupId)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -387,8 +460,42 @@ export async function unarchiveApprovalTemplateGroup(orgId: string, groupId: str
  * own read of a since-archived row (if it is the archiver reading a since-added link — not
  * possible here since archive runs its unlink UPDATE only after re-checking under its OWN lock)
  * observes the fresh state (acceptance B). No L0: this path neither writes `name` nor assigns
- * `sort_order` (§2 锁序表 invariant).
+ * `sort_order` (§2 锁序表 invariant). Body only (no SET either — link takes neither, see §3.0
+ * file-header note).
  */
+export async function linkApprovalTemplateToGroupWithClient(
+  client: TxClient,
+  orgId: string,
+  templateId: string,
+  groupId: string,
+  linkedBy: string,
+): Promise<ApprovalTemplateGroupLinkRow> {
+  const locked = await client.query(
+    `SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+    [orgId, groupId],
+  )
+  if (locked.rows.length === 0) {
+    throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
+  }
+  if ((locked.rows[0] as { archived_at: string | Date | null }).archived_at !== null) {
+    throw new ServiceError('Group is archived', 409, 'GROUP_ARCHIVED')
+  }
+
+  const upserted = await client.query(
+    `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (org_id, template_id) DO UPDATE SET
+       group_id = EXCLUDED.group_id,
+       unlinked_at = NULL,
+       linked_by = EXCLUDED.linked_by,
+       linked_at = EXCLUDED.linked_at
+     RETURNING ${LINK_COLUMNS}`,
+    [orgId, templateId, groupId, linkedBy],
+  )
+  return mapLinkRow(upserted.rows[0] as RawLinkRow)
+}
+
+/** Thin wrapper over `linkApprovalTemplateToGroupWithClient` — see §3.0 file-header note. */
 export async function linkApprovalTemplateToGroup(
   orgId: string,
   templateId: string,
@@ -396,31 +503,7 @@ export async function linkApprovalTemplateToGroup(
   linkedBy: string,
 ): Promise<ApprovalTemplateGroupLinkRow> {
   try {
-    return await transaction(async (client) => {
-      const locked = await client.query(
-        `SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
-        [orgId, groupId],
-      )
-      if (locked.rows.length === 0) {
-        throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
-      }
-      if ((locked.rows[0] as { archived_at: string | Date | null }).archived_at !== null) {
-        throw new ServiceError('Group is archived', 409, 'GROUP_ARCHIVED')
-      }
-
-      const upserted = await client.query(
-        `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
-         VALUES ($1, $2, $3, $4, now())
-         ON CONFLICT (org_id, template_id) DO UPDATE SET
-           group_id = EXCLUDED.group_id,
-           unlinked_at = NULL,
-           linked_by = EXCLUDED.linked_by,
-           linked_at = EXCLUDED.linked_at
-         RETURNING ${LINK_COLUMNS}`,
-        [orgId, templateId, groupId, linkedBy],
-      )
-      return mapLinkRow(upserted.rows[0] as RawLinkRow)
-    })
+    return await transaction((client) => linkApprovalTemplateToGroupWithClient(client, orgId, templateId, groupId, linkedBy))
   } catch (error) {
     throw mapGroupConstraintError(error)
   }
