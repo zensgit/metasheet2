@@ -482,7 +482,7 @@ apps/web/src/composables/useSessionOrg.ts
 | — | E(2):去掉 L0 | 同 K(create),无需重复施加 | 见 #15 | 由 K 覆盖(测试文件自身在 `:276-283` 已声明「E 负控不测这条」) |
 | 19a | E(3)-a:仅禁用 `mapGroupConstraintError` 的 `atg_sort_unique` 分支 | `ApprovalTemplateGroupService.ts:140`(`if (false && …)`) | `expected 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED' to be 'GROUP_SORT_CONFLICT'`(实收前者,状态仍 500) | **RED(经码而非状态)** |
 | 19b | E(3)-b:按测试文件头注释字面「删 `createApprovalTemplateGroup` 内 try/catch」 | `ApprovalTemplateGroupService.ts:181-182,198-201`(去掉服务层 try/catch) | 同 19a:`expected 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED' to be 'GROUP_SORT_CONFLICT'`——**仍是干净 500,不是「无响应」** | **RED,但不是文件注释宣称的失败模式**,见 §15.6 |
-| 19c | E(3)-c:真正的「无响应」机制 —— 删**路由 handler 自己的** try/catch(`routes/approvals.ts:1103,1113-1115`) | `routes/approvals.ts` | `Unhandled Rejection: ServiceError: Group sort order conflict …`;`Test timed out in 20000ms` | **RED,且是唯一真正复现「无响应/超时」的改动点**,见 §15.6 |
+| 19c | E(3)-c:真正的「无响应」机制 —— 删**路由 handler 自己的** try/catch(`routes/approvals.ts:1127,1137-1139`,修复轮 1 后行号,原 `:1103,1113-1115`) | `routes/approvals.ts` | `Unhandled Rejection: ServiceError: Group sort order conflict …`;`Test timed out in 30000ms`(修复轮 3 现场重跑逐字;`vitest.integration.config.ts:19` 的 `testTimeout: 30000` 早于本切片存在,旧记录的 `20000ms` 在本 head 从未成立过,系记录错误而非漂移) | **RED,且是唯一真正复现「无响应/超时」的改动点**,见 §15.6 |
 
 ### 15.1 发现:G 的显式同名复核是「惯性冗余」,只有与 A 共享的 fallback 分支才是唯一防线
 
@@ -565,7 +565,7 @@ $ git status --porcelain
 ### 15.6 E(3):测试文件头部注释描述的「无响应」机制定位有误,现场重新定位
 
 `serialization.db.test.ts:27-33` 的头部注释字面写「delete the try/catch around `transaction(...)` in `createApprovalTemplateGroup`」会导致「the whole route handler's response never resolves」。现场按字面执行(仅删服务层 `ApprovalTemplateGroupService.ts` 里包裹 `transaction(...)` 的 `try/catch`,`routes/approvals.ts` 自己的 `try/catch` 保持不动)得到的是**干净的 500**(`APPROVAL_TEMPLATE_GROUP_CREATE_FAILED`),测试在 20 秒内正常返回并按错误码断言失败——**不是**注释描述的「无响应」。
-根因:`routes/approvals.ts:1102-1115` 的路由 handler**自己也有**一层 `try { … } catch (error) { handleApprovalsError(...) }`,与服务层的 `try/catch` 是**两层独立的**捕获,注释只算到了内层。只有把**外层(路由自己的)** `try/catch` 也一并删掉,才复现出「无响应」:现场移除 `routes/approvals.ts:1103` 的 `try {` 与 `:1113-1115` 的 `catch` 块后,重跑观察到 `Unhandled Rejection: ServiceError: Group sort order conflict`(来自 `mapGroupConstraintError` 正确算出的错误,只是无人接住)与 `Test timed out in 20000ms`——这才是锁文/测试注释共同预言的「Express 4 不接 async 拒绝 ⇒ 无响应」现象的真实、唯一复现点。
+根因:`routes/approvals.ts:1126-1140`(修复轮 1 后行号;P2-1 在此路由之前的挂接路由插入了新代码,行号相应下移,原 `:1102-1115`)的路由 handler**自己也有**一层 `try { … } catch (error) { handleApprovalsError(...) }`,与服务层的 `try/catch` 是**两层独立的**捕获,注释只算到了内层。只有把**外层(路由自己的)** `try/catch` 也一并删掉,才复现出「无响应」:现场移除 `routes/approvals.ts:1127` 的 `try {` 与 `:1137-1139` 的 `catch` 块后,重跑观察到 `Unhandled Rejection: ServiceError: Group sort order conflict`(来自 `mapGroupConstraintError` 正确算出的错误,只是无人接住)与 `Test timed out in 30000ms`(修复轮 3 现场重跑逐字;`vitest.integration.config.ts:19` 的 `testTimeout` 自该文件唯一一次提交起就是 `30000`——`git log --oneline -- packages/core-backend/vitest.integration.config.ts` 只有一条提交 `e0defbe26`,`20000ms` 在本仓历史上从未对这个文件成立过,是原始记录写错,不是后续漂移)——这才是锁文/测试注释共同预言的「Express 4 不接 async 拒绝 ⇒ 无响应」现象的真实、唯一复现点。
 **结论**:E 行本身仍然被现有测试正确 mutation-discriminate(三种施法都产生红),但测试文件自己的头部注释对**具体机制**(哪一层 try/catch 是那道防线)的描述与当前代码结构不完全对应——这是「源码文本断言≠行为断言」的又一个实例(此处是**注释**而非应用代码本身),记入门审供参考,不改动测试文件或注释(不改代码)。
 
 ## 16. Mutation 台账收尾核对(零残留)
@@ -598,8 +598,8 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 ## 17. 未做 / 未验 / blocked-with-reason(如实列出)
 
 1. **验收 C、D、E 后半** —— 不在本切片范围(锁文 §6「期 1」门本身未列 C/D/E 后半;设计 MD §1.2 已逐条引锁文 §/分期)。留给 A-4。
-2. **验收 B′ 的 mutation 台账** —— BLOCKED-with-reason,见 §15.2:I2′ 后备判定逻辑当前不存在于任何应用代码路径,无对象可 mutate;A-4 落地 `section=` 端点时须补做。
-3. **验收 J 的前端半**(session-org 选择器组件、403 后展示、选定后重试、`run-required-web-tests.sh` 令牌)与**未知 `section=` ⇒ 400** —— 不在本切片,归 A-2/A-4(设计 MD §1.3,补充清单 #5)。
+2. **验收 B′ 的 mutation 台账** —— 处置口径**并入 #3 的 owner 勘误桶**(修复轮 3,gate P2-3 收口;原记为自裁 BLOCKED-with-reason,与 #3/#5 是同一类锁文自相矛盾,不应自裁,理由见 #3)。技术事实不变,仍见 §15.2:I2′ 后备判定逻辑当前不存在于任何应用代码路径,无对象可 mutate;测试改为纯 DB 级说明性断言(`lifecycle.db.test.ts:481`,见 §20.1),A-4 落地 `section=` 端点时须对**那个端点**重做 mutation 台账。
+3. **验收 J 的前端半**(session-org 选择器组件、403 后展示、选定后重试、`run-required-web-tests.sh` 令牌)、**未知 `section=` ⇒ 400**、以及**验收 B′**(上条)—— 三者是**同一类**锁文自相矛盾:锁文 §6「期 1」门把 J 后端半/B′ 列入本切片验收范围,但它们唯一的消费方(前端选择器组件、`section=` 列表端点)都排在 A-4(分期 3)才存在。原记录把 J/C 的 400 升 owner、把 B′ 自行判 BLOCKED,是**同一类问题两种处置口径**(违反判据集合自洽);统一改为**待 owner 勘误**,三者并列,不在本切片阻塞,归 A-2/A-4(设计 MD §1.2/§1.3/§6,补充清单 #5;§20.1 记录本轮的归并)。
 4. **补充清单 #1 的闭世界缺口** —— 未收口(§13.5),`scripts/ops/approval-template-groups-ci-wiring.test.mjs` 新守卫文件留给后续单元或 owner 裁决。
 5. **s6a 钉的时效性** —— 仅对本 push 前一刻的 `plugin-tests.yml` 字节成立(§4/§13.4);合并前必须重算,不在本单元范围内。
 6. **重排端点(分期 3)的 E 后半判据** —— 代码尚未实现,自然也未验证。
@@ -733,3 +733,87 @@ OK
 ### 19.4 本轮未处理(原状留给下一轮)
 
 P2-3(B′ 处置口径并入 owner 勘误桶)、P3-6(F 补齐归档/挂接两格)、P3-7(squash `f6e8ea2d8` 等 wip 提交)、P3-8(三处逐字/注释更正)、P3-9(闭世界守卫披露,同 §9/§13.5,不新建)、P3-10(typecheck 边界已写入验证 MD,无需重复)——按 gate 报告原文列出,未在本轮触碰。
+
+## 20. 修复轮 3(2026-09-18)—— gate `impl-gate-A-slice1-round1-20260918.md` P2-3 / P3-8 收口
+
+被审 head:`004350867`(修复轮 2 之后)。本轮只动本文档、设计 MD、`lifecycle.db.test.ts`、`serialization.db.test.ts`(均为注释/用例名/说明性断言标注)、`vitest.config.ts`(一处注释)——**不改 DDL、不改 `plugin-tests.yml`、不改任何生产 `.ts` 文件的可执行代码**(两处 mutation 探针已在 `metasheet2_lock_a` 上现场执行并 `cp` 复原,见 §20.1)。测试数量不变(26,同 §19)。P3-6/P3-7/P3-9/P3-10 本轮未处理,原状见 gate 报告,留给下一轮或 owner。
+
+### 20.1 P3-8 —— 三处逐字/注释更正
+
+**(a)§15.6 与台账 #19c 的 `Test timed out in 20000ms` 更正为 `30000ms`**:现场重做 E(3)-c 的隔离改法(仅删 `routes/approvals.ts` 建组路由 handler 自己的 outer try/catch,`:1127` 的 `try {` 与 `:1137-1139` 的 `catch` 块,服务层 `ApprovalTemplateGroupService.ts` 的 try/catch 保持不动——与门审 §15.6 描述的隔离方式一致):
+
+```
+$ cp packages/core-backend/src/routes/approvals.ts /tmp/gateA-fix3-probe-backups/approvals.ts.orig
+$ python3 - <<'PY'   # 删除建组路由 handler 自己的 try { / } catch (error) { ... }
+PY
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-serialization.db.test.ts \
+    -t "COMMIT-time" --reporter=verbose
+ × E: COMMIT-time (not statement-time) DEFERRABLE violation on the production create path maps to
+     500 GROUP_SORT_CONFLICT
+   Unhandled Rejection: ServiceError: Group sort order conflict
+     at mapGroupConstraintError (src/services/ApprovalTemplateGroupService.ts:141:14)
+   Error: Test timed out in 30000ms.
+$ cp /tmp/gateA-fix3-probe-backups/approvals.ts.orig packages/core-backend/src/routes/approvals.ts
+$ cmp /tmp/gateA-fix3-probe-backups/approvals.ts.orig packages/core-backend/src/routes/approvals.ts && echo OK
+OK
+$ (单独重跑,回绿) ✓ E: COMMIT-time ... 1 passed
+```
+
+`30000` 与 `vitest.integration.config.ts:19` 的 `testTimeout: 30000` 一致。**机械核实这不是漂移**:该配置文件自创建以来只有一次提交,且该提交本身就写的是 `30000`——
+
+```
+$ git log --oneline -- packages/core-backend/vitest.integration.config.ts
+e0defbe26 ci(attendance): publish a stable web guard check (#4585)
+```
+
+只有 1 条提交(计数:1),`30000` 从这份文件存在的第一天就是这个值,`20000ms` 在本仓历史上对这份配置**从未成立过**——旧记录是笔误,不是后来的漂移。已同步改写 §15.6 正文与台账第 19c 行,并顺带更正该处已过期的路由行号(`routes/approvals.ts:1103,1113-1115` → 现场 `:1127,1137-1139`,系修复轮 1 的 P2-1 在同文件更早处插入代码所致的行号下移,非本轮改动)。
+
+**(b)`serialization.db.test.ts` 头部注释 mutation (4) 的未收尾自我更正**——原文先写「since there is no group-row lock left for it to queue behind」再用「... actually」推翻自己,是草稿思维过程留在交付件里。已重写成单一陈述:K 的 rename 腿屏障就是 L0 advisory lock 本身(holder 不取任何 L1 行锁),判别性 mutation 是删 `takeOrgLock` 的两行。纯注释改动,不影响任何 `it()` 的可执行内容。
+
+**(c)`vitest.config.ts:1825` 附近注释说反了 isolation level 且借用了本文件没有的「goldens」措辞**——已重写为:生产走的是 RC(`createApprovalTemplateGroup` 内显式 `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);本文件把连接池默认值强制成 RR,**刻意不同于生产**,目的是让那条 `SET` 的缺失/失效变得可观察(否则会静默读到过期的 RR 快照);并删除了「export/serialization goldens」这一无实指的借用措辞(本文件没有 golden 文件)。这是 `exclude` 数组内某一项的注释,数组内容(哪些文件被排除)零变化,不触发 s6a 重钉(s6a 只钉 `plugin-tests.yml`)。
+
+**回归确认**(三处都是注释/逐字更正,唯一有代码语义的改动是(a)的探针已 cp 复原):
+
+```
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  2 passed (2)
+      Tests  26 passed (26)
+$ pnpm run type-check   # tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json
+(无输出,exit 0)
+```
+
+### 20.2 P2-3 —— B′ 处置口径并入 owner 勘误桶;说明性断言标注;用例名收窄
+
+门审的判定本身(BLOCKED-with-reason 的技术事实:I2′ 判定不存在于任何应用代码路径,§15.2)未被推翻,**被更正的是处置口径**:原验证 MD §17 #2 把 B′ 自行判定为「留给 A-4」的既成事实,而 §17 #3(J 前端半 + 未知 `section=` ⇒ 400)是**同一类**锁文自相矛盾(锁文 §6「期 1」门把该验收行列入本切片范围,但其唯一消费方要到 A-4 才存在)却走的是「升 owner 勘误」——同一类问题两种处置口径,违反「验收判据集合必须自洽」。
+
+**改动**:
+1. 验证 MD §17 #2/#3 重写(见上方对应 diff),三项(J 前端半、`section=`/`category` 互斥 400、B′)并列同一个 owner 勘误桶。
+2. 设计 MD §6 表新增一行(B′,并入补充清单 #5 同桶),§7 收尾句「两条」改「三条」。
+3. `lifecycle.db.test.ts` B′ 用例改动(纯注释/命名/断言旁注,零行为代码变化):
+   - 用例名从「unlinked-from-group templates show as ungrouped, never falling back to category; never-linked templates still show category」(暗示了一个本切片不存在的展示行为)收窄为「B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate」(只claim它证明的东西:两条 SQL 谓词在 DB 层面的区分)。
+   - `it()` 上方新增说明,指向 A-4/§15.2/§17 #2-#3。
+   - `:481`(`expect(rejectedPredicate.rows[0].looks_never_grouped).toBe(true)`)旁新增注释,明写这是「断言自己查询出的值等于自己」、按构造恒真、零 mutation 判别力,只是给人类读者解释被拒绝谓词的失败模式;并把行尾注释从「red under the rejected predicate」(暗示存在红态)改为「always true — see note above; not a gate」。
+
+**回归确认**(与 §20.1 共用同一次全量重跑,§20.1 已贴,不重复):`Test Files 2 passed (2) / Tests 26 passed (26)`(用例数不变:改的是名字与注释,不是新增/删除 `it()`);`pnpm run type-check` exit 0。
+
+### 20.3 收尾核对
+
+```
+$ git status --porcelain -- packages/ plugins/ .github/
+(空)
+$ cmp /tmp/gateA-fix3-probe-backups/approvals.ts.orig packages/core-backend/src/routes/approvals.ts && echo OK
+OK
+$ cmp /tmp/gateA-fix3-probe-backups/ApprovalTemplateGroupService.ts.orig packages/core-backend/src/services/ApprovalTemplateGroupService.ts && echo OK
+OK
+```
+
+本轮触碰的文件仅限:本文档、设计 MD、`lifecycle.db.test.ts`、`serialization.db.test.ts`、`vitest.config.ts`(注释)——`git diff --stat`(提交时的精确计数见对应 commit 的 `git show --stat`)不包含任何生产 `.ts` 文件、DDL、`plugin-tests.yml`。s6a 钉不受影响(`plugin-tests.yml` 零改动)。
+
+### 20.4 本轮未处理(原状留给下一轮)
+
+P3-6(F 补齐归档/挂接两格)、P3-7(squash `f6e8ea2d8` 等 wip 提交——**本轮评估后确认无法在不 force-push 已推送分支的前提下完成**,squash 会改写已 push 到 `origin/feat/approval-template-groups-phase1` 的提交 SHA,需要 force,超出本轮授权范围,升级为需要 owner/门审明确批准 force-push 才能做)、P3-9(闭世界守卫披露,同 §9/§13.5,不新建)、P3-10(typecheck 边界已写入验证 MD,无需重复)。

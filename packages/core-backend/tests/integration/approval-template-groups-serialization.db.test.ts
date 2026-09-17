@@ -39,12 +39,11 @@ import { Client } from 'pg'
  *       (Express 4 does not catch an async rejection; `routes/approvals.ts` mounts via `app.use`,
  *       outside the plugin host's per-route wrapper) — the COMMIT-mapping test times out instead
  *       of asserting 500/GROUP_SORT_CONFLICT;
- *   (4) delete the `SELECT ... FOR UPDATE` from `renameApprovalTemplateGroup` (K, rename leg) →
- *       the rename request no longer blocks on the L0-only holder (`waitUntilBackendBlockedByHolder`
- *       times out) since there is no group-row lock left for it to queue behind... actually K's
- *       barrier is the L0 advisory lock itself (the holder does not take any L1 row lock — see the
- *       K helper's own doc comment) — so the correct K mutation is deleting `takeOrgLock`'s two
- *       lines from `renameApprovalTemplateGroup` (mirrors mutation (2) for the rename path).
+ *   (4) K's barrier for the rename leg is the L0 advisory lock itself (the holder takes no L1 row
+ *       lock — see the K helper's own doc comment), so the discriminating mutation is deleting
+ *       `takeOrgLock`'s two lines from `renameApprovalTemplateGroup` (mirrors mutation (2) for the
+ *       rename path) → the rename request no longer blocks on the L0-only holder at all
+ *       (`waitUntilBackendBlockedByHolder` times out — a hard failure, not a silent pass).
  */
 vi.hoisted(() => {
   const base = process.env.DATABASE_URL

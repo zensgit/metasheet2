@@ -439,7 +439,12 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   })
 
   // ── B′ ─────────────────────────────────────────────────────────────────────────────────────
-  it('B′: unlinked-from-group templates show as ungrouped, never falling back to category; never-linked templates still show category', async () => {
+  // NOTE (gate P2-3, fix round 3): I2′'s consumer (the `section=` list endpoint whose display
+  // logic would read this predicate) does not exist in phase 1 — it lands in A-4. There is no
+  // application code path today for "unlinked shows as ungrouped" or "never-linked still shows
+  // category" to exercise; that half of this test's name describes a future display behaviour,
+  // not anything this file proves. What IS proven, DB-level only, is the paragraph below.
+  it('B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate', async () => {
     const org = trackOrg(`atg-bp-${TS}`)
     const admin = await tok(base, `bp-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
     const group = (await (await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `Bp Group ${TS}` } })).json()).group
@@ -470,15 +475,23 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     )
     expect(neverLinkedCheck.rows[0].never_grouped).toBe(true)
 
-    // mutation surrogate: the REJECTED predicate "group_id IS NULL" (instead of "no link row at
-    // all") would incorrectly mark the UNLINKED template (which DOES have a group_id-NULL row) as
-    // "never grouped" too — collapsing the B′ distinction this row exists to prove.
+    // ILLUSTRATIVE ONLY — zero mutation-discriminating power (gate P2-3, fix round 3): this
+    // assertion is `expect(<the rejected predicate's own output>).toBe(true)`, so it is true by
+    // construction and can never go red — it does not call, and cannot detect a change to, any
+    // application code. Its only job is to make the REJECTED predicate's failure mode legible
+    // for a human reader: "group_id IS NULL" (instead of "no link row at all") would incorrectly
+    // mark the UNLINKED template (which DOES have a group_id-NULL row) as "never grouped" too,
+    // collapsing the distinction the two `expect`s above this one actually prove. There is no
+    // "unreject the predicate and mutate it" step here because no application code implements
+    // either predicate yet (see the note above `it(...)` and §15.2/§17 #2-#3 of the verification
+    // MD) — A-4 must replace this whole block with a real mutation-probed test once the `section=`
+    // endpoint exists.
     const rejectedPredicate = await query(
       `SELECT group_id IS NULL AS looks_never_grouped
          FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
       [org, unlinkedTpl],
     )
-    expect(rejectedPredicate.rows[0].looks_never_grouped).toBe(true) // red under the rejected predicate
+    expect(rejectedPredicate.rows[0].looks_never_grouped).toBe(true) // always true — see note above; not a gate
   })
 
   // ── F ──────────────────────────────────────────────────────────────────────────────────────
