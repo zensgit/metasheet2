@@ -624,6 +624,45 @@ async function assertCancelRoundSeatsEligibleInTxn(
   )
 }
 
+/**
+ * Lock §4 `roundPolicy = { windowDays, suite }` — the SINGLE derivation, read off the ORIGINAL
+ * document instance's own metadata. Extracted so the two time points of §5 I4 / §2-G4
+ * (creation snapshot, final-decision snapshot) cannot drift apart: a divergence between them would
+ * read as "the policy changed" and silently expire a live round. `createCancelRoundInstance` and
+ * the §14.2 判据 IV in-lock final evaluation both call THIS, never a second copy.
+ */
+function deriveCancelRoundRoundPolicy(
+  originalMetadata: Record<string, unknown> | null,
+): { readonly suite: string; readonly windowDays: number } {
+  const metadata = originalMetadata ?? {}
+  const suite = typeof metadata.suite === 'string' ? metadata.suite : 'leave'
+  const windowDays =
+    typeof metadata.windowDays === 'number'
+      ? metadata.windowDays
+      : CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS[suite as keyof typeof CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS]
+        ?? CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS.other
+  return { suite, windowDays }
+}
+
+/**
+ * Lock §14.2 判据 IV — what the in-lock final evaluation answers. `redeem` is 判据 II's branch
+ * (C-1 through the W4 external transaction entry); the other two are C-3's persistent closure.
+ * `blocked` carries the bounded code that the engine record's reason `business_blocked:<code>` is
+ * built from, with the finer cause in `detail` — the pin already recorded in the phase-2
+ * verification MD §2.
+ */
+type CancelRoundFinalEvaluationV1 =
+  | { readonly decision: 'redeem' }
+  | { readonly decision: 'expired' }
+  | { readonly decision: 'blocked'; readonly code: string; readonly detail: string | null }
+
+/** The `reason` written into the C-3 closure record, per lock §3 C-3 / §14.2 判据 IV. */
+function cancelRoundCloseReason(
+  evaluation: Exclude<CancelRoundFinalEvaluationV1, { decision: 'redeem' }>,
+): string {
+  return evaluation.decision === 'expired' ? 'round_expired' : `business_blocked:${evaluation.code}`
+}
+
 type PublishedDefinitionRow = {
   id: string
   template_id: string
@@ -1105,6 +1144,14 @@ export type ApprovalNodeTimeoutEffectOutcome =
 // (ApprovalAssigneeResolver.ts) drops any `system:`-prefixed actor on a bare `startsWith` predicate, so
 // this NEW value needs zero edits there — it is covered by construction, not by an enumerated list.
 const APPROVAL_DEPARTURE_SYSTEM_ACTOR = 'system:approval-departure'
+/**
+ * Lock §3 C-3 「actor = 系统终结身份」/ §14.2 判据 IV — the sentinel recorded as the actor of a
+ * cancel round's SYSTEM-side close (窗口/策略已关, 业务不可逆). It is the only thing that tells a
+ * system closure apart from an approver's own reject in `approval_records`, so it must stay
+ * distinct from both real user ids and the other two sentinels. Same `system:` prefix convention,
+ * so `isSystemSentinelActor` covers it by construction (see the departure sentinel's note above).
+ */
+const APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
@@ -8678,6 +8725,8 @@ export class ApprovalProductService {
       // while `forbidden` itself short-circuits the window check inside the helper so THIS
       // lock-anchored code still wins for that suite.
       const originalMetadata = toNullableRecord(original.metadata) ?? {}
+      // Single derivation, shared with the 判据 IV final evaluation (see
+      // `deriveCancelRoundRoundPolicy`) so the two snapshot time points cannot drift apart.
       const { suite, windowDays } = deriveCancelRoundRoundPolicy(originalMetadata)
       if (suite === 'forbidden') {
         throw new CancelRoundSuiteForbiddenError(
@@ -9361,6 +9410,222 @@ export class ApprovalProductService {
       throw new ServiceError('Cancel round approval not found after creation', 500, 'CANCEL_ROUND_CREATE_FAILED')
     }
     return approval
+  }
+
+  /**
+   * Lock §3 C-2 step ③ + §14.2 判据 IV — the IN-LOCK final evaluation, run inside the caller's
+   * `dispatchAction` transaction and BEFORE any terminal status write.
+   *
+   * Lock order (lock §3 C-2 全局顺序, the part this method owns): the engine instance is already
+   * held `FOR UPDATE` by `dispatchAction`'s entry read; this takes ② the round row and ③ the
+   * ORIGINAL document instance, in that order, and takes the original instance's lock even on the
+   * branches that never write it — front-loading the order 判据 II's C-1 call needs rather than
+   * acquiring it later, mid-transaction, in a different order.
+   *
+   * ⚠️ Rollout/advisory lock (lock §3 C-2 「rollout/advisory 锁 → 轮次引擎实例 → …」): NOT taken
+   * here, and it cannot be taken here in the right order. `dispatchAction` opens `BEGIN` and
+   * immediately takes `approval_instances … FOR UPDATE` with no prior read, so any advisory lock
+   * acquired at this hook is acquired AFTER a row lock. That is invisible to the W4 entry's own
+   * check — `assertExternalTransactionRolloutLockHeldV1` queries `pg_locks` for held-ness only,
+   * never for acquisition order — so it would PASS while the global order is violated. The
+   * `expired` / `blocked` closures below never call W4 and so never need it; 判据 II does, and
+   * must restructure `dispatchAction`'s entry (a cheap non-locking pre-read to detect a cancel
+   * round, take the org's class-`00` shared rollout lock, and only then `FOR UPDATE`) plus a
+   * fail-closed re-assert after the row lock. Recorded here, not papered over.
+   */
+  private async evaluateCancelRoundFinalInLock(
+    client: ApprovalDbClient,
+    engineInstanceId: string,
+  ): Promise<{
+    readonly roundId: string
+    readonly documentId: string
+    readonly evaluation: CancelRoundFinalEvaluationV1
+    readonly policySnapshotAtDecision: string
+  }> {
+    // ② the round row.
+    const roundResult = await client.query<{ id: string; document_id: string }>(
+      `SELECT id, document_id FROM approval_rounds
+        WHERE engine_instance_id = $1 AND outcome = 'pending'
+        FOR UPDATE`,
+      [engineInstanceId],
+    )
+    const round = roundResult.rows[0]
+    if (!round || roundResult.rows.length !== 1) {
+      // Same fail-closed rationale as 判据 III's `rowCount !== 1`: a cancel-round engine instance
+      // reaching its terminal approve with no single pending round means WI-4's one-round-per-
+      // instance invariant is already broken. 基础设施异常 path (lock §3 C-3 row 5): throw ⇒ the
+      // caller's transaction rolls back ⇒ the round stays `pending` and keeps its seats.
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to evaluate',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+
+    // ③ the original document instance.
+    const originalResult = await client.query<ApprovalInstanceRow>(
+      `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
+      [round.document_id],
+    )
+    const original = originalResult.rows[0]
+    if (!original) {
+      throw new ServiceError(
+        'Cancel-round document instance not found at final evaluation',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+
+    // §2-G4 「双时点按当前策略评估」 — re-derive from the original document's CURRENT metadata, so a
+    // policy that changed between creation and decision is what this evaluation sees. §4: the
+    // decision snapshot is written 同形 with the creation snapshot, on BOTH branches.
+    const { suite, windowDays } = deriveCancelRoundRoundPolicy(toNullableRecord(original.metadata))
+    const policySnapshotAtDecision = JSON.stringify({
+      definitionPolicy: original.policy_snapshot,
+      roundPolicy: { windowDays, suite },
+    })
+
+    // §2-G2 「时间锚固定为首次对应时间(撤销:初始轮 `approved_at`)」 — the FIRST approved transition
+    // on the original document, read off its own audit trail (`approval_instances` has no
+    // `approved_at` column); `MIN` is 「首次」 and is what makes the anchor 「不随修订滚动」.
+    // The window comparison runs on the DATABASE clock, the same `now()` every other write here
+    // uses, so a fixture moves the anchor rather than the clock.
+    const windowResult = await client.query<{ approved_at: Date | null; expired: boolean | null }>(
+      `SELECT anchor.approved_at,
+              now() > anchor.approved_at + make_interval(days => $2::int) AS expired
+         FROM (SELECT MIN(created_at) AS approved_at
+                 FROM approval_records
+                WHERE instance_id = $1 AND to_status = 'approved') AS anchor`,
+      [round.document_id, Math.trunc(windowDays)],
+    )
+    const window = windowResult.rows[0]
+    if (!window || window.approved_at === null || window.expired === null) {
+      // Implementer choice, FLAGGED for owner registration (the lock names the anchor but not its
+      // absence): an approved document with no `to_status='approved'` record — a legacy/bridge row
+      // — cannot be evaluated against G2's anchor. Refusing to decide (throw ⇒ rollback ⇒ round
+      // stays `pending`, seats kept, retryable) is preferred over closing the round as `expired`,
+      // which would be irreversible on the strength of missing evidence.
+      throw new ServiceError(
+        'Cancel-round document has no approved-at anchor for the window evaluation',
+        409,
+        'CANCEL_ROUND_WINDOW_ANCHOR_MISSING',
+      )
+    }
+
+    // C-3 row 3 「最终评估:窗口/策略已关」. `forbidden` is the policy half: the suite may have been
+    // re-tagged after creation, and §14.3 #14's creation gate cannot speak for the decision point.
+    const evaluation: CancelRoundFinalEvaluationV1 =
+      suite === 'forbidden' || windowDays <= 0 || window.expired
+        ? { decision: 'expired' }
+        : { decision: 'redeem' }
+
+    return {
+      roundId: round.id,
+      documentId: round.document_id,
+      evaluation,
+      policySnapshotAtDecision,
+    }
+  }
+
+  /**
+   * Lock §3 C-3 「持久化收口」 + §14.2 判据 IV — the C-3 SYSTEM-side close, shared by both of its
+   * causes (窗口/策略已关 ⇒ `expired`, 业务不可逆 ⇒ `blocked`). Writes inside the caller's
+   * transaction and does NOT commit; the caller commits and returns.
+   *
+   * What it deliberately does NOT do: build or enqueue a completion event. 判据 IV's 「零完成事件」
+   * is a property of this path having no such call at all, not of a flag being off — and the
+   * caller must `return` immediately afterwards, because falling through would let `:11070`'s
+   * status write overwrite `rejected` with `approved` and `:11172`'s enqueue fire the event.
+   */
+  private async closeCancelRoundSystemTerminalInTxn(
+    client: ApprovalDbClient,
+    params: {
+      readonly engineInstanceId: string
+      readonly instance: ApprovalInstanceRow
+      readonly nextVersion: number
+      readonly currentNodeKey: string | null
+      readonly evaluation: Exclude<CancelRoundFinalEvaluationV1, { decision: 'redeem' }>
+      readonly policySnapshotAtDecision: string
+    },
+  ): Promise<void> {
+    const { engineInstanceId, instance, nextVersion, currentNodeKey, evaluation } = params
+    const reason = cancelRoundCloseReason(evaluation)
+
+    // 席位失效 (判据 IV) — same helper the approver-reject terminal uses. MEASURED, not assumed:
+    // deleting this call leaves the 判据 IV acceptance case GREEN (mutation M-6), because every
+    // approve mode already deactivates the acting seat before the terminal advance is reached
+    // (`'all'`: `:11470`), and a terminal resolution means no later node's seats exist yet. So on
+    // the paths reachable today this is defence in depth, not the cause of the released seat — the
+    // acceptance assertion is an end-state check and is documented as such rather than as proof
+    // that this line is load-bearing. It stays because a mode that leaves a seat active would
+    // otherwise close a round with a live assignment, and because dropping it would make this
+    // closure differ from the approver-reject terminal it mirrors.
+    await this.deactivateAllActiveAssignments(client, engineInstanceId)
+
+    // 引擎 `status='rejected'` — C-3 「复用现有 `rejected`」, no new engine terminal state (§3 C-3
+    // last-but-one bullet). Statement shape copied from the `request.action === 'reject'` terminal.
+    await client.query(
+      `UPDATE approval_instances
+       SET status = 'rejected',
+           version = $2,
+           current_node_key = NULL,
+           current_step = total_steps,
+           metadata = COALESCE(metadata, '{}'::jsonb) - 'parallelBranchStates',
+           updated_at = now()
+       WHERE id = $1`,
+      [engineInstanceId, nextVersion],
+    )
+
+    // The audit row. Action verb is the EXISTING `reject` — a new verb would land on seven pinned
+    // copies of the action union across lines (attendance P26 among them); what distinguishes a
+    // system close from an approver's reject is the sentinel actor plus the reason, which is the
+    // lock's own criterion (「系统终结身份(非真人 actor)与专用 reason 是区分『审批人驳回』的唯一依据,
+    // 历史记录必须能查出来」). The reason therefore lives in a queryable metadata key, not in prose
+    // inside `comment`.
+    await this.insertApprovalRecord(client, engineInstanceId, {
+      action: 'reject',
+      actorId: APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR,
+      actorName: APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR,
+      comment: null,
+      fromStatus: instance.status,
+      toStatus: 'rejected',
+      fromVersion: instance.version,
+      toVersion: nextVersion,
+      metadata: {
+        nodeKey: currentNodeKey,
+        cancelRoundSystemClose: true,
+        cancelRoundCloseReason: reason,
+        cancelRoundOutcome: evaluation.decision,
+        // The fine-grained business cause is persisted BESIDE the bounded reason token, never
+        // concatenated into it (the 判据 IV pin recorded in the phase-2 verification MD §2).
+        ...(evaluation.decision === 'blocked' ? { cancelRoundBlockDetail: evaluation.detail } : {}),
+      },
+    })
+
+    // 轮次 `expired`/`blocked` + `ended_at` (I3 「终结即释放」: the partial unique index is
+    // `WHERE outcome = 'pending'`, so this write is what frees the document for a next round) and
+    // §4's decision-time snapshot, written 同形 on this branch too.
+    const roundResult = await client.query(
+      `UPDATE approval_rounds
+          SET outcome = $2,
+              ended_at = now(),
+              block_reason = $3,
+              policy_snapshot_at_decision = $4
+        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+      [
+        engineInstanceId,
+        evaluation.decision,
+        evaluation.decision === 'blocked' ? reason : null,
+        params.policySnapshotAtDecision,
+      ],
+    )
+    if (roundResult.rowCount !== 1) {
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to close',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
   }
 
   /** T3-6: best-effort read-model projection at create — never throws into the approval flow. */
@@ -12338,6 +12603,53 @@ export class ApprovalProductService {
            WHERE id = $1`,
           [id],
         )
+      }
+
+      // ─── Lock §14.3 outlet #5′ (new anchor; registered as #5′) ─────────────────────────────────
+      // Lock §3 C-2 「挂点位置」 + §14.2 判据 IV. This is census outlet #5 — `dispatchAction`'s
+      // approve fall-through, the ONE `approved` outlet a cancel round may pass through — and the
+      // anchor the lock fixes is 「先于任何终态状态写」, i.e. immediately before the
+      // `UPDATE approval_instances SET status = $2` below, NOT before the completion enqueue (a
+      // hook defined on the enqueue would silently miss the `return` branch, §11-③).
+      //
+      // Only a TERMINAL approve advance is in scope: `resolution.status === 'approved'` is exactly
+      // the condition under which the enqueue below builds a completion event.
+      if (resolution.status === 'approved' && isCancelRoundInstance(instance)) {
+        const { evaluation, policySnapshotAtDecision } =
+          await this.evaluateCancelRoundFinalInLock(client, id)
+        if (evaluation.decision !== 'redeem') {
+          // C-3 持久化收口. Everything below — the status write, the approve record, the
+          // assignment inserts, the completion event, the post-commit emits — is skipped by the
+          // `return`, which is itself load-bearing (判据 IV's own mutation: remove it and the
+          // status is overwritten back to `approved` and a completion event appears).
+          await this.closeCancelRoundSystemTerminalInTxn(client, {
+            engineInstanceId: id,
+            instance,
+            nextVersion,
+            currentNodeKey,
+            evaluation,
+            policySnapshotAtDecision,
+          })
+          await client.query('COMMIT')
+          // Metrics only — `safeMetricsCall`-wrapped, and deliberately NOT
+          // `emitApprovalCompletionEvent` / `buildCompletionEvent`, which is what 判据 IV's
+          // 「零完成事件」 names. The terminal metric reports `rejected`, matching the engine row.
+          this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+          this.emitTerminalMetric(id, 'rejected')
+          // Same shape as `dispatchAction`'s own bottom return (lock §14.2 判据 IV 「return 一个与
+          // `:11227-11231` 同形的 `UnifiedApprovalDTO`」) — the read-back, the 404 on a missing
+          // row, the return; not the `!` non-null assertion the in-function branches above use.
+          const closedApproval = await this.getApproval(id, actor.userId, actor.roles)
+          if (!closedApproval) {
+            throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+          }
+          return closedApproval
+        }
+        // TODO(判据 II, next unit): `redeem` must run C-1 through the W4 external transaction
+        // entry and write `approval_rounds.outcome = 'applied'` before the status write below.
+        // Until it does, a redeemed round's row stays `pending` after its engine instance goes
+        // `approved` — the I3 gap this branch inherits from phase 1, disclosed in the phase-2
+        // verification MD rather than silently carried.
       }
 
       await client.query(
