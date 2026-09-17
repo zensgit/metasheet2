@@ -157,9 +157,14 @@ const SOURCE_QUEUE_PERMISSION_CODE_CLASS_6 = `attendance:approve-c6-${suffix}`
 // viewer with a `('role', <its own role string>)` seat matching its own resolved role) but use its
 // own suffixed role string for BOTH its `users.role` column and its `('role', <string>)` seat's
 // `assignee_id` (mirroring `ROLE_NAME_CLASS_2`/`ROLE_NAME_CLASS_3B`), never the bare `'employee'`
-// literal — `git grep -n "'employee'"` under `src/` turns up no RBAC-load-bearing read of that
-// exact string (unlike `role_id='admin'`), so suffixing it changes nothing the query under test
-// reads.
+// literal. Verified, not assumed: `git grep -n "'employee'" -- packages/core-backend/src | wc -l`
+// → 2, both in `routes/attendance-admin.ts` (`AttendanceRoleTemplateId`'s type-union member and
+// `ATTENDANCE_ROLE_TEMPLATES.employee.id`) — a template KEY for an unrelated attendance-admin
+// role-assignment feature whose actual `role_id` written to `user_roles` is `'attendance_employee'`
+// (see the SAME object's `roleId` field), never the bare string `'employee'`; neither hit is a
+// comparison against `users.role` or `resolveApprovalActorRoles`'s output (unlike `role_id='admin'`,
+// which `rbac/service.ts`'s `isAdmin` DOES read literally) — so suffixing this string changes
+// nothing the query under test reads.
 const ROLE_NAME_CLASS_11 = `employee-c11-${suffix}`
 
 function pool(): Pool {
