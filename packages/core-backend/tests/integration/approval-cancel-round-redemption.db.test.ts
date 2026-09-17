@@ -324,6 +324,14 @@ describeIfDatabase('cancel-round redemption (WI-13, 判据 III only): revoke/rej
       // REVOKE branch (A4, `requesterSnapshot?.id !== actor.userId`) — distinct from WI-16's
       // create-time `CANCEL_ROUND_REQUESTER_ONLY` gate in `creation.db.test.ts`, which the lock
       // itself warns looks alike (§14.1: "两者混同正是…陷阱").
+      //
+      // Gate review P3-C item 1 mutation probe (verification MD Part E, §E1): this test's own
+      // 403 assertion below is itself downstream of the seed's `allowRevoke` gate
+      // (`ApprovalProductService.ts:10554`, checked BEFORE the requester-identity check this test
+      // targets) — with `allowRevoke=false` the impostor would get 409 APPROVAL_REVOKE_DISABLED
+      // here instead of 403. Not a defect (the seed's real value is `true`, and this is the shipped
+      // chokepoint order), but worth knowing before "fixing" a future 409 here by touching identity
+      // logic instead of checking `allowRevoke` first.
       const suffix = `revoke-forbidden-${TS}`
       const fixture = await seedPendingCancelRound(suffix)
       const impostorId = `wi13-impostor-${suffix}`
