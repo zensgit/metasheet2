@@ -110,7 +110,46 @@
  * anywhere alongside `buildAttendanceCalculationRolloutAdvisoryKey` in `w4c0-identity.ts` AND
  * whether any production call site takes it; per lock:304 ("首期没有 class-11 就不要虚构它"), if
  * either is absent on this head the honest deliverable is "not constructible on this head" plus
- * that grep — not a synthesized pairing. Q-C is a first-phase ABSENCE claim (lock:305: creation-
+ * that grep — not a synthesized pairing.
+ *
+ * CORRECTION (2026-09-17, before that grep was ever run): the sentence above is WITHDRAWN, not
+ * followed. A first pass searched this file for the literal substring `class-10` and found zero
+ * hits, which would have supported "not constructible" — but the source text spells it
+ * ``class-`10` `` (with backticks around the digits), so a literal `class-10` search is a grep
+ * bug, not evidence of absence (memory: `feedback_empty_read_is_not_absence.md`). Re-run with the
+ * backtick-aware pattern, both class-`10` and class-`11` key builders exist and are exported
+ * right beside `buildAttendanceCalculationRolloutAdvisoryKey`, and BOTH are taken by real
+ * production code, not just defined:
+ *   - class-`10` (`| CLASS_10_PREFIX`, `w4c0-identity.ts:970`):
+ *     `buildAttendanceResultOperationAdvisoryKey` (`:1032`) and
+ *     `buildAttendanceLegacyIdempotencyAdvisoryKey` (`:1072`).
+ *   - class-`11` (`| CLASS_11_PREFIX`, `w4c0-identity.ts:970`):
+ *     `buildAttendanceCalculationTargetAdvisoryKey` (`:1093`) and
+ *     `buildAttendanceOperationalBulkTargetAdvisoryKey` (`:1100`).
+ *   - production acquisition sites (the builders' own callers, not just their definitions —
+ *     `grep -rln '<name>' packages/core-backend/src plugins --include='*.ts' --include='*.cjs' |
+ *     grep -v '/__tests__/\|\.test\.\|/tests/'` per name, union not intersection):
+ *     `acquireAttendanceResultOperationLocks` (`:1497`) ← `w4c3a-import-rollback-boundary.ts`,
+ *     `w4c3a-rollout-control.ts`, `w4c3a-import-rollback.ts`;
+ *     `acquireAttendanceImportReservationLocksV1` (`:1516`) ← `w4c3a-legacy-plan-processor.ts`,
+ *     `w4c3a-sync-import-host.ts`, `w4c3a-legacy-plan-enqueue.ts`;
+ *     `acquireAttendanceCalculationTargetLocks` (`:1546`) ← `w4c3a-legacy-plan-processor.ts`,
+ *     `w4c3a-import-rollback-boundary.ts`, `w4c3a-rollout-control.ts`,
+ *     `w4c3c-record-operation-boundary.ts`, `w4c3a-legacy-plan-enqueue.ts`,
+ *     `w4c3a-import-rollback.ts`, `w4c2-live-scheduled-boundary.ts`;
+ *     `acquireAttendanceOperationalBulkTargetLockV1` (`:1560`) ← `w4c3a-legacy-plan-processor.ts`,
+ *     `w4c3a-legacy-plan-enqueue.ts` — a live, multi-caller keyspace, not a defined-but-dormant
+ *     one.
+ * Q-B is therefore CONSTRUCTIBLE on this head, not absent — lock:304's "首期没有 class-11 就不要
+ * 虚构它" does not apply (class-`11` is not being invented; it already exists and is already
+ * acquired). This correction only withdraws the (never-executed) "not constructible" shortcut; it
+ * does not itself construct Q-B's census — that construction (which `attendance_requests` row and
+ * which of the four builders above actually co-occur in one transaction, forward order, reversed
+ * order, positive control) remains a follow-up slice of this same WI-0, unattempted here. Marking
+ * the state at the claim, not voiding the paragraph (memory:
+ * `feedback_supersession_marker_must_evaluate_not_void.md`).
+ *
+ * Q-C is a first-phase ABSENCE claim (lock:305: creation-
  * time auto-approve is forbidden, so `record-link:row-auth` never co-occurs with a W4 lock in
  * phase 1); per `feedback_positive_control_not_failclosed.md` an absence claim needs a positive
  * control proving the harness CAN see co-occurrence when it exists, not just a clean run —
