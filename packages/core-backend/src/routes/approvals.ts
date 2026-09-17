@@ -75,6 +75,15 @@ import {
   listApprovalDepartments,
 } from '../services/approval-directory'
 import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
+import {
+  archiveApprovalTemplateGroup,
+  createApprovalTemplateGroup,
+  linkApprovalTemplateToGroup,
+  listApprovalTemplateGroups,
+  renameApprovalTemplateGroup,
+  unarchiveApprovalTemplateGroup,
+  unlinkApprovalTemplateFromGroup,
+} from '../services/ApprovalTemplateGroupService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -306,6 +315,45 @@ function resolveApprovalTenantId(req: Request): string | undefined {
   if (typeof candidate !== 'string') return undefined
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : undefined
+}
+
+/**
+ * Approval form grouping — design lock v2.13 §2 "org 从哪来" (acceptance A‴). Every group/link
+ * endpoint below calls this FIRST, before touching the database. `orgId` appearing in the request
+ * body or query string is REJECTED outright (400 `ORG_ID_NOT_ACCEPTED`) — this router's own
+ * `/directory/member-groups` `orgId` is CALLER-SUPPLIED (self-documented as such at that route)
+ * and is NOT the precedent to copy here. The only accepted source is `req.authenticatedTenantId`
+ * (`jwt-middleware.ts`), set ONLY from the verified token's own `tenantId` claim — never
+ * `req.user.tenantId`, which the `x-tenant-id` request header can backfill when the token itself
+ * carries no tenant, and which this router therefore never reads for this purpose. Missing it is
+ * fail-closed 403 `SESSION_ORG_REQUIRED`, zero writes on every path (a multi-org member with no
+ * selected session-org — `AuthService.resolveSessionTenantId` mints `authenticatedTenantId` only
+ * when the caller belongs to exactly one org — gets exactly this response on every one of these
+ * endpoints; that IS this slice's J acceptance row, since no session-org picker UI exists yet).
+ *
+ * Returns the resolved org id, or `undefined` after already writing the error response — callers
+ * must `return` immediately in that case without writing anything else.
+ */
+function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
+  const bodyOrgId = isPlainRecord(req.body) ? req.body.orgId : undefined
+  const queryOrgId = (req.query as Record<string, unknown> | undefined)?.orgId
+  const orgIdSupplied =
+    (typeof bodyOrgId === 'string' && bodyOrgId.trim().length > 0)
+    || (typeof queryOrgId === 'string' && queryOrgId.trim().length > 0)
+  if (orgIdSupplied) {
+    res.status(400).json(
+      approvalErrorResponse('ORG_ID_NOT_ACCEPTED', 'orgId is not accepted in the request body or query string'),
+    )
+    return undefined
+  }
+  const authenticatedTenantId = req.authenticatedTenantId
+  if (typeof authenticatedTenantId !== 'string' || authenticatedTenantId.trim().length === 0) {
+    res.status(403).json(
+      approvalErrorResponse('SESSION_ORG_REQUIRED', 'An authenticated session organization is required'),
+    )
+    return undefined
+  }
+  return authenticatedTenantId.trim()
 }
 
 // Exported for the approval-attachment upload route (§4.1 template-access gate): the attachment
@@ -1019,6 +1067,106 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_TEMPLATE_VERSION_RESTORE_FAILED',
         'Failed to restore approval template version',
       )
+    }
+  })
+
+  // ── Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 ────────────
+  // I7: writes gated by `approvalTemplateAdminGuard` (same as `/api/approval-templates` itself,
+  // `:803/:851/:940/:954`); the one read below by `rbacGuard('approvals:read')` (same as `:531`).
+  // Every handler resolves `orgId` via `resolveApprovalTemplateGroupOrgId` FIRST — before any
+  // service call — so a rejected/missing org never reaches the database (A‴, zero writes).
+
+  r.get('/api/approval-template-groups', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const groups = await listApprovalTemplateGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_LIST_FAILED', 'Failed to list approval template groups')
+    }
+  })
+
+  r.post('/api/approval-template-groups', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const name = typeof req.body?.name === 'string' ? req.body.name : ''
+      const group = await createApprovalTemplateGroup(orgId, name, actorId)
+      res.status(201).json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED', 'Failed to create approval template group')
+    }
+  })
+
+  r.patch('/api/approval-template-groups/:id', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const name = typeof req.body?.name === 'string' ? req.body.name : ''
+      const group = await renameApprovalTemplateGroup(orgId, req.params.id, name)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_RENAME_FAILED', 'Failed to rename approval template group')
+    }
+  })
+
+  r.post('/api/approval-template-groups/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const group = await archiveApprovalTemplateGroup(orgId, req.params.id)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_ARCHIVE_FAILED', 'Failed to archive approval template group')
+    }
+  })
+
+  r.post('/api/approval-template-groups/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const group = await unarchiveApprovalTemplateGroup(orgId, req.params.id)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED', 'Failed to unarchive approval template group')
+    }
+  })
+
+  // Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
+  r.post('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : ''
+      if (!groupId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_GROUP_ID_REQUIRED', 'groupId is required'))
+      }
+      const link = await linkApprovalTemplateToGroup(orgId, req.params.id, groupId, actorId)
+      res.status(201).json({ link })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED', 'Failed to link approval template to group')
+    }
+  })
+
+  // Unlink is an INDEPENDENT UPDATE, never routed through the upsert above (§2). Idempotent 204
+  // whether the template was linked, already unlinked, or never linked at all (acceptance H).
+  r.delete('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      await unlinkApprovalTemplateFromGroup(orgId, req.params.id)
+      res.status(204).end()
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED', 'Failed to unlink approval template from group')
     }
   })
 
