@@ -321,16 +321,16 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 | A‴ | org 只取 `authenticatedTenantId`(三格) | 同文件 `:349`(原 `:344` +5) | `A‴: org comes ONLY from req.authenticatedTenantId — body/query orgId rejected, forged header ignored, missing tenant fails closed` | 同上 |
 | B | 归档是一个事务;并发挂接见证已归档态 | 同文件 `:397`(原 `:392` +5) | `B: archive is one transaction (members unlinked, never deleted); a concurrent link blocks then sees the archived state` | 同上 |
 | B′ | 解除关联不回落 category;从未关联仍显示 | 同文件 `:447`(原 `:437`,修复轮 1 +5、修复轮 3 再 +5——round 3 在 `it(` 上方插入了 5 行 NOTE 注释,见 §20.2) | `B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate`(修复轮 3 收窄前的原名见 §13.2 逐字记录 / §20.2) | 同上(**§13.5 披露**:本用例只做 DB 谓词层面演示,不经任何服务/路由代码) |
-| B″ | 首次/重新挂接同一 upsert;并发首次挂接双成功 | 同文件 `:713`(原 `:669`,修复轮 1 后 +75,修复轮 4 在 F 内插入约 37 行使其再顺移 +44 到 `:713`——已在修复轮 5/§22 现场重算,见 P3-2) | `B″: first-link and re-link share ONE atomic upsert; two concurrent FIRST links to different groups both succeed, later commit wins` | 同上 |
+| B″ | 首次/重新挂接同一 upsert;并发首次挂接双成功 | 同文件 `:713`(原 `:669`,与 G/H/I′ 同一组三次提交下位移完全相同——修复轮 1 后 `:594→669(+75)`,`cbaa1bc13`(修复轮 3)+20 → `:689`,`5b3d6310c`(修复轮 4)+24 → `:713`;已在修复轮 5/§22.2 逐提交现场核对,见 P3-2) | `B″: first-link and re-link share ONE atomic upsert; two concurrent FIRST links to different groups both succeed, later commit wins` | 同上 |
 | C | `section=` 分节 | **不在本切片** — 锁文 §6「期 3」;`section` 查询参数在分期 1 不存在(A‴ 测试文件 `:391-392`(原 `:386-387` +5)自陈) | — | A-4 |
 | D | category 后备(仅从未关联) | **不在本切片** — 同上;其底层 `NOT EXISTS` 判据已由 B′ 间接验证(见 §13.5),但 D 本身的展示/筛选端点属分期 3 | — | A-4 |
 | E(前半:序号 + COMMIT 映射) | 并发建组 n+1/n+2;COMMIT 期 DEFERRABLE 映射 500;正控(裸 SQL 撞 `atg_sort_unique`/`atg_sort_archived_pair`);RR-默认池前提哨兵 | `approval-template-groups-serialization.db.test.ts:161,194,221,233,278,300`(原 `:162,195,222,234,279,301`,修复轮 3 把头部注释从 6 行改成 5 行后全表 off-by-one,已在修复轮 5/§22 现场 `grep -n "^  it("` 重算,见 P3-2) | `sentinel: the service pool REALLY runs repeatable-read default — a bare-BEGIN generic transaction is RR`(harness 非空转前提);`E positive control: two same-org active groups committing the SAME sort_order hit 23505 on atg_sort_unique at COMMIT, not at INSERT`;`E positive control: archiving without clearing sort_order hits the paired CHECK (atg_sort_archived_pair) immediately`;`E: two concurrent creates via the PRODUCTION path get sort_order n+1/n+2 …`;`E: negative control — an unrelated advisory key never blocks a concurrent create …`;`E: COMMIT-time (not statement-time) DEFERRABLE violation on the production create path maps to 500 GROUP_SORT_CONFLICT` | 同上 |
 | E(后半:并发重排) | 并发重排终态是其中一方完整排列 | **不在本切片** — 重排端点是分期 3(§6) | — | A-4 |
-| F | 授权面:写端点 admin guard,读端点 `approvals:read` | 同 lifecycle 文件 `:504`(原 `:485`,修复轮 2/3 在其之前的 B′ 用例上方累计插入注释使其顺移 +19,已在修复轮 5/§22 现场 `grep -n` 重算,见 P3-2) | `F: authorization — write endpoints require approvalTemplateAdminGuard, the list endpoint requires approvals:read; denial writes zero rows` | `approval-real-db-integration` |
-| G | 解档:干净态/同名活跃阻塞/改名冲入阻塞 | 同文件 `:638`(原 `:594`,修复轮 1 后 +69,此后修复轮 4 在 F 内插入约 37 行使其再顺移 +44——已在修复轮 5/§22 现场重算,见 P3-2) | `G: unarchive — clean case; blocked by another ACTIVE group with the same name; blocked by a group renamed into that name` | 同上 |
-| H | 解除幂等 | 同文件 `:680`(原 `:636`,同上顺移 +44,已重算) | `H: unlink is idempotent — never-linked, already-unlinked, and active-link cases` | 同上 |
+| F | 授权面:写端点 admin guard,读端点 `approvals:read` | 同 lifecycle 文件 `:504`(原 `:485`;精确按提交拆分:`cbaa1bc13`(修复轮 3)+13 → `:498`,`5b3d6310c`(修复轮 4)在 F 用例正上方新增块注释 +6 → `:504`,合计 +19;已在修复轮 5/§22.2 用 `git show <commit>:<path> | grep -n` 逐提交现场核对,见 P3-2) | `F: authorization — write endpoints require approvalTemplateAdminGuard, the list endpoint requires approvals:read; denial writes zero rows` | `approval-real-db-integration` |
+| G | 解档:干净态/同名活跃阻塞/改名冲入阻塞 | 同文件 `:638`(原 `:594`;精确按提交拆分:修复轮 1 后 +69 → `:594`,`cbaa1bc13`(修复轮 3)+20 → `:614`,`5b3d6310c`(修复轮 4,F 用例体内新增 18 行 + F 上方块注释 6 行)+24 → `:638`;已在修复轮 5/§22.2 逐提交现场核对,见 P3-2) | `G: unarchive — clean case; blocked by another ACTIVE group with the same name; blocked by a group renamed into that name` | 同上 |
+| H | 解除幂等 | 同文件 `:680`(原 `:636`,与 G 同一组三次提交下位移完全相同——`:636→656(+20)→680(+24)`,因 G/H 之间无插入,已重算) | `H: unlink is idempotent — never-linked, already-unlinked, and active-link cases` | 同上 |
 | I | I6 爆炸半径零(本地机械 diff) | 非 vitest 用例——本地命令(§6,已用现场 HEAD 重跑,见 §13.1) | — | 本地,非 CI |
-| I′ | I6 行为门(自动化 actor 未变) | 同 lifecycle 文件 `describe:753`,`(a):796`,`(b):824`(原 `:709`/`:752`/`:780`,同上顺移 +44,已在修复轮 5/§22 重算) | `(a) MAIN sees exactly {dept-scoped, role-scoped}, never the unseen template; CONTROL sees nothing (positive control)`;`(b) all three actor constructors return EXACTLY the ApprovalTemplateVisibilityActor key set at runtime (no stray optional field)` | `approval-real-db-integration` |
+| I′ | I6 行为门(自动化 actor 未变) | 同 lifecycle 文件 `describe:753`,`(a):796`,`(b):824`(原 `:709`/`:752`/`:780`,与 G/H 同一组位移,已重算) | `(a) MAIN sees exactly {dept-scoped, role-scoped}, never the unseen template; CONTROL sees nothing (positive control)`;`(b) all three actor constructors return EXACTLY the ApprovalTemplateVisibilityActor key set at runtime (no stray optional field)` | `approval-real-db-integration` |
 | J | 多 org 成员脱困(403 + 前端选择器 + 未知 `section=` 400) | **后端半**:同 A‴ 用例第 (iii) 格(`:382-389`,原 `:377-384` +5,A‴ 测试自陈「This is also J's only backend-observable leg」);**前端半 + 未知 token 400**:不在本切片(见设计 MD §1.3,归 A-2/A-4) | `approval-real-db-integration`(后端半) |
 | K | 改名/建组/解档持 L0,阻塞可证伪 | `approval-template-groups-serialization.db.test.ts:328,350,372`(原 `:329,351,373`,同 E 前半的 off-by-one,已重算) | `K: an L0-only holder (no L1 row lock) stalls a concurrent CREATE in the same org`;`K: an L0-only holder stalls a concurrent RENAME of an existing group in the same org`;`K: an L0-only holder stalls a concurrent UNARCHIVE of an archived group in the same org` | 同上 |
 
@@ -454,7 +454,7 @@ apps/web/src/composables/useSessionOrg.ts
 
 ## 15. Mutation 台账(每条:备份 → 改 → 跑 → 还原 → cmp;全部在 `metasheet2_lock_a` 上现场执行)
 
-> **行号作用域说明(修复轮 1 追加)**:本节及以下 §16/§17 内所有 `routes/approvals.ts`/`ApprovalTemplateGroupService.ts` file:line 引用,记录的是**当时被 mutate 的那次 HEAD**(`252d01865`,门审报告 `impl-gate-A-slice1-round1-20260918.md` 审的同一 commit)——探针已全部还原,这些行号是「曾在此处做过什么、看到什么」的历史证据,不是「现在去这一行找」的活地图。修复轮 1(§18)在 `routes/approvals.ts` 顶部与内部新增了共 30 行(§3.1 设计 MD 脚注有精确位移表),本节列出的旧行号**未跟随重算**——按需核对时,用本节的函数名/端点路径重新 `grep -n` 现场行号,不要按此处数字直接跳转。§12(锁文验收表 crosswalk)与设计 MD §3.1/§3.2/§3.3/§5 是「活地图」,已在修复轮 1 里重新核对为当前 HEAD;§15/§16/§17 是「历史记录」,不重算。
+> **行号作用域说明(修复轮 1 追加)**:本节及以下 §16/§17 内所有 `routes/approvals.ts`/`ApprovalTemplateGroupService.ts` file:line 引用,记录的是**当时被 mutate 的那次 HEAD**(`252d01865`,门审报告 `impl-gate-A-slice1-round1-20260918.md` 审的同一 commit)——探针已全部还原,这些行号是「曾在此处做过什么、看到什么」的历史证据,不是「现在去这一行找」的活地图。修复轮 1(§18)在 `routes/approvals.ts` 顶部与内部新增了共 30 行(§3.1 设计 MD 脚注有精确位移表),本节列出的旧行号**未跟随重算**——按需核对时,用本节的函数名/端点路径重新 `grep -n` 现场行号,不要按此处数字直接跳转。§12(锁文验收表 crosswalk)与设计 MD §3.1/§3.2/§3.3/§5 是「活地图」,已在修复轮 1 里重新核对为当前 HEAD;§15/§16/§17 是「历史记录」,不重算。**§18.1/§18.2/§19.1 是第三类**:它们记录的是「修复轮 1/2 落地时那次 HEAD 上的行号」,曾经也是「历史记录、不重算」,但修复轮 5(§22.2,gate 第 2 轮 P3-2)已把其中会被读者当作导航用的六处 `file:line` 引用按当前 HEAD 现场重算并原地改写——读者今天可以把 §18.1/§18.2/§19.1 的行号当活地图用,但仍需留意:未来若再有代码提交插入行数,这三节会重新变回历史记录,除非再跑一次同样的重算。
 
 统一流程:`cp <file> /tmp/mutation-backups/<file>.orig` 一次性备份 → 用 `sed -i.bak`/`python3` 精确改动 → 用 `-t "<用例名片段>"` 只跑受影响的一条用例 → `cp <backup> <file>` 还原 → `cmp <backup> <file>` 确认逐字节相同。收尾复核:`git status --porcelain` 与 `git diff --stat` 均为空(§16)。
 
@@ -607,6 +607,7 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 8. **§3.4(设计 MD)记录的实现者裁量**(重复归档复用 `GROUP_ARCHIVED`)—— 未获锁文文本背书,无验收行覆盖,门审需明确认可或要求改动。
 9. **§3.5(设计 MD,修复轮 1 新增)记录的实现者裁量**(挂接可见性失败形状复用 `APPROVAL_TEMPLATE_NOT_FOUND`,404 而非发明新码)—— 同 #8,未获锁文文本背书(锁文只 ratify「要校验」,未点名失败码),无独立验收字母覆盖(附属于 I5/§2,不是锁文 §4 表的一行),门审需明确认可或要求改动;可达性披露见 §18.1。
 10. **G 的双层防线定性(修复轮 2,gate P2-2 收口)**——`unarchiveApprovalTemplateGroup` 同时保留「显式预检查 + 共享 mapper 分支」两层同名冲突防御是**实现选择**,不是锁文要求;第一层(`:311-317`)可安全删除且不引入 TOCTOU(同 org 三条写路径共享同一把 L0),保留它的理由(避免 L0 临界区内一次注定失败的写)较薄。本轮**只更正了归因**(§15.1 结论重写 + 测试文件 `:591-` 注释同步,删除了「需要发明新 mutation」的被驳论断),未删除代码——门审需裁 (a) 删除预检查使 G 恢复单条 mutation 判别力,或 (b) 接受现状为实现选择。PR body 开出时需点名此项(与 #2/#8/#9 同批)。
+11. **非 uuid 模板 id + 格式合法但不存在的组 id → 挂接端点响应从 404 变 500(修复轮 5,gate 第 2 轮 NIT 现场实测确认,§22.5)**——本切片新增的 §2 挂接可见性校验(`isApprovalTemplateVisibleForGroupLink`,先于 `linkApprovalTemplateToGroup` 内的组存在性检查执行)把「模板 id 是否合法 uuid」的检查时机提前到了组检查之前;对这一具体组合,修复前(mutation 探针还原到 P2-1 之前的调用路径,现场验证)是 404 `GROUP_NOT_FOUND`,修复后(当前 HEAD,未改代码,现场验证)是 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED`。**这是真实的行为差异**,不是「今天不可达」的假设缺口(与 #9 不同类)。是否补一格验收测试是设计裁量,本轮不新增(范围控制);PR body 必须点名为已知行为差异,不能只写「未验证」。
 
 ## 18. 修复轮 1(2026-09-18)—— gate `impl-gate-A-slice1-round1-20260918.md` P2-1 / P2-4 收口
 
@@ -880,7 +881,7 @@ OK
 
 ## 22. 修复轮 5(2026-09-18)—— gate `impl-gate-A-slice1-round2-20260918.md`(第 2 轮门审)P2-1 / P3-2 收口
 
-被审 head:`5b3d6310c`(修复轮 4 之后;第 2 轮门审的被审 head 与此相同)。**本轮是纯文档改动**——只动本文档(`docs/development/approval-template-groups-phase1-verification-20260918.md`)的 §12/§14/§18.1/§18.2/§19.1 五处行号与计数引用,**零 `.ts` 改动、零 DDL、零 `plugin-tests.yml`/`vitest.config.ts` 改动**,不需要 mutation 探针(探针证明的是代码断言的判别力,本轮没有改动任何断言或代码,只改文档里记录的行号/计数,回归确认走的是「套件仍然全绿 + typecheck 仍然 exit 0」,同 §19.1 对纯注释改动的处理方式)。
+被审 head:`5b3d6310c`(修复轮 4 之后;第 2 轮门审的被审 head 与此相同)。**提交内容是纯文档改动**——最终 `git diff` 只有本文档(`docs/development/approval-template-groups-phase1-verification-20260918.md`)一个文件,改的是 §12/§14/§17/§18.1/§18.2/§19.1 的行号与计数引用,**零 `.ts` 改动、零 DDL、零 `plugin-tests.yml`/`vitest.config.ts` 改动落地**。P2-1/P3-2 两条本身是台账/行号勘误,不需要 mutation 探针(探针证明的是代码断言的判别力,这两条没有改动任何断言或代码),回归确认走的是「套件仍然全绿 + typecheck 仍然 exit 0」,同 §19.1 对纯注释改动的处理方式;但本轮**顺带核实了 NIT**(门审留白的一条行为差异事实),核实过程对 `routes/approvals.ts` 与测试文件各做了一次 mutation 式探针(`cp` 备份 → 改 → 跑 → 还原 → `cmp`),过程见 §22.5,收尾两个文件均字节级复原,不计入本轮的净代码改动。
 
 ### 22.1 P2-1 —— §14 补充清单 #4 的机械计数在修复轮 4 之后为假,现场重算
 
@@ -909,31 +910,65 @@ $ grep -n "toBe(403)" tests/integration/approval-template-groups-lifecycle.db.te
 
 ### 22.2 P3-2 —— §12 验收映射表 / §18.1 / §18.2 / §19.1 的行号在修复轮 4 之后集体漂移,现场重算
 
-第 2 轮门审的第二条发现:修复轮 4 在 F 用例内插入约 37 行后,F 之后的全部用例(F 自身、request-shape codes、`§2(a)`/`§2(b)`、G、H、B″、I′)整体下移;同时修复轮 3 曾把 E 前半头部注释从 6 行改成 5 行,造成 E/K 两组行号 off-by-one——分支里此前有两个专门的「recompute line citations」提交(`bdfe29974` 对应修复轮 1、`ff993d3ef` 对应修复轮 3),修复轮 4 之后没有第三个,属於已建立的纪律漏了一次。
+第 2 轮门审的第二条发现:修复轮 4 之后,F 及其后的全部用例(F 自身、request-shape codes、`§2(a)`/`§2(b)`、G、H、B″、I′)整体下移;同时修复轮 3 曾把 E 前半头部注释从 6 行改成 5 行,造成 E/K 两组行号 off-by-one——分支里此前有两个专门的「recompute line citations」提交(`bdfe29974` 对应修复轮 1、`ff993d3ef` 对应修复轮 3),修复轮 4 之后没有第三个,属於已建立的纪律漏了一次。
 
-现场逐条 `grep -n "^\s*it('\|^\s*describe('"` 重新核对(命令与结果):
+现场逐条重新核对(命令为原样逐字输出,非目测重排;`\s` 是 GNU 扩展,macOS 系统 `grep` 不保证支持,改用可移植的 `-E "^ *(it|describe)\("`):
 
 ```
-$ grep -n "^\s*it('\|^\s*describe('" tests/integration/approval-template-groups-lifecycle.db.test.ts
-242:  it('A: ...     269:  it('A′: ...     317:  it('A″: ...     349:  it('A‴: ...
-397:  it('B: ...     447:  it('B′ (DB-level predicate only...     504:  it('F: ...
-544:  it('request-shape codes: ...                                569:  it('§2(a): ...
-591:  it('§2(b): ...                                               638:  it('G: ...
-680:  it('H: ...                                                   713:  it('B″: ...
-753:  describe('I′: ...    796:    it('(a) ...    824:    it('(b) ...
-$ grep -n "^\s*it('" tests/integration/approval-template-groups-serialization.db.test.ts
-161:  it('sentinel: ...   194:  it('E positive control: ... SAME sort_order ...
-221:  it('E positive control: ... archiving ...                    233:  it('E: two concurrent creates ...
-278:  it('E: negative control ...                                  300:  it('E: COMMIT-time ...
-328:  it('K: ... CREATE ...   350:  it('K: ... RENAME ...   372:  it('K: ... UNARCHIVE ...
+$ grep -nE "^ *(it|describe)\('" tests/integration/approval-template-groups-lifecycle.db.test.ts
+242:  it('A: same-org active-name conflict is 409; a different org may reuse the name; an archived name may be reused', async () => {
+269:  it('A′: cross-org does not overlap — the SAME global template goes into DIFFERENT groups for DIFFERENT orgs', async () => {
+317:  it('A″: cross-org link is 404 (org-scoped row-lock SELECT); the composite FK is the last-resort DB guard', async () => {
+349:  it('A‴: org comes ONLY from req.authenticatedTenantId — body/query orgId rejected, forged header ignored, missing tenant fails closed', async () => {
+397:  it('B: archive is one transaction (members unlinked, never deleted); a concurrent link blocks then sees the archived state', async () => {
+447:  it('B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate', async () => {
+504:  it('F: authorization — write endpoints require approvalTemplateAdminGuard, the list endpoint requires approvals:read; denial writes zero rows', async () => {
+544:  it('request-shape codes: GROUP_NAME_REQUIRED (blank name) and APPROVAL_GROUP_ID_REQUIRED (missing groupId)', async () => {
+569:  it('§2(a): the exported visibility predicate — visible to a non-manager in its own scope, hidden outside it, and false for a nonexistent id', async () => {
+591:  it('§2(b): the link endpoint 404s APPROVAL_TEMPLATE_NOT_FOUND (zero rows written) for a template id that does not exist', async () => {
+638:  it('G: unarchive — clean case; blocked by another ACTIVE group with the same name; blocked by a group renamed into that name', async () => {
+680:  it('H: unlink is idempotent — never-linked, already-unlinked, and active-link cases', async () => {
+713:  it('B″: first-link and re-link share ONE atomic upsert; two concurrent FIRST links to different groups both succeed, later commit wins', async () => {
+753:  describe('I′: I6 explosion-radius behavioural gate — automation template-visibility actor is UNCHANGED by this slice', () => {
+796:    it('(a) MAIN sees exactly {dept-scoped, role-scoped}, never the unseen template; CONTROL sees nothing (positive control)', async () => {
+824:    it('(b) all three actor constructors return EXACTLY the ApprovalTemplateVisibilityActor key set at runtime (no stray optional field)', async () => {
+$ grep -nE "^ *(it|describe)\('" tests/integration/approval-template-groups-serialization.db.test.ts
+161:  it('sentinel: the service pool REALLY runs repeatable-read default — a bare-BEGIN generic transaction is RR', async () => {
+194:  it('E positive control: two same-org active groups committing the SAME sort_order hit 23505 on atg_sort_unique at COMMIT, not at INSERT', async () => {
+221:  it('E positive control: archiving without clearing sort_order hits the paired CHECK (atg_sort_archived_pair) immediately', async () => {
+233:  it('E: two concurrent creates via the PRODUCTION path get sort_order n+1/n+2 — the RC pin lets the second read the freshly-committed MAX', async () => {
+278:  it('E: negative control — an unrelated advisory key never blocks a concurrent create (sanity check on the pg_blocking_pids probe, not a mutation-2 gate — see K below for that)', async () => {
+300:  it('E: COMMIT-time (not statement-time) DEFERRABLE violation on the production create path maps to 500 GROUP_SORT_CONFLICT', async () => {
+328:  it('K: an L0-only holder (no L1 row lock) stalls a concurrent CREATE in the same org', async () => {
+350:  it('K: an L0-only holder stalls a concurrent RENAME of an existing group in the same org', async () => {
+372:  it('K: an L0-only holder stalls a concurrent UNARCHIVE of an archived group in the same org', async () => {
 ```
 
-A/A′/A″/A‴/B/B′(在 F 之前)未受影响,行号不变;F/request-shape/§2(a)/§2(b)/G/H/B″/I′(在 F 及其后)与 E 前半/K(off-by-one)全部按上表现场重算的数字改写:
+A/A′/A″/A‴/B/B′(在 F 之前)未受影响,行号不变;F/request-shape/§2(a)/§2(b)/G/H/B″/I′(在 F 及其后)与 E 前半/K(off-by-one)全部按上方现场输出改写:
 
 - §12 表:F→`:504`、G→`:638`、H→`:680`、B″→`:713`、I′→`describe:753`/`(a):796`/`(b):824`、E 前半 6 格→`:161,194,221,233,278,300`、K 三格→`:328,350,372`(均已在表格原地写入「原 `:NNN`」+ 变更原因,不是裸替换数字)。
 - §18.1:`§2(a)` 块注释+用例体 `:521-552`→`:558-589`;`§2(b)` `:554-568`→`:591-605`。
 - §18.2:G 用例内 `GROUP_NOT_ARCHIVED` 插入点 `:594-`/`:598-602`→`:638-`/`:643-647`;request-shape 用例 `:507-519`→`:544-556`。
 - §19.1:G 用例正上方整段块注释 `:591-`→`:607-637`。
+
+**因果链现场重算(不是估算)**——用 `git show <commit>:<path> | grep -n "it('X:"` 在每个中间提交上定位同一用例,得到精确的、按提交归因的位移(而不是把「差多少行」笼统摊给「插入约 37 行」):
+
+```
+$ for c in 252d01865 b352ee8de bdfe29974 888d01a81 004350867 cbaa1bc13 ff993d3ef 5b3d6310c; do
+    ln=$(git show $c:packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts | grep -n "it('F:" | head -1 | cut -d: -f1)
+    echo "$c  F@:$ln"
+  done
+252d01865  F@:480
+b352ee8de  F@:485    ← 修复轮 1(P2-1/P2-4 代码提交):顶部新增 3 处 import,净 +5
+bdfe29974  F@:485    ← 纯文档提交(recompute citations),不动测试文件,F 不变
+888d01a81  F@:485    ← 纯文档提交(P2-2/P2-5 归因改写),不动测试文件,F 不变
+004350867  F@:485    ← 纯文档提交(§19.2 措辞),不动测试文件,F 不变
+cbaa1bc13  F@:498    ← 修复轮 3 代码提交(P2-3/P3-8 合并 + 字面值修正):+13(B′ 上方 NOTE 注释等)
+ff993d3ef  F@:498    ← 纯文档提交(recompute citations after fix round 3),不动测试文件,F 不变
+5b3d6310c  F@:504    ← 修复轮 4(P3-6)在 F 用例正上方插入 6 行块注释:+6(F 用例体内部另插入 18 行,不影响 F 自身的 it() 行号,但会顺移其后的 G/H/B″/I′)
+```
+
+同法核对 G(`it('G:`)在同一组提交上的位置:`525→594(+69,round1)→614(+20,round3的cbaa1bc13)→638(+24,round4的5b3d6310c:F内部18行+F上方6行块注释)`——`+20` 与 `+24` 相加正是 §12 表原先写的「+44」,现已按提交拆分并逐个验证,不再是一个笼统数字。H/B″/I′ 与 G 同一组三次提交下的位移完全相同(`+69`/`+20`/`+24`),因为它们与 G 之间没有插入任何行。
 
 **缓解事实,不构成豁免**:§12 表同时给了逐字用例名,用例名全部未变——按仓内「按测试名钉,不按行号」的纪律,表格在改动前也仍可用;但门审既已点名,行号本应准确,本轮如实重算并写入,不以「用例名兜底」为由不改。
 
@@ -952,7 +987,19 @@ $ git status --porcelain
  M docs/development/approval-template-groups-phase1-verification-20260918.md
 ```
 
-零 skip,26/26 与修复轮 1–4 及本轮之前一致(用例数不变——本轮未新增/删除任何 `it()`);typecheck exit 0;`git status --porcelain` 只有本文档一处改动,`.ts`/DDL/`plugin-tests.yml`/`vitest.config.ts` 均未触碰,s6a 钉不受影响(未改 `plugin-tests.yml`)。
+零 skip,26/26 与修复轮 1–4 及本轮之前一致(用例数不变——本轮未新增/删除任何 `it()`);typecheck exit 0;`git status --porcelain` 只有本文档一处改动,`.ts`/DDL/`plugin-tests.yml`/`vitest.config.ts` 均未触碰。
+
+**s6a 钉不受影响,机械核对(不是仅凭「未改 plugin-tests.yml」的推断)**:s6a 的 `PINNED_EVIDENCE_FILES`(`plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs:254-297`)是一份固定的具名文件清单(10 个 `relativePath` 条目,含 `pluginTestsWorkflow` → `.github/workflows/plugin-tests.yml`),本轮唯一改动的文件不在这份清单里:
+
+```
+$ grep -c "approval-template-groups-phase1-verification-20260918.md" \
+    plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs
+0
+$ git diff 5b3d6310c..HEAD --name-only
+docs/development/approval-template-groups-phase1-verification-20260918.md
+```
+
+本轮改动的唯一文件既不在 `PINNED_EVIDENCE_FILES` 清单里,也不是 `PINNED_MODULE_RELATIVE_DIR` 下的 S1–S6 具名模块——s6a 的重算条件是「改了清单里的文件」,本轮零命中,不需要重钉,这是清单本身的事实而不是对因果的猜测。
 
 ### 22.4 本轮未处理 —— 第 2 轮门审报告剩余条目的处置说明(P3-3/P3-4 待下一轮修复;P3-5/P3-6/NIT 为记录性重确认)
 
@@ -960,15 +1007,64 @@ $ git status --porcelain
 - **P3-4**(「guard 人口 ⊆ manager」是零 grep 计数的全称断言,承重两件事,今日成立但断言形式不成立):**未处理,留给下一修复轮**——同上,理由同 P3-3,且第 2 轮门审自己已经把这条的反例证伪过程、差集与计数(`approval-templates:*` 全仓授予 0 处)写全了,下一轮的工作是把这些证据抄写进 `routes/approvals.ts:396-399` 的代码注释、设计 MD §3.5、本文档 §18.1,不需要重新调查。
 - **P3-5**(结转;`wip` 提交 `f6e8ea2d8`/`93e57198e`/`0d2ed3389` 仍在历史里;squash 需 force-push,超出本轮授权的措辞应改为「本 lane 选择不 force-push」):第 2 轮门审对第 1 轮 §21.3 的 disposition 重新核实后仍判「结转,不代 owner 裁」,并额外指出 PR body 措辞需要改正(不是「因授权限制无法 squash」,而是「本 lane 选择不 force-push」)。**disposition 不变**:本轮 `git log --oneline origin/main..HEAD` 重新确认三个 wip 提交仍在、仍已 push(见下方核对),不 squash、不 force-push;PR body 措辞的改正留到开 Draft PR 时一并处理(本切片当前无 PR 可改)。
 - **P3-6**(结转;两个新真库套件仍无 `*-ci-wiring` 守卫):第 2 轮门审重新做了 census(`grep -rl "approval-template-groups" scripts/` 零命中 + 5 个同 step id 守卫 `node --test` 16/16 绿)并维持第 1 轮判定「已披露残留,非阻塞」。**disposition 不变**:本轮不新建守卫,留给需要新建时的独立切片,开 PR 时 body 需点名。
-- **NIT**(非 UUID 模板 id 可能让失败点从 404 前移到 500;门审明确「未实测,不作结论」):**记录性,不构成本轮修复项**——门审本身未跑这个用例,只从列类型与语句顺序推断,标注为未验证并交给实现方自行决定是否值得加一格。本轮不加这一格测试:加与不加是设计裁量(是否要把这一格纳入验收范围),不是「断言无判别力」需要修的那类缺陷,补一格属于范围扩张,按硬规矩「修复不得扩范围」,留给 owner/下一次设计复核决定是否要求这一格。
+- **NIT**(非 UUID 模板 id 可能让失败点从 404 前移到 500;门审明确「未实测,不作结论」):**本轮已实测,门审留白的是「事实」不是「测试用例」,两者要分开处置**——把「要不要新增一格验收测试」的设计裁量,和「这条行为差异是否真实存在、需不需要在 §17/PR body 披露」的事实问题分开:前者确实是范围扩张,本轮不新增测试,留给 owner/下一次设计复核;后者是本轮**必须核实**的既有事实,不核实就不能对 owner 说「不确定」——现场验证过程与结果见下方 §22.5(新增小节),结论:**这是本切片自己的 P2-1 修复引入的一个真实行为差异**(非 UUID 模板 id + 一个格式合法但不存在的组 id 时:修复前 404 `GROUP_NOT_FOUND`,修复后 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED`),已写入本文档 §17 与下方 §22.5,PR body 开出时必须点名为已知行为差异,不能只留一句「未验证」。
 
 ```
 $ git log --oneline origin/main..HEAD | grep -E "^[0-9a-f]+ wip:|^f6e8ea2d8|^93e57198e|^0d2ed3389"
-f6e8ea2d8 wip: carry step-agent changes forward (to be squashed by the lane)
-93e57198e fix(approval): scope group-archive unlink UPDATE to org_id
 0d2ed3389 fix(approval): close orgId array bypass; correct stale error-code docstring
+93e57198e fix(approval): scope group-archive unlink UPDATE to org_id
+f6e8ea2d8 wip: carry step-agent changes forward (to be squashed by the lane)
 ```
 
 P3-5 的三个提交现场核对仍在分支历史中,均已 push(`git rev-parse HEAD` = `git rev-parse origin/feat/approval-template-groups-phase1`)。
 
-**本轮小结**:第 2 轮门审的 1 P2(阻塞)+ 5 P3 + 1 NIT 中,P2-1(阻塞项)与 P3-2 本轮完成实际修复;P3-3/P3-4 明确留给下一修复轮(范围控制,非遗漏);P3-5/P3-6/NIT 三条完成「记录性重确认」——disposition 均未变化,已如实写入。gate 报告的 verdict 是「只差 P2-1 一条」DRAFT-READY,本轮已把该条闭合;P3-3/P3-4 不影响 DRAFT-READY 判定(门审原文:两条都是 P3),但仍需下一轮处置才算「全部处理完」。
+### 22.5 NIT 现场实测(不是新增测试用例,只是核实门审留白的事实是否属实)
+
+门审的 NIT 写的是「未实测,不作结论」,不是「不重要,不用查」——一条会改变生产响应码的行为差异,若不核实就写进披露清单,等于对 owner 说了一句自己都没验证的话。核实方法沿用本文件既有的 mutation 探针纪律(`cp` 备份 → 改 → 单独跑 → `cp` 还原 → `cmp`),这里改的是「让本轮 P2-1 的新代码失效」以还原修复前的行为,而不是改断言。
+
+**场景选择**:门审原句含糊地把「模板 id 非 uuid」和「组不存在」两件事混在一起说。拆成两个精确场景现场探测:
+
+| 场景 | 模板 id | 组 id | 修复前(禁用 §2 校验块) | 修复后(当前 HEAD) |
+|---|---|---|---|---|
+| (1) 组存在 | `not-a-uuid` | 一个真实建出的组 | 500(见下)| 500(未变) |
+| (2) 组不存在但格式合法 | `not-a-uuid` | `randomUUID()`,未落库 | **404** `GROUP_NOT_FOUND` | **500** `APPROVAL_TEMPLATE_GROUP_LINK_FAILED` |
+
+**场景 (1)**(临时 `it()`,`approval-template-groups-lifecycle.db.test.ts`,§2(b) 之后,跑完即删,零残留):对当前 HEAD 直接发起 `POST /api/approval-templates/not-a-uuid/group`(`groupId` 指向一个真实建出的组):
+
+```
+ZZGATE-R5-NIT-PROBE result: 500 {"ok":false,"error":{"code":"APPROVAL_TEMPLATE_GROUP_LINK_FAILED","message":"Failed to link approval template to group"}}
+```
+
+日志确认根因是新代码本身(`isApprovalTemplateVisibleForGroupLink` 的 `SELECT ... WHERE id = $1`,`templateId` 直接吃 `req.params.id`):`error":"invalid input syntax for type uuid: \"not-a-uuid\""`,`at isApprovalTemplateVisibleForGroupLink (…/routes/approvals.ts:413:18)`。但这一格**不足以证明是本轮引入的变化**——组存在时,修复前的旧路径(`linkApprovalTemplateToGroup` 的 `INSERT ... VALUES ($1, $2, …)`,`$2` 是同一个非法 `templateId`,该列同样是 `uuid` 类型)同样会在 INSERT 上抛同一个 22P02,`mapGroupConstraintError` 不认这个错误码,一样兜底 500——**场景 (1) 修复前后都是 500,零变化**,只是错误发生的语句不同。
+
+**场景 (2)** 才是判别点:用一个**语法合法但未落库**的组 id(`randomUUID()`)。
+
+- **修复后(当前 HEAD,未改任何代码)**:
+  ```
+  ZZGATE-R5-NIT-PROBE-2 result: 500 {"ok":false,"error":{"code":"APPROVAL_TEMPLATE_GROUP_LINK_FAILED","message":"Failed to link approval template to group"}}
+  ```
+- **修复前(mutation:注释掉 `routes/approvals.ts:1191-1194` 的 §2 可见性校验块,还原到本轮 P2-1 之前的调用路径,`cp` 备份 → 改 → 跑 → 还原 → `cmp OK`)**:
+  ```
+  ZZGATE-R5-NIT-PROBE-2 result: 404 {"error":{"code":"GROUP_NOT_FOUND","message":"Group not found"}}
+  ```
+  机制:`linkApprovalTemplateToGroup` 先对**组**做 `SELECT ... WHERE org_id = $1 AND id = $2 FOR UPDATE`(`$2` 是格式合法的 `groupId`,不报 22P02),`locked.rows.length === 0` ⇒ 抛 `ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')`——这一步在触碰非法 `templateId` 之前就返回了,所以修复前根本走不到会抛 22P02 的那条语句。修复后,§2 校验块在调用 `linkApprovalTemplateToGroup` **之前**就先对 `templateId` 做 `SELECT`,不管 `groupId` 是否存在都会先在这里抛 22P02。
+
+**结论(真实、非推断)**:本切片新增的 §2 挂接可见性校验,把「模板 id 是否为合法 uuid」的检查时机从**组检查之后**移到了**组检查之前**——对「模板 id 非法 + 组 id 合法但不存在」这一个具体组合,响应从 404 `GROUP_NOT_FOUND` 变成了 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED`。这是本切片自己的修复引入的真实行为差异,不是「今天不可达」的假设性缺口(与 P3-4 的「今天不可达」不同类,不要混同处置)。**范围判断**:是否要为这一格补验收测试是设计裁量(NIT 本身不构成阻塞、不构成本轮修复项),但「这条差异存在」是必须写入披露的事实——已写入本文档 §17 与 PR body 待写清单。
+
+**收尾(两条探针均已还原,零残留)**:
+```
+$ cmp /tmp/approvals-nit-backup.ts packages/core-backend/src/routes/approvals.ts && echo OK
+OK
+$ cmp /tmp/nit-probe-backup.orig packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts && echo OK
+OK
+$ git status --porcelain
+ M docs/development/approval-template-groups-phase1-verification-20260918.md
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  2 passed (2)
+      Tests  26 passed (26)
+```
+
+**本轮小结**:第 2 轮门审的 1 P2(阻塞)+ 5 P3 + 1 NIT 中,P2-1(阻塞项)与 P3-2 本轮完成实际修复;P3-3/P3-4 明确留给下一修复轮(范围控制,非遗漏);P3-5/P3-6 完成「记录性重确认」(disposition 未变);NIT 完成**现场实测**并确认是真实行为差异,已写入披露,是否补验收测试留给设计裁量。gate 报告的 verdict 是「只差 P2-1 一条」DRAFT-READY,本轮已把该条闭合;P3-3/P3-4 不影响 DRAFT-READY 判定(门审原文:两条都是 P3),但仍需下一轮处置才算「全部处理完」。
