@@ -33633,8 +33633,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33647,6 +33647,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -33875,8 +33876,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33889,6 +33890,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -34150,8 +34152,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34160,6 +34162,7 @@ module.exports = {
           input.startDate,
           input.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34435,8 +34438,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34445,6 +34448,7 @@ module.exports = {
           requesterSource.workDate,
           route.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34776,7 +34780,8 @@ module.exports = {
         const rows = await trx.query(
           `UPDATE attendance_requests
            SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
-               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8,
+               approval_workflow_key = $9, updated_at = now()
            WHERE id = $1
            RETURNING *`,
           [
@@ -34788,6 +34793,7 @@ module.exports = {
             draft.reason,
             JSON.stringify(draft.metadata),
             approvalId,
+            approvalPayload.workflowKey,
           ],
         )
         const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
