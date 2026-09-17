@@ -570,6 +570,14 @@ export default defineConfig({
       // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
       'tests/integration/approval-projection-visibility.db.test.ts',
       'tests/integration/approval-projection-participant-read.db.test.ts',
+      // Project-key fix: the participant carve-out + both per-row deny arms + the sheet-capabilities
+      // choke now read the SAME namespaced key the writer stores (deriveProjectionFieldId), proven
+      // against REAL reconcile() output across all four consumer surfaces. Requires real PostgreSQL
+      // (a real approval template/instance chain). Excluded from the no-DB default job so
+      // `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-projection-key-parity.yml lane (NOT plugin-tests.yml — see
+      // that lane's own header for the s6a sha256-pinned-provenance rationale), which arms EXPECT_DB=1.
+      'tests/integration/approval-projection-key-parity.db.test.ts',
       // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',

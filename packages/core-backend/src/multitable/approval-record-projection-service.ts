@@ -53,6 +53,16 @@ const logger = new Logger('ApprovalRecordProjection')
  *  re-exported here for existing importers. */
 export { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 import { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
+/**
+ * Per-column projection data-key derivation, namespaced by the row's own sheet id. Single source of
+ * truth lives in the side-effect-free `approval-projection-constants` (permission-service.ts /
+ * sheet-capabilities.ts read it back via `approvalProjectionParticipantPredicateSql` so a
+ * reader can never drift onto a bare column key the writer below never stores under — the T36-1
+ * review P1 defect that constant's own doc comment describes); re-exported here so existing
+ * importers of this module (the writer itself, `approval-record-projection.test.ts`) are unaffected.
+ */
+export { deriveProjectionFieldId } from './approval-projection-constants'
+import { deriveProjectionFieldId } from './approval-projection-constants'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 /** Reserved owner/actor for the system-managed base + record rows (not a real user). */
 export const APPROVAL_PROJECTION_SYSTEM_OWNER = 'system:approval-projection'
@@ -103,10 +113,6 @@ const PROJECTION_COLUMNS: readonly ProjectionColumn[] = [
 
 export function deriveProjectionSheetId(templateId: string): string {
   return `sht_apr_proj_${templateId}`
-}
-
-export function deriveProjectionFieldId(sheetId: string, columnKey: string): string {
-  return `${sheetId}__${columnKey}`
 }
 
 export function deriveProjectionRecordId(instanceId: string): string {
