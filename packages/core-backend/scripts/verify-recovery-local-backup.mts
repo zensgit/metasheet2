@@ -604,6 +604,15 @@ async function runFailClosedNegatives(input: {
   await unchanged()
 
   const packagePath = join(input.custodyPath, `${input.custodyId}-${input.receipt.backupId}.custody`)
+  const receiptStore = await createLocalCustodyStore({
+    archivePath: input.archivePath,
+    custodyPath: input.custodyPath,
+    custodyId: input.custodyId,
+    transactionDepth: input.runtime.depth,
+  })
+  await assert.rejects(receiptStore.readBackup({ ...input.receipt, sha256: '0'.repeat(64) }), /RECOVERY_LOCAL_CUSTODY_STORE_REFUSED/)
+  await assert.rejects(receiptStore.readBackup({ ...input.receipt, size: input.receipt.size + 1 }), /RECOVERY_LOCAL_CUSTODY_STORE_REFUSED/)
+  await unchanged()
   const packageBytes = await readFile(packagePath)
   const hiddenPackage = `${packagePath}.missing`
   await rename(packagePath, hiddenPackage)
