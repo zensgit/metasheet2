@@ -817,3 +817,63 @@ OK
 ### 20.4 本轮未处理(原状留给下一轮)
 
 P3-6(F 补齐归档/挂接两格)、P3-7(squash `f6e8ea2d8` 等 wip 提交——**本轮评估后确认无法在不 force-push 已推送分支的前提下完成**,squash 会改写已 push 到 `origin/feat/approval-template-groups-phase1` 的提交 SHA,需要 force,超出本轮授权范围,升级为需要 owner/门审明确批准 force-push 才能做)、P3-9(闭世界守卫披露,同 §9/§13.5,不新建)、P3-10(typecheck 边界已写入验证 MD,无需重复)。
+
+## 21. 修复轮 4(2026-09-18)—— gate `impl-gate-A-slice1-round1-20260918.md` P3-6 收口;P3-7/P3-9/P3-10 结转确认
+
+被审 head:`ff993d3ef`(修复轮 3 之后)。本轮只动 `lifecycle.db.test.ts`(F 用例内追加两段断言,零其他文件)与本文档——**不改 DDL、不改 `plugin-tests.yml`/`vitest.config.ts`、不改任何生产 `.ts` 文件的可执行代码**(两条 mutation 探针已在 `metasheet2_lock_a` 上现场执行并 `cp` 复原,见 §21.2)。
+
+### 21.1 P3-6 —— F 补齐归档 / 挂接两格
+
+Gate 指出 F 只覆盖锁文点名的三个写动作(建组/归档/挂接)中的一个(建组),归档、挂接两格的 403 拒绝断言缺失,虽然今天三条路由共享同一个字面 `approvalTemplateAdminGuard` 常量、覆盖缺口不构成活缺陷,但锁文按名逐格,验收表就该按名逐格。
+
+**改动**(`packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts`,均在既有 `F: authorization...` 用例内追加,零新增 `it()`):
+- `:498-503` 用例上方新增块注释,记录 P3-6 的处置理由(逐字见文件)。
+- `:521`:`createAsAdmin` 的响应体现在被解出 `group` 变量(此前只断言 `status`,未取 body),供归档/挂接两格复用同一个 admin 建出的组作固定装置。
+- `:525-530`(归档格):`nobody` 对该组调 `/archive` ⇒ 断言 `403`(`:528`);并直接查 `approval_template_groups.archived_at` 断言仍为 `NULL`(`:530`,零写入,不是只看状态码)。
+- `:532-540`(挂接格):新建一个模板,`nobody` 对它调 `/group`(带 `groupId`)⇒ 断言 `403`(`:535`);并查 `approval_template_group_links` 计数断言为 `0`(`:540`)。
+
+**Mutation 探针(两条,`cp` 备份 → 改 → 单独跑 `-t "F:"` → `cp` 还原 → `cmp` → 单独重跑回绿 → 全量重跑回绿;`/tmp/gateA-fix4-probe-backups/`)**:
+
+| # | 目标 | 改动 | 命令关键结果 | 判定 |
+|---|---|---|---|---|
+| P3-6-M1 | `/api/approval-template-groups/:id/archive` 路由的 `approvalTemplateAdminGuard` | 从路由参数表整体删除该 guard(`routes/approvals.ts:1154`) | `-t "F:"`:`expected 200 to be 403`,失败行精确落在新增的 `archiveAsNobody` 断言(`:528`) | **RED ✓**——归档格有判别力 |
+| P3-6-M2 | `/api/approval-templates/:id/group`(POST,链接端点)的 `approvalTemplateAdminGuard` | 从该路由参数表删除该 guard(`routes/approvals.ts:1177`;同名 `DELETE .../group`(`:1204`,取消挂接端点)未动,仅改 POST 一行) | `-t "F:"`:`expected 201 to be 403`,失败行精确落在新增的 `linkAsNobody` 断言(`:535`) | **RED ✓**——挂接格有判别力 |
+
+两条探针逐条单独执行、单独还原:`cmp /tmp/gateA-fix4-probe-backups/approvals.ts.orig packages/core-backend/src/routes/approvals.ts` 均 `OK`;每条还原后单独重跑 `-t "F:"` 回绿;全部完成后全文件套件收尾重跑:
+
+```
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  2 passed (2)
+      Tests  26 passed (26)
+```
+
+（用例数不变:26,与 §20 一致——本轮只在既有 F 用例内追加 `expect`,未新增/删除任何 `it()`。）
+
+```
+$ pnpm run type-check   # tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json
+(无输出,exit 0)
+```
+
+### 21.2 收尾核对
+
+```
+$ git status --porcelain -- packages/ plugins/ .github/
+ M packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts
+$ cmp /tmp/gateA-fix4-probe-backups/approvals.ts.orig packages/core-backend/src/routes/approvals.ts && echo OK
+OK
+```
+
+生产代码文件(`approvals.ts`)经两条 mutation 探针后字节级复原;唯一实际改动是测试文件内的追加断言。`git diff --stat -- packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts` 的精确插入/删除计数见对应 commit 的 `git show --stat`。DDL、`plugin-tests.yml`、`vitest.config.ts` 本轮零改动,s6a 钉不受影响。
+
+### 21.3 P3-7 / P3-9 / P3-10 结转确认(不重复处置,只确认原判仍然成立)
+
+三条在 §19.4/§20.4 已各自拿到处置说明,本轮逐条重新核实原判在当前 HEAD 上依然成立,不是简单抄写:
+
+- **P3-7**(squash `f6e8ea2d8` 等 wip 提交):`git log --oneline origin/main..HEAD` 现场重跑,`f6e8ea2d8`/`93e57198e`/`0d2ed3389` 三个提交仍在分支历史中且已推送到 `origin/feat/approval-template-groups-phase1`(`git rev-parse HEAD` 与 `git rev-parse origin/feat/approval-template-groups-phase1` 相同)。squash 会改写这些已公开提交的 SHA,需要 `git push --force`,而本轮硬规矩明确「不用 force」——**disposition 不变**:升级为需 owner/门审明确批准 force-push 才能做,本轮不代为决定,不尝试变通(例如不做「新增一个 revert-and-redo 提交」这种绕过,因为那不是 gate 要求的「squash 成可读历史」,是另一种历史形状,属于同类「另造更窄同类物」的裁量越界)。
+- **P3-9**(两个新真库套件无 `*-ci-wiring` 守卫):现场重跑 `grep -rl "approval-template-groups" scripts/ops/*.mjs`,`exit=1`(零命中,与 gate 报告一致,census 结论未变);未新建守卫——gate 原文本身已判定这不是阻塞项(「我不把它记为阻塞项」),补充清单 #1 的文义是「普查」而非「必须新建」,census 已完成,**disposition 不变**:已披露的残留,留给后续需要新建守卫时的独立切片,不在本轮范围内新建。
+- **P3-10**(typecheck 证据 + `.test.ts` 不在 `tsc` 覆盖范围):本轮 §21.1 已现场补跑 `pnpm run type-check`(exit 0),延续 §18.3/§19/§20.1 每轮都补跑一次的做法;`tsconfig.json` 的 `exclude` 含 `**/*.test.ts` 这条既有仓内边界在 §18.3 已写入本文档且未变化,**disposition 不变**:不需要为同一条边界重复新写一遍说明。
+
+三条均确认「原判仍然成立、无需改变处置」,不是遗漏未做。至此,gate 报告 P1/P2/P3 全部条目(P2-1 至 P2-5、P3-6 至 P3-10;P3-7/P3-8 与 P3-9/P3-10 表述见上)均已在修复轮 1–4 中处置完毕(修复实现,或改写归因/账目,或——仅 P3-7 一条——因触碰硬规矩边界而升级为待 owner 批准 force-push,记录在案,不由本轮代为决定)。
