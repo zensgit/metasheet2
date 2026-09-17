@@ -25579,6 +25579,51 @@ module.exports = {
       return rows.length > 0
     }
 
+    // ACL slice A (2026-09-17): closed action set for group-manager reads.
+    // Write actions (members mutate, managers mutate, rule edit, fixed-schedule apply)
+    // stay admin-only and MUST NOT be added here without a separate owner decision.
+    const ATTENDANCE_GROUP_MANAGER_ACTIONS = new Set([
+      'view_group',
+      'list_members',
+      'view_team_availability',
+      'fixed_schedule_preview',
+    ])
+
+    async function canManageAttendanceGroup(orgId, userId, groupId, action) {
+      if (!ATTENDANCE_GROUP_MANAGER_ACTIONS.has(action)) return false
+      if (!orgId || !userId || !groupId) return false
+      return userManagesAttendanceGroup(orgId, groupId, userId)
+    }
+
+    async function listManagedAttendanceGroupIds(orgId, userId) {
+      const rows = await db.query(
+        `SELECT group_id
+         FROM attendance_group_managers
+         WHERE org_id = $1
+           AND user_id = $2
+           AND role IN ('owner', 'sub_owner')`,
+        [orgId, userId]
+      )
+      return rows.map((row) => row.group_id).filter(Boolean)
+    }
+
+    async function resolveAttendanceGroupCatalogAccess(orgId, userId) {
+      if (process.env.RBAC_BYPASS === 'true' || await hasAttendanceAdminAccess(userId)) {
+        return { kind: 'org' }
+      }
+      const groupIds = await listManagedAttendanceGroupIds(orgId, userId)
+      if (groupIds.length === 0) return { kind: 'denied' }
+      return { kind: 'managed', groupIds }
+    }
+
+    function respondAttendanceGroupCatalogForbidden(res) {
+      res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+    }
+
+    function respondAttendanceGroupManagerTableMissing(res) {
+      res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+    }
+
     function respondAttendanceSchedulerScopeForbidden(res) {
       res.status(403).json({
         ok: false,
@@ -44829,7 +44874,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
         })
@@ -44846,29 +44891,85 @@ module.exports = {
         const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!routeActorAccess) return
         const orgId = routeActorAccess.orgId
+        const actorId = routeActorAccess.userId
         const { page, pageSize, offset } = parsePagination(req.query)
 
+        let catalogAccess
         try {
-          const countRows = await db.query(
-            'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
-            [orgId]
-          )
+          catalogAccess = await resolveAttendanceGroupCatalogAccess(orgId, actorId)
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            respondAttendanceGroupManagerTableMissing(res)
+            return
+          }
+          logger.error('Attendance group catalog access failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
+          return
+        }
+        if (catalogAccess.kind === 'denied') {
+          respondAttendanceGroupCatalogForbidden(res)
+          return
+        }
+
+        const managedScope = catalogAccess.kind === 'managed'
+
+        try {
+          const countRows = managedScope
+            ? await db.query(
+              `SELECT COUNT(*)::int AS total
+               FROM attendance_groups g
+               WHERE g.org_id = $1
+                 AND g.id IN (
+                   SELECT m.group_id
+                   FROM attendance_group_managers m
+                   WHERE m.org_id = $1
+                     AND m.user_id = $2
+                     AND m.role IN ('owner', 'sub_owner')
+                 )`,
+              [orgId, actorId]
+            )
+            : await db.query(
+              'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
+              [orgId]
+            )
           const total = Number(countRows[0]?.total ?? 0)
 
-          const rows = await db.query(
-            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
-             FROM attendance_groups g
-             LEFT JOIN (
-               SELECT group_id, COUNT(*)::int AS member_count
-               FROM attendance_group_members
-               WHERE org_id = $1
-               GROUP BY group_id
-             ) member_counts ON member_counts.group_id = g.id
-             WHERE g.org_id = $1
-             ORDER BY g.created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
-          )
+          const rows = managedScope
+            ? await db.query(
+              `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+               FROM attendance_groups g
+               LEFT JOIN (
+                 SELECT group_id, COUNT(*)::int AS member_count
+                 FROM attendance_group_members
+                 WHERE org_id = $1
+                 GROUP BY group_id
+               ) member_counts ON member_counts.group_id = g.id
+               WHERE g.org_id = $1
+                 AND g.id IN (
+                   SELECT m.group_id
+                   FROM attendance_group_managers m
+                   WHERE m.org_id = $1
+                     AND m.user_id = $2
+                     AND m.role IN ('owner', 'sub_owner')
+                 )
+               ORDER BY g.created_at DESC
+               LIMIT $3 OFFSET $4`,
+              [orgId, actorId, pageSize, offset]
+            )
+            : await db.query(
+              `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+               FROM attendance_groups g
+               LEFT JOIN (
+                 SELECT group_id, COUNT(*)::int AS member_count
+                 FROM attendance_group_members
+                 WHERE org_id = $1
+                 GROUP BY group_id
+               ) member_counts ON member_counts.group_id = g.id
+               WHERE g.org_id = $1
+               ORDER BY g.created_at DESC
+               LIMIT $2 OFFSET $3`,
+              [orgId, pageSize, offset]
+            )
 
           res.json({
             ok: true,
@@ -44877,6 +44978,7 @@ module.exports = {
               total,
               page,
               pageSize,
+              scope: managedScope ? 'managed' : 'org',
             },
           })
         } catch (error) {
@@ -44887,19 +44989,38 @@ module.exports = {
           logger.error('Attendance groups fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
+        const actorId = actorAccess.userId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          if (process.env.RBAC_BYPASS !== 'true' && !(await hasAttendanceAdminAccess(actorId))) {
+            const allowed = await canManageAttendanceGroup(orgId, actorId, groupId, 'view_group')
+            if (!allowed) {
+              res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+              return
+            }
+          }
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            respondAttendanceGroupManagerTableMissing(res)
+            return
+          }
+          logger.error('Attendance group lookup authorization failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
           return
         }
 
@@ -44935,7 +45056,7 @@ module.exports = {
           logger.error('Attendance group lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(

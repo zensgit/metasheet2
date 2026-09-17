@@ -989,6 +989,204 @@ describe('attendance UUID route validation', () => {
     expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('INSERT INTO attendance_group_managers')
   })
 
+  it('lists every attendance group for a full admin and stamps scope=org', async () => {
+    const { db, routes } = await createHarness('false')
+    const ownedGroupId = '00000000-0000-4000-8000-000000000101'
+    const otherGroupId = '00000000-0000-4000-8000-000000000102'
+    const groupRow = {
+      id: ownedGroupId,
+      org_id: 'default',
+      name: 'Ops Team',
+      code: 'ops-team',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      member_count: 2,
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_groups') && !sql.includes('attendance_group_managers')) {
+        return [{ total: 2 }]
+      }
+      if (sql.includes('FROM attendance_groups g') && !sql.includes('attendance_group_managers')) {
+        return [groupRow, { ...groupRow, id: otherGroupId, name: 'Other' }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups', {
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: { total: 2, scope: 'org' },
+    })
+    expect((res.body as { data: { items: Array<{ id: string }> } }).data.items.map((item) => item.id))
+      .toEqual([ownedGroupId, otherGroupId])
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_group_managers')
+  })
+
+  it('scopes GET /api/attendance/groups to owner/sub_owner rows for a non-admin manager', async () => {
+    const { db, routes } = await createHarness('false')
+    const ownedGroupId = '00000000-0000-4000-8000-000000000101'
+    const groupRow = {
+      id: ownedGroupId,
+      org_id: 'default',
+      name: 'Owned Team',
+      code: 'owned',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      member_count: 1,
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT group_id') && sql.includes('FROM attendance_group_managers')) {
+        expect(params).toEqual(['default', 'owner-user-1'])
+        return [{ group_id: ownedGroupId }]
+      }
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) {
+        expect(params).toEqual(['default', 'owner-user-1'])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_groups g') && sql.includes('attendance_group_managers')) {
+        expect(params).toEqual(['default', 'owner-user-1', 50, 0])
+        return [groupRow]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups', {
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: ownedGroupId }],
+        total: 1,
+        scope: 'managed',
+      },
+    })
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    // Mutation target: dropping the managers predicate makes this assertion fail.
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).toContain("m.role IN ('owner', 'sub_owner')")
+  })
+
+  it('returns 403 on GET /api/attendance/groups when the caller is neither admin nor a group manager', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT group_id') && sql.includes('FROM attendance_group_managers')) {
+        return []
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups', {
+      user: { id: 'bystander-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('returns 200 for GET /api/attendance/groups/:id when the caller manages that group', async () => {
+    const { db, routes } = await createHarness('false')
+    const groupRow = {
+      id: attendanceGroupId,
+      org_id: 'default',
+      name: 'Owned Team',
+      code: 'owned',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1')) {
+        expect(params).toEqual(['default', attendanceGroupId, 'owner-user-1'])
+        return [{ ok: 1 }]
+      }
+      if (sql.includes('FROM attendance_groups') && sql.includes('WHERE id = $1')) {
+        return [groupRow]
+      }
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) {
+        return [{ total: 3 }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: attendanceGroupId, memberCount: 3 } })
+  })
+
+  it('returns 403 before 404 on GET /api/attendance/groups/:id for a group the caller does not manage', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1')) {
+        return []
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('returns 503 when attendance_group_managers is missing on scoped group get', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers')) {
+        const error = new Error('relation "attendance_group_managers" does not exist')
+        ;(error as { code?: string }).code = '42P01'
+        throw error
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'DB_NOT_READY' } })
+  })
+
   it('rejects malformed route UUID params before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const cases = [
