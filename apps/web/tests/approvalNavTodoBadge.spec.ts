@@ -485,5 +485,11 @@ describe('app-level approval todo badge', () => {
     // unbumped counter when the stale promise finally settles, and 42 gets painted.
     expect(badgeOf(root)).toBeNull()
     expect(unavailableBadgeOf(root)).toBeNull()
+    // Positive control disambiguating WHY nothing rendered: `pendingCount === 0` alone would look
+    // identical whether the stale 42 was voided or simply never arrived. No further call happened
+    // after the sign-out — the late resolve was the SAME already-in-flight promise settling, not a
+    // new read — so the badge's "nothing rendered" state is provably the vote against 42, not a
+    // coincidence of an unrelated empty read.
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
   })
 })
