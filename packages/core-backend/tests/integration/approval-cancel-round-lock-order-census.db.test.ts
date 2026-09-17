@@ -154,14 +154,37 @@
  * phase 1); per `feedback_positive_control_not_failclosed.md` an absence claim needs a positive
  * control proving the harness CAN see co-occurrence when it exists, not just a clean run —
  * roughly double the construction work of Q-D, and not attempted in this addendum.
+ *
+ * ADDENDUM (2026-09-18) — Q-B and Q-C are now CONSTRUCTED, in two further `describeIfDatabase`
+ * blocks below (not inline here, so the paragraphs above stay an accurate record of what THIS
+ * addendum found and did NOT yet do — per `feedback_supersession_marker_must_evaluate_not_void.md`
+ * the claim above is evaluated, not deleted):
+ *   - Q-B: the same three-leg technique as Q-A (candidate order proven to genuinely contend via a
+ *     timed block; the reversed order proven to deadlock deterministically at `40P01`; a positive
+ *     control proving both sides following the candidate order do not deadlock) — now against a
+ *     REAL `attendance_requests` row and the REAL class-`11` key
+ *     (`buildAttendanceOperationalBulkTargetAdvisoryKey`, `w4c0-identity.ts:1100`).
+ *   - Q-C: (a) a mechanical scan of `createCancelRoundInstance`'s own source (re-read fresh, not a
+ *     hand-transcribed line range) confirming it contains zero `record-link`-shaped tokens, and
+ *     (b) two positive controls proving the detection technique itself is not vacuous — one
+ *     showing a `pg_locks` audit sees TWO distinct advisory locks when both are deliberately held
+ *     in one transaction, one showing the two CAN be forced to deadlock (`40P01`) when taken by
+ *     two connections in opposite orders. Per lock:305's own framing (a review suggestion, not
+ *     owner-ratified), this does not rule for or against WI-4 ever taking both together in a
+ *     LATER phase — it establishes that if it did, both the "are they ever combined" scan and the
+ *     "would a cycle be caught" detector are real, not vacuous.
  */
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   buildAttendanceCalculationRolloutAdvisoryKey,
+  buildAttendanceOperationalBulkTargetAdvisoryKey,
   parseCanonicalAttendanceRolloutOrgKeyV1,
 } from '../../src/attendance/w4c0-identity'
+import { acquireRecordLinkRowAuthLockOnQuery } from '../../src/services/approval-record-link-row-auth-lock'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
 const dbUrl = process.env.DATABASE_URL
@@ -309,6 +332,315 @@ describeIfDatabase(
       try {
         const outcomes = await Promise.allSettled([forwardOrder(a), forwardOrder(b)])
         expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'fulfilled'])
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+  },
+)
+
+describeIfDatabase(
+  'WI-0 lock-order census (Q-B): attendance_requests row lock vs. attendance class-`11` operational-bulk-target advisory lock',
+  () => {
+    let pool: Pool
+    const createdInstanceIds: string[] = []
+    const createdRequestIds: string[] = []
+
+    beforeAll(async () => {
+      await ensureApprovalSchemaReady()
+      pool = new Pool({ connectionString: dbUrl })
+    }, 60000)
+
+    afterAll(async () => {
+      if (createdRequestIds.length > 0) {
+        await pool
+          .query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds])
+          .catch(() => undefined)
+      }
+      if (createdInstanceIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+          .catch(() => undefined)
+      }
+      await pool?.end().catch(() => undefined)
+    })
+
+    // A non-cancel-round workflow key (`atr_not_cancel_round`, WI-3's Q1c migration, forbids the
+    // reserved one) paired identically on both sides of the composite FK
+    // (`attendance_requests_instance_workflow_fkey` on (approval_instance_id,
+    // approval_workflow_key) -> approval_instances(id, workflow_key)) — the exact pairing that
+    // migration requires, confirmed present on this private DB (`\d attendance_requests`).
+    const REQUEST_WORKFLOW_KEY = 'attendance.request'
+
+    async function seedRequestRow(): Promise<string> {
+      const instanceId = `census-qb-instance-${randomUUID()}`
+      await pool.query("INSERT INTO approval_instances (id, status, workflow_key) VALUES ($1, 'approved', $2)", [
+        instanceId,
+        REQUEST_WORKFLOW_KEY,
+      ])
+      createdInstanceIds.push(instanceId)
+      const requestId = randomUUID()
+      // user_id/work_date/request_type/org_id are NOT NULL on the real (shared) table with no
+      // default for the first three — the throwaway-scratch-DB sibling tests (fk-migration) can
+      // skip them because THEIR CREATE TABLE only has the two columns the migration itself
+      // touches; this file runs against the real migrated schema, so all of them are required.
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+         VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', 'default', $3, $4)`,
+        [requestId, `census-qb-user-${randomUUID()}`, instanceId, REQUEST_WORKFLOW_KEY],
+      )
+      createdRequestIds.push(requestId)
+      return requestId
+    }
+
+    // The REAL production key derivation for class-`11` — not reimplemented — so a future change
+    // to the formula is picked up by this file automatically instead of silently drifting from it.
+    // Unlike the other three class-`10`/`11` builders (which require a witness-checked identity,
+    // §9-4's own factory/rehydrator discipline), this one takes only a parsed org key — same shape
+    // as Q-A's class-`00` builder — which is why it is the one this census slice exercises: it is
+    // a REAL, multi-caller production keyspace (`w4c3a-legacy-plan-processor.ts`,
+    // `w4c3a-legacy-plan-enqueue.ts`), not a defined-but-dormant one (lock:304).
+    function targetKeyFor(orgId: string): bigint {
+      return buildAttendanceOperationalBulkTargetAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(orgId))
+    }
+
+    it('candidate order (class-11 then attendance_requests row): a target-lock holder BLOCKS a later row acquisition, which proceeds once released', async () => {
+      const orgId = randomUUID()
+      const key = targetKeyFor(orgId)
+      const requestId = await seedRequestRow()
+
+      const holder = await pool.connect()
+      const waiter = await pool.connect()
+      try {
+        await holder.query('BEGIN')
+        await holder.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
+        await holder.query('SELECT id FROM attendance_requests WHERE id = $1 FOR UPDATE', [requestId])
+
+        await waiter.query('BEGIN')
+        let settled = false
+        const waiterAcquire = waiter
+          .query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
+          .then((result) => {
+            settled = true
+            return result
+          })
+
+        // The waiter must still be blocked: a non-contending harness would have "succeeded"
+        // instantly, which is exactly the false-positive this timed check exists to catch.
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        expect(settled, 'the second connection did not actually contend for the class-11 key').toBe(false)
+
+        await holder.query('COMMIT')
+        await waiterAcquire
+        expect(settled).toBe(true)
+        // Having taken class-11, the waiter now takes the row — free because the holder released
+        // it in the same COMMIT — completing the candidate order.
+        await waiter.query('SELECT id FROM attendance_requests WHERE id = $1 FOR UPDATE', [requestId])
+        await waiter.query('COMMIT')
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        await waiter.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+        waiter.release()
+      }
+    })
+
+    it('the REVERSED order (attendance_requests row taken before class-11 on one side) deadlocks DETERMINISTICALLY (40P01)', async () => {
+      // No site in the tree takes this reversed order today (WI-10/WI-11 do not exist yet) —
+      // constructed by hand so that IF a future implementation ever introduces one, Postgres's own
+      // detector — not a race that fails rarely and silently under load — is what catches it.
+      const orgId = randomUUID()
+      const key = targetKeyFor(orgId)
+      const requestId = await seedRequestRow()
+
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        // A takes class-11 first (the candidate order).
+        await a.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
+        // B takes the row first (the REVERSE order).
+        await b.query('SELECT id FROM attendance_requests WHERE id = $1 FOR UPDATE', [requestId])
+
+        const aSecond = a.query('SELECT id FROM attendance_requests WHERE id = $1 FOR UPDATE', [requestId])
+        const bSecond = b.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
+
+        const outcomes = await Promise.allSettled([aSecond, bSecond])
+        const deadlocks = outcomes.filter(
+          (outcome) => outcome.status === 'rejected' && (outcome.reason as { code?: string }).code === '40P01',
+        )
+        // EXACTLY one victim: zero would mean the cycle was never formed; two would mean
+        // something else went wrong.
+        expect(deadlocks.length, 'the constructed reverse order did not deadlock').toBe(1)
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+
+    it('POSITIVE CONTROL: both connections following the candidate order (class-11 then attendance_requests row) do NOT deadlock', async () => {
+      // Without this, the leg above could be passing because ANY two lock acquisitions on these
+      // two primitives deadlock regardless of order.
+      const orgId = randomUUID()
+      const key = targetKeyFor(orgId)
+      const requestId = await seedRequestRow()
+
+      async function forwardOrder(client: PoolClient): Promise<void> {
+        await client.query('BEGIN')
+        await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [key.toString()])
+        await client.query('SELECT id FROM attendance_requests WHERE id = $1 FOR UPDATE', [requestId])
+        await client.query('COMMIT')
+      }
+
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        const outcomes = await Promise.allSettled([forwardOrder(a), forwardOrder(b)])
+        expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'fulfilled'])
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+  },
+)
+
+describeIfDatabase(
+  'WI-0 lock-order census (Q-C): record-link:row-auth advisory lock vs. attendance class-`00` rollout advisory lock',
+  () => {
+    // (a) MECHANICAL ABSENCE SCAN. §13/lock:305's suggestion (review, NOT owner-ratified) is that
+    // `record-link:row-auth` never co-occurs with a W4 lock during creation. This re-reads
+    // `createCancelRoundInstance`'s own source FRESH (not a hand-transcribed line range carried
+    // over from the Q-A addendum above) so a future edit that moves the function cannot leave a
+    // stale "0 matches" claim standing unnoticed.
+    it('ABSENCE: createCancelRoundInstance never references the record-link row-auth lock (mechanical scan, re-read fresh)', () => {
+      const sourcePath = join(__dirname, '../../src/services/ApprovalProductService.ts')
+      const source = readFileSync(sourcePath, 'utf8')
+      const startMarker = 'async createCancelRoundInstance('
+      const startIndex = source.indexOf(startMarker)
+      expect(
+        startIndex,
+        'createCancelRoundInstance not found — source moved, re-locate before trusting this scan',
+      ).toBeGreaterThan(-1)
+      expect(source.indexOf(startMarker, startIndex + 1), 'more than one match for the start marker').toBe(-1)
+      // The method body ends at the first `\n  }\n` (two-space class-method indent) after the
+      // start marker — the same boundary the Q-A addendum located by hand (`sed -n
+      // '8308,8545p'`), now re-derived from source text so a line-number shift cannot silently
+      // narrow or widen the scanned range.
+      const closeMarker = '\n  }\n'
+      const closeIndex = source.indexOf(closeMarker, startIndex)
+      expect(closeIndex, 'method close brace not found after createCancelRoundInstance').toBeGreaterThan(startIndex)
+      const body = source.slice(startIndex, closeIndex)
+      // Sanity floor: the real method is ~230 lines; a boundary-detection bug that grabbed only
+      // the signature would trivially "pass" a body.match() check for the wrong reason.
+      expect(body.length, 'scanned body suspiciously short — boundary detection likely wrong').toBeGreaterThan(2000)
+      const hits = body.match(/record.?link/gi) ?? []
+      expect(
+        hits,
+        `createCancelRoundInstance must not reference the record-link row-auth lock; found: ${JSON.stringify(hits)}`,
+      ).toEqual([])
+    })
+
+    let pool: Pool
+
+    beforeAll(async () => {
+      await ensureApprovalSchemaReady()
+      pool = new Pool({ connectionString: dbUrl })
+    }, 60000)
+
+    afterAll(async () => {
+      await pool?.end().catch(() => undefined)
+    })
+
+    function rolloutKeyFor(orgId: string): bigint {
+      return buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(orgId))
+    }
+
+    // The REAL production helper — imported, not reimplemented (`approval-record-link-row-auth
+    // -lock.ts`). `record_permissions` has zero rows for a freshly randomised (sheetId, recordId)
+    // pair, so the helper's own internal `FOR UPDATE` is a real query against a real table but
+    // never contends with anything — only the `pg_advisory_xact_lock(hashtext(...))` call at the
+    // top of the helper is load-bearing for this file's two legs below.
+    async function takeRecordLinkLock(client: PoolClient, sheetId: string, recordId: string): Promise<void> {
+      await acquireRecordLinkRowAuthLockOnQuery(
+        (sqlText: string, params?: unknown[]) => client.query(sqlText, params),
+        sheetId,
+        recordId,
+      )
+    }
+
+    it('POSITIVE CONTROL: holding BOTH locks in one transaction is VISIBLE to a pg_locks audit as two distinct advisory locks', async () => {
+      // Proves the detection technique itself, independent of whether any production code takes
+      // this path today (it does not — see the ABSENCE scan above): if a future implementation
+      // DID combine these two locks, an audit query over `pg_locks` filtered to this backend would
+      // see two DISTINCT (classid, objid) advisory-lock rows, not a coalesced one and not zero.
+      // Empirically confirmed independent of this test file (`psql`, same DB): a bigint-keyed
+      // `pg_advisory_xact_lock` and a `pg_advisory_xact_lock(hashtext(...))` both land at
+      // `objsubid = 1` with distinct (classid, objid) pairs — this is the single-key form for
+      // BOTH call shapes, not a session/xact-scope artifact.
+      const orgId = randomUUID()
+      const sheetId = `census-qc-sheet-${randomUUID()}`
+      const recordId = `census-qc-record-${randomUUID()}`
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [rolloutKeyFor(orgId).toString()])
+        await takeRecordLinkLock(client, sheetId, recordId)
+
+        const pidResult = await client.query('SELECT pg_backend_pid()::int AS pid')
+        const pid = pidResult.rows[0].pid as number
+        const locksResult = await client.query(
+          "SELECT DISTINCT classid, objid FROM pg_locks WHERE locktype = 'advisory' AND pid = $1 AND objsubid = 1",
+          [pid],
+        )
+        expect(
+          locksResult.rows.length,
+          `expected 2 distinct advisory locks held on this backend, saw: ${JSON.stringify(locksResult.rows)}`,
+        ).toBe(2)
+        await client.query('COMMIT')
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
+    it('POSITIVE CONTROL: the two locks CAN be forced to deadlock (40P01) when two connections take them in opposite orders', async () => {
+      // Completes the "harness can see co-occurrence" proof: not only can a `pg_locks` audit see
+      // both locks held at once (leg above), Postgres's own cycle detector fires if a future
+      // implementation ever combined them in opposing orders across two transactions — the SAME
+      // mechanism Q-A/Q-B/Q-D above rely on, applied to this pair.
+      const orgId = randomUUID()
+      const rolloutKey = rolloutKeyFor(orgId)
+      const sheetId = `census-qc-sheet-${randomUUID()}`
+      const recordId = `census-qc-record-${randomUUID()}`
+
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        // A takes class-00 first.
+        await a.query('SELECT pg_advisory_xact_lock($1::bigint)', [rolloutKey.toString()])
+        // B takes record-link:row-auth first (the REVERSE order).
+        await takeRecordLinkLock(b, sheetId, recordId)
+
+        const aSecond = takeRecordLinkLock(a, sheetId, recordId)
+        const bSecond = b.query('SELECT pg_advisory_xact_lock($1::bigint)', [rolloutKey.toString()])
+
+        const outcomes = await Promise.allSettled([aSecond, bSecond])
+        const deadlocks = outcomes.filter(
+          (outcome) => outcome.status === 'rejected' && (outcome.reason as { code?: string }).code === '40P01',
+        )
+        expect(deadlocks.length, 'the constructed reverse order did not deadlock').toBe(1)
       } finally {
         await a.query('ROLLBACK').catch(() => undefined)
         await b.query('ROLLBACK').catch(() => undefined)
