@@ -3,10 +3,14 @@
 - 日期：2026-09-17
 - 状态：普查记录（不是设计锁，不构成授权）
 - 工作树：`../metasheet2-tasks-m0` 分支 `grok/tasks-m0`
-- **基线 SHA（本文件写成时 `origin/main`）**：`c6679d0f6990572139fd604c7cfe6f6427d47aa7`（`docs(attendance): back-fill the ratified class-01 rewrite… (#5777)`）
-- 计划 v5 冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`。main 已前进。普查机械核在 `00781e68b8a6a8ec8fc7b04f358eefedcd6c3b00` 上完成；随后 `git pull --ff-only` 到本 SHA（仅 attendance 锁文，与 §8 代码锚点零交集）。§8 锚点在 ff 后抽查 `run-required-web-tests.sh` exec 行、`index.ts` 审批挂载、`AGENTS.md:48-50`、`docker-publish-preflight.mjs:19` 未再漂移（见 §5）。
+- **基线 SHA**：`89f1ecdee2c3b70205a318074824c834bc6a5c7e`（本 head 相对 `origin/main` 的 merge-base；`Merge pull request #5848`）
+- 计划 v5 冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`。main 已前进。§8 锚点在本 merge-base 上重跑（见 §5）。
 - 输入：计划 v5 MD5 `f74e172840d2aa2502216d0dd8dff867`；交接件 / 审阅件 v2 / 飞书 26 篇离线语料。
 - 范围：只读普查。未连 staging/生产。未跑浏览器。未应用迁移。
+
+### 飞书离线语料行号口径
+
+语料目录只有 `.html`。锁与计划写的 `《篇名》:N` 是转换后 **1-indexed 文本行**，不是 `data-line-index`。配方：页眉 6 行 + `data-line-index`（0-based）。正控：`使用子任务` `data-line-index=1`（五层）→ 文本 :7；`添加任务负责人` `data-line-index=4`（创建人默认为负责人）→ 文本 :10。
 
 ---
 
@@ -199,17 +203,24 @@ print(len(toks), sum(1 for t in toks if 'task' in t.lower()))
 
 ---
 
-## 5. 计划锚点 `sed -n` 复核（对本 SHA）
+## 5. 计划锚点 `sed -n` 复核（对本 merge-base）
 
-解析规则（可复现，不依赖 `/tmp`）：从计划 v5 反引号内取出 `path-or-basename.ext:line`；`line` 可为 `n`、`n-m`、逗号并列；另将 `file.ext:96/111` 拆成两条。解析到 worktree 文件后，行号超出文件行数 ⇒ OOB。裸名 `index.ts` 按最短相对路径优先，会命中 `apps/web/src/multitable/index.ts`（69 行）而非 `packages/core-backend/src/index.ts`。
+解析规则：从计划 v5 反引号内取出 `path-or-basename.ext:line`；`line` 可为 `n`、`n-m`、逗号并列；另将 `file.ext:96/111` 拆成两条。解析到 worktree 文件后，行号超出文件行数 ⇒ OOB。裸名按 basename 索引；**同名多文件 ⇒ AMBIGUOUS**（仍选最短路径做行号检查，但不得把 in-range 读成「解析到计划意图文件」）。`OK_IN_RANGE` 只证明行号落在解析到的那个文件范围内。
 
-复现命令与 2026-09-17 在本 SHA 上的实际输出见下。§5.1 / §5.2 两张表是逐条 `sed -n`，不依赖这三个计数。
+计划路径必须经环境变量 `TASK_FEATURE_PLAN_PATH` 传入；缺文件则 fail-loud 非零退出。默认不硬编码仓外路径。
+
+复现命令（在 worktree 根；计划不在仓内时由调用方提供绝对路径）：
 
 ```bash
-python3 - <<'PY'
-import re, pathlib, json
-plan = pathlib.Path.home()/'.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/task-feature-development-plan-20260915.md'
-wt = pathlib.Path('.')  # 在 worktree 根执行
+TASK_FEATURE_PLAN_PATH="${TASK_FEATURE_PLAN_PATH:?set me}" python3 - <<'PY'
+import os, sys, re, pathlib
+plan_s = os.environ.get('TASK_FEATURE_PLAN_PATH')
+if not plan_s:
+    sys.exit('TASK_FEATURE_PLAN_PATH unset')
+plan = pathlib.Path(plan_s)
+if not plan.is_file():
+    sys.exit('PLAN missing: ' + str(plan))
+wt = pathlib.Path('.')
 text = plan.read_text()
 pat = re.compile(r'`([^`]*?([A-Za-z0-9_./-]+\.(?:ts|js|cjs|mjs|yml|yaml|md|vue|sh|json))):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)`')
 pat2 = re.compile(r'`([^`]*?([A-Za-z0-9_./-]+\.(?:ts|js|cjs|mjs|yml|yaml|md|vue|sh|json))):(\d+(?:/\d+)+)`')
@@ -234,7 +245,7 @@ for p in wt.rglob('*'):
     idx.setdefault(p.name, []).append(p)
 def resolve(pathish):
     p=wt/pathish
-    if p.is_file(): return [p]
+    if p.is_file(): return [p], False
     hits=idx.get(pathlib.Path(pathish).name, [])
     scored=[]
     for h in hits:
@@ -242,11 +253,15 @@ def resolve(pathish):
         score=(2 if rel.endswith(suf) or rel.endswith(pathlib.Path(pathish).name) else 0) + (1 if 'src/' in rel else 0) - (1 if '/tests/' in rel else 0)
         scored.append((score, len(rel), h))
     scored.sort(key=lambda x: (-x[0], x[1]))
-    return [h for _,__,h in scored[:5]]
-ok=oob=miss=0
-oob_files=[]
+    amb = len(hits) > 1
+    return [h for _,__,h in scored[:5]], amb
+ok=oob=miss=amb=0
+oob_files=[]; amb_files=[]
 for pathish, spec in uniq:
-    paths=resolve(pathish)
+    paths, is_amb = resolve(pathish)
+    if is_amb:
+        amb += 1
+        amb_files.append((pathish, spec, str(paths[0].relative_to(wt)) if paths else None, len(idx.get(pathlib.Path(pathish).name, []))))
     if not paths:
         miss += 1; continue
     n=len(paths[0].read_text(errors='replace').splitlines())
@@ -259,29 +274,24 @@ for pathish, spec in uniq:
         oob += 1; oob_files.append((pathish, spec, str(paths[0].relative_to(wt)), n))
     else:
         ok += 1
-print('unique', len(uniq), 'OK', ok, 'OOB', oob, 'MISSING', miss)
+print('unique', len(uniq), 'OK_IN_RANGE', ok, 'OOB', oob, 'MISSING', miss, 'AMBIGUOUS', amb)
+print('NOTE OK_IN_RANGE means line numbers fit the resolved file, not that the file is the intended one')
 for row in oob_files:
     print('OOB', row)
+for row in amb_files[:20]:
+    print('AMBIGUOUS', row)
+print('ambiguous_total', amb)
 PY
 ```
 
-本 SHA 实测输出：
-
-```
-unique 133 OK 128 OOB 5 MISSING 0
-OOB ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 69)
-```
+本 merge-base 实测输出见报告 §6（同一 head 上跑）。§5.1 / §5.2 两张表是逐条 `sed -n`。
 
 ### 5.1 计划 §8 逐条（新 SHA 必核）
 
 | 计划锚点 | 本 SHA | 摘录 |
 |---|---|---|
 | `vitest.config.ts:31-33` | 仍 `exclude` 起头 + 两条历史 glob | `'**/node_modules/**'` `:32`、`'**/dist/**'` `:33` |
-| `vitest.config.ts:1782` **漂移** | 现为 `'tests/integration/elearning-media-quota.db.test.ts'` | 历史 glob `'tests/e2e/**'` 现位于 **`:1797`**（文件 1829 行） |
+| `vitest.config.ts:1782` **漂移** | 现为 `'tests/integration/elearning-media-quota.db.test.ts'`（`:1797`） | 历史 glob `'tests/e2e/**'` 现位于 **`:1812`**（文件 1844 行；base `89f1ecdee`） |
 | `approval-realdb-comments.yml:30` | SUPERSEDED 注释仍在 | suite 同时在 required `test (20.x)` |
 | `:41-43` / `:45-47` | 仍声明无 `merge_group`、无 `branches:` | 与计划一致 |
 | `:99` | `EXPECT_DB: '1'` | 一致 |
@@ -317,7 +327,7 @@ OOB ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 69)
 | `namespace-admission.ts:11-38` | `NON_NAMESPACED_PERMISSION_RESOURCES`；**无 `tasks`** |
 | `namespace-admission.ts:344-347` | admin 短路；非豁免需 controlledNamespaces；`admissionsTableUnavailable ⇒ true`（`:346`，绑 `RBAC_OPTIONAL`） |
 | `rbac.ts:69` / `:110-111` | admin 短路；守卫自身抛错 500 |
-| `index.ts` 审批挂载 | 计划 `:1763-1777` **漂移**（现为 `/health`）。实际 `this.app.use(approvalsRouter(` 在 **`:1785-1788`** |
+| `index.ts` 审批挂载 | 计划 `:1763-1777` **漂移**（现为 `/health`）。实际 `this.app.use(approvalsRouter(` 在 **`:1791`**（上一轮 `:1785` 再漂移） |
 | `guardPolicy.ts:29` / `:77` / `:87-95` | 焦点白名单仍无 `/tasks`；`KNOWN_REQUIRED_FEATURES` 无 `tasks`；`/stock-prep` 不加 `requiredFeature` 先例仍在 |
 | `App.vue:7-74` | 三互斥分支仍在；默认分支 `:30-74` |
 | `permission-service.ts:1033-1037` | 计划指 rethrow 契约；本 SHA 该行是注释，函数 `loadApprovalProjectionDeniedRecordIds` 从 `:1040` 起，throw 在 `:1305`/`:1378` |

@@ -2,7 +2,7 @@
 
 - 日期：2026-09-17
 - 状态：**PROPOSED — 不是已 ratify 的锁**。本件是 M1 的输入。不构成 DDL 应用、PR 合并或生产开关授权。三者各自需要 owner 亲写 GitHub comment。
-- **基线 SHA**：`c6679d0f6990572139fd604c7cfe6f6427d47aa7`（写成时 `origin/main`）
+- **基线 SHA**：`89f1ecdee2c3b70205a318074824c834bc6a5c7e`（本 head 相对 `origin/main` 的 merge-base）
 - 计划输入：`task-feature-development-plan-20260915.md` v5，MD5 `f74e172840d2aa2502216d0dd8dff867`（PROPOSED 计划，不等于 ratify）
 - 普查：`docs/development/task-feature-census-20260917.md`
 - 骨架：照 `docs/development/elearning-plugin-design-lock-20260810.md` 的 §0–§15 编号。**§8 不重排**（计划 v5 多处按「锁 §4 / 锁 §12」引用）。
@@ -159,11 +159,13 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 每个 `tests/integration/task-*.db.test.ts` 必须三点齐，缺一即 skip 形状绿（交接件 §四.5）：
 
-① **exclude 逐文件字面量**：加进 `packages/core-backend/vitest.config.ts` 的 `test.exclude`。任务条目必须是逐文件字面量，**不得用 glob**。数组现存三条历史 glob 显式排除在集合比较之外：`'**/node_modules/**'`（本 SHA `:32`）、`'**/dist/**'`（`:33`）、`'tests/e2e/**'`（本 SHA **`:1797`**，计划写的 `:1782` 已漂移到 elearning 文件）。验法：排除后 no-DB 配置对该路径报 **`No test files found`，不是 skipped**。
+① **exclude 逐文件字面量**：加进 `packages/core-backend/vitest.config.ts` 的 `test.exclude`。任务条目必须是逐文件字面量，**不得用 glob**。数组现存三条历史 glob 显式排除在集合比较之外：`'**/node_modules/**'`（本 SHA `:32`）、`'**/dist/**'`（`:33`）、`'tests/e2e/**'`（本 SHA **`:1812`**；计划写的 `:1782`、上一轮写的 `:1797` 均已漂移，`:1797` 现为 `elearning-media-quota.db.test.ts`）。验法：排除后 no-DB 配置对该路径报 **`No test files found`，不是 skipped**。
 
 ② **独立证据 lane**：形状照 `.github/workflows/approval-realdb-comments.yml`：`workflow_dispatch` + `pull_request`（paths，**不加 `branches:`**，`:45-47`）+ `push main`；**不声明 `merge_group`** 仅在 lane 保留 paths 时成立（`:41`）；job 级 `DATABASE_URL`（postgres:16）+ `EXPECT_DB: '1'`（`:99`）；`MIGRATION_EXCLUDE` 标准 6 项（`:129` 逗号列表；`MIGRATION_EXCLUDE_TRACKING.md` 文案 union 为 7，新迁移不加进去）；`vitest --config vitest.integration.config.ts run <整文件> --reporter=verbose`（`:136`；verbose 是判据：lane 绿后从日志读出收集用例数写进 PR body，零收集的绿无效 `:133-135`）；测试顶部 `EXPECT_DB` 哨兵（`approval-sequential-mode.db.test.ts:14`）。
 
-③ **点名哪个 required context 真正执行该文件**。独立 lane 只是证据。**(a)/(b) 由 §13-12 裁，本锁不落槌**。裁定前 §0/§12 db 门 required 格写 TBD。另：自建 `task-ci-coverage-enumeration.test.ts`（发现式：磁盘 `task-*.db.test.ts` = exclude 条目 = lane 文件清单，配扫描负控），放进 always-on 必需 lane（计划 §8-1 ④）。
+③ **点名哪个 required context 真正执行该文件**。独立 lane 只是证据。**(a)/(b) 由 §13-12 裁，本锁不落槌**。db 门 required 格见 §12 门 2/9/13/17 行尾「required 承载: TBD（§13-12 未裁）」。
+
+④ **发现式覆盖枚举（已定，来源 计划 v5 §8-1 ④）**：自建 `task-ci-coverage-enumeration.test.ts`（`readdirSync`）：磁盘 `task-*.db.test.ts` 集合 = `vitest.config.ts` exclude 条目集合 = 证据 lane 文件清单，三者相等；各配扫描负控（集合非空、正则未失效，照 `approval-ci-coverage-enumeration.test.ts:679-685`）。本文件**不**进 `test.exclude`、**不**进任何逐文件 run-list。承载 = always-on 必需 job `plugin-tests.yml` 的 `Run core-backend tests` 步（本 SHA `:842-844`，`pnpm --filter @metasheet/core-backend test`，即 `test (18.x)` / `test (20.x)`）。审批对物 `approval-ci-coverage-enumeration.test.ts` 今天即如此落地，与 §13-12 无关。
 
 本切片 docs-only，不建测试文件、不改 `vitest.config.ts`、不建 lane。
 
@@ -248,9 +250,10 @@ N/A:本线无媒体轨。
 
 | # | 题 | 状态 |
 |---|---|---|
-| 已定抄入 | 两类非空、日期三规则、锁协议锁序、投影复合键、deny 两族、两点接线（§5.3）、真库三点接线①②（§5.2.1；③=§13-12 未裁）、五段部署链（§5.4）、导航/引导、PendingItem 五/六键+不带正文、§13-37/38/39 缺省 | 已定，来源计划 v5；ratify 时可改 |
+| 已定抄入 | 两类非空、日期三规则、锁协议锁序、投影复合键、deny 两族、两点接线（§5.3）、真库三点接线①②（§5.2.1）、发现式覆盖枚举④（§5.2.1 ④，always-on `plugin-tests.yml:842-844`）、五段部署链（§5.4）、导航/引导、PendingItem 五/六键+不带正文、§13-37/38/39 缺省 | 已定，来源计划 v5；ratify 时可改 |
 | §13-10 | RBAC 豁免集 / `tasks_user` seed | **未裁** |
-| §13-12 | 真库测试 required 承载 | **未裁** |
+| §13-12 | 真库测试 required 承载（§5.2.1 ③ 的 (a)/(b)） | **未裁** |
+| `TASKS_*` 与 GH manifest | 章程 `AGENTS.md:68` 落地；计划 v5 无此条。该守卫对 `TASKS_*` 零覆盖：既不登记 manifest，也无需登 `NON_GH_*`。属已披露缺口，不是第二 org/锁键 | 已定为本锁陈述（选项 a 的空转指令已删）；要真门走 (b) 扩正则或升 owner |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
 
 ---
@@ -259,9 +262,9 @@ N/A:本线无媒体轨。
 
 - `TASKS_ENABLED === 'true'`（精确字符串）。关时 router 工厂返回 `null`，`index.ts` `if (router) this.app.use(router)` 跳过。
 - P1：`TASKS_SCHEDULER_ENABLED` / `TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED` / `TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED`，默认 OFF。
-- **flag 与 Global-History manifest（选项 a）**：provenance = `AGENTS.md:68`（「新增 env flag 必须登记」）；**计划 v5 无此条**，属本锁对章程的落地，不是计划抄入。`TASKS_*` **不属** Global-History 族。`global-history-flag-manifest.test.mjs` 的源真相只从 `MULTITABLE_[A-Z_0-9]+` 与 `ELEARNING_*_ENABLED` 推导（`:143-151`）；把 `TASKS_*` 写入 `GLOBAL_HISTORY_FLAG_MANIFEST` 会落 phantom 断言（`:168-172`），`pnpm verify:global-history-flag-manifest:test` 必红。正确落地：**不得**登记进 GH manifest；源码一旦出现 `TASKS_*_ENABLED` 读，**同一 PR** 把 `TASKS_` 前缀登进 `NON_GH_PREFIXES`（照 `test.mjs:66-71` 既有写法）或把精确名登进 `NON_GH_EXACT`（`:72`）。那是排除列表，**不是** GH 注册。M0 源码无 `TASKS_*` 读，本切片不改 `test.mjs`。
+- **flag 与 Global-History manifest（已披露缺口；§9 表）**：provenance = `AGENTS.md:68`；**计划 v5 无此条**。`global-history-flag-manifest.test.mjs` 的源真相只从 `MULTITABLE_[A-Z_0-9]+` 与 `ELEARNING_*_ENABLED` 推导（`:143-151`）；`NON_GH_PREFIXES` / `NON_GH_EXACT` 只过滤前一支（`:144-147`），`ELEARNING` 支不过滤。因此该守卫对 `TASKS_*` **零覆盖**：登不进 manifest（会 phantom，`:168-172`），登进排除列表也对任一断言零差别。本锁如实陈述：**既不登记 GH manifest，也无需登排除列表**。若要真门：同 PR 把 `globalHistoryFlagsInSource()` 扩到 `TASKS_*_ENABLED` 并补 manifest 条目（选项 b），或升 owner。M0 源码无 `TASKS_*` 读，本切片不改 `test.mjs`。
 - 生产启用是独立 owner 授权，不等于本锁 ratify。
-- 路由挂载：审批段之后（本 SHA `index.ts:1785-1788` 之后）；静态子路径先于 `/:id`。真起服务器打一遍。
+- 路由挂载：审批段之后（本 SHA `index.ts:1791` `this.app.use(approvalsRouter({`；上一轮 `:1785` 已漂移）；静态子路径先于 `/:id`。真起服务器打一遍。
 
 ---
 
@@ -276,27 +279,27 @@ N/A:本线无媒体轨。
 
 ---
 
-## 12. Ratify 验收门（编号；db 门 required 承载 §13-12 裁前写 TBD）
+## 12. Ratify 验收门
 
 1. org 写路径无 claim ⇒ 422；读路径 `org_missing` / `predicate_error`；不写 `'default'`。
-2. 非 admin 三件事缺一 403；直授+admission 仍 403。
+2. 非 admin 三件事缺一 403；直授+admission 仍 403。required 承载: TBD（§13-12 未裁）。
 3. 完成判定网格 any/all × 增删人 × 切模式 × {0,1,n}。
 4. 可见 ≠ pending（self_completed 正反）。
 5. PendingItem 五键/六键；`dueAt` 不得为 null/空串；响应体不含 `description` / `description_rich` 等正文字段。
 6. 树 depth 0..4、无环、交叉移动恰一成功。
 7. 锁键单点 + 锁序正/负控。
 8. 日期三规则固定 `now=2026-09-15T12:30Z` 三格。
-9. deny 注错 ⇒ 投影读非 200 且零行外泄。
+9. deny 注错 ⇒ 投影读非 200 且零行外泄。required 承载: TBD（§13-12 未裁）。
 10. 标题「备料复核」过；`[!-~]` 不在 title。
 11. 前端两点接线；flag OFF 与零任务不同形；404 不断言开关。
 12. 前端引导三触发 + `predicate_error` 不引导。
-13. 真起服务器静态路径；非 admin 打通一条任务路由。
+13. 真起服务器静态路径；非 admin 打通一条任务路由。required 承载: TBD（§13-12 未裁）。
 14. 含 DDL 的 PR 首段标明未应用未合并；遵守 §5.4 五段部署链（合并≠发布≠部署≠迁移）。
 15. 生产源码注释不点名其他线符号。
 16. lane 断言 `RBAC_OPTIONAL` 未设置。
-17. 真库三点接线齐备（§5.2.1 ①②；③ 的 required 承载仍 §13-12 未裁）：no-DB 配置对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped。
+17. 真库接线齐备：①②（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ④（三集合相等、扫描负控、正则未失效，承载 `plugin-tests.yml:842-844`）。③ 的 required 承载: TBD（§13-12 未裁）。
 
-门 2/9/13 的 **required 绿** 在 §13-12 裁定前不得声称。门 17 的 ①② 可在 M2 接线 PR 上验；③ 在裁定前不得用「门全绿」概括。
+门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。①②④ 可在 M2 接线 PR 上验。
 
 ---
 
@@ -349,7 +352,7 @@ N/A:本线无媒体轨。
 **12. §8-1 ③ required 承载（未裁）**
 - **(a)** 整文件加进 `plugin-tests.yml` `test` job run-list。代价：s6a pin 重算（`s6a-package-provenance-pins.json:90` 钉住该文件）+ 与在飞 PR 串行化。本切片禁止改该文件。
 - **(b)** 任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。代价：lane 须先单独合进 main 才有同名 job；在飞 PR 要 rebase 才出现 context。
-- 建议：倾向 (b)，避免动 s6a。**未裁；裁定前 §0/§12 db 门写 TBD，不得声称门全绿。**
+- 建议：倾向 (b)，避免动 s6a。**未裁；§12 门 2/9/13/17 行尾「required 承载: TBD（§13-12 未裁）」未裁前不得声称门全绿。**
 
 ### L1
 
@@ -391,7 +394,7 @@ N/A:本线无媒体轨。
 1. 本 PROPOSED 锁经两轮独立对抗闸（Claude；实现者自扫绝对量词 ≠ 自批）。
 2. Owner 对每条「需 owner ratify」句亲写 comment ID（格式「owner comment \<id\> on PR \<N\>」）。锁文文字编辑本身不算。
 3. **§13-10 / §13-12 必须落槌** 才进入 M2。
-4. rebase 至当时 `origin/main` 并重跑普查锚点 `sed -n`（本文件基线 `c6679d0f6`；main 再前进则重核）。
+4. rebase 至当时 `origin/main` 并重跑普查锚点 `sed -n`（本文件基线 = 该 head 的 merge-base；main 再前进则重核）。
 5. 含 DDL 的后续 PR 另需独立合并授权 comment；本锁 ratify ≠ 合并 ≠ `TASKS_ENABLED` 生产开。
 
 ---
