@@ -383,6 +383,7 @@ share one lane; the two `.test.ts` files run in the default no-DB unit-test job)
 | 判据 III, implementer-erratum branch | `approval-cancel-round-redemption.db.test.ts` | `erratum (not a lock quote — implementer choice, flagged for owner registration): a broken ...` (`CANCEL_ROUND_INVARIANT_VIOLATION` path) | same |
 | 判据 III, **正控 2** — 非原 requester revoke ⇒ 403 `APPROVAL_REVOKE_FORBIDDEN` (Part D / round 5 fix, gate P1-B row 1) | `approval-cancel-round-redemption.db.test.ts` | `判据 III 正控 2 (§14.2, §6 "仅原 requester"): a non-original-requester actor cannot revoke the cancel-round instance (403 APPROVAL_REVOKE_FORBIDDEN — NOT the create-time CANCEL_ROUND_REQUESTER_ONLY, a different code on a different path, §14.1 note)` | same |
 | §14.1 seed evidence — reject without `comment` ⇒ 400 `REJECT_COMMENT_REQUIRED` (Part D / round 5 fix, gate P1-B row 2) | `approval-cancel-round-redemption.db.test.ts` | `§14.1 seed evidence: reject without a comment is rejected with the named error code (400 REJECT_COMMENT_REQUIRED, not a bare 400), proving the comment gate is present for the cancel-round node` | same |
+| §14.1 seed evidence — node `approvalMode` explicit value `'all'` (会签), not `normalizeApprovalMode`'s undefined-fallback (Part G / round-2-gate fix, gate P2-1) | `approval-cancel-round-redemption.db.test.ts` | assertion inside the same `§14.1 seed evidence: reject without a comment ...` case, reading the same already-fetched published-definition row (`expect(cancelApprovalNode?.config?.approvalMode).toBe('all')`) | same |
 | Q-A lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `§9-4 order (class-00 then instance row): a rollout holder BLOCKS a later instance-row acquisition, which proceeds once released` + reversed-order + positive-control siblings | same |
 | Q-B lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `candidate order (class-11 then attendance_requests row): a target-lock holder BLOCKS a later row acquisition, which proceeds once released` + reversed + positive-control siblings | same |
 | Q-C lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `ABSENCE: createCancelRoundInstance never references the record-link row-auth lock (mechanical scan, re-read fresh)` + two POSITIVE CONTROL siblings proving the harness can force a real `40P01` | same |
@@ -453,6 +454,25 @@ vectors file shows no delta since the pin recorded in `e394c9e9c`); re-run in §
   `cancel_round` (P1-A's suggested closure line), and fixes the stale `api.ts` comment the same
   review flagged as P2-A. **Checklist item 15 is now closed.** See Part C for the rerun and mutation
   evidence.
+- **§14.2 allow-set member-level pin — open before this pass, CLOSED by it (round 4 / Part J)**: this
+  bullet did not exist in §A9 before gate round 4; the gate's own P2-1 finding (reason 3) was
+  precisely that this gap had NO entry here, so a reader of this "honest open list" would have
+  concluded there was no gap. Before this fix, the ratified §9-9 allow-set
+  {approve,reject,revoke,comment} had ZERO discriminative power at the MEMBER level — the 47/47
+  acceptance suite only ever dispatched `'handle'`/`'return'`, so widening
+  `CANCEL_ROUND_ALLOWED_ACTIONS` to also permit `'transfer'` (a verb the ratify header names
+  explicitly as forbidden, and which lock §9-11/C-3 couples to closing the revoke window) left the
+  entire suite green (`impl-gate-C-slice1-round4-20260918.md` P2-1, mutation R4-M5). Fixed by a new
+  mechanical-enumeration test in `approval-cancel-round-outlet-guards.db.test.ts` ("§9-9 allow-set
+  MEMBER pin") that iterates the real exported `APPROVAL_ACTION_TYPES` union — not a hand-listed
+  literal of the three ratify-named verbs, which would drift on the next verb added to that union —
+  and asserts every member outside a locally-declared copy of the ratified allow-set is rejected 409
+  `CANCEL_ROUND_OUTLET_FORBIDDEN`. Reran the same widening mutation post-fix, individually for all
+  three ratify-named verbs (`'transfer'`, `'add_sign'`, `'reduce_sign'`, each its own `cp`-backed
+  mutation): each time the new test goes red specifically at that verb (400 `VALIDATION_ERROR` where
+  409 `CANCEL_ROUND_OUTLET_FORBIDDEN` was expected), the other 6 tests in the file stay green, and the
+  file's total
+  goes from 6→7 tests / the suite total from 47→48. **Checklist item now closed.** See Part J.
 - **判据 II / 判据 IV / `attendance-parity.db.test.ts`**: not implemented in this slice (design MD
   §1.1, unchanged from Part B's Decision 3). Deferred to C-2, per the goal document's own slice
   ordering.
@@ -896,11 +916,14 @@ This is the actual required-check content, not a proxy for it — it is line 779
 `.github/workflows/web-tests.yml`'s job `web-tests` runs, copied character-for-character.
 
 **Not rerun this pass, by scope**: the seven `approval-cancel-round-*.db.test.ts` real-DB suites,
-the two backend unit tests, `packages/core-backend`'s typecheck, and the 38 sibling `*-ci-wiring`
-guards — none of the files this pass's commit touched are backend/DB or CI-config code, so none of
-those suites exercise anything this pass changed. Verified with a *scoped* diff against the code
-directories those suites cover, not the raw file count (the raw diff includes this document itself,
-which is not code):
+the two backend unit tests, `packages/core-backend`'s typecheck, and ~~the 38 sibling `*-ci-wiring`
+guards~~ **the 45 sibling `*-ci-wiring` guards — SUPERSEDED, round-3 gate finding P2-2 / Part H2:
+"38" was wrong the moment it was written here, not a later drift; the true population, mechanically
+enumerated (`find . -path ./node_modules -prune -o -name "*ci-wiring*" -print | grep -v node_modules
+| wc -l` → 45), is 45** — none of the files this pass's commit touched are backend/DB or CI-config
+code, so none of those suites exercise anything this pass changed. Verified with a *scoped* diff
+against the code directories those suites cover, not the raw file count (the raw diff includes this
+document itself, which is not code):
 ```
 $ git diff 95eccb89b HEAD --name-only -- packages plugins .github
 (empty)
@@ -1606,3 +1629,1049 @@ against each other.
   than the pass's own read-only real-DB rerun against the already-migrated private `metasheet2_lock_c`
   (F2) — no `migrate.ts` invocation happened in this pass at all, since no new migration exists to run.
 - This pass's own commit message and push follow the same conventions as Parts C/D/E.
+
+---
+
+# Part G — round 8 fix (2026-09-18, this pass)
+
+**Scope of this pass**: a second independent gate review ran after Part F —
+`impl-gate-C-slice1-round2-20260918.md` (審者 Opus, HEAD reviewed `7ef8e610e08b23181aece95ac4c82f4cde1f082f`,
+verdict **DRAFT-READY**, 0 P1 / 1 P2 / 4 P3). This pass closes the one P2 finding (**P2-1**) and
+records this document's disposition of the round's remaining findings; a separate commit in this
+same pass closes the wording half of **P3-A** and disposes P3-B/P3-C/P3-D. HEAD before this pass's
+first commit: `7ef8e610e` (the exact HEAD the round-2 review audited — nothing landed on the branch
+between the review and this pass, confirmed by `git log -1` matching the review's own header).
+
+## G1. P2-1 — §14.1 seed evidence: node `approvalMode` explicit value, the other half of the sentence Part D closed one half of
+
+Lock §14.1 (v5.8, lock:335) states the node-config requirement as one sentence covering **two**
+explicit values in the same breath: "节点 `approvalMode` 与席位数显式置值 … `approvalMode` 取会签
+`'all'` … `normalizeApprovalMode` 对 undefined 回 `'single'` … seed 不靠默认." Part D's D2 closed the
+sentence's `commentRequired` half (a sibling node-config key, same lock sentence family) with an
+explicitness pin read from the seed's own materialized row. The `approvalMode` half was never given
+the same treatment — the gate reviewer confirmed this by construction (mutation M9: deleting the key
+from the seeded row left all 47 cases green), and by exhaustive grep (14 hits for `approvalMode` across
+this lane's test files, all 14 inside locally-built fixture literals using `'single'`, none reading the
+seed's own row).
+
+**Fix, this pass**: `approval-cancel-round-redemption.db.test.ts`'s `§14.1 seed evidence: reject
+without a comment ...` case already fetches the seeded `approval_published_definitions` row (that is
+where D2's `commentRequired` pin lives) — this pass adds one more `expect` against the *same* fetched
+row, not a new query and not a test-local fixture (the failure mode the gate's own note called out:
+copying one of the 14 `'single'`-fixture hits would pin nothing):
+
+```ts
+expect(cancelApprovalNode?.config?.approvalMode).toBe('all')
+```
+
+Property path and value were re-derived at this pass's own HEAD, not copied from the gate report:
+
+```
+$ grep -n "approvalMode" packages/core-backend/src/db/seeds/approval-cancel-round-published-definition.ts
+26:… `approvalMode: 'all'` (会签 — NOT the `normalizeApprovalMode` default …
+83:          approvalMode: 'all',
+$ psql metasheet2_lock_c -tAc "select runtime_graph->'nodes'->1->'config'->>'approvalMode' \
+    from approval_published_definitions where id='00000000-0000-4000-8000-000000000003'"
+all
+```
+
+**Full suite rerun, this pass, `metasheet2_lock_c` (already migrated, no `migrate.ts` invocation)**:
+
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+      tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,attendance-fk-migration,outlet-guards,node-timeout-effect}.db.test.ts
+ Test Files  7 passed (7)
+      Tests  47 passed (47)
+```
+
+Still 47, unchanged from Part D/E/F's count — this fix adds one assertion to an existing case, not a
+new `it()` (the same accounting distinction P3-D's disposition below asks readers to keep straight).
+Also reran the two unit tests (`Test Files 2 passed / Tests 15 passed`) and `tsc --noEmit -p .`
+(`TSC-EXIT:0`).
+
+**Mutation ledger (this pass) — G1-M1, the same M9 shape the gate reviewer used, so this row is
+directly comparable to their finding**. Because the seed's `runtime_graph` is materialized into the
+`approval_published_definitions` row at migration time (not re-evaluated per test run, same reason
+D2's own mutation used a live-row probe rather than a source `cp`), the backup target is the row's
+JSON text dumped to a file, not a source file:
+
+```
+$ psql metasheet2_lock_c -tAc "select runtime_graph::text from approval_published_definitions \
+    where id='00000000-0000-4000-8000-000000000003'" > /tmp/gate-c-r2-fix-backups/runtime_graph.before.txt
+$ psql metasheet2_lock_c -c "UPDATE approval_published_definitions \
+    SET runtime_graph = runtime_graph #- '{nodes,1,config,approvalMode}' \
+    WHERE id='00000000-0000-4000-8000-000000000003'"
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-redemption.db.test.ts
+ 1 failed | 5 passed
+ × §14.1 seed evidence: reject without a comment ...
+   → expected undefined to be 'all'
+```
+
+Red fires **only** at the newly added `approvalMode` assertion — no other assertion in the file turns
+red — the same "red at exactly the added assertion, nothing else" shape Parts D/E's mutation ledgers
+record. (Deliberately not citing a line number here: this document's own G3, two sections below,
+closes a finding about a comment that went stale by citing a line number instead of a durable
+description — repeating that shape in the same pass would be the wrong lesson to draw from it.)
+Restored
+from the backed-up JSON text and re-`SELECT`ed into a second file:
+
+```
+$ psql metasheet2_lock_c -c "UPDATE approval_published_definitions SET runtime_graph = \$\$<pasted JSON>\$\$::jsonb \
+    WHERE id='00000000-0000-4000-8000-000000000003'"
+$ diff /tmp/gate-c-r2-fix-backups/runtime_graph.before.txt /tmp/gate-c-r2-fix-backups/runtime_graph.after.txt
+(empty)
+```
+
+Reran the full seven-suite set after restore: `Test Files 7 passed (7) / Tests 47 passed (47)`,
+confirming the restore left no residue.
+
+**§A6 mapping row added** for this assertion (see the table above, row immediately following the
+`commentRequired` §14.1 seed-evidence row) — the gate's own critique of P2-1 was partly that it was
+undisclosed, so the mapping table gets the row, not just this narrative section.
+
+## G2. Disposition — the round-2 gate review's other four findings (P3-A/P3-B/P3-C/P3-D)
+
+Detail for each finding is below (§G3-P3-A, §G4-P3-B, §G5-P3-C/P3-D); the authoritative one-table
+summary is §G6. ~~All of this pass's changes — G1's test assertion, the two comment fixes, and the
+design MD header narrowing — landed in a single commit; there is no second commit to point to.~~
+**SUPERSEDED (round-3 gate finding P3-1, fixed in §I1): this sentence and §G7's "Two commits this
+pass" a few paragraphs below flatly contradicted each other — one of them had to be wrong, and it was
+this one.** The round-2 fix landed across two commits: `a166f5ca0` (G1's test assertion and mutation
+ledger, both P3-A comment fixes, the design MD header narrowing, and this document's G1–G7 as first
+drafted) and `6c5b06f7d` (three narrowing fixes to this Part's own prose, made after an advisor pass
+and caught before push — see §G7 for what each one fixed). §G7's "two" was the correct count; this
+sentence's "single commit" and "no second commit to point to" were written before `6c5b06f7d` landed
+and never updated afterward.
+
+---
+
+## G3. P3-A (round-2, distinct from round-1's P3-A) — two production-comment `file:line` pointers wrong since the commit that introduced them
+
+The gate review found two source-comment citations that never pointed at what they claimed, in
+either this HEAD or the commit that introduced them (so not a drift — wrong from birth):
+
+1. `ApprovalBridgeService.ts:1583`'s doc comment cited `ApprovalProductService.ts:9246` as the
+   `AttendanceCentralApprovalError` absorption line; the real absorption check is at `APS:9637`
+   (`if (error instanceof AttendanceCentralApprovalError) {`).
+2. `apps/web/src/approvals/api.ts:1648`'s comment cited `APS:8561` as the `bulkReassignApprovals`
+   `rejectIfCancelRound` guard call; the real call is at `APS:8916`. (`:8561` is the **lock's own
+   baseline** line number for this guard, from before the lane's line numbers drifted — the comment
+   had copied the lock's citation instead of reading the tree.)
+
+**Re-derived fresh at this pass's own HEAD, not copied from the gate report**:
+
+```
+$ grep -n "instanceof AttendanceCentralApprovalError" packages/core-backend/src/services/ApprovalProductService.ts
+9320:          if (error instanceof AttendanceCentralApprovalError) {
+9637:        if (error instanceof AttendanceCentralApprovalError) {
+$ grep -n "rejectIfCancelRound(instance, 'bulkReassignApprovals')" packages/core-backend/src/services/ApprovalProductService.ts
+8916:          rejectIfCancelRound(instance, 'bulkReassignApprovals')
+```
+
+`:9637` (not `:9320`, the other `instanceof AttendanceCentralApprovalError` hit) is the correct
+absorption line, verified against the comment's own words rather than against a name: the comment
+says the failure mode is "silently absorbed into **`skipped_stale`**" — that is a specific outcome
+literal, not a description of "some catch block somewhere". `:9320`'s catch (inside
+`applyApprovalDepartureTransfer`, confirmed by `grep -n "async applyApprovalDepartureTransfer"` →
+`:9217`, no closing brace/next method boundary between `:9217` and `:9320`) resolves to
+`skipDepartureTransfer(instanceId, 'attendance-central-unsupported')` (`:9322`) — a **different**
+named outcome. `:9637`'s catch (inside `applyNodeTimeoutEffect`, `:9568`) resolves to `return
+'skipped_stale'` literally (`:9640`) — the exact string the comment names. Only one of the file's two
+`instanceof AttendanceCentralApprovalError` hits produces the literal outcome the comment is warning
+about, and it is the one this pass cites.
+
+**Comment-text safety check before editing** (a comment-only change is not automatically inert — round
+1's own P1-A was a sync-pin regex breaking on a comment block): grepped for any guard that parses
+either file's source text.
+
+```
+$ grep -rn "readFileSync" apps/web/tests packages/core-backend/tests scripts/ops | grep -iE "api\.ts|ApprovalBridgeService"
+(no output)
+```
+
+~~No hit — no sync-pin or source-text guard reads either file, so editing only the comment body is
+safe.~~ **SUPERSEDED (round-3 gate finding P3-2, fixed in §I2): the grep's own shape is the problem,
+not its result.** `grep -rn "readFileSync" … | grep -iE "api\.ts|ApprovalBridgeService"` can only ever
+match a line where the literal token `readFileSync` and a filename co-occur — it is structurally
+blind to a `read(...)` helper defined on one line and called with the filename on another, or to a
+path built by joining a variable. Both shapes exist in this tree and both read one of the two files
+this pass's comment edits touched; §I2 replaces this narrative with the actual guards found and rerun.
+
+**Fix, this pass**: two one-line comment edits (no code, no behavior change):
+
+- `ApprovalBridgeService.ts:1583`: `` `ApprovalProductService.ts:9246` `` → `` `ApprovalProductService.ts:9637` ``.
+- `apps/web/src/approvals/api.ts:1648`: `` `APS:8561` `` → `` `APS:8916` ``.
+
+**Design MD §0 header — narrowed, not re-asserted as a new universal claim**: the design MD's
+provenance header claims "HEAD at time of writing `a32b2e015`" and "all citations re-derived against
+this worktree's actual tree at HEAD". ~~The gate's P3-A (round 2) falsified the second clause for two
+citations that were never in the design MD's own re-derivation pass (they are source-code comments,
+not design-MD prose) — so the design MD's own claim about *its own* citations was not false~~ —
+**SUPERSEDED (round-3 gate finding P2-1 / Part H1): that sentence is itself false and is retracted,
+not narrowed.** Design MD §3.2 (design MD:206) independently repeats the same `ApprovalProductService.ts:9246`
+citation as design-MD prose, not a source-code comment, and it was wrong for the identical reason the
+two source comments were wrong (`:9246` is `applyApprovalDepartureTransfer`'s manager-resolution
+catch, not `applyNodeTimeoutEffect`'s absorption branch at `:9637`). The round-2 gate's P3-A finding
+therefore reached the design MD as well as the two comments; this document's defense of the design
+MD's own citation was itself an error, fixed in Part H1, not a correct narrowing. Its staleness (the
+"HEAD at time of writing" line lagging six commits, per Part F1's own observation) remained real
+through this pass — **and is retired, not merely re-dated, by round-3's own fix pass**: Part H4 below
+converts the header from a single pinned "HEAD as of" SHA (which goes stale on every subsequent pass,
+this narrowing included) to a non-decaying "see the verification MD's own per-Part HEAD claims"
+pointer, per the round-3 gate report's own §9 item 8 suggestion. This pass (round 2) updates the
+design MD header's HEAD line to this pass's
+own starting HEAD (`7ef8e610e`) and narrows the re-derivation clause to name what it actually covers:
+prose citations inside the design MD, re-checked against the HEAD named in the same sentence — not a
+claim that every source-code comment anywhere in the tree has been swept (that sweep is what the gate
+review itself did, mechanically, over 121 citations across two documents; the design MD does not
+duplicate that sweep and should not claim to).
+
+**Rerun, this pass, `metasheet2_lock_c`**: full seven-suite set (`Test Files 7 passed (7) / Tests 47
+passed (47)`, unchanged from G1's rerun — comment-only edits cannot move test counts) and `tsc
+--noEmit -p .` (`TSC-EXIT:0`).
+
+## G4. P3-B (round-2, same underlying finding as round-1's P3-B, now with a sourced answer)
+
+The gate reviewer could not locate the two "hard rules" the earlier disposition (Part F5 / F3's own
+P3-B row) cited as blocking closure of the two `wip` commits, and said so honestly — the goal file
+and the lock's ratify header both *require* opening a Draft PR rather than forbidding it, and the
+gate reviewer's own three readable authorization documents contain no force-push or no-PR
+prohibition. **The reviewer was right that those three documents don't contain it — the source is a
+fourth document the reviewer does not have: this implementation lane's own per-step task instruction**,
+which states verbatim (this pass's own launch instructions): "不合并、不 undraft、不开 PR、不动
+origin/main" and "提交…绝不…force". Those are this lane's *step-level* constraints, not the *slice's*
+final-delivery contract — the goal file's Draft-PR requirement is a later step in the same lane
+(opening the Draft PR is explicitly out of scope for the fix-round steps, in scope for the step that
+follows fix-round closure), so the two are not in tension: the fix-round steps operate under a
+narrower, temporary no-PR/no-force constraint than the slice's own eventual delivery form.
+
+**Disposition: stays OPEN, but now *sourced*, not "cause unknown."** The two `wip` commits
+(`8301a9178`, `f482f97e5`) remain in branch history; the two rule-compliant closure paths (interactive
+rebase → needs force-push; PR-body merge-method note → needs a Draft PR to exist) both remain closed
+under this lane's current step, for the reason now named above rather than left as "possibly a lane
+instruction I cannot see." This finding **self-resolves at the lane's Draft-PR-opening step** (per
+Part F3's original framing, still current) — no code or doc change in this pass closes it, because
+none can under the constraint that produces it.
+
+## G5. P3-C and P3-D (round-2) — corrections to the round-1 gate report and to this document's own accounting, no implementer action
+
+- **P3-C**: round-2's own re-scan states the round-1 gate report's §1.6 "38 sibling `*-ci-wiring`
+  guards, closed" undercounted the supplementary checklist's true population of 45 (missing 6
+  `packages/core-backend/tests/unit/*-ci-wiring.test.ts` files and 1
+  `plugins/plugin-integration-core/__tests__/sealed-export-s5-ci-wiring.test.cjs`, none matched by the
+  round-1 glob). Round-2's own §1.7 already ran and closed all 45/45 (`476 + 17 + 1`, all green) —
+  this is a correction to a **prior gate report's** wording, ~~not to this lane's implementation or to
+  this verification document, which never claimed "38" anywhere (checked: `grep -n "38" docs/development/approval-cancel-round-phase1-verification-20260918.md` → no hit describing the
+  sibling-guard count as 38)~~. **SUPERSEDED (round-3 gate finding P2-2 / Part H2): that parenthetical
+  is itself false — this document's own Part C3 (line ~900, quoted verbatim above) does
+  say "the 38 sibling `*-ci-wiring` guards", a hit the round-3 gate reviewer found by re-running the
+  identical grep and getting a match. There *was* an action item: Part H2 corrects Part C3's "38" to
+  "45" and records the correction here rather than repeating the false "no hit" claim.**
+- **P3-D**: bookkeeping note that the "four lock-named acceptance rows" Part D closed materialized as
+  3 new `it()` cases plus 2 assertions added to an existing case, not 4 new cases — flagged so a
+  reader does not misread "four acceptance rows" as "four test functions." This pass's own G1 fix is
+  the same shape (an assertion added to an existing case, not a new case) and states its own count
+  explicitly above (still 47) for the same reason. **No action item beyond the wording precision
+  already present in this document's own §A6/§A3 language** (which describes rows and cases
+  separately rather than conflating them).
+
+## G6. Authoritative disposition table — round-2 gate review's five findings
+
+| Finding | One-line description | Disposition (as of this pass) | Evidence |
+|---|---|---|---|
+| P2-1 | `approvalMode` half of lock §14.1's node-config sentence had zero assertion | **CLOSED** — assertion added against the seed's own materialized row, mutation-confirmed (G1-M1) | This pass, §G1 |
+| P3-A | Two production-comment `file:line` pointers wrong since introduction | ~~**CLOSED** — both comments corrected; design MD §0 header narrowed to a checkable claim~~ **SUPERSEDED (round-3 gate P2-1): that row understated the finding — the design MD had a THIRD, independent wrong citation of its own (design MD:206, `:9246` → `:9637`), not merely a "header" issue. Re-closed CLOSED in Part H1 with all three fix points listed.** | Round-2 fix, §G3; re-closed this pass, §H1 |
+| P3-B | Two `wip` commits still in branch history | **OPEN, sourced** — this lane's own step instruction (no-PR, no-force) is the blocking rule the gate reviewer could not locate; self-resolves at the lane's Draft-PR-opening step | This pass, §G4; not touched by any code/doc change |
+| P3-C | Round-1 gate report's own 38-vs-45 sibling-guard undercount | ~~**Registered, no implementer action** — a correction to a prior gate report's wording, already closed by the gate reviewer's own round-2 re-scan; this document never asserted 38~~ **SUPERSEDED (round-3 gate P2-2): the "never asserted 38" clause was itself false — Part C3 (line ~900) does say 38. Fixed to 45 in Part H2, this pass.** | Round-2 disposition, §G5; fixed this pass, §H2 |
+| P3-D | "Four acceptance rows" materialized as 3 cases + 2 assertions, not 4 cases | **Registered, no implementer action** — wording-precision note; this pass's own G1 fix follows the same accounting discipline | This pass, §G5 |
+
+**Net after this pass**: 2 of 5 findings CLOSED (P2-1, P3-A), 1 OPEN with its blocking rule now
+sourced (P3-B, unchanged disposition, better-cited), 2 registered with no action item (P3-C, P3-D).
+This mirrors Part F3's own table shape for round 1's nine findings — read this table for round 2's
+current status rather than reconstructing it from §G1–§G5's narrative.
+
+**SUPERSEDED for currency, not for validity (round-3 gate / Part H)**: this was an honest snapshot of
+what round-2's own fix pass believed at the time — it is not retracted as a record of that belief.
+Two of its premises turned out false (P3-A's "both comments corrected" undercounted a third citation
+inside the design MD itself; P3-C's "no action item" rested on a grep the round-3 gate reviewer reran
+and got a hit from). See §G6's table (now annotated) and Part H for the current, corrected status:
+P3-A is CLOSED with three fix points, P3-C is fixed (one prose line), not merely "registered."
+
+## G7. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree (`wt-cancel-round`); no `git checkout --`,
+  `git reset --hard`, or stash discard was used or needed.
+- No lock file (`approval-change-request-design-lock-draft-20260915.md`) or `reviews/` document was
+  opened for editing: `git diff --name-only origin/main..HEAD | grep -iE "review|lock-draft|\.claude"`
+  → 0 hits, re-checked after this pass's commits.
+- No PR was opened, no branch was merged or undrafted, no migration was applied anywhere (no new
+  migration exists to run; `metasheet2_lock_c` was already migrated by an earlier pass) — the two DB
+  mutation probes (G1-M1's `runtime_graph` edit) were row-level `UPDATE`s against the lane's own
+  private DB, backed up and restored, not migrations.
+- ~~Two commits this pass: one for G1 (P2-1's assertion + mutation ledger + this document's G1/§A6
+  updates), one for G3–G6 (the two comment fixes, the design MD header narrowing, and this document's
+  G2–G7).~~ **SUPERSEDED (round-3 gate finding P3-1, fixed in §I1): the count (two) was right; the
+  split by content was wrong.** Both P3-A comment fixes and the design MD header narrowing landed in
+  the **first** commit alongside G1, not the second. The true split: `a166f5ca0` (G1's P2-1 assertion
+  and mutation ledger, both P3-A comment fixes, the design MD header narrowing, and this document's
+  G1–G7 as first drafted) and `6c5b06f7d` (three narrowing fixes to this Part's own prose, caught by
+  an advisor pass before push: G3's absorption-line claim backed by the mechanically distinguishing
+  grep instead of a name-read, G1's mutation-ledger line-number reference replaced with a
+  drift-immune description, and G2's dangling forward-reference to a nonexistent second commit
+  replaced with a same-document pointer to G6). Both commits follow the same conventional-commit and
+  push discipline as Parts C–F.
+
+---
+
+# Part H — round-3 gate fix (2026-09-18, this pass)
+
+Fix-round response to `reviews/impl-gate-C-slice1-round3-20260918.md` (verdict NEEDS-FIX, 0 P1 / 2 P2
+/ 5 P3, HEAD `6c5b06f7dc3de3a6b58e1abff09763c11e078d96`, base `origin/main` =
+`89f1ecdee2c3b70205a318074824c834bc6a5c7e`, unmoved). This pass closes the round's two P2 findings
+(both self-certification failures — a finding recorded CLOSED or "no action item" on the basis of a
+sentence the round-3 gate reviewer showed to be false). It does not touch the five P3 findings; see
+§H4 for their carried-forward disposition. **Docs-only pass: zero production or test code touched.**
+
+## H1. P2-1 (round-3, CONFIRMED) — design MD:206's own `:9246` citation, independent of the two
+source comments round-2 already fixed
+
+**The finding, exactly as the round-3 gate stated it**: round-2's Part G3 recorded P3-A (round 2)
+CLOSED on the strength of "both comments corrected" and a claim that the design MD's own citations
+were never falsified because the two wrong pointers were "source-code comments, not design-MD prose."
+That claim was false — the design MD has its own, independent citation of the identical wrong line
+number, in its own prose, at §3.2 (design MD:206). Confirmed against this pass's own starting HEAD,
+before this pass's fix (not the current, already-fixed file — a plain `grep` against the working tree
+at the time of writing this sentence would already show the corrected `9637`):
+
+```
+$ git show 6c5b06f7d:docs/development/approval-cancel-round-phase1-design-20260918.md | grep -n "9246"
+206:(`ApprovalProductService.ts:9246`, the `catch (error) { if (error instanceof
+```
+
+Re-derived fresh against this pass's own HEAD (not copied from either gate report):
+
+```
+$ grep -n "instanceof AttendanceCentralApprovalError" packages/core-backend/src/services/ApprovalProductService.ts
+9320:          if (error instanceof AttendanceCentralApprovalError) {
+9637:        if (error instanceof AttendanceCentralApprovalError) {
+$ sed -n '9636,9641p' packages/core-backend/src/services/ApprovalProductService.ts
+      } catch (error) {
+        if (error instanceof AttendanceCentralApprovalError) {
+          await consumeTimeout()
+          await client.query('COMMIT')
+          return 'skipped_stale'
+        }
+```
+
+`:9246` is inside `applyApprovalDepartureTransfer`'s manager-resolution `catch` (a plain `catch {}`
+with no `instanceof` check at all, resolving to a fail-closed no-manager outcome, `APS:9243-9250`) —
+not the `applyNodeTimeoutEffect` absorption branch the design MD's sentence describes. The real
+absorption branch is `:9637` (the `if`), whose body's `return 'skipped_stale'` lands at `:9640`. This
+is the same wrong-line-number defect round-2's own P3-A found in the two source comments
+(`ApprovalBridgeService.ts:1583`, `apps/web/src/approvals/api.ts:1648`, both already fixed in
+`a166f5ca0`) — the design MD simply had a third, independent instance of it that round-2 missed
+because it only swept the two comments the gate report named, not its own prose.
+
+**Comment/prose-text safety check before editing** (same discipline as round-2's G3, rerun fresh, not
+copied, and deliberately **not** scoped to a handful of test directories the way round-2's G3 was —
+round-3's own P3-2 finding showed that a directory-scoped, `readFileSync`-co-occurrence grep is
+structurally blind to `read('…')`-wrapped and variable-path guards; the fix is to widen the *scope*,
+not just the *pattern*): does anything anywhere in the tree parse the design MD's own text as a
+source-of-truth pin?
+
+```
+$ grep -rln "approval-cancel-round-phase1-design-20260918" . --exclude-dir=node_modules --exclude-dir=.git
+docs/development/approval-cancel-round-phase1-verification-20260918.md
+```
+
+One hit, and it is this verification document itself — which cites the design MD's filename in prose
+(exactly as this sentence does), not a test or script that opens the file to extract a behavioral
+pin. Confirmed by a second, independent check for the shape P3-2 actually found (a directory walker
+or `readFileSync`/`readdirSync` call built from a `docs/development` path fragment, which would not
+name this file's basename at all):
+
+```
+$ grep -rln "readdirSync.*docs/development\|readFileSync.*docs/development\|join.*docs.*development" . --exclude-dir=node_modules --exclude-dir=.git
+plugins/plugin-integration-core/__tests__/stock-preparation-handoff.test.cjs
+docs/development/approval-cancel-round-phase1-verification-20260918.md
+docs/development/platform-overall-design/stock-prep-onboarding-acceleration-20260901.md
+scripts/ops/dingtalk-p4-final-closeout.mjs
+scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.test.mjs
+scripts/ops/staging-attendance-makeup-punch-mp6-smoke.test.mjs
+scripts/ops/staging-attendance-ae4-result-edit-smoke.test.mjs
+scripts/ops/dingtalk-p4-final-closeout.test.mjs
+scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs
+scripts/ops/staging-attendance-overtime-bank-v18-smoke.test.mjs
+scripts/ops/staging-attendance-report-digest-rd45-smoke.test.mjs
+scripts/ops/export-dingtalk-staging-evidence-packet.test.mjs
+```
+
+12 hits. One is this verification document itself, matched because it quotes this very grep pattern
+as prose (the command line immediately above) — the same self-matching trap §H1/§H2 already flag for
+"9246" and "38"; not a code guard, discounted. The other 11 are all inspected below, not sampled:
+
+| File | What it actually reads/writes | Names the design MD? |
+|---|---|---|
+| `stock-preparation-handoff.test.cjs:2472` | `path.join(..., 'docs', 'development', 'takeover-beiliao-20260821', '222-deploy-window-runbook-20260901.md')` | No — a differently-named runbook |
+| `stock-prep-onboarding-acceleration-...md:66` | Markdown prose citing `docs/development/source-onboarding-self-service-design-20260830.md` §9; matched only because "join" (Chinese "join 计数") appears near an unrelated `docs/development/...` citation on the same line | No — not code at all |
+| `dingtalk-p4-final-closeout.mjs:252` | `path.join(opts.docsOutputDir, ...)` — `docsOutputDir` is a CLI-provided **write** target for this script's own generated report, not a literal `docs/development` read | No |
+| `staging-attendance-*-smoke.test.mjs` (hmr5, mp6, ae4, rd45, v18 — 5 files; rd45 reads two runbooks in one file, lines 33-34) | Each `readFileSync(join(here, '../../docs/development/<one specific, differently-named staging runbook>.md'))` | No — five files naming several different runbooks between them, none this design MD |
+| `dingtalk-p4-final-closeout.test.mjs:188/208/262` | Writes/reads its own test-fixture file named `dingtalk-final-remote-smoke-development-<date>.md` inside a temp `docsDir` fixture, unrelated to the real `docs/development/` tree | No |
+| `multitable-onprem-package-upgrade-inplace.test.mjs:44` | `path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')` | No — same named runbook as the first row |
+| `export-dingtalk-staging-evidence-packet.test.mjs:151` | `path.join(outputDir, 'docs/development/dingtalk-staging-execution-checklist-20260408.md')` — an output path this test writes an evidence copy to | No |
+
+None of the 11 constructs a path toward `approval-cancel-round-phase1-design-20260918.md`, and none
+walks `docs/development/` generically extracting citations from every file in it — each names one
+specific, unrelated file (or, for `dingtalk-p4-final-closeout.mjs`, writes to a directory rather than
+reading a named target from it). Editing the design MD's prose is behavior-inert.
+
+**Fix, this pass**: one edit, `docs/development/approval-cancel-round-phase1-design-20260918.md:206`
+— the design MD's *citation* changed from `ApprovalProductService.ts:9246` to
+`ApprovalProductService.ts:9637`, and the bracketed description was rewritten to name the actual
+branch (`if (error instanceof AttendanceCentralApprovalError) { … }` inside `applyNodeTimeoutEffect`,
+whose `return 'skipped_stale'` lands at `:9640`) instead of the `catch (error) { if … }` paraphrase
+that had conflated the two nearby lines. The edit also appended a trailing clause naming `:9246`'s
+real identity (`applyApprovalDepartureTransfer`'s manager-resolution catch) so the historical error is
+documented, not erased — which means a raw `grep -c "9246"` against the design MD still returns a
+nonzero count after this fix, **by design**, the same way this Part's own prose and §G3/§G6's
+retroactive annotations still name "9246" and "38" to describe what was wrong (a whole-document
+occurrence count is the wrong instrument for either claim, exactly the shape of trap this document's
+own §H1/§H2 are about). The checkable claim is narrower: the design MD's one *citation* line — the
+`ApprovalProductService.ts:` reference immediately following "cites the exact absorption line" — now
+names `9637`, not `9246`:
+
+```
+$ grep -n "cites the exact absorption line" -A1 docs/development/approval-cancel-round-phase1-design-20260918.md
+205:(`ApprovalBridgeService.ts:1577-1584`) repeats the reasoning and cites the exact absorption line
+206-(`ApprovalProductService.ts:9637`, the `if (error instanceof AttendanceCentralApprovalError) { … }`
+```
+
+**§G3 and §G6 corrected, not silently rewritten**: the false sentence in §G3 and the P3-A row in
+§G6's table are struck through in place and annotated `SUPERSEDED (round-3 gate P2-1 / Part H1)`,
+per this repo's own discipline that a supersession marker evaluates the specific sentence rather than
+voiding the section around it. P3-A's disposition is re-affirmed **CLOSED**, now listing all three
+fix points (the two source comments from round-2, plus this pass's design MD:206 edit) rather than
+two.
+
+**"A third, independent instance" — is it exactly three, not four or more?** A whole-tree sweep for
+any other live citation of the wrong line number, run before asserting a specific count:
+
+```
+$ grep -rn "9246" . --exclude-dir=node_modules --exclude-dir=.git
+```
+
+Every hit is one of: (a) the two docs' own retraction/finding narrative (this Part, §G3, §G6 — all
+past-tense, describing what was wrong, not asserting it as current), (b) one unrelated substring match
+in a different document's `:29246` token (a five-digit line-number list in an unrelated attendance
+design doc — `29246`, not `9246`), or (c) ~~design MD:209-210's~~ **design MD:216-217's** own
+trailing clause (this pass's addition, also past-tense) — ~~209-210~~ **SUPERSEDED (gate round 4 /
+`impl-gate-C-slice1-round4-20260918.md` P3-4): a LATER commit in this same pass (`74c6c2e96`) added
+two lines to this section's header, pushing the trailing clause down from :209-210 to its current
+:216-217; the citation here was written before that shift and never re-derived afterward. Re-checked
+fresh: `grep -n "9246" docs/development/approval-cancel-round-phase1-design-20260918.md` → hits at
+`:216` and `:217`, matching the wording quoted here. The count and classification below are
+unaffected — only this one line-number pointer was stale.** Zero hits in any source file
+(`packages/**`) or test file
+(`**/*.test.*`, `**/*.spec.*`). The count is exactly three: the two comments round-2 fixed
+(`a166f5ca0`) and this pass's design MD:206 fix — no fourth site exists.
+
+**Header fix, this pass's second commit**: the design MD's own provenance header (the line the gate
+report's §9 item 8 flagged as chronically stale, most recently one commit behind at round-3's own
+HEAD) is rewritten from a single pinned "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" SHA to a
+pointer at the verification document's own per-Part HEAD claims, which do not go stale the way a
+hardcoded SHA does. This closes round-3's P3-3 (see §H4) — landed in this pass's second commit
+(alongside this section's own self-review corrections; see §H3), not the first commit that fixed
+P2-1's design MD:206 citation, since the header rewrite was not part of the original round-3 fix and
+was only added once the gate report's §9 item 8 suggestion was acted on during self-review.
+
+**Rerun, this pass, `metasheet2_lock_c`** (docs-only change; rerun to confirm no incidental
+regression, not because the edit could plausibly move a test):
+
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,attendance-fk-migration,outlet-guards,node-timeout-effect}.db.test.ts
+ Test Files  7 passed (7)
+      Tests  47 passed (47)
+```
+
+Unchanged from every prior pass's rerun of this same set (§G1, §G3). No mutation ledger for this
+finding: the fix is a Markdown citation correction with a safety check (above) proving nothing parses
+it as a behavioral pin, so there is no assertion for a mutation to falsify.
+
+## H2. P2-2 (round-3, CONFIRMED) — Part C3's "38 sibling `*-ci-wiring` guards" line, and §G5's false
+"never claimed 38" grep
+
+**The finding, exactly as the round-3 gate stated it**: round-2's §G5 disposed of round-1's P3-C
+("38 sibling guards, undercounted") by asserting this verification document "never claimed '38'
+anywhere," citing a grep that supposedly produced no hit. The round-3 gate reran the identical grep
+and got a hit:
+
+```
+$ grep -n "38" docs/development/approval-cancel-round-phase1-verification-20260918.md
+900:the two backend unit tests, `packages/core-backend`'s typecheck, and the 38 sibling `*-ci-wiring`
+```
+
+Re-run fresh at this pass's own HEAD, same result before this pass's edit (confirming the round-3
+gate's finding, not merely trusting the gate report's transcript):
+
+```
+$ git show 6c5b06f7d:docs/development/approval-cancel-round-phase1-verification-20260918.md | grep -n "38 sibling"
+900:the two backend unit tests, `packages/core-backend`'s typecheck, and the 38 sibling `*-ci-wiring`
+```
+
+Part C3 (written during the round-1 fix pass, HEAD `95eccb89b`) does say "38," describing the
+sibling-guard population as part of a "not rerun this pass, by scope" disclosure. §G5's "never
+claimed 38 anywhere" was false, and the "No action item for this pass" conclusion that rested on it
+does not hold — there was an action item: correcting the stale count.
+
+**True population, mechanically enumerated, this pass** (same method as round-2's own §1.6/§1.7 and
+round-3's §1.6, not re-typed from either report):
+
+```
+$ find . -path ./node_modules -prune -o -name "*ci-wiring*" -print | grep -v node_modules | wc -l
+45
+```
+
+45, matching the supplementary checklist's own population count, quoted rather than assumed
+(`reviews/impl-supplementary-gate-checklist-20260918.md:6`: "同族 `*-ci-wiring` 共 45 个") and
+round-2/round-3's own closure of "45/45." **Was "38" simply stale drift, or wrong from the moment
+Part C3 wrote it (HEAD `95eccb89b`)?** Checked, not assumed — the population was already 45 at that
+exact HEAD, ~~before any of this lane's own `*-ci-wiring` files existed to inflate a later count~~
+**SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md` P3-6): this parenthetical is
+false — `95eccb89b`'s population of 45 already INCLUDES this lane's own new
+`approval-cancel-round-ci-wiring.test.ts` (`git ls-tree -r 95eccb89b --name-only | grep -E
+'ci-wiring' | grep -i cancel-round` → that one file, confirmed). The true pre-lane population, on
+`origin/main`, is 44 (`git ls-tree -r origin/main --name-only | grep -cE '[^/]*ci-wiring[^/]*$'` →
+`44`). The supported conclusion is unaffected — 44 ≠ 38, so "38" was still stale/wrong the moment
+Part C3 wrote it, regardless of whether the comparison point is 44 or 45 — only the "before this
+lane's own file existed" provenance claim about WHY the count is 45 was false; the file was already
+counted in it.**:
+
+```
+$ git ls-tree -r 95eccb89b --name-only | grep -E '[^/]*ci-wiring[^/]*$' | wc -l
+45
+```
+
+"38" was wrong the moment Part C3 wrote it — the round-1 gate report's own §1.6 explains why (its
+glob missed 7 files that existed all along), not a later drift this lane introduced. (This pass does
+not rerun all 45 — that was already done fresh in round-3's §1.6, one commit back, and nothing in
+this pass's docs-only diff touches CI config or any `*-ci-wiring` test file, so there is nothing for
+those suites to exercise differently. Scoped-diff check, same method as Part C3 used, pinned to this
+pass's first commit rather than the moving `HEAD` symbol so the claim does not drift on a later
+commit: `git diff 6c5b06f7d 74c6c2e96 --name-only -- packages plugins scripts .github` → empty,
+~~re-checked against this pass's full commit range, not just its first commit.)~~ **SUPERSEDED
+(gate round 4 / `impl-gate-C-slice1-round4-20260918.md` P3-3): this was NOT the full commit range —
+two more commits (`dce9e16df`, `50fe83ebc`) landed after `74c6c2e96`, and this sentence's own claim
+of "full commit range" was written before them and never updated. The re-derived full-range check,
+pinned to this pass's actual last commit `50fe83ebc`, is
+`git diff --name-only 6c5b06f7d 50fe83ebc -- packages plugins scripts .github apps` → `0` (rerun by
+this fix pass); the substance — zero non-doc files touched across the whole pass — still holds, only
+the "full range" claim about which commits were actually checked was false.)**
+
+**Fix, this pass**: `docs/development/approval-cancel-round-phase1-verification-20260918.md:900` —
+"the 38 sibling `*-ci-wiring` guards" → "the 45 sibling `*-ci-wiring` guards," struck through in place
+(not silently overwritten) with a `SUPERSEDED (round-3 gate P2-2 / Part H2)` annotation naming the
+correction and the grep that re-confirms it. §G5's P3-C bullet is corrected the same way: the false
+"never claimed 38 anywhere" clause is struck and annotated, replaced with an honest statement that the
+hit exists and was fixed this pass. §G6's P3-C table row is updated from "Registered, no implementer
+action" to point at this fix.
+
+A whole-document grep for "38 sibling" is **not** the right check here (it necessarily still matches
+this Part's own retraction narrative and §G5's corrected bullet, both quoting the historical wrong
+text in past tense to document the correction — the same instrument error §H1 flags for "9246"). The
+scoped, correct check is line 900 itself:
+
+```
+$ sed -n '900p' docs/development/approval-cancel-round-phase1-verification-20260918.md
+the two backend unit tests, `packages/core-backend`'s typecheck, and ~~the 38 sibling `*-ci-wiring`
+guards~~ **the 45 sibling `*-ci-wiring` guards — SUPERSEDED, round-3 gate finding P2-2 / Part H2: …**
+```
+
+Line 900 no longer asserts "38" as the live population count; it is struck through and replaced with
+"45," carrying the same `SUPERSEDED` marker used throughout this document.
+
+## H3. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree (`wt-cancel-round`) on the assigned branch
+  (`feat/approval-cancel-round-phase1`); no `git checkout --`, `git reset --hard`, or stash discard
+  was used or needed.
+- No lock file or `reviews/` document was opened for editing this pass. Checked against this pass's
+  own starting HEAD rather than `origin/main` (`origin/main` has not moved; the wider
+  `origin/main..HEAD` diff is checked the same way in every earlier Part of this document), pinned to
+  fixed commits rather than the moving `HEAD` symbol so the claim does not silently start covering a
+  later, unrelated commit once this branch gets its next fix-round commit:
+  `git diff --name-only 6c5b06f7d 74c6c2e96 | grep -iE "review|lock-draft|\.claude"` → 0 hits.
+  ~~(scoped to `74c6c2e96`)~~ **SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md`
+  P3-3, "same family" as the :2129 fix above): this check was also short two commits. Re-derived over
+  the true full range: `git diff --name-only 6c5b06f7d 50fe83ebc | grep -iE "review|lock-draft|\.claude"`
+  → 0 hits. The claim itself ("no lock file or `reviews/` document was opened for editing this
+  pass") still holds; only the range the original check covered was incomplete.**
+- No migration was applied anywhere in this pass (no new migration exists to run); the private DB
+  (`metasheet2_lock_c`) was already migrated by an earlier pass and only read (test runs), never
+  written outside those tests' own transactions.
+- No PR opened, no branch merged or undrafted, no force-push.
+- **This pass's commits are every commit on this branch after `6c5b06f7d`** (`git log --oneline
+  6c5b06f7d..` lists them; each commit message states its own scope) — deliberately **not** a count
+  pinned into this prose, the same lesson this pass already applied to the design MD's "HEAD as of"
+  header (§H1's closing note): a self-count inside a document every one of its own commits edits
+  cannot survive the next commit that edits it, and an earlier draft of this bullet said "two" when a
+  third, self-review-of-the-self-review commit was already landing. In role terms: the first commit
+  is the P2-1/P2-2 fixes and this Part H (H1-H4) as originally written; every commit after it is a
+  self-review correction to a claim this Part itself made too loosely on an earlier writing (see each
+  commit's own message for what it fixed). Every one of them is docs-only — verified before staging
+  each commit via `git status --porcelain` / `git diff --stat` showing only the same two
+  `docs/development/*.md` paths, and confirmed for the full range via
+  `git diff --name-only 6c5b06f7d 74c6c2e96` ~~(currently the tip of this pass's commits): the same
+  two files, zero others.~~ **SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md`
+  P3-3): `74c6c2e96` stopped being the tip two commits before this sentence was ever read —
+  `dce9e16df` and `50fe83ebc` landed after it (the irony: `dce9e16df`'s own stated purpose was
+  fixing a self-count elsewhere in this very Part H, and it introduced this same defect on a
+  sibling sentence — `feedback_generation_guard_must_be_applied_to_every_sibling_surface`).
+  Re-derived over the true tip: `git diff --name-only 6c5b06f7d 50fe83ebc` → still exactly the same
+  two `docs/development/*.md` paths, zero others. The substance holds; only the "currently the tip"
+  self-reference was false.**
+- Files touched, across this pass's commits: `docs/development/approval-cancel-round-phase1-design-20260918.md`
+  (the §3.2/design MD:206 citation fix, the header rewrite, and the trailing historical clause) and
+  `docs/development/approval-cancel-round-phase1-verification-20260918.md` (this Part H in full, the
+  `SUPERSEDED` annotations to §G3/§G5/§G6, and the "Net after this pass" paragraph). Zero non-`.md`
+  files across any of them. `git status --porcelain` is clean after each commit and push (no stray
+  edits, no leftover mutation-probe state — none were run this pass; see §H1/§H2's own notes on why
+  not).
+
+## H4. What this pass does not close — carried forward, not silently dropped
+
+The round-3 gate report's five P3 findings are **not** addressed by this pass; they are the scope of
+a later fix-round step, not abandoned. (As written when this bullet list was first drafted — the
+P3-3 bullet further down this same list is itself the fix for P3-3, and two more, P3-1/P3-2, are
+fixed in a subsequent pass on this branch; see each bullet's own current text or `SUPERSEDED`
+annotation for present state, not this introductory sentence.)
+
+- ~~**P3-1** (Part G self-contradicts: §G2 says "single commit," §G7 says "Two commits this pass") —
+  unresolved; needs both sentences reconciled against the true two-commit history
+  (`a166f5ca0` + `6c5b06f7d`), per the gate's own §9 recipe. Not touched this pass.~~ **SUPERSEDED —
+  fixed in a later pass on this branch, §I1**: this bullet was accurate when Part H was first
+  written; it does not describe the document's current state. §I1 reconciles §G2 and §G7 against the
+  true two-commit history and corrects the content split, not just the count.
+- ~~**P3-2** (§G3's `readFileSync`-co-occurrence grep is structurally blind to `read('…')`-wrapped and
+  variable-path guards, and two such guards exist in this tree reading the exact files G3 edited) —
+  unresolved; §H1 above deliberately used a broader filename-based grep for its own safety check
+  instead of repeating G3's narrower one, but does not yet go back and fix G3's own argument text.
+  Not touched this pass.~~ **SUPERSEDED — fixed in a later pass on this branch, §I2**: §G3's own
+  argument text is corrected there, naming the two guards and disclosing that one of them does not
+  strip comments.
+- **P3-3** (design MD header's "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" is one commit
+  behind this pass's own starting HEAD) — **fixed this pass, per the gate report's own §9 item 8
+  suggestion** ("改成「见 git 历史」这种不会腐烂的写法"): the header no longer pins a single "HEAD as
+  of" SHA at all (pinning *this* pass's HEAD would only recreate the identical self-reference problem
+  the moment this pass's own commit lands — a header can never cite the SHA of the commit that writes
+  it). It now points to "read the verification MD's own Part covering the pass in question," which
+  does not decay on the next pass the way a hardcoded SHA does. See §H1's closing note.
+- **P3-4** (two `wip` commits, closure depends on a lane instruction outside the gate reviewer's
+  readable authorization chain) — not this implementer's to close; round-2's §G4 already recorded the
+  correct disposition (self-resolves at the Draft-PR-opening step). No action item for any fix-round
+  pass before that step exists.
+- **P3-5** (§14.3 #9's mirror-override half, (b), still has no mutation run against it — only the
+  positive-control half, (a), does, per round-3's own M6) — already disclosed as open in the design
+  MD §4 and this document's §A9, consistent across all three gate rounds. Not a regression, not
+  newly discovered; no action item beyond what is already on record.
+
+This pass's own two fixes (§H1, §H2) are commit-scoped and complete against the round-3 gate's own
+§9 closure criteria for P2-1 and P2-2. The round's zero P1 findings needed no action.
+
+---
+
+# Part I — round-3 gate's remaining two open P3 findings, fixed (later pass on this branch)
+
+Part H (above) closed round-3's two P2 findings and one of its five P3 findings (P3-3) but explicitly
+left P3-1, P3-2, P3-4, and P3-5 as carried forward (§H4). P3-4 and P3-5 already carried a correct
+final disposition in §H4 ("not this implementer's to close" / "already disclosed, not a regression")
+— nothing to fix there, only to leave standing. P3-1 and P3-2 did not: both named a live defect in
+this document's own prose (§G2/§G7's self-contradiction; §G3's non-covering grep). This Part fixes
+those two, in place at §G2/§G3/§G7 (not narrated separately here, to avoid the exact "narrative
+covers the sentence instead of the sentence being fixed" failure this document has already flagged in
+itself twice — see §G3's and §G5's `SUPERSEDED` annotations). **Docs-only: zero production or test
+code touched.**
+
+## I1. P3-1 (round-3) — §G2/§G7's commit-count self-contradiction, reconciled
+
+**The finding**: §G2 said the round-2 fix "landed in a single commit; there is no second commit to
+point to." §G7, a few dozen lines later in the same document, said "Two commits this pass." Both
+cannot be true.
+
+**Re-derived against this branch's actual history, not copied from either sentence**:
+```
+$ git show --stat a166f5ca0 | tail -6
+ apps/web/src/approvals/api.ts                      |   2 +-
+ ...approval-cancel-round-phase1-design-20260918.md |  32 ++-
+ ...al-cancel-round-phase1-verification-20260918.md | 240 +++++++++++++++++++++
+ .../src/services/ApprovalBridgeService.ts          |   2 +-
+ .../approval-cancel-round-redemption.db.test.ts    |   8 +-
+ 5 files changed, 271 insertions(+), 13 deletions(-)
+$ git show --stat 6c5b06f7d | tail -3
+ ...al-cancel-round-phase1-verification-20260918.md | 31 ++++++++++++++--------
+ 1 file changed, 20 insertions(+), 11 deletions(-)
+```
+`a166f5ca0` touched both source comments (`ApprovalBridgeService.ts`, `api.ts`) and the design MD —
+so the two P3-A comment fixes and the design MD header narrowing are in the **first** commit, not a
+second one. `6c5b06f7d` touched only the verification MD, 31 lines — consistent with its own message
+("Three narrowing fixes to the round-8 fix pass just committed"), i.e. it corrects three sentences
+**inside** Part G, it does not add the comment fixes or header narrowing. So: two commits is the right
+count (§G7), but §G7's own description of what landed in which commit was also wrong — it attributed
+the comment fixes and header narrowing to the *second* commit ("one for G3–G6 … the two comment
+fixes, the design MD header narrowing"), when they are in the first.
+
+**Fix, this pass**: §G2 and §G7 both corrected in place (struck through, `SUPERSEDED` annotation
+naming this finding and this Part, then the true two-commit split with per-commit content) rather
+than silently rewritten — per this document's own established practice for a finding that turns out
+to have been recorded wrong (see §G3/§G5's `SUPERSEDED` blocks, and memory
+`feedback_supersession_marker_must_evaluate_not_void`: evaluate the specific false sentence, don't
+void the whole section).
+
+**Deliberately not restated as a hardcoded fact in this Part**: this Part does not itself assert "two
+commits, split X/Y" as a freestanding claim outside of what §G2/§G7 now say — that would recreate a
+second copy of the same claim for a future pass to find drifted from the first, the identical failure
+shape `dce9e16df` diagnosed for the design MD's "HEAD as of" header and its own commit-count bullet.
+§I1 points at §G2/§G7; it does not duplicate them.
+
+**Rerun**: none required — no code or test file is touched by this fix (`git diff --stat` for this
+commit, see §I3, shows only the verification MD). The seven-suite cancel-round set and `tsc --noEmit`
+were rerun anyway, unchanged from every prior rerun this branch (`Test Files 7 passed (7) / Tests 47
+passed (47)`; `TSC-EXIT:0`).
+
+## I2. P3-2 (round-3) — §G3's safety-check grep replaced with the actual guards, named and rerun
+
+**The finding**: §G3 justified editing two source comments with `grep -rn "readFileSync" … | grep
+-iE "api\.ts|ApprovalBridgeService"` returning no hits, concluding "no sync-pin or source-text guard
+reads either file." The grep's shape can only match a line where the literal token `readFileSync` and
+a filename co-occur; it is blind to a `read(...)` helper whose body is on a different line from its
+call site, or to a path built from a variable. Two such guards exist in this tree and both read one
+of the two files §G3 edited:
+
+```
+$ grep -n "read('services/ApprovalBridgeService.ts')" packages/core-backend/tests/unit/approval-admin-capability.test.ts
+366:    const arms = extractAdminArms(read('services/ApprovalBridgeService.ts'))
+$ sed -n '343,345p' packages/core-backend/tests/unit/approval-admin-capability.test.ts
+343:  function read(rel: string): string {
+344:    return readFileSync(join(src, rel), 'utf8')
+345:  }
+$ grep -n "'src/approvals/api.ts'," apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts
+852:      'src/approvals/api.ts',
+```
+
+**Whether either guard could actually have been tripped by §G3's edits, checked directly rather than
+assumed from "reads the file"**:
+
+- `approval-admin-capability.test.ts`'s guard extracts SQL-arm shapes via
+  `ADMIN_ARM_RE` against `source.replace(/\s+/g, ' ')` (`:356`) — **it does not strip comments before
+  matching**, and says so in its own docblock: "a whole-file `toContain` … can be satisfied by a
+  **DOCBLOCK** restating the arm" (`:350`). So "editing only the comment body is inherently inert" is
+  **not a true general claim about this file** — a comment containing the `ADMIN_ARM_RE` SQL shape
+  would turn this guard red regardless of being a comment. The edit §G3 actually made (a `file:line`
+  citation number, `:9246` → `:9637`, inside a *different* docblock) does not contain that shape, so
+  it stayed green for that reason, not for "comments are inert."
+- `approval-member-identity-coverage-enumeration.spec.ts`'s guard at `:852` reads `api.ts` but its
+  assertion (`:857-858`) checks for role-name-resolution identifiers
+  (`ensureRoleNamesResolved|getResolvedRoleName|resolveApprovalDirectoryRoles|resolvedRoleNames`),
+  unrelated in content to the `APS:8561`→`APS:8916` citation §G3 edited in that file — so this guard
+  was never at risk from that specific edit, but again because of what it checks, not because
+  comments are categorically safe.
+
+**Actual safety evidence, rerun this pass** — the two guards that read these files, green:
+```
+$ npx vitest run tests/unit/approval-admin-capability.test.ts --reporter=dot
+ Test Files  1 passed (1)   Tests  15 passed (15)
+$ npx vitest run approval-member-identity-coverage-enumeration --reporter=dot
+ Test Files  1 passed (1)   Tests  16 passed (16)
+```
+Both counts match the round-3 gate report's own P3-2 finding text verbatim
+(`reviews/impl-gate-C-slice1-round3-20260918.md`, lines 294-295: "→ Test Files 1 passed / Tests 15
+passed" / "16 passed") — this Part reruns the gate reviewer's own commands, not new ones. This
+supersedes §G3's grep-based inertness argument with actual-guard evidence, and names the file where
+"comment edits are inert" does not hold as a general property (`approval-admin-capability.test.ts`),
+per the gate's own §9 item 7 instruction.
+
+**Fix, this pass**: §G3's "No hit — … editing only the comment body is safe" sentence struck through
+and annotated `SUPERSEDED`, pointing here.
+
+**Rerun**: seven-suite cancel-round set and `tsc --noEmit`, unchanged (`Test Files 7 passed (7) /
+Tests 47 passed (47)`; `TSC-EXIT:0`) — this fix touches only prose in the verification MD, no source
+or test file.
+
+## I3. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree (`wt-cancel-round`) on the assigned branch; no
+  `git checkout --`, `git reset --hard`, or stash discard was used or needed.
+- No lock file or `reviews/` document was opened for editing: `git diff --name-only
+  origin/main..HEAD | grep -iE "review|lock-draft|\.claude"` → 0 hits, checked after this pass's
+  commit.
+- No migration applied anywhere this pass (none exists to run); the private DB (`metasheet2_lock_c`)
+  was written to by neither §I1 nor §I2 (docs-only) — it was read (never written outside those tests'
+  own transactions) by the seven-suite integration rerun cited in §I1/§I2's own "Rerun" notes, the
+  same suite set every earlier pass on this branch has used.
+- No PR opened, no branch merged or undrafted, no force-push.
+- Every commit in this pass is docs-only and touches only this one file — verified before staging
+  each one via `git status --porcelain` / `git diff --stat`, and (for the pass as a whole, in case
+  more than one commit lands) via `git diff --name-only dce9e16df..HEAD` (`git log --oneline
+  dce9e16df..` lists the commits; each message states its own scope). Deliberately **not** a commit
+  count pinned into this prose — the same lesson `dce9e16df`'s own message already drew from an
+  earlier version of exactly this bullet ("a self-count inside a document every one of its own
+  commits edits cannot survive the next commit that edits it") and §I1 applies to itself above.
+  Neither source comment nor the design MD is touched by this pass's fixes (P3-1's fix corrects this
+  document's *account* of what landed where in `a166f5ca0`/`6c5b06f7d`; it does not re-touch those
+  files themselves).
+
+## I4. Net status — round-3 gate report (`impl-gate-C-slice1-round3-20260918.md`) fully processed
+
+Round-3's verdict was NEEDS-FIX, 0 P1 / 2 P2 / 5 P3 — re-derived from the report's own section
+headings, not copied from its header line:
+```
+$ grep -cE "^### P[23]-" reviews/impl-gate-C-slice1-round3-20260918.md
+7
+```
+~~(run from the worktree root)~~ **SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md`
+P3-5): gate reports live under `~/.claude/projects/<proj>/reviews/`, NOT inside this repo's own
+worktree — `reviews/impl-gate-C-slice1-round3-20260918.md` does not exist under the worktree root, so
+this command as written cannot be reproduced there (`ls -d reviews` at the worktree root →
+"No such file or directory"). The number itself is correct — run from the actual reviews directory,
+`grep -cE "^### P[23]-" impl-gate-C-slice1-round3-20260918.md` → `7`, re-confirmed fresh by this fix
+pass — only the path in the command as transcribed here was not reachable from the worktree it reads
+as being run from.** Matching `grep -nE "^### P"` listing exactly P2-1, P2-2, P3-1, P3-2, P3-3, P3-4,
+P3-5 and no others — 7, agreeing with the header's "2 P2 / 5 P3". Disposition after this Part:
+
+| Finding | Status | Where |
+|---|---|---|
+| P2-1 | CLOSED | §H1 |
+| P2-2 | CLOSED | §H2 |
+| P3-1 | CLOSED | §I1 (this pass) |
+| P3-2 | CLOSED | §I2 (this pass) |
+| P3-3 | CLOSED | §H4 (design MD header converted to a non-decaying pointer) |
+| P3-4 | Recorded, no implementer action — outside this document's readable authorization chain, self-resolves at the Draft-PR-opening step per round-2's §G4 | §H4 |
+| P3-5 | Recorded, no implementer action — already disclosed as open across all three gate rounds, not a regression | §H4 |
+
+Every finding the round-3 gate report named now has a terminal disposition recorded in this document:
+five fixed (two P2, three P3), two P3 findings correctly recorded as open-and-not-actionable-here
+rather than closed. This does not constitute a fourth gate pass approving the fixes — that is the
+next independent reviewer's call, not this document's own.
+
+---
+
+# Part J — gate round 4 (`impl-gate-C-slice1-round4-20260918.md`) fully processed (fix round 1, this pass)
+
+> Round 4 re-reviewed the round-3 FIX (this document's Part H/Part I), not new code from this lane —
+> its own one-sentence framing: "这一条 P2 不是修复轮引入的回归…是我本轮新跑出来的实现侧覆盖缺口."
+> Verdict: NEEDS-FIX, **0 P1 / 1 P2 / 6 P3** (`impl-gate-C-slice1-round4-20260918.md:10`).
+
+## J1. P2-1 (round-4, CONFIRMED) — §9-9 allow-set had zero MEMBER-level discriminative power; fixed
+
+**The gap** (gate §3, mutation R4-M5): `CANCEL_ROUND_ALLOWED_ACTIONS` implements the ratified §9-9
+allow-set correctly (`{approve, reject, revoke, comment}`), and the lock-named negative-control
+mutation ("remove the action-judgment call entirely") was already red per round-3's own M6/R4-M6. But
+no test ever dispatched `'transfer'`, `'add_sign'`, or `'reduce_sign'` specifically — the existing
+`#4/#6` acceptance only exercises `'handle'`/`'return'`. So *widening* the set (adding `'transfer'`
+back in, the exact regression the ratify header exists to prevent) left all 47 acceptance tests
+green — a silent break of the coupled §9-11/C-3 revoke-window invariant that the lock itself says
+`transfer` also gates.
+
+**Fix — one new test, mechanically enumerated, not hand-listed** (per
+`feedback_trap_enumeration_does_not_converge`, explicitly named in the gate's own §9 fix guidance):
+`packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts`, new `it`
+block titled `§9-9 allow-set MEMBER pin`, placed directly after the existing `#4/#6` test:
+
+```ts
+import { APPROVAL_ACTION_TYPES, type ApprovalActionRequest } from '../../src/types/approval-product'
+// …
+const RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS = new Set<string>(['approve', 'reject', 'revoke', 'comment'])
+const forbiddenActions = APPROVAL_ACTION_TYPES.filter(
+  (action) => !RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS.has(action),
+)
+expect(forbiddenActions.length).toBeGreaterThanOrEqual(5)
+expect(forbiddenActions).toEqual(expect.arrayContaining(['transfer', 'add_sign', 'reduce_sign']))
+for (const action of forbiddenActions) {
+  // dispatch each one on a real cancel-round instance, assert 409 CANCEL_ROUND_OUTLET_FORBIDDEN,
+  // assert the row (version, status) is unchanged
+}
+```
+
+This iterates the REAL exported `ApprovalActionType` union (currently 9 members: approve, reject,
+transfer, revoke, comment, return, add_sign, reduce_sign, handle), not a copy-pasted array of the
+three ratify-named verbs — so a future verb added to `APPROVAL_ACTION_TYPES` is covered by this loop
+without anyone remembering to edit this test (the exact failure mode
+`finding_approval_action_verb_pinned_copy_blast_radius` warns about). The local
+`RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS` copy is deliberately NOT imported from
+`ApprovalProductService`'s own `CANCEL_ROUND_ALLOWED_ACTIONS` constant — importing the production
+constant would make the test tautological against exactly the widening regression it exists to catch
+(the guard-the-guard assertions above also fail loudly, rather than passing vacuously, if the
+enumeration itself is ever tampered with).
+
+**Implementation**: unchanged, per the gate's own §9 closure judgment ("实现不需要改") — the allow-set
+literal was already correct; only the missing pin is added.
+
+**Evidence, this pass** — private DB `metasheet2_lock_c`, dropped and recreated fresh
+(`dropdb --if-exists` → `createdb` → migrate):
+
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c npx tsx src/db/migrate.ts
+MIGRATE-EXIT:0
+$ grep -c "executed successfully" /tmp/c-migrate.log
+409
+```
+
+Baseline (before the new test), seven-suite rerun on the virgin DB:
+```
+Test Files  7 passed (7)
+     Tests  47 passed (47)
+```
+
+After adding the test, same seven suites:
+```
+Test Files  7 passed (7)
+     Tests  48 passed (48)
+```
+
+`tsc --noEmit -p .` (packages/core-backend): `TSC-EXIT:0`, 0 lines of output.
+
+**Mutation (repeats gate's own R4-M5, this pass's own run)** — `cp` backup, not `git checkout --`:
+```
+$ cp packages/core-backend/src/services/ApprovalProductService.ts /tmp/APS.orig.ts
+```
+Edit: add `'transfer'` as a fifth member of `CANCEL_ROUND_ALLOWED_ACTIONS` (the exact widening the
+ratify header forbids). Rerun `approval-cancel-round-outlet-guards.db.test.ts` alone:
+```
+✓ #4/#6 dispatchAction action gate …
+× §9-9 allow-set MEMBER pin …
+  action=transfer: expected ServiceError: targetUserId is required for transfer { …(3) } to
+  match object { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' }
+  - Expected: { code: "CANCEL_ROUND_OUTLET_FORBIDDEN", statusCode: 409 }
+  + Received: { code: "VALIDATION_ERROR", statusCode: 400 }
+Test Files  1 failed (1)
+     Tests  1 failed | 6 passed (7)
+```
+The new test goes red — and specifically on the widened action, not by coincidence: with the outlet
+gate bypassed for `'transfer'`, execution falls through to the transfer-specific downstream
+validation (`targetUserId is required for transfer`), which throws a DIFFERENT code/status
+(`400 VALIDATION_ERROR`, not `409 CANCEL_ROUND_OUTLET_FORBIDDEN`). Because the assertion checks the
+SPECIFIC status+code pair (not merely "did it reject"), it fails whenever the
+`CANCEL_ROUND_OUTLET_FORBIDDEN` gate is not what's actually blocking the action — which is exactly
+the invariant this test exists to pin, regardless of what secondary validation happens to also fire
+once the primary gate is bypassed. The other 6 tests in the file (including `#4/#6`, which never
+dispatches `'transfer'`) stay green — the mutation is not a blanket break, only a member-level one,
+confirming the new test's discriminative power is genuinely additive over the pre-existing suite.
+
+**Why `add_sign` and `reduce_sign` needed SEPARATE single-verb mutations, not just this one**: the
+`for (const action of forbiddenActions)` loop's body is `await expect(promise).rejects.toMatchObject(...)`
+— on a mismatch this throws synchronously, aborting the loop at the FIRST failing iteration.
+`forbiddenActions`, filtered from `APPROVAL_ACTION_TYPES` preserving that array's declared order, is
+`['transfer', 'return', 'add_sign', 'reduce_sign', 'handle']` — `'transfer'` is first. So the single
+mutation above only proves `'transfer'` is pinned; it says nothing about `'add_sign'`/`'reduce_sign'`
+individually (the gate report's own §8 flagged exactly this as "未分别跑" for those two verbs, and a
+fix that inherited the same gap in its own evidence would repeat the finding it's closing). Two more
+`cp`-backed single-verb mutations, run and restored the same way:
+
+```
+$ cp packages/core-backend/src/services/ApprovalProductService.ts /tmp/APS.orig2.ts
+```
+Add ONLY `'add_sign'` (not `'transfer'`) to the allow-set. Rerun the same file alone:
+```
+× §9-9 allow-set MEMBER pin …
+  action=add_sign: expected ServiceError: targetUserIds is required f… { …(3) } to match object
+  { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' }
+  - Expected: { code: "CANCEL_ROUND_OUTLET_FORBIDDEN", statusCode: 409 }
+  + Received: { code: "VALIDATION_ERROR", statusCode: 400 }
+Test Files  1 failed (1)
+     Tests  1 failed | 6 passed (7)
+```
+Red specifically at `action=add_sign` — the loop's earlier iterations (`'transfer'`, `'return'`,
+still forbidden in this mutation) pass fine first, confirming the failure tracks the mutated member,
+not a blanket break. Restore, `cmp` clean, rerun outlet-guards file green again. Repeat with ONLY
+`'reduce_sign'` added:
+```
+× §9-9 allow-set MEMBER pin …
+  action=reduce_sign: expected ServiceError: targetAssignmentUserId is r… { …(3) } to match object
+  { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' }
+  - Expected: { code: "CANCEL_ROUND_OUTLET_FORBIDDEN", statusCode: 409 }
+  + Received: { code: "VALIDATION_ERROR", statusCode: 400 }
+Test Files  1 failed (1)
+     Tests  1 failed | 6 passed (7)
+```
+Red specifically at `action=reduce_sign` (`'transfer'`/`'return'`/`'add_sign'` pass first). All three
+ratify-named verbs are now INDIVIDUALLY measured, not two of them inferred from the shared predicate
+— closing the same gap in the fix's own evidence that the gate report disclosed in its own §8/§10 for
+`'transfer'` alone.
+
+Each of the three mutations was restored and verified byte-identical independently, immediately after
+its own run (not batched at the end): `transfer`'s backup (`/tmp/APS.orig.ts`) restored and `cmp`
+clean before the `add_sign` mutation was made; `add_sign`'s backup (`/tmp/APS.orig2.ts`) restored and
+`cmp` clean (`RESTORE-CLEAN-1`) before the `reduce_sign` mutation reused that same clean baseline;
+`reduce_sign`'s restore from the same backup was `cmp` clean (`RESTORE-CLEAN-2`). `git status
+--porcelain` after all three restores:
+```
+ M packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts
+```
+(the seed-file and this document's own edits, at the point these mutations were run, had not yet been
+made — only the new test file shows as modified here). Only the intended test-file diff remains after
+each restore; every mutation left zero trace on `ApprovalProductService.ts`. Post-restore, full
+seven-suite rerun: `Test Files 7 passed (7)`, `Tests 48 passed (48)` — matches the post-fix baseline
+above, confirming the restores did not silently change anything else.
+
+**Disclosure**: §A9 above now carries a line for this gap and its closure (added this pass, following
+the document's existing convention for a since-resolved BLOCKING item).
+
+**Checklist item now closed.**
+
+## J2. The six P3 findings — disposed "顺手" per the gate's own §9 items 3-8 (docs-only, no code)
+
+| Gate finding | Disposition | Where |
+|---|---|---|
+| P3-1 (seed file: three stale baseline `file:line` pointers) | Fixed — replaced with an explanation of why the lock's baseline line numbers no longer match this tree's (+446 lines to `ApprovalProductService.ts`), plus a `grep` recipe to re-derive fresh pointers instead of a new literal that would just go stale again the same way. | `packages/core-backend/src/db/seeds/approval-cancel-round-published-definition.ts` (module doc comment) |
+| P3-2 (seed file: false invariant — "empty array is more restrictive than absent") | Withdrawn — the window gate is `revokeBeforeNodeKeys?.length && …`, so an absent key and an empty array short-circuit identically (both fail-open); replaced with the correct statement and a pointer to R4-M3's real behavioural mutation as what actually pins the fail-open default. | same file, same comment block (kept as ONE edit since the false claim and the stale pointers share a paragraph, but the two defects — pointer-error vs. invariant-error — are called out separately per the gate's own instruction not to conflate them) |
+| P3-3 (this document's own tip-pointer, `74c6c2e96`, stale by two commits at three sites) | Fixed at all three sites (verif:2129/2171/2187-area, pre-this-pass line numbers) — struck through and annotated `SUPERSEDED`, re-derived against the true tip `50fe83ebc`; the underlying substantive claims (docs-only, zero non-md files, same two files touched) all still hold, only the "which commits were checked" self-reference was false. | this document, this Part J entry + the three struck-through sites in §H3 |
+| P3-4 (design MD's own `:9246`-context citation, `209-210` vs. actual `216-217`) | Fixed — struck through and annotated, re-derived: `grep -n "9246" design MD` → `:216`/`:217`. | this document, the §I2-area citation |
+| P3-5 (a `reviews/…` grep in §I4 not reproducible from the worktree root) | Fixed — annotated that gate reports live under `~/.claude/projects/<proj>/reviews/`, not in this repo; the number itself (7) was already correct and is re-confirmed from the actual path. | this document, §I4 |
+| P3-6 (§H2's false provenance parenthetical — "before this lane's own ci-wiring file existed") | Withdrawn — `95eccb89b`'s population of 45 already INCLUDES this lane's own new `approval-cancel-round-ci-wiring.test.ts`; the true pre-lane count (on `origin/main`) is 44. The supported conclusion ("38" was wrong from the start) is unaffected since 44 ≠ 38 either way. | this document, §H2 |
+
+None of these six required any code change, any real-DB rerun, or any migration — all are corrections
+to prose/comments this lane's own earlier passes wrote, confirmed against the current tree by fresh
+`grep`/`git` commands quoted inline at each site (not re-typed from the gate report).
+
+## J3. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree (`wt-cancel-round`) on branch
+  `feat/approval-cancel-round-phase1`; no `git checkout --`, `git reset --hard`, or stash discard was
+  used or needed anywhere in this pass.
+- The three mutations this pass ran (R4-M5 repeat for `'transfer'`, plus the two additional
+  single-verb mutations for `'add_sign'` and `'reduce_sign'`, §J1) were each backed up with `cp`,
+  restored with `cp`, and verified byte-identical with `cmp` individually — not batched at the end;
+  `git status --porcelain` showed only the intended source-tree diff after each restore.
+- No lock file or `reviews/` document is touched by this pass's commit(s) — checked with
+  `git diff --name-only origin/main..HEAD | grep -iE "review|lock-draft|\.claude"` after the commit
+  existed and before pushing (not asserted here in advance of that commit existing, per the same
+  discipline this Part's own §J2/P3-3 entry names). Result: 0 hits.
+- No migration was applied to any shared database; the only database touched
+  (`metasheet2_lock_c`) is this lane's own private DB, dropped and recreated fresh by this pass
+  (§J1) — never a shared or CI database.
+- No PR opened, no branch merged or undrafted, no force-push, `origin/main` untouched.
+- Files touched this pass:
+  `packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts` (the new
+  §9-9 member-pin test), `packages/core-backend/src/db/seeds/approval-cancel-round-published-definition.ts`
+  (P3-1/P3-2 comment fixes), `docs/development/approval-cancel-round-phase1-verification-20260918.md`
+  (this Part J, the §A9 disclosure line, and the P3-3/P3-4/P3-5/P3-6 struck-through annotations).
+  Zero other paths.
+
+## J4. Net status — gate round 4 (`impl-gate-C-slice1-round4-20260918.md`) fully processed
+
+| Finding | Status | Where |
+|---|---|---|
+| P2-1 | CLOSED | §J1 |
+| P3-1 | CLOSED | §J2 |
+| P3-2 | CLOSED | §J2 |
+| P3-3 | CLOSED | §J2, §H3 (struck-through annotations) |
+| P3-4 | CLOSED | §J2, §I2-area citation |
+| P3-5 | CLOSED | §J2, §I4 |
+| P3-6 | CLOSED | §J2, §H2 |
+
+Every finding round 4 named now has a terminal disposition recorded in this document. This does not
+constitute a fifth gate pass approving these fixes — that is the next independent reviewer's call,
+not this document's own.

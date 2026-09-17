@@ -1,19 +1,38 @@
 # Approval Cancel-Round — Phase 1 (C-1) Design (2026-09-18)
 
-Branch `feat/approval-cancel-round-phase1`, HEAD at time of writing `a32b2e015`. Source of authority:
-`approval-change-request-design-lock-draft-20260915.md` v5.9 (RATIFIED 2026-09-18; see its own
-抬头 RATIFY record, quoted verbatim in §7 below — this document does not restate or paraphrase it).
-Goal definition: `goal-three-locks-full-implementation-20260918.md` (slice "C 撤销 / C-1 合同层").
-Supplementary gate checklist: `impl-supplementary-gate-checklist-20260918.md`.
+Branch `feat/approval-cancel-round-phase1`. Originally written at HEAD `a32b2e015`; edited by several
+later fix passes since (Part F's fix, round-2's Part G, round-3's Part H among them), each of which
+re-derived the specific citation(s) it touched against its own HEAD at the time — not a claim that
+every pass re-swept every citation in this document; each pass's own verification-MD Part states what
+it actually re-derived. **This header
+deliberately no longer pins a single "HEAD as of" SHA** — every prior version of that line went stale
+the moment a later pass landed without also rewriting it here, which is itself a finding the
+verification MD's Part F1 and Part G's G3 both record, and which round-3's gate report §9 item 8
+suggested resolving exactly this way ("改成「见 git 历史」这种不会腐烂的写法"), adopted here in
+round-3's own fix pass (verification MD's Part H4). For the citations' actual currency, read the
+verification document's own Part covering the pass in question (each Part states and verifies its own
+starting HEAD) rather than this header.
+Source of authority: `approval-change-request-design-lock-draft-20260915.md` v5.9 (RATIFIED
+2026-09-18; see its own 抬头 RATIFY record, quoted verbatim in §7 below — this document does not
+restate or paraphrase it). Goal definition: `goal-three-locks-full-implementation-20260918.md`
+(slice "C 撤销 / C-1 合同层"). Supplementary gate checklist:
+`impl-supplementary-gate-checklist-20260918.md`.
 
 All lock line-number citations below use the form `lock:NNN`, meaning "line NNN of the lock file as
 it stands today" (the lock's own §-numbers are the stable identity; line numbers can drift between
 lock revisions, so every citation here was re-read against the copy on disk at the time of writing,
-not carried over from an older draft). All *code* file:line citations are against **this worktree's
-actual tree at HEAD `a32b2e015`**, re-derived by `grep`/`sed`, not copied from the lock's own
-evidence table (§10/§14), which is pinned to the lock's pre-implementation baseline `f274316f6` and
-is now stale by `+447` lines in `ApprovalProductService.ts` alone (`git diff --stat
-89f1ecdee...HEAD`). Where a lock citation gives a baseline line number for context, this is marked.
+not carried over from an older draft). All *code* file:line citations **in this document's own
+prose** were re-derived by `grep`/`sed` against the tree at the HEAD named above at the time each
+passage was last edited, not copied from the lock's own evidence table (§10/§14), which is pinned to
+the lock's pre-implementation baseline `f274316f6` and was stale by `+447` lines in
+`ApprovalProductService.ts` alone as of `a32b2e015` (`git diff --stat 89f1ecdee...HEAD`). This
+claim covers citations written into *this file*; it is not a claim that every `file:line` comment
+anywhere in the source tree has been swept for accuracy — that broader sweep is what
+`impl-gate-C-slice1-round2-20260918.md` did mechanically (121 citations across this document and the
+verification MD), and it is what found the two source-code comment pointers this document does not
+itself contain (fixed instead in `ApprovalBridgeService.ts` and `apps/web/src/approvals/api.ts`
+directly; see verification MD Part G, §G3). Where a lock citation gives a baseline line number for
+context, this is marked.
 
 ## 1. Scope of this slice (C-1 合同层)
 
@@ -191,8 +210,12 @@ export function rejectIfCancelRound(instance, outletLabel: string): void
 lock §14.3 (lock:357) names this explicitly ("不得继承或复用
 `AttendanceCentralApprovalError`…会把后者吞成 `skipped_stale`"); the class's own doc comment
 (`ApprovalBridgeService.ts:1577-1584`) repeats the reasoning and cites the exact absorption line
-(`ApprovalProductService.ts:9246`, the `catch (error) { if (error instanceof
-AttendanceCentralApprovalError) … return 'skipped_stale' }` branch inside `applyNodeTimeoutEffect`).
+(`ApprovalProductService.ts:9637`, the `if (error instanceof AttendanceCentralApprovalError) { … }`
+branch inside `applyNodeTimeoutEffect` (`:9568`), whose body's `return 'skipped_stale'` lands at
+`:9640` — re-derived fresh against this pass's own HEAD, not copied from the round-2/round-3 gate
+reports' citations, per the correction those reports made to this section's earlier `:9246` pointer,
+which was never the absorption line: `:9246` falls inside `applyApprovalDepartureTransfer`'s manager
+resolution `catch`, an unrelated fail-closed no-manager path).
 
 ### 3.3 The allowed action set (lock §14.2, lock:342)
 
