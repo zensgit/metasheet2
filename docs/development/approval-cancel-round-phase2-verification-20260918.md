@@ -1499,6 +1499,137 @@ $ git diff --name-only 0225a1aa4..HEAD -- .github/workflows/plugin-tests.yml
 $ git status --short                       (4 modified files, 0 untracked)
 ```
 
+## 3.13 R2, IMPLEMENTED — and the lock's three literal clauses have NO discriminating power (this unit)
+
+Lock:169, 期 1's second 承重反例: 「最终业务评估失败 ⇒ **零业务取消、零 `approved` 完成事件**,但 C-3
+关闭结果已持久化(mutation:把评估挪到入队之后 ⇒ R2 必红)」.
+
+One case, appended to the already-wired redemption suite (13 → 14 cases in this file; 60 → 61 in the
+six-file cancel-round set).
+
+### 3.13.1 The 入队 mapping, NAMED — not inferred
+
+§4 of the previous revision flagged this: the statement after `evaluateCancelRoundFinalInLock` on the
+shipped code is the C-1 call, not an enqueue, so 「把评估挪到入队之后」 needs a stated mapping.
+
+The lock supplies it directly. C-2's ordered step list (lock:105-107) is:
+
+> ① 锁轮次行 → ② 锁原单据实例 → ③ **锁内最终评估** → 分支决定 → 通过:④ 经 C-1 的 W4 外部事务入口
+> 执行完整取消 → ⑤ 写轮次 `applied` → ⑥ **才写 `approved` 审计与入队完成事件** → `COMMIT`
+
+入队 is **step ⑥**. So the mutation is: move the whole
+`resolution.status === 'approved' && isCancelRoundInstance(instance)` hook block from its anchor
+(immediately before `UPDATE approval_instances SET status = $2`) to immediately after
+`await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)` — past the terminal
+status write, past the `approve` audit row, past the enqueue. Registered as **M-20**, and the probe
+was run at exactly that site (the `if (completionEvent) { … }` block's closing brace in
+`dispatchAction`, NOT one of the six sibling `enqueueApprovalEventIfDurable` call sites — the first
+attempt landed on the wrong one and was caught by `tsc` (`Cannot find name 'rolloutLock'`), restored,
+and redone).
+
+### 3.13.2 ⚠️ WHICH assertion carries the mutation — and it is an implementer addition
+
+**Measured, not argued**: under M-20 the `ivexp` case (§3.4) — which asserts 零完成事件, engine
+`rejected`, round `expired` + `ended_at`, the system actor and the decision snapshot, i.e. R2's
+clauses 2 and 3 in full — **stayed GREEN**. So did every other case in the six files except one.
+
+That is §11-③'s trap recurring at this branch, and it is worth stating in full because it means
+**R2's three literal clauses cannot detect the mutation the lock names for R2**:
+
+| R2 clause | Under M-20 | Why |
+|---|---|---|
+| 零业务取消 | GREEN | the evaluation still answers `expired` and still skips C-1 — just later |
+| 零 `approved` 完成事件 (in-process channel) | GREEN | the C-3 branch's own `return` sits before the post-commit `emitApprovalCompletionEvent`, so the built event is never emitted wherever the hook sits |
+| C-3 收口已持久化 | GREEN | the closure still runs and still overwrites `approved` back to `rejected` |
+
+The discriminating assertion is the **persisted `approved` half of step ⑥** — the `approve` audit row
+on the cancel round's own instance, which the mutant writes and the shipped order does not:
+
+```ts
+count(*) FILTER (WHERE action = 'approve')     => '0'
+count(*) FILTER (WHERE to_status = 'approved') => '0'
+```
+
+This is an **IMPLEMENTER ADDITION to R2's clause set**, recorded as such in the case's own doc
+comment. No reader should take 「R2 built, its mutation red」 to mean the lock's literal clauses were
+gated — they were not, and on this code shape they cannot be.
+
+### 3.13.3 Mutation ledger (this unit)
+
+`cp` backup → edit → run alone → `cp` restore → `cmp` (`RESTORED-IDENTICAL`, `git status` shows only
+the test file modified).
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-20 | move the outlet-#5′ hook block past step ⑥ (after `enqueueApprovalEventIfDurable`) | R2 red, and only R2 | **exactly 1 red**: `R2 … expected '1' to be '0'` (the `approve` audit row the mutant writes). 60 green — including `ivexp`, which proves the hook still EXECUTED in its new position and still closed the round, so the red is the reordering and not an unreachable hook |
+
+Two hygiene checks the ledger line depends on, run rather than assumed:
+- the mutant **typechecks** (`npx tsc --noEmit`, exit 0) and its diffstat is `82 insertions(+), 80 deletions(-)` on one file — the block moved, it was not duplicated or dropped;
+- `ivexp` GREEN under the mutant is the proof the hook ran at its new site (a hook made unreachable
+  would leave the round `pending` and the instance `approved`, and `ivexp` asserts both the other
+  way).
+
+### 3.13.4 Why the REAL port and an attendance-backed fixture
+
+Over a test double 「零业务取消」 could only be `calls.length === 0` — a statement about a stub. This
+case binds nothing: the attendance plugin's REAL `executeInExternalTransaction` is live (asserted
+`getAttendanceCancellationExecutionPort()` is defined before the action), and the zeros are rows:
+原单 still `approved`, zero `revoke` records on it, `attendance_requests.status` still `approved` with
+`resolved_by`/`resolved_at` still NULL. The positive control that this same fixture shape DOES get
+cancelled when the evaluation passes is §3.12's end-to-end case.
+
+**「零业务取消」 is fail-open-shaped**, so the preconditions are asserted as rows BEFORE the action —
+otherwise the zero is also green for a fixture that never had a target (unattached document,
+unparseable `business_key`, a `rolloutLock.kind !== 'required'` pre-read):
+
+```ts
+approval_instances: status='approved', workflow_key='attendance.request',
+                    business_key='attendance-request:<uuid>'
+attendance_requests: exactly 1 row, status='approved'
+getAttendanceCancellationExecutionPort(): defined
+```
+
+Two deliberate choices, written down so a later reader does not "fix" them:
+1. **`seedDirectoryIdentity` is NOT called.** C-1 never runs here, so the directory rows are not
+   needed; and if the evaluation ever accidentally answered `redeem`, the real adapter's
+   actor-liveness recheck would fail the transaction, the round would stay `pending`, and 「C-3 收口
+   已持久化」 would go RED. The omission makes an accidental redeem fail loudly.
+2. **This is the FIRST case to drive the C-3 `expired` close under the `required` posture.** With an
+   attendance request attached, `resolveCancelRoundRolloutLockRequirementV1` answers
+   `{ kind: 'required' }`, so the dispatch runs under `BEGIN ISOLATION LEVEL SERIALIZABLE` holding the
+   rollout advisory lock (§3.9); `ivexp` runs the `not_required` one. ⚠️ That posture claim is a
+   CONSTRUCTION argument from the pre-read's predicate plus the fixture rows asserted above — it is
+   not a `pg_locks` measurement here (census Q-F, §3.9.4, is where the lock itself is measured).
+
+### 3.13.5 Commands and results
+
+```
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json          (no output, exit 0)
+
+$ (packages/core-backend) EXPECT_DB=1 \
+  DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  ATTENDANCE_TEST_DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{redemption,creation,outlet-guards,seat-guards,\
+      node-timeout-effect,lock-order-census}.db.test.ts --reporter=dot
+  Test Files  6 passed (6)
+        Tests  61 passed (61)          (redemption: 13 -> 14)
+
+  … same command with M-20 applied:
+  Test Files  1 failed | 5 passed (6)
+        Tests  1 failed | 60 passed (61)
+  FAIL … R2 … AssertionError: expected '1' to be '0'
+```
+
+No new file and no `plugin-tests.yml` edit — the case went into a suite already enumerated by both CI
+contracts (§3.4), so **no s6a provenance re-pin is owed** by this unit:
+
+```
+$ git diff --name-only 0225a1aa4..HEAD -- .github/workflows/plugin-tests.yml
+  0 lines
+```
+
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -1526,18 +1657,16 @@ they are.
   updated by this; the caveat in the bullet above (a double, not the real protocol) applies to it
   too.
 - **R2** (锁内最终评估失败 ⇒ 零业务取消、零 `approved` 完成事件、C-3 收口已持久化) and its named
-  mutation (move the evaluation after the enqueue ⇒ must go red) — **not built**, and it is the
-  next unit. §3.12 makes it STRONGER as well as cheaper: over a double, 「零业务取消」 could only be
-  `calls.length === 0`; with the real boundary bound and an attendance-backed fixture it becomes a
-  row assertion (原单 still `approved`, `attendance_requests` still `approved`, zero `revoke`
-  records) that a double cannot fake. ⚠️ One mapping the next unit must STATE rather than assume:
-  the lock's named mutation is 「把评估挪到入队之后」, and on the current code the statement after
-  `evaluateCancelRoundFinalInLock` is the C-1 call (`redeemCancelRoundInTxn`), not an enqueue. The
-  unit must name which statement the evaluation is moved past and argue why that is the lock's
-  入队, instead of letting a reader infer the mapping. M-5 is 判据 IV's
-  own negative control and is NOT a substitute: it proves the `return` is load-bearing, not that a
-  *business* evaluation failure leaves zero business cancellation behind (there is no business
-  cancellation on this path yet).
+  mutation — **BUILT in §3.13**, against the REAL W4 boundary with a live attendance target, so
+  「零业务取消」 is rows (原单 still `approved`, zero `revoke`, `attendance_requests` still
+  `approved`) rather than `calls.length === 0`. The 入队 mapping §4 asked for is stated from the
+  lock's own step ⑥ (lock:105-107) and the probe was run at that exact site (M-20: exactly 1 red,
+  60 green). ⚠️ What is NOT established, and it is the headline: **R2's three literal clauses have
+  no discriminating power against the mutation the lock names for R2** — all three stayed GREEN
+  under M-20 (measured: `ivexp` green), and the assertion that carries it is an IMPLEMENTER
+  ADDITION (the persisted `approve` audit row). §11-③'s trap, recurring at this branch. Also still
+  open from this case: the `required` posture claim (SERIALIZABLE + rollout advisory lock) is a
+  construction argument here, not a `pg_locks` measurement.
 - **The external end-to-end — DONE in §3.12, and it was NOT cheap.** The case is green against the
   real boundary and it found a shipped P1 (the non-UUID replay key) on its first run. Both of the
   two risks this bullet named — (a) replay preflight with a never-registered `operationId`, (b) the
