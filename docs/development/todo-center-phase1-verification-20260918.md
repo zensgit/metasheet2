@@ -620,3 +620,175 @@ $ git status --short
 
 Judge D is DISCHARGED. Judges B/C' remain deferred — see the gate file's own docblock for the
 current status line.
+
+## Judging criterion C′ (actionable reuses the decision door's own predicate) — DISCHARGED, both the endpoint-level and unit-level mutations run for real
+
+Design-lock §5 row C′: "可办理标记" — `actionable` on each `/api/todo/items` row must equal
+`resolveCanDecideCurrentNode` (`approval-seat-authorization.ts:225-249`), the SAME predicate the
+decision door enforces. 正控: class ① `actionable=true`. Row's own mutation (endpoint-level): force
+`actionable` to an unconditional `true` ⇒ class ⑥'s row reddens. Row's own mutation (**unit-level**,
+第 6 轮 P2-a: "列表里 ⑧/⑨ 没有行、⑦ 早返回,端点级无观察点"): construct "non-pending instance" and
+"seat not at a decidable node" parameter sets directly against `resolveCanDecideCurrentNode`,
+asserting `false`; swap the implementation for a "seat type ∈ {user, role}" simplified version ⇒
+both param sets give `true`, red.
+
+Unlike judges A/D, row C′'s own 正控 column names a live value (`class ① 条目 actionable=true`) that
+nothing asserted before this step:
+
+```
+$ grep -rn "actionable" packages/core-backend/tests apps/web
+```
+
+No hit under `tests/todo-center-pending-gate/` or any `apps/web` todo-center spec (the full grep
+output is dominated by unrelated `actionable`-named fixtures/tests in other domains — dingtalk,
+attendance, multitable, admin-directory — none of them this suite or this field). New permanent test
+content was therefore required (unlike judge A/D's no-new-content pattern) — a `describe("Judge C′ —
+...")` block was added to `todo-center-pending-gate.ts`, observation point `GET /api/todo/items`
+(the same route Judge C's block already exercises), reusing the existing class ①/⑥ fixtures.
+
+**Class ①'s `true` is earned, not an early return.** Row C′ makes this point about class ⑥ ("否则
+`:189-196` 早返回 true,与席位类型无关"); the same burden applies to ① and is not left implicit:
+`instance1` has `sourceSystem: 'platform'`, a non-null `publishedDefinitionId` (seeded via
+`seedNonHandlerPublishedDefinition` in `beforeAll`), and an id
+(`todo-center-pending-gate-i1-<suffix>`) that does not start with `plm:` — so
+`decisionDoorIsSeatGated(instance1)` is `true` and `resolveCanDecideCurrentNode` falls through to the
+seat-membership arm instead of the non-seat-gated-door `return true` at
+`approval-seat-authorization.ts:189-196`— a docblock comment in the test file records this fact
+inline rather than only here.
+
+Baseline (both new tests green, all 20 prior tests unaffected):
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 passed (1)
+      Tests  22 passed (22)
+```
+
+### Mutation 1 (endpoint-level) — force `actionable` to an unconditional `true` (real cp/edit/run/restore/cmp)
+
+```
+$ F=packages/core-backend/src/services/approval-pending-source.ts
+$ cp "$F" "$F.mutprobe-cprime-endpoint.bak"
+```
+Edit: inside `listPendingForUser`'s `.map`, replaced the `resolveCanDecideCurrentNode({...})` call
+with the literal `const actionable = true // MUTPROBE-CPRIME-ENDPOINT`.
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 failed (1)
+      Tests  1 failed | 21 passed (22)
+```
+Failing test (the ONLY one): `Judge C′ ... class ⑥'s item is actionable=false ...`:
+```
+AssertionError: expected true to be false
+```
+Class ①'s `actionable=true` assertion (already `true` before the mutation) stayed green alongside
+every A0/Judge-C test — isolation is exactly what row C′'s wording implies: only the item whose real
+value differs from the forced constant moves.
+
+Restore:
+```
+$ cp "$F.mutprobe-cprime-endpoint.bak" "$F"
+$ cmp "$F" "$F.mutprobe-cprime-endpoint.bak"; echo $?
+0
+$ rm "$F.mutprobe-cprime-endpoint.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+Post-restore confirmation:
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  22 passed (22)
+$ git status --short
+ M tests/todo-center-pending-gate/todo-center-pending-gate.ts
+```
+(the only diff outstanding is the new permanent test content itself, not a mutation residue.)
+
+### Mutation 2 (unit-level) — `resolveCanDecideCurrentNode` swapped for the "seat type ∈ {user, role}" simplified version (real cp/edit/run/restore/cmp)
+
+Baseline, no-DB unit suite (unaffected by anything above — this suite carries no DB):
+
+```
+$ npx vitest run tests/unit/approval-can-decide-current-node.test.ts --reporter=verbose
+ Test Files  1 passed (1)
+      Tests  41 passed (41)
+```
+
+```
+$ F=packages/core-backend/src/services/approval-seat-authorization.ts
+$ cp "$F" "$F.mutprobe-cprime-unit.bak"
+```
+Edit: `resolveCanDecideCurrentNode`'s **entire body** (`approval-seat-authorization.ts:231-248`)
+replaced with:
+```ts
+return options.assignments.some((assignment) => (
+  assignment.assignment_type === 'user' || assignment.assignment_type === 'role'
+))
+```
+The advisor's note before this step flagged that keeping the `instance.status !== 'pending'` and
+`decidableNodeKeys` guards while swapping only the final `.some(...)` predicate would leave the
+"非 pending 实例" half of the probe green and understate what was discharged — so the whole function
+body was replaced, including those guards, not just the seat-type test.
+
+```
+$ npx vitest run tests/unit/approval-can-decide-current-node.test.ts --reporter=verbose
+ Test Files  1 failed (1)
+      Tests  19 failed | 22 passed (41)
+```
+Both of row C′'s named param sets are among the 19 reds:
+```
+× resolveCanDecideCurrentNode — instance status > a approved instance cannot be decided even by the seat holder
+× resolveCanDecideCurrentNode — instance status > a rejected instance cannot be decided even by the seat holder
+× resolveCanDecideCurrentNode — instance status > a revoked instance cannot be decided even by the seat holder
+× resolveCanDecideCurrentNode — instance status > a cancelled instance cannot be decided even by the seat holder
+× resolveCanDecideCurrentNode — instance status > a draft instance cannot be decided even by the seat holder
+× resolveCanDecideCurrentNode — seat shapes at the current node > a seat at a node the instance is NOT stopped on cannot decide
+```
+— the "非 pending 实例" set (all five non-pending statuses the existing fixture loop covers) and the
+"席位不在可决节点" set both flip from `false` to `true`, exactly the row's own wording. The other 13
+reds, enumerated in full (not a sample — 19 total minus the 6 named above): role-seat-not-held
+mismatch; delegated-seat routing; non-participant; inactive seat; seat with no node key; an instance
+stopped on no node at all; no viewer identity; three parallel-region cases (completed branch,
+post-join branch frontier, malformed branch metadata); the two non-seat-gated-door cases (their
+expected `true` flips to `false`, because the simplified version never reaches the
+`decisionDoorIsSeatGated` early return at all); and one fixture-provenance case (the
+runtime-vs-hand-written parallel-state comparison, which depends on the same door-mirror behavior).
+This is the expected wide spread of gutting the whole predicate at once — not a scoping defect — the
+same handling given to judge A's 9/16-red spreads above.
+
+Restore:
+```
+$ cp "$F.mutprobe-cprime-unit.bak" "$F"
+$ cmp "$F" "$F.mutprobe-cprime-unit.bak"; echo $?
+0
+$ rm "$F.mutprobe-cprime-unit.bak"
+$ git diff --stat -- "$F"; echo $?
+0
+```
+
+Post-restore confirmation:
+```
+$ npx vitest run tests/unit/approval-can-decide-current-node.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  41 passed (41)
+$ git status --short -- packages/core-backend/src/services/approval-seat-authorization.ts
+(no output)
+```
+
+No CI wiring change needed: `services/approval-seat-authorization.ts` is already a member of
+`approval-realdb-todo-center-pending-query.yml`'s trigger `paths:` (verified earlier in this doc,
+"C′ 经 `resolveCanDecideCurrentNode` 依赖" per the lock's own §4 wording); the unit-level mutation's
+target suite, `tests/unit/approval-can-decide-current-node.test.ts`, runs in the default no-DB
+`test (20.x)` job already, per that suite's own docblock, needing no lane assignment of its own —
+consistent with the lock's own "C′ 的单元级 mutation 在默认 no-DB lane" line.
+
+Judge C′ is DISCHARGED. Judge B remains deferred — see the gate file's own docblock for the current
+status line.
