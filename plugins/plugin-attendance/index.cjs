@@ -35808,6 +35808,20 @@ module.exports = {
           })
         : null
 
+    // Approval-change-request lock §3 C-1 — hand the SAME boundary to the approval side's
+    // cancel-round redemption. Not a second boundary and not a cancel-only shim: the object bound
+    // here is the one the HTTP routes above already call, so 判据 II's 完整业务取消 and an ordinary
+    // `POST /requests/:id/cancel` run the identical W4 protocol (prepare/prepareIdentity → identity
+    // congruence → rollout-locked posture → authorization → replay preflight → adapter.execute →
+    // seal/outbox), differing only in who owns the connection and the transaction.
+    if (
+      w4RequestOperationBoundary
+      && attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary === 'function'
+    ) {
+      attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary(w4RequestOperationBoundary)
+    }
+
     // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
 	    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
 	      const rows = await trx.query(
