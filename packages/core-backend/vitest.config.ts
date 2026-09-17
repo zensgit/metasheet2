@@ -1813,9 +1813,13 @@ export default defineConfig({
       // derivation) against a real `approval_instances` row lock, both the §9-4 forward order
       // and a deliberately reversed order proven to deadlock deterministically (40P01). Real
       // DB (two raw `pg.Pool` connections). Excluded here so describeIfDatabase cannot
-      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
-      // .github/workflows/approval-realdb-cancel-round.yml lane, which arms EXPECT_DB=1. This
-      // slice covers Q-A only, not Q-B/Q-C/Q-D — see the file's own header.
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s required
+      // `test (20.x)` "Run approval real-DB integration" step (id `approval-real-db-integration`),
+      // which arms EXPECT_DB=1. (Previously a standalone, non-required
+      // `approval-realdb-cancel-round.yml` lane; promoted here and that lane deleted so the same
+      // file does not run twice per PR — see the required step's own header comment for the
+      // recompute-the-s6a-pin procedure this promotion followed.) This slice covers Q-A only, not
+      // Q-B/Q-C/Q-D — see the file's own header.
       'tests/integration/approval-cancel-round-lock-order-census.db.test.ts',
       // WI-4 `createCancelRoundInstance` creation acceptance: dedicated-instance shape (judgment
       // I / I″), the one-pending-round-per-document invariant (§5 I3 / `uq_approval_rounds_
@@ -1823,9 +1827,9 @@ export default defineConfig({
       // (`CancelRoundSuiteForbiddenError`). Drives a real one-node template through the running
       // server to get a genuinely `approved` original document, then calls the service method
       // in-process. Real DB (poolManager + a real dispatch transaction). Excluded here so
-      // `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
-      // standalone .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to the
-      // WI-0 census above), which arms EXPECT_DB=1.
+      // `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into
+      // `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB integration" step
+      // (sibling entry to the WI-0 census above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-creation.db.test.ts',
       // WI-13 cancel-round redemption acceptance, 判据 III ONLY (revoke A4 / reject A7
       // terminating the round row in the same transaction as the instance transition; §5 I3's
@@ -1836,9 +1840,9 @@ export default defineConfig({
       // on WI-10/11/12, which do not exist on this branch (separate follow-up files once they
       // land). Real DB (poolManager + a real dispatch transaction, driven through the running
       // server exactly like the creation acceptance file). Excluded here so `describeIfDatabase`
-      // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
-      // .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to WI-0/WI-4 above),
-      // which arms EXPECT_DB=1.
+      // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s
+      // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to
+      // WI-0/WI-4 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-redemption.db.test.ts',
       // §14.3 outlets #12/#13 (lock:373-374) — the two SEAT-WRITE chokepoints
       // (`bulkReassignApprovals`, `applyApprovalDepartureTransfer`): a cancel-round instance's
@@ -1851,8 +1855,8 @@ export default defineConfig({
       // paths, not seat-writers). Real DB (poolManager + a real dispatch transaction, driven
       // through the running server exactly like the creation/redemption acceptance files).
       // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
-      // WHOLE FILE into the standalone .github/workflows/approval-realdb-cancel-round.yml lane
-      // (sibling job to WI-0/WI-4/WI-13 above), which arms EXPECT_DB=1.
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling entry to WI-0/WI-4/WI-13 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-seat-guards.db.test.ts',
       // WI-3 Q1c package (§14.3 #10/#11, lock:371-372) — the migration's own preflight guard
       // (dangling reference aborts before any constraint exists), the two `atr_*` CHECK
@@ -1864,8 +1868,8 @@ export default defineConfig({
       // public schema — see the file's own header for why an isolated SCHEMA does not work for
       // this particular migration's non-schema-scoped `pg_constraint` idempotency guards).
       // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
-      // WHOLE FILE into the standalone .github/workflows/approval-realdb-cancel-round.yml lane
-      // (sibling job to WI-0/WI-4/WI-13/#12-13 above), which arms EXPECT_DB=1.
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling entry to WI-0/WI-4/WI-13/#12-13 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts',
       // §14.3 outlets #2/#4/#6/#7/#7′/#8 — the "outlet-guards" file the seat-guards file's own
       // header promised, landed in two slices: #2 (`adminJump`) and #4/#6 (`dispatchAction`'s
@@ -1877,8 +1881,8 @@ export default defineConfig({
       // in-process against a deliberately half-formed instance (its only reachable path). #3 is a
       // separate later slice (different oracle shape — see the file's own header). Excluded here
       // so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into
-      // the standalone .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to
-      // WI-0/WI-4/WI-13/#12-13/#10-11 above), which arms EXPECT_DB=1.
+      // `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB integration" step
+      // (sibling entry to WI-0/WI-4/WI-13/#12-13/#10-11 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
       // §14.3 outlet #3 (`applyNodeTimeoutEffect`) — the separate-slice file the outlet-guards
       // file's own header promises: a DIFFERENT oracle shape (a returned scanner outcome, not a
@@ -1889,12 +1893,13 @@ export default defineConfig({
       // due-set on round 2 (the lock's own "两轮扫描命中同一实例" negative-control shape,
       // mutation-tested for real: patching the branch to skip WITHOUT consuming reproducibly
       // reds exactly these two assertions). Excluded here so `describeIfDatabase` cannot
-      // skip-green it in the no-DB job. NOT YET wired into a CI run (the standalone
-      // `approval-realdb-cancel-round.yml` lane its siblings use is slated for deletion — the
-      // lane's own pending CI-wiring decision moves every file in this exclusion block into
-      // `plugin-tests.yml`'s required `test (20.x)` check instead; adding a job to a workflow
-      // about to be deleted would be wasted same-lane work). Local acceptance only until that
-      // wiring step lands — see the lane's verification MD for the run evidence in the interim.
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s required
+      // `test (20.x)` "Run approval real-DB integration" step (sibling entry to
+      // WI-0/WI-4/WI-13/#12-13/#10-11/#2-4-6-7-7'-8 above), which arms EXPECT_DB=1. (This file's
+      // own siblings above were wired into the now-deleted standalone
+      // `approval-realdb-cancel-round.yml` lane first; this file landed after that lane's pending
+      // CI-wiring decision was made, so it goes straight into the required step alongside them —
+      // see the required step's own header comment for the recompute-the-s6a-pin procedure.)
       'tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
