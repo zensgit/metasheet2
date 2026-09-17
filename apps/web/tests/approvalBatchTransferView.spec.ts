@@ -300,7 +300,14 @@ describe('批量转交 outcome helpers', () => {
       join(__dirname, '../../../packages/core-backend/src/services/ApprovalProductService.ts'),
       'utf8',
     )
-    const unionMatch = serviceSrc.match(
+    // Strip block comments BEFORE matching the union: the `cancel_round` member (lock §14.3 #12)
+    // is preceded by a multi-line `/** … */` JSDoc explaining the byte-exact literal, and `\s*`
+    // between union members does not cross a `/** … */` block — the un-stripped regex silently
+    // stopped at the last member before the comment (`target-user-invalid`) and never saw
+    // `cancel_round`/`error`, so this pin passed while missing the exact code it exists to catch.
+    // (impl-gate-C-slice1-round1-20260918.md P1-A.)
+    const serviceSrcNoComments = serviceSrc.replace(/\/\*[\s\S]*?\*\//g, '')
+    const unionMatch = serviceSrcNoComments.match(
       /export type ApprovalBulkReassignSkipReason\s*=\s*((?:\s*\|\s*'[^']+')+)/,
     )
     expect(
@@ -309,6 +316,9 @@ describe('批量转交 outcome helpers', () => {
     ).toBeTruthy()
     const serverCodes = Array.from(unionMatch![1].matchAll(/'([^']+)'/g)).map((m) => m[1])
     expect(serverCodes.length, 'regex matched the union header but extracted zero literals').toBeGreaterThan(0)
+    // Direct proof the comment-stripping didn't just widen the match harmlessly: the member the
+    // JSDoc guards against being missed must actually be present in what we extracted.
+    expect(serverCodes).toContain('cancel_round')
     // Bidirectional by construction (toEqual on two sorted arrays): a server literal with no FE
     // label reds this exactly as much as an FE label with no server literal — that symmetry is the
     // mechanism §14.3 #12's mutation relies on ("mutation: 去掉 FE 映射 ⇒ 同步钉红").
@@ -321,6 +331,14 @@ describe('批量转交 outcome helpers', () => {
     }
     expect(isKnownSkipReason('a-code-added-later')).toBe(false)
     expect(describeSkipReason('a-code-added-later', true)).toBe('未转交（原因未知）')
+    // Lock §14.3 #12's FE acceptance line verbatim: `cancel_round` must render the dedicated
+    // copy, not the unknown-reason fallback — `not.toBe('')` above would not have caught a
+    // fallback string (the fallback is non-empty), so this needs its own assertion.
+    expect(describeSkipReason('cancel_round', true)).toBe('该审批处于撤销轮中，暂不可改派')
+    expect(describeSkipReason('cancel_round', true)).not.toBe('未转交（原因未知）')
+    expect(describeSkipReason('cancel_round', false)).toBe(
+      'This approval is in a cancel round and cannot be reassigned',
+    )
   })
 
   it('blocks a submit for each refusal the endpoint itself makes', () => {
