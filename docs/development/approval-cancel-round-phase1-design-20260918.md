@@ -2,7 +2,9 @@
 
 Branch `feat/approval-cancel-round-phase1`. Originally written at HEAD `a32b2e015`; edited by several
 later fix passes since (Part F's fix, round-2's Part G, round-3's Part H among them), each of which
-re-derived the file:line citations below against its own HEAD at the time. **This header
+re-derived the specific citation(s) it touched against its own HEAD at the time — not a claim that
+every pass re-swept every citation in this document; each pass's own verification-MD Part states what
+it actually re-derived. **This header
 deliberately no longer pins a single "HEAD as of" SHA** — every prior version of that line went stale
 the moment a later pass landed without also rewriting it here, which is itself a finding the
 verification MD's Part F1 and Part G's G3 both record, and which round-3's gate report §9 item 8

@@ -1952,14 +1952,38 @@ name this file's basename at all):
 
 ```
 $ grep -rln "readdirSync.*docs/development\|readFileSync.*docs/development\|join.*docs.*development" . --exclude-dir=node_modules --exclude-dir=.git
+plugins/plugin-integration-core/__tests__/stock-preparation-handoff.test.cjs
+docs/development/approval-cancel-round-phase1-verification-20260918.md
+docs/development/platform-overall-design/stock-prep-onboarding-acceleration-20260901.md
+scripts/ops/dingtalk-p4-final-closeout.mjs
+scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.test.mjs
+scripts/ops/staging-attendance-makeup-punch-mp6-smoke.test.mjs
+scripts/ops/staging-attendance-ae4-result-edit-smoke.test.mjs
+scripts/ops/dingtalk-p4-final-closeout.test.mjs
+scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs
+scripts/ops/staging-attendance-overtime-bank-v18-smoke.test.mjs
+scripts/ops/staging-attendance-report-digest-rd45-smoke.test.mjs
+scripts/ops/export-dingtalk-staging-evidence-packet.test.mjs
 ```
 
-11 hits, all inspected: every one reads a *different*, specifically-named runbook/report file
-(dingtalk staging runbooks, multitable onprem deploy runbooks, etc.) or is `dingtalk-p4-final-closeout.mjs`'s
-`DEFAULT_DOCS_DIR` constant, which is a **write** target for that script's own generated output, not a
-read-and-pin walker. None constructs a path toward
-`approval-cancel-round-phase1-design-20260918.md`, and none walks `docs/development/` generically
-extracting citations from every file in it. Editing the design MD's prose is behavior-inert.
+12 hits. One is this verification document itself, matched because it quotes this very grep pattern
+as prose (the command line immediately above) — the same self-matching trap §H1/§H2 already flag for
+"9246" and "38"; not a code guard, discounted. The other 11 are all inspected below, not sampled:
+
+| File | What it actually reads/writes | Names the design MD? |
+|---|---|---|
+| `stock-preparation-handoff.test.cjs:2472` | `path.join(..., 'docs', 'development', 'takeover-beiliao-20260821', '222-deploy-window-runbook-20260901.md')` | No — a differently-named runbook |
+| `stock-prep-onboarding-acceleration-...md:66` | Markdown prose citing `docs/development/source-onboarding-self-service-design-20260830.md` §9; matched only because "join" (Chinese "join 计数") appears near an unrelated `docs/development/...` citation on the same line | No — not code at all |
+| `dingtalk-p4-final-closeout.mjs:252` | `path.join(opts.docsOutputDir, ...)` — `docsOutputDir` is a CLI-provided **write** target for this script's own generated report, not a literal `docs/development` read | No |
+| `staging-attendance-*-smoke.test.mjs` (hmr5, mp6, ae4, rd45 ×2, v18 — 6 files) | Each `readFileSync(join(here, '../../docs/development/<one specific, differently-named staging runbook>.md'))` | No — six different named runbooks, none this design MD |
+| `dingtalk-p4-final-closeout.test.mjs:188/208/262` | Writes/reads its own test-fixture file named `dingtalk-final-remote-smoke-development-<date>.md` inside a temp `docsDir` fixture, unrelated to the real `docs/development/` tree | No |
+| `multitable-onprem-package-upgrade-inplace.test.mjs:44` | `path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')` | No — same named runbook as the first row |
+| `export-dingtalk-staging-evidence-packet.test.mjs:151` | `path.join(outputDir, 'docs/development/dingtalk-staging-execution-checklist-20260408.md')` — an output path this test writes an evidence copy to | No |
+
+None of the 11 constructs a path toward `approval-cancel-round-phase1-design-20260918.md`, and none
+walks `docs/development/` generically extracting citations from every file in it — each names one
+specific, unrelated file (or, for `dingtalk-p4-final-closeout.mjs`, writes to a directory rather than
+reading a named target from it). Editing the design MD's prose is behavior-inert.
 
 **Fix, this pass**: one edit, `docs/development/approval-cancel-round-phase1-design-20260918.md:206`
 — the design MD's *citation* changed from `ApprovalProductService.ts:9246` to
@@ -2004,13 +2028,14 @@ addition, also past-tense). Zero hits in any source file (`packages/**`) or test
 (`**/*.test.*`, `**/*.spec.*`). The count is exactly three: the two comments round-2 fixed
 (`a166f5ca0`) and this pass's design MD:206 fix — no fourth site exists.
 
-**Header fix, same commit**: the design MD's own provenance header (the line the gate report's §9
-item 8 flagged as chronically stale, most recently one commit behind at round-3's own HEAD) is
-rewritten this pass from a single pinned "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" SHA to a
+**Header fix, this pass's second commit**: the design MD's own provenance header (the line the gate
+report's §9 item 8 flagged as chronically stale, most recently one commit behind at round-3's own
+HEAD) is rewritten from a single pinned "HEAD as of the round-8 fix pass … `7ef8e610e08b…`" SHA to a
 pointer at the verification document's own per-Part HEAD claims, which do not go stale the way a
-hardcoded SHA does. This closes round-3's P3-3 (see §H4) in the same commit as P2-1, since both
-touch the same document's header region and the gate's own §9 recipe treats the header line as
-"cost zero" to fix once already editing this paragraph.
+hardcoded SHA does. This closes round-3's P3-3 (see §H4) — landed in this pass's second commit
+(alongside this section's own self-review corrections; see §H3), not the first commit that fixed
+P2-1's design MD:206 citation, since the header rewrite was not part of the original round-3 fix and
+was only added once the gate report's §9 item 8 suggestion was acted on during self-review.
 
 **Rerun, this pass, `metasheet2_lock_c`** (docs-only change; rerun to confirm no incidental
 regression, not because the edit could plausibly move a test):
