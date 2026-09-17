@@ -4,6 +4,11 @@ Scope: owner-confirmation and source-grounded contract only, not runtime
 implementation or acceptance. Base:
 `89f1ecdee2c3b70205a318074824c834bc6a5c7e`.
 
+Historical contract-only head: `838e555aa0e2aa3fe495b04fbfd3d3bb503532b5`.
+Later implementation evidence is separate in
+`timemachine-manual-source-verification-20260917.md`; the statements below do
+not describe the entire evolving PR after this contract checkpoint.
+
 ## Confirmed Evidence
 
 - Owner explicitly confirmed the previously proposed manual-capture boundary.
