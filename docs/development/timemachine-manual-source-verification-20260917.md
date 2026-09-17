@@ -62,3 +62,15 @@ bootstrap; request identity; authenticated receipt publication; HTTP/UI;
 independent final review; exact-head CI. None is waived by this checkpoint.
 No scheduling, retention change, flag enablement, customer storage, deployment
 or production operation was performed.
+
+## Review Follow-Up
+
+Terra medium read-only review found no concrete source P1/P2, but identified a
+P2 regression gap: the mock-query unit did not pin SQL scope/deletion predicates.
+The unit now matches the complete contiguous scoped WHERE clause. Independently
+neutralizing sheet, base, workspace and deleted-at predicates each produces
+exactly one failure (11 remaining pass); restoring them returns GREEN. This is
+a mechanical CI regression guard, not a substitute for full migrated-schema
+integration tests. Source bytes are unchanged from the code SHA above. The
+earlier unit SHA above describes the initial checkpoint, before this follow-up.
+The reviewer session was closed; no independent whole-capture approval is claimed.
