@@ -90,8 +90,18 @@ lists in the same commit that introduces it.
 
 ## What was and was not verified locally
 
-- `python3 -c "import yaml; yaml.safe_load(...)"` — the new workflow file parses as valid YAML;
-  `on.push.paths == on.pull_request.paths` (both lists printed and diffed by eye, 13/13 match).
+- `python3 -c "import yaml; yaml.safe_load(...)"` — the new workflow file parses as valid YAML.
+  `on.push.paths == on.pull_request.paths` checked **mechanically** (not eyeballed): PyYAML's
+  default resolver treats the bare `on:` key as the boolean `True` (YAML 1.1 truthy-scalar
+  resolution), so the check reads `data[True]['pull_request']['paths'] ==
+  data[True]['push']['paths']` — printed `True`, `count: 13 13`.
+- `env -u DATABASE_URL EXPECT_DB=1 pnpm --filter @metasheet/core-backend exec vitest --config
+  vitest.todo-center-pending-gate.config.ts run tests/todo-center-pending-gate/
+  todo-center-pending-gate.ts --reporter=verbose` — this is the exact invocation the new workflow
+  step runs, executed directly against the current (gate-file-missing) tree to confirm the
+  fail-closed claim below is a tested fact, not an asserted comment. Output: `No test files found,
+  exiting with code 1`; process exit code `1`. Vitest 1.6.1's zero-match behavior is REJECT, not
+  pass — no `--passWithNoTests` flag is needed or added.
 - `git diff --stat -- .github/workflows/plugin-tests.yml` — empty. `plugin-tests.yml` is untouched
   by this commit, confirming the byte-identical claim above rather than asserting it blind.
 - `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/approval-ci-coverage-
