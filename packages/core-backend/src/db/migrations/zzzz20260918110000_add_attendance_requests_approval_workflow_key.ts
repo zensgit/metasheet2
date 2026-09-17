@@ -80,6 +80,70 @@
  * Do not remove this block until that follow-up has landed and the full attendance real-DB
  * suite has been re-run green with this migration applied.
  *
+ * ---- 2026-09-17 follow-up (fixture pairing applied to 7 of the 9; two are FALSE POSITIVES) ----
+ *
+ * 7 of the 9 files named above got `approval_workflow_key`/`workflow_key` added to the exact
+ * raw-SQL INSERT the census flagged, value matched to whatever that file's OWN paired
+ * `approval_instances.workflow_key` already used (a per-file literal — `'attendance_request_approval'`
+ * in three files, the imported `ATTENDANCE_APPROVAL_WORKFLOW_KEY` constant in one, and the plain
+ * production value `'attendance.request'` where no local convention existed): action-authorization,
+ * w4c3b-central-approval, flow-dynamic-kind-s7-1, w4c3b-request-snapshots (the original CONFIRMED
+ * pair, now also carries workflow_key on its `approval_instances` insert per (b) below),
+ * decision-trace-w5-0 (3 sites), attendance-plugin.test.ts (1 site), result-edit (3 sites). Each
+ * was pre-fix-confirmed to hit the real `atr_instance_key_pair` 23514 (not just mechanically
+ * flagged) by reverting the one file to its pre-fix text against a freshly migrated private DB and
+ * observing the failure, then restoring and reconfirming green — see this commit's message for the
+ * exact command and file list.
+ *
+ * The other 2 — attendance-w4c3a-rollout-control.db.test.ts and
+ * attendance-w4c5-rollout-transition-tool.db.test.ts — are FALSE POSITIVES from the grep sweep and
+ * were deliberately left untouched (adding the columns there was tried and reverted: it breaks
+ * previously-green tests with `42703 column "approval_workflow_key" of relation "attendance_requests"
+ * does not exist`). Mechanism: both files never touch the shared migrated schema at all — each
+ * spins up its own throwaway `CREATE DATABASE ms2_w4c3a_control_*` / `ms2_w4c5_tool_*` and builds
+ * `attendance_requests`/`approval_instances` by hand in a local `createBase()` (minimal columns
+ * only, no FK, no CHECK — see that function's own comment: "the rollout-control predicate reads
+ * only `id` and `status`"). The Q1c contract is a constraint on the SHARED migrated database; a
+ * fixture that never runs against that database cannot violate it and gains nothing from carrying
+ * the pairing. Do not re-add these two — grep each file for `CREATE DATABASE` before assuming any
+ * new "INSERT INTO attendance_requests ... approval_instance_id" hit needs the same fix this block
+ * describes.
+ *
+ * Case (b)'s "24 of the ~38 files" collapses to exactly the same 7 (zero *additional* files) once
+ * exercised, not under-fixed to 7: `\d approval_instances` shows `workflow_key` is nullable with no
+ * table-level NOT NULL, and the FK is Postgres's default MATCH SIMPLE — either column of the pair
+ * being NULL skips the FK check entirely (lock:371's own §14.3 #10 note on step 5). So an
+ * `approval_instances` row missing `workflow_key` only ever matters to THIS migration when some
+ * `attendance_requests` row's `approval_instance_id`+`approval_workflow_key` pair is later resolved
+ * against it — i.e. exactly the same 9 (7 real + 2 false-positive) files case (a) already covers;
+ * the other ~30 "0/N" files in the (b) census insert `approval_instances` rows nothing in
+ * `attendance_requests` ever references, so they can carry a NULL `workflow_key` forever without
+ * tripping either CHECK or FK. No separate case-(b)-only fix site exists.
+ *
+ * UPDATE-statement and kysely-syntax sweep (extends the src/plugins claim above to tests/): no
+ * `UPDATE attendance_requests` in `tests/` sets `approval_instance_id` (`grep -rn -A8 "UPDATE
+ * attendance_requests" packages/core-backend/tests/ | grep "approval_instance_id"` → empty), and no
+ * kysely-syntax writer targets either table anywhere in `tests/`, `src/`, or `plugins/`
+ * (`grep -rn "insertInto('attendance_requests')\|updateTable('attendance_requests')\|insertInto('approval_instances')\|updateTable('approval_instances')"` → empty, both single- and
+ * double-quote forms checked).
+ *
+ * Verified GREEN on a freshly created+migrated private DB (`createdb metasheet2_lock_c_v1 && tsx
+ * src/db/migrate.ts`), each of the 9 named files run individually with `vitest --config
+ * vitest.integration.config.ts run <file> --reporter=dot`. Still open before this block can be
+ * removed: (1) the full ~124-file invocation this comment's top section names (plugin-tests.yml's
+ * "Run attendance integration tests" step) has NOT yet been run end-to-end in one pass — running
+ * these 9 files together (still on a virgin DB) surfaces 2 UNRELATED failures in
+ * attendance-plugin.test.ts ("auto-writes one high-confidence suggestion..." and "W4C-3a reproduces
+ * the committed legacy-import-v1 governing-SHA golden") that do NOT reproduce when that file runs
+ * alone against the same virgin DB (166/166 green) — a cross-file fixture/state collision from one
+ * of the other 8 files, confirmed unrelated to this migration's columns (reverting only this file's
+ * one-hunk fix and re-running the 9-file batch reproduces the identical 2 failures). Root cause not
+ * yet isolated; do not attribute it to Q1c without first bisecting which of the other 8 files
+ * causes it. (2) The remaining ~115 files in the full invocation have not been touched by this
+ * census at all and may hold their own unrelated failures.
+ *
+ * ---- end 2026-09-17 follow-up ----
+ *
  * ============================================================================================
  *
  * Approval change-request design lock v5.9 §14.3 #10 (lock:371) — "Q1c" package, DDL/migration
