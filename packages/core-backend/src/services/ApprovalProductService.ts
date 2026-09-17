@@ -165,12 +165,19 @@ import {
   attendanceCentralApprovalErrorToServiceFields,
   authorizeAttendanceCentralReassign,
   classifyAndLockAttendanceRequestForInstance,
+  classifyAttendanceRequestForInstanceV1,
   filterBulkReassignDiscoveryForAttendance,
   type AttendanceReassignAuditWitnessV1,
   AttendanceCentralApprovalError,
   isCancelRoundInstance,
   APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
 } from '../attendance/w4c3b-central-approval-hooks'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  type AttendanceW4TransactionClientV1,
+} from '../attendance/w4c0-identity'
+import { isRetryableSqlState } from '../attendance/w4c0-operation-registry'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
   buildApprovalCompletionEvent,
@@ -1078,6 +1085,109 @@ const APPROVAL_DEPARTURE_SYSTEM_ACTOR = 'system:approval-departure'
  * so `isSystemSentinelActor` covers it by construction (see the departure sentinel's note above).
  */
 const APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'
+
+/**
+ * Lock §3 C-2 全局锁序 —— 「rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → …」.
+ *
+ * `dispatchAction` historically opened `BEGIN` and IMMEDIATELY took `approval_instances … FOR
+ * UPDATE` with nothing in between, so any advisory lock taken later on that path would be taken
+ * AFTER a row lock — a global-order violation the W4 external entry's own
+ * `assertExternalTransactionRolloutLockHeldV1` cannot see (it queries `pg_locks` for held-ness
+ * only, never for acquisition order, so it would PASS while the order is broken). This repo has a
+ * deterministic-deadlock precedent for that exact shape (#4899), so the order is restructured
+ * rather than asserted.
+ *
+ * This resolver is the ONE predicate that answers 「does this dispatch have to take the org's
+ * rollout shared lock, and on WHICH org key?」. It is called TWICE — once before `BEGIN` (to decide
+ * the isolation level and take the lock first) and once after the instance row lock (fail-closed
+ * re-assert). Deliberately ONE function called twice, not two hand-written conditions: if the
+ * re-assert asked a WIDER question (e.g. 「is it a cancel round?」 alone) it would fail closed on a
+ * legitimate cancel round whose original document is not attendance-owned.
+ *
+ * WHICH org (census Q-E, phase-2 verification MD §3.3c): NOT `approval_instances.org_id`. The
+ * demand comes from `w4c3b-request-operation-boundary.ts:814`, which asserts the lock on the org
+ * the adapter resolved from the `attendance_requests` row. Q-E leg 1 shows the two columns can
+ * hold different values and derive different class-`00` keys — they are two INDEPENDENT
+ * derivations (the instance's is subject-based, `deriveAttendanceApprovalOrgStampV1`), not one
+ * copied from the other. So the org is resolved through the request row, three hops:
+ * round engine instance → its pending `approval_rounds.document_id` → the ORIGINAL document
+ * instance → its `attendance_requests` row.
+ *
+ * The last hop reuses the LOCKING path's own predicate with `lock: 'none'` (Q-E leg 3: the repo's
+ * other instance→request join, `filterBulkReassignDiscoveryForAttendance`, ADMITS rows this one
+ * rejects — adopting it would widen what the pre-read accepts, a contract-shaped change).
+ *
+ * `document_id` is read WITHOUT a lock here and that is sound for the same measured reason the
+ * final evaluator relies on: ZERO assignments to `approval_rounds.document_id` anywhere in `src`
+ * or `plugins`. `attendance_requests.org_id` is NOT immutable (4 `org_id = EXCLUDED.org_id`
+ * upsert writers), which is precisely why the post-lock re-assert is load-bearing.
+ */
+export type CancelRoundRolloutLockRequirementV1 =
+  | Readonly<{ kind: 'none' }>
+  | Readonly<{ kind: 'required'; orgId: string; documentId: string; requestId: string }>
+
+/**
+ * EXPORTED for the WI-0 lock-order census (Q-F) — not for production callers. `dispatchAction` is
+ * its only production call site (twice); the census drives THIS function rather than a
+ * transcription of it, so a drift in the org derivation reddens the census.
+ */
+export async function resolveCancelRoundRolloutLockRequirementV1(
+  client: ApprovalDbClient,
+  engineInstanceId: string,
+): Promise<CancelRoundRolloutLockRequirementV1> {
+  const instanceProbe = await client.query<{ id: string; workflow_key: string | null }>(
+    `SELECT id, workflow_key FROM approval_instances
+      WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'`,
+    [engineInstanceId],
+  )
+  const probe = instanceProbe.rows[0]
+  // Not a cancel round (the overwhelming majority of dispatches) ⇒ nothing changes for it: no
+  // advisory lock, no SERIALIZABLE, one extra primary-key lookup. Also the answer for a missing
+  // row: `dispatchAction`'s own 404 below is the authority on existence, not this probe.
+  if (!probe || !isCancelRoundInstance(probe)) return { kind: 'none' }
+
+  // Same source of truth the in-lock final evaluator uses (`evaluateCancelRoundFinalInLock`):
+  // the ONE pending round row for this engine instance. A non-1 count is left to that evaluator's
+  // `CANCEL_ROUND_INVARIANT_VIOLATION`, which runs inside the transaction; answering `none` here
+  // only means 「no lock demanded」, and the re-assert re-runs this same query under the row lock.
+  const roundProbe = await client.query<{ document_id: string }>(
+    `SELECT document_id FROM approval_rounds
+      WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+    [engineInstanceId],
+  )
+  if (roundProbe.rows.length !== 1) return { kind: 'none' }
+  const documentId = roundProbe.rows[0].document_id
+
+  const originalProbe = await client.query<{
+    id: string
+    workflow_key: string | null
+    business_key: string | null
+  }>(
+    `SELECT id, workflow_key, business_key FROM approval_instances WHERE id = $1`,
+    [documentId],
+  )
+  const original = originalProbe.rows[0]
+  if (!original) return { kind: 'none' }
+
+  const classification = await classifyAttendanceRequestForInstanceV1(client, original, { lock: 'none' })
+  if (classification.kind !== 'attendance' || !classification.request) return { kind: 'none' }
+  return {
+    kind: 'required',
+    orgId: classification.request.orgId,
+    documentId,
+    requestId: classification.request.requestId,
+  }
+}
+
+/** Byte-equality of the two evaluations. Any drift is refused, in either direction. */
+function cancelRoundRolloutLockRequirementsEqual(
+  a: CancelRoundRolloutLockRequirementV1,
+  b: CancelRoundRolloutLockRequirementV1,
+): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'none' || b.kind === 'none') return true
+  return a.orgId === b.orgId && a.documentId === b.documentId && a.requestId === b.requestId
+}
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
@@ -10497,9 +10607,35 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     let client: ApprovalDbClient | null = null
+    // Hoisted out of the `try` so the catch can tell the two error surfaces this method now has
+    // apart: only a dispatch that took this branch runs under SERIALIZABLE and holds an advisory
+    // lock, so only it can produce a serialization failure / advisory deadlock that did not exist
+    // before. Every other dispatch keeps its previous error behaviour byte for byte.
+    let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
     try {
       client = await pool.connect()
-      await client.query('BEGIN')
+
+      // ─── Lock §3 C-2 全局锁序 — the rollout lock must precede every row lock ────────────────────
+      // BEFORE `BEGIN`, by construction: PostgreSQL fixes a transaction's isolation level at its
+      // FIRST statement, so this read cannot live inside the transaction without foreclosing
+      // `BEGIN ISOLATION LEVEL SERIALIZABLE` (which the W4 external entry requires —
+      // `assertExternalTransactionIsolationV1`). It is advisory only: a stale answer is caught by
+      // the fail-closed re-assert under the row lock below, which is what makes it safe to read
+      // outside the transaction.
+      rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id)
+
+      if (rolloutLock.kind === 'required') {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        // FIRST lock of the transaction — before the instance row lock below, which is the whole
+        // point. Reuses the production acquirer (one key derivation, no local hash).
+        await acquireAttendanceCalculationRolloutLock(
+          client as unknown as AttendanceW4TransactionClientV1,
+          parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId),
+          'shared',
+        )
+      } else {
+        await client.query('BEGIN')
+      }
 
       const instanceResult = await client.query<ApprovalInstanceRow>(
         `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
@@ -10508,6 +10644,19 @@ export class ApprovalProductService {
       const instance = instanceResult.rows[0]
       if (!instance) {
         throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+      // Fail-closed re-assert (lock §3 C-2). The SAME predicate, re-evaluated now that the
+      // instance row is locked. Refuses in BOTH directions, and the direction that matters is
+      // `none` → `required`: `attendance_requests.org_id` is NOT immutable (4 upsert writers set
+      // it from `EXCLUDED`), so a pre-read that resolved no org — or a different one — must never
+      // be allowed to proceed holding the wrong lock, or none. Placed before any DML on this path.
+      const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id)
+      if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
+        throw new ServiceError(
+          'Cancel-round rollout lock scope changed between the pre-read and the instance row lock',
+          409,
+          'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',
+        )
       }
       // P17/P22/P26: attendance instances fail closed before assignment/instance DML
       // (including adversarial rows carrying published_definition_id).
@@ -12307,6 +12456,20 @@ export class ApprovalProductService {
       }
     } catch (error) {
       await rollbackQuietly(client)
+      // Values-free mapping for the ONE new error surface this restructure opens. Scoped to the
+      // branch that created it: only a `required` dispatch runs under SERIALIZABLE and holds the
+      // org advisory lock, so only it can newly raise 40001 (serialization failure) or 40P01
+      // (deadlock) from these. A non-cancel-round dispatch keeps the bare rethrow it had, so this
+      // is not a repo-wide retry-semantics change smuggled in under a cancel-round commit.
+      // `isRetryableSqlState` is the repo's single predicate for the pair (exported by
+      // w4c0-operation-registry precisely so two layers cannot drift).
+      if (rolloutLock.kind === 'required' && isRetryableSqlState(error)) {
+        throw new ServiceError(
+          'Approval action hit transient transaction contention; retry the action',
+          503,
+          'CANCEL_ROUND_DISPATCH_CONTENDED',
+        )
+      }
       throw error
     } finally {
       client?.release()
