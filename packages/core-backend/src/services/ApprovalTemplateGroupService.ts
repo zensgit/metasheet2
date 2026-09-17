@@ -273,8 +273,15 @@ export async function archiveApprovalTemplateGroup(orgId: string, groupId: strin
  * L0→L1 (I8). Members do NOT come back (archiving already unlinked them and there is no history
  * column to restore from — this is Q4's ratified "no" answer, not an oversight). A same-org active
  * name conflict is checked explicitly BEFORE the UPDATE so it surfaces as a clean 409
- * `GROUP_NAME_TAKEN` rather than a raw statement-time 23505 on `uq_atg_org_name_active` (G's
- * mutation probe: removing this check turns the clean 409 into an unmapped 500).
+ * `GROUP_NAME_TAKEN` *before* attempting a write that would fail anyway — the failure mode the
+ * lock's G row names for removing this check (an unmapped 500 raw-23505 leak) does NOT reproduce
+ * against this file's `mapGroupConstraintError`: that mapper is generic across every caller
+ * (create/rename/unarchive), so the immediate `uq_atg_org_name_active` violation this UPDATE would
+ * itself raise is caught and mapped to the SAME 409 `GROUP_NAME_TAKEN` regardless (confirmed by
+ * mutation-testing this block out — no observable change; the mutation that DOES falsify the 409
+ * is removing `mapGroupConstraintError`'s `uq_atg_org_name_active` branch itself, shared with A's
+ * own mutation proof). This check therefore is not the SOLE guard, but IS still load-bearing for
+ * not attempting a doomed write inside the L0 critical section.
  */
 export async function unarchiveApprovalTemplateGroup(orgId: string, groupId: string): Promise<ApprovalTemplateGroupRow> {
   try {
