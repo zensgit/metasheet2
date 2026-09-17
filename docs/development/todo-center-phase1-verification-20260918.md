@@ -1826,7 +1826,18 @@ protection**. A PR that regresses `approval-pending-query.ts`'s WHERE clause, or
 this pass adds to its trigger set, can merge to `main` with this lane simply never having run (it is
 `pull_request`-triggered with a `paths:` filter and no `merge_group:` — see the workflow's own header
 comment for why `merge_group:` was deliberately omitted — so a PR whose diff happens to miss the
-trigger set, or a reviewer who doesn't notice an un-run optional check, both merge clean).
+trigger set merges clean with no human in the loop forced to notice). **On whether a human reviewer
+would be in that loop at all**: the same `gh api` call's top-level key set —
+`["allow_deletions","allow_force_pushes","allow_fork_syncing","block_creations","enforce_admins",
+"lock_branch","required_conversation_resolution","required_linear_history","required_signatures",
+"required_status_checks","url"]` — carries **no** `required_pull_request_reviews` key at all, meaning
+`main` currently has no configured review requirement of any kind (not "some review config exists but
+is lenient" — the key is absent). This is stated because this repo's own project instructions record
+a 2026-08-14 verification that review requirements (code-owner review, last-push approval, 1 approval)
+were restored and enabled; this check, five weeks later, finds them gone from the live API response.
+That drift is **out of scope for this pass** to chase further (it is a repo-wide branch-protection
+fact, not a todo-center-lane finding) and is not investigated beyond this one `gh api` call — flagged
+here only because it is the fact this section's own claim depends on, not asserted from memory.
 
 **What this pass does NOT do**: change branch protection, or decide that the lane *should* become
 required. That is an infrastructure change with a merge-cost trade-off (this repo's own memory notes
@@ -1914,10 +1925,12 @@ high-churn, widely-shared modules across the whole backend, not approval-specifi
 Postgres job (a ~25-minute-budget job per its `timeout-minutes: 25`) will now spin up on a materially
 larger set of PRs than the narrow 13-path set it replaces. Fail-closed (spin up the job on a change
 that MIGHT matter) wins over the alternative (miss a real regression this gate exists to catch)
-because — per the P2-0 finding directly above — this lane is advisory, not required, so its actual
-merge-time cost of "running more often" is zero blocking-time cost to anyone; the only cost is CI
-minutes. Had P2-0 resolved the other way (lane IS required), this same trade-off would need an
-explicit owner sign-off on the added required-lane latency; it does not, given P2-0's actual result.
+because — per the P2-0 finding directly above — this lane is advisory, not required, so a run of it
+never gates anyone's merge; the cost of the wider trigger set is CI minutes and one more entry in the
+PR checks list on more PRs, not merge-blocking latency (this pass has no measurement of shared-runner
+queue contention, so that specific cost is left unclaimed rather than asserted as zero). Had P2-0
+resolved the other way (lane IS required), this same trade-off would need an explicit owner sign-off
+on the added required-lane latency; it does not, given P2-0's actual result.
 
 ### P2-3 — `approval-pending-query.ts` added to the p7r1 lane's trigger set (the only regression
 ### coverage of the module this slice extracted `/pending-count`'s WHERE clause into)
@@ -2077,24 +2090,41 @@ unaffected, as expected for a change confined to two non-pinned workflow files.
 | `plugin-tests.yml` 与迁移目录本轮仍未被触碰(s6a / 判据 F 不受影响) | 见本节"Regression"小节完整输出 | 空输出;`0` |
 | 工作树在提交前只列出本轮改动的 3 个文件,无其它路径 | `git status --short` | ` M .github/workflows/approval-realdb-p7r1-coverage-repair.yml`<br>` M .github/workflows/approval-realdb-todo-center-pending-query.yml`<br>` M docs/development/todo-center-phase1-verification-20260918.md` |
 
-### P3-1 重新归类:BLOCKED-by-constraint,不是"remaining"
+### P3-1 重新归类:in-place squash 不可达(force-push 被禁),但发现本身可能在合并时自行消解——不是简单的"remaining"
 
 上一轮的"本轮未处理"清单把 P3-1(squash 两条 `wip:` 提交 `a2cf836b5`、`01759832a`)与其余五项并列
-为"留给下一步"。这个归类不准确:这两条提交**已经 push 到 `origin/feat/todo-center-shared-pending-
-query`**(`git log`/`git status` 显示分支与远端同步),squash 它们需要改写已推送的历史 = force-push,
-而本 lane 的硬规矩明确禁止 force-push。⇒ **P3-1 在本 lane 现有约束下不可达,不是"排期未到"，是
-"这条路径被规矩本身挡死"**——继续把它记成"remaining"会让下一步再次尝试、再次撞到同一条硬规矩。
-正确状态:**BLOCKED-by-constraint**(不是 BLOCKED-需 owner 裁决——这不是设计分歧,是本 lane 自己的
-安全规矩产生的必然结果,undraft/PR 阶段如需要可由不同规矩下的流程处理,例如开 PR 前用
-`git rebase -i` 在**尚未推送**的副本上整理,或直接在 PR description 里说明这两条是过程性提交)。
+为"留给下一步"。**约束部分准确、结论部分过强,分开说**:
+
+约束是真的——这两条提交**已经 push 到 `origin/feat/todo-center-shared-pending-query`**(`git log`/
+`git status` 显示分支与远端同步),在原地 squash/rebase 它们需要改写已推送的历史 = force-push,而本
+lane 的硬规矩明确禁止 force-push。⇒ **就地整理这条路径在本 lane 现有约束下不可达**——这一点站得住。
+
+但"因此 P3-1 这个发现本身 BLOCKED"过强。P3-1 真正关心的是"undraft 前需整理成可读历史",而这个仓库
+在 PR 合并方式上**三种都开着**(未钉死单一策略,故不能断言"必 squash"):
+
+```
+$ gh api repos/zensgit/metasheet2 --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge}'
+{"allow_squash_merge":true,"allow_merge_commit":true,"allow_rebase_merge":true}
+```
+如果这条 PR 最终**以 squash 方式**合并(本仓库过往有此惯例的记录,见项目记忆
+`squash使祖先判据失效`),30 条提交(含两条 `wip:`)会被折成 `main` 上的一条——P3-1 关心的"可读历史"
+问题在那一刻自动消解,不需要在 push 之前动手整理。但三种合并方式都开着,**不能断言这条 PR 一定被
+squash**,所以不能把 P3-1 标成"已消解"。
+
+**正确状态**:**UNRESOLVED,merge-method-contingent**——就地整理(rebase -i 后 force-push)在本 lane
+硬规矩下不可达,是确定的;发现本身是否仍然成立,取决于开 PR 时选哪种合并方式,现在还不知道。
+**安全网,不依赖猜中合并方式**:PR description 里显式说明这两条是过程性提交("carry step-agent/
+interrupted-implementer changes forward"),让审阅者在任何合并方式下都不会把它们误读成设计决策。
+这条安全网本轮同样未做(未开 PR),留给开 PR 的那一步。
 
 ### 本轮未处理、留给下一步的项(更新后的清单,如实列出)
 
 本轮处理了 P2-0(RESOLVED)、P2-2(FIXED)、P2-3(FIXED)、P3-4(FIXED,随 P2-2 同一编辑)。以下项
 **仍未在任何一轮触碰**:
 
-- **P3-1**:两条 `wip:` 提交(`a2cf836b5`、`01759832a`)——**BLOCKED-by-constraint**(见上一小节),
-  不是排期未到。
+- **P3-1**:两条 `wip:` 提交(`a2cf836b5`、`01759832a`)——**UNRESOLVED,merge-method-contingent**
+  (见上一小节):就地整理不可达(force-push 被禁),但发现本身是否仍成立取决于开 PR 时的合并方式;
+  安全网(PR description 显式说明)本轮未做,留给开 PR 那一步。
 - **P3-2**:`approval-ci-coverage-enumeration.test.ts` 发现式守卫的闭世界边界未登记
   `todo-center-pending-gate.ts`。
 - **P3-3**:设计 MD §5 的 HEAD 钉点(`63fc3d699`)已过期,当前 HEAD 已进一步前移(锚点仍字节有效,
