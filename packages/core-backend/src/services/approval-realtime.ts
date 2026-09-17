@@ -114,14 +114,7 @@ export async function publishApprovalCountsUpdate(
     if (!collabService) return
     const payload = await buildApprovalCountsUpdatedPayload(input)
     if (!payload) return
-    const room = buildAuthenticatedUserRoom(input.userId)
-    collabService.broadcastTo(room, 'approval:counts-updated', payload)
-    // todo-center-design-lock §4: the center reuses the same per-user room and broadcast call —
-    // it does not open a second channel or re-derive its own pending predicate. v1 registers only
-    // the approval source (`pending-source-registry.ts`), so the approval payload IS the total
-    // todo count today; this is an ADDITIONAL event alongside `approval:counts-updated` (kept for
-    // its existing subscribers, e.g. `useApprovalCountsRealtime.ts`), not a replacement.
-    collabService.broadcastTo(room, 'todo:counts-updated', payload)
+    collabService.broadcastTo(buildAuthenticatedUserRoom(input.userId), 'approval:counts-updated', payload)
   } catch (error) {
     input.logger?.warn(
       'Failed to publish approval count update',
