@@ -1880,6 +1880,22 @@ export default defineConfig({
       // the standalone .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to
       // WI-0/WI-4/WI-13/#12-13/#10-11 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
+      // §14.3 outlet #3 (`applyNodeTimeoutEffect`) — the separate-slice file the outlet-guards
+      // file's own header promises: a DIFFERENT oracle shape (a returned scanner outcome, not a
+      // rejected promise) sharing only `isCancelRoundInstance`, not `rejectIfCancelRound`. Two-part
+      // oracle per test — outcome literal `skipped_cancel_round` AND the armed deadline actually
+      // consumed, the latter proven by re-running the REAL production scan predicate
+      // (`ApprovalMetricsService.scanNodeTimeouts`) and observing the instance drop out of the
+      // due-set on round 2 (the lock's own "两轮扫描命中同一实例" negative-control shape,
+      // mutation-tested for real: patching the branch to skip WITHOUT consuming reproducibly
+      // reds exactly these two assertions). Excluded here so `describeIfDatabase` cannot
+      // skip-green it in the no-DB job. NOT YET wired into a CI run (the standalone
+      // `approval-realdb-cancel-round.yml` lane its siblings use is slated for deletion — the
+      // lane's own pending CI-wiring decision moves every file in this exclusion block into
+      // `plugin-tests.yml`'s required `test (20.x)` check instead; adding a job to a workflow
+      // about to be deleted would be wasted same-lane work). Local acceptance only until that
+      // wiring step lands — see the lane's verification MD for the run evidence in the interim.
+      'tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

@@ -33,9 +33,10 @@ import { CANCEL_ROUND_APPROVAL_NODE_KEY } from '../../src/db/seeds/approval-canc
  *     `ApprovalBridgeService.dispatchAction` directly), matching the taskbook's own named test
  *     "half-formed instance ... is rejected AND fails isTemplateRuntimeInstance" / "positive:
  *     full instance reaches dispatchAction".
- *   - NOT covered by this file (separate slice): #3 (`applyNodeTimeoutEffect` — a two-part
- *     oracle, outcome literal AND deadline-consumption, needing an env-flag-gated scanner call
- *     and a two-round re-pickup negative control — "这是判据不是括号", lock:363).
+ *   - NOT covered by this file (separate slice, landed as
+ *     `approval-cancel-round-node-timeout-effect.db.test.ts`): #3 (`applyNodeTimeoutEffect` — a
+ *     two-part oracle, outcome literal AND deadline-consumption, needing an env-flag-gated
+ *     scanner call and a two-round re-pickup negative control — "这是判据不是括号", lock:363).
  *   - Covered elsewhere: #12/#13 (seat-write chokepoints — `approval-cancel-round-seat-guards
  *     .db.test.ts`); attendance-parity and attendance-FK-migration (separate files); 判据 II/IV
  *     of redemption (depend on WI-10/11/12, not on this branch).
