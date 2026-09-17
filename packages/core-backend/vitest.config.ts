@@ -1854,6 +1854,19 @@ export default defineConfig({
       // WHOLE FILE into the standalone .github/workflows/approval-realdb-cancel-round.yml lane
       // (sibling job to WI-0/WI-4/WI-13 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-seat-guards.db.test.ts',
+      // WI-3 Q1c package (§14.3 #10/#11, lock:371-372) — the migration's own preflight guard
+      // (dangling reference aborts before any constraint exists), the two `atr_*` CHECK
+      // constraints discriminated by `.constraint` name (not merely `23514`, which both share),
+      // #11's "no independent guard, protected by #10" outcome-level dependency claim, and a
+      // source-text sweep pairing `approval_instance_id` with `approval_workflow_key` at each of
+      // the five known production writer sites in index.cjs. Runs against throwaway
+      // `CREATE DATABASE` scratch databases it provisions itself (never the shared/migrated
+      // public schema — see the file's own header for why an isolated SCHEMA does not work for
+      // this particular migration's non-schema-scoped `pg_constraint` idempotency guards).
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into the standalone .github/workflows/approval-realdb-cancel-round.yml lane
+      // (sibling job to WI-0/WI-4/WI-13/#12-13 above), which arms EXPECT_DB=1.
+      'tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
