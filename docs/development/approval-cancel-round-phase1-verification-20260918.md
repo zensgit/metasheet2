@@ -1,16 +1,21 @@
 # Approval Cancel-Round Phase 1 — Verification (2026-09-18, finalized)
 
-**Bottom line up front, so it cannot be missed by skimming to a later table**: this slice is
-**not** a clean pass. One test this lane authored is currently RED on this tree —
+**Bottom line up front, so it cannot be missed by skimming to a later table**: Part A below
+(round 3) reported one test this lane authored as currently RED on that tree —
 `apps/web/tests/approvalBatchTransferView.spec.ts`'s FE/BE sync-pin guard for outlet #12 (§A4)
-under-extracts the backend's error-code union because of a regex defect, and per this task's
-"不改代码" instruction it was reported, not fixed. Checklist item 15 is therefore **not closed**.
-Everything else in Part A is green, but this one item should be the door review's first line item,
-not a footnote.
+under-extracting the backend's error-code union because of a regex defect — and, per that round's
+"不改代码" instruction, reported it rather than fixing it, leaving checklist item 15 not closed.
+**Round 4 (Part C, below) fixes exactly that regex** (this round's task explicitly authorizes and
+requires the fix, unlike round 3's) plus a stale, now-false source comment the gate review
+(`impl-gate-C-slice1-round1-20260918.md`, P1-A/P2-A) additionally caught in the same file family.
+Checklist item 15 is now **closed**. See Part C for the fix, the exact required-lane rerun, and two
+fresh mutation probes proving the fix (and the new assertions it required) are load-bearing. Part A
+and Part B are preserved verbatim below as the historical record of what round 3 actually observed;
+read the supersession notes inline rather than the original text where the two disagree.
 
-This document is finalized in two layers, kept separate rather than merged into one narrative:
+This document is finalized in three layers, kept separate rather than merged into one narrative:
 
-- **Part A (this pass, 2026-09-18)**: a fresh rerun against the private DB **`metasheet2_lock_c`**
+- **Part A (round 3, 2026-09-18)**: a fresh rerun against the private DB **`metasheet2_lock_c`**
   (per instruction — not a freshly-created virgin DB), the full 17-item supplementary-checklist
   walk, a live mutation ledger with genuine backup→edit→run→restore→cmp cycles run in this pass, the
   lock's verification-table rows mapped to test file + case name + lane, and — because the task
@@ -22,6 +27,12 @@ This document is finalized in two layers, kept separate rather than merged into 
   today's evidence — Part A supersedes it for "is it green right now" (see the supersession notes
   added at the top of Part B's §9/§10) — but its narrative (the virgin-migration proof, the Q-B/Q-C
   census construction story, the decision-3 boundary reasoning) remains correct and is not restated.
+- **Part C (round 4, 2026-09-18, this pass)**: the fix for §A4's red FE guard (P1-A of the
+  independent gate review `impl-gate-C-slice1-round1-20260918.md`), bundled with that same review's
+  P2-A (a stale, now-false source comment in the same file family). Part A and Part B are **not**
+  edited in place — read together with the supersession notes this pass adds at each affected
+  spot (BLUF above, §A4, the FE-sync-pin row in §A6, item 15 in §A8, and the BLOCKING bullet in
+  §A9) rather than treating the original prose as current.
 
 HEAD at the time of Part A: `b2f2d3ac3` (after this same commit's design-MD sibling; no code
 changes are part of this commit — see §A3's mutation ledger for the two temporary, fully-restored
@@ -303,19 +314,29 @@ six of the eight members and never reaching `'cancel_round'` or `'error'`.
   narrative (quoted in the design MD) describes the guard's *shape* being correct without having
   executed it.
 
-**Disposition — this is a BLOCKING open item, not a closed one**: per the task's "不改代码" rule
-(applied here without carving out test files this lane itself authored, since the instruction drew
-no such line), the regex was **not** fixed. This means **checklist item 15 is NOT closed**: the
-lock's own requirement for outlet #12 ("同 PR 必改三处…同步钉") includes a *working* sync guard, and
-this one currently cannot prove what it exists to prove. The underlying FE/BE data (the union member,
-the label map entry) are correct — only the guard is broken — but a broken guard is not a substitute
-for a working one, and this document does not present it as such. Reported here as a CONFIRMED
-defect for the door review to register and fix (the minimal fix would let the repeated group also
-skip a `/** ... */` block, or split the match on the closing `*/` before applying the per-literal
-`matchAll`) — a fix that touches only this test file, not the FE/BE code it verifies. See §A9 for
-this item restated as the lead blocking entry, and see the note this adds to Part B's §9/§10 below
-(this finding also means the "second finding" this pass required is §A2, immediately above — the two
-genuine findings this pass surfaced are §A2 and this section, not a separate third section).
+**Disposition, as recorded in round 3 — this is a BLOCKING open item, not a closed one**: per the
+task's "不改代码" rule (applied here without carving out test files this lane itself authored, since
+the instruction drew no such line), the regex was **not** fixed. This means **checklist item 15 is
+NOT closed**: the lock's own requirement for outlet #12 ("同 PR 必改三处…同步钉") includes a *working*
+sync guard, and this one currently cannot prove what it exists to prove. The underlying FE/BE data
+(the union member, the label map entry) are correct — only the guard is broken — but a broken guard
+is not a substitute for a working one, and this document does not present it as such. Reported here
+as a CONFIRMED defect for the door review to register and fix (the minimal fix would let the
+repeated group also skip a `/** ... */` block, or split the match on the closing `*/` before
+applying the per-literal `matchAll`) — a fix that touches only this test file, not the FE/BE code it
+verifies. See §A9 for this item restated as the lead blocking entry, and see the note this adds to
+Part B's §9/§10 below (this finding also means the "second finding" this pass required is §A2,
+immediately above — the two genuine findings this pass surfaced are §A2 and this section, not a
+separate third section).
+
+> **SUPERSEDED for currency, not for validity (round 4 / Part C note)**: the door review this
+> paragraph asked for happened (`impl-gate-C-slice1-round1-20260918.md`, finding P1-A) and confirmed
+> this exact root cause byte-for-byte, plus that it sits in the `web-tests` **required** branch
+> check (a narrower but real correction to §A6's original "apps/web default job" lane label — see
+> the note on that row). Part C below applies the minimal fix this paragraph names (strip
+> `/\*[\s\S]*?\*\//g` before matching, not the split-on-`*/` alternative) and reruns green. The root
+> cause and severity analysis above remain accurate as a record of what round 3 found; only the
+> "not fixed" / "BLOCKING" verdict is superseded — **checklist item 15 is now closed.**
 
 ## A6. Lock verification-table → test file + case name + lane (full mapping)
 
@@ -355,7 +376,7 @@ share one lane; the two `.test.ts` files run in the default no-DB unit-test job)
 | Q-C lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `ABSENCE: createCancelRoundInstance never references the record-link row-auth lock (mechanical scan, re-read fresh)` + two POSITIVE CONTROL siblings proving the harness can force a real `40P01` | same |
 | CI wiring (lane decision 1) | `approval-cancel-round-ci-wiring.test.ts` | 6 cases (see §A1.2) | default unit job |
 | Plugin mirror constant (lane decision 2) | `approval-cancel-round-plugin-mirror-constant.test.ts` | 9 cases (see §A1.2) | default unit job |
-| FE sync pin (§14.3 #12, checklist item 15) | `apps/web/tests/approvalBatchTransferView.spec.ts` | `names every skip code the server declares, and falls back for an unrecognised one` | apps/web default job — **currently RED, see §A4** |
+| FE sync pin (§14.3 #12, checklist item 15) | `apps/web/tests/approvalBatchTransferView.spec.ts` | `names every skip code the server declares, and falls back for an unrecognised one` | ~~apps/web default job — currently RED, see §A4~~ **SUPERSEDED (round 4 / Part C): lane corrected to `web-tests` (required, no-paths-filter check on `main`'s branch protection — this row's original lane label was itself wrong, per gate finding P1-A), and GREEN after Part C's fix. See Part C.** |
 
 ## A7. Two-point wiring / trigger set / s6a — grep evidence (fresh, this tree)
 
@@ -405,21 +426,21 @@ vectors file shows no delta since the pin recorded in `e394c9e9c`); re-run in §
 | 12 | Lane B: A0 reuse of existing suite | **N/A — lane B item.** |
 | 13 | W7-R10 is a directory-ROOT list, not a file list | **Closed, by containment argument, not by a basename grep** (a basename grep would be structurally 0-hit by design and prove nothing). The migration file's own addendum (`zzzz20260918090000_create_approval_rounds.ts`, lines 1-59, quoted in the design MD §2.1) walks each of this lane's new/edited files against the three named roots: `plugin-attendance/index.cjs` falls under root 1, `w4c3b-central-approval-hooks.ts` under root 2, and the migrations / `ApprovalProductService.ts` / `ApprovalBridgeService.ts` / `routes/approvals.ts` correctly fall **outside** all three roots (schema DDL and approval-side service/route code, not attendance-side group-policy/frozen-context reference sites). |
 | 14 | Four attendance census pins re-checked on push | **Closed, re-run fresh this pass** (§A1.6, 60/60, including "exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML" and "hard zero-bypass: current-tree open-debt set is exactly empty"). |
-| 15 | FE sync pin must read backend source, not hand-transcribe | **Structurally closed (the guard is a `readFileSync` source pin, not a hand-transcribed array, and both FE files it checks against already carry `cancel_round`), but the guard itself is currently RED due to a regex defect — see §A4. Not "done", reported as a live finding.** |
+| 15 | FE sync pin must read backend source, not hand-transcribe | ~~Structurally closed..., but the guard itself is currently RED due to a regex defect — see §A4. Not "done", reported as a live finding.~~ **SUPERSEDED (round 4 / Part C): fixed and GREEN. The guard is a `readFileSync` source pin (not hand-transcribed), it strips block comments before matching so the `cancel_round`/`error` members are no longer skipped, both FE files it checks against already carried `cancel_round`, and two new assertions pin the dedicated skip-reason copy specifically (not just "non-empty"). See Part C.** |
 | 16 | §5 I6 "撤销不限次" needs an explicit acceptance row | **Closed.** `approval-cancel-round-redemption.db.test.ts`'s `chain (§5 I6, 撤销不限次)` case is exactly this row; §A3 Mutation 2 proves it is load-bearing (disabling the round-close write turns it red). |
 | 17 | §14.1 CJS mirror constant / §14.3 legacy-catch-500 mutation / §2-G2 time anchor — "zero mapping" in the taskbook | **Two of three closed, one N/A for this slice.** §14.1 CJS mirror constant: closed — pinned by `approval-cancel-round-plugin-mirror-constant.test.ts`'s 9 cases, green fresh in §A1.2 (no separate mutation was run against the mirror constant specifically in this pass; the 9 cases already include the "positive control: a renamed/absent identifier would fail" case, which is itself a mutation-shaped assertion). §14.3 legacy-catch-500 mutation: **closed and re-verified live in this pass** — §A3 Mutation 1 is exactly this mutation (disable outlet #7's pass-through ⇒ observe 500 instead of 409), run fresh, not merely cited. §2-G2 time anchor (the amend-only "generation" time-anchor field): **N/A to this slice** — G2 applies to amend rounds, out of scope per lock §7 (see design MD §1.1); this slice's `approval_rounds` schema has no amend-specific columns to anchor. |
 
 ## A9. What remains open, unverified, or blocked (honest list — not silently closed)
 
-- **BLOCKING — the FE sync-pin regex defect (§A4)**: `apps/web/tests/approvalBatchTransferView.spec.ts`
-  is CONFIRMED red on the current tree, right now, in this lane's own diff. This means **checklist
-  item 15 is not closed** and outlet #12's FE half has no currently-working verification (the FE/BE
-  *data* line up correctly — the union member and label map both already carry `cancel_round` — but a
-  broken guard cannot be credited as proof of that). Not fixed here, per the task's "不改代码"
-  instruction applied literally (no carve-out for a test file this lane authored). This is the one
-  item in this document that keeps the slice from being a clean "红的不交付" pass — it IS red, and it
-  is being delivered anyway per the instruction to report rather than fix; the door review's first
-  action item should be this row.
+- ~~BLOCKING — the FE sync-pin regex defect (§A4)~~ **RESOLVED (round 4 / Part C)**:
+  `apps/web/tests/approvalBatchTransferView.spec.ts` was CONFIRMED red at round 3 (this lane's own
+  diff), independently confirmed by the gate review (`impl-gate-C-slice1-round1-20260918.md` P1-A,
+  which additionally traced the exact same root cause byte-for-byte and established it sits in the
+  `web-tests` **required** branch-protection check, not the "apps/web default job" this document
+  originally said). Part C fixes the extraction regex, adds a dedicated-copy assertion for
+  `cancel_round` (P1-A's suggested closure line), and fixes the stale `api.ts` comment the same
+  review flagged as P2-A. **Checklist item 15 is now closed.** See Part C for the rerun and mutation
+  evidence.
 - **判据 II / 判据 IV / `attendance-parity.db.test.ts`**: not implemented in this slice (design MD
   §1.1, unchanged from Part B's Decision 3). Deferred to C-2, per the goal document's own slice
   ordering.
@@ -777,3 +798,123 @@ All six round-2 items are closed: five by prior commits (traced in §1's table w
 sixth (this document) by the virgin-DB rerun recorded in §2/§7 above. Decision 3 is closed as
 **blocked-with-reason**, not as delivered — §5 is the authoritative record for what remains open for
 slice 2 (attendance-parity, redemption 判据 II/IV) and must not be read as "done."
+
+---
+
+# Part C — round 4 fix (2026-09-18, this pass)
+
+**Scope of this pass**: fix the two round-3 findings the independent gate review
+(`impl-gate-C-slice1-round1-20260918.md`, dated 2026-09-18) confirmed as its **P1-A** and **P2-A**
+— the only two findings this pass addresses. The review's other findings (P1-B's four missing
+acceptance rows, P2-B's seed-visibility disclosure, P3-A through P3-E) are **not** touched here;
+they remain open for a subsequent fix-round step and are not re-described in this section.
+HEAD before this pass's commit: `95eccb89b` (the exact HEAD the gate review reviewed). This pass
+touches exactly two files, both `apps/web`, neither backend/DB code:
+`apps/web/tests/approvalBatchTransferView.spec.ts` and `apps/web/src/approvals/api.ts`.
+
+## C1. P1-A fix — the sync-pin's extraction regex now tolerates the JSDoc block between members
+
+**Root cause** (already isolated correctly in round 3 — see Part A §A4 above, not restated in
+full here): the regex `/export type ApprovalBulkReassignSkipReason\s*=\s*((?:\s*\|\s*'[^']+')+)/`
+requires each successive `| '...'` union member to be reachable via whitespace-only (`\s*`)
+before the next `|`. `ApprovalProductService.ts:386-405` has a multi-line `/** … */` JSDoc between
+`'target-user-invalid'` and `'cancel_round'` explaining the latter's byte-exactness requirement;
+`\s*` cannot cross that block, so the repeated group silently stopped at six of eight members and
+never reached `'cancel_round'`/`'error'`.
+
+**Fix, verbatim** (`apps/web/tests/approvalBatchTransferView.spec.ts`): strip block comments from
+the source text *before* matching the union, so the whitespace-only assumption between remaining
+tokens holds again:
+
+```js
+const serviceSrcNoComments = serviceSrc.replace(/\/\*[\s\S]*?\*\//g, '')
+const unionMatch = serviceSrcNoComments.match(
+  /export type ApprovalBulkReassignSkipReason\s*=\s*((?:\s*\|\s*'[^']+')+)/,
+)
+```
+
+This is the first of the two minimal fixes Part A §A4 itself named ("let the repeated group also
+skip a `/** … */` block") — chosen over the "split on `*/`" alternative because it is a single line
+and does not need special-casing where the closing `*/` falls relative to a union member boundary.
+
+Two assertions were added, not just the regex fix:
+1. `expect(serverCodes).toContain('cancel_round')` — direct proof the comment-stripping did not
+   just widen the match harmlessly; the specific member the JSDoc guards against being missed must
+   actually be present in what got extracted.
+2. `expect(describeSkipReason('cancel_round', true)).toBe('该审批处于撤销轮中，暂不可改派')` (+ the
+   `.not.toBe('未转交（原因未知）')` and English-locale forms) — the lock's own §14.3 #12 FE
+   acceptance line verbatim ("dedicated copy, not the unknown-reason fallback"). The pre-existing
+   generic loop only asserted `describeSkipReason(code, false)).not.toBe('')`, which a regression
+   that silently fell back to the (non-empty) unknown-reason copy would **not** have caught — see
+   Mutation 2 below for the constructed proof of exactly that gap.
+
+## C2. P2-A fix — the stale, self-contradicting comment in `api.ts`
+
+`apps/web/src/approvals/api.ts:1646-1655`'s comment on the FE `ApprovalBulkReassignSkipReason`
+type alias read (verbatim, before this fix): "ADDED HERE AHEAD OF the backend union member landing
+(tracked separately; `ApprovalProductService.ts`'s own `ApprovalBulkReassignSkipReason` does not
+declare it yet) … the pin is EXPECTED to fail until that backend PR lands." That was true at the
+moment the comment was written, but the backend union has since declared `cancel_round` **on this
+same branch** (`ApprovalProductService.ts:404`) — so the comment was both a stale historical claim
+and, worse, an argument that pre-justified the P1-A red as "expected," exactly the pattern
+`feedback_asserted_invariant_is_a_bug` / `feedback_source_text_assertions_are_not_behaviour` warn
+about. Rewritten to state the current, true relationship (both sides declare the literal; the
+sync-pin now verifies the two match byte-for-byte) rather than a landing sequence that already
+happened.
+
+## C3. Rerun evidence — the exact commands, this pass
+
+Single file:
+```
+$ cd apps/web && npx vitest run tests/approvalBatchTransferView.spec.ts
+ Test Files  1 passed (1)
+      Tests  72 passed (72)
+```
+
+The gate review's exact `web-tests` required-lane invocation
+(`apps/web/scripts/run-required-web-tests.sh:779`, run verbatim, not paraphrased):
+```
+$ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
+ Test Files  4 passed (4)
+      Tests  107 passed (107)
+```
+This is the actual required-check content, not a proxy for it — it is line 779 of the script that
+`.github/workflows/web-tests.yml`'s job `web-tests` runs, copied character-for-character.
+
+**Not rerun this pass, by scope**: the seven `approval-cancel-round-*.db.test.ts` real-DB suites,
+the two backend unit tests, `packages/core-backend`'s typecheck, and the 38 sibling `*-ci-wiring`
+guards — none of this pass's two files are backend/DB code or touch anything those suites exercise
+(confirmed: `git diff 95eccb89b HEAD --name-only` after this pass's commit is exactly the two
+`apps/web` files named above). A subsequent step that also touches P1-B's backend acceptance rows
+must rerun those suites; this step does not claim to have done so.
+
+## C4. Mutation ledger — two probes, `cp`-backup → edit → run → restore → `cmp`, this pass
+
+Backup directory `/tmp/gate-c-slice1-round1-backups/`. Each mutation run in isolation on the single
+spec file; `git status --porcelain` was empty both before this pass's edits and after each restore.
+
+| # | Mutated | Change | Observed red | Restore |
+|---|---|---|---|---|
+| P1 | `approvalBatchTransferView.spec.ts` | Reverted the comment-strip: matched `serviceSrc` directly instead of `serviceSrcNoComments` (i.e., undid exactly the C1 fix, nothing else) | `1 failed \| 71 passed (72)`; `AssertionError: expected [ 'not-found', 'not-pending', …(4) ] to include 'cancel_round'` — the new `toContain('cancel_round')` assertion catches the exact round-3 defect on its own, one line, no dependency on the later `toEqual` | `cmp` identical to backup |
+| P2 | `batchTransfer.ts` | Kept the `cancel_round` key present (so the bidirectional sync-pin `toEqual` still passes) but set its value to the **fallback text itself** — `{ zh: '未转交（原因未知）', en: 'Not transferred (unrecognised reason)' }` — simulating a regression that silently degrades to the unknown-reason copy without removing the key | `1 failed \| 71 passed (72)`; `AssertionError: expected '未转交（原因未知）' to be '该审批处于撤销轮中，暂不可改派'` at the new dedicated-copy assertion — confirmed this is **not** caught by the pre-existing `describeSkipReason(code, false)).not.toBe('')` loop (that loop stays green under this mutation; only the new assertion reds), proving the new assertion adds real discriminating power rather than duplicating existing coverage | `cmp` identical to backup |
+
+Full green rerun after both restores, confirmed in §C3 above (this is the same 72/72 and 107/107
+run, taken after the restores, not before).
+
+## C5. Working-tree discipline, this pass
+
+- `git status --porcelain` was empty at the start of this pass (matching the gate-review HEAD
+  `95eccb89b`'s clean state) and is exactly `M apps/web/src/approvals/api.ts` +
+  `M apps/web/tests/approvalBatchTransferView.spec.ts` (plus this document) at the end.
+- Zero `git checkout --`; all mutation reverts were `cp`-restore + `cmp`-verified, per §C4.
+- No lock file, no `reviews/` file, no `origin/main` state touched.
+
+## C6. Checklist item 15 and gate findings P1-A/P2-A — final disposition
+
+**Checklist item 15: CLOSED.** The sync-pin is green, reads backend source (not a hand-transcribed
+array), tolerates the JSDoc comment between union members, and specifically pins the dedicated
+`cancel_round` copy rather than only "some non-empty string."
+**Gate finding P1-A: FIXED**, per §C1/§C3/§C4 (P1) above.
+**Gate finding P2-A: FIXED**, per §C2 above.
+Both fixes verified in the exact required-lane invocation the gate review traced to
+`main`'s branch protection (§C3), not merely in isolation.
