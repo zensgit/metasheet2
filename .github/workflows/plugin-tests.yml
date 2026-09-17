@@ -1654,6 +1654,8 @@ jobs:
             tests/integration/approval-instance-readability-s1.db.test.ts \
             tests/integration/approval-comments.db.test.ts \
             tests/integration/approval-lock9-process-attachments-realdb.db.test.ts \
+            tests/integration/approval-template-groups-lifecycle.db.test.ts \
+            tests/integration/approval-template-groups-serialization.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
