@@ -181,6 +181,8 @@ UPDATE approval_template_group_links
 
 对 `approval_template_group_backfill_batch_links` 里的每一行执行上述 UPDATE。`rowCount = 0` 表示这一行自 execute 之后已经被别的操作改动过(重新挂接到别的组、或又被解除又被再挂接——任何一种都会让 `linked_at` 更新)——**这不是错误,是"跳过,不动它"**,精确对应"不动批次外的数据"。`rowCount = 1` 表示状态自 execute 起未变,安全解除。
 
+**已知残留(披露,非漏判)**:`linked_at` 取自 `now()`(事务开始时刻),是同一事务内的常量。如果在 execute 提交之后、rollback 开始之前,发生了"解除该模板 → 立刻重新挂接回同一个组"且两次操作发生在同一个事务里(因而共享同一个 `now()` 值),巧合下新的 `linked_at` 可能与批次记录的旧值相等,rollback 会把这次"批次外的重新挂接"误判为"批次自身状态未变"而解除它。这个反例需要构造"同一事务内解除又挂接"这个不常见的调用序列才能触发,列为已知边界,不在本切片修复范围(修复需要一个不依赖时间戳的版本号列,是范围变更)。
+
 ### 4.3 分组回滚:仅归档"批次新建 且 回滚后零剩余成员"的组
 
 ```
@@ -192,10 +194,16 @@ FOR EACH (groupId, createdNew) IN batch_groups WHERE batch_id = $batchId:
   remaining ← SELECT count(*) FROM approval_template_group_links
                 WHERE org_id = $org AND group_id = $groupId AND unlinked_at IS NULL
   IF remaining = 0:
-    -- 与 archiveApprovalTemplateGroup 逐字相同的两条语句(members-unlink UPDATE 此时必然影响 0 行,
-    -- 因为 remaining 已确认为零;仍然执行它是为了与既有归档路径的语句形状保持逐字一致,不是可省略的多余步骤)
+    -- 与 archiveApprovalTemplateGroup 逐字相同的两条语句。第一条此时必然影响 0 行——不是因为它的
+    -- WHERE 谓词恰好只匹配 remaining 数出的那个集合,而是因为 atgl_state_check(A-1 DDL:
+    -- `CHECK ((group_id IS NULL) = (unlinked_at IS NOT NULL))`)保证「group_id = $groupId」与
+    -- 「group_id = $groupId AND unlinked_at IS NULL」这两个集合恒等——任何 group_id 非空的行,
+    -- 这条 CHECK 就已经把它的 unlinked_at 钉成 NULL,不存在「group_id = $groupId 但 unlinked_at
+    -- 非空」的行。remaining=0 因此意味着「group_id = $groupId」这个更宽的谓词也是 0 行,两个谓词
+    -- 字面不同但外延相同,不是巧合,是这条 CHECK 承重。仍然执行这条语句是为了与既有归档路径的语句
+    -- 形状保持逐字一致,不是可省略的多余步骤。
     UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now()
-      WHERE org_id = $org AND group_id = $groupId    -- remaining=0 时此语句影响 0 行,是保持形状一致的空操作
+      WHERE org_id = $org AND group_id = $groupId
     UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
       WHERE org_id = $org AND id = $groupId
   -- ELSE: remaining > 0 ⇒ 该组在 execute 之后被别人加了新成员,保留该组不归档
@@ -288,4 +296,4 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 
 ## 10. 本步交付物与下一步
 
-本步(worktree/私有库建立后的第一个可提交单元)只交付本文档,不写任何实现代码——taskbook `:72`/`:227` 明确 W7/W8/W9(preview/execute/rollback)在"设计提案过独立门审"之前不进入实现队列。下一步(交给主会话或下一次续做)是把本文档提交给 Opus 门审,门审通过或给出修法意见后,再按 §10 的验证计划纲要开始写 DDL + 服务层 + 端点。
+本步(worktree/私有库建立后的第一个可提交单元)只交付本文档,不写任何实现代码——taskbook `:72`/`:227` 明确 W7/W8/W9(preview/execute/rollback)在"设计提案过独立门审"之前不进入实现队列。**下一步是把本文档送独立门审**(§6.2 的 guard 冲突、§8.4 的 `WithClient` 重构落点都是需要门审/owner 表态的输入项,不是已定案——门审通过或给出修法意见之后,才按 §9 的验证计划纲要开始写 DDL + 服务层 + 端点)。
