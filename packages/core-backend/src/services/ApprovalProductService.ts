@@ -9416,11 +9416,19 @@ export class ApprovalProductService {
    * Lock §3 C-2 step ③ + §14.2 判据 IV — the IN-LOCK final evaluation, run inside the caller's
    * `dispatchAction` transaction and BEFORE any terminal status write.
    *
-   * Lock order (lock §3 C-2 全局顺序, the part this method owns): the engine instance is already
-   * held `FOR UPDATE` by `dispatchAction`'s entry read; this takes ② the round row and ③ the
-   * ORIGINAL document instance, in that order, and takes the original instance's lock even on the
-   * branches that never write it — front-loading the order 判据 II's C-1 call needs rather than
-   * acquiring it later, mid-transaction, in a different order.
+   * Lock order (lock §3 C-2 全局顺序 + 「census 未做前不实现」). The engine instance is already held
+   * `FOR UPDATE` by `dispatchAction`'s entry read; this then takes ② the ORIGINAL document
+   * instance and ③ the round row, and takes the original instance's lock even on the branches that
+   * never write it — front-loading the order 判据 II's C-1 call needs.
+   *
+   * ⚠️ The {original document, round row} pair is a NEW lock pair this method introduces, and its
+   * order is NOT free: `createCancelRoundInstance` locks the original document first and only then
+   * INSERTs into `approval_rounds` (where the `WHERE outcome='pending'` partial unique index makes
+   * it wait on any uncommitted change to that document's pending round). A closer that took the
+   * round row first therefore closes a cycle. That was CONSTRUCTED, not reasoned about, and
+   * deadlocked deterministically — `40P01 deadlock detected`; the census leg is Q-D in
+   * `approval-cancel-round-lock-order-census.db.test.ts`, with the reversed order kept as the
+   * standing proof and this order as the positive control.
    *
    * ⚠️ Rollout/advisory lock (lock §3 C-2 「rollout/advisory 锁 → 轮次引擎实例 → …」): NOT taken
    * here, and it cannot be taken here in the right order. `dispatchAction` opens `BEGIN` and
@@ -9442,7 +9450,39 @@ export class ApprovalProductService {
     readonly evaluation: CancelRoundFinalEvaluationV1
     readonly policySnapshotAtDecision: string
   }> {
-    // ② the round row.
+    // ② the ORIGINAL document instance, ③ the round row — IN THAT ORDER. The order is the whole
+    // point (see the lock-order note on this method): `createCancelRoundInstance` locks the
+    // original document FIRST and only then touches `approval_rounds`, so a closer that took the
+    // round row first would invert the pair. That inversion is not theoretical — it was CONSTRUCTED
+    // and deadlocked deterministically (see `approval-cancel-round-lock-order-census.db.test.ts`,
+    // Q-D). The `document_id` needed to get there is read WITHOUT a lock first; it is immutable on
+    // a round row (no writer anywhere updates it — `git grep -n "UPDATE approval_rounds"`), so this
+    // read cannot go stale in a way that matters, and the locked re-read below is the authority.
+    const roundProbe = await client.query<{ document_id: string }>(
+      `SELECT document_id FROM approval_rounds
+        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+      [engineInstanceId],
+    )
+    if (roundProbe.rows.length !== 1) {
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to evaluate',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+    const originalResult = await client.query<ApprovalInstanceRow>(
+      `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
+      [roundProbe.rows[0].document_id],
+    )
+    const original = originalResult.rows[0]
+    if (!original) {
+      throw new ServiceError(
+        'Cancel-round document instance not found at final evaluation',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+
     const roundResult = await client.query<{ id: string; document_id: string }>(
       `SELECT id, document_id FROM approval_rounds
         WHERE engine_instance_id = $1 AND outcome = 'pending'
@@ -9450,27 +9490,13 @@ export class ApprovalProductService {
       [engineInstanceId],
     )
     const round = roundResult.rows[0]
-    if (!round || roundResult.rows.length !== 1) {
+    if (!round || roundResult.rows.length !== 1 || round.document_id !== original.id) {
       // Same fail-closed rationale as 判据 III's `rowCount !== 1`: a cancel-round engine instance
       // reaching its terminal approve with no single pending round means WI-4's one-round-per-
       // instance invariant is already broken. 基础设施异常 path (lock §3 C-3 row 5): throw ⇒ the
       // caller's transaction rolls back ⇒ the round stays `pending` and keeps its seats.
       throw new ServiceError(
         'Cancel-round instance has no single matching pending round to evaluate',
-        409,
-        'CANCEL_ROUND_INVARIANT_VIOLATION',
-      )
-    }
-
-    // ③ the original document instance.
-    const originalResult = await client.query<ApprovalInstanceRow>(
-      `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
-      [round.document_id],
-    )
-    const original = originalResult.rows[0]
-    if (!original) {
-      throw new ServiceError(
-        'Cancel-round document instance not found at final evaluation',
         409,
         'CANCEL_ROUND_INVARIANT_VIOLATION',
       )
