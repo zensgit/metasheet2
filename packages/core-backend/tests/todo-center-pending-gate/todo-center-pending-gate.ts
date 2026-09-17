@@ -55,8 +55,13 @@
  * mutation — swap `resolveCanDecideCurrentNode`'s whole body for the "seat type ∈ {user, role}"
  * simplified version) is also run for real, against
  * `tests/unit/approval-can-decide-current-node.test.ts` (not this file — that suite has no DB):
- * 19/41 redden, including both of row C′'s named unit-level param sets ("非 pending 实例" — the six
- * non-pending-status tests — and "席位不在可决节点" — "a seat at a node the instance is NOT stopped
+ * 19/41 redden, including both of row C′'s named unit-level param sets ("非 pending 实例" — the five
+ * non-pending-status tests (`for (const status of ['approved', 'rejected', 'revoked', 'cancelled',
+ * 'draft'])` — the sixth case in that same describe block, "a pending instance with a matching seat
+ * can be decided", is the positive control and stays green under this mutation, so it is not counted
+ * here; round-2 gate finding P3-4, `impl-gate-B-slice1-round2-20260918.md`, corrected this from an
+ * earlier "six" that conflated the five negative cases with the describe block's six-test total) —
+ * and "席位不在可决节点" — "a seat at a node the instance is NOT stopped
  * on cannot decide"), restored and re-run 41/41 green. Judge B (fail-closed AND discriminable,
  * design-lock §5 row B's API-layer half) is now DISCHARGED by the `describe('Judge B — ...')` block
  * below (observation points: `GET /api/todo/items` AND `GET /api/todo/count` — the latter had ZERO
