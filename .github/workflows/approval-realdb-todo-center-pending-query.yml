@@ -54,9 +54,25 @@ on:
       - 'packages/core-backend/src/services/approval-actor-roles.ts'
       - 'packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts'
       - 'packages/core-backend/tests/todo-center-pending-gate/setup.ts'
-      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.todo-center-pending-gate.config.ts'
       - 'packages/core-backend/vitest.config.ts'
+      # Gate report impl-gate-B-slice1-round1-20260918.md P2-2: this lane runs on the PRODUCTION
+      # RBAC axis (RBAC_BYPASS=false / RBAC_TOKEN_TRUST=false / PRODUCT_MODE=plm-workbench below),
+      # not the default token-trust harness, so these six modules are not merely imported — the
+      # gate agent's mutation M8 (AuthService.ts:742 admin-role upgrade) proved one of them is
+      # load-bearing for a specific class (③′) the suite's golden values depend on. A change to
+      # any of the six can silently flip this gate's expected counts without ever triggering it.
+      # Known cost, accepted per the same fail-closed-over-narrow-trigger-set precedent this repo
+      # already applies elsewhere (feedback_lock_taking_port_needs_lock_order_census and siblings):
+      # these are high-churn, widely-shared modules, so this lane's Postgres job will now spin up
+      # more often than the narrower 13-path trigger set it replaces — the alternative (missing a
+      # real behavior change) is worse for an advisory-only real-DB evidence lane (see P2-0 below).
+      - 'packages/core-backend/src/auth/AuthService.ts'
+      - 'packages/core-backend/src/rbac/rbac.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
+      - 'packages/core-backend/src/rbac/namespace-admission.ts'
+      - 'packages/core-backend/src/config/product-mode.ts'
+      - 'packages/core-backend/src/routes/auth.ts'
       - '.github/workflows/approval-realdb-todo-center-pending-query.yml'
   push:
     branches: [main]
@@ -70,9 +86,25 @@ on:
       - 'packages/core-backend/src/services/approval-actor-roles.ts'
       - 'packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts'
       - 'packages/core-backend/tests/todo-center-pending-gate/setup.ts'
-      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.todo-center-pending-gate.config.ts'
       - 'packages/core-backend/vitest.config.ts'
+      # Gate report impl-gate-B-slice1-round1-20260918.md P2-2: this lane runs on the PRODUCTION
+      # RBAC axis (RBAC_BYPASS=false / RBAC_TOKEN_TRUST=false / PRODUCT_MODE=plm-workbench below),
+      # not the default token-trust harness, so these six modules are not merely imported — the
+      # gate agent's mutation M8 (AuthService.ts:742 admin-role upgrade) proved one of them is
+      # load-bearing for a specific class (③′) the suite's golden values depend on. A change to
+      # any of the six can silently flip this gate's expected counts without ever triggering it.
+      # Known cost, accepted per the same fail-closed-over-narrow-trigger-set precedent this repo
+      # already applies elsewhere (feedback_lock_taking_port_needs_lock_order_census and siblings):
+      # these are high-churn, widely-shared modules, so this lane's Postgres job will now spin up
+      # more often than the narrower 13-path trigger set it replaces — the alternative (missing a
+      # real behavior change) is worse for an advisory-only real-DB evidence lane (see P2-0 below).
+      - 'packages/core-backend/src/auth/AuthService.ts'
+      - 'packages/core-backend/src/rbac/rbac.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
+      - 'packages/core-backend/src/rbac/namespace-admission.ts'
+      - 'packages/core-backend/src/config/product-mode.ts'
+      - 'packages/core-backend/src/routes/auth.ts'
       - '.github/workflows/approval-realdb-todo-center-pending-query.yml'
 
 permissions:
