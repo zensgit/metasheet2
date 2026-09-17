@@ -38,7 +38,10 @@ import type {
  *     rollout-lock `pg_locks` assert, posture resolution, replay preflight or the seal/outbox.
  *   - 账侧完整取消结果逐字节等价 (lock §8 期 1) and the `unrecoverableExpired` presentation, which
  *     only an end-to-end run against the plugin's real boundary can establish.
- *   - R2 (锁内最终评估失败 ⇒ 零业务取消) and its named mutation.
+ *   - R2 (锁内最终评估失败 ⇒ 零业务取消) — now COVERED here, by the last case in this file,
+ *     against the REAL boundary. ⚠️ Read its doc comment before trusting it: R2's three
+ *     literal clauses have NO discriminating power against the mutation the lock names for
+ *     R2, and the assertion that does carry it is an implementer addition.
  *
  * 判据 III (lock:passim, wired at `ApprovalProductService.ts` — see the in-code comments at the
  * revoke (A4) and reject (A7) branches, `git grep -n "判据 III"`): a cancel-round instance's own
@@ -1256,6 +1259,174 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         [deriveCancelRoundW4OperationIdV1(roundIdRow.rows[0].id)],
       )
       expect(calculations.rows[0].count).toBe('0')
+    },
+  )
+
+  /**
+   * ── R2 (lock §8 期 1 的第二条承重反例) ────────────────────────────────────────────────────────
+   *
+   * 「最终业务评估失败 ⇒ 零业务取消、零 `approved` 完成事件,但 C-3 关闭结果已持久化
+   * (mutation:把评估挪到入队之后 ⇒ R2 必红)」(lock:169).
+   *
+   * WHAT 入队 MEANS HERE, stated rather than left to inference. The lock's own C-2 step list
+   * (lock:105-107) is: ① 锁轮次行 → ② 锁原单据实例 → ③ 锁内最终评估 → 分支决定 → 通过:④ 经 C-1
+   * 的 W4 外部事务入口 → ⑤ 写轮次 `applied` → ⑥ **才写 `approved` 审计与入队完成事件** → `COMMIT`.
+   * 入队 is step ⑥. On the shipped code the statement after `evaluateCancelRoundFinalInLock` is the
+   * C-1 call, not an enqueue, so 「把评估挪到入队之后」 maps to: move the whole
+   * `resolution.status === 'approved' && isCancelRoundInstance(instance)` hook block from its
+   * anchor (immediately before the `UPDATE approval_instances SET status = $2` terminal write) to
+   * immediately after `enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)`
+   * — i.e. past the terminal status write, past the `approve` audit row, past the enqueue. That is
+   * the mutation this case is measured against (phase-2 MD §3.13.3, M-20).
+   *
+   * ⚠️ WHICH ASSERTION CARRIES THE MUTATION — and it is NOT one of R2's three literal clauses.
+   * Under that mutant all three stay GREEN, for reasons that are §11-③'s trap recurring at this
+   * branch:
+   *   - 「零完成事件」 measured on the in-process channel stays green because the C-3 branch's own
+   *     `return` sits before the post-commit `emitApprovalCompletionEvent`, so the built event is
+   *     never emitted no matter where the hook sits;
+   *   - 「零业务取消」 stays green because the evaluation still answers `expired` and still skips
+   *     C-1, just later;
+   *   - 「C-3 收口已持久化」 stays green because the closure still runs and still overwrites the
+   *     status back to `rejected`.
+   * The discriminating assertion is the PERSISTED `approved` half of step ⑥: the `approve` audit
+   * row on the cancel round's own instance, which the mutant writes and the shipped order does
+   * not. It is an IMPLEMENTER ADDITION to R2's clause set, recorded as such so no reader takes
+   * 「R2 built, its mutation red」 to mean the lock's three literal clauses were gated.
+   *
+   * WHY THE REAL PORT AND AN ATTENDANCE-BACKED FIXTURE. Over a double 「零业务取消」 could only be
+   * `calls.length === 0` — a statement about a stub. Here the plugin's REAL boundary is bound
+   * (asserted), the original document really is an attendance document with an `approved`
+   * request behind it (asserted as rows BEFORE the action, so the zero is not the trivially-true
+   * zero of a fixture with no target), and the positive control that the same fixture shape DOES
+   * get cancelled when the evaluation passes is the END-TO-END case above.
+   *
+   * Two further notes, so a later reader does not "fix" them:
+   *   - `seedDirectoryIdentity` is deliberately NOT called. C-1 never runs on this path, so the
+   *     directory rows are not needed; and if the evaluation ever accidentally answered `redeem`,
+   *     the real adapter's actor-liveness recheck would fail the transaction, the round would stay
+   *     `pending`, and 「C-3 收口已持久化」 would go RED. The omission makes an accidental redeem
+   *     fail loudly instead of silently.
+   *   - With an attendance request attached, `resolveCancelRoundRolloutLockRequirementV1` answers
+   *     `{ kind: 'required' }`, so this dispatch runs under `BEGIN ISOLATION LEVEL SERIALIZABLE`
+   *     holding the rollout advisory lock (§3.9). This is therefore the FIRST case to drive the
+   *     C-3 `expired` close under that posture — the `ivexp` case above runs the `not_required`
+   *     one. (A construction argument from the pre-read's predicate + the fixture rows asserted
+   *     below, not a `pg_locks` measurement; census Q-F is where that is measured.)
+   */
+  it(
+    'R2 (lock §8 期 1 反例二): the in-lock final evaluation fails with the REAL W4 boundary bound ' +
+      'and a live attendance target ⇒ ZERO business cancellation, ZERO `approved` audit row and ' +
+      'ZERO completion events, while the C-3 close is durably persisted',
+    async () => {
+      const suffix = `r2-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        // 200 days > the `leave` suite's default 90-day window and NO `windowDays` override ⇒ the
+        // in-lock final evaluation answers `expired`. Same knob the `ivexp` case uses; the
+        // difference here is that a real cancellable target exists behind the document.
+        await ageApprovedAnchor(documentId, 200)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+
+      // ── PRECONDITIONS AS ROWS. 「零业务取消」 is fail-open-shaped: it is also green when there
+      // was nothing to cancel. These assertions make the target demonstrably reachable, so the
+      // zeros below are a statement about a refusal and not about an empty fixture.
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+      const before = await pool().query<{
+        status: string
+        workflow_key: string | null
+        business_key: string | null
+      }>(
+        `SELECT status, workflow_key, business_key FROM approval_instances WHERE id = $1`,
+        [fixture.documentId],
+      )
+      expect(before.rows[0]?.status).toBe('approved')
+      expect(before.rows[0]?.workflow_key).toBe('attendance.request')
+      expect(before.rows[0]?.business_key).toBe(`attendance-request:${attached!.requestId}`)
+      const requestBefore = await pool().query<{ status: string }>(
+        `SELECT status FROM attendance_requests WHERE id = $1::uuid`,
+        [attached!.requestId],
+      )
+      expect(requestBefore.rows.length).toBe(1)
+      expect(requestBefore.rows[0].status).toBe('approved')
+
+      const capture = captureCompletionEvents(fixture.roundInstanceId)
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        capture.stop()
+      }
+
+      // ── R2 clause 2: 零 `approved` 完成事件 (in-process channel — the live one in this lane).
+      expect(capture.seen).toEqual([])
+
+      // ── R2's MUTATION-CARRYING assertion (implementer addition, see the doc comment): the
+      // persisted `approved` half of step ⑥ never happened on the round's own instance.
+      const roundRecords = await pool().query<{ approve_rows: string; approved_rows: string }>(
+        `SELECT
+           count(*) FILTER (WHERE action = 'approve')::text AS approve_rows,
+           count(*) FILTER (WHERE to_status = 'approved')::text AS approved_rows
+         FROM approval_records WHERE instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(roundRecords.rows[0].approve_rows).toBe('0')
+      expect(roundRecords.rows[0].approved_rows).toBe('0')
+
+      // ── R2 clause 1: 零业务取消. Every row the real adapter would have written, absent.
+      const original = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.documentId],
+      )
+      expect(original.rows[0]?.status).toBe('approved')
+      const revokes = await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_records
+          WHERE instance_id = $1 AND action = 'revoke'`,
+        [fixture.documentId],
+      )
+      expect(revokes.rows[0].count).toBe('0')
+      const requestAfter = await pool().query<{
+        status: string
+        resolved_by: string | null
+        resolved_at: Date | null
+      }>(
+        `SELECT status, resolved_by, resolved_at FROM attendance_requests WHERE id = $1::uuid`,
+        [attached!.requestId],
+      )
+      expect(requestAfter.rows[0].status).toBe('approved')
+      expect(requestAfter.rows[0].resolved_by).toBeNull()
+      expect(requestAfter.rows[0].resolved_at).toBeNull()
+
+      // ── R2 clause 3: C-3 收口已持久化 (and committed — every read here is on a fresh pool
+      // connection, after the HTTP response returned).
+      const round = await pool().query<{ outcome: string; ended_at: Date | null; block_reason: string | null }>(
+        `SELECT outcome, ended_at, block_reason FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(round.rows[0]?.outcome).toBe('expired')
+      expect(round.rows[0]?.ended_at).not.toBeNull()
+      expect(round.rows[0]?.block_reason).toBeNull()
+      const roundInstance = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(roundInstance.rows[0]?.status).toBe('rejected')
+      const closeRecord = await pool().query<{ actor_id: string; metadata: Record<string, unknown> }>(
+        `SELECT actor_id, metadata FROM approval_records
+          WHERE instance_id = $1 AND to_status = 'rejected'`,
+        [fixture.roundInstanceId],
+      )
+      expect(closeRecord.rows.length).toBe(1)
+      expect(closeRecord.rows[0].actor_id).toBe('system:approval-cancel-round')
+      expect(closeRecord.rows[0].metadata.cancelRoundCloseReason).toBe('round_expired')
+      const dto = (await approve.json()) as { status?: string }
+      expect(dto.status).toBe('rejected')
     },
   )
 })
