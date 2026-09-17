@@ -30,6 +30,7 @@ import * as claimAnchorAmendment from '../../src/db/migrations/zzzz2026082812600
 import * as legalHoldAuthority from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
 import * as restoreJobs from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import * as derivedEffects from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
+import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -179,6 +180,13 @@ const MIGRATIONS: NamedMigration[] = [
   {
     name: 'zzzz20260915160000_create_recovery_archive_derived_effects',
     module: derivedEffects,
+  },
+  {
+    name: 'zzzz20260918120000_add_recovery_archive_section_checkpoints',
+    module: {
+      up: (db) => db.transaction().execute(sectionCheckpoints.up),
+      down: (db) => db.transaction().execute(sectionCheckpoints.down),
+    },
   },
 ]
 

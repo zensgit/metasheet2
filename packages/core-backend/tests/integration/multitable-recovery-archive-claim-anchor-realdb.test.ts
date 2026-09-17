@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import * as checkpointMigration from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
 
 import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
@@ -84,6 +85,7 @@ let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = false
 let initialFingerprint = ''
+let restoreCheckpointSchema = false
 let seqCursor = SEQ_BASE
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
@@ -674,6 +676,18 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 6 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    // Preserve the historical amendment's exact fingerprint assertions while
+    // removing/reapplying its newer dependent migration in causal order.
+    const checkpoint = await sql<{ present: boolean }>`SELECT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_constraint
+      WHERE conrelid=pg_catalog.to_regclass('public.meta_record_history_operations')
+        AND conname='chk_mrho_operation_kind'
+        AND pg_catalog.pg_get_constraintdef(oid) LIKE '%section_checkpoint%'
+    ) AS present`.execute(db)
+    if (checkpoint.rows[0]?.present) {
+      await db.transaction().execute(checkpointMigration.down)
+      restoreCheckpointSchema = true
+    }
     await installIfAbsent()
 
     await q(`INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)`, [KEY_ID])
@@ -773,7 +787,11 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
         keyClient.release()
       }
     } finally {
-      await db.destroy()
+      try {
+        if (restoreCheckpointSchema) await db.transaction().execute(checkpointMigration.up)
+      } finally {
+        await db.destroy()
+      }
     }
   })
 

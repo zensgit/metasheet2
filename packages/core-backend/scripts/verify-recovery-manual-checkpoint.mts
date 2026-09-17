@@ -47,6 +47,23 @@ try {
     if (run.status !== 0) console.error((run.stderr ?? '').slice(-8000))
     assert.equal(run.status, 0, `MIGRATION_${phase.toUpperCase()}_FAILED`)
   }
+  // Historical migration tests must unwind newer layers and restore them. Run
+  // the actual CI replay/neighbor entrypoints before the new protocol tests.
+  const neighbors = [
+    ['tsx', 'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'],
+    ['vitest', '--config', 'vitest.integration.config.ts', 'run',
+      'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts', '--reporter=dot'],
+  ]
+  for (const args of neighbors) {
+    const run = spawnSync('pnpm', ['--filter', '@metasheet/core-backend', 'exec', ...args], {
+      cwd: repo, env: { ...env, METASHEET_REAL_DB_TEST_STEP: '1' }, encoding: 'utf8',
+      timeout: 240000, maxBuffer: 16 * 1024 * 1024,
+    })
+    console.log((run.stdout ?? '').slice(-4000))
+    if (run.status !== 0) console.error((run.stderr ?? '').slice(-8000))
+    assert.equal(run.status, 0, 'MIGRATION_NEIGHBOR_FAILED')
+  }
   client = new Client({ ...connection, database })
   await client.connect()
   const query = (text: string, params?: unknown[]) => client!.query(text, params)

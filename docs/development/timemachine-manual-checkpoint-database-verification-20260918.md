@@ -101,5 +101,29 @@ authenticated object receipts; publication and restore-loop acceptance; UI.
 Identity and DB sealing alone do not prove captured bytes correspond to the
 current source state. No manual-capture endpoint or button is claimed here.
 
+## CI Compatibility Follow-Up
+
+Remote head `20c0a121eef30df1c41b439c2883a64a3ae8435b` failed the migration
+replay job and two historical real-DB suites in Node20. The new checkpoint
+amendment was missing from the causal replay roster; historical suites also
+reset older function definitions without first unwinding the newer amendment.
+Fresh migration succeeded; the full catalog fingerprint correctly detected
+the mismatch. No production migration or fingerprint assertion was weakened.
+
+The test-only correction appends the transaction-wrapped checkpoint migration
+to replay, and temporarily unwinds/restores it around historical suite setup
+and cleanup. The wiring census now requires all 28 migrations. The checkpoint
+acceptance driver runs the actual replay verifier and both historical suites
+before its own protocol assertions.
+
+Local restored verification: replay 28 migrations / 931 catalog objects with
+identical fingerprint; section causality 40/40; claim anchor 19/19; checkpoint
+acceptance passed; wiring contract 36/36; acceptance TypeScript passed.
+Removing the new replay entry reproduced `catalog_changed count=12`; restoring
+it returned the full driver to green. The wiring contract independently rejects
+the same removal. Luna's narrow static review found no concrete P1/P2; it ran
+no tests and is not a whole-product verdict. Remote CI on the follow-up commit
+must be checked separately; local success does not supersede the failed 20c run.
+
 No automatic scheduling, retention policy, cleanup, customer storage, flags,
 dispatch, staging, deployment, production, or hard-deleted-table resurrection.
