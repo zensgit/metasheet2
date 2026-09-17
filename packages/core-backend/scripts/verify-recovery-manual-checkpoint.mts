@@ -108,7 +108,8 @@ try {
   `)
 
   type Plan = RecoveryArchiveSnapshotReservationPlan
-  async function claim(kind: 'section_bootstrap' | 'section_checkpoint', sheetId = 's', useHelper = false): Promise<Plan> {
+  async function claim(kind: 'section_bootstrap' | 'section_checkpoint', sheetId = 's', useHelper = false,
+    shortLifetime?: 'lease' | 'expiry'): Promise<Plan> {
     const allocated = useHelper
       ? await checkpoints.allocateRecoveryArchiveCheckpointIdentities(query)
       : await bootstrap.allocateRecoveryArchiveSnapshotIdentities(query)
@@ -128,9 +129,10 @@ try {
       checkpoint_id,source_vector_hash,key_id,owner_kind,owner_id,owner_fence,
       lease_expires_at,expires_at
     ) VALUES ($1::uuid,'w','b',$2,$3::uuid,$4::bigint,$5,$6,'synthetic-key',
-      $7,$8,1,clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours')`,
+      $7,$8,1,clock_timestamp()+CASE WHEN $9::text='lease' THEN interval '1 second' ELSE interval '1 hour' END,
+      clock_timestamp()+CASE WHEN $9::text='expiry' THEN interval '1 second' ELSE interval '2 hours' END)`,
     [plan.generationId,sheetId,plan.snapshotOperationId,plan.snapshotSeq,
-      sheetId === 's' ? 'trust' : 'no-genesis-trust',sourceVectorHash,plan.ownerKind,plan.ownerId])
+      sheetId === 's' ? 'trust' : 'no-genesis-trust',sourceVectorHash,plan.ownerKind,plan.ownerId,shortLifetime ?? null])
     if (kind === 'section_bootstrap') {
       return bootstrap.persistRecoveryArchiveSnapshotReservations(query, plan, allocated)
     }
@@ -211,6 +213,66 @@ try {
       }), { code: 'RECOVERY_ARCHIVE_CHECKPOINT_PARTIAL_FINALIZE' })
     })
   }
+  const concurrentPlan = await transaction(() => claim('section_checkpoint', 's', true))
+  const concurrentInput = { ...concurrentPlan, sections: concurrentPlan.sections.map((section) => ({
+    sectionKind: section.sectionKind, rowCount: '1', sourceHash: 'b'.repeat(64),
+  })) }
+  const retryClient = new Client({ ...connection, database })
+  await retryClient.connect()
+  let retry: Promise<unknown> | undefined
+  try {
+    const firstPid = (await query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const secondPid = (await retryClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    await query('BEGIN')
+    await checkpoints.consumeRecoveryArchiveCheckpointReservations(query, concurrentInput)
+    await retryClient.query('BEGIN')
+    await retryClient.query("SET LOCAL statement_timeout='5s'")
+    // Capture rejection immediately; no unhandled rejection if the barrier fails.
+    retry = checkpoints.consumeRecoveryArchiveCheckpointReservations(
+      (text, params) => retryClient.query(text, params), concurrentInput,
+    ).then((result) => ({ result }), (error: unknown) => ({ error }))
+    let waitingAtGeneration = false
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const activity = (await admin.query(`SELECT query, pg_blocking_pids(pid) AS blockers
+        FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'`, [secondPid])).rows[0]
+      if (activity?.blockers.includes(firstPid)) {
+        assert.match(activity.query, /FROM meta_recovery_archives[\s\S]*FOR UPDATE/)
+        waitingAtGeneration = true
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(waitingAtGeneration, true, 'CHECKPOINT_RETRY_MUST_WAIT_AT_GENERATION')
+    await query('COMMIT')
+    assert.deepEqual(await retry, { result: concurrentPlan })
+    await retryClient.query('COMMIT')
+    assert.equal((await query(`SELECT count(*)::int AS n FROM meta_sheet_section_revisions
+      WHERE operation_id=ANY($1::uuid[])`, [concurrentPlan.sections.map((section) => section.operationId)])).rows[0].n, 9)
+  } finally {
+    await query('ROLLBACK')
+    await retry
+    await retryClient.query('ROLLBACK')
+    await retryClient.end()
+  }
+  for (const invalidation of ['lease', 'expiry', 'fence'] as const) {
+    await query('BEGIN')
+    try {
+      const plan = await claim('section_checkpoint', 's', true,
+        invalidation === 'fence' ? undefined : invalidation)
+      // Let the short synthetic lifetime elapse; never bypass catalog ownership guards.
+      if (invalidation !== 'fence') await query('SELECT pg_sleep(1.1)')
+      await assert.rejects(checkpoints.consumeRecoveryArchiveCheckpointReservations(query, {
+        ...plan, ownerFence: invalidation === 'fence' ? '2' : plan.ownerFence,
+        sections: plan.sections.map((section) => ({
+          sectionKind: section.sectionKind, rowCount: '1', sourceHash: 'b'.repeat(64),
+        })),
+      }), { code: 'RECOVERY_ARCHIVE_CHECKPOINT_GENERATION_UNAVAILABLE' })
+      assert.equal((await query(`SELECT count(*)::int AS n FROM meta_sheet_section_revisions
+        WHERE operation_id=ANY($1::uuid[])`, [plan.sections.map((section) => section.operationId)])).rows[0].n, 0)
+    } finally {
+      await query('ROLLBACK')
+    }
+  }
   await assert.rejects(transaction(async () => { await claim('section_checkpoint', 'no-genesis') }),
     { code: '23514', message: 'recovery_archive_checkpoint_genesis_required' })
   await assert.rejects(transaction(async () => { await checkpoint(await claim('section_checkpoint'), 'ordinary') }),
@@ -254,11 +316,12 @@ try {
   }
   assert.equal((await query("SELECT pg_get_functiondef('public.meta_record_history_operations_validate_endpoint()'::regprocedure) AS definition")).rows[0].definition, functionSql)
   assert.deepEqual((await query('SELECT * FROM meta_recovery_archive_section_bootstrap_markers')).rows, markerBefore)
-  assert.equal((await query("SELECT count(*)::int AS n FROM meta_record_history_operations WHERE operation_kind='section_checkpoint'")).rows[0].n, 18)
+  assert.equal((await query("SELECT count(*)::int AS n FROM meta_record_history_operations WHERE operation_kind='section_checkpoint'")).rows[0].n, 27)
   await assert.rejects(db.transaction().execute(migration.down), { message: 'RECOVERY_ARCHIVE_CHECKPOINT_DOWN_IN_USE' })
   await db.transaction().execute(migration.up)
   console.log('PASS: fresh/replay; direct up/down/down/up/up; CHECK/function/trigger drift refused; populated down refused')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
+  console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')
 } finally {
   await db?.destroy()

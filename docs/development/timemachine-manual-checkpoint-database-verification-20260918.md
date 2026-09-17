@@ -95,7 +95,7 @@ new P1/P2. All reviewer sessions are closed. This is not a whole-product final
 review or remote CI result.
 
 Remaining: required-CI wiring/remote proof
-for this new acceptance driver; concurrent checkpoint/lease takeover tests;
+for this new acceptance driver; lease takeover and permission-revocation tests;
 bounded canonical capture coordinator; permission/provider revalidation;
 authenticated object receipts; publication and restore-loop acceptance; UI.
 Identity and DB sealing alone do not prove captured bytes correspond to the
@@ -124,6 +124,31 @@ it returned the full driver to green. The wiring contract independently rejects
 the same removal. Luna's narrow static review found no concrete P1/P2; it ran
 no tests and is not a whole-product verdict. Remote CI on the follow-up commit
 must be checked separately; local success does not supersede the failed 20c run.
+
+## Concurrent Retry And Expiry Follow-Up
+
+The acceptance driver now uses two real PostgreSQL clients for the same
+persisted checkpoint plan. The first consumes all nine members inside an open
+transaction. The second is observed through `pg_stat_activity` and
+`pg_blocking_pids`: it must wait on the generation `SELECT ... FOR UPDATE`,
+not merely block later on a duplicate INSERT. After the first commits, the
+second returns the exact same plan; exactly nine revision rows exist.
+
+Mutation: remove `FOR UPDATE` only from the second client's generation query.
+The new barrier fails because the observed blocking query is an INSERT into
+section revisions. Restore the query and the complete driver passes again.
+Production helper and migration bytes are unchanged by this test-only slice.
+
+Three further negatives prove lease expiration, archive expiration, and a
+mismatched owner fence return `RECOVERY_ARCHIVE_CHECKPOINT_GENERATION_UNAVAILABLE`
+with zero checkpoint revisions. Short synthetic lifetimes are assigned at
+INSERT and allowed to elapse; no ownership trigger is disabled. An initial
+attempt to shorten an existing active lease was rejected by the existing
+catalog guard and was replaced with this legitimate expiry fixture.
+
+These tests do not prove actual owner takeover, user permission revocation,
+source coherence under concurrent edits, process restart, or runtime capture.
+The driver remains local-only until explicit required-CI wiring is completed.
 
 No automatic scheduling, retention policy, cleanup, customer storage, flags,
 dispatch, staging, deployment, production, or hard-deleted-table resurrection.
