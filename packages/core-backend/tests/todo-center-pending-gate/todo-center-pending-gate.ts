@@ -74,8 +74,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S8 for classes ①②③③′④⑤⑥ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
-// these classes and is deferred to a later step, along with classes ⑦⑧⑨⑩⑪⑫⑬).
+// through S1–S8 for classes ①②③③′④⑤⑥⑦ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
+// these classes and is deferred to a later step, along with classes ⑧⑨⑩⑪⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -410,6 +410,17 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // documents (list-side `actionable=false` is judging criterion C′, not A0; A0 only counts) (§5 A0
   // ⑥).
   const v6 = viewer('c6-source-queue-seat', 'employee')
+  // Class ⑦ — same viewer/seat shape as ①, but its instance's `published_definition_id` is
+  // literally NULL (never filled via `seedNonHandlerPublishedDefinition`, unlike every other class
+  // here) ⇒ count 1: the handler-node exclusion is `NOT EXISTS (SELECT 1 FROM
+  // approval_published_definitions pd WHERE pd.id = i.published_definition_id AND ...)`, and `pd.id
+  // = NULL` never matches any row, so `NOT EXISTS` is TRUE — a NULL/dangling definition is INCLUDED,
+  // not excluded (design-lock §5 A0 ⑦; mutation "EXISTS 已发布定义" would flip this to 0, red).
+  // Shares `SHARED_SEAT_NODE_KEY` with ①②⑥ — this is deliberate (§5 A0 "跨类 node_key 关系写死"): a
+  // later step's class ⑧ handler-classified definition targets that SAME node key, so the
+  // `pd.id = i.published_definition_id` join-key mutation has ①②⑥⑦ to wrongly exclude, not just ⑧
+  // itself.
+  const v7 = viewer('c7-null-published-definition', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -450,14 +461,25 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null, // filled in beforeAll
     currentNodeKey: SHARED_SEAT_NODE_KEY,
   }
+  // Class ⑦'s own instance — `publishedDefinitionId` is left `null` HERE, on purpose, and is never
+  // assigned in `beforeAll` (unlike instance1/2/3b/5/6 above, whose `null` is only a placeholder
+  // overwritten by `seedNonHandlerPublishedDefinition`). Shared node key with ①②⑥ (see `v7`'s
+  // docblock).
+  const instance7: InstanceFixture = {
+    id: `todo-center-pending-gate-i7-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null,
+    currentNodeKey: SHARED_SEAT_NODE_KEY,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5, v6]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -492,6 +514,9 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     await seedInstance(instance3b)
     await seedInstance(instance5)
     await seedInstance(instance6)
+    // instance7's `published_definition_id` is left NULL — no `seedNonHandlerPublishedDefinition`
+    // call for it, on purpose (class ⑦'s whole point, see its docblock above).
+    await seedInstance(instance7)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -521,6 +546,12 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       instanceId: instance6.id,
       assignmentType: 'source_queue',
       assigneeId: SOURCE_QUEUE_PERMISSION_CODE_CLASS_6,
+      nodeKey: SHARED_SEAT_NODE_KEY,
+    })
+    await seedAssignment({
+      instanceId: instance7.id,
+      assignmentType: 'user',
+      assigneeId: v7.id,
       nodeKey: SHARED_SEAT_NODE_KEY,
     })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
@@ -706,6 +737,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       // The `attendance_approver` user_roles row is non-admin, so — same discriminator as ⑤ — no
       // upgrade fires and `/me` reads back the seeded 'employee', proving this class's count (below)
       // is NOT coming from an accidental admin fast-path.
+      expect(me.role).toBe('employee')
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(1)
+    })
+
+    it('class ⑦ — user seat, pending, NULL published_definition_id (handler exclusion NOT EXISTS is inclusive) ⇒ count 1', async () => {
+      const token = await devToken(baseUrl, v7.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v7.email)
+      expect(me.username).toBe(v7.username)
+      expect(me.name).toBe(v7.name)
       expect(me.role).toBe('employee')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
