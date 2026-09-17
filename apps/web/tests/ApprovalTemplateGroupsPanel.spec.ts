@@ -130,4 +130,46 @@ describe('ApprovalTemplateGroupsPanel — acceptance J (design lock v2.13 §4)',
     expect(el.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
     expect(el.textContent).toContain('Ops')
   })
+
+  it('a 403 SESSION_ORG_REQUIRED on the initial mount-time list load shows the switcher; selecting an org retries the SAME list load', async () => {
+    // Distinct from the create-flow case above: this drives the `loadGroups()` catch branch
+    // specifically (mount-time GET), which that test's mock never 403s on (its GET always
+    // resolves 200 with an empty list) — so a mutation only on `loadGroups`'s branch would pass
+    // every other case in this file untouched. This case is what gives that branch discriminating
+    // power.
+    useAuth().setToken(jwt('org-a'))
+    let listAttempts = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        listAttempts += 1
+        if (listAttempts === 1) {
+          return jsonResponse(403, { error: { code: 'SESSION_ORG_REQUIRED', message: 'An authenticated session organization is required' } })
+        }
+        return jsonResponse(200, { groups: [group('atg_3', 'org-b', 'Legal')] })
+      }
+      if (path === '/api/auth/session-orgs') {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      if (path === '/api/auth/session-org' && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    expect(listAttempts).toBe(1)
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).not.toBeNull()
+    expect(el.textContent).not.toContain('Legal')
+
+    const select = el.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle(6)
+
+    expect(listAttempts).toBe(2)
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(el.textContent).toContain('Legal')
+  })
 })

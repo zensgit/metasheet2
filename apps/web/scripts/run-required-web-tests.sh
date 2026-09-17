@@ -1695,3 +1695,11 @@ exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spe
 # substring of it, it is a substring of none (`python3` bidirectional scan, 395 tokens, zero
 # collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it
 # resolves to exactly this one spec file (2/2 tests).
+# restored via `cp` backup/diff/cmp) — that was the LIST endpoint's own SESSION_ORG_REQUIRED
+# branch (`loadGroups`); a separate probe on the CREATE endpoint's branch (`onCreate`) isolates to
+# only the create-flow test, and each restore verified byte-identical via `cmp`, so both of the
+# panel's two catch sites are independently mutation-covered by a dedicated test (list-load
+# 403-then-retry vs. create 403-then-retry — 3 cases total). Verified against every existing token
+# above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 395
+# tokens, zero collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally
+# confirms it resolves to exactly this one spec file (3/3 tests).
