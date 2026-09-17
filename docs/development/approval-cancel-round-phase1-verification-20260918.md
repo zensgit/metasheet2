@@ -33,6 +33,13 @@ This document is finalized in three layers, kept separate rather than merged int
   edited in place — read together with the supersession notes this pass adds at each affected
   spot (BLUF above, §A4, the FE-sync-pin row in §A6, item 15 in §A8, and the BLOCKING bullet in
   §A9) rather than treating the original prose as current.
+- **Part D (round 5)**: closes the gate review's P1-B (four missing acceptance rows). **Part E
+  (round 6)**: closes P3-C (two unrun mutations) and P3-D (`policy_snapshot_at_create.definitionPolicy`
+  had zero assertion). **Part F (round 7)**: docs-only — fixes the P3-A wording gap and discloses
+  P2-B into the design MD (both left OPEN, owner-gated), and adds **§F3**, the single authoritative
+  per-finding disposition table for all nine gate findings. **If you want "is finding X closed right
+  now," read §F3, not the closing paragraph of whichever Part you happen to be in** — those paragraphs
+  are each correct only for their own pass.
 
 HEAD at the time of Part A: `b2f2d3ac3` (after this same commit's design-MD sibling; no code
 changes are part of this commit — see §A3's mutation ledger for the two temporary, fully-restored
@@ -1457,3 +1464,139 @@ class of self-correction Part D's D2 recorded, now repeated once more in this la
 owner-gated per the review's own framing), P3-A (挂点位置措辞 correction + owner备案), P3-B (two `wip`
 commits; legal closure form is a PR-body note, deferred to the PR-open step), P3-E (the review itself
 registers this as not-a-deduction — no action item exists to close).
+
+---
+
+# Part F — round 7 fix (2026-09-18, this pass)
+
+**Scope of this pass**: docs-only. Closes the wording half of the gate review's **P3-A** finding
+(`impl-gate-C-slice1-round1-20260918.md`, dated 2026-09-18) and writes the disclosure half of its
+**P2-B** finding into the design MD as the deployment note a future PR body must carry. HEAD before
+this pass's commit: `8b8aa8a5e` (the head left by Part E's P3-D fix). Neither finding's *code* half
+is touched here — P3-A's literal deviation from lock:344 is disclosed, not accepted or reordered
+(the owner's interpretation call, not this document's); P2-B's `visibility_scope` narrowing is a
+scope addition beyond lock §14.1 and stays owner-gated. This pass changes **only**
+`approval-cancel-round-phase1-design-20260918.md`; no test file, no migration, no lock file, no
+`plugin-tests.yml`, no `origin/main` state was touched, so there is nothing to add to the two-point
+wiring, the s6a pin, or the sentinel census, and no new mutation to run — the design MD's own §5
+already cites gate report mutation M2 for load-bearing evidence rather than re-deriving it.
+
+## F1. Why this pass re-derived every line number instead of copying the gate report's
+
+The gate report's P3-A/P2-B evidence is pinned to HEAD `95eccb89b`; six commits landed since
+(`ee5905796` … `8b8aa8a5e`), all touching `ApprovalProductService.ts`. Per this design MD's own §0
+provenance rule ("every citation here was re-read against the copy on disk at the time of writing"),
+every line number this pass adds was re-read fresh against `8b8aa8a5e`, not carried over:
+
+```
+$ git rev-parse HEAD
+8b8aa8a5ee9563a5344cd6b77bfebeaa78ece0ac
+```
+
+**判据 III sequence (P3-A), each boundary read individually, this pass:**
+```
+$ sed -n '10592p;10602p' .../ApprovalProductService.ts   # A4 status write bounds
+$ sed -n '10603p;10613p' ...                              # A4 audit-row bounds
+$ sed -n '10614p;10625p' ...                              # A4 completion-event build bounds
+$ sed -n '10627p' ...                                     # A4 enqueue line
+$ sed -n '10641p;10654p' ...                               # A4 round-write bounds
+$ sed -n '10655p' ...                                      # A4 COMMIT line
+$ sed -n '11079p;11088p;11090p;11104p;11105p;11116p;11118p;11128p;11141p;11142p' ...  # A7, same six checkpoints
+```
+Every line printed matched the design MD's new §5 table exactly (the opening/closing statement of
+each of the six steps, both branches) — see the six-step table itself for the values, not repeated
+here to avoid a second place they can drift out of sync.
+
+**P2-B facts, re-verified against `8b8aa8a5e`, not assumed unchanged:**
+```
+$ git diff 95eccb89bc1ef37ce0a8eaee5a8d7e046e4da33d HEAD --stat -- \
+    '*approval-cancel-round-published-definition*' \
+    'packages/core-backend/src/db/migrations/'
+(empty output)
+```
+Empty diff over both the specific seed-migration glob and the whole migrations directory between the
+gate review's HEAD and this pass's own HEAD — the seed migration's column list and the unrelated
+visibility-scope-default migration are byte-identical to what the gate review read. This pass cites
+the gate review's psql evidence by provenance (`impl-gate-C-slice1-round1-20260918.md` §P2-B, HEAD
+`95eccb89b`) rather than re-running `createdb`/`migrate` a third time for an unchanged fact, and
+separately re-read the two source line citations that changed nothing (`applyTemplateVisibilityFilter`
+and `listTemplates`'s own line spans are unchanged — same `grep -n` output as the gate report),
+**catching and fixing one mis-citation of its own in the process**: the design MD's first draft of
+this paragraph cited the `COALESCE(visibility_scope->>'type', 'all') = 'all'` unconditional-pass
+condition at `:4483`; a fresh `sed -n '4469,4500p'` read shows `:4483` is a blank line and the
+condition itself is at `:4485` (`conditions.push(` opens at `:4484`). Fixed before this pass's commit
+— not left for a future round to catch, per this lane's own repeated self-correction discipline
+(Parts C/D/E each record one of these).
+
+## F2. Fresh full-suite rerun and typecheck, this pass (docs-only change, verified anyway)
+
+No production or test file changed in this pass, so no regression was possible in principle — rerun
+anyway, since "no code changed" is a claim this document makes about itself and the discipline this
+lane has followed throughout is to verify claims, not assert them:
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,attendance-fk-migration,outlet-guards,node-timeout-effect}.db.test.ts --reporter=dot
+ Test Files  7 passed (7)
+      Tests  47 passed (47)
+```
+(47/47 — identical to Part E's own post-fix count; this pass added no new test case.)
+```
+$ cd packages/core-backend && npx tsc --noEmit -p .
+(no output, exit 0)
+```
+`git status --porcelain` before this pass's edits: empty (matching HEAD `8b8aa8a5e`'s clean state,
+per the harness's own pre-flight `git log`/`git status`). After this pass's edits and before commit,
+the only path shown is `docs/development/approval-cancel-round-phase1-design-20260918.md` plus this
+verification document itself — no `ApprovalProductService.ts`, no migration, no test file, no lock
+file, no `plugin-tests.yml`. Zero `git checkout --`, zero `git reset --hard`, zero stash anywhere in
+this pass (nothing was mutated that needed restoring — see F1's read-only `sed`/`grep` commands).
+
+## F3. Authoritative per-finding disposition (all nine gate findings, one table, self-consistent)
+
+Five earlier passes (Part C/D/E) each state their own scope-limited disposition correctly for the
+pass they describe; none of those sentences is being rewritten or voided here (per
+`feedback_supersession_marker_must_evaluate_not_void` — a scope marker retires a claim's *currency*,
+not the sentence itself). This table is the single place that answers "what is true about finding
+X **as of this document's own HEAD**, right now" — reading it should never require reconciling five
+different "remains open" lists (§A9, and Parts C/D/E's own closing paragraphs) by hand.
+
+| Finding | One-line description | Disposition (as of this pass) | Evidence |
+|---|---|---|---|
+| P1-A | FE sync-pin spec red, in a `main` required check, lane mis-recorded | **CLOSED** — regex fixed, dedicated assertion added, lane correction recorded | Part C, §C1/C3/C4/C6 |
+| P2-A | Stale `api.ts` comment pre-justifying the P1-A red as "expected" | **CLOSED** — comment corrected | Part C, §C2/C6 |
+| P1-B | Four lock-named acceptance rows absent (正控 2, `REJECT_COMMENT_REQUIRED`, 判据 I reverse, index-itself negative control) | **CLOSED** — all four added, fixtures reused | Part D, §D1-D4/D8 |
+| P2-B | Seed leaves `visibility_scope` at its table default ⇒ template-center-visible, launchable "撤销审批" once applied | **DISCLOSED, OPEN, owner-gated** — deployment note now in design MD §9; `visibility_scope` narrowing is a scope addition beyond lock §14.1, decision left to owner; DDL is Draft-only, not applied anywhere today | This pass (§F1), design MD §9; original finding `impl-gate-C-slice1-round1-20260918.md` §P2-B |
+| P3-A | Round-row write's actual hook point is after the status write, not before it, per lock:344's literal text | **Wording FIXED / deviation DISCLOSED, OPEN, owner 备案** — design MD §5 now states the true six-step sequence with current line numbers and names the literal deviation explicitly; no code reordered, no behavioral difference constructed by the gate reviewer or by this pass; whether to accept the deviation or reorder the write is an owner interpretation of lock:344 | This pass (§F1), design MD §5; original finding `impl-gate-C-slice1-round1-20260918.md` §P3-A |
+| P3-B | Two `wip` commits still in branch history | **OPEN, blocked by this task's own hard rules** — dropping them from an already-pushed branch needs an interactive rebase + force-push; this lane's hard rules forbid force pushes; the only rule-compliant closure form is a PR-body merge-method note, which requires a PR to exist | Part E, §E5 (repeats Part D's D8 framing); not touched by this pass |
+| P3-C | Two lock-named mutations (seed `allowRevoke=false`; 负控 I′ workflow-key rewrite) never run | **CLOSED** — both run and documented, one incidental ordering finding recorded | Part E, §E1/E2/E5 |
+| P3-D | `policy_snapshot_at_create.definitionPolicy` had zero assertion | **CLOSED** — deep-equal assertion added, confirmed load-bearing by two mutations (first draft caught as confounded and fixed before the pass returned) | Part E, §E3/E5 |
+| P3-E | This lane's own CI-wiring guard is a closed world over its own 7-file array | **Registered, no action item** — the gate review itself frames this as "not a deduction" (repo-wide convention shared by 45 sibling guards; cross-lane fix, not this slice's scope) | Gate report §3, P3-E; not touched by any pass |
+
+**Net after this pass, 5+2+1+1 = 9 (grep the table above for the row count if this drifts)**: 5 of 9
+findings CLOSED (P1-A, P2-A, P1-B, P3-C, P3-D), 2 disclosed-and-owner-gated with no code change made
+(P2-B, P3-A), 1 blocked by this task's own hard rules (P3-B), 1 registered with no action item
+(P3-E).
+
+## F4. Relationship to §A9 and Parts C/D/E's own "remains open" paragraphs
+
+§A9 (Part A, this document's earliest section) and the closing paragraphs of Parts C, D, and E each
+say something true about "what remains open" **as of the pass they describe** — none of those five
+statements is rewritten here. What changes is only which findings F3's own table now marks non-open:
+§A9 predates the gate review entirely (it lists this lane's *own* pre-gate open items, a different
+and non-overlapping set from the gate's nine findings) and needs no correction. Parts C/D/E's closing
+paragraphs are each correct for their own pass and remain so; a reader who wants the **current**
+status of any of the gate review's nine findings should read F3, not reconstruct it by walking
+Parts C through F in order and mentally diffing five "remains open, unchanged by this pass" sentences
+against each other.
+
+## F5. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree; no `git checkout --`, `git reset --hard`, or stash
+  discard was used or needed (this pass is a pure-addition/pure-edit docs change, verified by F2's
+  `git status --porcelain` reads, not by omission).
+- No lock file (`approval-change-request-design-lock-draft-20260915.md`) was opened for editing.
+- No PR was opened, no branch was merged or undrafted, no migration was applied to any database other
+  than the pass's own read-only real-DB rerun against the already-migrated private `metasheet2_lock_c`
+  (F2) — no `migrate.ts` invocation happened in this pass at all, since no new migration exists to run.
+- This pass's own commit message and push follow the same conventions as Parts C/D/E.
