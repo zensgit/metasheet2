@@ -881,7 +881,7 @@ OK
 
 ## 22. 修复轮 5(2026-09-18)—— gate `impl-gate-A-slice1-round2-20260918.md`(第 2 轮门审)P2-1 / P3-2 收口
 
-被审 head:`5b3d6310c`(修复轮 4 之后;第 2 轮门审的被审 head 与此相同)。**提交内容是纯文档改动**——最终 `git diff` 只有本文档(`docs/development/approval-template-groups-phase1-verification-20260918.md`)一个文件,改的是 §12/§14/§17/§18.1/§18.2/§19.1 的行号与计数引用,**零 `.ts` 改动、零 DDL、零 `plugin-tests.yml`/`vitest.config.ts` 改动落地**。P2-1/P3-2 两条本身是台账/行号勘误,不需要 mutation 探针(探针证明的是代码断言的判别力,这两条没有改动任何断言或代码),回归确认走的是「套件仍然全绿 + typecheck 仍然 exit 0」,同 §19.1 对纯注释改动的处理方式;但本轮**顺带核实了 NIT**(门审留白的一条行为差异事实),核实过程对 `routes/approvals.ts` 与测试文件各做了一次 mutation 式探针(`cp` 备份 → 改 → 跑 → 还原 → `cmp`),过程见 §22.5,收尾两个文件均字节级复原,不计入本轮的净代码改动。
+被审 head:`5b3d6310c`(修复轮 4 之后;第 2 轮门审的被审 head 与此相同)。**提交内容是纯文档改动**——最终 `git diff` 只有本文档(`docs/development/approval-template-groups-phase1-verification-20260918.md`)一个文件,改的是 §12/§14/§17/§18.1/§18.2/§19.1 的行号与计数引用,§15 开头的行号作用域说明(新增一句为 §18.1/§18.2/§19.1 定性),以及新增的 §22.5(NIT 现场实测)——**零 `.ts` 改动、零 DDL、零 `plugin-tests.yml`/`vitest.config.ts` 改动落地**。P2-1/P3-2 两条本身是台账/行号勘误,不需要 mutation 探针(探针证明的是代码断言的判别力,这两条没有改动任何断言或代码),回归确认走的是「套件仍然全绿 + typecheck 仍然 exit 0」,同 §19.1 对纯注释改动的处理方式;但本轮**顺带核实了 NIT**(门审留白的一条行为差异事实),核实过程对 `routes/approvals.ts` 与测试文件各做了一次 mutation 式探针(`cp` 备份 → 改 → 跑 → 还原 → `cmp`),过程见 §22.5,收尾两个文件均字节级复原,不计入本轮的净代码改动。
 
 ### 22.1 P2-1 —— §14 补充清单 #4 的机械计数在修复轮 4 之后为假,现场重算
 
@@ -1003,7 +1003,7 @@ docs/development/approval-template-groups-phase1-verification-20260918.md
 
 ### 22.4 本轮未处理 —— 第 2 轮门审报告剩余条目的处置说明(P3-3/P3-4 待下一轮修复;P3-5/P3-6/NIT 为记录性重确认)
 
-- **P3-3**(serialization 头部 mutation 配方点名一个全仓不存在的函数 `takeOrgLock`,且同一注释块 mutation (3) 的机制记录与 §17 #7 的「本次未编辑该注释」自相矛盾):**未处理,留给下一修复轮**——这是测试文件内的注释改动(不是本文档),按本步「选一到两条」的范围,本轮选择了 P2-1/P3-2 这两条纯文档计数/行号修复,未把 P3-3 一并纳入,不是遗漏,是范围控制。
+- **P3-3**(serialization 头部 mutation 配方点名一个全仓不存在的函数 `takeOrgLock`,且同一注释块 mutation (3) 的机制记录与 §17 #7 的「本次未编辑该注释」自相矛盾):**未处理,留给下一修复轮**——这是测试文件内的注释改动(不是本文档),按本步「选一到两条」的范围,本轮选择了 P2-1/P3-2 这两条纯文档计数/行号修复,未把 P3-3 一并纳入,不是遗漏,是范围控制。下一轮的修法**不需要新造措辞**:同一注释块里 mutation (2) 已经写对了(「delete the `pg_advisory_xact_lock` line」),mutation (4) 只需照抄 (2) 的措辞、把函数名从 `takeOrgLock` 换成 `pg_advisory_xact_lock` 那一行即可,不必发明新的描述方式。
 - **P3-4**(「guard 人口 ⊆ manager」是零 grep 计数的全称断言,承重两件事,今日成立但断言形式不成立):**未处理,留给下一修复轮**——同上,理由同 P3-3,且第 2 轮门审自己已经把这条的反例证伪过程、差集与计数(`approval-templates:*` 全仓授予 0 处)写全了,下一轮的工作是把这些证据抄写进 `routes/approvals.ts:396-399` 的代码注释、设计 MD §3.5、本文档 §18.1,不需要重新调查。
 - **P3-5**(结转;`wip` 提交 `f6e8ea2d8`/`93e57198e`/`0d2ed3389` 仍在历史里;squash 需 force-push,超出本轮授权的措辞应改为「本 lane 选择不 force-push」):第 2 轮门审对第 1 轮 §21.3 的 disposition 重新核实后仍判「结转,不代 owner 裁」,并额外指出 PR body 措辞需要改正(不是「因授权限制无法 squash」,而是「本 lane 选择不 force-push」)。**disposition 不变**:本轮 `git log --oneline origin/main..HEAD` 重新确认三个 wip 提交仍在、仍已 push(见下方核对),不 squash、不 force-push;PR body 措辞的改正留到开 Draft PR 时一并处理(本切片当前无 PR 可改)。
 - **P3-6**(结转;两个新真库套件仍无 `*-ci-wiring` 守卫):第 2 轮门审重新做了 census(`grep -rl "approval-template-groups" scripts/` 零命中 + 5 个同 step id 守卫 `node --test` 16/16 绿)并维持第 1 轮判定「已披露残留,非阻塞」。**disposition 不变**:本轮不新建守卫,留给需要新建时的独立切片,开 PR 时 body 需点名。
@@ -1035,7 +1035,14 @@ P3-5 的三个提交现场核对仍在分支历史中,均已 push(`git rev-parse
 ZZGATE-R5-NIT-PROBE result: 500 {"ok":false,"error":{"code":"APPROVAL_TEMPLATE_GROUP_LINK_FAILED","message":"Failed to link approval template to group"}}
 ```
 
-日志确认根因是新代码本身(`isApprovalTemplateVisibleForGroupLink` 的 `SELECT ... WHERE id = $1`,`templateId` 直接吃 `req.params.id`):`error":"invalid input syntax for type uuid: \"not-a-uuid\""`,`at isApprovalTemplateVisibleForGroupLink (…/routes/approvals.ts:413:18)`。但这一格**不足以证明是本轮引入的变化**——组存在时,修复前的旧路径(`linkApprovalTemplateToGroup` 的 `INSERT ... VALUES ($1, $2, …)`,`$2` 是同一个非法 `templateId`,该列同样是 `uuid` 类型)同样会在 INSERT 上抛同一个 22P02,`mapGroupConstraintError` 不认这个错误码,一样兜底 500——**场景 (1) 修复前后都是 500,零变化**,只是错误发生的语句不同。
+日志确认根因是新代码本身(`isApprovalTemplateVisibleForGroupLink` 的 `SELECT ... WHERE id = $1`,`templateId` 直接吃 `req.params.id`):`error":"invalid input syntax for type uuid: \"not-a-uuid\""`,`at isApprovalTemplateVisibleForGroupLink (…/routes/approvals.ts:413:18)`。但这一格**不足以证明是本轮引入的变化**——组存在时,修复前的旧路径(`linkApprovalTemplateToGroup` 的 `INSERT ... VALUES ($1, $2, …)`,`$2` 是同一个非法 `templateId`,该列同样是 `uuid` 类型)同样会在 INSERT 上抛同一个 22P02。`mapGroupConstraintError`(`ApprovalTemplateGroupService.ts:133-145`)不认这个错误码——机械核对,不是目测:
+
+```
+$ grep -c "'22P02'\|\"22P02\"" packages/core-backend/src/services/ApprovalTemplateGroupService.ts
+0
+```
+
+该函数只处理 `error instanceof ServiceError`(原样返回)与 `pgErr.code === '23505'` 的两个具名约束分支,零处理 22P02,原样 `return error` 交给路由层 `catch` 的通用 500 兜底——所以场景 (1) 组存在时,修复前后都会走到未被映射的 22P02,**都是 500,零变化**,只是错误发生的语句不同(修复前是 INSERT,修复后是新增的 SELECT)。
 
 **场景 (2)** 才是判别点:用一个**语法合法但未落库**的组 id(`randomUUID()`)。
 
@@ -1043,7 +1050,7 @@ ZZGATE-R5-NIT-PROBE result: 500 {"ok":false,"error":{"code":"APPROVAL_TEMPLATE_G
   ```
   ZZGATE-R5-NIT-PROBE-2 result: 500 {"ok":false,"error":{"code":"APPROVAL_TEMPLATE_GROUP_LINK_FAILED","message":"Failed to link approval template to group"}}
   ```
-- **修复前(mutation:注释掉 `routes/approvals.ts:1191-1194` 的 §2 可见性校验块,还原到本轮 P2-1 之前的调用路径,`cp` 备份 → 改 → 跑 → 还原 → `cmp OK`)**:
+- **修复前(mutation 模拟,不是真的切到 `252d01865` 那次提交)**:注释掉 `routes/approvals.ts:1191-1194` 的 §2 可见性校验块,还原到本轮 P2-1 之前的调用路径,`cp` 备份 → 改 → 跑 → 还原 → `cmp OK`。没有直接 checkout 旧提交的原因:测试文件顶部按名导入 `isApprovalTemplateVisibleForGroupLink`(本轮才新增的导出),整体换成旧版 `approvals.ts` 会让这个导入在运行时找不到该导出、连测试文件本身都跑不起来——mutation 式禁用是能在**同一个测试文件**下精确还原「调用路径回到 P2-1 之前」这件事的唯一办法,不是图省事的替代:
   ```
   ZZGATE-R5-NIT-PROBE-2 result: 404 {"error":{"code":"GROUP_NOT_FOUND","message":"Group not found"}}
   ```
