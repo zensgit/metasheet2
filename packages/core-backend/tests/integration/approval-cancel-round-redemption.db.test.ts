@@ -258,6 +258,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     approverId: string
     approverToken: string
     roundInstanceId: string
+    templateId: string
   }> {
     const requesterId = `wi13-req-${suffix}`
     const approverId = `wi13-apr-${suffix}`
@@ -281,7 +282,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     expect(roundRow.rows.length).toBe(1)
     createdRoundIds.add(roundRow.rows[0].id)
 
-    return { documentId, requesterId, requesterToken, approverId, approverToken, roundInstanceId: dto.id }
+    return { documentId, requesterId, requesterToken, approverId, approverToken, roundInstanceId: dto.id, templateId }
   }
 
   async function roundOutcome(engineInstanceId: string): Promise<{ outcome: string; ended_at: Date | null }> {
@@ -1519,6 +1520,305 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       )
       expect(roundRecords.rows[0].approve_rows).toBe('0')
       expect(roundRecords.rows[0].approved_rows).toBe('0')
+    },
+  )
+
+  /**
+   * ── 账侧验收 (lock §8 期 1 的第二条验收线) ───────────────────────────────────────────────────
+   *
+   * 「账侧(完整取消结果**逐字节等价于现有 W4 路径** + `unrecoverableExpired` 呈现)」(lock:169),
+   * and lock §3 C-1 的执行内容 = 「**现有 `requestCancelAdapter.execute` 的全部步骤**(§10-⑦),
+   * 不是其中一个 helper」(lock:81-86).
+   *
+   * WHAT 「现有 W4 路径」 IS, AS A RUNNING THING. The ordinary way an approved leave gets cancelled
+   * today is `POST /api/attendance/requests/:id/cancel` — route registered at
+   * `plugins/plugin-attendance/index.cjs:38634`, which runs the W4 operation protocol over a
+   * boundary-owned connection. The redemption path runs the SAME protocol over the APPROVER's
+   * transaction (`executeInExternalTransaction`). This case runs both, on TWIN fixtures, and
+   * compares the rows they leave behind.
+   *
+   * WHY TWO FIXTURES AND NOT ONE. A single request can only be cancelled once, so parity cannot be
+   * a before/after on one row; it has to be two structurally identical fixtures differing ONLY in
+   * which channel cancels them. The twin is built from the SAME helpers in the SAME order
+   * (`publishOneNodeTemplate` → `createApprovedOriginal` → `attachAttendanceRequest` →
+   * `seedDirectoryIdentity`), and the ONE deliberate difference is disclosed: fixture B has **no
+   * cancel round**, because 「现有 W4 路径」 means the path as a user walks it today, and that user
+   * has no round. A round on B would make B a non-representative twin, not a better one.
+   *
+   * HOW 「逐字节」 IS MADE MEASURABLE. Byte equality cannot hold literally — the two fixtures have
+   * different primary keys, different users and different clocks. So the comparison NORMALISES
+   * rather than excludes wherever it honestly can: every A-side identifier is substituted with its
+   * B-side counterpart (`IDENTITY_SUBSTITUTIONS` below) before the compare, so an identifier that
+   * survives normalisation and still differs is a REAL divergence. Only what cannot be normalised
+   * is excluded, and each exclusion is DATA (`DECLARED_DIVERGENCES`) with a machine-checkable
+   * `column` and a written `reason` — not a sentence in a comment that rots.
+   *
+   * ⚠️ THIS CASE'S GREEN IS CONDITIONAL ON AN OPEN OWNER DECISION. §3.11.4 flagged the C-1 audit
+   * row's acting identity as an implementer choice: the redemption hook acts as the cancel round's
+   * REQUESTER, not the approver. Parity with the W4 path is precisely the argument that choice was
+   * made on (lock §8 期 1 「逐字节等价于现有 W4 路径」), so this case is that argument's
+   * MEASUREMENT — and if the owner rules that the audit row must carry the approver (or a system
+   * sentinel), `approval_records.actor_id` stops normalising onto B's and this case goes RED BY
+   * DESIGN. It is not swallowing the dispute; it is the dispute's oracle. Stated here so nobody
+   * later "fixes" the red by adding `actor_id` to the exclusion table.
+   *
+   * ⚠️ WHAT THIS DOES **NOT** ESTABLISH, and it is the headline finding of this unit:
+   * `unrecoverableExpired` 呈现 IS NOT CLOSED BY THIS CASE, for two independent reasons, both
+   * measured below rather than argued:
+   *   (a) **no leave-balance lots are seeded**, so `reverseLeaveBalanceDeduction` has nothing to
+   *       reverse and BOTH paths produce `reversal.reversed = 0`. Parity of a zero is parity; it
+   *       is not the `unrecoverableExpired > 0` presentation lock:86 demands.
+   *   (b) **the approval side has no channel to present it on.** `redeemCancelRoundInTxn` receives
+   *       `{ kind: 'executed', response }` from the entry and returns `{ kind: 'applied' }` —
+   *       the W4 response payload, `reversal` and all, is DISCARDED. The B-side assertion below
+   *       pins the payload the W4 path returns so the shape is on record; the A-side has no
+   *       counterpart to compare it against, and that absence is asserted, not glossed.
+   * Both are registered in the phase-2 verification MD as OPEN. This case closes the ROW-LEVEL
+   * half of the 账侧 line (the end state the two paths leave in the database) and nothing more.
+   */
+  it(
+    '账侧 (lock §8 期 1): the redeemed cancel round leaves the SAME rows as the existing ' +
+      '`POST /api/attendance/requests/:id/cancel` path on a twin fixture — every column equal ' +
+      'after identity normalisation except the ones declared as data, with a reason each',
+    async () => {
+      // ── Columns that cannot be normalised onto the twin's, each with its reason. This table IS
+      //    the contract: the compare below asserts the ACTUAL divergence set is a subset of it,
+      //    so a new unexplained divergence goes red, and `reason` is carried as a field rather
+      //    than a comment so it can be read back in the failure message.
+      const DECLARED_DIVERGENCES: readonly { readonly table: string; readonly column: string; readonly reason: string }[] = [
+        { table: 'attendance_requests', column: 'created_at', reason: 'wall clock — the two fixtures are seeded in sequence, not simultaneously' },
+        { table: 'attendance_requests', column: 'updated_at', reason: 'wall clock — set by each path\'s own `now()` inside its own transaction' },
+        { table: 'attendance_requests', column: 'resolved_at', reason: 'wall clock — the cancellation instant, necessarily different per fixture' },
+        { table: 'approval_instances', column: 'created_at', reason: 'wall clock — fixture seeding order' },
+        { table: 'approval_instances', column: 'updated_at', reason: 'wall clock — each path\'s own cancellation instant' },
+        { table: 'approval_instances', column: 'submitted_at', reason: 'wall clock — fixture seeding order' },
+        { table: 'approval_instances', column: 'completed_at', reason: 'wall clock — set when the ORIGINAL document was approved, per fixture' },
+        { table: 'approval_records', column: 'created_at', reason: 'wall clock — the revoke audit row is written at each path\'s own cancellation instant' },
+        { table: 'approval_instances', column: 'request_no', reason: 'per-document sequence number minted at create from a global counter — no fixture-side source to normalise onto, and no bearing on the 账侧 outcome' },
+        { table: 'approval_records', column: 'id', reason: 'bigint identity of the audit row itself — a global sequence, no fixture-side source' },
+        { table: 'approval_records', column: 'occurred_at', reason: 'wall clock — the cancellation instant' },
+        // ⚠️ THE TWO SUBSTANTIVE ONES. These are NOT clock or key artefacts: the two paths record
+        // genuinely different request provenance, and the values are asserted exactly below rather
+        // than waved through by this table. Registered for owner sign-off in the phase-2 MD.
+        { table: 'approval_records', column: 'ip_address', reason: 'SUBSTANTIVE — measured A=null, B=127.0.0.1: the redemption carries no HTTP request of its own to attribute, and fabricating one would be an invented audit value' },
+        { table: 'approval_records', column: 'user_agent', reason: 'SUBSTANTIVE — measured A=null, B=node: same cause as ip_address' },
+      ]
+      const declaredFor = (table: string): ReadonlySet<string> =>
+        new Set(DECLARED_DIVERGENCES.filter((d) => d.table === table).map((d) => d.column))
+
+      // ── Fixture A: cancelled THROUGH the cancel round (outlet #5 → C-2 → C-1). ──────────────
+      const suffixA = `parity-a-${TS}`
+      let attachedA: { requestId: string; orgId: string } | undefined
+      const a = await seedPendingCancelRound(suffixA, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attachedA = await attachAttendanceRequest(documentId, `wi13-req-${suffixA}`)
+      })
+      expect(attachedA).toBeTruthy()
+      await seedDirectoryIdentity(a.requesterId, attachedA!.orgId)
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+
+      // ── Fixture B: the TWIN, cancelled through the EXISTING W4 HTTP route. Same helpers, same
+      //    order, no cancel round (see the doc comment's disclosure). ───────────────────────────
+      const suffixB = `parity-b-${TS}`
+      const requesterB = `wi13-req-${suffixB}`
+      const approverB = `wi13-apr-${suffixB}`
+      const adminB = `wi13-admin-${suffixB}`
+      await grantWrite(requesterB)
+      const adminTokenB = await authToken(baseUrl, adminB)
+      const requesterTokenB = await authToken(baseUrl, requesterB)
+      const approverTokenB = await authToken(baseUrl, approverB)
+      const templateB = await publishOneNodeTemplate(adminTokenB, approverB, suffixB)
+      const documentB = await createApprovedOriginal(requesterB, requesterTokenB, approverTokenB, templateB)
+      await ageApprovedAnchor(documentB, 200)
+      await setDocumentWindowDays(documentB, 365)
+      const attachedB = await attachAttendanceRequest(documentB, requesterB)
+      await seedDirectoryIdentity(requesterB, attachedB.orgId)
+
+      // Both fixtures must sit in the SAME org, or every org-scoped column below would diverge for
+      // a reason the twin construction did not intend. Asserted rather than assumed.
+      expect(attachedA!.orgId).toBe(attachedB.orgId)
+
+      // ── Drive A: approve the cancel round. ──────────────────────────────────────────────────
+      const approveA = await jsonRequest(baseUrl, `/api/approvals/${a.roundInstanceId}/actions`, a.approverToken, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approveA.status, await approveA.clone().text()).toBe(200)
+
+      // ── Drive B: the existing W4 path, as a user walks it. ──────────────────────────────────
+      const cancelB = await jsonRequest(baseUrl, `/api/attendance/requests/${attachedB.requestId}/cancel`, requesterTokenB, {
+        method: 'POST',
+        body: {},
+      })
+      expect(cancelB.status, await cancelB.clone().text()).toBe(200)
+
+      // ── The W4 RESULT PAYLOAD, pinned. This is 「完整取消结果」 as the existing path returns it,
+      //    and it is recorded here because the redemption path has NO counterpart to compare it
+      //    against: `redeemCancelRoundInTxn` returns `{ kind: 'applied' }` and drops
+      //    `{ kind: 'executed', response }`. See the doc comment's finding (b).
+      const payloadB = (await cancelB.json()) as {
+        ok?: boolean
+        data?: { requestId?: string; status?: string; orgId?: string; userId?: string; reversal?: unknown }
+      }
+      expect(payloadB.ok).toBe(true)
+      expect(payloadB.data?.status).toBe('cancelled')
+      expect(payloadB.data?.requestId).toBe(attachedB.requestId)
+      expect(payloadB.data?.userId).toBe(requesterB)
+      // `reversal` is the field carrying `unrecoverableExpired` (index.cjs:19392-19445). It is
+      // PRESENT on this path — the property lock:86 calls 呈现 — and this fixture seeds no leave
+      // lots, so its counters are zeros. Asserted as a shape so a later fixture that DOES seed
+      // lots has a named place to strengthen.
+      expect(Object.prototype.hasOwnProperty.call(payloadB.data ?? {}, 'reversal')).toBe(true)
+
+      // ── Identity normalisation map: A-side value → B-side counterpart. Anything that survives
+      //    this and still differs is a real divergence, not a fixture artefact. ─────────────────
+      const oneRow = async (sql: string, params: unknown[]): Promise<Record<string, unknown>> => {
+        const result = await pool().query<Record<string, unknown>>(sql, params)
+        expect(result.rows.length, `${sql} :: ${JSON.stringify(params)}`).toBe(1)
+        return result.rows[0]
+      }
+
+      // Every pair below is a FIXTURE-CONSTRUCTION fact — an identifier this test chose, or one
+      // minted by the template publication it drove — and is looked up from the TEMPLATE tables,
+      // never read off the rows being compared. That distinction is the whole integrity of the
+      // method: a pair sourced from the compared rows themselves would not normalise the column,
+      // it would silently EXCLUDE it (and could mask a real divergence anywhere else the same
+      // value appears). `request_no` is the one identity that has no fixture-side source, so it is
+      // declared as a divergence below instead of being substituted.
+      const templateIdentity = async (templateId: string) => {
+        const key = await oneRow(`SELECT key FROM approval_templates WHERE id = $1::uuid`, [templateId])
+        const version = await oneRow(
+          `SELECT id::text AS id FROM approval_template_versions WHERE template_id = $1::uuid ORDER BY version DESC LIMIT 1`,
+          [templateId],
+        )
+        const published = await oneRow(
+          `SELECT id::text AS id FROM approval_published_definitions WHERE template_id = $1::uuid`,
+          [templateId],
+        )
+        return { key: key.key as string, versionId: version.id as string, publishedId: published.id as string }
+      }
+      const identityA = await templateIdentity(a.templateId)
+      const identityB = await templateIdentity(templateB)
+      const IDENTITY_SUBSTITUTIONS: readonly (readonly [string, string])[] = [
+        [a.documentId, documentB],
+        [attachedA!.requestId, attachedB.requestId],
+        [a.requesterId, requesterB],
+        [a.approverId, approverB],
+        [a.templateId, templateB],
+        [identityA.key, identityB.key],
+        [identityA.versionId, identityB.versionId],
+        [identityA.publishedId, identityB.publishedId],
+      ]
+      // Every substitution must be a real, non-empty, DISTINCT pair — otherwise a silently empty
+      // map would normalise nothing and the compare would pass by doing no work.
+      for (const [from, to] of IDENTITY_SUBSTITUTIONS) {
+        expect(typeof from).toBe('string')
+        expect(from.length).toBeGreaterThan(0)
+        expect(from).not.toBe(to)
+      }
+      const normalise = (value: unknown): string => {
+        let text = JSON.stringify(value ?? null)
+        for (const [from, to] of IDENTITY_SUBSTITUTIONS) text = text.split(from).join(to)
+        return text
+      }
+
+      // ── The comparator. Returns the set of columns whose NORMALISED values differ. ───────────
+      const divergentColumns = (rowA: Record<string, unknown>, rowB: Record<string, unknown>): string[] => {
+        const columns = [...new Set([...Object.keys(rowA), ...Object.keys(rowB)])].sort()
+        return columns.filter((c) => normalise(rowA[c]) !== normalise(rowB[c]))
+      }
+
+      // ── Compare 1: the attendance request row — the 账侧 row proper. ─────────────────────────
+      const reqA = await oneRow(`SELECT * FROM attendance_requests WHERE id = $1::uuid`, [attachedA!.requestId])
+      const reqB = await oneRow(`SELECT * FROM attendance_requests WHERE id = $1::uuid`, [attachedB.requestId])
+      expect(reqA.status).toBe('cancelled')
+      expect(reqB.status).toBe('cancelled')
+      const reqDiff = divergentColumns(reqA, reqB)
+      expect(
+        reqDiff.filter((c) => !declaredFor('attendance_requests').has(c)),
+        `undeclared attendance_requests divergence — declared: ${[...declaredFor('attendance_requests')].join(', ')}`,
+      ).toEqual([])
+
+      // POSITIVE CONTROL for the comparator itself. If `normalise`/`divergentColumns` silently
+      // compared nothing (an empty substitution map, a thrown-away key set), every assertion above
+      // would pass vacuously. A column deliberately perturbed on a COPY must be reported.
+      expect(divergentColumns({ ...reqA, status: 'not-cancelled' }, reqB)).toContain('status')
+      // …and the identity columns must NOT be reported, which is what proves normalisation ran
+      // rather than that the rows happened to match.
+      expect(reqDiff).not.toContain('id')
+      expect(reqDiff).not.toContain('user_id')
+      expect(reqDiff).not.toContain('approval_instance_id')
+      expect(reqDiff).not.toContain('resolved_by')
+
+      // ── Compare 2: the ORIGINAL approval instance — `approved → cancelled`, written by C-1. ──
+      const instA = await oneRow(`SELECT * FROM approval_instances WHERE id = $1`, [a.documentId])
+      const instB = await oneRow(`SELECT * FROM approval_instances WHERE id = $1`, [documentB])
+      expect(instA.status).toBe('cancelled')
+      expect(instB.status).toBe('cancelled')
+      const instDiff = divergentColumns(instA, instB)
+      expect(
+        instDiff.filter((c) => !declaredFor('approval_instances').has(c)),
+        `undeclared approval_instances divergence — declared: ${[...declaredFor('approval_instances')].join(', ')}`,
+      ).toEqual([])
+      expect(instDiff).not.toContain('id')
+      expect(instDiff).not.toContain('business_key')
+      expect(instDiff).not.toContain('requester_snapshot')
+
+      // ── Compare 3: the revoke audit row — lock §3 C-1's named shape. ─────────────────────────
+      const recA = await oneRow(
+        `SELECT * FROM approval_records WHERE instance_id = $1 AND action = 'revoke'`,
+        [a.documentId],
+      )
+      const recB = await oneRow(
+        `SELECT * FROM approval_records WHERE instance_id = $1 AND action = 'revoke'`,
+        [documentB],
+      )
+      expect(recA.from_status).toBe('approved')
+      expect(recA.to_status).toBe('cancelled')
+      const recDiff = divergentColumns(recA, recB)
+      expect(
+        recDiff.filter((c) => !declaredFor('approval_records').has(c)),
+        `undeclared approval_records divergence — declared: ${[...declaredFor('approval_records')].join(', ')}`,
+      ).toEqual([])
+      // THE CONDITIONAL GREEN, asserted rather than left to the comment: the redemption path's
+      // audit row normalises onto the W4 path's because BOTH act as the requester. If the owner
+      // rules otherwise (§3.11.4), this line is the one that goes red.
+      expect(recDiff).not.toContain('actor_id')
+      expect(recA.actor_id).toBe(a.requesterId)
+      expect(recB.actor_id).toBe(requesterB)
+      // The posture the BOUNDARY resolved in-lock, on both paths — lock §3 C-1 「运行模式与授权
+      // 凭据由边界在锁内解析」. Equal, and equal to the value the HTTP path resolves for a
+      // self-cancellation.
+      expect((recA.metadata as Record<string, unknown>).w4ActorPosture).toBe('self')
+      expect((recB.metadata as Record<string, unknown>).w4ActorPosture).toBe('self')
+
+      // ── ⚠️ THE ONE SUBSTANTIVE DIVERGENCE THIS CASE FOUND, asserted as VALUES so it cannot
+      //    quietly change. 「逐字节等价」 does NOT hold for the revoke row's request provenance:
+      //    the W4 HTTP path attributes the cancellation to the caller's connection, and the
+      //    redemption path has no connection of its own to attribute — the only HTTP request in
+      //    play is the APPROVER's, against a DIFFERENT instance, so carrying its address here
+      //    would attribute the requester's cancellation to the approver's browser. `null` is the
+      //    honest value, not a gap to be filled.
+      //
+      //    FLAGGED FOR OWNER REGISTRATION (phase-2 MD): whether 账侧 parity is satisfied by this,
+      //    or whether the audit row must carry a synthetic provenance marker (e.g. an
+      //    `approval-cancel-round` sentinel) so the two paths are distinguishable in the audit
+      //    trail by intent rather than by an absence. Nothing on this branch depends on which way
+      //    it is settled; this case pins today's behaviour either way.
+      expect(recA.ip_address).toBeNull()
+      expect(recA.user_agent).toBeNull()
+      expect(recB.ip_address).not.toBeNull()
+      expect(recB.user_agent).not.toBeNull()
+
+      // ── The 呈现 GAP, ASSERTED. The approval side exposes no field carrying the W4 result
+      //    payload: the redeemed round's DTO is an ordinary `UnifiedApprovalDTO`. Measured as a
+      //    negative so that the day a channel IS added, this line goes red and the MD's OPEN item
+      //    must be revisited rather than quietly staying open.
+      const dtoA = (await approveA.json()) as Record<string, unknown>
+      expect(Object.keys(dtoA)).not.toContain('reversal')
+      expect(Object.keys(dtoA)).not.toContain('cancellationResult')
+      expect(JSON.stringify(dtoA)).not.toContain('unrecoverableExpired')
     },
   )
 })
