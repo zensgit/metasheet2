@@ -2182,10 +2182,11 @@ discharged for that touch
 > were fabricated — invented to look plausible rather than copy-pasted from a command actually run —
 > and the "matches the report's §3 table" and "none of them shifted" sentences that followed were
 > built on that error. All three are corrected below with the actual, re-run command output. This
-> correction was caught by a second advisor pass on this very subsection before the commit
-> containing it was pushed as `424363c47ec3` — but that commit's own message still repeats the wrong
-> "+12/−6" figure and cannot be rewritten under this lane's no-force-push rule, so this file is the
-> propagation path for the correction, not the commit message.**
+> correction was caught by a second advisor pass **after** the commit containing the fabrication
+> (`424363c47`, per `git rev-parse` — not hand-extended) had already been pushed — that commit's own
+> message still repeats the wrong "+12/−6" figure and cannot be rewritten under this lane's
+> no-force-push rule, so this file is the propagation path for the correction, not the commit
+> message.**
 
 The report (§7): "修复轮必须重跑的门:整套 26 条 + M1–M8 全部 mutation". FIX-ROUND PASS's P1-1 commit
 (`284ee1381`) changed `packages/core-backend/src/services/approval-pending-query.ts` — the exact file
@@ -2291,11 +2292,14 @@ AuthService.ts` is empty — this branch has never touched that file at all, at 
 
 **Regression re-run, current tree, exact workflow shell shape** (this is the "整套 26 条" half of §7's
 replay requirement; the "M1-M8 mutation" half is discharged by anchor-presence above rather than by
-re-running all eight destructive probes again, since zero bytes of executable code changed and the
-report's own §7 framing — "carries forward by construction rather than being replayed" — is precisely
-FIX-ROUND 2 PASS's own already-accepted standard for a no-src-diff pass; this pass extends that same
-standard one step further back to cover FIX-ROUND PASS's docblock-only diff, which had not yet been
-checked against it):
+re-running all eight destructive probes again, since no executable LINE changed — comment-only,
++10 lines shifted the six anchors down without altering any of their text, per the correction above;
+this is a narrower and more accurate claim than "zero bytes ... changed", which is false for the file
+as a whole (11 insertions/1 deletion) — and the report's own §7 framing, "carries forward by
+construction rather than being replayed", is precisely FIX-ROUND 2 PASS's own already-accepted
+standard for a no-src-diff pass; this pass extends that same standard one step further, to a pass
+whose diff touches only comment bytes rather than zero bytes, which had not yet been checked against
+it):
 
 ```
 $ export DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" EXPECT_DB=1
