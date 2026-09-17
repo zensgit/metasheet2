@@ -5,6 +5,17 @@ const DATABASE_NAME = /^[a-z][a-z0-9_]{0,62}$/
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', '::1'])
 const DISALLOWED_PORTS = new Set(['5432', '5433', '5435'])
 
+export function assertOwnedDatabaseIdentity(
+  expected: { readonly oid: string; readonly owner: string } | undefined,
+  current: { readonly oid?: unknown; readonly owner?: unknown } | undefined,
+): void {
+  if (!expected || !current || !/^[1-9][0-9]*$/.test(expected.oid)
+    || expected.owner !== 'tm_backup_owner'
+    || current.oid !== expected.oid || current.owner !== expected.owner) {
+    throw new Error('RECOVERY_LOCAL_BACKUP_DATABASE_IDENTITY_REFUSED')
+  }
+}
+
 export interface RecoveryLocalBackupCliOptions {
   readonly adminUrl: URL
   readonly pgdata: string

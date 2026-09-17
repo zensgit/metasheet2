@@ -7,6 +7,7 @@ import { describe, expect, test } from 'vitest'
 import {
   admitRecoveryLocalBackupAdminUrl,
   assertOwnedPrivateDirectory,
+  assertOwnedDatabaseIdentity,
   admitRecoveryLocalBackupWorkRoot,
   assertDistinctDirectoryIdentities,
   parseRecoveryLocalBackupCli,
@@ -16,6 +17,14 @@ import {
 } from '../utils/recovery-local-backup-driver-safety'
 
 describe('local backup-set acceptance driver safety', () => {
+  test('refuses cleanup of a replaced, unowned or missing database', () => {
+    const owned = { oid: '17001', owner: 'tm_backup_owner' }
+    expect(() => assertOwnedDatabaseIdentity(owned, { ...owned })).not.toThrow()
+    for (const current of [undefined, { ...owned, oid: '17002' }, { ...owned, owner: 'other' }]) {
+      expect(() => assertOwnedDatabaseIdentity(owned, current)).toThrow('RECOVERY_LOCAL_BACKUP_DATABASE_IDENTITY_REFUSED')
+    }
+    expect(() => assertOwnedDatabaseIdentity(undefined, owned)).toThrow('RECOVERY_LOCAL_BACKUP_DATABASE_IDENTITY_REFUSED')
+  })
   test('admits only an explicit nonstandard loopback postgres maintenance URL', () => {
     const admitted = admitRecoveryLocalBackupAdminUrl('postgresql://tm_backup_owner:secret@127.0.0.1:55469/postgres')
     expect(admitted.hostname).toBe('127.0.0.1')

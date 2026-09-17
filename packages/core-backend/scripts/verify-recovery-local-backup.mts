@@ -35,6 +35,7 @@ const require = createRequire(import.meta.url)
 const {
   assertDistinctDirectoryIdentities,
   assertOwnedPrivateDirectory,
+  assertOwnedDatabaseIdentity,
   parseRecoveryLocalBackupCli,
   recoveryLocalBackupDatabaseNames,
   recoveryLocalBackupDatabaseUrl,
@@ -52,6 +53,7 @@ const targetUrl = recoveryLocalBackupDatabaseUrl(args.adminUrl, names.target)
 const recoverySecret = randomBytes(32)
 const jwtSecret = randomBytes(48).toString('hex')
 const children = new Set<ChildProcess>()
+const ownedDatabases = new Map<string, { oid: string; owner: string }>()
 let workRootCreated = false
 let sourceCreated = false
 let targetCreated = false
@@ -800,10 +802,22 @@ function runChecked(
 
 async function createOwnedDatabase(admin: Pool, name: string, owner: string): Promise<void> {
   await admin.query(`CREATE DATABASE ${quoteIdentifier(name)} OWNER ${quoteIdentifier(owner)}`)
+  if (name === names.source) sourceCreated = true
+  if (name === names.target) targetCreated = true
+  const identity = await admin.query(
+    'SELECT oid::text, pg_catalog.pg_get_userbyid(datdba) AS owner FROM pg_catalog.pg_database WHERE datname=$1', [name],
+  )
+  const row = identity.rows[0] as { oid: string; owner: string } | undefined
+  if (!row || row.owner !== owner) throw new Error('RECOVERY_LOCAL_BACKUP_DATABASE_IDENTITY_REFUSED')
+  ownedDatabases.set(name, { oid: row.oid, owner: row.owner })
   await admin.query(`REVOKE CONNECT ON DATABASE ${quoteIdentifier(name)} FROM PUBLIC`)
 }
 
 async function dropOwnedDatabase(admin: Pool, name: string): Promise<void> {
+  const identity = await admin.query(
+    'SELECT oid::text, pg_catalog.pg_get_userbyid(datdba) AS owner FROM pg_catalog.pg_database WHERE datname=$1', [name],
+  )
+  assertOwnedDatabaseIdentity(ownedDatabases.get(name), identity.rows[0])
   await admin.query(
     `SELECT pg_catalog.pg_terminate_backend(pid)
        FROM pg_catalog.pg_stat_activity
@@ -811,6 +825,7 @@ async function dropOwnedDatabase(admin: Pool, name: string): Promise<void> {
     [name],
   )
   await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(name)}`)
+  ownedDatabases.delete(name)
 }
 
 async function assertDatabaseOwner(admin: Pool, name: string, owner: string): Promise<void> {
