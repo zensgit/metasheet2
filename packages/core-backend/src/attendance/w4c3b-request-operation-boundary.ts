@@ -165,6 +165,12 @@ export interface AttendanceRequestOperationPreparedV1<TState = unknown> {
 }
 
 export interface AttendanceRequestOperationExecutionV1 {
+  /**
+   * Absent on every successful execution. Present only on the refusal member below, which is what
+   * makes this pair a discriminated union the compiler can narrow without every existing adapter
+   * having to start returning a tag it never returned before.
+   */
+  readonly kind?: undefined
   readonly response: unknown
   readonly resolvedRequestId: string | null
   readonly lifecycleEvents: readonly [{
@@ -172,6 +178,49 @@ export interface AttendanceRequestOperationExecutionV1 {
     readonly payload: unknown
   }]
 }
+
+/**
+ * Lock §3 C-3 / §11-④ (lock:126-130) — a BUSINESS refusal, returned by the adapter instead of
+ * thrown.
+ *
+ * `w4c3b-approved-leave-cancellation.ts` already returns the business outcome `review_required`
+ * as a value (`:76`, `:165`); its only production consumer turned that value straight back into a
+ * `throw` (`plugins/plugin-attendance/index.cjs`, the
+ * `ATTENDANCE_CANCELLATION_REVIEW_REQUIRED` 409). A throw aborts the caller's transaction path,
+ * so a cancel round could never PERSIST its `blocked` closure — the lock is explicit that this is
+ * the C-1 reuse point and that it 「不得写成照既有先例」. Hence: the adapter now returns this, and
+ * the ONE place that decides what to do with it is the boundary, per entry.
+ *
+ * 「业务拒绝与基础设施异常是两条路径、两种返回,不共用 throw」(lock §3 C-3, last line): this type is
+ * the business-rejection path. Infrastructure failures keep throwing and are nobody's decision.
+ */
+export interface AttendanceRequestOperationBusinessRefusalV1 {
+  readonly kind: 'business_refused'
+  /**
+   * Stable machine code for the refusal, and — pinned here so 判据 IV cannot drift — the `<code>`
+   * that C-3's engine record reason `business_blocked:<code>` is built from (lock §14.2 判据 IV).
+   * A bounded, queryable token; the fine-grained business cause travels in `detail`, not in the
+   * reason string.
+   */
+  readonly code: string
+  /**
+   * The adapter's own finer-grained cause (for the approved-leave cancellation: the
+   * `ApprovedLeaveCancellationReviewReasonV1`, e.g. `record_missing`). Carried into the C-3
+   * closure's record metadata, never concatenated into the reason.
+   */
+  readonly detail: string | null
+  /**
+   * The error the HTTP entry throws, CONSTRUCTED BY THE ADAPTER and thrown unchanged by this
+   * boundary. The adapter owns the host's error class and its exact payload, so the HTTP response
+   * stays byte-for-byte what it is today (status, code, message, validation details) — the
+   * 账侧字节等价 acceptance line (lock §8 期 1). The boundary never re-derives it.
+   */
+  readonly httpError: unknown
+}
+
+export type AttendanceRequestOperationExecutionResultV1 =
+  | AttendanceRequestOperationExecutionV1
+  | AttendanceRequestOperationBusinessRefusalV1
 
 export interface AttendanceRequestOperationContextV1 {
   readonly operationId: string | null
@@ -221,7 +270,7 @@ export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
     trx: AttendanceRequestPluginTrxV1,
     prepared: AttendanceRequestOperationPreparedV1<TState>,
     operation: AttendanceRequestOperationContextV1,
-  ): Promise<AttendanceRequestOperationExecutionV1>
+  ): Promise<AttendanceRequestOperationExecutionResultV1>
 }
 
 export type AttendanceRequestOperationAdaptersV1 = Readonly<{
@@ -282,6 +331,24 @@ export interface AttendanceRequestOperationExternalTransactionInputV1 {
   readonly routeInput: unknown
 }
 
+/**
+ * What `executeInExternalTransaction` can answer: everything `execute` can, PLUS the business
+ * refusal that `execute` throws instead (lock §3 C-3 「两条路径、两种返回」).
+ *
+ * `business_refused` means, exactly: the attendance domain declined this cancellation on business
+ * grounds, and NOTHING this entry did remains in the caller's transaction — the attempt was rolled
+ * back to a boundary-owned savepoint before returning (see the entry). The caller's transaction is
+ * intact and can still write and COMMIT its C-3 closure, which is the whole reason this is a return
+ * and not a throw. It carries no `response`: there is no sealed operation to respond with.
+ */
+export type AttendanceRequestOperationExternalTransactionResultV1 =
+  | AttendanceRequestOperationBoundaryResultV1
+  | {
+    readonly kind: 'business_refused'
+    readonly code: string
+    readonly detail: string | null
+  }
+
 export interface AttendanceRequestOperationBoundaryV1 {
   execute(input: AttendanceRequestOperationBoundaryInputV1): Promise<AttendanceRequestOperationBoundaryResultV1>
   /**
@@ -293,7 +360,7 @@ export interface AttendanceRequestOperationBoundaryV1 {
    */
   executeInExternalTransaction(
     input: AttendanceRequestOperationExternalTransactionInputV1,
-  ): Promise<AttendanceRequestOperationBoundaryResultV1>
+  ): Promise<AttendanceRequestOperationExternalTransactionResultV1>
 }
 
 export interface AttendanceRequestOperationBoundaryDepsV1 {
@@ -508,6 +575,47 @@ async function assertExternalTransactionRolloutLockHeldV1(
   }
 }
 
+/**
+ * The single decision point for a business refusal (lock §3 C-3 / §11-④). Every `adapter.execute`
+ * call site in the protocol funnels through here, so no branch can quietly treat a refusal as a
+ * successful execution and go on to enqueue an outbox event or seal the operation.
+ *
+ * - HTTP entry (`mode` absent): throw the adapter's OWN error object, unchanged. Not a
+ *   re-derivation — the same instance the adapter constructed, so status, code, message and
+ *   validation details are exactly what shipped today (账侧字节等价, lock §8 期 1).
+ * - External entry: return the decision to the caller. The approval side then persists its C-3
+ *   closure in the same transaction; the refused attempt itself is undone by the entry's savepoint.
+ *
+ * Returns `null` when the result is an ordinary execution, so callers narrow on that.
+ */
+function isBusinessRefusal(
+  result: AttendanceRequestOperationExecutionResultV1,
+): result is AttendanceRequestOperationBusinessRefusalV1 {
+  return (result as { kind?: unknown }).kind === 'business_refused'
+}
+
+function takeBusinessRefusal(
+  result: AttendanceRequestOperationBusinessRefusalV1,
+  mode: { readonly externalTransaction: true } | undefined,
+): { readonly kind: 'business_refused'; readonly code: string; readonly detail: string | null } {
+  // Validate before acting on it. A malformed refusal must not become an untyped throw of
+  // `undefined` on the HTTP entry, nor a closure reason built from a non-string on the external
+  // one; both would be worse than a 500 that names the defect.
+  if (typeof result.code !== 'string' || result.code.length === 0) {
+    fail('W4C3B_REQUEST_BUSINESS_REFUSAL_INVALID', 500)
+  }
+  if (result.detail !== null && typeof result.detail !== 'string') {
+    fail('W4C3B_REQUEST_BUSINESS_REFUSAL_INVALID', 500)
+  }
+  if (mode?.externalTransaction !== true) {
+    if (result.httpError === null || result.httpError === undefined) {
+      fail('W4C3B_REQUEST_BUSINESS_REFUSAL_INVALID', 500)
+    }
+    throw result.httpError
+  }
+  return { kind: 'business_refused' as const, code: result.code, detail: result.detail }
+}
+
 function buildEnvelope(
   input: AttendanceRequestOperationBoundaryInputV1,
   prepared: AttendanceRequestOperationPreparedV1,
@@ -561,8 +669,15 @@ export function createAttendanceRequestOperationBoundaryV1(
       const input = normalizeInput(rawInput)
       const connection = await deps.acquireConnection()
       try {
-        return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) =>
+        const result = await runAttendanceResultOperationTransactionV1(connection.client, async (trx) =>
           runRequestOperationProtocolV1(trx, deps.adapters, input))
+        // Unreachable by construction: without `mode.externalTransaction` the protocol THROWS the
+        // adapter's own HTTP error on a business refusal rather than returning one, which is what
+        // keeps this entry's observable behaviour byte-identical to what shipped. Asserted anyway,
+        // fail-closed, so that a future edit which makes the protocol return here cannot silently
+        // hand a refusal to an HTTP caller as if it were a result.
+        if (result.kind === 'business_refused') fail('W4C3B_REQUEST_BUSINESS_REFUSAL_UNHANDLED', 500)
+        return result
       } finally {
         connection.release()
       }
@@ -580,7 +695,38 @@ export function createAttendanceRequestOperationBoundaryV1(
       // advisory lock) needs the org, which only `prepareIdentity` can supply — so it is asserted
       // inside the protocol, at the one point where the org is known and before the protocol's
       // own first lock. See `assertExternalTransactionRolloutLockHeldV1`.
-      return runRequestOperationProtocolV1(client, deps.adapters, input, { externalTransaction: true })
+      //
+      // The attempt runs inside a boundary-owned SAVEPOINT. A business refusal (lock §3 C-3) is
+      // discovered LATE — the verdict is produced BY appending the cancellation calculation, after
+      // the operation-registry row, the `FOR UPDATE` row locks and the calculation/segment rows
+      // already exist in this transaction. On the HTTP entry the throw discards all of that. Here
+      // the caller goes on to COMMIT its C-3 closure, so without this savepoint every one of those
+      // rows — including an operation row that is REGISTERED BUT NEVER SEALED, which is the replay
+      // contract's input — would commit as a side effect of a refusal. Rolling back to the
+      // savepoint makes the refused attempt leave nothing behind: 判据 II's negative control R2
+      // wants 「零业务取消」, and a committed unsealed operation row is not zero.
+      //
+      // Measured on PostgreSQL 15.17, not recalled (probe transcript in the verification MD):
+      // after `ROLLBACK TO SAVEPOINT` the caller's transaction is still usable and commits; the
+      // rows and the xact advisory lock taken INSIDE the savepoint are gone; and the caller's own
+      // rollout advisory lock, taken BEFORE the savepoint, survives — so a caller that makes a
+      // second call in the same transaction still passes the rollout-lock precondition.
+      await client.query('SAVEPOINT w4c3b_external_txn_attempt', [])
+      const result = await runRequestOperationProtocolV1(
+        client,
+        deps.adapters,
+        input,
+        { externalTransaction: true },
+      )
+      // Deliberately NOT in a `finally`/`catch`: an infrastructure exception is the OTHER path
+      // (lock §3 C-3 「两条路径、两种返回」). It propagates with the whole transaction left for the
+      // caller to roll back — and after a database error the transaction is aborted, so issuing
+      // RELEASE here would itself fail and would mask the real error.
+      if (result.kind === 'business_refused') {
+        await client.query('ROLLBACK TO SAVEPOINT w4c3b_external_txn_attempt', [])
+      }
+      await client.query('RELEASE SAVEPOINT w4c3b_external_txn_attempt', [])
+      return result
     },
   }
 }
@@ -608,7 +754,7 @@ async function runRequestOperationProtocolV1(
   adapters: AttendanceRequestOperationAdaptersV1,
   input: AttendanceRequestOperationBoundaryInputV1,
   mode?: { readonly externalTransaction: true },
-): Promise<AttendanceRequestOperationBoundaryResultV1> {
+): Promise<AttendanceRequestOperationExternalTransactionResultV1> {
         {
           const shapedTrx = pluginTrx(trx)
           const adapter = adapters[input.kind]
@@ -661,6 +807,7 @@ async function runRequestOperationProtocolV1(
               // `{ effectiveState: 'legacy', referenceSegments: false }`; mirror it exactly.
               referenceSegments: false,
             }))
+            if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
             return { kind: 'legacy' as const, response: result.response }
           }
 
@@ -685,6 +832,7 @@ async function runRequestOperationProtocolV1(
                 // create a second place that decides what `legacy` admits.
                 referenceSegments: posture.referenceSegments,
               }))
+              if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
               return { kind: 'legacy' as const, response: result.response }
             }
           }
@@ -726,6 +874,11 @@ async function runRequestOperationProtocolV1(
             // step 2 — the one resolution this transaction performs.
             referenceSegments: preflight.referenceSegments,
           }))
+          // Before the outbox enqueue and before the seal — a refused attempt must leave neither.
+          // On the HTTP entry this throws exactly where the adapter used to throw: the adapter
+          // returned immediately at its refusal point, so no statement runs between the old throw
+          // site and this one.
+          if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
           if (preflight.kind === 'legacy_no_operation') {
             return { kind: 'legacy' as const, response: result.response }
           }

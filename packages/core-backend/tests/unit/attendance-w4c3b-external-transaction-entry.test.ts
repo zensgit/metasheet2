@@ -265,3 +265,142 @@ describe('W4 external transaction entry (lock §3 C-1) — input surface', () =>
     expect(boundary.execute).not.toBe(boundary.executeInExternalTransaction)
   })
 })
+
+/**
+ * Lock §3 C-3 / §11-④ (lock:126-130) — the business-refusal return contract.
+ *
+ * The adapter no longer throws its `ATTENDANCE_CANCELLATION_REVIEW_REQUIRED` 409 from inside
+ * `execute`; it RETURNS the business outcome and the boundary decides. What these tests can prove
+ * without a database is the decision itself and the savepoint discipline around it. What they
+ * cannot prove — that a real refusal inside a real caller transaction leaves zero rows behind —
+ * is a real-DB obligation and is NOT claimed here.
+ */
+const REFUSAL_HTTP_ERROR = Object.freeze({
+  status: 409,
+  code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+  message: 'Approved leave cancellation requires attendance review',
+  details: [{ field: 'calculation', message: 'record_missing' }],
+})
+
+/** Non-canonical org key: `parseCanonicalAttendanceRolloutOrgKeyV1` rejects it. */
+const NON_CANONICAL_ORG = 'not a canonical org key'
+
+/**
+ * Reaches `adapter.execute` with no database: a non-canonical org plus a null operationId routes
+ * the HTTP entry into the legacy branch, which calls `execute` directly. That is call site 1 of
+ * three; all three funnel through the same `takeBusinessRefusal`.
+ */
+function refusingAdapters(refusal: unknown): AttendanceRequestOperationAdaptersV1 {
+  const prepared = {
+    orgId: NON_CANONICAL_ORG,
+    actorId: '33333333-4444-4555-8666-777777777777',
+    actorPosture: 'self',
+    tokenSubjectUserId: null,
+    subjectUserId: '33333333-4444-4555-8666-777777777777',
+    subjectScope: 'self',
+    commandPayload: Object.freeze({}),
+    state: {},
+  }
+  const adapter = {
+    async prepareIdentity() { return prepared },
+    async prepare() { return prepared },
+    async execute() { return refusal },
+  }
+  return Object.freeze({
+    request_create: adapter,
+    request_pending_edit: adapter,
+    request_decision: adapter,
+    request_cancel: adapter,
+  }) as unknown as AttendanceRequestOperationAdaptersV1
+}
+
+/** An IDLE connection, as `runAttendanceResultOperationTransactionV1`'s own probe demands. */
+function idleConnectionClient(): AttendanceW4TransactionClientV1 & { seen: string[] } {
+  const seen: string[] = []
+  return {
+    seen,
+    async query(sqlText: string) {
+      seen.push(sqlText)
+      if (sqlText.startsWith('SAVEPOINT ')) throw pgError('25P01')
+      return { rows: [] }
+    },
+  }
+}
+
+describe('business refusal (lock §3 C-3 / §11-④) — the boundary decides throw vs return', () => {
+  it('HTTP entry: throws the adapter’s OWN error object, unchanged (账侧字节等价)', async () => {
+    const client = idleConnectionClient()
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => ({ client, release: () => undefined }),
+      adapters: refusingAdapters({
+        kind: 'business_refused',
+        code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+        detail: 'record_missing',
+        httpError: REFUSAL_HTTP_ERROR,
+      }),
+    })
+
+    let thrown: unknown = 'NOTHING_THROWN'
+    try {
+      await boundary.execute({
+        kind: 'request_cancel',
+        operationId: null,
+        correlationId: 'http-entry-refusal',
+        routeVariant: null,
+        routeInput: { requestId: '99999999-8888-4777-8666-555555555555' },
+      })
+    } catch (error) {
+      thrown = error
+    }
+    // Identity, not equality: the boundary rethrows the very instance the adapter built, so all
+    // four fields (status, code, message, validation details) are whatever the adapter shipped —
+    // there is no second place that could re-derive them differently.
+    expect(thrown).toBe(REFUSAL_HTTP_ERROR)
+    // And it is NOT converted into a boundary error: a 500 here would be a visible regression.
+    expect(thrown).not.toBeInstanceOf(AttendanceW4RequestBoundaryError)
+  })
+
+  it('HTTP entry: a malformed refusal fails closed rather than throwing undefined', async () => {
+    for (const malformed of [
+      { kind: 'business_refused', code: '', detail: null, httpError: REFUSAL_HTTP_ERROR },
+      { kind: 'business_refused', code: 'X', detail: 7, httpError: REFUSAL_HTTP_ERROR },
+      { kind: 'business_refused', code: 'X', detail: null, httpError: undefined },
+    ]) {
+      const client = idleConnectionClient()
+      const boundary = createAttendanceRequestOperationBoundaryV1({
+        acquireConnection: async () => ({ client, release: () => undefined }),
+        adapters: refusingAdapters(malformed),
+      })
+      expect(await codeOf(() => boundary.execute({
+        kind: 'request_cancel',
+        operationId: null,
+        correlationId: 'http-entry-malformed-refusal',
+        routeVariant: null,
+        routeInput: { requestId: '99999999-8888-4777-8666-555555555555' },
+      }))).toBe('W4C3B_REQUEST_BUSINESS_REFUSAL_INVALID')
+    }
+  })
+
+  it('external entry: the attempt runs inside a boundary-owned savepoint', async () => {
+    const client = stubClient('serializable')
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: async () => {
+        throw new Error('the external entry must never acquire a connection')
+      },
+      adapters: stubAdapters(),
+    })
+    await expect(boundary.executeInExternalTransaction(validExternalInput(client)))
+      .rejects.toThrow(PAST_THE_GATES)
+
+    const attempt = client.seen.filter((sql) => sql.includes('w4c3b_external_txn_attempt'))
+    // The savepoint is taken BEFORE the protocol runs — a refusal discovered late must have
+    // something to roll back to.
+    expect(attempt).toEqual(['SAVEPOINT w4c3b_external_txn_attempt'])
+    // An INFRASTRUCTURE exception is the other path (lock §3 C-3 「两条路径、两种返回」): it
+    // propagates with the caller's transaction left for the caller to roll back. The boundary must
+    // NOT issue ROLLBACK TO / RELEASE here — after a database error the transaction is aborted and
+    // a RELEASE would itself fail, masking the real error.
+    expect(attempt).not.toContain('ROLLBACK TO SAVEPOINT w4c3b_external_txn_attempt')
+    expect(attempt).not.toContain('RELEASE SAVEPOINT w4c3b_external_txn_attempt')
+  })
+})
