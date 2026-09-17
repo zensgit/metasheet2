@@ -1975,7 +1975,7 @@ as prose (the command line immediately above) — the same self-matching trap §
 | `stock-preparation-handoff.test.cjs:2472` | `path.join(..., 'docs', 'development', 'takeover-beiliao-20260821', '222-deploy-window-runbook-20260901.md')` | No — a differently-named runbook |
 | `stock-prep-onboarding-acceleration-...md:66` | Markdown prose citing `docs/development/source-onboarding-self-service-design-20260830.md` §9; matched only because "join" (Chinese "join 计数") appears near an unrelated `docs/development/...` citation on the same line | No — not code at all |
 | `dingtalk-p4-final-closeout.mjs:252` | `path.join(opts.docsOutputDir, ...)` — `docsOutputDir` is a CLI-provided **write** target for this script's own generated report, not a literal `docs/development` read | No |
-| `staging-attendance-*-smoke.test.mjs` (hmr5, mp6, ae4, rd45 ×2, v18 — 6 files) | Each `readFileSync(join(here, '../../docs/development/<one specific, differently-named staging runbook>.md'))` | No — six different named runbooks, none this design MD |
+| `staging-attendance-*-smoke.test.mjs` (hmr5, mp6, ae4, rd45, v18 — 5 files; rd45 reads two runbooks in one file, lines 33-34) | Each `readFileSync(join(here, '../../docs/development/<one specific, differently-named staging runbook>.md'))` | No — five files naming several different runbooks between them, none this design MD |
 | `dingtalk-p4-final-closeout.test.mjs:188/208/262` | Writes/reads its own test-fixture file named `dingtalk-final-remote-smoke-development-<date>.md` inside a temp `docsDir` fixture, unrelated to the real `docs/development/` tree | No |
 | `multitable-onprem-package-upgrade-inplace.test.mjs:44` | `path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')` | No — same named runbook as the first row |
 | `export-dingtalk-staging-evidence-packet.test.mjs:151` | `path.join(outputDir, 'docs/development/dingtalk-staging-execution-checklist-20260408.md')` — an output path this test writes an evidence copy to | No |
@@ -2103,7 +2103,8 @@ not rerun all 45 — that was already done fresh in round-3's §1.6, one commit 
 this pass's docs-only diff touches CI config or any `*-ci-wiring` test file, so there is nothing for
 those suites to exercise differently. Scoped-diff check, same method as Part C3 used, pinned to this
 pass's first commit rather than the moving `HEAD` symbol so the claim does not drift on a later
-commit: `git diff 6c5b06f7d c1586411d --name-only -- packages plugins scripts .github` → empty.)
+commit: `git diff 6c5b06f7d 74c6c2e96 --name-only -- packages plugins scripts .github` → empty,
+re-checked against this pass's full commit range, not just its first commit.)
 
 **Fix, this pass**: `docs/development/approval-cancel-round-phase1-verification-20260918.md:900` —
 "the 38 sibling `*-ci-wiring` guards" → "the 45 sibling `*-ci-wiring` guards," struck through in place
@@ -2135,30 +2136,31 @@ Line 900 no longer asserts "38" as the live population count; it is struck throu
 - No lock file or `reviews/` document was opened for editing this pass. Checked against this pass's
   own starting HEAD rather than `origin/main` (`origin/main` has not moved; the wider
   `origin/main..HEAD` diff is checked the same way in every earlier Part of this document), pinned to
-  a fixed commit rather than the moving `HEAD` symbol so the claim does not silently start covering a
+  fixed commits rather than the moving `HEAD` symbol so the claim does not silently start covering a
   later, unrelated commit once this branch gets its next fix-round commit:
-  `git diff --name-only 6c5b06f7d c1586411d | grep -iE "review|lock-draft|\.claude"` → 0 hits.
+  `git diff --name-only 6c5b06f7d 74c6c2e96 | grep -iE "review|lock-draft|\.claude"` → 0 hits.
 - No migration was applied anywhere in this pass (no new migration exists to run); the private DB
   (`metasheet2_lock_c`) was already migrated by an earlier pass and only read (test runs), never
   written outside those tests' own transactions.
 - No PR opened, no branch merged or undrafted, no force-push.
-- **Two commits this pass**, following Part G's own convention of naming commits by role rather than
-  by a SHA a commit would have to predict for itself: the first (`c1586411d`) is the P2-1/P2-2 fixes
-  and this Part H (H1-H4) as originally written; the second (this pass's own advisor-reviewed
-  follow-up, landing after `c1586411d`) corrects four claims Part H itself made too loosely on first
-  writing — widening the P2-1 safety-check sweep from a directory-scoped grep to a whole-tree one,
-  adding the whole-tree "exactly three, not four" sweep for `:9246`, verifying "38 was already wrong
-  when Part C3 wrote it" against `95eccb89b` instead of asserting it, quoting the supplementary
-  checklist's own population line instead of citing it from memory, pinning the two SHA-relative diff
-  commands above to fixed commits instead of the moving `HEAD` symbol, and resolving P3-3 (the design
-  MD header) instead of deferring it. Verified before staging the second commit, the same way as the
-  first: `git status --porcelain` and `git diff --stat` show only the same two
-  `docs/development/*.md` paths, zero other files.
-- Files touched, across both of this pass's commits: `docs/development/approval-cancel-round-phase1-design-20260918.md`
+- **This pass's commits are every commit on this branch after `6c5b06f7d`** (`git log --oneline
+  6c5b06f7d..` lists them; each commit message states its own scope) — deliberately **not** a count
+  pinned into this prose, the same lesson this pass already applied to the design MD's "HEAD as of"
+  header (§H1's closing note): a self-count inside a document every one of its own commits edits
+  cannot survive the next commit that edits it, and an earlier draft of this bullet said "two" when a
+  third, self-review-of-the-self-review commit was already landing. In role terms: the first commit
+  is the P2-1/P2-2 fixes and this Part H (H1-H4) as originally written; every commit after it is a
+  self-review correction to a claim this Part itself made too loosely on an earlier writing (see each
+  commit's own message for what it fixed). Every one of them is docs-only — verified before staging
+  each commit via `git status --porcelain` / `git diff --stat` showing only the same two
+  `docs/development/*.md` paths, and confirmed for the full range via
+  `git diff --name-only 6c5b06f7d 74c6c2e96` (currently the tip of this pass's commits): the same two
+  files, zero others.
+- Files touched, across this pass's commits: `docs/development/approval-cancel-round-phase1-design-20260918.md`
   (the §3.2/design MD:206 citation fix, the header rewrite, and the trailing historical clause) and
   `docs/development/approval-cancel-round-phase1-verification-20260918.md` (this Part H in full, the
   `SUPERSEDED` annotations to §G3/§G5/§G6, and the "Net after this pass" paragraph). Zero non-`.md`
-  files across either commit. `git status --porcelain` is clean after each commit and push (no stray
+  files across any of them. `git status --porcelain` is clean after each commit and push (no stray
   edits, no leftover mutation-probe state — none were run this pass; see §H1/§H2's own notes on why
   not).
 
