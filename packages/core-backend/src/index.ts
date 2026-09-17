@@ -239,6 +239,9 @@ import {
   correlationIdMiddleware,
 } from './middleware/correlation'
 import { approvalsRouter } from './routes/approvals'
+import { todoRouter } from './routes/todo'
+import { pendingSourceRegistry } from './services/pending-source-registry'
+import { approvalPendingSource } from './services/approval-pending-source'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
@@ -1837,6 +1840,9 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
+    // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
+    pendingSourceRegistry.register(approvalPendingSource)
+    this.app.use(todoRouter())
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
