@@ -808,9 +808,11 @@ slice 2 (attendance-parity, redemption 判据 II/IV) and must not be read as "do
 — the only two findings this pass addresses. The review's other findings (P1-B's four missing
 acceptance rows, P2-B's seed-visibility disclosure, P3-A through P3-E) are **not** touched here;
 they remain open for a subsequent fix-round step and are not re-described in this section.
-HEAD before this pass's commit: `95eccb89b` (the exact HEAD the gate review reviewed). This pass
-touches exactly two files, both `apps/web`, neither backend/DB code:
-`apps/web/tests/approvalBatchTransferView.spec.ts` and `apps/web/src/approvals/api.ts`.
+HEAD before this pass's commit: `95eccb89b` (the exact HEAD the gate review reviewed). This pass's
+code changes touch exactly two files, both `apps/web`, neither backend/DB code:
+`apps/web/tests/approvalBatchTransferView.spec.ts` and `apps/web/src/approvals/api.ts` — plus this
+document (see §C3 for the distinction between "commit touches three paths" and "commit touches
+zero backend/CI code," both of which are true and neither of which contradicts the other).
 
 ## C1. P1-A fix — the sync-pin's extraction regex now tolerates the JSDoc block between members
 
@@ -883,10 +885,19 @@ This is the actual required-check content, not a proxy for it — it is line 779
 
 **Not rerun this pass, by scope**: the seven `approval-cancel-round-*.db.test.ts` real-DB suites,
 the two backend unit tests, `packages/core-backend`'s typecheck, and the 38 sibling `*-ci-wiring`
-guards — none of this pass's two files are backend/DB code or touch anything those suites exercise
-(confirmed: `git diff 95eccb89b HEAD --name-only` after this pass's commit is exactly the two
-`apps/web` files named above). A subsequent step that also touches P1-B's backend acceptance rows
-must rerun those suites; this step does not claim to have done so.
+guards — none of the files this pass's commit touched are backend/DB or CI-config code, so none of
+those suites exercise anything this pass changed. Verified with a *scoped* diff against the code
+directories those suites cover, not the raw file count (the raw diff includes this document itself,
+which is not code):
+```
+$ git diff 95eccb89b HEAD --name-only -- packages plugins .github
+(empty)
+```
+The full (unscoped) `git diff 95eccb89b HEAD --name-only` is three paths — the two `apps/web` files
+plus this document — which is the true count for "what did this commit touch," distinct from the
+narrower "did it touch backend/CI code" claim the empty scoped diff above actually supports. A
+subsequent step that also touches P1-B's backend acceptance rows must rerun the real-DB suites;
+this step does not claim to have done so.
 
 ## C4. Mutation ledger — two probes, `cp`-backup → edit → run → restore → `cmp`, this pass
 
@@ -904,8 +915,10 @@ run, taken after the restores, not before).
 ## C5. Working-tree discipline, this pass
 
 - `git status --porcelain` was empty at the start of this pass (matching the gate-review HEAD
-  `95eccb89b`'s clean state) and is exactly `M apps/web/src/approvals/api.ts` +
-  `M apps/web/tests/approvalBatchTransferView.spec.ts` (plus this document) at the end.
+  `95eccb89b`'s clean state); immediately before committing, the three staged paths were
+  `apps/web/src/approvals/api.ts`, `apps/web/tests/approvalBatchTransferView.spec.ts`, and this
+  document; `git status --porcelain` is empty again after the commit (clean tree, nothing left
+  uncommitted).
 - Zero `git checkout --`; all mutation reverts were `cp`-restore + `cmp`-verified, per §C4.
 - No lock file, no `reviews/` file, no `origin/main` state touched.
 
