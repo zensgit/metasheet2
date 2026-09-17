@@ -1269,6 +1269,16 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # file. This token covers the new shared component in isolation only; the acceptance-J integration
 # spec (403 SESSION_ORG_REQUIRED → selector → retry → 201, wired into the approval template center
 # page) lands in a later slice with its own token.
+#
+# A-2 slice 2 (approval form grouping lock v2.13 §6 phase 1 FE client, 2026-09-18): `approvalTemplateGroupsClient`
+# — unit spec for the seven group-endpoint client functions added to `approvals/api.ts`
+# (list/create/rename/archive/unarchive/link/unlink), including the acceptance-J assertion that a
+# 403 `SESSION_ORG_REQUIRED` throws `ApprovalApiError` with `.code` intact rather than being
+# collapsed to a generic message — the case the front-end 403-retry flow (a later slice) will
+# branch on. Verified against every existing token above: none is a substring of it, it is a
+# substring of none (`python3` bidirectional scan, 394 tokens, zero collisions); `npx vitest run
+# approvalTemplateGroupsClient --reporter=verbose` locally confirms it resolves to exactly this one
+# spec file (8/8 tests). This token covers the client functions in isolation only.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1351,6 +1361,7 @@ exec npx vitest run \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
   approvalTemplateGovernance \
+  approvalTemplateGroupsClient \
   approvalTemplateRouteGuard \
   approvalTemplateVersionHistory \
   approvalUserPicker \
