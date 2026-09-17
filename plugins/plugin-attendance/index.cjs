@@ -35137,6 +35137,33 @@ module.exports = {
       },
       execute: async function executeRequestCancel(trx, prepared, operation) {
         const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        // ── Lock §3 C-2 全局锁序 — the ORIGINAL approval instance is locked BEFORE the request row.
+        // lock:110 「建议全局顺序 rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → attendance_requests
+        // → 余额批次，现有适配器改为同序」; lock:227 repeats it as the row-lock class order.
+        // Until this commit this adapter took `attendance_requests FOR UPDATE` first and the
+        // original `approval_instances` row second, while the core approval side takes them the
+        // other way round (`classifyAndLockAttendanceRequestForInstance`, always reached with the
+        // instance row already `FOR UPDATE`-held by `dispatchAction` / `bulkReassignApprovals`).
+        // That is a cycle on the SAME (request, instance) pair, and it is not theoretical: it is
+        // CONSTRUCTED and deadlocks deterministically (40P01) in census Q-G,
+        // `packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts`.
+        // Behaviour note (disclosed, not buried): when BOTH rows are mutated concurrently between
+        // prepare and execute, the 409 that surfaces is now 'Approval changed during cancellation
+        // preparation' where it used to be 'Request changed during cancellation preparation' —
+        // same status and same code (`REQUEST_STATE_CONFLICT`), and no test asserts the
+        // precedence. The one row lock this now takes before the authorization calls below has the
+        // same blast radius as the request-row lock that was already taken before them.
+        let lockedApproval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          lockedApproval = approvalRows[0] ?? null
+          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
+          }
+        }
         const lockedRequestRows = await trx.query(
           'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
           [route.requestId],
@@ -35166,17 +35193,6 @@ module.exports = {
           },
         )
         await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
-        let lockedApproval = null
-        if (approvalId) {
-          const approvalRows = await trx.query(
-            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-            [approvalId],
-          )
-          lockedApproval = approvalRows[0] ?? null
-          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
-            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
-          }
-        }
         if (requestRow.status !== 'pending' && !approvedLeave) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }

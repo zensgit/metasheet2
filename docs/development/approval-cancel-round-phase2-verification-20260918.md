@@ -913,6 +913,199 @@ $ (packages/core-backend) npx vitest run tests/unit
 
 ---
 
+## 3.10 判据 II's SECOND prerequisite, IMPLEMENTED: the cancel adapter's lock order (this unit)
+
+§4's residual list said: 「§3 C-2 的全局序把 `attendance_requests` 排在原单据实例**之后**，而现有适配器
+取 `attendance_requests → approval_instances(原单)` —— **相反** —— 锁说「现有适配器改为同序」。Q-D 的三腿
+技术是模板；这些腿没有建。」 This unit builds them, and the reorder they were the prerequisite for.
+
+Lock authority, quoted rather than paraphrased:
+- lock:110 「建议全局顺序 **rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → `attendance_requests` →
+  余额批次**，现有适配器改为同序」
+- lock:227 the same as the row-lock class order: 「行锁(轮次实例 → 原单据实例 → `attendance_requests`
+  → 计算/段 → 余额批次)」
+
+### 3.10.1 What landed
+
+| Piece | Where | Lock clause |
+|---|---|---|
+| the `approval_instances` (原单) `FOR UPDATE` + its prepare-snapshot comparison moved ABOVE the `attendance_requests` `FOR UPDATE` | `plugins/plugin-attendance/index.cjs`, `execute: async function executeRequestCancel` | lock:110 「现有适配器改为同序」, lock:227 |
+| census **Q-G**, four legs | `packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts` (appended) | §3 C-2 lock:111 「census not done before implementation」 |
+
+Nothing else moved. The two `{ forUpdate: true }` helpers that sit between the two row locks —
+`assertScheduleDispatchRequestScopeAllowed` → `loadScheduleDispatchDetail` (locks
+`attendance_schedule_dispatch_requests`) and `loadLatestRequestSnapshotToken` (locks
+`attendance_request_calculation_snapshots`) — stay where they are, i.e. after `attendance_requests`.
+**FLAGGED for owner registration, not silently reordered around:** lock:227's class list names
+「计算/段」 (which is where the calculation-snapshot relation plausibly belongs, and it is already
+after `attendance_requests`) but names **no** schedule-dispatch relation at all, and Q-B's answer is
+explicit that 「首期没有 class-11 就不要虚构它」 (lock:304). So this unit places only the pair the lock
+names, and records the unclassified third relation as an open question rather than inventing a rank
+for it.
+
+### 3.10.2 The population, enumerated BEFORE the edit
+
+Reordering one of N paths does not fix an order — it inverts one edge and can close a different
+cycle. So the both-row population was counted first, mechanically:
+
+```
+$ git grep -n "attendance_requests[^;]*FOR UPDATE" -- plugins/plugin-attendance/index.cjs
+plugins/plugin-attendance/index.cjs:8538:   (a comment, not a statement)
+plugins/plugin-attendance/index.cjs:34751:  'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+plugins/plugin-attendance/index.cjs:35110:  'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',   <- cancel adapter
+plugins/plugin-attendance/index.cjs:37596:  'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',        <- decision adapter
+$ git grep -n "approval_instances[^;]*FOR UPDATE" -- plugins/plugin-attendance/index.cjs
+plugins/plugin-attendance/index.cjs:35141:  <- cancel adapter
+plugins/plugin-attendance/index.cjs:35578:  <- shift-swap consent rejection
+plugins/plugin-attendance/index.cjs:37617:  <- decision adapter
+$ git grep -n "attendance_requests[^;]*FOR UPDATE" -- packages/core-backend/src
+(no output — the core side never writes this statement inline; it goes through
+ `classifyAttendanceRequestForInstanceV1`, which is why the census calls that function
+ rather than transcribing its SQL)
+```
+
+Three plugin sites lock `attendance_requests`, three lock `approval_instances`; **two** functions
+lock BOTH (`executeRequestCancel`, the decision adapter), and the shift-swap consent path locks
+`attendance_shift_swap_requests` + `approval_instances`, not `attendance_requests`. Q-G LEG 4 pins
+those two counts (3 and 3) so a fourth site cannot appear without reddening this census.
+
+**Only the cancel adapter was reordered.** The decision adapter is the approve/reject path and runs
+only while the request is `pending` (`if (requestRow.status !== 'pending') throw INVALID_STATUS`),
+so it is not on 判据 II's approved-document path; reordering it is an attendance-line change with its
+own blast radius, and this slice does not take it. LEG 4 asserts it is **still** request-first, so
+this block cannot be read as 「全仓已同序」 and a future reorder there is forced to update this file.
+
+### 3.10.3 The cycle is LIVE, not a future one — and that is what LEG 1 constructs
+
+Unlike Q-D (whose cancel-round side does not exist until 判据 II lands), **both** sides of this pair
+are production code today:
+
+- **core**: `classifyAndLockAttendanceRequestForInstance` locks `attendance_requests`, and every one
+  of its call sites is reached with the `approval_instances` row already `FOR UPDATE`-held —
+  `dispatchAction`'s entry read, `bulkReassignApprovals` (`ApprovalProductService.ts:9346`),
+  `assertAttendanceCentralMutationFailClosed` (`w4c3b-central-approval-hooks.ts:247`). So core runs
+  原单据实例 → `attendance_requests`.
+- **plugin**: `executeRequestCancel` ran `attendance_requests` → 原单据实例.
+
+Both are reachable on a **pending** request (a user cancelling it vs. a bulk reassign / admin jump
+on its pending instance), i.e. on the same `(request, instance)` pair at the same time. LEG 1
+constructs exactly that and it deadlocks **deterministically** with `40P01`. This is therefore a
+pre-existing live defect that the lock's 「改为同序」 closes, not only a 判据 II prerequisite —
+recorded as such rather than folded into the slice's own narrative.
+
+### 3.10.4 The four legs
+
+| Leg | What it does | Kind |
+|---|---|---|
+| LEG 1 | core order vs. the PRE-FIX adapter order on one seeded `(request, instance)` pair ⇒ exactly one `40P01` | constructed race (standing proof) |
+| LEG 2 | POSITIVE CONTROL — both sides in the SHIPPED order ⇒ no deadlock, **and** both sides reach a defined outcome (the core classification resolves; the adapter's request lock returns `rowCount === 1`), so 「no deadlock」 is not 「nothing happened」 | constructed race |
+| LEG 3 | production source scan, anchored at both ends (`execute: async function executeRequestCancel(` … the adapter's own `SET status = 'cancelled', resolved_by = $2` write): the instance `FOR UPDATE` index is LESS than the request `FOR UPDATE` index | source scan |
+| LEG 4 | the two site counts (3 and 3) + the decision adapter is still request-first | mechanical enumeration |
+
+LEG 1 writes the pre-fix statement out by hand and **says so in the test**: the fix removed that
+order from production source, so it cannot be driven through live code any more. That is a
+disclosure, not a claim that the leg exercises production.
+
+### 3.10.5 Mutation ledger (this unit)
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-11 | restore the PRE-FIX `executeRequestCancel` (the whole file, `cp` from the pre-edit backup) and re-run Q-G | LEG 3 red; LEGs 1/2/4 still green | **RED exactly as predicted**: `AssertionError: 原单据实例 must be locked BEFORE attendance_requests: expected 1563 to be less than 238`, `Tests 1 failed | 3 passed | 23 skipped (27)`. Restored with `cp` and `cmp` proved byte-identical (`RESTORED-IDENTICAL`). |
+
+LEG 1's own discriminating power needs no separate mutation: it is a constructed race that produces
+a real `40P01`, and LEG 2 is its paired negative — the same harness, the shipped order, no deadlock.
+
+### 3.10.6 The one behaviour change, disclosed
+
+When BOTH rows are mutated concurrently between `prepare` and `execute`, the 409 that surfaces is
+now `'Approval changed during cancellation preparation'` where it used to be
+`'Request changed during cancellation preparation'`. Same status (409) and same code
+(`REQUEST_STATE_CONFLICT`); only the message differs, and only in a race. **No test asserts that
+precedence** — checked before the edit rather than after a green:
+
+```
+$ git grep -rn "Request changed during cancellation preparation\|Approval changed during cancellation preparation" -- . ':!docs'
+plugins/plugin-attendance/index.cjs:35117   (the throw itself)
+plugins/plugin-attendance/index.cjs:35146   (the throw itself)
+```
+
+2 hits, both the production `throw`s; zero assertions. Secondary note, also disclosed rather than
+argued away: the adapter now takes one row lock (the named request's own approval instance) before
+`resolveRequestCancellationActorPosture` authorizes the actor. That is the same blast radius as the
+`attendance_requests` row lock the adapter **already** took before that authorization call — this
+unit did not create the pattern, and moving authorization above both locks is a larger restructure
+than 「改为同序」 authorizes.
+
+### 3.10.7 Two-point wiring / census
+
+No new file and no `plugin-tests.yml` change ⇒ **no s6a re-pin**:
+
+```
+$ git status --short
+ M docs/development/approval-cancel-round-phase2-verification-20260918.md
+ M packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts
+ M plugins/plugin-attendance/index.cjs
+```
+
+The census file is already wired into CI (it carries the top-level `EXPECT_DB` sentinel and is in
+the attendance real-DB step); Q-G is appended to it. The `index.cjs` change adds **no DML and no new
+SQL statement** — it moves one existing `SELECT … FOR UPDATE` within the same enclosing function,
+and the `w4c0-dml-inventory` classifiers key on the enclosing function name, not on line numbers:
+
+```
+$ grep -rln "35109\|35110\|35141\|35142" scripts/ packages/core-backend/tests/ .github/
+(no output — no corpus pins a line number in index.cjs)
+$ node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
+  tests 60 | pass 60 | fail 0
+```
+
+### 3.10.8 Commands and results
+
+```
+$ node --check plugins/plugin-attendance/index.cjs
+  (no output, exit 0)
+
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+  (no output, exit 0)
+
+$ (packages/core-backend) EXPECT_DB=1 \
+  DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  ATTENDANCE_TEST_DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-lock-order-census.db.test.ts
+  Test Files  1 passed (1)
+        Tests  27 passed (27)          (23 -> 27)
+
+$ … run tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
+      tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+      tests/integration/attendance-w4c3b-central-approval.db.test.ts
+  Test Files  3 passed (3)
+        Tests  45 passed (45)
+
+$ … run tests/integration/approval-cancel-round-{creation,outlet-guards,seat-guards,redemption,\
+      node-timeout-effect}.db.test.ts tests/integration/attendance-schedule-dispatch.test.ts
+  Test Files  6 passed (6)
+        Tests  46 passed (46)
+
+$ (packages/core-backend) npx vitest run tests/unit/attendance-w7-w6r5-preservation-guard.test.ts \
+    tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts \
+    src/attendance/__tests__/w7-w6r5-guard-root-set.test.ts \
+    tests/unit/source-files-no-raw-control-bytes.test.ts \
+    tests/unit/approval-cancel-round-plugin-mirror-constant.test.ts
+  Test Files  5 passed (5)
+        Tests  46 passed (46)
+```
+
+**One RED that is NOT this unit's, established by running the pre-fix file:**
+`tests/integration/attendance-shift-swap.test.ts` fails 2 of 12 on this machine —
+`AssertionError: expected '2049-06-13' to be '2049-06-14'` and
+`expected '2049-06-14' to be '2049-06-15'`. Re-run with `plugins/plugin-attendance/index.cjs`
+restored byte-identical to its pre-edit state: **the same two failures, same messages**. A
+one-day date shift is a wall-clock/timezone artifact of this local testbed, not a lock-order
+effect; the file is reported here rather than omitted from the run list.
+
+---
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -951,11 +1144,15 @@ they are.
   refused by the partial unique index with 23505/409) is not built. M-7 mutates the outcome's
   *value*, not its presence.
 - **卡片失效 for a carded cancel round** — see §3.8: possible, pre-existing, unswept.
-- **判据 II's remaining census legs** — Q-D covers {document row, round row}. 判据 II adds two more
-  resources on the same path: `attendance_requests` and the rollout advisory lock. §3 C-2's global
-  order puts `attendance_requests` AFTER the original document instance, while the existing adapter
-  takes `attendance_requests → approval_instances(原单)` — the **opposite** — and the lock says
-  「现有适配器改为同序」. Q-D's three-leg technique is the template; the legs are not built.
+- **判据 II's remaining census legs** — **RESOLVED in §3.10** for the {原单据实例,
+  `attendance_requests`} pair: the adapter is reordered and census Q-G's four legs are built (the
+  pre-fix order proven to deadlock with a real `40P01`, the shipped order as the positive control,
+  the source anchored, the population counted). The rollout advisory lock's leg was already built as
+  Q-F (§3.9). What is still NOT established here: the **decision** adapter remains request-first
+  (deliberately — it is a pending-request path, out of 判据 II's scope, and LEG 4 pins it so a later
+  reorder must update this file), and the two relations the cancel adapter locks BETWEEN the pair
+  (`attendance_schedule_dispatch_requests`, `attendance_request_calculation_snapshots`) have no rank
+  in lock:227's class list — flagged for owner registration in §3.10.1, not silently ordered.
 - **R1 for the new guard point** — #5′ is an outlet anchor, not a chokepoint guard, so it takes no
   `CANCEL_ROUND_OUTLET_FORBIDDEN` negative control; whether §8 期 1's R1 count (9 sites) should grow
   to include it is an owner registration question, raised with the #5′ registration itself.
