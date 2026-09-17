@@ -1427,6 +1427,13 @@ written by the plugin's adapter. Stated as an artifact assertion rather than as 
 returned 200」, so a future edit that leaves a double bound turns these red instead of staying green
 while silently ceasing to be end-to-end.
 
+⚠️ **The positive control is POSTURE-DEPENDENT, and this is the disclosure.** Those rows exist
+because the adapter reached its write block, which the legacy write posture is what permits (the
+same fact §3.12.3 item 2 states about the calculation count). Under a shadow/authoritative posture
+the P14 branch runs first and could refuse, in which case the control's rows would be absent for a
+reason unrelated to which provider is bound. Read it as 「the real adapter wrote these rows ON THIS
+POSTURE」, not as a posture-independent proof of provenance.
+
 **How the plugin is loaded at all, established rather than assumed.** The server is built with
 `pluginDirs: []`, which is NOT 「no plugins」: `PluginLoader`'s constructor adopts
 `options.pluginDirs` only when `length` is truthy, so an empty array leaves `basePath='./plugins'`,
@@ -1455,6 +1462,7 @@ reported.
 
 | # | Mutation | Expected | Observed |
 |---|---|---|---|
+| M-19 | change the namespace constant's last hex digit (`…a7c4` → `…a7c5`) | the derivation's GOLDEN assertion red, and only it | **exactly 1 red**: `expected 'b1d0cb10-9eba-549a-957d-21c355dd9394' to be '46c05da2-ae5a-53c4-ac85-61190e0571ff'`; 184 green. The three self-consistency assertions above it (shape, determinism, distinctness) stayed GREEN under this mutation — which is precisely why the golden value had to be added: without it, 「the namespace is frozen」 was an asserted invariant with no test |
 | M-18 | revert the fix: pass `roundId` raw as `operationId` | the end-to-end case red; the double-backed 判据 II case red only on its new derivation assertion | **exactly 2 red, both predicted**: e2e `expected 500 to be 200`; double-backed `expected 'apr_ed58e25d-…' to be '2b919f37-61e8-574f-…'`. 11 green — so the fix is load-bearing AND the shape assertion in the double-backed case now has discriminating power it did not have before |
 
 ### 3.12.5 Commands and results
@@ -1522,7 +1530,11 @@ they are.
   next unit. §3.12 makes it STRONGER as well as cheaper: over a double, 「零业务取消」 could only be
   `calls.length === 0`; with the real boundary bound and an attendance-backed fixture it becomes a
   row assertion (原单 still `approved`, `attendance_requests` still `approved`, zero `revoke`
-  records) that a double cannot fake. M-5 is 判据 IV's
+  records) that a double cannot fake. ⚠️ One mapping the next unit must STATE rather than assume:
+  the lock's named mutation is 「把评估挪到入队之后」, and on the current code the statement after
+  `evaluateCancelRoundFinalInLock` is the C-1 call (`redeemCancelRoundInTxn`), not an enqueue. The
+  unit must name which statement the evaluation is moved past and argue why that is the lock's
+  入队, instead of letting a reader infer the mapping. M-5 is 判据 IV's
   own negative control and is NOT a substitute: it proves the `return` is load-bearing, not that a
   *business* evaluation failure leaves zero business cancellation behind (there is no business
   cancellation on this path yet).
