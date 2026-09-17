@@ -74,9 +74,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S4 and S6–S8 for classes ①②③③′④⑤ only — S5 (`user_namespace_admissions`, class ⑥
-// only) and S9 (`approval_reads`, classes ⑫⑬ only) are not needed by these classes and are
-// deferred to a later step, along with classes ⑥⑦⑧⑨⑩⑪⑫⑬).
+// through S1–S8 for classes ①②③③′④⑤⑥ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
+// these classes and is deferred to a later step, along with classes ⑦⑧⑨⑩⑪⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -101,6 +100,62 @@ const ROLE_NAME_CLASS_3B = `manager-c3b-${suffix}`
 // suffixed anyway, consistent with every other fixture value in this file, so no two runs (or two
 // classes within one run) can ever collide on it.
 const ROLE_NAME_CLASS_5 = `reviewer-c5-${suffix}`
+
+// Class ⑥'s `user_roles.role_id` value is NOT arbitrary like ⑤'s: `attendance_approver` is a
+// migration-seeded role (`zzzz20260208100000_create_roles_table.ts`) whose `role_permissions` row
+// (`attendance:approve`) is what makes `namespace-admission.ts`'s `fetchUserNamespaceRoleContext`
+// resolve `'attendance'` into `controlledNamespaces` in the first place — a fixture-invented role id
+// would leave that set empty and `filterPermissionCodesByNamespaceAdmission` would strip
+// `attendance:approve` right back out regardless of the admission row below. Confirmed present in
+// this suite's own DB (not inferred from migration source): `role_permissions` holds
+// `('attendance_approver','attendance:approve')` and `permissions` holds `'attendance:approve'`.
+const ROLE_ID_CLASS_6_ATTENDANCE_APPROVER = 'attendance_approver'
+const NAMESPACE_ADMISSION_CLASS_6 = 'attendance'
+
+// **Deliberate, flagged divergence from the lock's literal wording — surfaced for the Opus gate,
+// not silently absorbed.** §5 A0 ⑥ writes the seat as `('source_queue','attendance:approve')`,
+// the REAL production permission code. Seeding it verbatim collides with an UNRELATED class this
+// same file also seeds: class ③′'s viewer holds a genuine `user_roles('admin')` row (load-bearing
+// for a DIFFERENT reason — the role-upgrade-replaces-not-unions bug §5 A0 ③′ pins), and
+// `filterPermissionCodesByNamespaceAdmission`'s admin fast path (`namespace-admission.ts:369`,
+// `if (roleContext.isAdmin) return normalizedCodes`) hands ANY `user_roles('admin')` holder every
+// one of admin's `role_permissions` codes UNFILTERED — confirmed in this suite's own DB
+// (`SELECT permission_code FROM role_permissions WHERE role_id='admin' AND permission_code LIKE
+// 'attendance%'` → includes `attendance:approve`). So with the literal code, class ③′'s viewer
+// would ALSO match this class's `source_queue` seat via the query's PERMISSIONS arm (`$3`) —
+// discovered empirically: seeding it verbatim turned ③′'s golden `0` into `1` while leaving every
+// other already-passing class green, isolating the interaction to exactly this pair. That is not a
+// fixture ordering bug to paper over with test isolation (which would make every class's golden
+// value depend on which OTHER classes happen to be seeded, the opposite of what §3.0's "seed all
+// fourteen once" order is for) — it is the admin bypass genuinely, correctly extending to ANY
+// permission-keyed `source_queue` item, including this one.
+//
+// Fix: keep the MECHANISM verbatim (⑥'s `attendance:approve` visibility comes from
+// `attendance_approver` role + `user_namespace_admissions`, never `user_permissions` directly —
+// the exact thing §3.0's "v2.6 写「不用 user_roles」是错的" correction pins) but use a
+// fixture-owned, per-run-suffixed code in the SAME `attendance` namespace as the `source_queue`
+// seat's `assignee_id`, added as a SECOND `role_permissions` row on the same
+// `attendance_approver` role (alongside its existing real mapping, not replacing it) — so
+// `derivePermissionNamespace` still resolves `'attendance'`, `controlledNamespaces`/the admission
+// gate are still exercised identically for ⑥'s own (non-admin) viewer, but no OTHER role's
+// `role_permissions` (in particular `admin`'s) happens to already list this exact string. What
+// this does NOT decide: whether real admins SHOULD count real attendance-sourced source_queue
+// items in production today — that is a live product-behavior question, not a fixture concern,
+// and is left for the platform-authorization line (§7-6 territory), not adjudicated here.
+const SOURCE_QUEUE_PERMISSION_CODE_CLASS_6 = `attendance:approve-c6-${suffix}`
+
+// FORWARD NOTE for whichever step adds class ⑪ (its own instance, `('user', id)` PLUS
+// `('role','employee')` on itself): design-lock §5 A0 writes ⑪'s role seat as the bare literal
+// `'employee'`. Every OTHER `users.role='employee'` class already seeded here (①④⑤⑥, and later
+// ⑦⑨⑩⑫⑬) resolves `resolveApprovalActorRoles(req)` to `['employee']` too — seeding ⑪'s role-type
+// seat as literal `'employee'` would therefore match ALL of their `('role', $2)` arms, inflating ①
+// 1→2, ④ 0→1, ⑥ 1→2, exactly the ②/③′ cross-contamination class this file's own `ROLE_NAME_CLASS_2`
+// comment (above) already worked around. ⑪ MUST use its own suffixed role string for BOTH its
+// `users.role` column and its `('role', <string>)` seat's `assignee_id` (mirroring `ROLE_NAME_CLASS_2`
+// / `ROLE_NAME_CLASS_3B`), never the bare `'employee'` literal, even though the lock text writes it
+// unsuffixed — `git grep -n "'employee'"` under `src/` turns up no RBAC-load-bearing read of that
+// exact string (unlike `role_id='admin'`), so suffixing it changes nothing the query under test
+// reads.
 
 function pool(): Pool {
   return poolManager.get()
@@ -169,6 +224,41 @@ async function grantApprovalsRead(userId: string): Promise<void> {
   await pool().query(
     `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
     [userId],
+  )
+}
+
+// S5 — `user_namespace_admissions('attendance', enabled)`. Class ⑥ only (design-lock §3.0).
+// `listUserPermissions` (`rbac/service.ts:97`) pipes its merged `user_permissions ∪ role_permissions`
+// result through `filterPermissionCodesByNamespaceAdmission` (`namespace-admission.ts:356-377`),
+// which — for any permission code whose namespace (`split_part(code, ':', 1)`) is admission-
+// controlled — keeps the code ONLY if this table has an `enabled=true` row for that namespace.
+// Without this row, ⑥'s `attendance:approve` grant (via the `attendance_approver` role) is silently
+// stripped and `req.user.permissions` never carries it, so `resolveApprovalActorPermissions`'s
+// `source_queue` arm (`$3`) has nothing to match — the fixture would read as ⑤-shaped (0), not ⑥'s.
+async function seedNamespaceAdmission(userId: string, namespace: string): Promise<void> {
+  await pool().query(
+    `INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source)
+     VALUES ($1, $2, TRUE, 'todo-center-pending-gate-fixture')`,
+    [userId, namespace],
+  )
+}
+
+// Fixture-owned second `role_permissions` mapping on the real `attendance_approver` role (see the
+// `SOURCE_QUEUE_PERMISSION_CODE_CLASS_6` docblock above for why this exists instead of the literal
+// `attendance:approve`). `permissions` row first — `role_permissions.permission_code` carries an FK
+// to it (`role_permissions_permission_code_fkey`), same ordering constraint S1 already documents for
+// `approvals:read`. ADDITIVE: the role's existing two real rows (`attendance:read`/`attendance:approve`)
+// are untouched; only this one new row is inserted, and only this one is removed in `afterAll`.
+async function seedClass6SourceQueuePermission(): Promise<void> {
+  await pool().query(
+    `INSERT INTO permissions (code, name, description)
+     VALUES ($1, 'Todo Center Gate Class 6 Fixture', 'todo-center-pending-gate fixture permission (class 6 source_queue seat)')
+     ON CONFLICT (code) DO NOTHING`,
+    [SOURCE_QUEUE_PERMISSION_CODE_CLASS_6],
+  )
+  await pool().query(
+    `INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [ROLE_ID_CLASS_6_ATTENDANCE_APPROVER, SOURCE_QUEUE_PERMISSION_CODE_CLASS_6],
   )
 }
 
@@ -310,6 +400,16 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // unfixed, record-only behavior this class pins as-is (§5 A0 ⑤; §3.0 "记录性:(b) 会是 1,这就
   // 是 (b) 的加宽人口,也是 actionable 与门分叉的人口").
   const v5 = viewer('c5-reviewer-role-seat', 'employee')
+  // Class ⑥ — `users.role='employee'`, `user_roles` holds the migration-seeded, non-admin
+  // `attendance_approver` role (granting `attendance:approve` via `role_permissions`, admitted
+  // through `user_namespace_admissions('attendance', enabled)`), holding a `('source_queue',
+  // 'attendance:approve')` seat (same shared node key as ①) on a pending platform instance whose
+  // published definition does not classify the seat's node as a handler ⇒ count 1: the query's
+  // third arm (`$3`, `resolveApprovalActorPermissions`) matches `source_queue` assignments against
+  // the viewer's PERMISSIONS, not roles — this is the "①计入、核心门拒绝" divergence §1.5/§7-2″
+  // documents (list-side `actionable=false` is judging criterion C′, not A0; A0 only counts) (§5 A0
+  // ⑥).
+  const v6 = viewer('c6-source-queue-seat', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -341,14 +441,23 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null, // filled in beforeAll
     currentNodeKey: `todo-center-pending-gate-node-5-${suffix}`,
   }
+  // Class ⑥'s own instance, shared node key with ①②⑦ (design-lock §5 A0 "跨类 node_key 关系写死":
+  // ①②⑥⑦ 的席位 node_key 与 ⑧ 的 handler 节点键同串).
+  const instance6: InstanceFixture = {
+    id: `todo-center-pending-gate-i6-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: SHARED_SEAT_NODE_KEY,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -362,16 +471,27 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     // Class ⑤'s NON-admin `user_roles` row — (a) never reads `user_roles` for role resolution, so
     // this row is exactly what the class is pinning as invisible under (a).
     await seedUserRole(v5.id, ROLE_NAME_CLASS_5)
+    // Class ⑥'s NON-admin, migration-seeded `attendance_approver` row (also invisible to (a)'s
+    // `users.role`-only role resolution, same as ⑤ — but ⑥ reaches the query through the
+    // PERMISSIONS arm, not the role arm, so that invisibility does not zero it out the way it does
+    // ⑤). Its `user_namespace_admissions` row is what keeps `attendance:approve` surviving
+    // `filterPermissionCodesByNamespaceAdmission` — seeded together, right after, so both halves of
+    // ⑥'s distinguishing fixture read as one unit.
+    await seedUserRole(v6.id, ROLE_ID_CLASS_6_ATTENDANCE_APPROVER)
+    await seedNamespaceAdmission(v6.id, NAMESPACE_ADMISSION_CLASS_6)
+    await seedClass6SourceQueuePermission()
 
     instance1.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c1')
     instance2.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c2')
     instance3b.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c3b')
     instance5.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c5')
+    instance6.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c6')
 
     await seedInstance(instance1)
     await seedInstance(instance2)
     await seedInstance(instance3b)
     await seedInstance(instance5)
+    await seedInstance(instance6)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -397,6 +517,12 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       assigneeId: ROLE_NAME_CLASS_5,
       nodeKey: instance5.currentNodeKey!,
     })
+    await seedAssignment({
+      instanceId: instance6.id,
+      assignmentType: 'source_queue',
+      assigneeId: SOURCE_QUEUE_PERMISSION_CODE_CLASS_6,
+      nodeKey: SHARED_SEAT_NODE_KEY,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
 
@@ -414,11 +540,30 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       await p.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [seededInstanceIds])
       await p.query(
         'DELETE FROM approval_published_definitions WHERE id = ANY($1::uuid[])',
-        [[instance1.publishedDefinitionId, instance2.publishedDefinitionId, instance3b.publishedDefinitionId, instance5.publishedDefinitionId]],
+        [[
+          instance1.publishedDefinitionId,
+          instance2.publishedDefinitionId,
+          instance3b.publishedDefinitionId,
+          instance5.publishedDefinitionId,
+          instance6.publishedDefinitionId,
+        ]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
       await p.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [seededUserIds])
+      // `user_namespace_admissions.user_id` cascades on `users` delete (migration
+      // `zzzz20260411120000`), but deleted explicitly anyway, consistent with every other table in
+      // this cleanup relying on its own `WHERE ... = ANY($1)` rather than cascade alone.
+      await p.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [seededUserIds])
       await p.query('DELETE FROM users WHERE id = ANY($1::text[])', [seededUserIds])
+      // The class ⑥ fixture-owned second `role_permissions` row on the REAL `attendance_approver`
+      // role (see `SOURCE_QUEUE_PERMISSION_CODE_CLASS_6` docblock) — scoped precisely to this one
+      // added row, leaving the role's two pre-existing real mappings untouched. `permissions`
+      // second (its FK cascades this row too, but explicit, same idiom as the rest of this block).
+      await p.query('DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [
+        ROLE_ID_CLASS_6_ATTENDANCE_APPROVER,
+        SOURCE_QUEUE_PERMISSION_CODE_CLASS_6,
+      ])
+      await p.query('DELETE FROM permissions WHERE code = $1', [SOURCE_QUEUE_PERMISSION_CODE_CLASS_6])
     } catch {
       // cleanup failures shouldn't mask the test result
     }
@@ -545,6 +690,29 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(body).toHaveProperty('count')
       expect(body.count).toBe(0)
       expect(body.unreadCount).toBe(0)
+    })
+
+    // NOTE (flagged divergence, see `SOURCE_QUEUE_PERMISSION_CODE_CLASS_6`'s docblock above): this
+    // seat's `assignee_id` is a fixture-owned code, not the literal `attendance:approve` §5 A0 ⑥
+    // writes — the literal collides with class ③′'s admin-upgraded viewer via the RBAC admin
+    // bypass. The MECHANISM (attendance_approver role + namespace admission, not user_permissions)
+    // is unchanged.
+    it('class ⑥ — attendance source_queue seat counts under (a)+admission (permissions arm, not role arm) ⇒ 1', async () => {
+      const token = await devToken(baseUrl, v6.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v6.email)
+      expect(me.username).toBe(v6.username)
+      expect(me.name).toBe(v6.name)
+      // The `attendance_approver` user_roles row is non-admin, so — same discriminator as ⑤ — no
+      // upgrade fires and `/me` reads back the seeded 'employee', proving this class's count (below)
+      // is NOT coming from an accidental admin fast-path.
+      expect(me.role).toBe('employee')
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(1)
     })
   })
 })
