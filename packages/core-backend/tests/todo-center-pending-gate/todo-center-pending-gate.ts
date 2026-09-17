@@ -8,8 +8,12 @@
  * — is never exercised there), `GET /api/approvals/pending-count` must return the fourteen
  * lock-mandated golden values in §5's A0 row for the fourteen viewer classes (①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬). This
  * step adds classes ⑫⑬ (the `approval_reads` pair) — every A0 class now has a fixture and a
- * golden-value assertion. Judges A/B/C/C'/D/F remain deferred (see the fixture-plumbing docblock
- * below for the S9 note).
+ * golden-value assertion. Judge F (no new tables) is DISCHARGED — it carries no positive control
+ * in §5's own table (its 正控 column is `—`: a recorded fact, not a mutation-tested gate) and is
+ * discharged by a `git diff --quiet` command recorded in
+ * `docs/development/todo-center-phase1-verification-20260918.md`, not by test content in this
+ * file. Judges A/B/C/C'/D remain deferred (see the fixture-plumbing docblock below for the S9
+ * note).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
