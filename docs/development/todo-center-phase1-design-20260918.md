@@ -168,7 +168,24 @@ $ grep -inE "BEGIN|COMMIT|ROLLBACK|transaction|FOR UPDATE|pg_advisory|advisory" 
 请求(`services/pending-source-registry.ts:74-108`)。本切片是纯读投影,不持有、不等待任何数据库锁,
 也不参与任何应用层互斥。
 
-## 5. 与既有代码的接缝(file:line,工作树 HEAD=63fc3d699550e5d39cb95536c7e99d99314d4346)
+## 5. 与既有代码的接缝(file:line)
+
+**锚点最后一次机械核对(门审 P3-3 修复,2026-09-18):** 下表七个 file:line 锚点最初写于工作树
+`HEAD=63fc3d699550e5d39cb95536c7e99d99314d4346`,此后分支又前进了若干轮修复提交,钉死单个数字会
+在下一次提交时立刻过期(正是门审 P3-3 指出的问题)。改为可自证的形式:锚点所在的四个源文件
+(`routes/approvals.ts`、`src/index.ts`、`services/approval-realtime.ts`、`vitest.config.ts`)
+自 `63fc3d699` 起在本分支上字节未变,核对命令与结果如下——**任何编辑此表的人,先跑同一条命令确认
+仍为空 diff 再改数字,空 diff 就不用改**:
+
+```
+$ git diff --stat 63fc3d699 HEAD -- packages/core-backend/src/routes/approvals.ts \
+    packages/core-backend/src/index.ts \
+    packages/core-backend/src/services/approval-realtime.ts \
+    packages/core-backend/vitest.config.ts
+(空,exit 0 diff --stat 无输出)
+```
+（本次核对时 `HEAD=d2009f9b47f0008ae0ea5ffc18a28f1bd475ef9b`;`63fc3d699..HEAD` 之间的六条提交
+只碰了两个 workflow 文件、一个 docblock 注释块和两份验证/设计 MD,均不在上面四个文件之列。）
 
 | 接缝 | 位置 |
 |---|---|
