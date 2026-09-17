@@ -316,6 +316,86 @@ describeIfDatabase('cancel-round redemption (WI-13, 判据 III only): revoke/rej
   )
 
   it(
+    '判据 III 正控 2 (§14.2, §6 "仅原 requester"): a non-original-requester actor cannot revoke ' +
+      'the cancel-round instance (403 APPROVAL_REVOKE_FORBIDDEN — NOT the create-time ' +
+      'CANCEL_ROUND_REQUESTER_ONLY, a different code on a different path, §14.1 note)',
+    async () => {
+      // Gate review P1-B row 1: this is the positive-evidence half of §6 "仅原 requester" for the
+      // REVOKE branch (A4, `requesterSnapshot?.id !== actor.userId`) — distinct from WI-16's
+      // create-time `CANCEL_ROUND_REQUESTER_ONLY` gate in `creation.db.test.ts`, which the lock
+      // itself warns looks alike (§14.1: "两者混同正是…陷阱").
+      const suffix = `revoke-forbidden-${TS}`
+      const fixture = await seedPendingCancelRound(suffix)
+      const impostorId = `wi13-impostor-${suffix}`
+      const impostorToken = await authToken(baseUrl, impostorId)
+
+      const revoke = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, impostorToken, {
+        method: 'POST',
+        body: { action: 'revoke' },
+      })
+      expect(revoke.status).toBe(403)
+      const body = (await revoke.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('APPROVAL_REVOKE_FORBIDDEN')
+
+      // The round must be untouched by the rejected attempt — still pending.
+      const outcome = await roundOutcome(fixture.roundInstanceId)
+      expect(outcome.outcome).toBe('pending')
+      expect(outcome.ended_at).toBeNull()
+
+      // POSITIVE CONTROL — the true original requester still succeeds against the SAME round,
+      // proving the guard above isn't vacuously green because the round was broken some other way.
+      const revokeByRequester = await jsonRequest(
+        baseUrl,
+        `/api/approvals/${fixture.roundInstanceId}/actions`,
+        fixture.requesterToken,
+        { method: 'POST', body: { action: 'revoke' } },
+      )
+      expect(revokeByRequester.status, await revokeByRequester.clone().text()).toBe(200)
+      const outcomeAfter = await roundOutcome(fixture.roundInstanceId)
+      expect(outcomeAfter.outcome).toBe('withdrawn')
+    },
+  )
+
+  it(
+    '§14.1 seed evidence: reject without a comment is rejected with the named error code ' +
+      '(400 REJECT_COMMENT_REQUIRED, not a bare 400), proving the comment gate is present for ' +
+      'the cancel-round node',
+    async () => {
+      // Gate review P1-B row 2: the "chain" test above always sends a comment on reject, so it
+      // never exercises the comment gate's negative side — the seed's node policy resolves via
+      // `effectiveCommentRequired` to `'reject_only'` (lock §14.1), which must actually 400 when
+      // the request has no `comment`, not silently accept it.
+      const suffix = `reject-comment-${TS}`
+      const fixture = await seedPendingCancelRound(suffix)
+
+      const reject = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+        method: 'POST',
+        body: { action: 'reject' },
+      })
+      expect(reject.status).toBe(400)
+      const body = (await reject.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('REJECT_COMMENT_REQUIRED')
+
+      // The round must be untouched by the rejected attempt — still pending.
+      const outcome = await roundOutcome(fixture.roundInstanceId)
+      expect(outcome.outcome).toBe('pending')
+      expect(outcome.ended_at).toBeNull()
+
+      // POSITIVE CONTROL — the same reject action WITH a comment succeeds and terminates the
+      // round, proving the 400 above isn't vacuously green because reject itself was broken.
+      const rejectWithComment = await jsonRequest(
+        baseUrl,
+        `/api/approvals/${fixture.roundInstanceId}/actions`,
+        fixture.approverToken,
+        { method: 'POST', body: { action: 'reject', comment: 'positive control for REJECT_COMMENT_REQUIRED' } },
+      )
+      expect(rejectWithComment.status, await rejectWithComment.clone().text()).toBe(200)
+      const outcomeAfter = await roundOutcome(fixture.roundInstanceId)
+      expect(outcomeAfter.outcome).toBe('rejected')
+    },
+  )
+
+  it(
     'DISCRIMINATING CONTROL: revoking one document\'s round does not touch a DIFFERENT ' +
       "document's own pending round (keyed on engine_instance_id, not \"any pending round\")",
     async () => {
