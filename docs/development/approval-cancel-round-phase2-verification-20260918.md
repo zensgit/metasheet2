@@ -1316,6 +1316,38 @@ $ … run tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts
         Tests  45 passed (45)
 ```
 
+### 3.11.9 Census for the new file and the two new error codes
+
+Two burns in this repo's ledger are 「a token list is the population, so a token it does not name
+stays outside the denominator while the guard goes green」 (the O2 trap) and 「a new source file
+needs its census pins」. Both checked mechanically rather than assumed:
+
+```
+$ git grep -rn "CANCEL_ROUND_WINDOW_ANCHOR_MISSING" -- scripts packages/core-backend/tests .github
+  packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:780  (prose)
+  packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:810  (the assertion)
+  2 lines
+```
+The only consumer of an existing sibling cancel-round code is the acceptance assertion itself:
+there is **no** enumerating guard whose denominator would need
+`CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE` / `CANCEL_ROUND_BUSINESS_TARGET_MISSING` added.
+
+```
+$ git grep -n "src/core/" scripts/ops/ci-realdb-step-contract.mjs .github/workflows/plugin-tests.yml
+  0 lines
+
+$ git diff --name-only 0225a1aa4..HEAD -- .github/workflows/plugin-tests.yml
+  0 lines
+```
+Neither CI contract enumerates `src/core/`, and `plugin-tests.yml` is untouched — so **no s6a
+provenance re-pin** is owed by this unit (the s6a hash is a function of that workflow file).
+
+The one guard that DOES enumerate source files was run rather than reasoned about:
+`tests/unit/source-files-no-raw-control-bytes.test.ts`, together with the plugin-mirror constant
+guard and both boundary suites — `Test Files 4 passed (4) / Tests 39 passed (39)`.
+
+---
+
 ⚠️ The suite is EXCLUDED from the default vitest config and reports `No test files found, exiting
 with code 1` when run without `--config vitest.integration.config.ts` — an exit-1 that is easy to
 misread as an infrastructure problem rather than the wrong runner. Recorded because it cost a run.
@@ -1353,10 +1385,30 @@ they are.
   own negative control and is NOT a substitute: it proves the `return` is load-bearing, not that a
   *business* evaluation failure leaves zero business cancellation behind (there is no business
   cancellation on this path yet).
-- **The external refusal end-to-end** — a caller now EXISTS (§3.11), but the savepoint's SQL-level
-  semantics (§2.2) and the boundary's statement sequence (§2.4) have still not been run against each
-  other, because the acceptance cases bind a double in place of the real boundary. This is the
-  single highest-value thing the next unit can close, and it subsumes the org-key question.
+- **The external refusal end-to-end — NEXT UNIT, and it is CHEAP.** A caller now exists (§3.11),
+  but the savepoint's SQL-level semantics (§2.2) and the boundary's statement sequence (§2.4) have
+  still not been run against each other, because the acceptance cases bind a double.
+  **The real boundary is ALREADY BOUND in that same harness** — that is what §3.11.6's
+  「provider is being replaced」 warning proves, since nothing but plugin-attendance registers this
+  port. So the end-to-end case is: seed the attendance-backed fixture and simply do NOT bind a
+  double. The fixture is already the right shape (`leave` + `approved` ⇒ the adapter's
+  `approvedLeave` branch, so its `INVALID_STATUS` gate passes). ONE case then exercises the
+  isolation assert, the rollout-lock `pg_locks` assert (closing §3.11.3's construction argument
+  with a measurement), posture resolution, replay preflight, the seal/outbox, and the savepoint
+  composition. An earlier draft of this bullet implied the work was expensive; it is a handful of
+  lines, and it is the next unit's first item.
+- **Two inputs the double cannot refuse, and the real boundary might** — named here so the
+  end-to-end case knows what to look for:
+  (a) **replay preflight with a never-seen `operationId`.** The HTTP path's
+  `resolveRequestOperationId` often returns `null`, which routes into `adapter.prepare` and skips
+  the seal; this call ALWAYS supplies a non-null id and so takes the `prepareIdentity` +
+  preflight + seal path. What the operation registry does with an id it has never registered was
+  NOT read.
+  (b) **the snapshot expectations.** `requestBody: {}` yields `expectedSnapshotVersion = 0` and
+  `expectedSnapshotHash = '0'.repeat(64)`, and `loadLatestRequestSnapshotToken` runs in both
+  prepare and execute. If anything compares those defaults against the loaded token, every redeem
+  of a request that HAS a snapshot fails. That HTTP clients may omit the same fields is weak
+  evidence it is tolerated, not proof.
 - **账侧完整取消结果逐字节等价 + `unrecoverableExpired` 呈现** (lock §8 期 1) — only the refusal
   branch's bytes are covered (§2.3); the success branch's full-cancellation result is not.
 - **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 II and 判据 IV
