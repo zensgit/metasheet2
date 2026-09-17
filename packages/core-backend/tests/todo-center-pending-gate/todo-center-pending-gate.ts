@@ -90,6 +90,31 @@
  * `register(approvalPendingSource)`) after every test in the block, defensive against this ceasing
  * to be the last describe block in a future edit.
  *
+ * **Correction (round-2 gate P2-1, `impl-gate-B-slice1-round2-20260918.md`): tests (1)-(4) above
+ * prove `pending-source-registry.ts`'s own try/catch, not the row B wording's named mechanism —
+ * "共享查询自己的 DB 读" (the shared query's OWN read) — failing. The report's own mutation (M8: break
+ * `listApprovalPendingRowsForViewer`'s SELECT so the registry's stub is never reached) showed a real
+ * `pool.query` rejection propagates to 200 + `unavailable`, with zero permanent test guarding it.
+ * Test (5), added in this pass, is that permanent guard: `vi.spyOn` on the real `pg.Pool` instance
+ * `approval-pending-source.ts` imports (the SAME fault-injection shape as
+ * `approval-routing-policy-failclose.api.test.ts`'s `orgPolicyProbeFaultEnabled` spy — `Reflect.
+ * apply`-forwarding every non-targeted call to the real implementation), targeting only the
+ * `matching_instances` CTE unique to the row-version SELECT. This is a REAL `pool.query` rejection
+ * reaching `approvalPendingSource.listPendingForUser` and then `pending-source-registry.ts`'s
+ * try/catch from the OUTSIDE — no registry-level stub is registered — so it exercises the exact
+ * mechanism (1)-(4) do not: the shared query's own DB read failing. `GET /api/todo/count` (a
+ * DIFFERENT SELECT, no `matching_instances` CTE) staying `ok` in the SAME test proves the fault is
+ * scoped to the targeted query, not the pool globally. **Coverage is now half, not full**: test (5)
+ * exercises `listApprovalPendingRowsForViewer`'s SELECT (the `/api/todo/items` path) failing for
+ * real; `countApprovalPendingForViewer`'s SEPARATE SELECT (the `/api/todo/count`-only path — see
+ * `approval-pending-source.ts`'s `countPendingForUser`) has NO equivalent real-failure test — this
+ * pass deliberately left it healthy to prove the fault's scoping, not because that SELECT's own
+ * read failure is out of scope for row B's wording. A future mutation on `countApprovalPendingForViewer`'s
+ * SELECT text alone would find nothing red here. Judge B's API-layer half is DISCHARGED for the
+ * row-version query as of test (5), not before it, and NOT YET for the count-only query — see
+ * `docs/development/todo-center-phase1-verification-20260918.md`'s "P2-1" entry (FIX-ROUND 5 PASS)
+ * for the disposition and the count-query gap left open.
+ *
  * (See the fixture-plumbing docblock below for the S9 note.)
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
@@ -103,9 +128,16 @@
  * vitest config.
  */
 import { randomUUID } from 'node:crypto'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
+// Aliased on import: this file already has its OWN module-scope `function pool(): Pool { return
+// poolManager.get() }` helper (line ~272, used throughout the S1-S9 fixture setup) returning the
+// `ConnectionPool` wrapper, not the raw `pg.Pool` — a same-name collision with a plain `import {
+// pool }` would silently shadow one or the other depending on the bundler's declaration-hoisting
+// order (confirmed empirically: the local function wins), not a TypeScript-caught error (this file
+// is outside `tsconfig.json`'s `include` — `**/*.test.ts` only — so `tsc --noEmit` never sees it).
+import { pool as approvalServicePgPool } from '../../src/db/pg'
 import { pendingSourceRegistry, type PendingItem } from '../../src/services/pending-source-registry'
 import { approvalPendingSource, APPROVAL_PENDING_SOURCE_NAME } from '../../src/services/approval-pending-source'
 import type { Pool } from 'pg'
@@ -1486,6 +1518,66 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       // unlike both mutations above.
       expect(Object.values(itemsResult.body.sources)).not.toContain('unavailable')
       expect(Object.values(countResult.body.sources)).not.toContain('unavailable')
+    })
+
+    it("a REAL DB read failure inside the shared query's OWN row-version SELECT (not a registry-level stub) is reported `unavailable` on GET /api/todo/items, while GET /api/todo/count — a DIFFERENT SELECT with no `matching_instances` CTE — stays `ok` on the SAME viewer: proof this is the shared query's own read failing, not the registry's try/catch that every other Judge B case above exercises (impl-gate-B-slice1-round2-20260918.md P2-1: those four cases only prove `pending-source-registry.ts`'s catch branches, not `pool.query` rejection propagating out of `approval-pending-source.ts`/`approval-pending-query.ts` itself)", async () => {
+      expect(approvalServicePgPool, 'the real pg Pool must be available for this fault-injection test').toBeTruthy()
+      const servicePool = approvalServicePgPool as Pool
+      const token = await devToken(baseUrl, v1.id)
+
+      // Positive control, asserted live, BEFORE the fault is armed — without this, a pre-existing
+      // regression that already made class ①'s item disappear would make the mutation assertion
+      // below pass vacuously.
+      const baselineItems = await fetchTodoItems(baseUrl, token)
+      expect(baselineItems.status).toBe(200)
+      expect(baselineItems.body.sources).toEqual({ approval: 'ok' })
+      expect(baselineItems.body.items.some((item) => item.id === instance1.id)).toBe(true)
+
+      // Same fault-injection shape as `approval-routing-policy-failclose.api.test.ts`'s
+      // `orgPolicyProbeFaultEnabled` spy: `vi.spyOn` the SAME real `pg.Pool` instance
+      // `approval-pending-source.ts` calls into (`import { pool } from '../db/pg'` — the module
+      // singleton, not a per-test double), matching only the target SQL text and
+      // `Reflect.apply`-forwarding every other call (including the count query below) to the real
+      // implementation, so this is `pool.query` itself rejecting — not a fake `PendingSource`
+      // registered in `approval`'s place.
+      const originalQuery = servicePool.query
+      const querySpy = vi.spyOn(servicePool, 'query').mockImplementation(function (this: Pool, ...args: unknown[]) {
+        const text = args[0]
+        // `matching_instances` is the CTE name unique to `listApprovalPendingRowsForViewer`'s
+        // row-version SELECT (`approval-pending-query.ts`) — `countApprovalPendingForViewer`'s
+        // SELECT has no CTE at all, so this fault targets exactly the query judging criterion B's
+        // "共享查询自己的读" names, and nothing else the same viewer's requests touch.
+        if (typeof text === 'string' && text.includes('matching_instances')) {
+          return Promise.reject(new Error('todo-center-gate: simulated real pool.query rejection for the shared row-version SELECT'))
+        }
+        return Reflect.apply(originalQuery, this, args)
+      })
+
+      try {
+        const itemsResult = await fetchTodoItems(baseUrl, token)
+        expect(itemsResult.status).toBe(200)
+        expect(itemsResult.body.sources).toEqual({ approval: 'unavailable' })
+        expect(itemsResult.body.items).toHaveLength(0)
+
+        // The distinguishing evidence: `/api/todo/count` runs `countApprovalPendingForViewer`'s
+        // SELECT (no `matching_instances` CTE) and is UNTOUCHED by this fault — the SAME viewer,
+        // SAME moment, one endpoint `unavailable` and the other `ok` + the correct count. A
+        // pool-wide outage (or a fault on the wrong query) would fail this half too.
+        const countResult = await fetchTodoCount(baseUrl, token)
+        expect(countResult.status).toBe(200)
+        expect(countResult.body.sources).toEqual({ approval: 'ok' })
+        expect(countResult.body.count).toBe(1)
+      } finally {
+        querySpy.mockRestore()
+      }
+
+      // Fault removed — the SAME endpoint that just reported `unavailable` returns to `ok` on the
+      // SAME viewer immediately after, confirming the spy (not some latent connection-pool state)
+      // was the only thing that changed.
+      const recoveredItems = await fetchTodoItems(baseUrl, token)
+      expect(recoveredItems.status).toBe(200)
+      expect(recoveredItems.body.sources).toEqual({ approval: 'ok' })
+      expect(recoveredItems.body.items.some((item) => item.id === instance1.id)).toBe(true)
     })
   })
 })

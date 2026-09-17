@@ -1166,6 +1166,14 @@ the lock's own text ("AuthService 层吞错... 不在本格,见 §7-6").
 
 Judge B (API-layer half) is DISCHARGED.
 
+> **Correction (FIX-ROUND 5 PASS, mark-not-void per repo convention): the flat "DISCHARGED" above
+> was round-2-gated as too strong for the "共享查询自己的读失败" cell specifically — tests 1-4 above
+> all substitute at the registry level (`pendingSourceRegistry.clear()` + a stub `PendingSource`),
+> which proves `pending-source-registry.ts`'s own try/catch, not a real `pool.query` rejection
+> propagating out of the shared query itself. See this document's new "## FIX-ROUND 5 PASS" section
+> (end of file) for the added test (a real `vi.spyOn`-injected `pool.query` rejection, not a
+> registry stub) and what it does and does not now cover.**
+
 ## FINALIZATION PASS (2026-09-18, lane-continuation step — B-1 slice, per goal doc's per-slice
 ## deliverable rule). This section supersedes stale evidence pinned below it; it does not delete
 ## the sections above, which remain accurate point-in-time records of the state they were taken
@@ -2775,6 +2783,17 @@ own self-cert commands were re-run in this pass, not copied from memory — see 
   ——若有,补一条走 approval 源本身、真实 DB 读失败(如把行版查询的 SELECT 打坏一列)的常驻用例;
   若无该缝,诚实降级验证 MD 的判据 B 小节标题(去掉 "DISCHARGED, no source-file mutation needed" 的
   过强表述)。**不得**再次在 registry 注入点造探针——那正是本发现点名的错法。
+
+  > **Correction (FIX-ROUND 5 PASS): CLOSED.** 该缝确实存在——`listApprovalPendingRowsForViewer` /
+  > `countApprovalPendingForViewer` 都把 `pool: Pool` 作为显式参数,且 `approval-pending-source.ts`
+  > 调用它们时传入的是 `db/pg.ts` 导出的**真实单例** `pg.Pool`,可用 `vi.spyOn` 直接注入(与
+  > `approval-routing-policy-failclose.api.test.ts` 的 `orgPolicyProbeFaultEnabled` 探针同一手法,
+  > 非 registry 注入点)。已加一条常驻用例(仅打坏行版 SELECT,`GET /api/todo/count` 走的是另一条
+  > 无 `matching_instances` CTE 的 SELECT,保持 `ok` 以证明故障是被打中的那条查询自己的,不是整个
+  > pool);见文末"## FIX-ROUND 5 PASS"新增小节。**半闭合,如实说明**:`countApprovalPendingForViewer`
+  > 自己的 SELECT 读失败仍无等价常驻用例(本轮的探针刻意放过它以证明故障作用域,不是遗漏)——判据 B
+  > 的"共享查询自己的读失败"格现在是**行版查询半边**DISCHARGED,**计数查询半边**仍未验证。
+
 - **P2-2**(round-2 编号,写进 PR body 首段,不必改代码):lane 非 required + 门文件在 38 个
   `*-ci-wiring` 闭世界之外,两洞叠加;PR body 待用文本已在文末小节起草,须在开 PR 前更新为闭合
   P1-1 之后的措辞(去掉对 P1-1 的"owner call needed"框架,已在本节"PR body 待用文本"段落 1 完成)。
@@ -2789,3 +2808,283 @@ own self-cert commands were re-run in this pass, not copied from memory — see 
   (`2dc296f1`/`fff0fcca`/`e4b091bd`)**不是本轮或本 lane 产生的**,原样不动,留给该库的所有者自查。
 
 这份清单严格照抄 round-2 门审报告 §7 的编号与描述,只标记本轮处理了哪一条,不预判下一步该选哪条。
+
+## FIX-ROUND 5 PASS (2026-09-18, fifth lane-continuation step). Base at start of this pass: HEAD =
+`58dff909e49b852d2992698d4c86d19c1aeeb16f`, merge-base with `origin/main` unchanged at
+`89f1ecdee2c3b70205a318074824c834bc6a5c7e` (`git merge-base origin/main HEAD` re-run this pass, same
+value). This pass addresses round-2 gate report `impl-gate-B-slice1-round2-20260918.md`'s **P2-1
+only** (the task book's own instruction this step: pick one to two not-yet-handled items from the
+report's P1/P2/P3 list — P1-1 was already closed by FIX-ROUND 4 PASS above; P2-2/P3-1 are PR-body-only
+obligations with no PR yet open, so nothing to close before that step; P3-2/P3-3/P3-4/P3-5 are
+independent doc-only NITs left for a subsequent step rather than bundled into this code-behavior
+commit — mixing them would force a re-verify of unrelated doc corrections alongside a real test
+addition). It does not touch or re-litigate FINALIZATION PASS, FIX-ROUND PASS, FIX-ROUND 2/3/4 PASS
+above (repo convention: mark the sentence, don't void the section) — the two forward-pointing
+correction markers this pass adds (after "Judge B (API-layer half) is DISCHARGED." and after FIX-ROUND
+4 PASS's own P2-1 carry-forward bullet) are additive, not rewrites.
+
+### What the report actually required, restated precisely before claiming it's done
+
+`impl-gate-B-slice1-round2-20260918.md`'s P2-1: the four existing Judge B tests only exercise
+`pending-source-registry.ts`'s own try/catch (via `pendingSourceRegistry.clear()` + a throwing stub),
+not the row's named mechanism — "共享查询自己的 DB 读" (the shared query's OWN read) failing and that
+failure propagating to `unavailable`. The report's own M8 mutation (breaking
+`listApprovalPendingRowsForViewer`'s SELECT column list) proved the propagation works today but found
+**zero permanent test guarding it**. Required: either (a) confirm an injectable seam exists and add a
+permanent test using a REAL DB read failure (not a registry stub), or (b) if no such seam exists,
+downgrade the Judge B section's "DISCHARGED, no source-file mutation needed" heading. The report
+explicitly named two acceptable shapes for (a): "把行版查询的 SELECT 打坏一列的常驻用例" or "注入一个
+会 reject 的 pool" — this pass takes the second.
+
+### The seam: both shared-query functions already take `pool` as an explicit parameter
+
+```
+$ grep -n "^export async function \(count\|list\)ApprovalPendingRowsForViewer\|^export async function countApprovalPendingForViewer" packages/core-backend/src/services/approval-pending-query.ts
+137:export async function countApprovalPendingForViewer(
+196:export async function listApprovalPendingRowsForViewer(
+```
+`countApprovalPendingForViewer(pool: Pool, viewer, sourceSystem)` and
+`listApprovalPendingRowsForViewer(pool: Pool, viewer, sourceSystem)` both take the real `pg.Pool` as
+their first argument (`approval-pending-query.ts`); `approval-pending-source.ts` calls both with the
+SAME singleton imported via `import { pool } from '../db/pg'`. That singleton is a real, live `pg.Pool`
+instance reachable from a test via the identical import path — no mock, no DI container, just
+`vi.spyOn` on the object the running server's own request handler already holds a reference to. This
+is the exact shape `approval-routing-policy-failclose.api.test.ts` already uses for an unrelated
+fail-close probe (`orgPolicyProbeFaultEnabled` / `isRoutingPolicyProbeSql`, that file's own
+`beforeAll`): `Reflect.apply`-forward every call except the one matching a target-SQL substring, which
+rejects instead. This pass follows that precedent rather than inventing a new fault-injection shape.
+
+### A name collision the gate file's own local helper created — found empirically, not by tsc
+
+The gate file (`todo-center-pending-gate.ts`) already declares a module-scope
+`function pool(): Pool { return poolManager.get() }` (line ~286, used throughout the S1-S9 fixture
+setup — 17 call sites) that returns the `ConnectionPool` WRAPPER, not the raw `pg.Pool`. A first
+attempt at this test imported the raw pool as `import { pool } from '../../src/db/pg'` — same local
+name as the existing function declaration, in the SAME module scope. This is NOT a TypeScript error
+(see next subsection for why) but IS a runtime shadowing bug: the bundler's declaration-hoisting
+order made the LOCAL FUNCTION win, confirmed by instrumenting the test body and printing the bound
+value before writing a single assertion:
+```
+DEBUG servicePool { typeofPool: 'function', isNull: false,
+  stringForm: 'function pool() {\n  return __vite_ssr_import_3__.poolManager.get();\n}',
+  ownKeys: [ 'length', 'name', 'prototype' ] }
+```
+— `pool` resolved to the local helper, not the `db/pg.ts` export, and `vi.spyOn(that, 'query')` threw
+`query does not exist` (tinyspy's error for a property found neither as the object's own nor its
+direct prototype's — a plain `Function` object has no `query`). Fixed by aliasing the import:
+`import { pool as approvalServicePgPool } from '../../src/db/pg'`, with a comment at the import site
+explaining the collision for the next editor. Re-run after the fix: passes (full output below).
+
+**This is disclosed as its own finding, not folded into "a bug I fixed along the way"**: it means a
+plain `import { pool } from '../db/pg'` anywhere else in THIS SPECIFIC FILE would silently resolve to
+the wrong thing, with no compiler diagnostic — see the next subsection for why tsc cannot catch it.
+
+### `tsc --noEmit exit 0` does not, and never did, cover this file — a verification-station gap, named explicitly
+
+Every prior pass in this document, and the round-2 gate report itself (§2.3 "typecheck exit 0"), cites
+`npx tsc --noEmit` as covering "no type errors in the branch's changes." It does not cover
+`todo-center-pending-gate.ts`, and did not catch the `pool`/`pool` collision above:
+```
+$ grep -n '"include"' -A 8 packages/core-backend/tsconfig.json
+  "include": [
+    "src/**/*",
+    "core/**/*",
+    "types/**/*",
+    "scripts/encrypt-dingtalk-destination-secrets.ts",
+    "scripts/encrypt-dingtalk-integration-secrets.ts"
+  ],
+$ grep -n '"exclude"' -A 2 packages/core-backend/tsconfig.json
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/__tests__/**"]
+```
+`tests/` is not in `include` at all — this is stronger than "excluded by the `.test.ts` pattern" (the
+gate file has no `.test.ts` suffix, by design, per this file's own docblock, to dodge the DEFAULT
+vitest include glob — an unrelated, orthogonal design choice that happens to ALSO put it outside
+tsc's project). `npx tsc --noEmit`'s exit 0, everywhere it has been cited in this document and in the
+gate report, is evidence about `src/**/*` / `core/**/*` / `types/**/*` only. It says nothing about any
+file under `packages/core-backend/tests/`, this gate file included. Recorded here as its own line in
+the "未做/未验" ledger below — a reviewer re-running the cited command would find the same gap
+independently; better it is disclosed here first (repo memory:
+`feedback_verification_sweep_rules` / the general "the check you cite has to check what you claim"
+class).
+
+### The fix: a fifth Judge B test — real `pool.query` rejection, not a registry stub
+
+Added inside the existing `describe('Judge B — ...')` block, after the negative-control test, as
+permanent test content (`packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts`):
+
+```ts
+const originalQuery = servicePool.query
+const querySpy = vi.spyOn(servicePool, 'query').mockImplementation(function (this: Pool, ...args: unknown[]) {
+  const text = args[0]
+  if (typeof text === 'string' && text.includes('matching_instances')) {
+    return Promise.reject(new Error('todo-center-gate: simulated real pool.query rejection for the shared row-version SELECT'))
+  }
+  return Reflect.apply(originalQuery, this, args)
+})
+```
+`matching_instances` is the CTE name unique to `listApprovalPendingRowsForViewer`'s row-version SELECT
+(`WITH matching_instances AS (...)`) — `countApprovalPendingForViewer`'s SELECT has no CTE at all, so
+this fault cannot fire for `/api/todo/count`'s query. Sequence, on class ①'s viewer (`v1`):
+
+1. **Positive control, asserted live before the fault is armed**: `GET /api/todo/items` returns
+   `sources: { approval: 'ok' }` and contains `instance1` — without this, a pre-existing regression
+   already hiding class ①'s item would make the mutation assertion below pass vacuously.
+2. **Fault armed**, `GET /api/todo/items` called: `200` + `sources: { approval: 'unavailable' }` +
+   `items: []` — a REAL `pool.query` rejection, not a stub throw, reaching
+   `pending-source-registry.ts`'s try/catch from the outside.
+3. **Same viewer, `GET /api/todo/count`, SAME test, fault still armed**: `200` +
+   `sources: { approval: 'ok' }` + `count: 1` — the distinguishing evidence the report asked for: a
+   DIFFERENT query on the SAME connection pool, at the SAME moment, is unaffected. A pool-wide outage
+   (or a fault targeting the wrong SQL) would fail this assertion too.
+4. **Spy restored in a `finally`** (not merely at the end of the `try` block, so an assertion failure
+   inside the `try` still restores it before the next test runs) — `querySpy.mockRestore()`.
+5. **Recovery check, same viewer, same endpoint, immediately after restore**: `GET /api/todo/items`
+   returns to `sources: { approval: 'ok' }` with `instance1` present — confirms the spy (not some
+   latent pool/connection state) was the only thing that changed.
+
+**Blast-radius check, stated explicitly rather than left implied** (advisor review of this pass asked
+for this): the config this suite runs under sets `fileParallelism: false` and `maxConcurrency: 1`
+(`vitest.todo-center-pending-gate.config.ts`), and this is the ONLY test file the project collects
+(`include: ['tests/todo-center-pending-gate/todo-center-pending-gate.ts']`) — so no other test's
+`pool.query` call can be in flight while the spy is installed, and the block's existing `afterEach`
+(registry-only restore) never needed to also restore this spy because every awaited call inside the
+new test's `try`/`finally` completes before the test function returns, which is also the mechanism
+proven by the recovery check in step 5 running successfully in the SAME test, synchronously after
+`mockRestore()`.
+
+### Mutation ledger — this pass's own added test, cp-backed, run, restored, `cmp` exit 0
+
+Per the hard rule (every mutation probe: `cp` backup → edit → run standalone → `cp` restore → `cmp`),
+run against the NEW test itself (not against production code — the addition IS the fix; this
+mutation proves the test's own assertions are discriminative, not vacuous):
+```
+$ cp packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts /tmp/gatefile-final.bak
+$ sed -i.mutbak "s/text.includes('matching_instances')/text.includes('mutation-probe-never-matches-xyz')/" \
+    packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+$ DATABASE_URL=postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b EXPECT_DB=1 RBAC_BYPASS=false \
+    RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+    pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts \
+    run tests/todo-center-pending-gate/todo-center-pending-gate.ts -t "REAL DB read failure" --reporter=verbose
+ × ... a REAL DB read failure inside the shared query's OWN row-version SELECT ...
+   expect(itemsResult.body.sources).toEqual({ approval: 'unavailable' })
+   - Expected: Object { "approval": "unavailable" }
+   + Received: Object { "approval": "ok" }
+ Test Files  1 failed (1)
+      Tests  1 failed | 26 skipped (27)
+```
+With the marker string changed so the fault condition never matches, the fault never fires and the
+test reds on exactly the assertion it exists to guard (`sources.approval` stays `'ok'` instead of
+flipping to `'unavailable'`) — proof the test is discriminative, not a vacuous pass. Restored:
+```
+$ cp /tmp/gatefile-final.bak packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+$ cmp /tmp/gatefile-final.bak packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts && echo CMP_OK
+CMP_OK
+$ git status --short
+ M packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+ M docs/development/todo-center-phase1-verification-20260918.md
+$ rm -f packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts.mutbak
+```
+(the mutation used `sed -i.mutbak`, leaving a `.mutbak` sibling file alongside the target — removed
+after the `cmp` confirmed the target file itself was restored byte-for-byte; `git status --short`
+above is from immediately after the `cmp`, before that cleanup `rm`, which is why it shows only the
+two intended files.)
+
+### Full regression replay
+
+Real-DB gate, workflow-literal shell shape, `metasheet2_lock_b` (no schema change this pass):
+```
+$ export DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" EXPECT_DB=1 \
+    RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0
+$ pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts \
+    run tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ ✓ tests/todo-center-pending-gate/todo-center-pending-gate.ts (27 tests) 717ms
+ Test Files  1 passed (1)
+      Tests  27 passed (27)
+```
+Up from 26 — the one new test, nothing else changed shape (all four pre-existing Judge B tests, all
+A0/Judge C/Judge C′ tests, the sentinel and the dev-mock probe, unchanged and green).
+
+Unit suites (no DB, unaffected — this pass touches no file either suite imports):
+```
+$ npx vitest run tests/unit/approval-can-decide-current-node.test.ts \
+    tests/unit/approval-realtime.test.ts tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot
+ ✓ tests/unit/approval-realtime.test.ts (3 tests) 2ms
+ ✓ tests/unit/approval-ci-coverage-enumeration.test.ts (342 tests) 44ms
+ ✓ tests/unit/approval-can-decide-current-node.test.ts (41 tests) 4ms
+ Test Files  3 passed (3)
+      Tests  386 passed (386)
+```
+Unchanged from FIX-ROUND 4 PASS's 386 (this pass adds no unit-suite content).
+
+Independent oracle (unaffected — same file, byte-identical to `origin/main`, re-confirmed):
+```
+$ git diff --stat origin/main...HEAD -- '*approval-wp3-pending-count.api.test.ts'
+(empty)
+$ DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts \
+  run tests/integration/approval-wp3-pending-count.api.test.ts --reporter=dot
+ ✓ tests/integration/approval-wp3-pending-count.api.test.ts (7 tests | 1 skipped) 366ms
+ Test Files  1 passed (1)
+      Tests  6 passed | 1 skipped (7)
+```
+
+Typecheck — re-run, exit 0, with the scope caveat from above restated rather than silently repeated:
+```
+$ cd packages/core-backend && npx tsc --noEmit; echo "TSC_EXIT=$?"
+TSC_EXIT=0
+```
+Covers `src/**/*`/`core/**/*`/`types/**/*` only, per this pass's own tsconfig finding above — does
+NOT cover the file this pass actually changed. Cited here for completeness (production code this
+pass touches zero of, so exit 0 is expected and uninformative), not as evidence about the test file.
+
+s6a / migrations, unaffected (same commands, re-run):
+```
+$ git diff --stat -- .github/workflows/plugin-tests.yml
+(empty)
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?
+0
+```
+
+### Changed-file census
+
+```
+$ git diff origin/main --stat | tail -1
+14 files changed, NNNN insertions(+), 43 deletions(-)
+```
+File count (14) and deletions (43) unchanged from FIX-ROUND 4 PASS — this pass adds lines to a file
+already counted in that 14 (`todo-center-pending-gate.ts`, entirely new relative to `origin/main`, so
+its added lines are pure insertions, not a deletion/insertion pair) and to this doc (likewise already
+counted). Insertions figure intentionally omitted from prose per the self-referential-count convention
+this document adopted in commit `58dff909e` — re-run the command for the current number, it is not
+load-bearing for anything this pass claims.
+
+Files touched by THIS pass specifically:
+```
+$ git status --short
+ M docs/development/todo-center-phase1-verification-20260918.md
+ M packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+```
+Exactly two files — no production source file, no migration, no workflow YAML.
+
+### 未做/未验 表新增(本轮)
+
+| 项 | 状态 | 依据 |
+|---|---|---|
+| `countApprovalPendingForViewer`(计数专用 SELECT)自己的真实读失败 | **未验**——本轮只打坏了行版查询(`listApprovalPendingRowsForViewer`),`/api/todo/count` 在新测试里被断言保持 `ok`,用来证明故障作用域,不是遗漏,但这意味着计数查询自己的读失败路径今天仍无常驻用例 | 见上方"The fix"小节步骤 3;一条对称的额外用例(把计数 SELECT 打出一个不存在的列、断言 `/api/todo/count` 变 `unavailable` 而 `/api/todo/items` 仍 `ok`)可在下一步补上,不属本轮范围 |
+| `tsc --noEmit` 对 `packages/core-backend/tests/**` 的覆盖 | **未覆盖,首次在本文档明确记录为独立发现**(此前每一轮的"typecheck exit 0"实际只覆盖 `src/`/`core/`/`types/`) | 见上方"tsc --noEmit exit 0 does not..." 小节;`tsconfig.json` 的 `include` 数组逐字 |
+
+### 本轮未处理、留给下一步的项(如实列出,按 round-2 门审报告 §7 编号;更新自 FIX-ROUND 4 PASS 的同名清单)
+
+本轮处理了 **P2-1**(FIX-ROUND 4 PASS 已处理 P1-1)。以下项仍未在任何一轮触碰,原样留给后续步骤:
+
+- **P2-2**(写进 PR body 首段,不必改代码,尚无 PR 可写):lane 非 required + 门文件在 38 个
+  `*-ci-wiring` 闭世界之外,两洞叠加。
+- **P3-1**(PR body 需点名,尚无 PR):两条 `wip:` 提交(`a2cf836b5`/`01759832a`)仍在历史里。
+- **P3-2**:验证 MD `:1425` 附近关于 `approval-schema-bootstrap.ts` 的那一行仍与代码相反且无失效
+  标记(见 round-2 报告原文引用)。
+- **P3-3**:FIX-ROUND 3 锚点表两条 grep 输出不完整(贴出的是单行,实际各两行)。
+- **P3-4**:门文件 docblock "the six non-pending-status tests" 应为 "five"。
+- **P3-5**(记录性,已如实处置,无需再动):`.env` 回填架空探针 A 形态;`metasheet_v2` 三批更早残留不
+  是本 lane 产生的,原样不动。
+
+这份清单严格照抄 round-2 门审报告 §7 的编号与描述,只标记到本轮为止处理了哪些,不预判下一步该选哪条。
