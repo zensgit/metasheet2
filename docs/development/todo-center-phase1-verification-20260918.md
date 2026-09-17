@@ -322,7 +322,7 @@ question: does `computeApprovalPendingCounts` inside that file comply with desig
 一份" hard constraint (reuse each domain's existing predicate; the center — and, by the same
 principle, any consumer — must not hand-carry a second copy of the pending predicate)? It does not
 comply; that is a separate, real finding, not cleared by this section. See the "Judging criterion
-P1-1" entry in the FINALIZATION PASS section below for the reproduction and disposition.**
+P1-1" entry in the FIX-ROUND PASS section further below for the reproduction and disposition.**
 
 ## Judging criterion C (list dedup, list/count arm-set parity) — DISCHARGED, both mutations run for real
 
@@ -1444,9 +1444,9 @@ $ grep -n "^## 8\|^## 9" /Users/chouhua/.claude/projects/-Users-chouhua-Download
 ## P2-1); it does not touch or re-litigate the FINALIZATION PASS section above (repo convention:
 ## mark the sentence, don't void the section).
 
-### Judging criterion P1-1 — second pending predicate in `approval-realtime.ts` (design-lock §3
-### "只准一份" hard constraint) — REGISTERED per gate report disposition (b); (a)/(c) remain an
-### owner call, not decided here
+### P1-1 — second pending predicate in `approval-realtime.ts` (design-lock §3
+### "只准一份" hard constraint; a gate finding, not a §5 judging criterion) — REGISTERED per gate
+### report disposition (b); (a)/(c) remain an owner call, not decided here
 
 The gate report's finding, restated precisely: `services/approval-realtime.ts`'s
 `computeApprovalPendingCounts` hand-copies the same three-arm assignee-match disjunction
@@ -1679,7 +1679,7 @@ $ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packag
 
 | 项 | 状态 | 原因 |
 |---|---|---|
-| `approval-realtime.ts` 第二份 pending 谓词(P1-1) | **REGISTERED,未折入**——(a) 折入 / (c) BLOCKED 仍待 owner 裁决;本轮取 (b):如实登记 + 收窄判据 D 证据范围,不代 owner 选边 | 见本节"Judging criterion P1-1";设计 MD §6 第 7 条同步登记;`approval-pending-query.ts` docblock 已加 KNOWN EXCEPTION 指针(comment-only,`git diff` 已证零行为改动) |
+| `approval-realtime.ts` 第二份 pending 谓词(P1-1) | **REGISTERED,未折入**——(a) 折入 / (c) BLOCKED 仍待 owner 裁决;本轮取 (b):如实登记 + 收窄判据 D 证据范围,不代 owner 选边 | 见本节"P1-1"小节;设计 MD §6 第 7 条同步登记;`approval-pending-query.ts` docblock 已加 KNOWN EXCEPTION 指针(comment-only,`git diff` 已证零行为改动) |
 | 判据 D 的证据范围 | 本文档对行 D 的证据面**只覆盖 REST 路径**(`/pending-count`);锁 §5 行 D 字面范围更宽(未改锁文本身),差额 = 实时推送路径,该路径已知与 REST 路径不一致(见 P1-1 复现) | 同上;不是把行 D 改窄,是记录本文档证据面与锁文字面范围之间的一条已知缺口 |
 
 ### 绝对断言自扫(本轮新增)
@@ -1696,7 +1696,7 @@ $ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packag
 | 全套件在新 guard 加入后仍 26/26(workflow 逐字调用形态,全新迁移库) | 见本节"Real run, fresh database"小节完整输出 | 26 passed / 26 |
 | `npx tsc --noEmit` 本轮仍 exit 0 | `npx tsc --noEmit -p tsconfig.json; echo $?` | 0 |
 | `plugin-tests.yml` 与迁移目录本轮仍未被触碰(s6a / 判据 F 不受影响) | `git diff --stat -- .github/workflows/plugin-tests.yml`;`git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?` | 空输出;`0` |
-| 工作树在本轮结束时干净(改动已提交前的中间检查点) | `git status --short` | 见提交前记录 |
+| 工作树在改动提交前干净(除本轮待提交的 4 个文件外无其它改动) | `git status --short` | 只列出本轮改动的 4 个文件(2 个 workflow/src、2 个 doc),无其它路径 |
 
 ### 本轮未处理、留给下一步的项(如实列出,避免下一步重新普查)
 
