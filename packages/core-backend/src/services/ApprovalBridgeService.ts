@@ -45,6 +45,7 @@ import {
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
+  isCancelRoundInstance,
 } from '../attendance/w4c3b-central-approval-hooks'
 
 /**
@@ -1070,6 +1071,11 @@ export class ApprovalBridgeService {
         await bridgeDispatchTestBarrierForTests('after_instance_lock', { instanceId: id })
       }
 
+      // Lock §14.3 outlet #8 — a cancel-round instance never terminalizes through the generic
+      // bridge dispatch (it only ever moves through `ApprovalProductService.dispatchAction`'s
+      // dedicated cancel-round handling, WI-7/WI-12).
+      rejectIfCancelRound(instance, 'ApprovalBridgeService.dispatchAction')
+
       // P17/P22: attendance instances cannot terminalize through the generic bridge.
       // Classify + lock request before any instance/assignment DML (including
       // adversarial published_definition_id rows).
@@ -1566,4 +1572,44 @@ export class ServiceError extends Error {
     super(message)
     this.name = 'ServiceError'
   }
+}
+
+/**
+ * Approval change-request design lock v5.9 §14.3 — thrown by every one of the 8 chokepoints that
+ * must reject a cancel-round instance (outlets #2/#4/#6/#7/#7'/#8; #12/#13 land as a typed skip
+ * reason instead, per the lock's own distinction). `extends ServiceError` (not
+ * `AttendanceCentralApprovalError`) so `handleApprovalsError`'s `error instanceof ServiceError`
+ * branch (routes.ts) and this file's own callers funnel it through the standard envelope; extending
+ * `AttendanceCentralApprovalError` instead would get it silently absorbed into `skipped_stale` at
+ * `ApprovalProductService.ts:9246`, which is the one behavior this class must never have.
+ */
+export class CancelRoundOutletForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_OUTLET_FORBIDDEN')
+    this.name = 'CancelRoundOutletForbiddenError'
+  }
+}
+
+/** Lock §9-5 (lock:143) — creation-time suite gate: `suite='forbidden'` rejects before any write. */
+export class CancelRoundSuiteForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_SUITE_FORBIDDEN')
+    this.name = 'CancelRoundSuiteForbiddenError'
+  }
+}
+
+/**
+ * Shared outlet guard (lock §14.3, WI-7) — every chokepoint that must reject a cancel-round
+ * instance outright (as opposed to #12/#13's typed-skip treatment) calls this instead of
+ * hand-rolling the `isCancelRoundInstance` check, so the rejected action set stays centrally
+ * auditable. No-op for a non-cancel-round instance.
+ */
+export function rejectIfCancelRound(
+  instance: { workflow_key?: string | null },
+  outletLabel: string,
+): void {
+  if (!isCancelRoundInstance(instance)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances cannot be actioned through ${outletLabel}`,
+  )
 }
