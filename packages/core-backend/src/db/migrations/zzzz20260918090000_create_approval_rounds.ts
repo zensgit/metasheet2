@@ -24,10 +24,15 @@
  * directory-sourced `requested_by` unwritable if it ever carries a non-ASCII user id; the lock
  * (§4, lock:141) names the unanchored predicate verbatim.
  *
- * Two indexes below (`idx_approval_rounds_engine_instance`, `idx_approval_rounds_document_started`)
- * are NOT named in lock §4 — they are additive-beyond-lock convenience indexes for lookups this
- * slice's services will need (engine-instance → round reverse lookup; per-document history scan).
- * Flagged here for the DDL-gate reviewer; drop them if the lock is read as an exhaustive DDL list.
+ * Lock §4 (lock:142) enumerates exactly one index: the partial unique index below. An earlier
+ * draft of this migration also added two convenience indexes (engine-instance reverse lookup,
+ * per-document history scan) that are NOT named in the lock. Nothing in the first slice's scope
+ * (createCancelRoundInstance, the outlet guards, 判据 III) needs either — round lookups in this
+ * slice are always by `id` (primary key) or by the partial unique index. Per the DDL-gate
+ * discipline (DDL is owner-gated; the lock is read as an exhaustive DDL list until told
+ * otherwise), they have been removed rather than carried as a source-comment disclosure. If a
+ * later slice needs one of these access patterns, add it in that slice's own migration with its
+ * own justification.
  */
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
@@ -55,13 +60,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_rounds_pending_document
     ON approval_rounds (document_id)
     WHERE outcome = 'pending'`.execute(db)
-
-  await sql`CREATE INDEX IF NOT EXISTS idx_approval_rounds_engine_instance
-    ON approval_rounds (engine_instance_id)
-    WHERE engine_instance_id IS NOT NULL`.execute(db)
-
-  await sql`CREATE INDEX IF NOT EXISTS idx_approval_rounds_document_started
-    ON approval_rounds (document_id, started_at DESC)`.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
