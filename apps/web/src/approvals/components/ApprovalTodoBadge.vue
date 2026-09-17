@@ -1,6 +1,14 @@
 <template>
   <span
-    v-if="pendingCount > 0"
+    v-if="isUnavailable"
+    class="approval-todo-badge approval-todo-badge--unavailable"
+    data-testid="approval-todo-badge-unavailable"
+    role="status"
+    :aria-label="unavailableLabel"
+    :title="unavailableLabel"
+  >!</span>
+  <span
+    v-else-if="pendingCount > 0"
     class="approval-todo-badge"
     data-testid="approval-todo-badge"
     role="status"
@@ -11,24 +19,37 @@
 
 <script setup lang="ts">
 // P1b slice 1 — the app-level 待办 badge for the top-nav 审批中心 entry.
+// B-2 (todo-center-design-lock v2.14 §4/判据 B) — repointed at the aggregation endpoint:
 //
 // WHAT IT REUSES, and what it deliberately does NOT do:
-//   * The count is the SAME server-owned pending count the 审批中心 header already renders
-//     (`getPendingCount` → GET /api/approvals/pending-count, and the `approval:counts-updated`
-//     socket push via `useApprovalCountsRealtime`). It is the total 待办 `count`, the figure
-//     ApprovalCenterView.vue shows beside 待办 — NOT the `unreadCount` its 未读 chip shows.
+//   * The count is now the todo-center's own aggregate (`getTodoCount` → GET /api/todo/count),
+//     which B-1 built by calling the SAME shared 待处理 query 审批中心's header already reads
+//     (lock §3.0/§4 — zero-behavior-change reuse, not a second predicate). It is the total 待办
+//     `count` — NOT any per-source `unreadCount`.
 //   * It writes NOTHING. In particular it does not create or write a notification-inbox record:
 //     the inbox is a multitable record-subscription model and approval tasks do not belong in it.
 //   * It NEVER reloads a list. The existing no-auto-reload discipline (ApprovalCenterView's
 //     G-B2-11 pill: a realtime push moves the count, never the rows) is preserved here by
 //     construction — this component owns one number and renders it; it has no list to reload and
 //     no router navigation of its own.
+//   * It does NOT自行判断可见性: `isTodoResponseDegraded` is the one shared rule (also used by the
+//     todo center page) for "render as unavailable rather than trust the number" — this component
+//     does not invent a second version of that judgment (lock §3 hard constraint).
+//
+// 判据 B (徽标格): a response with the legacy `degraded: true` flag OR any source reporting
+// `unavailable` — and a thrown/rejected read, which carries the SAME "the count is not trustworthy"
+// meaning — must render as a discriminable "不可用" state, never collapse to the same "0" a
+// genuinely-empty todo list renders as. `degraded` itself is not emitted by `/api/todo/count` today
+// (double-gated by `APPROVALS_OPTIONAL`, unreachable in this lane — see `todo/api.ts`), so this
+// component's OWN spec is the only place that branch is exercised; it is stubbed there, not on a
+// live backend path.
 //
 // The label is passed in by the caller rather than resolved here, so the nav keeps ONE i18n table
 // (App.vue's `navLabels`) instead of growing a second one. The label carries no values — it names
 // the surface ("待办审批" / "Pending approvals"); the badge text is the count alone.
 import { computed, onMounted, ref } from 'vue'
-import { getPendingCount } from '../api'
+import { getTodoCount, isTodoResponseDegraded, type TodoCountResponse } from '../../todo/api'
+import { useLocale } from '../../composables/useLocale'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../useApprovalCountsRealtime'
 
 const props = withDefaults(defineProps<{
@@ -39,12 +60,34 @@ const props = withDefaults(defineProps<{
   overflowAt: 99,
 })
 
+const { isZh } = useLocale()
+
 const pendingCount = ref(0)
+// 判据 B: discriminable from "pendingCount === 0" — a genuinely empty todo list and "this read
+// could not be trusted" must never render the same way.
+const isUnavailable = ref(false)
+
+const unavailableLabel = computed(() => (
+  isZh.value ? `${props.label}(数据不可用)` : `${props.label} (data unavailable)`
+))
 
 function applyCount(value: unknown): void {
   pendingCount.value = typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? Math.trunc(value)
     : 0
+}
+
+/** The one place both "the server said degraded" and "the read threw" collapse into the same
+ *  discriminable state — see the 判据 B note above. `response` is `null` only when the read threw
+ *  (no body to inspect), which is unavailable unconditionally, same as a degraded body. */
+function applyResult(response: TodoCountResponse | null): void {
+  if (response === null || isTodoResponseDegraded(response)) {
+    isUnavailable.value = true
+    pendingCount.value = 0
+    return
+  }
+  isUnavailable.value = false
+  applyCount(response.count)
 }
 
 const displayCount = computed(() => (
@@ -56,6 +99,7 @@ const displayCount = computed(() => (
 // so its bucket is 'all'.
 function handleCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
   const scoped = payload.countsBySourceSystem?.all ?? payload
+  isUnavailable.value = false
   applyCount(scoped.count)
 }
 
@@ -77,12 +121,15 @@ try {
 
 async function refresh(): Promise<void> {
   try {
-    const result = await getPendingCount('all')
-    applyCount(result.count)
+    const result = await getTodoCount()
+    applyResult(result)
   } catch {
-    // Decorative surface: a failed count must never surface an error in the shell chrome.
-    // Falling back to 0 hides the badge rather than rendering a stale or invented figure.
-    applyCount(0)
+    // 判据 B: a failed read is exactly as untrustworthy as a `degraded: true` response — both
+    // must render the discriminable "不可用" state, NOT the same "0" an empty list renders as.
+    // (The prior badge collapsed this to `applyCount(0)`, which is indistinguishable from
+    // "genuinely nothing pending" — that collapse is what 判据 B's mutation restores to prove
+    // this branch is load-bearing.)
+    applyResult(null)
   }
 }
 
@@ -107,5 +154,11 @@ defineExpose({ refresh })
   font-size: 12px;
   line-height: 1;
   font-weight: 600;
+}
+
+/* 判据 B: visually distinct from the numeric badge above so "不可用" is never mistaken for "0
+   pending" (which renders no badge at all) or for a genuine count. */
+.approval-todo-badge--unavailable {
+  background: var(--el-color-warning);
 }
 </style>
