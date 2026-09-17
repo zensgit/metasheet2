@@ -1404,6 +1404,7 @@ $ grep -n "^## 8\|^## 9" /Users/chouhua/.claude/projects/-Users-chouhua-Download
 | 补充清单条目 2 与锁 §6 字面冲突 | **BLOCKED——升级门审/owner 裁决,本文档不代为裁定** | 见补充清单条目 2 的核对结果 |
 | `.env` 文件回填绕过 `env -u DATABASE_URL` 探针形态(哨兵机制的真实边界弱于该探针形态所暗示) | 已如实记录为缺陷,不修 | 见上方"反 skip-green 三件的哨兵证据"小节;继承自 `elearning-pilot-auth` 先例,非本切片独有;不影响 CI job(job 级 `env:` 无条件覆盖) |
 | `routes/todo.ts` 的 `approvals:read` 单一权限门槛在第二源注册后需收窄 | 已知局限,记录不改(此切片只注册一个源,门槛与暴露面重合) | 设计 MD §3.1;文件自身 `todo.ts:11-17` 文档已自陈 |
+| 补充清单条目 9 的残留:workflow 的 `paths:` 仍列着 `tests/helpers/approval-schema-bootstrap.ts`,但门文件实际未导入它 | **未修,仅文档已更正**——本文档的claim 从"anticipatorily included,大概率会用到"改为"证伪,未被导入",但 `.github/workflows/approval-realdb-todo-center-pending-query.yml` 的 `on.push.paths`/`on.pull_request.paths` 两处列表本身**未改动**,仍与锁 §6"套件真正执行到的每个 src 模块"的标准有一条多列的偏差(over-inclusion,不是 under-inclusion,不破坏 fail-closed) | 见补充清单条目 9 的核对结果;摘除该条目属于改 CI 接线,超出本轮"不改代码"授权,留给门审/下一次接触该 workflow 时处理 |
 
 ### 一致性小修:`git diff --stat` 与 `cmp` 的角色分工
 
