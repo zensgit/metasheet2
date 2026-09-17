@@ -3,7 +3,7 @@ import type {
   UniverMetaRouterOptions,
 } from '../routes/univer-meta'
 import type { RecoveryArchiveCustodyInput, RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
-import { resolveLocalArchiveCustody } from './recovery-local-custody'
+import { resolveLocalArchiveCustody, resolveLocalArchiveCustodyRelease } from './recovery-local-custody'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
 import type {
   RecoveryArchiveObservability,
@@ -48,12 +48,14 @@ export interface RecoveryArchiveApplication {
   readonly routerOptions: UniverMetaRouterOptions | undefined
   startWorker(): void
   stopWorker(): Promise<void>
+  releaseCustody(): void
 }
 
 const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
 const COMPOSITION_FACTORY_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED'
 const DATABASE_RUNTIME_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_DATABASE_RUNTIME_FAILED'
 const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
+const WORKER_STOPPED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
 const WORKER_STOP_TIMEOUT_MS = 10_000
 
@@ -72,6 +74,7 @@ export function createRecoveryArchiveApplication(
       routerOptions: undefined,
       startWorker() {},
       async stopWorker() {},
+      releaseCustody() {},
     })
   }
   if (!factory) throw new Error(COMPOSITION_INVALID)
@@ -115,15 +118,19 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
   })
-  let workerStarted = false
+  let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
+  let workerDrained = false
+  const releaseCustody = resolveLocalArchiveCustodyRelease(composition.keyCustody)
 
   return Object.freeze({
     routerOptions,
     startWorker() {
-      if (workerStarted) return
-      workerStarted = true
+      if (workerState === 'stopped') throw new Error(WORKER_STOPPED)
+      if (workerState === 'failed') throw new Error(WORKER_BOOT_FAILED)
+      if (workerState === 'started') return
+      workerState = 'started'
       try {
         workerLoop = bootRecoveryArchiveRestoreWorker({
           env: activationEnv,
@@ -131,18 +138,24 @@ export function createRecoveryArchiveApplication(
           createWorker: () => createRecoveryArchiveRestoreWorker(workerInput),
           onResult: (result) => observability?.recordRun(result),
         })
+        if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       } catch {
+        workerState = 'failed'
         throw new Error(WORKER_BOOT_FAILED)
       }
-      if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       recordLifecycleSafely(observability, 'started')
     },
     async stopWorker() {
+      workerState = 'stopped'
       if (workerStop) return workerStop
-      if (!workerLoop) return
+      if (!workerLoop) {
+        workerDrained = true
+        return
+      }
       const loop = workerLoop
       workerStop = stopRecoveryArchiveWorkerLoop(loop).then(
         () => {
+          workerDrained = true
           recordLifecycleSafely(observability, 'drained')
         },
         (error: unknown) => {
@@ -155,6 +168,10 @@ export function createRecoveryArchiveApplication(
       } finally {
         workerLoop = null
       }
+    },
+    releaseCustody() {
+      if (!workerDrained) throw new Error(WORKER_STOP_FAILED)
+      releaseCustody?.()
     },
   })
 }

@@ -10,6 +10,8 @@
     "../core/**/*",
     "../types/**/*",
     "./verify-recovery-archive-server.mts",
-    "./verify-recovery-local-backup.mts"
+    "./verify-recovery-local-backup.mts",
+    "./verify-recovery-local-startup.mts",
+    "./start-recovery-local.mts"
   ]
 }

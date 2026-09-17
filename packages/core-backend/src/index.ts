@@ -457,6 +457,8 @@ export interface MetaSheetServerOptions {
   readonly host?: string
   readonly pluginDirs?: string[]
   readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
+  readonly startupSignal?: AbortSignal
+  readonly manageProcessSignals?: boolean
 }
 
 // 按项目导出物料 Excel: lazily imports `xlsx` (same lazy-import discipline as routes/univer-meta.ts's
@@ -521,7 +523,7 @@ async function sendStockPreparationHandoffNotification(params: {
   return sendStockPreparationHandoffNotificationToDestinations(service, params)
 }
 
-function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
+export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
   const pool = poolManager.get()
   const query = pool.query.bind(pool) as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']
   const transaction: RecoveryArchiveApplicationDatabaseRuntime['transaction'] = async (work) =>
@@ -615,6 +617,8 @@ export class MetaSheetServer {
   /** Mirror delivery worker interval handle — only ever set when the mirror flag is ON. */
   private stopDingTalkTodoMirrorWorker?: () => Promise<void>
   private readonly recoveryArchiveApplication: RecoveryArchiveApplication
+  private readonly startupSignal?: AbortSignal
+  private readonly manageProcessSignals: boolean
 
   // IoC Container
   private injector: Injector
@@ -641,6 +645,8 @@ export class MetaSheetServer {
       process.env,
       recoveryArchiveObservability,
     )
+    this.startupSignal = options.startupSignal
+    this.manageProcessSignals = options.manageProcessSignals !== false
 
     // 创建核心API
     const coreAPI = this.createCoreAPI()
@@ -3691,6 +3697,13 @@ export class MetaSheetServer {
       throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
     }
 
+    // Custody outlives accepted HTTP work as well as worker chunks. Never revoke on a failed drain.
+    try {
+      this.recoveryArchiveApplication.releaseCustody()
+    } catch {
+      throw new Error('RECOVERY_ARCHIVE_CUSTODY_RELEASE_FAILED')
+    }
+
     try {
       const { pool } = await import('./db/pg')
       if (pool) {
@@ -3721,6 +3734,7 @@ export class MetaSheetServer {
   }
 
   private async startOnce(): Promise<void> {
+    this.assertStartupNotCancelled()
     // IoC: Load configuration
     if (!this.portLocked) {
       try {
@@ -4757,6 +4771,7 @@ export class MetaSheetServer {
 
     this.installGlobalErrorHandler()
 
+    this.assertStartupNotCancelled()
     this.logger.info('Starting HTTP server listen phase...')
     await new Promise<void>((resolve, reject) => {
       const onError = (err: NodeJS.ErrnoException) => {
@@ -4773,6 +4788,7 @@ export class MetaSheetServer {
       this.httpServer.once('error', onError)
       const onListening = () => {
         this.httpServer.off('error', onError)
+        try { this.assertStartupNotCancelled() } catch (error) { reject(error); return }
 
         // If port=0, update port to actual assigned port
         const addr = this.httpServer.address()
@@ -4798,6 +4814,7 @@ export class MetaSheetServer {
     })
 
     try {
+      this.assertStartupNotCancelled()
       // The injected worker is deliberately activated only after the HTTP listener is live.
       this.recoveryArchiveApplication.startWorker()
     } catch (error) {
@@ -4817,7 +4834,7 @@ export class MetaSheetServer {
     }
 
     // Register signal handlers only for real runtime, not test runners.
-    if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+    if (this.manageProcessSignals && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))
       process.on('SIGINT', () => this.stopForSignal('SIGINT'))
     }
@@ -4825,6 +4842,10 @@ export class MetaSheetServer {
     if (startElearningMediaWorkers && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopElearningMediaWorkers = startElearningMediaWorkers()
     }
+  }
+
+  private assertStartupNotCancelled(): void {
+    if (this.startupSignal?.aborted || this.stopPromise) throw new Error('SERVER_STARTUP_CANCELLED')
   }
 }
 
