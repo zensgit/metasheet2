@@ -57,12 +57,12 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 6 | 正控：`gantt_tasks` 出现在 `createTable` | `20250924140000_create_gantt_tables.ts:13` | `sed -n '13p' packages/core-backend/src/db/migrations/20250924140000_create_gantt_tables.ts` | `.createTable('gantt_tasks')` |
 | 7 | `NON_NAMESPACED_PERMISSION_RESOURCES` 不含 `'tasks'` | `namespace-admission.ts:11-38` | `sed -n '11,38p' packages/core-backend/src/rbac/namespace-admission.ts` | 集合止于 `'workflow'`，无 `tasks` |
 | 8 | `exec npx vitest run` 在 `:1186` 不在 `:1069`；token 392；含 `task` 的 token 数为 0 | `run-required-web-tests.sh` | census §4 命令 | 1069=注释；1186=`exec`；392；0 |
-| 9 | 拟用锁前缀 `task-structure:` / `task-projection:` / `tasks-scheduler:` 未作为既有字面键前缀出现 | census §2 | `rg -n "task-structure:|task-projection:|tasks-scheduler:" packages/core-backend/src plugins --glob '!**/node_modules/**'` | 期望 0 命中（实现前） |
+| 9 | 拟用锁前缀 `task-structure:` / `task-projection:` / `tasks-scheduler:` 未作为既有字面键前缀出现 | census §2 | `rg -n "task-structure:|task-projection:|tasks-scheduler:" packages/core-backend/src plugins --glob '!**/node_modules/**'` | 实际：0 行输出、exit 1（无命中）。正控：同命令族可命中 `` `approval-projection:${instanceId}` ``（census §2.1 / `approval-record-projection-service.ts`） |
 | 10 | 本地主库活跃多成员用户数 = 0（仅代表该库） | census §1.3 | QUERY B | `multi_active_member_users = 0`，分母 115 |
 | 11 | 审批路由挂载不在计划写的 `index.ts:1763-1777` | `index.ts:1785` | `rg -n "approvalsRouter" packages/core-backend/src/index.ts` | `1785:    this.app.use(approvalsRouter({` |
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
-| 14 | 锁草案 §13 含题号 1–39 | 锁文件 | `rg -n "^\*\*(1[0-9]\|2[0-9]\|3[0-9]\|[1-9])\." docs/development/task-feature-design-lock-20260917.md` | 1–39 均有 |
+| 14 | 锁草案 §13 含题号 1–39 各恰一次 | 锁文件 | 见 §6 代码块（默认 rg 引擎 `^\*\*([1-9]\|[12][0-9]\|3[0-9])\.`） | `39` |
 | 15 | §13-10 与 §13-12 标未裁 | 锁 §13 | `rg -n "未裁" docs/development/task-feature-design-lock-20260917.md` | 题 10、12 |
 
 ---
@@ -105,8 +105,8 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
 6. **§13-10 / §13-12 未裁**。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **两轮对抗闸未进行**（Q4：Claude 闸，本切片只交 PROPOSED）。
-9. 计划 M0 退出门「两轮独立对抗审吸收」尚未满足——本报告不声称 M0 退出门已过。
+8. **两轮对抗闸未齐**：第一轮 REJECT（`gate-task-m0-20260917.md`）；本修复轮待重跑闸。不声称 M0 退出门已过。
+9. 计划 M0 退出门「两轮独立对抗审吸收」尚未满足。
 
 ---
 
@@ -114,15 +114,45 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **两轮闸未进行**（待 owner 把本报告路径 + PR 号交给新 Claude 窗口）。
+3. **两轮闸未齐**：第一轮 REJECT 已吸收进本修复轮；第二轮独立对抗审未开始。
 4. **§13-10 / §13-12 未裁**。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
 7. 未改任何共享文件 / workflow / token 行。
 8. 未验证 s6a pin 在「若将来改 plugin-tests.yml」下的重算（本切片未改）。
-9. 未对 133 条计划锚点逐条把 `sed -n` 全文贴进本报告（census §5 给了 §8 全表 + 承重抽查；完整 JSON 在本地 `/tmp/task-m0-anchor-results2.json`，不入库）。
+9. 锚点 133/128/5 已改为 census §5 内嵌解析脚本（不依赖 `/tmp`）；未把 133 条逐条 `sed -n` 全文贴进本报告（§5.1/§5.2 仍是逐条表）。
 10. 未把 392 token 全文列入仓库文件。
 11. 飞书 IM/P2 篇在锁 §2 用计划已蒸馏的承重机制，未在本报告逐篇贴原文行。
 12. `mergeable` JSON 已回填 §0；当时 checks 未完成，未把 QUEUED 当绿。
 
 不许写「全部完成」。本切片交付 = 三份 docs + Draft PR-0。
+
+---
+
+## 6. 修复轮（对闸第一轮 REJECT，`gate-task-m0-20260917.md`）
+
+未改 §13-10 / §13-12 的未裁状态。未合并。任务 B 未起。
+
+| finding | 改动 | 复现命令 | 实际输出 |
+|---|---|---|---|
+| P1-1 | 锁新增 §5.4 五段部署链（`:184-196`）；门 14 指向 §5.4（`:294`）；§9 表写「五段部署链（§5.4）」（`:251`） | `rg -n "publish_images\|deploy_production\|MIGRATE START\|### 5.4" docs/development/task-feature-design-lock-20260917.md` | `:184` `### 5.4 五段部署链`；`:189/:191` `publish_images` / `deploy_production`；`:192` `MIGRATE START/END`。`rg -c "publish_images\|deploy_production"` → `3` |
+| P1-2 | 锁 §10 `:262` 改为选项 a：`TASKS_*` 不属 GH 族；provenance=`AGENTS.md:68`；计划 v5 无此条；实现时登 `NON_GH_PREFIXES`/`NON_GH_EXACT`（不是 GH 注册）。删「必须登记 GH manifest」 | `rg -n "NON_GH_PREFIXES\|计划 v5 无此条\|新 flag 必须登记" docs/development/task-feature-design-lock-20260917.md` | `:262` 含 `NON_GH_PREFIXES` 与 `计划 v5 无此条`；「新 flag 必须登记」**0 命中** |
+| P1-3 | 锁新增 §5.2.1（`:158-168`）抄计划 §8-1 ①②③（③ 仍指向 §13-12 未裁）；§12 门 17（`:297`） | `rg -n "No test files found\|EXPECT_DB\|task-ci-coverage\|### 5.2.1" docs/development/task-feature-design-lock-20260917.md` | `:158` 节标题；`:162` `No test files found`；`:164` `EXPECT_DB`；`:166` `task-ci-coverage-enumeration.test.ts`；`:297` 门 17 |
+| P2-1 | 锁 §5.3 `:178-180` 改回计划原文：`grep -c -- '<token>'` **= 1**；**不得命中** `apps/web/verification/`；输出写进 PR body | `rg -n "grep -c\|不得命中" docs/development/task-feature-design-lock-20260917.md` | `:178` `grep -c -- '<token>'` `= 1`；`:179` `不得命中 apps/web/verification/`。旧句「人口含 verification」在锁中 **0 命中** |
+| P2-2 | 锁 §4.4 `:134` 与 §13-13 `:356` 补回 `default_remind_policy` 优先层；全天钉 `tasks.time_zone` + `computeDateReminderOccurrence(..., {floating:true})` | `rg -n "default_remind_policy\|tasks.time_zone" docs/development/task-feature-design-lock-20260917.md` | `:134` 先 policy 再两支派生；全天明确 `tasks.time_zone`、不用查看者时区；`:356` 同 |
+| P2-3 | 锁 §6.1 `:205` 补交接件 §二③「不带正文」；门 5 `:285` 加 `description`/`description_rich` 负向 | `rg -n "不带正文\|description_rich" docs/development/task-feature-design-lock-20260917.md` | `:205` `不带正文`；`:285` 门 5 含 `description_rich` |
+| P2-4 | 普查 §5 `:202-279` 内嵌解析脚本 + 本 SHA 实测输出；删「JSON 在 /tmp」依赖 | 在 worktree 根跑 census §5 的 `python3` 块 | `unique 133 OK 128 OOB 5 MISSING 0` 后接 5 行 `OOB ('index.ts', …, 'apps/web/src/multitable/index.ts', 69)` |
+| P2-5 | 本报告断言 #14 改用默认 rg 引擎（勿把 `\|` 当交替） | 见本节代码块 | `39` |
+| P3-1 | 锁 §2 `:58-60`：子任务五层 `:7`；创建人默认负责人 `:10`；完成/重启 `:19`/`:20`，`:21-23` 标 IM 不对标 | `rg -n "使用子任务\|添加任务负责人\|完成与重启任务" docs/development/task-feature-design-lock-20260917.md` | `:58` `:20`/`:19`；`:59` `:7`；`:60` `:10` |
+| P3-2 | 锁 §13-32 `:381`：只改文案为「示例卡片」；多维表文件注释不得出现 tasks 域符号 | `rg -n "KanbanView" docs/development/task-feature-design-lock-20260917.md` | `:381` 含「不得出现任何 tasks 域符号」；旧句「不得点名任务线符号以外的其他线」**0 命中** |
+| P3-3 | 本报告断言 #9 `:60` 输出栏改为实际 0 行 / exit 1，并引 census §2.1 正控 | `rg -n "task-structure:\|task-projection:\|tasks-scheduler:" packages/core-backend/src plugins --glob '!**/node_modules/**'` | 0 行；exit 1 |
+| P3-4 | 锁 §4.4 `:123-132` 写入 `viewerToday`/`viewerNextMidnight` SQL；`x-viewer-time-zone` 非法用 `isValidIanaTimeZone` 回退 `tasks.time_zone` | `rg -n "viewerToday\|isValidIanaTimeZone" docs/development/task-feature-design-lock-20260917.md` | `:124-125` SQL 两行；`:132` 校验 + 非法或缺失回退 |
+
+§13-10 / §13-12 未裁核对：`rg -n "未裁" docs/development/task-feature-design-lock-20260917.md` 仍命中题 10、12 与 §9 表，无「已裁」。
+
+P2-5 实际命令（默认 rg 引擎，`|` 是交替；在 worktree 根执行）：
+
+```bash
+rg -n '^\*\*([1-9]|[12][0-9]|3[0-9])\.' docs/development/task-feature-design-lock-20260917.md | wc -l
+# 实际输出：39
+```

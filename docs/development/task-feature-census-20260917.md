@@ -195,13 +195,86 @@ print(len(toks), sum(1 for t in toks if 'task' in t.lower()))
 "
 ```
 
-正控：`StockPreparationProjectBoard` 为第一个 token；`multitable-external-context-sync` 为最后一个。双向碰撞检查人口含 `apps/web/verification/`（脚本 `:28-37` 成文）。未来任务 spec token 尚未加入——本切片 docs-only，不改该行。
+正控：`StockPreparationProjectBoard` 为第一个 token；`multitable-external-context-sync` 为最后一个。脚本 `:28-37` 成文说明 CamelCase 备料 token 不得成为 `apps/web/verification/stock-prep-*.spec.ts` 的子串（Playwright 用例；**命中即红**）。未来任务 spec token 尚未加入——本切片 docs-only，不改该行。碰撞判据正文在锁 §5.3。
 
 ---
 
 ## 5. 计划锚点 `sed -n` 复核（对本 SHA）
 
-解析计划 v5 反引号内 `file:line`：**133 条 unique**。其中路径可解析且行号落在文件内 **128**；**OOB 5**（全是裸名 `index.ts` 解析到 `apps/web/src/multitable/index.ts` 69 行，正确目标是 `packages/core-backend/src/index.ts`）。
+解析规则（可复现，不依赖 `/tmp`）：从计划 v5 反引号内取出 `path-or-basename.ext:line`；`line` 可为 `n`、`n-m`、逗号并列；另将 `file.ext:96/111` 拆成两条。解析到 worktree 文件后，行号超出文件行数 ⇒ OOB。裸名 `index.ts` 按最短相对路径优先，会命中 `apps/web/src/multitable/index.ts`（69 行）而非 `packages/core-backend/src/index.ts`。
+
+复现命令与 2026-09-17 在本 SHA 上的实际输出见下。§5.1 / §5.2 两张表是逐条 `sed -n`，不依赖这三个计数。
+
+```bash
+python3 - <<'PY'
+import re, pathlib, json
+plan = pathlib.Path.home()/'.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/task-feature-development-plan-20260915.md'
+wt = pathlib.Path('.')  # 在 worktree 根执行
+text = plan.read_text()
+pat = re.compile(r'`([^`]*?([A-Za-z0-9_./-]+\.(?:ts|js|cjs|mjs|yml|yaml|md|vue|sh|json))):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)`')
+pat2 = re.compile(r'`([^`]*?([A-Za-z0-9_./-]+\.(?:ts|js|cjs|mjs|yml|yaml|md|vue|sh|json))):(\d+(?:/\d+)+)`')
+anchors=[]
+for m in pat.finditer(text):
+    full=m.group(1).strip(); fname=m.group(2); spec=m.group(3)
+    pathish=fname if (' ' in full or '\n' in full) else full
+    anchors.append((pathish, spec))
+for m in pat2.finditer(text):
+    full=m.group(1).strip(); fname=m.group(2)
+    pathish=fname if ' ' in full else full
+    for sp in m.group(3).split('/'):
+        anchors.append((pathish, sp))
+uniq=[]; seen=set()
+for a in anchors:
+    if a in seen: continue
+    seen.add(a); uniq.append(a)
+idx={}
+for p in wt.rglob('*'):
+    if not p.is_file(): continue
+    if any(x in p.parts for x in ('node_modules','dist','.git','references','artifacts','coverage')): continue
+    idx.setdefault(p.name, []).append(p)
+def resolve(pathish):
+    p=wt/pathish
+    if p.is_file(): return [p]
+    hits=idx.get(pathlib.Path(pathish).name, [])
+    scored=[]
+    for h in hits:
+        rel=str(h.relative_to(wt)); suf=pathish.lstrip('./')
+        score=(2 if rel.endswith(suf) or rel.endswith(pathlib.Path(pathish).name) else 0) + (1 if 'src/' in rel else 0) - (1 if '/tests/' in rel else 0)
+        scored.append((score, len(rel), h))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [h for _,__,h in scored[:5]]
+ok=oob=miss=0
+oob_files=[]
+for pathish, spec in uniq:
+    paths=resolve(pathish)
+    if not paths:
+        miss += 1; continue
+    n=len(paths[0].read_text(errors='replace').splitlines())
+    bad=False
+    for part in spec.split(','):
+        a,b = map(int, part.split('-',1)) if '-' in part else (int(part), int(part))
+        if a<1 or b>n or a>b:
+            bad=True
+    if bad:
+        oob += 1; oob_files.append((pathish, spec, str(paths[0].relative_to(wt)), n))
+    else:
+        ok += 1
+print('unique', len(uniq), 'OK', ok, 'OOB', oob, 'MISSING', miss)
+for row in oob_files:
+    print('OOB', row)
+PY
+```
+
+本 SHA 实测输出：
+
+```
+unique 133 OK 128 OOB 5 MISSING 0
+OOB ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 69)
+```
 
 ### 5.1 计划 §8 逐条（新 SHA 必核）
 

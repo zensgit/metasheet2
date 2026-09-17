@@ -55,9 +55,9 @@ flowchart LR
 
 1. 四种角色视角 + 已完成 + 全部（《查看和编辑任务》）。
 2. 多负责人 + 全部/任一完成（《添加任务负责人》:14-15）。
-3. 创建人「仅我完成 / 为所有负责人完成」；父完成不级联子（《完成与重启任务》:19-23）。
-4. 子任务含根五层、设父/转独立双端编辑权、父候选排除子孙（《使用子任务》:1,10-11,30）。
-5. 创建人默认为负责人之一，可移除；零负责人合法（《添加任务负责人》:4；《查看和编辑任务》:15）。
+3. 创建人「仅我完成 / 为所有负责人完成」（《完成与重启任务》:20）；父完成不级联子（同篇 :19）。:21-23 是 IM 场景，不对标。
+4. 子任务含根五层（《使用子任务》:7）、设父/转独立双端编辑权（:10-11）、父候选排除子孙（:30）。
+5. 创建人默认为负责人之一，可移除；零负责人合法（《添加任务负责人》:10；《查看和编辑任务》:15）。
 6. 截止日期 vs 具体时间点；提醒缺省 −30min / 当天 18:00（《创建任务》:19-20）。
 7. 红点口径逾期 / 逾期或今天 / 可关（《任务设置》《使用任务红点标记》）。
 8. 关注人只读+评论+收通知（《关注任务》；冲突见 §13-23）。
@@ -118,15 +118,20 @@ P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` 
 
 四列 + `time_zone`（带任一日期才必填，IANA，`isValidIanaTimeZone`）+ 派生 `due_at`。
 
-逾期 / 「今天」三条规则（查看者日期语义）：
+逾期 / 「今天」三条规则（查看者日期语义）。SQL 定义（**已定，来源 计划 v5 §2.6**）：
+
+```
+viewerToday = (now() AT TIME ZONE :viewerTz)::date
+viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
+```
 
 1. 定时 overdue = `due_at < now()`（与 viewerTz 无关）。
 2. 定时 overdue_or_today = `due_at < viewerNextMidnight`（查看者当地次日零点瞬时）。
 3. 全天 overdue = `due_date < viewerToday`；overdue_or_today = `due_date <= viewerToday`。
 
-查看者时区：`x-viewer-time-zone`，缺省回退任务 `time_zone`。显示：全天 floating 不换算日期。
+查看者时区：请求头 `x-viewer-time-zone`；服务端用 `isValidIanaTimeZone` 校验，**非法或缺失回退任务自身 `time_zone`**。显示：全天 floating 不换算日期。
 
-`remind_at` 缺省（P1，§13-13）：有 `due_time` ⇒ `due_at − 30min`（`due_time` 在 00:00–00:29 跨日回退）；全天 ⇒ 当地 18:00。
+`remind_at` 缺省（P1，**已定，来源 计划 v5 §5-13 / §2.6**）：创建未显式给 `remind_at` 时**先**按用户 `default_remind_policy`；policy 缺省 ⇒ 有 `due_time` ⇒ `due_at − 30min`（任务域自算纯函数；`due_time` 在 00:00–00:29 跨日回退到前一日）；全天（`due_time IS NULL`）⇒ `due_date` 在 **`tasks.time_zone`** 下的 18:00，经 `computeDateReminderOccurrence(due_date, {timeOfDay:'18:00', offsetDays:0, timezone: tasks.time_zone}, {floating:true})`。不用查看者时区。区分依据是四列，不是从 `timestamptz` 反推。`task_user_settings.default_remind_policy` 是该列的读者（P1 建表，P0-A 派生函数仍实现 policy=缺省 的两支）。
 
 ---
 
@@ -150,9 +155,43 @@ P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` 
 - 真 fetch，不复制审批 `USE_MOCK`。
 - 助手模块 `apps/web/src/tasks/` + `views/tasks/`。
 
+### 5.2.1 真库三点接线（**已定，来源 计划 v5 §8-1**；第 ③ 点 required 承载见 §13-12 **未裁**）
+
+每个 `tests/integration/task-*.db.test.ts` 必须三点齐，缺一即 skip 形状绿（交接件 §四.5）：
+
+① **exclude 逐文件字面量**：加进 `packages/core-backend/vitest.config.ts` 的 `test.exclude`。任务条目必须是逐文件字面量，**不得用 glob**。数组现存三条历史 glob 显式排除在集合比较之外：`'**/node_modules/**'`（本 SHA `:32`）、`'**/dist/**'`（`:33`）、`'tests/e2e/**'`（本 SHA **`:1797`**，计划写的 `:1782` 已漂移到 elearning 文件）。验法：排除后 no-DB 配置对该路径报 **`No test files found`，不是 skipped**。
+
+② **独立证据 lane**：形状照 `.github/workflows/approval-realdb-comments.yml`：`workflow_dispatch` + `pull_request`（paths，**不加 `branches:`**，`:45-47`）+ `push main`；**不声明 `merge_group`** 仅在 lane 保留 paths 时成立（`:41`）；job 级 `DATABASE_URL`（postgres:16）+ `EXPECT_DB: '1'`（`:99`）；`MIGRATION_EXCLUDE` 标准 6 项（`:129` 逗号列表；`MIGRATION_EXCLUDE_TRACKING.md` 文案 union 为 7，新迁移不加进去）；`vitest --config vitest.integration.config.ts run <整文件> --reporter=verbose`（`:136`；verbose 是判据：lane 绿后从日志读出收集用例数写进 PR body，零收集的绿无效 `:133-135`）；测试顶部 `EXPECT_DB` 哨兵（`approval-sequential-mode.db.test.ts:14`）。
+
+③ **点名哪个 required context 真正执行该文件**。独立 lane 只是证据。**(a)/(b) 由 §13-12 裁，本锁不落槌**。裁定前 §0/§12 db 门 required 格写 TBD。另：自建 `task-ci-coverage-enumeration.test.ts`（发现式：磁盘 `task-*.db.test.ts` = exclude 条目 = lane 文件清单，配扫描负控），放进 always-on 必需 lane（计划 §8-1 ④）。
+
+本切片 docs-only，不建测试文件、不改 `vitest.config.ts`、不建 lane。
+
 ### 5.3 前端两点接线（**已定，来源 计划 v5 §8-2**）
 
-新 spec 必须：(1) `.github/workflows/tasks-web-guard.yml`（paths 型，**不声明 `merge_group`**）；(2) `run-required-web-tests.sh` 的 `exec` 行 token（本 SHA 在 **:1186**，不是计划写的 :1069）。双向碰撞检查人口含 `apps/web/verification/`。本切片 docs-only，不改这两处。
+新 spec 必须两处齐才不是 skip-shaped green：
+
+① `.github/workflows/tasks-web-guard.yml`：paths 型（`apps/web/src/tasks/**`、`apps/web/src/views/tasks/**`、`apps/web/tests/tasks*.spec.ts`、`apps/web/src/router/guardPolicy.ts`、`apps/web/src/App.vue`、workflow 自身），`push main` 同 paths，**不声明 `merge_group`**。不抄 `attendance-web-guard.yml:2-3` 的无 paths 形状。step 用 `pnpm --filter @metasheet/web exec vitest run <逐文件路径> --reporter=verbose`。
+
+② token 加进 `apps/web/scripts/run-required-web-tests.sh` 的 `exec npx vitest run …` 行（本 SHA 在 **`:1186`**，不是计划写的 `:1069`；执行者 = always-on 必需 job `web-tests`，`web-tests.yml:77`）。双向碰撞检查覆盖 vitest 实际收集的人口（不只 `apps/web/tests`）：
+
+- 正向：`find apps/web -path '*/node_modules' -prune -o -name '*.spec.ts' -print -o -name '*.test.ts' -print | grep -c -- '<token>'` **= 1**
+- 反向：token 不是其它任何路径的子串，且**不得命中 `apps/web/verification/`**（Playwright 用例；命中即红，不是「扫描人口包含 verification」）
+- 两条命令输出写进 PR body
+
+本切片 docs-only，不改这两处。
+
+### 5.4 五段部署链（**已定，来源 计划 v5 §8-3**）
+
+合并 → 构建 → 发布 → 部署 → 迁移是五个独立动作，不自动串联。
+
+1. **合并**进 main 只触发 `docker-build.yml` 的 build job **构建**（`:4-8`；`paths-ignore: docs/**`，纯 docs 合并如 PR-0 连 build 都不跑）。
+2. **发布镜像是 dispatch 门**：`publish_images` 步骤要 `publish_preflight.verified == 'true'`（`:111`），其上游 `publish_authorization.publish_requested`（`:96`）由 `scripts/ops/docker-publish-preflight.mjs:19` 决定：`if (context.eventName !== 'workflow_dispatch') return { publish: false }`。
+3. **生产部署 job** 仅在 `workflow_dispatch && inputs.deploy_production == true && github.ref == 'refs/heads/main' && needs.build.outputs.published == 'true'` 时运行（`:120-122`）。`published` 只能由同一次 dispatch 的发布步骤置真。
+4. 因此 prod 上线必须在**同一次 dispatch 同时给** `publish_images: true` 与 `deploy_production: true` 两个 input；只给后者会得到静默跳过的 deploy。staging 由 window-runner 部署，需 owner 指令。
+5. **迁移**只在该 deploy job 的「Remote deploy」步骤内执行（`docker-build.yml:484-488`，容器内 `node packages/core-backend/dist/src/db/migrate.js`，带 `MIGRATE START/END` 标记）。生产迁移与生产部署同门。
+
+含 DDL 的 PR body 首段写明：本 PR 合并后**不会**自动到达生产，迁移**不会**自动应用；`down()` 是否验证过。新迁移默认在 CI 跑，不加进 `MIGRATION_EXCLUDE`。
 
 ---
 
@@ -163,7 +202,7 @@ P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` 
 - `task-access.ts`：`resolveTaskRoles`（行级，角色可叠加、能力取并集）+ `buildTaskScopeCondition`（只产 SQL 文本与参数，不执行）。
 - `buildTaskPendingCondition` **必须由** `buildTaskScopeCondition({view:'assigned'})` 派生，不得自行发射角色臂。
 - **错误契约两族（已定，来源 计划 v5 §3 / §7-8）**：允许列表谓词抛错 ⇒ 空列表 + `degraded`；投影 deny 集合查询失败 ⇒ **抛出**，绝不返回空 deny 集。
-- PendingItem（**已定，来源 计划 v5 §3**）：无截止日五键 `source/id/title/href/updatedAt`；有截止日六键（多 `dueAt`）；无截止日省略键，不填 null/空串。`source` 经 `TASK_PENDING_SOURCE` 常量，P0-A 先 `'task'`（§13-35）。签名比交接件多 `orgId`。
+- PendingItem（**已定，来源 计划 v5 §3 + 交接件 §二③**）：无截止日五键 `source/id/title/href/updatedAt`；有截止日六键（多 `dueAt`）；无截止日省略键，不填 null/空串。**不带正文**（投影不搬运内容；响应体不含 `description` / `description_rich` 等正文字段）。`source` 经 `TASK_PENDING_SOURCE` 常量，P0-A 先 `'task'`（§13-35）。签名比交接件多 `orgId`。
 
 ### 6.2 完成判定（规则；对称性见 §13-9）
 
@@ -209,7 +248,7 @@ N/A:本线无媒体轨。
 
 | # | 题 | 状态 |
 |---|---|---|
-| 已定抄入 | 两类非空、日期三规则、锁协议锁序、投影复合键、deny 两族、两点接线、五段部署链、导航/引导、PendingItem 五/六键、§13-37/38/39 缺省 | 已定，来源计划 v5；ratify 时可改 |
+| 已定抄入 | 两类非空、日期三规则、锁协议锁序、投影复合键、deny 两族、两点接线（§5.3）、真库三点接线①②（§5.2.1；③=§13-12 未裁）、五段部署链（§5.4）、导航/引导、PendingItem 五/六键+不带正文、§13-37/38/39 缺省 | 已定，来源计划 v5；ratify 时可改 |
 | §13-10 | RBAC 豁免集 / `tasks_user` seed | **未裁** |
 | §13-12 | 真库测试 required 承载 | **未裁** |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
@@ -219,7 +258,8 @@ N/A:本线无媒体轨。
 ## 10. Feature flag 与 RBAC
 
 - `TASKS_ENABLED === 'true'`（精确字符串）。关时 router 工厂返回 `null`，`index.ts` `if (router) this.app.use(router)` 跳过。
-- P1：`TASKS_SCHEDULER_ENABLED` / `TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED` / `TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED`，默认 OFF。新 flag 必须登记 `scripts/ops/global-history-flag-manifest`。
+- P1：`TASKS_SCHEDULER_ENABLED` / `TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED` / `TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED`，默认 OFF。
+- **flag 与 Global-History manifest（选项 a）**：provenance = `AGENTS.md:68`（「新增 env flag 必须登记」）；**计划 v5 无此条**，属本锁对章程的落地，不是计划抄入。`TASKS_*` **不属** Global-History 族。`global-history-flag-manifest.test.mjs` 的源真相只从 `MULTITABLE_[A-Z_0-9]+` 与 `ELEARNING_*_ENABLED` 推导（`:143-151`）；把 `TASKS_*` 写入 `GLOBAL_HISTORY_FLAG_MANIFEST` 会落 phantom 断言（`:168-172`），`pnpm verify:global-history-flag-manifest:test` 必红。正确落地：**不得**登记进 GH manifest；源码一旦出现 `TASKS_*_ENABLED` 读，**同一 PR** 把 `TASKS_` 前缀登进 `NON_GH_PREFIXES`（照 `test.mjs:66-71` 既有写法）或把精确名登进 `NON_GH_EXACT`（`:72`）。那是排除列表，**不是** GH 注册。M0 源码无 `TASKS_*` 读，本切片不改 `test.mjs`。
 - 生产启用是独立 owner 授权，不等于本锁 ratify。
 - 路由挂载：审批段之后（本 SHA `index.ts:1785-1788` 之后）；静态子路径先于 `/:id`。真起服务器打一遍。
 
@@ -242,7 +282,7 @@ N/A:本线无媒体轨。
 2. 非 admin 三件事缺一 403；直授+admission 仍 403。
 3. 完成判定网格 any/all × 增删人 × 切模式 × {0,1,n}。
 4. 可见 ≠ pending（self_completed 正反）。
-5. PendingItem 五键/六键；`dueAt` 不得为 null/空串。
+5. PendingItem 五键/六键；`dueAt` 不得为 null/空串；响应体不含 `description` / `description_rich` 等正文字段。
 6. 树 depth 0..4、无环、交叉移动恰一成功。
 7. 锁键单点 + 锁序正/负控。
 8. 日期三规则固定 `now=2026-09-15T12:30Z` 三格。
@@ -251,11 +291,12 @@ N/A:本线无媒体轨。
 11. 前端两点接线；flag OFF 与零任务不同形；404 不断言开关。
 12. 前端引导三触发 + `predicate_error` 不引导。
 13. 真起服务器静态路径；非 admin 打通一条任务路由。
-14. 含 DDL 的 PR 首段标明未应用未合并；五段部署链。
+14. 含 DDL 的 PR 首段标明未应用未合并；遵守 §5.4 五段部署链（合并≠发布≠部署≠迁移）。
 15. 生产源码注释不点名其他线符号。
 16. lane 断言 `RBAC_OPTIONAL` 未设置。
+17. 真库三点接线齐备（§5.2.1 ①②；③ 的 required 承载仍 §13-12 未裁）：no-DB 配置对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped。
 
-门 2/9/13 的 **required 绿** 在 §13-12 裁定前不得声称。
+门 2/9/13 的 **required 绿** 在 §13-12 裁定前不得声称。门 17 的 ①② 可在 M2 接线 PR 上验；③ 在裁定前不得用「门全绿」概括。
 
 ---
 
@@ -312,7 +353,7 @@ N/A:本线无媒体轨。
 
 ### L1
 
-**13. `remind_at` 缺省** — **已定算法，来源 计划 v5 §5-13 / §2.6**（−30min / 18:00 / 跨日回退）。
+**13. `remind_at` 缺省** — **已定算法，来源 计划 v5 §5-13 / §2.6**：先 `default_remind_policy`；缺省则定时 `due_at − 30min`（含 00:00–00:29 跨日回退）、全天 = `due_date` 在 `tasks.time_zone` 下 18:00（`computeDateReminderOccurrence` + floating），不用 viewerTz。见 §4.4。
 **14. 清单归档** — **已定，来源 计划 v5 §5-11**（归档权 created_by ∪ edit/owner；不改变任务状态/可见性）。
 **15. `created_by` vs `owner_id`** — **已定方向，来源 计划 v5 §2.1**：created_by 不可变；owner 可转，原 owner 降 edit。
 **16. 自定义字段** — 建议 org 定义 + 清单绑定 + 任务值；建/改/删权 = 清单可编辑者。
@@ -337,7 +378,7 @@ N/A:本线无媒体轨。
 **29. 分页** — 建议 P0-A `limit/offset` + 上限 100；总数返回；cursor 留 P1。
 **30. socket 扇出** — 建议按 user 房间；P0-A 完成/指派/重启 emit；关注人 P1 收通知后再扩。
 **31. 投影 sweep** — 建议照审批 5 分钟量级；最大滞后承诺请裁，建议不写 SLA 数字只写「sweep 周期可配、默认保守」。
-**32. `KanbanView.vue` 示例卡片** — 建议保留为演示，加注释「非任务实体」但 **生产源码注释不得点名任务线符号以外的其他线**；或改文案去掉「任务示例」以免普查误伤。请裁。本锁建议改文案为中性「示例卡片」，不在注释里点名本线未建表。
+**32. `KanbanView.vue` 示例卡片** — 建议只改文案为中性「示例卡片」。该文件属多维表线：其注释里**不得出现任何 tasks 域符号**（`tasks` / `task_*` / `TASKS_*` 等），否则会触发他线普查钉。不在该文件注释里写「非任务实体」或本线表名。
 **33. i18n** — 建议 `tasks/labels.ts` + 一条 CJK/EN spec。
 **34. 跨任务动态页** — 建议 P1 清单动态走 `task_list_events`；跨任务「动态」页可后置。
 **35. `PendingItem.source`** — 建议 P0-A `'task'`，单点常量；待办中心锁裁后只改一处。
