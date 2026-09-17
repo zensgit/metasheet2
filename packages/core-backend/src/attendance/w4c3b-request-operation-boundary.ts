@@ -16,6 +16,7 @@
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   acquireAttendanceCalculationRolloutLock,
+  buildAttendanceCalculationRolloutAdvisoryKey,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
 } from './w4c0-identity'
@@ -251,8 +252,48 @@ export type AttendanceRequestOperationBoundaryResultV1 =
   | { readonly kind: 'executed'; readonly response: unknown }
   | { readonly kind: 'replay'; readonly response: unknown }
 
+/**
+ * Lock §3 C-1 (lock:88-92) — the external transaction entry. It carries exactly the
+ * `execute` input plus the caller's transaction client. There is deliberately no field for the
+ * run mode (`acceptedWritePosture`), the actor posture, or any other authorization credential:
+ * 「运行模式、授权凭据不得由普通请求参数指定」. Those are resolved by the boundary inside the
+ * transaction, from the org's rollout posture and the adapter's own identity preparation, exactly
+ * as they are on the HTTP entry — this input cannot influence them.
+ */
+export interface AttendanceRequestOperationExternalTransactionInputV1 {
+  /**
+   * Caller-owned transaction client. The caller owns BEGIN/COMMIT/ROLLBACK and the connection's
+   * lifetime; this boundary issues none of them and releases nothing. Everything this protocol
+   * writes commits — or rolls back — with the caller's transaction, which is the whole point:
+   * 判据 II requires C-1's business cancellation and the approval side's round/instance writes to
+   * be one atomic unit (lock §14.2 判据 II).
+   */
+  readonly client: AttendanceW4TransactionClientV1
+  readonly kind: AttendanceRequestOperationKindV1
+  /**
+   * NOT nullable here, unlike `execute`. A null id routes into the legacy branch that skips
+   * operation preflight, identity congruence, the outbox and the seal — i.e. it skips the very
+   * W4 operation protocol this entry exists to reuse (lock §3 C-1: 「复用同一套 W4 操作协议」).
+   * Refused with a typed code rather than silently degraded.
+   */
+  readonly operationId: string
+  readonly correlationId: string
+  readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
+  readonly routeInput: unknown
+}
+
 export interface AttendanceRequestOperationBoundaryV1 {
   execute(input: AttendanceRequestOperationBoundaryInputV1): Promise<AttendanceRequestOperationBoundaryResultV1>
+  /**
+   * Same protocol, caller-owned connection and transaction (lock §3 C-1: 「仅移交连接与事务生命周期
+   * 的所有权」). Caller obligations, both enforced rather than documented:
+   *  - the transaction is `ISOLATION LEVEL SERIALIZABLE` (what `execute`'s own runner opens);
+   *  - the caller already holds this org's class-`00` rollout SHARED advisory lock, taken BEFORE
+   *    any row lock it holds.
+   */
+  executeInExternalTransaction(
+    input: AttendanceRequestOperationExternalTransactionInputV1,
+  ): Promise<AttendanceRequestOperationBoundaryResultV1>
 }
 
 export interface AttendanceRequestOperationBoundaryDepsV1 {
@@ -354,6 +395,86 @@ function normalizeInput(input: unknown): AttendanceRequestOperationBoundaryInput
   })
 }
 
+/**
+ * Lock §3 C-1. Separate from `normalizeInput` because the external entry's contract differs in
+ * exactly two ways and both must be refusals, not coercions: it carries a caller-owned `client`,
+ * and its `operationId` may not be null. Everything else is normalized by the SAME `normalizeInput`
+ * so the two entries cannot drift into accepting different inputs.
+ */
+function normalizeExternalTransactionInput(input: unknown): {
+  client: AttendanceW4TransactionClientV1
+  input: AttendanceRequestOperationBoundaryInputV1
+} {
+  const code = 'W4C3B_REQUEST_EXTERNAL_TRANSACTION_INPUT_INVALID'
+  const fields = exactObject(
+    input,
+    ['client', 'kind', 'operationId', 'correlationId', 'routeVariant', 'routeInput'],
+    code,
+  )
+  const client = fields.client
+  if (typeof client !== 'object' || client === null || typeof (client as { query?: unknown }).query !== 'function') {
+    fail(code)
+  }
+  if (typeof fields.operationId !== 'string') fail(code)
+  const normalized = normalizeInput({
+    kind: fields.kind,
+    operationId: fields.operationId,
+    correlationId: fields.correlationId,
+    routeVariant: fields.routeVariant,
+    routeInput: fields.routeInput,
+  })
+  // `normalizeInput` accepts null; this entry does not (see the input type's own doc comment).
+  if (normalized.operationId === null) fail(code)
+  return { client: client as AttendanceW4TransactionClientV1, input: normalized }
+}
+
+/**
+ * Caller obligation 1 (lock §3 C-1: 「调用方须满足隔离级别与锁序」). `execute`'s own runner opens
+ * `BEGIN ISOLATION LEVEL SERIALIZABLE`; a caller-owned transaction at READ COMMITTED would run the
+ * identical protocol under a weaker snapshot, so the W4 preflight's replay/posture predicates could
+ * be read under one snapshot and written under another. Asserted, not documented: PostgreSQL fixes
+ * the isolation level at the transaction's first statement, so a caller cannot repair this after
+ * the fact and a silent downgrade must be refused up front.
+ */
+async function assertExternalTransactionIsolationV1(
+  client: AttendanceW4TransactionClientV1,
+): Promise<void> {
+  const result = await client.query("SELECT current_setting('transaction_isolation') AS isolation", [])
+  const isolation = (result.rows[0] as { isolation?: unknown } | undefined)?.isolation
+  if (typeof isolation !== 'string' || isolation.toLowerCase() !== 'serializable') {
+    fail('W4C3B_REQUEST_EXTERNAL_TRANSACTION_ISOLATION_INVALID', 500)
+  }
+}
+
+/**
+ * Caller obligation 2 (lock §3 C-2 全局锁序, and lock §14.2's requirement that the census 「包含
+ * rollout 共享锁与 advisory 锁」). Reuses the production key builder — not a second derivation — so
+ * a future change to the key cannot leave this check probing a stale one. The `pg_locks` predicate
+ * is the shape already used in-repo for advisory-lock-held probes
+ * (`w4c0-operation-registry.ts:979-982`); `ShareLock` is what `pg_advisory_xact_lock_shared`
+ * registers and `ExclusiveLock` is what `pg_advisory_xact_lock` registers — a caller holding the
+ * exclusive lock satisfies the ordering obligation a fortiori, so both are accepted.
+ */
+async function assertExternalTransactionRolloutLockHeldV1(
+  client: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<void> {
+  const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(orgKey)
+  const result = await client.query(
+    `SELECT 1 FROM pg_locks
+      WHERE pid = pg_backend_pid() AND locktype = 'advisory' AND granted
+        AND objsubid = 1
+        AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+        AND objid::bigint = ($1::bigint & 4294967295)
+        AND mode IN ('ShareLock', 'ExclusiveLock')`,
+    [key.toString()],
+  )
+  if (result.rows.length === 0) {
+    fail('W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD', 500)
+  }
+}
+
 function buildEnvelope(
   input: AttendanceRequestOperationBoundaryInputV1,
   prepared: AttendanceRequestOperationPreparedV1,
@@ -407,9 +528,52 @@ export function createAttendanceRequestOperationBoundaryV1(
       const input = normalizeInput(rawInput)
       const connection = await deps.acquireConnection()
       try {
-        return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) => {
+        return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) =>
+          runRequestOperationProtocolV1(trx, deps.adapters, input))
+      } finally {
+        connection.release()
+      }
+    },
+
+    async executeInExternalTransaction(rawInput) {
+      const { client, input } = normalizeExternalTransactionInput(rawInput)
+      // §3 C-1 (lock:88-92) — the caller owns the connection and the transaction lifecycle, so
+      // the two properties this protocol would otherwise establish for itself have to be proven
+      // rather than assumed. Both are enforced BEFORE the first statement that can take a lock or
+      // write a row, and both fail closed with a typed code. Neither is derivable from
+      // `rawInput`: a caller cannot declare itself compliant.
+      await assertExternalTransactionIsolationV1(client)
+      // The second precondition (the caller already holds this org's class-`00` rollout SHARED
+      // advisory lock) needs the org, which only `prepareIdentity` can supply — so it is asserted
+      // inside the protocol, at the one point where the org is known and before the protocol's
+      // own first lock. See `assertExternalTransactionRolloutLockHeldV1`.
+      return runRequestOperationProtocolV1(client, deps.adapters, input, { externalTransaction: true })
+    },
+  }
+}
+
+/**
+ * The single copy of the W4 request-operation protocol (§10-⑫, lock:83-92):
+ * prepareIdentity → canonical-org classification → rollout-shared-lock posture resolve →
+ * authorization context → operation replay preflight → prepare + identity congruence →
+ * adapter.execute → outbox enqueue → seal.
+ *
+ * `execute` runs it inside a boundary-owned SERIALIZABLE transaction on a boundary-owned
+ * connection; `executeInExternalTransaction` runs the SAME body on a caller-owned client inside a
+ * caller-owned transaction. Lock §3 C-1: the external entry "仅移交连接与事务生命周期的所有权" —
+ * nothing else about the protocol may differ between the two entries, which is why this is one
+ * function and not two. `mode.externalTransaction` therefore steers NOTHING inside the body; it
+ * exists only so the two ownership-specific preconditions can name themselves in errors.
+ */
+async function runRequestOperationProtocolV1(
+  trx: AttendanceW4TransactionClientV1,
+  adapters: AttendanceRequestOperationAdaptersV1,
+  input: AttendanceRequestOperationBoundaryInputV1,
+  mode?: { readonly externalTransaction: true },
+): Promise<AttendanceRequestOperationBoundaryResultV1> {
+        {
           const shapedTrx = pluginTrx(trx)
-          const adapter = deps.adapters[input.kind]
+          const adapter = adapters[input.kind]
           const operation = Object.freeze({
             operationId: input.operationId,
             correlationId: input.correlationId,
@@ -428,6 +592,27 @@ export function createAttendanceRequestOperationBoundaryV1(
             parseCanonicalAttendanceRolloutOrgKeyV1(identityPrepared.orgId)
           } catch {
             canonicalOrg = false
+          }
+          if (mode?.externalTransaction === true) {
+            // Lock §3 C-2 (lock:108-113): 建议全局顺序 rollout/advisory 锁 → 轮次引擎实例 → 原单据实例
+            // → attendance_requests → 余额批次. The external caller has ALREADY taken its own row
+            // locks (the cancel round's engine instance, the original document instance) before
+            // reaching this entry, so if it had not also already taken the rollout lock, this
+            // protocol's own `acquireAttendanceCalculationRolloutLock` below would take it AFTER
+            // those row locks — the exact reversed order that phase 1's Q-A census proved
+            // deadlocks deterministically (40P01) against any holder taking them in the ratified
+            // order (`approval-cancel-round-lock-order-census.db.test.ts`, "the REVERSED order …
+            // deadlocks DETERMINISTICALLY"). Verified, not documented: the check reads `pg_locks`
+            // for THIS backend, so a non-compliant caller is refused instead of deadlocking.
+            //
+            // This proves the lock is held NOW, which cannot by itself prove it was taken before
+            // the caller's row locks (`pg_locks` carries no acquisition order). It is the strongest
+            // mechanical check available here and it catches the only violation that is reachable
+            // in practice — a caller that never takes the lock at all. The ordering obligation on
+            // callers that do take it stays a documented obligation, stated here rather than
+            // silently implied.
+            if (!canonicalOrg) fail('W4C3B_REQUEST_ORG_OUTSIDE_W4_DOMAIN')
+            await assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)
           }
           if (!canonicalOrg) {
             if (input.operationId !== null) fail('W4C3B_REQUEST_ORG_OUTSIDE_W4_DOMAIN')
@@ -532,10 +717,5 @@ export function createAttendanceRequestOperationBoundaryV1(
             kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,
             response: result.response,
           }
-        })
-      } finally {
-        connection.release()
-      }
-    },
-  }
+        }
 }
