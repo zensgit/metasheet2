@@ -1154,6 +1154,13 @@ export function createRecordApprovalCompletionSink(
 
 type CompletionEventBus = {
   subscribe<T>(eventType: string, handler: (payload: T) => void | Promise<void>, plugin?: string): string
+  unsubscribe(id: string): boolean
+}
+
+export interface RecordApprovalCompletionSubscription {
+  readonly ids: readonly string[]
+  detach(): void
+  drain(): Promise<void>
 }
 
 /**
@@ -1165,16 +1172,41 @@ export function subscribeRecordApprovalCompletionBus(
   eventBus: CompletionEventBus,
   sink: RecordApprovalCompletionSink,
   onError: (eventType: string, error: unknown) => void = () => undefined,
-): string[] {
+): RecordApprovalCompletionSubscription {
   const ids: string[] = []
-  for (const eventType of RECORD_APPROVAL_COMPLETION_EVENT_TYPES) {
-    ids.push(
-      eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
-        sink.handleApprovalCompletion(payload).catch((error) => onError(eventType, error))
-      }),
-    )
+  const inFlight = new Set<Promise<void>>()
+  let detached = false
+  const detach = (): void => {
+    if (detached) return
+    detached = true
+    for (const id of ids) eventBus.unsubscribe(id)
   }
-  return ids
+  try {
+    for (const eventType of RECORD_APPROVAL_COMPLETION_EVENT_TYPES) {
+      ids.push(
+        eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
+          const task = sink.handleApprovalCompletion(payload).catch((error) => onError(eventType, error))
+          inFlight.add(task)
+          void task.then(
+            () => inFlight.delete(task),
+            () => inFlight.delete(task),
+          )
+        }),
+      )
+    }
+  } catch (error) {
+    detach()
+    throw error
+  }
+  return {
+    ids: Object.freeze([...ids]),
+    detach,
+    async drain(): Promise<void> {
+      while (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight])
+      }
+    },
+  }
 }
 
 function defaultPublishRecordRealtime(input: { sheetId: string; recordId: string; actorId?: string }): void {

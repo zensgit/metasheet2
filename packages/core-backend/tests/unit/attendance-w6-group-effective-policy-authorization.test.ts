@@ -624,7 +624,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
 
   it('A2 — the set of methods holding ANY this.app.<verb> registration site is exactly this frozen set', () => {
     const byMethod = new Set(model.sites.map((s) => s.enclosingMethod))
-    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'start'])
+    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'startOnce'])
   })
 
   it('A3 — ordering: the gate, audit, and security sites all precede the route site, in setupMiddleware\'s own sequential order', () => {
@@ -660,7 +660,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'createCoreAPI', signature: '[methodLower](...)' },
       { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'registerPluginRoute', signature: "[methodLower as 'get' | 'post' | 'put' | 'delete' | 'patch'](...)" },
       { kind: 'ESCAPE', enclosingMethod: 'setupMiddleware', signature: 'installMetrics(...) arg0' },
-      { kind: 'ESCAPE', enclosingMethod: 'start', signature: 'new APIGateway(...) arg0' },
+      { kind: 'ESCAPE', enclosingMethod: 'startOnce', signature: 'new APIGateway(...) arg0' },
     ])
   })
 

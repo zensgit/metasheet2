@@ -366,29 +366,72 @@ export function createDingTalkTodoMirrorSink(
 
 type TodoMirrorEventBus = {
   subscribe<T>(eventType: string, handler: (payload: T) => void | Promise<void>, plugin?: string): string
+  unsubscribe(id: string): boolean
+}
+
+export interface DingTalkTodoMirrorSubscription {
+  readonly ids: readonly string[]
+  detach(): void
+  drain(): Promise<void>
 }
 
 /**
- * Wire the eventBus (legacy) leg. Returns the subscription ids. Failures are handed to `onError` and
- * never thrown into the bus — a todo that cannot be mirrored must not break the other subscribers.
+ * Wire the eventBus (legacy) leg. The returned handle closes admission before detaching its exact
+ * subscriptions, then drains every callback admitted before that point. Failures are handed to
+ * `onError` and never thrown into the bus — a todo that cannot be mirrored must not break the other
+ * subscribers.
  */
 export function subscribeDingTalkTodoMirrorBus(
   eventBus: TodoMirrorEventBus,
   sink: DingTalkTodoMirrorSink,
   onError: (eventType: string, error: unknown) => void = () => undefined,
-): string[] {
+): DingTalkTodoMirrorSubscription {
   const ids: string[] = []
+  const inFlight = new Set<Promise<void>>()
+  let accepting = true
+
+  const track = (eventType: string, task: Promise<void>): Promise<void> => {
+    const observed = task.catch((error) => {
+      try {
+        onError(eventType, error)
+      } catch {
+        // Error reporting must not create an unhandled rejection in the event bus.
+      }
+    })
+    inFlight.add(observed)
+    void observed.then(
+      () => inFlight.delete(observed),
+      () => inFlight.delete(observed),
+    )
+    return observed
+  }
+
   ids.push(
-    eventBus.subscribe<ApprovalTaskCreatedEventV1>(TODO_MIRROR_TASK_CREATED_EVENT_TYPE, (payload) => {
-      sink.handleApprovalTaskCreated(payload).catch((error) => onError(TODO_MIRROR_TASK_CREATED_EVENT_TYPE, error))
-    }),
+    eventBus.subscribe<ApprovalTaskCreatedEventV1>(TODO_MIRROR_TASK_CREATED_EVENT_TYPE, (payload) => (
+      accepting
+        ? track(TODO_MIRROR_TASK_CREATED_EVENT_TYPE, sink.handleApprovalTaskCreated(payload))
+        : Promise.resolve()
+    )),
   )
   for (const eventType of TODO_MIRROR_COMPLETION_EVENT_TYPES) {
     ids.push(
-      eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
-        sink.handleApprovalCompletion(payload).catch((error) => onError(eventType, error))
-      }),
+      eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => (
+        accepting
+          ? track(eventType, sink.handleApprovalCompletion(payload))
+          : Promise.resolve()
+      )),
     )
   }
-  return ids
+
+  return {
+    ids: Object.freeze([...ids]),
+    detach(): void {
+      if (!accepting) return
+      accepting = false
+      for (const id of ids) eventBus.unsubscribe(id)
+    },
+    async drain(): Promise<void> {
+      await Promise.all([...inFlight])
+    },
+  }
 }

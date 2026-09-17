@@ -596,6 +596,12 @@ export class MetaSheetServer {
   /** Record-level submit-for-approval completion sink (eventBus leg + durable consumer share this object). */
   private recordApprovalCompletionSink:
     import('./multitable/record-approval-submission-service').RecordApprovalCompletionSink | null = null
+  private recordApprovalCompletionSubscription:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSubscription | null = null
+  private approvalProjectionService:
+    import('./multitable/approval-record-projection-service').ApprovalRecordProjectionService | null = null
+  private approvalProjectionSweepScheduler:
+    import('./services/ApprovalProjectionSweepScheduler').ApprovalProjectionSweepScheduler | null = null
   /**
    * DingTalk approval-todo ONE-WAY mirror sink (eventBus leg + durable consumer_key
    * `dingtalk-todo-mirror` share this object). Built unconditionally — the sink itself is a no-op
@@ -604,8 +610,10 @@ export class MetaSheetServer {
    */
   private dingtalkTodoMirrorSink:
     import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSink | null = null
+  private dingtalkTodoMirrorSubscription:
+    import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSubscription | null = null
   /** Mirror delivery worker interval handle — only ever set when the mirror flag is ON. */
-  private stopDingTalkTodoMirrorWorker?: () => void
+  private stopDingTalkTodoMirrorWorker?: () => Promise<void>
   private readonly recoveryArchiveApplication: RecoveryArchiveApplication
 
   // IoC Container
@@ -3334,8 +3342,91 @@ export class MetaSheetServer {
     return this.stopPromise
   }
 
+  private closeHttpServerForShutdown(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        if (!this.httpServer.listening) {
+          resolve()
+          return
+        }
+        this.httpServer.close((error?: Error) => {
+          if (error) {
+            reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+            return
+          }
+          this.logger.info('HTTP server closed')
+          resolve()
+        })
+      } catch {
+        reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+      }
+    })
+  }
+
+  private async waitForShutdownBarrier(
+    tasks: Array<Promise<unknown>>,
+    failureCode: string,
+    timeoutMessage: string,
+  ): Promise<void> {
+    let timeout: NodeJS.Timeout | null = null
+    const settled = Promise.allSettled(tasks).then((results) => {
+      if (results.some((result) => result.status === 'rejected')) {
+        throw new Error(failureCode)
+      }
+    })
+    try {
+      await Promise.race([
+        settled,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            this.logger.warn(timeoutMessage)
+            reject(new Error(failureCode))
+          }, 10_000)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  private observeShutdownTask<T>(task: Promise<T>): Promise<T> {
+    // Some producer drains can reject before the recovery worker finishes and before the shared
+    // allSettled barrier is installed. Observe immediately without changing the original promise,
+    // so the later barrier still sees and propagates the rejection as a values-free failure code.
+    void task.catch(() => undefined)
+    return task
+  }
+
   private async stopOnce(signal: string): Promise<void> {
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
+
+    // Close every approval-completion producer admission synchronously. Their drains run while the
+    // completion listeners remain attached, so a terminal event emitted by already-admitted work is not lost.
+    const approvalProducerDrains: Array<Promise<unknown>> = []
+    approvalProducerDrains.push(this.observeShutdownTask(this.closeHttpServerForShutdown()))
+    approvalProducerDrains.push(this.observeShutdownTask(stopApprovalSlaScheduler()))
+    if (this.automationService) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.automationService.stopProducerAdmissions()))
+    }
+    if (this.approvalProjectionSweepScheduler) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.approvalProjectionSweepScheduler.stop()))
+    }
+    if (this.durableDeliveryLoop) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
+    }
+    if (this.stopDingTalkTodoMirrorWorker) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.stopDingTalkTodoMirrorWorker()))
+      this.stopDingTalkTodoMirrorWorker = undefined
+    }
+    if (this.dingtalkInteractiveCardStreamWorker) {
+      approvalProducerDrains.push(
+        this.observeShutdownTask(
+          this.dingtalkInteractiveCardStreamWorker.shutdown().then((status) => {
+            if (status.state === 'failed') throw new Error('DINGTALK_CARD_STREAM_DRAIN_FAILED')
+          }),
+        ),
+      )
+    }
 
     try {
       await this.stopElearningMediaWorkers?.()
@@ -3356,6 +3447,44 @@ export class MetaSheetServer {
       this.logger.warn('Recovery archive restore worker stop failed')
     }
 
+    let approvalCompletionBarrierFailed = false
+    try {
+      await this.waitForShutdownBarrier(
+        approvalProducerDrains,
+        'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+        'Approval completion producer drain timeout',
+      )
+      if (this.automationService) {
+        await this.waitForShutdownBarrier(
+          [this.automationService.drainTransitiveCompletionProducers()],
+          'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+          'Approval completion transitive producer drain timeout',
+        )
+      }
+
+      // No producer can add another completion callback after this point. Detach only IDs owned by
+      // these consumers, then drain callbacks that were admitted before the synchronous detach.
+      this.automationService?.detachCompletionConsumers()
+      this.approvalProjectionService?.unsubscribe(eventBus)
+      this.recordApprovalCompletionSubscription?.detach()
+      this.dingtalkTodoMirrorSubscription?.detach()
+      const approvalSinkDrains: Array<Promise<unknown>> = []
+      if (this.automationService) approvalSinkDrains.push(this.automationService.drainCompletionConsumers())
+      if (this.approvalProjectionService) approvalSinkDrains.push(this.approvalProjectionService.drainCompletionHandlers())
+      if (this.recordApprovalCompletionSubscription) approvalSinkDrains.push(this.recordApprovalCompletionSubscription.drain())
+      if (this.dingtalkTodoMirrorSubscription) approvalSinkDrains.push(this.dingtalkTodoMirrorSubscription.drain())
+      await this.waitForShutdownBarrier(
+        approvalSinkDrains,
+        'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+        'Approval completion sink drain timeout',
+      )
+      this.automationServiceReady = false
+      setAutomationServiceInstance(null)
+    } catch {
+      approvalCompletionBarrierFailed = true
+      this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+    }
+
     const shutdownTasks: Promise<void>[] = []
 
     // 0. Stop background tasks
@@ -3373,26 +3502,6 @@ export class MetaSheetServer {
         this.logger.warn(`Audit log partition ensure stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
-    shutdownTasks.push(Promise.resolve().then(() => {
-      try {
-        this.automationService?.shutdown()
-        this.automationServiceReady = false
-        setAutomationServiceInstance(null)
-      } catch (err) {
-        this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }))
-    // P2 durable-delivery S5: stop the outbox dispatch loop (no-op when the flag was OFF — the handle is null).
-    // A clean stop lets in-flight adapters finish/abort and prevents a claimed row from being abandoned mid-lease.
-    if (this.durableDeliveryLoop) {
-      const loop = this.durableDeliveryLoop
-      this.durableDeliveryLoop = null
-      shutdownTasks.push(
-        loop.stop().catch((err) => {
-          this.logger.warn(`Durable delivery dispatch loop stop error: ${err instanceof Error ? err.message : String(err)}`)
-        }) as Promise<void>,
-      )
-    }
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         this.stopMetaRevisionRetention?.()
@@ -3415,16 +3524,8 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
-    // 口径订正(裁判 prose):下面这条 shutdownTask **不是**「先于 pool.end() 完成」的顺序保证 ——
-    // 它与 :3465 的 `await pool.end()` 是同一个 `Promise.all(shutdownTasks)`(:3597)里的**并列
-    // 兄弟**,两者并发,整体再与 10s 超时 race(:3598-3602)。
-    // 「不会留半截 DELETE」是这三件事合起来给的:
-    //   (a) stop 置位后不再入轮(notification-retention.ts 的唯一闸门 kickRunOnce);
-    //   (b) 批量循环每批之前都看 stopped 位(同文件 sweepNotificationRetention 的 shouldStop),
-    //       关停后不再发新批;
-    //   (c) pg 的 pool.end() 会等**已借出的 client 归还**后才真正关池 —— 在飞那一批就在自己借出的
-    //       那条连接上跑完。10s 超时被撞时是连接被断开,单条 DELETE 原子回滚,同样不留半批。
-    // 这里 await 的意义:让这条 task 在飞行结束前不 resolve,而不是 fire-and-forget(fix r1-A4)。
+    // This task must settle before pool.end(). The bounded shutdown barrier below clears its timeout on
+    // success and rejects on a real timeout, leaving the pool open instead of reporting a false completion.
     shutdownTasks.push(Promise.resolve().then(async () => {
       try {
         await this.stopNotificationRetention?.()
@@ -3440,14 +3541,6 @@ export class MetaSheetServer {
         this.stopApprovalAttachmentWorkers = undefined
       } catch (err) {
         this.logger.warn(`Approval attachment workers stop error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }))
-    shutdownTasks.push(Promise.resolve().then(() => {
-      try {
-        this.stopDingTalkTodoMirrorWorker?.()
-        this.stopDingTalkTodoMirrorWorker = undefined
-      } catch (err) {
-        this.logger.warn(`DingTalk todo mirror worker stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -3470,52 +3563,6 @@ export class MetaSheetServer {
       )
     }
 
-    // 0c. Shut down optional DingTalk interactive-card Stream worker
-    if (this.dingtalkInteractiveCardStreamWorker) {
-      shutdownTasks.push(
-        this.dingtalkInteractiveCardStreamWorker.shutdown().catch((err) => {
-          this.logger.warn(`DingTalk interactive-card Stream shutdown error: ${err instanceof Error ? err.message : String(err)}`)
-        }) as Promise<void>,
-      )
-    }
-
-    // 1. Close HTTP server
-    shutdownTasks.push(new Promise<void>((resolve) => {
-      try {
-        if (this.httpServer.listening) {
-          this.httpServer.close((err: Error | undefined) => {
-            if (err) {
-              this.logger.warn(`HTTP server close error: ${err.message}`)
-            } else {
-              this.logger.info('HTTP server closed')
-            }
-            resolve()
-          })
-        } else {
-          resolve()
-        }
-      } catch (err) {
-        this.logger.warn(`HTTP server close error: ${err instanceof Error ? err.message : String(err)}`)
-        resolve()
-      }
-    }))
-
-    // 2. Close database pool only after the restore worker has definitely drained.
-    if (recoveryArchiveWorkerDrained) {
-      shutdownTasks.push((async () => {
-        try {
-          const { pool } = await import('./db/pg')
-          if (pool) {
-            await pool.end()
-            this.logger.info('Database pool closed')
-          }
-        } catch (err) {
-          this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      })())
-    } else {
-      this.logger.warn('Database pool close skipped because recovery archive restore worker did not drain')
-    }
 
     // 3. Unload plugins gracefully
     shutdownTasks.push((async () => {
@@ -3545,14 +3592,6 @@ export class MetaSheetServer {
         this.logger.info('Directory sync scheduler stopped')
       } catch (err) {
         this.logger.warn(`Directory sync scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })())
-
-    shutdownTasks.push((async () => {
-      try {
-        stopApprovalSlaScheduler()
-      } catch (err) {
-        this.logger.warn(`Approval SLA scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -3636,17 +3675,30 @@ export class MetaSheetServer {
       }
     })())
 
-    // Wait for all shutdown tasks with timeout
-    await Promise.race([
-      Promise.all(shutdownTasks),
-      new Promise<void>((resolve) => setTimeout(() => {
-        this.logger.warn('Shutdown timeout, forcing exit')
-        resolve()
-      }, 10000)) // 10 second timeout
-    ])
+    await this.waitForShutdownBarrier(
+      shutdownTasks,
+      'SHUTDOWN_TIMEOUT',
+      'Shutdown timeout; database pool left open',
+    )
 
     if (recoveryArchiveWorkerStopFailed) {
       throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
+    if (approvalCompletionBarrierFailed) {
+      throw new Error('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+    }
+    if (!recoveryArchiveWorkerDrained) {
+      throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
+
+    try {
+      const { pool } = await import('./db/pg')
+      if (pool) {
+        await pool.end()
+        this.logger.info('Database pool closed')
+      }
+    } catch (err) {
+      this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
     }
 
     this.logger.info('Shutdown complete')
@@ -3656,6 +3708,19 @@ export class MetaSheetServer {
    * 启动服务器
    */
   async start(): Promise<void> {
+    try {
+      await this.startOnce()
+    } catch (error) {
+      try {
+        await this.stop('STARTUP_FAILED')
+      } catch {
+        this.logger.warn('STARTUP_ROLLBACK_FAILED')
+      }
+      throw error
+    }
+  }
+
+  private async startOnce(): Promise<void> {
     // IoC: Load configuration
     if (!this.portLocked) {
       try {
@@ -3767,7 +3832,7 @@ export class MetaSheetServer {
       // Roll back the half-built instance. It was never published (no field, no singleton, routes see
       // undefined), so this only reaps whatever the partial init managed to start.
       try {
-        pendingAutomationService?.shutdown()
+        await pendingAutomationService?.shutdown()
       } catch {
         // best-effort rollback — the instance is unpublished either way
       }
@@ -3788,14 +3853,22 @@ export class MetaSheetServer {
         resolveApprovalProjectionSweepLeaderOptions,
         resolveApprovalProjectionSweepIntervalMs,
       } = await import('./services/ApprovalProjectionSweepScheduler')
-      getApprovalRecordProjectionService().subscribe(eventBus)
+      const projectionService = getApprovalRecordProjectionService()
+      projectionService.subscribe(eventBus)
+      this.approvalProjectionService = projectionService
       const projectionSweepLeaderOptions = await resolveApprovalProjectionSweepLeaderOptions()
-      startApprovalProjectionSweepScheduler({
+      this.approvalProjectionSweepScheduler = startApprovalProjectionSweepScheduler({
         leaderOptions: projectionSweepLeaderOptions,
         intervalMs: resolveApprovalProjectionSweepIntervalMs(),
       })
       this.logger.info('Approval record projection initialized')
     } catch (e) {
+      const scheduler = this.approvalProjectionSweepScheduler
+      this.approvalProjectionSweepScheduler = null
+      await scheduler?.stop().catch(() => undefined)
+      this.approvalProjectionService?.unsubscribe(eventBus)
+      await this.approvalProjectionService?.drainCompletionHandlers().catch(() => undefined)
+      this.approvalProjectionService = null
       this.logger.error('Approval record projection initialization failed; continuing in degraded mode', e as Error)
     }
 
@@ -3817,7 +3890,7 @@ export class MetaSheetServer {
         // good — the durable retry re-runs the guarded UPDATE, matches zero rows and ACKs.
         { runInTransaction: createPoolTransactionRunner(recordApprovalPool) },
       )
-      subscribeRecordApprovalCompletionBus(
+      this.recordApprovalCompletionSubscription = subscribeRecordApprovalCompletionBus(
         eventBus,
         this.recordApprovalCompletionSink,
         (eventType, error) => this.logger.warn(
@@ -3826,6 +3899,8 @@ export class MetaSheetServer {
       )
       this.logger.info('Record approval completion sink initialized')
     } catch (e) {
+      this.recordApprovalCompletionSubscription = null
+      this.recordApprovalCompletionSink = null
       this.logger.error('Record approval completion sink initialization failed; continuing in degraded mode', e as Error)
     }
 
@@ -3843,7 +3918,7 @@ export class MetaSheetServer {
       )
       const todoMirrorPool = poolManager.get()
       this.dingtalkTodoMirrorSink = createDingTalkTodoMirrorSink(todoMirrorPool.query.bind(todoMirrorPool))
-      subscribeDingTalkTodoMirrorBus(
+      this.dingtalkTodoMirrorSubscription = subscribeDingTalkTodoMirrorBus(
         eventBus,
         this.dingtalkTodoMirrorSink,
         (eventType, error) => this.logger.warn(
@@ -3863,7 +3938,10 @@ export class MetaSheetServer {
           })
         }, intervalMs)
         timer.unref?.()
-        this.stopDingTalkTodoMirrorWorker = () => clearInterval(timer)
+        this.stopDingTalkTodoMirrorWorker = async () => {
+          clearInterval(timer)
+          await todoMirrorWorker.stopAndDrain()
+        }
         this.logger.info('DingTalk todo mirror worker started (DINGTALK_TODO_MIRROR_ENABLED)')
       }
       this.logger.info('DingTalk todo mirror sink initialized')

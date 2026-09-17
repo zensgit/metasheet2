@@ -410,12 +410,9 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
   })
 })
 
-// R10: TrashModal shares the SAME `twoLayerVisibleFields` wiring as History Center (was `scopedAllFields`
-// alone, layer-3-only). TrashModal derives a trash-row TITLE from field VALUES via `pickRecordTitle` —
-// a property-hidden (layer-2) field leaking its NAME is bad enough; leaking its VALUE into a visible
-// title is worse. This pins both layers on the trash-row title, reusing the same `fields` fixture
-// (fld_1 visible-both-layers, fld_2 RBAC-denied/layer-3, fld_3 property-hidden/layer-2).
-describe('MultitableWorkbench -> TrashModal field-scope wiring', () => {
+// The current record-trash entry point is History (the toolbar now opens the separate sheet recycle bin).
+// This preserves the two-layer field-mask assertion on the real History -> TrashModal recovery path.
+describe('MultitableWorkbench -> History -> TrashModal field-scope wiring', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
 
@@ -443,6 +440,23 @@ describe('MultitableWorkbench -> TrashModal field-scope wiring', () => {
   beforeEach(() => {
     mockListDeletedRecords.mockReset()
     mockListDeletedRecords.mockResolvedValue({ records: [deletedRecord()], total: 1 })
+    mockListHistoryEvents.mockReset()
+    mockListHistoryEvents.mockResolvedValue({
+      batches: [{
+        batchId: 'delete_batch', sheetId: 'sheet_1', actorId: 'user_1', actorName: null, source: 'rest',
+        action: 'delete', createdAt: new Date().toISOString(), visibleAffectedRecordCount: 1,
+        visibleAffectedFieldCount: 0, provenanceQuality: 'stamped',
+      }], total: 1, nextCursor: null, searchTruncated: false,
+    })
+    mockGetHistoryBatch.mockReset()
+    mockGetHistoryBatch.mockResolvedValue({
+      batchId: 'delete_batch', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
+      visibleAffectedRecordCount: 1, visibleAffectedFieldCount: 0,
+      changes: [{
+        sheetId: 'sheet_1', recordId: 'rec_del_1', action: 'delete', version: 2,
+        changedFieldIds: [], before: {}, after: null,
+      }],
+    } satisfies HistoryBatchDetail)
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     capsMock = {
@@ -463,7 +477,7 @@ describe('MultitableWorkbench -> TrashModal field-scope wiring', () => {
     vi.clearAllMocks()
   })
 
-  it('the trash-row title falls through a property-hidden field (layer-2) to the record-id fallback, and never shows the RBAC-denied field (layer-3) either', async () => {
+  it('the History-selected current trash row falls through a property-hidden field (layer-2) to the record-id fallback, and never shows the RBAC-denied field (layer-3) either', async () => {
     const MultitableWorkbench = (await import('../src/multitable/views/MultitableWorkbench.vue')).default
 
     app = createApp(defineComponent({
@@ -472,12 +486,16 @@ describe('MultitableWorkbench -> TrashModal field-scope wiring', () => {
     app.mount(container!)
     await flushUi()
 
-    const trashBtn = container!.querySelector<HTMLButtonElement>('[data-action="open-trash"]')
-    expect(trashBtn).toBeTruthy()
-    trashBtn!.click()
+    container!.querySelector<HTMLButtonElement>('[data-action="open-history"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+    await flushUi()
+    const restoreBtn = container!.querySelector<HTMLButtonElement>('[data-test="hist-restore-deleted-record"]')
+    expect(restoreBtn).toBeTruthy()
+    restoreBtn!.click()
     await flushUi()
 
-    expect(mockListDeletedRecords).toHaveBeenCalledWith('sheet_1', undefined)
+    expect(mockListDeletedRecords).toHaveBeenCalledWith('sheet_1', { limit: 100, offset: 0 })
 
     const titleEl = container!.querySelector('[data-test="trash-record-title"]')
     expect(titleEl).toBeTruthy()

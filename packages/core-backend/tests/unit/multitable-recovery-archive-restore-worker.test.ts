@@ -85,6 +85,66 @@ describe('recovery archive restore worker', () => {
     expect(ops.claim).not.toHaveBeenCalled()
   })
 
+  it.each(['idle', 'completed', 'retry'] as const)('processes derived work (%s) before selecting restore jobs', async (outcome) => {
+    const calls: string[] = []
+    const ops = operations({
+      sweepExpired: vi.fn(async () => {
+        calls.push('sweep')
+        return 0
+      }),
+      processDerivedWork: vi.fn(async () => {
+        calls.push('derived')
+        return outcome
+      }),
+      select: vi.fn(async () => {
+        calls.push('select')
+        return null
+      }),
+    })
+    await expect(worker(ops).runOnce()).resolves.toEqual({ kind: 'idle', swept: 0, chunks: 0 })
+    expect(calls).toEqual(['sweep', ...Array(outcome === 'completed' ? 32 : 1).fill('derived'), 'select'])
+  })
+
+  it.each(['idle', 'retry'] as const)('drains completed effects until %s without starving a restore job', async (outcome) => {
+    const processDerivedWork = vi.fn()
+      .mockResolvedValueOnce('completed')
+      .mockResolvedValueOnce('completed')
+      .mockResolvedValue(outcome)
+    const ops = operations({ processDerivedWork })
+    await expect(worker(ops).runOnce()).resolves.toEqual({ kind: 'completed', swept: 0, chunks: 0 })
+    expect(processDerivedWork).toHaveBeenCalledTimes(3)
+    expect(ops.claim).toHaveBeenCalledTimes(1)
+    expect(ops.finalize).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds a continuously replenished derived queue and still completes a restore job', async () => {
+    const processDerivedWork = vi.fn(async () => 'completed' as const)
+    const ops = operations({ processDerivedWork })
+    await expect(worker(ops).runOnce()).resolves.toEqual({ kind: 'completed', swept: 0, chunks: 0 })
+    expect(processDerivedWork).toHaveBeenCalledTimes(32)
+    expect(ops.finalize).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not start work after stop and does not select after a derived failure', async () => {
+    const ops = operations({ processDerivedWork: vi.fn(async () => { throw new Error('unavailable') }) })
+    await expect(worker(ops).runOnce(() => true)).resolves.toEqual({ kind: 'stopped', swept: 0, chunks: 0 })
+    expect(ops.sweepExpired).not.toHaveBeenCalled()
+    expect(ops.processDerivedWork).not.toHaveBeenCalled()
+    await expect(worker(ops).runOnce()).resolves.toEqual({ kind: 'tick_failed', swept: 0, chunks: 0 })
+    expect(ops.select).not.toHaveBeenCalled()
+  })
+
+  it('honors stop after in-flight derived work drains', async () => {
+    let stopping = false
+    const ops = operations({ processDerivedWork: vi.fn(async () => {
+      stopping = true
+      return 'completed'
+    }) })
+    await expect(worker(ops).runOnce(() => stopping)).resolves.toEqual({ kind: 'stopped', swept: 0, chunks: 0 })
+    expect(ops.processDerivedWork).toHaveBeenCalledTimes(1)
+    expect(ops.select).not.toHaveBeenCalled()
+  })
+
   it('claims, executes chunks, renews between chunks, and finalizes only after no pending chunk', async () => {
     const calls: string[] = []
     const ops = operations({
