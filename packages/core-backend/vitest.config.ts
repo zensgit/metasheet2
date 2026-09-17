@@ -1817,6 +1817,16 @@ export default defineConfig({
       // .github/workflows/approval-realdb-cancel-round.yml lane, which arms EXPECT_DB=1. This
       // slice covers Q-A only, not Q-B/Q-C/Q-D — see the file's own header.
       'tests/integration/approval-cancel-round-lock-order-census.db.test.ts',
+      // WI-4 `createCancelRoundInstance` creation acceptance: dedicated-instance shape (judgment
+      // I / I″), the one-pending-round-per-document invariant (§5 I3 / `uq_approval_rounds_
+      // pending_document`), WI-16's requester-only creation authz, and §14.3 #14's suite gate
+      // (`CancelRoundSuiteForbiddenError`). Drives a real one-node template through the running
+      // server to get a genuinely `approved` original document, then calls the service method
+      // in-process. Real DB (poolManager + a real dispatch transaction). Excluded here so
+      // `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to the
+      // WI-0 census above), which arms EXPECT_DB=1.
+      'tests/integration/approval-cancel-round-creation.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

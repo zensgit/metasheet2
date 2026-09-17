@@ -142,7 +142,19 @@ import type {
   UnifiedApprovalDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
-import { ServiceError, CancelRoundOutletForbiddenError, rejectIfCancelRound } from './ApprovalBridgeService'
+import {
+  ServiceError,
+  CancelRoundOutletForbiddenError,
+  CancelRoundSuiteForbiddenError,
+  rejectIfCancelRound,
+} from './ApprovalBridgeService'
+import {
+  CANCEL_ROUND_TEMPLATE_ID,
+  CANCEL_ROUND_TEMPLATE_VERSION_ID,
+  CANCEL_ROUND_PUBLISHED_DEFINITION_ID,
+  CANCEL_ROUND_APPROVAL_NODE_KEY,
+  buildCancelRoundRuntimeGraph,
+} from '../db/seeds/approval-cancel-round-published-definition'
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
@@ -152,6 +164,7 @@ import {
   type AttendanceReassignAuditWitnessV1,
   AttendanceCentralApprovalError,
   isCancelRoundInstance,
+  APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
 } from '../attendance/w4c3b-central-approval-hooks'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
@@ -287,6 +300,20 @@ function isPostgresUniqueViolation(error: unknown): boolean {
     && error !== null
     && (error as { code?: unknown }).code === '23505'
 }
+
+/**
+ * Lock:143 — the `suite` ceilings from the decoded rule page (`reviews/设置审批撤销规则.txt:41-43`):
+ * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` is blocked at creation (§14.3 #14)
+ * before `windowDays` is ever consulted, so it carries no meaningful ceiling here. Phase 1 only
+ * ships `leave`; the other keys are held for the suites the lock reserves for later phases so a
+ * fixture that sets one of them does not silently fall through to `other`'s value.
+ */
+const CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS = Object.freeze({
+  attendance: 180,
+  leave: 90,
+  other: 90,
+  forbidden: 0,
+} as const)
 
 type PublishedDefinitionRow = {
   id: string
@@ -8248,6 +8275,268 @@ export class ApprovalProductService {
     const approval = await this.getApproval(instanceId, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
+    }
+    return approval
+  }
+
+  /**
+   * Approval change-request design lock v5.9 §14.1 (WI-4) — the dedicated creation path for a
+   * cancel round. `createApproval` above hardcodes `workflow_key = 'approval-product-template'`
+   * (`:8052` literal) and runs the FULL org/role/department/delegation/group snapshot assembly a
+   * general-purpose template never needs for this one fixed, single-node, `requester_choice`-only
+   * graph — so this is a separate, narrower path, not a call into `createApproval`/
+   * `assembleCreationContext` with a different templateId (the latter's `templateVisibleAtCreateBoundary`
+   * / `applyTemplateVisibilityFilter` gate on department/role audience targeting that this
+   * system-only template was never given, and never should be — it is not reachable through
+   * template-center browsing).
+   *
+   * Reuses the class's own private DML helpers (`insertAssignments`, `insertApprovalRecord`,
+   * `bumpNodeActivationSeq`, `enqueueApprovalTaskCreatedEventsInTxn`, `projectApprovalOnCreate`,
+   * `emitApprovalTaskCreatedEventsPostCommit`, `getApproval`) so the round's own instance behaves
+   * byte-identically to any other platform instance for every reader downstream (detail GET,
+   * pending-count projection, `canDecideCurrentNode`), and the seed's fixed `runtime_graph` /
+   * `ApprovalGraphExecutor` / `buildApprovalAssignmentResolver` so seat resolution goes through the
+   * SAME `requester_choice` code path §14.1's module doc names, not a hand-rolled assignment insert.
+   *
+   * WI-16 (lock §6, "仅原 requester"): only the original document's `requester_snapshot.id` may
+   * call this — enforced here, at create time, under the SAME `FOR UPDATE` lock as the suite gate
+   * below (a stale read cannot authorize). The lock names no error code for this rejection (unlike
+   * the 8 outlet-guard codes and `CANCEL_ROUND_SUITE_FORBIDDEN`, which are lock-anchored) — flagged
+   * as an implementer erratum for owner/gate registration, same discipline as
+   * `CANCEL_ROUND_INVARIANT_VIOLATION` in the revoke/reject branches above.
+   */
+  async createCancelRoundInstance(
+    documentId: string,
+    actor: { userId: string; userName?: string },
+    options: { reason?: string | null } = {},
+  ): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const instanceId = crypto.randomUUID()
+    // lock:140 — `apr_…` is an APPLICATION-generated id, not part of the DDL's own generation.
+    const roundId = `apr_${crypto.randomUUID()}`
+    const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
+    let client: ApprovalDbClient | null = null
+    let initialAssignmentCount = 0
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      // §9-4 order for this path: no rollout/advisory lock is taken here at all (creation never
+      // touches W4 attendance calculation) — the only row this transaction must serialize against
+      // is the original document instance itself, locked FIRST and before any INSERT (Q-A).
+      const originalResult = await client.query<ApprovalInstanceRow & { org_id: string | null }>(
+        `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
+        [documentId],
+      )
+      const original = originalResult.rows[0]
+      if (!original) {
+        throw new ServiceError('Approval instance not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+      if (original.status !== 'approved') {
+        // Lock §0/§1 — a cancel round only exists for an already-approved document. No lock-
+        // anchored code for this rejection either; same erratum class as WI-16 above.
+        throw new ServiceError(
+          'A cancel round can only be started for an approved document',
+          409,
+          'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+        )
+      }
+
+      // WI-16 — see method doc. `requester_snapshot` is `NOT NULL DEFAULT '{}'::jsonb`, so a
+      // legacy/malformed row with no `.id` fails closed (never `undefined === undefined`).
+      const originalRequesterSnapshot = toNullableRecord(original.requester_snapshot)
+      const originalRequesterId =
+        typeof originalRequesterSnapshot?.id === 'string' ? originalRequesterSnapshot.id : null
+      if (!originalRequesterId || originalRequesterId !== actor.userId) {
+        throw new ServiceError(
+          'Only the original requester may start a cancel round for this document',
+          403,
+          'CANCEL_ROUND_REQUESTER_ONLY',
+        )
+      }
+
+      // §14.3 #14 (WI-6) — suite gate, BEFORE any write, per the lock's own zero-row requirement.
+      // No production template→suite mapping table exists yet (lock:375 defers that to §9-5); phase
+      // 1 reads the suite tag off the ORIGINAL instance's own `metadata.suite` so a fixture/seed can
+      // pin it directly (lock:143's "seed/夹具直接给出"), defaulting to `'leave'` — phase 1's only
+      // shipped suite — when the tag is absent (every pre-existing instance in the corpus).
+      const originalMetadata = toNullableRecord(original.metadata) ?? {}
+      const suite = typeof originalMetadata.suite === 'string' ? originalMetadata.suite : 'leave'
+      if (suite === 'forbidden') {
+        throw new CancelRoundSuiteForbiddenError(
+          "This document's suite does not permit a cancel round",
+        )
+      }
+      const windowDays =
+        typeof originalMetadata.windowDays === 'number'
+          ? originalMetadata.windowDays
+          : CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS[suite as keyof typeof CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS]
+            ?? CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS.other
+
+      // I3 (§5) is ultimately enforced by `uq_approval_rounds_pending_document` (caught below on
+      // 23505) — this pre-check only turns the common case into a named error instead of a raw
+      // constraint violation for the concurrent/rare case.
+      const pendingRound = await client.query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`,
+        [documentId],
+      )
+      if (pendingRound.rows.length > 0) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
+
+      // Seats (§14.1) — the original document's approvers, read off its own audit trail rather
+      // than its (possibly since-deactivated) `approval_assignments` rows, so a reassigned/expired
+      // seat cannot silently drop the person who actually approved.
+      const approverRows = await client.query<{ actor_id: string }>(
+        `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+        [documentId],
+      )
+      const approverIds = approverRows.rows
+        .map((row) => row.actor_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+
+      // §14.1 — `requesterSnapshot.id` MUST equal the original requester (the revoke gate at the
+      // A4 branch above reads exactly this key); `requesterChoices[CANCEL_ROUND_APPROVAL_NODE_KEY]`
+      // is the `requester_choice` assignee source's ONLY input (module doc on the seed file).
+      const requesterSnapshot: ApprovalRequesterSnapshot & { requesterChoices: Record<string, string[]> } = {
+        id: originalRequesterId,
+        name:
+          typeof originalRequesterSnapshot?.name === 'string' ? originalRequesterSnapshot.name : originalRequesterId,
+        requesterChoices: { [CANCEL_ROUND_APPROVAL_NODE_KEY]: approverIds },
+      }
+
+      const runtimeGraph = buildCancelRoundRuntimeGraph()
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSchema: undefined,
+        formSnapshot: {},
+        requesterSnapshot: requesterSnapshot as unknown as Record<string, unknown>,
+      })
+      const executor = new ApprovalGraphExecutor(runtimeGraph, {}, { assignmentResolver })
+      const initial = executor.resolveInitialState()
+      initialAssignmentCount = initial.assignments.length
+
+      // Advisor note / I″ (lock §14.1): NEVER auto-approve and NEVER create with zero seats — the
+      // seed deliberately omits `emptyAssigneePolicy: 'auto-approve'`, and this is the explicit,
+      // fail-closed backstop in case a future edit to the seed graph ever introduced one, or the
+      // original document's approver trail is empty (should not happen for an `approved` instance,
+      // but the seat query above is a LEFT-style read with no lock-time guarantee of non-emptiness).
+      if (initial.status !== 'pending' || initial.currentNodeKey !== CANCEL_ROUND_APPROVAL_NODE_KEY || initialAssignmentCount === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
+
+      const requestNo = await this.allocateRequestNo()
+      const title = `撤销「${original.title ?? documentId}」`
+
+      await client.query(
+        `INSERT INTO approval_instances
+         (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
+          requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+          current_step, total_steps, sync_status, sync_error,
+          template_id, template_version_id, published_definition_id, request_no, form_snapshot, current_node_key,
+          created_at, updated_at, org_id)
+         VALUES
+         ($1, $2, 0, 'platform', NULL, $3, $4, $5,
+          $6, $7, $8, $9,
+          $10, $11, 'ok', NULL,
+          $12, $13, $14, $15, $16, $17,
+          now(), now(), $18)`,
+        [
+          instanceId,
+          initial.status,
+          APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+          documentId,
+          title,
+          JSON.stringify(requesterSnapshot),
+          JSON.stringify({}),
+          JSON.stringify({ allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          JSON.stringify({ cancelRoundDocumentId: documentId }),
+          initial.currentStep ?? 0,
+          initial.totalSteps,
+          CANCEL_ROUND_TEMPLATE_ID,
+          CANCEL_ROUND_TEMPLATE_VERSION_ID,
+          CANCEL_ROUND_PUBLISHED_DEFINITION_ID,
+          requestNo,
+          JSON.stringify({}),
+          initial.currentNodeKey,
+          original.org_id,
+        ],
+      )
+
+      const initialEntryEpoch = await this.bumpNodeActivationSeq(client, instanceId)
+      createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, initial.assignments, initialEntryEpoch)))
+      await this.insertApprovalRecord(client, instanceId, {
+        action: 'created',
+        actorId: actor.userId,
+        actorName: actor.userName || actor.userId,
+        comment: options.reason ?? null,
+        fromStatus: null,
+        toStatus: initial.status,
+        fromVersion: null,
+        toVersion: 0,
+        metadata: { nodeKey: 'start', requestNo, cancelRoundDocumentId: documentId },
+      })
+
+      // §4 — one `approval_rounds` row, `kind = 'cancel'`, keyed to THIS instance as its engine
+      // instance; `policy_snapshot_at_create.definitionPolicy` freezes the ORIGINAL document's own
+      // policy object verbatim (lock:143 "所读…策略对象原样") — the object that actually governs
+      // whether/how this document may be cancelled, distinct from the cancel round's OWN
+      // `policy_snapshot` (`allowRevoke`) written above, which governs the ROUND's redemption
+      // mechanics, not the original document's cancellability.
+      await client.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, reason, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', $3, $4, $5, 'pending', $6)`,
+        [
+          roundId,
+          documentId,
+          instanceId,
+          actor.userId,
+          options.reason ?? null,
+          JSON.stringify({
+            definitionPolicy: original.policy_snapshot,
+            roundPolicy: { windowDays, suite },
+          }),
+        ],
+      )
+
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
+      await client.query('COMMIT')
+    } catch (error) {
+      await rollbackQuietly(client)
+      // The pre-check above cannot close a concurrent-insert race by itself — this is the
+      // authoritative backstop (I3, §5): translate the partial unique index's raw 23505 into the
+      // SAME named error the pre-check throws, rather than letting a constraint-name/SQLSTATE leak
+      // to the caller.
+      if (
+        isPostgresUniqueViolation(error)
+        && (error as { constraint?: unknown }).constraint === 'uq_approval_rounds_pending_document'
+      ) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
+      throw error
+    } finally {
+      client?.release()
+    }
+
+    await this.projectApprovalOnCreate(instanceId)
+    await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents)
+
+    const approval = await this.getApproval(instanceId, actor.userId, [])
+    if (!approval) {
+      throw new ServiceError('Cancel round approval not found after creation', 500, 'CANCEL_ROUND_CREATE_FAILED')
     }
     return approval
   }
