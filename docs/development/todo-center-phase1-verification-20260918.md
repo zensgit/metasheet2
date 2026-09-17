@@ -1443,6 +1443,22 @@ $ grep -n "^## 8\|^## 9" /Users/chouhua/.claude/projects/-Users-chouhua-Download
 | `routes/todo.ts` 的 `approvals:read` 单一权限门槛在第二源注册后需收窄 | 已知局限,记录不改(此切片只注册一个源,门槛与暴露面重合) | 设计 MD §3.1;文件自身 `todo.ts:11-17` 文档已自陈 |
 | 补充清单条目 9 的残留:workflow 的 `paths:` 仍列着 `tests/helpers/approval-schema-bootstrap.ts`,但门文件实际未导入它 | **未修,仅文档已更正**——本文档的claim 从"anticipatorily included,大概率会用到"改为"证伪,未被导入",但 `.github/workflows/approval-realdb-todo-center-pending-query.yml` 的 `on.push.paths`/`on.pull_request.paths` 两处列表本身**未改动**,仍与锁 §6"套件真正执行到的每个 src 模块"的标准有一条多列的偏差(over-inclusion,不是 under-inclusion,不破坏 fail-closed) | 见补充清单条目 9 的核对结果;摘除该条目属于改 CI 接线,超出本轮"不改代码"授权,留给门审/下一次接触该 workflow 时处理 |
 
+> **上一行由本轮(round-2 gate P3-2,`impl-gate-B-slice1-round2-20260918.md`)标记为 MOOT——不是撤销,是求值。**
+> 这一行写在 FINALIZATION PASS(本轮之前最早的一轮),当时准确。此后 **FIX-ROUND 2 PASS**(本文档下方
+> "round-1 `P2-2`(bundled with `P3-4`)" 小节)把这一行的两个具体断言都改变了事实基础:
+> - "**未修**" —— 现在**假**:`tests/helpers/approval-schema-bootstrap.ts` 已从 workflow 的两处
+>   `paths:` 列表里删除。
+> - "**两处列表本身未改动**" —— 现在**假**,原因正是上一条:两处列表都被那次编辑改动了。
+>
+> 机械复核(本轮实测,不是引用旧记录):
+> ```
+> $ grep -c "approval-schema-bootstrap" .github/workflows/approval-realdb-todo-center-pending-query.yml
+> 0
+> ```
+> 上一行整行现在是 **moot**(既非"待修"也非"仍有偏差"——偏差本身已经消失),不是"仍然准确、只是加了限定语"。
+> 求值,不作废:这行文字本身**保留**作为 FINALIZATION PASS 当时状态的准确历史记录;这条标记只改变
+> "读者今天应得出什么结论"这一件事——不应再引用它作为"workflow 仍多列该文件"的证据。
+
 ### 一致性小修:`git diff --stat` 与 `cmp` 的角色分工
 
 本文档多处 mutation 台账在 restore 后同时跑 `cmp "$F" "$F.bak"; echo $?`(真正的字节相等断言)与
@@ -2333,6 +2349,48 @@ held across the docblock insertion. M8's anchor (`src/auth/AuthService.ts:742`) 
 entirely untouched file (`git diff --stat 89f1ecdee2 HEAD -- packages/core-backend/src/auth/
 AuthService.ts` is empty — this branch has never touched that file at all, at any round).
 
+> **Correction (this pass, round-2 gate P3-3, `impl-gate-B-slice1-round2-20260918.md`): the two
+> `grep -n` pastes above for M2/M3, in BOTH blocks (current-tree AND the `/tmp/orig.ts` pre-edit
+> blob), pasted only one line each where the real command returns two.** The docblock's own
+> numbered summary of the WHERE clause (`* 1. `a.is_active = TRUE` — ...` / `* 2. `i.status =
+> 'pending'` — ...`, lines 17/19) restates the same two literal substrings the executable code uses
+> at lines 111/112 — so `grep -n "i.status = 'pending'"` and `grep -n 'a.is_active = TRUE'` were
+> always going to hit twice, on both the pre-edit blob and the current tree, and the report is right
+> that this table pasted only the executable-line hit each time. Full output, re-run against the
+> CURRENT tree:
+> ```
+> $ F=packages/core-backend/src/services/approval-pending-query.ts
+> $ grep -n "i.status = 'pending'" "$F"
+> 19: *   2. `i.status = 'pending'` — closed instances never count.
+> 112:    `i.status = 'pending'`,
+> $ grep -n 'a.is_active = TRUE' "$F"
+> 17: *   1. `a.is_active = TRUE` — only ACTIVE seats count (a large population: every node advance
+> 111:    `a.is_active = TRUE`,
+> ```
+> And against the pre-edit blob (`9a416b9ba`, the exact commit the gate report audited):
+> ```
+> $ git show 9a416b9ba:packages/core-backend/src/services/approval-pending-query.ts | grep -n "i.status = 'pending'"
+> 19: *   2. `i.status = 'pending'` — closed instances never count.
+> 102:    `i.status = 'pending'`,
+> $ git show 9a416b9ba:packages/core-backend/src/services/approval-pending-query.ts | grep -n 'a.is_active = TRUE'
+> 17: *   1. `a.is_active = TRUE` — only ACTIVE seats count (a large population: every node advance
+> 101:    `a.is_active = TRUE`,
+> ```
+> **This also forces a correction to the "every one +10 lines lower" sentence a few paragraphs above
+> and to the M1-M7 rows of the "绝对断言自扫" table below**: that claim is true only for the
+> EXECUTABLE-code occurrence of each of the six anchor strings (the ones M1-M7's mutation ledger
+> actually edits: 75→85, 77→87, 101→111, 102→112, 136→146, 139→149). The DOCBLOCK's plain-prose
+> restatement of two of those same substrings, at lines 17 and 19, sits ABOVE the KNOWN EXCEPTION
+> insertion point (lines 59-72 in the diff) and is therefore **unshifted** — 17→17, 19→19, identical
+> in both blobs. "Every one +10 lines lower" was true of the six mutation-ledger anchors this pass
+> was actually checking (M1-M7's executable occurrences) and is restated here as exactly that claim,
+> not the broader "every occurrence of these six strings" the unqualified sentence could be read as.
+> This does not change M1-M7's replay conclusion (mutation probes match by string, not by line
+> number, and the executable occurrence — the one every mutation ledger entry actually edits — is
+> the one confirmed unchanged-in-text and uniformly +10 in position); it corrects an incomplete
+> command-output paste and an imprecise "every one" generalization, both flagged by round-2 gate
+> P3-3, neither changing this section's substantive conclusion.
+
 **Regression re-run, current tree, exact workflow shell shape** (this is the "整套 26 条" half of §7's
 replay requirement; the "M1-M8 mutation" half is discharged by anchor-presence above rather than by
 re-running all eight destructive probes again, since no executable LINE changed — comment-only,
@@ -2513,6 +2571,14 @@ ledger and psql repros elsewhere in this document — this text was never a reco
 was instructions for a future PR-body paste, and pasting the version below now would put a resolved
 item into the PR as if it were still open.
 
+**Paragraph 2 expanded by FIX-ROUND 6 PASS (2026-09-18)**: round-2 gate finding P2-2
+(`impl-gate-B-slice1-round2-20260918.md`) found that the original paragraph 2 below (round-1's P2-0,
+required-check status alone) named only one of two holes the report says "stack" — the branch-protection
+absence AND the gate file's absence from every closed-world `*-ci-wiring` coverage census — and required
+"PR body 首段必须写这一条" for the compound fact, not the single hole. Expanded in place (not replaced —
+unlike paragraph 1, the underlying fact here was never closed, so this is an addition to an open item,
+not a correction of a resolved one).
+
 > **1. A pre-existing second pending-predicate, briefly wired into this slice and then unwired
 > (design-lock §3, gate finding P1-1).** `approval-realtime.ts`'s `computeApprovalPendingCounts`
 > hand-copies the shared three-arm assignee-match predicate but omits the handler-node exclusion — a
@@ -2528,15 +2594,34 @@ item into the PR as if it were still open.
 > before reintroducing `todo:counts-updated` — see verification MD's "P1-1" entry and its FIX-ROUND 4
 > PASS correction for the full repro and disposition history.
 >
-> **2. Lane required-check status (P2-0).** `approval-realdb-todo-center-pending-query` is confirmed
-> **not** a required branch-protection check on `main` (`gh api repos/zensgit/metasheet2/branches/
-> main/protection`, `required-status-checks` enumerated, none matching this lane; also confirmed none
-> of the 10 backing workflows for the 13 existing required contexts collects this gate file). This
-> slice's entire real-DB evidence surface (26 cases, 14 viewer classes, 8 mutations proven
-> load-bearing) is therefore advisory at merge time — a regression here can merge to `main` with this
-> lane simply never having run. **Owner call needed**: add this lane to required status checks
-> (merge-serialisation cost, now higher after this pass's own trigger-set widening) vs. accept
-> advisory-only real-DB coverage for this slice.
+> **2. Lane required-check status, PLUS a second, independent blind spot the two stack with
+> (P2-0, expanded by round-2 gate finding P2-2, `impl-gate-B-slice1-round2-20260918.md`).**
+> `approval-realdb-todo-center-pending-query` is confirmed **not** a required branch-protection check
+> on `main` (`gh api repos/zensgit/metasheet2/branches/main/protection`, `required-status-checks`
+> enumerated, none matching this lane; also confirmed none of the 10 backing workflows for the 13
+> existing required contexts collects this gate file). **Independently**, this gate file also sits
+> outside every `readdirSync`-based closed-world coverage guard in this repo: of the 38
+> `*-ci-wiring.test.mjs` files repo-wide (not the 45 an earlier internal checklist estimated — recount
+> confirmed 38), zero reference `todo-center` or `approval-pending-query`, and
+> `scripts/ops/ci-realdb-step-contract.mjs`'s `REAL_DB_STEP_IDS` only covers real-DB steps INSIDE
+> `plugin-tests.yml` — this lane is a separate, standalone workflow, structurally outside that
+> census's population. **The two holes compound, not merely coexist**: today, deleting
+> `.github/workflows/approval-realdb-todo-center-pending-query.yml` outright, or emptying its
+> `paths:` filters, would not be caught by branch protection (hole 1) NOR by any of the 38
+> `*-ci-wiring` guards NOR by `test (20.x)` (hole 2 — the gate file carries no `.test.ts` suffix by
+> design and is explicitly excluded from `vitest.config.ts`'s default collection). This slice's
+> entire real-DB evidence surface (27 cases as of this pass, 14 viewer classes, 9 mutations proven
+> load-bearing) is therefore advisory at merge time with no independent backstop verifying the lane
+> itself keeps running. There is also a standing conflict this PR body must flag rather than resolve:
+> an internal supplementary checklist item asserts design-lock §6 already ratified running this
+> evidence inside `plugin-tests.yml`; the lock's own §6 text says only "a real-DB lane" and
+> separately states its required-status is unverified — this document treats that as a
+> checklist-vs-lock conflict, escalated, not resolved by either. **Owner call needed**: (i) add this
+> lane to `main`'s required status checks (merge-serialisation cost, now higher after this pass's own
+> trigger-set widening) and/or widen a closed-world guard's population to include standalone
+> `approval-realdb-*` workflows, or (ii) explicitly accept that this slice's real-DB evidence is
+> advisory-only and unguarded-against-deletion at merge time. Either way, resolve the checklist/lock
+> §6 conflict above at the same time.
 >
 > **3. Two `wip:` commits in the branch history.** `a2cf836b5` ("wip: carry interrupted implementer
 > changes forward (to be squashed by the lane)") and `01759832a` ("wip: carry step-agent changes
@@ -3088,3 +3173,226 @@ Exactly two files — no production source file, no migration, no workflow YAML.
   是本 lane 产生的,原样不动。
 
 这份清单严格照抄 round-2 门审报告 §7 的编号与描述,只标记到本轮为止处理了哪些,不预判下一步该选哪条。
+
+> **本清单由 FIX-ROUND 6 PASS 更正(mark-not-void):** 上面五条("本轮未处理")里的 **P3-2/P3-3/P3-4
+> 三条已在 FIX-ROUND 6 PASS 处理并闭合**(见文末同名小节);**P3-5 本轮确认为记录性、无需代码改动,
+> 并对"建议实现方自查清理" 那句话给出了明确处置(不在本 lane 做,理由见该小节)**;**P2-2/P3-1 仍然
+> UNRESOLVED——本 lane 没有能力关闭它们**(两者的剩余动作都是"把文本写进 PR body 首段",而开 PR 本身
+> 被本 lane 硬规矩禁止),但 PR-body 待用文本本轮已更新以纳入 P2-2 的"两洞叠加"完整措辞。这份原始清单
+> 本身**保留不改**,作为它被写下那一刻的准确记录;上面这条更正只改变"读者现在该向哪一节要最新状态"。
+
+## FIX-ROUND 6 PASS (2026-09-18, sixth lane-continuation step). Base at start of this pass: HEAD =
+`bda8c7e4f7d85c67b740f876b3d6fa9c9fe8263c` (FIX-ROUND 5 PASS's own head), merge-base with
+`origin/main` unchanged at `89f1ecdee2c3b70205a318074824c834bc6a5c7e` (re-run this pass, same value).
+This pass addresses round-2 gate report `impl-gate-B-slice1-round2-20260918.md`'s **P3-2, P3-3, P3-4
+(closed), P3-5 (disposition, no code change), and the PR-body-only halves of P2-2/P3-1 (drafted,
+still open)** — the task book's own instruction this step: P1-1 was already closed by FIX-ROUND 4
+PASS, P2-1 by FIX-ROUND 5 PASS; these are the remaining round-2 §7 items, and every one of them now
+carries an explicit disposition, closing the report's own checklist. It does not touch or re-litigate
+FINALIZATION PASS, FIX-ROUND PASS, or FIX-ROUND 2/3/4/5 PASS above (repo convention: mark the
+sentence, don't void the section) — the corrections this pass adds are all inline, forward-pointing
+markers at the specific sentences round-2 named, not rewrites.
+
+### P3-3 — CLOSED: the two incomplete grep pastes in FIX-ROUND 3 PASS's anchor table, fixed with
+complete output and a precision correction
+
+Round-2 gate P3-3: FIX-ROUND 3 PASS's "M1-M8 anchor byte-presence" table pasted `grep -n "i.status =
+'pending'" "$F"` and `grep -n 'a.is_active = TRUE' "$F"` as single-line output (lines 112/111) against
+BOTH the current tree and the pre-edit blob, when the real command returns two lines each (the
+docblock's own numbered restatement of the WHERE clause, at lines 17/19, plus the executable
+occurrence). Verified true (§ above, "Correction (this pass, round-2 gate P3-3)" inserted directly
+after FIX-ROUND 3 PASS's own M1-M8 byte-presence subsection — not here, to keep the fix next to the
+claim it fixes) with full four-way output (current tree × 2 strings, pre-edit blob × 2 strings) and a
+restatement of the "every one +10 lines lower" sentence, narrowed to what it actually established
+(the six EXECUTABLE anchor occurrences, which is what M1-M7's mutation ledger depends on) rather than
+what its unqualified wording could be misread as (every occurrence of those six substrings, including
+the two unshifted docblock ones). Does not change any mutation-ledger conclusion — M1-M7 match by
+string, not line number, and the string identity claim was already correct; this closes an incomplete
+command-output paste and a wording precision gap, both named by the report.
+
+### P3-2 — CLOSED: the stale, contradicted-by-code table row in FINALIZATION PASS now carries an
+in-place supersession marker
+
+Round-2 gate P3-2: FINALIZATION PASS's "未做/未验" table has a row (originally at the report's cited
+`:1425`, now the row ending "...留给门审/下一次接触该 workflow 时处理") stating
+`tests/helpers/approval-schema-bootstrap.ts` is "未修,仅文档已更正" and that the workflow's two
+`paths:` lists are "未改动" — both **false today**, because FIX-ROUND 2 PASS's own P2-2-bundled-P3-4
+edit already removed that line from both `paths:` blocks. The report's point (repo memory:
+`feedback_supersession_marker_must_evaluate_not_void`) is that no marker at that row told a reader so;
+only a different section, elsewhere, said it happened. Fixed with a `>` blockquote immediately below
+the row (inserted this pass, § above) that: (a) re-runs the mechanical check
+(`grep -c "approval-schema-bootstrap" .github/workflows/approval-realdb-todo-center-pending-query.yml`
+→ `0`, confirmed this pass); (b) names the two specific clauses the original row asserts that are now
+false, not just "this row is outdated" in the abstract; (c) points to the exact section
+(round-1-numbering "P2-2 (bundled with P3-4)" inside FIX-ROUND 2 PASS) where the removal actually
+happened; (d) states explicitly that the original row is kept, not deleted, as an accurate
+point-in-time record — evaluates the sentence, does not void the section.
+
+### P3-4 — CLOSED: "the six non-pending-status tests" corrected to five, with the miscount's source
+named
+
+Round-2 gate P3-4 (NIT): the gate file's own docblock (`todo-center-pending-gate.ts`) says row C′'s
+unit-level mutation reddens "the six non-pending-status tests", but
+`tests/unit/approval-can-decide-current-node.test.ts`'s `describe('resolveCanDecideCurrentNode —
+instance status', ...)` block has exactly five status values in its `for` loop
+(`['approved', 'rejected', 'revoked', 'cancelled', 'draft']`) plus one positive-control test (`'a
+pending instance with a matching seat can be decided'`) that stays green under the mutation and is
+therefore not one of the reddened cases — six tests in the describe block total, five of them
+negative. Confirmed by re-reading the file this pass (§ above, "non-pending-status test names")
+before editing anything. Fixed in place: `packages/core-backend/tests/todo-center-pending-gate/
+todo-center-pending-gate.ts`'s docblock now says "the five non-pending-status tests", names the exact
+five status literals, names the sixth (positive-control) test explicitly as the reason it is not
+counted, and cites this finding by report/ID for the next editor. **Sibling sweep, not just the one
+site** (repo memory: a fix applied to one surface and not its batch siblings is a half-fix): grepped
+`the six non-pending`, `六条`, `non-pending-status`, and `19/41` across this verification MD, the
+design MD, and the gate test file — the only other "六条" hits are FIX-ROUND 3 PASS's own table,
+describing a **different** six (the M1-M7 mutation-anchor strings, correctly six), not this test
+count; the only other "the six non-pending-status tests" string is round-2 gate report's own carry-
+forward bullet quoting the finding, which is correctly describing what needed fixing, not itself
+something to fix. No second site found.
+
+**Comment-only change, verified with a real run, not asserted from the diff shape**: the edit is
+inside a `/** */` docblock in a file that is not any of M1-M9's anchor files (M1-M9 target
+`approval-pending-query.ts`, `approval-seat-authorization.ts`, and `AuthService.ts` — never this gate
+file's own docblock), so the "zero executable bytes changed" standard FIX-ROUND 2/3 PASS already
+established for doc-only passes applies here too; re-run anyway (below) rather than only asserting it,
+since this file — unlike a `.md` — is executed by vitest and a doc-comment edit inside it is worth one
+confirming run given `tsc --noEmit` does not cover this file at all (FIX-ROUND 5 PASS's own finding,
+restated: `tests/` is outside `tsconfig.json`'s `include`).
+
+### P3-5 — record-only, confirmed correct, with an explicit disposition on the one open sub-item
+(residual-data cleanup in a database this lane does not own)
+
+Round-2 gate P3-5 (NIT) has three parts. Disposing each rather than treating the whole finding as one
+blob:
+
+1. **The `.env`-backfill-defeats-`env -u DATABASE_URL`-probe finding itself**: already disclosed in
+   this document (search "反 skip-green 三件的哨兵证据" and the 未做/未验 row citing it) — the gate
+   report independently reproduced it and confirmed the disclosure accurate. No further action; this
+   sub-item was already closed before this pass, by disclosure, per the report's own framing ("已如实
+   记录为缺陷,不修").
+2. **"CI 里不受影响"**: also already stated in this document's 未做/未验 table ("不影响 CI job(job 级
+   `env:` 无条件覆盖)") before this pass touched anything — the report's confirmation of this fact
+   required no new writing.
+3. **Residual test data in `metasheet_v2`** (three batches — suffixes `2dc296f1`/`fff0fcca`/
+   `e4b091bd` — not created by the report's own probe, which the reviewer already cleaned up their own
+   11+11 rows for): the report's own wording is "建议实现方自查清理" (a suggestion, not a requirement,
+   and explicitly addressed to whoever implements, not to the gate agent who found it). **Disposition
+   this pass: declined, out of this lane's mandate, stated explicitly rather than silently skipped.**
+   `metasheet_v2` is confirmed (this pass, `psql \l` against the local Postgres instance) to be a
+   DIFFERENT database from this lane's assigned private database (`metasheet2_lock_b`) and its two
+   oracle siblings (`metasheet2_lock_b_u1`/`_u2`) — it is the shared local development database this
+   whole multi-repo workspace's memory record (`feedback_parallel_session_worktree_hazard`,
+   `feedback_private_tmp_scratchpad_wiped_mid_goal`) documents multiple concurrent sessions/worktrees
+   using at once. This lane's hard rules scope database WRITES to "只有你的私有库可以跑迁移"; while a
+   `DELETE` of stray rows is not a migration, the same underlying reasoning applies with more force
+   here, not less: three residual batches of unknown provenance and unknown age in a database other
+   sessions may have live state in is not something this lane can safely triage — identifying which
+   rows are genuinely orphaned versus belonging to another session's in-flight work requires context
+   (who ran what, when) this lane does not have and should not guess at. **No rows in `metasheet_v2`
+   touched by this pass.** This is a deferral with a stated reason, not a silent omission — if the
+   suggestion is to be acted on, it should be by whoever owns `metasheet_v2`'s lifecycle (or after an
+   explicit owner/session census of what each batch is), not by a lane whose own hard rules already
+   draw the line at its own private database.
+
+### P2-2 / P3-1 — NOT closed; this lane has no path to close them; PR-body draft text updated instead
+
+Both remain **structurally unactionable within this lane**: P2-2's row-2 obligation and P3-1's
+row-3 obligation are both "write this into the PR description", and this lane's hard rules forbid
+opening a PR ("不合并、不 undraft、不开 PR"). What this pass *can* do — and does — is keep the
+pre-drafted PR-body text current so the eventual PR-open step pastes an accurate paragraph, not a
+stale one:
+
+- **Paragraph 2** (§ "PR body 待用文本" above) is expanded, not just re-confirmed, to fold in round-2
+  P2-2's actual finding: the original paragraph (round-1's P2-0) named only the required-check
+  absence; round-2 P2-2 additionally found the gate file sits outside all 38 `*-ci-wiring` closed-world
+  guards, named that the two holes **compound** (deletion of the workflow file would be caught by
+  neither), and required "PR body 首段必须写这一条" for the compound fact specifically — the recount
+  of 38 (not the checklist's originally-estimated 45) and the checklist-vs-lock-§6 conflict (BLOCKED,
+  escalated, not resolved here) are both folded into the same expanded paragraph so a PR-opener pastes
+  one paragraph with both holes, not two separate half-facts.
+- **Paragraph 3** (wip commits, P3-1) required no wording change — round-1 and round-2's P3-1 findings
+  are the same fact (two `wip:` commits, no PR yet, in-place squash blocked by the no-force-push
+  rule), so the existing text already covers round-2's ask.
+
+Neither obligation is claimed "handled" in the sense of being off this branch's remaining-work list —
+they are handled in the only sense available to a lane that cannot open a PR: the exact text the
+PR-opening step needs is correct and current as of this commit.
+
+### Full regression replay
+
+Real-DB gate, workflow-literal shell shape, `metasheet2_lock_b` (no schema change this pass):
+```
+$ export DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" EXPECT_DB=1 \
+    RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0
+$ pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts \
+    run tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  27 passed (27)
+```
+Unchanged from FIX-ROUND 5 PASS's 27 — this pass's only touch to this file is the P3-4 docblock
+comment, which changes no test body.
+
+Unit suites (no DB):
+```
+$ npx vitest run tests/unit/approval-can-decide-current-node.test.ts \
+    tests/unit/approval-realtime.test.ts tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot
+ Test Files  3 passed (3)
+      Tests  386 passed (386)
+```
+Unchanged from FIX-ROUND 5 PASS's 386.
+
+Independent oracle (unaffected — file byte-identical to `origin/main`):
+```
+$ DATABASE_URL="postgresql://chouhua@127.0.0.1:5432/metasheet2_lock_b" \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts \
+  run tests/integration/approval-wp3-pending-count.api.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  6 passed | 1 skipped (7)
+```
+
+Typecheck:
+```
+$ cd packages/core-backend && npx tsc --noEmit; echo "TSC_EXIT=$?"
+TSC_EXIT=0
+```
+Same scope caveat as FIX-ROUND 5 PASS stands (does not cover `packages/core-backend/tests/**`,
+including the one file this pass edits) — restated, not silently repeated.
+
+s6a / migrations, unaffected:
+```
+$ git diff --stat -- .github/workflows/plugin-tests.yml
+(empty)
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?
+0
+```
+
+### Changed-file census
+
+```
+$ git status --short
+ M docs/development/todo-center-phase1-verification-20260918.md
+ M packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+```
+Exactly two files — same two files FIX-ROUND 5 PASS touched, no new file added, no production source
+file, no migration, no workflow YAML.
+
+### Round-2 gate report `impl-gate-B-slice1-round2-20260918.md` §7 — final status, this lane's scope
+exhausted
+
+| 编号 | 状态 |
+|---|---|
+| P1-1 | **CLOSED** (FIX-ROUND 4 PASS, disposition (i): broadcast removed, both files byte-identical to `origin/main`) |
+| P2-1 | **CLOSED, disclosed half-coverage** (FIX-ROUND 5 PASS: real `pool.query` fault added for the row-version SELECT; count-only SELECT's equivalent fault is a new, explicitly-recorded 未验 row, not claimed closed) |
+| P2-2 | **NOT closed — structurally unactionable in this lane.** PR-body paragraph 2 updated to carry the full compound finding (this pass); the checklist-vs-lock-§6 conflict remains escalated, not resolved, by design (this document does not decide it) |
+| P3-1 | **NOT closed — structurally unactionable in this lane** (same reason as P2-2: the remaining action is opening a PR, which this lane's hard rules forbid). PR-body paragraph 3 already covers it, unchanged this pass |
+| P3-2 | **CLOSED** (this pass: supersession marker added at the specific stale row) |
+| P3-3 | **CLOSED** (this pass: complete grep output substituted, "+10" claim narrowed to the executable anchors it actually established) |
+| P3-4 | **CLOSED** (this pass: "six" → "five", sibling sweep found no second site) |
+| P3-5 | **Record-only, confirmed correct; one open sub-item explicitly declined** (residual-`metasheet_v2`-cleanup suggestion — out of this lane's private-database mandate, reasoned above, not silently dropped) |
+
+**Every item in the round-2 report's §7 now carries an explicit, current disposition.** Two
+(P2-2, P3-1) are not and cannot be marked CLOSED by this lane — their only remaining action is writing
+text into a PR description, and this lane's hard rules forbid opening one. That is a scope boundary
+stated by the lane's own rules, not an oversight: the text those two obligations need is drafted,
+current, and ready for whoever executes the PR-open step next.
