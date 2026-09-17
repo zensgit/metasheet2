@@ -347,7 +347,9 @@ share one lane; the two `.test.ts` files run in the default no-DB unit-test job)
 | Lock item | Test file | Case name (verbatim) | Lane |
 |---|---|---|---|
 | 判据 I (创建期写入正确谓词) | `approval-cancel-round-creation.db.test.ts` | `writes the dedicated instance, one pending round row, and an active seat for the original approver` | `approval-real-db-integration` (required, 20.x) |
+| 判据 I (两向), **reverse direction** — 经公开 `createApproval` ⇒ 谓词假 (Part D / round 5 fix, gate P1-B row 3) | `approval-cancel-round-creation.db.test.ts` | assertion inside the same `writes the dedicated instance, ...` case (`isCancelRoundInstance(originalInstanceRow.rows[0]!)).toBe(false)`) | same |
 | I3 (`uq_approval_rounds_pending_document`) | `approval-cancel-round-creation.db.test.ts` | `§5 I3 — a second cancel round cannot be started while one is pending (uq_approval_rounds_pending_document)` | same |
+| §4 / §5 I3 / 判据 III 负控 — **the index itself**, bypassing the app-layer precheck (Part D / round 5 fix, gate P1-B row 4) | `approval-cancel-round-creation.db.test.ts` | `§4 / §5 I3 / §14.2 判据 III 负控 — the partial unique index itself is load-bearing, independent of the app-layer precheck (bypass createCancelRoundInstance and INSERT a second pending round directly ⇒ 23505)` | same |
 | §6 仅原 requester (WI-16) | `approval-cancel-round-creation.db.test.ts` | `WI-16 — only the original requester may start a cancel round (403 CANCEL_ROUND_REQUESTER_ONLY)` | same |
 | Outlet #14 (suite gate) | `approval-cancel-round-creation.db.test.ts` | `§14.3 #14 (WI-6) — suite="forbidden" is rejected before any write (CancelRoundSuiteForbiddenError 409)` | same |
 | Outlet #2 (`adminJump`) | `approval-cancel-round-outlet-guards.db.test.ts` | `#2 adminJump — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN; a genuine downstream jump on an ordinary instance still succeeds` | same |
@@ -371,6 +373,8 @@ share one lane; the two `.test.ts` files run in the default no-DB unit-test job)
 | §5 I6 (撤销不限次, explicit acceptance row — checklist item 16) | `approval-cancel-round-redemption.db.test.ts` | same `chain (...)` case — this is the row itself, not a separate test; see §A3 Mutation 2 for the live mutation proving it is load-bearing | same |
 | 判据 III, keying discrimination | `approval-cancel-round-redemption.db.test.ts` | `DISCRIMINATING CONTROL: revoking one document's round does not touch a DIFFERENT document's own pending round (keyed on engine_instance_id, not "any pending round")` | same |
 | 判据 III, implementer-erratum branch | `approval-cancel-round-redemption.db.test.ts` | `erratum (not a lock quote — implementer choice, flagged for owner registration): a broken ...` (`CANCEL_ROUND_INVARIANT_VIOLATION` path) | same |
+| 判据 III, **正控 2** — 非原 requester revoke ⇒ 403 `APPROVAL_REVOKE_FORBIDDEN` (Part D / round 5 fix, gate P1-B row 1) | `approval-cancel-round-redemption.db.test.ts` | `判据 III 正控 2 (§14.2, §6 "仅原 requester"): a non-original-requester actor cannot revoke the cancel-round instance (403 APPROVAL_REVOKE_FORBIDDEN — NOT the create-time CANCEL_ROUND_REQUESTER_ONLY, a different code on a different path, §14.1 note)` | same |
+| §14.1 seed evidence — reject without `comment` ⇒ 400 `REJECT_COMMENT_REQUIRED` (Part D / round 5 fix, gate P1-B row 2) | `approval-cancel-round-redemption.db.test.ts` | `§14.1 seed evidence: reject without a comment is rejected with the named error code (400 REJECT_COMMENT_REQUIRED, not a bare 400), proving the comment gate is present for the cancel-round node` | same |
 | Q-A lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `§9-4 order (class-00 then instance row): a rollout holder BLOCKS a later instance-row acquisition, which proceeds once released` + reversed-order + positive-control siblings | same |
 | Q-B lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `candidate order (class-11 then attendance_requests row): a target-lock holder BLOCKS a later row acquisition, which proceeds once released` + reversed + positive-control siblings | same |
 | Q-C lock order | `approval-cancel-round-lock-order-census.db.test.ts` | `ABSENCE: createCancelRoundInstance never references the record-link row-auth lock (mechanical scan, re-read fresh)` + two POSITIVE CONTROL siblings proving the harness can force a real `40P01` | same |
@@ -931,3 +935,196 @@ array), tolerates the JSDoc comment between union members, and specifically pins
 **Gate finding P2-A: FIXED**, per §C2 above.
 Both fixes verified in the exact required-lane invocation the gate review traced to
 `main`'s branch protection (§C3), not merely in isolation.
+
+---
+
+# Part D — round 5 fix (2026-09-18, this pass)
+
+**Scope of this pass**: fix the gate review's **P1-B** finding
+(`impl-gate-C-slice1-round1-20260918.md`, dated 2026-09-18) — the four lock-named acceptance rows
+the review found present in the lock text but absent from every test file in this lane, and not
+disclosed as open in either this document's §A6 mapping table or its §A9 "what remains open" list
+(the review's own diagnosis: "验收集合不自洽" / `feedback_acceptance_criteria_set_must_be_self_consistent`).
+This pass does **not** touch P2-B (seed-visibility disclosure) or P3-A through P3-E; those remain
+open for a subsequent step. HEAD before this pass's commit: `cd2de9622` (the head left by Part C's
+own follow-up correction).
+
+Four rows, each closed by adding a real, currently-passing acceptance assertion — every gap was a
+missing TEST, not a missing production behavior; no lock-anchored row required a source change.
+
+## D1. 判据 III 正控 2 (§14.2, §6 "仅原 requester") — non-original-requester revoke ⇒ 403 APPROVAL_REVOKE_FORBIDDEN
+
+Lock text (§14.2, verbatim): "正控 2:**非原 requester** 发起 revoke ⇒ 403 `APPROVAL_REVOKE_FORBIDDEN`
+(§6「仅原 requester」的正向证据)". Gate review, AS OF its reviewed HEAD `95eccb89b` (before this pass):
+a full-corpus grep for `APPROVAL_REVOKE_FORBIDDEN` in a cancel-round context returned **0** hits (the
+only match anywhere, `approval-instance-readability-s1.db.test.ts`, is unrelated to cancel rounds).
+Re-run fresh on this pass's tree, for the record — now **2** files, the pre-existing unrelated one
+plus this pass's own new case:
+```
+$ grep -rln "APPROVAL_REVOKE_FORBIDDEN" packages/core-backend/tests apps/web/tests
+packages/core-backend/tests/integration/approval-instance-readability-s1.db.test.ts
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+Added: `approval-cancel-round-redemption.db.test.ts`, new case `判据 III 正控 2 (...)`. Seeds a
+pending cancel round (`seedPendingCancelRound`), issues `revoke` from a fresh, never-granted
+`impostorId` actor, asserts `403` + `body.error.code === 'APPROVAL_REVOKE_FORBIDDEN'`, then asserts
+the round is untouched (`outcome === 'pending'`, `ended_at === null`), then — POSITIVE CONTROL — the
+true original requester still succeeds against the **same** round afterward
+(`outcome === 'withdrawn'`), proving the guard is not vacuously green because the round was already
+broken some other way.
+
+Distinguished, in the test's own name and its lead comment, from `CANCEL_ROUND_REQUESTER_ONLY`
+(create-time, WI-16, a **different** error code on a **different** path, already covered in
+`creation.db.test.ts`) — the lock's own §14.1 note flags exactly this confusion as a trap ("两者混同
+正是…陷阱").
+
+## D2. §14.1 seed evidence — reject without `comment` ⇒ 400 REJECT_COMMENT_REQUIRED
+
+Lock text (§14.1, verbatim): "mutation: ... 去掉 `comment` ⇒ 400 **`REJECT_COMMENT_REQUIRED`**
+(断言错误码,不断言裸 400;证明评论门在场)". Gate review, AS OF its reviewed HEAD `95eccb89b` (before
+this pass): a full-corpus grep for `REJECT_COMMENT_REQUIRED` in a cancel-round context returned **0**
+hits (its 2 matches elsewhere, `approvals-bridge-routes.test.ts` and
+`approval-comment-required.db.test.ts`, are unrelated suites). Re-run fresh on this pass's tree, for
+the record — now **3** files, the two pre-existing unrelated ones plus this pass's own new case:
+```
+$ grep -rln "REJECT_COMMENT_REQUIRED" packages/core-backend/tests apps/web/tests
+packages/core-backend/tests/unit/approvals-bridge-routes.test.ts
+packages/core-backend/tests/integration/approval-comment-required.db.test.ts
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+Added: `approval-cancel-round-redemption.db.test.ts`, new case `§14.1 seed evidence: reject without
+a comment ...`. Seeds a pending cancel round, issues `reject` from the resolved approver **without**
+a `comment` field, asserts `400` + `body.error.code === 'REJECT_COMMENT_REQUIRED'`, asserts the
+round is still `pending`/`ended_at === null`, then — POSITIVE CONTROL — the same reject **with** a
+comment succeeds and terminates the round (`outcome === 'rejected'`).
+
+## D3. 判据 I(两向), reverse direction — a publicly-created instance does NOT satisfy the cancel-round predicate
+
+Lock text (§14.1, verbatim): "判据 I(两向):经专用路径 ⇒ 谓词真;**经公开 `createApproval` ⇒ 谓词假**。"
+Gate review: the existing creation test only asserted the forward direction
+(`isCancelRoundInstance(instance!)).toBe(true)` on the DEDICATED instance); no assertion anywhere in
+the corpus covered the reverse direction on the ORIGINAL (publicly-created) instance.
+
+Added: one assertion inside `approval-cancel-round-creation.db.test.ts`'s existing
+`writes the dedicated instance, ...` case, immediately after the original document is created via
+the public path and before the dedicated cancel-round instance is created:
+```ts
+const originalInstanceRow = await pool().query<{ workflow_key: string | null }>(
+  `SELECT workflow_key FROM approval_instances WHERE id = $1`,
+  [documentId],
+)
+expect(isCancelRoundInstance(originalInstanceRow.rows[0]!)).toBe(false)
+```
+
+**Discriminating-power mutation** (§14.3 #1's own 负控 — "公开路径写入轮次键 ⇒ 判据 I 反向红" — run
+once as a probe, NOT committed as permanent code, since it would break every non-cancel-round
+instance in the corpus): `cp`-backed up `ApprovalProductService.ts`, edited the SQL literal at line
+8079 (the public `createApproval` INSERT's hardcoded `workflow_key` value) from
+`'approval-product-template'` to `'approval.cancel-round'`, reran the single test:
+```
+$ DATABASE_URL=... EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-creation.db.test.ts -t "writes the dedicated instance"
+ × writes the dedicated instance, one pending round row, and an active seat for the original approver
+   → expected true to be false
+ Tests  1 failed | 5 skipped (6)
+```
+Restored via `cp` from the backup; `cmp` confirmed byte-identical to the pre-mutation file;
+`git status --porcelain` empty immediately after restore. The new assertion has real discriminating
+power — it is not vacuously true against this codebase.
+
+## D4. §4 / §5 I3 / §14.2 判据 III 负控 — the partial unique index itself, not just the app-layer precheck
+
+Lock text (§4): "部分唯一索引 `uq_approval_rounds_pending_document`... 与 C-3 配合才成立" plus §14.2's
+own 判据 III 负控 phrasing ("同单据再发起 cancel 轮被唯一索引拒(断言 23505/409)"). Gate review: the
+existing "§5 I3" test's own `CANCEL_ROUND_ALREADY_PENDING` assertion is produced entirely by
+`createCancelRoundInstance`'s own pre-check (`APS:8377`, a plain `SELECT ... WHERE outcome='pending'`
+issued before any INSERT) — the method's own code comment says as much ("this pre-check only turns
+the common case into a named error instead of a raw constraint violation"). Deleting the index
+outright would leave the existing test green, because the pre-check fires first every time a call
+goes through the service. The index itself had zero acceptance.
+
+Added: `approval-cancel-round-creation.db.test.ts`, new case
+`§4 / §5 I3 / §14.2 判据 III 负控 — the partial unique index itself is load-bearing, ...`. After a
+service-created pending round exists, the test **bypasses the service entirely** with a raw
+`INSERT INTO approval_rounds (...) VALUES (..., 'pending', ...)` issued directly from the test's own
+pool connection (never through `createCancelRoundInstance`, so the app-layer pre-check is never
+consulted) targeting the same `document_id`. Asserts the raw insert rejects with
+`error.code === '23505'` and `error.constraint === 'uq_approval_rounds_pending_document'` — the real
+Postgres constraint violation, not the service's translated `CANCEL_ROUND_ALREADY_PENDING`. Then
+asserts exactly one round row remains for the document (the failed statement left nothing behind)
+and it is still the original pending row.
+
+This test is directly constructible without any source mutation (bypassing the service via a raw
+SQL insert is itself the discriminating mechanism), so no `cp`-backup probe was run for this row —
+the test's own bypass IS the proof the index (not merely the pre-check) rejects the row.
+
+## D5. Rerun evidence — the exact commands, this pass
+
+```
+$ cd packages/core-backend
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,attendance-fk-migration,outlet-guards,node-timeout-effect}.db.test.ts
+ Test Files  7 passed (7)
+      Tests  47 passed (47)
+```
+(Part B's own count was 44; +3 this pass — D1, D2, D4 are each a new `it()`; D3 is a new assertion
+inside an already-existing case, so it does not add to the test count.)
+
+```
+$ npx tsc --noEmit -p .
+TSC-EXIT:0     (no output)
+```
+
+**Not rerun this pass, by scope**: the two backend unit tests
+(`approval-cancel-round-ci-wiring.test.ts`, `approval-cancel-round-plugin-mirror-constant.test.ts`)
+and the FE spec — this pass touches only `approval-cancel-round-creation.db.test.ts` and
+`approval-cancel-round-redemption.db.test.ts`, both already rerun above; neither of the unit-test
+files nor the FE spec reads or is affected by either changed file:
+```
+$ git diff cd2de9622 HEAD --name-only
+docs/development/approval-cancel-round-phase1-verification-20260918.md
+packages/core-backend/tests/integration/approval-cancel-round-creation.db.test.ts
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+No `plugin-tests.yml`, `vitest.config.ts`, or any new file was touched — both changed files already
+run inside the existing two-point wiring, so no s6a recompute is needed for this pass.
+
+## D6. Mutation ledger — this pass
+
+Backup directory `/tmp/gate-c-slice1-backups/`.
+
+| # | Mutated | Change | Observed red | Restore |
+|---|---|---|---|---|
+| P1B-1 | `ApprovalProductService.ts` | Public `createApproval`'s hardcoded `workflow_key` SQL literal (line 8079) changed from `'approval-product-template'` to `'approval.cancel-round'` | `1 failed \| 5 skipped (6)`; `expected true to be false` at the new §D3 reverse-direction assertion | `cmp` identical to backup |
+
+D1/D2/D4's own POSITIVE CONTROL steps (see D1/D2/D4 above) serve the same discriminating-power role
+for those three rows without a source mutation: D1 and D2's positive controls prove the surrounding
+action (revoke/reject) genuinely still works on the same fixture immediately after the negative
+assertion, and D4's raw-SQL bypass is itself the discriminating mechanism — no code deletion could
+make it "more red," since the constraint either exists in the schema or it does not.
+
+## D7. Working-tree discipline, this pass
+
+- `git status --porcelain` was empty at the start of this pass (matching HEAD `cd2de9622`'s clean
+  state); the only paths staged before commit are the two `.db.test.ts` files plus this document;
+  `git status --porcelain` is empty again after the commit.
+- One `cp`-backup → edit → run → restore → `cmp` cycle (§D3/D6); zero `git checkout --`.
+- No lock file, no `reviews/` file, no `origin/main` state, no CI-config file, no DDL/migration
+  touched.
+
+## D8. §A6 / §A9 correction and gate finding P1-B — final disposition
+
+**§A6 updated**: four new rows appended (二处 near the 判据 I / I3 cluster for D3/D4, 二处 near the
+判据 III cluster for D1/D2), each cross-referenced to this Part D — the mapping table's own
+self-consistency defect the gate review named is now closed for these four rows.
+**§A9 unchanged**: none of the four rows was ever listed there (that omission was exactly the gate
+finding), so there is nothing to remove; nothing new needs to be added to §A9 either, since all four
+are now closed rather than deferred.
+
+**Gate finding P1-B: FIXED** — all four missing acceptance rows (正控 2, `REJECT_COMMENT_REQUIRED`,
+判据 I reverse direction, the partial unique index) now have real, currently-green,
+discriminating-power-confirmed acceptance tests, per §D1-D4/D5/D6 above. The review's other findings
+from the same round (P2-B, P3-A through P3-E) remain open, untouched by this pass.
