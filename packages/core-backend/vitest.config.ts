@@ -1867,6 +1867,16 @@ export default defineConfig({
       // WHOLE FILE into the standalone .github/workflows/approval-realdb-cancel-round.yml lane
       // (sibling job to WI-0/WI-4/WI-13/#12-13 above), which arms EXPECT_DB=1.
       'tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts',
+      // §14.3 outlets #2 (`adminJump`) and #4/#6 (`dispatchAction`'s single action-judgment call
+      // site) — the FIRST slice of the "outlet-guards" file the seat-guards file's own header
+      // promised: both throw `CancelRoundOutletForbiddenError` (409 `CANCEL_ROUND_OUTLET_FORBIDDEN`)
+      // IN-PROCESS before any DML, each paired with a positive control on the SAME method against
+      // an ordinary (non-cancel-round) instance. #3/#7/#7′/#8 are separate later slices (different
+      // oracle shapes — see the file's own header). Excluded here so `describeIfDatabase` cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-cancel-round.yml lane (sibling job to
+      // WI-0/WI-4/WI-13/#12-13/#10-11 above), which arms EXPECT_DB=1.
+      'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
