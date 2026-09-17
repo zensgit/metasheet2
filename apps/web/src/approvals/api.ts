@@ -1645,7 +1645,7 @@ export async function listPendingApprovalsForApprover(
  *
  * `cancel_round` (design lock §14.3 #12,
  * approval-change-request-design-lock-draft-20260915.md v5.9): the backend's
- * `rejectIfCancelRound` guard on `bulkReassignApprovals` (`APS:8561`) reports a
+ * `rejectIfCancelRound` guard on `bulkReassignApprovals` (`APS:8916`) reports a
  * skipped seat for an instance that is mid cancel-round via this literal.
  * `ApprovalProductService.ts`'s own `ApprovalBulkReassignSkipReason` now
  * declares it too (both landed on this branch), so the readFileSync sync-pin

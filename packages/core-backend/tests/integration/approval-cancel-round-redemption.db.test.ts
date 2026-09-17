@@ -386,7 +386,7 @@ describeIfDatabase('cancel-round redemption (WI-13, 判据 III only): revoke/rej
       // fallback covered". This assertion reads the seed's own published-definition row and pins the
       // explicit value directly, the same discipline as the CJS mirror-constant test elsewhere in
       // this lane.
-      const publishedDefinition = await pool().query<{ runtime_graph: { nodes: Array<{ key: string; config?: { nodeOperationPolicy?: { commentRequired?: string } } }> } }>(
+      const publishedDefinition = await pool().query<{ runtime_graph: { nodes: Array<{ key: string; config?: { approvalMode?: string; nodeOperationPolicy?: { commentRequired?: string } } }> } }>(
         `SELECT pd.runtime_graph
            FROM approval_instances i
            JOIN approval_published_definitions pd ON pd.id = i.published_definition_id
@@ -397,6 +397,12 @@ describeIfDatabase('cancel-round redemption (WI-13, 判据 III only): revoke/rej
         (node) => node.key === 'cancel_approval',
       )
       expect(cancelApprovalNode?.config?.nodeOperationPolicy?.commentRequired).toBe('reject_only')
+      // Gate review round 2, P2-1: lock §14.1's node-config sentence names TWO explicit-value
+      // requirements in the same breath — `commentRequired` (pinned above) and `approvalMode`
+      // ("会签 'all'", not `normalizeApprovalMode`'s undefined-fallback default). Only the first
+      // half had a pin; this closes the other half against the same seeded row already fetched
+      // above (not a test-local fixture — those all use `'single'` and would pin nothing).
+      expect(cancelApprovalNode?.config?.approvalMode).toBe('all')
 
       const reject = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
         method: 'POST',
