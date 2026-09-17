@@ -26,7 +26,10 @@
  * which are pure request-shape concerns the route layer owns before it ever calls into this file:
  *   GROUP_NOT_FOUND (404) · GROUP_ARCHIVED (409) · GROUP_NAME_TAKEN (409) · GROUP_NOT_ARCHIVED
  *   (409) · GROUP_SORT_CONFLICT (500, §2 DEFERRABLE side effect ③ — a COMMIT-time 23505 on
- *   `atg_sort_unique`, not a statement-time one).
+ *   `atg_sort_unique`, not a statement-time one). "ALL" above means all of the lock's ratified
+ *   domain codes; `requireName` below also raises `GROUP_NAME_REQUIRED` (400), an implementer's
+ *   input-shape validation (same footing as this router's `APPROVAL_GROUP_ID_REQUIRED` /
+ *   `APPROVAL_ACTOR_REQUIRED`), not an eighth ratified outcome.
  *
  * `GROUP_NAME_TAKEN` on ARCHIVE is this implementer's choice, not lock text: the lock defines
  * archive-of-an-already-archived-group behaviour nowhere and no acceptance row exercises it: reusing
@@ -251,9 +254,13 @@ export async function archiveApprovalTemplateGroup(orgId: string, groupId: strin
       }
 
       // I2 / I2′: unlink (UPDATE, not DELETE) every member of this group before archiving it.
+      // org_id = $1 is carried here too (every other write/read in this file does — §2 "SELECT
+      // 必须带 org 谓词"), even though `atg_<uuid>` ids are already globally unique and the
+      // composite `atgl_group_fk` makes a cross-org link row for this exact groupId impossible
+      // today: correctness should rest on this predicate, not on an invariant enforced elsewhere.
       await client.query(
-        `UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE group_id = $1`,
-        [groupId],
+        `UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2`,
+        [orgId, groupId],
       )
 
       const updated = await client.query(
