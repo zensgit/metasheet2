@@ -1568,7 +1568,7 @@ different "remains open" lists (§A9, and Parts C/D/E's own closing paragraphs) 
 | P1-B | Four lock-named acceptance rows absent (正控 2, `REJECT_COMMENT_REQUIRED`, 判据 I reverse, index-itself negative control) | **CLOSED** — all four added, fixtures reused | Part D, §D1-D4/D8 |
 | P2-B | Seed leaves `visibility_scope` at its table default ⇒ template-center-visible, launchable "撤销审批" once applied | **DISCLOSED, OPEN, owner-gated** — deployment note now in design MD §9; `visibility_scope` narrowing is a scope addition beyond lock §14.1, decision left to owner; DDL is Draft-only, not applied anywhere today | This pass (§F1), design MD §9; original finding `impl-gate-C-slice1-round1-20260918.md` §P2-B |
 | P3-A | Round-row write's actual hook point is after the status write, not before it, per lock:344's literal text | **Wording FIXED / deviation DISCLOSED, OPEN, owner 备案** — design MD §5 now states the true six-step sequence with current line numbers and names the literal deviation explicitly; no code reordered, no behavioral difference constructed by the gate reviewer or by this pass; whether to accept the deviation or reorder the write is an owner interpretation of lock:344 | This pass (§F1), design MD §5; original finding `impl-gate-C-slice1-round1-20260918.md` §P3-A |
-| P3-B | Two `wip` commits still in branch history | **OPEN, blocked by this task's own hard rules** — dropping them from an already-pushed branch needs an interactive rebase + force-push; this lane's hard rules forbid force pushes; the only rule-compliant closure form is a PR-body merge-method note, which requires a PR to exist | Part E, §E5 (repeats Part D's D8 framing); not touched by this pass |
+| P3-B | Two `wip` commits still in branch history | **OPEN, blocked by two named hard rules, not by absence of an alternative** — dropping them from an already-pushed branch needs an interactive rebase, which needs a force-push (**this task's hard rules forbid force pushes, no exception clause**); the only other rule-compliant closure form is a PR-body merge-method note, which needs a Draft PR to exist (**this task's hard rules also forbid opening a PR**) — both routes are closed by rule, not by this lane failing to find one | Part E, §E5 (repeats Part D's D8 framing); not touched by this pass |
 | P3-C | Two lock-named mutations (seed `allowRevoke=false`; 负控 I′ workflow-key rewrite) never run | **CLOSED** — both run and documented, one incidental ordering finding recorded | Part E, §E1/E2/E5 |
 | P3-D | `policy_snapshot_at_create.definitionPolicy` had zero assertion | **CLOSED** — deep-equal assertion added, confirmed load-bearing by two mutations (first draft caught as confounded and fixed before the pass returned) | Part E, §E3/E5 |
 | P3-E | This lane's own CI-wiring guard is a closed world over its own 7-file array | **Registered, no action item** — the gate review itself frames this as "not a deduction" (repo-wide convention shared by 45 sibling guards; cross-lane fix, not this slice's scope) | Gate report §3, P3-E; not touched by any pass |
@@ -1583,8 +1583,14 @@ findings CLOSED (P1-A, P2-A, P1-B, P3-C, P3-D), 2 disclosed-and-owner-gated with
 §A9 (Part A, this document's earliest section) and the closing paragraphs of Parts C, D, and E each
 say something true about "what remains open" **as of the pass they describe** — none of those five
 statements is rewritten here. What changes is only which findings F3's own table now marks non-open:
-§A9 predates the gate review entirely (it lists this lane's *own* pre-gate open items, a different
-and non-overlapping set from the gate's nine findings) and needs no correction. Parts C/D/E's closing
+§A9 predates the gate review, so most of its bullets are this lane's *own* pre-gate open items,
+outside the gate's nine-finding set (判据 II/IV, outlet #9's negative control, the missing HTTP
+route, the two supplementary-checklist PR-body items, the `suite` production mapping, Q-A/Q-B/Q-C's
+ratify status, and the local-vs-CI PG-version gap — none of these is one of F3's nine rows). §A9's
+**one** exception is its first bullet, the P1-A red — it names the gate review by ID and is already
+updated in place by Part C (`~~BLOCKING~~ **RESOLVED (round 4 / Part C)**`), agreeing with F3's own
+P1-A row; that bullet needed no further correction here, not because it predates the gate review
+(it does not) but because Part C already reconciled it. Parts C/D/E's closing
 paragraphs are each correct for their own pass and remain so; a reader who wants the **current**
 status of any of the gate review's nine findings should read F3, not reconstruct it by walking
 Parts C through F in order and mentally diffing five "remains open, unchanged by this pass" sentences
