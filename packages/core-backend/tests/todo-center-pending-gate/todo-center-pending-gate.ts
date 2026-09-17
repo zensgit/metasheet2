@@ -6,7 +6,8 @@
  * identity directly and the production role-resolution axis — `users.role`, the admin-upgrade
  * REPLACEMENT semantics in `AuthService.resolveRbacProfile`, `user_roles`/`user_permissions` reads
  * — is never exercised there), `GET /api/approvals/pending-count` must return the fourteen
- * lock-mandated golden values in §5's A0 row for the fourteen viewer classes (①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬).
+ * lock-mandated golden values in §5's A0 row for the fourteen viewer classes (①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬). This
+ * step adds class ⑨; ⑩⑪⑫⑬ remain deferred (see the fixture-plumbing docblock below).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -74,8 +75,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
-// these classes and is deferred to a later step, along with classes ⑨⑩⑪⑫⑬).
+// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧⑨ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
+// these classes and is deferred to a later step, along with classes ⑩⑪⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -461,6 +462,13 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // wrongly become excluded (1→0) while ⑧'s handler row would wrongly become included (0→1); the
   // lock requires both classes be re-checked under that one mutation, not just one of them.
   const v8 = viewer('c8-handler-node-excluded', 'employee')
+  // Class ⑨ — same viewer/seat shape as ①, but its instance's `status` is `'approved'`, not
+  // `'pending'` ⇒ count 0: the query's second WHERE conjunct is `i.status = 'pending'` literally —
+  // any other status (closed, terminal, or otherwise) never qualifies, regardless of the seat/
+  // handler-node conditions (design-lock §5 A0 ⑨; mutation "drop the status conjunct" would flip
+  // this to 1, red). Shares `SHARED_SEAT_NODE_KEY` with ①②⑥⑦⑧ (consistent with every other class in
+  // this file using the one shared node key where the lock does not require a distinct one).
+  const v9 = viewer('c9-approved-status', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -524,14 +532,24 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null, // filled in beforeAll (the HANDLER definition, not the non-handler helper)
     currentNodeKey: SHARED_SEAT_NODE_KEY,
   }
+  // Class ⑨'s own instance — `status='approved'` (NOT `'pending'`), the only field that
+  // distinguishes it from instance1's shape. Non-handler published definition, shared node key with
+  // ①②⑥⑦⑧ (see `v9`'s docblock).
+  const instance9: InstanceFixture = {
+    id: `todo-center-pending-gate-i9-${suffix}`,
+    status: 'approved',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: SHARED_SEAT_NODE_KEY,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -563,6 +581,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     // Class ⑧'s definition classifies `SHARED_SEAT_NODE_KEY` as a handler node — the ONLY call to
     // `seedHandlerPublishedDefinition` in this file.
     instance8.publishedDefinitionId = await seedHandlerPublishedDefinition('c8', SHARED_SEAT_NODE_KEY)
+    instance9.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c9')
 
     await seedInstance(instance1)
     await seedInstance(instance2)
@@ -573,6 +592,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     // call for it, on purpose (class ⑦'s whole point, see its docblock above).
     await seedInstance(instance7)
     await seedInstance(instance8)
+    await seedInstance(instance9)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -616,6 +636,12 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       assigneeId: v8.id,
       nodeKey: SHARED_SEAT_NODE_KEY,
     })
+    await seedAssignment({
+      instanceId: instance9.id,
+      assignmentType: 'user',
+      assigneeId: v9.id,
+      nodeKey: SHARED_SEAT_NODE_KEY,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
 
@@ -640,6 +666,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
           instance5.publishedDefinitionId,
           instance6.publishedDefinitionId,
           instance8.publishedDefinitionId,
+          instance9.publishedDefinitionId,
         ]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
@@ -830,6 +857,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(me.email).toBe(v8.email)
       expect(me.username).toBe(v8.username)
       expect(me.name).toBe(v8.name)
+      expect(me.role).toBe('employee')
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(0)
+      expect(body.unreadCount).toBe(0)
+    })
+
+    it('class ⑨ — user seat shape identical to ①, but the instance status is \'approved\' not \'pending\' ⇒ count 0', async () => {
+      const token = await devToken(baseUrl, v9.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v9.email)
+      expect(me.username).toBe(v9.username)
+      expect(me.name).toBe(v9.name)
       expect(me.role).toBe('employee')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
