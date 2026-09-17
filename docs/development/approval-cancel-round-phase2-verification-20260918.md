@@ -24,6 +24,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-4 | `ApprovalProductService.redeemCancelRoundInTxn`'s own comment (commit `08b7cbec3`), and §4's 「it is CHEAP」 bullet | 「`operationId` … must be a UUID … The round row's own id **is exactly the right identity**」, and 「the end-to-end case … is a handful of lines」 | **BOTH RETRACTED — see §3.12.** The round id is `text`, minted `apr_${crypto.randomUUID()}`, so the boundary refused EVERY real redemption with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID` (500). Four double-backed acceptance cases were green over a code path that could not work. And the end-to-end case was not cheap: it took a production fix plus two fixture facts that no reading of the source would have produced. |
 | R-2 | my own working notes for this step | "the `w7-w6r5-guard` classification test ran and passed" | **RETRACTED — it never ran.** A combined run of three targets printed `Test Files 2 passed (2)` and I inferred which two. Checked directly: `npx vitest run tests/unit/w7-w6r5-guard` prints **`No test files found, exiting with code 1`** — that path holds `classification.ts` and `walk.ts`, which are corpora, not suites. Their real consumers are named in §2.5 and were run there. A directory that collects zero files is not a green. |
 | R-5 | commit `5dbbf5f6b` message, 3rd paragraph, and §3.13.2's first draft | "under M-20 **ALL THREE** of R2's literal clauses stayed GREEN (**measured** — the `ivexp` case … passed)" | **RETRACTED IN PART — clause 1 was NOT measured by that run.** `ivexp` has no attendance target, so it asserts nothing about 零业务取消; the only case that does is R2 itself, and in that run R2 died at the `approve_rows` assertion, which the first draft ordered BEFORE the 零业务取消 rows — so those rows were never evaluated. Clauses 2 and 3 were genuinely measured; clause 1 was an argument labelled as a measurement, in a file whose whole discipline is the opposite. FIXED by the follow-up commit: the case now orders the three literal clauses first and the implementer addition last, and M-20 re-run puts the red on the file's last line (`:1433:49`) with all three evaluated and green. The original commit message cannot be edited without a force-push, so the correction lives here. |
+| R-6 | §3.4, §3.11.6 and the redemption suite's own header (phase 2, all three units) | a new `.db.test.ts` would owe 「the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102` — a closed world that stays green for a file it does not list」 | **RETRACTED — that is not what lives at `:99-102`, and the script holds no file list at all.** Read this session: `:99-102` is `REAL_DB_STEP_IDS = Object.freeze({ approval: 'approval-real-db-integration', multitable: 'multitable-real-db-integration' })` — a frozen map of two **step ids**, not test files. The file population is DERIVED from the workflow at check time (`wholeFileVitestArgs`, `:521-525`, reads the parsed step's own vitest invocations), so it cannot go stale against `plugin-tests.yml` the way a hard-coded list would. `grep -c 'db.test.ts'` over the whole script ⇒ **1** (a doc-comment example at `:513`), `grep -c cancel-round` ⇒ **0**. Consequence for this line: a new `.db.test.ts` under the existing `approval` step owes `plugin-tests.yml` + the s6a re-pin, and owes this script **nothing**. The three places carrying the wrong description are corrected in place; the two commit messages that repeated it cannot be, so this row is their correction. |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -557,9 +558,10 @@ bare 500 is **unchecked** and is the next unit's first question.
 
 Appended to the already-wired `tests/integration/approval-cancel-round-redemption.db.test.ts`
 (6 → 8 cases) rather than a new `.db.test.ts`. A new file would owe: the `plugin-tests.yml`
-workflow list, the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102`
-(a closed world that stays green for a file it does not list — supplementary checklist item 1), and
-an s6a provenance re-pin (items 3 / 14). None of that buys coverage this fixture already gives.
+workflow list and an s6a provenance re-pin (items 3 / 14). (⚠️ CORRECTED, §0 R-6: earlier revisions
+of this sentence also named a 「hard-coded `FILES` array」 in `scripts/ops/ci-realdb-step-contract.mjs`
+— there is none. `:99-102` is a frozen map of two STEP IDS, and the file population is derived from
+the workflow at check time. That script owes nothing for a new file.) None of that buys coverage this fixture already gives.
 **Zero new files and zero workflow edits in either of this unit's two commits** — the follow-up
 commit modifies the existing `approval-cancel-round-lock-order-census.db.test.ts` (Q-D, §3.3) and
 the same two files again — so the four attendance census pins and the s6a pin are untouched:
@@ -1254,8 +1256,8 @@ gets its `approved` status write, its approve audit row and the 恰一个 comple
 ### 3.11.6 Acceptance — four cases, in the already-wired file
 
 Appended to `approval-cancel-round-redemption.db.test.ts` (same reasoning as §3.4: a new
-`.db.test.ts` would need `plugin-tests.yml`, the `ci-realdb-step-contract.mjs` `FILES` array and an
-s6a re-pin, for no coverage this fixture cannot give).
+`.db.test.ts` would need `plugin-tests.yml` and an s6a re-pin, for no coverage this fixture cannot
+give; the `ci-realdb-step-contract.mjs` clause this sentence used to carry is retracted, §0 R-6).
 
 | Case | What it establishes |
 |---|---|
@@ -1534,7 +1536,7 @@ and redone).
 SECOND, so when M-20 turned it red the three literal clauses below it were never evaluated and
 「they stayed green」 was an argument wearing a measurement's label (retracted in §0, R-4). The case
 now orders the three literal clauses FIRST and the implementer addition LAST, and M-20 was re-run:
-the red lands on the file's LAST assertion (`…redemption.db.test.ts:1433`,
+the red lands on the file's LAST assertion (`…redemption.db.test.ts:1433` at mutant-run time, `:1435` after the §0 R-6 header correction,
 `expect(roundRecords.rows[0].approve_rows).toBe('0')`), so **every clause in the table below was
 evaluated in that same run and passed**.
 
@@ -1574,7 +1576,7 @@ the test file modified).
 | # | Mutation | Expected | Observed |
 |---|---|---|---|
 | M-20 | move the outlet-#5′ hook block past step ⑥ (after `enqueueApprovalEventIfDurable`) | R2 red, and only R2 | **exactly 1 red**: `R2 … expected '1' to be '0'` (the `approve` audit row the mutant writes). 60 green — including `ivexp`, which proves the hook still EXECUTED in its new position and still closed the round, so the red is the reordering and not an unreachable hook |
-| M-20 (re-run, after the assertion reorder) | same mutation, against the reordered case | the red should move to the file's LAST assertion, with all three literal clauses evaluated and green | **red at `…redemption.db.test.ts:1433:49`** — the last line of the case. 13 of 14 green in that file. This is what makes the §3.13.2 table a measurement instead of an argument |
+| M-20 (re-run, after the assertion reorder) | same mutation, against the reordered case | the red should move to the file's LAST assertion, with all three literal clauses evaluated and green | **red at `…redemption.db.test.ts:1433:49`** — the last assertion of the case (the §0 R-6 header correction landed afterwards and shifted that line to `:1435`; `grep -n 'expect(roundRecords.rows\[0\].approve_rows)'` ⇒ 1435). 13 of 14 green in that file. This is what makes the §3.13.2 table a measurement instead of an argument |
 
 Two hygiene checks the ledger line depends on, run rather than assumed:
 - the mutant **typechecks** (`npx tsc --noEmit`, exit 0) and its diffstat is `82 insertions(+), 80 deletions(-)` on one file — the block moved, it was not duplicated or dropped;
@@ -1632,9 +1634,20 @@ $ (packages/core-backend) EXPECT_DB=1 \
   Test Files  1 failed | 5 passed (6)
         Tests  1 failed | 60 passed (61)
   FAIL … R2 … AssertionError: expected '1' to be '0'
+
+  … M-20 re-run after the assertion reorder (redemption file alone):
+  Test Files  1 failed (1)
+        Tests  1 failed | 13 passed (14)
+  FAIL … R2 … at …/approval-cancel-round-redemption.db.test.ts:1433:49
 ```
 
-No new file and no `plugin-tests.yml` edit — the case went into a suite already enumerated by CI, so
+⚠️ WHICH RUN PRODUCED WHICH NUMBER, since both sit in this section. 「60 green / 1 assertion out of
+61」 comes from the SIX-FILE mutant run, which used the PRE-reorder case; 「red at `:1433:49`, 13 of
+14 green」 comes from the single-file mutant run against the POST-reorder case. The cross-inference is
+safe only because the other 60 cases' source is byte-identical between the two runs (the reorder
+touched one case body in one file) — said out loud rather than left for a reviewer to reconstruct.
+
+No new file and no `plugin-tests.yml` edit — the case went into a suite already enumerated by `plugin-tests.yml`, so
 **no s6a provenance re-pin is owed** by this unit. ⚠️ The earlier units in this file ran that absence
 grep from `0225a1aa4`, a MID-BRANCH baseline; for an absence claim about the BRANCH it has to run
 from the branch point, which is what is done here:
@@ -1653,11 +1666,18 @@ $ grep -n lock-order-census .github/workflows/plugin-tests.yml
 
 So the 1006-line census file phase 1 added IS in the CI lane (it is not new on this branch —
 `git cat-file -e feat/approval-cancel-round-phase1:…lock-order-census.db.test.ts` succeeds), and this
-branch adds no `.db.test.ts` at all. `scripts/ops/ci-realdb-step-contract.mjs` contains **one**
-`db.test.ts` token in total (`grep -c db.test.ts` ⇒ 1) and **zero** `cancel-round` matches — it is not
-the per-file closed world the phase-1 header called it, so nothing is owed to it either. Recorded
-here because 「a closed world that stays green for a file it does not list」 is this branch's own
-named hazard and it deserved a run, not a recollection.
+branch adds **no `.db.test.ts` at all** — which is what 「nothing owed」 rests on, independently of any
+script's shape.
+
+And `scripts/ops/ci-realdb-step-contract.mjs` owes nothing either — but the reason this file gave for
+that, in three places, was **wrong**, so it was read rather than grepped (§0 R-6). Two token counts
+(`grep -c 'db.test.ts'` ⇒ 1, `grep -c cancel-round` ⇒ 0) were the first evidence, and stopping there
+would have been 「a token grep standing in for reading the enumeration」 — this repo's own O2 census
+trap. Reading it: `:99-102` is `REAL_DB_STEP_IDS`, a frozen map of two STEP IDS, and the file
+population comes from `wholeFileVitestArgs` (`:521-525`), which derives it from the parsed workflow
+step's own vitest invocations. It is not a closed world over files; there is no file list to fall out
+of. Recorded because 「a closed world that stays green for a file it does not list」 is this branch's
+own named hazard, and the hazard turned out to be in the DESCRIPTION, not the script.
 
 
 ## 4. What this slice has NOT proven yet
@@ -1694,7 +1714,7 @@ they are.
   60 green). ⚠️ What is NOT established, and it is the headline: **R2's three literal clauses have
   no discriminating power against the mutation the lock names for R2** — all three stayed GREEN
   under M-20 — measured by ONE run of the reordered case, whose red lands on its last line
-  (`:1433:49`) so all three were evaluated first (§0 R-5 retracts the first draft's weaker
+  (`:1433:49` at mutant-run time; the later header correction shifted it to `:1435`) so all three were evaluated first (§0 R-5 retracts the first draft's weaker
   evidence) — and the assertion that carries it is an IMPLEMENTER ADDITION (the persisted
   `approve` audit row). M-20 is detected by 1 assertion out of 61 cases in this corpus. §11-③'s trap, recurring at this branch. Also still
   open from this case: the `required` posture claim (SERIALIZABLE + rollout advisory lock) is a
