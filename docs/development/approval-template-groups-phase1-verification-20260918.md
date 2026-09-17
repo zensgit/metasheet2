@@ -4,9 +4,11 @@
 - 任务书:`impl-taskbook-A-grouping-20260918.md` §3 CI 接线清单
 - 补充清单:`impl-supplementary-gate-checklist-20260918.md` #1–#3
 - 子单元:u3「CI 接线 + s6a 重钉」
-- worktree HEAD:`dba46e7c1ad5c6092943029e96d8f5ad30c11f42`(分支 `feat/approval-template-groups-phase1-u3`)
+- worktree HEAD(§1–§9 原始记录时):`dba46e7c1ad5c6092943029e96d8f5ad30c11f42`(分支 `feat/approval-template-groups-phase1-u3`,当时未提交)
+- worktree HEAD(§10 二次核验时,即本文件所在提交的父提交):`fbcf62caa08fc429d3158c77bfab4d0d2e7bc8f3`
 - `origin/main`:`23dfdf417686b931a515bf03abbce1d6471c3098`
 - 环境:node `v25.9.0`,python3 `/usr/bin/python3` `Python 3.9.6`
+- **§5 的「45」计数已被 §10 核实为错误,原句保留但视为已撤回,更正值见 §10.3**
 
 ## 1. CI 接线 #1 — `vitest.config.ts` exclude
 
@@ -132,6 +134,24 @@ exit=0
 
 `git diff --exit-code` 无输出本身不是证据——退出码才是:`exit=0` 表示自 `origin/main` 分叉点（`d944a1276a65b01a33701486b31b7b3eddf588ae`）到本 worktree HEAD（`dba46e7c1ad5c6092943029e96d8f5ad30c11f42`）之间,这两个 multitable 自动化源文件**逐字节零改动**——分组 phase 1 的实现没有触碰这条平行路径,满足验收 I。未为此新建测试文件。
 
+**存在性正控(§10 补,原始记录漏做)**:`git diff --exit-code A..B -- <path>` 对一个两端都不存在的路径同样退出 0——「无输出 + exit=0」本身不能区分「零改动」与「该路径压根不在树里」。用 `git cat-file -e` 证明两个路径在 HEAD 确实存在:
+
+```
+$ git cat-file -e HEAD:packages/core-backend/src/multitable/automation-service.ts && echo "automation-service.ts: exists"
+automation-service.ts: exists
+$ git cat-file -e HEAD:packages/core-backend/src/multitable/automation-approval-template-access.ts && echo "automation-approval-template-access.ts: exists"
+automation-approval-template-access.ts: exists
+```
+
+两文件均存在,§6 的 `exit=0` 因此确实是「逐字节零改动」而非「路径不存在时的假阳性」。同时把 diff 与退出码核对合成一条复合命令重跑(消除跨两次 shell 调用的 `$?` 语义漂移):
+
+```
+$ MB=$(git merge-base origin/main HEAD); git diff --exit-code "$MB"..HEAD -- \
+    packages/core-backend/src/multitable/automation-service.ts \
+    packages/core-backend/src/multitable/automation-approval-template-access.ts; echo "exit=$?"
+exit=0
+```
+
 ## 7. 本次改动清单(u3 名下文件集,截至本记录)
 
 ```
@@ -167,5 +187,102 @@ Test Files  2 passed (2)
 
 ## 9. 未完成 / 披露残留
 
-- **补充清单 #1 的闭世界缺口未收口**(见 §5):需要新建 `scripts/ops/approval-template-groups-ci-wiring.test.mjs` + `plugin-tests.yml` 新增一个 `run:` 步骤,超出 u3 本次名下文件集,留给后续单元或 owner 裁决是否现在做。
+- **补充清单 #1 的闭世界缺口未收口**(见 §5,计数已在 §10.3 更正):需要新建 `scripts/ops/approval-template-groups-ci-wiring.test.mjs` + `plugin-tests.yml` 新增一个 `run:` 步骤,超出 u3 本次名下文件集,留给后续单元或 owner 裁决是否现在做。
 - **s6a 钉的时效性**(见 §4):合并前必须对当时的 `plugin-tests.yml` 字节重算一次,不能沿用本记录里的值。
+
+## 10. 二次核验(同一子单元,续做;不新增 wiring 改动)
+
+§1–§9 是起草期(worktree HEAD `dba46e7c1`)的原始记录,随后与 §2/§4 的 `plugin-tests.yml`/`vitest.config.ts`/s6a 钉改动一起提交为 `fbcf62caa`(本节写入前的 HEAD)。本节在**不改动任何 wiring 文件**的前提下,补做 advisor 复核指出的三处欠证,并核对任务书 CI 接线 #7。
+
+### 10.1 §6 的 HEAD 是否仍然成立
+
+`fbcf62caa` 自身的 diff 只触碰 `.github/workflows/plugin-tests.yml`、`packages/core-backend/vitest.config.ts`、`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 与本文档,不触碰 §6 点名的两个 multitable 源文件(逐字核对下方 diff --stat 的路径列表):
+
+```
+$ git show --stat fbcf62caa | tail -n +5
+ .github/workflows/plugin-tests.yml                 |   2 +
+ ...template-groups-phase1-verification-20260918.md | 171 +++++++++++++++++++++
+ packages/core-backend/vitest.config.ts             |  18 +++
+ .../vectors/s6a-package-provenance-pins.json       |   2 +-
+ 4 files changed, 192 insertions(+), 1 deletion(-)
+```
+
+四个改动路径中没有 `automation-service.ts` / `automation-approval-template-access.ts`,所以 §6 在 `dba46e7c1` 处核验过的「零改动」结论,在当前实际 HEAD `fbcf62caa` 处**依然成立**(把 §6 的复合命令换成 `origin/main..fbcf62caa` 重跑一次,与 §6a 的 `origin/main..HEAD` 是同一个结果,因为期间唯一的中间提交没碰这两个文件):
+
+```
+$ git diff --exit-code origin/main..fbcf62caa -- \
+    packages/core-backend/src/multitable/automation-service.ts \
+    packages/core-backend/src/multitable/automation-approval-template-access.ts; echo "exit=$?"
+exit=0
+```
+
+本节(§10)写入后的提交只改动本文档一处(`docs/development/**`),不再触碰 §1/§2/§4 已核验的三个 wiring 文件字节,因此本节之后 §4 的 s6a 值与 §1/§2 的接线核对结果不会因为本次提交而失效——回归终止于此,不再需要下一轮「HEAD 是否还成立」的追问。
+
+### 10.2 任务书 CI 接线 #7 — 分支保护 required contexts(push 前核对,不得沿用锁文数字)
+
+```
+$ gh api repos/zensgit/metasheet2/branches/main/protection --jq '.required_status_checks.contexts | length, .[]'
+13
+contracts (strict)
+contracts (dashboard)
+pr-validate
+test (20.x)
+contracts (openapi)
+web-tests
+stock-prep PowerShell 5.1 acceptance
+attendance-web-guard
+integration-guard
+ssh host-key pin contract (fail-closed known_hosts)
+observation-kit contract (read-only SQL census + runbook gating)
+recovery-schema-drift
+Approval browser verify (chromium)
+$ gh api repos/zensgit/metasheet2/branches/main/protection --jq '.required_status_checks.strict'
+false
+```
+
+2026-09-17 快照:13 个 required contexts(与锁文引用的 2026-09-17 快照数字一致,`strict=false`),`test (20.x)` 在列、`test (18.x)` 不在列——本单元 §1/§2 把两个新真库套件钉进「唯一经 `test (20.x)` required 的真库步骤」这条前提,在 push 前重新核验后依然成立。这是本子单元自己 push 前的核对,不代表合并时刻仍然成立(合并前要再核一次,与 §4 的 s6a 时效性披露同理)。
+
+### 10.3 更正 §5 的「45」— 机械计数
+
+§5 原句「该数组存在于消费方——45 个 `*-ci-wiring.test.mjs`……每个 family 各自持有并各自被 `plugin-tests.yml` 显式 `run:` 一次(不是 glob 自动发现)」与「45 个守卫文件对应 45 处独立 `run:` 调用,无 glob」两处「45」均为**未经命令核实的估计数**,现场重数:
+
+```
+$ ls scripts/ops/*-ci-wiring.test.mjs | wc -l
+      38
+$ grep -oE 'scripts/ops/[A-Za-z0-9_-]+-ci-wiring\.test\.mjs' .github/workflows/plugin-tests.yml | sort -u | wc -l
+      36
+$ comm -23 <(basename -a scripts/ops/*-ci-wiring.test.mjs | sort -u) \
+           <(grep -oE '[A-Za-z0-9_-]+-ci-wiring\.test\.mjs' .github/workflows/plugin-tests.yml | sort -u)
+approval-browser-ci-wiring.test.mjs
+stock-prep-browser-ci-wiring.test.mjs
+$ grep -rl "approval-browser-ci-wiring\|stock-prep-browser-ci-wiring" .github/workflows/
+.github/workflows/approval-browser-verify.yml
+.github/workflows/stock-prep-browser-verify.yml
+```
+
+更正后的准确形状:仓内 `*-ci-wiring.test.mjs` 家族共 **38** 个文件,其中 **36** 个在 `plugin-tests.yml` 的无 DB `test` job 里各有(或共享)一条 `run: node --test …` 调用,另外 **2** 个(`approval-browser-ci-wiring.test.mjs`、`stock-prep-browser-ci-wiring.test.mjs`)根本不在 `plugin-tests.yml` 里,而是各自被独立的 `approval-browser-verify.yml` / `stock-prep-browser-verify.yml` 调用。「1 个守卫文件 = 1 处独立 `run:`」这句也不是严格 1:1——`t2gate-collision-mechanism-ci-wiring.test.mjs` 那一步(`.github/workflows/plugin-tests.yml:505`)把它与 `t2gate-runbook-values-free-contract.test.mjs` 两个文件合在同一条 `run: node --test a.test.mjs b.test.mjs` 里执行。
+
+**这处更正不改变 §5/§9 的实质结论**:无论准确计数是 38/36/2 还是原句声称的 45,§5 的核心断言——`grep -rl "approval-template-groups" scripts/ops/*.mjs` 零命中,即没有任何现存 `*-ci-wiring` 守卫覆盖这两个新文件——不依赖这个数字,该 grep 本身已单独给出且未受影响。「45」是伴随性的背景计数错误,不是被撤回的判定;更正它是因为**记忆**「绝对断言自扫必须机械化」要求所有全称/计数断言必须挂命令,不能靠估读。
+
+### 10.4 私有 DB 复跑(新鲜时间戳,确认未回归)
+
+```
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a_u3" pnpm exec tsx src/db/migrate.ts
+(无输出 — 迁移已是最新,幂等)
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a_u3" pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts \
+    --reporter=dot
+Test Files  2 passed (2)
+     Tests  21 passed | 2 skipped (23)
+```
+
+与 §8 记录的结果逐字段一致(21 passed | 2 skipped)——§1/§2/§4 的静态核对与 §8 的端到端复现在本次二次核验时段依然成立;同一批 `node --input-type=module` 静态核对(`isQuotedInTestExclude` / `isSuiteWiredInRealDbStep`)与 §4 的 `computePackageProvenancePinSet` 比对也已重跑,结果与 §1/§2/§4 记录的值逐字相同(未重复贴出)。
+
+### 10.5 本节结论
+
+- §6 的验收 I 结论补齐存在性正控后依然成立(§10.1)。
+- 任务书 CI 接线 #7 已在 push 前核对,13 个 required contexts、`strict=false`、`test (20.x)` 在列的前提不变(§10.2)。
+- §5/§9 的「45」计数错误已更正为 38 个守卫文件(36 个在 `plugin-tests.yml`、2 个在各自独立的 browser-verify workflow),且更正不影响「零覆盖」判定本身(§10.3)。
+- 本节新增的核对全部是**只读命令**,未修改 `vitest.config.ts` / `plugin-tests.yml` / s6a 钉,§1/§2/§4 记录的字节级证据与本次提交的 s6a 值不受影响,无需重算。
+- §9 的两条披露残留(闭世界缺口未收口、s6a 钉合并前需重算)维持不变,未被本节关闭。
