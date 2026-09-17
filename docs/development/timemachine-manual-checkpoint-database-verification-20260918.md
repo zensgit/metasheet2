@@ -34,7 +34,7 @@ size is the unchanged bootstrap, restore and claim-anchor authority branches.
 Commands, from the isolated worktree:
 
 ```sh
-NODE_ENV=test pnpm --filter @metasheet/core-backend exec tsx scripts/verify-recovery-manual-checkpoint.mts
+TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
 NODE_ENV=test pnpm --filter @metasheet/core-backend exec tsx scripts/verify-recovery-manual-source.mts
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/multitable-recovery-archive-section-checkpoint.test.ts tests/unit/multitable-recovery-archive-source-vector.test.ts tests/unit/multitable-recovery-archive-seals.test.ts tests/unit/multitable-recovery-archive-section-bootstrap.test.ts
 pnpm --filter @metasheet/core-backend exec tsc -p scripts/tsconfig.recovery-archive-acceptance.json --noEmit
@@ -94,8 +94,8 @@ After its fix and successful full DB rerun, the narrow closure review found no
 new P1/P2. All reviewer sessions are closed. This is not a whole-product final
 review or remote CI result.
 
-Remaining: required-CI wiring/remote proof
-for this new acceptance driver; lease takeover and permission-revocation tests;
+Remaining: remote exact-head proof of the new required-CI acceptance step;
+lease takeover and permission-revocation tests;
 bounded canonical capture coordinator; permission/provider revalidation;
 authenticated object receipts; publication and restore-loop acceptance; UI.
 Identity and DB sealing alone do not prove captured bytes correspond to the
@@ -148,7 +148,42 @@ catalog guard and was replaced with this legitimate expiry fixture.
 
 These tests do not prove actual owner takeover, user permission revocation,
 source coherence under concurrent edits, process restart, or runtime capture.
-The driver remains local-only until explicit required-CI wiring is completed.
+The concurrent driver passed locally; its new required-CI wiring below still
+needs an exact-head remote run before it counts as remote evidence.
+
+## Portable Required-CI Runner
+
+`scripts/ops/run-recovery-manual-checkpoint.mjs` creates an isolated cluster in
+the platform temporary directory, with a unique port and fixed synthetic DB
+owner. It accepts only the PostgreSQL binaries directory, not an existing DB
+URL/data directory. The driver validates loopback, nonstandard port, role,
+temporary path ownership, and the server's actual data directory before
+creating its unique database. It continues to sanitize migration environments.
+The runner stops the owned cluster and removes its directory after success or
+failure; ambiguous server status refuses removal.
+
+`plugin-tests.yml` invokes this runner after PostgreSQL setup, in both matrix
+versions, without conditional skipping or continue-on-error. Existing workflow
+content is byte-equivalent after removing the one added step. The static wiring
+contract is 37/37 and rejects removal/conditional disabling of this invocation.
+Only `evidenceFiles.pluginTestsWorkflow` changed in the official provenance
+recomputation. Old pin failed; refreshed pin passed with differenceCount=0.
+
+Local PostgreSQL 15 portable run passed the full driver and automatic cleanup;
+acceptance TypeScript passed. The first portable startup exposed macOS temp-path
+symlink canonicalization and missing LC_ALL; both are corrected. Its stopped
+failed-start cluster was removed separately after checking PG_VERSION/no PID.
+Sealed-export S5 was rerun with the already-installed mssql package supplied via
+temporary NODE_PATH because this worktree lacks that package's direct symlink;
+no dependency installation or package changes were made.
+
+Coordinator refute-first found no blocking issue in this bounded test-runner
+delta. A Luna read-only review did not return a terminal verdict within its
+bounded window and was closed; no external approval is claimed for this slice.
+
+The independent source-reader driver still uses its older local-only launch
+contract. This slice wires checkpoint acceptance, not that separate driver or
+the unfinished runtime manual-capture coordinator.
 
 No automatic scheduling, retention policy, cleanup, customer storage, flags,
 dispatch, staging, deployment, production, or hard-deleted-table resurrection.

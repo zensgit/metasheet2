@@ -34,6 +34,27 @@ const FILES = [
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
+function manualCheckpointContract(workflow) {
+  const step = namedStepBody(workflow, 'Run isolated manual checkpoint acceptance')
+  assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)
+  assert.match(step, /^\s+TM_TEST_PG_BIN="\$\(pg_config --bindir\)" node scripts\/ops\/run-recovery-manual-checkpoint\.mjs\s*$/m)
+}
+
+test('required plugin lane runs the owned-cluster manual checkpoint driver without skip-green', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  manualCheckpointContract(workflow)
+  assert.throws(() => manualCheckpointContract(workflow.replace(
+    'node scripts/ops/run-recovery-manual-checkpoint.mjs', 'echo checkpoint-disabled',
+  )))
+  assert.throws(() => manualCheckpointContract(workflow.replace(
+    '      - name: Run isolated manual checkpoint acceptance',
+    '      - name: Run isolated manual checkpoint acceptance\n        if: false',
+  )))
+  const runner = readFileSync(join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), 'utf8')
+  assert.match(runner, /scripts\/verify-recovery-manual-checkpoint\.mts/)
+  assert.match(runner, /assert\.equal\(code, 0,/)
+})
+
 function maskCommentsAndStrings(src) {
   let out = ''
   let i = 0

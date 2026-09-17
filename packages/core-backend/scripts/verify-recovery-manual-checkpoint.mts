@@ -2,8 +2,10 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client, Pool } from 'pg'
 import { Kysely, PostgresDialect, sql } from 'kysely'
@@ -16,18 +18,29 @@ const checkpoints = require('../src/multitable/recovery-archive-section-checkpoi
 const migration = require('../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints.ts') as typeof import('../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints')
 assert.equal(process.env.NODE_ENV, 'test', 'SYNTHETIC_TEST_MODE_REQUIRED')
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
-const connection = { host: '127.0.0.1', port: 55483, user: 'tm_manual' }
+const adminUrl = new URL(process.env.TM_MANUAL_TEST_ADMIN_URL ?? 'http://invalid')
+assert.equal(adminUrl.protocol, 'postgresql:')
+assert.equal(adminUrl.hostname, '127.0.0.1')
+assert.equal(adminUrl.username, 'tm_manual')
+assert.equal(adminUrl.pathname, '/postgres')
+assert.equal(adminUrl.password, '')
+assert.equal(adminUrl.search, '')
+assert.equal(adminUrl.hash, '')
+assert.ok(Number(adminUrl.port) >= 1024 && !['5432', '5433', '5435'].includes(adminUrl.port))
+const pgdata = await realpath(process.env.TM_MANUAL_TEST_PGDATA ?? '/invalid')
+assert.equal(basename(pgdata), 'pgdata')
+assert.match(basename(dirname(pgdata)), /^tm-manual-checkpoint-cluster-[a-zA-Z0-9]+$/)
+assert.equal(dirname(dirname(pgdata)), await realpath(tmpdir()))
+const connection = { host: '127.0.0.1', port: Number(adminUrl.port), user: 'tm_manual' }
 const admin = new Client({ ...connection, database: 'postgres', connectionTimeoutMillis: 5000 })
 const database = `tm_manual_checkpoint_${randomUUID().replaceAll('-', '')}`
-const root = await mkdtemp('/private/tmp/tm-manual-checkpoint-run-')
+const root = await mkdtemp(join(tmpdir(), 'tm-manual-checkpoint-run-'))
 let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
 try {
   await admin.connect()
-  assert.deepEqual((await admin.query('SHOW data_directory')).rows, [
-    { data_directory: '/private/tmp/tm-manual-source-pg-20260918' },
-  ])
+  assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
   assert.equal((await admin.query('SELECT current_user AS owner')).rows[0].owner, 'tm_manual')
   await admin.query(`CREATE DATABASE "${database}"`)
   created = true
@@ -35,7 +48,7 @@ try {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
     NODE_ENV: 'test', METASHEET_ENV_DIR: root, CONFIG_FILE: `${root}/config.json`,
-    DATABASE_URL: `postgresql://tm_manual@127.0.0.1:55483/${database}`,
+    DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
     SECRET_PROVIDER: 'env', JWT_SECRET: randomUUID(),
   }
   for (const phase of ['fresh', 'replay']) {
