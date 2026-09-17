@@ -5,6 +5,22 @@ import {
 
 type RelationalSection = Exclude<RecoveryArchiveDataSectionName, 'attachments_index' | 'permission_evidence'>
 export type RecoveryArchiveRelationalSource = Readonly<Record<RelationalSection, readonly unknown[]>>
+export interface RecoveryArchiveAttachmentCandidate {
+  attachmentId: string
+  recordId: string | null
+  fieldId: string | null
+  storageFileId: string
+  storagePath: string
+  storageProvider: string
+  sizeBytes: string
+  mediaType: string
+  deleted: boolean
+  blobPurged: boolean
+}
+export interface RecoveryArchiveCaptureSource {
+  sections: RecoveryArchiveRelationalSource
+  attachmentCandidates: readonly RecoveryArchiveAttachmentCandidate[]
+}
 export type RecoveryArchiveSourceQuery = (
   sql: string, params: unknown[],
 ) => Promise<{ rows: unknown[] }>
@@ -73,7 +89,16 @@ SELECT jsonb_build_object(
     'filter_info', v.filter_info, 'sort_info', v.sort_info,
     'group_info', v.group_info, 'hidden_field_ids', v.hidden_field_ids, 'config', v.config))
     FROM public.meta_views v JOIN scope s ON s.id = v.sheet_id), '[]'::jsonb)
-) AS sections FROM scope`
+) AS sections,
+COALESCE((SELECT jsonb_agg(jsonb_build_object(
+  'attachmentId', a.id, 'recordId', a.record_id, 'fieldId', a.field_id,
+  'storageFileId', a.storage_file_id, 'storagePath', a.storage_path,
+  'storageProvider', a.storage_provider, 'sizeBytes', a.size::text,
+  'mediaType', a.mime_type, 'deleted', a.deleted_at IS NOT NULL,
+  'blobPurged', a.blob_purged_at IS NOT NULL))
+  FROM public.multitable_attachments a JOIN scope s ON s.id = a.sheet_id), '[]'::jsonb)
+  AS attachment_candidates
+FROM scope`
 
 /** Internal source projection only: caller must supply freshly authorized scope.
  * This is not an archive, attachment proof, permission proof or publication token.
@@ -82,13 +107,23 @@ export async function readRecoveryArchiveRelationalSource(
   query: RecoveryArchiveSourceQuery,
   scope: RecoveryArchiveSourceScope,
 ): Promise<RecoveryArchiveRelationalSource> {
+  return (await readRecoveryArchiveCaptureSource(query, scope)).sections
+}
+
+/** Internal metadata only. Candidates are not authenticated attachment receipts,
+ * immutable object versions or public DTOs; storage paths must never be exposed.
+ */
+export async function readRecoveryArchiveCaptureSource(
+  query: RecoveryArchiveSourceQuery,
+  scope: RecoveryArchiveSourceScope,
+): Promise<RecoveryArchiveCaptureSource> {
   try {
     for (const value of [scope.sheetId, scope.baseId, scope.workspaceId]) {
       if (typeof value !== 'string' || !value || value.trim() !== value) throw new Error()
     }
     const result = await query(SOURCE_SQL, [scope.sheetId, scope.baseId, scope.workspaceId])
     if (result.rows.length !== 1) throw new Error()
-    const raw = result.rows[0] as { sections?: unknown }
+    const raw = result.rows[0] as { sections?: unknown; attachment_candidates?: unknown }
     if (!raw || typeof raw.sections !== 'object' || raw.sections === null || Array.isArray(raw.sections)) {
       throw new Error()
     }
@@ -108,9 +143,39 @@ export async function readRecoveryArchiveRelationalSource(
     for (const sequence of projected.auto_number as { field_id: string }[]) {
       if (!fields.has(sequence.field_id)) throw new Error()
     }
-    return projected
+    const records = new Set((projected.records as { record_id: string }[]).map((record) => record.record_id))
+    const candidates = admitAttachmentCandidates(raw.attachment_candidates)
+    for (const candidate of candidates) {
+      if (candidate.fieldId !== null && !fields.has(candidate.fieldId)) throw new Error()
+      if (candidate.recordId !== null && !records.has(candidate.recordId)) throw new Error()
+    }
+    return { sections: projected, attachmentCandidates: candidates }
   } catch {
     // SQL/provider errors may contain source identifiers and must not escape.
     throw new RecoveryArchiveRelationalSourceError()
   }
+}
+
+function admitAttachmentCandidates(value: unknown): RecoveryArchiveAttachmentCandidate[] {
+  if (!Array.isArray(value)) throw new Error()
+  const textKeys = ['attachmentId', 'storageFileId', 'storagePath', 'storageProvider', 'sizeBytes', 'mediaType'] as const
+  const nullableKeys = ['recordId', 'fieldId'] as const
+  const keys = [...textKeys, ...nullableKeys, 'deleted', 'blobPurged']
+  const seen = new Set<string>()
+  return value.map((row: unknown) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error()
+    const input = row as Record<string, unknown>
+    if (Object.keys(input).length !== keys.length || keys.some((key) => !Object.hasOwn(input, key))) throw new Error()
+    for (const key of textKeys) {
+      if (typeof input[key] !== 'string' || !input[key]) throw new Error()
+    }
+    for (const key of nullableKeys) {
+      if (input[key] !== null && (typeof input[key] !== 'string' || !input[key])) throw new Error()
+    }
+    if (!/^(0|[1-9][0-9]*)$/.test(input.sizeBytes as string)
+      || typeof input.deleted !== 'boolean' || typeof input.blobPurged !== 'boolean'
+      || seen.has(input.attachmentId as string)) throw new Error()
+    seen.add(input.attachmentId as string)
+    return { ...input } as unknown as RecoveryArchiveAttachmentCandidate
+  }).sort((left, right) => left.attachmentId < right.attachmentId ? -1 : left.attachmentId > right.attachmentId ? 1 : 0)
 }

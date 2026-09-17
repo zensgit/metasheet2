@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
 
 const require = createRequire(import.meta.url)
-const { readRecoveryArchiveRelationalSource } = require('../src/multitable/recovery-archive-relational-source.ts') as typeof import('../src/multitable/recovery-archive-relational-source')
+const { readRecoveryArchiveRelationalSource, readRecoveryArchiveCaptureSource } = require('../src/multitable/recovery-archive-relational-source.ts') as typeof import('../src/multitable/recovery-archive-relational-source')
 assert.equal(process.env.NODE_ENV, 'test', 'SYNTHETIC_TEST_MODE_REQUIRED')
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
 const connection = { host: '127.0.0.1', port: 55483, user: 'tm_manual' }
@@ -56,11 +56,21 @@ try {
       VALUES ('00000000-0000-0000-0000-000000000001','s','gone','r','"old"','field_delete','2026-09-17T12:00:00.123Z');
     INSERT INTO meta_link_tombstones(id,sheet_id,field_id,record_id,foreign_record_id,reason,created_at)
       VALUES ('00000000-0000-0000-0000-000000000002','s','gone','r','target','field_delete','2026-09-17T12:00:00.123Z');
+    INSERT INTO multitable_attachments(id,sheet_id,record_id,field_id,storage_file_id,filename,mime_type,size,storage_path)
+      VALUES ('a','s','r','f','object-a','synthetic','application/octet-stream',9007199254740993,'synthetic/a'),
+             ('other-a','empty',NULL,NULL,'object-other','synthetic','application/octet-stream',1,'synthetic/other'),
+             ('unbound','s',NULL,NULL,'object-unbound','synthetic','application/octet-stream',0,'synthetic/unbound');
+    UPDATE multitable_attachments SET deleted_at=now(),blob_purged_at=now() WHERE id='unbound';
   `)
   const query = (text: string, params: unknown[]) => reader!.query(text, params)
   const scope = { sheetId: 's', baseId: 'b', workspaceId: 'w' }
   const read = () => readRecoveryArchiveRelationalSource(query, scope)
   const first = await read()
+  const capture = await readRecoveryArchiveCaptureSource(query, scope)
+  assert.deepEqual(capture.attachmentCandidates.map((a) => a.attachmentId), ['a', 'unbound'])
+  assert.equal(capture.attachmentCandidates[0].sizeBytes, '9007199254740993')
+  assert.equal(capture.attachmentCandidates[1].deleted, true)
+  assert.equal(capture.attachmentCandidates[1].blobPurged, true)
   assert.equal(Object.keys(first).length, 7)
   assert.ok(Object.values(first).every((rows) => rows.length === 1))
   assert.deepEqual(JSON.parse(JSON.stringify(first.auto_number)), [{ field_id: 'f', next_value: '9007199254740993' }])
@@ -76,12 +86,16 @@ try {
   await writer.query('BEGIN')
   await writer.query(`UPDATE meta_fields SET name='After' WHERE id='f'`)
   await writer.query(`UPDATE meta_records SET data='{"f":"after"}',version=8 WHERE id='r'`)
+  await writer.query(`UPDATE multitable_attachments SET size=2 WHERE id='a'`)
   await reader.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   assert.deepEqual(await read(), first)
+  assert.deepEqual(await readRecoveryArchiveCaptureSource(query, scope), capture)
   await writer.query('COMMIT')
   assert.deepEqual(await read(), first)
+  assert.deepEqual(await readRecoveryArchiveCaptureSource(query, scope), capture)
   await reader.query('COMMIT')
   const after = await read()
+  assert.equal((await readRecoveryArchiveCaptureSource(query, scope)).attachmentCandidates[0].sizeBytes, '2')
   assert.equal((after.schema[0] as { name: string }).name, 'After')
   assert.deepEqual(JSON.parse(JSON.stringify(after.records)), [{ record_id: 'r', exists: true, version: 8, data: { f: 'after' } }])
   await reader.query(`UPDATE meta_bases SET deleted_at=now() WHERE id='b'`)

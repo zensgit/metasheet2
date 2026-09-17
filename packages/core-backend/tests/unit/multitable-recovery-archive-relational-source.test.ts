@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { readRecoveryArchiveRelationalSource } from '../../src/multitable/recovery-archive-relational-source'
+import { readRecoveryArchiveCaptureSource, readRecoveryArchiveRelationalSource } from '../../src/multitable/recovery-archive-relational-source'
 
 const scope = { workspaceId: 'workspace', baseId: 'base', sheetId: 'sheet' }
 const code = 'RECOVERY_ARCHIVE_RELATIONAL_SOURCE_UNAVAILABLE'
@@ -14,7 +14,7 @@ function sections() {
 describe('manual archive relational source projection', () => {
   it('uses one statement and server scope, without fabricating attachment/permission evidence', async () => {
     const input = sections()
-    const query = vi.fn().mockResolvedValue({ rows: [{ sections: input }] })
+    const query = vi.fn().mockResolvedValue({ rows: [{ sections: input, attachment_candidates: [] }] })
     const result = await readRecoveryArchiveRelationalSource(query, scope)
     expect(query).toHaveBeenCalledTimes(1)
     expect(query.mock.calls[0][1]).toEqual(['sheet', 'base', 'workspace'])
@@ -30,7 +30,7 @@ describe('manual archive relational source projection', () => {
   it('accepts a proven empty live scope, not a missing scope', async () => {
     const empty = Object.fromEntries(Object.keys(sections()).map((key) => [key, []]))
     await expect(readRecoveryArchiveRelationalSource(
-      vi.fn().mockResolvedValue({ rows: [{ sections: empty }] }), scope,
+      vi.fn().mockResolvedValue({ rows: [{ sections: empty, attachment_candidates: [] }] }), scope,
     )).resolves.toEqual(empty)
     await expect(readRecoveryArchiveRelationalSource(
       vi.fn().mockResolvedValue({ rows: [] }), scope,
@@ -41,7 +41,7 @@ describe('manual archive relational source projection', () => {
     const partial: Record<string, unknown> = sections()
     delete partial[section]
     await expect(readRecoveryArchiveRelationalSource(
-      vi.fn().mockResolvedValue({ rows: [{ sections: partial }] }), scope,
+      vi.fn().mockResolvedValue({ rows: [{ sections: partial, attachment_candidates: [] }] }), scope,
     )).rejects.toMatchObject({ code })
   })
 
@@ -53,7 +53,7 @@ describe('manual archive relational source projection', () => {
       { ...sections(), auto_number: [{ field_id: 'f', next_value: 2 }] },
     ]) {
       await expect(readRecoveryArchiveRelationalSource(
-        vi.fn().mockResolvedValue({ rows: [{ sections: malformed }] }), scope,
+        vi.fn().mockResolvedValue({ rows: [{ sections: malformed, attachment_candidates: [] }] }), scope,
       )).rejects.toMatchObject({ code })
     }
   })
@@ -64,7 +64,7 @@ describe('manual archive relational source projection', () => {
       { ...sections(), auto_number: [{ field_id: 'other', next_value: '2' }] },
     ]) {
       await expect(readRecoveryArchiveRelationalSource(
-        vi.fn().mockResolvedValue({ rows: [{ sections: malformed }] }), scope,
+        vi.fn().mockResolvedValue({ rows: [{ sections: malformed, attachment_candidates: [] }] }), scope,
       )).rejects.toMatchObject({ code })
     }
   })
@@ -75,5 +75,36 @@ describe('manual archive relational source projection', () => {
       .rejects.toMatchObject({ code })
     expect(query).not.toHaveBeenCalled()
     await expect(readRecoveryArchiveRelationalSource(query, scope)).rejects.toMatchObject({ message: code })
+  })
+
+  const attachment = {
+    attachmentId: 'a', recordId: 'r', fieldId: 'f', storageFileId: 'object',
+    storagePath: 'internal-only', storageProvider: 'local', sizeBytes: '9007199254740993',
+    mediaType: 'application/octet-stream', deleted: false, blobPurged: false,
+  }
+  it('captures all attachment states in the same statement without asserting object verification', async () => {
+    const candidate = { ...attachment }
+    const query = vi.fn().mockResolvedValue({ rows: [{ sections: sections(), attachment_candidates: [
+      { ...attachment, attachmentId: 'z', recordId: null, fieldId: null, deleted: true, blobPurged: true }, candidate,
+    ] }] })
+    const result = await readRecoveryArchiveCaptureSource(query, scope)
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(query.mock.calls[0][0]).toMatch(/FROM public\.multitable_attachments a JOIN scope s ON s\.id = a\.sheet_id\), '\[\]'::jsonb\)/)
+    expect(result.attachmentCandidates).toEqual([attachment, { ...attachment, attachmentId: 'z', recordId: null, fieldId: null, deleted: true, blobPurged: true }])
+    candidate.storagePath = 'changed'
+    expect(result.attachmentCandidates[0].storagePath).toBe('internal-only')
+    expect(Object.keys(result.sections)).not.toContain('attachments_index')
+  })
+  it.each([
+    undefined, null, {}, [attachment, attachment],
+    [{ ...attachment, sizeBytes: 2 }], [{ ...attachment, sizeBytes: '-1' }],
+    [{ ...attachment, sizeBytes: '01' }], [{ ...attachment, recordId: 'other' }],
+    [{ ...attachment, fieldId: 'other' }], [{ ...attachment, deleted: 'false' }],
+    [{ ...attachment, blobPurged: null }], [{ ...attachment, storagePath: '' }],
+    [{ ...attachment, immutableVersion: 'fabricated' }],
+  ])('refuses missing or malformed attachment inventory %#', async (candidates) => {
+    await expect(readRecoveryArchiveCaptureSource(vi.fn().mockResolvedValue({ rows: [
+      { sections: sections(), attachment_candidates: candidates },
+    ] }), scope)).rejects.toMatchObject({ code, message: code })
   })
 })
