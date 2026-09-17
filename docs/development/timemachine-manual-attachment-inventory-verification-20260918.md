@@ -47,3 +47,24 @@ This is local synthetic PostgreSQL 15 evidence, not a required-CI attachment
 storage round trip. Unit SQL-census assertions cover the inventory query in the
 existing backend unit lane. Public manual capture and repeat-capture source
 seals remain incomplete. No flags, customer storage, dispatch or deployment.
+
+## Reference Completeness Follow-Up
+
+Parent `d443fe2291bccede0bfedd068c0d083a94aa5cff` captured metadata but did
+not yet reconcile record attachment-cell references against that inventory.
+The accompanying change refuses a referenced ID missing from the selected
+table, a deleted/purged referenced object, or a non-null binding to a different
+record/field. Malformed attachment values are refused instead of inheriting the
+live summary reader's silent omission. Supported legacy ID formats are resolved
+without rewriting archived record data; empty JSON-array strings are handled.
+Unreferenced deleted/unbound candidates remain in the inventory.
+
+- Updated unit plus canonical-row neighbor: 56/56 PASS.
+- Bypass the reference-admission call: exactly 10 new negatives RED, 32 source
+  positives/other cases remain green; restoration returns 56/56.
+- Full migrated PG15 acceptance now uses a real attachment field/reference;
+  a missing reference and a referenced purged blob are rejected. Fresh migration
+  plus second no-op migrateToLatest and the two-connection checks PASS.
+- Acceptance typecheck, source lint and diff-check PASS.
+- This follow-up has local self-review and mutation evidence. The earlier Terra
+  verdict applies to its prior inventory delta, not this new reference guard.

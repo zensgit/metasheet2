@@ -107,6 +107,37 @@ RPO/RTO, NAS durability or independent backup SLA is implied.
 
 ## Execution Order
 
+### Repeat-Capture Implementation Direction (Not Yet Implemented)
+
+The source audit and bounded Sol architecture review on `d443fe229` identify
+`section_checkpoint` / `checkpoint_snapshot` as the intended repeat-capture
+extension. Ordinary events only prove event counts/endpoints, not a complete
+section digest; the immutable per-sheet bootstrap marker remains genesis proof.
+Do not delete that marker or reuse an old bootstrap root for new content.
+
+Keep first capture unchanged. A later generation requires existing genesis and
+nine fresh payload-bound section checkpoint operations plus a fresh snapshot
+parent. Reuse immutable generation reservations rather than introducing another
+checkpoint-marker ledger. Each checkpoint has exactly one full-section revision
+with exact row count and canonical source hash. The generic ordinary-event
+sealer must remain unable to mint checkpoint operations.
+
+A new forward migration must extend tightly paired operation/action/member and
+reservation constraints, endpoint/member guards and generation claim anchors;
+do not rewrite deployed migrations. Preserve bootstrap-only source-vector v1;
+use an explicit new domain/version for checkpoint vectors. Add real-DB drift,
+forged-member, stale-source, partial-retry and rollback negatives before exposing
+the new callable path. A green existing recovery-schema-drift workflow alone
+does not prove these causality objects.
+
+The capture transaction must bind the exact canonical content and source fence.
+No unbounded object IO inside it. Any preparation outside that transaction needs
+a proven drift token and revalidation; crash recovery must not silently recapture
+different bytes under an already-sealed generation. Attachment pins and fresh
+permission evidence participate in the same complete nine-section proof.
+Publication still independently verifies receipts, coverage, authority and owner
+fence. Sol's result is architecture input, not implemented/DB-tested approval.
+
 One coordinator owns writes. First trace and implement consistent source capture
 and reuse existing publication authority; then bind the command to existing
 recovery authorization and the table UI. Review high-risk persistence/permission

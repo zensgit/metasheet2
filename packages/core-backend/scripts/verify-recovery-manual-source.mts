@@ -47,8 +47,8 @@ try {
   await reader.query(`
     INSERT INTO meta_bases(id,name,workspace_id) VALUES ('b','Synthetic','w');
     INSERT INTO meta_sheets(id,name,base_id) VALUES ('s','Synthetic','b'),('empty','Empty','b');
-    INSERT INTO meta_fields(id,sheet_id,name,type,property,"order") VALUES ('f','s','Before','string','{}',1);
-    INSERT INTO meta_records(id,sheet_id,data,version) VALUES ('r','s','{"f":"before"}',7);
+    INSERT INTO meta_fields(id,sheet_id,name,type,property,"order") VALUES ('f','s','Before','attachment','{}',1);
+    INSERT INTO meta_records(id,sheet_id,data,version) VALUES ('r','s','{"f":["a"]}',7);
     INSERT INTO meta_links(id,field_id,record_id,foreign_record_id) VALUES ('l','f','r','target');
     INSERT INTO meta_field_auto_number_sequences(field_id,sheet_id,next_value) VALUES ('f','s',9007199254740993);
     INSERT INTO meta_views(id,sheet_id,name,type) VALUES ('v','s','Grid','grid');
@@ -85,7 +85,7 @@ try {
   // a pinned transaction remains coherent after commit; a fresh read advances.
   await writer.query('BEGIN')
   await writer.query(`UPDATE meta_fields SET name='After' WHERE id='f'`)
-  await writer.query(`UPDATE meta_records SET data='{"f":"after"}',version=8 WHERE id='r'`)
+  await writer.query(`UPDATE meta_records SET version=8 WHERE id='r'`)
   await writer.query(`UPDATE multitable_attachments SET size=2 WHERE id='a'`)
   await reader.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   assert.deepEqual(await read(), first)
@@ -97,7 +97,13 @@ try {
   const after = await read()
   assert.equal((await readRecoveryArchiveCaptureSource(query, scope)).attachmentCandidates[0].sizeBytes, '2')
   assert.equal((after.schema[0] as { name: string }).name, 'After')
-  assert.deepEqual(JSON.parse(JSON.stringify(after.records)), [{ record_id: 'r', exists: true, version: 8, data: { f: 'after' } }])
+  assert.deepEqual(JSON.parse(JSON.stringify(after.records)), [{ record_id: 'r', exists: true, version: 8, data: { f: ['a'] } }])
+  await reader.query(`UPDATE meta_records SET data='{"f":["missing"]}' WHERE id='r'`)
+  await assert.rejects(read(), unavailable)
+  await reader.query(`UPDATE meta_records SET data='{"f":["a"]}' WHERE id='r'`)
+  await reader.query(`UPDATE multitable_attachments SET blob_purged_at=now() WHERE id='a'`)
+  await assert.rejects(read(), unavailable)
+  await reader.query(`UPDATE multitable_attachments SET blob_purged_at=NULL WHERE id='a'`)
   await reader.query(`UPDATE meta_bases SET deleted_at=now() WHERE id='b'`)
   await assert.rejects(read(), unavailable)
   await reader.query(`UPDATE meta_bases SET deleted_at=NULL WHERE id='b'`)

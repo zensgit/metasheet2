@@ -107,4 +107,41 @@ describe('manual archive relational source projection', () => {
       { sections: sections(), attachment_candidates: candidates },
     ] }), scope)).rejects.toMatchObject({ code, message: code })
   })
+
+  function attachmentSections(value: unknown) {
+    return { ...sections(),
+      schema: [{ ...sections().schema[0], type: 'attachment' }],
+      records: [{ record_id: 'r', exists: true, version: 1, data: { f: value } }],
+    }
+  }
+  it.each([['a'], 'a', '["a"]', '[]', null, []])('keeps supported attachment references without rewriting data %#', async (value) => {
+    const source = attachmentSections(value)
+    const result = await readRecoveryArchiveCaptureSource(vi.fn().mockResolvedValue({ rows: [
+      { sections: source, attachment_candidates: [attachment] },
+    ] }), scope)
+    expect(result.sections).toEqual(source)
+  })
+  it.each([
+    { value: ['missing'], candidates: [attachment] },
+    { value: ['a'], candidates: [] },
+    { value: ['a'], candidates: [{ ...attachment, deleted: true }] },
+    { value: ['a'], candidates: [{ ...attachment, blobPurged: true }] },
+    { value: { id: 'a' }, candidates: [attachment] },
+    { value: ['a', {}], candidates: [attachment] },
+    { value: '["a",{}]', candidates: [attachment] },
+    { value: '["a",', candidates: [attachment] },
+  ])('refuses silently lost references %#', async ({ value, candidates }) => {
+    await expect(readRecoveryArchiveCaptureSource(vi.fn().mockResolvedValue({ rows: [
+      { sections: attachmentSections(value), attachment_candidates: candidates },
+    ] }), scope)).rejects.toMatchObject({ code, message: code })
+  })
+  it.each(['record', 'field'])('refuses valid but different %s binding', async (kind) => {
+    const source = attachmentSections(['a'])
+    source.schema.push({ ...source.schema[0], field_id: 'other-field' })
+    source.records.push({ record_id: 'other-record', exists: true, version: 1, data: { f: null } })
+    const candidate = { ...attachment, ...(kind === 'record' ? { recordId: 'other-record' } : { fieldId: 'other-field' }) }
+    await expect(readRecoveryArchiveCaptureSource(vi.fn().mockResolvedValue({ rows: [
+      { sections: source, attachment_candidates: [candidate] },
+    ] }), scope)).rejects.toMatchObject({ code })
+  })
 })

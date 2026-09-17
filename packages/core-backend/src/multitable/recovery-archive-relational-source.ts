@@ -2,6 +2,7 @@ import {
   buildRecoveryArchiveSectionRows,
   type RecoveryArchiveDataSectionName,
 } from './recovery-archive-section-rows'
+import { normalizeAttachmentIds } from './attachment-service'
 
 type RelationalSection = Exclude<RecoveryArchiveDataSectionName, 'attachments_index' | 'permission_evidence'>
 export type RecoveryArchiveRelationalSource = Readonly<Record<RelationalSection, readonly unknown[]>>
@@ -149,10 +150,41 @@ export async function readRecoveryArchiveCaptureSource(
       if (candidate.fieldId !== null && !fields.has(candidate.fieldId)) throw new Error()
       if (candidate.recordId !== null && !records.has(candidate.recordId)) throw new Error()
     }
+    assertReferencedAttachments(projected, candidates)
     return { sections: projected, attachmentCandidates: candidates }
   } catch {
     // SQL/provider errors may contain source identifiers and must not escape.
     throw new RecoveryArchiveRelationalSourceError()
+  }
+}
+
+function assertReferencedAttachments(
+  sections: RecoveryArchiveRelationalSource,
+  candidates: readonly RecoveryArchiveAttachmentCandidate[],
+): void {
+  const fields = (sections.schema as { field_id: string; type: string }[])
+    .filter((field) => field.type === 'attachment')
+  const byId = new Map(candidates.map((candidate) => [candidate.attachmentId, candidate]))
+  for (const record of sections.records as { record_id: string; data: Record<string, unknown> }[]) {
+    for (const field of fields) {
+      let value = record.data[field.field_id]
+      // Reuse the live reader's legacy ID formats, but do not inherit its
+      // silent dropping of malformed array elements or object-shaped values.
+      const scalar = (item: unknown) => typeof item === 'string'
+        || (typeof item === 'number' && Number.isFinite(item))
+      if (typeof value === 'string' && value.trim().startsWith('[')) {
+        value = JSON.parse(value)
+        if (!Array.isArray(value)) throw new Error()
+      }
+      if (value !== null && value !== undefined
+        && !(Array.isArray(value) ? value.every(scalar) : scalar(value))) throw new Error()
+      for (const id of normalizeAttachmentIds(value)) {
+        const candidate = byId.get(id)
+        if (!candidate || candidate.deleted || candidate.blobPurged
+          || (candidate.recordId !== null && candidate.recordId !== record.record_id)
+          || (candidate.fieldId !== null && candidate.fieldId !== field.field_id)) throw new Error()
+      }
+    }
   }
 }
 
