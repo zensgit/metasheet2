@@ -12,8 +12,18 @@
  * in §5's own table (its 正控 column is `—`: a recorded fact, not a mutation-tested gate) and is
  * discharged by a `git diff --quiet` command recorded in
  * `docs/development/todo-center-phase1-verification-20260918.md`, not by test content in this
- * file. Judges A/B/C/C'/D remain deferred (see the fixture-plumbing docblock below for the S9
- * note).
+ * file. Judge C (list dedup, list/count arm-set parity) is now DISCHARGED by the `describe('Judge
+ * C — ...')` block below — observation point `GET /api/todo/items` per §5 row C's own wording, the
+ * first test content ever to exercise `routes/todo.ts` (confirmed zero prior coverage via `grep -rn
+ * "api/todo" packages/core-backend/tests apps/web`). Both of row C's named mutations were run for
+ * real (cp backup → edit → red → cp restore → `cmp` exit 0, ledger in the verification doc): dropping
+ * `DISTINCT` from `matching_instances` reddens ONLY the ⑪ dedup test (18 A0 count tests + the ⑥
+ * arm-parity test stay green); forking the row query's assignee-match condition to drop the
+ * `source_queue` arm (an artificial single-call-site fork — `approvalPendingAssigneeMatchCondition`
+ * is otherwise shared byte-for-byte between count and list, so the drift the lock names is
+ * unreachable without deliberately breaking that sharing) reddens ONLY the ⑥ arm-parity test,
+ * leaving ⑥'s own A0 count assertion (and everything else) green. Judges A/B/C'/D remain deferred
+ * (see the fixture-plumbing docblock below for the S9 note).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -416,6 +426,33 @@ async function fetchPendingCount(
     headers: { Authorization: `Bearer ${token}` },
   })
   const body = (await response.json()) as PendingCountResponse & { error?: { code: string } }
+  return { status: response.status, body }
+}
+
+interface TodoItem {
+  source: string
+  id: string
+  title: string
+  href: string
+  updatedAt: string
+  actionable?: boolean
+}
+
+interface TodoItemsResponse {
+  items: TodoItem[]
+  sources: Record<string, 'ok' | 'unavailable'>
+}
+
+/** Judging criterion C's observation point (design-lock §5 row C): `GET /api/todo/items`, the
+ *  aggregated list `routes/todo.ts` serves off `pendingSourceRegistry` — NOT `/pending-count`
+ *  itself. Same auth header shape as `fetchPendingCount`; no `sourceSystem` query param exists on
+ *  this endpoint (the center aggregates across all source systems the same way the badge's
+ *  `?sourceSystem=all` does — `approval-pending-source.ts`'s own docblock). */
+async function fetchTodoItems(baseUrl: string, token: string): Promise<{ status: number; body: TodoItemsResponse }> {
+  const response = await fetch(`${baseUrl}/api/todo/items`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const body = (await response.json()) as TodoItemsResponse
   return { status: response.status, body }
 }
 
@@ -1116,6 +1153,53 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(body).toHaveProperty('count')
       expect(body.count).toBe(1)
       expect(body.unreadCount).toBe(1)
+    })
+  })
+
+  // Judging criterion C (design-lock §5 row C): "列表按实例去重,与计数口径对齐" — the badge's
+  // `COUNT(DISTINCT a.instance_id)` and the todo-center's row-version query (`matching_instances AS
+  // (SELECT DISTINCT a.instance_id ...)`, `approval-pending-query.ts`) must walk the SAME qualifying
+  // population, one row per instance. Observation point is `GET /api/todo/items` per the lock's own
+  // wording, not `/pending-count` — this is the FIRST test content ever to exercise that route (see
+  // this file's own commit history: `todoRouter()` has had zero test coverage until this step,
+  // confirmed via `grep -rn "api/todo" packages/core-backend/tests apps/web` returning nothing
+  // before this commit). Lock line 96's caveat applies: "独立请求之间不承诺跨时刻严格相等...相等断
+  // 言只在同一测试事务/同一快照内做" — both assertions below fetch back-to-back with no intervening
+  // write, inside one `it`, not across two.
+  describe('Judge C — list dedup, list/count arm-set parity (observation point: GET /api/todo/items)', () => {
+    it('class ⑪\'s two-simultaneously-active-seat instance appears EXACTLY ONCE in /api/todo/items (list dedups by instance; mutation record below)', async () => {
+      const token = await devToken(baseUrl, v11.id)
+      const { status, body } = await fetchTodoItems(baseUrl, token)
+      expect(status).toBe(200)
+      expect(body.sources.approval).toBe('ok')
+      const matches = body.items.filter((item) => item.id === instance11.id)
+      // Positive control for the dedup mutation recorded in
+      // docs/development/todo-center-phase1-verification-20260918.md: dropping the `DISTINCT` from
+      // `matching_instances`'s `SELECT DISTINCT a.instance_id` turns this into `toHaveLength(2)`
+      // (one row per active seat) while leaving every A0 count assertion above untouched (the badge
+      // query never reads `matching_instances`) — verified there, not re-run on every CI pass.
+      expect(matches).toHaveLength(1)
+    })
+
+    it('class ⑥\'s source_queue-arm instance is present in /api/todo/items AND /pending-count reports count 1, asserted in the same snapshot (list and count share one arm set)', async () => {
+      const token = await devToken(baseUrl, v6.id)
+      // Back-to-back, no write between: this is the "same snapshot" the lock's line 96 caveat
+      // requires for a list/count equality assertion (two independent HTTP requests, not one).
+      const itemsResult = await fetchTodoItems(baseUrl, token)
+      const countResult = await fetchPendingCount(baseUrl, token, 'all')
+      expect(itemsResult.status).toBe(200)
+      expect(countResult.status).toBe(200)
+      const matches = itemsResult.body.items.filter((item) => item.id === instance6.id)
+      // Positive control for the arm-divergence mutation recorded in the verification doc: forking
+      // the row query's assignee-match condition to drop the `source_queue` arm (while the count
+      // query keeps all three) turns `matches` empty while `countResult.body.count` stays 1 — the
+      // exact "count 保留 source_queue 臂而列表漏掉" drift design-lock row C names. The shared
+      // `approvalPendingAssigneeMatchCondition` helper makes that drift unreachable WITHOUT an
+      // artificial single-call-site fork (there is no second copy of the three-arm text to
+      // accidentally diverge) — see the verification doc for why the probe required forking one
+      // call site rather than flipping an existing literal.
+      expect(matches).toHaveLength(1)
+      expect(countResult.body.count).toBe(1)
     })
   })
 })
