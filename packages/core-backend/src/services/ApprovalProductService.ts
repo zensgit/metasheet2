@@ -10336,6 +10336,33 @@ export class ApprovalProductService {
         )
         // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the revoke transition above.
         await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        // Lock §14.2 判据 III (A4) — a cancel-round instance's own revoke terminates its round
+        // row in the SAME transaction as the instance transition above (same `client`, one
+        // `COMMIT` below). `engine_instance_id` (not `document_id`) is this instance's own id —
+        // the round row it drives, per the migration header on `approval_rounds`. WI-4 writes the
+        // instance and its round row together, so exactly one `pending` round must exist here —
+        // this is NOT a re-entrancy guard (a second revoke on the same instance can never reach
+        // this branch: `APPROVAL_TERMINAL_STATUSES` above 409s first, and the instance is held
+        // FOR UPDATE with a version check). `rowCount !== 1` means the invariant is already
+        // broken (dangling/duplicate round row) and must fail closed rather than silently commit
+        // an orphaned `pending` round that would permanently block re-issuing one for this
+        // document (§5 I3, `uq_approval_rounds_pending_document`). The lock gives no error-code
+        // contract for this branch (only WI-16's create-time check has the same gap) — this code
+        // is an implementer choice, flagged for owner/gate registration, not a lock edit.
+        if (isCancelRoundInstance(instance)) {
+          const roundResult = await client.query(
+            `UPDATE approval_rounds SET outcome = 'withdrawn', ended_at = now()
+             WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [id],
+          )
+          if (roundResult.rowCount !== 1) {
+            throw new ServiceError(
+              'Cancel-round instance has no single matching pending round to terminate',
+              409,
+              'CANCEL_ROUND_INVARIANT_VIOLATION',
+            )
+          }
+        }
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
@@ -10800,6 +10827,29 @@ export class ApprovalProductService {
         )
         // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the reject transition above.
         await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        // Lock §14.2 判据 III (A7) — same mechanism, same fail-closed rationale, and same
+        // implementer-erratum error-code caveat as the revoke branch above: a cancel-round
+        // instance's own reject terminates its round row (`engine_instance_id = id`) in the SAME
+        // transaction as the instance transition, and `rowCount !== 1` means the one-round-per-
+        // instance invariant (WI-4) is already broken, not that this is a re-entrant call (a
+        // second reject can never reach this branch — `instance.status !== 'pending'` 409s first
+        // below, and the instance is held FOR UPDATE with a version check). The comment-required
+        // front gate above (§1.3, `REJECT_COMMENT_REQUIRED`) is unchanged — this only appends a
+        // write.
+        if (isCancelRoundInstance(instance)) {
+          const roundResult = await client.query(
+            `UPDATE approval_rounds SET outcome = 'rejected', ended_at = now()
+             WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [id],
+          )
+          if (roundResult.rowCount !== 1) {
+            throw new ServiceError(
+              'Cancel-round instance has no single matching pending round to terminate',
+              409,
+              'CANCEL_ROUND_INVARIANT_VIOLATION',
+            )
+          }
+        }
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
