@@ -1,7 +1,10 @@
 /**
  * ============================================================================================
- * PRECONDITION UNMET (2026-09-17) — this migration is NOT safe to land as-is. Read before
- * touching this file or removing this block. BLOCKED, not a defect in the code below.
+ * PRECONDITION — RESOLVED (2026-09-17, see the dated addendum after the follow-up section below
+ * for the closing full-suite-green evidence). Originally opened as "PRECONDITION UNMET": this
+ * migration was NOT safe to land as-is until the fixture-pairing gap this header documents was
+ * closed and re-verified. Kept below in full for provenance — read it before touching this file;
+ * the risk it describes was real (see the follow-up section), not a defect in the DDL itself.
  * ============================================================================================
  *
  * Lock v5.9's own 互斥性说明 (lock:377, the paragraph immediately after the §14.3 table) names
@@ -77,8 +80,10 @@
  * it requires EITHER a follow-up PR touching the listed test files (add
  * `approval_workflow_key`/`workflow_key` pairing to each raw-SQL fixture; case (b) additionally
  * needs `approval_instances.workflow_key` set) OR an owner ruling that changes the DDL itself.
- * Do not remove this block until that follow-up has landed and the full attendance real-DB
- * suite has been re-run green with this migration applied.
+ * That follow-up landed and the full attendance real-DB suite has since been re-run green with
+ * this migration applied — see the dated addendum after the follow-up section below. This block
+ * is kept (not deleted) for provenance rather than removed outright, per the "mark resolution at
+ * the claim, don't void the section" convention.
  *
  * ---- 2026-09-17 follow-up (fixture pairing applied to 7 of the 9; two are FALSE POSITIVES) ----
  *
@@ -129,20 +134,57 @@
  *
  * Verified GREEN on a freshly created+migrated private DB (`createdb metasheet2_lock_c_v1 && tsx
  * src/db/migrate.ts`), each of the 9 named files run individually with `vitest --config
- * vitest.integration.config.ts run <file> --reporter=dot`. Still open before this block can be
- * removed: (1) the full ~124-file invocation this comment's top section names (plugin-tests.yml's
- * "Run attendance integration tests" step) has NOT yet been run end-to-end in one pass — running
- * these 9 files together (still on a virgin DB) surfaces 2 UNRELATED failures in
- * attendance-plugin.test.ts ("auto-writes one high-confidence suggestion..." and "W4C-3a reproduces
- * the committed legacy-import-v1 governing-SHA golden") that do NOT reproduce when that file runs
- * alone against the same virgin DB (166/166 green) — a cross-file fixture/state collision from one
- * of the other 8 files, confirmed unrelated to this migration's columns (reverting only this file's
- * one-hunk fix and re-running the 9-file batch reproduces the identical 2 failures). Root cause not
- * yet isolated; do not attribute it to Q1c without first bisecting which of the other 8 files
- * causes it. (2) The remaining ~115 files in the full invocation have not been touched by this
- * census at all and may hold their own unrelated failures.
+ * vitest.integration.config.ts run <file> --reporter=dot`. At the time of this paragraph, still
+ * open before this block could be removed: (1) the full ~124-file invocation this comment's top
+ * section names (plugin-tests.yml's "Run attendance integration tests" step) had NOT yet been run
+ * end-to-end in one pass — running these 9 files together (still on a virgin DB) surfaced 2
+ * UNRELATED failures in attendance-plugin.test.ts ("auto-writes one high-confidence suggestion..."
+ * and "W4C-3a reproduces the committed legacy-import-v1 governing-SHA golden") that did NOT
+ * reproduce when that file ran alone against the same virgin DB (166/166 green) — a cross-file
+ * fixture/state collision from one of the other 8 files, confirmed unrelated to this migration's
+ * columns (reverting only this file's one-hunk fix and re-running the 9-file batch reproduced the
+ * identical 2 failures). (2) The remaining ~115 files in the full invocation had not been touched
+ * by this census at all. Both are now closed — see the addendum immediately below.
  *
  * ---- end 2026-09-17 follow-up ----
+ *
+ * ---- 2026-09-17 addendum: full ~124-file suite re-run GREEN (closes this precondition) ----
+ *
+ * The exact `plugin-tests.yml` "Run attendance integration tests" step invocation (all 124 files
+ * it lists, `vitest --config vitest.integration.config.ts run <124 files> --reporter=dot`) was run
+ * end-to-end against a FRESH private DB (`createdb metasheet2_lock_c_v2 && DATABASE_URL=... tsx
+ * src/db/migrate.ts` at this same commit) with two env details matched to what CI actually uses,
+ * neither of which this migration or its fixture fix controls:
+ *
+ *   - `DATABASE_URL`/`ATTENDANCE_TEST_DATABASE_URL` with an EXPLICIT username (CI's own literal is
+ *     `postgresql://postgres@localhost:5432/metasheet_test`). A user-less URL
+ *     (`postgresql://localhost:5432/<db>`) makes `attendance-w4c3a-p08-child-process.db.test.ts`'s
+ *     two tests fail with `no PostgreSQL user name specified in startup packet` — that fixture's
+ *     `spawnChild()` helper deliberately passes the child process only `PATH`/`HOME`/`NODE_PATH`
+ *     plus the caller's own `env` overrides (not `USER`/`PGUSER`), so the child's own `pg.Pool`
+ *     has no username to fall back to unless the connection string names one. A pre-existing
+ *     invocation detail, unrelated to Q1c — confirmed by `git diff origin/main..HEAD -- <those 3
+ *     files>` returning empty (this lane never touched them).
+ *   - `TZ=UTC` (GitHub Actions' `ubuntu-latest` runner default). Under the local shell's `TZ`
+ *     (`Asia/Shanghai`, UTC+8), two `attendance-shift-swap.test.ts` assertions compare a UTC-derived
+ *     work-date string against a value one calendar day off — again confirmed pre-existing and
+ *     untouched by this lane via the same empty-diff check.
+ *
+ * With both matched to CI and a virgin DB (not the reused `metasheet2_lock_c`, which had
+ * accumulated state from prior sub-unit runs and was the actual cause of 3 further
+ * `attendance-plugin.test.ts` failures — including a THIRD one, "records max-cap and low-confidence
+ * auto-write skips without creating assignments", not seen in the 9-file batch above — that vanish
+ * on a fresh DB, confirming cross-file state pollution rather than a Q1c defect):
+ *
+ *   Test Files  124 passed (124)
+ *        Tests  1784 passed (1784)
+ *   (exit code 0)
+ *
+ * This satisfies the removal condition this block itself stated ("the full attendance real-DB
+ * suite has been re-run green with this migration applied"). The block is retained rather than
+ * deleted so the precondition's original risk, the fix, and its false positives stay auditable.
+ *
+ * ---- end 2026-09-17 addendum ----
  *
  * ============================================================================================
  *
