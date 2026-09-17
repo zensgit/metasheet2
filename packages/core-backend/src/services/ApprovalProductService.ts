@@ -363,6 +363,17 @@ export type ApprovalBulkReassignSkipReason =
   | 'target-is-requester'
   | 'target-already-assignee'
   | 'target-user-invalid'
+  /**
+   * Lock §14.3 #12 (lock:373) — the cancel-round outlet chokepoint at `rejectIfCancelRound`.
+   * Byte-exact `cancel_round` (underscore, NOT the kebab-case `cancel-round` every sibling
+   * literal in this union uses): this is the one bulk-reassign skip reason that reaches the
+   * frontend (`ApprovalBulkReassignSkipReason` → `apps/web/src/approvals/api.ts:1646` →
+   * `batchTransfer.ts:28`'s label map → the sync pin at
+   * `apps/web/tests/approvalBatchTransferView.spec.ts:284-298`), and that pin compares this
+   * exact string against the FE mapping key — a normalized `cancel-round` would silently miss
+   * it and render "原因未知" instead of the dedicated copy.
+   */
+  | 'cancel_round'
   | 'error'
 
 export type ApprovalBulkReassignRequest = {
@@ -496,6 +507,14 @@ export type ApprovalDepartureTransferSkipReason =
   | 'no-active-seat'
   | 'target-is-requester'
   | 'target-already-assignee'
+  /**
+   * Lock §14.3 #13 (lock:374) — same mechanism and literal as
+   * `ApprovalBulkReassignSkipReason`'s `'cancel_round'` above; this union has no route to the
+   * frontend (its sole consumer is `approval-departure-transfer-dispatch.ts:92`), so no FE pin
+   * applies here, but the literal is kept byte-identical for consistency across the two
+   * §14.3 #12/#13 seat-write chokepoints.
+   */
+  | 'cancel_round'
   | 'error'
 
 export interface ApprovalDepartureTransferSkip {
@@ -8595,6 +8614,23 @@ export class ApprovalProductService {
         // Holds instance FOR UPDATE — concurrent decision/reassign must wait here.
         await awaitBulkReassignTestBarrier('after_instance_lock', instanceId)
 
+        // Lock §14.3 outlet #12 — a cancel-round instance's seat may never be reassigned through
+        // this admin path (§6 "仅原 requester"; §2-G3 re-qualification is the only thing allowed
+        // to touch its seat). Guard BEFORE `classifyAndLockAttendanceRequestForInstance` below, not
+        // after: rejecting here avoids taking the `attendance_requests` row lock that call acquires
+        // on a path that is about to abort — §11/§13 leave the cancel-round lock-order questions
+        // (Q-A/Q-B) undecided, so a rejected instance should touch as few locks as possible.
+        try {
+          rejectIfCancelRound(instance, 'bulkReassignApprovals')
+        } catch (error) {
+          if (error instanceof CancelRoundOutletForbiddenError) {
+            await client.query('ROLLBACK')
+            skip(instanceId, 'cancel_round')
+            continue
+          }
+          throw error
+        }
+
         // P26: classify + lock request org before actor/target authorization (never trust JSON org).
         let attendanceReassignAudit: AttendanceReassignAuditWitnessV1 | null = null
         const attendanceClass = await classifyAndLockAttendanceRequestForInstance(client, instance)
@@ -8962,6 +8998,21 @@ export class ApprovalProductService {
           await client.query('ROLLBACK')
           skipDepartureTransfer(instanceId, 'not-pending')
           continue
+        }
+
+        // Lock §14.3 outlet #13 — same rule and same placement rationale as outlet #12 above: a
+        // cancel-round instance's seat may never move through this SYSTEM-actor departure path,
+        // and the guard runs before the attendance-central fail-closed check immediately below so
+        // a rejected instance never reaches that check's own DML.
+        try {
+          rejectIfCancelRound(instance, 'applyApprovalDepartureTransfer')
+        } catch (error) {
+          if (error instanceof CancelRoundOutletForbiddenError) {
+            await client.query('ROLLBACK')
+            skipDepartureTransfer(instanceId, 'cancel_round')
+            continue
+          }
+          throw error
         }
 
         // P26: attendance-central instances are not a departure-transfer target on this system
