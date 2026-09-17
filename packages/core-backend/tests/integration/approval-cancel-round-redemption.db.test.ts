@@ -24,10 +24,12 @@ import type {
  *
  * SCOPE CORRECTION (phase 2, this branch). Phase 1's header said 判据 II and 判据 IV "are NOT
  * covered here … separate follow-up files". The 判据 IV half is now covered HERE rather than in a
- * new file — deliberately: a new `.db.test.ts` would have to be wired into `plugin-tests.yml`,
- * into `scripts/ops/ci-realdb-step-contract.mjs`'s hard-coded `FILES` array (a closed world that
- * stays green for a file it does not list) and would force an s6a provenance re-pin, none of
- * which buys coverage this file's already-wired fixture cannot give. The 判据 II cases and 判据 IV's
+ * new file — deliberately: a new `.db.test.ts` would have to be wired into `plugin-tests.yml` and
+ * would force an s6a provenance re-pin, neither of which buys coverage this file's already-wired
+ * fixture cannot give. (⚠️ CORRECTED, phase-2 MD §0 R-6: this comment used to also name a
+ * 「hard-coded `FILES` array」 in `scripts/ops/ci-realdb-step-contract.mjs`. There is none —
+ * `:99-102` is a frozen map of two STEP IDS, and that script derives its file population from the
+ * parsed workflow step itself, so it owes nothing for a new file.) The 判据 II cases and 判据 IV's
  * `blocked` half were appended by the same reasoning once the redemption hook landed.
  *
  * What is STILL not covered here, stated so no green below is read for more than it is:
