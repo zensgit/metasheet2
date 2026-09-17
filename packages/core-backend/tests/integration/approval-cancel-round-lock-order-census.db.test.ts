@@ -1417,3 +1417,211 @@ describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restr
     expect(catchBody).toContain('throw error')
   })
 })
+
+describeIfDatabase(
+  'WI-0 lock-order census (Q-G): {原单据实例, attendance_requests} — the adapter reorder (判据 II prerequisite)',
+  () => {
+    /**
+     * Lock §3 C-2 (lock:110) fixes the global order
+     *   `rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → attendance_requests → 余额批次`
+     * and ends with 「现有适配器改为同序」; lock:227 restates it as the row-lock class order.
+     *
+     * Q-D covered {原单据实例, 轮次行}. This leg covers the NEXT pair on the same path, and unlike
+     * Q-D's — whose cancel-round side does not exist until 判据 II lands — BOTH sides of this one
+     * are LIVE production code today:
+     *
+     *   core side    `classifyAndLockAttendanceRequestForInstance` — always reached with the
+     *                `approval_instances` row already `FOR UPDATE`-held (`dispatchAction`'s entry
+     *                read, `bulkReassignApprovals`, `assertAttendanceCentralMutationFailClosed`),
+     *                so it runs 原单据实例 → `attendance_requests`.
+     *   plugin side  `executeRequestCancel` in `plugins/plugin-attendance/index.cjs` — took
+     *                `attendance_requests` FIRST and the `approval_instances` row second.
+     *
+     * That is an inversion between two live paths on the SAME (request, instance) pair, and both
+     * are reachable while the request is still `pending` (a pending request's cancel vs. a bulk
+     * reassign / admin jump on its pending instance). LEG 1 CONSTRUCTS it and it deadlocks
+     * deterministically; LEG 2 is the positive control on the shipped order; LEG 3 anchors the
+     * production source; LEG 4 enumerates what is still NOT in the ratified order, so this block
+     * cannot be read as 「全仓已同序」.
+     */
+    let pool: Pool
+    const createdInstanceIds: string[] = []
+    const createdRequestIds: string[] = []
+    const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
+
+    beforeAll(async () => {
+      await ensureApprovalSchemaReady()
+      pool = new Pool({ connectionString: dbUrl })
+    }, 60000)
+
+    afterAll(async () => {
+      if (createdRequestIds.length > 0) {
+        await pool
+          .query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds])
+          .catch(() => undefined)
+      }
+      if (createdInstanceIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+          .catch(() => undefined)
+      }
+      await pool?.end().catch(() => undefined)
+    })
+
+    /** One attendance-owned `approval_instances` row and the `attendance_requests` row joined to it. */
+    async function seedAttendanceRequestWithInstance(): Promise<{
+      instanceId: string
+      requestId: string
+      orgId: string
+    }> {
+      const orgId = randomUUID()
+      const instanceId = `census-qg-inst-${randomUUID()}`
+      await pool.query(
+        `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+         VALUES ($1, 'pending', $2, $3, $4)`,
+        [instanceId, ATTENDANCE_WORKFLOW_KEY, null, orgId],
+      )
+      createdInstanceIds.push(instanceId)
+
+      const requestId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+         VALUES ($1, $2, CURRENT_DATE, 'leave', 'pending', $3, $4, $5)`,
+        [requestId, `census-qg-user-${randomUUID()}`, orgId, instanceId, ATTENDANCE_WORKFLOW_KEY],
+      )
+      createdRequestIds.push(requestId)
+      return { instanceId, requestId, orgId }
+    }
+
+    /**
+     * The CORE side's second lock, taken through the REAL production predicate rather than a
+     * transcribed copy of its SQL — so a future change to that predicate is picked up here instead
+     * of drifting away from it silently.
+     */
+    async function coreLocksRequestForInstance(client: PoolClient, instanceId: string): Promise<void> {
+      await classifyAndLockAttendanceRequestForInstance(
+        client as unknown as Parameters<typeof classifyAndLockAttendanceRequestForInstance>[0],
+        { id: instanceId, workflow_key: ATTENDANCE_WORKFLOW_KEY, business_key: null },
+      )
+    }
+
+    it('LEG 1: the PRE-FIX adapter order (attendance_requests before the instance row) deadlocks DETERMINISTICALLY (40P01) against the core order', async () => {
+      const { instanceId, requestId } = await seedAttendanceRequestWithInstance()
+      const core = await pool.connect()
+      const adapter = await pool.connect()
+      try {
+        await core.query('BEGIN')
+        await adapter.query('BEGIN')
+        // CORE (ratified order): 原单据实例 first.
+        await core.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
+        // ADAPTER as it stood BEFORE this commit: `attendance_requests` first. Written out here
+        // deliberately — this is the order the fix REMOVED, so it cannot be read off production
+        // source any more, and the leg says so rather than pretending to call live code.
+        await adapter.query('SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE', [requestId])
+
+        // Each side now reaches for the row the other holds — the cycle.
+        const coreSecond = coreLocksRequestForInstance(core, instanceId)
+        const adapterSecond = adapter.query(
+          'SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE',
+          [instanceId],
+        )
+
+        const outcomes = await Promise.allSettled([coreSecond, adapterSecond])
+        const deadlocks = outcomes.filter(
+          (outcome) => outcome.status === 'rejected' && (outcome.reason as { code?: string }).code === '40P01',
+        )
+        expect(deadlocks.length, 'the constructed pre-fix order did not deadlock').toBe(1)
+      } finally {
+        await core.query('ROLLBACK').catch(() => undefined)
+        await adapter.query('ROLLBACK').catch(() => undefined)
+        core.release()
+        adapter.release()
+      }
+    })
+
+    it('POSITIVE CONTROL (LEG 2): the SHIPPED order (both sides take the instance row first) does NOT deadlock, and BOTH sides reach a defined outcome', async () => {
+      const { instanceId, requestId } = await seedAttendanceRequestWithInstance()
+      const core = await pool.connect()
+      const adapter = await pool.connect()
+      try {
+        await core.query('BEGIN')
+        await adapter.query('BEGIN')
+        await core.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
+
+        // The adapter, in its SHIPPED order, blocks on the INSTANCE row before it can touch the
+        // request row — so it can never hold half the cycle.
+        const adapterRun = (async () => {
+          await adapter.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
+          const locked = await adapter.query(
+            'SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+            [requestId],
+          )
+          return locked.rowCount
+        })()
+
+        // The core side proceeds on its own merits: it takes the request row and returns the
+        // attendance classification — a DEFINED outcome, not merely "nothing happened".
+        await expect(coreLocksRequestForInstance(core, instanceId)).resolves.toBeUndefined()
+        await core.query('COMMIT')
+
+        await expect(adapterRun).resolves.toBe(1)
+        await adapter.query('COMMIT')
+      } finally {
+        await core.query('ROLLBACK').catch(() => undefined)
+        await adapter.query('ROLLBACK').catch(() => undefined)
+        core.release()
+        adapter.release()
+      }
+    })
+
+    it('LEG 3: the production cancel adapter takes the two in the ratified order (source scan, anchored at both ends)', () => {
+      const source = readFileSync(
+        join(__dirname, '../../../../plugins/plugin-attendance/index.cjs'),
+        'utf8',
+      )
+      const start = source.indexOf('execute: async function executeRequestCancel(')
+      expect(start, 'executeRequestCancel was not found').toBeGreaterThan(-1)
+      // Far end anchored on the adapter's own terminal write, so the slice cannot run past the
+      // function and pick up some other site's statements.
+      const end = source.indexOf("SET status = 'cancelled', resolved_by = $2", start)
+      expect(end, 'the adapter`s attendance_requests terminal write was not found').toBeGreaterThan(start)
+      const body = source.slice(start, end)
+
+      const instanceLock = body.indexOf("'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE'")
+      const requestLock = body.indexOf("'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE'")
+      expect(instanceLock, 'the instance FOR UPDATE was not found in executeRequestCancel').toBeGreaterThan(-1)
+      expect(requestLock, 'the request FOR UPDATE was not found in executeRequestCancel').toBeGreaterThan(-1)
+      expect(instanceLock, '原单据实例 must be locked BEFORE attendance_requests').toBeLessThan(requestLock)
+    })
+
+    it('LEG 4 (registered, NOT buried): the plugin`s OTHER both-row path is still in the pre-fix order — this fix is one site, not a repo-wide sweep', () => {
+      const source = readFileSync(
+        join(__dirname, '../../../../plugins/plugin-attendance/index.cjs'),
+        'utf8',
+      )
+      // Mechanical enumeration, so the claim is a count and not a memory. Comment/doc lines are
+      // excluded by requiring the quoted statement form the adapters actually execute.
+      const requestLocks = [...source.matchAll(/SELECT \* FROM attendance_requests WHERE id = \$1(?:::uuid)? FOR UPDATE/g)]
+      const instanceLocks = [...source.matchAll(/SELECT \* FROM approval_instances WHERE id = \$1 FOR UPDATE/g)]
+      expect(requestLocks.length, 'attendance_requests FOR UPDATE site count changed').toBe(3)
+      expect(instanceLocks.length, 'approval_instances FOR UPDATE site count changed').toBe(3)
+
+      // The decision adapter (`attendance_requests` → `approval_instances`) is the residual: it is
+      // the approve/reject path, which runs only while the request is `pending`, so it is NOT on
+      // 判据 II's approved-document path and is deliberately left to the attendance line. If this
+      // assertion ever reddens because someone reordered it, the phase-2 verification MD's
+      // residual list must be updated in the same commit.
+      const decisionStart = source.indexOf('const decisionReferenceSegments = operation?.referenceSegments === true')
+      expect(decisionStart, 'the decision adapter anchor was not found').toBeGreaterThan(-1)
+      const decisionEnd = source.indexOf('const requestMetadata = normalizeMetadata(requestRow.metadata)', decisionStart)
+      expect(decisionEnd).toBeGreaterThan(decisionStart)
+      const decisionBody = source.slice(decisionStart, decisionEnd)
+      const dRequest = decisionBody.indexOf("'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE'")
+      const dInstance = decisionBody.indexOf("'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE'")
+      expect(dRequest).toBeGreaterThan(-1)
+      expect(dInstance).toBeGreaterThan(-1)
+      expect(dRequest, 'the decision adapter is expected to STILL be request-first (residual)').toBeLessThan(dInstance)
+    })
+  },
+)
