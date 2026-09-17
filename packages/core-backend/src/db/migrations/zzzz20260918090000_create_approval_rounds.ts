@@ -14,6 +14,20 @@
  * `policy_snapshot_at_create` is NOT NULL (every round freezes the policy that governed its
  * creation); `policy_snapshot_at_decision` is written once, at final evaluation (deferred to the
  * second slice — this slice never populates it).
+ *
+ * Non-blank CHECKs use the repo's dominant unanchored form `col ~ '[!-~]'` (contains at least one
+ * printable non-space character), matching e.g. `approval_att_org_nonblank`
+ * (`zzzz20260715210000_create_approval_attachments.ts:24`) and
+ * `automation_outbox_event_id_nonblank` (`zzzz20260715120000_create_automation_outbox.ts:78`) —
+ * NOT the anchored `^[!-~]+$` form used by the (minority) directory corp-scope migration. The
+ * anchored form additionally rejects any non-ASCII byte anywhere in the string, which would make a
+ * directory-sourced `requested_by` unwritable if it ever carries a non-ASCII user id; the lock
+ * (§4, lock:141) names the unanchored predicate verbatim.
+ *
+ * Two indexes below (`idx_approval_rounds_engine_instance`, `idx_approval_rounds_document_started`)
+ * are NOT named in lock §4 — they are additive-beyond-lock convenience indexes for lookups this
+ * slice's services will need (engine-instance → round reverse lookup; per-document history scan).
+ * Flagged here for the DDL-gate reviewer; drop them if the lock is read as an exhaustive DDL list.
  */
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
@@ -33,9 +47,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     block_reason TEXT NULL,
     policy_snapshot_at_create JSONB NOT NULL,
     policy_snapshot_at_decision JSONB NULL,
-    CONSTRAINT chk_approval_rounds_id_nonblank CHECK (id ~ '^[!-~]+$'),
-    CONSTRAINT chk_approval_rounds_document_id_nonblank CHECK (document_id ~ '^[!-~]+$'),
-    CONSTRAINT chk_approval_rounds_requested_by_nonblank CHECK (requested_by ~ '^[!-~]+$')
+    CONSTRAINT chk_approval_rounds_id_nonblank CHECK (id ~ '[!-~]'),
+    CONSTRAINT chk_approval_rounds_document_id_nonblank CHECK (document_id ~ '[!-~]'),
+    CONSTRAINT chk_approval_rounds_requested_by_nonblank CHECK (requested_by ~ '[!-~]')
   )`.execute(db)
 
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_rounds_pending_document
