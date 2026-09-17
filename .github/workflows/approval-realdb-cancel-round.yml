@@ -7,7 +7,7 @@ name: Approval real-DB acceptance (cancel-round)
 # new independent workflow file, not a job folded into approval-realdb-acceptance.yml", precisely
 # so this file's own edits do not collide with that lane's).
 #
-# AS OF THIS COMMIT, three jobs are wired (one landed per commit, each adding its own sibling job
+# AS OF THIS COMMIT, four jobs are wired (one landed per commit, each adding its own sibling job
 # rather than rewriting the others — see git history for which commit added which):
 #   1. WI-0's lock-order census, Q-A slice 1
 #      (tests/integration/approval-cancel-round-lock-order-census.db.test.ts) — two real Postgres
@@ -21,6 +21,12 @@ name: Approval real-DB acceptance (cancel-round)
 #      (tests/integration/approval-cancel-round-redemption.db.test.ts) — revoke/reject
 #      terminating the round; 判据 II/IV are NOT covered (depend on WI-10/11/12, not on this
 #      branch).
+#   4. §14.3 outlets #12/#13's seat-guard acceptance
+#      (tests/integration/approval-cancel-round-seat-guards.db.test.ts) — the two seat-write
+#      chokepoints (bulkReassignApprovals, applyApprovalDepartureTransfer): a cancel-round
+#      instance's seat is skipped `cancel_round` via the typed catch while a sibling ordinary
+#      pending instance on the same assignee/departed user reassigns/transfers normally in the
+#      same call.
 # Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no flag
 # change.
 #
@@ -311,6 +317,83 @@ jobs:
             echo "suites=approval-cancel-round-redemption.db.test.ts"
             echo "scope=WI-13 判据 III only — revoke (A4) and reject (A7) each terminate their OWN approval_rounds row (engine_instance_id-keyed) in the same transaction as the instance's terminal-status write; §5 I3 pending-slot release; §5 I6 (撤销不限次) via a 3-round chain on one document; a two-document discriminating control proving the UPDATE does not key on document_id or terminate any pending round; the CANCEL_ROUND_INVARIANT_VIOLATION erratum path (implementer choice, not a lock quote, flagged for owner registration)"
             echo "notCovered=判据 II (final approve / C-1 real attendance cancellation) and 判据 IV (C-3 system-side expire/block) — both depend on WI-10/WI-11/WI-12, not on this branch; outlet guards, seat guards, attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-cancel-round-seat-guards:
+    name: approval-cancel-round-seat-guards (§14.3 #12/#13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run §14.3 #12/#13 cancel-round seat-guard acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-cancel-round-seat-guards.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-cancel-round-seat-guards.db.test.ts"
+            echo "scope=§14.3 outlets #12 (bulkReassignApprovals) and #13 (applyApprovalDepartureTransfer) — the two seat-write chokepoints: a cancel-round instance's seat is skipped with the typed CancelRoundOutletForbiddenError -> reason='cancel_round' catch, seat byte-identical before/after; a sibling ordinary pending instance on the SAME assignee/departed user reassigns/transfers normally in the SAME call (discriminating positive control)"
+            echo "notCovered=outlets #2/#3/#7/#7'/#8 (separate outlet-guards file — decide/dispatch/legacy-route paths, not seat-writers); attendance-parity, attendance-FK-migration — separate sibling files/jobs per the taskbook split"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
