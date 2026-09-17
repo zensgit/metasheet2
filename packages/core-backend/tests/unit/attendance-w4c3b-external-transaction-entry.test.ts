@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AttendanceW4RequestBoundaryError,
   createAttendanceRequestOperationBoundaryV1,
+  runExternalTransactionAttemptInSavepointV1,
   type AttendanceRequestOperationAdaptersV1,
 } from '../../src/attendance/w4c3b-request-operation-boundary'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
@@ -402,5 +403,75 @@ describe('business refusal (lock §3 C-3 / §11-④) — the boundary decides th
     // a RELEASE would itself fail, masking the real error.
     expect(attempt).not.toContain('ROLLBACK TO SAVEPOINT w4c3b_external_txn_attempt')
     expect(attempt).not.toContain('RELEASE SAVEPOINT w4c3b_external_txn_attempt')
+  })
+})
+
+/**
+ * The savepoint discipline itself, driven directly. The three protocol call sites that can produce
+ * a refusal are only reachable with a real database, so the entry's own wrapper is exercised here
+ * against a supplied outcome — the SAME function the entry calls, not a transcription of it.
+ *
+ * The negative ("no ROLLBACK/RELEASE on an infrastructure exception") is asserted above; per the
+ * rule that an "assert it does not happen" needs its matching positive control, the refusal
+ * sequence is asserted here in full and in order.
+ */
+describe('external attempt savepoint (lock §3 C-3) — refusal rolls back, exception does not', () => {
+  function recordingClient(): AttendanceW4TransactionClientV1 & { seen: string[] } {
+    const seen: string[] = []
+    return {
+      seen,
+      async query(sqlText: string) {
+        seen.push(sqlText)
+        return { rows: [] }
+      },
+    }
+  }
+
+  it('POSITIVE CONTROL: a business refusal issues SAVEPOINT → ROLLBACK TO → RELEASE, in order', async () => {
+    const client = recordingClient()
+    const refusal = { kind: 'business_refused' as const, code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED', detail: 'record_missing' }
+
+    const result = await runExternalTransactionAttemptInSavepointV1(client, async () => refusal)
+
+    // The decision reaches the caller — it is a RETURN, not a throw. That is the whole contract:
+    // the approval side has to still be able to write and COMMIT its C-3 closure.
+    expect(result).toEqual(refusal)
+    // Exact sequence, exact order. ROLLBACK TO alone leaves the savepoint DEFINED, so a missing
+    // RELEASE would leave the caller inside a subtransaction the boundary created — every
+    // subsequent closure write would land at the wrong nesting level.
+    expect(client.seen).toEqual([
+      'SAVEPOINT w4c3b_external_txn_attempt',
+      'ROLLBACK TO SAVEPOINT w4c3b_external_txn_attempt',
+      'RELEASE SAVEPOINT w4c3b_external_txn_attempt',
+    ])
+  })
+
+  it('a successful execution releases the savepoint but does NOT roll back', async () => {
+    const client = recordingClient()
+    const executed = { kind: 'executed' as const, response: { ok: true } }
+
+    const result = await runExternalTransactionAttemptInSavepointV1(client, async () => executed)
+
+    expect(result).toEqual(executed)
+    // The discriminating half of the pair above: same wrapper, different outcome, and the ROLLBACK
+    // is absent. Without this case, "ROLLBACK TO is issued" could be satisfied by a wrapper that
+    // rolls back unconditionally and silently discards every successful cancellation.
+    expect(client.seen).toEqual([
+      'SAVEPOINT w4c3b_external_txn_attempt',
+      'RELEASE SAVEPOINT w4c3b_external_txn_attempt',
+    ])
+  })
+
+  it('an infrastructure exception issues neither ROLLBACK TO nor RELEASE', async () => {
+    const client = recordingClient()
+    const infra = Object.assign(new Error('deadlock detected'), { code: '40P01' })
+
+    await expect(runExternalTransactionAttemptInSavepointV1(client, async () => { throw infra }))
+      .rejects.toBe(infra)
+
+    // Lock §3 C-3 「两条路径、两种返回」: the caller rolls back its whole transaction. After a
+    // database error the transaction is aborted, so a RELEASE issued here would itself fail and
+    // would mask the real error.
+    expect(client.seen).toEqual(['SAVEPOINT w4c3b_external_txn_attempt'])
   })
 })
