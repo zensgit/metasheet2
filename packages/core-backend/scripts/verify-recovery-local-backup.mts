@@ -84,7 +84,7 @@ let createRecoveryArchiveFileStoreProvider: typeof import('../src/multitable/rec
 let provisionRecoveryArchiveFileRoot: typeof import('../src/multitable/recovery-archive-file-store').provisionRecoveryArchiveFileRoot
 let loadRecoveryArchiveAuthorityInternal: typeof import('../src/multitable/recovery-archive-preview').loadRecoveryArchiveAuthorityInternal
 let RecoveryArchivePreviewErrorClass: typeof import('../src/multitable/recovery-archive-preview').RecoveryArchivePreviewError
-let readRecoveryArchiveCompleteSectionsInternal: typeof import('../src/multitable/recovery-archive-reader').readRecoveryArchiveCompleteSectionsInternal
+let readRecoveryArchiveCompleteSectionState: typeof import('../src/multitable/recovery-archive-reader').readRecoveryArchiveCompleteSectionState
 let RecoveryArchiveReaderErrorClass: typeof import('../src/multitable/recovery-archive-reader').RecoveryArchiveReaderError
 let createLocalCustodyBackup: typeof import('../src/multitable/recovery-local-custody').createLocalCustodyBackup
 let createLocalCustodySession: typeof import('../src/multitable/recovery-local-custody').createLocalCustodySession
@@ -132,7 +132,7 @@ async function loadRuntimeDependencies(): Promise<void> {
   provisionRecoveryArchiveFileRoot = fileStore.provisionRecoveryArchiveFileRoot
   loadRecoveryArchiveAuthorityInternal = preview.loadRecoveryArchiveAuthorityInternal
   RecoveryArchivePreviewErrorClass = preview.RecoveryArchivePreviewError
-  readRecoveryArchiveCompleteSectionsInternal = reader.readRecoveryArchiveCompleteSectionsInternal
+  readRecoveryArchiveCompleteSectionState = reader.readRecoveryArchiveCompleteSectionState
   RecoveryArchiveReaderErrorClass = reader.RecoveryArchiveReaderError
   createLocalCustodyBackup = custody.createLocalCustodyBackup
   createLocalCustodySession = custody.createLocalCustodySession
@@ -341,7 +341,8 @@ async function main(): Promise<Record<string, unknown>> {
     })
 
     const authority = await loadAuthority(targetRuntime, fixture.fixture)
-    const opened = await readRecoveryArchiveCompleteSectionsInternal({
+    const opened = await readRecoveryArchiveCompleteSectionState({
+      query: targetRuntime.query,
       selectedBinding: authority.selectedBinding,
       manifestObject: authority.manifestObject,
       sectionObjects: authority.sectionObjects,
@@ -349,8 +350,8 @@ async function main(): Promise<Record<string, unknown>> {
       objectStore: targetProvider,
       transactionDepth: targetRuntime.depth,
     })
-    assert.equal(opened.sections.records.length, recoveryLocalBackupRecordCount())
-    assert.deepEqual(Object.keys(opened.sections).sort(), [...RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
+    assert.equal(opened.records.size, recoveryLocalBackupRecordCount())
+    assert.deepEqual(Object.keys(opened).sort(), [...RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
     targetSession.lock()
 
     const localWorkerInput: NonNullable<ArchiveProcessWorkerInput['local']> = {
@@ -553,6 +554,7 @@ async function runFailClosedNegatives(input: {
 
   const authority = await loadAuthority(input.runtime, input.fixture.fixture)
   const readerInput = {
+    query: input.runtime.query,
     selectedBinding: authority.selectedBinding,
     manifestObject: authority.manifestObject,
     sectionObjects: authority.sectionObjects,
@@ -588,7 +590,7 @@ async function runFailClosedNegatives(input: {
   missingKeySession.unlock({ custodyId: input.custodyId, recoverySecret: input.recoverySecret, backup: unrelatedBackup })
   const missingKeyAdmission = missingKeySession.admitForArchive(input.custodyId)
   await assert.rejects(
-    readRecoveryArchiveCompleteSectionsInternal({ ...readerInput, keyCustody: missingKeyAdmission }),
+    readRecoveryArchiveCompleteSectionState({ ...readerInput, keyCustody: missingKeyAdmission }),
     (error: unknown) => error instanceof RecoveryArchiveReaderErrorClass && error.code === 'RECOVERY_ARCHIVE_READER_KEY_CUSTODY_FAILED',
   )
   missingKeySession.lock()
@@ -654,7 +656,7 @@ async function runFailClosedNegatives(input: {
   await rename(objectPath, hiddenObject)
   try {
     await assert.rejects(
-      readRecoveryArchiveCompleteSectionsInternal(readerInput),
+      readRecoveryArchiveCompleteSectionState(readerInput),
       (error: unknown) => error instanceof RecoveryArchiveReaderErrorClass && error.code === 'RECOVERY_ARCHIVE_READER_OBJECT_STORE_FAILED',
     )
   } finally {
