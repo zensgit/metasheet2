@@ -1168,3 +1168,239 @@ are now closed rather than deferred.
 判据 I reverse direction, the partial unique index) now have real, currently-green,
 discriminating-power-confirmed acceptance tests, per §D1-D4/D5/D6 above. The review's other findings
 from the same round (P2-B, P3-A through P3-E) remain open, untouched by this pass.
+
+---
+
+# Part E — round 6 fix (2026-09-18, this pass)
+
+**Scope of this pass**: close the gate review's **P3-C** finding (`impl-gate-C-slice1-round1-20260918.md`,
+dated 2026-09-18) — the two lock-named mutations that had never been run — and its **P3-D** finding —
+`policy_snapshot_at_create`'s `definitionPolicy` half had zero assertion anywhere in the corpus (only
+`roundPolicy` was checked). HEAD before this pass's commit: `3a70b7639` (the head left by Part D's own
+D2 self-correction). This pass does **not** touch P2-B (seed-visibility disclosure, code fix is
+owner-gated per the review's own §6/§9 framing), P3-A (挂点位置措辞, docs + owner备案), P3-B (two `wip`
+commits — dropping them from an already-pushed branch needs a rebase/force-push this lane's hard rules
+forbid; its only legal form here is a PR-body merge-method note, deferred to the PR-open step), or
+P3-E (the review itself registers this as "not a deduction," so there is nothing to fix). Those four
+remain open for a subsequent step.
+
+Unlike Part D, neither finding here named a missing acceptance ROW (an assertion that should exist but
+doesn't) — P3-C named two assertions that already exist but had never been run against a mutation to
+show they discriminate, and P3-D named a real gap (zero assertion) closed by one new deep-equal line
+plus its own mutation. All three probes were run against the SAME private DB the rest of this document
+uses, `metasheet2_lock_c` — not a fresh/virgin database — since none of them touches DDL or seed
+content, only application code and one already-migrated row's JSON payload.
+
+## E1. P3-C, item 1 — §14.1 mutation: seed `allowRevoke` governs the revoke gate at `ApprovalProductService.ts:10554`
+
+Lock text (§14.1, verbatim, quoted by the gate review): "mutation: seed `allowRevoke=false` ⇒ 红"
+(the seed's `allowRevoke` is 判据 III's revoke-half front door; before this pass only the POSITIVE
+200-succeeds evidence existed — `redemption.db.test.ts`'s chain test and 正控 2's own positive-control
+step — and the gate review named this as "没有把这道门打掉看红").
+
+Read the enforcement site first, to confirm this key has no fallback layer (unlike D2's
+`commentRequired`, which DOES fall back to the instance snapshot and was confounded because of it):
+`ApprovalProductService.ts:10554` reads `if (!runtimeGraph.policy.allowRevoke)` directly off
+`runtimeGraph`, itself `asRuntimeGraph(runtime.runtime_graph)` from a **fresh**
+`SELECT * FROM approval_published_definitions WHERE id = instance.published_definition_id` issued
+inside the same request (line ~9933) — no snapshot fallback exists for this key anywhere in the
+resolver chain. So a DB-row mutation on the published definition's `runtime_graph.policy.allowRevoke`
+is a clean, unconfounded probe of this exact chokepoint, not a repeat of D2's confound.
+
+Probe (DB-row mutation, `psql`-backup → `jsonb_set` → rerun → restore → `diff`, the same discipline
+Part D's D2 self-correction used and for the identical reason — the seed is materialized into this row
+at migration time, not re-read from `approval-cancel-round-published-definition.ts` per test run):
+
+```
+$ psql -d metasheet2_lock_c -tAc "select runtime_graph::text from approval_published_definitions
+    where id='00000000-0000-4000-8000-000000000003'" > /tmp/gate-c-slice1-backups/pd-cancel-round-runtime-graph.pre-allowrevoke.json
+$ psql -d metasheet2_lock_c -c "UPDATE approval_published_definitions
+    SET runtime_graph = jsonb_set(runtime_graph, '{policy,allowRevoke}', 'false')
+    WHERE id='00000000-0000-4000-8000-000000000003'"
+$ npx vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+ Test Files  1 failed (1)
+      Tests  4 failed | 2 passed (6)
+```
+
+Four tests turned red, all at their revoke step:
+- `chain (§5 I6, 撤销不限次)`: `expected 409 to be 200` — round-1 revoke, the test's own positive
+  evidence for `allowRevoke=true`, is exactly what breaks.
+- `判据 III 正控 2 (...)`: `expected 409 to be 403` — **this is a finding, not just a confirmation**:
+  the allowRevoke gate at `:10554` runs BEFORE the requester-identity check at `:10556`, so with
+  `allowRevoke=false` the impostor's revoke attempt gets `409 APPROVAL_REVOKE_DISABLED` instead of the
+  `403 APPROVAL_REVOKE_FORBIDDEN` this test (added in Part D, D1) asserts — meaning 正控 2's own 403
+  assertion is itself downstream of, and depends on, `allowRevoke` being `true`. Worth a one-line note
+  in the test's own comment for a future reader, but not a defect: the ORDER (allowRevoke gate first,
+  identity check second) is the shipped chokepoint order, and 正控 2 only ever runs it with the seed's
+  real (`true`) value, so its own assertion is unaffected in normal operation.
+- `DISCRIMINATING CONTROL: ... keyed on engine_instance_id ...`: `expected 409 to be 200` — its own
+  revoke-succeeds half breaks the same way as the chain test's round 1.
+- `erratum (... a broken one-round-per-instance invariant ...)`: `expected 'APPROVAL_REVOKE_DISABLED'
+  to be 'CANCEL_ROUND_INVARIANT_VIOLATION'` — the allowRevoke gate fires before this test's own
+  invariant-violation branch is ever reached.
+
+Restore:
+```
+$ psql -d metasheet2_lock_c -c "UPDATE approval_published_definitions
+    SET runtime_graph = '<pre-mutation JSON text>'::jsonb
+    WHERE id='00000000-0000-4000-8000-000000000003'"
+$ diff pd-cancel-round-runtime-graph.pre-allowrevoke.json pd-cancel-round-runtime-graph.post-restore.json
+(empty)
+$ npx vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+```
+
+No new permanent assertion was needed: unlike D2's `commentRequired`, there is no explicit-vs-default
+distinction possible for `allowRevoke` (absent and `false` are handled identically — fail-closed — by
+the single direct read at `:10554`), so the existing positive assertions ARE the full acceptance
+surface for this key; this probe only had to demonstrate they discriminate, which it now has, four
+times over.
+
+## E2. P3-C, item 2 — §14.1 负控 I′: rewriting the dedicated path's `workflow_key` literal to the public path's ⇒ Judgment I positive assertions turn red
+
+Lock text (§14.1, verbatim, quoted by the gate review): "负控 I′:专用路径改写 `'approval-product-template'`
+⇒ 正向红". This is the mirror of Part D's D3/D4 (which mutated the PUBLIC path's literal to the
+DEDICATED value and watched the REVERSE-direction assertion turn red); I′ mutates the DEDICATED path's
+own literal to the PUBLIC value and watches the FORWARD-direction assertions turn red.
+
+Source mutation (`cp`-backup → edit → run → restore → `cmp`):
+```
+$ cp packages/core-backend/src/services/ApprovalProductService.ts /tmp/gate-c-slice1-backups/ApprovalProductService.ts.p3c2.bak
+```
+`ApprovalProductService.ts:8455`, inside `createCancelRoundInstance`'s own INSERT parameter list —
+changed the `workflow_key` binding from the shared constant to the public path's own hardcoded
+literal:
+```diff
+-          APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
++          'approval-product-template',
+```
+(Mutating the shared `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY` constant itself, rather than this one call
+site's use of it, would have been the wrong probe — both `isCancelRoundInstance`'s predicate and this
+writer read the SAME symbol, so they would move together and nothing would turn red. The lock's own
+"改写" wording is about the WRITER's literal specifically, matching the mirror shape of D3/D4's public-
+path probe.)
+
+```
+$ npx vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-creation.db.test.ts --reporter=dot -t "writes the dedicated instance"
+ Test Files  1 failed (1)
+      Tests  1 failed | 5 skipped (6)
+AssertionError: expected 'approval-product-template' to be 'approval.cancel-round'
+  at creation.db.test.ts:236 — expect(instance!.workflow_key).toBe(APPROVAL_CANCEL_ROUND_WORKFLOW_KEY)
+```
+red at exactly the Judgment I positive assertion (line 236); the very next line
+(`isCancelRoundInstance(instance!)).toBe(true)`) would have failed identically had the first assertion
+not already stopped the test.
+
+**Cleanup note (not a defect in the probe, a consequence of a live test failing mid-fixture)**: this
+mutation causes the test to abort BEFORE its own `createdRoundIds.add(...)` call runs, so the
+`approval_rounds` row the mutated write still created was left un-tracked for the test's `afterAll`
+cleanup, which then hit `23503` (the round's `document_id` FK) trying to delete the now-untracked
+original document instance. Identified and deleted the two orphaned rows by id
+(`approval_rounds` id `apr_5bf3bb58-...`, `approval_instances` ids `e8529d86-...` /
+`bf42e5f0-...`) directly via `psql` before restoring the source file, confirmed zero remaining rows
+referencing either id, then restored:
+```
+$ cp /tmp/gate-c-slice1-backups/ApprovalProductService.ts.p3c2.bak packages/core-backend/src/services/ApprovalProductService.ts
+$ cmp /tmp/gate-c-slice1-backups/ApprovalProductService.ts.p3c2.bak packages/core-backend/src/services/ApprovalProductService.ts
+(identical)
+$ npx vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-creation.db.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+```
+
+## E3. P3-D — `policy_snapshot_at_create.definitionPolicy` had zero assertion; now deep-equal against the original document's own frozen `policy_snapshot`
+
+Lock text (§4, v5.4, verbatim): `policy_snapshot_at_create` = `{ definitionPolicy: <原样>,
+roundPolicy: { windowDays, suite } }`. The gate review found `creation.db.test.ts:262-268` asserted
+the `roundPolicy` half (key set, `suite`, `windowDays`) but made **zero** assertion — "连「键存在」都
+没有" — about `definitionPolicy`.
+
+Per the advisor's caution before writing this: a `toBeDefined()` or key-existence check would be a
+narrow predicate passing by construction (any non-null value satisfies it). The fix instead reads the
+ORIGINAL document's own `policy_snapshot` column directly, BEFORE `createCancelRoundInstance` runs,
+and deep-equals it against `policy_snapshot_at_create.definitionPolicy` AFTER — the same "原样" (frozen
+verbatim) the lock text names, not a hardcoded literal that would drift if the original document's
+policy shape ever changes independently of this test.
+
+Added (single test, `approval-cancel-round-creation.db.test.ts`, `writes the dedicated instance, one
+pending round row, and an active seat for the original approver`): the pre-existing
+`originalInstanceRow` query now also selects `policy_snapshot`, and after the existing `roundPolicy`
+assertions:
+```ts
+expect(roundRows.rows[0].policy_snapshot_at_create.definitionPolicy).toEqual(
+  originalInstanceRow.rows[0]!.policy_snapshot,
+)
+```
+
+Mutation probe (`cp`-backup → edit → run → restore → `cmp`), on the exact assignment the lock names
+(`ApprovalProductService.ts:8505`):
+```
+$ cp packages/core-backend/src/services/ApprovalProductService.ts /tmp/gate-c-slice1-backups/ApprovalProductService.ts.p3d.bak
+```
+```diff
+-            definitionPolicy: original.policy_snapshot,
++            definitionPolicy: {},
+```
+```
+$ npx vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-creation.db.test.ts --reporter=dot -t "writes the dedicated instance"
+ Test Files  1 failed (1)
+      Tests  1 failed | 5 skipped (6)
+AssertionError: expected {} to deeply equal { allowRevoke: true, sourceOfTruth: 'platform', …(0) }
+```
+red exactly at the new assertion, with the expected/received values matching the finding's own
+description of what should have been frozen. This mutation happens LATER in the test's control flow
+than E2's (after `createdRoundIds.add(...)` already ran), so no orphaned-row cleanup was needed here;
+confirmed zero stray rows anyway before restoring:
+```
+$ cp /tmp/gate-c-slice1-backups/ApprovalProductService.ts.p3d.bak packages/core-backend/src/services/ApprovalProductService.ts
+$ cmp /tmp/gate-c-slice1-backups/ApprovalProductService.ts.p3d.bak packages/core-backend/src/services/ApprovalProductService.ts
+(identical)
+```
+
+## E4. Full-suite rerun, typecheck, and working-tree discipline, this pass
+
+Full seven-file real-DB rerun after all three probes were restored:
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,attendance-fk-migration,outlet-guards,node-timeout-effect}.db.test.ts --reporter=dot
+ Test Files  7 passed (7)
+      Tests  47 passed (47)
+```
+(47, not 48 — E3's new assertion was added INSIDE an existing `it`, not as a new case, so the total
+test count is unchanged from Part D's own 47/47.)
+
+```
+$ cd packages/core-backend && npx tsc --noEmit -p .
+(no output, exit 0)
+```
+
+- `git status --porcelain` was empty at the start of this pass (matching HEAD `3a70b7639`'s clean
+  state); the only path staged before commit is `approval-cancel-round-creation.db.test.ts` (E3) plus
+  this document; `git status --porcelain` is empty again after the commit.
+- Two `cp`-backup → edit → run → restore → `cmp` cycles on `ApprovalProductService.ts` source (E2,
+  E3) and one `psql`-backup → `jsonb_set` → run → restore → `diff` cycle on the
+  `approval_published_definitions.runtime_graph` DB row (E1) — DB-row mutation for the same reason
+  Part D's D2 used one (the seed is materialized at migration time, not re-read per test run). Zero
+  `git checkout --` anywhere. E2's mutation left two orphaned rows as a side effect of the test
+  aborting mid-fixture (not of the restore discipline) — identified, deleted by id, and confirmed zero
+  remaining references before the source restore; see §E2's cleanup note.
+- No lock file, no `reviews/` file, no `origin/main` state, no CI-config file, no migration file, no
+  `plugin-tests.yml` touched — nothing in this pass added a new `.db.test.ts` file or changed the
+  real-DB two-point wiring, so no s6a recompute is required.
+
+## E5. Gate findings P3-C and P3-D — final disposition
+
+**Gate finding P3-C: CLOSED.** Both named mutations now run and are documented (§E1, §E2); neither
+required a new permanent assertion beyond what already existed in the corpus — the gap was that their
+discriminating power had never been demonstrated, and it now has been, with one incidental finding
+(§E1: 正控 2's 403 is itself downstream of `allowRevoke`, an ordering fact worth a future comment, not
+a defect).
+**Gate finding P3-D: CLOSED** — `policy_snapshot_at_create.definitionPolicy` now has a deep-equal
+acceptance assertion against the original document's own frozen `policy_snapshot`, confirmed
+load-bearing by a source mutation (§E3).
+**Remaining open, unchanged by this pass**: P2-B (seed-visibility disclosure; its code half is
+owner-gated per the review's own framing), P3-A (挂点位置措辞 correction + owner备案), P3-B (two `wip`
+commits; legal closure form is a PR-body note, deferred to the PR-open step), P3-E (the review itself
+registers this as not-a-deduction — no action item exists to close).
