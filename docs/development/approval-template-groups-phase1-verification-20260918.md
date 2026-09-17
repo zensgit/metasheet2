@@ -469,7 +469,7 @@ apps/web/src/composables/useSessionOrg.ts
 | 6 | B″(a):upsert 换裸 UPDATE | `ApprovalTemplateGroupService.ts:368-378` | `timed out waiting for backend blocked by holder`(MVCC 下 UPDATE 对不可见行 0 行,永不停车) | **RED** |
 | 7 | B″(b):upsert 换裸 INSERT | 同上(删 `ON CONFLICT …` 子句) | `expected 500 to be 201`(裸 23505 未被映射) | **RED** |
 | 8 | A′:主键改单列 `template_id`(真实 DDL,非测试自带的 TEMP TABLE 替身) | `metasheet2_lock_a` 上 `ALTER TABLE … DROP CONSTRAINT approval_template_group_links_pkey` + `ADD CONSTRAINT … PRIMARY KEY (template_id)` | `expected 500 to be 201`——实收 `there is no unique or exclusion constraint matching the ON CONFLICT specification`(42P10),而非锁文预言的「静默覆盖」 | **RED,但机制不同**,见 §15.3 |
-| 9 | A″(a):挂接 SELECT 去掉 org 谓词 | `ApprovalTemplateGroupService.ts:358` | `expected 500 to be 201`(bind 参数数量与占位符不匹配报错,而非「跨 org 200 泄露」) | **RED,机制见 §15.4** |
+| 9 | A″(a):挂接 SELECT 去掉 org 谓词(**修复轮 2 重写,见 §15.4**——原行记录的是被混淆的版本;下方是隔离版本在当前 HEAD 的现场结果) | `ApprovalTemplateGroupService.ts:358`(`linkApprovalTemplateToGroup` 内 `FOR UPDATE` 行,head `bdfe29974` 现场 `grep -n` 确认,非沿用旧记录数字) | 隔离改法(`org_id = $1 AND` → `$1::text IS NOT NULL AND`,保留对 `$1` 的引用避免绑定参数计数错配):`-t "A″"` → `expected 500 to be 404`,失败点是跨 org 断言 `:333`(现场 `grep -n` 确认),正控 `:328` 保持 201 未受影响 | **RED,判别力真实(隔离版本)**,机制见 §15.4 |
 | 10 | A″(b):删复合 FK(真实 DDL) | `metasheet2_lock_a` 上 `ALTER TABLE approval_template_group_links DROP CONSTRAINT atgl_group_fk` | 裸 INSERT 断言从「rejects 23503」变成实际插入成功(`rowCount:1`,无异常) | **RED** |
 | 11 | A‴(a):org 源改 `req.user.tenantId` | `routes/approvals.ts:361` | `expected 201 to be 403`(case iii 伪造头下写入成功) | **RED** |
 | 12 | A‴(b):接受 `req.body.orgId` | `routes/approvals.ts:351-360` | `expected 201 to be 400`(case i 写入成功) | **RED** |
@@ -488,7 +488,7 @@ apps/web/src/composables/useSessionOrg.ts
 
 第一次按锁文字面(只删 `ApprovalTemplateGroupService.ts:311-317`)得到的是**惰性(inert)结果**:G 测试仍然全绿。根因是 `unarchiveApprovalTemplateGroup` 最终的 `UPDATE` 语句本身会撞 `uq_atg_org_name_active`(立即部分唯一索引),而 `mapGroupConstraintError` 把这个 23505 映射回**同一个** 409 `GROUP_NAME_TAKEN`——`ApprovalTemplateGroupService.ts:34-38` 的文件头注释已自陈这一点(「confirmed by mutation-testing this block out — no observable change」),本次现场复现验证了该注释所写属实。
 真正让 G 落红的是**复合 mutation**(同时删 `:311-317` **且** 禁用 `:137` 的 `uq_atg_org_name_active` 分支)——而**仅**禁用 `:137`(`:311-317` 保留)对 G **单独测不出**(G 走的是自己的显式 `ServiceError` 抛出路径,`mapGroupConstraintError` 首行 `if (error instanceof ServiceError) return error` 直接放行,不经过 `:137` 分支);但**仅**禁用 `:137` 对 **A** 单独测得出红(A 的建组路径没有显式预检查,完全依赖 `:137` 这条分支)。
-**结论**:锁文 G 行命名的那条「去掉同名复核」mutation,在本实现下不是判别性的——真正的判别性 mutation 是**共享的** `mapGroupConstraintError:137` 分支移除,它同时是 A 与 G(复合态)的证据来源。这不是缺陷,是与 commit `236f9dac8`(「correct two inert mutation claims in group real-DB suites」)同一族的、已被架构自身文档化的现象;记入此处是让门审看到**台账里的红**而非只信任源码注释里的断言(记忆:「源码文本断言≠行为断言」)。
+**结论(修复轮 2,gate `impl-gate-A-slice1-round1-20260918.md` P2-2 收口)**:锁文 G 行命名的那条「去掉同名复核」mutation,在本实现下不是判别性的——真正的判别性 mutation 是**共享的** `mapGroupConstraintError:137` 分支移除,它同时是 A 与 G(复合态)的证据来源。**这不是锁文的合同缺口**:门审逐字核过锁文,G 行只要求「同名冲入阻塞」这一个可观察行为,没有规定必须靠两层独立防御才算数;第二层(`mapGroupConstraintError:137` 的 `uq_atg_org_name_active` 分支)本来就是共享基础设施,建组(A)路径一开始就依赖它。真正的归因是**实现选择**:`unarchiveApprovalTemplateGroup` 在共享分支之上,自己又加了一次 UPDATE 前的显式 SELECT 预检查(§`ApprovalTemplateGroupService.ts:311-317`)。这一层在当前形状下**可以安全删除**——删除它不会引入 TOCTOU:同 org 的建组/改名/解档三条写路径共享同一个 `pg_advisory_xact_lock(hashtext('atg:'+org))`(L0),预检查与 UPDATE 之间不存在可被并发利用的窗口;也不会改变本套件任何一条用例的可观察结果(探针 2a/2b 已证明:单独删预检查、单独禁用 mapper 分支,两种单层改动都不改变对外行为)。保留它的理由 X 是:在 L0 临界区内提前退出、避免发起一次注定失败的写(省一次 UPDATE 尝试)——**这条理由较薄**:同样可以论证「少一次 SELECT 往返」在性能上可以忽略,是否值得为此保留一条对锁文验收零判别力的代码路径,不由本次修复单方裁定。**要求 owner 裁决**(二选一,均未在本轮实现):(a) 删除 `:311-317` 预检查,让 mapper 分支成为 G 唯一、判别性的防线,与 A 共享同一证据路径(回归探针 2b 的复合态观察);(b) 保留现状,明确接受「保留双层」是**实现选择**而非锁文要求——`unarchiveApprovalTemplateGroup` 的文件头注释与测试文件 `:591-` 处的注释均已改写,不再称为「合同缺口」(记忆:「源码文本断言≠行为断言」;这里更正的是**归因**,不是行为门本身——G 的验收断言此前与此后均为真判别力的绿)。
 
 ### 15.2 B′:无可改的应用代码路径 —— BLOCKED-with-reason
 
@@ -502,9 +502,61 @@ B′ 用例(`lifecycle.db.test.ts:442-484`(原 `:437-479`,修复轮 1 后 +5))�
 本次额外对**真实**`approval_template_group_links` 表做了 DDL mutation(`DROP CONSTRAINT approval_template_group_links_pkey` → `ADD CONSTRAINT … PRIMARY KEY (template_id)`),重跑 A′ 用例的**真实端点断言**(`linkA`/`linkB` 两次 `httpReq`)。结果不是锁文预言的「静默覆盖」,而是应用代码里 `ON CONFLICT (org_id, template_id)` 的仲裁索引不存在,触发 `42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification`,`linkA` 直接 500——比「静默覆盖」更早、更响亮地失败。
 **结论**:A′ 行在**真实**代码路径上依然是可 mutation-discriminate 的(红,`expected 500 to be 201`),但红的**机制**与锁文文本描述的「覆盖」不同——是 `ON CONFLICT` 仲裁索引缺失,不是运行时的静默数据覆盖。测试自带的 TEMP TABLE 段落论证的是「如果真的允许覆盖会发生什么」,与「如果真的把 PK 改窄会发生什么」是两个不同的反事实,本节把两者都做了并分开记录。
 
-### 15.4 A″(a):参数计数不匹配掩盖了「跨 org 泄露」的语义信号
+### 15.4 A″(a):重写为隔离版本(修复轮 2,gate P2-5 收口)
 
-删除 `ApprovalTemplateGroupService.ts:358` 的 `org_id = $1 AND` 后,SQL 文本里不再引用 `$1`,但调用点仍传入 `[orgId, groupId]` 两个绑定参数——PostgreSQL 在参数数量与占位符不匹配时直接报错,连**同 org 的正控格**（`ok.status` 应为 201)也一并变红。这是一个比「跨 org 静默放行」更早触发的失败信号,但仍然是该行代码改动导致的确定性红,判定为有效 mutation(红),只是记录清楚失败的具体断言点是控制组的 `expect(ok.status).toBe(201)`(`:323`),不是后续的跨 org 断言。
+**这一节被 gate `impl-gate-A-slice1-round1-20260918.md` 的 P2-5 点名重写,原文整段撤回,不是补充。**
+
+原记录(门审报告已引用,现已撤回)写的是**被混淆的 mutation**:直接删除 `org_id = $1 AND`,SQL 文本不再引用 `$1`,但调用点仍传入 `[orgId, groupId]` 两个绑定参数,PostgreSQL 在参数数量与占位符不匹配时直接报错——这连**同 org 的正控格**(`ok.status` 应为 201)也一并炸掉,对「org 谓词是否真的在挡跨 org」**零判别力**(报错来自绑定参数计数不匹配,不是「跨 org 200 泄露」这个语义)。门审用**隔离版本**重跑并证伪了这一版记录的判定依据;本节按门审给出的隔离形状,在**本轮实际 HEAD**上重跑,不是照抄门审报告里对 `252d01865` 的旧输出。
+
+**隔离改法**:保留对 `$1` 的引用(避免参数计数不匹配这个混淆项),把它从「过滤条件」降级为「恒真的哑引用」:
+
+```
+- `SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`
++ `SELECT archived_at FROM approval_template_groups WHERE $1::text IS NOT NULL AND id = $2 FOR UPDATE`
+```
+
+**现场执行**(head `bdfe29974`,`metasheet2_lock_a`,与 §18 同一 `cp`/改/跑/还原/`cmp` 流程,备份于 `/tmp/gateA-fix2-probe-backups/`):
+
+```
+$ cp packages/core-backend/src/services/ApprovalTemplateGroupService.ts \
+    /tmp/gateA-fix2-probe-backups/ApprovalTemplateGroupService.ts.orig
+$ python3 - <<'PYEOF'
+# 替换 :358 行(现场 grep -n 确认的当前行号,非沿用旧记录)
+old = "SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE"
+new = "SELECT archived_at FROM approval_template_groups WHERE $1::text IS NOT NULL AND id = $2 FOR UPDATE"
+# ... 精确单次替换,assert count==1
+PYEOF
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts -t "A″" --reporter=verbose
+ ✗ A″: cross-org link is 404 (org-scoped row-lock SELECT); the composite FK is the last-resort DB guard
+   AssertionError: expected 500 to be 404 // Object.is equality
+   at tests/integration/approval-template-groups-lifecycle.db.test.ts:333:26
+ Test Files  1 failed (1)
+      Tests  1 failed | 14 passed | 1 skipped (16)
+```
+
+失败点精确落在跨 org 断言 `expect(cross.status).toBe(404)`(`:333`,现场 `grep -n "A″:"` 定位用例起点后手数确认),**同一测试内**先执行的正控 `expect(ok.status).toBe(201)`(`:328`)未报错(若正控本身失败,vitest 会在 `:328` 就中断,报告的行号不会是 `:333`)——这是「隔离」的字面含义:失败点单点落在跨 org 格,不再牵连正控。
+
+**结论**:A″(a) 是**有判别力的 mutation**——去掉 `linkApprovalTemplateToGroup` 里 group 行锁 SELECT 的 org 谓词后,跨 org 请求会找到本不该看见的 group 行、拿到 `archived_at`(非空判定通过)、继续走到 upsert,upsert 因 `(org_id, group_id)` 与 `atgl_group_fk` 目标不匹配而在**写入侧**触发复合 FK 的 23503(未被 `mapGroupConstraintError` 映射,兜底 500)——**机制与锁文预言的「23503 而非 404」完全一致**,只是本节改写前的记录选错了改法、把噪音(参数计数报错)当成了信号。
+
+**还原与确认**(§16 收尾流程的一部分,现场重跑):
+
+```
+$ cp /tmp/gateA-fix2-probe-backups/ApprovalTemplateGroupService.ts.orig \
+    packages/core-backend/src/services/ApprovalTemplateGroupService.ts
+$ cmp /tmp/gateA-fix2-probe-backups/ApprovalTemplateGroupService.ts.orig \
+    packages/core-backend/src/services/ApprovalTemplateGroupService.ts && echo "cmp OK"
+cmp OK
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts -t "A″" --reporter=dot
+ ✓ tests/integration/approval-template-groups-lifecycle.db.test.ts (16 tests | 1 skipped)
+ Test Files  1 passed (1)
+      Tests  15 passed | 1 skipped (16)
+$ git status --porcelain
+(空)
+```
+
+**行号作用域说明(比照 §15 开头的通用披露,本节额外声明)**:本节是**唯一**在本轮(head `bdfe29974` 之后)重新现场执行的 mutation 行——其余 §15/§16/§17 的行号与输出仍是 `252d01865` 的历史记录,不因本节重跑而重算(道理同 §15 开头的作用域说明)。`ApprovalTemplateGroupService.ts:358`(被 mutate 的那一行)与旧记录数字相同,这不是巧合而是因为修复轮 1 只改了 `routes/approvals.ts` 与 lifecycle 测试文件、未碰 `ApprovalTemplateGroupService.ts`(§18 头部已声明);但**测试断言的行号发生了移位**——旧记录引用的正控行是 `:323`,本节现场重跑得到的正控行是 `:328`、跨 org 断言行是 `:333`(均为修复轮 1 在该测试文件内新增用例导致的 +5 移位,与 §12 crosswalk 表「原 `:312` → 现 `:317`」记录的同一批移位一致)——三个数字**均为本次独立 `grep -n`/断言栈现场确认**,不是沿用旧记录未核实的数字,读者不应把 `:323` 当作本节仍然成立的引用。
 
 ### 15.5 E(1):比锁文预言更早的失败信号
 
@@ -554,6 +606,7 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 7. **§15.6 揭示的测试文件头部注释机制描述偏差** —— 不属于代码缺陷(测试判定本身仍是有效的红/绿门),但建议后续修订 `serialization.db.test.ts:19-33` 的头部注释,把「哪一层 try/catch 是真正防线」写准确;本次遵守「不改代码」未做这处编辑,留给门审决定是否值得单独一个小改动 PR。
 8. **§3.4(设计 MD)记录的实现者裁量**(重复归档复用 `GROUP_ARCHIVED`)—— 未获锁文文本背书,无验收行覆盖,门审需明确认可或要求改动。
 9. **§3.5(设计 MD,修复轮 1 新增)记录的实现者裁量**(挂接可见性失败形状复用 `APPROVAL_TEMPLATE_NOT_FOUND`,404 而非发明新码)—— 同 #8,未获锁文文本背书(锁文只 ratify「要校验」,未点名失败码),无独立验收字母覆盖(附属于 I5/§2,不是锁文 §4 表的一行),门审需明确认可或要求改动;可达性披露见 §18.1。
+10. **G 的双层防线定性(修复轮 2,gate P2-2 收口)**——`unarchiveApprovalTemplateGroup` 同时保留「显式预检查 + 共享 mapper 分支」两层同名冲突防御是**实现选择**,不是锁文要求;第一层(`:311-317`)可安全删除且不引入 TOCTOU(同 org 三条写路径共享同一把 L0),保留它的理由(避免 L0 临界区内一次注定失败的写)较薄。本轮**只更正了归因**(§15.1 结论重写 + 测试文件 `:591-` 注释同步,删除了「需要发明新 mutation」的被驳论断),未删除代码——门审需裁 (a) 删除预检查使 G 恢复单条 mutation 判别力,或 (b) 接受现状为实现选择。PR body 开出时需点名此项(与 #2/#8/#9 同批)。
 
 ## 18. 修复轮 1(2026-09-18)—— gate `impl-gate-A-slice1-round1-20260918.md` P2-1 / P2-4 收口
 
@@ -622,3 +675,61 @@ $ git status --porcelain    (本轮全部 mutation 探针还原后)
 ```
 
 本轮**不涉及** DDL、`plugin-tests.yml`、`vitest.config.ts`、s6a 钉——两点接线与 §1/§2/§4 的核对结论对本轮改动后的 HEAD 依然成立(新增的两个 `it()` 在既有已接线文件内,未新增文件)。
+
+## 19. 修复轮 2(2026-09-18)—— gate `impl-gate-A-slice1-round1-20260918.md` P2-2 / P2-5 收口
+
+被审对象是修复轮 1 落地后的 HEAD(`bdfe29974`);本轮只动 `docs/development/approval-template-groups-phase1-verification-20260918.md`(本文档自身,§15.1/§15/§17)与 `packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts`(G 用例前 `:591-` 处的注释,纯注释改动,零行为代码)——**不改 DDL、不改 `plugin-tests.yml`/`vitest.config.ts`、不改任何 `.ts` 生产代码**(`ApprovalTemplateGroupService.ts`/`routes/approvals.ts` 的探针已全部还原,收尾 `cmp`/`git status` 见下)。P2-3/P3-6/P3-7/P3-8/P3-9/P3-10 本轮未处理,原状见 gate 报告,留给后续修复轮。
+
+### 19.1 P2-2 —— G 的双层防线定性从「锁文合同缺口」改判为「实现选择」
+
+**处置口径**:采用 gate 给出的选项 (b)——只更正归因,不删代码。选项 (a)(删除 `unarchiveApprovalTemplateGroup:311-317` 的预检查、让 G 恢复单条 mutation 判别力)会撤销 `ApprovalTemplateGroupService.ts:280-292` 文件头注释已明确论证过的一处实现决策,牵连 G/A/K(unarchive)三组探针与 §15.1 的重新执行,超出本轮「一到两条」的范围,且门审本身未指定也未验证任何替代形状——留给 owner 与后续实现轮裁决,本轮不代为决定。
+
+**改动的两处**:
+1. 验证 MD §15.1「结论」段——原句「这不是缺陷,是……已被架构自身文档化的现象」改写为:锁文 G 行只要求「同名冲入阻塞」这一可观察行为,不要求两层独立防御;第二层(`mapGroupConstraintError:137`)是共享基础设施,第一层(`:311-317` 的显式预检查)是本实现在其上追加的选择;该层可安全删除且不引入 TOCTOU(同 org 三条写路径共享同一把 L0 advisory lock,预检查与 UPDATE 之间没有可被并发利用的窗口);保留它的理由(避免 L0 临界区内一次注定失败的写)较薄,如实写明「较薄」而非包装成充分理由;明确请 owner 在 (a) 删除预检查 / (b) 接受现状为实现选择之间二选一。
+2. 验证 MD §17 新增条目 #10,把这条实现者裁量并入 #8/#9 所在的「门审需明确认可或要求改动」桶,并注明 PR body 开出时需与 #2/#8/#9 同批点名。
+
+**测试文件注释同步**(`lifecycle.db.test.ts:591-` 附近,G 用例正上方):删除被门审明确驳回的一句——「this is a lock-vs-implementation contract gap……since strengthening it would mean inventing a new mutation not in the lock」(门审原话:「不必发明锁文之外的新 mutation」,该句断言的前提是假的)。替换为:指出这是实现选择而非锁文缺口,第一层是在共享分支之上的额外添加,删除第一层即可恢复单条判别力且不触碰锁文文本要求任何东西,并指向验证 MD §15.1/§17 #10 的 owner 裁决点。**这是纯注释改动**,零行为代码变化。
+
+**回归确认**(同一 `metasheet2_lock_a`,注释改动不需要 mutation 探针,只需确认套件仍然全绿且未引入语法/类型错误):
+
+```
+$ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  2 passed (2)
+      Tests  26 passed (26)
+$ pnpm exec tsc --noEmit -p .
+(无输出,exit 0)
+```
+
+用例计数不变(26,与 §18.3 收尾一致)——本条只改注释,不新增/删除任何 `it()`。
+
+### 19.2 P2-5 —— 台账 #9(A″(a))改写为隔离版本
+
+被门审点名「记录的失败点与机制都错」的那一行(§15 台账 #9、§15.4)**整段撤回重写**,不是追加订正:
+
+- **旧版**(现已撤回):删除 `org_id = $1 AND` 后 SQL 不再引用 `$1`,而调用点仍传两个绑定参数 ⇒ PostgreSQL 直接报「参数数量与占位符不匹配」,把正控(`ok.status` 应为 201)也一并炸掉——对「org 谓词是否真的在挡跨 org」零判别力。
+- **新版**(本轮现场执行,见 §15.4 全文重写):隔离改法 `org_id = $1 AND` → `$1::text IS NOT NULL AND`,保留对 `$1` 的引用以消除参数计数噪音。`metasheet2_lock_a` 上 `cp` 备份 → 改 → `-t "A″"` → 结果:失败点精确落在跨 org 断言(`expected 500 to be 404`),同一用例内先执行的正控断言未受影响(测试框架在第一处失败即中断,失败行号确认落在跨 org 格而非正控格)→ `cp` 还原 → `cmp OK` → 单独重跑回绿 → 全量重跑回绿(见下)。
+
+**结论变化**:旧版记录仍判定为"RED"但机制记错;新版确认 A″(a) **依然是有判别力的 mutation**,且机制与锁文预言一致(23503 复合 FK 兜底 500,而非 404)——这纠正的是**记录**,不是**判定**:A″ 这一行此前与此后都是真门,只是台账里写的失败点和原因是错的。
+
+**重要澄清(与 P2-1 的调用路径变化无关)**:本条 mutation 的施法点是 `linkApprovalTemplateToGroup` 内 group 行的 `FOR UPDATE` SELECT(`ApprovalTemplateGroupService.ts:358`),该函数本身与修复轮 1 新增的 `isApprovalTemplateVisibleForGroupLink` 前置校验(`routes/approvals.ts`,校验的是**模板**可见性,不涉及 group 的 org 归属)是两个独立的检查点——现场重跑证实修复轮 1 的改动没有掩盖或提前拦截这条 mutation 的信号,红点仍然精确落在锁文预言的位置。
+
+**全量回归**(与 §19.1 共用同一次重跑,§15.4 内已完整记录命令与逐字输出,不重复贴):`Test Files 2 passed (2) / Tests 26 passed (26)`;`git status --porcelain` 与 `git diff --stat` 均限定在 `packages/ plugins/ .github/` 路径下为空(方法论同 §16)。
+
+### 19.3 收尾核对
+
+```
+$ git status --porcelain -- packages/ plugins/ .github/
+(空)
+$ cmp /tmp/gateA-fix2-probe-backups/ApprovalTemplateGroupService.ts.orig \
+    packages/core-backend/src/services/ApprovalTemplateGroupService.ts && echo OK
+OK
+```
+
+（本节写入过程中本文档自身仍在被编辑,`git diff --stat` 的插入/删除计数会随本节剩余段落继续变化——不在此处贴一个会在写完这句话之后立刻过期的数字,道理同 §10.1「verdict 必须绑已发生的 SHA,不能靠预告」。提交后的精确 diffstat 见对应 commit 的 `git show --stat`,提交信息里会写。这里只用范围受限的 `git status --porcelain -- packages/ plugins/ .github/` 断言**代码路径**零残留、`cmp` 断言生产代码文件字节级复原——这两条在本节写完之后依然成立,已改动的文件只有本文档与 `lifecycle.db.test.ts` 的注释块,没有触碰 DDL、`plugin-tests.yml`、`vitest.config.ts`、s6a 钉、或任何生产 `.ts` 文件的可执行代码。）
+
+### 19.4 本轮未处理(原状留给下一轮)
+
+P2-3(B′ 处置口径并入 owner 勘误桶)、P3-6(F 补齐归档/挂接两格)、P3-7(squash `f6e8ea2d8` 等 wip 提交)、P3-8(三处逐字/注释更正)、P3-9(闭世界守卫披露,同 §9/§13.5,不新建)、P3-10(typecheck 边界已写入验证 MD,无需重复)——按 gate 报告原文列出,未在本轮触碰。
