@@ -57,8 +57,31 @@
  * `tests/unit/approval-can-decide-current-node.test.ts` (not this file — that suite has no DB):
  * 19/41 redden, including both of row C′'s named unit-level param sets ("非 pending 实例" — the six
  * non-pending-status tests — and "席位不在可决节点" — "a seat at a node the instance is NOT stopped
- * on cannot decide"), restored and re-run 41/41 green. Judge B remains deferred (see the
- * fixture-plumbing docblock below for the S9 note).
+ * on cannot decide"), restored and re-run 41/41 green. Judge B (fail-closed AND discriminable,
+ * design-lock §5 row B's API-layer half) is now DISCHARGED by the `describe('Judge B — ...')` block
+ * below (observation points: `GET /api/todo/items` AND `GET /api/todo/count` — the latter had ZERO
+ * prior coverage anywhere in the repo, confirmed via `grep -rn "api/todo/count" packages/core-backend/tests
+ * apps/web` returning no hit before this commit). Rather than mutating a source file on disk, this
+ * uses the registry's own test-only `clear()` escape hatch (`pending-source-registry.ts`'s own
+ * docblock names this exact use) to swap in a deliberately-throwing stub in the SAME process the
+ * running server's routes read from — a live substitution of the "审批源抛错" the lock's wording
+ * asks for, not a simulation. Three real requests, no mutation ledger entry needed (the fault IS the
+ * test body, not a reverted edit): (1) a second, additionally-registered stub source throws
+ * alongside the real `approval` source ⇒ `approval` stays `ok` and its class-① item/count are
+ * unaffected, the stub source alone reports `unavailable`; (2) the `approval` NAME itself is
+ * re-registered with a throwing implementation (replacing the real source, per `Map.set` semantics
+ * in `register()`) while a second, healthy stub source is registered alongside it ⇒ `approval`
+ * reports `unavailable` and class ①'s item disappears entirely (not a stale copy, not folded into a
+ * smaller total — the healthy stub's own item/count is the ONLY thing left), proving the failure
+ * does not degrade into a quietly-smaller number; (3) negative control, class ④ (genuinely zero
+ * pending, no registry mutation) ⇒ both endpoints answer `sources: { approval: 'ok' }` with 0
+ * items/count and neither response's `sources` map contains the string `'unavailable'` anywhere —
+ * the shape §5 row B calls out as required to stay distinguishable from (1)/(2) above. An `afterEach`
+ * restores the registry to production shape (`clear()` then `register(approvalPendingSource)`)
+ * after every test in the block, defensive against this ceasing to be the last describe block in a
+ * future edit.
+ *
+ * (See the fixture-plumbing docblock below for the S9 note.)
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -71,9 +94,11 @@
  * vitest config.
  */
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { pendingSourceRegistry, type PendingItem } from '../../src/services/pending-source-registry'
+import { approvalPendingSource, APPROVAL_PENDING_SOURCE_NAME } from '../../src/services/approval-pending-source'
 import type { Pool } from 'pg'
 
 // ---------------------------------------------------------------------------------------------
@@ -488,6 +513,24 @@ async function fetchTodoItems(baseUrl: string, token: string): Promise<{ status:
     headers: { Authorization: `Bearer ${token}` },
   })
   const body = (await response.json()) as TodoItemsResponse
+  return { status: response.status, body }
+}
+
+interface TodoCountResponse {
+  count: number
+  sources: Record<string, 'ok' | 'unavailable'>
+}
+
+/** Judging criterion B's second observation point (design-lock §5 row B): `GET /api/todo/count` —
+ *  the aggregated count `routes/todo.ts` serves off the SAME `pendingSourceRegistry` as
+ *  `fetchTodoItems` above, distinct from `/api/approvals/pending-count`. Zero prior coverage of this
+ *  route anywhere in the repo before this commit (`grep -rn "api/todo/count" packages/core-backend/tests
+ *  apps/web` returns no hit on the pre-commit tree — verified in the verification doc). */
+async function fetchTodoCount(baseUrl: string, token: string): Promise<{ status: number; body: TodoCountResponse }> {
+  const response = await fetch(`${baseUrl}/api/todo/count`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const body = (await response.json()) as TodoCountResponse
   return { status: response.status, body }
 }
 
@@ -1281,6 +1324,110 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       // `tests/unit/approval-can-decide-current-node.test.ts`, not here — that suite has no DB and
       // is not part of this real-DB gate file.
       expect(match?.actionable).toBe(false)
+    })
+  })
+
+  // Judging criterion B (design-lock §5 row B, API-layer half): fail-closed AND discriminable — a
+  // source that throws must answer 200 with that source marked `unavailable` (not fold into a
+  // smaller/zero count, not crash the aggregate), other registered sources must be unaffected, and
+  // a GENUINELY zero-pending viewer must stay distinguishable (`ok` + 0, no `unavailable` anywhere).
+  //
+  // This uses the registry's own test-only `clear()` escape hatch (see that method's docblock in
+  // `pending-source-registry.ts`) to swap a deliberately-throwing stub into the SAME
+  // `pendingSourceRegistry` singleton the running server's `routes/todo.ts` reads from — a live
+  // substitution, not a mutation of a file on disk, so there is no cp/edit/restore/cmp ledger entry
+  // for this row (the fault IS the test body). `afterEach` restores production shape after every
+  // test so a failure mid-test still leaves later tests (in this file, or any added after this
+  // block in future) with a sane registry.
+  describe('Judge B — fail-closed and discriminable per-source status (observation points: GET /api/todo/items, GET /api/todo/count)', () => {
+    afterEach(() => {
+      pendingSourceRegistry.clear()
+      pendingSourceRegistry.register(approvalPendingSource)
+    })
+
+    it('a second registered source that throws is reported `unavailable`; the real `approval` source stays `ok` and its class-① item/count are unaffected', async () => {
+      const failingSourceName = `todo-center-gate-stub-b-fail-${suffix}`
+      pendingSourceRegistry.register({
+        name: failingSourceName,
+        async listPendingForUser(): Promise<PendingItem[]> {
+          throw new Error('todo-center-gate-stub-b: deliberate failure for judging criterion B')
+        },
+      })
+
+      const token = await devToken(baseUrl, v1.id)
+      const itemsResult = await fetchTodoItems(baseUrl, token)
+      const countResult = await fetchTodoCount(baseUrl, token)
+
+      expect(itemsResult.status).toBe(200)
+      expect(countResult.status).toBe(200)
+      expect(itemsResult.body.sources.approval).toBe('ok')
+      expect(itemsResult.body.sources[failingSourceName]).toBe('unavailable')
+      expect(countResult.body.sources.approval).toBe('ok')
+      expect(countResult.body.sources[failingSourceName]).toBe('unavailable')
+      // The real source's own class ① golden value (1) is untouched by the sibling failure.
+      expect(itemsResult.body.items.some((item) => item.id === instance1.id)).toBe(true)
+      expect(countResult.body.count).toBe(1)
+    })
+
+    it('the `approval` source ITSELF throwing (same-name registry swap) is reported `unavailable` and its item disappears — NOT folded into a smaller number; a concurrently-healthy stub source stays `ok` and is still counted', async () => {
+      const okStubName = `todo-center-gate-stub-b-ok-${suffix}`
+      const stubItemId = `todo-center-gate-stub-b-item-${suffix}`
+      const stubItem: PendingItem = {
+        source: okStubName,
+        id: stubItemId,
+        title: 'judge-B healthy stub item',
+        href: `/stub/${stubItemId}`,
+        updatedAt: new Date().toISOString(),
+      }
+      pendingSourceRegistry.register({
+        name: APPROVAL_PENDING_SOURCE_NAME,
+        async listPendingForUser(): Promise<PendingItem[]> {
+          throw new Error('todo-center-gate-stub-b: approval source itself failing for judging criterion B')
+        },
+        async countPendingForUser(): Promise<number> {
+          throw new Error('todo-center-gate-stub-b: approval source itself failing for judging criterion B')
+        },
+      })
+      pendingSourceRegistry.register({
+        name: okStubName,
+        async listPendingForUser(): Promise<PendingItem[]> {
+          return [stubItem]
+        },
+      })
+
+      const token = await devToken(baseUrl, v1.id)
+      const itemsResult = await fetchTodoItems(baseUrl, token)
+      const countResult = await fetchTodoCount(baseUrl, token)
+
+      expect(itemsResult.status).toBe(200)
+      expect(countResult.status).toBe(200)
+      expect(itemsResult.body.sources.approval).toBe('unavailable')
+      expect(itemsResult.body.sources[okStubName]).toBe('ok')
+      // Class ①'s real pending item is ABSENT — the failing source contributes nothing, not a
+      // stale copy — while the healthy stub's own item is present.
+      expect(itemsResult.body.items.some((item) => item.id === instance1.id)).toBe(false)
+      expect(itemsResult.body.items.some((item) => item.id === stubItemId)).toBe(true)
+      expect(countResult.body.sources.approval).toBe('unavailable')
+      expect(countResult.body.sources[okStubName]).toBe('ok')
+      // Exactly the healthy stub's contribution (1) — not folded into 0, not inflated.
+      expect(countResult.body.count).toBe(1)
+    })
+
+    it('negative control: a genuinely zero-pending viewer (class ④, no registry mutation) gets `ok` + 0 from every source — a shape distinguishable from both `unavailable` cases above (no `unavailable` value anywhere in `sources`)', async () => {
+      const token = await devToken(baseUrl, v4.id)
+      const itemsResult = await fetchTodoItems(baseUrl, token)
+      const countResult = await fetchTodoCount(baseUrl, token)
+
+      expect(itemsResult.status).toBe(200)
+      expect(countResult.status).toBe(200)
+      expect(itemsResult.body.sources).toEqual({ approval: 'ok' })
+      expect(countResult.body.sources).toEqual({ approval: 'ok' })
+      expect(itemsResult.body.items).toHaveLength(0)
+      expect(countResult.body.count).toBe(0)
+      // The §5 row B discriminability requirement: neither shape contains `unavailable` anywhere,
+      // unlike both mutations above.
+      expect(Object.values(itemsResult.body.sources)).not.toContain('unavailable')
+      expect(Object.values(countResult.body.sources)).not.toContain('unavailable')
     })
   })
 })

@@ -790,5 +790,96 @@ target suite, `tests/unit/approval-can-decide-current-node.test.ts`, runs in the
 `test (20.x)` job already, per that suite's own docblock, needing no lane assignment of its own —
 consistent with the lock's own "C′ 的单元级 mutation 在默认 no-DB lane" line.
 
-Judge C′ is DISCHARGED. Judge B remains deferred — see the gate file's own docblock for the current
-status line.
+Judge C′ is DISCHARGED.
+
+## Judging criterion B (fail-closed AND discriminable, API-layer half) — DISCHARGED, no source-file mutation needed
+
+Design-lock §5 row B: a source that throws must answer `200` with that source marked `unavailable`
+(never folded into a smaller/zero count, never a 500), other registered sources must be unaffected,
+and a genuinely zero-pending viewer must stay distinguishable (`ok` + 0, no `unavailable` anywhere).
+Scope for this step is the row's **API layer** half only (registry-level, both `GET /api/todo/items`
+and `GET /api/todo/count`) — the badge-layer half (`ApprovalTodoBadge.vue`'s `degraded`/`unavailable`
+rendering, and the FE-spec stub for it) belongs to the B-2 frontend slice per the goal doc's
+`B-2 前端 ... 承接判据 B 徽标格` line, not this backend step.
+
+Unlike judges A/C/C′/D, this row's own mechanism is already load-bearing production code —
+`pending-source-registry.ts`'s `listPendingForUser`/`countPendingForUser` both wrap each registered
+source's call in a `try { ... } catch { sources[source.name] = 'unavailable' }` (no rethrow), and
+that module's own docblock on `clear()` names this exact use ("a suite that wants a clean registry
+... can reset before registering its own sources... e.g. to register a deliberately-throwing stub for
+criterion B") — the escape hatch was built anticipating this step. So the probe here is a **live
+in-process registry substitution** (swap a throwing stub into the SAME `pendingSourceRegistry`
+singleton `routes/todo.ts` reads from), not a cp/edit/restore/cmp mutation of a file on disk — there
+is no source-file diff to leave outstanding, and no restore/cmp step, because nothing on disk changed.
+
+`GET /api/todo/count` had zero prior test coverage anywhere in the repo before this commit:
+
+```
+$ grep -rn "api/todo/count" packages/core-backend/tests apps/web
+```
+(no output, confirmed against the tree immediately before this step's edit) — so a `fetchTodoCount`
+helper was added alongside the existing `fetchTodoItems` one, and Judge B's block exercises both
+endpoints (row B's own wording does not name one over the other; both share the same `sources` shape
+off the same registry).
+
+Three real HTTP round trips against the live server, added as permanent test content — a
+`describe('Judge B — ...')` block in `todo-center-pending-gate.ts`, run after Judge C′'s block:
+
+1. **A second registered source throws; the real `approval` source is unaffected.** Register an
+   additional stub source (`todo-center-gate-stub-b-fail-<suffix>`) whose `listPendingForUser`
+   unconditionally throws, alongside the real `approval` source (already registered by
+   `MetaSheetServer`'s constructor at `beforeAll` time). Viewer: class ①'s `v1` (golden value 1).
+   Assert both endpoints answer `200`, `sources.approval === 'ok'`, `sources['...-fail-...'] ===
+   'unavailable'`, class ①'s item is still present in `/api/todo/items`, and `/api/todo/count`'s
+   `count` is still `1` — the failing sibling contributes nothing but does not touch the real
+   source's own numbers.
+2. **The `approval` NAME itself is re-registered with a throwing implementation** (`register()`'s
+   `Map.set` semantics replace-by-name — this is the literal "审批源抛错" the lock's wording asks
+   for, not a synthetic third source), with a second, healthy stub source
+   (`todo-center-gate-stub-b-ok-<suffix>`, returning one `PendingItem`) registered alongside it.
+   Assert `sources.approval === 'unavailable'`, class ①'s item is **absent** from
+   `/api/todo/items` (not a stale copy — genuinely gone), the healthy stub's item **is** present,
+   `sources['...-ok-...'] === 'ok'`, and `/api/todo/count`'s `count` is exactly `1` — the healthy
+   stub's own contribution, not `0` (folded-into-zero) and not `2` (stale approval count leaking
+   through).
+3. **Negative control** — class ④ (`v4`, genuinely zero pending, no registry mutation at all):
+   both endpoints answer `sources: { approval: 'ok' }` (via `toEqual`, so no stray `unavailable` key
+   can hide), `items` has length `0`, `count` is `0`, and `Object.values(sources)` contains no
+   `'unavailable'` string in either response — the shape §5 row B requires to stay distinguishable
+   from both mutations above.
+
+An `afterEach` inside the `describe` block restores production shape
+(`pendingSourceRegistry.clear()` then `pendingSourceRegistry.register(approvalPendingSource)`) after
+every test, so a failure mid-test still leaves the registry sane; this is also why the block is
+written to run all three tests regardless of order rather than depending on test 3 running before 1/2.
+
+```
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/ --reporter=verbose
+ ✓ tests/todo-center-pending-gate/todo-center-pending-gate.ts > todo-center pending-query production-path gate (real DB, dedicated process) > Judge B — fail-closed and discriminable per-source status (observation points: GET /api/todo/items, GET /api/todo/count) > a second registered source that throws is reported `unavailable`; the real `approval` source stays `ok` and its class-① item/count are unaffected
+ ✓ tests/todo-center-pending-gate/todo-center-pending-gate.ts > todo-center pending-query production-path gate (real DB, dedicated process) > Judge B — fail-closed and discriminable per-source status (observation points: GET /api/todo/items, GET /api/todo/count) > the `approval` source ITSELF throwing (same-name registry swap) is reported `unavailable` and its item disappears — NOT folded into a smaller number; a concurrently-healthy stub source stays `ok` and is still counted
+ ✓ tests/todo-center-pending-gate/todo-center-pending-gate.ts > todo-center pending-query production-path gate (real DB, dedicated process) > Judge B — fail-closed and discriminable per-source status (observation points: GET /api/todo/items, GET /api/todo/count) > negative control: a genuinely zero-pending viewer (class ④, no registry mutation) gets `ok` + 0 from every source — a shape distinguishable from both `unavailable` cases above (no `unavailable` value anywhere in `sources`)
+
+ Test Files  1 passed (1)
+      Tests  25 passed (25)
+```
+
+No source-file diff outstanding for this row (only the gate file and this doc changed):
+```
+$ git diff --stat -- packages/core-backend/src/services/pending-source-registry.ts packages/core-backend/src/services/approval-pending-source.ts packages/core-backend/src/routes/todo.ts
+$ echo $?
+0
+```
+(empty diff, exit 0 — Judge B's API-layer half needed zero production-code changes; the fail-closed
+mechanism it exercises already existed.)
+
+**Not covered by this step** (explicitly, per the goal doc's B-2 slice split, not an oversight):
+the badge-layer half of row B (`ApprovalTodoBadge.vue`'s rendering of `degraded`/`unavailable`, and
+the FE-spec mutation restoring today's `applyCount(0)` catch-branch behavior) — that is frontend
+work assigned to slice B-2, gated on this B-1 backend slice passing review first. The §7-6
+`AuthService.resolveRbacProfile` silent-catch residual (`isRbacAdmin`/`listUserPermissions`,
+`:740-745`/`:747-751`) named in the lock's own v2.6 rewrite is likewise out of scope for row B per
+the lock's own text ("AuthService 层吞错... 不在本格,见 §7-6").
+
+Judge B (API-layer half) is DISCHARGED.
