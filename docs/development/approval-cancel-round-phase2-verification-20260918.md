@@ -23,6 +23,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-3 | commit `56d517127` message, 2nd paragraph, and §3.10.3's first draft | "that inversion is a cycle on the same (request, instance) pair today" … the reorder "closes" the live defect | **RETRACTED IN PART — the reorder closes it for the CANCEL path only.** My own census leg contradicts the word "closes": Q-G LEG 4 shows the DECISION adapter (`index.cjs:37596`/`:37617`) is also `attendance_requests → approval_instances` and is also gated on `requestRow.status === 'pending'` — exactly the population `bulkReassignApprovals` reaches `classifyAndLockAttendanceRequestForInstance` on with the instance row held. So the same cycle, same shape, is **still live** after this commit via the decision adapter. Leaving that adapter to the attendance line is the right scope call; calling the defect closed was not. The commit message cannot be edited without a force-push, so the correction lives here. |
 | R-4 | `ApprovalProductService.redeemCancelRoundInTxn`'s own comment (commit `08b7cbec3`), and §4's 「it is CHEAP」 bullet | 「`operationId` … must be a UUID … The round row's own id **is exactly the right identity**」, and 「the end-to-end case … is a handful of lines」 | **BOTH RETRACTED — see §3.12.** The round id is `text`, minted `apr_${crypto.randomUUID()}`, so the boundary refused EVERY real redemption with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID` (500). Four double-backed acceptance cases were green over a code path that could not work. And the end-to-end case was not cheap: it took a production fix plus two fixture facts that no reading of the source would have produced. |
 | R-2 | my own working notes for this step | "the `w7-w6r5-guard` classification test ran and passed" | **RETRACTED — it never ran.** A combined run of three targets printed `Test Files 2 passed (2)` and I inferred which two. Checked directly: `npx vitest run tests/unit/w7-w6r5-guard` prints **`No test files found, exiting with code 1`** — that path holds `classification.ts` and `walk.ts`, which are corpora, not suites. Their real consumers are named in §2.5 and were run there. A directory that collects zero files is not a green. |
+| R-5 | commit `5dbbf5f6b` message, 3rd paragraph, and §3.13.2's first draft | "under M-20 **ALL THREE** of R2's literal clauses stayed GREEN (**measured** — the `ivexp` case … passed)" | **RETRACTED IN PART — clause 1 was NOT measured by that run.** `ivexp` has no attendance target, so it asserts nothing about 零业务取消; the only case that does is R2 itself, and in that run R2 died at the `approve_rows` assertion, which the first draft ordered BEFORE the 零业务取消 rows — so those rows were never evaluated. Clauses 2 and 3 were genuinely measured; clause 1 was an argument labelled as a measurement, in a file whose whole discipline is the opposite. FIXED by the follow-up commit: the case now orders the three literal clauses first and the implementer addition last, and M-20 re-run puts the red on the file's last line (`:1433:49`) with all three evaluated and green. The original commit message cannot be edited without a force-push, so the correction lives here. |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -1529,18 +1530,29 @@ and redone).
 
 ### 3.13.2 ⚠️ WHICH assertion carries the mutation — and it is an implementer addition
 
-**Measured, not argued**: under M-20 the `ivexp` case (§3.4) — which asserts 零完成事件, engine
-`rejected`, round `expired` + `ended_at`, the system actor and the decision snapshot, i.e. R2's
-clauses 2 and 3 in full — **stayed GREEN**. So did every other case in the six files except one.
+**Measured — after a correction.** The first version of this case asserted the implementer addition
+SECOND, so when M-20 turned it red the three literal clauses below it were never evaluated and
+「they stayed green」 was an argument wearing a measurement's label (retracted in §0, R-4). The case
+now orders the three literal clauses FIRST and the implementer addition LAST, and M-20 was re-run:
+the red lands on the file's LAST assertion (`…redemption.db.test.ts:1433`,
+`expect(roundRecords.rows[0].approve_rows).toBe('0')`), so **every clause in the table below was
+evaluated in that same run and passed**.
 
 That is §11-③'s trap recurring at this branch, and it is worth stating in full because it means
 **R2's three literal clauses cannot detect the mutation the lock names for R2**:
 
 | R2 clause | Under M-20 | Why |
 |---|---|---|
-| 零业务取消 | GREEN | the evaluation still answers `expired` and still skips C-1 — just later |
-| 零 `approved` 完成事件 (in-process channel) | GREEN | the C-3 branch's own `return` sits before the post-commit `emitApprovalCompletionEvent`, so the built event is never emitted wherever the hook sits |
-| C-3 收口已持久化 | GREEN | the closure still runs and still overwrites `approved` back to `rejected` |
+| 零业务取消 (原单 `approved`, zero `revoke`, request `approved` + NULL `resolved_*`) | GREEN — evaluated, line-ordered before the red | the evaluation still answers `expired` and still skips C-1 — just later |
+| 零 `approved` 完成事件 (in-process channel) | GREEN — evaluated | the C-3 branch's own `return` sits before the post-commit `emitApprovalCompletionEvent`, so the built event is never emitted wherever the hook sits |
+| C-3 收口已持久化 (round `expired` + `ended_at`, engine `rejected`, system actor, `dto.status`) | GREEN — evaluated | the closure still runs and still overwrites `approved` back to `rejected` |
+
+**How narrow the anchor's detection surface actually is.** Across the whole six-file cancel-round
+corpus (61 cases) M-20 is detected by **exactly one assertion on exactly one path**. `ivexp` (§3.4,
+the `not_required` expired close) stays green; §3.12's end-to-end REDEEM case stays green too (status
+write → approve record → enqueue → hook → C-1 → fall-through → one post-commit event still holds
+when the hook is late). 「exactly 1 red」 undersells that: it is 1 red out of 61 because 60 cases
+genuinely cannot see the reordering, not because the corpus is thin.
 
 The discriminating assertion is the **persisted `approved` half of step ⑥** — the `approve` audit row
 on the cancel round's own instance, which the mutant writes and the shipped order does not:
@@ -1562,6 +1574,7 @@ the test file modified).
 | # | Mutation | Expected | Observed |
 |---|---|---|---|
 | M-20 | move the outlet-#5′ hook block past step ⑥ (after `enqueueApprovalEventIfDurable`) | R2 red, and only R2 | **exactly 1 red**: `R2 … expected '1' to be '0'` (the `approve` audit row the mutant writes). 60 green — including `ivexp`, which proves the hook still EXECUTED in its new position and still closed the round, so the red is the reordering and not an unreachable hook |
+| M-20 (re-run, after the assertion reorder) | same mutation, against the reordered case | the red should move to the file's LAST assertion, with all three literal clauses evaluated and green | **red at `…redemption.db.test.ts:1433:49`** — the last line of the case. 13 of 14 green in that file. This is what makes the §3.13.2 table a measurement instead of an argument |
 
 Two hygiene checks the ledger line depends on, run rather than assumed:
 - the mutant **typechecks** (`npx tsc --noEmit`, exit 0) and its diffstat is `82 insertions(+), 80 deletions(-)` on one file — the block moved, it was not duplicated or dropped;
@@ -1621,13 +1634,30 @@ $ (packages/core-backend) EXPECT_DB=1 \
   FAIL … R2 … AssertionError: expected '1' to be '0'
 ```
 
-No new file and no `plugin-tests.yml` edit — the case went into a suite already enumerated by both CI
-contracts (§3.4), so **no s6a provenance re-pin is owed** by this unit:
+No new file and no `plugin-tests.yml` edit — the case went into a suite already enumerated by CI, so
+**no s6a provenance re-pin is owed** by this unit. ⚠️ The earlier units in this file ran that absence
+grep from `0225a1aa4`, a MID-BRANCH baseline; for an absence claim about the BRANCH it has to run
+from the branch point, which is what is done here:
 
 ```
-$ git diff --name-only 0225a1aa4..HEAD -- .github/workflows/plugin-tests.yml
+$ git diff --name-only feat/approval-cancel-round-phase1..HEAD \
+    -- .github/workflows/plugin-tests.yml scripts/ops/ci-realdb-step-contract.mjs
   0 lines
+$ git diff --name-status feat/approval-cancel-round-phase1..HEAD -- '*.db.test.ts'
+  M  …/approval-cancel-round-lock-order-census.db.test.ts
+  M  …/approval-cancel-round-outlet-guards.db.test.ts
+  M  …/approval-cancel-round-redemption.db.test.ts        (3 modified, 0 added)
+$ grep -n lock-order-census .github/workflows/plugin-tests.yml
+  1666:            tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
 ```
+
+So the 1006-line census file phase 1 added IS in the CI lane (it is not new on this branch —
+`git cat-file -e feat/approval-cancel-round-phase1:…lock-order-census.db.test.ts` succeeds), and this
+branch adds no `.db.test.ts` at all. `scripts/ops/ci-realdb-step-contract.mjs` contains **one**
+`db.test.ts` token in total (`grep -c db.test.ts` ⇒ 1) and **zero** `cancel-round` matches — it is not
+the per-file closed world the phase-1 header called it, so nothing is owed to it either. Recorded
+here because 「a closed world that stays green for a file it does not list」 is this branch's own
+named hazard and it deserved a run, not a recollection.
 
 
 ## 4. What this slice has NOT proven yet
@@ -1663,8 +1693,10 @@ they are.
   lock's own step ⑥ (lock:105-107) and the probe was run at that exact site (M-20: exactly 1 red,
   60 green). ⚠️ What is NOT established, and it is the headline: **R2's three literal clauses have
   no discriminating power against the mutation the lock names for R2** — all three stayed GREEN
-  under M-20 (measured: `ivexp` green), and the assertion that carries it is an IMPLEMENTER
-  ADDITION (the persisted `approve` audit row). §11-③'s trap, recurring at this branch. Also still
+  under M-20 — measured by ONE run of the reordered case, whose red lands on its last line
+  (`:1433:49`) so all three were evaluated first (§0 R-5 retracts the first draft's weaker
+  evidence) — and the assertion that carries it is an IMPLEMENTER ADDITION (the persisted
+  `approve` audit row). M-20 is detected by 1 assertion out of 61 cases in this corpus. §11-③'s trap, recurring at this branch. Also still
   open from this case: the `required` posture claim (SERIALIZABLE + rollout advisory lock) is a
   construction argument here, not a `pg_locks` measurement.
 - **The external end-to-end — DONE in §3.12, and it was NOT cheap.** The case is green against the
