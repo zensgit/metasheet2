@@ -14,7 +14,7 @@
         <template #default="{ row }">{{ delegateeDisplay(row.delegateeUserId) }}</template>
       </el-table-column>
       <el-table-column label="范围">
-        <template #default="{ row }">{{ row.scope === 'template' ? `指定模板：${row.scopeTemplateId}` : '全部审批' }}</template>
+        <template #default="{ row }">{{ row.scope === 'template' ? `指定表单：${row.scopeTemplateId}` : '全部审批' }}</template>
       </el-table-column>
       <el-table-column label="时间窗">
         <template #default="{ row }">{{ fmt(row.startAt) }} ~ {{ fmt(row.endAt) }}</template>
@@ -48,11 +48,11 @@
         <el-form-item label="范围">
           <el-select v-model="form.scope" data-testid="my-delegation-scope">
             <el-option label="全部审批" value="all" />
-            <el-option label="指定模板" value="template" />
+            <el-option label="指定表单" value="template" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="form.scope === 'template'" label="模板">
-          <el-input v-model="form.scopeTemplateId" placeholder="审批模板 ID" data-testid="my-delegation-template" />
+        <el-form-item v-if="form.scope === 'template'" label="表单">
+          <el-input v-model="form.scopeTemplateId" placeholder="审批表单 ID" data-testid="my-delegation-template" />
         </el-form-item>
         <el-form-item label="开始时间">
           <el-date-picker v-model="form.startAt" type="datetime" value-format="YYYY-MM-DDTHH:mm" />

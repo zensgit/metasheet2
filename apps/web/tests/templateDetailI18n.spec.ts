@@ -103,6 +103,14 @@ const unarchiveTemplateSpy = vi.fn()
 const listTemplateVersionsSpy = vi.fn().mockResolvedValue([])
 const getTemplateVersionSpy = vi.fn()
 const restoreTemplateVersionSpy = vi.fn()
+// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3; lazy-fetch corrected round 3,
+// gate 2 P1-1): CategoryCandidateInput.vue calls this lazily, on the field's first focus/open —
+// never on mount (see the component's own doc comment for why). The mock module previously omitted
+// this export entirely, so any mounted instance that DID reach the fetch had its bare `catch {}`
+// silently swallow a vitest "no export defined on mock" error and the dropdown always rendered zero
+// candidates. Default resolves to a small non-empty list so tests can observe both "the endpoint
+// was called" (C1 first conjunct) and "a fetched candidate renders".
+const listTemplateCategoriesSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   updateTemplateCategory: (id: string, category: string | null) => updateTemplateCategorySpy(id, category),
@@ -114,6 +122,7 @@ vi.mock('../src/approvals/api', () => ({
   listTemplateVersions: (id: string) => listTemplateVersionsSpy(id),
   getTemplateVersion: (id: string, versionId: string) => getTemplateVersionSpy(id, versionId),
   restoreTemplateVersion: (id: string, versionId: string, req: unknown) => restoreTemplateVersionSpy(id, versionId, req),
+  listTemplateCategories: () => listTemplateCategoriesSpy(),
 }))
 
 const elSuccessSpy = vi.fn()
@@ -409,6 +418,7 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     listTemplateVersionsSpy.mockReset().mockResolvedValue([])
     getTemplateVersionSpy.mockReset()
     restoreTemplateVersionSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset().mockResolvedValue(['差旅', '采购'])
     confirmSpy.mockClear().mockResolvedValue(undefined)
     elSuccessSpy.mockClear()
     elErrorSpy.mockClear()
@@ -533,10 +543,10 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     const root = await mountView()
 
     expect(root.querySelector('.ms-page-header__title')?.textContent).toBe('出差申请')
-    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回模板列表')
+    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回表单列表')
     expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
     expect(root.querySelector('[data-testid="template-detail-archive-button"]')?.textContent).toBe('停用')
-    expect(root.querySelector('.template-detail__category-label')?.textContent).toBe('模板分类:')
+    expect(root.querySelector('.template-detail__category-label')?.textContent).toBe('表单分类:')
     expect(root.querySelector('.template-detail__visibility')?.textContent).toContain('按部门')
     expect(root.querySelector('[data-testid="template-detail-visibility-ids"]')?.textContent).toBe('部门 1')
     expect(root.querySelector('.template-detail__node-assignee')?.textContent).toContain('用户:')
@@ -572,7 +582,7 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     setLocale('zh-CN')
     mockActiveTemplate.value = buildTemplate({})
     const root = await mountView()
-    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回模板列表')
+    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回表单列表')
     expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
     expect(root.querySelector('.template-detail__section h2')?.textContent).toBe('表单字段')
 
@@ -584,7 +594,7 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
 
     setLocale('zh-CN')
     await nextTick()
-    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回模板列表')
+    expect(root.querySelector('.ms-page-header__back')?.textContent).toContain('返回表单列表')
     expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
     expect(root.querySelector('.template-detail__section h2')?.textContent).toBe('表单字段')
   })
@@ -620,6 +630,75 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     root2.querySelector<HTMLButtonElement>('[data-testid="template-detail-category-save-button"]')!.click()
     await flushUi()
     expect(elSuccessSpy).toHaveBeenCalledWith('已更新分类为 报销')
+  })
+
+  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4; lazy-fetch corrected
+  // round 3, gate 2 P1-1): the detail-view category field must actually be wired to
+  // `GET /api/approval-templates/categories`, not merely still work as a free-text input if the
+  // wiring is ripped out (see G-M6 in the gate report, which reverted BOTH call sites — authoring
+  // AND this one — to plain `<el-input>` and found zero red tests anywhere in the suite before this
+  // pin existed). `CategoryCandidateInput` mounts once editing begins (`v-else` branch,
+  // `beginEditCategory`), but must NOT fetch merely from mounting — only on first focus (a
+  // mount-time fetch reds the required `approval-browser-verify` Playwright lane, which has no
+  // coverage of this view at all, so an unstubbed mount-time request here is otherwise invisible —
+  // see the gate-2 addendum). This observes no call right after entering edit mode, then a call on
+  // focus, then confirms a fetched candidate reaches the rendered dropdown.
+  it('C1: entering category edit mode does not fetch until the field is focused, then fetches and renders one', async () => {
+    // category: null so categoryDraft starts empty and the candidate filter (which narrows by the
+    // CURRENT typed value) shows the full fetched list rather than only entries containing the
+    // template's existing category.
+    mockActiveTemplate.value = buildTemplate({ category: null })
+    const root = await mountView()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="template-detail-category-edit-button"]')!.click()
+    await flushUi()
+    expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
+
+    const input = root.querySelector<HTMLInputElement>('[data-testid="template-detail-category-input"]')!
+    input.dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    const list = root.querySelector('[data-testid="category-candidate-list"]')
+    expect(list?.textContent).toContain('采购')
+  })
+
+  // P2-B (round 4, owner review) — parent-shortcut isolation proven against the REAL production
+  // wiring, not just the isolated Host in categoryCandidateInput.spec.ts. This view is the one that
+  // actually writes `@keyup.enter="saveCategory" @keyup.escape="cancelEditCategory"` onto
+  // <CategoryCandidateInput> (`TemplateDetailView.vue:109-110`); `saveCategory` calls
+  // `updateTemplateCategory` (mocked below as `updateTemplateCategorySpy`) and, on success,
+  // `ElMessage.success` (`elSuccessSpy`) — either firing here would mean the isolation broke
+  // against the real handler, not merely a test double standing in for it.
+  it('P2-B: ArrowDown x2 + Enter selects the second fetched candidate WITHOUT invoking the real saveCategory handler', async () => {
+    mockActiveTemplate.value = buildTemplate({ category: null })
+    const root = await mountView()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="template-detail-category-edit-button"]')!.click()
+    await flushUi()
+    const input = root.querySelector<HTMLInputElement>('[data-testid="template-detail-category-input"]')!
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await flushUi() // now on the second fetched candidate ('采购', of ['差旅', '采购'] — see beforeEach)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi()
+
+    expect(input.value).toBe('采购')
+    expect(updateTemplateCategorySpy).not.toHaveBeenCalled()
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+
+    // Positive control, in the SAME real wiring (pass-through): the dropdown is closed now (a
+    // keyboard-accepted selection closes it, same as a mouse click), so Enter must reach the real
+    // saveCategory handler — proving the isolation above suppresses the shortcut ONLY while a
+    // candidate is actually being accepted, not Enter in general on this field.
+    updateTemplateCategorySpy.mockResolvedValueOnce(buildTemplate({ category: '采购' }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(updateTemplateCategorySpy).toHaveBeenCalledTimes(1)
   })
 
   it('SLA edit: invalid-value error and update-success toast follow the locale', async () => {
@@ -683,9 +762,9 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     const root2 = await mountView()
     root2.querySelector<HTMLButtonElement>('[data-testid="template-detail-archive-button"]')!.click()
     await flushUi()
-    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用模板')
+    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用表单')
     await flushUi()
-    expect(elSuccessSpy).toHaveBeenCalledWith('已停用模板')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已停用表单')
   })
 
   it('unarchive dialog title/buttons and success toast follow the locale', async () => {

@@ -120,7 +120,7 @@ export function validateDelegationForm(form: DelegationForm): string | null {
   if (!form.delegatorUserId.trim()) return '请填写委托人'
   if (!form.delegateeUserId.trim()) return '请填写被委托人'
   if (form.delegatorUserId.trim() === form.delegateeUserId.trim()) return '委托人与被委托人不能相同'
-  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定模板范围需要选择模板'
+  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定表单范围需要选择表单'
   if (!form.startAt || !form.endAt) return '请填写时间窗'
   if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return '结束时间必须晚于开始时间'
   return null
@@ -151,7 +151,7 @@ export type OwnCreateDelegationPayload = Omit<CreateDelegationPayload, 'delegato
 
 export function validateOwnDelegationForm(form: OwnDelegationForm): string | null {
   if (!form.delegateeUserId.trim()) return '请填写被委托人'
-  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定模板范围需要选择模板'
+  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定表单范围需要选择表单'
   if (!form.startAt || !form.endAt) return '请填写时间窗'
   if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return '结束时间必须晚于开始时间'
   return null
