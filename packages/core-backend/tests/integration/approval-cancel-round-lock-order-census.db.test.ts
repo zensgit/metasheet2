@@ -165,14 +165,20 @@
  *     REAL `attendance_requests` row and the REAL class-`11` key
  *     (`buildAttendanceOperationalBulkTargetAdvisoryKey`, `w4c0-identity.ts:1100`).
  *   - Q-C: (a) a mechanical scan of `createCancelRoundInstance`'s own source (re-read fresh, not a
- *     hand-transcribed line range) confirming it contains zero `record-link`-shaped tokens, and
- *     (b) two positive controls proving the detection technique itself is not vacuous — one
- *     showing a `pg_locks` audit sees TWO distinct advisory locks when both are deliberately held
- *     in one transaction, one showing the two CAN be forced to deadlock (`40P01`) when taken by
- *     two connections in opposite orders. Per lock:305's own framing (a review suggestion, not
- *     owner-ratified), this does not rule for or against WI-4 ever taking both together in a
- *     LATER phase — it establishes that if it did, both the "are they ever combined" scan and the
- *     "would a cycle be caught" detector are real, not vacuous.
+ *     hand-transcribed line range, and anchored at BOTH ends — a positive end-anchor on the
+ *     method's own last distinctive token, not just a length floor — mutation-tested: an inserted
+ *     `// record-link` comment at the method's tail turns the scan RED, confirmed by hand then
+ *     reverted) confirming it contains zero `record-link`-shaped tokens, and (b) two positive
+ *     controls proving the RUNTIME detection technique is not vacuous — one showing a `pg_locks`
+ *     audit sees TWO distinct advisory locks when both are deliberately held in one transaction,
+ *     one showing the two CAN be forced to deadlock (`40P01`) when taken by two connections in
+ *     opposite orders. These are two SEPARATE proofs, not one covering the other: (a) is a static
+ *     scan of one function's source text, mutation-tested on its own; (b) is a live-Postgres
+ *     probe of the lock pair in general. Per lock:305's own framing (a review suggestion, not
+ *     owner-ratified), none of this rules for or against WI-4 ever taking both together in a
+ *     LATER phase — it establishes that today's absence is a verified reading of the code (not an
+ *     unexercised regex) and that IF a future site combined them, both a `pg_locks` audit and
+ *     Postgres's own deadlock detector would see it.
  */
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -387,11 +393,21 @@ describeIfDatabase(
       // default for the first three — the throwaway-scratch-DB sibling tests (fk-migration) can
       // skip them because THEIR CREATE TABLE only has the two columns the migration itself
       // touches; this file runs against the real migrated schema, so all of them are required.
+      // org_id is a RANDOMIZED value, not the literal `'default'` — this file's own tests run
+      // inside `plugin-tests.yml` alongside ~124 other attendance real-DB files on the SAME
+      // shared DB (`attendance-w4c3b-request-snapshots.db.test.ts`'s header names one concrete
+      // cross-file collision on this exact table); several siblings aggregate
+      // `attendance_requests` by `org_id` (e.g. `approval-org-writer-w4-s1.db.test.ts:183`,
+      // `attendance-approval-manager-at-level-s7-4.db.test.ts`) — `'default'` is the single most
+      // shared org value in the repo and would risk polluting one of those counts. Nothing in the
+      // three legs below depends on org_id being a real org; the class-11 key already comes from
+      // its own separately randomized `orgId`.
+      const requestOrgId = `census-qb-org-${randomUUID()}`
       await pool.query(
         `INSERT INTO attendance_requests
            (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
-         VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', 'default', $3, $4)`,
-        [requestId, `census-qb-user-${randomUUID()}`, instanceId, REQUEST_WORKFLOW_KEY],
+         VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, $5)`,
+        [requestId, `census-qb-user-${randomUUID()}`, requestOrgId, instanceId, REQUEST_WORKFLOW_KEY],
       )
       createdRequestIds.push(requestId)
       return requestId
@@ -540,9 +556,17 @@ describeIfDatabase(
       const closeIndex = source.indexOf(closeMarker, startIndex)
       expect(closeIndex, 'method close brace not found after createCancelRoundInstance').toBeGreaterThan(startIndex)
       const body = source.slice(startIndex, closeIndex)
-      // Sanity floor: the real method is ~230 lines; a boundary-detection bug that grabbed only
-      // the signature would trivially "pass" a body.match() check for the wrong reason.
-      expect(body.length, 'scanned body suspiciously short — boundary detection likely wrong').toBeGreaterThan(2000)
+      // POSITIVE END-ANCHOR, not just a length floor: `body` must contain the method's own last
+      // distinctive token (the error code on its final throw) so a boundary bug that grabbed only
+      // a prefix of the method fails LOUDLY here instead of silently under-scanning and passing
+      // the `record-link` check for the wrong reason (memory:
+      // `feedback_source_text_assertions_are_not_behaviour.md` — an unexercised regex proves
+      // nothing; this anchor is what makes the window itself trustworthy). Mutation-tested: a
+      // `// record-link` comment inserted immediately before `return approval` at the method's own
+      // tail turns this test RED (confirmed by hand, then reverted — see this commit's message).
+      expect(body, 'scanned body does not reach the method tail — boundary detection likely wrong').toContain(
+        'CANCEL_ROUND_CREATE_FAILED',
+      )
       const hits = body.match(/record.?link/gi) ?? []
       expect(
         hits,
