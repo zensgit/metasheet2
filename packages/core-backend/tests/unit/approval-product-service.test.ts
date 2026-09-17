@@ -8549,4 +8549,35 @@ describe('ApprovalProductService', () => {
         .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
     })
   })
+
+  /**
+   * Lock §3 C-2 step ④'s replay key. These four assertions are the ones the integration
+   * double-backed cases structurally CANNOT make: a test double never normalizes its input, so the
+   * raw-`roundId` defect (`approval_rounds.id` is `text`, minted `apr_<uuid>`; the boundary's
+   * `uuidOrNull` refuses it with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`, 500) was green in four of
+   * them until the end-to-end case ran the real boundary.
+   */
+  describe('deriveCancelRoundW4OperationIdV1 (lock §3 C-2 step ④ replay key)', () => {
+    it('derives a UUIDv5 from a round id, deterministically and distinctly, and refuses an empty one', async () => {
+      const { deriveCancelRoundW4OperationIdV1 } = await import('../../src/core/attendance-cancellation-execution-port')
+      const roundId = 'apr_2f1f2ad0-9f3d-4b3c-8e6a-1b6b6a2a7c11'
+
+      // UUID-shaped, version 5, RFC 4122 variant — what the boundary's `uuidOrNull` accepts and
+      // what `approval_rounds.id` is NOT.
+      const derived = deriveCancelRoundW4OperationIdV1(roundId)
+      expect(derived).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      expect(derived).not.toBe(roundId)
+
+      // Deterministic: a retry of the SAME round after a rolled-back attempt replays under the
+      // same W4 operation rather than minting a second one.
+      expect(deriveCancelRoundW4OperationIdV1(roundId)).toBe(derived)
+
+      // Distinct: two rounds must never share a replay key, or the second would replay the first's
+      // response and report a cancellation it never performed.
+      expect(deriveCancelRoundW4OperationIdV1(`${roundId}x`)).not.toBe(derived)
+
+      // Fail closed rather than hand every empty identity one shared key.
+      expect(() => deriveCancelRoundW4OperationIdV1('')).toThrow()
+    })
+  })
 })
