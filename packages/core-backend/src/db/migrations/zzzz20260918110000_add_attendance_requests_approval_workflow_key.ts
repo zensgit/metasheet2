@@ -1,4 +1,87 @@
 /**
+ * ============================================================================================
+ * PRECONDITION UNMET (2026-09-17) — this migration is NOT safe to land as-is. Read before
+ * touching this file or removing this block. BLOCKED, not a defect in the code below.
+ * ============================================================================================
+ *
+ * Lock v5.9's own 互斥性说明 (lock:377, the paragraph immediately after the §14.3 table) names
+ * the exact condition this migration is in:
+ *   "#10 的 FK 与配对 CHECK 会让既有悬空引用与空键实例从可写变不可写——真实行为变化,
+ *    须先普查并单独裁" (a census must run FIRST, and the owner must rule separately — the
+ *    author of this migration is not authorized to make that call).
+ *
+ * The migration's own preflight guard (below) covers the "既有悬空引用" half against
+ * PRODUCTION data (empirically empty on the private test DB this was verified against, which
+ * has zero rows in both tables — that DB cannot stand in for a census of real data). The half
+ * the lock's own text calls PLAUSIBLE-not-confirmed ("五写入方经 upsertAttendanceApprovalInstance
+ * 永远写该键,真实数据里该集合应为空——PLAUSIBLE,迁移彩排实测后才算证实") is exactly the one this
+ * census turned up a population for — but in TEST FIXTURES, not production data, which the lock
+ * text did not anticipate:
+ *
+ * Running the actual attendance real-DB suite (`vitest --config vitest.integration.config.ts`,
+ * the same invocation `.github/workflows/plugin-tests.yml`'s "Run attendance integration tests"
+ * step uses) against a migrated private DB (`metasheet2_lock_c_u1`) with this migration applied:
+ *
+ *   `tests/integration/attendance-w4c3b-request-snapshots.db.test.ts`: 2 of 3 "P12 request
+ *   snapshots (real PostgreSQL)" tests FAIL with `23514 atr_instance_key_pair` — both construct
+ *   an `attendance_requests` row via raw SQL with a non-null `approval_instance_id` and no
+ *   `approval_workflow_key` (lines ~304 and ~413 of that file at the time of this note).
+ *
+ * That is a CONFIRMED, exercised failure — not a static read. The broader population is not yet
+ * fully exercised but is structurally certain from a mechanical sweep (this file's author did
+ * not touch any test file; the counts below are read-only greps, run from the repo root):
+ *
+ *   `for f in $(grep -rl "INSERT INTO attendance_requests" packages/core-backend/tests/); do
+ *      grep -A6 "INSERT INTO attendance_requests" "$f" | grep -c approval_instance_id; done`
+ *   -> non-zero (1-5 occurrences) in 9 of the 17 files that INSERT into attendance_requests via
+ *   raw SQL: attendance-approval-action-authorization.db.test.ts (1),
+ *   attendance-w4c3b-central-approval.db.test.ts (1),
+ *   attendance-approval-flow-dynamic-kind-s7-1.db.test.ts (1),
+ *   attendance-decision-trace-w5-0.db.test.ts (3), attendance-plugin.test.ts (1),
+ *   attendance-w4c3b-request-snapshots.db.test.ts (2, CONFIRMED above),
+ *   attendance-w4c5-rollout-transition-tool.db.test.ts (1),
+ *   attendance-w4c3a-rollout-control.db.test.ts (5), attendance-result-edit.test.ts (3).
+ *
+ * Two DISTINCT failure modes, not one — a fixer must handle both, or will half-fix and re-red:
+ *   (a) `23514 atr_instance_key_pair` — the attendance-side INSERT/UPDATE sets a non-null
+ *       `approval_instance_id` without `approval_workflow_key` (CONFIRMED above).
+ *   (b) `23503` (the composite FK itself) — a fixture that DOES pair both columns on the
+ *       attendance side, but seeds its own `approval_instances` row without `workflow_key`
+ *       (NULL), so the referenced (id, workflow_key) tuple never exists. Census:
+ *       `for f in $(grep -rl "INSERT INTO approval_instances" packages/core-backend/tests/); do
+ *          echo "$(grep -A8 "INSERT INTO approval_instances" "$f" | grep -c workflow_key)/
+ *          $(grep -c "INSERT INTO approval_instances" "$f") :: $f"; done`
+ *       -> 24 of the ~38 files with an `approval_instances` INSERT have at least one occurrence
+ *       with zero `workflow_key` mentions nearby (exact file list in the command output; not
+ *       reproduced here to avoid this comment going stale on an unrelated future edit to those
+ *       files — re-run the command for the current list).
+ *
+ * Mechanical closure of two adjacent risks, so a future reader does not have to re-ask:
+ *   - Exactly 5 production writers exist (not 6+): `grep -rn "INSERT INTO attendance_requests\|
+ *     UPDATE attendance_requests" packages/core-backend/src/ plugins/ --include="*.ts"
+ *     --include="*.cjs" | grep -v node_modules` returns exactly this file's own backfill UPDATE
+ *     plus 9 lines in index.cjs — the 5 that set approval_instance_id (already edited, this same
+ *     commit) and 4 more (:35184, :35561, :37886, :37902 as of this note) that UPDATE status by
+ *     matching on `id`/`org_id`/`status` only and never touch `approval_instance_id` or
+ *     `approval_workflow_key` — confirmed by reading each, these are the lock's "同键写点"
+ *     (§14.3 #10 row, keyed BY the column, not writing it) and correctly need no edit.
+ *   - No kysely-syntax (`insertInto('attendance_requests')` / `updateTable(...)`) writer exists
+ *     anywhere in src/, tests/, or plugins/ — raw SQL is the only syntax touching this table, so
+ *     the syntax-sweep half of `feedback_writer_audit_both_query_syntaxes` is exhaustively clean.
+ *
+ * Disposition: per lock:377's own "须先普查并单独裁", this migration's author (an implementer
+ * bound to a file mandate that forbids editing tests/**) is not authorized to fix the fixtures
+ * or to narrow/weaken the ratified CHECK/FK to make them pass. This file's DDL is written
+ * correctly to the lock's spec (see the verification log at the bottom of this header) and
+ * should NOT be edited to "fix" the fixtures — the ratified constraint is not the bug. Landing
+ * it requires EITHER a follow-up PR touching the listed test files (add
+ * `approval_workflow_key`/`workflow_key` pairing to each raw-SQL fixture; case (b) additionally
+ * needs `approval_instances.workflow_key` set) OR an owner ruling that changes the DDL itself.
+ * Do not remove this block until that follow-up has landed and the full attendance real-DB
+ * suite has been re-run green with this migration applied.
+ *
+ * ============================================================================================
+ *
  * Approval change-request design lock v5.9 §14.3 #10 (lock:371) — "Q1c" package, DDL/migration
  * 3 of 3 for the first slice (WI-3, impl-taskbook-C-change-request-20260918.md).
  *
