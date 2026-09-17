@@ -31,6 +31,7 @@
 | 归档端点(事务:L0→L1→L2,批量解除关联) | I2;锁序表「归档 L0→L1→L2(批量)」 |
 | 解档端点(L0→L1) | I8;锁序表「解档 L0→L1」 |
 | 挂接端点(原子 upsert,L1→L2,不取 L0) | §2「挂接是同一条原子 upsert」;锁序表「挂接 L1→L2」 |
+| 挂接时按原谓词校验模板可见(不可见 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`,零行写入;见 §3.5) | §2「模板可见性仍走原权限谓词……挂接时按原谓词校验可见」(ratified) |
 | 解除关联端点(独立 UPDATE,L2 only) | §2「解除关联…是一条独立 UPDATE」;锁序表「解除 L2」 |
 | org 来源钉死 `req.authenticatedTenantId`(A‴) | §2「org 从哪来」 |
 | 授权面(I7):写端点 `approvalTemplateAdminGuard`,读端点 `rbacGuard('approvals:read')` | I7 |
@@ -140,6 +141,16 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 ### 3.4 一处实现者裁量(未获锁文文本背书,写明供门审核实)
 
 `unarchiveApprovalTemplateGroup`(`ApprovalTemplateGroupService.ts:294-336`)对「归档一个已经归档的组」没有单独处理——它走的是「找不到该 id 的活跃组行」还是复用 `GROUP_ARCHIVED`?现场读代码:`archiveApprovalTemplateGroup`(`:241-278`)在锁到组行后检查 `archived_at !== null` ⇒ 抛 `GROUP_ARCHIVED`(`:253-255`,409)。锁文 §2/I2 只定义了「归档一个活跃组」的路径,未定义「归档一个已归档组」应返回什么;`ApprovalTemplateGroupService.ts:34-38` 的文件头注释自陈这是实现者选择复用链接态判到的同名码,而非新码,且验收表没有任何一行练到这个分支。属于**未获锁文文本背书的实现决定**,不是缺陷,列入门审核对项。
+
+### 3.5 另一处实现者裁量(修复轮补齐,gate P2-1)——挂接可见性的失败形状
+
+锁文 §2 原文「模板可见性仍走原权限谓词……一个组织只能给自己**能看到**的模板归组(挂接时按原谓词校验可见)」只 ratify 了**要校验**这件事,没有点名校验失败时的 HTTP 状态码或错误码——这两点是实现者选择,写明供门审核实:
+
+- **落点**:`routes/approvals.ts`(新增导出函数 `isApprovalTemplateVisibleForGroupLink`,紧邻 `resolveApprovalTemplateVisibilityActor` 之后),不是 `ApprovalTemplateGroupService.ts`——后者的文件头注释(`:5-8`)自陈「never reads `req` and never defaults the org」,这个不变量延伸到「不做可见性判定」:可见性判定需要 actor(依赖 `req.user`),放进这个刻意不碰 `req` 的服务模块会违反它自己的边界,所以校验点选在路由层,链接前置检查,链接本身的服务函数不变。
+- **谓词复用,非新逻辑**:直接调用锁文/§1.6(I5/I6)已经点名不得新造的 `applyTemplateVisibilityFilter`(`ApprovalProductService.ts:4383-4419`,与列表/详情端点同一个函数),对 `approval_templates` 的 `id = $1` 加同样的析取条件——**不是**又发明一条独立的可见性判定。
+- **失败形状(实现者选择,非 ratified 码)**:不可见 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`(零行写入,链接服务函数完全不被调用)——复用本路由既有的同名码(`:897`,模板详情端点在 actor 看不到时的同一 404),不是发明第 11 个专用码。选择 404 而非 403 的理由:与仓内其它 actor 门控的模板查找同构——「存在但看不见」与「不存在」对调用方呈现相同响应,不额外暴露「有一个你看不到的模板」这一事实。
+- **范围仅限挂接**(锁文原文点名的动作是「挂接」,不含解除关联)——`unlinkApprovalTemplateFromGroup` 未加此校验,解除关联对可见性的语义锁文未定义,不在本条修复范围内。
+- **可达性披露(如实,不夸大)**:`approvalTemplateAdminGuard`(`rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`)能通过守卫的每个 actor,`resolveApprovalTemplateVisibilityActor` 都会把它判成 `isTemplateManager = true`(两个 guard 码都在 `isTemplateManager` 的判定并集里),而 `applyTemplateVisibilityFilter` 对 manager 直接短路、不加任何条件——所以今天**没有**任何 HTTP 可达路径能让这条校验因「看不见该模板」而 404;它今天在生产流量下只等价于「模板是否存在」的检查(对不存在的模板 id 同样 404,顺带堵上了 `mapGroupConstraintError` 未映射 `template_id` 上 `atgl_template_fk` 23503 的既有空白——那种情况下之前会 500)。真正的判别力(非 manager actor 命中 dept/role 作用域外的模板)只在直接调用导出的 `isApprovalTemplateVisibleForGroupLink` 时被验证——见验证 MD §2 新增 mutation 台账两条(§2(a) 谓词直调、§2(b) 端点调用点)。
 
 ## 4. 事务与锁序
 
