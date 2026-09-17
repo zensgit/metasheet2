@@ -454,6 +454,25 @@ vectors file shows no delta since the pin recorded in `e394c9e9c`); re-run in §
   `cancel_round` (P1-A's suggested closure line), and fixes the stale `api.ts` comment the same
   review flagged as P2-A. **Checklist item 15 is now closed.** See Part C for the rerun and mutation
   evidence.
+- **§14.2 allow-set member-level pin — open before this pass, CLOSED by it (round 4 / Part J)**: this
+  bullet did not exist in §A9 before gate round 4; the gate's own P2-1 finding (reason 3) was
+  precisely that this gap had NO entry here, so a reader of this "honest open list" would have
+  concluded there was no gap. Before this fix, the ratified §9-9 allow-set
+  {approve,reject,revoke,comment} had ZERO discriminative power at the MEMBER level — the 47/47
+  acceptance suite only ever dispatched `'handle'`/`'return'`, so widening
+  `CANCEL_ROUND_ALLOWED_ACTIONS` to also permit `'transfer'` (a verb the ratify header names
+  explicitly as forbidden, and which lock §9-11/C-3 couples to closing the revoke window) left the
+  entire suite green (`impl-gate-C-slice1-round4-20260918.md` P2-1, mutation R4-M5). Fixed by a new
+  mechanical-enumeration test in `approval-cancel-round-outlet-guards.db.test.ts` ("§9-9 allow-set
+  MEMBER pin") that iterates the real exported `APPROVAL_ACTION_TYPES` union — not a hand-listed
+  literal of the three ratify-named verbs, which would drift on the next verb added to that union —
+  and asserts every member outside a locally-declared copy of the ratified allow-set is rejected 409
+  `CANCEL_ROUND_OUTLET_FORBIDDEN`. Reran the same widening mutation post-fix, individually for all
+  three ratify-named verbs (`'transfer'`, `'add_sign'`, `'reduce_sign'`, each its own `cp`-backed
+  mutation): each time the new test goes red specifically at that verb (400 `VALIDATION_ERROR` where
+  409 `CANCEL_ROUND_OUTLET_FORBIDDEN` was expected), the other 6 tests in the file stay green, and the
+  file's total
+  goes from 6→7 tests / the suite total from 47→48. **Checklist item now closed.** See Part J.
 - **判据 II / 判据 IV / `attendance-parity.db.test.ts`**: not implemented in this slice (design MD
   §1.1, unchanged from Part B's Decision 3). Deferred to C-2, per the goal document's own slice
   ordering.
@@ -2046,8 +2065,15 @@ $ grep -rn "9246" . --exclude-dir=node_modules --exclude-dir=.git
 Every hit is one of: (a) the two docs' own retraction/finding narrative (this Part, §G3, §G6 — all
 past-tense, describing what was wrong, not asserting it as current), (b) one unrelated substring match
 in a different document's `:29246` token (a five-digit line-number list in an unrelated attendance
-design doc — `29246`, not `9246`), or (c) design MD:209-210's own trailing clause (this pass's
-addition, also past-tense). Zero hits in any source file (`packages/**`) or test file
+design doc — `29246`, not `9246`), or (c) ~~design MD:209-210's~~ **design MD:216-217's** own
+trailing clause (this pass's addition, also past-tense) — ~~209-210~~ **SUPERSEDED (gate round 4 /
+`impl-gate-C-slice1-round4-20260918.md` P3-4): a LATER commit in this same pass (`74c6c2e96`) added
+two lines to this section's header, pushing the trailing clause down from :209-210 to its current
+:216-217; the citation here was written before that shift and never re-derived afterward. Re-checked
+fresh: `grep -n "9246" docs/development/approval-cancel-round-phase1-design-20260918.md` → hits at
+`:216` and `:217`, matching the wording quoted here. The count and classification below are
+unaffected — only this one line-number pointer was stale.** Zero hits in any source file
+(`packages/**`) or test file
 (`**/*.test.*`, `**/*.spec.*`). The count is exactly three: the two comments round-2 fixed
 (`a166f5ca0`) and this pass's design MD:206 fix — no fourth site exists.
 
@@ -2113,7 +2139,16 @@ $ find . -path ./node_modules -prune -o -name "*ci-wiring*" -print | grep -v nod
 (`reviews/impl-supplementary-gate-checklist-20260918.md:6`: "同族 `*-ci-wiring` 共 45 个") and
 round-2/round-3's own closure of "45/45." **Was "38" simply stale drift, or wrong from the moment
 Part C3 wrote it (HEAD `95eccb89b`)?** Checked, not assumed — the population was already 45 at that
-exact HEAD, before any of this lane's own `*-ci-wiring` files existed to inflate a later count:
+exact HEAD, ~~before any of this lane's own `*-ci-wiring` files existed to inflate a later count~~
+**SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md` P3-6): this parenthetical is
+false — `95eccb89b`'s population of 45 already INCLUDES this lane's own new
+`approval-cancel-round-ci-wiring.test.ts` (`git ls-tree -r 95eccb89b --name-only | grep -E
+'ci-wiring' | grep -i cancel-round` → that one file, confirmed). The true pre-lane population, on
+`origin/main`, is 44 (`git ls-tree -r origin/main --name-only | grep -cE '[^/]*ci-wiring[^/]*$'` →
+`44`). The supported conclusion is unaffected — 44 ≠ 38, so "38" was still stale/wrong the moment
+Part C3 wrote it, regardless of whether the comparison point is 44 or 45 — only the "before this
+lane's own file existed" provenance claim about WHY the count is 45 was false; the file was already
+counted in it.**:
 
 ```
 $ git ls-tree -r 95eccb89b --name-only | grep -E '[^/]*ci-wiring[^/]*$' | wc -l
@@ -2127,7 +2162,14 @@ this pass's docs-only diff touches CI config or any `*-ci-wiring` test file, so 
 those suites to exercise differently. Scoped-diff check, same method as Part C3 used, pinned to this
 pass's first commit rather than the moving `HEAD` symbol so the claim does not drift on a later
 commit: `git diff 6c5b06f7d 74c6c2e96 --name-only -- packages plugins scripts .github` → empty,
-re-checked against this pass's full commit range, not just its first commit.)
+~~re-checked against this pass's full commit range, not just its first commit.)~~ **SUPERSEDED
+(gate round 4 / `impl-gate-C-slice1-round4-20260918.md` P3-3): this was NOT the full commit range —
+two more commits (`dce9e16df`, `50fe83ebc`) landed after `74c6c2e96`, and this sentence's own claim
+of "full commit range" was written before them and never updated. The re-derived full-range check,
+pinned to this pass's actual last commit `50fe83ebc`, is
+`git diff --name-only 6c5b06f7d 50fe83ebc -- packages plugins scripts .github apps` → `0` (rerun by
+this fix pass); the substance — zero non-doc files touched across the whole pass — still holds, only
+the "full range" claim about which commits were actually checked was false.)**
 
 **Fix, this pass**: `docs/development/approval-cancel-round-phase1-verification-20260918.md:900` —
 "the 38 sibling `*-ci-wiring` guards" → "the 45 sibling `*-ci-wiring` guards," struck through in place
@@ -2162,6 +2204,11 @@ Line 900 no longer asserts "38" as the live population count; it is struck throu
   fixed commits rather than the moving `HEAD` symbol so the claim does not silently start covering a
   later, unrelated commit once this branch gets its next fix-round commit:
   `git diff --name-only 6c5b06f7d 74c6c2e96 | grep -iE "review|lock-draft|\.claude"` → 0 hits.
+  ~~(scoped to `74c6c2e96`)~~ **SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md`
+  P3-3, "same family" as the :2129 fix above): this check was also short two commits. Re-derived over
+  the true full range: `git diff --name-only 6c5b06f7d 50fe83ebc | grep -iE "review|lock-draft|\.claude"`
+  → 0 hits. The claim itself ("no lock file or `reviews/` document was opened for editing this
+  pass") still holds; only the range the original check covered was incomplete.**
 - No migration was applied anywhere in this pass (no new migration exists to run); the private DB
   (`metasheet2_lock_c`) was already migrated by an earlier pass and only read (test runs), never
   written outside those tests' own transactions.
@@ -2177,8 +2224,15 @@ Line 900 no longer asserts "38" as the live population count; it is struck throu
   commit's own message for what it fixed). Every one of them is docs-only — verified before staging
   each commit via `git status --porcelain` / `git diff --stat` showing only the same two
   `docs/development/*.md` paths, and confirmed for the full range via
-  `git diff --name-only 6c5b06f7d 74c6c2e96` (currently the tip of this pass's commits): the same two
-  files, zero others.
+  `git diff --name-only 6c5b06f7d 74c6c2e96` ~~(currently the tip of this pass's commits): the same
+  two files, zero others.~~ **SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md`
+  P3-3): `74c6c2e96` stopped being the tip two commits before this sentence was ever read —
+  `dce9e16df` and `50fe83ebc` landed after it (the irony: `dce9e16df`'s own stated purpose was
+  fixing a self-count elsewhere in this very Part H, and it introduced this same defect on a
+  sibling sentence — `feedback_generation_guard_must_be_applied_to_every_sibling_surface`).
+  Re-derived over the true tip: `git diff --name-only 6c5b06f7d 50fe83ebc` → still exactly the same
+  two `docs/development/*.md` paths, zero others. The substance holds; only the "currently the tip"
+  self-reference was false.**
 - Files touched, across this pass's commits: `docs/development/approval-cancel-round-phase1-design-20260918.md`
   (the §3.2/design MD:206 citation fix, the header rewrite, and the trailing historical clause) and
   `docs/development/approval-cancel-round-phase1-verification-20260918.md` (this Part H in full, the
@@ -2377,8 +2431,15 @@ headings, not copied from its header line:
 $ grep -cE "^### P[23]-" reviews/impl-gate-C-slice1-round3-20260918.md
 7
 ```
-matching `grep -nE "^### P"` listing exactly P2-1, P2-2, P3-1, P3-2, P3-3, P3-4, P3-5 and no others —
-7, agreeing with the header's "2 P2 / 5 P3". Disposition after this Part:
+~~(run from the worktree root)~~ **SUPERSEDED (gate round 4 / `impl-gate-C-slice1-round4-20260918.md`
+P3-5): gate reports live under `~/.claude/projects/<proj>/reviews/`, NOT inside this repo's own
+worktree — `reviews/impl-gate-C-slice1-round3-20260918.md` does not exist under the worktree root, so
+this command as written cannot be reproduced there (`ls -d reviews` at the worktree root →
+"No such file or directory"). The number itself is correct — run from the actual reviews directory,
+`grep -cE "^### P[23]-" impl-gate-C-slice1-round3-20260918.md` → `7`, re-confirmed fresh by this fix
+pass — only the path in the command as transcribed here was not reachable from the worktree it reads
+as being run from.** Matching `grep -nE "^### P"` listing exactly P2-1, P2-2, P3-1, P3-2, P3-3, P3-4,
+P3-5 and no others — 7, agreeing with the header's "2 P2 / 5 P3". Disposition after this Part:
 
 | Finding | Status | Where |
 |---|---|---|
@@ -2394,3 +2455,223 @@ Every finding the round-3 gate report named now has a terminal disposition recor
 five fixed (two P2, three P3), two P3 findings correctly recorded as open-and-not-actionable-here
 rather than closed. This does not constitute a fourth gate pass approving the fixes — that is the
 next independent reviewer's call, not this document's own.
+
+---
+
+# Part J — gate round 4 (`impl-gate-C-slice1-round4-20260918.md`) fully processed (fix round 1, this pass)
+
+> Round 4 re-reviewed the round-3 FIX (this document's Part H/Part I), not new code from this lane —
+> its own one-sentence framing: "这一条 P2 不是修复轮引入的回归…是我本轮新跑出来的实现侧覆盖缺口."
+> Verdict: NEEDS-FIX, **0 P1 / 1 P2 / 6 P3** (`impl-gate-C-slice1-round4-20260918.md:10`).
+
+## J1. P2-1 (round-4, CONFIRMED) — §9-9 allow-set had zero MEMBER-level discriminative power; fixed
+
+**The gap** (gate §3, mutation R4-M5): `CANCEL_ROUND_ALLOWED_ACTIONS` implements the ratified §9-9
+allow-set correctly (`{approve, reject, revoke, comment}`), and the lock-named negative-control
+mutation ("remove the action-judgment call entirely") was already red per round-3's own M6/R4-M6. But
+no test ever dispatched `'transfer'`, `'add_sign'`, or `'reduce_sign'` specifically — the existing
+`#4/#6` acceptance only exercises `'handle'`/`'return'`. So *widening* the set (adding `'transfer'`
+back in, the exact regression the ratify header exists to prevent) left all 47 acceptance tests
+green — a silent break of the coupled §9-11/C-3 revoke-window invariant that the lock itself says
+`transfer` also gates.
+
+**Fix — one new test, mechanically enumerated, not hand-listed** (per
+`feedback_trap_enumeration_does_not_converge`, explicitly named in the gate's own §9 fix guidance):
+`packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts`, new `it`
+block titled `§9-9 allow-set MEMBER pin`, placed directly after the existing `#4/#6` test:
+
+```ts
+import { APPROVAL_ACTION_TYPES, type ApprovalActionRequest } from '../../src/types/approval-product'
+// …
+const RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS = new Set<string>(['approve', 'reject', 'revoke', 'comment'])
+const forbiddenActions = APPROVAL_ACTION_TYPES.filter(
+  (action) => !RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS.has(action),
+)
+expect(forbiddenActions.length).toBeGreaterThanOrEqual(5)
+expect(forbiddenActions).toEqual(expect.arrayContaining(['transfer', 'add_sign', 'reduce_sign']))
+for (const action of forbiddenActions) {
+  // dispatch each one on a real cancel-round instance, assert 409 CANCEL_ROUND_OUTLET_FORBIDDEN,
+  // assert the row (version, status) is unchanged
+}
+```
+
+This iterates the REAL exported `ApprovalActionType` union (currently 9 members: approve, reject,
+transfer, revoke, comment, return, add_sign, reduce_sign, handle), not a copy-pasted array of the
+three ratify-named verbs — so a future verb added to `APPROVAL_ACTION_TYPES` is covered by this loop
+without anyone remembering to edit this test (the exact failure mode
+`finding_approval_action_verb_pinned_copy_blast_radius` warns about). The local
+`RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS` copy is deliberately NOT imported from
+`ApprovalProductService`'s own `CANCEL_ROUND_ALLOWED_ACTIONS` constant — importing the production
+constant would make the test tautological against exactly the widening regression it exists to catch
+(the guard-the-guard assertions above also fail loudly, rather than passing vacuously, if the
+enumeration itself is ever tampered with).
+
+**Implementation**: unchanged, per the gate's own §9 closure judgment ("实现不需要改") — the allow-set
+literal was already correct; only the missing pin is added.
+
+**Evidence, this pass** — private DB `metasheet2_lock_c`, dropped and recreated fresh
+(`dropdb --if-exists` → `createdb` → migrate):
+
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c npx tsx src/db/migrate.ts
+MIGRATE-EXIT:0
+$ grep -c "executed successfully" /tmp/c-migrate.log
+409
+```
+
+Baseline (before the new test), seven-suite rerun on the virgin DB:
+```
+Test Files  7 passed (7)
+     Tests  47 passed (47)
+```
+
+After adding the test, same seven suites:
+```
+Test Files  7 passed (7)
+     Tests  48 passed (48)
+```
+
+`tsc --noEmit -p .` (packages/core-backend): `TSC-EXIT:0`, 0 lines of output.
+
+**Mutation (repeats gate's own R4-M5, this pass's own run)** — `cp` backup, not `git checkout --`:
+```
+$ cp packages/core-backend/src/services/ApprovalProductService.ts /tmp/APS.orig.ts
+```
+Edit: add `'transfer'` as a fifth member of `CANCEL_ROUND_ALLOWED_ACTIONS` (the exact widening the
+ratify header forbids). Rerun `approval-cancel-round-outlet-guards.db.test.ts` alone:
+```
+✓ #4/#6 dispatchAction action gate …
+× §9-9 allow-set MEMBER pin …
+  action=transfer: expected ServiceError: targetUserId is required for transfer { …(3) } to
+  match object { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' }
+  - Expected: { code: "CANCEL_ROUND_OUTLET_FORBIDDEN", statusCode: 409 }
+  + Received: { code: "VALIDATION_ERROR", statusCode: 400 }
+Test Files  1 failed (1)
+     Tests  1 failed | 6 passed (7)
+```
+The new test goes red — and specifically on the widened action, not by coincidence: with the outlet
+gate bypassed for `'transfer'`, execution falls through to the transfer-specific downstream
+validation (`targetUserId is required for transfer`), which throws a DIFFERENT code/status
+(`400 VALIDATION_ERROR`, not `409 CANCEL_ROUND_OUTLET_FORBIDDEN`). Because the assertion checks the
+SPECIFIC status+code pair (not merely "did it reject"), it fails whenever the
+`CANCEL_ROUND_OUTLET_FORBIDDEN` gate is not what's actually blocking the action — which is exactly
+the invariant this test exists to pin, regardless of what secondary validation happens to also fire
+once the primary gate is bypassed. The other 6 tests in the file (including `#4/#6`, which never
+dispatches `'transfer'`) stay green — the mutation is not a blanket break, only a member-level one,
+confirming the new test's discriminative power is genuinely additive over the pre-existing suite.
+
+**Why `add_sign` and `reduce_sign` needed SEPARATE single-verb mutations, not just this one**: the
+`for (const action of forbiddenActions)` loop's body is `await expect(promise).rejects.toMatchObject(...)`
+— on a mismatch this throws synchronously, aborting the loop at the FIRST failing iteration.
+`forbiddenActions`, filtered from `APPROVAL_ACTION_TYPES` preserving that array's declared order, is
+`['transfer', 'return', 'add_sign', 'reduce_sign', 'handle']` — `'transfer'` is first. So the single
+mutation above only proves `'transfer'` is pinned; it says nothing about `'add_sign'`/`'reduce_sign'`
+individually (the gate report's own §8 flagged exactly this as "未分别跑" for those two verbs, and a
+fix that inherited the same gap in its own evidence would repeat the finding it's closing). Two more
+`cp`-backed single-verb mutations, run and restored the same way:
+
+```
+$ cp packages/core-backend/src/services/ApprovalProductService.ts /tmp/APS.orig2.ts
+```
+Add ONLY `'add_sign'` (not `'transfer'`) to the allow-set. Rerun the same file alone:
+```
+× §9-9 allow-set MEMBER pin …
+  action=add_sign: expected ServiceError: targetUserIds is required f… { …(3) } to match object
+  { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' }
+  - Expected: { code: "CANCEL_ROUND_OUTLET_FORBIDDEN", statusCode: 409 }
+  + Received: { code: "VALIDATION_ERROR", statusCode: 400 }
+Test Files  1 failed (1)
+     Tests  1 failed | 6 passed (7)
+```
+Red specifically at `action=add_sign` — the loop's earlier iterations (`'transfer'`, `'return'`,
+still forbidden in this mutation) pass fine first, confirming the failure tracks the mutated member,
+not a blanket break. Restore, `cmp` clean, rerun outlet-guards file green again. Repeat with ONLY
+`'reduce_sign'` added:
+```
+× §9-9 allow-set MEMBER pin …
+  action=reduce_sign: expected ServiceError: targetAssignmentUserId is r… { …(3) } to match object
+  { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' }
+  - Expected: { code: "CANCEL_ROUND_OUTLET_FORBIDDEN", statusCode: 409 }
+  + Received: { code: "VALIDATION_ERROR", statusCode: 400 }
+Test Files  1 failed (1)
+     Tests  1 failed | 6 passed (7)
+```
+Red specifically at `action=reduce_sign` (`'transfer'`/`'return'`/`'add_sign'` pass first). All three
+ratify-named verbs are now INDIVIDUALLY measured, not two of them inferred from the shared predicate
+— closing the same gap in the fix's own evidence that the gate report disclosed in its own §8/§10 for
+`'transfer'` alone.
+
+Each of the three mutations was restored and verified byte-identical independently, immediately after
+its own run (not batched at the end): `transfer`'s backup (`/tmp/APS.orig.ts`) restored and `cmp`
+clean before the `add_sign` mutation was made; `add_sign`'s backup (`/tmp/APS.orig2.ts`) restored and
+`cmp` clean (`RESTORE-CLEAN-1`) before the `reduce_sign` mutation reused that same clean baseline;
+`reduce_sign`'s restore from the same backup was `cmp` clean (`RESTORE-CLEAN-2`). `git status
+--porcelain` after all three restores:
+```
+ M packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts
+```
+(the seed-file and this document's own edits, at the point these mutations were run, had not yet been
+made — only the new test file shows as modified here). Only the intended test-file diff remains after
+each restore; every mutation left zero trace on `ApprovalProductService.ts`. Post-restore, full
+seven-suite rerun: `Test Files 7 passed (7)`, `Tests 48 passed (48)` — matches the post-fix baseline
+above, confirming the restores did not silently change anything else.
+
+**Disclosure**: §A9 above now carries a line for this gap and its closure (added this pass, following
+the document's existing convention for a since-resolved BLOCKING item).
+
+**Checklist item now closed.**
+
+## J2. The six P3 findings — disposed "顺手" per the gate's own §9 items 3-8 (docs-only, no code)
+
+| Gate finding | Disposition | Where |
+|---|---|---|
+| P3-1 (seed file: three stale baseline `file:line` pointers) | Fixed — replaced with an explanation of why the lock's baseline line numbers no longer match this tree's (+446 lines to `ApprovalProductService.ts`), plus a `grep` recipe to re-derive fresh pointers instead of a new literal that would just go stale again the same way. | `packages/core-backend/src/db/seeds/approval-cancel-round-published-definition.ts` (module doc comment) |
+| P3-2 (seed file: false invariant — "empty array is more restrictive than absent") | Withdrawn — the window gate is `revokeBeforeNodeKeys?.length && …`, so an absent key and an empty array short-circuit identically (both fail-open); replaced with the correct statement and a pointer to R4-M3's real behavioural mutation as what actually pins the fail-open default. | same file, same comment block (kept as ONE edit since the false claim and the stale pointers share a paragraph, but the two defects — pointer-error vs. invariant-error — are called out separately per the gate's own instruction not to conflate them) |
+| P3-3 (this document's own tip-pointer, `74c6c2e96`, stale by two commits at three sites) | Fixed at all three sites (verif:2129/2171/2187-area, pre-this-pass line numbers) — struck through and annotated `SUPERSEDED`, re-derived against the true tip `50fe83ebc`; the underlying substantive claims (docs-only, zero non-md files, same two files touched) all still hold, only the "which commits were checked" self-reference was false. | this document, this Part J entry + the three struck-through sites in §H3 |
+| P3-4 (design MD's own `:9246`-context citation, `209-210` vs. actual `216-217`) | Fixed — struck through and annotated, re-derived: `grep -n "9246" design MD` → `:216`/`:217`. | this document, the §I2-area citation |
+| P3-5 (a `reviews/…` grep in §I4 not reproducible from the worktree root) | Fixed — annotated that gate reports live under `~/.claude/projects/<proj>/reviews/`, not in this repo; the number itself (7) was already correct and is re-confirmed from the actual path. | this document, §I4 |
+| P3-6 (§H2's false provenance parenthetical — "before this lane's own ci-wiring file existed") | Withdrawn — `95eccb89b`'s population of 45 already INCLUDES this lane's own new `approval-cancel-round-ci-wiring.test.ts`; the true pre-lane count (on `origin/main`) is 44. The supported conclusion ("38" was wrong from the start) is unaffected since 44 ≠ 38 either way. | this document, §H2 |
+
+None of these six required any code change, any real-DB rerun, or any migration — all are corrections
+to prose/comments this lane's own earlier passes wrote, confirmed against the current tree by fresh
+`grep`/`git` commands quoted inline at each site (not re-typed from the gate report).
+
+## J3. Working-tree, commit, and branch discipline, this pass
+
+- All work happened in the assigned worktree (`wt-cancel-round`) on branch
+  `feat/approval-cancel-round-phase1`; no `git checkout --`, `git reset --hard`, or stash discard was
+  used or needed anywhere in this pass.
+- The three mutations this pass ran (R4-M5 repeat for `'transfer'`, plus the two additional
+  single-verb mutations for `'add_sign'` and `'reduce_sign'`, §J1) were each backed up with `cp`,
+  restored with `cp`, and verified byte-identical with `cmp` individually — not batched at the end;
+  `git status --porcelain` showed only the intended source-tree diff after each restore.
+- No lock file or `reviews/` document is touched by this pass's commit(s) — checked with
+  `git diff --name-only origin/main..HEAD | grep -iE "review|lock-draft|\.claude"` after the commit
+  existed and before pushing (not asserted here in advance of that commit existing, per the same
+  discipline this Part's own §J2/P3-3 entry names). Result: 0 hits.
+- No migration was applied to any shared database; the only database touched
+  (`metasheet2_lock_c`) is this lane's own private DB, dropped and recreated fresh by this pass
+  (§J1) — never a shared or CI database.
+- No PR opened, no branch merged or undrafted, no force-push, `origin/main` untouched.
+- Files touched this pass:
+  `packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts` (the new
+  §9-9 member-pin test), `packages/core-backend/src/db/seeds/approval-cancel-round-published-definition.ts`
+  (P3-1/P3-2 comment fixes), `docs/development/approval-cancel-round-phase1-verification-20260918.md`
+  (this Part J, the §A9 disclosure line, and the P3-3/P3-4/P3-5/P3-6 struck-through annotations).
+  Zero other paths.
+
+## J4. Net status — gate round 4 (`impl-gate-C-slice1-round4-20260918.md`) fully processed
+
+| Finding | Status | Where |
+|---|---|---|
+| P2-1 | CLOSED | §J1 |
+| P3-1 | CLOSED | §J2 |
+| P3-2 | CLOSED | §J2 |
+| P3-3 | CLOSED | §J2, §H3 (struck-through annotations) |
+| P3-4 | CLOSED | §J2, §I2-area citation |
+| P3-5 | CLOSED | §J2, §I4 |
+| P3-6 | CLOSED | §J2, §H2 |
+
+Every finding round 4 named now has a terminal disposition recorded in this document. This does not
+constitute a fifth gate pass approving these fixes — that is the next independent reviewer's call,
+not this document's own.
