@@ -49,23 +49,42 @@
 // the surface ("待办审批" / "Pending approvals"); the badge text is the count alone.
 //
 // 判据 E (代数守卫, lock §5): a logout or an org switch must void any `getTodoCount()` read still
-// in flight for the principal that is leaving — the same property `useApprovalAdminCapability`
-// (round-7) already enforces for the admin-capability read on this same nav shell, copied here
-// WHOLE rather than item-by-item (an earlier draft copied only the generation bump and dropped the
-// microtask/`hasSession()` gate around the re-read, which is a real bug: `useAuth`'s reset funnel
-// calls `notifyAuthPrincipalChange()` BEFORE it writes the new token to storage, so a re-read fired
-// synchronously inside the notification would ask `/api/todo/count` with the OUTGOING session — an
-// anonymous request on sign-out, or the departing principal's on a login. Deferring the re-read to a
-// microtask lets that synchronous storage write land first).
+// in flight for the principal that is leaving. The MECHANISM below is general — it reacts to
+// `onAuthPrincipalChange`, whoever fires it — copied WHOLE from `useApprovalAdminCapability`
+// (round-7) rather than item-by-item (an earlier draft copied only the generation bump and dropped
+// the microtask/`hasSession()` gate around the re-read, which is a real bug: `useAuth`'s reset
+// funnel calls `notifyAuthPrincipalChange()` BEFORE it writes the new token to storage, so a
+// re-read fired synchronously inside the notification would ask `/api/todo/count` with the
+// OUTGOING session — an anonymous request on sign-out, or the departing principal's on a login.
+// Deferring the re-read to a microtask lets that synchronous storage write land first).
 //
-// Two INDEPENDENT bumps, each pinned by its own test because neither covers the other:
+// VERIFIED WIRING, STATED PLAINLY: `notifyAuthPrincipalChange()` is called from exactly one place
+// in `useAuth.ts` — `resetSessionBootstrap`, reached by `setToken` (login) and `clearToken`
+// (sign-out/401). It is grepped, not assumed:
+//   grep -n 'notifyAuthPrincipalChange' src/composables/useAuth.ts  →  one import line, one call
+//   site, both inside `resetSessionBootstrap`.
+// The explicit in-session org switch (`setExplicitSessionOrg`) does NOT call it — that function
+// writes `auth_token`/`jwt` and installs the explicit-session marker directly, with no call to
+// `resetSessionBootstrap` or `notifyAuthPrincipalChange` anywhere in its body. So today an org
+// switch fires NO notification, and this guard — though it would handle one correctly if it fired —
+// is not actually exercised by the org-switch code path in production. This is a PRE-EXISTING gap
+// shared with `useApprovalAdminCapability`'s identical mechanism (same missing wiring, same blast
+// radius), not something this commit introduces or can fix by itself: wiring
+// `notifyAuthPrincipalChange()` into `setExplicitSessionOrg` is a change to a shared auth funnel
+// with its own rollback path, and belongs to its own reviewed unit, not this one.
+//
+// Two INDEPENDENT bumps, each pinned by its own test because neither covers the other, for the two
+// transitions THIS mechanism does receive:
 //   * `refresh()`'s own bump discards a stale response when the transition issues its OWN new read
-//     (an org switch: a session remains, so a fresh read for the new principal starts and can
-//     resolve before the outgoing read does).
-//   * the listener's bump discards a stale response when the transition issues NO new read (a
-//     sign-out: `hasSession()` is false, so nothing supersedes the in-flight read from the inside —
+//     (login while already signed in, e.g. a dev-token refresh: a session remains, so a fresh read
+//     for the new principal starts and can resolve before the outgoing read does).
+//   * the listener's bump discards a stale response when the transition issues NO new read
+//     (sign-out: `hasSession()` is false, so nothing supersedes the in-flight read from the inside —
 //     without this second bump, that read's own `mine === generation` check would still pass when
 //     it finally resolves, and it would paint the departed principal's count).
+// The tests below name their scenario "principal swap, session present" / "sign-out, no session"
+// rather than "org switch" precisely because the mechanism is generic to `onAuthPrincipalChange`
+// and does not depend on which real caller fires it — see the wiring note above for what does.
 //
 // The listener also resets `pendingCount`/`isUnavailable` to their initial "nothing rendered"
 // values synchronously — the translation of `useApprovalAdminCapability`'s "go back to `pending`
