@@ -761,6 +761,9 @@ export type ApprovalNodeTimeoutEffectOutcome =
   | 'skipped_invalid_config'
   | 'skipped_terminal_gated'
   | 'skipped_parallel_state'
+  // Lock §14.3 outlet #3 — a cancel-round instance never advances through the timeout scanner's
+  // transfer/jump firer; logged/metrics-only, never surfaced to the frontend (v5.9 lock text).
+  | 'skipped_cancel_round'
 // Lock-4 (docs/development/approval-lock4-flow-policies-20260817.md) F4-E — 离职自动转上级, OD-L4-9(a):
 // system sentinel recorded as the actor of an out-of-band departure transfer. `isSystemSentinelActor`
 // (ApprovalAssigneeResolver.ts) drops any `system:`-prefixed actor on a bare `startsWith` predicate, so
@@ -9325,6 +9328,15 @@ export class ApprovalProductService {
       if (!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || armed.current_node_timeout_effect !== scannedEffect) {
         await client.query('ROLLBACK')
         return 'skipped_stale'
+      }
+
+      // Lock §14.3 outlet #3 — a cancel-round instance shares only the identity predicate
+      // `isCancelRoundInstance` here, not the throw-based `rejectIfCancelRound` used at the other
+      // chokepoints: this outlet's contract is a returned scanner outcome, not a rejected promise.
+      // Must consume the now-reverified deadline (not just skip) so the scanner does not re-pick up
+      // the same instance on the next tick.
+      if (isCancelRoundInstance(instance)) {
+        return await consumeAndSkip('skipped_cancel_round', 'cancel_round_instance')
       }
 
       // P26: attendance instances are not timeout-transfer/jump targets on the central path.
