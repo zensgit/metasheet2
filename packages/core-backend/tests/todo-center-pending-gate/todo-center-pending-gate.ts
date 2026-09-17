@@ -689,6 +689,8 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     instance9.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c9')
     instance10.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c10')
     instance11.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c11')
+    instance12.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c12')
+    instance13.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c13')
 
     await seedInstance(instance1)
     await seedInstance(instance2)
@@ -702,6 +704,8 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     await seedInstance(instance9)
     await seedInstance(instance10)
     await seedInstance(instance11)
+    await seedInstance(instance12)
+    await seedInstance(instance13)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -775,8 +779,33 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       assigneeId: ROLE_NAME_CLASS_11,
       nodeKey: instance11.currentNodeKey!,
     })
+    // Class ⑫'s single active user seat on its own instance — same shape as ①'s.
+    await seedAssignment({
+      instanceId: instance12.id,
+      assignmentType: 'user',
+      assigneeId: v12.id,
+      nodeKey: instance12.currentNodeKey!,
+    })
+    // Class ⑬'s single active user seat on its own instance — same shape as ①'s and ⑫'s.
+    await seedAssignment({
+      instanceId: instance13.id,
+      assignmentType: 'user',
+      assigneeId: v13.id,
+      nodeKey: instance13.currentNodeKey!,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
+
+    // S9 — `approval_reads` (design-lock §3.0 S9, seeded LAST, after every instance the pair
+    // references already exists — `instance_id` FK-cascades on `approval_instances`). Class ⑫:
+    // v12 has read its OWN instance ⇒ its `unreadCount` must exclude it. Class ⑬: v1 (class ①'s
+    // OWN viewer) has read ⑬'s instance — NOT ⑬'s own viewer — so this row must not suppress ⑬'s
+    // `unreadCount` (only a correctly-scoped join, matching BOTH `user_id` AND `instance_id`,
+    // keeps ⑬'s own count at 1 while this same row is what ①'s assertion, above, depends on
+    // staying unaffected). See `seedApprovalRead`'s own docblock for the full mutation-kill
+    // rationale for pinning the "other user" to v1 specifically rather than an arbitrary third id.
+    await seedApprovalRead(v12.id, instance12.id)
+    await seedApprovalRead(v1.id, instance13.id)
 
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
@@ -788,6 +817,11 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   afterAll(async () => {
     const p = pool()
     try {
+      // `approval_reads` rows FK-cascade on `approval_instances` delete (migration
+      // `zzzz20260423140000`), but deleted explicitly anyway, BEFORE the instance delete,
+      // consistent with every other table in this cleanup relying on its own
+      // `WHERE ... = ANY($1)` rather than cascade alone.
+      await p.query('DELETE FROM approval_reads WHERE instance_id = ANY($1::text[])', [seededInstanceIds])
       await p.query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [seededInstanceIds])
       await p.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [seededInstanceIds])
       await p.query(
@@ -802,6 +836,8 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
           instance9.publishedDefinitionId,
           instance10.publishedDefinitionId,
           instance11.publishedDefinitionId,
+          instance12.publishedDefinitionId,
+          instance13.publishedDefinitionId,
         ]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
@@ -1040,6 +1076,36 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       // Role assertion deliberately does NOT read `'employee'` literally — see
       // `ROLE_NAME_CLASS_11`'s own docblock for why this class's `users.role` value is suffixed.
       expect(me.role).toBe(ROLE_NAME_CLASS_11)
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(1)
+    })
+
+    it('class ⑫ — own viewer, own instance, viewer has READ this same instance ⇒ count 1, unreadCount 0', async () => {
+      const token = await devToken(baseUrl, v12.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v12.email)
+      expect(me.username).toBe(v12.username)
+      expect(me.name).toBe(v12.name)
+      expect(me.role).toBe('employee')
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(0)
+    })
+
+    it('class ⑬ — own viewer, own instance, SOMEONE ELSE (class ①\'s viewer) has read this instance, not ⑬\'s own viewer ⇒ count 1, unreadCount 1', async () => {
+      const token = await devToken(baseUrl, v13.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v13.email)
+      expect(me.username).toBe(v13.username)
+      expect(me.name).toBe(v13.name)
+      expect(me.role).toBe('employee')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
       expect(status).toBe(200)
