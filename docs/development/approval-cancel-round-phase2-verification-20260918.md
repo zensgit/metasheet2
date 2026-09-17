@@ -244,23 +244,207 @@ $ (packages/core-backend) npx vitest run \
 
 ---
 
-## 3. What this slice has NOT proven yet
+## 3. 判据 IV — the C-3 system close, `expired` half (this unit)
 
-Listed so no reader takes the greens above for more than they are.
+Lock §3 C-3 row 3 (「最终评估:窗口/策略已关」) + §14.2 判据 IV. Wired at census outlet **#5′**, the
+new anchor this unit registers: `ApprovalProductService.dispatchAction`, immediately before the
+terminal `UPDATE approval_instances SET status = $2 …` — the lock's 「先于任何终态状态写」, not
+「先于完成事件入队」 (a hook on the enqueue misses the `return` branch, §11-③).
 
-- **判据 II** (C-2 兑现挂点) — not implemented. No hook exists at `ApprovalProductService` yet.
-- **判据 IV** (C-3 system closure `expired`/`blocked`, §14.3 `#5′`) — not implemented.
-- **R2** (锁内最终评估失败 ⇒ 零业务取消、零 approved 完成事件、C-3 收口已持久化), and its mutation
-  (move the evaluation after the enqueue ⇒ must go red) — not built.
-- **The external refusal end-to-end**: that a real refusal inside a real caller transaction leaves
-  zero rows behind. Two halves are proven separately — the savepoint's SQL-level semantics are
-  measured on PG 15.17 (§2.2), and the boundary's statement sequence is asserted in all three
-  outcomes with positive controls (§2.4 M-2/M-4: refusal ⇒ SAVEPOINT→ROLLBACK TO→RELEASE, success
-  ⇒ SAVEPOINT→RELEASE, exception ⇒ SAVEPOINT only). They have NOT been run against each other:
-  no caller exists yet, and the three protocol call sites that can produce a refusal need a real
-  database, so the wrapper is driven directly with a supplied outcome.
+### 3.1 What landed
+
+| Piece | Where | Lock clause |
+|---|---|---|
+| `deriveCancelRoundRoundPolicy` | `ApprovalProductService.ts` (module scope) | §4 `roundPolicy = { windowDays, suite }` — ONE derivation, now shared by `createCancelRoundInstance` and the final evaluation, so §5 I4's two snapshots cannot drift |
+| `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'` | same | §3 C-3 「actor = 系统终结身份」; same `system:` prefix as the timeout/departure sentinels, so `isSystemSentinelActor` covers it by construction |
+| `evaluateCancelRoundFinalInLock` | `ApprovalProductService.ts` | §3 C-2 step ③ 「锁内最终评估」; locks ② the round row and ③ the ORIGINAL document instance, in the lock's order |
+| `closeCancelRoundSystemTerminalInTxn` | same | §3 C-3 「持久化收口」: seats, engine `rejected`, the audit row, round `expired`/`blocked` + `ended_at` + `block_reason` + `policy_snapshot_at_decision` |
+| the branch + early `return` | same, at outlet #5′ | §14.2 判据 IV 「收口分支写完必须提前返回」 |
+
+**Decisions taken here, each traced to a lock clause rather than to taste:**
+- **Action verb is the EXISTING `reject`,** not a new one. §3 C-3 says the engine state 「复用现有
+  `rejected`」 and that the system identity + reason are 「区分『审批人驳回』的唯一依据」. A new verb
+  would also land on the repo's pinned action-union copies (attendance P26 among them).
+- **The reason is queryable data, not prose.** `approval_records.metadata.cancelRoundCloseReason`
+  = `round_expired` (or `business_blocked:<code>`), with `cancelRoundOutcome` and — on the
+  `blocked` half — `cancelRoundBlockDetail` beside it. 「历史记录必须能查出来」 is a query
+  requirement, so it is a key, not a sentence in `comment` (which stays null).
+- **`policy_snapshot_at_decision` is written on the closure branch too.** §4 says 「在最终评估时同形
+  写入」 — that is both branches, not only `applied`. The acceptance asserts the decision snapshot's
+  key set equals the creation snapshot's.
+- **The return copies `dispatchAction`'s own bottom return** (`getApproval` → 404 on null → return),
+  which is what the lock's `:11227-11231` names — deliberately NOT the `(await …)!` non-null
+  assertion the in-function branches above use.
+
+### 3.2 The §2-G2 time anchor (the checklist's item 17)
+
+The supplementary checklist flags 「§2-G2 时间锚,任务书均零映射」. The **lock does** define it —
+§2-G2: 「时间锚固定为首次对应时间(撤销:初始轮 `approved_at`)…不随修订滚动」. `approval_instances`
+has no `approved_at` column (`approval-bridge-types.ts:255-282` lists every column), so the anchor is
+read off the document's own audit trail as `MIN(created_at)` of its `to_status = 'approved'` records
+— `MIN` is 「首次」 and is what makes it 「不随修订滚动」. The comparison runs on the database clock
+(`now()`), the same one every write on this path uses, so the fixture moves the **anchor**, not the
+clock.
+
+**Implementer choice, FLAGGED for owner registration** (the lock names the anchor but not its
+absence): an `approved` document with no such record — a legacy/bridge row — makes the window
+un-evaluable. This refuses to decide (`CANCEL_ROUND_WINDOW_ANCHOR_MISSING`, 409 ⇒ rollback ⇒ the
+round stays `pending` with its seats, retryable) rather than closing the round as `expired`, which
+would be irreversible on the strength of missing evidence. Same flag class as the redemption
+suite's existing `erratum (not a lock quote — implementer choice…)` case.
+
+### 3.3 ⚠️ Open blocker for 判据 II: the rollout advisory lock cannot be ordered at this hook
+
+Recorded now because it is a property of **this** wiring site, not of the next unit's code.
+
+Lock §3 C-2 fixes the global order **rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → …**, and the
+W4 external entry states the same obligation ("the caller already holds this org's class-`00`
+rollout SHARED advisory lock, **taken BEFORE any row lock it holds**").
+
+`dispatchAction` opens `BEGIN` and *immediately* takes `approval_instances … FOR UPDATE` with no
+prior read:
+
+```
+$ (packages/core-backend) awk '/^  async dispatchAction\(/,/FOR UPDATE`,/' src/services/ApprovalProductService.ts \
+    | grep -nE "BEGIN|pool.connect|FOR UPDATE"
+10:      client = await pool.connect()
+11:      await client.query('BEGIN')
+14:        `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+```
+
+Three statements: connect, `BEGIN`, row lock. Nothing between `BEGIN` and the `FOR UPDATE`.
+
+So any advisory lock taken at the #5′ hook is taken **after** a row lock. That violation is
+**invisible to the entry's own check**: `assertExternalTransactionRolloutLockHeldV1`
+(`w4c3b-request-operation-boundary.ts:558-578`) queries `pg_locks` for *held-ness* only —
+`granted`, `objsubid = 1`, `mode IN ('ShareLock','ExclusiveLock')` — and has no notion of
+acquisition order. It would **PASS** while the global order is broken. This is exactly the shape the
+repo has a deterministic-deadlock precedent for (#4899), so it is not a theoretical tidiness point.
+
+The `expired` / `blocked` closures never call W4, so nothing in **this** unit needs the advisory
+lock. 判据 II does, and the fix is a restructure of `dispatchAction`'s entry, not a line at the
+hook: a cheap **non-locking** pre-read to detect a cancel round → take the org's rollout shared lock
+→ only then `FOR UPDATE` → and a fail-closed re-assert after the row lock (the pre-read is advisory,
+so a stale one must not be able to skip the lock silently). Deriving the org id at that point is its
+own hazard — this repo has a live attendance `org` fall-through to `'default'`. **Not attempted
+here; 判据 II must start from it.** The in-code note lives on `evaluateCancelRoundFinalInLock`.
+
+### 3.4 Acceptance — where it lives, and why not in a new file
+
+Appended to the already-wired `tests/integration/approval-cancel-round-redemption.db.test.ts`
+(6 → 8 cases) rather than a new `.db.test.ts`. A new file would owe: the `plugin-tests.yml`
+workflow list, the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102`
+(a closed world that stays green for a file it does not list — supplementary checklist item 1), and
+an s6a provenance re-pin (items 3 / 14). None of that buys coverage this fixture already gives.
+**Zero new files and zero workflow edits in this commit**, so the four attendance census pins and
+the s6a pin are untouched:
+
+```
+$ git show --name-only --format= <this commit>
+docs/development/approval-cancel-round-phase2-verification-20260918.md
+packages/core-backend/src/services/ApprovalProductService.ts
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+**The two cases are an isolated pair** — identical fixture, identical action, identical route, with
+exactly ONE field different (the original document's `windowDays`: the `leave` default 90 vs. an
+explicit 365), both with the §2-G2 anchor moved 200 days into the past. A difference in outcome can
+therefore only be the window predicate. Without the second case, "the round closed as `expired`"
+would be equally satisfied by an implementation that closes *every* cancel-round approve.
+
+```
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+  (no output, exit 0)
+
+$ (packages/core-backend) EXPECT_DB=1 \
+  DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  ATTENDANCE_TEST_DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{creation,outlet-guards,seat-guards,redemption,node-timeout-effect}.db.test.ts
+  Test Files  5 passed (5)
+        Tests  28 passed (28)          (redemption: 6 -> 8)
+
+$ (packages/core-backend) npx vitest run tests/unit
+  Test Files  796 passed (796)
+        Tests  12742 passed (12742)
+```
+
+### 3.5 「零完成事件」 is measured on a channel proven live, not on an inert one
+
+The durable outbox is flag-gated and **empty either way** in this lane, so an outbox count would
+have had zero discriminating power for 判据 IV's 「零完成事件」. The assertion therefore counts the
+channel that is ACTIVE with the flag off — `emitApprovalCompletionEvent` →
+`eventBus` (`ApprovalCompletionEvent.ts:124-138`: `if (isDurableDeliveryEnabled()) return`, else
+`eventBus.emit`) — subscribing to all four `approval.{approved,rejected,revoked,cancelled}` types
+and filtering on this instance id. The paired open-window case observes **exactly one**
+`approval.approved` through the same subscription, which is the positive control that makes the
+closure case's `[]` a measurement rather than a dead listener.
+
+### 3.6 Mutation ledger (this unit)
+
+Every probe: `cp` backup → edit → run → `cp` restore → `cmp` (all three restores verified identical
+— `RESTORED-IDENTICAL` printed each time).
+
+| # | Mutation | Expected | Observed |
+|---|---|---|---|
+| M-5 | **the lock's own 判据 IV negative control** — delete the closure branch's early `return` (`return closedApproval` → `void closedApproval`), keeping every write | the status is overwritten back to `approved` **and** a completion event appears ⇒ the 判据 IV case red, nothing else | **exactly 1 red**, and on the named symptom: `AssertionError: expected [ 'approval.approved' ] to deeply equal []`; 7 green |
+| M-6 | delete `deactivateAllActiveAssignments` from the closure | the seat assertion red | **GREEN — the mutation is INEFFECTIVE.** See below; the assertion is reclassified, not kept as if it had passed a probe |
+| M-7 | round write `outcome = evaluation.decision` → hard-coded `'rejected'` (collapse `expired` into 判据 III's outcome) | the round-outcome assertion red, and only it | **exactly 1 red**: `AssertionError: expected 'rejected' to be 'expired'`; 7 green |
+
+**M-6 is a finding, not a footnote.** Removing the closure's own seat release leaves the acceptance
+GREEN, because every approve mode already deactivates the acting seat before the terminal advance
+is reached (`ApprovalProductService.ts:11470` for `'all'`, the mode §14.1 gives the cancel-round
+definition) and a terminal resolution has no later node's seats yet. So on the paths reachable
+today that call is **defence in depth, not the cause of the released seat**. Consequences, both
+taken: the acceptance's 席位失效 line is documented **in the test** as an end-state check with no
+discriminating power for that statement, and the call is **kept** (a mode that left a seat active
+would otherwise close a round with a live assignment, and dropping it would make this closure differ
+from the approver-reject terminal it mirrors). Recorded rather than quietly deleted, because
+"the seat assertion passed" would otherwise read as evidence the closure releases the seat.
+
+### 3.7 C-3's five rows — what is and is not covered
+
+Stated per-row so 「五种情形逐行落测试」 is not inflated by this commit.
+
+| C-3 row | Outcome | Status |
+|---|---|---|
+| 审批人驳回 | `rejected` | **covered — phase 1**, 判据 III (this file's `chain` case) |
+| 发起人撤回本轮 | `withdrawn` | **covered — phase 1**, 判据 III (same case) |
+| 最终评估:窗口/策略已关 | `expired` | **covered — this unit** |
+| 最终评估:业务不可逆 | `blocked` | **NOT covered.** It is produced by C-1's `business_refused` return, so it lands with 判据 II. The writer (`closeCancelRoundSystemTerminalInTxn`) already takes it and is shared by both causes; nothing exercises it yet |
+| 基础设施异常 | stays `pending` | **partially** — the two `CANCEL_ROUND_INVARIANT_VIOLATION` throws and `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` take this path by construction (throw ⇒ the caller's transaction rolls back), and phase 1's `erratum` case asserts the rollback shape on the revoke branch; no case drives it through **#5′** |
+
+---
+
+## 4. What this slice has NOT proven yet
+
+Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
+they are.
+
+- **判据 II** (C-2 兑现挂点) — **not implemented.** The `redeem` branch falls through to today's
+  approve path, so a redeemed round's row is left `pending` after its engine instance reaches
+  `approved` — an §5 I3 gap inherited from phase 1. It is **asserted as-is** in the paired open-
+  window case, so the change is forced to be noticed when 判据 II flips it to `'applied'`, rather
+  than being silently satisfied.
+- **判据 II's prerequisite** — the rollout advisory lock ordering blocker in §3.3. Unresolved.
+- **判据 IV's `blocked` half** and C-3 row 4 — see §3.7.
+- **R2** (锁内最终评估失败 ⇒ 零业务取消、零 `approved` 完成事件、C-3 收口已持久化) and its named
+  mutation (move the evaluation after the enqueue ⇒ must go red) — **not built.** M-5 is 判据 IV's
+  own negative control and is NOT a substitute: it proves the `return` is load-bearing, not that a
+  *business* evaluation failure leaves zero business cancellation behind (there is no business
+  cancellation on this path yet).
+- **The external refusal end-to-end** — unchanged from the previous revision: the savepoint's
+  SQL-level semantics (§2.2) and the boundary's statement sequence (§2.4) are proven separately and
+  have still not been run against each other, because no caller exists yet.
 - **账侧完整取消结果逐字节等价 + `unrecoverableExpired` 呈现** (lock §8 期 1) — only the refusal
-  branch's bytes are covered so far (§2.3); the success branch's full-cancellation result is not.
-- **`attendance-parity.db.test.ts`** and the redemption suite's II/IV halves (phase 1 left them
-  marked blocked-with-reason) — not yet filled in.
-- **§5 I3 「终结即释放」** mutation, and R1 for any new guard point — not built.
+  branch's bytes are covered (§2.3); the success branch's full-cancellation result is not.
+- **`attendance-parity.db.test.ts`** — not yet filled in. The redemption suite's 判据 IV half is now
+  filled in (§3.4); its 判据 II half is not.
+- **§5 I3 「终结即释放」 mutation** — the `expired` case asserts a new round can start immediately
+  after the close, but the lock's named mutation (drop the `outcome` write ⇒ the next create is
+  refused by the partial unique index with 23505/409) is not built. M-7 mutates the outcome's
+  *value*, not its presence.
+- **R1 for the new guard point** — #5′ is an outlet anchor, not a chokepoint guard, so it takes no
+  `CANCEL_ROUND_OUTLET_FORBIDDEN` negative control; whether §8 期 1's R1 count (9 sites) should grow
+  to include it is an owner registration question, raised with the #5′ registration itself.
+- **FE / notification side** — C-3's 「卡片失效、端点返回一致」 column is untouched.
