@@ -320,7 +320,7 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 | A″ | 跨 org 挂接 404;复合 FK 兜底 23503 | 同文件 `:317`(原 `:312` +5) | `A″: cross-org link is 404 (org-scoped row-lock SELECT); the composite FK is the last-resort DB guard` | 同上 |
 | A‴ | org 只取 `authenticatedTenantId`(三格) | 同文件 `:349`(原 `:344` +5) | `A‴: org comes ONLY from req.authenticatedTenantId — body/query orgId rejected, forged header ignored, missing tenant fails closed` | 同上 |
 | B | 归档是一个事务;并发挂接见证已归档态 | 同文件 `:397`(原 `:392` +5) | `B: archive is one transaction (members unlinked, never deleted); a concurrent link blocks then sees the archived state` | 同上 |
-| B′ | 解除关联不回落 category;从未关联仍显示 | 同文件 `:442`(原 `:437` +5) | `B′: unlinked-from-group templates show as ungrouped, never falling back to category; never-linked templates still show category` | 同上(**§13.5 披露**:本用例只做 DB 谓词层面演示,不经任何服务/路由代码) |
+| B′ | 解除关联不回落 category;从未关联仍显示 | 同文件 `:447`(原 `:437`,修复轮 1 +5、修复轮 3 再 +5——round 3 在 `it(` 上方插入了 5 行 NOTE 注释,见 §20.2) | `B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate`(修复轮 3 收窄前的原名见 §13.2 逐字记录 / §20.2) | 同上(**§13.5 披露**:本用例只做 DB 谓词层面演示,不经任何服务/路由代码) |
 | B″ | 首次/重新挂接同一 upsert;并发首次挂接双成功 | 同文件 `:669`(原 `:594`,修复轮 1 后 +75——G 用例内插入的 GROUP_NOT_ARCHIVED 一格把其后的全部用例再顺移 +6) | `B″: first-link and re-link share ONE atomic upsert; two concurrent FIRST links to different groups both succeed, later commit wins` | 同上 |
 | C | `section=` 分节 | **不在本切片** — 锁文 §6「期 3」;`section` 查询参数在分期 1 不存在(A‴ 测试文件 `:391-392`(原 `:386-387` +5)自陈) | — | A-4 |
 | D | category 后备(仅从未关联) | **不在本切片** — 同上;其底层 `NOT EXISTS` 判据已由 B′ 间接验证(见 §13.5),但 D 本身的展示/筛选端点属分期 3 | — | A-4 |
@@ -351,7 +351,7 @@ $ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vi
     tests/integration/approval-template-groups-serialization.db.test.ts \
     --reporter=verbose
 ```
-关键行(逐字段摘录,完整用例名见 §12 表,全部 ✓):
+关键行(逐字段摘录,当时现场逐字捕获,不因后续改名回填——完整**当前**用例名见 §12 表,全部 ✓):
 ```
 ✓ … sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)
 ✓ … A: same-org active-name conflict is 409; …
@@ -359,7 +359,7 @@ $ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vi
 ✓ … A″: cross-org link is 404 …
 ✓ … A‴: org comes ONLY from req.authenticatedTenantId …
 ✓ … B: archive is one transaction …
-✓ … B′: unlinked-from-group templates show as ungrouped …
+✓ … B′: unlinked-from-group templates show as ungrouped … （旧名,本用例已在修复轮 3/P2-3 改名,见 §20.2;§12 表已同步为新名,这里保留原始终端输出的逐字性,不回填）
 ✓ … F: authorization — write endpoints require approvalTemplateAdminGuard …
 ✓ … G: unarchive — clean case …
 ✓ … H: unlink is idempotent …
@@ -492,7 +492,7 @@ apps/web/src/composables/useSessionOrg.ts
 
 ### 15.2 B′:无可改的应用代码路径 —— BLOCKED-with-reason
 
-B′ 用例(`lifecycle.db.test.ts:442-484`(原 `:437-479`,修复轮 1 后 +5))的核心「mutation」是测试**自己内联的两条原始 SQL**(`NOT EXISTS(...)` 谓词 vs 被拒绝的 `group_id IS NULL` 谓词),两条查询都直接写在 `it()` 内,不经过任何 `ApprovalTemplateGroupService.ts` 或 `routes/approvals.ts` 的函数——因为 I2′ 定义的「后备显示判定」目前**没有任何服务/路由代码实现它**:能消费这个判据的中心页列表端点是 §6 分期 3(A-4)的 `section=` 端点,分期 1 尚未存在。
+B′ 用例(`lifecycle.db.test.ts:447-495`(原 `:437-479`,修复轮 1 后 `:442-484`,修复轮 3/P2-3 在 `it(` 上方插入 5 行 NOTE 注释后再 +5;现场 `grep -n "it('B′\|rejectedPredicate"` 可核))的核心「mutation」是测试**自己内联的两条原始 SQL**(`NOT EXISTS(...)` 谓词 vs 被拒绝的 `group_id IS NULL` 谓词),两条查询都直接写在 `it()` 内,不经过任何 `ApprovalTemplateGroupService.ts` 或 `routes/approvals.ts` 的函数——因为 I2′ 定义的「后备显示判定」目前**没有任何服务/路由代码实现它**:能消费这个判据的中心页列表端点是 §6 分期 3(A-4)的 `section=` 端点,分期 1 尚未存在。
 因此,「备份→改→跑→还原→cmp」这套流程在 B′ 这一行**没有目标可改**——不存在一个当前 HEAD 上的 `.ts` 文件包含「用 `group_id IS NULL` 判定后备」这行逻辑可以被 mutate。B′ 测试当前的形态是对**将来消费方必须遵守的不变量**的一次 DB 级机械论证,而不是对已交付代码的行为门。
 **判定:BLOCKED-with-reason**——非因为验证失败或跳过,而是因为锁文 B′/D 行命名的 mutation 对象在本切片尚不存在于应用代码里;A-4 落地 `section=` 端点时,必须对**那个端点**重做这一行的 mutation 台账,不能援引本节的 B′ 记录为「已 mutation-tested」的证据。
 
@@ -598,8 +598,8 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 ## 17. 未做 / 未验 / blocked-with-reason(如实列出)
 
 1. **验收 C、D、E 后半** —— 不在本切片范围(锁文 §6「期 1」门本身未列 C/D/E 后半;设计 MD §1.2 已逐条引锁文 §/分期)。留给 A-4。
-2. **验收 B′ 的 mutation 台账** —— 处置口径**并入 #3 的 owner 勘误桶**(修复轮 3,gate P2-3 收口;原记为自裁 BLOCKED-with-reason,与 #3/#5 是同一类锁文自相矛盾,不应自裁,理由见 #3)。技术事实不变,仍见 §15.2:I2′ 后备判定逻辑当前不存在于任何应用代码路径,无对象可 mutate;测试改为纯 DB 级说明性断言(`lifecycle.db.test.ts:481`,见 §20.1),A-4 落地 `section=` 端点时须对**那个端点**重做 mutation 台账。
-3. **验收 J 的前端半**(session-org 选择器组件、403 后展示、选定后重试、`run-required-web-tests.sh` 令牌)、**未知 `section=` ⇒ 400**、以及**验收 B′**(上条)—— 三者是**同一类**锁文自相矛盾:锁文 §6「期 1」门把 J 后端半/B′ 列入本切片验收范围,但它们唯一的消费方(前端选择器组件、`section=` 列表端点)都排在 A-4(分期 3)才存在。原记录把 J/C 的 400 升 owner、把 B′ 自行判 BLOCKED,是**同一类问题两种处置口径**(违反判据集合自洽);统一改为**待 owner 勘误**,三者并列,不在本切片阻塞,归 A-2/A-4(设计 MD §1.2/§1.3/§6,补充清单 #5;§20.1 记录本轮的归并)。
+2. **验收 B′ 的 mutation 台账** —— 处置口径**并入 #3 的 owner 勘误桶**(修复轮 3,gate P2-3 收口;原记为自裁 BLOCKED-with-reason,与 #3/#5 是同一类锁文自相矛盾,不应自裁,理由见 #3)。技术事实不变,仍见 §15.2:I2′ 后备判定逻辑当前不存在于任何应用代码路径,无对象可 mutate;测试改为纯 DB 级说明性断言(`lifecycle.db.test.ts:494`,见 §20.2),A-4 落地 `section=` 端点时须对**那个端点**重做 mutation 台账。
+3. **验收 J 的前端半**(session-org 选择器组件、403 后展示、选定后重试、`run-required-web-tests.sh` 令牌)、**未知 `section=` ⇒ 400**、以及**验收 B′**(上条)—— 三者是**同一类**锁文自相矛盾:锁文 §6「期 1」门把 J 后端半/B′ 列入本切片验收范围,但它们唯一的消费方(前端选择器组件、`section=` 列表端点)都排在 A-4(分期 3)才存在。原记录把 J/C 的 400 升 owner、把 B′ 自行判 BLOCKED,是**同一类问题两种处置口径**(违反判据集合自洽);统一改为**待 owner 勘误**,三者并列,不在本切片阻塞,归 A-2/A-4(设计 MD §1.2/§1.3/§6,补充清单 #5;§20.2 记录本轮的归并)。
 4. **补充清单 #1 的闭世界缺口** —— 未收口(§13.5),`scripts/ops/approval-template-groups-ci-wiring.test.mjs` 新守卫文件留给后续单元或 owner 裁决。
 5. **s6a 钉的时效性** —— 仅对本 push 前一刻的 `plugin-tests.yml` 字节成立(§4/§13.4);合并前必须重算,不在本单元范围内。
 6. **重排端点(分期 3)的 E 后半判据** —— 代码尚未实现,自然也未验证。
@@ -797,7 +797,7 @@ $ pnpm run type-check   # tsc --noEmit && tsc -p scripts/tsconfig.recovery-archi
 3. `lifecycle.db.test.ts` B′ 用例改动(纯注释/命名/断言旁注,零行为代码变化):
    - 用例名从「unlinked-from-group templates show as ungrouped, never falling back to category; never-linked templates still show category」(暗示了一个本切片不存在的展示行为)收窄为「B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate」(只claim它证明的东西:两条 SQL 谓词在 DB 层面的区分)。
    - `it()` 上方新增说明,指向 A-4/§15.2/§17 #2-#3。
-   - `:481`(`expect(rejectedPredicate.rows[0].looks_never_grouped).toBe(true)`)旁新增注释,明写这是「断言自己查询出的值等于自己」、按构造恒真、零 mutation 判别力,只是给人类读者解释被拒绝谓词的失败模式;并把行尾注释从「red under the rejected predicate」(暗示存在红态)改为「always true — see note above; not a gate」。
+   - `:494`(`expect(rejectedPredicate.rows[0].looks_never_grouped).toBe(true)`,现场 `grep -n "rejectedPredicate\|looks_never_grouped" lifecycle.db.test.ts` 核实行号)旁新增注释,明写这是「断言自己查询出的值等于自己」、按构造恒真、零 mutation 判别力,只是给人类读者解释被拒绝谓词的失败模式;并把行尾注释从「red under the rejected predicate」(暗示存在红态)改为「always true — see note above; not a gate」。
 
 **回归确认**(与 §20.1 共用同一次全量重跑,§20.1 已贴,不重复):`Test Files 2 passed (2) / Tests 26 passed (26)`(用例数不变:改的是名字与注释,不是新增/删除 `it()`);`pnpm run type-check` exit 0。
 
