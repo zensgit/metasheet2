@@ -7,7 +7,7 @@
  * REPLACEMENT semantics in `AuthService.resolveRbacProfile`, `user_roles`/`user_permissions` reads
  * — is never exercised there), `GET /api/approvals/pending-count` must return the fourteen
  * lock-mandated golden values in §5's A0 row for the fourteen viewer classes (①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬). This
- * step adds class ⑨; ⑩⑪⑫⑬ remain deferred (see the fixture-plumbing docblock below).
+ * step adds class ⑩; ⑪⑫⑬ remain deferred (see the fixture-plumbing docblock below).
  *
  * This file, its `setup.ts`, and `vitest.todo-center-pending-gate.config.ts` are an independent
  * vitest project, mirroring `tests/elearning-pilot-auth/` (see that suite's own docblock for why a
@@ -75,8 +75,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 // -------------------------------------------------------------------------------------------
 // Fixture plumbing (design-lock §3.0's executable S1–S9 seed order; this file currently seeds
-// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧⑨ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
-// these classes and is deferred to a later step, along with classes ⑩⑪⑫⑬).
+// through S1–S8 for classes ①②③③′④⑤⑥⑦⑧⑨⑩ — S9 (`approval_reads`, classes ⑫⑬ only) is not needed by
+// these classes and is deferred to a later step, along with classes ⑪⑫⑬).
 // -------------------------------------------------------------------------------------------
 const suffix = randomUUID().slice(0, 8)
 
@@ -469,6 +469,18 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // this to 1, red). Shares `SHARED_SEAT_NODE_KEY` with ①②⑥⑦⑧ (consistent with every other class in
   // this file using the one shared node key where the lock does not require a distinct one).
   const v9 = viewer('c9-approved-status', 'employee')
+  // Class ⑩ — same viewer/seat shape as ①, but the SEAT ROW ITSELF is `is_active = FALSE` (the
+  // instance is still `status='pending'`) ⇒ count 0: the query's FIRST WHERE conjunct is
+  // `a.is_active = TRUE` literally — an inactive assignment row never qualifies regardless of the
+  // status/handler-node conditions (design-lock §5 A0 ⑩; mutation "drop `a.is_active = TRUE`"
+  // would flip this to 1, red). Own viewer AND own instance, deliberately NOT reusing ①'s (design-
+  // lock §3.0: "⑩ 不复用 ①(复用会计 1 不计 0)" — ①'s own active seat on ①'s instance would leave
+  // ⑩'s golden 0 undetectable if the two classes shared either fixture). Own, distinct node key
+  // (unlike ①②⑥⑦⑧⑨'s shared one) — ⑩ is not part of the join-key population those classes pin
+  // (see `SHARED_SEAT_NODE_KEY`'s own docblock); nothing requires it to collide with theirs, and
+  // keeping it separate means the eventual "drop the join key" mutation for ⑦/⑧ cannot brush past
+  // ⑩'s independently-zeroing `is_active = FALSE` row by coincidence.
+  const v10 = viewer('c10-inactive-seat', 'employee')
 
   const instance1: InstanceFixture = {
     id: `todo-center-pending-gate-i1-${suffix}`,
@@ -542,14 +554,24 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     publishedDefinitionId: null, // filled in beforeAll
     currentNodeKey: SHARED_SEAT_NODE_KEY,
   }
+  // Class ⑩'s own instance — `status='pending'` (the instance itself is unremarkable; what makes
+  // this class golden-0 is its ASSIGNMENT row's `is_active = FALSE`, seeded below). Own, distinct
+  // node key (see `v10`'s docblock above for why it does not share `SHARED_SEAT_NODE_KEY`).
+  const instance10: InstanceFixture = {
+    id: `todo-center-pending-gate-i10-${suffix}`,
+    status: 'pending',
+    sourceSystem: 'platform',
+    publishedDefinitionId: null, // filled in beforeAll
+    currentNodeKey: `todo-center-pending-gate-node-10-${suffix}`,
+  }
 
-  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id]
-  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id]
+  const seededUserIds = [v1.id, v2.id, v3.id, v3b.id, v4.id, v5.id, v6.id, v7.id, v8.id, v9.id, v10.id]
+  const seededInstanceIds = [instance1.id, instance2.id, instance3b.id, instance5.id, instance6.id, instance7.id, instance8.id, instance9.id, instance10.id]
 
   beforeAll(async () => {
     await seedApprovalsReadPermission()
 
-    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9]) {
+    for (const v of [v1, v2, v3, v3b, v4, v5, v6, v7, v8, v9, v10]) {
       await seedUser(v)
       // Design-lock §3.0: "每类都 seed users 行 + user_permissions('approvals:read')" — uniformly,
       // regardless of whether the class is expected to reach the query via the admin fast-path.
@@ -582,6 +604,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     // `seedHandlerPublishedDefinition` in this file.
     instance8.publishedDefinitionId = await seedHandlerPublishedDefinition('c8', SHARED_SEAT_NODE_KEY)
     instance9.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c9')
+    instance10.publishedDefinitionId = await seedNonHandlerPublishedDefinition('c10')
 
     await seedInstance(instance1)
     await seedInstance(instance2)
@@ -593,6 +616,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
     await seedInstance(instance7)
     await seedInstance(instance8)
     await seedInstance(instance9)
+    await seedInstance(instance10)
 
     await seedAssignment({
       instanceId: instance1.id,
@@ -642,6 +666,15 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       assigneeId: v9.id,
       nodeKey: SHARED_SEAT_NODE_KEY,
     })
+    // Class ⑩'s seat row is INACTIVE (`is_active: false`) — the sole distinguishing fixture for
+    // this class (design-lock §5 A0 ⑩: "去掉 `a.is_active = TRUE` ⇒ 1,红").
+    await seedAssignment({
+      instanceId: instance10.id,
+      assignmentType: 'user',
+      assigneeId: v10.id,
+      nodeKey: instance10.currentNodeKey!,
+      isActive: false,
+    })
     // Class ③ and ④ intentionally seed NO assignment and NO instance of their own (design-lock
     // §3.0 S7 note: "③/④ 无席位无实例").
 
@@ -667,6 +700,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
           instance6.publishedDefinitionId,
           instance8.publishedDefinitionId,
           instance9.publishedDefinitionId,
+          instance10.publishedDefinitionId,
         ]],
       )
       await p.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUserIds])
@@ -872,6 +906,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(me.email).toBe(v9.email)
       expect(me.username).toBe(v9.username)
       expect(me.name).toBe(v9.name)
+      expect(me.role).toBe('employee')
+
+      const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
+      expect(status).toBe(200)
+      expect(body).toHaveProperty('count')
+      expect(body.count).toBe(0)
+      expect(body.unreadCount).toBe(0)
+    })
+
+    it('class ⑩ — own viewer/instance, pending, but the SEAT ROW is is_active=FALSE ⇒ count 0', async () => {
+      const token = await devToken(baseUrl, v10.id)
+      const me = await fetchMe(baseUrl, token)
+      expect(me.email).toBe(v10.email)
+      expect(me.username).toBe(v10.username)
+      expect(me.name).toBe(v10.name)
       expect(me.role).toBe('employee')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
