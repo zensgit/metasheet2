@@ -150,3 +150,120 @@ lists in the same commit that introduces it.
 - **s6a**: not applicable to this commit — `plugin-tests.yml` is untouched, so there is nothing to
   re-pin. This is the evidence that retires the "+ s6a 重钉" clause in the original task framing,
   not an omission of it.
+
+## Addendum (2026-09-17, lane-continuation step) — judge F, `ci-realdb-step-contract.mjs`
+## registration, `approval-realtime.ts` trigger-set
+
+By the time of this addendum the gate-content sibling (fourteen-class A0 viewer matrix, classes
+①②③③′④⑤⑥⑦⑧⑨⑩⑪⑫⑬) has landed on this branch — the "gate file does not exist yet" framing above is now
+historical, point-in-time (this doc is not rewritten to erase that; see the multi-repo workspace's
+own convention of leaving prior verification snapshots as accurate records rather than retroactively
+correcting them). This addendum discharges three items from the design-lock's §5 judge table and
+the cross-lane supplementary checklist that are CI-wiring-shaped, not test-content-shaped, and so
+belong in this doc rather than the gate-content unit's own notes.
+
+### Judge F ("无新表" — §5 row F, 正控 column `—`)
+
+§5 itself marks F (and E) with no positive control — unlike A/A0/B/C/C'/D, F is not a
+mutation-tested gate; it is a recorded fact about this feature's diff. "落成可执行断言" here means
+the verdict comes from a command's exit status, not a suite added around it (adding a `node --test`
+snapshot-of-the-migrations-directory guard would either false-red on any unrelated migration landing
+on `main` in the meantime, cross-lane-poisoning this lane, or — if scoped by filename pattern
+instead — silently narrow F's actual claim, this repo's own documented anti-pattern:
+`feedback_second_narrower_artifact_is_contract_narrowing`). The mechanical command, run against this
+branch's actual merge-base with `origin/main` (three-dot, not two-dot — two-dot would misreport any
+migration `main` gained after the branch point as a deletion):
+
+```
+$ git merge-base origin/main HEAD
+89f1ecdee2c3b70205a318074824c834bc6a5c7e
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations
+$ echo "exit=$?"
+exit=0
+$ git diff --stat origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations
+(no output)
+```
+
+`exit=0` from `--quiet` (which implies `--exit-code`) is the actual pass/fail signal — a bare
+`git diff --stat` always exits 0 regardless of content, so it alone would not have been a real
+assertion (a plain `--stat` was run earlier in this lane's history for a *different*, working-tree
+comparison — `git diff --stat -- .github/workflows/plugin-tests.yml`, correct for that use since it
+has no base-ref argument at all — this is a distinct command shape and is not reused here uncritically).
+**Widened from the lock's literal wording** ("`db/migrations`", singular): this repo has TWO
+migration roots — the legacy raw-SQL `packages/core-backend/migrations/` and the modern kysely
+`packages/core-backend/src/db/migrations/` (same two-root split `migration-prod-image-parity.yml`'s
+own header calls out) — both are diffed above; the lock's literal path names only one. Judge F is
+DISCHARGED for this branch as of merge-base `89f1ecdee2c3b70205a318074824c834bc6a5c7e`. Re-run before
+merge if new commits land on this branch (the merge-base could move).
+
+### `ci-realdb-step-contract.mjs` FILES registration — N/A, mechanically confirmed
+
+Supplementary checklist item 1 warns that `*-ci-wiring.test.mjs` guards each carry a hardcoded
+`FILES` array registering suite files inside `plugin-tests.yml`'s named real-DB step, and a new
+`.db.test.ts` that enters a workflow's suite list without entering that array stays outside the
+guard's closed world. This does not apply to the todo-center gate:
+
+```
+$ grep -n "FILES" scripts/ops/ci-realdb-step-contract.mjs
+(no output, exit 1)
+```
+
+`ci-realdb-step-contract.mjs` itself defines no `FILES` array at all — the per-lane `FILES` arrays
+checklist item 1 describes live in the INDIVIDUAL `*-ci-wiring.test.mjs` guard files (e.g.
+`directory-grant-table-ci-wiring.test.mjs`), each importing this module's `REAL_DB_STEP_IDS`
+(`{ approval: 'approval-real-db-integration', multitable: 'multitable-real-db-integration' }`,
+lines 98-102) to locate ONE step BY STABLE `id:` inside `plugin-tests.yml`, then asserting THEIR
+OWN suite file is a whole-file argument of that step's `vitest run` invocation. The todo-center
+gate is not a member of either step's population — it is a standalone workflow file
+(`approval-realdb-todo-center-pending-query.yml`, u3's own deliberate deviation from the taskbook's
+literal "add a step to plugin-tests.yml" wording, recorded above) that never touches
+`plugin-tests.yml`:
+
+```
+$ grep -n "todo-center\|approval-pending-query" .github/workflows/plugin-tests.yml
+(no output, exit 1)
+```
+
+There is consequently no `FILES` array to register this gate into, and no new `*-ci-wiring.test.mjs`
+guard is needed for it — registering one would assert a membership relationship (this gate runs
+inside `plugin-tests.yml`'s `approval-real-db-integration` step) that is false. N/A, per the
+checklist's own "或按其 REAL_DB_STEP_IDS 机制说明为何 N/A 并记录" clause.
+
+### `approval-realtime.ts` trigger-set membership — N/A, mechanically confirmed
+
+The design-lock's own rule for the trigger-set ("触发集") is to list every src module the SUITE
+ACTUALLY EXECUTES, not every module a listed module happens to import. `routes/approvals.ts` (already
+in both `paths:` lists) imports `publishApprovalCountsUpdate` from `services/approval-realtime.ts`,
+but that import is only reached through `publishApprovalCountsForUsers`, called from eight route
+handlers — all POST, all decision/mutation endpoints, none of them GET:
+
+```
+$ awk '/^ *r\.(post|get|put|patch|delete)\(/ {last=$0; lastln=NR} /await publishApprovalCountsForUsers\(/ {print lastln": "last}' packages/core-backend/src/routes/approvals.ts
+2062:  r.post('/api/approvals/:id/mark-read', ...
+2118:  r.post('/api/approvals/mark-all-read', ...
+2216:  r.post('/api/approvals/:id/remind', ...
+2406:  r.post('/api/approvals/:id/jump', ...
+2531:  r.post('/api/approvals/admin/reassign', ...
+2676:  r.post('/api/approvals/:id/actions', ...
+2839:  r.post('/api/approvals/:id/approve', ...
+2989:  r.post('/api/approvals/:id/reject', ...
+```
+
+The todo-center-pending-gate suite issues zero requests against any of these — it is a read-only
+GET matrix (`/api/approvals/pending-count`, `/api/auth/me`) plus, for classes ⑫/⑬, a direct
+`approval_reads` row insert in its own fixture helper rather than a call to
+`POST /api/approvals/:id/mark-read`:
+
+```
+$ grep -n "\.post(\|/decide\|/approve\b\|/reject\b" packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+(no output, exit 1)
+```
+
+`services/approval-realtime.ts` is therefore genuinely unreached by this suite's execution — adding
+it to the trigger-set `paths:` would arm a real-DB lane for a file whose production-path behavior
+this lane never observes, contrary to the lock's own "套件真正执行到的每个 src 模块" criterion. N/A;
+not added. The commit that changed this file's behavior (`6fba6e01e`, "broadcast
+todo:counts-updated alongside approval:counts-updated") is instead covered by
+`packages/core-backend/tests/unit/approval-realtime.test.ts`, an always-on no-DB unit suite (not
+excluded in `vitest.config.ts`, collected by `plugin-tests.yml`'s required `test (20.x)` job by
+default — no special wiring needed or added).
