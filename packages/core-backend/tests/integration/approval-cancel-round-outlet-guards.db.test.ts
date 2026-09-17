@@ -470,10 +470,12 @@ describeIfDatabase('cancel-round outlet guards (§14.3 #2/#4/#6/#7/#7′/#8): a 
       [cancelRoundInstanceId],
     )
     expect(after.rows[0]).toEqual(before.rows[0])
-    // The round row is what this guard protects: had the legacy route been allowed to write the
-    // instance `rejected` directly, `approval_rounds.outcome` would still read `pending` (only
-    // `dispatchAction`'s 判据 III writes it) — a permanent placeholder blocking re-issue of a
-    // cancel round for the same document (§5 I3). Confirm it never moved.
+    // `outcome='pending'` ALONE is not discriminating — it reads identically whether the guard
+    // fired or not, since only `dispatchAction`'s 判据 III ever moves it off `pending`. What makes
+    // this a real negative is the CONJUNCTION with the instance-row equality assertion above: the
+    // orphan bug this guard prevents is instance-terminal ∧ round-still-pending. Proving the
+    // instance never left `pending` (the `after.rows[0]).toEqual(before.rows[0])` above) is what
+    // rules the orphan combination out; this query just confirms the round side of that pair.
     const roundAfter = await pool().query<{ outcome: string }>(
       `SELECT outcome FROM approval_rounds WHERE engine_instance_id = $1`,
       [cancelRoundInstanceId],
