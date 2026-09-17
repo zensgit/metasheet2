@@ -67,6 +67,13 @@ export default defineConfig({
       // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-node-operation-policy.db.test.ts',
+      // Revoke terminal-status guard: three approval pre-states (legacy `/approve`, executor
+      // `/actions{approve}`, still-`pending`) against `POST /actions{revoke}`, read back with raw
+      // SQL against `approval_instances`. Requires real PostgreSQL and a real dispatch transaction.
+      // Excluded from the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a
+      // WHOLE FILE into .github/workflows/approval-realdb-revoke-terminal-guard.yml, which arms
+      // EXPECT_DB=1.
+      'tests/integration/approval-revoke-terminal-guard.db.test.ts',
       // `canDecideCurrentNode` — the viewer-scoped decision affordance on the detail DTO, asserted
       // together with what the decision endpoint actually does for the same viewer. Requires real
       // PostgreSQL: the ROLE arm resolves through AuthService -> `user_roles` (the case is a
