@@ -1581,7 +1581,7 @@ export class ServiceError extends Error {
  * `AttendanceCentralApprovalError`) so `handleApprovalsError`'s `error instanceof ServiceError`
  * branch (routes.ts) and this file's own callers funnel it through the standard envelope; extending
  * `AttendanceCentralApprovalError` instead would get it silently absorbed into `skipped_stale` at
- * `ApprovalProductService.ts:9246`, which is the one behavior this class must never have.
+ * `ApprovalProductService.ts:9637`, which is the one behavior this class must never have.
  */
 export class CancelRoundOutletForbiddenError extends ServiceError {
   constructor(message: string) {
