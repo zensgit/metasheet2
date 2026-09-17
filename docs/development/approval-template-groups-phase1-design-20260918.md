@@ -203,6 +203,7 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 | session-org 前端选择器组件、`useSessionOrg` 接线、`run-required-web-tests.sh` 令牌、J 的前端半验收 | A-2 |
 | J 行「未知 `section=` 令牌 ⇒ 400」 | 补充清单 #5:锁文勘误请示 owner,挪到 A-4(分期 3)门,`section=` 到分期 3 才存在 |
 | C 行「`?category=` 与 `section` 同现 ⇒ 400」 | 同上,挪到 A-4 |
+| B′ 行「无案例的后备判定 mutation 台账」(实现门审 P2-3,修复轮 3) | 同上,并入 #5 同一个 owner 勘误桶——I2′ 判定唯一消费方(`section=` 列表端点)也在 A-4 才存在;本切片测试(`lifecycle.db.test.ts:442-`)已改为纯 DB 级说明性断言,不冒充可 mutation 的应用代码门,A-4 落地端点时须对该端点重做台账 |
 | 验收 C(中心页分节 `section=`)、D(category 后备显示/筛选)、E 后半(重排端点 + 并发重排终态) | A-4(分期 3),见 §1.2 |
 | 管理员「按现有 category 建组并挂接」预览→执行→可回滚 | A-3(分期 2) |
 | 补充清单 #1 的闭世界缺口(`scripts/ops/approval-template-groups-ci-wiring.test.mjs` 新守卫文件) | 未排期,留给后续单元或 owner 裁决是否现在做(见验证 MD) |
@@ -222,4 +223,4 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 按 §0 抬头 RATIFY 记录:Q3=是、Q4=不保留(建议值)、Q5=首期不动(建议值)、分期 2=要、`key` 顺带=不顺带。**第 2 项(本切片实际实现的形状依据)已 ratify**,本切片按 v2.13 §2/§3 原样实现,未对已 ratify 的形状做任何偏离——偏离仅限于 §3.4 与 §6 列出的、锁文文本本就未覆盖的实现空隙,不是对已裁决条款的改写。
 
-本切片没有新引入需要 owner 裁决的问题;§6「留给后续切片的项」里的两条锁文勘误请示(J/C 的 400 挪分期)已在补充清单 #5 里向 owner 披露,尚待回应,不阻塞本切片的 Draft PR。
+本切片没有新引入需要 owner 裁决的问题;§6「留给后续切片的项」里的三条锁文勘误请示(J/C 的 400 挪分期,以及修复轮 3 归并进同一桶的 B′ mutation 台账无案例)已在补充清单 #5 里向 owner 披露,尚待回应,不阻塞本切片的 Draft PR。
