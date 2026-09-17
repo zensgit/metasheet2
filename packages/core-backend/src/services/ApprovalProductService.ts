@@ -1121,6 +1121,20 @@ const APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'
  * final evaluator relies on: ZERO assignments to `approval_rounds.document_id` anywhere in `src`
  * or `plugins`. `attendance_requests.org_id` is NOT immutable (4 `org_id = EXCLUDED.org_id`
  * upsert writers), which is precisely why the post-lock re-assert is load-bearing.
+ *
+ * WHICH ACTION (the second axis, and the one that decides scope). Only the approve fall-through
+ * — outlet #5/#5′ — can reach W4 at all. 判据 III's revoke/reject branches terminate the round
+ * row with a bare `UPDATE approval_rounds`: no W4 call, no attendance write, nothing that needs
+ * the rollout lock. `comment` writes no round state at all, and the five verbs
+ * `assertCancelRoundActionAllowed` refuses must reach that refusal as cheaply as they did before.
+ * So a resolver keyed on the instance ALONE would have widened all of them: already-shipped
+ * 判据 III behaviour would silently move to SERIALIZABLE, gain an org-wide advisory lock, gain a
+ * `40001` failure mode it never had, and a forbidden verb would take an org lock before being
+ * rejected — plus the re-assert's 409 would start preceding §14.3 #4/#6's outlet-guard codes.
+ * `action === 'approve'` is the tightest predicate available BEFORE `BEGIN` (terminality is not
+ * knowable until the executor runs inside the transaction, and over-locking a non-terminal
+ * approve is harmless), and it is checked FIRST, before any query — so every other action pays
+ * not even the pre-read's round trip.
  */
 export type CancelRoundRolloutLockRequirementV1 =
   | Readonly<{ kind: 'none' }>
@@ -1134,7 +1148,10 @@ export type CancelRoundRolloutLockRequirementV1 =
 export async function resolveCancelRoundRolloutLockRequirementV1(
   client: ApprovalDbClient,
   engineInstanceId: string,
+  action: ApprovalActionType,
 ): Promise<CancelRoundRolloutLockRequirementV1> {
+  // The action axis, checked before anything touches the database (see the note above).
+  if (action !== 'approve') return { kind: 'none' }
   const instanceProbe = await client.query<{ id: string; workflow_key: string | null }>(
     `SELECT id, workflow_key FROM approval_instances
       WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'`,
@@ -10622,7 +10639,7 @@ export class ApprovalProductService {
       // `assertExternalTransactionIsolationV1`). It is advisory only: a stale answer is caught by
       // the fail-closed re-assert under the row lock below, which is what makes it safe to read
       // outside the transaction.
-      rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id)
+      rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
 
       if (rolloutLock.kind === 'required') {
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
@@ -10650,7 +10667,7 @@ export class ApprovalProductService {
       // `none` → `required`: `attendance_requests.org_id` is NOT immutable (4 upsert writers set
       // it from `EXCLUDED`), so a pre-read that resolved no org — or a different one — must never
       // be allowed to proceed holding the wrong lock, or none. Placed before any DML on this path.
-      const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id)
+      const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
       if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
         throw new ServiceError(
           'Cancel-round rollout lock scope changed between the pre-read and the instance row lock',
