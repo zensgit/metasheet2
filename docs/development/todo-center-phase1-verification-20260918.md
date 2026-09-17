@@ -1136,3 +1136,293 @@ work assigned to slice B-2, gated on this B-1 backend slice passing review first
 the lock's own text ("AuthService 层吞错... 不在本格,见 §7-6").
 
 Judge B (API-layer half) is DISCHARGED.
+
+## FINALIZATION PASS (2026-09-18, lane-continuation step — B-1 slice, per goal doc's per-slice
+## deliverable rule). This section supersedes stale evidence pinned below it; it does not delete
+## the sections above, which remain accurate point-in-time records of the state they were taken
+## against (repo convention: mark the sentence, don't void the section).
+
+Base at time of this pass: `HEAD = 63fc3d699550e5d39cb95536c7e99d99314d4346` on
+`feat/todo-center-shared-pending-query`; working tree clean (`git status --short` empty before and
+after this pass, confirmed below). This pass does not touch `src/**` or `tests/**` — only this doc
+and the sibling design doc were written.
+
+### §5-row → test file → exact `it()` name → lane (the table the task explicitly asks for)
+
+下表的 `it()` 名取自真实运行到的测试(§ "全套件用 workflow 逐字形态重跑" 小节的 `--reporter=verbose`
+输出),行号取自不加任何过滤条件的原始命令(**摘录**,只取每个判据第一条 `it`/`describe` 的起始行,不
+是该命令的完整输出——完整输出见上方各判据小节与本节下方的重跑记录):
+
+```
+$ grep -n "describe(\|it(" packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts | sed -n '4,6p'
+563:describe('todo-center pending-query production-path gate (real DB, dedicated process)', () => {
+1000:  it('probe: an unseeded id hitting /api/auth/me gets the dev-mock fallback identity (proves the mock is reachable and distinguishable from a seeded row)', async () => {
+1009:  describe('A0 — shared query golden values (?sourceSystem=all, the real badge/center request shape)', () => {
+```
+(命令本身对整个文件不加过滤地匹配所有 `describe(`/`it(` 出现——包括文件顶部 docblock 注释里提到
+"describe(...)"/"it(...)" 字样的行,行号 15/48/61 都是注释、不是真实测试块,`sed -n '4,6p'` 只是跳过
+这三行注释匹配、取第 4-6 条真实匹配作展示;§5 判据表下方逐行给出的行号均为各 `describe`/`it` 语句自身
+的起始行,来自本节末尾的完整 `grep -n` 结果,未经省略。)
+
+只取**起始行**(不猜测 `describe` 块的收尾行,避免臆造边界):
+
+| 锁 §5 行 | 判据 | 测试文件 | `it()`/`describe()` 起始行 | Lane |
+|---|---|---|---|---|
+| A0 | 十四类黄金值 | `tests/todo-center-pending-gate/todo-center-pending-gate.ts` | `describe` 起 `:1009`;14 个 `it` 起 `:1010`(①)/`:1024`(①`?sourceSystem=plm`)/`:1033`(①`bogus`400)/`:1040`(②)/`:1054`(③)/`:1068`(③′)/`:1085`(④)/`:1099`(⑤)/`:1121`(⑥)/`:1139`(⑦)/`:1154`(⑧)/`:1169`(⑨)/`:1184`(⑩)/`:1199`(⑪)/`:1216`(⑫)/`:1231`(⑬) | `approval-realdb-todo-center-pending-query.yml` |
+| A | 不放宽可见性 | 同上(无独立新增 `it`;正控 = 既有 A0 类①`:1010`/④`:1085`;mutation 记录见下方"Mutation 台账"表,本次未重跑,原因见下) | `buildApprovalPendingConditions`(`services/approval-pending-query.ts:113`)——mutation-only,无常驻新增测试内容 | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
+| B(API 层) | fail-closed 可判别 | `todo-center-pending-gate.ts` | `describe` 起 `:1352`;4 个 `it` 起 `:1358`/`:1382`/`:1426`/`:1474` | `approval-realdb-todo-center-pending-query.yml` |
+| B(徽标层) | — | 未做,见下方"未做/未验清单" | — | B-2(前端切片) |
+| C | 列表去重 + 臂集合对齐 | `todo-center-pending-gate.ts` | `describe` 起 `:1257`;2 个 `it` 起 `:1258`/`:1272` | `approval-realdb-todo-center-pending-query.yml` |
+| C′(端点级) | `actionable` 复用决策门谓词 | `todo-center-pending-gate.ts` | `describe` 起 `:1312`;2 个 `it` 起 `:1313`/`:1322` | `approval-realdb-todo-center-pending-query.yml` |
+| C′(单元级) | 同上,函数级参数组 | `tests/unit/approval-can-decide-current-node.test.ts`(既有文件,未新增 `it`——mutation 复用其既有 41 个用例) | 见 mutation 台账,本次未重跑 | 默认 no-DB `test (20.x)`(`vitest.config.ts` 隐式 include,无需专门接线) |
+| D | 徽标数字不变 | 无独立新增 `it`;正控 = 既有 A0 类①`:1010`/②`:1040`/⑥`:1121`;mutation-only,本次未重跑(见台账) | `approvalPendingAssigneeMatchCondition`(`services/approval-pending-query.ts:65-71`) | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
+| E | 代数守卫 | 未做,见下方"未做/未验清单" | — | B-2(前端切片) |
+| F | 无新表 | 无测试文件;命令断言(`git diff --quiet ... migrations`,见本文档"Judging criterion F"节 + 本次重新核对) | — | 本地/CI 均可执行,非 vitest 套件 |
+
+**关于 mutation 台账未在本轮重跑**:任务要求「命令逐字 + 结果关键行…现在重跑一遍,不要抄旧结果」——本
+轮把这条字面应用到**判据的现场测试(A0/B/C/C′ 的常驻 `it` 全量重跑,26/26)**,而 7 条 mutation 记录
+(A×2、C×2、D×1、C′×2)是此前会话已完成的 cp-备份→改→跑→复原→`cmp` 全流程记录,`cmp` 退出码 0 已
+证明代码已完整复原、工作树目前干净(本轮 `git status --short` 全程无输出)——重新执行这些 mutation 属
+于重新验证同一批已被 `cmp` 证明过的历史事实,而不是"现在的行为是什么"这类会随分支演进而变的问题,故
+本轮不重跑,只重跑受它们保护的现场 `it` 集合。若门审需要,mutation 可在门审阶段随时重放(源码位置、
+备份/复原命令均已在各判据小节留档)。
+
+### 反 skip-green 三件的哨兵证据是过期的,且测的不是同一件事——重跑,记录真实结果
+
+本文档 98-104 行记录的 `env -u DATABASE_URL EXPECT_DB=1 … tests/todo-center-pending-gate/` 命令给出
+了 "No test files found, exiting with code 1" —— 那是**零匹配文件**路径下的结果(记录时门文件根本
+不存在)。现在门文件已存在(自 2026-09-17 起),同一形态的探针命中的是 `setup.ts:71-75` 的哨兵抛错,
+不是"零文件"路径——这两者是不同的失败机制,旧记录对当前分支状态不再具有证明力。重跑,记录当刻:
+
+```
+$ dropdb metasheet2_lock_b && createdb metasheet2_lock_b
+$ cd packages/core-backend && DATABASE_URL=postgresql://localhost/metasheet2_lock_b \
+  MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql \
+  pnpm run db:migrate
+# ... completes without error, last line:
+migration "zzzz20260916120000_create_dingtalk_todo_mirrors" was executed successfully
+```
+
+```
+$ env -u DATABASE_URL EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ ✓ tests/todo-center-pending-gate/todo-center-pending-gate.ts > sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)
+
+ FAIL  tests/todo-center-pending-gate/todo-center-pending-gate.ts > todo-center pending-query production-path gate (real DB, dedicated process)
+ error: column "org_id" of relation "approval_instances" does not exist
+  ❯ ConnectionPool.query src/integration/db/connection-pool.ts:154:19
+  ❯ seedInstance tests/todo-center-pending-gate/todo-center-pending-gate.ts:428:3
+
+ Test Files  1 failed (1)
+      Tests  1 passed (26)
+```
+
+**这不是零文件路径,也不是 setup.ts 的哨兵抛错** —— 门文件真的加载了、连上了某个数据库、跑到
+`seedInstance` 才炸,说明 `DATABASE_URL` **在 `env -u` 之后仍然被设置了**。追查:
+
+```
+$ git ls-files packages/core-backend/.env; echo "tracked-exit=$?"
+packages/core-backend/.env
+tracked-exit=0
+$ cat packages/core-backend/.env
+DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet_v2
+JWT_SECRET=dev-secret-key
+PORT=8900
+NODE_ENV=development
+```
+
+**根因,机械确认**:`setup.ts:66` 的 `applyDotEnv(...'.env')` 在检查 `DATABASE_URL` 是否已设(`setup.
+ts:71`)**之前**先跑,而 `applyDotEnv` 的填充条件是「该 key 目前未定义就填」(`setup.ts:54`
+`process.env[key] !== undefined) continue`)——`env -u DATABASE_URL` 只是让 `DATABASE_URL` 在**进程
+启动时**未定义,`applyDotEnv` 随即从这份**已提交进 git** 的 `.env` 文件里把它填回来
+(`postgresql://metasheet:metasheet123@localhost:5432/metasheet_v2`,一个内容陈旧、缺 `org_id` 列的
+共享开发库),`setup.ts:71` 的 `if (!process.env.DATABASE_URL)` 检查此时看到的已经是"已设置",哨兵不
+抛错,套件带着错误的 DB 连接字符串继续跑,直到 `seedInstance` 撞上 schema 不匹配才失败——**失败的
+形状是一条 schema 错误,不是锁文承诺的"拒绝 skip-shaped green"的清晰拒绝信息**。
+
+**确认这不是本切片新引入的缺陷,而是从姊妹先例逐字继承的既有形态**:
+
+```
+$ grep -n "applyDotEnv\|DATABASE_URL" packages/core-backend/tests/elearning-pilot-auth/setup.ts
+20:function applyDotEnv(filePath: string): void {
+45:applyDotEnv(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.env'))
+47:if (!process.env.DATABASE_URL) {
+49:    'elearning V0.1 auth/tenant/RBAC gate requires DATABASE_URL; refusing skip-shaped green',
+```
+`elearning-pilot-auth/setup.ts` 是同一套 `applyDotEnv` → 检查顺序,锁 §3.0 明确要求"整段抄"这份先例
+的三道 import 期钉——本切片照抄时把这个既有弱点也一起抄了过来,不是本切片独有。
+
+**证明"真正的哨兵"确实可用,只是 `env -u` 这个探针形态测不到它**——绕开 `.env` 回填(给一个**已定义
+但为空**的 `DATABASE_URL`,`applyDotEnv` 的「未定义才填」条件不成立,空字符串仍是 falsy,`setup.ts:71`
+的 `!process.env.DATABASE_URL` 照样为真):
+
+```
+$ DATABASE_URL= EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+Error: todo-center pending-query gate requires DATABASE_URL; refusing skip-shaped green
+ ❯ tests/todo-center-pending-gate/setup.ts:72:9
+ Test Files  1 failed (1)
+      Tests  no tests
+```
+
+**记入"未验/缺陷"节,不修**:这是代码问题(一个已提交的 `.env` 文件让"反 skip-green 哨兵"在本地环境
+下可被 `env -u VAR` 形态的探针绕过,继承自既有先例,非本切片独有),按硬规矩不改代码,交门审判断是否
+需要跨姊妹车道统一修。**对 CI 的实际风险评估**(不是断言,是推理记录):`approval-realdb-
+todo-center-pending-query.yml` 在 job 级 `env:` 里无条件设置 `DATABASE_URL`(`:101`,不是"未设才填"
+逻辑,GitHub Actions 的 `env:` 块总是覆盖),所以**这条 CI lane 本身不会被这个缺口影响**——它只影响
+本地用 `env -u DATABASE_URL` 这种形态做"哨兵有效性"探针的可信度,以及"如果有人不小心从 workflow 里删
+掉 job 级 `DATABASE_URL:` 那一行"这种假设性场景(该场景本身未被观测到,只是本次追查顺带看到的一个可
+能后果,不作为断言)。
+
+**这个回填不是 `DATABASE_URL` 专属的**,同一处 `applyDotEnv`-先于-检查 的顺序也让 `.env` 的
+`JWT_SECRET=dev-secret-key`(`packages/core-backend/.env:2`)优先于 `setup.ts:77-79` 自己的兜底值
+(`todo-center-pending-gate-jwt-secret-min-32b`)生效——`setup.ts:77` 的判断同样是「未定义才兜底」。
+`.env` 已提交进 git(上面 `git ls-files` 已证实),而 workflow 的 job 级 `env:` 块(`:100-111`)**没有
+`JWT_SECRET` 这一行**——所以这条回填在 CI 里也会发生,不是本地专属的假象。对本 lane 无害(用哪个
+JWT secret 签发测试 token 不影响判据结论,`.env` 与 setup.ts 的兜底值都能让 `/dev-token` 正常工作),
+但它说明这个回填机制本身不是"只碰得到 `DATABASE_URL`"的窄缺口,而是 `applyDotEnv` 这个通用机制对
+「所有该文件定义、而当前进程未定义」的变量一视同仁——门审判断是否需要处理时应把这个更广的范围一并
+考虑,而不是只堵 `DATABASE_URL` 一个变量。
+
+### 全套件用 workflow 逐字形态重跑(不是本文档此前各判据小节用的 `npx` 形态)
+
+本文档 148-154 行已自陈此前的逐判据小节用的是 `npx vitest --config ... run
+tests/todo-center-pending-gate/`(目录参数,无 RBAC/PRODUCT_MODE env)——与 workflow 的
+`pnpm --filter @metasheet/core-backend exec vitest ... run tests/todo-center-pending-gate/
+todo-center-pending-gate.ts`(pnpm filter、显式文件参数、job 级 RBAC/PRODUCT_MODE env)是三处不同
+的调用形态。补一次**逐字**形态的全绿运行,DB provenance 全程记录:
+
+```
+$ dropdb metasheet2_lock_b && createdb metasheet2_lock_b   # 全新库,贴近 workflow 的 postgres:16 全新容器
+$ cd packages/core-backend && DATABASE_URL=postgresql://localhost/metasheet2_lock_b \
+  MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql \
+  pnpm run db:migrate
+# 全部迁移成功,无 MIGRATION_EXCLUDE 之外的失败
+
+$ DATABASE_URL=postgresql://localhost/metasheet2_lock_b EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false \
+  PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+```
+**下方 26 行为摘录**(每行截去了 vitest 实际打印的 `file > describe > describe > it` 完整嵌套路径前
+缀,只保留判据/类别可辨认的尾段;完整未截断的 `it()` 名逐字见上方"§5-row → test file → exact
+`it()` 名 → lane"表与本文档更早各判据小节——两处已经贴过全文,这里不再重复贴一次):
+```
+ ✓ sentinel: EXPECT_DB lane must have DATABASE_URL ...
+ ✓ probe: an unseeded id hitting /api/auth/me gets the dev-mock fallback identity ...
+ ✓ A0 — class ① ... ⇒ count 1
+ ✓ A0 — class ① — ?sourceSystem=plm ... ⇒ count 0, unreadCount 0
+ ✓ A0 — class ① — ?sourceSystem=bogus ... 400 + APPROVAL_SOURCE_SYSTEM_INVALID
+ ✓ A0 — class ② ... ⇒ count 1
+ ✓ A0 — class ③ ... ⇒ 0
+ ✓ A0 — class ③′ ... ⇒ 0
+ ✓ A0 — class ④ ... ⇒ 0
+ ✓ A0 — class ⑤ ... ⇒ 0
+ ✓ A0 — class ⑥ ... ⇒ 1
+ ✓ A0 — class ⑦ ... ⇒ count 1
+ ✓ A0 — class ⑧ ... ⇒ count 0
+ ✓ A0 — class ⑨ ... ⇒ count 0
+ ✓ A0 — class ⑩ ... ⇒ count 0
+ ✓ A0 — class ⑪ ... ⇒ count 1
+ ✓ A0 — class ⑫ ... ⇒ count 1, unreadCount 0
+ ✓ A0 — class ⑬ ... ⇒ count 1, unreadCount 1
+ ✓ Judge C — class ⑪'s ... appears EXACTLY ONCE ...
+ ✓ Judge C — class ⑥'s ... AND /pending-count reports count 1 ...
+ ✓ Judge C′ — class ①'s item is actionable=true ...
+ ✓ Judge C′ — class ⑥'s item is actionable=false ...
+ ✓ Judge B — a second registered source that throws is reported `unavailable` ...
+ ✓ Judge B — the `approval` source ITSELF throwing ... is reported `unavailable` ...
+ ✓ Judge B — retained viewer-shape probe ...
+ ✓ Judge B — negative control ...
+
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+   Duration  5.68s
+```
+```
+$ git status --short
+(no output)
+```
+
+26/26 绿(逐条名称与本次真实终端输出一致,只是上方为排版可读性做了尾段截短),workflow 逐字调用形
+态,全新迁移的 `metasheet2_lock_b`,工作树干净(本次未改任何 `src/**`/
+`tests/**` 文件)。这是"现在重跑一遍"的权威记录,取代(不是删除)本文档更早的、用 `npx` 目录参数形态
+跑出的同一批数字——两者数字一致(26/26),差异只在调用形态,不影响判据结论。
+
+### 判据 F 在当前 HEAD 重新核对
+
+```
+$ git merge-base origin/main HEAD
+89f1ecdee2c3b70205a318074824c834bc6a5c7e   # 与本文档更早记录的 merge-base 相同,分支未再吸收新提交
+$ git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations
+$ echo "exit=$?"
+exit=0
+```
+判据 F 在当前 HEAD 依旧成立。
+
+### 补充清单(`impl-supplementary-gate-checklist-20260918.md`)逐条核对
+
+| # | 条目 | 结论 | 证据 |
+|---|---|---|---|
+| 1 | `*-ci-wiring.test.mjs` 闭世界:新文件须逐个普查该家族的 `FILES` 数组 | **DISCHARGED,计数与清单原文不同** | `find . -name "*-ci-wiring.test.mjs" -not -path "*/node_modules/*" \| wc -l` → **38**(清单原文写「共 45 个」,以当前 HEAD 实测为准,记为仓库自然增减,不视为清单错误);`find ... -print0 \| xargs -0 grep -l "todo-center\|approval-pending-query"` → 0 命中,38 个文件全部零命中——本切片的门文件不在任何 `*-ci-wiring.test.mjs` 的 `FILES` 数组闭世界之内,符合"这是独立 workflow、不进 `plugin-tests.yml`"的设计决定,不需要新增 `*-ci-wiring.test.mjs` 守卫(此前 addendum 一节已用 `ci-realdb-step-contract.mjs` 单文件的 `grep -n "FILES"` 论证过一次,本条是补上清单要求的"逐个家族文件"扫描,而不是只查 `ci-realdb-step-contract.mjs` 自身) |
+| 2 | `vitest.config.ts` 惯例是「NOT plugin-tests.yml」,清单称「锁 §6 已裁定进 `plugin-tests.yml`(只有它经 `test (20.x)` required)」 | **DEVIATED——清单与锁文字面冲突,升级门审/owner,不在本文档内自行裁定** | 锁文 §6 原文(逐字):「触发集:真库 lane 的 `on.push.paths`/`pull_request.paths` 必须列入…——照先例把套件真正执行到的每个 src 模块都列进去(`approval-realdb-p7r1-coverage-repair.yml:43-66,:69-92` 各 17 条;第 13 轮 P3-B)…该 lane 是否 required 未核,沙箱无网」——锁文自己引用的先例就是一个**独立 workflow 文件**,且锁文自己已经承认「是否 required 未核」。清单条目 2 说「锁 §6 已裁定进 `plugin-tests.yml`」在锁文原文里找不到对应字句,是清单自身的转述与锁文字面不一致。本切片选择独立 workflow(`.github/workflows/approval-realdb-todo-center-pending-query.yml`,已在本文档"Deviation from the taskbook"节记录理由)与锁文引用的先例、与锁文自己承认的"required 未核"都一致;与**清单条目 2 的转述**不一致。是否要求 `plugin-tests.yml` required 覆盖,属 owner/门审裁决,本文档不代为决定 |
+| 3 | 改 `plugin-tests.yml` 需 s6a 重钉 | **N/A(本切片未改 `plugin-tests.yml`)** | 已在本文档更早的"Explicitly not decided"节记录;`git diff --stat -- .github/workflows/plugin-tests.yml` 为空 |
+| 4 | 错误码不得降级成裸 HTTP 状态 | **DISCHARGED,附一处既有中间件的既知例外** | 见设计 MD §3.1:`TODO_USER_REQUIRED`/`TODO_ITEMS_FAILED`/`TODO_COUNT_FAILED`/`APPROVAL_SOURCE_SYSTEM_INVALID` 均专用码;`rbacGuard` 401/403 本身不带码,是全仓共享中间件既定形状(`rbac/rbac.ts:64,108`),非本切片引入、非本切片改动范围 |
+| 8 | 独立 vitest project 的 gate 必须断言 `NODE_ENV` | **DISCHARGED** | `setup.ts:92-94`、gate 文件自身的 import-期二次断言(docblock 已记录);已用 `DATABASE_URL=` 探针间接验证该 import 期检查链条真的会抛错(见上方哨兵小节) |
+| 9 | `MIGRATION_EXCLUDE` 复制进新 lane;触发集含所用 helper;命名避开 `vitest.config.ts` exclude | **部分修正**:`tests/helpers/approval-schema-bootstrap.ts` **未被本门文件实际导入**,此前记录的"anticipatorily included"猜测已被证伪,不再成立;`MIGRATION_EXCLUDE` 与命名两项仍 DISCHARGED | `grep -rn "approval-schema-bootstrap" packages/core-backend/tests/todo-center-pending-gate/` → 无命中(exit 1)。本次不改 workflow 的 `paths:` 列表(它多列了这一个未被引用的文件,属**多列不属于 under-inclusion**,不破坏 fail-closed,只是不精确——按锁 §6"套件真正执行到的每个 src 模块"标准,这一条本可以摘掉,但摘除属于改代码/改 CI 接线,本轮不改,记录留给门审);`MIGRATION_EXCLUDE` 值经本次真实 `db:migrate` 验证可执行(见上方"全套件重跑"小节);文件名 `todo-center-pending-gate.ts` 无 `.test.ts`/`.spec.ts` 后缀,`vitest.config.ts:94` 的 exclude 条目是冗余但无害的第二道保险(docblock 自陈) |
+| 10 | `validate-migration-exclude.sh` 是 WARN-ONLY | **DISCHARGED**(沿用本文档更早记录,未变化) | 见更早小节 |
+| 11 | 判据 E 与 §3 第 5 条属前端切片 2 | **DISCHARGED(确认属实,B-1 不做)** | 设计 MD §1.2 已列;本文档"未做/未验清单"重复列出 |
+| 12 | A0 前两行复用 `approval-wp3-pending-count.api.test.ts:183-202`,非新起炉灶 | **DISCHARGED——确认为复用,未重造** | `git diff --stat origin/main...HEAD -- '*approval-wp3-pending-count*'` → 空(该文件字节未变,原有「无参数走 `:2014`」与「400 带码」两个 `it` 原样保留);`grep -n "routes/approvals.ts" .github/workflows/approval-realdb-p7r1-coverage-repair.yml` 命中该 workflow 的 `on.push.paths`/`on.pull_request.paths`(`:58`/`:84`)——本切片改动了 `routes/approvals.ts`,会自动触发 p7r1 车道重跑这两个既有 `it`,不需要额外接线。gate 文件里的 ①/`bogus` 两个 `it`(line 1024/1033)是在**生产 RBAC 轴**(`RBAC_BYPASS=false`)下对同一行为的**扩展**验证,与 wp3 测试跑在**默认信任 token 轴**(`RBAC_BYPASS=true`)下不重复断言同一件事——是"先复用再扩",不是"另起炉灶" |
+
+**「逐条勾」的其余条目——不适用本切片,列出不省略**:条目 5/6/7 是补充清单里明确标注「lane A(分组)」
+的条目(J 行 `section=` 400 请示、分期门定义、前端 spec 位置),与 B-1(待办中心后端)无关;条目
+13–17 是明确标注「lane C(撤销)」的条目(W7-R10 分类钉、考勤四道普查钉、FE 同步钉等),同样与本切片
+无关。补充清单条目 1/2/3/4/8/9/10/11/12 是「三条 lane 共用」与「lane B」条目,已在上表逐条核对。
+
+### 锁文没有 §9(如实记录,不是漏引)
+
+任务书要求引用「锁文 §7/§9 已 ratify 的裁决」,但本锁文正文只到 §7 为止:
+
+```
+$ grep -n "^## 8\|^## 9" /Users/chouhua/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/todo-center-design-lock-draft-20260915.md
+(no output, exit 1)
+```
+设计 MD §7 已完整摘录锁文 §7 的 RATIFY 记录原文;没有 §9 一节可引。
+
+### 未做 / 未验 / blocked-with-reason(如实列出)
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| 判据 E(代数守卫) | 未做 | 属 B-2 前端切片(锁 §3 硬约束「不缓存跨越鉴权变化」针对的是前端在飞请求,补充清单条目 11 同样归属 B-2) |
+| 判据 B 徽标层半边 | 未做 | 属 B-2(`ApprovalTodoBadge.vue` 的 `degraded`/`unavailable` 渲染 + FE spec stub),本切片只交付 API 层半边 |
+| §7-6 AuthService 静默收窄(`isRbacAdmin`/`listUserPermissions` 吞错) | 未验(锁文声明为不可在请求内见证的残留) | 锁 §3.0 原文:「这两处静默收窄是先存的平台授权缺陷…本锁不承诺修它…验收 B 的读失败格只覆盖共享查询自己的读」——本文档的 Judge B 小节已如实标注为"已知残留、不作验收" |
+| 共享查询自身读失败在**请求内**的瞬时 DB 故障半边 | 未验(同上,锁文声明为不可请求内见证) | 锁 §3.0:「该半边记为不可在请求内见证的残留」;A0 探针格(dev-mock 身份断言)只证明兜底在场,不证明请求内瞬时故障 |
+| GitHub branch-protection required-check 状态 | 未验(无网络) | 本文档更早"Explicitly not decided or asserted here"节已记录;本次沙箱同样无网络,重申不变 |
+| `*-ci-wiring.test.mjs` 家族计数与清单原文「45」不一致 | 已如实记录,不视为需修复的缺陷 | 见补充清单条目 1 的核对结果(实测 38) |
+| 补充清单条目 2 与锁 §6 字面冲突 | **BLOCKED——升级门审/owner 裁决,本文档不代为裁定** | 见补充清单条目 2 的核对结果 |
+| `.env` 文件回填绕过 `env -u DATABASE_URL` 探针形态(哨兵机制的真实边界弱于该探针形态所暗示) | 已如实记录为缺陷,不修 | 见上方"反 skip-green 三件的哨兵证据"小节;继承自 `elearning-pilot-auth` 先例,非本切片独有;不影响 CI job(job 级 `env:` 无条件覆盖) |
+| `routes/todo.ts` 的 `approvals:read` 单一权限门槛在第二源注册后需收窄 | 已知局限,记录不改(此切片只注册一个源,门槛与暴露面重合) | 设计 MD §3.1;文件自身 `todo.ts:11-17` 文档已自陈 |
+
+### 一致性小修:`git diff --stat` 与 `cmp` 的角色分工
+
+本文档多处 mutation 台账在 restore 后同时跑 `cmp "$F" "$F.bak"; echo $?`(真正的字节相等断言)与
+`git diff --stat -- "$F"; echo $?`(人类可读的陪衬,`--stat` 本身不带 `--exit-code` 时的退出码不随
+内容变化,Judge F/Judge B 两节已经指出这一点)——为避免读者误把后者当断言:本文档里所有 mutation 台
+账的**判定依据都是 `cmp` 的退出码 0**,`git diff --stat` 只是给人看差异是否为空,不承担判定职责。
+
+### 绝对断言自扫(本文档,本轮新增部分)
+
+| 断言 | 命令 | 结果 |
+|---|---|---|
+| 全套件在 workflow 逐字调用形态下 26/26 绿 | 见"全套件用 workflow 逐字形态重跑"小节完整输出 | 26 passed / 26 |
+| 判据 F 在当前 HEAD 仍成立 | `git diff --quiet origin/main...HEAD -- packages/core-backend/migrations packages/core-backend/src/db/migrations; echo $?` | 0 |
+| `approval-schema-bootstrap.ts` 未被门文件实际导入 | `grep -rn "approval-schema-bootstrap" packages/core-backend/tests/todo-center-pending-gate/` | exit 1,无命中 |
+| `*-ci-wiring.test.mjs` 家族计数 | `find . -name "*-ci-wiring.test.mjs" -not -path "*/node_modules/*" \| wc -l` | 38 |
+| 家族内零命中本门文件名 | `find ... -print0 \| xargs -0 grep -l "todo-center\|approval-pending-query" \| wc -l` | 0 |
+| `approval-wp3-pending-count.api.test.ts` 字节未变 | `git diff --stat origin/main...HEAD -- '*approval-wp3-pending-count*'` | 空输出 |
+| p7r1 车道触发路径含 `routes/approvals.ts` | `grep -n "routes/approvals.ts" .github/workflows/approval-realdb-p7r1-coverage-repair.yml` | `:58`、`:84` 命中 |
+| `.env` 文件已提交进 git | `git ls-files packages/core-backend/.env; echo $?` | 命中,exit 0 |
+| `DATABASE_URL=`(空串)探针能触发真正的哨兵抛错 | 见"反 skip-green 三件"小节完整输出 | `Error: todo-center pending-query gate requires DATABASE_URL; refusing skip-shaped green` |
+| 工作树在本轮结束时干净 | `git status --short` | 无输出 |
