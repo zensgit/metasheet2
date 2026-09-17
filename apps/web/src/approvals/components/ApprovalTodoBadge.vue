@@ -47,10 +47,53 @@
 // The label is passed in by the caller rather than resolved here, so the nav keeps ONE i18n table
 // (App.vue's `navLabels`) instead of growing a second one. The label carries no values — it names
 // the surface ("待办审批" / "Pending approvals"); the badge text is the count alone.
-import { computed, onMounted, ref } from 'vue'
+//
+// 判据 E (代数守卫, lock §5): a logout or an org switch must void any `getTodoCount()` read still
+// in flight for the principal that is leaving — the same property `useApprovalAdminCapability`
+// (round-7) already enforces for the admin-capability read on this same nav shell, copied here
+// WHOLE rather than item-by-item (an earlier draft copied only the generation bump and dropped the
+// microtask/`hasSession()` gate around the re-read, which is a real bug: `useAuth`'s reset funnel
+// calls `notifyAuthPrincipalChange()` BEFORE it writes the new token to storage, so a re-read fired
+// synchronously inside the notification would ask `/api/todo/count` with the OUTGOING session — an
+// anonymous request on sign-out, or the departing principal's on a login. Deferring the re-read to a
+// microtask lets that synchronous storage write land first).
+//
+// Two INDEPENDENT bumps, each pinned by its own test because neither covers the other:
+//   * `refresh()`'s own bump discards a stale response when the transition issues its OWN new read
+//     (an org switch: a session remains, so a fresh read for the new principal starts and can
+//     resolve before the outgoing read does).
+//   * the listener's bump discards a stale response when the transition issues NO new read (a
+//     sign-out: `hasSession()` is false, so nothing supersedes the in-flight read from the inside —
+//     without this second bump, that read's own `mine === generation` check would still pass when
+//     it finally resolves, and it would paint the departed principal's count).
+//
+// The listener also resets `pendingCount`/`isUnavailable` to their initial "nothing rendered"
+// values synchronously — the translation of `useApprovalAdminCapability`'s "go back to `pending`
+// first" into this component's two-state shape, so the outgoing principal's number never lingers
+// for the width of the new read.
+//
+// NOT covered by this guard, and left as a separate, larger unit (see `remaining` in the commit
+// this lands with): `useApprovalCountsRealtime`'s socket connects with the token read ONCE, at
+// `ensureSocket()` time, and is never reconnected on an auth transition — only torn down on
+// unmount. `handleCountsUpdated` below therefore has no generation check of its own; a push that
+// arrives on the outgoing principal's still-open socket after a transition is not this commit's
+// fix, it is the realtime trigger point's.
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { getTodoCount, isTodoResponseDegraded, type TodoCountResponse } from '../../todo/api'
 import { useLocale } from '../../composables/useLocale'
+import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../useApprovalCountsRealtime'
+
+function hasSession(): boolean {
+  try {
+    return getAuthPrincipalKey() !== null
+  } catch {
+    // A storage read can throw (Safari private mode). "Cannot tell" is not "signed out", so the
+    // re-read is still issued and the server decides — same rationale as
+    // `useApprovalAdminCapability`'s identical guard.
+    return true
+  }
+}
 
 const props = withDefaults(defineProps<{
   label: string
@@ -119,11 +162,22 @@ try {
   // No realtime updates for this session; the mounted count below is still shown.
 }
 
+// 判据 E: monotonic generation. Bumped here on every call, and also by the auth-transition
+// listener below (see the file-level note for why that second bump is not redundant).
+let generation = 0
+let disposed = false
+
 async function refresh(): Promise<void> {
+  generation += 1
+  const mine = generation
   try {
     const result = await getTodoCount()
+    // Superseded by a later refresh — either a fresh call, or the transition listener's own bump
+    // — says nothing about the principal this badge now represents.
+    if (mine !== generation) return
     applyResult(result)
   } catch {
+    if (mine !== generation) return
     // 判据 B: a failed read is exactly as untrustworthy as a `degraded: true` response — both
     // must render the discriminable "不可用" state, NOT the same "0" an empty list renders as.
     // (The prior badge collapsed this to `applyCount(0)`, which is indistinguishable from
@@ -133,8 +187,29 @@ async function refresh(): Promise<void> {
   }
 }
 
+const unsubscribeAuthPrincipal = onAuthPrincipalChange(() => {
+  // Retire the outgoing principal's read in flight SYNCHRONOUSLY, before anything about the new
+  // principal is decided — a sign-out issues no read of its own below, so without this bump
+  // nothing would ever supersede a read still in flight from before the transition.
+  generation += 1
+  // The outgoing principal's number must not linger on screen for the width of the new read.
+  pendingCount.value = 0
+  isUnavailable.value = false
+  // Deferred to a microtask: see the file-level note on why (the funnel writes the new token to
+  // storage AFTER this notification fires).
+  void Promise.resolve().then(() => {
+    if (disposed || !hasSession()) return
+    void refresh()
+  })
+})
+
 onMounted(() => {
   void refresh()
+})
+
+onUnmounted(() => {
+  disposed = true
+  unsubscribeAuthPrincipal()
 })
 
 defineExpose({ refresh })

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { TOKEN_KEYS } from '../src/composables/authPrincipal'
 
 // P1b slice 1 — the app-level 待办 badge on the top-nav 审批中心 entry.
 // B-2 (todo-center-design-lock v2.14 §4/判据 B) — the badge now reads the todo-center's own
@@ -121,6 +122,9 @@ describe('app-level approval todo badge', () => {
     realtimeCallCount.value = 0
     getTodoCountSpy.mockReset()
     getTodoCountSpy.mockResolvedValue({ count: 0, sources: { approval: 'ok' } })
+    // 判据 E tests drive `getAuthPrincipalKey()` through real storage — start from a clean slate so
+    // no prior test's token (or lack of one) leaks in.
+    for (const key of TOKEN_KEYS) localStorage.removeItem(key)
   })
 
   afterEach(() => {
@@ -128,6 +132,7 @@ describe('app-level approval todo badge', () => {
     if (container) container.remove()
     app = null
     container = null
+    for (const key of TOKEN_KEYS) localStorage.removeItem(key)
     vi.clearAllMocks()
   })
 
@@ -396,5 +401,89 @@ describe('app-level approval todo badge', () => {
       vi.doUnmock('../src/approvals/components/ApprovalTodoBadge.vue')
       vi.resetModules()
     }
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 判据 E (代数守卫), todo-center-design-lock v2.14 §5: a logout or an org switch must void any
+  // `getTodoCount()` read still in flight for the departing principal. Constructed as a real race
+  // (deferred promises resolved in a chosen order), not a sleep — and driven through the REAL
+  // `authPrincipal.ts` module (not a mock), the same primitive `useApprovalAdminCapability` already
+  // uses for the admin-capability read on this same nav shell.
+  //
+  // Two bumps, two tests, each isolating the ONE that matters — walking either mutant (delete just
+  // that bump) against the OTHER test leaves it green, which is why both exist:
+  //   * E1: a session remains, so the transition's OWN read supersedes the stale one — pins
+  //     `refresh()`'s own generation bump.
+  //   * E2: no session remains, so NOTHING supersedes the in-flight read from the inside — pins the
+  //     listener's bump, the one `useApprovalAdminCapability`'s docblock calls out by name (round-7:
+  //     "a transition that issues no new read... must still retire the read already in flight").
+  // ───────────────────────────────────────────────────────────────────────────
+  it('E1 (principal swap, session present): a stale read settling AFTER the transition must not overwrite the count the transition\'s own read fetched', async () => {
+    // Dynamically imported, and only AFTER `mountApp()` below: an earlier test in this file
+    // ("(b) a badge that throws...") calls `vi.resetModules()` in its `finally`, which replaces
+    // the module registry `mountApp()`'s own `await import('../src/App.vue')` resolves against. A
+    // STATIC top-of-file import of `notifyAuthPrincipalChange` captured a reference into the OLD
+    // registry — calling it would notify listeners on a `Set` the mounted badge never subscribed
+    // to, and the transition would silently no-op (measured: the badge's re-read count stayed at 1
+    // instead of 2 until this was switched to a dynamic import taken from the current registry).
+    localStorage.setItem('auth_token', 'principal-1-token')
+    let resolveStale: ((value: { count: number; sources: Record<string, string> }) => void) | null = null
+    const stale = new Promise((resolve) => { resolveStale = resolve as typeof resolveStale })
+    getTodoCountSpy.mockReturnValueOnce(stale) // the mount-time read; left unresolved for now.
+
+    const root = await mountApp()
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
+    // Nothing has resolved yet: neither state a genuinely-fetched principal would show.
+    expect(badgeOf(root)).toBeNull()
+    expect(unavailableBadgeOf(root)).toBeNull()
+
+    // Org switch: a session remains, so the transition issues its own read, which resolves first.
+    getTodoCountSpy.mockResolvedValueOnce({ count: 9, sources: { approval: 'ok' } })
+    localStorage.setItem('auth_token', 'principal-2-token')
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    notifyAuthPrincipalChange()
+    await flushUi()
+
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(2)
+    expect(badgeOf(root)?.textContent?.trim()).toBe('9')
+
+    // The FIRST (stale) read — for the principal that has left — resolves late.
+    resolveStale!({ count: 42, sources: { approval: 'ok' } })
+    await flushUi()
+
+    // Mutation guard: deleting `refresh()`'s `if (mine !== generation) return` pair makes this red
+    // (the badge would flip to 42, the stale value, right here).
+    expect(badgeOf(root)?.textContent?.trim()).toBe('9')
+    expect(unavailableBadgeOf(root)).toBeNull()
+  })
+
+  it('E2 (sign-out, no session): a read still in flight at sign-out must not paint the departed principal\'s count once it resolves', async () => {
+    localStorage.setItem('auth_token', 'principal-1-token')
+    let resolveStale: ((value: { count: number; sources: Record<string, string> }) => void) | null = null
+    const stale = new Promise((resolve) => { resolveStale = resolve as typeof resolveStale })
+    getTodoCountSpy.mockReturnValueOnce(stale) // the mount-time read; left unresolved for now.
+
+    const root = await mountApp()
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1)
+
+    // Sign-out: no session remains, so the transition issues NO read of its own (`hasSession()` is
+    // false) — the only thing that can retire the read above is the listener's bump.
+    for (const key of TOKEN_KEYS) localStorage.removeItem(key)
+    // Dynamically imported for the same reason as E1 above — must resolve against the module
+    // registry `mountApp()`'s `App.vue` import actually used, not a stale pre-`resetModules()` one.
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    notifyAuthPrincipalChange()
+    await flushUi()
+    expect(getTodoCountSpy).toHaveBeenCalledTimes(1) // confirms no re-read was issued.
+
+    // The stale mount-time read resolves AFTER the sign-out.
+    resolveStale!({ count: 42, sources: { approval: 'ok' } })
+    await flushUi()
+
+    // Mutation guard: deleting the LISTENER's `generation += 1` (keeping `refresh()`'s own bump)
+    // makes this red — with no second read ever issued, `refresh()`'s own `mine` still matches the
+    // unbumped counter when the stale promise finally settles, and 42 gets painted.
+    expect(badgeOf(root)).toBeNull()
+    expect(unavailableBadgeOf(root)).toBeNull()
   })
 })
