@@ -39,8 +39,18 @@
  *
  * NOT covered by this file: WI-0 lock-order census, WI-4 creation, WI-7/8 outlet guards, WI-8
  * seat guards, WI-12/13/14 redemption (separate sibling files per the taskbook split);
- * attendance-parity (blocked on WI-10/11, which are themselves blocked on WI-0's Q-B/Q-C closing
- * — not attempted on this branch).
+ * attendance-parity — NOT attempted on this branch (unchanged conclusion), but the REASON below
+ * is now stale, marked at the claim rather than rewritten (memory:
+ * `feedback_supersession_marker_must_evaluate_not_void.md`):
+ *
+ * SUPERSEDED (2026-09-18): "blocked on WI-10/11, which are themselves blocked on WI-0's Q-B/Q-C
+ * closing" is no longer true — `approval-cancel-round-lock-order-census.db.test.ts` now
+ * constructs Q-B and Q-C (both green against this same private DB), so WI-0 no longer blocks
+ * WI-10/WI-11 on that specific dependency. attendance-parity stays unattempted here for an
+ * OWNER-SCOPE reason instead: 判据 II (final approve exercises C-1's real attendance
+ * cancellation) and 判据 IV (C-3's system-side close) are named as a second-slice item in this
+ * lane's own handoff (main-session ruling, not a technical blocker this file can close) —
+ * restated here as blocked-with-reason, not as a residual WI-0 dependency.
  */
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
