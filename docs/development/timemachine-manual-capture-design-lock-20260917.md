@@ -362,3 +362,18 @@ added. Receipt `verified` transitions remain tied to the later finalization tran
 this adapter neither publishes an archive nor grants recovery access. The synthetic
 acceptance uses only the existing test-local provider, not customer storage or a
 production-provider readiness claim.
+
+### Local Custody Compatibility Evidence
+
+Manual capture accepts the existing opaque local admission through the unchanged
+crypto custody input. No new key provider or format is needed. The synthetic
+integration stores the encrypted custody backup in a private sibling directory,
+admits the active `local-v1` key, captures and uploads all ten sections, locks the
+originating session and restores a fresh session from the saved backup. Wrong
+recovery secret, changed generation binding and altered wrapped DEK must refuse.
+Already prepared ciphertext can resume upload while the originating session stays
+locked; this does not permit new encryption or implicit unlock.
+
+This proves the internal manual chain's compatibility with LC-1..6, not standard
+startup wiring, a separate-host recovery drill or final archive publication. Runtime
+policy/command admission and manifest/catalog finalization remain open.

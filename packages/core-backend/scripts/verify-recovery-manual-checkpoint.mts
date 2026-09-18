@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
-import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -691,9 +691,9 @@ try {
   await assert.rejects(recheckSource(shortSource.source),
     { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE' })
   console.log('PASS: in-fence live source snapshots; empty/nonempty; detached copies; schema/record drift and revocation refuse; replay never recaptures; forged source refused')
-  const continuation = async () => {
+  const continuation = async (admitter = admit) => {
     const identity = { ...admissionRequest, requestId: randomUUID() }
-    const result = await admit(identity)
+    const result = await admitter(identity)
     assert.ok(result.source)
     const row = (await query(`SELECT owner_kind,owner_id,owner_fence::text,source_vector_hash,
       anchor_operation_id::text,anchor_seq::text,checkpoint_id,key_id
@@ -885,6 +885,71 @@ try {
       await revoker.end()
     }
     console.log('PASS: real local ciphertext PUT/HEAD records ten uploaded receipts; exact resume adds no rows or captures; no verified/publication claim')
+    const local = require('../src/multitable/recovery-local-custody.ts') as typeof import('../src/multitable/recovery-local-custody')
+    const localStores = require('../src/multitable/recovery-local-custody-store.ts') as typeof import('../src/multitable/recovery-local-custody-store')
+    const custodyId = randomUUID()
+    const recoverySecret = randomBytes(32)
+    const localSession = local.createLocalCustodySession(first.transactionDepth)
+    const restoredSession = local.createLocalCustodySession(first.transactionDepth)
+    const archivePath = join(root, 'local-custody-archive')
+    const custodyPath = join(root, 'local-custody-keys')
+    await mkdir(archivePath, { mode: 0o700 })
+    await mkdir(custodyPath, { mode: 0o700 })
+    const backup = local.createLocalCustodyBackup({ custodyId, recoverySecret, transactionDepth: first.transactionDepth })
+    try {
+      const custodyStore = await localStores.createLocalCustodyStore({ custodyId, archivePath, custodyPath,
+        transactionDepth: first.transactionDepth })
+      const receipt = await custodyStore.putBackup(randomUUID(), backup)
+      localSession.unlock({ custodyId, backup, recoverySecret })
+      const capability = localSession.admitForArchive(custodyId)
+      await query('INSERT INTO meta_recovery_archive_keys(key_id) VALUES ($1)', [capability.keyId])
+      const localInput = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
+        { ...admissionPolicy, keyId: capability.keyId }))
+      const localProvider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath })
+      await manual({ ...localInput, capture: async (snapshot) => ({ ...await capture(snapshot),
+        binding: localInput.binding, keyCustody: capability }),
+      upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...localInput, provider: localProvider }) })
+      localSession.lock()
+      const persisted = await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, localInput.owner))
+      assert.ok(persisted)
+      const uploadModule = require('../src/multitable/recovery-archive-prepared-upload.ts') as typeof import('../src/multitable/recovery-archive-prepared-upload')
+      const envelope = uploadModule.decodeRecoveryArchivePreparedEnvelope(persisted)
+      const savedBackup = await custodyStore.readBackup(receipt)
+      try {
+        assert.throws(() => restoredSession.unlock({ custodyId, backup: savedBackup, recoverySecret: randomBytes(32) }),
+          { message: 'RECOVERY_LOCAL_CUSTODY_REFUSED' })
+        restoredSession.unlock({ custodyId, backup: savedBackup, recoverySecret })
+      } finally { savedBackup.fill(0) }
+      assert.throws(() => restoredSession.openLocalDek({ generationId: randomUUID(),
+        keyId: capability.keyId.split(':')[2]!, wrappedId: envelope.binding.wrappedDekId, wrapped: envelope.wrappedDek }),
+      { message: 'RECOVERY_LOCAL_CUSTODY_REFUSED' })
+      const tamperedWrapped = Buffer.from(envelope.wrappedDek)
+      tamperedWrapped[0] = tamperedWrapped[0]! ^ 1
+      assert.throws(() => restoredSession.openLocalDek({ generationId: localInput.owner.generationId,
+        keyId: capability.keyId.split(':')[2]!, wrappedId: envelope.binding.wrappedDekId, wrapped: tamperedWrapped }),
+      { message: 'RECOVERY_LOCAL_CUSTODY_REFUSED' })
+      tamperedWrapped.fill(0)
+      const dek = restoredSession.openLocalDek({ generationId: localInput.owner.generationId,
+        keyId: capability.keyId.split(':')[2]!, wrappedId: envelope.binding.wrappedDekId, wrapped: envelope.wrappedDek })
+      try {
+        for (const section of envelope.sections) {
+          const plaintext = archiveCrypto.openRecoveryArchiveSection({ binding: { ...envelope.binding,
+            sectionName: section.sectionName, plaintextSha256: section.plaintextSha256 },
+          dek, nonce: section.nonce, ciphertext: section.ciphertext, authTag: section.authTag })
+          assert.equal(createHash('sha256').update(plaintext).digest('hex'), section.plaintextSha256)
+        }
+      } finally { dek.fill(0) }
+      await manual({ ...localInput, source: null, capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') },
+        upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...localInput, provider: localProvider }) })
+      assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
+        WHERE generation_id=$1::uuid AND state='uploaded'`, [localInput.owner.generationId])).rows[0].n, 10)
+      console.log('PASS: real local custody backup outside archive root; manual capture, uploaded receipts, locked-session resume and fresh-session unwrap/decrypt ten sections')
+    } finally {
+      localSession.lock()
+      restoredSession.lock()
+      backup.fill(0)
+      recoverySecret.fill(0)
+    }
     console.log('PASS: manual bootstrap/repeat seal exact nine data hashes; real 28-row coverage replaces callback input; nonce failure leaves only historical seals')
     const drift = await continuation()
     const driftWriter = new Client({ ...connection, database })

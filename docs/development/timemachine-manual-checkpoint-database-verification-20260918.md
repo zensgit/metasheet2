@@ -641,3 +641,27 @@ Final gates: complete owned-PG acceptance and cleanup pass; receipt-compiler/wor
 unit neighbors 2 files, 23/23; acceptance TypeScript, upload-module ESLint, wiring
 37/37, full S5 and diff check pass. The owning temporary provider directory is removed
 by the driver's final cleanup. All plaintext and storage paths are synthetic.
+
+## Manual Capture With Real Local Custody
+
+Follow-up acceptance is based on exact product head
+`47c2942bd0b6232719645b18ce1e749e5d8af585`. No production changes are necessary:
+the existing opaque local capability already satisfies the manual crypto path.
+
+The driver creates a real encrypted custody backup and retains it through the
+existing immutable custody store, outside its owned archive root. It registers the
+local key in the disposable catalog, manually captures with that capability, and
+uploads ten ciphertext sections through the real temporary filesystem provider.
+After locking the original custody session, a fresh session reads the saved backup,
+unlocks and unwraps the generation DEK, and authenticates/decrypts all ten stored
+prepared sections. Each resulting plaintext matches its authenticated SHA-256.
+Wrong secret, wrong generation and modified wrapped-DEK bytes refuse with the exact
+values-free local custody code. Locked-origin-session upload resume leaves exactly
+ten uploaded receipts and does not capture or encrypt again.
+
+This uses a fresh session, not a separate process or a separate-host manual restore.
+The existing custody-core tests independently include a separate-process primitive
+recovery positive; neither test substitutes for final catalog publication. Keys and
+owned sessions are scrubbed/locked in finally; the driver removes its DB, cluster
+and temporary storage. Logs: `/private/tmp/tm-manual-local-custody-{final,unit}.log`.
+Core/store neighbors pass 2 files, 29/29; acceptance TypeScript and diff check pass.
