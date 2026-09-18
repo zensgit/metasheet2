@@ -1116,6 +1116,15 @@ Four real HTTP round trips against the live server, added as permanent test cont
    unreachable" from "genuinely 0 pending" — the count alone cannot carry that distinction, which is
    why tests 1/2 alone (where the count differs, 1 vs 1 vs 0) were insufficient to discharge this
    row on their own, and why test 3 needed its own live baseline rather than borrowing test 1's.
+   > **Marker (P3 卫生轮,round-3 门审 P3-0): read this bullet together with the "Correction
+   > (FIX-ROUND 5 PASS)" block a few paragraphs below, not in isolation.** That correction says
+   > tests 1-4 — test 3 above included — only prove `pending-source-registry.ts`'s own try/catch,
+   > not a real `pool.query` rejection out of the shared query itself. So "row B's own parenthetical"
+   > (class ②'s viewer shape) is satisfied HERE, by test 3's registry-level mechanism — it is not
+   > also satisfied by test (5)'s real DB read failure below, which uses a class ① viewer. Full
+   > disclosure and the mutation evidence for why that gap has no discriminative consequence:
+   > `packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts`'s docblock,
+   > the paragraph starting "**Disclosure (round-3 gate P3-0, ...)**".
 4. **Negative control** — class ④ (`v4`, genuinely zero pending, no registry mutation at all):
    both endpoints answer `sources: { approval: 'ok' }` (via `toEqual`, so no stray `unavailable` key
    can hide), `items` has length `0`, `count` is `0`, and `Object.values(sources)` contains no
@@ -1213,7 +1222,7 @@ $ grep -n "describe(\|it(" packages/core-backend/tests/todo-center-pending-gate/
 
 | 锁 §5 行 | 判据 | 测试文件 | `it()`/`describe()` 起始行(P3 卫生轮重新核对) | Lane |
 |---|---|---|---|---|
-| A0 | 十四类黄金值 | `tests/todo-center-pending-gate/todo-center-pending-gate.ts` | `describe` 起 `:1067`;16 个 `it` 起 `:1068`(①)/`:1082`(①`?sourceSystem=plm`)/`:1091`(①`bogus`400)/`:1098`(②)/`:1112`(③)/`:1126`(③′)/`:1143`(④)/`:1157`(⑤)/`:1179`(⑥)/`:1197`(⑦)/`:1212`(⑧)/`:1227`(⑨)/`:1242`(⑩)/`:1257`(⑪)/`:1274`(⑫)/`:1289`(⑬) | `approval-realdb-todo-center-pending-query.yml` |
+| A0 | 十四类黄金值 | `tests/todo-center-pending-gate/todo-center-pending-gate.ts` | `describe` 起 `:1067`;**14 类,16 个 `it`**(类①拆成 3 个 `it` ——基础形状 + `?sourceSystem=plm` + `bogus`400;类③拆成③与③′ 2 个 `it`;其余 11 类各 1 个 `it`;3+2+11=16,与"十四类"不矛盾)起 `:1068`(①)/`:1082`(①`?sourceSystem=plm`)/`:1091`(①`bogus`400)/`:1098`(②)/`:1112`(③)/`:1126`(③′)/`:1143`(④)/`:1157`(⑤)/`:1179`(⑥)/`:1197`(⑦)/`:1212`(⑧)/`:1227`(⑨)/`:1242`(⑩)/`:1257`(⑪)/`:1274`(⑫)/`:1289`(⑬) | `approval-realdb-todo-center-pending-query.yml` |
 | A | 不放宽可见性 | 同上(无独立新增 `it`;正控 = 既有 A0 类①`:1068`/④`:1143`;mutation 记录见下方"Mutation 台账"表,本次未重跑,原因见下) | `buildApprovalPendingConditions`(`services/approval-pending-query.ts:113`)——mutation-only,无常驻新增测试内容 | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
 | B(API 层) | fail-closed 可判别 | `todo-center-pending-gate.ts` | `describe` 起 `:1410`;**5 个** `it` 起 `:1416`/`:1440`/`:1484`/`:1532`/`:1549`(FIX-ROUND 5 PASS 增至 5 条——第 5 条是 round-2 门审 P2-1 要求新增的"真实 `pool.query` 读失败"用例,见本文档"P2-1"条目;本表之前一直只列前 4 条,round-3 门审 P3-2 指出未同步,本轮已补) | `approval-realdb-todo-center-pending-query.yml` |
 | B(徽标层) | — | 未做,见下方"未做/未验清单" | — | B-2(前端切片) |
@@ -3484,20 +3493,21 @@ $ git diff -- packages/core-backend/tests/todo-center-pending-gate/todo-center-p
 (空——测试文件里每一条改动行都以 docblock 的 `*` 前缀开头,零执行期代码行改动)
 ```
 
-`git diff --stat <起点>`(本轮尚未提交,`HEAD` 仍等于起点本身,`<起点>..HEAD` 这时是空 diff——所以
-下面这条命令用单个 ref 把起点与**当前工作树**相比,而不是 `<起点>..HEAD`;本节文字本身也在这份工作
-树里,是自指:插入本节这几十行之后再重跑,两个文件的行数还会各自再涨一点,但**改动的文件集合恒为这
-两个,不会出现第三个文件**——这与本文档其余 FIX-ROUND 节尾"先捕获再写入本节"的惯例相同。提交完成、
-`HEAD` 前进之后,`git diff --stat 1c08a4ac8..HEAD` 会给出与下面这条命令等价的结果(至多因为本段自己
-占的几十行而略高):
+**故意不钉插入/删除的行数**:本节文字自己也活在被测的这份工作树里,写入本节的每一句都会立刻让下面
+这条命令再多算几行——任何写在这里的具体数字,写完的瞬间就已经偏差(本文档自己在别处已经因为这个
+理由改过一次编造/漂移的插入计数,见 `58dff909e` 一条提交)。这里只断言**文件集合**,不断言行数;要
+知道行数,现在就跑:
 
 ```
-$ git diff --stat 1c08a4ac8feb0e443134ae20af283d836ff30300
- docs/development/todo-center-phase1-verification-20260918.md          | 156 ++++++++++++++++++---
- packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts | 25 +++-
- 2 files changed, 163 insertions(+), 18 deletions(-)
+$ git diff --stat 1c08a4ac8feb0e443134ae20af283d836ff30300..HEAD
 ```
-只两个文件、零新文件、零生产代码文件——与"改动范围核实"小节的 `git status --short` 一致。
+
+提交完成后(`HEAD` 已前进到包含本节的提交)重跑上面这条命令,结果应为**恰好两个文件**——
+`docs/development/todo-center-phase1-verification-20260918.md` 与
+`packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts`——不多不少;
+具体插入/删除的行数不是本节要证明的东西,不钉数字。只两个文件、零新文件、零生产代码文件、零
+`.github/workflows`、零迁移——与上方"改动范围核实"小节的 `git status --short` 和分目录
+`git diff --stat` 空输出一致。
 
 ### 测试重跑证据(每条闭合后跑相关测试)
 
@@ -3516,6 +3526,20 @@ $ git diff --stat 1c08a4ac8feb0e443134ae20af283d836ff30300
   - `cd packages/core-backend && npx tsc --noEmit` → **exit 0,0 行输出**
   - 私有库处置:`createdb metasheet2_p3hyg_b1` → 迁移 → 三套测试 → `dropdb metasheet2_p3hyg_b1`(本轮
     结束前执行,不留存)
+
+### 自查跟进(本节自己的自我复核,同一轮内完成,commit 见下)
+
+写完上面的处置表与新增段落后,对本节自己做了一轮自检,发现并当场改正四处:(1) P3-0 的披露最初只加在
+门文件 docblock,而报告点名的误读风险实际落在本 MD 的 Judge B item-3 段落与其后的 FIX-ROUND 5 更正
+标记"并排读"——已在 item 3 段落原地加一条 marker,回指 docblock 披露;(2) "P3 卫生轮"节末尾原先钉了
+一份 `git diff --stat` 的具体插入/删除行数,而那段文字本身的插入会让数字立刻过期(本文档自己已经因为
+同类问题改过一次编造的插入计数,见 `58dff909e`)——已删除具体行数,只保留命令与"文件集合恒为这两个"
+的断言;(3) 把"three PR-body obligations"改成"four"后,全文档扫了一遍其余"三段/three paragraph"
+提法,确认其余出现处(P3-1 条目"第 3 段"、条目 11 与新表"当时只三段"/"stopped at three"这两处)都是
+描述**改动前的历史状态**,不是活的计数,不需要跟着改;(4) A0 行"十四类"与新填的"16 个 it"两个数字
+并排出现却无解释——已加一句"类①拆 3 个 it、类③拆 2 个(③/③′)、其余 11 类各 1 个,3+2+11=16"的
+和解注记。以上四处均为纯 MD 文字修正,不改变本轮已跑绿的任何测试内容,**不需要重跑门**(门文件本身在
+这一次自查里字节未动)。
 
 ### 本轮未处理项
 
