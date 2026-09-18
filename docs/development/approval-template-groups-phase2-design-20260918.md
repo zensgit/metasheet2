@@ -846,7 +846,8 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 
 - **人口构造**：一条 `INSERT … SELECT … FROM generate_series(1, 550)` 批量插入 550 行（不是 550 次 `createTemplate()`/API 调用），`category='CapProbe'`，`key` 用 `atge-cap-tpl-${TS}-` 前缀 + 序号,保证与文件内其余用例的 key 不冲突。550 而非 501 的余量理由:`approval_templates` 全表无 `org_id` 列（本文件 `afterEach` 注释已指出),"eligible" 是跨全表的计数,不按本测试的 `org` 限定——550 的余量确保即使此前某条用例意外遗留了少量未清理的 eligible 行,本测试仍能稳定触发上界,不依赖"这次真库状态恰好是零残留"这个假设。
 - **不进共享 `templateIds`/`afterEach`**:该数组每条都会被文件级 `afterEach` 逐行 `DELETE`,550 行会拖慢文件里其余全部用例;改为 `try/finally` 内一条 `DELETE … WHERE key LIKE $1` 前缀匹配,断言失败也照样清理(mutation 探针验证见下)。
-- **断言两个方向**:①`executeApprovalTemplateGroupBackfill(...)` 必须 reject 且 `toMatchObject({statusCode: 400, code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE'})`——先读源码确认了这两个字面量(`routes/approvals.ts:626-631`)才写断言,不是照错误信息猜的;②`tableCounts(org)` 五张表(`groups/links/batches/batchGroups/batchLinks`)在该 org 上全部为 0——证明"零行写入"是"抛错发生在任何 INSERT 之前",不是"事务回滚抹掉了已写的行"这个弱得多的命题(这条 org 从未被其他用例碰过,不需要"调用前后差值"这种更复杂的判据)。
+- **断言两个方向**:①`executeApprovalTemplateGroupBackfill(...)` 必须 reject 且 `toMatchObject({statusCode: 400, code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE', message: expect.stringContaining('exceeds the 500 limit')})`——先读源码确认了这三个字面量(`routes/approvals.ts:626-631`,抛错信息模板 `` `…exceeds the ${MAX} limit` ``)才写断言,不是照错误信息猜的;`message` 这一半是 advisor 复核后补的(见 §20.3.1):`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` 未导出,只有 `statusCode`/`code` 时,若常量本身改小(仍小于本测试的种子行数),测试会继续绿,却已经不再验证"500"这个具体数字——`message` 是模块外唯一能看到真实阈值的通道;②`tableCounts(org)` 五张表(`groups/links/batches/batchGroups/batchLinks`)在该 org 上全部为 0——证明"零行写入"是"抛错发生在任何 INSERT 之前",不是"事务回滚抹掉了已写的行"这个弱得多的命题(这条 org 从未被其他用例碰过,不需要"调用前后差值"这种更复杂的判据)。
+- **隔离边界(披露,非本测试防御范围)**:550 行种子在整个用例执行期间对**全部** org 都是"全局 eligible"(§20.1 上一条已述原因)。`finally` 块的即时清理只在本文件的用例**顺序**执行时成立(本文件未用 `it.concurrent`,vitest 默认按此文件的声明顺序跑)——若未来改成并发跑同一文件内的用例,某个恰好在这 550 行窗口期间执行的兄弟用例会看到自己那次调用的 `eligible > 500`,或多出一个不在预期内的 `CapProbe` 分组。这不是本测试要解决的问题,只如实记录这个前提。
 
 ### 20.2 命令与结果
 
@@ -877,6 +878,12 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 ### 20.3 mutation 正控(cp/改/跑/还原/cmp)
 
 `cp src/routes/approvals.ts /tmp/approvals.ts.bak` → 把守卫条件 `eligible.length > APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` 改成 `eligible.length > APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES * 100`（550 行不再触发上界）→ 单独重跑本文件：**恰好 1 条**变红（本步新增的规模上界用例,`AssertionError` 打印出完整的 550 条 `groups[0].templateIds` 而不是抛错——判别力证据本身），其余 11 条不受影响 → `cp /tmp/approvals.ts.bak src/routes/approvals.ts` → `cmp src/routes/approvals.ts /tmp/approvals.ts.bak` → `RESTORE BYTE-IDENTICAL`。还原后重跑整份文件确认 12/12 恢复绿。
+
+### 20.3.1 advisor 复核后补一条断言 + 第二次 mutation（2026-09-18,同一续做步骤内）
+
+advisor 指出:`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` 未导出,§20.1 最初的断言只查 `statusCode`/`code`,若这个常量本身被改小（例如改成 300,但仍小于测试种子的 550 行）,抛错分支依然会触发、`statusCode`/`code` 依然匹配,测试会继续绿——但这时测试已经不再验证"500"这个具体数字,变成了一个只验证"抛不抛"的空转判据（记忆 `feedback_source_text_assertions_are_not_behaviour`/`feedback_count_guard_and_fake_switch_test` 点名的形状）。修法:`toMatchObject` 加第三个字段 `message: expect.stringContaining('exceeds the 500 limit')`（抛错信息模板本身就把阈值数字插值进去,不是另起一行拼字符串）,把"500"这个字面量的校验责任交给唯一能从模块外看到真实阈值的通道。
+
+**mutation 验证这一步确实补上了盲区**（不是重复 §20.3 的"整体变红"探针,而是专门证明"只查 statusCode/code" vs "加了 message" 两种写法在同一次 mutation 下的差别）:`cp src/routes/approvals.ts /tmp/approvals.ts.bak2` → 把常量本身从 `500` 改成 `300`（不是像 §20.3 那样调大到不触发,而是调小——550 仍然 > 300,守卫仍会触发,`statusCode`/`code` 依然匹配）→ 单独重跑本文件:**恰好本条**变红,报错逐字打印 `Expected: "message": StringContaining "exceeds the 500 limit"` vs `Received` 里没有这个字段匹配(实际信息是 "exceeds the 300 limit"),其余 11 条不受影响 → `cp /tmp/approvals.ts.bak2 src/routes/approvals.ts` → `cmp` → `RESTORE BYTE-IDENTICAL`(`git diff --stat src/routes/approvals.ts` 确认无残留改动)。这证明了 advisor 的判断:改前的写法（仅 `statusCode`/`code`)对着这个特定 mutation（阈值改小但仍被种子行数越过)没有判别力,加了 `message` 之后才有。
 
 ### 20.4 本步不新增/不触碰
 
