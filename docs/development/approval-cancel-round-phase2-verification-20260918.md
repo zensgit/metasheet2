@@ -2340,6 +2340,126 @@ $ (packages/core-backend) DATABASE_URL=…/metasheet2_lock_c2 EXPECT_DB=1 \
 green is recorded here as what it is (the fixture worked), not as evidence the case is strong. The
 strength claim rests on M-23/M-24, not on the green.
 
+## 3.17 `attendance-parity.db.test.ts` 退役对账 — the provenance census WIDENED, and the four pins measured (this unit)
+
+§3.15.0 retired the filename on a two-source check (the lock, and phase-1's design MD). The task
+that commissioned this unit asked for the census to be run over **four** sources and for the CI pins
+to be proven aligned to the final file set. Both were done, and the census found **one source
+§3.15.0 did not check**.
+
+### 3.17.1 The four-source census, each with its command and count
+
+| # | source | provenance class | names `attendance-parity`? |
+|---|---|---|---|
+| 1 | the ratified lock | **OWNER-RATIFIED** | **0** |
+| 2 | phase-1 design MD | implementer-authored | 4 (`:80`, `:81`, `:83`, `:486`) |
+| 3 | phase-1 verification MD | implementer-authored | 8 |
+| 4 | **PR #5851 body** | implementer-authored | **1 — NOT previously checked** |
+
+```
+$ grep -c "attendance-parity" \
+    ~/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/approval-change-request-design-lock-draft-20260915.md
+0
+
+$ grep -c "attendance-parity" docs/development/approval-cancel-round-phase1-design-20260918.md
+4
+$ grep -c "attendance-parity" docs/development/approval-cancel-round-phase1-verification-20260918.md
+8
+
+$ gh pr view 5851 --json body -q .body | grep -c "attendance-parity"
+1
+$ gh pr view 5851 --json body -q .body | grep -n "attendance-parity"
+27:判据 II(C-2 兑现挂点先于 `:11070`,W4 外部事务入口 C-1)、判据 IV(C-3 收口 `expired`/`blocked`)、attendance-parity;修改期与加班撤销不在本锁首期。
+```
+
+⚠️ **The PR body naming it does NOT flip the verdict, and the reason is the provenance class, not
+the count.** The task's restore condition is 「若**锁文**或**已 ratify 的记录**点名了该文件」. PR
+#5851 is a **Draft PR opened by this implementation lane** — its body is implementer-authored prose
+of exactly the same class as sources 2 and 3, not an owner ratification. The repo's own rule is
+that a RATIFY source is an owner-authored artefact
+(`feedback_authorization_source_must_be_owner_authored`); an implementer quoting a filename into a
+PR body they wrote themselves and then citing that body back is the self-certifying loop that rule
+names. So the corrected statement of the finding is **narrower than 「只有任务书文本点名」 and
+wider than §3.15.0's two sources**:
+
+> The filename is named in **four** implementer-authored places (task text, phase-1 design MD,
+> phase-1 verification MD, PR #5851 body) and in **zero** owner-ratified ones.
+
+### 3.17.2 There is no file to restore — the artefact never existed
+
+The task's restore branch presupposes `d22d6c624` deleted something. It did not:
+
+```
+$ find . -iname "*attendance-parity*" -not -path "*/node_modules/*" | wc -l
+0
+$ git log --all --oneline --diff-filter=A -- '*attendance-parity*'
+(empty)
+$ git show --stat --format="" d22d6c624
+ ...approval-cancel-round-phase1-design-20260918.md |   9 +-
+ ...al-cancel-round-phase2-verification-20260918.md | 256 ++++++++++++++++-
+ .../approval-cancel-round-redemption.db.test.ts    | 302 ++++++++++++++++++++-
+ 3 files changed, 556 insertions(+), 11 deletions(-)
+```
+
+`--diff-filter=A` over `--all` returns empty: the path was never added on **any** ref, so it was
+never deleted on any either. `d22d6c624` touched three files, none of them a deletion. What was
+retired is a **planned deliverable NAME** carried forward through three documents; the thin-wrapper
+option the task offers ("可作薄包装指向新 parity 用例") would therefore be a NEW file created to
+match a name whose only authority is the documents that mis-quoted it — 另造同类物 in the literal
+sense, and it would cost an s6a re-pin (§3.17.3) for zero coverage.
+
+**DEVIATION FROM THE TASK'S LITERAL WORDING, declared.** The task's two branches are "restore it" or
+"only the task text named it". Neither is exactly true, so this unit takes the second branch with
+the correction above. 依据, in order: (1) the lock — the only ratified source — names a REQUIREMENT
+(账侧, 逐字节等价, 现有 W4 路径, `unrecoverableExpired`) and no artefact, `grep -c` → 0; (2) the
+requirement is implemented and green in `approval-cancel-round-redemption.db.test.ts` (§3.15 for the
+row-level compare, §3.16 for `unrecoverableExpired`, §3.18 for its presentation); (3) the three
+other sources are the same provenance class as each other and none is owner-authored; (4) creating
+the file would add a required-lane suite and force an s6a recompute + `plugin-tests.yml` edit, which
+is the merge-serialisation bottleneck `feedback_s6a_pin_is_a_merge_bottleneck` names, for no
+coverage that the already-wired file does not already carry.
+
+### 3.17.3 The four pins, measured against the final file set
+
+The final real-DB file set for this lane is **seven** files — unchanged by `d22d6c624`, which added
+no suite file and removed none.
+
+| pin | where it lives | population | measured |
+|---|---|---|---|
+| ci-wiring 守卫人口 | `packages/core-backend/tests/unit/approval-cancel-round-ci-wiring.test.ts:60-68` (`CANCEL_ROUND_REALDB_FILES`) | 7 | 7 ✅ |
+| `plugin-tests.yml` 清单 | step `id: approval-real-db-integration` run-list | 7 | 7 ✅ |
+| `ci-realdb-step-contract` FILES | see the ⚠️ below | n/a — no `FILES` export | ✅ by construction |
+| s6a 钉 | `pluginTestsWorkflow` digest | recomputed only when `plugin-tests.yml` changes | not perturbed ✅ |
+
+```
+$ ls packages/core-backend/tests/integration/approval-cancel-round-*.db.test.ts | wc -l
+7
+$ grep -c "tests/integration/approval-cancel-round-.*\.db\.test\.ts" .github/workflows/plugin-tests.yml
+7
+$ grep -c "'tests/integration/approval-cancel-round-.*\.db\.test\.ts'," packages/core-backend/vitest.config.ts
+7
+$ git log --oneline a02930896 -1 --name-only -- .github/workflows/plugin-tests.yml
+e394c9e9c ci(approval): promote cancel-round real-DB suites into required test (20.x)
+.github/workflows/plugin-tests.yml
+```
+
+⚠️ **The task's third pin, 「`ci-realdb-step-contract` FILES」, does not exist in the shape the name
+suggests, and saying so is the point of this row.** `scripts/ops/ci-realdb-step-contract.mjs` is a
+shared **helper**: `grep -n "FILES" scripts/ops/ci-realdb-step-contract.mjs` → **0 hits**. It
+exports `REAL_DB_STEP_IDS` (`:99-102`, a frozen two-entry allowlist `approval` / `multitable`) plus
+the predicates `isQuotedInTestExclude` / `isSuiteWiredInRealDbStep` / `realDbStepWholeFileArgs`. The
+closed world of FILES for this lane lives in the **consumer** — the `CANCEL_ROUND_REALDB_FILES`
+constant in row 1, which imports those four symbols. Rows 1 and 3 are therefore **the same
+population read once**, not two independent pins; reporting them as two would have been the
+count-guard failure `feedback_count_guard_and_fake_switch_test` names. The lane's guard is a
+`tests/unit/*.test.ts` (collected by Vitest's default include, run in both required `test` legs),
+not a `scripts/ops/*-ci-wiring.test.mjs` — which is why it appears in neither `scripts/ops` listing.
+
+`e394c9e9c` is the promotion commit and the most recent touch of `plugin-tests.yml` at this base:
+`d22d6c624` is not in that list, so it perturbed no workflow bytes and the s6a `pluginTestsWorkflow`
+digest is untouched by the retirement. **Alignment therefore holds by construction rather than by
+edit** — the retired name was never in any of the four populations, because it was never a file.
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -2440,6 +2560,12 @@ they are.
   already-wired `approval-cancel-round-redemption.db.test.ts` (§3.15), which is why this unit
   triggers no new census pins and no s6a re-pin. Phase-1's blocked-with-reason item is discharged,
   not deferred again.
+  ⚠️ **WIDENED in §3.17** (this revision). The two-source check behind this bullet missed a third
+  and fourth implementer-authored naming — phase-1's VERIFICATION MD (8 occurrences) and **PR
+  #5851's own body** (1). The verdict is unchanged, because all four are the same provenance class
+  and none is owner-ratified, but 「只有任务书文本点名」 would have been false. §3.17 also measures
+  the four CI pins against the final 7-file set and records that the artefact **never existed on any
+  ref**, so nothing was deleted and nothing can be restored.
 - **§5 I3 「终结即释放」 mutation** — **BUILT in §3.14** for the C-3 closure, as its own case
   (`:817-894`) whose `createCancelRoundInstance` call is the first statement after the close, so the
   clause carries the mutation instead of dying behind an earlier assertion. M-21 (delete the round
