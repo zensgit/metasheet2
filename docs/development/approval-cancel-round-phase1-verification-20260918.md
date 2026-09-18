@@ -2812,19 +2812,29 @@ pass because nothing they guard against moved.
 
 ```
 $ git diff --stat 74a387dad6a1b29acb596ab3992a634bc739eb9d..HEAD
+ docs/development/approval-cancel-round-phase1-design-20260918.md         |  10 +-
+ docs/development/approval-cancel-round-phase1-verification-20260918.md   | 183 ++++++++++++++++++++-
+ .../approval-cancel-round-outlet-guards.db.test.ts                       |  12 +-
+ 3 files changed, 192 insertions(+), 13 deletions(-)
 ```
-Exactly 3 files, same 3 this Part K's own K1 table names (this Part K's own text is itself part of
-the verification-MD delta, so its exact line count is intrinsically self-referential — like Part J's
-own diff-of-itself before it — but the FILE LIST is not: it is fixed the moment the edits above
-stopped, before this sentence was written):
+Measured at `85473095c4f45d0010eb40f2523e91da0f72cb25` (the commit that carries K1-K6 of this Part
+K). This Part K's own text is itself part of the 183-line verification-MD delta above — like Part
+J's own diff-of-itself before it, the exact insertion count is intrinsically self-referential (this
+sentence adds to the count it is describing), but the FILE LIST of 3 is not: it was fixed the moment
+the source edits (P3-1/P3-2/P3-3/P3-5) stopped, before this document's own Part K prose was written.
+A follow-up commit adding K7's own restored numbers (this block) and K6's softened wording (next
+paragraph) adds a small further delta on top of the 192/13 above — see this document's own git log
+for the exact split, not re-typed here to avoid yet another self-reference layer.
 - `docs/development/approval-cancel-round-phase1-design-20260918.md` — P3-2 (2 sites, comment-style
   MD prose, no code).
 - `docs/development/approval-cancel-round-phase1-verification-20260918.md` — P3-1, P3-3, P3-5
   (second site), plus this Part K.
 - `packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts` — P3-5
-  (first site), a doc-comment-only edit inside the test file (`/** ... */` block), zero executable
-  lines changed — confirmed by the 48/48 rerun in K6 being byte-identical in count and case names to
-  round-5 gate's own baseline.
+  (first site), a doc-comment-only edit inside the test file (`/** ... */` block, verified by the
+  `git diff` hunk itself — every changed line falls between the `/**` and `*/` markers) — zero
+  executable lines changed. The 48/48 rerun in K6 matches round-5 gate's own test COUNT baseline;
+  this pass did not additionally diff the list of case names against that report (the diff hunk
+  above is the stronger evidence for "comment only", not the test count).
 
 Zero other files touched. Zero lock-file or `reviews/` touches
 (`git diff --name-only origin/main..HEAD | grep -icE "review|lock-draft|\.claude"` → unchanged at
