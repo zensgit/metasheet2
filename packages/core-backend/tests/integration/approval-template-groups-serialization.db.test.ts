@@ -41,8 +41,11 @@ import { Client } from 'pg'
  *       of asserting 500/GROUP_SORT_CONFLICT;
  *   (4) K's barrier for the rename leg is the L0 advisory lock itself (the holder takes no L1 row
  *       lock — see the K helper's own doc comment), so the discriminating mutation is deleting
- *       `takeOrgLock`'s two lines from `renameApprovalTemplateGroup` (mirrors mutation (2) for the
- *       rename path) → the rename request no longer blocks on the L0-only holder at all
+ *       the `pg_advisory_xact_lock` line from `renameApprovalTemplateGroup` (mirrors mutation (2)
+ *       for the rename path — round-3 gate P3-2: this recipe previously named a non-existent
+ *       `takeOrgLock` helper and "two lines"; the lock call is a single inline
+ *       `client.query('SELECT pg_advisory_xact_lock(...))` statement, same shape as mutation (2))
+ *       → the rename request no longer blocks on the L0-only holder at all
  *       (`waitUntilBackendBlockedByHolder` times out — a hard failure, not a silent pass).
  */
 vi.hoisted(() => {
