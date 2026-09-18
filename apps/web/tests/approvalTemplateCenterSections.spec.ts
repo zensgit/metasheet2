@@ -16,21 +16,29 @@
  * `listTemplateCategories()` are fetched as sections after `group:`/`ungrouped`, and a candidate
  * whose own bucket total is 0 is dropped from what renders (unlike `group:`/`ungrouped`, which
  * always render, empty state included) — that name list is global/org-agnostic (§Q5 undecided),
- * so not every name it returns resolves to a real section in this org.
+ * so not every name it returns resolves to a real section in this org; (9)-(13) group-order
+ * move-up/move-down (§3 I3 / §4 acceptance E phase-3 leg): the request sends the org's FULL
+ * active-group permutation (never leaking `ungrouped`/`category:<name>` tokens into it), a
+ * successful reorder re-sorts the rendered sections by the response's `sortOrder` WITHOUT
+ * re-fetching each section's already-loaded rows, boundary buttons are disabled at each end and
+ * `ungrouped` never gets move controls, and a failed reorder surfaces a non-blocking inline error
+ * while leaving the section order exactly as it was.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
-import type { ApprovalTemplateGroupDTO } from '../src/types/approval'
+import type { ApprovalTemplateGroupDTO, ApprovalTemplateGroupReorderResultDTO } from '../src/types/approval'
 
 const listApprovalTemplateGroupsSpy = vi.fn<[], Promise<ApprovalTemplateGroupDTO[]>>()
 const listTemplateCategoriesSpy = vi.fn<[], Promise<string[]>>()
 const listTemplatesBySectionSpy = vi.fn()
+const reorderApprovalTemplateGroupsSpy = vi.fn<[string[]], Promise<ApprovalTemplateGroupReorderResultDTO[]>>()
 
 vi.mock('../src/approvals/api', () => ({
   listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
   listTemplateCategories: () => listTemplateCategoriesSpy(),
   listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
+  reorderApprovalTemplateGroups: (groupIds: string[]) => reorderApprovalTemplateGroupsSpy(groupIds),
 }))
 
 function group(overrides: Partial<ApprovalTemplateGroupDTO>): ApprovalTemplateGroupDTO {
@@ -81,6 +89,7 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     listTemplateCategoriesSpy.mockReset()
     listTemplateCategoriesSpy.mockResolvedValue([])
     listTemplatesBySectionSpy.mockReset()
+    reorderApprovalTemplateGroupsSpy.mockReset()
     selectSpy = vi.fn()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -270,5 +279,145 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     expect(
       container!.querySelector('[data-testid="template-group-section-ungrouped"]'),
     ).toBeTruthy()
+  })
+
+  it('sends the adjacent-swapped, org-scoped active-group permutation when moving a group down (no ungrouped/category token leaks into it)', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+      group({ id: 'atg_c', name: 'Group C', sortOrder: 3 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue(['报销'])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    reorderApprovalTemplateGroupsSpy.mockResolvedValue([
+      { id: 'atg_b', sortOrder: 1 },
+      { id: 'atg_a', sortOrder: 2 },
+      { id: 'atg_c', sortOrder: 3 },
+    ])
+
+    await mountView()
+
+    const moveDownA = container!.querySelector(
+      '[data-testid="template-group-section-move-down-group:atg_a"]',
+    ) as HTMLButtonElement
+    moveDownA.click()
+    await flushUi()
+
+    // Exactly A/B swapped — C, `ungrouped`, and the `category:报销` candidate never appear in the
+    // permutation the request carries, even though they were all rendered sections.
+    expect(reorderApprovalTemplateGroupsSpy).toHaveBeenCalledTimes(1)
+    expect(reorderApprovalTemplateGroupsSpy).toHaveBeenCalledWith(['atg_b', 'atg_a', 'atg_c'])
+  })
+
+  it('re-sorts rendered group sections by the response sortOrder WITHOUT re-fetching any section', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_a') return Promise.resolve({ data: [template('tpl_a', 'From A')], total: 1 })
+      if (section === 'group:atg_b') return Promise.resolve({ data: [template('tpl_b', 'From B')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+    reorderApprovalTemplateGroupsSpy.mockResolvedValue([
+      { id: 'atg_b', sortOrder: 1 },
+      { id: 'atg_a', sortOrder: 2 },
+    ])
+
+    await mountView()
+    const fetchCountBeforeReorder = listTemplatesBySectionSpy.mock.calls.length
+
+    const moveDownA = container!.querySelector(
+      '[data-testid="template-group-section-move-down-group:atg_a"]',
+    ) as HTMLButtonElement
+    moveDownA.click()
+    await flushUi()
+
+    // Reordering changes POSITION, not membership or content — no additional fetch.
+    expect(listTemplatesBySectionSpy).toHaveBeenCalledTimes(fetchCountBeforeReorder)
+
+    const tokensInOrder = Array.from(
+      container!.querySelectorAll('[data-testid^="template-group-section-"]'),
+    )
+      .map((el) => el.getAttribute('data-testid') ?? '')
+      .filter((id) => /^template-group-section-(group:|ungrouped$)/.test(id))
+      .map((id) => id.replace('template-group-section-', ''))
+    expect(tokensInOrder).toEqual(['group:atg_b', 'group:atg_a', 'ungrouped'])
+
+    // Each section's own previously-loaded rows travelled WITH it, not re-fetched or swapped.
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!.textContent,
+    ).toContain('From B')
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!.textContent,
+    ).toContain('From A')
+  })
+
+  it('disables move-up on the first group and move-down on the last group; `ungrouped` never gets move controls', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+
+    await mountView()
+
+    const upA = container!.querySelector(
+      '[data-testid="template-group-section-move-up-group:atg_a"]',
+    ) as HTMLButtonElement
+    const downA = container!.querySelector(
+      '[data-testid="template-group-section-move-down-group:atg_a"]',
+    ) as HTMLButtonElement
+    const upB = container!.querySelector(
+      '[data-testid="template-group-section-move-up-group:atg_b"]',
+    ) as HTMLButtonElement
+    const downB = container!.querySelector(
+      '[data-testid="template-group-section-move-down-group:atg_b"]',
+    ) as HTMLButtonElement
+
+    expect(upA.disabled).toBe(true)
+    expect(downA.disabled).toBe(false)
+    expect(upB.disabled).toBe(false)
+    expect(downB.disabled).toBe(true)
+
+    expect(
+      container!.querySelector('[data-testid="template-group-section-move-up-ungrouped"]'),
+    ).toBeNull()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-move-down-ungrouped"]'),
+    ).toBeNull()
+  })
+
+  it('surfaces a non-blocking inline error and leaves the section order unchanged when the reorder request fails', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    reorderApprovalTemplateGroupsSpy.mockRejectedValue(new Error('conflict'))
+
+    await mountView()
+
+    const moveDownA = container!.querySelector(
+      '[data-testid="template-group-section-move-down-group:atg_a"]',
+    ) as HTMLButtonElement
+    moveDownA.click()
+    await flushUi()
+
+    const errorEl = container!.querySelector('[data-testid="template-group-sections-reorder-error"]')
+    expect(errorEl).toBeTruthy()
+    expect(errorEl!.textContent).toContain('conflict')
+
+    // The failed swap must not have been applied client-side either.
+    const tokensInOrder = Array.from(
+      container!.querySelectorAll('[data-testid^="template-group-section-"]'),
+    )
+      .map((el) => el.getAttribute('data-testid') ?? '')
+      .filter((id) => /^template-group-section-(group:|ungrouped$)/.test(id))
+      .map((id) => id.replace('template-group-section-', ''))
+    expect(tokensInOrder).toEqual(['group:atg_a', 'group:atg_b', 'ungrouped'])
   })
 })
