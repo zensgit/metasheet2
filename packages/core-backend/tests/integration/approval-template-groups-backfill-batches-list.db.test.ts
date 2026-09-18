@@ -15,7 +15,7 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
  * (`listApprovalTemplateGroupBackfillBatches`, `src/services/ApprovalTemplateGroupService.ts`;
  * `GET /api/approval-template-groups/backfill/batches`, `src/routes/approvals.ts`).
  *
- * Provenance: `docs/development/approval-template-groups-phase2-design-20260918.md` §2.1 index /
+ * Provenance: `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §2.1 index /
  * §6.1 endpoint row / §13.1 changesRequired #5 — folded verbatim from the independent design-gate
  * verdict's P1-5 finding (`reviews/design-gate-A3-phase2-20260918.md`): before this endpoint
  * existed, a `batchId` appeared in exactly one place (execute's own response), so an operator

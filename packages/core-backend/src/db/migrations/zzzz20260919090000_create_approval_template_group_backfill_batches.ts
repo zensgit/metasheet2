@@ -5,7 +5,7 @@ import { sql } from 'kysely'
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3
  * ("backfill by existing category") batch bookkeeping.
  *
- * Provenance: design proposal `docs/development/approval-template-groups-phase2-design-20260918.md`
+ * Provenance: design proposal `docs/development/approval-template-groups-phase2-backfill-design-20260918.md`
  * §2, AS AMENDED by the independent design-gate verdict
  * `reviews/design-gate-A3-phase2-20260918.md` (folded into the proposal's §13.1). The gate found
  * one real defect in the proposal's original DDL text (changesRequired #4, real-DB M6): the
@@ -21,9 +21,12 @@ import { sql } from 'kysely'
  * composite-FK guarantee, and per-(batch,template) uniqueness — none of which a JSONB blob gives
  * for free.
  *
- * Additive only, Draft-only migration — nothing reads or writes these tables until the W7
- * (preview) / W8 (execute) / W9 (rollback) route layer lands in a later PR. Phase 1's
- * `approval_template_groups` / `approval_template_group_links`
+ * Additive only, Draft-only migration. The W7 (preview) / W8 (execute) / W9 (rollback) route
+ * layer that reads and writes these tables has since landed (`src/routes/approvals.ts`,
+ * `src/services/ApprovalTemplateGroupService.ts`) — see each function's own doc comment and the
+ * `approval-template-groups-backfill-{preview,execute,rollback}-ci-wiring.test.mjs` guards; this
+ * migration remains Draft-only (unapplied to any shared/staging/prod database) regardless. Phase
+ * 1's `approval_template_groups` / `approval_template_group_links`
  * (`zzzz20260918090000_create_approval_template_groups.ts`) are untouched by this file.
  */
 export async function up(db: Kysely<unknown>): Promise<void> {

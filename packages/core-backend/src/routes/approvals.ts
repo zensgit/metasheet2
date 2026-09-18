@@ -473,7 +473,7 @@ export async function isApprovalTemplateVisibleForGroupLink(
 }
 
 // ── A-3 backfill — design-gate A3-phase2, W7 preview ────────────────────────────────────────────
-// `docs/development/approval-template-groups-phase2-design-20260918.md` §5. Read-only: no lock,
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §5. Read-only: no lock,
 // no write — the candidate population is §5.1's I2′ predicate (`NOT EXISTS` in
 // `approval_template_group_links` for this org) plus the SAME `applyTemplateVisibilityFilter`
 // every other template read in this router uses (defined here, not the service file, for the SAME
@@ -610,7 +610,7 @@ function byCategoryCodePoint(a: { category: string }, b: { category: string }): 
 }
 
 // ── A-3 backfill — design-gate A3-phase2, W8 execute (2026-09-18 续做步骤 17) ────────────────────
-// `docs/development/approval-template-groups-phase2-design-20260918.md` §3 / §13.2 (unified lock
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §3 / §13.2 (unified lock
 // order, verbatim). Lives here — not `ApprovalTemplateGroupService.ts` — for the SAME reason
 // `previewApprovalTemplateGroupBackfill` and `isApprovalTemplateVisibleForGroupLink` do: it needs
 // `applyTemplateVisibilityFilter`, which that service file deliberately does not import.
