@@ -59,10 +59,23 @@ export async function getTodoCount(): Promise<TodoCountResponse> {
 
 /**
  * True when the response signals the caller should render a discriminable "unavailable" state
- * rather than trust the numeric count/list at face value — either the legacy `degraded` flag or
- * any registered source reporting `unavailable`. Centralized here so the badge and the center page
- * apply the identical rule (lock §3: the center must not invent a second judgment of its own, and
- * that includes not letting two call sites diverge on what "not really ok" means).
+ * rather than trust the numeric count at face value — either the legacy `degraded` flag or any
+ * registered source reporting `unavailable`.
+ *
+ * CORRECTED (fix round 2, gate `impl-gate-B2-round1-20260918.md` P3-4): only `ApprovalTodoBadge.vue`
+ * calls this. This docblock previously claimed "Centralized here so the badge and the center page
+ * apply the identical rule" — false; `TodoCenterView.vue` imports neither this function nor
+ * `TodoCountResponse`, and `TodoItemsResponse` (above) has no `degraded` field for it to read:
+ *   grep -n "isTodoResponseDegraded\|from '\.\./api'" apps/web/src/todo/views/TodoCenterView.vue
+ *   → no hits for either
+ * That is not a second, diverged judgment though: the center page renders each source's
+ * `PendingSourceStatus` DIRECTLY from `response.sources` (verbatim, per-source, in
+ * `TodoCenterView.vue`'s `applyResult()`) — the SAME "unavailable" half of this predicate applied
+ * per-source instead of collapsed into one boolean for the whole response. The badge needs one
+ * boolean because it renders one number; the center page needs per-source because it renders
+ * per-source groups. Lock §3's "no second judgment" constraint is about not inventing a DIFFERENT
+ * rule for what counts as unavailable, not about every call site sharing one function — the center
+ * page's per-source status IS `response.sources[source]` untouched, same as this function reads it.
  */
 export function isTodoResponseDegraded(response: { degraded?: boolean; sources: Record<string, PendingSourceStatus> }): boolean {
   if (response.degraded === true) return true

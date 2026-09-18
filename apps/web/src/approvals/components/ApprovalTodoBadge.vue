@@ -32,10 +32,15 @@
 //     G-B2-11 pill: a realtime push moves the count, never the rows) is preserved here by
 //     construction — this component owns one number and renders it; it has no list to reload and
 //     no router navigation of its own.
-//   * It does NOT自行判断可见性: `isTodoResponseDegraded` is the one shared rule (also used by the
-//     todo center page) for "render as unavailable rather than trust the number" — this component
-//     does not invent a second version of that judgment (lock §3 hard constraint).
+//   * It does NOT自行判断可见性: `isTodoResponseDegraded` is this component's one rule for "render
+//     as unavailable rather than trust the number" — it does not invent a second version of that
+//     judgment (lock §3 hard constraint). CORRECTED (fix round 2, gate `impl-gate-B2-round1-
+//     20260918.md` P3-4): this line previously read "also used by the todo center page" — false;
+//     `TodoCenterView.vue` imports neither this function nor `TodoCountResponse`, and its own
+//     `TodoItemsResponse` has no `degraded` field for it to read (see `todo/api.ts`'s corrected
+//     docblock for the full picture, including why this is not a second diverged rule).
 //
+
 // 判据 B (徽标格): a response with the legacy `degraded: true` flag OR any source reporting
 // `unavailable` — and a thrown/rejected read, which carries the SAME "the count is not trustworthy"
 // meaning — must render as a discriminable "不可用" state, never collapse to the same "0" a
@@ -64,8 +69,15 @@
 // production. That claim was checked against a stale copy of `useAuth.ts` and is FALSE as of
 // `5f4b643b78` (2026-09-08, predates this branch): `setExplicitSessionOrg` DOES call it, via
 // `resetSessionBootstrap` right before its own `return true`.
-//   grep -n 'resetSessionBootstrap(' src/composables/useAuth.ts  →  4 call sites: `setToken`,
-//   `clearToken`, `setExplicitSessionOrg`, and the forced-relogin branch inside `bootstrapSession`.
+//   grep -n 'resetSessionBootstrap(' src/composables/useAuth.ts  →  6 hits; one (`:123`) is the
+//   function's own declaration, the other 5 are call sites: `setToken` (`:234`), `clearToken`
+//   (`:249`), `setExplicitSessionOrg` (`:301`), the forced-relogin branch inside `bootstrapSession`
+//   (`:412`), and the cross-tab `storage` event listener inside `observeExplicitSessionStorage`
+//   (`:77`). CORRECTED (fix round 2, gate `impl-gate-B2-round1-20260918.md` P3-5): this line
+//   previously said "4 call sites" and omitted the `:77` listener — that call is a genuine 5th
+//   site, not a mistaken double-count of one of the other four, but it does not change the
+//   conclusion below: it calls the SAME `resetSessionBootstrap`, which calls the SAME
+//   `notifyAuthPrincipalChange()` this file's guard already reacts to generically.
 // So an org switch DOES fire this notification, and this guard's reaction — the SAME generic
 // `onAuthPrincipalChange` code whether the trigger is sign-out, login, or an org switch — IS
 // exercised by it in production, not merely "would handle one correctly if it fired". Proven, not
