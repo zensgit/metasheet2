@@ -559,30 +559,45 @@ round-2 门审已实测收窄:`packages/core-backend/vitest.integration.config.t
 
 ### 14.9 #8 DEFERRED-需行为改动 — `EXPECT_DB` 在 real-DB 步骤未设
 
-现场重跑 `grep -c "EXPECT_DB" .github/workflows/plugin-tests.yml`(post-rebase head)= **0**,与 round-2 门审的披露一致,rebase 未改变这一点。这不是本切片(phase 3)引入的缺口——四个 phase-3 文件只是复制了 phase-1 两个原始文件已经在用的同一套 `itIfExpectDb` 哨兵模式,且这套模式在仓内约 60 个 `.db.test.ts` 文件里普遍存在,`plugin-tests.yml` 的 `approval-real-db-integration` 步骤从一开始就不设 `EXPECT_DB`,不是本切片改坏的。修复需要给该步骤的 `env:` 加一行 `EXPECT_DB: '1'`——这是对 `.github/workflows/plugin-tests.yml` 的改动,不在本轮「只允许测试、注释、MD、scripts/dev」范围内(工作流文件的改动惯例上还会级联触发 s6a 重新计算,影响面覆盖这条 real-DB 步骤下的全部 60+ 文件,不只是本切片的四个)。登记为 DEFERRED,交 owner 决定是否要把这行加上(以及由谁承担 s6a 重钉与安静窗口协调)。
+现场重跑 `grep -c "EXPECT_DB" .github/workflows/plugin-tests.yml`(post-rebase head)= **0**,与 round-2 门审的披露一致,rebase 未改变这一点。这不是本切片(phase 3)引入的缺口——四个 phase-3 文件只是复制了 phase-1 两个原始文件已经在用的同一套 `itIfExpectDb` 哨兵模式,且这套模式在仓内普遍存在:本轮现场重跑 `grep -rl "EXPECT_DB" packages/core-backend/tests | wc -l` = **54 个文件**(§13 在 rebase 之前的旧头上量得的是「约 60 个」,数字随分支前后移动是预期的,不当正文常量维护,以本次现场重跑为准),`plugin-tests.yml` 的 `approval-real-db-integration` 步骤从一开始就不设 `EXPECT_DB`,不是本切片改坏的。修复需要给该步骤的 `env:` 加一行 `EXPECT_DB: '1'`——这是对 `.github/workflows/plugin-tests.yml` 的改动,不在本轮「只允许测试、注释、MD、scripts/dev」范围内(工作流文件的改动惯例上还会级联触发 s6a 重新计算,影响面覆盖这条 real-DB 步骤下的全部 54 个文件,不只是本切片的四个)。登记为 DEFERRED,交 owner 决定是否要把这行加上(以及由谁承担 s6a 重钉与安静窗口协调)。
 
 ### 14.10 撤回类改动的全分支扫描(item ③)
 
-以下每条模式在当前分支(`git grep`,含 worktree 全部已跟踪文件)上核实为零命中,证明本轮没有遗留任何应撤回的过强/失真措辞:
+**订正(本节最初写成「以下四条模式核实为零命中」——这句本身已被下面的重跑推翻,同一类自引用问题 §1.4/§24.1 处理过两次:一份记录自己写作过程的文档,在它自己完成写作之后,会开始命中它自己引用/转述过的那句被撤回的话。判读规则不变——判"是否以现在时重申",不是判"grep 数字是否为零";下面逐条给出在**当前 head**(含本节自身、§14.1/§14.6/§14.8 已提交的文本)上重新跑出的真实计数与分类,不再声称任何一条是 0 hits 而不解释):**
 
 ```
-$ grep -rn "3218a4aaa" .                                                              # 0 hits(§14.8)
-$ grep -rn "两个新用例都在 \`\.db\.test\.ts\` 里,\`describeIfDatabase\` 无 \`DATABASE_URL\` 时整块跳过" .   # 0 hits(§14.2,旧措辞已被 §12 的更正段替换)
-$ grep -n "NOT RUN" docs/development/approval-template-groups-phase3-sections-verification-20260918.md docs/development/approval-template-groups-phase3-sections-design-20260918.md   # 仅 1 处,是 §7 标题里回顾「替换了什么」的历史提法,非现存台账行
-$ grep -rn "必须加.*pageSize\|pageSize.*必须" docs/development apps/web/tests packages/core-backend/tests   # 0 hits(§14.6,round-1 那句「必须加 pageSize」只存在于外部门审报告,从未写进仓内文件)
+$ grep -rln "3218a4aaa" .
 ```
+命中 **1 个文件**(本文档自身),**3 处**:§14.1 处置表第 7 行、§14.8 正文、以及本节展示的这条命令注释里各引用一次这个已撤回的 SHA——三处都是"点名它已被撤回/已不在目标文档里"的元描述,零处以现在时断言它仍然出现在目标文档里。分类:category-3(历史/元叙事)。
+
+```
+$ grep -rl "两个新用例都在 \`\.db\.test\.ts\` 里,\`describeIfDatabase\` 无 \`DATABASE_URL\` 时整块跳过" . | wc -l
+```
+**0**——这条是被撤回措辞的**逐字原句**,不含在 §14.2 的转述文字里(§14.2 转述时改写了措辞,没有逐字引用整句),所以这一条确实是零命中,不是自引用陷阱。
+
+```
+$ grep -n "NOT RUN" docs/development/approval-template-groups-phase3-sections-verification-20260918.md docs/development/approval-template-groups-phase3-sections-design-20260918.md
+```
+命中 **1 处**:§7 标题里回顾"替换了本节此前的 3 RUN / 3 NOT RUN"——这是标题自身对"发生过什么"的元描述,不是一张现存的台账;§14.2/§14.10 讨论这件事时用的是"NOT RUN"这个词组本身,不会新增命中(该词组没有出现在本节或 §14.2 的正文里)。分类:category-3。
+
+```
+$ grep -rln "必须加.*pageSize\|pageSize.*必须" docs/development apps/web/tests packages/core-backend/tests
+```
+命中 **3 个文件**:(a)本文档自身——§14.1 处置表第 5 行 + §14.6 正文各引用一次「必须加 `pageSize`」这句被降级的原话,均为"这句已被降级"的元描述,零处现在时重申;(b)`docs/development/attendance-dingtalk-benchmark-target-and-tracker-20260601.md:367` 与 `docs/development/multitable-nongrid-view-materialization-designlock-20260708.md:390`——逐句读过,**均为正则假阳性**:前者「pageSize 上限 20」与后半句「必须 staging ... 后才翻 ✅」是同一行里两个不相关的子句(考勤线的分页参数说明 + 考勤线自己的 staging 门槛判据),`.*` 跨子句连了起来;后者「`pageSize` 取 10/50/200 三次挂载」与「INV-6 的三次挂载断言必须红」同理,是多维表甘特图设计锁自己的 mutation-red 判据,与本切片的 `ungrouped` 桶分页无关。两处均与 `approval-template-groups`/`ungrouped`/A-4 主题无关,不是本轮遗留的过强声明。
+
+**结论**:四条模式里,只有第 2 条(逐字原句)是真正的"零命中";其余三条在本文档完成自身写作后都会命中自己——命中内容逐条读过均为元描述/历史叙事/不相关假阳性,**零处**以现在时重申任何一条已被撤回或已被降级的断言。
 
 另:`bash scripts/dev/atg-retraction-sweep.sh` 现场重跑(post-rebase + post-本轮编辑),`EXIT=0`;扫描范围内本轮新增的命中(`⊇`/`⊂`/`subset`/`superset` 若干处,均在 `origin/main` 自身前进带来的无关文件里,如 `plugin-attendance/index.cjs` 的考勤三层嵌套、`univer-meta.ts` 字段收窄)逐条读过,**零处**触及 `approvalTemplateAdminGuard`/`isTemplateManager` 主题,判定结论(guard/manager 两个方向互不包含)不受影响——已把这次现场重跑的脚注写回 §8(phase1-verification 那份历史更正另见其自身文档,不在本 lane 职责范围内重复维护)。
 
 ### 14.11 本轮改动范围(`git diff --stat`)
 
-起点 = rebase-onto-phase1 完成、push 之前的 head `aad08d275168c127d4d66758a3bc0977654f8e56`(与本文档 §13 记录的 HEAD `bdcdfebc4` 之后、rebase 之后的最新一次提交一致)。命令(仓根目录):
+起点 = rebase-onto-phase1 完成、push 之前的 head `aad08d275168c127d4d66758a3bc0977654f8e56`(与本文档 §13 记录的 HEAD `bdcdfebc4` 之后、rebase 之后的最新一次提交一致)。
+
+**范围说明(避免自引用漂移)**:本文档自己就是本轮改动的一部分,一份还在写作中的文档不能把"自己写到一半时的字节数"当成最终范围——之前一版这里犯了这个错误(用 `aad08d275..HEAD` 这个会随后续编辑继续增长的活动范围,写的却是一次性的静态数字)。改为钉两个**固定、已提交、不再变化**的端点:
 
 ```
-$ git diff --stat aad08d275..HEAD
+$ git diff --stat aad08d275..1d2a7f903
 ```
-
-本节写入之前一刻的实测输出(与本段落自身、以及本段落之后 §14.12 的收尾复核记录一并构成本文档自己的提交,故此处的数字**不包含本次文档编辑自身**——同 §1.4 对自引用行号问题的处理方式一致,不把文档正在记录的这次改动算进它自己描述的范围):
 
 ```
  .../tests/approvalTemplateCenterCategory.spec.ts   |  21 ++
@@ -591,7 +606,9 @@ $ git diff --stat aad08d275..HEAD
  3 files changed, 166 insertions(+), 2 deletions(-)
 ```
 
-三个文件:两个测试文件(`packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts`、`apps/web/tests/approvalTemplateCenterCategory.spec.ts`)与本验证 MD 自身——零生产代码改动、零 workflow 改动、零迁移、零新文件、零重命名。`git diff --name-only aad08d275..HEAD -- packages/core-backend/src apps/web/src '.github/workflows' 'packages/core-backend/src/db/migrations'` 现场核对为**零命中**,机械确认上一句不是自述。
+`1d2a7f903` 是本轮三条实质性修复提交(round-2 P3-2 测试、round-1 P3-3 测试、本 §14 disposition 表的第一版)的最后一个;此后 §14.10/§14.11/§14.9 的本次订正又追加了一个纯文档提交(`docs(approval): embed literal diffstat in P3 hygiene §14.11` 及本次订正),把范围钉在 `1d2a7f903` 而不是不断移动的 `HEAD`,是为了让这段文字本身可以被复现验证而不会因为文档还在继续编辑而失真——最终 PR/commit 历史里完整的、包含本次订正在内的范围以 `git log --oneline aad08d275..<本 lane 推送的最终 HEAD>` 现场核对为准,不在本段重复维护一个会过期的数字。
+
+三个文件(`aad08d275..1d2a7f903` 范围内):两个测试文件(`packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts`、`apps/web/tests/approvalTemplateCenterCategory.spec.ts`)与本验证 MD 自身——零生产代码改动、零 workflow 改动、零迁移、零新文件、零重命名。`git diff --name-only aad08d275..1d2a7f903 -- packages/core-backend/src apps/web/src '.github/workflows' 'packages/core-backend/src/db/migrations'` 现场核对为**零命中**,机械确认上一句不是自述。本次订正(`1d2a7f903..HEAD`)只改动本文档自身(§14.9/§14.10/§14.11 三处订正),同一条零命中命令对这个范围重跑同样为空。
 
 ### 14.12 本轮全绿复核(处女库 `ms2_a4_p3hygiene_20260919`,用完 `dropdb`)
 
