@@ -354,11 +354,23 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // `templateIds` array (which the file's `afterEach` drains one-row-at-a-time — 550 individual
   // DELETEs there would slow every other test in this file) — this test deletes its own batch by
   // key prefix in a `finally`, so a thrown assertion still cleans up and does not poison later
-  // tests' global eligible counts.
+  // tests' global eligible counts. This isolation relies on the file's cases running sequentially
+  // (the default here, no `it.concurrent`) — a sibling case executing DURING this test's 550-row
+  // window would itself see `eligible > 500` for any org it exercises, or pick up a `CapProbe`
+  // group it does not expect; this is a disclosure, not something this test defends against.
+  //
+  // The 400's message asserts the LITERAL "500" (via `MAX_CANDIDATES` reused into the regex, not
+  // a second hardcoded "500") on top of the statusCode/code — `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES`
+  // is not exported, so nothing else ties this test's fixture size to the guard's real threshold.
+  // Without the message check, lowering the constant (leaving 550 still over whatever the new
+  // value is) would keep this test green while it silently stopped proving anything about the
+  // number 500 specifically — the message is the only channel the real threshold is observable
+  // through from outside the module.
+  const MAX_CANDIDATES_UNDER_TEST = 500 // must equal `routes/approvals.ts`'s (unexported) `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES`
   it('§13 changesRequired #12: exceeding the 500-candidate cap throws a typed 400 BEFORE any write commits — zero rows across every table this call could have written', async () => {
     const org = trackOrg(`atge-cap-${TS}`)
     const keyPrefix = `atge-cap-tpl-${TS}-`
-    const overCapCount = 550 // > the 500 cap (`routes/approvals.ts` const), independent of any stray eligible rows
+    const overCapCount = MAX_CANDIDATES_UNDER_TEST + 50 // margin above the cap, independent of any stray eligible rows
     await query(
       `INSERT INTO approval_templates (key, name, status, category)
        SELECT $1 || g, $1 || g, 'draft', 'CapProbe' FROM generate_series(1, $2) AS g`,
@@ -368,6 +380,7 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
       await expect(executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')).rejects.toMatchObject({
         statusCode: 400,
         code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE',
+        message: expect.stringContaining(`exceeds the ${MAX_CANDIDATES_UNDER_TEST} limit`),
       })
 
       // Zero rows written for THIS org across every table the happy path would have touched —
@@ -378,7 +391,7 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
       expect(counts).toEqual({ groups: 0, links: 0, batches: 0, batchGroups: 0, batchLinks: 0 })
     } finally {
       // Not routed through `templateIds`/the shared `afterEach` — one bulk DELETE, so a failed
-      // assertion above still removes these 550 rows before the next test's `eligible` count runs.
+      // assertion above still removes these rows before the next test's `eligible` count runs.
       await query(`DELETE FROM approval_templates WHERE key LIKE $1`, [`${keyPrefix}%`])
     }
   })
