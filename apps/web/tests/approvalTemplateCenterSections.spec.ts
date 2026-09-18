@@ -22,7 +22,14 @@
  * successful reorder re-sorts the rendered sections by the response's `sortOrder` WITHOUT
  * re-fetching each section's already-loaded rows, boundary buttons are disabled at each end and
  * `ungrouped` never gets move controls, and a failed reorder surfaces a non-blocking inline error
- * while leaving the section order exactly as it was.
+ * while leaving the section order exactly as it was; (14)-(19) item-level move-to-group (§6 表第 3
+ * 行 "拖拽归组", a `<select>` substitution for native drag — see the component's own header
+ * comment): "未分组" is offered only from a `group:<id>` section (never from `ungrouped` or
+ * `category:<name>`, where unlinking is a no-op per I2′), a successful move removes the row from
+ * its section and bumps the target section's own count without re-fetching either, moving the
+ * LAST row out of a `category:<name>` section drops that section entirely (same 0-total rule as
+ * the candidate-enumeration tests above), and a failed move surfaces a non-blocking inline error
+ * leaving the row exactly where it was.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
@@ -33,11 +40,16 @@ const listApprovalTemplateGroupsSpy = vi.fn<[], Promise<ApprovalTemplateGroupDTO
 const listTemplateCategoriesSpy = vi.fn<[], Promise<string[]>>()
 const listTemplatesBySectionSpy = vi.fn()
 const reorderApprovalTemplateGroupsSpy = vi.fn<[string[]], Promise<ApprovalTemplateGroupReorderResultDTO[]>>()
+const linkApprovalTemplateToGroupSpy = vi.fn<[string, string], Promise<void>>()
+const unlinkApprovalTemplateFromGroupSpy = vi.fn<[string], Promise<void>>()
 
 vi.mock('../src/approvals/api', () => ({
   listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
   listTemplateCategories: () => listTemplateCategoriesSpy(),
   listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
+  linkApprovalTemplateToGroup: (templateId: string, groupId: string) =>
+    linkApprovalTemplateToGroupSpy(templateId, groupId),
+  unlinkApprovalTemplateFromGroup: (templateId: string) => unlinkApprovalTemplateFromGroupSpy(templateId),
   reorderApprovalTemplateGroups: (groupIds: string[]) => reorderApprovalTemplateGroupsSpy(groupIds),
 }))
 
@@ -78,6 +90,12 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+async function selectMoveTarget(select: HTMLSelectElement, value: string): Promise<void> {
+  select.value = value
+  select.dispatchEvent(new Event('change', { bubbles: true }))
+  await flushUi()
+}
+
 describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -90,6 +108,10 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     listTemplateCategoriesSpy.mockResolvedValue([])
     listTemplatesBySectionSpy.mockReset()
     reorderApprovalTemplateGroupsSpy.mockReset()
+    linkApprovalTemplateToGroupSpy.mockReset()
+    linkApprovalTemplateToGroupSpy.mockResolvedValue(undefined)
+    unlinkApprovalTemplateFromGroupSpy.mockReset()
+    unlinkApprovalTemplateFromGroupSpy.mockResolvedValue(undefined)
     selectSpy = vi.fn()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -419,5 +441,174 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
       .filter((id) => /^template-group-section-(group:|ungrouped$)/.test(id))
       .map((id) => id.replace('template-group-section-', ''))
     expect(tokensInOrder).toEqual(['group:atg_a', 'group:atg_b', 'ungrouped'])
+  })
+
+  it('offers every OTHER active group plus 未分组 as move targets from a group: section, and moving to another group calls link + updates both counts without re-fetching either section', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_a') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    const optionValues = Array.from(select.querySelectorAll('option')).map((o) => o.getAttribute('value'))
+    // Placeholder, then 未分组 (this row's section IS a `group:` section), then the ONE other
+    // active group — never `atg_a` itself, never `ungrouped`/`category:<name>` tokens.
+    expect(optionValues).toEqual(['', 'ungrouped', 'group:atg_b'])
+
+    await selectMoveTarget(select, 'group:atg_b')
+
+    expect(linkApprovalTemplateToGroupSpy).toHaveBeenCalledTimes(1)
+    expect(linkApprovalTemplateToGroupSpy).toHaveBeenCalledWith('tpl_1', 'atg_b')
+    expect(unlinkApprovalTemplateFromGroupSpy).not.toHaveBeenCalled()
+    // Moving changes membership, not either section's already-loaded content — no re-fetch.
+    expect(listTemplatesBySectionSpy).toHaveBeenCalledTimes(fetchCountBeforeMove)
+
+    expect(container!.querySelector('[data-testid="template-group-section-item-tpl_1"]')).toBeNull()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
+        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+    ).toBe('0')
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!
+        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+    ).toBe('1')
+  })
+
+  it('moving an item to 未分组 calls unlink (never link) and bumps the ungrouped section total', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_a') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'ungrouped')
+
+    expect(unlinkApprovalTemplateFromGroupSpy).toHaveBeenCalledTimes(1)
+    expect(unlinkApprovalTemplateFromGroupSpy).toHaveBeenCalledWith('tpl_1')
+    expect(linkApprovalTemplateToGroupSpy).not.toHaveBeenCalled()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-ungrouped"]')!
+        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+    ).toBe('1')
+  })
+
+  it('never offers 未分组 as a move target from `ungrouped` or `category:<name>` sections (unlinking a never-linked row is a no-op, I2′)', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    listTemplateCategoriesSpy.mockResolvedValue(['报销'])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'ungrouped') return Promise.resolve({ data: [template('tpl_u', 'Ungrouped row')], total: 1 })
+      if (section === 'category:报销') return Promise.resolve({ data: [template('tpl_c', 'Category row')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+
+    const optionValuesOf = (testid: string) => {
+      const select = container!.querySelector(`[data-testid="${testid}"]`) as HTMLSelectElement
+      return Array.from(select.querySelectorAll('option')).map((o) => o.getAttribute('value'))
+    }
+
+    expect(optionValuesOf('template-group-section-move-tpl_u')).toEqual(['', 'group:atg_a'])
+    expect(optionValuesOf('template-group-section-move-tpl_c')).toEqual(['', 'group:atg_a'])
+  })
+
+  it('drops an emptied `category:<name>` section entirely once its last row is moved out (same 0-total rule as candidate enumeration)', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    listTemplateCategoriesSpy.mockResolvedValue(['报销'])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'category:报销') return Promise.resolve({ data: [template('tpl_c', 'Category row')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    expect(container!.querySelector('[data-testid="template-group-section-category:报销"]')).toBeTruthy()
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_c"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_a')
+
+    expect(container!.querySelector('[data-testid="template-group-section-category:报销"]')).toBeNull()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
+        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+    ).toBe('1')
+  })
+
+  it('surfaces a non-blocking inline error and leaves the row exactly in place when a move request fails', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_a') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+    linkApprovalTemplateToGroupSpy.mockRejectedValue(new Error('archived'))
+
+    await mountView()
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_b')
+
+    const errorEl = container!.querySelector('[data-testid="template-group-sections-move-error"]')
+    expect(errorEl).toBeTruthy()
+    expect(errorEl!.textContent).toContain('archived')
+
+    expect(container!.querySelector('[data-testid="template-group-section-item-tpl_1"]')).toBeTruthy()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
+        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+    ).toBe('1')
+    expect(
+      container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!
+        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+    ).toBe('0')
+  })
+
+  it('clicking the move-to-group select does not also emit the item-selection event (click stays contained)', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_a', name: 'Group A', sortOrder: 1 }),
+      group({ id: 'atg_b', name: 'Group B', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_a') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    select.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(selectSpy).not.toHaveBeenCalled()
+
+    // The item's own click (on the `<li>`, unrelated to the select) still works.
+    const item = container!.querySelector(
+      '[data-testid="template-group-section-item-tpl_1"]',
+    ) as HTMLLIElement
+    item.click()
+    await flushUi()
+    expect(selectSpy).toHaveBeenCalledWith('tpl_1')
   })
 })
