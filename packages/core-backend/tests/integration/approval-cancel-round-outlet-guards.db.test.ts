@@ -394,9 +394,15 @@ describeIfDatabase('cancel-round outlet guards (§14.3 #2/#4/#6/#7/#7′/#8): a 
    * anyone remembering to also add it here (see `finding_approval_action_verb_pinned_copy_blast_radius`).
    * Instead this test MECHANICALLY enumerates the real exported `APPROVAL_ACTION_TYPES` union and
    * asserts every member NOT in a locally-declared copy of the ratified allow-set is rejected. The
-   * local allow-set copy is deliberately NOT imported from `ApprovalProductService`'s own
-   * `CANCEL_ROUND_ALLOWED_ACTIONS` — importing the production constant would make this test
-   * tautological against exactly the widening regression it exists to catch.
+   * local allow-set copy holds its own ratified-literal value rather than importing
+   * `ApprovalProductService`'s `CANCEL_ROUND_ALLOWED_ACTIONS` — that constant is module-private
+   * (never `export`ed today, so "importing" it is not actually an available choice; gate round-5
+   * P3-5, `impl-gate-C-slice1-round5-20260918.md`, corrects an earlier "deliberately NOT imported"
+   * phrasing here that implied a declined option rather than an absent one — same substance,
+   * accurate wording). Holding an independent copy is still the right design even if the constant
+   * is exported later and this test switches to importing it: R5-M6's vacuous-assertion guard two
+   * lines below (`expect(forbiddenActions.length).toBeGreaterThanOrEqual(5)`) is what actually
+   * catches the "test synced to implementation" self-consistency failure, not the import boundary.
    */
   it('§9-9 allow-set MEMBER pin — every ApprovalActionType NOT in the ratified allow-set {approve,reject,revoke,comment} is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN, enumerated mechanically over the exported union (not hand-listed)', async () => {
     const suffix = `member-pin-${TS}`
