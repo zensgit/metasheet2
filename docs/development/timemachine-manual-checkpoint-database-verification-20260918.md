@@ -473,3 +473,14 @@ The filter is restored before final verification.
 This gate neither reads attachment bytes nor writes customer/local attachment files.
 It does not establish provider receipts, complete attachments_index, permission
 evidence or catalog publication. The tests use only a disposable owned database.
+
+Final verification includes conflict-free true merge
+`11290b272b9940f5bc0473c25902c4a916f1f4b6` (parents
+`9bc144d4c9bdb129cf7bbb2021bee010da55c493` and main
+`3c6c28958c2ce51334b8f02df13272ef0ae77889`). Full owned-cluster acceptance,
+30-migration replay and prior DB neighbors pass; cleanup reports zero connections
+and database, with the temporary cluster removed. Source-pin wiring/source/worker
+and new-main comment route tests pass 114/114. Acceptance TypeScript, scoped lint,
+static wiring 37/37 and full S5 pass. Local logs:
+`/private/tmp/tm-manual-attachment-{final,unit-final,wiring,s5}.log`.
+No new remote terminal CI result is implied by these local results.
