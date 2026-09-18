@@ -824,3 +824,30 @@ Remaining: user-facing confirmation/status flow, immutable attachment capture,
 separately authorized restore/apply acceptance, and final product closeout.
 No automatic schedule, retention, cleanup, hard-deleted-table revival, Ready,
 merge, flag enablement, dispatch, deployment or production action is included.
+
+## Manual Capture Web Client
+
+Implementation `248a4c7b3` adds capture/read methods to the existing client, with
+an isolated closed-response parser. The POST body is exactly requestId; scope
+stays in the encoded sheet URL, never an actor/key/generation body alias. Both
+operations reject malformed request identities before IO and require the returned
+requestId to match the requested identity. Unknown keys, malformed generation,
+missing fields and unsupported/non-string states refuse with a fixed error.
+
+Existing client and modal suites: 2 files / 137 tests PASS (99 client, 38 modal).
+Before implementation 20 new cases failed and 78 existing passed. A subsequent
+array-state negative also passes. Removing request identity equality produces
+exactly one failed case; restoration returns all 137 to green. These are client
+and mounted-component tests, not evidence that a new capture UI exists yet.
+
+Application `vue-tsc -p tsconfig.app.json --noEmit`, scoped ESLint and diff-check
+PASS. Full `vue-tsc -b` does NOT pass in this shared dependency installation:
+vite.config.ts:28 reports TS2769 from installed Vite 5/Vite 7 plugin type identity.
+No dependency/lockfile/config change was made to hide that result. Existing web
+dependencies were linked into this worktree; lint used already-installed parser
+packages through temporary NODE_PATH, with no install.
+
+The existing spec is already included in multitable-web-guard and the dedicated
+required-web invocation (client + modal). No selector was removed or changed.
+Logs: `/private/tmp/tm-manual-client-{red,green,identity-mutation,lint,tsc,app-tsc}.log`.
+UI confirmation, durable reload state and browser acceptance remain outstanding.
