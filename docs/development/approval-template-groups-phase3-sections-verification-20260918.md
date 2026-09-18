@@ -325,9 +325,11 @@ $ grep -o "approvalTemplateCenterSections" apps/web/scripts/run-required-web-tes
 
 ```
 $ bash scripts/dev/atg-retraction-sweep.sh
+$ echo "EXIT=$?"
+EXIT=0
 ```
 
-新增命中集中在本次新增的两份 MD 文件自身(设计 MD §2.2「A-1 锁文 §3 I2′ 判定谓词的逐字复用」一节引用了 I2′ 的 `NOT EXISTS` 谓词原文、§4.3 引用了 DEFERRABLE 副作用的历史叙述;本验证 MD §1 并入的 rebase-note 内容原样保留了原来那两处历史命中,只是行号随之改变)——逐条读取后,分类与 §1.4 记录的三类(已撤回历史叙事 / 否定式现测结论 / 与本主题无关的误命中)一致,**零处**以现在时重申 `⊆`/`⊋` 任一方向的包含关系。`routes/approvals.ts:406-440` 的三层递进撤回内容本次会话未改动,继续原样成立。
+**实测结果(而非预判)**:两份新文档的扫描范围命中(`git diff --name-only origin/main..HEAD` 的文件清单)只有**本验证 MD**(`approval-template-groups-phase3-sections-verification-20260918.md`)本身携带模式命中——正文 §1 并入的原 rebase-note 内容原样保留了它自己的两处历史命中(压缩叙事「guard⊆manager → guard⊋manager → 互不包含」、逐字引用脚本模式列表的元描述),行号从旧文件的 `:33`/`:61` 变为本文档现在的 `:50`/`:78`(后者在文档内被引用了多次,`grep -c` 命中即为引用次数,非独立命中数);§1.4 段落自身的转述文字(`:84`)与 §8 本段(`:330` 附近)作为**对这两处历史命中的再次转述**,同样落入否定式/元描述分类,不构成新增的现在时包含断言。**设计 MD 在这些模式上零命中**(它引用 A-1 锁文的 I2′/DEFERRABLE 条款用的是「NOT EXISTS」「DEFERRABLE」等词,不落在 `⊆/⊇/⊂/⊃/⊋/⊊/子集/超集/严格超集/subset/superset/无法制造/通配权限码` 这组扫描模式里),之前一版草稿在此处的表述("设计 MD §2.2……引用了……"暗示设计 MD 也会命中)与实测不符,已按实测更正。`routes/approvals.ts:406-440` 的三层递进撤回内容本次会话未改动,继续原样成立,`packages/core-backend/src/routes/approvals.ts` 的命中(`:406`/`:408`/`:434`/`:1781`/`:2304`)均是 A-1 遗留的历史叙事/元描述,不属于本切片新增。
 
 `scripts/dev/atg-verification-recount.sh` 本次重跑,退出码 0,计数与 A-1 verification §14/§24.5 记录的数字一致——本切片未新增任何 4xx/500 状态码断言或错误码断言到那两个文件(lifecycle/serialization 属 A-1,A-4 的断言全部落在新文件 `sections`/`reorder` 里,不在这个脚本的扫描范围内)。
 
