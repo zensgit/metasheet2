@@ -392,3 +392,9 @@ packages fail closed in manual continuation; no implicit upgrade or recapture.
 Structural envelope checks do not replace restore-time MAC/AEAD authentication.
 Manifest object receipt and atomic catalog publication remain separate unfinished
 steps; stored sections alone do not make an archive available for recovery.
+
+The subsequent manifest upload adapter now persists an `uploaded` receipt using
+the exact durable signed envelope, with generation-scoped immutable object identity
+and fresh post-provider authorization. It never marks receipts `verified` and never
+publishes the catalog. The unfinished step is atomic receipt verification and
+catalog finalization, followed by runtime command/UI integration.

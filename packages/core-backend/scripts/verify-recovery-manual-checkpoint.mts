@@ -475,7 +475,7 @@ try {
   const actorId = randomUUID()
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
   const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck,
-    createRecoveryArchiveManualObjectUpload } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+    createRecoveryArchiveManualObjectUpload, createRecoveryArchiveManualManifestUpload } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -907,6 +907,28 @@ try {
     assert.equal(receipts.length, 10)
     assert.deepEqual(receipts.map((row) => row.section_name).sort(), [...archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
     assert.ok(receipts.every((row) => row.object_class === 'section' && row.state === 'uploaded'))
+    const uploadManifest = createRecoveryArchiveManualManifestUpload(uploadInput.transaction, { ...repeated, provider })
+    await uploadManifest()
+    await uploadManifest()
+    const manifestReceipt = (await query(`SELECT object_id,provider_version,plaintext_sha256,ciphertext_sha256,
+      size_bytes::text,state,section_name,attachment_id FROM meta_recovery_archive_objects
+      WHERE generation_id=$1::uuid AND object_class='manifest'`, [repeated.owner.generationId])).rows
+    assert.equal(manifestReceipt.length, 1)
+    assert.equal(manifestReceipt[0].state, 'uploaded')
+    assert.equal(manifestReceipt[0].section_name, null)
+    assert.equal(manifestReceipt[0].attachment_id, null)
+    const durable = await uploadInput.transaction((q) => prepared.readRecoveryArchivePreparedCapture(q, repeated.owner))
+    assert.ok(durable)
+    const expectedManifest = preparedUpload.decodeRecoveryArchivePreparedEnvelope(durable).manifestEnvelope!
+    const manifestDigest = createHash('sha256').update(expectedManifest).digest('hex')
+    assert.equal(manifestReceipt[0].plaintext_sha256, manifestDigest)
+    assert.equal(manifestReceipt[0].ciphertext_sha256, manifestDigest)
+    const storedManifest = await provider.get({ generationId: repeated.owner.generationId, objectId: manifestDigest,
+      expectedVersion: manifestDigest, expectedSha256: manifestDigest, expectedSize: String(expectedManifest.length),
+      expectedExpiresAt: objectExpiry })
+    assert.ok(Buffer.from(storedManifest.bytes).equals(expectedManifest))
+    assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
+      WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 0)
     const revokedUpload = await continuation()
     const revoker = new Client({ ...connection, database })
     await revoker.connect()
@@ -922,11 +944,20 @@ try {
       { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
       assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
         [revokedUpload.owner.generationId])).rows[0].n, 0)
+      await revoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+      await assert.rejects(createRecoveryArchiveManualManifestUpload(uploadInput.transaction,
+        { ...revokedUpload, provider: { ...provider, async head() { throw new Error('SYNTHETIC_HEAD_UNAVAILABLE') } } })(),
+      { message: 'RECOVERY_ARCHIVE_OBJECT_RECEIPT_COMPILER_PROVIDER_FAILED' })
+      await assert.rejects(createRecoveryArchiveManualManifestUpload(uploadInput.transaction,
+        { ...revokedUpload, provider: revokingProvider })(),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+      assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
+        [revokedUpload.owner.generationId])).rows[0].n, 0)
     } finally {
       await revoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
       await revoker.end()
     }
-    console.log('PASS: real local ciphertext PUT/HEAD records ten uploaded receipts; exact resume adds no rows or captures; no verified/publication claim')
+    console.log('PASS: real local PUT/HEAD records ten sections and one durable signed manifest; idempotent replay, HEAD failure and post-IO revocation guards; no verified/publication claim')
     const local = require('../src/multitable/recovery-local-custody.ts') as typeof import('../src/multitable/recovery-local-custody')
     const localStores = require('../src/multitable/recovery-local-custody-store.ts') as typeof import('../src/multitable/recovery-local-custody-store')
     const custodyId = randomUUID()

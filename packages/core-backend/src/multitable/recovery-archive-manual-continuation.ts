@@ -17,15 +17,38 @@ import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-obje
 import { bindRecoveryArchiveManualManifestBinding } from './recovery-archive-manual-admission'
 import { buildRecoveryArchiveSealedSnapshotManifest } from './recovery-archive-sealed-snapshot-manifest'
 import { authenticateRecoveryArchiveSealedSnapshotManifest } from './recovery-archive-authenticated-manifest'
+import { parseRecoveryArchiveManifestObjectEnvelope } from './recovery-archive-manifest-object-envelope'
+import type { RecoveryArchiveSectionName } from './recovery-archive-contract'
+
+type ManualObjectUploadInput = Pick<RecoveryArchiveManualContinuationInput, 'identity' | 'owner' | 'transactionDepth'> & {
+  provider: RecoveryArchiveObjectStoreProvider
+}
 
 /** PUT/HEAD sealed section bytes only; verification and catalog publication remain a later transaction. */
 export function bindRecoveryArchiveManualObjectUpload(
   transaction: RecoveryArchivePreparedUploadInput['transaction'],
   authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
-  input: Pick<RecoveryArchiveManualContinuationInput, 'identity' | 'owner' | 'transactionDepth'> & {
-    provider: RecoveryArchiveObjectStoreProvider
-  },
+  input: ManualObjectUploadInput,
 ): RecoveryArchivePreparedUploadInput['upload'] {
+  const upload = bindManualObjectUpload(transaction, authorize, input)
+  return async (_envelope, section) => upload(section.sectionName)
+}
+
+/** Upload only the durable signed envelope. Does not mark any object verified or publish the catalog. */
+export function bindRecoveryArchiveManualManifestUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
+  input: ManualObjectUploadInput,
+): () => Promise<void> {
+  const upload = bindManualObjectUpload(transaction, authorize, input)
+  return () => upload(null)
+}
+
+function bindManualObjectUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
+  input: ManualObjectUploadInput,
+): (name: RecoveryArchiveSectionName | null) => Promise<void> {
   const identity = Object.freeze({ ...input.identity })
   const owner = Object.freeze({ ...input.owner })
   const provider = input.provider
@@ -43,8 +66,7 @@ export function bindRecoveryArchiveManualObjectUpload(
     }
     return { payload, envelope }
   }
-  return async (_envelope, requestedSection) => {
-    const name = requestedSection.sectionName
+  return async (name) => {
     const admitted = await transaction(async (query) => {
       const original = await authorizedPayload(query)
       const result = await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid', [owner.generationId])
@@ -53,15 +75,22 @@ export function bindRecoveryArchiveManualObjectUpload(
       return { ...original, expiresAt: expiry.toISOString() }
     })
     // Always upload the durable original, never bytes supplied by the callback caller.
-    const section = admitted.envelope.sections.find((candidate) => candidate.sectionName === name)
-    if (!section) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
-    const sha256 = createHash('sha256').update(section.ciphertext).digest('hex')
+    const section = name === null ? null : admitted.envelope.sections.find((candidate) => candidate.sectionName === name)
+    const bytes = name === null ? admitted.envelope.manifestEnvelope : section?.ciphertext
+    if (!bytes) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
+    if (name === null) {
+      const signed = parseRecoveryArchiveManifestObjectEnvelope(bytes)
+      if (signed.manifest.expires_at !== admitted.expiresAt || signed.manifest.source_vector_hash !== owner.sourceVectorHash) {
+        throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
+      }
+    }
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
     const evidence = await compileRecoveryArchiveObjectReceipt({ provider, transactionDepth,
       object: { generationId: owner.generationId, objectId: sha256, version: sha256,
-        sha256, size: String(section.ciphertext.byteLength), bytes: section.ciphertext,
+        sha256, size: String(bytes.byteLength), bytes,
         expiresAt: admitted.expiresAt, pinned: false },
-      objectClass: 'section', sectionName: name, attachmentId: null,
-      keyId: admitted.envelope.binding.keyId, plaintextSha256: section.plaintextSha256,
+      objectClass: name === null ? 'manifest' : 'section', sectionName: name, attachmentId: null,
+      keyId: admitted.envelope.binding.keyId, plaintextSha256: section?.plaintextSha256 ?? sha256,
       ownerKind: owner.ownerKind, ownerId: owner.ownerId, ownerFence: owner.ownerFence })
     await transaction(async (query) => {
       const current = await authorizedPayload(query)

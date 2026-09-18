@@ -695,3 +695,28 @@ final full run. Logs: `/private/tmp/tm-manual-signed-manifest-final.log`,
 Not yet delivered: manifest-object PUT/HEAD, verified receipt/catalog atomic
 publication, runtime admission/UI, or immutable attachment-source integration.
 No flag, customer storage, production, Ready or merge action is implied.
+
+## Durable Manifest Object Receipt
+
+Implementation starts at `c37bfe252906ce562f8c4f5646c2dd64991e7f29`.
+The manual manifest uploader reads the original signed envelope from the prepared
+package, checks its expiry/source vector against the admitted generation, and uses
+the existing guarded PUT/HEAD compiler. It shares the section uploader's pre/post
+IO fresh authority and owner checks; caller-supplied bytes are not accepted.
+The manifest object id/version/hash are its exact SHA-256. Its receipt has class
+`manifest`, null section/attachment identity, and remains `uploaded`.
+
+The synthetic PostgreSQL/filesystem driver verifies ten section receipts plus
+exactly one manifest receipt after repeated uploads, GET byte-equivalence with the
+durable signed envelope, and zero verified receipts. HEAD failure and actor
+deactivation inside HEAD both refuse without registering the manifest. A mutation
+that skips post-IO authorization only for the manifest causes the exact revocation
+negative to fail with `Missing expected rejection`; it is restored for the final
+run. The first test attempt used an incorrect receipt-column name; canonical
+`provider_version`/`size_bytes` fixed the test query, not production schema.
+
+Evidence logs: `/private/tmp/tm-manual-manifest-object-{final,mutation,restored,unit,s5}.log`.
+Compiler neighbors: 10/10. Acceptance tsc, source ESLint, full S5 and diff-check
+pass. Owned database/connections and temporary cluster are removed by the runner.
+No catalog transition or finalization is implemented by this adapter; recovery
+availability still requires the later atomic verification/publication transaction.
