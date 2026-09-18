@@ -3984,3 +3984,152 @@ merge, and the merge's own diff stat shows `ApprovalProductService.ts` changed b
 methodology, the corrected numbers, and which files were confirmed UNCHANGED live in the design MD's
 own new §10 (added by this pass) — not duplicated here to avoid two documents disagreeing on which
 one is authoritative for a design-side citation.
+
+---
+
+## CI 修复:enum-mirror census(2026-09-18;PR #5856,`feat/approval-cancel-round-phase2` @`518e9a49f` → this fix)
+
+Draft PR #5856's required `test (20.x)` / `test (18.x)` were both red on
+`tests/unit/approval-field-access-enum-mirror.test.ts` ("NodeFieldAccess enum mirror (Lock-7 G-14 /
+Lock-7B OD-L7B-10)"), two named cases, first reproduced locally (not just read off the CI log) before
+any edit:
+
+```
+cd <worktree>/packages/core-backend
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/approval-field-access-enum-mirror.test.ts
+```
+
+Against the unmodified tree (`git show 518e9a49f:…/ApprovalProductService.ts` restored over the
+working copy, confirmed byte-identical to `HEAD` before running): **2 failed / 49 passed**, the same
+two names as the CI log
+(`/Users/chouhua/.claude/jobs/7e2e993c/tmp/job20.clean`, grep `FAIL`/`AssertionError`):
+
+1. `carrier file census: exactly this set of files carries a 2+-member literal co-occurrence within
+   the proximity window` — `expected [ …(14) ] to deeply equal [ …(13) ]`, the extra file being
+   `packages/core-backend/src/services/ApprovalProductService.ts`.
+2. `packages/core-backend/src/services/ApprovalProductService.ts @432550-432767 :: {readonly,
+   required}` (offsets against `518e9a49f`; a source edit shifts them, so this is a citation of the
+   pre-fix tree, not a live anchor) — `matched 0 PARTIAL_CARRIER_ALLOWLIST entries (expected exactly
+   1)`.
+
+**位点.** Both failures trace to ONE new declaration, introduced by this slice (confirmed absent on
+`origin/feat/approval-cancel-round-phase1`: `git diff origin/feat/approval-cancel-round-phase1 --
+…/ApprovalProductService.ts` shows the whole `CancelRoundRolloutLockRequirementV1` type, its resolver,
+and `redeemCancelRoundInTxn` as net-new): `redeemCancelRoundInTxn`'s own `params`/return-type
+declaration —
+
+```ts
+private async redeemCancelRoundInTxn(
+  client: ApprovalDbClient,
+  params: {
+    …
+    readonly rolloutLock: Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>
+    …
+  },
+): Promise<
+  | { readonly kind: 'applied'; readonly outcome: CancelRoundCancellationOutcomeV1 }
+  | { readonly kind: 'blocked'; readonly code: string; readonly detail: string | null }
+> { … }
+```
+
+Reading the guard's own mechanism (`QUOTED_LITERAL_RE` / `BARE_WORD_RE` in the test file, ~L818-860)
+resolves this to two SPECIFIC matched occurrences, not "readonly appears a lot near required": the
+quoted string `'required'` in `Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>` —
+`CancelRoundRolloutLockRequirementV1`'s own `kind` discriminant, an unrelated advisory-lock/
+SERIALIZABLE-retry gate for cancel-round dispatch (declared ~L913, resolved by
+`resolveCancelRoundRolloutLockRequirementV1`) — and the bare word `readonly` in the return type's
+`{ readonly kind: 'applied'; … }`, which qualifies the guard's delimiter rule only because it directly
+follows `{ ` (an ordinary TS property-modifier, on a value with no relation to `NodeFieldAccess`
+whatsoever). Both are real code, not comment/prose, and neither is a `NodeFieldAccess` copy: a
+coincidental collision of two of the four ratified words with an entirely different local type, the
+same class the file's own `PluginRbacProvisioningService.ts` (`readonly`/`editable`, an unrelated
+`RoleFieldPolicy`) and `base.yml` (`editable`/`required`, an unrelated JSON-Schema `required:`
+keyword) entries already carry.
+
+**两个选项,选的是哪个,为什么.** The task brief's own precedent
+(`P26 census 同名闭包折叠` — 改名 + 独立条目,不要并进别人的条目) is about a *different* failure shape
+(a new site colliding with an EXISTING entry's symbol window); here there is no existing entry for
+this file at all, so the two live options were:
+
+- **(rejected) Add a symbol-anchored `PARTIAL_CARRIER_ALLOWLIST` entry** — `file:
+  'packages/core-backend/src/services/ApprovalProductService.ts'`, `members: ['readonly',
+  'required']`, `nearSymbol: 'CancelRoundRolloutLockRequirementV1'` (45 bytes before the cluster start,
+  comfortably inside a 100-byte window, and — per `matchingAllowlistEntries`'s `file`+`members` filter
+  — provably unambiguous, since no other cluster in this file shares this file+member-set pair). This
+  would have worked, but it (a) permanently widens `carrier file census`'s pinned file list from 13 to
+  14, coupling that guard file to this feature's own private type layout for as long as this codebase
+  exists, (b) is a second entry this repo's own `feedback_exemption_reasons_rot_make_them_data.md` /
+  `feedback_single_definition_does_not_make_a_narrow_predicate_correct.md` concerns apply to (every
+  entry must stay "exercised" forever, per the guard's own trailing test), and (c) requires editing the
+  guard file itself for a collision entirely internal to this slice's own code — "加宽与补登记必须同PR"
+  is satisfiable here, but avoidable is better than merely satisfiable.
+- **(chosen) Hoist the inline `Extract<>` into a named type alias, defined where the underlying literal
+  already lives harmlessly.** The pre-existing union (`export type CancelRoundRolloutLockRequirementV1
+  = | Readonly<{ kind: 'none' }> | Readonly<{ kind: 'required'; … }>`, ~L913) already contains the
+  quoted `'required'` literal and has carried ZERO cluster since phase 1 (confirmed: this file is
+  absent from both phase-1's and phase-2's-pre-fix `expectedFiles` list) — because the guard's
+  `BARE_WORD_RE` has no `i` flag, so the adjacent `Readonly<` (capitalized, TS's own utility type)
+  never satisfies the lowercase-only `readonly` match. Adding
+  `export type CancelRoundRolloutLockRequiredV1 = Extract<CancelRoundRolloutLockRequirementV1, { kind:
+  'required' }>` immediately after that union, and replacing the ONE production use-site
+  (`redeemCancelRoundInTxn`'s `rolloutLock` param) with the named alias, removes the quoted `'required'`
+  literal from the collision site entirely — the params/return-type declaration is left with only the
+  bare word `readonly` (a single distinct tracked word, below the guard's 2-member cluster floor) and
+  forms no cluster at all. This is a pure type-level refactor: the alias is erased at compile time, the
+  union's own shape, every `.kind === 'required'` comparison elsewhere in the file (resolver, dispatch,
+  retry-classification — untouched, still comparing against the literal string), and the alias's own
+  ONE production consumer are all unchanged. `tsc --noEmit` (below) is the proof of type-identity, not
+  an assertion.
+
+**修复.** `packages/core-backend/src/services/ApprovalProductService.ts`, two hunks (git diff
+`1 file changed, 9 insertions(+), 1 deletion(-)`):
+
+```ts
+// ~L915, immediately after the existing union:
+/**
+ * The `{ kind: 'required' }` branch of {@link CancelRoundRolloutLockRequirementV1} — named so a
+ * call site that only ever runs once the lock is known to be held (never the `'none'` branch)
+ * states that in its own type instead of repeating the `Extract<>` inline. Currently used by
+ * `redeemCancelRoundInTxn`'s `rolloutLock` param.
+ */
+export type CancelRoundRolloutLockRequiredV1 = Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>
+
+// ~L9003, redeemCancelRoundInTxn's params:
+readonly rolloutLock: CancelRoundRolloutLockRequiredV1  // was: Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>
+```
+
+No line of `tests/unit/approval-field-access-enum-mirror.test.ts` (the guard/lock file) was touched —
+zero pin widening, zero new allowlist entry, zero change to `EXPECTED_COMPLETE_CLUSTER_COUNT` or
+`expectedFiles`.
+
+**命令与结果.**
+
+1. Guard, unmodified tree (red, matches CI): `pnpm --filter @metasheet/core-backend exec vitest run
+   tests/unit/approval-field-access-enum-mirror.test.ts` → **2 failed / 49 passed**, the same two
+   named failures as job20.clean, both messages quoted verbatim above.
+2. Guard, fixed tree: same command → **50 passed / 50**, `carrier file census` back to the pinned
+   13-file list (`ApprovalProductService.ts` does not appear in ANY cluster line of the run output —
+   the collision is gone, not merely allowlisted), and `every PARTIAL_CARRIER_ALLOWLIST entry is
+   exercised` unaffected (the allowlist itself is untouched).
+3. `pnpm exec tsc --noEmit` (package `@metasheet/core-backend`) → clean, zero diagnostics — the
+   type-identity claim above is machine-checked, not asserted.
+4. This slice's two `.db.test.ts` suites, against a **fresh, virgin** private database (never shared/
+   staging/production; created and migrated from empty for this fix specifically, matching this file's
+   own house convention of never reusing a database across independent verification passes):
+   `createdb metasheet2_lock_c2_fix` → `DATABASE_URL=postgres://…/metasheet2_lock_c2_fix pnpm exec tsx
+   src/db/migrate.ts` (all pending migrations through `zzzz20260918110000_…`, including this branch's
+   own three cancel-round migrations, applied clean) → `DATABASE_URL=… pnpm exec vitest --config
+   vitest.integration.config.ts run tests/integration/approval-cancel-round-lock-order-census.db.test.ts
+   tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot` → **44 passed / 2
+   skipped** (2 files, 46 cases total), zero failures. PostgreSQL **15.17 (Homebrew, aarch64-apple-
+   darwin)**. The two skips were not re-diffed against the pre-fix tree — this fix touches only a
+   compile-time type alias with one production call site already covered by both suites' own redemption
+   paths, so a skip-count change would only be possible if the fix altered runtime behavior, which
+   `tsc`'s clean pass and the diff's own shape (an `Extract<>` replaced by its own named alias, no
+   value-level change) rule out.
+
+**结论.** Both required checks' only red site is closed by a source-level rename that removes the
+false collision at its root, leaving the census guard — the file the task brief itself named as not to
+be edited ("不改锁文") — byte-identical. No allowlist entry was needed; the option is documented above,
+not silently dropped, per this document's own "不裁决,只如实列" convention for paths considered and
+not taken.
