@@ -946,3 +946,83 @@ export async function rollbackApprovalTemplateGroupBackfillBatch(
     throw mapGroupConstraintError(error)
   }
 }
+
+// ── A-3 backfill — batch list (design-gate A3-phase2, P1-5 / changesRequired #5, 2026-09-18) ────
+// `docs/development/approval-template-groups-phase2-design-20260918.md` §2.1 index / §6.1 endpoint
+// row / §13.1 changesRequired #5 (real-DB M-series gate report, `reviews/design-gate-A3-phase2-
+// 20260918.md`): a `batchId` appears in exactly one other place today — execute's own response —
+// so an operator whose execute request timed out, or who simply wants to audit what has already
+// been rolled back, had no way to discover a `batchId` to pass to rollback at all. That is an
+// already-shipped reachability gap, not a missing test: §2.1's own comment concedes the batch head
+// table carries no "in progress" state column because a request that dies mid-flight is supposed
+// to be resolved by "list the batches and see", and this function is that list.
+//
+// Read-only, no lock (§2 锁序表: "只读路径不取 L0") — same convention as `listApprovalTemplateGroups`
+// above. Lives here, not `routes.ts`, for the SAME reason rollback does (this file's W9 section
+// header): a batch's own bookkeeping is fixed at `execute` time and carries no dependency on the
+// caller's current `ApprovalTemplateVisibilityActor` / `applyTemplateVisibilityFilter` scope, so
+// none of the reasons preview/execute were pushed out to `routes.ts` apply here.
+
+export interface ApprovalTemplateGroupBackfillBatchSummary {
+  batchId: string
+  createdBy: string
+  createdAt: string
+  rolledBackAt: string | null
+}
+
+export interface ApprovalTemplateGroupBackfillBatchListPage {
+  batches: ApprovalTemplateGroupBackfillBatchSummary[]
+  limit: number
+  offset: number
+  total: number
+}
+
+/**
+ * `limit`/`offset` are the caller's already-clamped values (the route layer owns clamping, same
+ * division of responsibility as every other paginated read in `routes.ts`) — this function trusts
+ * them as-is rather than re-validating, the same convention `listApprovalRecordLinkOptions`'s
+ * callers already use elsewhere in this router.
+ *
+ * `ORDER BY created_at DESC, id DESC` — the `..._backfill_batches_org_created_idx` index (§2.1)
+ * covers `(org_id, created_at DESC)`; `id DESC` is a deterministic tiebreaker for the (currently
+ * unreachable outside artificial clock skew, but not provably impossible) case of two batches in
+ * the same org sharing a `created_at` timestamptz value, so pagination across two calls cannot
+ * silently reorder or drop a row at a page boundary.
+ */
+export async function listApprovalTemplateGroupBackfillBatches(
+  orgId: string,
+  limit: number,
+  offset: number,
+): Promise<ApprovalTemplateGroupBackfillBatchListPage> {
+  const countResult = await query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM approval_template_group_backfill_batches WHERE org_id = $1`,
+    [orgId],
+  )
+  const total = Number((countResult.rows[0] as { n: string } | undefined)?.n ?? '0')
+
+  const rowsResult = await query<{
+    id: string
+    created_by: string
+    created_at: string | Date
+    rolled_back_at: string | Date | null
+  }>(
+    `SELECT id, created_by, created_at, rolled_back_at
+       FROM approval_template_group_backfill_batches
+      WHERE org_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2 OFFSET $3`,
+    [orgId, limit, offset],
+  )
+
+  return {
+    batches: rowsResult.rows.map((row) => ({
+      batchId: row.id,
+      createdBy: row.created_by,
+      createdAt: toIso(row.created_at),
+      rolledBackAt: toIsoOrNull(row.rolled_back_at),
+    })),
+    limit,
+    offset,
+    total,
+  }
+}
