@@ -197,6 +197,32 @@ describe('app-level approval todo badge', () => {
     expect(group.parentElement?.className).toContain('nav-links')
   })
 
+  // B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标). Before this test, the
+  // todo center page (routed at /todo) was reachable only by typing the URL — nothing in the shell
+  // linked to it. A SEPARATE nav-link, not a repurposing of the 审批中心 link or the badge's own
+  // (non-existent) href, so the P1b "badge is a sibling, never a child" contract the test above
+  // pins stays intact — this entry is a peer of `.nav-approvals`, not inside it.
+  it('renders a 待办中心 nav-link to /todo, as a PEER of the 审批中心 group (not inside it)', async () => {
+    getTodoCountSpy.mockResolvedValue({ count: 0, sources: { approval: 'ok' } })
+    const root = await mountApp()
+
+    const todoLink = root.querySelector('[data-testid="nav-todo-center"]')
+    expect(todoLink).toBeTruthy()
+    expect(todoLink!.getAttribute('href')).toBe('/todo')
+    expect(todoLink!.textContent?.trim()).toBe('待办中心')
+    // Mutation guard companion to the test above: /todo must NOT have landed inside the
+    // `.nav-approvals` flex item (that assertion already pins its link set to exactly ['/approvals']).
+    expect(todoLink!.closest('.nav-approvals')).toBeNull()
+  })
+
+  it('renders the 待办中心 nav-link in English under the en locale', async () => {
+    mocks.isZh = false
+    getTodoCountSpy.mockResolvedValue({ count: 0, sources: { approval: 'ok' } })
+    const root = await mountApp()
+
+    expect(root.querySelector('[data-testid="nav-todo-center"]')?.textContent?.trim()).toBe('Todo Center')
+  })
+
   it('updates from the realtime counts composable without any further fetch', async () => {
     getTodoCountSpy.mockResolvedValue({ count: 1, sources: { approval: 'ok' } })
     const root = await mountApp()
@@ -342,6 +368,18 @@ describe('app-level approval todo badge', () => {
 
     expect(badgeOf(root)).toBeNull()
     expect(getTodoCountSpy).not.toHaveBeenCalled()
+  })
+
+  // B-2: the /todo nav-link is gated by the SAME predicate as the badge/审批中心 link
+  // (`canUseApprovals`, i.e. `approvals:read` — the identical permission `appRoutes.ts` requires to
+  // enter the route), not a separately-invented one — so a principal who cannot see the 审批中心
+  // link cannot see an entry into the page that aggregates it either.
+  it('renders no 待办中心 nav-link for a principal without approvals:read', async () => {
+    mocks.permissions = []
+    getTodoCountSpy.mockResolvedValue({ count: 7, sources: { approval: 'ok' } })
+    const root = await mountApp()
+
+    expect(root.querySelector('[data-testid="nav-todo-center"]')).toBeNull()
   })
 
   // ───────────────────────────────────────────────────────────────────────────
