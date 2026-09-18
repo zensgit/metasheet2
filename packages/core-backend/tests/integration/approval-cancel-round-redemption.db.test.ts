@@ -1811,6 +1811,56 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(recB.ip_address).not.toBeNull()
       expect(recB.user_agent).not.toBeNull()
 
+      // ── C-1 STEPS ③ AND ⑦, MEASURED — the two the three row compares above CANNOT see. ──────
+      //
+      // Lock:86 lists C-1's execution as seven steps. The compares above cover ④ (原审批实例
+      // approved → cancelled + `approval_records`) and ⑤ (请求 cancelled). Step ③
+      // 「按运行模式追加取消计算」 writes `attendance_record_calculations`, and step ⑦
+      // 「发 `attendance.request.cancelled`」 enqueues `attendance_result_event_outbox` — NEITHER
+      // table is in the three compared above, so a divergence there would have gone unseen behind
+      // a green. They are measured here instead.
+      //
+      // WHY THEY ARE EXPECTED TO BE EQUAL, and why that is a NARROWING rather than a closure. Both
+      // are gated on the ORG's accepted write posture, resolved by the boundary from the rollout
+      // registry (`w4c0-operation-registry.ts:640`, `:877`): under `legacy_projection_only` the
+      // adapter skips the P14 calculation (`index.cjs:35169`) and the boundary skips the outbox
+      // enqueue (`w4c3b-request-operation-boundary.ts:903-916`). The twins are asserted to share an
+      // org above, and posture is an ORG property, so both paths take the SAME branch by
+      // construction — which means these two assertions confirm parity WITHOUT exercising the
+      // non-legacy branch on either path. §3.12.3 records the same posture for the end-to-end case.
+      // The `authoritative` / `shadow` postures remain UNEXERCISED on both sides; that is an OPEN
+      // item in the phase-2 MD, not something this green covers.
+      const calcCount = async (userId: string): Promise<string> =>
+        (
+          await pool().query<{ count: string }>(
+            `SELECT count(*)::text AS count
+               FROM attendance_record_calculations c
+               JOIN attendance_records r ON r.id = c.attendance_record_id
+              WHERE r.user_id = $1`,
+            [userId],
+          )
+        ).rows[0].count
+      const calcA = await calcCount(a.requesterId)
+      const calcB = await calcCount(requesterB)
+      expect(calcA, 'C-1 step ③ (按运行模式追加取消计算) must not diverge between the twins').toBe(calcB)
+
+      const outboxCount = async (requestId: string): Promise<string> =>
+        (
+          await pool().query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM attendance_result_event_outbox
+              WHERE event_kind = 'attendance.request.cancelled'
+                AND payload->>'requestId' = $1`,
+            [requestId],
+          )
+        ).rows[0].count
+      const outboxA = await outboxCount(attachedA!.requestId)
+      const outboxB = await outboxCount(attachedB.requestId)
+      expect(outboxA, 'C-1 step ⑦ (发 attendance.request.cancelled) must not diverge between the twins').toBe(outboxB)
+      // Pinned as VALUES, not just as equality: `0 === 0` is also what a broken attribution
+      // predicate returns. If either becomes non-zero the posture assumption above changed and this
+      // case's reasoning must be re-read, so it goes red rather than silently widening.
+      expect({ calcA, calcB, outboxA, outboxB }).toEqual({ calcA: '0', calcB: '0', outboxA: '0', outboxB: '0' })
+
       // ── The 呈现 GAP, ASSERTED. The approval side exposes no field carrying the W4 result
       //    payload: the redeemed round's DTO is an ordinary `UnifiedApprovalDTO`. Measured as a
       //    negative so that the day a channel IS added, this line goes red and the MD's OPEN item
