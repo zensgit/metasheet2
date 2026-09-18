@@ -1831,6 +1831,15 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it. Same
       // plugin-tests.yml override and s6a re-pin note as the lifecycle file above.
       'tests/integration/approval-template-groups-serialization.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 3 (A-4) real-DB
+      // acceptance C/D (`section=` four-bucket listing + per-section pagination). A THIRD normal-
+      // pool file for this feature (not RR-pinned — the section listing takes no L0/L1/L2, §2
+      // 锁序表 "只读路径不取 L0"). Same override/re-pin note as the two phase-1 siblings above:
+      // this deliberately OVERRIDES the "NOT plugin-tests.yml" local convention because lock §6
+      // assigns real-DB acceptance for this feature into the one real-DB step that runs on the
+      // required `test (20.x)` leg. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it.
+      'tests/integration/approval-template-groups-sections.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
