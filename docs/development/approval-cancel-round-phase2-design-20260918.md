@@ -273,23 +273,30 @@ through the fail-closed re-assert throw; see §10 for the drift history this anc
 10521  client = await pool.connect()
 10530  rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)   // BEFORE BEGIN
 10532  if (rolloutLock.kind === 'required') {
-10525    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
-10528    await acquireAttendanceCalculationRolloutLock(client, orgKey, 'shared')                     // FIRST lock
-10533  } else {
-10534    await client.query('BEGIN')
-10535  }
-10538  … FOR UPDATE on approval_instances …                                                          // SECOND lock
-10550  const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)  // fail-closed re-assert
-10551  if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
-10552    throw new ServiceError(
-10555      'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',
-10556    )
-10557  }
+10533    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+10536    await acquireAttendanceCalculationRolloutLock(client, orgKey, 'shared')                     // FIRST lock
+10541  } else {
+10542    await client.query('BEGIN')
+10543  }
+10546  … FOR UPDATE on approval_instances …                                                          // SECOND lock
+10558  const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)  // fail-closed re-assert
+10559  if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
+10560    throw new ServiceError(
+10563      'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',
+10564    )
+10565  }
 ```
 
-(Every line number above is this document's OWN fresh `grep -n`/`sed -n` extract at HEAD `d462677bd`
-— not the `a02930896` original with arrows grafted on; the `a02930896` numbers this replaces are
-tabulated once, in §10, rather than interleaved into a source excerpt a second time.)
+(Every line number above is this document's OWN fresh `grep -n`/`sed -n` extract at current HEAD
+— re-derived 2026-09-19 per gate2's carried P3-1 finding, which caught that the prior pass's fix
+here was incomplete: it re-derived only the block's first 4 lines and left the remaining 8 at their
+stale, pre-`e90a44dbe`-insertion values, so the block briefly placed the `BEGIN ISOLATION LEVEL
+SERIALIZABLE` line (then `10525`) numerically *before* the `if` that gates it (`10532`) — internally
+inconsistent on its face. All 12 lines below the first 4 needed the same uniform `+8` this file's
+other citations already carried (confirmed against the re-assert call's own citation two paragraphs
+below, `~L10558`, which was already correct and is now consistent with this block). Not the `a02930896`
+original with arrows grafted on; the `a02930896` numbers this replaces are tabulated once, in §10,
+rather than interleaved into a source excerpt a second time.)
 
 The extra ~10-15 line growth between the pre-read and the re-assert (vs. the original `a02930896`
 snippet) is u3's own `dispatchCancellationOutcome` hoist (§3.18's surface-half plumbing), inserted in
