@@ -258,3 +258,44 @@ created for this operation.
 `git push --force-with-lease origin feat/approval-template-groups-phase2-backfill` (rebase of this
 lane's own branch — permitted exception to the no-force rule) after all of the above went green.
 Resulting remote HEAD recorded in the PR/task StructuredOutput.
+
+---
+
+## 8. Second rebase (2026-09-18, gate fix-round 1, `impl-gate-A3-round1-20260918.md` §5 P2)
+
+The gate that reviewed this branch's post-§1–7 tip (`9bda1dbccd8ce7145e2ed88a789f43128ad2de75`)
+found that `origin/feat/approval-template-groups-phase1` had advanced 9 more commits past the
+`03ee9f4bb` tip this file's §1–7 rebased onto — 4 of those touch `packages/core-backend` or
+`scripts` — and that the design-gate Q6(a) condition ("A-1 rebase, not cherry-pick, on any further
+A-1 fix round") therefore no longer held on this head. Full detail in the gate report and in
+`approval-template-groups-phase2-backfill-verification-20260918.md` §7; this section records only
+the git-mechanics half.
+
+- **Pre-rebase HEAD**: `9bda1dbccd8ce7145e2ed88a789f43128ad2de75` (the gate-reviewed SHA).
+- **New phase1 tip**: `a789422b516f9e9ab6949c2cc0762a5daabc6be7` (fetched fresh from
+  `origin/feat/approval-template-groups-phase1`).
+- **Operation**: `git rebase origin/feat/approval-template-groups-phase1`, replaying all 26 commits
+  of this lane. **Zero conflicts** — the gate's own prediction (its earliest lane hunk starts at
+  `@@ -437,6 +447,338 @@`, outside phase1's `@@ -395,28 +395,42 @@` comment-only hunk) held exactly.
+- **Post-rebase HEAD (before this round's two doc corrections)**:
+  `ff1e40686659a4ec3c66d3a717643b16e1af50fa`. The final HEAD after this round's doc-only commit(s)
+  is the one recorded in git log / the task's StructuredOutput; it is NOT this SHA.
+- **Ancestor check**: `git merge-base --is-ancestor origin/feat/approval-template-groups-phase1
+  HEAD` → `YES`; `git rev-list --count origin/feat/approval-template-groups-phase1 ^HEAD` → `0`.
+- **SHA-drift disclosure**: this second rebase rewrote all 26 of this lane's own commit SHAs a
+  second time. Every lane-commit SHA cited anywhere in §1–7 above, in the design MD, or in the
+  verification MD from before this round now refers to the PRE-second-rebase lineage — those
+  commits are no longer reachable from this branch's `git log` (though individually `git show
+  <sha>`-able until a `git gc`). Nothing in §1–7 above was rewritten to chase this; only the
+  judgment-bearing anchors (head SHA, phase1-ancestor relationship, the E1–E5 evidence) were
+  recomputed fresh, in `…verification-20260918.md` §7.2.
+- **Evidence rerun**: E1 (7 real-DB suites, private DB `metasheet2_lock_a3`), E2/E2′/E2″ (full
+  no-DB core-backend lane + its 6 census guards + zero-collection check on the 5 new
+  `.db.test.ts` files), E3 (both `tsc` invocations), E4 (5 ci-wiring guards + s6a provenance +
+  349-test census enumeration), and E5 (s6a sha256 pin vs `pins.json`) were all rerun fresh on the
+  rebased tree — see `…verification-20260918.md` §7.2 for the full command/result table. No new
+  migration was required (`db:migrate --list` on `metasheet2_lock_a3` reported `Applied: 408,
+  Pending: 0` both before and after — phase1's 9 new commits carry zero DDL).
+- **Push**: `git push --force-with-lease origin feat/approval-template-groups-phase2-backfill`
+  (same permitted exception as §7, applied a second time to this lane's own branch) after this
+  round's doc commit(s) and the full evidence rerun above went green.
