@@ -41,8 +41,13 @@ import type {
  *     rollout-lock `pg_locks` assert, posture resolution, replay preflight or the seal/outbox.
  *   - 账侧完整取消结果逐字节等价 (lock §8 期 1) — the twin-fixture compare, second-to-last case.
  *     `unrecoverableExpired` 呈现 (lock:86) is the LAST case: the counter is computed and
- *     PERSISTED by the W4 seal (non-zero, measured); only the user-facing SURFACE is still open,
- *     and both cases assert its absence as a negative.
+ *     PERSISTED by the W4 seal (non-zero, measured), AND a `dto.cancellationOutcome` channel now
+ *     exists on the approve response and the approve audit row's `metadata` (⚠️ P3-hygiene,
+ *     2026-09-19: the two cases below assert this POSITIVELY — the twin-fixture case pins the
+ *     CLEAN token `cancelled` on its zero-lot fixture, the last case pins
+ *     `cancelled_with_unrecoverable_expired` on its seeded-expired-lot fixture — this is no longer
+ *     a negative-only channel-absence assertion). Which USER-FACING surface a human reads it from
+ *     is still an owner default, not a gap in the DTO/audit-row plumbing itself.
  *   - R2 (锁内最终评估失败 ⇒ 零业务取消) — now COVERED here, by the last case in this file,
  *     against the REAL boundary. ⚠️ Read its doc comment before trusting it: R2's three
  *     literal clauses have NO discriminating power against the mutation the lock names for
@@ -983,8 +988,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
   it(
     '判据 II (§14.2, outlet #5): an attendance-backed cancel round whose window is OPEN redeems — ' +
-      'C-1 is invoked through the W4 external transaction entry with the round id as its ' +
-      'operation id, the round row goes `applied` + `ended_at`, the instance goes `approved`, and ' +
+      'C-1 is invoked through the W4 external transaction entry with a UUIDv5 operation id ' +
+      'derived from the round id (`deriveCancelRoundW4OperationIdV1`), the round row goes ' +
+      '`applied` + `ended_at`, the instance goes `approved`, and ' +
       'EXACTLY ONE completion event is emitted (so 判据 IV/R2 zeros are measurements, not an ' +
       'inert channel)',
     async () => {
@@ -2220,9 +2226,12 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * ── `unrecoverableExpired` 呈现 (lock:86) — the half that IS closable, and a CLAIM RETRACTED ──
    *
    * lock:86 states C-1's step ⑥ as 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,
-   * **必须呈现**)」. The 账侧 parity case above asserts the approval-side DTO carries NO channel
-   * for it and phase-2 MD §3.15.6 called the whole item a CONTRACT GAP on the ground that
+   * **必须呈现**)」. Phase-2 MD §3.15.6 called the whole item a CONTRACT GAP on the ground that
    * 「the approval side has no channel to present it on **at all**」.
+   * ⚠️ P3-hygiene (2026-09-19): a channel exists now (§3.18) — the 账侧 parity case above asserts
+   * it POSITIVELY, pinning the CLEAN token (`dto.cancellationOutcome.status === 'cancelled'`,
+   * every counter zero) on its zero-lot fixture, precisely so it can discriminate from what THIS
+   * case pins below on a seeded-expired-lot fixture.
    *
    * ⛔ THAT SECOND HALF IS RETRACTED BY THIS CASE, and the retraction is a measurement, not a
    * re-reading. The redemption path supplies a NON-NULL `operationId`
@@ -2234,7 +2243,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * caller's transaction client, so it commits with the approve. The counter is therefore
    * COMPUTED, and PERSISTED, and QUERYABLE per operation, on the redemption path. What remains
    * open is only WHICH USER-FACING SURFACE renders it — an owner decision this branch does not
-   * make, still asserted as a negative at the end of this case.
+   * make. ⚠️ P3-hygiene (2026-09-19): that surface HAS since been added (§3.18, a default the
+   * owner still needs to ratify) — the end of this case now asserts the channel POSITIVELY
+   * (`cancelled_with_unrecoverable_expired`), not as a negative; see the case's own inline comment
+   * at the tripwire for what changed and why the two lines were rewritten rather than deleted.
    *
    * The other half of §3.15.6's finding stands and is what this case closes as a TEST gap: 「no
    * fixture seeds leave-balance lots, so both paths produce zero counters」. A zero counter cannot
@@ -2255,8 +2267,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * `unrecoverableExpired === 0` and would pass against a path that does nothing.
    *
    * WHAT THIS CASE DOES NOT ESTABLISH:
-   *   - 呈现 on a user-facing surface. Registered as an owner decision (phase-2 MD §3.15.6);
-   *     the negative at the bottom of this case goes red the day one is added.
+   *   - WHICH surface a human reads 呈现 from, or whether the field must survive a reload on the
+   *     DTO. The channel's EXISTENCE is no longer open (§3.18 added it, and the case's own
+   *     assertions below are positive); the status tokens and the two carriers (action-response
+   *     DTO, approve audit-row `metadata`) are implementer defaults, registered for owner
+   *     ratification in phase-2 MD §3.18.7, not a gap this case leaves silently open.
    *   - The LIVE-lot reversal half (`reversed > 0`, a `reverse` event, `remaining_minutes`
    *     restored). That is a different branch of the same helper and is not what lock:86's
    *     「必须呈现」 names; it is left to the attendance line's own `reverseLeaveBalanceDeduction`
@@ -2264,8 +2279,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    */
   it(
     'unrecoverableExpired 呈现 (lock:86): an EXPIRED lot makes the counter NON-ZERO on the ' +
-      'redemption path and the W4 seal persists it in `attendance_result_operations.' +
-      'response_snapshot` — while the approval DTO still carries no channel for it',
+      'redemption path, the W4 seal persists it in `attendance_result_operations.' +
+      'response_snapshot`, and the approve DTO + audit-row metadata now carry the ' +
+      '`cancelled_with_unrecoverable_expired` status token for it',
     async () => {
       const suffix = `uexp-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
