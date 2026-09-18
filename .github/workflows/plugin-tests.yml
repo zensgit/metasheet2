@@ -400,6 +400,13 @@ jobs:
       - name: A3 backfill-preview CI wiring contract
         run: node --test scripts/ops/approval-template-groups-backfill-preview-ci-wiring.test.mjs
 
+      # Same slice, W8 execute unit — the write `executeApprovalTemplateGroupBackfill` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the changesRequired #2/#3 idempotency and
+      # cross-verification proofs.
+      - name: A3 backfill-execute CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs
+
       # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
@@ -1675,6 +1682,7 @@ jobs:
             tests/integration/approval-template-groups-serialization.db.test.ts \
             tests/integration/approval-template-groups-backfill-schema.db.test.ts \
             tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+            tests/integration/approval-template-groups-backfill-execute.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
