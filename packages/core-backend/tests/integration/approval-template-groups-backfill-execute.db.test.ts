@@ -129,6 +129,36 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     )
   }
 
+  // §11 CI fix (shared-DB fixture collision — see the sibling preview suite's own copy of this
+  // helper for the full mechanism comment): `executeApprovalTemplateGroupBackfill`'s `eligible`
+  // query has the SAME "no template-level org filter, only the link-exclusion is org-scoped" shape
+  // as preview's candidate query, so it is equally exposed to a foreign, unrelated file's leftover
+  // `approval_templates` row in the shared real-DB CI step. Copied (not imported) per this file's
+  // own convention for `tok`/`httpReq`. Like the sink query everywhere in this lane, this omits
+  // `applyTemplateVisibilityFilter` (a superset sweep is fine only because every exact assertion
+  // in this file runs under `managerActor`, where that filter is a no-op) — a future non-manager
+  // exact-set assertion would need more than this helper.
+  const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
+  const FOREIGN_SINK_SORT_ORDER = 999999
+
+  async function sinkForeignTemplates(org: string, ownTemplateIds: readonly string[]): Promise<string> {
+    const sinkGroupId = `atg_sink_${org}`
+    await query(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+       VALUES ($1, $2, $3, $4, 'sink')`,
+      [sinkGroupId, org, FOREIGN_SINK_GROUP_NAME, FOREIGN_SINK_SORT_ORDER],
+    )
+    await query(
+      `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+       SELECT $1, t.id, $2, 'sink', now()
+         FROM approval_templates t
+        WHERE NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)
+          AND NOT (t.id = ANY($3::uuid[]))`,
+      [org, sinkGroupId, ownTemplateIds],
+    )
+    return sinkGroupId
+  }
+
   const managerActor: ApprovalTemplateVisibilityActor = {
     userId: `execute-manager-${TS}`,
     departmentIds: [],
@@ -164,6 +194,13 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     const hr1 = await createTemplate(`atge-hr1-${TS}`, 'HR')
     const hr2 = await createTemplate(`atge-hr2-${TS}`, 'HR')
     const finance = await createTemplate(`atge-fin-${TS}`, 'Finance')
+    await sinkForeignTemplates(org, [hr1, hr2, finance])
+    // §11 CI fix: the sink's own group/link rows are baselined here (captured AFTER sinking, BEFORE
+    // execute) so the `tableCounts` assertion below can stay an exact-number `toEqual` on the DELTA
+    // execute itself produces, instead of silently including the sink's own bookkeeping rows in an
+    // absolute count. `batches`/`batchGroups`/`batchLinks` are never touched by the sink (it only
+    // writes to `approval_template_groups`/`_links`), so their baseline is always 0 regardless.
+    const before = await tableCounts(org)
 
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
 
@@ -176,8 +213,14 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     expect(financeGroup?.action).toBe('create')
     expect(financeGroup?.templateIds).toEqual([finance])
 
-    const counts = await tableCounts(org)
-    expect(counts).toEqual({ groups: 2, links: 3, batches: 1, batchGroups: 2, batchLinks: 3 })
+    const after = await tableCounts(org)
+    expect({
+      groups: after.groups - before.groups,
+      links: after.links - before.links,
+      batches: after.batches - before.batches,
+      batchGroups: after.batchGroups - before.batchGroups,
+      batchLinks: after.batchLinks - before.batchLinks,
+    }).toEqual({ groups: 2, links: 3, batches: 1, batchGroups: 2, batchLinks: 3 })
 
     const batchRow = await query<{ created_by: string; org_id: string }>(
       `SELECT created_by, org_id FROM approval_template_group_backfill_batches WHERE id = $1`,
@@ -197,6 +240,7 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     const existingGroupId = `atg_execute_attach_${TS}`
     await createGroup(existingGroupId, org, 'HR')
     const tpl = await createTemplate(`atge-attach-tpl-${TS}`, '  HR  ') // btrim('  HR  ') = 'HR'
+    await sinkForeignTemplates(org, [tpl])
 
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
 
@@ -206,9 +250,12 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     expect(hrGroup?.groupId).toBe(existingGroupId)
     expect(hrGroup?.templateIds).toEqual([tpl])
 
-    // Exactly the pre-existing row — execute must NOT have inserted a second 'HR' group.
+    // Exactly the pre-existing row — execute must NOT have inserted a second 'HR' group. Filtered
+    // by name (not a bare org-wide count) because the sink group above is itself a real row in this
+    // org's `approval_template_groups` table — the claim under test is specifically about 'HR', not
+    // about the org's total group count.
     const groupCount = await query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM approval_template_groups WHERE org_id = $1`,
+      `SELECT count(*)::text AS n FROM approval_template_groups WHERE org_id = $1 AND name = 'HR'`,
       [org],
     )
     expect(Number(groupCount.rows[0].n)).toBe(1)
@@ -231,6 +278,7 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     const org = trackOrg(`atge-mixed-skip-${TS}`)
     const cjkTpl = await createTemplate(`atge-cjk-${TS}`, '人事')
     const hrTpl = await createTemplate(`atge-mixed-hr-${TS}`, 'HR')
+    await sinkForeignTemplates(org, [cjkTpl, hrTpl])
 
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
 
@@ -257,20 +305,32 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // batch-header row per call even though nothing was ever backfillable.
   it('an org where every candidate is skip-eligible writes zero rows and reports batchId: null (not an empty-but-committed batch)', async () => {
     const org = trackOrg(`atge-all-skip-${TS}`)
-    await createTemplate(`atge-all-skip-cjk-${TS}`, '人事')
-    await createTemplate(`atge-all-skip-blank-${TS}`, '   ')
+    const cjkTpl = await createTemplate(`atge-all-skip-cjk-${TS}`, '人事')
+    const blankTpl = await createTemplate(`atge-all-skip-blank-${TS}`, '   ')
+    await sinkForeignTemplates(org, [cjkTpl, blankTpl])
+    // §11 CI fix: the sink itself just wrote a real group + (possibly zero, possibly many) links to
+    // `org` — an absolute `{ groups: 0, links: 0, … }` assertion would now be false regardless of
+    // `execute`'s own behaviour. Baselined the same way as the happy-path test above: the DELTA
+    // across the `execute` call is what "writes zero rows" actually means here.
+    const before = await tableCounts(org)
 
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
 
     expect(result).toEqual({ batchId: null, scope: 'org-complete', groups: [] })
-    const counts = await tableCounts(org)
-    expect(counts).toEqual({ groups: 0, links: 0, batches: 0, batchGroups: 0, batchLinks: 0 })
+    const after = await tableCounts(org)
+    expect(after).toEqual(before)
   })
 
   // §3.2 "两次顺序 execute 幂等" — the SAME code path a concurrent loser takes (see design doc
   // §3.2), asserted here as the sequential leg. Zero row delta is checked across EVERY table
   // execute can write, not just the response shape: a response-only assertion would stay green
   // even if the second call silently duplicated batch bookkeeping rows for the same links.
+  // §11 CI fix exemption: no `sinkForeignTemplates` call needed here — this test's own assertion
+  // (`countsAfterSecond` equals `countsAfterFirst`) is already a DELTA across the two `execute`
+  // calls, not an absolute count. A foreign pollutant present at `beforeAll` time gets folded into
+  // whichever bucket the FIRST call processes either way; the SECOND call then sees it already
+  // linked (same as this test's own two templates) and writes nothing new — the two snapshots stay
+  // equal to each other regardless of how many foreign rows existed going in.
   it('idempotency: a second sequential execute call on the same eligible population returns batchId: null and writes zero additional rows across every table', async () => {
     const org = trackOrg(`atge-idem-${TS}`)
     await createTemplate(`atge-idem-hr1-${TS}`, 'HR')
@@ -294,8 +354,9 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // entirely inside Postgres can see that.
   it("changesRequired #2: approval_template_group_backfill_batch_links.linked_at is byte-identical (raw SQL '=', not JS) to the links row it was copied from", async () => {
     const org = trackOrg(`atge-token-${TS}`)
-    await createTemplate(`atge-token-hr1-${TS}`, 'HR')
-    await createTemplate(`atge-token-hr2-${TS}`, 'HR')
+    const tokHr1 = await createTemplate(`atge-token-hr1-${TS}`, 'HR')
+    const tokHr2 = await createTemplate(`atge-token-hr2-${TS}`, 'HR')
+    await sinkForeignTemplates(org, [tokHr1, tokHr2])
 
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(result.batchId).not.toBeNull()
@@ -322,6 +383,10 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // `STORABLE_GROUP_NAME_PATTERN`'s doc-comment (ApprovalTemplateGroupService.ts) for why that axis
   // is a distinct, unverified risk (`finding_prod_pg15_never_tested`), not covered by this test
   // being green.
+  // §11 CI fix exemption: no `sinkForeignTemplates` call needed here — every assertion below looks
+  // up a SPECIFIC fixture id (`idByKey.get(f.key)`), never an array length or a full-population
+  // count. A foreign pollutant folded into this org's `execute` call changes what ELSE gets linked,
+  // but never changes whether these five specific ids individually ended up linked or not.
   it('SQL/JS cross-verification: classifyBackfillCategory.action==="skip" agrees, per real candidate row, with whether execute left that row unlinked', async () => {
     const org = trackOrg(`atge-crossverify-${TS}`)
     const fixtures: Array<{ key: string; category: string | null }> = [
