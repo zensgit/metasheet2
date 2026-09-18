@@ -621,6 +621,22 @@ export interface ApprovalTemplateListItemDTO {
   updatedAt: string
 }
 
+/**
+ * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 3 (A-4) FE read
+ * surface. Mirrors the backend's `ApprovalTemplateGroupRow` (`ApprovalTemplateGroupService.ts`)
+ * byte-for-byte — same camelCase field set, no re-derivation on this side.
+ */
+export interface ApprovalTemplateGroupDTO {
+  id: string
+  orgId: string
+  name: string
+  sortOrder: number | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+}
+
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
