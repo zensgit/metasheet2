@@ -15,18 +15,14 @@ import { query } from '../../src/db/pg'
  * (`…-serialization.db.test.ts`, E/K) nor the write-path fixtures of the normal-pool file
  * (`…-lifecycle.db.test.ts`, A/A′/A″/A‴/B/B′/B″/F/G/H/I′) — a NORMAL pool, same as the latter.
  *
- * DISCLOSED RESIDUAL (carried forward, not newly introduced — see phase-1 verification MD §9):
- * no `*-ci-wiring.test.mjs` closed-world guard exists yet for this feature's `.db.test.ts` family
- * (there are 45 such guards for OTHER lanes/features, one hardcoded `FILES` array each; phase 1
- * deliberately did not add one for its own two files, because doing so requires an ADDITIONAL
- * `plugin-tests.yml` step — `- name: ... / run: node --test scripts/ops/<file>` — the guards are
- * not auto-discovered, verified `grep -n "ci-wiring" .github/workflows/*.yml` = 45 guard files ↔
- * 45 independent `run:` invocations, no glob). This file's two-point wiring (the `vitest.config.ts`
- * exclude entry below and the `plugin-tests.yml` `approval-real-db-integration` step's explicit
- * file list) is therefore, like its two siblings, unguarded by a THIRD mechanism that would catch
- * a future accidental removal of either point — same gap, now covering a third file, not a new
- * one. Adding that guard (plus its own new workflow step) is out of this slice's scope for the
- * same reason phase 1 gave.
+ * RESIDUAL CLOSED (2026-09-18, same day as disclosure): the missing `*-ci-wiring.test.mjs`
+ * closed-world guard for this feature's `.db.test.ts` family now exists —
+ * `scripts/ops/approval-template-groups-ci-wiring.test.mjs`, modeled whole on the newer,
+ * step-id-anchored `t2-source-freeze-ci-wiring.test.mjs` contract (not the older regex-style
+ * `approval-data-closure-ci-wiring.test.mjs`, which cannot detect the "step exists but never runs"
+ * bypass class) — covering all four files of this feature (both phase-1 originals and both
+ * phase-3 additions), wired into `plugin-tests.yml`'s required no-DB `test` job as its own
+ * `node --test` step, with the `pluginTestsWorkflow` s6a pin recomputed in the same commit.
  *
  * Every mutation probe below is a real source-code edit — backed up with `cp`, applied, the ONE
  * affected test re-run to observe red, restored, and `cmp`-verified byte-identical (recorded in
