@@ -342,6 +342,47 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     }
   })
 
+  // §13 changesRequired #12 / design-gate A3-phase2 extra P2 ("execute 规模上界"), real-DB half —
+  // the `.ts` guard itself (`eligible.length > APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES`,
+  // `routes/approvals.ts:626-632`) landed in the W8 commit but §19.1/§19.4 record its real-DB
+  // coverage as still open ("超 500 触发 400、零行写入 仍未覆盖"). Two independent template rows
+  // do not exist per candidate here — `approval_templates` carries no `org_id` column at all (see
+  // this file's own `afterEach` comment), so "eligible" is a GLOBAL count across the whole table,
+  // not scoped to this test's `org`. A bulk `generate_series` INSERT (one round trip, not 501
+  // separate `createTemplate()` calls) creates 550 fresh rows — comfortably over the 500 cap even
+  // if a prior test in this run left stray eligible rows behind, and NOT tracked in the shared
+  // `templateIds` array (which the file's `afterEach` drains one-row-at-a-time — 550 individual
+  // DELETEs there would slow every other test in this file) — this test deletes its own batch by
+  // key prefix in a `finally`, so a thrown assertion still cleans up and does not poison later
+  // tests' global eligible counts.
+  it('§13 changesRequired #12: exceeding the 500-candidate cap throws a typed 400 BEFORE any write commits — zero rows across every table this call could have written', async () => {
+    const org = trackOrg(`atge-cap-${TS}`)
+    const keyPrefix = `atge-cap-tpl-${TS}-`
+    const overCapCount = 550 // > the 500 cap (`routes/approvals.ts` const), independent of any stray eligible rows
+    await query(
+      `INSERT INTO approval_templates (key, name, status, category)
+       SELECT $1 || g, $1 || g, 'draft', 'CapProbe' FROM generate_series(1, $2) AS g`,
+      [keyPrefix, overCapCount],
+    )
+    try {
+      await expect(executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE',
+      })
+
+      // Zero rows written for THIS org across every table the happy path would have touched —
+      // the guard fires before the batch-header INSERT, so this is not merely "the transaction
+      // rolled back" (which every other error path in this file also exercises) but specifically
+      // "nothing was ever written for the org that tripped the cap".
+      const counts = await tableCounts(org)
+      expect(counts).toEqual({ groups: 0, links: 0, batches: 0, batchGroups: 0, batchLinks: 0 })
+    } finally {
+      // Not routed through `templateIds`/the shared `afterEach` — one bulk DELETE, so a failed
+      // assertion above still removes these 550 rows before the next test's `eligible` count runs.
+      await query(`DELETE FROM approval_templates WHERE key LIKE $1`, [`${keyPrefix}%`])
+    }
+  })
+
   // Route wiring — real HTTP, real guard, real MetaSheetServer (a path string in source proves
   // nothing about what actually answers it at runtime). Unlike preview, execute's guard is NOT a
   // disclosed I7 deviation (it is a write endpoint, so `approvalTemplateAdminGuard` is I7's own

@@ -781,7 +781,7 @@ s6a `pluginTestsWorkflow` 钉重算(`.github/workflows/plugin-tests.yml` 两处�
 | 额外 P1 `linked_at` 令牌全程不经 JS | 写入侧服务端相关子查询,回滚侧集合式 join,两端都不读原语的 JS 映射返回值 | `routes/approvals.ts:704-710`(execute 写入侧,`SELECT … FROM approval_template_group_links l WHERE …` 相关子查询,不是原语返回值)+`ApprovalTemplateGroupService.ts:746-753`(rollback 侧 `UPDATE … FROM … WHERE l.linked_at = b.linked_at`) | **已落地 @`f96411589`/`d2e96e833`**(写入侧用相关子查询而非门审建议原文的数据修改 CTE,语义等价——都不经过 JS `Date`往返,§17 已有 mutation 证据,本步未重新验证 mutation,只核对了语句形状) |
 | 额外 P1 批次列表端点 `GET …/backfill/batches` + 索引 | 索引已在 §2.1 DDL;端点此前**不存在**(`grep -n "backfill/batches" src/routes/approvals.ts` 在本步开始时只命中 `:batchId/rollback` 一行) | 本步新增,见 §19.2 | **本步(续做步骤 18)落地,此前是 §13.1 表的一处错误"已落地"记录,见 §19.3 的勘误说明** |
 | 额外 P2 COMMIT 阶段 23505 映射在 transaction 之外 + §7 补 `GROUP_SORT_CONFLICT` | `mapGroupConstraintError` 包裹整个 `await transaction(...)`,不逐语句 catch | `routes/approvals.ts:724`(文件头注释明写"wraps this ENTIRE `await transaction(...)` call, not any individual statement inside it")+`:739` | **已落地 @`f96411589`** |
-| 额外 P2 execute 规模上界 | `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500` + 400 抛错 | `routes/approvals.ts:554,626-631` | **pseudocode+`.ts` 已落地 @`f96411589`;真库测试(超 500 触发 400、零行写入)仍未覆盖,原样结转,见 remaining** |
+| 额外 P2 execute 规模上界 | `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500` + 400 抛错 | `routes/approvals.ts:554,626-631` | **pseudocode+`.ts` 已落地 @`f96411589`;真库测试见 §20(续做步骤 19)——本表这一格此前"仍未覆盖"的记录已过期,不再回改本行文字,按 §19.3 的勘误惯例只在此追加指针** |
 | 额外 P1 CJK category 炸整批 | `classifyBackfillCategory` 对不可入库 category 返回 `skip`,execute 的 `eligible` 谓词层面排除,不是循环 `continue`/抛错 | `ApprovalTemplateGroupService.ts:613,634-636`(`STORABLE_GROUP_NAME_PATTERN` / `CATEGORY_NOT_STORABLE_AS_GROUP_NAME`) | **已落地 @`d15dbe362`(preview)/`f96411589`(execute 复用同一函数)** |
 
 **对账结论**:16 条 changesRequired 里,15 条在本步核对前就已经在代码里落地(散布在续做步骤 5/8/9/11/12/16/17,只是 §13.1 表的几处文字没跟上——已在 §13.1 现场勘误,见上方 changesRequired #1/#9 的表格编辑),唯一**代码层面真实未落地**的是 changesRequired #5 的 `GET …/backfill/batches` 路由本体(索引早就有了)。changesRequired #16(A-1 回流)、#13(组合调用判别力测试三件套)、跨 lane 项(P1-3/#5852 回流)不在本步权限/范围内,维持 remaining,见下方。
@@ -828,10 +828,66 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 ### 19.4 remaining(原样结转,按本步核对结果更新)
 
 - changesRequired #13 的三条组合调用判别力测试——未变化,范围同 §18 记录(并发 execute / execute-vs-rollback / rollback-vs 手工操作三种两两组合共用 `atg:${orgId}` advisory lock)。
-- 规模上界(500)真库测试(execute 侧)——未变化。
+- ~~规模上界(500)真库测试(execute 侧)~~——**本步(续做步骤 19)已落地,见 §20**。
 - A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留)——未变化。
 - 验证 MD(§13.7,仍不存在)——W7/W8/W9/list 四个单元均已落地,紧迫性进一步提高,留给下一步或 owner。
 - link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化,仍待 owner/下一轮门审。
 - changesRequired #16 后半(A-1 `routes/approvals.ts:396-399` 过强注释回流 #5852)、P1-3 对 #5852 的溢出影响——跨 lane,不在本分支权限内,维持 §13.5 记录。
 - **新披露 1(继承自 A-1/W7/W8/W9,本步实测确认,不在本步修复)**:`EXPECT_DB` 哨兵在 `describeIfDatabase`(`process.env.DATABASE_URL ? describe : describe.skip`)之外时是空转的——`EXPECT_DB=1` 且 `DATABASE_URL` 缺失会把哨兵自己也跳过(实测:`unset DATABASE_URL; EXPECT_DB=1 npx vitest … approval-template-groups-backfill-batches-list.db.test.ts` → `8 skipped`,零失败),而这正是哨兵存在的目的要抓的那一种配置错误。四个姊妹 backfill 套件(schema/preview/execute/rollback)与本文件共享同一形状——本文件**故意**没有单方面改成不同结构(会造出第五种不一致的哨兵写法),按现状记为继承残留,和 P3-2 的 CI 闭世界残留同一批披露,交后续统一修法。
 - **新披露 2(P2-5 的新增可达面)**:一个非 manager 的管理员执行 backfill 时,批次只记录了他"看得见"的那部分模板(`scope: 'visible-to-you'`),但批次头没有任何列记住这一点。本步新增的列表端点是第一个让**另一个**操作者看到该批次、却无法判断它是否只覆盖了部分模板的界面——修法需要给批次头加列(锁 §2 之外但仍是新增 DDL,超出本步范围),记入 remaining,不在本步动 DDL。
+
+## 20. 续做步骤 19:额外 P2 execute 规模上界的真库测试(2026-09-18)
+
+任务书要求先对账(§19)再逐条落地未落地的项;§19.1/§19.4 核对后剩下的、且不跨 lane / 不需要新 CI 接线（成本最低）的一项是"额外 P2 execute 规模上界"的真库半——`.ts` 分支本身早在 `f96411589`（续做步骤 17）就已落地，缺的只是证明它在真实数据库上会触发。本步只做这一项，不动 changesRequired #13（需要构造并发，见 remaining）。
+
+### 20.1 新增测试
+
+`packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts` 新增一例（原有 11 例不变，文件现有 12 例），插在 W8 execute 的最后一个业务用例（SQL/JS 交叉验证）与"route wiring"描述块之间：
+
+- **人口构造**：一条 `INSERT … SELECT … FROM generate_series(1, 550)` 批量插入 550 行（不是 550 次 `createTemplate()`/API 调用），`category='CapProbe'`，`key` 用 `atge-cap-tpl-${TS}-` 前缀 + 序号,保证与文件内其余用例的 key 不冲突。550 而非 501 的余量理由:`approval_templates` 全表无 `org_id` 列（本文件 `afterEach` 注释已指出),"eligible" 是跨全表的计数,不按本测试的 `org` 限定——550 的余量确保即使此前某条用例意外遗留了少量未清理的 eligible 行,本测试仍能稳定触发上界,不依赖"这次真库状态恰好是零残留"这个假设。
+- **不进共享 `templateIds`/`afterEach`**:该数组每条都会被文件级 `afterEach` 逐行 `DELETE`,550 行会拖慢文件里其余全部用例;改为 `try/finally` 内一条 `DELETE … WHERE key LIKE $1` 前缀匹配,断言失败也照样清理(mutation 探针验证见下)。
+- **断言两个方向**:①`executeApprovalTemplateGroupBackfill(...)` 必须 reject 且 `toMatchObject({statusCode: 400, code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE'})`——先读源码确认了这两个字面量(`routes/approvals.ts:626-631`)才写断言,不是照错误信息猜的;②`tableCounts(org)` 五张表(`groups/links/batches/batchGroups/batchLinks`)在该 org 上全部为 0——证明"零行写入"是"抛错发生在任何 INSERT 之前",不是"事务回滚抹掉了已写的行"这个弱得多的命题(这条 org 从未被其他用例碰过,不需要"调用前后差值"这种更复杂的判据)。
+
+### 20.2 命令与结果
+
+```
+DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-template-groups-backfill-execute.db.test.ts --reporter=verbose
+```
+→ `Test Files 1 passed (1)` / `Tests 12 passed (12)`（含新增的规模上界用例）。
+
+全套件回归（A-1 两个既有文件 + 本切片全部五个 W7/W8/W9/schema/list 文件）：
+```
+DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-template-groups-lifecycle.db.test.ts \
+  tests/integration/approval-template-groups-serialization.db.test.ts \
+  tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+  tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+  tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+  tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+  tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+  --reporter=dot
+```
+→ `Test Files 7 passed (7)` / `Tests 78 passed (78)`(77 + 本步新增 1)。
+
+`npx tsc --noEmit`(`packages/core-backend`)：零错误。
+
+### 20.3 mutation 正控(cp/改/跑/还原/cmp)
+
+`cp src/routes/approvals.ts /tmp/approvals.ts.bak` → 把守卫条件 `eligible.length > APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` 改成 `eligible.length > APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES * 100`（550 行不再触发上界）→ 单独重跑本文件：**恰好 1 条**变红（本步新增的规模上界用例,`AssertionError` 打印出完整的 550 条 `groups[0].templateIds` 而不是抛错——判别力证据本身），其余 11 条不受影响 → `cp /tmp/approvals.ts.bak src/routes/approvals.ts` → `cmp src/routes/approvals.ts /tmp/approvals.ts.bak` → `RESTORE BYTE-IDENTICAL`。还原后重跑整份文件确认 12/12 恢复绿。
+
+### 20.4 本步不新增/不触碰
+
+`.github/workflows/plugin-tests.yml`、`vitest.config.ts`、`s6a` 钉——本步只在既有的、已双点接线的 `approval-template-groups-backfill-execute.db.test.ts` 内加一个 `it()`,该文件本身的两点接线（`vitest.config.ts` exclude + `plugin-tests.yml` 白名单）在 W8 落地时（`f96411589`）就已完成，未发生新增文件/新增 CI 步骤，故无需重算 s6a、无需新 `*-ci-wiring.test.mjs`、无需碰 `ci-realdb-step-contract.mjs`。apps/web 未改动。changesRequired #13 的三条组合调用判别力测试、A-1 两个既有真库文件的 `*-ci-wiring.test.mjs` 补齐、验证 MD（§13.7）——均未因本步而变化,见下方 remaining。
+
+### 20.5 remaining(在 §19.4 基础上更新)
+
+- changesRequired #13 的三条组合调用判别力测试——未变化。
+- ~~规模上界(500)真库测试(execute 侧)~~——**本步已落地**,不再是 remaining 项。
+- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留)——未变化。
+- 验证 MD(§13.7,仍不存在)——未变化,紧迫性同 §19.4。
+- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化。
+- changesRequired #16 后半(A-1 回流 #5852)、P1-3 溢出影响——跨 lane,未变化。
+- §19.4 的"新披露 1"(`EXPECT_DB` 哨兵在 `DATABASE_URL` 缺失时空转)、"新披露 2"(P2-5 批次头缺 scope 列)——均未变化,原样结转。
