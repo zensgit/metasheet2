@@ -317,6 +317,20 @@ describeIfDatabase('Approval template groups — §6 phase 3 sections (lock v2.1
     expect(repeated.status).toBe(400)
     expect((await repeated.json()).error.code).toBe('APPROVAL_TEMPLATE_SECTION_TOKEN_INVALID')
 
+    // A repeated `?category=` key ALSO parses to an ARRAY (Express query-string parsing is
+    // symmetric across keys), so the category-conflict check must recognize it the same way the
+    // section-token check recognizes a repeated `section=` above — `isOrgIdValuePresent`
+    // (routes/approvals.ts) is the shared helper, also used for the `orgId` body/query rejection,
+    // and this pins that its array branch actually reaches this call site rather than being
+    // reachable only from `resolveApprovalTemplateGroupOrgId`'s own callers.
+    const arrayCategory = await httpReq(
+      base,
+      '/api/approval-templates?section=ungrouped&category=a&category=b',
+      admin,
+    )
+    expect(arrayCategory.status).toBe(400)
+    expect((await arrayCategory.json()).error.code).toBe('APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT')
+
     // Positive control: a well-formed, non-conflicting request succeeds.
     const ok = await httpReq(base, '/api/approval-templates?section=ungrouped', admin)
     expect(ok.status).toBe(200)
