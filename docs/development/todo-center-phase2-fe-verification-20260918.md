@@ -885,15 +885,17 @@ $ grep -n "buildAuthenticatedUserRoom" packages/core-backend/src/services/Collab
 房间键只含 `userId`,不含 tenant/org。`todo-realtime.ts:73` 与 `approval-realtime.ts:117` 都直接调用
 这同一个函数——两条推送共用同一套按用户分房的规则,没有第二套按 org 分房的规则存在。
 
-**第二层(比房间键更深):这条推送读的那份共享谓词本身有没有 tenant/org 维度**——房间只决定「谁能收
-到」,真正决定「换 org 后一条迟到推送是否描述了『错误的』数据」的是查询本身是否会因 org 不同而产出不
-同的数:
+**第二层(比房间键更深,也是本条结论真正的落脚点):这条推送读的那份共享谓词本身有没有 tenant/org
+维度**——房间只决定「谁能收到」,真正决定「换 org 后一条迟到推送是否描述了『错误的』数据」的是查询
+本身是否会因 org 不同而产出不同的数:
 ```
 $ grep -n "tenant\|org" packages/core-backend/src/services/approval-pending-query.ts
 (无输出)
+$ wc -l packages/core-backend/src/services/approval-pending-query.ts   # 正控:证明上面那条 grep 真的
+256 packages/core-backend/src/services/approval-pending-query.ts       # 读到了文件,不是读空文件的假阴性
 ```
 `approval-pending-query.ts`(`GET /api/todo/count`、`todo:counts-updated`、`GET
-/api/approvals/pending-count`、`approval:counts-updated` 共用的唯一一份 SQL)里,**零处**引用
+/api/approvals/pending-count`、`approval:counts-updated` 共用的唯一一份 SQL,256 行)里,**零处**引用
 tenant/org。往上一层,喂给这份查询的 viewer 类型本身也不带 tenant 字段:
 ```
 $ sed -n '30,37p' packages/core-backend/src/routes/todo.ts
@@ -923,9 +925,8 @@ $ sed -n '26,30p' packages/core-backend/src/services/approval-pending-source.ts
 `{ actorId, roles, permissions }` 三个字段——没有 tenant 字段可供任何一层去按 org 过滤,即使想加也
 无处挂。
 
-**第三层:换 org 本身会不会让 `roles`/`permissions` 变化**(即使查询不按 tenant 过滤,如果换 org 后
-token 里的 `roles`/`permissions` 变了,数字理论上仍可能因此改变,推送就可能读到旧 org 下算出的旧
-`roles`/`permissions` 对应的旧数字):
+**第三层(佐证,非结论必需——见下面的边界说明):换 org 这一个端点本身会不会让 `roles`/`permissions`
+变化**:
 ```
 $ sed -n '1219,1240p' packages/core-backend/src/routes/auth.ts
 ```
@@ -934,17 +935,51 @@ $ sed -n '1219,1240p' packages/core-backend/src/routes/auth.ts
 const tokenUser = { ...user, tenantId: chosen }
 const nextToken = authService.createToken(tokenUser, { sid: sessionId })
 ```
-`user`(连同它的 `roles`/`permissions`)整体展开进新 `tokenUser`,只有 `tenantId` 字段被覆写——换句
-话说,**换 org 这个动作本身不会重新计算这个用户的 `roles`/`permissions`**,新旧两个 token 对同一个
-`actorId` 喂给上面那份查询的三元组(`actorId`/`roles`/`permissions`)逐字段相同。
+`user`(连同它当时的 `roles`/`permissions`)整体展开进新 `tokenUser`,只有 `tenantId` 字段被覆写——
+**这一条端点本身**不重新计算这个用户的 `roles`/`permissions`。但这只证明「切这一刀不改」,不能单独
+证明「roles/permissions 本来就不分 org」——如果 login 时的角色解析是按 tenant 查出来的,同一个人直
+接登录 org B 拿到的角色集合仍可能与从 org A 切过去不同,第三层单独不能排除这种情况。
 
-**结论(三层证据合起来读)**:对同一个已登录用户,这份查询在换 org 前后产出**同一个数字**——不是
-「碰巧现在两个 org 恰好相等」,而是这条数据管线里**没有任何一层**(房间键、SQL、viewer 类型、
-token 铸造)引用 org/tenant,所以从数据源头开始就没有「按 org 变化的数字」这回事。因此:一条在换 org
-之后落在仍然打开着的旧 socket 上的迟到推送,并**不是**「描述了另一个 org 的数据」——它描述的是与换
-org 后立刻发起的一次 REST 重读会算出的**同一个**org-invariant 数字。门审 P3-7 问的「房间/负载是否已
-按 org 隔离」这个问题本身预设了「数字会随 org 变化」,而机核结果是这个预设不成立,所以问题在这份实
-现里没有第二种答案要去区分——房间不按 org 分,是因为数字本来就不按 org 分。
+**因此补一条更底层、覆盖每一次请求(不只是切换的那一刻)的证据**——`req.user.roles`/`permissions`
+到底是怎么算出来的,追到底:
+```
+$ sed -n '267p' packages/core-backend/src/auth/AuthService.ts
+      const user = await this.getUserById(userId)
+$ sed -n '570,577p' packages/core-backend/src/auth/AuthService.ts
+        const result = await pool.query(
+          `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1`,
+          [userId]
+        )
+
+        if (result.rows.length > 0) {
+          const row = result.rows[0] as UserRow
+          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
+```
+生产路径(`verifyToken` 每次请求都走)是 `getUserById(userId)` → 一条 `WHERE id = $1` 的全局
+`users` 表查询(不带 tenant 条件)→ 结果喂给 `resolveRbacProfile(row.id, row.role, row.permissions)`:
+```
+$ grep -n "isRbacAdmin(userId\|listUserPermissions(userId" packages/core-backend/src/auth/AuthService.ts
+741:      const admin = await isRbacAdmin(userId)
+748:      permissions = await listUserPermissions(userId)
+$ grep -n "^export async function isAdmin\|^export async function listUserPermissions" packages/core-backend/src/rbac/service.ts
+19:export async function isAdmin(userId: string, runQuery: typeof query = query): Promise<boolean> {
+74:export async function listUserPermissions(userId: string): Promise<string[]> {
+```
+`resolveRbacProfile` 内部调的 `isRbacAdmin`/`listUserPermissions`(`rbac/service.ts` 里的
+`isAdmin`/`listUserPermissions`)签名都只接受 `userId`(可选一个 `runQuery` 覆盖参数,与 tenant 无
+关)——不是"这次切换恰好没变",而是**这条 RBAC 解析链路从函数签名开始就没有 tenant 参数可传**,对
+每一次认证请求(不论 token 里的 `tenantId` 是什么)都成立,不依赖于"切换"这个具体动作。
+
+**结论,基于第二层(充分)+ 上面这条 RBAC 解析证据(独立地把第三层的"仅证明这一个端点"补强成"对每
+次请求都成立"),第三层原句本身不单独作为结论依据**:对同一个已登录用户,这份查询在换 org 前后产出
+**同一个数字**——不是「碰巧现在两个 org 恰好相等」,而是(a)第二层已经证明查询本身、以及喂给它的
+viewer 类型,都不消费 org/tenant,单凭这一条就足以让结论成立而不依赖角色是否变化;(b)角色/权限的
+解析链路(`getUserById` → `resolveRbacProfile` → `isRbacAdmin`/`listUserPermissions`)本身也没有
+tenant 参数可传,进一步确认不存在「按 org 变化的角色集合」这个中间变量。因此:一条在换 org 之后落在
+仍然打开着的旧 socket 上的迟到推送,并**不是**「描述了另一个 org 的数据」——它描述的是与换 org 后立
+刻发起的一次 REST 重读会算出的**同一个**org-invariant 数字。门审 P3-7 问的「房间/负载是否已按 org
+隔离」这个问题本身预设了「数字会随 org 变化」,而机核结果是这个预设不成立,所以问题在这份实现里没
+有第二种答案要去区分——房间不按 org 分,是因为数字本来就不按 org 分。
 
 **如实框定这条结论的边界,不过度声称**:
 - **不是新引入的行为,也不是本切片能单方面改的**:`approval:counts-updated`(`approval-realtime.ts`)
@@ -967,13 +1002,25 @@ org 后立刻发起的一次 REST 重读会算出的**同一个**org-invariant �
 已确立的惯例(设计 MD 是撰写当时的快照,后续修复轮只更新本验证 MD 和被点名的源码 docblock,不回填设
 计 MD)。
 
+**本轮内的一次自我复核,收窄第三层的范围**:第一版把第三层写成「换 org 这个动作本身不会重新计算
+`roles`/`permissions`,所以……对每个 org 都相同」——这一步跳跃本身不成立:`session-org` 这一个端点
+不重算,只证明「切这一刀不改」,不能单独排除「login 时角色本来就按 tenant 解析」的可能性(若如此,
+直接登录另一个 org 拿到的角色集合可以与从另一个 org 切过去不同,第三层原句就覆盖不到这种情况)。补
+一条更底层的证据后收窄了表述:结论现在基于第二层(查询本身零 tenant 引用,单凭这一条已经充分,不依
+赖角色是否变化)+ 补充的 RBAC 解析链路证据(`isAdmin`/`listUserPermissions` 签名只接受 `userId`,
+对每一次认证请求都成立,不只是切换那一刻),第三层原句降级为「佐证」而非结论单独的依据。同一遍复核
+也发现「没有任何一层……token 铸造引用 org/tenant」这句括注不成立(`session-org` 明明把 `tenantId`
+写进了新 token,`jwt-middleware.ts:101-108` 也确实读它)——已从结论段落里删除该括注,改为
+「(a)/(b)」两点式的、逐条可核对的表述,不再用一句笼统的「没有任何一层」去覆盖一个自己都没验证到底
+的清单。
+
 ### 13.2 测试与类型检查(本条是纯 docblock 改动,零行为变化)
 
 零可执行行为改变——`ApprovalTodoBadge.vue` 只有注释文本变化,`<script setup>` 的可执行部分、
 `<template>`、`<style>` 逐字未动:
 ```
-$ git diff apps/web/src/approvals/components/ApprovalTodoBadge.vue | grep -E "^[+-]" | grep -vE "^[+-]//|^\+\+\+|^---"
-(无输出 —— 每一行非 diff-header 的改动都以 // 开头,零非注释行改动)
+$ git diff 2081e0fa6 -- apps/web/src/approvals/components/ApprovalTodoBadge.vue | grep -E "^[+-]" | grep -vE "^[+-]//|^\+\+\+|^---"
+(无输出 —— 对本轮起点 2081e0fa6 比较,每一行非 diff-header 的改动都以 // 开头,零非注释行改动)
 ```
 因此本条同样不发明一个对注释文本零判别力的假 mutation 探针(同 §12.1 的既定判断)。重跑受影响的前端
 spec(证明改动没有破坏解析或引入语法错误)与 typecheck:
@@ -989,12 +1036,14 @@ EXIT=0   # vue-tsc -b + 两个 verification tsconfig,均无输出即通过
 ### 13.3 越界检查
 
 ```
-$ git diff --stat -- apps/web/src/approvals/components/ApprovalTodoBadge.vue
- .../src/approvals/components/ApprovalTodoBadge.vue | 34 +++++++++++++++++++---
- 1 file changed, 30 insertions(+), 4 deletions(-)
+$ git diff 2081e0fa6 --stat -- apps/web/src/approvals/components/ApprovalTodoBadge.vue   # 对本轮起点
+ .../src/approvals/components/ApprovalTodoBadge.vue | 44 ++++++++++++++++++++--
+ 1 file changed, 40 insertions(+), 4 deletions(-)
 ```
-(本 MD 自身的追加不计入该条 diffstat——对自己取 diffstat 会引用一个还没定型的数字,同 `4e97acd92`
-已修过的自指陷阱,§12.3 已用过同一处理方式,这里延续。)
+(与本轮起点 `2081e0fa6` 比较,不是与上一次提交比较——本条 docblock 在本轮内被 advisor 复核后又收窄
+过一次表述,单看"相对上一次提交"的 diff 会漏掉第一次改动的那部分,只对同一个人误导性地更小。本 MD
+自身的追加不计入该条 diffstat——对自己取 diffstat 会引用一个还没定型的数字,同 `4e97acd92` 已修过的
+自指陷阱,§12.3 已用过同一处理方式,这里延续。)
 只碰了门审 P3-7 点名的那一份 docblock 与本验证 MD;零 `packages/core-backend` 改动,零迁移,零锁文,
 零 workflow 文件改动。
 
