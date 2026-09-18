@@ -1424,3 +1424,5 @@ f7b929700 fix(approval): retract falsified wildcard-permission guard claim (gate
 ```
 
 **本次修复未做的事(如实列出)**:未合并、未 undraft、未开/动 PR、未动 `origin/main`、未应用任何迁移到共享库、未改锁文、DDL 文件零字节改动(`atg_name_nonblank` 放宽仍是 owner 勘误项,原样待裁)。`ApprovalTemplateGroupService.ts` 的 §3.4/§3.5、验证 MD §4.2/§22.2(历史链)里同类的陈旧行号未被本轮触碰——它们不在 `impl-gate-A-slice1-round4-20260918.md` §5 P3-1 表格枚举的锚点范围内,如实标注为「既有条件,不算本轮账上」,留给后续轮次或 owner 判断是否值得同样改写。
+
+**自指记录(写下本节之后必然出现的第 5 个提交)**:上面的 commit 列表止于 `b32a0b6fc`——写这份 §23.12 本身、以及修正 §14 #4 行里一处未转义 `|` 破坏表格的问题(现场跑一遍本文档与设计 MD 的表格字段计数自检脚本发现,修好后两份文档零问题),是**第 5 个**提交,晚于上面列表锁定的那一刻。这正是 NIT 项本身想避免的那类「文档自己不带 provenance」——所以这里补一句而不是悄悄不提:第 5 个提交只改这一份文档(表格转义 + 本节),不涉及任何生产代码/测试代码,`git log --oneline 03ee9f4bb..HEAD` 现场跑出的完整列表以推送前最后一次 `git log` 为准。
