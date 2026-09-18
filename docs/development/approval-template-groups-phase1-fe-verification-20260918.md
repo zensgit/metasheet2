@@ -640,7 +640,7 @@ e0defbe26 ci(attendance): publish a stable web guard check (#4585)
   - **并集语义**(遍历所有匹配 `vitest run` 的逻辑行,把每一行的 token 都并起来,不判断该行是否会被前面的无条件 `exec` 短路):见 (c)。
 (c) **并集语义的读取者现场核实有两处,不是一处**:`packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts` 的 `extractVitestTokensFromBashScript`(`:119-145`)与 `packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts` 的 `requiredLaneTokens`(`:61-79`,现场读了实现——`for (const line of joined.split('\n'))` 遍历每一条含 `vitest run` 的逻辑行,逐行把 token 追加进同一个数组,同样不区分某一行是否可达)。这一类的失真方向更隐蔽:死副本上的 token 会被两处都判定"已进入 required lane",看起来像覆盖到了,实际上从未被执行到。修复前,这两处守卫对这三份 spec 的 covered 判定本身就是错的。
 
-**机械前置(供未来 rebase,供下一轮/下一次改动这条 exec 行时核)**:任何一次改动或合并涉及 `apps/web/scripts/run-required-web-tests.sh` 的这条 `exec npx vitest run` 巨行之后,必须核两件事:①`grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh` 恒等于 1;②如果 rebase/合并呈现过该行的两个版本,合并后单行的 token 集合必须等于两个版本 token 集合的**并集**(不丢、不重复)。机械脚本见本轮新增的 `scripts/dev/atg-exec-line-post-rebase-check.sh`(只读,不改脚本本体;退出码非零时打印重复行数与——若提供两个待比较的 ref——双向 token 差集,供人工核对)。**实现口径更正(2026-09-19,第三次复核修正)**:脚本把"等于并集"拆成两个独立检查而不是一次相等性比较——Check 2 只看当前这一行内部有没有重复 token(与任何 ref 无关),Check 3 只看当前 token 集合是否为 `<ref-a>`/`<ref-b>` 并集的**超集**(不丢);二者合起来在"当前行本身无重复"这个前提下等价于"等于并集",但不等价于对任意输入都成立的严格集合相等——如果未来在 `<ref-a>`/`<ref-b>` 之外又混入了一个全新的、任一 ref 都没有的 token,Check 3 仍会 PASS(超集允许多出的元素),需要人工核对该新 token 是否是这次改动本身有意引入的。
+**机械前置(供未来 rebase,供下一轮/下一次改动这条 exec 行时核)**:任何一次改动或合并涉及 `apps/web/scripts/run-required-web-tests.sh` 的这条 `exec npx vitest run` 巨行之后,必须核两件事:①`grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh` 恒等于 1;②如果 rebase/合并呈现过该行的两个版本,合并后单行的 token 集合必须等于两个版本 token 集合的**并集**(不丢、不重复)。机械脚本见本轮新增的 `scripts/dev/atg-exec-line-post-rebase-check.sh`(只读,不改脚本本体;退出码非零时打印重复行数与——若提供两个待比较的 ref——双向 token 差集,供人工核对)。**实现口径更正(2026-09-19,第三次复核修正)**:脚本把"等于并集"拆成两个独立检查而不是一次相等性比较——Check 2 只看当前这一行内部有没有重复 token(与任何 ref 无关),Check 3 只看当前 token 集合是否为 `<ref-a>`/`<ref-b>` 并集的**超集**(不丢);二者合起来买到的是"不丢(超集)+ 当前行内不重复"这个更弱的性质,不等价于"等于并集"这个更强的相等性质——如果未来在 `<ref-a>`/`<ref-b>` 之外又混入了一个全新的、任一 ref 都没有的 token,Check 3 仍会 PASS(超集允许多出的元素),需要人工核对该新 token 是否是这次改动本身有意引入的。
 
 **修复本身(scripts/dev,本轮允许改;不回退)**:合并两行为一行——死副本独有的三个新 token(`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel`,丢弃死副本里重复的 `categoryCandidateInput`,活行里已有)追加到活行的 `--reporter=dot` 之前;删除死副本整行;三段说明注释一并移到活行之前并修正措辞(P3-4)。
 
@@ -758,4 +758,12 @@ M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 M	scripts/dev/atg-exec-line-post-rebase-check.sh
 ```
 
-三个文件,零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"生产脚本的注释块"(`run-required-web-tests.sh`,exec 行本身未改,见 P2-1 disposition 行的 md5 核对)、"验证 MD"(本文档)、"scripts/dev 只读检查脚本"三类,与本轮硬规矩("只许 MD/注释/scripts/dev")一致。
+三个文件,零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"生产脚本的注释块"(`run-required-web-tests.sh`,exec 行本身未改,见 P2-1 disposition 行的 md5 核对)、"验证 MD"(本文档)、"scripts/dev 只读检查脚本"三类,与本轮硬规矩("只许 MD/注释/scripts/dev")一致。任务书 ⑥ 点名要求的 `--stat` 一并附上,截至本节写作时的一次性快照供参考(同 §12.12 line 688 的先例,把这段证据写进文档本身会让 `--stat` 的插入行数继续过期,不作为判据——`--name-status` 才是):
+
+```
+$ git diff --stat f9cb22666
+ apps/web/scripts/run-required-web-tests.sh         |  29 +++---
+ ...plate-groups-phase1-fe-verification-20260918.md | 102 ++++++++++++++++-----
+ scripts/dev/atg-exec-line-post-rebase-check.sh     |  94 +++++++++++++++----
+ 3 files changed, 171 insertions(+), 54 deletions(-)
+```
