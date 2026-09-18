@@ -2609,6 +2609,30 @@ item came back to a human instead of ageing out.
 - **No FE was written** (§3.18.4) and the notification side is untouched.
 - **The counters themselves are §3.16's**, not this unit's — this unit moves them onto a surface.
 
+### 3.18.7b Blast radius of the two NEW tokens — an absence claim, with its commands
+
+This unit adds one `approval_records.metadata` key (`cancellationOutcome`) and one DTO field. The
+repo has a standing finding that new tokens on the approval audit-row family hit pinned copies
+across lines (`finding_approval_action_verb_pinned_copy_blast_radius`), so 「the suites I ran passed」
+is not the claim — **no closed-world guard over either shape exists** is, and it is measured:
+
+```
+$ grep -rn "approveRecordMetadata\|w4ActorPosture" --include='*.ts' --include='*.cjs' --include='*.mjs' \
+    packages plugins scripts | grep -v node_modules | grep -v ApprovalProductService.ts | wc -l
+18        # all ADDITIVE reads/writes of individual keys — no key allowlist, no closed world
+
+$ grep -rln "toMatchSnapshot\|toMatchInlineSnapshot" --include='*.ts' packages/core-backend/tests | wc -l
+0         # no snapshot can go stale on a widened metadata blob or DTO
+
+$ grep -rn "Object.keys(.*[Dd]to" --include='*.ts' packages/core-backend/tests
+packages/core-backend/tests/unit/elearning-title-policy.test.ts:202  # a DIFFERENT, unrelated DTO
+```
+
+The 18 hits read or write NAMED keys (`metadata.w4ActorPosture` etc.); none enumerates the metadata
+object's key set, so an added key breaks none of them. ⚠️ SCOPE: the greps cover `packages`,
+`plugins` and `scripts`; `apps/web` was counted separately in §3.18.4 (→ 0). Corroborating runs:
+sibling cancel-round suites 21 passed (21), approval unit corpus 191 passed (191).
+
 ### 3.18.8 Commands and results
 
 ```
