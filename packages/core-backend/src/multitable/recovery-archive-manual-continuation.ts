@@ -14,6 +14,9 @@ import { readRecoveryArchivePreparedCapture } from './recovery-archive-prepared-
 import { compileRecoveryArchiveObjectReceipt } from './recovery-archive-object-receipt-compiler'
 import { recordRecoveryArchiveObjectUploaded } from './recovery-archive-object-receipts'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import { bindRecoveryArchiveManualManifestBinding } from './recovery-archive-manual-admission'
+import { buildRecoveryArchiveSealedSnapshotManifest } from './recovery-archive-sealed-snapshot-manifest'
+import { authenticateRecoveryArchiveSealedSnapshotManifest } from './recovery-archive-authenticated-manifest'
 
 /** PUT/HEAD sealed section bytes only; verification and catalog publication remain a later transaction. */
 export function bindRecoveryArchiveManualObjectUpload(
@@ -69,7 +72,7 @@ export function bindRecoveryArchiveManualObjectUpload(
 }
 
 export type RecoveryArchiveManualContinuationInput =
-  Omit<RecoveryArchivePreparedUploadInput, 'transaction' | 'checkAuthority' | 'capture'> & {
+  Omit<RecoveryArchivePreparedUploadInput, 'transaction' | 'checkAuthority' | 'capture' | 'authenticateCapture'> & {
     /** Server-owned identity; durable request admission must supply it, never request-body aliases. */
     identity: RecoveryArchiveScopeIdentity
     source?: RecoveryArchiveManualSource | null
@@ -83,12 +86,15 @@ export function bindRecoveryArchiveManualContinuation(
 ) {
   const recheckSource = bindRecoveryArchiveManualSourceRecheck(transaction, authorize)
   const prepareSections = bindRecoveryArchiveManualSectionPlan(transaction, authorize)
+  const manifestBinding = bindRecoveryArchiveManualManifestBinding(transaction, authorize)
   return async (input: RecoveryArchiveManualContinuationInput): Promise<void> => {
     const identity = Object.freeze({ ...input.identity })
     const binding = Object.freeze({ ...input.binding })
     const owner = Object.freeze({ ...input.owner })
     const source = input.source
     const capture = input.capture
+    let prepared: { plan: Awaited<ReturnType<typeof prepareSections>>;
+      keyCustody: Awaited<ReturnType<typeof capture>>['keyCustody'] } | undefined
     if (identity.sheetId !== binding.sheetId || identity.baseId !== binding.baseId
       || identity.workspaceId !== binding.workspaceId) {
       throw new Error('RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH')
@@ -117,8 +123,19 @@ export function bindRecoveryArchiveManualContinuation(
         }
         const nonces = Object.fromEntries(sections.map((section) => [section.sectionName, section.nonce]))
         const canonicalSections = await prepareSections(source, nonces)
+        prepared = { plan: canonicalSections, keyCustody: proposed.keyCustody }
         return { ...proposed, binding: { ...proposed.binding }, sections: canonicalSections,
           reserveNonces: bindRecoveryArchiveManualNonceReservation(transaction, authorize, source) }
+      },
+      authenticateCapture: async (sealed) => {
+        if (!source || !prepared) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+        const canonicalBinding = await manifestBinding(source)
+        const unsigned = buildRecoveryArchiveSealedSnapshotManifest({ binding: canonicalBinding,
+          keyId: binding.keyId, plan: prepared.plan, sealResult: sealed })
+        const signed = await authenticateRecoveryArchiveSealedSnapshotManifest({ sealedManifest: unsigned,
+          keyCustody: prepared.keyCustody, transactionDepth: input.transactionDepth })
+        await recheckSource(source)
+        return signed.envelopeBytes
       },
       transactionDepth: input.transactionDepth, transaction,
       checkAuthority: async () => {

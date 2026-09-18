@@ -18,6 +18,7 @@ import { claimRecoveryArchiveSourcePinIntent } from './recovery-archive-source-p
 import type { RecoveryArchiveNonceReservationSink } from './recovery-archive-crypto'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from './recovery-archive-contract'
 import { buildRecoveryArchiveSnapshotPlan } from './recovery-archive-snapshot-plan'
+import type { RecoveryArchiveManifestBinding } from './recovery-archive-manifest'
 
 const sourceBrand = Symbol('manual-capture-source')
 export interface RecoveryArchiveManualSource { readonly [sourceBrand]: true }
@@ -72,6 +73,27 @@ export function bindRecoveryArchiveManualSourceRecheck(
   return async (source: RecoveryArchiveManualSource): Promise<void> => {
     await transaction(async (query) => { await recheckManualSource(query, source, authorize) })
   }
+}
+
+/** Manifest timestamps and source vector come from the admitted generation, never a caller clock. */
+export function bindRecoveryArchiveManualManifestBinding(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
+) {
+  return async (source: RecoveryArchiveManualSource): Promise<RecoveryArchiveManifestBinding> => transaction(async (query) => {
+    const entry = await recheckManualSource(query, source, authorize)
+    const result = await query(`SELECT created_at, expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
+      [entry.owner.generationId])
+    const row = result.rows[0] as { created_at?: unknown; expires_at?: unknown } | undefined
+    if (!(row?.created_at instanceof Date) || !(row.expires_at instanceof Date)) {
+      throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+    }
+    return { archive_generation_id: entry.binding.generationId, workspace_id: entry.binding.workspaceId,
+      base_id: entry.binding.baseId, sheet_id: entry.binding.sheetId,
+      anchor_operation_id: entry.binding.anchorOperationId, anchor_seq: entry.binding.anchorSeq,
+      checkpoint_id: entry.binding.checkpointId, created_at: row.created_at.toISOString(),
+      expires_at: row.expires_at.toISOString(), source_vector_hash: entry.owner.sourceVectorHash }
+  })
 }
 
 async function recheckManualSource(

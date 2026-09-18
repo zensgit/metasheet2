@@ -377,3 +377,18 @@ locked; this does not permit new encryption or implicit unlock.
 This proves the internal manual chain's compatibility with LC-1..6, not standard
 startup wiring, a separate-host recovery drill or final archive publication. Runtime
 policy/command admission and manifest/catalog finalization remain open.
+
+### Durable Manifest Authentication
+
+The manual continuation authenticates its server-built sealed-section manifest
+before any upload and persists the signed manifest envelope alongside ciphertext.
+Manifest timestamps and source vector are taken from the admitted database
+generation. Custody MAC runs outside transactions, followed by the canonical
+source/key/owner/permission recheck. Existing public archive format v1 is unchanged;
+only the internal prepared package gains version 2. Resume requires this signed
+package and does not reconstruct plaintext or call custody again. Legacy unsigned
+packages fail closed in manual continuation; no implicit upgrade or recapture.
+
+Structural envelope checks do not replace restore-time MAC/AEAD authentication.
+Manifest object receipt and atomic catalog publication remain separate unfinished
+steps; stored sections alone do not make an archive available for recovery.

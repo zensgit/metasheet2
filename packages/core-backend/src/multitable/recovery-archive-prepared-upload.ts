@@ -15,6 +15,7 @@ import {
   type RecoveryArchivePreparedCaptureOwner,
 } from './recovery-archive-prepared-capture'
 import type { SealQuery } from './recovery-archive-seals'
+import { parseRecoveryArchiveManifestObjectEnvelope } from './recovery-archive-manifest-object-envelope'
 
 const BINDING_KEYS = ['formatVersion', 'generationId', 'workspaceId', 'baseId', 'sheetId',
   'anchorOperationId', 'anchorSeq', 'checkpointId', 'keyId', 'wrappedDekId', 'dekFingerprint', 'aeadAlgorithm'] as const
@@ -25,6 +26,7 @@ export interface RecoveryArchivePreparedEnvelope {
   binding: RecoveryArchiveCryptoBinding
   wrappedDek: Buffer
   sections: RecoveryArchiveSealedSection[]
+  manifestEnvelope?: Buffer
 }
 
 function closed(value: unknown, keys: readonly string[]): Record<string, unknown> {
@@ -42,9 +44,10 @@ function bytes(value: unknown, length?: number): Buffer {
 }
 
 /** Only closed ciphertext fields are encoded; the result cannot retain raw DEK or plaintext properties. */
-export function encodeRecoveryArchivePreparedEnvelope(result: RecoveryArchiveReserveThenSealResult): Buffer {
+export function encodeRecoveryArchivePreparedEnvelope(result: RecoveryArchiveReserveThenSealResult, manifestEnvelope?: Uint8Array): Buffer {
   const payload = Buffer.from(JSON.stringify({
-    version: 1,
+    version: manifestEnvelope ? 2 : 1,
+    ...(manifestEnvelope ? { manifestEnvelope: Buffer.from(manifestEnvelope).toString('base64') } : {}),
     binding: Object.fromEntries(BINDING_KEYS.map((key) => [key, result.binding[key]])),
     wrappedDek: Buffer.from(result.wrappedDek).toString('base64'),
     sections: result.sealedSections.map((section) => ({
@@ -60,8 +63,9 @@ export function encodeRecoveryArchivePreparedEnvelope(result: RecoveryArchiveRes
 /** Shape validation is not AEAD authentication; existing open/restore cryptography still owns that check. */
 export function decodeRecoveryArchivePreparedEnvelope(payload: Buffer): RecoveryArchivePreparedEnvelope {
   try {
-    const wire = closed(JSON.parse(payload.toString('utf8')), ['version', 'binding', 'wrappedDek', 'sections'])
-    if (wire.version !== 1) throw new Error(INVALID)
+    const parsed = JSON.parse(payload.toString('utf8'))
+    const wire = closed(parsed, ['version', 'binding', 'wrappedDek', 'sections', ...(parsed?.version === 2 ? ['manifestEnvelope'] : [])])
+    if (wire.version !== 1 && wire.version !== 2) throw new Error(INVALID)
     const binding = closed(wire.binding, BINDING_KEYS) as unknown as RecoveryArchiveCryptoBinding
     const wrappedDek = bytes(wire.wrappedDek)
     if (!wrappedDek.length || !Array.isArray(wire.sections)
@@ -79,7 +83,21 @@ export function decodeRecoveryArchivePreparedEnvelope(payload: Buffer): Recovery
         ciphertext: bytes(section.ciphertext), authTag: bytes(section.authTag, 16),
         plaintextSha256: section.plaintextSha256 as string }
     })
-    return { binding, wrappedDek, sections }
+    const manifestEnvelope = wire.version === 2 ? bytes(wire.manifestEnvelope) : undefined
+    if (manifestEnvelope) {
+      const signed = parseRecoveryArchiveManifestObjectEnvelope(manifestEnvelope)
+      const manifest = signed.manifest
+      if (manifest.archive_generation_id !== binding.generationId || manifest.workspace_id !== binding.workspaceId
+        || manifest.base_id !== binding.baseId || manifest.sheet_id !== binding.sheetId
+        || manifest.anchor_operation_id !== binding.anchorOperationId || manifest.anchor_seq !== binding.anchorSeq
+        || manifest.checkpoint_id !== binding.checkpointId || !Buffer.from(signed.wrappedDek).equals(wrappedDek)
+        || manifest.sections.some((entry, index) => entry.name !== sections[index]!.sectionName
+          || entry.key_id !== binding.keyId || entry.wrapped_dek_id !== binding.wrappedDekId
+          || entry.dek_fingerprint !== binding.dekFingerprint || entry.aead_algorithm !== binding.aeadAlgorithm
+          || entry.nonce !== sections[index]!.nonce.toString('hex')
+          || entry.plaintext_sha256 !== sections[index]!.plaintextSha256)) throw new Error(INVALID)
+    }
+    return { binding, wrappedDek, sections, ...(manifestEnvelope ? { manifestEnvelope } : {}) }
   } catch { throw new Error(INVALID) }
 }
 
@@ -92,6 +110,8 @@ export interface RecoveryArchivePreparedUploadInput {
   checkAuthority: () => Promise<void>
   /** Invoked only when no persisted envelope exists. Source capture remains caller-owned. */
   capture: () => Promise<SealInput>
+  /** When supplied, the durable package must contain an authenticated manifest, including on resume. */
+  authenticateCapture?: (sealed: RecoveryArchiveReserveThenSealResult) => Promise<Uint8Array>
   transactionDepth: SealInput['transactionDepth']
   upload: (envelope: RecoveryArchivePreparedEnvelope, section: RecoveryArchiveSealedSection) => Promise<void>
 }
@@ -121,11 +141,13 @@ export async function uploadRecoveryArchivePreparedCapture(input: RecoveryArchiv
       binding: capture.binding, keyCustody: capture.keyCustody, transactionDepth: input.transactionDepth,
       dekSource: capture.dekSource, sections: capture.sections, reserveNonces: capture.reserveNonces,
     })
-    payload = encodeRecoveryArchivePreparedEnvelope(sealed)
+    const manifest = input.authenticateCapture ? await input.authenticateCapture(sealed) : undefined
+    payload = encodeRecoveryArchivePreparedEnvelope(sealed, manifest)
     await input.checkAuthority()
     payload = await input.transaction((query) => persistRecoveryArchivePreparedCapture(query, owner, payload!))
   }
   const envelope = decodeRecoveryArchivePreparedEnvelope(payload)
+  if (input.authenticateCapture && !envelope.manifestEnvelope) throw new Error('RECOVERY_ARCHIVE_PREPARED_MANIFEST_REQUIRED')
   verifyBinding(envelope.binding)
   for (let index = 0; index < envelope.sections.length; index += 1) {
     await input.checkAuthority()

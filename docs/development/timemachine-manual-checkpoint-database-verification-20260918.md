@@ -665,3 +665,33 @@ recovery positive; neither test substitutes for final catalog publication. Keys 
 owned sessions are scrubbed/locked in finally; the driver removes its DB, cluster
 and temporary storage. Logs: `/private/tmp/tm-manual-local-custody-{final,unit}.log`.
 Core/store neighbors pass 2 files, 29/29; acceptance TypeScript and diff check pass.
+
+## Authenticated Manifest In Durable Capture
+
+Implementation range starts at `5137894c1dd7eefb18c68d42e739b28d826befbc`;
+this section belongs to its manifest integration child commit. Manual capture now
+uses the existing sealed-snapshot compiler and transaction-guarded custody MAC.
+The generation's database timestamps and source vector, not callback values, bind
+the root. A source/authority/key/owner recheck follows the outside-transaction MAC.
+Internal prepared-package version 2 persists the signed v1 manifest object envelope
+with the original ciphertext before upload; public archive format remains v1.
+Decoding cross-checks scope, anchor, wrapped DEK and all section crypto descriptors.
+This is structural validation, not a substitute for restore-time MAC/AEAD checks.
+
+Real PostgreSQL driver proves exact MAC bytes, ten-section manifest, source-vector
+binding, altered anchor rejection, no re-sign on resume, and zero prepared package
+or upload on MAC failure. Old unsigned version-1 packages remain usable by the
+generic legacy fixture but are refused by the manual continuation. Its existing
+separate-connection revocation-between-uploads test now runs on a signed package.
+The real local custody scenario also passes through this production signing path.
+
+Focused manifest neighbors: 2 files / 21 tests PASS. Acceptance TypeScript and
+three-source ESLint PASS. Full synthetic driver PASS, owned DB/connections and
+cluster removed. Neutralizing the required-manifest guard makes the old-package
+negative fail with `Missing expected rejection`; the guard was restored before the
+final full run. Logs: `/private/tmp/tm-manual-signed-manifest-final.log`,
+`/private/tmp/tm-manual-manifest-{unit,mutation,restored}.log`.
+
+Not yet delivered: manifest-object PUT/HEAD, verified receipt/catalog atomic
+publication, runtime admission/UI, or immutable attachment-source integration.
+No flag, customer storage, production, Ready or merge action is implied.

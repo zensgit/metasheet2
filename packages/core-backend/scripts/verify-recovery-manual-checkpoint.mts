@@ -482,22 +482,18 @@ try {
   const revoker = new Client({ ...connection, database })
   await revoker.connect()
   try {
-    await manual({ ...manualInput, upload: async () => { manualUploads++ } })
-    assert.equal(manualUploads, 10)
-    manualUploads = 0
-    await assert.rejects(manual({ ...manualInput, upload: async () => {
-      manualUploads++
-      await revoker.query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
-    } }), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
-    assert.equal(manualUploads, 1)
+    await assert.rejects(manual({ ...manualInput, upload: async () => { manualUploads++ } }),
+      { message: 'RECOVERY_ARCHIVE_PREPARED_MANIFEST_REQUIRED' })
+    assert.equal(manualUploads, 0)
+    await revoker.query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
     await assert.rejects(manual({ ...manualInput, upload: async () => { manualUploads++ } }),
       { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
-    assert.equal(manualUploads, 1)
+    assert.equal(manualUploads, 0)
     await revoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
     await assert.rejects(manual({ ...manualInput, identity: { ...manualInput.identity, baseId: 'other' } }),
       { message: 'RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH' })
   } finally { await revoker.end() }
-  console.log('PASS: canonical manual authority on real users; separate-connection deactivation after first upload blocks subsequent sections and retry')
+  console.log('PASS: unsigned legacy package cannot resume manual publication; canonical authority and scope refuse')
   const request = { actorId, requestId: randomUUID(), workspaceId: 'w', baseId: 'b', sheetId: 's' }
   await assert.rejects(manualRequests.bindRecoveryArchiveManualRequest(query, request, uploadInput.owner.generationId),
     { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_TRANSACTION_REQUIRED' })
@@ -712,6 +708,7 @@ try {
   let captures = 0
   let produced = 0
   let reserved = 0
+  let authenticated = 0
   const sourceKey = randomBytes(32)
   const custody: import('../src/multitable/recovery-archive-crypto').RecoveryArchiveKeyCustodyAdapter = {
     async produceGenerationDek() {
@@ -722,7 +719,10 @@ try {
     async deriveDekFingerprint({ dek }) {
       return createHmac('sha256', Buffer.from(dek)).update(archiveCrypto.RECOVERY_ARCHIVE_DEK_FINGERPRINT_DOMAIN).digest('hex')
     },
-    async macManifestRoot() { throw new Error('SYNTHETIC_PUBLICATION_FORBIDDEN') },
+    async macManifestRoot({ preimage }) {
+      authenticated++
+      return createHmac('sha256', sourceKey).update(preimage).digest()
+    },
     async verifyManifestRootMac() { throw new Error('SYNTHETIC_PUBLICATION_FORBIDDEN') },
   }
   const capture = async (source: import('../src/multitable/recovery-archive-relational-source').RecoveryArchiveCaptureSource) => {
@@ -788,9 +788,26 @@ try {
     await assert.rejects(manual({ ...first, capture, upload }), { message: 'SYNTHETIC_SOURCE_UPLOAD_INTERRUPTION' })
     assert.equal(produced, 1)
     assert.equal(reserved, 0, 'caller-owned reservation callback must never run')
+    assert.equal(authenticated, 1, 'manifest authentication must precede first upload')
     assert.equal(await nonceCount(first.owner.generationId), 10)
     assert.deepEqual(await sealedMembers(first.binding.anchorOperationId), expectedMembers(first, 'section_bootstrap'))
     const captureCount = captures
+    const signedPayload = await uploadInput.transaction((q) => prepared.readRecoveryArchivePreparedCapture(q, first.owner))
+    assert.ok(signedPayload)
+    const signedEnvelope = preparedUpload.decodeRecoveryArchivePreparedEnvelope(signedPayload)
+    assert.ok(signedEnvelope.manifestEnvelope)
+    const manifestObjects = require('../src/multitable/recovery-archive-manifest-object-envelope.ts') as typeof import('../src/multitable/recovery-archive-manifest-object-envelope')
+    const signedManifest = manifestObjects.parseRecoveryArchiveManifestObjectEnvelope(signedEnvelope.manifestEnvelope).manifest
+    assert.equal(signedManifest.source_vector_hash, first.owner.sourceVectorHash)
+    assert.equal(signedManifest.sections.length, 10)
+    const preimage = archiveCrypto.buildRecoveryArchiveManifestMacPreimage({ ...signedEnvelope.binding,
+      rootHash: signedManifest.root_hash, createdAt: signedManifest.created_at, expiresAt: signedManifest.expires_at,
+      sourceVectorHash: signedManifest.source_vector_hash })
+    assert.equal(signedManifest.manifest_mac, createHmac('sha256', sourceKey).update(preimage).digest('hex'))
+    const altered = JSON.parse(signedPayload.toString('utf8'))
+    altered.binding.anchorSeq = String(BigInt(first.binding.anchorSeq) + 1n)
+    assert.throws(() => preparedUpload.decodeRecoveryArchivePreparedEnvelope(Buffer.from(JSON.stringify(altered))),
+      { message: 'RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID' })
     let resumedSections = 0
     await manual({ ...first, source: null, capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') },
       upload: async (envelope, section) => {
@@ -820,10 +837,35 @@ try {
         resumedSections++
       } })
     assert.equal(resumedSections, 10)
+    const signedRevoker = new Client({ ...connection, database })
+    await signedRevoker.connect()
+    try {
+      let authorizedUploads = 0
+      await assert.rejects(manual({ ...first, source: null, capture,
+        upload: async () => {
+          authorizedUploads++
+          await signedRevoker.query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+        } }), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+      assert.equal(authorizedUploads, 1)
+    } finally {
+      await signedRevoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+      await signedRevoker.end()
+    }
     assert.equal(captures, captureCount)
+    assert.equal(authenticated, 1, 'durable resume must not sign again')
     assert.equal(produced, 1)
     assert.equal(reserved, 0)
     assert.equal(await nonceCount(first.owner.generationId), 10)
+    const unsigned = await continuation()
+    let unsignedUploads = 0
+    await assert.rejects(manual({ ...unsigned, capture: async (source) => ({ ...await capture(source),
+      binding: unsigned.binding, keyCustody: { ...custody,
+        async macManifestRoot() { throw new Error('SYNTHETIC_MAC_UNAVAILABLE') } } }),
+    upload: async () => { unsignedUploads++ } }),
+    { message: 'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_KEY_CUSTODY_FAILED' })
+    assert.equal(unsignedUploads, 0)
+    assert.equal(await uploadInput.transaction((q) => prepared.readRecoveryArchivePreparedCapture(q, unsigned.owner)), null)
+    console.log('PASS: authenticated canonical manifest persisted before upload; root MAC, binding refusal, no-resign resume and MAC failure atomicity')
     const conflict = await continuation()
     const conflictPlan = await capture(manualAdmission.readRecoveryArchiveManualSource(conflict.source))
     conflictPlan.binding = conflict.binding
