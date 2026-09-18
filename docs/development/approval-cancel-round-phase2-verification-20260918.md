@@ -1824,9 +1824,22 @@ top-level `EXPECT_DB` sentinel and the two-point wiring were already in place fo
 ## 3.15 账侧验收, ROW-LEVEL HALF IMPLEMENTED — and the twin compare found a real divergence (this unit)
 
 Lock §8 期 1's second acceptance line: 「账侧(完整取消结果**逐字节等价于现有 W4 路径** +
-`unrecoverableExpired` 呈现)」(lock:169). This unit builds the twin-fixture comparison and closes
-the ROW-LEVEL half. It does **not** close `unrecoverableExpired` 呈现 — see §3.15.6, which is the
-headline.
+`unrecoverableExpired` 呈现)」(lock:169). This unit builds the twin-fixture comparison.
+
+**SCOPE, stated as a count rather than as 「the row-level half」** (an earlier draft of this section
+and the commit message for `d22d6c624` both said 「ROW-LEVEL HALF CLOSED」, which reads as 「the rows
+are equal」 and is an overclaim — retracted here). Lock:86 lists C-1's execution as **seven** steps.
+This unit's compares cover **two** of them, and measures two more:
+
+| C-1 step (lock:86) | This unit |
+|---|---|
+| ① 锁两行 `FOR UPDATE` | not observable as an end state — covered by census Q-G (§3.10) |
+| ② 状态复核 | not observable as an end state |
+| ③ 按运行模式追加取消计算 | **MEASURED equal (0/0)** — but skipped on BOTH under the org's legacy posture, §3.15.11 |
+| ④ 原实例 `approved → cancelled` + `approval_records` | **COMPARED column-for-column** |
+| ⑤ 请求 `cancelled` | **COMPARED column-for-column** |
+| ⑥ `reverseLeaveBalanceDeduction` → `unrecoverableExpired` | **NOT closed** — §3.15.6, the headline |
+| ⑦ 发 `attendance.request.cancelled` | **MEASURED equal (0/0)** — skipped on BOTH, §3.15.11 |
 
 ### 3.15.0 ⛔ PROVENANCE CORRECTION: `attendance-parity.db.test.ts` is NOT named by the lock
 
@@ -1970,10 +1983,17 @@ Lock:86 says C-1's execution includes `reverseLeaveBalanceDeduction`(返回 `unr
   the lock demands. Closing it needs a fixture that seeds an EXPIRED lot **and** a paired control
   where the value is absent — asserting presence on one fixture proves nothing about the
   presentation path.
-- **(b) The approval side has no channel to present it on.** `redeemCancelRoundInTxn` receives
-  `{ kind: 'executed', response }` from the entry (`ApprovalProductService.ts:9054`) and returns
-  `{ kind: 'applied' }` — **the W4 response payload, `reversal` and all, is DISCARDED**. The redeemed
-  round's DTO is an ordinary `UnifiedApprovalDTO` with no field carrying it.
+- **(b) The approval side has no channel to present it on.** `redeemCancelRoundInTxn`
+  (`ApprovalProductService.ts:9054`) special-cases only `business_refused` and returns
+  `{ kind: 'applied' }` for every success kind — **the entry's `response` payload, `reversal` and
+  all, is DISCARDED**. The redeemed round's DTO is an ordinary `UnifiedApprovalDTO` with no field
+  carrying it.
+  > ⛔ **ERRATUM (same unit, caught by the §3.15.11 probe).** An earlier draft of this bullet said
+  > the hook receives 「`{ kind: 'executed', response }`」. That names only one of the entry's
+  > success kinds. `w4c3b-request-operation-boundary.ts:903-924` returns `legacy` (preflight
+  > `legacy_no_operation`), `legacy_compat` (posture `legacy_projection_only`) **or** `executed`,
+  > and these fixtures take the **`legacy_compat`** branch, not `executed`. The payload is dropped
+  > on all of them, so the finding stands — but the specific kind named was wrong.
 
 (b) is asserted as a NEGATIVE in the case (the DTO has no `reversal` / `cancellationResult` key and
 its JSON does not contain `unrecoverableExpired`), so the day a channel IS added, the line goes red
@@ -2038,6 +2058,40 @@ every `tests/integration/*` file in the required lane's run-list, so a bare
 `npx vitest run tests/integration/…` prints `No test files found, exiting with code 1` — a
 skip-green shape. Recorded because it cost this unit a run: an operator who checks these cases with
 the bare command sees a non-zero exit and no tests, not a green.
+
+### 3.15.11 ⚠️ THE POSTURE PROBE — why two of C-1's steps are parity-trivial here, not covered
+
+The three row compares cannot see `attendance_record_calculations` (C-1 step ③) or
+`attendance_result_event_outbox` (step ⑦). Both are gated on the ORG's accepted **write** posture —
+which is NOT the `w4ActorPosture` the compares assert:
+
+- `metadata.w4ActorPosture = 'self'` is the **actor** posture (who is cancelling). Equal on both
+  twins, and asserted.
+- `acceptedWritePosture` is the **write** posture, resolved per-ORG from the rollout registry
+  (`w4c0-operation-registry.ts:640`, `:877`). Under `legacy_projection_only` the adapter skips the
+  P14 calculation (`plugins/plugin-attendance/index.cjs:35169`:
+  `if (approvedLeave && operation.acceptedWritePosture !== 'legacy_projection_only')`) and the
+  boundary skips the outbox enqueue (`w4c3b-request-operation-boundary.ts:903-916`:
+  `if (!isLegacyCompat) await enqueueAttendanceResultEventOutboxV1(...)`).
+
+**Had the twins resolved different write postures, one would append a cancellation calculation and
+the other would not, and the three compares would have stayed green over it** — a green whose blind
+spot contains a lock-named step. That is why the case now asserts both counts, symmetrically
+attributed (calculations joined through `attendance_records.user_id`; outbox rows keyed on
+`payload->>'requestId'`), and pins them as VALUES rather than as equality alone — `0 === 0` is also
+what a broken attribution predicate returns.
+
+Measured: `calcA = calcB = '0'`, `outboxA = outboxB = '0'`.
+
+⚠️ **What that green is and is not.** Posture is an ORG property and the twins are asserted to share
+an org, so they take the SAME branch by construction; these fixtures sit in
+`legacy_projection_only` (the same posture §3.12.3 records for the end-to-end case). So steps ③ and
+⑦ are confirmed **non-divergent**, and are confirmed **non-divergent because both are SKIPPED** —
+the `authoritative` and `shadow` branches are UNEXERCISED on both sides. Parity of two skips is
+parity; it is not coverage. **OPEN**: a twin pair in a non-legacy org, which needs rollout-registry
+fixture work no case in this file does today.
+
+This probe is also what caught the `kind: 'executed'` erratum in §3.15.6.
 
 ### 3.15.10 Wiring — nothing new to pin
 
@@ -2104,7 +2158,9 @@ they are.
   prepare and execute. If anything compares those defaults against the loaded token, every redeem
   of a request that HAS a snapshot fails. That HTTP clients may omit the same fields is weak
   evidence it is tolerated, not proof.
-- **账侧完整取消结果逐字节等价** (lock §8 期 1) — **ROW-LEVEL HALF CLOSED in §3.15**: a twin-fixture
+- **账侧完整取消结果逐字节等价** (lock §8 期 1) — **TWO of C-1's SEVEN steps COMPARED in §3.15**
+  (④ 原实例+审计行, ⑤ 请求 `cancelled`), two more MEASURED equal-but-skipped (③ 取消计算, ⑦ 事件
+  — §3.15.11), ⑥ open, ①/② not end-state-observable. NOT 「the rows are equal」: a twin-fixture
   compare against the real `POST /api/attendance/requests/:id/cancel` path, with eight identity
   substitutions sourced from fixture facts and 13 declared divergences carried as data. Every other
   column is byte-equal after normalisation. M-22 red at the named site, 1 of 16.
