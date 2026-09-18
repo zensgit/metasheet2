@@ -765,4 +765,214 @@ $ git diff --stat a4bf9f742..HEAD
  packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts | 6 ++
  5 files changed, 116 insertions(+), 13 deletions(-)
 ```
-（`a4bf9f742` = §9 rebase-note 提交,是本轮四个修复提交的起点。）只 5 个文件,四个提交(35a5e2ddd/a0ff59eeb/bf1d75d14/本提交)各自负责其中一部分;`git diff` 逐行核对:两份 MD 全是散文改写,三个源码文件的改动全在 `//` 或 `/** */` 注释块内,零一行可执行代码/SQL/正则/类型改动。
+（`a4bf9f742` = §9 rebase-note 提交,是本轮四个修复提交的起点。)只 5 个文件,四个提交(35a5e2ddd/a0ff59eeb/bf1d75d14/本提交)各自负责其中一部分;`git diff` 逐行核对:两份 MD 全是散文改写,三个源码文件的改动全在 `//` 或 `/** */` 注释块内,零一行可执行代码/SQL/正则/类型改动。
+
+## 11. CI 修复:required check `test (20.x)` 的「approval real-DB integration」步骤红(2026-09-18)
+
+**触发**:PR #5866(`feat/approval-template-groups-phase2-backfill`,head `f581004ae`)的 required check `test (20.x)` 在其「Run approval real-DB integration」步骤上红,单一失败:
+
+```
+FAIL tests/integration/approval-template-groups-backfill-preview.db.test.ts > … >
+  skipped: blank-after-trim (null category and a whitespace-only category) land in one
+  CATEGORY_BLANK_AFTER_TRIM bucket … — AssertionError: expected [ …(13) ] to deeply equal [ Array(1) ]
+  at :229 `expect(nullBucket!.templateIds).toEqual([nullCat])`
+```
+
+即该 org 的 `''`(blank-after-trim)桶收到 13 个模板 id,其中 12 个不是本用例 seed 的。
+
+### 11.0 任务书诊断的勘误——不是「org 碰撞」,是「模板表全局共享 + 候选谓词只按 org 过滤 link」
+
+派工任务书把这条失败归因为「本测试用的 org id 与其他套件共用」,并把修法定为「A-3 五个真库文件的夹具一律用本文件唯一的 org id」。逐行读产线代码后,这个归因是**假的**,对应的修法也**修不好**这条失败,理由是三条独立证据:
+
+1. `approval_templates` 的 DDL(`packages/core-backend/src/db/migrations/zzzz20260411120100_approval_templates_and_instance_extensions.ts:16-25`)**没有 `org_id` 列**——模板本来就是跨 org 全局共享的一张表,只有「哪个 org 把它挂进了哪个组」这件事(`approval_template_group_links`)才是 org 级的。
+2. `previewApprovalTemplateGroupBackfill` 的候选查询(`packages/core-backend/src/routes/approvals.ts:519-528`)WHERE 子句只有两段:`NOT EXISTS(... l.org_id = $1 ...)`(这个 org 从未关联过)+ `applyTemplateVisibilityFilter`。而 `applyTemplateVisibilityFilter`(`packages/core-backend/src/services/ApprovalProductService.ts:4383-4389`)在 `actor.isTemplateManager === true` 时**直接 `return index`,不追加任何条件**——本切片三个真库文件的 `managerActor` 全部是 `isTemplateManager: true`。折叠下来,候选谓词就是唯一一条:「这个模板从未被『这个 org』关联过」。
+3. `approval-template-groups-backfill-batches-list.db.test.ts` 自己的既有注释(本切片改动前就写在那里,`afterEach` 上方)原话就是:「`approval_templates` карries no org column, so a template left linked-nowhere by one case stays an eligible candidate for a later case」——五个文件的作者早就知道这件事,只是三个文件(preview/execute/rollback)在写 CI 前没有把它推广到「84 文件共享一个库」这个尺度。
+
+结论:一个「从未被本文件的 org 关联过」的全局模板行,是**任何** org 字符串的候选——把 org 换成 per-file 唯一值不改变这件事分毫。这不是 bug,是产线设计本身(模板池跨 org 共享,分组是 org 级的挂接);任务书要求的「零生产代码改动」在这个前提下是对的——要修的是测试夹具怎么在这个真实产线行为下让自己的候选人口保持干净,不是去改产线谓词。因此步骤②按**任务书原定方案作废**,改用下面 §11.2 的机制。
+
+### 11.1 复现:私有库 `metasheet2_lock_a3_ci`
+
+```
+$ dropdb -U postgres metasheet2_lock_a3_ci 2>&1   # (does not exist yet)
+$ createdb -U postgres metasheet2_lock_a3_ci
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci \
+    pnpm --filter @metasheet/core-backend db:migrate
+```
+0 pending(第二次原样重跑 `db:migrate` 无任何新迁移输出)。
+
+污染集——模拟「其他文件在同一次 CI 运行里留下的、从未被任何 org 关联过的模板行」,**两种形状都要**(只放 NULL/blank 只会让 preview 的 blank-after-trim 桶变红,execute/rollback 完全绿,判别力覆盖不到本切片改的另外两个文件):
+
+```sql
+INSERT INTO approval_templates (key, name, status, category, visibility_scope) VALUES
+  ('a3-ci-repro-foreign-null-1',  'a3-ci-repro-foreign-null-1',  'draft', NULL,  '{"type":"all","ids":[]}'::jsonb),
+  ('a3-ci-repro-foreign-blank-1', 'a3-ci-repro-foreign-blank-1', 'draft', '   ', '{"type":"all","ids":[]}'::jsonb),
+  ('a3-ci-repro-foreign-aaa-1',   'a3-ci-repro-foreign-aaa-1',   'draft', 'AAA', '{"type":"all","ids":[]}'::jsonb);
+```
+
+**用 HEAD(修复前)的三个文件对这个污染库跑一遍**(`cp` 备份修复后的文件 → `git show HEAD:<path>` 写回旧内容 → 跑 → `cp` 还原 → `cmp` 确认字节级复原,全程未用 `git checkout --`/`stash`):
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci \
+    pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts --reporter=dot
+ ❯ … skipped: blank-after-trim … — AssertionError: expected [ …(2) ] to deeply equal [ Array(1) ]
+     229| expect(nullBucket!.templateIds).toEqual([nullCat])
+ ❯ … candidateCount … — AssertionError: expected 4 to be 3
+ ❯ … buckets/skipped are ordered by plain code-point order … —
+     expected [ '100', 'AAA', 'Zebra', 'apple' ] to deeply equal [ '100', 'Zebra', 'apple' ]
+ ❯ … route wiring … an admin actor gets 200 … — expected 2 to be 1
+ Test Files  1 failed (1)
+      Tests  5 failed | 8 passed | 1 skipped (14)
+```
+第一条与生产 CI 日志的失败逐字一致(同一断言、同一行号 `:229`)——复现成立。另外三条是 `AAA` 污染物(而非 NULL/blank)单独触发的,证明污染集需要两种形状才对本切片的判别力做到位。
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci \
+    pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts --reporter=dot
+ Test Files  2 failed (2)
+      Tests  7 failed | 14 passed | 2 skipped (23)
+```
+`AAA`(一个可存储、排序在 `'HR'` 之前的 category)让 execute 的 `groups`/`links` 增量计数、`result.groups[0]` 下标假设、rollback 的 delta 计数全部现出原形——`execute`/`rollback` 两个文件此前**从未**被这个反例覆盖过(生产 CI 之所以只报 preview 一条红,是因为当时的污染集恰好只有 NULL category,没有 AAA 这种「可存储且排序靠前」的形状;这不代表 execute/rollback 没有同一类暴露面)。
+
+修复文件(preview/execute/rollback 三个)已在还原后重新用 `cmp` 确认与本次会话开始时的工作树状态字节相同,详见 §11.2 之后的复跑记录。
+
+### 11.2 修法(测试侧,零生产代码改动):`sinkForeignTemplates`
+
+三个真库文件(preview/execute/rollback)各自新增一个**同名同构、独立复制**(不建共享 import,遵循本切片既有的 `tok`/`httpReq` 复制惯例)的 helper:
+
+```ts
+const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
+const FOREIGN_SINK_SORT_ORDER = 999999
+
+async function sinkForeignTemplates(org: string, ownTemplateIds: readonly string[]): Promise<string> {
+  const sinkGroupId = `atg_sink_${org}`
+  await query(
+    `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+     VALUES ($1, $2, $3, $4, 'sink')`,
+    [sinkGroupId, org, FOREIGN_SINK_GROUP_NAME, FOREIGN_SINK_SORT_ORDER],
+  )
+  await query(
+    `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+     SELECT $1, t.id, $2, 'sink', now()
+       FROM approval_templates t
+      WHERE NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)
+        AND NOT (t.id = ANY($3::uuid[]))`,
+    [org, sinkGroupId, ownTemplateIds],
+  )
+  return sinkGroupId
+}
+```
+
+机制:对**产线用的同一条谓词**(`NOT EXISTS` 链接排除)反过来用一次——在本用例真正调用 `preview`/`execute` 之前,把「当前对这个 org 而言仍是候选、但不属于本用例自己 seed 的」每一个模板,抢先挂进一个本 org 专属、名字与 sort_order 都刻意避开这个文件里任何一个真实分类/排序值的「sink 组」。挂完之后,产线的 `NOT EXISTS` 检查会把这些外来行**合法地**排除掉——不是绕过产线逻辑,是让测试环境补上「一个真正隔离的 org 本来就会看到的样子」。之后每个用例原有的精确断言(`toEqual`,不退化成 `toContain`)才重新有意义。
+
+**披露(写进三个文件各自的 helper 注释)**:sink 查询没有跑 `applyTemplateVisibilityFilter`,只按 §11.0 folded 出来的 manager-only 谓词扫;这只在「本文件里每一处调用 `sinkForeignTemplates` 的用例都在 `managerActor`(`isTemplateManager:true`)下跑——此时该 filter 本身就是 no-op」这个前提下才是稳妥的。本文件唯一的非 manager 用例(preview 的 §5.2 scope 测试)不调用这个 helper,且只断言 `.find(...).toBeDefined()`,不是精确集合——不受影响。一个未来的「非 manager + 精确集合」断言需要一个感知可见性的 sink,不是这一个;如实记录,不在本轮处理。
+
+**关于 `id` 格式**:`atg_sink_${org}` 会把 org 标签里的连字符原样带进 group id(其余本文件的 group id 全部只用下划线)。核对 DDL(`packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts:37-62`):`id` 是裸 `text PRIMARY KEY`,没有格式 CHECK;只有 `org_id`/`name` 有 `[!-~]` 非空 CHECK,连字符满足。三次真库重跑(§11.1/§11.3)里没有一次因为 id 格式失败——不是理论推断,是实测确认。
+
+**清理**:preview/execute/rollback 三个文件的 `afterAll` 均按「batch(cascade)→ links → groups → 按 org」的顺序把 `orgTags` 里追踪到的每一个 org(含 sink 组/link)整段删掉;`sinkForeignTemplates` 的每一次调用现场核对——三个文件里传进去的 `org` 全部来自各自的 `trackOrg(...)`,没有一处绕过 tracking 直接手写 org 字符串。
+
+### 11.3 用污染库重跑五文件全绿,再在处女库重跑一遍
+
+污染库(§11.1 的 `metasheet2_lock_a3_ci`,污染物原样留在库里,preview 从不删模板行,只把它们挂进各用例自己 org 的 sink 组):
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci \
+    pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts --reporter=dot
+ Test Files  5 passed (5)
+      Tests  48 passed | 5 skipped (53)
+```
+
+处女库(`metasheet2_lock_a3_ci_virgin`,本次会话新建 + `db:migrate`,零污染):
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci_virgin \
+    pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts --reporter=dot
+ Test Files  5 passed (5)
+      Tests  48 passed | 5 skipped (53)
+```
+
+两边计数逐字相同(48/5/53)——修法在污染库与处女库上行为一致,不是「恰好在这一批污染物上蒙对了」。schema/batches-list 两个未改动的文件在两边都保持全绿(它们的断言全部按具体 id/batchId 定位,或已有 org 级清理,天然不暴露在这个共享表的问题面上——本轮据此判定这两个文件**不需要** `sinkForeignTemplates`)。
+
+### 11.4 Mutation(唯一亲跑;`cp` 备份 → 编辑 → 单独跑 → `cp` 还原 → `cmp`)
+
+对 `classifyBackfillCategory`(`packages/core-backend/src/services/ApprovalTemplateGroupService.ts:705-718`)做探针:去掉 blank-after-trim 单独分支,让空字符串落进「不可存储」分支(与 CJK 类共用 `CATEGORY_NOT_STORABLE_AS_GROUP_NAME` 这一个 reason):
+
+```diff
+   const trimmedCategory = pgBtrim(rawCategory ?? '')
+-  if (trimmedCategory === '') {
+-    return { action: 'skip', reason: 'CATEGORY_BLANK_AFTER_TRIM', trimmedCategory }
+-  }
+   if (!STORABLE_GROUP_NAME_PATTERN.test(trimmedCategory)) {
+     return { action: 'skip', reason: 'CATEGORY_NOT_STORABLE_AS_GROUP_NAME', trimmedCategory }
+   }
+```
+
+处女库上单独跑 preview 文件:
+
+```
+❯ … skipped: blank-after-trim … —
+    AssertionError: expected 'CATEGORY_NOT_STORABLE_AS_GROUP_NAME' to be 'CATEGORY_BLANK_AFTER_TRIM'
+    295| expect(nullBucket!.reason).toBe('CATEGORY_BLANK_AFTER_TRIM')
+ Test Files  1 failed (1)
+      Tests  1 failed | 12 passed | 1 skipped (14)
+```
+唯一变红的正是目标用例,其余 13 条(含本轮新增的全部 `sinkForeignTemplates` 断言)保持绿——判别力精确落在被测分支上,不是整份文件的连坐。`cp` 还原 + `cmp` 确认 `ApprovalTemplateGroupService.ts` 与探针前字节相同后,重跑 preview 文件确认恢复绿(13 passed | 1 skipped)。
+
+### 11.5 required 步骤逐字复现(84 文件)+ core-backend 全量 vitest
+
+`.github/workflows/plugin-tests.yml` 的 `approval-real-db-integration` 步骤(:1604-1699)原样抄出 84 个文件,唯一改动是把 `DATABASE_URL` 换成本次的污染库(`metasheet_test` 是其他 lane 共用的库,依硬规矩绝不写):
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci \
+    pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    <84 个文件,与 workflow 步骤原文逐字同序> --reporter=dot
+ Test Files  1 failed | 83 passed (84)
+      Tests  1 failed | 932 passed | 10 skipped (943)
+```
+
+唯一失败:`directory-binding-admin-routes.db.test.ts`(`B. GET /suggestions is the §9 read-only surface` — expected 401 to be 200)。**与本切片无关**,如实记录不算已满足绿:
+- 该文件在 84 文件列表里排第 69 位,本切片改动的五个文件排第 76/80/81/82/83/84 位——按 `fileParallelism:false` 的严格串行顺序,它先于本切片任何文件运行,不可能是下游被本次改动影响的结果。
+- 断言与 `approval_templates`/分组/回填毫无关系(`grep` 该文件全文,零次出现这几个词)。
+- 单独隔离重跑(处女库)全绿:
+  ```
+  $ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci_virgin \
+      pnpm exec vitest --config vitest.integration.config.ts run \
+      tests/integration/directory-binding-admin-routes.db.test.ts --reporter=dot
+   Test Files  1 passed (1)
+        Tests  6 passed (6)
+  ```
+  确认是 84 文件共享一次 server/DB 进程时才出现的跨文件状态污染(某个更早文件残留的 RBAC/JWT 设置行影响到了这条 401/200 判定),不是本次改动引入的新缺陷,也不是本次污染 INSERT(直接对 `approval_templates` 表插的 3 行)能触达的表面——按记忆 `feedback_flake_attribution_last_active_suite` 的要求,如实点名「未定位根因的跨文件既有 flake」,不归为本切片修复范围,不据此宣称「required 步骤已全绿」。
+
+`core-backend` 全量无 DB 单测(`pnpm test:unit`,与本切片 5 个真库文件完全不相交的另一条 lane,用来确认三处测试文件改动没有波及其它任何单测):
+```
+$ pnpm --filter @metasheet/core-backend run test:unit
+ Test Files  794 passed (794)
+      Tests  12715 passed (12715)
+```
+零失败。
+
+### 11.6 收尾:`git diff --stat`(证明只动测试与本 MD)
+
+```
+$ git diff --stat
+ .../approval-template-groups-backfill-execute.db.test.ts  |  85 +++++++++++++--
+ .../approval-template-groups-backfill-preview.db.test.ts  | 115 ++++++++++++++++++---
+ .../approval-template-groups-backfill-rollback.db.test.ts |  63 ++++++++++-
+ docs/development/approval-template-groups-phase2-backfill-verification-20260918.md | <本节自身>
+ 4 files changed
+```
+零生产代码改动(§11.4 的 mutation 探针已 `cmp` 确认字节级复原,不计入本次提交);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-backfill-batches-list.db.test.ts` 按 §11.3 结论保持不动。§10 是既有编号(修复轮 3),本节按既有编号序延续为 §11——三个文件里的代码注释本身已经这样自称(「§11 CI fix」),本节把编号落回 MD 正文,不是新起一套编号。
+
+**遗留(如实记录,不算已满足)**:`directory-binding-admin-routes.db.test.ts` 的跨文件 flake 未定位根因,只确认与本切片无关且不可能是本切片下游;是否需要单独立项排查,交 owner/后续 lane 裁决。

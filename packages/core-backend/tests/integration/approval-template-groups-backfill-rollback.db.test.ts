@@ -121,6 +121,35 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
     return id
   }
 
+  // §11 CI fix (shared-DB fixture collision — see the sibling preview suite's own copy of this
+  // helper for the full mechanism comment): `executeApprovalTemplateGroupBackfill`'s `eligible`
+  // query has the SAME "no template-level org filter, only the link-exclusion is org-scoped" shape,
+  // so calling it from this file (every rollback fixture goes through a real `execute` first) is
+  // equally exposed to a foreign, unrelated file's leftover `approval_templates` row in the shared
+  // real-DB CI step. Copied (not imported) per this file's own convention for `tok`/`httpReq`. Like
+  // every other copy in this lane, this omits `applyTemplateVisibilityFilter` — sound only because
+  // every case in this file runs under `managerActor`, where that filter is a no-op.
+  const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
+  const FOREIGN_SINK_SORT_ORDER = 999999
+
+  async function sinkForeignTemplates(org: string, ownTemplateIds: readonly string[]): Promise<string> {
+    const sinkGroupId = `atg_sink_${org}`
+    await query(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+       VALUES ($1, $2, $3, $4, 'sink')`,
+      [sinkGroupId, org, FOREIGN_SINK_GROUP_NAME, FOREIGN_SINK_SORT_ORDER],
+    )
+    await query(
+      `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+       SELECT $1, t.id, $2, 'sink', now()
+         FROM approval_templates t
+        WHERE NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)
+          AND NOT (t.id = ANY($3::uuid[]))`,
+      [org, sinkGroupId, ownTemplateIds],
+    )
+    return sinkGroupId
+  }
+
   const managerActor: ApprovalTemplateVisibilityActor = {
     userId: `rollback-manager-${TS}`,
     departmentIds: [],
@@ -153,8 +182,14 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
 
   it('happy path: rollback archives the batch-created group, unlinks the batch-linked templates, and stamps rolled_back_at', async () => {
     const org = trackOrg(`atgr-happy-${TS}`)
-    await createTemplate(`atgr-hr1-${TS}`, 'HR')
-    await createTemplate(`atgr-hr2-${TS}`, 'HR')
+    const hr1 = await createTemplate(`atgr-hr1-${TS}`, 'HR')
+    const hr2 = await createTemplate(`atgr-hr2-${TS}`, 'HR')
+    await sinkForeignTemplates(org, [hr1, hr2])
+    // §11 CI fix: baselined AFTER sinking, BEFORE execute — the sink's own group row (permanently
+    // active) and any foreign links it just wrote would otherwise be counted into the absolute
+    // numbers below. The DELTA across execute+rollback is what "one group created then archived,
+    // two links created then unlinked, one batch" actually means once a sink group is present.
+    const before = await tableCounts(org)
     const executed = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(executed.batchId).not.toBeNull()
     const batchId = executed.batchId as string
@@ -162,8 +197,14 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
     const result = await rollbackApprovalTemplateGroupBackfillBatch(org, batchId)
     expect(typeof result.rolledBackAt).toBe('string')
 
-    const counts = await tableCounts(org)
-    expect(counts).toEqual({ groups: 1, activeGroups: 0, links: 2, activeLinks: 0, batches: 1 })
+    const after = await tableCounts(org)
+    expect({
+      groups: after.groups - before.groups,
+      activeGroups: after.activeGroups - before.activeGroups,
+      links: after.links - before.links,
+      activeLinks: after.activeLinks - before.activeLinks,
+      batches: after.batches - before.batches,
+    }).toEqual({ groups: 1, activeGroups: 0, links: 2, activeLinks: 0, batches: 1 })
 
     const batchRow = await query<{ rolled_back_at: string | null }>(
       `SELECT rolled_back_at FROM approval_template_group_backfill_batches WHERE id = $1`,
@@ -175,6 +216,11 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
     )
   })
 
+  // §11 CI fix exemption: no `sinkForeignTemplates` call needed — every assertion below is scoped
+  // to the SPECIFIC pre-existing `existingGroupId`/its own link row, never an org-wide count or
+  // array. A foreign 'HR'-category pollutant, if present, gets pulled into this SAME batch/group by
+  // `execute` (it is batch-INTERNAL, not batch-external, from rollback's point of view) and is
+  // unlinked right alongside `tpl` — the `linkRow` toHaveLength(0) check holds either way.
   it('attach path: rollback unlinks the batch-linked template but does NOT archive a created_new=false group, even though it now has zero members', async () => {
     const org = trackOrg(`atgr-attach-${TS}`)
     const existingGroupId = `atg_rollback_attach_${TS}`
@@ -254,6 +300,12 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
   it('a batch-linked template moved to a different group by a batch-external action is left exactly where the external action put it', async () => {
     const org = trackOrg(`atgr-extmove-${TS}`)
     const movedTpl = await createTemplate(`atgr-extmove-tpl-${TS}`, 'HR')
+    // §11 CI fix: `result.groups[0]` below assumes exactly one category comes out of this org's
+    // `execute` call — true in the reproduction pollution set on hand today (its one non-null
+    // foreign row happens to also be category 'HR', folding into the SAME bucket), but NOT
+    // guaranteed in general: a foreign row with a DIFFERENT ASCII category that sorts before 'HR'
+    // would put a different group at index 0. Sinking closes the general case, not just today's.
+    await sinkForeignTemplates(org, [movedTpl])
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(result.batchId).not.toBeNull()
     const originalGroupId = result.groups[0].groupId
@@ -296,6 +348,9 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
   it('a batch-linked template detached and re-linked to the SAME group by a batch-external action is left alone (a fresh linked_at is a different token, even though group_id is unchanged)', async () => {
     const org = trackOrg(`atgr-extrelink-${TS}`)
     const tpl = await createTemplate(`atgr-extrelink-tpl-${TS}`, 'HR')
+    // §11 CI fix: same `result.groups[0]` exposure as the batch-external-move test above — sunk for
+    // the same reason (see that test's own comment for the mechanism).
+    await sinkForeignTemplates(org, [tpl])
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(result.batchId).not.toBeNull()
     const groupId = result.groups[0].groupId
