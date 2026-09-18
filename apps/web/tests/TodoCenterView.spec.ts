@@ -19,6 +19,13 @@ import { TOKEN_KEYS } from '../src/composables/authPrincipal'
 //      (two independent generation bumps — see that file and `approvalNavTodoBadge.spec.ts`'s E1/E2
 //      for why neither bump alone covers both transitions) and driven through the REAL
 //      `authPrincipal.ts` module, not a mock, as those tests do.
+//   3. REALTIME (B-2 step 8): `todo:counts-updated` triggers the SAME generation-guarded
+//      `refresh()` mount and 判据 E already use — the push carries no items (`{ count, sources }`),
+//      so there is no cheaper reaction. `useTodoCountsRealtime` is mocked at module level exactly
+//      like `approvalNavTodoBadge.spec.ts` mocks it for the badge — the composable's own normalizer
+//      and socket lifecycle are exercised for real in `apps/web/tests/todoCountsRealtime.spec.ts`,
+//      not here. The sign-out half of 判据 E for the push path (`acceptPushes`) mirrors the badge's
+//      own E3 test.
 const getTodoItemsSpy = vi.fn()
 vi.mock('../src/todo/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/todo/api')>()
@@ -27,6 +34,16 @@ vi.mock('../src/todo/api', async (importOriginal) => {
     getTodoItems: (...args: unknown[]) => getTodoItemsSpy(...args),
   }
 })
+
+type CountsCallback = (payload: { count: number; sources: Record<string, string> }) => void
+
+let capturedOnCountsUpdated: CountsCallback | null = null
+vi.mock('../src/todo/useTodoCountsRealtime', () => ({
+  useTodoCountsRealtime: (options: { onCountsUpdated: CountsCallback }) => {
+    capturedOnCountsUpdated = options.onCountsUpdated
+    return { reconnect: vi.fn(), disconnect: vi.fn() }
+  },
+}))
 
 const mocks = vi.hoisted(() => ({ isZh: true }))
 
@@ -53,6 +70,7 @@ describe('todo center view', () => {
     mocks.isZh = true
     getTodoItemsSpy.mockReset()
     getTodoItemsSpy.mockResolvedValue({ items: [], sources: {} })
+    capturedOnCountsUpdated = null
     // 判据 E tests drive `getAuthPrincipalKey()` through real storage — start clean.
     for (const key of TOKEN_KEYS) localStorage.removeItem(key)
   })
@@ -62,6 +80,7 @@ describe('todo center view', () => {
     if (container) container.remove()
     app = null
     container = null
+    capturedOnCountsUpdated = null
     for (const key of TOKEN_KEYS) localStorage.removeItem(key)
     vi.clearAllMocks()
   })
@@ -236,5 +255,55 @@ describe('todo center view', () => {
     expect(groupOf(root, 'approval')).toBeNull()
     expect(root.textContent).not.toContain('旧会话待办')
     expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // REALTIME (B-2 step 8) — see file header. `useTodoCountsRealtime` is mocked; its own
+  // normalizer/socket lifecycle is exercised for real in `todoCountsRealtime.spec.ts`.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('re-runs the same generation-guarded refresh on a todo:counts-updated push, rather than judging the pushed payload directly', async () => {
+    getTodoItemsSpy.mockResolvedValueOnce({ items: [], sources: { approval: 'ok' } })
+    const root = await mountView()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+    expect(groupOf(root, 'approval')?.querySelector('[data-testid="todo-center-group-empty"]')).not.toBeNull()
+
+    getTodoItemsSpy.mockResolvedValueOnce({
+      items: [{ source: 'approval', id: 'pushed', title: '推送到达', href: '/approvals/pushed', updatedAt: '2026-09-18T00:00:00.000Z' }],
+      sources: { approval: 'ok' },
+    })
+    expect(capturedOnCountsUpdated).toBeTypeOf('function')
+    capturedOnCountsUpdated!({ count: 1, sources: { approval: 'ok' } })
+    await flushUi()
+
+    // Mutation guard: the push payload alone carries no items — if `handleCountsUpdated` were
+    // changed to paint from the payload instead of calling `refresh()`, this second read would
+    // never happen and the list would stay empty.
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(2)
+    expect(groupOf(root, 'approval')?.textContent).toContain('推送到达')
+  })
+
+  it('a push landing on the still-open socket after a CONFIRMED sign-out must not issue a new read (mirrors the badge\'s E3)', async () => {
+    localStorage.setItem('auth_token', 'principal-1-token')
+    getTodoItemsSpy.mockResolvedValueOnce({ items: [], sources: { approval: 'ok' } })
+    const root = await mountView()
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+
+    for (const key of TOKEN_KEYS) localStorage.removeItem(key)
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    notifyAuthPrincipalChange()
+    await flushUi()
+    // Sign-out issues no re-read of its own (`hasSession()` is false) — confirms the assertion
+    // below reflects the push gate, not a coincidentally-idle refresh.
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+    expect(groupOf(root, 'approval')).toBeNull()
+
+    capturedOnCountsUpdated!({ count: 9, sources: { approval: 'ok' } })
+    await flushUi()
+
+    // Mutation guard: deleting `acceptPushes` (or its `= false` assignment on confirmed sign-out)
+    // makes this red — the push would trigger a THIRD `getTodoItems()` call for a departed
+    // principal.
+    expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)
+    expect(groupOf(root, 'approval')).toBeNull()
   })
 })
