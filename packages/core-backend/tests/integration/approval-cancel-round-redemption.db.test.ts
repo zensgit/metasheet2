@@ -2089,6 +2089,81 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       // case's reasoning must be re-read, so it goes red rather than silently widening.
       expect({ calcA, calcB, outboxA, outboxB }).toEqual({ calcA: '0', calcB: '0', outboxA: '0', outboxB: '0' })
 
+      // ── C-1 STEP ⑥, MEASURED — and it is a DIVERGENCE, not a parity. ────────────────────────
+      //
+      // Lock:86 makes `reverseLeaveBalanceDeduction`'s `unrecoverableExpired` 「必须呈现」. The
+      // value is CARRIED on both paths, but by two different artefacts, so there is no row to put
+      // side by side. Measured here with ONE predicate run against TWO inputs — same SQL, same
+      // column — so that B's zero is discriminating rather than an uncontrolled miss.
+      //
+      // THE MECHANISM (read at this head, not inherited). The seal
+      // (`w4c0-operation-registry.ts:764-789`, `UPDATE attendance_result_operations … SET state =
+      // 'completed', response_snapshot = …`) sits at the END of the boundary's transaction
+      // (`w4c3b-request-operation-boundary.ts:918-921`). It is NOT gated on `operationId`; the only
+      // early return that skips it on a non-refused run is `preflight.kind ===
+      // 'legacy_no_operation'` (`:897`), which the registry returns only when the org's posture is
+      // `legacy_projection_only` AND the command carried no stable identity
+      // (`w4c0-operation-registry.ts:641-648`, 「Null-ID legacy commands create no operation row」).
+      // That makes it a 2×2 over (posture, operationId):
+      //   · legacy + null      ⇒ legacy_no_operation ⇒ NO seal   ← path B, MEASURED here (0 rows)
+      //   · legacy + non-null  ⇒ seals, returns `legacy_compat`  ← path A, MEASURED here (1 row)
+      //   · non-legacy + null  ⇒ `fail('W4C0_OPERATION_ID_REQUIRED')` (`:650-653`)   NOT MEASURED
+      //   · non-legacy + non-null ⇒ seals, returns `executed`                        NOT MEASURED
+      // The two unmeasured cells are read off source only and are labelled as such; the link
+      // 「operationId === null ⇒ plan.legacyNullIdCount > 0」 is NOT read, so the third cell is a
+      // source-text claim, not a behaviour claim.
+      //
+      // WHY B CARRIES NO IDENTITY, AND WHY THAT IS THE REPRESENTATIVE CASE — not a fixture choice.
+      // `resolveRequestOperationId` (`index.cjs:33304-33311`) reads `operationId`/`operation_id`
+      // out of the REQUEST BODY and nothing else. The published contract for this endpoint
+      // (`packages/openapi/src/paths/attendance.yml:758-765`) declares exactly two body properties,
+      // `comment` and `metadata` — there is NO field a client could put an operation id in. The one
+      // production client in the repo sends `JSON.stringify({})`
+      // (`apps/web/src/views/AttendanceView.vue:23128-23131`); this fixture's `body: {}` above is a
+      // copy of it, not a simplification. Census (excludes node_modules, docs, tests):
+      //   $ grep -rn "attendance/requests/" . | grep -v node_modules | grep -i cancel
+      //   ⇒ 1 production client (AttendanceView.vue:23128), 1 route registration
+      //     (index.cjs:38634) + its DELETE alias (`:38638-38642`, same `cancelRequest` handler),
+      //     1 spec (attendance.yml:748), 1 SDK type, 1 entrypoint constant; the rest are tests.
+      // So making B seal would require sending a field the contract does not offer and no client
+      // sends — it would buy a comparable row by making B stop being a twin of production.
+      const sealCount = async (requestId: string): Promise<string> =>
+        (
+          await pool().query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM attendance_result_operations
+              WHERE resolved_request_id = $1::uuid`,
+            [requestId],
+          )
+        ).rows[0].count
+      const sealA = await sealCount(attachedA!.requestId)
+      const sealB = await sealCount(attachedB.requestId)
+      // A is the IN-CASE POSITIVE CONTROL for B's zero: identical SQL, identical column, the only
+      // difference is which request id goes in. A non-zero A proves the table exists, the predicate
+      // matches, and the column is populated — so B's 0 is a measured ABSENCE of a seal, not a
+      // broken query. Pinned as VALUES for the §3.14.1 reason.
+      expect({ sealA, sealB }).toEqual({ sealA: '1', sealB: '0' })
+
+      // The 呈现 the lock asks for, on A: persisted in the sealed snapshot. Asserted as a KEY
+      // (this fixture seeds no leave lots, so the counter is 0 — §3.16 is where a seeded EXPIRED
+      // lot drives it to 120), so the assertion survives the value changing but dies if the
+      // carrier is dropped.
+      const sealRowA = await oneRow(
+        `SELECT entrypoint, state, response_snapshot FROM attendance_result_operations
+          WHERE resolved_request_id = $1::uuid`,
+        [attachedA!.requestId],
+      )
+      expect(sealRowA.entrypoint).toBe('request_cancel')
+      expect(sealRowA.state).toBe('completed')
+      const reversalA = ((sealRowA.response_snapshot as { data?: { reversal?: unknown } })?.data ?? {}).reversal
+      expect(reversalA, 'C-1 step ⑥ — the sealed snapshot must still carry `reversal`').toBeDefined()
+      expect(Object.keys(reversalA as Record<string, unknown>)).toContain('unrecoverableExpired')
+
+      // The SAME value on B lives in the HTTP RESPONSE BODY (`payloadB.data.reversal`, asserted
+      // above) and in no sealed row at all. That asymmetry IS the finding: ⑥'s 账侧 parity half is
+      // NOT a writable byte-compare on a representative twin, because the two paths present the
+      // value through different artefacts — A through `response_snapshot`, B through its response.
+      // Recorded as a DECLARED DIVERGENCE with a mechanism (the 2×2 above), not as an open TODO.
+
       // ── The 呈现 GAP, ASSERTED. The approval side exposes no field carrying the W4 result
       //    payload: the redeemed round's DTO is an ordinary `UnifiedApprovalDTO`. Measured as a
       //    negative so that the day a channel IS added, this line goes red and the MD's OPEN item
