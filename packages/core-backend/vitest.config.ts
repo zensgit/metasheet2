@@ -1840,6 +1840,14 @@ export default defineConfig({
       // required `test (20.x)` leg. DATABASE_URL-gated; excluded here so the no-DB job cannot
       // skip-green it.
       'tests/integration/approval-template-groups-sections.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 3 (A-4) real-DB
+      // acceptance E's phase-3 leg (concurrent reorder) + §3 I3. A FOURTH normal-pool file for
+      // this feature (not RR-pinned — the reorder transaction sets READ COMMITTED itself). Same
+      // override/re-pin note as the three siblings above: this deliberately OVERRIDES the "NOT
+      // plugin-tests.yml" local convention because lock §6 assigns real-DB acceptance for this
+      // feature into the one real-DB step that runs on the required `test (20.x)` leg.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it.
+      'tests/integration/approval-template-groups-reorder.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
