@@ -538,3 +538,27 @@ PR #5849's preceding head had one cloud schema-gate timeout; it is not classifie
 as a flake. Source seals, immutable attachment copy, object receipts and catalog
 publication remain separate incomplete gates. No customer storage, flags or
 deployment are involved.
+
+## Custody-Interval Source Drift
+
+The follow-up synthetic regression changes a captured record from a second database
+connection inside `produceGenerationDek`, after the initial source checks but before
+nonce reservation. The server-owned sink must reject with
+`RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED`, leave zero nonce rows and no prepared
+envelope for that generation, and invoke no upload callback. This does not claim a
+final publication fence: source may still change after the reservation transaction.
+
+Mutation replacing the sink's transactional source recheck with its cached source
+entry produces `Missing expected rejection` in this new case. Both mutation and
+restored runs clean their owned database/connections and temporary cluster.
+The test-only wrapper forwards the complete custody input, including generation ID.
+Logs: `/private/tmp/tm-manual-custody-drift-{mutation,final}.log`.
+
+Preceding main integration `b49d82ec91d455319bd966cc1c77e4d8f5f4bdeb` has ordered
+parents `e43eb22869eaf5858b725f336380580c2ddc68bc` and
+`bb77ca5f2ce3c2825265ec8877861d367d017ead`. The merge had no conflict or manual
+resolution; official provenance comparison was zero differences. Full owned-PG,
+73 worker/crypto tests, static wiring 37/37, acceptance TypeScript and full S5 passed
+on that merged tree. Its main-relative whitespace check passed; two unrelated PLM
+docs inherited trailing blank lines from main and were not edited. Remote CI is
+separate evidence and is not implied by these local results.

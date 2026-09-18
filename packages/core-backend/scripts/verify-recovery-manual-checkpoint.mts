@@ -807,6 +807,25 @@ try {
     assert.equal(conflictUploads, 0)
     assert.equal(await nonceCount(conflict.owner.generationId), 1, 'earlier nine reservations must roll back')
     assert.equal(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, conflict.owner)), null)
+    const drift = await continuation()
+    const driftWriter = new Client({ ...connection, database })
+    await driftWriter.connect()
+    let driftUploads = 0
+    try {
+      await assert.rejects(manual({ ...drift, capture: async (snapshot) => ({
+        ...await capture(snapshot), binding: drift.binding,
+        keyCustody: { ...custody, async produceGenerationDek(input) {
+          await driftWriter.query(`UPDATE meta_records SET data='{"manual-source-field":"during-custody"}',
+            version=version+1 WHERE id='manual-source-record'`)
+          return custody.produceGenerationDek(input)
+        } },
+      }), upload: async () => { driftUploads++ } }),
+      { message: 'RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED' })
+      assert.equal(driftUploads, 0)
+      assert.equal(await nonceCount(drift.owner.generationId), 0)
+      assert.equal(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, drift.owner)), null)
+    } finally { await driftWriter.end() }
+    console.log('PASS: separate-connection source change during custody refuses reservation, prepared persistence and upload')
     console.log('PASS: server-owned ten-row nonce transaction; caller sink ignored; last-row conflict rolls back earlier nine, no prepared ciphertext/upload; resume keeps original reservations')
   } finally { sourceKey.fill(0) }
   console.log('PASS: source generation binding and single use; tampered relational plaintext refused before custody; interrupted first seal resumes ten authenticated original sections without source or recapture')
