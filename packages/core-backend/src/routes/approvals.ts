@@ -395,28 +395,42 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
 // 校验可见)": exported (not inlined at the one call site) so a real-DB test can exercise the
 // predicate directly with a NON-manager actor.
 //
-// CORRECTED (design-gate-A3-phase2-20260918.md §2 Q2 / P2-5, 2026-09-18 回流修复): an earlier
-// version of this comment claimed "`approvalTemplateAdminGuard` makes every actor that can reach
-// the link endpoint today `isTemplateManager` (guard population ⊆ manager ⊆ sees everything)".
-// That is a strictly-narrower claim than the code supports and is FALSE for two actor shapes that
-// pass the guard but that `isTemplateManager` above cannot see:
-//   (1) a wildcard permission code — `rbac/rbac.ts:21-25`'s `hasPermissionCode` admits
-//       `approval-templates:*` (and `approvals:*`/`*:*`) via RESOURCE-prefix expansion, so
-//       `approvalTemplateAdminGuard`'s `rbacGuardAny(['approval-templates:manage',
-//       'approvals:admin-templates'])` lets it through; `isTemplateManager` above tests
-//       `permissions.includes(...)` on those SAME two exact strings plus `'*:*'`/`'approvals:*'`
-//       only — `'approval-templates:*'` is not one of them, so it is admitted by the guard but
-//       invisible to this actor derivation.
+// CORRECTED (design-gate-A3-phase2-20260918.md §2 Q2 / P2-5; corrected AGAIN
+// impl-gate-A-slice1-round4-20260918.md §2 P2-1, 2026-09-18): an earlier version of this comment
+// claimed "`approvalTemplateAdminGuard` makes every actor that can reach the link endpoint today
+// `isTemplateManager` (guard population ⊆ manager ⊆ sees everything)". Round 2's gate already
+// real-DB falsified that once (a wildcard-code actor measured 403, not admitted — see round 3's
+// report §3 P3-3). This round's own fix (the single commit this comment lives in) flipped ⊆ to ⊋,
+// but grounded it in a SECOND false claim — copied verbatim from A-3's static-code-reading
+// conclusion, without re-checking round 2's own real-DB result — that a wildcard
+// `approval-templates:*` permission code, by itself, gets an actor past the guard. Round 4's gate
+// (reviewing this very comment) independently re-tested that and real-DB falsified it a SECOND
+// time, end-to-end, on this head:
+//   (1) a wildcard permission code does NOT, by itself, pass the guard. `hasPermissionCode`
+//       (`rbac/rbac.ts:21-25`) does expand `approval-templates:*` to match the guard's literal
+//       `approval-templates:manage` string, but that is only ONE conjunct of `rbacGuardAny`'s
+//       permission leg (`rbac/rbac.ts:134-142`): `requestUserHasResolvedPermission(requestUser,
+//       code) && await isPermissionAllowedByNamespaceAdmission(userId, code)`. `approval-templates`
+//       IS an admission-controlled resource (`approvals` is NOT — see
+//       `namespace-admission.ts`'s `NON_NAMESPACED_PERMISSION_RESOURCES`), so absent an extra
+//       namespace-admission grant, the second conjunct fails and BOTH `approval-templates:*` and
+//       the guard's own literal `approval-templates:manage` get 403 — measured end-to-end on this
+//       head, not inferred. This actor shape exists only if the same principal ALSO holds a
+//       namespace-admission grant for `approval-templates`; repo-wide grants of
+//       `approval-templates:*` are 0 today (all repo hits are commentary, not real grants).
 //   (2) a DB-side admin — `rbacGuardAny`'s final fallback calls `isAdmin(userId)`
 //       (`rbac/service.ts`, `user_roles WHERE role_id = 'admin'`), independent of anything on the
 //       JWT/`req.user` this function reads (`req.user.role`, `.roles`, `.permissions`). A principal
-//       admitted ONLY through that DB row is likewise invisible to `isTemplateManager` above.
-// So the true relationship is: guard population ⊋ manager population (a strict superset, not
-// equal, not a subset relation at all) — `applyTemplateVisibilityFilter` does NOT short-circuit
-// for every actor able to reach this endpoint, only for the ones `isTemplateManager` actually
-// recognizes. This is exactly why exporting the predicate for a direct, non-manager-actor unit
-// test (below) was never sufficient on its own — see the lifecycle suite's REAL, guard-passing,
-// non-manager HTTP case ("§2(c): a DB-side-admin actor" block) added in the same 回流修复, which
+//       admitted ONLY through that DB row is invisible to `isTemplateManager` above — this is the
+//       ONLY actor shape actually demonstrated end-to-end this round (lifecycle suite's "§2(c): a
+//       DB-side-admin actor" HTTP case, plus a negative control that removes the `user_roles` grant
+//       and turns it 403 again).
+// So the true relationship is still guard population ⊋ manager population (a strict superset, not
+// equal, not a subset relation at all), but this round it rests on exactly ONE measured leg —
+// DB-side `isAdmin` — not two. Correcting this CLAIM changes no runtime behavior; only what this
+// comment asserts about existing behavior changes. This is exactly why exporting the predicate for
+// a direct, non-manager-actor unit test (below) was never sufficient on its own — see the lifecycle
+// suite's REAL, guard-passing, non-manager HTTP case ("§2(c): a DB-side-admin actor" block), which
 // proves the filter still narrows what such an actor's link REQUEST can see, not merely what the
 // predicate returns when called directly with a hand-built actor object.
 //
