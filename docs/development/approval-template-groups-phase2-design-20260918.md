@@ -914,7 +914,7 @@ advisor 指出:`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` 未导出,§20.
 - **人口**:一个新 org;一条真实 `approval_templates` 行,`category = 'ExecCat-<TS>'`(带时间戳后缀,不与本文件任何其它测试或跨会话残留冲突,不可信任裸字面量"HR"这类跨文件共享类目)。
 - **持锁方(raw client,同 E 的 `beginArchiveHold`/`beginLinkHold` 手法)**:`BEGIN; SET READ COMMITTED; pg_advisory_xact_lock('atg:'||org); INSERT` 一个**不同名**的组(`HolderCat <TS>`,`sort_order=1`)——用不同类目名是为了让 execute 走"create"分支而不是"attach"分支,不搅乱要测的那条 `MAX(sort_order)+1` 路径。
 - **并发腿**:`POST /api/approval-template-groups/backfill/execute`(真实 HTTP,走完整 guard + `executeApprovalTemplateGroupBackfill`)。`waitUntilBackendBlockedByHolder(holderPid)` 确认 execute 真的停在 L0(不是没跑到那一步就意外过了),持锁方再 `COMMIT`。
-- **断言(双保险,状态码断言是主判据)**:①`res.status` 必须是 `201`(执行成功、新建了组)——这是主判据,因为 mutant 下的失败模式是**整个 execute 事务在 COMMIT 时因 `atg_sort_unique` 冲突回滚**(持锁方的组已经落库在先,execute 若读到 stale MAX 会算出同一个 `sort_order`,DEFERRABLE 约束在 COMMIT 才检查,一旦冲突,execute 自己新建的那行连同批次头一起被回滚,不会有"重复行残留"这种更弱的可观测信号,只会是 500);②响应体里能找到 `category === 'ExecCat-<TS>'` 的那一组,`action === 'create'`,`templateIds` 精确等于本用例自己建的模板 id(不假设 `groups.length === 1`——`approval_templates` 全表无 org 列,理论上其它文件的残留候选也会被同一次 execute 一并处理,断言只认自己关心的那一格,不认整个数组形状);③DB 层再核一次该组的 `sort_order` 严格大于持锁方的 `1`(锦上添花,不是替代①)。
+- **断言(双保险,状态码断言是主判据)**:①`res.status` 必须是 `201`(执行成功、新建了组)——这是主判据。**mutant 下的失败机制已现场核实,不是推断**:临时在测试里加一行 `console.log` 打印 mutant 跑时的响应体,重跑一次,输出是 `500 {"error":{"code":"GROUP_SORT_CONFLICT","message":"Group sort order conflict"}}`——证实了"整个 execute 事务在 COMMIT 时因 `atg_sort_unique` 冲突回滚,`mapGroupConstraintError` 把它映射成 500 GROUP_SORT_CONFLICT"这条机制描述,不是"观测到 500,原因待查"式的空判据;调试行验证完立即删除,`cmp` 确认测试文件与 §21.4 mutation 之前的版本逐字节一致(两个文件——`routes/approvals.ts` 与本测试文件——都做过 cp 备份 → 改 → 跑 → 还原 → `cmp`,证据链完整)。②响应体里能找到 `category === 'ExecCat-<TS>'` 的那一组,`action === 'create'`,`templateIds` 精确等于本用例自己建的模板 id(不假设 `groups.length === 1`——`approval_templates` 全表无 org 列,理论上其它文件的残留候选也会被同一次 execute 一并处理,断言只认自己关心的那一格,不认整个数组形状);③DB 层再核一次该组的 `sort_order` 严格大于持锁方的 `1`(锦上添花,不是替代①)。
 - **清理**:`try/finally` 里删自己插入的模板行(与本文件其它测试一致的 org 级清理由已有的 `orgTags`/`afterAll` 负责,但 execute 会写 `approval_template_group_backfill_batches`/`batch_groups`/`batch_links` 三张表,本文件之前的 `afterAll` 没有清它们——已一并把批次头的删除加进 `afterAll`(先删批次头,级联清两张子表,`atgbbg_group_fk` 是 `NO ACTION`,必须先于组行删除;对本文件其它没写过这三张表的 org 是零行 no-op)。
 
 ### 21.3 命令与结果
@@ -927,6 +927,8 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 → `Test Files 1 passed (1)` / `Tests 11 passed (11)`(含新增例)。
 
 全套件回归(同 §20.2 的七文件命令):`Test Files 7 passed (7)` / `Tests 79 passed (79)`(78 + 本步新增 1)。`npx tsc --noEmit`(`packages/core-backend`):零错误。
+
+**CI 可达性现场核对(不是假设)**:`grep -n "approval-template-groups-serialization" .github/workflows/plugin-tests.yml` → 命中 `:1693`,在 `approval-real-db-integration` 步骤的白名单里——本文件确实会被 CI 跑到,新增的这一条不是"绿但从未真正执行"。
 
 ### 21.4 mutation 正控(cp/改/跑/还原/cmp,两个文件一起验证"只在 RR 池文件里有判别力")
 
