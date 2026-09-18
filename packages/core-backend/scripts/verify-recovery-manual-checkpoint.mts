@@ -1100,8 +1100,17 @@ try {
       assert.equal(opened.coverage_index.length, 28)
       console.log('PASS: real local custody backup; locked-session upload resume, fresh-session authenticated publication and public archive reader reconciles all ten stored sections')
       const { createRecoveryArchiveManualCommand } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+      let refusePreviewObjectRead = false
+      let corruptPreviewObjectRead = false
       const runtime = { keyCustody: restoredSession.admitForArchive(custodyId),
-        objectStore: localProvider, transactionDepth: first.transactionDepth }
+        objectStore: { ...localProvider, async get(...args: Parameters<typeof localProvider.get>) {
+          if (refusePreviewObjectRead) throw new Error('SYNTHETIC_PREVIEW_OBJECT_UNAVAILABLE')
+          const stored = await localProvider.get(...args)
+          if (!corruptPreviewObjectRead) return stored
+          const bytes = Uint8Array.from(stored.bytes)
+          bytes[0] = bytes[0]! ^ 1
+          return { ...stored, bytes }
+        } }, transactionDepth: first.transactionDepth }
       const command = createRecoveryArchiveManualCommand(uploadInput.transaction, runtime,
         { ...admissionPolicy, keyId: capability.keyId })
       const commandIdentity = { ...localInput.identity, requestId: randomUUID() }
@@ -1187,6 +1196,57 @@ try {
           const catalog = await catalogResponse.json() as { ok: boolean; data: { generationId: string } }
           assert.equal(catalog.ok, true)
           assert.equal(catalog.data.generationId, publicResult.data.generationId)
+          const previewUrl = captureUrl.replace('/captures', '/preview')
+          const previewBody = JSON.stringify({ generationId: publicResult.data.generationId,
+            mode: 'revert', scope: { kind: 'whole_sheet' } })
+          const previewResponse = await fetch(previewUrl, { method: 'POST', headers, body: previewBody })
+          assert.equal(previewResponse.status, 200)
+          const previewResult = await previewResponse.json() as { ok: boolean; data: {
+            generationId: string; executable: boolean; blockedReason: string; previewIdentity: null;
+            summary: { effectiveWriteCount: number } } }
+          assert.equal(previewResult.ok, true)
+          assert.equal(previewResult.data.generationId, publicResult.data.generationId)
+          assert.equal(previewResult.data.blockedReason, 'no_changes')
+          assert.equal(previewResult.data.executable, false)
+          assert.equal(previewResult.data.previewIdentity, null)
+          assert.equal(previewResult.data.summary.effectiveWriteCount, 0)
+          refusePreviewObjectRead = true
+          try {
+            const refused = await fetch(previewUrl, { method: 'POST', headers, body: previewBody })
+            assert.equal(refused.status, 503)
+            const refusedBody = await refused.text()
+            assert.ok(!refusedBody.includes('SYNTHETIC_PREVIEW_OBJECT_UNAVAILABLE'))
+          } finally { refusePreviewObjectRead = false }
+          corruptPreviewObjectRead = true
+          try {
+            const corrupted = await fetch(previewUrl, { method: 'POST', headers, body: previewBody })
+            assert.equal(corrupted.status, 503)
+          } finally { corruptPreviewObjectRead = false }
+          assert.equal((await fetch(previewUrl, { method: 'POST', headers, body: previewBody })).status, 200)
+          const originalLive = (await query(`SELECT data,version,updated_at FROM meta_records
+            WHERE id='manual-source-record'`)).rows[0]
+          try {
+            await query(`UPDATE meta_records SET data='{"manual-source-field":"synthetic-post-archive-edit"}',
+              version=version+1 WHERE id='manual-source-record'`)
+            const changedResponse = await fetch(previewUrl, { method: 'POST', headers, body: previewBody })
+            assert.equal(changedResponse.status, 200)
+            const changed = await changedResponse.json() as { ok: boolean; data: {
+              executable: boolean; blockedReason: null; previewIdentity: string;
+              summary: { effectiveWriteCount: number; reverts: { recordId: string; fieldIds: string[] }[] } } }
+            assert.equal(changed.ok, true)
+            assert.equal(changed.data.executable, true)
+            assert.equal(changed.data.blockedReason, null)
+            assert.equal(typeof changed.data.previewIdentity, 'string')
+            assert.ok(changed.data.previewIdentity.length > 0)
+            assert.equal(changed.data.summary.effectiveWriteCount, 1)
+            assert.deepEqual(changed.data.summary.reverts, [{ recordId: 'manual-source-record', fieldIds: ['manual-source-field'] }])
+            assert.deepEqual((await query(`SELECT data FROM meta_records WHERE id='manual-source-record'`)).rows[0].data,
+              { 'manual-source-field': 'synthetic-post-archive-edit' }, 'preview must not apply the recovery')
+          } finally {
+            await query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
+              [JSON.stringify(originalLive.data), originalLive.version, originalLive.updated_at])
+          }
+          console.log('PASS: public HTTP capture/catalog/preview; unchanged no_changes; edited field exact executable plan without apply; missing/corrupt object refuses; restored reads recover')
         } finally {
           httpServer.closeIdleConnections()
           await new Promise<void>((resolve, reject) => httpServer.close(error => error ? reject(error) : resolve()))
