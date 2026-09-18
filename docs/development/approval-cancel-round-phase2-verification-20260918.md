@@ -6,9 +6,12 @@ Branch `feat/approval-cancel-round-phase2`, stacked on `feat/approval-cancel-rou
 `ApprovalBridgeService.ts` and `apps/web/src/approvals/api.ts`, neither of which this slice edits).
 The branch name alone no longer resolves to this slice's base, so the SHA is the citation.
 Lock: `approval-change-request-design-lock-draft-20260915.md` (v5.9, RATIFIED).
-Private database: **`metasheet2_lock_c2`**, PostgreSQL **15.17 (Homebrew)**, created for this slice
-and migrated from empty including the phase-1 migrations. No shared, staging or production
-database was touched.
+Private databases (three by the end of this file, each created virgin and migrated from empty
+including the phase-1 migrations; **no shared, staging or production database was ever touched**):
+`metasheet2_lock_c2` (this unit's own original runs), `metasheet2_lock_c2_merge` (post-merge
+verification, "合流记录" §), and `metasheet2_lock_c2_docs` (the 2026-09-18 定稿 pass's independent
+rerun). All three: PostgreSQL **15.17 (Homebrew)** (`metasheet2_lock_c2_docs`'s own `select version()`
+is in the 定稿重跑记录 § below — not assumed identical to the other two by naming convention alone).
 
 This file is **incremental**: it records each unit as it lands, with commands run verbatim and the
 result lines they printed. Units not yet done are listed as not done, not as passing.
@@ -30,7 +33,7 @@ lanes folded back by merge commit `1c98ff937`.
 | 判据 IV,`blocked` 半边(C-3 收口,C-1 `business_refused` 承接) | `approval-cancel-round-redemption.db.test.ts` | "判据 IV `blocked` 半边 + C-3 row 4(业务不可逆):C-1 RETURNS a business refusal …" | base | **PASS** | 同上;这一半边同样是双件背书 |
 | W4 入口(C-1 通过 W4 外部事务入口调用,C-1 port) | `approval-cancel-round-redemption.db.test.ts` | "判据 II END-TO-END (no double): the redemption runs the REAL W4 external-transaction entry — its isolation and rollout-lock preconditions pass by MEASUREMENT …"；判据 II fail-closed 的 `CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE` 用例 | base | **部分** | E2E 用例走的是 **legacy 写入姿态**,P14 已批休假取消计算被跳过(断言过,§3.12.3);未 seed 请假余额批次,`reverseLeaveBalanceDeduction` 未写任何东西 |
 | §3.3b 锁序(rollout advisory lock 排在行锁之前,阻塞项的解法) | `approval-cancel-round-lock-order-census.db.test.ts` | census Q-F(6 legs,17→23 passed);M-11 至 M-15(§3.9.5,原编号未动) | base | **部分** | leg 3 只是**源码顺序**证明,不是真并发死锁构造(需要 Q-A/Q-D 的双连接技术,§3.9.4 自陈);新 503 面的路由层处理未验证(§3.9.3) |
-| §8 期 1 账侧字节等价 | `approval-cancel-round-redemption.db.test.ts` | "账侧 (lock §8 期 1): the redeemed cancel round leaves the SAME rows as the existing `POST /api/attendance/requests/:id/cancel` path on a twin fixture …" | u2 前身(§3.15)+ u2 补测(§3.21/§3.22) | **部分** | 七步里 ②④⑤ 已比对、③⑦ 等值但走的是**已跳过的生产分支**(需 non-legacy 双胞胎)、⑥ 是**声明式背离**(无可比行对)、①② 无终态可比;另 request provenance(`ip_address`/`user_agent`)是实质性背离,owner 待裁(§3.15's headline,§7.2) |
+| §8 期 1 账侧字节等价 | `approval-cancel-round-redemption.db.test.ts` | "账侧 (lock §8 期 1): the redeemed cancel round leaves the SAME rows as the existing `POST /api/attendance/requests/:id/cancel` path on a twin fixture …" | base(§3.15)+ u2 补测(§3.21/§3.22) | **部分** | 七步里 ②④⑤ 已比对、③⑦ 等值但走的是**已跳过的生产分支**(需 non-legacy 双胞胎)、⑥ 是**声明式背离**(无可比行对)、①② 无终态可比;另 request provenance(`ip_address`/`user_agent`)是实质性背离,owner 待裁(§3.15's headline,§7.2) |
 | §5 I3「终结即释放」(两个终态写入方) | `approval-cancel-round-redemption.db.test.ts` | "§5 I3 「终结即释放」 (the C-3 half): … `createCancelRoundInstance` call is the first post-close statement …"(M-21);"§5 I3 「终结即释放」 (the C-2 half, outlet #5): …"(M-30,§3.20) | base(C-3 半边)+ u2(C-2 半边,§3.20) | **PASS**(两个写入方都已探) | 两条用例都用测试替身 port,原单据在生产中会被 C-1 真取消——真实边界下第二轮是否会因单据状态被拒,未答(§3.20 自陈的夹具前提) |
 | §9-9 允许集含 `approve` 成员钉 | `approval-cancel-round-redemption.db.test.ts` | "§9-9 允许集 MEMBER pin (approve) — gate round-5 P3-1: on ONE cancel-round instance the action-judgment gate refuses a non-member … and LETS `approve` THROUGH …"(M-29,§3.19) | u2 | **PASS** | 只钉了 `approve` 一格;`reject`/`revoke`/`comment` 三格仍是 C-1 R5-M8/M9/M10 的证据,绑定 C-1 自己的 head,本单元不继承不重跑(§3.19.4 自陈) |
 
@@ -3490,10 +3493,24 @@ inside the running §4 summary that were outside the git-conflicted hunks entire
 them because u3 never touched those exact lines, so they carried u2's stale numbering silently):
 
 ```
-$ grep -c "M-2[5-9]\|M-3[0-2]" docs/development/approval-cancel-round-phase2-verification-20260918.md
+$ git show 1c98ff937:docs/development/approval-cancel-round-phase2-verification-20260918.md \
+    | grep -c "M-2[5-9]\|M-3[0-2]"
 # manually inspected each hit (28 total) and classified by section context — see the two tables
 # below for the resulting, collision-free ledger.
 ```
+
+⚠️ **Head-scoped to `1c98ff937` (this merge commit), re-stated for a reader who diffs this file
+against a later revision**: neither command above is re-runnable verbatim against the CURRENT file
+and get the same numbers — this section is a historical transcript of what those commands printed at
+merge time, kept as the record of how that specific collision was resolved, not a standing claim
+about the file's present mutation-ID population. Re-run today, the bare `grep -c` form (without
+`git show <SHA>:`) would also pick up `M-33`/`M-34` (§0 R-11, a LATER, unrelated collision the
+2026-09-18 定稿 pass found between §3.9.5 and §3.10.5 — inside the "M-1..M-24 (base, unperturbed)"
+range this section's own next code block names). "Unperturbed" there means untouched by the
+u2/u3 MERGE specifically; it does not mean collision-free in the absolute — R-11 is the correction for
+that. The aggregated, current-head-accurate mutation ledger is in the "Mutation 台账汇总表" section
+at the end of this file; treat that one as authoritative for "what mutation IDs exist today," not
+this historical block.
 
 u3's ledger (unchanged, `§3.16`–`§3.18`): `M-25` (expired branch folded into plain success),
 `M-26` (whole classifier folded into undifferentiated bucket), `M-27` (durable write deleted).
@@ -3533,11 +3550,12 @@ $ grep -c "^<<<<<<<\|^=======$\|^>>>>>>>" \
     packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
 docs/development/approval-cancel-round-phase2-verification-20260918.md:0
 packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:0
-$ grep -o "M-[0-9]\+" docs/development/approval-cancel-round-phase2-verification-20260918.md \
-    | sort -t- -k2 -n | uniq -c
-# M-1..M-24 (base, unperturbed), M-25/M-26/M-27 = u3 (3 each, all inside §3.16), M-29(2)/M-30(7)/
-# M-31(1)/M-32(5) = u2 (renumbered) — no ID appears in both a u3-section context and a u2-section
-# context.
+$ git show 1c98ff937:docs/development/approval-cancel-round-phase2-verification-20260918.md \
+    | grep -o "M-[0-9]\+" | sort -t- -k2 -n | uniq -c
+# M-1..M-24 (base, unperturbed BY THE MERGE), M-25/M-26/M-27 = u3 (3 each, all inside §3.16),
+# M-29(2)/M-30(7)/M-31(1)/M-32(5) = u2 (renumbered) — no ID appears in both a u3-section context and
+# a u2-section context. (⚠️ superseded for "current file" purposes by §0 R-11 / the Mutation 台账汇总表
+# — see the note on the block above.)
 ```
 
 Committed `1c98ff937` ("merge(approval): fold u2 lane into phase2 stack") and pushed
@@ -3676,6 +3694,8 @@ merge-record's own run; it is confirmation, not a different code path.
 $ dropdb -h localhost -p 5432 -U metasheet metasheet2_lock_c2_docs
 dropdb: error: database removal failed: ERROR:  database "metasheet2_lock_c2_docs" does not exist
 $ createdb -h localhost -p 5432 -U metasheet metasheet2_lock_c2_docs
+$ psql -h localhost -p 5432 -U metasheet -d metasheet2_lock_c2_docs -tAc "select version()"
+PostgreSQL 15.17 (Homebrew) on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
 
 $ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_docs \
     npx tsx src/db/migrate.ts
@@ -3739,9 +3759,11 @@ $ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@local
 **All green, from a virgin database, on the current branch tip: migration (ends at the same
 `zzzz20260918110000` file as every prior run), `tsc --noEmit`, the ci-wiring guard (6/6), both named
 unit suites (194/194), all seven `approval-cancel-round-*.db.test.ts` files (78/78 including the
-redemption file's own 19/19), and the redemption file's 19 `it()`-plus-sentinel titles printed by
-name — matching the static census in the "`it()` count reconciled" section above exactly, with no
-title missing and none renamed since that census was taken.**
+redemption file's own 19/19), and — printed here by name for the first time in this file, with
+`--reporter=verbose` — the 19 individual `it()`-plus-sentinel titles above. That count (19) matches
+the static `it()`-plus-sentinel census in the "`it()` count reconciled" section; that earlier census
+recorded a COUNT, never the individual titles, so this is the first title-level confirmation, not a
+re-confirmation of one that already existed.**
 
 ---
 
