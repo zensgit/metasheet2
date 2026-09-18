@@ -219,13 +219,16 @@ resolution `catch`, an unrelated fail-closed no-manager path).
 
 ### 3.3 The allowed action set (lock §14.2, lock:342)
 
-`ApprovalProductService.ts` (design-time sketch; re-derive this tree's actual lines with
-`grep -n "^const CANCEL_ROUND_ALLOWED_ACTIONS\|^function assertCancelRoundActionAllowed"
-ApprovalProductService.ts` rather than trusting a pinned literal here — P3 hygiene round,
-2026-09-19, gate round-5 P3-2 found this section's `:4253-4264` and §7's `:4253-4272` both off by
-a few lines from this tree's real block, `:4251-4256` (const) / `:4258-4266` (function); per
+`ApprovalProductService.ts` (design-time sketch; re-derive this tree's actual lines with the grep
+below rather than trusting a pinned literal here — P3 hygiene round, 2026-09-19, gate round-5 P3-2
+found this section's `:4253-4264` and §7's `:4253-4272` both off by a few lines from this tree's
+real block, `:4251-4256` (const) / `:4258-4266` (function); per
 `feedback_digest_pin_is_not_a_behavioural_gate`, re-deriving rather than re-pinning a corrected
 literal is the fix, since a fresh literal drifts the same way on the next edit):
+
+```
+grep -n "^const CANCEL_ROUND_ALLOWED_ACTIONS\|^function assertCancelRoundActionAllowed" packages/core-backend/src/services/ApprovalProductService.ts
+```
 
 ```
 const CANCEL_ROUND_ALLOWED_ACTIONS: ReadonlySet<ApprovalActionType> =
