@@ -1,7 +1,7 @@
 /** Synthetic full-schema checkpoint acceptance; never use a customer database. */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createCipheriv, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -12,6 +12,8 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const prepared = require('../src/multitable/recovery-archive-prepared-capture.ts') as typeof import('../src/multitable/recovery-archive-prepared-capture')
+const preparedMigration = require('../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures.ts') as typeof import('../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures')
 const bootstrap = require('../src/multitable/recovery-archive-section-bootstrap.ts') as typeof import('../src/multitable/recovery-archive-section-bootstrap')
 const vectors = require('../src/multitable/recovery-archive-source-vector.ts') as typeof import('../src/multitable/recovery-archive-source-vector')
 const checkpoints = require('../src/multitable/recovery-archive-section-checkpoint.ts') as typeof import('../src/multitable/recovery-archive-section-checkpoint')
@@ -333,6 +335,60 @@ try {
   await assert.rejects(db.transaction().execute(migration.down), { message: 'RECOVERY_ARCHIVE_CHECKPOINT_DOWN_IN_USE' })
   await db.transaction().execute(migration.up)
   console.log('PASS: fresh/replay; direct up/down/down/up/up; CHECK/function/trigger drift refused; populated down refused')
+  for (const operation of [preparedMigration.up, preparedMigration.down, preparedMigration.down,
+    preparedMigration.up, preparedMigration.up]) await db.transaction().execute(operation)
+  for (const tamper of [
+    'ALTER TABLE public.meta_recovery_archive_prepared_captures ALTER COLUMN owner_id DROP NOT NULL',
+    `ALTER TABLE public.meta_recovery_archive_prepared_captures DROP CONSTRAINT chk_mrapc_shape,
+      ADD CONSTRAINT chk_mrapc_shape CHECK (true)`,
+    'ALTER TABLE public.meta_recovery_archive_prepared_captures DISABLE TRIGGER trg_mrapc_row',
+    `CREATE OR REPLACE FUNCTION public.meta_recovery_archive_prepared_capture_guard()
+      RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$ BEGIN RETURN NEW; END $$`,
+  ]) {
+    await assert.rejects(db.transaction().execute(async (tx) => {
+      await sql.raw(tamper).execute(tx)
+      await preparedMigration.up(tx)
+    }), { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_SCHEMA_DRIFT' })
+  }
+  const preparedPlan = await transaction(() => claim('section_checkpoint', 's', true))
+  const key = randomBytes(32)
+  const nonce = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', key, nonce)
+  const bytes = Buffer.concat([nonce, cipher.update('synthetic immutable capture'), cipher.final(), cipher.getAuthTag()])
+  key.fill(0)
+  assert.deepEqual(await transaction(() => prepared.persistRecoveryArchivePreparedCapture(query, preparedPlan, bytes)), bytes)
+  assert.deepEqual(await transaction(() => prepared.persistRecoveryArchivePreparedCapture(query, preparedPlan, bytes)), bytes)
+  await assert.rejects(transaction(() => prepared.persistRecoveryArchivePreparedCapture(query, preparedPlan, Buffer.from('changed'))),
+    { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_CONFLICT' })
+  await assert.rejects(prepared.readRecoveryArchivePreparedCapture(query, preparedPlan),
+    { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_TRANSACTION_REQUIRED' })
+  const resumed = new Client({ ...connection, database })
+  await resumed.connect()
+  try {
+    await resumed.query('BEGIN')
+    assert.deepEqual(await prepared.readRecoveryArchivePreparedCapture(
+      (text, params) => resumed.query(text, params), preparedPlan), bytes)
+    await resumed.query('COMMIT')
+  } finally { await resumed.end() }
+  await assert.rejects(transaction(() => prepared.readRecoveryArchivePreparedCapture(query, { ...preparedPlan, ownerFence: '2' })),
+    { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE' })
+  for (const statement of [
+    'UPDATE meta_recovery_archive_prepared_captures SET payload=payload',
+    'DELETE FROM meta_recovery_archive_prepared_captures',
+    'TRUNCATE meta_recovery_archive_prepared_captures',
+  ]) await assert.rejects(transaction(() => query(statement)),
+    { code: '55000', message: 'recovery_archive_prepared_capture_immutable' })
+  await assert.rejects(db.transaction().execute(preparedMigration.down),
+    { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_DOWN_IN_USE' })
+  for (const lifetime of ['lease', 'expiry'] as const) {
+    const expired = await transaction(() => claim('section_checkpoint', 's', true, lifetime))
+    await transaction(() => prepared.persistRecoveryArchivePreparedCapture(query, expired, bytes))
+    await query('SELECT pg_sleep(1.1)')
+    await assert.rejects(transaction(() => prepared.readRecoveryArchivePreparedCapture(query, expired)),
+      { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE' })
+  }
+  await db.transaction().execute(preparedMigration.up)
+  console.log('PASS: immutable prepared bytes persist across connections; exact retry/conflict; expired owner/fence/transaction guards; drift and nonempty down refused')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

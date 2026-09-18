@@ -206,3 +206,36 @@ not a process-restart or durable-storage acceptance. Crypto 58/58 and snapshot
 planner 11/11 passed. Temporarily swallowing the production nonce reservation
 error makes the new test fail; restoration returns 69/69, with zero production
 diff. The interrupted-capture coordinator/original-byte persistence remains OPEN.
+
+## Prepared Byte Store Local Acceptance
+
+Additive migration `zzzz20260918130000` and internal
+`recovery-archive-prepared-capture.ts` implement immutable generation-owned byte
+persistence. This is a local successor to `1a45a0798b11a2c173655fe5c22fd8c638da1d38`,
+not part of the remote 9072 proof above. The existing required owned-cluster
+driver now exercises the byte store; no workflow or provenance pin was changed.
+
+Fresh/replay and causal down/up now cover 29 migrations and 946 catalog objects,
+fingerprint `f97da837b6a6c10583aeb22c84f64aa40573cc32a5b52ad5eaf6cedb2e22d76e`.
+The claim-anchor fixture explicitly includes the new FK child in owned-state
+cleanup; no CASCADE or assertion weakening was used. Both historical suites
+remain 59/59. The static migration census includes the new entry and a removal
+negative, with wiring 37/37.
+
+Synthetic AES-GCM bytes commit once, then a separate PostgreSQL connection reads
+the identical payload. Same-byte retry succeeds; changed bytes conflict. Reads
+without an explicit transaction, mismatched fence, expired lease and expired
+generation refuse. UPDATE/DELETE/TRUNCATE and nonempty down refuse. Direct empty
+up/down/down/up/up succeeds. NOT NULL, CHECK(true), disabled-trigger and replaced
+guard-function mutations make replay fail and roll back to canonical state.
+
+Discriminating production mutation: removing the stored-byte equality check makes
+the changed-payload test fail with a missing expected conflict; the driver exits
+nonzero while still dropping the owned database and stopping/removing its cluster.
+The guard was restored before final acceptance. TypeScript acceptance compilation
+and scoped source ESLint pass. No external review verdict is claimed.
+
+This proves cross-connection durable byte storage, not an end-to-end process
+restart, real wrapped-key envelope, object-store resume, permission recheck,
+request binding or archive publication. Those coordinator obligations remain OPEN.
+Only a disposable synthetic database was used; no customer storage or flags.

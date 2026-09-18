@@ -149,3 +149,24 @@ Technical route spelling, persisted request representation and exact file scope
 are implementation decisions to record after the source trace, not new business
 permissions. Any need to widen capture/restore semantics beyond these boundaries
 returns to the owner. Keep historical SHA-scoped reports unchanged.
+
+## Prepared Capture Persistence Boundary
+
+The manual-capture implementation adds an immutable, generation-owned prepared
+byte store, not another archive catalog. A single prepared payload belongs to
+the existing generation, owner/fence and source-vector hash. Its checksum is
+database-generated. Exact-byte retry is idempotent; different bytes conflict.
+Reads and writes require an active, unexpired owner within an explicit database
+transaction. UPDATE, DELETE and TRUNCATE are refused; nonempty rollback refuses
+to destroy the retained original. No builder takeover or lease revival is added.
+
+This internal store accepts an opaque sealed envelope from a future coordinator;
+it is not an encryption validator, permission check or public endpoint. It must
+never receive plaintext or an unwrapped DEK. Ciphertext/wrapped-key/descriptors
+must be serialized and validated by that coordinator before using the store.
+The source-to-seal crash interval still fails closed: a reserved nonce must not
+be reused to encrypt a recaptured source when no prepared payload was committed.
+Object upload and provider calls remain outside the database transaction.
+
+Storage acceptance alone does not close durable command identity, consistent
+source capture, fresh authorization, full receipt publication, restore or UI.
