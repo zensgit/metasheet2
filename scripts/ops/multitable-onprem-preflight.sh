@@ -23,6 +23,8 @@ IMPORT_UPLOAD_DIR=""
 ATTACHMENT_PATH=""
 ATTACHMENT_STORAGE_BASE_URL=""
 ENABLE_PLM=""
+ENCRYPTION_KEY=""
+ENCRYPTION_SALT=""
 
 function die() {
   write_report "FAIL" "$*"
@@ -188,6 +190,12 @@ function build_suggested_actions() {
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       actions+=("Set a real JWT_SECRET in app.env and remove placeholder values such as change-me.")
       ;;
+    ENCRYPTION_KEY\ is\ missing*|ENCRYPTION_KEY\ uses\ the\ insecure\ built-in\ default\ value*)
+      actions+=("Set a real ENCRYPTION_KEY in app.env. Generate one with: openssl rand -hex 32.")
+      ;;
+    ENCRYPTION_SALT\ is\ missing*|ENCRYPTION_SALT\ uses\ the\ insecure\ built-in\ default\ value*)
+      actions+=("Set a real ENCRYPTION_SALT in app.env. Generate one with: openssl rand -hex 32.")
+      ;;
     POSTGRES_PASSWORD\ is\ missing*|POSTGRES_PASSWORD\ is\ still\ \'change-me\'*)
       actions+=("Set a real POSTGRES_PASSWORD in app.env and remove placeholder values such as change-me.")
       ;;
@@ -269,6 +277,12 @@ EOF
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       printf '%s\0' "$(build_generated_secret_snippet "JWT_SECRET" "openssl rand -hex 32" "Generate and persist a strong JWT secret")"
       ;;
+    ENCRYPTION_KEY\ is\ missing*|ENCRYPTION_KEY\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\0' "$(build_generated_secret_snippet "ENCRYPTION_KEY" "openssl rand -hex 32" "Generate and persist a strong encryption-at-rest master key")"
+      ;;
+    ENCRYPTION_SALT\ is\ missing*|ENCRYPTION_SALT\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\0' "$(build_generated_secret_snippet "ENCRYPTION_SALT" "openssl rand -hex 32" "Generate and persist a strong encryption-at-rest salt")"
+      ;;
     POSTGRES_PASSWORD\ is\ missing*|POSTGRES_PASSWORD\ is\ still\ \'change-me\'*)
       printf '%s\0' "$(build_env_set_snippet "POSTGRES_PASSWORD" "replace-with-real-db-password" "Write the real PostgreSQL password into app.env")"
       ;;
@@ -336,6 +350,12 @@ function build_suggested_quick_fix_commands() {
       ;;
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       printf '%s\n' "$(build_generate_secret_quick_command "JWT_SECRET")"
+      ;;
+    ENCRYPTION_KEY\ is\ missing*|ENCRYPTION_KEY\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\n' "$(build_generate_secret_quick_command "ENCRYPTION_KEY")"
+      ;;
+    ENCRYPTION_SALT\ is\ missing*|ENCRYPTION_SALT\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\n' "$(build_generate_secret_quick_command "ENCRYPTION_SALT")"
       ;;
     POSTGRES_PASSWORD\ is\ missing*|POSTGRES_PASSWORD\ is\ still\ \'change-me\'*)
       printf '%s\n' "$(build_set_env_quick_command "POSTGRES_PASSWORD" "replace-with-real-db-password")"
@@ -545,6 +565,37 @@ function require_absolute_path_env() {
   [[ "$value" == /* ]] || die "${key} must be an absolute path (got: '${value}')"
 }
 
+# Encryption-at-rest master key/salt for packages/core-backend/src/security/encrypted-secrets.ts.
+# These must be present and must not equal the built-in insecure default sentinels, otherwise
+# any secret encrypted with the fallback key is trivially decryptable. We deliberately never
+# echo the configured value back to the operator (values-free diagnostics).
+function require_encryption_material() {
+  local var_name="$1"
+  local value="$2"
+  local default_sentinel="$3"
+
+  # get_env_value does a literal `${line#KEY=}` with no shell re-parsing, unlike
+  # `docker compose --env-file` / `source` (the actual runtime path for this file).
+  # Without normalizing the same way here, a quoted value
+  # (ENCRYPTION_KEY="default-key-change-in-production"), a whitespace-only value
+  # (ENCRYPTION_KEY=   ), or a sentinel with a trailing \r left by a CRLF-saved
+  # env file would all sail past a byte-for-byte `==` compare below even though
+  # Compose/source would treat them as the bare default/empty value at runtime.
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if (( ${#value} >= 2 )); then
+    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+      value="${value:1:-1}"
+    fi
+  fi
+
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  if [[ "$value" == "$default_sentinel" ]]; then
+    die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  fi
+}
+
 [[ -f "$ENV_FILE" ]] || die "ENV_FILE not found: ${ENV_FILE}"
 [[ "$REQUIRE_STORAGE_DIRS" == "0" || "$REQUIRE_STORAGE_DIRS" == "1" ]] || die "REQUIRE_STORAGE_DIRS must be 0 or 1"
 
@@ -558,10 +609,14 @@ IMPORT_UPLOAD_DIR="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)
 ATTACHMENT_PATH="$(strip_quotes "$(get_env_value ATTACHMENT_PATH)")"
 ATTACHMENT_STORAGE_BASE_URL="$(strip_quotes "$(get_env_value ATTACHMENT_STORAGE_BASE_URL)")"
 ENABLE_PLM="$(strip_quotes "$(get_env_value ENABLE_PLM)")"
+ENCRYPTION_KEY="$(get_env_value ENCRYPTION_KEY)"
+ENCRYPTION_SALT="$(get_env_value ENCRYPTION_SALT)"
 
 require_nonempty_env "JWT_SECRET" "$JWT_SECRET"
 require_nonempty_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 require_nonempty_env "DATABASE_URL" "$DATABASE_URL"
+require_encryption_material "ENCRYPTION_KEY" "$ENCRYPTION_KEY" "default-key-change-in-production"
+require_encryption_material "ENCRYPTION_SALT" "$ENCRYPTION_SALT" "default-salt-change-in-production"
 
 if [[ "$DATABASE_URL" == *"change-me"* ]]; then
   die "DATABASE_URL still contains 'change-me' in ${ENV_FILE}"

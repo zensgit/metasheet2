@@ -59,6 +59,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, posix, relative, sep } from 'node:path'
 
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -68,11 +69,15 @@ import {
   checkerRegistrations,
   codeOf,
   findFunctionsNamed,
+  isFnNode,
+  LIVENESS_CARRYING_RESOLVERS,
   namedImports,
+  normalizeEol,
   resolveInjectedFunctions,
   scanRouteSource,
   sheetTableLivenessFilter,
   type AnalyzeOptions,
+  type FnNode,
   type HandlerAnalysis,
   type HandlerUnit,
   type OpaqueRegistration,
@@ -255,11 +260,391 @@ const readsNoSheetData = (h: RouteHandler) => !NO_SHEET_DATA.test(everything(h))
 const touchesNoSheetTable = (h: RouteHandler) => !/\b(meta_(records|fields|sheets|views)|sheet_id|resolveSheet\w*Capabilities\w*|loadSheet\w*|requireRecordReadable)\b/.test(everything(h))
   && !/\b(pool|poolManager|db|query)\b/.test(h.code)
 
-/** #5832: the in-process bulk generate loop calls the model per row and never asks whether the sheet is live. */
-const bulkWorkerStillLivenessBlind = () => {
-  const code = functionCode('services/ai-bulk-job-service.ts', 'runGeneratePhase')
-  return /\brunShortcutCore\(/.test(code)
-    && !/\b(loadSheetLiveness|assertSheetLive|sheetLiveness|loadSheetRow|resolveSheet\w*Capabilities\w*)\b|deleted_at/.test(code)
+/**
+ * #5832 (fixed): the in-process bulk generate loop sends prompts built from the sheet's records row by
+ * row, long after the start route's own liveness check. It must ask the shared helper about the JOB'S
+ * OWN sheet before EVERY provider call and stop on anything but proof of a live sheet. Proven on the
+ * tree (not by name), so the cancel exemption that relies on it cannot outlive the fix:
+ *  · `loadSheetLiveness` is imported from multitable/sheet-liveness.ts;
+ *  · the `for (… of plan.rows)` body has, as a direct statement AFTER the per-row cancel (job status)
+ *    check and BEFORE the one that calls runShortcutCore,
+ *    `if (!(await jobSheetIsLive(query, jobId, plan.sheetId))) { …; return }`, whose branch marks the
+ *    remainder not generated and the job errored;
+ *  · `jobSheetIsLive` is ONE top-level function `(query, jobId, sheetId)` whose body is exactly, in
+ *    order and adjacent: `let liveness: SheetLiveness`; a try whose only statement is
+ *    `liveness = await loadSheetLiveness(query, sheetId)` and whose catch answers false (fail-closed);
+ *    `if (liveness !== 'live') { …; return false }` (so `absent` stops too); `return true` — its only
+ *    non-false answer;
+ *  · nothing rebinds what the check reads: in jobSheetIsLive nothing writes `query` / `jobId` /
+ *    `sheetId` / `liveness` except that one lookup, and nothing re-declares them; in runGeneratePhase
+ *    nothing writes `query` / `jobId` / `plan` (or a property of `plan`), and `plan` is declared once, as
+ *    `const plan = this.plans.get(jobId)`; module-wide, `loadSheetLiveness` and `jobSheetIsLive` are
+ *    bound once and never written.
+ * The behaviour those lines produce is pinned separately (bulkWorkerBehaviourProblems): the tree check
+ * cannot see what a call evaluates to at run time.
+ */
+const BULK_WORKER_FILE = 'services/ai-bulk-job-service.ts'
+const BULK_WORKER_GATE = '!(await jobSheetIsLive(query, jobId, plan.sheetId))'
+const BULK_WORKER_LOOKUP = 'liveness = await loadSheetLiveness(query, sheetId)'
+
+const unwrapParens = (node: ts.Expression): ts.Expression => (ts.isParenthesizedExpression(node) ? unwrapParens(node.expression) : node)
+
+/** Identifiers declared (variable, parameter, binding element, function, class, import) under `root`. */
+function declaredNames(root: ts.Node): Array<{ name: string; decl: ts.Node }> {
+  const out: Array<{ name: string; decl: ts.Node }> = []
+  const visit = (node: ts.Node): void => {
+    const p = node.parent
+    if (ts.isIdentifier(node) && p && (
+      ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p)) && p.name === node)
+      || ((ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isClassDeclaration(p) || ts.isClassExpression(p)) && p.name === node)
+      || ((ts.isImportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p)) && p.name === node)
+    )) {
+      out.push({ name: node.text, decl: p })
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return out
+}
+
+/**
+ * Writes under `root`: `=` / compound assignments and `++` / `--`, including destructuring targets and
+ * `for (x of …)` heads. `name` is the target's ROOT identifier (`plan.sheetId = …` writes `plan`).
+ */
+function writtenNames(root: ts.Node): Array<{ name: string; node: ts.Node }> {
+  const out: Array<{ name: string; node: ts.Node }> = []
+  const targetRoots = (target: ts.Node, at: ts.Node): void => {
+    const t = ts.isExpression(target) ? unwrapParens(target) : target
+    if (ts.isIdentifier(t)) out.push({ name: t.text, node: at })
+    else if (ts.isPropertyAccessExpression(t) || ts.isElementAccessExpression(t)) targetRoots(t.expression, at)
+    else if (ts.isNonNullExpression(t) || ts.isAsExpression(t) || ts.isTypeAssertionExpression(t) || ts.isSatisfiesExpression(t)) targetRoots(t.expression, at)
+    else if (ts.isArrayLiteralExpression(t)) t.elements.forEach((e) => targetRoots(e, at))
+    else if (ts.isObjectLiteralExpression(t)) {
+      for (const prop of t.properties) {
+        if (ts.isShorthandPropertyAssignment(prop)) out.push({ name: prop.name.text, node: at })
+        else if (ts.isPropertyAssignment(prop)) targetRoots(prop.initializer, at)
+        else if (ts.isSpreadAssignment(prop)) targetRoots(prop.expression, at)
+      }
+    } else if (ts.isSpreadElement(t)) targetRoots(t.expression, at)
+    else if (ts.isBinaryExpression(t) && t.operatorToken.kind === ts.SyntaxKind.EqualsToken) targetRoots(t.left, at)
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node)
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      targetRoots(node.left, node)
+    } else if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+      targetRoots(node.operand, node)
+    } else if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) && !ts.isVariableDeclarationList(node.initializer)) {
+      targetRoots(node.initializer, node)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return out
+}
+
+const paramNames = (fn: FnNode) => fn.parameters
+  .map((p) => (ts.isIdentifier(p.name) && !p.initializer && !p.dotDotDotToken && !p.questionToken ? p.name.text : '<not a plain parameter>'))
+  .join(', ')
+
+function bulkWorkerLivenessProblems(source: string): string[] {
+  const sf = scanRouteSource(BULK_WORKER_FILE, source).sourceFile
+  const text = (node: ts.Node) => codeOf(node, sf)
+  const lastIs = (node: ts.Statement | undefined, expected: string) => !!node && ts.isBlock(node)
+    && node.statements.length > 0 && text(node.statements[node.statements.length - 1]!) === expected
+  const problems: string[] = []
+
+  const imported = namedImports(sf).get('loadSheetLiveness')
+  if (!imported || imported.imported !== 'loadSheetLiveness' || resolveImport(BULK_WORKER_FILE, imported.module) !== 'multitable/sheet-liveness.ts') {
+    problems.push('loadSheetLiveness must be imported from multitable/sheet-liveness')
+  }
+  // Module-wide: the helper and the gate are each bound exactly once and never reassigned.
+  const moduleDecls = declaredNames(sf)
+  for (const name of ['loadSheetLiveness', 'jobSheetIsLive']) {
+    const count = moduleDecls.filter((d) => d.name === name).length
+    if (count !== 1) problems.push(`module: \`${name}\` must be bound exactly once (found ${count}) — a second binding can shadow it`)
+  }
+  for (const w of writtenNames(sf).filter((x) => x.name === 'loadSheetLiveness' || x.name === 'jobSheetIsLive')) {
+    problems.push(`module: \`${w.name}\` must never be written (\`${text(w.node)}\`)`)
+  }
+
+  const phases = findFunctionsNamed(sf, 'runGeneratePhase')
+  if (phases.length !== 1) return [...problems, `runGeneratePhase: expected 1 definition, found ${phases.length}`]
+  const phase = phases[0]!
+  if (paramNames(phase) !== 'query, jobId') problems.push(`runGeneratePhase: parameters must be exactly (query, jobId), found (${paramNames(phase)})`)
+  const phaseDecls = declaredNames(phase).filter((d) => ['query', 'jobId', 'plan', 'jobSheetIsLive', 'loadSheetLiveness'].includes(d.name)
+    && !(ts.isParameter(d.decl) && d.decl.parent === phase))
+  const planDecl = phaseDecls.length === 1 && ts.isVariableDeclaration(phaseDecls[0]!.decl) ? phaseDecls[0]!.decl : null
+  if (!planDecl || text(planDecl) !== 'plan = this.plans.get(jobId)'
+    || !ts.isVariableDeclarationList(planDecl.parent) || !(planDecl.parent.flags & ts.NodeFlags.Const)) {
+    problems.push(`runGeneratePhase: \`plan\` must be declared once, as \`const plan = this.plans.get(jobId)\`, and nothing may re-declare query / jobId / plan / jobSheetIsLive (found: ${phaseDecls.map((d) => text(d.decl)).join(' | ') || 'none'})`)
+  }
+  for (const w of writtenNames(phase).filter((x) => ['query', 'jobId', 'plan'].includes(x.name))) {
+    problems.push(`runGeneratePhase: \`${w.name}\` must never be written (\`${text(w.node)}\`)`)
+  }
+  const loops: ts.ForOfStatement[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isForOfStatement(node) && text(node.expression) === 'plan.rows') loops.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(phases[0]!)
+  const loopBody = loops.length === 1 && ts.isBlock(loops[0]!.statement) ? loops[0]!.statement.statements : null
+  if (!loopBody) return [...problems, `runGeneratePhase: expected exactly one \`for (… of plan.rows) { … }\`, found ${loops.length}`]
+  const sendAt = loopBody.findIndex((st) => /\brunShortcutCore\(/.test(text(st)))
+  if (sendAt < 0) problems.push('the plan.rows loop no longer calls runShortcutCore — re-derive what this check protects')
+  const gateAt = loopBody.findIndex((st) => ts.isIfStatement(st) && text(st.expression) === BULK_WORKER_GATE)
+  if (gateAt < 0) {
+    problems.push(`the plan.rows loop must stop on \`if (${BULK_WORKER_GATE})\` as a direct statement of its body`)
+  } else {
+    const stop = loopBody[gateAt] as ts.IfStatement
+    if (stop.elseStatement || !lastIs(stop.thenStatement, 'return;')) problems.push('the liveness stop must end in `return` (and have no else)')
+    const stopCode = text(stop.thenStatement)
+    if (!/\bmarkRemainingPendingNotGenerated\(query, jobId\)/.test(stopCode)) problems.push('the liveness stop must mark the remainder pending_not_generated')
+    if (!/\bmarkErroredIfRunning\(query, jobId\)/.test(stopCode)) problems.push('the liveness stop must mark the job errored (guarded on running)')
+    if (sendAt >= 0 && gateAt > sendAt) problems.push('the liveness stop must come BEFORE the provider call in the loop body')
+    // After the cancel check, so a cancelled job stays `rejected` and is not asked about its sheet again.
+    const cancelAt = loopBody.findIndex((st) => ts.isIfStatement(st) && /\breadJobStatus\(query, jobId\)/.test(text(st.expression)))
+    if (cancelAt < 0 || cancelAt > gateAt) problems.push('the liveness stop must follow the per-row cancel (job status) check')
+  }
+
+  const gates = findFunctionsNamed(sf, 'jobSheetIsLive')
+  const gate = gates.length === 1 && ts.isFunctionDeclaration(gates[0]!) && gates[0]!.parent === sf ? gates[0]! : null
+  const gateBody = gate?.body && ts.isBlock(gate.body) ? gate.body.statements : null
+  if (!gate || !gateBody) return [...problems, `jobSheetIsLive: expected 1 top-level function declaration with a block body, found ${gates.length} definition(s)`]
+  // The loop passes plan.sheetId THIRD: the third parameter is what the lookup asks about.
+  if (paramNames(gate) !== 'query, jobId, sheetId') problems.push(`jobSheetIsLive: parameters must be exactly (query, jobId, sheetId), found (${paramNames(gate)})`)
+  // Exactly four statements, in this order, adjacent: nothing can run between the lookup and the refusal.
+  const [declSt, trySt, refuseSt, finalSt] = gateBody
+  if (gateBody.length !== 4 || !declSt || text(declSt) !== 'let liveness: SheetLiveness;') {
+    problems.push(`jobSheetIsLive: the body must be exactly \`let liveness: SheetLiveness\`, the guarded lookup, the refusal, \`return true\` — adjacent, nothing in between (found ${gateBody.length} statements)`)
+  }
+  const lookup = trySt && ts.isTryStatement(trySt) && trySt.tryBlock.statements.length === 1 ? trySt.tryBlock.statements[0]! : null
+  if (!trySt || !ts.isTryStatement(trySt) || !lookup || text(lookup) !== `${BULK_WORKER_LOOKUP};`
+    || !trySt.catchClause || !lastIs(trySt.catchClause.block, 'return false;') || trySt.finallyBlock) {
+    problems.push('jobSheetIsLive: `loadSheetLiveness(query, sheetId)` must run in a try whose catch answers false (fail-closed), as the second statement')
+  }
+  if (!refuseSt || !ts.isIfStatement(refuseSt) || text(refuseSt.expression) !== 'liveness !== \'live\''
+    || refuseSt.elseStatement || !lastIs(refuseSt.thenStatement, 'return false;')) {
+    problems.push('jobSheetIsLive: `if (liveness !== \'live\') { …; return false }` must follow the lookup, as the third statement')
+  }
+  // Nothing rebinds what the lookup reads or what the refusal tests.
+  const gateNames = ['query', 'jobId', 'sheetId', 'liveness', 'loadSheetLiveness']
+  const redeclared = declaredNames(gate).filter((d) => gateNames.includes(d.name)
+    && !(ts.isParameter(d.decl) && d.decl.parent === gate) && !(declSt && d.decl.parent?.parent === declSt))
+  for (const d of redeclared) problems.push(`jobSheetIsLive: \`${d.name}\` must not be re-declared (\`${text(d.decl)}\`)`)
+  const lookupWrite = lookup && ts.isExpressionStatement(lookup) ? unwrapParens(lookup.expression) : null
+  for (const w of writtenNames(gate).filter((x) => gateNames.includes(x.name) && x.node !== lookupWrite)) {
+    problems.push(`jobSheetIsLive: \`${w.name}\` may only be written by the lookup (\`${text(w.node)}\`)`)
+  }
+  const returnsTrue: ts.ReturnStatement[] = []
+  const collect = (node: ts.Node): void => {
+    if (ts.isReturnStatement(node) && node.expression && text(node.expression) !== 'false') returnsTrue.push(node)
+    if (node === gate || !isFnNode(node)) ts.forEachChild(node, collect)
+  }
+  collect(gate)
+  if (returnsTrue.length !== 1 || returnsTrue[0] !== gateBody[gateBody.length - 1] || text(returnsTrue[0]!) !== 'return true;') {
+    problems.push('jobSheetIsLive: the only non-false answer must be its final `return true`')
+  }
+  return problems
+}
+
+/**
+ * #5832 BEHAVIOUR TIE. The tree check above proves the shape of the stop; what the stop DOES (the
+ * provider is not called again, `absent` and a failed lookup stop too, a cancel still wins) is proven
+ * by running the real worker in tests/unit/ai-bulk-job-sheet-liveness.test.ts. That file must exist, run
+ * the real service (import it, mock nothing, stay out of the vitest exclude list) and keep each case,
+ * none skipped or focused.
+ */
+const BULK_WORKER_BEHAVIOUR_TEST = 'ai-bulk-job-sheet-liveness.test.ts'
+const BULK_WORKER_BEHAVIOUR_CASES = [
+  'LIVE sheet:',
+  'sheet DELETED while row 1 is generating:',
+  'sheet deleted BEFORE the worker starts:',
+  'sheet row GONE (absent) mid-run:',
+  'liveness LOOKUP FAILS before row 2:',
+  'CANCEL still wins:',
+]
+const TEST_CALLEES = new Set(['it', 'test', 'describe', 'suite'])
+const TEST_MODIFIERS = new Set(['skip', 'only', 'todo', 'skipIf', 'runIf', 'fails', 'each', 'for'])
+const TEST_SKIP_ALIASES = new Set(['xit', 'xtest', 'xdescribe', 'fit', 'fdescribe'])
+
+function bulkWorkerBehaviourProblems(testSource: string | null, vitestConfig: string): string[] {
+  if (testSource === null) return [`tests/unit/${BULK_WORKER_BEHAVIOUR_TEST} is missing`]
+  const sf = ts.createSourceFile(BULK_WORKER_BEHAVIOUR_TEST, normalizeEol(testSource), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const problems: string[] = []
+  const titles: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      const first = node.arguments[0]
+      if (ts.isIdentifier(callee) && (callee.text === 'it' || callee.text === 'test') && first && ts.isStringLiteralLike(first)) titles.push(first.text)
+      if (ts.isIdentifier(callee) && TEST_SKIP_ALIASES.has(callee.text)) problems.push(`${callee.text}(…) skips or focuses a case`)
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+        if (TEST_CALLEES.has(callee.expression.text) && TEST_MODIFIERS.has(callee.name.text)) {
+          problems.push(`${callee.expression.text}.${callee.name.text}(…) is not allowed here — every case runs, unconditionally`)
+        }
+        if (callee.expression.text === 'vi' && /^(do)?(un)?mock$/i.test(callee.name.text)) {
+          problems.push(`vi.${callee.name.text}(…) — the behaviour test drives the real worker and the real provider choke`)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  const service = namedImports(sf).get('BulkFillJobService')
+  if (!service || service.imported !== 'BulkFillJobService' || service.module !== '../../src/services/ai-bulk-job-service') {
+    problems.push('BulkFillJobService must be imported from ../../src/services/ai-bulk-job-service')
+  }
+  for (const prefix of BULK_WORKER_BEHAVIOUR_CASES) {
+    const n = titles.filter((t) => t.startsWith(prefix)).length
+    if (n !== 1) problems.push(`case "${prefix}…": expected exactly one it(…), found ${n}`)
+  }
+  if (vitestConfig.includes(BULK_WORKER_BEHAVIOUR_TEST.replace(/\.test\.ts$/, ''))) {
+    problems.push(`vitest.config.ts mentions ${BULK_WORKER_BEHAVIOUR_TEST} — it must run in the unit job`)
+  }
+  return problems
+}
+
+/**
+ * Self-test seam for the two #5832 proofs that the cancel exemption and the worker's PROVIDER_LOOPS entry
+ * rest on: left empty, both read the tree; the self-test swaps in a mutated worker source or behaviour
+ * test (in memory) to show each `stillTrue` falls with either proof.
+ */
+const bulkWorkerInputs: { worker?: string; behaviour?: string | null } = {}
+
+function bulkWorkerSourceProblems(): string[] {
+  return bulkWorkerLivenessProblems(bulkWorkerInputs.worker ?? readSource(BULK_WORKER_FILE))
+}
+
+function readBulkWorkerBehaviour(): string[] {
+  const path = join(__dirname, BULK_WORKER_BEHAVIOUR_TEST)
+  const onDisk = () => (existsSync(path) ? readFileSync(path, 'utf8') : null)
+  return bulkWorkerBehaviourProblems(
+    bulkWorkerInputs.behaviour !== undefined ? bulkWorkerInputs.behaviour : onDisk(),
+    readFileSync(join(__dirname, '../../vitest.config.ts'), 'utf8'),
+  )
+}
+
+// ── Provider loops (#5832, #5838) ───────────────────────────────────────────
+
+/**
+ * A loop that sends record content to the model row by row outlives any liveness check made before it
+ * starts. Every such loop under src/ is named in PROVIDER_LOOPS: fixed (with a proof), or a tracked GAP.
+ *
+ * What is discovered (scope of the claim): a call to the provider choke `runShortcutCore`, or to a
+ * SAME-FILE function whose body calls it directly, that sits inside a loop statement (for, for…of,
+ * for…in, while, do) or inside a callback passed to an array iteration method (map, forEach, …), within
+ * one function. A call reached through a cross-file helper, a deeper same-file chain or a queue is not
+ * seen here.
+ */
+const PROVIDER_CHOKE = 'runShortcutCore'
+const ITERATION_METHODS = new Set(['map', 'forEach', 'flatMap', 'reduce', 'reduceRight', 'filter', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex'])
+/** Calls that re-establish sheet liveness (any of them inside the loop flips a GAP entry to "no longer true"). */
+const LIVENESS_CALLS = new Set(['loadSheetLiveness', 'assertSheetLive', 'jobSheetIsLive', 'loadSheetRow', 'requireRecordReadable', ...LIVENESS_CARRYING_RESOLVERS])
+
+interface ProviderLoop {
+  /** `<file under src/> <route key>` for a route handler, else `<file> <enclosing function name>`. */
+  key: string
+  line: number
+  /** The loop (head and body) calls something that re-establishes sheet liveness. */
+  asksLiveness: boolean
+}
+
+const calledName = (call: ts.CallExpression): string | null => {
+  const callee = call.expression
+  if (ts.isIdentifier(callee)) return callee.text
+  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)) return callee.name.text
+  return null
+}
+
+/** Whether `root` calls one of `names`; `direct` stops at nested functions (their calls are theirs). */
+function callsAny(root: ts.Node, names: Set<string>, direct = false): boolean {
+  let found = false
+  const visit = (node: ts.Node): void => {
+    if (found) return
+    if (ts.isCallExpression(node) && names.has(calledName(node) ?? '')) { found = true; return }
+    if (direct && node !== root && isFnNode(node)) return
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return found
+}
+
+function fnNameOf(fn: FnNode): string | null {
+  if (fn.name && (ts.isIdentifier(fn.name) || ts.isPrivateIdentifier(fn.name))) return fn.name.text
+  const p = fn.parent
+  if (p && ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)) return p.name.text
+  if (p && (ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) && ts.isIdentifier(p.name)) return p.name.text
+  return null
+}
+
+function providerLoopsOf(rel: string, scanned: ScannedRouteFile): ProviderLoop[] {
+  const sf = scanned.sourceFile
+  const senders = new Set([PROVIDER_CHOKE])
+  const collectSenders = (node: ts.Node): void => {
+    if (isFnNode(node)) {
+      const name = fnNameOf(node)
+      if (name && name !== PROVIDER_CHOKE && callsAny(node, new Set([PROVIDER_CHOKE]), true)) senders.add(name)
+    }
+    ts.forEachChild(node, collectSenders)
+  }
+  collectSenders(sf)
+
+  const loops = new Map<ts.Node, ProviderLoop>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && senders.has(calledName(node) ?? '')) {
+      let loop: ts.Node | null = null
+      let current: ts.Node = node
+      while (!loop && current.parent && !ts.isSourceFile(current.parent)) {
+        const parent: ts.Node = current.parent
+        if (ts.isIterationStatement(parent, false)) {
+          loop = parent
+        } else if (isFnNode(parent)) {
+          const outer = parent.parent
+          const iterates = !!outer && ts.isCallExpression(outer) && outer.arguments.some((a) => a === parent)
+            && ts.isPropertyAccessExpression(outer.expression) && ITERATION_METHODS.has(outer.expression.name.text)
+          if (!iterates) break
+          loop = outer
+        }
+        current = parent
+      }
+      if (loop && !loops.has(loop)) {
+        let fn: ts.Node | undefined = loop.parent
+        while (fn && !isFnNode(fn)) fn = fn.parent
+        const handler = fn ? scanned.handlers.find((h) => h.units.some((u) => u.label === 'handler' && u.node === fn)) : undefined
+        const owner = handler ? handler.key : (fn && isFnNode(fn) ? fnNameOf(fn) : null) ?? '<module>'
+        loops.set(loop, {
+          key: `${rel} ${owner}`,
+          line: sf.getLineAndCharacterOfPosition(loop.getStart(sf)).line + 1,
+          asksLiveness: callsAny(loop, LIVENESS_CALLS),
+        })
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return [...loops.values()]
+}
+
+const PROVIDER_LOOPS: Record<string, { reason: string; stillTrue: (loop: ProviderLoop) => boolean }> = {
+  'services/ai-bulk-job-service.ts runGeneratePhase': {
+    reason: 'FIXED (#5832) — the async bulk-fill job worker sends one prompt per row long after the start route’s '
+      + 'liveness check; it now asks loadSheetLiveness about the job’s own sheet before every provider call and '
+      + 'stops the job on anything but proof of a live sheet (shape proven by bulkWorkerLivenessProblems, behaviour '
+      + 'by the tied behaviour test, bulkWorkerBehaviourProblems).',
+    stillTrue: (loop) => loop.asksLiveness
+      && bulkWorkerSourceProblems().length === 0
+      && readBulkWorkerBehaviour().length === 0,
+  },
+  'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': {
+    reason: 'GAP — tracked in #5838 — the INLINE bulk-preview path (at most MULTITABLE_AI_BULK_MAX_ROWS generatable '
+      + 'rows) refuses a non-live sheet once at entry, then loops over the rows calling runShortcutCore without asking '
+      + 'again, so a sheet soft-deleted during the request keeps sending its remaining rows’ record content to the '
+      + 'provider. Same class as #5832, different lane; this route file is not edited by the #5832 change. When the '
+      + 'loop re-checks liveness this entry stops being true: replace it with a proof like the worker’s.',
+    stillTrue: (loop) => !loop.asksLiveness,
+  },
 }
 
 const ownJobGate = (h: RouteHandler) => {
@@ -443,13 +828,18 @@ const COVERED: Record<string, CoveredFile> = {
         stillTrue: ownJobGate,
       },
       'POST /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/cancel': {
-        reason: 'MUST WORK ON A DELETED SHEET — cancel is the only brake on an in-flight job whose sheet was '
-          + 'deleted mid-run. Owner + cross-sheet gated by resolveBulkJobForActor (asserted); it only flips '
-          + 'the job state via cancelBulkJob and never touches the sheet. The worker it brakes is itself a '
-          + 'GAP — tracked in #5832 — services/ai-bulk-job-service.ts runGeneratePhase keeps sending the '
-          + 'deleted sheet’s rows to the model (runShortcutCore, row by row, only re-reading the JOB status) and '
-          + 'never re-checks sheet liveness (asserted still true); until that is fixed, cancel is the only stop.',
-        stillTrue: (h) => ownJobGate(h) && /\bcancelBulkJob\(/.test(h.code) && bulkWorkerStillLivenessBlind(),
+        reason: 'MUST WORK ON A DELETED SHEET — the owner must still be able to stop and release their own job '
+          + 'after the sheet is deleted: a SUSPENDED job (generation done, awaiting review) holds the active-job '
+          + 'slot until it is cancelled or committed, and commit is refused on a deleted sheet. Owner + '
+          + 'cross-sheet gated by resolveBulkJobForActor (asserted); it only flips the job state via '
+          + 'cancelBulkJob and never touches the sheet. Cancel is no longer the only brake on generation: since '
+          + '#5832 the worker (services/ai-bulk-job-service.ts runGeneratePhase) asks loadSheetLiveness about '
+          + 'the job’s own sheet before every provider call and stops the job as errored once the sheet is not '
+          + 'live (shape asserted on the tree, bulkWorkerLivenessProblems; behaviour asserted by the tied worker '
+          + 'test, bulkWorkerBehaviourProblems).',
+        stillTrue: (h) => ownJobGate(h) && /\bcancelBulkJob\(/.test(h.code)
+          && bulkWorkerSourceProblems().length === 0
+          && readBulkWorkerBehaviour().length === 0,
       },
     },
   },
@@ -567,22 +957,18 @@ const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; rea
 }
 
 /**
- * GAP — the vetted record gate asks liveness BEFORE authority. Every handler that relies on it alone
- * inherits a liveness oracle; they are enumerated here so the list cannot grow unnoticed.
+ * The vetted record gate is held to the SAME rule 3 as a route (#5830): the capability lookup runs
+ * first, its 401/403 precede the liveness 404, nothing — no record read — runs between, and the
+ * liveness it refuses is the one of the sheet it was given. Routes that rely on it alone (AI shortcut
+ * preview/run, button run, record approvals POST/GET) are GUARDED on the strength of that proof; their
+ * behaviour is pinned in multitable-record-gate-capability-before-liveness.test.ts.
  */
-const RECORD_GATE_ORDER_GAP = {
-  reason: 'GAP — tracked in #5830 — OWNED BY THE univer-meta.ts BRANCH (not edited from here): '
-    + 'requireRecordReadable answers 404 (record missing, SHEET_DELETED, `Sheet not found`) BEFORE its 401/403, so a '
-    + 'caller without read access can tell a live sheet from a deleted one through each route below. The '
-    + '"same 403 for live and deleted" property of this closed world holds only where the route’s own gate is '
-    + 'order-checked (rule 3), not for these.',
-  handlers: [
-    'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/preview',
-    'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/run',
-    'routes/multitable-button.ts POST /sheets/:sheetId/records/:recordId/fields/:fieldId/button/run',
-    'routes/multitable-record-approvals.ts POST /sheets/:sheetId/records/:recordId/approvals',
-    'routes/multitable-record-approvals.ts GET /sheets/:sheetId/records/:recordId/approvals',
-  ],
+const VETTED_RECORD_GATE_OPTIONS: AnalyzeOptions = {
+  vetted: new Map(),
+  delegated: null,
+  preGateCalls: new Set(),
+  requireOrder: true,
+  gateFirst: true,
 }
 
 const CHECKER_OPTIONS: AnalyzeOptions = {
@@ -640,6 +1026,7 @@ interface FileFacts {
   opaque: OpaqueRegistration[]
   checkers: ReturnType<typeof checkerFindings>
   gatewayCalls: ReturnType<typeof callSitesNamed>
+  providerLoops: ProviderLoop[]
 }
 
 /** Everything the closed world needs from one file, read from its syntax tree (the tree is not kept). */
@@ -652,7 +1039,24 @@ function factsOf(rel: string, source: string, refusals = CHECKER_REFUSALS): File
     opaque: scanned.opaque,
     checkers: checkerFindings(rel, scanned.sourceFile, refusals),
     gatewayCalls: callSitesNamed(scanned.sourceFile, GATEWAY_REGISTRARS),
+    providerLoops: providerLoopsOf(rel, scanned),
   }
+}
+
+/** Provider loops found in `facts` against the PROVIDER_LOOPS ledger. */
+function providerLoopProblems(facts: FileFacts[], ledger = PROVIDER_LOOPS): string[] {
+  const found = facts.flatMap((f) => f.providerLoops)
+  const problems: string[] = []
+  for (const loop of found) {
+    if (!(loop.key in ledger)) problems.push(`${loop.key} (line ${loop.line}): a loop sends rows to the model and is not named in PROVIDER_LOOPS`)
+  }
+  for (const [key, entry] of Object.entries(ledger)) {
+    const loops = found.filter((l) => l.key === key)
+    if (loops.length !== 1) { problems.push(`${key}: expected exactly one provider loop, found ${loops.length}`); continue }
+    problems.push(...reasonProblems(key, entry))
+    if (!entry.stillTrue(loops[0]!)) problems.push(`${key}: the fact this entry rests on is no longer true`)
+  }
+  return problems
 }
 
 /** Route modules that address a sheet but belong to no closed world. */
@@ -1172,7 +1576,7 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(reasonProblems('k', { reason: `GAP — tracked in #5831 (see docs/development/no-such-doc.md)${why}` }).join('\n')).toMatch(/does not exist/)
     // Every reason in this file passes — including the ones nested in ledgers and the OPAQUE list.
     const reasons: Array<[string, { reason: string }]> = [
-      ['RECORD_GATE_ORDER_GAP', RECORD_GATE_ORDER_GAP],
+      ...Object.entries(PROVIDER_LOOPS).map(([k, e]): [string, { reason: string }] => [`PROVIDER_LOOPS ${k}`, e]),
       ...Object.entries(COVERED).flatMap(([file, c]) => [
         ...Object.entries(c.exempt).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e]),
         ...Object.entries(c.unaddressed?.named ?? {}).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e]),
@@ -1331,16 +1735,25 @@ describe('sheet-liveness closure over EVERY route file', () => {
   })
 
   it('vetted external guards refuse a non-live sheet (their bodies, not their names)', () => {
-    // requireRecordReadable: resolves the sheet itself, binds and refuses its liveness on the same path.
+    // requireRecordReadable: resolves the sheet itself, binds and refuses its liveness on the same path —
+    // under the full route rules (VETTED_RECORD_GATE_OPTIONS): the resolver is the first thing awaited,
+    // its 401/403 come before the liveness 404, and no record read (or anything else) runs in between.
     const meta = scanRouteSource('routes/univer-meta.ts', readSource('routes/univer-meta.ts'))
     const defs = findFunctionsNamed(meta.sourceFile, 'requireRecordReadable')
     expect(defs, 'routes/univer-meta.ts must define requireRecordReadable exactly once').toHaveLength(1)
-    const unit: HandlerUnit = { label: 'handler', node: defs[0]!, code: codeOf(defs[0]!, meta.sourceFile) }
-    // Liveness is asked before authority in this helper — see RECORD_GATE_ORDER_GAP — so only
-    // bind-and-refuse is required here, not the order clause.
-    const analysis = analyzeHandler({ units: [unit] }, meta.sourceFile, CHECKER_OPTIONS)
+    const def = defs[0]!
+    const unit: HandlerUnit = { label: 'handler', node: def, code: codeOf(def, meta.sourceFile) }
+    const analysis = analyzeHandler({ units: [unit] }, meta.sourceFile, VETTED_RECORD_GATE_OPTIONS)
     expect(analysis.violations).toEqual([])
-    expect(analysis.sources.some((s) => s.startsWith('resolver '))).toBe(true)
+    expect(analysis.sources).toEqual(['resolver resolveSheetReadableCapabilities'])
+    // The liveness it refuses is that of the sheet it was GIVEN: the resolver takes the helper's own
+    // `sheetId` parameter, which the body never reassigns.
+    expect(def.parameters.map((p) => p.name.getText(meta.sourceFile))).toEqual(['req', 'query', 'sheetId', 'recordId'])
+    expect(unit.code).toMatch(/= await resolveSheetReadableCapabilities\(req, query, sheetId\)/)
+    expect(unit.code.match(/\bresolveSheet\w*Capabilities\w*\(/g)).toHaveLength(1)
+    expect(unit.code).not.toMatch(/\bsheetId\s*(?:[-+*\/]?=(?!=)|\+\+|--)/)
+    expect(unit.code).toMatch(/status:\s*401/)
+    expect(unit.code).toMatch(/status:\s*403/)
     expect(unit.code).toMatch(/status:\s*404/)
     // loadSheetRow: filters the SHEET table's deleted_at and answers null when the row is gone.
     const loader = functionCode('multitable/loaders.ts', 'loadSheetRow')
@@ -1349,24 +1762,19 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(Object.keys(VETTED_EXTERNAL_GUARDS).sort()).toEqual(['loadSheetRow', 'requireRecordReadable'])
   })
 
-  it(`GAP ledger: the routes that inherit requireRecordReadable's liveness-before-403 order are exactly the named ones`, () => {
-    expect(RECORD_GATE_ORDER_GAP.reason).toMatch(GAP_TRACKER)
-    expect(reasonProblems('RECORD_GATE_ORDER_GAP', RECORD_GATE_ORDER_GAP)).toEqual([])
-    const inheriting: string[] = []
-    for (const [file, config] of Object.entries(COVERED)) {
-      for (const h of scan(file).handlers.filter(addressesASheet)) {
-        if (h.key in config.exempt) continue
-        const sources = [...new Set(analysisOf(file, h).sources)]
-        if (sources.length > 0 && sources.every((s) => s === 'vetted requireRecordReadable')) inheriting.push(`${file} ${h.key}`)
-      }
-    }
-    expect(inheriting.sort()).toEqual([...RECORD_GATE_ORDER_GAP.handlers].sort())
-    // Still true: in the helper the liveness refusal precedes the 403. When that is fixed, drop the ledger.
+  it(`RECORD GATE ORDER (#5830): in requireRecordReadable, authority (401, 403) precedes liveness, which precedes the record read`, () => {
+    // Independent of the tree analysis above: the steps appear in this order in the helper's code.
     const code = functionCode('routes/univer-meta.ts', 'requireRecordReadable')
-    const liveAt = code.indexOf("sheetLiveness !== 'live'")
-    const forbiddenAt = code.indexOf('!capabilities.canRead')
-    expect(liveAt).toBeGreaterThan(-1)
-    expect(forbiddenAt).toBeGreaterThan(liveAt)
+    const order = [
+      code.indexOf('await resolveSheetReadableCapabilities('),
+      code.indexOf('!access.userId'),
+      code.indexOf('!capabilities.canRead'),
+      code.indexOf("sheetLiveness !== 'live'"),
+      code.indexOf('FROM meta_records'),
+    ]
+    expect(order.every((at) => at > -1), `missing step: ${JSON.stringify(order)}`).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(code.indexOf('FROM meta_records')).toBe(code.lastIndexOf('FROM meta_records'))
   })
 
   it('delegated guards: the route helper hands off to the injected resolver, and every injected resolver filters deleted sheets', () => {
@@ -1410,6 +1818,239 @@ describe('sheet-liveness closure over EVERY route file', () => {
     const resolverCode = codeOf(resolver[0]!, auth.sourceFile)
     expect(resolverCode).toMatch(/FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL/)
     expect(resolverCode).toMatch(/membershipOk/)
+  })
+
+  it('#5832: the bulk generate worker stops on a non-live sheet before every provider call (the cancel exemption rests on it)', () => {
+    const source = normalizeEol(readSource(BULK_WORKER_FILE))
+    expect(bulkWorkerLivenessProblems(source)).toEqual([])
+
+    // Sharpness: each way the fix could quietly rot is caught (mutated in memory, never on disk).
+    const stop = /\n( *)if \(!\(await jobSheetIsLive\(query, jobId, plan\.sheetId\)\)\) \{\n[\s\S]*?\n\1\}\n/.exec(source)
+    expect(stop, 'the stop block must be locatable for the self-test').not.toBeNull()
+    const withoutStop = source.replace(stop![0], '\n')
+    const send = 'const outcome = await runShortcutCore(this.aiClient, ctx, row.prompt)\n'
+    expect(source).toContain(send)
+    expect(source).toContain('for (const row of plan.rows) {\n')
+    const redFor = (mutated: string) => bulkWorkerLivenessProblems(mutated).join('\n')
+    // no check at all
+    expect(redFor(withoutStop)).toMatch(/must stop on/)
+    // checked once, before the loop
+    expect(redFor(withoutStop.replace('for (const row of plan.rows) {\n', `${stop![0].slice(1)}for (const row of plan.rows) {\n`))).toMatch(/must stop on/)
+    // checked after the provider call
+    expect(redFor(withoutStop.replace(send, `${send}${stop![0].slice(1)}`))).toMatch(/BEFORE the provider call/)
+    // checked ahead of the cancel check
+    const cancelCheck = "      if ((await readJobStatus(query, jobId)) !== 'running') {\n"
+    expect(source).toContain(cancelCheck)
+    expect(redFor(withoutStop.replace(cancelCheck, `${stop![0].slice(1)}${cancelCheck}`))).toMatch(/follow the per-row cancel/)
+    // asks about another id
+    expect(redFor(source.replace('jobSheetIsLive(query, jobId, plan.sheetId)', 'jobSheetIsLive(query, jobId, plan.fieldId)'))).toMatch(/must stop on/)
+    // stops without leaving the active state
+    expect(redFor(source.replace(stop![0], stop![0].replace('markErroredIfRunning(query, jobId)', 'suspendIfRunning(query, jobId)')))).toMatch(/mark the job errored/)
+    // fail-open on a lookup error
+    expect(redFor(source.replace(/(\} catch \(err\) \{[\s\S]*?)return false\n/, '$1return true\n'))).toMatch(/catch answers false/)
+    // only `deleted` refused (`absent` would keep sending)
+    expect(redFor(source.replace("if (liveness !== 'live') {", "if (liveness === 'deleted') {"))).toMatch(/must follow the lookup/)
+    // a second way to answer true
+    expect(redFor(source.replace("liveness = await loadSheetLiveness(query, sheetId)\n", "liveness = await loadSheetLiveness(query, sheetId)\n    if (liveness === 'absent') return true\n"))).toMatch(/must run in a try|only non-false answer/)
+    // a different liveness helper spelling
+    expect(redFor(source.replace("from '../multitable/sheet-liveness'", "from '../multitable/sheet-liveness-copy'"))).toMatch(/must be imported from multitable\/sheet-liveness/)
+
+    // Rebinding what the check reads, or asking about the wrong id, while the shape above still holds
+    // (#5832 refuter, state lens: M1–M3 once passed this check). `swap` refuses a needle that is absent.
+    const swap = (from: string, to: string, src = source) => {
+      expect(src.split(from).length - 1, `self-test needle must occur exactly once: ${JSON.stringify(from)}`).toBe(1)
+      return src.replace(from, () => to)
+    }
+    const decl = '  let liveness: SheetLiveness\n'
+    const refusal = "  if (liveness !== 'live') {\n"
+    const signature = 'async function jobSheetIsLive(query: AiUsageQueryFn, jobId: string, sheetId: string)'
+    const catchReturn = /(\} catch \(err\) \{\n[\s\S]*?\n)(    return false\n  \}\n  if \(liveness !== 'live'\))/
+    expect(source).toMatch(catchReturn)
+    // M1: a statement between the lookup and the refusal overrides the verdict
+    expect(redFor(swap(refusal, `  liveness = 'live'\n${refusal}`))).toMatch(/nothing in between/)
+    expect(redFor(swap(refusal, `  liveness = 'live'\n${refusal}`))).toMatch(/`liveness` may only be written by the lookup/)
+    // M2: the lookup is pointed at an always-live stub
+    expect(redFor(swap(decl, `${decl}  query = async () => ({ rows: [{ deleted_at: null }] })\n`))).toMatch(/`query` may only be written by the lookup/)
+    // M3: parameters swapped — the loop's plan.sheetId lands in `jobId`, the lookup asks about the job id
+    expect(redFor(swap(signature, 'async function jobSheetIsLive(query: AiUsageQueryFn, sheetId: string, jobId: string)'))).toMatch(/parameters must be exactly \(query, jobId, sheetId\)/)
+    // M3b: a default or optional parameter is not a plain parameter
+    expect(redFor(swap(signature, "async function jobSheetIsLive(query: AiUsageQueryFn, jobId: string, sheetId: string = 'sheet')"))).toMatch(/parameters must be exactly/)
+    // M4: `deleted` downgraded to live before the refusal
+    expect(redFor(swap(refusal, `  if (liveness === 'deleted') liveness = 'live'\n${refusal}`))).toMatch(/nothing in between/)
+    // M5: a write hidden in a branch that still answers false (shape intact; the write rule alone reds)
+    const inCatch = source.replace(catchReturn, (_m, head: string, tail: string) => `${head}    sheetId ??= jobId\n${tail}`)
+    expect(inCatch).not.toBe(source)
+    expect(redFor(inCatch)).toBe('jobSheetIsLive: `sheetId` may only be written by the lookup (`sheetId ??= jobId`)')
+    // M6: a shadowing re-declaration in the gate (shape intact; the declaration rule alone reds) or in the loop
+    const shadowed = source.replace(catchReturn, (_m, head: string, tail: string) => `${head}    const query = 1\n${tail}`)
+    expect(shadowed).not.toBe(source)
+    expect(redFor(shadowed)).toBe('jobSheetIsLive: `query` must not be re-declared (`query = 1`)')
+    const gateComment = '      // #5832: re-check the job'
+    expect(redFor(swap(gateComment, `      const query = async () => ({ rows: [{ deleted_at: null }] })\n${gateComment}`))).toMatch(/nothing may re-declare query/)
+    // M7: the plan's sheet id is rewritten before the check
+    expect(redFor(swap(gateComment, `      plan.sheetId = row.recordId\n${gateComment}`))).toMatch(/`plan` must never be written/)
+    expect(redFor(swap(gateComment, `      ;({ sheetId: plan['sheetId'] } = row as any)\n${gateComment}`))).toMatch(/`plan` must never be written/)
+    // M8: the phase's own query rebound (destructuring counts too)
+    const planLine = '    const plan = this.plans.get(jobId)\n'
+    expect(redFor(swap(planLine, `    ;[query] = [async () => ({ rows: [] })] as any\n${planLine}`))).toMatch(/`query` must never be written/)
+    expect(redFor(swap(planLine, '    const plan = this.plans.get(`${jobId}`)\n'))).toMatch(/`plan` must be declared once/)
+    // M9: a second binding of the helper or of the gate
+    expect(redFor(`${source}\nfunction loadSheetLiveness() { return 'live' }\n`)).toMatch(/`loadSheetLiveness` must be bound exactly once/)
+    const asArrow = source.replace(/async function jobSheetIsLive\(([^)]*)\): Promise<boolean> \{/, 'const jobSheetIsLive = async ($1): Promise<boolean> => {')
+    expect(asArrow).not.toBe(source)
+    expect(redFor(asArrow)).toMatch(/expected 1 top-level function declaration/)
+    // M10: the gate is reassigned elsewhere in the module
+    expect(redFor(`${source}\nexport function hijack() { (jobSheetIsLive as any) = async () => true }\n`)).toMatch(/`jobSheetIsLive` must never be written/)
+  })
+
+  it('#5832 BEHAVIOUR TIE: the worker behaviour test exists, runs the real worker, and keeps every case (the cancel exemption rests on it)', () => {
+    expect(readBulkWorkerBehaviour()).toEqual([])
+    const path = join(__dirname, BULK_WORKER_BEHAVIOUR_TEST)
+    const text = normalizeEol(readFileSync(path, 'utf8'))
+    const config = normalizeEol(readFileSync(join(__dirname, '../../vitest.config.ts'), 'utf8'))
+    const red = (src: string | null, cfg = config) => bulkWorkerBehaviourProblems(src, cfg).join('\n')
+    const swap = (from: string, to: string) => {
+      expect(text.split(from).length - 1, `self-test needle must occur exactly once: ${JSON.stringify(from)}`).toBe(1)
+      return text.replace(from, () => to)
+    }
+    const deletedCase = "  it('sheet DELETED while row 1 is generating:"
+    expect(red(null)).toMatch(/is missing/)
+    expect(red(swap(deletedCase, "  it.skip('sheet DELETED while row 1 is generating:"))).toMatch(/it\.skip\(…\) is not allowed/)
+    expect(red(swap(deletedCase, "  it.skipIf(true)('sheet DELETED while row 1 is generating:"))).toMatch(/it\.skipIf\(…\) is not allowed/)
+    expect(red(swap(deletedCase, "  xit('sheet DELETED while row 1 is generating:"))).toMatch(/xit\(…\) skips or focuses/)
+    expect(red(swap("  it('LIVE sheet:", "  it.only('LIVE sheet:"))).toMatch(/it\.only\(…\) is not allowed/)
+    expect(red(swap("describe('AI bulk job worker", "describe.skip('AI bulk job worker"))).toMatch(/describe\.skip\(…\) is not allowed/)
+    expect(red(swap("  it('sheet row GONE (absent) mid-run:", "  it('sheet row GONE mid-run:"))).toMatch(/case "sheet row GONE \(absent\) mid-run:…": expected exactly one it\(…\), found 0/)
+    expect(red(swap("  it('liveness LOOKUP FAILS before row 2:", "  it('LIVE sheet: twice"))).toMatch(/case "LIVE sheet:…": expected exactly one it\(…\), found 2/)
+    expect(red(swap("import { afterEach,", "vi.mock('../../src/multitable/sheet-liveness')\nimport { afterEach,"))).toMatch(/vi\.mock\(…\)/)
+    expect(red(swap("} from '../../src/services/ai-bulk-job-service'", "} from './fake-ai-bulk-job-service'"))).toMatch(/BulkFillJobService must be imported/)
+    expect(red(text, config.replace("exclude: [\n", "exclude: [\n      'tests/unit/ai-bulk-job-sheet-liveness.test.ts',\n"))).toMatch(/vitest\.config\.ts mentions/)
+    expect(config).toContain('exclude: [\n')
+  })
+
+  it('#5832: the cancel exemption and the worker ledger entry each fall when EITHER proof falls (shape or behaviour)', () => {
+    const file = 'routes/multitable-ai.ts'
+    const key = 'POST /sheets/:sheetId/ai/shortcut/bulk-job/:jobId/cancel'
+    const cancel = scan(file).handlers.find((h) => h.key === key)
+    expect(cancel, `${file} ${key} must exist`).toBeDefined()
+    const exemptionD = COVERED[file]!.exempt[key]!
+    const workerKey = 'services/ai-bulk-job-service.ts runGeneratePhase'
+    const workerLoop = allFacts().flatMap((f) => f.providerLoops).find((l) => l.key === workerKey)
+    expect(workerLoop, `${workerKey} must be discovered`).toBeDefined()
+    const verdicts = () => [exemptionD.stillTrue!(cancel!), PROVIDER_LOOPS[workerKey]!.stillTrue(workerLoop!)]
+    expect(verdicts()).toEqual([true, true])
+
+    const worker = normalizeEol(readSource(BULK_WORKER_FILE))
+    const behaviour = normalizeEol(readFileSync(join(__dirname, BULK_WORKER_BEHAVIOUR_TEST), 'utf8'))
+    const rebound = worker.replace('  let liveness: SheetLiveness\n', "  let liveness: SheetLiveness\n  liveness = 'live'\n")
+    const skipped = behaviour.replace("  it('sheet row GONE (absent) mid-run:", "  it.skip('sheet row GONE (absent) mid-run:")
+    expect(rebound).not.toBe(worker)
+    expect(skipped).not.toBe(behaviour)
+    try {
+      bulkWorkerInputs.worker = rebound
+      expect(verdicts(), 'worker shape broken').toEqual([false, false])
+      delete bulkWorkerInputs.worker
+      bulkWorkerInputs.behaviour = skipped
+      expect(verdicts(), 'behaviour case skipped').toEqual([false, false])
+      bulkWorkerInputs.behaviour = null
+      expect(verdicts(), 'behaviour test missing').toEqual([false, false])
+    } finally {
+      delete bulkWorkerInputs.worker
+      delete bulkWorkerInputs.behaviour
+    }
+    expect(verdicts()).toEqual([true, true])
+  })
+
+  it('PROVIDER LOOPS: every loop under src/ that sends rows to the model is named — fixed with a proof, or a tracked GAP (#5832, #5838)', () => {
+    const facts = allFacts()
+    const found = facts.flatMap((f) => f.providerLoops)
+    expect(providerLoopProblems(facts)).toEqual([])
+    expect(found.map((l) => l.key).sort()).toEqual(Object.keys(PROVIDER_LOOPS).sort())
+    // Still true today: the worker asks, the inline bulk-preview loop does not.
+    expect(Object.fromEntries(found.map((l) => [l.key, l.asksLiveness]))).toEqual({
+      'services/ai-bulk-job-service.ts runGeneratePhase': true,
+      'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': false,
+    })
+
+    // Sharpness, in memory: the ledger reds when a loop is fixed, added, unnamed or loses its proof.
+    const withSource = (rel: string, mutated: string) => facts.map((f) => (f.rel === rel ? factsOf(rel, mutated) : f))
+    const inline = normalizeEol(readSource('routes/multitable-ai.ts'))
+    const inlineSend = '        const outcome = await runShortcutCore(\n'
+    expect(inline.split(inlineSend).length - 1).toBe(1)
+    // the inline loop starts re-checking liveness → the GAP entry is no longer true (replace it with a proof)
+    const fixed = inline.replace(inlineSend, () => `        if ((await loadSheetLiveness(query, sheetId)) !== 'live') break\n${inlineSend}`)
+    expect(providerLoopProblems(withSource('routes/multitable-ai.ts', fixed)).join('\n'))
+      .toMatch(/bulk-preview: the fact this entry rests on is no longer true/)
+    // a second provider loop appears in a route → not named
+    const doubled = inline.replace("  router.post('/sheets/:sheetId/ai/shortcut/bulk-commit',", () => [
+      "  router.post('/sheets/:sheetId/ai/shortcut/bulk-again', async (req: Request, res: Response) => {",
+      '    for (const id of [] as string[]) { await executeShortcut(req, res, {} as any, id, async () => {}) }',
+      '  })',
+      "  router.post('/sheets/:sheetId/ai/shortcut/bulk-commit',",
+    ].join('\n'))
+    expect(doubled).not.toBe(inline)
+    expect(providerLoopProblems(withSource('routes/multitable-ai.ts', doubled)).join('\n'))
+      .toMatch(/routes\/multitable-ai\.ts POST \/sheets\/:sheetId\/ai\/shortcut\/bulk-again \(line \d+\): a loop sends rows to the model and is not named/)
+    // the worker loses its per-row check → its entry reds (and bulkWorkerLivenessProblems with it)
+    const worker = normalizeEol(readSource(BULK_WORKER_FILE))
+    const blind = worker.replace(/\n( *)if \(!\(await jobSheetIsLive\(query, jobId, plan\.sheetId\)\)\) \{\n[\s\S]*?\n\1\}\n/, '\n')
+    expect(blind).not.toBe(worker)
+    expect(providerLoopProblems(withSource(BULK_WORKER_FILE, blind)).join('\n'))
+      .toMatch(/runGeneratePhase: the fact this entry rests on is no longer true/)
+    // a ledger entry is dropped → the loop is unnamed; an entry whose loop is gone → dead entry
+    const rest = { ...PROVIDER_LOOPS }
+    delete rest['routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview']
+    expect(providerLoopProblems(facts, rest).join('\n')).toMatch(/bulk-preview \(line \d+\): a loop sends rows to the model and is not named/)
+    const unlooped = inline.replace(inlineSend, () => '        const outcome = await runShortcutCoreRenamed(\n')
+    expect(providerLoopProblems(withSource('routes/multitable-ai.ts', unlooped)).join('\n'))
+      .toMatch(/bulk-preview: expected exactly one provider loop, found 0/)
+    // a GAP entry must name its tracker
+    expect(providerLoopProblems(facts, {
+      ...PROVIDER_LOOPS,
+      'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': {
+        ...PROVIDER_LOOPS['routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview']!,
+        reason: PROVIDER_LOOPS['routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview']!.reason.replace('tracked in #5838', 'tracked in #TBD'),
+      },
+    }).join('\n')).toMatch(/TBD/)
+  })
+
+  it('PROVIDER LOOPS self-test: every loop shape around the choke or a same-file sender is found; a liveness call inside the loop is seen', () => {
+    const fixture = [
+      "import { runShortcutCore } from '../services/ai-bulk-shared'",
+      "import { loadSheetLiveness } from '../multitable/sheet-liveness'",
+      'async function sendOne(p) { return runShortcutCore(client, ctx, p) }',
+      'const sendArrow = async (p) => runShortcutCore(client, ctx, p)',
+      'export function build(router) {',
+      "  router.post('/sheets/:sheetId/for-of', async (req, res) => { for (const p of ps) { await runShortcutCore(client, ctx, p) } })",
+      "  router.post('/sheets/:sheetId/while', async (req, res) => { while (next()) { await sendOne(req.body) } })",
+      "  router.post('/sheets/:sheetId/do', async (req, res) => { do { await sendArrow(req.body) } while (more()) })",
+      "  router.post('/sheets/:sheetId/for-in', async (req, res) => { for (const k in ps) await runShortcutCore(client, ctx, ps[k]) })",
+      "  router.post('/sheets/:sheetId/classic', async (req, res) => { for (let i = 0; i < n; i++) { await runShortcutCore(client, ctx, ps[i]) } })",
+      "  router.post('/sheets/:sheetId/fan-out', async (req, res) => { await Promise.all(ps.map((p) => runShortcutCore(client, ctx, p))) })",
+      "  router.post('/sheets/:sheetId/checked', async (req, res) => { for (const p of ps) { if ((await loadSheetLiveness(q, req.params.sheetId)) !== 'live') break; await runShortcutCore(client, ctx, p) } })",
+      "  router.post('/sheets/:sheetId/once', async (req, res) => { await runShortcutCore(client, ctx, req.body.p) })",
+      "  router.post('/sheets/:sheetId/not-iteration', async (req, res) => { await retry(() => runShortcutCore(client, ctx, req.body.p)) })",
+      '}',
+      'class Worker {',
+      '  async drain() { for (const p of ps) await this.sendOne(p) }',
+      '}',
+      // A registrar whose NESTED handler calls the choke is not itself a sender: mounting it on several
+      // routers in a loop sends nothing per iteration (senders are direct callers only).
+      "function mount(router) { router.post('/sheets/:sheetId/nested', async (req, res) => { await runShortcutCore(client, ctx, req.body.p) }) }",
+      'for (const r of routers) mount(r)',
+    ].join('\n')
+    const loops = factsOf('routes/fixture.ts', fixture).providerLoops
+    expect(Object.fromEntries(loops.map((l) => [l.key, l.asksLiveness]))).toEqual({
+      'routes/fixture.ts POST /sheets/:sheetId/for-of': false,
+      'routes/fixture.ts POST /sheets/:sheetId/while': false,
+      'routes/fixture.ts POST /sheets/:sheetId/do': false,
+      'routes/fixture.ts POST /sheets/:sheetId/for-in': false,
+      'routes/fixture.ts POST /sheets/:sheetId/classic': false,
+      'routes/fixture.ts POST /sheets/:sheetId/fan-out': false,
+      'routes/fixture.ts POST /sheets/:sheetId/checked': true,
+      'routes/fixture.ts drain': false,
+    })
+    expect(factsOf('routes/fixture.ts', fixture.replace(/\n/g, '\r\n')).providerLoops).toEqual(loops)
   })
 
   it('COLLAB CHECKERS: every set…Checker seam that resolves sheet capabilities refuses a non-live sheet with its own refusal value', () => {

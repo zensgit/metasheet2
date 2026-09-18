@@ -116,6 +116,19 @@ jobs:
           set -euo pipefail
           PKG_ROOT="${{ steps.unpack.outputs.pkg_root }}"
           cp "$PKG_ROOT/docker/app.env.multitable-onprem.template" "$PKG_ROOT/docker/app.env"
+          # Encryption-at-rest material (owner review F4, 2026-09-16). bootstrap-admin.sh
+          # (recipe step 5 below) fail-closes when ENCRYPTION_KEY/ENCRYPTION_SALT are missing
+          # or still the built-in default, and the multitable template declares neither --
+          # without these two lines the rehearsal exits 1 at step 5, before any DB work.
+          #
+          # RUN-SCOPED SYNTHETIC MATERIAL, NOT PRODUCTION MATERIAL: minted fresh on every run,
+          # never echoed to the log (it is written into the env file, not to stdout), never
+          # uploaded (the artifact step collects logs only), and discarded with the ephemeral
+          # substrate at teardown. It is deliberately NOT a literal in this file, so there is
+          # nothing here that could be copy-pasted into a real deployment; a real operator
+          # mints their own with `openssl rand -hex 32` per the on-prem runbook.
+          REHEARSAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+          REHEARSAL_ENCRYPTION_SALT="$(openssl rand -hex 32)"
           {
             echo ""
             echo "# --- rehearsal overrides (run-scoped, synthetic) ---"
@@ -127,6 +140,8 @@ jobs:
             echo "BCRYPT_SALT_ROUNDS=12"
             echo "ATTENDANCE_IMPORT_REQUIRE_TOKEN=1"
             echo "UPLOAD_DIR=${RUNNER_TEMP}/uploads"
+            echo "ENCRYPTION_KEY=${REHEARSAL_ENCRYPTION_KEY}"
+            echo "ENCRYPTION_SALT=${REHEARSAL_ENCRYPTION_SALT}"
           } >> "$PKG_ROOT/docker/app.env"
           mkdir -p "${RUNNER_TEMP}/uploads"
 

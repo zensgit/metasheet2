@@ -5,12 +5,40 @@
  * Provides REST API for protection rule management
  */
 
+import type { Request } from 'express';
 import { Router } from 'express';
 import { protectionRuleService } from '../services/ProtectionRuleService';
+import { requireAdminRole } from '../guards/audit-integration';
 import { Logger } from '../core/logger';
 
 const router = Router();
 const logger = new Logger('ProtectionRulesRoutes');
+
+// SECURITY (issue #5667): this router is mounted at /api/admin/safety/rules (admin-routes.ts) and its
+// four write endpoints (POST /, PATCH /:id, DELETE /:id, POST /evaluate) used to carry NO authorization
+// at all, while the rule creator and the rate-limit bucket were read from the caller-controlled
+// `x-user-id` header with an `'anon'`/`'system'` fallback — so any authenticated user could rewrite the
+// safety rules that gate destructive operations, and attribute the change to anyone. Writes are now
+// platform-admin (requireAdminRole: isAdmin throwing -> 503; no pool -> isAdmin returns false -> 403,
+// see rbac/service.ts) and identity
+// comes ONLY from req.user.id. Same treatment as the sibling snapshot-labels router (GHSA-h8mf F2).
+//
+// SECURITY (issue #5678, batch 1): the two reads (GET /, GET /:id) were left open by #5667 and are
+// now admin-only as well. They return each rule's name, conditions and effects — the full map of
+// which destructive operations are blocked and under what predicate — to any authenticated caller,
+// which is reconnaissance for the writes the gate above protects. Same guard, same semantics
+// (403 ADMIN_REQUIRED / 503 RBAC_CHECK_FAILED); admins see exactly what they saw before.
+// Ordering note: the rate limiter below is a router.use registered ahead of every route, so it runs
+// BEFORE this gate. A denied caller is still metered against its own quota instead of getting an
+// unmetered probing channel — and the 11th request in a burst is still 429, not 403, which is what
+// keeps scripts/verify-sprint2-staging.sh's rate-limit probe meaningful.
+const getUserId = (req: Request): string => {
+  const id = req.user?.id;
+  if (id === undefined || id === null || String(id).length === 0) {
+    throw new Error('unauthenticated: protection rule mutation requires an authenticated req.user.id');
+  }
+  return String(id);
+};
 
 // Simple in-memory rate limiter: 10 requests per 60s per user+method+path
 const rateLimitStore = new Map<string, number[]>();
@@ -18,7 +46,9 @@ const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
 router.use((req, res, next) => {
-  const userId = (req.headers['x-user-id'] as string) || 'anon';
+  // Bucket by the authenticated principal, falling back to the peer address — never by a header the
+  // caller writes, which would let anyone mint a fresh quota per request by changing one string.
+  const userId = req.user?.id ? String(req.user.id) : (req.ip || 'unknown');
   const key = `${userId}:${req.method}:${req.path}`;
   let timestamps = rateLimitStore.get(key) || [];
   const now = Date.now();
@@ -51,7 +81,7 @@ function isDatabaseError(error: unknown): error is DatabaseError {
  * GET /api/admin/safety/rules
  * List all protection rules
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAdminRole(), async (req, res) => {
   try {
     const { target_type, is_active } = req.query;
 
@@ -79,7 +109,7 @@ router.get('/', async (req, res) => {
  * GET /api/admin/safety/rules/:id
  * Get a single protection rule
  */
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
     const rule = await protectionRuleService.getRule(id);
@@ -108,9 +138,9 @@ router.get('/:id', async (req, res) => {
  * POST /api/admin/safety/rules
  * Create a new protection rule
  */
-router.post('/', async (req, res) => {
+router.post('/', requireAdminRole(), async (req, res) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'system';
+    const userId = getUserId(req);
     const {
       rule_name,
       description,
@@ -200,7 +230,7 @@ router.post('/', async (req, res) => {
  * PATCH /api/admin/safety/rules/:id
  * Update a protection rule
  */
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
@@ -241,7 +271,7 @@ router.patch('/:id', async (req, res) => {
  * DELETE /api/admin/safety/rules/:id
  * Delete a protection rule
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -264,7 +294,7 @@ router.delete('/:id', async (req, res) => {
  * POST /api/admin/safety/rules/evaluate
  * Dry-run evaluation of protection rules
  */
-router.post('/evaluate', async (req, res) => {
+router.post('/evaluate', requireAdminRole(), async (req, res) => {
   try {
     const { entity_type, entity_id, operation, properties, user_id } = req.body;
 
