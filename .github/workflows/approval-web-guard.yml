@@ -996,8 +996,15 @@ jobs:
         # two-point gap, closed on introduction rather than left for a later round). SUBSTRING
         # COLLISIONS checked mechanically in BOTH directions using this run line's own token list
         # (split on whitespace, dropping the leading `pnpm … vitest run` and trailing
-        # `--reporter=dot`): 103 tokens before this change, 106 after, no duplicates; none of the
-        # three new tokens contains, nor is contained by, any of the other 103 — in particular
+        # `--reporter=dot`): 103 tokens before this change, 106 after. CORRECTION (gate
+        # `impl-gate-B2-round1-20260918.md` P3-2, fix round 3): "no duplicates" below was FALSE
+        # taken literally — the 106-token list carries three pre-existing LITERAL duplicate pairs
+        # inherited from earlier rounds (`approval-condition-summary`, `approval-amount-in-words`,
+        # `approval-form-draft`, each appearing twice already before this change; vitest dedupes a
+        # repeated positional itself, so this is inert, not a real gap). What actually holds, and is
+        # the only claim this comment needs: none of the three NEW tokens contains, nor is contained
+        # by, any of the other 103 (pre-existing duplicates included — checked against the raw list,
+        # not a de-duplicated one) — in particular
         # `todoApi` vs the neighbouring `approvalApiErrorSurfacing` (only `Api` in common, not a
         # substring either way) and `TodoCenterView` vs `approvalCenterTable`/`approval-center`
         # (share only `Center`/`center`). Each verified green in isolation
