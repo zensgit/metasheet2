@@ -1,8 +1,47 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { publishTodoCountsUpdate, type TodoCountFetcher } from '../../src/services/todo-realtime'
-import type { PendingViewer } from '../../src/services/pending-source-registry'
+import { pendingSourceRegistry, type PendingViewer } from '../../src/services/pending-source-registry'
 
 describe('todo realtime count publisher (B-2)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // Gate `impl-gate-B2-round1-20260918.md` P1-1: every case further below INJECTS
+  // `countPendingForUser`, so none of them ever execute `defaultCountPendingForUser` — the ONLY
+  // branch production actually takes (`routes/approvals.ts` never passes `countPendingForUser`).
+  // Proven by mutation: replacing `defaultCountPendingForUser`'s body with a divergent
+  // implementation left those 5 cases (and the full default-config `vitest run`) all green — the
+  // P1's own reproduction, `cp`-restored after. This case closes that gap by NOT injecting a
+  // fetcher, so it runs the real default path, and by asserting on the shared singleton itself
+  // (`pendingSourceRegistry.countPendingForUser`) rather than on a substitute — that's the one call
+  // production can reach.
+  it('the DEFAULT path (no injected fetcher) calls pendingSourceRegistry.countPendingForUser — the same singleton GET /api/todo/count reads — and forwards its result verbatim', async () => {
+    const broadcastTo = vi.fn()
+    const registrySpy = vi
+      .spyOn(pendingSourceRegistry, 'countPendingForUser')
+      .mockResolvedValue({ count: 5, sources: { approval: 'ok' } })
+
+    await publishTodoCountsUpdate({
+      collabService: { broadcastTo },
+      userId: 'u6',
+      roles: ['finance'],
+      permissions: ['attendance:approve'],
+      reason: 'decide',
+      // no countPendingForUser: exercises `defaultCountPendingForUser`
+    })
+
+    expect(registrySpy).toHaveBeenCalledTimes(1)
+    expect(registrySpy).toHaveBeenCalledWith({
+      actorId: 'u6',
+      roles: ['finance'],
+      permissions: ['attendance:approve'],
+    })
+    expect(broadcastTo).toHaveBeenCalledWith('auth-user:u6', 'todo:counts-updated', expect.objectContaining({
+      count: 5,
+      sources: { approval: 'ok' },
+    }))
+  })
   it('reuses the injected countPendingForUser fetcher — the SAME shape pendingSourceRegistry.countPendingForUser returns — never computing a count itself', async () => {
     const broadcastTo = vi.fn()
     let receivedViewer: PendingViewer | undefined

@@ -468,7 +468,14 @@ async function listDirectApprovalAssigneeIds(instanceId: string): Promise<string
     .filter((userId) => typeof userId === 'string' && userId.trim().length > 0)
 }
 
-async function publishApprovalCountsForUsers(
+// Exported (additive-only; no behavior change) so gate `impl-gate-B2-round1-20260918.md`'s P1-1
+// finding can be gated directly: all eight approval-action call sites funnel through this ONE
+// function to fire both `publishApprovalCountsUpdate` and `publishTodoCountsUpdate` on the same
+// `uniqueUsers` set (design MD §5.1's by-construction argument), so a wiring test gating THIS
+// function's own body is the right anchor — it does not, by itself, prove any given call site
+// actually reaches this function; that half stays the grep/by-construction argument. Mirrors
+// `isPlmApprovalId`'s export.
+export async function publishApprovalCountsForUsers(
   options: ApprovalRouterOptions | undefined,
   users: Array<{ userId: string; roles?: string[] }>,
   reason: string,
