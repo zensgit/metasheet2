@@ -145,10 +145,36 @@
 // reconnecting the socket itself (re-authenticating with the new token) on the SAME
 // `onAuthPrincipalChange` event this file already subscribes to for the REST half — a change to
 // this composable's own connection lifecycle, not to the backend query, and a separate, larger unit
-// than this commit. Not narrowed further than that: whether `todo:counts-updated`'s room/payload is
-// even scoped per-org (as opposed to per-user, in which case a stale push might already be
-// harmless) has not been checked here — left as an open question for that unit, not asserted either
-// way.
+// than this commit.
+//
+// CHECKED (fix round 4, gate `impl-gate-B2-round1-20260918.md` P3-7 — this was previously left as
+// an open question, not asserted either way; it is now): `todo:counts-updated`'s room is
+// per-user only, NOT per-org (`buildAuthenticatedUserRoom(userId)` returns the literal string
+// `auth-user:${userId}`, `CollabService.ts:8-10` — no tenant/org component). But the deeper
+// reason a stale push here is harmless is that the COUNT ITSELF has no org dimension to be stale
+// about, at any layer this pipeline touches:
+//   grep -n 'tenant\|org' packages/core-backend/src/services/approval-pending-query.ts   → 0 hits
+// the shared SQL both `GET /api/todo/count` and this push read never filters or groups by
+// tenant/org. Every `PendingViewer`/`ApprovalPendingViewer` built on the way there
+// (`routes/todo.ts`'s `resolveTodoViewer`, `pending-source-registry.ts`,
+// `approval-pending-source.ts`'s `toApprovalPendingViewer`) carries only
+// `{ actorId, roles, permissions }` — no tenant field exists to plumb through even if the query
+// wanted one. And the org-switch endpoint itself (`routes/auth.ts`'s `POST /auth/session-org`)
+// does not recompute `roles`/`permissions` for the new org: its `tokenUser` is built as
+// `{ ...user, tenantId: chosen }`, which carries the SAME `user.roles`/`user.permissions` forward
+// from the pre-switch token, changing only `tenantId`. So for one signed-in user, this query returns the
+// IDENTICAL number regardless of which org's token is currently active — there is no per-org
+// value for a push (or a REST re-read) to be stale RELATIVE TO. A push landing on the still-open
+// socket after an org switch is therefore not a wrong-org leak; it is the same org-invariant count
+// the REST re-read would also return, before and after the switch.
+// PRE-EXISTING, not introduced or worsened here: `approval:counts-updated` (`approval-realtime.ts`)
+// reads the SAME query shape through the SAME room-building function and has always had this
+// property. Whether "the todo/approval count spans every org a user belongs to, not just the
+// currently-active one" is the right product behavior is a separate question this gap does not
+// answer either way — orthogonal to P3-7, which was only about whether a STALE push could describe
+// a DIFFERENT org's data than a fresh one would (it cannot, because there is no such difference).
+// The socket-reconnection gap two paragraphs up remains open regardless of this finding — it is
+// about which TOKEN authenticates the connection, not about what the query returns.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { getTodoCount, isTodoResponseDegraded, type TodoCountResponse } from '../../todo/api'
 import { useLocale } from '../../composables/useLocale'
