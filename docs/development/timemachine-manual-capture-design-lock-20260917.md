@@ -398,3 +398,24 @@ the exact durable signed envelope, with generation-scoped immutable object ident
 and fresh post-provider authorization. It never marks receipts `verified` and never
 publishes the catalog. The unfinished step is atomic receipt verification and
 catalog finalization, followed by runtime command/UI integration.
+
+### Atomic Manual Publication
+
+The internal finalizer now verifies the durable manifest MAC through guarded
+custody outside the database transaction. It then re-reads byte-identical prepared
+content under the canonical sheet fence, active key/version lock, current request
+identity/authority, writer exclusion and active owner lease. The exact unpruned
+trust checkpoint must contain the selected anchor. Current source rows and the
+actual immutable sealed-history coverage are rebuilt and compared with every
+signed section hash/count. Eleven exact uploaded object receipts are promoted,
+the 28-row snapshot coverage is inserted, and the catalog is finalized in one
+transaction. A failed final write rolls all of those changes back.
+
+Section storage MUST contain `ciphertext || authTag`, matching the existing v1
+reader; object identity/hash/size cover the complete bytes. Earlier ciphertext-only
+upload evidence is superseded: it did not prove stored objects could be restored.
+Fresh-session real local custody now exercises the actual archive reader against
+the persisted manifest and all ten complete stored section objects.
+
+This is internal no-attachment publication evidence, not a newly enabled product
+route, customer-storage acceptance, full attachment support or a completed goal.

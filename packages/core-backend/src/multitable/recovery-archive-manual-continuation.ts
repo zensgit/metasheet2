@@ -76,7 +76,9 @@ function bindManualObjectUpload(
     })
     // Always upload the durable original, never bytes supplied by the callback caller.
     const section = name === null ? null : admitted.envelope.sections.find((candidate) => candidate.sectionName === name)
-    const bytes = name === null ? admitted.envelope.manifestEnvelope : section?.ciphertext
+    // The v1 reader splits the final 16 bytes as the GCM tag.
+    const bytes = name === null ? admitted.envelope.manifestEnvelope
+      : section ? Buffer.concat([section.ciphertext, section.authTag]) : undefined
     if (!bytes) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
     if (name === null) {
       const signed = parseRecoveryArchiveManifestObjectEnvelope(bytes)

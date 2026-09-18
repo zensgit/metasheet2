@@ -161,31 +161,41 @@ export function bindRecoveryArchiveManualSectionPlan(
     const sealInput = { ...entry.owner, sheetId: entry.identity.sheetId, sections }
     const plan = entry.repeat ? await consumeRecoveryArchiveCheckpointReservations(query, sealInput)
       : await consumeRecoveryArchiveBootstrapReservations(query, sealInput)
-    const ids = plan.sections.map((section) => section.operationId)
-    const revisions = await query(`SELECT id::text, sheet_id, section_kind, entity_key, action, payload,
-      tombstone, seq::text, operation_id::text,
-      to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
-      FROM meta_sheet_section_revisions WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])`, [plan.sheetId, ids])
-    const endpoints = await query(`SELECT sheet_id, operation_id::text, endpoint_seq::text, event_count,
-      to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-      operation_kind, event_contract_version, component_count
-      FROM meta_record_history_operations WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])`,
-    [plan.sheetId, [...ids, plan.snapshotOperationId]])
-    const members = await query(`SELECT sheet_id, parent_operation_id::text, ordinal, section_kind,
-      source_head_kind, source_operation_id::text, source_head_seq::text, row_count::text, source_hash,
-      to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
-      FROM meta_record_history_snapshot_members WHERE sheet_id=$1 AND parent_operation_id=$2::uuid`,
-    [plan.sheetId, plan.snapshotOperationId])
-    if (revisions.rows.length !== 9 || endpoints.rows.length !== 10 || members.rows.length !== 9) {
-      throw new Error('RECOVERY_ARCHIVE_MANUAL_COVERAGE_INCOMPLETE')
-    }
-    const coverageCandidates = [
-      ...(revisions.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'section_revision', boundSection: row.section_kind, row, sourceSeq: row.seq })),
-      ...(endpoints.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'sealed_operation_endpoint', boundSection: 'manifest_root', row, sourceSeq: row.endpoint_seq })),
-      ...(members.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'snapshot_membership', boundSection: row.section_kind, row, sourceSeq: row.source_head_seq })),
-    ]
-    return buildRecoveryArchiveSnapshotPlan({ sectionRows, coverageCandidates, nonces })
+    return readRecoveryArchiveManualSnapshotPlan(query, plan.sheetId, plan.snapshotOperationId, entry.snapshot, nonces)
   })
+}
+
+/** Rebuild the same plan from immutable sealed membership, not a caller-provided coverage list. */
+export async function readRecoveryArchiveManualSnapshotPlan(
+  query: SealQuery, sheetId: string, snapshotOperationId: string,
+  snapshot: RecoveryArchiveCaptureSource, nonces: Record<string, Uint8Array>,
+) {
+  if (snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+  const sectionRows = { ...snapshot.sections, attachments_index: [], permission_evidence: [] }
+  const members = await query(`SELECT sheet_id, parent_operation_id::text, ordinal, section_kind,
+    source_head_kind, source_operation_id::text, source_head_seq::text, row_count::text, source_hash,
+    to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+    FROM meta_record_history_snapshot_members WHERE sheet_id=$1 AND parent_operation_id=$2::uuid`,
+  [sheetId, snapshotOperationId])
+  const ids = (members.rows as { source_operation_id: string }[]).map((row) => row.source_operation_id)
+  const revisions = await query(`SELECT id::text, sheet_id, section_kind, entity_key, action, payload,
+    tombstone, seq::text, operation_id::text,
+    to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+    FROM meta_sheet_section_revisions WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])`, [sheetId, ids])
+  const endpoints = await query(`SELECT sheet_id, operation_id::text, endpoint_seq::text, event_count,
+    to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+    operation_kind, event_contract_version, component_count
+    FROM meta_record_history_operations WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])`,
+  [sheetId, [...ids, snapshotOperationId]])
+  if (revisions.rows.length !== 9 || endpoints.rows.length !== 10 || members.rows.length !== 9) {
+    throw new Error('RECOVERY_ARCHIVE_MANUAL_COVERAGE_INCOMPLETE')
+  }
+  const coverageCandidates = [
+    ...(revisions.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'section_revision', boundSection: row.section_kind, row, sourceSeq: row.seq })),
+    ...(endpoints.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'sealed_operation_endpoint', boundSection: 'manifest_root', row, sourceSeq: row.endpoint_seq })),
+    ...(members.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'snapshot_membership', boundSection: row.section_kind, row, sourceSeq: row.source_head_seq })),
+  ]
+  return buildRecoveryArchiveSnapshotPlan({ sectionRows, coverageCandidates, nonces })
 }
 
 export interface RecoveryArchiveManualAdmissionPolicy {

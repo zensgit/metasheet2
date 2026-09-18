@@ -720,3 +720,44 @@ Compiler neighbors: 10/10. Acceptance tsc, source ESLint, full S5 and diff-check
 pass. Owned database/connections and temporary cluster are removed by the runner.
 No catalog transition or finalization is implemented by this adapter; recovery
 availability still requires the later atomic verification/publication transaction.
+
+## Atomic Publication And Stored-Object Recovery
+
+Implementation range starts at `590f86bce0c59e87a86007aee60168024aba5e56`.
+Sol high's bounded read-only review of that checkpoint found a real critical
+integrity defect: section objects omitted the GCM tag, while the reader splits
+the final 16 stored bytes as that tag. The new download/decrypt positive failed on
+the old implementation with `RECOVERY_ARCHIVE_CRYPTO_AEAD_OPEN_FAILED`. Upload,
+object hash/size and final receipt expectations now use `ciphertext || authTag`.
+The preceding ciphertext-equality positives are not evidence of recoverability.
+The reviewer did not review the subsequently written finalizer; no independent
+approval of that new implementation is claimed here.
+
+Finalization uses a pre-authorized immutable prepared payload, verifies its MAC
+outside transactions, then rechecks byte equality and all authority inside the
+publication transaction. Canonical fence, key/version, live actor/request, writer
+exclusion, generation binding/lease/expiry and exact unpruned trust checkpoint
+precede source/coverage comparisons. Real immutable history rows produce the
+coverage plan; arbitrary caller coverage is never accepted. All eleven receipts,
+28 coverage rows and parent `verified/finalized/complete` transition are atomic.
+
+Real-DB negatives cover missing manifest receipt, wrong request identity, stale
+key version, rejected MAC, actor revoked during MAC, inactive actor, changed source
+and a fault at the final parent UPDATE. The final-write fault leaves zero verified
+receipts and zero coverage rows. Removing the source/hash guard makes the drift
+negative red. Removing the MAC-result guard makes the rejected-MAC negative red.
+Both guards are restored before the final run.
+
+The real local-custody path resumes uploads with its original session locked,
+uses a backup-restored fresh session for MAC verification/publication, and calls
+the existing `readRecoveryArchiveCompleteSectionsInternal` against the actual
+filesystem objects. All ten sections open; records=1 and coverage=28. This is a
+synthetic internal reader proof, not an enabled HTTP restore/apply or customer UAT.
+
+Logs: `/private/tmp/tm-manual-object-auth-tag-red.log`,
+`/private/tmp/tm-manual-finalization-{negative,mutation,authenticated-final,reader,mac-mutation,final,neighbors}.log`.
+Reader/compiler neighbors: 2 files / 25 tests. Acceptance tsc and source ESLint
+pass. The driver removes its owned DB, connections and cluster. A test injection
+was adjusted after MAC verification introduced a read transaction: source drift
+is injected only into the final transaction so rollback restores the fixture.
+No migration/flag/deployment or customer data change accompanies this slice.

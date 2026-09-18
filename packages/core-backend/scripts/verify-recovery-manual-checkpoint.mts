@@ -475,7 +475,8 @@ try {
   const actorId = randomUUID()
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
   const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck,
-    createRecoveryArchiveManualObjectUpload, createRecoveryArchiveManualManifestUpload } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+    createRecoveryArchiveManualObjectUpload, createRecoveryArchiveManualManifestUpload,
+    createRecoveryArchiveManualFinalization } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -723,7 +724,9 @@ try {
       authenticated++
       return createHmac('sha256', sourceKey).update(preimage).digest()
     },
-    async verifyManifestRootMac() { throw new Error('SYNTHETIC_PUBLICATION_FORBIDDEN') },
+    async verifyManifestRootMac({ preimage, mac }) {
+      return createHmac('sha256', sourceKey).update(preimage).digest().equals(Buffer.from(mac))
+    },
   }
   const capture = async (source: import('../src/multitable/recovery-archive-relational-source').RecoveryArchiveCaptureSource) => {
     captures++
@@ -895,10 +898,16 @@ try {
     const resumeWithObjects = () => manual({ ...repeated, source: null,
       capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') }, upload: async (envelope, section) => {
         await objectUpload(envelope, { ...section, ciphertext: Buffer.from('SYNTHETIC_UNTRUSTED_PLAINTEXT') })
-        const digest = createHash('sha256').update(section.ciphertext).digest('hex')
+        const objectBytes = Buffer.concat([section.ciphertext, section.authTag])
+        const digest = createHash('sha256').update(objectBytes).digest('hex')
         const stored = await provider.get({ generationId: repeated.owner.generationId, objectId: digest,
-          expectedVersion: digest, expectedSha256: digest, expectedSize: String(section.ciphertext.length), expectedExpiresAt: objectExpiry })
-        assert.ok(Buffer.from(stored.bytes).equals(section.ciphertext))
+          expectedVersion: digest, expectedSha256: digest, expectedSize: String(objectBytes.length), expectedExpiresAt: objectExpiry })
+        assert.ok(Buffer.from(stored.bytes).equals(objectBytes))
+        const downloaded = Buffer.from(stored.bytes)
+        const recovered = archiveCrypto.openRecoveryArchiveSection({ binding: { ...envelope.binding,
+          sectionName: section.sectionName, plaintextSha256: section.plaintextSha256 }, dek: sourceKey,
+        nonce: section.nonce, ciphertext: downloaded.subarray(0, -16), authTag: downloaded.subarray(-16) })
+        assert.equal(createHash('sha256').update(recovered).digest('hex'), section.plaintextSha256)
       } })
     await resumeWithObjects()
     await resumeWithObjects()
@@ -908,6 +917,11 @@ try {
     assert.deepEqual(receipts.map((row) => row.section_name).sort(), [...archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
     assert.ok(receipts.every((row) => row.object_class === 'section' && row.state === 'uploaded'))
     const uploadManifest = createRecoveryArchiveManualManifestUpload(uploadInput.transaction, { ...repeated, provider })
+    const finalize = createRecoveryArchiveManualFinalization(uploadInput.transaction)
+    const finalInput = { identity: repeated.identity, owner: repeated.owner,
+      keyCustody: custody, transactionDepth: repeated.transactionDepth,
+      key: { keyId: repeated.binding.keyId, expectedRowVersion: admissionPolicy.keyRowVersion } }
+    await assert.rejects(finalize(finalInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
     await uploadManifest()
     await uploadManifest()
     const manifestReceipt = (await query(`SELECT object_id,provider_version,plaintext_sha256,ciphertext_sha256,
@@ -929,6 +943,45 @@ try {
     assert.ok(Buffer.from(storedManifest.bytes).equals(expectedManifest))
     assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
       WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 0)
+    await assert.rejects(finalize({ ...finalInput, identity: { ...finalInput.identity, requestId: randomUUID() } }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    await assert.rejects(finalize({ ...finalInput, key: { ...finalInput.key, expectedRowVersion: '999' } }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    await assert.rejects(finalize({ ...finalInput, keyCustody: { ...custody, async verifyManifestRootMac() { return false } } }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    try {
+      await assert.rejects(finalize({ ...finalInput, keyCustody: { ...custody, async verifyManifestRootMac() {
+        await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+        return true
+      } } }), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    } finally { await query('UPDATE users SET is_active=true WHERE id=$1', [actorId]) }
+    const revokedFinalize = createRecoveryArchiveManualFinalization((work) => uploadInput.transaction(async (q) => {
+      await q('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+      return work(q)
+    }))
+    await assert.rejects(revokedFinalize(finalInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    let finalizeTransactions = 0
+    const driftFinalize = createRecoveryArchiveManualFinalization((work) => uploadInput.transaction(async (q) => {
+      if (++finalizeTransactions === 2) await q(`UPDATE meta_records SET data='{"manual-source-field":"before-finalize"}' WHERE id='manual-source-record'`)
+      return work(q)
+    }))
+    await assert.rejects(driftFinalize(finalInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    const faultFinalize = createRecoveryArchiveManualFinalization((work) => uploadInput.transaction((q) => work(async (sql, params) => {
+      if (sql.startsWith('UPDATE meta_recovery_archives SET state=')) throw new Error('SYNTHETIC_FINAL_WRITE_FAILURE')
+      return q(sql, params)
+    })))
+    await assert.rejects(faultFinalize(finalInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
+      WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 0)
+    assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_coverage_items
+      WHERE generation_id=$1::uuid`, [repeated.owner.generationId])).rows[0].n, 0)
+    await finalize(finalInput)
+    assert.deepEqual((await query(`SELECT state,build_status,coverage_status,coverage_row_count::text
+      FROM meta_recovery_archives WHERE generation_id=$1::uuid`, [repeated.owner.generationId])).rows,
+    [{ state: 'verified', build_status: 'finalized', coverage_status: 'complete', coverage_row_count: '28' }])
+    assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
+      WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 11)
+    console.log('PASS: atomic manual archive publication with authentic 28-row coverage and eleven verified receipts')
     const revokedUpload = await continuation()
     const revoker = new Client({ ...connection, database })
     await revoker.connect()
@@ -957,7 +1010,7 @@ try {
       await revoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
       await revoker.end()
     }
-    console.log('PASS: real local PUT/HEAD records ten sections and one durable signed manifest; idempotent replay, HEAD failure and post-IO revocation guards; no verified/publication claim')
+    console.log('PASS: real local PUT/HEAD records ten sections and one durable signed manifest; idempotent replay, HEAD failure and post-IO revocation guards; uploader alone does not publish')
     const local = require('../src/multitable/recovery-local-custody.ts') as typeof import('../src/multitable/recovery-local-custody')
     const localStores = require('../src/multitable/recovery-local-custody-store.ts') as typeof import('../src/multitable/recovery-local-custody-store')
     const custodyId = randomUUID()
@@ -1016,7 +1069,35 @@ try {
         upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...localInput, provider: localProvider }) })
       assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
         WHERE generation_id=$1::uuid AND state='uploaded'`, [localInput.owner.generationId])).rows[0].n, 10)
-      console.log('PASS: real local custody backup outside archive root; manual capture, uploaded receipts, locked-session resume and fresh-session unwrap/decrypt ten sections')
+      await createRecoveryArchiveManualManifestUpload(uploadInput.transaction, { ...localInput, provider: localProvider })()
+      await finalize({ identity: localInput.identity, owner: localInput.owner,
+        key: { keyId: capability.keyId, expectedRowVersion: '1' },
+        keyCustody: restoredSession.admitForArchive(custodyId), transactionDepth: first.transactionDepth })
+      assert.equal((await query(`SELECT state FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
+        [localInput.owner.generationId])).rows[0].state, 'verified')
+      const reader = require('../src/multitable/recovery-archive-reader.ts') as typeof import('../src/multitable/recovery-archive-reader')
+      const localManifest = manifestObjects.parseRecoveryArchiveManifestObjectEnvelope(envelope.manifestEnvelope!).manifest
+      const storedObjects = (await query(`SELECT object_class,section_name,object_id,provider_version,ciphertext_sha256,size_bytes::text
+        FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid AND state='verified'`,
+      [localInput.owner.generationId])).rows
+      const objectBinding = (sectionName: string | null) => {
+        const object = storedObjects.find((row) => row.section_name === sectionName)!
+        return { generationId: localInput.owner.generationId, objectId: object.object_id,
+          expectedVersion: object.provider_version, expectedSha256: object.ciphertext_sha256,
+          expectedSize: object.size_bytes, expectedExpiresAt: localManifest.expires_at }
+      }
+      const opened = await reader.readRecoveryArchiveCompleteSectionsInternal({
+        selectedBinding: { generationId: localInput.owner.generationId, workspaceId: localInput.identity.workspaceId,
+          baseId: localInput.identity.baseId, sheetId: localInput.identity.sheetId,
+          anchorOperationId: localInput.binding.anchorOperationId, anchorSeq: localInput.binding.anchorSeq,
+          checkpointId: localInput.binding.checkpointId, rootHash: localManifest.root_hash,
+          sourceVectorHash: localInput.owner.sourceVectorHash },
+        keyCustody: restoredSession.admitForArchive(custodyId), transactionDepth: first.transactionDepth,
+        objectStore: localProvider, manifestObject: objectBinding(null),
+        sectionObjects: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map(objectBinding) })
+      assert.equal(opened.sections.records.length, 1)
+      assert.equal(opened.sections.coverage_index.length, 28)
+      console.log('PASS: real local custody backup; locked-session upload resume, fresh-session authenticated publication and actual archive reader opens all ten stored sections')
     } finally {
       localSession.lock()
       restoredSession.lock()
