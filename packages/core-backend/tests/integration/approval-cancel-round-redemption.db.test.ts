@@ -1205,9 +1205,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    */
   it(
     '§5 I3 「终结即释放」 (the C-2 half, outlet #5): after a SUCCESSFUL redemption the round is ' +
-      '`applied` and the document\'s pending slot is RELEASED, so a new cancel round starts ' +
-      'immediately — asserted as the FIRST post-redeem statement, which is what makes the clause ' +
-      'carry its own mutation (M-26) instead of dying behind 判据 II\'s end-state check',
+      '`applied` and the document\'s pending SLOT is released — measured as slot state, with the ' +
+      'ORIGINAL document asserted still `approved` because the cancellation port is a double (in ' +
+      'production C-1 would cancel it and no second round would be possible). The create is the ' +
+      'FIRST post-redeem statement, which is what makes the clause carry its own mutation (M-26) ' +
+      'instead of dying behind 判据 II\'s end-state check',
     async () => {
       const suffix = `i3c2-${TS}`
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
