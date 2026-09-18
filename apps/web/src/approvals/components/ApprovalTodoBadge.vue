@@ -159,14 +159,24 @@
 // (`routes/todo.ts`'s `resolveTodoViewer`, `pending-source-registry.ts`,
 // `approval-pending-source.ts`'s `toApprovalPendingViewer`) carries only
 // `{ actorId, roles, permissions }` — no tenant field exists to plumb through even if the query
-// wanted one. And the org-switch endpoint itself (`routes/auth.ts`'s `POST /auth/session-org`)
-// does not recompute `roles`/`permissions` for the new org: its `tokenUser` is built as
-// `{ ...user, tenantId: chosen }`, which carries the SAME `user.roles`/`user.permissions` forward
-// from the pre-switch token, changing only `tenantId`. So for one signed-in user, this query returns the
-// IDENTICAL number regardless of which org's token is currently active — there is no per-org
-// value for a push (or a REST re-read) to be stale RELATIVE TO. A push landing on the still-open
-// socket after an org switch is therefore not a wrong-org leak; it is the same org-invariant count
-// the REST re-read would also return, before and after the switch.
+// wanted one. THIS ALONE is enough for the conclusion below, independent of whether roles/
+// permissions themselves happen to vary by org.
+// Two more pieces, checked rather than assumed, that additionally rule out an org-varying
+// `roles`/`permissions` INPUT to that query: (a) the org-switch endpoint itself
+// (`routes/auth.ts`'s `POST /auth/session-org`) does not recompute them for the new org — its
+// `tokenUser` is built as `{ ...user, tenantId: chosen }`, carrying the SAME `user.roles`/
+// `user.permissions` forward, changing only `tenantId` — but that only proves THIS ONE TRANSITION
+// doesn't change them, not that they are org-invariant in general; so (b) the production
+// resolution path every authenticated request goes through (`AuthService.verifyToken` →
+// `getUserById(userId)`, a `WHERE id = $1` query with no tenant condition, → `resolveRbacProfile`
+// → `isAdmin(userId)`/`listUserPermissions(userId)` in `rbac/service.ts`) has NO tenant parameter
+// anywhere in that chain's signatures — not "this switch happened not to change it", but there is
+// no tenant input for it to vary BY, for any request, not only the one right after a switch.
+// So for one signed-in user, this query returns the IDENTICAL number regardless of which org's
+// token is currently active — there is no per-org value for a push (or a REST re-read) to be
+// stale RELATIVE TO. A push landing on the still-open socket after an org switch is therefore not
+// a wrong-org leak; it is the same org-invariant count the REST re-read would also return, before
+// and after the switch.
 // PRE-EXISTING, not introduced or worsened here: `approval:counts-updated` (`approval-realtime.ts`)
 // reads the SAME query shape through the SAME room-building function and has always had this
 // property. Whether "the todo/approval count spans every org a user belongs to, not just the
