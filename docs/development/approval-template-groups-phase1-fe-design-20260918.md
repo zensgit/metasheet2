@@ -98,7 +98,7 @@
 
 ## 4. 事务与锁序
 
-**不适用本切片。** A-2 是纯前端切片:七个客户端函数只是 `fetch` 包装,面板组件只做 DOM 状态机(`loading`/`creating`/`showSessionOrgSwitcher` 等 `ref`),不发出任何 SQL、不持有任何数据库连接或锁。机械核对(验证 MD §5.4):对本切片全部改动文件跑 `grep -c "BEGIN\|COMMIT\|pg_advisory\|FOR UPDATE\|new Client\|new Pool"`,全部为 0。事务与锁序表属 A-1 设计 MD §4,本切片不重复。
+**不适用本切片。** A-2 是纯前端切片:七个客户端函数只是 `fetch` 包装,面板组件只做 DOM 状态机(`loading`/`creating`/`showSessionOrgSwitcher` 等 `ref`),不发出任何 SQL、不持有任何数据库连接或锁。机械核对(验证 MD §5.4)限定在四个production 代码文件(`api.ts`/`SessionOrgSwitcher.vue`/`ApprovalTemplateGroupsPanel.vue`/`TemplateCenterView.vue`)上跑 `grep -c "BEGIN\|COMMIT\|pg_advisory\|FOR UPDATE\|new Client\|new Pool"`,全部为 0——**更正**:第一版曾对「全部改动文件」不加限定地跑同一模式,命中 15(全部是英文散文里的假阳性,如 `commit body`/`new client methods` 这类与 SQL 无关的自然语言用词,以及本文档与验证 MD 自身引用锁文/A-1 术语造成的自指命中,详见验证 MD §5.4 的更正记录),已收窄到只扫描本切片实际新增/改动的生产代码与 spec 源文件(排除 CI shell 脚本的散文注释与本 MD 文档自身)。事务与锁序表属 A-1 设计 MD §4,本切片不重复。
 
 ## 5. 与既有代码的接缝(file:line)
 
