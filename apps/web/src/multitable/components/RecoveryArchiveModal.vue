@@ -22,6 +22,11 @@
         </header>
 
         <div class="archive-recovery__body">
+          <ManualArchiveCapture
+            v-if="jobDiscoveryResolved && !job && captureArchive && readCapture"
+            :sheet-id="sheetId" :sheet-name="sheetName" :is-zh="isZh"
+            :capture="captureArchive" :read="readCapture" @completed="recheckArchive"
+          />
           <p v-if="jobDiscoveryLoading" class="archive-recovery__state" data-test="archive-recovery-discovery-loading">{{ l('loading') }}</p>
           <p v-else-if="jobDiscoveryError" class="archive-recovery__state archive-recovery__state--error" data-test="archive-recovery-discovery-error">{{ jobDiscoveryError }}</p>
           <p v-else-if="!job && catalogLoading" class="archive-recovery__state" data-test="archive-recovery-loading">{{ l('loading') }}</p>
@@ -176,9 +181,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RefreshRight } from '@element-plus/icons-vue'
+import ManualArchiveCapture from './ManualArchiveCapture.vue'
 
 import type {
   RecoveryArchiveCatalogEntry,
+  RecoveryArchiveCaptureStatus,
   RecoveryArchiveCatalogPage,
   RecoveryArchiveExecuteResult,
   RecoveryArchiveJobPage,
@@ -200,6 +207,9 @@ const JOB_POLL_MS = 2_000
 const props = defineProps<{
   visible: boolean
   sheetId: string
+  sheetName?: string
+  captureArchive?: (sheetId: string, requestId: string) => Promise<RecoveryArchiveCaptureStatus>
+  readCapture?: (sheetId: string, requestId: string) => Promise<RecoveryArchiveCaptureStatus>
   isZh: boolean
   fields: RecoveryArchiveFieldOption[]
   selectedRecordIds: string[]

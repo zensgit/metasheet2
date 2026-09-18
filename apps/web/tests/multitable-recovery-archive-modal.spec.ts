@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 
 import RecoveryArchiveModal from '../src/multitable/components/RecoveryArchiveModal.vue'
+import ManualArchiveCapture from '../src/multitable/components/ManualArchiveCapture.vue'
+import type { RecoveryArchiveCaptureStatus } from '../src/multitable/api/client'
 import type {
   RecoveryArchiveCatalogPage,
   RecoveryArchiveExecuteResult,
@@ -49,7 +51,132 @@ const flush = async () => {
   }
 }
 const q = (selector: string) => document.body.querySelector(selector) as HTMLElement | null
-afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; vi.useRealTimers() })
+afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; sessionStorage.clear(); vi.restoreAllMocks(); vi.useRealTimers() })
+
+function mountManual(over: Partial<InstanceType<typeof ManualArchiveCapture>['$props']> = {}) {
+  const sheet = ref('sheet_1')
+  const capture = vi.fn(async (_sheet: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> => ({ requestId, generationId, state: 'recoverable' }))
+  const read = vi.fn(async (_sheet: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> => ({ requestId, generationId, state: 'pending' }))
+  const completed = vi.fn()
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const app = createApp(defineComponent({ setup: () => () => h(ManualArchiveCapture, {
+    isZh: false, sheetName: 'Projects', capture, read, onCompleted: completed, ...over, sheetId: sheet.value,
+  }) }))
+  app.mount(container)
+  const handle = { unmount: () => app.unmount() }
+  mounted.push(handle)
+  return { capture, read, completed, sheet, unmount: () => {
+    mounted.splice(mounted.indexOf(handle), 1)
+    handle.unmount()
+    container.remove()
+  } }
+}
+
+async function confirmManual() {
+  const checkbox = q('[data-test="manual-archive-confirm"]') as HTMLInputElement
+  checkbox.checked = true
+  checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+  await flush()
+}
+
+describe('ManualArchiveCapture', () => {
+  it('requires explicit confirmation and persists identity before POST without restoring data', async () => {
+    const ctx = mountManual()
+    await flush()
+    expect(q('[data-test="manual-archive"]')?.textContent).toContain('Projects')
+    expect((q('[data-test="manual-archive-submit"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(ctx.capture).not.toHaveBeenCalled()
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    const id = sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')
+    expect(ctx.capture.mock.calls).toEqual([['sheet_1', id]])
+    expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery')
+    expect(ctx.completed).toHaveBeenCalledTimes(1)
+    expect(q('[data-test="manual-archive-submit"]')).toBeNull()
+    q('[data-test="manual-archive-new"]')!.click()
+    await flush()
+    expect(sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')).toBeNull()
+    expect((q('[data-test="manual-archive-submit"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('reuses the original identity after ambiguous failure and reads it after remount', async () => {
+    const capture = vi.fn().mockRejectedValueOnce(new Error('private-provider-path')).mockImplementation(async (_sheet, requestId) => ({ requestId, generationId, state: 'pending' }))
+    const ctx = mountManual({ capture })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(q('[data-test="manual-archive-error"]')?.textContent).not.toContain('private-provider-path')
+    const id = sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(capture.mock.calls).toEqual([['sheet_1', id], ['sheet_1', id]])
+    ctx.unmount()
+    const fresh = mountManual()
+    await flush()
+    expect(fresh.read.mock.calls).toEqual([['sheet_1', id]])
+    expect(fresh.capture).not.toHaveBeenCalled()
+    expect(fresh.completed).not.toHaveBeenCalled()
+  })
+
+  it('ignores a completed response from the previous sheet', async () => {
+    let finish!: (value: RecoveryArchiveCaptureStatus) => void
+    const capture = vi.fn(() => new Promise<RecoveryArchiveCaptureStatus>((resolve) => { finish = resolve }))
+    const ctx = mountManual({ capture })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    ctx.sheet.value = 'sheet_2'
+    await flush()
+    finish({ requestId: '11111111-1111-4111-8111-111111111111', generationId, state: 'recoverable' })
+    await flush()
+    expect(ctx.completed).not.toHaveBeenCalled()
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+    expect((q('[data-test="manual-archive-submit"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('does not submit when durable request identity cannot be saved', async () => {
+    const ctx = mountManual()
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(ctx.capture).not.toHaveBeenCalled()
+    expect(q('[data-test="manual-archive-error"]')).not.toBeNull()
+  })
+
+  it('does not treat cached identity as completion and discards another actor missing request', async () => {
+    sessionStorage.setItem('metasheet.manual-archive.request:sheet_1', '11111111-1111-4111-8111-111111111111')
+    const read = vi.fn().mockRejectedValue({ status: 404 })
+    const ctx = mountManual({ read })
+    await flush()
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(ctx.completed).not.toHaveBeenCalled()
+    expect(sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')).toBeNull()
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+  })
+
+  it('refreshes catalog once on pending completion, not on every successful reload', async () => {
+    const id = '11111111-1111-4111-8111-111111111111'
+    sessionStorage.setItem('metasheet.manual-archive.request:sheet_1', id)
+    const read = vi.fn().mockResolvedValueOnce({ requestId: id, generationId, state: 'pending' })
+      .mockResolvedValue({ requestId: id, generationId, state: 'recoverable' })
+    const ctx = mountManual({ read })
+    await flush()
+    q('[data-test="manual-archive-refresh"]')!.click()
+    await flush()
+    expect(ctx.completed).toHaveBeenCalledTimes(1)
+    q('[data-test="manual-archive-refresh"]')!.click()
+    await flush()
+    expect(ctx.completed).toHaveBeenCalledTimes(1)
+    ctx.unmount()
+    const fresh = mountManual({ read })
+    await flush()
+    expect(fresh.completed).not.toHaveBeenCalled()
+    expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery')
+  })
+})
 
 function mount(over: Partial<Record<string, unknown>> = {}) {
   const listCatalog = vi.fn(async () => catalog)
@@ -118,6 +245,20 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe('RecoveryArchiveModal', () => {
+  it('wires manual completion to catalog rediscovery without starting a restore', async () => {
+    const captureArchive = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))
+    const readCapture = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))
+    const ctx = mount({ captureArchive, readCapture, sheetName: 'Projects' })
+    await flush()
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(captureArchive).toHaveBeenCalledTimes(1)
+    expect(ctx.listCatalog).toHaveBeenCalledTimes(2)
+    expect(ctx.executeArchive).not.toHaveBeenCalled()
+    expect(ctx.acceptJob).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery'))
+  })
   it.each([
     ['RECOVERY_ARCHIVE_CATALOG_DISABLED', 'Archive recovery is not enabled.'],
     ['RECOVERY_ARCHIVE_PREVIEW_DISABLED', 'Archive recovery is not enabled.'],
