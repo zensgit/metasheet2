@@ -477,6 +477,8 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 
 ### 13.1 changesRequired 逐条落地表
 
+**本表状态已由 §19.1(续做步骤 18,对着当前分支实际代码逐条 `grep` 核对,不是重读本表旧文本)复核过一轮;三格(#1/#5/#9)曾经落后于代码,已在下方现场勘误——冲突以 §19.1 为准,不要只信这张表自己的历史文本。**
+
 | # | 门审要求(摘) | 本文档落地位置 | 状态 |
 |---|---|---|---|
 | 1 | execute 与 rollback 改成"L0 → 一条 `ORDER BY id FOR UPDATE` 预锁全部目标既有组 → 所有 L2 写 → 归档"(实测 M2/M3) | §3.1 pseudocode 本体已整段改写(取代旧的逐类目循环)+ §4 新增 rollback 事务骨架(BEGIN…COMMIT,含批次头 FOR UPDATE + 预锁既有组)+ §4.3 `locked` 已改为复用骨架读回的快照 | **已落地(execute 半续做步骤 17`executeApprovalTemplateGroupBackfillWithClient`;rollback 半续做步骤 12`rollbackApprovalTemplateGroupBackfillWithClient`,见 §18)——本行"rollback 半仍待"的旧文本是本步(续做步骤 18)核对代码后发现的过期状态,已勘误** |
@@ -549,6 +551,8 @@ L0(顾问锁)
 - P3-2:A-1 两文件不被任何 `*-ci-wiring.test.mjs` 覆盖的闭世界残留披露,本切片新文件继承同样残留。
 - P3-3:`action` 判定函数抽取为只读小函数供 preview/execute 共用,且同时返回 `skipped` 判定。
 - Q6(a) 三条件:PR 必须堆叠在 A-1 之上(base=`feat/approval-template-groups-phase1`);mutation 台账位移声明(#5852 台账是对重构前函数体写的,需逐条说明目标已搬进 `...WithClient` 体内);A-1 若再有修复轮,A-3 必须 rebase 不得 cherry-pick。
+- changesRequired #5(续做步骤 18 新增):`GET …/backfill/batches` 是继 preview 之后**第二个**挂 `approvalTemplateAdminGuard` 而非 I7 字面 `rbacGuard('approvals:read')` 的只读端点——gate 本身已在 changesRequired #5 原文里点名这个 guard,不是本步现场裁量,但 O3 的 owner 一句话确认原文只提名了 preview 一个端点。PR body 需要把这条偏离扩写成"两个端点",不能让 owner 以为只有 preview 一处需要确认。
+- 本步(续做步骤 18)commit message 有过度声明:写了"changesRequired #5 是 16 条里唯一未落地的一条",但准确表述(见 §19.1/§19.4)是"#5 的**代码**是唯一缺口,#12 的实测规模-耗时曲线/上界真库测试、#13 的三条组合调用判别力测试、#16 后半的 #5852 回流仍然开放"——按 commit 不可 amend 的硬规矩,这条勘误只能在文档里补,PR body 必须用 §19.1/§19.4 的措辞,不能沿用 commit message 的说法。
 
 ### 13.7 验证 MD 状态
 
@@ -829,3 +833,5 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 - 验证 MD(§13.7,仍不存在)——W7/W8/W9/list 四个单元均已落地,紧迫性进一步提高,留给下一步或 owner。
 - link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化,仍待 owner/下一轮门审。
 - changesRequired #16 后半(A-1 `routes/approvals.ts:396-399` 过强注释回流 #5852)、P1-3 对 #5852 的溢出影响——跨 lane,不在本分支权限内,维持 §13.5 记录。
+- **新披露 1(继承自 A-1/W7/W8/W9,本步实测确认,不在本步修复)**:`EXPECT_DB` 哨兵在 `describeIfDatabase`(`process.env.DATABASE_URL ? describe : describe.skip`)之外时是空转的——`EXPECT_DB=1` 且 `DATABASE_URL` 缺失会把哨兵自己也跳过(实测:`unset DATABASE_URL; EXPECT_DB=1 npx vitest … approval-template-groups-backfill-batches-list.db.test.ts` → `8 skipped`,零失败),而这正是哨兵存在的目的要抓的那一种配置错误。四个姊妹 backfill 套件(schema/preview/execute/rollback)与本文件共享同一形状——本文件**故意**没有单方面改成不同结构(会造出第五种不一致的哨兵写法),按现状记为继承残留,和 P3-2 的 CI 闭世界残留同一批披露,交后续统一修法。
+- **新披露 2(P2-5 的新增可达面)**:一个非 manager 的管理员执行 backfill 时,批次只记录了他"看得见"的那部分模板(`scope: 'visible-to-you'`),但批次头没有任何列记住这一点。本步新增的列表端点是第一个让**另一个**操作者看到该批次、却无法判断它是否只覆盖了部分模板的界面——修法需要给批次头加列(锁 §2 之外但仍是新增 DDL,超出本步范围),记入 remaining,不在本步动 DDL。
