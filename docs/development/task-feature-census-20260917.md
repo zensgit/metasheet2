@@ -3,7 +3,7 @@
 - 日期：2026-09-17
 - 状态：普查记录（不是设计锁，不构成授权）
 - 工作树：`../metasheet2-tasks-m0` 分支 `grok/tasks-m0`
-- **基线 SHA**：`89f1ecdee2c3b70205a318074824c834bc6a5c7e`（本 head 相对 `origin/main` 的 merge-base；`Merge pull request #5848`）
+- **基线 SHA**：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（本 head 相对 `origin/main` 的 merge-base；`fix(multitable): 通知面板靠视口左缘时改为左对齐，内容不再被裁切 (#5872)`）
 - 计划 v5 冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`。main 已前进。§8 锚点在本 merge-base 上重跑（见 §5）。
 - 输入：计划 v5 MD5 `f74e172840d2aa2502216d0dd8dff867`；交接件 / 审阅件 v2 / 飞书 26 篇离线语料。
 - 范围：只读普查。未连 staging/生产。未跑浏览器。未应用迁移。
@@ -178,7 +178,7 @@ rg -n -i "CREATE TABLE[[:space:]]+(IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]
 | 文件行数 | 1186 |
 | `sed -n '1069p'` | 注释：`# the hide-empty toggle (isEmptyValue-shared predicate, …` |
 | `exec npx vitest run` 行号 | **1186** |
-| token 数（`exec` 与 `--reporter=dot` 之间） | **392** |
+| token 数（`exec` 与 `--reporter=dot` 之间） | **394**（上一 merge-base 为 392；本 SHA 多 2） |
 | 重复 token | 0 |
 | 含 `task`（大小写不敏感）的 token | 0 |
 
@@ -199,7 +199,7 @@ print(len(toks), sum(1 for t in toks if 'task' in t.lower()))
 "
 ```
 
-正控：`StockPreparationProjectBoard` 为第一个 token；`multitable-external-context-sync` 为最后一个。脚本 `:28-37` 成文说明 CamelCase 备料 token 不得成为 `apps/web/verification/stock-prep-*.spec.ts` 的子串（Playwright 用例；**命中即红**）。未来任务 spec token 尚未加入——本切片 docs-only，不改该行。碰撞判据正文在锁 §5.3。
+正控：`StockPreparationProjectBoard` 为第一个 token；`StockPreparationDataSourceRegistry` 为最后一个（上一 merge-base 末 token 为 `multitable-external-context-sync`，仍在清单中但不再是末位）。脚本 `:28-37` 成文说明 CamelCase 备料 token 不得成为 `apps/web/verification/stock-prep-*.spec.ts` 的子串（Playwright 用例；**命中即红**）。未来任务 spec token 尚未加入——本切片 docs-only，不改该行。碰撞判据正文在锁 §5.3。
 
 ---
 
@@ -291,7 +291,7 @@ PY
 | 计划锚点 | 本 SHA | 摘录 |
 |---|---|---|
 | `vitest.config.ts:31-33` | 仍 `exclude` 起头 + 两条历史 glob | `'**/node_modules/**'` `:32`、`'**/dist/**'` `:33` |
-| `vitest.config.ts:1782` **漂移** | 现为 `'tests/integration/elearning-media-quota.db.test.ts'`（`:1797`） | 历史 glob `'tests/e2e/**'` 现位于 **`:1812`**（文件 1844 行；base `89f1ecdee`） |
+| `vitest.config.ts:1782` **漂移** | 现为 `'tests/integration/elearning-media-quota.db.test.ts'`（`:1797`） | 历史 glob `'tests/e2e/**'` 现位于 **`:1812`**（文件 1844 行；base `bb77ca5f2`） |
 | `approval-realdb-comments.yml:30` | SUPERSEDED 注释仍在 | suite 同时在 required `test (20.x)` |
 | `:41-43` / `:45-47` | 仍声明无 `merge_group`、无 `branches:` | 与计划一致 |
 | `:99` | `EXPECT_DB: '1'` | 一致 |
@@ -303,7 +303,7 @@ PY
 | s6a `sealed-export-package-provenance.cjs:298-300` | 仍钉 `plugin-tests.yml` | 一致 |
 | s6a pin json `:90` | `"pluginTestsWorkflow": "5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf"` | **本切片禁止改 `plugin-tests.yml`** |
 | `web-tests.yml:8-9,17-22,26-27,77` | paths 脚注 / POST-append / `merge_group` / `run-required-web-tests.sh` | 一致；文件共 77 行 |
-| `approval-ci-coverage-enumeration.test.ts:299-339,:409,:577,:679-685` | `classifyT3` / lane 正则 / 文件发现 / 扫描负控 | 一致；`task-*` 仍被忽略 |
+| `tests/unit/approval-ci-coverage-enumeration.test.ts:299-339,:409,:577,:679-685` | `classifyT3` / lane 正则 / 文件发现 / 扫描负控（`:679-685` 仍是 scan negative control） | 一致；`task-*` 仍被忽略 |
 | `AGENTS.md:48-50` **漂移** | 现为章程「当前唯一优先级」备料段 | 两点接线正文 **不在** 本 SHA 的 `AGENTS.md`（74 行）。计划自述「基线版 AGENTS.md 无此段」。纪律仍按计划 §8-2 + 工作区未提交的 canonical `AGENTS.md` 执行，不把本 SHA `:48-50` 当两点接线证据 |
 | `multitable-web-guard.yml:16-18` | `on: pull_request: paths:` | 一致 |
 | `elearning-web-guard.yml:19-21` | 同上 | 一致 |
@@ -325,12 +325,18 @@ PY
 | `AuthService.ts:387-426` | `resolveSessionTenantId` 对 `user_orgs` + `users.is_active` |
 | `routes/auth.ts:1220-1251` | `POST /session-org`；非成员 403 |
 | `namespace-admission.ts:11-38` | `NON_NAMESPACED_PERMISSION_RESOURCES`；**无 `tasks`** |
-| `namespace-admission.ts:344-347` | admin 短路；非豁免需 controlledNamespaces；`admissionsTableUnavailable ⇒ true`（`:346`，绑 `RBAC_OPTIONAL`） |
+| `namespace-admission.ts:9` | `RBAC_OPTIONAL` **读点** `allowDegradation = process.env.RBAC_OPTIONAL === '1'` |
+| `namespace-admission.ts:344-347` | admin 短路；非豁免需 controlledNamespaces；`admissionsTableUnavailable ⇒ true`（`:346` 是降级后果行，**不是**旗读点） |
+| `namespace-admission.ts:102-108,:196-199` | `deriveDelegatedAdminNamespace`：`*_admin` 角色名无需 `role_permissions` 即获准入 |
+| `rbac.ts:12` | `RBAC_TOKEN_TRUST` 模块装载读点 |
+| `rbac.ts:40-44` / `:85-91` | token `perms` 充当权限来源（仍与准入相与） |
+| `AuthService.ts:171` | `RBAC_TOKEN_TRUST` 第二读点 |
+| `tests/setup.integration.ts:7-8` | `RBAC_BYPASS='true'` / `RBAC_TOKEN_TRUST='true'`（`vitest.integration.config.ts:21` setupFiles） |
 | `rbac.ts:69` / `:110-111` | admin 短路；守卫自身抛错 500 |
 | `index.ts` 审批挂载 | 计划 `:1763-1777` **漂移**（现为 `/health`）。实际 `this.app.use(approvalsRouter(` 在 **`:1791`**（上一轮 `:1785` 再漂移） |
 | `guardPolicy.ts:29` / `:77` / `:87-95` | 焦点白名单仍无 `/tasks`；`KNOWN_REQUIRED_FEATURES` 无 `tasks`；`/stock-prep` 不加 `requiredFeature` 先例仍在 |
 | `App.vue:7-74` | 三互斥分支仍在；默认分支 `:30-74` |
-| `permission-service.ts:1033-1037` | 计划指 rethrow 契约；本 SHA 该行是注释，函数 `loadApprovalProjectionDeniedRecordIds` 从 `:1040` 起，throw 在 `:1305`/`:1378` |
+| `src/multitable/permission-service.ts:1044` + `:1315`/`:1388` | 计划指 rethrow 契约；函数 `loadApprovalProjectionDeniedRecordIds` 从 `:1047` 起；fail-closed `throw err` 在 `:1315`/`:1388` |
 | `elearning/feature-flags.ts:32` | `env[name] === 'true'` |
 
 ---
@@ -361,4 +367,4 @@ PY
 - 未连 staging/生产，故生产 `user_orgs` 分布 UNCLEAR。
 - 未跑真库测试、未起浏览器、未起 API 服务器。
 - 未跑 `hashtext` 数值碰撞（只做字面前缀差）。
-- 未把 392 个 token 全文贴进本文件（命令可复现）。
+- 未把 394 个 token 全文贴进本文件（命令可复现）。
