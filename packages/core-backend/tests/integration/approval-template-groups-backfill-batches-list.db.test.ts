@@ -145,6 +145,40 @@ describeIfDatabase('approval template groups — phase 2 backfill batch list (de
     )
   }
 
+  // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): this file's own `sinkForeignTemplates` —
+  // same convention, independently copied (not imported) from the sibling preview/execute/rollback
+  // suites, same disclosure (omits `applyTemplateVisibilityFilter`, sound only under
+  // `managerActor` — see those files' own copy of this comment for the full mechanism). Added here
+  // because two of this file's `it`s below call the REAL `executeApprovalTemplateGroupBackfill`
+  // (route-wiring admin, smoke) and were named by gate round 3 as 2 of the 10 un-sunk `execute`
+  // calls this lane's real-DB step exposes to the 500-candidate cap
+  // (`executeApprovalTemplateGroupBackfillWithClient` counts every org-unlinked storable template
+  // BEFORE bucketing, `routes/approvals.ts:694-701`). This file's other three `it`s
+  // (ordering/pagination, rolledBackAt/org-scoping, the cross-org HTTP isolation case) either
+  // insert batch rows directly (`insertBatch`, no candidate query involved at all) or — the
+  // cross-org case — never assert on `execRes`'s status/body, so they are unaffected either way;
+  // left untouched, not silently exempted by a new prose claim.
+  const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
+  const FOREIGN_SINK_SORT_ORDER = 999999
+
+  async function sinkForeignTemplates(org: string, ownTemplateIds: readonly string[]): Promise<string> {
+    const sinkGroupId = `atg_sink_${org}`
+    await query(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+       VALUES ($1, $2, $3, $4, 'sink')`,
+      [sinkGroupId, org, FOREIGN_SINK_GROUP_NAME, FOREIGN_SINK_SORT_ORDER],
+    )
+    await query(
+      `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+       SELECT $1, t.id, $2, 'sink', now()
+         FROM approval_templates t
+        WHERE NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)
+          AND NOT (t.id = ANY($3::uuid[]))`,
+      [org, sinkGroupId, ownTemplateIds],
+    )
+    return sinkGroupId
+  }
+
   const managerActor: ApprovalTemplateVisibilityActor = {
     userId: `list-manager-${TS}`,
     departmentIds: [],
@@ -194,7 +228,11 @@ describeIfDatabase('approval template groups — phase 2 backfill batch list (de
   describe('route wiring: GET /api/approval-template-groups/backfill/batches (real HTTP, real guard)', () => {
     it('an admin actor gets 200 with the batch it just executed, and rolledBackAt flips from null to a timestamp after a real rollback', async () => {
       const org = trackOrg(`atgl-http-admin-${TS}`)
-      await createTemplate(`atgl-http-admin-tpl-${TS}`, 'HTTPList')
+      // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): this call point had no sink call and no
+      // exemption comment — gate round 3 named it as one of the 10 un-sunk `execute` calls this
+      // lane's real-DB step exposes to the 500-candidate cap.
+      const httpAdminTpl = await createTemplate(`atgl-http-admin-tpl-${TS}`, 'HTTPList')
+      await sinkForeignTemplates(org, [httpAdminTpl])
       const admin = await tok(base, `http-list-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
 
       const execRes = await httpReq(base, '/api/approval-template-groups/backfill/execute', 'POST', admin)
@@ -262,7 +300,11 @@ describeIfDatabase('approval template groups — phase 2 backfill batch list (de
   // tests — keeps the imports self-justifying rather than a silent unused-import drift risk.
   it('smoke: executeApprovalTemplateGroupBackfill + rollbackApprovalTemplateGroupBackfillBatch both surface through the list unit function', async () => {
     const org = trackOrg(`atgl-smoke-${TS}`)
-    await createTemplate(`atgl-smoke-tpl-${TS}`, 'Smoke')
+    // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): this call point had no sink call and no
+    // exemption comment — gate round 3 named it as one of the 10 un-sunk `execute` calls this
+    // lane's real-DB step exposes to the 500-candidate cap.
+    const smokeTpl = await createTemplate(`atgl-smoke-tpl-${TS}`, 'Smoke')
+    await sinkForeignTemplates(org, [smokeTpl])
     const executed = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(executed.batchId).not.toBeNull()
     const batchId = executed.batchId as string

@@ -122,12 +122,15 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
   }
 
   // §11 CI fix (shared-DB fixture collision — see the sibling preview suite's own copy of this
-  // helper for the full mechanism comment): `executeApprovalTemplateGroupBackfill`'s `eligible`
-  // query has the SAME "no template-level org filter, only the link-exclusion is org-scoped" shape,
-  // so calling it from this file (every rollback fixture goes through a real `execute` first) is
-  // equally exposed to a foreign, unrelated file's leftover `approval_templates` row in the shared
-  // real-DB CI step. Copied (not imported) per this file's own convention for `tok`/`httpReq`. Like
-  // every other copy in this lane, this omits `applyTemplateVisibilityFilter` — sound only because
+  // helper for the full mechanism comment, corrected by the P3-2 fix in `impl-gate-A3-round3-20260918.md`:
+  // source not located, volume not measured, exposure confirmed — NOT "some other file within
+  // this one 84-file step", which is retracted there): `executeApprovalTemplateGroupBackfill`'s
+  // `eligible` query has the SAME "no template-level org filter, only the link-exclusion is
+  // org-scoped" shape, so calling it from this file (every rollback fixture goes through a real
+  // `execute` first) is equally exposed to a foreign, unrelated row left over from some earlier
+  // real-DB step sharing this database. Copied (not imported) per this file's own convention for
+  // `tok`/`httpReq`. Like every other copy in this lane, this omits `applyTemplateVisibilityFilter`
+  // — sound only because
   // every case in this file runs under `managerActor`, where that filter is a no-op.
   const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
   const FOREIGN_SINK_SORT_ORDER = 999999
@@ -216,11 +219,16 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
     )
   })
 
-  // §11 CI fix exemption: no `sinkForeignTemplates` call needed — every assertion below is scoped
-  // to the SPECIFIC pre-existing `existingGroupId`/its own link row, never an org-wide count or
-  // array. A foreign 'HR'-category pollutant, if present, gets pulled into this SAME batch/group by
-  // `execute` (it is batch-INTERNAL, not batch-external, from rollback's point of view) and is
-  // unlinked right alongside `tpl` — the `linkRow` toHaveLength(0) check holds either way.
+  // P2-1 fix (`impl-gate-A3-round3-20260918.md`, retracting the `§11 CI fix exemption` this
+  // replaced): the retracted comment argued no sink was needed because every assertion below is
+  // scoped to the SPECIFIC pre-existing `existingGroupId`, so a foreign 'HR' pollutant "either
+  // way" ends up unlinked alongside `tpl`. That argument never considered `execute` itself
+  // throwing before rollback (or any per-group assertion) ever runs — E14 (gate round 3)
+  // constructed exactly that: enough foreign rows push the org-scoped `eligible` count past the
+  // 500 cap and `executed` below never resolves. The conditional, correct claim is: the
+  // per-group-scoping argument holds ONLY while
+  // `foreign rows for this org <= cap - this test's own 1 candidate`. Sunk below, like every other
+  // case in this file, instead of assumed.
   it('attach path: rollback unlinks the batch-linked template but does NOT archive a created_new=false group, even though it now has zero members', async () => {
     const org = trackOrg(`atgr-attach-${TS}`)
     const existingGroupId = `atg_rollback_attach_${TS}`
@@ -228,7 +236,8 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
       `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by) VALUES ($1, $2, $3, 1, 'probe')`,
       [existingGroupId, org, 'HR'],
     )
-    await createTemplate(`atgr-attach-tpl-${TS}`, '  HR  ')
+    const attachTpl = await createTemplate(`atgr-attach-tpl-${TS}`, '  HR  ')
+    await sinkForeignTemplates(org, [attachTpl])
 
     const executed = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(executed.batchId).not.toBeNull()
@@ -257,6 +266,10 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
   it('batch-external addition to a batch-created group survives rollback: the group stays active because it is not empty', async () => {
     const org = trackOrg(`atgr-extadd-${TS}`)
     const batchTpl = await createTemplate(`atgr-extadd-batch-${TS}`, 'HR')
+    // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): this call point had no sink call and no
+    // exemption comment — gate round 3 named it as one of the 10 un-sunk `execute` calls this
+    // lane's real-DB step exposes to the 500-candidate cap.
+    await sinkForeignTemplates(org, [batchTpl])
     const result = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(result.batchId).not.toBeNull()
     const hrGroup = result.groups.find((g) => g.category === 'HR')
@@ -384,7 +397,11 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
 
   it('changesRequired #7: rolling back an already-rolled-back batch is a 409 (not an idempotent 200), and the error carries the original rolledBackAt', async () => {
     const org = trackOrg(`atgr-double-${TS}`)
-    await createTemplate(`atgr-double-tpl-${TS}`, 'HR')
+    // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): this call point had no sink call and no
+    // exemption comment — gate round 3 named it as one of the 10 un-sunk `execute` calls this
+    // lane's real-DB step exposes to the 500-candidate cap.
+    const doubleTpl = await createTemplate(`atgr-double-tpl-${TS}`, 'HR')
+    await sinkForeignTemplates(org, [doubleTpl])
     const executed = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     const batchId = executed.batchId as string
 
@@ -400,7 +417,12 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
   it('a batchId that does not exist (in this org) is a 404, indistinguishable from a batchId belonging to a DIFFERENT org', async () => {
     const org = trackOrg(`atgr-notfound-${TS}`)
     const otherOrg = trackOrg(`atgr-notfound-other-${TS}`)
-    await createTemplate(`atgr-notfound-other-tpl-${TS}`, 'HR')
+    // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): `otherOrg` is the org that actually calls
+    // `execute` below — this call point had no sink call and no exemption comment; gate round 3
+    // named it as one of the 10 un-sunk `execute` calls this lane's real-DB step exposes to the
+    // 500-candidate cap.
+    const notfoundTpl = await createTemplate(`atgr-notfound-other-tpl-${TS}`, 'HR')
+    await sinkForeignTemplates(otherOrg, [notfoundTpl])
     const executedInOtherOrg = await executeApprovalTemplateGroupBackfill(otherOrg, managerActor, 'probe-actor')
     const foreignBatchId = executedInOtherOrg.batchId as string
 
@@ -418,7 +440,11 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
   describe('route wiring: POST /api/approval-template-groups/backfill/batches/:batchId/rollback (real HTTP, real guard)', () => {
     it('an admin actor gets 200 and the batch-created group becomes archived', async () => {
       const org = trackOrg(`atgr-http-admin-${TS}`)
-      await createTemplate(`atgr-http-admin-tpl-${TS}`, 'HTTPRollback')
+      // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14): this call point had no sink call and no
+      // exemption comment — gate round 3 named it as one of the 10 un-sunk `execute` calls this
+      // lane's real-DB step exposes to the 500-candidate cap.
+      const httpAdminTpl = await createTemplate(`atgr-http-admin-tpl-${TS}`, 'HTTPRollback')
+      await sinkForeignTemplates(org, [httpAdminTpl])
       const admin = await tok(base, `http-rollback-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
 
       const execRes = await httpReq(base, '/api/approval-template-groups/backfill/execute', 'POST', admin)
