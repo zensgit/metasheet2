@@ -334,3 +334,32 @@ and removed. The envelope is presealed synthetic input and uploads are callbacks
 not actual KMS/object-storage or process-restart acceptance. Durable request
 admission, consistent source capture, provider receipts, catalog publication and
 the command/UI remain OPEN. No flags or deployment changed.
+
+## Durable Request Binding Acceptance
+
+Local successor to `7ce6696fd00e3d5d0ac45fac364e127a1c76e352` adds the
+manual request migration, internal lookup/bind helper, and owned-cluster tests.
+The synthetic driver proves new-connection lookup, exact retry, actor isolation,
+scope/generation conflict, explicit transaction enforcement, and a two-connection
+retry waiting on the first transaction before returning the same generation with
+one persisted row. Row UPDATE/DELETE/TRUNCATE and nonempty migration down refuse.
+Column-nullability, disabled-trigger, function-body and deferrable-unique drift
+are rejected on replay; empty down/down/up/up succeeds.
+
+Discrimination: temporarily removing the helper's hash comparison lets a tampered
+stored hash resolve instead of rejecting. The real-DB assertion fails with
+`Missing expected rejection`; restoring the comparison makes the full driver pass.
+Both runs remove the owned DB/connections and stop/remove the synthetic cluster.
+
+Full fresh migration and replay pass. The exact Time Machine replay census is now
+30 migrations / 963 catalog objects, fingerprint
+`47d05a62b2afabf386aacbedc725ff7ed92dfcde7064b580fd17851093d150e4`.
+Existing 59 anchor/section tests and 127 historical migration tests pass, followed
+by a second complete catalog replay and all checkpoint/prepared/authority tests.
+Historical fixture layers explicitly unwind/restore the empty request layer;
+production retention guards are not weakened. Static wiring 37/37, acceptance
+TypeScript and scoped source ESLint pass. No workflow selector is removed.
+
+This is internal durable identity, not completed request admission: generation
+allocation and canonical authority must still be composed in one transaction.
+No command/UI, real object provider, customer data, flag or deployment is exercised.

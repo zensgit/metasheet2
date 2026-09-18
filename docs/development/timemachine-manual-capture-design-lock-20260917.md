@@ -196,3 +196,22 @@ Identity and crypto scope must agree before capture or upload. Every resumed
 section rechecks current authority in a short transaction; policy lookup errors
 are normalized to a values-free unavailable code. This does not yet provide a
 locked permission/source snapshot or authorize catalog publication.
+
+### Durable Manual Request Binding
+
+An immutable internal mapping now binds `(actor_id, request_id)` to one generation
+and the exact workspace/base/sheet tuple. Its domain/versioned hash covers the
+actor and target tuple; the proposed manual command has no caller-supplied capture
+options. Future command changes must explicitly version that payload contract.
+Generation uniqueness prevents aliases from turning one capture into two requests.
+Database insertion requires a matching live building generation; catalog foreign
+keys, immutable row/truncate guards and nonempty-down refusal retain retry truth.
+
+Lookup returns the original generation across connections, including after the
+generation is no longer eligible for building. That result is identity evidence,
+not permission or a lease renewal. The caller must recheck authorization and active
+ownership before continuation. A conflicting target or generation refuses.
+The eventual admission transaction must look up first, then atomically create the
+generation and binding only when absent; losing concurrent creation must roll back
+its entire transaction. This helper does not yet implement generation allocation,
+HTTP admission or publication and must not be exposed as an authorization bypass.

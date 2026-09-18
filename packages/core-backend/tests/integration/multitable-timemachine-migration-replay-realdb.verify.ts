@@ -32,6 +32,7 @@ import * as restoreJobs from '../../src/db/migrations/zzzz20260828131000_create_
 import * as derivedEffects from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
 import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
 import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
+import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -196,9 +197,17 @@ const MIGRATIONS: NamedMigration[] = [
       down: (db) => db.transaction().execute(preparedCaptures.down),
     },
   },
+  {
+    name: 'zzzz20260918140000_create_recovery_archive_manual_requests',
+    module: {
+      up: (db) => db.transaction().execute(manualRequests.up),
+      down: (db) => db.transaction().execute(manualRequests.down),
+    },
+  },
 ]
 
 const TOUCHED_RELATIONS = [
+  'meta_recovery_archive_manual_requests',
   'meta_recovery_archive_prepared_captures',
   'meta_recovery_archive_derived_effects',
   'meta_field_value_tombstones',
@@ -241,6 +250,7 @@ const TOUCHED_RELATIONS = [
 ]
 
 const OWNED_RELATIONS = [
+  'meta_recovery_archive_manual_requests',
   'meta_recovery_archive_prepared_captures',
   'meta_recovery_archive_derived_effects',
   'meta_field_value_tombstones',
@@ -511,6 +521,7 @@ const ARCHIVE_RESTORE_JOB_FUNCTIONS = [
 ]
 
 const OWNED_FUNCTIONS = [
+  'meta_recovery_archive_manual_request_guard',
   'meta_recovery_archive_prepared_capture_guard',
   ...OPERATION_FUNCTIONS,
   ...AUTHORITY_FUNCTIONS,

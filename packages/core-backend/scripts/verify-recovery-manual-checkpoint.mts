@@ -12,6 +12,8 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const manualRequests = require('../src/multitable/recovery-archive-manual-request.ts') as typeof import('../src/multitable/recovery-archive-manual-request')
+const manualRequestMigration = require('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests.ts') as typeof import('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests')
 const preparedUpload = require('../src/multitable/recovery-archive-prepared-upload.ts') as typeof import('../src/multitable/recovery-archive-prepared-upload')
 const archiveCrypto = require('../src/multitable/recovery-archive-crypto.ts') as typeof import('../src/multitable/recovery-archive-crypto')
 const archiveContract = require('../src/multitable/recovery-archive-contract.ts') as typeof import('../src/multitable/recovery-archive-contract')
@@ -95,6 +97,24 @@ try {
   await client.connect()
   const query = (text: string, params?: unknown[]) => client!.query(text, params)
   db = new Kysely({ dialect: new PostgresDialect({ pool: new Pool({ ...connection, database, max: 1 }) }) })
+  for (const operation of [manualRequestMigration.up, manualRequestMigration.down,
+    manualRequestMigration.down, manualRequestMigration.up, manualRequestMigration.up]) {
+    await db.transaction().execute(operation)
+  }
+  for (const tamper of [
+    'ALTER TABLE public.meta_recovery_archive_manual_requests ALTER COLUMN workspace_id DROP NOT NULL',
+    'ALTER TABLE public.meta_recovery_archive_manual_requests DISABLE TRIGGER trg_mramr_row',
+    `ALTER TABLE public.meta_recovery_archive_manual_requests
+      DROP CONSTRAINT meta_recovery_archive_manual_requests_generation_id_key,
+      ADD UNIQUE(generation_id) DEFERRABLE INITIALLY IMMEDIATE`,
+    `CREATE OR REPLACE FUNCTION public.meta_recovery_archive_manual_request_guard()
+      RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$ BEGIN RETURN NEW; END $$`,
+  ]) {
+    await assert.rejects(db.transaction().execute(async (tx) => {
+      await sql.raw(tamper).execute(tx)
+      await manualRequestMigration.up(tx)
+    }), { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_SCHEMA_DRIFT' })
+  }
   for (const operation of [migration.up, migration.down, migration.down, migration.up, migration.up]) {
     await db.transaction().execute(operation)
   }
@@ -474,6 +494,81 @@ try {
       { message: 'RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH' })
   } finally { await revoker.end() }
   console.log('PASS: canonical manual authority on real users; separate-connection deactivation after first upload blocks subsequent sections and retry')
+  const request = { actorId, requestId: randomUUID(), workspaceId: 'w', baseId: 'b', sheetId: 's' }
+  await assert.rejects(manualRequests.bindRecoveryArchiveManualRequest(query, request, uploadInput.owner.generationId),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_TRANSACTION_REQUIRED' })
+  await transaction(async () => {
+    assert.equal(await manualRequests.bindRecoveryArchiveManualRequest(query, request, uploadInput.owner.generationId),
+      uploadInput.owner.generationId)
+  })
+  await transaction(async () => {
+    assert.equal(await manualRequests.bindRecoveryArchiveManualRequest(query, request, uploadInput.owner.generationId),
+      uploadInput.owner.generationId)
+  })
+  await assert.rejects(transaction(() => manualRequests.bindRecoveryArchiveManualRequest(query,
+    { ...request, sheetId: 'no-genesis' }, uploadInput.owner.generationId)),
+  { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT' })
+  await assert.rejects(transaction(() => manualRequests.bindRecoveryArchiveManualRequest(query, request, randomUUID())),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT' })
+  await client.end()
+  client = new Client({ ...connection, database })
+  await client.connect()
+  assert.equal(await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query, request)),
+    uploadInput.owner.generationId)
+  assert.equal(await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query,
+    { ...request, actorId: randomUUID() })), null)
+  const requestCount = await query('SELECT count(*)::int AS count FROM meta_recovery_archive_manual_requests')
+  assert.equal(requestCount.rows[0].count, 1)
+  await query('BEGIN')
+  try {
+    await query('ALTER TABLE meta_recovery_archive_manual_requests DISABLE TRIGGER trg_mramr_row')
+    await query("UPDATE meta_recovery_archive_manual_requests SET request_hash=repeat('0',64)")
+    await assert.rejects(manualRequests.readRecoveryArchiveManualRequest(query, request),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT' })
+  } finally { await query('ROLLBACK') }
+  for (const mutation of [
+    'UPDATE meta_recovery_archive_manual_requests SET request_hash=request_hash',
+    'DELETE FROM meta_recovery_archive_manual_requests',
+    'TRUNCATE meta_recovery_archive_manual_requests',
+  ]) await assert.rejects(transaction(() => query(mutation)), { code: '55000' })
+  const concurrentRequest = { ...request, requestId: randomUUID() }
+  const requestPlan = await transaction(() => claim('section_checkpoint', 's', true))
+  const requestClient = new Client({ ...connection, database })
+  await requestClient.connect()
+  let pendingRequest: Promise<{ result: string } | { error: unknown }> | undefined
+  try {
+    const firstPid = (await query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const secondPid = (await requestClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    await query('BEGIN')
+    await manualRequests.bindRecoveryArchiveManualRequest(query, concurrentRequest, requestPlan.generationId)
+    await requestClient.query('BEGIN')
+    await requestClient.query("SET LOCAL statement_timeout='5s'")
+    pendingRequest = manualRequests.bindRecoveryArchiveManualRequest(
+      (text, params) => requestClient.query(text, params), concurrentRequest, requestPlan.generationId,
+    ).then((result) => ({ result }), (error: unknown) => ({ error }))
+    let blocked = false
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const activity = (await admin.query(`SELECT pg_blocking_pids(pid) AS blockers
+        FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'`, [secondPid])).rows[0]
+      if (activity?.blockers.includes(firstPid)) { blocked = true; break }
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(blocked, true, 'MANUAL_REQUEST_RETRY_MUST_WAIT')
+    await query('COMMIT')
+    assert.deepEqual(await pendingRequest, { result: requestPlan.generationId })
+    await requestClient.query('COMMIT')
+    assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_manual_requests
+      WHERE actor_id=$1::uuid AND request_id=$2::uuid`, [actorId, concurrentRequest.requestId])).rows[0].n, 1)
+  } finally {
+    await query('ROLLBACK')
+    await pendingRequest
+    await requestClient.query('ROLLBACK')
+    await requestClient.end()
+  }
+  await assert.rejects(db.transaction().execute(manualRequestMigration.down),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_DOWN_IN_USE' })
+  await db.transaction().execute(manualRequestMigration.up)
+  console.log('PASS: immutable manual request binding; new-connection lookup; two-connection retry; actor isolation and scope/generation conflict; transaction and nonempty-down guards')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')
