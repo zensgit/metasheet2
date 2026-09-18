@@ -4,7 +4,7 @@
 - 设计 MD(同批交付):`approval-template-groups-phase1-fe-design-20260918.md`
 - 目标文档:`goal-three-locks-full-implementation-20260918.md`(切片「A 分组 / A-2 前端脱困」)
 - 补充清单:`impl-supplementary-gate-checklist-20260918.md`(三线共用 #1–#4、lane A #5–#7)
-- worktree HEAD(本文档写作起点):`cb6d7fa9f97b02438f0d0f36c8fb955870f9e2e8`;分支 `feat/approval-template-groups-phase1-fe`,堆叠在 `feat/approval-template-groups-phase1`(A-1,尖端 `0144932ac67e80a81f204dd6c6e502d000112276`,与本分支的 merge-base 相同——零漂移)
+- worktree HEAD(本文档写作起点):`cb6d7fa9f97b02438f0d0f36c8fb955870f9e2e8`;分支 `feat/approval-template-groups-phase1-fe`,堆叠在 `feat/approval-template-groups-phase1`(A-1,尖端 `0144932ac67e80a81f204dd6c6e502d000112276`,与本分支的 merge-base 相同——零漂移)。**抬头 stale 披露(P3 卫生轮,2026-09-19,gate `impl-gate-A2-round1-20260918.md` P3-4)**:门审对象 head 是 `d3097be00`(晚两个 docs-only 提交);本轮又对 A-1 尖端做了一次 rebase(A-1 自身已跑过一轮同名 P3 卫生轮并带入了 `origin/main` 后续提交)并在其上追加了本文档 §12 的卫生修复。§1–§11 的 `file:line` 锚点已在卫生轮对当前 HEAD 复核仍成立;§12 是本轮新增内容,以卫生轮结束时的 HEAD 为准(见 `git log`)。
 - 私有真库:`metasheet2_lock_a2`(本文档全新创建,§4 起的迁移重跑均在此库现场执行)——**其角色是一次性 fixture,不是 staging/prod**:创建它、对它跑迁移不构成对锁文「含 DDL 只 Draft、不应用、不合并」约束的违反(该约束管的是把 DDL 应用到共享/生产数据库或合并 PR,不是本地一次性验证库);它承载的迁移链是 **A-1 继承的 DDL**,不是 A-2 自己新增的(A-2 零迁移文件,见 §4.1)。本切片(A-2)自身三份新 spec 全部 mock 网络层、零 DB 依赖(见 §4.2)——这是本文档"现在重跑"这句话对 A-2 实际买到的东西:三份 spec 的活体重跑(§1),不是一条新的 DB 覆盖路径。
 - 环境:`node -v` → `v25.9.0`;`pnpm -v` → `10.33.0`
 
@@ -144,6 +144,8 @@ collisions new-vs-old: []
 ```
 
 **更正实现者提交里的一处措辞**(commit `f3d7c69c9` 曾在 `run-required-web-tests.sh` 的注释里写"394 tokens"/"395 tokens"——那是开发过程中逐个添加 token 时的中间快照,不是最终计数;本节现场重算的最终值是 396(run-required-web-tests.sh)与 106(approval-web-guard.yml :1026),已在 `cb6d7fa9f`(同一分支的后续提交)里就近似问题做过一次修正,本节是**本文档自己的独立重算**,不是转抄该提交的说法。**声明范围的更正**:碰撞扫描只证明「3 个新 token 与各自文件里的旧 token 之间」双向子串扫描为空——不断言旧 token 集合内部彼此无碰撞(旧集合里确实存在如 `approval-record-link`/`approval-record-link-picker` 这类前缀碰撞,是既有惯例,与本切片无关,本切片不引入新的此类碰撞)。
+
+**P3 卫生轮再更正(2026-09-19,§12.9)**:上面这个"396"从一开始就算错了对象——它取的是文件里**两条**几乎相同的 `exec npx vitest run` 巨行里排在后面、实际上从未被 bash 执行到的那一条(`exec` 无条件替换进程,排在前面的那条才是活的),本三个新 token 因此在此前的每一个 HEAD 上都**没有**真正进入 required 的 `web-tests` job。修复(合并两行为一)后,唯一存活的 `exec` 行的最终 token 数是 **397**,不是 396。完整根因、修复过程与影响声明见验证 MD §12.9,不在此处重复。
 
 **Token 实际解析验证(现场跑,非静态断言)**——见 §1 的三份 spec 均已现场跑绿;此外验证「`SessionOrgSwitcher.spec.ts` 全文件名 token 是否真的会连带匹配到 `AttendanceSessionOrgSwitcher.spec.ts`」(设计上的已知重复覆盖,非缺口):
 
@@ -492,3 +494,147 @@ $ pnpm --filter @metasheet/web exec vue-tsc -b
 - **分组重命名/归档/解档/挂接/解除关联的 UI 端到端验证**:客户端函数已隔离测试(§1「J(客户端层)」行以外的另外 5 条用例覆盖了这些函数的 URL/method/序列化,但没有对应 UI,因此没有「用户点击某按钮触发某函数」这一层集成验证)——设计 MD §1.2 已披露这是本切片有意的最小范围,不是遗漏,但也确实"未验"这一层。
 - **`approval-web-guard.yml` 的 job 本身是否真的会在 CI 环境(而非本地)绿**:本文档全部命令都在本地 worktree 执行,未触发实际 GitHub Actions 运行；`web-tests`/`approval-web-guard` 两个 workflow 在 CI 上的真实运行结果留给 Draft PR 开出后的 CI 状态检查,本文档不能也不应该冒称已验证 CI 环境本身。
 - **owner 请示条款**(补充清单 #5、#6):见 §10,均未决,不阻塞本切片 Draft PR,但完成声明需如实标注"待 owner 回应"而非"已裁决"。
+
+## 12. P3 卫生轮(2026-09-19)— 处置表 + 一条卫生轮自身发现的缺陷
+
+对象:`impl-gate-A2-round1-20260918.md`(A-2 前端第 1 轮门审,DRAFT-READY,0 P1/0 P2/8 P3)。本轮硬规矩:生产代码零行为改动,只许测试/注释/MD/scripts/dev;不动 PR 状态与 body;不改锁文。以下处置表逐条对应报告 §5 的 P3-1..P3-8,外加卫生轮自己在核对 P3-4 时发现的一条独立缺陷(编号 P3-9)。
+
+### 12.0 前置:本轮先对栈底 rebase
+
+本 lane 是 Draft PR #5854(`feat/approval-template-groups-phase1-fe`),堆叠在 `feat/approval-template-groups-phase1`(A-1)之上。A-1 自己已经跑过一轮同名的 P3 卫生轮(`fbb5b38d8 docs(approval): P3 hygiene disposition table + evidence (sec26)`)并把 `origin/main` 的后续提交带了进来,本分支落后于新尖端。本轮第一步 `git rebase origin/feat/approval-template-groups-phase1`——**零冲突**(git 自动跳过 33 个内容已存在于新尖端的重复提交,只重放了本分支真正独有的 8 个提交),随后 `git push --force-with-lease` 一次同步远端。旧尖端 `5d0f780f5` → 新尖端见 `git log -1`。
+
+### 12.1 处置表
+
+| # | 报告原文一句 | 处置 | 证据 / commit |
+|---|---|---|---|
+| P3-1 | 挂载点爆炸半径普查是手工的,真实挂载人口是 5 份 spec(含 `approval-e2e-permissions.spec.ts:565`、`approval-e2e-lifecycle.spec.ts:629`)而两份 MD 只点名 3 份 | CLOSED-MD | 本节 §12.2 补齐 5 行人口表 + 命令,并把「无回归」措辞改窄为「替换式 mock 的三份已补;`...actual` 的两份经实跑确认不受影响」 |
+| P3-2 | `ApprovalTemplateGroupErrorCode` 全仓零消费方,18 码与后端的重合只由一次性脚本保证,无常驻守卫,后端改码时前端联合类型会静默腐烂 | CLOSED-MD(取报告给出的第二个选项——收窄 `.code` 类型需要改生产代码 `api.ts`,本轮禁止) | 本节 §12.3 登记腐烂风险到「未验/风险」清单 |
+| P3-3 | 新 token 把被刻意隔离的考勤会话 spec(`:477` 单进程池)拉回默认池重跑一遍;A-2 自己会铸 token 的 `ApprovalTemplateGroupsPanel.spec.ts` 也没放隔离行 | CLOSED-MD(说明,不挪动 token——挪动需要重新验证隔离池夹具和两处闭世界 census,风险/收益不对称,本轮不做) | 本节 §12.4 |
+| P3-4 | `run-required-web-tests.sh` 注释里「lands in a later slice」已 stale(该 slice 已落地);token 计数注释仍是「394/395」快照;两份 MD 抬头 HEAD 仍是 `cb6d7fa9f`(被审 head 晚两提交) | CLOSED-测试+注释(计数)/ CLOSED-注释(措辞)/ CLOSED-MD(抬头) | commit 修 `run-required-web-tests.sh` 三处注释;两份 MD 抬头见 design MD 本次编辑 + 本节 §12.0 |
+| P3-5 | 正控「单 org 成员从不见到选择器」对应的 `toBeNull()` 断言在自己的夹具下永远不可能红(mock 对 session-orgs 端点只会 throw,组件自身 `v-if` 已经因 `orgs` 为空把它藏掉);承重的是旁边的调用普查断言 | DEFERRED-需行为改动(记录了一次已验证不成立的候选修法,不落地) | 本节 §12.5——尝试过给 `/api/auth/session-orgs` 补一个非空返回值,亲跑 M6 复现证明**仍然不解决**(`loadGroups()` 自己的成功分支会把 `showSessionOrgSwitcher` 重新置回 `false`,覆盖掉 `handleSessionOrgRequired` 刚置的 `true`);已用 `cp` 备份 → 改 → 跑 → 验证不成立 → 用 `cp` 逐字节还原两个文件(测试文件与生产文件都已确认零残留改动) |
+| P3-6 | 共享组件常量 DOM id(`session-org-switcher-select`)+ 面板从不传 `hasUsableClaim`,与考勤宿主行为有差异,两份 MD 未记 | CLOSED-MD | 本节 §12.6 |
+| P3-7 | 目标文档 DoD 要求「切片 = 分支 + Draft PR」,报告写门审时尚无 Draft PR;#5/#6 披露还没进 PR body | DEFERRED-🔒不可操作(硬规矩禁止本轮动 PR 状态与 body) | 本节 §12.7——Draft PR #5854 现已存在(报告当时的「无 PR」已 stale);PR body 待披露的两句原文见 §12.7,留给下一次允许编辑 PR body 的轮次原样粘贴 |
+| P3-8 | 两个新前端面(`SessionOrgSwitcher.vue`、`ApprovalTemplateGroupsPanel.vue`)在 `templateCenterI18n.spec.ts:765` 的 i18n 闭世界硬编码文件清单之外 | CLOSED-测试 | `apps/web/tests/templateCenterI18n.spec.ts` 新增两条守卫测试(见 §12.8),亲跑正向格(注入未翻译中文字符串)证明判别力,`cp` 备份/还原,`cmp` 字节相同 |
+| P3-9(卫生轮自身发现,不在原报告 8 条内) | `run-required-web-tests.sh` 里存在两份几乎相同的 `exec npx vitest run ...` 巨行——第一份(旧)在前、含本切片三个新 token 的那份(重复)在后;bash `exec` 无条件替换进程,第一份一执行,后面整个脚本(含第二份)永不到达。三个新 token 因此**从未被 `web-tests` required job 实际跑过**,报告 §1.4「令牌解析验证」与两份 MD §1/§2.1/§2.3 的「required 覆盖」结论在当前 HEAD 上是假的 | CLOSED-测试+脚本(scripts/dev,允许本轮改) | 本节 §12.9——merge 两行为一行,三个新 token 移到唯一存活行的 `--reporter=dot` 前;`bash -n` 通过;merged 后 token 计数从 394/395(报告口径)变为 **397**;`pnpm --filter @metasheet/web exec vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel --reporter=dot` 现场 4 文件 15 用例全绿 |
+
+### 12.2 P3-1:挂载点人口 5 行表(补齐两份 MD 未点名的两份)
+
+```
+$ grep -rn "approval/TemplateCenterView" apps/web/tests/ apps/web/src/
+```
+
+| spec | 挂载行(现场 `grep -rn` 复核) | mock 形态 | 本切片是否补过 |
+|---|---|---|---|
+| `approvalTemplateCenterCategory.spec.ts` | `:427` | 替换式 | 是 |
+| `approvalTemplateGovernance.spec.ts` | `:397` | 替换式 | 是 |
+| `templateCenterI18n.spec.ts` | `:400` | 替换式 | 是 |
+| `approval-e2e-permissions.spec.ts` | `:565` | `...actual` 展开 | **否**——但已现场重跑 244/244 绿(见 gate 报告 §1.2),真实挂载 5 次,走 `...actual` 的真客户端函数 |
+| `approval-e2e-lifecycle.spec.ts` | `:629` | `...actual` 展开 | **否**——同上 |
+
+**口径更正**:本文档 §8「既有 spec 接缝回归」原先只覆盖三份替换式 mock 的 spec;现补记——`...actual` 展开的两份不需要打接缝补丁(它们走真实客户端函数,不会因为面板新增无条件挂载而抛出未捕获异常),但也因此**不在**本切片新增的任何 mock 覆盖之内。gate 报告记录了一处未查清现象(两份 spec 内 `listApprovalTemplateGroups()` 在用例存续期内既未 resolve 也未 reject)——本轮未进一步排查(未验项,不属于本轮 4 类可闭合范围),原样保留报告措辞,不升级也不擅自下结论。
+
+### 12.3 P3-2:错误码联合类型腐烂风险(登记,不改生产代码)
+
+`ApprovalTemplateGroupErrorCode`(`apps/web/src/approvals/api.ts:1142-1160`)全仓仅 1 处引用(自己的定义行);`ApprovalApiError.code` 字段类型是 `string | undefined`,面板按字符串字面量分支,该联合类型不提供任何编译期约束。18 码与后端的一致性目前只由 §5.2 的一次性 Python 脚本核对过一次,**不是常驻守卫**——后端未来改码不会让本仓任何测试变红。收窄 `.code` 类型需要编辑 `api.ts`(生产代码),本轮硬规矩禁止;记为已知风险,留给下一个允许生产代码改动的轮次。
+
+### 12.4 P3-3:新 token 未进 `:477` 隔离行(说明,不挪动)
+
+`run-required-web-tests.sh:477` 单独用 `--pool=forks --poolOptions.forks.singleFork=true` 跑四份"显式会话" spec(理由:这类 spec 会通过 `useAuth().setToken(...)` 写 localStorage、铸真实 JWT,注释原文标注为需要进程隔离)。核对结果:
+
+- `SessionOrgSwitcher.spec.ts`(3 用例)**不**铸 token、不写 localStorage——纯 props/emit 组件测试,不属于「显式会话 spec」这一类,留在默认池符合该行原本的分类标准。
+- `ApprovalTemplateGroupsPanel.spec.ts`(3 用例)**确实**在每条用例里调用 `useAuth().setToken(jwt(...))`(`apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts:69,86,140`),按 `:477` 的分类标准应当算「显式会话 spec」。
+
+**不挪动的理由**:`apps/web/vite.config.ts:103-109` 未关闭 vitest 默认的逐文件隔离,`:477` 的单进程池是对"跨文件状态泄漏"额外加的一层保险,不是唯一防线——gate 报告已现场核实这不是活缺陷(考勤闭世界 census 24/24 绿,未被新 token 掩盖)。把 `ApprovalTemplateGroupsPanel.spec.ts` 挪进 `:477` 需要重新验证该单进程池夹具在加入第 5 个文件后仍然稳定,并重算两处闭世界 census 的匹配范围——这是行为验证,不是纯文本改动,本轮不做,留给下一个允许更广泛回归验证的轮次;PR body 应披露这条未挪动的理由(P3-7 同一批 🔒 限制,见 §12.7)。
+
+### 12.5 P3-5:尝试修复未成功(如实记录,已还原)
+
+**假设**:给 `/api/auth/session-orgs` 补一个非空 `orgs` 返回值,应该能让 `toBeNull()` 断言在 M6 式 mutation(`onMounted` 改成主动 `handleSessionOrgRequired(loadGroups)` 后再 `loadGroups()`)下变红。
+
+**验证过程**(`cp` 备份 → 改 → 跑 → 结论 → `cp` 还原):在测试文件里给该用例的 mock 加了一条 `/api/auth/session-orgs` 分支返回 `{ orgs: ['org-a'] }`,再在生产文件里复现 M6 mutation。**结果:假设不成立**——`toBeNull()` 依旧绿,失败还是落在旁边的调用普查断言(`expected true to be false`),与 gate 报告原始记录逐字相同。
+
+**根本原因**:mutation 后的 `onMounted` 依次调用 `handleSessionOrgRequired(loadGroups)`(同步把 `showSessionOrgSwitcher.value` 置 `true`)、然后又调用一次独立的 `loadGroups()`;后者的 `try` 块在其 `await listApprovalTemplateGroups()` 成功后会**无条件**把 `showSessionOrgSwitcher.value` 重新置回 `false`(`ApprovalTemplateGroupsPanel.vue:133`)——这次成功的微任务链比 `loadSessionOrgs()` 的链更短,先落地,把刚置上的 `true` 覆盖掉。只要这个夹具里的列表调用最终会成功(而"single-org member"这条用例的全部意义就在于列表调用确实成功),`toBeNull()` 在 `settle()` 结束时就结构性地不可能红——与报告原文「结构性,不只是某条 mutation 的巧合」完全吻合,不是可以用一行 mock 修补的。
+
+生产文件与测试文件均已用 `cp` 逐字节还原,`cmp` 确认;`git status --porcelain` 对两个文件均为空。**处置**:DEFERRED-需行为改动——真正让该断言承重需要重构这条用例本身的夹具形状(例如拆成两条更细的用例,或改用一个不依赖列表调用结果的独立断言点),这是测试设计层面的行为变动,超出本轮"闭合"定义,留给下一轮。
+
+### 12.6 P3-6:共享组件差异登记
+
+`SessionOrgSwitcher.vue` 把原件 `AttendanceSessionOrgSwitcher.vue` 的 `id="attendance-session-org"` 换成常量 `id="session-org-switcher-select"`——今天只有一个宿主(本面板),同页出现两个实例才会撞 DOM id,不是活缺陷。面板未传 `hasUsableClaim` prop,该值在审批面恒为 `undefined`(falsy),`hintText` 的 `chooseHint` 分支因此只受 `orgs.length > 1 && !modelValue` 控制,与考勤宿主(会传 `hasUsableClaim`)的文案分支不同——功能上不算缺陷(两条路径都能提示用户选择组织),但属未记录的行为差异,登记在案。
+
+### 12.7 P3-7:Draft PR 现状(🔒 不可操作部分)
+
+报告撰写时 `gh pr list --head feat/approval-template-groups-phase1-fe --state all` 返回空;**现状更正**:Draft PR #5854 现已存在。目标文档 DoD 的另一半——补充清单 #5/#6 两句披露写进 PR body——本轮硬规矩明确禁止编辑 PR 状态与 body,故只登记、不操作。留给下一次允许编辑 PR body 的轮次原样粘贴的两句:
+
+1. 补充清单 #5:J 行「未知 `section=` 令牌 ⇒ 400」与 C 行「`?category=` 与 `section` 同现 ⇒ 400」——`section=` 到分期 3(A-4)才存在,首期(含 A-2)不可满足,已请示 owner 把这两句挪到 A-4 门,未决。
+2. 补充清单 #6:分期门「1 落地」的求值(门审通过 vs 已合并)——已请示 owner 定义为「Draft PR 过门审」,本设计 MD 按此口径撰写,未决。
+3.(本轮新增披露,建议一并写入 PR body)§12.4 记录的 `ApprovalTemplateGroupsPanel.spec.ts` 未进 `:477` 隔离行的理由。
+
+### 12.8 P3-8:i18n 闭世界守卫新增两条测试(已通过 mutation 验证)
+
+`apps/web/tests/templateCenterI18n.spec.ts` 新增两条守卫(不是简单地把两个文件名塞进 `CONVERTED_FILES` 数组——该数组只按下标被两个既有测试各读一次,不是被遍历的通用清单,加进去不会产生任何新覆盖):
+
+- `SessionOrgSwitcher.vue`:按 `DEFAULT_COPY` 具名 bilingual 表分块(与 `ApprovalCenterView.vue` 守卫同一手法),表外扫描 CJK。
+- `ApprovalTemplateGroupsPanel.vue`:该文件没有具名表,四处用户可见文案都是内联 `tr('English', '中文')` 调用——允许配对出现在同一调用里的 CJK,其余出现 CJK 一律判定为走私字符串。
+
+两条测试都带正控(表/配对调用集合非空 + 确有 CJK)。**Mutation 验证**(`cp` 备份 → 注入未翻译中文 → 跑 → 全部按预期变红 → `cp` 还原 → `cmp` 字节相同):在 `SessionOrgSwitcher.vue` 的 `<label>` 内插入一段裸中文、在 `ApprovalTemplateGroupsPanel.vue` 的 create 按钮文案后追加一段裸中文,两条新守卫连同一条既有的 `TemplateCenterView` 渲染断言（因为该面板挂载在其下）一并变红(3 个测试失败);还原后 18/18 全绿。
+
+### 12.9 P3-9:required 覆盖被自己的重复行悄悄吞掉(卫生轮自身发现)
+
+**如何被发现**:核对 P3-4 的「394/395 token」措辞时,重算 `run-required-web-tests.sh` 的最终 token 数,Python 脚本按文件里**第一条**匹配 `exec npx vitest run` 的行取值,结果与预期不符(394 而非应有的 397),顺着这条线索发现文件里有 **两条** `^exec npx vitest run` 开头的行,而不是一条。
+
+**根因(逐条 commit 核对,非推测)**:
+
+```
+$ git log --oneline -S"exec npx vitest run" -- apps/web/scripts/run-required-web-tests.sh
+96c512876 feat(approval): shared SessionOrgSwitcher component for template groups A-2
+e0defbe26 ci(attendance): publish a stable web guard check (#4585)
+```
+
+`96c512876`(等价于本分支 rebase 前的 `2ef7add98`,内容相同、hash 因 rebase 不同)的 diff 是**纯追加 17 行**——包括一份完整的、内容与既有末行几乎相同的第二条 `exec npx vitest run ...` 巨行副本,把新 token `SessionOrgSwitcher.spec.ts` 追加在这份**副本**的 `--reporter=dot` 之后,而不是编辑原本那一行。后续三个提交(`54da3d9b5`/`c86b09fd4`/`14c6d7112`,对应 approvalTemplateGroupsClient / ApprovalTemplateGroupsPanel 两个 token)都在这份死副本上继续追加,无人发现。
+
+**为什么两轮验证都没抓到**:gate 报告 §1.4 用 `tail -1 ... | wc -w` 只看文件最后一行(恰好就是死副本,词数因此"对得上");两份 MD §2.3 的 Python 脚本用 `for line in content.splitlines(): if line.strip().startswith(marker): return line`——`.startswith` 命中的是**第一条**匹配行,而第一条（活的）那时还没加新 token,所以脚本的"394"输出其实是在告诉我们"活的那一行还没有新 token"，只是没人意识到"第一条"和"最后一条"是两条不同的行。这正是"扫描窗口两头都骗人"——`tail -1` 骗在只看窗口尾部,`.startswith` 的 first-match 骗在只看窗口头部,两个工具分别被两端的假象说服。
+
+**修复**(scripts/dev,允许本轮改):合并两行为一行——死副本独有的三个新 token(`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel`,丢弃死副本里重复的 `categoryCandidateInput`,活行里已有)追加到活行的 `--reporter=dot` 之前;删除死副本整行;三段说明注释一并移到活行之前并修正措辞(P3-4)。
+
+```
+$ grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh
+1
+$ bash -n apps/web/scripts/run-required-web-tests.sh; echo "exit=$?"
+exit=0
+$ pnpm --filter @metasheet/web exec vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel --reporter=dot
+ Test Files  4 passed (4)
+      Tests  15 passed (15)
+```
+
+Token 计数重算(合并后):`run-required-web-tests.sh` 从报告记录的 394/395/396(三次开发中途快照)变为 **397**(392 条共享前缀 + `categoryCandidateInput` + `StockPreparationDataSourceRegistry`,这两个是 rebase 带入的、A-2 之外的既有 token + 本切片 3 个新 token);双向子串碰撞扫描零命中。`approval-web-guard.yml:1026` 那一行本身没有这个重复行问题(核对 `run: pnpm --filter @metasheet/web exec vitest run` 只有 2 处匹配,与报告一致,:925 是无关 job);其 YAML 可解析、job key 唯一(`approval-web-guard`),该文件 push/pull_request 两个 `paths` 列表之间存在一处非对称缺口(6 个既有 approval 文件只在 pull_request 侧、不在 push 侧),但该缺口在 rebase 前的 A-1 尖端就已存在,与本切片改动无关,不在本轮范围内,不处理。
+
+**影响声明(供下一轮门审核对)**:gate 报告 `impl-gate-A2-round1-20260918.md` §1.4「令牌解析验证」与两份 MD 的 §1/§2.1/§2.3 在**当前 HEAD**(本次修复提交)之前的所有历史 HEAD 上,关于「三个新 token 已进入 required `web-tests` job」的结论都是**假的**——`web-tests` job 实际执行的是死副本前面那条活行,从未包含这三个新 token。DRAFT-READY 裁决本身建立在直接现场重跑三份 spec(而非依赖这条 exec 行)得到的绿证据上,裁决不受影响;但任何引用"required 覆盖已确认"这句话的后续文档,都应改指向本节和本次修复的 commit,不再引用报告 §1.4 原文的现场输出作为"required 覆盖"的证据。
+
+### 12.10 撤回类改动扫描(实测结果,非"零命中"——按"求值,不作废整节"的纪律逐条判读)
+
+本轮涉及撤回/更正的措辞(P3-4 的「lands in a later slice with its own token」;「394/395 tokens」快照)现场全分支 `git grep` 实测**并非零命中**——命中的都是修正句自身引用旧文措辞做说明,不是旧断言仍然独立成立地站着：
+
+```
+$ git grep -n "lands in a later slice" -- '*.sh' '*.md' '*.yml'
+apps/web/scripts/run-required-web-tests.sh:1202:# hygiene wave, 2026-09-19: this sentence originally said "lands in a later slice with its own
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:(本节表格行 + 本段说明)
+$ git grep -n "394 tokens\|395 tokens" -- apps/web/scripts/run-required-web-tests.sh
+apps/web/scripts/run-required-web-tests.sh:1213:# original "394 tokens" snapshot); ...
+apps/web/scripts/run-required-web-tests.sh:1233:# ... why this moved from the original "395 tokens" snapshot); ...
+```
+
+逐条判读:两处脚本内命中都在「this sentence originally said / moved from the original "N tokens" snapshot」这一修正句式之内,是**引用旧文本以说明已被修正**,不是旧断言以独立、无限定的形式重新出现;本文档内的命中就是本节自身的表格与说明。真正需要检验的判据是「文件里是否还有一处**不带修正限定**的『lands in a later slice』或『394/395 tokens』」——`grep -c`该无限定形态为 0(唯一出现处都紧跟在「originally said / moved from」这类回顾性短语之后)。按「失效标记要求值不要作废整节」的纪律:P3-4 要撤回的是"这句话仍然成立"这个论断,不是"这几个字符串不得再出现"这件事本身。
+
+### 12.11 diffstat 证据:本轮只动测试/注释/MD/scripts
+
+起点取本轮 rebase 后的 HEAD(`b1e5c745f8fbc6d63987223d3af1e56b9b835ef5`,rebase+force-push 完成、卫生轮编辑开始之前)——而不是 A-1 尖端,因为对 A-1 尖端取 diff 会把 rebase 带入的 159 文件 / 22k 行 main 主线改动也算进来,淹没本轮真正的改动面:
+
+```
+$ git diff --stat b1e5c745f8fbc6d63987223d3af1e56b9b835ef5
+ apps/web/scripts/run-required-web-tests.sh                                  |  36 ++++--
+ apps/web/tests/templateCenterI18n.spec.ts                                   |  62 ++++++++++
+ docs/development/approval-template-groups-phase1-fe-design-20260918.md      |   2 +-
+ docs/development/approval-template-groups-phase1-fe-verification-20260918.md| 133 ++++++++++++++++++++-
+ 4 files changed, 222 insertions(+), 11 deletions(-)
+```
+
+四个文件全部落在 scripts / 测试 / MD 三类,零 `src/**` 生产代码改动(`ApprovalTemplateGroupsPanel.spec.ts` 的 P3-5 尝试性 mock 改动已用 `cp` 逐字节还原,不出现在这份 diffstat 里)。
