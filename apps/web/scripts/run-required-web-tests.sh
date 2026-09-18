@@ -1735,9 +1735,10 @@ exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spe
 # the line instead of erroring — the duplicate (dead) copy, not the original, is what carried the
 # risk: bash's `exec` builtin unconditionally replaces the process on the FIRST such line reached,
 # so only the earlier of the two lines ever ran. On the commits actually named in the prior
-# paragraph's audit trail (`cb6d7fa9f`, `d3097be00`), the three tokens were already back together
-# in the single live line, not stranded on a dead duplicate — so the "never exercised until this
-# commit" claim did not hold for this branch's history. The duplicate-line hazard itself is real
+# paragraph's audit trail (`cb6d7fa9f`, `d3097be00`) — both of which predate the rebase above —
+# the three tokens had never been split off a dead duplicate in the first place: there was only
+# ever the single live line at those commits, so the "never exercised until this commit" claim did
+# not hold for this branch's history. The duplicate-line hazard itself is real
 # (see the two repo precedents cited in scripts/dev/atg-exec-line-post-rebase-check.sh's header)
 # and that script exists to catch it mechanically on future rebases; this paragraph corrects only
 # the narrative of how this specific occurrence resolved.
