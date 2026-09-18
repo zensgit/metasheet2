@@ -2,6 +2,13 @@
 
 Status: OWNER-CONFIRMED bounded scope; implementation and acceptance OPEN.
 
+UI checkpoint `360a65ce3`: the existing archive modal now has an explicit selected
+table confirmation and manual capture/status section. It stores only a request UUID
+for tab-session reload, rechecks durable status on mount, retries that same request,
+and never initiates restore. Browser component checks are synthetic; full runtime
+browser acceptance and immutable attachments remain open. See the staged database
+verification report for exact evidence and limitations.
+
 Runtime command increment (2026-09-19, following implementation checkpoint
 `d390c1e4797f8a86ef714a34b2fe49e35d686d19`): the selected-table HTTP command
 and request-status reader now compose the internal no-attachment pipeline.

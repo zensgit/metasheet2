@@ -851,3 +851,43 @@ The existing spec is already included in multitable-web-guard and the dedicated
 required-web invocation (client + modal). No selector was removed or changed.
 Logs: `/private/tmp/tm-manual-client-{red,green,identity-mutation,lint,tsc,app-tsc}.log`.
 UI confirmation, durable reload state and browser acceptance remain outstanding.
+
+## Manual Archive UI Checkpoint
+
+Implementation `360a65ce3` supersedes the preceding client-only UI gap. The real
+workbench passes capture/read client methods and the selected table name into the
+archive modal; a separate ManualArchiveCapture component owns confirmation and
+status. Existing restore preview/execute/job actions remain separate and are not
+invoked by capture completion. Completion triggers catalog rediscovery only.
+
+Only the request UUID is stored in sessionStorage, before the first POST. Retry
+reuses it; remount queries the server rather than trusting a cached success.
+Missing actor-scoped request clears the hint; authorization/storage failures do
+not become success. New capture after terminal state requires another explicit
+confirmation. Sheet changes/unmount invalidate old responses. Pending-to-complete
+refresh notifies the catalog once; a completed remount cannot create a refresh
+loop. This is tab-session reload continuity, not cross-device request discovery.
+
+Local evidence: client/modal 2 files / 145 tests PASS, including 8 new manual UI
+cases. Application vue-tsc and scoped component/test ESLint PASS, diff-check PASS.
+Removing the successful-response epoch guard causes exactly the old-sheet result
+negative to fail; the guard was restored and all tests rerun green.
+
+Chromium synthetic component harness at 1440 and 390 px verifies confirmation,
+capture, full page reload/server-status read, visible refresh icon and no document
+horizontal overflow. Screenshots: `/private/tmp/tm-manual-ui-1440.png` and
+`/private/tmp/tm-manual-ui-390.png`. Harness uses production component, Element Plus
+and repository tokens with synthetic callback responses; it is NOT authenticated
+whole-workbench/backend UAT. Its temporary Vite server was stopped after checks.
+Logs: `/private/tmp/tm-manual-ui-{final-unit,epoch-mutation,tsc,lint}.log`.
+
+Outstanding acceptance is unchanged where not directly exercised: live identity
+changes across browser sessions, full selected-table HTTP browser loop, attachments,
+public preview followed by separately authorized restore/apply, and final TM audit.
+No flags, automatic work, customer storage, Ready, merge or deployment enabled.
+
+Follow-up `de2a1ca85` clears a formerly recoverable status when a later read fails,
+including revocation (403); it never leaves a stale success beside the new error.
+The added revocation-refresh case passes. Workbench source ESLint also passes.
+Luna's bounded read-only UI review was stopped without a terminal verdict; no
+independent approval is inferred. This checkpoint remains Draft/HOLD.
