@@ -471,7 +471,7 @@ try {
   console.log('PASS: presealed-envelope upload interruption/new connection resumes original ten sections without capture; injected authority revocation refuses')
   const actorId = randomUUID()
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
-  const { createRecoveryArchiveManualContinuation } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+  const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -569,6 +569,81 @@ try {
     { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_DOWN_IN_USE' })
   await db.transaction().execute(manualRequestMigration.up)
   console.log('PASS: immutable manual request binding; new-connection lookup; two-connection retry; actor isolation and scope/generation conflict; transaction and nonempty-down guards')
+  const admissionPolicy = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 3600, expiresAfterSeconds: 7200 }
+  const admit = createRecoveryArchiveManualAdmission(uploadInput.transaction, admissionPolicy)
+  const admissionRequest = { ...request, requestId: randomUUID(), sheetId: 'no-genesis' }
+  const generationCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archives')).rows[0].n as number
+  const beforeAdmission = await generationCount()
+  const admitted = await admit(admissionRequest)
+  assert.equal(admitted.replayed, false)
+  assert.equal(await generationCount(), beforeAdmission + 1)
+  const kinds = (await query(`SELECT reservation_kind,count(*)::int AS n
+    FROM meta_recovery_archive_snapshot_reservations WHERE generation_id=$1::uuid GROUP BY reservation_kind`,
+  [admitted.generationId])).rows
+  assert.deepEqual(kinds.sort((a, b) => a.reservation_kind.localeCompare(b.reservation_kind)),
+    [{ reservation_kind: 'archive_snapshot', n: 1 }, { reservation_kind: 'section_bootstrap', n: 9 }])
+  assert.deepEqual(await admit(admissionRequest), { generationId: admitted.generationId, replayed: true })
+  assert.equal(await generationCount(), beforeAdmission + 1)
+  await assert.rejects(admit({ ...admissionRequest, baseId: 'other' }),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+  await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+  try {
+    await assert.rejects(admit(admissionRequest), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+  } finally { await query('UPDATE users SET is_active=true WHERE id=$1', [actorId]) }
+  const failedRequest = { ...request, requestId: randomUUID() }
+  const failingAdmission = createRecoveryArchiveManualAdmission(
+    (work) => transaction(() => work(async (text, params) => {
+      if (text.includes('INSERT INTO public.meta_recovery_archive_manual_requests')) throw new Error('SYNTHETIC_BIND_FAILURE')
+      return query(text, params)
+    })), admissionPolicy,
+  )
+  await assert.rejects(failingAdmission(failedRequest), { message: 'SYNTHETIC_BIND_FAILURE' })
+  assert.equal(await generationCount(), beforeAdmission + 1)
+  assert.equal(await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query, failedRequest)), null)
+  await assert.rejects(createRecoveryArchiveManualAdmission(uploadInput.transaction,
+    { ...admissionPolicy, keyRowVersion: '2' })(failedRequest),
+  { message: 'RECOVERY_ARCHIVE_KEY_REFERENCE_UNAVAILABLE' })
+  await query("INSERT INTO meta_sheets(id,name,base_id) VALUES ('manual-no-trust','Synthetic','b')")
+  await assert.rejects(admit({ ...failedRequest, sheetId: 'manual-no-trust' }),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_TRUST_UNAVAILABLE' })
+  assert.equal(await generationCount(), beforeAdmission + 1)
+  const repeatedCapture = await admit({ ...request, requestId: randomUUID() })
+  assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_snapshot_reservations
+    WHERE generation_id=$1::uuid AND reservation_kind='section_checkpoint'`, [repeatedCapture.generationId])).rows[0].n, 9)
+  const admissionClient = new Client({ ...connection, database })
+  await admissionClient.connect()
+  let competingAdmission: Promise<{ result: { generationId: string; replayed: boolean } } | { error: unknown }> | undefined
+  try {
+    const simultaneous = { ...request, requestId: randomUUID() }
+    const firstPid = (await query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const secondPid = (await admissionClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const countBeforeRace = await generationCount()
+    await query('BEGIN')
+    const first = await createRecoveryArchiveManualAdmission((work) => work(query), admissionPolicy)(simultaneous)
+    await admissionClient.query('BEGIN')
+    await admissionClient.query("SET LOCAL statement_timeout='5s'")
+    competingAdmission = createRecoveryArchiveManualAdmission(
+      (work) => work((text, params) => admissionClient.query(text, params)), admissionPolicy,
+    )(simultaneous).then((result) => ({ result }), (error: unknown) => ({ error }))
+    let blocked = false
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const activity = (await admin.query(`SELECT pg_blocking_pids(pid) AS blockers
+        FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'`, [secondPid])).rows[0]
+      if (activity?.blockers.includes(firstPid)) { blocked = true; break }
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(blocked, true, 'MANUAL_ADMISSION_MUST_WAIT_AT_FENCE')
+    await query('COMMIT')
+    assert.deepEqual(await competingAdmission, { result: { generationId: first.generationId, replayed: true } })
+    await admissionClient.query('COMMIT')
+    assert.equal(await generationCount(), countBeforeRace + 1)
+  } finally {
+    await query('ROLLBACK')
+    await competingAdmission
+    await admissionClient.query('ROLLBACK')
+    await admissionClient.end()
+  }
+  console.log('PASS: canonical manual admission atomically binds bootstrap/checkpoint generations; exact replay, revoked actor and scope refusal; failed binding rolls back generation')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

@@ -363,3 +363,27 @@ TypeScript and scoped source ESLint pass. No workflow selector is removed.
 This is internal durable identity, not completed request admission: generation
 allocation and canonical authority must still be composed in one transaction.
 No command/UI, real object provider, customer data, flag or deployment is exercised.
+
+## Atomic Reservation Admission Acceptance
+
+Local successor to `de78798590800f48c1998879aa7f56eaacb4e19b` invokes the
+canonical runtime admission factory on the synthetic database. First capture
+persists nine bootstrap identities and one snapshot identity; a sheet with genesis
+uses nine checkpoint identities. Exact retry returns the original generation.
+A second connection waits behind the first admission transaction, then returns
+that generation with `replayed=true`; the catalog grows by exactly one row.
+
+Cross-base and revoked-user calls refuse, including revoked replay. A wrong key
+row version and a missing active trust checkpoint refuse without generation growth.
+Fault injection at the request-binding INSERT rolls back the already-created
+generation and reservations, and the request remains absent. Neutralizing the
+lookup-first replay return makes the exact-retry positive fail with
+`RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT`; restoration passes the complete driver.
+
+The driver retains fresh/replay, the 30-migration catalog census, 59+127 historical
+real-DB tests and all earlier checkpoint/prepared/request/authority acceptance.
+Unit neighbors pass 73/73; acceptance TypeScript, scoped new-module ESLint and
+full sealed-export S5 pass. Tests use only the owned synthetic cluster; cleanup
+requires database/connections zero and cluster removal. This evidence proves
+reservation admission only, not consistent source sealing, archive publication,
+HTTP/UI readiness or use of customer storage.

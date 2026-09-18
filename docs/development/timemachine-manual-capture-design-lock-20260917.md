@@ -215,3 +215,24 @@ The eventual admission transaction must look up first, then atomically create th
 generation and binding only when absent; losing concurrent creation must roll back
 its entire transaction. This helper does not yet implement generation allocation,
 HTTP admission or publication and must not be exposed as an authorization bypass.
+
+### Atomic Reservation Admission
+
+The internal runtime factory now composes fresh canonical scope/manage/full-read
+authorization, request lookup and generation/reservation/binding writes in one
+caller-owned transaction. Lock order is canonical sheet fence, actor/request
+advisory serialization, key registry, then generation/reservation writes. Exact
+replays return the recorded generation only after fresh authorization; they do
+not allocate another generation or extend its lease.
+
+New requests require an active key at the server-configured row version, no
+writer block, and exactly one active unpruned trust checkpoint. Existing immutable
+bootstrap markers select checkpoint reservations; otherwise the original bootstrap
+allocator is used. Lease/expiry values are explicit server policy, not request
+options, a retention scheduler or a cleanup mechanism. Any failed write rolls back
+the generation, all reservations and the request binding together.
+
+This is reservation admission, not source capture or a public command. Source
+capture/checkpoint sealing still needs an exact in-fence source boundary and drift
+revalidation before crypto/publication. A previously reserved generation cannot be
+blindly populated from a later live snapshot. No HTTP route calls the factory yet.
