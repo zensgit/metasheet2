@@ -783,6 +783,38 @@ try {
     assert.equal(reserved, 10)
   } finally { sourceKey.fill(0) }
   console.log('PASS: source generation binding and single use; tampered relational plaintext refused before custody; interrupted first seal resumes ten authenticated original sections without source or recapture')
+  await query(`INSERT INTO multitable_attachments
+    (id,sheet_id,storage_file_id,filename,mime_type,size,storage_path,deleted_at,blob_purged_at)
+    VALUES ('manual-live-attachment','no-genesis','manual-live-file','synthetic','text/plain',3,'synthetic/live',NULL,NULL),
+    ('manual-deleted-attachment','no-genesis','manual-deleted-file','synthetic','text/plain',3,'synthetic/deleted',now(),NULL)`)
+  const pinnedRequest = { ...admissionRequest, requestId: randomUUID() }
+  const pinned = await admit(pinnedRequest)
+  const pins = async (generationId: string) => (await query(`SELECT attachment_id,reference_class,reference_state,
+    availability,immutable_version,content_sha256,content_size_bytes::text,
+    source_owner_id,source_owner_fence::text,
+    source_lease_until = (SELECT lease_expires_at FROM meta_recovery_archives WHERE generation_id=$1) AS exact_lease
+    FROM meta_recovery_archive_attachment_refs WHERE generation_id=$1 ORDER BY attachment_id`, [generationId])).rows
+  assert.deepEqual(await pins(pinned.generationId), ['manual-deleted-attachment', 'manual-live-attachment'].map((id) => ({
+    attachment_id: id, reference_class: 'source', reference_state: 'building', availability: 'mutable',
+    immutable_version: null, content_sha256: null, content_size_bytes: null,
+    source_owner_id: pinned.generationId, source_owner_fence: '1', exact_lease: true,
+  })))
+  assert.deepEqual(await admit(pinnedRequest), { generationId: pinned.generationId, replayed: true, source: null })
+  assert.equal((await pins(pinned.generationId)).length, 2)
+  const beforePinFailure = await generationCount()
+  const failedPinRequest = { ...admissionRequest, requestId: randomUUID() }
+  const failingPinAdmission = createRecoveryArchiveManualAdmission(<T,>(work: (q: typeof query) => Promise<T>) =>
+    transaction(() => work(async (text, params) => {
+      if (text.includes('INSERT INTO public.meta_recovery_archive_attachment_refs')
+        && params?.[1] === 'manual-live-attachment') throw new Error('SYNTHETIC_PRIVATE_PIN_FAILURE')
+      return query(text, params)
+    })), admissionPolicy)
+  await assert.rejects(failingPinAdmission(failedPinRequest), { message: 'RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED' })
+  assert.equal(await generationCount(), beforePinFailure)
+  assert.equal(await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query, failedPinRequest)), null)
+  assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs
+    WHERE attachment_id IN ('manual-live-attachment','manual-deleted-attachment')`)).rows[0].n, 2)
+  console.log('PASS: all live/deleted attachment candidates atomically receive mutable source intents with exact lease/owner; retry unchanged; second pin failure rolls back generation/request/first pin without leaking provider values')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

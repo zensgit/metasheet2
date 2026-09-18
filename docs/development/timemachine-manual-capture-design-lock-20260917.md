@@ -273,3 +273,18 @@ handle and cannot call capture or produce another DEK. These checks do not repla
 final in-fence source sealing/publication checks: source can change after a recheck.
 Attachment pins, permission evidence, production nonce/provider composition and
 catalog publication remain incomplete. No endpoint or feature flag is enabled.
+
+### Atomic Attachment Source Intents
+
+Fresh manual admission now registers every captured attachment candidate with the
+existing generation-owned source-pin authority, in the same transaction as the
+generation/reservations/request binding. It uses the database-returned lease value
+without timestamp rounding. Deleted attachment rows are not silently omitted.
+Exact request replay does not insert or renew pins. A failed pin claim rolls back
+the whole admission, including earlier pins.
+
+Pins remain `source/building/mutable`, with null immutable version/hash/size.
+This is an intent, not proof of bytes, an archive object reference or a verified
+attachment. Immutable source capture, AEAD object copy and durable receipts still
+have to succeed before verification/publication. No cleanup or retention behavior
+is added or changed by this composition.

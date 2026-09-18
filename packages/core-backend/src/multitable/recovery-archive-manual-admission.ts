@@ -11,6 +11,7 @@ import type { SealQuery } from './recovery-archive-seals'
 import { readRecoveryArchiveCaptureSource, type RecoveryArchiveCaptureSource } from './recovery-archive-relational-source'
 import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
 import { readRecoveryArchivePreparedCapture, type RecoveryArchivePreparedCaptureOwner } from './recovery-archive-prepared-capture'
+import { claimRecoveryArchiveSourcePinIntent } from './recovery-archive-source-pin'
 
 const sourceBrand = Symbol('manual-capture-source')
 export interface RecoveryArchiveManualSource { readonly [sourceBrand]: true }
@@ -135,11 +136,12 @@ export function bindRecoveryArchiveManualAdmission(
       const generationId = randomUUID()
       const plan = { ...allocated, generationId, sheetId: identity.sheetId, sourceVectorHash,
         ownerKind: 'archive_builder', ownerId: generationId, ownerFence: '1' }
-      await query(`INSERT INTO public.meta_recovery_archives (
+      const generation = await query(`INSERT INTO public.meta_recovery_archives (
         generation_id,workspace_id,base_id,sheet_id,anchor_operation_id,anchor_seq,
         checkpoint_id,source_vector_hash,key_id,owner_kind,owner_id,owner_fence,lease_expires_at,expires_at
       ) VALUES ($1::uuid,$2,$3,$4,$5::uuid,$6::bigint,$7,$8,$9,'archive_builder',$1::text,1,
-        clock_timestamp()+$10::int*interval '1 second',clock_timestamp()+$11::int*interval '1 second')`,
+        clock_timestamp()+$10::int*interval '1 second',clock_timestamp()+$11::int*interval '1 second')
+        RETURNING lease_expires_at::text AS lease_until`,
       [generationId, identity.workspaceId, identity.baseId, identity.sheetId,
         allocated.snapshotOperationId, allocated.snapshotSeq, checkpointId, sourceVectorHash,
         policy.keyId, policy.leaseSeconds, policy.expiresAfterSeconds])
@@ -147,6 +149,14 @@ export function bindRecoveryArchiveManualAdmission(
       else await persistRecoveryArchiveSnapshotReservations(query, plan, allocated)
       await bindRecoveryArchiveManualRequest(query, identity, generationId)
       const snapshot = await readRecoveryArchiveCaptureSource(query, identity)
+      const leaseUntil = (generation.rows[0] as { lease_until?: unknown } | undefined)?.lease_until
+      if (typeof leaseUntil !== 'string') throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+      // Intent only: immutable version/hash/bytes must be verified outside this admission.
+      for (const attachment of snapshot.attachmentCandidates) {
+        await claimRecoveryArchiveSourcePinIntent(query, { generationId, attachmentId: attachment.attachmentId,
+          keyId: policy.keyId, ownerKind: plan.ownerKind, ownerId: plan.ownerId,
+          ownerFence: plan.ownerFence, leaseUntil })
+      }
       const source: RecoveryArchiveManualSource = Object.freeze({ [sourceBrand]: true as const })
       sources.set(source, { identity, owner: { generationId, ownerKind: plan.ownerKind,
         ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot),

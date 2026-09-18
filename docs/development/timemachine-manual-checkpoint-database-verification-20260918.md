@@ -457,3 +457,19 @@ Owned DB/connections and temporary cluster are removed. First-parent diff-check
 reports seven existing main documentation EOF blank lines; these unrelated files
 are not edited. The candidate-versus-main diff-check is the owned-change gate.
 This records local replay, not new remote CI, archive publication or deployment.
+
+## Manual Attachment Intent Acceptance
+
+Successor to `c8dbf4ad88466b3245161e0dcdedd566f21bd2a5` reuses the source-pin
+claim helper during admission. Synthetic PostgreSQL fixtures contain a live and a
+deleted attachment row. The exact catalog assertion requires both intents, the
+generation's owner/fence and exact database lease, mutable availability and null
+immutable-version/content-hash/content-size. Request replay leaves exactly two pins.
+Injecting a values-bearing error on the second pin produces only
+`RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED`; generation/request/first pin all roll
+back. A mutation filtering out deleted candidates fails the exact two-pin assertion.
+The filter is restored before final verification.
+
+This gate neither reads attachment bytes nor writes customer/local attachment files.
+It does not establish provider receipts, complete attachments_index, permission
+evidence or catalog publication. The tests use only a disposable owned database.
