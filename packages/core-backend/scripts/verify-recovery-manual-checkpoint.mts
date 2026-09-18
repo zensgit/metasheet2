@@ -1117,6 +1117,7 @@ try {
       const commandIdentity = { ...localInput.identity, requestId: randomUUID() }
       const archiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       const fenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      const strictFlag = process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
       try {
         process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
         process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
@@ -1156,6 +1157,10 @@ try {
         await query('SELECT pg_sleep(2.1)')
         assert.deepEqual(await command.capture(lostIdentity), { ...sourceMissing, state: 'incomplete' })
         // Real HTTP registrar + canonical database authority, with synthetic authentication only.
+        const { RECOVERY_AUTHORITY_TRIGGERS } = require('../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts') as typeof import('../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks')
+        for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+          await query(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`)
+        }
         const express = require('express') as typeof import('express')
         const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
         const httpApp = express()
@@ -1186,6 +1191,7 @@ try {
         }
         httpApp.use('/api/multitable', univerMetaRouter({ recoveryArchiveRuntime: { ...runtime, transactionDepth: httpProbe },
           recoveryArchiveDatabaseRuntime: httpDatabase,
+          recoveryArchiveAuditedReplayHorizonMs: 60000, // Synthetic fixture policy, never a runtime default.
           recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId } }))
         const httpServer = httpApp.listen(0, '127.0.0.1')
         try {
@@ -1245,6 +1251,7 @@ try {
           assert.equal((await fetch(previewUrl, { method: 'POST', headers, body: previewBody })).status, 200)
           const originalLive = (await query(`SELECT data,version,updated_at FROM meta_records
             WHERE id='manual-source-record'`)).rows[0]
+          let restoredThroughHttp = false
           try {
             await query(`UPDATE meta_records SET data='{"manual-source-field":"synthetic-post-archive-edit"}',
               version=version+1 WHERE id='manual-source-record'`)
@@ -1262,9 +1269,48 @@ try {
             assert.deepEqual(changed.data.summary.reverts, [{ recordId: 'manual-source-record', fieldIds: ['manual-source-field'] }])
             assert.deepEqual((await query(`SELECT data FROM meta_records WHERE id='manual-source-record'`)).rows[0].data,
               { 'manual-source-field': 'synthetic-post-archive-edit' }, 'preview must not apply the recovery')
+            const executeUrl = captureUrl.replace('/captures', '/execute')
+            const executeBody = JSON.stringify({ previewIdentity: changed.data.previewIdentity, scope: { kind: 'whole_sheet' } })
+            const restoreHistory = async () => (await query(`SELECT revision.actor_id,revision.source,
+              revision.changed_field_ids,revision.patch,revision.snapshot,operation.event_count,
+              (operation.endpoint_seq IS NOT NULL) AS sealed
+              FROM meta_record_revisions revision
+              JOIN meta_record_history_operations operation ON operation.operation_id=revision.operation_id
+              WHERE revision.record_id='manual-source-record' AND revision.source='restore'
+              ORDER BY revision.seq`)).rows
+            const beforeRestoreHistory = await restoreHistory()
+            process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'false'
+            const disabledExecute = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+            assert.equal(disabledExecute.status, 409)
+            assert.equal((await disabledExecute.json()).error.code, 'RECOVERY_TRUST_REQUIRED')
+            assert.deepEqual(await restoreHistory(), beforeRestoreHistory)
+            process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+            const appliedResponse = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+            const applied = await appliedResponse.json()
+            assert.equal(appliedResponse.status, 200, JSON.stringify(applied))
+            assert.equal(applied.ok, true)
+            assert.equal(applied.data.revertedCount, 1)
+            assert.equal(applied.data.resurrectedCount, 0)
+            assert.equal(applied.data.deletedCount, 0)
+            assert.deepEqual((await query(`SELECT data FROM meta_records WHERE id='manual-source-record'`)).rows[0].data,
+              originalLive.data, 'real HTTP execution must restore the archived field value')
+            restoredThroughHttp = true
+            const restoredHistory = await restoreHistory()
+            assert.equal(restoredHistory.length, beforeRestoreHistory.length + 1)
+            assert.deepEqual(restoredHistory.at(-1), { actor_id: actorId, source: 'restore',
+              changed_field_ids: ['manual-source-field'], patch: originalLive.data,
+              snapshot: originalLive.data, event_count: 1, sealed: true })
+            const afterApply = (await query(`SELECT data,version FROM meta_records WHERE id='manual-source-record'`)).rows[0]
+            const replayedResponse = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+            assert.equal(replayedResponse.status, 409)
+            assert.deepEqual((await query(`SELECT data,version FROM meta_records WHERE id='manual-source-record'`)).rows[0], afterApply)
+            assert.deepEqual(await restoreHistory(), restoredHistory)
+            console.log('PASS: real HTTP archive execution restores synthetic field and sealed restore history; consumed preview replay refuses without another write/history event')
           } finally {
-            await query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
-              [JSON.stringify(originalLive.data), originalLive.version, originalLive.updated_at])
+            if (!restoredThroughHttp) {
+              await query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
+                [JSON.stringify(originalLive.data), originalLive.version, originalLive.updated_at])
+            }
           }
           console.log('PASS: public HTTP capture/catalog/preview; unchanged no_changes; edited field exact executable plan without apply; missing/corrupt object refuses; restored reads recover')
           if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
@@ -1288,6 +1334,8 @@ try {
         else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = archiveFlag
         if (fenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
         else process.env.MULTITABLE_ENABLE_WRITER_FENCE = fenceFlag
+        if (strictFlag === undefined) delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+        else process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = strictFlag
       }
       console.log('PASS: real HTTP manual command/status through canonical authority with synthetic authentication; exact retry, lost-source no-recapture, expired lease, revoked identity and default-OFF gates; listener closed')
     } finally {
