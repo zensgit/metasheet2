@@ -555,4 +555,153 @@ describeIfDatabase('approval template groups — L0 serialization + DEFERRABLE C
     const rows = await query<{ name: string }>(`SELECT name FROM approval_template_groups WHERE org_id = $1`, [org])
     expect(rows.rows.map((r) => r.name)).toEqual([`Outer ${TS}`])
   })
+
+  // ── A-3 changesRequired #13 item 3: execute/rollback lock-order format, parking point only ────
+  // §13.2's fix for design-gate M2/M3 replaced a PER-CATEGORY/PER-GROUP `id = $2 FOR UPDATE` loop
+  // (pre-fix: L1→L2→L1→L2…, deadlocking against a concurrent plain link/unlink request's own
+  // L1→L2 order — `reviews/a3-probe/execute-lockorder-probe.cjs` /
+  // `rollback-lockorder-probe.cjs` demonstrated the pre-fix 40P01) with ONE deterministic
+  // `id = ANY($2) ORDER BY id FOR UPDATE` statement that pre-locks EVERY existing group a call
+  // touches BEFORE any L2 write. The gate's instruction is to assert the PARKING POINT, not the
+  // terminal state.
+  //
+  // An earlier draft of these two tests tried to assert "the batch's L2 write has not happened
+  // yet" by reading `approval_template_group_links` from a SEPARATE connection while the holder
+  // blocks execute/rollback — and that assertion was VACUOUS: a still-open transaction's writes
+  // are invisible to any other session regardless of statement order (ordinary MVCC visibility),
+  // so it read zero rows whether or not the write had actually happened inside the blocked
+  // transaction. The mutation below is what caught this: the vacuous version passed unchanged
+  // under the pre-fix mutant, proving it had zero discriminating power (memory
+  // `feedback_confounded_mutation_needs_isolated_variant_grid` — the fix here is analogous:
+  // isolate to a signal an outside observer CAN actually see).
+  //
+  // `pg_stat_activity.query` sidesteps this: it shows the blocked backend's OWN currently-
+  // executing statement TEXT, which is visible to any observer regardless of whether that
+  // statement's transaction has committed. `waitUntilBackendBlockedByHolder`'s `queryFragment`
+  // pins the blocked query to the literal `id = ANY($2) ORDER BY id FOR UPDATE` fragment — proven
+  // present verbatim in `pg_stat_activity.query` for this exact statement shape via a standalone
+  // two-connection probe before this assertion was written (node-postgres sends the parameterized
+  // text as-is; PG 15 does not rewrite or truncate it for a statement this short). Under a
+  // reverted-to-pre-fix mutant (per-category `id = $2 FOR UPDATE`, no `ANY`, no `ORDER BY`), the
+  // blocked query would have a DIFFERENT text and the fragment would never match — a hard timeout
+  // failure, not a silent pass (verified below). This proves the STATEMENT SHAPE the fix requires
+  // is what execute/rollback actually stall on — not proof of the L1-before-L2 write ordering
+  // itself (that requires the two-party 40P01 construction the probes above used, out of scope
+  // for this step — see remaining).
+  it('execute lock-order (design-gate M2, §13.2 fix): stalls on the batched deterministic pre-lock statement, not a per-category one', async () => {
+    const org = trackOrg(`atg-lo-exec-${TS}`)
+    const admin = await tok(base, `lo-exec-admin-${TS}`, org)
+    const category = `LOExec-${TS}`
+    const groupId = `atg_loexec_${TS}`
+    await query(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by) VALUES ($1,$2,$3,1,'seed')`,
+      [groupId, org, category],
+    )
+    const tplRow = await query<{ id: string }>(
+      `INSERT INTO approval_templates (key, name, status, category, visibility_scope)
+       VALUES ($1, $1, 'draft', $2, $3) RETURNING id`,
+      [`atg-loexec-tpl-${TS}`, category, JSON.stringify({ type: 'all', ids: [] })],
+    )
+    const templateId = tplRow.rows[0].id
+
+    try {
+      await withRawClient(async (holder, holderPid) => {
+        await holder.query('BEGIN')
+        // Holder takes L1 on the ONE existing group — no L0.
+        await holder.query(`SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`, [
+          org,
+          groupId,
+        ])
+
+        const executePromise = httpReq(base, '/api/approval-template-groups/backfill/execute', admin, { method: 'POST' })
+        const blockedPid = await waitUntilBackendBlockedByHolder(holderPid, {
+          queryFragment: 'id = ANY($2) ORDER BY id FOR UPDATE',
+        })
+        expect(blockedPid).toBeGreaterThan(0)
+
+        await holder.query('COMMIT')
+
+        const res = await executePromise
+        expect(res.status).toBe(201)
+      })
+
+      const linkAfter = await query<{ group_id: string }>(
+        `SELECT group_id FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
+        [org, templateId],
+      )
+      expect(linkAfter.rows[0]?.group_id).toBe(groupId)
+    } finally {
+      await query(`DELETE FROM approval_templates WHERE id = $1`, [templateId])
+    }
+  })
+
+  // Sibling of the execute format above, for rollback (design-gate M3). Rollback's fix pre-locks
+  // its target group with the SAME `id = ANY($2) ORDER BY id FOR UPDATE` shape — see
+  // `ApprovalTemplateGroupService.ts`'s `rollbackApprovalTemplateGroupBackfillWithClient` — before
+  // its §4.2 unlink runs, replacing a pre-fix order that unlinked FIRST, then took a fresh
+  // `id = $2 FOR UPDATE` per group.
+  it('rollback lock-order (design-gate M3, §13.2 fix): stalls on the batched deterministic pre-lock statement, not a per-group one', async () => {
+    const org = trackOrg(`atg-lo-rb-${TS}`)
+    const admin = await tok(base, `lo-rb-admin-${TS}`, org)
+    const category = `LORollback-${TS}`
+    const tplRow = await query<{ id: string }>(
+      `INSERT INTO approval_templates (key, name, status, category, visibility_scope)
+       VALUES ($1, $1, 'draft', $2, $3) RETURNING id`,
+      [`atg-lorb-tpl-${TS}`, category, JSON.stringify({ type: 'all', ids: [] })],
+    )
+    const templateId = tplRow.rows[0].id
+
+    try {
+      const executeRes = await httpReq(base, '/api/approval-template-groups/backfill/execute', admin, { method: 'POST' })
+      expect(executeRes.status).toBe(201)
+      const executeBody = (await executeRes.json()) as {
+        batchId: string | null
+        groups: Array<{ groupId: string; category: string; templateIds: string[] }>
+      }
+      const own = executeBody.groups.find((g) => g.category === category)
+      expect(own).toBeDefined()
+      const groupId = own!.groupId
+      const batchId = executeBody.batchId
+      expect(batchId).not.toBeNull()
+
+      await withRawClient(async (holder, holderPid) => {
+        await holder.query('BEGIN')
+        // Holder takes L1 on the SAME group rollback will need for its archive check — no L0
+        // (this format is specifically about the L1<->L2 ORDER, not about L0 contention, which K
+        // above already covers).
+        await holder.query(`SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`, [
+          org,
+          groupId,
+        ])
+
+        const rollbackPromise = httpReq(base, `/api/approval-template-groups/backfill/batches/${batchId}/rollback`, admin, {
+          method: 'POST',
+        })
+        const blockedPid = await waitUntilBackendBlockedByHolder(holderPid, {
+          queryFragment: 'id = ANY($2) ORDER BY id FOR UPDATE',
+        })
+        expect(blockedPid).toBeGreaterThan(0)
+
+        await holder.query('COMMIT')
+
+        const res = await rollbackPromise
+        expect(res.status).toBe(200)
+      })
+
+      const linkAfter = await query<{ group_id: string | null; unlinked_at: string | null }>(
+        `SELECT group_id, unlinked_at FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
+        [org, templateId],
+      )
+      expect(linkAfter.rows[0].group_id).toBeNull()
+      expect(linkAfter.rows[0].unlinked_at).not.toBeNull()
+
+      const groupAfter = await query<{ archived_at: string | null }>(
+        `SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+        [org, groupId],
+      )
+      expect(groupAfter.rows[0].archived_at).not.toBeNull()
+    } finally {
+      await query(`DELETE FROM approval_templates WHERE id = $1`, [templateId])
+    }
+  })
 })
