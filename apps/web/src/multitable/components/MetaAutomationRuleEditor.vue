@@ -1692,6 +1692,9 @@
           <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
             {{ automationLabel('testRun.unsavedHint', isZh) }}
           </div>
+          <div v-if="testRunBlockedBySavedRuleDirty" class="meta-rule-editor__hint" data-field="testRunSavedDirtyHint">
+            {{ automationLabel('testRun.savedDirtyHint', isZh) }}
+          </div>
           <div
             v-if="props.testRunState"
             class="meta-rule-editor__test-run-status"
@@ -1707,7 +1710,7 @@
         </el-button>
         <el-button
           class="meta-rule-editor__btn"
-          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running'"
+          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running' || testRunBlockedBySavedRuleDirty"
           @click="onTestRun"
           data-action="test"
         >
@@ -2637,6 +2640,12 @@ const recipientCandidateFields = computed(() => props.fields.filter((field) => f
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 const dateReminderCandidateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
+// #5859: Test Run always executes the PERSISTED rule (client.testAutomationRule sends no body),
+// so an already-saved rule with unsaved draft edits must not offer Test Run — it would silently
+// run the stale saved version (e.g. empty notification recipients) instead of what's on screen.
+// Reuses the B1-07 open-time snapshot as the dirty baseline (same one requestClose() uses).
+const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftSnapshot.value)
+const testRunBlockedBySavedRuleDirty = computed(() => !!props.rule?.id && isDraftDirty.value)
 function dingTalkTestRunConfirmMessage(): string {
   const separator = isZh.value ? '' : ' '
   return `${automationLabel('testRun.warning', isZh.value)}${separator}${automationLabel('testRun.confirmSuffix', isZh.value)}`
@@ -3590,8 +3599,7 @@ async function confirmDiscardChanges(): Promise<boolean> {
 // B1-07: discard protection — all three close paths (overlay click, ×, cancel) route here.
 // A successful save is closed by the parent on the 'save' emit and never passes through this guard.
 async function requestClose(): Promise<void> {
-  const dirty = JSON.stringify(draft.value) !== draftSnapshot.value
-  if (dirty && !(await confirmDiscardChanges())) return
+  if (isDraftDirty.value && !(await confirmDiscardChanges())) return
   emit('close')
 }
 
@@ -5555,6 +5563,7 @@ async function confirmDingTalkTestRun(): Promise<boolean> {
 
 async function onTestRun(): Promise<void> {
   if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
+  if (testRunBlockedBySavedRuleDirty.value) return
   if (savedRuleHasDingTalkActions.value && !(await confirmDingTalkTestRun())) return
   emit('test', props.rule.id)
 }

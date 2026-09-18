@@ -2283,7 +2283,10 @@ describe('MetaAutomationRuleEditor', () => {
     expect(tested).not.toHaveBeenCalled()
   })
 
-  it('requires confirmation based on the saved rule even when the draft action changes', async () => {
+  // #5859: Test Run always executes the PERSISTED rule (no request body), so once the draft
+  // diverges from the saved rule the button must disable rather than silently run stale config —
+  // this replaces the older "still runs the saved rule" expectation for a dirtied draft.
+  it('disables Test Run once a saved rule draft is edited and explains the saved version will run', async () => {
     const tested = vi.fn()
     const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { container } = mount({
@@ -2307,6 +2310,9 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
+    const testBtnBefore = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtnBefore.disabled).toBe(false)
+
     const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
     // UF-4 shape adaptation: the native test assigned .value = 'notify', which is not one of the
     // selectable options (the assignment blanked the select); with el-select we change the draft
@@ -2314,11 +2320,16 @@ describe('MetaAutomationRuleEditor', () => {
     epSetSelect(actionSelect, 'send_notification')
     await flushPromises()
 
-    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(true)
+    expect(container.querySelector('[data-field="testRunSavedDirtyHint"]')?.textContent)
+      .toContain('Test Run uses the last saved version')
+
+    testBtn.click()
     await flushPromises()
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1)
-    expect(tested).toHaveBeenCalledWith('rule_1')
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(tested).not.toHaveBeenCalled()
   })
 
   it('does not require confirmation for non-DingTalk Test Run', async () => {
@@ -2393,6 +2404,63 @@ describe('MetaAutomationRuleEditor', () => {
     expect(payload.name).toBe('My Rule')
     expect(payload.triggerType).toBe('record.created')
     expect(payload.actions).toHaveLength(1)
+  })
+
+  it('#5859: keeps Test Run enabled for a saved rule with no unsaved edits', async () => {
+    const tested = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userId: 'user_1', message: 'Hello' },
+        actions: [{ type: 'send_notification', config: { userId: 'user_1', message: 'Hello' } }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    expect(container.querySelector('[data-field="testRunSavedDirtyHint"]')).toBeFalsy()
+
+    testBtn.click()
+    await flushPromises()
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
+  it('#5859: disables Test Run once a saved rule\'s notification recipients are edited', async () => {
+    const tested = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userId: 'user_1', message: 'Hello' },
+        actions: [{ type: 'send_notification', config: { userId: 'user_1', message: 'Hello' } }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtnBefore = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtnBefore.disabled).toBe(false)
+
+    const userIdInput = container.querySelector('[data-action-index="0"] [data-field="notificationUserIds"]') as HTMLTextAreaElement
+    userIdInput.value = 'user_1,user_2'
+    userIdInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(true)
+    expect(container.querySelector('[data-field="testRunSavedDirtyHint"]')?.textContent)
+      .toContain('Test Run uses the last saved version')
+
+    testBtn.click()
+    await flushPromises()
+    expect(tested).not.toHaveBeenCalled()
   })
 
   it('populates draft from existing rule', async () => {

@@ -183,6 +183,7 @@ export type AutomationLabelKey =
   | 'testRun.confirmSuffix'
   | 'testRun.confirmTitle'
   | 'testRun.unsavedHint'
+  | 'testRun.savedDirtyHint'
   | 'testRun.button'
   | 'testRun.running'
   | 'manager.title'
@@ -541,6 +542,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'testRun.confirmSuffix',
   'testRun.confirmTitle',
   'testRun.unsavedHint',
+  'testRun.savedDirtyHint',
   'testRun.button',
   'testRun.running',
   'manager.title',
@@ -985,6 +987,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.confirmTitle': { en: 'Run test?', zh: '运行测试？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
+  'testRun.savedDirtyHint': { en: 'Test Run uses the last saved version. Save your changes first.', zh: '测试运行使用的是最后一次保存的版本，请先保存当前改动。' },
   'testRun.button': { en: 'Test Run', zh: '测试运行' },
   'testRun.running': { en: 'Running...', zh: '正在运行...' },
   'manager.title': { en: 'Automations', zh: '自动化' },
