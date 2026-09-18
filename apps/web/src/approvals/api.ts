@@ -9,6 +9,7 @@ import { apiFetch, apiGet, apiPost } from '../utils/api'
 import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateGroupDTO,
+  ApprovalTemplateGroupReorderResultDTO,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVersionDetailDTO,
   ApprovalTemplateVersionSummaryDTO,
@@ -445,12 +446,19 @@ export async function listTemplatesBySection(params: {
  * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — `groupIds` is the
  * org's FULL permutation of its currently-active group ids (a full re-rank, not a delta); the
  * server re-derives `sortOrder` from array position (1..n) inside its own L0 critical section.
+ *
+ * Return type fixed to `ApprovalTemplateGroupReorderResultDTO[]` (`{id, sortOrder}` only) — this
+ * previously claimed `ApprovalTemplateGroupDTO[]`, but the route's underlying service
+ * (`ApprovalTemplateGroupReorderService.ts`'s `ApprovalTemplateGroupReorderResult`) never returns
+ * `name`/`createdBy`/`archivedAt`; a caller trusting those fields on the wider type would have read
+ * `undefined` at runtime. This function was previously unused by any UI (see
+ * `TemplateGroupSections.vue`), so the type is corrected here with zero call-site fallout.
  */
 export async function reorderApprovalTemplateGroups(
   groupIds: string[],
-): Promise<ApprovalTemplateGroupDTO[]> {
+): Promise<ApprovalTemplateGroupReorderResultDTO[]> {
   if (USE_MOCK) return []
-  const payload = await apiPost<{ groups?: ApprovalTemplateGroupDTO[] }>(
+  const payload = await apiPost<{ groups?: ApprovalTemplateGroupReorderResultDTO[] }>(
     '/api/approval-template-groups/reorder',
     { groupIds },
   )
