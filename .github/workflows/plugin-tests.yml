@@ -414,6 +414,14 @@ jobs:
       - name: A3 backfill-rollback CI wiring contract
         run: node --test scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs
 
+      # Same slice, batch LIST unit (design-gate P1-5 / changesRequired #5) — the read-only
+      # `listApprovalTemplateGroupBackfillBatches` suite must stay wired into BOTH
+      # vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step). Dropping either
+      # point silently disables the ordering/pagination/org-scoping/rolledBackAt-round-trip proofs
+      # — the only reachability path to a rollback-able batchId once execute's own response is gone.
+      - name: A3 backfill-batches-list CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
+
       # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
@@ -1691,6 +1699,7 @@ jobs:
             tests/integration/approval-template-groups-backfill-preview.db.test.ts \
             tests/integration/approval-template-groups-backfill-execute.db.test.ts \
             tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+            tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

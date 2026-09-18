@@ -85,6 +85,7 @@ import {
   createApprovalTemplateGroupWithClient,
   linkApprovalTemplateToGroup,
   linkApprovalTemplateToGroupWithClient,
+  listApprovalTemplateGroupBackfillBatches,
   listApprovalTemplateGroups,
   mapGroupConstraintError,
   renameApprovalTemplateGroup,
@@ -1658,6 +1659,32 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
     },
   )
+
+  // Batch list (design doc §2.1 index / §6.1 endpoint row / §13.1 changesRequired #5, design-gate
+  // P1-5). Registered after rollback rather than before preview so the literal `/backfill/batches`
+  // path and the parameterised `/backfill/batches/:batchId/rollback` path sit next to each other in
+  // source order — Express itself does not care about registration order between a GET and a POST
+  // on different literal/parameterised path shapes, this ordering is for readability only. Same
+  // guard as the other three backfill endpoints — see §6.2's three-part rationale (item ③: this
+  // endpoint exposes "which write-plans have taken effect / been undone", the same "write's read
+  // companion" category as preview, not a `rbacGuard('approvals:read')` browse view).
+  r.get('/api/approval-template-groups/backfill/batches', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const limit = parsePaging(req.query.limit, 20, 100)
+      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
+      const page = await listApprovalTemplateGroupBackfillBatches(orgId, limit, offset)
+      res.json(page)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCHES_LIST_FAILED',
+        'Failed to list approval template group backfill batches',
+      )
+    }
+  })
 
   // B3-04: participant candidate-user directory. Registered BEFORE '/api/approvals/:id' so
   // 'directory' is never matched as an :id. Reuses searchDirectoryUsers (active-only, {id,name,email},

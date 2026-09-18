@@ -1871,6 +1871,16 @@ export default defineConfig({
       // `approval-template-groups-backfill-rollback-ci-wiring.test.mjs` guard (same convention as
       // the three suites above).
       'tests/integration/approval-template-groups-backfill-rollback.db.test.ts',
+      // Same slice, batch LIST unit (design-gate P1-5 / changesRequired #5, 2026-09-18):
+      // `listApprovalTemplateGroupBackfillBatches`
+      // (`src/services/ApprovalTemplateGroupService.ts`) — read-only, takes no lock. Proves
+      // `created_at DESC` ordering + limit/offset pagination against directly-inserted rows with
+      // controlled timestamps, the `rolledBackAt` null-vs-set round trip through the real rollback
+      // code path, and org scoping. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-batches-list-ci-wiring.test.mjs` guard (same convention
+      // as the four sibling backfill suites' own guards).
+      'tests/integration/approval-template-groups-backfill-batches-list.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
