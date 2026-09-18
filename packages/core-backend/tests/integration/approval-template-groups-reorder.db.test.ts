@@ -315,7 +315,8 @@ describeIfDatabase('Approval template groups — §6 phase 3 reorder endpoint (l
     expect((await blankEntry.json()).error.code).toBe('GROUP_REORDER_IDS_REQUIRED')
   })
 
-  // ── authorization (gate impl-gate-A4-round1-20260918.md §2 P2-1) ─────────────────────────────
+  // ── authorization (gate impl-gate-A4-round1-20260918.md §2 P2-1; actor 3 closes round-2 gate's
+  // P3-2, impl-gate-A4-round2-20260918.md §2.2/§9 item 2) ────────────────────────────────────
   // Lock §3 I7 names "重排" (reorder) explicitly among the write endpoints that carry
   // `approvalTemplateAdminGuard`; lock §4 row F's mutation column ("去掉写端点 guard ⇒ 非管理员
   // 201,红") applies to this endpoint too. Before this test, that assertion was DEAD for
@@ -325,10 +326,21 @@ describeIfDatabase('Approval template groups — §6 phase 3 reorder endpoint (l
   // sent an unprivileged request at this ONE route. Same actor shape as the phase-1 lifecycle
   // file's row F (`roles: 'user'`, an unrelated permission, no `approval-templates:manage` /
   // `approvals:admin-templates`).
+  //
+  // Round-2 gate's MD3 mutation (swap, not delete — replace the guard at `:1288` with
+  // `rbacGuard('approvals:read')`) found the `nobody` actor above has ZERO discriminating power
+  // against that form: `nobody` (perms `multitable:read`) is denied by BOTH the real guard and the
+  // swapped one, so the file stayed 6/6 green under the swap. `readerOnly` below sits exactly in
+  // the gap the swap would open — `approvals:read` satisfies neither `approval-templates:manage`
+  // nor `approvals:admin-templates` (so it is correctly denied by the CURRENT, correct guard) but
+  // WOULD satisfy a guard checking the single code `approvals:read` — see
+  // `rbac/rbac.ts`'s `hasPermissionCode`: it isn't `*:*`, isn't `approval-templates:*`, isn't
+  // `approvals:*`, so today it is denied on both codes in `approvalTemplateAdminGuard`'s list.
   it('authorization: reorder requires approvalTemplateAdminGuard — a non-admin gets 403 and sort_order is left untouched; the same body from an admin succeeds', async () => {
     const org = trackOrg(`atg-reorder-auth-${TS}`)
     const admin = await tok(base, `reorder-auth-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
     const nobody = await tok(base, `reorder-auth-nobody-${TS}`, { roles: 'user', perms: 'multitable:read', tenantId: org })
+    const readerOnly = await tok(base, `reorder-auth-reader-${TS}`, { roles: 'user', perms: 'approvals:read', tenantId: org })
 
     const g1 = await createGroup(base, admin, `Reorder Auth G1 ${TS}`)
     const g2 = await createGroup(base, admin, `Reorder Auth G2 ${TS}`)
@@ -345,6 +357,19 @@ describeIfDatabase('Approval template groups — §6 phase 3 reorder endpoint (l
     // the bare string `{ error: 'Insufficient permissions' }` (`rbac/rbac.ts`), with no `code`
     // field, same discriminator as the phase-1 lifecycle file's `§2(d)` case.
     expect((await asNobody.json()).error).toBe('Insufficient permissions')
+
+    // Actor 3 (round-2 gate P3-2): same body, same org, an actor with `approvals:read` and
+    // neither `approval-templates:manage` nor `approvals:admin-templates`. Denied today by the
+    // real `approvalTemplateAdminGuard`; a mutation probe swapping that guard for
+    // `rbacGuard('approvals:read')` flips this ONE assertion to 200 while `asNobody` above stays
+    // 403 under both guard forms — this is what gives the swap form discriminating power that the
+    // `nobody` actor alone does not have.
+    const asReaderOnly = await httpReq(base, '/api/approval-template-groups/reorder', readerOnly, {
+      method: 'POST',
+      body: { groupIds: [g2.id, g1.id] },
+    })
+    expect(asReaderOnly.status).toBe(403)
+    expect((await asReaderOnly.json()).error).toBe('Insufficient permissions')
 
     // Denial must not have touched sort_order — the reversed permutation in the denied body would
     // be visible immediately if the guard were bypassed.
