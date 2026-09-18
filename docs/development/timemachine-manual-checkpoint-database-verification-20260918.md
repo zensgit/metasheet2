@@ -1031,3 +1031,29 @@ A bounded Sol read-only attachment review confirmed D1's immutable-source
 requirement but did not finish storage writer/deleter inspection; it is not a
 code-review approval or evidence of attachment support. Immutable attachments,
 full authenticated Workbench UAT and broader restore shapes remain open.
+
+## Unsupported Attachment Capture Diagnostic
+
+Code checkpoint: `86d97984559c24696c230165335279f8fc04c111`.
+
+The owner route preserves the exact known manual attachment-unavailable code in
+a closed 503 response. The UI renders fixed bilingual copy explaining that
+attachment-containing manual archives are unavailable and the archive is
+incomplete. It does not render provider error text, claim successful capture,
+or override 401/403/409 handling. Prefix lookalikes remain generic failures.
+
+Evidence: backend route/writer neighbors 59/59; modal/client 151/151;
+acceptance TypeScript, application vue-tsc, scoped source ESLint and diff-check
+PASS. Initial tests failed on the missing diagnostic. Independently replacing
+exact code equality with prefix matching makes one backend and one UI test RED;
+both were restored before the final green runs. No DB test was run for this
+diagnostic-only change; previous DB evidence remains bound to its earlier SHA.
+Logs: `/private/tmp/tm-manual-attachment-diagnostic-{backend,web}-{red,green,mutation,final}.log`.
+
+This diagnoses the initial rejected capture only. The failure reason is not
+durably persisted for subsequent status reads; pending is not success. The
+storage audit found create-only destination writes but no provider-returned
+immutable source version on download. A successful download plus hash is not
+immutable-source admission. Actual attachment capture, version-specific reads,
+source-pin-aware deletion coverage and full Workbench UAT remain OPEN.
+No flags, customer storage/data, Ready, merge, dispatch or deployment changed.
