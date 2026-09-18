@@ -470,7 +470,7 @@ IDENTICAL
 
 ## 8. 修复轮 2 处置(本轮,`impl-gate-A3-round1-20260918.md` §6 P3-1 / P3-2 / P3-3)
 
-**范围声明**:任务书"选尚未处理的一到三条",本轮处置 §7.4 列出的第 1/2/3 条(三处过期断言注释、12 处改名前路径、`atgbb_org_nonblank` 映射缺口)。三条都是文档/注释/映射表补全,**零行为变化**于既有生产路径(preview/execute/rollback 的请求处理逻辑一行未动)——§8.4 的回归重跑证明这一点,而不是假定它。未选 §7.4 第 4/5/6/7 条:第 4 条是纯文字自检、体量不到独立一条;第 5/6 条门审自己的 remaining 备注已建议下一轮暂缓或换更便宜的做法(见 §7.4 原文);第 7 条要点名的对象是将来开 PR 时的 PR body,不是本仓代码/文档。
+**范围声明**:任务书"选尚未处理的一到三条",本轮处置 §7.4 列出的第 1/2/3 条(三处过期断言注释、12 处改名前路径、`atgbb_org_nonblank` 映射缺口)。**行为变化的准确范围**(不能笼统写"零行为变化",`mapGroupConstraintError` 本身就在 execute 事务的错误处理路径上,§8.3 确实改了它的一个分支):P3-1/P3-2 是纯注释/文档路径改写,零行为变化;P3-3 对**任何今天可达的输入**零行为变化(§8.3 已论证 `org_id` 在到达这段代码前已被路由层 403 拦掉空白值,且库内既有 org id 全是 ASCII,所以 `atgbb_org_nonblank` 这条 CHECK 今天造不成任何一次真实的 23514),行为变化只发生在**假设**有一个非可打印-ASCII 的 org id 撞上这条 CHECK 的那个不可达分支——从"未映射的裸 500"变成"映射后的 400",这正是 P3-3 要修的那件事,不是意外副作用。preview/execute/rollback 的请求处理逻辑本身(SQL 语句、锁序、事务边界、guard)一行未动,§8.4 的回归重跑证明这一点。未选 §7.4 第 4/5/6/7 条:第 4 条是纯文字自检、体量不到独立一条;第 5/6 条门审自己的 remaining 备注已建议下一轮暂缓或换更便宜的做法(见 §7.4 原文);第 7 条要点名的对象是将来开 PR 时的 PR body,不是本仓代码/文档。
 
 ### 8.1 P3-1 —— 三处"接线还不存在"的过期断言注释,在本 head 上为假
 
@@ -587,6 +587,17 @@ $ npx vitest run tests/unit/approval-template-group-backfill-batch-org-nonblank.
         Tests  14722 passed | 1604 skipped (16326)
    Duration    65.38s
    ```
-   exit 0,零失败。**与门审 E2 记录的 `931 passed | 175 skipped (1106)` / `14718 passed | 1604 skipped (16322)` 相比**:文件数 +1,与本轮新增的唯一一个测试文件(§8.3 的新单元测试)逐一对应;测试数 +4,比新文件自己的 3 个用例多 1 条,**本轮未去追查这多出的 1 条从哪来**——如实披露为未核实的差异,不冒充"与旧基线逐位重现"(记忆 `feedback_absolute_claim_sweep_must_be_mechanical`);但 skip 数(175 文件 / 1604 用例)两次完全相同,说明不是"某条原本 skip 的用例这次变绿"那种解释,更可能是某条对环境/计数敏感的普查式用例(例如按当前仓库文件/插件数量枚举的那一类)在两次不同会话的运行环境之间有 1 个单位的差异,与本轮改动的三处文件(全部是注释与新增测试)在因果上不相关——**0 failed** 才是本轮要证的那句话,数字对不上不改变这个结论。
+   exit 0,零失败。**与门审 E2 记录的 `931 passed | 175 skipped (1106)` / `14718 passed | 1604 skipped (16322)` 相比**:文件数 +1(与本轮新增的唯一一个测试文件逐一对应),测试数 +4——比新文件自己的 3 个用例多 1 条。**追查结果(不留作未核实差异)**:
+   ```
+   $ grep -aE "approval-ci-coverage-enumeration|approval-field-access-enum-mirror|multitable-o2-census-closed-world|approval-lock8-field-type-census|recovery-conflict-census|ai-provider-call-site-census" /tmp/e2-fixround2-full.log
+    ✓ tests/unit/approval-ci-coverage-enumeration.test.ts (350 tests)
+    ✓ tests/unit/approval-field-access-enum-mirror.test.ts (50 tests)
+    ✓ tests/unit/multitable-o2-census-closed-world.test.ts (7 tests)
+    ✓ tests/unit/approval-lock8-field-type-census.test.ts (36 tests)
+    ✓ tests/unit/recovery-conflict-census.test.ts (40 tests)
+    ✓ tests/unit/ai-provider-call-site-census.test.ts (4 tests)
+   ```
+   门审 E4 记录 `approval-ci-coverage-enumeration.test.ts` 是 `349 passed`;本次 `350`——**逐一对上那 +1**,其余五个普查/镜像守卫的用例数(50/7/36/40/4)与门审记录一致,零漂移。读该文件自己的 doc-comment(`tests/unit/approval-ci-coverage-enumeration.test.ts:1-27`)证实这不是巧合:它对 `packages/core-backend/tests/**` 做活的 `fs.readdirSync` 枚举,每发现一个 approval 相关的测试文件就生成一条 `it(...)`,断言该文件"要么被某个具名、不可跳过的 CI lane 收集,要么在 allowlist 里"——本轮新增的 `tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts` 落在 `packages/core-backend/tests/unit/`,被 Vitest **默认 include glob**(`vitest.config.ts` 未覆盖)收集,该 doc-comment 原文写明"a brand-new file in `tests/unit/` needs NO workflow edit to be collected — that is what makes this home un-skippable"——枚举守卫发现了新文件、判定它已被无条件收集、生成并跑绿了对应的一条 `it`,是 **350 = 349 + 1** 这条判别力证据自己在起作用,不是巧合也不需要另外登记(记忆 `feedback_generation_guard_must_be_applied_to_every_sibling_surface` 的反向确认:本轮不需要手工"补登记",因为 `tests/unit/` 这一层本身就是该守卫的默认收集面)。skip 数(175 文件 / 1604 用例)两次完全相同,与"枚举到了 1 个新文件、生成了 1 条新绿用例"这个解释一致,排除"某条原本 skip 的用例变绿"的另一种可能。
+8. **retraction sweep**(gate §8 复核清单第 2 条建议、本轮改了 `routes/approvals.ts` 的注释故顺手跑一遍):`bash scripts/dev/atg-retraction-sweep.sh`,exit 0,两处命中均落在该脚本自己定义的"类别 3——叙述一件已经被撤回的事实,不是把它当今天成立的事实来断言"(命中原文都在讲"通配腿已被 phase1 证伪",不是在断言通配腿今天成立),脚本自己的判据要求类别 2(仍在断言为今天事实)命中数必须为 0——本次为 0。
 
-**结论**:P3-1/P3-2/P3-3 三条均已修复并有判别力证据;既有 85 条真库用例、5 个 wiring 守卫、s6a 钉、typecheck、14700+ 条无库用例全部保持绿,零失败。
+**结论**:P3-1/P3-2/P3-3 三条均已修复并有判别力证据;既有 85 条真库用例、5 个 wiring 守卫、s6a 钉、typecheck、14700+ 条无库用例(含 350 条枚举守卫用例,+1 逐一对应本轮新文件,零未解释漂移)、retraction sweep 全部保持绿,零失败。
