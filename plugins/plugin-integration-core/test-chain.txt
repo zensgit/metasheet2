@@ -58,6 +58,7 @@ node __tests__/stock-preparation-project-reads.test.cjs
 node __tests__/stock-preparation-erp-material-sync-persist.test.cjs
 node __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs
 node __tests__/stock-preparation-readonly-source-run.test.cjs
+node __tests__/scenario-b-synthetic-bom-source-run.test.cjs
 node __tests__/stock-preparation-plm-source-persist-bridge.test.cjs
 node __tests__/stock-preparation-snapshot-reads.test.cjs
 node __tests__/stock-preparation-confirm-writes.test.cjs
