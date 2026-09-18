@@ -47,6 +47,27 @@
           >
             {{ t.delegationsButton }}
           </el-button>
+          <!-- Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive view-mode toggle.
+               Default 'flat' keeps every existing spec's mount behavior byte-identical; the
+               grouped branch below is a SIBLING template, not a wrapper around the existing
+               table/gallery markup, so this never touches their structure. -->
+          <el-button
+            :type="viewMode === 'flat' ? 'primary' : 'default'"
+            size="small"
+            class="ms-ml-12"
+            data-testid="template-center-view-mode-flat"
+            @click="viewMode = 'flat'"
+          >
+            {{ t.viewModeFlat }}
+          </el-button>
+          <el-button
+            :type="viewMode === 'grouped' ? 'primary' : 'default'"
+            size="small"
+            data-testid="template-center-view-mode-grouped"
+            @click="viewMode = 'grouped'"
+          >
+            {{ t.viewModeGrouped }}
+          </el-button>
         </div>
       </template>
     </PageHeader>
@@ -100,6 +121,12 @@
       <el-tab-pane :label="t.tabArchived" name="archived" />
     </el-tabs>
 
+    <!-- Approval form grouping lock v2.13 §6 phase 3 (A-4) — `viewMode` gate wraps the ENTIRE
+         pre-existing flat table/gallery block as a sibling of the new grouped view, rather than
+         being merged into the table's own `v-if`/`v-else` pair (which would make the gallery
+         `v-else` fire in grouped+non-manager mode too). Default 'flat' keeps this block's own
+         `v-if`/`v-else` behaving exactly as before for every spec that never touches viewMode. -->
+    <template v-if="viewMode === 'flat'">
     <!-- G-B2-17: admin path unchanged — the management table stays exactly as before. -->
     <el-table
       v-if="canManageTemplates"
@@ -254,9 +281,16 @@
         :title="searchText || categoryFilter ? t.emptyTableSearch : t.emptyGalleryDefault"
       />
     </div>
+    </template>
+    <TemplateGroupSections
+      v-else
+      :status="statusTab === 'all' ? undefined : statusTab"
+      :search="searchText || undefined"
+      @select="handleSectionItemSelect"
+    />
 
     <el-pagination
-      v-if="store.total > pageSize"
+      v-if="viewMode === 'flat' && store.total > pageSize"
       class="template-center__pagination"
       background
       layout="total, prev, pager, next"
@@ -274,6 +308,7 @@ import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
 import EmptyState from '../../components/status/EmptyState.vue'
 import ApprovalTemplateGroupsPanel from './ApprovalTemplateGroupsPanel.vue'
+import TemplateGroupSections from './TemplateGroupSections.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
@@ -321,6 +356,8 @@ const cloningId = ref<string | null>(null)
 const archivingId = ref<string | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
+// Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive view-mode toggle, default 'flat'.
+const viewMode = ref<'flat' | 'grouped'>('flat')
 
 // G-B2-17 — the requester gallery re-filters the current page's templates instantly as
 // categoryFilter/searchText change (no need to wait for handleSearch's Enter/blur), on top of
@@ -393,6 +430,12 @@ function handlePageChange(page: number) {
 
 function handleRowClick(row: ApprovalTemplateListItemDTO) {
   router.push({ path: `/approval-templates/${row.id}` })
+}
+
+// Approval form grouping lock v2.13 §6 phase 3 (A-4) — TemplateGroupSections emits a bare
+// template id (it has no dependency on vue-router itself, unlike handleRowClick's row object).
+function handleSectionItemSelect(templateId: string) {
+  router.push({ path: `/approval-templates/${templateId}` })
 }
 
 function startApproval(templateId: string) {
