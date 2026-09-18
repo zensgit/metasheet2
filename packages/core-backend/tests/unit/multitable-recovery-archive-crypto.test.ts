@@ -83,7 +83,25 @@ describe('attachment object AEAD domain', () => {
     expect(openRecoveryArchiveAttachment({ binding: { generation: result.binding,
       attachmentId: object.attachmentId, sourceVersion: object.sourceVersion,
       plaintextSha256: object.plaintextSha256 }, dek: key, sealed: object })).toEqual(original)
-    expect(() => encodeRecoveryArchivePreparedEnvelope(result)).toThrow('RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID')
+    const durable = encodeRecoveryArchivePreparedEnvelope(result)
+    expect(JSON.parse(durable.toString()).version).toBe(3)
+    expect(decodeRecoveryArchivePreparedEnvelope(durable).attachments).toEqual(result.sealedAttachments)
+    const wire = JSON.parse(durable.toString())
+    for (const mutate of [
+      (value: typeof wire) => { value.version = 2 },
+      (value: typeof wire) => { value.attachments[0].plaintext = 'forbidden' },
+      (value: typeof wire) => { value.attachments[0].sourceVersion = '' },
+      (value: typeof wire) => { value.attachments[0].sizeBytes++ },
+      (value: typeof wire) => { value.attachments[0].nonce = value.sections[0].nonce },
+      (value: typeof wire) => { value.attachments[0].authTag = 'AA==' },
+      (value: typeof wire) => { value.attachments.push(value.attachments[0]) },
+      (value: typeof wire) => { value.attachments = [] },
+    ]) {
+      const changed = structuredClone(wire)
+      mutate(changed)
+      expect(() => decodeRecoveryArchivePreparedEnvelope(Buffer.from(JSON.stringify(changed))))
+        .toThrow('RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID')
+    }
     key.fill(0)
   })
 
@@ -375,7 +393,7 @@ describe("Prepared sealed-envelope continuation", () => {
         attachments: [{ attachmentId: "10000000-0000-4000-8000-000000000001", sourceVersion: "version-1",
           plaintext: Buffer.from("attachment bytes"), nonce: Buffer.alloc(12, 240) }],
       }),
-    })).rejects.toThrow("RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID");
+    })).rejects.toThrow("RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED");
     expect(stored).toBeNull();
     expect(uploads).toEqual([]);
     await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow("SYNTHETIC_UPLOAD_INTERRUPTION");
@@ -396,6 +414,56 @@ describe("Prepared sealed-envelope continuation", () => {
       upload: async () => { allowed = false; uploads.push(Buffer.from("one")); },
     })).rejects.toThrow("AUTHORITY_REVOKED");
     expect(uploads).toHaveLength(12);
+  });
+
+  test('attachment interruption resumes exact ciphertext without source or custody and refuses missing attachment uploader', async () => {
+    const binding = generationBinding();
+    let stored: Buffer | null = null;
+    let captures = 0;
+    let reservations = 0;
+    let sectionUploads = 0;
+    const delivered: Buffer[] = [];
+    const query = async (text: string, params?: unknown[]): Promise<{ rows: unknown[] }> => {
+      if (text.includes('pg_current_xact_id')) return { rows: [{ xid: '1' }] };
+      if (text.includes('FOR UPDATE')) return { rows: [{ generation_id: binding.generationId }] };
+      if (text.startsWith('INSERT')) { stored ??= Buffer.from(params![5] as Buffer); return { rows: [] }; }
+      return { rows: stored ? [{ payload: stored, payload_sha256: createHash('sha256').update(stored).digest('hex') }] : [] };
+    };
+    const input = {
+      binding, owner: { generationId: binding.generationId, ownerKind: 'archive_builder', ownerId: 'test',
+        ownerFence: '1', sourceVectorHash: 'a'.repeat(64) },
+      transaction: async <T,>(work: (q: typeof query) => Promise<T>): Promise<T> => work(query),
+      checkAuthority: async () => {}, transactionDepth: depthProbe(0),
+      capture: async () => { captures++; return {
+        binding, keyCustody: createTestCustody(), transactionDepth: depthProbe(0), dekSource: { kind: 'produce' as const },
+        sections: fullSnapshotSections(), reserveNonces: async () => { reservations++; },
+        attachments: [1, 2].map((id) => ({ attachmentId: `att_${id}`, sourceVersion: `version-${id}`,
+          plaintext: Buffer.from(`synthetic-blob-${id}`), nonce: Buffer.alloc(12, 230 + id) })),
+      }; },
+      upload: async () => { sectionUploads++; },
+      uploadAttachment: async (_envelope: unknown, attachment: { ciphertext: Buffer }) => {
+        expect(stored).not.toBeNull(); delivered.push(Buffer.from(attachment.ciphertext));
+        throw new Error('SYNTHETIC_ATTACHMENT_INTERRUPTION');
+      },
+    };
+    await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow('SYNTHETIC_ATTACHMENT_INTERRUPTION');
+    const original = Buffer.from(stored!);
+    const resume = { ...input, capture: async (): Promise<never> => { throw new Error('MUST_NOT_RECAPTURE'); } };
+    await expect(uploadRecoveryArchivePreparedCapture({ ...resume, uploadAttachment: undefined }))
+      .rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED');
+    expect(sectionUploads).toBe(10);
+    await uploadRecoveryArchivePreparedCapture({ ...resume, uploadAttachment: async (envelope, object) => {
+      delivered.push(Buffer.from(object.ciphertext));
+      envelope.attachments![1]!.ciphertext.fill(0);
+    } });
+    expect(captures).toBe(1); expect(reservations).toBe(1);
+    expect(delivered).toHaveLength(3);
+    expect(delivered[0]).toEqual(delivered[1]);
+    expect(delivered[2]).toEqual(decodeRecoveryArchivePreparedEnvelope(original).attachments![1]!.ciphertext);
+    expect(stored).toEqual(original);
+    await expect(uploadRecoveryArchivePreparedCapture({ ...resume,
+      authenticateCapture: async (): Promise<never> => { throw new Error('MUST_NOT_RESIGN'); },
+    })).rejects.toThrow('RECOVERY_ARCHIVE_PREPARED_MANIFEST_REQUIRED');
   });
 });
 

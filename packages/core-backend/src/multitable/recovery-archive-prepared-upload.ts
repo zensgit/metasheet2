@@ -20,13 +20,16 @@ import { parseRecoveryArchiveManifestObjectEnvelope } from './recovery-archive-m
 const BINDING_KEYS = ['formatVersion', 'generationId', 'workspaceId', 'baseId', 'sheetId',
   'anchorOperationId', 'anchorSeq', 'checkpointId', 'keyId', 'wrappedDekId', 'dekFingerprint', 'aeadAlgorithm'] as const
 const SECTION_KEYS = ['sectionName', 'aeadAlgorithm', 'nonce', 'ciphertext', 'authTag', 'plaintextSha256']
+const ATTACHMENT_KEYS = ['attachmentId', 'sourceVersion', 'plaintextSha256', 'sizeBytes', 'nonce', 'ciphertext', 'authTag']
 const INVALID = 'RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID'
+type PreparedAttachment = NonNullable<RecoveryArchiveReserveThenSealResult['sealedAttachments']>[number]
 
 export interface RecoveryArchivePreparedEnvelope {
   binding: RecoveryArchiveCryptoBinding
   wrappedDek: Buffer
   sections: RecoveryArchiveSealedSection[]
   manifestEnvelope?: Buffer
+  attachments?: PreparedAttachment[]
 }
 
 function closed(value: unknown, keys: readonly string[]): Record<string, unknown> {
@@ -45,11 +48,18 @@ function bytes(value: unknown, length?: number): Buffer {
 
 /** Only closed ciphertext fields are encoded; the result cannot retain raw DEK or plaintext properties. */
 export function encodeRecoveryArchivePreparedEnvelope(result: RecoveryArchiveReserveThenSealResult, manifestEnvelope?: Uint8Array): Buffer {
-  // Version 1/2 cannot carry binary attachment objects; never silently discard them.
-  if (result.sealedAttachments?.length) throw new Error(INVALID)
+  const attachments = result.sealedAttachments
+  if (attachments !== undefined && !Array.isArray(attachments)) throw new Error(INVALID)
+  const hasAttachments = !!attachments?.length
   const payload = Buffer.from(JSON.stringify({
-    version: manifestEnvelope ? 2 : 1,
-    ...(manifestEnvelope ? { manifestEnvelope: Buffer.from(manifestEnvelope).toString('base64') } : {}),
+    version: hasAttachments ? 3 : manifestEnvelope ? 2 : 1,
+    ...(hasAttachments || manifestEnvelope ? { manifestEnvelope: manifestEnvelope ? Buffer.from(manifestEnvelope).toString('base64') : null } : {}),
+    ...(hasAttachments ? { attachments: attachments.map((object) => ({
+      attachmentId: object.attachmentId, sourceVersion: object.sourceVersion,
+      plaintextSha256: object.plaintextSha256, sizeBytes: object.sizeBytes,
+      nonce: object.nonce.toString('base64'), ciphertext: object.ciphertext.toString('base64'),
+      authTag: object.authTag.toString('base64'),
+    })) } : {}),
     binding: Object.fromEntries(BINDING_KEYS.map((key) => [key, result.binding[key]])),
     wrappedDek: Buffer.from(result.wrappedDek).toString('base64'),
     sections: result.sealedSections.map((section) => ({
@@ -66,8 +76,10 @@ export function encodeRecoveryArchivePreparedEnvelope(result: RecoveryArchiveRes
 export function decodeRecoveryArchivePreparedEnvelope(payload: Buffer): RecoveryArchivePreparedEnvelope {
   try {
     const parsed = JSON.parse(payload.toString('utf8'))
-    const wire = closed(parsed, ['version', 'binding', 'wrappedDek', 'sections', ...(parsed?.version === 2 ? ['manifestEnvelope'] : [])])
-    if (wire.version !== 1 && wire.version !== 2) throw new Error(INVALID)
+    const wire = closed(parsed, ['version', 'binding', 'wrappedDek', 'sections',
+      ...(parsed?.version === 2 || parsed?.version === 3 ? ['manifestEnvelope'] : []),
+      ...(parsed?.version === 3 ? ['attachments'] : [])])
+    if (wire.version !== 1 && wire.version !== 2 && wire.version !== 3) throw new Error(INVALID)
     const binding = closed(wire.binding, BINDING_KEYS) as unknown as RecoveryArchiveCryptoBinding
     const wrappedDek = bytes(wire.wrappedDek)
     if (!wrappedDek.length || !Array.isArray(wire.sections)
@@ -85,7 +97,30 @@ export function decodeRecoveryArchivePreparedEnvelope(payload: Buffer): Recovery
         ciphertext: bytes(section.ciphertext), authTag: bytes(section.authTag, 16),
         plaintextSha256: section.plaintextSha256 as string }
     })
-    const manifestEnvelope = wire.version === 2 ? bytes(wire.manifestEnvelope) : undefined
+    let attachments: PreparedAttachment[] | undefined
+    if (wire.version === 3) {
+      if (!Array.isArray(wire.attachments) || !wire.attachments.length) throw new Error(INVALID)
+      const identities = new Set<string>()
+      attachments = wire.attachments.map((item: unknown) => {
+        const object = closed(item, ATTACHMENT_KEYS)
+        if (typeof object.attachmentId !== 'string' || !object.attachmentId.trim()
+          || typeof object.sourceVersion !== 'string' || !object.sourceVersion.trim()
+          || typeof object.plaintextSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(object.plaintextSha256)
+          || typeof object.sizeBytes !== 'number' || !Number.isSafeInteger(object.sizeBytes) || object.sizeBytes < 0
+          || identities.has(object.attachmentId)) throw new Error(INVALID)
+        identities.add(object.attachmentId)
+        const nonce = bytes(object.nonce, 12)
+        if (nonces.has(nonce.toString('hex'))) throw new Error(INVALID)
+        nonces.add(nonce.toString('hex'))
+        const ciphertext = bytes(object.ciphertext)
+        if (ciphertext.length !== object.sizeBytes) throw new Error(INVALID)
+        return { attachmentId: object.attachmentId, sourceVersion: object.sourceVersion,
+          plaintextSha256: object.plaintextSha256, sizeBytes: object.sizeBytes, nonce,
+          ciphertext, authTag: bytes(object.authTag, 16) }
+      })
+    }
+    const manifestEnvelope = wire.version === 2 || (wire.version === 3 && wire.manifestEnvelope !== null)
+      ? bytes(wire.manifestEnvelope) : undefined
     if (manifestEnvelope) {
       const signed = parseRecoveryArchiveManifestObjectEnvelope(manifestEnvelope)
       const manifest = signed.manifest
@@ -99,7 +134,8 @@ export function decodeRecoveryArchivePreparedEnvelope(payload: Buffer): Recovery
           || entry.nonce !== sections[index]!.nonce.toString('hex')
           || entry.plaintext_sha256 !== sections[index]!.plaintextSha256)) throw new Error(INVALID)
     }
-    return { binding, wrappedDek, sections, ...(manifestEnvelope ? { manifestEnvelope } : {}) }
+    return { binding, wrappedDek, sections, ...(manifestEnvelope ? { manifestEnvelope } : {}),
+      ...(attachments ? { attachments } : {}) }
   } catch { throw new Error(INVALID) }
 }
 
@@ -116,6 +152,7 @@ export interface RecoveryArchivePreparedUploadInput {
   authenticateCapture?: (sealed: RecoveryArchiveReserveThenSealResult) => Promise<Uint8Array>
   transactionDepth: SealInput['transactionDepth']
   upload: (envelope: RecoveryArchivePreparedEnvelope, section: RecoveryArchiveSealedSection) => Promise<void>
+  uploadAttachment?: (envelope: RecoveryArchivePreparedEnvelope, attachment: PreparedAttachment) => Promise<void>
 }
 
 /** Persist all sealed bytes before the first upload. Resume never invokes capture/custody/encryption. */
@@ -139,6 +176,7 @@ export async function uploadRecoveryArchivePreparedCapture(input: RecoveryArchiv
     outside()
     const capture = await input.capture()
     verifyBinding(capture.binding)
+    if (capture.attachments?.length && !input.uploadAttachment) throw new Error('RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED')
     const sealed = await reserveThenSealRecoveryArchiveSections({
       binding: capture.binding, keyCustody: capture.keyCustody, transactionDepth: input.transactionDepth,
       dekSource: capture.dekSource, sections: capture.sections, attachments: capture.attachments,
@@ -152,13 +190,16 @@ export async function uploadRecoveryArchivePreparedCapture(input: RecoveryArchiv
   const envelope = decodeRecoveryArchivePreparedEnvelope(payload)
   if (input.authenticateCapture && !envelope.manifestEnvelope) throw new Error('RECOVERY_ARCHIVE_PREPARED_MANIFEST_REQUIRED')
   verifyBinding(envelope.binding)
-  for (let index = 0; index < envelope.sections.length; index += 1) {
+  const uploadAttachment = input.uploadAttachment
+  if (envelope.attachments?.length && !uploadAttachment) throw new Error('RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED')
+  for (let index = 0; index < envelope.sections.length + (envelope.attachments?.length ?? 0); index += 1) {
     await input.checkAuthority()
     const current = await input.transaction((query) => readRecoveryArchivePreparedCapture(query, owner))
     if (!current?.equals(payload)) throw new Error('RECOVERY_ARCHIVE_PREPARED_CAPTURE_CONFLICT')
     outside()
     // Fresh decode prevents a provider mutating one callback's object from changing subsequent uploads.
     const original = decodeRecoveryArchivePreparedEnvelope(payload)
-    await input.upload(original, original.sections[index]!)
+    if (index < original.sections.length) await input.upload(original, original.sections[index]!)
+    else await uploadAttachment!(original, original.attachments![index - original.sections.length]!)
   }
 }

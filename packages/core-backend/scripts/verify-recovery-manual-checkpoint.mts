@@ -539,6 +539,67 @@ try {
   await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture(uploadInput), { message: 'SYNTHETIC_AUTHORITY_REVOKED' })
   assert.equal(delivered.length, 11)
   console.log('PASS: presealed-envelope upload interruption/new connection resumes original ten sections without capture; injected authority revocation refuses')
+  // Independently prepared binary fixtures prove persistence/continuation, not source admission or publication.
+  const attachmentCrypto = require('../src/multitable/recovery-archive-attachment-crypto.ts') as typeof import('../src/multitable/recovery-archive-attachment-crypto')
+  const binaryOwner = await transaction(() => claim('section_checkpoint', 's', true))
+  const binaryBinding = { ...binding, generationId: binaryOwner.generationId,
+    anchorOperationId: binaryOwner.snapshotOperationId, anchorSeq: binaryOwner.snapshotSeq }
+  const binaryFullBinding = { ...fullBinding, ...binaryBinding }
+  const binaryKey = randomBytes(32)
+  const binaryPlaintext = Buffer.from([0, 255, 17, 128, 0, 13, 10])
+  const binaryId = `att_${randomUUID()}`
+  const binaryHash = archiveCrypto.recoveryArchivePlaintextSha256(binaryPlaintext)
+  let binaryPayload: Buffer
+  try {
+    binaryPayload = preparedUpload.encodeRecoveryArchivePreparedEnvelope({
+      binding: binaryFullBinding, wrappedDekId: binaryFullBinding.wrappedDekId,
+      dekFingerprint: binaryFullBinding.dekFingerprint, wrappedDek: randomBytes(64), reservations: [],
+      sealedSections: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => {
+        const plaintext = Buffer.from(`synthetic ${sectionName}`)
+        return archiveCrypto.sealRecoveryArchiveSection({ binding: { ...binaryFullBinding, sectionName,
+          plaintextSha256: archiveCrypto.recoveryArchivePlaintextSha256(plaintext) },
+        dek: binaryKey, nonce: randomBytes(12), plaintext })
+      }),
+      sealedAttachments: [{ attachmentId: binaryId, sourceVersion: `sha256:${binaryHash}`,
+        plaintextSha256: binaryHash, sizeBytes: binaryPlaintext.length,
+        ...attachmentCrypto.sealRecoveryArchiveAttachment({ binding: { generation: binaryFullBinding,
+          attachmentId: binaryId, sourceVersion: `sha256:${binaryHash}`, plaintextSha256: binaryHash },
+        dek: binaryKey, nonce: randomBytes(12), plaintext: binaryPlaintext }) }],
+    })
+    await transaction(() => prepared.persistRecoveryArchivePreparedCapture(query, binaryOwner, binaryPayload))
+    let binarySectionUploads = 0
+    const binaryDelivered: Buffer[] = []
+    const binaryInput = { ...uploadInput, owner: binaryOwner, binding: binaryBinding,
+      checkAuthority: async () => {}, upload: async () => { binarySectionUploads++ },
+      uploadAttachment: async (_envelope: unknown, object: { ciphertext: Buffer }) => {
+        binaryDelivered.push(Buffer.from(object.ciphertext)); throw new Error('SYNTHETIC_BINARY_INTERRUPTION')
+      },
+    }
+    await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture({ ...binaryInput, uploadAttachment: undefined }),
+      { message: 'RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED' })
+    assert.equal(binarySectionUploads, 0)
+    await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture(binaryInput),
+      { message: 'SYNTHETIC_BINARY_INTERRUPTION' })
+    await client.end()
+    client = new Client({ ...connection, database })
+    await client.connect()
+    await preparedUpload.uploadRecoveryArchivePreparedCapture({ ...binaryInput,
+      uploadAttachment: async (envelope, object) => {
+        assert.deepEqual(attachmentCrypto.openRecoveryArchiveAttachment({ binding: { generation: envelope.binding,
+          attachmentId: object.attachmentId, sourceVersion: object.sourceVersion, plaintextSha256: object.plaintextSha256 },
+        dek: binaryKey, sealed: object }), binaryPlaintext)
+        binaryDelivered.push(Buffer.from(object.ciphertext)); object.ciphertext.fill(0)
+      },
+    })
+    assert.equal(binaryDelivered.length, 2)
+    assert.deepEqual(binaryDelivered[0], binaryDelivered[1])
+    assert.deepEqual(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, binaryOwner)), binaryPayload)
+    await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture({ ...binaryInput,
+      checkAuthority: async () => { throw new Error('SYNTHETIC_AUTHORITY_REVOKED') },
+    }), { message: 'SYNTHETIC_AUTHORITY_REVOKED' })
+    assert.equal(binaryDelivered.length, 2)
+  } finally { binaryKey.fill(0); binaryPlaintext.fill(0) }
+  console.log('PASS: binary attachment envelope persists exact bytes; interruption/new connection resumes without recapture; missing uploader and revoked authority refuse')
   const actorId = randomUUID()
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
   const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck,
