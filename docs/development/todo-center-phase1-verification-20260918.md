@@ -1186,33 +1186,41 @@ and the sibling design doc were written.
 
 ### §5-row → test file → exact `it()` name → lane (the table the task explicitly asks for)
 
+**过期标记(P3 卫生轮,round-3 门审 `impl-gate-B-slice1-round3-20260918.md` P3-2;本节标记方式遵循仓
+内惯例"标句子不作废本节" —— 本节结构与方法仍成立,只有下面这批具体行号曾经过期):此表与其上方的
+`grep`/`sed` 示例输出最初写于更早的 HEAD;门审 P3-2 机械核实,row B 从 4 条 `it` 增至 5 条后表未同步
+(仍写"4 个"),且 A0 行的全部行号已整体偏移。下面的行号已在本轮(P3 卫生轮)针对当前 HEAD 重新
+`grep -n` 核对一遍,但门文件几乎每轮修复都会新增内容并让行号继续漂移——**任何后续编辑者在信任这些
+数字之前,先重跑下面这条命令,行号变了就照实改,不要凭旧表答案臆断**:**
+
 下表的 `it()` 名取自真实运行到的测试(§ "全套件用 workflow 逐字形态重跑" 小节的 `--reporter=verbose`
 输出),行号取自不加任何过滤条件的原始命令(**摘录**,只取每个判据第一条 `it`/`describe` 的起始行,不
 是该命令的完整输出——完整输出见上方各判据小节与本节下方的重跑记录):
 
 ```
 $ grep -n "describe(\|it(" packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts | sed -n '4,6p'
-563:describe('todo-center pending-query production-path gate (real DB, dedicated process)', () => {
-1000:  it('probe: an unseeded id hitting /api/auth/me gets the dev-mock fallback identity (proves the mock is reachable and distinguishable from a seeded row)', async () => {
-1009:  describe('A0 — shared query golden values (?sourceSystem=all, the real badge/center request shape)', () => {
+621:describe('todo-center pending-query production-path gate (real DB, dedicated process)', () => {
+1058:  it('probe: an unseeded id hitting /api/auth/me gets the dev-mock fallback identity (proves the mock is reachable and distinguishable from a seeded row)', async () => {
+1067:  describe('A0 — shared query golden values (?sourceSystem=all, the real badge/center request shape)', () => {
 ```
 (命令本身对整个文件不加过滤地匹配所有 `describe(`/`it(` 出现——包括文件顶部 docblock 注释里提到
-"describe(...)"/"it(...)" 字样的行,行号 15/48/61 都是注释、不是真实测试块,`sed -n '4,6p'` 只是跳过
-这三行注释匹配、取第 4-6 条真实匹配作展示;§5 判据表下方逐行给出的行号均为各 `describe`/`it` 语句自身
-的起始行,来自本节末尾的完整 `grep -n` 结果,未经省略。)
+"describe(...)"/"it(...)" 字样的行,当前 HEAD 行号 15/48/66 都是注释、不是真实测试块(这三个数字本身
+也随每轮 docblock 编辑漂移,不是恒定值),`sed -n '4,6p'` 只是跳过这三行注释匹配、取第 4-6 条真实匹配
+作展示;§5 判据表下方逐行给出的行号均为各 `describe`/`it` 语句自身的起始行,来自本节末尾的完整
+`grep -n` 结果,未经省略。)
 
 只取**起始行**(不猜测 `describe` 块的收尾行,避免臆造边界):
 
-| 锁 §5 行 | 判据 | 测试文件 | `it()`/`describe()` 起始行 | Lane |
+| 锁 §5 行 | 判据 | 测试文件 | `it()`/`describe()` 起始行(P3 卫生轮重新核对) | Lane |
 |---|---|---|---|---|
-| A0 | 十四类黄金值 | `tests/todo-center-pending-gate/todo-center-pending-gate.ts` | `describe` 起 `:1009`;14 个 `it` 起 `:1010`(①)/`:1024`(①`?sourceSystem=plm`)/`:1033`(①`bogus`400)/`:1040`(②)/`:1054`(③)/`:1068`(③′)/`:1085`(④)/`:1099`(⑤)/`:1121`(⑥)/`:1139`(⑦)/`:1154`(⑧)/`:1169`(⑨)/`:1184`(⑩)/`:1199`(⑪)/`:1216`(⑫)/`:1231`(⑬) | `approval-realdb-todo-center-pending-query.yml` |
-| A | 不放宽可见性 | 同上(无独立新增 `it`;正控 = 既有 A0 类①`:1010`/④`:1085`;mutation 记录见下方"Mutation 台账"表,本次未重跑,原因见下) | `buildApprovalPendingConditions`(`services/approval-pending-query.ts:113`)——mutation-only,无常驻新增测试内容 | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
-| B(API 层) | fail-closed 可判别 | `todo-center-pending-gate.ts` | `describe` 起 `:1352`;4 个 `it` 起 `:1358`/`:1382`/`:1426`/`:1474` | `approval-realdb-todo-center-pending-query.yml` |
+| A0 | 十四类黄金值 | `tests/todo-center-pending-gate/todo-center-pending-gate.ts` | `describe` 起 `:1067`;16 个 `it` 起 `:1068`(①)/`:1082`(①`?sourceSystem=plm`)/`:1091`(①`bogus`400)/`:1098`(②)/`:1112`(③)/`:1126`(③′)/`:1143`(④)/`:1157`(⑤)/`:1179`(⑥)/`:1197`(⑦)/`:1212`(⑧)/`:1227`(⑨)/`:1242`(⑩)/`:1257`(⑪)/`:1274`(⑫)/`:1289`(⑬) | `approval-realdb-todo-center-pending-query.yml` |
+| A | 不放宽可见性 | 同上(无独立新增 `it`;正控 = 既有 A0 类①`:1068`/④`:1143`;mutation 记录见下方"Mutation 台账"表,本次未重跑,原因见下) | `buildApprovalPendingConditions`(`services/approval-pending-query.ts:113`)——mutation-only,无常驻新增测试内容 | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
+| B(API 层) | fail-closed 可判别 | `todo-center-pending-gate.ts` | `describe` 起 `:1410`;**5 个** `it` 起 `:1416`/`:1440`/`:1484`/`:1532`/`:1549`(FIX-ROUND 5 PASS 增至 5 条——第 5 条是 round-2 门审 P2-1 要求新增的"真实 `pool.query` 读失败"用例,见本文档"P2-1"条目;本表之前一直只列前 4 条,round-3 门审 P3-2 指出未同步,本轮已补) | `approval-realdb-todo-center-pending-query.yml` |
 | B(徽标层) | — | 未做,见下方"未做/未验清单" | — | B-2(前端切片) |
-| C | 列表去重 + 臂集合对齐 | `todo-center-pending-gate.ts` | `describe` 起 `:1257`;2 个 `it` 起 `:1258`/`:1272` | `approval-realdb-todo-center-pending-query.yml` |
-| C′(端点级) | `actionable` 复用决策门谓词 | `todo-center-pending-gate.ts` | `describe` 起 `:1312`;2 个 `it` 起 `:1313`/`:1322` | `approval-realdb-todo-center-pending-query.yml` |
+| C | 列表去重 + 臂集合对齐 | `todo-center-pending-gate.ts` | `describe` 起 `:1315`;2 个 `it` 起 `:1316`/`:1330` | `approval-realdb-todo-center-pending-query.yml` |
+| C′(端点级) | `actionable` 复用决策门谓词 | `todo-center-pending-gate.ts` | `describe` 起 `:1370`;2 个 `it` 起 `:1371`/`:1380` | `approval-realdb-todo-center-pending-query.yml` |
 | C′(单元级) | 同上,函数级参数组 | `tests/unit/approval-can-decide-current-node.test.ts`(既有文件,未新增 `it`——mutation 复用其既有 41 个用例) | 见 mutation 台账,本次未重跑 | 默认 no-DB `test (20.x)`(`vitest.config.ts` 隐式 include,无需专门接线) |
-| D | 徽标数字不变 | 无独立新增 `it`;正控 = 既有 A0 类①`:1010`/②`:1040`/⑥`:1121`;mutation-only,本次未重跑(见台账) | `approvalPendingAssigneeMatchCondition`(`services/approval-pending-query.ts:65-71`) | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
+| D | 徽标数字不变 | 无独立新增 `it`;正控 = 既有 A0 类①`:1068`/②`:1098`/⑥`:1179`;mutation-only,本次未重跑(见台账) | `approvalPendingAssigneeMatchCondition`(`services/approval-pending-query.ts:65-71`) | 正控在 `approval-realdb-todo-center-pending-query.yml`;mutation 是历史会话手动 cp/edit/run/restore,非 CI 常驻步骤 |
 | E | 代数守卫 | 未做,见下方"未做/未验清单" | — | B-2(前端切片) |
 | F | 无新表 | 无测试文件;命令断言(`git diff --quiet ... migrations`,见本文档"Judging criterion F"节 + 本次重新核对) | — | 本地/CI 均可执行,非 vitest 套件 |
 
@@ -1410,7 +1418,7 @@ exit=0
 | 8 | 独立 vitest project 的 gate 必须断言 `NODE_ENV` | **DISCHARGED** | `setup.ts:92-94`、gate 文件自身的 import-期二次断言(docblock 已记录);已用 `DATABASE_URL=` 探针间接验证该 import 期检查链条真的会抛错(见上方哨兵小节) |
 | 9 | `MIGRATION_EXCLUDE` 复制进新 lane;触发集含所用 helper;命名避开 `vitest.config.ts` exclude | **部分修正**:`tests/helpers/approval-schema-bootstrap.ts` **未被本门文件实际导入**,此前记录的"anticipatorily included"猜测已被证伪,不再成立;`MIGRATION_EXCLUDE` 与命名两项仍 DISCHARGED | `grep -rn "approval-schema-bootstrap" packages/core-backend/tests/todo-center-pending-gate/` → 无命中(exit 1)。本次不改 workflow 的 `paths:` 列表(它多列了这一个未被引用的文件,属**多列不属于 under-inclusion**,不破坏 fail-closed,只是不精确——按锁 §6"套件真正执行到的每个 src 模块"标准,这一条本可以摘掉,但摘除属于改代码/改 CI 接线,本轮不改,记录留给门审);`MIGRATION_EXCLUDE` 值经本次真实 `db:migrate` 验证可执行(见上方"全套件重跑"小节);文件名 `todo-center-pending-gate.ts` 无 `.test.ts`/`.spec.ts` 后缀,`vitest.config.ts:94` 的 exclude 条目是冗余但无害的第二道保险(docblock 自陈) |
 | 10 | `validate-migration-exclude.sh` 是 WARN-ONLY | **DISCHARGED**(沿用本文档更早记录,未变化) | 见更早小节 |
-| 11 | 判据 E 与 §3 第 5 条属前端切片 2 | **DISCHARGED(确认属实,B-1 不做)** | 设计 MD §1.2 已列;本文档"未做/未验清单"重复列出 |
+| 11 | 判据 E 与 §3 第 5 条属前端切片 2 | **DISCHARGED(确认属实,B-1 不做)**(P3 卫生轮补:此前 DISCHARGED 时 PR body 待用文本只三段,均未写"未做"——条目字面要求的载体缺失;本轮已加"段落 4"补上,见下方"PR body 待用文本") | 设计 MD §1.2 已列;本文档"未做/未验清单"重复列出;PR body 待用文本段落 4(round-3 门审 P3-3) |
 | 12 | A0 前两行复用 `approval-wp3-pending-count.api.test.ts:183-202`,非新起炉灶 | **DISCHARGED——确认为复用,未重造** | `git diff --stat origin/main...HEAD -- '*approval-wp3-pending-count*'` → 空(该文件字节未变,原有「无参数走 `:2014`」与「400 带码」两个 `it` 原样保留);`grep -n "routes/approvals.ts" .github/workflows/approval-realdb-p7r1-coverage-repair.yml` 命中该 workflow 的 `on.push.paths`/`on.pull_request.paths`(`:58`/`:84`)——本切片改动了 `routes/approvals.ts`,会自动触发 p7r1 车道重跑这两个既有 `it`,不需要额外接线。gate 文件里的 ①/`bogus` 两个 `it`(line 1024/1033)是在**生产 RBAC 轴**(`RBAC_BYPASS=false`)下对同一行为的**扩展**验证,与 wp3 测试跑在**默认信任 token 轴**(`RBAC_BYPASS=true`)下不重复断言同一件事——是"先复用再扩",不是"另起炉灶" |
 
 **「逐条勾」的其余条目——不适用本切片,列出不省略**:条目 5/6/7 是补充清单里明确标注「lane A(分组)」
@@ -2557,11 +2565,19 @@ explicitly out of scope for this registration-only pass.
 rules — "不合并、不 undraft、不开 PR" — so this text is written here for whoever executes that step, not
 posted anywhere by this pass)
 
-The gate report and the two prior FIX-ROUND passes together impose three PR-body obligations. Writing
+The gate report and the prior FIX-ROUND passes together impose four PR-body obligations. Writing
 them here, verbatim-ready, closes the "deferred and hope someone remembers" gap the advisor review
-flagged — copy these three paragraphs into the PR description at open time, unedited unless the
+flagged — copy these four paragraphs into the PR description at open time, unedited unless the
 underlying facts have changed by then (re-run the cited commands first if opening the PR is more than
 a few days after this pass).
+
+**Paragraph 4 added by the P3 hygiene pass (round-3 gate `impl-gate-B-slice1-round3-20260918.md`
+P3-3)**: supplementary checklist item 11 ("判据 E 与 §3 第 5 条属前端切片 2,首切片 PR body 要写
+「未做」") was marked DISCHARGED in this document while the PR-body obligations above stopped at three
+paragraphs, none of which said "未做" for criterion E or lock §3 clause 5 — the fact was registered
+elsewhere (design MD §1.2, this document's 未做/未验清单) but not in the carrier the checklist item
+names. Paragraph 4 below closes that gap by adding the missing paragraph itself, rather than by
+downgrading item 11's DISCHARGED status.
 
 **Paragraph 1 revised by FIX-ROUND 4 PASS (2026-09-18)**: the round-2 gate report
 (`impl-gate-B-slice1-round2-20260918.md`) judged the original paragraph below's disposition
@@ -2630,6 +2646,16 @@ not a correction of a resolved one).
 > moot; if merged via merge-commit or rebase-merge, they will appear in `main`'s history verbatim.
 > Both are already pushed to the remote branch, so an in-place history rewrite (rebase + force-push)
 > is not available under this lane's hard rules — this note is the safety net in its place.
+>
+> **4. Judging criterion E (algebraic guard) and design-lock §3's fifth hard constraint are not done
+> in this slice — they belong to B-2.** Row E of design-lock §5 ("algebraic guard: no cross-permission
+> caching for the same viewer's in-flight badge/center requests") and §3's fifth hard constraint
+> ("不缓存跨越鉴权变化") are both frontend concerns — there is no in-flight request cache in this
+> backend slice for them to guard — and the target/design docs place them in the B-2 frontend slice
+> (design MD §1.2's scope table; this document's 未做/未验清单 also lists both as 未做). This slice
+> ships zero frontend code. **No owner call needed on this item** — it is a scope statement, not an
+> open question — but supplementary checklist item 11 names the PR body as the required carrier for
+> it, so it is written here rather than only in the internal tables above.
 
 ### 绝对断言自扫(本轮新增)
 
@@ -3396,3 +3422,103 @@ exhausted
 text into a PR description, and this lane's hard rules forbid opening one. That is a scope boundary
 stated by the lane's own rules, not an oversight: the text those two obligations need is drafted,
 current, and ready for whoever executes the PR-open step next.
+
+## P3 卫生轮(2026-09-19)— round-3 门审 `impl-gate-B-slice1-round3-20260918.md`(0 P1、0 P2、4 P3、Verdict
+DRAFT-READY)全部 4 条 P3 逐条处置。Base at start of this pass: HEAD =
+`1c08a4ac8feb0e443134ae20af283d836ff30300`(round-3 门审自己审的 head),merge-base 与 `origin/main`
+不变仍为 `89f1ecdee2c3b70205a318074824c834bc6a5c7e`。不重跑或改写上方任何一节(仓内惯例:标句子不作废
+本节)。本轮硬规矩:生产代码零行为改动——只改了测试文件的 docblock 注释与本 MD,`packages/core-backend/
+src`、`.github/workflows`、任何迁移文件字节未动(§"改动范围核实"逐条实测,见下)。
+
+### 处置表
+
+来源:门审报告"## 1. Findings"全节(4 条,P3-0…P3-3)+ "## 7"节"建议在开 PR 那一轮一并改掉的四条
+P3"(收敛要求,与 Findings 逐条同构,给出了每条的修法选项)。
+
+| 编号 | 报告原文(节译一句) | 处置 | 证据 / commit |
+|---|---|---|---|
+| P3-0 | 锁 §5 行 B 点名的 class ② 探针形状落在 registry-stub 的 test 3 上,真实 `pool.query` 读失败的 test 5 用的是 class ①,未披露;报告自己的 MU6(把 test 5 的 viewer 换成 class ②)实测 27/27 绿、与 class ① 结果逐字节相同,判定"无判别力差异,不阻断" | **CLOSED-注释**(取报告建议的选项 (ii):加披露句,不改探针形状——选项 (i) 换形状本身要求"须按锁 §6 重跑整套件",而 MU6 已证明两种形状产出相同结果,加一句注释披露"哪句锁文由哪条用例满足"就能把开放问题讲清楚,风险比改测试内容更小) | `packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts` docblock 新增一段以 "**Disclosure (round-3 gate P3-0, ...)**" 开头的段落,原文引锁 §5 行 B 括注 + 指出该括注挂在它前半句"同一机制,合并执行"上、test (3) 就是那次合并执行、test (5) 是 round-2 门审要求的更严追加、并复述 MU6 的实测结果;commit `c7403d4fb` |
+| P3-1 | 门文件 docblock 原 `:117-118`(编辑后行号已变,详见 P3-2 的失效说明)一句绝对断言"A future mutation on `countApprovalPendingForViewer`'s SELECT text alone would find nothing red here"被报告 MU2 机械证伪(打坏该 SELECT 实测 20/27 红,含全部 16 条 A0 与 Judge B 五条里的四条) | **CLOSED-注释** | 同上文件,该句改写为:没有任何用例正向断言 `sources.approval === 'unavailable'` 来守住这条 SELECT 的读失败;打坏它会让 20/27 条因为别的理由变红(详列断言文本),这是"因连带失败被检测到",不是"被正向断言守住";commit `c7403d4fb` |
+| P3-2 | 目标文档"§5-row → test file → it() 名"表(报告引用行号 `:1213` 一带)已过期:row B 写"4 个 it"、实测 5 个;A0 行的全部行号整体偏移约 37 行;过期处无任何失效标记 | **CLOSED-MD** | 本文件"§5-row → test file → exact `it()` name → lane"表:(a) 在表前加过期标记段落,点名此表此前用的固定行号会随门文件每轮修复漂移,并给出"先重跑 grep 再信任数字"的指引;(b) row B 原地补一句"FIX-ROUND 5 PASS 增至 5 条"的失效说明 + 5 个 `it` 的当前行号;(c) A0/C/C′/D 行的行号全部按当前 HEAD 重新 `grep -n` 核对更新(A0 describe `:1009`→`:1067`,16 个 `it` 全部同步;C `:1257`→`:1315`;C′ `:1312`→`:1370`);commit(本次 MD 提交,见下方 commit 记录) |
+| P3-3 | 补充清单条目 11("判据 E 与 §3 第 5 条属前端切片 2,首切片 PR body 要写「未做」")标 DISCHARGED,但预写的 PR body 待用文本当时只有三段,没有一段写"未做" | **CLOSED-MD** | 本文件"PR body 待用文本"节新增"段落 4"(判据 E 的代数守卫 + 锁 §3 第 5 条硬约束属 B-2、本切片未做,附理由);开头句"three PR-body obligations" 改为 "four";补充清单条目 11 一行的证据列改指回"段落 4";commit(本次 MD 提交,见下方 commit 记录) |
+
+**报告"已披露、交 owner、不计入本轮 verdict 的三项"——round-2 遗留,不是本轮 4 条 P3 之一,仅为完整性
+登记,本轮不动、不代裁**:
+
+| 项 | 处置 |
+|---|---|
+| 第 2 轮 P2-2(lane 非 required + 门文件在 38 个 `*-ci-wiring` 闭世界之外,两洞叠加) | DEFERRED-owner 项(round-3 报告确认披露到位;owner 的 (i)/(ii) 二选一未裁,本轮不代裁,不属于测试/注释/MD 可闭合范围) |
+| 第 2 轮 P3-1(两条 `wip:` 提交仍在历史里) | DEFERRED-owner 项(就地收口需要 force-push,本 lane 硬规矩禁止;PR body 段落 3 已覆盖) |
+| 补充清单条目 2 与锁 §6 字面冲突("锁 §6 已裁定进 `plugin-tests.yml`"与锁文原文不符) | DEFERRED-owner 项(已升级,不在本文档内自裁) |
+
+**为何以上三项不进"处置表"当作第 5/6/7 条 P3 处理**:门审报告原文明写这三项"**不计入本轮 verdict**"
+(独立于 0P1/0P2/4P3 的判分之外),是 round-2 报告的旧发现在 round-3 复核后重新确认"披露到位",而不是
+round-3 报告"## 1. Findings"一节新开的条目——round-3 报告自己的判分口径就是"4 条 P3",本轮处置表的范围
+与判分口径保持一致。
+
+### 撤回类改动的全分支扫描(retraction sweep)
+
+P3-1 撤回的是门文件 docblock 里一句被证伪的绝对断言(见处置表)。扫描确认该断言原文在整个已跟踪内容
+里零残留(不是只查改动的那一处):
+
+```
+$ grep -rn "would find nothing red here" .
+(空,exit 1)
+$ git grep -n "would find nothing red here"
+(空,exit 1)
+```
+
+### 改动范围核实(只测试注释 MD,零生产代码 / 零 CI 接线 / 零迁移)
+
+```
+$ git status --short
+ M docs/development/todo-center-phase1-verification-20260918.md
+ M packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+
+$ git diff --stat -- packages/core-backend/src .github/workflows \
+    packages/core-backend/migrations packages/core-backend/src/db/migrations
+(空,exit 0 diff --stat 无输出)
+
+$ git diff -- packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts \
+    | grep -E "^[+-]" | grep -v "^+++\|^---" | grep -v "^[+-] \*"
+(空——测试文件里每一条改动行都以 docblock 的 `*` 前缀开头,零执行期代码行改动)
+```
+
+`git diff --stat <起点>`(本轮尚未提交,`HEAD` 仍等于起点本身,`<起点>..HEAD` 这时是空 diff——所以
+下面这条命令用单个 ref 把起点与**当前工作树**相比,而不是 `<起点>..HEAD`;本节文字本身也在这份工作
+树里,是自指:插入本节这几十行之后再重跑,两个文件的行数还会各自再涨一点,但**改动的文件集合恒为这
+两个,不会出现第三个文件**——这与本文档其余 FIX-ROUND 节尾"先捕获再写入本节"的惯例相同。提交完成、
+`HEAD` 前进之后,`git diff --stat 1c08a4ac8..HEAD` 会给出与下面这条命令等价的结果(至多因为本段自己
+占的几十行而略高):
+
+```
+$ git diff --stat 1c08a4ac8feb0e443134ae20af283d836ff30300
+ docs/development/todo-center-phase1-verification-20260918.md          | 156 ++++++++++++++++++---
+ packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts | 25 +++-
+ 2 files changed, 163 insertions(+), 18 deletions(-)
+```
+只两个文件、零新文件、零生产代码文件——与"改动范围核实"小节的 `git status --short` 一致。
+
+### 测试重跑证据(每条闭合后跑相关测试)
+
+- P3-0 + P3-1(同一文件,docblock 编辑):`vitest --config vitest.todo-center-pending-gate.config.ts run
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose` → **27/27 绿**(处女库
+  `metasheet2_p3hyg_b1`,迁移已跑,用后 `dropdb`)。
+- P3-2 + P3-3(纯 MD 编辑,门文件字节不变):不改变任何测试文件,无需重跑该门;仍在本轮末尾随全套件
+  一并复核。
+- 收尾复核(本轮全部编辑完成后):
+  - 门文件 27/27(同上,复跑一次确认最终态)
+  - 单元 lane `tests/unit/approval-can-decide-current-node.test.ts` + `approval-realtime.test.ts` +
+    `approval-ci-coverage-enumeration.test.ts` → **386/386 绿**
+  - 独立 oracle `tests/integration/approval-wp3-pending-count.api.test.ts`(`vitest.integration.config.ts`)
+    → **6 passed | 1 skipped (7)**(skip = 该文件自己的 `itIfExpectDb` 哨兵,未设 `EXPECT_DB`,是正确的
+    skip)
+  - `cd packages/core-backend && npx tsc --noEmit` → **exit 0,0 行输出**
+  - 私有库处置:`createdb metasheet2_p3hyg_b1` → 迁移 → 三套测试 → `dropdb metasheet2_p3hyg_b1`(本轮
+    结束前执行,不留存)
+
+### 本轮未处理项
+
+无。报告"## 1. Findings"全部 4 条与"## 7"收敛要求列出的同 4 条,处置表已逐条给出 CLOSED-注释 /
+CLOSED-MD;三项已披露的 round-2 遗留 owner 项按报告口径本就不计入本轮 4 条 P3,登记为 DEFERRED-owner
+项,不代裁、不改动。
