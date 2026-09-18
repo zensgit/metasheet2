@@ -5,7 +5,7 @@
 - 补充清单:`impl-supplementary-gate-checklist-20260918.md` 三线共用 #1–#4(#1–#3 不适用本切片,见 §1.2;#4 适用,见 §3.4)+ lane A 专属 #5–#7(全部适用,见 §1.2/§6/§7)
 - 设计 MD(同批交付的后端对偶):`approval-template-groups-phase1-design-20260918.md`(切片 A-1)
 - 本文档所在分支:`feat/approval-template-groups-phase1-fe`,堆叠在 `feat/approval-template-groups-phase1`(A-1)之上
-- 本文档写作时 worktree HEAD:`cb6d7fa9f97b02438f0d0f36c8fb955870f9e2e8`(6 个提交,`git log --oneline feat/approval-template-groups-phase1..HEAD` 现场核对为 6 行)
+- 本文档写作时 worktree HEAD:`cb6d7fa9f97b02438f0d0f36c8fb955870f9e2e8`(6 个提交,`git log --oneline feat/approval-template-groups-phase1..HEAD` 现场核对为 6 行)。**抬头 stale 披露(P3 卫生轮,2026-09-19,gate `impl-gate-A2-round1-20260918.md` P3-4)**:被审 head 是 `d3097be00`(晚两个 docs-only 提交);本轮又在其上做了卫生修复(见验证 MD §12)。下文全部 `file:line` 锚点已在卫生轮对当前 HEAD 逐条复核仍成立——git 历史见 `git log --oneline feat/approval-template-groups-phase1..HEAD` 现场核对。
 - 基线关系(现场 `git merge-base` 核对,零漂移):`feat/approval-template-groups-phase1` 尖端 = `0144932ac67e80a81f204dd6c6e502d000112276` = 本分支与 A-1 的 merge-base(本分支是 A-1 的直接后代);A-1 与 `origin/main`(`89f1ecdee2c3b70205a318074824c834bc6a5c7e`)的 merge-base 就是 `origin/main` 尖端本身(A-1 是 `origin/main` 的直接后代)——两段都零漂移。
 - 下文所有 `file:line` 都是**对本 HEAD 现场 `grep -n` 的结果**;它们只在这个 HEAD 上成立,后续任何一次提交（含本文档自身的提交）都可能使行号位移,合并前需重新核对(与 A-1 设计 MD 同一纪律)。
 
