@@ -53,13 +53,27 @@ vi.hoisted(() => {
   if (base) {
     const sep = base.includes('?') ? '&' : '?'
     process.env.DATABASE_URL = `${base}${sep}options=${encodeURIComponent(
-      '-c default_transaction_isolation=repeatable\\ read',
+      // `lock_timeout` (added for changesRequired #13 item 1's reverse positive control, this
+      // step): ONLY `lock_timeout` fires while a backend is actively WAITING ON A LOCK — a
+      // pool-exhaustion stall or an ordinary slow statement never trips it (`statement_timeout`
+      // would not distinguish the two), so a rejection under this setting is structurally
+      // attributable to a lock wait, not some other cause. 5000ms is far above every OTHER test in
+      // this file's actual block duration (each holder commits within tens of ms of
+      // `waitUntilBackendBlockedByHolder` returning — see E/K below) so it cannot false-trip an
+      // existing assertion, and far below this file's 30s `testTimeout`
+      // (`vitest.integration.config.ts`).
+      '-c default_transaction_isolation=repeatable\\ read -c lock_timeout=5000',
     )}`
   }
 })
 
 import { MetaSheetServer } from '../../src/index'
 import { query, transaction } from '../../src/db/pg'
+import {
+  beginApprovalTemplateGroupTxn,
+  createApprovalTemplateGroup,
+  createApprovalTemplateGroupWithClient,
+} from '../../src/services/ApprovalTemplateGroupService'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const EXPECT_DB = process.env.EXPECT_DB === '1'
@@ -469,5 +483,76 @@ describeIfDatabase('approval template groups — L0 serialization + DEFERRABLE C
     } finally {
       await query(`DELETE FROM approval_templates WHERE id = $1`, [templateId])
     }
+  })
+
+  // ── A-3 changesRequired #13 item 1: reverse positive control for §3.0's ...WithClient split ──
+  // §3.0's file-header note predicts a SPECIFIC failure mode for a composed caller that misuses
+  // the API — awaiting a non-`WithClient` exported function (which opens its OWN `transaction()`,
+  // i.e. draws a SECOND connection from the pool) from INSIDE an already-open `transaction()`
+  // callback that already holds this org's L0 advisory lock. This test reproduces that misuse
+  // against the REAL exported `createApprovalTemplateGroup` (not a synthetic replay of the
+  // mechanism) and pins the failure to the predicted mechanism, not a lookalike one:
+  //   - the pool (`DB_POOL_MAX` default 20 — `connection-pool.ts`) has ample headroom for a
+  //     second connection, so a rejection here cannot be pool-exhaustion;
+  //   - `lock_timeout` (file-wide, see the `vi.hoisted` block above) fires ONLY while a backend is
+  //     actively WAITING ON A LOCK — it structurally excludes both pool-acquire and an ordinary
+  //     slow query as the cause;
+  //   - `pg_blocking_pids` independently names the OUTER transaction's own backend as the thing
+  //     the inner call is blocked on, AT THE MOMENT it is blocked — not inferred after the fact
+  //     from the error alone (verified against a standalone two-connection probe — 55P03,
+  //     "canceling statement due to lock timeout" — before this assertion was written);
+  //   - the blocked backend's OWN active query text is asserted to contain `pg_advisory_xact_lock`
+  //     (`waitUntilBackendBlockedByHolder`'s `queryFragment` option, same technique as the E
+  //     COMMIT-mapping test above) — naming the specific statement it is parked on, not merely
+  //     "some statement". This was NOT decorative: an early draft of this test removed L0 from
+  //     `createApprovalTemplateGroupWithClient` as its mutation and found the test STILL passed —
+  //     without L0, the inner INSERT instead waits on the (also real, also documented — see this
+  //     file's header note (1)) DEFERRABLE `atg_sort_unique` index's tuple lock against the outer's
+  //     uncommitted row, which raises the SAME 55P03 for a DIFFERENT reason. Only pinning the
+  //     blocked query's TEXT to the advisory-lock statement isolates the claim this test is
+  //     actually about (memory `feedback_confounded_mutation_needs_isolated_variant_grid`).
+  // The "组合正例" half of changesRequired #13 item 1 is the existing A-3 execute (composed
+  // caller) test directly above — a composed caller correctly using the `...WithClient` split
+  // succeeding under contention. This test is its REVERSE: proving the split is load-bearing, not
+  // stylistic, by showing what happens when a composed caller does NOT use it.
+  it('REVERSE positive control (§3.0, changesRequired #13 item 1): awaiting a non-WithClient exported function from inside an already-open transaction() self-deadlocks at the L0 lock wait, not at connection-pool acquisition', async () => {
+    const org = trackOrg(`atg-revctl-${TS}`)
+    let blockedByOuter = 0
+
+    const outerReturn = await transaction(async (client) => {
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      // Outer takes L0 for `org` itself, via the SAME real primitive a composed caller's first
+      // `...WithClient` call would use — not a raw `pg_advisory_xact_lock` stand-in.
+      await createApprovalTemplateGroupWithClient(txClient, org, `Outer ${TS}`, 'outer')
+      const pidRow = await client.query('SELECT pg_backend_pid() AS pid')
+      const outerPid = Number((pidRow.rows[0] as { pid: number }).pid)
+
+      // MISUSE under test: the thin, non-WithClient wrapper, awaited from inside this already-open
+      // transaction() — exactly the shape §3.0's file header names, not a paraphrase of it.
+      const innerPromise = createApprovalTemplateGroup(org, `Inner ${TS}`, 'inner').then(
+        () => ({ ok: true as const }),
+        (e: unknown) => ({
+          ok: false as const,
+          code: (e as { code?: string } | undefined)?.code,
+          message: String((e as { message?: unknown } | undefined)?.message ?? e),
+        }),
+      )
+
+      blockedByOuter = await waitUntilBackendBlockedByHolder(outerPid, { queryFragment: 'pg_advisory_xact_lock' })
+      return await innerPromise
+    })
+
+    expect(blockedByOuter).toBeGreaterThan(0)
+    expect(outerReturn.ok).toBe(false)
+    if (!outerReturn.ok) {
+      // 55P03 = lock_not_available (PostgreSQL's code when `lock_timeout` cancels a lock wait).
+      expect(outerReturn.code).toBe('55P03')
+    }
+
+    // The outer transaction's OWN work (creating "Outer") must have committed — `transaction()`
+    // only rolls back on a THROWN error, and the outer callback caught the inner misuse's
+    // rejection and returned it as a value, so it never threw.
+    const rows = await query<{ name: string }>(`SELECT name FROM approval_template_groups WHERE org_id = $1`, [org])
+    expect(rows.rows.map((r) => r.name)).toEqual([`Outer ${TS}`])
   })
 })
