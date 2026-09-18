@@ -3595,3 +3595,34 @@ re-guessed): §2.2's `pending → applied` citation, §7.1's "only one terminal 
 to closed), §8's first two bullets (呈现 surface: half-closed with a default; parity retirement:
 verdict unchanged, census widened), §1.1's two matching bullets, and six new rows in §1's main
 scope table for u2/u3's landed units — see that document's own §9 for the full account.
+
+### `it()` count reconciled — 19 was checked, not assumed
+
+The redemption file's own 19-passed count above was cross-checked against a static `it()`-call
+census on all three inputs, because a static count and a green run can diverge in exactly one
+direction (a dropped case still passes — it just stops existing):
+
+```
+$ git show a02930896:…/approval-cancel-round-redemption.db.test.ts | grep -c "^  it("
+16
+$ git show origin/…-u3:…/approval-cancel-round-redemption.db.test.ts | grep -c "^  it("
+16   # u3 adds ZERO new it() blocks — it REWRITES two existing ones (账侧 parity's tail, and
+     # `unrecoverableExpired 呈现`'s own body) from negative assertions to positive ones; confirmed
+     # by diffing base vs u3 directly, not inferred from the count alone
+$ git show origin/…-u2:…/approval-cancel-round-redemption.db.test.ts | grep -c "^  it("
+18   # u2 adds exactly two NEW it() blocks: §9-9 member-pin, §5 I3 C-2 half
+$ grep -c "^  it(" packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+18   # merged: base(16) + u3(+0) + u2(+2) = 18 — arithmetic holds
+```
+
+The vitest-reported **19** is this 18 plus ONE top-level sentinel `itIfExpectDb(...)` at `:71`
+("EXPECT_DB lane must have DATABASE_URL"), which sits OUTSIDE `describeIfDatabase(...)` at 0-indent
+and so is invisible to the `^  it(` (2-space) pattern above — confirmed by name against the
+`--reporter=verbose` output, which lists exactly these 19 titles and no others. No case was lost in
+the splice.
+
+One accounting note, not a defect: §3.19's M-29 row ("全文件:12 failed / 6 passed (18)") and §3.20's
+M-30 row ("5 failed / 14 passed (19)") are u2's OWN lane-local mutant-run measurements, taken against
+u2's file before this merge (18 and 19 `it()`-plus-sentinel tests respectively, on u2's branch) — they
+are historical records of what u2 measured, not re-run against the final merged 20-test-plus-sentinel
+file, and are left as u2 wrote them for that reason.
