@@ -1168,27 +1168,35 @@ MD5 (…/ApprovalTemplateGroupService.ts) = f59e76d76070f065e6d214485913fe1a
 
 **这是本切片(A-1)未采纳、也不能采纳的一条**:锁 §2 的约束清单是 ratify 对象,只有 owner 能改;本轮的修法(§23.2)是请求形状映射,不触碰 DDL,`atg_name_nonblank` 这条 CHECK 本身在本切片结束时与 ratify 时逐字相同。**待 owner 裁决**:是否将 `CONSTRAINT atg_name_nonblank CHECK (name ~ '[!-~]')` 改为 `CHECK (btrim(name) <> '')`(真正表达「非空白」,不歧视非 ASCII/CJK)——若 owner 批准,需要一次新的、独立的、含 DDL 迁移的 Draft PR(本 worktree/本切片明确不做,按硬规矩不动 DDL、不应用迁移到共享库)。在 owner 勘误落地前,§23.2/§23.3 的 400 映射是**唯一**能做的缓解:仍然拒绝纯中文名,但拒绝的形状从不透明 500 变成携带约束名与勘误提示的 400。
 
-### 23.6 P2-5 —— `routes/approvals.ts:396-399` 「guard population ⊆ manager」是过强声明
+### 23.6 P2-5 —— `routes/approvals.ts:396-399` 「guard population ⊆ manager」是过强声明;本节自己的第一版修法换上了另一条实测为假的声明(impl-gate-A-slice1-round4-20260918.md §2 P2-1 收口,本段整段重写)
 
-**现场核对(与 A-3 门审 P2-5 逐条对照)**:
+**本节的更正史,如实记录,不隐去**:本节第一版把下面反例 (1)(通配码)写成既成事实,论证只引了 `hasPermissionCode` 的资源前缀展开,漏掉了 `rbacGuardAny` 权限腿的第二个合取项。这不是新发现——**第 2 轮门审早就端到端实测过同一条并证伪**(见 `impl-gate-A-slice1-round3-20260918.md` §3 P3-3:「第 2 轮已自造反例并自证伪(`approval-templates:*` 持有者被 `rbac/namespace-admission.ts` 挡在 guard 外,实测 403;全仓授予计数 0)」)。本节第一版把 A-3 设计门审 P2-5 的**静态代码阅读**结论逐字誊回了正文,没有回读第 2 轮已有的实测记录。**第 4 轮门审独立复测,同样 403,是第二次证伪**(`impl-gate-A-slice1-round4-20260918.md` §2 P2-1)。以下是重写后如实的现场核对:
 
-- `hasPermissionCode`(`rbac/rbac.ts:21-25`)对权限码做资源前缀通配展开:`permissionCodes.includes('approval-templates:*')` 会放行 `approval-templates:manage` 这个判据——`approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`(`:199`)因此对持 `approval-templates:*` 的主体放行;而 `isTemplateManager`(`resolveApprovalTemplateVisibilityActor`,`:375-392`)只精确 `.includes()` 五个字符串(`'*:*'`/`'approvals:*'`/`'approvals:admin-templates'`/`'approval-templates:manage'`/角色 `'admin'`),`'approval-templates:*'` 不在其中——持这个通配码的主体**过 guard 但非 manager**。
-- `rbacGuardAny` 的最终兜底 `const adminCheck = await isAdmin(userId); if (adminCheck) next()`(`rbac.ts`)直接查 DB(`user_roles WHERE role_id='admin'`),与 `req.user.role`/`.roles`/`.permissions`(JWT 声明,`isTemplateManager` 读的就是这几个字段)完全独立——一个只在 DB 侧持 `user_roles(role_id='admin')`、JWT 里不带任何 admin/manager 声明的主体,同样**过 guard 但非 manager**。
+- `hasPermissionCode`(`rbac/rbac.ts:21-25`)对权限码确实做资源前缀通配展开:`permissionCodes.includes('approval-templates:*')` 能匹配到 `approval-templates:manage`。**但这只是 `rbacGuardAny` 权限腿的一个合取项**(`rbac/rbac.ts:134-142`):`requestUserHasResolvedPermission(requestUser, code) && await isPermissionAllowedByNamespaceAdmission(userId, code)`。`approval-templates` 是一个 admission-controlled resource(`namespace-admission.ts:139` 的 `derivePermissionNamespace` 对它返回非 null;`approvals` 才在 `:11` 的 `NON_NAMESPACED_PERMISSION_RESOURCES` 里被豁免),所以在**没有**额外 namespace-admission 授予的前提下,第二个合取项判假——`approval-templates:*` **与** guard 自己字面点名的 `approval-templates:manage` **两者都拿 403**,这是端到端实测(见下方五行输出),不是推断。这个「通配码过 guard」的主体形状只有在同一主体**另外**持有 `approval-templates` 的 namespace-admission 授予时才存在;全仓真实授予(migrations/seeds 里对 `role_permissions`/`user_permissions` 写入这个 code 的行)计数为 **0**——仓内命中这个字符串的位置全部是描述该机制的注释/文档,不是授予数据。
+- `rbacGuardAny` 的最终兜底 `const adminCheck = await isAdmin(userId); if (adminCheck) next()`(`rbac.ts`)直接查 DB(`user_roles WHERE role_id='admin'`),与 `req.user.role`/`.roles`/`.permissions`(JWT 声明,`isTemplateManager` 读的就是这几个字段)完全独立——一个只在 DB 侧持 `user_roles(role_id='admin')`、JWT 里不带任何 admin/manager 声明的主体,**过 guard 但非 manager**。**这是本轮唯一被端到端实测支撑的反例**(§23.7 的 §2(c) HTTP 用例 + 其 mutation 负控:把 `resolveApprovalTemplateVisibilityActor` 的 `isTemplateManager` 硬编码为 `true` 会让隐藏模板一格从 404 变红 201;另有一条独立负控——删掉 §2(c) fixture 里那行 `user_roles` INSERT,建组请求从 201 变 403——证明这条 fixture 唯一的 guard 凭据就是那一行,不是别的腿顺带放行的)。
 
-真实计数(不是目测,`grep` 命中数):
+**判别式实测**(处女库 `metasheet2_gate_a_r4`,临时 `it()`,跑完按 `cp`→改→单独跑→还原→`cmp` 纪律核对;两条正控证明 token 传递路径本身是通的,唯一的判别变量是 namespace admission):
 
 ```
-$ grep -c "approval-templates:\*" packages/core-backend/src --include="*.ts" -r
-0
+ZZR4-WILDCARD-RESULT   status=403 body={"error":"Insufficient permissions"}   ← perms='approval-templates:*'
+ZZR4-WILDCARD-LINK     status=403 body={"error":"Insufficient permissions"}   ← 同主体打 link 端点
+ZZR4-EXACT-RESULT      status=403 body={"error":"Insufficient permissions"}   ← perms='approval-templates:manage'(guard 自己字面点名的码!)
+ZZR4-NONNS-CONTROL     status=201 ...                                          ← perms='approvals:admin-templates'(非 namespaced,正控)
+ZZR4-STARSTAR-CONTROL  status=201 ...                                          ← perms='*:*'(正控)
 ```
 
-全仓零处授予 `approval-templates:*`——这条通配路径今天**未被生产任何数据触发**,但 P2-5 的重点从来不是「今天有没有人持有它」,而是**判据本身是否成立**:`isTemplateManager` 会漏掉持有它的主体,这条通配路径又是仓内合法的 RBAC 语法(`hasPermissionCode` 就是为它写的),第二条 DB 侧 `isAdmin` 路径更是当前生产代码里天天在走的默认兜底,不依赖任何罕见配置。「今天零授予」缓解不了断言,只是缩小了当下的爆炸半径(呼应本文档 §22.4 P3-4 的既有记录与用户记忆 `finding_authservice_silent_permission_narrowing`)。
+真实计数(不是目测;修正 P3-5 指出的命令/输出形状不对齐——`grep -c ... -r` 对目录会逐文件打印 `路径:计数`,不会打印单独一个 `0`,这里改用会话时刻真实可重跑的形式):
 
-**修法**:改写 `routes/approvals.ts:394-423`(原过强声明在旧版 `:396-399`;块注释起始行 `:394` 未变,新增的更正说明使整个块延伸到 `:423`)的块注释,撤回「guard population ⊆ manager ⊆ sees everything」这句过强声明,改为如实措辞:两条反例逐一点名(通配码 + DB 侧 admin),结论改写为「guard population ⊋ manager population(严格超集,不是子集也不是相等)」。**同一句过强声明还有第二处副本**——`approval-template-groups-lifecycle.db.test.ts`「§2 link-time visibility」测试组自己的块注释里重复了几乎相同的措辞(「`approvalTemplateAdminGuard`'s permission codes are a SUBSET of `isTemplateManager`'s derivation... every actor able to reach the link ENDPOINT today is a manager」),这里一并改写,指向 §23.7 新增的 §2(c) 用例作为反例的真实证据,不留一份未撤回的副本。两处改动均为纯注释,不改变任何运行时行为。
+```
+$ grep -rn "approval-templates:\*" packages/core-backend/src/db/migrations packages/core-backend/src/db/seeds 2>/dev/null | grep -i "role_permissions\|user_permissions"
+(空 —— 零真实授予行)
+```
+
+**修法**(本次重写,取代本节原有的、已实测为假的版本):撤回「guard population ⊆ manager ⊆ sees everything」这句最初的过强声明,新结论仍是「guard population ⊋ manager population(严格超集,不是子集也不是相等)」,但**只靠一条被实测支撑的腿**(DB 侧 `isAdmin`)撑着——通配码那条腿今天不存在端到端可达形式,只有在额外持有 namespace-admission 授予时才存在,而全仓零处这样的授予。**同一句话有三份副本,已一并改写**:`routes/approvals.ts:398-`(`isApprovalTemplateVisibleForGroupLink` 上方块注释)、`approval-template-groups-lifecycle.db.test.ts`「§2 link-time visibility」测试组块注释、以及本节;三处均已改为上面如实的措辞,指向 §23.7 的 §2(c) 用例作为唯一被实测支撑的反例证据。三处改动均为纯注释,**不改变任何运行时行为**——本节改写的是「这段注释对现有行为的描述」,不是行为本身。
 
 ### 23.7 真库用例:guard 通过但非 manager 的主体,link 端点的可见性过滤仍生效
 
-**构造方法**:走 P2-5 点名的第二条反例(DB 侧 `isAdmin`)——因为它不需要新造任何 RBAC 授予关系,只需一行 `user_roles` INSERT,是两条反例里在既有测试 harness(`tok()` 走 `RBAC_TOKEN_TRUST=true` 的可信 token 路径)下**最干净可构造**的一条:
+**构造方法**:走 §23.6 修正后点名的、唯一被端到端实测支撑的反例(DB 侧 `isAdmin`)——它不需要新造任何 RBAC 授予关系,只需一行 `user_roles` INSERT,在既有测试 harness(`tok()` 走 `RBAC_TOKEN_TRUST=true` 的可信 token 路径)下**最干净可构造**:
 
 1. `dev-token` 铸一个 `roles=user, perms=''`(**不含任何 admin/manager 声明**)、`tenantId=org` 的 token;
 2. 直接对该 `userId` 执行 `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')`——这是该主体唯一的「admin」痕迹,只在 DB 侧,JWT/`req.user` 上什么都没有;
