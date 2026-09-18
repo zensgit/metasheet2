@@ -89,21 +89,27 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 ## 3. 接口与错误码(全部专用码;标注 ratified vs 实现者新增)
 
-### 3.1 七个端点(`packages/core-backend/src/routes/approvals.ts`,行号已按修复轮 1 后的 HEAD 重算——见脚注)
+### 3.1 七个端点(`packages/core-backend/src/routes/approvals.ts`)——锚点改用「符号 + 近似行号」(impl-gate-A-slice1-round4-20260918.md P3-1 收口)
 
-| 方法 + 路径 | 行 | Guard | 服务函数 |
+**为什么改格式**:上一版本表用裸 `:NNNN` 钉行号,连续三轮(修复轮 1/§22/本轮)的门审各发现过一次全表数字漂移——每次任何一处更早的函数插入/删除代码,后面全部端点的行号就整体位移,而没有机械前置动作会去重算它。本表现在把**路径字符串本身**当主锚点(它不随行号漂移,`grep -n` 永远能定位到),行号只作为写文档当下的近似值,标注 `~`,并给出可现场重跑的定位命令,不再承诺精确:
+
+```
+$ grep -n "r\.\(get\|post\|patch\|delete\)('/api/approval-template-groups\|r\.\(get\|post\|patch\|delete\)('/api/approval-templates/:id/group" packages/core-backend/src/routes/approvals.ts
+```
+
+| 方法 + 路径 | 行(~,现场核对以上方命令为准) | Guard | 服务函数 |
 |---|---|---|---|
-| `GET /api/approval-template-groups` | `:1115` | `rbacGuard('approvals:read')` | `listApprovalTemplateGroups` |
-| `POST /api/approval-template-groups` | `:1126` | `approvalTemplateAdminGuard` | `createApprovalTemplateGroup` |
-| `PATCH /api/approval-template-groups/:id` | `:1142` | `approvalTemplateAdminGuard` | `renameApprovalTemplateGroup` |
-| `POST /api/approval-template-groups/:id/archive` | `:1154` | `approvalTemplateAdminGuard` | `archiveApprovalTemplateGroup` |
-| `POST /api/approval-template-groups/:id/unarchive` | `:1165` | `approvalTemplateAdminGuard` | `unarchiveApprovalTemplateGroup` |
-| `POST /api/approval-templates/:id/group` | `:1177` | `approvalTemplateAdminGuard` | `linkApprovalTemplateToGroup`(**+ 一处新增的可见性前置检查,见 §3.5**) |
-| `DELETE /api/approval-templates/:id/group` | `:1204` | `approvalTemplateAdminGuard` | `unlinkApprovalTemplateFromGroup` |
+| `GET /api/approval-template-groups` | `~1152` | `rbacGuard('approvals:read')` | `listApprovalTemplateGroups` |
+| `POST /api/approval-template-groups` | `~1163` | `approvalTemplateAdminGuard` | `createApprovalTemplateGroup` |
+| `PATCH /api/approval-template-groups/:id` | `~1179` | `approvalTemplateAdminGuard` | `renameApprovalTemplateGroup` |
+| `POST /api/approval-template-groups/:id/archive` | `~1191` | `approvalTemplateAdminGuard` | `archiveApprovalTemplateGroup` |
+| `POST /api/approval-template-groups/:id/unarchive` | `~1202` | `approvalTemplateAdminGuard` | `unarchiveApprovalTemplateGroup` |
+| `POST /api/approval-templates/:id/group` | `~1214` | `approvalTemplateAdminGuard` | `linkApprovalTemplateToGroup`(**+ 一处新增的可见性前置检查,见 §3.5**) |
+| `DELETE /api/approval-templates/:id/group` | `~1241` | `approvalTemplateAdminGuard` | `unlinkApprovalTemplateFromGroup` |
 
-**行号脚注(修复轮 1,`impl-gate-A-slice1-round1-20260918.md` 反馈)**:本切片首次门审(head `252d01865`)之后,修复轮 1 在 `routes/approvals.ts` 顶部加了 1 行 import、在 `resolveApprovalTemplateVisibilityActor` 之后加了 23 行(§3.5 的导出函数),在链接端点内部又加了 6 行(可见性调用点)——本表与下文 §3.2/§3.3 的行号已用 `git diff 252d01865..HEAD -- packages/core-backend/src/routes/approvals.ts` 现场核对过位移量(391 行之前 +1;391–1164 行 +24;1165 行及以后 +30)并重新 `grep -n` 逐条验证,不是手工套算术。
+上表的 `~` 数字是 `routes/approvals.ts` 在 P2-1 提交(retract falsified wildcard-permission guard claim)落地之后、本 P3-1 提交现场 `grep -n` 的结果,写下的那一刻就可能已经不是最新——任何后续提交在这七行**之前**插入/删除代码都会使它们整体位移。**不要**依赖这些数字做精确跳转或计算位移量;需要时按上方命令或路径字符串重新 `grep -n` 现场定位。本节不再维护「相对某个历史 head 位移了几行」的脚注(此前三版都错在这里)。
 
-`approvalTemplateAdminGuard`(`routes/approvals.ts:199`)= `rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`,与模板写端点(`:887` 等)同一常量,非本切片新建。所有七个端点先 `authenticate` 中间件,再各自的 guard,再 handler 内部第一行调用 `resolveApprovalTemplateGroupOrgId`(`routes/approvals.ts:352`)。
+`approvalTemplateAdminGuard`(符号定义,`grep -n "const approvalTemplateAdminGuard" routes/approvals.ts` 现场核对,~199)= `rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`,与模板写端点同一常量,非本切片新建。所有七个端点先 `authenticate` 中间件,再各自的 guard,再 handler 内部第一行调用 `resolveApprovalTemplateGroupOrgId`(符号定位,`grep -n "function resolveApprovalTemplateGroupOrgId" routes/approvals.ts`,~352)。
 
 ### 3.2 org 来源解析(A‴)
 
@@ -114,35 +120,43 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 `jwt-middleware.ts:101-104` 现场核对:`authenticatedTenantId` **只**在 `user.tenantId` 是非空字符串时被设置到 `req.authenticatedTenantId`(`:101-104`);紧接着的 `:106-109`(`extractTenantFromHeaders` 回填)只在 `!user.tenantId` 时把请求头值写回 **`user.tenantId`**,从不触碰 `req.authenticatedTenantId`——这正是 A‴(ii)「有效 token + 伪造头 ⇒ 头被忽略」成立的机制证据,不是靠约定。
 
-### 3.3 错误码全表
+### 3.3 错误码全表(锚点改用「符号 + 近似行号」,impl-gate-A-slice1-round4-20260918.md P3-1 收口;§3.1 同理由)
 
-**锁文 §2 ratified 的七个专用码**(`ApprovalTemplateGroupService.ts:23-32` 文件头逐字列出):
+**锁文 §2 ratified 的七个专用码**(`ApprovalTemplateGroupService.ts` 文件头,`grep -n "GROUP_NOT_FOUND (404)"` 定位,~27,逐字列出):
 
-| 码 | HTTP | 触发点(file:line) | 锁文出处 |
+| 码 | HTTP | 触发点(符号,行号 ~ 近似,`grep -n "'<message>'" ApprovalTemplateGroupService.ts` 现场核对) | 锁文出处 |
 |---|---|---|---|
-| `GROUP_NOT_FOUND` | 404 | rename `:220`、archive `:251`、unarchive `:304`、link `:362`(经各自函数直接抛出,link 的经 `mapGroupConstraintError` 透传) | §2「行锁 SELECT……0 行 ⇒ 404」 |
-| `GROUP_ARCHIVED` | 409 | archive(重复归档,实现者选择复用同码,见 §3.4)`:254`、link `:365` | §2「archived_at IS NOT NULL ⇒ 409」 |
-| `GROUP_NAME_TAKEN` | 409 | 建组/改名/解档撞 `uq_atg_org_name_active`(`mapGroupConstraintError:137-138`,由 `:199-201`/`:230-232`/`:333-335` 的 catch 触发)、解档显式复核(`:311-316`) | §2/I8「409 GROUP_NAME_TAKEN」 |
-| `GROUP_NOT_ARCHIVED` | 409 | unarchive `:308` | I8「否则 409 GROUP_NOT_ARCHIVED」 |
-| `GROUP_SORT_CONFLICT` | 500 | 建组/解档撞 `atg_sort_unique`(COMMIT 时,`mapGroupConstraintError:140-141`) | §2 DEFERRABLE 副作用③;验收 E |
-| `ORG_ID_NOT_ACCEPTED` | 400 | `resolveApprovalTemplateGroupOrgId` `:356-361`(`routes/approvals.ts`;修复轮 1 后 +1,见 §3.1 脚注) | §2「org 从哪来」 |
-| `SESSION_ORG_REQUIRED` | 403 | `resolveApprovalTemplateGroupOrgId` `:363-368` | §2「多 org 成员」;验收 J |
+| `GROUP_NOT_FOUND` | 404 | `renameApprovalTemplateGroup` ~263、`archiveApprovalTemplateGroup` ~294、`unarchiveApprovalTemplateGroup` ~347、`linkApprovalTemplateToGroup` ~405(经各自函数直接抛出,link 的经 `mapGroupConstraintError` 透传) | §2「行锁 SELECT……0 行 ⇒ 404」 |
+| `GROUP_ARCHIVED` | 409 | `archiveApprovalTemplateGroup`(重复归档,实现者选择复用同码,见 §3.4)~297、`linkApprovalTemplateToGroup` ~408 | §2「archived_at IS NOT NULL ⇒ 409」 |
+| `GROUP_NAME_TAKEN` | 409 | 建组/改名/解档撞 `uq_atg_org_name_active`(`mapGroupConstraintError` 内的 23505 分支,~167,由 `createApprovalTemplateGroup`/`renameApprovalTemplateGroup`/`unarchiveApprovalTemplateGroup` 各自的 `throw mapGroupConstraintError(error)` catch 触发,分别 ~243/~274/~377)、解档显式复核(`unarchiveApprovalTemplateGroup` 内,~359) | §2/I8「409 GROUP_NAME_TAKEN」 |
+| `GROUP_NOT_ARCHIVED` | 409 | `unarchiveApprovalTemplateGroup` ~351 | I8「否则 409 GROUP_NOT_ARCHIVED」 |
+| `GROUP_SORT_CONFLICT` | 500 | 建组/解档撞 `atg_sort_unique`(COMMIT 时,`mapGroupConstraintError` 内的 23505 第二分支,~170) | §2 DEFERRABLE 副作用③;验收 E |
+| `ORG_ID_NOT_ACCEPTED` | 400 | `resolveApprovalTemplateGroupOrgId`(`routes/approvals.ts`)~358 | §2「org 从哪来」 |
+| `SESSION_ORG_REQUIRED` | 403 | `resolveApprovalTemplateGroupOrgId` ~365 | §2「多 org 成员」;验收 J |
 
-**实现者新增的请求形状校验码**(锁文未点名,不算第八个 ratified 结果——`ApprovalTemplateGroupService.ts:26-32` 文件头自述这一区分):
+**实现者新增的请求形状校验码**(锁文未点名,不算第八个 ratified 结果——`ApprovalTemplateGroupService.ts` 文件头自述这一区分):
 
-| 码 | HTTP | 触发点 | 性质 |
+| 码 | HTTP | 触发点(符号 + 近似行号) | 性质 |
 |---|---|---|---|
-| `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts:155-161`,抛出于 `:158`,该文件本轮未改),建组/改名 name 为空/纯空白 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
-| `APPROVAL_GROUP_ID_REQUIRED` | 400 | link 端点 `routes/approvals.ts:1185-1188`(修复轮 1 后 +24),`groupId` 缺失/空白 | 同上 |
-| `APPROVAL_ACTOR_REQUIRED` | 401 | 建组 `:1130-1133`、link `:1181-1184`(均 +24),`resolveApprovalActorId` 返回 null | 沿用本路由既有惯例 |
+| `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts`,函数 ~198,抛出 ~200),建组/改名 name 为空/纯空白 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
+| `APPROVAL_GROUP_ID_REQUIRED` | 400 | link 端点(`routes/approvals.ts` ~1224),`groupId` 缺失/空白 | 同上 |
+| `APPROVAL_ACTOR_REQUIRED` | 401 | 建组端点 ~1169、link 端点 ~1220,`resolveApprovalActorId` 返回 null | 沿用本路由既有惯例 |
+| `GROUP_NAME_UNSUPPORTED`(**本轮/回流修复新增,impl-gate-A-slice1-round4-20260918.md P3-1 补录——此前本表漏列**) | 400 | `mapGroupConstraintError` 内的 23514 分支(`atg_name_nonblank` CHECK 违例,~178-183),由 `createApprovalTemplateGroup`/`renameApprovalTemplateGroup` 的 catch 触发;`details.constraint` 携带约束名 | **非 ratified 码**——请求形状映射(纯 CJK/不可打印字符名 ⇒ 400 而非裸 500),owner 勘误项见 §3.4(`atg_name_nonblank` CHECK 本身是否改写为 `btrim(name) <> ''`,待 owner 裁决,与本条错误码映射是两件事:后者今天已落地,前者未落地) |
 
-**七个 `handleApprovalsError` 兜底码**(数据库故障/未预期异常时的 500 fallback,不是业务语义码,而是「这条请求处理失败」的通用标签,7 个端点各一个、名字含端点动作;修复轮 1 后行号见括号):
+**七个 `handleApprovalsError` 兜底码**(数据库故障/未预期异常时的 500 fallback,不是业务语义码,而是「这条请求处理失败」的通用标签,7 个端点各一个、名字含端点动作;`grep -n "handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP" routes/approvals.ts` 现场核对):
 
-`APPROVAL_TEMPLATE_GROUP_LIST_FAILED`(`:1122`,原 `:1098` +24)、`_CREATE_FAILED`(`:1138`,原 `:1114` +24)、`_RENAME_FAILED`(`:1150`,原 `:1126` +24)、`_ARCHIVE_FAILED`(`:1161`,原 `:1137` +24)、`_UNARCHIVE_FAILED`(`:1172`,原 `:1148` +24)、`_LINK_FAILED`(`:1198`,原 `:1168` +30——在链接端点内部的第二处插入点之后)、`_UNLINK_FAILED`(`:1211`,原 `:1181` +30)。这七个只在 `ServiceError` 之外的异常(如连接失败)时出现——正常路径下的所有已知失败都会先命中上表的专用码。
+`APPROVAL_TEMPLATE_GROUP_LIST_FAILED`(~1159)、`_CREATE_FAILED`(~1175)、`_RENAME_FAILED`(~1187)、`_ARCHIVE_FAILED`(~1198)、`_UNARCHIVE_FAILED`(~1209)、`_LINK_FAILED`(~1235)、`_UNLINK_FAILED`(~1248)。这七个只在 `ServiceError` 之外的异常(如连接失败)时出现——正常路径下的所有已知失败都会先命中上表的专用码。
 
-### 3.4 一处实现者裁量(未获锁文文本背书,写明供门审核实)
+**行号免责声明(与 §3.1 相同):以上全部 `~NNN` 是本 P3-1 提交现场 `grep -n` 的近似值,不是精确锚点**——`ApprovalTemplateGroupService.ts` 与 `routes/approvals.ts` 任何一处更早的代码插入/删除都会使后面的数字整体位移。需要时用每行给出的符号名(函数名/抛出的 message 字符串/错误码字符串本身)重新 `grep -n` 现场定位,不要对着这些数字做算术或跳转。
 
-`unarchiveApprovalTemplateGroup`(`ApprovalTemplateGroupService.ts:294-336`)对「归档一个已经归档的组」没有单独处理——它走的是「找不到该 id 的活跃组行」还是复用 `GROUP_ARCHIVED`?现场读代码:`archiveApprovalTemplateGroup`(`:241-278`)在锁到组行后检查 `archived_at !== null` ⇒ 抛 `GROUP_ARCHIVED`(`:253-255`,409)。锁文 §2/I2 只定义了「归档一个活跃组」的路径,未定义「归档一个已归档组」应返回什么;`ApprovalTemplateGroupService.ts:34-38` 的文件头注释自陈这是实现者选择复用链接态判到的同名码,而非新码,且验收表没有任何一行练到这个分支。属于**未获锁文文本背书的实现决定**,不是缺陷,列入门审核对项。
+### 3.4 两处实现者裁量(未获锁文文本背书,写明供门审核实;第二处为本轮/回流修复新增,impl-gate-A-slice1-round4-20260918.md P3-1 并入)
+
+**(1)** `unarchiveApprovalTemplateGroup`(符号定位,~337-391)对「归档一个已经归档的组」没有单独处理——它走的是「找不到该 id 的活跃组行」还是复用 `GROUP_ARCHIVED`?现场读代码:`archiveApprovalTemplateGroup`(~284-336)在锁到组行后检查 `archived_at !== null` ⇒ 抛 `GROUP_ARCHIVED`(~297,409)。锁文 §2/I2 只定义了「归档一个活跃组」的路径,未定义「归档一个已归档组」应返回什么;`ApprovalTemplateGroupService.ts` 文件头注释(`grep -n "this implementer's choice" ApprovalTemplateGroupService.ts`,~34)自陈这是实现者选择复用链接态判到的同名码,而非新码,且验收表没有任何一行练到这个分支。属于**未获锁文文本背书的实现决定**,不是缺陷,列入门审核对项。
+
+**(2)**(owner 裁量桶,与 §23.5 的 `atg_name_nonblank` 勘误请示是**同一枚硬币的两面,但不是同一件事**——见下方区分)`GROUP_NAME_UNSUPPORTED`(§3.3 新表)本身是否应该存在,取决于 owner 对 `atg_name_nonblank CHECK (name ~ '[!-~]')` 的最终裁决:
+- 若 owner **维持**该 CHECK 拒绝非 ASCII/CJK 名字的现状(即认定「组名只能是可打印 ASCII」是有意为之),那么 `GROUP_NAME_UNSUPPORTED` 就是一个**长期存在**的、面向最终用户的合法错误码,§3.3 的分类("请求形状校验码"、非 ratified)成立,不需要改动。
+- 若 owner **采纳**§23.5 的默认建议,把 CHECK 改成 `CHECK (btrim(name) <> '')`(真正表达「非空白」),那么这条 CHECK 将不再对纯 CJK/非 ASCII 名字触发 23514,`GROUP_NAME_UNSUPPORTED` 这整条错误码路径会变成**死代码**(`mapGroupConstraintError` 里的这个分支永远不会被触发,因为 `NONBLANK_CHECK_CONSTRAINTS` 里的约束语义已改变),需要在那次(独立的、含 DDL 的)Draft PR 里一并决定是删除这个分支/错误码,还是保留作为「防御性映射,万一将来 CHECK 又被改回去」。
+- **两件事的关系**:§23.5 问的是「CHECK 该不该改」(DDL 层面,本切片不做);本条问的是「如果不改 CHECK,`GROUP_NAME_UNSUPPORTED` 这个应对措施本身算不算一个需要 owner 背书的新公开合同」(错误码/API 契约层面,本切片已经落地,行为已经生效)。owner 只需回答 §23.5 一次,本条的答案由那次回答**派生**,不需要单独再问一遍。
 
 ### 3.5 另一处实现者裁量(修复轮补齐,gate P2-1)——挂接可见性的失败形状
 
