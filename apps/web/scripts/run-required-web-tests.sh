@@ -1237,9 +1237,14 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # P3 hygiene wave correction (2026-09-19), second pass — the paragraph this replaces named the
 # wrong root cause; see the FE verification MD's hygiene section and
 # p3-hygiene-gate2-A2-20260919.md §1.1 for the corrected repro. What actually happened: the
-# original commit (`2699e0a07`, author date 2026-09-18 06:57) edited this line IN PLACE (17
-# insertions / 1 deletion — a normal same-line edit, not an appended second line) to add the three
-# tokens. A later rebase produced `2ef7add98` (committer date 2026-09-18 20:56), a rebase replay of
+# original commit (`2699e0a07`, author date 2026-09-18 06:57:35) edited this line IN PLACE (17
+# insertions / 1 deletion — a normal same-line edit, not an appended second line) to add only the
+# FIRST of the three tokens (`SessionOrgSwitcher.spec.ts`) — sorted-token diff between `0144932ac`
+# and `2699e0a07` shows exactly that one addition and nothing else. `approvalTemplateGroupsClient`
+# and `ApprovalTemplateGroupsPanel` were NOT on this line yet; they landed on it later, in
+# `1e55c39b8` (author date 2026-09-18 07:10:50) and `bc66e283e` (author date 2026-09-18 07:33:18)
+# respectively (`git log -S'<token>' -- <this file>` on each token). A later rebase produced
+# `2ef7add98` (committer date 2026-09-18 20:56), a rebase replay of
 # that same commit whose three-way merge against a sibling edit to this file kept BOTH versions of
 # the line instead of erroring — the duplicate (dead) copy, not the original, is what carried the
 # risk: bash's `exec` builtin unconditionally replaces the process on the FIRST such line reached,
