@@ -15,6 +15,33 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 
 ---
 
+## 本切片验收总表(2026-09-18 定稿;先读 §0 — 下表是导航,不是对 §0 撤回的替代或降级)
+
+Rows track the lock criteria this slice's own goal document names for C-2. Status is adjudicated
+from §4 ("What this slice has NOT proven yet"), not re-argued here. 部分 means the row's own listed
+gap is real and still open, not that the test is flaky or absent. lane: `base` = the original
+sequential C-2 work (pre-`u1`/`u2`/`u3` split, everything up to `a02930896`); `u2`/`u3` = the split
+lanes folded back by merge commit `1c98ff937`.
+
+| 验收行 | 测试文件 | 用例名(节选) | lane | Status | 未闭合的部分(引 §) |
+|---|---|---|---|---|---|
+| 判据 II(C-2 挂点先于 `:11070`,W4 外部事务入口 C-1) | `approval-cancel-round-redemption.db.test.ts` | "判据 II (§14.2, outlet #5): an attendance-backed cancel round whose window is OPEN redeems …"; "判据 II END-TO-END (no double): the redemption runs the REAL W4 external-transaction entry …"; "判据 II fail-closed …"; "判据 II scope fail-closed …" | base | **部分** | §3.11.6 的四个双件用例是**测试替身**背书,只证明审批侧半边;posture resolution / authorization 在真边界上会跑但**没有专门断言钉住其结果**(§3.12.3);§3.11.3 的 org-key 匹配对双件用例只是构造论证,§3.12 才是真跑(见 §4 第 1 条) |
+| 判据 IV,`expired` 半边(C-3 收口) | `approval-cancel-round-redemption.db.test.ts` | "判据 IV (§14.2, outlet #5′): the in-lock final evaluation finds the §2-G2 window closed ⇒ … `expired` …" | base | **PASS** | 卡片失效(C-3 row 3 第三列)未扫(§3.8,pre-existing);R1 的 9 处计数未把 #5′ 本身算进去,是否该到 10 是 owner 待裁(§7.1) |
+| 判据 IV,`blocked` 半边(C-3 收口,C-1 `business_refused` 承接) | `approval-cancel-round-redemption.db.test.ts` | "判据 IV `blocked` 半边 + C-3 row 4(业务不可逆):C-1 RETURNS a business refusal …" | base | **PASS** | 同上;这一半边同样是双件背书 |
+| W4 入口(C-1 通过 W4 外部事务入口调用,C-1 port) | `approval-cancel-round-redemption.db.test.ts` | "判据 II END-TO-END (no double): the redemption runs the REAL W4 external-transaction entry — its isolation and rollout-lock preconditions pass by MEASUREMENT …"；判据 II fail-closed 的 `CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE` 用例 | base | **部分** | E2E 用例走的是 **legacy 写入姿态**,P14 已批休假取消计算被跳过(断言过,§3.12.3);未 seed 请假余额批次,`reverseLeaveBalanceDeduction` 未写任何东西 |
+| §3.3b 锁序(rollout advisory lock 排在行锁之前,阻塞项的解法) | `approval-cancel-round-lock-order-census.db.test.ts` | census Q-F(6 legs,17→23 passed);M-11 至 M-15(§3.9.5,原编号未动) | base | **部分** | leg 3 只是**源码顺序**证明,不是真并发死锁构造(需要 Q-A/Q-D 的双连接技术,§3.9.4 自陈);新 503 面的路由层处理未验证(§3.9.3) |
+| §8 期 1 账侧字节等价 | `approval-cancel-round-redemption.db.test.ts` | "账侧 (lock §8 期 1): the redeemed cancel round leaves the SAME rows as the existing `POST /api/attendance/requests/:id/cancel` path on a twin fixture …" | u2 前身(§3.15)+ u2 补测(§3.21/§3.22) | **部分** | 七步里 ②④⑤ 已比对、③⑦ 等值但走的是**已跳过的生产分支**(需 non-legacy 双胞胎)、⑥ 是**声明式背离**(无可比行对)、①② 无终态可比;另 request provenance(`ip_address`/`user_agent`)是实质性背离,owner 待裁(§3.15's headline,§7.2) |
+| §5 I3「终结即释放」(两个终态写入方) | `approval-cancel-round-redemption.db.test.ts` | "§5 I3 「终结即释放」 (the C-3 half): … `createCancelRoundInstance` call is the first post-close statement …"(M-21);"§5 I3 「终结即释放」 (the C-2 half, outlet #5): …"(M-30,§3.20) | base(C-3 半边)+ u2(C-2 半边,§3.20) | **PASS**(两个写入方都已探) | 两条用例都用测试替身 port,原单据在生产中会被 C-1 真取消——真实边界下第二轮是否会因单据状态被拒,未答(§3.20 自陈的夹具前提) |
+| §9-9 允许集含 `approve` 成员钉 | `approval-cancel-round-redemption.db.test.ts` | "§9-9 允许集 MEMBER pin (approve) — gate round-5 P3-1: on ONE cancel-round instance the action-judgment gate refuses a non-member … and LETS `approve` THROUGH …"(M-29,§3.19) | u2 | **PASS** | 只钉了 `approve` 一格;`reject`/`revoke`/`comment` 三格仍是 C-1 R5-M8/M9/M10 的证据,绑定 C-1 自己的 head,本单元不继承不重跑(§3.19.4 自陈) |
+
+**Everything below this table (§0 onward) is the full, incremental record** — commands, mutation
+ledgers per unit, retractions, the merge record, and (added by this 定稿 pass) a fresh independent
+rerun on a brand-new private DB, an aggregated mutation ledger, wiring/census evidence, the
+supplementary gate checklist answered item-by-item, and the owner-pending items, at the very end of
+the file.
+
+---
+
 ## 0. Corrections and retractions (retraction-first)
 
 | # | Where the wrong claim is | The claim | Status |
@@ -29,6 +56,8 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-8 | §3.15.6 (previous revision), and the 账侧 case's own doc comment | 「`redeemCancelRoundInTxn` **DISCARDS** the entry's `{ kind: 'executed', response }` payload, so the approval side **has no channel to present it on at all**」 | **RETRACTED IN PART — the 「at all」 is false, and §3.16 measures the channel.** The discard is real and stands. What does not stand is the conclusion drawn from it: the redemption path supplies a non-null `operationId`, so it takes the boundary's identity+preflight+**seal** branch, and `sealAttendanceResultOperationV1` writes `attendance_result_operations.response_snapshot` with the adapter's WHOLE response object on the CALLER's transaction client (`w4c3b-request-operation-boundary.ts:918-921` → `w4c0-operation-registry.ts:756-790`). The counter is therefore computed, persisted and queryable per operation, and commits with the approve. §3.16 measures it at **120**, not at 0. The item that remains open is narrower than the one that was written: which USER-FACING surface renders it. Registered as an owner decision, not as a contract gap in the persistence. |
 | R-9 | commit `ab36b38f0`'s message, last paragraph | 「§4's bullet **is updated** from 'no probe' to CLOSED with its scope limits」 | **RETRACTED — at that SHA it was not.** The commit applied §3.18 and then attempted a second edit to §4's I3 bullet and §3.14.5's writer row; that edit threw `AssertionError` (the target string did not match), and because the `git add && git commit` was newline-separated rather than `&&`-chained, the commit landed anyway — with §3.18 present and both older 「no probe exists」 statements still standing. So `ab36b38f0` briefly contained a file that asserted a probe exists (§3.18) and that none exists (§3.14.5 row `:9108`, §4's bullet) at the same time. FIXED one commit later by `79f3d3ce2`, which is where the §4 and §3.14.5 updates actually live, and which discloses the mechanism. The original message cannot be edited without a force-push, so this row is its correction. **Consequence for a gate reader**: verify the §4 bullet against `79f3d3ce2` or later, never against `ab36b38f0`. |
 | R-10 | §3.16.7 / §3.17.6 / §3.18.5 的 `$ npx tsc --noEmit -p tsconfig.json` → 「[exited with code 0]」,以及据此说的「tsc clean」 | 读起来像「新加的测试代码过了类型门」 | **NARROWED(不是撤回:命令真跑过、真的 0)。** 两点限制,本单元实测:(1) `packages/core-backend/tsconfig.json` 的 `exclude` 含 `**/*.test.ts`,`--listFiles \| grep -c` 本文件 ⇒ **0**,即这些单元所改的测试文件**不在 tsc 的 program 内**,那个 0 与改动无关;(2) 旧写法 `npx tsc … \| tail -N && echo $?` 取的是 `tail` 的退出码,恒 0。⇒ 这些行只能支撑「生产源码仍可编译」(而这三个单元生产代码零改动,故恒真),**不能**支撑「新加的测试代码类型正确」。真正的门是 vitest 运行本身;本单元的语法错正是被它抓到、被 tsc 漏掉的(§3.20.8)。**Consequence for a gate reader**: 不要把这三节的 tsc 行读作测试代码的类型证据;要证据就看该节的 vitest 计数。 |
+| R-11 | §3.10.5's own mutation ledger table | mutation IDs `M-11` and `M-12`, assigned to the Q-G pre-fix-restore and Q-G-LEG-2 probes | **RETRACTED — collision, not a merge artefact this time.** §3.9.5 (an earlier, independent unit) had already claimed `M-11` (delete the shared `ORDER BY`'s business-key preference) and `M-12` (resolver takes the org from the instance instead of the request) for ITS OWN two mutations. §3.10.5 reused the same two bare numbers for two DIFFERENT probes without checking the file's own prior sections — unlike the u2/u3 merge-time collision (§0 has no row for that one because it was caught and fixed IN THE SAME COMMIT that created it, `1c98ff937`'s own merge-resolution notes at the end of this file), this one shipped and stood until this 定稿 pass found it by building the mutation-ledger summary table below and finding two rows claiming the same ID with different mutations. **FIXED here**: §3.10.5's two entries are renumbered `M-33` and `M-34` (the next free IDs after the existing `M-1`–`M-32`), at every occurrence in this file (§3.10.5's table and its own follow-up paragraph) and in the design MD's one cross-reference (`§4.3`, "M-12 is what caught it" → "M-34"). §3.9.5's `M-11`/`M-12` are UNCHANGED — they are the ones already cited elsewhere (design MD §4.2) and were first in document order. No test file changed; this is a documentation-only renumbering of a citation, not a re-run. |
+| R-12 | this file's own closing paragraph, "`it()` count reconciled" section (added by commit `d462677bd`) | "not re-run against the final merged **20**-test-plus-sentinel file" | **RETRACTED — arithmetic slip in the very paragraph that was reconciling arithmetic.** The same paragraph's own preceding lines establish base(16) + u3(+0) + u2(+2) = 18 `it()` blocks, plus the one sentinel = **19**, and this 定稿 pass's fresh rerun (below, private DB `metasheet2_lock_c2_docs`) reports the identical `19 passed (19)`. "20" was never derived from anything in the paragraph — it is corrected to 19 in place. |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -1073,24 +1102,28 @@ disclosure, not a claim that the leg exercises production.
 
 ### 3.10.5 Mutation ledger (this unit)
 
+⚠️ **Renumbered in the 2026-09-18 定稿 pass (§0 R-11): this section originally reused `M-11`/`M-12`,
+already claimed by §3.9.5 for two different mutations. Now `M-33`/`M-34` — the underlying probes,
+commands and results are unchanged; only the bare IDs moved.**
+
 | # | Mutation | Expected | Observed |
 |---|---|---|---|
-| M-11 | restore the PRE-FIX `executeRequestCancel` (the whole file, `cp` from the pre-edit backup) and re-run Q-G | LEG 3 red; LEGs 1/2/4 still green | **RED exactly as predicted**: `AssertionError: 原单据实例 must be locked BEFORE attendance_requests: expected 1563 to be less than 238`, `Tests 1 failed | 3 passed | 23 skipped (27)`. Restored with `cp` and `cmp` proved byte-identical (`RESTORED-IDENTICAL`). |
+| M-33 | restore the PRE-FIX `executeRequestCancel` (the whole file, `cp` from the pre-edit backup) and re-run Q-G | LEG 3 red; LEGs 1/2/4 still green | **RED exactly as predicted**: `AssertionError: 原单据实例 must be locked BEFORE attendance_requests: expected 1563 to be less than 238`, `Tests 1 failed | 3 passed | 23 skipped (27)`. Restored with `cp` and `cmp` proved byte-identical (`RESTORED-IDENTICAL`). |
 
-| M-12 | in LEG 2 only, point the adapter at a **different** seeded `(request, instance)` pair, so the two sides contend with nothing | LEG 2 red — a "no deadlock" leg that never contended has proved nothing | **RED**: `Error: backend 55248 never blocked on a lock within 5000ms — the two sides did not contend, so this leg proved nothing`, `Tests 1 failed | 26 skipped (27)`. Restored with `cp`, `cmp` identical, full file back to 27 passed. |
+| M-34 | in LEG 2 only, point the adapter at a **different** seeded `(request, instance)` pair, so the two sides contend with nothing | LEG 2 red — a "no deadlock" leg that never contended has proved nothing | **RED**: `Error: backend 55248 never blocked on a lock within 5000ms — the two sides did not contend, so this leg proved nothing`, `Tests 1 failed | 26 skipped (27)`. Restored with `cp`, `cmp` identical, full file back to 27 passed. |
 
 LEG 1's own discriminating power needs no separate mutation: it is a constructed race that produces
 a real `40P01`, and LEG 2 is its paired negative — the same harness, the shipped order, no deadlock.
 
-⚠️ **M-12 caught a vacuous assertion of mine before it shipped, and that is worth recording.** LEG 2's
+⚠️ **M-34 caught a vacuous assertion of mine before it shipped, and that is worth recording.** LEG 2's
 first contention proof was a JS-side `settled` flag flipped in `adapterRun.then(...)` and asserted
-still `false` before the core side committed. M-12 left it **green**: with the adapter pointed at an
+still `false` before the core side committed. M-34 left it **green**: with the adapter pointed at an
 unrelated pair it finished immediately, yet the flag was still `false`, because the `.then` callback
 had not been scheduled by the time the assertion ran. A first mutation attempt was also invalid —
 dropping the core side's instance lock did not remove contention, it only moved it to the request
 row (memory: `feedback_ineffective_mutation_looks_like_a_useless_test.md`). The shipped version asks
 **PostgreSQL** instead: `expectBackendBlockedOnLock` polls `pg_stat_activity.wait_event_type = 'Lock'`
-for the adapter's own backend pid and throws on timeout, which is what M-12 now reddens.
+for the adapter's own backend pid and throws on timeout, which is what M-34 now reddens.
 
 ### 3.10.6 The one behaviour change, disclosed
 
@@ -3624,5 +3657,308 @@ the splice.
 One accounting note, not a defect: §3.19's M-29 row ("全文件:12 failed / 6 passed (18)") and §3.20's
 M-30 row ("5 failed / 14 passed (19)") are u2's OWN lane-local mutant-run measurements, taken against
 u2's file before this merge (18 and 19 `it()`-plus-sentinel tests respectively, on u2's branch) — they
-are historical records of what u2 measured, not re-run against the final merged 20-test-plus-sentinel
-file, and are left as u2 wrote them for that reason.
+are historical records of what u2 measured, not re-run against the final merged **19**-test-plus-sentinel
+file (⚠️ §0 R-12: this said "20" until the 2026-09-18 定稿 pass — arithmetic slip, corrected; the
+paragraph's own 18+1 derivation above always said 19, and the fresh rerun below confirms it), and are
+left as u2 wrote them for that reason.
+
+---
+
+## 定稿重跑记录(2026-09-18,independent private DB `metasheet2_lock_c2_docs`)
+
+Purpose: this 定稿 pass does not trust the merge-record's own `metasheet2_lock_c2_merge` run (§ above)
+by citation alone — it creates a THIRD, brand-new database and reruns the same command sequence from
+virgin, on the current branch tip. `git diff --stat 1c98ff937..HEAD` (below) shows only the two docs
+files changed since the merge commit, so this rerun exercises byte-identical source to the
+merge-record's own run; it is confirmation, not a different code path.
+
+```
+$ dropdb -h localhost -p 5432 -U metasheet metasheet2_lock_c2_docs
+dropdb: error: database removal failed: ERROR:  database "metasheet2_lock_c2_docs" does not exist
+$ createdb -h localhost -p 5432 -U metasheet metasheet2_lock_c2_docs
+
+$ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_docs \
+    npx tsx src/db/migrate.ts
+… migration "zzzz20260918090000_create_approval_rounds" was executed successfully
+… migration "zzzz20260918100000_seed_approval_cancel_round_published_definition" was executed successfully
+… migration "zzzz20260918110000_add_attendance_requests_approval_workflow_key" was executed successfully
+[exited with code 0]
+
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+[exited with code 0]
+
+$ (packages/core-backend) npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+
+$ (packages/core-backend) npx vitest run tests/unit/approval-product-service.test.ts tests/unit/approval-admin-jump-service.test.ts --reporter=dot
+ ✓ tests/unit/approval-admin-jump-service.test.ts (9 tests)
+ ✓ tests/unit/approval-product-service.test.ts (185 tests)
+ Test Files  2 passed (2)
+      Tests  194 passed (194)
+
+$ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_docs EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts \
+    tests/integration/approval-cancel-round-creation.db.test.ts \
+    tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
+    tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts \
+    tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
+    tests/integration/approval-cancel-round-redemption.db.test.ts \
+    tests/integration/approval-cancel-round-seat-guards.db.test.ts \
+    --reporter=dot
+ Test Files  7 passed (7)
+      Tests  78 passed (78)
+
+$ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_docs EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=verbose
+ ✓ … sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)
+ ✓ … chain (§5 I6, 撤销不限次): revoke terminates round 1 (withdrawn) -> a fresh round can start immediately -> reject terminates round 2 (rejected) -> a third round can start immediately
+ ✓ … 判据 III 正控 2 (§14.2, §6 "仅原 requester"): a non-original-requester actor cannot revoke …
+ ✓ … §14.1 seed evidence: reject without a comment is rejected with the named error code …
+ ✓ … DISCRIMINATING CONTROL: revoking one document's round does not touch a DIFFERENT document's own pending round …
+ ✓ … erratum (…): a broken one-round-per-instance invariant fails closed with CANCEL_ROUND_INVARIANT_VIOLATION (409) …
+ ✓ … 判据 IV (§14.2, outlet #5′): the in-lock final evaluation finds the §2-G2 window closed ⇒ … `expired` …
+ ✓ … §5 I3 「终结即释放」 (the C-3 half): after the #5′ system close the document has NO pending round …
+ ✓ … 判据 IV fail-closed (…): a document with no §2-G2 anchor is NOT closed as `expired` …
+ ✓ … 判据 II (§14.2, outlet #5): an attendance-backed cancel round whose window is OPEN redeems …
+ ✓ … §9-9 允许集 MEMBER pin (approve) — gate round-5 P3-1: …
+ ✓ … §5 I3 「终结即释放」 (the C-2 half, outlet #5): …
+ ✓ … 判据 IV `blocked` half + C-3 row 4 (业务不可逆): …
+ ✓ … 判据 II fail-closed (C-3 row 5): with NO cancellation provider bound …
+ ✓ … 判据 II scope fail-closed (lock §8 期 1 = 请假撤销): …
+ ✓ … 判据 II END-TO-END (no double): the redemption runs the REAL W4 external-transaction entry …
+ ✓ … R2 (lock §8 期 1 反例二): the in-lock final evaluation fails with the REAL W4 boundary bound …
+ ✓ … 账侧 (lock §8 期 1): the redeemed cancel round leaves the SAME rows as the existing `POST /api/attendance/requests/:id/cancel` path on a twin fixture …
+ ✓ … unrecoverableExpired 呈现 (lock:86): an EXPIRED lot makes the counter NON-ZERO …
+ Test Files  1 passed (1)
+      Tests  19 passed (19)
+```
+
+**All green, from a virgin database, on the current branch tip: migration (ends at the same
+`zzzz20260918110000` file as every prior run), `tsc --noEmit`, the ci-wiring guard (6/6), both named
+unit suites (194/194), all seven `approval-cancel-round-*.db.test.ts` files (78/78 including the
+redemption file's own 19/19), and the redemption file's 19 `it()`-plus-sentinel titles printed by
+name — matching the static census in the "`it()` count reconciled" section above exactly, with no
+title missing and none renamed since that census was taken.**
+
+---
+
+## Mutation 台账汇总表(全 34 条;`(this unit)` 台账逐条汇总,不重新求值)
+
+Every row below restates a result already established in its own §-numbered section above; this
+table adds no new mutation and re-runs none of them (see the 定稿重跑记录 above for what WAS actually
+re-run — the plain suites, not the mutants). Two columns matter for reading this table honestly:
+**measured at** (which head the `cp`-backup/edit/run/restore cycle was actually performed against —
+a mutation ledger row is not automatically re-validated by a later merge just because the surrounding
+suite still passes green) and **verdict** (all 34 are load-bearing/discriminating except the one
+explicitly marked otherwise).
+
+| # | § | Measured at | Mutation (one line) | Result | Verdict |
+|---|---|---|---|---|---|
+| M-1 | §2.4 | base | `takeBusinessRefusal`: HTTP-entry branch made unreachable | exactly 2 red (the two HTTP-entry cases), 9 green | discriminating |
+| M-2 | §2.4 | base | delete the `SAVEPOINT` query | exactly 1 red, 10 green | discriminating |
+| M-3 | §2.4 | base | `throw result.httpError` → wrong error code/500 | red on the real-DB oracle | discriminating |
+| M-4 | §2.4 | base | drop the `business_refused` guard (unconditional rollback) | exactly 1 red, 13 green | discriminating |
+| M-5 | §3.6 | base | delete the closure's early `return` | exactly 1 red, 7 green | discriminating |
+| M-6 | §3.6 | base | delete `deactivateAllActiveAssignments` | **GREEN — ineffective**, reclassified in §3.6, not counted as a pass | non-discriminating (disclosed) |
+| M-7 | §3.6 | base | hard-code round outcome to `'rejected'` | exactly 1 red, 7 green | discriminating |
+| M-8 | §3.6 | base | reverse Q-D's lock order back to round-first | exactly 1 red, 12 green | discriminating |
+| M-9 | §3.3c (Q-E) | base | boundary assert uses `correlationId` instead of `orgId` | leg 4 red only, 16 green | discriminating |
+| M-10 | §3.3c (Q-E) | base | delete the classifier's business-key `ORDER BY` preference | leg 3 red only, 16 green | discriminating |
+| M-11 | §3.9.5 (Q-F) | base | delete the SAME shared `ORDER BY` preference | 2 red (Q-E leg 3 + Q-F leg 4), 19 green | discriminating |
+| M-12 | §3.9.5 (Q-F) | base | resolver takes org from instance, not request | leg 1 red only, 20 green | discriminating |
+| M-13 | §3.9.5 (Q-F) | base | move rollout-lock acquire to AFTER the row lock | leg 3 red only, 20 green | discriminating |
+| M-14 | §3.9.5 (Q-F) | base | delete the `action !== 'approve'` early-out | leg 5 red only, 22 green | discriminating |
+| M-15 | §3.9.5 (Q-F) | base | delete the `503 CANCEL_ROUND_DISPATCH_CONTENDED` mapping | leg 6 red only, 22 green | discriminating |
+| M-16 | §3.11.7 | base | unbound-port guard fails OPEN instead of closed | exactly 1 red, 11 green | discriminating |
+| M-17 | §3.11.7 | base | drop the `blocked` hand-off | exactly 1 red, 11 green | discriminating |
+| M-18 | §3.12.4 | base | revert the P1 fix (raw `roundId` as `operationId`) | 2 red exactly as predicted, 11 green | discriminating |
+| M-19 | §3.12.4 | base | change the namespace constant's last hex digit | exactly 1 red (the golden value), 184 green | discriminating |
+| M-20 | §3.13.3 | base | move the #5′ hook past step ⑥ | exactly 1 red (R2 only), 60 green | discriminating |
+| M-21 | §3.14.4 | base | delete the C-3 outcome write + its `rowCount` guard together | 4 red (I3 + the three other round-outcome assertions), 11 green | discriminating |
+| M-22 | §3.15.8 | base | populate `ipAddress`/`userAgent` instead of `null` | 1 red / 15 green | discriminating |
+| M-23 | §3.16.4 | base | seal payload replaced with a fixed stub | 1 red / 16 green | discriminating |
+| M-24 | §3.16.4 | base | `unrecoverableExpired` counter zeroed, branch kept | 1 red / 16 green | discriminating |
+| M-25 | §3.18.5 | u3 branch, pre-merge (`origin/…-u3@5af6e348f`) | fold the expired branch into plain success | 1 red / 16 green | discriminating |
+| M-26 | §3.18.5 | u3 branch, pre-merge | fold the whole classifier into one bucket | 2 red (both cases) / 15 green | discriminating |
+| M-27 | §3.18.5 | u3 branch, pre-merge | delete the durable audit-row write | 1 red / 16 green | discriminating |
+| M-29 | §3.19.3 | ⚠️ u2 branch, pre-merge (`origin/…-u2@028c57fbc`) — **not re-run against the merged/current file** | delete `'approve'` from the allow-set | isolated: 1 failed/17 skipped; full u2-branch file (pre-merge, 18 tests): 12 failed/6 passed | discriminating (membership-level red, not consequence-level) |
+| M-30 | §3.20.4 | ⚠️ u2 branch, pre-merge — **not re-run against the merged/current file** | delete the C-2 success write + its `rowCount` guard together (same shape as M-21) | isolated: 1 failed/18 skipped, red at its own `create` line; full u2-branch file (pre-merge, 19 tests): 5 failed/14 passed | discriminating |
+| M-31 | §3.22.5 | u2 branch, pre-merge | delete the whole `sealAttendanceResultOperationV1` call | 3 failed/16 passed — **confounded**, triggers a different rule first; **discarded**, superseded by M-32 | non-discriminating for its own claim (disclosed, superseded) |
+| M-32 | §3.22.5 | u2 branch, pre-merge | isolated replacement of M-31: `resolvedRequestId → null` only | exactly 1 red (`sealA` half only), 18 green (19) | discriminating |
+| M-33 | §3.10.5 (renumbered from `M-11`, §0 R-11) | base | restore the PRE-FIX `executeRequestCancel` and re-run Q-G | LEG 3 red, LEGs 1/2/4 green (1 failed/3 passed/23 skipped) | discriminating |
+| M-34 | §3.10.5 (renumbered from `M-12`, §0 R-11) | base | Q-G LEG 2 pointed at an unrelated `(request, instance)` pair | LEG 2 red, no contention (1 failed/26 skipped) | discriminating (also caught a vacuous JS-side assertion before shipping, §3.10.5) |
+
+**Caveat this table exists to make impossible to miss**: M-29–M-32's counts are exactly what u2
+measured on its OWN pre-merge branch. Nothing on this branch has re-run those four mutations against
+the post-merge / current file — the merge record and this 定稿 pass's own rerun above both confirm the
+FINAL file's plain (unperturbed) suite is still green (19/19), which is necessary but not sufficient
+evidence that the same four mutations would still redden the same way after the merge's renumbering
+and the two other lanes' insertions. Nothing in the merge (§0's own resolution notes) touched the
+production code paths those four mutations target, so there is no known reason to expect a different
+result — but "no known reason to expect otherwise" is not the same claim as "measured," and this row
+is why the distinction is not swept into a single "34/34 green" headline.
+
+---
+
+## 接线 / 哨兵 / s6a / `ci-realdb-step-contract` 证据(2026-09-18 定稿复核)
+
+`git diff --stat 1c98ff937..HEAD` (the merge commit through the current tip) touches only the two
+docs files this 定稿 pass is editing — so every command below runs against byte-identical source to
+what the merge record already measured; re-run here rather than merely cited, for the record:
+
+```
+$ git diff --stat 1c98ff937..HEAD
+ …approval-cancel-round-phase2-design-20260918.md       | 137 +++++++-----
+ …approval-cancel-round-phase2-verification-20260918.md | 241 +++++++++++++++++++++
+ 2 files changed, 325 insertions(+), 53 deletions(-)
+```
+
+**Four independent populations, all still 7** (no new `.db.test.ts` landed on this branch since the
+merge, so none of these needed an edit for this slice):
+
+```
+$ ls packages/core-backend/tests/integration/approval-cancel-round-*.db.test.ts | wc -l
+7
+$ grep -c "approval-cancel-round-.*\.db\.test\.ts" packages/core-backend/vitest.config.ts
+7
+$ sed -n '/CANCEL_ROUND_REALDB_FILES = \[/,/\]/p' packages/core-backend/tests/unit/approval-cancel-round-ci-wiring.test.ts \
+    | grep -c "\.db\.test\.ts"
+7
+$ grep -c "tests/integration/approval-cancel-round-.*\.db\.test\.ts \\\\" .github/workflows/plugin-tests.yml
+7
+```
+
+**`ci-realdb-step-contract.mjs` carries no `FILES` list of its own** (§3.17.3 already established
+this; re-confirmed, unchanged):
+
+```
+$ grep -n "FILES" scripts/ops/ci-realdb-step-contract.mjs | wc -l
+0
+```
+
+**s6a provenance pin — the workflow file's own bytes, re-hashed**:
+
+```
+$ shasum -a 256 .github/workflows/plugin-tests.yml
+b048a17f3ef9687073587fc9fe6486377f5a5f9d11abad1119b9e4e788d7b0c0
+$ grep pluginTestsWorkflow plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json
+    "pluginTestsWorkflow": "b048a17f3ef9687073587fc9fe6486377f5a5f9d11abad1119b9e4e788d7b0c0"
+$ node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
+sealed-export-package-provenance.test.cjs OK
+```
+
+Hash equal, guard OK — no re-pin owed (this slice changed zero `.yml` bytes since `a02930896`).
+
+**DML table-classification census — the migration this slice added is already claimed by name,
+not by symbol** (checklist item 14; `finding_p26_census_nearest_symbol_collision.md`'s trap named and
+avoided in the census's own comment):
+
+```
+$ grep -n "zzzz20260918110000_add_attendance_requests_approval_workflow_key" \
+    scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs
+699:      'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts',
+$ (packages/core-backend) npx vitest run tests/unit/attendance-w7-1a-inertness-sweep.test.ts --reporter=dot
+ ✓ tests/unit/attendance-w7-1a-inertness-sweep.test.ts (20 tests)
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+```
+
+**W7-R10 directory-root membership, checked by ROOT, not by basename grep** (checklist item 13's own
+warning: a basename grep against `w7-w6r5-guard-root-set.ts` returns 0 by construction, since the
+file holds directory globs, not filenames — that 0 is not evidence of anything):
+
+The three roots are `plugins/plugin-attendance/**`, `packages/core-backend/src/attendance/**`, and
+`packages/core-backend/src/attendance/w7-resolver/**`. This slice's own files, sorted by root
+membership rather than grepped by name:
+
+| File this slice touched or added | Falls under a W7-R10 root? | Which |
+|---|---|---|
+| `plugins/plugin-attendance/index.cjs` (modified) | yes | root 1 |
+| `packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts` (modified) | yes | root 2 |
+| `packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts` (modified) | yes | root 2 |
+| `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` (**new file**) | **no** | lives under `src/core/`, a plugin-agnostic host location — deliberately, per §5's own seam note ("modelled line-for-line on the existing `workday-calendar-port.ts` host↔plugin pattern"), not under any attendance-specific root |
+| `packages/core-backend/src/services/ApprovalProductService.ts` (modified) | no | not an attendance-domain file; approval-side dispatch |
+| `packages/core-backend/src/services/approval-bridge-types.ts` (modified) | no | approval-side types |
+
+No file this slice added falls into the guard's blind spot: the two attendance-domain edits are
+correctly IN the walked domain by directory (not verified by grepping their basenames against the
+root list, which would have told a reader nothing), and the one wholly new file is correctly OUTSIDE
+the attendance roots because it is not attendance-domain logic — it is a generic core-side port,
+same shape as the existing `workday-calendar-port.ts` precedent, which also lives outside these roots.
+This census is about a currently-inert FUTURE guard (the file's own header: "the future, W7-1 guard");
+nothing here is live-blocking today, and nothing this slice did widens or narrows that guard's future
+domain.
+
+---
+
+## 实现列车补充门审清单 — 逐条核(2026-09-18 定稿;`impl-supplementary-gate-checklist-20260918.md` 全 17 条)
+
+| # | 条款(节选) | 适用? | 核verdict | 证据 |
+|---|---|---|---|---|
+| 1 | `t2-source-freeze-ci-wiring.test.mjs` 闭世界;新 `.db.test.ts` 必须逐个进 45 个同族 `*-ci-wiring` 的硬编码数组 | 适用(共用) | **N/A for this slice — no new `.db.test.ts` file.** u2/u3 both extended the EXISTING `approval-cancel-round-redemption.db.test.ts`; the file population stayed at 7 in all four independent counts above. Nothing to add to any `*-ci-wiring` array. | 见上「接线证据」四计数 |
+| 2 | 在地惯例「NOT plugin-tests.yml」与锁 §6 的裁定相反,PR body 要写覆盖理由并重算 s6a | 适用(共用) | **CLOSED, pre-existing.** Phase-1's own PR (#5851) already carries this override and its s6a recount; this slice adds no new file to `plugin-tests.yml`, so the override is inherited, not re-decided. | phase-1 verification MD;s6a 哈希本节已重核,未变 |
+| 3 | 改 `plugin-tests.yml` 的 s6a 重钉需安静窗口 | 适用(共用) | **N/A — this slice changed zero bytes of `plugin-tests.yml`.** Byte-identical hash confirmed twice (merge record, this 定稿 pass). | 本节「s6a provenance pin」 |
+| 4 | 错误码不得降级成裸 HTTP 状态 | 适用(共用) | **PASS.** Every new code this slice throws (`CANCEL_ROUND_WINDOW_ANCHOR_MISSING`, `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED`, `CANCEL_ROUND_DISPATCH_CONTENDED`, `CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE`, `CANCEL_ROUND_BUSINESS_TARGET_MISSING`) goes through `ServiceError` with a named code — design MD §3.2's table traces each to its throw site. | 设计 MD §3.2;`handleApprovalsError` 判别式未改 |
+| 5 | J 行「未知 `section=` 令牌」/ C 行「`?category=` 与 `section` 同现」的分期勘误 | lane A only | **N/A — lane A(分组),非本切片。** | — |
+| 6 | 「1 落地」= 门审通过 vs 已合并 的求值 | lane A only | **N/A — lane A。** | — |
+| 7 | 前端 spec 位置基线 746/746 | lane A only | **N/A — lane A;本切片零前端改动。** | — |
+| 8 | 独立 vitest project 的 gate 必须断言 `NODE_ENV` | lane B only | **N/A — lane B(待办中心)。** | — |
+| 9 | `MIGRATION_EXCLUDE` 显式复制 / 触发集含所用 helper | lane B only | **N/A — lane B;本切片未新增独立 vitest project。** | — |
+| 10 | `validate-migration-exclude.sh` 是 WARN-ONLY,不能当门 | lane B only | **N/A — lane B。** | — |
+| 11 | 判据 E(代数守卫)属前端切片 2 | lane B only | **N/A — lane B。** | — |
+| 12 | A0 前两行复用现有 API 测试 | lane B only | **N/A — lane B。** | — |
+| 13 | W7-R10 是目录 root 清单,不是文件清单;新文件按 root 归属判断,不能按基名 grep | lane C(本切片) | **CLOSED, measured this pass — see the dedicated table above.** Two attendance-domain edits correctly inside the walked domain by root; the one new file correctly outside it (generic core-side port, not attendance logic). | 本节「W7-R10 directory-root membership」 |
+| 14 | 考勤四道普查钉(s6a hash / W7-R10 分类 / CI corpus / DML table-classification) | lane C(本切片) | **CLOSED, measured this pass.** s6a: hash equal, guard OK. W7-R10: see #13. CI corpus: the seven-file population is unchanged (no new corpus entry owed). DML table-classification: the new migration is already claimed BY RELPATH in `curated-debt-entries.cjs` (entry `X08`, avoiding the nearest-symbol trap by construction), and the classification test (`attendance-w7-1a-inertness-sweep.test.ts`) is green (20/20) on this tree. | 本节「DML table-classification census」;`curated-debt-entries.cjs:658-699` |
+| 15 | FE 同步钉:既有 spec 是手抄字面量数组,按锁 §14.3 #12 应改成 `readFileSync` 源码钉 | lane C(本切片) | **UNCHANGED, not touched by this slice — and correctly so.** `apps/web/tests/approvalBatchTransferView.spec.ts:284-298`'s transcribed-array pattern is a phase-1 finding, not something this slice's own scope (backend-only: no `apps/web` file appears in `git diff --stat feat/approval-cancel-round-phase1..HEAD`). §3.18.7b's blast-radius check (the two new tokens `cancellationOutcome`/`unrecoverableExpired`, `grep -rn` over `apps/web/src` → 0 hits) is the relevant input for THIS slice and is already measured: **zero FE surface renders either new token**, so there is nothing for a transcribed-array spec to have drifted against. Item 15's own fix (spec → `readFileSync`) remains open, owed to whichever slice next touches that spec, not manufactured here as a false "done." | §3.18.4/§3.18.7b;`git diff --stat feat/approval-cancel-round-phase1..HEAD` has no `apps/web/**` entries |
+| 16 | 锁 §5 I6「撤销不限次」要有一行验收 | lane C(本切片) | **CLOSED, pre-existing on this branch.** The redemption suite's own first case (`"chain (§5 I6, 撤销不限次): revoke terminates round 1 …"`) drives revoke→new round→reject→new round in sequence on one document, asserting no count-based refusal. | `approval-cancel-round-redemption.db.test.ts`, case name above, green in every rerun this document records |
+| 17 | §14.1 CJS 镜像常量 / §14.3 legacy-catch-500 mutation / §2-G2 时间锚,任务书零映射 | lane C(跨 C-1/C-2) | **CLOSED, split across both phases — not invented as one slice's work.** CJS mirror constant: closed in **phase 1** (`approval-cancel-round-plugin-mirror-constant.test.ts`, 9 cases, phase-1 verification MD line 444). legacy-catch-500 mutation: closed and re-verified live in **phase 1** (its §A3 Mutation 1). §2-G2 time anchor: phase-1's own answer was N/A for the AMEND-round field it was checking (out of scope for phase 1's schema); **this slice (§3.2) builds the DIFFERENT, in-scope §2-G2 anchor for the CANCEL round's own window** — `MIN(created_at)` of the document's `to_status='approved'` audit rows — and titles that section "(the checklist's item 17)" itself. All three sub-clauses are now accounted for; none was silently dropped between phases. | phase-1 verification MD:444;this file §3.2 |
+
+---
+
+## Owner 待裁项 + 「留给 C-3」的项(2026-09-18 定稿汇总;不裁决,只如实列)
+
+The computed task asked for "C-1 三项" among the owner-pending items. **That count does not bind**:
+enumerating every item actually open below (from design MD §7/§8 and this file's own §4) gives more
+than three, and forcing a triple would mean either inventing a false grouping or silently dropping a
+real item to make the arithmetic work. Each row below is tagged by which contract it traces to.
+
+| 项 | 溯源 | 现状(不裁决) |
+|---|---|---|
+| `unrecoverableExpired` 的用户面呈现:三 token 默认值(`cancelled` / `cancelled_with_unrecoverable_expired` / `cancelled_reversal_unreported`),`getApproval` 不投影该字段 | **新增于 C-2**(u3, §3.18) | 持久化半边已闭合并测量(§3.16,值 120);呈现半边是实现者按默认值关的,不是 owner 已批的形状;无 FE 面渲染(0 命中) |
+| `attendance-parity.db.test.ts` 退役,四来源溯源(锁 0 次点名 / phase-1 design MD 4 次 / phase-1 verification MD 8 次 / PR #5851 body 1 次) | **跨 C-1/C-2**(C-1 命名的伪影,C-2 的 §3.17 把普查扩到四源) | 结论未变:无 owner-ratified 来源点名此文件名;无引用可复原(从未存在于任何 ref) |
+| C-1 审计行(`revoke`)的 acting identity —— 本轮次的请求人 vs 审批人 vs 系统哨兵,锁未点名 | **C-1 遗留,C-2 的账侧比对依赖此裁决**(§3.11.4) | 账侧比对(§3.15)是**条件性**的:owner 若裁定审计行应携带审批人或系统哨兵而非请求人,该用例按设计变红,不是要悄悄放宽排除表来消红 |
+| 账侧 provenance 背离:`approval_records.ip_address`/`user_agent` 兑现路径为 `null`、W4 HTTP 路径有值 | **新增于 C-2**(§3.15.5) | 是否算「逐字节等价」满足(诚实缺席)或需要合成 provenance 标记,owner 未裁;本分支零依赖 |
+| rollout-lock 预读的 org 来源:采用 `classifyAndLockAttendanceRequestForInstance` 而非 `filterBulkReassignDiscoveryForAttendance`(两者在 Q-E leg 3 上分歧,被拒的谓词承认了被采纳的谓词拒绝的 org) | **新增于 C-2**(§4.2,verification §3.3c) | 按 `feedback_second_narrower_artifact_is_contract_narrowing.md` 的方向标为合同形状选择,非例行复用决定;本分支零依赖另一谓词 |
+| §8 期 1 R1 计数(现 9 处)是否要把新增的 #5′ 出口锚点算进去,变成 10 | **新增于 C-2**(design MD §7.1) | #5′ 是判据 IV 的出口锚点,不是拦截点守卫,按构造不带 `CANCEL_ROUND_OUTLET_FORBIDDEN` 负控;是否要登记为第 10 处,owner 未裁 |
+| `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` 的「拒绝裁决」设计选择 | **新增于 C-2**(§3.2) | 锁点名了锚点本身,没点名锚点缺失时的处置;本分支選擇 409 回滚而非直接判 `expired`,已标记待登记 |
+
+**「留给 C-3」——如实说:没有独立的 C-3 切片。** 目标文档(`goal-three-locks-full-implementation-
+20260918.md:9`)的切片清单在「线 C 撤销」下只列 C-1 合同层与 C-2 兑现与收口两项;锁文自己的三合同命名
+(C-1/C-2/C-3)里,**C-3(轮次终结契约)已经由本切片的判据 IV 工作整体交付**(design MD §7 的原话)。
+下面是 C-3 契约交付后仍然打开的真实残留项,不是伪造出来凑「留给下一切片」这句话:
+
+| 残留项 | 状态 |
+|---|---|
+| 卡片失效(C-3 row 3 第三列,已挂起的取消轮的卡片) | 可能存在,pre-existing,未扫(§3.8) |
+| R1 计数是否纳入 #5′ | 见上表,owner 待裁 |
+| §5 I3 的两个终态写入方 | **两个都已探测**(§3.14 + §3.20),不是残留 |
+| FE / 通知面:C-3「卡片失效、端点返回一致」列 | 完全未动(§4 最后一条) |
+| 决策适配器(非取消适配器)的同一死锁形状 | 仍活跃,故意留给考勤线(§1.1,§0 R-3) |
+| `filterBulkReassignDiscoveryForAttendance` 的非确定性 org 解析 | 考勤线发现,本分支零依赖(§3.3d) |
+| lock:227 未排级的两个关系(`attendance_schedule_dispatch_requests`、`attendance_request_calculation_snapshots`) | owner 登记项,未擅自排序(§3.10.1) |
+| 账侧比对的 non-legacy(authoritative/shadow)双胞胎 | 需要 rollout-registry 夹具工作,本分支未做(§3.15.11) |
+
+---
+
+## 设计 MD 逐 file:line 复核(2026-09-18 定稿;方法与结果表见设计 MD 自己的新增小节)
+
+This 定稿 pass re-checked every `file:line` citation in the companion design document
+(`approval-cancel-round-phase2-design-20260918.md`) against the current tree, because that document's
+own header states its citations were checked against `a02930896` — a commit BEFORE the u1→u3→u2
+merge, and the merge's own diff stat shows `ApprovalProductService.ts` changed by 41 net lines. Full
+methodology, the corrected numbers, and which files were confirmed UNCHANGED live in the design MD's
+own new §10 (added by this pass) — not duplicated here to avoid two documents disagreeing on which
+one is authoritative for a design-side citation.
