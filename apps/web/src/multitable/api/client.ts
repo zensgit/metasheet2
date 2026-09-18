@@ -2,6 +2,10 @@
  * MultitableApiClient — typed wrapper for all /api/multitable/* endpoints.
  * Uses apiFetch from project utils; accepts optional fetchFn for tests.
  */
+import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
+  type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+
 import type {
   MetaBase,
   MetaSheet,
@@ -2997,6 +3001,20 @@ export class MultitableApiClient implements CommentsApiClient {
   // binds a generation and scope, and both sync execute and async accept consume
   // only that server identity. Job state and owner actions never accept a plan,
   // worker fence, or caller-provided progress.
+  async captureRecoveryArchive(sheetId: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> {
+    requireRecoveryArchiveRequestId(requestId)
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/captures`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId }),
+    })
+    return requireRecoveryArchiveCaptureStatus(await this.parseJson<unknown>(res), requestId)
+  }
+
+  async readRecoveryArchiveCapture(sheetId: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> {
+    requireRecoveryArchiveRequestId(requestId)
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/captures/${requestId}`)
+    return requireRecoveryArchiveCaptureStatus(await this.parseJson<unknown>(res), requestId)
+  }
+
   async listRecoveryArchiveCatalog(
     sheetId: string,
     params?: { cursor?: string; limit?: number },
