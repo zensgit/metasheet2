@@ -3385,3 +3385,213 @@ they are.
   `attendance_schedule_dispatch_requests` and `attendance_request_calculation_snapshots` have no
   rank in lock:227's class list (§3.10.1); flagged for owner registration, not ordered.
 - **FE / notification side** — C-3's 「卡片失效、端点返回一致」 column is untouched.
+
+## 合流记录 (u1 → u3 → u2 onto `feat/approval-cancel-round-phase2`, 20260918)
+
+Worktree: `/private/tmp/claude-501/-Users-chouhua-Downloads-Github-metasheet2/6f6639a7-0412-43de-bd8b-0b416d18ae6b/scratchpad/wt-cancel-round-p2`.
+Pre-merge HEAD `a02930896` (31 commits, tree clean, matched `origin/feat/approval-cancel-round-phase2`).
+Lane SHAs confirmed against origin before merging:
+
+```
+$ git fetch origin && git rev-parse origin/feat/approval-cancel-round-phase2-u1 \
+    origin/feat/approval-cancel-round-phase2-u3 origin/feat/approval-cancel-round-phase2-u2
+de8fcbbe2a8205c674288ae437d1fc2d135acecf   # u1
+5af6e348fa350f0975bdb199b8975b34b267b8fc   # u3
+028c57fbcb1e55ada1e97a27a5dec2d21455a27f   # u2
+```
+
+### Merge sequence
+
+```
+$ git merge --no-ff origin/feat/approval-cancel-round-phase2-u1
+Merge made by the 'ort' strategy.
+ ...approval-cancel-round-phase2-design-20260918.md | 511 +++++++++++++++++++++
+ 1 file changed, 511 insertions(+)
+ create mode 100644 docs/development/approval-cancel-round-phase2-design-20260918.md
+# NO CONFLICT.
+
+$ git merge --no-ff origin/feat/approval-cancel-round-phase2-u3
+Merge made by the 'ort' strategy.
+ ...al-cancel-round-phase2-verification-20260918.md | 336 ++++++++++++++++++++-
+ .../core/attendance-cancellation-execution-port.ts |  94 ++++++
+ .../src/services/ApprovalProductService.ts         |  41 ++-
+ .../src/services/approval-bridge-types.ts          |  17 ++
+ .../approval-cancel-round-redemption.db.test.ts    |  72 ++++-
+ 5 files changed, 540 insertions(+), 20 deletions(-)
+# NO CONFLICT.
+
+$ git merge --no-ff origin/feat/approval-cancel-round-phase2-u2
+Auto-merging docs/development/approval-cancel-round-phase2-verification-20260918.md
+CONFLICT (content): Merge conflict in docs/development/approval-cancel-round-phase2-verification-20260918.md
+Auto-merging packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+CONFLICT (content): Merge conflict in packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+Automatic merge failed; fix conflicts and then commit the result.
+```
+
+### Conflict 1 — verification MD: BOTH lanes independently added sections numbered `3.17`–`3.20`
+
+u3 (merged first) claimed `## 3.17` (`attendance-parity.db.test.ts` 退役对账) and `## 3.18`
+(`unrecoverableExpired` 呈现, surface half) from the shared base's last section, `3.16`. u2,
+branched from the SAME base, independently numbered its own four new sections `3.17`–`3.20` too
+(§9-9 成员半边 / §5 I3 C-2 半边 / 账侧七步处置 / ⑥ 的账侧半边). Resolution: kept BOTH lanes' full
+prose and evidence — no line dropped from either side — and renumbered every one of u2's own
+headers, subsection numbers, and forward/backward cross-references to `3.19`–`3.22`:
+
+```
+$ grep -n "^## " docs/development/approval-cancel-round-phase2-verification-20260918.md | tail -8
+2351:## 3.17 `attendance-parity.db.test.ts` 退役对账 ...                (u3, unchanged)
+2471:## 3.18 `unrecoverableExpired` 呈现 — the SURFACE half ...          (u3, unchanged)
+2667:## 3.19 §9-9 允许集的 `approve` 成员半边 ...                        (u2, was 3.17)
+2787:## 3.20 §5 I3 「终结即释放」 的 C-2 半边 ...                        (u2, was 3.18)
+2889:## 3.21 账侧七步的逐步处置 ...                                      (u2, was 3.19)
+3034:## 3.22 ⑥ 的账侧半边 ...                                            (u2, was 3.20)
+3194:## 4. What this slice has NOT proven yet
+```
+
+A second, independent collision was found and fixed the same way: u2 also assigned mutation IDs
+`M-25`–`M-28` to its own four mutations, colliding with u3's own `M-25`/`M-26`/`M-27` (§3.18.5's
+ledger). u3's IDs were kept; u2's were remapped `M-25→M-29`, `M-26→M-30`, `M-27→M-31` (the
+discarded/confounded probe), `M-28→M-32`, across every occurrence — including TWO forward-reference
+table cells (lines 1818, 1873, inside the pre-existing §3.14/§3.15 tables) and SEVEN occurrences
+inside the running §4 summary that were outside the git-conflicted hunks entirely (git auto-merged
+them because u3 never touched those exact lines, so they carried u2's stale numbering silently):
+
+```
+$ grep -c "M-2[5-9]\|M-3[0-2]" docs/development/approval-cancel-round-phase2-verification-20260918.md
+# manually inspected each hit (28 total) and classified by section context — see the two tables
+# below for the resulting, collision-free ledger.
+```
+
+u3's ledger (unchanged, `§3.16`–`§3.18`): `M-25` (expired branch folded into plain success),
+`M-26` (whole classifier folded into undifferentiated bucket), `M-27` (durable write deleted).
+
+u2's ledger (renumbered, now `§3.19`–`§3.22`): `M-29` (was M-25: `'approve'` deleted from
+`CANCEL_ROUND_ALLOWED_ACTIONS`), `M-30` (was M-26: the C-2 success write + its rowCount guard
+deleted together), `M-31` (was M-27, discarded as a confounded mutant — triggered a different rule
+first), `M-32` (was M-28, M-31's isolated replacement: `resolvedRequestId → null` only).
+
+One stale prose comment in the test file was corrected rather than kept: u2's trailing comment
+("Measured as a negative so that the day a channel IS added, this line goes red…") described code
+that u3's own rewrite (kept via git's automatic, non-conflicting merge of the lines immediately
+below) had already turned from a negative into a positive assertion — keeping u2's sentence verbatim
+would have asserted something false about the very next lines, so it was dropped and u3's own
+comment (which correctly describes the current code) was kept in its place. No assertion, evidence
+line, or mutation result was removed — only this one now-contradicted narrative sentence.
+
+### Conflict 2 — redemption test file: both lanes extended the SAME 账侧-parity `it()` block
+
+u3 added a comment-only block (no new statements) introducing the DTO/`cancellationOutcome` checks
+that immediately follow (unconflicted, shared tail). u2 added real measurement code (`sealCount`,
+`sealA`/`sealB`, `sealRowA`, `reversalA` assertions) for a DIFFERENT sub-claim (the C-1 step ⑥
+seal-vs-response-body divergence). Resolution: kept u2's functional code first, then u3's comment
+immediately before the shared tail it introduces — both lanes' code and both lanes' load-bearing
+prose survive; only u2's one stale trailing paragraph (identified above) was dropped. Two
+cross-reference fixes applied inside u2's own kept code: `§3.20.4` → `§3.22.4` (inline), and (outside
+the git-conflicted hunk, in the earlier "§9-9 允许集" `it()` block at `:1143-1144` and `:1193/:1216`)
+`§3.17, M-25` → `§3.19, M-29` and `M-26` → `M-30`.
+
+### Resolution verification
+
+```
+$ git ls-files -u | wc -l
+0
+$ grep -c "^<<<<<<<\|^=======$\|^>>>>>>>" \
+    docs/development/approval-cancel-round-phase2-verification-20260918.md \
+    packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+docs/development/approval-cancel-round-phase2-verification-20260918.md:0
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:0
+$ grep -o "M-[0-9]\+" docs/development/approval-cancel-round-phase2-verification-20260918.md \
+    | sort -t- -k2 -n | uniq -c
+# M-1..M-24 (base, unperturbed), M-25/M-26/M-27 = u3 (3 each, all inside §3.16), M-29(2)/M-30(7)/
+# M-31(1)/M-32(5) = u2 (renumbered) — no ID appears in both a u3-section context and a u2-section
+# context.
+```
+
+Committed `1c98ff937` ("merge(approval): fold u2 lane into phase2 stack") and pushed
+(`git push -u origin feat/approval-cancel-round-phase2` — accepted, no force).
+
+### CI-wiring census, re-run mechanically post-merge (not read off the diff)
+
+`plugin-tests.yml` is BYTE-IDENTICAL to `a02930896` (`git diff a02930896 HEAD -- .github/workflows/plugin-tests.yml` → 0 lines), so the s6a `pluginTestsWorkflow` digest is untouched by construction — verified by running the guard, not merely inferred:
+
+```
+$ node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
+sealed-export-package-provenance.test.cjs OK
+```
+
+Five wiring points, all still 7-file (no new `.db.test.ts` landed on this branch — the only test file
+either lane touched is the pre-existing `approval-cancel-round-redemption.db.test.ts`):
+
+```
+$ ls packages/core-backend/tests/integration/approval-cancel-round-*.db.test.ts | wc -l
+7
+$ grep -c "approval-cancel-round-.*\.db\.test\.ts" packages/core-backend/vitest.config.ts
+7
+$ sed -n '/CANCEL_ROUND_REALDB_FILES = \[/,/\]/p' packages/core-backend/tests/unit/approval-cancel-round-ci-wiring.test.ts | grep -c "\.db\.test\.ts"
+7
+$ grep -n "approval-cancel-round-.*\.db\.test\.ts" .github/workflows/plugin-tests.yml
+1575:        # The seven `approval-cancel-round-*.db.test.ts` files at the tail of this run-list were   ← comment, not a run-list entry
+1666-1672: seven `tests/integration/approval-cancel-round-*.db.test.ts \` lines               ← the actual 7 run-list entries
+```
+
+`scripts/ops/ci-realdb-step-contract.mjs` exports no `FILES` list (verification §3.17.3 already
+established this — it is a shared predicate module the `CANCEL_ROUND_REALDB_FILES` constant above
+consumes, not a second independent population); `grep -n "FILES" scripts/ops/ci-realdb-step-contract.mjs` → 0 hits, unchanged post-merge.
+
+### Full verification run, private DB `metasheet2_lock_c2_merge`
+
+```
+$ dropdb -h localhost -p 5432 -U metasheet metasheet2_lock_c2_merge   # error: does not exist (confirms virgin)
+$ createdb -h localhost -p 5432 -U metasheet metasheet2_lock_c2_merge
+$ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_merge \
+    npx tsx src/db/migrate.ts
+# → all migrations executed successfully, ends at zzzz20260918110000_add_attendance_requests_approval_workflow_key
+
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+# → clean (exit 0)
+
+$ (packages/core-backend) npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+
+$ (packages/core-backend) npx vitest run tests/unit/approval-product-service.test.ts tests/unit/approval-admin-jump-service.test.ts --reporter=dot
+ ✓ tests/unit/approval-admin-jump-service.test.ts (9 tests)
+ ✓ tests/unit/approval-product-service.test.ts (185 tests)
+ Test Files  2 passed (2)
+      Tests  194 passed (194)
+
+$ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_merge EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts \
+    tests/integration/approval-cancel-round-creation.db.test.ts \
+    tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
+    tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts \
+    tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
+    tests/integration/approval-cancel-round-redemption.db.test.ts \
+    tests/integration/approval-cancel-round-seat-guards.db.test.ts \
+    --reporter=dot
+ Test Files  7 passed (7)
+      Tests  78 passed (78)
+
+$ (packages/core-backend) DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_lock_c2_merge EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+ ✓ tests/integration/approval-cancel-round-redemption.db.test.ts (19 tests)
+ Test Files  1 passed (1)
+      Tests  19 passed (19)
+```
+
+No new `.db.test.ts` file was added by this slice (u2 and u3 both extended the existing
+`approval-cancel-round-redemption.db.test.ts`), so no additional file needed adding to any of the
+four wiring populations or to the ci-wiring guard's own population — all already carried it before
+this merge (verification §3.17.3).
+
+**All green: typecheck, both named units (194/194), the ci-wiring guard (6/6), the s6a provenance
+guard, and all seven `approval-cancel-round-*.db.test.ts` files (78/78, including the merged
+redemption file's own 19/19).**
+
+Design MD's u1-authored "§9 合流后待更新" section updated in place against this merged tree (not
+re-guessed): §2.2's `pending → applied` citation, §7.1's "only one terminal writer" bullet (flipped
+to closed), §8's first two bullets (呈现 surface: half-closed with a default; parity retirement:
+verdict unchanged, census widened), §1.1's two matching bullets, and six new rows in §1's main
+scope table for u2/u3's landed units — see that document's own §9 for the full account.
