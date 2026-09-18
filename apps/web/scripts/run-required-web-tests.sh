@@ -1670,7 +1670,9 @@ exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spe
 # line 477 above, so this line re-running it changes no coverage, just re-executes an already-gated
 # file. This token covers the new shared component in isolation only; the acceptance-J integration
 # spec (403 SESSION_ORG_REQUIRED → selector → retry → 201, wired into the approval template center
-# page) lands in a later slice with its own token.
+# page) has since landed on this same branch as the `ApprovalTemplateGroupsPanel` token below (P3
+# hygiene wave, 2026-09-19: this sentence originally said "lands in a later slice with its own
+# token" — stale, since that slice had already landed here before this comment was corrected).
 #
 # A-2 slice 2 (approval form grouping lock v2.13 §6 phase 1 FE client, 2026-09-18): `approvalTemplateGroupsClient`
 # — unit spec for the seven group-endpoint client functions added to `approvals/api.ts`
@@ -1678,9 +1680,11 @@ exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spe
 # 403 `SESSION_ORG_REQUIRED` throws `ApprovalApiError` with `.code` intact rather than being
 # collapsed to a generic message — the case the front-end 403-retry flow (a later slice) will
 # branch on. Verified against every existing token above: none is a substring of it, it is a
-# substring of none (`python3` bidirectional scan, 394 tokens, zero collisions); `npx vitest run
-# approvalTemplateGroupsClient --reporter=verbose` locally confirms it resolves to exactly this one
-# spec file (8/8 tests). This token covers the client functions in isolation only.
+# substring of none (`python3` bidirectional scan, 397 tokens, zero collisions — recomputed 2026-09-19
+# in the P3 hygiene wave; see the FE verification MD's hygiene section for why this moved from the
+# original "394 tokens" snapshot); `npx vitest run approvalTemplateGroupsClient --reporter=verbose`
+# locally confirms it resolves to exactly this one spec file (8/8 tests). This token covers the
+# client functions in isolation only.
 #
 # A-2 scope item 4 (approval form grouping lock v2.13 §4 acceptance J, 2026-09-18):
 # `ApprovalTemplateGroupsPanel` — the integration spec this line's earlier `SessionOrgSwitcher`
@@ -1703,3 +1707,21 @@ exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spe
 # above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 395
 # tokens, zero collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally
 # confirms it resolves to exactly this one spec file (3/3 tests).
+# above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 397
+# tokens, zero collisions — recomputed 2026-09-19 in the P3 hygiene wave; see the FE verification
+# MD's hygiene section for why this moved from the original "395 tokens" snapshot); `npx vitest run
+# ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it resolves to exactly this one
+# spec file (3/3 tests).
+#
+# P3 hygiene wave correction (2026-09-19): the three tokens above were originally appended as a
+# SECOND, duplicate copy of this entire `exec npx vitest run ...` line instead of being inserted
+# into the one below — because bash's `exec` builtin unconditionally replaces the process on the
+# FIRST such line reached (no `if`/`case` guards this line), that duplicate line was dead code, and
+# none of `SessionOrgSwitcher.spec.ts` / `approvalTemplateGroupsClient` / `ApprovalTemplateGroupsPanel`
+# were ever exercised by the required `web-tests` job on this branch until this commit folded them
+# into the one live line below. Root cause: commit `96c512876` (`2ef7add98` on this branch after a
+# later rebase) added the duplicate copy rather than editing the existing line in place; three later
+# commits kept appending their own tokens to that dead copy without anyone noticing, because both
+# `tail -1` (used by the A-2 gate report) and this file's own verification-MD Python helper's
+# first-match `.startswith(...)` scan only ever look at ONE `exec npx vitest run` line and silently
+# picked the wrong one. See the FE verification MD's P3 hygiene section for the full repro.
