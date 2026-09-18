@@ -36,6 +36,12 @@
  * acceptance row exercises it. Reusing the SAME code the lock already assigns to the link-time
  * "this group is archived" case (rather than inventing an eighth code) reads correctly for both
  * the link-time and archive-time occurrences of the same underlying fact.
+ *
+ * `GROUP_NAME_UNSUPPORTED` (400, added in the design-gate-A3 回流修复 round, 2026-09-18) is
+ * likewise an implementer's request-shape mapping, not a ninth ratified code — see
+ * `mapGroupConstraintError`'s doc comment. It exists ONLY because the ratified §2 non-blank CHECKs
+ * reject non-ASCII input; it does not widen, and must not be read as widening, what those CHECKs
+ * accept.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -122,13 +128,36 @@ function newGroupId(): string {
 }
 
 /**
- * Maps a raw PostgreSQL 23505 (unique_violation) — whether raised at statement time (the
- * IMMEDIATE `uq_atg_org_name_active` partial index) or at COMMIT time (the DEFERRABLE
- * `atg_sort_unique`) — onto the lock's typed `ServiceError`s. `error.constraint` (not just
- * `error.code`) is the discriminator: a same-name concurrent write can hit the immediate name
- * index first even when the caller's intent was a sort-order collision (§2 / acceptance E, "同名行
- * 会先撞立即唯一索引"). Anything else (including an already-typed `ServiceError` thrown deeper in
- * the same transaction, e.g. GROUP_NOT_FOUND/GROUP_ARCHIVED) passes through unchanged.
+ * Design-gate A-3 (`design-gate-A3-phase2-20260918.md`, P1-3, real-DB-measured M5): the lock's §2
+ * non-blank CHECKs (`atg_name_nonblank`, `atg_org_nonblank`, `atgl_org_nonblank`) are
+ * `CHECK (col ~ '[!-~]')` — printable-ASCII-only, copied verbatim from
+ * `zzzz20260715210000_create_approval_attachments.ts:22-25`, where it guards two IDENTIFIER
+ * columns, never a human-typed display name. Applied to `name` it rejects every pure-CJK group
+ * name (`'人事' ~ '[!-~]'` = false; measured), which is the product's OWN placeholder text
+ * (`TemplateAuthoringView.vue:221`: "如 请假 / 采购 / 报销") — so unmapped, this was a raw
+ * `DatabaseError` (code 23514, statusCode undefined) reaching `handleApprovalsError`'s generic-500
+ * fallback (it only special-cases `ServiceError`), on the exact endpoint this row's create handler
+ * serves. `org_id`'s two occurrences are defense-in-depth only — the route layer already 403s a
+ * blank `req.authenticatedTenantId` before any call into this file (§2 "org 从哪来" / A‴) — mapped
+ * anyway so any other caller of these exported functions gets a typed 400, not a DB leak.
+ */
+const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
+
+/**
+ * Maps raw PostgreSQL constraint violations onto the lock's typed `ServiceError`s:
+ *  - 23505 (unique_violation) — whether raised at statement time (the IMMEDIATE
+ *    `uq_atg_org_name_active` partial index) or at COMMIT time (the DEFERRABLE
+ *    `atg_sort_unique`). `error.constraint` (not just `error.code`) is the discriminator: a
+ *    same-name concurrent write can hit the immediate name index first even when the caller's
+ *    intent was a sort-order collision (§2 / acceptance E, "同名行会先撞立即唯一索引").
+ *  - 23514 (check_violation) on one of `NONBLANK_CHECK_CONSTRAINTS` — see the block comment above.
+ *    This is a REQUEST-SHAPE mapping, not a loosening of the CHECK: the constraint itself is a
+ *    RATIFIED §2 clause and only an owner-approved lock erratum can widen it (this slice's
+ *    verification MD carries the "owner 勘误请示": `CHECK (btrim(name) <> '')`). Until that lands,
+ *    a pure-CJK (or otherwise non-printable-ASCII) name still cannot be created — this function's
+ *    only job is to stop the raw DB error from leaking through as an undifferentiated 500.
+ * Anything else (including an already-typed `ServiceError` thrown deeper in the same transaction,
+ * e.g. GROUP_NOT_FOUND/GROUP_ARCHIVED) passes through unchanged.
  */
 function mapGroupConstraintError(error: unknown): unknown {
   if (error instanceof ServiceError) return error
@@ -140,6 +169,20 @@ function mapGroupConstraintError(error: unknown): unknown {
     if (pgErr.constraint === 'atg_sort_unique') {
       return new ServiceError('Group sort order conflict', 500, 'GROUP_SORT_CONFLICT')
     }
+  }
+  if (
+    pgErr
+    && typeof pgErr === 'object'
+    && pgErr.code === '23514'
+    && typeof pgErr.constraint === 'string'
+    && NONBLANK_CHECK_CONSTRAINTS.has(pgErr.constraint)
+  ) {
+    return new ServiceError(
+      '当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误',
+      400,
+      'GROUP_NAME_UNSUPPORTED',
+      { constraint: pgErr.constraint },
+    )
   }
   return error
 }
