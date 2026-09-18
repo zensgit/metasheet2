@@ -315,6 +315,61 @@ describeIfDatabase('Approval template groups — §6 phase 3 reorder endpoint (l
     expect((await blankEntry.json()).error.code).toBe('GROUP_REORDER_IDS_REQUIRED')
   })
 
+  // ── authorization (gate impl-gate-A4-round1-20260918.md §2 P2-1) ─────────────────────────────
+  // Lock §3 I7 names "重排" (reorder) explicitly among the write endpoints that carry
+  // `approvalTemplateAdminGuard`; lock §4 row F's mutation column ("去掉写端点 guard ⇒ 非管理员
+  // 201,红") applies to this endpoint too. Before this test, that assertion was DEAD for
+  // `/api/approval-template-groups/reorder` specifically — the round-1 gate's M11 mutation probe
+  // (deleting `approvalTemplateAdminGuard` from `routes/approvals.ts:1288`) left all four real-DB
+  // suites, the full no-DB unit run, and both `ci-wiring` guards green, because nothing in the repo
+  // sent an unprivileged request at this ONE route. Same actor shape as the phase-1 lifecycle
+  // file's row F (`roles: 'user'`, an unrelated permission, no `approval-templates:manage` /
+  // `approvals:admin-templates`).
+  it('authorization: reorder requires approvalTemplateAdminGuard — a non-admin gets 403 and sort_order is left untouched; the same body from an admin succeeds', async () => {
+    const org = trackOrg(`atg-reorder-auth-${TS}`)
+    const admin = await tok(base, `reorder-auth-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+    const nobody = await tok(base, `reorder-auth-nobody-${TS}`, { roles: 'user', perms: 'multitable:read', tenantId: org })
+
+    const g1 = await createGroup(base, admin, `Reorder Auth G1 ${TS}`)
+    const g2 = await createGroup(base, admin, `Reorder Auth G2 ${TS}`)
+    expect([g1.sortOrder, g2.sortOrder]).toEqual([1, 2])
+
+    const asNobody = await httpReq(base, '/api/approval-template-groups/reorder', nobody, {
+      method: 'POST',
+      body: { groupIds: [g2.id, g1.id] },
+    })
+    expect(asNobody.status).toBe(403)
+    // Discriminates "the guard itself denied this" from "the guard passed and something else
+    // downstream returned 403" (e.g. `resolveApprovalTemplateGroupOrgId`'s `SESSION_ORG_REQUIRED`,
+    // shaped `{ok:false,error:{code,...}}`, per gate P3-5) — `rbacGuardAny`'s own denial body is
+    // the bare string `{ error: 'Insufficient permissions' }` (`rbac/rbac.ts`), with no `code`
+    // field, same discriminator as the phase-1 lifecycle file's `§2(d)` case.
+    expect((await asNobody.json()).error).toBe('Insufficient permissions')
+
+    // Denial must not have touched sort_order — the reversed permutation in the denied body would
+    // be visible immediately if the guard were bypassed.
+    const rowsAfterDenied = await query<{ id: string; sort_order: number }>(
+      `SELECT id, sort_order FROM approval_template_groups WHERE org_id = $1 ORDER BY sort_order`,
+      [org],
+    )
+    expect(rowsAfterDenied.rows.map((r) => r.id)).toEqual([g1.id, g2.id])
+    expect(rowsAfterDenied.rows.map((r) => Number(r.sort_order))).toEqual([1, 2])
+
+    // Positive control: the SAME body, SAME org, from an admin — the endpoint itself works and
+    // this isn't a 403-on-everything guard misconfiguration.
+    const asAdmin = await httpReq(base, '/api/approval-template-groups/reorder', admin, {
+      method: 'POST',
+      body: { groupIds: [g2.id, g1.id] },
+    })
+    expect(asAdmin.status).toBe(200)
+    const rowsAfterAdmin = await query<{ id: string; sort_order: number }>(
+      `SELECT id, sort_order FROM approval_template_groups WHERE org_id = $1 ORDER BY sort_order`,
+      [org],
+    )
+    expect(rowsAfterAdmin.rows.map((r) => r.id)).toEqual([g2.id, g1.id])
+    expect(rowsAfterAdmin.rows.map((r) => Number(r.sort_order))).toEqual([1, 2])
+  })
+
   // ── E phase-3 leg: two concurrent production reorders, constructed real concurrency ─────────
   it('E (phase 3): two concurrent reorders of the SAME org both succeed; the final state is exactly ONE side\'s complete 1..n permutation, never a torn mix', async () => {
     const org = trackOrg(`atg-reorder-concurrent-${TS}`)
