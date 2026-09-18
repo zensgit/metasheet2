@@ -114,21 +114,21 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
   it('M6 positive control: hard-deleting a linked template cascades through group_links into the batch_links row (no FK violation)', async () => {
     const org = `atgbb-m6-pos-${TS}`
     const tmplId = await createTemplate(`atgbb-m6-pos-t-${TS}`)
-    await createGroup('atgbb_m6_pos_g', org)
-    const linkedAt = await linkTemplate(org, tmplId, 'atgbb_m6_pos_g')
-    await createBatch('atgbb_m6_pos_b', org)
+    await createGroup(`atgbb_m6_pos_g_${TS}`, org)
+    const linkedAt = await linkTemplate(org, tmplId, `atgbb_m6_pos_g_${TS}`)
+    await createBatch(`atgbb_m6_pos_b_${TS}`, org)
     await query(
       `INSERT INTO approval_template_group_backfill_batch_groups (batch_id, org_id, group_id, created_new) VALUES ($1, $2, $3, true)`,
-      ['atgbb_m6_pos_b', org, 'atgbb_m6_pos_g'],
+      [`atgbb_m6_pos_b_${TS}`, org, `atgbb_m6_pos_g_${TS}`],
     )
     await query(
       `INSERT INTO approval_template_group_backfill_batch_links (batch_id, org_id, template_id, group_id, linked_at) VALUES ($1, $2, $3, $4, $5)`,
-      ['atgbb_m6_pos_b', org, tmplId, 'atgbb_m6_pos_g', linkedAt],
+      [`atgbb_m6_pos_b_${TS}`, org, tmplId, `atgbb_m6_pos_g_${TS}`, linkedAt],
     )
 
     const before = await query<{ n: string }>(
       `SELECT count(*)::text AS n FROM approval_template_group_backfill_batch_links WHERE batch_id = $1`,
-      ['atgbb_m6_pos_b'],
+      [`atgbb_m6_pos_b_${TS}`],
     )
     expect(before.rows[0].n).toBe('1')
 
@@ -144,7 +144,7 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
     expect(linksAfter.rows[0].n).toBe('0')
     const batchLinksAfter = await query<{ n: string }>(
       `SELECT count(*)::text AS n FROM approval_template_group_backfill_batch_links WHERE batch_id = $1`,
-      ['atgbb_m6_pos_b'],
+      [`atgbb_m6_pos_b_${TS}`],
     )
     expect(batchLinksAfter.rows[0].n).toBe('0')
   })
@@ -152,16 +152,16 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
   it('M6 negative control (mutation): reverting atgbbl_link_fk to the proposal\'s original NO ACTION blocks the same delete', async () => {
     const org = `atgbb-m6-neg-${TS}`
     const tmplId = await createTemplate(`atgbb-m6-neg-t-${TS}`)
-    await createGroup('atgbb_m6_neg_g', org)
-    const linkedAt = await linkTemplate(org, tmplId, 'atgbb_m6_neg_g')
-    await createBatch('atgbb_m6_neg_b', org)
+    await createGroup(`atgbb_m6_neg_g_${TS}`, org)
+    const linkedAt = await linkTemplate(org, tmplId, `atgbb_m6_neg_g_${TS}`)
+    await createBatch(`atgbb_m6_neg_b_${TS}`, org)
     await query(
       `INSERT INTO approval_template_group_backfill_batch_groups (batch_id, org_id, group_id, created_new) VALUES ($1, $2, $3, true)`,
-      ['atgbb_m6_neg_b', org, 'atgbb_m6_neg_g'],
+      [`atgbb_m6_neg_b_${TS}`, org, `atgbb_m6_neg_g_${TS}`],
     )
     await query(
       `INSERT INTO approval_template_group_backfill_batch_links (batch_id, org_id, template_id, group_id, linked_at) VALUES ($1, $2, $3, $4, $5)`,
-      ['atgbb_m6_neg_b', org, tmplId, 'atgbb_m6_neg_g', linkedAt],
+      [`atgbb_m6_neg_b_${TS}`, org, tmplId, `atgbb_m6_neg_g_${TS}`, linkedAt],
     )
 
     let caught: unknown = null
@@ -187,11 +187,20 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
     ).rejects.toBeDefined()
 
     expect(caught).not.toBeNull()
+    // NOTE on discriminating power: this /atgbbl_link_fk/ message match is NOT the assertion that
+    // proves the mutation worked — it also passes under the fixed (CASCADE) migration, because
+    // dropping+re-adding the constraint always names it in the DROP/ADD DDL and in the message on
+    // ANY subsequent violation this session triggers, mutated or not (confirmed directly: this
+    // file's mutation-probe run reddened the two assertions below, never this one). The signal
+    // lives entirely in the confdeltype check that follows — do not delete this line as
+    // "redundant" without checking that one first.
     expect(String((caught as { message?: string })?.message ?? caught)).toMatch(/atgbbl_link_fk/)
 
     // Schema-restoration proof, not an assumption: the constraint's delete-action in the catalog
     // is CASCADE again (the ALTERs were rolled back), and the SAME delete this test just watched
-    // fail now succeeds for real — clean up via the real committed path.
+    // fail now succeeds for real — clean up via the real committed path. This IS the assertion
+    // with discriminating power (see note above) — it is what actually reddened under the
+    // migration-file mutation probe (atgbbl_link_fk reverted to NO ACTION in the .ts source).
     const restored = await query<{ confdeltype: string }>(
       `SELECT confdeltype FROM pg_constraint WHERE conname = 'atgbbl_link_fk'`,
     )
@@ -204,12 +213,12 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
   it('atgbbg_group_fk rejects a batch_groups row whose group belongs to a DIFFERENT org than the batch', async () => {
     const orgBatch = `atgbb-xorg-bg-batch-${TS}`
     const orgGroup = `atgbb-xorg-bg-group-${TS}`
-    await createGroup('atgbb_xorg_bg_g', orgGroup)
-    await createBatch('atgbb_xorg_bg_b', orgBatch)
+    await createGroup(`atgbb_xorg_bg_g_${TS}`, orgGroup)
+    await createBatch(`atgbb_xorg_bg_b_${TS}`, orgBatch)
     await expect(
       query(
         `INSERT INTO approval_template_group_backfill_batch_groups (batch_id, org_id, group_id, created_new) VALUES ($1, $2, $3, true)`,
-        ['atgbb_xorg_bg_b', orgBatch, 'atgbb_xorg_bg_g'],
+        [`atgbb_xorg_bg_b_${TS}`, orgBatch, `atgbb_xorg_bg_g_${TS}`],
       ),
     ).rejects.toThrow(/atgbbg_group_fk/)
   })
@@ -218,13 +227,13 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
     const orgLink = `atgbb-xorg-bl-link-${TS}`
     const orgBatch = `atgbb-xorg-bl-batch-${TS}`
     const tmplId = await createTemplate(`atgbb-xorg-bl-t-${TS}`)
-    await createGroup('atgbb_xorg_bl_g', orgLink)
-    const linkedAt = await linkTemplate(orgLink, tmplId, 'atgbb_xorg_bl_g')
-    await createBatch('atgbb_xorg_bl_b', orgBatch)
+    await createGroup(`atgbb_xorg_bl_g_${TS}`, orgLink)
+    const linkedAt = await linkTemplate(orgLink, tmplId, `atgbb_xorg_bl_g_${TS}`)
+    await createBatch(`atgbb_xorg_bl_b_${TS}`, orgBatch)
     await expect(
       query(
         `INSERT INTO approval_template_group_backfill_batch_links (batch_id, org_id, template_id, group_id, linked_at) VALUES ($1, $2, $3, $4, $5)`,
-        ['atgbb_xorg_bl_b', orgBatch, tmplId, 'atgbb_xorg_bl_g', linkedAt],
+        [`atgbb_xorg_bl_b_${TS}`, orgBatch, tmplId, `atgbb_xorg_bl_g_${TS}`, linkedAt],
       ),
     ).rejects.toThrow(/atgbbl_link_fk/)
   })
@@ -233,29 +242,29 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
   it('deleting a batch head cascades to its own batch_groups/batch_links rows without touching the groups/links they point at', async () => {
     const org = `atgbb-head-cascade-${TS}`
     const tmplId = await createTemplate(`atgbb-head-cascade-t-${TS}`)
-    await createGroup('atgbb_head_cascade_g', org)
-    const linkedAt = await linkTemplate(org, tmplId, 'atgbb_head_cascade_g')
-    await createBatch('atgbb_head_cascade_b', org)
+    await createGroup(`atgbb_head_cascade_g_${TS}`, org)
+    const linkedAt = await linkTemplate(org, tmplId, `atgbb_head_cascade_g_${TS}`)
+    await createBatch(`atgbb_head_cascade_b_${TS}`, org)
     await query(
       `INSERT INTO approval_template_group_backfill_batch_groups (batch_id, org_id, group_id, created_new) VALUES ($1, $2, $3, true)`,
-      ['atgbb_head_cascade_b', org, 'atgbb_head_cascade_g'],
+      [`atgbb_head_cascade_b_${TS}`, org, `atgbb_head_cascade_g_${TS}`],
     )
     await query(
       `INSERT INTO approval_template_group_backfill_batch_links (batch_id, org_id, template_id, group_id, linked_at) VALUES ($1, $2, $3, $4, $5)`,
-      ['atgbb_head_cascade_b', org, tmplId, 'atgbb_head_cascade_g', linkedAt],
+      [`atgbb_head_cascade_b_${TS}`, org, tmplId, `atgbb_head_cascade_g_${TS}`, linkedAt],
     )
 
-    await query(`DELETE FROM approval_template_group_backfill_batches WHERE id = $1`, ['atgbb_head_cascade_b'])
-    batchIds.splice(batchIds.indexOf('atgbb_head_cascade_b'), 1)
+    await query(`DELETE FROM approval_template_group_backfill_batches WHERE id = $1`, [`atgbb_head_cascade_b_${TS}`])
+    batchIds.splice(batchIds.indexOf(`atgbb_head_cascade_b_${TS}`), 1)
 
     const childGroups = await query<{ n: string }>(
       `SELECT count(*)::text AS n FROM approval_template_group_backfill_batch_groups WHERE batch_id = $1`,
-      ['atgbb_head_cascade_b'],
+      [`atgbb_head_cascade_b_${TS}`],
     )
     expect(childGroups.rows[0].n).toBe('0')
     const childLinks = await query<{ n: string }>(
       `SELECT count(*)::text AS n FROM approval_template_group_backfill_batch_links WHERE batch_id = $1`,
-      ['atgbb_head_cascade_b'],
+      [`atgbb_head_cascade_b_${TS}`],
     )
     expect(childLinks.rows[0].n).toBe('0')
 
@@ -263,7 +272,7 @@ describeIfDatabase('approval template groups — phase 2 backfill batch DDL (des
     // is bookkeeping about a write, not the write's target.
     const groupStillThere = await query<{ n: string }>(
       `SELECT count(*)::text AS n FROM approval_template_groups WHERE id = $1`,
-      ['atgbb_head_cascade_g'],
+      [`atgbb_head_cascade_g_${TS}`],
     )
     expect(groupStillThere.rows[0].n).toBe('1')
     const linkStillThere = await query<{ n: string }>(
