@@ -22,7 +22,7 @@ import {
   RECOVERY_ARCHIVE_V1_SECTION_NAMES,
   isMultitableRecoveryArchiveEnabled,
 } from './recovery-archive-contract'
-import type { RecoveryArchiveKeyCustodyAdapter, RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
+import type { RecoveryArchiveCustodyInput, RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
 import {
   createTransactionGuardedRecoveryArchiveObjectStore,
   type RecoveryArchiveObjectExpectedBinding,
@@ -80,7 +80,7 @@ export type RecoveryArchivePreviewTransaction = <T>(
 ) => Promise<T>
 
 export interface RecoveryArchivePreviewRuntime {
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly transactionDepth: RecoveryArchiveTransactionDepthProbe
 }

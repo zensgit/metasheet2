@@ -24,6 +24,7 @@
  */
 
 import { createCipheriv, createDecipheriv, createHash } from "node:crypto";
+import { resolveLocalArchiveCustody, type LocalArchiveCustodyAdmission } from "./recovery-local-custody";
 
 import {
   RECOVERY_ARCHIVE_FORMAT_VERSION,
@@ -245,7 +246,7 @@ export interface RecoveryArchiveGenerationDek {
  * get that property by convention - they get it from `createTransactionGuardedKeyCustody`, which
  * every orchestration helper in this module applies internally.
  */
-export interface RecoveryArchiveKeyCustodyAdapter {
+export interface RecoveryArchiveCustodyOperations {
   /** Mint a fresh generation DEK under `keyId` and return it wrapped. */
   produceGenerationDek(request: {
     keyId: string;
@@ -261,7 +262,8 @@ export interface RecoveryArchiveKeyCustodyAdapter {
   }): Promise<RecoveryArchiveGenerationDek>;
 
   /**
-   * Domain-separated, KMS-attested, one-to-one opaque identity of the ACTUAL UNWRAPPED DEK.
+   * Domain-separated identity of the ACTUAL UNWRAPPED DEK. The existing KMS adapter
+   * requires KMS attestation; explicitly admitted local custody has local assurance only.
    *
    * D-F: hashing only the wrapped ciphertext is NOT sufficient, because randomized re-wrapping
    * would hide reuse of the same DEK and defeat the nonce-uniqueness registry.
@@ -284,6 +286,10 @@ export interface RecoveryArchiveKeyCustodyAdapter {
     mac: Uint8Array;
   }): Promise<boolean>;
 }
+
+/** Existing KMS custody contract; local sessions use a separate opaque admission. */
+export type RecoveryArchiveKeyCustodyAdapter = RecoveryArchiveCustodyOperations;
+export type RecoveryArchiveCustodyInput = RecoveryArchiveKeyCustodyAdapter | LocalArchiveCustodyAdmission;
 
 /**
  * Database transaction-depth probe. Depth 0 means "no database transaction is open on the
@@ -421,9 +427,12 @@ function assertGenerationDekResult(
  * cannot opt out by passing an unwrapped one.
  */
 export function createTransactionGuardedKeyCustody(
-  adapter: RecoveryArchiveKeyCustodyAdapter,
+  input: RecoveryArchiveCustodyInput,
   probe: RecoveryArchiveTransactionDepthProbe,
-): RecoveryArchiveKeyCustodyAdapter {
+): RecoveryArchiveCustodyOperations {
+  const adapter = callExternalSync("RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED", () =>
+    resolveLocalArchiveCustody(input) ?? input as RecoveryArchiveKeyCustodyAdapter,
+  );
   return {
     async produceGenerationDek(request) {
       assertKeyCustodyCallOutsideTransaction(probe);
@@ -1039,7 +1048,7 @@ export interface RecoveryArchiveReserveThenSealInput {
     "dekFingerprint" | "wrappedDekId"
   >;
   /** The RAW adapter. This helper wraps it internally and never calls it unwrapped. */
-  keyCustody: RecoveryArchiveKeyCustodyAdapter;
+  keyCustody: RecoveryArchiveCustodyInput;
   transactionDepth: RecoveryArchiveTransactionDepthProbe;
   dekSource: RecoveryArchiveDekSource;
   /** Exactly the ten format-v1 sections, in the exact contract order, one nonce each. */

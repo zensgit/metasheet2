@@ -88,7 +88,7 @@ defineExpose({
 // presentation unchanged.
 const configEditorApi = inject(APPROVAL_NODE_CONFIG_EDITOR_KEY, undefined)
 const hasEditableApprovalConfig = computed(() => {
-  // Lock-3 §1.5: a handler node ALSO takes the tabbed presentation (办理人设置 + 表单权限), reusing the
+  // Lock-3 §1.5: a handler node ALSO takes the tabbed presentation (办理人设置 + 字段权限), reusing the
   // same edit model — so it must be admitted here alongside `approval`.
   if (props.node.type !== 'approval' && props.node.type !== 'handler') return false
   const fn = configEditorApi?.approvalNodeEditFor
@@ -101,7 +101,7 @@ const tabs = computed<ApprovalCanvasInspectorTabDescriptor[]>(() => {
     // Lock-3 §1.5: the first tab's LABEL is node-type specific (办理人设置 for a handler) — which is
     // exactly why the strip is derived per node TYPE rather than hand-written once.
     { id: 'assignee', label: props.node.type === 'handler' ? '办理人设置' : '审批人设置' },
-    { id: 'fieldPermissions', label: '表单权限' },
+    { id: 'fieldPermissions', label: '字段权限' },
   ]
   if (hasRatifiedOperationPolicy(registry, props.node.type)) {
     list.push({ id: 'operations', label: '操作权限' })

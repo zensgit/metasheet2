@@ -673,8 +673,24 @@ function normalizeCommentMentionSummary(
 }
 
 function normalizeCommentMentionSuggestions(
-  payload: { items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number } | null | undefined,
-): { items: MetaCommentMentionSuggestion[]; total: number; limit: number } {
+  payload: {
+    items?: Array<Partial<MetaCommentMentionSuggestion>>
+    total?: number
+    limit?: number
+    query?: unknown
+    hasMore?: unknown
+    requiresQuery?: unknown
+    minQueryLength?: unknown
+  } | null | undefined,
+): {
+  items: MetaCommentMentionSuggestion[]
+  total: number
+  limit: number
+  query: string
+  hasMore: boolean
+  requiresQuery: boolean
+  minQueryLength: number
+} {
   return {
     items: Array.isArray(payload?.items)
       ? payload.items
@@ -687,6 +703,11 @@ function normalizeCommentMentionSuggestions(
       : [],
     total: typeof payload?.total === 'number' ? payload.total : 0,
     limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+    // #5795 markers (see listCommentMentionSuggestions).
+    query: typeof payload?.query === 'string' ? payload.query : '',
+    hasMore: payload?.hasMore === true,
+    requiresQuery: payload?.requiresQuery === true,
+    minQueryLength: typeof payload?.minQueryLength === 'number' ? payload.minQueryLength : 1,
   }
 }
 
@@ -1477,6 +1498,19 @@ export interface RestoreBatchExecuteResult {
   targetVersion: number
 }
 
+export interface DeletedSheet {
+  id: string
+  baseId: string
+  name: string
+  description: string | null
+  deletedAt: string
+}
+
+export interface DeletedSheetPage {
+  sheets: DeletedSheet[]
+  nextCursor: string | null
+}
+
 // T9-R4: a config/schema-change history entry (server-gated per entity type; the FE renders it as-is).
 export interface MetaConfigRevision {
   id: string
@@ -1488,6 +1522,7 @@ export interface MetaConfigRevision {
   changedKeys: string[]
   batchId: string | null
   actorId: string | null
+  actorName?: string | null
   createdAt: string
 }
 
@@ -2271,9 +2306,21 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
-  // Undo a soft delete (POST /api/multitable/sheets/:id/restore). API half only in this slice: there
-  // is no recycle-bin UI yet, so nothing in the workbench calls this — it exists so the follow-up
-  // (list soft-deleted sheets + restore) has its wire contract pinned now.
+  async listDeletedSheets(baseId: string, params?: { cursor?: string; limit?: number }): Promise<DeletedSheetPage> {
+    const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/trash${qs(params ?? {})}`)
+    const data = await this.parseJson<DeletedSheetPage>(res)
+    if (!data || !Array.isArray(data.sheets)
+      || !(data.nextCursor === null || (typeof data.nextCursor === 'string' && data.nextCursor.length > 0))
+      || !data.sheets.every((sheet) => sheet && typeof sheet.id === 'string' && sheet.id.length > 0
+        && sheet.baseId === baseId && typeof sheet.name === 'string'
+        && (sheet.description === null || typeof sheet.description === 'string')
+        && typeof sheet.deletedAt === 'string' && Number.isFinite(new Date(sheet.deletedAt).getTime()))) {
+      throw new Error('Invalid deleted sheets response')
+    }
+    return data
+  }
+
+  // Undo a soft delete through the same lifecycle-authority gate as deletion.
   async restoreSheet(sheetId: string): Promise<{ restored: string; sheet: MetaSheet }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore`, { method: 'POST' })
     return this.parseJson(res)
@@ -2302,9 +2349,12 @@ export class MultitableApiClient implements CommentsApiClient {
       body: JSON.stringify({}),
     })
     const data = await this.parseJson<{ restored?: string; sheetId?: string }>(res)
+    if (data?.restored !== recordId || typeof data.sheetId !== 'string' || !data.sheetId) {
+      throw new Error('Invalid record restore response')
+    }
     return {
-      restored: typeof data?.restored === 'string' ? data.restored : recordId,
-      sheetId: typeof data?.sheetId === 'string' ? data.sheetId : '',
+      restored: data.restored,
+      sheetId: data.sheetId,
     }
   }
 
@@ -2321,14 +2371,37 @@ export class MultitableApiClient implements CommentsApiClient {
    * 2c-S3 — the assignable directory for ONE person field (source = B member-group directory).
    * Returns the same allowed set the write validator accepts (active-only, member-group-scoped),
    * so the picker offers exactly what a save will accept. Gated server-side on canEditRecord.
+   *
+   * #5781: the endpoint is now SEARCH-REQUIRED and capped. A call with no `q` answers 200 with an
+   * empty list and `requiresQuery: true` (not an error) — render "type to search", not "no members".
+   * `hasMore` is set when the answer was clamped to the server ceiling.
+   *
+   * #5809: `match: 'exact'` asks for an EXACT lookup (id / name / email equal to `q`, case-insensitive)
+   * instead of the substring search — used by the import resolver. Same gate, set and ceiling. A server
+   * that predates the mode ignores the parameter and answers the substring search, so callers must still
+   * filter for exact matches themselves.
    */
   async listPersonFieldDirectory(
     sheetId: string,
     fieldId: string,
-    params?: { q?: string },
-  ): Promise<{ items: Array<{ userId: string; name: string | null; email: string | null }>; total: number; query: string }> {
+    params?: { q?: string; match?: 'exact' },
+  ): Promise<{
+    items: Array<{ userId: string; name: string | null; email: string | null }>
+    total: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/person-fields/${encodeURIComponent(fieldId)}/directory${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>; total?: number; query?: string }>(res)
+    const data = await this.parseJson<{
+      items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>
+      total?: number
+      query?: string
+      hasMore?: unknown
+      requiresQuery?: unknown
+      minQueryLength?: unknown
+    }>(res)
     const items = (data.items ?? [])
       .map((it) => ({
         userId: String(it.userId ?? ''),
@@ -2336,7 +2409,14 @@ export class MultitableApiClient implements CommentsApiClient {
         email: typeof it.email === 'string' ? it.email : null,
       }))
       .filter((it) => it.userId.length > 0)
-    return { items, total: typeof data.total === 'number' ? data.total : items.length, query: typeof data.query === 'string' ? data.query : '' }
+    return {
+      items,
+      total: typeof data.total === 'number' ? data.total : items.length,
+      query: typeof data.query === 'string' ? data.query : '',
+      hasMore: data.hasMore === true,
+      requiresQuery: data.requiresQuery === true,
+      minQueryLength: typeof data.minQueryLength === 'number' ? data.minQueryLength : 1,
+    }
   }
 
   async updateSheetPermission(
@@ -3471,13 +3551,33 @@ export class MultitableApiClient implements CommentsApiClient {
     }
   }
 
+  /**
+   * #5795: the endpoint is SEARCH-REQUIRED and capped (same contract as listPersonFieldDirectory). A call
+   * without `q` answers 200 with no items and `requiresQuery: true` — render "type to search", never
+   * "no match". `hasMore` is set when the answer was clamped to the server ceiling; `total` is only the
+   * size of the returned page (the server no longer discloses a deployment-wide count).
+   *
+   * #5809: `match: 'exact-email'` asks for users whose (trimmed, case-folded) EMAIL EQUALS `q` instead of
+   * the name/email/id substring search — used by the legacy person importer. Same gate, term requirement
+   * and ceiling. A server that predates the mode ignores it and answers the substring search, so callers
+   * must still filter for exact matches themselves.
+   */
   async listCommentMentionSuggestions(params: {
     spreadsheetId: string
     q?: string
     limit?: number
-  }): Promise<{ items: MetaCommentMentionSuggestion[]; total: number; limit: number }> {
+    match?: 'exact-email'
+  }): Promise<{
+    items: MetaCommentMentionSuggestion[]
+    total: number
+    limit: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/comments/mention-candidates${qs(params)}`)
-    const data = await this.parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
+    const data = await this.parseJson<Parameters<typeof normalizeCommentMentionSuggestions>[0]>(res)
     return normalizeCommentMentionSuggestions(data)
   }
 
@@ -3603,13 +3703,38 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
+  /**
+   * #5795: search-required like listPersonFieldDirectory — no `q` ⇒ 200 + no items + `requiresQuery`
+   * (render "type to search"); `hasMore` ⇒ the page was clamped (at most 50).
+   */
   async listFormShareCandidates(
     sheetId: string,
     params?: { q?: string; limit?: number },
-  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+  ): Promise<{
+    items: MetaSheetPermissionCandidate[]
+    total: number
+    limit: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/form-share-candidates${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
-    return normalizeSheetPermissionCandidates(data)
+    const data = await this.parseJson<{
+      items?: Array<Partial<MetaSheetPermissionCandidate>>
+      total?: number
+      limit?: number
+      query?: string
+      hasMore?: unknown
+      requiresQuery?: unknown
+      minQueryLength?: unknown
+    }>(res)
+    return {
+      ...normalizeSheetPermissionCandidates(data),
+      hasMore: data.hasMore === true,
+      requiresQuery: data.requiresQuery === true,
+      minQueryLength: typeof data.minQueryLength === 'number' ? data.minQueryLength : 1,
+    }
   }
 
   // --- API Tokens ---
@@ -3775,7 +3900,7 @@ export class MultitableApiClient implements CommentsApiClient {
    * The single-use `resumeToken` comes from the suspended step's C1 descriptor in the run detail.
    * `confirmSideEffects:true` is always sent (the UI confirm-gates this call). parseJson throws an
    * Error with `.code` (NOT_FOUND / ALREADY_RESUMED / RULE_CHANGED / RULE_MISSING_OR_DISABLED /
-   * RECORD_GONE) so the caller can map it to an inline message rather than a generic toast.
+   * RECORD_GONE / SHEET_DELETED) so the caller can map it to an inline message rather than a generic toast.
    */
   async resumeAutomation(resumeToken: string): Promise<AutomationRunView> {
     const res = await this.fetch('/api/multitable/automation/resume', {
@@ -3794,7 +3919,7 @@ export class MultitableApiClient implements CommentsApiClient {
    * contract as resumeAutomation). parseJson throws an Error with `.code` (NOT_FOUND /
    * NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT / RETRY_WINDOW_EXPIRED /
    * START_APPROVAL_ALREADY_CREATED / RULE_MISSING_OR_DISABLED / RULE_CHANGED /
-   * RETRY_LEDGER_EVIDENCE_MISSING) so the caller can map it to an inline message.
+   * RETRY_LEDGER_EVIDENCE_MISSING / SHEET_DELETED) so the caller can map it to an inline message.
    */
   async retryAutomationExecution(executionId: string): Promise<AutomationRunView> {
     const res = await this.fetch(

@@ -223,6 +223,27 @@ export type AutomationLabelKey =
   | 'manager.testRunning'
   | 'manager.testRunningDingTalkWarning'
   | 'manager.testRunAtLeastOneActionFailed'
+  // #5817 follow-up: test-run button refusals, keyed by the route's error code
+  // (MetaAutomationManager.vue TEST_RUN_ERROR_LABELS). The server's English message is never shown.
+  | 'manager.testRunError.forbidden'
+  | 'manager.testRunError.unauthenticated'
+  | 'manager.testRunError.sheetDeleted'
+  | 'manager.testRunError.notFound'
+  | 'manager.testRunError.ruleNotFound'
+  | 'manager.testRunError.serviceUnavailable'
+  | 'manager.testRunError.permissionCheckFailed'
+  | 'manager.testRunError.invalidMode'
+  | 'manager.testRunError.confirmSideEffectsRequired'
+  | 'manager.testRunError.sampleRecordRequired'
+  | 'manager.testRunError.invalidRecordId'
+  | 'manager.testRunError.sampleRecordReadFailed'
+  | 'manager.testRunError.sampleRecordDataInvalid'
+  | 'manager.testRunError.invalidOperationId'
+  | 'manager.testRunError.actionUnsupported'
+  | 'manager.testRunError.recordWriteProtectionDisabled'
+  | 'manager.testRunError.outboundProtectionDisabled'
+  | 'manager.testRunError.failed'
+  | 'manager.testRunError.generic'
   | 'dingtalk.preset'
   | 'dingtalk.addGroups'
   | 'dingtalk.addGroupOption'
@@ -333,6 +354,8 @@ export type AutomationLabelKey =
   | 'runs.resumeError.ruleChanged'
   | 'runs.resumeError.ruleMissingOrDisabled'
   | 'runs.resumeError.recordGone'
+  // #5803: the rule's sheet is soft-deleted; nothing ran and the resume token was not consumed.
+  | 'runs.resumeError.sheetDeleted'
   | 'runs.resumeError.generic'
   // P3-4: whole-execution re-run button (distinct from Resume above, which only continues a
   // suspended step's remaining actions). Confirm dialog enumerates the consequences from data
@@ -362,6 +385,8 @@ export type AutomationLabelKey =
   | 'runs.rerunError.ruleMissingOrDisabled'
   | 'runs.rerunError.ruleChanged'
   | 'runs.rerunError.ledgerEvidenceMissing'
+  // #5803: the rule's sheet is soft-deleted; nothing ran or was recorded.
+  | 'runs.rerunError.sheetDeleted'
   // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
   // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
   // string would otherwise render verbatim in a zh session.
@@ -556,6 +581,25 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.testRunning',
   'manager.testRunningDingTalkWarning',
   'manager.testRunAtLeastOneActionFailed',
+  'manager.testRunError.forbidden',
+  'manager.testRunError.unauthenticated',
+  'manager.testRunError.sheetDeleted',
+  'manager.testRunError.notFound',
+  'manager.testRunError.ruleNotFound',
+  'manager.testRunError.serviceUnavailable',
+  'manager.testRunError.permissionCheckFailed',
+  'manager.testRunError.invalidMode',
+  'manager.testRunError.confirmSideEffectsRequired',
+  'manager.testRunError.sampleRecordRequired',
+  'manager.testRunError.invalidRecordId',
+  'manager.testRunError.sampleRecordReadFailed',
+  'manager.testRunError.sampleRecordDataInvalid',
+  'manager.testRunError.invalidOperationId',
+  'manager.testRunError.actionUnsupported',
+  'manager.testRunError.recordWriteProtectionDisabled',
+  'manager.testRunError.outboundProtectionDisabled',
+  'manager.testRunError.failed',
+  'manager.testRunError.generic',
   'dingtalk.preset',
   'dingtalk.addGroups',
   'dingtalk.addGroupOption',
@@ -666,6 +710,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.resumeError.ruleChanged',
   'runs.resumeError.ruleMissingOrDisabled',
   'runs.resumeError.recordGone',
+  'runs.resumeError.sheetDeleted',
   'runs.resumeError.generic',
   'runs.rerun',
   'runs.rerunConfirmTitle',
@@ -689,6 +734,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunError.ruleMissingOrDisabled',
   'runs.rerunError.ruleChanged',
   'runs.rerunError.ledgerEvidenceMissing',
+  'runs.rerunError.sheetDeleted',
   'runs.rerunError.adminRequired',
   'runs.rerunError.generic',
   'resultWriteback.title',
@@ -979,6 +1025,25 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.testRunning': { en: 'Running test.', zh: '正在运行测试。' },
   'manager.testRunningDingTalkWarning': { en: 'Running test. DingTalk actions may send real messages.', zh: '正在运行测试。钉钉动作可能发送真实消息。' },
   'manager.testRunAtLeastOneActionFailed': { en: 'At least one action failed.', zh: '至少一个动作失败。' },
+  'manager.testRunError.forbidden': { en: 'You do not have permission to test-run automations on this sheet.', zh: '你没有在此表上测试运行自动化的权限。' },
+  'manager.testRunError.unauthenticated': { en: 'Your session has expired. Sign in again and retry.', zh: '登录已失效，请重新登录后重试。' },
+  'manager.testRunError.sheetDeleted': { en: 'This sheet has been deleted, so the test did not run. Restore the sheet and try again.', zh: '该表已被删除，测试未运行。请先恢复该表后重试。' },
+  'manager.testRunError.notFound': { en: 'The sheet or the sample record was not found.', zh: '表或样例记录不存在。' },
+  'manager.testRunError.ruleNotFound': { en: 'The rule was not found or is disabled. Enable it, or refresh and try again.', zh: '规则不存在或已停用。请确认规则已启用，或刷新后重试。' },
+  'manager.testRunError.serviceUnavailable': { en: 'The service is temporarily unavailable. Try again later.', zh: '服务暂时不可用，请稍后重试。' },
+  'manager.testRunError.permissionCheckFailed': { en: 'Your permissions could not be verified. Try again later.', zh: '无法校验你的权限，请稍后重试。' },
+  'manager.testRunError.invalidMode': { en: 'The test run mode is invalid.', zh: '测试运行模式无效。' },
+  'manager.testRunError.confirmSideEffectsRequired': { en: 'A real test run requires confirming its side effects.', zh: '真实测试运行需要先确认其副作用。' },
+  'manager.testRunError.sampleRecordRequired': { en: 'A real test run requires a readable sample record.', zh: '真实测试运行需要一条可读的样例记录。' },
+  'manager.testRunError.invalidRecordId': { en: 'The sample record ID is invalid.', zh: '样例记录 ID 无效。' },
+  'manager.testRunError.sampleRecordReadFailed': { en: 'The sample record could not be read. Try again later.', zh: '读取样例记录失败，请稍后重试。' },
+  'manager.testRunError.sampleRecordDataInvalid': { en: 'The sample record data is unavailable.', zh: '样例记录数据不可用。' },
+  'manager.testRunError.invalidOperationId': { en: 'The test run request is invalid. Refresh and try again.', zh: '测试运行请求无效，请刷新后重试。' },
+  'manager.testRunError.actionUnsupported': { en: 'This rule has actions that cannot run in a real test run.', zh: '该规则包含不支持真实测试运行的动作。' },
+  'manager.testRunError.recordWriteProtectionDisabled': { en: 'Real test runs of record-changing actions are off until duplicate-write protection is enabled.', zh: '记录写入类动作的重复执行保护未开启，暂不能真实测试运行。' },
+  'manager.testRunError.outboundProtectionDisabled': { en: 'Real test runs of outbound message actions are off until duplicate-send protection is enabled.', zh: '外发消息类动作的重复发送保护未开启，暂不能真实测试运行。' },
+  'manager.testRunError.failed': { en: 'The test run failed on the server. Try again later.', zh: '测试运行在服务端失败，请稍后重试。' },
+  'manager.testRunError.generic': { en: 'Test run request failed. Try again later.', zh: '测试运行请求失败，请稍后重试。' },
   'dingtalk.preset': { en: 'Message preset', zh: '消息预设' },
   'dingtalk.addGroups': { en: 'Add DingTalk groups', zh: '添加钉钉群' },
   'dingtalk.addGroupOption': { en: '-- add DingTalk group --', zh: '-- 添加钉钉群 --' },
@@ -1092,6 +1157,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.resumeError.ruleChanged': { en: 'The rule changed since it was suspended; cannot resume safely.', zh: '规则在挂起后已变更，无法安全恢复。' },
   'runs.resumeError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot resume.', zh: '规则缺失或已停用，无法恢复。' },
   'runs.resumeError.recordGone': { en: 'The record no longer exists; cannot resume.', zh: '记录已不存在，无法恢复。' },
+  'runs.resumeError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was resumed. Restore the sheet and try again.", zh: '规则所在的表已被删除，未恢复执行。请先恢复该表后重试。' },
   'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
   // P3-4 — whole-execution re-run. Textually distinct from the load-error "Retry" (log.retry, which
   // only reloads the list) and from Resume above (which continues one suspended step).
@@ -1130,6 +1196,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.rerunError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot re-run.', zh: '规则缺失或已停用，无法重新执行。' },
   'runs.rerunError.ruleChanged': { en: "The rule's actions changed since this run; cannot re-run safely.", zh: '规则动作在此次运行后已变更，无法安全重新执行。' },
   'runs.rerunError.ledgerEvidenceMissing': { en: 'Retry evidence for this execution is missing.', zh: '该执行的重试证据缺失。' },
+  'runs.rerunError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again.", zh: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
   'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
   'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },

@@ -25,6 +25,10 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const BASE_ID = `base_act_${TS}`
 const SHEET_ID = `sheet_act_${TS}`
+// #5780 characterization fixture: a SECOND base, so the cross-base case below cannot pass merely
+// because everything happens to live in one base. See the last test in this file.
+const BASE_B_ID = `base_act_b_${TS}`
+const SHEET_B_ID = `sheet_act_b_${TS}`
 const CREATOR = `u_act_creator_${TS}`
 const REQUESTER = `u_act_req_${TS}`
 const APPROVER = `u_act_appr_${TS}`
@@ -93,6 +97,8 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'ACT Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'ACT Sheet'])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_B_ID, 'ACT Base B'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_B_ID, BASE_B_ID, 'ACT Sheet B'])
 
     await q(
       `INSERT INTO permissions (code, name, description)
@@ -151,9 +157,9 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
       await q('DELETE FROM approval_templates WHERE id = $1', [tid]).catch(() => {})
     }
     // F9b: the rule path now writes durable notification rows for this sheet — clean them up too.
-    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
-    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
-    await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = ANY($1::text[])', [[SHEET_ID, SHEET_B_ID]]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SHEET_ID, SHEET_B_ID]]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_ID, BASE_B_ID]]).catch(() => {})
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, OUTSIDER]]).catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, OUTSIDER]]).catch(() => {})
   })
@@ -383,5 +389,102 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
     await svc.handleApprovalCompletionTrigger(nullTemplateEvent)
     const after = await q('SELECT COUNT(*)::int AS count FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [ruleIds])
     expect((after.rows[0] as { count: number }).count).toBe((before.rows[0] as { count: number }).count)
+  })
+
+  /**
+   * #5780 — CURRENT BEHAVIOUR, PINNED DELIBERATELY. THIS IS NOT AN ENDORSEMENT.
+   *
+   * `loadEnabledApprovalCompletedRules` (and its `approval.task_created` twin) filter on
+   * trigger_type + enabled + trigger_config.templateId and NOTHING ELSE. There is no base, workspace
+   * or tenant predicate anywhere on the approval lane, so one completion for template T fires EVERY
+   * enabled rule bound to T ANYWHERE in the deployment. That is what this test asserts — as the bug it
+   * is, not as a contract.
+   *
+   * READ THE TITLE LITERALLY. The completion does not "come from base B": a completion belongs to NO
+   * base at all today. `startApprovalInstance()` creates the instance from a templateId, and the event
+   * (`ApprovalCompletionEventV1.approval`) carries instanceId / requestNo / templateId /
+   * templateVersionId / publishedDefinitionId / businessKey / workflowKey — no base/tenant key BY NAME
+   * (asserted below). The base-B rule in this fixture is a RULE, not the completion's origin; it exists
+   * so the case cannot be satisfied by a single-base fixture.
+   *
+   * WHAT #5780 ACTUALLY NEEDS — a ruling, not a migration. Ownership is already reachable in ONE join
+   * on each side: `approval.instanceId` → `approval_instances.org_id` (written on every instance; its
+   * resolution fail-closes with 422 APPROVAL_ORG_UNRESOLVED, which is why this fixture must seed
+   * `user_orgs` above), and `automation_rules.sheet_id` → `meta_sheets.base_id` → `meta_bases.
+   * workspace_id` / `owner_id`. The open question is whether the org axis and the workspace/base axis
+   * are the SAME ownership (and which pair is authoritative, and what a base with no workspace means).
+   * That is an owner decision, not a predicate to invent inside a liveness bug fix. The by-name
+   * assertion below proves only that the PAYLOAD has no such key — it proves nothing about the joins.
+   *
+   * WHEN #5780 LANDS, THIS ASSERTION IS EXPECTED TO INVERT: the loader will return only the rules that
+   * belong to the completion's own owner, `routedBases` will collapse to ONE, and the base-A rule will
+   * NOT execute. That inversion is the SIGNAL that the fix arrived — flip the expectations here and
+   * delete this note. Do NOT read a red here as a regression, and above all do NOT "repair" it by
+   * widening the loader again.
+   */
+  test('#5780 current behaviour, pinned deliberately: a completion belongs to NO base, so it fires every enabled rule on its template in EVERY base (base-A rule + base-B rule both execute)', async () => {
+    const makeCrossBaseRule = async (sheetId: string, name: string): Promise<string> => {
+      const rule = await svc.createRule(sheetId, {
+        name,
+        triggerType: 'approval.completed',
+        triggerConfig: { templateId },
+        actionType: 'send_notification',
+        actionConfig: { userIds: [CREATOR], message: `cross-base probe ${name}` },
+        createdBy: CREATOR,
+      } as never)
+      const id = (rule as { id: string }).id
+      ruleIds.push(id)
+      return id
+    }
+    // Two rules on the same template, in two different bases. Neither base owns the completion (it has
+    // no base); the pair exists so this case cannot be satisfied by a single-base fixture, where "spans
+    // every base" and "spans one base" are indistinguishable — whatever owner a future predicate
+    // resolves for the completion, it cannot keep BOTH of these firing.
+    const ruleInBaseA = await makeCrossBaseRule(SHEET_ID, 'cross-base probe (base A)')
+    const ruleInBaseB = await makeCrossBaseRule(SHEET_B_ID, 'cross-base probe (base B)')
+
+    // (1) LOADER level. Assert on the DISTINCT BASE IDS behind the routed rules rather than on a rule
+    // count: a count could be satisfied by two rules in one base, which would prove nothing.
+    const routed = await svc.loadEnabledApprovalCompletedRules(templateId)
+    const routedSheetIds = routed.map((r) => r.sheet_id)
+    expect(routedSheetIds, 'the base-A rule is routed by templateId alone').toContain(SHEET_ID)
+    expect(routedSheetIds, 'so is the base-B rule — same template, different base').toContain(SHEET_B_ID)
+    const baseRows = await q(
+      'SELECT DISTINCT base_id FROM meta_sheets WHERE id = ANY($1::text[])',
+      [Array.from(new Set(routedSheetIds))],
+    )
+    const routedBases = (baseRows.rows as Array<{ base_id: string }>).map((r) => r.base_id)
+    expect(
+      new Set(routedBases).size,
+      '#5780 pin: template-keyed routing spans EVERY base today; when the ownership predicate lands this becomes 1 and this expectation inverts',
+    ).toBeGreaterThan(1)
+
+    // (2) The payload side of WHY: the completion event carries no base/tenant key BY NAME. (Ownership
+    // is still reachable by join on both sides — see the note above; this asserts the payload only.)
+    const completionEvents: ApprovalCompletionEventV1[] = []
+    integrationEventBus.subscribe('approval.approved', (payload) => {
+      completionEvents.push(payload as ApprovalCompletionEventV1)
+    })
+
+    // (3) END TO END: one completion, and BOTH rules execute — in two different bases.
+    const instanceId = await startApprovalInstance()
+    await approvals.dispatchAction(instanceId, { action: 'approve', comment: 'ok' } as never, approverActor())
+
+    expect(
+      await waitForExecutionCount(ruleInBaseA, 1),
+      '#5780 pin: the base-A rule executes for a completion it has no base relationship to',
+    ).toBeGreaterThanOrEqual(1)
+    expect(
+      await waitForExecutionCount(ruleInBaseB, 1),
+      'control: the base-B rule executes too, so a zero above would mean a broken fixture rather than a fixed loader',
+    ).toBeGreaterThanOrEqual(1)
+
+    const observed = completionEvents.find((e) => e.approval.instanceId === instanceId)
+    expect(observed, 'the completion must have reached the bus for the routing above to be the real path').toBeTruthy()
+    const approvalKeys = Object.keys(observed!.approval)
+    expect(
+      approvalKeys.filter((k) => /base|tenant|workspace|org/i.test(k)),
+      '#5780: the completion PAYLOAD carries no base/tenant/workspace/org key by name — so the loader has nothing to filter on without a join. Ownership IS reachable (approval_instances.org_id on this side, meta_sheets.base_id → meta_bases.workspace_id on the rule side); what is missing is the ruling that those are the same ownership. When #5780 lands, expect either this list to become non-empty or the loader to join, and the pin above to invert.',
+    ).toEqual([])
   })
 })

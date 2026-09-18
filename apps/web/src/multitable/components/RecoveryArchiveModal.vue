@@ -7,7 +7,18 @@
             <strong>{{ l('title') }}</strong>
             <span>{{ l('subtitle') }}</span>
           </div>
-          <MtIconButton class="archive-recovery__close" :aria-label="l('close')" @click="close">&times;</MtIconButton>
+          <div class="archive-recovery__header-actions">
+            <MtIconButton
+              v-if="!job"
+              :icon="RefreshRight"
+              :title="l('recheck')"
+              :aria-label="l('recheck')"
+              :disabled="busy || jobDiscoveryLoading || catalogLoading"
+              data-test="archive-recovery-recheck"
+              @click="recheckArchive"
+            />
+            <MtIconButton class="archive-recovery__close" :aria-label="l('close')" @click="close">&times;</MtIconButton>
+          </div>
         </header>
 
         <div class="archive-recovery__body">
@@ -164,6 +175,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { RefreshRight } from '@element-plus/icons-vue'
 
 import type {
   RecoveryArchiveCatalogEntry,
@@ -297,6 +309,8 @@ function l(key: string): string {
     startingJob: '正在创建作业…', startJob: '创建恢复作业', executing: '正在执行…', execute: '执行恢复', blocked: '服务器未允许执行此预览。',
     no_changes: '当前状态没有需要恢复的变更。', schema_drift: '当前架构与归档恢复点不兼容。', inbound_unprovable: '关联完整性无法证明，服务器拒绝执行。',
     async_plan_required: '需要后台恢复作业。', runtimeUnavailable: '归档恢复当前不可用。', forbidden: '没有归档恢复权限。', notFound: '恢复点或作业不存在。',
+    disabled: '归档恢复尚未启用。', serviceNotReady: '归档恢复服务尚未就绪。', scopeUnavailable: '当前表的归档恢复范围尚未配置。',
+    dataUnavailable: '归档恢复数据暂时不可用。', unauthenticated: '请重新登录后访问归档恢复。', recheck: '重新检查归档恢复',
     conflict: '恢复状态已变化，请刷新后重试。', requestFailed: '归档恢复请求失败。', timeUnavailable: '时间不可用', jobTitle: '恢复作业', progress: '进度',
     resumeDeadline: '最晚继续时间', refresh: '刷新', resume: '继续作业', cancelJob: '取消作业', newRecovery: '开始新的恢复',
     job_planned: '等待执行', job_applying: '正在执行', job_paused_retryable: '已暂停，可继续', job_done: '已完成', job_abandoned_partial: '部分执行后终止', job_cancelled_zero_write: '未写入并已取消',
@@ -311,6 +325,8 @@ function l(key: string): string {
     startingJob: 'Starting job…', startJob: 'Start recovery job', executing: 'Executing…', execute: 'Execute recovery', blocked: 'The server did not allow this preview.',
     no_changes: 'There are no changes to recover.', schema_drift: 'The current schema is incompatible with this archive point.', inbound_unprovable: 'Link integrity cannot be proven, so the server refused execution.',
     async_plan_required: 'A background recovery job is required.', runtimeUnavailable: 'Archive recovery is currently unavailable.', forbidden: 'You do not have archive recovery permission.', notFound: 'The recovery point or job was not found.',
+    disabled: 'Archive recovery is not enabled.', serviceNotReady: 'The archive recovery service is not ready.', scopeUnavailable: 'Archive recovery scope is not configured for this sheet.',
+    dataUnavailable: 'Archive recovery data is currently unavailable.', unauthenticated: 'Sign in again to access archive recovery.', recheck: 'Check archive recovery again',
     conflict: 'Recovery state changed. Refresh and try again.', requestFailed: 'Archive recovery request failed.', timeUnavailable: 'Time unavailable', jobTitle: 'Recovery job', progress: 'Progress',
     resumeDeadline: 'Resume deadline', refresh: 'Refresh', resume: 'Resume job', cancelJob: 'Cancel job', newRecovery: 'Start another recovery',
     job_planned: 'Queued', job_applying: 'Applying', job_paused_retryable: 'Paused and resumable', job_done: 'Completed', job_abandoned_partial: 'Stopped after partial application', job_cancelled_zero_write: 'Cancelled before writes',
@@ -339,16 +355,39 @@ function formatTime(value: string): string {
 function messageFor(error: unknown): string {
   const status = typeof error === 'object' && error !== null ? (error as { status?: unknown }).status : undefined
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (status === 401) return l('unauthenticated')
   if (status === 403) return l('forbidden')
   if (status === 404) return l('notFound')
   if (status === 409) return l('conflict')
-  if (
-    status === 503 ||
-    (typeof code === 'string' && (
-      code.includes('DISABLED') || code.includes('UNAVAILABLE') || code.includes('SUBSTRATE') || code.includes('PERSISTENCE')
-    ))
-  ) return l('runtimeUnavailable')
+  switch (code) {
+    case 'RECOVERY_ARCHIVE_CATALOG_DISABLED':
+    case 'RECOVERY_ARCHIVE_PREVIEW_DISABLED':
+    case 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED':
+      return l('disabled')
+    case 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE':
+    case 'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE':
+      return l('serviceNotReady')
+    case 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE':
+      return l('scopeUnavailable')
+    case 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID':
+    case 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID':
+    case 'RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID':
+      return l('dataUnavailable')
+  }
+  if (status === 503) return l('runtimeUnavailable')
   return l('requestFailed')
+}
+
+function recheckArchive(): void {
+  if (!props.visible || !props.sheetId || job.value || busy.value || jobDiscoveryLoading.value || catalogLoading.value) return
+  catalogRequest++
+  catalogError.value = null
+  entries.value = []
+  nextCursor.value = null
+  selectedGenerationId.value = null
+  clearPreview()
+  // A durable job may have appeared since the previous catalog read.
+  void discoverCurrentSheetJob()
 }
 
 function clearPreview(): void {
@@ -658,9 +697,17 @@ function decimalCount(value: string): bigint {
   return /^(?:0|[1-9][0-9]*)$/.test(value) ? BigInt(value) : 0n
 }
 
-function close(): void {
+function invalidateArchiveReads(): void {
+  catalogRequest++
+  previewRequest++
   jobDiscoveryRequest++
+  catalogLoading.value = false
+  previewLoading.value = false
   jobDiscoveryLoading.value = false
+}
+
+function close(): void {
+  invalidateArchiveReads()
   clearJobPoll()
   emit('close')
 }
@@ -685,8 +732,7 @@ watch(
   ([visible, sheetId], previous) => {
     if (!previous || sheetId !== previous[1]) resetForSheet()
     if (!visible) {
-      jobDiscoveryRequest++
-      jobDiscoveryLoading.value = false
+      invalidateArchiveReads()
       clearJobPoll()
       return
     }
@@ -697,7 +743,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  jobDiscoveryRequest++
+  invalidateArchiveReads()
   clearJobPoll()
 })
 </script>
@@ -706,6 +752,7 @@ onBeforeUnmount(() => {
 .archive-recovery-overlay { position: fixed; inset: 0; z-index: 2100; display: grid; place-items: center; padding: 24px; background: rgb(15 23 42 / 42%); }
 .archive-recovery-modal { width: min(780px, 100%); max-height: min(780px, calc(100vh - 48px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color); box-shadow: 0 18px 48px rgb(15 23 42 / 28%); }
 .archive-recovery__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 18px; border-bottom: 1px solid var(--el-border-color-lighter); }
+.archive-recovery__header-actions { display: flex; flex: none; gap: 4px; }
 .archive-recovery__header strong, .archive-recovery__header span { display: block; }
 .archive-recovery__header span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 13px; }
 .archive-recovery__body { overflow: auto; padding: 16px 18px 20px; }

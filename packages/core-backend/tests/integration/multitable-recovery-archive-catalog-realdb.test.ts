@@ -14,6 +14,7 @@ import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz202608
 import * as objectReceiptAuthorityMigration from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
 import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
+import * as derivedEffectsMigration from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
@@ -598,11 +599,17 @@ async function truncateCatalog(): Promise<void> {
   const legalHoldTarget = legalHoldTable.rows[0]?.present
     ? 'meta_recovery_archive_legal_holds,'
     : ''
+  const derivedEffectsTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_derived_effects') IS NOT NULL AS present`,
+  )
+  const derivedEffectTarget = derivedEffectsTable.rows[0]?.present
+    ? 'meta_recovery_archive_derived_effects,'
+    : ''
   const restoreJobsTable = await q(
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
   )
   const restoreJobTargets = restoreJobsTable.rows[0]?.present
-    ? `meta_recovery_archive_restore_plans,
+    ? `${derivedEffectTarget}meta_recovery_archive_restore_plans,
          meta_recovery_archive_job_chunks,
          meta_recovery_archive_sync_receipts,
          meta_recovery_archive_jobs,
@@ -810,6 +817,7 @@ async function installCatalogIfAbsent(): Promise<void> {
 }
 
 interface CatalogStackRestore {
+  derivedEffects: boolean
   claimAnchor: boolean
   legalHoldAuthority: boolean
   objectAuthority: boolean
@@ -817,6 +825,12 @@ interface CatalogStackRestore {
 }
 
 async function downCatalogStack(target: Kysely<unknown>): Promise<CatalogStackRestore> {
+  const derivedEffects = await sql<{ present: boolean }>`
+    SELECT pg_catalog.to_regclass('public.meta_recovery_archive_derived_effects') IS NOT NULL AS present
+  `.execute(target)
+  const restoreDerivedEffects = derivedEffects.rows[0]?.present === true
+  if (restoreDerivedEffects) await derivedEffectsMigration.down(target)
+
   const restoreJobs = await sql<{ present: boolean }>`
     SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present
   `.execute(target)
@@ -848,6 +862,7 @@ async function downCatalogStack(target: Kysely<unknown>): Promise<CatalogStackRe
   await stagingCleanupMigration.down(target)
   await archiveCatalogMigration.down(target)
   return {
+    derivedEffects: restoreDerivedEffects,
     claimAnchor: restoreClaimAnchor,
     legalHoldAuthority: restoreLegalHoldAuthority,
     objectAuthority: restoreObjectAuthority,
@@ -858,6 +873,7 @@ async function downCatalogStack(target: Kysely<unknown>): Promise<CatalogStackRe
 async function upCatalogStack(
   target: Kysely<unknown>,
   restore: CatalogStackRestore = {
+    derivedEffects: false,
     claimAnchor: false,
     legalHoldAuthority: false,
     objectAuthority: false,
@@ -873,6 +889,7 @@ async function upCatalogStack(
   if (restore.claimAnchor) await claimAnchorMigration.up(target)
   if (restore.legalHoldAuthority) await legalHoldMigration.up(target)
   if (restore.restoreJobs) await restoreJobsMigration.up(target)
+  if (restore.derivedEffects) await derivedEffectsMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
@@ -2402,6 +2419,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         if (restore.objectAuthority) await objectReceiptAuthorityMigration.up(trx)
         if (restore.claimAnchor) await claimAnchorMigration.up(trx)
         if (restore.legalHoldAuthority) await legalHoldMigration.up(trx)
+        if (restore.restoreJobs) await restoreJobsMigration.up(trx)
+        if (restore.derivedEffects) await derivedEffectsMigration.up(trx)
+        const restoredDerivedEffects = await sql<{ present: boolean }>`
+          SELECT pg_catalog.to_regclass('public.meta_recovery_archive_derived_effects') IS NOT NULL AS present
+        `.execute(trx)
+        expect(restoredDerivedEffects.rows[0]?.present).toBe(restore.derivedEffects)
         throw new Error('recovery_archive_catalog_replay_rollback')
       }),
     )

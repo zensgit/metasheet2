@@ -35,7 +35,7 @@ Guides: `AGENTS.md` (includes Local Dev & Troubleshooting).
 - [ ] **If monitoring/alerting config changed**: Confirmed routing and thresholds are correct
   - Applies to: `weekly_metrics.yaml`, `scripts/collect-security-metrics.sh`, Prometheus/Grafana configs
   - Verify: Alert routes point to correct channels, thresholds match SLA requirements
-  - See: `.github/CODEOWNERS` for dual approval requirement
+  - Note: `.github/CODEOWNERS` does not exist in this repo yet; dual approval for this item is enforced manually by the owner until CODEOWNERS is established
 
 ## 保证型 / 被 pin 文件 PR 的硬门
 
@@ -58,3 +58,11 @@ Guides: `AGENTS.md` (includes Local Dev & Troubleshooting).
 
   - `integration-guard` 与 S5 是本节重点检查项，不替代其他必需 CI、审批、合并权限或仓库授权要求。
   - 合并前 head 或 main/base 再次变化时，重新对齐最新 main、核对 pin 并重跑相关验证；此前的绿灯不能作为新候选的证据。
+
+- [ ] **新增操作 / 新增插件消费者 / 部署或授权边界变更必须配套独立 ADR**：以下三类变更，代码与对应 ADR 必须分别提交为不同 PR，不得夹带在功能 PR 里顺手改：
+
+  - 新增操作：新端点、新动作（route/action/RPC）。
+  - 新增插件消费者：某插件首次拿到宿主 facade，或已有插件的 facade 能力范围被扩大。
+  - 部署边界或授权边界变更，例如：把某路径加入全局门豁免表、扩大 `mst_` allowlist、给 fail-closed 门加旁路开关。
+  - **决策文档落在哪**：本仓**没有** `docs/adr/` 目录或 ADR 编号惯例（已核：`git ls-files | grep -i adr` 无实质命中），现行惯例是 `docs/development/<主题>-design-<YYYYMMDD>.md`（仓内 1250+ 份）。**本条门指的就是这类独立决策文档**，不要求先建 ADR 体系；若 owner 日后建立 `docs/adr/`，把本条指向那里即可。
+  - 自查：本 PR 若命中以上任一类型，而描述里没有链接到对应的独立决策文档，视为未完成——拆分 PR，或补一份决策文档再合并。

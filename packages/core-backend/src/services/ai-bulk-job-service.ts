@@ -35,6 +35,12 @@
  * (an in-process plan loss) it marks the header `errored`, leaving the persisted partial
  * committable (BJ-5).
  *
+ * SHEET LIVENESS (#5832): the plan's prompts carry the sheet's record content, so the worker
+ * re-checks the job's own sheet (multitable/sheet-liveness.ts) before EVERY provider call and stops
+ * — remainder `pending_not_generated`, header `errored` — once the sheet is soft-deleted, gone, or
+ * the lookup fails. The commit route refuses a non-live sheet on its own (route-level liveness 404,
+ * plus requireRecordReadable's per-row liveness refusal inside commitOneRecord).
+ *
  * SCOPE (Slice 1): crash coverage is the IN-PROCESS exception path — runJob wraps the
  * worker body after the claim and maps any unexpected throw to `errored` (see runJob). A
  * HARD process restart is NOT auto-reconciled in-process: the in-memory queue + plan registry
@@ -51,6 +57,7 @@ import { randomUUID, createHash } from 'crypto'
 import { AiProviderClient } from './ai-provider-client'
 import { runShortcutCore, type PoolLike, type ShortcutRequestContext } from './ai-bulk-shared'
 import type { AiUsageQueryFn } from './ai-usage-ledger'
+import { loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
 import type { WorkflowJobStatus, WorkflowJobSuspendReason } from '../multitable/workflow-job-contract'
 import type { QueueService } from '../types/plugin'
 
@@ -429,9 +436,16 @@ async function suspendIfRunning(query: AiUsageQueryFn, jobId: string, quotaPause
 /**
  * Mark the job `errored` (BJ-5) — GUARDED on `running` so a concurrent cancel (→ rejected)
  * is never clobbered. Generated rows are untouched and stay committable (errored ∈ the
- * commit committable set). Used for the plan-absent case (an in-process plan loss) and any
- * unexpected worker crash after the queued→running claim. (Does NOT cover a hard process
- * restart — runJob is never re-invoked then; that reconciliation is a B-4 follow-up.)
+ * commit committable set). Three callers:
+ *  · the plan-absent case (an in-process plan loss);
+ *  · any unexpected worker crash after the queued→running claim — rows are left as the crash
+ *    found them (typically the remainder still raw `pending`);
+ *  · DELIBERATELY, the sheet-not-live stop in runGeneratePhase (#5832, `jobSheetIsLive`): the
+ *    worker returns normally, and it has already flipped the remainder to
+ *    `pending_not_generated` before this call.
+ * So `errored` does not by itself mean "crashed".
+ * (Does NOT cover a hard process restart — runJob is never re-invoked then; that
+ * reconciliation is a B-4 follow-up.)
  */
 async function markErroredIfRunning(query: AiUsageQueryFn, jobId: string): Promise<void> {
   await query(
@@ -538,6 +552,72 @@ export async function cancelBulkJob(query: AiUsageQueryFn, jobId: string): Promi
   return true
 }
 
+// ── Sheet liveness (soft delete, #5832) ─────────────────────────────────────
+
+const LOOKUP_ERROR_CLASS_SHAPE = /^[A-Za-z_$][\w$]{0,63}$/
+const LOOKUP_ERROR_CODE_SHAPE = /^[0-9A-Z_]{2,32}$/
+
+/**
+ * Values-free description of a failed liveness lookup, for the log line: the constructor name and,
+ * when identifier-shaped, the driver `code` (a SQLSTATE such as `57014`, or an errno such as
+ * `ECONNREFUSED`). Never `message` / `detail` / `hint`, which can carry connection details or values.
+ * Same shape as `describeLookupError` in multitable/automation-service.ts; not imported from there so
+ * the worker does not pull the whole automation module graph in for two regexes.
+ */
+function describeLivenessLookupError(err: unknown): { errorClass: string; errorCode?: string } {
+  let errorClass: string = typeof err
+  if (err instanceof Error) {
+    const ctorName = (err as { constructor?: { name?: unknown } }).constructor?.name
+    errorClass = typeof ctorName === 'string' && LOOKUP_ERROR_CLASS_SHAPE.test(ctorName)
+      ? ctorName
+      : LOOKUP_ERROR_CLASS_SHAPE.test(err.name) ? err.name : 'Error'
+  }
+  const code = err !== null && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' && LOOKUP_ERROR_CODE_SHAPE.test(code) ? { errorClass, errorCode: code } : { errorClass }
+}
+
+/**
+ * SHEET LIVENESS for the generate loop (#5832). The plan holds prompts that were assembled from the
+ * sheet's record content when the job started, so nothing downstream of this loop reads the sheet
+ * again: a soft delete (or a hard one) does not stop those prompts from reaching the provider. The
+ * loop therefore asks, before EVERY provider call, whether the JOB'S OWN sheet is still live — with
+ * the one shared definition (multitable/sheet-liveness.ts `loadSheetLiveness`).
+ *
+ * Returns true ONLY on positive proof that the sheet is live:
+ *  · `deleted` → false. The point of the fix.
+ *  · `absent`  → false. Deliberately stricter than the automation lanes (which refuse exactly
+ *    `deleted`): the job was created by a route that required a LIVE sheet, so `absent` here means the
+ *    `meta_sheets` row disappeared mid-run, and the in-memory prompts would still go out — there is no
+ *    record read downstream that a hard delete would make fail. Both non-live verdicts mean "no sheet
+ *    here to act on".
+ *  · lookup THROWS → false (FAIL-CLOSED). This is an egress path: a failed lookup is not proof the
+ *    sheet is live, and the cost of stopping is small and recoverable — generated rows stay committable,
+ *    the job leaves the active set, and the user can run AI fill again. (The approval-automation lanes
+ *    in automation-service.ts chose fail-open because their completion events are one-shot and
+ *    authorization gates downstream of them fail closed; neither holds here — this loop has no
+ *    downstream gate, and a stopped job can simply be run again.) Logged values-free.
+ */
+async function jobSheetIsLive(query: AiUsageQueryFn, jobId: string, sheetId: string): Promise<boolean> {
+  let liveness: SheetLiveness
+  try {
+    liveness = await loadSheetLiveness(query, sheetId)
+  } catch (err) {
+    console.error(
+      `[ai-bulk-job] runJob ${jobId}: sheet liveness lookup failed; stopping generation before the next provider call (fail-closed, #5832)`,
+      { reason: 'liveness_lookup_failed', ...describeLivenessLookupError(err) },
+    )
+    return false
+  }
+  if (liveness !== 'live') {
+    console.warn(
+      `[ai-bulk-job] runJob ${jobId}: the job's sheet is not live; stopping generation before the next provider call (#5832)`,
+      { reason: liveness === 'deleted' ? 'sheet_deleted' : 'sheet_absent' },
+    )
+    return false
+  }
+  return true
+}
+
 // ── The worker ──────────────────────────────────────────────────────────────
 
 /**
@@ -639,9 +719,10 @@ export class BulkFillJobService {
   /**
    * The generate phase, extracted so `runJob` can wrap it in ONE try/catch and map any
    * unexpected failure to `errored` (BJ-5). The deliberate stop paths (cancel / quota /
-   * provider-error / blocked / complete) suspend the header and return normally; an
-   * UNHANDLED throw propagates to runJob, which marks the header errored without touching
-   * the already-generated rows. Plan cleanup is owned by runJob's `finally`.
+   * provider-error / blocked / complete) suspend the header and return normally; the
+   * sheet-not-live stop (#5832, see `jobSheetIsLive`) marks it `errored` and returns
+   * normally; an UNHANDLED throw propagates to runJob, which marks the header errored
+   * without touching the already-generated rows. Plan cleanup is owned by runJob's `finally`.
    */
   private async runGeneratePhase(query: AiUsageQueryFn, jobId: string): Promise<void> {
     const plan = this.plans.get(jobId)
@@ -665,6 +746,25 @@ export class BulkFillJobService {
       // stay `generated` (charged); the still-`pending` remainder was flipped to
       // `pending_not_generated` by the cancel.
       if ((await readJobStatus(query, jobId)) !== 'running') {
+        return
+      }
+
+      // #5832: re-check the job's own sheet before EVERY provider call (after the cancel check, so a
+      // cancel keeps its `rejected`). Not live, or the lookup failed → send nothing more: the remainder
+      // becomes `pending_not_generated` (uncharged), and the job goes `errored`, a terminal state the
+      // UI already shows, whose generated rows stay committable once the sheet is restored.
+      // `markErroredIfRunning` is guarded on `running`, so a cancel landing meanwhile still wins.
+      // RESIDUAL WINDOW: a delete that commits after this check answers live still lets THIS row out.
+      // The window is not just check-to-send: it spans runShortcutCore's whole quota reservation
+      // transaction, including the wait for the instance-wide advisory lock that serializes every AI
+      // reservation, so it grows with concurrent AI use. Narrowing it does not need a lock held across
+      // the provider call: re-checking liveness inside runShortcutCore after the reservation and right
+      // before `aiClient.complete` would leave the lock wait outside the window (ai-bulk-shared.ts,
+      // not changed here). The inline bulk-preview loop has no per-row check at all (#5838).
+      if (!(await jobSheetIsLive(query, jobId, plan.sheetId))) {
+        await markRemainingPendingNotGenerated(query, jobId)
+        await setHeaderProgress(query, jobId, generated, settledCost)
+        await markErroredIfRunning(query, jobId)
         return
       }
 

@@ -11,6 +11,37 @@ import {
 import type { AutomationRule } from '../src/multitable/types'
 
 describe('MultitableApiClient', () => {
+  it('accepts only an explicit record-restore identity from the server', async () => {
+    const result = { restored: 'r1', sheetId: 's1' }
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: result }))) })
+    await expect(client.restoreDeletedRecord('r1')).resolves.toEqual(result)
+  })
+
+  it.each([{}, { sheetId: 's1' }, { restored: 'other', sheetId: 's1' }, { restored: 'r1', sheetId: '' }])('does not fabricate success for an invalid record-restore result', async (data) => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data }))) })
+    await expect(client.restoreDeletedRecord('r1')).rejects.toThrow('Invalid record restore response')
+  })
+
+  it('lists soft-deleted sheets within the requested base and preserves opaque pagination', async () => {
+    const data = { sheets: [{ id: 's1', baseId: 'b1', name: 'Orders', description: null, deletedAt: '2026-09-14T08:00:00.000Z' }], nextCursor: 'opaque-next' }
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data })))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.listDeletedSheets('b1', { cursor: 'opaque+cursor', limit: 20 })).resolves.toEqual(data)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/bases/b1/trash?cursor=opaque%2Bcursor&limit=20')
+  })
+
+  it.each([
+    { sheets: null, nextCursor: null },
+    { sheets: [], nextCursor: '' },
+    { sheets: [], nextCursor: 12 },
+    { sheets: [{ baseId: 'b1', name: 'Orders', description: null, deletedAt: '2026-09-14T08:00:00.000Z' }], nextCursor: null },
+    { sheets: [{ id: 's1', baseId: 'other', name: 'Orders', description: null, deletedAt: '2026-09-14T08:00:00.000Z' }], nextCursor: null },
+    { sheets: [{ id: 's1', baseId: 'b1', name: 'Orders', description: null, deletedAt: 'invalid' }], nextCursor: null },
+  ])('rejects malformed or wrong-base sheet recycle-bin responses', async (data) => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data }))) })
+    await expect(client.listDeletedSheets('b1')).rejects.toThrow('Invalid deleted sheets response')
+  })
+
   beforeEach(() => {
     setMultitableApiErrorLocaleResolver(undefined)
     vi.useFakeTimers()
@@ -95,7 +126,93 @@ describe('MultitableApiClient', () => {
       total: 2,
       limit: 8,
       query: 'lin',
+      // #5795 markers default to "not truncated / term given" when the server omits them
+      hasMore: false,
+      requiresQuery: false,
+      minQueryLength: 1,
     })
+  })
+
+  // #5795: both roster-shaped candidate reads are search-required and capped; the client passes the
+  // server's values-free markers through so the UI can tell "type to search" from "no match".
+  it('passes the form-share candidate requiresQuery / hasMore markers through', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      const q = new URL(input, 'http://fake.invalid').searchParams.get('q')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: q
+          ? { items: [], total: 0, limit: 20, query: q, hasMore: true, requiresQuery: false, minQueryLength: 1 }
+          : { items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    const blank = await client.listFormShareCandidates('sheet_1', { q: '' })
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/sheet_1/form-share-candidates')
+    expect(blank).toMatchObject({ items: [], requiresQuery: true, hasMore: false, minQueryLength: 1 })
+    const typed = await client.listFormShareCandidates('sheet_1', { q: 'f' })
+    expect(typed).toMatchObject({ requiresQuery: false, hasMore: true, query: 'f' })
+  })
+
+  it('passes the comment mention-candidate markers through and never invents a population count', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      const q = new URL(input, 'http://fake.invalid').searchParams.get('q')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: q
+          ? {
+              items: [{ id: 'u_fake', label: 'Fake Person', subtitle: 'fake@example.invalid' }],
+              total: 1,
+              limit: 20,
+              query: q,
+              hasMore: true,
+              requiresQuery: false,
+              minQueryLength: 1,
+            }
+          : { items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listCommentMentionSuggestions({ spreadsheetId: 'sheet_1', q: '', limit: 20 })).resolves.toEqual({
+      items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1,
+    })
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/comments/mention-candidates?spreadsheetId=sheet_1&limit=20')
+    await expect(client.listCommentMentionSuggestions({ spreadsheetId: 'sheet_1', q: 'fa', limit: 20 })).resolves.toEqual({
+      items: [{ id: 'u_fake', label: 'Fake Person', subtitle: 'fake@example.invalid' }],
+      total: 1,
+      limit: 20,
+      query: 'fa',
+      hasMore: true,
+      requiresQuery: false,
+      minQueryLength: 1,
+    })
+  })
+
+  // #5809: the import resolvers rely on the server's exact modes; a client that silently dropped
+  // `match` would fall back to the substring search and the ceiling could hide the real owner.
+  it('sends match=exact on the person-field directory lookup', async () => {
+    const fetchFn = vi.fn(async (_input: string) => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [], total: 0, query: 'x', hasMore: false, requiresQuery: false, minQueryLength: 1 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listPersonFieldDirectory('s', 'f', { q: 'x', match: 'exact' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/s/person-fields/f/directory?q=x&match=exact')
+  })
+
+  it('sends match=exact-email on the mention-candidate lookup', async () => {
+    const fetchFn = vi.fn(async (_input: string) => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [], total: 0, limit: 50, query: 'a@b.c', hasMore: false, requiresQuery: false, minQueryLength: 1 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listCommentMentionSuggestions({ spreadsheetId: 's', q: 'a@b.c', limit: 50, match: 'exact-email' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/comments/mention-candidates?spreadsheetId=s&q=a%40b.c&limit=50&match=exact-email')
   })
 
   it('normalizes automation rule list responses from snake_case API rows', async () => {

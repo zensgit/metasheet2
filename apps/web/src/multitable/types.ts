@@ -12,6 +12,8 @@ import type { MetaCommentMentionSuggestion, MultitableCommentReaction, Multitabl
 import { COMMENT_REACTION_PALETTE } from '../shared/comments/types'
 
 export type { MetaCommentMentionSuggestion, MultitableCommentReaction, MultitableComment }
+// #5795: the server-side mention search contract (see shared/comments/types.ts).
+export type { MetaCommentMentionSearch, MetaCommentMentionSearchResult } from '../shared/comments/types'
 export { COMMENT_REACTION_PALETTE }
 
 // --- Field types ---

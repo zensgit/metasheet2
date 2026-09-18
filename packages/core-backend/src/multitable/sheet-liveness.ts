@@ -77,6 +77,47 @@ export async function loadSheetLiveness(query: LivenessQuery, sheetId: string): 
   return row.deleted_at === null || typeof row.deleted_at === 'undefined' ? 'live' : 'deleted'
 }
 
+/**
+ * The SAME question, asked about MANY sheets in ONE round trip.
+ *
+ * It lives next to {@link loadSheetLiveness} on purpose: the column read (`deleted_at`), the
+ * comparison (`deleted_at IS NULL ⇒ live`, anything else ⇒ `deleted`) and the "no row ⇒ absent"
+ * verdict are written ONCE here for both arities, so a batched caller cannot end up with a second,
+ * subtly different definition of "live".
+ *
+ * Why it exists: the template-keyed approval rule loaders resolve liveness for every sheet a
+ * template's rules sit on. Asking per sheet made the cost of ONE approval event scale with the
+ * number of DISTINCT sheets (serially, each checkout able to wait out the pool timeout), on a path
+ * whose caller holds a durable lease. One round trip makes that cost constant.
+ *
+ * Every id passed in gets an entry: ids with no `meta_sheets` row — and ids that are not usable
+ * strings, matching {@link loadSheetLiveness}'s own guard — map to `absent`.
+ */
+export async function loadSheetLivenessBatch(
+  query: LivenessQuery,
+  sheetIds: readonly string[],
+): Promise<Map<string, SheetLiveness>> {
+  const result = new Map<string, SheetLiveness>()
+  const lookups: string[] = []
+  for (const sheetId of sheetIds) {
+    if (typeof sheetId !== 'string' || sheetId.length === 0) {
+      if (typeof sheetId === 'string') result.set(sheetId, 'absent')
+      continue
+    }
+    if (!result.has(sheetId)) {
+      result.set(sheetId, 'absent')
+      lookups.push(sheetId)
+    }
+  }
+  if (lookups.length === 0) return result
+  const res = await query('SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[])', [lookups])
+  for (const row of res.rows as Array<{ id?: unknown; deleted_at?: unknown } | undefined>) {
+    if (!row || typeof row.id !== 'string') continue
+    result.set(row.id, row.deleted_at === null || typeof row.deleted_at === 'undefined' ? 'live' : 'deleted')
+  }
+  return result
+}
+
 export async function isSheetLive(query: LivenessQuery, sheetId: string): Promise<boolean> {
   return (await loadSheetLiveness(query, sheetId)) === 'live'
 }

@@ -22,8 +22,8 @@ describe('describeTemplateAuthoringError', () => {
   it('uses a values-free fallback for unknown API and local errors', () => {
     expect(describeTemplateAuthoringError(
       new ApprovalApiError('database host db.internal:5432', 500, 'UNKNOWN'),
-      '保存模板失败',
-    )).toBe('保存模板失败')
-    expect(describeTemplateAuthoringError(new Error('raw local message'), '保存模板失败')).toBe('保存模板失败')
+      '保存表单失败',
+    )).toBe('保存表单失败')
+    expect(describeTemplateAuthoringError(new Error('raw local message'), '保存表单失败')).toBe('保存表单失败')
   })
 })

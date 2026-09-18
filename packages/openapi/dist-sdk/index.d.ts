@@ -7606,13 +7606,15 @@ export interface paths {
         };
         /**
          * List comment mention candidates
-         * @description Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.
+         * @description Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. By default the term is a literal case-insensitive substring of name, email or id. When `match=exact-email` (#5819) is set, the term is instead matched against the stored email by trimmed, case-insensitive equality - still requires a non-blank `q`, and the returned rows are a subset of what the substring search would return for the same term. `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
          */
         get: {
             parameters: {
                 query: {
                     spreadsheetId: string;
                     q?: string;
+                    /** @description Optional. When set to `exact-email`, switches from substring search to trimmed, case-insensitive email equality (#5819). */
+                    match?: "exact-email";
                     limit?: number;
                 };
                 header?: never;
@@ -10000,6 +10002,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/bases/{baseId}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List restorable deleted tables in a base
+         * @description Requires sheet lifecycle authority and read access. Returns only eligible soft-deleted user tables; managed and system projections are excluded. Authorization is applied before pagination. No total count is exposed. Missing, deleted, and inaccessible bases return 403. The opaque cursor is bound to the base and uses a stable table-id keyset.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Opaque nextCursor from the preceding page of this base. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    baseId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Authorized deleted tables, possibly empty. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                sheets: {
+                                    id: string;
+                                    baseId: string;
+                                    name: string;
+                                    description: string | null;
+                                    /** Format: date-time */
+                                    deletedAt: string;
+                                }[];
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/templates": {
         parameters: {
             query?: never;
@@ -10343,7 +10407,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a multitable sheet */
+        /**
+         * Soft-delete a multitable sheet
+         * @description Marks the table deleted while retaining its fields, records, and views. It is no longer accessible through live table reads or writes. Authorized users can restore it from the table recycle bin; this is not a record deletion or field deletion.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -10375,6 +10442,63 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a soft-deleted multitable sheet
+         * @description Clears the table deletion marker under the same lifecycle authority as table deletion. Retained fields, records, views, and inbound links become available again. Does not restore an earlier data version or recreate a table that was permanently deleted. Live or missing tables return 404; a concurrent recovery fence returns 409. No feature flag is changed.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Table restored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                restored: string;
+                                sheet: {
+                                    id: string;
+                                    baseId: string | null;
+                                    name: string;
+                                    description: string | null;
+                                };
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -16480,6 +16604,10 @@ export interface components {
             updatedAt?: string;
             /** @description Mentioned user identifiers parsed from comment content. */
             mentions?: string[];
+            /** @description Display labels for this comment's own mentions, keyed by user id. A label is the user's name, or their email when they have no name (the label the mention search returns, without its email subtitle). Only in GET /api/comments responses to an interactive session caller, only on that caller's own comments, only for active users, and for at most 50 distinct ids per response. Never sent to API-token callers. An id without an entry has no label in this response (inactive or deleted user, no name or email, or beyond the 50-distinct-id ceiling). */
+            mentionLabels?: {
+                [key: string]: string;
+            };
         };
         CommentsListResponse: {
             /** @example true */
@@ -16529,10 +16657,36 @@ export interface components {
             ok?: boolean;
             data?: {
                 items?: components["schemas"]["CommentMentionCandidate"][];
-                /** @example 1 */
+                /**
+                 * @description Number of items in this (clamped) page - never a deployment-wide count.
+                 * @example 1
+                 */
                 total?: number;
-                /** @example 50 */
+                /**
+                 * @description Effective page size after the server ceiling (50).
+                 * @example 50
+                 */
                 limit?: number;
+                /**
+                 * @description The trimmed search term that was applied (empty when `requiresQuery` is true).
+                 * @example jam
+                 */
+                query?: string;
+                /**
+                 * @description True when more candidates matched than this page holds.
+                 * @example false
+                 */
+                hasMore?: boolean;
+                /**
+                 * @description True when the call carried no usable search term; `items` is then empty.
+                 * @example false
+                 */
+                requiresQuery?: boolean;
+                /**
+                 * @description Minimum trimmed search-term length the server accepts.
+                 * @example 1
+                 */
+                minQueryLength?: number;
             };
         };
         CommentUnreadCountResponse: {

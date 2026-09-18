@@ -22,6 +22,9 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const CREATOR = `user_oapi2cw_${TS}`
 const SHEET = `sheet_oapi2cw_${TS}`
+// The comment routes now refuse a sheet that does not exist or was soft-deleted (404, after the capability
+// 403), so the fixture must create a LIVE sheet instead of addressing a made-up id.
+const BASE = `base_oapi2cw_${TS}`
 const ROW = `rec_oapi2cw_${TS}`
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 
@@ -68,6 +71,8 @@ describeIfDatabase('OAPI-2a comments:write token comment-create (real DB, full s
        ON CONFLICT (id) DO UPDATE SET is_admin = TRUE, permissions = EXCLUDED.permissions`,
       [CREATOR, `${CREATOR}@t.local`, 'CmtWriter', JSON.stringify(['comments:write', 'multitable:read'])],
     )
+    await q(`INSERT INTO meta_bases (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [BASE, 'OAPI-2a Comments Base'])
+    await q(`INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [SHEET, BASE, 'OAPI-2a Comments Sheet'])
 
     const svc = new ApiTokenService(db)
     const w = await svc.createToken(CREATOR, { name: 'cw', scopes: ['comments:write'] })
@@ -90,6 +95,8 @@ describeIfDatabase('OAPI-2a comments:write token comment-create (real DB, full s
     await q('DELETE FROM oapi_write_audit WHERE token_id = ANY($1::text[])', [[tokWriteId, tokWrongScopeId]]).catch(() => {})
     await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [CREATOR]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     if (server) await server.stop()
   })
 

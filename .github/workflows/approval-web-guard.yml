@@ -404,6 +404,21 @@ on:
       - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
       # App.spec.ts now enumerates every request the shell issues, including this capability read.
       - 'apps/web/tests/App.spec.ts'
+      # 审批表单页切片 1 round 4 (2026-09-16, P2-A) — this workflow's own two-point discipline had a
+      # gap: CategoryCandidateInput.vue / categoryCandidateInput.spec.ts were already on
+      # run-required-web-tests.sh's exec line but had NO entry here, so an edit to either could break
+      # the main required gate without ever re-running this targeted lane. templateDetailLabels.ts
+      # (sibling of the already-guarded templateCenterLabels.ts) and delegations.ts (sibling of the
+      # already-guarded delegationStatus.ts) were touched by the same slice and had the identical
+      # gap. templateDetailI18n.spec.ts (sibling of the already-guarded templateCenterI18n.spec.ts)
+      # now carries this round's real-parent keyboard-isolation integration test (P2-B) — without a
+      # path entry here, a future edit to CategoryCandidateInput.vue's keyboard handling could red
+      # that assertion in run-required-web-tests.sh without this lane ever confirming it separately.
+      - 'apps/web/src/approvals/components/CategoryCandidateInput.vue'
+      - 'apps/web/tests/categoryCandidateInput.spec.ts'
+      - 'apps/web/src/views/approval/templateDetailLabels.ts'
+      - 'apps/web/src/approvals/delegations.ts'
+      - 'apps/web/tests/templateDetailI18n.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -770,6 +785,21 @@ on:
       - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
       # App.spec.ts now enumerates every request the shell issues, including this capability read.
       - 'apps/web/tests/App.spec.ts'
+      # 审批表单页切片 1 round 4 (2026-09-16, P2-A) — this workflow's own two-point discipline had a
+      # gap: CategoryCandidateInput.vue / categoryCandidateInput.spec.ts were already on
+      # run-required-web-tests.sh's exec line but had NO entry here, so an edit to either could break
+      # the main required gate without ever re-running this targeted lane. templateDetailLabels.ts
+      # (sibling of the already-guarded templateCenterLabels.ts) and delegations.ts (sibling of the
+      # already-guarded delegationStatus.ts) were touched by the same slice and had the identical
+      # gap. templateDetailI18n.spec.ts (sibling of the already-guarded templateCenterI18n.spec.ts)
+      # now carries this round's real-parent keyboard-isolation integration test (P2-B) — without a
+      # path entry here, a future edit to CategoryCandidateInput.vue's keyboard handling could red
+      # that assertion in run-required-web-tests.sh without this lane ever confirming it separately.
+      - 'apps/web/src/approvals/components/CategoryCandidateInput.vue'
+      - 'apps/web/tests/categoryCandidateInput.spec.ts'
+      - 'apps/web/src/views/approval/templateDetailLabels.ts'
+      - 'apps/web/src/approvals/delegations.ts'
+      - 'apps/web/tests/templateDetailI18n.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -926,4 +956,15 @@ jobs:
         # mobile path one prop over already read the same locale-aware computed (renamed
         # mobileEmptyText -> tabEmptyText). Inserted next to the neighbouring `approvalCenterTable`
         # token (same view).
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
+        # 审批表单页切片 1 round 4 (2026-09-16, P2-A/P2-B): `categoryCandidateInput` for the new
+        # apps/web/tests/categoryCandidateInput.spec.ts (this lane's own two-point gap — the token
+        # was already on run-required-web-tests.sh's exec line but absent here; see the `paths:`
+        # comment above) — the component's endpoint-wiring, allow-create, fail-soft, and this
+        # round's ArrowDown/ArrowUp/Enter/Escape/ARIA + parent-shortcut-isolation coverage.
+        # `templateDetailI18n` for apps/web/tests/templateDetailI18n.spec.ts (same pre-existing gap)
+        # — this round adds the real-parent (TemplateDetailView.vue) integration proof that
+        # CategoryCandidateInput's Enter/Escape handling does not fire the real saveCategory/
+        # cancelEditCategory when a candidate is being keyboard-accepted, alongside its existing i18n
+        # retrofit coverage. Inserted next to the neighbouring `templateCenterI18n`/`approvalTemplateCenterCategory`
+        # tokens (same view family).
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry categoryCandidateInput templateDetailI18n --reporter=dot

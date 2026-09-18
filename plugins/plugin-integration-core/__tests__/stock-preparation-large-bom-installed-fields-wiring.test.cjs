@@ -271,6 +271,20 @@ function baseServices(sourceAdapter, ledger) {
           config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
         }
       },
+      // #5590 (G4/M2) 起 registerIntegrationRoutes 硬依赖 getExternalSystemForAdapter（去掉了
+      // credential-stripped 回退）。适配器加载走的就是这条（会解密），返回与 getExternalSystem 同一系统。
+      async getExternalSystemForAdapter(input = {}) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+          credentials: {},
+        }
+      },
     },
     adapterRegistry: {
       createAdapter() { return sourceAdapter },

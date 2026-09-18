@@ -160,6 +160,35 @@ describe('todo mirror worker — claim', () => {
     }
     expect(claim.params[3]).toBe('worker-test')
   })
+
+  it('stopAndDrain refuses another batch and waits for the admitted outbound send to settle', async () => {
+    let releaseSend!: () => void
+    const createTodoTask = vi.fn(() => new Promise<{ taskId: string; raw: Record<string, never> }>((resolve) => {
+      releaseSend = () => resolve({ taskId: 'dt-task-1', raw: {} })
+    }))
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      createTodoTask,
+    })
+
+    const admitted = h.worker.runBatch()
+    await vi.waitFor(() => expect(createTodoTask).toHaveBeenCalledTimes(1))
+    let stopped = false
+    const stop = h.worker.stopAndDrain().then(() => { stopped = true })
+    const refused = await h.worker.runBatch()
+    expect(refused).toEqual({
+      claimed: 0, created: 0, completed: 0, retrying: 0, failed: 0, skipped: 0, outcomeUnknown: 0, lostLease: 0,
+    })
+    expect(h.calls.filter((call) => call.sql.includes('WITH claim AS'))).toHaveLength(1)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(stopped).toBe(false)
+
+    releaseSend()
+    await admitted
+    await stop
+    expect(stopped).toBe(true)
+  })
 })
 
 describe('todo mirror worker — create phase', () => {

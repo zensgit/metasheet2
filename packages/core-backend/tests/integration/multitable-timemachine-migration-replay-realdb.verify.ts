@@ -29,6 +29,7 @@ import * as objectReceiptAuthority from '../../src/db/migrations/zzzz20260828125
 import * as claimAnchorAmendment from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import * as legalHoldAuthority from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
 import * as restoreJobs from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
+import * as derivedEffects from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -175,9 +176,14 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260828131000_create_recovery_archive_restore_jobs',
     module: restoreJobs,
   },
+  {
+    name: 'zzzz20260915160000_create_recovery_archive_derived_effects',
+    module: derivedEffects,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
+  'meta_recovery_archive_derived_effects',
   'meta_field_value_tombstones',
   'meta_link_tombstones',
   'meta_config_revisions',
@@ -218,6 +224,7 @@ const TOUCHED_RELATIONS = [
 ]
 
 const OWNED_RELATIONS = [
+  'meta_recovery_archive_derived_effects',
   'meta_field_value_tombstones',
   'meta_link_tombstones',
   'meta_record_version_markers',

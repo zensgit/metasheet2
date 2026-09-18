@@ -300,27 +300,26 @@ describe('#5750 external context sync converges on identical host re-sends', () 
   })
 
   // #5750 review: the memo must record what THIS sync applied, not whatever happens to be on
-  // screen when it finally returns. loadBaseContext applies the context and only THEN awaits
-  // /fields, so that window is wide enough for a rail click or a second host navigation to land in
-  // it; memoizing the intruder's state made the request look satisfied forever while the workbench
-  // rendered a different sheet.
+  // screen when it finally returns. Context and fields apply atomically; a rail click or a second
+  // host navigation during the fields request supersedes the first request. The cancelled request
+  // must not memoize the newer writer's state as its own successful result.
   it('does not memoize a state another writer produced while it was awaiting (rail click mid-sync)', async () => {
     const { client, counters, releaseFields } = makeRaceClient()
     const wb = useMultitableWorkbench({ client })
 
-    // 1) host navigate -> Orders: /context lands and is applied, /fields is still in flight.
+    // 1) host navigate -> Orders: /context lands, but /fields still prevents atomic application.
     const navigate = wb.syncExternalContext({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
-    await vi.waitFor(() => expect(wb.activeSheetId.value).toBe('sheet_orders'))
     await vi.waitFor(() => expect(releaseFields.pending()).toBe(true))
+    expect(wb.activeSheetId.value).toBe('')
 
     // 2) the user clicks another sheet in the rail while that /fields is open.
     wb.selectSheet('sheet_deals')
     await wb.loadSheetMeta('sheet_deals')
     expect(wb.activeSheetId.value).toBe('sheet_deals')
 
-    // 3) the held /fields answers; the sync reports success, but the state is the rail click's.
+    // 3) the held /fields answers; the superseded sync reports false and preserves the rail click.
     releaseFields.flush()
-    expect(await navigate).toBe(true)
+    expect(await navigate).toBe(false)
     expect(wb.activeSheetId.value).toBe('sheet_deals')
 
     // 4) the host re-sends the SAME navigate: it must actually navigate, not report a memoized hit.
@@ -345,7 +344,7 @@ describe('#5750 external context sync converges on identical host re-sends', () 
     expect(await wb.syncExternalContext({ baseId: 'base_ops', sheetId: 'sheet_deals', viewId: 'view_deals' })).toBe(true)
     expect(wb.activeSheetId.value).toBe('sheet_deals')
     releaseFields.flush()
-    expect(await first).toBe(true)
+    expect(await first).toBe(false)
 
     // Going back to #1's context has to re-fetch; #2's context stays memoized on its own terms.
     const contextBefore = counters.context

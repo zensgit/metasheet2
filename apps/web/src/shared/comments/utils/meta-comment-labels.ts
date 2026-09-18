@@ -38,6 +38,10 @@ export type MetaCommentLabelKey =
   | 'comment.mentionSuggestionsAria'
   | 'comment.hintBase'
   | 'comment.hintWithMention'
+  // #5795: the mention search is server-side and term-required; a bare `@` shows this prompt.
+  | 'comment.mentionTypeToSearch'
+  // #5808: chip text for a mention whose person could not be named (never the raw id).
+  | 'comment.mentionUnknownUser'
   | 'comment.discardDraftConfirm'
   | 'comment.addReaction'
   | 'comment.errorLoad'
@@ -86,6 +90,8 @@ const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string 
     en: 'Tab to mention, Ctrl/Cmd + Enter to send',
     zh: 'Tab 提及，Ctrl/Cmd + Enter 发送',
   },
+  'comment.mentionTypeToSearch': { en: 'Type a name or email to mention someone', zh: '输入姓名或邮箱以提及成员' },
+  'comment.mentionUnknownUser': { en: 'Unknown user', zh: '未知用户' },
   'comment.discardDraftConfirm': {
     en: 'Discard unsaved comment draft?',
     zh: '放弃未保存的评论草稿吗？',

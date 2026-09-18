@@ -39,7 +39,7 @@ export const NODE_OPERATION_DISABLED_CODE = 'APPROVAL_NODE_OPERATION_DISABLED'
  * Honest copy for a policy denial. Deliberately contains NO 请重试: the operation is disabled by the
  * template's configuration, so retrying cannot help and asking for it manufactures audit noise.
  */
-export const NODE_OPERATION_DISABLED_MESSAGE = '该节点已关闭此操作，请联系管理员调整审批模板的操作权限。'
+export const NODE_OPERATION_DISABLED_MESSAGE = '该节点已关闭此操作，请联系管理员调整审批表单的操作权限。'
 
 export interface MemberActionFailure {
   /** What to show the member. */

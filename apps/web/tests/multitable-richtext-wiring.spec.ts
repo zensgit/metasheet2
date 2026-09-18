@@ -174,6 +174,40 @@ describe('cell editor (MetaCellEditor) — rich vs plain editor selection', () =
   })
 })
 
+// #5795 refuter round: with the term-less roster preload gone, the host-bound search is the only way a rich
+// cell editor reaches people. MetaCellEditor must hand it to the REAL MetaRichLongTextEditor.
+describe('cell editor (MetaCellEditor) — #5795 mentionSearch hand-off to the rich editor', () => {
+  it('typing "@term" in the rich cell editor calls the search handed to MetaCellEditor', async () => {
+    const search = vi.fn(async (_q: string) => ({ items: [], requiresQuery: false, hasMore: false }))
+    const { container, app } = mount(MetaCellEditor, {
+      field: RICH,
+      modelValue: '',
+      recordId: 'rec_1',
+      mentionSearch: search,
+      'onUpdate:modelValue': vi.fn(),
+      onConfirm: vi.fn(),
+      onCancel: vi.fn(),
+      onOpenLinkPicker: vi.fn(),
+    })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    editable.textContent = 'x @fakecell'
+    const range = document.createRange()
+    range.setStart(editable.firstChild!, 'x @fakecell'.length)
+    range.collapse(true)
+    window.getSelection()!.removeAllRanges()
+    window.getSelection()!.addRange(range)
+    editable.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 220))
+    await nextTick()
+
+    expect(search).toHaveBeenCalledWith('fakecell')
+    app.unmount()
+    container.remove()
+  })
+})
+
 describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no flood)', () => {
   function mountEditor(handlers: Record<string, unknown>) {
     const container = document.createElement('div')

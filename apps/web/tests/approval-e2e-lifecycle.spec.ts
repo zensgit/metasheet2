@@ -655,7 +655,7 @@ describe('Approval E2E Lifecycle', () => {
     it('renders template center with header', async () => {
       await mountTemplateCenterView()
       const header = container!.querySelector('.template-center__header h1')
-      expect(header?.textContent).toBe('审批模板')
+      expect(header?.textContent).toBe('审批表单')
     })
 
     it('renders status tabs (all / published / draft / archived)', async () => {

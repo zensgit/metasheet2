@@ -435,7 +435,7 @@ describe('todo mirror consumer — wiring and log discipline', () => {
     const subscribed: string[] = []
     const bus = { subscribe: (eventType: string) => { subscribed.push(eventType); return `sub-${subscribed.length}` } }
     const sink = createDingTalkTodoMirrorSink(fakeLedger().query)
-    const ids = subscribeDingTalkTodoMirrorBus(bus as never, sink)
+    const subscription = subscribeDingTalkTodoMirrorBus(bus as never, sink)
     expect(subscribed).toEqual([
       'approval.task_created',
       'approval.approved',
@@ -443,7 +443,43 @@ describe('todo mirror consumer — wiring and log discipline', () => {
       'approval.revoked',
       'approval.cancelled',
     ])
-    expect(ids).toHaveLength(5)
+    expect(subscription.ids).toHaveLength(5)
+  })
+
+  it('returns the admitted sink promise, detaches exact ids, and drains it before shutdown completes', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    const handlers = new Map<string, (payload: unknown) => void | Promise<void>>()
+    const unsubscribe = vi.fn(() => true)
+    const bus = {
+      subscribe: (eventType: string, handler: (payload: unknown) => void | Promise<void>) => {
+        handlers.set(eventType, handler)
+        return `sub:${eventType}`
+      },
+      unsubscribe,
+    }
+    const sink = {
+      handleApprovalTaskCreated: vi.fn(() => pending),
+      handleApprovalCompletion: vi.fn(async () => undefined),
+    }
+    const subscription = subscribeDingTalkTodoMirrorBus(bus, sink)
+
+    const admitted = handlers.get('approval.task_created')!(taskCreatedEvent())
+    expect(admitted).toBeInstanceOf(Promise)
+    subscription.detach()
+    expect(unsubscribe.mock.calls.map(([id]) => id)).toEqual(subscription.ids)
+
+    let drained = false
+    const drain = subscription.drain().then(() => { drained = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(drained).toBe(false)
+    await handlers.get('approval.task_created')!(taskCreatedEvent())
+    expect(sink.handleApprovalTaskCreated).toHaveBeenCalledTimes(1)
+
+    release()
+    await admitted
+    await drain
+    expect(drained).toBe(true)
   })
 
   it('a sink failure is handed to onError and never thrown into the bus', async () => {

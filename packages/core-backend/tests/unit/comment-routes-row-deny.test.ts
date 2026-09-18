@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/integration/db/connection-pool', () => ({
   poolManager: {
-    get: () => ({ query: mocks.query }),
+    // getInternalPool: read at load time by src/db/pg.ts (routes/comments.ts -> multitable/access -> rbac/service).
+    get: () => ({ query: mocks.query, getInternalPool: () => null }),
   },
 }))
 
@@ -74,16 +75,23 @@ function buildCommentService() {
   }
 }
 
-function buildApp(commentService: ReturnType<typeof buildCommentService>): Express {
+function buildApp(
+  commentService: ReturnType<typeof buildCommentService>,
+  // #5808: `apiTokenId` stands in for what the real apiTokenAuth sets on an `mst_` request.
+  requestShape: { apiTokenId?: string; noUser?: boolean } = {},
+): Express {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    ;(req as any).user = {
-      id: 'actor-row-denied',
-      roles: [],
-      perms: ['comments:read', 'comments:write', 'multitable:read'],
-      permissions: ['comments:read', 'comments:write', 'multitable:read'],
+    if (!requestShape.noUser) {
+      ;(req as any).user = {
+        id: 'actor-row-denied',
+        roles: [],
+        perms: ['comments:read', 'comments:write', 'multitable:read'],
+        permissions: ['comments:read', 'comments:write', 'multitable:read'],
+      }
     }
+    if (requestShape.apiTokenId) (req as any).apiTokenId = requestShape.apiTokenId
     next()
   })
   app.use(commentsRouter({ get: () => commentService } as any))
@@ -98,6 +106,7 @@ describe('comments routes row-deny gate', () => {
     mocks.resolveSheetReadableCapabilities.mockResolvedValue({
       access: { userId: 'actor-row-denied', isAdminRole: false },
       capabilities: { canRead: true },
+      sheetLiveness: 'live',
     })
     mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
     mocks.loadDeniedRecordIds.mockResolvedValue(new Set(['row-denied']))
@@ -229,5 +238,98 @@ describe('comments routes row-deny gate', () => {
 
     expect(res.status).toBe(403)
     expect(commentService.createComment).not.toHaveBeenCalled()
+  })
+})
+
+// #5808 — who gets edit-time mention labels on GET /api/comments. The service decides WHAT is named
+// (own comments, own mentions, active users, bounded — pinned in comment-service.test.ts); the route
+// decides FOR WHOM: only an authenticated interactive session caller, and only after the existing
+// G-8 sheet-read gate and row-level deny. Fake ids only.
+describe('comments list — edit-time mention labels (#5808)', () => {
+  const ownComment = {
+    id: 'comment-own',
+    authorId: 'actor-row-denied',
+    mentions: ['u-fake-alpha'],
+    mentionLabels: { 'u-fake-alpha': 'Fake Alpha' },
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.resolveSheetReadableCapabilities.mockResolvedValue({
+      access: { userId: 'actor-row-denied', isAdminRole: false },
+      capabilities: { canRead: true },
+      sheetLiveness: 'live',
+    })
+    mocks.loadRowLevelReadDenyEnabled.mockResolvedValue(true)
+    mocks.loadDeniedRecordIds.mockResolvedValue(new Set(['row-denied']))
+  })
+
+  it("asks the service to label the session caller's own comments and passes the labels through", async () => {
+    const commentService = buildCommentService()
+    commentService.getComments.mockResolvedValue({ items: [ownComment] as any, total: 1 })
+    pinned.setApp(buildApp(commentService))
+
+    const res = await request(pinned.url()).get('/api/comments').query({ spreadsheetId: 'sheet-1', rowId: 'row-visible' })
+
+    expect(res.status).toBe(200)
+    expect(commentService.getComments).toHaveBeenCalledTimes(1)
+    expect((commentService.getComments.mock.calls[0] as unknown[])[1]).toMatchObject({
+      mentionLabelsAuthorId: 'actor-row-denied',
+      viewerId: 'actor-row-denied',
+      excludeRowIds: ['row-denied'],
+    })
+    expect(res.body.data.items[0].mentionLabels).toEqual({ 'u-fake-alpha': 'Fake Alpha' })
+  })
+
+  it('never asks for labels on an API-token request', async () => {
+    const commentService = buildCommentService()
+    pinned.setApp(buildApp(commentService, { apiTokenId: 'tok-fake-1' }))
+
+    await request(pinned.url()).get('/api/comments').query({ spreadsheetId: 'sheet-1' }).expect(200)
+
+    expect(commentService.getComments).toHaveBeenCalledTimes(1)
+    expect((commentService.getComments.mock.calls[0] as unknown[])[1]).not.toHaveProperty('mentionLabelsAuthorId')
+  })
+
+  it('never asks for labels when the id would only come from the x-user-id header', async () => {
+    mocks.resolveSheetReadableCapabilities.mockResolvedValue({
+      access: { userId: '', isAdminRole: false },
+      capabilities: { canRead: true },
+      sheetLiveness: 'live',
+    })
+    const commentService = buildCommentService()
+    pinned.setApp(buildApp(commentService, { noUser: true }))
+
+    await request(pinned.url())
+      .get('/api/comments')
+      .set('x-user-id', 'actor-row-denied')
+      .query({ spreadsheetId: 'sheet-1' })
+      .expect(200)
+
+    const options = (commentService.getComments.mock.calls[0] as unknown[])[1]
+    // the header still feeds reactedByMe (pre-existing), but never decides whose comments get labels
+    expect(options).toMatchObject({ viewerId: 'actor-row-denied' })
+    expect(options).not.toHaveProperty('mentionLabelsAuthorId')
+  })
+
+  it('a caller who cannot read the sheet or the row gets no comments and no labels', async () => {
+    const commentService = buildCommentService()
+    commentService.getComments.mockResolvedValue({ items: [ownComment] as any, total: 1 })
+    pinned.setApp(buildApp(commentService))
+
+    const rowDenied = await request(pinned.url()).get('/api/comments').query({ spreadsheetId: 'sheet-1', rowId: 'row-denied' })
+    expect(rowDenied.status).toBe(200)
+    expect(rowDenied.body.data.items).toEqual([])
+
+    mocks.resolveSheetReadableCapabilities.mockResolvedValue({
+      access: { userId: 'actor-row-denied', isAdminRole: false },
+      capabilities: { canRead: false },
+      sheetLiveness: 'live',
+    })
+    const sheetDenied = await request(pinned.url()).get('/api/comments').query({ spreadsheetId: 'sheet-1' })
+    expect(sheetDenied.status).toBe(403)
+    expect(JSON.stringify(sheetDenied.body)).not.toContain('Fake Alpha')
+
+    expect(commentService.getComments).not.toHaveBeenCalled()
   })
 })

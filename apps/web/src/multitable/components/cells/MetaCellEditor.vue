@@ -68,6 +68,7 @@
       :model-value="modelValue"
       :is-zh="isZh"
       :mention-suggestions="mentionSuggestions"
+      :mention-search="mentionSearch"
       @update:model-value="emit('update:modelValue', $event)"
       @confirm="emit('confirm')"
       @cancel="emit('cancel')"
@@ -350,7 +351,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, toRef } from 'vue'
-import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSuggestion, MetaField } from '../../types'
+import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSearch, MetaCommentMentionSuggestion, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
 import MetaRichLongTextEditor from './MetaRichLongTextEditor.vue'
@@ -414,6 +415,8 @@ const props = defineProps<{
    * `commentMentionSuggestions` (no fresh fetch). Absent on the anonymous form path.
    */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   /**
    * D2/P2-1 (grid-commit-reliability): the SOLE host opt-in switch for every
    * commit/discard-on-blur AND commit-on-Tab behaviour this editor can emit

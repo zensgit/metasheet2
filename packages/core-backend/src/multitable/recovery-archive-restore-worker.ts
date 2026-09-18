@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { consumeRecoveryArchiveDerivedEffect, type RecoveryArchiveDerivedWork } from './recovery-archive-derived-effects'
 
 import {
   executeRecoveryArchiveAsyncRestoreChunk,
@@ -40,6 +41,7 @@ export interface RecoveryArchiveRestoreWorkerRunResult {
 }
 
 export interface RecoveryArchiveRestoreWorkerOperations {
+  processDerivedWork?(): Promise<'idle' | 'completed' | 'retry'>
   sweepExpired(): Promise<number>
   select(): Promise<RecoveryArchiveRestoreJobCandidate | null>
   claim(
@@ -73,7 +75,9 @@ export interface RecoveryArchiveRestoreWorkerConfig {
 
 export interface CreateRecoveryArchiveRestoreWorkerInput
   extends Omit<RecoveryArchiveAsyncRestoreChunkInput, 'claim'>,
-    RecoveryArchiveRestoreWorkerConfig {}
+    RecoveryArchiveRestoreWorkerConfig {
+  readonly processDerivedWork?: (work: RecoveryArchiveDerivedWork) => Promise<boolean>
+}
 
 const STALE_ERROR_CODES = new Set([
   'RECOVERY_ARCHIVE_RESTORE_JOB_NOT_FOUND',
@@ -115,7 +119,11 @@ export function createRecoveryArchiveRestoreWorker(
   const workerOwnerId = input.workerOwnerId ?? randomUUID()
   const replayHorizonMs = nonnegativeInteger(input.replayHorizonMs)
   const sweepLimit = positiveInteger(input.sweepLimit ?? 100)
+  const processDerivedWork = input.processDerivedWork
   const operations: RecoveryArchiveRestoreWorkerOperations = {
+    ...(processDerivedWork ? {
+      processDerivedWork: () => consumeRecoveryArchiveDerivedEffect(input.transaction, processDerivedWork),
+    } : {}),
     sweepExpired: () => sweepExpiredRecoveryArchiveRestoreJobs(input.transaction, {
       replayHorizonMs,
       limit: sweepLimit,
@@ -165,10 +173,22 @@ export function createRecoveryArchiveRestoreWorkerFromOperations(
   return {
     async runOnce(shouldStop = () => false) {
       let swept = 0
+      if (shouldStop()) return result('stopped', swept, 0)
       try {
         swept = await operations.sweepExpired()
       } catch {
         return result('sweep_failed', 0, 0)
+      }
+      if (shouldStop()) return result('stopped', swept, 0)
+
+      try {
+        // Drain a bounded batch without starving restore jobs or hot-looping a retry.
+        for (let attempt = 0; attempt < 32 && operations.processDerivedWork; attempt += 1) {
+          if (shouldStop()) return result('stopped', swept, 0)
+          if (await operations.processDerivedWork() !== 'completed') break
+        }
+      } catch {
+        return result('tick_failed', swept, 0)
       }
       if (shouldStop()) return result('stopped', swept, 0)
 
