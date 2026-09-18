@@ -528,8 +528,12 @@ $ pnpm --filter @metasheet/web exec vue-tsc -b
 | **第四次修正(2026-09-19,`p3-hygiene-gate3-A2-20260919.md`)— P2-1** | 上一轮改写进 `apps/web/scripts/run-required-web-tests.sh:1240-1242` 的注释自带一条可测量为假的提交归属断言:说原始提交 `2699e0a07` 就地编辑这条 exec 行「to add the three tokens」,而实测该提交只加了三个 token 里的一个(`SessionOrgSwitcher.spec.ts`);另两个是后来才落到这条行上的 | CLOSED-注释 | 该注释块改为「to add only the FIRST of the three tokens」,补记 `approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel` 分别在 `1e55c39b8`(author date 2026-09-18 07:10:50)、`bc66e283e`(author date 2026-09-18 07:33:18)才落到这条行上——`git log --format='%h %ad %s' --date=format:'%m-%d %H:%M:%S' -S'<token>' -- apps/web/scripts/run-required-web-tests.sh` 对两个 token 各自核对,均以该提交为最早命中;`diff <(0144932ac 排序 token) <(2699e0a07 排序 token)` 只有一行差异(`SessionOrgSwitcher.spec.ts`),398→399。**exec 行零改动**:改前后 `grep -c '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh` 均为 1,该行 md5(`grep '^exec npx vitest run' … \| md5`)改前改后均为 `03f7fa1797a449fc9b5c2df6ff3e6351`,sha256 均为 `da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d` |
 | **第四次修正 — P3-1** | §12.9 第二张表「当前谱系对应件」一列在 3/7 行上与本行自己的测量值相反(`cb6d7fa9f`→`3a30f6ba2` exec 行数 1 vs 2;`d3097be00`→`6e24b8854` 1 vs 2;`0144932ac`→`a33f55796`「尚不含」vs「含有」`StockPreparationDataSourceRegistry`),邀请读者做一次必然失败的交叉核对,且原文无任何提示 | CLOSED-MD | §12.9 第二张表后补一段读数警告(现场 `git show <sha>:apps/web/scripts/run-required-web-tests.sh \| grep -c '^exec npx vitest run'` 逐条核对三行对应件),点名三处不同;每格字面断言本身仍为真,只是不能跨行拿对应件复现本行读数 |
 | **第四次修正 — P3-2** | 本节 P3-3 那一行括号内「现场 `git grep -n "real precondition gate\|reporting-only tool" -- .` 零命中」被同一条命令在本 head 上证伪(命中该行自身) | CLOSED-MD | 改写为「`.sh` 文件内零命中(不随 MD 自身编辑漂移的判据),MD 内命中数随本文档引用该措辞的次数增长,不写死具体数字」;`git grep -n "real precondition gate\|reporting-only tool" -- .` 现场重跑对 `.sh` 恒为零命中,对本 MD 命中数取决于当次执行时文档已写了几处引用(本次修正在 P3-3 行、本行、下方对账表三处都会引用同一短语做说明,故 ≥3,具体数字请现场执行该命令,不在本行写死) |
-| **第四次修正 — P3-3** | §12.12 自扫第三条判读段引用的硬编码行号 `:644` 在**被审 head**(`7dc349c7c37e6ed470f6db84a43ee03ea660ff86`,本次修正前的分支尖端)上是空行(`git show 7dc349c7c:docs/development/approval-template-groups-phase1-fe-verification-20260918.md \| sed -n '644p'` → 空),真实引文段落早已下移;该行号是原样抄自上一份门审报告(`p3-hygiene-gate2-A2-20260919.md` §P2-2 表格)的过期锚点 | CLOSED-MD | 改用符号锚点——段落标题「影响声明更正(2026-09-19 复核修正)」+ 现场 `git grep -n "影响声明更正" -- <本文件>` 定位,**不在本行写死具体行号**(编辑过程中该行号已当场从 `:659` 移到 `:661` 又移到 `:666`——写死任何一个数字都会在下一次编辑后立即变成新的过期断言,这正是本条 finding 要根治的错误类型);**注**:本次修正提交完成后,工作树里物理行号 `:644` 已因本节新增内容变成别的一句话(不再是空行),这是预期内的行号漂移,不构成新发现——`:644` 空行这一事实断言的对象自始至终是「被审 head」这一个固定 commit,不是"当前文件的第 644 行"这个会漂移的坐标 |
-| **第四次修正 — P3-4** | §12.13 的 `--stat` 快照(`102 +` / 合计 `171 insertions`)已过期,本 head 现场重跑为 `110 +` / `179 insertions` | CLOSED-MD(该行本身已自我披露为"一次性快照供参考,不作判据";按任务书要求就地重跑更新数字,`--name-status` 才是本节的判据,三行现场核对与原文逐字相同) | §12.13 `--stat` code fence 按本 head(`git diff --stat f9cb22666`)重跑替换为新数字;`git diff --name-status f9cb22666` 三行现场核对不变 |
+| **第四次修正 — P3-3** | §12.12 自扫第三条判读段引用的硬编码行号 `:644` 在**被审 head**(`7dc349c7c37e6ed470f6db84a43ee03ea660ff86`,本次修正前的分支尖端)上是空行(`git show 7dc349c7c:docs/development/approval-template-groups-phase1-fe-verification-20260918.md \| sed -n '644p'` → 空),真实引文段落早已下移;该行号是原样抄自上一份门审报告(`p3-hygiene-gate2-A2-20260919.md` §P2-2 表格)的过期锚点 | CLOSED-MD | 改用符号锚点——段落标题「影响声明更正(2026-09-19 复核修正)」+ 现场 `git grep -n "影响声明更正" -- <本文件>` 定位,**不在本行写死具体行号**(**第五次修正:此处原有的"该行号在编辑过程中先后移动到哪几个位置"的叙述已删除——那是未提交工作树的中间状态,没有命令能把它重跑出来**);**注**:本次修正提交完成后,工作树里物理行号 `:644` 已因本节新增内容变成别的一句话(不再是空行),这是预期内的行号漂移,不构成新发现——`:644` 空行这一事实断言的对象自始至终是「被审 head」这一个固定 commit,不是"当前文件的第 644 行"这个会漂移的坐标 |
+| **第四次修正 — P3-4** | §12.13 的 `--stat` 快照已过期(原文写死的插入行数与被审 head 上现场重跑的值不一致;**第五次修正按"不手写任何数字"的纪律把这两组数字一并删除,不在本行转录**) | CLOSED-MD(该行本身已自我披露为"一次性快照供参考,不作判据";按任务书要求就地重跑更新数字,`--name-status` 才是本节的判据,三行现场核对与原文逐字相同) | §12.13 `--stat` code fence 按本 head(`git diff --stat f9cb22666`)重跑替换为新数字;`git diff --name-status f9cb22666` 三行现场核对不变 —— **第五次修正已推翻本行处置**:门审实测写进去的数字逐字是上一个提交的值,"就地重跑更新数字"这条路本身就是错的,本轮改为整块删除、不重填,见下方第五次修正 P2-1 行 |
+| **第五次修正(2026-09-19,`p3-hygiene-gate4-A2-20260919.md`)— P2-1** | §12.14 对账表以"全部有现场输出支撑、无需标未测量"收尾,而表内有三个各自独立的证伪点:§12.13 那份 `--stat` 数字逐字来自另一个提交,却被标成"本节写作时现场跑"的输出;一个被当作锚点历史的行号不对应任何提交(是未提交工作树的中间状态);还有一条"先写一个数、加一行说明后重跑变成另一个数"的过程轶事,既无命令也无"未测量"标注 | CLOSED-MD | (a) §12.13 的两份 `--stat` code fence 与 §12.14 对应表行**整块删除、不重填**,只留 `--name-status`;§12.12 正文里同族的一次性 `--stat` 快照一并删除。(b) 两条过程轶事在本表第四次修正 P3-3 行、§12.12、§12.14 三处一并删除——它们描述的是未提交的工作树,没有命令能把它们重跑出来。(c) §12.14 收尾的绝对断言删除,改为"上表每行命令在本次修正树上重跑一次,输出见各行",并真的逐行重跑,记录见 §12.15 |
+| **第五次修正 — P3-1** | §12.12 四个自扫 code fence 里转录的硬编码行号本轮已全部漂移;上一轮只修了被点名的那一个,同段落的兄弟一个没扫 | CLOSED-MD | 四个 fence 的输出一律改为 `… \| cut -d: -f1 \| sort \| uniq -c`(只留文件与计数,不留行号),四段判读改用符号锚点(§ 编号 + 段落标题);承重的是命中计数与逐条判读,两者本轮现场重跑后不变 |
+| **第五次修正 — P3-2** | §12.14 在"不要写死行号"那一行里写死了两个行号,并以"每次都命中"这种对未来状态的全称断言收尾 | CLOSED-MD | 该行改为符号定位("第三次修正 P3-3 行"与"第四次修正 P3-2 行"),删去"每次都"与两个硬编码行号 |
+| **第五次修正 — P3-3** | 生产注释引的 `git log -S … -- <this file>` 是**文件级**命令,却用作 **exec 行级**断言的证据(本例恰好同解,但该命令不具判别力:换一个"先进注释、后进 exec 行"的 token 就会给出过早的提交) | CLOSED-注释 | 注释改用可判别形式 `git show <sha>:<this file> \| grep '^exec npx vitest run' \| grep -c '<token>'`,在被点名提交与其父提交上各跑一次,把跑出的 0/1 逐字写进注释;并写明双 exec 行时期"this line"严格指的是死副本(`bc66e283e` 上 `grep -n '^exec npx vitest run'` 给出两行,token 落在后一行)。**exec 行零字节改动**:见 §12.15 的 `shasum` fence |
 
 ### 12.2 P3-1:挂载点人口 5 行表(补齐两份 MD 未点名的两份)
 
@@ -707,52 +711,44 @@ M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 A	scripts/dev/atg-exec-line-post-rebase-check.sh
 ```
 
-`--name-status`(而不是 `--stat` 的行数/字节数)是本节的主要证据,因为它在这段文字自己被写入文件之后再重跑也不会变——`--stat` 的行数会随着"把这段证据本身写进文档"这个动作而回退性地对不上,是自指的。截至本节写作时的一次性快照供参考:`git diff --stat c41710ab0` → `2 files changed, 204 insertions(+), 11 deletions(-)`(该数字是**插入本段之前**的计数,之后每次编辑本节都会使其略微过期,不作为判据——上面的 `--name-status` 才是)。
+`--name-status`(而不是 `--stat` 的行数/字节数)是本节的主要证据,因为它在这段文字自己被写入文件之后再重跑也不会变——`--stat` 的行数会随着"把这段证据本身写进文档"这个动作而回退性地对不上,是自指的。**第五次修正(`p3-hygiene-gate4-A2-20260919.md` §P2-1)**:原文此处随附的一次性 `git diff --stat c41710ab0` 快照已删除,不重填新值——任何填进来的数字在写下的同一刻就已被"把它写进文档"这个动作本身改掉,填一次就再造一条同类断言。
 
 两个文件零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"验证 MD"与"新增的 scripts/dev 只读检查脚本"两类。`scripts/dev/atg-exec-line-post-rebase-check.sh` 不是测试文件(不在任何 `tests/`、不带 `.spec.`/`.test.` 后缀、不被任何 CI workflow 或 vitest 配置引用),是 §12.9"机械前置"要求的独立小工具;本轮亲跑三条自测(正控:对本次真实的 bug 提交 `b1e5c745f` 复现检测出 2 条 exec 行,退出码 1;正控:对当前已修复文件 + `cb6d7fa9f`/`d3097be00` 两个真实 head 跑 union 检查,退出码 0;负控攻判据:临时把当前文件的 exec 行摘掉一个 token 后再跑,退出码 2 且报出被摘掉的具体 token),跑完用 `cp` 备份/还原、`cmp` 确认字节相同,`git status --porcelain` 对被 mutate 的文件为空。**退出码更正(第三次复核修正)**:上一句"退出码 2"是旧脚本(两检查版本)的编号;脚本改成三检查(新增独立的"不重复"判定)后,原来"缺 token"这半条判据的退出码改为 **3**(重跑上面同一个负控探针——对当前文件真实摘掉 `ApprovalTemplateGroupsPanel` 后跑 `cb6d7fa9f`/`d3097be00` union 检查——现场复现 `FAIL: … MISSING: ApprovalTemplateGroupsPanel`、`EXIT=3`,`cp` 备份/还原、`cmp` 字节相同);脚本自身头部注释与本文档处置表(第三次修正 P3-1/P3-2)已同步为新编号,此处历史记录不回改,仅在此更正指向。
 
 **撤回类改动自扫(第三次复核修正,2026-09-19)**:比照 §12.10 的纪律,对本节改写自己扫一遍。**上一版此处的三条转录不是真实命令输出**——已被独立复核门审 `p3-hygiene-gate-A2-20260919.md` §P2-2 证伪:前两条把 `git grep -n` 的多行原始输出各压成一句括号内的概括,并把真实命中数说成 1;第三条的"零命中"与"不是引用后限定这种保留形式"两句,都被同一条命令的真实输出推翻。以下三条**去掉 `-- '*.md'`,改为全仓 `-- .`**、只取 `file:line`(不截取内容——上一版的问题正是编造内容摘要充当命令输出,这次不重犯)、逐字重跑。每条命令的搜索串本身会在下方 code fence 里出现一次,因此该命令行自身构成一条"自指"命中(展示搜索模式必然如此),不当残留计:
 
 ```
-$ git grep -n "此前的每一个" -- . | cut -d: -f1,2
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:148
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:519
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:617
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:632
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:710
+$ git grep -n "此前的每一个" -- . | cut -d: -f1 | sort | uniq -c
+   5 docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 ```
 
-真实命中 **5** 处,不是上一版暗示的 1 处。`:148` 是 §12.9 开头的复核修正段,用"本节最初的这条更正说……——这句全称式判断是错的"的回顾句式转述并撤销;`:519` 是处置表行,转述报告原文指出的错误;`:617` 是 §12.9 一处小标题式的否定句("这条重复不是……——逐 head 核对……");`:632` 是 §12.9 影响声明段,同样以"……这句全称式判断是一次错误撤回"收尾;第 5 处是本条命令行自身。**逐条判读:全部回顾式/自指,零处以"成立"口吻残留。**
+命中集中在本 MD 一个文件内(计数见上),不是上一版压成一句括号概括时暗示的单条命中。**第五次修正(`p3-hygiene-gate4-A2-20260919.md` §P3-1)**:本条及下方三条的输出一律从 `cut -d: -f1,2` 的行号清单改为 `cut -d: -f1 | sort | uniq -c` 的"文件 + 计数",判读改用符号锚点——硬编码行号在文档自身持续编辑时必然漂移,上一轮点名修了一个,同段落的兄弟一个没扫,本轮整批换掉。正文命中分别落在:§12.9 开头的复核修正段(用"本节最初的这条更正说……——这句全称式判断是错的"的回顾句式转述并撤销)、§12.1 处置表里转述报告原文指出错误的那一行、§12.9 一处小标题式的否定句("这条重复不是……——逐 head 核对……")、§12.9「影响声明更正」段(以"……这句全称式判断是一次错误撤回"收尾);此外本条命令行自身构成一条自指命中。**逐条判读:回顾式/自指,零处以"成立"口吻残留。**
 
 ```
-$ git grep -n "无人发现" -- . | cut -d: -f1,2
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:519
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:593
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:721
+$ git grep -n "无人发现" -- . | cut -d: -f1 | sort | uniq -c
+   3 docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 ```
 
-真实命中 **3** 处,不是上一版暗示的 1 处。`:519`/`:593` 都在转述并撤销原 §12.9 那句已证伪的根因描述("实现者在死副本上继续追加"那句的后半);第 3 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留。**
+命中集中在本 MD 一个文件内(计数见上),不是上一版暗示的单条命中。正文命中落在 §12.1 处置表那一行,以及 §12.9 里转述并撤销原根因描述("实现者在死副本上继续追加"那句的后半)的段落;此外本条命令行自身构成一条自指命中。**回顾式/自指,零处以"成立"口吻残留。**
 
 ```
-$ git grep -n "在.*之前的所有历史 HEAD 上.*都是假的" -- . | cut -d: -f1,2
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:659
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:730
+$ git grep -n "在.*之前的所有历史 HEAD 上.*都是假的" -- . | cut -d: -f1 | sort | uniq -c
+   2 docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 ```
 
-真实命中 **2** 处,不是上一版声称的 0 处。**第四次修正锚点更正**:上一版此处写死行号`:644`——独立复核门审(`p3-hygiene-gate3-A2-20260919.md` §P3-3)实测该行号在**被审 head**(`7dc349c7c37e6ed470f6db84a43ee03ea660ff86`,本次修正前的分支尖端)上是**空行**(`git show 7dc349c7c:docs/development/approval-template-groups-phase1-fe-verification-20260918.md \| sed -n '644p'` → 空),`:644` 是被原样抄自上一份门审报告(`p3-hygiene-gate2-A2-20260919.md` §P2-2 表格)里的行号,本轮编辑早已使正文行号下移;硬编码的精确行号在文档自身持续编辑时必然漂移(本段自己就是例证——本次修正过程中该命中先后落在 `:659`、`:661`、`:666`,每次编辑都不同,证明"改一次数字就再准一次"这条路走不通)。改用符号锚点,**且不写死具体行号**:命中该处的段落标题是"**影响声明更正(2026-09-19 复核修正)**",现场执行 `git grep -n "影响声明更正" -- docs/development/approval-template-groups-phase1-fe-verification-20260918.md` 取值即可定位。该段正文把这句被证伪的全称断言完整放在引号内、紧跟"按上文逐 head 核对,这句话不成立"——**恰恰就是**上一版宣称不存在的那种"引用后限定"保留形式(整句原文保留,不是"originally said"式的部分改写);第 2 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留**——但上一版"零命中"与"不是引用后限定这种保留形式"两句表述本身是假的,已在本段开头更正,不再以转录形式重复出现在别处。
+命中集中在本 MD 一个文件内(计数见上),不是上一版声称的零命中。**第四次修正锚点更正**:上一版此处写死行号`:644`——独立复核门审(`p3-hygiene-gate3-A2-20260919.md` §P3-3)实测该行号在**被审 head**(`7dc349c7c37e6ed470f6db84a43ee03ea660ff86`,该次修正前的分支尖端)上是**空行**(`git show 7dc349c7c:docs/development/approval-template-groups-phase1-fe-verification-20260918.md \| sed -n '644p'` → 空),`:644` 是原样抄自上一份门审报告(`p3-hygiene-gate2-A2-20260919.md` §P2-2 表格)里的行号,那一轮的编辑早已使正文行号下移;硬编码的精确行号在文档自身持续编辑时必然漂移。**第五次修正(§P2-1/§P3-1)**:原文此处还附了一段"该命中在编辑过程中先后落到哪几个行号"的叙述——那是未提交工作树的中间状态,没有任何命令能把它重跑出来,已整段删除,不重填。改用符号锚点,**且不写死具体行号**:命中该处的段落标题是"**影响声明更正(2026-09-19 复核修正)**",现场执行 `git grep -n "影响声明更正" -- docs/development/approval-template-groups-phase1-fe-verification-20260918.md` 取值即可定位。该段正文把这句被证伪的全称断言完整放在引号内、紧跟"按上文逐 head 核对,这句话不成立"——**恰恰就是**上一版宣称不存在的那种"引用后限定"保留形式(整句原文保留,不是"originally said"式的部分改写);此外本条命令行自身构成一条自指命中。**回顾式/自指,零处以"成立"口吻残留**——但上一版"零命中"与"不是引用后限定这种保留形式"两句表述本身是假的,已在本段开头更正,不再以转录形式重复出现在别处。
 
 三条搜索串给出的判读结论一致:被证伪的旧结论只以"上一版说过……"这类回顾性引用形式存在,没有一处以独立、无限定的当前事实口吻重新站立。按"失效标记要求值不要作废整节"的纪律,本节要撤回的是旧版 §12.9 那三处结论本身,而不是这些字符串一旦出现就必须清零——只要出现处都带着否定/回顾限定,就合乎要求。
 
 **P2-1 本身的四句英文原句也补一遍全仓机械扫描**(不只中文三串;§12.12 上一版的自扫范围本来就是因为带 `-- '*.md'` 才漏看 `.sh` 里的英文原句,这次连带把原文一起扫,不能只信"改过了"这句自我陈述)。以下命令只取 `file:line`(不取内容——原因见 §12.12 开头的教训:取内容会把搜索串再嵌入一次,自我放大命中数)。命令自身的搜索串会在下方 code fence 里出现一次,构成 1 条自指命中:
 
 ```
-$ git grep -nE 'were ever exercised|added the duplicate copy rather than editing|without anyone noticing|picked the wrong one' -- . | cut -d: -f1,2
-docs/development/approval-lock10-instance-readability-20260821.md:223
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:521
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:742
+$ git grep -nE 'were ever exercised|added the duplicate copy rather than editing|without anyone noticing|picked the wrong one' -- . | cut -d: -f1 | sort | uniq -c
+   1 docs/development/approval-lock10-instance-readability-20260821.md
+   2 docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 ```
 
-命中 3 处。`docs/development/approval-lock10-instance-readability-20260821.md:223` 与本次改动完全无关(另一份设计文档,谈的是另一套锁的 C-1/C-3 关系,巧合命中四句里的一句);`:521` 是本文档处置表里转述被撤回原句以说明处置内容的那一行;第 3 处是本条命令行自身。`apps/web/scripts/run-required-web-tests.sh` **零命中**——四句被证伪的英文原句在该文件里已被 P2-1 的改写完全替换,不是部分保留或仅加限定词。
+`docs/development/approval-lock10-instance-readability-20260821.md` 那一处与本次改动完全无关(另一份设计文档,谈的是另一套锁的 C-1/C-3 关系,巧合命中四句里的一句);本 MD 的命中分别是 §12.1 处置表里转述被撤回原句以说明处置内容的那一行,以及本条命令行自身。上面的文件清单里没有 `apps/web/scripts/run-required-web-tests.sh`——四句被证伪的英文原句在该文件里已被 P2-1 的改写完全替换,不是部分保留或仅加限定词。
 
 ### 12.13 第三次修正 diffstat 证据
 
@@ -765,35 +761,13 @@ M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
 M	scripts/dev/atg-exec-line-post-rebase-check.sh
 ```
 
-三个文件,零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"生产脚本的注释块"(`run-required-web-tests.sh`,exec 行本身未改,见 P2-1 disposition 行的 md5 核对)、"验证 MD"(本文档)、"scripts/dev 只读检查脚本"三类,与本轮硬规矩("只许 MD/注释/scripts/dev")一致。任务书 ⑥ 点名要求的 `--stat` 一并附上,截至本节写作时的一次性快照供参考(同 §12.12 line 688 的先例,把这段证据写进文档本身会让 `--stat` 的插入行数继续过期,不作为判据——`--name-status` 才是):
+三个文件,零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"生产脚本的注释块"(`run-required-web-tests.sh`,exec 行本身未改,见 P2-1 disposition 行与 §12.15 的 `shasum` 核对)、"验证 MD"(本文档)、"scripts/dev 只读检查脚本"三类,与本轮硬规矩("只许 MD/注释/scripts/dev")一致。
 
-```
-$ git diff --stat f9cb22666
- apps/web/scripts/run-required-web-tests.sh         |  29 +++---
- ...plate-groups-phase1-fe-verification-20260918.md | 102 ++++++++++++++++-----
- scripts/dev/atg-exec-line-post-rebase-check.sh     |  94 +++++++++++++++----
- 3 files changed, 171 insertions(+), 54 deletions(-)
-```
-
-**第四次修正(2026-09-19)`--stat` 重跑**:上面这份快照是第三次修正提交时的一次性数字,本 head 现场重跑已过期(预期之内——同一段解释见上一段)。按任务书 P3-4 要求就地更新为本 head 的现场输出:
-
-```
-$ git diff --name-status f9cb22666
-M	apps/web/scripts/run-required-web-tests.sh
-M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
-M	scripts/dev/atg-exec-line-post-rebase-check.sh
-$ git diff --stat f9cb22666
- apps/web/scripts/run-required-web-tests.sh         |  29 +++---
- ...plate-groups-phase1-fe-verification-20260918.md | 110 ++++++++++++++++-----
- scripts/dev/atg-exec-line-post-rebase-check.sh     |  94 +++++++++++++++----
- 3 files changed, 179 insertions(+), 54 deletions(-)
-```
-
-`--name-status` 三行不变(仍是同三个文件,同类别:注释块/验证 MD/scripts-dev)。`--stat` 的 `110 ++++++++++++++++-----` / `179 insertions` 是**本节写作时**(第四次修正提交、含本段自身)的现场值,本轮结束后如果本文档再被编辑,这个数字会再次过期——这正是 §12.12/§12.13 已经解释过的自指性质,`--name-status` 才是不随文档自身编辑而漂移的判据。
+**第五次修正(2026-09-19,`p3-hygiene-gate4-A2-20260919.md` §P2-1)—— 两份 `--stat` 快照整块删除,不重填**:本节原先有两个 `git diff --stat f9cb22666` code fence(第三次修正写下的一份,第四次修正"就地重跑更新数字"的一份),已全部删除。门审点名的缺陷不是"快照过期"这种良性自指,而是:第四次修正那份写进来的值**逐字是上一个提交的值,也正是门审报告自己在另一个提交上测得的值**,却被标注成"本节写作时现场跑"的输出——没有任何一次 `git diff --stat f9cb22666` 在那个 head 上会打印它。再填一个"更准的"数字只会在写下的同一刻再造一条同类断言(写入动作本身就改变插入行数),所以本轮**只删不填**。`--name-status`(上方 code fence)才是本节的判据:它不随文档自身编辑漂移,本轮已现场重跑,重跑记录见 §12.15。
 
 ### 12.14 第四次修正(2026-09-19)—— 事实断言 ⇄ 命令对账表
 
-对象:独立复核门审 `p3-hygiene-gate3-A2-20260919.md`(NEEDS-FIX,0 P1/**1 P2**/4 P3)。本节规则:本轮改写或新增的每一条关于提交/行/token 的事实断言,都在下表附一条可重跑命令与其现场输出;没有命令支撑的一律标"未测量"(本轮未发现需要如此标注的新断言——凡是新写的事实性陈述都已现场核过,见下表)。
+对象:独立复核门审 `p3-hygiene-gate3-A2-20260919.md`(NEEDS-FIX)。本节规则:本轮改写或新增的每一条关于提交/行/token 的事实断言,都在下表附一条可重跑命令与其现场输出;没有命令支撑的一律标"未测量"。**第五次修正(`p3-hygiene-gate4-A2-20260919.md` §P2-1)**:本节原先在此处的括号("本轮未发现需要如此标注的新断言……")与表末的绝对断言收尾均已删除——门审实测该收尾有三个各自独立的证伪点,其中一条正是把另一个提交的值标成本次运行的输出。
 
 | 断言 | 命令 | 现场输出 |
 |---|---|---|
@@ -801,19 +775,18 @@ $ git diff --stat f9cb22666
 | `2699e0a07` 相对 `0144932ac` 的 exec 行 token 差异只有 `SessionOrgSwitcher.spec.ts` 一项(398→399) | `diff <(git show 0144932ac:…\|grep '^exec…'\|tr ' ' '\n'\|sort) <(git show 2699e0a07:…\|同\|sort)` | `345a346`<br>`> SessionOrgSwitcher.spec.ts`(其余 398 行逐行相同) |
 | `approvalTemplateGroupsClient` 最早落在 exec 行是 `1e55c39b8`,author date 2026-09-18 07:10:50 | `git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M:%S' -S'approvalTemplateGroupsClient' -- apps/web/scripts/run-required-web-tests.sh` | 最早一条:`1e55c39b8 2026-09-18 07:10:50 feat(approval): typed frontend client for the seven template-group endpoints` |
 | `ApprovalTemplateGroupsPanel` 最早落在 exec 行是 `bc66e283e`,author date 2026-09-18 07:33:18 | 同上,`-S'ApprovalTemplateGroupsPanel'` | 最早一条:`bc66e283e 2026-09-18 07:33:18 feat(approval): wire session-org 403 retry into the template groups panel` |
-| 两次改写脚本注释后 exec 行逐字节零改动 | 改前改后各跑一次:`grep -c '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh`;`grep '^exec npx vitest run' … \| md5`;`… \| shasum -a 256` | `grep -c` 均为 `1`;md5 改前改后均为 `03f7fa1797a449fc9b5c2df6ff3e6351`;sha256 均为 `da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d` |
+| 三轮改写脚本注释后 exec 行逐字节零改动(第三次 / 第四次 / 第五次修正) | `for r in f9cb22666 7dc349c7c ca5d50b71; do git show $r:apps/web/scripts/run-required-web-tests.sh \| grep '^exec npx vitest run' \| shasum -a 256; done`,再对改后工作树跑一次同样的 `grep \| shasum`;另 `grep -c '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh` | 四次 `shasum` 输出逐字相同(`da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d`),`grep -c` 为 `1`;逐字输出见 §12.15 |
 | `bash -n` 对改后脚本仍通过 | `bash -n apps/web/scripts/run-required-web-tests.sh; echo exit=$?` | `exit=0` |
 | `cb6d7fa9f` 本行 exec 行数 1,其"当前谱系对应件"`3a30f6ba2` 实测 exec 行数 2 | `git show <sha>:apps/web/scripts/run-required-web-tests.sh \| grep -c '^exec npx vitest run'`(两个 sha 各跑一次) | `cb6d7fa9f` → `1`;`3a30f6ba2` → `2` |
 | `d3097be00` 本行 exec 行数 1,对应件 `6e24b8854` 实测 2 | 同上命令,换 sha | `d3097be00` → `1`;`6e24b8854` → `2` |
 | `0144932ac` 的 exec 行不含 `StockPreparationDataSourceRegistry`,对应件 `a33f55796` 含有,token 数 398→399 | `git show <sha>:…\|grep -c StockPreparationDataSourceRegistry`;`…\|grep '^exec…'\|grep -o StockPreparationDataSourceRegistry\|wc -l`;`…\|grep '^exec…'\|tr ' ' '\n'\|grep -v '^$'\|wc -l` | `0144932ac` 含 `StockPreparationDataSourceRegistry` 计数 `0`,token 数 `398`;`a33f55796` 该 token 计数 `1`,token 数 `399` |
 | P3-3 那句"零命中"对 `.sh` 文件为真、对整仓（含本 MD）为假 | `git grep -n "real precondition gate\|reporting-only tool" -- apps/web/scripts/run-required-web-tests.sh`(限定脚本文件) | 空输出——脚本文件内确为零命中,这是不随 MD 自身编辑漂移的判据 |
-| 同一命令不限定路径,对本 MD 命中数不固定(本表刻意不写死数字——写下"当前命中 N 处"这句话本身就会在文档里再添一次引用,让 N 立刻变成 N+1,本行前一版编辑就实测踩过这个坑:先写"3 处"、加上这行说明后现场重跑变"4 处") | `git grep -n "real precondition gate\|reporting-only tool" -- .` | 每次都命中 `:525`(P3-3 行自身)与 `:530`(本节 P3-2 行)这两处结构性引用,加上本表任何转述本身;确切总数请读者现场重跑该命令,本表不记录、不承诺 |
+| 同一命令不限定路径时,对本 MD 的命中数不固定(本表刻意不写死数字——写下"当前命中 N 处"这句话本身就会在文档里再添一次引用,让 N 立刻变成 N+1) | `git grep -n "real precondition gate\|reporting-only tool" -- .` | 命中第三次修正 P3-3 行与第四次修正 P3-2 行(符号定位,本表不写死行号),加上本表任何转述本身;确切总数请读者现场重跑该命令,本表不记录、不承诺 |
 | `:644` 在**被审 head**(`7dc349c7c`,本次修正前的分支尖端)上是空行——注意不是"当前工作树第 644 行"这个会漂移的坐标,本次修正提交后工作树的物理 `:644` 已变成另一句话,预期内 | `git show 7dc349c7c:docs/development/approval-template-groups-phase1-fe-verification-20260918.md \| sed -n '644p'` | 空输出 |
-| "影响声明更正"段用符号锚点定位,不写死行号(本次修正过程中该行号先后是 `:659`/`:661`/`:666`,每编辑一次就变一次) | `git grep -n "影响声明更正" -- docs/development/approval-template-groups-phase1-fe-verification-20260918.md` | 现场取值即为准确行号;本表不转录具体数字,避免制造下一条过期断言 |
-| §12.13 `--stat` 快照在本 head 上是 `110 +` / `179 insertions`,不是原文的 `102 +` / `171` | `git diff --stat f9cb22666`(本节写作时现场跑) | `apps/web/scripts/run-required-web-tests.sh \| 29 +++---`;MD 一行 `110 ++++++++++++++++-----`;dev 脚本一行 `94 +++++++++++++++----`;合计 `179 insertions(+), 54 deletions(-)` |
+| "影响声明更正"段用符号锚点定位,不写死行号 | `git grep -n "影响声明更正" -- docs/development/approval-template-groups-phase1-fe-verification-20260918.md` | 现场取值即为准确行号;本表不转录具体数字,避免制造下一条过期断言 |
 | `--name-status` 三文件不因编辑轮次而变 | `git diff --name-status f9cb22666` | 三行,与第三次修正记录逐字相同(见上方 §12.13 与本节) |
 
-逐条核对结论:本轮新写或改写的事实性断言(提交归属、exec 行 token 差异、md5/sha256 不变量、对应件读数交叉核对、`:525`/`:644` 两处过期表述)**全部**有上表对应命令的现场输出支撑,无需标"未测量"的项。§1–§11(设计前置、门审证据、既有处置表)与本节之外的 §12.0–§12.13 历史段落属于此前三轮已核实的既有内容,本轮未重新逐句复核(不在本次报告 §P2-1/§P3-1..4 的点名范围内),不在此表重复列出。
+上表每一行的命令,都在本次第五次修正的树上重跑过一次(父提交 `ca5d50b71`;提交后 `git status --porcelain` 为空,故工作树与提交树一致),输出即各行"现场输出"列所载,未做转抄;重跑的原始记录见 §12.15。§1–§11 与本节之外的 §12.0–§12.13 历史段落不在本轮点名范围内,本轮未重新逐句复核,不在此表列出。
 
 **收尾核验(本次修正提交前,现场跑)**:
 
@@ -828,3 +801,54 @@ exit=0
 ```
 
 470/7240 与第三次修正记录的数字逐格相同,符合预期(`apps/web/src`、`apps/web/tests`、`packages` 三向 diff 仍为空,本轮只动注释与 MD)。**如实记录一次未复现的瑕疵**:同一条命令在这两次干净通过之间,曾有一次独立尝试在测试全部通过、汇总行(`Test Files 470 passed`/`Tests 7240 passed`)打印之后,于 vitest worker 线程退出阶段撞上 Node v25.9.0 的一次原生崩溃(`FATAL ERROR: v8::ToLocalChecked Empty MaybeLocal`,JS 栈指向 `node:internal/modules/esm/translators` 的 CJS 互操作路径),导致进程以非零码退出——发生在测试汇总已经打印"全绿"之后的 worker 收尾阶段,与本轮改动(纯注释,exec 行逐字节未变)无因果关系;换回同一条命令立即复现绿(见上方 code fence),不再复现该崩溃,判定为环境级瞬时故障(Node 运行时内部崩溃),不作为本次改动的回归证据,也不掩盖它——如实记录在此,供下一轮如再次撞见时比对。
+
+### 12.15 第五次修正(2026-09-19)—— 删除自指数字、行号换符号锚点
+
+对象:独立复核门审 `p3-hygiene-gate4-A2-20260919.md`(NEEDS-FIX),被审 head 即本次修正的父提交 `ca5d50b71`。本轮方法论由任务书点名:**只删不加,不手写任何数字**——凡是本轮无法当场重跑出来的数字(自指的 `--stat` 快照、未提交工作树的编辑过程叙述)一律删除而不重填;凡是"全部 / 每次都 / 无需"一类的绝对收尾一律删除;留下的每一个数字都必须是本轮某条命令的逐字输出,命令与输出写在同一格或同一 code fence 内。
+
+**本次修正的改动面**(判据是文件清单,不是行数;故用 `--name-status`):
+
+```
+$ git diff --name-status ca5d50b71
+M	apps/web/scripts/run-required-web-tests.sh
+M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
+```
+
+**exec 行逐字节零改动**(三个历史提交 + 改后工作树各跑一次):
+
+```
+$ for r in f9cb22666 7dc349c7c ca5d50b71; do git show $r:apps/web/scripts/run-required-web-tests.sh | grep '^exec npx vitest run' | shasum -a 256; done
+da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d  -
+da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d  -
+da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d  -
+$ grep '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh | shasum -a 256
+da4a2ba1e04c1d341c2cee05d1e50360e82408d792f305f51dd5370ebe77b30d  -
+$ grep -c '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh
+1
+```
+
+**§12.13 的判据 `--name-status` 现场重跑**:
+
+```
+$ git diff --name-status f9cb22666
+M	apps/web/scripts/run-required-web-tests.sh
+M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
+M	scripts/dev/atg-exec-line-post-rebase-check.sh
+```
+
+**`bash -n` 与 required lane 逐字复现**:
+
+```
+$ bash -n apps/web/scripts/run-required-web-tests.sh; echo exit=$?
+exit=0
+$ bash -e apps/web/scripts/run-required-web-tests.sh
+ Test Files  470 passed (470)
+      Tests  7240 passed (7240)
+   Start at  07:27:35
+   Duration  47.73s (transform 24.93s, setup 3.07s, collect 138.15s, tests 187.99s, environment 89.80s, prepare 17.79s)
+LANE_EXIT=0
+```
+
+**自查**:§12.12 的四个自扫 code fence 在本节全部写完之后又各重跑一次,输出与 fence 内所载逐字相同(这四条的输出只含文件名与计数、不含搜索串,所以把输出写进文档不会改变命中数——这正是改用 `uniq -c` 的附带好处)。本轮新增的每一行都逐行 grep 过:凡含数字或 SHA 的,同一格或同一 fence 内都写着产生它的命令。
+
+**本轮未处理、如实披露**:§12.11 的 `git diff --stat b1e5c745f…` code fence 是卫生轮首轮写下的证据,同样是对工作树取的自指 diffstat,其插入行数在此后每一次编辑后都会过期。本轮门审未点名该处,按"只改点名范围"未动它;留给下一轮判定是删除还是改成 `--name-status`。
