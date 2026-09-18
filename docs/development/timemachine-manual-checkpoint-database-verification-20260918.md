@@ -891,3 +891,31 @@ including revocation (403); it never leaves a stale success beside the new error
 The added revocation-refresh case passes. Workbench source ESLint also passes.
 Luna's bounded read-only UI review was stopped without a terminal verdict; no
 independent approval is inferred. This checkpoint remains Draft/HOLD.
+
+## Public HTTP Preview Round Trip
+
+Test checkpoint `4a32c0f3e` extends the existing CI-wired synthetic driver without
+changing production code or flags outside its isolated process. The chain now
+covers production capture -> status -> catalog -> public preview against actual
+PostgreSQL, local-custody cryptography and filesystem archive objects.
+
+- Unchanged live data returns a closed no_changes preview, zero writes, no
+  executable identity.
+- A synthetic post-archive record edit produces exactly one revert for the
+  expected record/field, executable=true and a nonempty preview identity. The
+  record retains the edited value afterward: preview does not apply recovery.
+  The fixture's direct edit is not evidence of a real user edit/history writer.
+- Provider read interruption returns 503 without its private error value.
+- Returning corrupted bytes from the real object's read result returns 503;
+  restoring normal reads restores a successful preview.
+- The temporary data/version/timestamp fixture is restored in finally. The HTTP
+  listener closes; owned DB/connections are zero and synthetic cluster removed.
+
+Full dedicated runner PASS (30 TM migrations/replay, 59 + 127 neighbor tests plus
+driver assertions); acceptance tsc, existing exact-anchor wiring and diff-check
+PASS. Logs: `/private/tmp/tm-manual-public-preview-final-db.log`,
+`/private/tmp/tm-manual-public-preview-tsc.log`,
+`/private/tmp/tm-manual-public-preview-wiring.log`.
+This joins the backend stages; it does not yet join the browser with that backend,
+exercise real-login authorization or execute restore. Attachments remain refused
+by the current manual continuation. No broader completion or UAT claim is made.
