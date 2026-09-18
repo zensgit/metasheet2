@@ -39,6 +39,7 @@ import {
 } from "../../src/multitable/recovery-archive-crypto";
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from "../../src/multitable/recovery-archive-contract";
 import { decodeRecoveryArchivePreparedEnvelope, encodeRecoveryArchivePreparedEnvelope, uploadRecoveryArchivePreparedCapture } from "../../src/multitable/recovery-archive-prepared-upload";
+import { sealRecoveryArchiveAttachment, openRecoveryArchiveAttachment } from '../../src/multitable/recovery-archive-attachment-crypto';
 
 const WORKSPACE = "ws_d2h_unit";
 const BASE = "base_d2h_unit";
@@ -54,6 +55,82 @@ const PLAINTEXT = Buffer.from(
 );
 const CREATED_AT = "2026-08-26T00:00:00.000Z";
 const EXPIRES_AT = "2027-08-26T00:00:00.000Z";
+
+describe('attachment object AEAD domain', () => {
+  test('reserves attachment nonces with all ten sections under the same generation DEK', async () => {
+    const key = randomBytes(32)
+    const plaintext = Buffer.from('synthetic attachment')
+    const original = Buffer.from(plaintext)
+    const nonce = randomBytes(12)
+    const originalNonce = Buffer.from(nonce)
+    let reserved = 0
+    const result = await reserveThenSealRecoveryArchiveSections({
+      binding: generationBinding(), keyCustody: createTestCustody({ dek: key }), transactionDepth: depthProbe(0),
+      dekSource: { kind: 'produce' }, sections: fullSnapshotSections(),
+      attachments: [{ attachmentId: 'att_10000000-0000-4000-8000-000000000001', sourceVersion: 'source-v1', plaintext, nonce }],
+      reserveNonces: async (rows) => {
+        reserved = rows.length
+        expect(rows).toHaveLength(11)
+        expect(rows[10]!.sectionName).toBe(`attachment:${createHash('sha256').update('att_10000000-0000-4000-8000-000000000001').digest('hex')}`)
+        expect(rows[10]!.nonceHex).toBe(originalNonce.toString('hex'))
+        expect(new Set(rows.map((row) => row.dekFingerprint)).size).toBe(1)
+        plaintext.fill(0); nonce.fill(0)
+      },
+    })
+    expect(reserved).toBe(11)
+    expect(result.sealedAttachments).toHaveLength(1)
+    const object = result.sealedAttachments![0]!
+    expect(openRecoveryArchiveAttachment({ binding: { generation: result.binding,
+      attachmentId: object.attachmentId, sourceVersion: object.sourceVersion,
+      plaintextSha256: object.plaintextSha256 }, dek: key, sealed: object })).toEqual(original)
+    expect(() => encodeRecoveryArchivePreparedEnvelope(result)).toThrow('RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID')
+    key.fill(0)
+  })
+
+  test('rejects section/attachment nonce reuse before custody and refuses reservation failure before sealing', async () => {
+    const sections = fullSnapshotSections()
+    const custody = createTestCustody()
+    const input = { binding: generationBinding(), keyCustody: custody, transactionDepth: depthProbe(0),
+      dekSource: { kind: 'produce' as const }, sections,
+      attachments: [{ attachmentId: '10000000-0000-4000-8000-000000000001', sourceVersion: 'source-v1', plaintext: Buffer.from('blob'), nonce: sections[0]!.nonce }],
+      reserveNonces: async () => { throw new Error('synthetic reservation refusal') } }
+    await expect(reserveThenSealRecoveryArchiveSections(input)).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_DUPLICATE_NONCE_IN_BATCH')
+    expect(custody.calls).toEqual([])
+    let sealed = 0
+    await expect(reserveThenSealRecoveryArchiveSections({ ...input,
+      attachments: [{ ...input.attachments[0]!, nonce: randomBytes(12) }],
+      sealSection: (value) => { sealed += 1; return sealRecoveryArchiveSection(value) },
+    })).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED')
+    expect(sealed).toBe(0)
+  })
+
+  test('roundtrips binary bytes and rejects attachment, source-version and generation substitution', () => {
+    const dek = randomBytes(32)
+    const plaintext = Buffer.from([0, 255, 1, 2, 0, 42])
+    const bound = { generation: { ...generationBinding(), wrappedDekId: WRAPPED_DEK_ID, dekFingerprint: 'a'.repeat(64) },
+      attachmentId: 'synthetic-attachment', sourceVersion: 'sha256:' + recoveryArchivePlaintextSha256(plaintext),
+      plaintextSha256: recoveryArchivePlaintextSha256(plaintext) }
+    const sealed = sealRecoveryArchiveAttachment({ binding: bound, dek, nonce: randomBytes(12), plaintext })
+    expect(openRecoveryArchiveAttachment({ binding: bound, dek, sealed })).toEqual(plaintext)
+    for (const changed of [
+      { ...bound, attachmentId: 'another-attachment' },
+      { ...bound, sourceVersion: 'another-version' },
+      { ...bound, generation: { ...bound.generation, sheetId: 'another-sheet' } },
+      { ...bound, generation: { ...bound.generation, generationId: randomUUID() } },
+    ]) expect(() => openRecoveryArchiveAttachment({ binding: changed, dek, sealed }))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CRYPTO_INVALID')
+    expect(() => openRecoveryArchiveSection({ binding: { ...bound.generation,
+      sectionName: 'attachments_index', plaintextSha256: bound.plaintextSha256 }, dek, ...sealed }))
+      .toThrow()
+    const corrupted = { ...sealed, authTag: Buffer.from(sealed.authTag) }
+    corrupted.authTag[0] = corrupted.authTag[0]! ^ 1
+    expect(() => openRecoveryArchiveAttachment({ binding: bound, dek, sealed: corrupted }))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CRYPTO_INVALID')
+    expect(() => sealRecoveryArchiveAttachment({ binding: bound, dek, nonce: randomBytes(12), plaintext: Buffer.from('different') }))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CRYPTO_INVALID')
+    dek.fill(0)
+  })
+})
 
 function fingerprintOfDek(dek: Uint8Array): string {
   return createHmac("sha256", Buffer.from(dek))
@@ -291,6 +368,16 @@ describe("Prepared sealed-envelope continuation", () => {
         throw new Error("SYNTHETIC_UPLOAD_INTERRUPTION");
       },
     };
+    await expect(uploadRecoveryArchivePreparedCapture({ ...input,
+      capture: async () => ({
+        binding, keyCustody: custody, transactionDepth: depthProbe(0), dekSource: { kind: "produce" as const },
+        sections: fullSnapshotSections(), reserveNonces: async () => {},
+        attachments: [{ attachmentId: "10000000-0000-4000-8000-000000000001", sourceVersion: "version-1",
+          plaintext: Buffer.from("attachment bytes"), nonce: Buffer.alloc(12, 240) }],
+      }),
+    })).rejects.toThrow("RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID");
+    expect(stored).toBeNull();
+    expect(uploads).toEqual([]);
     await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow("SYNTHETIC_UPLOAD_INTERRUPTION");
     const original = Buffer.from(stored!);
     await uploadRecoveryArchivePreparedCapture({ ...input, capture: async () => { throw new Error("MUST_NOT_RECAPTURE"); },

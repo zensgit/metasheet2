@@ -33,6 +33,7 @@ import * as derivedEffects from '../../src/db/migrations/zzzz20260915160000_crea
 import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
 import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
+import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -202,6 +203,13 @@ const MIGRATIONS: NamedMigration[] = [
     module: {
       up: (db) => db.transaction().execute(manualRequests.up),
       down: (db) => db.transaction().execute(manualRequests.down),
+    },
+  },
+  {
+    name: 'zzzz20260919130000_extend_archive_nonce_object_identity',
+    module: {
+      up: (db) => db.transaction().execute(nonceObjectIdentity.up),
+      down: (db) => db.transaction().execute(nonceObjectIdentity.down),
     },
   },
 ]

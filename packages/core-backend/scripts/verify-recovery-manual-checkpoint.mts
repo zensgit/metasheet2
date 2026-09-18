@@ -101,6 +101,72 @@ try {
   await client.connect()
   const query = (text: string, params?: unknown[]) => client!.query(text, params)
   db = new Kysely({ dialect: new PostgresDialect({ pool: new Pool({ ...connection, database, max: 1 }) }) })
+  const nonceObjects = require('../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity.ts') as typeof import('../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity')
+  for (const operation of [nonceObjects.up, nonceObjects.down, nonceObjects.down, nonceObjects.up, nonceObjects.up]) {
+    await db.transaction().execute(operation)
+  }
+  for (const tamper of [
+    `ALTER TABLE meta_recovery_archive_nonce_reservations DROP CONSTRAINT chk_meta_recovery_archive_nonce_reservation_object_name,
+      ADD CONSTRAINT chk_meta_recovery_archive_nonce_reservation_object_name CHECK (true)`,
+    `ALTER TABLE meta_recovery_archive_nonce_reservations DROP CONSTRAINT uq_meta_recovery_archive_nonce_reservation_generation_section,
+      ADD CONSTRAINT uq_meta_recovery_archive_nonce_reservation_generation_section UNIQUE(generation_id,section_name) DEFERRABLE`,
+    `ALTER TABLE meta_recovery_archive_nonce_reservations DISABLE TRIGGER trg_meta_recovery_archive_nonce_reservation_guard_row`,
+    `ALTER TABLE meta_recovery_archive_nonce_reservations DISABLE TRIGGER trg_meta_recovery_archive_nonce_reservation_guard_truncate`,
+    `ALTER TABLE meta_recovery_archive_nonce_reservations ADD CONSTRAINT chk_meta_recovery_archive_nonce_reservation_section_name
+      CHECK (section_name NOT LIKE 'attachment:%')`,
+    `CREATE OR REPLACE FUNCTION public.meta_recovery_archive_reserve_nonce(p_dek_fingerprint text,p_nonce text,
+      p_generation_id uuid,p_section_name text,p_aead_algorithm text,p_format_version integer)
+      RETURNS void LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$ BEGIN RETURN; END $$`,
+    `CREATE OR REPLACE FUNCTION public.meta_recovery_archive_nonce_reservation_guard_row()
+      RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$ BEGIN RETURN NEW; END $$`,
+  ]) {
+    await assert.rejects(db.transaction().execute(async (tx) => {
+      await sql.raw(tamper).execute(tx)
+      await nonceObjects.up(tx)
+    }), { message: 'RECOVERY_ARCHIVE_NONCE_OBJECT_SCHEMA_DRIFT' })
+  }
+  const objectGeneration = randomUUID()
+  const objectIdentity = `attachment:${createHash('sha256').update(`att_${randomUUID()}`).digest('hex')}`
+  const nonceFingerprint = randomBytes(32).toString('hex')
+  const indexNonce = randomBytes(12).toString('hex')
+  const attachmentNonce = randomBytes(12).toString('hex')
+  const reserveNonce = (nonce: string, object: string, fingerprint = nonceFingerprint) => query(
+    `SELECT public.meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,'aes-256-gcm',1)`,
+    [fingerprint, nonce, objectGeneration, object])
+  await reserveNonce(indexNonce, 'attachments_index')
+  await reserveNonce(attachmentNonce, objectIdentity)
+  await assert.rejects(reserveNonce(indexNonce, `attachment:${randomBytes(32).toString('hex')}`),
+    { message: 'recovery_archive_nonce_reservation_conflict' })
+  await assert.rejects(reserveNonce(randomBytes(12).toString('hex'), objectIdentity),
+    { message: 'recovery_archive_nonce_reservation_conflict' })
+  await assert.rejects(reserveNonce(attachmentNonce, 'records'),
+    { message: 'recovery_archive_nonce_reservation_conflict' })
+  for (const invalid of ['attachment:', 'attachment:not-a-uuid', `attachment:${randomUUID().toUpperCase()}`, 'unknown']) {
+    await assert.rejects(reserveNonce(randomBytes(12).toString('hex'), invalid),
+      { message: 'recovery_archive_nonce_reservation_shape_invalid' })
+  }
+  await assert.rejects(db.transaction().execute(nonceObjects.down),
+    { message: 'RECOVERY_ARCHIVE_NONCE_OBJECT_DOWN_IN_USE' })
+  for (const text of [
+    `UPDATE meta_recovery_archive_nonce_reservations SET section_name=section_name WHERE generation_id=$1`,
+    `DELETE FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1`,
+  ]) await assert.rejects(query(text, [objectGeneration]), { message: 'recovery_archive_nonce_reservation_immutable' })
+  await assert.rejects(query('TRUNCATE meta_recovery_archive_nonce_reservations'),
+    { message: 'recovery_archive_nonce_reservation_immutable' })
+  for (const mutation of [
+    { constraint: 'pk_meta_recovery_archive_nonce_reservations', nonce: indexNonce, identity: `attachment:${randomBytes(32).toString('hex')}` },
+    { constraint: 'uq_meta_recovery_archive_nonce_reservation_generation_section', nonce: randomBytes(12).toString('hex'), identity: objectIdentity },
+  ]) {
+    // Removing either arbiter must make the real refusal assertion fail; rollback restores it.
+    await assert.rejects(db.transaction().execute(async (tx) => {
+      await sql.raw(`ALTER TABLE meta_recovery_archive_nonce_reservations DROP CONSTRAINT ${mutation.constraint}`).execute(tx)
+      await assert.rejects(sql`SELECT public.meta_recovery_archive_reserve_nonce(
+        ${nonceFingerprint},${mutation.nonce},${objectGeneration}::uuid,${mutation.identity},'aes-256-gcm',1)`.execute(tx),
+      { message: 'recovery_archive_nonce_reservation_conflict' })
+    }), { code: 'ERR_ASSERTION' })
+  }
+  await db.transaction().execute(nonceObjects.up)
+  console.log('PASS: attachment/index nonce identities coexist; cross-object nonce reuse and second object ciphertext refuse; drift and populated rollback refuse')
   for (const operation of [manualRequestMigration.up, manualRequestMigration.down,
     manualRequestMigration.down, manualRequestMigration.up, manualRequestMigration.up]) {
     await db.transaction().execute(operation)

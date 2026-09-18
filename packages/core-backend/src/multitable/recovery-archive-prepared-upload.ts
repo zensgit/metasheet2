@@ -45,6 +45,8 @@ function bytes(value: unknown, length?: number): Buffer {
 
 /** Only closed ciphertext fields are encoded; the result cannot retain raw DEK or plaintext properties. */
 export function encodeRecoveryArchivePreparedEnvelope(result: RecoveryArchiveReserveThenSealResult, manifestEnvelope?: Uint8Array): Buffer {
+  // Version 1/2 cannot carry binary attachment objects; never silently discard them.
+  if (result.sealedAttachments?.length) throw new Error(INVALID)
   const payload = Buffer.from(JSON.stringify({
     version: manifestEnvelope ? 2 : 1,
     ...(manifestEnvelope ? { manifestEnvelope: Buffer.from(manifestEnvelope).toString('base64') } : {}),
@@ -139,7 +141,8 @@ export async function uploadRecoveryArchivePreparedCapture(input: RecoveryArchiv
     verifyBinding(capture.binding)
     const sealed = await reserveThenSealRecoveryArchiveSections({
       binding: capture.binding, keyCustody: capture.keyCustody, transactionDepth: input.transactionDepth,
-      dekSource: capture.dekSource, sections: capture.sections, reserveNonces: capture.reserveNonces,
+      dekSource: capture.dekSource, sections: capture.sections, attachments: capture.attachments,
+      reserveNonces: capture.reserveNonces,
     })
     const manifest = input.authenticateCapture ? await input.authenticateCapture(sealed) : undefined
     payload = encodeRecoveryArchivePreparedEnvelope(sealed, manifest)
