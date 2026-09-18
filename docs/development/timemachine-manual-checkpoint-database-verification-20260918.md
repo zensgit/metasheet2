@@ -1057,3 +1057,34 @@ immutable source version on download. A successful download plus hash is not
 immutable-source admission. Actual attachment capture, version-specific reads,
 source-pin-aware deletion coverage and full Workbench UAT remain OPEN.
 No flags, customer storage/data, Ready, merge, dispatch or deployment changed.
+
+## Attachment Source Deletion Audit
+
+Read-only source checkpoint: `82451aae946bc7870c1aed648c77e130629da744`.
+These are code-path findings, not reproduced real-DB race evidence.
+
+- `StorageProvider` in `src/services/StorageService.ts` exposes exclusive-create
+  uploadByKey, but downloadByKey returns bytes without a provider source-version
+  identity. Destination exclusivity alone does not close the immutable-source gate.
+- `recovery-archive-manual-admission.ts` admits every non-purged attachment
+  candidate, including unreferenced deleted rows, and records source-pin intents.
+  Continuation still rejects attachment candidates, so no successful attachment
+  capture is currently claimed.
+- `univer-meta.ts`, the attachment DELETE transaction, acquires the sheet fence
+  and soft-deletes the row, then calls deleteAttachmentBinaryShared after commit.
+  That physical-delete helper does not itself consult source pins. Existing
+  source pins therefore need protection in this direct deletion path too.
+- `attachment-orphan-retention.ts` checks active pins under the sheet fence in
+  claimAttachmentBlobPurge, then releases the transaction before deleteByKey.
+  Its comment assumes future admission refuses deleted rows. Actual manual
+  admission includes non-purged deleted candidates. A deleted-row pin can thus
+  be admitted between purge claim and physical deletion. Holding DB locks over
+  provider I/O is not an acceptable repair under D1.
+
+Next verification must reproduce both orderings with two connections and an
+explicit provider barrier: pin-first/direct-delete and purge-claim-first/pin.
+The eventual protocol must durably arbitrate source claims versus purge claims
+before provider I/O, preserve historical attachment scope, keep disabled behavior
+unchanged, and never label a lost source recoverable. Do not merely remove the
+attachment refusal or add a second non-atomic pre-delete read. Immutable source
+versioning remains a separate mandatory prerequisite after deletion arbitration.
