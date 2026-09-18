@@ -320,3 +320,19 @@ authority; no new registry, nonce deletion or duplicate-as-success retry is adde
 Prepared ciphertext resumes without another reservation. Source handles still cannot
 be recreated for a generation whose plaintext was lost. This does not yet complete
 source sealing, immutable attachment copy, object receipts or catalog publication.
+
+### No-Attachment Source Seal Integration
+
+The server-owned reservation transaction now also consumes the admitted bootstrap
+or repeat-checkpoint identities. It derives all nine data-section counts and hashes
+from the private captured source, with empty attachment index only when no attachment
+candidates exist and zero-row audit-only permission evidence. The continuation
+requires these two empty sections byte-for-byte; arbitrary callback evidence is not
+accepted. Any attachment candidate refuses continuation until immutable-source
+verification is integrated.
+
+Canonical fence, current source/key/authority/owner checks, nine source seals,
+snapshot parent and nonce reservation share one transaction. A nonce failure rolls
+back the seals; prepared-envelope resume does not re-seal. These are historical
+source seals, not catalog publication or permission to prune history. Derived coverage,
+immutable attachments, provider receipts and the final publication fence remain open.

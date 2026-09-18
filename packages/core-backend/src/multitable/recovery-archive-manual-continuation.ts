@@ -39,14 +39,16 @@ export function bindRecoveryArchiveManualContinuation(
       capture: async () => {
         if (!source) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
         const snapshot = takeRecoveryArchiveManualSource(source, identity, owner, binding)
+        if (snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
         await recheckSource(source)
         const expected = structuredClone(snapshot)
         const proposed = await capture(snapshot)
         const sections = proposed.sections.map((section) => ({ sectionName: section.sectionName,
           plaintext: Buffer.from(section.plaintext), nonce: Buffer.from(section.nonce) }))
-        for (const name of Object.keys(expected.sections) as (keyof typeof expected.sections)[]) {
+        const sectionRows = { ...expected.sections, attachments_index: [], permission_evidence: [] }
+        for (const name of Object.keys(sectionRows) as (keyof typeof sectionRows)[]) {
           const matches = sections.filter((section) => section.sectionName === name)
-          const canonical = canonicalizeRecoveryArchiveSectionRows(name, buildRecoveryArchiveSectionRows(name, expected.sections[name]))
+          const canonical = canonicalizeRecoveryArchiveSectionRows(name, buildRecoveryArchiveSectionRows(name, sectionRows[name]))
           if (matches.length !== 1 || !matches[0]!.plaintext.equals(Buffer.from(canonical.canonicalJson))) {
             throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
           }

@@ -3,13 +3,16 @@ import { acquireCanonicalSheetFence, assertNoActiveWriterBlock } from './canonic
 import { lockActiveRecoveryArchiveKeyForReference } from './recovery-archive-key-registry'
 import { bindRecoveryArchiveManualRequest, readRecoveryArchiveManualRequest,
   type RecoveryArchiveManualRequest } from './recovery-archive-manual-request'
-import { allocateRecoveryArchiveSnapshotIdentities, persistRecoveryArchiveSnapshotReservations } from './recovery-archive-section-bootstrap'
-import { allocateRecoveryArchiveCheckpointIdentities, persistRecoveryArchiveCheckpointReservations } from './recovery-archive-section-checkpoint'
+import { allocateRecoveryArchiveSnapshotIdentities, persistRecoveryArchiveSnapshotReservations,
+  consumeRecoveryArchiveBootstrapReservations } from './recovery-archive-section-bootstrap'
+import { allocateRecoveryArchiveCheckpointIdentities, persistRecoveryArchiveCheckpointReservations,
+  consumeRecoveryArchiveCheckpointReservations } from './recovery-archive-section-checkpoint'
 import { computeRecoveryArchiveSourceVectorHash, computeRecoveryArchiveCheckpointVectorHash } from './recovery-archive-source-vector'
 import type { RecoveryArchivePreparedUploadInput } from './recovery-archive-prepared-upload'
 import type { SealQuery } from './recovery-archive-seals'
 import { readRecoveryArchiveCaptureSource, type RecoveryArchiveCaptureSource } from './recovery-archive-relational-source'
-import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
+import { canonicalizeRecoveryArchiveJson, canonicalizeRecoveryArchiveSectionRows } from './recovery-archive-manifest'
+import { buildRecoveryArchiveSectionRows, RECOVERY_ARCHIVE_DATA_SECTION_NAMES } from './recovery-archive-section-rows'
 import { readRecoveryArchivePreparedCapture, type RecoveryArchivePreparedCaptureOwner } from './recovery-archive-prepared-capture'
 import { claimRecoveryArchiveSourcePinIntent } from './recovery-archive-source-pin'
 import type { RecoveryArchiveNonceReservationSink } from './recovery-archive-crypto'
@@ -30,6 +33,7 @@ const sources = new WeakMap<RecoveryArchiveManualSource, {
   binding: RecoveryArchivePreparedUploadInput['binding']
   consumed: boolean
   keyRowVersion: string
+  repeat: boolean
 }>()
 
 function sourceHash(source: RecoveryArchiveCaptureSource): string {
@@ -107,6 +111,16 @@ export function bindRecoveryArchiveManualNonceReservation(
           || row.aeadAlgorithm !== entry.binding.aeadAlgorithm || row.dekFingerprint !== rows[0]!.dekFingerprint)) {
         throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_BINDING_MISMATCH')
       }
+      if (entry.snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+      const sections = RECOVERY_ARCHIVE_DATA_SECTION_NAMES.map((sectionKind) => {
+        const raw = sectionKind === 'attachments_index' || sectionKind === 'permission_evidence'
+          ? [] : entry.snapshot.sections[sectionKind]
+        const canonical = canonicalizeRecoveryArchiveSectionRows(sectionKind, buildRecoveryArchiveSectionRows(sectionKind, raw))
+        return { sectionKind, rowCount: canonical.rowCount, sourceHash: canonical.plaintextSha256 }
+      })
+      const sealInput = { ...entry.owner, sheetId: entry.identity.sheetId, sections }
+      if (entry.repeat) await consumeRecoveryArchiveCheckpointReservations(query, sealInput)
+      else await consumeRecoveryArchiveBootstrapReservations(query, sealInput)
       try {
         for (const row of rows) await query(`SELECT public.meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,$5,$6)`,
           [row.dekFingerprint, row.nonceHex, row.generationId, row.sectionName, row.aeadAlgorithm, row.formatVersion])
@@ -199,7 +213,7 @@ export function bindRecoveryArchiveManualAdmission(
       const source: RecoveryArchiveManualSource = Object.freeze({ [sourceBrand]: true as const })
       sources.set(source, { identity, owner: { generationId, ownerKind: plan.ownerKind,
         ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot),
-      consumed: false, keyRowVersion: policy.keyRowVersion, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
+      consumed: false, repeat, keyRowVersion: policy.keyRowVersion, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
         baseId: identity.baseId, sheetId: identity.sheetId, anchorOperationId: allocated.snapshotOperationId,
         anchorSeq: allocated.snapshotSeq, checkpointId, keyId: policy.keyId, aeadAlgorithm: 'aes-256-gcm' } })
       return { generationId, replayed: false, source }

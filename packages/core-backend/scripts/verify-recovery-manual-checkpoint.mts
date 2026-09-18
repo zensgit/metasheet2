@@ -728,7 +728,7 @@ try {
     captures++
     return { binding: first.binding, transactionDepth: first.transactionDepth, keyCustody: custody,
       dekSource: { kind: 'produce' as const },
-      // The other three sections are synthetic only, not attachment/permission/publication proof.
+      // Empty attachment/audit sections are valid here; coverage remains a synthetic placeholder.
       sections: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => {
         const rows = source.sections[sectionName as keyof typeof source.sections]
         const plaintext = rows === undefined ? '[]' : manifest.canonicalizeRecoveryArchiveSectionRows(
@@ -750,6 +750,19 @@ try {
   }
   const nonceCount = async (generationId: string) => (await query(`SELECT count(*)::int AS n
     FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1::uuid`, [generationId])).rows[0].n
+  const sealedMembers = async (operationId: string) => (await query(`SELECT section_kind,
+    row_count::text,source_hash,source_head_kind FROM meta_record_history_snapshot_members
+    WHERE sheet_id='no-genesis' AND parent_operation_id=$1::uuid ORDER BY ordinal`, [operationId])).rows
+  const expectedMembers = (input: Awaited<ReturnType<typeof continuation>>, kind: string) => {
+    const snapshot = manualAdmission.readRecoveryArchiveManualSource(input.source)
+    return sectionRows.RECOVERY_ARCHIVE_DATA_SECTION_NAMES.map((section_kind) => {
+      const raw = section_kind === 'attachments_index' || section_kind === 'permission_evidence'
+        ? [] : snapshot.sections[section_kind]
+      const canonical = manifest.canonicalizeRecoveryArchiveSectionRows(section_kind,
+        sectionRows.buildRecoveryArchiveSectionRows(section_kind, raw))
+      return { section_kind, row_count: canonical.rowCount, source_hash: canonical.plaintextSha256, source_head_kind: kind }
+    })
+  }
   try {
     await assert.rejects(manual({ ...first, source: null, capture, upload }),
       { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE' })
@@ -775,6 +788,7 @@ try {
     assert.equal(produced, 1)
     assert.equal(reserved, 0, 'caller-owned reservation callback must never run')
     assert.equal(await nonceCount(first.owner.generationId), 10)
+    assert.deepEqual(await sealedMembers(first.binding.anchorOperationId), expectedMembers(first, 'section_bootstrap'))
     const captureCount = captures
     let resumedSections = 0
     await manual({ ...first, source: null, capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') },
@@ -807,6 +821,14 @@ try {
     assert.equal(conflictUploads, 0)
     assert.equal(await nonceCount(conflict.owner.generationId), 1, 'earlier nine reservations must roll back')
     assert.equal(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, conflict.owner)), null)
+    assert.deepEqual(await sealedMembers(conflict.binding.anchorOperationId), [], 'nonce conflict must roll back source seals')
+    const repeated = await continuation()
+    let repeatedUploads = 0
+    await manual({ ...repeated, capture: async (snapshot) => ({ ...await capture(snapshot), binding: repeated.binding }),
+      upload: async () => { repeatedUploads++ } })
+    assert.equal(repeatedUploads, 10)
+    assert.deepEqual(await sealedMembers(repeated.binding.anchorOperationId), expectedMembers(repeated, 'section_checkpoint'))
+    console.log('PASS: manual bootstrap and repeat checkpoint seal exact nine canonical data hashes; nonce failure rolls back seals')
     const drift = await continuation()
     const driftWriter = new Client({ ...connection, database })
     await driftWriter.connect()

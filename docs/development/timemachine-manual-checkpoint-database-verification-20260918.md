@@ -562,3 +562,24 @@ resolution; official provenance comparison was zero differences. Full owned-PG,
 on that merged tree. Its main-relative whitespace check passed; two unrelated PLM
 docs inherited trailing blank lines from main and were not edited. Remote CI is
 separate evidence and is not implied by these local results.
+
+## Integrated No-Attachment Source Seals
+
+The manual nonce transaction now calls the existing bootstrap/checkpoint consumer
+after its fresh fenced source checks. The driver compares all nine persisted
+snapshot-member row counts and hashes to canonical captured rows, including empty
+attachment/audit sections. The first request proves bootstrap; a subsequent request
+proves repeat checkpoint and ten uploads. A final-section nonce conflict leaves no
+snapshot members, proving the preceding seals rolled back with nonce reservation.
+
+Mutation disabling both consumer calls fails the exact first nine-member comparison
+(empty result instead of nine canonical members). Restored full isolated-PG acceptance
+passes; database/connections are zero and the temporary cluster is removed. Logs:
+`/private/tmp/tm-manual-seals-{mutation,final,unit,wiring,s5}.log`.
+Acceptance TypeScript, scoped source ESLint, worker/crypto 73/73, wiring 37/37 and
+full S5 pass. No migration or workflow changes are part of this delta.
+
+The continuation currently refuses attachment candidates and accepts zero-row
+audit-only permission evidence. Derived coverage is still a synthetic placeholder in
+this test; these seals are not complete publication, retention/prune authority or a
+restore grant. Final publication checks and immutable attachment support remain open.
