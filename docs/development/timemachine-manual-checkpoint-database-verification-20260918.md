@@ -498,3 +498,11 @@ Read-only source audit found `StorageService.downloadByKey` has no versioned-sou
 contract. The existing archive object-store validates immutable destination objects,
 but does not prove the legacy attachment source was immutable during copying.
 No customer path was read; no alternate source assurance was invented.
+
+Mutation bypassing the purged-marker guard produces `Missing expected rejection`
+for the exact unavailable code. Restored final acceptance passes on merge
+`18f73f5b3988da6391f9063249ac5595dfa1c747`, whose second parent is docs-only main
+`8b6aea8b725a1c7f4c9b0746851d51a59e7d1bb4`. Owned database/connections and cluster
+are removed on both results. Source/source-pin wiring/worker unit tests: 57/57;
+acceptance TypeScript, scoped lint, static wiring 37/37 and full S5 pass. Logs:
+`/private/tmp/tm-manual-purged-{final,mutation,unit,wiring,s5}.log`.
