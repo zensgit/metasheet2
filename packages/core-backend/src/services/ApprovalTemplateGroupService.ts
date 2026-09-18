@@ -282,7 +282,13 @@ const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonbla
  * Anything else (including an already-typed `ServiceError` thrown deeper in the same transaction,
  * e.g. GROUP_NOT_FOUND/GROUP_ARCHIVED) passes through unchanged.
  */
-function mapGroupConstraintError(error: unknown): unknown {
+// Exported (2026-09-18, W8 execute unit, design-gate-A3-phase2 changesRequired #11): the
+// composed backfill execute handler (`routes/approvals.ts`) wraps its ENTIRE `transaction(...)`
+// call in this SAME mapper — not a second, divergent copy — for the identical reason every
+// thin wrapper in this file already does: `atg_sort_unique` is DEFERRABLE INITIALLY DEFERRED, so
+// a real duplicate-sort-order collision only raises 23505 at COMMIT, which a try/catch INSIDE the
+// transaction callback cannot observe.
+export function mapGroupConstraintError(error: unknown): unknown {
   if (error instanceof ServiceError) return error
   const pgErr = error as { code?: unknown; constraint?: unknown } | null
   if (pgErr && typeof pgErr === 'object' && pgErr.code === '23505') {

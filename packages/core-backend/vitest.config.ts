@@ -1854,6 +1854,14 @@ export default defineConfig({
       // Has its own dedicated `approval-template-groups-backfill-preview-ci-wiring.test.mjs` guard
       // (same rationale as the schema suite's own dedicated guard, above).
       'tests/integration/approval-template-groups-backfill-preview.db.test.ts',
+      // Same slice, W8 execute unit: `executeApprovalTemplateGroupBackfill`
+      // (`src/routes/approvals.ts`) — the single `transaction()` callback composing
+      // `createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient` on one
+      // connection (§3.1/§13.2). DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-execute-ci-wiring.test.mjs` guard (same convention as
+      // the two suites above).
+      'tests/integration/approval-template-groups-backfill-execute.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
