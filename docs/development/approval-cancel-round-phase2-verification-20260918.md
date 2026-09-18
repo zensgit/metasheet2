@@ -216,8 +216,37 @@ packages/core-backend/tests/unit/attendance-w4c3b-external-transaction-entry.tes
 plugins/plugin-attendance/index.cjs
 ```
 
-The new unit cases were appended to a file already collected by the default vitest project; the
-real-DB oracle is an existing file already wired into the attendance real-DB step at
+⚠️ **CORRECTED, and the correction came from running the check rather than restating it.** This
+line used to read 「the new unit cases were **appended to a file already collected**」.
+`attendance-w4c3b-external-transaction-entry.test.ts` is a **NEW** file (`A` in
+`git diff --name-status feat/approval-cancel-round-phase1..HEAD`), 477 lines, with **zero** hits
+across `*.yml *.mjs *.sh *.json *.cjs` — i.e. no token anywhere names it. Under this repo's
+「考勤新文件四道 census 钉」 rule that is exactly the shape that owes pins, so 「already collected」
+was an assumption doing the work of a measurement.
+
+**Measured, with a positive control for the method** (`packages/core-backend`, default config —
+which is what `npm test` → the required `test (20.x)` lane runs, since `"test": "vitest"`):
+
+```
+# the file under test
+$ npx vitest run tests/unit/attendance-w4c3b-external-transaction-entry.test.ts --reporter=dot
+  Test Files  1 passed (1)
+        Tests  14 passed (14)
+
+# POSITIVE CONTROL — a file that IS on vitest.config.ts's exclude list, passed the same way
+$ npx vitest run tests/integration/admin-users.api.test.ts --reporter=dot
+  No test files found, exiting with code 1
+```
+
+The control is what makes the first run mean something: a path filter does **not** override
+`exclude`, so an excluded file collects zero. The new file collects and runs ⇒ it is not excluded.
+And the config sets **no `include` override** (`grep -cE '^\s*include\s*:' vitest.config.ts` ⇒ `0`),
+so collection falls to vitest's default glob, which is discovery-based over `tests/unit/**` — a
+population no token list can go stale against. **Conclusion: this file needs no pin**, and the
+four-pin rule it looked like it triggered applies to new `.db.test.ts` files and to
+`plugin-tests.yml` edits, neither of which this is.
+
+The real-DB oracle is an existing file already wired into the attendance real-DB step at
 `.github/workflows/plugin-tests.yml:1838`.
 
 **"No census entry needs widening" is not assumed — the corpora were grepped.** Both changed source
