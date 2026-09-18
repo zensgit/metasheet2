@@ -735,6 +735,50 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect(visibleRes.status).toBe(201)
   })
 
+  // ── §2(d): the OTHER non-containment direction — manager, guard-fail (impl-gate-A-slice1-round6-
+  // 20260918.md §2 P2-1) ──
+  // §2(c) above witnesses one direction: an actor `approvalTemplateAdminGuard` ADMITS (DB-side
+  // `isAdmin`) that `isTemplateManager` does NOT recognize. This case witnesses the OTHER
+  // direction: a permission claim `isTemplateManager` DOES recognize, that the guard does NOT
+  // admit — so the two populations are mutually non-inclusive, neither one a subset of the other.
+  // Both arms below use the IDENTICAL claim shape (`MGR_PERMS`), not two hand-written shapes that
+  // merely look alike, so they are provably about the same principal.
+  it('§2(d): a permission code that satisfies isTemplateManager does not, by itself, satisfy approvalTemplateAdminGuard — pins the direction §2(c) does not cover', async () => {
+    const org = trackOrg(`atg-vis4-${TS}`)
+    const mgrUserId = `vis4-mgr-${TS}`
+    const MGR_PERMS = ['approvals:read', 'approval-templates:manage']
+
+    // Arm A (HTTP, real DB): a token carrying ONLY these permission claims — no `roles=admin`, no
+    // `user_roles` DB grant, no namespace-admission grant. `approval-templates:manage` is the
+    // guard's OWN literal permission code, yet this principal is refused.
+    const mgrToken = await tok(base, mgrUserId, { roles: 'user', perms: MGR_PERMS.join(','), tenantId: org })
+    const groupRes = await httpReq(base, '/api/approval-template-groups', mgrToken, { method: 'POST', body: { name: `Vis4 ${TS}` } })
+    expect(groupRes.status).toBe(403)
+    // Discriminates "the guard itself denied this" from "the guard passed and something else
+    // downstream returned 403" (e.g. `SESSION_ORG_REQUIRED`, shaped `{ok:false,error:{code,...}}`)
+    // — `rbacGuardAny`'s own denial body is the bare string `{ error: 'Insufficient permissions' }`
+    // (`rbac/rbac.ts`), with no `code` field.
+    expect((await groupRes.json()).error).toBe('Insufficient permissions')
+
+    // Arm B (direct call to the exported resolver, the IDENTICAL claim shape as Arm A):
+    // `isTemplateManager` is true for this permission set — one of its derivation legs is exactly
+    // `permissions.includes('approval-templates:manage')`, with no admission requirement on this
+    // leg at all.
+    const mgrReq = {
+      user: { id: mgrUserId, role: 'user', roles: ['user'], permissions: MGR_PERMS },
+    } as unknown as Request
+    const mgrActor = resolveApprovalTemplateVisibilityActor(mgrReq)
+    expect(mgrActor?.isTemplateManager).toBe(true)
+
+    // Negative control: drop the ONE permission code that satisfies a derivation leg — isolates
+    // WHICH claim does the work, rather than resting on "no plain user is ever a manager".
+    const plainReq = {
+      user: { id: `${mgrUserId}-plain`, role: 'user', roles: ['user'], permissions: ['approvals:read'] },
+    } as unknown as Request
+    const plainActor = resolveApprovalTemplateVisibilityActor(plainReq)
+    expect(plainActor?.isTemplateManager).toBe(false)
+  })
+
   // ── G ──────────────────────────────────────────────────────────────────────────────────────
   // FINDING (verified by actual mutation probe on `src/services/ApprovalTemplateGroupService.ts`
   // unarchiveApprovalTemplateGroup, cp-backup → edit → run this file → cp-restore → cmp — not

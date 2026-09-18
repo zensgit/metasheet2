@@ -19,6 +19,18 @@
 # fact (bad) or narrates it as something already retracted/falsified (fine, e.g.
 # "which is false", "已撤回", "已证伪", "过强声明").
 #
+# ROUND 6 (impl-gate-A-slice1-round6-20260918.md §2 P2-1): the fix that replaced
+# "⊆" with "guard population ⊋ manager population (a strict superset)" was ITSELF
+# the SAME failure mode one level up — a retracted overclaim replaced by a second,
+# narrower-but-still-false overclaim, never covered by this script's own pattern
+# set (P3-3 of that same report). The pattern set below is widened accordingly:
+# every containment SYMBOL (⊆/⊇/⊂/⊃/⊋/⊊), every containment WORD in either
+# language (子集/超集/严格超集/subset/superset/strict superset), and the two
+# patterns round 5 had narrowed to require a specific co-occurring phrase on the
+# SAME line ("纯 HTTP 测试.*无法制造", "通配权限码.*过 guard") are now bare
+# substrings ("无法制造", "通配权限码") so a differently-worded restatement of the
+# same claim cannot slip past by rephrasing the other half of the sentence.
+#
 # Usage:
 #   scripts/dev/atg-retraction-sweep.sh [<base-ref>]
 #   <base-ref> defaults to origin/main. The scan covers the file set from
@@ -48,16 +60,27 @@ echo
 # rather than buried in one merged count.
 declare -a PATTERNS=(
   '⊆'
+  '⊇'
+  '⊂'
+  '⊃'
+  '⊋'
+  '⊊'
   '每个 *actor'
   'isTemplateManager *= *true'
   '没有.{0,6}HTTP *可达'
   '今天.{0,6}HTTP *可达路径'
-  '纯 *HTTP *测试.*无法制造'
+  '无法制造'
   'guard population'
   'guard *人口'
   'sees everything'
   'wildcard permission'
-  '通配权限码.*过 *guard'
+  '通配权限码'
+  '子集'
+  '超集'
+  '严格超集'
+  'strict superset'
+  'subset'
+  'superset'
 )
 
 for pat in "${PATTERNS[@]}"; do
@@ -79,21 +102,34 @@ cat <<'EOF'
 === how to use this output ===
 1. For every hit printed above, read the FULL sentence it sits in (open the
    file at that line, don't judge from the grep fragment alone).
-2. If the sentence asserts the claim as true of TODAY's behavior ("guard
-   population IS a subset of manager", "there is NO HTTP-reachable path
-   today") -> that is a live P2, not a stale one: this is exactly the defect
-   class impl-gate-A-slice1-round5-20260918.md §2 P2-1 found (design MD §3.5,
-   verification MD §18.1) after two of three named copies had already been
-   fixed. Rewrite it using the measured relationship: guard ⊋ manager (a
-   strict superset), with the ONLY end-to-end-measured "guard-pass, non-
-   manager" counterexample being the DB-side `isAdmin(userId)` leg (the §2(c)
-   lifecycle test case) — the wildcard-permission-code leg does NOT stand
-   alone (it is blocked by the `isPermissionAllowedByNamespaceAdmission`
-   conjunct; repo-wide real grants of `approval-templates:*` are 0).
+2. If the sentence asserts a CONTAINMENT relationship as true of TODAY's
+   behavior in EITHER direction ("guard population IS a subset of manager",
+   "guard population is a strict SUPERSET of manager", "there is NO
+   HTTP-reachable path today") -> that is a live P2, not a stale one. Both
+   directions have already been found false once: round 5 found "⊆" false
+   (impl-gate-A-slice1-round5-20260918.md §2 P2-1); round 6 found the "⊋"
+   replacement ALSO false, in the opposite direction
+   (impl-gate-A-slice1-round6-20260918.md §2 P2-1) — a principal holding only
+   the guard's own literal `approval-templates:manage` code satisfies
+   `isTemplateManager` but is refused by the guard itself (see verification
+   MD §23.6's `ZZR4-EXACT-RESULT status=403`, and the lifecycle suite's
+   "§2(d)" case). DO NOT rewrite a live hit into a THIRD containment claim in
+   either direction. The measured relationship is: the two populations are
+   MUTUALLY NON-INCLUSIVE (neither is a subset of the other), with one
+   end-to-end-measured counterexample per direction — guard-pass/non-manager
+   is the DB-side `isAdmin(userId)` leg (the §2(c) lifecycle test case);
+   manager/guard-fail is the bare `approval-templates:manage` permission code
+   (the §2(d) lifecycle test case) — and say nothing, either way, about
+   whether a PRODUCTION provisioning path always pairs the two grants (that
+   is a separate, unmeasured claim).
 3. If the sentence narrates the claim as something ALREADY retracted or
    falsified ("which is false", "已撤回", "已证伪", "过强声明", "被撤回的声
    明"), or is a changelog-style "this round replaced X with Y" entry — that
-   is legitimate history, not a live defect. Leave it.
+   is legitimate history, not a live defect. Leave it. A sentence stating the
+   measured "mutually non-inclusive" conclusion in PROSE (no containment
+   symbol or word asserted as true) is also fine and will still show up as a
+   hit on the word-patterns above — that is expected, not itself a defect;
+   judge the SENTENCE, not the pattern match.
 4. A hit on a "⊆"/"guard population" pattern in an UNRELATED sentence (e.g.
    `export ⊆ read`, a different endpoint's differential-privilege claim that
    has nothing to do with `approvalTemplateAdminGuard`/`isTemplateManager`) is
