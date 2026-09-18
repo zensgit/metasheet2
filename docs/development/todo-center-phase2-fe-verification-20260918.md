@@ -1479,6 +1479,9 @@ P3-3 要核对的具体命题是「全分支范围内有没有一处把 `:1186` 
 $ sed -n '1,1267p' docs/development/todo-center-phase2-fe-verification-20260918.md | grep -n "1186" | grep -i "approvalNavTodoBadge"
 (空)
 ```
+（`1267` 是本轮提交时 `## 15.` 那一行的行号减一——未来任何一轮再往这份文档后面追加 §16 及以后的
+内容,都会把这个数字变得偏低而漏查新增内容;重跑此检索时先用 `grep -n "^## 15\."` 重新取当前 HEAD
+上 `## 15.` 的行号,再代入,不要沿用这个写死的 `1267`。)
 零命中——`:78`(设计 MD)与 `:753`(验证 MD §12.1)是全文里仅有的两处 `:1186` 引用,它们讨论的是
 `todoApi`/`TodoCenterView`/`todoCountsRealtime` 三个令牌的 exec 行(§15.4/§15.6 已核对准确),从未
 提及 `approvalNavTodoBadge`。命题核对为真:交付物自己的正文里,没有一处把 `:1186` 当作
