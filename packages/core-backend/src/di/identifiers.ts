@@ -425,10 +425,16 @@ export interface CommentAddressRecord {
     rowId: string;
 }
 
-/** #5831 part B — one row a cross-sheet comment aggregate must leave out (row-level read deny). */
-export interface CommentInboxDeniedRow {
+/**
+ * #5831 part B — a sheet with row-level read deny ON for the caller, with the rows a cross-sheet comment
+ * aggregate may include on it: the candidate rows the route CHECKED against the deny and found allowed.
+ * An ALLOW list, not a deny list, so a row nobody checked when the scope was built (a comment that
+ * arrived between the candidate lookup and the count/page queries) is left out, never let in.
+ */
+export interface CommentInboxRowDenySheet {
     spreadsheetId: string;
-    rowId: string;
+    /** Trimmed row ids; a comment on any other row of this sheet is excluded. */
+    allowedRowIds: readonly string[];
 }
 
 /**
@@ -440,8 +446,8 @@ export interface CommentInboxDeniedRow {
 export interface CommentInboxScope {
     /** Sheets the caller may read AND that are live. */
     sheetIds: readonly string[];
-    /** Rows on those sheets the caller is row-level read-denied on. */
-    deniedRows: readonly CommentInboxDeniedRow[];
+    /** Those of `sheetIds` with row-level read deny on, each with its allowed rows (fail-closed). */
+    rowDenySheets: readonly CommentInboxRowDenySheet[];
 }
 
 export interface ICommentService {

@@ -109,7 +109,7 @@ import type { CollabService } from '../../src/services/CollabService'
 import type { CommentInboxScope } from '../../src/di/identifiers'
 
 /** #5831 part B: the cross-sheet aggregates need the route's scope; these fixtures live on sheet-1. */
-const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet-1'], deniedRows: [] }
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet-1'], rowDenySheets: [] }
 
 // ── Get the shared result queues ────────────────────────────────────────────
 
@@ -471,10 +471,10 @@ describe('CommentService', () => {
       selectFrom.mockClear()
       const nothing: unknown[] = [
         undefined,
-        { sheetIds: [], deniedRows: [] },
-        { sheetIds: [''], deniedRows: [] },
-        { sheetIds: 'sheet-1', deniedRows: [] },
-        { deniedRows: [{ spreadsheetId: 'sheet-1', rowId: 'row-1' }] },
+        { sheetIds: [], rowDenySheets: [] },
+        { sheetIds: [''], rowDenySheets: [] },
+        { sheetIds: 'sheet-1', rowDenySheets: [] },
+        { rowDenySheets: [{ spreadsheetId: 'sheet-1', allowedRowIds: ['row-1'] }] },
       ]
       for (const scope of nothing) {
         await expect(service.getInbox('user-viewer', { limit: 5, offset: 0 }, scope as never)).resolves.toEqual({ items: [], total: 0 })

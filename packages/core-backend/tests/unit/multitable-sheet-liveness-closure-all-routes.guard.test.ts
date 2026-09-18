@@ -333,8 +333,9 @@ const inboxRouteScoped = (h: RouteHandler, call: RegExp) => /const inbox = await
 
 const INBOX_SCOPE_REASON = 'CROSS-SHEET AGGREGATE, FILTERED (#5831 part B): it names no sheet, so it cannot answer with the '
   + 'single-sheet 403/404. Instead resolveCommentInboxScope (same file) keeps only comments on LIVE sheets the caller may READ '
-  + '(loadSheetLivenessBatch + filterReadableSheetRowsForAccess, the gate’s rules for a set) and off rows the caller is '
-  + 'row-level denied (non-admins, bounded to the candidate rows), and CommentService applies that scope in the WHERE of '
+  + '(loadSheetLivenessBatch + filterReadableSheetRowsForAccess, the gate’s rules for a set) and, on a row-deny sheet '
+  + '(loadInboxRowDenySheetIds, one batched flag lookup), only on the candidate rows it CHECKED and found allowed (non-admins; '
+  + 'an allow list, so a row it never checked is left out), and CommentService applies that scope in the WHERE of '
   + 'every count and page query (all asserted in "INBOX SCOPE").'
 
 /** #5831 part A: the `:commentId` routes of comments.ts, each gated on the comment's own sheet. */
@@ -1192,9 +1193,10 @@ describe('sheet-liveness closure over EVERY route file', () => {
     ]
     expect(reasons.flatMap(([key, entry]) => reasonProblems(key, entry))).toEqual([])
     // 12 after #5831 part A closed the six comment-id GAPs (GUARDED now, see COMMENT-ID ROUTES); 10 after
-    // part B closed the inbox and unread-count GAPs (FILTERED now, see INBOX SCOPE). A branch that closes
-    // another GAP lowers this floor by the number it removes.
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(10)
+    // part B closed the inbox and unread-count GAPs (FILTERED now, see INBOX SCOPE); 9 after #5844 closed the
+    // requireRecordReadable order GAP on main. A branch that closes another GAP lowers this floor by the
+    // number it removes (#5843, which closes the #5832 GAP, takes it to 8).
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(9)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
@@ -1425,19 +1427,29 @@ describe('sheet-liveness closure over EVERY route file', () => {
     }
 
     // The scope: authenticated identity only; liveness for everyone; the read rule for the set; row deny
-    // for non-admins, bounded to the candidate rows (a 3-argument loadDeniedRecordIds would scan the sheet).
+    // for non-admins, bounded to the candidate rows (a 3-argument loadDeniedRecordIds would scan the sheet),
+    // carried as an ALLOW list per row-deny sheet (a deny list would admit a row nobody checked).
     const scope = functionCode(file, 'resolveCommentInboxScope')
-    expect(scope).toMatch(/const access = await resolveRequestAccess\(req\);\s*const userId = access\.userId;\s*if \(userId\.trim\(\)\.length === 0\)\s*return \{ userId: '', scope: \{ sheetIds: \[\], deniedRows: \[\] \} \};/)
+    expect(scope).toMatch(/const access = await resolveRequestAccess\(req\);\s*const userId = access\.userId;\s*if \(userId\.trim\(\)\.length === 0\)\s*return \{ userId: '', scope: \{ sheetIds: \[\], rowDenySheets: \[\] \} \};/)
     expect(scope).not.toMatch(/\bgetUserId\(|x-user-id|req\.(headers|query|body|params)/)
     expect(scope).toMatch(/const candidateSheetIds = await commentService\.listInboxCandidateSheetIds\(userId\);/)
     expect(scope).toMatch(/const liveness = await loadSheetLivenessBatch\(query, candidateSheetIds\);\s*const liveSheetIds = candidateSheetIds\.filter\(\(sheetId\) => liveness\.get\(sheetId\) === 'live'\);/)
     expect(scope).toMatch(/const readableSheetIds = await resolveInboxReadableSheetIds\(query, access, liveSheetIds\);/)
     expect(scope).toMatch(/if \(!access\.isAdminRole\) \{/)
-    expect(scope).toMatch(/for \(const sheetId of readableSheetIds\) \{\s*if \(await loadRowLevelReadDenyEnabled\(query, sheetId\)\)\s*rowDenySheetIds\.push\(sheetId\);/)
+    // The flag: ONE batched lookup over the readable set (never a per-sheet loadRowLevelReadDenyEnabled loop),
+    // by the single-sheet helper's own rule (approval-projection base ⇒ on, else the column).
+    expect(scope).toMatch(/const rowDenySheetIds = await loadInboxRowDenySheetIds\(query, readableSheetIds\);/)
+    expect(scope).not.toMatch(/\bloadRowLevelReadDenyEnabled\b/)
+    const flagBatch = functionCode(file, 'loadInboxRowDenySheetIds')
+    expect(flagBatch).toMatch(/'SELECT id, row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\)'/)
+    expect(flagBatch).toMatch(/isApprovalProjectionBaseId\([^)]*\) \|\| row\.enabled === true/)
+    expect(flagBatch).toMatch(/throw err;/)
     expect(scope).toMatch(/await commentService\.listInboxCandidateRowIds\(userId, rowDenySheetIds\)/)
     expect(scope.match(/\bloadDeniedRecordIds\(/g)).toHaveLength(1)
     expect(scope).toMatch(/await loadDeniedRecordIds\(query, sheetId, userId, rowIds\)/)
-    expect(scope).toMatch(/return \{ userId, scope: \{ sheetIds: readableSheetIds, deniedRows \} \};\s*\}$/)
+    // Every row-deny sheet is pushed (even with no candidate row), with its checked-and-allowed rows only.
+    expect(scope).toMatch(/for \(const sheetId of rowDenySheetIds\) \{(?:(?!continue)[\s\S])*rowDenySheets\.push\(\{ spreadsheetId: sheetId, allowedRowIds: rowIds\.filter\(\(rowId\) => !denied\.has\(rowId\)\) \}\);\s*\}/)
+    expect(scope).toMatch(/return \{ userId, scope: \{ sheetIds: readableSheetIds, rowDenySheets \} \};\s*\}$/)
     const readable = functionCode(file, 'resolveInboxReadableSheetIds')
     expect(readable).toMatch(/await filterReadableSheetRowsForAccess\(query, liveSheetIds\.map\(\(id\) => \(\{ id \}\)\), access\)/)
     // The admin half of the gate's e-learning restriction (filterReadableSheetRowsForAccess skips it for admins).
@@ -1450,15 +1462,19 @@ describe('sheet-liveness closure over EVERY route file', () => {
     }
     const predicate = functionCode('services/CommentService.ts', 'inboxScopePredicate')
     expect(predicate).toMatch(/c\.spreadsheet_id = any\(\$\{scope\.sheetIds\}::text\[\]\)/)
-    expect(predicate).toMatch(/and not exists \(/)
-    expect(predicate).toMatch(/where denied\.spreadsheet_id = c\.spreadsheet_id\s+and denied\.row_id = btrim\(c\.row_id, \$\{JS_TRIM_WHITESPACE\}\)/)
+    // Allow list on row-deny sheets: (not a row-deny sheet) OR (an allowed pair) — never `not exists (denied)`.
+    expect(predicate).toMatch(/and \(c\.spreadsheet_id <> all\(\$\{scope\.rowDenySheetIds\}::text\[\]\) or exists \(/)
+    expect(predicate).toMatch(/where allowed\.spreadsheet_id = c\.spreadsheet_id\s+and allowed\.row_id = btrim\(c\.row_id, \$\{JS_TRIM_WHITESPACE\}\)/)
+    expect(predicate).not.toMatch(/not exists|denied/)
     const admit = functionCode('services/CommentService.ts', 'admitInboxScope')
     expect(admit).toMatch(/if \(sheetIds\.length === 0\)\s*return null;/)
+    // A row-deny sheet is kept even when its allow list is empty (a malformed allow list can only narrow).
+    expect(admit).toMatch(/if \(sheetId\.length === 0\)\s*continue;\s*rowDenySheetIds\.add\(sheetId\);/)
     // Kysely ANDs `.where()` calls without parentheses, so an `or` predicate must carry its own — or its
     // branches escape the filters around it (the scope included).
     expect(functionCode('services/CommentService.ts', 'inboxCandidatePredicate'))
       .toMatch(/return sql<boolean> `\(\(\$\{inboxMentionPredicate\(userId\)\}\) or r\.comment_id is null\)`;/)
-    expect(predicate).toMatch(/return sql<boolean> `\(c\.spreadsheet_id = any\(\$\{scope\.sheetIds\}::text\[\]\) \$\{deniedRowPredicate\}\)`;/)
+    expect(predicate).toMatch(/return sql<boolean> `\(c\.spreadsheet_id = any\(\$\{scope\.sheetIds\}::text\[\]\) \$\{rowDenyPredicate\}\)`;/)
 
     // CLOSED WORLD over CommentService: every method that reads meta_comments neither by id nor for ONE
     // sheet is one of the scoped aggregates or an id-only candidate lister.

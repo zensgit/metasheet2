@@ -5,7 +5,7 @@ import type { Injector } from '@wendellhu/redi'
 import {
   ICommentService,
   type CommentAddressRecord,
-  type CommentInboxDeniedRow,
+  type CommentInboxRowDenySheet,
   type CommentInboxScope,
   type CommentQueryOptions,
 } from '../di/identifiers'
@@ -16,6 +16,8 @@ import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { poolManager } from '../integration/db/connection-pool'
 import { resolveRequestAccess, type ResolvedRequestAccess } from '../multitable/access'
+import { isApprovalProjectionBaseId } from '../multitable/approval-projection-constants'
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   canAccessElearningProjectionSheet,
   loadElearningProjectionSheetOrgMap,
@@ -153,7 +155,8 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  * addressed routes (patch/delete/read/reactions/resolve), which gate on the sheet the COMMENT lives on.
  * The user-scoped cross-sheet `inbox`/`unread-count` aggregates name no sheet, so they cannot answer
  * with a single-sheet 403; they are FILTERED instead (#5831 part B, `resolveCommentInboxScope`): only
- * comments on sheets this gate would let the caller read, that are live, on rows it would not deny.
+ * comments on sheets this gate would let the caller read, that are live, and — on a sheet with row-level
+ * read deny on — on rows the scope CHECKED and found allowed (a row it never checked is left out).
  */
 type CommentReadContext = {
   userId: string
@@ -276,6 +279,37 @@ async function resolveInboxReadableSheetIds(
 }
 
 /**
+ * #5831 part B — `loadRowLevelReadDenyEnabled` (permission-service) for a SET of sheets in ONE round trip:
+ * the same columns and the same rule (an approval-projection sheet is always row-gated, otherwise the
+ * per-sheet flag), so the inbox and the single-sheet gate agree on which sheets carry the deny. Returns
+ * the subset of `sheetIds` that do. Pre-feature absence of the table/column means "off" everywhere, as in
+ * the single-sheet helper; any other error propagates to the route catch (500, never a serve).
+ */
+async function loadInboxRowDenySheetIds(query: QueryFn, sheetIds: readonly string[]): Promise<string[]> {
+  const ids = [...new Set(sheetIds.filter((id) => typeof id === 'string' && id.length > 0))]
+  if (ids.length === 0) return []
+  try {
+    const result = await query(
+      'SELECT id, row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = ANY($1::text[])',
+      [ids],
+    )
+    const enabled = new Set<string>()
+    for (const row of result.rows as Array<{ id?: unknown; enabled?: unknown; base_id?: unknown } | undefined>) {
+      if (!row || typeof row.id !== 'string') continue
+      if (isApprovalProjectionBaseId(typeof row.base_id === 'string' ? row.base_id : null) || row.enabled === true) {
+        enabled.add(row.id)
+      }
+    }
+    return ids.filter((id) => enabled.has(id))
+  } catch (err) {
+    if (isUndefinedTableError(err, 'meta_sheets') || isUndefinedColumnError(err, 'row_level_read_permissions_enabled')) {
+      return []
+    }
+    throw err
+  }
+}
+
+/**
  * #5831 part B — WHICH comments the cross-sheet aggregates (GET /api/comments/inbox and GET
  * /api/comments/unread-count) may list and count for the caller: the ones a comment-id route would let
  * the same caller act on, so every listed item can be marked read.
@@ -285,9 +319,14 @@ async function resolveInboxReadableSheetIds(
  *  - LIVE: sheets whose `meta_sheets` row exists and is not soft-deleted (loadSheetLivenessBatch, the
  *    batched twin of the gate's loadSheetLiveness). Admins included, as on the sheet-addressed routes.
  *  - READABLE: resolveInboxReadableSheetIds, the gate's read rule for the whole set.
- *  - ROW DENY: for a non-admin, on every readable live sheet with row-level read deny switched on
- *    (loadRowLevelReadDenyEnabled), the rows loadDeniedRecordIds denies — asked only about the rows that
- *    carry a candidate comment for this caller. Admins skip it, as on the sheet-addressed routes.
+ *  - ROW DENY: for a non-admin, every readable live sheet with row-level read deny switched on
+ *    (loadInboxRowDenySheetIds, the batched twin of the gate's loadRowLevelReadDenyEnabled) goes into
+ *    the scope as a row-deny sheet carrying its ALLOWED rows: the rows that hold a candidate comment for
+ *    this caller (listInboxCandidateRowIds — the bound handed to loadDeniedRecordIds, so it never
+ *    evaluates a whole sheet) minus the rows it denies. The service admits a comment on such a sheet
+ *    only on an allowed row, so a comment whose row was never checked here — one that arrived between
+ *    the candidate lookup and the count/page queries — is left out, not let in (a deny list would let
+ *    it in until the next request). Admins skip it, as on the sheet-addressed routes.
  *
  * The service applies the scope in SQL, in the WHERE of the COUNT and of the page query (before
  * LIMIT/OFFSET), so `total`, the unread counts and the pages all agree with what is listed.
@@ -295,10 +334,8 @@ async function resolveInboxReadableSheetIds(
  * COST, once per request: 1 query for the candidate sheets (the distinct sheets holding a comment by
  * someone else that the caller has not read or is mentioned in), 1 liveness query, a fixed number of
  * batched readable-set queries (independent of the number of sheets; one more for an admin), then, for
- * a non-admin, one row-deny flag lookup per readable live candidate sheet (K) and — only when at least
- * one of them has row deny on — 1 query for their candidate rows plus one row-bounded
- * loadDeniedRecordIds per such sheet. K is at most the number of live sheets that hold a comment
- * addressed to the caller.
+ * a non-admin, 1 batched row-deny flag lookup and — only when at least one readable live sheet has row
+ * deny on — 1 query for their candidate rows plus one row-bounded loadDeniedRecordIds per such sheet.
  */
 async function resolveCommentInboxScope(
   req: Request,
@@ -306,31 +343,27 @@ async function resolveCommentInboxScope(
 ): Promise<{ userId: string; scope: CommentInboxScope }> {
   const access = await resolveRequestAccess(req)
   const userId = access.userId
-  if (userId.trim().length === 0) return { userId: '', scope: { sheetIds: [], deniedRows: [] } }
+  if (userId.trim().length === 0) return { userId: '', scope: { sheetIds: [], rowDenySheets: [] } }
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
   const candidateSheetIds = await commentService.listInboxCandidateSheetIds(userId)
   const liveness = await loadSheetLivenessBatch(query, candidateSheetIds)
   const liveSheetIds = candidateSheetIds.filter((sheetId) => liveness.get(sheetId) === 'live')
   const readableSheetIds = await resolveInboxReadableSheetIds(query, access, liveSheetIds)
-  const deniedRows: CommentInboxDeniedRow[] = []
+  const rowDenySheets: CommentInboxRowDenySheet[] = []
   if (!access.isAdminRole) {
-    const rowDenySheetIds: string[] = []
-    for (const sheetId of readableSheetIds) {
-      if (await loadRowLevelReadDenyEnabled(query, sheetId)) rowDenySheetIds.push(sheetId)
-    }
+    const rowDenySheetIds = await loadInboxRowDenySheetIds(query, readableSheetIds)
     const candidateRows = rowDenySheetIds.length > 0
       ? await commentService.listInboxCandidateRowIds(userId, rowDenySheetIds)
       : new Map<string, string[]>()
     for (const sheetId of rowDenySheetIds) {
-      const rowIds = candidateRows.get(sheetId) ?? []
-      if (rowIds.length === 0) continue
-      for (const rowId of await loadDeniedRecordIds(query, sheetId, userId, rowIds)) {
-        deniedRows.push({ spreadsheetId: sheetId, rowId })
-      }
+      // Trimmed like the gate compares them (loadDeniedRecordIds trims its bound; the SQL compares btrim).
+      const rowIds = [...new Set((candidateRows.get(sheetId) ?? []).map((rowId) => rowId.trim()).filter((rowId) => rowId.length > 0))]
+      const denied = rowIds.length > 0 ? await loadDeniedRecordIds(query, sheetId, userId, rowIds) : new Set<string>()
+      rowDenySheets.push({ spreadsheetId: sheetId, allowedRowIds: rowIds.filter((rowId) => !denied.has(rowId)) })
     }
   }
-  return { userId, scope: { sheetIds: readableSheetIds, deniedRows } }
+  return { userId, scope: { sheetIds: readableSheetIds, rowDenySheets } }
 }
 
 /** #5840 — the refusal for a mark-all-read that names someone other than the caller. Values-free. */

@@ -11,7 +11,9 @@
  *   - the WHERE has NO top-level `or`: Kysely joins `.where()` calls with a bare `and`, and the inbox
  *     predicate `(mentioned) or unread` used to be unwrapped, which made the mentioned branch skip every
  *     filter after it (the scope included) and the unread branch skip the author filter;
- *   - denied rows are excluded per (sheet, row) pair, with the row compared trimmed like the id gate;
+ *   - on a row-deny sheet only the ALLOWED (sheet, row) pairs are admitted (fail-closed: a row the route
+ *     never checked is out), with the row compared trimmed like the id gate; a sheet without the deny
+ *     is admitted whole;
  *   - the candidate listers select ids only.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -65,8 +67,16 @@ import type { CommentInboxScope } from '../../src/di/identifiers'
 const USER = 'user-fake-viewer'
 const SCOPE: CommentInboxScope = {
   sheetIds: ['sheet-fake-a', 'sheet-fake-b'],
-  deniedRows: [{ spreadsheetId: 'sheet-fake-b', rowId: 'row-fake-denied' }],
+  rowDenySheets: [{ spreadsheetId: 'sheet-fake-b', allowedRowIds: ['row-fake-allowed-1', 'row-fake-allowed-2'] }],
 }
+/** The scope conjunct's parameters, as SCOPE compiles: sheets, row-deny sheets, allowed pairs (parallel), trim set. */
+const SCOPE_PARAMS = [
+  ['sheet-fake-a', 'sheet-fake-b'],
+  ['sheet-fake-b'],
+  ['sheet-fake-b', 'sheet-fake-b'],
+  ['row-fake-allowed-1', 'row-fake-allowed-2'],
+  JS_TRIM_WHITESPACE,
+]
 
 function makeService() {
   const collab = { broadcastTo: vi.fn(), sendTo: vi.fn(), getRoomMembers: vi.fn(async () => []) }
@@ -150,15 +160,12 @@ describe('CommentService cross-sheet aggregates apply the inbox scope in SQL (#5
       expect(conjuncts[0]).toMatch(/^"c"\."author_id" != \$\d+$/)
       expect(conjuncts[1]).toMatch(/^\(\(c\.mentions @> \$\d+::jsonb\) or r\.comment_id is null\)$/)
       const scope = scopeConjunct(query)
-      expect(scope.text).toMatch(/^\(c\.spreadsheet_id = any\(\$\d+::text\[\]\) and not exists \(/)
-      expect(scope.text).toMatch(/from unnest\(\$\d+::text\[\], \$\d+::text\[\]\) as denied\(spreadsheet_id, row_id\)/)
-      expect(scope.text).toMatch(/where denied\.spreadsheet_id = c\.spreadsheet_id\s+and denied\.row_id = btrim\(c\.row_id, \$\d+\)/)
-      expect(scope.params).toEqual([
-        ['sheet-fake-a', 'sheet-fake-b'],
-        ['sheet-fake-b'],
-        ['row-fake-denied'],
-        JS_TRIM_WHITESPACE,
-      ])
+      // Sheet in scope AND (not a row-deny sheet OR an allowed pair) — an allow list, never `not exists (denied)`.
+      expect(scope.text).toMatch(/^\(c\.spreadsheet_id = any\(\$\d+::text\[\]\) and \(c\.spreadsheet_id <> all\(\$\d+::text\[\]\) or exists \(/)
+      expect(scope.text).toMatch(/from unnest\(\$\d+::text\[\], \$\d+::text\[\]\) as allowed\(spreadsheet_id, row_id\)/)
+      expect(scope.text).toMatch(/where allowed\.spreadsheet_id = c\.spreadsheet_id\s+and allowed\.row_id = btrim\(c\.row_id, \$\d+\)/)
+      expect(scope.text).not.toMatch(/not exists|denied/)
+      expect(scope.params).toEqual(SCOPE_PARAMS)
     }
     // The page's scope sits before ORDER BY (it is part of the WHERE, not a post-filter).
     const pageOrderBy = topLevelOffsets(page.sql, ' order by ')
@@ -167,13 +174,27 @@ describe('CommentService cross-sheet aggregates apply the inbox scope in SQL (#5
     expect(page.sql.indexOf('c.spreadsheet_id = any(')).toBeLessThan(pageOrderBy[0]!)
   })
 
-  it('without denied rows the scope is the sheet set alone', async () => {
+  it('without a row-deny sheet the scope is the sheet set alone', async () => {
     captured.rows.push([{ c: 0 }], [])
-    await service.getInbox(USER, undefined, { sheetIds: ['sheet-fake-a'], deniedRows: [] })
+    await service.getInbox(USER, undefined, { sheetIds: ['sheet-fake-a'], rowDenySheets: [] })
     for (const query of captured.queries) {
       const scope = scopeConjunct(query)
       expect(scope.text).toMatch(/^\(c\.spreadsheet_id = any\(\$\d+::text\[\]\)\s*\)$/)
       expect(scope.params).toEqual([['sheet-fake-a']])
+    }
+  })
+
+  it('a row-deny sheet with NO allowed row still binds as a row-deny sheet (nothing on it is admitted)', async () => {
+    captured.rows.push([{ c: 0 }], [])
+    await service.getInbox(USER, undefined, {
+      sheetIds: ['sheet-fake-a', 'sheet-fake-b'],
+      rowDenySheets: [{ spreadsheetId: 'sheet-fake-b', allowedRowIds: [] }],
+    })
+    expect(captured.queries).toHaveLength(2)
+    for (const query of captured.queries) {
+      const scope = scopeConjunct(query)
+      expect(scope.text).toMatch(/<> all\(\$\d+::text\[\]\) or exists \(/)
+      expect(scope.params).toEqual([['sheet-fake-a', 'sheet-fake-b'], ['sheet-fake-b'], [], [], JS_TRIM_WHITESPACE])
     }
   })
 
@@ -189,12 +210,7 @@ describe('CommentService cross-sheet aggregates apply the inbox scope in SQL (#5
       expect(conjuncts, query.sql).toHaveLength(3)
       expect(conjuncts[0]).toMatch(/^"c"\."author_id" != \$\d+$/)
       expect(conjuncts[1]).toBe('r.comment_id is null')
-      expect(scopeConjunct(query).params).toEqual([
-        ['sheet-fake-a', 'sheet-fake-b'],
-        ['sheet-fake-b'],
-        ['row-fake-denied'],
-        JS_TRIM_WHITESPACE,
-      ])
+      expect(scopeConjunct(query).params).toEqual(SCOPE_PARAMS)
     }
   })
 

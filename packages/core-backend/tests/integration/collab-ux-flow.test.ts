@@ -152,7 +152,7 @@ import type { CollabService } from '../../src/services/CollabService'
 import type { CommentInboxScope } from '../../src/di/identifiers'
 
 /** #5831 part B: the cross-sheet aggregates need the route's (readable, live) sheet scope. */
-const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_a'], deniedRows: [] }
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_a'], rowDenySheets: [] }
 import type { CommentMentionCandidate, CommentUnreadSummary } from '../../src/di/identifiers'
 
 // Queue accessors — retrieved in beforeEach to get the live arrays

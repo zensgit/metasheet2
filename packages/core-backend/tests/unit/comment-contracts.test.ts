@@ -50,7 +50,7 @@ import { CommentService } from '../../src/services/CommentService'
 import type { CommentInboxScope, CommentUnreadSummary } from '../../src/di/identifiers'
 
 /** #5831 part B: the unread aggregates need the route's (readable, live) sheet scope. */
-const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_1'], deniedRows: [] }
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_1'], rowDenySheets: [] }
 
 // Create a minimal mock CollabService
 function createMockCollabService() {

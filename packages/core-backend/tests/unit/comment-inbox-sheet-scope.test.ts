@@ -14,7 +14,11 @@
  *   - every listed item can be marked read (the comment-id gate lets it through), and nothing else;
  *   - admins: liveness still applies, row deny does not, the e-learning projection check does (as on the
  *     sheet-addressed routes);
- *   - the row deny is asked only about candidate rows, only for sheets that have it switched on;
+ *   - the row deny is asked only about candidate rows, only for sheets that have it switched on, and
+ *     the flag itself is read in ONE batched query for the whole readable set;
+ *   - on a row-deny sheet the scope is an ALLOW list of the rows it checked: a comment that arrives
+ *     after the candidate lookup (a row nobody checked) is left out of that request, never let in
+ *     (check-then-use race, disclosure-lens finding on #5831 part B);
  *   - the identity is the signed-in user, never the x-user-id header;
  *   - mark-all-read writes only the signed-in user's read state; a body userId naming someone else is
  *     refused (403) and that user's read state is untouched (#5840).
@@ -159,10 +163,15 @@ function isCandidate(comment: Comment, userId: string): boolean {
   return comment.author !== userId && (comment.mentions.includes(userId) || !comment.readBy.has(userId))
 }
 
+/** What the SQL scope predicate admits: the sheet is in scope and, on a row-deny sheet, the row is allowed. */
 function inScope(comment: Comment, scope: CommentInboxScope): boolean {
-  return scope.sheetIds.includes(comment.sheet)
-    && !scope.deniedRows.some((d) => d.spreadsheetId === comment.sheet && d.rowId === comment.row)
+  if (!scope.sheetIds.includes(comment.sheet)) return false
+  const rowDeny = scope.rowDenySheets.find((d) => d.spreadsheetId === comment.sheet)
+  return !rowDeny || rowDeny.allowedRowIds.includes(comment.row.trim())
 }
+
+/** The batched row-deny flag lookup the route runs through the pool (loadInboxRowDenySheetIds). */
+const ROW_DENY_FLAG_SQL = /row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\)/
 
 /** The service fake: filters by the scope BEFORE counting and paginating (what the SQL WHERE does). */
 function buildCommentService() {
@@ -222,6 +231,13 @@ function buildCommentService() {
 type Service = ReturnType<typeof buildCommentService>
 
 function installWorldMocks() {
+  mocks.query.mockImplementation(async (sqlText: string, params?: unknown[]) => {
+    if (ROW_DENY_FLAG_SQL.test(sqlText)) {
+      const ids = (params?.[0] as string[]) ?? []
+      return { rows: ids.filter((id) => sheets[id]).map((id) => ({ id, enabled: sheets[id]!.rowDeny, base_id: null })) }
+    }
+    throw new Error(`unexpected pool query: ${sqlText}`)
+  })
   mocks.resolveSheetReadableCapabilities.mockImplementation(async (req: any, _q: unknown, sheetId: string) => {
     const isAdminRole = Array.isArray(req.user?.roles) && req.user.roles.includes('admin')
     const userId = String(req.user?.id ?? '')
@@ -325,7 +341,7 @@ describe('GET /api/comments/inbox and /unread-count list only readable, live, no
     expect(service.getInbox.mock.calls[0]![2]).toEqual(inboxScope)
     expect(inboxScope).toEqual({
       sheetIds: ['sht-readable', 'sht-rowdeny'],
-      deniedRows: [{ spreadsheetId: 'sht-rowdeny', rowId: 'row-denied' }],
+      rowDenySheets: [{ spreadsheetId: 'sht-rowdeny', allowedRowIds: ['row-visible'] }],
     })
   })
 
@@ -354,7 +370,11 @@ describe('GET /api/comments/inbox and /unread-count list only readable, live, no
 
   it('the row deny is asked only for sheets that have it on, and only about their candidate rows', async () => {
     await inboxPage(50, 0)
-    expect(mocks.loadRowLevelReadDenyEnabled.mock.calls.map((c) => c[1])).toEqual(['sht-readable', 'sht-rowdeny'])
+    // The flag: ONE batched query over the readable live set, never the per-sheet helper.
+    expect(mocks.query).toHaveBeenCalledTimes(1)
+    expect(mocks.query.mock.calls[0]![0]).toMatch(ROW_DENY_FLAG_SQL)
+    expect(mocks.query.mock.calls[0]![1]).toEqual([['sht-readable', 'sht-rowdeny']])
+    expect(mocks.loadRowLevelReadDenyEnabled).not.toHaveBeenCalled()
     expect(service.listInboxCandidateRowIds.mock.calls).toEqual([[READER, ['sht-rowdeny']]])
     expect(mocks.loadDeniedRecordIds.mock.calls).toEqual([[expect.any(Function), 'sht-rowdeny', READER, ['row-visible', 'row-denied']]])
     // The read rule and the liveness are each computed ONCE for the whole candidate set.
@@ -372,6 +392,82 @@ describe('GET /api/comments/inbox and /unread-count list only readable, live, no
     expect(page.items.map((i) => i.id)).toContain('cmt-d2')
     expect(service.listInboxCandidateRowIds).not.toHaveBeenCalled()
     expect(mocks.loadDeniedRecordIds).not.toHaveBeenCalled()
+    expect(service.getInbox.mock.calls[0]![2]).toEqual({ sheetIds: ['sht-readable', 'sht-rowdeny'], rowDenySheets: [] })
+  })
+
+  it('an approval-projection sheet is always a row-deny sheet, as in the single-sheet gate', async () => {
+    sheets['sht-rowdeny']!.rowDeny = false
+    mocks.query.mockImplementation(async (sqlText: string, params?: unknown[]) => {
+      expect(sqlText).toMatch(ROW_DENY_FLAG_SQL)
+      return { rows: ((params?.[0] as string[]) ?? []).map((id) => ({ id, enabled: false, base_id: id === 'sht-rowdeny' ? 'base_apr_projection' : null })) }
+    })
+    const ids = (await inboxPage(50, 0)).items.map((i) => i.id)
+    expect(ids).not.toContain('cmt-d2')
+    expect(ids).toContain('cmt-d1')
+    expect(service.listInboxCandidateRowIds.mock.calls).toEqual([[READER, ['sht-rowdeny']]])
+  })
+
+  it('a flag lookup error fails closed (500), never a wider scope', async () => {
+    mocks.query.mockRejectedValue(new Error('fake connection lost'))
+    const res = await request(pinned.url()).get('/api/comments/inbox')
+    expect(res.status).toBe(500)
+    expect(service.getInbox).not.toHaveBeenCalled()
+  })
+
+  describe('a row-deny sheet admits only the rows the scope checked (fail-closed against the check-then-use race)', () => {
+    const lateComment = (row: string, extra: Partial<Comment> = {}) =>
+      ({ id: 'cmt-late', sheet: 'sht-rowdeny', row, author: AUTHOR, mentions: [READER], readBy: new Set<string>(), at: 999, ...extra })
+
+    /** A comment lands on `row` right after the candidate rows were read, before the count/page queries. */
+    function arriveAfterCandidateLookup(row: string) {
+      const original = service.listInboxCandidateRowIds.getMockImplementation()!
+      service.listInboxCandidateRowIds.mockImplementationOnce(async (userId: string, sheetIds: readonly string[]) => {
+        const out = await original(userId, sheetIds)
+        comments.push(lateComment(row))
+        return out
+      })
+    }
+
+    it('a late comment on a DENIED row is not listed or counted, and stays out on the next request too', async () => {
+      sheets['sht-rowdeny']!.denied[READER]!.add('row-late')
+      arriveAfterCandidateLookup('row-late')
+      const page = await inboxPage(50, 0)
+      expect(page.items.map((i) => i.id)).not.toContain('cmt-late')
+      expect(page.total).toBe(5)
+      expect(service.getInbox.mock.calls[0]![2]).toEqual({
+        sheetIds: ['sht-readable', 'sht-rowdeny'],
+        rowDenySheets: [{ spreadsheetId: 'sht-rowdeny', allowedRowIds: ['row-visible'] }],
+      })
+      // Next request: the row is a candidate now, gets checked, and is denied.
+      expect((await inboxPage(50, 0)).items.map((i) => i.id)).not.toContain('cmt-late')
+      expect(await unreadCount()).toEqual({ unreadCount: 4, mentionUnreadCount: 1, count: 4 })
+      expect((await request(pinned.url()).post('/api/comments/cmt-late/read')).status).toBe(403)
+    })
+
+    it('a late comment on a VISIBLE row is left out of the request that missed it and listed by the next', async () => {
+      arriveAfterCandidateLookup('row-late-visible')
+      expect((await inboxPage(50, 0)).items.map((i) => i.id)).not.toContain('cmt-late')
+      const next = await inboxPage(50, 0)
+      expect(next.items.map((i) => i.id)).toContain('cmt-late')
+      expect(next.total).toBe(6)
+      expect((await request(pinned.url()).post('/api/comments/cmt-late/read')).status).toBe(204)
+    })
+
+    it('a row-deny sheet with no candidate row at all admits nothing, even a comment that arrives meanwhile', async () => {
+      comments = comments.filter((c) => c.sheet !== 'sht-rowdeny')
+      comments.push({ id: 'cmt-d0', sheet: 'sht-rowdeny', row: 'row-visible', author: AUTHOR, mentions: [], readBy: new Set([READER]), at: 50 })
+      sheets['sht-rowdeny']!.denied[READER]!.add('row-late')
+      // sht-rowdeny is a candidate sheet only through the mention below, which is added AFTER the row lookup.
+      service.listInboxCandidateSheetIds.mockResolvedValueOnce(['sht-readable', 'sht-rowdeny'])
+      arriveAfterCandidateLookup('row-late')
+      const page = await inboxPage(50, 0)
+      expect(page.items.map((i) => i.id)).not.toContain('cmt-late')
+      expect(service.getInbox.mock.calls[0]![2]).toEqual({
+        sheetIds: ['sht-readable', 'sht-rowdeny'],
+        rowDenySheets: [{ spreadsheetId: 'sht-rowdeny', allowedRowIds: [] }],
+      })
+      expect(mocks.loadDeniedRecordIds).not.toHaveBeenCalled()
+    })
   })
 
   it('the identity is the signed-in user; a forged x-user-id changes nothing', async () => {
@@ -391,7 +487,8 @@ describe('GET /api/comments/inbox and /unread-count list only readable, live, no
     expect((await inboxPage(50, 0)).total).toBe(0)
     expect(await unreadCount()).toEqual({ unreadCount: 0, mentionUnreadCount: 0, count: 0 })
     expect(service.listInboxCandidateSheetIds).not.toHaveBeenCalled()
-    expect(service.getInbox.mock.calls[0]![2]).toEqual({ sheetIds: [], deniedRows: [] })
+    expect(service.getInbox.mock.calls[0]![2]).toEqual({ sheetIds: [], rowDenySheets: [] })
+    expect(mocks.query).not.toHaveBeenCalled()
   })
 
   it('without comments:read both routes refuse before any lookup', async () => {
@@ -413,7 +510,9 @@ describe('admins: the same rules as the sheet-addressed routes', () => {
     ])
     expect(page.total).toBe(10)
     expect(mocks.loadRowLevelReadDenyEnabled).not.toHaveBeenCalled()
+    expect(mocks.query).not.toHaveBeenCalled()
     expect(mocks.loadDeniedRecordIds).not.toHaveBeenCalled()
+    expect(service.getInbox.mock.calls[0]![2]).toMatchObject({ rowDenySheets: [] })
     expect(mocks.canAccessElearningProjectionSheet).toHaveBeenCalledWith(
       expect.objectContaining({ userId: ADMIN, isAdminRole: true }), 'sht-elearning', 'org-fake')
 

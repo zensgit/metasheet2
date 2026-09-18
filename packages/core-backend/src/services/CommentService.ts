@@ -199,51 +199,63 @@ type CommentActivityPayload = {
 /** #5831 part B — a CommentInboxScope that admits at least one sheet, as the SQL predicate takes it. */
 type AdmittedInboxScope = {
   sheetIds: string[]
-  deniedSheetIds: string[]
-  deniedRowIds: string[]
+  /** Sheets with row-level read deny on: a comment there is admitted only through the allowed pairs. */
+  rowDenySheetIds: string[]
+  /** Parallel arrays: (sheet, trimmed row) pairs admitted on the row-deny sheets. */
+  allowedSheetIds: string[]
+  allowedRowIds: string[]
 }
 
 /**
  * #5831 part B — null when the scope admits nothing (missing, malformed or without a sheet): the
  * cross-sheet aggregates then answer empty WITHOUT a query, so a caller that forgets the scope gets
  * nothing rather than every sheet. Ids are taken as given (they come from the database through the
- * route); only non-strings and empty strings are dropped.
+ * route); only non-strings and empty strings are dropped. A malformed row-deny entry (no sheet id) is
+ * dropped whole; a row-deny sheet with no usable allowed row stays a row-deny sheet (nothing admitted
+ * on it), so a malformed allow list can only narrow the scope, never widen it.
  */
 function admitInboxScope(scope: CommentInboxScope | undefined): AdmittedInboxScope | null {
   const rawSheetIds: readonly unknown[] = Array.isArray(scope?.sheetIds) ? scope.sheetIds : []
   const sheetIds = [...new Set(rawSheetIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
   if (sheetIds.length === 0) return null
-  const deniedSheetIds: string[] = []
-  const deniedRowIds: string[] = []
-  const rawDenied: readonly unknown[] = Array.isArray(scope?.deniedRows) ? scope.deniedRows : []
-  for (const entry of rawDenied) {
-    const denied = entry as { spreadsheetId?: unknown; rowId?: unknown } | null
-    const sheetId = typeof denied?.spreadsheetId === 'string' ? denied.spreadsheetId : ''
-    const rowId = typeof denied?.rowId === 'string' ? denied.rowId : ''
-    if (sheetId.length === 0 || rowId.length === 0) continue
-    deniedSheetIds.push(sheetId)
-    deniedRowIds.push(rowId)
+  const rowDenySheetIds = new Set<string>()
+  const allowedSheetIds: string[] = []
+  const allowedRowIds: string[] = []
+  const rawRowDeny: readonly unknown[] = Array.isArray(scope?.rowDenySheets) ? scope.rowDenySheets : []
+  for (const entry of rawRowDeny) {
+    const rowDeny = entry as { spreadsheetId?: unknown; allowedRowIds?: unknown } | null
+    const sheetId = typeof rowDeny?.spreadsheetId === 'string' ? rowDeny.spreadsheetId : ''
+    if (sheetId.length === 0) continue
+    rowDenySheetIds.add(sheetId)
+    const rawRows: readonly unknown[] = Array.isArray(rowDeny?.allowedRowIds) ? rowDeny.allowedRowIds : []
+    for (const rowId of rawRows) {
+      if (typeof rowId !== 'string' || rowId.length === 0) continue
+      allowedSheetIds.push(sheetId)
+      allowedRowIds.push(rowId)
+    }
   }
-  return { sheetIds, deniedSheetIds, deniedRowIds }
+  return { sheetIds, rowDenySheetIds: [...rowDenySheetIds], allowedSheetIds, allowedRowIds }
 }
 
 /**
  * #5831 part B — the WHERE fragment every user-scoped cross-sheet aggregate applies to `meta_comments as c`
  * (in the COUNT and in the page query, i.e. before LIMIT/OFFSET): the comment's sheet is one of the
- * admitted (readable, live) sheets, and its row is not a denied row of that sheet. The row is compared
- * trimmed the way the comment-id gate compares it (`isRowDenied` trims the stored row id; JS_TRIM_WHITESPACE
- * is JS `trim()` for SQL).
+ * admitted (readable, live) sheets, and — on a sheet with row-level read deny on — its row is one of
+ * the rows the route checked and found allowed. An ALLOW list (fail-closed): a comment whose row the
+ * route never checked (it arrived after the candidate lookup) is left out rather than let in. The row
+ * is compared trimmed the way the comment-id gate compares it (`isRowDenied` trims the stored row id;
+ * JS_TRIM_WHITESPACE is JS `trim()` for SQL).
  */
 function inboxScopePredicate(scope: AdmittedInboxScope) {
-  const deniedRowPredicate = scope.deniedRowIds.length > 0
-    ? sql`and not exists (
+  const rowDenyPredicate = scope.rowDenySheetIds.length > 0
+    ? sql`and (c.spreadsheet_id <> all(${scope.rowDenySheetIds}::text[]) or exists (
         select 1
-        from unnest(${scope.deniedSheetIds}::text[], ${scope.deniedRowIds}::text[]) as denied(spreadsheet_id, row_id)
-        where denied.spreadsheet_id = c.spreadsheet_id
-          and denied.row_id = btrim(c.row_id, ${JS_TRIM_WHITESPACE})
-      )`
+        from unnest(${scope.allowedSheetIds}::text[], ${scope.allowedRowIds}::text[]) as allowed(spreadsheet_id, row_id)
+        where allowed.spreadsheet_id = c.spreadsheet_id
+          and allowed.row_id = btrim(c.row_id, ${JS_TRIM_WHITESPACE})
+      ))`
     : sql``
-  return sql<boolean>`(c.spreadsheet_id = any(${scope.sheetIds}::text[]) ${deniedRowPredicate})`
+  return sql<boolean>`(c.spreadsheet_id = any(${scope.sheetIds}::text[]) ${rowDenyPredicate})`
 }
 
 /**
