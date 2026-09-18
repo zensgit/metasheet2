@@ -7,6 +7,8 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // This runner owns its cluster. It never accepts a database URL or existing data directory.
+assert.ok(process.argv.slice(2).every(argument => argument === '--browser'), 'UNKNOWN_ACCEPTANCE_ARGUMENT')
+const browser = process.argv.includes('--browser')
 const bin = await realpath(process.env.TM_TEST_PG_BIN ?? '/invalid')
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const root = await mkdtemp(join(await realpath(tmpdir()), 'tm-manual-checkpoint-cluster-'))
@@ -34,6 +36,7 @@ try {
       'scripts/verify-recovery-manual-checkpoint.mts'], {
       cwd: repo, stdio: 'inherit', timeout: 600000,
       env: { ...env, NODE_ENV: 'test', TM_MANUAL_TEST_PGDATA: pgdata,
+        ...(browser ? { TM_MANUAL_TEST_BROWSER: 'true' } : {}),
         TM_MANUAL_TEST_ADMIN_URL: `postgresql://tm_manual@127.0.0.1:${port}/postgres` },
     })
     child.once('error', reject)

@@ -1,5 +1,6 @@
 /** Synthetic full-schema checkpoint acceptance; never use a customer database. */
 import assert from 'node:assert/strict'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises'
@@ -1163,9 +1164,28 @@ try {
           if (req.headers.authorization === 'Bearer synthetic-manual-owner') req.user = { id: actorId, role: 'admin' }
           next()
         })
-        httpApp.use('/api/multitable', univerMetaRouter({ recoveryArchiveRuntime: runtime,
-          recoveryArchiveDatabaseRuntime: { transaction: uploadInput.transaction, query,
-            transactionDepthProbe: runtime.transactionDepth },
+        // Browser status/catalog requests overlap: each transaction owns its connection.
+        const httpPool = new Pool({ ...connection, database, max: 4 })
+        const httpDepth = new AsyncLocalStorage<number>()
+        const httpProbe = { currentTransactionDepth: () => httpDepth.getStore() ?? 0 }
+        const httpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
+          query: (text, params) => httpPool.query(text, params),
+          transactionDepthProbe: httpProbe,
+          async transaction(work) {
+            const owned = await httpPool.connect()
+            try {
+              await owned.query('BEGIN')
+              const result = await httpDepth.run(1, () => work((text, params) => owned.query(text, params)))
+              await owned.query('COMMIT')
+              return result
+            } catch (error) {
+              await owned.query('ROLLBACK')
+              throw error
+            } finally { owned.release() }
+          },
+        }
+        httpApp.use('/api/multitable', univerMetaRouter({ recoveryArchiveRuntime: { ...runtime, transactionDepth: httpProbe },
+          recoveryArchiveDatabaseRuntime: httpDatabase,
           recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId } }))
         const httpServer = httpApp.listen(0, '127.0.0.1')
         try {
@@ -1247,10 +1267,16 @@ try {
               [JSON.stringify(originalLive.data), originalLive.version, originalLive.updated_at])
           }
           console.log('PASS: public HTTP capture/catalog/preview; unchanged no_changes; edited field exact executable plan without apply; missing/corrupt object refuses; restored reads recover')
+          if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
+            const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
+            await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`)
+          }
         } finally {
-          httpServer.closeIdleConnections()
-          await new Promise<void>((resolve, reject) => httpServer.close(error => error ? reject(error) : resolve()))
-          assert.equal(httpServer.address(), null)
+          try {
+            httpServer.closeIdleConnections()
+            await new Promise<void>((resolve, reject) => httpServer.close(error => error ? reject(error) : resolve()))
+            assert.equal(httpServer.address(), null)
+          } finally { await httpPool.end() }
         }
         process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'false'
         await assert.rejects(command.capture({ ...commandIdentity, requestId: randomUUID() }),
