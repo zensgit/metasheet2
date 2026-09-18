@@ -28,6 +28,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-7 | §4's 「§5 I3 『终结即释放』 mutation」 bullet (previous revision) | the mutation's red would be 「the next create is **refused by the partial unique index** with 23505/409」 | **RETRACTED — the index is never reached in the sequential shape.** Measured in §3.14.2: `createCancelRoundInstance` has an application pre-check at `ApprovalProductService.ts:8558-8568` that runs before the `INSERT`, and M-21's stack frame is `ApprovalProductService.ts:8563:15` — `CANCEL_ROUND_ALREADY_PENDING` (409). The 23505 backstop at `:8697-8705` is the CONCURRENT-race path and this case does not construct one. The half that stands: C-3's outcome write is what releases the slot. The half that does not: any claim about `uq_approval_rounds_pending_document` itself. |
 | R-8 | §3.15.6 (previous revision), and the 账侧 case's own doc comment | 「`redeemCancelRoundInTxn` **DISCARDS** the entry's `{ kind: 'executed', response }` payload, so the approval side **has no channel to present it on at all**」 | **RETRACTED IN PART — the 「at all」 is false, and §3.16 measures the channel.** The discard is real and stands. What does not stand is the conclusion drawn from it: the redemption path supplies a non-null `operationId`, so it takes the boundary's identity+preflight+**seal** branch, and `sealAttendanceResultOperationV1` writes `attendance_result_operations.response_snapshot` with the adapter's WHOLE response object on the CALLER's transaction client (`w4c3b-request-operation-boundary.ts:918-921` → `w4c0-operation-registry.ts:756-790`). The counter is therefore computed, persisted and queryable per operation, and commits with the approve. §3.16 measures it at **120**, not at 0. The item that remains open is narrower than the one that was written: which USER-FACING surface renders it. Registered as an owner decision, not as a contract gap in the persistence. |
 | R-9 | commit `ab36b38f0`'s message, last paragraph | 「§4's bullet **is updated** from 'no probe' to CLOSED with its scope limits」 | **RETRACTED — at that SHA it was not.** The commit applied §3.18 and then attempted a second edit to §4's I3 bullet and §3.14.5's writer row; that edit threw `AssertionError` (the target string did not match), and because the `git add && git commit` was newline-separated rather than `&&`-chained, the commit landed anyway — with §3.18 present and both older 「no probe exists」 statements still standing. So `ab36b38f0` briefly contained a file that asserted a probe exists (§3.18) and that none exists (§3.14.5 row `:9108`, §4's bullet) at the same time. FIXED one commit later by `79f3d3ce2`, which is where the §4 and §3.14.5 updates actually live, and which discloses the mechanism. The original message cannot be edited without a force-push, so this row is its correction. **Consequence for a gate reader**: verify the §4 bullet against `79f3d3ce2` or later, never against `ab36b38f0`. |
+| R-10 | §3.16.7 / §3.17.6 / §3.18.5 的 `$ npx tsc --noEmit -p tsconfig.json` → 「[exited with code 0]」,以及据此说的「tsc clean」 | 读起来像「新加的测试代码过了类型门」 | **NARROWED(不是撤回:命令真跑过、真的 0)。** 两点限制,本单元实测:(1) `packages/core-backend/tsconfig.json` 的 `exclude` 含 `**/*.test.ts`,`--listFiles \| grep -c` 本文件 ⇒ **0**,即这些单元所改的测试文件**不在 tsc 的 program 内**,那个 0 与改动无关;(2) 旧写法 `npx tsc … \| tail -N && echo $?` 取的是 `tail` 的退出码,恒 0。⇒ 这些行只能支撑「生产源码仍可编译」(而这三个单元生产代码零改动,故恒真),**不能**支撑「新加的测试代码类型正确」。真正的门是 vitest 运行本身;本单元的语法错正是被它抓到、被 tsc 漏掉的(§3.20.8)。**Consequence for a gate reader**: 不要把这三节的 tsc 行读作测试代码的类型证据;要证据就看该节的 vitest 计数。 |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -2752,12 +2753,34 @@ $ grep -n "itIfExpectDb\|EXPECT_DB" \
 普查(排除 node_modules / docs / 测试):
 
 ```
-$ grep -rn "attendance/requests/" . | grep -v node_modules | grep -i cancel | grep -v "\.md:"
-⇒ 生产客户端 1(AttendanceView.vue:23128)
-  路由注册 1(index.cjs:38634)+ DELETE 别名 1(:38638-38642,同一个 cancelRequest 处理器)
-  合同 1(attendance.yml:748)、SDK 类型 1、entrypoint 常量 1(w4c3b:386)
-  其余全部是测试文件
+$ grep -rn "attendance/requests/" . | grep -v node_modules | grep -i cancel | grep -v "\.md:" | wc -l
+21
 ```
+
+21 行**逐行归位**(不是「其余全是测试」那种含糊收尾):
+
+| # | 归类 | 位置 |
+|---|---|---|
+| 1 | **生产客户端(唯一)** | `apps/web/src/views/AttendanceView.vue:23128`,`body: JSON.stringify({})` |
+| 1 | 路由注册 | `plugins/plugin-attendance/index.cjs:38634` |
+| 1 | 合同 | `packages/openapi/src/paths/attendance.yml:748` |
+| 1 | 生成的 SDK 类型 | `packages/openapi/dist-sdk/index.d.ts:1835` |
+| 1 | entrypoint 常量 | `w4c3b-request-operation-boundary.ts:386` |
+| 1 | 散文注释 | `ApprovalProductService.ts:9076` |
+| 15 | 测试文件 | redemption ×4、w4c3b-routes ×4、attendance-plugin ×5、uuid-validation ×1、schedule-dispatch ×1 |
+
+⇒ 非测试、非生成物的**调用方恰好 1 个**,且它发空体。
+
+⚠️ **DELETE 别名不在上面这条命令的产出里**——它的路径不含 `/cancel`,要单独一条:
+
+```
+$ grep -n "'/api/attendance/requests/:id'" -A 2 plugins/plugin-attendance/index.cjs | grep -B 1 cancelRequest
+38640:      '/api/attendance/requests/:id',
+38641-      withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
+```
+
+⇒ `DELETE /api/attendance/requests/:id` 复用**同一个** `cancelRequest` 处理器,所以同样从请求体取
+operation id,同样没有字段可填。
 
 ⇒ **把 B 改成会封存,等于发一个合同里不存在、任何客户端都不发的字段** —— 那是用「让 B 不再是孪生」
 换一行可比的数据。所以 ⑥ 的账侧平价**不是还没写,而是在代表性夹具上不可构造**。
@@ -2769,6 +2792,11 @@ $ grep -rn "attendance/requests/" . | grep -v node_modules | grep -i cancel | gr
 ```sql
 SELECT count(*)::text FROM attendance_result_operations WHERE resolved_request_id = $1::uuid
 ```
+
+⚠️ 这条 count **只按 `resolved_request_id` 收窄,不按 org/entrypoint**,所以 `sealA='1'` 隐含一条前提:
+本文件 19 条用例里没有第二条会对 A 的 request id 封存。今天成立,因为 request id 由夹具逐条新建、
+互不重用。写在这里是因为断言是 `toEqual({sealA:'1'})`——将来若有夹具重用了 id,它会**因为错误的
+原因**变红,读到这行的人才知道先去查前提而不是查封存逻辑。
 
 实测 `sealA = '1'`、`sealB = '0'`。**A 的 1 就是 B 的 0 的 in-case 正控**:证明表在、谓词命中、列有值。
 A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
@@ -2784,7 +2812,7 @@ A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
 | | A(兑现路径) | B(生产 HTTP 路径) |
 |---|---|---|
 | `attendance_result_operations` 封存行 | **1**(带 `reversal.unrecoverableExpired`) | **0** |
-| HTTP 响应体 `data.reversal` | —(DTO 丢弃,已断言为负例) | **有**(`payloadB`,同用例断言) |
+| HTTP 响应体 `data.reversal` | —(DTO 丢弃,已断言为负例) | **有,且内层 `unrecoverableExpired` 键也已断言**(原先只断言外层 `reversal` 键存在,那样 B 半边比 A 半边弱,本单元补齐) |
 
 `unrecoverableExpired` **两条路都「呈现」了,但呈现在不同的工件上**:A 在封存快照里,B 在响应体里。
 逐字节比对需要一对同类行,而这里一侧根本没有行 ⇒ **declared divergence with a mechanism**,
@@ -2820,14 +2848,32 @@ A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
 ### 3.20.8 Commands and results
 
 ```
-$ npx tsc --noEmit -p tsconfig.json
-[exited with code 0]
+$ npx tsc --noEmit -p tsconfig.json > /tmp/u2-tsc.log 2>&1; echo $?
+0                     # 0 行输出
 
 $ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_DB=1 \
     npx vitest --config vitest.integration.config.ts run \
     tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
       Tests  19 passed (19)
 ```
+
+⚠️ **`tsc` 对本单元的改动是空转的,别把它当门。** 本包 `tsconfig.json` 的 `exclude` 含
+`**/*.test.ts`,`include` 只有 `src`/`core`/`types` 加两个脚本:
+
+```
+$ npx tsc --noEmit -p tsconfig.json --listFiles | grep -c "approval-cancel-round-redemption.db.test.ts"
+0
+```
+
+⇒ 测试文件**根本不在 tsc 的 program 里**。`tsc` 退出 0 只说明生产源码仍编译得过(本单元生产代码零
+改动,所以它必然是 0),对我改的那个文件**一个字都没检查**。真正的类型/语法门是 vitest 跑本身
+(esbuild transform + 执行)——本单元就是靠它抓到一次真实语法错:B 侧断言第一版把原句尾巴
+「That asymmetry IS the finding…」留在了代码行后面,`tsc` 照样 0,vitest 直接
+`Transform failed … Expected ";" but found "That"` 且 `no tests` 零执行。修好后才是 19 passed。
+
+⚠️ 另:`npx tsc … | tail -N && echo $?` 取的是 `tail` 的退出码,**不是 `tsc` 的**,恒为 0。上面已改成
+先重定向再单独 `echo $?`。§3.16.7/§3.17.6/§3.18.5 的「tsc clean」行用的是旧写法,**同样只覆盖生产
+源码、不覆盖测试文件**——见 §0 R-10。
 
 ---
 

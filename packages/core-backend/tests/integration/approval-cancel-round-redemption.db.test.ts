@@ -2158,8 +2158,15 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(reversalA, 'C-1 step ⑥ — the sealed snapshot must still carry `reversal`').toBeDefined()
       expect(Object.keys(reversalA as Record<string, unknown>)).toContain('unrecoverableExpired')
 
-      // The SAME value on B lives in the HTTP RESPONSE BODY (`payloadB.data.reversal`, asserted
-      // above) and in no sealed row at all. That asymmetry IS the finding: ⑥'s 账侧 parity half is
+      // The SAME value on B lives in the HTTP RESPONSE BODY and in no sealed row at all. The
+      // earlier `hasOwnProperty` line only pins that the `reversal` KEY is there; the divergence
+      // table in §3.20.4 claims the two carriers hold the SAME inner field, so the inner key is
+      // asserted here too — otherwise B's half of that table would be weaker than A's.
+      expect(
+        Object.keys((payloadB.data as { reversal?: Record<string, unknown> }).reversal ?? {}),
+        'C-1 step ⑥ — B carries `unrecoverableExpired` in its RESPONSE BODY, where A carries it in the seal',
+      ).toContain('unrecoverableExpired')
+      // That asymmetry IS the finding: ⑥'s 账侧 parity half is
       // NOT a writable byte-compare on a representative twin, because the two paths present the
       // value through different artefacts — A through `response_snapshot`, B through its response.
       // Recorded as a DECLARED DIVERGENCE with a mechanism (the 2×2 above), not as an open TODO.
