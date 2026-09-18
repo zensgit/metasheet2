@@ -747,10 +747,14 @@ s6a `pluginTestsWorkflow` 钉重算(`.github/workflows/plugin-tests.yml` 两处�
 
 **本步不新增/不触碰**:`scripts/ops/ci-realdb-step-contract.mjs` 的任何导出;`GET …/backfill/batches` 端点;changesRequired #13 的三条组合调用判别力测试;规模上界(500)真库测试;apps/web(本切片全程无前端改动,没有需要接进 `run-required-web-tests.sh` 的新 spec)。
 
-**未做,原样结转的 remaining**:
-- changesRequired #13 的三条组合调用判别力测试——现在覆盖面比 §17 记录时更宽:除了"并发 execute"变体,还需要"execute 与 rollback 并发竞争同一把 L0"、"rollback 与手工建组/归档并发竞争同一把 L0"两个新变体,三者共用同一把 `atg:${orgId}` advisory lock,判别力测试的 fixture 需要覆盖这三种两两组合,不只是本切片三个函数各自独立起一次。
-- `GET /api/approval-template-groups/backfill/batches` 列表端点(changesRequired #5)。
+**两点自查(独立复核追加,未改代码)**:
+1. `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` 是从 `archiveApprovalTemplateGroupWithClient` 原地内联的同一段文本剪切出来的,单行,与原文本逐字节相同(`git show HEAD -- .../ApprovalTemplateGroupService.ts` 核对,removed/added 两行字符完全一致,只是从模板字符串换成了普通字符串)。`ATG_ARCHIVE_GROUP_ROW_SQL` 是多行模板字符串,提成顶层常量后其内部缩进从原来的 7 空格变成 3 空格——**这两处缩进空白本身也会进 SQL 文本**(多出/少了几个空格字符),所以这条常量与原文本不是逐字节相同,只是在 SQL 语义上等价(WHERE/RETURNING 前的空白对 Postgres 解析无意义)。上一段"顺带是一次无行为变化的重构"这句话说的是行为(执行结果)不变,不是文本字节不变——本条把两者分开写清楚,避免读成"两处提取都是纯剪切"。该行为不变的证据是 §17/本步共用的回归套件里 `approval-template-groups-lifecycle.db.test.ts`(16 例)与 `serialization.db.test.ts`(10 例)两个文件本身就覆盖 `archiveApprovalTemplateGroupWithClient` 的行为,本步重跑两者全绿(见上方回归证据的 69/69),不是一句未经检验的断言。
+2. 本函数文件头注释与 §4.3 循环内注释引用的"design-gate M3"是门审阶段对**修法前**伪代码顺序(§4.2 先做、再对组发第二次 `FOR UPDATE`)的真实复现(`reviews/a3-probe/rollback-lockorder-probe.cjs`,已记入 §4.3 正文)——这是已验证的历史事实,不是本步凭空断言。但"§13.2 统一锁序让**本步落地的这段新代码**在真实并发下确实不会重蹈同一个死锁"这句推论,本步**没有**用一个并发探针去逐字重新验证(标准"排序取锁避免死锁"论证,不是可疑推断,但仍然是"论证",不是"实测")——这正是下方 remaining 第一条 changesRequired #13 尚未做完的部分,该义务覆盖的范围比 §17 记录时更宽(见下方)。
+
+**未做,原样结转的 remaining(按次序:前两条是本步遗留的义务,后四条是继承自更早步骤、未因本步变化)**:
+- changesRequired #13 的三条组合调用判别力测试——现在覆盖面比 §17 记录时更宽:除了"并发 execute"变体,还需要"execute 与 rollback 并发竞争同一把 L0"、"rollback 与手工建组/归档并发竞争同一把 L0"两个新变体,三者共用同一把 `atg:${orgId}` advisory lock,判别力测试的 fixture 需要覆盖这三种两两组合,不只是本切片三个函数各自独立起一次。门审报告把这条列为合入前必须补齐的义务(见上方"两点自查"第 2 条),不是可选项。
+- `GET /api/approval-template-groups/backfill/batches` 列表端点(changesRequired #5)——第三次原样结转,但现在的分量不同于前两次:W7/W8/W9 三个单元都已落地后,§2.1 自己写的"批次头没有可观测的进行中状态,该缺口由列表端点接住"这句话变成了一个**已经可达但没有出口**的洞——一个 `execute` 请求超时/连接中断的管理员现在完全没有办法查到某个 batchId 是否存在,也就没有办法对它调用 rollback。这不是一个测试覆盖缺口,是本切片自己已交付的功能里一个可达性缺口,建议列为下一步的第一候选。
 - 规模上界(500)真库测试(execute 侧,未因本步而变化)。
-- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留,未因本步而变化)。
+- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留,继承自 A-1,未因本步而变化)。
 - 验证 MD(§13.7,仍不存在)——现在 W7/W8/W9 三个单元都已落地,补这份 MD 的紧迫性比 §17 时更高,留给下一步或 owner 决定是否现在补。
-- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining,未因本步而变化,仍待 owner/下一轮门审)。
+- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining,继承自更早步骤,未因本步而变化,仍待 owner/下一轮门审)。
