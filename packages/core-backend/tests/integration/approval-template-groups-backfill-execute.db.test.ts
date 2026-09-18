@@ -316,6 +316,12 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // `btrim` + the `[!-~]` storability class) must agree, ROW BY ROW against this unit's OWN SQL
   // `eligible` predicate, with which of these real candidate rows execute actually processed —
   // not a separately-run ad hoc SQL query, but the outcome of the real call this file exercises.
+  // Collation caveat: this suite runs against whatever Postgres collation the local/CI DB was
+  // initialized with (glibc/`en_US.utf8` in every environment this has been run in so far). It
+  // does not exercise the musl/`15-alpine` collation axis production uses — see
+  // `STORABLE_GROUP_NAME_PATTERN`'s doc-comment (ApprovalTemplateGroupService.ts) for why that axis
+  // is a distinct, unverified risk (`finding_prod_pg15_never_tested`), not covered by this test
+  // being green.
   it('SQL/JS cross-verification: classifyBackfillCategory.action==="skip" agrees, per real candidate row, with whether execute left that row unlinked', async () => {
     const org = trackOrg(`atge-crossverify-${TS}`)
     const fixtures: Array<{ key: string; category: string | null }> = [
