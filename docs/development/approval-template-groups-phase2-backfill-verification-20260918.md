@@ -905,6 +905,8 @@ $ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci_virgin
 
 两边计数逐字相同(48/5/53)——修法在污染库与处女库上行为一致,不是「恰好在这一批污染物上蒙对了」。schema/batches-list 两个未改动的文件在两边都保持全绿(它们的断言全部按具体 id/batchId 定位,或已有 org 级清理,天然不暴露在这个共享表的问题面上——本轮据此判定这两个文件**不需要** `sinkForeignTemplates`)。
 
+> **§12.1 求值(不是作废本句,而是给这句话本身钉一个求值)**:上面这句对 `batches-list` 的「不需要」判断,在 34 行小体量污染集下成立,但对「候选数超过 500 上限」这条轴不成立——`impl-gate-A3-round3-20260918.md` P2-1(E14)测到 `batches-list` 的 route-wiring admin 与 smoke 两个用例正是未 sink 的 `execute` 调用点,在 634 行外来污染下会抛 `Backfill candidate count … exceeds the 500 limit`。§12.1 已经给这两个用例加了 `sinkForeignTemplates`——`batches-list` 的「不需要」判断到此**作废**,以 §12.1 为准。`schema` 一侧的判断(该文件零 `execute`/`rollback` 调用,只做 DDL/约束断言)不受影响,仍然成立。
+
 **步骤④的机械核查(而不是只看「两个库都绿」)**:按记忆 `feedback_absolute_claim_sweep_must_be_mechanical`,「绿」本身不是证据——§11.1 自己就演示过「NULL-only 污染物让 execute/rollback 保持绿,换成 AAA 形状才现出原形」,同一个陷阱可能同样发生在这里。逐文件机械核查(`grep -n "org_id = \$1\|WHERE org_id\|count(\*)"` 打底,再读命中行上下文判断是不是「org 级全集/计数」还是「按具体 id 定位」):
 
 - `approval-template-groups-backfill-schema.db.test.ts` / `approval-template-groups-backfill-batches-list.db.test.ts`(A-3 本身另外两个真库文件):已在 §11.3 上文核实——全部命中要么是 DDL/约束层面的具体 conname 断言,要么按 batchId/templateId 精确定位,零一处对 `approval_templates` 的全局候选做全集/计数断言。
@@ -916,6 +918,8 @@ $ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci_virgin
   - **实测确证**(不是只靠代码走查):这四处 backfill 调用点在 §11.5 的 84 文件复现里,就是在含 `NULL`/`'   '`/`'AAA'` 三种形状污染物的同一个 `metasheet2_lock_a3_ci` 库上原样跑过的——`✓ approval-template-groups-lifecycle.db.test.ts (19 tests | 1 skipped) 887ms`、`✓ approval-template-groups-serialization.db.test.ts (14 tests | 1 skipped) 6743ms`,两个文件零红。
 
 结论:步骤④要求的「同类共享 org 假设」普查,在 A-3 自己的另外两个文件、以及同一条 lane 里唯一两个会调用受影响函数的 A-1 文件(`serialization`)上都做了——零命中需要隔离;`lifecycle` 结构上不在暴露面上。不新增改动。
+
+> **§12.7 求值(不是作废本句,而是给这句话本身钉一个求值)**:「零命中需要隔离」对 `serialization` 的判断,是在 §11.1 那批 34 行、含 `NULL`/`'   '`/`'AAA'` 三种形状但**体量不超过 500 上限**的污染集下测得的,在那个体量下**成立**。它在「候选数超过 500 上限」这条轴上**不成立**——§12.7 用同一份 634 行注入亲测 `serialization` 在这条轴上 3 个用例红(`:493`/`:647`/`:686`)。这是本轮**没有修**的一个已知暴露面(不在 P2-1 点名的 10 个调用点之内,修改 `serialization` 会超出本轮授权范围),如实记录,不据此撤回上面「零命中需要隔离」这句话在其原始测量体量下的正确性——两个体量、两个结论,不是同一个结论自相矛盾。
 
 ### 11.4 Mutation(唯一亲跑;`cp` 备份 → 编辑 → 单独跑 → `cp` 还原 → `cmp`)
 
@@ -1050,6 +1054,30 @@ CMP-IDENTICAL
 
 还原后 `git status --porcelain` 只剩本轮三个真实改动的文件,无 mutation 残留。清理污染物(`DELETE … WHERE key LIKE 'p2r4-pollute-%'` → `DELETE 634`,库回到 0 行)。
 
+**Mutation 补充——证明 `assertEligibleCandidateCountWithinCap` 这个断言本身有判别力,不是「跟着产线 `ServiceError` 顺路绿」**:上面这次 mutation 去掉的是 rollback `double` 用例的 `sinkForeignTemplates` 调用,那条用例本身不调用 `assertEligibleCandidateCountWithinCap`——证明的是「sink 承重」,不是「新加的断言承重」。这两件事是分开的,补做一次只针对断言的 mutation:`cp` 备份 execute 文件,只去掉 idempotency 用例里的 `await sinkForeignTemplates(org, [idemHr1, idemHr2])` 一行(换成 `// MUTANT-P2-1-ASSERT` 注释),**保留**同一用例后面的 `await assertEligibleCandidateCountWithinCap(org, 2)` 调用;重新注入 634 行污染物;单独跑 execute 文件:
+
+```
+$ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3_r4 EXPECT_DB=1 pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts --reporter=verbose
+ × … idempotency: a second sequential execute call … — expected 636 to be 2
+ FAIL … idempotency …
+ AssertionError: expected 636 to be 2 // Object.is equality
+   ❯ assertEligibleCandidateCountWithinCap tests/integration/approval-template-groups-backfill-execute.db.test.ts:203:27
+       203|     expect(eligibleCount).toBe(ownCandidateCount)
+   ❯ tests/integration/approval-template-groups-backfill-execute.db.test.ts:388:5
+ Test Files  1 failed (1)
+      Tests  1 failed | 11 passed (12)
+```
+
+失败发生在 `assertEligibleCandidateCountWithinCap` 内部(`636` = 634 行外来污染 + 本用例自己的 2 个候选,`toBe(ownCandidateCount=2)` 断言先红),在这条用例走到 `executeApprovalTemplateGroupBackfill` 之前——不是产线 `ServiceError` 冒出来顺带带红这条用例,是断言自己先侦测到「候选人口不干净」这件事。其余 11 条(含未受影响的其余 execute 文件用例)保持绿。`cp` 还原 + `cmp`:
+
+```
+$ cmp <备份> <还原后的文件> && echo CMP-IDENTICAL
+CMP-IDENTICAL
+```
+
+还原后 `git status --porcelain` 空(与提交后的工作树字节相同)。清理污染物,`dropdb`。
+
 ### 12.2 P3-1 —— MD 里一处标「原话」的引用含 3 个西里尔同形字
 
 机械扫描(python,`unicodedata` 逐字符核 Cyrillic/Greek/组合符/NUL/格式控制字符区段)命中本文件(本 MD)`:789` 三个字符:U+043A(CYRILLIC SMALL LETTER KA)、U+0430(CYRILLIC SMALL LETTER A)、U+0440(CYRILLIC SMALL LETTER ER)——英文单词 "carries" 的前三个字母被换成了这三个西里尔同形字(此处刻意不重复排印被替换前的确切字节序列,避免同一份「零同形字」文档里再留一处需要被下一轮同形字扫描重新命中的样本)。改用 python 精确字符串替换(先断言命中次数为 1,再替换成 ASCII 原文)修正,重新扫描确认**零残留**,并与源文件 `approval-template-groups-backfill-batches-list.db.test.ts:108` 的真实原话逐字比对一致(该文件本轮也被 P2-1 修改,但这一行本身未变)。
@@ -1104,4 +1132,43 @@ $ git diff --stat 4f5fd00c3157e807b8e28b01c98dca07619bc289
 
 零生产代码改动——`packages/core-backend/src/` 与 `.github/workflows/` 下零文件命中(与 §2/E1 的既有核查方法一致,本轮同样跑过 `git diff --name-only 4f5fd00c3..HEAD | grep -v -E "\.md$|tests/integration/.*\.db\.test\.ts$" | wc -l` = 0)。`approval-template-groups-backfill-batches-list.db.test.ts` 本轮**从 §11.6 记录的「保持不动」名单里移出**——它是本轮 P2-1 唯一新增 `sinkForeignTemplates` 副本的文件(此前三个文件独立复制,本轮加了第四份);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-lifecycle.db.test.ts`/`approval-template-groups-serialization.db.test.ts` 三个文件本轮仍未改动。
 
-**未做、也未被授权做**:合并、undraft、开/改 PR、把迁移应用到任何共享/staging/prod 库、改锁文、改任何产线代码。
+### 12.7 如实记录:本轮跑到但没修的暴露面(不在 P2-1 点名的 10 个调用点之内,未被授权修改)
+
+派工书只点名了 execute/rollback/batches-list 三个文件的 10 个调用点;§11.3 曾用一批 34 行、体量不超过 500 上限的污染集测过 `serialization`(A-1 既有文件)零命中,认为不需要隔离。§12.1 修完 10 个点之后,本会话用同一份 634 行 E14 污染集把 `serialization` 单独跑了一遍(私有库 `metasheet2_lock_a3_r4`,与 §12.1 同一次会话),证明这条判断在超过 500 上限这条轴上**不成立**:
+
+```
+$ psql -d metasheet2_lock_a3_r4 -c "INSERT INTO approval_templates … FROM generate_series(1, 634) AS g;"
+INSERT 0 634
+$ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3_r4 EXPECT_DB=1 pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  1 failed (1)
+      Tests  3 failed | 11 passed (14)
+```
+
+三条失败逐字:
+
+1. `:493`「A-3 execute (composed caller): under the RR-default pool, execute still reads a concurrently-committed holder row at MAX(sort_order) — proving the SET this composed transaction issues is not a single-primitive-only obligation」—— `AssertionError: expected 400 to be 201`。
+2. `:647`(经 `waitUntilBackendBlockedByHolder`,抛出点在 `:175`)「execute lock-order (design-gate M2, §13.2 fix): stalls on the batched deterministic pre-lock statement, not a per-category one」—— `Error: timed out waiting for backend blocked by holder pid … on query ~id = ANY($2) ORDER BY id FOR UPDATE (never engaged the production lock — race golden would be vacuous)`。**这一条比另外两条更值得点名**:它不是简单地变红,而是「从未真正打到产线锁」——这条用例本来是用来证明「悲观锁在正确的语句上生效」的判别力探针,在候选数超限、`execute` 一开始就因 `ServiceError` 短路的情况下,连锁都没上,探针本身失去判别力,不只是失败。
+3. `:686`「rollback lock-order (design-gate M3, §13.2 fix): stalls on the batched deterministic pre-lock statement, not a per-group one」—— `AssertionError: expected 400 to be 201`。
+
+清理:`DELETE FROM approval_templates WHERE key LIKE 'p2r4b-pollute-%'` → `DELETE 634`,库回到 0 行。
+
+**归类,不修**:`git diff --name-only 4f5fd00c3..HEAD` 不包含 `approval-template-groups-serialization.db.test.ts`——本轮零字节改动过这个文件,它在超限体量下的行为是**改动前就存在的暴露面**,不是本次提交引入的回归。修它需要给 `serialization` 自己的 4 个 backfill 调用点(`:487`/`:646`/`:685`/`:707`)加 sink,这是产线锁序/RR-pool 探针文件,改动面超出 P2-1 点名的 10 个调用点和本次派工授权的范围,留给 owner/后续 lane 裁决是否要在同一个机制下修。
+
+**同一份普查也带出另一条不对称,一并点名(§12.1 的 sinkForeignTemplates 助手注释里已留了一句,这里搬进 MD 让它可见)**:`batches-list` 里第三个调用 `execute` 的用例——`` `a foreign org never sees another org's batches over HTTP` ``(现行号 `:267` 起——本轮改动前是 `:229`,因本文件同轮加了 `sinkForeignTemplates` 助手与两处调用而下移)——本轮**没有**加 sink,是刻意的:它从未对 `execRes.status`/`execBody` 做任何断言,只检查 org B 的列表里找不到 `execBody.batchId`;在候选数超限、`execute` 抛 400 而不是返回 `{batchId}` 的场景下,`execBody.batchId` 是 `undefined`,而「org B 的列表里找不到 batchId===undefined 的一条」这句断言**依然为真**——这条用例在超限体量下会**假绿**(不是因为它被保护了,是因为它从来没有真的验证过 `execute` 成功)。这是本轮**发现但未修**的第三类问题(与「未 sink 导致真红」不同类):修法是让它对 `execRes.status` 做真断言,同样超出本轮授权范围,一并交 owner/后续 lane。
+
+**本轮 required real-DB 步骤(§12.5)全绿,不代表以上三类问题已经被覆盖到**——§12.5 的 84 文件复现全程是**处女库**(见 §12.5 表格),从未叠加 634 行这种超限体量;这三类问题只在体量超过 500 上限时才会现出原形,required lane today 不会撞到它们,不代表它们不存在。
+
+**机械普查:real-DB lane 里每一个还会调用受影响函数(`executeApprovalTemplateGroupBackfill`/`previewApprovalTemplateGroupBackfill`/rollback)的调用点,以及它在「候选数超过 500 上限」这条轴上的状态**(§12.1 的 10 个点已修,不重复列):
+
+| 文件 | 调用点 | 本轮状态 |
+|---|---|---|
+| `approval-template-groups-backfill-{preview,execute,rollback,batches-list}.db.test.ts` | 门审 E14 点名的 10 个(见 §12.1) | **已修**——加 sink + 两处新增断言;E14 复现 45/45 绿 |
+| `approval-template-groups-backfill-batches-list.db.test.ts` | `:267` 起(本轮改动前 `:229`),cross-org HTTP isolation 用例 | **未修,假绿**——不断言 `execRes.status`,超限时 `execBody.batchId` 为 `undefined` 仍能通过断言(见上文) |
+| `approval-template-groups-serialization.db.test.ts` | `:487`/`:646`/`:685`/`:707` | **未修,超限时真红**——3/4 处已亲测(见上文);`:487`(其余 3 处共享的辅助调用点之一,已在 3 条失败里覆盖)不再单独复测 |
+| `approval-template-groups-lifecycle.db.test.ts` | 无 | 结构上不在暴露面——`grep -ci "backfill\|previewApprovalTemplateGroupBackfill\|executeApprovalTemplateGroupBackfill"` = 0 |
+| `approval-template-groups-backfill-schema.db.test.ts` | 无 | 结构上不在暴露面——DDL/约束级断言,零 `execute`/`preview`/`rollback` 调用 |
+
+关闭以上「未修」两行是**独立于本轮**的决定,不在本次派工范围内;本轮的职责边界是 P2-1 点名的 10 个调用点,已经全部关闭并复核(§12.1)。
+
+**未做、也未被授权做**:合并、undraft、开/改 PR、把迁移应用到任何共享/staging/prod 库、改锁文、改任何产线代码;`serialization` 与 `batches-list` cross-org 用例的这两类已知暴露面本轮**同样未修**(见 §12.7),留给 owner/后续 lane。
