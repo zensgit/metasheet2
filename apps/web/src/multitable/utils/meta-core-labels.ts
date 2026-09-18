@@ -63,6 +63,7 @@ export type MetaCoreLabelKey =
   | 'grid.noRecordsHintPrefix' | 'grid.noRecordsHintAction' | 'grid.noRecordsHintSuffix'
   | 'grid.addRecordInline'
   | 'grid.freezeUpToColumn' | 'grid.unfreezeColumns'
+  | 'grid.freezeUpToRow' | 'grid.unfreezeRows'
   | 'grid.aggregateTooLarge'
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
@@ -210,6 +211,8 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.freezeUpToColumn': { en: 'Freeze up to this column', zh: '冻结到此列' },
   'grid.aggregateTooLarge': { en: 'Too many rows to aggregate', zh: '数据量过大，无法聚合' },
   'grid.unfreezeColumns': { en: 'Unfreeze columns', zh: '取消冻结' },
+  'grid.freezeUpToRow': { en: 'Freeze up to this row', zh: '冻结到此行' },
+  'grid.unfreezeRows': { en: 'Unfreeze rows', zh: '取消冻结行' },
   'grid.noMatchingTitle': { en: 'No matching records', zh: '没有匹配的记录' },
   'grid.noMatchingHint': { en: 'Try a different search term', zh: '试试其他搜索词' },
   'grid.collapseRow': { en: 'Collapse row', zh: '收起行' },
