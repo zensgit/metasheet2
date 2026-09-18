@@ -343,6 +343,12 @@ GET /api/approval-template-groups/backfill/preview →
                                    // "org-complete";否则为"visible-to-you",提醒调用方这份 buckets
                                    // 不是 org 的完整候选清单。计算不新造判定——直接复用
                                    // resolveApprovalTemplateVisibilityActor 已经解析出的 actor 种类。
+  "candidateCount": 3,             // 【§13 changesRequired #12(P2-2 cap 分支),续做步骤 21 落地】
+                                   // 每个非 skip 桶 templateCount 之和——execute 的 eligible 查询会
+                                   // 用同一条谓词(changesRequired #3)处理的确切数量,不是第二条独立
+                                   // 查询,不会与 buckets 各自的 templateCount 相加结果分岔;调用方
+                                   // 用它对照 APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES(500)
+                                   // 判断是否要先收窄再点 execute。
   "buckets": [
     {
       "category": "HR",
@@ -492,8 +498,8 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 | 9 | execute 调用 `...WithClient` 原语,不得抄语句;rollback 共用语句须提炼命名常量/附加谓词形参 | §1 表三行现场标注 | **已落地。execute 半(续做步骤 17):调用 `createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient`,未抄语句;#9 与 #2 的张力(调用 link 原语会拿到其 JS 映射后的 `linkedAt`,直接回填批次表会重犯 M4)按本步 §17 的现场注释解决——批次明细行的 `linked_at` 改由一条独立的服务端相关子查询从刚提交的链接行读回,而不是使用原语返回值,§17 有 mutation 证据。rollback 半(续做步骤 12,见 §18):不调用归档/解除原语(§4.1 论证维持),但把共用语句提成 `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` / `ATG_ARCHIVE_GROUP_ROW_SQL` 两个命名导出常量,`archiveApprovalTemplateGroupWithClient` 自身也改调这两个常量而非内联——全仓该语句只有一处文本。本行"rollback 半仍待 W9"的旧文本是本步(续做步骤 18)核对代码后发现的过期状态,已勘误。** |
 | 10 | SET 义务变成 typecheck 门:唯一 `beginApprovalTemplateGroupTxn(client)` 返回品牌类型 `AtgTxClient`;明确不采用运行时 `current_setting` 断言 | 本节 §13.2 逐字保留门审给出的成品设计;§11 附录原文的"SET 由薄封装发出"承诺在此升级为机械约束 | **已落地(续做步骤 16 品牌类型本体;续做步骤 17 在 execute 侧的调用点验证——`beginApprovalTemplateGroupTxn` 在 `executeApprovalTemplateGroupBackfill` 薄封装里调用恰好一次)** |
 | 11 | `mapGroupConstraintError` 套在整个 `transaction()` 之外;§7 错误码表补 `GROUP_SORT_CONFLICT` | §3.1 catch 分支段已现场标注 try/catch 包裹形状(前半);§7 错误码表已补 `GROUP_SORT_CONFLICT` 行(后半) | **已落地(续做步骤 5,含前后两半)** |
-| 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一 | §3.1 pseudocode 已加 `IF count(eligible) > 500` 中止分支(选"上界"一侧,非规模-耗时曲线);§7 错误码表已补 `APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE` 行 | **pseudocode 已落地(续做步骤 5);`.ts` 已落地(续做步骤 17,`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500` 常量 + 抛错分支)。规模上界的真库测试(超过 500 触发 400、零行写入)本步未覆盖,记入 remaining。** |
-| 13 | W8 同 PR 补三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 池文件;锁序格断言停车点非终态) | §9 验证计划纲要目前只有粗粒度描述;本条细化待 §9 改写(下一实现单元) | 设计已知悉,§9 待补三条具体用例名 |
+| 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一;**cap 分支额外要求"preview 提前给出 `candidateCount`"**(报告 §3 P2-2 原文) | §3.1 pseudocode 已加 `IF count(eligible) > 500` 中止分支(选"上界"一侧,非规模-耗时曲线);§7 错误码表已补 `APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE` 行;`candidateCount` 见 §5.2 响应形状 | **execute 半 + 上界真库测试(超过 500 触发 400、零行写入)已落地(续做步骤 17/19,`1786c0566`)。preview 半(`candidateCount`)在本表上一版本长期缺格——`grep -rn "candidateCount" packages/core-backend/src packages/core-backend/tests`(改动前)0 命中,§19.1/§20.5/§21.6 三轮 remaining 都只点了"规模上界真库测试"这一半,从未点过 preview 半——**本步(续做步骤 21)补齐**:`ApprovalTemplateGroupBackfillPreview.candidateCount`(routes/approvals.ts)= 同一个 `bucketsByCategory` 累加器求和,不是第二条独立查询;同预测 `.db.test.ts` 三例(单元值断言、HTTP 序列化断言、与 execute 实际处理数的跨调用耦合断言)+ mutation 正控(cp/改/跑/还原/cmp,三例全部由绿转红,还原 `cmp` 逐字节一致)** |
+| 13 | W8 同 PR 补三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 池文件;锁序格断言停车点非终态) | §9 验证计划纲要目前只有粗粒度描述;本条细化待 §9 改写(下一实现单元) | **勘误(本步,续做步骤 21):本行"设计已知悉,§9 待补"这句字面是本表从 §13 首次写出起就没跟上代码的过期状态——三个子项其实早就全部落地,只是三次落地(§21 自己那次除外)都没有回写这一格:① 组合正例 + 反向正控(`transaction()` 内部再 `await` 一个 `...WithClient` 导出函数会在 L0 停车/超时,不是别的原因)—— `117e248cb`;② SET 义务格落在 RR 默认池文件——`45e5c8a21`(§21 自己落地并回写过);③ 锁序格断言**停车点**(`waitUntilBackendBlockedByHolder`,报告字面要求,不是完整两方 40P01 构造)——`f3b3cc5d3`。`git log --oneline origin/feat/approval-template-groups-phase1..HEAD` 核对:三个 SHA 均在当前分支历史内。** |
 | 14 | §1 表逐格改调用级复用;§2.1"无可观测中间态"收窄为"无 DB 行级中间态" | §1 表三行 + §2.1 段,均已现场标注 | **已落地** |
 | 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | §"批次机制选择"段(原§1 前)已加现场标注,补更宽普查(`operation_audit_logs` 自述占位且 schema 漂移两次、无 org 无 FK;`oapi_write_audit`/`automation_action_applied`/`approval_form_field_revisions` 各自域内无 FK;`attendance_import_rollback_*` 改列为正面先例而非仅驳回对象) | **已落地(续做步骤 5)** |
 | 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard⊋manager 的事实(前半道理已求值);`scope` 字段已写入 §5.2 响应形状(jsonc 示例)与 §3.1 execute 的两处 `RETURN`(中段已落地);回流 #5852 是跨 lane 动作,本分支无权限做(后半见 §13.5) | **前半+中段已落地(续做步骤 5),后半记入 remaining(见 §13.5)** |
@@ -949,4 +955,55 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 - 验证 MD(§13.7,仍不存在)——未变化。
 - link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化。
 - changesRequired #16 后半(A-1 回流 #5852)、P1-3 溢出影响——跨 lane,未变化。
+- §19.4 的"新披露 1"、"新披露 2"——均未变化,原样结转。
+
+**勘误(续做步骤 21,§22 有完整版本):这条"changesRequired #13 剩余两条"是本步核对代码后发现的过期状态——① 与 ③ 早就在 `117e248cb` / `f3b3cc5d3` 落地,只是没有回写到这里。不要只信这一格的历史文本,以 §22.1 为准。**
+
+## 22. 续做步骤 21:任务书指定对账表(Q1–Q7 + 四条"额外 P1/P2")+ changesRequired #12 预览半补齐(2026-09-18)
+
+任务书原文点名"逐条(Q1…Q7、额外 P1×2、额外 P2×2)在设计 MD §13 写「已落地 @commit / 未落地」,再逐条落未落地的"。§13.1/§19.1 两张表已经按 changesRequired 编号(1–16)逐条核过,但任务书是按门审报告(`reviews/design-gate-A3-phase2-20260918.md`)自己的 Q1–Q7 + P1/P2 编号点名的,两套编号不是一一对应(一个 Q 可能拆成好几条 changesRequired,一个 changesRequired 也可能回答好几个 Q)——本节按任务书自己的编号重新核一遍,而不是假设"changesRequired 表核过了所以 Q 编号也一定核过"。
+
+### 22.1 逐条核对(本步现场 grep/git log,不是重读 §13.1 旧文本)
+
+| 任务书条目 | 对应 changesRequired / Q | 状态 @ commit | 核对命令 |
+|---|---|---|---|
+| Q1 三表 FK 修正(含 `batch_links→links` CASCADE) | #4 | **已落地 @ `02775e95f`**(该文件唯一一次改动就是这次提交,`atgbbl_link_fk … ON DELETE CASCADE` 从落地起就是这个值,非后补勘误) | `git log --oneline --follow -- packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts` → 单一提交 `02775e95f`;`approval-template-groups-backfill-schema.db.test.ts` 的 M6 正/负控两例(均绿) |
+| Q2 preview 挂 `approvalTemplateAdminGuard` | #8 | **已落地 @ `d15dbe362`(W7 preview 路由注册)** | `grep -n "backfill/preview'," packages/core-backend/src/routes/approvals.ts` → 命中一行,紧跟 `approvalTemplateAdminGuard` |
+| Q3 分桶键 `btrim(category)`,不折大小写,不回写 `approval_templates.category` | #6 | **已落地 @ `d15dbe362`(preview 侧 `classifyBackfillCategory`/`pgBtrim` 本体)+ `f96411589`(execute `eligible` 查询套用同一条 `btrim(t.category) ~ '[!-~]'` 谓词)** | `grep -n "toLowerCase\|toUpperCase" packages/core-backend/src/services/ApprovalTemplateGroupService.ts packages/core-backend/src/routes/approvals.ts` → 0 命中(本步现场跑,`packages/core-backend/src` 两文件范围);`grep -n "UPDATE approval_templates" packages/core-backend/src/services/ApprovalTemplateGroupService.ts packages/core-backend/src/routes/approvals.ts` → 0 命中,证实不回写 |
+| Q4 重复 rollback 409 + 专用码 + `rolledBackAt` | #7 | **已落地 @ `d2e96e833`(W9 rollback)**,专用码 `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK` | `approval-template-groups-backfill-rollback.db.test.ts` 例"changesRequired #7: rolling back an already-rolled-back batch is a 409 …"(绿,见 §14 命令回归的 82/83 例之一) |
+| Q5 三条 FK 分别裁(Q1 的展开) | #4(同上) | **已落地**,与 Q1 同一行证据 | 同上 |
+| Q6 品牌类型 `AtgTxClient` 变成 typecheck 门 | #10 | **已落地 @ `06ac4927e`**(品牌类型本体);三个 `...WithClient` 签名参数类型均为 `AtgTxClient` | `grep -n "client: AtgTxClient" packages/core-backend/src/services/ApprovalTemplateGroupService.ts` → 4 命中(`createApprovalTemplateGroupWithClient`/`archiveApprovalTemplateGroupWithClient`/`linkApprovalTemplateToGroupWithClient`/`rollbackApprovalTemplateGroupBackfillWithClient`,execute 半在 `routes/approvals.ts` 另有 1 处);`npx tsc --noEmit`(本步现场跑)0 错误 |
+| Q7 execute/rollback 锁序 L0→L1→L2 且"40P01 有映射" | #1 + #13 | **锁序重写已落地(execute 半 `f96411589`,rollback 半 `d2e96e833`)。"40P01 有映射"这半——核对后判定 MOOT BY CONSTRUCTION,不是遗漏,理由见下方独立小节。** | `grep -n "40P01" packages/core-backend/src/routes/approvals.ts packages/core-backend/src/services/ApprovalTemplateGroupService.ts` → 0 命中(本步现场跑) |
+| 额外 P1:`linked_at` 令牌往返恒不匹配 ⇒ rollback 空转 | #2 | **已落地 @ `f96411589`(execute 写入侧 CTE-free)+ `d2e96e833`(rollback 读侧集合式 join)** | 两处 SQL 见本文档 §13.1 行 2 的现场标注;`approval-template-groups-backfill-rollback.db.test.ts` 有回归例覆盖真回滚成功路径(非空转) |
+| 额外 P1:批次列表端点 `GET …/backfill/batches` + 索引 | #5 | **已落地 @ `7eb3f481d`**(§13.1 行 5 本身记录过这条从"误标已落地"到"真落地"的勘误过程,本节不重复) | `grep -n "r.get('/api/approval-template-groups/backfill/batches'" packages/core-backend/src/routes/approvals.ts` → 1 命中 |
+| 额外 P2:COMMIT 阶段 23505 映射在 `transaction()` 之外 + §7 错误码表补 `GROUP_SORT_CONFLICT` | #11 | **已落地 @ `f96411589`(execute 半)/`d2e96e833`(rollback 半)——两个组合调用者的 `mapGroupConstraintError` catch 都套在各自 `transaction(...)` 调用外层,不是回调内** | `grep -n "mapGroupConstraintError(error)" packages/core-backend/src/routes/approvals.ts packages/core-backend/src/services/ApprovalTemplateGroupService.ts` → `routes/approvals.ts:755`(execute 组合调用者)与 `ApprovalTemplateGroupService.ts:803`(rollback 组合调用者),人工读两处上下文确认都在 `await transaction(...)` 外层的 `try{}catch`,不在传给 `transaction()` 的回调体内 |
+| 额外 P2:execute 规模上界 `BACKFILL_TOO_LARGE` 或实测曲线 | #12 | **cap 分支已选定并落地(execute 半 `f96411589`,真库测试 `1786c0566`);preview 半(`candidateCount`)本步(续做步骤 21)补齐——见 §13.1 行 12 现场勘误** | 本步 `grep -rn "candidateCount" packages/core-backend/src/routes/approvals.ts packages/core-backend/tests/integration/approval-template-groups-backfill-preview.db.test.ts` 从 0 命中(改动前,已在本节引言处确认)变为 6 处源码命中(接口字段/累加计算/返回值,含注释)+ 15 处测试文件命中(3 个 `expect` 断言 + 相关注释与用例标题),`npx tsc --noEmit` 0 错误,`.db.test.ts` 里新增/被改动的 3 处 `expect(...candidateCount...)` 断言做过 mutation 正控(cp/改/跑/还原/cmp):把计算改成恒 0 后,单独重跑该文件 → 3 例由绿转红(另 11 例不受影响),`cp` 还原后 `cmp` 逐字节一致,`git status --short` 只剩本步的合法编辑 |
+
+### 22.2 "Q7:40P01 有映射"为什么判 MOOT,不是 UNLANDED
+
+任务书原文把 Q7 写成"execute/rollback 锁序 L0→L1→L2 **且** 40P01 有映射"——字面读像是要求两件事都做。核对门审报告原文(§2 Q7a):"无人映射 `40P01`:`mapGroupConstraintError`(`:182-194`)只处理 23505 ⇒ 无辜的挂接请求拿到通用 500"——这句话出现在**修法之前**的问题描述段,是诊断当前 bug 的症状,不是 changesRequired 清单(报告 §4)里的独立条目;changesRequired #1 的字面要求只有"改成 L0→L1→L2 非降序",没有第二句"并且映射 40P01"。
+
+更关键的是,§13.2(逐字保留的门审成品)自己给出过一次**穷举式无环性证明**("建组 L0;改名 L0→L1;归档 L0→L1→L2;解档 L0→L1;重排 L0→L1;挂接 L1→L2;解除 L2;preview 不取锁;execute/rollback(修法后)L0→L1→L2。每条路径的取锁序列都是 L0≤L1≤L2 的非降序……⇒ 无环。")——锁序图无环是 Postgres 40P01(`deadlock_detected`)**发生的必要条件的否定**:两个事务只有在互相等待对方持有的锁(锁请求图成环)时才会被死锁检测器判定为死锁。修法后的锁序图已经证明不存在环,也就是说 **execute/rollback 之间、以及它们与挂接/解除/改名/归档/解档/重排之间,不再有 40P01 可以发生的路径**——不是"发生了但没人接住",是"结构上不会再发生"。给一个证明不可达的分支写运行时映射是死代码(记忆 `feedback_dead_code_defect_is_not_a_live_vulnerability` 的反向情形:这次不是"死代码里藏着活漏洞",而是"活修法让原来的症状变成了不可达分支"),而且会违反本仓"先证可达性再写"的验证纪律——加一行 `if (pgErr.code === '40P01') return new ServiceError(...)` 没有任何真库测试能触发它(触发需要先把 §13.2 的无环性证明打破,等于重新引入 M2/M3 的 bug),那样的分支本身就是本仓已经点名过的"注释断言不测=藏 bug"反面例子的镜像:一条**永远拿不到 mutation 正控的 catch 分支**。
+
+**结论**:Q7 的"40P01 有映射"半句按门审报告 §13.2 自身的证明判 **MOOT BY CONSTRUCTION**,不计入 unlanded,也不补代码。若 owner/下一轮门审认为"防御性映射"仍然值得加(例如未来分期 3 的重排逻辑改变了锁序、无环性证明需要重新过一遍),那是对 §13.2 证明范围的重新挑战,应作为独立 changesRequired 提出,不是本步能替 owner 决定的事。
+
+### 22.3 任务书原文"execute 对其跳过并计数"与门审 #3 字面的分歧(如实披露,不悄悄改窄或改宽)
+
+任务书本步原文对额外 P1(CJK category)的要求写的是"execute 对其跳过**并计数**"。门审报告 changesRequired #3 的字面要求只有"不合格 category 进 preview 的 `skipped` 桶(带 reason),execute **跳过**而非抛错炸整事务"——没有"execute 也要计数"这半句。核对当前实现(`executeApprovalTemplateGroupBackfillWithClient` 的 `eligible` 查询,`routes/approvals.ts`):`btrim(t.category) ~ '[!-~]'` 这个谓词在 SQL `WHERE` 子句里,不合格行**从未进入** `eligible` 结果集——execute 这一层结构上看不到被跳过的行,也就没有"计数"这个动作的落脚点(计数需要先看见,execute 的实现选择是让 SQL 直接把它们过滤掉,不是"看见了但不算数")。
+
+这不是实现的缺口,是**任务书这句转述比门审原文更宽**——门审 #3 的"跳过"由 execute 侧的谓词过滤实现,"计数"这个能力只在 **preview** 侧存在(`skipped` 桶自己的 `templateCount` 字段,`ApprovalTemplateGroupBackfillSkip.templateCount`,§13.1 行 3 已确认落地)。管理员如果想知道某次 execute 会跳过多少条纯中文分类的模板,答案是**先看 preview 的 `skipped` 桶**,execute 本身不重复给一份计数——两份计数如果都做,反而会引入"execute 自己数的" vs "preview 数的"两条独立计数分岔的新风险(与 changesRequired #12 这次修的"candidateCount 不能是第二条独立查询"是同一类问题)。按门审 #3 字面(governs)不额外给 execute 加计数,本节记录这条分歧,供 owner/下一轮门审核对任务书转述与门审原文是否需要对齐。
+
+### 22.4 本步不新增/不触碰
+
+`.github/workflows/plugin-tests.yml`、`vitest.config.ts`、s6a 钉——本步只在既有的、已双点接线的 `approval-template-groups-backfill-preview.db.test.ts` 内加一个 `it()` + 两处既有 `it()` 内追加断言 + `afterAll` 补批次表清理,未新增文件、未新增 CI 步骤。`approval_template_group_backfill_batches` 等三张表的 DDL/迁移未改动。apps/web 未改动。
+
+### 22.5 remaining(在 §21.6 基础上更新)
+
+- ~~changesRequired #13 剩余两条~~ ——**已勘误(见 §22.1):三个子项全部落地,不再是 remaining。**
+- changesRequired #12 的"规模-耗时曲线"备选分支——未做(设计已二选一走"上界"分支,报告允许二选一,不是缺口)。
+- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留)——未变化,跨 lane。
+- 验证 MD(§13.7,仍不存在)——未变化,按任务书本步说明属下一阶段。
+- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化,待 owner。
+- changesRequired #16 后半(A-1 回流 #5852)——跨 lane,未变化。
+- §22.3 记录的"任务书转述 vs 门审 #3 原文"分歧——待 owner/下一轮门审核对是否需要对齐任务书措辞,不是代码缺口。
 - §19.4 的"新披露 1"、"新披露 2"——均未变化,原样结转。

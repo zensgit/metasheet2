@@ -498,6 +498,14 @@ export interface ApprovalTemplateGroupBackfillSkip {
 
 export interface ApprovalTemplateGroupBackfillPreview {
   scope: 'org-complete' | 'visible-to-you'
+  // design-gate-A3-phase2 changesRequired #12 (P2-2, cap branch): "…超出返回 400 …
+  // _BACKFILL_TOO_LARGE,并在 preview 里提前给出 candidateCount,让管理员先收窄". This is the
+  // SAME population execute's `eligible` query counts and caps at
+  // `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` below — the sum of every non-skipped
+  // bucket's `templateCount` (skipped rows are never candidates; execute's `eligible` query
+  // filters them out via the identical `btrim(category) ~ '[!-~]'` predicate, changesRequired
+  // #3) — not a separate count computed from a second query, so the two cannot drift apart.
+  candidateCount: number
   buckets: ApprovalTemplateGroupBackfillBucket[]
   skipped: ApprovalTemplateGroupBackfillSkip[]
 }
@@ -575,11 +583,19 @@ export async function previewApprovalTemplateGroupBackfill(
     bucket.templateCount++
   }
 
+  // changesRequired #12 (P2-2 cap branch): summed from the SAME bucket accumulator the `buckets`
+  // array below is built from — not a third independent count — so `candidateCount` cannot drift
+  // from `buckets`' own `templateCount` fields (a reader who sums `buckets[].templateCount`
+  // themselves must get this exact number back; asserted in the preview `.db.test.ts`).
+  let candidateCount = 0
+  for (const bucket of bucketsByCategory.values()) candidateCount += bucket.templateCount
+
   return {
     // §5.2 changesRequired #16: "org-complete" iff `applyTemplateVisibilityFilter` is a no-op for
     // this actor (the SAME condition that function itself short-circuits on) — not "actor is a
     // manager" restated, but the literal predicate this preview's own candidate query just ran.
     scope: !actor || actor.isTemplateManager ? 'org-complete' : 'visible-to-you',
+    candidateCount,
     // §3.1 "categories ← … 按字典序排序" — plain code-point order (NOT `localeCompare`, which is
     // locale/ICU-dependent and can disagree with SQL `ORDER BY` under a C-collation database; see
     // `finding_prod_pg15_never_tested` for this repo's live glibc/musl collation gap), so preview's
