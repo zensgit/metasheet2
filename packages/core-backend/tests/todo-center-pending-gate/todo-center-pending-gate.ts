@@ -114,11 +114,32 @@
  * real; `countApprovalPendingForViewer`'s SEPARATE SELECT (the `/api/todo/count`-only path — see
  * `approval-pending-source.ts`'s `countPendingForUser`) has NO equivalent real-failure test — this
  * pass deliberately left it healthy to prove the fault's scoping, not because that SELECT's own
- * read failure is out of scope for row B's wording. A future mutation on `countApprovalPendingForViewer`'s
- * SELECT text alone would find nothing red here. Judge B's API-layer half is DISCHARGED for the
+ * read failure is out of scope for row B's wording. No test in this file positively asserts
+ * `sources.approval === 'unavailable'` to guard `countApprovalPendingForViewer`'s own SELECT
+ * failing — breaking it (round-3 gate `impl-gate-B-slice1-round3-20260918.md` MU2: `approval_reads`
+ * renamed to a non-existent table, leaving `whereSql` and the row-version SELECT untouched) turns 20
+ * of this file's 27 cases red for OTHER reasons (all sixteen A0 `count`/`unreadCount` assertions plus
+ * four of Judge B's five cases — everything that calls the shared count path, via `expected 500 to be
+ * 200` / `expected 'unavailable' to be 'ok'` / `expected { approval: 'unavailable' } to deeply equal
+ * { approval: 'ok' }`) — that is detection via collateral failure, not a guard via a positive
+ * `unavailable` assertion. Judge B's API-layer half is DISCHARGED for the
  * row-version query as of test (5), not before it, and NOT YET for the count-only query — see
  * `docs/development/todo-center-phase1-verification-20260918.md`'s "P2-1" entry (FIX-ROUND 5 PASS)
  * for the disposition and the count-query gap left open.
+ *
+ * **Disclosure (round-3 gate P3-0, `impl-gate-B-slice1-round3-20260918.md`): design-lock §5 row B's
+ * parenthetical — "保留探针 viewer 形状要求:class ② 的形状,持恰一个 role 型席位且是其计数的唯一来源"
+ * (retain the viewer-shape requirement: class ②'s shape, holding exactly one role-typed seat that is
+ * its ONLY qualifying seat) — is grammatically attached to the sentence it follows ("this row and the
+ * 源抛错 row are the same mechanism, merged execution"), and test (3) above IS that merged execution:
+ * class ② viewer, a LIVE positive control (`ok` + 1), then `unavailable` on the same viewer. Test (5)'s
+ * viewer is class ① (`v1`/`instance1`), not class ②, because test (5) exists to satisfy a STRICTER
+ * requirement the round-2 gate raised — a REAL `pool.query` rejection, not a registry-level stub —
+ * that the lock text never anticipated and so never assigned a viewer shape to. Round-3 gate MU6
+ * (swap test (5)'s viewer to `v2`/`instance2`, its own `whereSql` role arm) reran 27/27 green,
+ * byte-identical to the class ① result: a `pool.query`-level rejection fails the query's read as a
+ * whole regardless of which arm the probe seat sits on, so class ① vs class ② makes no discriminative
+ * difference here. This paragraph is documentation only — no source file was mutated to reach it.**
  *
  * (See the fixture-plumbing docblock below for the S9 note.)
  *
