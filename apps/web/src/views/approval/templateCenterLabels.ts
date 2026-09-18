@@ -56,6 +56,14 @@ export const ZH = {
   unarchiveSuccess: '已启用表单',
   unarchiveError: '启用表单失败',
   cancel: '取消',
+  // Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive "分组视图" toggle. `viewMode`
+  // defaults to 'flat' (unchanged existing behavior); these keys back the new sectioned view only.
+  viewModeFlat: '平铺视图',
+  viewModeGrouped: '分组视图',
+  groupSectionsLoading: '正在加载分组…',
+  groupSectionsLoadError: '加载分组失败',
+  groupSectionEmpty: '此分组暂无表单',
+  groupSectionLoadMore: '加载更多',
 } as const
 
 export const EN: Record<keyof typeof ZH, string> = {
@@ -101,4 +109,10 @@ export const EN: Record<keyof typeof ZH, string> = {
   unarchiveSuccess: 'Template enabled',
   unarchiveError: 'Failed to enable template',
   cancel: 'Cancel',
+  viewModeFlat: 'Flat view',
+  viewModeGrouped: 'Grouped view',
+  groupSectionsLoading: 'Loading groups...',
+  groupSectionsLoadError: 'Failed to load groups',
+  groupSectionEmpty: 'No templates in this group',
+  groupSectionLoadMore: 'Load more',
 }

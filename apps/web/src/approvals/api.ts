@@ -8,6 +8,7 @@
 import { apiFetch, apiGet, apiPost } from '../utils/api'
 import type {
   ApprovalTemplateListItemDTO,
+  ApprovalTemplateGroupDTO,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVersionDetailDTO,
   ApprovalTemplateVersionSummaryDTO,
@@ -397,6 +398,63 @@ export async function listTemplateCategories(): Promise<string[]> {
   }
   const payload = await apiGet<{ data?: string[] }>('/api/approval-templates/categories')
   return Array.isArray(payload?.data) ? payload.data : []
+}
+
+/**
+ * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 3 (A-4). Lists this
+ * org's template groups (`GET /api/approval-template-groups`, org resolved server-side from
+ * `authenticatedTenantId` per §2 "org 从哪来" — nothing to pass here). Read-gated on
+ * `approvals:read` only (I7) — every reader sees the group list, not just template managers.
+ */
+export async function listApprovalTemplateGroups(): Promise<ApprovalTemplateGroupDTO[]> {
+  if (USE_MOCK) return []
+  const payload = await apiGet<{ groups?: ApprovalTemplateGroupDTO[] }>('/api/approval-template-groups')
+  return Array.isArray(payload?.groups) ? payload.groups : []
+}
+
+/**
+ * Approval form grouping lock v2.13 §4 acceptance row C — one of the three `section=` token
+ * shapes (`group:<id>` / `ungrouped` / `category:<name>`), built by the caller via
+ * `template-group-sections.ts`-style token composition. Paging is `page`/`pageSize` (1-based),
+ * same shape as `listTemplates` above — the route converts it to `limit`/`offset` server-side and
+ * the response's own `total` is THIS BUCKET's count (§4 row C: "每个 section 独立 page/pageSize"),
+ * not the union of every section, so the caller never has to reconstruct a per-section count.
+ *
+ * MUST NOT be combined with a `category` filter on the same request — the route 400s
+ * (`APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT`) on that combination (§4 row C / row J) — so this
+ * function deliberately takes no `category` parameter at all.
+ */
+export async function listTemplatesBySection(params: {
+  section: string
+  status?: ApprovalTemplateStatus
+  search?: string
+  page?: number
+  pageSize?: number
+}): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
+  if (USE_MOCK) return { data: [], total: 0 }
+  const qs = new URLSearchParams()
+  qs.set('section', params.section)
+  if (params.status) qs.set('status', params.status)
+  if (params.search) qs.set('search', params.search)
+  if (params.page) qs.set('page', String(params.page))
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize))
+  return apiGet(`/api/approval-templates?${qs.toString()}`)
+}
+
+/**
+ * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — `groupIds` is the
+ * org's FULL permutation of its currently-active group ids (a full re-rank, not a delta); the
+ * server re-derives `sortOrder` from array position (1..n) inside its own L0 critical section.
+ */
+export async function reorderApprovalTemplateGroups(
+  groupIds: string[],
+): Promise<ApprovalTemplateGroupDTO[]> {
+  if (USE_MOCK) return []
+  const payload = await apiPost<{ groups?: ApprovalTemplateGroupDTO[] }>(
+    '/api/approval-template-groups/reorder',
+    { groupIds },
+  )
+  return Array.isArray(payload?.groups) ? payload.groups : []
 }
 
 /**
