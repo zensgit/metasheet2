@@ -1761,11 +1761,19 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 /* Header-only refinements: target thead specifically so the shared
    row-num/check-col classes (also used on body td) keep their existing
-   body-row appearance — only the header cells adopt the panel/token look. */
+   body-row appearance — only the header cells adopt the panel/token look.
+   #5863: these corner cells sit at the intersection of the left-sticky row-num/
+   check-col stack and the sticky-top header row, so they need BOTH `top: 0`
+   and a zIndex above a frozen body cell's (2) — 3, matching the plain
+   (non-frozen) `.meta-field-header` tier, so the corner paints over body
+   content scrolling underneath it in both directions. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
+  position: sticky;
+  top: 0;
+  z-index: 3;
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }

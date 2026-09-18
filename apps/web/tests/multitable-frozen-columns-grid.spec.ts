@@ -75,9 +75,10 @@ describe('MetaGridTable frozen columns — offsets', () => {
     expect(headers(root)[1].style.left).toBe('216px') // 56 + 160
   })
 
-  it('freezes nothing when frozenLeftColumnIds is empty', () => {
+  it('freezes nothing when frozenLeftColumnIds is empty (header stays sticky-top only, #5863)', () => {
     const root = mountGrid({ frozenLeftColumnIds: [], enableMultiSelect: false })
-    expect(headers(root)[0].style.position).not.toBe('sticky')
+    // The header row is always sticky-top (#5863); "not frozen" means no horizontal (left) stick.
+    expect(headers(root)[0].style.left).toBe('')
   })
 
   it('frozen cell PRESERVES conditional-formatting background (not clobbered by the opaque #fff)', () => {
@@ -105,6 +106,44 @@ describe('MetaGridTable frozen columns — offsets', () => {
     })
     const cell = root.querySelector('.meta-grid__cell') as HTMLElement
     expect(cell.style.backgroundColor).toBe('rgb(255, 255, 255)') // #fff
+  })
+})
+
+describe('MetaGridTable — sticky header row (#5863)', () => {
+  it('a non-frozen header cell is sticky-top, always on (no frozen columns needed)', () => {
+    const root = mountGrid({ frozenLeftColumnIds: [], enableMultiSelect: false })
+    const h = headers(root)[2] // f3, not frozen
+    expect(h.style.position).toBe('sticky')
+    expect(h.style.top).toBe('0px')
+    expect(h.style.left).toBe('') // horizontal stickiness stays opt-in via freeze
+  })
+
+  it('a frozen header cell is sticky BOTH left and top, with a higher zIndex than a frozen body cell', () => {
+    const root = mountGrid({
+      rows: [{ id: 'r1', version: 1, data: { f1: 'A' } }],
+      frozenLeftColumnIds: ['f1'],
+      columnWidths: { f1: 100 },
+      enableMultiSelect: false,
+    })
+    const h = headers(root)[0] // f1, frozen
+    expect(h.style.position).toBe('sticky')
+    expect(h.style.top).toBe('0px')
+    expect(h.style.left).toBe('56px')
+    const bodyCell = root.querySelector('.meta-grid__cell') as HTMLElement // r1/f1, frozen
+    expect(Number(h.style.zIndex)).toBeGreaterThan(Number(bodyCell.style.zIndex))
+  })
+
+  it('a first-body-row frozen cell does NOT carry the header sticky-top (left only, no top)', () => {
+    const root = mountGrid({
+      rows: [{ id: 'r1', version: 1, data: { f1: 'A' } }],
+      frozenLeftColumnIds: ['f1'],
+      columnWidths: { f1: 100 },
+      enableMultiSelect: false,
+    })
+    const bodyCell = root.querySelector('.meta-grid__cell') as HTMLElement
+    expect(bodyCell.style.position).toBe('sticky')
+    expect(bodyCell.style.left).toBe('56px')
+    expect(bodyCell.style.top).toBe('') // never vertically sticky — only the header row is
   })
 })
 
