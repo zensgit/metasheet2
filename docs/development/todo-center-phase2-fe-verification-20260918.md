@@ -1059,3 +1059,176 @@ PR,就没有 PR body 可以真正把这段话写进去;提前在源码或本 MD 
 BLOCKED-WITH-REASON(待开 PR,非代码/文档缺口,不可在当前硬规矩下继续推进)。至此,门审
 `impl-gate-B2-round1-20260918.md` 点名的 1 P1 + 1 P2 + 8 P3 共 10 条,除 P3-8 外的 9 条均已在修复轮
 1-4 里逐条关闭。
+
+## 14. 开 PR 前 required 复现(2026-09-18)
+
+在为本分支开 Draft PR 之前,逐字复现 required 检查(feedback_ci_green_means_run_ci_steps.md 纪律:
+照 CI 实际跑的命令跑,不臆测)。三条命令覆盖 repo-root type-check、`packages/core-backend` 全量
+vitest、`apps/web` required web-tests 门(`apps/web/scripts/run-required-web-tests.sh`)。第三条命令
+命中一条既有的 mechanical pattern census 守卫(`tests/approval-member-identity-coverage-enumeration.spec.ts`
+TIER B),定位、修复、复跑的完整记录见 §14.2-§14.5。
+
+### 14.1 三条命令与结果(修复前)
+
+```
+$ pnpm type-check
+...
+EXIT=0
+```
+
+```
+$ cd packages/core-backend && CI=true npx vitest run --reporter=dot
+ Test Files  933 passed | 175 skipped (1108)
+      Tests  14720 passed | 1604 skipped (16324)
+EXIT=0
+```
+
+```
+$ cd apps/web && npx vitest run tests/approval-member-identity-coverage-enumeration.spec.ts
+ ❯ tests/approval-member-identity-coverage-enumeration.spec.ts (16 tests | 1 failed)
+   ❯ ... every raw-id-render pattern occurrence ... has an explicit ALLOWLIST triage entry ...
+     → untriaged raw-id-render pattern hit(s) -- each needs an explicit ALLOWLIST entry (VALUES-FREE-FIXED or OUT-OF-SCOPE with a reason):
+src/approvals/components/ApprovalTodoBadge.vue:153 [template-string-id-interp] // `auth-user:${userId}`, `CollabService.ts:8-10` — no tenant/org component). But the deeper
+ Test Files  1 failed (1)
+      Tests  1 failed | 15 passed (16)
+```
+
+`apps/web/scripts/run-required-web-tests.sh` 的最后一段 `exec npx vitest run ... approval-member-identity-coverage-enumeration ... --reporter=dot` 把这个 spec 的 basename 当作一个子串 token 收进同一条 vitest 调用;
+用 `npx vitest run approval-member-identity-coverage-enumeration --reporter=dot`(该脚本用的 token 形状,不带路径/扩展名)单独跑,收集到的仍然只有这一个文件(`Test Files 1 ...(1)`),证明这条 token 在 apps/web 全树里唯一命中该 spec、没有子串碰撞——因此上面这条直接对 spec 文件路径的复现,与 required 脚本对这一个文件实际执行的内容逐字等价,不是近似替代。
+
+### 14.2 命中原文与定位
+
+失败断言的 diff 输出:
+
+```
+- Array []
++ Array [
++   "src/approvals/components/ApprovalTodoBadge.vue:153 [template-string-id-interp] // `auth-user:${userId}`, `CollabService.ts:8-10` — no tenant/org component). But the deeper",
++ ]
+```
+
+`src/approvals/components/ApprovalTodoBadge.vue:153` 修复前原文(纯注释,非渲染代码):
+
+```
+// per-user only, NOT per-org (`buildAuthenticatedUserRoom(userId)` returns the literal string
+// `auth-user:${userId}`, `CollabService.ts:8-10` — no tenant/org component). But the deeper
+```
+
+这段注释是修复轮 4(§13.1)新写入的 docblock 段落,复述 `packages/core-backend/src/services/CollabService.ts:8-10` 的真实实现(已核对):
+
+```
+export function buildAuthenticatedUserRoom(userId: string): string {
+  return `auth-user:${userId}`
+}
+```
+
+TIER B 的 `template-string-id-interp` 模式(`tests/approval-member-identity-coverage-enumeration.spec.ts` 内
+`PATTERNS` 数组)是一条对**每一行原始文本**的词法 grep(`\$\{[^}]*(\.id\b|Ids|\.ids\b|userId|roleId|deptId)[^}]*\}`),
+该文件自己的 docstring(TIER B 段落)明确说明这是"single-LINE lexical grep",且该文件的 `ALLOWLIST`
+分组里两次出现过完全同类的先例——`'a code COMMENT describing the historical pre-fix pattern in prose,
+not a live code'`(约 L339)与 `'a COMMENT line describing the shared-panel template fallback ... prose,
+not a render/assignment site; the scan does not strip comments'`(约 L552)——都是**已被显式登记为
+OUT-OF-SCOPE 的注释命中**,不是该守卫要跳过注释扫描。也就是说,扫描器按设计不剥离注释:命中原因不
+是 bug,是这条新写的 docblock 恰好用 `` `auth-user:${userId}` `` 这个反引号+`${}`的写法转述了源码里
+真实存在的模板字符串插值,字面撞上了这条模式。
+
+### 14.3 处置:选 (a),重写注释而非登记 ALLOWLIST
+
+任务给出的二选一里选了 **(a)——重写这一行注释,保留原意但不再出现 `${...}` 插值形态**,没有选 (b)
+(加一条 OUT-OF-SCOPE 条目)。理由:(a) 是更小的改动面——不用碰这份对 ALLOWLIST 陈旧性有专门断言
+(`every ALLOWLIST entry still appears in its file`)的守卫文件本身,不给这份已经有 500+ 行的 ALLOWLIST
+再添一条需要长期维护的登记项;这行注释要表达的事实(`buildAuthenticatedUserRoom` 返回的房间名没有
+tenant/org 分量)在不使用模板字面量记号的前提下同样能准确转述,不存在"必须用 `${}` 形态才说得清楚"
+的情况——不像 §14.2 提到的两条先例(它们是在转述"历史上出现过的" 或 "别的文件里现存的" 真实代码写
+法,原样引用是论证本身的一部分);这里没有这种约束,纯属可换写法。因此按任务指示的优先级选 (a)。
+
+改动(仅这一处,`apps/web/src/approvals/components/ApprovalTodoBadge.vue:152-153`):
+
+```diff
+-// per-user only, NOT per-org (`buildAuthenticatedUserRoom(userId)` returns the literal string
+-// `auth-user:${userId}`, `CollabService.ts:8-10` — no tenant/org component). But the deeper
++// per-user only, NOT per-org (`buildAuthenticatedUserRoom(userId)` returns the room name
++// "auth-user:" followed by the raw userId, `CollabService.ts:8-10` — no tenant/org component). But the deeper
+```
+
+含义未变(仍然是:房间名 = 字面量前缀 `auth-user:` 拼上原始 `userId`,没有 tenant/org 分量,指向
+`CollabService.ts:8-10`);只是把"贴一段带 `${}` 的模板字面量语法"换成了"用文字描述同一件事",不再
+落入 `template-string-id-interp` 的词法形状。
+
+### 14.4 复跑结果
+
+```
+$ cd apps/web && npx vitest run tests/approval-member-identity-coverage-enumeration.spec.ts
+ Test Files  1 passed (1)
+      Tests  16 passed (16)
+EXIT=0
+```
+
+```
+$ pnpm type-check
+EXIT=0   # vue-tsc -b + 两个 verification tsconfig + core-backend tsc,均无输出即通过
+```
+
+```
+$ cd packages/core-backend && CI=true npx vitest run --reporter=dot
+ Test Files  933 passed | 175 skipped (1108)
+      Tests  14720 passed | 1604 skipped (16324)
+EXIT=0
+```
+
+（三条命令与 §14.1 修复前逐字同源;前两条数字与修复前一致——本条改动零可执行行为,前端/后端两侧
+本就不该因为一处注释重写而变化;第三条 web spec 从 1 failed/15 passed 转为 16 passed。）
+
+### 14.5 同形态注释普查 + 越界检查
+
+按本切片(与 `origin/main` 的合并基 `89f1ecdee2c3b70205a318074824c834bc6a5c7e` 相比)改动的全部
+`.vue`/`.ts` 文件,逐个 grep 是否还有别的注释里出现同样"`${...Id}`/`${...id}`"的模板插值形态：
+
+```
+$ git diff --name-only 89f1ecdee2c3b70205a318074824c834bc6a5c7e..HEAD -- '*.vue' '*.ts'
+apps/web/src/App.vue
+apps/web/src/approvals/components/ApprovalTodoBadge.vue
+apps/web/src/router/appRoutes.ts
+apps/web/src/todo/api.ts
+apps/web/src/todo/useTodoCountsRealtime.ts
+apps/web/src/todo/views/TodoCenterView.vue
+apps/web/tests/App.spec.ts
+apps/web/tests/TodoCenterView.spec.ts
+apps/web/tests/approvalNavTodoBadge.spec.ts
+apps/web/tests/todoApi.spec.ts
+apps/web/tests/todoCountsRealtime.spec.ts
+apps/web/tests/useAuth.spec.ts
+packages/core-backend/src/index.ts
+packages/core-backend/src/routes/approvals.ts
+packages/core-backend/src/routes/todo.ts
+packages/core-backend/src/services/approval-pending-query.ts
+packages/core-backend/src/services/approval-pending-source.ts
+packages/core-backend/src/services/pending-source-registry.ts
+packages/core-backend/src/services/todo-realtime.ts
+packages/core-backend/tests/todo-center-pending-gate/setup.ts
+packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts
+packages/core-backend/tests/unit/approval-todo-counts-dual-publish-wiring.test.ts
+packages/core-backend/tests/unit/todo-realtime.test.ts
+packages/core-backend/vitest.config.ts
+packages/core-backend/vitest.todo-center-pending-gate.config.ts
+
+$ for f in <上面 24 个文件>; do command grep -nE '\$\{[a-zA-Z]*[iI]d\}' "$f"; done
+(无输出 —— 修复后的 ApprovalTodoBadge.vue 本身也不再命中,零其它文件命中)
+```
+
+零其它命中——本切片改动的文件里,`${...Id}`/`${...id}` 这个插值形态只出现过 §14.2 那一处,已按
+§14.3 处置。不需要额外改动。
+
+越界检查(只应改了这一行注释 + 本 MD 追加的这一节):
+
+```
+$ git diff --stat
+ apps/web/src/approvals/components/ApprovalTodoBadge.vue | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+```
+
+（对源码文件的 diffstat;本 MD 自身这次追加的 §14 不计入——同 §12.3/§13.3 已用过的处理方式,对
+一份还在追加中的文档取自己的 diffstat会引用一个还没定型的数字。）源码侧 diff 的两处 `+`/`-` 都以
+`//` 开头,零非注释行改动,零 `packages/core-backend` 改动,零迁移,零锁文,零 workflow 文件改动,
+未触碰 `tests/approval-member-identity-coverage-enumeration.spec.ts` 本身(守卫的扫描逻辑与 ALLOWLIST
+均未改动,符合任务"不得改守卫的扫描逻辑"的约束)。
