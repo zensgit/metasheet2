@@ -12,6 +12,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const manualAdmission = require('../src/multitable/recovery-archive-manual-admission.ts') as typeof import('../src/multitable/recovery-archive-manual-admission')
 const manualRequests = require('../src/multitable/recovery-archive-manual-request.ts') as typeof import('../src/multitable/recovery-archive-manual-request')
 const manualRequestMigration = require('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests.ts') as typeof import('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests')
 const preparedUpload = require('../src/multitable/recovery-archive-prepared-upload.ts') as typeof import('../src/multitable/recovery-archive-prepared-upload')
@@ -471,7 +472,7 @@ try {
   console.log('PASS: presealed-envelope upload interruption/new connection resumes original ten sections without capture; injected authority revocation refuses')
   const actorId = randomUUID()
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
-  const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+  const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -582,7 +583,7 @@ try {
   [admitted.generationId])).rows
   assert.deepEqual(kinds.sort((a, b) => a.reservation_kind.localeCompare(b.reservation_kind)),
     [{ reservation_kind: 'archive_snapshot', n: 1 }, { reservation_kind: 'section_bootstrap', n: 9 }])
-  assert.deepEqual(await admit(admissionRequest), { generationId: admitted.generationId, replayed: true })
+  assert.deepEqual(await admit(admissionRequest), { generationId: admitted.generationId, replayed: true, source: null })
   assert.equal(await generationCount(), beforeAdmission + 1)
   await assert.rejects(admit({ ...admissionRequest, baseId: 'other' }),
     { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
@@ -634,7 +635,7 @@ try {
     }
     assert.equal(blocked, true, 'MANUAL_ADMISSION_MUST_WAIT_AT_FENCE')
     await query('COMMIT')
-    assert.deepEqual(await competingAdmission, { result: { generationId: first.generationId, replayed: true } })
+    assert.deepEqual(await competingAdmission, { result: { generationId: first.generationId, replayed: true, source: null } })
     await admissionClient.query('COMMIT')
     assert.equal(await generationCount(), countBeforeRace + 1)
   } finally {
@@ -644,6 +645,49 @@ try {
     await admissionClient.end()
   }
   console.log('PASS: canonical manual admission atomically binds bootstrap/checkpoint generations; exact replay, revoked actor and scope refusal; failed binding rolls back generation')
+  assert.ok(admitted.source)
+  const recheckSource = createRecoveryArchiveManualSourceRecheck(uploadInput.transaction)
+  const emptySource = manualAdmission.readRecoveryArchiveManualSource(admitted.source)
+  assert.deepEqual(emptySource.sections.records, [])
+  await recheckSource(admitted.source)
+  const sourceWriter = new Client({ ...connection, database })
+  await sourceWriter.connect()
+  try {
+    await sourceWriter.query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
+      VALUES ('manual-source-field','no-genesis','Synthetic','string','{}',1)`)
+    await sourceWriter.query(`INSERT INTO meta_records(id,sheet_id,data)
+      VALUES ('manual-source-record','no-genesis','{"manual-source-field":"before"}')`)
+    await assert.rejects(recheckSource(admitted.source), { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED' })
+    assert.deepEqual(manualAdmission.readRecoveryArchiveManualSource(admitted.source).sections.records, [])
+    assert.deepEqual(await admit(admissionRequest), { generationId: admitted.generationId, replayed: true, source: null })
+    const freshSource = await admit({ ...admissionRequest, requestId: randomUUID() })
+    assert.ok(freshSource.source)
+    const original = manualAdmission.readRecoveryArchiveManualSource(freshSource.source)
+    assert.equal(original.sections.records.length, 1)
+    assert.deepEqual((original.sections.records[0] as { data: unknown }).data, { 'manual-source-field': 'before' })
+    const mutableRecord = original.sections.records[0] as { data: unknown }
+    mutableRecord.data = { 'manual-source-field': 'caller-mutated' }
+    assert.deepEqual((manualAdmission.readRecoveryArchiveManualSource(freshSource.source).sections.records[0] as { data: unknown }).data,
+      { 'manual-source-field': 'before' })
+    await recheckSource(freshSource.source)
+    await sourceWriter.query(`UPDATE meta_records SET data='{"manual-source-field":"after"}',version=version+1
+      WHERE id='manual-source-record'`)
+    await assert.rejects(recheckSource(freshSource.source), { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED' })
+    await sourceWriter.query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+    await assert.rejects(recheckSource(freshSource.source), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+  } finally {
+    await sourceWriter.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+    await sourceWriter.end()
+  }
+  await assert.rejects(recheckSource({} as Parameters<typeof recheckSource>[0]),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE' })
+  const shortSource = await createRecoveryArchiveManualAdmission(uploadInput.transaction,
+    { ...admissionPolicy, leaseSeconds: 1, expiresAfterSeconds: 30 })({ ...request, requestId: randomUUID() })
+  assert.ok(shortSource.source)
+  await query('SELECT pg_sleep(1.1)')
+  await assert.rejects(recheckSource(shortSource.source),
+    { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE' })
+  console.log('PASS: in-fence live source snapshots; empty/nonempty; detached copies; schema/record drift and revocation refuse; replay never recaptures; forged source refused')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

@@ -387,3 +387,25 @@ full sealed-export S5 pass. Tests use only the owned synthetic cluster; cleanup
 requires database/connections zero and cluster removal. This evidence proves
 reservation admission only, not consistent source sealing, archive publication,
 HTTP/UI readiness or use of customer storage.
+
+## In-Fence Source Snapshot Acceptance
+
+Local successor to `2c1ace18f57ed384b49b85cac9333ddc73e98b55` adds source
+snapshot handles to fresh admission, while exact replay returns no source handle.
+The real-DB driver proves empty and nonempty snapshots, detached-copy mutation
+isolation, and unchanged-source recheck. A separate connection adds schema/record
+data after the empty capture and later changes an existing record/version: each
+old handle refuses with `RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED` and retains its
+original data. A new request can capture the later state; the old request cannot.
+User deactivation, fabricated handles and elapsed generation lease also refuse.
+
+Removing the digest comparison causes the schema/record drift negative to fail
+with `Missing expected rejection`; after restoration the complete owned-cluster
+driver passes. Existing 30-migration replay, 59+127 real-DB neighbors and all prior
+acceptance remain included. Focused source/worker/crypto tests pass 115/115;
+acceptance TypeScript, scoped module ESLint, static wiring and S5 are also checked.
+Owned database/connections and temporary cluster are removed after either result.
+
+These are in-process source and recheck proofs, not a crash-resumable plaintext
+store, verified attachment bytes, sealed source revisions or complete publication.
+No HTTP route, flag, customer storage or deployment was introduced.

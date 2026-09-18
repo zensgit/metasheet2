@@ -236,3 +236,24 @@ This is reservation admission, not source capture or a public command. Source
 capture/checkpoint sealing still needs an exact in-fence source boundary and drift
 revalidation before crypto/publication. A previously reserved generation cannot be
 blindly populated from a later live snapshot. No HTTP route calls the factory yet.
+
+### First-Attempt Source Snapshot
+
+Fresh admission now reads the existing seven relational projections and attachment
+metadata in one MVCC statement while the admission transaction still holds the
+canonical sheet fence. The internal result includes an opaque in-process source
+handle. Its original scope, owner tuple, snapshot and canonical digest are private;
+consumers receive detached copies, not a mutable reference to the stored snapshot.
+Exact request replay returns `source=null`, never a new capture of later data.
+
+The canonical runtime source-recheck factory reacquires the sheet fence, checks
+current authority and writer-block/active-generation ownership, then compares a
+fresh projection with the original canonical digest. Drift, revocation, expired
+ownership and fabricated handles refuse. This helper does not mint a publication
+token and does not guarantee that data cannot change after its transaction ends.
+
+The handle is intentionally not durable or public. Loss before prepared ciphertext
+has been committed cannot be repaired by recapturing later data under that generation.
+The caller must fail closed. Durable ciphertext resume remains a separate path.
+Attachment metadata is not an immutable object receipt, and full permission evidence,
+source sealing, crypto/provider composition and final publication still remain OPEN.

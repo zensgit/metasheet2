@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { acquireCanonicalSheetFence, assertNoActiveWriterBlock } from './canonical-sheet-fence'
 import { lockActiveRecoveryArchiveKeyForReference } from './recovery-archive-key-registry'
 import { bindRecoveryArchiveManualRequest, readRecoveryArchiveManualRequest,
@@ -8,6 +8,57 @@ import { allocateRecoveryArchiveCheckpointIdentities, persistRecoveryArchiveChec
 import { computeRecoveryArchiveSourceVectorHash, computeRecoveryArchiveCheckpointVectorHash } from './recovery-archive-source-vector'
 import type { RecoveryArchivePreparedUploadInput } from './recovery-archive-prepared-upload'
 import type { SealQuery } from './recovery-archive-seals'
+import { readRecoveryArchiveCaptureSource, type RecoveryArchiveCaptureSource } from './recovery-archive-relational-source'
+import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
+import { readRecoveryArchivePreparedCapture, type RecoveryArchivePreparedCaptureOwner } from './recovery-archive-prepared-capture'
+
+const sourceBrand = Symbol('manual-capture-source')
+export interface RecoveryArchiveManualSource { readonly [sourceBrand]: true }
+export interface RecoveryArchiveManualAdmissionResult {
+  generationId: string
+  replayed: boolean
+  source: RecoveryArchiveManualSource | null
+}
+const sources = new WeakMap<RecoveryArchiveManualSource, {
+  identity: RecoveryArchiveManualRequest
+  owner: RecoveryArchivePreparedCaptureOwner
+  snapshot: RecoveryArchiveCaptureSource
+  hash: string
+}>()
+
+function sourceHash(source: RecoveryArchiveCaptureSource): string {
+  return createHash('sha256').update(canonicalizeRecoveryArchiveJson(source)).digest('hex')
+}
+
+/** In-memory plaintext for the first attempt only; never a public response or a durable restart proof. */
+export function readRecoveryArchiveManualSource(source: RecoveryArchiveManualSource): RecoveryArchiveCaptureSource {
+  const entry = sources.get(source)
+  if (!entry) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+  return structuredClone(entry.snapshot)
+}
+
+/** Recheck after external preparation, under the same fence, without replacing the original snapshot. */
+export function bindRecoveryArchiveManualSourceRecheck(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
+) {
+  return async (source: RecoveryArchiveManualSource): Promise<void> => {
+    const entry = sources.get(source)
+    if (!entry) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+    await transaction(async (query) => {
+      await acquireCanonicalSheetFence(query, entry.identity.sheetId)
+      let allowed = false
+      try { allowed = await authorize(query, entry.identity) } catch {
+        throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
+      }
+      if (!allowed) throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
+      await assertNoActiveWriterBlock(query, entry.identity.sheetId)
+      await readRecoveryArchivePreparedCapture(query, entry.owner)
+      const current = await readRecoveryArchiveCaptureSource(query, entry.identity)
+      if (sourceHash(current) !== entry.hash) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED')
+    })
+  }
+}
 
 export interface RecoveryArchiveManualAdmissionPolicy {
   keyId: string
@@ -16,8 +67,8 @@ export interface RecoveryArchiveManualAdmissionPolicy {
   expiresAfterSeconds: number
 }
 
-/** Internal reservation admission only. Policy and identity are server-owned, never HTTP-body aliases.
- * No plaintext is captured, nonce reserved, object uploaded or catalog entry published here.
+/** Internal admission/source snapshot. Policy and identity are server-owned, never HTTP-body aliases.
+ * No nonce is reserved, object uploaded or catalog entry published here.
  */
 export function bindRecoveryArchiveManualAdmission(
   transaction: RecoveryArchivePreparedUploadInput['transaction'],
@@ -28,7 +79,7 @@ export function bindRecoveryArchiveManualAdmission(
   if (!Number.isSafeInteger(policy.leaseSeconds) || policy.leaseSeconds <= 0
     || !Number.isSafeInteger(policy.expiresAfterSeconds) || policy.expiresAfterSeconds < policy.leaseSeconds
     || policy.expiresAfterSeconds > 2147483647) throw new Error('RECOVERY_ARCHIVE_MANUAL_POLICY_INVALID')
-  return async (input: RecoveryArchiveManualRequest): Promise<{ generationId: string; replayed: boolean }> => {
+  return async (input: RecoveryArchiveManualRequest): Promise<RecoveryArchiveManualAdmissionResult> => {
     const identity = Object.freeze({ ...input })
     return transaction(async (query) => {
       await acquireCanonicalSheetFence(query, identity.sheetId)
@@ -41,7 +92,7 @@ export function bindRecoveryArchiveManualAdmission(
       }
       if (!allowed) throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
       const existing = await readRecoveryArchiveManualRequest(query, identity)
-      if (existing !== null) return { generationId: existing, replayed: true }
+      if (existing !== null) return { generationId: existing, replayed: true, source: null }
       await lockActiveRecoveryArchiveKeyForReference(query, {
         keyId: policy.keyId, expectedRowVersion: policy.keyRowVersion,
       })
@@ -77,7 +128,11 @@ export function bindRecoveryArchiveManualAdmission(
       if (repeat) await persistRecoveryArchiveCheckpointReservations(query, plan, allocated)
       else await persistRecoveryArchiveSnapshotReservations(query, plan, allocated)
       await bindRecoveryArchiveManualRequest(query, identity, generationId)
-      return { generationId, replayed: false }
+      const snapshot = await readRecoveryArchiveCaptureSource(query, identity)
+      const source: RecoveryArchiveManualSource = Object.freeze({ [sourceBrand]: true as const })
+      sources.set(source, { identity, owner: { generationId, ownerKind: plan.ownerKind,
+        ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot) })
+      return { generationId, replayed: false, source }
     })
   }
 }

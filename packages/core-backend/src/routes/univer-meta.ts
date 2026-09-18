@@ -78,7 +78,7 @@ import {
 } from '../multitable/recovery-plan-authorization'
 import { bindRecoveryArchiveWorkerAuthorization, bindRecoveryArchiveScopeAuthorization } from '../multitable/recovery-archive-worker-authorization'
 import { bindRecoveryArchiveManualContinuation } from '../multitable/recovery-archive-manual-continuation'
-import { bindRecoveryArchiveManualAdmission, type RecoveryArchiveManualAdmissionPolicy } from '../multitable/recovery-archive-manual-admission'
+import { bindRecoveryArchiveManualAdmission, bindRecoveryArchiveManualSourceRecheck, type RecoveryArchiveManualAdmissionPolicy } from '../multitable/recovery-archive-manual-admission'
 import type { RecoveryArchivePreparedUploadInput } from '../multitable/recovery-archive-prepared-upload'
 import { bindRecoveryArchiveDerivedProcessor, runRecoveryArchiveDerivedTransaction } from '../multitable/recovery-archive-derived-processor'
 import type { RecoveryArchiveDerivedWork } from '../multitable/recovery-archive-derived-effects'
@@ -7247,6 +7247,13 @@ export function createRecoveryArchiveManualAdmission(
   return bindRecoveryArchiveManualAdmission(transaction, bindRecoveryArchiveScopeAuthorization(
     (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
   ), policy)
+}
+
+/** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualSourceRecheck(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualSourceRecheck(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
 }
 
 /** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
