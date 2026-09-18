@@ -185,7 +185,7 @@ decision into a C-3 closure mid-transaction when the business evaluation inside 
 | `redeemCancelRoundInTxn` (private) | `:8998` (was `:8996`) | §3 C-2 steps ④–⑤; §14.2 判据 II |
 | `AttendanceCancellationExecutionPort` + its singleton registry (`register`/`unregister`/`get`/`has`/`clear`) | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` (new file) | §3 C-1 「审批侧只调用」 — modelled line-for-line on the existing `workday-calendar-port.ts` host↔plugin pattern, the one precedent for approval calling INTO attendance (verification §3.11.1) |
 | `deriveCancelRoundW4OperationIdV1(roundId)` | same file, `:69` (re-checked post-merge, unchanged despite the file's own +94-line growth — the insertions landed below this declaration) | the W4 replay key (§14.1's operation-registry contract) — the round's own id, which is why it must be a UUID (the P1 §3.12.1 fixed) |
-| the pre-read + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + rollout-lock-first + fail-closed re-assert | `ApprovalProductService.ts:10506-10556` (was `:10496-10541`; see §4.2 below and §10) | §3 C-2 全局锁序 |
+| the pre-read + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + rollout-lock-first + fail-closed re-assert | `ApprovalProductService.ts:10506-10557` (was `:10496-10541`; see §4.2 below and §10) | §3 C-2 全局锁序 |
 | outlet #5′ branch + early `return` | `:12166-12233` (was `:12150-12220`; see §4.1 and §2.3 above) | §14.2 判据 IV |
 
 ### 3.2 Error codes this slice introduces, each traced to the throw site (this tree)
@@ -265,23 +265,31 @@ inconsistency was itself flagged as an out-of-scope finding, §3.3d), and that `
 .org_id` is **NOT** immutable (4 `EXCLUDED`-writer upserts), so the post-lock re-assert on it is
 load-bearing, not cosmetic.
 
-**What this tree does about it (`ApprovalProductService.ts:10506-10556`, was `:10496-10541` —
+**What this tree does about it (`ApprovalProductService.ts:10506-10557`, was `:10496-10541` —
 re-extracted at HEAD `d462677bd` for this 定稿 pass; see §10 for the full drift account)**:
 
 ```
 10506  let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
 10513  client = await pool.connect()
 10522  rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)   // BEFORE BEGIN
-10508→10524  if (rolloutLock.kind === 'required') {
+10524  if (rolloutLock.kind === 'required') {
 10525    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
 10528    await acquireAttendanceCalculationRolloutLock(client, orgKey, 'shared')                     // FIRST lock
-10533→10534  } else { await client.query('BEGIN') }
+10533  } else {
+10534    await client.query('BEGIN')
+10535  }
 10538  … FOR UPDATE on approval_instances …                                                          // SECOND lock
 10550  const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)  // fail-closed re-assert
 10551  if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
-10555    'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',  // inside `throw new ServiceError(…, 409, …)` at :10552-10556
-10556  }
+10552    throw new ServiceError(
+10555      'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',
+10556    )
+10557  }
 ```
+
+(Every line number above is this document's OWN fresh `grep -n`/`sed -n` extract at HEAD `d462677bd`
+— not the `a02930896` original with arrows grafted on; the `a02930896` numbers this replaces are
+tabulated once, in §10, rather than interleaved into a source excerpt a second time.)
 
 The extra ~10-15 line growth between the pre-read and the re-assert (vs. the original `a02930896`
 snippet) is u3's own `dispatchCancellationOutcome` hoist (§3.18's surface-half plumbing), inserted in
@@ -366,7 +374,7 @@ flagged for owner registration in §7/§8 below, not ordered by invention.
 | Seam | File:line | What it does |
 |---|---|---|
 | Rollout-lock resolver (the "same predicate, different lock mode" seam) | `packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts` — `classifyAttendanceRequestForInstanceV1(client, instance, { lock })`, thin `classifyAndLockAttendanceRequestForInstance` wrapper pinning `lock:'for_update'` | the ONE instance→request predicate, parameterised rather than duplicated (§4.2) |
-| `dispatchAction` entry restructure | `ApprovalProductService.ts:10506-10556` (was `:10496-10541`; §10) | pre-read, conditional SERIALIZABLE, rollout-lock-first, fail-closed re-assert (§4.2) |
+| `dispatchAction` entry restructure | `ApprovalProductService.ts:10506-10557` (was `:10496-10541`; §10) | pre-read, conditional SERIALIZABLE, rollout-lock-first, fail-closed re-assert (§4.2) |
 | Outlet #5′ (new anchor) | `ApprovalProductService.ts:12166-12233` (was `:12150-12220`; §10) (the `if (resolution.status === 'approved' && isCancelRoundInstance(instance))` block at `:12166` through its `closeCancelRoundSystemTerminalInTxn` call and early `return`, closing brace at `:12233`) | judgment IV's branch decision + persistence close; the fall-through for `redeem` (§2.3) |
 | C-1 port (new file) | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` | `AttendanceCancellationExecutionPort` registry — modelled on `core/workday-calendar-port.ts` (§3.1); the registered surface is the WHOLE `AttendanceRequestOperationBoundaryV1`, deliberately not narrowed, per lock §3 C-1's "仅移交连接与事务生命周期的所有权" |
 | Attendance cancel adapter, lock reorder | `plugins/plugin-attendance/index.cjs:35107` (`executeRequestCancel`), `approval_instances FOR UPDATE` now at `:35128`, `attendance_requests FOR UPDATE` now at `:35137` | §4.3 |
@@ -594,7 +602,7 @@ whose specific cited line held.
 | `closeCancelRoundSystemTerminalInTxn` def | `:8878` | `:8880` | `grep -n "private async closeCancelRoundSystemTerminalInTxn"` |
 | `redeemCancelRoundInTxn` def | `:8996` | `:8998` | `grep -n "private async redeemCancelRoundInTxn"` |
 | C-2 success writer (`SET outcome = 'applied'`) | `:9109`, block `:9106-9112` | `:9120`, block `:9118-9131` | `sed -n` around `outcome = 'applied'` |
-| `dispatchAction` restructure — pre-read var → re-assert throw | `:10496-10541` | `:10506-10556` (method itself opens `:10494`) | `grep -n` on each of: `let rolloutLock`, `BEGIN ISOLATION LEVEL SERIALIZABLE`, `acquireAttendanceCalculationRolloutLock(`, the `FOR UPDATE` literal, the re-assert call, `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` |
+| `dispatchAction` restructure — pre-read var → re-assert throw | `:10496-10541` | `:10506-10557` (method itself opens `:10494`) | `grep -n` on each of: `let rolloutLock`, `BEGIN ISOLATION LEVEL SERIALIZABLE`, `acquireAttendanceCalculationRolloutLock(`, the `FOR UPDATE` literal, the re-assert call, `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` |
 | `bulkReassignApprovals`'s `approval_instances FOR UPDATE` | `:9509` (this doc's own prior correction of verification MD's `:9346`) | `:9483` | `grep -n "async bulkReassignApprovals("` then `sed -n` forward to the `FOR UPDATE` literal |
 | `pending → rejected` round-outcome write | `:11750` | `:11766` | `grep -n "outcome = 'rejected', ended_at"` |
 | `pending → withdrawn` round-outcome write | `:11263` | `:11279` | `grep -n "outcome = 'withdrawn', ended_at"` |
