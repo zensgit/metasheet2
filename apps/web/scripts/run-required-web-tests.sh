@@ -1734,7 +1734,18 @@ exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spe
 # and `2699e0a07` shows exactly that one addition and nothing else. `approvalTemplateGroupsClient`
 # and `ApprovalTemplateGroupsPanel` were NOT on this line yet; they landed on it later, in
 # `1e55c39b8` (author date 2026-09-18 07:10:50) and `bc66e283e` (author date 2026-09-18 07:33:18)
-# respectively (`git log -S'<token>' -- <this file>` on each token). A later rebase produced
+# respectively. The file-level `git log -S'<token>' -- <this file>` cited by the previous pass
+# cannot discriminate an exec-line landing from a comment-only mention of the same token, so the
+# claim above is backed by the exec-line form instead, run once on the named commit and once on
+# its parent:
+#     git show <sha>:<this file> | grep '^exec npx vitest run' | grep -c '<token>'
+# Verbatim results (measured 2026-09-19): for `approvalTemplateGroupsClient`, 0 at `1e55c39b8^`
+# and 1 at `1e55c39b8`; for `ApprovalTemplateGroupsPanel`, 0 at `bc66e283e^` and 1 at
+# `bc66e283e`. One caveat on the words "this line": at `bc66e283e` the file still carried TWO
+# exec lines (`git show bc66e283e:<this file> | grep -n '^exec npx vitest run'` prints 1186 and
+# 1227) and the token landed on 1227 — the dead duplicate, not the live first-reached line. For
+# the duplicate era "this line" therefore means the dead copy produced by the merge described
+# next. A later rebase produced
 # `2ef7add98` (committer date 2026-09-18 20:56), a rebase replay of
 # that same commit whose three-way merge against a sibling edit to this file kept BOTH versions of
 # the line instead of erroring — the duplicate (dead) copy, not the original, is what carried the
