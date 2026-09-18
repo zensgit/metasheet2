@@ -530,6 +530,27 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     // a group-linkage lookup. Mutation target: make this branch consult group state (eg call
     // listApprovalTemplateGroups() to decide tag visibility) → this assertion goes red.
     expect(listApprovalTemplateGroupsSpy).not.toHaveBeenCalled()
+
+    // Gate impl-gate-A4-round1-20260918.md P3-3: the assertion above is "asserts not called" with
+    // no SAME-FILE positive control proving the spy would register a call if one were made — i.e.
+    // nothing here rules out the assertion passing vacuously because the mock wiring itself is
+    // broken (wrong module path, a hoisting break, a stale import), independent of what
+    // `TemplateCenterView.vue` actually does.
+    //
+    // A call-SITE positive control (proving THIS component calls the function on some other path)
+    // cannot be built in this file: `TemplateCenterView.vue`'s own script never imports
+    // `listApprovalTemplateGroups` at all (only `TemplateGroupSections.vue` does, for the phase-3
+    // grouped view) — see that real call-site positive control at
+    // `approvalTemplateCenterSections.spec.ts`'s `expect(listApprovalTemplateGroupsSpy)
+    // .toHaveBeenCalledTimes(1)` assertion, same spy function, different component.
+    //
+    // What CAN be checked here, in this file, is that the mock wiring is the live binding rather
+    // than a dead one: call the mocked module's own export directly and confirm it reaches this
+    // exact spy instance. This does not prove the component calls it — it proves that if the
+    // component ever did, `not.toHaveBeenCalled()` above would not pass vacuously.
+    const { listApprovalTemplateGroups } = await import('../src/approvals/api')
+    await listApprovalTemplateGroups()
+    expect(listApprovalTemplateGroupsSpy).toHaveBeenCalledTimes(1)
   })
 
   it('renders visibility scope summary per row', async () => {
