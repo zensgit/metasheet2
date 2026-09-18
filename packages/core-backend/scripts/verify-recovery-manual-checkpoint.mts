@@ -1,7 +1,7 @@
 /** Synthetic full-schema checkpoint acceptance; never use a customer database. */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { createCipheriv, randomBytes, randomUUID } from 'node:crypto'
+import { createCipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -18,6 +18,8 @@ const manualRequestMigration = require('../src/db/migrations/zzzz20260918140000_
 const preparedUpload = require('../src/multitable/recovery-archive-prepared-upload.ts') as typeof import('../src/multitable/recovery-archive-prepared-upload')
 const archiveCrypto = require('../src/multitable/recovery-archive-crypto.ts') as typeof import('../src/multitable/recovery-archive-crypto')
 const archiveContract = require('../src/multitable/recovery-archive-contract.ts') as typeof import('../src/multitable/recovery-archive-contract')
+const sectionRows = require('../src/multitable/recovery-archive-section-rows.ts') as typeof import('../src/multitable/recovery-archive-section-rows')
+const manifest = require('../src/multitable/recovery-archive-manifest.ts') as typeof import('../src/multitable/recovery-archive-manifest')
 const prepared = require('../src/multitable/recovery-archive-prepared-capture.ts') as typeof import('../src/multitable/recovery-archive-prepared-capture')
 const preparedMigration = require('../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures.ts') as typeof import('../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures')
 const bootstrap = require('../src/multitable/recovery-archive-section-bootstrap.ts') as typeof import('../src/multitable/recovery-archive-section-bootstrap')
@@ -688,6 +690,99 @@ try {
   await assert.rejects(recheckSource(shortSource.source),
     { message: 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE' })
   console.log('PASS: in-fence live source snapshots; empty/nonempty; detached copies; schema/record drift and revocation refuse; replay never recaptures; forged source refused')
+  const continuation = async () => {
+    const identity = { ...admissionRequest, requestId: randomUUID() }
+    const result = await admit(identity)
+    assert.ok(result.source)
+    const row = (await query(`SELECT owner_kind,owner_id,owner_fence::text,source_vector_hash,
+      anchor_operation_id::text,anchor_seq::text,checkpoint_id,key_id
+      FROM meta_recovery_archives WHERE generation_id=$1::uuid`, [result.generationId])).rows[0]
+    return { identity, source: result.source,
+      owner: { generationId: result.generationId, ownerKind: row.owner_kind, ownerId: row.owner_id,
+        ownerFence: row.owner_fence, sourceVectorHash: row.source_vector_hash },
+      binding: { formatVersion: 1, generationId: result.generationId, workspaceId: identity.workspaceId,
+        baseId: identity.baseId, sheetId: identity.sheetId, anchorOperationId: row.anchor_operation_id,
+        anchorSeq: row.anchor_seq, checkpointId: row.checkpoint_id, keyId: row.key_id,
+        aeadAlgorithm: 'aes-256-gcm' as const },
+      transactionDepth: { currentTransactionDepth: () => 0 } }
+  }
+  const first = await continuation()
+  const other = await continuation()
+  let captures = 0
+  let produced = 0
+  let reserved = 0
+  const sourceKey = randomBytes(32)
+  const custody: import('../src/multitable/recovery-archive-crypto').RecoveryArchiveKeyCustodyAdapter = {
+    async produceGenerationDek() {
+      produced++
+      return { dek: Buffer.from(sourceKey), wrappedDekId: 'synthetic-source-wrapped', wrappedDek: randomBytes(64) }
+    },
+    async unwrapGenerationDek() { throw new Error('SYNTHETIC_UNWRAP_FORBIDDEN') },
+    async deriveDekFingerprint({ dek }) {
+      return createHmac('sha256', Buffer.from(dek)).update(archiveCrypto.RECOVERY_ARCHIVE_DEK_FINGERPRINT_DOMAIN).digest('hex')
+    },
+    async macManifestRoot() { throw new Error('SYNTHETIC_PUBLICATION_FORBIDDEN') },
+    async verifyManifestRootMac() { throw new Error('SYNTHETIC_PUBLICATION_FORBIDDEN') },
+  }
+  const capture = async (source: import('../src/multitable/recovery-archive-relational-source').RecoveryArchiveCaptureSource) => {
+    captures++
+    return { binding: first.binding, transactionDepth: first.transactionDepth, keyCustody: custody,
+      dekSource: { kind: 'produce' as const },
+      // The other three sections are synthetic only, not attachment/permission/publication proof.
+      sections: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => {
+        const rows = source.sections[sectionName as keyof typeof source.sections]
+        const plaintext = rows === undefined ? '[]' : manifest.canonicalizeRecoveryArchiveSectionRows(
+          sectionName, sectionRows.buildRecoveryArchiveSectionRows(sectionName, rows)).canonicalJson
+        return { sectionName, plaintext: Buffer.from(plaintext), nonce: randomBytes(12) }
+      }),
+      reserveNonces: async (rows: readonly unknown[]) => { reserved += rows.length },
+    }
+  }
+  const upload = async () => { throw new Error('SYNTHETIC_SOURCE_UPLOAD_INTERRUPTION') }
+  try {
+    await assert.rejects(manual({ ...first, source: null, capture, upload }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE' })
+    await assert.rejects(manual({ ...first, source: other.source, capture, upload }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_BINDING_MISMATCH' })
+    assert.throws(() => manualAdmission.takeRecoveryArchiveManualSource(first.source,
+      { ...first.identity, actorId: randomUUID() }, first.owner, first.binding),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_BINDING_MISMATCH' })
+    assert.throws(() => manualAdmission.takeRecoveryArchiveManualSource(first.source,
+      first.identity, first.owner, { ...first.binding, anchorSeq: '999999' }),
+    { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_BINDING_MISMATCH' })
+    assert.equal(captures, 0)
+    await assert.rejects(manual({ ...other, capture: async (source) => {
+      const plan = await capture(source)
+      plan.binding = other.binding
+      plan.sections.find((section) => section.sectionName === 'records')!.plaintext = Buffer.from('[]')
+      return plan
+    }, upload }), { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH' })
+    assert.equal(produced, 0)
+    await assert.rejects(manual({ ...other, capture, upload }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE' })
+    await assert.rejects(manual({ ...first, capture, upload }), { message: 'SYNTHETIC_SOURCE_UPLOAD_INTERRUPTION' })
+    assert.equal(produced, 1)
+    assert.equal(reserved, 10)
+    const captureCount = captures
+    let resumedSections = 0
+    await manual({ ...first, source: null, capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') },
+      upload: async (envelope, section) => {
+        const plaintext = archiveCrypto.openRecoveryArchiveSection({ binding: { ...envelope.binding,
+          sectionName: section.sectionName, plaintextSha256: section.plaintextSha256 },
+        dek: sourceKey, nonce: section.nonce, ciphertext: section.ciphertext, authTag: section.authTag })
+        const original = manualAdmission.readRecoveryArchiveManualSource(first.source).sections
+        const rows = original[section.sectionName as keyof typeof original]
+        if (rows !== undefined) assert.equal(Buffer.from(plaintext).toString('utf8'),
+          manifest.canonicalizeRecoveryArchiveSectionRows(section.sectionName,
+            sectionRows.buildRecoveryArchiveSectionRows(section.sectionName, rows)).canonicalJson)
+        resumedSections++
+      } })
+    assert.equal(resumedSections, 10)
+    assert.equal(captures, captureCount)
+    assert.equal(produced, 1)
+    assert.equal(reserved, 10)
+  } finally { sourceKey.fill(0) }
+  console.log('PASS: source generation binding and single use; tampered relational plaintext refused before custody; interrupted first seal resumes ten authenticated original sections without source or recapture')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

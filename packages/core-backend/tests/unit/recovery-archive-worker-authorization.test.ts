@@ -49,11 +49,12 @@ describe('production archive worker authorization', () => {
         ciphertext: 'AQ==', authTag: Buffer.alloc(16).toString('base64'), plaintextSha256: 'b'.repeat(64),
       })),
     }))
+    let hasPrepared = true
     const query = async (text: string, params?: unknown[]) => {
       if (text.includes('pg_current_xact_id')) return { rows: [{ xid: '1' }] }
       if (text.includes('FROM public.meta_recovery_archives')) return { rows: [{ generation_id: generationId }] }
       if (text.includes('FROM public.meta_recovery_archive_prepared_captures')) {
-        return { rows: [{ payload, payload_sha256: createHash('sha256').update(payload).digest('hex') }] }
+        return { rows: hasPrepared ? [{ payload, payload_sha256: createHash('sha256').update(payload).digest('hex') }] : [] }
       }
       return authorityQuery(text, params)
     }
@@ -88,6 +89,9 @@ describe('production archive worker authorization', () => {
     authorityQuery.mockRejectedValueOnce(new Error('SYNTHETIC_PRIVATE_DATABASE_DETAIL'))
     await expect(run(input)).rejects.toThrow(/^RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE$/)
     expect(upload).not.toHaveBeenCalled()
+    hasPrepared = false
+    await expect(run(input)).rejects.toThrow('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+    expect(capture).not.toHaveBeenCalled()
   })
   test('uses persisted actor and fresh database without any HTTP request', async () => {
     const { state, query } = database()

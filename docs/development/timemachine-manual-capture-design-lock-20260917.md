@@ -257,3 +257,19 @@ has been committed cannot be repaired by recapturing later data under that gener
 The caller must fail closed. Durable ciphertext resume remains a separate path.
 Attachment metadata is not an immutable object receipt, and full permission evidence,
 source sealing, crypto/provider composition and final publication still remain OPEN.
+
+### Source-Bound First Encryption
+
+The internal continuation now consumes a first-attempt source handle exactly once,
+matching actor, workspace/base/sheet, generation owner and the complete reserved
+crypto binding. It snapshots the handle and callback before asynchronous work.
+Before custody or nonce reservation, all seven relational plaintext sections must
+exactly match canonical bytes derived from the original detached source snapshot.
+Canonical source/authority rechecks run before and after plan preparation.
+
+Missing, consumed or mismatched handles fail closed when prepared ciphertext is
+absent. Once immutable prepared ciphertext exists, continuation needs no source
+handle and cannot call capture or produce another DEK. These checks do not replace
+final in-fence source sealing/publication checks: source can change after a recheck.
+Attachment pins, permission evidence, production nonce/provider composition and
+catalog publication remain incomplete. No endpoint or feature flag is enabled.

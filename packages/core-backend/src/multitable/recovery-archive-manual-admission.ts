@@ -24,6 +24,8 @@ const sources = new WeakMap<RecoveryArchiveManualSource, {
   owner: RecoveryArchivePreparedCaptureOwner
   snapshot: RecoveryArchiveCaptureSource
   hash: string
+  binding: RecoveryArchivePreparedUploadInput['binding']
+  consumed: boolean
 }>()
 
 function sourceHash(source: RecoveryArchiveCaptureSource): string {
@@ -34,6 +36,22 @@ function sourceHash(source: RecoveryArchiveCaptureSource): string {
 export function readRecoveryArchiveManualSource(source: RecoveryArchiveManualSource): RecoveryArchiveCaptureSource {
   const entry = sources.get(source)
   if (!entry) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+  return structuredClone(entry.snapshot)
+}
+
+/** First encryption attempt only. A lost/consumed source must not be reconstructed from later live data. */
+export function takeRecoveryArchiveManualSource(
+  source: RecoveryArchiveManualSource, identity: Pick<RecoveryArchiveManualRequest, 'actorId' | 'workspaceId' | 'baseId' | 'sheetId'>,
+  owner: RecoveryArchivePreparedCaptureOwner, binding: RecoveryArchivePreparedUploadInput['binding'],
+): RecoveryArchiveCaptureSource {
+  const entry = sources.get(source)
+  if (!entry || entry.consumed) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+  if ((['actorId', 'workspaceId', 'baseId', 'sheetId'] as const).some((key) => identity[key] !== entry.identity[key])
+    || (Object.keys(entry.owner) as (keyof RecoveryArchivePreparedCaptureOwner)[]).some((key) => owner[key] !== entry.owner[key])
+    || (Object.keys(entry.binding) as (keyof typeof binding)[]).some((key) => binding[key] !== entry.binding[key])) {
+    throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_BINDING_MISMATCH')
+  }
+  entry.consumed = true
   return structuredClone(entry.snapshot)
 }
 
@@ -131,7 +149,10 @@ export function bindRecoveryArchiveManualAdmission(
       const snapshot = await readRecoveryArchiveCaptureSource(query, identity)
       const source: RecoveryArchiveManualSource = Object.freeze({ [sourceBrand]: true as const })
       sources.set(source, { identity, owner: { generationId, ownerKind: plan.ownerKind,
-        ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot) })
+        ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot),
+      consumed: false, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
+        baseId: identity.baseId, sheetId: identity.sheetId, anchorOperationId: allocated.snapshotOperationId,
+        anchorSeq: allocated.snapshotSeq, checkpointId, keyId: policy.keyId, aeadAlgorithm: 'aes-256-gcm' } })
       return { generationId, replayed: false, source }
     })
   }

@@ -409,3 +409,33 @@ Owned database/connections and temporary cluster are removed after either result
 These are in-process source and recheck proofs, not a crash-resumable plaintext
 store, verified attachment bytes, sealed source revisions or complete publication.
 No HTTP route, flag, customer storage or deployment was introduced.
+
+## Source-Bound Continuation Acceptance
+
+Local successor to `4f68eb0fdb73255a5033daac1b02ee5286c2bd0a` binds the
+first encryption attempt to the original admission source. The owned PostgreSQL
+driver checks missing handles, different-generation handles, actor/anchor mismatch,
+single consumption, and altered relational plaintext refusal before key custody.
+The positive path uses real AES-GCM with synthetic custody and nonce-reservation
+ports, interrupts the first upload, then resumes all ten authenticated sections
+without a source handle, capture call, second DEK or second nonce reservation.
+Decrypted relational sections are compared to the original snapshot's canonical
+bytes. The other three fixture sections are synthetic, not attachment/permission
+or coverage proofs; the upload callback is not an object-store receipt.
+
+Mutation: removing plaintext equality admitted altered records and reached the
+synthetic upload interruption instead of `RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH`.
+The negative failed precisely; the original guard was restored. Both mutation and
+normal runs remove their owned database/connections and temporary PostgreSQL cluster.
+
+After restoration, the full isolated driver passes, including 30-migration replay
+and existing 59+127 real-DB neighbors. Focused source/worker/crypto is 115/115;
+acceptance TypeScript, scoped source ESLint, static wiring 37/37, full sealed-export
+S5 and diff-check pass. Final driver log:
+`/private/tmp/tm-manual-source-continuation-final.log` (local evidence only).
+
+The remote predecessor was verified at 35 SUCCESS / 1 intentional SKIPPED. During
+this local batch main advanced from `89f1ecdee2c3b70205a318074824c834bc6a5c7e`
+to `62aa4dc4cdf99ecad72f3acb2b34430d8524a3dc`, including shared route changes.
+This batch does not claim then-current-main equivalence, remote successor CI or
+complete manual archive readiness. Integration and publication gates remain separate.
