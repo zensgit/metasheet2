@@ -177,7 +177,7 @@ $ pnpm exec vitest run tests/unit/approval-ci-coverage-enumeration.test.ts
 ```
 No new approval spec/test file is unwired or missing from the allowlist as of this HEAD.
 
-## 5. Required test (20.x) — verbatim reproduction
+## 5. Required test (20.x) — reproduced with only the DB endpoint substituted
 
 Extracted the `approval-real-db-integration` step's run body byte-for-byte from
 `.github/workflows/plugin-tests.yml` (lines 1614–1699, the exact `pnpm --filter @metasheet/core-
@@ -213,10 +213,12 @@ real-DB step above — `.github/workflows/plugin-tests.yml:877-879`'s "Run core-
 the no-DB vitest lane, and phase1's own precedent verification ran both halves, not just the
 real-DB one. `packages/core-backend/package.json`'s `"test"` script is exactly `"vitest"` (already
 pinned by `approval-ci-coverage-enumeration.test.ts`'s self-exemption assertion in §4), so the
-command below is that step verbatim, with `DATABASE_URL` explicitly unset (so every
-`describeIfDatabase` suite takes the same skip branch it does in CI's no-DB job) and `CI=true` set
-to match the GitHub Actions runner's environment (vitest's watch-vs-run-once behaviour is CI-env
-sensitive):
+command below runs that exact script (`pnpm --filter @metasheet/core-backend test`), with two env
+values that differ from the bare CI step line because GitHub Actions supplies them ambiently rather
+than the step setting them itself: `DATABASE_URL` explicitly unset (so every `describeIfDatabase`
+suite takes the same skip branch it does in CI's no-DB job) and `CI=true` set to match the runner's
+environment (vitest's watch-vs-run-once behaviour is CI-env sensitive). Both are disclosed here,
+not silent substitutions:
 
 ```
 $ env -u DATABASE_URL CI=true pnpm --filter @metasheet/core-backend test
@@ -232,14 +234,15 @@ changed by 43 lines) ran and passed on the merged tree:
 ```
 $ grep -c "tests/unit/approval-template-routes.test.ts" /tmp/no-db-lane-run.log
 30
-$ grep -cE '✗ tests/unit/approval-template-routes.test.ts' /tmp/no-db-lane-run.log
-0
 ```
-No failed test anywhere in the run — the only lines matching a bare `FAIL`/`✗` text search are
-green (`✓`) test names whose own descriptions document fail-closed behaviour under test (e.g.
-"both validator loaders FAIL CLOSED when express-validator cannot be resolved"), not actual
-failures; the summary line's `0 failed` (implicit — vitest only prints a "Failed Tests" section
-when one exists, and none appears here) and exit code 0 are the authoritative counts.
+That count establishes the file actually ran (not silently zero-matched). A weaker cross-check —
+`grep -cE "^\s*✗|FAIL " /tmp/no-db-lane-run.log` — hits only 4 lines, and every one of them is a
+green `✓` test whose own name documents fail-closed behaviour under test (e.g. "both validator
+loaders FAIL CLOSED when express-validator cannot be resolved"), not an actual failure; this is a
+weak sanity check, not proof of zero failures on its own. The authoritative zero-failure evidence
+is the summary line itself — `931 passed | 175 skipped (1106)` accounts for the full file count
+with no separate `failed` segment (vitest prints one only when nonzero) — together with exit code
+0.
 
 ## 6. Scope not touched by this rebase
 
