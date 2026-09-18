@@ -898,3 +898,53 @@ advisor 指出:`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` 未导出,§20.
 - link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化。
 - changesRequired #16 后半(A-1 回流 #5852)、P1-3 溢出影响——跨 lane,未变化。
 - §19.4 的"新披露 1"(`EXPECT_DB` 哨兵在 `DATABASE_URL` 缺失时空转)、"新披露 2"(P2-5 批次头缺 scope 列)——均未变化,原样结转。
+
+## 21. 续做步骤 20:changesRequired #13 第 2 项——RR 默认池文件的 SET 义务格(2026-09-18)
+
+`approval-template-groups-backfill-execute.db.test.ts` 自己的文件头(续做步骤 18 之前就写在那里)已经明写:changesRequired #13 的三条组合调用判别力测试"是这条同 PR 义务点名的对象,本文件不做,推迟到同分支的后续提交"。本步做其中第 2 条——SET 义务必须落在 RR 默认池文件(锁 §6 的文件 1,即 `approval-template-groups-serialization.db.test.ts`),不是随便哪个文件都行。§20.5 remaining 的"changesRequired #13 三条"缩成两条(第 3 条锁序格留给下一步,见下方 remaining)。
+
+### 21.1 为什么现有的 4 条文件头 mutation 记录不覆盖这一格
+
+该文件（`approval-template-groups-serialization.db.test.ts`)文件头已经记录了 4 条手工 mutation,但全部只探了**单原语**调用者(`createApprovalTemplateGroup`/`renameApprovalTemplateGroup`,各自开自己的 `transaction()` 且各自调用一次 `beginApprovalTemplateGroupTxn`)。W8 execute 是本切片**唯一**的组合调用者:它在**一个** `transaction()` 回调里调用 `beginApprovalTemplateGroupTxn` **一次**,再把返回的 `AtgTxClient` 传给两个 `...WithClient`(`createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient`)。一个只删掉组合调用者自己那一次 `beginApprovalTemplateGroupTxn` 调用、不动任何单原语调用者的回归,不会被这 4 条记录动到——它们的判别力全部绑定在单原语路径上。
+
+### 21.2 新增测试
+
+`approval-template-groups-serialization.db.test.ts` 追加一例(原有 10 例不变,现有 11 例),紧跟 K 组三例之后:
+
+- **人口**:一个新 org;一条真实 `approval_templates` 行,`category = 'ExecCat-<TS>'`(带时间戳后缀,不与本文件任何其它测试或跨会话残留冲突,不可信任裸字面量"HR"这类跨文件共享类目)。
+- **持锁方(raw client,同 E 的 `beginArchiveHold`/`beginLinkHold` 手法)**:`BEGIN; SET READ COMMITTED; pg_advisory_xact_lock('atg:'||org); INSERT` 一个**不同名**的组(`HolderCat <TS>`,`sort_order=1`)——用不同类目名是为了让 execute 走"create"分支而不是"attach"分支,不搅乱要测的那条 `MAX(sort_order)+1` 路径。
+- **并发腿**:`POST /api/approval-template-groups/backfill/execute`(真实 HTTP,走完整 guard + `executeApprovalTemplateGroupBackfill`)。`waitUntilBackendBlockedByHolder(holderPid)` 确认 execute 真的停在 L0(不是没跑到那一步就意外过了),持锁方再 `COMMIT`。
+- **断言(双保险,状态码断言是主判据)**:①`res.status` 必须是 `201`(执行成功、新建了组)——这是主判据,因为 mutant 下的失败模式是**整个 execute 事务在 COMMIT 时因 `atg_sort_unique` 冲突回滚**(持锁方的组已经落库在先,execute 若读到 stale MAX 会算出同一个 `sort_order`,DEFERRABLE 约束在 COMMIT 才检查,一旦冲突,execute 自己新建的那行连同批次头一起被回滚,不会有"重复行残留"这种更弱的可观测信号,只会是 500);②响应体里能找到 `category === 'ExecCat-<TS>'` 的那一组,`action === 'create'`,`templateIds` 精确等于本用例自己建的模板 id(不假设 `groups.length === 1`——`approval_templates` 全表无 org 列,理论上其它文件的残留候选也会被同一次 execute 一并处理,断言只认自己关心的那一格,不认整个数组形状);③DB 层再核一次该组的 `sort_order` 严格大于持锁方的 `1`(锦上添花,不是替代①)。
+- **清理**:`try/finally` 里删自己插入的模板行(与本文件其它测试一致的 org 级清理由已有的 `orgTags`/`afterAll` 负责,但 execute 会写 `approval_template_group_backfill_batches`/`batch_groups`/`batch_links` 三张表,本文件之前的 `afterAll` 没有清它们——已一并把批次头的删除加进 `afterAll`(先删批次头,级联清两张子表,`atgbbg_group_fk` 是 `NO ACTION`,必须先于组行删除;对本文件其它没写过这三张表的 org 是零行 no-op)。
+
+### 21.3 命令与结果
+
+```
+DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+```
+→ `Test Files 1 passed (1)` / `Tests 11 passed (11)`(含新增例)。
+
+全套件回归(同 §20.2 的七文件命令):`Test Files 7 passed (7)` / `Tests 79 passed (79)`(78 + 本步新增 1)。`npx tsc --noEmit`(`packages/core-backend`):零错误。
+
+### 21.4 mutation 正控(cp/改/跑/还原/cmp,两个文件一起验证"只在 RR 池文件里有判别力")
+
+`cp src/routes/approvals.ts /tmp/approvals.ts.set-mutation.bak` → 把 `executeApprovalTemplateGroupBackfill` 里 `const txClient = await beginApprovalTemplateGroupTxn(client)` 改成 `const txClient = client as AtgTxClient`(跳过组合调用者自己那次 SET,不动任何单原语调用者)：
+
+- 单独重跑 **RR 池文件**(`approval-template-groups-serialization.db.test.ts`):`Tests 1 failed | 10 passed (11)`——**恰好**本步新增的那一条变红(`expected 500 to be 201`),文件里其余 10 条(含 K 组三条自己的 L0 停车断言、E 组自己的 COMMIT-mapping 断言)不受影响。
+- 单独重跑**普通池文件**(`approval-template-groups-backfill-execute.db.test.ts`,W8 12 例):`Test Files 1 passed (1)` / `Tests 12 passed (12)`——**同一个 mutation** 在 RC 默认池下完全空转,两边都绿,证实"这条判别力专属于 RR 池文件"不是断言,是实测。
+- `cp /tmp/approvals.ts.set-mutation.bak src/routes/approvals.ts` → `cmp` → `RESTORE BYTE-IDENTICAL`;还原后的 `git status --short` 只剩测试文件的合法编辑,`routes/approvals.ts` 零残留。
+
+### 21.5 本步不新增/不触碰
+
+`.github/workflows/plugin-tests.yml`、`vitest.config.ts`、s6a 钉——本步只在既有的、已双点接线的 `approval-template-groups-serialization.db.test.ts` 内加一个 `it()` 并顺手补全其 `afterAll` 的批次表清理,未新增文件、未新增 CI 步骤,无需重算 s6a、无需新 `*-ci-wiring.test.mjs`。apps/web 未改动。changesRequired #13 剩余两条(组合调用正例+反向正控停车/超时;execute/rollback 与 A-1 挂接端点真并发的锁序格,断言停车点而非终态,正控=修复前语句顺序)、A-1 两个既有真库文件的 `*-ci-wiring.test.mjs`、验证 MD(§13.7)——均未因本步而变化。
+
+### 21.6 remaining(在 §20.5 基础上更新)
+
+- changesRequired #13 剩余两条(① 组合调用正例 + 从已开事务内部 `await` 导出函数会停车/超时的反向正控;② execute/rollback 与 A-1 挂接端点真并发的锁序格,`waitUntilBackendBlockedByHolder` 断言停车点而非终态,正控=设计门审 M2/M3 修复前的语句顺序,探针已在 `reviews/a3-probe/execute-lockorder-probe.cjs`/`rollback-lockorder-probe.cjs`,可改写成夹具)——**本步只落地了 SET 义务格(原三条的第 2 条),这两条未变化**。
+- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留)——未变化。
+- 验证 MD(§13.7,仍不存在)——未变化。
+- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining)——未变化。
+- changesRequired #16 后半(A-1 回流 #5852)、P1-3 溢出影响——跨 lane,未变化。
+- §19.4 的"新披露 1"、"新披露 2"——均未变化,原样结转。

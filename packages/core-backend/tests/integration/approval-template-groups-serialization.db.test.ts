@@ -182,6 +182,11 @@ describeIfDatabase('approval template groups — L0 serialization + DEFERRABLE C
 
   afterAll(async () => {
     for (const org of orgTags.splice(0)) {
+      // Deleting the batch header cascades to both child tables (`atgbbg_batch_fk` /
+      // `atgbbl_batch_fk` are `ON DELETE CASCADE` — design-gate-A3-phase2 §Q5) — a no-op for every
+      // org this file's OTHER tests track (only the new A-3 SET-obligation test below writes these
+      // tables), and must run BEFORE the groups delete: `atgbbg_group_fk` is `ON DELETE NO ACTION`.
+      await query(`DELETE FROM approval_template_group_backfill_batches WHERE org_id = $1`, [org])
       await query(`DELETE FROM approval_template_group_links WHERE org_id = $1`, [org])
       await query(`DELETE FROM approval_template_groups WHERE org_id = $1`, [org])
     }
@@ -394,5 +399,75 @@ describeIfDatabase('approval template groups — L0 serialization + DEFERRABLE C
       expect(res.status).toBe(200)
       expect((await res.json()).group.archivedAt).toBeNull()
     })
+  })
+
+  // ── A-3 combined-caller SET obligation (design-gate-A3-phase2 changesRequired #13, item 2) ──
+  // This file's own header + K's four documented mutations only ever probed SINGLE-primitive
+  // callers (`createApprovalTemplateGroup` etc., each opening its OWN `transaction()` and calling
+  // `beginApprovalTemplateGroupTxn` once). The gate's changesRequired #13 point 2 requires the SAME
+  // RR-pool discriminating shape for a COMPOSED caller — `executeApprovalTemplateGroupBackfill`,
+  // which calls `beginApprovalTemplateGroupTxn` once and threads the branded client into TWO
+  // `...WithClient` primitives — because a regression that drops the composed caller's own SET call
+  // (while leaving every single-primitive wrapper untouched) would be invisible to every existing
+  // `it()` in this file.
+  it('A-3 execute (composed caller): under the RR-default pool, execute still reads a concurrently-committed holder row at MAX(sort_order) — proving the SET this composed transaction issues is not a single-primitive-only obligation', async () => {
+    const org = trackOrg(`atg-a3set-${TS}`)
+    const admin = await tok(base, `a3set-admin-${TS}`, org)
+    const category = `ExecCat-${TS}`
+    const tplRow = await query<{ id: string }>(
+      `INSERT INTO approval_templates (key, name, status, category, visibility_scope)
+       VALUES ($1, $1, 'draft', $2, $3) RETURNING id`,
+      [`atg-a3set-tpl-${TS}`, category, JSON.stringify({ type: 'all', ids: [] })],
+    )
+    const templateId = tplRow.rows[0].id
+
+    try {
+      await withRawClient(async (holder, holderPid) => {
+        await holder.query('BEGIN')
+        await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${org}`])
+        await holder.query(
+          `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by) VALUES ($1,$2,$3,1,'holder')`,
+          [`atg_a3set_holder_${TS}`, org, `HolderCat ${TS}`],
+        )
+
+        // Same shape as E above: execute's own L0 acquisition parks behind holder's; under the
+        // correct (SET-issued) path, once granted, execute's SUBSEQUENT reads (including the
+        // create-primitive's `MAX(sort_order)+1`) see holder's now-committed row per-statement
+        // (READ COMMITTED). Under the mutant (no SET ⇒ this connection runs under the pool's
+        // REPEATABLE READ default), the whole transaction's snapshot is fixed at execute's FIRST
+        // statement — the L0 `pg_advisory_xact_lock` SELECT — BEFORE it parks, so it never sees
+        // holder's row at all: the create-primitive computes sort_order=1 again, and holder's
+        // ALREADY-COMMITTED row of the same value collides with it at COMMIT (`atg_sort_unique`,
+        // DEFERRABLE) — the whole execute() transaction rolls back, surfacing as 500, not 201.
+        const executePromise = httpReq(base, '/api/approval-template-groups/backfill/execute', admin, { method: 'POST' })
+        await waitUntilBackendBlockedByHolder(holderPid)
+
+        await holder.query('COMMIT')
+
+        const res = await executePromise
+        expect(res.status).toBe(201)
+        const body = (await res.json()) as {
+          groups: Array<{ category: string; action: string; templateIds: string[] }>
+        }
+        const own = body.groups.find((g) => g.category === category)
+        expect(own).toBeDefined()
+        expect(own!.action).toBe('create')
+        expect(own!.templateIds).toEqual([templateId])
+      })
+
+      const ownGroup = await query<{ sort_order: number }>(
+        `SELECT sort_order FROM approval_template_groups WHERE org_id = $1 AND name = $2`,
+        [org, category],
+      )
+      expect(ownGroup.rowCount).toBe(1)
+      // Strictly greater than holder's committed sort_order=1 — the RR mutant's failure mode is
+      // NOT a smaller/duplicate value surviving (that scenario rolls back at COMMIT, see above and
+      // this file's own header note (1)); this assertion is belt-and-suspenders on top of the
+      // res.status check, not a substitute for it.
+      expect(Number(ownGroup.rows[0].sort_order)).toBeGreaterThan(1)
+    } finally {
+      await query(`DELETE FROM approval_templates WHERE id = $1`, [templateId])
+    }
   })
 })
