@@ -91,17 +91,39 @@
 // first" into this component's two-state shape, so the outgoing principal's number never lingers
 // for the width of the new read.
 //
-// NOT covered by this guard, and left as a separate, larger unit (see `remaining` in the commit
-// this lands with): `useApprovalCountsRealtime`'s socket connects with the token read ONCE, at
+// NOW REPOINTED at `todo:counts-updated` (`useTodoCountsRealtime`, `../../todo/`) instead of
+// `approval:counts-updated` — the former is computed by `pendingSourceRegistry.countPendingForUser`,
+// the SAME function `getTodoCount()` above reads; the latter is computed by
+// `approval-realtime.ts`'s `computeApprovalPendingCounts`, a pre-existing, KNOWN-DIVERGENT second
+// copy of the pending predicate (missing the handler-node exclusion) — subscribing to both would
+// re-admit that divergence into the rendered number. `handleCountsUpdated` reuses `applyResult()`
+// (the SAME function `refresh()` calls) rather than inventing its own degraded/unavailable check,
+// per the file-level "does NOT自行判断可见性" note above — the earlier version of this handler set
+// `isUnavailable.value = false` unconditionally, which was itself a second, divergent judgment.
+//
+// PARTIALLY covered by a session guard, one gap left open and re-attributed correctly (the prior
+// note here blamed "the realtime trigger point" — that unit is done now, and was never actually
+// where this gap lives): `useTodoCountsRealtime`'s socket connects with the token read ONCE, at
 // `ensureSocket()` time, and is never reconnected on an auth transition — only torn down on
-// unmount. `handleCountsUpdated` below therefore has no generation check of its own; a push that
-// arrives on the outgoing principal's still-open socket after a transition is not this commit's
-// fix, it is the realtime trigger point's.
+// unmount. `handleCountsUpdated` below checks a local `acceptPushes` flag before painting.
+// `acceptPushes` is NOT a live re-check of `hasSession()` at push time — most of this file's own
+// tests never set an `auth_token` at all, and a live check would drop every push in every test that
+// doesn't (a push arriving is not itself evidence of who is signed in). Instead it mirrors the
+// REST re-read's OWN timing: the listener's deferred microtask below (the same one that decides
+// whether to call `refresh()`) is the ONE place a transition's outcome — session remains, or not —
+// is actually resolved, so that is where `acceptPushes` is set. This closes the SIGN-OUT half (a
+// push landing on the still-open socket after a CONFIRMED sign-out is dropped, matching the
+// listener's own synchronous zeroing — see the E3 test). The ORG-SWITCH half remains open:
+// a session remains (so `acceptPushes` stays/returns `true`) across a switch, so a push landing on
+// the still-open socket afterward can still describe the departing principal. Closing that requires
+// reconnecting the socket itself (re-authenticating with the new token) on `onAuthPrincipalChange`
+// — a change to this composable's own connection lifecycle, not to the backend query, and a
+// separate, larger unit than this commit.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { getTodoCount, isTodoResponseDegraded, type TodoCountResponse } from '../../todo/api'
 import { useLocale } from '../../composables/useLocale'
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
-import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../useApprovalCountsRealtime'
+import { useTodoCountsRealtime, type TodoCountsUpdatedPayload } from '../../todo/useTodoCountsRealtime'
 
 function hasSession(): boolean {
   try {
@@ -156,13 +178,20 @@ const displayCount = computed(() => (
   pendingCount.value > props.overflowAt ? `${props.overflowAt}+` : String(pendingCount.value)
 ))
 
-// Same scoping rule ApprovalCenterView.handleRealtimeCountsUpdated uses: prefer the per-source
-// bucket for the scope being displayed, fall back to the payload root. The nav badge is unscoped,
-// so its bucket is 'all'.
-function handleCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
-  const scoped = payload.countsBySourceSystem?.all ?? payload
-  isUnavailable.value = false
-  applyCount(scoped.count)
+// Sign-out half of 判据 E for the push path (see file-level note): starts `true` so mount-time and
+// steady-state pushes are unaffected; set by the auth-transition listener's own deferred check
+// below, NOT re-derived from live storage at push time.
+let acceptPushes = true
+
+// `todo:counts-updated` carries the SAME shape `getTodoCount()` resolves to (`{ count, sources,
+// degraded? }`), so the push path reuses `applyResult()` verbatim instead of a second judgment —
+// see the file-level note above for why that matters and what the prior handler got wrong.
+function handleCountsUpdated(payload: TodoCountsUpdatedPayload): void {
+  // A push that lands on this still-open socket after a CONFIRMED sign-out must not repaint —
+  // there is no principal left for it to describe, and the listener below has already zeroed the
+  // rendered state.
+  if (!acceptPushes) return
+  applyResult(payload)
 }
 
 // P1b round 2, item (3): this component lives in the APP SHELL, so a throw here takes the whole
@@ -176,7 +205,7 @@ function handleCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
 // test (a throwing composable — the badge still renders its count; a throwing component — the nav
 // renders without the badge).
 try {
-  useApprovalCountsRealtime({ onCountsUpdated: handleCountsUpdated })
+  useTodoCountsRealtime({ onCountsUpdated: handleCountsUpdated })
 } catch {
   // No realtime updates for this session; the mounted count below is still shown.
 }
@@ -217,7 +246,14 @@ const unsubscribeAuthPrincipal = onAuthPrincipalChange(() => {
   // Deferred to a microtask: see the file-level note on why (the funnel writes the new token to
   // storage AFTER this notification fires).
   void Promise.resolve().then(() => {
-    if (disposed || !hasSession()) return
+    if (disposed) return
+    if (!hasSession()) {
+      // Sign-out CONFIRMED (not merely notified — see file-level note on `acceptPushes`): retire
+      // any push landing on the still-open socket too, same as the REST re-read is retired below.
+      acceptPushes = false
+      return
+    }
+    acceptPushes = true
     void refresh()
   })
 })

@@ -7,17 +7,18 @@ import { TOKEN_KEYS } from '../src/composables/authPrincipal'
 // aggregation endpoint instead of the approvals-only one:
 //
 // The badge reuses the SERVER-OWNED pending count `/api/todo/count` (`getTodoCount`) exposes, plus
-// the `approval:counts-updated` realtime push routed through `useApprovalCountsRealtime` (not yet
-// repointed at `todo:counts-updated` — that requires the realtime trigger point to be rebuilt on
-// top of the shared query, a separate unit). Both are mocked here so the two halves can be driven
-// independently:
+// the `todo:counts-updated` realtime push routed through `useTodoCountsRealtime` — repointed off
+// `approval:counts-updated`/`useApprovalCountsRealtime` now that `services/todo-realtime.ts` computes
+// the push from the SAME shared query `/api/todo/count` reads (B-2 step 6/7; see
+// `ApprovalTodoBadge.vue`'s file-level note for why subscribing to both would be wrong, not merely
+// redundant). Both halves are mocked here so they can be driven independently:
 //   * the initial read proves the badge is bound to the fetched count (not a constant), and
 //   * the captured `onCountsUpdated` callback proves a later push moves the rendered number.
 //
-// `useApprovalCountsRealtime` is mocked rather than exercised because the real composable
-// deliberately opens no socket under MODE==='test' (see its onMounted) — mocking it is the only way
-// to reach the callback at all, and it also keeps the badge's own contract (which bucket of the
-// payload it reads) pinned.
+// `useTodoCountsRealtime` is mocked rather than exercised because the real composable deliberately
+// opens no socket under MODE==='test' (see its onMounted) — mocking it is the only way to reach the
+// callback at all. The composable's own normalizer (malformed-push handling, the socket lifecycle)
+// is exercised for real in `apps/web/tests/todoCountsRealtime.spec.ts`, not here.
 
 const getTodoCountSpy = vi.fn()
 vi.mock('../src/todo/api', async (importOriginal) => {
@@ -30,14 +31,14 @@ vi.mock('../src/todo/api', async (importOriginal) => {
 
 type CountsCallback = (payload: {
   count: number
-  unreadCount: number
-  countsBySourceSystem?: Record<string, { count: number; unreadCount: number }>
+  sources: Record<string, string>
+  degraded?: boolean
 }) => void
 
 let capturedOnCountsUpdated: CountsCallback | null = null
 const realtimeCallCount = { value: 0 }
-vi.mock('../src/approvals/useApprovalCountsRealtime', () => ({
-  useApprovalCountsRealtime: (options: { onCountsUpdated: CountsCallback }) => {
+vi.mock('../src/todo/useTodoCountsRealtime', () => ({
+  useTodoCountsRealtime: (options: { onCountsUpdated: CountsCallback }) => {
     realtimeCallCount.value += 1
     // Round-2 item 3: the composable is the one call in the badge's setup that reaches outside the
     // component, and the badge now lives in the APP SHELL — an escaping throw would blank the whole
@@ -203,7 +204,7 @@ describe('app-level approval todo badge', () => {
 
     const fetchCallsBefore = getTodoCountSpy.mock.calls.length
     expect(capturedOnCountsUpdated).toBeTypeOf('function')
-    capturedOnCountsUpdated!({ count: 4, unreadCount: 3 })
+    capturedOnCountsUpdated!({ count: 4, sources: { approval: 'ok' } })
     await flushUi()
 
     expect(badgeOf(root)?.textContent?.trim()).toBe('4')
@@ -211,19 +212,47 @@ describe('app-level approval todo badge', () => {
     expect(getTodoCountSpy.mock.calls.length).toBe(fetchCallsBefore)
   })
 
-  it('prefers the "all" bucket of a per-source realtime payload', async () => {
+  // Mutation guard for `handleCountsUpdated` reusing `applyResult()`: the PRIOR handler set
+  // `isUnavailable.value = false` unconditionally on every push, which was itself a second,
+  // divergent "is this trustworthy" judgment (the file-level note above names this explicitly).
+  // Restoring that unconditional reset makes this test red — a push reporting a source as
+  // `unavailable` must render the discriminable state, not the plain numeric badge.
+  it('renders the discriminable unavailable state when a realtime push itself reports a source unavailable (mutation guard: push handler must not force isUnavailable=false)', async () => {
+    getTodoCountSpy.mockResolvedValue({ count: 1, sources: { approval: 'ok' } })
     const root = await mountApp()
-    capturedOnCountsUpdated!({
-      count: 99,
-      unreadCount: 99,
-      countsBySourceSystem: {
-        all: { count: 5, unreadCount: 1 },
-        platform: { count: 2, unreadCount: 0 },
-      },
-    })
+    expect(badgeOf(root)?.textContent?.trim()).toBe('1')
+
+    capturedOnCountsUpdated!({ count: 3, sources: { approval: 'unavailable' } })
     await flushUi()
 
-    expect(badgeOf(root)?.textContent?.trim()).toBe('5')
+    expect(unavailableBadgeOf(root)).toBeTruthy()
+    expect(badgeOf(root)).toBeNull()
+  })
+
+  // 判据 E, push half (sign-out): see `ApprovalTodoBadge.vue`'s file-level note — this closes the
+  // sign-out gap left open by the socket never being reconnected on a transition. Mutation guard:
+  // deleting `handleCountsUpdated`'s `if (!hasSession()) return` makes this red (the badge would
+  // repaint '9' after sign-out).
+  it('E3 (sign-out): a push arriving on the still-open socket after sign-out must not repaint', async () => {
+    localStorage.setItem('auth_token', 'principal-1-token')
+    getTodoCountSpy.mockResolvedValue({ count: 2, sources: { approval: 'ok' } })
+    const root = await mountApp()
+    expect(badgeOf(root)?.textContent?.trim()).toBe('2')
+
+    for (const key of TOKEN_KEYS) localStorage.removeItem(key)
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    notifyAuthPrincipalChange()
+    await flushUi()
+    // Sign-out issues no re-read of its own (`hasSession()` is false); confirms the state below
+    // reflects the push guard, not a genuinely fetched empty/unavailable state.
+    expect(badgeOf(root)).toBeNull()
+    expect(unavailableBadgeOf(root)).toBeNull()
+
+    capturedOnCountsUpdated!({ count: 9, sources: { approval: 'ok' } })
+    await flushUi()
+
+    expect(badgeOf(root)).toBeNull()
+    expect(unavailableBadgeOf(root)).toBeNull()
   })
 
   it('hides the badge when there is nothing pending', async () => {
