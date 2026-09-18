@@ -148,3 +148,30 @@ CRED-06 是唯一的例外——它引用的 `data-source-secret-keys.ts` 本身
 - **`role_permissions`/`user_permissions` 里 `<resource>:*` 这种细粒度通配符**（不是
   `*:*`）：任务明确只要求 `*:*`，没有把 `spreadsheet:*` 这类资源级通配符纳入范围，本文件
   没有额外去猜 ADM-07 是否也想要这个数字。
+
+## 复核返修（F3 / F4 / F5）— 2026-09-18 设计变更
+
+> **仍未在生产库执行；生产执行需 owner 另行授权。** 本轮只做开发侧修正与合成库验证。
+
+三处设计变更（逐条根因、改法、正反例与两种 schema 的结果表见
+`readonly-inventory-pack-verification-20260916.md` §6）：
+
+1. **HTTP 判据从文本扫描改为 JSON 语义匹配（F3）**。原设计沿用两份来源设计文档里的
+   `actions::text ILIKE '%"url":"http://%'`。这在 PostgreSQL 上是错的：JSONB 不保留输入排版，
+   回显成员是 `"url": "http://…"`，不含空格的模式打不中正常行（合成库实测：4 条真实 `http://`
+   存量被旧谓词报成 0）。新判据是 `jsonb_path_query(actions,'$.**')` + `jsonb_each_text`，
+   按**键名语义 + 字符串值 scheme** 判定，覆盖顶层与嵌套两种位置，且对排版/大小写免疫。
+   影响：TRG-04 的零计数在返修前**不能**用来批准 https-only 收紧。
+
+2. **计数与 ID 共享同一命中谓词（F4）**。CRED-06 的两对查询（形状 A / 形状 B）各自抽出一个
+   `hit` CTE，计数与 ID 都用 `WHERE matched_top_level OR matched_headers`。设计上的不变量：
+   `|受影响 ID| == 计数`，由 `verify/run-verify.mjs` 断言。返修前的 ID 列表混入了零命中的普通
+   连接，**不能直接驱动清理**。
+
+3. **执行契约下沉到 `_preamble.sql`（F5）**。新增共享前言：唯一执行方式（整文件 `psql -f`）、
+   `ON_ERROR_STOP on`、会话级 `default_transaction_read_only`、statement/lock/idle 超时、
+   `-v schema=` 固定 `search_path`。schema 探针不再只是"给人看"，而是 `\gset` + `\if`
+   **自动分派**互斥分支（含 `04` 旧 schema 下 `is_admin` 与 `is_active` 两个缺列的组合）。
+   每个文件末尾输出 `INVENTORY_RESULT … status=complete|incomplete reason=…`：缺列、超时、
+   截断一律 `incomplete`，**没有该行即视为不完整**，任何一种都不得解读为零命中。
+   键名普查（`01` 的 Q6/Q7）改为 `-v census=1` 显式开启，默认不跑也不外传。

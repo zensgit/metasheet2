@@ -1,105 +1,139 @@
-# 只读盘点包（2026-09-16）— CRED-06 / TRG-04 / ADM-08 / ADM-13
+# 只读盘点包（2026-09-16，2026-09-18 复核返修）— CRED-06 / TRG-04 / ADM-08 / ADM-13
 
-这是一个**只读盘点包**：四个 `.sql` 文件，全部只含 `SELECT` / `WITH … SELECT`，没有任何
-`INSERT` / `UPDATE` / `DELETE` / DDL。目的是在合并四条在飞/待裁决工作之前，先知道生产库
-（222）上现在有多少行会受影响——**不做任何回填、不做任何清理、不改任何表结构**。
+这是一个**只读盘点包**：四个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
+`SELECT` / `WITH … SELECT`，没有任何 `INSERT` / `UPDATE` / `DELETE` / DDL。目的是在合并
+四条在飞/待裁决工作之前，先知道生产库上现在有多少行会受影响——**不做任何回填、不做任何
+清理、不改任何表结构**。
 
-写这份盘点包的代理**没有连接过任何数据库**，也没有碰过 222。所有 SQL 都是照着仓库里的
-迁移文件、以及两组尚未合并分支里的设计文档手工核对列名写出来的，**从未在真实
-PostgreSQL 上跑过**。上机前请先把每条查询当作候选语法，用下面第 3 节的方法自己过一遍。
+> **生产执行状态：未执行。** 本包**从未在任何真实数据库（含 222）上跑过**。真实盘点需要
+> owner 另行授权（目标库、只读身份、窗口、超时与输出预算）。下面的验证全部在**本机一次性
+> 合成 PostgreSQL 16 的临时 schema**、**全假数据**上完成。
+
+## 0. 2026-09-18 复核返修（F3 / F4 / F5）
+
+| 编号 | 问题 | 修法 |
+|---|---|---|
+| F3 | `02-trg04` 用 `actions::text ILIKE '%"url":"http://%'` 扫 JSONB 文本。JSONB **不保留排版**，回显形式是 `"url": "http://…"`（冒号后有空格），正常命中被漏成 0 | 改为 **JSON 字段语义匹配**：`jsonb_path_query(actions,'$.**')` 逐层取节点 → `jsonb_each_text` 取成员 → 键名归一化命中 url 类键名 **且** 字符串值（trim 后、不分大小写）以 `http://` 开头。顶层/嵌套/排版/大小写全覆盖 |
+| F4 | `01-cred06` 的「受影响 ID」只按对象形状过滤，普通连接也进 ID 列表，计数却不含它 | 计数与 ID 共用同一个 `hit` CTE 与同一个 `WHERE matched_top_level OR matched_headers`，`|ids| == count` 成为可断言的不变量 |
+| F5 | 执行指引三处互相矛盾；Q1 只是探针不会自动选互斥分支；`04` 的旧 schema 回退漏了 `is_active` | 统一为**一种执行方式**（整文件 `psql -f`）＋ `\set ON_ERROR_STOP on` ＋ 探针 `\gset` 自动分派兼容分支 ＋ 每个文件末尾输出 `INVENTORY_RESULT … status=complete\|incomplete reason=…` |
+
+证据与正反例清单见 `docs/development/readonly-inventory-pack-verification-20260916.md` §“复核返修”。
 
 ## 1. 这四份文件分别解锁什么
 
 | 文件 | 编号 | 解锁 / 喂给 | 一句话 |
 |---|---|---|---|
-| `01-cred06-secret-keys.sql` | CRED-06 | PR #5648（`fix/data-source-secret-keys-vocab-nfkc`）、PR #5681（`test/secret-keys-realdb-inventory-sync`） | `data_sources` 里还有多少行的 `connection`（两种列形状）带着秘密形状的键名（`password`/`token`/… 词表） |
-| `02-trg04-http-targets.sql` | TRG-04 | PR #5619（`fix/automation-webhook-ssrf-guard`）、PR #5649（`fix/webhook-service-ssrf-guard`） | 自动化规则（`automation_rules.actions`）和 webhook 订阅（`multitable_webhooks.url`）里还有多少条 `http://`（非 https）目标——两条 PR 合并后这些行会立刻开始以 `WEBHOOK_TARGET_REJECTED:scheme-not-allowed` 失败 |
-| `03-adm08-wildcard-permissions.sql` | ADM-08 | 喂 ADM-07 的裁决（`*:*` 超级通配权限怎么处理） | `users.permissions`（两种列形状）、`user_permissions`、`role_permissions`（含经 `user_roles` 继承）里现在有多少行/多少用户持有 `*:*` |
-| `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（本文件不回填） | 有多少用户满足声明式 admin 字段（`users.is_admin=TRUE` 或 `users.role='admin'`），但在 `user_roles` 里没有 `role_id='admin'` 那一行——即 `rbac/service.ts` 的 `isAdmin()` 会判"否"，但仓库里另外十几处按 `(is_admin OR role='admin')` 判定的地方会判"是"的那批人 |
+| `01-cred06-secret-keys.sql` | CRED-06 | PR #5648、PR #5681 | `data_sources` 里还有多少行的连接配置（两种列形状）带着秘密形状的键名 |
+| `02-trg04-http-targets.sql` | TRG-04 | PR #5619、PR #5649 | 自动化规则（`automation_rules.actions`）和 webhook 订阅（`multitable_webhooks.url`）里还有多少条 `http://`（非 https）目标 |
+| `03-adm08-wildcard-permissions.sql` | ADM-08 | 喂 ADM-07 的裁决 | `users.permissions`（两种列形状）、`user_permissions`、`role_permissions`（含经 `user_roles` 继承）里现在有多少行/多少用户持有 `*:*` |
+| `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（不回填） | 有多少用户满足声明式 admin 字段，但 `user_roles` 里没有 `role_id='admin'` 那一行 |
 
-每个 `.sql` 文件顶部都有更详细的背景说明和逐条查询的"目的 / 依据代码 / 预期输出 / 缺列缺表怎么办"。
+每个 `.sql` 顶部有更详细的背景、逐条查询的“目的 / 依据代码 / 预期输出”，以及本轮返修说明。
 
-## 2. 怎么跑（222 上的 PowerShell 5.1 约定）
+## 2. 唯一的执行方式
 
-222 的默认远程 shell 是 **PowerShell 5.1**：不认 `&&`，命令之间用 `;` 串接；带参数的多行脚本
-建议整个函数用 `-File` 带参调用，或者用 `-EncodedCommand`（PS 5.1 对多行/带特殊字符命令的
-一贯坑）。读中文输出必须显式声明 UTF-8，否则会看到乱码或问号。
+**一个文件一条命令，整文件跑，不要逐段复制粘贴。** `_preamble.sql` 已经把
+`ON_ERROR_STOP` 打开，任何一条语句出错都会立刻中止该文件并让 `psql` 以非零状态退出——
+所以“整文件跑”和“遇错停止”这次是同一件事。
+
+```bash
+# 只读角色 + 明确 schema + 留存输出
+export PGAPPNAME=readonly-inventory-20260916
+psql "$READONLY_DATABASE_URL" -v schema=public -f 01-cred06-secret-keys.sql > 01.log 2>&1
+psql "$READONLY_DATABASE_URL" -v schema=public -f 02-trg04-http-targets.sql  > 02.log 2>&1
+psql "$READONLY_DATABASE_URL" -v schema=public -f 03-adm08-wildcard-permissions.sql > 03.log 2>&1
+psql "$READONLY_DATABASE_URL" -v schema=public -f 04-adm13-declared-admins.sql > 04.log 2>&1
+grep -h '^INVENTORY_RESULT' 0*.log
+```
+
+222 的默认远程 shell 是 PowerShell 5.1（不认 `&&`，用 `;` 串接；读中文输出要显式
+UTF-8）：
 
 ```powershell
-# 1) 建好一个只读连接串（不要把口令打在命令行历史里；用环境变量）
-$env:DATABASE_URL = '<读你们自己的机密管理拿到的只读连接串>'
-
-# 2) 确认 psql 能连上（不改任何数据，纯探测）
-psql $env:DATABASE_URL -c "SELECT 1"
-
-# 3) 逐个文件跑，每个文件独立、互不依赖，随时可以中断（Ctrl+C）
-#    显式声明输出编码为 UTF-8，避免中文注释在控制台乱码
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-psql $env:DATABASE_URL -f 01-cred06-secret-keys.sql
-psql $env:DATABASE_URL -f 02-trg04-http-targets.sql
-psql $env:DATABASE_URL -f 03-adm08-wildcard-permissions.sql
-psql $env:DATABASE_URL -f 04-adm13-declared-admins.sql
+$env:PGAPPNAME = 'readonly-inventory-20260916'
+psql $env:READONLY_DATABASE_URL -v schema=public -f 01-cred06-secret-keys.sql *> 01.log ; `
+psql $env:READONLY_DATABASE_URL -v schema=public -f 02-trg04-http-targets.sql  *> 02.log ; `
+psql $env:READONLY_DATABASE_URL -v schema=public -f 03-adm08-wildcard-permissions.sql *> 03.log ; `
+psql $env:READONLY_DATABASE_URL -v schema=public -f 04-adm13-declared-admins.sql *> 04.log
+Select-String -Path 0*.log -Pattern '^INVENTORY_RESULT'
 ```
 
-如果习惯用 `;` 串起来跑（PS 5.1 不认 `&&`）：
+### 前置条件（每条都不是可选项）
 
-```powershell
-psql $env:DATABASE_URL -f 01-cred06-secret-keys.sql ; psql $env:DATABASE_URL -f 02-trg04-http-targets.sql ; psql $env:DATABASE_URL -f 03-adm08-wildcard-permissions.sql ; psql $env:DATABASE_URL -f 04-adm13-declared-admins.sql
+- **只读角色**：用只有 `GRANT SELECT` 的角色连接，不要用应用角色。包本身还会
+  `SET default_transaction_read_only = on`（写语句会以 SQLSTATE 25006 失败），但那是纵深
+  防御，不替代账号层的只读。
+- **`search_path`**：用 `-v schema=<schema>` 显式指定；不传就用角色默认值。四份文件的探针
+  都经 `current_schemas(false)` 解析，**探针看得见的表 == 查询会读的表**。
+- **超时**：前言固定 `statement_timeout=120s`、`lock_timeout=5s`、
+  `idle_in_transaction_session_timeout=30s`。超时是错误，会触发 `ON_ERROR_STOP` 中止。
+- **输出预算**：带 id 的查询没有 `LIMIT`（owner 要的是「计数 + id」）。如果计数是成千上万，
+  **先只回报计数**，拿到明确预算后再单独取 id 列表。
+- **键名普查默认不跑、不外传**：`01` 的 Q6/Q7（键名清单）只有加 `-v census=1` 才执行。
+  任意键名也可能承载业务内容，**默认不外传键名普查结果**；要导出须 owner 同意，且只在受控
+  渠道内传阅。
+
+## 3. 怎么判断这次跑完了（唯一的完成态口径）
+
+每个文件的**最后一条语句**输出一行：
+
+```
+INVENTORY_RESULT file=<文件名> status=complete …
+INVENTORY_RESULT file=<文件名> status=incomplete reason=<原因> …
 ```
 
-**全部只读、可随时中断、输出不含任何值**：
+判读规则：
 
-- 每条 SQL 语句都以 `SELECT`（含 CTE 的 `WITH … SELECT`）开头，psql 遇到语法错误会原样报错
-  并停在那一条，前面已经跑完的查询结果不会受影响、也不会被回滚（没有事务，没有东西可回滚）。
-- 中断（Ctrl+C）安全：没有任何语句持有写锁或长事务，中断只是少看到几行输出。
-- 输出里没有密码、口令、URL、token 这类值——只有计数（`count(*)`）、主键 id、和少量结构性
-  标识符（`sheet_id` / `created_by` / `role_id` / `active` 这类"是谁/是哪条"的标签，不是"内容是
-  什么"的值）。每份 `.sql` 文件顶部的注释单独说明了这条纪律在这一份文件里的具体边界。
-- 建议用只读角色连接（`GRANT SELECT` 而非应用角色），这四份文件不需要任何写权限。
+1. `status=complete` → 该文件的数字可用。
+2. `status=incomplete reason=…` → **数字不完整**（缺表/缺列，例如老 schema 没有
+   `automation_rules.actions` 或 `users.is_admin`）。此时打印出来的计数只是**下界**，
+   **绝不能当成“零命中”**。
+3. **根本没有 `INVENTORY_RESULT` 行** → 这次运行中途夭折（语法错误、权限不足、
+   `statement_timeout`/`lock_timeout` 取消、连接断开、Ctrl-C、输出被截断）。同样按
+   **不完整**处理，`psql` 退出码非零可以佐证。重跑前先解决原因。
 
-## 3. 本机没跑过真库——上机前怎么自己核一遍
-
-写这份盘点包时本机（开发者工作站 / 本 worktree）**没有可用的 PostgreSQL、docker、psql**（见
-配套验证文档 `docs/development/readonly-inventory-pack-verification-20260916.md` §0 的检查记录），
-且任务边界明确禁止连接任何数据库，所以四份 `.sql` 从未被真正执行过。上机前请至少做以下几步：
-
-1. **先跑每份文件里的"列探针"（Q1）**。四份文件的第一条查询都是对 `information_schema.columns`
-   的只读探测，用来确认本文档假设的列名/列形状（jsonb vs text[]、`config` vs `connection`
-   两套 DDL……）在这台生产库上到底是哪一种。如果探针的结果和文件注释里写的两种形状都对不上，
-   **停下来**，不要继续跑后面的查询——说明这台库的 schema 和本次盘点依据的迁移文件不一致，需要
-   先弄清楚差异再决定怎么改 SQL。
-2. **在测试库上先跑一遍**（如果有的话）。哪怕是一个空的、刚跑完迁移的测试库，也能把明显的语法
-   错误（拼错的函数名、少了一个括号）筛出来，比直接对生产库跑安全得多。
-3. 语法有把握之后，才对生产库跑；仍然建议先跑 Q1 探针、再跑其余查询，不要图快把整份文件一次性
-   丢给 `psql -f` ——如果某条查询失败，`psql -f` 默认会继续跑下一条（不是 `ON_ERROR_STOP`），
-   所以哪怕报错也不会中断整个文件，请自己逐段看输出，确认每条查询真的返回了预期形状的结果，
-   而不是一条静默的报错。
+缺列、超时、截断一律记 `incomplete`；**任何一种都不得被解读为零命中**。
 
 ## 4. 结果怎么回填
 
-这份盘点包的产出是**数字和 id 列表**，不是决定本身。下面是每份文件的输出对应哪条后续动作：
-
 | 文件 | 查询 | 回填去哪 |
 |---|---|---|
-| `01-cred06-secret-keys.sql` | Q2/Q3（形状 A 计数 + id）、Q4/Q5（形状 B 计数 + id） | 把计数和受影响 `id` 列表贴进 PR #5648 / #5681 的合并前检查项；若计数 > 0，参考 `data-source-connection-secret-keys-design-20260912.md` §5"迁移方案"决定是否需要配套的去键 UPDATE（该 UPDATE 本盘点包不包含，需要另开工单，且嵌套 `connection.headers` 那一步——见文件里的注释——不能和顶层一起无脑跑，可能是在用的凭证） |
-| `01-cred06-secret-keys.sql` | Q6/Q7（键名普查，供人工核对全角/新词，非强制） | 人工过一遍键名列表，和文件头注释里的词表比对，找出正则规则漏判的形状；发现新形状就回报给 #5648/#5681 的作者，让词表跟着扩，而不是自己在这份盘点包里改判定逻辑 |
-| `02-trg04-http-targets.sql` | Q2/Q3（`automation_rules` 计数 + id/sheet_id） | 贴进 PR #5619 的"Pre-merge step for the owner"（该 PR 描述里原话："合并前的存量 `http://` 规则只读盘点没做"——这份文件补上了 id 版本）；按 `sheet_id` 通知对应团队 |
-| `02-trg04-http-targets.sql` | Q5/Q6（`multitable_webhooks` 计数 + id/created_by） | 贴进 PR #5649 的"Pre-merge inventory for the owner"；按 `created_by` 通知对应用户 |
-| `03-adm08-wildcard-permissions.sql` | 全部 | 交给 ADM-07 的裁决——是否要收紧/取消 `*:*`、怎么处理已持有它的用户/角色；本文件不建议怎么处理，只给现状 |
-| `04-adm13-declared-admins.sql` | Q2/Q3（计数 + id，按声明字段分类） | 交给 PR #5665 / #5677——**只作为盘点输入，本文件明确不做回填**（不写任何 `INSERT INTO user_roles`）。是否要把这批用户批量插入 `user_roles(role_id='admin')`，还是反过来去掉他们的 `is_admin`/`role='admin'`，是 #5665/#5677 要做的裁决，不是本盘点包的范围 |
+| `01` | Q2/Q3（形状 A 计数 + id）或 Q4/Q5（形状 B，自动分派） | 贴进 PR #5648 / #5681 的合并前检查项；计数 > 0 时是否要配套去键 UPDATE 另开工单（嵌套 `connection.headers` 可能是在用凭证，不能和顶层一起无脑跑） |
+| `01` | Q6/Q7（键名普查，`-v census=1` 才跑） | 人工比对词表找漏判形状，回报给 #5648/#5681 的作者；**默认不外传** |
+| `02` | Q2/Q3（`automation_rules` 计数 + id/sheet_id） | 贴进 PR #5619 的合并前盘点；按 `sheet_id` 通知团队 |
+| `02` | Q5/Q6（`multitable_webhooks` 计数 + id/created_by） | 贴进 PR #5649 的合并前盘点；按 `created_by` 通知用户 |
+| `03` | 全部 | 交给 ADM-07 的裁决；本文件只给现状 |
+| `04` | Q2/Q3（计数 + id，按声明字段分类） | 交给 PR #5665 / #5677，**只作为盘点输入，不回填** |
 
-## 5. 文件清单
+## 5. 文件清单与验证
 
 ```
 scripts/ops/readonly-inventory-20260916/
+├── _preamble.sql                 （共享执行契约：ON_ERROR_STOP / 只读 / 超时 / search_path）
 ├── 01-cred06-secret-keys.sql
 ├── 02-trg04-http-targets.sql
 ├── 03-adm08-wildcard-permissions.sql
 ├── 04-adm13-declared-admins.sql
-└── README.md   （本文件）
+├── verify/
+│   ├── fixture-modern.sql        （合成新 schema：全假值）
+│   ├── fixture-legacy.sql        （合成旧 schema：缺 actions / is_admin / is_active）
+│   ├── run-verify.mjs            （一次性 schema 建→灌→跑→断言→DROP）
+│   └── readonly-inventory-pack.test.mjs （node --test 两层：静态契约 + 合成库）
+└── README.md                     （本文件）
 ```
+
+本机/CI 跑验证（**只连一次性合成库，不要指向任何真实库**）：
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scratch \
+  node --test scripts/ops/readonly-inventory-20260916/verify/readonly-inventory-pack.test.mjs
+```
+
+没有 `DATABASE_URL` / `psql` 时合成库那层会**显式跳过并打印提示**；在 CI 的 DB 泳道里设
+`METASHEET_REAL_DB_TEST_STEP=1`，缺 `DATABASE_URL` 或缺 `psql` 会**红**而不是静默跳过。
 
 配套文档：
 
 - 设计：`docs/development/readonly-inventory-pack-design-20260916.md`
-- 验证（列名核对表）：`docs/development/readonly-inventory-pack-verification-20260916.md`
+- 验证：`docs/development/readonly-inventory-pack-verification-20260916.md`

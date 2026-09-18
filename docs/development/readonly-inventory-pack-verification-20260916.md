@@ -90,3 +90,117 @@ $ env | grep -i "DATABASE_URL\|PG" → 空
   找不到列，是没有被要求盘它。
 - TRG-04 的"3xx 重定向"盘点——不是表/列缺失，是这个属性根本不是存量数据的静态字段，两份
   来源设计文档都各自说明了这一点。
+
+## 6. 复核返修（F3 / F4 / F5）— 2026-09-18 合成 PostgreSQL 实跑
+
+**执行状态声明：仍未在生产库执行；生产执行需 owner 另行授权**（目标库、只读身份、窗口、
+超时与输出预算）。本节全部结果来自**本机一次性合成 PostgreSQL 16.9**（便携二进制，临时
+cluster，端口 55432），数据全是明显假值（`*.invalid` 主机、`FAKE-NOT-A-REAL-*` 占位），
+跑完即 `DROP SCHEMA … CASCADE`。没有连接 222 或任何真实库。
+
+复核报告：`artifacts/reviews/queue-closeout-20260916/review-and-decisions.md` §3 F3/F4/F5、§7.3。
+
+### 6.1 F3 — HTTP 存量漏报
+
+**根因**：`02-trg04-http-targets.sql` 旧版用 `actions::text ILIKE '%"url":"http://%'` 扫
+`jsonb::text`。JSONB 不保留输入排版，回显成员一律是 `"url": "http://…"`（冒号后一个空格），
+这个不含空格的模式因此**永远打不中正常存储的行**；它同时对键的大小写敏感，还会把"描述字段
+里恰好写了 `"url":"http://`"这种文本当成命中。
+
+**改法**：JSON 字段语义匹配。`jsonb_path_query(ar.actions, '$.**')` 遍历数组本身、每个 action
+对象以及 `condition_branch` 的内层 `actions`；`jsonb_each_text` 取该节点的成员；命中条件是
+**键名归一化后属于 url 类键名**（`url`/`webhookUrl`/`endpoint`/…）**且**其字符串值 `btrim`
+后 `ILIKE 'http://%'`。不依赖任何渲染形式、空格、键序或大小写。`multitable_webhooks.url` 是
+text 列，仍是直接前缀判定，但加了 `btrim`。
+
+**正反例（合成新 schema，`fixture-modern.sql`）**：
+
+| 例 | 行 | 形状 | 新谓词 | 旧文本谓词 |
+|---|---|---|---|---|
+| 正 | `r-top` | 顶层 action 的 `url: http://` | 命中 | 漏 |
+| 正 | `r-nested` | `condition_branch` 内层 actions | 命中 | 漏 |
+| 正 | `r-spaced` | 带空格排版写入 | 命中 | 漏 |
+| 正 | `r-upper` | 键 `URL`、scheme `HTTP://` | 命中 | 漏 |
+| 反 | `r-https` | `https://` | 不中 | 不中 |
+| 反 | `r-https-upper` | `HTTPS://` | 不中 | 不中 |
+| 反 | `r-decoy` | 普通文本字段里含 `"url":"http://…` 字面量 | 不中 | 不中（转义后也不匹配） |
+
+实跑数字：新谓词 `http_rules = 4`，id 集合 `{r-nested, r-spaced, r-top, r-upper}`；
+**旧谓词在同一批数据上得 0**——即旧版会把 4 条真实存量报成"零 HTTP 存量"。
+
+### 6.2 F4 — ID 与计数集合不一致
+
+**根因**：旧版 Q3/Q5 的行过滤是 `jsonb_typeof(config #> '{connection}') = 'object'`（只看形状），
+与计数用的秘密键谓词不是一回事，普通连接因此进 ID 列表而不进计数。
+
+**改法**：计数与 ID 共用同一个 `hit` CTE，且都用 `WHERE matched_top_level OR matched_headers`
+过滤（形状 A / 形状 B 各一对，共 4 处，静态测试断言正好 4 处）。
+
+**正反例**：`ds-clean`（有 connection 对象、零秘密键）既不进计数也不进 ID；`ds-top`（顶层
+`password`）与 `ds-headers`（`headers.Authorization`）两者都进；`ds-noconn` 两者都不进。
+实跑：`count = 2`，`|ids| = 2`，集合 `{ds-headers, ds-top}`；**旧的形状谓词在同一批数据上
+返回 3 行**（多出 `ds-clean`），与计数不等。
+
+### 6.3 F5 — 执行指引无可靠完成态
+
+**根因**：README 同时教"整文件跑"、"遇错停止"、"别整文件跑、默认会继续"；Q1 只是探针不会
+自动选互斥 schema 分支；`04` 的旧 schema 回退只提了 `is_admin`，漏了 Q3 选的 `is_active`
+——恰好在它声称覆盖的那种库上会以 42703 中断。
+
+**改法**：新增 `_preamble.sql`（每个文件 `\ir` 引入）统一执行契约——`\set ON_ERROR_STOP on`、
+`SET default_transaction_read_only = on`、`statement_timeout=120s` / `lock_timeout=5s` /
+`idle_in_transaction_session_timeout=30s`、`-v schema=` 时固定 `search_path`；探针结果经
+`\gset` + `\if` **自动分派**兼容分支；每个文件最后一条语句输出
+`INVENTORY_RESULT file=… status=complete|incomplete reason=…`。**没有这行 = 不完整**。
+
+**两种 schema × 四个文件的实跑结果行**：
+
+| 文件 | 新 schema（`fixture-modern.sql`） | 旧 schema（`fixture-legacy.sql`） |
+|---|---|---|
+| `01` | `status=complete shapes=A census=off(default)` | `status=complete shapes=B census=off(default)` |
+| `02` | `status=complete scope=automation_rules+multitable_webhooks` | `status=incomplete reason=missing-column:automation_rules.actions scope=multitable_webhooks-only` |
+| `03` | `status=complete shape=A(jsonb)` | `status=complete shape=B(text[])` |
+| `04` | `status=complete predicate=is_admin-or-role` | `status=incomplete reason=missing-column:users.is_admin users.is_active note=role-only-lower-bound` |
+
+旧 schema 上 `02` 的 `http_rules` 计数**根本不打印**（分支被跳过），而不是打印 0；`04` 打印的
+是 `declared_admin_not_in_user_roles_role_only`（明确标注为下界），结果行同时给出
+`note=role-only-lower-bound`。
+
+**缺列 / 超时 / 权限不足 → incomplete 的证据**：
+
+| 场景 | 制造方式 | 结果 |
+|---|---|---|
+| 缺列 | 旧 schema 没有 `automation_rules.actions` / `users.is_admin` / `users.is_active` | `status=incomplete reason=missing-column:…`，退出码 0，计数不打印或标注为下界 |
+| 锁超时 | 并发会话 `LOCK TABLE data_sources IN ACCESS EXCLUSIVE MODE` 后跑 `01` | psql 退出码 3，stderr `ERROR: canceling statement due to lock timeout`，**没有任何 `INVENTORY_RESULT` 行** |
+| 权限不足 | 新建无 `SELECT` 权限的角色跑 `01`（`information_schema` 按权限过滤，表对它不可见） | `status=incomplete reason=missing-table:data_sources`，**不打印任何计数**，不会伪装成零命中 |
+
+### 6.4 变异探针（去掉修复 → 测试红）
+
+在 scratchpad 的**副本**上做（仓库树未改动），跑
+`node --test verify/readonly-inventory-pack.test.mjs`：
+
+| 变异 | 结果 |
+|---|---|
+| 把 `02` 的语义谓词换回 `actions::text ILIKE '%"url":"http://%'` | 2 红：静态契约测试 + 合成库测试（`actual: []` vs 期望 4 条 id） |
+| 把 `01` 的 ID 过滤从 `WHERE matched_top_level OR matched_headers` 换成 `WHERE true` | 2 红：静态计数 3≠4 + id 集合出现 `ds-clean`、`ds-noconn` |
+| 把 `04` 的 `incomplete` 文案改成 `complete`，并把前言 `ON_ERROR_STOP on` 改成 `off` | 2 红：前言契约测试 + 旧 schema 结果行断言 |
+
+### 6.5 验证件与建议接线
+
+- 一次性脚本：`scripts/ops/readonly-inventory-20260916/verify/run-verify.mjs`
+  （建临时 schema → 灌合成数据 → 按 runbook 的唯一方式跑四个文件 → 断言 → `DROP SCHEMA`）。
+- 自动化：`scripts/ops/readonly-inventory-20260916/verify/readonly-inventory-pack.test.mjs`
+  （`node --test`；第一层静态契约无需数据库，第二层 `DATABASE_URL` 门控）。
+- **建议接线泳道**：仿
+  `.github/workflows/approval-s1-evidence-replay-gate-realdb.yml` 新开一条小泳道——
+  `services: postgres:16` + `METASHEET_REAL_DB_TEST_STEP=1`，只装 Node、不走
+  `plugin-tests.yml` 的依赖链（本测试只用 Node 内置模块 + runner 自带 `psql`），
+  路径过滤 `scripts/ops/readonly-inventory-20260916/**`。**本轮没有改 `.github/workflows/**`**，
+  接线留给协调方。
+
+### 6.6 本轮明确没做的事
+
+- 没有在任何真实数据库（含 222）上执行本包的任何一条语句。
+- 没有改 `.github/`、`packages/`、`plugins/` 下任何文件。
+- 没有为 `connection.url` 的 userinfo 口令、`<resource>:*` 细粒度通配符等 §5 已列的已知盲区
+  新增查询——返修只针对 F3/F4/F5。
