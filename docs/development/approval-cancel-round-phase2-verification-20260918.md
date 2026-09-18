@@ -2876,6 +2876,87 @@ $ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_
 `approval-cancel-round-redemption.db.test.ts`,无新文件 / 新 lib / 新表 ⇒ s6a、考勤四钉、W7-R10、
 `ci-realdb-step-contract.mjs` 全部零欠账。
 
+---
+
+## 3.19 账侧七步的**逐步处置**,写成依据而不是表格单元 (this unit)
+
+§3.15 用一张表给 C-1 七步各标了一个状态。本节把其中三类**写成依据**:①/② 为什么不是「跳过」而是
+**没有可比的终态**,③/⑦ 的开放项**究竟是什么**(不是它看起来的那样),⑥ 的平价半边**能不能构造**。
+
+### 3.19.1 ①「锁两行 `FOR UPDATE`」与 ②「状态复核」——依据,引锁文行号
+
+锁文对这两步的原文在 **lock:84**:
+
+> 锁 `attendance_requests` 与原 `approval_instances` `FOR UPDATE` → 状态复核 → 按运行模式追加取消计算 →
+
+它们在 §8 期 1 的**账侧**验收里(lock:169「完整取消结果**逐字节等价于现有 W4 路径**」)**没有可比对象**,
+理由是逐字节等价是一条**行级**判据,而这两步都不落行:
+
+- **①**:`FOR UPDATE` 是事务内持有的**行锁**。事务 `COMMIT` 之后,没有任何一行记录曾经取过它——
+  `pg_locks` 在提交后就不再有这条目。twin 比对读的是提交后的三张表,所以 ① 在这条判据下**不可观测**,
+  而不是「测了但跳过了」。
+- **②**:状态复核是**读侧**判定。复核**通过**时它什么都不写,通过与否的差别只体现在后续步骤发生与否上
+  ——而后续步骤(④⑤)已经各自被逐列比对。所以复核成功这一事实同样没有独立的终态可比。
+
+**①并不是没有被覆盖,只是不归账侧管。** 锁文对 ① 的实质约束是**锁顺序**(lock:227 的
+`行锁(轮次实例 → 原单据实例 → attendance_requests → 计算/段 → 余额批次)`),而那条约束由 §3.10 的
+census Q-G 四条腿覆盖——含一条用真实 `40P01` 证明**修复前的顺序确实死锁**的反例。把 ① 记成「账侧未覆盖」
+会读成一个并不存在的缺口;它的门在别处,且那道门是建过的。
+
+**②的负例方向,本分支确实没有。** 「复核**失败**时必须拒绝」是一条**行为**断言,不是平价断言;本分支
+没有任何用例构造「考勤请求已不在可取消状态」的夹具。登记在 §4,不含糊成「①/② 不适用」。
+
+### 3.19.2 ⚠️ ③/⑦ 的开放项**不是**「把断言写出来」——它们已经是断言了
+
+这一条是对一种**误读**的更正,而且这个误读容易发生,所以写在这里:§3.15.11 的标题是「why two of
+C-1's steps are **parity-trivial** here, not covered」,正文说 ③(取消计算)与 ⑦(事件)
+「**MEASURED equal (0/0)** — but skipped on BOTH」。读快了会理解成「这两步的断言被 skip 掉了」。
+
+**不是。** 用例里没有任何 `test.skip`;③ 与 ⑦ 是**实打实的断言**,而且是按值断言的
+(`calcA = calcB = '0'`、`outboxA = outboxB = '0'`,并且**两侧都按值钉**而不只断言相等——§3.15.11
+自己解释了为什么:`0 === 0` 也是归因谓词写错时的返回值)。**被跳过的是生产分支**:twin 所在的 org 处于
+`legacy_projection_only` 写姿态,适配器因此跳过 P14 取消计算
+(`plugins/plugin-attendance/index.cjs:35169`),边界因此跳过 outbox 入队
+(`w4c3b-request-operation-boundary.ts:903-916`)。
+
+所以这两步的真实开放项是**分支覆盖**,不是断言缺失,它需要的东西也完全不同:一对**非 legacy org** 的
+twin,即 rollout registry 夹具(`w4c0-operation-registry.ts:640`、`:877` 解析 `acceptedWritePosture`)
+——本文件今天没有任何用例做这件事。而且那还只是入场券:`authoritative`/`shadow` 分支一旦真的跑起来,
+新出现的 calculation / outbox 行**各自需要自己的归一化对**(它们带各自的 id 与时间戳),否则 twin 比对
+会立刻因身份列不同而红。这是一个**独立单元**,不是本单元能顺手收的一行断言。
+
+⚠️ 因此:本单元**不**把 ③/⑦ 标成已闭合,也**不**假装它们只差一个断言。§3.15.11 的
+「**OPEN**: a twin pair in a non-legacy org」保持 OPEN,措辞按本节澄清。
+
+### 3.19.3 ⑥ 的平价半边能不能构造 —— 取决于 B 侧封不封存,而这一点**尚未测量**
+
+⑥(`reverseLeaveBalanceDeduction` 返回 `unrecoverableExpired`,lock:86「必须呈现」)现在是**两半**:
+
+- **持久化半边:已闭合**(§3.16)。兑现路径供非 null `operationId` ⇒ 走封存分支,
+  `attendance_result_operations.response_snapshot` 里 `unrecoverableExpired = 120`,非零,M-23/M-24
+  各 1 红。
+- **呈现半边:owner 裁决**(§3.15.6/§3.16)。哪个用户可见面渲染它,锁文没定;本分支把「DTO 上没有这个
+  字段」断言成**负例**,所以真加了通道就会红。
+
+**账侧平价的那一半(twin 比对两条路径的 `unrecoverableExpired`)今天不可构造,原因是可测量的、但我没测**:
+B 侧走的是 HTTP `POST /api/attendance/requests/:id/cancel`,它的 `operationId` 来自
+`resolveRequestOperationId(parsed.data)`(`plugins/plugin-attendance/index.cjs:38484`、`:38570`;
+定义在 `:33304`)——即**从请求体解析**。§3.15.6 记过它「often returns null」,而 null ⇒ 走
+`adapter.prepare`、**不封存** ⇒ B 侧根本没有 `response_snapshot` 行可比。
+
+**我没有对本文件 twin 夹具的那个请求体实测过这个返回值**,所以这里写的是判据而不是结论:
+
+> ⑥ 的账侧平价能否构造 = 「twin 夹具 B 的取消请求体是否让 `resolveRequestOperationId` 返回非 null」。
+> 若返回 null,⑥ 不是一条断言,而是一条**带理由的 declared divergence**(A 封存、B 不封存,因为两条
+> 路径的 operation 身份来源不同);若返回非 null,则它是一条可以写的比对。
+
+登记在 §4,附这条可机核的判据,而不是含糊的「⑥ 开放」。
+
+### 3.19.4 本节没有改动任何代码或测试
+
+纯文档单元:把已有的测量换个说法、把误读挡掉、把三个开放项写成**可执行的下一步**而不是形容词。
+本节不产生任何新的绿。
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -2947,6 +3028,21 @@ they are.
   compare against the real `POST /api/attendance/requests/:id/cancel` path, with eight identity
   substitutions sourced from fixture facts and 13 declared divergences carried as data. Every other
   column is byte-equal after normalisation. M-22 red at the named site, 1 of 16.
+  ⚠️ **Step-by-step disposition, written as 依据 rather than as table cells: §3.19.** ①/② have no
+  twin-comparable end state (a `FOR UPDATE` held inside a committed transaction leaves no row; a
+  PASSING status recheck writes nothing — lock:84), and ① is covered where the lock actually
+  constrains it, as lock ORDER by census Q-G (lock:227), not by the 账侧 door. ③/⑦ are **already
+  assertions** — §3.19.2 corrects the easy misreading of §3.15.11: nothing is `test.skip`ped, the
+  counts are pinned as VALUES on both sides; what is skipped is the PRODUCTION branch under
+  `legacy_projection_only`, so the open item is BRANCH coverage needing a non-legacy-org twin
+  (rollout registry, `w4c0-operation-registry.ts:640`/`:877`) plus normalisation pairs for the rows
+  that would then appear — a unit of its own. ⑥'s 账侧 parity half is gated on a MEASURABLE question
+  nobody has measured: whether `resolveRequestOperationId` (`index.cjs:33304`, called at `:38484`
+  /`:38570`) returns non-null for fixture B's own cancel request body — null ⇒ B never seals ⇒ ⑥ is
+  a declared divergence with a reason, not an assertion. Registered with that criterion attached.
+  ⚠️ Also NOT built anywhere on this branch: ②'s NEGATIVE direction — a fixture whose attendance
+  request is no longer in a cancellable state, so the status recheck REFUSES. That is a behaviour
+  assertion, not a parity one, and no case constructs it.
   ⚠️ What is NOT closed by it, and both are measured rather than argued: (a) **request provenance
   is a SUBSTANTIVE divergence** — `approval_records.ip_address`/`user_agent` are `null` on the
   redemption path and populated on the HTTP path (§3.15.5), flagged for owner registration rather
