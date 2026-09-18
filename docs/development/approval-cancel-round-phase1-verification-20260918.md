@@ -362,6 +362,7 @@ share one lane; the two `.test.ts` files run in the default no-DB unit-test job)
 | Outlet #14 (suite gate) | `approval-cancel-round-creation.db.test.ts` | `§14.3 #14 (WI-6) — suite="forbidden" is rejected before any write (CancelRoundSuiteForbiddenError 409)` | same |
 | Outlet #2 (`adminJump`) | `approval-cancel-round-outlet-guards.db.test.ts` | `#2 adminJump — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN; a genuine downstream jump on an ordinary instance still succeeds` | same |
 | Outlets #4/#6 (action gate) | `approval-cancel-round-outlet-guards.db.test.ts` | `#4/#6 dispatchAction action gate — a cancel-round instance rejects 'handle' and 'return' 409 CANCEL_ROUND_OUTLET_FORBIDDEN; 'comment' (an allowed action) still succeeds` | same |
+| §14.2 允许集 — COMPLEMENT half, member-level (round-4 gate P2-1 closure; round-5 gate P3-3 adds this row) | `approval-cancel-round-outlet-guards.db.test.ts` | `§9-9 allow-set MEMBER pin — every ApprovalActionType NOT in the ratified allow-set {approve,reject,revoke,comment} is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN, enumerated mechanically over the exported union (not hand-listed)` | same |
 | Outlet #7 (legacy approve) | `approval-cancel-round-outlet-guards.db.test.ts` | `#7 legacy POST /:id/approve — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN via handleApprovalsError; the row is unchanged` | same |
 | Outlet #7′ (legacy reject) | `approval-cancel-round-outlet-guards.db.test.ts` | `#7′ legacy POST /:id/reject — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN via handleApprovalsError; the round stays pending, not orphaned` | same |
 | Outlet #8 (Bridge) | `approval-cancel-round-outlet-guards.db.test.ts` | `#8 ApprovalBridgeService.dispatchAction — a half-formed cancel-round instance (no published_definition_id) fails isTemplateRuntimeInstance and is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN by the generic bridge` | same |
@@ -454,8 +455,10 @@ vectors file shows no delta since the pin recorded in `e394c9e9c`); re-run in §
   `cancel_round` (P1-A's suggested closure line), and fixes the stale `api.ts` comment the same
   review flagged as P2-A. **Checklist item 15 is now closed.** See Part C for the rerun and mutation
   evidence.
-- **§14.2 allow-set member-level pin — open before this pass, CLOSED by it (round 4 / Part J)**: this
-  bullet did not exist in §A9 before gate round 4; the gate's own P2-1 finding (reason 3) was
+- **§14.2 allow-set member-level pin — open before this pass, the COMPLEMENT half CLOSED by it
+  (round 4 / Part J); the MEMBERSHIP half's `approve` slot separately identified as still
+  undiscriminated, deferred to C-2 (P3 hygiene round, 2026-09-19, gate round-5 P3-1 — see Part K)**:
+  this bullet did not exist in §A9 before gate round 4; the gate's own P2-1 finding (reason 3) was
   precisely that this gap had NO entry here, so a reader of this "honest open list" would have
   concluded there was no gap. Before this fix, the ratified §9-9 allow-set
   {approve,reject,revoke,comment} had ZERO discriminative power at the MEMBER level — the 47/47
@@ -472,7 +475,19 @@ vectors file shows no delta since the pin recorded in `e394c9e9c`); re-run in §
   mutation): each time the new test goes red specifically at that verb (400 `VALIDATION_ERROR` where
   409 `CANCEL_ROUND_OUTLET_FORBIDDEN` was expected), the other 6 tests in the file stay green, and the
   file's total
-  goes from 6→7 tests / the suite total from 47→48. **Checklist item now closed.** See Part J.
+  goes from 6→7 tests / the suite total from 47→48. **Checklist item closed for the COMPLEMENT
+  half** — the five verbs the allow-set must reject (`transfer`/`add_sign`/`reduce_sign`/`return`/
+  `handle`). See Part J.
+  **Narrowing (P3 hygiene round, 2026-09-19, gate round-5 P3-1)**: the MEMBERSHIP half is a
+  per-member 2×2, not a single bit this fix flips closed. Gate round-5 measured all four allow-set
+  members individually (R5-M7…M10): removing `comment`/`revoke`/`reject` each turns the suite red
+  (load-bearing), but removing `approve` leaves all 48 tests green — because the `approve` outlet is
+  judgment II's own dispatch path, which this C-1 slice does not implement (design MD §1.1, Decision
+  3, deferred to C-2). So `approve`'s presence in `CANCEL_ROUND_ALLOWED_ACTIONS` is, from this
+  slice's own acceptance suite's point of view, an unverified member, not a pinned one. This gap
+  predates this pass — gate round 5 is the first to name it — and its closure is deferred to C-2's
+  own acceptance table (a "approve outlet, member-level pin" row, alongside judgment II itself), not
+  to this slice. See Part K.
 - **判据 II / 判据 IV / `attendance-parity.db.test.ts`**: not implemented in this slice (design MD
   §1.1, unchanged from Part B's Decision 3). Deferred to C-2, per the goal document's own slice
   ordering.
@@ -2500,11 +2515,15 @@ transfer, revoke, comment, return, add_sign, reduce_sign, handle), not a copy-pa
 three ratify-named verbs — so a future verb added to `APPROVAL_ACTION_TYPES` is covered by this loop
 without anyone remembering to edit this test (the exact failure mode
 `finding_approval_action_verb_pinned_copy_blast_radius` warns about). The local
-`RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS` copy is deliberately NOT imported from
-`ApprovalProductService`'s own `CANCEL_ROUND_ALLOWED_ACTIONS` constant — importing the production
-constant would make the test tautological against exactly the widening regression it exists to catch
-(the guard-the-guard assertions above also fail loudly, rather than passing vacuously, if the
-enumeration itself is ever tampered with).
+`RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS` copy holds its own ratified-literal value rather than
+importing `ApprovalProductService`'s own `CANCEL_ROUND_ALLOWED_ACTIONS` constant — that constant is
+module-private (never `export`ed), so declining to import it was never actually an available choice;
+an independent literal copy is what keeps the test non-tautological against exactly the widening
+regression it exists to catch (the guard-the-guard assertions above also fail loudly, rather than
+passing vacuously, if the enumeration itself is ever tampered with). **Correction (P3 hygiene round,
+2026-09-19, gate round-5 P3-5)**: this paragraph and the test's own doc comment previously said
+"deliberately NOT imported", which reads as a declined choice; there was no such choice available
+since the production constant was never exported. Same substance, corrected wording — see Part K.
 
 **Implementation**: unchanged, per the gate's own §9 closure judgment ("实现不需要改") — the allow-set
 literal was already correct; only the missing pin is added.
@@ -2675,3 +2694,151 @@ to prose/comments this lane's own earlier passes wrote, confirmed against the cu
 Every finding round 4 named now has a terminal disposition recorded in this document. This does not
 constitute a fifth gate pass approving these fixes — that is the next independent reviewer's call,
 not this document's own.
+
+---
+
+# Part K — P3 卫生轮(2026-09-19)
+
+Processes every P3 gate round 5 (`impl-gate-C-slice1-round5-20260918.md`, 0 P1 / 0 P2 / 5 P3,
+DRAFT-READY) left open, plus that report's own §9 ("若要把五条 P3 也清掉") suggested closures. Scope
+this pass, per the running instruction: **zero production-code behavior change** — comments, MD,
+test files, scripts/dev only. Start point this pass diffs against:
+`74a387dad6a1b29acb596ab3992a634bc739eb9d` (this document's own round-5-gated HEAD, confirmed via
+`git rev-parse HEAD` before any edit in this pass, not copied from the gate report's prose).
+
+## K1. Disposition table
+
+| # | 原文一句(round-5 gate) | 处置 |
+|---|---|---|
+| P3-1 | 成员钉只钉了补集;`approve` 的成员身份半边仍零判别力(§A9 的 "CLOSED by it" 措辞盖过了两半) | **CLOSED-MD** — §A9 bullet header and closing sentence narrowed to "COMPLEMENT half CLOSED"; `approve`'s undiscriminated membership named explicitly and deferred to C-2 alongside 判据 II. Part J's own `P2-1 \| CLOSED` verdict row is UNTOUCHED (that verdict — widening has no discriminative power — is genuinely closed; only the broader "member-level pin" phrasing needed narrowing, per `feedback_supersession_marker_must_evaluate_not_void`: the marker evaluates the one sentence, not the section). |
+| P3-2 | 设计 MD 两处 `file:line` 指针(§3.3 `:4253-4264`,§7 `:4253-4272`)与本树不符,且不是漂移,是写错 | **CLOSED-MD** — both sites switched from a pinned line-literal to a re-derive `grep` command, per the gate's own recommended (and preferred) fix; the correct current-tree block (`:4251-4256` const / `:4258-4266` function) is also stated once, for a reader who wants the number without running the grep. §7's `:9928` call-site pointer — which the gate confirmed correct — is left untouched. |
+| P3-3 | 验收映射表(§A6)没有新测试 `§9-9 allow-set MEMBER pin` 的行 | **CLOSED-MD** — one row added to §A6 immediately after the existing `Outlets #4/#6 (action gate)` row, verbatim test title copied from the test file (not retyped by hand), same `same` lane label as its sibling rows in that file. |
+| P3-4 | PR #5851 body 仍停在第 2 轮,「门审要求 PR body 必写的九条」标题也未追平第 10/11 条 | **DEFERRED-owner 项** — this round's own hard rule forbids touching PR state or body (`不动 PR 状态与 body`); a PR-body edit is a publish-time action, not a test/comment/MD/scripts change. Not attempted. §K3 below carries forward the gate's suggested replacement text verbatim so whoever next updates the body does not have to re-derive it. |
+| P3-5 | 新测试的 doc 注释("deliberately NOT imported")把一件做不到的事("导入" `CANCEL_ROUND_ALLOWED_ACTIONS`,该常量从未 `export`)写成了"有意不做" | **CLOSED-注释** — fixed at both sites that carried the phrase: the test file's own doc comment (`approval-cancel-round-outlet-guards.db.test.ts`) and this document's Part J narrative describing the same test (verif, §J2-area). Both now say the constant is module-private, so "importing" was never an available choice, while keeping the substantive point (an independent literal copy is the correct design, confirmed load-bearing by R5-M6) unchanged. |
+
+## K2. §14.2 允许集 —— 完整 2×2,写死供下一轮引用(不必重导)
+
+| 允许集成员 | 移除它 ⇒ | 本 lane 的钉 |
+|---|---|---|
+| `reject` | 红(2 例,redemption) | 有钉,round-5 R5-M10 |
+| `revoke` | 红(4 例,redemption) | 有钉,round-5 R5-M9 |
+| `comment` | 红(1 例,outlet-guards #4/#6) | 有钉,round-5 R5-M8 |
+| `approve` | **绿(48/48)** | **无钉 — 判据 II 未在本切片实现,深钉延后到 C-2** |
+
+补集半边(拒绝 `transfer`/`add_sign`/`reduce_sign`/`return`/`handle`)由 round-4/5 的 `§9-9 allow-set
+MEMBER pin` 逐成员钉住(round-5 R5-M1…M5,五条全红)。
+
+## K3. P3-4 的建议正文,原样搬运(供下一次更新 PR body 时直接用)
+
+Round-5 gate §9 第 4 条 + 该报告结尾的建议引用文本,逐字未改动:
+
+> §14.2 允许集的**补集半边**已有逐成员钉(`§9-9 allow-set MEMBER pin`,机械遍历
+> `APPROVAL_ACTION_TYPES`),门审第 5 轮对 `transfer`/`add_sign`/`reduce_sign`/`return`/`handle`
+> **五个动词逐个亲跑加宽 mutation,五条全红**;**成员半边**同样逐格测量(`reject`/`revoke`/`comment`
+> 移除即红,**只有 `approve` 无钉**),`approve` 随判据 II 落 C-2(门审 P3-1)。
+
+以及门审第 5 轮 §9 第 4 条本身:更新 PR body 的门审状态段(第 2 轮 → 第 5 轮 DRAFT-READY @
+`74a387dad`),并把第 10/11 条按现状求值(第 11 条已因钉子落地而消解)。**本轮未执行**——见 K1
+P3-4 处置理由。
+
+## K4. §3.6 承接事项(round-5 gate,非 P3,本轮未处置)——如实点名,不当成已排空
+
+Round-5 gate §3.6 named four carry-over items not counted as P-level and not new this round. This
+pass's scope is the five *open P3s*, not these; they are named here only so they do not read as
+silently dropped:
+- §14.3 #9 (b) 半边(mirror 覆盖)——仍无可红断言,carry-over 未变。
+- 两个 `wip:` 提交——squash 需要 force-push 到已推送的分支;本轮硬规矩禁止 force-push,未处置。
+- 判据 II / 判据 IV / attendance-parity——C-2 范围,已披露,未处置。
+- 锁文 mtime(`Sep 17 10:45`)vs 抬头 `RATIFIED 2026-09-18`——owner 求值项,未处置。
+
+## K5. 撤回类改动 —— 全 lane population grep 扫描
+
+Population = the two cancel-round MDs (`…-design-20260918.md`, `…-verification-20260918.md`) plus
+the outlet-guards test file — the three files P3-1/P3-2/P3-3/P3-5's withdrawn phrasings could have
+lived in.
+
+```
+$ grep -rn "deliberately NOT imported" docs/development/approval-cancel-round-phase1-verification-20260918.md \
+    packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts
+```
+Both remaining hits are inside the CORRECTIVE sentence itself (quoting the retracted phrase to name
+what was fixed), not a standing claim. Zero hits assert the old (false) framing as fact.
+
+```
+$ grep -n "4253-4264\|4253-4272" docs/development/approval-cancel-round-phase1-design-20260918.md
+```
+Both remaining hits are inside the corrective annotation (naming the old, wrong numbers as what was
+fixed). Zero hits use them as an active pointer.
+
+**Repo-wide, for the record (not this lane's population)**: `4253-4272` also appears in
+`docs/development/approval-remaining-dev-design-report-20260820.md:379`, describing a different
+construct (`samePersonPolicy` widening predicate) in a different, unrelated document from a different
+work item. Left untouched — out of this lane's scope, and touching an unrelated doc's line-number
+citation is not this pass's mandate.
+
+```
+$ grep -n "CLOSED by it" docs/development/approval-cancel-round-phase1-verification-20260918.md
+```
+One hit, now reading "**the COMPLEMENT half** CLOSED by it" — the bare, unqualified form no longer
+exists.
+
+## K6. 本轮跑了什么(处女库,dropdb 收尾)
+
+```
+$ dropdb --if-exists metasheet2_p3hygiene_r5 && createdb metasheet2_p3hygiene_r5
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_p3hygiene_r5 npx tsx src/db/migrate.ts
+MIGRATE-EXIT:0   grep -c "executed successfully" → 409
+$ DATABASE_URL=…metasheet2_p3hygiene_r5 EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,attendance-fk-migration,outlet-guards,node-timeout-effect}.db.test.ts
+ Test Files  7 passed (7)   Tests  48 passed (48)   Duration  21.33s
+$ npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts tests/unit/approval-cancel-round-plugin-mirror-constant.test.ts
+ Test Files  2 passed (2)   Tests  15 passed (15)
+$ npx tsc --noEmit -p .    (packages/core-backend)
+TSC-EXIT:0   wc -l → 0
+$ dropdb metasheet2_p3hygiene_r5
+```
+Same 48/48 and 15/15 as round-5 gate's own baseline (§1.2/§1.3 of that report) — this pass's only
+production-adjacent edit (the test-file doc-comment fix, P3-5) is confirmed non-behavioral by these
+identical counts, not merely asserted so from reading the diff.
+
+**Range exemption, stated not silently skipped** (same reasoning as round-5 gate §1.9): this pass
+adds/renames zero real-DB test files and touches zero `.github/` files, so the two-point wiring
+census, sentinels, `plugin-tests.yml` inclusion count, `*-ci-wiring` population (45), the DML
+table-classification suite, and the s6a `plugin-tests.yml` digest pin all carry forward unchanged
+from round-5 gate's own mechanical recount (§1.6/§1.7/§1.8/§1.9 of that report) — not rerun this
+pass because nothing they guard against moved.
+
+## K7. 改动面(机械可核)
+
+```
+$ git diff --stat 74a387dad6a1b29acb596ab3992a634bc739eb9d..HEAD
+```
+Exactly 3 files, same 3 this Part K's own K1 table names (this Part K's own text is itself part of
+the verification-MD delta, so its exact line count is intrinsically self-referential — like Part J's
+own diff-of-itself before it — but the FILE LIST is not: it is fixed the moment the edits above
+stopped, before this sentence was written):
+- `docs/development/approval-cancel-round-phase1-design-20260918.md` — P3-2 (2 sites, comment-style
+  MD prose, no code).
+- `docs/development/approval-cancel-round-phase1-verification-20260918.md` — P3-1, P3-3, P3-5
+  (second site), plus this Part K.
+- `packages/core-backend/tests/integration/approval-cancel-round-outlet-guards.db.test.ts` — P3-5
+  (first site), a doc-comment-only edit inside the test file (`/** ... */` block), zero executable
+  lines changed — confirmed by the 48/48 rerun in K6 being byte-identical in count and case names to
+  round-5 gate's own baseline.
+
+Zero other files touched. Zero lock-file or `reviews/` touches
+(`git diff --name-only origin/main..HEAD | grep -icE "review|lock-draft|\.claude"` → unchanged at
+`0`, this pass added nothing to that population). Zero `origin/main` touches (this pass makes no
+fetch of `main`, no push to it). Zero merge, undraft, PR-state, or PR-body change.
+
+## K8. 未处置项(如实列,非本轮遗漏)
+
+- P3-4 (PR body) — deferred, hard rule this round, §K1/§K3.
+- §3.6 的四条 carry-over — deferred, out of this round's P3 scope, §K4 (named so as not to read as
+  dropped).
+- No new mutation probes were run this pass — every fact P3-1/P3-2/P3-3/P3-5 rely on
+  (module-private-ness of `CANCEL_ROUND_ALLOWED_ACTIONS`, the real `:4251-4266` block, the verbatim
+  test title, the 2×2 member table) was re-derived fresh this pass with `grep`/`sed -n` against the
+  current tree (quoted inline above), not copied from the gate report's prose — but none of it is a
+  NEW behavioral claim requiring a NEW mutation; round-5's own R5-M1…M10 (`impl-gate-C-slice1-round5-20260918.md`
+  §4) remain the mutation evidence for the 2×2 table in K2, cited, not rerun.
