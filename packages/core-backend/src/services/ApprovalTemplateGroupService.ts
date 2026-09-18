@@ -625,3 +625,76 @@ export async function unlinkApprovalTemplateFromGroup(
   )
   return { changed: (result.rowCount ?? 0) > 0 }
 }
+
+// ── A-3 backfill ("按现有 category 建组并挂接") — design-gate A3-phase2, W7 preview ─────────────
+//
+// `docs/development/approval-template-groups-phase2-design-20260918.md` §5.2 / P3-3
+// (design-gate changesRequired, `reviews/design-gate-A3-phase2-20260918.md`): preview and (later)
+// execute MUST decide "create a new group for this category / attach to an existing one / skip
+// this category entirely" through the SAME function, or the two can silently diverge (preview
+// shows a plan execute would not actually carry out). `classifyBackfillCategory` below is that
+// function — pure, no DB access, so both callers can share it without composing another
+// transaction. It is intentionally the ONLY place this module decides "is `category` storable as
+// a group name" — the boolean is a straight port of the `btrim(category) ~ '[!-~]'` predicate the
+// design's `eligible` SQL query (§3.1) uses, so a caller building that SQL later has a second,
+// independent (JS) implementation to diff against rather than a copy of the same expression.
+
+export type BackfillCategorySkipReason = 'CATEGORY_BLANK_AFTER_TRIM' | 'CATEGORY_NOT_STORABLE_AS_GROUP_NAME'
+
+export type BackfillCategoryClassification =
+  | { action: 'skip'; reason: BackfillCategorySkipReason; trimmedCategory: string }
+  | { action: 'create'; trimmedCategory: string }
+  | { action: 'attach'; trimmedCategory: string; existingGroupId: string }
+
+/**
+ * Mirrors PostgreSQL's ONE-ARGUMENT `btrim(text)`, which trims only the ASCII space character
+ * (0x20) from both ends — NOT `String.prototype.trim()`'s full Unicode-whitespace set (tabs,
+ * newlines, NBSP, … all survive). A category of `'\tHR\t'` therefore stays `'\tHR\t'` here, same
+ * as it would under the SQL `eligible` predicate — reimplementing this with `.trim()` would let a
+ * tab-padded legacy category disagree between the two, which is exactly the divergence this
+ * function exists to prevent (see the file-header block above this function).
+ */
+function pgBtrim(value: string): string {
+  let start = 0
+  let end = value.length
+  while (start < end && value.charCodeAt(start) === 0x20) start++
+  while (end > start && value.charCodeAt(end - 1) === 0x20) end--
+  return value.slice(start, end)
+}
+
+/**
+ * Mirrors the POSIX bracket expression `[!-~]` (ASCII 0x21–0x7E, "printable and not a space") that
+ * `atg_name_nonblank` / `atgbb_org_nonblank` (§2 DDL) and the execute `eligible` predicate (§3.1)
+ * all use for "storable as a group name". `test()` on a non-empty match anywhere in the string is
+ * the same semantics as SQL's `~` operator against this pattern (a containment match, not a
+ * full-string anchor).
+ */
+const STORABLE_GROUP_NAME_PATTERN = /[!-~]/
+
+/**
+ * §5.2 / P3-3: given one candidate template's raw `category` value and the org's current
+ * `{ trimmed name → active group id }` snapshot, decide skip / create / attach. `rawCategory` is
+ * the UNTRIMMED database value (including `null`, which is treated identically to `''` — a
+ * template with no category set at all is "blank after trim", not a fourth outcome). The skip
+ * branch (blank / not-storable) never consults `existingGroupIdByTrimmedName` — callers that only
+ * need to know whether a category is skip-eligible (e.g. to build the trimmed-name set to query
+ * existing groups for, BEFORE that map exists) may call this with an empty map and read only
+ * `.action === 'skip'` / `.trimmedCategory` off the result; the `existingGroupId` branch is only
+ * meaningful once the real map is supplied.
+ */
+export function classifyBackfillCategory(
+  rawCategory: string | null,
+  existingGroupIdByTrimmedName: ReadonlyMap<string, string>,
+): BackfillCategoryClassification {
+  const trimmedCategory = pgBtrim(rawCategory ?? '')
+  if (trimmedCategory === '') {
+    return { action: 'skip', reason: 'CATEGORY_BLANK_AFTER_TRIM', trimmedCategory }
+  }
+  if (!STORABLE_GROUP_NAME_PATTERN.test(trimmedCategory)) {
+    return { action: 'skip', reason: 'CATEGORY_NOT_STORABLE_AS_GROUP_NAME', trimmedCategory }
+  }
+  const existingGroupId = existingGroupIdByTrimmedName.get(trimmedCategory)
+  return existingGroupId
+    ? { action: 'attach', trimmedCategory, existingGroupId }
+    : { action: 'create', trimmedCategory }
+}
