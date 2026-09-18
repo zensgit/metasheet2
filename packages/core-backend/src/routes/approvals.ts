@@ -89,6 +89,7 @@ import {
   listApprovalTemplatesBySection,
   parseApprovalTemplateSectionToken,
 } from '../services/ApprovalTemplateGroupSectionService'
+import { reorderApprovalTemplateGroups } from '../services/ApprovalTemplateGroupReorderService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -1273,6 +1274,31 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       res.json({ group })
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED', 'Failed to unarchive approval template group')
+    }
+  })
+
+  // Reorder — design lock v2.13 §6 phase 3 (A-4), §3 I3 / §4 acceptance E (phase-3 leg) / §6 表第
+  // 3 行. Body is the ORG'S FULL permutation of its currently-active group ids (§3 I3: "分期 3
+  // 拖拽后整体重排 1..n", a full re-rank, not a delta). Shape (array of non-blank strings) is
+  // checked here, BEFORE any DB access (same "org resolved / request validated before any write"
+  // discipline as every other handler in this block); the SET-equality check against the org's
+  // actual active ids happens inside the service's own L0 critical section (no TOCTOU window
+  // between validating the set and writing it) and raises the dedicated `GROUP_REORDER_SET_MISMATCH`
+  // code for every shape of mismatch (missing / extra / duplicate / archived id).
+  r.post('/api/approval-template-groups/reorder', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const rawIds = req.body?.groupIds
+      if (!Array.isArray(rawIds) || rawIds.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
+        return res.status(400).json(
+          approvalErrorResponse('GROUP_REORDER_IDS_REQUIRED', 'groupIds must be an array of group ids'),
+        )
+      }
+      const groups = await reorderApprovalTemplateGroups(orgId, rawIds)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_REORDER_FAILED', 'Failed to reorder approval template groups')
     }
   })
 
