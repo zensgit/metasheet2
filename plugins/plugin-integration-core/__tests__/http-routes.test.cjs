@@ -5672,6 +5672,131 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.body.data.authoritative, false)
 }
 
+// #5860 — one sheet = one project on the LARGE-BOM lane. The lane never plans through `computeDryRun`,
+// so the guard is wired by hand into three routes; this test enumerates all three so an unwired one
+// (the RUN route was, in the first round) turns red here rather than in a customer's sheet.
+async function testLargeBomLaneRefusesForeignProjectOnPlanStartAndRun() {
+  const records = createTableActionRecordsApi()
+  const calls = []
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const mount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createDurableMemoryStorage(),
+    config: {
+      stockPreparationTableActions: [tableActionConfig()],
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
+    },
+  })
+  const FOREIGN_ID = 'foreign_active_row'
+  const foreignRow = () => ({
+    id: FOREIGN_ID,
+    sheetId: 'sheet_stock_configured',
+    version: 1,
+    data: { projectNo: 'P-OTHER', idempotencyKey: 'FOREIGN_KEY', componentSourceId: 'FOREIGN_PART', active: true },
+  })
+  const addForeign = () => { records.rows.push(foreignRow()) }
+  const removeForeign = () => { records.rows.splice(records.rows.findIndex((row) => row.id === FOREIGN_ID), 1) }
+  const writeCount = () => records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  const assertForeignRefusal = (res, label) => {
+    assert.equal(res.statusCode, 409, label + ': 409')
+    assert.equal(res.body.error.code, 'TARGET_SHEET_FOREIGN_PROJECT', label + ': code')
+    assert.deepEqual({ ...res.body.error.details }, { foreignProjectCount: 1, foreignActiveRowCount: 1 }, label + ': values-free details')
+    const text = JSON.stringify(res.body)
+    assert.equal(text.includes('P-OTHER') || text.includes('FOREIGN_PART') || text.includes('FOREIGN_KEY'), false, label + ': no row value leaks')
+  }
+
+  let res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 202)
+  const jobId = res.body.data.jobId
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'completed')
+
+  // PLAN
+  addForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertForeignRefusal(res, 'PLAN')
+  assert.equal(writeCount(), 0, 'PLAN refusal writes nothing')
+  removeForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.planRevisionPresent, true, 'control: PLAN succeeds once the foreign row is gone')
+
+  // START (approval)
+  addForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { confirm: {} },
+  })
+  assertForeignRefusal(res, 'START')
+  assert.equal(writeCount(), 0, 'START refusal writes nothing')
+  removeForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { confirm: {} },
+  })
+  assertOkResponse(res, 202)
+  const applyJobId = res.body.data.jobId
+
+  // RUN (per chunk; also the resume path) — a foreign row that lands AFTER approval still refuses.
+  addForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertForeignRefusal(res, 'RUN')
+  assert.equal(writeCount(), 0, 'RUN refusal writes nothing (no partial chunk)')
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'queued', 'RUN refusal leaves the apply job in the state it was in')
+  removeForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'succeeded', 'control: the same apply job runs once the foreign row is gone')
+  assert.ok(writeCount() > 0, 'control: the real run writes')
+}
+
 async function testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount() {
   const calls = []
   const records = createTableActionRecordsApi()
@@ -9308,6 +9433,7 @@ async function main() {
   await testTableActionRoutes()
   await testTableActionMvpPersistRoute()
   await testLargeBomBackgroundExpansionJobRoutes()
+  await testLargeBomLaneRefusesForeignProjectOnPlanStartAndRun()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
   await testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn()
