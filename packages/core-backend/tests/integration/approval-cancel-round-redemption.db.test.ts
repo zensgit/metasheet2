@@ -4,6 +4,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor, ensureLocalUserRow } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import { type ApprovalActionRequest } from '../../src/types/approval-product'
 import { eventBus } from '../../src/integration/events/event-bus'
 import {
   deriveCancelRoundW4OperationIdV1,
@@ -1060,6 +1061,118 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
       // 轮次 `applied` (lock §3 C-2 step ⑤) + I3 「终结即释放」. This expectation is the one phase 1
       // deliberately left asserting `'pending'` so 判据 II could not land silently.
+      const round = await roundOutcome(fixture.roundInstanceId)
+      expect(round.outcome).toBe('applied')
+      expect(round.ended_at).not.toBeNull()
+    },
+  )
+
+  /**
+   * Gate round-5 P3-1 (`impl-gate-C-slice1-round5-20260918.md` §3 P3-1 / R5-M7, §4 table) — the
+   * ratified §9-9 allow-set `{approve, reject, revoke, comment}` has a MEMBER half and a COMPLEMENT
+   * half, and only the complement half was pinned in C-1.
+   *
+   * The complement half lives at `approval-cancel-round-outlet-guards.db.test.ts:401` (§9-9
+   * allow-set MEMBER pin), which enumerates `APPROVAL_ACTION_TYPES` mechanically and asserts every
+   * NON-member is refused. The gate's round-5 sweep then measured the four members one cell at a
+   * time — removing `reject` ⇒ 2 red, `revoke` ⇒ 4 red, `comment` ⇒ 1 red, and removing `approve`
+   * ⇒ **48/48 GREEN**, because C-1's reachable surface never redeems. That is the zero-discriminating
+   * cell this case closes, and the lock itself put it here: `approve` IS outlet #5 (lock §14.3), and
+   * outlet #5 IS 判据 II, which the lock assigns to C-2.
+   *
+   * WHY THIS CASE EXISTS WHEN 判据 II ABOVE ALREADY GOES RED. Measured on this branch (phase-2 MD
+   * §3.17): removing `'approve'` from `CANCEL_ROUND_ALLOWED_ACTIONS` now turns **11 of 17** cases in
+   * this file red. So the cell is no longer empty. But every one of those 11 reds is a CONSEQUENCE
+   * red — `expected 409 to be 200`, or a named code assertion reading `CANCEL_ROUND_OUTLET_FORBIDDEN`
+   * where it wanted its own code. A consequence red cannot tell 「the action-judgment gate refused
+   * it」 from 「the redemption broke somewhere downstream」, and it evaporates the day those
+   * assertions are refactored. This case makes the MEMBERSHIP itself load-bearing by measuring both
+   * sides of the same gate, on the SAME instance, in the same run:
+   *
+   *   1. a NON-member (`handle`, outlet #4) is refused 409 `CANCEL_ROUND_OUTLET_FORBIDDEN` and the
+   *      row is unchanged — so the gate is demonstrably LIVE on this very instance, which is what
+   *      stops step 2's success from reading as 「there is no gate here」
+   *      (`feedback_positive_control_not_failclosed`);
+   *   2. `approve` on that same instance is LET THROUGH and redeems, asserted POSITIVELY (200,
+   *      round `applied` + `ended_at`, instance `approved`) rather than as 「not
+   *      CANCEL_ROUND_OUTLET_FORBIDDEN」 — an absence-of-one-error assertion cannot tell success
+   *      from failure-for-another-reason (`feedback_not_this_error_is_not_an_outcome_assertion`).
+   *
+   * The allow-set literal below is an independent local copy, NOT an import of the production
+   * `CANCEL_ROUND_ALLOWED_ACTIONS` — importing it would make this test tautological against exactly
+   * the narrowing regression it exists to catch (same reasoning as the complement-half pin).
+   */
+  it(
+    '§9-9 允许集 MEMBER pin (approve) — gate round-5 P3-1: on ONE cancel-round instance the ' +
+      'action-judgment gate refuses a non-member (`handle` ⇒ 409 CANCEL_ROUND_OUTLET_FORBIDDEN, ' +
+      'row unchanged) and LETS `approve` THROUGH to redeem (200, round `applied`), so removing ' +
+      '`approve` from the ratified allow-set is red on the MEMBERSHIP, not on a downstream ' +
+      'consequence',
+    async () => {
+      const suffix = `m7pin-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        // 365 > 200 — the window is OPEN, so the in-lock evaluation answers `redeem` and the
+        // `approve` half below reaches the redemption rather than the #5′ system close.
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+
+      // The RATIFIED literal (lock §9-9 ratify header, verbatim): {approve, reject, revoke, comment}.
+      const RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS = new Set<string>(['approve', 'reject', 'revoke', 'comment'])
+      // Vacuity guards on this case's own premises — if either of these ever stops holding, the two
+      // halves below stop being 「member」 and 「non-member」 and the case would assert nothing about
+      // membership at all.
+      expect(RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS.has('approve')).toBe(true)
+      expect(RATIFIED_CANCEL_ROUND_ALLOWED_ACTIONS.has('handle')).toBe(false)
+
+      // ── HALF 1, the in-case positive control: the gate IS live on THIS instance.
+      const before = await pool().query<{ version: number; status: string }>(
+        `SELECT version, status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(before.rows[0]?.status).toBe('pending')
+      await expect(
+        new ApprovalProductService().dispatchAction(
+          fixture.roundInstanceId,
+          { action: 'handle' } as ApprovalActionRequest,
+          { userId: fixture.approverId, userName: 'member-pin control actor', roles: [] },
+        ),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' })
+      const afterControl = await pool().query<{ version: number; status: string }>(
+        `SELECT version, status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(afterControl.rows[0]).toEqual(before.rows[0])
+      // The refused non-member left the round's seat exactly as it found it, so half 2 starts from
+      // the same state half 1 did.
+      expect((await roundOutcome(fixture.roundInstanceId)).outcome).toBe('pending')
+
+      // ── HALF 2, the member itself: `approve` is LET THROUGH the same gate and redeems.
+      const portStub = bindCancellationPort(async () => ({ kind: 'executed', response: { ok: true } }))
+      let approve: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        // ⚠️ This is the line that carries the mutation (phase-2 MD §3.17, M-25). Its failure
+        // message prints the body, so a red NAMES the door that refused — under M-25 it reads
+        // `CANCEL_ROUND_OUTLET_FORBIDDEN`, which is the membership claim, not a downstream one.
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+      }
+
+      // Positive outcome, load-bearing: the member was not merely 「not refused」, it redeemed.
+      expect(portStub.calls.length).toBe(1)
+      const instanceRow = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(instanceRow.rows[0]?.status).toBe('approved')
       const round = await roundOutcome(fixture.roundInstanceId)
       expect(round.outcome).toBe('applied')
       expect(round.ended_at).not.toBeNull()
