@@ -1718,6 +1718,7 @@ jobs:
             tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
             tests/integration/approval-template-groups-lifecycle.db.test.ts \
             tests/integration/approval-template-groups-serialization.db.test.ts \
+            tests/integration/approval-template-groups-sections.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
