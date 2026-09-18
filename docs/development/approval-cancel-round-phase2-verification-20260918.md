@@ -4223,12 +4223,12 @@ point — NOT the old, now-unreachable `006d9458e` gate SHA, which would also sh
 phase-1 files this rebase pulled in):
 
 ```
-$ git diff --stat 1a4a4d992dbb68b9fc22ffa5311dde3a5809bfcc
- docs/development/approval-cancel-round-phase2-design-20260918.md       | 74 +++++++++++++---------
- docs/development/approval-cancel-round-phase2-verification-20260918.md | 92 +++++++++++++++++++++--
- packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts | 18 ++
- packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts        | 38 ++++----
- 4 files changed, 175 insertions(+), 47 deletions(-)
+$ git diff --stat 1a4a4d992dbb68b9fc22ffa5311dde3a5809bfcc HEAD
+ docs/development/approval-cancel-round-phase2-design-20260918.md       | 74 +++++++++++--------
+ docs/development/approval-cancel-round-phase2-verification-20260918.md | 83 ++++++++++++++++++++--
+ packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts | 18 +++++
+ packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts        | 38 +++++++---
+ 4 files changed, 166 insertions(+), 47 deletions(-)
 ```
 
 ⚠️ **Self-reference, disclosed rather than papered over** (same shape as the round-1 P3-hygiene
