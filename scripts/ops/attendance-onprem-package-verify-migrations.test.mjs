@@ -30,6 +30,14 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     omitDistMigration,
     extraSourceMigration,
     omitSupersededAuditMarker,
+    omitQaToolingShaFile,
+    manifestQaToolingSha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    genericPackage = false,
+    manifestWindowsNativeQaWithoutPins = false,
+    omitPinDeploymentAuthorized = false,
+    omitPinSyntheticDataOnly = false,
+    omitManifestDeploymentAuthorized = false,
+    omitManifestSyntheticDataOnly = false,
   } = options
 
   const placeholderFiles = [
@@ -38,6 +46,14 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'plugins/plugin-attendance/plugin.json',
     'plugins/plugin-attendance/index.cjs',
     'scripts/ops/attendance-onprem-start-pm2.ps1',
+    'scripts/ops/attendance-windows-native-common.ps1',
+    'scripts/ops/attendance-windows-native-preflight.ps1',
+    'scripts/ops/attendance-windows-native-start.ps1',
+    'scripts/ops/attendance-windows-native-stop.ps1',
+    'scripts/ops/attendance-windows-native-healthcheck.ps1',
+    'scripts/ops/attendance-windows-native-bootstrap-admin.ps1',
+    'scripts/ops/attendance-windows-native-qa-runner.mjs',
+    'scripts/ops/multitable-onprem-bootstrap-admin.ps1',
     'scripts/ops/attendance-onprem-package-install.sh',
     'scripts/ops/attendance-onprem-package-upgrade.sh',
     'scripts/ops/attendance-onprem-publish-web-dist.sh',
@@ -46,6 +62,8 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'scripts/ops/attendance-wsl-portproxy-refresh.ps1',
     'scripts/ops/attendance-wsl-portproxy-task.ps1',
     'docker/app.env.example',
+    'docs/deployment/attendance-windows-native-qa-v2-20260804.md',
+    'docs/development/attendance-windows-native-qa-v2-verification-20260804.md',
     'ops/nginx/attendance-onprem.conf.example',
     'docs/deployment/attendance-windows-onprem-easy-start-20260306.md',
     'docs/deployment/attendance-windows-wsl-onprem-20260306.md',
@@ -56,6 +74,75 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   for (const rel of placeholderFiles) {
     writeFile(pkgRoot, rel, `${rel}\n`)
   }
+
+  writeFile(
+    pkgRoot,
+    'packages/core-backend/package.json',
+    JSON.stringify({ name: '@metasheet/core-backend', dependencies: {} })
+  )
+  writeFile(
+    pkgRoot,
+    'plugins/plugin-attendance/package.json',
+    JSON.stringify({ name: '@metasheet/plugin-attendance', dependencies: {} })
+  )
+  writeFile(pkgRoot, 'SOURCE_SHA', '676ed2433813139216d77685021a5b5c1acdb235\n')
+  if (!omitQaToolingShaFile) {
+    writeFile(pkgRoot, 'QA_TOOLING_SHA', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n')
+  }
+  if (!genericPackage) {
+    const pin = {
+      campaign: 'attendance-windows-native-qa-v2-20260804',
+      expectedSourceSha: '676ed2433813139216d77685021a5b5c1acdb235',
+      status: 'DRAFT_HOLD',
+      ...(!omitPinDeploymentAuthorized ? { deploymentAuthorized: false } : {}),
+      ...(!omitPinSyntheticDataOnly ? { syntheticDataOnly: true } : {}),
+    }
+    writeFile(
+      pkgRoot,
+      'attendance-windows-native-qa-v2.pin.json',
+      JSON.stringify(pin)
+    )
+    writeFile(
+      pkgRoot,
+      'scripts/ops/attendance-windows-native-qa-v2.pin.json',
+      JSON.stringify(pin)
+    )
+  }
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-qa-risk-matrix.json',
+    JSON.stringify({
+      campaign: 'attendance-windows-native-qa-v2-20260804',
+      expectedSourceSha: '676ed2433813139216d77685021a5b5c1acdb235',
+      status: 'DRAFT_HOLD',
+      deploymentAuthorized: false,
+      cases: [{ id: 'PQA-10', title: 'scheduled' }],
+      staleEvidenceShas: [],
+    })
+  )
+  writeFile(
+    pkgRoot,
+    'metasheet-attendance-onprem-v2.7.2-run34.json',
+    JSON.stringify({
+      name: 'metasheet-attendance-onprem-v2.7.2-run34',
+      sourceSha: '676ed2433813139216d77685021a5b5c1acdb235',
+      qaToolingSha: manifestQaToolingSha,
+      ...(genericPackage && !manifestWindowsNativeQaWithoutPins
+        ? {}
+        : {
+            windowsNativeQa: {
+              campaign: 'attendance-windows-native-qa-v2-20260804',
+              status: 'DRAFT_HOLD',
+              ...(!omitManifestDeploymentAuthorized
+                ? { deploymentAuthorized: false }
+                : {}),
+              ...(!omitManifestSyntheticDataOnly
+                ? { syntheticDataOnly: true }
+                : {}),
+            },
+          }),
+    })
+  )
 
   writeFile(pkgRoot, 'apps/web/dist/index.html', '<html>attendance</html>\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/index.js', 'module.exports = {}\n')
@@ -86,6 +173,18 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   )
   writeFile(
     pkgRoot,
+    'docker/app.env.attendance-windows-native.qa.example',
+    [
+      'JWT_SECRET=change-me',
+      'POSTGRES_DB=metasheet_windows_qa',
+      'DATABASE_URL=postgres://metasheet:change-me@127.0.0.1:5432/metasheet_windows_qa',
+      'ATTENDANCE_IMPORT_UPLOAD_DIR=storage/attendance-import',
+      'WINDOWS_NATIVE_GATEWAY_HOST=127.0.0.1',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
     'pnpm-workspace.yaml',
     "packages:\n  - 'packages/*'\n  - 'plugins/*'\n"
   )
@@ -96,6 +195,19 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\attendance-onprem-start-pm2.ps1" -RootDir "%~dp0."\n'
   )
   writeFile(pkgRoot, 'start-pm2-remote.bat', 'call "%~dp0start-pm2.bat"\n')
+  for (const [name, script] of [
+    ['windows-native-preflight.bat', 'attendance-windows-native-preflight.ps1'],
+    ['windows-native-start.bat', 'attendance-windows-native-start.ps1'],
+    ['windows-native-stop.bat', 'attendance-windows-native-stop.ps1'],
+    ['windows-native-healthcheck.bat', 'attendance-windows-native-healthcheck.ps1'],
+    ['windows-native-bootstrap-admin.bat', 'attendance-windows-native-bootstrap-admin.ps1'],
+  ]) {
+    writeFile(
+      pkgRoot,
+      name,
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\${script}" -RootDir "%~dp0."\n`
+    )
+  }
   writeFile(
     pkgRoot,
     'deploy-run34.bat',
@@ -105,6 +217,64 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     pkgRoot,
     'scripts/ops/attendance-onprem-deploy-run.ps1',
     'scripts\\ops\\attendance-onprem-publish-web-dist.ps1\n'
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-common.ps1',
+    [
+      'PM2 cleanup failed',
+      'Assert-WindowsNativeExactSourceSha',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-preflight.ps1',
+    [
+      'Assert-WindowsNativeExactSourceSha',
+      'Assert-WindowsNativeLoopbackHost',
+      'Attendance opt-in is forbidden',
+      'External integration configuration is forbidden',
+      'APPROVAL_BREACH_DINGTALK_',
+      'ENABLE_ATTENDANCE_SCHEDULER_LEADER_LOCK',
+      'metasheet_windows_qa',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-start.ps1',
+    [
+      'attendance-windows-native-preflight.ps1',
+      'attendance-onprem-deploy-run.ps1',
+      'Run windows-native-stop.bat before starting again',
+      'Remove-WindowsNativePm2Apps',
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-bootstrap-admin.ps1',
+    'multitable-onprem-bootstrap-admin.ps1\n'
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-gateway.mjs',
+    [
+      "const headers = {}; headers['x-forwarded-for'] = remoteAddress",
+      "throw new Error('gateway host must be loopback')",
+      '',
+    ].join('\n')
+  )
+  writeFile(
+    pkgRoot,
+    'scripts/ops/attendance-windows-native-qa-runner.mjs',
+    "console.log('DRAFT_HOLD')\n"
+  )
+  writeFile(
+    pkgRoot,
+    'ecosystem.windows-native.config.cjs',
+    'module.exports={apps:[{name:"metasheet-windows-gateway"}]}\n'
   )
   writeFile(
     pkgRoot,
@@ -203,6 +373,51 @@ test('accepts a package with compiled migration coverage for upgraded databases'
   })
 })
 
+test('keeps the existing non-QA package verifier path valid', () => {
+  withArchive({ genericPackage: true }, (archivePath) => {
+    const result = runVerify(archivePath)
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stderr, /Package verify OK/)
+  })
+})
+
+test('does not downgrade a manifest-marked Windows QA package when both pin files are missing', () => {
+  withArchive(
+    { genericPackage: true, manifestWindowsNativeQaWithoutPins: true },
+    (archivePath) => {
+      const result = runVerify(archivePath)
+
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /attendance-windows-native-qa-v2\.pin\.json/)
+    },
+  )
+})
+
+for (const [label, option, expectedPattern] of [
+  ['pin deployment boundary', 'omitPinDeploymentAuthorized', /pin\.deploymentAuthorized/],
+  ['pin synthetic-data boundary', 'omitPinSyntheticDataOnly', /pin\.syntheticDataOnly/],
+  [
+    'manifest deployment boundary',
+    'omitManifestDeploymentAuthorized',
+    /manifest\.windowsNativeQa\.deploymentAuthorized/,
+  ],
+  [
+    'manifest synthetic-data boundary',
+    'omitManifestSyntheticDataOnly',
+    /manifest\.windowsNativeQa\.syntheticDataOnly/,
+  ],
+]) {
+  test(`rejects a Windows QA package missing its explicit ${label}`, () => {
+    withArchive({ [option]: true }, (archivePath) => {
+      const result = runVerify(archivePath)
+
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, expectedPattern)
+    })
+  })
+}
+
 test('rejects a package whose compiled provider lacks the superseded audit marker', () => {
   withArchive({ omitSupersededAuditMarker: true }, (archivePath) => {
     const result = runVerify(archivePath)
@@ -237,4 +452,25 @@ test('rejects a package when a source TS migration lacks compiled JS', () => {
     assert.match(result.stderr, new RegExp(extraSourceMigration))
     assert.match(result.stderr, /Package missing compiled JS for one or more core backend TS migrations/)
   })
+})
+
+test('rejects a package missing the QA tooling provenance SHA', () => {
+  withArchive({ omitQaToolingShaFile: true }, (archivePath) => {
+    const result = runVerify(archivePath)
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /QA_TOOLING_SHA/)
+  })
+})
+
+test('rejects a package whose manifest QA tooling SHA differs from the package file', () => {
+  withArchive(
+    { manifestQaToolingSha: 'cccccccccccccccccccccccccccccccccccccccc' },
+    (archivePath) => {
+      const result = runVerify(archivePath)
+
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /manifest\.qaToolingSha mismatch/)
+    }
+  )
 })
