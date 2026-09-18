@@ -368,18 +368,18 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 | 2 | `linked_at` 令牌全程不经 JS:写入用数据修改 CTE,回滚用集合式 join(实测 M4) | §4.2「已知残留」段已重写 + 成品 SQL 已贴入该节 | **已落地(含成品 SQL)** |
 | 3 | preview/execute 共用同一条可入库谓词 `btrim(category) ~ '[!-~]'`,必须在 `eligible` 查询内部而非循环 `continue`(实测 M5) | §3.1 eligible 谓词已替换 + 注释说明机制 | **已落地** |
 | 4 | `atgbbl_link_fk` 改 `ON DELETE CASCADE`;另两条 FK 维持原值(实测 M6) | §2.3 CREATE TABLE 后现场标注 + §4.4 point 2 现场标注(区分两条不同的 FK,不得混淆) | **已落地** |
-| 5 | 新增 `GET /api/approval-template-groups/backfill/batches`(admin guard,分页,含 `rolledBackAt`)+ 索引 | §2.1 段现场标注引用本条;端点表本身待 §13.3 新增小节 | 设计已定,端点表待 W7 实现单元补 |
+| 5 | 新增 `GET /api/approval-template-groups/backfill/batches`(admin guard,分页,含 `rolledBackAt`)+ 索引 | §2.1 段现场标注引用本条;§6.1 端点表本身未加这一行 | **未落地(见 §13.3)** |
 | 6 | 分桶键/组名一律 `btrim(category)`,不折大小写,不回写 `category` 列 | §8 item 2 现场标注 | **已落地** |
 | 7 | rollback 对已回滚批次返回 409 + 专用码 + `rolledBackAt` | §4.4 point 1 现场标注 | **已落地** |
 | 8 | preview 挂 `approvalTemplateAdminGuard`,PR body 逐字披露对 I7 的偏离 | §6.2「本提案倾向」段后现场标注 | 设计已落地;PR body 义务见 §13.4 |
 | 9 | execute 调用 `...WithClient` 原语,不得抄语句;rollback 共用语句须提炼命名常量/附加谓词形参 | §1 表三行现场标注 | 设计已落地(代码化待 W8/W9) |
 | 10 | SET 义务变成 typecheck 门:唯一 `beginApprovalTemplateGroupTxn(client)` 返回品牌类型 `AtgTxClient`;明确不采用运行时 `current_setting` 断言 | 本节 §13.2 逐字保留门审给出的成品设计;§11 附录原文的"SET 由薄封装发出"承诺在此升级为机械约束 | 设计已落地(品牌类型待 W8 实现) |
-| 11 | `mapGroupConstraintError` 套在整个 `transaction()` 之外;§7 错误码表补 `GROUP_SORT_CONFLICT` | §3.1 lock-order 现场标注已提及;§7 错误码表本身待补一行(见 §13.3) | 部分落地,§7 表格待补 |
+| 11 | `mapGroupConstraintError` 套在整个 `transaction()` 之外;§7 错误码表补 `GROUP_SORT_CONFLICT` | §3.1 lock-order 现场标注已提及 catch 套法(前半);§7 错误码表本身未加 `GROUP_SORT_CONFLICT` 这一行(后半) | **前半已求值/后半未落地(见 §13.3)** |
 | 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一 | 未在正文现场标注(§3 pseudocode 未涉及规模上界);记入 §13.3 待补小节 | **未落地,记入 remaining** |
 | 13 | W8 同 PR 补三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 池文件;锁序格断言停车点非终态) | §9 验证计划纲要目前只有粗粒度描述;本条细化待 §9 改写(下一实现单元) | 设计已知悉,§9 待补三条具体用例名 |
 | 14 | §1 表逐格改调用级复用;§2.1"无可观测中间态"收窄为"无 DB 行级中间态" | §1 表三行 + §2.1 段,均已现场标注 | **已落地** |
-| 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | 本文档 §2 开头"批次机制选择"段尚保留原始四 token 表述,未现场标注;记入 remaining(本步未改,避免超出本步范围) | **未落地,记入 remaining** |
-| 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard⊋manager 的事实;`scope` 字段本身未写入 §5.2 响应形状;回流 #5852 是跨 lane 动作,本分支无权限做 | 部分落地,`scope` 字段待 §5.2 补;回流动作记入 remaining |
+| 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | 未加现场标注,原因见 §13.3 | **未落地(见 §13.3)** |
+| 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard⊋manager 的事实(前半道理已求值);`scope` 字段本身未写入 §5.2 响应形状(中段未落地);回流 #5852 是跨 lane 动作,本分支无权限做(后半见 §13.5) | **中段未落地(见 §13.3),后半记入 remaining(见 §13.5)** |
 
 ### 13.2 逐字保留的门审成品(供 W7/W8/W9 直接抄用,不得转述)
 
