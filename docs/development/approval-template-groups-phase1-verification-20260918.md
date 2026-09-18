@@ -1519,7 +1519,7 @@ f7b929700 fix(approval): retract falsified wildcard-permission guard claim (gate
 
 ### 24.1 扫描范围与命令
 
-范围**不是**固定文件列表,而是 `git diff --name-only origin/main..HEAD` 现场给出的分支 diff 集合(**本轮为 12 个文件,不是 11 个——第 6 轮门审 P3-1 指出这里的枚举漏列了脚本自己**:`.github/workflows/plugin-tests.yml`、两份设计/验证 MD、迁移文件、`routes/approvals.ts`、`ApprovalTemplateGroupService.ts`、两个测试文件、`vitest.config.ts`、s6a 钉、`atg-verification-recount.sh`、以及 `atg-retraction-sweep.sh` 自身——脚本用 `git diff --name-only` 现场取文件集合,那次提交把脚本自己也一并加了进这个分支,枚举时却忘了把脚本自己算作第 12 个文件)——这样下一轮分支新增的文件也会被自动纳入,不需要重新枚举文件名。搜的表述(当时 11 个模式,任务书原文列出的每一种撤回表述各一条,外加中文版「guard 人口 ⊆」与英文 `wildcard permission`/`sees everything`):`⊆`、`每个 *actor`、`isTemplateManager *= *true`、`没有.{0,6}HTTP *可达`、`今天.{0,6}HTTP *可达路径`、`纯 *HTTP *测试.*无法制造`、`guard population`、`guard *人口`、`sees everything`、`wildcard permission`、`通配权限码.*过 *guard`(**第 6 轮修复轮已把这个模式集加宽到 22 个,见 §25.5**)。命令与用法说明见 §24.5 的脚本本身(`scripts/dev/atg-retraction-sweep.sh`),不在本节重复贴脚本源码。
+范围**不是**固定文件列表,而是 `git diff --name-only origin/main..HEAD` 现场给出的分支 diff 集合——**本节不再钉一个绝对文件数(第二次订正)**:第 6 轮门审 P3-1 指出上一版写死的「11 个文件」漏算了脚本自己,当时现场重跑补成「12 个」(`.github/workflows/plugin-tests.yml`、两份设计/验证 MD、迁移文件、`routes/approvals.ts`、`ApprovalTemplateGroupService.ts`、两个测试文件、`vitest.config.ts`、s6a 钉、`atg-verification-recount.sh`、`atg-retraction-sweep.sh` 自身);但这个数字本身就依赖 `origin/main` 当时的位置——本节落笔之后 `origin/main` 已经继续前进(现场重跑此刻是 **59 个文件**,含大量与本分支主题无关、只是因为 `origin/main` 与本分支基线之间自然产生差异的文件),把「12」写成本轮的现时事实与把「⊋」写成现时事实是同一种错误(钉一个会随时间漂移的数)。**判定规则不受文件数影响**:新增的这些文件里没有一处命中「guard population」/「isTemplateManager」/包含关系符号或词等主题相关模式(已现场核对,见 §25.5 的更新说明),所以扫描仍然只需要读「命中」而不需要读「文件数」这个数字——权威文件数以脚本现场打印的 `git diff --name-only origin/main..HEAD` 首行输出为准,不在本节的正文里另写一个会过期的绝对值。搜的表述(当时 11 个模式,任务书原文列出的每一种撤回表述各一条,外加中文版「guard 人口 ⊆」与英文 `wildcard permission`/`sees everything`):`⊆`、`每个 *actor`、`isTemplateManager *= *true`、`没有.{0,6}HTTP *可达`、`今天.{0,6}HTTP *可达路径`、`纯 *HTTP *测试.*无法制造`、`guard population`、`guard *人口`、`sees everything`、`wildcard permission`、`通配权限码.*过 *guard`(**第 6 轮修复轮已把这个模式集加宽到 22 个,见 §25.5**)。命令与用法说明见 §24.5 的脚本本身(`scripts/dev/atg-retraction-sweep.sh`),不在本节重复贴脚本源码。
 
 ### 24.2 修复前命中清单(现场执行,file:line + 原句,逐条读过)
 
@@ -1678,7 +1678,7 @@ $ md5 packages/core-backend/src/rbac/rbac.ts
 
 模式总数从 11 个升到 22 个(`⊆⊇⊂⊃⊋⊊` 6 个 + 中英文词共 16 个)。
 
-**复跑结果(22 个模式,现场执行,输出总长 230 行,不在本节整段粘贴——本节按类别汇总分类,复现命令是 `bash scripts/dev/atg-retraction-sweep.sh`,任何人可自行重跑核对)**:
+**复跑结果(22 个模式,现场执行于本轮修复轮当时的 `origin/main` 位置,不在本节整段粘贴——本节按类别汇总分类,复现命令是 `bash scripts/dev/atg-retraction-sweep.sh`,任何人可自行重跑核对)。下表的具体命中处数(如「11 处」「9 处」)与「输出总长」是当时那次重跑的快照——与 §24.1 同一订正:`origin/main` 之后继续前进,今天重跑扫描到的文件数与总行数都会更大(独立核对见下方脚注),但**分类结论不受影响**:新增的文件里没有一处命中任何一个包含关系符号或词,也没有一处以现时口吻重申 `⊆`/`⊋` 关系——每次重跑都应当只读「零活断言」这一句,不应该把某次重跑的文件数/行数快照当成需要每轮维护的正文数字**:
 
 | 命中类别 | 代表位置 | 判定 |
 |---|---|---|
@@ -1692,7 +1692,7 @@ $ md5 packages/core-backend/src/rbac/rbac.ts
 | `subset` | `.github/workflows/plugin-tests.yml`(无关 CI 步骤命名)、`routes/approvals.ts:2223`(Wave 2 WP3 无关功能的 `subset`)、`vitest.config.ts`(无关的「F2 security-critical subset」)、**新增的 `§2(d)` 注释本身**(`lifecycle.db.test.ts:721,743`,均为「not a subset relation」「neither one a subset of the other」的**否定式**表述)、脚本自身文本 | 全部合法/无关主题,§2(d) 的两处是本轮新写的正确否定式断言 |
 | `superset` | 验证 MD `:1281`(历史叙事,引用被撤回的旧措辞)、**`routes/approvals.ts:429`**(本轮新写的「`"superset" conclusion above is itself false`」,明确点名旧结论已被推翻)、脚本自身文本 | 全部合法——`:429` 是对旧结论的否定,不是重申 |
 
-**逐条核对完毕,零处**以现时事实口吻重申任何一个方向的包含关系(`⊆` 或 `⊋`)。这不是「grep 命中数为零」(命中数是 63 处左右,因为讨论「撤回了什么」这件事本身必然会提到被撤回的措辞),而是「零处现时重申」——与 §24.6 建立的判读标准一致,按同一份规程复核。
+**逐条核对完毕,零处**以现时事实口吻重申任何一个方向的包含关系(`⊆` 或 `⊋`)。这不是「grep 命中数为零」(本节起草当时命中数是 63 处左右,因为讨论「撤回了什么」这件事本身必然会提到被撤回的措辞;这个「63」本身也只是那次重跑的快照,不是本节要维护的正文数字——理由同上一段与 §24.1 的订正),而是「零处现时重申」——与 §24.6 建立的判读标准一致,按同一份规程复核。**独立复核脚注(同日、`origin/main` 已再前进之后重跑)**:扫描文件数从 12 涨到 59(全部是与本分支主题无关的、`origin/main` 自身前进带来的差集文件),脚本输出总行数从约 230 行涨到 357 行,`⊆`/`⊋` 等包含关系符号与词的命中位置逐一核对后与上表列出的位置**完全一致**——新增的 47 个文件里没有一处贡献新的命中,零处现时重申的结论在文件数与行数都变化之后仍然成立,不是靠数字凑巧不变撑住的。
 
 ### 25.6 P3-1 / P3-2 / P3-3 / P3-4 处置(本轮一并收口)
 
