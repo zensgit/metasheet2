@@ -919,3 +919,36 @@ PASS. Logs: `/private/tmp/tm-manual-public-preview-final-db.log`,
 This joins the backend stages; it does not yet join the browser with that backend,
 exercise real-login authorization or execute restore. Attachments remain refused
 by the current manual continuation. No broader completion or UAT claim is made.
+
+## Production Modal To HTTP Browser Acceptance
+
+Code checkpoint: `067b0154794a91222407e29e9c8ae84c5d2208d2`.
+Run the owned synthetic runner with `--browser`; it starts its own loopback Vite
+listener and Chromium using already-installed dependencies, never customer storage.
+
+At both 1440px and 390px, the production RecoveryArchiveModal and
+MultitableApiClient reach the production HTTP router, isolated PostgreSQL, local
+custody and filesystem object provider. Confirmation is required; capture returns
+the closed recoverable result; page reload performs a fresh status lookup; the
+exact captured generation is selectable and preview returns no_changes with
+executable=false. No execute/job write requests or browser page errors occur.
+The dialog has no horizontal overflow. Screenshots were inspected locally.
+
+The first browser run exposed a fixture limitation: serial HTTP checks had shared
+one pg.Client transaction connection. Concurrent catalog/status requests failed.
+The HTTP fixture now checks out one pool connection per transaction and tracks
+transaction depth through AsyncLocalStorage. No product code was changed to make
+the browser pass. The original failure is not recorded as successful acceptance.
+
+Final runner PASS: 30 TM migrations/replay, 59 + 127 neighbor tests, driver
+assertions and both browser viewports. Acceptance TypeScript, node syntax check,
+existing exact-anchor wiring and diff-check PASS. Browser, listener and cache
+closed/removed; owned DB/connections zero; synthetic cluster removed.
+Log: `/private/tmp/tm-manual-http-browser-final-verified.log`.
+Screenshots are `tm-manual-http-browser-{1440,390}.png` under Node's os.tmpdir().
+
+This is local production-component/client/HTTP acceptance with synthetic auth,
+not full Workbench login/UAT, restore execution or an attachment recovery drill.
+The optional browser leg is not claimed as remotely required CI. Attachments
+remain refused by manual continuation. PR stays Draft/HOLD; no flags outside
+the owned test process, dispatch, deployment or production operations occurred.
