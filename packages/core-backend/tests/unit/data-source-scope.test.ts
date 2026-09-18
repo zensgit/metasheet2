@@ -114,11 +114,25 @@ function statefulFakeDb() {
     return b
   }
 
+  // removeDataSource now runs the referential delete guard BEFORE it writes (PERM-04),
+  // so the stand-in must answer integration_external_systems' two COUNT queries as well.
+  // These round-trip tests model an installed reference table holding ZERO references;
+  // the guard's own matrix lives in data-source-visibility-authority-matrix.test.ts.
+  function refCountBuilder() {
+    const b = {
+      select: () => b,
+      where: () => b,
+      execute: async () => [{ count: 0 }],
+    }
+    return b
+  }
+
   return {
     rows,
     control,
     db: {
-      selectFrom: () => selectBuilder(),
+      selectFrom: (table: string) =>
+        table === 'integration_external_systems' ? refCountBuilder() : selectBuilder(),
       insertInto: () => insertBuilder(),
       updateTable: () => updateBuilder(),
       deleteFrom: () => deleteBuilder(),
