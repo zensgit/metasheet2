@@ -886,8 +886,12 @@ export interface ApprovalTemplateGroupBackfillBatchListPage {
  * `ORDER BY created_at DESC, id DESC` — the `..._backfill_batches_org_created_idx` index (§2.1)
  * covers `(org_id, created_at DESC)`; `id DESC` is a deterministic tiebreaker for the (currently
  * unreachable outside artificial clock skew, but not provably impossible) case of two batches in
- * the same org sharing a `created_at` timestamptz value, so pagination across two calls cannot
- * silently reorder or drop a row at a page boundary.
+ * the same org sharing a `created_at` timestamptz value, so two calls over an UNCHANGED row set
+ * order and paginate deterministically. This does NOT cover a batch inserted between two calls —
+ * a concurrent `execute` shifts every later offset window by one, the same standard offset-based
+ * pagination drift every other `limit`/`offset` list in this router already has (§6.1: "不在本提案
+ * 新造分页协议" — a cursor-based scheme that survives concurrent inserts was deliberately not
+ * built here).
  */
 export async function listApprovalTemplateGroupBackfillBatches(
   orgId: string,
