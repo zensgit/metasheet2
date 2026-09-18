@@ -148,6 +148,26 @@ describe('MetaNotificationBell (S1b)', () => {
     expect(m.container.querySelector('[data-test="notification-panel"]')).toBeNull()
   })
 
+  it('viewport clip: panel aligns left when the bell sits near the left edge', async () => {
+    const m = mount(); mounted = m
+    await flush()
+    const btn = m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!
+    btn.getBoundingClientRect = () => ({ left: 40, right: 120, width: 80, top: 0, bottom: 0, height: 0, x: 40, y: 0, toJSON: () => ({}) })
+    btn.click()
+    await flush()
+    expect(m.container.querySelector('[data-test="notification-panel"]')?.classList.contains('meta-notif-bell__panel--align-left')).toBe(true)
+  })
+
+  it('viewport clip: panel stays right-anchored when there is room to the left', async () => {
+    const m = mount(); mounted = m
+    await flush()
+    const btn = m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!
+    btn.getBoundingClientRect = () => ({ left: 900, right: 980, width: 80, top: 0, bottom: 0, height: 0, x: 900, y: 0, toJSON: () => ({}) })
+    btn.click()
+    await flush()
+    expect(m.container.querySelector('[data-test="notification-panel"]')?.classList.contains('meta-notif-bell__panel--align-left')).toBe(false)
+  })
+
   it('does not crash when the client fails — renders the error state instead (P2-1)', async () => {
     const m = mount({ listRecordSubscriptionNotifications: vi.fn(async () => { throw new Error('netfail') }) }); mounted = m
     await flush()
