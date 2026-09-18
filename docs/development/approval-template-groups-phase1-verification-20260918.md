@@ -452,7 +452,7 @@ apps/web/src/composables/useSessionOrg.ts
 | 三线共用 #1 | `*-ci-wiring` 闭世界 | 未收口,见 §9/§13.5,披露维持 |
 | 三线共用 #2 | `vitest.config.ts:42-45` 惯例覆盖需 PR body 写明 | 已在 `vitest.config.ts` 对应位置写入覆盖说明注释(§3 已记),PR body 需重申 |
 | 三线共用 #3 | s6a 重钉 | 已重钉且现场核对匹配(§13.4);合并前时效性披露见 §4/§9 |
-| 三线共用 #4 | 错误码不得降级成裸 HTTP 状态 | **机械前置动作(impl-gate-A-slice1-round4-20260918.md §2 P2-2 收口后新增,写在本行最前,任何一轮新增/删除用例后必须先跑再改数字)**:重跑 `scripts/dev/atg-verification-recount.sh`(§14 末尾附完整脚本源码,亦可手动逐条跑本行下方三条命令),把输出原样贴回本行,不得手抄或沿用旧数字。**修复轮 1(2026-09-18,见 §18)重算,替换本行原「全部 10 个码逐条都有断言」的过强全称句——gate `impl-gate-A-slice1-round1-20260918.md` P2-4 机械计数(4 码零命中)证伪了原句,原句已撤回。修复轮 5(2026-09-18,见 §22)对本行第二次重算——gate `impl-gate-A-slice1-round2-20260918.md` P2-1 机械计数(在修复轮 4 新增两条裸 403 之后,本行未同步重算)证伪了当时的 15/13/2/`:492,497` 那组数字。gate `impl-gate-A-slice1-round4-20260918.md` P2-2 发现本行在修复轮 4(单一提交 `03ee9f4bb`,新增 P1-3 与 §2(c) 两条用例)落地后第三次未同步重算——这是同一失效的第三次发生,现按本 head 现场重跑同一条命令替换全部数字并新增机械前置动作,不再靠人记。** 机械核对(现场 grep,非目测,`03ee9f4bb` 之后现场重跑):两文件负例状态断言(`.status).toBe(4xx|500)`)共 **19** 处(`grep -noE "\.status\)\.toBe\((40[0-9]\|500)\)" approval-template-groups-lifecycle.db.test.ts approval-template-groups-serialization.db.test.ts \| wc -l`),配对的 `error.code).toBe(...)` 断言共 **15** 处(同一命令把 `\.status\)\.toBe` 换成 `error\.code\)\.toBe\('[A-Z_]+'\)`)——**逐行核对差额的 4 处**(`grep -n "toBe(403)" approval-template-groups-lifecycle.db.test.ts`)是 F 用例(`lifecycle.db.test.ts:520,525,537,544`,分别对应 `createAsNobody`/`listAsNobody`/`archiveAsNobody`/`linkAsNobody`)对非管理员的四个 403(第 5 个 `toBe(403)` 在 `:397`,是 A‴(iii) 的 `noTenantRes`,与 `SESSION_ORG_REQUIRED` 配对,不计入差额);这四处**不是**本锁引入的专用码之一,命中的是仓内既有、本锁未改动的共享中间件 `rbacGuardAny`(`src/rbac/rbac.ts:172-175`),该中间件对全仓所有路由(含 `/api/approval-templates` 自身)一律返回裸 `{ error: 'Insufficient permissions' }`(无 `code` 字段)——不在补充清单 #4「本锁错误码」的适用范围内。**逐码核对**(命令 `grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 \| wc -l` 逐码跑,§3.3 设计 MD 的 10 个码全表 + 本轮新增的第 11 个码):`GROUP_NOT_FOUND` 1、`GROUP_ARCHIVED` 1、`GROUP_NAME_TAKEN` 3、`GROUP_NOT_ARCHIVED` **1**(修复轮 1 新增,此前 **0**——§18)、`GROUP_SORT_CONFLICT` 1、`ORG_ID_NOT_ACCEPTED` 2、`SESSION_ORG_REQUIRED` 1、`GROUP_NAME_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_GROUP_ID_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_ACTOR_REQUIRED` **0**(仍无断言——`resolveApprovalActorId` 只在 `authenticate` 中间件已放行之后才被调用,触发它要求一个已验签但 `user.id`/`userId`/`sub` 三者皆缺的 token,本文件的 `tok()` helper 经 `/api/auth/dev-token` 铸造,不产出这种 token;记为「无断言,理由:本测试 harness 内不可达」,不当作遗漏補)、**`GROUP_NAME_UNSUPPORTED` 1**(本轮/回流修复新增,§3.3 设计 MD 全表尚未列这个码——见 P3-1,请求形状映射码,非锁文 ratify 码)。**(表外,不计入下面 11/10 分母)`APPROVAL_TEMPLATE_NOT_FOUND` 现 **2**(此前 **1**——§18.1 的 §2(b) 首次引入;本轮 §2(c) 新增第二处命中,复用同一码,非新码)。**11 码中 10 码有 `error.code` 断言、1 码(`APPROVAL_ACTOR_REQUIRED`)harness 内不可达而无断言。** mutation 台账(§15/§18)每条红也均以「专用码不等」或「状态不等」精确报告,未见任何一条只查裸状态码就断言通过。 |
+| 三线共用 #4 | 错误码不得降级成裸 HTTP 状态 | **机械前置动作(impl-gate-A-slice1-round4-20260918.md §2 P2-2 收口后新增,写在本行最前,任何一轮新增/删除用例后必须先跑再改数字)**:重跑 `scripts/dev/atg-verification-recount.sh`(§14 末尾附完整脚本源码,亦可手动逐条跑本行下方三条命令),把输出原样贴回本行,不得手抄或沿用旧数字。**修复轮 1(2026-09-18,见 §18)重算,替换本行原「全部 10 个码逐条都有断言」的过强全称句——gate `impl-gate-A-slice1-round1-20260918.md` P2-4 机械计数(4 码零命中)证伪了原句,原句已撤回。修复轮 5(2026-09-18,见 §22)对本行第二次重算——gate `impl-gate-A-slice1-round2-20260918.md` P2-1 机械计数(在修复轮 4 新增两条裸 403 之后,本行未同步重算)证伪了当时的 15/13/2/`:492,497` 那组数字。gate `impl-gate-A-slice1-round4-20260918.md` P2-2 发现本行在修复轮 4(单一提交 `03ee9f4bb`,新增 P1-3 与 §2(c) 两条用例)落地后第三次未同步重算——这是同一失效的第三次发生,现按本 head 现场重跑同一条命令替换全部数字并新增机械前置动作,不再靠人记。** 机械核对(现场 grep,非目测,`03ee9f4bb` 之后现场重跑):两文件负例状态断言(`.status).toBe(4xx\|500)`)共 **19** 处(`grep -noE "\.status\)\.toBe\((40[0-9]\|500)\)" approval-template-groups-lifecycle.db.test.ts approval-template-groups-serialization.db.test.ts \| wc -l`),配对的 `error.code).toBe(...)` 断言共 **15** 处(同一命令把 `\.status\)\.toBe` 换成 `error\.code\)\.toBe\('[A-Z_]+'\)`)——**逐行核对差额的 4 处**(`grep -n "toBe(403)" approval-template-groups-lifecycle.db.test.ts`)是 F 用例(`lifecycle.db.test.ts:520,525,537,544`,分别对应 `createAsNobody`/`listAsNobody`/`archiveAsNobody`/`linkAsNobody`)对非管理员的四个 403(第 5 个 `toBe(403)` 在 `:397`,是 A‴(iii) 的 `noTenantRes`,与 `SESSION_ORG_REQUIRED` 配对,不计入差额);这四处**不是**本锁引入的专用码之一,命中的是仓内既有、本锁未改动的共享中间件 `rbacGuardAny`(`src/rbac/rbac.ts:172-175`),该中间件对全仓所有路由(含 `/api/approval-templates` 自身)一律返回裸 `{ error: 'Insufficient permissions' }`(无 `code` 字段)——不在补充清单 #4「本锁错误码」的适用范围内。**逐码核对**(命令 `grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 \| wc -l` 逐码跑,§3.3 设计 MD 的 10 个码全表 + 本轮新增的第 11 个码):`GROUP_NOT_FOUND` 1、`GROUP_ARCHIVED` 1、`GROUP_NAME_TAKEN` 3、`GROUP_NOT_ARCHIVED` **1**(修复轮 1 新增,此前 **0**——§18)、`GROUP_SORT_CONFLICT` 1、`ORG_ID_NOT_ACCEPTED` 2、`SESSION_ORG_REQUIRED` 1、`GROUP_NAME_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_GROUP_ID_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_ACTOR_REQUIRED` **0**(仍无断言——`resolveApprovalActorId` 只在 `authenticate` 中间件已放行之后才被调用,触发它要求一个已验签但 `user.id`/`userId`/`sub` 三者皆缺的 token,本文件的 `tok()` helper 经 `/api/auth/dev-token` 铸造,不产出这种 token;记为「无断言,理由:本测试 harness 内不可达」,不当作遗漏補)、**`GROUP_NAME_UNSUPPORTED` 1**(本轮/回流修复新增,§3.3 设计 MD 全表尚未列这个码——见 P3-1,请求形状映射码,非锁文 ratify 码)。**(表外,不计入下面 11/10 分母)`APPROVAL_TEMPLATE_NOT_FOUND` 现 **2**(此前 **1**——§18.1 的 §2(b) 首次引入;本轮 §2(c) 新增第二处命中,复用同一码,非新码)。**11 码中 10 码有 `error.code` 断言、1 码(`APPROVAL_ACTOR_REQUIRED`)harness 内不可达而无断言。** mutation 台账(§15/§18)每条红也均以「专用码不等」或「状态不等」精确报告,未见任何一条只查裸状态码就断言通过。 |
 | lane A #5 | J/C 的「未知 `section=` ⇒ 400」挪分期 3 请示 | 已在设计 MD §1.2/§6 与 A‴ 测试注释(`:391-392`,原 `:386-387` +5)双重记录,owner 尚未回应,不阻塞本切片 |
 | lane A #6 | 「1 落地」求值 = Draft PR 过门审 | 已按此定义推进(目标文档亦如此记录),本 MD 不重复裁决 |
 | lane A #7 | 前端 spec 位置 `apps/web/tests/` | 不适用——本切片零前端改动(§13.6),留给 A-2 核对 |
@@ -1355,3 +1355,72 @@ $ cd packages/core-backend && CI=true pnpm exec vitest run --reporter=dot
 本回流修复(§23)唯一提交:`03ee9f4bb6c7eb67349da5cda332cf4e4d6ceaac`(`fix(approval): map CJK-name CHECK violation to 400, correct guard/manager overclaim`)——**NIT 收口(impl-gate-A-slice1-round4-20260918.md §5 NIT)**:上一版本节只写「不在此重复粘贴 SHA」,本轮门审指出这样这份 MD 自身就不带 provenance,已改为直接写死 SHA。
 
 `impl-gate-A-slice1-round4-20260918.md` P2/P3 收口(本次修复,commit 列表以 `git log --oneline 03ee9f4bb..HEAD -- docs/development/approval-template-groups-phase1-verification-20260918.md packages/core-backend/src/routes/approvals.ts packages/core-backend/src/services/ApprovalTemplateGroupService.ts packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts docs/development/approval-template-groups-phase1-design-20260918.md scripts/dev/atg-verification-recount.sh` 现场输出为准,§23.12 附最终 SHA 列表):见 §23.12。
+
+### 23.12 impl-gate-A-slice1-round4-20260918.md 处置表 + 最终验证证据链
+
+**逐条处置**(commit SHA 均为完整 40 字符,`git log --oneline 03ee9f4bb..b32a0b6fc` 现场核对,4 个提交,无 squash、无 force):
+
+| 项 | 处置 | commit | 备注 |
+|---|---|---|---|
+| P2-1(通配腿反例实测为假) | **已修复**——三份副本(生产注释/测试注释/本文档 §23.6-§23.7)一并改写,唯一被实测支撑的反例改为 DB 侧 `isAdmin`,写明第 2 轮与第 4 轮各证伪一次 | `f7b929700` | 纯注释/文档,零运行时行为变化;M4 判别式实测(五行输出)复述进 §23.6 |
+| P2-2(§14 #4 机械计数第三次为假) | **已修复**——按本 head 重算 19/15/差额 4/`:397,520,525,537,544`,逐码表补 `GROUP_NAME_UNSUPPORTED`(1)、`APPROVAL_TEMPLATE_NOT_FOUND` 改 2,分母改 11/10;新增机械前置动作 + `scripts/dev/atg-verification-recount.sh` | `8a2a29a61` | 脚本已现场跑通(见下方证据),后续任何新增/删除用例后必须先跑这个脚本再改数字 |
+| P3-1(全组锚点集体漂移) | **已修复**——设计 MD §3.1/§3.3、验证 MD §12/§18.1/§18.2/§19.1/§23.1 全部改用「符号 + `grep -n` 定位 + 近似行号」,不再维护逐提交位移算术;§12 表另修复 4 行意外多出的单元格 | `a687e2591`(设计 MD)+ `02c6bbe89`(验证 MD) | 设计 MD §3.3 同时补 `GROUP_NAME_UNSUPPORTED` 行并入 §3.4 owner 裁量桶(报告原话「并入 §3.4 的 owner 裁量桶」);§3.4/§3.5/§4.2 中未被报告点名的同类陈旧行号**未**顺带修——超出本轮枚举范围,如实披露,不算已收口 |
+| P3-2(atg_org_nonblank/atgl_org_nonblank 零覆盖) | **确认披露属实,不升级,不改动**(报告verdict 本身就是「不升级」)| — | 报告原话:「我确认这条披露属实且措辞恰当,不升级」——本轮无对应代码/文档改动 |
+| P3-3(中文 message 被测试冻结成合同) | **如实披露,未改动断言**——收窄断言在技术上可行(`details.constraint` 已独立承担 M1 mutation 的判别力),但是否收窄是一次合同层面的裁决,留给 owner 与 §23.5 的 `atg_name_nonblank` CHECK 勘误一并做 | `02c6bbe89` | PR body 待补充这条披露(硬规矩不许本轮自己动 PR;交下一次能编辑 PR 的环节补) |
+| P3-4(平台管理员授权行清理只靠 afterAll) | **已修复**——`beforeAll` 增加前缀幂等 sweep,且用「插入孤儿行 → 只跑不相关的 sentinel 用例 → 核对孤儿行消失」的隔离实测确认是 sweep 本身在清理,不是巧合;评估并否决了「事务内」「更唯一的临时用户」两个替代方案,理由记录在案 | `b32a0b6fc`(代码)+ `02c6bbe89`(文档) | 残留风险(连续两次运行都被打断)已如实标注为缓解后的剩余量,不是消灭 |
+| P3-5(§23.6 grep 命令/输出形状不对齐) | **已修复**——随 P2-1 一起重写,换成会话时刻真实可重跑的两段管道命令(`grep -rn` 接 `grep -i` 过滤),并现场核对输出为空 | `f7b929700` | 与 P2-1 同一提交,因为两者改的是同一段落 |
+| NIT(§23.11 不写 SHA) | **已修复**——写死本回流修复的提交 SHA `03ee9f4bb6c7eb67349da5cda332cf4e4d6ceaac`,并在本节追加本次全部 4 个修复提交的 SHA | `02c6bbe89` | 见上表与下方最终 SHA |
+
+**最终验证证据链(本次修复收尾,head `b32a0b6fc5c075ef6136670ec305c7fa0ad71c37`,私有库 `metasheet2_lock_a1_fix`)**:
+
+```
+$ pnpm type-check                                            # 全仓,含 apps/web 两个 verification tsconfig
+exit 0(core-backend / apps/web 均 Done,零错误)
+
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix" EXPECT_DB=1 pnpm exec vitest \
+    --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+ Test Files  2 passed (2)
+      Tests  28 passed (28)
+
+$ node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
+tests 1 / pass 1 / fail 0                                    # s6a 钉,未受本轮影响(plugin-tests.yml 零改动)
+
+$ node --test --test-concurrency=1 scripts/ops/*-ci-wiring.test.mjs
+tests 476 / pass 476 / fail 0                                # 全绿,本次未复现第 4 轮报告记录的 2 条 ETIMEDOUT(环境噪音,非分支缺陷)
+
+$ export DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix"
+$ bash -e /tmp/gateA-fix1-required-step.sh                   # .github/workflows/plugin-tests.yml `approval-real-db-integration` 步骤 run: 体逐字抽取,79 个测试文件参数,bash -e 执行
+ Test Files  79 passed (79)
+      Tests  880 passed | 5 skipped (885)
+REQUIRED_STEP_EXIT=0                                         # 与本文档 §14/§23.10 记录的 79/880/5 skip 逐字相符
+
+$ env -u DATABASE_URL CI=true bash -e -c 'pnpm --filter @metasheet/core-backend test'   # 同 job 的 no-DB 单测 lane
+ Test Files  931 passed | 175 skipped (1106)
+      Tests  14713 passed | 1604 skipped (16317)
+NODB_EXIT=0                                                   # 与 §23.10 记录逐字相符
+
+$ git diff --exit-code 03ee9f4bb..HEAD -- packages/core-backend/src/db/migrations/
+exit 0                                                        # DDL 零改动,硬规矩满足
+
+$ git diff --name-status 03ee9f4bb..HEAD
+M  docs/development/approval-template-groups-phase1-design-20260918.md
+M  docs/development/approval-template-groups-phase1-verification-20260918.md
+M  packages/core-backend/src/routes/approvals.ts
+M  packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts
+A  scripts/dev/atg-verification-recount.sh
+                                                               # ApprovalTemplateGroupService.ts 本轮未改动;新增文件仅一个脚本,非测试/非 DDL
+
+$ git status --porcelain
+(空)
+
+$ git log --oneline 03ee9f4bb..HEAD
+b32a0b6fc test(approval): sweep orphaned §2(c) admin grant in beforeAll (gate P3-4)
+02c6bbe89 docs(approval): recompute verification MD anchors, disclose P3-3/P3-4 dispositions (gate P3-1/P3-3/P3-4/NIT)
+a687e2591 docs(approval): recompute design MD anchors as symbol + approximate line (gate P3-1)
+8a2a29a61 docs(approval): recount §14 error-code census, add machine recount script (gate P2-2)
+f7b929700 fix(approval): retract falsified wildcard-permission guard claim (gate P2-1)
+```
+
+**本次修复未做的事(如实列出)**:未合并、未 undraft、未开/动 PR、未动 `origin/main`、未应用任何迁移到共享库、未改锁文、DDL 文件零字节改动(`atg_name_nonblank` 放宽仍是 owner 勘误项,原样待裁)。`ApprovalTemplateGroupService.ts` 的 §3.4/§3.5、验证 MD §4.2/§22.2(历史链)里同类的陈旧行号未被本轮触碰——它们不在 `impl-gate-A-slice1-round4-20260918.md` §5 P3-1 表格枚举的锚点范围内,如实标注为「既有条件,不算本轮账上」,留给后续轮次或 owner 判断是否值得同样改写。
