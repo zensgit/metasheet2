@@ -38,8 +38,10 @@ import type {
  *     external-transaction entry with these inputs, and the round/instance/event writes followed
  *     from its answer」 — and nothing about prepare/prepareIdentity, the isolation assert, the
  *     rollout-lock `pg_locks` assert, posture resolution, replay preflight or the seal/outbox.
- *   - 账侧完整取消结果逐字节等价 (lock §8 期 1) and the `unrecoverableExpired` presentation, which
- *     only an end-to-end run against the plugin's real boundary can establish.
+ *   - 账侧完整取消结果逐字节等价 (lock §8 期 1) — the twin-fixture compare, second-to-last case.
+ *     `unrecoverableExpired` 呈现 (lock:86) is the LAST case: the counter is computed and
+ *     PERSISTED by the W4 seal (non-zero, measured); only the user-facing SURFACE is still open,
+ *     and both cases assert its absence as a negative.
  *   - R2 (锁内最终评估失败 ⇒ 零业务取消) — now COVERED here, by the last case in this file,
  *     against the REAL boundary. ⚠️ Read its doc comment before trusting it: R2's three
  *     literal clauses have NO discriminating power against the mutation the lock names for
@@ -153,6 +155,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   // `user_orgs` membership for the acting id. A dev token is not a directory row, so the double-
   // backed cases never needed these.
   const createdDirectoryUserIds = new Set<string>()
+  // The `unrecoverableExpired` case (bottom of this file) seeds a leave-balance GRANT LOT plus its
+  // `deduct` event. `attendance_leave_balance_events.balance_id` is `ON DELETE CASCADE`, so
+  // deleting the lot takes its events with it.
+  const createdLeaveBalanceIds = new Set<string>()
 
   const pool = () => poolManager.get()
 
@@ -192,6 +198,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       if (createdDirectoryUserIds.size > 0) {
         await pool().query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [[...createdDirectoryUserIds]])
         await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...createdDirectoryUserIds]])
+      }
+      if (createdLeaveBalanceIds.size > 0) {
+        await pool().query('DELETE FROM attendance_leave_balances WHERE id = ANY($1::uuid[])', [[...createdLeaveBalanceIds]])
       }
       if (mintedUserIds.size > 0) {
         // Lock §2-G3 fixture delta — drop the `users` rows this file's `authToken` minted.
@@ -1253,8 +1262,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    *   - 账侧完整取消结果逐字节等价 (lock §8 期 1). This is DB END-STATE parity with what the W4
    *     path writes; byte equivalence needs the HTTP `POST /api/attendance/requests/:id/cancel`
    *     path run on a twin fixture and a field-by-field compare of both results. Still open.
-   *   - `unrecoverableExpired` presentation: this fixture seeds no leave-balance lots, so
-   *     `reverseLeaveBalanceDeduction` finds no `deduct` events and writes nothing. Still open.
+   *   - `unrecoverableExpired` presentation: THIS fixture seeds no leave-balance lots, so
+   *     `reverseLeaveBalanceDeduction` finds no `deduct` events and writes nothing. Covered by the
+   *     LAST case in this file, which seeds an expired lot and pins the sealed counter at 120.
    *   - The P14 approved-leave cancellation CALCULATION. The org resolves to a legacy write
    *     posture here, and the adapter's P14 branch is `approvedLeave && acceptedWritePosture !==
    *     'legacy_projection_only'` — so the calculation append is SKIPPED on this fixture. That is
@@ -1580,19 +1590,23 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * DESIGN. It is not swallowing the dispute; it is the dispute's oracle. Stated here so nobody
    * later "fixes" the red by adding `actor_id` to the exclusion table.
    *
-   * ⚠️ WHAT THIS DOES **NOT** ESTABLISH, and it is the headline finding of this unit:
-   * `unrecoverableExpired` 呈现 IS NOT CLOSED BY THIS CASE, for two independent reasons, both
-   * measured below rather than argued:
+   * ⚠️ WHAT THIS DOES **NOT** ESTABLISH: `unrecoverableExpired` 呈现 IS NOT CLOSED BY THIS CASE,
+   * for two reasons this case measures rather than argues — and the SECOND of them has since been
+   * narrowed by the LAST case in this file (phase-2 MD §3.16, §0 R-8):
    *   (a) **no leave-balance lots are seeded**, so `reverseLeaveBalanceDeduction` has nothing to
    *       reverse and BOTH paths produce `reversal.reversed = 0`. Parity of a zero is parity; it
-   *       is not the `unrecoverableExpired > 0` presentation lock:86 demands.
-   *   (b) **the approval side has no channel to present it on.** `redeemCancelRoundInTxn` receives
-   *       `{ kind: 'executed', response }` from the entry and returns `{ kind: 'applied' }` —
-   *       the W4 response payload, `reversal` and all, is DISCARDED. The B-side assertion below
-   *       pins the payload the W4 path returns so the shape is on record; the A-side has no
-   *       counterpart to compare it against, and that absence is asserted, not glossed.
-   * Both are registered in the phase-2 verification MD as OPEN. This case closes the ROW-LEVEL
-   * half of the 账侧 line (the end state the two paths leave in the database) and nothing more.
+   *       is not the `unrecoverableExpired > 0` presentation lock:86 demands. CLOSED by the last
+   *       case, which seeds an EXPIRED lot and gets 120.
+   *   (b) **the approval side's RETURN VALUE has no channel for it.** `redeemCancelRoundInTxn`
+   *       receives `{ kind: 'executed', response }` from the entry and returns `{ kind: 'applied' }`
+   *       — the W4 response payload, `reversal` and all, is DISCARDED on that path.
+   *       ⛔ The stronger form of this sentence — 「the approval side has no channel to present it
+   *       on AT ALL」 — is RETRACTED: the W4 seal writes the same object into
+   *       `attendance_result_operations.response_snapshot` on the caller's own transaction client,
+   *       so it IS persisted and queryable. What is still open is only which USER-FACING surface
+   *       renders it, which is why the DTO negative at the bottom of this case stands.
+   * The narrower open item is registered in the phase-2 verification MD. This case closes the
+   * ROW-LEVEL half of the 账侧 line (the end state the two paths leave in the database).
    */
   it(
     '账侧 (lock §8 期 1): the redeemed cancel round leaves the SAME rows as the existing ' +
@@ -1671,10 +1685,12 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       })
       expect(cancelB.status, await cancelB.clone().text()).toBe(200)
 
-      // ── The W4 RESULT PAYLOAD, pinned. This is 「完整取消结果」 as the existing path returns it,
-      //    and it is recorded here because the redemption path has NO counterpart to compare it
-      //    against: `redeemCancelRoundInTxn` returns `{ kind: 'applied' }` and drops
-      //    `{ kind: 'executed', response }`. See the doc comment's finding (b).
+      // ── The W4 RESULT PAYLOAD, pinned. This is 「完整取消结果」 as the existing path returns it.
+      //    `redeemCancelRoundInTxn` returns `{ kind: 'applied' }` and drops
+      //    `{ kind: 'executed', response }`, so the redemption path has no RETURN-VALUE counterpart
+      //    to compare against. ⚠️ It does have a PERSISTED one — the W4 seal writes the same object
+      //    into `attendance_result_operations.response_snapshot` — which is what the LAST case in
+      //    this file measures, and which narrows finding (b) of the doc comment above.
       const payloadB = (await cancelB.json()) as {
         ok?: boolean
         data?: { requestId?: string; status?: string; orgId?: string; userId?: string; reversal?: unknown }
@@ -1887,6 +1903,167 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(Object.keys(dtoA)).not.toContain('reversal')
       expect(Object.keys(dtoA)).not.toContain('cancellationResult')
       expect(JSON.stringify(dtoA)).not.toContain('unrecoverableExpired')
+    },
+  )
+
+  /**
+   * ── `unrecoverableExpired` 呈现 (lock:86) — the half that IS closable, and a CLAIM RETRACTED ──
+   *
+   * lock:86 states C-1's step ⑥ as 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,
+   * **必须呈现**)」. The 账侧 parity case above asserts the approval-side DTO carries NO channel
+   * for it and phase-2 MD §3.15.6 called the whole item a CONTRACT GAP on the ground that
+   * 「the approval side has no channel to present it on **at all**」.
+   *
+   * ⛔ THAT SECOND HALF IS RETRACTED BY THIS CASE, and the retraction is a measurement, not a
+   * re-reading. The redemption path supplies a NON-NULL `operationId`
+   * (`deriveCancelRoundW4OperationIdV1`), so it takes the boundary's identity+preflight+**seal**
+   * branch, and the seal is `sealAttendanceResultOperationV1(trx, identity, { responseSnapshot:
+   * jsonValue(result.response) })` (`w4c3b-request-operation-boundary.ts:918-921`), which writes
+   * `attendance_result_operations.response_snapshot` — the adapter's WHOLE response object,
+   * `data.reversal` included (`w4c0-operation-registry.ts:756-790`). That write is issued on the
+   * caller's transaction client, so it commits with the approve. The counter is therefore
+   * COMPUTED, and PERSISTED, and QUERYABLE per operation, on the redemption path. What remains
+   * open is only WHICH USER-FACING SURFACE renders it — an owner decision this branch does not
+   * make, still asserted as a negative at the end of this case.
+   *
+   * The other half of §3.15.6's finding stands and is what this case closes as a TEST gap: 「no
+   * fixture seeds leave-balance lots, so both paths produce zero counters」. A zero counter cannot
+   * distinguish 「computed and zero」 from 「never computed」 — `0 === 0` is also what a path that
+   * never called `reverseLeaveBalanceDeduction` produces. This fixture seeds an EXPIRED lot with a
+   * live `deduct` event for the request, so the expected value is 120, not 0.
+   *
+   * WHY AN *EXPIRED* LOT AND NOT A LIVE ONE. §3a of `reverseLeaveBalanceDeduction`
+   * (`index.cjs:19415-19424`): an expired lot is NOT resurrected — the portion is counted into
+   * `unrecoverableExpired` and **no `reverse` event is written and no `remaining_minutes` is
+   * touched**. So this case gets a non-zero counter whose correctness is checkable from two
+   * directions at once: the counter's value, and the absence of the writes a non-expired lot
+   * would have made. Both are asserted.
+   *
+   * NON-VACUITY, asserted BEFORE the action rather than argued: the lot is read back through the
+   * SAME predicate production uses (`expires_at IS NOT NULL AND expires_at <= now()`), and the
+   * `deduct` event is counted. Without those two rows the assertion below would be
+   * `unrecoverableExpired === 0` and would pass against a path that does nothing.
+   *
+   * WHAT THIS CASE DOES NOT ESTABLISH:
+   *   - 呈现 on a user-facing surface. Registered as an owner decision (phase-2 MD §3.15.6);
+   *     the negative at the bottom of this case goes red the day one is added.
+   *   - The LIVE-lot reversal half (`reversed > 0`, a `reverse` event, `remaining_minutes`
+   *     restored). That is a different branch of the same helper and is not what lock:86's
+   *     「必须呈现」 names; it is left to the attendance line's own `reverseLeaveBalanceDeduction`
+   *     unit tests (`tests/unit/attendance-leave-cancellation-reversal.test.ts`), which cover it.
+   */
+  it(
+    'unrecoverableExpired 呈现 (lock:86): an EXPIRED lot makes the counter NON-ZERO on the ' +
+      'redemption path and the W4 seal persists it in `attendance_result_operations.' +
+      'response_snapshot` — while the approval DTO still carries no channel for it',
+    async () => {
+      const suffix = `uexp-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+      await seedDirectoryIdentity(fixture.requesterId, attached!.orgId)
+      // The REAL boundary, as in the END-TO-END case: a double returns `{ kind: 'executed' }` and
+      // seals nothing, so every assertion below would be red against one.
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+
+      // ── The lot. `attachAttendanceRequest` writes `user_id = 'wi13-req-<suffix>'`, which IS
+      //    `fixture.requesterId`, and the helper reverses on `requestRow.user_id` — so the lot must
+      //    be granted to that same id or the deduct scan finds nothing.
+      const lot = await pool().query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes,
+            source_type, source_key, granted_at, expires_at, status)
+         VALUES ($1, $2, 'annual', 480, 360, 'grant', $3,
+                 now() - interval '400 days', now() - interval '1 day', 'expired')
+         RETURNING id::text AS id`,
+        [attached!.orgId, fixture.requesterId, `wi13-uexp-${suffix}`],
+      )
+      const lotId = lot.rows[0].id
+      createdLeaveBalanceIds.add(lotId)
+      await pool().query(
+        `INSERT INTO attendance_leave_balance_events
+           (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ($1, $2, $3::uuid, 'deduct', -120, 'leave_request', $4)`,
+        [attached!.orgId, fixture.requesterId, lotId, attached!.requestId],
+      )
+
+      // ── NON-VACUITY, measured through production's own predicate. ───────────────────────────
+      const pre = await pool().query<{ expired: boolean; remaining_minutes: number; deducts: string }>(
+        `SELECT (b.expires_at IS NOT NULL AND b.expires_at <= now()) AS expired,
+                b.remaining_minutes,
+                (SELECT count(*)::text FROM attendance_leave_balance_events e
+                  WHERE e.balance_id = b.id AND e.event_type = 'deduct' AND e.source_id = $2) AS deducts
+           FROM attendance_leave_balances b WHERE b.id = $1::uuid`,
+        [lotId, attached!.requestId],
+      )
+      expect(pre.rows[0].expired).toBe(true)
+      expect(Number(pre.rows[0].remaining_minutes)).toBe(360)
+      expect(pre.rows[0].deducts).toBe('1')
+
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, await approve.clone().text()).toBe(200)
+
+      // The redemption really happened — otherwise the seal below could be absent for the boring
+      // reason rather than the interesting one.
+      expect((await roundOutcome(fixture.roundInstanceId)).outcome).toBe('applied')
+      const cancelledRequest = await pool().query<{ status: string }>(
+        `SELECT status FROM attendance_requests WHERE id = $1::uuid`,
+        [attached!.requestId],
+      )
+      expect(cancelledRequest.rows[0]?.status).toBe('cancelled')
+
+      // ── THE CHANNEL, measured. `response_snapshot` is the adapter's whole response object. ──
+      const roundIdRow = await pool().query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      const operationId = deriveCancelRoundW4OperationIdV1(roundIdRow.rows[0].id)
+      const sealed = await pool().query<{ state: string; response_snapshot: unknown }>(
+        `SELECT state, response_snapshot FROM attendance_result_operations
+          WHERE org_id = $1 AND operation_id = $2::uuid`,
+        [attached!.orgId, operationId],
+      )
+      expect(sealed.rows.length).toBe(1)
+      expect(sealed.rows[0].state).toBe('completed')
+      const snapshot = sealed.rows[0].response_snapshot as {
+        data?: { reversal?: Record<string, unknown> }
+      }
+      // Pinned as the WHOLE object, not just the one counter: `unrecoverableExpired: 120` alongside
+      // `reversed: 0` / `lots: 0` is what says the expired portion was counted INSTEAD of restored.
+      expect(snapshot.data?.reversal).toEqual({
+        reversed: 0,
+        lots: 0,
+        unrecoverableExpired: 120,
+        alreadyReversed: false,
+      })
+
+      // ── §3a: the expired lot is NOT resurrected. Zero `reverse` events, untouched remaining. ──
+      const events = await pool().query<{ event_type: string; count: string }>(
+        `SELECT event_type, count(*)::text AS count FROM attendance_leave_balance_events
+          WHERE balance_id = $1::uuid GROUP BY event_type ORDER BY event_type`,
+        [lotId],
+      )
+      expect(events.rows).toEqual([{ event_type: 'deduct', count: '1' }])
+      const post = await pool().query<{ remaining_minutes: number; status: string }>(
+        `SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1::uuid`,
+        [lotId],
+      )
+      expect(Number(post.rows[0].remaining_minutes)).toBe(360)
+      expect(post.rows[0].status).toBe('expired')
+
+      // ── The 呈现 SURFACE is still open, asserted as a negative (same shape as the 账侧 case).
+      //    This is the ONLY half of lock:86 this branch leaves open, and it is an owner decision:
+      //    the payload exists and is persisted; where a human reads it is not this file's call.
+      const dto = (await approve.json()) as Record<string, unknown>
+      expect(JSON.stringify(dto)).not.toContain('unrecoverableExpired')
+      expect(JSON.stringify(dto)).not.toContain('reversal')
     },
   )
 })

@@ -26,6 +26,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-5 | commit `5dbbf5f6b` message, 3rd paragraph, and §3.13.2's first draft | "under M-20 **ALL THREE** of R2's literal clauses stayed GREEN (**measured** — the `ivexp` case … passed)" | **RETRACTED IN PART — clause 1 was NOT measured by that run.** `ivexp` has no attendance target, so it asserts nothing about 零业务取消; the only case that does is R2 itself, and in that run R2 died at the `approve_rows` assertion, which the first draft ordered BEFORE the 零业务取消 rows — so those rows were never evaluated. Clauses 2 and 3 were genuinely measured; clause 1 was an argument labelled as a measurement, in a file whose whole discipline is the opposite. FIXED by the follow-up commit: the case now orders the three literal clauses first and the implementer addition last, and M-20 re-run puts the red on the file's last line (`:1433:49`) with all three evaluated and green. The original commit message cannot be edited without a force-push, so the correction lives here. |
 | R-6 | §3.4, §3.11.6 and the redemption suite's own header (phase 2, all three units) | a new `.db.test.ts` would owe 「the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102` — a closed world that stays green for a file it does not list」 | **RETRACTED — that is not what lives at `:99-102`, and the script holds no file list at all.** Read this session: `:99-102` is `REAL_DB_STEP_IDS = Object.freeze({ approval: 'approval-real-db-integration', multitable: 'multitable-real-db-integration' })` — a frozen map of two **step ids**, not test files. The file population is DERIVED from the workflow at check time (`wholeFileVitestArgs`, `:521-525`, reads the parsed step's own vitest invocations), so it cannot go stale against `plugin-tests.yml` the way a hard-coded list would. `grep -c 'db.test.ts'` over the whole script ⇒ **1** (a doc-comment example at `:513`), `grep -c cancel-round` ⇒ **0**. Consequence for this line: a new `.db.test.ts` under the existing `approval` step owes `plugin-tests.yml` + the s6a re-pin, and owes this script **nothing**. The three places carrying the wrong description are corrected in place; the two commit messages that repeated it cannot be, so this row is their correction. |
 | R-7 | §4's 「§5 I3 『终结即释放』 mutation」 bullet (previous revision) | the mutation's red would be 「the next create is **refused by the partial unique index** with 23505/409」 | **RETRACTED — the index is never reached in the sequential shape.** Measured in §3.14.2: `createCancelRoundInstance` has an application pre-check at `ApprovalProductService.ts:8558-8568` that runs before the `INSERT`, and M-21's stack frame is `ApprovalProductService.ts:8563:15` — `CANCEL_ROUND_ALREADY_PENDING` (409). The 23505 backstop at `:8697-8705` is the CONCURRENT-race path and this case does not construct one. The half that stands: C-3's outcome write is what releases the slot. The half that does not: any claim about `uq_approval_rounds_pending_document` itself. |
+| R-8 | §3.15.6 (previous revision), and the 账侧 case's own doc comment | 「`redeemCancelRoundInTxn` **DISCARDS** the entry's `{ kind: 'executed', response }` payload, so the approval side **has no channel to present it on at all**」 | **RETRACTED IN PART — the 「at all」 is false, and §3.16 measures the channel.** The discard is real and stands. What does not stand is the conclusion drawn from it: the redemption path supplies a non-null `operationId`, so it takes the boundary's identity+preflight+**seal** branch, and `sealAttendanceResultOperationV1` writes `attendance_result_operations.response_snapshot` with the adapter's WHOLE response object on the CALLER's transaction client (`w4c3b-request-operation-boundary.ts:918-921` → `w4c0-operation-registry.ts:756-790`). The counter is therefore computed, persisted and queryable per operation, and commits with the approve. §3.16 measures it at **120**, not at 0. The item that remains open is narrower than the one that was written: which USER-FACING surface renders it. Registered as an owner decision, not as a contract gap in the persistence. |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -2100,18 +2101,226 @@ required lane at `.github/workflows/plugin-tests.yml:1668`. **No new file, no ne
 ⇒ none of the four attendance census pins and no s6a re-pin are triggered by this unit.** This is
 the saving §3.15.0's provenance correction bought.
 
+---
+
+## 3.16 `unrecoverableExpired` 呈现 — the persistence half, MEASURED; the surface half, still owner's (this unit)
+
+The task names 账侧验收 as 「完整取消结果逐字节等价于现有 W4 路径 **+ `unrecoverableExpired` 呈现**」
+(lock §8 期 1, lock:169), and lock:86 states the requirement inside C-1's step list:
+「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,**必须呈现**)」.
+
+The previous revision's §3.15.6 called this item CLOSED-BLOCKED for two reasons. **One of them was
+wrong**, and the correction is what this unit is.
+
+### 3.16.1 The two reasons, re-evaluated one at a time
+
+| §3.15.6's reason | Verdict now |
+|---|---|
+| (a) 「no fixture seeds leave-balance lots, so both paths produce zero counters」 | **STOOD, and CLOSED by this unit.** It was a real TEST gap: `0 === 0` cannot distinguish 「computed and zero」 from 「never computed」. §3.16.2's fixture makes the expected value **120**. |
+| (b) 「`redeemCancelRoundInTxn` DISCARDS the entry's `{ kind: 'executed', response }` payload, so the approval side has **no channel to present it on at all**」 | **RETRACTED IN PART (§0 R-8).** The discard is real. The 「at all」 is not — the payload is persisted by the W4 seal, in the caller's transaction, before `redeemCancelRoundInTxn` ever sees it. |
+
+The mechanism for (b), read rather than recalled:
+
+```
+$ git grep -n "sealAttendanceResultOperationV1" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
+…:32     <- the import
+…:918    <- the ONE call in this boundary
+$ git grep -c "sealAttendanceResultOperationV1" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
+2
+```
+
+⚠️ The 「ONE call」 is scoped **to this file**, and the scope is load-bearing: repo-wide the seal has
+**9 call sites across 4 boundaries** (`git grep -c "await sealAttendanceResultOperationV1(" --
+packages/core-backend/src` ⇒ `w4c2-live-scheduled-boundary.ts:6`,
+`w4c3a-canonical-import-kernel.ts:1`, `w4c3b-request-operation-boundary.ts:1`,
+`w4c3c-record-operation-boundary.ts:1`), and its definition is
+`w4c0-operation-registry.ts:756`. A first draft of this block printed the three-line narrow list as
+though it were the repo-wide grep's whole output; it is not, and the corrected commands are above.
+The claim this section needs is only the file-scoped one — `request_cancel` runs through the `w4c3b`
+boundary — but an unscoped 「the ONE call」 would have been false.
+
+`w4c3b-request-operation-boundary.ts:918-921`:
+
+```ts
+await sealAttendanceResultOperationV1(trx, identity, {
+  responseSnapshot: jsonValue(result.response),
+  resolvedRequestId: result.resolvedRequestId,
+})
+```
+
+and `w4c0-operation-registry.ts:764-778` writes it as
+`UPDATE attendance_result_operations SET state = 'completed', response_snapshot = $4::jsonb …`
+on `trx` — which, on this path, **is the approval side's own transaction client** (lock §3 C-1
+「仅移交连接与事务生命周期的所有权」). Three consequences, and each is what makes the 「at all」
+false:
+
+1. the seal is **not** conditional on `isLegacyCompat` (only the outbox enqueue above it is), so it
+   runs on the legacy posture this fixture resolves to;
+2. `result.response` is the adapter's **whole** response object — `{ ok, data: { requestId, status,
+   orgId, userId, reversal, … } }` (`index.cjs:35275-35285`) — so `data.reversal` and its
+   `unrecoverableExpired` go in verbatim;
+3. it commits with the approve, atomically, because it is the caller's transaction.
+
+So the honest statement of what is open is **narrower** than the one that was written: the payload
+is computed, persisted and queryable per operation id; what nobody has decided is **which
+user-facing surface renders it**. That is an owner decision (the DTO? the round's detail view? a
+notification?), and inventing one here would be 另造 a presentation contract the lock does not name.
+
+### 3.16.2 The fixture — why an EXPIRED lot, and why that makes the measurement two-sided
+
+`reverseLeaveBalanceDeduction` (`index.cjs:19392-19446`) has two branches per deduct row. The
+expired one (`index.cjs:19417-19425`, its own comment calls it §3a) is:
+
+- `unrecoverableExpired += deducted`
+- **no** `reverse` event written
+- **no** `remaining_minutes` touched
+
+That asymmetry is what makes a single fixture check the claim from both directions: the counter must
+be 120, **and** the writes a non-expired lot would have made must be absent. A live lot would have
+given `reversed: 120, lots: 1` and a `reverse` event instead, so the two halves cannot both be green
+by accident.
+
+Seeded before the approve (`approval-cancel-round-redemption.db.test.ts`, the file's last case):
+
+| Row | Values that matter |
+|---|---|
+| `attendance_leave_balances` | `user_id = fixture.requesterId` (the id `attachAttendanceRequest` writes as `attendance_requests.user_id`, which is what the helper reverses on), `amount_minutes 480 / remaining_minutes 360`, `expires_at = now() - 1 day`, `status 'expired'` |
+| `attendance_leave_balance_events` | `event_type 'deduct'`, `delta_minutes -120`, `source_id = attached.requestId` — the helper's scan predicate is `source_id = $3 AND event_type = 'deduct'` |
+
+**NON-VACUITY is asserted, not argued.** Before the action the case reads the lot back through
+**production's own predicate** (`(expires_at IS NOT NULL AND expires_at <= now()) AS expired`) and
+counts the deduct rows: `expired = true`, `remaining_minutes = 360`, `deducts = '1'`. Without those
+two rows the counter assertion would be `unrecoverableExpired === 0` and would pass against a path
+that never called the helper at all — which is exactly the shape §3.15.6 reason (a) named.
+
+`approvedLeave` — the gate on the reversal call (`index.cjs:35066`, `:35268`) — is
+`requestRow.status === 'approved' && requestRow.request_type === 'leave'`, and
+`attachAttendanceRequest` inserts exactly that pair. Note this branch is **not** posture-gated,
+unlike the P14 cancellation calculation at `:35169`, which is why the reversal runs on this fixture
+while §3.12.3's P14 assertion stays a zero.
+
+### 3.16.3 What the case asserts, in order
+
+1. the REAL port is bound (`getAttendanceCancellationExecutionPort()` defined) — a double seals
+   nothing, so every assertion below would be red against one;
+2. non-vacuity of the fixture (above);
+3. the approve returns 200, the round is `applied`, and `attendance_requests.status = 'cancelled'`
+   — so an absent seal below cannot be the boring absence of a redemption;
+4. **the channel**: exactly one `attendance_result_operations` row for
+   `deriveCancelRoundW4OperationIdV1(roundId)`, `state = 'completed'`, and its
+   `response_snapshot.data.reversal` deep-equals
+   `{ reversed: 0, lots: 0, unrecoverableExpired: 120, alreadyReversed: false }` — pinned as the
+   WHOLE object rather than the one counter, because `unrecoverableExpired: 120` next to
+   `reversed: 0` is what says the portion was **counted instead of restored**;
+5. §3a's absences: the lot's events are exactly `[{deduct, 1}]` (zero `reverse`), and
+   `remaining_minutes` is still 360 with `status` still `expired`;
+6. **the surface is still open**, as a negative: the approve's `UnifiedApprovalDTO` contains
+   neither `unrecoverableExpired` nor `reversal` anywhere in its JSON. Same shape as the 账侧 case's
+   own negative — the day a channel is added, both go red and this section's OPEN item must be
+   revisited rather than quietly staying open.
+
+### 3.16.4 Mutation ledger (this unit)
+
+Both probes are on PRODUCTION code, not on the fixture — a fixture mutation would die on the
+non-vacuity pre-check (that is the pre-check's job) and would prove nothing about the assertion.
+`cp` backup → mutate → run the WHOLE file → `cp` restore → `cmp`.
+
+| ID | Mutation | Expected | Measured |
+|---|---|---|---|
+| M-23 | `w4c3b-request-operation-boundary.ts:919` — `responseSnapshot: jsonValue(result.response)` ⇒ `jsonValue({ mutated: true })` (the seal still runs, still completes, still writes a snapshot — only the payload is gone) | the new case red at the `response_snapshot.data.reversal` assertion; every other case green | **exactly 1 red / 16 green.** `AssertionError: expected undefined to deeply equal { reversed: +0, lots: +0, …(2) }` at `approval-cancel-round-redemption.db.test.ts:2013:39` — the named site |
+| M-24 | `plugins/plugin-attendance/index.cjs:19423` — `unrecoverableExpired += deducted` ⇒ `unrecoverableExpired += 0` (the §3a branch still skips the restore; only the counter stops counting) | same case red, same site, with a PRESENT object whose counter is 0 | **exactly 1 red / 16 green.** `AssertionError: expected { lots: +0, reversed: +0, …(2) } to deeply equal { reversed: +0, lots: +0, …(2) }` at `:2013:39` |
+
+⚠️ **LINE-NUMBER DRIFT, converted rather than left to rot.** Both mutant runs happened BEFORE the
+three stale in-file claims were reconciled in the same commit (the suite header, the END-TO-END
+case's 呈现 bullet, and the 账侧 case's finding (b) — see §3.16.1), which added **9 lines** above the
+assertion. The frame both runs printed is `:2013:39`; the same assertion now sits at **`:2022`**
+(`git grep -n "expect(snapshot.data?.reversal)"` ⇒ one hit, `:2022`). The mutants were not re-run
+after the comment edits — comments cannot change a result — so the frames are recorded as MEASURED
+(`:2013`) with the conversion stated, not silently rewritten to today's number.
+
+The pair is the point: M-23 says the assertion is bound to **the seal's payload** (not to some
+other row that happens to be there), and M-24 says it is bound to **the counter's own computation**
+(not merely to an object being sealed). Either alone would leave the other unproven. Both restored
+byte-identically (`cmp` silent) and the file re-run clean at **17 passed (17)**.
+
+⚠️ What the ledger does NOT contain, stated so it is not read as absent-because-unnecessary: no
+mutation of `redeemCancelRoundInTxn`'s discard. There is nothing to mutate — this unit deliberately
+does **not** change the discard, because threading the payload out of it would need a destination,
+and the destination is the owner decision in §3.16.1. The discard is documented, not repaired.
+
+### 3.16.5 Scope — the live-lot half is NOT here, and that is deliberate
+
+`reversed > 0` / a `reverse` event / `remaining_minutes` restored is the OTHER branch of the same
+helper. It is not what lock:86's 「必须呈现」 names (the named return value is
+`unrecoverableExpired`), and it is already covered by the attendance line's own unit suite:
+
+```
+$ git grep -c "unrecoverableExpired" -- packages/core-backend/tests/unit/attendance-leave-cancellation-reversal.test.ts
+6
+```
+
+Six matching LINES, of which **four are assertions**: `:52` reversed 60 / unrecoverable 0, `:76` the
+pure-expired case, `:87` the mixed lot, `:103` the empty case. The other two are `:16` (the helper's
+type declaration) and `:73` (a test NAME). Recorded that way because a first draft of this block
+wrote `4` — the assertion count — next to a `grep -c`, which counts lines; the two are different
+quantities and the command is the one that has to be true. Duplicating that branch through the
+approval path would add a second, slower copy of covered behaviour and no new predicate.
+
+### 3.16.6 Wiring — nothing new to pin
+
+The case is appended to `approval-cancel-round-redemption.db.test.ts`, already wired at
+`plugin-tests.yml:1668` and already carrying the top-level `EXPECT_DB` sentinel. No new file, no new
+error code, no `plugin-tests.yml` edit ⇒ **no s6a re-pin**. Confirmed mechanically:
+
+```
+$ git diff --name-only feat/approval-cancel-round-phase1..HEAD -- .github/workflows/plugin-tests.yml
+(no output)
+```
+
+The two tables the fixture writes (`attendance_leave_balances`, `attendance_leave_balance_events`)
+are seeded and torn down inside the suite's existing `afterAll` (the events cascade off the lot's
+`ON DELETE CASCADE` FK), so a shared DB is left as it was found.
+
+### 3.16.7 Commands and results
+
+```
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+# → clean
+
+$ (packages/core-backend) DATABASE_URL=…/metasheet2_lock_c2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts -t 'unrecoverableExpired' --reporter=dot
+# → 1 passed | 16 skipped (17)
+
+$ (packages/core-backend) DATABASE_URL=…/metasheet2_lock_c2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+# → 17 passed (17)     [after M-23 and M-24 were restored; each mutant run gave 1 failed | 16 passed]
+```
+
+⚠️ The case went green on its FIRST run. §3.12's did not, and found a shipped P1 — so a first-run
+green is recorded here as what it is (the fixture worked), not as evidence the case is strong. The
+strength claim rests on M-23/M-24, not on the green.
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
 they are.
 
 - **判据 II** (C-2 兑现挂点) — **IMPLEMENTED in §3.11**, with the C-1 port, the `blocked`
-  hand-off and four acceptance cases. What is still NOT established about it: every one of those
-  cases binds a TEST DOUBLE through the production registry, so they prove the approval side's half
-  of the contract and nothing about the real W4 protocol (prepare/prepareIdentity, the isolation
+  hand-off and four acceptance cases. ⚠️ **This bullet is CORRECTED, not merely updated**: its
+  previous revision scoped the double caveat to 「every one of those cases」 while §3.12 had already
+  landed an END-TO-END case against the real boundary, and §3.16 has since added a second
+  real-boundary case. Stated precisely now — the caveat scopes to **§3.11.6's four cases only**,
+  which bind a TEST DOUBLE through the production registry and so prove the approval side's half of
+  the contract and nothing about the real W4 protocol (prepare/prepareIdentity, the isolation
   assert, the rollout-lock `pg_locks` assert, posture resolution, authorization, replay preflight,
-  seal/outbox). The org-key match (§3.11.3) is argued from a query predicate, which is a
-  construction argument, not a live run.
+  seal/outbox). Several of those ARE exercised elsewhere: §3.12's case measures the isolation and
+  rollout-lock asserts, and §3.16's measures the seal as a persisted row. Still unexercised by any
+  case on this branch: posture resolution and authorization as assertions in their own right (they
+  run, but nothing pins their outcome) — see §3.12.3's legacy-posture note. §3.11.3's org-key match
+  remains a construction argument from a query predicate for the four double-backed cases; §3.12 is
+  what turns it into a live run.
 - **`filterBulkReassignDiscoveryForAttendance`'s nondeterministic org** (§3.3d) — a real defect
   found by this census, deliberately OUT of scope here, owed to the attendance line as a finding.
   Nothing on this branch depends on it.
@@ -2169,13 +2378,23 @@ they are.
   redemption path and populated on the HTTP path (§3.15.5), flagged for owner registration rather
   than excluded; (b) the case's green is **CONDITIONAL** on §3.11.4's open acting-identity decision
   and goes red by design if the owner rules the other way (§3.15.7).
-- **`unrecoverableExpired` 呈现** (lock:86 「必须呈现」) — **STILL OPEN, and it is a CONTRACT GAP, not
-  a test gap** (§3.15.6). Two independent reasons: no fixture seeds leave-balance lots, so both
-  paths produce zero counters; and `redeemCancelRoundInTxn` **DISCARDS** the entry's
-  `{ kind: 'executed', response }` payload, so the approval side has no channel to present it on at
-  all. The absence is asserted as a negative so the day a channel is added the line goes red. Where
-  the payload should surface is a design decision the lock does not make — registered for owner
-  decision, deliberately not invented here.
+- **`unrecoverableExpired` 呈现** (lock:86 「必须呈现」) — **HALF CLOSED in §3.16, and the other
+  half is NARROWER than the previous revision claimed** (§0 R-8 retracts it). The persistence half
+  is now MEASURED: the redemption path supplies a non-null `operationId`, so it takes the seal
+  branch, and `sealAttendanceResultOperationV1` writes the adapter's whole response —
+  `data.reversal` included — into `attendance_result_operations.response_snapshot` **on the
+  approval side's own transaction client**, committing atomically with the approve. §3.16's case
+  seeds an EXPIRED lot plus its `deduct` event and pins the sealed object at
+  `{ reversed: 0, lots: 0, unrecoverableExpired: 120, alreadyReversed: false }` — a NON-ZERO
+  counter, so it is no longer the `0 === 0` that cannot tell 「computed」 from 「never computed」.
+  Two production mutations carry it (M-23 the seal's payload, M-24 the counter's computation),
+  1 red / 16 green each, both at the same named site.
+  ⚠️ What is STILL OPEN, and it is the narrower thing: **which user-facing surface renders it.**
+  `redeemCancelRoundInTxn` does still discard `{ kind: 'executed', response }`, and the approval
+  DTO carries no field for it — asserted as a negative in BOTH the 账侧 case and §3.16's, so the day
+  a channel is added they go red. This unit deliberately does not invent that field: a destination
+  for the payload is a presentation contract the lock does not name, so it is registered for owner
+  decision rather than 另造 here.
 - **`attendance-parity.db.test.ts`** — **RETIRED as a deliverable, and the reason is a provenance
   correction** (§3.15.0): the filename appears **zero** times in the lock
   (`grep -c "attendance-parity" <lock>` → 0); phase-1's design MD `:61-62` mis-attributed it to
