@@ -12,7 +12,11 @@
  * (not a client-reconstructed one); (3) an empty section renders the empty-state text, not zero
  * rows silently; (4) "load more" appends page 2 without re-fetching page 1; (5) clicking an item
  * emits `select` with the template id; (6) a failed group fetch surfaces the top-level error state
- * rather than rendering an empty section list.
+ * rather than rendering an empty section list; (7)-(8) `category:<name>` candidates from
+ * `listTemplateCategories()` are fetched as sections after `group:`/`ungrouped`, and a candidate
+ * whose own bucket total is 0 is dropped from what renders (unlike `group:`/`ungrouped`, which
+ * always render, empty state included) — that name list is global/org-agnostic (§Q5 undecided),
+ * so not every name it returns resolves to a real section in this org.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
@@ -20,10 +24,12 @@ import { useLocale } from '../src/composables/useLocale'
 import type { ApprovalTemplateGroupDTO } from '../src/types/approval'
 
 const listApprovalTemplateGroupsSpy = vi.fn<[], Promise<ApprovalTemplateGroupDTO[]>>()
+const listTemplateCategoriesSpy = vi.fn<[], Promise<string[]>>()
 const listTemplatesBySectionSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
+  listTemplateCategories: () => listTemplateCategoriesSpy(),
   listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
 }))
 
@@ -72,6 +78,8 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
   beforeEach(() => {
     useLocale().setLocale('zh-CN')
     listApprovalTemplateGroupsSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue([])
     listTemplatesBySectionSpy.mockReset()
     selectSpy = vi.fn()
     container = document.createElement('div')
@@ -218,5 +226,49 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     expect(listTemplatesBySectionSpy).toHaveBeenCalledWith(
       expect.objectContaining({ section: 'ungrouped', status: 'published', search: 'travel', page: 1 }),
     )
+  })
+
+  it('fetches one category:<name> section per listTemplateCategories() name, after group/ungrouped', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    listTemplateCategoriesSpy.mockResolvedValue(['报销', '采购'])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+
+    await mountView()
+
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    // group:atg_a, ungrouped, category:报销, category:采购 — in that order.
+    expect(listTemplatesBySectionSpy).toHaveBeenCalledTimes(4)
+    const sectionArg = (i: number) => listTemplatesBySectionSpy.mock.calls[i]?.[0] as { section: string }
+    expect(sectionArg(0).section).toBe('group:atg_a')
+    expect(sectionArg(1).section).toBe('ungrouped')
+    expect(sectionArg(2).section).toBe('category:报销')
+    expect(sectionArg(3).section).toBe('category:采购')
+  })
+
+  it('drops a category:<name> candidate with zero rows in this org, but keeps one with rows and still renders the always-empty ungrouped bucket', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    listTemplateCategoriesSpy.mockResolvedValue(['报销', '采购'])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'category:采购') {
+        return Promise.resolve({ data: [template('tpl_1', 'Purchase form')], total: 1 })
+      }
+      // 'ungrouped' and 'category:报销' both resolve empty — only the category one is a dropped
+      // candidate; 'ungrouped' is always a real section (see header comment / SectionState.alwaysShow).
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+
+    expect(
+      container!.querySelector('[data-testid="template-group-section-category:报销"]'),
+    ).toBeNull()
+    const purchaseSection = container!.querySelector(
+      '[data-testid="template-group-section-category:采购"]',
+    )
+    expect(purchaseSection).toBeTruthy()
+    expect(purchaseSection!.textContent).toContain('Purchase form')
+    expect(
+      container!.querySelector('[data-testid="template-group-section-ungrouped"]'),
+    ).toBeTruthy()
   })
 })
