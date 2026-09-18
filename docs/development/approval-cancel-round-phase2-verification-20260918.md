@@ -4192,7 +4192,7 @@ disclosure (R1-P3-7) that needed no edit.
 
 | # | Report's one-line claim | Disposition | Where |
 |---|---|---|---|
-| R1-P3-1 | Test titles/comments in the redemption suite still describe the `unrecoverableExpired` DTO/audit-row channel as ABSENT ("carries no channel", "assert its absence as a negative", "goes red the day one is added") when §3.18 already added it and the suite's own runtime assertions are positive — 5 places named, "not guaranteed exhaustive" | **CLOSED-注释.** Mechanical sweep (`git grep -n` for the same negation family across the suite file) found exactly 5 live-claim hits matching the report's count; all 5 fixed in place (suite header, 判据 II title's stale "round id as its operation id" folded in as a 6th same-family fix, the 呈现 case's outer doc-comment intro + "WHAT THIS CASE DOES NOT ESTABLISH" bullet, and the `it()` title). Two adjacent sentences the sweep also matched (账侧 doc-comment bullet (b) ~L1794-1801, and its inline twin ~L1889) were checked and are ALREADY self-consistent — each already carries its own ⛔-marked retraction of the oversold half, added before round-1 even ran; left untouched. No MD table copies these titles verbatim (checked before editing any title string), so no downstream sync was needed. | `packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts` (suite header ~L43-50, 判据 II title ~L971-974, 呈现 case doc-comment ~L2208-2258, `it()` title ~L2262-2266) |
+| R1-P3-1 | Test titles/comments in the redemption suite still describe the `unrecoverableExpired` DTO/audit-row channel as ABSENT ("carries no channel", "assert its absence as a negative", "goes red the day one is added") when §3.18 already added it and the suite's own runtime assertions are positive — 5 places named, "not guaranteed exhaustive" | **CLOSED-注释(含复核修正 2026-09-19).** Mechanical sweep (`git grep -n` for the same negation family across the suite file) found exactly 5 live-claim hits matching the report's count; all 5 fixed in place (suite header, 判据 II title's stale "round id as its operation id" folded in as a 6th same-family fix, the 呈现 case's outer doc-comment intro + "WHAT THIS CASE DOES NOT ESTABLISH" bullet, and the `it()` title). RETRACTED: this row originally also claimed two adjacent sentences the sweep matched (账侧 doc-comment bullet (b), then ~L1794-1801, and its inline twin, then ~L1889) "were checked and are ALREADY self-consistent … left untouched" — that claim was FALSE, not merely unverified. An independent gate diffed both against the production return type (`ApprovalProductService.ts:9015-9017` / `:9141`: `redeemCancelRoundInTxn` returns `{ kind: 'applied'; outcome: CancelRoundCancellationOutcomeV1 }`, not `{ kind: 'applied' }`) and found both sentences, plus the case's own "the DTO negative at the bottom of this case stands" follow-on, directly contradicted it — the return value DOES carry `outcome` (derived from the same W4 `result.response` via `classifyCancelRoundCancellationOutcomeV1`), so nothing is discarded, and the case's own bottom assertion (`outcomeA`) is already a POSITIVE, not a negative left standing. Both spots have now been rewritten to state the production return type accurately (bullet (b) now ~L1800-1812; inline twin now ~L1893-1903), comment-only, zero test-assertion or production-code changes. No MD table copies these titles verbatim (checked before editing any title string), so no downstream sync was needed. | `packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts` (suite header ~L43-50, 判据 II title ~L971-974, 呈现 case doc-comment ~L2208-2258 pre-edit, `it()` title ~L2262-2266 pre-edit); `ApprovalProductService.ts:9015-9017`, `:9141` (production return type, the corrective evidence) |
 | R1-P3-2 | `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` has zero test coverage while both MDs call it "load-bearing"; round-1's own re-review (twice) concluded both drift directions are independently fail-closed elsewhere, so "load-bearing" (implying correctness depends on it) is an overclaim, and recommended softening the wording | **CLOSED-MD** (treated as a retraction, per rule ③: full-branch grep). Both occurrences (design MD §3.2, verification MD §3.9.1) reworded to state it is redundant depth FOR CORRECTNESS (naming the two fail-closed backstops the gate found) but still load-bearing FOR ERROR-CODE PRECISION — neither the original overclaim nor its mirror-image ("not load-bearing at all") survives. `git grep -n "load-bearing"` combined with `SCOPE_CHANGED` across `*.md`/`*.ts`/`*.cjs`/`*.mjs` on the whole branch returns exactly these 2 (now-corrected) lines — zero unqualified hits remain. | `docs/development/approval-cancel-round-phase2-design-20260918.md:196`, `…verification-20260918.md:760` |
 | R1-P3-3 | `deactivateAllActiveAssignments` in the C-3 close (M-6) has zero discriminating power — every approve mode already deactivates the acting seat before the terminal advance, so the mutation stays green; the CODE COMMENT already discloses this accurately ("MEASURED, not assumed... this is defence in depth, not the cause of the released seat") | **CLOSED-MD (already correct; independently reconfirmed, not re-edited).** Read the comment at `ApprovalProductService.ts` (site not touched, per the R2-P3-2 line-stability constraint above) — it states exactly what the gate found, with no overclaim. Nothing to fix; recorded here so the disposition table is complete rather than silently dropping a P3 that turned out to need no action. | `ApprovalProductService.ts` (read-only; site is the `deactivateAllActiveAssignments` call inside the C-3 system-close terminal, per gate's own citation) |
 | R1-P3-4 | The C-3 closure's `getApproval` sits inside `try` (unlike the ordinary bottom-return's, which sits outside `try/finally`), so a throw there could 503-map an already-committed close; round-1's OWN re-review concluded the increment is unreachable (`getApproval` never produces `40001`/`40P01`) and the underlying "committed-yet-reported-failed" exposure is inherited from the pre-existing bottom-return path, not new — "维持 P3" both times | **CLOSED-MD** (reachability note recorded here rather than as a new code comment in `ApprovalProductService.ts`, to avoid re-shifting the line numbers R2-P3-2 just fixed). No test or code change: the gate's own re-review already supplies the closing argument (`isRetryableSqlState` matches only `40001`/`40P01`; `getApproval` takes an independent pooled connection, default READ COMMITTED, pure SELECT, no row lock ⇒ neither SQLSTATE is reachable from it), and it is reproduced verbatim above as the record of why this stays P3 rather than escalating. | verification MD (this section); `ApprovalProductService.ts` read-only |
@@ -4200,7 +4200,7 @@ disclosure (R1-P3-7) that needed no edit.
 | R1-P3-6 | The new `attendance-cancellation-execution-port.ts` port file sits outside all three W7-R10 walked roots; the guard itself is "(future, W7-1)" and has zero effect today | **DEFERRED-owner项.** `w7-w6r5-guard-root-set.ts` is a DIFFERENT, PROPOSED design-lock's artefact (`#4556` attendance W7/W6-R5, `OD-W7-0..10` OPEN owner decisions, status "PROPOSED / runtime HOLD"), explicitly framed as "a point-in-time fact about the W7-0 baseline" (`f364c7f9b3`) rather than a living list. Amending its root set from an unrelated PR (cancel-round C-2) would be registering a cross-line decision this PR has no standing to make, and the guard that would consume a 4th root does not exist yet regardless. Registration belongs to the W7-1 implementer under that line's own OD process; not actioned here. | `packages/core-backend/src/attendance/w7-w6r5-guard-root-set.ts` (not touched) |
 | R1-P3-7 | Reordering the adapter's row locks (lock §3 C-2 global order) changed which 409 message wins under a concurrent double-mutation ("Approval changed…" vs "Request changed…"); same status/code, no test asserts the precedence; round-1's re-review downgraded a P2 candidate to P3 and recommended recording the change rather than pinning a sequential-race test with zero discriminating power | **CLOSED-注释 (already complete; independently reconfirmed, not re-edited).** The adapter already carries a full, accurate disclosure at the exact site ("Behaviour note (disclosed, not buried)... and no test asserts the precedence"), added when the reorder landed. Advisor-reviewed alternative (a sequential test asserting message priority) was rejected: pinning it would need a CONSTRUCTED race to have any discriminating power, and would freeze an ordering the gate itself called incidental (status/code unchanged) — out of budget and out of proportion to what round-1 asked for. | `plugins/plugin-attendance/index.cjs:35118-35123` (read-only) |
 | R1-P3-8 | `CANCEL_ROUND_DISPATCH_CONTENDED`'s only leg (census LEG 6) is a source scan of `dispatchAction`'s catch block; the mapping has zero runtime coverage (self-disclosed in the test's own comment) | **CLOSED-测试**, same "positive format" treatment as R1-P3-5: a closed-world COUNT over the whole `ApprovalProductService.ts` source (not just the sliced `catchBody`) requiring exactly 1 occurrence, so a second throw site elsewhere in the file no longer hides from this leg. Verified by mutation: `toBe(1)`→`toBe(5)` reddens (`expected 1 to be 5`); reverted, `cmp` byte-identical. | same file, LEG 6 (~L1392-1432) |
-| R1-§8 (FE pin) | Round-1 §8's own list of what it deferred includes "前端侧(补充清单第 15 条 FE 同步钉)不在本切片改动面内,未审" — not a P3 finding, but an item the convergence section named and this pass should not silently drop | **DEFERRED-需行为改动.** No FE work exists in this branch to sync a pin against (confirmed: this branch's diff-stat contains no `apps/web` files at any point in its history). Registered so the disposition table is a complete answer to "以及报告收敛要求节", not a partial one. | supplementary checklist item 15 (unactioned, out of this slice's file scope per round-1) |
+| R1-§8 (FE pin) | Round-1 §8's own list of what it deferred includes "前端侧(补充清单第 15 条 FE 同步钉)不在本切片改动面内,未审" — not a P3 finding, but an item the convergence section named and this pass should not silently drop | **CLOSED (复核修正 2026-09-19).** RETRACTED: the parenthetical "confirmed: this branch's diff-stat contains no `apps/web` files at any point in its history" was FALSE — `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- apps/web` shows 3 files (`api.ts`, `batchTransfer.ts`, `approvalBatchTransferView.spec.ts`), all from base-branch (phase-1) commits `a166f5ca0`/`ee5905796`/`f482f97e5`/`c03fdb6c5`. The operational half of round-1's note still holds (THIS slice's OWN diff touches zero `apps/web` files, so there is no FE change here to sync a pin against) — but item 15 itself is not merely out of this slice's scope, it is ALREADY DONE: `ee5905796` (an ancestor of this head) states "Checklist item 15 closed" in its own commit message, and the phase-1 verification MD's Part C (round 4) records the fix, the exact required-lane rerun (`approvalBatchTransferView.spec.ts` 72/72, plus the named-suite required-lane invocation 107/107), and two mutation probes. Nothing here is DEFERRED. | phase-1 verification MD Part C (round 4); `ee5905796` (ancestor of head `d8669db96`); `git diff --stat` cited above |
 | R2-P3-1 | `role-assignment-boundary.test.ts` and `w4c3a-rollout-control-inventory.test.ts` race under `pool: 'forks'` (one writes a scratch file into the source tree, the other globs+reads it at collection time) causing an intermittent `ENOENT` on `test (18.x)`/`test (20.x)`; measured non-deterministic (2 full runs: 1 red/1 green), pre-existing on `main`, gate explicitly recommends filing it separately rather than fixing it in this PR ("否则 one-concern-per-PR 被破") | **DEFERRED-owner项**, per the gate's own explicit recommendation. Not actioned: fixing a cross-suite race is a behavior-adjacent test-infra change (which file writes where, or which file tolerates a vanished path) that deserves its own review, not a hygiene-pass line item. Confirmed still pre-existing: `git diff --quiet origin/main -- <both files>` → both `IDENTICAL-TO-MAIN` on the current (rebased) tip too. | `packages/core-backend/tests/unit/role-assignment-boundary.test.ts:872`, `src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts:145` (neither touched) |
 | R2-P3-2 | `e90a44dbe` inserted 8 lines at `ApprovalProductService.ts:914-921`, one commit after the design MD's own line-number re-derivation pass (§10, pinned to `d462677bd`) — every citation below the insertion in both MDs drifted +8, and the final doc commit never re-pinned; gate recommends converting to `symbol + ~L` anchors (AGENTS.md's own convention for large files) to structurally end the drift class rather than re-pinning a third generation of exact numbers | **CLOSED-MD, for the named citations; the broader sweep is a registered follow-up.** Converted to `symbol/anchor, ~L<n>` form, each number independently re-derived by `grep -n` against the CURRENT tree (not by transcribing round-2's own now-additionally-stale `+8` table): design MD's §3.1 module-scope table (7 symbols), §4.2's `dispatchAction` block, §4.2's "called twice" sentence, §4.3's `bulkReassignApprovals` citation, §4.4's/§5's seam-table rows, §7.1's C-2-success-writer note, §10's own now-twice-stale table (left as an explicitly-labeled `d462677bd`-baseline historical record, per the same "explicit baseline SHA ⇒ not a false claim" reasoning round-2 itself used for P3-2's severity call — plus a new note explaining WHY it drifted again and pointing to the symbol-anchor conversion instead of a third re-pin); and verification MD §3.14.4's outcome-writer table (all 4 rows, not just the 2 the gate quoted — the other 2 in the SAME table were independently found stale by the same `grep -n` re-derivation and fixed for internal consistency). One occurrence was deliberately LEFT AS-IS: §3.20.1's captured `git grep` transcript is genuine historical command output, explicitly labeled with its own baseline (`a02930896`) — editing the code-block content would fabricate a transcript, so it stays as recorded evidence, unlike the live-reference table beside it. **NOT closed**: an independent `grep -noE` sweep of both MDs found roughly 20 additional raw `ApprovalProductService.ts:NNNN` citations outside round-2's named set (e.g. `:8514`, `:8331`, `:10929`, `:9346`, `:4433`…) — spot-checked, several are ALSO stale (this file's drift is not limited to the one +8 insertion round-2 measured; smaller ±2-line drifts predate it). Converting all of them was outside this step's budget; registered as a mechanical, comment/MD-only follow-up with no behavior risk. | `docs/development/approval-cancel-round-phase2-design-20260918.md` (§3.1, §4.2, §4.3, §4.4, §5, §7.1, §10); `…verification-20260918.md` §3.14.4 |
 
@@ -4240,3 +4240,102 @@ kept as measured evidence, not rounded off or omitted. What it proves regardless
 two MD files, two `.db.test.ts` files, zero `src/` files, zero `.cjs`/`.mjs` files, zero migrations,
 zero `plugin-tests.yml` / `ci-realdb-step-contract.mjs` / `ci-wiring` changes — no new or renamed
 test file, so none of those pins move.
+
+---
+
+## 复核修正(2026-09-19)
+
+An independent gate (`p3-hygiene-gate-C2-20260919.md`, head `d8669db9601ae955a878649a8e222e72725d0c8d`)
+re-derived every row this §N section marked CLOSED and found two record-level P2s: both were
+over-strong claims made WHILE closing a row, not omissions.
+
+- **R1-P3-1's "already self-consistent" claim was FALSE.** The row's own text said 账侧 doc-comment
+  bullet (b) and its inline twin "were checked and are ALREADY self-consistent … left untouched."
+  Diffed against the production return type (`ApprovalProductService.ts:9015-9017` / `:9141`:
+  `redeemCancelRoundInTxn` returns `{ kind: 'applied'; outcome: CancelRoundCancellationOutcomeV1 }`,
+  never a bare `{ kind: 'applied' }`), both sentences were directly contradicted — the return value
+  DOES carry `outcome` (derived from the same `result.response` via
+  `classifyCancelRoundCancellationOutcomeV1`), so nothing is discarded, and the redemption case's own
+  bottom assertion (`outcomeA`, `redemption.db.test.ts:2204-2213`, re-derived by `grep -n
+  "expect(outcomeA?.status)"` against the current tree — not copied from the gate report's pre-edit
+  `:2193-2202`) is already POSITIVE, not a "DTO negative" left standing. Both spots are now
+  rewritten to state the production return type accurately (bullet (b) now `~L1800-1812`; inline
+  twin now `~L1893-1903`, both re-derived post-edit, not the pre-edit `~L1794-1801`/`~L1889` the
+  gate cited); comment-only, zero test-assertion changes. Row updated to CLOSED-注释(含复核修正).
+- **R1-§8's "confirmed" claim was FALSE.** The row said "confirmed: this branch's diff-stat contains
+  no `apps/web` files at any point in its history." `git diff --stat $(git merge-base origin/main
+  HEAD)..HEAD -- apps/web` shows 3 files (`api.ts`, `batchTransfer.ts`,
+  `approvalBatchTransferView.spec.ts`) from base-branch (phase-1) commits — the claim conflated "this
+  slice's own diff" (true, and still the operative reason apps/web is untouched HERE) with "this
+  branch's entire history" (false). Worse, the item the row DEFERRED — supplementary checklist item
+  15 — was already closed on the base branch: `ee5905796` (an ancestor of this head) states
+  "Checklist item 15 closed" in its own commit message, and the phase-1 verification MD's Part C
+  (round 4) records the fix, the required-lane rerun, and two mutation probes. Row updated to
+  CLOSED, citing Part C and `ee5905796` in place of the retracted "confirmed" parenthetical.
+
+**Retraction sweep for this pass — hits classified by line, not a bare "0 hits" claim.** Both
+disposition-table rows above QUOTE the retracted phrases as evidence (naming what was wrong is the
+point of a retraction), so a mechanical sweep for those same phrases necessarily re-matches this
+document's own retraction narrative. Asserting "0 hits" here would repeat the exact defect the
+gate's P3-3 finding named against the prior round ("记下的数字在 head 上不可复现"). Run against the
+working tree with this section's text in place:
+
+```
+$ git grep -n "has no channel for it\|returns \`{ kind: 'applied' }\`\|is DISCARDED on that path\|no RETURN-VALUE counterpart\|DTO negative at the bottom" -- '*.ts' '*.md'
+```
+
+Matches: the R1-P3-1 disposition-table row (`:4195`, quoting "the DTO negative at the bottom of this
+case stands" as the retracted phrase) and this §复核修正 section's own retraction prose above (which
+quotes the same phrase for the same reason). No other match anywhere in the tree.
+
+```
+$ git grep -n "at any point in its history\|no apps/web files\|contains no \`apps/web\`" -- '*.ts' '*.md'
+```
+
+Matches: the R1-§8 disposition-table row (`:4203`, quoting the retracted "confirmed: … at any point
+in its history" parenthetical) and this section's own retraction prose above (same reason). No other
+match anywhere in the tree.
+
+**Confirmed against the one file that actually carried the two live claims** —
+`packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts` — scoping
+either grep to just that file returns no output, i.e. the file the false claims described is now
+clean of them:
+
+```
+$ git grep -n "has no channel for it\|returns \`{ kind: 'applied' }\`\|is DISCARDED on that path\|no RETURN-VALUE counterpart\|DTO negative at the bottom\|at any point in its history\|no apps/web files\|contains no \`apps/web\`" -- packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+(no output)
+```
+
+Every match that exists lives inside this MD's own retraction record (the two disposition-table rows
+and this section), never inside the test file the claims were originally about, and never asserted
+as a live, standing claim anywhere. Because this section quotes the retracted phrases verbatim by
+design, further wording passes over it can add or move self-matches inside this same paragraph
+without that being a regression — the invariant checked is "no LIVE occurrence outside this
+retraction record", not "zero raw string matches in the repo".
+
+**`git diff --numstat` against this pass's starting head** (comment/MD only — no `src/`, no
+test-assertion lines, no migrations):
+
+```
+$ git diff --numstat d8669db9601ae955a878649a8e222e72725d0c8d
+96      2       docs/development/approval-cancel-round-phase2-verification-20260918.md
+23      13      packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+⚠️ **Self-reference, disclosed rather than papered over** (same shape the previous pass used, directly
+above this section): this §复核修正 section's own insertion is counted inside the
+`…verification-20260918.md` line above (96/2 as measured when this line was last written; the 2
+deletions are the two disposition-table rows' original text, the 96 insertions are their replacements
+plus this entire §复核修正 section), so the exact insertion count moves with any further wording pass
+over this section and is not chaseable to a fixed point without omitting real content — the number is
+kept as measured evidence, not rounded off. What it proves regardless of its exact value: still only
+these two files (`git status --porcelain` names no third file), zero `src/`, zero migrations, zero
+CI-wiring. The `.db.test.ts` file's count (`23 13`) is independent of this MD-only section and does
+NOT move from further wording passes here.
+
+**Verification run, virgin private DB `metasheet2_p2fix_20260919` (dropped after)**: `db:migrate`
+exit 0; `tsc --noEmit -p tsconfig.json` clean; `vitest --config vitest.integration.config.ts run
+tests/integration/approval-cancel-round-redemption.db.test.ts` → **18 passed | 1 skipped (19)**,
+unchanged from before the comment fix (the 1 skip is pre-existing and unrelated). No other file in
+the branch diff was touched by this pass, so the census/outlet-guards mutation probes (M-A/M-B) and
+the full real-DB/unit/type-check lanes from the previous pass's evidence stand unchanged.
