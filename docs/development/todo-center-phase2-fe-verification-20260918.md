@@ -514,7 +514,162 @@ $ git status --porcelain
 (`routes/approvals.ts` 的一行 ` M` 就是 10.1 节那一处 `export` 加法,不是 mutation 7 没还原干净——
 mutation 7 的 `cmp` 已在 §10.3 单独确认过字节相同。)
 
-### 10.6 本轮未处理
+### 10.6 本轮未处理(修复轮 2 已使这条部分过期,见 §11 开头的更正)
 
 门审十项发现(1 P1 + 1 P2 + 8 P3)里的八条 P3(P3-1 已通过 10 节开头的更正部分处理;P3-2~P3-8 未动,留给下一轮或 owner
-排期,如实列出,不在本轮声称交付)。
+排期,如实列出,不在本轮声称交付)。**更正(修复轮 2,20260918)**:本行「P3-2~P3-8 未动」在 P3-4/P3-5/P3-6 三条上已不成立——见 §11。仍未动的是 P3-2/P3-3/P3-7/P3-8 四条(§11.4)。
+
+## 11. 修复轮 2(20260918)—— 关闭 P3-4、P3-5、P3-6
+
+被审 head 与本节起点:`c31f928a6`(修复轮 1 的提交,已合入本分支)。本节选取门审十项发现里剩余八条 P3
+中的三条:**P3-4**(`isTodoResponseDegraded`「徽标与中心页共用」的过强断言)、**P3-5**
+(`resetSessionBootstrap`「4 处调用点」少算一处)、**P3-6**(中心页 `item.href` 交给 `router-link`
+前零校验)。其余四条(P3-2/P3-3/P3-7/P3-8)本轮未动,见 §11.4。
+
+### 11.1 P3-6 —— `TodoCenterView.vue` 的 href 守卫(唯一有行为改动的一条)
+
+**改了什么**:`apps/web/src/todo/views/TodoCenterView.vue` 新增组件本地(未导出)的
+`isSameOriginRelativeHref(href): boolean` 谓词——要求 `href` 以单个 `/` 开头(非 `//`、非 `/\`),且
+第一个 `/`/`?`/`#` 之前不含 URL scheme(如 `javascript:`、`https:`)。`applyResult()` 里对每个 item
+计算一次 `navigable` 字段(不在模板里逐次重算);模板对 `!item.navigable` 的行渲染为不可点击的
+`<span data-testid="todo-center-item-unlinkable">`(标题 + 判据 C′ pill 照常渲染),否则维持原有
+`<router-link>`。命中时 `console.error` 一条,使异常可被发现而非静默吞掉。
+
+**不是什么修复,如实澄清(避免重犯门审点名的过强声明同类错误)**:这**不是**开放重定向修复——
+`router-link` 的 `:to` 把收到的字符串当**内部路由路径**用 `router.resolve` 解析,从不会让浏览器跳转
+到任意 URL,所以站外/绝对地址本身进不了这条攻击面。真正的失效模式是**静默**:一个不是路由形状的
+字符串会解析成 no-op 或损坏路由,该行看起来仍是可点击链接,点击却什么都不发生。锁 §4 字面(「点击
+`href` 导航」)描述的是导航机制本身发生时的样子,没有规定「每一行必须渲染成链接」——所以本次选择的
+修法是把不合法的行渲染成惰性文本,不是「阻止导航」。
+
+**当前生产人口**:`approval-pending-source.ts:34-36`(`approvalItemHref`)今天只产出
+`/approvals/<id>` 形状,天然合法——本条是防御性的,面向锁 §2「中心替换/推广该徽标」之后未来注册的
+第二个来源,不是修一个已观测到的生产 bug(如实标注,不夸大紧迫性)。
+
+**测试**(`apps/web/tests/TodoCenterView.spec.ts` 新增 1 条用例,文件本身已在
+`run-required-web-tests.sh` 的令牌名单与 `approval-web-guard.yml` 两处 `paths:`/exec 行内——两点接线
+不适用于本轮,未新增 spec 文件、未改该脚本):
+```
+$ cd apps/web && npx vitest run TodoCenterView --reporter=verbose
+ ✓ ...renders a malformed (non-site-relative) href as an inert row, not a link that would silently fail to navigate
+ Test Files  1 passed (1) / Tests  11 passed (11)
+```
+断言方式:对站外 URL / 协议相对 URL / `javascript:` 三种畸形 href,断言 stub `router-link` 自己的
+标记属性 `data-router-link-to` 缺失(不是只查 `data-testid` 缺失——防止「留着 router-link、只删
+testid」这类更弱的 mutant 逃过);同时断言合法的第四条 item 仍渲染出恰好一个
+`data-router-link-to`。**测试能证明什么、不能证明什么,如实说明**:spec 里的 `router-link` 是
+`mountView()`(`:93-98`)里的桩件——纯 `<a :href>`,不是真实 vue-router——所以这条用例证明的是「本组件
+自己的谓词命中时确实不渲染 anchor」,**不能**证明真实 vue-router 在这类字符串上到底会不会解析成
+no-op 路由;那半句仍是文件级注释里陈述的推理,不是本轮另跑真实 router 验证过的事实。
+
+**Mutation(两个方向,`cp` 备份 → 改 → 单独跑该 spec 文件 → 观察 → `cp` 还原 → `cmp`)**:
+- **方向 A(谓词失效,永远放行)**:`isSameOriginRelativeHref` 改成永远 `return true`。
+  ```
+  $ npx vitest run TodoCenterView --reporter=verbose
+   × renders a malformed (non-site-relative) href as an inert row...
+   Test Files  1 failed (1) / Tests  1 failed | 10 passed (11)
+  ```
+  精确命中新用例,其余十条(含正常 href 的用例)不受影响——`cp` 还原,`cmp` 字节相同。
+- **方向 B(谓词过宽,永远拒绝)**——防止「谓词写得比命名场景窄但依然让新用例通过」这类假阳性
+  (`feedback_fixture_shape_must_match_named_scenario`):`isSameOriginRelativeHref` 改成永远
+  `return false`。
+  ```
+  $ npx vitest run TodoCenterView --reporter=verbose
+   × renders an ok source's items, each linking to its href
+   × renders a view-only pill for actionable:false, and no pill when actionable is absent or true
+   × renders a malformed (non-site-relative) href as an inert row...
+   Test Files  1 failed (1) / Tests  3 failed | 8 passed (11)
+  ```
+  两条**既有**(非本轮新增)用例连带转红,证明谓词不是「过宽到吞掉一切都能蒙混过关」——`cp` 还原,
+  `cmp` 字节相同。
+- 两次还原后 `git status --porcelain` 只剩本轮意图改动的四个路径(见 §11.5),无 mutation 残留。
+
+### 11.2 P3-4 —— `isTodoResponseDegraded`「徽标与中心页共用」的过强断言(两处文档字符串,均改)
+
+**位置与事实**:`apps/web/src/todo/api.ts:60-65`(函数自身文档字符串)与
+`apps/web/src/approvals/components/ApprovalTodoBadge.vue:35-37`(文件头 WHAT-IT-REUSES 段)都写着
+「badge 和 center page 共用同一条规则」。机核:
+```
+$ grep -n "isTodoResponseDegraded\|from '\.\./api'" apps/web/src/todo/views/TodoCenterView.vue
+132:import { getTodoItems, type PendingItem, type PendingSourceStatus, type TodoItemsResponse } from '../api'
+```
+`TodoCenterView.vue` 只导入三个类型和 `getTodoItems`,**不**导入这个函数,也不导入
+`TodoCountResponse`;其自身的 `TodoItemsResponse` 没有 `degraded` 字段——两处「共用」断言均为假,
+已在两处原地改写(不删旧结论所在段落,标注 CORRECTED + 本轮门审编号)。
+
+**改写后的准确说法,避免走向另一个极端(「零关联」同样是过强声明)**:中心页确实实现了**同一条规则
+的另一半**——它在 `applyResult()` 里把 `response.sources[source]` 逐源原样渲染成
+`unavailable`/`ok` 两态,这正是 `isTodoResponseDegraded` 里「任一来源 unavailable ⇒ 视为不可信」
+那一半判断,只是按来源展开而非折叠成一个布尔值(徽标渲染一个数字,需要一个布尔;中心页渲染分组,需要
+按来源展开)。锁 §3「中心不得另造第二套判断」约束的是**规则本身不得分叉**,不是「每个调用点必须共用
+同一个函数名」——中心页读的 `sources[source]` 与该函数读的 `sources` 是同一份数据、同一条语义,未
+分叉。
+
+本条为纯文档字符串改动,无行为变化,不新增测试(无可测的行为);`git diff` 只命中注释文本。
+
+### 11.3 P3-5 —— `resetSessionBootstrap`「4 处调用点」少算一处
+
+**位置**:`ApprovalTodoBadge.vue:66-67`(`TodoCenterView.vue` 对同一机制只写「见 badge 文件的文档
+字符串」,未独立复述这个数字,因此只改了 badge 一处源码——门审报告原句「两个 .vue 的文档字符串」指的
+是两个文件都在讨论这条机制,不是两个文件都各自复述了错误的「4」这个数字,已核对):
+```
+$ cd apps/web && grep -n 'resetSessionBootstrap(' src/composables/useAuth.ts
+77:      resetSessionBootstrap(true, false, true)
+123:function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false, preserveExplicitSession = false) {
+234:    resetSessionBootstrap(false, false, true)
+249:    resetSessionBootstrap(true, true, true)
+301:    resetSessionBootstrap(true, false, true)
+412:      resetSessionBootstrap(true)
+```
+6 处命中,1 处(`:123`)是函数自身声明,5 处是调用点。原文档字符串写「4 call sites: setToken,
+clearToken, setExplicitSessionOrg, and the forced-relogin branch inside bootstrapSession」——漏掉
+`:77`(`observeExplicitSessionStorage` 内的跨标签页 `storage` 事件监听器)。已原地改写为逐一点名
+5 处 + 各自行号,并注明这条结论(该监听器调用的是同一个 `resetSessionBootstrap` → 同一个
+`notifyAuthPrincipalChange()`,不改变本文件判据 E 已覆盖的结论)不受影响。纯文档字符串改动,无
+行为变化,不新增测试。
+
+### 11.4 本轮未处理
+
+门审剩余 P3 里的四条本轮仍未动,如实列出(不在本轮声称交付):
+- **P3-2**(`approval-web-guard.yml` 「no duplicates」断言按字面不成立):未改该 YAML 文件——改
+  workflow 注释文本不在本轮选择的两条之内,留给下一轮或 owner 排期。
+- **P3-3**(每个审批动作新增一次每用户查询、连接池压放大 +33% 的成本未记账):文档记账项,未落。
+- **P3-7**(`todo:counts-updated` 房间/负载是否按 org 隔离未核):需要新的调查,未做。
+- **P3-8**(导航入口的范围扩张自陈是否写进 PR body):PR body 撰写项,Draft PR 尚未开出,未做。
+
+### 11.5 重跑的闸(本轮改动只在 apps/web,零后端 diff)
+
+```
+$ git diff --stat c31f928a6..HEAD
+ apps/web/src/approvals/components/ApprovalTodoBadge.vue |  22 +++++--
+ apps/web/src/todo/api.ts                                 |  21 +++++--
+ apps/web/src/todo/views/TodoCenterView.vue                |  69 +++++++++++++++++++++-
+ apps/web/tests/TodoCenterView.spec.ts                      |  38 ++++++++++++
+ 4 files changed, 138 insertions(+), 12 deletions(-)
+```
+零 `packages/core-backend` 改动 ⇒ 本轮未重跑后端真库套件(§7 项 5),那些证据仍以修复轮 1 的重跑
+为准(未受本轮影响,因为本轮没碰后端任何文件)。
+
+```
+$ cd apps/web && npx vitest run approvalNavTodoBadge TodoCenterView todoApi todoCountsRealtime tests/App.spec.ts tests/useAuth.spec.ts --reporter=dot
+ Test Files  6 passed (6) / Tests  90 passed (90)     ← 89 → 90,恰好 +1(新用例)
+
+$ cd apps/web && npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
+ Test Files  4 passed (4) / Tests  63 passed (63)
+
+$ pnpm type-check     # 全仓,含 apps/web vue-tsc -b + 两个 verification tsconfig + core-backend tsc --noEmit
+EXIT=0(core-backend: Done;apps/web: Done)
+
+$ sed -n '1006p' .github/workflows/approval-web-guard.yml | sed 's/^ *run: //' | bash -c "$(cat)"   # CI 步骤字面重跑
+ Test Files  104 passed (104)
+      Tests  1959 passed (1959)     ← 1958 → 1959,恰好 +1
+```
+两条 mutation(§11.1)各自 `cp` 备份 → 改 → 单独跑 `TodoCenterView` → 观察 → `cp` 还原 → `cmp` 字节
+相同;还原后 `git status --porcelain` 只剩本轮四个意图改动路径:
+```
+$ git status --porcelain
+ M apps/web/src/approvals/components/ApprovalTodoBadge.vue
+ M apps/web/src/todo/api.ts
+ M apps/web/src/todo/views/TodoCenterView.vue
+ M apps/web/tests/TodoCenterView.spec.ts
+```

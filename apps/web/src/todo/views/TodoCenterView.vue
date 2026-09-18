@@ -39,7 +39,24 @@
         </p>
         <ul v-else class="todo-center__items">
           <li v-for="item in group.items" :key="item.id" class="todo-center__item">
-            <router-link :to="item.href" class="todo-center__item-link" data-testid="todo-center-item">
+            <!-- P3-6 (gate `impl-gate-B2-round1-20260918.md`): a source-produced href that is not a
+                 site-relative path renders INERT (this branch), never a `<router-link>` that would
+                 silently resolve to a no-op/broken route — see `isSameOriginRelativeHref`'s docblock
+                 below for why this is not an open-redirect fix (`router-link` never treats the string
+                 as a URL to follow). -->
+            <span
+              v-if="!item.navigable"
+              class="todo-center__item-link todo-center__item-link--unlinkable"
+              data-testid="todo-center-item-unlinkable"
+            >
+              <span class="todo-center__item-title">{{ item.title }}</span>
+              <span
+                v-if="item.actionable === false"
+                class="todo-center__pill todo-center__pill--view-only"
+                data-testid="todo-center-item-view-only"
+              >{{ isZh ? '仅查看' : 'View only' }}</span>
+            </span>
+            <router-link v-else :to="item.href" class="todo-center__item-link" data-testid="todo-center-item">
               <span class="todo-center__item-title">{{ item.title }}</span>
               <!-- 判据 C′: an item the viewer cannot currently act on renders visibly differently
                    from an actionable one (a view-only pill), never the same shape. Absent when the
@@ -128,16 +145,48 @@
 // setup would not be isolated to this route the way the badge's throw is isolated to the nav — it
 // would propagate up uncaught. Losing it degrades the page to "loads once on mount and on auth
 // transitions", which is still a correct, honest page.
+//
+// HREF GUARD (fix round 2, gate `impl-gate-B2-round1-20260918.md` P3-6): `approval-pending-source.ts`
+// only ever produces `/approvals/<id>` today, so this is defensive, not a fix for an observed
+// production bug — but the lock leaves `href`'s shape unconstrained for any FUTURE source
+// registered ahead of this one. This is NOT an open-redirect fix: `router-link`'s `:to` resolves
+// whatever string it is given as an internal ROUTE PATH via `router.resolve`, it never navigates
+// the browser to an arbitrary URL, so an absolute/off-site href cannot make this page leave the
+// site. The actual failure mode is SILENCE — a non-route-shaped string resolves to a no-op or a
+// broken route, and the row still looks like a normal, clickable link. Lock §4's literal text
+// ("点击 `href` 导航") describes the navigation mechanism when it happens; it does not require every
+// row to render as a link, so a malformed href renders the row INERT (no `<router-link>`, see
+// template) plus a `console.error` so the condition is discoverable — never a link that quietly
+// does nothing on click.
 import { onMounted, onUnmounted, ref } from 'vue'
 import { getTodoItems, type PendingItem, type PendingSourceStatus, type TodoItemsResponse } from '../api'
 import { useLocale } from '../../composables/useLocale'
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useTodoCountsRealtime, type TodoCountsUpdatedPayload } from '../useTodoCountsRealtime'
 
+interface RenderableItem extends PendingItem {
+  // Precomputed once per `applyResult()` call (not re-evaluated per render in the template) —
+  // whether `href` is safe to hand to `router-link`. See the HREF GUARD file-level note.
+  navigable: boolean
+}
+
 interface TodoGroup {
   source: string
   status: PendingSourceStatus
-  items: PendingItem[]
+  items: RenderableItem[]
+}
+
+// A site-relative path: starts with exactly one leading `/` (not `//`, which a browser/router can
+// treat as protocol-relative), not a backslash variant of the same trick, and carries no URL scheme
+// (`javascript:`, `https:`, ...) before its first `/`/`?`/`#` — rejected defensively even though
+// `router-link` would not execute it as a URL. Local to this component: it is not exported, and it
+// is not the shared `isTodoResponseDegraded`-style rule the badge and this page both apply — this
+// page is the only consumer of `item.href`, so there is nothing to centralize (see `todo/api.ts`'s
+// corrected docblock for the sibling mistake of overclaiming a shared rule that had only one user).
+function isSameOriginRelativeHref(href: string): boolean {
+  if (typeof href !== 'string' || href.length === 0) return false
+  if (!href.startsWith('/') || href.startsWith('//') || href.startsWith('/\\')) return false
+  return !/^\/[^/?#]*:/.test(href)
 }
 
 const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批' }
@@ -177,7 +226,16 @@ function applyResult(response: TodoItemsResponse | null): void {
   groups.value = Object.entries(response.sources).map(([source, status]) => ({
     source,
     status,
-    items: response.items.filter((item) => item.source === source),
+    items: response.items
+      .filter((item) => item.source === source)
+      .map((item) => {
+        const navigable = isSameOriginRelativeHref(item.href)
+        if (!navigable) {
+          // Discoverable, not silent — see HREF GUARD file-level note.
+          console.error(`[todo-center] source "${source}" produced a non-site-relative href; rendering item "${item.id}" inert instead of linking to it: ${item.href}`)
+        }
+        return { ...item, navigable }
+      }),
   }))
 }
 
@@ -301,6 +359,11 @@ defineExpose({ refresh })
   padding: 10px 4px;
   text-decoration: none;
   color: inherit;
+}
+
+.todo-center__item-link--unlinkable {
+  color: var(--el-text-color-secondary, #666);
+  cursor: default;
 }
 
 .todo-center__pill {

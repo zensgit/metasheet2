@@ -180,6 +180,44 @@ describe('todo center view', () => {
     expect(byHref('/approvals/no-notion')?.querySelector('[data-testid="todo-center-item-view-only"]')).toBeNull()
   })
 
+  // P3-6 (gate `impl-gate-B2-round1-20260918.md`): `approvalItemHref` only ever emits
+  // `/approvals/<id>` today — these hrefs are synthetic, standing in for a hypothetical future
+  // source. The stub `router-link` here is a plain `<a :href>` (see `mountView` above), so this
+  // proves the component's OWN predicate fires and withholds the anchor for a non-site-relative
+  // href — it does not, and cannot, prove anything about real vue-router's runtime behavior on
+  // such a string.
+  it('renders a malformed (non-site-relative) href as an inert row, not a link that would silently fail to navigate', async () => {
+    getTodoItemsSpy.mockResolvedValue({
+      items: [
+        { source: 'approval', id: 'off-site', title: '站外地址', href: 'https://evil.example.com/x', updatedAt: '2026-09-18T00:00:00.000Z' },
+        { source: 'approval', id: 'protocol-relative', title: '协议相对', href: '//evil.example.com/x', updatedAt: '2026-09-18T00:00:00.000Z' },
+        { source: 'approval', id: 'scheme', title: '危险协议', href: 'javascript:alert(1)', updatedAt: '2026-09-18T00:00:00.000Z' },
+        { source: 'approval', id: 'ok-one', title: '正常条目', href: '/approvals/ok-one', updatedAt: '2026-09-18T00:00:00.000Z' },
+      ],
+      sources: { approval: 'ok' },
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const root = await mountView()
+    const group = groupOf(root, 'approval')
+    // Assert absence via the stub's own marker (`data-router-link-to`), not merely a missing
+    // `data-testid`, so a mutant that keeps the router-link but drops only the testid would still
+    // be caught.
+    const links = Array.from(group?.querySelectorAll('[data-router-link-to]') ?? [])
+    const inertRows = Array.from(group?.querySelectorAll('[data-testid="todo-center-item-unlinkable"]') ?? [])
+
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute('data-router-link-to')).toBe('/approvals/ok-one')
+    expect(inertRows).toHaveLength(3)
+    expect(inertRows.map((el) => el.textContent).join('|')).toContain('站外地址')
+    expect(inertRows.map((el) => el.textContent).join('|')).toContain('协议相对')
+    expect(inertRows.map((el) => el.textContent).join('|')).toContain('危险协议')
+    // Not silent: each malformed href is logged, not swallowed.
+    expect(errorSpy).toHaveBeenCalledTimes(3)
+
+    errorSpy.mockRestore()
+  })
+
   it('renders a page-level load-failed state (distinct from any per-source unavailable group) when the read throws', async () => {
     getTodoItemsSpy.mockRejectedValue(new Error('network down'))
 
