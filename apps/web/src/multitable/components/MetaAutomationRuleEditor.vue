@@ -140,8 +140,8 @@
             />
             <div class="meta-rule-editor__hint" data-field="webhookEndpointHint">
               {{ isZh
-                ? `保存后向 POST /api/multitable/automation/webhooks/${props.rule?.id || '<规则ID>'} 发送 JSON 对象请求；请求头需携带 X-MS-Webhook-Timestamp（Unix 秒）与 X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "时间戳.请求体")，时间戳新鲜窗口 ±300 秒。密钥保存后只写不读（读取接口返回打码值）。`
-                : `After saving, POST a JSON object to /api/multitable/automation/webhooks/${props.rule?.id || '<ruleId>'} with X-MS-Webhook-Timestamp (unix seconds) and X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "timestamp.body"); freshness window is ±300s. The secret is write-only after save (reads return a redacted value).` }}
+                ? `调用方须持有效会话 JWT（Authorization: Bearer <token>）——匿名调用会被全局会话门拒绝（401）。保存后向 POST /api/multitable/automation/webhooks/${props.rule?.id || '<规则ID>'} 发送 JSON 对象请求；请求头需携带 X-MS-Webhook-Timestamp（Unix 秒）与 X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "时间戳.请求体")，时间戳新鲜窗口 ±300 秒。密钥保存后只写不读（读取接口返回打码值）。`
+                : `The caller must present a valid session JWT (Authorization: Bearer <token>) — anonymous calls are rejected (401) by the global session gate. After saving, POST a JSON object to /api/multitable/automation/webhooks/${props.rule?.id || '<ruleId>'} with X-MS-Webhook-Timestamp (unix seconds) and X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "timestamp.body"); freshness window is ±300s. The secret is write-only after save (reads return a redacted value).` }}
             </div>
           </template>
 

@@ -4534,6 +4534,9 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saveBtn.disabled).toBe(true)
     expect(container.querySelector('[data-field="webhookEndpointHint"]')?.textContent)
       .toContain('/api/multitable/automation/webhooks/')
+    // TRG-02 closeout: hint must state the session-JWT requirement, not just HMAC/timestamp.
+    expect(container.querySelector('[data-field="webhookEndpointHint"]')?.textContent)
+      .toContain('session JWT')
 
     const secretInput = container.querySelector('[data-field="webhookSecret"]') as HTMLInputElement
     secretInput.value = '  s3cret-1  '
