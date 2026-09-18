@@ -370,7 +370,7 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
    - **O1**:三张批次表是锁 §2 之外的新表(锁文外 DDL)——建议采纳提案形状,Draft only。
    - **O2**:`atg_name_nonblank CHECK` 拒绝纯中文组名,是 A-1/#5852 上的活缺陷——A-3 在 owner ratify 该勘误前,对纯中文 category **功能性惰性**(诚实披露,见设计 MD 抬头块第 2 条)。
    - **O3**:preview/批次列表端点挂 `approvalTemplateAdminGuard`(偏离 I7 字面读/写二分)——建议按默认值,需 owner 一句话确认。
-7. **跨 lane 项,部分已随修复轮 1 解决**(设计 MD §13.5):A-1 Draft PR #5852 的"0 P1"结论需要因 P1-3(CJK 组名裸 `DatabaseError`,O2)重新求值——**这一半仍然开放**,是对另一个 Draft PR 的回流,本分支无权改 A-1 已落地代码。changesRequired #16 后半(guard⊋manager 的过强注释,`routes/approvals.ts:396-399`)**这一半已在修复轮 1 解决**——不是本分支现场改写 A-1 代码,而是 A-1 自己的第 4/5 轮门审已把这条注释真库证伪并重写(`f7b929700`),本分支第二次 `git rebase origin/feat/approval-template-groups-phase1`(2026-09-18)把该修复原样带入本树;详见 §7。
+7. **跨 lane 项,部分已随修复轮 1 解决,一处状态断言已被后续 rebase 更新**(设计 MD §13.5):A-1 Draft PR #5852 的"0 P1"结论需要因 P1-3(CJK 组名裸 `DatabaseError`,O2)重新求值——**这一半仍然开放**,是对另一个 Draft PR 的回流,本分支无权改 A-1 已落地代码。changesRequired #16 后半(`routes/approvals.ts:396-399` 的过强注释)——不是本分支现场改写 A-1 代码,而是 A-1 自己陆续多轮门审在真库证伪并重写这条注释:第 4/5 轮(`f7b929700`)先把"通配权限码单独过 guard"这条腿证伪,本分支第二次 rebase 时原样带入本树;第 6/7 轮(`3e53c52fe`)又进一步证伪了"guard ⊋ manager(严格超集)"这个结论本身,发现两个人口是**互不包含**(反方向反例:持 `approval-templates:manage` 但未过 namespace admission 的主体被 guard 403 却被 `isTemplateManager` 判成 manager),本分支**第三次** rebase(2026-09-18,到 `a728ed655`)已把这条修复原样带入本树。**这一半不是"已解决后维持不变",而是"随 A-1 的证伪推进被反复重写,当前树已是最新版本"**——本文档 §9 记录第三次 rebase 的 git 力学,§7.3 本节及 §13.6(设计 MD)已按互不包含改写措辞。
 8. **A-1 两个既有真库文件(`lifecycle`/`serialization`)未被任何 `*-ci-wiring.test.mjs` 覆盖**(P3-2 残留,本切片新增的五个文件继承同样的闭世界残留形态,不是本切片引入的新缺口,但也未被本切片修复)。
 9. **一个非 manager 管理员执行 backfill 时,批次头不记录"只覆盖了部分模板"**(设计 MD §19.4 新披露 2):修法需要给批次头加列,超出本步范围(且需要新 DDL,不在本步动)。
 
@@ -410,7 +410,7 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
    ```
    11 个模式全部跑过。逐条读过命中的完整句子(不是只看 grep 片段)后分类:
    - **本 lane 文件里唯二的「present-tense 现在时事实」命中**(门审判定规则的类别 2,活缺陷):`approval-template-groups-phase2-backfill-design-20260918.md:440`(§13 changesRequired #8/Q2 现场标注段,原文"持 `approval-templates:*` 或走 DB 侧 `isAdmin(userId)` 的主体过 guard 但非 manager"把已证伪的通配腿当成第二条成立的反例)与 `:586`(§13.6 Draft PR body 必写清单,changesRequired #16 一行,原文"两类主体过 guard 但非 manager")——逐字匹配门审 §5 后果 (b) 点名的两处。
-   - 已重写为:guard ⊋ manager 结论不变,但**只标注一条被端到端实测支撑的腿**(DB 侧 `isAdmin`),通配腿改写成"该腿在 phase1 第 2/4 轮门审各端到端真库证伪一次,全仓真实授予计数 0,今天不存在可达形式"。
+   - 已重写为:guard ⊋ manager 结论不变,但**只标注一条被端到端实测支撑的腿**(DB 侧 `isAdmin`),通配腿改写成"该腿在 phase1 第 2/4 轮门审各端到端真库证伪一次,全仓真实授予计数 0,今天不存在可达形式"。**求值(2026-09-18,第三次 rebase 后,记忆 `feedback_supersession_marker_must_evaluate_not_void`)**:这句"guard ⊋ manager 结论不变"本身已被 phase1 第 6/7 轮门审(`3e53c52fe`)进一步证伪——两个人口是**互不包含**,不是严格超集:反方向的实测反例是持 `approval-templates:manage` 权限码但未过 namespace admission 合取项的主体,被 `isTemplateManager` 精确 `.includes()` 判成 manager,却被 `rbacGuardAny` 拒绝(403)。本条目下面记录的"只标注一条腿"这个动作本身仍然如实(那是当时唯一已知的实测反例),但它的结论句已经过期,不得再引用"guard ⊋ manager 结论不变"这半句作为今天成立的事实;当前状态见 §13.4/§13.6(设计 MD)与本文档 §9。
    - 重写后重跑同一脚本确认这两处不再落入类别 2(现摘录,完整命中见 `/tmp/atg-sweep-after.txt`):
      ```
      $ bash scripts/dev/atg-retraction-sweep.sh > /tmp/atg-sweep-after.txt 2>&1
@@ -688,3 +688,32 @@ exit 0,零输出。
 ### 9.5 结论
 
 rebase 零冲突、range-diff 证明本 lane 35 个提交内容逐一不变、私有库 `metasheet2_lock_a3_rb` 上本 lane 7 个真库文件与 tsc 均绿、三条 required 逐字复现全绿(仓根 type-check 13/13、core-backend 全量 932 文件/14722 用例、apps/web required 网关 465 文件/7164 用例,零失败)。rebase 后 HEAD:`64b1261da20fc3f9632eac6a567d882f38377723`。
+
+## 10. 修复轮 3 处置(`impl-gate-A3-round2-20260918.md` §7 点名"开 PR 前必修"的记录级项,2026-09-18)
+
+**范围声明**:本轮只改 MD 散文与代码注释,**零代码行为改动**(不改任何可执行语句、SQL、正则、类型)。处置该门审报告 §7 的四条(编号按该报告原文):第 1 条(P3-1,最高优先级)、第 2 条(P3-2)、第 4 条(P3-4)、第 5 条(P3-5)。第 3 条(P3-3,验收 E 终态腿)与第 6 条(新发现,`atgbb_org_nonblank` 声明未测)本轮不处理,如实留在 §5 项 1 / §7(round1 disposition)。
+
+### 10.1 P3-1(最高优先级)——lane 自有 MD 的"guard ⊋ manager"过强断言,改写为"互不包含,两方向各一条反例"
+
+**背景**:门审报告 §3 发现,A-1 phase1 第 6/7 轮门审(commit `3e53c52fe`)在本 lane 上一次 rebase(第二次,到 `a789422b5`)之后,进一步证伪了"guard ⊋ manager(严格超集)"这个结论本身——两个人口是**互不包含**,新增的反方向反例是:持 `approval-templates:manage` 权限码但未过 namespace admission 合取项的主体,被 `isTemplateManager` 精确 `.includes()` 判成 manager,却被 `rbacGuardAny` 拒绝(403,即 A-1 §23.6 记录的 `ZZR4-EXACT-RESULT status=403`)。门审逐 hunk 核对后确认:**代码侧零命中**(A-1 自己的 `routes/approvals.ts` 注释已经历"CORRECTED A THIRD TIME"改写,与本 lane 无关),唯一的活缺陷是本 lane 自有 MD 里四句仍以"guard ⊋ manager"或等价措辞断言严格超集,外加一处"已解决"状态断言已过期。
+
+**改动清单(均为逐句改写,不改代码)**:
+1. 设计 MD §13.1 表第 16 行(原第 535 行区域):把"guard⊋manager 的事实(前半道理已求值)"改写为"guard 人口与 manager 人口互不包含的事实(两方向各有一个实测反例……)"。
+2. 设计 MD §13.5 项 2(原第 578 行区域):把"是过强声明(guard 人口 ⊋ manager 人口)"改写为"是过强声明——两个人口互不包含,不是……严格超集关系(……)"。
+3. 设计 MD §13.6 Draft PR body 必写清单的 changesRequired #16 一行(原第 586 行区域,**这是最高优先级项,原文会被逐字抄进 world-readable 的 PR 正文**):整句改写为"guard 人口与 manager 人口**互不包含**……两个方向各有一个端到端实测反例:①……②……PR body 必须逐字写「互不包含,两方向各一条反例」,不得抄 changesRequired #16 原文的 ⊋ 措辞而不加订正标注"。
+4. 设计 MD §5.2 响应形状 jsonc 注释(原第 368 行区域,门审未点名但本轮机械复核 `通配权限码` 模式命中后发现的同族活缺陷):原文"通配权限码展开 / isAdmin(userId) 两类主体都能过 guard 但可能不是 manager"仍在断言"通配权限码单独过 guard"这条**已被证伪**的腿为真,改写为"唯一端到端实测成立的『过 guard 但非 manager』反例是 DB 侧 isAdmin(userId)一条腿——通配权限码单独过 guard 已被 phase1 第 2/4 轮各真库证伪,不是第二条成立的腿"。
+5. 验证 MD §7.2(原第 413 行区域):对已过期的"guard ⊋ manager 结论不变"这句历史记录,按记忆 `feedback_supersession_marker_must_evaluate_not_void` 的要求**贴到那句话上求值**(不删除历史记录本身,只在其后补一段"求值(2026-09-18,第三次 rebase 后)……结论句已经过期,不得再引用……作为今天成立的事实")。
+6. 验证 MD §5 项 7(原第 373 行区域):把"这一半已在修复轮 1 解决"这句现已过期的状态断言改写为如实记录多轮证伪链(第 4/5 轮→第 6/7 轮→本 lane 第三次 rebase 各自带入什么),不再用"已解决后维持不变"这个隐含"从此没再变过"的措辞。
+
+**PR body 必写清单本身**:设计 MD §13.6 的 changesRequired #16 一行已经改写(见上第 3 点),避免这条被证伪的措辞原样抄进未来的 Draft PR 正文。
+
+**机械验证(sweep 输出)**:重跑 A-1 带来的 22 模式版 `scripts/dev/atg-retraction-sweep.sh`(相对 `origin/feat/approval-template-groups-phase1`,即本 lane 自己的 21 个文件差集):
+
+```
+$ bash scripts/dev/atg-retraction-sweep.sh origin/feat/approval-template-groups-phase1
+```
+22 个模式里 **11 个有命中**(`⊆`/`⊋`/`guard population`/`guard *人口`/`sees everything`/`wildcard permission`/`通配权限码`/`超集`/`严格超集`/`subset`/`superset`),其余 11 个零命中;有命中的 11 个模式合计 **48 条命中行**(跨 21 个文件、去重后落在 4 个文件:`routes/approvals.ts`、`ApprovalTemplateGroupService.ts`【本次 0 命中,STORABLE_GROUP_NAME_PATTERN 一带的新注释未撞中任何一个 22 模式】、设计 MD、验证 MD,以及 `plugin-tests.yml`/`vitest.config.ts` 里与本主题完全无关的 `subset`/`⊆` 假阳性)。逐条读过完整句子后分类:
+- **类别 2(活命中,以「成立」口吻断言任一方向包含关系)= 0 条**。本轮改写的 5 处(design MD 三处+verification MD 两处)全部不再以现在时断言 ⊋/⊆/严格超集;唯一含 ⊋/严格超集/超集/`guard 人口`/`通配权限码` 字样的命中,句子本身要么在**叙述**"这曾经被断言又被证伪"(类别 3,如验证 MD §7.2/§7 项 7 的改写句、design MD §13.1/§13.5/§13.6 改写句本身——它们提到"⊋"是为了说"这不成立",不是在断言它成立),要么是**不同主题**的假阳性(类别 4,如 `export⊆read`、`list⊋detail`、`multitable-permmatrix-b4-g7-export-subset-read`,与 `approvalTemplateAdminGuard`/`isTemplateManager` 完全无关)。
+- `routes/approvals.ts` 的命中(4 处,均在 A-1 自己的注释块内,本 lane 未碰这些行)本身已经历"CORRECTED A THIRD TIME"的自我改写,现读结论是"the two populations are mutually non-inclusive — neither contains the other",与本 lane 的改写口径一致;不属于本 lane 需要处理的对象,如实记录不动。
+
+**要求达成**:零处以「成立」口吻断言任一方向包含关系(类别 2 = 0),符合任务书判据。
