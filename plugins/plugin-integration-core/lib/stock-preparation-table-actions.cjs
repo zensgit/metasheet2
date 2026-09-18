@@ -497,6 +497,9 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // Absent also means the expander applies ITS default (`DEFAULT_ROOT_SELECTION`, 老系统规则),
     // which is the owner's ruling; a deployment that needs the pre-F1c root set writes
     // `rootSelection: { enabled: false }` HERE and it now actually reaches both lanes.
+    // #5862: `sheetMetalMatch` / `sheetMetalRequiresMainPrefix` ride the SAME block — the whole
+    // normalized object is stored and forwarded, so a new key needs no new wire here or in the
+    // large-BOM lane; it needs the expander's normalizer to know it (and to refuse a misspelling).
     ...(rootSelection ? { rootSelection } : {}),
   }
 }
@@ -512,6 +515,8 @@ function normalizeStockPreparationActionConfig(input = {}) {
  *
  * The expander's own error class is translated to this module's 422 config error so a bad deploy
  * config fails where an operator can see it (config time) with the code every other bad key uses.
+ * #5862: that vocabulary now includes `sheetMetalMatch` ('endsWith' | 'contains') and
+ * `sheetMetalRequiresMainPrefix`, and the block is a CLOSED key set — an unknown key is a 422 too.
  */
 function normalizeActionRootSelection(input) {
   if (input === undefined || input === null) return undefined
