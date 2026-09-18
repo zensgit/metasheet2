@@ -471,3 +471,18 @@ the persisted manifest and all ten complete stored section objects.
 
 This is internal no-attachment publication evidence, not a newly enabled product
 route, customer-storage acceptance, full attachment support or a completed goal.
+# Attachment Source Purge Arbitration Implementation
+
+Checkpoint `ac390fb7e106852b141051b980602a8a79d9de67` implements the
+existing source-protection requirement, without authorizing attachment capture.
+`blob_purge_claimed_at` is a durable, monotonic deletion-intent marker, not a
+receipt that bytes were deleted. Under the canonical sheet fence, manual
+admission refuses this marker and all three guarded physical deletion paths
+refuse an active source pin before committing the marker. Provider I/O follows
+transaction commit; `blob_purged_at` remains the existing success receipt.
+Provider failure retains the marker and permits idempotent deletion retry.
+This arbitrates source use versus deletion, not exactly-once physical deletion.
+Both existing archive and writer-fence flags must be exact true for guarded
+deletion; disabled deletion behavior is preserved. Mixed-version or differently
+flagged writers are not a validated deployment configuration. No runtime flags
+were enabled outside owned test processes.

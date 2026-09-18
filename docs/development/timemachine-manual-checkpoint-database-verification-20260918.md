@@ -1088,3 +1088,40 @@ before provider I/O, preserve historical attachment scope, keep disabled behavio
 unchanged, and never label a lost source recoverable. Do not merely remove the
 attachment refusal or add a second non-atomic pre-delete read. Immutable source
 versioning remains a separate mandatory prerequisite after deletion arbitration.
+
+## Source Purge Arbitration Checkpoint
+
+Code: `ac390fb7e106852b141051b980602a8a79d9de67` (seven files).
+The persistent purge claim is separate from confirmed purge. Direct deletion,
+orphan cleanup and delayed blob purge check pins and commit the claim under the
+canonical sheet fence. Manual admission uses that fence and rejects claims,
+including non-purged deleted candidates. Provider operations remain outside DB
+transactions. Missing direct transaction/identity prerequisites fail closed only
+when the existing archive/fence flags are enabled.
+
+The owned PG15 full-schema runner first reproduced a pinned source reaching the
+production deletion helper (one storage call, expected zero). Final tests prove
+pin-first refusal, separate-connection purge-first admission refusal, no leaked
+generation/request from rejection, retained claim after provider failure, no
+premature purge stamp, and successful idempotent retry. Migration down/down/up/up,
+default-expression drift rejection and nonempty-down refusal pass. Source-pin
+neighbor tests and the full checkpoint suite pass; all owned DB connections,
+database and cluster are removed after red and green runs.
+
+Mutations independently remove the existing-pin guard (physical-delete count
+becomes one) and admission's purge-claim refusal (generation count increases).
+Both produce precise RED results; restored final runner is GREEN. Backend
+attachment/source-pin unit neighbors 35/35, acceptance tsc, scoped source ESLint,
+exact-anchor wiring and diff-check pass. Browser code is unchanged; no new browser
+or Workbench UAT claim. Logs: `/private/tmp/tm-source-purge-{final,unit,tsc-final,lint,wiring}.log`,
+`tm-source-purge-{pin,admission}-mutation.log`, and
+`tm-manual-source-pin-delete-red.log`.
+
+Sol's bounded read-only review raised concurrent repeated purge calls as P1.
+Independent disposition: repeated calls are possible, but existing
+StorageProvider.deleteByKey explicitly requires idempotent ENOENT success and the
+compensating sweeper already retries. This marker is source-use exclusion, not
+an exclusive provider-execution lease; exactly-once purge was not the contract.
+No reviewer approval is claimed. The agent is closed. Immutable source versioning
+and actual attachment archive copying are still OPEN. No Ready/merge/flag,
+dispatch, deployment or customer storage/data operation occurred.
