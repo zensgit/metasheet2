@@ -10,6 +10,13 @@ A0/A/C/D/F 与判据 B 的 API 层半边是 B-1 的范围,已在 `todo-center-ph
 写本文档时**未新增、未修改任何源码或锁文**——所有下方的「重跑」都是对已落地代码的验证,mutation 台账
 的每一条都在跑完后原样恢复(`cmp` 确认字节级相同)。
 
+**更正(P3-1,独立门审 `impl-gate-B2-round1-20260918.md` 指出,修复轮 1 登记)**:上面自报的
+`git rev-parse HEAD` = `4b3f8f483`,是**本文档自己这次提交之前**的一次提交;门审绑定的、也是本条
+更正与 §10 修复轮实际核对的被审 head 是**该文档提交本身**,即 `396cd9b9238d78fe0f9ef6b189113ef98127a84e`
+(`docs(approval): todo-center B-2 (frontend) design + verification MD`)。§10 记录的修复轮 1 建立在
+`396cd9b92` 之上,不在 `4b3f8f483` 之上——本节起,任何「本文档被审 head」的引用一律以 `396cd9b92`
+为准,不以本段开头那个自报值为准。
+
 ## 1. 锁文验收表 → spec 文件 + 用例名 + lane
 
 | 锁 §5 行 | 覆盖范围(本切片 vs B-1) | spec 文件 | 用例名(节选,完整见 §2 命令输出) | lane |
@@ -19,7 +26,7 @@ A0/A/C/D/F 与判据 B 的 API 层半边是 B-1 的范围,已在 `todo-center-ph
 | B(API 层) | B-1 范围,不在本切片 | 同上 | 判据 B API 层格 | 同上 |
 | **B(徽标层)** | **本切片** | `apps/web/tests/approvalNavTodoBadge.spec.ts` | `renders a discriminable unavailable state when the count read throws (mutation guard...)`、`... when the response carries a stubbed \`degraded: true\` flag ...`、`... when any source reports \`unavailable\`, even with a nonzero count ...`、`carries the label in the unavailable state's aria-label ...` | `apps/web/scripts/run-required-web-tests.sh`(令牌 `approvalNavTodoBadge`,**required 检查 `web-tests`**,见 §5) |
 | **B(中心页层)** | **本切片** | `apps/web/tests/TodoCenterView.spec.ts` | `renders "checked, nothing pending" for an ok source with zero items — NOT the same shape as unavailable`、`renders "could not check" for an unavailable source — NOT the same shape as ok+0`、`mutation guard: a response with an unavailable source among ok sources must still render that source's own unavailable group (...)`、`renders a page-level load-failed state (...)` | 同上(`TodoCenterView` 令牌,同一 required 检查) |
-| **B(推送同源)** | **本切片** | `packages/core-backend/tests/unit/todo-realtime.test.ts` | `reuses the injected countPendingForUser fetcher — the SAME shape pendingSourceRegistry.countPendingForUser returns — never computing a count itself`、`carries the per-source ok/unavailable status map through verbatim (fail-closed discriminability, lock §3)` | `packages/core-backend` 默认单测(无需真库);**required 检查 `test (20.x)`**(经 `pnpm --filter @metasheet/core-backend test` 的裸 `vitest run`,见 §4.4——已用 JSON reporter 机核该文件在其内) |
+| **B(推送同源)** | **本切片(修复轮 1 后)** | `packages/core-backend/tests/unit/todo-realtime.test.ts`、`packages/core-backend/tests/unit/approval-todo-counts-dual-publish-wiring.test.ts` | `the DEFAULT path (no injected fetcher) calls pendingSourceRegistry.countPendingForUser ...`(生产默认路径本身)、`reuses the injected countPendingForUser fetcher ...`(消费给定 fetcher 的形状,原有)、`fires todo:counts-updated for the SAME uniqueUsers set as approval:counts-updated, on every call`(触发接线) | `packages/core-backend` 默认单测(无需真库);**required 检查 `test (20.x)`**(§10 用 JSON reporter 机核两个文件均在其内) |
 | C | B-1 范围,不在本切片 | `todo-center-pending-gate.ts` | 判据 C 两条 mutation | 真库 lane |
 | D | B-1 范围,不在本切片 | 同上 | 判据 D | 同上 |
 | **C′(前端呈现)** | **本切片** | `apps/web/tests/TodoCenterView.spec.ts` | `renders a view-only pill for actionable:false, and no pill when actionable is absent or true` | `run-required-web-tests.sh`,required |
@@ -28,6 +35,17 @@ A0/A/C/D/F 与判据 B 的 API 层半边是 B-1 的范围,已在 `todo-center-ph
 | **E(中心页)** | **本切片** | `apps/web/tests/TodoCenterView.spec.ts` | `E1 (principal swap, session present): ...`、`E2 (sign-out, no session): ...`、`a push landing on the still-open socket after a CONFIRMED sign-out must not issue a new read (mirrors the badge's E3)` | `run-required-web-tests.sh`,required |
 | **E(换 org 接线事实)** | **本切片** | `apps/web/tests/useAuth.spec.ts` | `fires the auth-principal-change notification synchronously on a successful org switch, storage already updated` | `run-required-web-tests.sh`**第 477 行**(见下方附注——**不是**本切片改的那段 exec 行),required |
 | F(无新表) | B-1/本切片共同满足(本切片未新增迁移) | — | `git diff --stat` 对 `packages/core-backend/src/db/migrations` 为空 | — |
+
+附注(`B(推送同源)` 行,修复轮 1 的撤回,20260918):本行原先只列
+`'reuses the injected countPendingForUser fetcher ...'` 一条用例,并把它写成「验证判据 B 推送同源」的
+唯一证据。独立门审 `impl-gate-B2-round1-20260918.md`(P1-1)指出该用例**注入了** `countPendingForUser`,
+从未执行生产唯一走的 `defaultCountPendingForUser` 分支,对「生产默认 = 共享注册表方法」这条断言
+**零判别力**(亲跑 mutation:把默认路径换成已知发散实现,该用例连同整个 required `test (20.x)`
+默认套件全绿)。**同一份 mutation 结论也证伪了 §4.4 原结论**「本切片改动里唯一验证『推送不重新发明
+谓词』的单测……」——那句话把「在 required 收集范围内」和「对该不变量有判别力」混为一谈,已作废(§4.4
+正文同步更正,不留原句)。修复轮 1 新增两条用例(见上方表格新行、§10)补上生产默认路径与
+`routes/approvals.ts` 触发接线两处此前零覆盖的分支,本行更新为反映这两条新用例。旧用例本身没有错
+(它证明的「消费给定 fetcher」这件事仍然成立),错的是**用它论证了一件它证明不了的事**。
 
 附注(`useAuth.spec.ts` 的 lane 归属,写作过程中的一次自我更正):`run-required-web-tests.sh` 不是单
 一条 exec 行,而是**多段** `npx vitest run ...` 调用的串联(每段各挑一批文件/令牌)。本切片改的是
@@ -256,8 +274,29 @@ print([r['status'] for r in d['testResults'] if 'todo-realtime' in r['name']])
 ```
 `packages/core-backend/vitest.config.ts` 的 `exclude` 数组(`:31-` 起)本次会话通读过,没有任何一条
 匹配 `tests/unit/todo-realtime.test.ts`(该数组只排除若干 `tests/integration/*.db.test.ts`/`*.api.test.ts`
-真库用例)。结论:本切片改动里唯一验证「推送不重新发明谓词」的单测,**落在 required 检查 `test (20.x)`
-的收集范围内**,3912 个测试套件(含它)全绿——不是本切片自己声称、而是这次跑出来的。
+真库用例)。
+
+**撤回(gate `impl-gate-B2-round1-20260918.md` P2-1,修复轮 1,20260918)**:上一段末句「本切片改动里
+唯一验证『推送不重新发明谓词』的单测,落在 required 检查『收集范围内』」把两件事混成了一件——「在
+`test (20.x)` 的收集范围内被执行」(前半句,机核为真)不等于「对『推送不重新发明谓词』这条不变量有
+判别力」(后半句,机核为**假**:门审对该单测唯一的用例做 mutation,让默认路径改读已知发散实现,
+required 套件全绿)。原句已作废,不保留在本文档任何位置。
+
+修复轮 1 补上生产默认路径与触发接线两处此前零覆盖的分支(设计 MD §5.2 撤回段、本文档 §10),两条
+新用例同样用 JSON reporter 机核落在 `test (20.x)` 的默认收集范围内:
+```
+$ cd packages/core-backend && CI=true npx vitest run --reporter=json --outputFile=/tmp/core-backend-full-run-clean.json
+$ python3 -c "
+import json
+d = json.load(open('/tmp/core-backend-full-run-clean.json'))
+print(d['numTotalTestSuites'], d['numPassedTestSuites'], d['numFailedTestSuites'])
+print([(r['name'], r['status']) for r in d['testResults'] if 'todo-realtime' in r['name'] or 'approval-todo-counts-dual-publish' in r['name']])
+"
+3914 3914 0
+[('.../tests/unit/approval-todo-counts-dual-publish-wiring.test.ts', 'passed'), ('.../tests/unit/todo-realtime.test.ts', 'passed')]
+```
+「在收集范围内」这半句因此对两个文件都成立(机核);「有判别力」这半句现在由 §10 的两条 mutation
+(对新用例本身亲跑、非对整个套件推断)单独支撑——composition,不是同一份证据两次使用。
 
 ## 5. Required-check 状态核实
 
@@ -336,3 +375,146 @@ $ gh api repos/zensgit/metasheet2/branches/main/protection --jq '.required_statu
 
 锁文 `todo-center-design-lock-draft-20260915.md` 到 §7 为止,无 §8/§9;本文档不虚构不存在的锁文小节
 编号。
+
+## 10. 修复轮 1(20260918)—— 关闭 P1-1 生产路径/接线零覆盖 + P2-1 过强声明
+
+被审 head(gate `impl-gate-B2-round1-20260918.md`):`396cd9b9238d78fe0f9ef6b189113ef98127a84e`。本节
+是该 head 之上新增的一次提交,不改写上面 §1–§9(它们记录的是 `396cd9b92` 那一刻的状态);§1/§4.4 里
+两处直接相关的过强断言已就地加撤回段(不删旧文字)。本节选取门审十项发现(1 P1 + 1 P2 + 8 P3)里的 P1-1 与 P2-1 两条
+(其余八条 P3 未处理,留给下一轮或 owner 排期)。
+
+### 10.1 改了什么(仅两处,均 additive)
+
+1. `packages/core-backend/src/routes/approvals.ts`:私有函数 `publishApprovalCountsForUsers` 加
+   `export`(纯加法,零行为变化——函数体一字未改),附注释说明导出理由(镜像既有 `isPlmApprovalId`
+   的导出注释风格)。
+2. 两个新增/改动的测试文件(无源码行为改动):
+   - `packages/core-backend/tests/unit/todo-realtime.test.ts` 新增 1 条用例(原 5 条不动)。
+   - `packages/core-backend/tests/unit/approval-todo-counts-dual-publish-wiring.test.ts`(新文件,2
+     条用例)。
+
+`git diff --stat 396cd9b92..HEAD -- packages/core-backend/src` 只命中这一处 `export` 关键字的增删;
+`packages/core-backend/src/services/todo-realtime.ts` 零改动(P1-1 的建议修法本身就是「只加测试」,
+不改生产代码——生产代码的问题不是逻辑错,是零覆盖)。
+
+### 10.2 新用例覆盖什么、明确不覆盖什么(避免重犯 P2-1 的同类错误)
+
+- `tests/unit/todo-realtime.test.ts` 新用例 `'the DEFAULT path (no injected fetcher) calls
+  pendingSourceRegistry.countPendingForUser ...'`:**覆盖**——不注入 fetcher 时,
+  `publishTodoCountsUpdate` 确实调用共享单例 `pendingSourceRegistry.countPendingForUser`(`vi.spyOn`
+  打在单例方法本身,不是替身),并把其返回值原样转发进广播负载。**不覆盖**——`pendingSourceRegistry`
+  内部聚合逻辑本身的正确性(那是 B-1 `PendingSourceRegistry`/`approval-pending-query.ts` 的判据
+  A0/A/B/C/D,真库 lane 已闭合,见 `todo-center-phase1-verification-20260918.md`)。
+- `tests/unit/approval-todo-counts-dual-publish-wiring.test.ts`:**覆盖**——`publishApprovalCountsForUsers`
+  这一个函数的**自己的函数体**,对给定的 `uniqueUsers` 集合,确实同时调用了
+  `publishApprovalCountsUpdate` 与 `publishTodoCountsUpdate`,且两者收到相同的 userId 集合、相同的
+  `roles`、相同的 `reason`。**不覆盖、也不能证明**——八个路由调用点是否都真的调用了这个共享函数而不是
+  绕开它另起一套;那半句论证仍然是设计 MD §5.1 的「按构造相等」(grep 八个调用点全部落在这一个函数
+  名下,逐字核对过),本测试没有、也不需要重复它——两条论证互补,不是一条测试证了两件事。
+
+### 10.3 Mutation 证据(cp 备份 → 改 → 单独跑新文件 → 观察红 → cp 还原 → `cmp`)
+
+**Mutation 6(对应门审 M5)**——`src/services/todo-realtime.ts` 的 `defaultCountPendingForUser` 换成
+门审点名的已知发散实现(`approval-realtime.ts` 的 `computeApprovalPendingCounts`):
+```diff
+-const defaultCountPendingForUser: TodoCountFetcher = (viewer) =>
+-  pendingSourceRegistry.countPendingForUser(viewer)
++const defaultCountPendingForUser: TodoCountFetcher = async (viewer) => {
++  const { pool } = await import('../db/pg')
++  const { computeApprovalPendingCounts } = await import('./approval-realtime')
++  const query = pool!.query.bind(pool)
++  const { count } = await computeApprovalPendingCounts(query, {
++    userId: viewer.actorId, roles: viewer.roles, permissions: viewer.permissions,
++  })
++  return { count, sources: { approval: 'ok' } }
++}
+```
+```
+$ npx vitest run tests/unit/todo-realtime.test.ts --reporter=dot
+ Tests  1 failed | 5 passed (6)   ← 精确命中新用例;旧 5 条(全部注入 fetcher)照常绿,复现门审诊断
+```
+`cp` 还原,`cmp /tmp/todo-realtime.ts.bak src/services/todo-realtime.ts` 字节相同。
+
+**Mutation 7(对应门审 M6)**——`src/routes/approvals.ts` 里 `publishApprovalCountsForUsers` 的
+`Promise.all` 数组中,`publishTodoCountsUpdate({...})` 整个调用换成 `Promise.resolve()`:
+```
+$ npx vitest run tests/unit/approval-todo-counts-dual-publish-wiring.test.ts --reporter=verbose
+ ✗ fires todo:counts-updated for the SAME uniqueUsers set ...
+   → expected "spy" to be called 2 times, but got 0 times
+ ✓ publishes nothing for an empty/blank-only user list ...
+ Tests  1 failed | 1 passed (2)
+```
+`cp` 还原,`cmp /tmp/approvals.ts.bak src/routes/approvals.ts` 字节相同;还原后
+`git diff packages/core-backend/src/routes/approvals.ts` 只剩 10.1 节那一处 `export` 加法。
+
+**证据构成方式,如实说明**:上面两条 mutation 只对**新文件单独跑**,不是对 required 检查
+`test (20.x)` 跑的那条整条命令(`pnpm --filter @metasheet/core-backend test`)本身做 mutation 后
+重跑一次全量(那样成本更高,门审自己对 M5/M6 做过一次,见门审报告 §5)。本节的结论是**复合**得出的,
+不是单独任何一步的结论:
+1. 两条 mutation 分别让对应新用例单独跑时转红(上面逐字)。
+2. §4.4 已用 JSON reporter 机核**未 mutation** 的两个文件都落在 `test (20.x)` 默认 `vitest run`
+   的收集范围内(`3914 3914 0`,含两个文件名,均 `passed`)。
+3. 由 1+2 可推:该 mutation 若发生在 `test (20.x)` 实际跑的那条命令上,会让同一个用例在同一条
+   required 检查里转红——但这一步是**推论**,不是又跑了一次全量 mutation,如实标注。
+
+### 10.4 因改了 `routes/approvals.ts` 而重跑的闸(门审 §7 项 4/5)
+
+```
+$ pnpm type-check                                        # 全仓,含 apps/web vue-tsc -b + 两个 verification tsconfig + core-backend tsc --noEmit
+EXIT=0(core-backend: Done;apps/web: Done)
+```
+私有 DB `metasheet2_lock_b2`(处女库要求见门审 §7 项 5;本库既有、迁移已到最新,`db:migrate --list`
+确认 `Pending: 0`,未重新 `createdb`,但改动前后 schema 本就未变,复用同一个已迁移到位的库对本项判据
+零差异):
+```
+$ DATABASE_URL=postgresql://…/metasheet2_lock_b2 EXPECT_DB=1 RBAC_BYPASS=false RBAC_TOKEN_TRUST=false \
+  PRODUCT_MODE=plm-workbench RBAC_CACHE_TTL_MS=0 \
+  npx vitest --config vitest.todo-center-pending-gate.config.ts run \
+  tests/todo-center-pending-gate/todo-center-pending-gate.ts --reporter=verbose
+ Test Files  1 passed (1) / Tests  27 passed (27)
+
+$ … --config vitest.integration.config.ts run tests/integration/approval-wp3-pending-count.api.test.ts --reporter=verbose
+ Test Files  1 passed (1) / Tests  7 passed (7)
+```
+两条真库套件在 `export` 关键字加入后一字不改地转绿,证明这次改动没有触碰共享查询路径。
+
+门审 §7 项 6(令牌唯一性 + 两点接线)**不适用**:两个新/改动文件都在
+`packages/core-backend/tests/unit/`,不在 `apps/web/tests/`,不经过 `run-required-web-tests.sh` 的
+exec 行令牌匹配;机核确认它们的文件名不出现在任何闭世界注册表里:
+```
+$ grep -rn "approval-todo-counts-dual-publish-wiring\|tests/unit/todo-realtime" \
+  packages/core-backend/vitest.config.ts .github/workflows/plugin-tests.yml
+(无输出)
+```
+
+### 10.5 全套件重跑(门审 §7 项 1/2)
+
+```
+$ cd apps/web && npx vitest run approvalNavTodoBadge TodoCenterView todoApi todoCountsRealtime tests/App.spec.ts tests/useAuth.spec.ts --reporter=dot
+ Test Files  6 passed (6) / Tests  89 passed (89)
+
+$ cd packages/core-backend && npx vitest run --reporter=dot     # 默认 config,= required test (20.x) 跑的同一条,未 mutate
+ Test Files  933 passed (933) | 175 skipped (1108)
+      Tests  14720 passed (14720) | 1604 skipped (16324)
+```
+0 failed。附带关闭 §8 表「`apps/web` 全量 `vue-tsc -b` 类型检查」那一行的「未跑」状态——本轮
+`pnpm type-check`(见 10.4)已覆盖全仓 `vue-tsc -b`,绿。
+
+两条 mutation 各自 `cp` 备份 → 改 → 跑 → 还原,还原后逐一 `cmp` 确认字节相同(见 §10.3);两次
+`cmp` 都不产生输出(相同)。还原后整个工作树的 `git status --porcelain` 只剩本轮**意图**改动的五个
+路径,没有任何 mutation 残留:
+```
+$ git status --porcelain
+ M docs/development/todo-center-phase2-fe-design-20260918.md
+ M docs/development/todo-center-phase2-fe-verification-20260918.md
+ M packages/core-backend/src/routes/approvals.ts
+ M packages/core-backend/tests/unit/todo-realtime.test.ts
+?? packages/core-backend/tests/unit/approval-todo-counts-dual-publish-wiring.test.ts
+```
+(`routes/approvals.ts` 的一行 ` M` 就是 10.1 节那一处 `export` 加法,不是 mutation 7 没还原干净——
+mutation 7 的 `cmp` 已在 §10.3 单独确认过字节相同。)
+
+### 10.6 本轮未处理
+
+门审十项发现(1 P1 + 1 P2 + 8 P3)里的八条 P3(P3-1 已通过 10 节开头的更正部分处理;P3-2~P3-8 未动,留给下一轮或 owner
+排期,如实列出,不在本轮声称交付)。
