@@ -1,3 +1,4 @@
+import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
 /**
  * Unified approval bridge types.
  *
@@ -88,6 +89,22 @@ export interface UnifiedApprovalDTO {
    * care about parallelism keep using `currentNodeKey` unchanged.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,**必须呈现**)」 — the
+   * 呈现 channel, DEFAULT CONTRACT (⚠️ owner 待裁, 按默认值; the alternatives are listed with the
+   * type in `core/attendance-cancellation-execution-port.ts`).
+   *
+   * Present ONLY on the response of the approve action that REDEEMED a 撤销 round; `undefined` on
+   * every other approval and every other action, so no existing consumer's shape changes by a
+   * byte. Values-free: a status token plus integer counters — no ids, no names, no free text.
+   *
+   * ⚠️ ACTION-RESPONSE SCOPE, stated rather than implied: `getApproval` does NOT project it, so a
+   * later `GET /approvals/:id` omits it. The durable read is the approve audit row's
+   * `metadata.cancellationOutcome`, carried verbatim by `UnifiedApprovalHistoryDTO.metadata` and
+   * committed in the same transaction as the cancellation itself. Whether 呈现 must also survive a
+   * reload on THIS type is the owner decision registered alongside the default.
+   */
+  cancellationOutcome?: CancelRoundCancellationOutcomeV1 | null
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state for the 待我处理 (pending) tab — `true` once the
