@@ -166,9 +166,17 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
 
   it('renders per-section items and the section-own total (not a client-reconstructed count)', async () => {
     listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    // gate impl-gate-A4-round1-20260918.md §2 P2-2: the fixture MUST make `total !== data.length`
+    // (page 1 of a larger section — one row returned, seven total) so a client-reconstructed count
+    // (`res.data.length`) and the server-given one (`res.total`) are DISTINGUISHABLE. The prior
+    // fixture (`data:[1 row], total:1`) made the two implementations observationally identical —
+    // mutating `loadAll()` to read `total: res.data.length` left this test's badge assertion green
+    // (18/18, including this very test) because 1 === 1 either way. Verified by re-running that
+    // exact mutation against THIS fixture (cp backup → edit → run → restore → cmp byte-identical):
+    // the badge assertion goes red (`expected '1' to be '7'`) before this fix, and passes after.
     listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
       if (section === 'group:atg_a') {
-        return Promise.resolve({ data: [template('tpl_1', 'Onboarding form')], total: 1 })
+        return Promise.resolve({ data: [template('tpl_1', 'Onboarding form')], total: 7 })
       }
       return Promise.resolve({ data: [], total: 0 })
     })
@@ -178,7 +186,9 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     const groupSection = container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
     expect(groupSection.textContent).toContain('Group A')
     expect(groupSection.textContent).toContain('Onboarding form')
-    expect(groupSection.querySelector('[data-testid="template-group-section-count"]')?.textContent?.trim()).toBe('1')
+    // The server-given total (7), NOT the client-reconstructed row count (1 — this page has only
+    // one row because six more are on later pages).
+    expect(groupSection.querySelector('[data-testid="template-group-section-count"]')?.textContent?.trim()).toBe('7')
 
     const ungroupedSection = container!.querySelector('[data-testid="template-group-section-ungrouped"]')!
     // No item in `ungrouped` — the empty-state text renders, not a silently blank list.
