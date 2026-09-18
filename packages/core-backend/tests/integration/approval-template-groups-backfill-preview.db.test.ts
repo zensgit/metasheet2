@@ -104,7 +104,17 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
   // EVERY subsequent `previewApprovalTemplateGroupBackfill` call in this suite, regardless of
   // which org calls it (this is real production behaviour, not a test bug: the same template can
   // legitimately be backfilled into more than one org's groups). Wiping templates after EACH case
-  // (not only in `afterAll`) is what gives every `it` below its own clean candidate population.
+  // (not only in `afterAll`) is necessary but, corrected 2026-09-18 (§11 CI fix — see this file's
+  // own `sinkForeignTemplates`), NOT sufficient on its own for "every `it` below gets its own clean
+  // candidate population": it only reclaims templates THIS FILE created. The gated real-DB CI step
+  // (`.github/workflows/plugin-tests.yml`, job id `approval-real-db-integration`) runs 84 files
+  // (62 `.db.test.ts` + 14 `.api.test.ts` + 8 plain `.test.ts`, counted mechanically off that one
+  // step's own file list) against one shared Postgres with `fileParallelism:false` (strictly
+  // sequential, no cross-file race) — so a template some OTHER, earlier file in that run leaves
+  // linked-nowhere (its own teardown never deletes `approval_templates` rows, because template
+  // deletion was never part of that file's own contract) is *still sitting in the table* by the
+  // time this file's `beforeAll` runs, and is an eligible candidate for every org this file uses,
+  // independent of the org string. `sinkForeignTemplates` is what actually closes that gap.
   afterEach(async () => {
     for (const id of templateIds.splice(0)) {
       await query(`DELETE FROM approval_templates WHERE id = $1`, [id])
@@ -142,6 +152,55 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     )
   }
 
+  // §11 CI fix (shared-DB fixture collision, `feedback_shared_db_integration_fixture_collision`):
+  // reproduced live (see the fix-round verification MD) that a bare, unlinked-anywhere
+  // `approval_templates` row — regardless of which file or which org created it — is a candidate
+  // for EVERY org's `previewApprovalTemplateGroupBackfill` call, because the candidate SELECT
+  // carries no template-level org filter at all (only the link-exclusion is org-scoped). Renaming
+  // this file's own org tags cannot fix that: a foreign row is a candidate for THIS org no matter
+  // what string `org` is. This helper makes the environment match what a genuinely isolated org
+  // would see by using the SAME production predicate against itself — link every template that is
+  // currently a candidate for `org` (i.e. `NOT EXISTS` a link row for `org`) MINUS this test's own
+  // `ownTemplateIds` into a throwaway "sink" group scoped to `org` alone. After this call, the
+  // production NOT EXISTS check legitimately excludes every foreign row, so this file's exact-set
+  // assertions (`toEqual`, not `toContain`) stay meaningful without being weakened.
+  //
+  // The sink group's name is deliberately outside every category any test in this file (or its
+  // W8/W9 siblings) ever uses — `existingGroupIdByTrimmedName`'s lookup is `name = ANY(categories)`,
+  // so a colliding name would silently flip a bucket's action from "create" to "attach". Its
+  // `sort_order` is a large constant, clear of every `sort_order` value (1, 2) a fixture in this
+  // suite ever hardcodes — `atg_sort_unique UNIQUE (org_id, sort_order)` would otherwise reject the
+  // INSERT outright when a test also creates its own group at `sort_order = 1` in the same org.
+  //
+  // Disclosure: unlike production's candidate query, this sink query does NOT run
+  // `applyTemplateVisibilityFilter` — it sweeps every org-unlinked row regardless of visibility
+  // scope. That is sound ONLY because every exact-set assertion in this file that calls
+  // `sinkForeignTemplates` runs under `managerActor` (`isTemplateManager: true`), where
+  // `applyTemplateVisibilityFilter` is itself a no-op (§5.2's own scope rule). The one non-manager
+  // case in this file (`§5.2 changesRequired #16` scope test, below) never calls this helper and
+  // only asserts `.find(...).toBeDefined()`, not an exact set. A future non-manager test that
+  // asserts an exact bucket/skipped array would need a visibility-aware sink, not this one.
+  const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
+  const FOREIGN_SINK_SORT_ORDER = 999999
+
+  async function sinkForeignTemplates(org: string, ownTemplateIds: readonly string[]): Promise<string> {
+    const sinkGroupId = `atg_sink_${org}`
+    await query(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+       VALUES ($1, $2, $3, $4, 'sink')`,
+      [sinkGroupId, org, FOREIGN_SINK_GROUP_NAME, FOREIGN_SINK_SORT_ORDER],
+    )
+    await query(
+      `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+       SELECT $1, t.id, $2, 'sink', now()
+         FROM approval_templates t
+        WHERE NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)
+          AND NOT (t.id = ANY($3::uuid[]))`,
+      [org, sinkGroupId, ownTemplateIds],
+    )
+    return sinkGroupId
+  }
+
   const managerActor: ApprovalTemplateVisibilityActor = {
     userId: `preview-manager-${TS}`,
     departmentIds: [],
@@ -161,6 +220,7 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     const hr1 = await createTemplate(`atgp-hr1-${TS}`, 'HR')
     const hr2 = await createTemplate(`atgp-hr2-${TS}`, 'HR')
     const finance = await createTemplate(`atgp-fin-${TS}`, 'Finance')
+    await sinkForeignTemplates(org, [hr1, hr2, finance])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
 
@@ -186,6 +246,7 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     const org = trackOrg(`atgp-attach-${TS}`)
     await createGroup(`atg_preview_attach_${TS}`, org, 'HR')
     const tpl = await createTemplate(`atgp-attach-tpl-${TS}`, '  HR  ') // btrim(' HR ') = 'HR' — same active group
+    await sinkForeignTemplates(org, [tpl])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
 
@@ -206,7 +267,8 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
       `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL WHERE id = $1`,
       [`atg_preview_archived_${TS}`],
     )
-    await createTemplate(`atgp-archived-tpl-${TS}`, 'Legal')
+    const archivedTpl = await createTemplate(`atgp-archived-tpl-${TS}`, 'Legal')
+    await sinkForeignTemplates(org, [archivedTpl])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
     const legalBucket = preview.buckets.find((b) => b.category === 'Legal')
@@ -220,6 +282,11 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     const nullCat = await createTemplate(`atgp-skip-null-${TS}`, null)
     const blankCat = await createTemplate(`atgp-skip-blank-${TS}`, '   ')
     const chineseCat = await createTemplate(`atgp-skip-cjk-${TS}`, '人事')
+    // §11 CI fix: this is the exact case reproduced live against the shared real-DB step — a
+    // foreign, unrelated file's own leftover `category IS NULL` template (never linked anywhere,
+    // by a different file entirely) lands in THIS org's `''`-keyed CATEGORY_BLANK_AFTER_TRIM
+    // bucket unless it is sunk first (see `sinkForeignTemplates`'s own comment for the mechanism).
+    await sinkForeignTemplates(org, [nullCat, blankCat, chineseCat])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
 
@@ -247,11 +314,15 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
 
   it('changesRequired #12: candidateCount is the SAME population execute actually processes, computed from the SAME predicate (not a second, independently-drifting query) — asserted by running both against one org with a skip-eligible mix', async () => {
     const org = trackOrg(`atgp-candidatecount-${TS}`)
-    await createTemplate(`atgp-cc-hr1-${TS}`, 'HR')
-    await createTemplate(`atgp-cc-hr2-${TS}`, 'HR')
-    await createTemplate(`atgp-cc-fin-${TS}`, 'Finance')
-    await createTemplate(`atgp-cc-cjk-${TS}`, '人事') // skip-eligible: CATEGORY_NOT_STORABLE_AS_GROUP_NAME
-    await createTemplate(`atgp-cc-blank-${TS}`, '   ') // skip-eligible: CATEGORY_BLANK_AFTER_TRIM
+    const cc1 = await createTemplate(`atgp-cc-hr1-${TS}`, 'HR')
+    const cc2 = await createTemplate(`atgp-cc-hr2-${TS}`, 'HR')
+    const cc3 = await createTemplate(`atgp-cc-fin-${TS}`, 'Finance')
+    const cc4 = await createTemplate(`atgp-cc-cjk-${TS}`, '人事') // skip-eligible: CATEGORY_NOT_STORABLE_AS_GROUP_NAME
+    const cc5 = await createTemplate(`atgp-cc-blank-${TS}`, '   ') // skip-eligible: CATEGORY_BLANK_AFTER_TRIM
+    // §11 CI fix: sunk BEFORE both calls below — the SAME org is reused for the coupled `execute`
+    // call further down, so one sink covers both (a foreign row, once sunk, stays linked in this
+    // org for the rest of the `it`).
+    await sinkForeignTemplates(org, [cc1, cc2, cc3, cc4, cc5])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
     expect(preview.candidateCount).toBe(3) // 2 HR + 1 Finance — the two skip rows excluded
@@ -275,6 +346,7 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     const linkedTpl = await createTemplate(`atgp-linked-tpl-${TS}`, 'AlreadyLinked')
     await linkTemplate(org, linkedTpl, `atg_preview_linked_g_${TS}`)
     const unlinkedTpl = await createTemplate(`atgp-unlinked-tpl-${TS}`, 'AlreadyLinked')
+    await sinkForeignTemplates(org, [linkedTpl, unlinkedTpl])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
     const bucket = preview.buckets.find((b) => b.category === 'AlreadyLinked')
@@ -312,11 +384,19 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
 
   it('preview writes ZERO rows: approval_template_groups/links row counts for the org are byte-identical before and after, across a run that produces both a "create" and a "skip" bucket', async () => {
     const org = trackOrg(`atgp-nowrite-${TS}`)
-    await createTemplate(`atgp-nowrite-hr-${TS}`, 'HR')
-    await createTemplate(`atgp-nowrite-blank-${TS}`, '')
+    const hrTpl = await createTemplate(`atgp-nowrite-hr-${TS}`, 'HR')
+    const blankTpl = await createTemplate(`atgp-nowrite-blank-${TS}`, '')
+    await sinkForeignTemplates(org, [hrTpl, blankTpl])
 
+    // §11 CI fix: the baseline is captured AFTER `sinkForeignTemplates`, not before. The sink's own
+    // group/link rows are real writes this fixture itself just made to `org` — asserting a literal
+    // `{ groups: 0, links: 0 }` precondition would now be false regardless of `preview`'s own
+    // behaviour. The invariant under test ("preview writes zero rows") is still fully enforced —
+    // just as a DELTA across the `preview` call rather than against a hardcoded absolute zero.
+    // `before.groups` staying pinned at exactly 1 (only the sink group this fixture created) is the
+    // one absolute check that still makes sense to keep.
     const before = await tableCounts(org)
-    expect(before).toEqual({ groups: 0, links: 0 })
+    expect(before.groups).toBe(1)
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
     expect(preview.buckets.length).toBeGreaterThan(0)
@@ -341,6 +421,7 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     const org = trackOrg(`atgp-tab-${TS}`)
     const tabOnly = await createTemplate(`atgp-tab-only-${TS}`, '\t')
     const tabPadded = await createTemplate(`atgp-tab-padded-${TS}`, '\tHR\t')
+    await sinkForeignTemplates(org, [tabOnly, tabPadded])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
 
@@ -371,9 +452,12 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
   // suite's advisor review flagged before it shipped.
   it('buckets/skipped are ordered by plain code-point order, not locale-collated order', async () => {
     const org = trackOrg(`atgp-order-${TS}`)
-    await createTemplate(`atgp-order-a-${TS}`, 'Zebra')
-    await createTemplate(`atgp-order-b-${TS}`, 'apple')
-    await createTemplate(`atgp-order-c-${TS}`, '100')
+    const orderA = await createTemplate(`atgp-order-a-${TS}`, 'Zebra')
+    const orderB = await createTemplate(`atgp-order-b-${TS}`, 'apple')
+    const orderC = await createTemplate(`atgp-order-c-${TS}`, '100')
+    // §11 CI fix: this test asserts the FULL `categories` array by exact equality — a single
+    // foreign category anywhere in the shared DB (sorting between these three) would break it.
+    await sinkForeignTemplates(org, [orderA, orderB, orderC])
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
     const categories = preview.buckets.map((b) => b.category)
@@ -401,7 +485,8 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
   describe('route wiring: GET /api/approval-template-groups/backfill/preview (real HTTP, real guard)', () => {
     it('an admin actor gets 200 with {scope, candidateCount, buckets, skipped}', async () => {
       const org = trackOrg(`atgp-http-admin-${TS}`)
-      await createTemplate(`atgp-http-admin-tpl-${TS}`, 'HR')
+      const httpAdminTpl = await createTemplate(`atgp-http-admin-tpl-${TS}`, 'HR')
+      await sinkForeignTemplates(org, [httpAdminTpl])
       // Same fixture shape as the phase 1 lifecycle suite's own "F: authorization" positive
       // control (`roles: 'admin', perms: '*:*'`) — `requestUserIsAdmin` bypasses BOTH
       // `approvalTemplateAdminGuard` and the namespace-admission check that a non-admin
