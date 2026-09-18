@@ -47,7 +47,10 @@ vi.mock('../../src/db/type-helpers', () => ({
 // Import after mocks
 // ---------------------------------------------------------------------------
 import { CommentService } from '../../src/services/CommentService'
-import type { CommentUnreadSummary } from '../../src/di/identifiers'
+import type { CommentInboxScope, CommentUnreadSummary } from '../../src/di/identifiers'
+
+/** #5831 part B: the unread aggregates need the route's (readable, live) sheet scope. */
+const INBOX_SCOPE: CommentInboxScope = { sheetIds: ['sheet_1'], rowDenySheets: [] }
 
 // Create a minimal mock CollabService
 function createMockCollabService() {
@@ -111,7 +114,7 @@ describe('Comment API contracts', () => {
   describe('getUnreadSummary()', () => {
     it('returns both unreadCount and mentionUnreadCount', async () => {
       // The mock db returns null from executeTakeFirst, so counts default to 0
-      const summary = await service.getUnreadSummary('user_1')
+      const summary = await service.getUnreadSummary('user_1', INBOX_SCOPE)
 
       expect(summary).toEqual({
         unreadCount: 0,
@@ -122,7 +125,7 @@ describe('Comment API contracts', () => {
     })
 
     it('returns zero counts for a user with no unread comments', async () => {
-      const summary = await service.getUnreadSummary('user_no_comments')
+      const summary = await service.getUnreadSummary('user_no_comments', INBOX_SCOPE)
 
       expect(summary.unreadCount).toBe(0)
       expect(summary.mentionUnreadCount).toBe(0)
@@ -134,7 +137,7 @@ describe('Comment API contracts', () => {
       //   count(*) filter (where mentions @> ...) for mention-specific unread
       // Both conditions require r.comment_id is null (unread) as the WHERE clause.
       // This ensures mentionUnreadCount is a subset of unreadCount.
-      const summary = await service.getUnreadSummary('user_2')
+      const summary = await service.getUnreadSummary('user_2', INBOX_SCOPE)
 
       // With mock returning null/0, both should be 0
       expect(summary.mentionUnreadCount).toBeLessThanOrEqual(summary.unreadCount)
@@ -208,7 +211,7 @@ describe('Comment API contracts', () => {
 
   describe('getUnreadCount() still works (legacy)', () => {
     it('returns a number', async () => {
-      const count = await service.getUnreadCount('user_1')
+      const count = await service.getUnreadCount('user_1', INBOX_SCOPE)
       expect(typeof count).toBe('number')
       expect(count).toBe(0) // mock returns null → 0
     })

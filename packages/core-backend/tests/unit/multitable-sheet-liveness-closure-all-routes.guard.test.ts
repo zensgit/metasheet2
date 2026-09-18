@@ -155,6 +155,9 @@ const DELEGATED_GUARDS: Record<string, { helper: string; delegated: string; wiri
 const PRE_GATE_CALLS: Record<string, string> = {
   applyBurstLimiter: 'per-caller AI rate limiting (multitable-ai.ts) — consumes a burst token, touches no sheet data',
   resolveBulkJobForActor: 'the caller’s OWN job header (multitable-ai.ts; owner + cross-sheet 404) — reads no record',
+  getCommentAddress: 'WHICH sheet a comment-id route must gate on (#5831; comments.ts resolveCommentIdContext only) — '
+    + 'CommentService.getCommentAddress reads the two addressing columns of one meta_comments row by id, no content, no '
+    + 'author and no sheet data (both asserted in "COMMENT-ID ROUTES")',
 }
 
 function resolveImport(fromFile: string, specifier: string): string | null {
@@ -673,16 +676,61 @@ const LEGACY_PERMISSION_NOT_FIXED = '. `:id` IS a meta_sheets id on the kysely s
   + 'names a legacy spreadsheet and a meta-sheet liveness refusal would break it. Proposed once production is '
   + 'confirmed: canManageSheetAccess + a liveness refusal on grant/revoke.'
 
-const COMMENT_RESIDUAL = 'GAP — tracked in #5831 (see docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md '
-  + '§Residual) — '
+/**
+ * #5831 part B — the user-scoped cross-sheet aggregates of CommentService and how each must apply the
+ * route's CommentInboxScope: admit it first (a missing or empty scope answers empty WITHOUT a query), then
+ * put `inboxScopePredicate` in the WHERE of every query that counts or lists (`wheres` = how many).
+ */
+const COMMENT_SCOPED_AGGREGATES: Record<string, { wheres: number }> = {
+  getInbox: { wheres: 2 },
+  getUnreadCount: { wheres: 1 },
+  getUnreadSummary: { wheres: 1 },
+}
+/** #5831 part B — the id-only candidate listers the route turns into that scope (called by it alone). */
+const COMMENT_INBOX_CANDIDATE_LISTERS = ['listInboxCandidateSheetIds', 'listInboxCandidateRowIds']
 
-/** A service method whose body still selects without a liveness or readable-sheet filter. */
-const commentServiceUnfiltered = (method: string) => {
+/**
+ * A scoped aggregate really filters: it admits the scope and returns before querying when nothing is
+ * admitted, and each of its `.where(…)` scope filters sits on a query BEFORE that query executes (for the
+ * page query: before `.limit(`), so COUNT and pages see the same rows.
+ */
+const commentServiceScoped = (method: string) => {
   const code = functionCode('services/CommentService.ts', method)
-  return code.length > 0 && !/deleted_at|resolveReadableSheetIds|readableSheetIds|resolveSheet\w*Capabilities/.test(code)
+  const spec = COMMENT_SCOPED_AGGREGATES[method]
+  if (!spec || code.length === 0) return false
+  if (!/const admitted = admitInboxScope\(scope\);\s*if \(!admitted \|\| userId\.trim\(\)\.length === 0\)\s*return [^;]*;/.test(code)) return false
+  const queries = code.split(/\bawait db\b/).slice(1)
+  const scoped = queries.filter((q) => /\.where\((?:scopePredicate|inboxScopePredicate\(admitted\))\)/.test(q))
+  if (queries.length !== spec.wheres || scoped.length !== spec.wheres) return false
+  return scoped.every((q) => {
+    const at = q.search(/\.where\((?:scopePredicate|inboxScopePredicate\(admitted\))\)/)
+    const end = q.search(/\.(?:limit|execute|executeTakeFirst)\(/)
+    return end > at
+  })
 }
 
-const noSheetGate = (h: RouteHandler) => !/\b(resolveCommentReadContext|resolveSheet\w*Capabilities|loadSheetLiveness)\b/.test(everything(h))
+/** The route half of an inbox entry: the handler asks resolveCommentInboxScope and hands the scope on. */
+const inboxRouteScoped = (h: RouteHandler, call: RegExp) => /const inbox = await resolveCommentInboxScope\(req, commentService\);/.test(h.code)
+  && call.test(h.code)
+  && h.helpers.has('resolveCommentInboxScope')
+  && !/\bgetUserId\(/.test(h.code)
+
+const INBOX_SCOPE_REASON = 'CROSS-SHEET AGGREGATE, FILTERED (#5831 part B): it names no sheet, so it cannot answer with the '
+  + 'single-sheet 403/404. Instead resolveCommentInboxScope (same file) keeps only comments on LIVE sheets the caller may READ '
+  + '(loadSheetLivenessBatch + filterReadableSheetRowsForAccess, the gate’s rules for a set) and, on a row-deny sheet '
+  + '(loadInboxRowDenySheetIds, one batched flag lookup), only on the candidate rows it CHECKED and found allowed (non-admins; '
+  + 'an allow list, so a row it never checked is left out), and CommentService applies that scope in the WHERE of '
+  + 'every count and page query (all asserted in "INBOX SCOPE").'
+
+/** #5831 part A: the `:commentId` routes of comments.ts, each gated on the comment's own sheet. */
+const COMMENT_ID_ROUTES = [
+  'PATCH /api/comments/:commentId',
+  'DELETE /api/comments/:commentId',
+  'POST /api/comments/:commentId/read',
+  'POST /api/comments/:commentId/reactions',
+  'DELETE /api/comments/:commentId/reactions',
+  'POST /api/comments/:commentId/resolve',
+]
 
 const COVERED: Record<string, CoveredFile> = {
   'routes/api-tokens.ts': {
@@ -729,55 +777,23 @@ const COVERED: Record<string, CoveredFile> = {
   },
   'routes/comments.ts': {
     minHandlers: 18,
-    minInScope: 10,
+    // 10 sheet-addressed + the 6 comment-id routes, which gate on the comment's own sheet (#5831 part A).
+    minInScope: 16,
     exempt: {},
     behaviourTest: 'comment-routes-sheet-liveness.test.ts',
     unaddressed: {
-      touches: /\bcommentService\.\w+\(/,
+      // Any reference to the service counts (a cast such as `(commentService as any).x(` included).
+      touches: /\bcommentService\b/,
       named: {
         'GET /api/comments/inbox': {
-          reason: `${COMMENT_RESIDUAL}CROSS-SHEET LISTING (pre-existing): CommentService.getInbox selects every unread `
-            + 'or @-mentioning comment by another author across ALL sheets — content, sheet/base/field names — with no '
-            + 'per-sheet read filter and no deleted-sheet filter. A single-sheet gate cannot fix it; it needs the '
-            + 'readable, live sheet set applied in SQL before LIMIT/OFFSET (asserted still unfiltered).',
-          stillTrue: (h) => /\bcommentService\.getInbox\(/.test(h.code) && commentServiceUnfiltered('getInbox'),
+          reason: INBOX_SCOPE_REASON,
+          stillTrue: (h) => inboxRouteScoped(h, /\bcommentService\.getInbox\(inbox\.userId, \{ limit, offset \}, inbox\.scope\)/)
+            && commentServiceScoped('getInbox'),
         },
         'GET /api/comments/unread-count': {
-          reason: `${COMMENT_RESIDUAL}CROSS-SHEET COUNT (pre-existing): CommentService.getUnreadSummary counts unread `
-            + 'comments across ALL sheets with no per-sheet read filter and no deleted-sheet filter — the same '
-            + 'residual as the inbox (asserted still unfiltered).',
-          stillTrue: (h) => /\bcommentService\.getUnreadSummary\(/.test(h.code) && commentServiceUnfiltered('getUnreadSummary'),
-        },
-        'PATCH /api/comments/:commentId': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): the service finds the comment by id and checks `
-            + 'only authorship, never the comment’s sheet — no per-sheet read gate and no liveness, so an author can '
-            + 'still edit a comment on a soft-deleted sheet.',
-          stillTrue: noSheetGate,
-        },
-        'DELETE /api/comments/:commentId': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): authorship only, never the comment’s sheet — `
-            + 'an author can still delete a comment on a soft-deleted sheet.',
-          stillTrue: noSheetGate,
-        },
-        'POST /api/comments/:commentId/read': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): marks a read receipt by comment id for any `
-            + 'comments:read holder, without resolving the comment’s sheet (no read gate, no liveness).',
-          stillTrue: noSheetGate,
-        },
-        'POST /api/comments/:commentId/reactions': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): adds a reaction by comment id for any `
-            + 'comments:write holder, without resolving the comment’s sheet (no read gate, no liveness).',
-          stillTrue: noSheetGate,
-        },
-        'DELETE /api/comments/:commentId/reactions': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): removes the caller’s reaction by comment id `
-            + 'without resolving the comment’s sheet (no read gate, no liveness).',
-          stillTrue: noSheetGate,
-        },
-        'POST /api/comments/:commentId/resolve': {
-          reason: `${COMMENT_RESIDUAL}COMMENT-ID ADDRESSED (pre-existing): resolves ANY comment by id for any `
-            + 'comments:write holder — no authorship check, no read gate, no liveness.',
-          stillTrue: noSheetGate,
+          reason: `${INBOX_SCOPE_REASON} It counts with the SAME scope the inbox lists with.`,
+          stillTrue: (h) => inboxRouteScoped(h, /\bcommentService\.getUnreadSummary\(inbox\.userId, inbox\.scope\)/)
+            && commentServiceScoped('getUnreadSummary'),
         },
       },
     },
@@ -1584,7 +1600,11 @@ describe('sheet-liveness closure over EVERY route file', () => {
       ...Object.entries(OPAQUE_REGISTRATIONS).flatMap(([file, entries]) => Object.entries(entries).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e])),
     ]
     expect(reasons.flatMap(([key, entry]) => reasonProblems(key, entry))).toEqual([])
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(15)
+    // 12 after #5831 part A closed the six comment-id GAPs (GUARDED now, see COMMENT-ID ROUTES); 10 after
+    // part B closed the inbox and unread-count GAPs (FILTERED now, see INBOX SCOPE); 9 after #5844 closed the
+    // requireRecordReadable order GAP on main. A branch that closes another GAP lowers this floor by the
+    // number it removes (#5843, which closes the #5832 GAP, takes it to 8).
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(9)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
@@ -1732,6 +1752,178 @@ describe('sheet-liveness closure over EVERY route file', () => {
       const text = readFileSync(join(__dirname, config.behaviourTest!), 'utf8')
       expect(text, `${config.behaviourTest} must assert its route table against the scan`).toContain(`sheetAddressedRouteKeys('${file}')`)
     }
+  })
+
+  it('COMMENT-ID ROUTES (#5831): gated on the comment’s OWN sheet, through one pre-gate lookup that reads only the comment’s address', () => {
+    const file = 'routes/comments.ts'
+    const s = scan(file)
+    // Population: exactly these routes are addressed by comment id, and each one is GUARDED by the id gate.
+    const idRoutes = s.handlers.filter((h) => h.paths.some((p) => p.includes(':commentId')))
+    expect(idRoutes.map((h) => h.key).sort()).toEqual([...COMMENT_ID_ROUTES].sort())
+    for (const h of idRoutes) {
+      expect(addressesASheet(h), h.key).toBe(true)
+      expect(guardOf(file, h), h.key).toBe('gate-helper resolveCommentIdContext')
+      expect(analysisOf(file, h).violations, h.key).toEqual([])
+      // The gate is asked about the very id the service then acts on.
+      expect(h.code, h.key).toMatch(/const commentId = req\.params\.commentId;/)
+      expect(h.code, h.key).toMatch(/await resolveCommentIdContext\(req, res, commentService, commentId\)/)
+    }
+
+    // The gate: the comment's stored sheet, never a sheet id from the request; one refusal body for
+    // "no such comment", "may not read its sheet" and "may not read its row".
+    const gate = functionCode(file, 'resolveCommentIdContext')
+    expect(gate).toMatch(/^async function resolveCommentIdContext\([^)]*\)[^{]*\{\s*const address = await commentService\.getCommentAddress\(commentId\);/)
+    expect(gate).toMatch(/await resolveCommentReadContext\(req, res, address\.spreadsheetId, \[address\.rowId\]\)/)
+    expect(gate).toMatch(/if \(isRowDenied\(context, address\.rowId\)\)/)
+    expect(gate).not.toMatch(/\breq\.(query|body|params)\b|\bsheetId\b/)
+    const readGate = functionCode(file, 'resolveCommentReadContext')
+
+    // Row deny bound (#5831 fix round): only the id gate bounds the deny lookup, to the comment's own row;
+    // every sheet-addressed caller still loads the complete set its filters rely on; and an id route never
+    // treats its (bounded) deny set as a sheet-wide one.
+    expect(readGate.match(/\bloadDeniedRecordIds\(/g)).toHaveLength(1)
+    expect(readGate).toMatch(/await loadDeniedRecordIds\(query, spreadsheetId, access\.userId, denyScopeRowIds\)/)
+    const readGateCalls = [...codeOf(s.sourceFile, s.sourceFile).matchAll(/await resolveCommentReadContext\(([^()]*)\)/g)].map((m) => m[1]!)
+    expect(readGateCalls.length).toBeGreaterThanOrEqual(10)
+    for (const args of readGateCalls) expect(args, args).toMatch(/^req, res, [^,]+$|^req, res, address\.spreadsheetId, \[address\.rowId\]$/)
+    expect(readGateCalls.filter((args) => args.split(',').length !== 3)).toEqual(['req, res, address.spreadsheetId, [address.rowId]'])
+    for (const h of idRoutes) expect(h.code, h.key).not.toMatch(/\b(deniedRows|filterDeniedRows|deniedRowIds)\b/)
+    const refusals = [...`${gate}\n${readGate}`.matchAll(/res\.status\(403\)\.json\(([^\n]*)\);/g)].map((m) => m[1])
+    expect(refusals).toHaveLength(3)
+    expect(new Set(refusals).size).toBe(1)
+
+    // The pre-gate lookup (PRE_GATE_CALLS.getCommentAddress) is called from that gate only, and reads the
+    // three addressing columns of one meta_comments row by id — nothing else.
+    const callers: string[] = []
+    for (const rel of listSourceFiles()) {
+      const source = readSource(rel)
+      if (!source.includes('getCommentAddress')) continue
+      const sf = scanRouteSource(rel, source).sourceFile
+      for (const call of callSitesNamed(sf, new Set(['getCommentAddress']))) {
+        const owner = findFunctionsNamed(sf, 'resolveCommentIdContext').find((fn) => {
+          const from = sf.getLineAndCharacterOfPosition(fn.getStart(sf)).line + 1
+          const to = sf.getLineAndCharacterOfPosition(fn.getEnd()).line + 1
+          return call.line >= from && call.line <= to
+        })
+        callers.push(`${rel} ${owner ? 'resolveCommentIdContext' : `line ${call.line}`}`)
+      }
+    }
+    expect(callers).toEqual(['routes/comments.ts resolveCommentIdContext'])
+    const lookup = functionCode('services/CommentService.ts', 'getCommentAddress')
+    expect(lookup).toMatch(/\.selectFrom\('meta_comments'\)\s*\.select\(\['spreadsheet_id', 'row_id'\]\)\s*\.where\('id', '=', commentId\)\s*\.executeTakeFirst\(\)/)
+    expect(lookup.match(/\bselectFrom\(/g)).toHaveLength(1)
+    expect(lookup).not.toMatch(/\b(selectAll|join|leftJoin|innerJoin|sql|query|insertInto|updateTable|deleteFrom|content|author_id)\b/)
+
+    // Resolve (#5831 coordinator decision; stricter rule deferred to #5841): the sheet gate — read access to
+    // the comment's live sheet and row — plus comments:write, and nothing in between: the service runs on
+    // the very next statement after the gate's null check.
+    const resolve = idRoutes.find((h) => h.key === 'POST /api/comments/:commentId/resolve')!
+    expect(resolve.middleware).toMatch(/^rbacGuard\('comments', 'write'\)$/)
+    expect(resolve.code).toMatch(/const context = await resolveCommentIdContext\(req, res, commentService, commentId\);\s*if \(!context\)\s*return;\s*await commentService\.resolveComment\(commentId\);/)
+    expect(resolve.code.match(/\bcommentService\.\w+\(/g)).toEqual(['commentService.resolveComment('])
+  })
+
+  it('INBOX SCOPE (#5831 part B): the cross-sheet aggregates list and count only readable, live, non-denied comments, filtered in SQL', () => {
+    const file = 'routes/comments.ts'
+    const s = scan(file)
+    const inboxRoutes = s.handlers.filter((h) => /resolveCommentInboxScope/.test(h.code))
+    expect(inboxRoutes.map((h) => h.key).sort()).toEqual(['GET /api/comments/inbox', 'GET /api/comments/unread-count'])
+    for (const h of inboxRoutes) {
+      // Unaddressed by construction (a sheet-addressed route would owe the single-sheet 403/404 instead).
+      expect(addressesASheet(h), h.key).toBe(false)
+      expect(h.middleware, h.key).toMatch(/^rbacGuard\('comments', 'read'\)$/)
+    }
+
+    // The scope: authenticated identity only; liveness for everyone; the read rule for the set; row deny
+    // for non-admins, bounded to the candidate rows (a 3-argument loadDeniedRecordIds would scan the sheet),
+    // carried as an ALLOW list per row-deny sheet (a deny list would admit a row nobody checked).
+    const scope = functionCode(file, 'resolveCommentInboxScope')
+    expect(scope).toMatch(/const access = await resolveRequestAccess\(req\);\s*const userId = access\.userId;\s*if \(userId\.trim\(\)\.length === 0\)\s*return \{ userId: '', scope: \{ sheetIds: \[\], rowDenySheets: \[\] \} \};/)
+    expect(scope).not.toMatch(/\bgetUserId\(|x-user-id|req\.(headers|query|body|params)/)
+    expect(scope).toMatch(/const candidateSheetIds = await commentService\.listInboxCandidateSheetIds\(userId\);/)
+    expect(scope).toMatch(/const liveness = await loadSheetLivenessBatch\(query, candidateSheetIds\);\s*const liveSheetIds = candidateSheetIds\.filter\(\(sheetId\) => liveness\.get\(sheetId\) === 'live'\);/)
+    expect(scope).toMatch(/const readableSheetIds = await resolveInboxReadableSheetIds\(query, access, liveSheetIds\);/)
+    expect(scope).toMatch(/if \(!access\.isAdminRole\) \{/)
+    // The flag: ONE batched lookup over the readable set (never a per-sheet loadRowLevelReadDenyEnabled loop),
+    // by the single-sheet helper's own rule (approval-projection base ⇒ on, else the column).
+    expect(scope).toMatch(/const rowDenySheetIds = await loadInboxRowDenySheetIds\(query, readableSheetIds\);/)
+    expect(scope).not.toMatch(/\bloadRowLevelReadDenyEnabled\b/)
+    const flagBatch = functionCode(file, 'loadInboxRowDenySheetIds')
+    expect(flagBatch).toMatch(/'SELECT id, row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\)'/)
+    expect(flagBatch).toMatch(/isApprovalProjectionBaseId\([^)]*\) \|\| row\.enabled === true/)
+    expect(flagBatch).toMatch(/throw err;/)
+    expect(scope).toMatch(/await commentService\.listInboxCandidateRowIds\(userId, rowDenySheetIds\)/)
+    expect(scope.match(/\bloadDeniedRecordIds\(/g)).toHaveLength(1)
+    expect(scope).toMatch(/await loadDeniedRecordIds\(query, sheetId, userId, rowIds\)/)
+    // Every row-deny sheet is pushed (even with no candidate row), with its checked-and-allowed rows only.
+    expect(scope).toMatch(/for \(const sheetId of rowDenySheetIds\) \{(?:(?!continue)[\s\S])*rowDenySheets\.push\(\{ spreadsheetId: sheetId, allowedRowIds: rowIds\.filter\(\(rowId\) => !denied\.has\(rowId\)\) \}\);\s*\}/)
+    expect(scope).toMatch(/return \{ userId, scope: \{ sheetIds: readableSheetIds, rowDenySheets \} \};\s*\}$/)
+    const readable = functionCode(file, 'resolveInboxReadableSheetIds')
+    expect(readable).toMatch(/await filterReadableSheetRowsForAccess\(query, liveSheetIds\.map\(\(id\) => \(\{ id \}\)\), access\)/)
+    // The admin half of the gate's e-learning restriction (filterReadableSheetRowsForAccess skips it for admins).
+    expect(readable).toMatch(/if \(!access\.isAdminRole \|\| readable\.length === 0\)\s*return readable;/)
+    expect(readable).toMatch(/canAccessElearningProjectionSheet\(access, id, /)
+
+    // The service: the scope is applied by every aggregate, before COUNT and LIMIT.
+    for (const method of Object.keys(COMMENT_SCOPED_AGGREGATES)) {
+      expect(commentServiceScoped(method), `CommentService.${method} must admit and apply the inbox scope`).toBe(true)
+    }
+    const predicate = functionCode('services/CommentService.ts', 'inboxScopePredicate')
+    expect(predicate).toMatch(/c\.spreadsheet_id = any\(\$\{scope\.sheetIds\}::text\[\]\)/)
+    // Allow list on row-deny sheets: (not a row-deny sheet) OR (an allowed pair) — never `not exists (denied)`.
+    expect(predicate).toMatch(/and \(c\.spreadsheet_id <> all\(\$\{scope\.rowDenySheetIds\}::text\[\]\) or exists \(/)
+    expect(predicate).toMatch(/where allowed\.spreadsheet_id = c\.spreadsheet_id\s+and allowed\.row_id = btrim\(c\.row_id, \$\{JS_TRIM_WHITESPACE\}\)/)
+    expect(predicate).not.toMatch(/not exists|denied/)
+    const admit = functionCode('services/CommentService.ts', 'admitInboxScope')
+    expect(admit).toMatch(/if \(sheetIds\.length === 0\)\s*return null;/)
+    // A row-deny sheet is kept even when its allow list is empty (a malformed allow list can only narrow).
+    expect(admit).toMatch(/if \(sheetId\.length === 0\)\s*continue;\s*rowDenySheetIds\.add\(sheetId\);/)
+    // Kysely ANDs `.where()` calls without parentheses, so an `or` predicate must carry its own — or its
+    // branches escape the filters around it (the scope included).
+    expect(functionCode('services/CommentService.ts', 'inboxCandidatePredicate'))
+      .toMatch(/return sql<boolean> `\(\(\$\{inboxMentionPredicate\(userId\)\}\) or r\.comment_id is null\)`;/)
+    expect(predicate).toMatch(/return sql<boolean> `\(c\.spreadsheet_id = any\(\$\{scope\.sheetIds\}::text\[\]\) \$\{rowDenyPredicate\}\)`;/)
+
+    // CLOSED WORLD over CommentService: every method that reads meta_comments neither by id nor for ONE
+    // sheet is one of the scoped aggregates or an id-only candidate lister.
+    const service = scan('services/CommentService.ts')
+    const crossSheet: string[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.body) {
+        const code = codeOf(node, service.sourceFile)
+        const readsComments = /\bselectFrom\('meta_comments\b|\bfrom meta_comments\b/.test(code)
+        const bySheetOrId = /\.where\('(?:c\.)?(?:spreadsheet_id|id|parent_id)', '=',|\bc\.spreadsheet_id = \$\{(?!scope\b)/.test(code)
+        if (readsComments && !bySheetOrId) crossSheet.push(node.name.text)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(service.sourceFile)
+    expect(crossSheet.sort()).toEqual([...Object.keys(COMMENT_SCOPED_AGGREGATES), ...COMMENT_INBOX_CANDIDATE_LISTERS].sort())
+    for (const lister of COMMENT_INBOX_CANDIDATE_LISTERS) {
+      const code = functionCode('services/CommentService.ts', lister)
+      // Ids only — no content, author, mentions or names leave these.
+      expect(code, lister).toMatch(/\.select\((?:'c\.spreadsheet_id'|\['c\.spreadsheet_id', 'c\.row_id'\])\)/)
+      expect(code.match(/\.select(?:All)?\(/g), lister).toHaveLength(1)
+      expect(code.match(/\.selectFrom\(/g), lister).toHaveLength(1)
+    }
+    // …and only the scope helper calls them (nothing else may list candidates unfiltered).
+    const callers: string[] = []
+    for (const rel of listSourceFiles()) {
+      const source = readSource(rel)
+      if (!COMMENT_INBOX_CANDIDATE_LISTERS.some((name) => source.includes(name))) continue
+      const sf = scanRouteSource(rel, source).sourceFile
+      const owner = findFunctionsNamed(sf, 'resolveCommentInboxScope')[0]
+      for (const call of callSitesNamed(sf, new Set(COMMENT_INBOX_CANDIDATE_LISTERS))) {
+        const inside = owner !== undefined
+          && call.line >= sf.getLineAndCharacterOfPosition(owner.getStart(sf)).line + 1
+          && call.line <= sf.getLineAndCharacterOfPosition(owner.getEnd()).line + 1
+        callers.push(`${rel} ${call.name} ${inside ? 'resolveCommentInboxScope' : `line ${call.line}`}`)
+      }
+    }
+    expect(callers.sort()).toEqual([
+      'routes/comments.ts listInboxCandidateRowIds resolveCommentInboxScope',
+      'routes/comments.ts listInboxCandidateSheetIds resolveCommentInboxScope',
+    ])
   })
 
   it('vetted external guards refuse a non-live sheet (their bodies, not their names)', () => {

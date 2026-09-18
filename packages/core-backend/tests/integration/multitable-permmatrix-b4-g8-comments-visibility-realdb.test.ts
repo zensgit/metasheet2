@@ -289,13 +289,11 @@ describeIfDatabase('F1 — comments respect row-level read deny (real DB)', () =
  *
  * `CommentService.getInbox` (`/api/comments/inbox`) now additively projects `baseName`/`sheetName`/
  * `viewName`/`fieldName` alongside the existing `baseId`/`sheetId`/`viewId`/`fieldId` (raw ids kept,
- * names are name-first display sugar). See `CommentService.getInbox`'s doc comment for the
- * no-WHERE-relaxation reasoning: this endpoint has no per-sheet `resolveSheetReadableCapabilities`
- * gate (pre-existing, tracked residual from the G-8 verification doc — NOT this PR's scope). This
- * suite verifies the ADDITIVE projection itself (names correctly resolved alongside unchanged ids for
- * a row this endpoint already serves). It intentionally does NOT ship a row-selection/exclusion
- * golden for this endpoint — that would be asserting a property of pre-existing, unmodified query
- * logic that is out of scope for this PR to characterize.
+ * names are name-first display sugar). This suite verifies the ADDITIVE projection itself (names
+ * correctly resolved alongside unchanged ids for a row this endpoint serves). The row selection of the
+ * inbox (readable, live sheets only — #5831 part B) is pinned by the next suite; since that change the
+ * viewer here needs read access to both sheets, so it gets a per-sheet read grant (a comments:read code
+ * alone no longer shows comments on sheets the viewer cannot read).
  *
  * P3 follow-up (docket #71, off PR #4330's gate): the original golden above only pinned
  * baseName/sheetName/fieldName in real DB — `viewName` (the byte-twin of the already-tested `view_id`
@@ -370,9 +368,18 @@ describeIfDatabase('G-10 — comment inbox entity-name projection (real DB)', ()
        VALUES ($1,$2,$3,$4,$2,$3,$4,$5,$6,$7::jsonb, now(), now())`,
       [noViewCommentId, noViewSheetId, noViewRecordId, noViewFieldId, author, 'G10_INBOX_NOVIEW_COMMENT', JSON.stringify([viewer])],
     )
+
+    // #5831 part B: the inbox lists only sheets the viewer may read — grant read on both sheets.
+    for (const grantedSheetId of [sheetId, noViewSheetId]) {
+      await q(
+        `INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,'user',$2,'spreadsheet:read')`,
+        [grantedSheetId, viewer],
+      )
+    }
   })
 
   afterAll(async () => {
+    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [[sheetId, noViewSheetId]]).catch(() => {})
     await q('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [[viewerCommentId, recordLevelCommentId, noViewCommentId]]).catch(() => {})
     await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [sheetId]).catch(() => {})
     await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [noViewSheetId]).catch(() => {})
@@ -426,5 +433,155 @@ describeIfDatabase('G-10 — comment inbox entity-name projection (real DB)', ()
     expect(item).toBeTruthy() // row not dropped despite the sheet having zero meta_views rows
     expect(item?.viewId).toBeNull()
     expect(item?.viewName).toBeNull()
+  })
+})
+
+/**
+ * #5831 part B + #5840 — the cross-sheet comment aggregates and mark-all-read (real DB).
+ *
+ * The reader holds comments:read/write and NO global multitable code; it may read exactly the sheets it
+ * is granted, so the inbox and the counts are exact even in a shared database:
+ *   - A: granted, live — a1, a2 (mentions the reader), a3 unread; a4 mentions the reader and is read;
+ *        `own` is the reader's own comment WITHOUT a read record (must never be listed);
+ *   - B: live, NOT granted — b1 (mentions the reader), b2;
+ *   - C: granted, soft-deleted — c1 (mentions the reader);
+ *   - D: granted, live, row-level read deny on; d1 on a visible row, d2 (mentions the reader) on a row the
+ *        reader is denied.
+ * b1, d2 and `own` also pin the WHERE precedence: with the inbox predicate unwrapped, a mentioned comment
+ * escaped every later filter and an unread one escaped the author filter.
+ */
+describeIfDatabase('#5831 part B — inbox and unread count list only readable, live, non-denied comments (real DB)', () => {
+  const ts = Date.now()
+  const baseId = `base_5831b_${ts}`
+  const sheetA = `sheet_5831b_a_${ts}`
+  const sheetB = `sheet_5831b_b_${ts}`
+  const sheetC = `sheet_5831b_c_${ts}`
+  const sheetD = `sheet_5831b_d_${ts}`
+  const rowA = `rec_5831b_a_${ts}`
+  const rowB = `rec_5831b_b_${ts}`
+  const rowC = `rec_5831b_c_${ts}`
+  const rowDVisible = `rec_5831b_dv_${ts}`
+  const rowDDenied = `rec_5831b_dd_${ts}`
+  const reader = `user_5831b_reader_${ts}`
+  const author = `user_5831b_author_${ts}`
+  const bystander = `user_5831b_bystander_${ts}`
+  const id = (name: string) => `cmt_5831b_${name}_${ts}`
+  const LISTED = ['a1', 'a2', 'a3', 'a4', 'd1'].map(id)
+  const NOT_LISTED = ['own', 'b1', 'b2', 'c1', 'd2'].map(id)
+  const ALL = [...LISTED, ...NOT_LISTED]
+  const SHEETS = [sheetA, sheetB, sheetC, sheetD]
+  const PERMS = ['comments:read', 'comments:write']
+
+  async function comment(name: string, sheet: string, row: string, commentAuthor: string, mentions: string[], secondsAgo: number) {
+    await q(
+      `INSERT INTO meta_comments (id, spreadsheet_id, row_id, field_id, container_id, target_id, target_field_id, author_id, content, mentions, created_at, updated_at)
+       VALUES ($1,$2,$3,NULL,$2,$3,NULL,$4,$5,$6::jsonb, now() - make_interval(secs => $7), now() - make_interval(secs => $7))`,
+      [id(name), sheet, row, commentAuthor, `C5831B_${name.toUpperCase()}`, JSON.stringify(mentions), secondsAgo],
+    )
+  }
+
+  beforeAll(async () => {
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x'), ($2,'x'), ($3,'x') ON CONFLICT (id) DO NOTHING", [reader, author, bystander])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [baseId, '5831B Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3), ($4,$2,$5)', [sheetA, baseId, '5831B A', sheetB, '5831B B'])
+    await q('INSERT INTO meta_sheets (id, base_id, name, deleted_at) VALUES ($1,$2,$3, now())', [sheetC, baseId, '5831B C (deleted)'])
+    await q('INSERT INTO meta_sheets (id, base_id, name, row_level_read_permissions_enabled) VALUES ($1,$2,$3,TRUE)', [sheetD, baseId, '5831B D (row deny)'])
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,'{}'::jsonb,1), ($3,$4,'{}'::jsonb,1), ($5,$6,'{}'::jsonb,1), ($7,$8,'{}'::jsonb,1), ($9,$8,'{}'::jsonb,1)`,
+      [rowA, sheetA, rowB, sheetB, rowC, sheetC, rowDVisible, sheetD, rowDDenied],
+    )
+    for (const [grantSheet, grantUser] of [[sheetA, reader], [sheetC, reader], [sheetD, reader], [sheetA, bystander]] as const) {
+      await q(
+        `INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,'user',$2,'spreadsheet:read')`,
+        [grantSheet, grantUser],
+      )
+    }
+    await q(
+      `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1,$2,'user',$3,'none')`,
+      [sheetD, rowDDenied, reader],
+    )
+    await comment('a1', sheetA, rowA, author, [], 100)
+    await comment('a2', sheetA, rowA, author, [reader], 90)
+    await comment('a3', sheetA, rowA, author, [], 80)
+    await comment('a4', sheetA, rowA, author, [reader], 70)
+    await comment('own', sheetA, rowA, reader, [], 60)
+    await comment('b1', sheetB, rowB, author, [reader], 50)
+    await comment('b2', sheetB, rowB, author, [], 40)
+    await comment('c1', sheetC, rowC, author, [reader], 30)
+    await comment('d1', sheetD, rowDVisible, author, [], 20)
+    await comment('d2', sheetD, rowDDenied, author, [reader], 10)
+    await q('INSERT INTO meta_comment_reads (comment_id, user_id) VALUES ($1,$2)', [id('a4'), reader])
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [ALL]).catch(() => {})
+    await q('DELETE FROM meta_comments WHERE spreadsheet_id = ANY($1::text[])', [SHEETS]).catch(() => {})
+    await q('DELETE FROM record_permissions WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => {})
+    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [SHEETS]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [baseId]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[reader, author, bystander]]).catch(() => {})
+  })
+
+  const readerApp = () => buildApp(reader, PERMS)
+
+  async function inbox(limit: number, offset: number) {
+    const res = await request(readerApp()).get('/api/comments/inbox').query({ limit, offset })
+    expect(res.status, res.text).toBe(200)
+    return res.body.data as { items: Array<{ id: string; unread: boolean; mentioned: boolean }>; total: number }
+  }
+
+  test('lists exactly the readable, live, non-denied comments; total and pages agree (filtered before LIMIT/OFFSET)', async () => {
+    const pages = [await inbox(2, 0), await inbox(2, 2), await inbox(2, 4), await inbox(2, 6)]
+    expect(pages.map((p) => p.total)).toEqual([5, 5, 5, 5])
+    expect(pages.map((p) => p.items.length)).toEqual([2, 2, 1, 0])
+    // Newest first.
+    expect(pages.flatMap((p) => p.items.map((i) => i.id))).toEqual([id('d1'), id('a4'), id('a3'), id('a2'), id('a1')])
+    const body = JSON.stringify(await inbox(50, 0))
+    for (const hidden of NOT_LISTED) expect(body, hidden).not.toContain(hidden)
+    expect(body).not.toContain(rowDDenied)
+  })
+
+  test('unread-count counts the same scope: 4 unread, 1 mentioning the reader', async () => {
+    const res = await request(readerApp()).get('/api/comments/unread-count')
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ unreadCount: 4, mentionUnreadCount: 1, count: 4 })
+  })
+
+  test('comments the inbox leaves out are refused by the comment-id gate; nothing is written', async () => {
+    const statuses: Record<string, number> = {}
+    for (const name of ['b1', 'c1', 'd2']) {
+      statuses[name] = (await request(readerApp()).post(`/api/comments/${id(name)}/read`)).status
+    }
+    expect(statuses).toEqual({ b1: 403, c1: 404, d2: 403 })
+    const written = await q('SELECT comment_id FROM meta_comment_reads WHERE user_id = $1 AND comment_id = ANY($2::text[])', [reader, [id('b1'), id('c1'), id('d2')]])
+    expect(written.rows).toEqual([])
+  })
+
+  test('mark-all-read refuses a body userId naming someone else and leaves that user’s read state untouched (#5840)', async () => {
+    const res = await request(readerApp())
+      .post(`/api/multitable/${sheetA}/comments/mark-all-read`)
+      .send({ userId: bystander })
+    expect(res.status).toBe(403)
+    expect(JSON.stringify(res.body)).not.toContain(bystander)
+    const bystanderReads = await q('SELECT count(*)::int AS c FROM meta_comment_reads WHERE user_id = $1', [bystander])
+    expect(Number((bystanderReads.rows[0] as { c: number }).c)).toBe(0)
+    // The bystander can still clear their own state.
+    const own = await request(buildApp(bystander, PERMS)).post(`/api/multitable/${sheetA}/comments/mark-all-read`).send({})
+    expect(own.status).toBe(200)
+    expect(own.body.data.markedRead).toBe(5)
+  })
+
+  test('every listed item can be marked read; afterwards the unread count is 0 and only mentioned items stay listed', async () => {
+    for (const listed of (await inbox(50, 0)).items) {
+      const res = await request(readerApp()).post(`/api/comments/${listed.id}/read`)
+      expect(res.status, `${listed.id}: ${res.text}`).toBe(204)
+    }
+    const count = await request(readerApp()).get('/api/comments/unread-count')
+    expect(count.body.data).toEqual({ unreadCount: 0, mentionUnreadCount: 0, count: 0 })
+    const after = await inbox(50, 0)
+    expect(after.items.map((i) => i.id)).toEqual([id('a4'), id('a2')])
+    expect(after.total).toBe(2)
   })
 })
