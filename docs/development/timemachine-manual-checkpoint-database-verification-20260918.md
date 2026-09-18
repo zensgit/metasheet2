@@ -1125,3 +1125,32 @@ an exclusive provider-execution lease; exactly-once purge was not the contract.
 No reviewer approval is claimed. The agent is closed. Immutable source versioning
 and actual attachment archive copying are still OPEN. No Ready/merge/flag,
 dispatch, deployment or customer storage/data operation occurred.
+
+## Upload-Time Content Identity
+
+Code checkpoint: `93796435d5119da2fe40e2ca8a883249bdfa4d35`.
+Local attachment uploads with both existing archive/fence flags exact true now
+clone their input buffer, derive SHA-256 before I/O and exclusively create a
+server-UUID/sha256-digest key. The attachment row persists that key; user-visible
+filename remains the original DB filename. Other uploads retain their old layout.
+The source read API requires that content-addressed key format and compares read
+bytes against its preexisting digest. It never derives a new source identity for
+a legacy mutable key. Unsupported provider capability fails closed.
+
+Real temporary filesystem tests prove upload/read through a reopened provider,
+exclusive-create refusal, tampered bytes refusal, missing file refusal, legacy
+key refusal and flags-off upload parity. A production storeAttachment invocation
+with a capturing DB adapter proves the persisted key and unchanged display name;
+this adapter is not real-DB evidence. F3 workflow already explicitly invokes this
+whole test file, alongside filesStorageKey/filesAcl. Four focused/neighbor files
+77/77, acceptance tsc, source ESLint and diff-check PASS. Removing digest equality
+produces one exact tampered-source RED; restored tests PASS. All filesystem data
+is synthetic and removed by the suite.
+
+Logs: `/private/tmp/tm-source-version-{red,green,mutation,restored,canaries,tsc,lint}.log`.
+Terra's bounded read-only session did not return a terminal verdict and was
+closed; no external approval is claimed. This is content-identity enforcement,
+not filesystem WORM, NAS certification or customer-storage validation. Manual
+continuation still refuses attachments until source-pin verification, encrypted
+copy, attachment manifest/receipt finalization and restore consumption are
+connected and verified. This checkpoint is not end-to-end attachment archival.
