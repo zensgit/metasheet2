@@ -905,6 +905,18 @@ $ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci_virgin
 
 两边计数逐字相同(48/5/53)——修法在污染库与处女库上行为一致,不是「恰好在这一批污染物上蒙对了」。schema/batches-list 两个未改动的文件在两边都保持全绿(它们的断言全部按具体 id/batchId 定位,或已有 org 级清理,天然不暴露在这个共享表的问题面上——本轮据此判定这两个文件**不需要** `sinkForeignTemplates`)。
 
+**步骤④的机械核查(而不是只看「两个库都绿」)**:按记忆 `feedback_absolute_claim_sweep_must_be_mechanical`,「绿」本身不是证据——§11.1 自己就演示过「NULL-only 污染物让 execute/rollback 保持绿,换成 AAA 形状才现出原形」,同一个陷阱可能同样发生在这里。逐文件机械核查(`grep -n "org_id = \$1\|WHERE org_id\|count(\*)"` 打底,再读命中行上下文判断是不是「org 级全集/计数」还是「按具体 id 定位」):
+
+- `approval-template-groups-backfill-schema.db.test.ts` / `approval-template-groups-backfill-batches-list.db.test.ts`(A-3 本身另外两个真库文件):已在 §11.3 上文核实——全部命中要么是 DDL/约束层面的具体 conname 断言,要么按 batchId/templateId 精确定位,零一处对 `approval_templates` 的全局候选做全集/计数断言。
+- `approval-template-groups-lifecycle.db.test.ts`(A-1 既有文件,同一条 required lane):全文 `grep` 零次出现 `previewApprovalTemplateGroupBackfill`/`executeApprovalTemplateGroupBackfill`/`backfill`——这个文件测的是分组的直接 CRUD(create/archive/link/unlink 组的路由/服务函数),从未调用会扫描全局 `approval_templates` 候选池的那两个函数,因此结构上就不在本条缺陷的暴露面上,不是「跑一次污染集正好没触发」。文件里唯一的 `count(*)`/`WHERE org_id` 命中(`:391`/`:404`/`:417`/`:539`)全部读的是 `approval_template_groups`(这张表本身就有 `org_id` 列,原生按 org 隔离,不依赖候选查询)。
+- `approval-template-groups-serialization.db.test.ts`(A-1 既有文件):`grep` 命中 4 处真的调用了 HTTP `execute`/`rollback`(`:487`/`:646`/`:685`/`:707`,RR-pool 序列化/锁序探针)——**这个文件结构上确实在暴露面上**,逐处读完调用之后的断言:
+  - 每一处对 `execBody.groups`/`body.groups` 的读取都是 `.find((g) => g.category === category)`(`category` 由本用例自己用 `${TS}` 拼出的独一无二字符串,如 `` `ExecCat-${TS}` ``、`` `LOExec-${TS}` ``——与本轮污染集的 `NULL`/`'   '`/`'AAA'` 三个字面量不可能撞上),从未对整个 `groups` 数组做 `toEqual`/`toHaveLength`(`grep -n "\.groups\b|toHaveLength|candidateCount|\.buckets\b"` 全文件只命中这两处 `.find`,零一处数组级断言)。
+  - 之后所有 SQL 复核(`:504`/`:585`/`:659`/`:662`/`:722`/`:729`)全部按 `org_id = $1 AND name = $2` / `template_id = $2` / `id = $2` 精确定位,唯一的数值比较是 `expect(Number(ownGroup.rows[0].sort_order)).toBeGreaterThan(1)`——`toBeGreaterThan`,不是精确相等,多一个外来 category 触发的额外建组只会把 sort_order 推得更高,不会让这条断言变红。
+  - 唯一读 `approval_template_groups` 全集数组的用例(`:315` "E: 两个并发 create … `[1, 2]`")走的是 `POST /api/approval-template-groups` 这条**直接建组**路由,不经过 backfill/候选查询,`approval_templates`/污染物与它无关。
+  - **实测确证**(不是只靠代码走查):这四处 backfill 调用点在 §11.5 的 84 文件复现里,就是在含 `NULL`/`'   '`/`'AAA'` 三种形状污染物的同一个 `metasheet2_lock_a3_ci` 库上原样跑过的——`✓ approval-template-groups-lifecycle.db.test.ts (19 tests | 1 skipped) 887ms`、`✓ approval-template-groups-serialization.db.test.ts (14 tests | 1 skipped) 6743ms`,两个文件零红。
+
+结论:步骤④要求的「同类共享 org 假设」普查,在 A-3 自己的另外两个文件、以及同一条 lane 里唯一两个会调用受影响函数的 A-1 文件(`serialization`)上都做了——零命中需要隔离;`lifecycle` 结构上不在暴露面上。不新增改动。
+
 ### 11.4 Mutation(唯一亲跑;`cp` 备份 → 编辑 → 单独跑 → `cp` 还原 → `cmp`)
 
 对 `classifyBackfillCategory`(`packages/core-backend/src/services/ApprovalTemplateGroupService.ts:705-718`)做探针:去掉 blank-after-trim 单独分支,让空字符串落进「不可存储」分支(与 CJK 类共用 `CATEGORY_NOT_STORABLE_AS_GROUP_NAME` 这一个 reason):
@@ -973,6 +985,6 @@ $ git diff --stat
  docs/development/approval-template-groups-phase2-backfill-verification-20260918.md | <本节自身>
  4 files changed
 ```
-零生产代码改动(§11.4 的 mutation 探针已 `cmp` 确认字节级复原,不计入本次提交);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-backfill-batches-list.db.test.ts` 按 §11.3 结论保持不动。§10 是既有编号(修复轮 3),本节按既有编号序延续为 §11——三个文件里的代码注释本身已经这样自称(「§11 CI fix」),本节把编号落回 MD 正文,不是新起一套编号。
+零生产代码改动(§11.4 的 mutation 探针已 `cmp` 确认字节级复原,不计入本次提交);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-backfill-batches-list.db.test.ts`/`approval-template-groups-lifecycle.db.test.ts`/`approval-template-groups-serialization.db.test.ts` 按 §11.3「步骤④机械核查」小节的 `grep` + 逐命中行走查 + 84 文件污染库实测三重证据保持不动,不是仅凭「两个库都绿」。§10 是既有编号(修复轮 3),本节按既有编号序延续为 §11——三个文件里的代码注释本身已经这样自称(「§11 CI fix」),本节把编号落回 MD 正文,不是新起一套编号。
 
 **遗留(如实记录,不算已满足)**:`directory-binding-admin-routes.db.test.ts` 的跨文件 flake 未定位根因,只确认与本切片无关且不可能是本切片下游;是否需要单独立项排查,交 owner/后续 lane 裁决。
