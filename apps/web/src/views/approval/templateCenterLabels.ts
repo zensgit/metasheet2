@@ -64,6 +64,9 @@ export const ZH = {
   groupSectionsLoadError: '加载分组失败',
   groupSectionEmpty: '此分组暂无表单',
   groupSectionLoadMore: '加载更多',
+  groupSectionMoveUp: '上移分组',
+  groupSectionMoveDown: '下移分组',
+  groupReorderError: '调整分组顺序失败',
 } as const
 
 export const EN: Record<keyof typeof ZH, string> = {
@@ -115,4 +118,7 @@ export const EN: Record<keyof typeof ZH, string> = {
   groupSectionsLoadError: 'Failed to load groups',
   groupSectionEmpty: 'No templates in this group',
   groupSectionLoadMore: 'Load more',
+  groupSectionMoveUp: 'Move group up',
+  groupSectionMoveDown: 'Move group down',
+  groupReorderError: 'Failed to reorder groups',
 }
