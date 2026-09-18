@@ -1002,8 +1002,10 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
 // project-scoped read cannot see: ACTIVE rows whose projectNo differs from `parameters.projectNo`.
 //
 // BOUNDED READ, SAME BOUNDS, SAME TRUNCATION POLICY AS THE PROJECT-SCOPED READ. The scan pages the
-// `active=true` equality filter (the records API only speaks equality, so "projectNo != X" cannot be
-// pushed down) with the SAME page limit / maxPages, and when the bound is hit:
+// WHOLE sheet, unfiltered (the records API only speaks equality, so "projectNo != X" cannot be pushed
+// down, and an `active = 'true'` text-equality filter would miss the 1 / "1" / "yes" / "y" values the
+// fill view reads as true — see `stockPreparationRowIsActive`), with the SAME page limit / maxPages,
+// and when the bound is hit:
 //   * >= 1 foreign active row already seen -> refuse with TARGET_SHEET_FOREIGN_PROJECT and
 //     `scanTruncated: true` (a partial scan that saw one foreign row is proof enough);
 //   * 0 foreign rows seen -> refuse with TABLE_ACTION_EXISTING_ROWS_TOO_LARGE exactly like the
@@ -1012,16 +1014,39 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
 //     branch, and `scanTruncated` only ever travels on a refusal.
 //
 // VALUES-FREE. The details carry two integers and an optional boolean — never a project number, never a
-// row value. `active` follows the planner's reading (`existingRow.active === false` is inactive), but
-// the pushed-down filter is `active === true`, so a row whose `active` cell is NULL is not counted; that
-// is the same set the fill views' `active` filter shows the customer.
+// row value.
+//
+// WHAT COUNTS AS ACTIVE is the FILL VIEW's reading, not the planner's: the view's `active` filter goes
+// through `toComparableBoolean` (packages/core-backend/src/routes/univer-meta.ts, ~:2836), and the
+// automation `update_record` bare UPDATE can store any of the shapes it accepts. The helper below is
+// that rule set copied verbatim, so the rows this guard counts are exactly the rows the customer sees.
+//
+// WHAT COUNTS AS THE SAME PROJECT is RAW exact equality with `parameters.projectNo` — the same text
+// equality the project-scoped read pushes down as SQL. A stored "P-001 " is NOT "P-001" to that read
+// (mark_inactive will never sweep it), so it is foreign here too; trimming would open exactly the hole
+// the guard exists to close.
+function stockPreparationRowIsActive(value) {
+  // Copied from toComparableBoolean (univer-meta.ts): null/undefined -> null; boolean as is; number
+  // -> !== 0; string -> trim+lower: '' -> null, true/1/yes/y -> true, false/0/no/n -> false, any other
+  // non-empty string -> true; anything else -> Boolean(value). Only a strict `true` is active here.
+  if (value === null || value === undefined) return false
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase()
+    if (s === '') return false
+    if (s === 'true' || s === '1' || s === 'yes' || s === 'y') return true
+    if (s === 'false' || s === '0' || s === 'no' || s === 'n') return false
+    return true
+  }
+  return Boolean(value)
+}
+
 async function assertTargetSheetHoldsNoForeignActiveRows(recordsApi, target, projectNo, options = {}) {
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
   const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
-  const filters = {
-    [mapFieldName('active', target.fieldIdMap)]: true,
-  }
+  const filters = {}
   const foreignProjects = new Set()
   let foreignActiveRowCount = 0
   let scanTruncated = true
@@ -1038,11 +1063,10 @@ async function assertTargetSheetHoldsNoForeignActiveRows(recordsApi, target, pro
     }
     for (const raw of pageRows) {
       const row = unmapRecordFields(raw, target.fieldIdMap)
-      if (row.active === false) continue
-      const rowProjectNo = optionalString(row.projectNo)
-      if (rowProjectNo === projectNo) continue
+      if (!stockPreparationRowIsActive(row.active)) continue
+      if (row.projectNo === projectNo) continue
       foreignActiveRowCount += 1
-      foreignProjects.add(rowProjectNo === null ? '' : rowProjectNo)
+      foreignProjects.add(typeof row.projectNo === 'string' ? row.projectNo : JSON.stringify(row.projectNo === undefined ? null : row.projectNo))
     }
     if (pageRows.length < limit) {
       scanTruncated = false
@@ -2406,6 +2430,11 @@ async function applyStockPreparationAction(input = {}) {
   // keeping "everything that plans through computeDryRun is probed" a property of computeDryRun
   // itself rather than of whoever calls it.
   await assertTargetFieldsExist(action, input.targetFieldExistence)
+  // #5860, same treatment: a foreign project's rows that landed between plan and apply refuse here,
+  // BEFORE the single-use token is burned, so the operator who creates a fresh sheet (or sweeps the
+  // other project) can still apply the plan they proved. The call inside `computeDryRun` runs once
+  // more a moment later for the same reason the existence probe does.
+  await assertTargetSheetHoldsNoForeignActiveRows(input.recordsApi, action.target, parameters.projectNo)
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
@@ -2549,6 +2578,7 @@ module.exports = {
     plmSystemFieldIds,
     readExistingStockPreparationRows,
     assertTargetSheetHoldsNoForeignActiveRows,
+    stockPreparationRowIsActive,
     stableStringify,
     targetFieldMapHasExplicitBindings,
     unmapRecordFields,
