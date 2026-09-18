@@ -952,3 +952,41 @@ not full Workbench login/UAT, restore execution or an attachment recovery drill.
 The optional browser leg is not claimed as remotely required CI. Attachments
 remain refused by manual continuation. PR stays Draft/HOLD; no flags outside
 the owned test process, dispatch, deployment or production operations occurred.
+
+## Manual Capture To Real HTTP Restore
+
+Code checkpoint: `49a590333952d88a37435253cdfe94b061dcdcd1`.
+Test-only increment, with production restore code byte-identical after mutation
+restoration. The same owned database/local custody/filesystem archive now supplies
+a real explicit HTTP restore after the synthetic post-archive field edit.
+
+- Strict history mode disabled: execute returns 409 RECOVERY_TRUST_REQUIRED and
+  adds no restore history. Enabling it is confined to the owned test process and
+  restored in finally; canonical authority triggers are enabled only in the
+  disposable database, as in the existing server/local-startup acceptance drivers.
+- The positive path uses the actual route, fresh permission stabilization and
+  restore kernel, not injected write/authorization callbacks. One field returns
+  to its archived value. The response reports one revert, zero resurrection and
+  zero deletion.
+- The new revision has the exact actor, source=restore, changed field, patch and
+  snapshot; its joined operation is sealed with event_count=1.
+- Reusing the consumed preview returns 409 and leaves data, version and history
+  unchanged. The fixture does not rewind the successful recovery's live version.
+- A synthetic-only server replay horizon is explicitly supplied in this driver;
+  no production default or retention value is introduced.
+
+Mutation: replace the restore SQL data assignment with an identity assignment,
+while preserving its successful update/response, then run the same driver. It
+fails precisely at the archived-field-value assertion. Restoring the production
+file byte-for-byte returns the full driver and both browser viewports to green.
+
+Final evidence: 59 + 127 neighbor tests, TM migration/replay census and all driver
+assertions PASS; Chromium 1440/390 capture/reload/catalog/preview PASS; acceptance
+TypeScript, exact-anchor wiring and diff-check PASS. Owned browser/listener/cache
+cleaned; database/connections zero; synthetic cluster removed on red and green.
+Logs: `/private/tmp/tm-manual-restore-http-{mutation,restored,tsc,wiring}.log`.
+
+Scope: one scalar revert through real HTTP in a synthetic environment. This is
+not evidence of browser-driven restore confirmation, deleted-record/field replay,
+attachment copying, full authenticated Workbench UAT or production readiness.
+No customer data/storage, deployment, dispatch, Ready or merge action occurred.

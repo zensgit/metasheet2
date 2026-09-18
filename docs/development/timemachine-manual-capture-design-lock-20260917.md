@@ -2,6 +2,14 @@
 
 Status: OWNER-CONFIRMED bounded scope; implementation and acceptance OPEN.
 
+Latest local acceptance: `067b0154794a91222407e29e9c8ae84c5d2208d2` joins
+the production modal/client to HTTP capture, status, catalog and preview at desktop
+and mobile widths. `49a590333952d88a37435253cdfe94b061dcdcd1` additionally
+executes a real HTTP restore of a synthetic changed scalar field, proves its sealed
+restore history, and refuses consumed-token replay. Browser-driven restore clicks,
+full login/UAT and immutable attachments remain open. The dated checkpoints below
+retain their original narrower evidence boundaries.
+
 UI checkpoint `360a65ce3`: the existing archive modal now has an explicit selected
 table confirmation and manual capture/status section. It stores only a request UUID
 for tab-session reload, rechecks durable status on mount, retries that same request,
