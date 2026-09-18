@@ -103,6 +103,7 @@ jobs:
                 apps/web/src/utils/permission-match.ts|\
                 apps/web/src/utils/networkErrors.ts|\
                 apps/web/src/utils/api.ts|\
+                apps/web/src/api/delete-fallback.ts|\
                 apps/web/src/utils/explicitSessionOrg.ts|\
                 apps/web/src/utils/authRedirect.ts|\
                 apps/web/src/views/plm/plmClipboard.ts|\
