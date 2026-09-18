@@ -12,11 +12,14 @@
   'flat'), so nothing here can affect any test that never toggles that ref.
 
   Bucket set: every ACTIVE group (§4 row C's `group:<id>`, sorted by `sortOrder`) plus `ungrouped`
-  (§4 row C's `group_id IS NULL` ∪ never-linked-with-empty-category bucket). The THIRD token shape,
-  `category:<name>`, is deliberately NOT enumerated here yet (it needs the distinct category-name
-  list from `listTemplateCategories()` cross-referenced against which names still have never-linked
-  rows) — left for a follow-up step; the backend bucket is already implemented and real-DB tested
-  regardless of whether this view enumerates it.
+  (§4 row C's `group_id IS NULL` ∪ never-linked-with-empty-category bucket) plus one `category:<name>`
+  section per name `listTemplateCategories()` returns. That list is GLOBAL and org-agnostic (no
+  link-row awareness, §Q5 undecided, deliberately untouched by this slice) — it is a name
+  CANDIDATE list, not itself a bucket enumeration, so each candidate is resolved against this org's
+  actual `category:<name>` bucket (server-side: never-linked + that literal category) and DROPPED
+  from `sections` when its own `total` is 0 (unlike `group:`/`ungrouped`, which always render, empty
+  state included — a category name with zero matching rows in this org is not a real section, it is
+  a name that happens to exist somewhere in the global template table).
 
   Each section paginates independently (§4 row C: "每个 section 独立 page/pageSize"; the response's
   own `total` is this bucket's count, per-section, not a client-reconstructed one) via a manual
@@ -84,7 +87,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import type { ApprovalTemplateListItemDTO, ApprovalTemplateStatus } from '../../types/approval'
-import { listApprovalTemplateGroups, listTemplatesBySection } from '../../approvals/api'
+import { listApprovalTemplateGroups, listTemplateCategories, listTemplatesBySection } from '../../approvals/api'
 import { useLocale } from '../../composables/useLocale'
 import { ZH, EN } from './templateCenterLabels'
 
@@ -110,6 +113,10 @@ interface SectionState {
   page: number
   pageSize: number
   hasMore: boolean
+  // `group:`/`ungrouped` always render (empty state included); a `category:<name>` candidate is
+  // dropped from `sections` when its own `total` is 0 — see the header comment / `loadAll` below.
+  // Not read by the template.
+  alwaysShow: boolean
 }
 
 const PAGE_SIZE = 10
@@ -132,19 +139,28 @@ async function loadAll(): Promise<void> {
   loadingGroups.value = true
   loadError.value = null
   try {
-    const groups = (await listApprovalTemplateGroups())
+    const [groupRows, categoryNames] = await Promise.all([
+      listApprovalTemplateGroups(),
+      listTemplateCategories(),
+    ])
+    const groups = groupRows
       .filter((g) => g.archivedAt === null)
       .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
     const buckets = [
-      ...groups.map((g) => ({ token: `group:${g.id}`, title: g.name })),
-      { token: 'ungrouped', title: t.value.categoryEmpty },
+      ...groups.map((g) => ({ token: `group:${g.id}`, title: g.name, alwaysShow: true })),
+      { token: 'ungrouped', title: t.value.categoryEmpty, alwaysShow: true },
+      // Candidates only — `listTemplateCategories()` is global/org-agnostic (§Q5 undecided), so a
+      // name here may resolve to zero rows in THIS org's `category:<name>` bucket; those are
+      // dropped below rather than rendered as an empty section (see header comment).
+      ...categoryNames.map((name) => ({ token: `category:${name}`, title: name, alwaysShow: false })),
     ]
-    sections.value = await Promise.all(
-      buckets.map(async ({ token, title }) => {
+    const loaded = await Promise.all(
+      buckets.map(async ({ token, title, alwaysShow }) => {
         const res = await fetchPage(token, 1)
         return {
           token,
           title,
+          alwaysShow,
           items: res.data,
           total: res.total,
           page: 1,
@@ -156,6 +172,7 @@ async function loadAll(): Promise<void> {
         } satisfies SectionState
       }),
     )
+    sections.value = loaded.filter((s) => s.alwaysShow || s.total > 0)
   } catch (e: any) {
     loadError.value = e?.message ?? t.value.groupSectionsLoadError
     sections.value = []
