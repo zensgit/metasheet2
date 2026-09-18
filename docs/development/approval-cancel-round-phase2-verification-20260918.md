@@ -27,6 +27,7 @@ result lines they printed. Units not yet done are listed as not done, not as pas
 | R-6 | §3.4, §3.11.6 and the redemption suite's own header (phase 2, all three units) | a new `.db.test.ts` would owe 「the **hard-coded `FILES` array** in `scripts/ops/ci-realdb-step-contract.mjs:99-102` — a closed world that stays green for a file it does not list」 | **RETRACTED — that is not what lives at `:99-102`, and the script holds no file list at all.** Read this session: `:99-102` is `REAL_DB_STEP_IDS = Object.freeze({ approval: 'approval-real-db-integration', multitable: 'multitable-real-db-integration' })` — a frozen map of two **step ids**, not test files. The file population is DERIVED from the workflow at check time (`wholeFileVitestArgs`, `:521-525`, reads the parsed step's own vitest invocations), so it cannot go stale against `plugin-tests.yml` the way a hard-coded list would. `grep -c 'db.test.ts'` over the whole script ⇒ **1** (a doc-comment example at `:513`), `grep -c cancel-round` ⇒ **0**. Consequence for this line: a new `.db.test.ts` under the existing `approval` step owes `plugin-tests.yml` + the s6a re-pin, and owes this script **nothing**. The three places carrying the wrong description are corrected in place; the two commit messages that repeated it cannot be, so this row is their correction. |
 | R-7 | §4's 「§5 I3 『终结即释放』 mutation」 bullet (previous revision) | the mutation's red would be 「the next create is **refused by the partial unique index** with 23505/409」 | **RETRACTED — the index is never reached in the sequential shape.** Measured in §3.14.2: `createCancelRoundInstance` has an application pre-check at `ApprovalProductService.ts:8558-8568` that runs before the `INSERT`, and M-21's stack frame is `ApprovalProductService.ts:8563:15` — `CANCEL_ROUND_ALREADY_PENDING` (409). The 23505 backstop at `:8697-8705` is the CONCURRENT-race path and this case does not construct one. The half that stands: C-3's outcome write is what releases the slot. The half that does not: any claim about `uq_approval_rounds_pending_document` itself. |
 | R-8 | §3.15.6 (previous revision), and the 账侧 case's own doc comment | 「`redeemCancelRoundInTxn` **DISCARDS** the entry's `{ kind: 'executed', response }` payload, so the approval side **has no channel to present it on at all**」 | **RETRACTED IN PART — the 「at all」 is false, and §3.16 measures the channel.** The discard is real and stands. What does not stand is the conclusion drawn from it: the redemption path supplies a non-null `operationId`, so it takes the boundary's identity+preflight+**seal** branch, and `sealAttendanceResultOperationV1` writes `attendance_result_operations.response_snapshot` with the adapter's WHOLE response object on the CALLER's transaction client (`w4c3b-request-operation-boundary.ts:918-921` → `w4c0-operation-registry.ts:756-790`). The counter is therefore computed, persisted and queryable per operation, and commits with the approve. §3.16 measures it at **120**, not at 0. The item that remains open is narrower than the one that was written: which USER-FACING surface renders it. Registered as an owner decision, not as a contract gap in the persistence. |
+| R-9 | commit `ab36b38f0`'s message, last paragraph | 「§4's bullet **is updated** from 'no probe' to CLOSED with its scope limits」 | **RETRACTED — at that SHA it was not.** The commit applied §3.18 and then attempted a second edit to §4's I3 bullet and §3.14.5's writer row; that edit threw `AssertionError` (the target string did not match), and because the `git add && git commit` was newline-separated rather than `&&`-chained, the commit landed anyway — with §3.18 present and both older 「no probe exists」 statements still standing. So `ab36b38f0` briefly contained a file that asserted a probe exists (§3.18) and that none exists (§3.14.5 row `:9108`, §4's bullet) at the same time. FIXED one commit later by `79f3d3ce2`, which is where the §4 and §3.14.5 updates actually live, and which discloses the mechanism. The original message cannot be edited without a force-push, so this row is its correction. **Consequence for a gate reader**: verify the §4 bullet against `79f3d3ce2` or later, never against `ab36b38f0`. |
 
 ```
 $ git grep -nE "result\.(response|lifecycleEvents|resolvedRequestId)" -- packages/core-backend/src/attendance/w4c3b-request-operation-boundary.ts
@@ -2113,6 +2114,12 @@ what a broken attribution predicate returns.
 
 Measured: `calcA = calcB = '0'`, `outboxA = outboxB = '0'`.
 
+> ⚠️ **措辞更正,见 §3.19.2** — 本节标题的 「parity-trivial … not covered」 与下一段的 「skipped on
+> BOTH」 容易被读成 「这两步的断言被 `test.skip` 掉了」。**没有任何 `test.skip`**:③/⑦ 是按值断言的
+> (就是上面这一行)。被跳过的是**生产分支**(org 处于 `legacy_projection_only`)。开放项因此是**分支
+> 覆盖**,不是缺断言。这条更正只针对措辞;下面 「OPEN: a twin pair in a non-legacy org」 的**要求本身
+> 仍然 OPERATIVE**。
+
 ⚠️ **What that green is and is not.** Posture is an ORG property and the twins are asserted to share
 an org, so they take the SAME branch by construction; these fixtures sit in
 `legacy_projection_only` (the same posture §3.12.3 records for the end-to-end case). So steps ③ and
@@ -2906,6 +2913,20 @@ census Q-G 四条腿覆盖——含一条用真实 `40P01` 证明**修复前的�
 **②的负例方向,本分支确实没有。** 「复核**失败**时必须拒绝」是一条**行为**断言,不是平价断言;本分支
 没有任何用例构造「考勤请求已不在可取消状态」的夹具。登记在 §4,不含糊成「①/② 不适用」。
 
+这条「零」附它的命令与计数(`feedback_absolute_claim_sweep_must_be_mechanical`),并且**限定在本切片
+的两个 cancel-round 套件内**——我没有扫全仓,所以断言的人口就写成这两个文件:
+
+```
+$ git grep -nE "attendance_requests[^\n]*SET status|UPDATE attendance_requests" \
+    -- packages/core-backend/tests/integration/approval-cancel-round-*.db.test.ts
+(无输出)
+$ … | wc -l
+0
+```
+
+⇒ 这两个套件里**零**处把 `attendance_requests.status` 改成不可取消态。范围之外(别的套件、考勤线自己的
+套件)**我没有扫**,所以这条不是全仓断言。
+
 ### 3.19.2 ⚠️ ③/⑦ 的开放项**不是**「把断言写出来」——它们已经是断言了
 
 这一条是对一种**误读**的更正,而且这个误读容易发生,所以写在这里:§3.15.11 的标题是「why two of
@@ -2921,7 +2942,21 @@ C-1's steps are **parity-trivial** here, not covered」,正文说 ③(取消计�
 
 所以这两步的真实开放项是**分支覆盖**,不是断言缺失,它需要的东西也完全不同:一对**非 legacy org** 的
 twin,即 rollout registry 夹具(`w4c0-operation-registry.ts:640`、`:877` 解析 `acceptedWritePosture`)
-——本文件今天没有任何用例做这件事。而且那还只是入场券:`authoritative`/`shadow` 分支一旦真的跑起来,
+——本文件今天没有任何用例做这件事,这条「零」同样附命令与计数:
+
+```
+$ grep -n "acceptedWritePosture\|w4c0-operation-registry" \
+    packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+1461:   *     posture here, and the adapter's P14 branch is `approvedLeave && acceptedWritePosture !==
+2051:      // registry (`w4c0-operation-registry.ts:640`, `:877`): under `legacy_projection_only` the
+2115:   * `data.reversal` included (`w4c0-operation-registry.ts:756-790`). That write is issued on the
+$ … | wc -l
+3
+```
+
+**3 处命中,逐条读过,全部在文档注释里**(行首分别是 `*`、`//`、`*`)——**零处可执行的 registry 夹具
+代码**。命中非零却是注释,这正是为什么这条要贴命令而不是只写 `wc -l`:一个只看计数的读者会把 3 当成
+「已经有夹具了」。而且那还只是入场券:`authoritative`/`shadow` 分支一旦真的跑起来,
 新出现的 calculation / outbox 行**各自需要自己的归一化对**(它们带各自的 id 与时间戳),否则 twin 比对
 会立刻因身份列不同而红。这是一个**独立单元**,不是本单元能顺手收的一行断言。
 
@@ -2952,7 +2987,33 @@ B 侧走的是 HTTP `POST /api/attendance/requests/:id/cancel`,它的 `operation
 
 登记在 §4,附这条可机核的判据,而不是含糊的「⑥ 开放」。
 
-### 3.19.4 本节没有改动任何代码或测试
+### 3.19.4 两点接线,在**本 head** 上重新核过(不继承 §3.15.9)
+
+§3.15.1 声明过:§3.15 以上的每个绝对数都绑 `7ef8e610e` 基点。两点接线的 exclude 半边本单元此前是
+**继承**的,这里在 `a02930896` 基点上重新量:
+
+```
+$ grep -n "approval-cancel-round-redemption" packages/core-backend/vitest.config.ts
+1846:      'tests/integration/approval-cancel-round-redemption.db.test.ts',
+$ grep -n "approval-cancel-round-redemption" .github/workflows/plugin-tests.yml
+1668:            tests/integration/approval-cancel-round-redemption.db.test.ts \
+```
+
+⇒ 两点都在:默认 lane **exclude** 它(`vitest.config.ts:1846`),required lane 的
+`approval-real-db-integration` 步骤**显式列出**它(`plugin-tests.yml:1668`)。顶层 `EXPECT_DB` 哨兵在
+本文件头部 `itIfExpectDb`——本单元直接读过,不是转述:
+
+```
+$ grep -n "itIfExpectDb\|EXPECT_DB" \
+    packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+70:const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+71:itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+```
+
+(⚠️ 本节初稿把这个哨兵写成 `:63-66`,那是文件头 doc comment 的行,**写错了**;改成贴 grep 输出而不是
+再钉一个会腐烂的行号区间。)
+
+### 3.19.5 本节没有改动任何代码或测试
 
 纯文档单元:把已有的测量换个说法、把误读挡掉、把三个开放项写成**可执行的下一步**而不是形容词。
 本节不产生任何新的绿。
