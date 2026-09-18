@@ -626,7 +626,7 @@ e0defbe26 ci(attendance): publish a stable web guard check (#4585)
 | `d3097be00` | 第 1 轮门审的被审 head | **1** | 全部命中,在唯一那条(活)行里 | `6e24b8854`(同 author date + subject;`d3097be00`/`5d0f780f5`/`b1e5c745f` 三者本身互为 rebase 副本,patch-id 逐字相同,故共享同一当前谱系对应件) |
 | `5d0f780f5` | 本轮 rebase 前的尖端 | **2** | 只命中第二条(死)行;第一条(活)行零命中 | `6e24b8854`(同上) |
 | `b1e5c745f` | `5d0f780f5` 的 rebase 等价物 | **2** | 同上 | `6e24b8854`(同上) |
-| `f3137d0de` | 上一份报告的被审 head | 2(承袭) | 同上 | `c41710ab0`(§0 已证树逐字节相同) |
+| `f3137d0de` | 上一份报告(第 2 轮门审)的被审 head——**这是 P3-9 代码修复之后**的 head,不是之前;§0 已证 `git diff f3137d0de c41710ab0` 为空(树逐字节相同),现场 `git show f3137d0de:apps/web/scripts/run-required-web-tests.sh \| grep -c '^exec npx vitest run'` 复核 = **1**,与 `c41710ab0`/`f9cb22666` 同为修复后状态,不与上面几行的"修复前、含重复行"归为一类 | **1** | 全部命中,在唯一那条(活)行里 | `c41710ab0`(§0 已证树逐字节相同) |
 | — | **当前谱系** | 1(修复后) | 全部命中,在唯一那条(活)行里 | `f9cb22666`(本文档被审 head) |
 
 也就是说,**在被门审的那个 head(`d3097be00`)与两份 MD 撰写时的 head(`cb6d7fa9f`)上,三份 spec 确实在 required 的 `web-tests` job 里**——gate 报告 §1.4「令牌解析验证」与两份 MD §1/§2.1/§2.3 在它们各自运行的那个 head 上**都是对的**,不是被 `tail -1` / first-match 这两个工具的窗口盲区骗过。重复行是后来(committer date)09-18 20:56:36 那次 rebase 才制造出来的,发生在 `d3097be00` 之后、`5d0f780f5` 尖端形成之时。**上一版"此前的每一个 HEAD 上都是假的"这句全称式判断是一次错误撤回**——它撤销的是一份原本正确的证据(记忆:"失效标记要求值不要作废整节")。真正需要更正的只是"当前 HEAD"之前那些**含重复行**的 head(`5d0f780f5`/`b1e5c745f`),不是此前全部历史。
@@ -640,7 +640,7 @@ e0defbe26 ci(attendance): publish a stable web guard check (#4585)
   - **并集语义**(遍历所有匹配 `vitest run` 的逻辑行,把每一行的 token 都并起来,不判断该行是否会被前面的无条件 `exec` 短路):见 (c)。
 (c) **并集语义的读取者现场核实有两处,不是一处**:`packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts` 的 `extractVitestTokensFromBashScript`(`:119-145`)与 `packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts` 的 `requiredLaneTokens`(`:61-79`,现场读了实现——`for (const line of joined.split('\n'))` 遍历每一条含 `vitest run` 的逻辑行,逐行把 token 追加进同一个数组,同样不区分某一行是否可达)。这一类的失真方向更隐蔽:死副本上的 token 会被两处都判定"已进入 required lane",看起来像覆盖到了,实际上从未被执行到。修复前,这两处守卫对这三份 spec 的 covered 判定本身就是错的。
 
-**机械前置(供未来 rebase,供下一轮/下一次改动这条 exec 行时核)**:任何一次改动或合并涉及 `apps/web/scripts/run-required-web-tests.sh` 的这条 `exec npx vitest run` 巨行之后,必须核两件事:①`grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh` 恒等于 1;②如果 rebase/合并呈现过该行的两个版本,合并后单行的 token 集合必须等于两个版本 token 集合的**并集**(不丢、不重复)。机械脚本见本轮新增的 `scripts/dev/atg-exec-line-post-rebase-check.sh`(只读,不改脚本本体;退出码非零时打印重复行数与——若提供两个待比较的 ref——双向 token 差集,供人工核对)。
+**机械前置(供未来 rebase,供下一轮/下一次改动这条 exec 行时核)**:任何一次改动或合并涉及 `apps/web/scripts/run-required-web-tests.sh` 的这条 `exec npx vitest run` 巨行之后,必须核两件事:①`grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh` 恒等于 1;②如果 rebase/合并呈现过该行的两个版本,合并后单行的 token 集合必须等于两个版本 token 集合的**并集**(不丢、不重复)。机械脚本见本轮新增的 `scripts/dev/atg-exec-line-post-rebase-check.sh`(只读,不改脚本本体;退出码非零时打印重复行数与——若提供两个待比较的 ref——双向 token 差集,供人工核对)。**实现口径更正(2026-09-19,第三次复核修正)**:脚本把"等于并集"拆成两个独立检查而不是一次相等性比较——Check 2 只看当前这一行内部有没有重复 token(与任何 ref 无关),Check 3 只看当前 token 集合是否为 `<ref-a>`/`<ref-b>` 并集的**超集**(不丢);二者合起来在"当前行本身无重复"这个前提下等价于"等于并集",但不等价于对任意输入都成立的严格集合相等——如果未来在 `<ref-a>`/`<ref-b>` 之外又混入了一个全新的、任一 ref 都没有的 token,Check 3 仍会 PASS(超集允许多出的元素),需要人工核对该新 token 是否是这次改动本身有意引入的。
 
 **修复本身(scripts/dev,本轮允许改;不回退)**:合并两行为一行——死副本独有的三个新 token(`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel`,丢弃死副本里重复的 `categoryCandidateInput`,活行里已有)追加到活行的 `--reporter=dot` 之前;删除死副本整行;三段说明注释一并移到活行之前并修正措辞(P3-4)。
 
@@ -710,28 +710,52 @@ A	scripts/dev/atg-exec-line-post-rebase-check.sh
 $ git grep -n "此前的每一个" -- . | cut -d: -f1,2
 docs/development/approval-template-groups-phase1-fe-verification-20260918.md:148
 docs/development/approval-template-groups-phase1-fe-verification-20260918.md:519
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:608
 docs/development/approval-template-groups-phase1-fe-verification-20260918.md:617
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:695
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:632
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:710
 ```
 
-真实命中 **5** 处,不是上一版暗示的 1 处。`:148` 是 §12.9 开头的复核修正段,用"本节最初的这条更正说……——这句全称式判断是错的"的回顾句式转述并撤销;`:519` 是处置表行,转述报告原文指出的错误;`:608` 是 §12.9 一处小标题式的否定句("这条重复不是……——逐 head 核对……");`:617` 是 §12.9 影响声明段,同样以"……这句全称式判断是一次错误撤回"收尾;第 5 处是本条命令行自身。**逐条判读:全部回顾式/自指,零处以"成立"口吻残留。**
+真实命中 **5** 处,不是上一版暗示的 1 处。`:148` 是 §12.9 开头的复核修正段,用"本节最初的这条更正说……——这句全称式判断是错的"的回顾句式转述并撤销;`:519` 是处置表行,转述报告原文指出的错误;`:617` 是 §12.9 一处小标题式的否定句("这条重复不是……——逐 head 核对……");`:632` 是 §12.9 影响声明段,同样以"……这句全称式判断是一次错误撤回"收尾;第 5 处是本条命令行自身。**逐条判读:全部回顾式/自指,零处以"成立"口吻残留。**
 
 ```
 $ git grep -n "无人发现" -- . | cut -d: -f1,2
 docs/development/approval-template-groups-phase1-fe-verification-20260918.md:519
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:586
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:706
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:593
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:721
 ```
 
-真实命中 **3** 处,不是上一版暗示的 1 处。`:519`/`:586` 都在转述并撤销原 §12.9 那句已证伪的根因描述("实现者在死副本上继续追加"那句的后半);第 3 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留。**
+真实命中 **3** 处,不是上一版暗示的 1 处。`:519`/`:593` 都在转述并撤销原 §12.9 那句已证伪的根因描述("实现者在死副本上继续追加"那句的后半);第 3 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留。**
 
 ```
 $ git grep -n "在.*之前的所有历史 HEAD 上.*都是假的" -- . | cut -d: -f1,2
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:644
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:715
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:659
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:730
 ```
 
 真实命中 **2** 处,不是上一版声称的 0 处。`:644` 正文把这句被证伪的全称断言完整放在引号内、紧跟"按上文逐 head 核对,这句话不成立"——**恰恰就是**上一版宣称不存在的那种"引用后限定"保留形式(整句原文保留,不是"originally said"式的部分改写);第 2 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留**——但上一版"零命中"与"不是引用后限定这种保留形式"两句表述本身是假的,已在本段开头更正,不再以转录形式重复出现在别处。
 
 三条搜索串给出的判读结论一致:被证伪的旧结论只以"上一版说过……"这类回顾性引用形式存在,没有一处以独立、无限定的当前事实口吻重新站立。按"失效标记要求值不要作废整节"的纪律,本节要撤回的是旧版 §12.9 那三处结论本身,而不是这些字符串一旦出现就必须清零——只要出现处都带着否定/回顾限定,就合乎要求。
+
+**P2-1 本身的四句英文原句也补一遍全仓机械扫描**(不只中文三串;§12.12 上一版的自扫范围本来就是因为带 `-- '*.md'` 才漏看 `.sh` 里的英文原句,这次连带把原文一起扫,不能只信"改过了"这句自我陈述)。以下命令只取 `file:line`(不取内容——原因见 §12.12 开头的教训:取内容会把搜索串再嵌入一次,自我放大命中数)。命令自身的搜索串会在下方 code fence 里出现一次,构成 1 条自指命中:
+
+```
+$ git grep -nE 'were ever exercised|added the duplicate copy rather than editing|without anyone noticing|picked the wrong one' -- . | cut -d: -f1,2
+docs/development/approval-lock10-instance-readability-20260821.md:223
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:521
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:742
+```
+
+命中 3 处。`docs/development/approval-lock10-instance-readability-20260821.md:223` 与本次改动完全无关(另一份设计文档,谈的是另一套锁的 C-1/C-3 关系,巧合命中四句里的一句);`:521` 是本文档处置表里转述被撤回原句以说明处置内容的那一行;第 3 处是本条命令行自身。`apps/web/scripts/run-required-web-tests.sh` **零命中**——四句被证伪的英文原句在该文件里已被 P2-1 的改写完全替换,不是部分保留或仅加限定词。
+
+### 12.13 第三次修正 diffstat 证据
+
+对象:独立复核门审 `p3-hygiene-gate2-A2-20260919.md`(NEEDS-FIX,0 P1/2 P2/5 P3),被审 head `f9cb22666`。比照 §12.12 自己的论证——`--name-status` 而不是 `--stat` 的行数/字节数才是不自指的证据(`--stat` 的插入行数会因为"把这段证据写进文档"这个动作本身而在下一次编辑后过期):
+
+```
+$ git diff --name-status f9cb22666
+M	apps/web/scripts/run-required-web-tests.sh
+M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
+M	scripts/dev/atg-exec-line-post-rebase-check.sh
+```
+
+三个文件,零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"生产脚本的注释块"(`run-required-web-tests.sh`,exec 行本身未改,见 P2-1 disposition 行的 md5 核对)、"验证 MD"(本文档)、"scripts/dev 只读检查脚本"三类,与本轮硬规矩("只许 MD/注释/scripts/dev")一致。
