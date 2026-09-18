@@ -2340,6 +2340,126 @@ $ (packages/core-backend) DATABASE_URL=…/metasheet2_lock_c2 EXPECT_DB=1 \
 green is recorded here as what it is (the fixture worked), not as evidence the case is strong. The
 strength claim rests on M-23/M-24, not on the green.
 
+---
+
+## 3.17 §9-9 允许集的 `approve` 成员半边 — C-1 门审 P3-1 / R5-M7 的承接 (this unit)
+
+C-1 第 5 轮门审(`impl-gate-C-slice1-round5-20260918.md` §3 P3-1、§4 表 R5-M7)的裁定:ratify 的
+§9-9 允许集 `{approve, reject, revoke, comment}` 有**补集半边**与**成员半边**,C-1 只钉住了补集。
+门审逐格亲跑的成员半边结果是 `reject` ⇒ 2 红、`revoke` ⇒ 4 红、`comment` ⇒ 1 红、**`approve` ⇒
+48/48 全绿**。锁文自己把这一格划给 C-2:`approve` 就是 §14.3 出口 #5,出口 #5 就是判据 II。
+
+### 3.17.1 先测量,再写用例 — 这一格在 C-2 上**已经不空了**
+
+在写任何用例之前,先把门审的 R5-M7 在本分支 head 上原样重跑一遍(`'approve'` 从
+`CANCEL_ROUND_ALLOWED_ACTIONS`(`ApprovalProductService.ts:4432-4437`)移除,其余一字不改):
+
+```
+$ 基线 DATABASE_URL=…/metasheet2_lock_c2_u2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+      Tests  17 passed (17)
+
+$ (R5-M7 重放,本 head,新用例尚未写)
+      Tests  11 failed | 6 passed (17)
+```
+
+**11/17 红。** 所以「零判别力」这个状态描述在 C-2 上已经失效——它是被判据 II/IV、R2、账侧、
+§3.16 这些**兑现路径上的用例**顺带钉住的。这一节如实记下这个数,而不是先写一个新用例再宣称
+是它闭合了这一格。
+
+### 3.17.2 那为什么还要一个专门的用例 —— 11 条红全是**后果红**
+
+逐条看那 11 条红的断言文本,没有一条是在断言「成员身份」:
+
+| 红的形状 | 例子 |
+|---|---|
+| `expected 409 to be 200` | 判据 IV、I3(C-3 半)、判据 II、判据 IV `blocked`、账侧、§3.16 等 8 条 |
+| `expected 'CANCEL_ROUND_OUTLET_FORBIDDEN' to be '<本用例自己的码>'` | `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`、`CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE`、`CANCEL_ROUND_BUSINESS_TARGET_MISSING` 各 1 条 |
+
+两种都是**后果**:它们说「兑现没发生」,不说「是动作判定闸拒的」。后果红分不清「闸把它拒了」
+与「兑现在下游坏了」,并且这些断言一旦被重构(换码、换状态码、换成别的出口),这一格就**悄悄空回去**
+——这正是 `feedback_digest_pin_is_not_a_behavioural_gate` 那一族。
+
+所以本单元补的是一条让**成员身份本身承重**的用例,做法是在**同一个实例、同一次运行**里测量同一道闸的两侧:
+
+1. **非成员对照(in-case positive control)**:`handle`(出口 #4)经 `dispatchAction` ⇒ 409
+   `CANCEL_ROUND_OUTLET_FORBIDDEN`,且 `approval_instances` 的 `(version, status)` 逐列不变、轮次仍
+   `pending`。这一半证明**闸在这个实例上是活的**,否则第 2 步的成功可以被读成「这里根本没有闸」
+   (`feedback_positive_control_not_failclosed`)。
+2. **成员本身**:同一实例上 `approve` 经真实 `POST /api/approvals/:id/actions` ⇒ 200,并且
+   **正向**断言兑现真的发生了(port 被调 1 次、实例 `approved`、轮次 `applied` + `ended_at` 非空),
+   而不是断言「不是 `CANCEL_ROUND_OUTLET_FORBIDDEN`」——`notEqual` 族分不清成功与因别的原因失败
+   (`feedback_not_this_error_is_not_an_outcome_assertion`)。
+
+允许集字面量是**本地独立副本**,不 import 生产的 `CANCEL_ROUND_ALLOWED_ACTIONS`——import 会让这条
+用例对它要抓的收窄回归**同义反复**;这与补集半边
+(`approval-cancel-round-outlet-guards.db.test.ts:401`)的理由逐字相同。用例自带两条空转防护
+(`has('approve') === true`、`has('handle') === false`),否则两个半边就不再是「成员」与「非成员」。
+
+### 3.17.3 Mutation 台账(this unit)
+
+`cp` 备份 → 改 → 单独跑 → `cp` 还原 → `cmp`。
+
+| # | Mutation | site | expected | measured |
+|---|---|---|---|---|
+| M-25 | 门审 R5-M7 同一条:从 `CANCEL_ROUND_ALLOWED_ACTIONS` 删掉 `'approve'`(1 行),其余一字不改 | `ApprovalProductService.ts:4433` | 新用例红,且红在**成员判定**那一行、错误码逐字是 `CANCEL_ROUND_OUTLET_FORBIDDEN` | **单跑新用例:1 failed / 17 skipped**,红在 `approval-cancel-round-redemption.db.test.ts:1146:62`,`AssertionError: {"error":{"code":"CANCEL_ROUND_OUTLET_FORBIDDEN","message":"Cancel-round instances do not accept action \"approve\""}}: expected 409 to be 200`。**全文件:12 failed / 6 passed (18)**——即 §3.17.1 的 11 条后果红 + 本用例这 1 条成员红 |
+
+红落在 `:1146` 而不是更早的对照行,这一点本身是判据:对照半边(`handle` ⇒ 409、行不变)在
+mutation 下**仍然通过并被求值**,所以本用例的红确实是「`approve` 不再是成员」而不是「闸整个没了」
+——§3.14.1 那条「用例死在更早的断言上 ⇒ 该子句没有承载 mutation」的陷阱在这里被显式避开了。
+
+还原后 `cmp` 与两份备份**都**逐字节相同,`git status` 只剩测试文件一项修改:
+
+```
+$ cmp /tmp/u2-APS-m25.ts src/services/ApprovalProductService.ts   → RESTORED-IDENTICAL
+$ cmp /tmp/u2-APS-backup.ts src/services/ApprovalProductService.ts → ALSO-IDENTICAL-TO-PRE-M7
+$ git status --short
+ M packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+### 3.17.4 这条用例**不**证明什么
+
+- **不**是允许集四个成员的机械遍历。它只钉 `approve` 一格;`reject`/`revoke`/`comment` 三格的钉由
+  门审第 5 轮 R5-M8/M9/M10 在 C-1 上逐格测量过(分别 1/4/2 红),本单元**不继承也不重跑**它们,
+  它们仍是 C-1 的证据、绑 C-1 的 head。
+- **不**证明 `handle` 之外的补集成员——那是补集半边的事,在 `outlet-guards.db.test.ts:401` 用
+  `APPROVAL_ACTION_TYPES` 机械遍历,本用例只借 `handle` 当**本例对照**,不重复那次遍历。
+- 兑现半边绑的是**测试替身** port(`bindCancellationPort`),与 §3.11.6 四例同一层级:它证审批侧
+  的半个合同,不证真实 W4 协议(那是 §3.12 的端到端用例)。
+
+### 3.17.5 Wiring — 无新增钉
+
+用例追加进 `approval-cancel-round-redemption.db.test.ts`,该文件已在
+`.github/workflows/plugin-tests.yml:1668` 的 `approval-real-db-integration` 步骤里。**无新
+`.db.test.ts`、无新 lib、无新表 ⇒ 不触发 s6a 重钉、不触发考勤四道普查钉、不触发 W7-R10 分类、
+`scripts/ops/ci-realdb-step-contract.mjs` 无欠账**(§0 R-6 已裁定后者对新文件也零欠账)。顶层
+`EXPECT_DB` 哨兵与两点接线对该文件早已就位。
+
+```
+$ grep -n "approval-cancel-round-redemption" .github/workflows/plugin-tests.yml
+1668:            tests/integration/approval-cancel-round-redemption.db.test.ts
+$ git status --short   # 本提交touch 的文件
+ M packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+ M docs/development/approval-cancel-round-phase2-verification-20260918.md
+```
+
+### 3.17.6 Commands and results
+
+```
+$ npx tsc --noEmit -p tsconfig.json
+[exited with code 0]
+
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+      Tests  18 passed (18)          ← 新用例落地后
+```
+
+私有库 `metasheet2_lock_c2_u2`(本子 lane 自建:`createdb` + `npx tsx src/db/migrate.ts`,409 条迁移
+全绿,`to_regclass('public.approval_rounds')` → `approval_rounds`,421 张表)。未触碰任何共享 /
+staging / 生产库。
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -2452,6 +2572,16 @@ they are.
   probed** — the C-2 success writer at `:9108` (`outcome = 'applied'`) is commented as I3 in the
   test file at `:1027` but has **no** probe, and building one needs the attendance target plus the
   double (§3.14.5's table). M-7 remains a mutation of the outcome's *value*, not its presence.
+- **§9-9 允许集的 `approve` 成员半边** (C-1 门审第 5 轮 P3-1 / R5-M7) — **承接并闭合在 §3.17**,
+  但闭合的方式与门审建议的不同,且这一点是本节的要点:门审当时写的是「零判别力」,而在本分支
+  head 上重放 R5-M7 已经是 **11 failed / 6 passed (17)** ——这一格早就被判据 II/IV、R2、账侧、
+  §3.16 顺带钉住了。补的用例(`:1101-1163`)因此不是「从空到有」,而是把**后果红**换成**成员红**:
+  11 条红全是 `expected 409 to be 200` 或「错误码不是我要的那个」,分不清「闸拒了」与「兑现在下游
+  坏了」,且会随那些断言的重构悄悄空回去。新用例在同一实例上同时测量闸的两侧(非成员 `handle` ⇒
+  409 + 行逐列不变;成员 `approve` ⇒ 200 + 轮次 `applied` 正向断言),M-25 红在 `:1146:62` 且错误码
+  逐字是 `CANCEL_ROUND_OUTLET_FORBIDDEN`,对照半边在 mutation 下仍被求值并通过。
+  ⚠️ 不建立的:四成员的机械遍历(只钉 `approve` 一格,另三格仍是 C-1 R5-M8/M9/M10 的证据、绑 C-1 的
+  head,本单元不继承不重跑);兑现半边用的是测试替身 port,与 §3.11.6 同层级。
 - **卡片失效 for a carded cancel round** — see §3.8: possible, pre-existing, unswept.
 - **判据 II's remaining census legs** — **RESOLVED in §3.10** for the {原单据实例,
   `attendance_requests`} pair: the adapter is reordered and census Q-G's four legs are built (the
