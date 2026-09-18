@@ -1813,7 +1813,7 @@ leaving **4 statements**, and zero hits under `plugins/` or in builder syntax:
 | Site | Outcome written | I3 mutation built? |
 |---|---|---|
 | `:8947` — `closeCancelRoundSystemTerminalInTxn` (C-3 system close) | `expired` / `blocked` | **YES — M-21, this unit** |
-| `:9108` — `redeemCancelRoundInTxn` (C-2 success) | `applied` | **NO.** The test file comments it as I3 at `:1027`, but no probe exists. Building it needs the attendance target and the double, so it is registered in §4, not smuggled in here |
+| `:9108` — `redeemCancelRoundInTxn` (C-2 success) | `applied` | **YES — M-26, §3.18** (this row is UPDATED: when §3.14 was written the answer was 「NO, no probe exists」, and it was registered in §4 rather than smuggled in here). The probe needs the attendance target plus the double, which is why it landed as its own unit. §3.18.1 re-derives this whole population at the current head instead of inheriting it |
 | `:11263` — 判据 III, 发起人撤回 | `withdrawn` | out of this slice (phase 1) |
 | `:11750` — 判据 III, 审批人驳回 | `rejected` | out of this slice (phase 1) |
 
@@ -2994,9 +2994,24 @@ they are.
   `createCancelRoundInstance`'s own pre-check (`:8558-8568`, measured frame `:8563:15`,
   `CANCEL_ROUND_ALREADY_PENDING` 409), and reaching `uq_approval_rounds_pending_document` needs a
   constructed race this case does not build; (b) **only ONE of the two terminal outcome writers is
-  probed** — the C-2 success writer at `:9108` (`outcome = 'applied'`) is commented as I3 in the
-  test file at `:1027` but has **no** probe, and building one needs the attendance target plus the
-  double (§3.14.5's table). M-7 remains a mutation of the outcome's *value*, not its presence.
+  probed** — ⚠️ **THIS HALF IS NOW CLOSED; see §3.18.** The C-2 success writer at `:9108`
+  (`outcome = 'applied'`) had no probe when §3.14 landed. M-26 deletes the `applied` write and its
+  `rowCount` guard together (same shape and same reason as M-21), and the new C-2 I3 case — whose
+  `createCancelRoundInstance` is the FIRST post-redeem statement — goes red at
+  `redemption.db.test.ts:1217:20`, frame `ApprovalProductService.ts:8563:15`,
+  `CANCEL_ROUND_ALREADY_PENDING` (409). Whole file: **5 red / 14 green (19)**, and the other four
+  reds all die on their own `applied` assertions — the direct confirmation that none of them could
+  have carried it. §3.14.5's population was **re-derived at this head** (6 hits, 2 prose, 4
+  statements, zero under `plugins/`, zero in builder syntax), not inherited from the `7ef8e610e`
+  measurement. The door is again the application pre-check, NOT
+  `uq_approval_rounds_pending_document` — §0 R-7's correction applies verbatim to M-26.
+  ⚠️ What §3.18 does NOT establish, stated as the fixture premise it is: the case measures the
+  SLOT release using a test-double port that writes nothing, so the ORIGINAL document is still
+  `approved` (**asserted** on the case's last line, not assumed). In production C-1 writes the
+  original `approved → cancelled`, and `createCancelRoundInstance` is premised on an `approved`
+  document — so whether a REAL-boundary redemption's second round would instead be refused for a
+  document-status reason is **not answered** by this case. M-7 remains a mutation of the outcome's
+  *value*, not its presence.
 - **§9-9 允许集的 `approve` 成员半边** (C-1 门审第 5 轮 P3-1 / R5-M7) — **承接并闭合在 §3.17**,
   但闭合的方式与门审建议的不同,且这一点是本节的要点:门审当时写的是「零判别力」,而在本分支
   head 上重放 R5-M7 已经是 **11 failed / 6 passed (17)** ——这一格早就被判据 II/IV、R2、账侧、
