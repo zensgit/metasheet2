@@ -479,7 +479,7 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 
 | # | 门审要求(摘) | 本文档落地位置 | 状态 |
 |---|---|---|---|
-| 1 | execute 与 rollback 改成"L0 → 一条 `ORDER BY id FOR UPDATE` 预锁全部目标既有组 → 所有 L2 写 → 归档"(实测 M2/M3) | §3.1 pseudocode 本体已整段改写(取代旧的逐类目循环)+ §4 新增 rollback 事务骨架(BEGIN…COMMIT,含批次头 FOR UPDATE + 预锁既有组)+ §4.3 `locked` 已改为复用骨架读回的快照 | **pseudocode 已落地(续做步骤 5);`.ts` 代码化仍待 W8/W9** |
+| 1 | execute 与 rollback 改成"L0 → 一条 `ORDER BY id FOR UPDATE` 预锁全部目标既有组 → 所有 L2 写 → 归档"(实测 M2/M3) | §3.1 pseudocode 本体已整段改写(取代旧的逐类目循环)+ §4 新增 rollback 事务骨架(BEGIN…COMMIT,含批次头 FOR UPDATE + 预锁既有组)+ §4.3 `locked` 已改为复用骨架读回的快照 | **execute 半的 `.ts` 已落地(续做步骤 17,`executeApprovalTemplateGroupBackfillWithClient`);rollback(W9)半的 `.ts` 仍待** |
 | 2 | `linked_at` 令牌全程不经 JS:写入用数据修改 CTE,回滚用集合式 join(实测 M4) | §4.2「已知残留」段已重写 + 成品 SQL 已贴入该节 | **已落地(含成品 SQL)** |
 | 3 | preview/execute 共用同一条可入库谓词 `btrim(category) ~ '[!-~]'`,必须在 `eligible` 查询内部而非循环 `continue`(实测 M5) | §3.1 eligible 谓词已替换 + 注释说明机制 | **已落地** |
 | 4 | `atgbbl_link_fk` 改 `ON DELETE CASCADE`;另两条 FK 维持原值(实测 M6) | §2.3 CREATE TABLE 后现场标注 + §4.4 point 2 现场标注(区分两条不同的 FK,不得混淆) | **已落地** |
@@ -487,10 +487,10 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 | 6 | 分桶键/组名一律 `btrim(category)`,不折大小写,不回写 `category` 列 | §8 item 2 现场标注 | **已落地** |
 | 7 | rollback 对已回滚批次返回 409 + 专用码 + `rolledBackAt` | §4.4 point 1 现场标注 | **已落地** |
 | 8 | preview 挂 `approvalTemplateAdminGuard`,PR body 逐字披露对 I7 的偏离 | §6.2「本提案倾向」段后现场标注 | 设计已落地;PR body 义务见 §13.4 |
-| 9 | execute 调用 `...WithClient` 原语,不得抄语句;rollback 共用语句须提炼命名常量/附加谓词形参 | §1 表三行现场标注 | 设计已落地(代码化待 W8/W9) |
-| 10 | SET 义务变成 typecheck 门:唯一 `beginApprovalTemplateGroupTxn(client)` 返回品牌类型 `AtgTxClient`;明确不采用运行时 `current_setting` 断言 | 本节 §13.2 逐字保留门审给出的成品设计;§11 附录原文的"SET 由薄封装发出"承诺在此升级为机械约束 | 设计已落地(品牌类型待 W8 实现) |
+| 9 | execute 调用 `...WithClient` 原语,不得抄语句;rollback 共用语句须提炼命名常量/附加谓词形参 | §1 表三行现场标注 | **execute 半已落地(续做步骤 17):调用 `createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient`,未抄语句;#9 与 #2 的张力(调用 link 原语会拿到其 JS 映射后的 `linkedAt`,直接回填批次表会重犯 M4)按本步 §17 的现场注释解决——批次明细行的 `linked_at` 改由一条独立的服务端相关子查询从刚提交的链接行读回,而不是使用原语返回值,§17 有 mutation 证据。rollback 半(命名常量/附加谓词形参)仍待 W9。** |
+| 10 | SET 义务变成 typecheck 门:唯一 `beginApprovalTemplateGroupTxn(client)` 返回品牌类型 `AtgTxClient`;明确不采用运行时 `current_setting` 断言 | 本节 §13.2 逐字保留门审给出的成品设计;§11 附录原文的"SET 由薄封装发出"承诺在此升级为机械约束 | **已落地(续做步骤 16 品牌类型本体;续做步骤 17 在 execute 侧的调用点验证——`beginApprovalTemplateGroupTxn` 在 `executeApprovalTemplateGroupBackfill` 薄封装里调用恰好一次)** |
 | 11 | `mapGroupConstraintError` 套在整个 `transaction()` 之外;§7 错误码表补 `GROUP_SORT_CONFLICT` | §3.1 catch 分支段已现场标注 try/catch 包裹形状(前半);§7 错误码表已补 `GROUP_SORT_CONFLICT` 行(后半) | **已落地(续做步骤 5,含前后两半)** |
-| 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一 | §3.1 pseudocode 已加 `IF count(eligible) > 500` 中止分支(选"上界"一侧,非规模-耗时曲线);§7 错误码表已补 `APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE` 行 | **已落地(续做步骤 5)** |
+| 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一 | §3.1 pseudocode 已加 `IF count(eligible) > 500` 中止分支(选"上界"一侧,非规模-耗时曲线);§7 错误码表已补 `APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE` 行 | **pseudocode 已落地(续做步骤 5);`.ts` 已落地(续做步骤 17,`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500` 常量 + 抛错分支)。规模上界的真库测试(超过 500 触发 400、零行写入)本步未覆盖,记入 remaining。** |
 | 13 | W8 同 PR 补三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 池文件;锁序格断言停车点非终态) | §9 验证计划纲要目前只有粗粒度描述;本条细化待 §9 改写(下一实现单元) | 设计已知悉,§9 待补三条具体用例名 |
 | 14 | §1 表逐格改调用级复用;§2.1"无可观测中间态"收窄为"无 DB 行级中间态" | §1 表三行 + §2.1 段,均已现场标注 | **已落地** |
 | 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | §"批次机制选择"段(原§1 前)已加现场标注,补更宽普查(`operation_audit_logs` 自述占位且 schema 漂移两次、无 org 无 FK;`oapi_write_audit`/`automation_action_applied`/`approval_form_field_revisions` 各自域内无 FK;`attendance_import_rollback_*` 改列为正面先例而非仅驳回对象) | **已落地(续做步骤 5)** |
@@ -655,3 +655,51 @@ L0(顾问锁)
 - **本步不新增/不触碰**:任何 `.db.test.ts` 文件、`plugin-tests.yml`、`vitest.config.ts` 的 exclude、s6a 钉(`s6a-package-provenance-pins.json`)、`scripts/ops/ci-realdb-step-contract.mjs` 的 FILES 数组——本步是纯 `.ts` 内部重构 + 复用既有真库文件做回归证据,没有新的真库测试入口需要两点接线,所以补充清单 #1/#2/#3(共用三条)在本步不适用,不是遗漏。
 
 - **未做,原样结转的 remaining(不因本步而缩小)**:W8 execute 的服务函数(§3.1 pseudocode → `.ts`)、`POST …/backfill/execute` 路由、`GET …/backfill/batches` 列表端点(changesRequired #5)、changesRequired #13 的三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 默认池文件;锁序格断言停车点非终态)、§15 记的"SQL 谓词 vs `classifyBackfillCategory` 交叉验证"义务;W9 rollback 全部(§4 pseudocode → `.ts`、事务骨架、rollback 路由);A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留);验证 MD(§13.7,仍不存在);step 10 记的两条披露(preview/execute 规模上界分道、`skipped` 桶 `null`/`''` 合并)仍未处理,原样结转给 W8。**本步新增的一条 remaining**:link 薄封装新增 SET 这条偏离是否可接受,留给 owner/下一轮门审(见上文披露段)。
+
+## 17. 续做步骤 17:W8 execute 服务函数 + 路由 + 首批真库验收(2026-09-18)
+
+本步实现 `POST /api/approval-template-groups/backfill/execute`(§3.1、§13.2 统一锁序、changesRequired #2/#3/#9/#11/#12 的 `.ts` 代码化)。**不做**:`GET …/backfill/batches` 列表端点(changesRequired #5)、changesRequired #13 的三条组合调用判别力测试(并发 execute 在 L0 停车 + 反向正控、RR 池 SET 义务格、锁序停车点断言)、规模上界(500)的真库测试、W9 rollback。这些原样结转,见下方 remaining。
+
+**放置位置**:`executeApprovalTemplateGroupBackfillWithClient` / `executeApprovalTemplateGroupBackfill` 落在 `routes/approvals.ts`(不在 `ApprovalTemplateGroupService.ts`)——与 `previewApprovalTemplateGroupBackfill` / `isApprovalTemplateVisibleForGroupLink` 同一理由:`eligible` 查询需要 `applyTemplateVisibilityFilter`,而该 service 文件刻意不 import 它(见该文件已有的同类注释)。
+
+**算法落地要点**(逐条对应 §13.1 changesRequired):
+- L0 → `eligible` 查询(I2′ NOT EXISTS + `btrim(category) ~ '[!-~]'` 在 SQL 内部,非循环 `continue` — changesRequired #3)→ 空则 `{batchId:null}` 提交空事务(§3.2 与"两次顺序 execute 幂等"同一代码路径)→ 规模上界(500,超出抛 400 `..._BACKFILL_TOO_LARGE` — changesRequired #12)→ 按 `existingByCategory` 一条 `ORDER BY id FOR UPDATE` 预锁全部既有组(§13.2 统一锁序,changesRequired #1)→ 插批次头 → 逐类目建组/挂接 + 写两张明细表。
+- **changesRequired #9 与 #2 的张力,本步现场解决(设计 pseudocode 原文未遇到,因为它内联了 CTE)**:execute 调用 `createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient`(不抄语句),但 `linkApprovalTemplateToGroupWithClient` 的 JS 返回值 `linkedAt` 已经过 `toIso()`/`toISOString()`(毫秒精度)——直接拿它写批次明细表会重犯 M4 那个 bug。落地做法:仍然调用原语完成挂接本身(L1 `FOR UPDATE` + `archived_at` 校验 + upsert 复用),批次明细表的 `linked_at` 改由**另一条**语句、通过对刚提交行的相关子查询(`SELECT l.linked_at FROM approval_template_group_links l WHERE …`)服务端复制——比 pseudocode 的单条 CTE 多一次往返,换来原语不被抄写。这条决策是本步现场做的,不是门审报告或 pseudocode 原文写明的,**已用一条 mutation 探针验证判别力**(见下方证据段)。
+- `mapGroupConstraintError` 现在从 service 文件导出(此前是模块私有函数),包在 `await transaction(...)` 整体调用外面,不在回调内部——changesRequired #11 前半。
+
+**真库测试**(新文件,11 例,`tests/integration/approval-template-groups-backfill-execute.db.test.ts`):happy path(create)、attach path(`created_new=false`)、混合 skip+eligible 同一次调用(CJK 类目被跳过但不阻塞 HR 类目提交——changesRequired #3 的机制主张)、全 skip 的 org 零写入 `batchId:null`、changesRequired #2 的 `linked_at` 字节级相等(原始 SQL `=`,非 JS 相等)、§15 记的 SQL/JS 交叉验证义务(`classifyBackfillCategory` 的 skip 判定逐行对照真实调用后该模板是否被挂接)、幂等(第二次调用五张表零增量)、三条路由级 HTTP 真实请求(admin 201/`approvals:read`-only 403/未认证 401)。
+
+**正控 mutation(cp/mutate/run/cmp-restore,三个,全部按预期变红后按原样还原,md5 一致)**:
+1. 把批次明细写入换回 `linkApprovalTemplateToGroupWithClient` 的 JS 返回值 `linked.linkedAt` → changesRequired #2 那条"字节级相等"用例变红(`expected false to be true`)。
+2. 把 `eligible` 查询的 `btrim(t.category) ~ '[!-~]'` 谓词整条删除(模拟"循环 continue"式的错误修法)→ 三条用例变红,且失败形状正是门审 M5 实测的原始 bug:`error: new row for relation "approval_template_groups" violates check constraint "atg_name_nonblank"`(`code: '23514'`)——证明这条谓词是防止"CJK 类目让整个 execute 100% 抛错"的机制承重点,不是装饰。
+3. 把"`eligible.length === 0` 提前返回"这个分支短路(`if (false && …)`)→ 幂等用例变红:`{batchId: null, ...}` 期望值 vs 实际拿到一个非空 `batchId` 的新建空批次头——这正是 changesRequired #3/#12 附注描述的"每次调用多一行空批次头"失败形状的姊妹版本(这里是"任何一次调用都不检测幂等",不是 CJK 专属)。
+
+每次探针都是 `cp` 备份 → 编辑 → 跑对应用例(`-t` 过滤)→ `cp` 还原 → `cmp` 逐字节核对与备份一致,md5 复核(`0697ab815d6ae81427a564ca7562e603`,还原前后一致)。
+
+**回归证据**(`metasheet2_lock_a3`):
+```
+DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-template-groups-lifecycle.db.test.ts \
+  tests/integration/approval-template-groups-serialization.db.test.ts \
+  tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+  tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+  tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+  --reporter=dot
+```
+→ `Test Files 5 passed (5)` / `Tests 58 passed (58)`(16 + 10 + 8 + 13 + 11)。
+
+**CI 两点接线**(同一提交):`vitest.config.ts` exclude 新增一行;`.github/workflows/plugin-tests.yml` 的 `approval-real-db-integration` 步骤白名单新增一行 + 新增一个独立 `A3 backfill-execute CI wiring contract` 步骤;新文件 `scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs`(复制自 preview 的同款守卫,换 `FILE` 常量)——已用同款 mutation 验证判别力(注释掉 `vitest.config.ts` 的 exclude 行 → 该守卫的第一条用例变红;还原后再次全绿)。`scripts/ops/*-ci-wiring.test.mjs` 全量重跑:**485 passed(482 + 本文件新增 3 条)**,零红,证明没有扰动任何兄弟 lane 的接线守卫。`scripts/ops/ci-realdb-step-contract.mjs` 再次确认无 `FILES` 闭世界导出(`grep -n "^export const FILES\|const FILES =" scripts/ops/ci-realdb-step-contract.mjs` → 零命中),与 W7 记录一致,本步沿用同一机制(每文件一个独立 `*-ci-wiring.test.mjs`)而非该数组。
+
+s6a `pluginTestsWorkflow` 钉重算(`.github/workflows/plugin-tests.yml` 两处编辑之后):`shasum -a 256 .github/workflows/plugin-tests.yml` → `fb1f5901f256927b723144dc5164f42be1ad3b41eb996f5dae1728fc9100f6d6`(替换旧值 `4c32b7ef...`)。红/绿证据:`node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 在改 workflow 文件之后、重算钉之前先跑一次 → `SEALED_EXPORT_INTERNAL_ERROR`(红,drift 被正确检出);写入新钉之后重跑同一条命令 → `sealed-export-package-provenance.test.cjs OK`(绿)。
+
+**本步不新增/不触碰**:`scripts/ops/ci-realdb-step-contract.mjs` 的任何导出(继续沿用逐文件 guard 惯例,不是遗漏);W9 相关任何文件;`GET …/backfill/batches` 端点。
+
+**未做,原样结转的 remaining**:
+- changesRequired #13 的三条组合调用判别力测试(并发 execute 在 L0 停车 + 反向正控 `await` 导出函数会停车/超时;SET 义务格落在 RR 默认池文件,mutation=删 `beginApprovalTemplateGroupTxn` 内的 SET 语句;锁序格用 `waitUntilBackendBlockedByHolder` 断言停车点而非终态)——门审原文"同 PR"指的是这条分支未来会开出的 Draft PR,不是这一个提交,但仍是本分支必须在合入前补齐的义务,不因本步而消失。
+- `GET /api/approval-template-groups/backfill/batches` 列表端点(changesRequired #5)。
+- 规模上界(500)的真库测试(超出触发 400、零写入)——本步只在 `.ts` 里落地了这条分支,未写对应的真库夹具(构造 501 行代价较高,留给后续步骤连同 changesRequired #13 一起补)。
+- W9 rollback 全部(§4 pseudocode → `.ts`、事务骨架、rollback 路由、真库测试、CI 两点接线)。
+- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留,未因本步而变化)。
+- 验证 MD(§13.7,仍不存在)。
+- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining,未因本步而变化,仍待 owner/下一轮门审)。
