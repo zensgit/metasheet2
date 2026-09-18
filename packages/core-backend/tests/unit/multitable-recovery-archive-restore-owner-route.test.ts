@@ -197,6 +197,21 @@ describe('manual archive command routes', () => {
     expect(response.body.error.code).toBe('RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
     expect(response.text).not.toContain('customer-path-secret')
   })
+  it('exposes only the exact supported attachment diagnostic, never provider text', async () => {
+    captureManual.mockRejectedValueOnce(new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE'))
+    const response = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ ok: false, error: {
+      code: 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE',
+      message: 'Manual archives containing attachments are not yet available.',
+    } })
+    captureManual.mockRejectedValueOnce(new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE private-provider-value'))
+    const unknown = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(unknown.status).toBe(503)
+    expect(unknown.body).toEqual({ ok: false, error: {
+      code: 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE', message: 'Manual archive capture is unavailable.',
+    } })
+  })
 })
 
 describe('Time Machine D5 owner routes', () => {

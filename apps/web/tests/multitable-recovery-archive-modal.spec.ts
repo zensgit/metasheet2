@@ -81,6 +81,22 @@ async function confirmManual() {
 }
 
 describe('ManualArchiveCapture', () => {
+  it.each([
+    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Manual archives containing attachments are not yet available; this archive is incomplete.'],
+    [true, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', '含附件的手动归档尚不可用；本次归档未完成。'],
+    [false, 403, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Your current identity cannot archive this table'],
+    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE_private', 'Archive unavailable; check configuration and retry'],
+  ])('uses exact safe manual diagnostics (%s/%s/%s)', async (isZh, status, code, expected) => {
+    const capture = vi.fn().mockRejectedValue({ status, code, message: 'private-provider-value' })
+    const ctx = mountManual({ isZh, capture })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(q('[data-test="manual-archive-error"]')?.textContent).toBe(expected)
+    expect(document.body.textContent).not.toContain('private-provider-value')
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+    expect(ctx.completed).not.toHaveBeenCalled()
+  })
   it('requires explicit confirmation and persists identity before POST without restoring data', async () => {
     const ctx = mountManual()
     await flush()

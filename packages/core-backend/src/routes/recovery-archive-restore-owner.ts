@@ -368,6 +368,7 @@ function sendManualError(res: Response, error: unknown) {
   if (code === 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT') return sendError(res, 409, code)
   if (code === 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE') return sendError(res, 403, 'FORBIDDEN')
   if (code === 'RECOVERY_ARCHIVE_MANUAL_NOT_FOUND') return sendError(res, 404, 'NOT_FOUND')
+  if (code === 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE') return sendError(res, 503, code)
   return sendError(res, 503, 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
 }
 
@@ -539,6 +540,8 @@ function messageForErrorCode(code: string): string {
       return 'Archive recovery runtime is unavailable.'
     case 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE':
       return 'Manual archive capture is unavailable.'
+    case 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE':
+      return 'Manual archives containing attachments are not yet available.'
     case 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT':
       return 'Archive request identity conflicts with its original scope.'
     case 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE':
