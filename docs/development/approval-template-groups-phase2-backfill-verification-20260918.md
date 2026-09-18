@@ -380,7 +380,7 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
 
 - `git status --short`(本文档与配对设计 MD 写作前后,`packages/core-backend/src/services/ApprovalTemplateGroupService.ts` 之外的任何文件均未改动):写作前空;§3.1 mutation 探针跑完并 `cmp` 确认字节相同后再次核验为空。
 - 本文档与配对设计 MD 是本次提交的全部改动(两个新增/改名的 `.md` 文件),提交信息见 git log,含 `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`。
-- Push 目标:`origin feat/approval-template-groups-phase2-backfill`(普通 push,非 force——本分支已完成的唯一一次 rebase 用过 force-with-lease,见 rebase note §7,本次不涉及 rebase)。
+- Push 目标:`origin feat/approval-template-groups-phase2-backfill`(普通 push,非 force——截至本文档初版定稿这一刻,本分支只完成过一次 rebase,用过 force-with-lease,见 rebase note §7;本次定稿动作本身不涉及 rebase。**这句话只描述到此刻为止的状态,不是对全篇历史的断言**——本分支后续确有第二次 rebase,记录在 rebase note §8 与本文档 §7,那次 push 同样用了 force-with-lease)。
 
 ---
 
@@ -442,7 +442,14 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
 | 4c | E4 census enumeration | `npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot` | `349 passed (349)` |
 | 5 | E5 s6a 钉字节核对 | `shasum -a 256 .github/workflows/plugin-tests.yml` vs `pins.json` | `099904601c47c078fa5c81bf4387a26cc0678174de5a24f54b5edc86ae5bece1`,逐字相同(`git diff --stat origin/main -- .github/workflows/plugin-tests.yml` 显示本分支对该文件仅有 42 行**新增**、无删改,rebase 未触碰它,pin 天然仍然有效) |
 
-M1/M2/M3/M14 四条 mutation 抽打两条的复核(门审 §8 复核清单第 4 条):留待下一轮或 Draft PR 前;本轮预算集中在 P2 本身与全套真库/无库/typecheck/wiring 回归,E1 的 7/85 计数与门审报告一致已经是这四条 mutation 承重面未变的间接证据(计数不变 ⇒ 断言集合不变 ⇒ 四条 mutation 打的靶子仍在原处),但不构成重新亲跑 mutation 本身。
+M1/M2/M14 三条 mutation 的复核(门审 §8 复核清单第 4 条,原文建议抽打两条,本轮抽打了 M3,详见下方):留待下一轮或 Draft PR 前。**订正一处推论**:此前草稿曾写"E1 的 7/85 计数与门审报告一致 ⇒ 断言集合不变 ⇒ 四条 mutation 打的靶子仍在原处",这是一条不成立的推论——用例计数不变不能推出用例内容不变(phase1 对 `lifecycle.db.test.ts` 改了 50 行,计数照样可能不变),已删除该推论;M1/M2/M14 未重打,是**未验**,不是"计数担保过的已验"。
+
+**M3 已重打**(本轮唯一重新亲跑的一条,理由:它打击的正是本轮 rebase 触碰最深的文件 `routes/approvals.ts`——phase1 改了其中 52 行):`cp packages/core-backend/src/routes/approvals.ts /tmp/approvals.ts.orig` 备份 → 把 execute 批次明细的 `linked_at` 写入源从"服务端相关子查询"改回"原语返回的 JS `linkedAt`"(门审 M3 的失效形态,`const linked = await linkApprovalTemplateToGroupWithClient(...)` 后改用 `linked.linkedAt` 作为 `VALUES` 参数而非原来的相关 `SELECT`)→ 单独跑 `approval-template-groups-backfill-execute.db.test.ts` + `approval-template-groups-backfill-rollback.db.test.ts` → `cp /tmp/approvals.ts.orig packages/core-backend/src/routes/approvals.ts` 还原 → `cmp` 确认字节相同,再重跑同两个套件确认恢复绿。
+```
+$ cmp packages/core-backend/src/routes/approvals.ts /tmp/approvals.ts.orig && echo IDENTICAL
+IDENTICAL
+```
+结果:execute 套件 1 例红,rollback 套件 4 例红(依赖同一批 `linked_at` 令牌做集合式匹配/精确性断言的用例,如 `expect(linkRow.rows).toHaveLength(0)`、`expect(batchLinkRow.rows[0].group_id).toBeNull()`、`expect(Number(groupRow.rows[0].n)).toBe(1)` 三处具体断言变红)——与门审报告 M3"红 5 条(execute 1 + rollback 4)"逐字吻合,判别力在 rebase 后的树上依然成立;还原后重跑同两个套件回到 `2 passed (2)` / `23 passed (23)`。M1/M2/M14 未重打,记入 remaining。
 
 ### 7.3 SHA 引用漂移声明
 
