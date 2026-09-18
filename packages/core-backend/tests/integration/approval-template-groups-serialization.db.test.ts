@@ -7,12 +7,19 @@ import { Client } from 'pg'
  * acceptance: E (sort_order serialization + COMMIT-time DEFERRABLE mapping) and K (L0 blocks
  * create/rename/unarchive — mechanical stall assertions).
  *
- * HARNESS: this file runs the ENTIRE service pool with REPEATABLE READ default (`vi.hoisted`
- * amends `DATABASE_URL` with `options=-c default_transaction_isolation=repeatable\ read` BEFORE
- * the static imports below — `PoolManager` is constructed at first import of the db module).
+ * HARNESS: this file runs the ENTIRE service pool with REPEATABLE READ default AND a 5000ms
+ * `lock_timeout` (`vi.hoisted` amends `DATABASE_URL` with `options=-c default_transaction_
+ * isolation=repeatable\ read -c lock_timeout=5000` BEFORE the static imports below —
+ * `PoolManager` is constructed at first import of the db module). BOTH options apply to every
+ * connection the pool ever opens for this file's run AND to every `withRawClient` raw connection
+ * below (they read the SAME amended `process.env.DATABASE_URL`) — a test elsewhere in this file
+ * that unexpectedly blocks on a lock for 5s+ will hit `lock_timeout`, not hang forever; the
+ * REVERSE positive control test (changesRequired #13 item 1, added 2026-09-18) is the only one of
+ * this file's tests whose blocked path is EXPECTED to run into that ceiling — every other test's
+ * holder commits within tens of ms of `waitUntilBackendBlockedByHolder` returning, well under it.
  * Precedent: `directory-source-freeze-lock-correctness.db.test.ts:43-53`. `vitest.integration.
- * config.ts` runs files in isolated forks with `fileParallelism:false`, so the RR default cannot
- * leak into any other suite. A sentinel test asserts the posture is actually active (a silently-RC
+ * config.ts` runs files in isolated forks with `fileParallelism:false`, so neither option can leak
+ * into any other suite. A sentinel test asserts the RR posture is actually active (a silently-RC
  * harness would make every pin test below vacuous).
  *
  * A/A′/A″/A‴/B/B′/B″/F/G/H/I′ live in the SEPARATE normal-pool file
@@ -46,7 +53,33 @@ import { Client } from 'pg'
  *       `takeOrgLock` helper and "two lines"; the lock call is a single inline
  *       `client.query('SELECT pg_advisory_xact_lock(...))` statement, same shape as mutation (2))
  *       → the rename request no longer blocks on the L0-only holder at all
- *       (`waitUntilBackendBlockedByHolder` times out — a hard failure, not a silent pass).
+ *       (`waitUntilBackendBlockedByHolder` times out — a hard failure, not a silent pass);
+ *   (5) [changesRequired #13 item 1, REVERSE positive control] delete the
+ *       `pg_advisory_xact_lock` line from `createApprovalTemplateGroupWithClient` → the test
+ *       passed UNCHANGED on a first attempt without the `queryFragment` pin (the inner INSERT
+ *       instead waits on the DEFERRABLE `atg_sort_unique` index's tuple lock against the outer's
+ *       uncommitted row, raising the SAME 55P03 for a DIFFERENT reason — a confounded mutation,
+ *       memory `feedback_confounded_mutation_needs_isolated_variant_grid`); pinning
+ *       `waitUntilBackendBlockedByHolder`'s `queryFragment` to `pg_advisory_xact_lock` fixed this
+ *       — the same mutation then times out (hard failure) as it should;
+ *   (6) [changesRequired #13 item 3, execute lock-order] revert
+ *       `executeApprovalTemplateGroupBackfillWithClient`'s single `id = ANY($2) ORDER BY id
+ *       FOR UPDATE` pre-lock statement to a design-gate-M2 pre-fix per-category `id = $2 FOR
+ *       UPDATE` loop → `waitUntilBackendBlockedByHolder`'s `queryFragment` pin to the batched
+ *       statement's literal text never matches (hard timeout failure, not a silent pass);
+ *   (7) [changesRequired #13 item 3, rollback lock-order] the SAME mutation shape in
+ *       `rollbackApprovalTemplateGroupBackfillWithClient` (§4.2 unlink FIRST, then a fresh
+ *       per-group `id = $2 FOR UPDATE`, design-gate M3 pre-fix order) → same hard timeout failure.
+ *       An EARLIER draft of (6)/(7) asserted "the batch's link row is not yet written/unlinked"
+ *       from a SEPARATE connection while blocked — that assertion was VACUOUS (an open
+ *       transaction's writes are invisible to any other session regardless of statement order,
+ *       ordinary MVCC visibility) and stayed GREEN under both mutations, catching nothing; the
+ *       `queryFragment` pin on the blocked backend's own query TEXT (visible externally
+ *       regardless of commit state, via `pg_stat_activity`) replaced it. (6)/(7) prove the
+ *       STATEMENT SHAPE the fix requires is what execute/rollback actually stall on, NOT the
+ *       L1-before-L2 acquisition ordering itself — that needs the two-party 40P01 construction
+ *       from `reviews/a3-probe/{execute,rollback}-lockorder-probe.cjs` and remains open (see
+ *       design doc remaining).
  */
 vi.hoisted(() => {
   const base = process.env.DATABASE_URL
