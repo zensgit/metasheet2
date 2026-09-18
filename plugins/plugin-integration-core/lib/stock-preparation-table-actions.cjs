@@ -993,6 +993,82 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
   })
 }
 
+// #5860 option A — ONE SHEET = ONE PROJECT, enforced at the table level.
+//
+// `readExistingStockPreparationRows` above is project-scoped by design (its filter is the projectNo
+// field), so `missingFromPlmPolicy=mark_inactive` only ever sweeps rows of the SAME project. A pull of
+// project B into a sheet that already holds project A therefore leaves A's rows `active=true` and the
+// fill views (sorted by parentComponentCode) show A first. This guard looks at the rows the
+// project-scoped read cannot see: ACTIVE rows whose projectNo differs from `parameters.projectNo`.
+//
+// BOUNDED READ, SAME BOUNDS, SAME TRUNCATION POLICY AS THE PROJECT-SCOPED READ. The scan pages the
+// `active=true` equality filter (the records API only speaks equality, so "projectNo != X" cannot be
+// pushed down) with the SAME page limit / maxPages, and when the bound is hit:
+//   * >= 1 foreign active row already seen -> refuse with TARGET_SHEET_FOREIGN_PROJECT and
+//     `scanTruncated: true` (a partial scan that saw one foreign row is proof enough);
+//   * 0 foreign rows seen -> refuse with TABLE_ACTION_EXISTING_ROWS_TOO_LARGE exactly like the
+//     project-scoped read does at its own bound. That read never tolerates truncation (it throws
+//     rather than plan off a partial set), so this one does not either: there is no ALLOW-on-truncation
+//     branch, and `scanTruncated` only ever travels on a refusal.
+//
+// VALUES-FREE. The details carry two integers and an optional boolean — never a project number, never a
+// row value. `active` follows the planner's reading (`existingRow.active === false` is inactive), but
+// the pushed-down filter is `active === true`, so a row whose `active` cell is NULL is not counted; that
+// is the same set the fill views' `active` filter shows the customer.
+async function assertTargetSheetHoldsNoForeignActiveRows(recordsApi, target, projectNo, options = {}) {
+  const api = ensureRecordsApi(recordsApi)
+  const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
+  const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
+  const filters = {
+    [mapFieldName('active', target.fieldIdMap)]: true,
+  }
+  const foreignProjects = new Set()
+  let foreignActiveRowCount = 0
+  let scanTruncated = true
+  for (let page = 0; page < maxPages; page += 1) {
+    const offset = page * limit
+    const pageRows = await api.queryRecords({
+      sheetId: target.sheetId,
+      filters,
+      limit,
+      offset,
+    })
+    if (!Array.isArray(pageRows)) {
+      throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
+    }
+    for (const raw of pageRows) {
+      const row = unmapRecordFields(raw, target.fieldIdMap)
+      if (row.active === false) continue
+      const rowProjectNo = optionalString(row.projectNo)
+      if (rowProjectNo === projectNo) continue
+      foreignActiveRowCount += 1
+      foreignProjects.add(rowProjectNo === null ? '' : rowProjectNo)
+    }
+    if (pageRows.length < limit) {
+      scanTruncated = false
+      break
+    }
+  }
+  if (foreignActiveRowCount > 0) {
+    throw new StockPreparationTableActionError(
+      409,
+      'TARGET_SHEET_FOREIGN_PROJECT',
+      '目标表已包含其他项目的有效行，请为新项目新建备料表',
+      {
+        foreignProjectCount: foreignProjects.size,
+        foreignActiveRowCount,
+        ...(scanTruncated ? { scanTruncated: true } : {}),
+      },
+    )
+  }
+  if (scanTruncated) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {
+      maxPages,
+      scan: 'foreign_project',
+    })
+  }
+}
+
 // ── #4160: logical-key <-> physical fieldId translation, bound to the ONE records entry point ──────
 //
 // The frozen templates declare LOGICAL field keys ('snapshotBatchId'); provisioning materializes each
@@ -1844,6 +1920,10 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping, b2aSchemaContract }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
+  // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
+  // dry-run before its first write, BEFORE any write on the apply path. Sits after the project-scoped
+  // read so the first records read stays the project read every caller and test already pins.
+  await assertTargetSheetHoldsNoForeignActiveRows(recordsApi, action.target, parameters.projectNo)
   const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
   let conflictPolicyReview = buildConflictPolicyReview({
     diagnostics: duplicateDiagnostics,
@@ -2468,6 +2548,7 @@ module.exports = {
     normalizeActionExtensionFieldIds,
     plmSystemFieldIds,
     readExistingStockPreparationRows,
+    assertTargetSheetHoldsNoForeignActiveRows,
     stableStringify,
     targetFieldMapHasExplicitBindings,
     unmapRecordFields,

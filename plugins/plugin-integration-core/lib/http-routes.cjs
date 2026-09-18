@@ -6485,6 +6485,10 @@ function requireStockPreparationAudit() {
         action.target,
         projectNo,
       )
+      // #5860 one sheet = one project: the large-BOM lane never plans through `computeDryRun`, so the
+      // table-level foreign-project guard is called here the same way the existence probe above is —
+      // after the project-scoped read, before the plan. 409 TARGET_SHEET_FOREIGN_PROJECT, values-free.
+      await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(getMultitableRecordsApi(), action.target, projectNo)
       const diagnostics = duplicateExpandedKeyDiagnosticsForRows(
         job.artifact && Array.isArray(job.artifact.rows) ? job.artifact.rows : [],
       )
@@ -6565,6 +6569,13 @@ function requireStockPreparationAudit() {
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
       await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
+      // #5860 at approval as well: a foreign project's active rows that landed between plan and
+      // approval refuse here, before a checkpoint job that would write next to them exists.
+      await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(
+        getMultitableRecordsApi(),
+        snapshotAction.target,
+        expansionJob.parameters && expansionJob.parameters.projectNo,
+      )
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
