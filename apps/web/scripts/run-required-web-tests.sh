@@ -1323,6 +1323,22 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # `tail -1` (used by the A-2 gate report) and this file's own verification-MD Python helper's
 # first-match `.startswith(...)` scan only ever look at ONE `exec npx vitest run` line and silently
 # picked the wrong one. See the FE verification MD's P3 hygiene section for the full repro.
+# P3 hygiene wave correction (2026-09-19), second pass — the paragraph this replaces named the
+# wrong root cause; see the FE verification MD's hygiene section and
+# p3-hygiene-gate2-A2-20260919.md §1.1 for the corrected repro. What actually happened: the
+# original commit (`2699e0a07`, author date 2026-09-18 06:57) edited this line IN PLACE (17
+# insertions / 1 deletion — a normal same-line edit, not an appended second line) to add the three
+# tokens. A later rebase produced `2ef7add98` (committer date 2026-09-18 20:56), a rebase replay of
+# that same commit whose three-way merge against a sibling edit to this file kept BOTH versions of
+# the line instead of erroring — the duplicate (dead) copy, not the original, is what carried the
+# risk: bash's `exec` builtin unconditionally replaces the process on the FIRST such line reached,
+# so only the earlier of the two lines ever ran. On the commits actually named in the prior
+# paragraph's audit trail (`cb6d7fa9f`, `d3097be00`), the three tokens were already back together
+# in the single live line, not stranded on a dead duplicate — so the "never exercised until this
+# commit" claim did not hold for this branch's history. The duplicate-line hazard itself is real
+# (see the two repo precedents cited in scripts/dev/atg-exec-line-post-rebase-check.sh's header)
+# and that script exists to catch it mechanically on future rebases; this paragraph corrects only
+# the narrative of how this specific occurrence resolved.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
