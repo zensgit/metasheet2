@@ -85,6 +85,10 @@ import {
   unarchiveApprovalTemplateGroup,
   unlinkApprovalTemplateFromGroup,
 } from '../services/ApprovalTemplateGroupService'
+import {
+  listApprovalTemplatesBySection,
+  parseApprovalTemplateSectionToken,
+} from '../services/ApprovalTemplateGroupSectionService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -629,6 +633,57 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = resolveApprovalListPaging(page, pageSize)
+
+      // Approval form grouping lock v2.13 §6 phase 3 (A-4), §4 rows C/J — this two-clause request
+      // shape check was requested up from A-1/A-2 (supplementary checklist lane-A #5) and lands
+      // here: `section=` and `?category=` are mutually exclusive, and an unrecognized `section=`
+      // token is a 400, never a silent fall-through to the unsectioned list (that fall-through is
+      // literally row C's own mutation target — "去掉 section 过滤 ⇒ 分页跨桶"). Both checks run
+      // BEFORE any DB access. Category-conflict is checked first (a structural shape conflict,
+      // same footing as `resolveApprovalTemplateGroupOrgId`'s own body/query `orgId` check ahead
+      // of its session check) so a request combining both never depends on which order errors
+      // happen to surface in.
+      const sectionRaw = req.query.section
+      if (sectionRaw !== undefined) {
+        if (isOrgIdValuePresent(req.query.category)) {
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT',
+              'section and category cannot be combined',
+            ),
+          )
+        }
+        // A repeated `?section=a&section=b` query key parses to an ARRAY, not a string — treating
+        // that (or any other non-string) as "no section" would silently degrade to the unsectioned
+        // list, the same fail-open shape the category check above guards against.
+        const sectionToken = typeof sectionRaw === 'string' && sectionRaw.length > 0
+          ? parseApprovalTemplateSectionToken(sectionRaw)
+          : null
+        if (!sectionToken) {
+          return res.status(400).json(
+            approvalErrorResponse('APPROVAL_TEMPLATE_SECTION_TOKEN_INVALID', 'Unknown section token'),
+          )
+        }
+        const sectionOrgId = resolveApprovalTemplateGroupOrgId(req, res)
+        if (!sectionOrgId) return
+        const sectioned = await listApprovalTemplatesBySection({
+          orgId: sectionOrgId,
+          token: sectionToken,
+          actor,
+          status: typeof req.query.status === 'string' ? req.query.status : undefined,
+          search: typeof req.query.search === 'string' ? req.query.search : undefined,
+          limit,
+          offset,
+        })
+        return res.json({
+          data: sectioned.data,
+          total: sectioned.total,
+          limit,
+          offset,
+          section: sectionRaw,
+        })
+      }
+
       // Wave 2 WP4 slice 1 — `?category=xxx` equality filter. Empty / missing
       // leaves the filter unset, which matches all categories AND uncategorized
       // rows (same semantics as before the slice).
