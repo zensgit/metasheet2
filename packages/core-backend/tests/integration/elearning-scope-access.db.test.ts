@@ -721,6 +721,11 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       )
       const excludedVersionId = String(firstVersion.rows[0]?.version_id)
 
+      // Refresh planner statistics after bulk seeding; retain the real scan boundary.
+      await client.query(
+        'ANALYZE elearning_courses, elearning_course_versions, elearning_scopes, elearning_scope_revision_rules',
+      )
+
       await expect(listElearningAudienceCourseMatches(db, {
         orgId,
         userId,
