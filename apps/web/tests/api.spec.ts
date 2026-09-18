@@ -4,6 +4,7 @@ import { useAuth } from '../src/composables/useAuth'
 import { getAuthPrincipalKey } from '../src/composables/authPrincipal'
 import { createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { NETWORK_UNAVAILABLE, networkUnavailableMessage } from '../src/utils/networkErrors'
+import { getDeleteTransport, resetDeleteTransportForTests } from '../src/api/delete-fallback'
 
 describe('apiFetch', () => {
   const store: Record<string, string> = {}
@@ -23,6 +24,7 @@ describe('apiFetch', () => {
     ;(globalThis as typeof globalThis & { localStorage: typeof localStorageMock }).localStorage = localStorageMock
     Object.keys(store).forEach((key) => delete store[key])
     sessionStorage.clear()
+    resetDeleteTransportForTests()
     vi.clearAllMocks()
   })
 
@@ -330,7 +332,7 @@ describe('apiFetch', () => {
     }
   })
 
-  it('F4-B: a DELETE is NOT retried even once — a reset can land after the server already committed', async () => {
+  it('F4-B/DELETE-fallback: a DELETE that gets no response is re-sent ONCE as POST+X-HTTP-Method-Override, never backoff-retried', async () => {
     vi.useFakeTimers()
     try {
       const fetchMock = vi.fn().mockRejectedValue(transportFailure())
@@ -348,10 +350,50 @@ describe('apiFetch', () => {
 
       const caught = await settled as Error & { code?: string }
       expect(caught.code).toBe(NETWORK_UNAVAILABLE)
-      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // Exactly two wire attempts: the native DELETE, then the one POST+override fallback
+      // (api/delete-fallback.ts). Deletes are idempotent, so that single replay is safe; the
+      // 1200/3500ms backoff loop still never applies to DELETE.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls[0][1].method).toBe('DELETE')
+      expect(fetchMock.mock.calls[1][1].method).toBe('POST')
+      expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('DELETE')
+      // Both attempts got no response: nothing was learned (the whole link is down), so the
+      // session does NOT flip — the next DELETE tries native first again.
+      expect(getDeleteTransport()).toBe('native')
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('DELETE-fallback: a DELETE that gets an HTTP response (404) is returned as-is, no second attempt', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await apiFetch('/api/multitable/records/rec_1', {
+      method: 'DELETE',
+      suppressUnauthorizedRedirect: true,
+    })
+
+    expect(response.status).toBe(404)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][1].method).toBe('DELETE')
+    expect(getDeleteTransport()).toBe('native')
+  })
+
+  it('DELETE-fallback: bypassDeleteFallback keeps the probe a literal DELETE with no fallback attempt', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const caught = await apiFetch('/api/method-probe', {
+      method: 'DELETE',
+      suppressUnauthorizedRedirect: true,
+      bypassDeleteFallback: true,
+    }).then(() => null, (error: unknown) => error) as Error & { code?: string }
+
+    expect(caught.code).toBe(NETWORK_UNAVAILABLE)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][1].method).toBe('DELETE')
+    expect(getDeleteTransport()).toBe('native')
   })
 
   it.each(['POST', 'PUT', 'PATCH'])('F4-B: a %s is NOT retried either', async method => {

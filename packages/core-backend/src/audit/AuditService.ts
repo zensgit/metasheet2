@@ -315,6 +315,7 @@ export class AuditService extends EventEmitter {
             geoLatitude: geo?.ll?.[0],
             geoLongitude: geo?.ll?.[1],
             requestMethod: req.method,
+            ...(req.methodOverride ? { actionDetails: { methodOverride: req.methodOverride } } : {}),
             requestPath: req.path,
             requestQuery: this.toRecordStringUnknown(req.query),
             requestBody: sanitizedBody,
