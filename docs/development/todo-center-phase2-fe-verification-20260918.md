@@ -1292,7 +1292,7 @@ stock-prep / security 等)——这是 rebase **之前**就存在的状态(本�
 | # | 门审原文(一句) | 处置 |
 |---|---|---|
 | P3-1 | 验证 MD §4.1 标题「`paths:` 两块字面相同」按全块口径为假(先存不对称,非本切片引入) | CLOSED-MD |
-| P3-2 | 8 个调用点删任意一个 ⇒ required 默认套件仍全绿(已被实现者显式自陈;真实风险很低) | CLOSED-注释(核实既有自陈仍准确,无新增) |
+| P3-2 | 8 个调用点删任意一个 ⇒ required 默认套件仍全绿(已被实现者显式自陈;真实风险很低) | 验证-无需改动(门审自身已判定风险可接受、不要求新增;本轮零编辑,只核实既有 docblock 自陈仍与当前 HEAD 一致) |
 | P3-3 | 上一轮门审报告 §4.4 把 `approvalNavTodoBadge` 的 lane 归错行(报告自身的错,非交付物的错) | CLOSED-MD(交付物本无此错,已核;补前瞻指引防未来转抄) |
 | P3-4 | P3-8(PR body 自陈导航入口范围扩张)仍 BLOCKED-WITH-REASON | DEFERRED-owner 项(硬规矩禁止本 lane 动 PR body) |
 | P3-5a | `approval-web-guard.yml` 106-token 全量重跑——本轮未跑 | CLOSED-测试(本轮实际执行) |
@@ -1382,6 +1382,15 @@ $ bash -c "$(cat /tmp/todo-fe-ci-cmd-p3hygiene.sh)"
 ```
 104 文件 / 1959 用例全绿,与修复轮 4 §13.2 记录的 1959 基线一致,不是抽样。该 lane 是 advisory,非
 required(§14.6/§5 已核),本条只是把门审 P3-5 点名的"未跑"补上,不改变任何判据的 required 状态。
+**范围说明(本条新查,不转引 §4.6——那条核的是 `plugin-tests.yml` 的 job 边界,不是这个文件)**:
+```
+$ grep -n "^jobs:\|^  approval-web-guard:" .github/workflows/approval-web-guard.yml
+829:jobs:
+830:  approval-web-guard:
+```
+`merge_group`/`pull_request`/`push` 三个触发器(:18/:19/:435)之下只有这一个 job、一份步骤列表,
+不是各触发器各自一份 job/exec——上面这一次重跑就是这个 job 唯一会执行的命令,不是"验证了三种触发
+路径中的一种,其余未验"。
 
 ### 15.7 P3-5b —— 真浏览器视觉验收,登记不做
 
@@ -1459,27 +1468,38 @@ apps/web/src/todo/views/TodoCenterView.vue:286:    if (!hasSession()) {
 `acceptPushes`/重读——见 `ApprovalTodoBadge.vue:307-322`),不在 `handleCountsUpdated` 函数体内,
 与被改写的那句失实注释无关,是本来就存在、本轮零改动的正确代码。
 
+P3-3 要核对的具体命题是「全分支范围内有没有一处把 `:1186` 当作 `approvalNavTodoBadge` 的位置来引
+用」。裸的 `git grep -n ":1186"` 命中太多与本条无关的数字巧合(其他文档里的行号/哈希片段),不是
+有判别力的检索;改用同时含两个关键词的检索才直接测这个命题:`git grep -n "1186" | grep -i
+"approvalNavTodoBadge"`。**这条检索本身有自指问题**——本 §15 正在讨论"`:1186` 是不是
+`approvalNavTodoBadge` 的行号"这件事,所以只要还在编辑本节,这条命令的命中数就会随本节自己的措辞
+增减而变(同 §12.3/§13.3/§14/§15.10 已明确过的自指陷阱),不能像别处那样贴一份"最终"输出冻结在
+文档里。改为只对**本节之外**(§1–§14,`## 15.` 之前、内容自本轮起不再改动的部分)跑这条检索:
 ```
-$ git grep -n ":1186"
-docs/development/todo-center-phase2-fe-design-20260918.md:78:...
-docs/development/todo-center-phase2-fe-verification-20260918.md:753:...
-docs/development/todo-center-phase2-fe-verification-20260918.md:(§15.4/§15.6 自身的叙述与命令回显)
+$ sed -n '1,1267p' docs/development/todo-center-phase2-fe-verification-20260918.md | grep -n "1186" | grep -i "approvalNavTodoBadge"
+(空)
 ```
-`:78`(设计 MD)与 `:753`(验证 MD §12.1)两处已在 §15.4 逐一核对,均是对
-`todoApi`/`TodoCenterView`/`todoCountsRealtime` 三个不同令牌所在 exec 行的准确引用(§15.6 用 grep
-重新验证 `:1186` 当前 HEAD 上仍是这三个令牌的 exec 行),不是误引 `approvalNavTodoBadge`;§15.4/
-§15.6 自身讨论这件事时的文字命中同理不是过强声明。**全分支范围内,没有一处把 `:1186` 当作
-`approvalNavTodoBadge` 的位置来引用**——这才是 P3-3 要求核对的具体命题,已核对为真。
+零命中——`:78`(设计 MD)与 `:753`(验证 MD §12.1)是全文里仅有的两处 `:1186` 引用,它们讨论的是
+`todoApi`/`TodoCenterView`/`todoCountsRealtime` 三个令牌的 exec 行(§15.4/§15.6 已核对准确),从未
+提及 `approvalNavTodoBadge`。命题核对为真:交付物自己的正文里,没有一处把 `:1186` 当作
+`approvalNavTodoBadge` 的位置。
 
 ### 15.10 越界检查
 
 ```
-$ git diff be2467ca656234ee19603fcd23f63f8788f92995..HEAD --stat
- apps/web/tests/approvalNavTodoBadge.spec.ts                                       | ++--
- apps/web/tests/todoCountsRealtime.spec.ts                                         | ++--
- docs/development/todo-center-phase2-fe-verification-20260918.md                   | ++--
+$ git diff be2467ca656234ee19603fcd23f63f8788f92995..HEAD --name-only
+apps/web/tests/approvalNavTodoBadge.spec.ts
+apps/web/tests/todoCountsRealtime.spec.ts
+docs/development/todo-center-phase2-fe-verification-20260918.md
+
+$ git diff be2467ca656234ee19603fcd23f63f8788f92995..HEAD --name-only -- apps/web/src packages/core-backend \
+    .github/workflows '*/migrations/*'
+(空——四条路径全部零命中)
 ```
-（不写具体插入/删除的数字——本节自身仍在追加中,对自己取 diffstat 会引用一个还没定型的数字,同
-`6dafde03e` 已修过的自指陷阱,§12.3/§13.3/§14 都用过这个处理方式,这里延续;数字请在本轮全部编辑
-完成、提交前用上面这条命令自己核一遍。)三个文件都在"测试 / MD"层,零 `packages/core-backend`
-改动,零迁移,零锁文,零 workflow 文件改动,零 `apps/web/src` 生产代码改动。
+（不对本 MD 自身取精确插入/删除数——本节还在追加中,对一份自己仍在编辑的文档取自己的 diffstat 会
+引用一个随下一次编辑就变的数字,同 `6dafde03e` 已修过的自指陷阱,§12.3/§13.3/§14 都用永久性回避
+这个处理方式,不是"提交前再核一遍"这种会随提交完成而过期的承诺,这里延续同一处理方式。)真正稳定、
+可重复验证的断言是**文件集合**,不是数字:本轮改动只触碰上面这三个文件(两个 `apps/web/tests/*.spec.ts`
+的注释 + 这一份 MD),`apps/web/src`、`packages/core-backend`、`.github/workflows`、迁移目录、锁文
+路径全部零命中——零 `packages/core-backend` 改动,零迁移,零锁文,零 workflow 文件改动,零
+`apps/web/src` 生产代码改动。
