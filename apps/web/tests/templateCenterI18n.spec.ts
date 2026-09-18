@@ -876,4 +876,66 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     const offenders = englishBranch.split('\n').filter((line) => CJK.test(line))
     expect(offenders).toEqual([])
   })
+
+  // P3 hygiene wave (2026-09-19), closing gate impl-gate-A2-round1-20260918.md's P3-8: the A-2
+  // template-groups slice added two new user-facing approval surfaces
+  // (SessionOrgSwitcher.vue, ApprovalTemplateGroupsPanel.vue) that sit outside every existing
+  // closed-world file list in this guard (CONVERTED_FILES above only ever names the two files the
+  // ORIGINAL i18n slice converted; it is read by index in the two tests above, not iterated, so a
+  // new file never gets swept just by being added to that array — it needs its own assertion,
+  // which is what these two tests are). Neither file routes through an external labels file the
+  // way TemplateCenterView.vue does, so a bare whole-file sweep (first attempt, reverted) false-
+  // positived on their OWN legitimate bilingual copy — each gets its own allowlisted-construct
+  // guard instead, same shape as the ApprovalCenterView.vue guard above.
+
+  function stripNonCode(source: string): string {
+    const noStyle = source.replace(/<style[\s\S]*?<\/style>/g, '')
+    const noHtmlComments = noStyle.replace(/<!--[\s\S]*?-->/g, '')
+    const noBlockComments = noHtmlComments.replace(/\/\*[\s\S]*?\*\//g, '')
+    return stripLineCommentsConservatively(noBlockComments)
+  }
+
+  it("guard: SessionOrgSwitcher.vue has no CJK literal outside its DEFAULT_COPY bilingual table", async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const abs = path.resolve(__dirname, '../src/components/SessionOrgSwitcher.vue')
+    const source = fs.readFileSync(abs, 'utf-8')
+    const stripped = stripNonCode(source)
+
+    const marker = 'const DEFAULT_COPY: SessionOrgSwitcherCopy = {'
+    const markerStart = stripped.indexOf(marker)
+    expect(markerStart).toBeGreaterThan(-1)
+    const { text: defaultCopySpan, endIndex } = extractBalanced(stripped, markerStart + marker.length - 1)
+    // Sanity: the allowlisted span really is the bilingual table (every `[en, zh]` tuple), not an
+    // extraction bug that silently allowlists nothing.
+    expect(CJK.test(defaultCopySpan)).toBe(true)
+
+    const rest = stripped.slice(0, markerStart) + stripped.slice(endIndex + 1)
+    const offenders = rest.split('\n').filter((line) => CJK.test(line))
+    expect(offenders).toEqual([])
+  })
+
+  it('guard: ApprovalTemplateGroupsPanel.vue has no CJK literal outside a paired tr(en, zh) call', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const abs = path.resolve(__dirname, '../src/views/approval/ApprovalTemplateGroupsPanel.vue')
+    const source = fs.readFileSync(abs, 'utf-8')
+    const stripped = stripNonCode(source)
+
+    // Every user-visible string in this panel is a direct `tr('English', '中文')` call (no labels
+    // table, unlike TemplateCenterView.vue / SessionOrgSwitcher.vue) — a line is allowlisted only
+    // when the CJK literal is paired with an English literal in the SAME `tr(...)` call, which is
+    // exactly what "translated" means here; anything else with CJK on it is a stray, untranslated
+    // string this guard exists to catch.
+    const pairedTrCall = /tr\('[^']*',\s*'[^']*'\)/
+    const lines = stripped.split('\n')
+    const pairedLines = lines.filter((line) => pairedTrCall.test(line))
+    // Sanity: this file really does have paired tr(en, zh) calls — otherwise the allowlist below
+    // is vacuous and this test degrades to a (still-valid, but weaker) whole-file CJK sweep.
+    expect(pairedLines.length).toBeGreaterThan(0)
+    for (const line of pairedLines) expect(CJK.test(line)).toBe(true)
+
+    const offenders = lines.filter((line) => CJK.test(line) && !pairedTrCall.test(line))
+    expect(offenders).toEqual([])
+  })
 })
