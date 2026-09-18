@@ -222,6 +222,7 @@ $ grep -n "r\.\(get\|post\|patch\|delete\)('/api/approval-template-groups\|r\.\(
 | 管理员「按现有 category 建组并挂接」预览→执行→可回滚 | A-3(分期 2) |
 | 补充清单 #1 的闭世界缺口(`scripts/ops/approval-template-groups-ci-wiring.test.mjs` 新守卫文件) | 未排期,留给后续单元或 owner 裁决是否现在做(见验证 MD) |
 | §3.4 提到的「重复归档复用 `GROUP_ARCHIVED`」裁量 | 门审核对项,若 owner/门审要求新码或不同状态码,需改动服务层一行 + 补一条验收 |
+| §3.5 挂接可见性校验(P2-1)引入的响应形状副作用:非法(非 uuid)`templateId` + 格式合法但**不存在**的 `groupId` 这一格,修复前是 404 `GROUP_NOT_FOUND`,本切片起是 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED`(第 3 轮门审 P3-6 现场实测确认,机制见验证 MD §22.5;`groupId` 存在时该格修复前后均为 500,不受影响) | 已披露,不阻塞;下一切片建议给 `mapGroupConstraintError` 补 22P02 → 400 映射,统一这一格与既有「组存在」格的响应形状 |
 
 ## 7. Owner 待裁项(锁文 §7/§9;已 ratify 的裁决原样引用抬头 RATIFY 记录,不改写)
 
