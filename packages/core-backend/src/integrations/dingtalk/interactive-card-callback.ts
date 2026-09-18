@@ -182,6 +182,26 @@ interface CallbackCorpAnchor {
   value: string
 }
 
+type CallbackCorpGateResult =
+  | 'matched'
+  | 'corp_anchor_conflict'
+  | 'corp_anchor_absent'
+  | 'delivery_corp_unresolved'
+  | 'corp_mismatch'
+
+type CallbackCompletionEvidence = {
+  deliveryId: string
+  headerEventCorpIdPresent: boolean
+  bodyCorpIdPresent: boolean
+  corpGateResult: CallbackCorpGateResult
+}
+
+type ResolvedCallbackOutcome = {
+  result: DingTalkApprovalCardCallbackResult
+  operatorDisplayName: string | null
+  completionEvidence: CallbackCompletionEvidence | null
+}
+
 function readCallbackCorpAnchor(payload: unknown): CallbackCorpAnchor {
   const record = asRecord(payload)
   if (!record) return { headerPresent: false, bodyPresent: false, conflict: false, value: '' }
@@ -420,7 +440,8 @@ async function resolveOperatorLocalUser(
 /**
  * Full B-3 execution: parse → ledger-only delivery resolve → fail-closed operator mapping →
  * same-source token threading → A-4 wrapper — then the B-4 terminal card update at outcome
- * production. Returns the typed outcome; never logs (callers own values-free logging).
+ * production. Returns the typed outcome and emits one values-free completion-evidence record only
+ * after the terminal-update attempt has completed; transport callers retain their existing outcome log.
  *
  * The B-4 follow-up is failure-isolated by construction: `applyDingTalkApprovalCardTerminalUpdate`
  * never throws and holds no query/engine access, so the committed action and the returned outcome
@@ -430,8 +451,17 @@ export async function executeDingTalkApprovalCardCallback(
   deps: DingTalkApprovalCardCallbackDeps,
   payload: unknown,
 ): Promise<DingTalkApprovalCardCallbackResult> {
-  const { result, operatorDisplayName } = await resolveDingTalkApprovalCardCallbackOutcome(deps, payload)
+  const { result, operatorDisplayName, completionEvidence } = await resolveDingTalkApprovalCardCallbackOutcome(deps, payload)
   await applyDingTalkApprovalCardTerminalUpdate(result, { operatorDisplayName }, deps.cardUpdateSender)
+  if (completionEvidence) {
+    // One atomic, values-free record binds the corp-anchor result and terminal callback outcome to
+    // the same completed invocation. UAT must consume this record instead of joining independent
+    // anchor/handled log lines that could belong to different callbacks.
+    logger.info('DingTalk interactive-card callback completed evidence', {
+      ...completionEvidence,
+      callbackOutcome: result.outcome,
+    })
+  }
   return result
 }
 
@@ -443,7 +473,7 @@ export async function executeDingTalkApprovalCardCallback(
 async function resolveDingTalkApprovalCardCallbackOutcome(
   deps: DingTalkApprovalCardCallbackDeps,
   payload: unknown,
-): Promise<{ result: DingTalkApprovalCardCallbackResult; operatorDisplayName: string | null }> {
+): Promise<ResolvedCallbackOutcome> {
   const parsed = parseDingTalkApprovalCardCallback(payload)
   if (parsed.ok === false) {
     return {
@@ -451,13 +481,16 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
         ? { outcome: 'rejected', reason: parsed.reason }
         : { outcome: 'ignored_unsupported_action', outTrackId: parsed.outTrackId },
       operatorDisplayName: null,
+      completionEvidence: null,
     }
   }
   const { outTrackId, operatorDingTalkUserId } = parsed.callback
 
   // LEDGER-ONLY resolution (§2): the delivery row is the sole delivery → instance anchor.
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, outTrackId)
-  if (!delivery) return { result: { outcome: 'delivery_not_found', outTrackId }, operatorDisplayName: null }
+  if (!delivery) {
+    return { result: { outcome: 'delivery_not_found', outTrackId }, operatorDisplayName: null, completionEvidence: null }
+  }
 
   // Owner hard gate (2026-07-10): operator identity may only resolve inside the delivery's own
   // DingTalk corp. An unpinned delivery (integration_id NULL) refuses OUTRIGHT — never a global
@@ -466,6 +499,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
     return {
       result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: 'integration_unpinned' },
       operatorDisplayName: null,
+      completionEvidence: null,
     }
   }
 
@@ -514,10 +548,18 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
           : anchor.value !== deliveryCorpId ? 'corp_mismatch'
             : null
 
+  const completionEvidence: CallbackCompletionEvidence = {
+    deliveryId: delivery.id,
+    headerEventCorpIdPresent: anchor.headerPresent,
+    bodyCorpIdPresent: anchor.bodyPresent,
+    corpGateResult: corpRefusal ?? 'matched',
+  }
+
   if (corpRefusal) {
     return {
       result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: corpRefusal },
       operatorDisplayName: null,
+      completionEvidence,
     }
   }
 
@@ -526,6 +568,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
     return {
       result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: operator.reason },
       operatorDisplayName: null,
+      completionEvidence,
     }
   }
 
@@ -534,7 +577,11 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
   // unreachable here by the owner gate above (P2 landing discipline: do NOT re-add it).
   const linkSecret = await resolveApprovalCardLinkSecretForIntegration(delivery.integration_id, deps.query)
   if (!linkSecret) {
-    return { result: { outcome: 'link_secret_unavailable', deliveryId: delivery.id }, operatorDisplayName: operator.userName }
+    return {
+      result: { outcome: 'link_secret_unavailable', deliveryId: delivery.id },
+      operatorDisplayName: operator.userName,
+      completionEvidence,
+    }
   }
   const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
 
@@ -559,9 +606,17 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
   const operatorDisplayName = operator.userName
   switch (outcome.status) {
     case 'ok':
-      return { result: { outcome: 'executed', deliveryId: delivery.id, summary: outcome.summary }, operatorDisplayName }
+      return {
+        result: { outcome: 'executed', deliveryId: delivery.id, summary: outcome.summary },
+        operatorDisplayName,
+        completionEvidence,
+      }
     case 'stale':
-      return { result: { outcome: 'stale', deliveryId: delivery.id, summary: outcome.summary }, operatorDisplayName }
+      return {
+        result: { outcome: 'stale', deliveryId: delivery.id, summary: outcome.summary },
+        operatorDisplayName,
+        completionEvidence,
+      }
     case 'engine_rejected':
       // Values-free: the engine's human-readable message may carry titles/names — only the stable
       // code and HTTP class cross this boundary. B-4 maps codes to reason-coded card copy.
@@ -574,9 +629,14 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
           summary: outcome.summary,
         },
         operatorDisplayName,
+        completionEvidence,
       }
     case 'not_found':
     default:
-      return { result: { outcome: 'wrapper_not_found', deliveryId: delivery.id }, operatorDisplayName }
+      return {
+        result: { outcome: 'wrapper_not_found', deliveryId: delivery.id },
+        operatorDisplayName,
+        completionEvidence,
+      }
   }
 }

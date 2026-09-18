@@ -26,11 +26,13 @@ import {
   DINGTALK_APPROVAL_CARD_NO_PERMISSION_TEXT,
   DINGTALK_APPROVAL_CARD_SYSTEM_UNAVAILABLE_TEXT,
   applyDingTalkApprovalCardTerminalUpdate,
+  applyDingTalkApprovalCardWebTerminalUpdate,
   buildDingTalkApprovalCardTerminalUpdate,
   createDingTalkApprovalCardStreamUpdateSender,
 } from '../../src/integrations/dingtalk/interactive-card-update'
 import type { DingTalkApprovalCardCallbackResult } from '../../src/integrations/dingtalk/interactive-card-callback'
 import { __resetDingTalkAppAccessTokenCacheForTests } from '../../src/integrations/dingtalk/client'
+import { Logger } from '../../src/core/logger'
 import type { ApprovalCardDeliverySummary } from '../../src/services/ApprovalCardDeliveryAction'
 
 const DELIVERY_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -42,6 +44,7 @@ const ACTED_AT_TEXT = '2026/07/10 14:30'
 function canarySummary(overrides: Partial<ApprovalCardDeliverySummary> = {}, approvalOverrides: Partial<ApprovalCardDeliverySummary['approval']> = {}): ApprovalCardDeliverySummary {
   return {
     deliveryId: DELIVERY_ID,
+    deliveryKind: 'interactive_card',
     cardState: 'acted',
     sendStatus: 'sent',
     nodeKey: 'NODE_KEY_CANARY',
@@ -62,6 +65,128 @@ function canarySummary(overrides: Partial<ApprovalCardDeliverySummary> = {}, app
     ...overrides,
   }
 }
+
+describe('applyDingTalkApprovalCardWebTerminalUpdate (deep-link terminal convergence)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('retires the original interactive card after a committed web reject', async () => {
+    const sends: unknown[] = []
+    const outcome = await applyDingTalkApprovalCardWebTerminalUpdate(
+      {
+        status: 'ok',
+        summary: canarySummary(
+          { actedAction: 'reject' },
+          { status: 'rejected' },
+        ),
+      },
+      async (update) => { sends.push(update) },
+    )
+
+    expect(outcome).toEqual({ status: 'updated', outTrackId: DELIVERY_ID })
+    expect(sends).toEqual([{
+      outTrackId: DELIVERY_ID,
+      statusText: `已驳回 · ${ACTED_AT_TEXT}`,
+      actionsVisible: false,
+    }])
+  })
+
+  it('retires a revoked card from the authoritative approval status', async () => {
+    const sends: unknown[] = []
+    const outcome = await applyDingTalkApprovalCardWebTerminalUpdate(
+      {
+        status: 'stale',
+        summary: canarySummary(
+          { cardState: 'superseded', actedAction: null, actedAt: null },
+          { status: 'revoked' },
+        ),
+      },
+      async (update) => { sends.push(update) },
+    )
+
+    expect(outcome).toEqual({ status: 'updated', outTrackId: DELIVERY_ID })
+    expect(sends).toEqual([{
+      outTrackId: DELIVERY_ID,
+      statusText: '审批已撤销',
+      actionsVisible: false,
+    }])
+  })
+
+  it('skips legacy work-notice deliveries and non-terminal outcomes', async () => {
+    const sender = vi.fn()
+    const workNotice = await applyDingTalkApprovalCardWebTerminalUpdate(
+      {
+        status: 'ok',
+        summary: canarySummary(
+          { deliveryKind: 'work_notice_action_card', actedAction: 'reject' },
+          { status: 'rejected' },
+        ),
+      },
+      sender,
+    )
+    const pending = await applyDingTalkApprovalCardWebTerminalUpdate(
+      {
+        status: 'engine_rejected',
+        code: 'VALIDATION_ERROR',
+        message: 'COMMENT_CANARY',
+        httpStatus: 400,
+        summary: canarySummary(
+          { cardState: 'sent', actedAction: null, actedAt: null },
+          { status: 'pending' },
+        ),
+      },
+      sender,
+    )
+
+    expect(workNotice).toEqual({ status: 'skipped', reason: 'no_update_for_outcome' })
+    expect(pending).toEqual({ status: 'skipped', reason: 'no_update_for_outcome' })
+    expect(sender).not.toHaveBeenCalled()
+  })
+
+  it('is idempotent: replaying the same terminal outcome emits byte-equal update-by-key payloads', async () => {
+    const sends: unknown[] = []
+    const outcome = {
+      status: 'ok' as const,
+      summary: canarySummary(
+        { actedAction: 'reject' },
+        { status: 'rejected' },
+      ),
+    }
+    const sender = async (update: unknown) => { sends.push(update) }
+
+    await Promise.all([
+      applyDingTalkApprovalCardWebTerminalUpdate(outcome, sender),
+      applyDingTalkApprovalCardWebTerminalUpdate(outcome, sender),
+    ])
+
+    expect(sends).toHaveLength(2)
+    expect(sends[0]).toEqual(sends[1])
+  })
+
+  it('isolates sender failure and logs only the error class plus delivery id', async () => {
+    const warning = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+    const outcome = await applyDingTalkApprovalCardWebTerminalUpdate(
+      {
+        status: 'ok',
+        summary: canarySummary(
+          { actedAction: 'reject' },
+          { status: 'rejected' },
+        ),
+      },
+      async () => { throw new Error('SECRET_API_BODY TITLE_CANARY COMMENT_CANARY') },
+    )
+
+    expect(outcome).toEqual({ status: 'failed', outTrackId: DELIVERY_ID, reason: 'Error' })
+    expect(warning).toHaveBeenCalledTimes(1)
+    const serialized = JSON.stringify(warning.mock.calls[0])
+    expect(serialized).toContain(`card_update_failed:Error`)
+    expect(serialized).toContain(DELIVERY_ID)
+    expect(serialized).not.toContain('SECRET_API_BODY')
+    expect(serialized).not.toContain('TITLE_CANARY')
+    expect(serialized).not.toContain('COMMENT_CANARY')
+  })
+})
 
 const CANARIES = [
   'NODE_KEY_CANARY',

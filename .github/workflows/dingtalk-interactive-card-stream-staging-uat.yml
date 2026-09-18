@@ -8,8 +8,8 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 #
 # EXECUTABLE: status | observe | prepare | on | off | https-on | https-off
 #   status  = read-only values-free snapshot (booleans / counts / reason classes)
-#   observe = read-only callback/corp-anchor/card-update result classes from the
-#             current Stream-ON backend container; never emits raw logs or ids
+#   observe = hold open a fresh five-minute log window and require exactly one
+#             atomic callback evidence record after observer_armed=true
 #   prepare = transport Stream credentials (chmod-600 files), derive exactly one
 #             active integration for live DINGTALK_CORP_ID with >=2 linked local users,
 #             atomically write the four credential/id env keys into
@@ -99,7 +99,7 @@ jobs:
 
           if [[ "$ACTION" == "observe" ]]; then
             if [[ ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-              echo "observe requires expected_delivery_id as a lowercase UUID" >&2
+            echo "observe requires expected_delivery_id as a lowercase UUID" >&2
               exit 2
             fi
           elif [[ -n "$EXPECTED_DELIVERY_ID" ]]; then
@@ -362,6 +362,7 @@ jobs:
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             echo ""
             echo "**Executable:** status / observe / prepare / on / off / https-on / https-off."
+            echo "For every callback: start observe, wait for observer_armed=true, click once immediately, then let the full five-minute observation window finish."
             echo "prepare forces Stream OFF after writing credentials + derived integration id."
             echo "on flips ONLY Stream flag true after prerequisite + LOG_LEVEL checks; proves worker_started only."
             echo "stream_connected is always unknown here (SDK connect resolves + retries forever; not log-proven)."
