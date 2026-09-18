@@ -332,7 +332,16 @@ accepted. Any attachment candidate refuses continuation until immutable-source
 verification is integrated.
 
 Canonical fence, current source/key/authority/owner checks, nine source seals,
-snapshot parent and nonce reservation share one transaction. A nonce failure rolls
-back the seals; prepared-envelope resume does not re-seal. These are historical
-source seals, not catalog publication or permission to prune history. Derived coverage,
-immutable attachments, provider receipts and the final publication fence remain open.
+snapshot parent and reading their coverage rows share one short transaction.
+The resulting ten-section plan uses the existing canonical snapshot planner: nine
+captured data sections and coverage derived from nine revisions, ten endpoints and
+nine memberships. Callback-supplied coverage bytes are never authoritative.
+
+This supersedes the initial seal-in-nonce transaction ordering: coverage must exist
+before custody and AEAD. Nonce reservation is a later short transaction which repeats
+the live source/key/authority/owner checks. A nonce or custody failure may retain
+historical seals, but creates no prepared ciphertext or published archive. It does
+not permit recapture of the consumed source. Prepared-envelope resume does not re-seal.
+These seals and the 28-row coverage prove this snapshot's source roots only, not
+arbitrary historical pruning authority. Immutable attachments, provider receipts and
+the final publication fence remain open.

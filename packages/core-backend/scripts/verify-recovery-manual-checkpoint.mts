@@ -728,10 +728,10 @@ try {
     captures++
     return { binding: first.binding, transactionDepth: first.transactionDepth, keyCustody: custody,
       dekSource: { kind: 'produce' as const },
-      // Empty attachment/audit sections are valid here; coverage remains a synthetic placeholder.
+      // Coverage input is deliberately bogus: the server must replace it with real sealed-row coverage.
       sections: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => {
         const rows = source.sections[sectionName as keyof typeof source.sections]
-        const plaintext = rows === undefined ? '[]' : manifest.canonicalizeRecoveryArchiveSectionRows(
+        const plaintext = sectionName === 'coverage_index' ? '[{"untrusted":true}]' : rows === undefined ? '[]' : manifest.canonicalizeRecoveryArchiveSectionRows(
           sectionName, sectionRows.buildRecoveryArchiveSectionRows(sectionName, rows)).canonicalJson
         return { sectionName, plaintext: Buffer.from(plaintext), nonce: randomBytes(12) }
       }),
@@ -801,6 +801,21 @@ try {
         if (rows !== undefined) assert.equal(Buffer.from(plaintext).toString('utf8'),
           manifest.canonicalizeRecoveryArchiveSectionRows(section.sectionName,
             sectionRows.buildRecoveryArchiveSectionRows(section.sectionName, rows)).canonicalJson)
+        if (section.sectionName === 'coverage_index') {
+          const coverage = JSON.parse(Buffer.from(plaintext).toString('utf8')) as { payload: { source_kind: string; source_id: string; source_sha256: string } }[]
+          assert.equal(coverage.length, 28)
+          assert.equal(coverage.filter((row) => row.payload.source_kind === 'section_revision').length, 9)
+          assert.equal(coverage.filter((row) => row.payload.source_kind === 'snapshot_membership').length, 9)
+          assert.equal(coverage.filter((row) => row.payload.source_kind === 'sealed_operation_endpoint').length, 10)
+          const endpoint = (await query(`SELECT sheet_id,operation_id::text,endpoint_seq::text,event_count,
+            created_at,operation_kind,event_contract_version,component_count FROM meta_record_history_operations
+            WHERE sheet_id=$1 AND operation_id=$2::uuid`, [first.binding.sheetId, first.binding.anchorOperationId])).rows[0]
+          endpoint.created_at = endpoint.created_at.toISOString()
+          const hashing = require('../src/multitable/recovery-archive-source-hash.ts') as typeof import('../src/multitable/recovery-archive-source-hash')
+          const hashed = hashing.computeRecoveryArchiveSourceHash('sealed_operation_endpoint', endpoint, endpoint.endpoint_seq)
+          assert.equal(coverage.find((row) => row.payload.source_kind === 'sealed_operation_endpoint'
+            && row.payload.source_id === hashed.sourceId)?.payload.source_sha256, hashed.hash)
+        }
         resumedSections++
       } })
     assert.equal(resumedSections, 10)
@@ -821,14 +836,15 @@ try {
     assert.equal(conflictUploads, 0)
     assert.equal(await nonceCount(conflict.owner.generationId), 1, 'earlier nine reservations must roll back')
     assert.equal(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, conflict.owner)), null)
-    assert.deepEqual(await sealedMembers(conflict.binding.anchorOperationId), [], 'nonce conflict must roll back source seals')
+    assert.deepEqual(await sealedMembers(conflict.binding.anchorOperationId), expectedMembers(conflict, 'section_checkpoint'),
+      'historical seals precede custody; nonce failure must not publish or persist ciphertext')
     const repeated = await continuation()
     let repeatedUploads = 0
     await manual({ ...repeated, capture: async (snapshot) => ({ ...await capture(snapshot), binding: repeated.binding }),
       upload: async () => { repeatedUploads++ } })
     assert.equal(repeatedUploads, 10)
     assert.deepEqual(await sealedMembers(repeated.binding.anchorOperationId), expectedMembers(repeated, 'section_checkpoint'))
-    console.log('PASS: manual bootstrap and repeat checkpoint seal exact nine canonical data hashes; nonce failure rolls back seals')
+    console.log('PASS: manual bootstrap/repeat seal exact nine data hashes; real 28-row coverage replaces callback input; nonce failure leaves only historical seals')
     const drift = await continuation()
     const driftWriter = new Client({ ...connection, database })
     await driftWriter.connect()

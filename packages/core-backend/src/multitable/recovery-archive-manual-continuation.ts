@@ -4,7 +4,7 @@ import {
   type RecoveryArchivePreparedUploadInput,
 } from './recovery-archive-prepared-upload'
 import type { SealQuery } from './recovery-archive-seals'
-import { bindRecoveryArchiveManualSourceRecheck, bindRecoveryArchiveManualNonceReservation, takeRecoveryArchiveManualSource,
+import { bindRecoveryArchiveManualSourceRecheck, bindRecoveryArchiveManualNonceReservation, bindRecoveryArchiveManualSectionPlan, takeRecoveryArchiveManualSource,
   type RecoveryArchiveManualSource } from './recovery-archive-manual-admission'
 import type { RecoveryArchiveCaptureSource } from './recovery-archive-relational-source'
 import { buildRecoveryArchiveSectionRows } from './recovery-archive-section-rows'
@@ -24,6 +24,7 @@ export function bindRecoveryArchiveManualContinuation(
   authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
 ) {
   const recheckSource = bindRecoveryArchiveManualSourceRecheck(transaction, authorize)
+  const prepareSections = bindRecoveryArchiveManualSectionPlan(transaction, authorize)
   return async (input: RecoveryArchiveManualContinuationInput): Promise<void> => {
     const identity = Object.freeze({ ...input.identity })
     const binding = Object.freeze({ ...input.binding })
@@ -53,8 +54,12 @@ export function bindRecoveryArchiveManualContinuation(
             throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
           }
         }
-        await recheckSource(source)
-        return { ...proposed, binding: { ...proposed.binding }, sections,
+        if (sections.length !== 10 || new Set(sections.map((section) => section.sectionName)).size !== 10) {
+          throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
+        }
+        const nonces = Object.fromEntries(sections.map((section) => [section.sectionName, section.nonce]))
+        const canonicalSections = await prepareSections(source, nonces)
+        return { ...proposed, binding: { ...proposed.binding }, sections: canonicalSections,
           reserveNonces: bindRecoveryArchiveManualNonceReservation(transaction, authorize, source) }
       },
       transactionDepth: input.transactionDepth, transaction,

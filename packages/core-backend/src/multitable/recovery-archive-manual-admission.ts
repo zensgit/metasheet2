@@ -17,6 +17,7 @@ import { readRecoveryArchivePreparedCapture, type RecoveryArchivePreparedCapture
 import { claimRecoveryArchiveSourcePinIntent } from './recovery-archive-source-pin'
 import type { RecoveryArchiveNonceReservationSink } from './recovery-archive-crypto'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from './recovery-archive-contract'
+import { buildRecoveryArchiveSnapshotPlan } from './recovery-archive-snapshot-plan'
 
 const sourceBrand = Symbol('manual-capture-source')
 export interface RecoveryArchiveManualSource { readonly [sourceBrand]: true }
@@ -112,21 +113,57 @@ export function bindRecoveryArchiveManualNonceReservation(
         throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_BINDING_MISMATCH')
       }
       if (entry.snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
-      const sections = RECOVERY_ARCHIVE_DATA_SECTION_NAMES.map((sectionKind) => {
-        const raw = sectionKind === 'attachments_index' || sectionKind === 'permission_evidence'
-          ? [] : entry.snapshot.sections[sectionKind]
-        const canonical = canonicalizeRecoveryArchiveSectionRows(sectionKind, buildRecoveryArchiveSectionRows(sectionKind, raw))
-        return { sectionKind, rowCount: canonical.rowCount, sourceHash: canonical.plaintextSha256 }
-      })
-      const sealInput = { ...entry.owner, sheetId: entry.identity.sheetId, sections }
-      if (entry.repeat) await consumeRecoveryArchiveCheckpointReservations(query, sealInput)
-      else await consumeRecoveryArchiveBootstrapReservations(query, sealInput)
       try {
         for (const row of rows) await query(`SELECT public.meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,$5,$6)`,
           [row.dekFingerprint, row.nonceHex, row.generationId, row.sectionName, row.aeadAlgorithm, row.formatVersion])
       } catch { throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_RESERVATION_REFUSED') }
     })
   }
+}
+
+/** Seal captured source and derive coverage from the actual committed-history row shapes. No custody or storage IO. */
+export function bindRecoveryArchiveManualSectionPlan(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
+) {
+  return async (source: RecoveryArchiveManualSource, nonces: Record<string, Uint8Array>) => transaction(async (query) => {
+    const entry = await recheckManualSource(query, source, authorize)
+    if (!entry.consumed) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+    if (entry.snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+    const sectionRows = { ...entry.snapshot.sections, attachments_index: [], permission_evidence: [] }
+    const sections = RECOVERY_ARCHIVE_DATA_SECTION_NAMES.map((sectionKind) => {
+      const canonical = canonicalizeRecoveryArchiveSectionRows(sectionKind,
+        buildRecoveryArchiveSectionRows(sectionKind, sectionRows[sectionKind]))
+      return { sectionKind, rowCount: canonical.rowCount, sourceHash: canonical.plaintextSha256 }
+    })
+    const sealInput = { ...entry.owner, sheetId: entry.identity.sheetId, sections }
+    const plan = entry.repeat ? await consumeRecoveryArchiveCheckpointReservations(query, sealInput)
+      : await consumeRecoveryArchiveBootstrapReservations(query, sealInput)
+    const ids = plan.sections.map((section) => section.operationId)
+    const revisions = await query(`SELECT id::text, sheet_id, section_kind, entity_key, action, payload,
+      tombstone, seq::text, operation_id::text,
+      to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+      FROM meta_sheet_section_revisions WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])`, [plan.sheetId, ids])
+    const endpoints = await query(`SELECT sheet_id, operation_id::text, endpoint_seq::text, event_count,
+      to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+      operation_kind, event_contract_version, component_count
+      FROM meta_record_history_operations WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])`,
+    [plan.sheetId, [...ids, plan.snapshotOperationId]])
+    const members = await query(`SELECT sheet_id, parent_operation_id::text, ordinal, section_kind,
+      source_head_kind, source_operation_id::text, source_head_seq::text, row_count::text, source_hash,
+      to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+      FROM meta_record_history_snapshot_members WHERE sheet_id=$1 AND parent_operation_id=$2::uuid`,
+    [plan.sheetId, plan.snapshotOperationId])
+    if (revisions.rows.length !== 9 || endpoints.rows.length !== 10 || members.rows.length !== 9) {
+      throw new Error('RECOVERY_ARCHIVE_MANUAL_COVERAGE_INCOMPLETE')
+    }
+    const coverageCandidates = [
+      ...(revisions.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'section_revision', boundSection: row.section_kind, row, sourceSeq: row.seq })),
+      ...(endpoints.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'sealed_operation_endpoint', boundSection: 'manifest_root', row, sourceSeq: row.endpoint_seq })),
+      ...(members.rows as Record<string, unknown>[]).map((row) => ({ sourceKind: 'snapshot_membership', boundSection: row.section_kind, row, sourceSeq: row.source_head_seq })),
+    ]
+    return buildRecoveryArchiveSnapshotPlan({ sectionRows, coverageCandidates, nonces })
+  })
 }
 
 export interface RecoveryArchiveManualAdmissionPolicy {

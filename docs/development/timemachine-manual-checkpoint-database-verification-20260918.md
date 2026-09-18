@@ -583,3 +583,35 @@ The continuation currently refuses attachment candidates and accepts zero-row
 audit-only permission evidence. Derived coverage is still a synthetic placeholder in
 this test; these seals are not complete publication, retention/prune authority or a
 restore grant. Final publication checks and immutable attachment support remain open.
+
+## Real Source Coverage Integration
+
+The subsequent implementation supersedes the preceding seal-in-nonce ordering.
+It seals and reads the actual nine revisions, ten operation endpoints and nine
+snapshot memberships in a short fenced transaction. The existing canonical snapshot
+planner derives the encrypted coverage section from those rows, with canonical UTC
+timestamps and decimal sequence strings. It never trusts callback coverage bytes.
+Custody remains outside the transaction; the later nonce transaction repeats source
+and authority checks. Historical seals can remain after nonce failure, while nonce
+batch rollback, no prepared ciphertext and no upload remain mandatory. These seals
+do not publish an archive or authorize history pruning.
+
+The full synthetic driver supplies deliberately bogus callback coverage, then decrypts
+the server-created section after interruption/resume. It requires 28 entries with
+exact 9/10/9 kind counts and independently rehashes the database snapshot endpoint.
+The nonce-conflict test now requires the original historical seal set to remain and
+still proves no prepared ciphertext/upload. The earlier empty-seal expectation failed
+on the first run, as expected for this documented ordering change, and was updated.
+The initial TypeScript pass also caught query-row typing that was corrected before
+final verification.
+
+Mutation dropping one real coverage candidate must fail the decrypted count assertion;
+the complete candidate set is restored before final gates. Logs:
+`/private/tmp/tm-manual-coverage-{mutation,final}.log`. This is no-attachment internal
+acceptance, not a provider receipt, finalized catalog entry or restore grant.
+
+Final local gates: owned full-PG acceptance and cleanup pass; snapshot/coverage/worker
+unit neighbors 3 files, 66/66; acceptance TypeScript, scoped source ESLint,
+static wiring 37/37, full S5 and diff check pass. The mutation fails precisely
+`27 !== 28` in the decrypted coverage assertion, then restoration is green.
+No new remote CI result is claimed for this local follow-up.
