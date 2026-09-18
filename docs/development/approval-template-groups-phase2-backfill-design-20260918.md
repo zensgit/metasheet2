@@ -365,8 +365,10 @@ GET /api/approval-template-groups/backfill/preview →
 {
   "scope": "org-complete",        // "org-complete" | "visible-to-you" —— 【§13 changesRequired #16,
                                    // 本步落地】见 §6.2 现场标注:过 approvalTemplateAdminGuard 的主体
-                                   // 不保证等于 isTemplateManager 人口(通配权限码展开 / isAdmin(userId)
-                                   // 两类主体都能过 guard 但可能不是 manager)——eligible 查询仍然套用
+                                   // 与 isTemplateManager 人口互不包含,不是前者包含后者(唯一端到端
+                                   // 实测成立的「过 guard 但非 manager」反例是 DB 侧 isAdmin(userId)
+                                   // 一条腿——通配权限码单独过 guard 已被 phase1 第 2/4 轮各真库证伪,
+                                   // 不是第二条成立的腿,2026-09-18 rebase 后订正)——eligible 查询仍然套用
                                    // applyTemplateVisibilityFilter,对非 manager 主体这会**收窄**候选
                                    // 模板集合。该字段如实标注:actor 的可见性判定若等价于"org 全量可见"
                                    // (即 applyTemplateVisibilityFilter 对该 actor 是恒真析取项)则为
@@ -532,7 +534,7 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 | 13 | W8 同 PR 补三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 池文件;锁序格断言停车点非终态) | §9 验证计划纲要目前只有粗粒度描述;本条细化待 §9 改写(下一实现单元) | **勘误(本步,续做步骤 21):本行"设计已知悉,§9 待补"这句字面是本表从 §13 首次写出起就没跟上代码的过期状态——三个子项其实早就全部落地,只是三次落地(§21 自己那次除外)都没有回写这一格:① 组合正例 + 反向正控(`transaction()` 内部再 `await` 一个 `...WithClient` 导出函数会在 L0 停车/超时,不是别的原因)—— `117e248cb`;② SET 义务格落在 RR 默认池文件——`45e5c8a21`(§21 自己落地并回写过);③ 锁序格断言**停车点**(`waitUntilBackendBlockedByHolder`,报告字面要求,不是完整两方 40P01 构造)——`f3b3cc5d3`。`git log --oneline origin/feat/approval-template-groups-phase1..HEAD` 核对:三个 SHA 均在当前分支历史内。** |
 | 14 | §1 表逐格改调用级复用;§2.1"无可观测中间态"收窄为"无 DB 行级中间态" | §1 表三行 + §2.1 段,均已现场标注 | **已落地** |
 | 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | §"批次机制选择"段(原§1 前)已加现场标注,补更宽普查(`operation_audit_logs` 自述占位且 schema 漂移两次、无 org 无 FK;`oapi_write_audit`/`automation_action_applied`/`approval_form_field_revisions` 各自域内无 FK;`attendance_import_rollback_*` 改列为正面先例而非仅驳回对象) | **已落地(续做步骤 5)** |
-| 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard⊋manager 的事实(前半道理已求值);`scope` 字段已写入 §5.2 响应形状(jsonc 示例)与 §3.1 execute 的两处 `RETURN`(中段已落地);回流 #5852 是跨 lane 动作,本分支无权限做(后半见 §13.5) | **前半+中段已落地(续做步骤 5),后半记入 remaining(见 §13.5)** |
+| 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard 人口与 manager 人口互不包含的事实(两方向各有一个实测反例——DB 侧 `isAdmin` 主体过 guard 但非 manager;持 `approval-templates:manage` 但未过 namespace admission 的主体被 guard 403 却被 `isTemplateManager` 判成 manager,phase1 第 6/7 轮已证伪原先"guard ⊋ manager"的严格超集说法,2026-09-18 rebase 后订正;前半道理已求值);`scope` 字段已写入 §5.2 响应形状(jsonc 示例)与 §3.1 execute 的两处 `RETURN`(中段已落地);回流 #5852 是跨 lane 动作,本分支无权限做(后半见 §13.5) | **前半+中段已落地(续做步骤 5),后半记入 remaining(见 §13.5)** |
 
 ### 13.2 逐字保留的门审成品(供 W7/W8/W9 直接抄用,不得转述)
 
@@ -575,7 +577,7 @@ L0(顾问锁)
 ### 13.5 跨 lane / 超出本分支权限的项(记入 remaining,不在本步处理)
 
 1. **P1-3 对 #5852 的溢出影响**:`createApprovalTemplateGroup(org,'人事',actor)` 抛裸 `DatabaseError`(`code=23514`),意味着 A-1 Draft PR #5852 第 3 轮"0 P1 / 0 P2 @`0144932ac`"的门审 verdict 是 **head-scoped** 的,该发现是本次 A-3 门审的溢出,**需要回流 #5852 重新求值其"0 P1"结论**——这不是 A-3 分支能做的事(#5852 是另一个 Draft PR,改它不在本 lane 权限内)。
-2. **changesRequired #16 后半**:`routes/approvals.ts:396-399` 的注释"`approvalTemplateAdminGuard` makes every actor that can reach the link endpoint today `isTemplateManager`"是过强声明(guard 人口 ⊋ manager 人口),**应随 P1-3 一并回流 #5852**——同上,不在本分支权限内现场改写 A-1 已落地代码的注释。
+2. **changesRequired #16 后半**:`routes/approvals.ts:396-399` 的注释"`approvalTemplateAdminGuard` makes every actor that can reach the link endpoint today `isTemplateManager`"是过强声明——两个人口互不包含,不是 guard 人口 ⊋ manager 人口这个严格超集关系(phase1 第 6/7 轮已各端到端真库证伪一次:DB 侧 `isAdmin` 主体过 guard 但非 manager;持 `approval-templates:manage` 但未过 namespace admission 的主体被 guard 403 却被 `isTemplateManager` 判成 manager,2026-09-18 rebase 后订正,原文的 ⊋ 是 `design-gate-A3-phase2-20260918.md` changesRequired #16 自己的绑定文本),**应随 P1-3 一并回流 #5852**——同上,不在本分支权限内现场改写 A-1 已落地代码的注释。
 3. **O2 的锁文勘误请示**是第三条尚未记入目标文档"不在目标内"清单的勘误项(该清单目前只列了分组锁 J/C「section 400」挪分期 3、"1 落地"求值两条)——需要在下一次向 owner 汇报时补齐这第三条,本文档在此记录以防遗漏。
 
 ### 13.6 Draft PR body 必写清单(为一个当前禁止开出的 PR 预先收集,防止到时遗漏)
@@ -583,7 +585,7 @@ L0(顾问锁)
 - changesRequired #3:纯中文 category 在 owner ratify `atg_name_nonblank` 勘误前功能惰性的诚实披露。
 - changesRequired #8:preview guard 偏离 I7 字面读/写二分的三条理由 + 请 owner 一句话确认。
 - changesRequired #15:Q1(b) 更宽普查记录(`operation_audit_logs` 自述占位且 schema 漂移两次;`attendance_import_rollback_*` 是正面先例而非仅驳回对象)。
-- changesRequired #16:`scope` 字段的存在理由(guard 人口 ⊋ manager 人口;唯一端到端实测成立的「过 guard 但非 manager」反例是 DB 侧 `isAdmin(userId)` 一条腿——通配权限码 `approval-templates:*` 单独过 guard 已被 phase1 第 2/4 轮各真库证伪一次,不是第二条成立的腿,2026-09-18 rebase 后订正,见 impl-gate-A3-round1-20260918.md §5 P2 后果 (b))。
+- changesRequired #16:`scope` 字段的存在理由——guard 人口与 manager 人口**互不包含**,不是 changesRequired #16 原文(`design-gate-A3-phase2-20260918.md`,上游绑定文本)所写的「guard 人口 ⊋ manager 人口」这个严格超集关系。两个方向各有一个端到端实测反例:①「过 guard 但非 manager」——DB 侧 `isAdmin(userId)` 一条腿(通配权限码 `approval-templates:*` 单独过 guard 已被 phase1 第 2/4 轮各真库证伪一次,不是第二条成立的腿,2026-09-18 rebase 后订正,见 impl-gate-A3-round1-20260918.md §5 P2 后果 (b));②「过 manager 但非 guard」——持 `approval-templates:manage` 权限码但未过 namespace admission 合取项的主体,被 `isTemplateManager` 精确 `.includes()` 判成 manager,却被 `rbacGuardAny` 拒绝(403),这是 phase1 第 6/7 轮门审新增的实测证伪(`3e53c52fe`),晚于本文档上一次写下 ⊋ 这句话。PR body 必须逐字写「互不包含,两方向各一条反例」,不得抄 changesRequired #16 原文的 ⊋ 措辞而不加订正标注。
 - P3-2:A-1 两文件不被任何 `*-ci-wiring.test.mjs` 覆盖的闭世界残留披露,本切片新文件继承同样残留。
 - P3-3:`action` 判定函数抽取为只读小函数供 preview/execute 共用,且同时返回 `skipped` 判定。
 - Q6(a) 三条件:PR 必须堆叠在 A-1 之上(base=`feat/approval-template-groups-phase1`);mutation 台账位移声明(#5852 台账是对重构前函数体写的,需逐条说明目标已搬进 `...WithClient` 体内);A-1 若再有修复轮,A-3 必须 rebase 不得 cherry-pick。
