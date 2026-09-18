@@ -198,8 +198,17 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   // §2(c) (design-gate A3 P2-5 回流修复) grants a REAL `user_roles(role_id='admin')` row to prove
   // the DB-side isAdmin guard-pass path — this file's shared `metasheet_test` DB context (see the
   // header note above) means that row must be torn down explicitly, the same as every other
-  // fixture row this file writes; a unique `TS`-suffixed userId avoids a PK collision but does NOT
-  // avoid indefinite accumulation of `role_id='admin'` rows across CI runs.
+  // fixture row this file writes. IMPORTANT (impl-gate-A-slice1-round4-20260918.md P3-4): this is
+  // the ONLY fixture in this file that grants `role_id='admin'` (platform admin, not a scoped
+  // dept/role like every other fixture's grant) — a process interruption between the INSERT above
+  // and the `afterAll` DELETE below leaves a REAL platform-admin `user_roles` row behind in the
+  // shared CI database, not merely a scoped-role row. A unique `TS`-suffixed userId avoids a PK
+  // collision but does NOT by itself avoid indefinite accumulation across interrupted CI runs — so
+  // `beforeAll` below ALSO does a prefix-scoped idempotent sweep (`vis3-dbadmin-%`) before this
+  // run's own grant, on top of the normal `afterAll` teardown: an interrupted prior run's orphaned
+  // admin row gets cleaned up the NEXT time this file runs, even if that next run also gets
+  // interrupted before its own `afterAll` — pre-execution cleanup is what survives interruption,
+  // post-execution cleanup only survives a completed run.
   const dbGrantedAdminUserIds: string[] = []
 
   itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
@@ -216,6 +225,15 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     for (const code of ['approvals:read', 'approval-templates:manage']) {
       await query(`INSERT INTO permissions (code, name) VALUES ($1, $1) ON CONFLICT (code) DO NOTHING`, [code])
     }
+
+    // Pre-execution idempotent sweep (impl-gate-A-slice1-round4-20260918.md P3-4): a `TS`-suffixed
+    // userId is unique to THIS run, so it never collides with a leftover row, but it also means a
+    // leftover platform-admin row from an interrupted PRIOR run (different TS) would never match
+    // this run's `dbGrantedAdminUserIds` array and would never be deleted by anyone. Sweep the
+    // stable literal prefix (not the per-run suffix) before granting this run's own row, so an
+    // orphan from an interrupted run gets reclaimed here even if THIS run also gets interrupted
+    // before its own `afterAll`.
+    await query(`DELETE FROM user_roles WHERE user_id LIKE 'vis3-dbadmin-%' AND role_id = 'admin'`)
   })
 
   afterAll(async () => {
