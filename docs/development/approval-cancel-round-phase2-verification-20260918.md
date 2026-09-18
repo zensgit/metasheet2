@@ -2460,6 +2460,177 @@ not a `scripts/ops/*-ci-wiring.test.mjs` — which is why it appears in neither 
 digest is untouched by the retirement. **Alignment therefore holds by construction rather than by
 edit** — the retired name was never in any of the four populations, because it was never a file.
 
+## 3.18 `unrecoverableExpired` 呈现 — the SURFACE half, CLOSED with a default (⚠️ owner 待裁, 按默认值) (this unit)
+
+§3.16 closed the persistence half and left exactly one thing open: **which surface renders it.**
+This unit implements a DEFAULT presentation contract so lock:86's 「必须呈现」 is satisfied by running
+code rather than by a registered gap. The default is flagged everywhere it lands; an owner who wants
+a different shape replaces it.
+
+### 3.18.1 What the lock does and does not fix
+
+`grep -n -i "unrecoverable\|expired\|过期"` over the lock returns 10 lines. Two bear on 呈现:
+
+- `lock:86` — C-1 step ⑥: 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,**必须呈现**)」
+- `lock:169` — 期 1 的账侧验收: 「完整取消结果逐字节等价于现有 W4 路径 + `unrecoverableExpired` 呈现」
+
+Both say **必须呈现**. Neither names a field, a payload shape, an endpoint or a screen. So the
+requirement is ratified and the contract is not — which is why this is implemented as a **named
+default carrying its own 待裁 marker**, not as a silent invention.
+
+### 3.18.2 The default contract
+
+`core/attendance-cancellation-execution-port.ts` (appended; no new file, no new census pin):
+
+```ts
+export type CancelRoundCancellationOutcomeV1 =
+  | { readonly status: 'cancelled'; readonly reversal: CancelRoundReversalSummaryV1 }
+  | { readonly status: 'cancelled_with_unrecoverable_expired'; readonly reversal: CancelRoundReversalSummaryV1 }
+  | { readonly status: 'cancelled_reversal_unreported'; readonly reversal: null }
+```
+
+**THREE statuses, not two,** and the third is §3.16.1's own lesson applied to the wire shape. If the
+summary were simply ABSENT when nothing was reversed, 「nothing to reverse」 and 「the channel is not
+wired」 would be byte-identical — the same `0 === 0` that could not tell 「computed」 from 「never
+computed」. A status token is therefore carried on EVERY redemption.
+
+**「不得与「成功」或「一般失败」同形」, satisfied by construction and asserted:**
+
+| neighbour | why `cancelled_with_unrecoverable_expired` is not 同形 with it |
+|---|---|
+| 「成功」 | a distinct token: a caller that only asks 「did it cancel」 still learns the balance is short. Asserted directly — `expect(outcome?.status).not.toBe('cancelled')` |
+| 「一般失败」 | it is NOT a failure shape, and making it one would be a **lie about a committed cancellation**: the cancel succeeded, the transaction committed, only some expired lots could not be refilled. Representing that as failure would invite a caller to retry or to tell the user the 撤销 did not happen |
+
+⚠️ **This is where the task's literal wording and the domain disagree, and the deviation is
+declared.** The task names the mutation 「把该状态折叠成一般失败 ⇒ 红」. There is no 一般失败 state on
+this path to fold into — the redemption either commits (all four success kinds) or becomes a C-3
+`blocked` closure, which is a different branch entirely and never reaches the classifier. The
+mutation is therefore run in the two directions that DO exist here (M-25 folds it into 成功, M-26
+folds it into the undifferentiated bucket) and both are red. Folding a committed cancellation into a
+failure shape is not implemented because it would be wrong, not because it was skipped.
+
+### 3.18.3 Two channels, and why both
+
+| channel | where | durable? | populated |
+|---|---|---|---|
+| **immediate** | `UnifiedApprovalDTO.cancellationOutcome` (`services/approval-bridge-types.ts`) | ✗ action response only | the approve call that redeemed the round |
+| **durable** | `approval_records.metadata.cancellationOutcome` (the `approve` audit row) | ✓ same transaction as the cancellation | read back via the existing history endpoint (`UnifiedApprovalHistoryDTO.metadata`) |
+
+The durable half exists because an in-memory field on the action response **fails the moment anyone
+reloads** — and a presentation requirement that evaporates on refresh has not been met. The audit
+row is written in the SAME transaction as the business cancellation and the round's `applied`, so
+it commits atomically with them. The precedent is the lock's own: `lock:94` already puts
+`metadata.w4ActorPosture` on this exact audit-row family, so metadata-carrying is precedented, not
+invented.
+
+⚠️ **REGISTERED FOR OWNER, stated as a limitation rather than left to be discovered:**
+`getApproval` does NOT project the field, so a later `GET /approvals/:id` omits it — the durable
+read goes through the history endpoint. Making 呈现 survive a reload **on the DTO itself** means
+joining the audit rows in `getApproval`, which is a hot read path; that is the owner's call, and it
+is written into the field's own doc comment so a reader of the type meets it there too.
+
+Two mechanics worth recording because both were nearly wrong:
+
+1. **Read from `result.response`, not from a read-back of the sealed row.** The `legacy` kind
+   returns BEFORE `sealAttendanceResultOperationV1` runs
+   (`w4c3b-request-operation-boundary.ts:897-899` vs `:918`), so a seal-based read would be absent
+   on that kind while the payload is right there in hand.
+2. **`business_refused` is narrowed out first** — its type comment says it carries no `response` at
+   all, and it is a `blocked` closure, not a cancellation.
+
+The classifier is **total and non-throwing** on purpose: it runs inside the caller's SERIALIZABLE
+transaction *after* the cancellation has been performed and sealed, so a presentation classifier
+must not be able to roll back a committed cancellation. An unreadable payload degrades to
+`cancelled_reversal_unreported`. And `unrecoverableExpired` — the field lock:86 names — is never
+defaulted to `0` when unreadable: defaulting would manufacture the reassuring answer out of missing
+data.
+
+### 3.18.4 The FE half: there is no 对应面 — measured, not assumed
+
+The task says 「前端**若有**对应面则渲染可判别文案」. The conditional does not fire:
+
+```
+$ grep -rn "cancellationOutcome\|unrecoverableExpired" apps/web/src | wc -l
+0
+$ grep -rln "cancelRound\|cancel-round\|CancelRound" apps/web/src
+apps/web/src/approvals/api.ts        ← the `cancel_round` batch-transfer SKIP-REASON literal only (:1646-1665)
+apps/web/src/approvals/batchTransfer.ts
+```
+
+There is no 撤销轮次 detail surface in `apps/web` to render onto — the only FE occurrence of the
+concept is a skip-reason token for batch transfer. Inventing a screen here would be far past 「若有
+对应面」. ⚠️ Consistent with §4's standing 「**FE / notification side** — C-3's 「卡片失效、端点返回
+一致」 column is untouched」: the FE half of this lock is unbuilt as a whole, not skipped for this
+item specifically.
+
+### 3.18.5 Mutation ledger (this unit)
+
+| id | mutation | site | expected | measured |
+|---|---|---|---|---|
+| M-25 | the expired branch folded into plain success (`return { status: 'cancelled', … }` unconditionally) | `attendance-cancellation-execution-port.ts`, `classifyCancelRoundCancellationOutcomeV1`'s final ternary | the expired case red on the status token | **1 red / 16 green** — `expected 'cancelled' to be 'cancelled_with_unrecoverable_expired'` |
+| M-26 | the whole classifier folded into the undifferentiated bucket (early `return { status: 'cancelled_reversal_unreported', reversal: null }`) | same function, first statement | **BOTH** cases red — the control too | **2 red / 15 green** — `expected 'cancelled_reversal_unreported' to be 'cancelled'` AND `… to be 'cancelled_with_unrecoverable_expired'` |
+| M-27 | the DURABLE write deleted (`approveRecordMetadata.cancellationOutcome = …` → `void`) | `ApprovalProductService.ts`, the approve-metadata block | the audit-row assertion red, the DTO assertion still green | **1 red / 16 green** — `expected undefined to be 'cancelled_with_unrecoverable_expired'` |
+
+**M-26 is the one that proves the CONTROL has discriminating power**, and it is the reason the 账侧
+parity case was rewritten rather than left alone: that fixture seeds NO leave-balance lots, so the
+same production path yields `unrecoverableExpired: 0` there and `120` in §3.16's. A positive-only
+assertion on ONE fixture would pass against an implementation that hardcodes
+`cancelled_with_unrecoverable_expired` for every redemption; M-26 red on BOTH is what rules that out.
+
+**M-27 separates the two channels.** It leaves the DTO half untouched and only the durable
+assertion falls — so the two are independently load-bearing rather than one assertion read twice.
+
+All three restored with `cp` and verified byte-identical (`cmp` → identical on both files;
+`grep -c "M-25\|M-26\|M-27"` over both production files → `0` and `0`).
+
+### 3.18.6 ⛔ THE TRIPWIRE FIRED, AS DESIGNED — and the lines were rewritten, not deleted
+
+§3.15.6 registered its OPEN item with a live tripwire: the two cases asserted, as NEGATIVES, that no
+such channel existed, 「so the day a channel IS added, the line goes red and this OPEN item must be
+revisited rather than quietly staying open」. A channel was added by this unit. Both went red:
+
+- `approval-cancel-round-redemption.db.test.ts:1887` (账侧 parity) — `not.toContain('reversal')` etc.
+- `:2047` (§3.16's case) — `not.toContain('unrecoverableExpired')` / `not.toContain('reversal')`
+
+They are **rewritten as positive assertions of the new contract**, never deleted and never excluded.
+Deleting them is precisely the move §3.15.7 warns about ("nobody later 'fixes' the red by adding
+`actor_id` to the exclusion table"). The mechanism worked exactly as it was designed to: the OPEN
+item came back to a human instead of ageing out.
+
+### 3.18.7 What this does NOT claim
+
+- **It is not an owner ratification.** The lock fixes 必须呈现 and nothing else; the status tokens,
+  the two channels and the action-response scope are all implementer defaults, marked 待裁 in the
+  type, in the DTO field's doc comment, and here.
+- **「零行为变化 for every other dispatch」 is narrow and true by construction, not by sweep**:
+  `dispatchCancellationOutcome` stays `null` unless a cancel round was actually redeemed, so the
+  field is `undefined` and the JSON is byte-identical on every other action. No sweep over all
+  dispatch verbs was run for this unit.
+- **No FE was written** (§3.18.4) and the notification side is untouched.
+- **The counters themselves are §3.16's**, not this unit's — this unit moves them onto a surface.
+
+### 3.18.8 Commands and results
+
+```
+$ (packages/core-backend) npx tsc --noEmit -p tsconfig.json
+# → clean
+
+$ (packages/core-backend) DATABASE_URL=…/metasheet2_lock_c2_u3 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+# → 17 passed (17)     [and again after all three mutants were restored]
+
+$ (packages/core-backend) npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts
+# → 6 passed (6)       [the file set is unchanged — no new suite file, so no pin moves]
+```
+
+### 3.18.9 Wiring — nothing new to pin
+
+No new `.db.test.ts`, no new suite file, no `plugin-tests.yml` edit, no s6a recompute. The
+acceptance lands in `approval-cancel-round-redemption.db.test.ts`, already in all four populations
+(§3.17.3), for the same reason §3.4 and §3.15.0 made that call. The production change is two
+existing `src/` files plus an append to a third; none is a gated artefact.
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than
@@ -2547,12 +2718,15 @@ they are.
   counter, so it is no longer the `0 === 0` that cannot tell 「computed」 from 「never computed」.
   Two production mutations carry it (M-23 the seal's payload, M-24 the counter's computation),
   1 red / 16 green each, both at the same named site.
-  ⚠️ What is STILL OPEN, and it is the narrower thing: **which user-facing surface renders it.**
-  `redeemCancelRoundInTxn` does still discard `{ kind: 'executed', response }`, and the approval
-  DTO carries no field for it — asserted as a negative in BOTH the 账侧 case and §3.16's, so the day
-  a channel is added they go red. This unit deliberately does not invent that field: a destination
-  for the payload is a presentation contract the lock does not name, so it is registered for owner
-  decision rather than 另造 here.
+  ⚠️ **SUPERSEDED BY §3.18** (this revision) — and the tripwire this paragraph describes FIRED.
+  The sentence above said the surface half was open and that the two negative assertions would go
+  red 「the day a channel is added」. §3.18 adds that channel, both lines went red, and both were
+  rewritten as positives rather than deleted. What remains open is narrower again, and is now a
+  flagged DEFAULT rather than a gap: the status tokens and the two channels
+  (`UnifiedApprovalDTO.cancellationOutcome` for the action response, the approve audit row's
+  `metadata.cancellationOutcome` for the durable read) are implementer choices marked 「owner 待裁,
+  按默认值」, and `getApproval` does not project the field, so a reload reads it from the history
+  endpoint rather than the DTO. See §3.18.3 and §3.18.7.
 - **`attendance-parity.db.test.ts`** — **RETIRED as a deliverable, and the reason is a provenance
   correction** (§3.15.0): the filename appears **zero** times in the lock
   (`grep -c "attendance-parity" <lock>` → 0); phase-1's design MD `:61-62` mis-attributed it to

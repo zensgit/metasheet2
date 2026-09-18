@@ -176,9 +176,11 @@ import {
 // no runtime dependency on the attendance PLUGIN; the plugin binds its boundary here at activate.
 // (`AttendanceW4TransactionClientV1`, the entry's client contract, is already imported below.)
 import {
+  classifyCancelRoundCancellationOutcomeV1,
   deriveCancelRoundW4OperationIdV1,
   getAttendanceCancellationExecutionPort,
 } from '../core/attendance-cancellation-execution-port'
+import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
 import {
   acquireAttendanceCalculationRolloutLock,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -9302,7 +9304,7 @@ export class ApprovalProductService {
       readonly policySnapshotAtDecision: string
     },
   ): Promise<
-    | { readonly kind: 'applied' }
+    | { readonly kind: 'applied'; readonly outcome: CancelRoundCancellationOutcomeV1 }
     | { readonly kind: 'blocked'; readonly code: string; readonly detail: string | null }
   > {
     const { engineInstanceId, instance, rolloutLock, roundId } = params
@@ -9401,6 +9403,15 @@ export class ApprovalProductService {
       return { kind: 'blocked', code: result.code, detail: result.detail }
     }
 
+    // lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,必须呈现)」 — the 呈现
+    // half, closed with the DEFAULT contract (owner 待裁, 按默认值; see the port module's type).
+    //
+    // Read from `result.response`, NOT from a read-back of the sealed row: the `legacy` kind
+    // returns BEFORE `sealAttendanceResultOperationV1` runs (`w4c3b-request-operation-boundary.ts`
+    // `:897-899` vs `:918`), so a seal-based read would be absent on it while the payload is right
+    // here. `business_refused` is narrowed out above — its type carries no `response` at all.
+    const outcome = classifyCancelRoundCancellationOutcomeV1(result.response)
+
     // 轮次 `applied` (lock §3 C-2 step ⑤) + I3 「终结即释放」 + §4's decision-time snapshot, written
     // 同形 with the C-3 closure's.
     const roundResult = await client.query(
@@ -9418,7 +9429,7 @@ export class ApprovalProductService {
         'CANCEL_ROUND_INVARIANT_VIOLATION',
       )
     }
-    return { kind: 'applied' }
+    return { kind: 'applied', outcome }
   }
 
   /** T3-6: best-effort read-model projection at create — never throws into the approval flow. */
@@ -10792,6 +10803,11 @@ export class ApprovalProductService {
     // lock, so only it can produce a serialization failure / advisory deadlock that did not exist
     // before. Every other dispatch keeps its previous error behaviour byte for byte.
     let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
+    // lock:86's 呈现 payload. Hoisted for the SAME structural reason as `rolloutLock`: it is
+    // produced deep inside the cancel-round branch of the `try` and consumed by the method's
+    // bottom `return`, which sits AFTER the `finally`. Stays `null` for every dispatch that is not
+    // a redeemed cancel round, so no other action's response shape changes by one byte.
+    let dispatchCancellationOutcome: CancelRoundCancellationOutcomeV1 | null = null
     try {
       client = await pool.connect()
 
@@ -12454,6 +12470,7 @@ export class ApprovalProductService {
         // (窗口/策略已关 ⇒ `expired`, 业务不可逆 ⇒ `blocked`) share one closure writer, and this is
         // where the second cause enters.
         let finalEvaluation: CancelRoundFinalEvaluationV1 = evaluation
+
         if (finalEvaluation.decision === 'redeem') {
           // Lock §3 C-2 steps ④–⑤ + §14.2 判据 II. Fail closed if the pre-read did not demand the
           // rollout lock: 首期 scope is 请假撤销 (lock §8 期 1), so a cancel round whose original
@@ -12481,6 +12498,8 @@ export class ApprovalProductService {
               code: redemption.code,
               detail: redemption.detail,
             }
+          } else {
+            dispatchCancellationOutcome = redemption.outcome
           }
         }
         if (finalEvaluation.decision !== 'redeem') {
@@ -12562,6 +12581,14 @@ export class ApprovalProductService {
       }
       if (approvalMode === 'threshold') {
         approveRecordMetadata.approvalThreshold = executor.getApprovalThreshold(currentNodeKey)
+      }
+      if (dispatchCancellationOutcome) {
+        // The DURABLE half of lock:86's 呈现. Same audit-row family the lock already uses for
+        // `metadata.w4ActorPosture` (lock:94), written in the SAME transaction as the business
+        // cancellation and the round's `applied`, so it commits atomically with them and is
+        // readable afterwards through the existing history endpoint (`UnifiedApprovalHistoryDTO`
+        // carries `metadata` verbatim). The DTO field below is the immediate half.
+        approveRecordMetadata.cancellationOutcome = dispatchCancellationOutcome
       }
       if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
         approveRecordMetadata.aggregateCancelled = aggregateCancelledAssigneeIds
@@ -12692,6 +12719,16 @@ export class ApprovalProductService {
     const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+    }
+    // The IMMEDIATE half of lock:86's 呈现 (default contract; owner 待裁). `getApproval` is a
+    // read-back of `approval_instances` and does NOT join the audit rows, so the outcome is
+    // attached here from the value the redemption returned in-transaction.
+    // ⚠️ SCOPE, stated rather than implied: this field is populated on the ACTION RESPONSE only.
+    // A later `GET /approvals/:id` will not carry it; the durable read is the approve audit row's
+    // `metadata.cancellationOutcome` via the history endpoint. Registered as an owner decision —
+    // if 呈现 must survive a reload on the DTO itself, `getApproval` has to project it.
+    if (dispatchCancellationOutcome) {
+      return { ...approval, cancellationOutcome: dispatchCancellationOutcome }
     }
     return approval
   }
