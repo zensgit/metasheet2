@@ -577,3 +577,11 @@ L0(顾问锁)
 - **回归证据(A-1 两个既有真库文件,未改动,亲跑)**:`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run tests/integration/approval-template-groups-lifecycle.db.test.ts tests/integration/approval-template-groups-serialization.db.test.ts tests/integration/approval-template-groups-backfill-schema.db.test.ts --reporter=dot`(`packages/core-backend` 内)→ `Test Files 3 passed (3)` / `Tests 34 passed (34)`(16 + 10 + 8)。
 - `npx tsc --noEmit -p tsconfig.json`(`packages/core-backend`)对迁移文件与新测试文件均**零错误**。
 - **未做**(remaining,交后续单元):W7 preview / W8 execute / W9 rollback 的路由与服务层 `.ts` 代码(含 `beginApprovalTemplateGroupTxn` 品牌类型、`GET …/backfill/batches` 端点、changesRequired #13 的三条组合调用判别力测试);A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(见上一条);验证 MD(§13.7,仍不存在)。
+
+### 14.1 同一单元内自纠三处(advisor 复核)
+
+§14 正文对应的提交(`02775e95f`)push 后过 advisor 复核,发现三处需要当场修复的问题;三处均已修正、重新亲跑验证,作为**同一续做步骤内的第二个提交**(见 git log,不 amend 已推送的提交):
+
+1. **wiring 守卫用了两个可用检查里较弱的一个**:`approval-template-groups-backfill-schema-ci-wiring.test.mjs` 最初照抄 B4 先例的 `cfg.includes(`'${FILE}'`)`——纯文本匹配,把 exclude 那一行注释掉(`// 'tests/...',`)子串仍在,守卫照样绿,而真实排除已经消失,no-DB job 会重新收集这个 DB-gated 套件并 skip-green。**已亲测该弱点**:手工注释掉 exclude 行,弱检查(3/3 绿,含被攻击的那一条)。改用同一个 `ci-realdb-step-contract.mjs` 模块里更强的 `isQuotedInTestExclude`(结构化解析 `test.exclude` 数组,先去行内注释)后,同一变异下该条目断言**转红**;`cp` 备份的 `vitest.config.ts` 还原后 `cmp` 字节级一致,重跑转绿。这是记忆 `feedback_copy_precedent_whole_block_not_item_by_item` 的又一实例——抄了先例里较窄的写法,而更宽的检查就在同一个已 import 的模块里。
+2. **硬编码 group/batch id 跨轮碰撞面**:测试文件里除 org/template key 外,`approval_template_groups.id`(全局 `text PRIMARY KEY`,非 org 域内唯一)与批次头 `id` 最初是裸字面量(如 `'atgbb_m6_pos_g'`),不像 org 一样带 `${TS}` 后缀。若某次运行在 `afterAll` 之前异常退出(取消/OOM/超时),会留下一行任何后续运行都清不掉的孤儿行,之后每次重跑都在 `INSERT` 处 23505、常驻转红,直到手工清库——对私有库 `metasheet2_lock_a3`(非一次性 CI 容器)是真实风险。已给全部 10 个 id 字面量补 `_${TS}` 后缀(改为模板字符串),`tsc --noEmit` 与全部 8 例真库测试重新亲跑绿。A-1 的 `lifecycle.db.test.ts` 没有这个面,因为它通过 API 建组(服务端铸 `atg_`+`randomUUID()`),本文件绕过路由直连 DB 才引入了这个手工分配 id 的责任。
+3. **M6 反控里的 `/atgbbl_link_fk/` 消息匹配无判别力**:该断言在 CASCADE(已修复)与 NO ACTION(mutation)两种情况下都会通过——只要这次会话对该约束触发过任何一次违反,DROP/ADD 语句与报错文本里都会带这个名字,不区分两种方向。真正承重的是其后 `confdeltype` 恢复检查(mutation 探针实测:正是这一条在 3/8 转红里reddened,消息匹配那条没有)。已在文件里加注释指出这一点,防止后来者把它当"冗余"删掉从而悄悄拆掉这个反控的判别力。

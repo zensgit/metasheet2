@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import {
   REAL_DB_STEP_IDS,
   isSuiteWiredInRealDbStep,
+  isQuotedInTestExclude,
   realDbStepWholeFileArgs,
 } from './ci-realdb-step-contract.mjs'
 
@@ -32,7 +33,15 @@ const STEP_ID = REAL_DB_STEP_IDS.approval
 
 test('vitest.config.ts excludes the A3 backfill-schema suite from the no-DB job', () => {
   const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
-  assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE} (DATABASE_URL-gated whole file)`)
+  // Structural check (parses the direct test.exclude array, strips line comments before
+  // matching), NOT `cfg.includes(...)` — a plain substring match stays green when the exclude
+  // entry is commented out (the path text is still present in the file), which is exactly the
+  // failure mode this guard exists to catch. Verified: commenting out the entry reddens this
+  // assertion; `cfg.includes()` does not move.
+  assert.ok(
+    isQuotedInTestExclude(cfg, FILE),
+    `vitest.config.ts must exclude ${FILE} (DATABASE_URL-gated whole file) as a live (non-commented) entry`,
+  )
 })
 
 test('plugin-tests.yml runs the A3 backfill-schema suite as a whole file in the directory real-DB step (id: approval-real-db-integration)', () => {
