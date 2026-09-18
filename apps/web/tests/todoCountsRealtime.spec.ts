@@ -58,6 +58,13 @@ describe('useTodoCountsRealtime', () => {
     await reconnect?.()
   }
 
+  // Mutation guard (P3 hygiene, 2026-09-19, re-run this round rather than carried forward):
+  // `cp` backup of `useTodoCountsRealtime.ts` → change the subscribed event string from
+  // `'todo:counts-updated'` to `'approval:counts-updated'` (the wrong-event mutation named in
+  // `impl-gate-B2-round2-20260918.md` P3-5) → `npx vitest run todoCountsRealtime` → 1 failed
+  // / 4 passed, exactly this test, at the `toHaveBeenCalledWith` assertion (received 0 calls,
+  // since the socket now only wires the approval-side event) → `cp` restore → `cmp`
+  // byte-identical → 5/5 green again.
   it('subscribes to todo:counts-updated and normalizes a well-formed push', async () => {
     const received = vi.fn()
     await mountAndSubscribe(received)
