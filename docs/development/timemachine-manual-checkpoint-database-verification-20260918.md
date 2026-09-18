@@ -761,3 +761,66 @@ pass. The driver removes its owned DB, connections and cluster. A test injection
 was adjusted after MAC verification introduced a read transaction: source drift
 is injected only into the final transaction so rollback restores the fixture.
 No migration/flag/deployment or customer data change accompanies this slice.
+
+## Explicit Manual Command And Public Reader
+
+Code checkpoint: `aad6d0e18` (parent `d390c1e4797f8a86ef714a34b2fe49e35d686d19`).
+The owner-confirmed contract is composed into explicit POST capture and GET status
+routes. Server-owned manual policy has no numeric defaults and is validated and
+snapshotted during composition. Commands remain behind existing exact-true gates;
+this verification does not configure or enable them outside synthetic tests.
+
+Responses expose only requestId, generationId and pending/incomplete/recoverable.
+Pending denotes an active durable lease, not scheduled background work. A retry
+without original source or durable prepared bytes never captures a later live
+table. Prepared retries use their original signed bytes and nonce reservations.
+Fresh canonical scope/actor authority applies to admission, reads, upload and
+publication; provider and custody IO remain outside database transactions.
+
+The preceding internal-reader proof is historical. The current driver calls the
+public `readRecoveryArchiveCompleteSectionState` facade and reconciles stored
+sections with canonical history. It also starts the production HTTP router with
+synthetic authentication and owned PG/filesystem dependencies: anonymous request
+401, caller identity alias 400, capture/read/retry recoverable, catalog generation
+match, interrupted upload resume, lost-source pending then lease-expired incomplete,
+revoked identity refusal and default-OFF refusal. This is not real-login browser
+UAT, restore/apply acceptance or customer storage evidence.
+
+Final local gates:
+- Route/composition/startup/liveness/DB-wiring: 5 files, 164 tests PASS.
+- Reconstructor/worker-authorization CI regressions: 2 files, 29 tests PASS.
+- Synthetic TM migration stream: 30 migrations, 963 catalog objects, replay PASS;
+  fingerprint `47d05a62b2afabf386aacbedc725ff7ed92dfcde7064b580fd17851093d150e4`.
+  This is the dedicated TM stream, not all repository migrations.
+- Full dedicated driver, public-reader and HTTP assertions PASS; owned database,
+  connections and synthetic cluster removed. Integration neighbor groups remain
+  59 and 127 tests as reported by the runner; driver assertions are not that count.
+- Acceptance TypeScript, scoped source ESLint, wiring guard, full sealed-export S5
+  and diff-check PASS. Whole `univer-meta.ts` ESLint retains exactly its baseline
+  1 error and 194 warnings; no blanket whole-file lint PASS is claimed.
+
+Mutation evidence: neutralizing fresh command-read authorization makes revoked
+actor read fail its rejection oracle; removing strict request-body parsing makes
+all nine caller-alias negatives fail. Both mutations were restored before final
+green runs.
+
+The parent exact-head Node18/20 CI failures were two deterministic regressions:
+the driver bypassed the public reader facade, and a continuation unit fixture was
+still unsigned v1. The former now uses the public facade; the latter uses a
+structural signed-v2 fixture while preserving explicit unsigned-v1 rejection.
+Real cryptographic verification remains covered by the synthetic custody driver.
+Remote CI for this new checkpoint remains pending publication, not inferred green.
+
+Sol high's completed read-only review of parent d390 found no substantiated P1/P2
+in the bounded atomic finalizer. It did not review this runtime command. A bounded
+Terra runtime review returned no substantive verdict; no approval is inferred.
+
+Evidence logs: `/private/tmp/tm-manual-command-final-unit.log`,
+`/private/tmp/tm-manual-command-ci-fix.log`,
+`/private/tmp/tm-manual-command-public-reader-db.log`,
+`/private/tmp/tm-manual-command-authority-mutation.log`,
+`/private/tmp/tm-manual-command-body-mutation.log`.
+Remaining: user-facing confirmation/status flow, immutable attachment capture,
+separately authorized restore/apply acceptance, and final product closeout.
+No automatic schedule, retention, cleanup, hard-deleted-table revival, Ready,
+merge, flag enablement, dispatch, deployment or production action is included.
