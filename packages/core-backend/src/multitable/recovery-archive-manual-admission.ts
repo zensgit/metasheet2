@@ -205,6 +205,17 @@ export interface RecoveryArchiveManualAdmissionPolicy {
   expiresAfterSeconds: number
 }
 
+/** Explicit server policy only. Absence is not permission to invent a retention or lease default. */
+export function snapshotRecoveryArchiveManualPolicy(input: RecoveryArchiveManualAdmissionPolicy): Readonly<RecoveryArchiveManualAdmissionPolicy> {
+  if (!input || Object.keys(input).sort().join(',') !== 'expiresAfterSeconds,keyId,keyRowVersion,leaseSeconds'
+    || typeof input.keyId !== 'string' || !input.keyId || input.keyId.trim() !== input.keyId
+    || typeof input.keyRowVersion !== 'string' || !/^[1-9][0-9]*$/.test(input.keyRowVersion)
+    || !Number.isSafeInteger(input.leaseSeconds) || input.leaseSeconds <= 0
+    || !Number.isSafeInteger(input.expiresAfterSeconds) || input.expiresAfterSeconds < input.leaseSeconds
+    || input.expiresAfterSeconds > 2147483647) throw new Error('RECOVERY_ARCHIVE_MANUAL_POLICY_INVALID')
+  return Object.freeze({ ...input })
+}
+
 /** Internal admission/source snapshot. Policy and identity are server-owned, never HTTP-body aliases.
  * No nonce is reserved, object uploaded or catalog entry published here.
  */
@@ -213,10 +224,7 @@ export function bindRecoveryArchiveManualAdmission(
   authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
   policyInput: RecoveryArchiveManualAdmissionPolicy,
 ) {
-  const policy = Object.freeze({ ...policyInput })
-  if (!Number.isSafeInteger(policy.leaseSeconds) || policy.leaseSeconds <= 0
-    || !Number.isSafeInteger(policy.expiresAfterSeconds) || policy.expiresAfterSeconds < policy.leaseSeconds
-    || policy.expiresAfterSeconds > 2147483647) throw new Error('RECOVERY_ARCHIVE_MANUAL_POLICY_INVALID')
+  const policy = snapshotRecoveryArchiveManualPolicy(policyInput)
   return async (input: RecoveryArchiveManualRequest): Promise<RecoveryArchiveManualAdmissionResult> => {
     const identity = Object.freeze({ ...input })
     return transaction(async (query) => {

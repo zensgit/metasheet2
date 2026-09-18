@@ -861,7 +861,7 @@ const COVERED: Record<string, CoveredFile> = {
   },
   'routes/multitable-button.ts': { minHandlers: 1, minInScope: 1, exempt: {} },
   'routes/multitable-record-approvals.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
-  'routes/recovery-archive-restore-owner.ts': { minHandlers: 9, minInScope: 9, exempt: {} },
+  'routes/recovery-archive-restore-owner.ts': { minHandlers: 11, minInScope: 11, exempt: {} },
   'routes/spreadsheet-permissions.ts': {
     minHandlers: 3,
     minInScope: 3,

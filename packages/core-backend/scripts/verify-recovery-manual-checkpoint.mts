@@ -1086,7 +1086,8 @@ try {
           expectedVersion: object.provider_version, expectedSha256: object.ciphertext_sha256,
           expectedSize: object.size_bytes, expectedExpiresAt: localManifest.expires_at }
       }
-      const opened = await reader.readRecoveryArchiveCompleteSectionsInternal({
+      const opened = await reader.readRecoveryArchiveCompleteSectionState({
+        query,
         selectedBinding: { generationId: localInput.owner.generationId, workspaceId: localInput.identity.workspaceId,
           baseId: localInput.identity.baseId, sheetId: localInput.identity.sheetId,
           anchorOperationId: localInput.binding.anchorOperationId, anchorSeq: localInput.binding.anchorSeq,
@@ -1095,9 +1096,114 @@ try {
         keyCustody: restoredSession.admitForArchive(custodyId), transactionDepth: first.transactionDepth,
         objectStore: localProvider, manifestObject: objectBinding(null),
         sectionObjects: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map(objectBinding) })
-      assert.equal(opened.sections.records.length, 1)
-      assert.equal(opened.sections.coverage_index.length, 28)
-      console.log('PASS: real local custody backup; locked-session upload resume, fresh-session authenticated publication and actual archive reader opens all ten stored sections')
+      assert.equal(opened.records.size, 1)
+      assert.equal(opened.coverage_index.length, 28)
+      console.log('PASS: real local custody backup; locked-session upload resume, fresh-session authenticated publication and public archive reader reconciles all ten stored sections')
+      const { createRecoveryArchiveManualCommand } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+      const runtime = { keyCustody: restoredSession.admitForArchive(custodyId),
+        objectStore: localProvider, transactionDepth: first.transactionDepth }
+      const command = createRecoveryArchiveManualCommand(uploadInput.transaction, runtime,
+        { ...admissionPolicy, keyId: capability.keyId })
+      const commandIdentity = { ...localInput.identity, requestId: randomUUID() }
+      const archiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      const fenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      try {
+        process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
+        process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+        await assert.rejects(createRecoveryArchiveManualCommand(uploadInput.transaction, runtime).capture(commandIdentity),
+          { message: 'RECOVERY_ARCHIVE_MANUAL_POLICY_UNAVAILABLE' })
+        await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_NOT_FOUND' })
+        const completed = await command.capture(commandIdentity)
+        assert.deepEqual(completed, { requestId: commandIdentity.requestId, generationId: completed.generationId, state: 'recoverable' })
+        assert.deepEqual(await command.read(commandIdentity), completed)
+        assert.deepEqual(await command.capture(commandIdentity), completed)
+        assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
+          [completed.generationId])).rows[0].n, 11)
+        const interruptedIdentity = { ...commandIdentity, requestId: randomUUID() }
+        const interruptedCommand = createRecoveryArchiveManualCommand(uploadInput.transaction,
+          { ...runtime, objectStore: { ...localProvider, async put() { throw new Error('SYNTHETIC_COMMAND_UPLOAD_INTERRUPTION') } } },
+          { ...admissionPolicy, keyId: capability.keyId })
+        await assert.rejects(interruptedCommand.capture(interruptedIdentity))
+        const interruptedStatus = await command.read(interruptedIdentity)
+        assert.equal(interruptedStatus.state, 'pending')
+        const payloadBefore = (await query('SELECT payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
+          [interruptedStatus.generationId])).rows[0].payload_sha256
+        assert.deepEqual(await command.capture(interruptedIdentity), { ...interruptedStatus, state: 'recoverable' })
+        assert.equal((await query('SELECT payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
+          [interruptedStatus.generationId])).rows[0].payload_sha256, payloadBefore)
+        assert.equal(await nonceCount(interruptedStatus.generationId), 10)
+        await assert.rejects(command.read({ ...commandIdentity, sheetId: 's' }), { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT' })
+        await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+        await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+        await query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+        const lostIdentity = { ...commandIdentity, requestId: randomUUID() }
+        const lost = await createRecoveryArchiveManualAdmission(uploadInput.transaction,
+          { ...admissionPolicy, keyId: capability.keyId, leaseSeconds: 2 })(lostIdentity)
+        const sourceMissing = { requestId: lostIdentity.requestId, generationId: lost.generationId, state: 'pending' }
+        assert.deepEqual(await command.capture(lostIdentity), sourceMissing)
+        assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
+          [lost.generationId])).rows[0].n, 0, 'retry must not recapture after opaque source was lost')
+        await query('SELECT pg_sleep(2.1)')
+        assert.deepEqual(await command.capture(lostIdentity), { ...sourceMissing, state: 'incomplete' })
+        // Real HTTP registrar + canonical database authority, with synthetic authentication only.
+        const express = require('express') as typeof import('express')
+        const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+        const httpApp = express()
+        httpApp.use(express.json())
+        httpApp.use((req, _res, next) => {
+          if (req.headers.authorization === 'Bearer synthetic-manual-owner') req.user = { id: actorId, role: 'admin' }
+          next()
+        })
+        httpApp.use('/api/multitable', univerMetaRouter({ recoveryArchiveRuntime: runtime,
+          recoveryArchiveDatabaseRuntime: { transaction: uploadInput.transaction, query,
+            transactionDepthProbe: runtime.transactionDepth },
+          recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId } }))
+        const httpServer = httpApp.listen(0, '127.0.0.1')
+        try {
+          await new Promise<void>((resolve, reject) => { httpServer.once('listening', resolve); httpServer.once('error', reject) })
+          const address = httpServer.address()
+          assert.ok(address && typeof address !== 'string')
+          const captureUrl = `http://127.0.0.1:${address.port}/api/multitable/sheets/no-genesis/recovery-archive/captures`
+          const headers = { 'content-type': 'application/json', authorization: 'Bearer synthetic-manual-owner' }
+          const httpRequestId = randomUUID()
+          assert.equal((await fetch(captureUrl, { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId: httpRequestId }) })).status, 401)
+          assert.equal((await fetch(captureUrl, { method: 'POST', headers,
+            body: JSON.stringify({ requestId: httpRequestId, actorId }) })).status, 400)
+          const submitted = await fetch(captureUrl, { method: 'POST', headers, body: JSON.stringify({ requestId: httpRequestId }) })
+          assert.equal(submitted.status, 200)
+          const publicResult = await submitted.json() as { ok: boolean; data: { requestId: string; generationId: string; state: string } }
+          assert.deepEqual(publicResult, { ok: true, data: { requestId: httpRequestId,
+            generationId: publicResult.data.generationId, state: 'recoverable' } })
+          const statusResponse = await fetch(`${captureUrl}/${httpRequestId}`, { headers })
+          assert.equal(statusResponse.status, 200)
+          assert.deepEqual(await statusResponse.json(), publicResult)
+          const replayResponse = await fetch(captureUrl, { method: 'POST', headers, body: JSON.stringify({ requestId: httpRequestId }) })
+          assert.equal(replayResponse.status, 200)
+          assert.deepEqual(await replayResponse.json(), publicResult)
+          const catalogUrl = captureUrl.replace('/captures', `/catalog/${publicResult.data.generationId}`)
+          const catalogResponse = await fetch(catalogUrl, { headers })
+          assert.equal(catalogResponse.status, 200)
+          const catalog = await catalogResponse.json() as { ok: boolean; data: { generationId: string } }
+          assert.equal(catalog.ok, true)
+          assert.equal(catalog.data.generationId, publicResult.data.generationId)
+        } finally {
+          httpServer.closeIdleConnections()
+          await new Promise<void>((resolve, reject) => httpServer.close(error => error ? reject(error) : resolve()))
+          assert.equal(httpServer.address(), null)
+        }
+        process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'false'
+        await assert.rejects(command.capture({ ...commandIdentity, requestId: randomUUID() }),
+          { message: 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE' })
+        await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE' })
+      } finally {
+        await query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+        if (archiveFlag === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+        else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = archiveFlag
+        if (fenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+        else process.env.MULTITABLE_ENABLE_WRITER_FENCE = fenceFlag
+      }
+      console.log('PASS: real HTTP manual command/status through canonical authority with synthetic authentication; exact retry, lost-source no-recapture, expired lease, revoked identity and default-OFF gates; listener closed')
     } finally {
       localSession.lock()
       restoredSession.lock()

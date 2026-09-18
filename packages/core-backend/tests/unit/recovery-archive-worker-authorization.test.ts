@@ -7,6 +7,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 import type { RecoveryArchivePreparedUploadInput } from '../../src/multitable/recovery-archive-prepared-upload'
 import { bindRecoveryArchiveScopeAuthorization } from '../../src/multitable/recovery-archive-worker-authorization'
+import { buildRecoveryArchiveManifest } from '../../src/multitable/recovery-archive-manifest'
+import { buildRecoveryArchiveManifestObjectEnvelope } from '../../src/multitable/recovery-archive-manifest-object-envelope'
 
 const identity: RecoveryArchiveWorkerIdentity = Object.freeze({ jobId: 'job', actorId: 'actor', workspaceId: 'workspace', baseId: 'base', sheetId: 'sheet' })
 function database() {
@@ -42,19 +44,33 @@ describe('production archive worker authorization', () => {
     const binding = { formatVersion: 1, generationId, workspaceId: identity.workspaceId, baseId: identity.baseId,
       sheetId: identity.sheetId, anchorOperationId: randomUUID(), anchorSeq: '1', checkpointId: 'checkpoint',
       keyId: 'key', aeadAlgorithm: 'aes-256-gcm' as const }
-    const payload = Buffer.from(JSON.stringify({ version: 1,
+    // Structural prepared-resume fixture only; real MAC verification is exercised by the real-DB finalizer.
+    const signed = buildRecoveryArchiveManifest({ archive_generation_id: generationId, workspace_id: identity.workspaceId,
+      base_id: identity.baseId, sheet_id: identity.sheetId, anchor_operation_id: binding.anchorOperationId,
+      anchor_seq: '1', checkpoint_id: binding.checkpointId, created_at: '2026-09-19T00:00:00.000Z',
+      expires_at: '2026-09-20T00:00:00.000Z', source_vector_hash: 'c'.repeat(64) },
+    RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((name, index) => ({ name, rows: [], aead_algorithm: 'aes-256-gcm',
+      key_id: binding.keyId, wrapped_dek_id: 'wrapped', dek_fingerprint: 'a'.repeat(64), nonce: Buffer.alloc(12, index).toString('hex') })),
+    'd'.repeat(64))
+    const manifestEnvelope = buildRecoveryArchiveManifestObjectEnvelope({ manifestJson: signed.manifestJson, wrappedDek: Buffer.from([1]) })
+    const packageBody = {
       binding: { ...binding, wrappedDekId: 'wrapped', dekFingerprint: 'a'.repeat(64) }, wrappedDek: 'AQ==',
       sections: RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName, index) => ({ sectionName,
         aeadAlgorithm: 'aes-256-gcm', nonce: Buffer.alloc(12, index).toString('base64'),
-        ciphertext: 'AQ==', authTag: Buffer.alloc(16).toString('base64'), plaintextSha256: 'b'.repeat(64),
+        ciphertext: 'AQ==', authTag: Buffer.alloc(16).toString('base64'), plaintextSha256: signed.manifest.sections[index]!.plaintext_sha256,
       })),
-    }))
+    }
+    const payload = Buffer.from(JSON.stringify({ version: 2, ...packageBody,
+      manifestEnvelope: Buffer.from(manifestEnvelope.envelopeBytes).toString('base64') }))
+    const unsignedPayload = Buffer.from(JSON.stringify({ version: 1, ...packageBody }))
+    let withManifest = true
     let hasPrepared = true
     const query = async (text: string, params?: unknown[]) => {
       if (text.includes('pg_current_xact_id')) return { rows: [{ xid: '1' }] }
       if (text.includes('FROM public.meta_recovery_archives')) return { rows: [{ generation_id: generationId }] }
       if (text.includes('FROM public.meta_recovery_archive_prepared_captures')) {
-        return { rows: hasPrepared ? [{ payload, payload_sha256: createHash('sha256').update(payload).digest('hex') }] : [] }
+        const bytes = withManifest ? payload : unsignedPayload
+        return { rows: hasPrepared ? [{ payload: bytes, payload_sha256: createHash('sha256').update(bytes).digest('hex') }] : [] }
       }
       return authorityQuery(text, params)
     }
@@ -70,6 +86,10 @@ describe('production archive worker authorization', () => {
     expect(capture).not.toHaveBeenCalled()
     expect(authorityQuery.mock.calls.filter(([sql]) => sql.includes('FROM users'))).toHaveLength(11)
     upload.mockClear()
+    withManifest = false
+    await expect(run(input)).rejects.toThrow('RECOVERY_ARCHIVE_PREPARED_MANIFEST_REQUIRED')
+    expect(upload).not.toHaveBeenCalled()
+    withManifest = true
     state.active = false
     await expect(run(input)).rejects.toThrow('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
     expect(upload).not.toHaveBeenCalled()

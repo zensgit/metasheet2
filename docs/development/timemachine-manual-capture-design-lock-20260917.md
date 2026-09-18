@@ -2,6 +2,42 @@
 
 Status: OWNER-CONFIRMED bounded scope; implementation and acceptance OPEN.
 
+Runtime command increment (2026-09-19, following implementation checkpoint
+`d390c1e4797f8a86ef714a34b2fe49e35d686d19`): the selected-table HTTP command
+and request-status reader now compose the internal no-attachment pipeline.
+This is not closure of the UI, attachment or separate restore acceptance gates.
+
+### Runtime Command Boundary
+
+- `POST /sheets/:sheetId/recovery-archive/captures` accepts exactly
+  `{ requestId }`; `GET /sheets/:sheetId/recovery-archive/captures/:requestId`
+  reads that actor's durable request. Query aliases are refused. These paths
+  share the existing multitable router mount and canonical recovery authority.
+- Both operations require the existing exact-true archive and writer-fence gates.
+  Creation additionally requires an explicit server-owned `manualCapture` policy
+  in application/local-startup composition: `keyId`, `keyRowVersion`,
+  `leaseSeconds`, `expiresAfterSeconds`. None has an inferred numeric default.
+  Omitted policy preserves restore-only composition; invalid policy fails closed.
+  Supporting explicit configuration does NOT ratify the deferred production
+  lease/retention values or authorize enabling a configured runtime.
+- Server-derived actor/workspace/base/table scope flows through admission,
+  canonical section construction, sealing, persisted encrypted package, uploads
+  and atomic finalization. HTTP cannot submit ciphertext, rows, keys, source
+  vectors, a generation id, lease or expiry overrides.
+- Closed response data is `{ requestId, generationId, state }`, with state
+  `pending`, `incomplete` or `recoverable`. Pending means a durable active,
+  unexpired building lease, not a promise that a background worker exists.
+  There is no new scheduler: the explicit POST drives work while awaited.
+  Network/upload failure can leave prepared bytes resumable by the same request.
+  Loss of the first opaque plaintext source without prepared bytes never causes
+  recapture; after its lease ends the request reads incomplete.
+- Finalized exact retries return the same generation. Interrupted prepared
+  retries preserve payload hash and ten nonce reservations. Status rereads
+  current authority; an old request id does not bypass a later revocation.
+- Publication does not restore the table. Catalog/preview/explicit restore remain
+  separate, and existing hard-deleted table and unsupported-attachment refusals
+  remain unchanged. UI and full public restore/apply acceptance remain OPEN.
+
 Owner confirmation: `确认手动归档合同` on 2026-09-17, in response to the
 proposal to let an administrator explicitly select a table for manual archive
 capture, with isolated synthetic verification and without automatic scheduling,
