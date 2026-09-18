@@ -77,6 +77,7 @@ async function run(create: boolean): Promise<void> {
     }
   } catch (cause) {
     if (epoch !== ownEpoch) return
+    status.value = null
     // The server scopes request lookup to the current actor. Do not reuse another actor's request.
     if (!create && (cause as { status?: number } | null)?.status === 404) {
       try { sessionStorage.removeItem(storageKey(sheet)) } catch { /* No write is performed here. */ }

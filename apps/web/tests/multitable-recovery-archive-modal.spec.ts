@@ -176,6 +176,20 @@ describe('ManualArchiveCapture', () => {
     expect(fresh.completed).not.toHaveBeenCalled()
     expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery')
   })
+
+  it('removes stale recoverable status after authority is revoked on refresh', async () => {
+    const id = '11111111-1111-4111-8111-111111111111'
+    sessionStorage.setItem('metasheet.manual-archive.request:sheet_1', id)
+    const read = vi.fn().mockResolvedValueOnce({ requestId: id, generationId, state: 'recoverable' })
+      .mockRejectedValue({ status: 403 })
+    mountManual({ read })
+    await flush()
+    expect(q('[data-test="manual-archive-status"]')).not.toBeNull()
+    q('[data-test="manual-archive-refresh"]')!.click()
+    await flush()
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+    expect(q('[data-test="manual-archive-error"]')?.textContent).toContain('cannot archive')
+  })
 })
 
 function mount(over: Partial<Record<string, unknown>> = {}) {
