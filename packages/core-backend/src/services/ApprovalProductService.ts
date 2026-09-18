@@ -1150,6 +1150,14 @@ export type CancelRoundRolloutLockRequirementV1 =
   | Readonly<{ kind: 'required'; orgId: string; documentId: string; requestId: string }>
 
 /**
+ * The `{ kind: 'required' }` branch of {@link CancelRoundRolloutLockRequirementV1} — named so a
+ * call site that only ever runs once the lock is known to be held (never the `'none'` branch)
+ * states that in its own type instead of repeating the `Extract<>` inline. Currently used by
+ * `redeemCancelRoundInTxn`'s `rolloutLock` param.
+ */
+export type CancelRoundRolloutLockRequiredV1 = Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>
+
+/**
  * EXPORTED for the WI-0 lock-order census (Q-F) — not for production callers. `dispatchAction` is
  * its only production call site (twice); the census drives THIS function rather than a
  * transcription of it, so a drift in the org derivation reddens the census.
@@ -9299,7 +9307,7 @@ export class ApprovalProductService {
     params: {
       readonly engineInstanceId: string
       readonly instance: ApprovalInstanceRow
-      readonly rolloutLock: Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>
+      readonly rolloutLock: CancelRoundRolloutLockRequiredV1
       readonly roundId: string
       readonly policySnapshotAtDecision: string
     },
