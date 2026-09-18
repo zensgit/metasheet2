@@ -370,14 +370,91 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
    - **O1**:三张批次表是锁 §2 之外的新表(锁文外 DDL)——建议采纳提案形状,Draft only。
    - **O2**:`atg_name_nonblank CHECK` 拒绝纯中文组名,是 A-1/#5852 上的活缺陷——A-3 在 owner ratify 该勘误前,对纯中文 category **功能性惰性**(诚实披露,见设计 MD 抬头块第 2 条)。
    - **O3**:preview/批次列表端点挂 `approvalTemplateAdminGuard`(偏离 I7 字面读/写二分)——建议按默认值,需 owner 一句话确认。
-7. **跨 lane 项,不在本分支权限内**(设计 MD §13.5):A-1 Draft PR #5852 的"0 P1"结论需要因 P1-3(CJK 组名裸 `DatabaseError`)与 changesRequired #16 后半(guard⊋manager 的过强注释)重新求值——这是对另一个 Draft PR 的回流,本分支无权改 A-1 已落地代码/注释。
+7. **跨 lane 项,部分已随修复轮 1 解决**(设计 MD §13.5):A-1 Draft PR #5852 的"0 P1"结论需要因 P1-3(CJK 组名裸 `DatabaseError`,O2)重新求值——**这一半仍然开放**,是对另一个 Draft PR 的回流,本分支无权改 A-1 已落地代码。changesRequired #16 后半(guard⊋manager 的过强注释,`routes/approvals.ts:396-399`)**这一半已在修复轮 1 解决**——不是本分支现场改写 A-1 代码,而是 A-1 自己的第 4/5 轮门审已把这条注释真库证伪并重写(`f7b929700`),本分支第二次 `git rebase origin/feat/approval-template-groups-phase1`(2026-09-18)把该修复原样带入本树;详见 §7。
 8. **A-1 两个既有真库文件(`lifecycle`/`serialization`)未被任何 `*-ci-wiring.test.mjs` 覆盖**(P3-2 残留,本切片新增的五个文件继承同样的闭世界残留形态,不是本切片引入的新缺口,但也未被本切片修复)。
 9. **一个非 manager 管理员执行 backfill 时,批次头不记录"只覆盖了部分模板"**(设计 MD §19.4 新披露 2):修法需要给批次头加列,超出本步范围(且需要新 DDL,不在本步动)。
 
 ---
 
-## 6. 收尾
+## 6. 收尾(本文档定稿时,2026-09-18)
 
 - `git status --short`(本文档与配对设计 MD 写作前后,`packages/core-backend/src/services/ApprovalTemplateGroupService.ts` 之外的任何文件均未改动):写作前空;§3.1 mutation 探针跑完并 `cmp` 确认字节相同后再次核验为空。
 - 本文档与配对设计 MD 是本次提交的全部改动(两个新增/改名的 `.md` 文件),提交信息见 git log,含 `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`。
 - Push 目标:`origin feat/approval-template-groups-phase2-backfill`(普通 push,非 force——本分支已完成的唯一一次 rebase 用过 force-with-lease,见 rebase note §7,本次不涉及 rebase)。
+
+---
+
+## 7. 修复轮 1 处置(`impl-gate-A3-round1-20260918.md`,裁定 0 P1 / 1 P2 / 7 P3)——本节处置该报告点名的唯一 P2
+
+**范围声明**:本轮只处置该门审报告的 P2(§5)。门审自建的 detached worktree `wt-A3-gate1` 未改本 lane 树;本轮之前 `git status --short` 为空,HEAD = `9bda1dbccd8ce7145e2ed88a789f43128ad2de75`(该门审 verdict 绑定的 head,逐字匹配)。
+
+### 7.1 P2 —— head 不是 `origin/feat/approval-template-groups-phase1` 的后代
+
+**修法**(按门审 §5「修法」逐字执行):
+
+1. **rebase**:`git rebase origin/feat/approval-template-groups-phase1`。26 个本 lane 提交全部重放,**零冲突**(门审 §5 预判「最早的 hunk 从 `@@ -437,6 +447,338 @@` 起,不落在 phase1 `@@ -395,28 +395,42 @@` 的改动范围内」成立,实测确认)。新 HEAD:`ff1e40686659a4ec3c66d3a717643b16e1af50fa`(本文档与配对设计 MD 的两处订正之前;含订正后的最终 HEAD 见 StructuredOutput/git log,本节其余证据均在订正后的树上重跑)。
+   ```
+   $ git merge-base --is-ancestor origin/feat/approval-template-groups-phase1 HEAD && echo YES
+   YES
+   $ git rev-list --count origin/feat/approval-template-groups-phase1 ^HEAD
+   0
+   ```
+   门审 §8 复核清单第 1 条(必须 YES)已满足。
+2. rebase 把 A-1 第 4/5 轮门审对 `routes/approvals.ts:396-` 块注释的重写(commit `f7b929700`,"retract falsified wildcard-permission guard claim")原样带入本树——这正是门审"后果 (a)"预判的自愈:该注释现在只主张 DB 侧 `isAdmin(userId)` 一条腿是端到端实测成立的「过 guard 但非 manager」反例,通配权限码那条腿被明确记为"第 2 轮与第 4 轮各真库证伪一次"。
+3. **后果 (b)——rebase 修不掉的两处 lane 自有文档**,现场机械扫描(不是逐条枚举,按门审 §5 修法用 phase1 自己的 `scripts/dev/atg-retraction-sweep.sh` 而非手数,因为该脚本的扫描范围是 `git diff --name-only origin/main..HEAD`,rebase 之后天然覆盖本 lane 的全部文件):
+   ```
+   $ bash scripts/dev/atg-retraction-sweep.sh > /tmp/atg-sweep-full.txt 2>&1; echo exit=$?
+   exit=0
+   $ grep -c "^=== pattern" /tmp/atg-sweep-full.txt
+   11
+   ```
+   11 个模式全部跑过。逐条读过命中的完整句子(不是只看 grep 片段)后分类:
+   - **本 lane 文件里唯二的「present-tense 现在时事实」命中**(门审判定规则的类别 2,活缺陷):`approval-template-groups-phase2-backfill-design-20260918.md:440`(§13 changesRequired #8/Q2 现场标注段,原文"持 `approval-templates:*` 或走 DB 侧 `isAdmin(userId)` 的主体过 guard 但非 manager"把已证伪的通配腿当成第二条成立的反例)与 `:586`(§13.6 Draft PR body 必写清单,changesRequired #16 一行,原文"两类主体过 guard 但非 manager")——逐字匹配门审 §5 后果 (b) 点名的两处。
+   - 已重写为:guard ⊋ manager 结论不变,但**只标注一条被端到端实测支撑的腿**(DB 侧 `isAdmin`),通配腿改写成"该腿在 phase1 第 2/4 轮门审各端到端真库证伪一次,全仓真实授予计数 0,今天不存在可达形式"。
+   - 重写后重跑同一脚本确认这两处不再落入类别 2(现摘录,完整命中见 `/tmp/atg-sweep-after.txt`):
+     ```
+     $ bash scripts/dev/atg-retraction-sweep.sh > /tmp/atg-sweep-after.txt 2>&1
+     $ grep -n "phase2-backfill-design-20260918.md:440\|phase2-backfill-design-20260918.md:586" /tmp/atg-sweep-after.txt | wc -l
+     4
+     ```
+     （4 = 两行各命中 2 个模式:`guard population`、`guard *人口`,均已人工逐条核对——两处现在只 narrate「通配腿已被 phase1 证伪」,不再断言它成立,归类 3,合法保留。第 440 行不再命中 `⊆`/`sees everything`/`通配权限码.*过 *guard` 三个模式,因为改写后不再含"通配腿单独过 guard"这句主张本身。）
+   - 本 lane 文件里其余命中(如 `backfill-preview.db.test.ts:305` 的 "scope is a property of the ACTOR's guard population" 一句)与 guard⊆manager 的撤回声明是**不同主题**的假阳性(门审判定规则类别 4),核对后确认不是同一个claim,不动。
+   - `approval-template-groups-phase2-backfill-design-20260918.md:578`(§13.5 项 2)与 `:871/:935/:987/:1041` 的"changesRequired #16 后半……应随 P1-3 一并回流 #5852"仅仅是**narrating**"这条注释是过强声明"这一事实(类别 3,不是断言通配腿成立),不需要按本 P2 重写;但其"回流 #5852"这个跨 lane 升级计划,内容上已被 §7.1 步骤 1-2 的 rebase 越过(A-1 自己已经修了,不必再回流)——见 §5 项 7 的订正。
+4. **改动范围核实**(本轮 gate-fix 的全部代码/文档改动):
+   ```
+   $ git diff --stat 9bda1dbccd8ce7145e2ed88a789f43128ad2de75.. -- docs/development/approval-template-groups-phase2-backfill-design-20260918.md docs/development/approval-template-groups-phase2-backfill-verification-20260918.md docs/development/approval-template-groups-phase2-backfill-rebase-note-20260918.md
+   ```
+   （提交后以 commit 里的实际 diffstat 为准;三份文档均为 doc-only 编辑,`packages/core-backend/src`、迁移目录、`.github/workflows/plugin-tests.yml` 均未在本轮改动——rebase 带入的 9 个 phase1 提交才碰了 `routes/approvals.ts`/`lifecycle.db.test.ts`/两个新 `scripts/dev/*.sh`,不是本轮 lane 自己写的。）
+
+### 7.2 重跑门审 §8 复核清单 2–4(rebase 后的完整回归)
+
+| # | 门审 §8 要求 | 命令 | 结果 |
+|---|---|---|---|
+| 1 | ancestor 判据 | 见 §7.1 步骤 1 | YES / 0 |
+| 2 | `grep -n "approval-templates:\*"` 两文件 + 跑 `atg-retraction-sweep.sh` | 见 §7.1 步骤 3 | 两处活命中已订正为叙述式;脚本 exit 0 |
+| 3a | E1 七套件真库(私有库 `metasheet2_lock_a3`,`db:migrate` 确认 `Applied: 408 / Pending: 0`) | `DATABASE_URL=postgres://…/metasheet2_lock_a3 EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run <7 files> --reporter=dot` | `Test Files 7 passed (7)` / `Tests 85 passed (85)`,与门审报告 E1 计数逐字相同(rebase 未新增/删除本切片用例) |
+| 3b | E2 无库全量 lane | `env -u DATABASE_URL CI=true pnpm --filter @metasheet/core-backend test` | `Test Files 931 passed \| 175 skipped (1106)` / `Tests 14718 passed \| 1604 skipped (16322)`,exit 0——与门审报告逐字相同(注:同一命令的第一次尝试因共享 `/private/tmp` worktree 里一个与本切片无关的瞬时未跟踪文件 `src/attendance/zz-nit3-untracked-scratch.ts` 消失导致 `role-assignment-boundary.test.ts` 的文件系统扫描 ENOENT,单独重跑该文件绿 40/40,判定为 TOCTOU 竞态而非本轮改动引入;本行的 931/14718 数字取自随后干净重跑的第二次结果) |
+| 3c | E2′ 六个全仓 census 守卫 | 从 E2 日志逐条 grep | `approval-field-access-enum-mirror.test.ts`、`multitable-o2-census-closed-world.test.ts`、`approval-lock8-field-type-census.test.ts`、`automation-test-run-error-codes-web-parity.test.ts`、`ai-provider-call-site-census.test.ts` 均 ✓(recovery-conflict-census.test.ts 见上方摘录,同样全绿) |
+| 3d | E2″ 五个 `.db.test.ts` 在无库 lane 零收集 | `grep -a "tests/integration/approval-template-groups" <E2 日志> \| grep -v approval-ci-coverage-enumeration \| wc -l` | `0`(注:裸 `grep -a "approval-template-groups"` 命中 7 行,均是 `approval-ci-coverage-enumeration.test.ts` 自己"is wired: …"的断言输出,不是这些文件被收集执行——加限定词排除后为 0,与门审 E2″ 结论一致) |
+| 3e | E3 两条 tsc | `npx tsc --noEmit`;`npx tsc -p scripts/tsconfig.recovery-archive-acceptance.json` | 均零输出,exit 0 |
+| 4a | E4 五个 ci-wiring 守卫 | `node --test scripts/ops/approval-template-groups-backfill-{schema,preview,execute,rollback,batches-list}-ci-wiring.test.mjs` | 各 `fail 0` |
+| 4b | E4 s6a provenance | `node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` | `pass 1 / fail 0` |
+| 4c | E4 census enumeration | `npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot` | `349 passed (349)` |
+| 5 | E5 s6a 钉字节核对 | `shasum -a 256 .github/workflows/plugin-tests.yml` vs `pins.json` | `099904601c47c078fa5c81bf4387a26cc0678174de5a24f54b5edc86ae5bece1`,逐字相同(`git diff --stat origin/main -- .github/workflows/plugin-tests.yml` 显示本分支对该文件仅有 42 行**新增**、无删改,rebase 未触碰它,pin 天然仍然有效) |
+
+M1/M2/M3/M14 四条 mutation 抽打两条的复核(门审 §8 复核清单第 4 条):留待下一轮或 Draft PR 前;本轮预算集中在 P2 本身与全套真库/无库/typecheck/wiring 回归,E1 的 7/85 计数与门审报告一致已经是这四条 mutation 承重面未变的间接证据(计数不变 ⇒ 断言集合不变 ⇒ 四条 mutation 打的靶子仍在原处),但不构成重新亲跑 mutation 本身。
+
+### 7.3 SHA 引用漂移声明
+
+本次 rebase 重写了本 lane 全部 26 个提交的 SHA。本文档、配对设计 MD、`rebase-note` 三份文档里此前记录的 lane 自有提交 SHA(如设计 MD §1"`68aead6db` 之后"、§13 附近的 lane commit 引用)**指向 rebase 前的旧历史线**,rebase 后已不在 `git log` 可达范围内(悬空,直到 `git gc` 前仍可用 `git show <sha>` 单独查到,但不在分支历史上)。本节及 §7.1/§7.2 之外的既有正文**不逐条重算**这些历史 SHA 引用——门审 §8 复核清单没有要求这么做,且这些引用的作用是"指向当时落地这件事的那个提交"这一叙事锚点,不是本轮门审判据读取的对象;唯一被门审判据直接读取的锚点(head SHA、phase1 ancestor 关系、E1–E5 计数)均已在 §7.1/§7.2 用**新 SHA / 现场重跑**重新钉过。若后续轮次需要引用某条历史内容,应先用 `git log --all --oneline | grep <关键词>` 或直接读本文档记录的旧 SHA(仍可 `git show` 到)重新定位,而不是假设旧 SHA 还在当前分支的 `git log` 里。
+
+### 7.4 未处置的门审发现(如实列出,不算已满足)
+
+门审报告 §6 的 7 条 P3 与 §8 复核清单第 4 条(mutation 抽打)不在本轮范围内,按任务书"选尚未处理的一到三条"只处置了这唯一的 P2(rebase + 两处文档订正 + 全套回归属于同一条 P2 的处置动作,不是三条独立条目)。P3 逐条状态:
+1. 三处"接线还不存在"的过期断言注释——未动。
+2. 12 处指向改名前文档路径的注释——未动(与本 P2 无关的独立残留)。
+3. `atgbb_org_nonblank` 未进 `NONBLANK_CHECK_CONSTRAINTS`——未动(需要服务层测试才能安全改,今天不可达,见门审原文)。
+4. 验证 MD §5 第 8 条与 §2.4 自相矛盾——**本轮顺带核实但未改**:§2.4 与 §5.8 的矛盾在 rebase 前后没有变化,仍然是"§5.8 低估了自己",留给下一轮。
+5. 验收 E 终态腿未测——未动,已在 §5 项 1 记录为 remaining。
+6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——未动。
+7. 补充清单 #1 的"`ci-realdb-step-contract.mjs` 硬编码 `FILES` 数组"前提在本 head 上为假——未动(本文档 §4 第 1 行已经写了"零命中确认",未单独点出"清单前提本身过期"这句话,门审 §6 第 7 条建议在 PR body 里点名,留给开 PR 那一步)。
