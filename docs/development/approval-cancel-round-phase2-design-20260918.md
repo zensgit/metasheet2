@@ -149,8 +149,8 @@ mutation is what proves the round write is load-bearing rather than decorative).
 
 | Transition | Engine instance | Round row | Completion events | Seats | Citation |
 |---|---|---|---|---|---|
-| `pending → rejected` (A7, judgment III) | `status='rejected'` (real reviewer) | `outcome='rejected', ended_at=now()` | one (ordinary reject completion) | released via engine closure | phase-1 design §5; `ApprovalProductService.ts:11766` (was `:11750`; re-checked post-merge, §10) |
-| `pending → withdrawn` (A4, judgment III) | `status='revoked'` | `outcome='withdrawn', ended_at=now()` | one (ordinary revoke completion) | released | phase-1 design §5; `:11279` (was `:11263`; re-checked post-merge, §10) |
+| `pending → rejected` (A7, judgment III) | `status='rejected'` (real reviewer) | `outcome='rejected', ended_at=now()` | one (ordinary reject completion) | released via engine closure | phase-1 design §5; `ApprovalProductService.ts`, `outcome = 'rejected', ended_at` ~L11774 |
+| `pending → withdrawn` (A4, judgment III) | `status='revoked'` | `outcome='withdrawn', ended_at=now()` | one (ordinary revoke completion) | released | phase-1 design §5; `ApprovalProductService.ts`, `outcome = 'withdrawn', ended_at` ~L11287 |
 | `pending → applied` (outlet #5, judgment II) | `status='approved'` (unchanged fall-through) → **C-1 executes and separately writes the ORIGINAL document's own instance** `approved→cancelled` | `outcome='applied', ended_at=now()` | **exactly one** APPROVAL-domain completion event, measured, and it is the cancel round's OWN — §3.11.6's case does not itself assert the original document's instance produces none (C-1 is an attendance-domain operation and never calls `dispatchAction`/`buildCompletionEvent` on the original, so none is expected by construction, but that is a construction argument here, not a case that asserts a zero on the original). C-1's OWN attendance-domain event, `attendance.request.cancelled`, is a separate thing this row does not cover — §3.15.11 measures it at **0/0 on both twins**, but only because the fixture's org resolves `legacy_projection_only`; the `authoritative`/`shadow` branches are unexercised, so that 0/0 is parity of two skips, not a closed claim that the event never fires | released; cancel round's own seats deactivate through the ordinary approve path | verification §3.11.6 (redeem case), §3.15.11, §3.20 (this cell's own I3 slot-release probe, closed post-merge — see §7.1) |
 | `pending → expired` (#5′, judgment IV) | `status='rejected'`, actor=`system:approval-cancel-round`, `metadata.cancelRoundCloseReason='round_expired'` | `outcome='expired', ended_at, block_reason=NULL, policy_snapshot_at_decision` | **zero** | seats deactivated by the closure writer | §3.1, §3.2 |
 | `pending → blocked` (#5′, judgment IV, via C-1's `business_refused`) | same system-sentinel shape, `metadata.cancelRoundCloseReason='business_blocked:<code>'`, `cancelRoundBlockDetail` **beside** the bounded reason token, never concatenated into it | `outcome='blocked', block_reason, ended_at, policy_snapshot_at_decision` | **zero** | deactivated | §3.11.6 (`business_refused` case) |
@@ -177,23 +177,23 @@ decision into a C-3 closure mid-transaction when the business evaluation inside 
 
 | Piece | Where (this tree) | Lock clause |
 |---|---|---|
-| `deriveCancelRoundRoundPolicy` | `:341` (was `:339`) | §4 `roundPolicy={windowDays,suite}` — ONE derivation, shared by `createCancelRoundInstance` (phase 1) and the final evaluation (this slice), so I4's two snapshots cannot drift |
-| `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'` | `:861` (was `:859`) | §3 C-3 「actor = 系统终结身份」; same `system:` prefix as the timeout/departure sentinels, so `isSystemSentinelActor` covers it by construction |
-| `resolveCancelRoundRolloutLockRequirementV1` | `:922` (exported; was `:920`) | §3 C-2 — "does this dispatch take the rollout lock, and on which org key" — three-hop resolution per §3.3c |
-| `evaluateCancelRoundFinalInLock` (private) | `:8753` (was `:8751`) | §3 C-2 step ③ 「锁内最终评估」 |
-| `closeCancelRoundSystemTerminalInTxn` (private) | `:8880` (was `:8878`) | §3 C-3 「持久化收口」 |
-| `redeemCancelRoundInTxn` (private) | `:8998` (was `:8996`) | §3 C-2 steps ④–⑤; §14.2 判据 II |
+| `deriveCancelRoundRoundPolicy` | `function deriveCancelRoundRoundPolicy`, ~L341 | §4 `roundPolicy={windowDays,suite}` — ONE derivation, shared by `createCancelRoundInstance` (phase 1) and the final evaluation (this slice), so I4's two snapshots cannot drift |
+| `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'` | `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR =`, ~L861 | §3 C-3 「actor = 系统终结身份」; same `system:` prefix as the timeout/departure sentinels, so `isSystemSentinelActor` covers it by construction |
+| `resolveCancelRoundRolloutLockRequirementV1` | `export async function resolveCancelRoundRolloutLockRequirementV1` (exported), ~L930 | §3 C-2 — "does this dispatch take the rollout lock, and on which org key" — three-hop resolution per §3.3c |
+| `evaluateCancelRoundFinalInLock` (private) | `private async evaluateCancelRoundFinalInLock`, ~L8761 | §3 C-2 step ③ 「锁内最终评估」 |
+| `closeCancelRoundSystemTerminalInTxn` (private) | `private async closeCancelRoundSystemTerminalInTxn`, ~L8888 | §3 C-3 「持久化收口」 |
+| `redeemCancelRoundInTxn` (private) | `private async redeemCancelRoundInTxn`, ~L9006 | §3 C-2 steps ④–⑤; §14.2 判据 II |
 | `AttendanceCancellationExecutionPort` + its singleton registry (`register`/`unregister`/`get`/`has`/`clear`) | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` (new file) | §3 C-1 「审批侧只调用」 — modelled line-for-line on the existing `workday-calendar-port.ts` host↔plugin pattern, the one precedent for approval calling INTO attendance (verification §3.11.1) |
-| `deriveCancelRoundW4OperationIdV1(roundId)` | same file, `:69` (re-checked post-merge, unchanged despite the file's own +94-line growth — the insertions landed below this declaration) | the W4 replay key (§14.1's operation-registry contract) — the round's own id, which is why it must be a UUID (the P1 §3.12.1 fixed) |
-| the pre-read + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + rollout-lock-first + fail-closed re-assert | `ApprovalProductService.ts:10506-10557` (was `:10496-10541`; see §4.2 below and §10) | §3 C-2 全局锁序 |
-| outlet #5′ branch + early `return` | `:12166-12233` (was `:12150-12220`; see §4.1 and §2.3 above) | §14.2 判据 IV |
+| `deriveCancelRoundW4OperationIdV1(roundId)` | same file, `export function deriveCancelRoundW4OperationIdV1`, ~L69 (unchanged despite that file's own growth — insertions landed below this declaration) | the W4 replay key (§14.1's operation-registry contract) — the round's own id, which is why it must be a UUID (the P1 §3.12.1 fixed) |
+| the pre-read + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + rollout-lock-first + fail-closed re-assert | `ApprovalProductService.ts`, `async dispatchAction(` ~L10502 through the re-assert throw (see §4.2 below and §10) | §3 C-2 全局锁序 |
+| outlet #5′ branch + early `return` | `ApprovalProductService.ts`, `if (resolution.status === 'approved' && isCancelRoundInstance(instance))` ~L12174 through `return closedApproval` ~L12240 (see §4.1 and §2.3 above) | §14.2 判据 IV |
 
 ### 3.2 Error codes this slice introduces, each traced to the throw site (this tree)
 
 | Code | HTTP | Condition | Lock anchor / status |
 |---|---|---|---|
 | `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` | 409 | §2-G2 time anchor unresolvable (no `to_status='approved'` audit row on the original document) — refuses to decide rather than closing `expired` on missing evidence | lock names the anchor but not its absence — **implementer erratum, flagged for owner registration** (§3.2) |
-| `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` | 409 | the pre-read's rollout-lock requirement and the post-row-lock re-assert disagree (org drift between the two reads) | §3.3c point 4 — load-bearing, because `attendance_requests.org_id` is NOT immutable |
+| `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` | 409 | the pre-read's rollout-lock requirement and the post-row-lock re-assert disagree (org drift between the two reads) | §3.3c point 4 — ⚠️ P3-hygiene (2026-09-19, retracts the prior "load-bearing" wording, impl-gate-C-slice2-round1 P3-2): redundant depth FOR CORRECTNESS — both drift directions are independently caught elsewhere (`none→required` by `CANCEL_ROUND_BUSINESS_TARGET_MISSING`; `required→required'` by the W4 entry's own `WHERE id=$1 AND org_id=$2` 404) — but still load-bearing FOR ERROR-CODE PRECISION: without it, org drift on this branch surfaces as a less specific downstream code instead of naming the scope change. `attendance_requests.org_id` is NOT immutable |
 | `CANCEL_ROUND_DISPATCH_CONTENDED` | 503 | `40001`/`40P01` on a dispatch that took the `required` rollout-lock branch — gated so a non-cancel-round dispatch keeps its byte-for-byte prior rethrow | §3.9.3 — **UNEXERCISED**: no test drives a real `40001` into it; only a source-scan control (M-15) reddens the mapping's removal |
 | `CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE` | 409 | the attendance execution port is unbound at redemption time | §3.11.2 — the ONE deliberate divergence from the `workday-calendar-port` precedent (which fails OPEN); failing open here would write `applied` having performed zero business cancellation |
 | `CANCEL_ROUND_BUSINESS_TARGET_MISSING` | 409 | evaluation decided `redeem` but the rollout-lock pre-read never demanded `required` (no attendance request behind the original document, so C-1 has nothing to execute) | §3.11.6's isolated-variant case; names the actual reason rather than letting the entry's own 500 surface |
@@ -265,14 +265,14 @@ inconsistency was itself flagged as an out-of-scope finding, §3.3d), and that `
 .org_id` is **NOT** immutable (4 `EXCLUDED`-writer upserts), so the post-lock re-assert on it is
 load-bearing, not cosmetic.
 
-**What this tree does about it (`ApprovalProductService.ts:10506-10557`, was `:10496-10541` —
-re-extracted at HEAD `d462677bd` for this 定稿 pass; see §10 for the full drift account)**:
+**What this tree does about it (`ApprovalProductService.ts`, `async dispatchAction(` ~L10502
+through the fail-closed re-assert throw; see §10 for the drift history this anchor form retires)**:
 
 ```
-10506  let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
-10513  client = await pool.connect()
-10522  rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)   // BEFORE BEGIN
-10524  if (rolloutLock.kind === 'required') {
+10514  let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
+10521  client = await pool.connect()
+10530  rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)   // BEFORE BEGIN
+10532  if (rolloutLock.kind === 'required') {
 10525    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
 10528    await acquireAttendanceCalculationRolloutLock(client, orgKey, 'shared')                     // FIRST lock
 10533  } else {
@@ -297,8 +297,8 @@ this exact span; nothing about the CONTROL FLOW this snippet documents changed �
 the source-order census (Q-F leg 3) itself, which is still green (this file's own §10, `metasheet2_
 lock_c2_docs` rerun in the verification MD).
 
-`resolveCancelRoundRolloutLockRequirementV1` is **the same function called twice** (`:922` the
-definition, `:10522` the pre-read, `:10550` the re-assert) — never two hand-written conditions
+`resolveCancelRoundRolloutLockRequirementV1` is **the same function called twice** (`ApprovalProductService.ts`
+def ~L930, pre-read call ~L10530, re-assert call ~L10558) — never two hand-written conditions
 (census Q-F leg 3/4 is the source-order + same-row proof of this). It resolves through
 `attendance_requests` via `classifyAttendanceRequestForInstanceV1(client, instance, { lock })`, the
 SAME predicate the row-locking path already uses (parameterised with a lock mode rather than
@@ -327,9 +327,8 @@ Independent of the two locks above: the lock's global order also places `attenda
 `attendance_requests` first. This is a **second, independently live** cycle (not a hypothetical one):
 core's `classifyAndLockAttendanceRequestForInstance` locks `attendance_requests` with the
 `approval_instances` row already `FOR UPDATE`-held (`dispatchAction`'s entry, `bulkReassignApprovals`
-`ApprovalProductService.ts:9483` (was `:9509` in this document's own `a02930896`-era correction,
-itself already a correction of the verification MD's original `:9346`; re-checked a second time
-post-merge for this 定稿 pass, §10) — and `w4c3b-central-approval-hooks.ts:247`), while the plugin adapter locked
+`ApprovalProductService.ts`, `async bulkReassignApprovals(` ~L9418 through its `FOR UPDATE` literal
+~L9491) — and `w4c3b-central-approval-hooks.ts:247`), while the plugin adapter locked
 `attendance_requests` FIRST and `approval_instances` SECOND — both reachable on the SAME `(request,
 instance)` pair while the request is `pending`.
 
@@ -374,8 +373,8 @@ flagged for owner registration in §7/§8 below, not ordered by invention.
 | Seam | File:line | What it does |
 |---|---|---|
 | Rollout-lock resolver (the "same predicate, different lock mode" seam) | `packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts` — `classifyAttendanceRequestForInstanceV1(client, instance, { lock })`, thin `classifyAndLockAttendanceRequestForInstance` wrapper pinning `lock:'for_update'` | the ONE instance→request predicate, parameterised rather than duplicated (§4.2) |
-| `dispatchAction` entry restructure | `ApprovalProductService.ts:10506-10557` (was `:10496-10541`; §10) | pre-read, conditional SERIALIZABLE, rollout-lock-first, fail-closed re-assert (§4.2) |
-| Outlet #5′ (new anchor) | `ApprovalProductService.ts:12166-12233` (was `:12150-12220`; §10) (the `if (resolution.status === 'approved' && isCancelRoundInstance(instance))` block at `:12166` through its `closeCancelRoundSystemTerminalInTxn` call and early `return`, closing brace at `:12233`) | judgment IV's branch decision + persistence close; the fall-through for `redeem` (§2.3) |
+| `dispatchAction` entry restructure | `ApprovalProductService.ts`, `async dispatchAction(` ~L10502 | pre-read, conditional SERIALIZABLE, rollout-lock-first, fail-closed re-assert (§4.2) |
+| Outlet #5′ (new anchor) | `ApprovalProductService.ts`, `if (resolution.status === 'approved' && isCancelRoundInstance(instance))` ~L12174 through its `closeCancelRoundSystemTerminalInTxn` call ~L12219 and early `return closedApproval` ~L12240 | judgment IV's branch decision + persistence close; the fall-through for `redeem` (§2.3) |
 | C-1 port (new file) | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` | `AttendanceCancellationExecutionPort` registry — modelled on `core/workday-calendar-port.ts` (§3.1); the registered surface is the WHOLE `AttendanceRequestOperationBoundaryV1`, deliberately not narrowed, per lock §3 C-1's "仅移交连接与事务生命周期的所有权" |
 | Attendance cancel adapter, lock reorder | `plugins/plugin-attendance/index.cjs:35107` (`executeRequestCancel`), `approval_instances FOR UPDATE` now at `:35128`, `attendance_requests FOR UPDATE` now at `:35137` | §4.3 |
 | The plugin's port bind | `plugins/plugin-attendance/index.cjs`, immediately after `w4RequestOperationBoundary = …` is built | wires the concrete boundary into the new core-side registry (§3.1) |
@@ -444,9 +443,8 @@ list that attaches to 判据 II / the slice as a whole rather than to C-3 narrow
   (verification §3.8). Not a regression this slice introduces; not verified closed either.
 - **⚠️ CLOSED post-merge (u2, verification §3.20) — was "only ONE of the two terminal outcome
   writers for the `applied` transition is probed".** §3.14's I3 mutation drives the round through
-  the #5′/C-3 closure writer; the C-2 success writer (`ApprovalProductService.ts:9118-9131`, was
-  `:9106-9112`, inside `redeemCancelRoundInTxn`, `SET outcome = 'applied'` at `:9120` (was `:9109`);
-  re-checked post-merge, §10) now has its own probe too: a
+  the #5′/C-3 closure writer; the C-2 success writer (`ApprovalProductService.ts`, inside
+  `redeemCancelRoundInTxn`, `SET outcome = 'applied'` ~L9128) now has its own probe too: a
   dedicated case whose `createCancelRoundInstance` call is the FIRST statement after the redemption
   returns, so the I3 clause itself — not `round.outcome === 'applied'`'s later end-state check —
   carries the mutation (M-30: the `applied` write and its `rowCount` guard deleted together, same
@@ -611,9 +609,23 @@ whose specific cited line held.
 **What this table does NOT claim**: it does not re-verify every prose sentence's SUBSTANCE — only
 that the cited line still holds the cited content. Every drifted citation above was checked to still
 name the SAME symbol or statement the surrounding prose describes; none turned out to point at
-unrelated code after the merge. The corrected numbers are also applied in place at each citation's
-own location earlier in this document (`NNNN (was MMMM)`), so this table is a consolidated summary,
-not the only place the fix lives.
+unrelated code after the merge. The corrected numbers were also applied in place at each citation's
+own location earlier in this document (`NNNN (was MMMM)`) — this table was a consolidated summary,
+not the only place the fix lived.
+
+**⚠️ P3-hygiene (2026-09-19, impl-gate-C-slice2-round2 P3-2) — this table's own numbers drifted
+AGAIN, by exactly +8, before this sentence was written.** The very next commit after this 定稿 pass
+(`e90a44dbe`) inserted 8 lines at `ApprovalProductService.ts:914-921`, so every line number in the
+table above that sits below the insertion is off by +8 on the current tree — this table itself
+became exactly the kind of drift it exists to correct, without a third pass ever re-pinning it.
+Rather than re-deriving a THIRD generation of exact numbers (which the NEXT insertion anywhere above
+these symbols would immediately stale again), every live citation in this document — this table's
+own rows, §3.1's module-scope table, §4.2, §4.4, §5's seam table, and §7.1's residual note — has
+been converted to the `symbol/anchor, ~L<approx>` form AGENTS.md's Coding Style already asks large
+files to use, re-derived fresh against the current tree by `grep -n` on each named symbol rather
+than by transcribing this table's own (now twice-stale) numbers. This table's exact numbers are left
+as-is below as the historical record of the `d462677bd` re-derivation pass; they are not live
+pointers and are not re-corrected here.
 
 **One puzzle this table does not resolve, and does not need to**: the offset is not uniform (+2 near
 the top of the file, growing to +14/+16 by the redemption/outlet region, and a non-monotonic -26 at
