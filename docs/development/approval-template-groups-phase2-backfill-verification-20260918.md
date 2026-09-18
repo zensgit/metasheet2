@@ -27,12 +27,14 @@
 
 | 子判据 | 测试文件 | 用例名(节选) | lane |
 |---|---|---|---|
-| 预览(只读,不写) | `tests/integration/approval-template-groups-backfill-preview.db.test.ts`(14 例) | `preview writes ZERO rows: approval_template_groups/links row counts for the org are byte-identical before and after, across a run that produces both a "create" and a "skip" bucket` | `test (20.x)` → `approval-real-db-integration` 步骤(真库,白名单第 79 行,见 §2.3) |
-| 执行(写,幂等) | `tests/integration/approval-template-groups-backfill-execute.db.test.ts`(12 例) | `happy path: creates one group per distinct btrim(category), links every eligible template, and records the batch header + both detail tables`;`idempotency: a second sequential execute call on the same eligible population returns batchId: null and writes zero additional rows across every table` | 同上,白名单第 80 行 |
-| 可回滚(精确到批次,不影响批次外) | `tests/integration/approval-template-groups-backfill-rollback.db.test.ts`(11 例) | `happy path: rollback archives the batch-created group, unlinks the batch-linked templates, and stamps rolled_back_at`;`batch-external addition to a batch-created group survives rollback: the group stays active because it is not empty`;`a batch-linked template moved to a different group by a batch-external action is left exactly where the external action put it` | 同上,白名单第 81 行 |
-| DDL(批次头 + 两张明细表) | `tests/integration/approval-template-groups-backfill-schema.db.test.ts`(8 例) | `the three FK delete-actions match the design-gate Q5 ruling exactly (a=NO ACTION, c=CASCADE)`;`M6 positive control: hard-deleting a linked template cascades through group_links into the batch_links row (no FK violation)` | 同上,白名单第 78 行 |
-| 批次可查(changesRequired #5) | `tests/integration/approval-template-groups-backfill-batches-list.db.test.ts`(8 例) | `orders by created_at DESC and paginates with limit/offset, with an accurate total independent of the page size`;`rolledBackAt is null for a not-yet-rolled-back batch and an ISO string for a rolled-back one, and org scoping excludes a foreign org entirely` | 同上,白名单第 82 行 |
+| 预览(只读,不写) | `tests/integration/approval-template-groups-backfill-preview.db.test.ts`(14 例) | `preview writes ZERO rows: approval_template_groups/links row counts for the org are byte-identical before and after, across a run that produces both a "create" and a "skip" bucket` | `test (20.x)` → `approval-real-db-integration` 步骤(真库,白名单第 81 行,见 §2.3) |
+| 执行(写,幂等) | `tests/integration/approval-template-groups-backfill-execute.db.test.ts`(12 例) | `happy path: creates one group per distinct btrim(category), links every eligible template, and records the batch header + both detail tables`;`idempotency: a second sequential execute call on the same eligible population returns batchId: null and writes zero additional rows across every table` | 同上,白名单第 82 行 |
+| 可回滚(精确到批次,不影响批次外) | `tests/integration/approval-template-groups-backfill-rollback.db.test.ts`(11 例) | `happy path: rollback archives the batch-created group, unlinks the batch-linked templates, and stamps rolled_back_at`;`batch-external addition to a batch-created group survives rollback: the group stays active because it is not empty`;`a batch-linked template moved to a different group by a batch-external action is left exactly where the external action put it` | 同上,白名单第 83 行 |
+| DDL(批次头 + 两张明细表) | `tests/integration/approval-template-groups-backfill-schema.db.test.ts`(8 例) | `the three FK delete-actions match the design-gate Q5 ruling exactly (a=NO ACTION, c=CASCADE)`;`M6 positive control: hard-deleting a linked template cascades through group_links into the batch_links row (no FK violation)` | 同上,白名单第 80 行 |
+| 批次可查(changesRequired #5) | `tests/integration/approval-template-groups-backfill-batches-list.db.test.ts`(8 例) | `orders by created_at DESC and paginates with limit/offset, with an accurate total independent of the page size`;`rolledBackAt is null for a not-yet-rolled-back batch and an ISO string for a rolled-back one, and org scoping excludes a foreign org entirely` | 同上,白名单第 84 行(最后一个 file 参数) |
 | 授权面(写=admin guard,非字面 I7 二分,已披露) | 上述五文件各自的 `route wiring` 嵌套 `describe` | 五文件均含 `an actor holding ONLY approvals:read (no approval-templates:manage) gets 403` + `an unauthenticated request gets 401, not a silent 200` | 同上 |
+
+白名单位置(`lifecycle`=78、`serialization`=79、`backfill-schema`=80、`backfill-preview`=81、`backfill-execute`=82、`backfill-rollback`=83、`backfill-batches-list`=84,是 84 个 file 参数里的最后 7 个)由 `nl -ba /tmp/a3docs-realdb-step-body.txt | grep -E "lifecycle|serialization|backfill-"` 现场核对——本节初稿曾把这五个位置错写成 78–82(整体少算了 2),已订正;承重的是「五文件均在 `approval-real-db-integration` 步骤的白名单参数列表里」这件事本身(§2.4 的五个 ci-wiring 守卫逐文件断言过这一点),具体序号只是佐证,不独立承重。
 
 ### 1.2 锁 §6 表第 2 行(「期 2:管理员『按现有 category 建组并挂接』的显式操作,预览→执行→可回滚」,门 =「1 落地」)
 
@@ -74,18 +76,14 @@ $ grep -n "backfill" packages/core-backend/src/index.ts
 ```
 `src/index.ts` 的两处命中是另一个不相关特性(「registry backfill」,访问控制注册表迁移进度),不是本分组功能——**零**生产路径能不经这条显式 `POST … /execute` 触发批量建组。判据满足。
 
-### 1.4 锁 §4 验收 E「序号不变量」——**A-3 execute 路径上,如实标未验**
+### 1.4 锁 §4 验收 E「序号不变量」——**A-3 execute 路径,拆两条腿讲(隔离级别腿已覆盖,终态腿未覆盖)**
 
-锁 §4 的 E 行原文判据是「分期 1 的 DDL + 建组;分期 3 的重排:并发两次建组 ⇒ 序号 n+1、n+2 各一,无 23505 泄露」——这是**分期 1/3** 的判据,A-3(分期 2)execute 只是**复用同一条 `MAX+1 → INSERT` 语句**(设计 MD §1「建组语句形状」行),因此设计 MD §3.2 称其为「E 的姊妹判据」而非 E 本身。核对结果:
+锁 §4 的 E 行原文判据是「分期 1 的 DDL + 建组;分期 3 的重排:并发两次建组 ⇒ 序号 n+1、n+2 各一,无 23505 泄露」+「隔离级别格:主判据(行为)……mutation:去掉显式 SET ⇒ B 的 RR 快照在停车前已取,读到陈旧 MAX,COMMIT 撞 23505」——**E 本身就是两条腿**:隔离级别腿(生产代码必须显式 `SET … READ COMMITTED`,否则在 RR 默认池上读到陈旧快照)与终态腿(两个真正并发的写者各自落到 n+1/n+2、零 23505 泄露)。这是**分期 1/3** 的判据原文,A-3(分期 2)execute 只是**复用同一条 `MAX+1 → INSERT` 语句**(设计 MD §1「建组语句形状」行)进组合调用,因此设计 MD §3.2 称其为「E 的姊妹判据」而非 E 本身。逐条核对本切片测试后,两条腿的覆盖情况不同,不能笼统合并成一句"未验":
 
-- **设计论证存在**(设计 MD §3.2):两个并发 execute 在同一把 `atg:${orgId}` 顾问锁上排队,先提交者清空 `eligible`,后到者重新查询后发现候选已清零 ⇒ 退化为空事务 `{batchId: null}`——**不需要**真正走到"两次同时 INSERT 争抢同一个 `MAX+1`"的分支,因为 L0 本身就把 execute 序列化了。
-- **构造并发的真库测试:不存在。** 逐条读 `approval-template-groups-backfill-execute.db.test.ts`(12 例)与 `-rollback.db.test.ts`(11 例)的全部用例名(见 §1.1 表与设计 MD §0′ 附近的清单),没有一条构造「两个并发 `POST …/execute`」或「一个 execute 并发一个手工建组」并断言 `sort_order` 终态为 n+1/n+2、零 `23505` 泄露的测试。
-- **容易混淆但不能替代的三条测试**(§13 changesRequired #13,commit `117e248cb`/`45e5c8a21`/`f3b3cc5d3`,均落在 `approval-template-groups-serialization.db.test.ts`,即 A-1 的 RR-default-pool 文件,不在本切片自己的五个文件里):
-  - `REVERSE positive control (§3.0, changesRequired #13 item 1): awaiting a non-WithClient exported function from inside an already-open transaction() self-deadlocks at the L0 lock wait, not at connection-pool acquisition`
-  - `A-3 execute (composed caller): under the RR-default pool, execute still reads a concurrently-committed holder row at MAX(sort_order) — proving the SET this composed transaction issues is not a single-primitive-only obligation`
-  - `execute lock-order (design-gate M2, §13.2 fix): stalls on the batched deterministic pre-lock statement, not a per-category one`
-  这三条断言的是**锁序自死锁陷阱**与**停车点**(`waitUntilBackendBlockedByHolder`),不是「两个 execute 并发跑完、序号各得 n+1/n+2」的终态断言——判别力不同,不能互相替代。
-- **结论**:E 在 A-3 execute 路径上的姊妹判据**未验**,原因 = 只有设计论证、无构造并发的真库测试。这不是本步能补的缺口(补测试属于代码/测试改动,超出本任务「不改代码」边界),如实记入 remaining(§5)。
+- **隔离级别腿——已覆盖(commit `45e5c8a21`,落在 A-1 的 RR-default-pool 文件 `approval-template-groups-serialization.db.test.ts`,不在本切片自己的五个文件里,但覆盖的正是 A-3 execute 这个组合调用者)**。读该 commit 引入的用例本体确认(不是只读 commit message 转述):`A-3 execute (composed caller): under the RR-default pool, execute still reads a concurrently-committed holder row at MAX(sort_order) — proving the SET this composed transaction issues is not a single-primitive-only obligation`——这是一个**真实构造的并发场景**:一条裸连接持 L0 并提交一个 `sort_order=1` 的组(占住 MAX),与此同时发出一次真实 `POST …/backfill/execute`(完整 guard 链),该请求停在同一把 L0 上,裸连接提交后放行,断言 = HTTP `201` 且新建的组 `sort_order > 1`(读到了并发提交后的新鲜 MAX,不是陈旧快照 ⇒ 不会在 COMMIT 撞 `23505`)。commit message 自陈的 mutation 证据:把 `beginApprovalTemplateGroupTxn(client)` 换成裸 `client as AtgTxClient` 类型转换(跳过实际发 SET),**恰好**这一条用例变红,该文件其余 10 条与 `backfill-execute.db.test.ts` 自己的 12 条均不受影响——判别力落在"组合调用者是否真的发了 SET"这一点上,与 E 隔离级别腿的机制完全一致,只是被测调用者从单原语换成了 A-3 的组合调用者。**这一腿在 A-3 execute 路径上已验证。**
+- **终态腿——未覆盖**。逐条读 `approval-template-groups-backfill-execute.db.test.ts`(12 例)与 `-rollback.db.test.ts`(11 例)的全部用例名(见 §1.1 表),没有一条构造「两个并发 `POST …/execute`」或「一个 execute 并发一个手工建组」、**双方都真正跑到提交**、断言各自落到 `sort_order` 的 n+1/n+2、零 `23505` 泄露的终态测试。设计 MD §3.2 对这条腿只给出**论证**(两个并发 execute 在同一把 `atg:${orgId}` 顾问锁上排队,先提交者清空 `eligible`,后到者重新查询后发现候选已清零 ⇒ 退化为空事务 `{batchId: null}`,**不需要**真的走到"两次同时 INSERT 争抢同一个 `MAX+1`"的分支)——论证成立与否本身没有问题,问题是**没有真库测试验证这个论证描述的退化路径确实发生**(例如:两个并发 execute,断言后到者确实拿到 `batchId: null` 而不是也创建了一个重复/冲突的组)。
+- **另外两条容易与上面混淆但仍不能替代终态腿的测试**(§13 changesRequired #13 剩余两项,commit `117e248cb`/`f3b3cc5d3`,同样落在 `serialization.db.test.ts`):`REVERSE positive control …: awaiting a non-WithClient exported function from inside an already-open transaction() self-deadlocks at the L0 lock wait …` 与 `execute lock-order (design-gate M2, §13.2 fix): stalls on the batched deterministic pre-lock statement, not a per-category one`——这两条断言的是**锁序自死锁陷阱**与**停车点**(`waitUntilBackendBlockedByHolder`),既不是隔离级别腿也不是终态腿,判别力再次不同,不能互相替代。
+- **结论**:E 在 A-3 execute 路径上,隔离级别腿**已验**(`45e5c8a21`),终态腿(两个并发 execute 都跑完、序号各得 n+1/n+2 或"第二个退化为空批次"这一具体断言)**未验**。这不是本步能补的缺口(补测试属于代码/测试改动,超出本任务「不改代码」边界),如实记入 remaining(§5)——remaining 条目已按此收窄,不再写成"E 的姊妹判据整体未验"。
 
 ---
 
@@ -184,7 +182,7 @@ $ grep -cE "^\s*✗|FAIL " <run log>
 ```
 均与 rebase note 逐位相同(30、4,且那 4 行全部是断言"fail closed 行为"本身的绿色用例名,不是真失败,已在 rebase note 里论证过,这里不重复整段论证)。
 
-### 2.4 五个 ci-wiring 守卫 + 闭世界普查
+### 2.4 五个 ci-wiring 守卫 + 哨兵普查 + 闭世界普查
 
 ```
 $ node --test scripts/ops/approval-template-groups-backfill-{batches-list,execute,preview,rollback,schema}-ci-wiring.test.mjs
@@ -193,6 +191,34 @@ $ node --test scripts/ops/approval-template-groups-backfill-{batches-list,execut
 ℹ fail 0
 ```
 每文件 3 断言(exclude 名单 / plugin-tests.yml 白名单 / 文件存在),5×3=15,全绿。
+
+**哨兵普查(五个 backfill 文件各自的 anti-skip-green 哨兵,本步现场 grep,非转抄)**:
+```
+$ grep -c "sentinel: EXPECT_DB lane must have DATABASE_URL" \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts
+…-schema.db.test.ts:1
+…-preview.db.test.ts:1
+…-execute.db.test.ts:1
+…-rollback.db.test.ts:1
+…-batches-list.db.test.ts:1
+```
+五文件各恰一条,均已在 §2.2 的真库回归里跑绿(`itIfExpectDb`,`EXPECT_DB=1` 时才不跳过)——`EXPECT_DB=1` 且 `DATABASE_URL` 缺失时该哨兵自身也会被 `describeIfDatabase` 跳过而不是变红,这是设计 MD §19.4「新披露 1」已记录的继承残留,本步未修复(不改代码边界),原样结转。
+
+**`ci-realdb-step-contract.mjs` 闭世界census(本步现场重跑,非转抄 §19.2 的旧记录)**:
+```
+$ grep -n "^export const FILES\|const FILES =" scripts/ops/ci-realdb-step-contract.mjs
+(no output, exit 1)
+$ sed -n '99,102p' scripts/ops/ci-realdb-step-contract.mjs
+export const REAL_DB_STEP_IDS = Object.freeze({
+  approval: 'approval-real-db-integration',
+  multitable: 'multitable-real-db-integration',
+})
+```
+零命中确认:该文件导出的是 `REAL_DB_STEP_IDS`(id 字符串映射,补充清单 #1 点名的"稳定 id")而非某个硬编码的逐文件 `FILES` 数组——五个 backfill 文件各自的独立 `*-ci-wiring.test.mjs` 才是"闭世界普查"的实际承重点(§2.4 上方 15/15),不是靠往这个共享文件的某个数组里追加条目。
 
 ```
 $ pnpm exec vitest run tests/unit/approval-ci-coverage-enumeration.test.ts
@@ -335,7 +361,7 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
 
 ## 5. 未做 / 未验 / owner 待裁(如实列出,不算作已满足)
 
-1. **验收 E 姊妹判据未验**(§1.4):execute 并发/execute-vs-手工建组的序号不变量,只有设计论证,无构造并发的真库测试。补测试需要改测试代码,超出本任务范围,记入下一实现步骤。
+1. **验收 E 姊妹判据的终态腿未验**(§1.4;隔离级别腿已由 `45e5c8a21` 覆盖,不是整体未验):两个真正并发的 execute(或 execute 并发手工建组)都跑到提交、各自落到 n+1/n+2 或"后到者退化为空批次"这一具体终态,只有设计论证(§3.2),无构造并发的真库测试。补测试需要改测试代码,超出本任务范围,记入下一实现步骤。
 2. **Draft PR 尚未开出**:锁 §6「门 = 1 落地」按「Draft PR 过门审」求值(补充清单 #6),本切片目前只有分支 + 两份 MD,门未满足。开 PR、过 Opus refute-first 门审、PR body 写齐设计 MD §13.6 清单,均是下一步。
 3. **12 处代码注释未随文件改名更新**(设计 MD §0′ 之前的抬头块已列全):不改代码边界内的已知残留,留给下一次触碰这些文件的提交顺手改。
 4. **门审报告"被审对象"路径失效**:`reviews/design-gate-A3-phase2-20260918.md` 引用的旧文件名(`approval-template-groups-phase2-design-20260918.md`)在本仓当前树里已不存在(rename 到本文档配对的设计 MD 路径),门审报告本身不属本 git 仓、无权限修改,如实披露。

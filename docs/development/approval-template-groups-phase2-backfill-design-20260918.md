@@ -6,16 +6,25 @@
 > - **诚实形状(门审报告 §0 原文,不得只留"APPROVED-WITH-CHANGES"五个字概括)**:「按本报告给的默认值落地后,A-3 在**本产品实际的中文 category 语料上仍然是惰性的**……要真正可用必须 owner 先 ratify `atg_name_nonblank` 勘误。默认值只保证 Draft 能推进且不会静默写坏数据,不保证功能对中文分类生效。」§13.4 O2 与 §13.6 首行已经记了这条待裁;这里在抬头重申,防止只读抬头一段的读者漏看。
 > - **7 个仓内代码/测试文件的 12 处注释仍按旧文件名引用本文档**(rename 后均已失效;任务边界"不改代码"故未一并修正,留给下一次触碰这些文件的提交顺手改,已如实列入 remaining):`packages/core-backend/src/routes/approvals.ts:451,588`;`packages/core-backend/src/services/ApprovalTemplateGroupService.ts:47,615,687,851`;`packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts:8`;`packages/core-backend/vitest.config.ts:1838`;`packages/core-backend/tests/integration/approval-template-groups-backfill-preview.db.test.ts:11`、`-execute.db.test.ts:12`、`-rollback.db.test.ts:13`、`-batches-list.db.test.ts:18`。
 > - **§13 裁定落地对照表指针(不在此重复整张表)**:§13.1(设计门审当天,续做步骤 4)= 初版逐条落地表(16 条 changesRequired);§19.1(续做步骤 18)= **第一次对着当前分支代码 `grep`/`git log` 现场核对**的对账表,勘误了 §13.1 三处过期文字(见 §19.3,#1/#5/#9 三格);§22.1(续做步骤 21)= **按门审报告自己的 Q1–Q7 + 额外 P1×2/P2×2 编号**(与 changesRequired 1–16 编号非一一对应)重新核的第二张对账表,每格都附 `git log -S "<独有文本>"` 核实过的 commit SHA,并纠正了草拟时一次凭 commit 主题行猜错的 SHA(§22.1 引言自陈)。**三张表冲突时以 §22.1 为准**——这是本次文档定稿新加的裁决规则,不是原提案自带的内容。
-> - **本步(文档定稿)新核对但未发现新测试的一项(如实披露,不算作已满足)**:锁 §4 验收 E「序号不变量」在 A-3 execute 路径上的姊妹判据(本文档 §3.2)是**设计论证**("后到者拿锁后 eligible 已清零,退化为空事务"),不是构造并发的真库测试——现场读 `tests/integration/approval-template-groups-backfill-execute.db.test.ts` 与 `-rollback.db.test.ts` 的全部用例名(见验证 MD 对应小节),**没有一条**构造"两个并发 execute"或"execute 并发手工建组"并断言 n+1/n+2、零 23505 泄露的终态。§13 changesRequired #13 的三条组合调用判别力测试(commit `117e248cb`/`45e5c8a21`/`f3b3cc5d3`)断言的是**锁序停车点**(`waitUntilBackendBlockedByHolder`),不是**序号不变量的终态**——两者判别力不同,不能互相替代。记入 remaining,不在本步补测试(不改代码边界)。
+> - **本步(文档定稿)新核对、需要拆两半讲的一项(如实披露,不笼统算作"未测")**:锁 §4 验收 E「序号不变量」在 A-3 execute(组合调用者)路径上分两条腿——**隔离级别腿:已覆盖**。commit `45e5c8a21` 在 RR-default 池文件(`approval-template-groups-serialization.db.test.ts`)新增的用例(`A-3 execute (composed caller): under the RR-default pool, execute still reads a concurrently-committed holder row at MAX(sort_order) …`)构造的是**真实并发**——一条裸连接持 L0 并提交一个 `sort_order=1` 的组,同时一次真实 `POST …/backfill/execute` 停在同一把 L0 上、放行后继续,断言 = 201 且新组 `sort_order > 1`(读到了并发提交后的新鲜 MAX,不是陈旧快照撞 `23505`)——这正是 E 的 SET 义务/隔离级别机制,应用到了组合调用者本身,不是单原语调用者的旁证。**终态腿:未覆盖**——没有一条测试构造"两个并发 `POST …/execute`"或"execute 并发手工建组"、双方都跑完、断言各自拿到 n+1/n+2 且零 `23505` 泄露的终态(§3.2 只给出这半的设计论证:后到者重新查询 `eligible` 已清零,退化为空事务,不必真的竞争同一个 `MAX+1`)。§13 changesRequired #13 另外两条(`117e248cb`/`f3b3cc5d3`)断言的是**锁序停车点**,与终态腿也是两回事。记入 remaining 的只有终态腿这一半,不在本步补测试(不改代码边界)。
+
+> **RATIFY 记录(原样引用,来自 `approval-form-group-entity-design-lock-draft-20260916.md` 抬头,与验证 MD §0 同一段落,双份存放以满足交付物清单"设计 MD 原样引用抬头 RATIFY 记录"的字面要求——两份内容须保持逐字一致,任何一份被编辑必须同步另一份)**:
+>
+> > **RATIFY 记录(2026-09-18)**
+> > - **授权来源(owner 亲写,本会话消息原文)**:「按 你建议执行1」——指向我前一条消息的建议 1:「ratify 三把锁:分组锁 v2.13、待办中心锁 v2.14、撤销锁 v5.9;待裁项按锁文里标的建议值」。owner 未点名的项(合并 PR、#5805 收口、#5698 处置)**不在本授权内**。
+> > - **ratify 当刻 head**:`origin/main @ 00781e68b`(2026-09-18);**验证基线** `85ddd2926`(第 4–13 轮门审全部在此 head 上核实),两 head 之间相差 228 提交(timemachine/recovery 合并列车)。
+> > - **漂移核对(85ddd2926 → 00781e68b)**:本锁引用的核心文件(`routes/approvals.ts`、`ApprovalProductService.ts`、`approval-seat-authorization.ts`、`AuthService.ts`、`rbac/*`、`plugin-attendance/index.cjs`、迁移目录既有文件、`plugin-tests.yml`)**字节相同**;唯二有位移的是 `packages/core-backend/src/index.ts`(整体 +8 行:jwt 中间件/correlation 增强/`app.use(approvalsRouter(`/correlationErrorHandler/插件 `addRoute` 的 catch 行号平移)与 `multitable/automation-service.ts`(import 行不变,布尔消费方区块行号平移);`run-required-web-tests.sh` 的 exec 行只多了 stock-prep 令牌;新增迁移 `…create_recovery_archive_derived_effects.ts` 与本锁无关。锁文正文保留基线行号,以本条为准换算。
+> > - **裁决结果(按建议值)**:Q3 分组按 org 作用域,`org_id` 只取 `req.authenticatedTenantId` = **是**;Q4 归档不保留成员、解档得空组 = **是**;Q5 `?category=` 与 `/categories` 首期不动、分期 3 再裁;**分期 2(按现有 category 建组并挂接)= 要,做成预览→执行→可回滚的管理员操作**;`key` 全局唯一 = **另立锁**,不顺带。§7 第 2 项(§2 两表形状 + 锁序表 + I1–I8)按 v2.13 ratify。
+> > - **不变的约束**:含 DDL 的切片只能以 Draft PR 交付、**不应用、不合并**;任何合并仍需 owner 逐 PR 一句话;实现按分期走「Sonnet 实现 → Opus 门审 → 修复重跑闸 → Draft PR」。
 
 - 锁文(唯一 ratify 对象):`approval-form-group-entity-design-lock-draft-20260916.md`,**v2.13 RATIFIED 2026-09-18**。锁文 §6「期 2」原文只有三个词的约束:「管理员『按现有 category 建组并挂接』的显式操作,预览 → 执行 → 可回滚」+ 门 =「1 落地」。**本切片的全部交互形状、DDL、错误码、并发/回滚精确性都是本文档新提出的设计,不是锁文逐条对照的实现**——这一点与 A-1(锁文 §2/§3 逐条落地)性质不同。
 - 目标文档:`goal-three-locks-full-implementation-20260918.md`(切片 `A-3 分期 2`,门 = 「待 A-1 Draft PR 过门(『1 落地』按此求值,已请示 owner)」——**该前置门已满足**:`#5852` 第 3 轮 DRAFT-READY(0 P1/0 P2/6 P3)@`0144932ac`,现场 `gh pr view 5852` 核对 body 确认。
 - 补充清单:`impl-supplementary-gate-checklist-20260918.md` #1–#4(三线共用)
-- **门控前提(taskbook 原文,未被任何后续文档撤销)**:`impl-taskbook-A-grouping-20260918.md:72`「W7(预览端点)……视设计提案而定 | 先出设计提案,过独立门审后才可标 S/M/L」;`:227`「分期 2 的交互设计未锁……W7/W8/W9 在没有独立设计提案通过门审之前不进入实现队列」。**本文档就是这份设计提案本身**,尚未经过独立门审——本步(worktree 建立后的第一个可提交单元)只交付这份提案,不写任何 `.ts` 实现代码。
+- **门控前提(taskbook 原文,未被任何后续文档撤销)**:`impl-taskbook-A-grouping-20260918.md:72`「W7(预览端点)……视设计提案而定 | 先出设计提案,过独立门审后才可标 S/M/L」;`:227`「分期 2 的交互设计未锁……W7/W8/W9 在没有独立设计提案通过门审之前不进入实现队列」。**本文档就是这份设计提案本身**,~~尚未经过独立门审~~【本行"尚未经过独立门审"与"本步只交付这份提案不写代码"两句是**初稿当时**(HEAD `0144932ac`)的状态,已被 §13 起的门审裁定与 §14–§22 的 `.ts`/迁移/真库测试落地整体推翻,不是本次改名/文档定稿这一步造成的变化——本行不删,标注在此,避免读者读到这句当作当前状态】——本步(worktree 建立后的第一个可提交单元)只交付这份提案,不写任何 `.ts` 实现代码。
 - 本文档所在分支:`feat/approval-template-groups-phase2-backfill`(基于 `origin/feat/approval-template-groups-phase1`)
 - 本文档写作时 worktree HEAD:`0144932ac`(与 A-1 的 Draft PR #5852 门审通过时的 head 相同——本分支尚无自己的提交)
-- `origin/main` 与本分支的 merge-base:`89f1ecdee2`(**相同**,即 `feat/approval-template-groups-phase1` 是 `origin/main` 的直接后代,本分支进一步在其上直接展开,无 rebase 漂移)
-- 下文所有 `file:line` 都是**对本 HEAD 现场 `grep -n` 的结果**(§0–§13 初稿写作时的 HEAD;§14 起各续做步骤自带各自的 HEAD/commit,不重述)。
+- `origin/main` 与本分支的 merge-base:`89f1ecdee2`(**相同**,即 `feat/approval-template-groups-phase1` 是 `origin/main` 的直接后代,本分支进一步在其上直接展开,~~无 rebase 漂移~~【**已不成立,本次文档定稿现场核对后勘误**:本分支此后经历过一次真实 rebase——`git rebase origin/feat/approval-template-groups-phase1`,把本分支已有的 26 个提交重放到 phase1 新落地的 `03ee9f4bb`(CJK-name 400 映射修复)之上,merge-base 因此推进,证据 = `docs/development/approval-template-groups-phase2-backfill-rebase-note-20260918.md` 全文(含一处 JSDoc 段落冲突的解决记录、`--force-with-lease` push)。本行原文只对**初稿写作那一刻**成立,不是本文档当前状态的描述】
+- 下文所有 `file:line` 都是**对本 HEAD 现场 `grep -n` 的结果**(§0–§13 初稿写作时的 HEAD;§14 起各续做步骤自带各自的 HEAD/commit;rebase 后的当前 HEAD 见文档最顶部抬头块与验证 MD,不重述)。
 
 ## 0′. 交付物对照 index(目标文档「每个切片的交付物」要求 → 本文档对应位置;本步新增,不改下文任何一节)
 
@@ -26,9 +35,9 @@
 | 接口与错误码 | §6(端点、guard、I7 授权面冲突);§7(错误码表) |
 | 事务与锁序,file:line | §3(execute 算法 + §3.0 嵌套事务死锁决策)、§4(rollback 算法);§13.2(逐字保留的门审成品:统一锁序 + 品牌类型方案);落地 file:line 见 §14/§17/§18/§19.1/§22.1(`routes/approvals.ts`/`ApprovalTemplateGroupService.ts` 具体行号) |
 | 与既有代码的接缝,file:line | §1(现有原语盘点,A-1 落地函数的 file:line);§11/§12(附录:`WithClient` 抽取的先行落地与独立复核) |
-| 留给后续切片的项 | §13.3(设计阶段的未落地项)→ §19.4 → §20.6/§21.6(如有)→ **§22.5(最新一版 remaining,冲突以此为准)**;本步新增两条见上方抬头块最后一条(验收 E 姊妹判据未测)与"12 处代码注释未随改名更新" |
+| 留给后续切片的项 | §13.3(设计阶段的未落地项)→ §19.4 → §20.6/§21.6(如有)→ **§22.5(最新一版 remaining,冲突以此为准)**;本步新增两条见上方抬头块最后一条(验收 E 姊妹判据的**终态腿**未测,隔离级别腿已由 `45e5c8a21` 覆盖,两腿不可合并成一句)与"12 处代码注释未随改名更新" |
 | owner 待裁项 | §13.4(O1/O2/O3,均已给默认值);§13.6(Draft PR body 必写清单,含待 owner 一句话确认的两项);§7 待 owner 裁决(锁文原表,分期 2 本身的"要/不要"已由抬头 RATIFY 记录裁定为"要") |
-| RATIFY 记录(锁文抬头,原样引用) | 见下方 §0 之前的锁文引用行(第 3 行)只摘了 §6;完整 RATIFY 记录逐字见验证 MD 开篇(避免在设计 MD 与验证 MD 各存一份、后续只改一份的分叉风险) |
+| RATIFY 记录(锁文抬头,原样引用) | 抬头块(本文档最顶部,标题行之后)已整段引用;验证 MD §0 存有逐字相同的第二份(交付物清单对两份 MD 都点了名)——**两份必须保持逐字一致**,编辑一份务必同步另一份,不靠"只留一份、互相指针"规避分叉风险 |
 
 ## 0. 范围重述(任务书原文,逐条核对是否可行)
 
