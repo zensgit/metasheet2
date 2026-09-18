@@ -727,6 +727,35 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '这不是您能修的;管理员升级完数据库,您再点一次就行。',
     enNext: 'This is not something you can fix — once an administrator finishes the upgrade, click again.',
   }),
+  // The 503 DataSourceManager.connectDataSource raises when the SOURCE library itself cannot be
+  // reached (#5586). That chokepoint sits under `/api/data-sources/*` (structure / tables / test-connect
+  // / query / select — the data-factory connection-management surface) and translates the raw driver
+  // text (which would otherwise carry host:port, the database name and the login it tried) into this
+  // fixed sentence + status before the response ever leaves the server.
+  //
+  // #5588 review corrected an overclaim in the first draft on TWO axes and both fixes are load-bearing:
+  //   1. A bare 503 cannot prove the cause is "not a permission problem" or that "retrying will not
+  //      help" — a source-account login/permission refusal and a transient fault both land on this same
+  //      code, and the sentence must not claim to have ruled either out. What IS provable, and what the
+  //      sentence says instead, is narrower: adding a permission to the MetaSheet account itself will
+  //      not fix it, because the account this route touches is on the SOURCE side, not ours. A short
+  //      retry is worth trying before anyone escalates, precisely because a transient fault is one of
+  //      the live possibilities.
+  //   2. This entry does NOT cover the stock-prep source precheck. `stockPreparationSourcePreflight`
+  //      builds its own adapter (`adapterRegistry.createAdapter`) and reads through it directly — it
+  //      never calls DataSourceManager.connectDataSource, so it never receives this fixed 503/code.
+  //      Reviewer verified this by injecting the exact SOURCE_UNAVAILABLE error into the real precheck
+  //      module: the result was `verdict: 'no-go'` with blocker `source_unreachable` reason
+  //      `unknown_error` (`classifyReadError` in stock-preparation-source-preflight.cjs pattern-matches
+  //      driver text/codes and has no case for this module's fixed sentence, so it falls through to
+  //      UNKNOWN) — never this literal sentence. The precheck page's own no-go/unknown_error copy is a
+  //      separate, not-yet-done change.
+  SOURCE_UNAVAILABLE: Object.freeze({
+    zh: '源库(比如 PLM、K3 用的那台 SQL Server)现在连不上,服务器答的是 503。不是直接给 MetaSheet 账号加权限就能解决,请实施检查具体原因(网络、端口、源库账号或其权限、瞬时故障都有可能);短时间内重试还是不行,再把这条报错升级给实施处理。',
+    en: 'The source database (for example the SQL Server behind PLM or K3) cannot be reached right now — the server answered 503. This is not fixed by adding a permission to the MetaSheet account; ask an implementer to check the actual cause (the network, a port, the source account or its permissions, or a transient fault). If a short retry still fails, escalate this to an implementer.',
+    zhNext: '不是给账号加权限就能解决的;先短时间重试一次,如果还是不行,把这条报错交给实施,去查源库那边的网络、端口、账号或权限,或者是不是瞬时故障。',
+    enNext: 'This is not fixed by adding a permission — retry briefly first; if it still fails, hand this error to an implementer to check the source database’s network, port, account or permissions, or whether it was a transient fault.',
+  }),
 })
 
 export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
