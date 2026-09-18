@@ -130,11 +130,14 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   }
 
   // §11 CI fix (shared-DB fixture collision — see the sibling preview suite's own copy of this
-  // helper for the full mechanism comment): `executeApprovalTemplateGroupBackfill`'s `eligible`
-  // query has the SAME "no template-level org filter, only the link-exclusion is org-scoped" shape
-  // as preview's candidate query, so it is equally exposed to a foreign, unrelated file's leftover
-  // `approval_templates` row in the shared real-DB CI step. Copied (not imported) per this file's
-  // own convention for `tok`/`httpReq`. Like the sink query everywhere in this lane, this omits
+  // helper for the full mechanism comment, corrected by the P3-2 fix in `impl-gate-A3-round3-20260918.md`:
+  // source not located, volume not measured, exposure confirmed — NOT "some other file within
+  // this one 84-file step", which is retracted there): `executeApprovalTemplateGroupBackfill`'s
+  // `eligible` query has the SAME "no template-level org filter, only the link-exclusion is
+  // org-scoped" shape as preview's candidate query, so it is equally exposed to a foreign,
+  // unrelated row left over from some earlier real-DB step sharing this database. Copied (not
+  // imported) per this file's own convention for `tok`/`httpReq`. Like the sink query everywhere
+  // in this lane, this omits
   // `applyTemplateVisibilityFilter` (a superset sweep is fine only because every exact assertion
   // in this file runs under `managerActor`, where that filter is a no-op) — a future non-manager
   // exact-set assertion would need more than this helper.
@@ -157,6 +160,48 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
       [org, sinkGroupId, ownTemplateIds],
     )
     return sinkGroupId
+  }
+
+  // P2-1 fix (`impl-gate-A3-round3-20260918.md`, E14) — moved up from beside the §13
+  // changesRequired #12 cap-guard test below so `assertEligibleCandidateCountWithinCap` (right
+  // below) can reference the SAME constant instead of a second hardcoded "500"; the cap-guard
+  // test's own comment there still explains why this literal must track the unexported production
+  // constant.
+  const MAX_CANDIDATES_UNDER_TEST = 500 // must equal `routes/approvals.ts`'s (unexported) `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES`
+
+  // P2-1 fix: `sinkForeignTemplates` above closes the "exact set/count" axis but, by itself, NOT
+  // the 500-candidate cap axis — `executeApprovalTemplateGroupBackfillWithClient`
+  // (`routes/approvals.ts:694-701`) counts EVERY org-unlinked storable template BEFORE bucketing,
+  // so a call site that skips sinking is exposed to a whole-call `ServiceError` the moment a
+  // shared CI database's foreign-pollutant count (plus this test's own candidates) crosses
+  // `MAX_CANDIDATES_UNDER_TEST`, independent of how narrowly that call site's OWN assertions are
+  // scoped afterward — that was this file's original, now-retracted, argument for the idempotency
+  // and cross-verification tests below not needing a sink call. Reproduced live (gate round 3,
+  // E14): 634 foreign rows made `eligible.length` 617 and every un-sunk `execute` call in this
+  // lane's three files threw `Backfill candidate count 617 exceeds the 500 limit` before a single
+  // row was written — a whole-call failure no per-id assertion scoping can survive.
+  //
+  // This function is the conditional, machine-checked replacement for that retracted prose: the
+  // "regardless of how many foreign rows" / "never changes" claims are true ONLY while
+  // `foreign rows for this org <= cap - this file's own candidate count for this org`. Sinking is
+  // what makes that inequality hold in practice (foreign rows are swept to 0 for this org); this
+  // asserts the actual precondition `execute` depends on immediately after sinking, rather than
+  // trusting the sink silently worked.
+  async function assertEligibleCandidateCountWithinCap(org: string, ownCandidateCount: number): Promise<void> {
+    // Mirrors `eligible`'s own WHERE clause shape (`routes/approvals.ts:679-688`) minus
+    // `applyTemplateVisibilityFilter` — sound for the identical reason `sinkForeignTemplates`
+    // itself omits it (this file's disclosure above `sinkForeignTemplates`): every caller of this
+    // assertion in this file runs under `managerActor`, where that filter is a no-op.
+    const result = await query<{ n: string }>(
+      `SELECT count(*)::text AS n
+         FROM approval_templates t
+        WHERE NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)
+          AND btrim(t.category) ~ '[!-~]'`,
+      [org],
+    )
+    const eligibleCount = Number(result.rows[0].n)
+    expect(eligibleCount).toBe(ownCandidateCount)
+    expect(eligibleCount).toBeLessThanOrEqual(MAX_CANDIDATES_UNDER_TEST)
   }
 
   const managerActor: ApprovalTemplateVisibilityActor = {
@@ -325,16 +370,22 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // §3.2), asserted here as the sequential leg. Zero row delta is checked across EVERY table
   // execute can write, not just the response shape: a response-only assertion would stay green
   // even if the second call silently duplicated batch bookkeeping rows for the same links.
-  // §11 CI fix exemption: no `sinkForeignTemplates` call needed here — this test's own assertion
-  // (`countsAfterSecond` equals `countsAfterFirst`) is already a DELTA across the two `execute`
-  // calls, not an absolute count. A foreign pollutant present at `beforeAll` time gets folded into
-  // whichever bucket the FIRST call processes either way; the SECOND call then sees it already
-  // linked (same as this test's own two templates) and writes nothing new — the two snapshots stay
-  // equal to each other regardless of how many foreign rows existed going in.
+  // P2-1 fix (`impl-gate-A3-round3-20260918.md`, retracting the `§11 CI fix exemption` this
+  // replaced): the retracted comment argued the two snapshots stay equal "regardless of how many
+  // foreign rows existed going in" because the DELTA assertion below does not care which bucket a
+  // foreign pollutant folds into. That argument never considered the FIRST `execute` call failing
+  // outright — E14 (gate round 3) constructed exactly that: enough foreign rows push the org-scoped
+  // `eligible` count past the 500 cap, and `first` above throws before either call writes anything,
+  // which the delta-only framing cannot distinguish from "nothing changed because idempotency
+  // held". The conditional, correct claim is: the delta argument holds ONLY while
+  // `foreign rows for this org <= cap - this test's own 2 candidates`. Sunk and asserted below,
+  // like every other case in this file, instead of assumed.
   it('idempotency: a second sequential execute call on the same eligible population returns batchId: null and writes zero additional rows across every table', async () => {
     const org = trackOrg(`atge-idem-${TS}`)
-    await createTemplate(`atge-idem-hr1-${TS}`, 'HR')
-    await createTemplate(`atge-idem-hr2-${TS}`, 'HR')
+    const idemHr1 = await createTemplate(`atge-idem-hr1-${TS}`, 'HR')
+    const idemHr2 = await createTemplate(`atge-idem-hr2-${TS}`, 'HR')
+    await sinkForeignTemplates(org, [idemHr1, idemHr2])
+    await assertEligibleCandidateCountWithinCap(org, 2)
 
     const first = await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
     expect(first.batchId).not.toBeNull()
@@ -383,10 +434,21 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // `STORABLE_GROUP_NAME_PATTERN`'s doc-comment (ApprovalTemplateGroupService.ts) for why that axis
   // is a distinct, unverified risk (`finding_prod_pg15_never_tested`), not covered by this test
   // being green.
-  // §11 CI fix exemption: no `sinkForeignTemplates` call needed here — every assertion below looks
-  // up a SPECIFIC fixture id (`idByKey.get(f.key)`), never an array length or a full-population
-  // count. A foreign pollutant folded into this org's `execute` call changes what ELSE gets linked,
-  // but never changes whether these five specific ids individually ended up linked or not.
+  // P2-1 fix (`impl-gate-A3-round3-20260918.md`, retracting the `§11 CI fix exemption` this
+  // replaced): the retracted comment argued a foreign pollutant "never changes whether these five
+  // specific ids individually ended up linked or not" because every assertion below looks up a
+  // SPECIFIC fixture id, never an array/count. That argument never considered `execute` itself
+  // throwing before it ever reaches the per-id linking logic — E14 (gate round 3) constructed
+  // exactly that: enough foreign rows push the org-scoped `eligible` count past the 500 cap, the
+  // `await executeApprovalTemplateGroupBackfill(...)` call below throws, and every per-id lookup
+  // after it never even runs (the whole `it` fails on the unhandled rejection). Per-id scoping
+  // protects the LOOP below from a foreign row changing some OTHER id's outcome; it cannot protect
+  // the call the loop depends on from failing outright. The conditional, correct claim is: the
+  // per-id argument holds ONLY while
+  // `foreign rows for this org <= cap - this test's own eligible candidates (2: 'ascii' + 'padded'
+  // both bucket to 'Ops'; the CJK/blank/null fixtures are correctly excluded from `eligible`
+  // itself, not merely skipped post-query)`. Sunk and asserted below, like every other case in
+  // this file, instead of assumed.
   it('SQL/JS cross-verification: classifyBackfillCategory.action==="skip" agrees, per real candidate row, with whether execute left that row unlinked', async () => {
     const org = trackOrg(`atge-crossverify-${TS}`)
     const fixtures: Array<{ key: string; category: string | null }> = [
@@ -400,6 +462,13 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
     for (const f of fixtures) {
       idByKey.set(f.key, await createTemplate(`atge-xv-${f.key}-${TS}`, f.category))
     }
+    await sinkForeignTemplates(org, Array.from(idByKey.values()))
+    // Own eligible count, independent of the hardcoded "2" in this test's own comment above: the
+    // SAME classification the loop below trusts, filtered to non-skip. If a future edit changes
+    // which of these five fixtures are storable, this assertion (and the loop below) move together
+    // instead of the comment silently going stale.
+    const ownEligibleCount = fixtures.filter((f) => classifyBackfillCategory(f.category, new Map()).action !== 'skip').length
+    await assertEligibleCandidateCountWithinCap(org, ownEligibleCount)
 
     await executeApprovalTemplateGroupBackfill(org, managerActor, 'probe-actor')
 
@@ -438,7 +507,10 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   // value is) would keep this test green while it silently stopped proving anything about the
   // number 500 specifically — the message is the only channel the real threshold is observable
   // through from outside the module.
-  const MAX_CANDIDATES_UNDER_TEST = 500 // must equal `routes/approvals.ts`'s (unexported) `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES`
+  // `MAX_CANDIDATES_UNDER_TEST` is declared once, up near `sinkForeignTemplates` /
+  // `assertEligibleCandidateCountWithinCap` (P2-1 fix) — referenced here rather than a second
+  // hardcoded "500" copy, so this test's own literal and that helper's cap check can never drift
+  // apart.
   it('§13 changesRequired #12: exceeding the 500-candidate cap throws a typed 400 BEFORE any write commits — zero rows across every table this call could have written', async () => {
     const org = trackOrg(`atge-cap-${TS}`)
     const keyPrefix = `atge-cap-tpl-${TS}-`
@@ -476,7 +548,11 @@ describeIfDatabase('approval template groups — phase 2 backfill execute (W8, d
   describe('route wiring: POST /api/approval-template-groups/backfill/execute (real HTTP, real guard)', () => {
     it('an admin actor gets 200/201 with a batchId and the created group is visible in a follow-up read', async () => {
       const org = trackOrg(`atge-http-admin-${TS}`)
-      await createTemplate(`atge-http-admin-tpl-${TS}`, 'HTTPRoute')
+      // P2-1 fix: this call point had neither a sink call nor an exemption comment at all (gate
+      // round 3 named it as one of the 10 un-sunk `execute` calls this lane's real-DB step exposes
+      // to the 500-candidate cap — `impl-gate-A3-round3-20260918.md` E14).
+      const tpl = await createTemplate(`atge-http-admin-tpl-${TS}`, 'HTTPRoute')
+      await sinkForeignTemplates(org, [tpl])
       const admin = await tok(base, `http-exec-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
 
       const res = await httpReq(base, '/api/approval-template-groups/backfill/execute', 'POST', admin)

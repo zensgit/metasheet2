@@ -786,7 +786,7 @@ FAIL tests/integration/approval-template-groups-backfill-preview.db.test.ts > �
 
 1. `approval_templates` 的 DDL(`packages/core-backend/src/db/migrations/zzzz20260411120100_approval_templates_and_instance_extensions.ts:16-25`)**没有 `org_id` 列**——模板本来就是跨 org 全局共享的一张表,只有「哪个 org 把它挂进了哪个组」这件事(`approval_template_group_links`)才是 org 级的。
 2. `previewApprovalTemplateGroupBackfill` 的候选查询(`packages/core-backend/src/routes/approvals.ts:519-528`)WHERE 子句只有两段:`NOT EXISTS(... l.org_id = $1 ...)`(这个 org 从未关联过)+ `applyTemplateVisibilityFilter`。而 `applyTemplateVisibilityFilter`(`packages/core-backend/src/services/ApprovalProductService.ts:4383-4389`)在 `actor.isTemplateManager === true` 时**直接 `return index`,不追加任何条件**——本切片三个真库文件的 `managerActor` 全部是 `isTemplateManager: true`。折叠下来,候选谓词就是唯一一条:「这个模板从未被『这个 org』关联过」。
-3. `approval-template-groups-backfill-batches-list.db.test.ts` 自己的既有注释(本切片改动前就写在那里,`afterEach` 上方)原话就是:「`approval_templates` карries no org column, so a template left linked-nowhere by one case stays an eligible candidate for a later case」——五个文件的作者早就知道这件事,只是三个文件(preview/execute/rollback)在写 CI 前没有把它推广到「84 文件共享一个库」这个尺度。
+3. `approval-template-groups-backfill-batches-list.db.test.ts` 自己的既有注释(本切片改动前就写在那里,`afterEach` 上方)原话就是:「`approval_templates` carries no org column, so a template left linked-nowhere by one case stays an eligible candidate for a later case」——五个文件的作者早就知道这件事,只是三个文件(preview/execute/rollback)在写 CI 前没有把它推广到「84 文件共享一个库」这个尺度。
 
 结论:一个「从未被本文件的 org 关联过」的全局模板行,是**任何** org 字符串的候选——把 org 换成 per-file 唯一值不改变这件事分毫。这不是 bug,是产线设计本身(模板池跨 org 共享,分组是 org 级的挂接);任务书要求的「零生产代码改动」在这个前提下是对的——要修的是测试夹具怎么在这个真实产线行为下让自己的候选人口保持干净,不是去改产线谓词。因此步骤②按**任务书原定方案作废**,改用下面 §11.2 的机制。
 
@@ -967,13 +967,13 @@ $ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_ci \
   ```
   确认是 84 文件共享一次 server/DB 进程时才出现的跨文件状态污染(某个更早文件残留的 RBAC/JWT 设置行影响到了这条 401/200 判定),不是本次改动引入的新缺陷,也不是本次污染 INSERT(直接对 `approval_templates` 表插的 3 行)能触达的表面——按记忆 `feedback_flake_attribution_last_active_suite` 的要求,如实点名「未定位根因的跨文件既有 flake」,不归为本切片修复范围,不据此宣称「required 步骤已全绿」。
 
-`core-backend` 全量无 DB 单测(`pnpm test:unit`,与本切片 5 个真库文件完全不相交的另一条 lane,用来确认三处测试文件改动没有波及其它任何单测):
+**P3-3 更正(`impl-gate-A3-round3-20260918.md`)**:上一版本节把下面这条 lane 称作「`core-backend` 全量无 DB 单测(`pnpm test:unit`)」——这个说法窄于 required 的真实 lane。`test:unit`(`package.json`)是 `vitest run tests/unit`,只跑 `tests/unit` 一个目录;required check `test (20.x)` 真正跑的「Run core-backend tests」步(`.github/workflows/plugin-tests.yml:877-879`,无 `if:`/无 `env:`)命令是 `pnpm --filter @metasheet/core-backend test`,收集面是前者的真超集。以下是用**正确命令**跑的结果(与门审 E11 逐字相同,本轮独立复跑确认非偶然):
 ```
-$ pnpm --filter @metasheet/core-backend run test:unit
- Test Files  794 passed (794)
-      Tests  12715 passed (12715)
+$ env -u DATABASE_URL -u EXPECT_DB CI=true pnpm --filter @metasheet/core-backend test --reporter=dot
+ Test Files  932 passed | 175 skipped (1107)
+      Tests  14722 passed | 1604 skipped (16326)
 ```
-零失败。
+EXIT=0,与本切片 5 个真库文件完全不相交的另一条 lane,用来确认三处测试文件改动没有波及其它任何单测——`grep -c "tests/integration/approval-template-groups-backfill" <该次日志>` = 0(五个新文件在这条无库 lane 里零收集,不是 skip-green)。
 
 ### 11.6 收尾:`git diff --stat`(证明只动测试与本 MD)
 
@@ -988,3 +988,120 @@ $ git diff --stat
 零生产代码改动(§11.4 的 mutation 探针已 `cmp` 确认字节级复原,不计入本次提交);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-backfill-batches-list.db.test.ts`/`approval-template-groups-lifecycle.db.test.ts`/`approval-template-groups-serialization.db.test.ts` 按 §11.3「步骤④机械核查」小节的 `grep` + 逐命中行走查 + 84 文件污染库实测三重证据保持不动,不是仅凭「两个库都绿」。§10 是既有编号(修复轮 3),本节按既有编号序延续为 §11——三个文件里的代码注释本身已经这样自称(「§11 CI fix」),本节把编号落回 MD 正文,不是新起一套编号。
 
 **遗留(如实记录,不算已满足)**:`directory-binding-admin-routes.db.test.ts` 的跨文件 flake 未定位根因,只确认与本切片无关且不可能是本切片下游;是否需要单独立项排查,交 owner/后续 lane 裁决。
+
+---
+
+## 12. 修复轮 4 处置(`impl-gate-A3-round3-20260918.md`,裁定 0 P1 / **1 P2** / 3 P3,2026-09-18)
+
+本节处置该报告点名的 P2-1 与三条 P3。私有库 `metasheet2_lock_a3_r4`(本次会话新建,`dropdb --if-exists` + `createdb` + 全量 `src/db/migrate.ts`,末条迁移与门审报告一致,`zzzz20260919090000_create_approval_template_group_backfill_batches`)。
+
+### 12.1 P2-1(唯一阻断项)—— `sinkForeignTemplates` 只关「精确集合/计数」轴,未关「500 上限」轴
+
+**发现原文**(门审 E14,亲跑):往同一 org 池注入 634 行外来未链接模板后,`executeApprovalTemplateGroupBackfillWithClient` 在分桶前对 `eligible.length`(617)做的上限检查(`routes/approvals.ts:694-701`,`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500`)先于任何 sink 生效,导致 10 个未 sink 的 `execute` 调用点全部抛 `ServiceError`——execute 文件的 idempotency(:335 起,现已随本轮改动移位)/cross-verification/route-wiring admin,rollback 文件的 attach/extadd/double/notfound/route-wiring admin,batches-list 文件的 route-wiring admin/smoke。execute 文件里 idempotency(原 `:328-333`)与 cross-verification(原 `:386-389`)两处豁免注释的 `regardless of how many foreign rows` / `never changes` 是被这条反例证伪的绝对断言。
+
+**修法(两条都做,按门审措辞对应)**:
+
+1. **10 个调用点全部加 `sinkForeignTemplates`**(execute 文件的 idempotency/cross-verification/route-wiring admin;rollback 文件的 attach/extadd/double/notfound/route-wiring admin;batches-list 文件的 route-wiring admin/smoke——后者此前完全没有这个 helper,本轮按三个既有文件的复制惯例新增了一份独立副本)。每处都改成「先 `createTemplate` 拿到自己的模板 id → `sinkForeignTemplates(org, [自己的 ids])` → 再调用 `execute`」,与本文件其余用例的既有写法一致。
+2. **两句被证伪的绝对断言,改写为有条件、可机核的陈述,并落成运行期断言**:execute 文件新增 `assertEligibleCandidateCountWithinCap(org, ownCandidateCount)`——对 org 跑与产线 `eligible` 同形的 SQL(`NOT EXISTS` 链接排除 + `btrim(...) ~ '[!-~]'`,同样披露省略 `applyTemplateVisibilityFilter`、理由与 `sinkForeignTemplates` 相同),断言结果**等于**这条用例自己算出来的候选数、且**不超过** `MAX_CANDIDATES_UNDER_TEST`(与 §13 changesRequired #12 用例共享同一个常量,不再有第二个硬编码 "500")。idempotency/cross-verification 两处调用点各调一次这个断言,把原注释里的散文条件——「`regardless`/`never` 只在『外来行 ≤ 上限 − 本文件候选数』这个前提下成立」——落成会真的跑、会真的红的代码,不是继续留成注释里的承诺。rollback attach 处原有一段类似但措辞不同的豁免注释(`:219-223`,「holds either way」),同样因为没考虑 `execute` 会先整体抛错而站不住,一并改写(不新增 candidateCount 断言,因为这条不是门审引用的两句「原话」之一,只是加 sink 让它不再假)。
+
+**复现门审 E14(本轮亲跑,4 个文件、45 个用例——与门审报告"10 failed | 35 passed (45)"同一分母)**:
+
+```
+$ psql -d metasheet2_lock_a3_r4 -c "INSERT INTO approval_templates (key, name, status, category, visibility_scope)
+    SELECT 'p2r4-pollute-' || g, 'p2r4-pollute-' || g, 'draft', 'Pollute' || (g % 7), '{\"type\":\"all\",\"ids\":[]}'::jsonb
+    FROM generate_series(1, 634) AS g;"
+INSERT 0 634
+
+$ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3_r4 EXPECT_DB=1 pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts --reporter=dot
+ Test Files  4 passed (4)
+      Tests  45 passed (45)
+```
+
+修复前是「10 failed | 35 passed (45)」,修复后同一份 45 个用例、同一 634 行污染物全绿——不是换了更宽松的污染集蒙对。
+
+**清理**:
+
+```
+$ psql -d metasheet2_lock_a3_r4 -c "DELETE FROM approval_templates WHERE key LIKE 'p2r4-pollute-%';"
+DELETE 634
+```
+
+**Mutation(唯一亲跑;`cp` 备份 → 编辑 → 单独跑 → `cp` 还原 → `cmp`)**:去掉 rollback 文件 `changesRequired #7`("double" rollback)用例里新加的 `sinkForeignTemplates(org, [doubleTpl])` 一行,换成一句 `// MUTANT-P2-1-R4` 注释;重新注入 634 行污染物;单独跑 rollback 文件:
+
+```
+$ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3_r4 EXPECT_DB=1 pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts --reporter=dot
+ ❯ … changesRequired #7: rolling back an already-rolled-back batch is a 409 … —
+     ServiceError: Backfill candidate count 635 exceeds the 500 limit
+ Test Files  1 failed (1)
+      Tests  1 failed | 10 passed (11)
+```
+
+唯一变红的正是被去掉 sink 的那条用例,错误逐字是门审 E14 同一个 `ServiceError`;其余 10 条(含本轮新加的其余 4 个 rollback 调用点的 sink)保持绿——判别力精确落在被测调用点,不是整份文件连坐。`cp` 还原 + `cmp`:
+
+```
+$ cmp <备份> <还原后的文件> && echo CMP-IDENTICAL
+CMP-IDENTICAL
+```
+
+还原后 `git status --porcelain` 只剩本轮三个真实改动的文件,无 mutation 残留。清理污染物(`DELETE … WHERE key LIKE 'p2r4-pollute-%'` → `DELETE 634`,库回到 0 行)。
+
+### 12.2 P3-1 —— MD 里一处标「原话」的引用含 3 个西里尔同形字
+
+机械扫描(python,`unicodedata` 逐字符核 Cyrillic/Greek/组合符/NUL/格式控制字符区段)命中本文件(本 MD)`:789` 三个字符:U+043A(CYRILLIC SMALL LETTER KA)、U+0430(CYRILLIC SMALL LETTER A)、U+0440(CYRILLIC SMALL LETTER ER)——英文单词 "carries" 的前三个字母被换成了这三个西里尔同形字(此处刻意不重复排印被替换前的确切字节序列,避免同一份「零同形字」文档里再留一处需要被下一轮同形字扫描重新命中的样本)。改用 python 精确字符串替换(先断言命中次数为 1,再替换成 ASCII 原文)修正,重新扫描确认**零残留**,并与源文件 `approval-template-groups-backfill-batches-list.db.test.ts:108` 的真实原话逐字比对一致(该文件本轮也被 P2-1 修改,但这一行本身未变)。
+
+同一次机械扫描也命中了门审报告 `impl-gate-A3-round3-20260918.md:116/:118`(该报告自己在转述这条发现时也复制了两次这份带同形字的引文)——这是**门审自己的报告文件**,不在「测试 + 本 MD」的授权修改范围内,本轮未触碰,如实记录不算已修。
+
+### 12.3 P3-2 —— 三个文件里写死的「污染来源」机制,改写为「来源未定位、体量未测量、暴露已确证」
+
+`preview.db.test.ts`(execute/rollback 转引同一段)原来的 `afterEach` 上方注释断言污染物来自「同一次 84 文件 run 里的某个 OTHER、更早的文件(它自己的 teardown 从不删 `approval_templates` 行,因为模板删除从来不是它的合同)」。这条机制声明与实测不符:门审 E2/E3(本次会话在 §11.1 已复核过)测到,处女库上把这一个步骤自身的 84 个文件跑完,`approval_templates` 残留是 **0 行**;机械核查 84 个文件里 33 个有带 `WHERE` 的 `DELETE FROM approval_templates`、零个无 `WHERE` 的整表删除、零个 `TRUNCATE`;又因 `fileParallelism:false` 严格串行,每个文件的 `afterAll` 都在下一个文件的 `beforeAll` 之前跑完——这一个步骤内部没有任何一个文件会把模板行留到别的文件眼前。
+
+本轮改写为诚实表述:三个文件(preview 的完整机制段,execute/rollback 指向它的引用句)一律改成——**真实来源几乎必然是同一个 CI job 里更早的、共用 `metasheet_test` 库的某个 real-DB 步骤(候选:`multitable-real-db-integration`/elearning/sealed-export/after-sales/BPMN 等),但这一点未经测量**;诚实的说法是**来源未定位、体量未测量、暴露已确证**(生产 CI 确实撞过这条——原始 bug 报告的「13 vs 1」blank 桶失败——所以「某个更早步骤」确实留下过行,只是哪一个、留了多少行都没测过)。`sinkForeignTemplates` 本身不依赖定位来源(它扫的是「当前对这个 org 而言仍是候选」的全集,不管是哪个步骤或哪个文件放进去的),这条归因错误只影响注释里的说法,不影响修法本身是否承重(§11.3/12.1 的实测已经覆盖了「不管来源是什么,sink 都能把它扫掉」这件事)。
+
+### 12.4 P3-3 —— MD §11.5 把 `test:unit` 称作「core-backend 全量无 DB 单测」,窄于 required lane
+
+`test:unit`(`package.json`)是 `vitest run tests/unit`,只跑 `tests/unit` 一个目录;required check `test (20.x)` 真正跑的「Run core-backend tests」步(`.github/workflows/plugin-tests.yml:877-879`,无 `if:`/无 `env:`)命令是 `pnpm --filter @metasheet/core-backend test`,收集面是前者的真超集。§11.5 原文按窄命令记录(`794 passed (794)` / `12715 passed (12715)`),本轮改成按正确命令、本次会话独立重跑的结果记录(见 §11.5 内联更正,与本节共用同一次亲跑):
+
+```
+$ env -u DATABASE_URL -u EXPECT_DB CI=true pnpm --filter @metasheet/core-backend test --reporter=dot
+ Test Files  932 passed | 175 skipped (1107)
+      Tests  14722 passed | 1604 skipped (16326)
+```
+
+EXIT=0,与门审 E11 的计数逐字相同(`1107`/`16326`),不是巧合——收集面没有因为版本或时间漂移。
+
+### 12.5 全量回归(本轮,私有库 `metasheet2_lock_a3_r4`)
+
+| 步骤 | 命令 / 要点 | 结果 |
+|---|---|---|
+| tsc | `cd packages/core-backend && npx tsc --noEmit` | EXIT=0,零错误(含 §12.1 新增的 `assertEligibleCandidateCountWithinCap`/常量重排) |
+| 建库 + 迁移 | `dropdb --if-exists metasheet2_lock_a3_r4 && createdb metasheet2_lock_a3_r4` + `DATABASE_URL=… pnpm run db:migrate` | 全量迁移,末条 `zzzz20260919090000_create_approval_template_group_backfill_batches`,与门审报告一致 |
+| A-3 五文件 + A-1 两文件,处女库,污染前 | `vitest --config vitest.integration.config.ts run <7 个文件> --reporter=dot` | `Test Files 7 passed (7)` / `Tests 86 passed (86)` |
+| E14 复现(§12.1) | 634 行污染 → 4 文件 45 用例 | 全绿(此前 10 failed) |
+| Mutation(§12.1) | 去掉 double 用例的 sink,635 超限 | 1 failed(仅该用例)/ 10 passed;`cmp` 复原 |
+| 84 文件 required real-DB 步骤逐字复现(按 `.github/workflows/plugin-tests.yml:1613-1699` 原样抄出,唯一改动是 `DATABASE_URL` 指向本次私有库) | `DATABASE_URL=… EXPECT_DB=1 bash -e /tmp/a3r4-realdb-step.sh` | `Test Files 84 passed (84)` / `Tests 943 passed (943)` / EXIT=0——**本轮零失败**,门审 E2 记录的那条跨文件既有 flake(`directory-binding-admin-routes.db.test.ts`)本次未复现,与 §11.5 遗留段"未定位根因的跨文件 flake"记录一致(间歇性,不是每次都触发) |
+| 84 文件跑完后 `approval_templates`/`approval_template_groups`/`approval_template_group_links` 残留 | `psql` 计数 | `0 \| 0 \| 0`——与 §12.3 的「本步骤自身残留为 0」结论一致,再次实测确认 |
+| A-3 五文件 + A-1 两文件,84 文件全量跑完后再跑一遍 | 同上 7 个文件 | `Test Files 7 passed (7)` / `Tests 86 passed (86)` |
+| core-backend 全量无 DB lane(§12.4 用的同一次亲跑) | `env -u DATABASE_URL -u EXPECT_DB CI=true pnpm --filter @metasheet/core-backend test --reporter=dot` | `Test Files 932 passed \| 175 skipped (1107)` / `Tests 14722 passed \| 1604 skipped (16326)` / EXIT=0;`grep -c "tests/integration/approval-template-groups-backfill" <日志>` = 0(五个真库文件零收集) |
+| 清库 | `dropdb metasheet2_lock_a3_r4` | 用完即删,不留存 |
+
+### 12.6 `git diff --stat 4f5fd00c3..HEAD`(证明只动测试与本 MD)
+
+```
+$ git diff --stat 4f5fd00c3157e807b8e28b01c98dca07619bc289
+ .../approval-template-groups-phase2-backfill-verification-20260918.md | 129 ++++-
+ .../approval-template-groups-backfill-batches-list.db.test.ts         |  46 ++-
+ .../approval-template-groups-backfill-execute.db.test.ts              | 114 +++--
+ .../approval-template-groups-backfill-preview.db.test.ts              |  31 +-
+ .../approval-template-groups-backfill-rollback.db.test.ts             |  56 ++-
+ 5 files changed, 326 insertions(+), 50 deletions(-)
+```
+(以此提交前的工作树为准测得,提交后的最终行数以实际 commit 为准,但文件集合与「零生产代码改动」结论不变——`git diff --name-only 4f5fd00c3..HEAD | grep -v -E "\.md$|tests/integration/.*\.db\.test\.ts$" | wc -l` = 0,亲测。)
+
+零生产代码改动——`packages/core-backend/src/` 与 `.github/workflows/` 下零文件命中(与 §2/E1 的既有核查方法一致,本轮同样跑过 `git diff --name-only 4f5fd00c3..HEAD | grep -v -E "\.md$|tests/integration/.*\.db\.test\.ts$" | wc -l` = 0)。`approval-template-groups-backfill-batches-list.db.test.ts` 本轮**从 §11.6 记录的「保持不动」名单里移出**——它是本轮 P2-1 唯一新增 `sinkForeignTemplates` 副本的文件(此前三个文件独立复制,本轮加了第四份);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-lifecycle.db.test.ts`/`approval-template-groups-serialization.db.test.ts` 三个文件本轮仍未改动。
+
+**未做、也未被授权做**:合并、undraft、开/改 PR、把迁移应用到任何共享/staging/prod 库、改锁文、改任何产线代码。

@@ -106,15 +106,30 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
   // legitimately be backfilled into more than one org's groups). Wiping templates after EACH case
   // (not only in `afterAll`) is necessary but, corrected 2026-09-18 (§11 CI fix — see this file's
   // own `sinkForeignTemplates`), NOT sufficient on its own for "every `it` below gets its own clean
-  // candidate population": it only reclaims templates THIS FILE created. The gated real-DB CI step
+  // candidate population": it only reclaims templates THIS FILE created.
+  //
+  // P3-2 fix (`impl-gate-A3-round3-20260918.md`): this comment used to name the mechanism as "some
+  // OTHER, earlier file IN THAT [84-file] RUN leaves a row linked-nowhere because template
+  // deletion was never part of that file's own contract". That specific claim is retracted — it
+  // does not survive measurement. The gated real-DB CI step
   // (`.github/workflows/plugin-tests.yml`, job id `approval-real-db-integration`) runs 84 files
-  // (62 `.db.test.ts` + 14 `.api.test.ts` + 8 plain `.test.ts`, counted mechanically off that one
-  // step's own file list) against one shared Postgres with `fileParallelism:false` (strictly
-  // sequential, no cross-file race) — so a template some OTHER, earlier file in that run leaves
-  // linked-nowhere (its own teardown never deletes `approval_templates` rows, because template
-  // deletion was never part of that file's own contract) is *still sitting in the table* by the
-  // time this file's `beforeAll` runs, and is an eligible candidate for every org this file uses,
-  // independent of the org string. `sinkForeignTemplates` is what actually closes that gap.
+  // (62 `.db.test.ts` + 14 `.api.test.ts` + 8 plain `.test.ts`) against one shared Postgres with
+  // `fileParallelism:false` (strictly sequential, no cross-file race); run start-to-finish on a
+  // virgin database, `approval_templates` residue after all 84 files finish is **0 rows** (gate
+  // round 3, E2/E3 — mechanically confirmed: 33 of the 84 files run a scoped
+  // `DELETE FROM approval_templates`, zero run a bare/unscoped delete or `TRUNCATE`, and
+  // `fileParallelism:false` means every file's `afterAll` completes before the next file's
+  // `beforeAll` starts). So no sibling file *within this one step* can be the source. The true
+  // source is almost certainly an EARLIER STEP in the same CI job sharing the same `metasheet_test`
+  // database (candidates: `multitable-real-db-integration`, elearning, sealed-export, after-sales,
+  // BPMN — all real-DB steps this repo runs against that one database), but this has not been
+  // measured. Honest statement of what is and is not known: **source not located, volume not
+  // measured, exposure confirmed** (production CI did hit this — the original bug report's "13 vs
+  // 1" blank-bucket failure — so SOME earlier step does leave rows behind; which one, and how
+  // many, is unmeasured). `sinkForeignTemplates` does not depend on locating the source — it sinks
+  // whatever is currently a candidate for this org, regardless of which step or file put it there
+  // — but the source attribution above should not be repeated as fact until someone actually
+  // measures it.
   afterEach(async () => {
     for (const id of templateIds.splice(0)) {
       await query(`DELETE FROM approval_templates WHERE id = $1`, [id])
