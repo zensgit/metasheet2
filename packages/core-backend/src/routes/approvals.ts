@@ -425,13 +425,24 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
 //       ONLY actor shape actually demonstrated end-to-end this round (lifecycle suite's "§2(c): a
 //       DB-side-admin actor" HTTP case, plus a negative control that removes the `user_roles` grant
 //       and turns it 403 again).
-// So the true relationship is still guard population ⊋ manager population (a strict superset, not
-// equal, not a subset relation at all), but this round it rests on exactly ONE measured leg —
-// DB-side `isAdmin` — not two. Correcting this CLAIM changes no runtime behavior; only what this
-// comment asserts about existing behavior changes. This is exactly why exporting the predicate for
-// a direct, non-manager-actor unit test (below) was never sufficient on its own — see the lifecycle
-// suite's REAL, guard-passing, non-manager HTTP case ("§2(c): a DB-side-admin actor" block), which
-// proves the filter still narrows what such an actor's link REQUEST can see, not merely what the
+// CORRECTED A THIRD TIME (impl-gate-A-slice1-round6-20260918.md §2 P2-1, 2026-09-18): the "strict
+// superset" conclusion above is itself false — it silently required that EVERY isTemplateManager
+// actor also pass the guard, which this file's own §23.6 record contradicts
+// (`ZZR4-EXACT-RESULT status=403` for `perms='approval-templates:manage'` alone, the guard's own
+// literal code). The two populations are mutually non-inclusive — neither contains the other —
+// with one measured counterexample per direction: guard-pass/non-manager is the DB-side `isAdmin`
+// leg above (§2(c)); manager/guard-fail is a principal holding only `approval-templates:manage`,
+// whose permission leg here (`resolveApprovalActorPermissions` above) carries no admission
+// conjunct while `rbacGuardAny`'s SAME-named leg is conjoined with
+// `isPermissionAllowedByNamespaceAdmission` (`rbac/rbac.ts:134-142,146-152`) — see the lifecycle
+// suite's "§2(d)" case (real HTTP + a direct call to this function on the identical claim shape,
+// plus a negative control). Whether production provisioning always pairs the two grants is NOT
+// measured and NOT asserted here. Correcting this CLAIM changes no runtime behavior; only what
+// this comment asserts about existing behavior changes. This is exactly why exporting the
+// predicate for a direct, non-manager-actor unit test (below)
+// was never sufficient on its own — see the lifecycle suite's REAL, guard-passing, non-manager
+// HTTP case ("§2(c): a DB-side-admin actor" block), which proves the filter still narrows what
+// such an actor's link REQUEST can see, not merely what the
 // predicate returns when called directly with a hand-built actor object.
 //
 // LINK ONLY (the lock's clause names 挂接, not unlink) — an implementer's choice to mask "exists
