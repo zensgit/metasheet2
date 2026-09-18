@@ -2460,6 +2460,108 @@ $ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_
 全绿,`to_regclass('public.approval_rounds')` → `approval_rounds`,421 张表)。未触碰任何共享 /
 staging / 生产库。
 
+---
+
+## 3.18 §5 I3 「终结即释放」 的 **C-2 半边** — 两个终态写入方里的第二个,现在也有了探针 (this unit)
+
+§3.14.5 把 `approval_rounds.outcome` 的终态写入方做了**全仓、双语法**普查,并在 §3.14 给其中一个
+建了 M-21。另一个——C-2 成功路径的 `applied` 写——当时**没有探针**,§3.14.5 自己的表里写着
+「**NO.** The test file comments it as I3 at `:1027`, but no probe exists」。本单元把它补上。
+
+### 3.18.1 普查在**本 head 上重新导出**,不继承 §3.14.5 的数
+
+§3.15.1 警告过:§3.15 以上的每个绝对数都是在 `7ef8e610e` 基点上量的、绑那个 head。本单元在
+`a02930896` 基点的工作树上原样重跑那条普查命令:
+
+```
+$ git grep -nE "UPDATE approval_rounds|approval_rounds['\"]?\)?[[:space:]]*\.set|updateTable\(['\"]approval_rounds" \
+    -- packages plugins | grep -v '\.test\.'
+ApprovalProductService.ts:899    ← 散文注释
+ApprovalProductService.ts:8768   ← 散文注释
+ApprovalProductService.ts:8947   ← C-3 system close(`expired`/`blocked`)   M-21(§3.14)
+ApprovalProductService.ts:9108   ← C-2 success(`applied`)                  M-26(本单元)
+ApprovalProductService.ts:11263  ← 判据 III 发起人撤回(`withdrawn`)        phase 1
+ApprovalProductService.ts:11750  ← 判据 III 审批人驳回(`rejected`)          phase 1
+$ … | wc -l
+6
+```
+
+**6 条命中、2 条是散文注释、4 条是语句、`plugins/` 下 0 条、builder 语法 0 条**——与 §3.14.5 在旧
+head 上的结论逐项一致,但这是**本 head 自己的测量**,不是继承。本切片范围内的两个写入方现在**各有
+一个探针**。
+
+### 3.18.2 为什么又是一条独立用例,而不是往判据 II 上再加一行
+
+§3.14.1 的教训,在同一个文件里第二次适用:判据 II 那条用例的最后一行已经是
+`expect(round.outcome).toBe('applied')`,但那是**末态检查**——把 M-26 打上去,它就死在那一行,
+**永远走不到任何「释放」子句**。所以释放子句要有自己的用例,并且 `createCancelRoundInstance`
+必须是兑现返回后的**第一条语句**。实测证实了这个排序的必要性:M-26 下判据 II 那条确实红在它自己的
+`applied` 断言上。
+
+### 3.18.3 ⚠️ 夹具前提是**测量出来的**,不是默认的
+
+这是本用例与 M-21 那条最不一样的地方,必须写清楚:
+
+生产上,一次成功的兑现会经 C-1 把**原单据**写成 `approved → cancelled`,而
+`createCancelRoundInstance` 的前提正是单据处于 `approved`。**若原单真被取消了,第二轮会因为「单据
+状态」这个与轮次槽位无关的理由被拒**——那样这条用例的红就不再是 I3 的红。
+
+本用例用的是**测试替身** port(`bindCancellationPort`,与 §3.11.6 四例同层级),它什么都不写,所以
+原单仍是 `approved`,横在兑现与第二轮之间的**只剩轮次行自己的 outcome**——这正是这条探针需要的隔离。
+用例把这个前提**写成断言**(最后一行读原单 `status` 必须仍是 `approved`),而不是默默依赖它。
+
+**代价,如实写在这里**:这条用例量的是**槽位释放**,不是「同一单据连取消两次」的端到端产品行为——
+后者锁文并未要求(§5 I6 「撤销不限次」讲的是**轮次**不限次,phase 1 的 chain 用例已覆盖)。真实
+边界下的兑现会不会让第二轮因单据状态被拒,**本用例不回答**,登记在 §4。
+
+### 3.18.4 Mutation 台账(this unit)
+
+`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`。
+
+| # | Mutation | site | expected | measured |
+|---|---|---|---|---|
+| M-26 | 与 M-21 **同形**:在 `redeemCancelRoundInTxn` 里把 `UPDATE approval_rounds … SET outcome = 'applied', ended_at = now(), policy_snapshot_at_decision = $2`(`:9107-9114`)**与**它的 `if (roundResult.rowCount !== 1) throw`(`:9115-9121`)**一起**删掉,15 行换成 1 行标记 | `ApprovalProductService.ts:9108`(C-2 成功写入方) | 本用例红,且红在它的 **create 行**(即子句被求值后失败),而不是更早 | **单跑本用例:1 failed / 18 skipped**,红在 `redemption.db.test.ts:1217:20`,栈帧 `ApprovalProductService.createCancelRoundInstance src/services/ApprovalProductService.ts:8563:15`,`ServiceError: This document already has a cancel round in progress`,`{ statusCode: 409, code: 'CANCEL_ROUND_ALREADY_PENDING' }`。**全文件:5 failed / 14 passed (19)** |
+
+两行**一起**删是刻意的,理由与 M-21 逐字相同:只删 `UPDATE` 会让 `roundResult` 变成 undefined,
+探针产出的是 `TypeError`,那是**另一种红**,不是这里要主张的那一种。
+
+全文件 5 条红是:判据 II、§9-9 成员钉(§3.17)、**本用例**、判据 II 端到端、§3.16 —— 前两条与后两条
+都死在**它们自己的 `applied` 断言**上,这正是 §3.18.2 的直接确认:**没有一条能承载这条 mutation**,
+只有把 create 排在第一位的本用例能。
+
+**门是预检,不是索引**——与 §0 R-7 对 M-21 的更正逐字同一条:红的栈帧是 `:8563:15`,即
+`createCancelRoundInstance` 自己的应用层预检(`SELECT id FROM approval_rounds WHERE document_id = $1
+AND outcome = 'pending'`),`INSERT` 从未到达约束。所以本用例**证**:C-2 的终态 `outcome` 写是释放
+单据 pending 槽位的那一步;**不证**任何关于 `uq_approval_rounds_pending_document` 本身的事——要碰到
+索引需要构造并发,本用例不构造。
+
+还原后:
+
+```
+$ cmp /tmp/u2-APS-m26.ts src/services/ApprovalProductService.ts     → RESTORED-IDENTICAL
+$ cmp /tmp/u2-APS-backup.ts src/services/ApprovalProductService.ts  → ALSO-IDENTICAL-TO-SESSION-BASELINE
+$ git status --short
+ M packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+### 3.18.5 Commands and results
+
+```
+$ npx tsc --noEmit -p tsconfig.json
+[exited with code 0]
+
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+      Tests  19 passed (19)        ← 新用例落地后(§3.17 的 18 + 本条)
+```
+
+### 3.18.6 Wiring — 无新增钉
+
+同 §3.17.5:用例追加进已在 `plugin-tests.yml:1668` 的
+`approval-cancel-round-redemption.db.test.ts`,无新文件 / 新 lib / 新表 ⇒ s6a、考勤四钉、W7-R10、
+`ci-realdb-step-contract.mjs` 全部零欠账。
+
 ## 4. What this slice has NOT proven yet
 
 Updated from §3 of the previous revision. Listed so no reader takes the greens above for more than

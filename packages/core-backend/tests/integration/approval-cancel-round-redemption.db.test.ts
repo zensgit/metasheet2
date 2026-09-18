@@ -1161,6 +1161,103 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     },
   )
 
+  /**
+   * §5 I3 「终结即释放」, the C-2 half — the SECOND of the two terminal `approval_rounds.outcome`
+   * writers. Phase-2 MD §3.14.5 enumerated the population repo-wide and both-syntax and found four
+   * write statements, of which two belong to this slice: the C-3 system close (`:8947`, outcome
+   * `expired`/`blocked`) and this one, the C-2 success (`:9108`, outcome `applied`). §3.14 built
+   * M-21 for the first; the second was commented as I3 in this file but had NO probe, and §3.14.5's
+   * own table says so. This case builds it.
+   *
+   * SHAPE, and it is §3.14.1's lesson applied rather than quoted: the 判据 II case above already
+   * ends with `round.outcome === 'applied'`, but that is an end-state check — run the I3 mutation
+   * against it and it dies on that very assertion, never reaching any release clause. So the
+   * release gets its own case in which `createCancelRoundInstance` is the FIRST statement after the
+   * redemption returns, which is what makes the I3 clause itself carry the mutation.
+   *
+   * ⚠️ FIXTURE PREMISE, MEASURED RATHER THAN ASSUMED. In production a successful redemption runs
+   * C-1, which writes the ORIGINAL document `approved → cancelled` — and `createCancelRoundInstance`
+   * is premised on an `approved` document, so a second round would be refused for a reason that has
+   * nothing to do with the slot. Here the cancellation port is a test double that writes nothing, so
+   * the original stays `approved` and the ONLY thing standing between the redemption and a second
+   * round is the round row's own outcome. That is exactly the isolation this probe needs, and the
+   * case ASSERTS the premise (the original is still `approved`) instead of relying on it silently.
+   * What that costs is stated in the MD: this case measures the SLOT release, not the end-to-end
+   * product behaviour of cancelling twice, which is not a thing the lock asks for.
+   */
+  it(
+    '§5 I3 「终结即释放」 (the C-2 half, outlet #5): after a SUCCESSFUL redemption the round is ' +
+      '`applied` and the document\'s pending slot is RELEASED, so a new cancel round starts ' +
+      'immediately — asserted as the FIRST post-redeem statement, which is what makes the clause ' +
+      'carry its own mutation (M-26) instead of dying behind 判据 II\'s end-state check',
+    async () => {
+      const suffix = `i3c2-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        // 365 > 200 — the window is OPEN, so the in-lock evaluation answers `redeem`.
+        await setDocumentWindowDays(documentId, 365)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+
+      const portStub = bindCancellationPort(async () => ({ kind: 'executed', response: { ok: true } }))
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+      }
+      expect(portStub.calls.length).toBe(1)
+
+      // ── THE I3 CLAUSE, FIRST. Under M-26 the round row stays `pending`, this line throws
+      // `CANCEL_ROUND_ALREADY_PENDING` (409) from `createCancelRoundInstance`'s own pre-check, and
+      // nothing below is evaluated — which is the whole point of the ordering.
+      const next = await new ApprovalProductService().createCancelRoundInstance(fixture.documentId, {
+        userId: fixture.requesterId,
+      })
+      createdApprovalIds.add(next.id)
+
+      const nextRound = await pool().query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+        [next.id],
+      )
+      expect(nextRound.rows.length).toBe(1)
+      createdRoundIds.add(nextRound.rows[0].id)
+
+      // The released round is a DIFFERENT row that reached a TERMINAL outcome — and the terminal
+      // outcome on THIS path is `applied`, which is what distinguishes this probe from M-21's
+      // (`expired`/`blocked` on the C-3 writer at `:8947`).
+      const closed = await pool().query<{ id: string; outcome: string; ended_at: Date | null }>(
+        `SELECT id, outcome, ended_at FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(closed.rows.length).toBe(1)
+      expect(closed.rows[0].outcome).toBe('applied')
+      expect(closed.rows[0].ended_at).not.toBeNull()
+      expect(closed.rows[0].id).not.toBe(nextRound.rows[0].id)
+
+      // 「同一单据至多一轮在途」 read off `document_id`, the column the partial unique index is
+      // declared on — exactly one pending round, and it is the new one.
+      const pendingForDocument = await pool().query<{ id: string; engine_instance_id: string }>(
+        `SELECT id, engine_instance_id FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`,
+        [fixture.documentId],
+      )
+      expect(pendingForDocument.rows.length).toBe(1)
+      expect(pendingForDocument.rows[0].engine_instance_id).toBe(next.id)
+
+      // THE FIXTURE PREMISE, MEASURED (see the doc comment): the double wrote nothing, so the
+      // ORIGINAL document is still `approved` and could not have refused the second round for a
+      // status reason. Without this line the case would silently depend on it.
+      const originalRow = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.documentId],
+      )
+      expect(originalRow.rows[0]?.status).toBe('approved')
+    },
+  )
+
   it(
     '判据 IV `blocked` half + C-3 row 4 (业务不可逆): C-1 RETURNS a business refusal instead of ' +
       'throwing it, so the same transaction still persists the close — engine `rejected` by the ' +
