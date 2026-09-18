@@ -85,10 +85,54 @@
 //     new read of its own (sign-out — nothing else would supersede the in-flight read).
 // Both clear the rendered state synchronously on transition so the departing principal's list never
 // lingers for the width of the new read.
+//
+// REALTIME (B-2 step 8): also subscribed to `todo:counts-updated`, same as the badge — but this
+// page cannot reuse the badge's `applyResult()`-on-push shortcut, because the push payload is
+// `{ count, sources }` (see `useTodoCountsRealtime`'s file-level note): no `items`. This page's
+// entire content IS the item list, so the only correct reaction to a push is to re-run the SAME
+// generation-guarded `refresh()` that mount and the auth-transition listener already use — not a
+// second, payload-shaped judgment. `handleCountsUpdated` therefore does nothing but call `refresh()`.
+//
+// DELIBERATE DIVERGENCE from `ApprovalCenterView`'s G-B2-11 ("新待办到达刷新 pill",
+// `src/approvals/newTodoPill.ts`): that surface deliberately does NOT auto-reload on a push, because
+// an unannounced reload would silently wipe the operator's in-progress `selectedPending`
+// multi-select mid-triage. This page has no analogous state — no selection, no in-progress edit,
+// every row a plain navigation link — so G-B2-11's rationale does not transfer, and a direct
+// `refresh()` is used instead of a click-to-refresh pill. Stated explicitly rather than left as an
+// unexplained inconsistency between the two 待办 surfaces for a reviewer to trip over.
+//
+// `acceptPushes` closes the SAME sign-out half `ApprovalTodoBadge.vue` closes, copied WHOLE for the
+// same reason: the socket connects with the token read once and is never reconnected on a
+// transition, so a push can land on the still-open socket after sign-out. Without the gate, that
+// push would call `refresh()` and issue a read for a departed principal.
+//
+// ORG-SWITCH HALF — corrects a claim made elsewhere, does not itself close the gap: both
+// `ApprovalTodoBadge.vue`'s docblock and `ce417a250` (this branch) state `setExplicitSessionOrg`
+// does not call `resetSessionBootstrap`/`notifyAuthPrincipalChange`. That is no longer true of the
+// code both were written against — `setExplicitSessionOrg`'s success path DOES call it
+// (`useAuth.ts:301`, inside the function at `useAuth.ts:265-303`; `resetSessionBootstrap` calls
+// `notifyAuthPrincipalChange()` unconditionally at `useAuth.ts:142`), added by `5f4b643b78`
+// ("fix(attendance): fence explicit organization session consumers", 2026-09-08) — an ancestor of
+// this branch's base, predating both texts that assert the opposite:
+//   grep -n 'resetSessionBootstrap(true, false, true)' apps/web/src/composables/useAuth.ts
+// If accurate end-to-end, an org switch fires the SAME `onAuthPrincipalChange` this file's E1/E2
+// tests already exercise via the generic listener, which would also cover the REST re-read half of
+// an org switch (narrowing, not closing, the badge's documented gap) — but the SOCKET itself still
+// authenticates with the pre-switch token and is never reconnected on any transition, so a push
+// landing on it after a switch is a distinct, still-unverified risk from the REST race. NOT proven
+// end-to-end here through a real `setExplicitSessionOrg()` call — left for a dedicated unit rather
+// than asserted either way beyond the grep above.
+//
+// Wrapped in try/catch like the badge, for a different reason: `router-view` in `App.vue` carries
+// no `ShellChromeBoundary` (that only wraps nav-shell children), so a throw from this composable's
+// setup would not be isolated to this route the way the badge's throw is isolated to the nav — it
+// would propagate up uncaught. Losing it degrades the page to "loads once on mount and on auth
+// transitions", which is still a correct, honest page.
 import { onMounted, onUnmounted, ref } from 'vue'
 import { getTodoItems, type PendingItem, type PendingSourceStatus, type TodoItemsResponse } from '../api'
 import { useLocale } from '../../composables/useLocale'
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
+import { useTodoCountsRealtime, type TodoCountsUpdatedPayload } from '../useTodoCountsRealtime'
 
 interface TodoGroup {
   source: string
@@ -153,12 +197,40 @@ async function refresh(): Promise<void> {
   }
 }
 
+// Sign-out half of 判据 E for the push path (see file-level note): starts `true` so mount-time and
+// steady-state pushes are unaffected; set by the auth-transition listener's own deferred check
+// below, NOT re-derived from live storage at push time — same rationale as the badge's identical
+// flag.
+let acceptPushes = true
+
+// The push carries no items (`{ count, sources }`) — re-running `refresh()` is the only correct
+// reaction; see the file-level note for why this is not a second judgment on the payload.
+function handleCountsUpdated(_payload: TodoCountsUpdatedPayload): void {
+  if (!acceptPushes) return
+  void refresh()
+}
+
+// Isolated for the same reason `ApprovalTodoBadge.vue` isolates this call — see file-level note.
+try {
+  useTodoCountsRealtime({ onCountsUpdated: handleCountsUpdated })
+} catch {
+  // No realtime refresh for this session; refresh() on mount and on auth transitions still keeps
+  // the list current.
+}
+
 const unsubscribeAuthPrincipal = onAuthPrincipalChange(() => {
   generation += 1
   groups.value = []
   loadFailed.value = false
   void Promise.resolve().then(() => {
-    if (disposed || !hasSession()) return
+    if (disposed) return
+    if (!hasSession()) {
+      // Sign-out CONFIRMED: retire any push landing on the still-open socket too, same as the REST
+      // re-read is retired above.
+      acceptPushes = false
+      return
+    }
+    acceptPushes = true
     void refresh()
   })
 })
