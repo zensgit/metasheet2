@@ -449,6 +449,31 @@ try {
   await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture(uploadInput), { message: 'SYNTHETIC_AUTHORITY_REVOKED' })
   assert.equal(delivered.length, 11)
   console.log('PASS: presealed-envelope upload interruption/new connection resumes original ten sections without capture; injected authority revocation refuses')
+  const actorId = randomUUID()
+  await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
+  const { createRecoveryArchiveManualContinuation } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+  const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
+  const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
+  let manualUploads = 0
+  const revoker = new Client({ ...connection, database })
+  await revoker.connect()
+  try {
+    await manual({ ...manualInput, upload: async () => { manualUploads++ } })
+    assert.equal(manualUploads, 10)
+    manualUploads = 0
+    await assert.rejects(manual({ ...manualInput, upload: async () => {
+      manualUploads++
+      await revoker.query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+    } }), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+    assert.equal(manualUploads, 1)
+    await assert.rejects(manual({ ...manualInput, upload: async () => { manualUploads++ } }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+    assert.equal(manualUploads, 1)
+    await revoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+    await assert.rejects(manual({ ...manualInput, identity: { ...manualInput.identity, baseId: 'other' } }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH' })
+  } finally { await revoker.end() }
+  console.log('PASS: canonical manual authority on real users; separate-connection deactivation after first upload blocks subsequent sections and retry')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

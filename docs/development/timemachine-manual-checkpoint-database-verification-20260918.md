@@ -315,3 +315,22 @@ Acceptance TypeScript compilation, scoped module lint and diff-check pass.
 Outstanding: durable request/actor admission, real-DB permission-race acceptance,
 source locking/revalidation, provider receipt persistence and catalog publication.
 No archive command, flag, deployment, customer data or external storage was used.
+
+### Real Database Continuation Authority Follow-Up
+
+On local `99abfd2de0482f5a10c28a69582e7570ff58bbca` plus this acceptance
+addition, the owned-cluster driver invokes the canonical factory with a real
+synthetic active admin user. All ten presealed sections upload through a stub.
+A separate PostgreSQL connection then deactivates that user immediately after
+the first upload: the second section and subsequent retry both refuse with
+`RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE`. A mismatched base binding also
+refuses before upload. This proves fresh database authority between sections;
+it does not prove cancellation of an already in-flight provider operation.
+
+Fresh migration/replay, the 29-migration catalog fingerprint, 59 legacy anchor
+tests, 127 historical migration tests, and checkpoint/prepared acceptance all
+pass. Owned database/connections are zero and the synthetic cluster is stopped
+and removed. The envelope is presealed synthetic input and uploads are callbacks,
+not actual KMS/object-storage or process-restart acceptance. Durable request
+admission, consistent source capture, provider receipts, catalog publication and
+the command/UI remain OPEN. No flags or deployment changed.
