@@ -8,6 +8,7 @@
 - **§1–§10 是 u3(CI 接线 + s6a 重钉)子单元的原始记录,原样保留,不重写**——其行号锚点基线 `85ddd2926`、worktree HEAD (`dba46e7c1`/`fbcf62caa`/`a2254950a`) 与 `origin/main`(`23dfdf417`)均为**该子单元当时的现场值**,时效性披露见 §9/§10.5;§11 起是本切片(A-1)收口时的**独立现场重跑**,覆盖锁文验收表的全部行(含 u3 未覆盖的 A/A′/A″/A‴/B/B′/B″/F/G/H/I′/J/K 与完整 mutation 台账),使用**当前** HEAD/merge-base,不沿用 §1–§10 的旧值
 - 环境:node `v25.9.0`,python3 `Python 3.9.6`
 - **§5 的「45」计数已被 §10 核实为错误,原句保留但视为已撤回,更正值见 §10.3**
+- **§23 是新增的独立回流修复轮(2026-09-18,来自 A-3 设计门审的两条溢出发现 P1-3/P2-5),私有真库改用本轮新建的 `metasheet2_lock_a1_fix`(`createdb` + 全量 `migrate`)——与 §1–§22 使用的 `metasheet2_lock_a` 是两个不同的库,§23 内的所有命令行/计数以 `metasheet2_lock_a1_fix` 为准,不与 §1–§22 的库共享状态**
 
 ## 1. CI 接线 #1 — `vitest.config.ts` exclude
 
@@ -1075,3 +1076,248 @@ $ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vi
 ```
 
 **本轮小结**:第 2 轮门审的 1 P2(阻塞)+ 5 P3 + 1 NIT 中,P2-1(阻塞项)与 P3-2 本轮完成实际修复;P3-3/P3-4 明确留给下一修复轮(范围控制,非遗漏);P3-5/P3-6 完成「记录性重确认」(disposition 未变);NIT 完成**现场实测**并确认是真实行为差异,已写入披露,是否补验收测试留给设计裁量。gate 报告的 verdict 是「只差 P2-1 一条」DRAFT-READY,本轮已把该条闭合;P3-3/P3-4 不影响 DRAFT-READY 判定(门审原文:两条都是 P3),但仍需下一轮处置才算「全部处理完」。
+
+## 23. 回流修复(2026-09-18,来自 A-3 设计门审)
+
+**来源**:`design-gate-A3-phase2-20260918.md`(分期 2 backfill 切片的独立门审报告)在审查 A-3 提案时,对**已落地的 A-1 代码**(本切片,`0144932ac`)做了两处溢出发现,要求回流:P1-3(实测 M5,`atg_name_nonblank` 拒绝纯中文名 ⇒ A-1 端点今天就是 500)与 P2-5(`routes/approvals.ts:396-399` 的「guard population ⊆ manager」注释是过强声明,现场核对为假)。P2-5 与本文档 §22.4 已记录的 P3-4(第 2 轮门审「零 grep 计数的全称断言」,本轮之前一直标注「留给下一修复轮」)是**同一条发现**——本节就是那个「下一修复轮」,不是新开的独立工作。
+
+本节全部实测在私有库 `metasheet2_lock_a1_fix`(`createdb` + 全量 `migrate`,`Pending: 0`)上现场执行,worktree `/private/tmp/claude-501/-Users-chouhua-Downloads-Github-metasheet2/6f6639a7-0412-43de-bd8b-0b416d18ae6b/scratchpad/wt-groups`(分支 `feat/approval-template-groups-phase1`)。
+
+### 23.1 P1-3 —— 复现:私有库上 `createApprovalTemplateGroup(org, '人事')` ⇒ 裸 `DatabaseError` 23514 ⇒ 端点 500
+
+```
+$ npx tsx repro-cjk-name.mjs   # createApprovalTemplateGroup(org, '人事', 'probe-actor')
+name: error
+constructor: DatabaseError
+code: 23514
+constraint: atg_name_nonblank
+statusCode: undefined
+message: new row for relation "approval_template_groups" violates check constraint "atg_name_nonblank"
+```
+
+这与 A-3 门审 M5 的现场测量逐字一致(`code=23514 constraint=atg_name_nonblank statusCode=undefined`,`ServiceError` 之外的裸 `DatabaseError`)。`handleApprovalsError`(`routes/approvals.ts:509-524`)只对 `error instanceof ServiceError` 特判,裸 `DatabaseError` 落到函数尾部的通用 500 兜底——即端点 `POST /api/approval-template-groups {name:'人事'}` 今天确实是 500,不是假设。
+
+### 23.2 修法 —— 在既有 23505 映射的同一处(`mapGroupConstraintError`)把 23514 映射为 400 `GROUP_NAME_UNSUPPORTED`
+
+改动位置:`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`,`mapGroupConstraintError`(与既有 `uq_atg_org_name_active`/`atg_sort_unique` 的 23505 分支同一个函数,同一处堆叠 `if`,不是新开一条映射路径)。
+
+```ts
+const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
+// … 既有 23505 分支之后 …
+if (
+  pgErr && typeof pgErr === 'object' && pgErr.code === '23514'
+  && typeof pgErr.constraint === 'string'
+  && NONBLANK_CHECK_CONSTRAINTS.has(pgErr.constraint)
+) {
+  return new ServiceError(
+    '当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误',
+    400,
+    'GROUP_NAME_UNSUPPORTED',
+    { constraint: pgErr.constraint },
+  )
+}
+```
+
+三个约束(`atg_name_nonblank`/`atg_org_nonblank`/`atgl_org_nonblank`)一并映射——任务书点名的集合;后两个是防御性的(路由层已在 `resolveApprovalTemplateGroupOrgId` 里对空白 `org_id` 先行 403,正常路径到不了它们,详见服务文件里新增的文档注释)。**如实披露:`atg_org_nonblank`/`atgl_org_nonblank` 这两条分支本轮零行为覆盖**——§23.3 的真库用例只打了 `atg_name_nonblank`;`mapGroupConstraintError` 未导出,没有绕过路由层直接命中这两条分支的单元测试路径;这两条分支目前只受 tsc 编译检查与代码走查保护,是本轮已知但未关闭的覆盖缺口,不是被验证过的行为,留待日后若要单独测试它们时需要先导出该函数或新造一条能绕过路由层前置校验的调用路径。**不放宽 CHECK**——`atg_name_nonblank` 本身仍是 `CHECK (name ~ '[!-~]')`,一个纯中文名依然建不出组;改变的只是失败的**形状**(400 + 具名错误码 + 携带 `constraint` 字段,而不是不透明的 500)。这是请求形状映射,不是 DDL 变更,不需要 owner 闸;§23.4 是另外一条、且是 DDL 的、确实需要 owner 裁决的勘误请示。
+
+**用词披露**:`ServiceError` 的 `message` 字段本轮用了中文原句「当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误」——这是本文件里**唯一**一条非英文的 `ServiceError` message(其余六个既有错误码的 message 全是英文),且「owner 勘误」是内部治理词汇,不是面向最终用户的产品文案,原样出现在一个生产 HTTP 响应体里。这不是疏忽:任务书原文逐字要求「错误体带 constraint 名与一句『当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误』」,本节按字面执行,`{constraint}` 放进 `details`、这句话放进 `message`——两者任务书都点了名,`details` 已经满足「错误体带 constraint 名」,message 的中文/内部措辞是对任务书那句原文的直接落实,不是本轮自行引入的风格漂移。若这条错误信息将来要国际化或改用面向用户的措辞,是一次独立的、需要另行裁量的改动,不属于本回流修复的范围。
+
+复现同一探针(未改任何测试文件,只改了服务文件)确认已修复:
+
+```
+$ npx tsx repro-cjk-name.mjs   # 修复后,同一调用
+name: ServiceError
+constructor: ServiceError
+code: GROUP_NAME_UNSUPPORTED
+statusCode: 400
+message: 当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误
+```
+
+### 23.3 永久回归用例(真库,HTTP 端到端)
+
+新增 `it('P1-3 (design-gate A-3, 2026-09-18): a pure-CJK group name maps to 400 GROUP_NAME_UNSUPPORTED, not a raw 500 — an ASCII name in the same org still succeeds', …)`(`approval-template-groups-lifecycle.db.test.ts`,紧跟在既有 `request-shape codes` 用例之后):对同一 org,`POST /api/approval-template-groups {name:'人事'}` ⇒ 400 + `error.code === 'GROUP_NAME_UNSUPPORTED'` + `error.details.constraint === 'atg_name_nonblank'` + 错误消息同时包含「当前锁文 CHECK 只接受可打印 ASCII」与「owner 勘误」两个子串(响应体必须同时携带约束名与 owner 勘误提示,任一半被静默降级都会重新掩盖 500 掩盖过的同一件事);零行写入(`SELECT … WHERE org_id=$1 AND name=$2` 命中 0 行);**正控**:同一 admin、同一 org,一个 ASCII 名字(`HR ${TS}`)仍然 201——证明这是请求形状映射,不是把整条创建路径或 guard/鉴权判成了拒绝。
+
+### 23.4 mutation(把 23514 映射删掉 ⇒ 用例红)
+
+遵守本仓 mutation 探针纪律:`cp` 备份 → 改 → 单独跑受影响用例 → `cp` 还原 → `cmp` 逐字节核对。
+
+```
+$ md5 src/services/ApprovalTemplateGroupService.ts
+MD5 (…/ApprovalTemplateGroupService.ts) = f59e76d76070f065e6d214485913fe1a
+# 删除 mapGroupConstraintError 里新增的整个 23514 if 块（python3 精确文本替换，非手工编辑）
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix" EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts -t "P1-3" --reporter=dot
+ ❯ … P1-3 … a pure-CJK group name maps to 400 GROUP_NAME_UNSUPPORTED …
+   AssertionError: expected 500 to be 400 // Object.is equality
+ Test Files  1 failed (1)
+      Tests  1 failed | 17 skipped (18)
+# 还原
+$ cp /tmp/a1-fix-probe/ApprovalTemplateGroupService.ts.orig src/services/ApprovalTemplateGroupService.ts
+$ cmp /tmp/a1-fix-probe/ApprovalTemplateGroupService.ts.orig src/services/ApprovalTemplateGroupService.ts && echo RESTORED-IDENTICAL
+RESTORED-IDENTICAL
+$ md5 src/services/ApprovalTemplateGroupService.ts
+MD5 (…/ApprovalTemplateGroupService.ts) = f59e76d76070f065e6d214485913fe1a
+```
+
+删掉映射后,同一用例从 400 变红成 500——mutation 证明这条映射是承重的,不是装饰性断言。还原后 MD5 与还原前逐字节一致。
+
+### 23.5 owner 勘误请示(原文,来自 A-3 门审 O2,verbatim 转述,本节不擅自采纳)
+
+设计门审 `design-gate-A3-phase2-20260918.md` §5 O2 原文:「`atg_name_nonblank CHECK (name ~ '[!-~]')` 拒绝纯中文名 —— **锁 §2 约束清单勘误**,且是 A-1/#5852 上的活缺陷」,默认值「建议改成 `CHECK (btrim(name) <> '')`;在 owner 裁决前,A-3 按 changesRequired #3 跳过+披露」。
+
+**这是本切片(A-1)未采纳、也不能采纳的一条**:锁 §2 的约束清单是 ratify 对象,只有 owner 能改;本轮的修法(§23.2)是请求形状映射,不触碰 DDL,`atg_name_nonblank` 这条 CHECK 本身在本切片结束时与 ratify 时逐字相同。**待 owner 裁决**:是否将 `CONSTRAINT atg_name_nonblank CHECK (name ~ '[!-~]')` 改为 `CHECK (btrim(name) <> '')`(真正表达「非空白」,不歧视非 ASCII/CJK)——若 owner 批准,需要一次新的、独立的、含 DDL 迁移的 Draft PR(本 worktree/本切片明确不做,按硬规矩不动 DDL、不应用迁移到共享库)。在 owner 勘误落地前,§23.2/§23.3 的 400 映射是**唯一**能做的缓解:仍然拒绝纯中文名,但拒绝的形状从不透明 500 变成携带约束名与勘误提示的 400。
+
+### 23.6 P2-5 —— `routes/approvals.ts:396-399` 「guard population ⊆ manager」是过强声明
+
+**现场核对(与 A-3 门审 P2-5 逐条对照)**:
+
+- `hasPermissionCode`(`rbac/rbac.ts:21-25`)对权限码做资源前缀通配展开:`permissionCodes.includes('approval-templates:*')` 会放行 `approval-templates:manage` 这个判据——`approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])`(`:199`)因此对持 `approval-templates:*` 的主体放行;而 `isTemplateManager`(`resolveApprovalTemplateVisibilityActor`,`:375-392`)只精确 `.includes()` 五个字符串(`'*:*'`/`'approvals:*'`/`'approvals:admin-templates'`/`'approval-templates:manage'`/角色 `'admin'`),`'approval-templates:*'` 不在其中——持这个通配码的主体**过 guard 但非 manager**。
+- `rbacGuardAny` 的最终兜底 `const adminCheck = await isAdmin(userId); if (adminCheck) next()`(`rbac.ts`)直接查 DB(`user_roles WHERE role_id='admin'`),与 `req.user.role`/`.roles`/`.permissions`(JWT 声明,`isTemplateManager` 读的就是这几个字段)完全独立——一个只在 DB 侧持 `user_roles(role_id='admin')`、JWT 里不带任何 admin/manager 声明的主体,同样**过 guard 但非 manager**。
+
+真实计数(不是目测,`grep` 命中数):
+
+```
+$ grep -c "approval-templates:\*" packages/core-backend/src --include="*.ts" -r
+0
+```
+
+全仓零处授予 `approval-templates:*`——这条通配路径今天**未被生产任何数据触发**,但 P2-5 的重点从来不是「今天有没有人持有它」,而是**判据本身是否成立**:`isTemplateManager` 会漏掉持有它的主体,这条通配路径又是仓内合法的 RBAC 语法(`hasPermissionCode` 就是为它写的),第二条 DB 侧 `isAdmin` 路径更是当前生产代码里天天在走的默认兜底,不依赖任何罕见配置。「今天零授予」缓解不了断言,只是缩小了当下的爆炸半径(呼应本文档 §22.4 P3-4 的既有记录与用户记忆 `finding_authservice_silent_permission_narrowing`)。
+
+**修法**:改写 `routes/approvals.ts:394-423`(原过强声明在旧版 `:396-399`;块注释起始行 `:394` 未变,新增的更正说明使整个块延伸到 `:423`)的块注释,撤回「guard population ⊆ manager ⊆ sees everything」这句过强声明,改为如实措辞:两条反例逐一点名(通配码 + DB 侧 admin),结论改写为「guard population ⊋ manager population(严格超集,不是子集也不是相等)」。**同一句过强声明还有第二处副本**——`approval-template-groups-lifecycle.db.test.ts`「§2 link-time visibility」测试组自己的块注释里重复了几乎相同的措辞(「`approvalTemplateAdminGuard`'s permission codes are a SUBSET of `isTemplateManager`'s derivation... every actor able to reach the link ENDPOINT today is a manager」),这里一并改写,指向 §23.7 新增的 §2(c) 用例作为反例的真实证据,不留一份未撤回的副本。两处改动均为纯注释,不改变任何运行时行为。
+
+### 23.7 真库用例:guard 通过但非 manager 的主体,link 端点的可见性过滤仍生效
+
+**构造方法**:走 P2-5 点名的第二条反例(DB 侧 `isAdmin`)——因为它不需要新造任何 RBAC 授予关系,只需一行 `user_roles` INSERT,是两条反例里在既有测试 harness(`tok()` 走 `RBAC_TOKEN_TRUST=true` 的可信 token 路径)下**最干净可构造**的一条:
+
+1. `dev-token` 铸一个 `roles=user, perms=''`(**不含任何 admin/manager 声明**)、`tenantId=org` 的 token;
+2. 直接对该 `userId` 执行 `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')`——这是该主体唯一的「admin」痕迹,只在 DB 侧,JWT/`req.user` 上什么都没有;
+3. 用该 token 打 `POST /api/approval-template-groups`(`approvalTemplateAdminGuard` 把守的写端点)—— **201**,证明 guard 确实放行了这个在 JWT 层面看起来毫无特权的主体(guard-pass 实证 #1);
+4. 用同一 token 对一个 `visibility_scope={type:'dept', ids:['其他部门']}`(该主体的 `departmentIds` 为空,不含这个部门)的模板发起 `POST /api/approval-templates/:id/group` —— **404 `APPROVAL_TEMPLATE_NOT_FOUND`**,不是 403(guard-pass 实证 #2:如果 guard 没放行,任何子用例都会先 403,不会走到可见性判定这一步),零行写入;
+5. 同一 token、同一 guard,对一个 `visibility_scope` 默认 `{type:'all', ids:[]}` 的模板发起同样的请求 —— **201**(正控:证明这是可见性过滤在起作用,不是整个端点对这个主体失灵)。
+
+```
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix" EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts -t "§2\(c\)" --reporter=dot
+ ✓ …§2(c): a DB-side-admin actor (guard passes; NOT isTemplateManager) still has its LINK request visibility-filtered
+ Test Files  1 passed (1)
+      Tests  1 passed | 17 skipped (18)
+```
+
+**mutation**(同一纪律,`cp` 备份 → 改 → 单独跑 → 还原 → `cmp`):在 `resolveApprovalTemplateVisibilityActor` 里把 `isTemplateManager` 硬编码成 `true`(模拟「guard population ⊆ manager」这句被撤回的声明若为真时的行为):
+
+```
+$ md5 src/routes/approvals.ts
+MD5 (…/approvals.ts) = 058c6cd157611be3f86f089986c5b4f0
+# isTemplateManager: true,  // MUTATION PROBE(临时)
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix" EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts -t "§2" --reporter=dot
+ ❯ …§2(c): a DB-side-admin actor …
+   AssertionError: expected 201 to be 404 // Object.is equality
+ Tests  1 failed | 2 passed | 15 skipped (18)
+# 还原
+$ cp /tmp/a1-fix-probe/approvals.ts.orig src/routes/approvals.ts
+$ cmp /tmp/a1-fix-probe/approvals.ts.orig src/routes/approvals.ts && echo RESTORED-IDENTICAL
+RESTORED-IDENTICAL
+$ md5 src/routes/approvals.ts
+MD5 (…/approvals.ts) = 058c6cd157611be3f86f089986c5b4f0
+```
+
+硬编码 `isTemplateManager: true` 后,§2(c) 的隐藏模板一格从 404 变红成 201(可见性过滤被短路),而 §2(a)/§2(b) 两条既有用例仍绿——精确定位到 §2(c) 新增的 hidden-template 断言才是这条用例的判别力所在,不是可见模板那一格(那一格无论 manager 与否都应该 201,本身没有判别力,只是正控)。还原后 MD5 与还原前逐字节一致。
+
+**结论**:这条真库用例证明了「存在过 guard 但非 manager 的主体,走到 link 端点时可见性过滤仍生效」——`applyTemplateVisibilityFilter` 不是靠 `isTemplateManager` 的短路才「恰好」安全,guard 与可见性判定是两个独立生效的判断层,即便某个主体绕过了 `isTemplateManager` 的识别(如本用例),可见性过滤仍然会把它限制在能看到的模板范围内。这**不是**说撤回的那句过强声明没有安全后果——它错误描述了一个不变量的**成立范围**(把「对多数今天真实存在的管理员成立」误写成「对整个 guard 人口成立」),如果日后有代码路径**依赖**「guard 人口就是 manager 人口」这个假设(例如一条「guard 通过就跳过可见性检查」的优化),那才会真正引入漏洞——本节的用例正是防止这类依赖被引入的回归锚点。
+
+### 23.8 本切片(A-1)真库套件全量重跑(含新增两条用例)
+
+```
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix" EXPECT_DB=1 \
+    pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=dot
+ Test Files  2 passed (2)
+      Tests  28 passed (28)
+```
+
+28 = 原 26(§22.3 最后一次确认的数字)+ 本轮新增 2(§23.3 的 P1-3 回归用例、§23.7 的 §2(c) 用例);零 skip、零 fail。
+
+```
+$ npx tsc --noEmit -p .
+(无输出,exit 0)
+$ git status --short
+ M packages/core-backend/src/routes/approvals.ts
+ M packages/core-backend/src/services/ApprovalTemplateGroupService.ts
+ M packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts
+```
+
+只有这三个文件被改动;`.github/workflows/plugin-tests.yml`、`vitest.config.ts`、任何迁移文件均未触碰。
+
+### 23.9 s6a / ci-wiring 守卫(未受影响,机械核对)
+
+本轮**未**修改 `plugin-tests.yml`(§23.8 的 `git status --short` 已确认),两个新用例都是加进**已经**被该 workflow 显式清单点名的既有文件(`approval-template-groups-lifecycle.db.test.ts`),不是新增文件——s6a 的重算条件是「改了 `PINNED_EVIDENCE_FILES` 清单里的文件(含 `pluginTestsWorkflow` → `.github/workflows/plugin-tests.yml` 整个文件的 sha256)」,本轮零命中:
+
+```
+$ node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
+✔ __tests__/sealed-export-package-provenance.test.cjs
+tests 1
+pass 1
+fail 0
+```
+
+`ci-wiring` 人口方面:`grep -rl "approval-template-groups" scripts/ops/*.test.mjs` 零命中(与本文档 §22.4 P3-6 记录的既有残留一致——这两个真库文件至今不受任何 `*-ci-wiring.test.mjs` 保护,只受 `plugin-tests.yml:1578` 一带的 bash `:?` 哨兵保护),本轮未新建守卫(未新增文件,不属于本轮任务范围),该既有残留原样保留、不在本节重复披露。
+
+### 23.10 required 检查 `test (20.x)` 的全量命令逐字复现
+
+**范围说明(先诚实划界,避免过强声明)**:`test (20.x)` 是一个横跨整个 monorepo 的巨型必需 job(`.github/workflows/plugin-tests.yml` 的 `test:` job,`node-version: [18.x, 20.x]` 矩阵,`if: matrix.node-version == '20.x'` 的步骤单独就有数十个,覆盖 e-learning/BPMN/multitable/考勤/attendance/dingtalk 等与本切片无关的域)。本节**没有**重跑该 job 里的每一步——那会跑数十个与本次改动零重叠的域,耗时且不产生额外判别力。本节逐字复现的是该 job 里**唯一**收纳了本切片两个真库文件的那一步——`Run approval real-DB integration (...)`(`id: approval-real-db-integration`),按 workflow 原文**逐字**(文件列表、`--config`、`--reporter` 全部照抄,只把 `DATABASE_URL` 换成本会话的私有库)整段跑一次,而不是像 §23.3/§23.8 那样只跑本切片自己的两个文件——这是「读 .github/workflows 里对 core-backend 的真实步骤,跑全量 vitest」这条要求里「全量」的落地方式:全量 = 该 required 步骤点名的**全部** 79 个文件一起跑一次,不是收窄到本切片改的文件。
+
+逐字来源(`sed -n '1568,1659p' .github/workflows/plugin-tests.yml`,原文照抄,79 个 whole-file 路径,以 `tests/integration/approval-template-groups-lifecycle.db.test.ts`/`…-serialization.db.test.ts` 两个文件收尾):
+
+```
+- name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
+  id: approval-real-db-integration
+  if: matrix.node-version == '20.x'
+  env:
+    DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+  run: |
+    : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
+    pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+      tests/integration/approval-directory-endpoints.api.test.ts \
+      … (79 个文件,原文逐字,详见 .github/workflows/plugin-tests.yml:1580-1658) …
+      tests/integration/approval-template-groups-lifecycle.db.test.ts \
+      tests/integration/approval-template-groups-serialization.db.test.ts \
+      --reporter=dot
+```
+
+本会话唯一的替换是 `DATABASE_URL`(`postgres@localhost:5432/metasheet_test` → `postgresql://localhost:5432/metasheet2_lock_a1_fix`,私有库,不是共享的 `metasheet_test`);`: "${DATABASE_URL:?...}"` 哨兵、`--config vitest.integration.config.ts`、`--reporter=dot`、79 个文件路径的顺序与拼写逐字未改。实测:
+
+```
+$ export DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix"
+$ pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    <79 个文件,逐字同 plugin-tests.yml:1580-1658> --reporter=dot
+ Test Files  79 passed (79)
+      Tests  880 passed | 5 skipped (885)
+   Duration  171.07s (transform 3.12s, setup 211ms, collect 34.82s, tests 96.92s, environment 5ms, prepare 2.27s)
+$ echo "EXIT_CODE=$?"
+EXIT_CODE=0
+```
+
+79/79 文件全绿,880/885 用例通过(5 skip 是既有文件里的既有 skip,与本轮改动无关,未新增/未减少);退出码 0。这条命令覆盖了本切片改动触及的两个文件,以及与它们在同一个 required 步骤里的其余 77 个真库文件(含大量 directory/dingtalk/attendance 域文件)——证明本轮改动(`ApprovalTemplateGroupService.ts`/`routes/approvals.ts` 的改动)不仅没有破坏本切片自己的用例,也没有破坏同一个 required 步骤下其余 77 个文件的既有断言(这两个改动的文件被其它 approval 域真库套件通过 import 间接触达时,行为保持兼容)。
+
+**no-DB 单元测试 lane(`test (20.x)` job 的另一半:`pnpm --filter @metasheet/core-backend test`,`vitest.config.ts`,不需要 DB)—— 也整体重跑了,不是靠 grep 推断覆盖面**。第一版本节曾打算用 `grep -rl "ApprovalTemplateGroupService\|resolveApprovalTemplateVisibilityActor\|isApprovalTemplateVisibleForGroupLink" packages/core-backend/tests/unit` 零命中来论证「未受影响」——**这条 grep 本身范围不够**:它只查了 `tests/unit` 这一个子目录,而 `vitest.config.ts` 没有 `include:`,默认 glob 覆盖整个包(`exclude` 列表之外的一切 `*.test.ts`/`*.spec.ts`),`tests/integration/approval-attachment-routes.test.ts` 就不在那份 `exclude` 清单里、也不在 `tests/unit` 下——而它通过 attachment 路由间接消费 `resolveApprovalTemplateVisibilityActor`(该函数的导出注释原话就是「Exported for the approval-attachment upload route」),grep 只按目录取样,已经先漏掉了一个真实消费方。按目录取样的 grep 不足为凭,于是改为**直接跑这条 lane 本身**:
+
+```
+$ unset DATABASE_URL   # 该 CI 步骤在 job 里排在 db:migrate 之前，DATABASE_URL 未设，若带着它跑就是在核对另一条命令
+$ cd packages/core-backend && CI=true pnpm exec vitest run --reporter=dot
+ Test Files  931 passed | 175 skipped (1106)
+      Tests  14713 passed | 1604 skipped (16317)
+   Duration  67.65s (…)
+```
+
+（`"test": "vitest"` 脚本本身是 watch 模式,本地必须用 `exec vitest run` 或 `CI=true` 让 vitest 自己探测到 CI 环境切换成一次性运行,否则会挂起而不是给出结果——这条踩坑点记入本节,免得下次照抄命令又卡在 watch 模式上;`DATABASE_URL` 必须**不设**,因为这条 CI 步骤在 job 顺序里排在 `db:migrate` **之前**,带着 `DATABASE_URL` 跑会激活所有 `describeIfDatabase` 套件,变成核对一条与 CI 实际执行的命令不同的命令。）
+
+931/931 文件通过、175 skip(`describeIfDatabase` 在无 `DATABASE_URL` 下的正常跳过,与本轮改动无关)、14713/14713 用例通过、零失败、退出码 0(见 `grep -c "FAIL"` 命中的 8 处逐一核对:全部来自一个仓内既有的 mutation-testing 元测试,其用例名字面包含单词 `FAIL`,不是真实失败);`approval-attachment-routes.test.ts`(34/34)特别核对通过。结合 §23.8 的 `tsc --noEmit -p .`(对整个包含 `tests/` 的 package 做完整类型检查,已确认零错误)与上面 79 文件 real-DB 全绿,构成本轮改动对 core-backend 两条主要 required 检查通路(真库 + no-DB 单测 + 类型检查三者)零回归的现场证据链,而不是「关键符号零引用」这一条本身范围不足的推断。
+
+### 23.11 提交与推送
+
+见 `git log`——本节改动随本切片 A-1 分支正常提交推送,提交信息见对应的 commit(conventional commits,含 `Co-Authored-By` 尾行),不在此重复粘贴 SHA(以 `git log`/`git push` 的现场输出为准)。
