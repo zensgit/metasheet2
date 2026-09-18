@@ -256,9 +256,14 @@ describe('app-level approval todo badge', () => {
   })
 
   // 判据 E, push half (sign-out): see `ApprovalTodoBadge.vue`'s file-level note — this closes the
-  // sign-out gap left open by the socket never being reconnected on a transition. Mutation guard:
-  // deleting `handleCountsUpdated`'s `if (!hasSession()) return` makes this red (the badge would
-  // repaint '9' after sign-out).
+  // sign-out gap left open by the socket never being reconnected on a transition. Mutation guard
+  // (P3 hygiene, 2026-09-19: corrected from a stale description — the component does not call
+  // `hasSession()` inside `handleCountsUpdated`; the guard is the `acceptPushes` flag, set by the
+  // auth-transition listener's own deferred check below): deleting `handleCountsUpdated`'s
+  // `if (!acceptPushes) return` makes this red (the badge would repaint '9' after sign-out).
+  // Re-run 2026-09-19: `cp` backup → delete that line → `npx vitest run approvalNavTodoBadge` →
+  // 1 failed / 22 passed (this test, at the `expect(badgeOf(root)).toBeNull()` assertion right
+  // after the push) → `cp` restore → `cmp` byte-identical → 23/23 green again.
   it('E3 (sign-out): a push arriving on the still-open socket after sign-out must not repaint', async () => {
     localStorage.setItem('auth_token', 'principal-1-token')
     getTodoCountSpy.mockResolvedValue({ count: 2, sources: { approval: 'ok' } })

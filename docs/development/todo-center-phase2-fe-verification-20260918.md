@@ -205,7 +205,11 @@ $ git status --porcelain
 
 ## 4. CI 两点接线证据
 
-### 4.1 `paths:` 两块字面相同
+### 4.1 本切片新增的 6 个 path 条目在两块里逐字一致(邻域 diff)
+
+**标题更正(P3 卫生轮,round-2 门审 `impl-gate-B2-round2-20260918.md` P3-1)**:原标题「`paths:`
+两块字面相同」按全块口径读是假的——下面的证据只是两个 26 行邻域的 `diff`,从未断言整份
+`pull_request.paths` 与 `push.paths` 逐字相等。标题已改窄到与证据同口径,不留误导旧句。
 
 ```
 $ sed -n '360,385p' .github/workflows/approval-web-guard.yml > /tmp/block1.txt
@@ -217,6 +221,34 @@ IDENTICAL
 `apps/web/src/todo/useTodoCountsRealtime.ts`、`apps/web/src/todo/views/TodoCenterView.vue`、
 `apps/web/tests/todoApi.spec.ts`、`apps/web/tests/todoCountsRealtime.spec.ts`、
 `apps/web/tests/TodoCenterView.spec.ts`。
+
+**独立观察(先存不对称,与本切片零关系,本轮对当前 HEAD 重新机核,不转抄门审在其审计 head 上算出的
+条目):**`impl-gate-B2-round2-20260918.md` P3-1 的证据段列了 12 个「只在 block1、不在 block2」的
+条目;对**当前 HEAD** 用脚本重新按 set 比较两块的全部条目(而非只读 26 行邻域),结果不是 12 条:
+
+```python
+# 解析 on.pull_request.paths(:20 起)与 on.push.paths(:437 起)两个列表,逐条比较集合
+block1 count: 267   block2 count: 255   ordered identical: False
+only in block1, not block2: 6
+  apps/web/src/approvals/newTodoPill.ts
+  apps/web/src/approvals/urgeButtonState.ts
+  apps/web/src/approvals/routePreviewErrors.ts
+  apps/web/src/approvals/routePreviewController.ts
+  apps/web/src/approvals/routePreviewSummary.ts
+  apps/web/src/approvals/templateGalleryFilter.ts
+only in block2, not block1: 0
+```
+逐一 `grep -n` 复核门审列出的另外 6 条(`amountInWords.ts`、`conditionSummary.ts`、`formDraft.ts`、
+`views/approval/ApprovalCenterView.vue`、`views/approval/TemplateCenterView.vue`、
+`tests/approvalApiErrorSurfacing.spec.ts`)——它们在**两块里各自出现至少一次**(例如
+`TemplateCenterView.vue` 在 block1 内 `:76`/`:83` 两处、block2 内 `:472` 一处;三处字节级 `od -c`
+比对确认同一字符串,非近似匹配),不满足「只在 block1」。这 6 条从门审报告的 12 条清单里退出,不是因
+为它们不曾不对称,而是当前 HEAD 上就是对称的——不推断中间是哪次改动补齐的(与本切片改动的
+diff 面为空,`git diff --name-only <base>...HEAD -- .github/workflows/approval-web-guard.yml`
+零命中,不是本切片补的)。剩下真正不对称的 6 条与门审报告一致方向(均为「只在 pull_request、不在
+push」),同样是 B-1 头就已存在、与本切片零关系的先存状态,`approval-web-guard` 本身是 advisory 而
+非 required(§14.6/§5 已核)。**不转抄门审报告的 12 条清单入本 MD**,只记这条独立机核的 6 条,避免
+把外部报告在其审计 head 上的快照当成当前 HEAD 的事实。
 
 ### 4.2 YAML 仍可解析
 
@@ -1232,3 +1264,222 @@ $ git diff --stat
 `//` 开头,零非注释行改动,零 `packages/core-backend` 改动,零迁移,零锁文,零 workflow 文件改动,
 未触碰 `tests/approval-member-identity-coverage-enumeration.spec.ts` 本身(守卫的扫描逻辑与 ALLOWLIST
 均未改动,符合任务"不得改守卫的扫描逻辑"的约束)。
+
+## 15. P3 卫生轮(2026-09-19)—— 门审 `impl-gate-B2-round2-20260918.md` 5 条 P3 逐条处置
+
+被审 head `d84e9e7fb`(§0)之后,本分支先执行了一次栈底同步:`git rebase
+origin/feat/todo-center-shared-pending-query`——该分支在合并基 `89f1ecdee`(与本分支共同祖先)之后
+只新增了 3 条真正的新内容提交(用 `git patch-id` 双向比对确认,其余约 40 条本分支已有等价内容的提交
+被 rebase 自动 `skipped previously applied commit`),rebase 零冲突。落地前后做过一次机械验证:
+`git diff <rebase 前 HEAD> <rebase 后 HEAD> --stat` 只显示两个文件的变化
+（`docs/development/todo-center-phase1-verification-20260918.md` 与
+`packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts`,均为 B-1 侧
+round-3 门审的 P3 收口,不是本切片的文件),与那 3 条提交各自的 `--stat` 逐字相加吻合,证明 rebase
+没有引入或丢失任何本切片文件的改动。rebase 后 `git push --force-with-lease` 一次(本轮唯一一次,已
+用完),新 HEAD 记为 `be2467ca656234ee19603fcd23f63f8788f92995`——本节全部诊断、mutation 重跑与
+diffstat 起点均以它为基准,不是被审 head。
+
+**一条如实记录、不修的先存状态**:`git diff origin/feat/todo-center-shared-pending-query...HEAD`
+（本 PR 的 diff base)目前包含约 26 个与本切片零关系的 `main` 提交(data-sources / multitable /
+stock-prep / security 等)——这是 rebase **之前**就存在的状态(本分支的 merge-base 是 main 较新的
+`bb77ca5f2`,而 base 分支仍停在较旧的 `89f1ecdee`),rebase 没有让它变得更宽,反而通过 patch-id 去重
+让"两条分支各自独立重放同一批 B-1 提交"的冗余缩小了。修正它需要 force-push **base 分支**
+（`feat/todo-center-shared-pending-query`),那是另一条 lane 的分支,本轮硬规矩不允许,如实记录为
+已知状态,交给整理 PR base / 出栈顺序的那一步处理。
+
+### 15.1 处置表
+
+| # | 门审原文(一句) | 处置 |
+|---|---|---|
+| P3-1 | 验证 MD §4.1 标题「`paths:` 两块字面相同」按全块口径为假(先存不对称,非本切片引入) | CLOSED-MD |
+| P3-2 | 8 个调用点删任意一个 ⇒ required 默认套件仍全绿(已被实现者显式自陈;真实风险很低) | CLOSED-注释(核实既有自陈仍准确,无新增) |
+| P3-3 | 上一轮门审报告 §4.4 把 `approvalNavTodoBadge` 的 lane 归错行(报告自身的错,非交付物的错) | CLOSED-MD(交付物本无此错,已核;补前瞻指引防未来转抄) |
+| P3-4 | P3-8(PR body 自陈导航入口范围扩张)仍 BLOCKED-WITH-REASON | DEFERRED-owner 项(硬规矩禁止本 lane 动 PR body) |
+| P3-5a | `approval-web-guard.yml` 106-token 全量重跑——本轮未跑 | CLOSED-测试(本轮实际执行) |
+| P3-5b | 真浏览器视觉验收——未跑,jsdom 不算 | DEFERRED-owner 项(需要真实浏览器验收基础设施投入) |
+| P3-5c | 徽标侧 E3(`acceptPushes`)与「订阅错事件」两条 mutation——本轮未重跑,沿用上一轮红 | CLOSED-测试(本轮亲跑转红) |
+
+**附带一条(卫生轮过程中发现,不在门审 5 条之列,但同属"改矛盾措辞"范畴)**:`approvalNavTodoBadge.spec.ts`
+E3 用例的注释写「deleting `handleCountsUpdated`'s `if (!hasSession()) return`」,但该函数体内并不
+调用 `hasSession()`(真正的守卫是 `acceptPushes` 标志,由认证切换监听器的延迟检查设置)——这条注释
+描述的是重构前的旧实现。已改写为准确描述,disposition 记为 CLOSED-注释。
+
+### 15.2 P3-1 —— 见 §4.1(已在原地更正标题 + 补独立观察,不在此重复)
+
+标题从「`paths:` 两块字面相同」改为「本切片新增的 6 个 path 条目在两块里逐字一致(邻域 diff)」,并
+用脚本对**当前 HEAD**重新做集合级比较(不是门审报告审计 head 上的 12 条清单转抄),发现真正「只在
+block1、不在 block2」的只有 6 条,另外 6 条(门审报告列的 12 条里的另一半)在当前 HEAD 上已经两块
+都有——证据与推理见 §4.1 原地补的段落。
+
+### 15.3 P3-2 —— 核实既有自陈仍准确,不新增覆盖
+
+```
+$ git diff be2467ca656234ee19603fcd23f63f8788f92995 -- packages/core-backend/src/routes/approvals.ts
+(空)   ← 本轮零改动这个文件
+$ git grep -n "by-construction / grep-based one" packages/core-backend/tests
+tests/unit/approval-todo-counts-dual-publish-wiring.test.ts:10:cannot — prove any of the eight route handlers actually calls this shared function instead of some
+```
+docblock 第 9-12 行原句「this gates `publishApprovalCountsForUsers`'s OWN body only. It does not —
+and cannot — prove any of the eight route handlers actually calls this shared function instead of
+some other path; that argument stays a by-construction / grep-based one」仍在、仍准确(门审 §3
+P3-2 亲跑 M8 逐字核对过这句自陈与实际行为一致);门审自身的结论是「风险很低,已被实现
+者显式自陈」,不是「需要新增一个 per-call-site 覆盖」的待办——把这条升级成「给八个调用点各打一个断
+言」是一次新增测试设计决策(需要先定义"哪种覆盖形状"),不是本轮"闭世界/矛盾措辞/正控"这类机械可
+闭合项,按硬规矩"生产代码零行为改动"之外的"新增测试覆盖面"决策留白,不在本轮做,也不构成新债务
+(门审判定已接受此风险)。
+
+### 15.4 P3-3 —— 交付物本无此错;补前瞻指引,不转抄 `:1186`
+
+```
+$ git grep -n "1186" -- docs/development/todo-center-phase2-fe-verification-20260918.md \
+    docs/development/todo-center-phase2-fe-design-20260918.md
+docs/development/todo-center-phase2-fe-design-20260918.md:78:| `apps/web/scripts/run-required-web-tests.sh` | 末行 exec 加 `todoApi TodoCenterView todoCountsRealtime` 三个令牌 | `:1186` |
+docs/development/todo-center-phase2-fe-verification-20260918.md:753:需要修的断言。对**当前 HEAD** 该 exec 行(`:1186`)重新机核(丢弃 `exec`/`npx`/`vitest`/`run`/
+```
+设计 MD `:78` 那一行是撰写当时的快照(按既定惯例不回填,见 §13.1 结尾的说明);验证 MD `:753`
+（§12.1)讨论的是 `todoApi`/`TodoCenterView`/`todoCountsRealtime` 三个不同令牌所在的 exec 行,门审
+§4.4 亲核过这条引用本身是准的(:1186 至今仍是这三个令牌的 exec 行,§15.6 已用 grep 重新核对)。两
+处都不是在给 `approvalNavTodoBadge` 定位。门审 P3-3 指出的错误只存在于**外部**报告
+`impl-gate-B2-round1-20260918.md` §4.4 自己的文字里(该文件是 head-scoped 的历史门审记录,本轮不
+回改它)。**前瞻指引(供未来 PR body 誊抄 §12.3/§13.4 条款、或任何人需要引用
+`approvalNavTodoBadge` 的 required-check lane 证据时使用,用命令定位、不转抄数字)**:
+```
+$ grep -n "^npx vitest run approvalNavTodoBadge " apps/web/scripts/run-required-web-tests.sh
+779:npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
+$ grep -n "^set -euo pipefail" apps/web/scripts/run-required-web-tests.sh
+473:set -euo pipefail
+```
+这条 exec 行本身没有 `|| exit $?`,失败传播靠脚本开头(当前 HEAD `:473`)的 `set -euo pipefail` 覆盖
+全部 17 条 `npx vitest run`——这条命令组合(不是裸数字)才是可信引用,行号会随脚本增长漂移,重跑这
+两条 `grep` 得到的数字才是当前 HEAD 的事实。
+
+### 15.5 P3-4(P3-8 结转)—— 核实待誊抄文本已完整,DEFERRED
+
+```
+$ grep -n "PR body 待写条款" docs/development/todo-center-phase2-fe-verification-20260918.md
+862:  > **PR body 待写条款(P3-8,门审 `impl-gate-B2-round1-20260918.md`)**:导航入口(commit
+$ sed -n '862,865p' docs/development/todo-center-phase2-fe-verification-20260918.md
+```
+§12.3 的待誊抄段落(当前 HEAD `:862-865`)已经点名 commit `4b3f8f483`、`App.vue:38,:52`、锁 §2「前端壳」表最后第 2 行(而非
+锁 §4 字面条款)——核对内容完整、准确,不需要在 MD 层再补一个字。剩下的动作**只能**是把这段话原样
+写进 Draft PR #5857 的 PR body——本轮硬规矩明文"不动 PR 状态与 body",不可执行,DEFERRED-owner 项:
+交给被授权编辑该 PR body 的下一步(开 PR / 整理 PR body 的那条 lane)原样誊抄 §12.3 原文,不必重新
+起草。
+
+### 15.6 P3-5a —— 106-token advisory 全量重跑,本轮亲跑
+
+```
+$ LINE=$(grep -n 'run: pnpm --filter @metasheet/web exec vitest run.*todoApi TodoCenterView todoCountsRealtime --reporter=dot$' \
+    .github/workflows/approval-web-guard.yml | head -1 | cut -d: -f1)
+$ echo $LINE
+1013   ← 不是 §2.3 记录的 :1006(该记录是修复轮 2 当刻的快照,脚本此后又增长过;§2.3 原样保留,不
+         回改历史记录,本条只是如实指出当前 HEAD 的准确行号靠 grep 得到,不是靠转抄)
+$ sed -n "${LINE}p" .github/workflows/approval-web-guard.yml | sed 's/^ *run: //' > /tmp/todo-fe-ci-cmd-p3hygiene.sh
+$ bash -c "$(cat /tmp/todo-fe-ci-cmd-p3hygiene.sh)"
+ Test Files  104 passed (104)
+      Tests  1959 passed (1959)
+   Duration  7.38s (transform 7.74s, setup 946ms, collect 14.49s, tests 26.77s, environment 21.64s, prepare 4.23s)
+```
+104 文件 / 1959 用例全绿,与修复轮 4 §13.2 记录的 1959 基线一致,不是抽样。该 lane 是 advisory,非
+required(§14.6/§5 已核),本条只是把门审 P3-5 点名的"未跑"补上,不改变任何判据的 required 状态。
+
+### 15.7 P3-5b —— 真浏览器视觉验收,登记不做
+
+jsdom 无法证明视觉可判别性(`feedback_css_verify_in_real_browser_not_jsdom`)。本轮硬规矩范围是
+测试/注释/MD/scripts 层,不包含新增真实浏览器（Playwright 等)验收基础设施——这不是一个"能不能做"
+的产品/合同判断,而是一次基础设施投入决策,超出本轮卫生扫描的范围,DEFERRED-owner 项,如实登记,
+不在此假装用 jsdom 顶替。
+
+### 15.8 P3-5c —— 徽标 E3(`acceptPushes`)+「订阅错事件」两条 mutation,本轮亲跑转红
+
+两条 mutation 各自 `cp` 备份 → 改 → 单独跑 → 观察红 → `cp` 还原 → `cmp` 字节相同 → 重跑回到全绿。
+
+**M-HYG1**(E3,`ApprovalTodoBadge.vue` 的 `handleCountsUpdated`):
+```
+$ cp src/approvals/components/ApprovalTodoBadge.vue /tmp/ApprovalTodoBadge.vue.bak
+# 删除 `if (!acceptPushes) return`(保留 `applyResult(payload)`)
+$ npx vitest run approvalNavTodoBadge --reporter=dot
+ Tests  1 failed | 22 passed (23)      ← 命中 E3 用例本身,断言
+ `expect(badgeOf(root)).toBeNull()` 在签退后收到迟到推送时失败(徽标重绘成 '9')
+$ cp /tmp/ApprovalTodoBadge.vue.bak src/approvals/components/ApprovalTodoBadge.vue
+$ cmp /tmp/ApprovalTodoBadge.vue.bak src/approvals/components/ApprovalTodoBadge.vue   # 字节相同
+$ npx vitest run approvalNavTodoBadge --reporter=dot
+ Tests  23 passed (23)
+```
+
+**M-HYG2**(订阅错事件,`useTodoCountsRealtime.ts` 的 socket 订阅名):
+```
+$ cp src/todo/useTodoCountsRealtime.ts /tmp/useTodoCountsRealtime.ts.bak
+# 'todo:counts-updated' → 'approval:counts-updated'
+$ npx vitest run todoCountsRealtime --reporter=dot
+ Tests  1 failed | 4 passed (5)        ← 命中「subscribes to todo:counts-updated ...」,
+ `toHaveBeenCalledWith` 收到 0 次调用(订阅错了事件名,回调从未被触发)
+$ cp /tmp/useTodoCountsRealtime.ts.bak src/todo/useTodoCountsRealtime.ts
+$ cmp /tmp/useTodoCountsRealtime.ts.bak src/todo/useTodoCountsRealtime.ts             # 字节相同
+$ npx vitest run todoCountsRealtime --reporter=dot
+ Tests  5 passed (5)
+```
+两条 mutation 各自的 guard 证据已同步写进对应 spec 文件里紧邻用例的注释(见 §15.1 附带一条 与
+`todoCountsRealtime.spec.ts` 的新注释),不再是"沿用上一轮的机械 diff 论证",而是本轮亲跑转红。
+
+### 15.9 撤回类改动扫描(全分支 grep,逐条核对,不假报零命中)
+
+本轮没有撤回任何**被证伪的事实性断言**(§4.1 的标题改写是"改窄口径"——原句下方给出的 26 行邻域
+`diff` 证据本身从未错,错的只是标题的覆盖面;E3 注释的改写是修正一句对当前代码已不准确的描述)。
+以下按纪律对全分支做机械扫描——**如实记录真实命中,不因为命中数不为零就断言"未清干净"**,逐条
+交代每一条命中为何不是一次存活的过强声明(自我指涉的检索天然会命中"正在描述这次修正"的句子本身,
+这是写"改了什么"时结构性无法避免的,不代表清理不彻底):
+
+```
+$ git grep -n "两块字面相同" -- '*.md'
+docs/development/todo-center-phase2-fe-verification-20260918.md:211:两块字面相同」按全块口径读是假的——下面的证据只是两个 26 行邻域的 `diff`,从未断言整份
+docs/development/todo-center-phase2-fe-verification-20260918.md:1294:| P3-1 | 验证 MD §4.1 标题「`paths:` 两块字面相同」按全块口径为假(先存不对称,非本切片引入) | CLOSED-MD |
+docs/development/todo-center-phase2-fe-verification-20260918.md:1309:标题从「`paths:` 两块字面相同」改为「本切片新增的 6 个 path 条目在两块里逐字一致(邻域 diff)」,并
+```
+3 处命中,全部是「引用旧标题以说明它已被改掉」的历史叙述(§4.1 更正段本身、§15.1 处置表的"原文一
+句"列、§15.2 的更正说明),**不是**标题本身——机械核对标题这一行:
+```
+$ grep -n "^### 4.1" docs/development/todo-center-phase2-fe-verification-20260918.md
+208:### 4.1 本切片新增的 6 个 path 条目在两块里逐字一致(邻域 diff)
+```
+标题行本身已不含该短语,零剩留。
+
+```
+$ git grep -n "deleting \`handleCountsUpdated\`'s \`if (!hasSession"
+docs/development/todo-center-phase2-fe-verification-20260918.md:1303:E3 用例的注释写「deleting `handleCountsUpdated`'s `if (!hasSession()) return`」,但该函数体内并不
+```
+1 处命中,是 §15.1 引用旧注释原文以说明它已被改写(中文叙述句,不是代码)。对**代码文件**单独核实
+零命中:
+```
+$ git grep -n "if (!hasSession" -- '*.ts' '*.vue'
+apps/web/src/approvals/components/ApprovalTodoBadge.vue:316:    if (!hasSession()) {
+apps/web/src/todo/views/TodoCenterView.vue:286:    if (!hasSession()) {
+```
+这两处是**不同位置**的真实代码(认证切换监听器里的 `hasSession()` 检查,决定要不要清零/续订
+`acceptPushes`/重读——见 `ApprovalTodoBadge.vue:307-322`),不在 `handleCountsUpdated` 函数体内,
+与被改写的那句失实注释无关,是本来就存在、本轮零改动的正确代码。
+
+```
+$ git grep -n ":1186"
+docs/development/todo-center-phase2-fe-design-20260918.md:78:...
+docs/development/todo-center-phase2-fe-verification-20260918.md:753:...
+docs/development/todo-center-phase2-fe-verification-20260918.md:(§15.4/§15.6 自身的叙述与命令回显)
+```
+`:78`(设计 MD)与 `:753`(验证 MD §12.1)两处已在 §15.4 逐一核对,均是对
+`todoApi`/`TodoCenterView`/`todoCountsRealtime` 三个不同令牌所在 exec 行的准确引用(§15.6 用 grep
+重新验证 `:1186` 当前 HEAD 上仍是这三个令牌的 exec 行),不是误引 `approvalNavTodoBadge`;§15.4/
+§15.6 自身讨论这件事时的文字命中同理不是过强声明。**全分支范围内,没有一处把 `:1186` 当作
+`approvalNavTodoBadge` 的位置来引用**——这才是 P3-3 要求核对的具体命题,已核对为真。
+
+### 15.10 越界检查
+
+```
+$ git diff be2467ca656234ee19603fcd23f63f8788f92995..HEAD --stat
+ apps/web/tests/approvalNavTodoBadge.spec.ts                                       | ++--
+ apps/web/tests/todoCountsRealtime.spec.ts                                         | ++--
+ docs/development/todo-center-phase2-fe-verification-20260918.md                   | ++--
+```
+（不写具体插入/删除的数字——本节自身仍在追加中,对自己取 diffstat 会引用一个还没定型的数字,同
+`6dafde03e` 已修过的自指陷阱,§12.3/§13.3/§14 都用过这个处理方式,这里延续;数字请在本轮全部编辑
+完成、提交前用上面这条命令自己核一遍。)三个文件都在"测试 / MD"层,零 `packages/core-backend`
+改动,零迁移,零锁文,零 workflow 文件改动,零 `apps/web/src` 生产代码改动。
