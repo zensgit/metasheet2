@@ -1895,14 +1895,30 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       // case's reasoning must be re-read, so it goes red rather than silently widening.
       expect({ calcA, calcB, outboxA, outboxB }).toEqual({ calcA: '0', calcB: '0', outboxA: '0', outboxB: '0' })
 
-      // ── The 呈现 GAP, ASSERTED. The approval side exposes no field carrying the W4 result
-      //    payload: the redeemed round's DTO is an ordinary `UnifiedApprovalDTO`. Measured as a
-      //    negative so that the day a channel IS added, this line goes red and the MD's OPEN item
-      //    must be revisited rather than quietly staying open.
+      // ── The 呈现 channel — and THIS case is its DISCRIMINATING CONTROL. ──
+      //
+      // ⛔ THE TRIPWIRE FIRED, AS DESIGNED (see the sibling note in the `unrecoverableExpired`
+      // case at the bottom of this file). These lines asserted the absence of a channel; a channel
+      // now exists, so they are rewritten as positives rather than deleted.
+      //
+      // WHY THIS CASE MATTERS MORE THAN THE POSITIVE ONE: this fixture seeds NO leave-balance
+      // lots, so the very same production code path yields `unrecoverableExpired: 0` here and
+      // `120` there. Asserting the CLEAN token on THIS fixture is what proves the expired token is
+      // computed from the payload rather than hardcoded for every redemption — a positive-only
+      // assertion on one fixture would pass against a path that always says
+      // `cancelled_with_unrecoverable_expired`.
       const dtoA = (await approveA.json()) as Record<string, unknown>
-      expect(Object.keys(dtoA)).not.toContain('reversal')
-      expect(Object.keys(dtoA)).not.toContain('cancellationResult')
-      expect(JSON.stringify(dtoA)).not.toContain('unrecoverableExpired')
+      const outcomeA = dtoA.cancellationOutcome as { status?: string; reversal?: Record<string, unknown> } | undefined
+      expect(outcomeA?.status).toBe('cancelled')
+      expect(outcomeA?.status).not.toBe('cancelled_with_unrecoverable_expired')
+      // Reported-and-zero, NOT absent: §3.16.1's lesson applied to the wire shape — an absent
+      // summary would make 「nothing to reverse」 and 「the channel is not wired」 byte-identical.
+      expect(outcomeA?.reversal).toEqual({
+        reversed: 0,
+        lots: 0,
+        unrecoverableExpired: 0,
+        alreadyReversed: false,
+      })
     },
   )
 
@@ -2058,12 +2074,44 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(Number(post.rows[0].remaining_minutes)).toBe(360)
       expect(post.rows[0].status).toBe('expired')
 
-      // ── The 呈现 SURFACE is still open, asserted as a negative (same shape as the 账侧 case).
-      //    This is the ONLY half of lock:86 this branch leaves open, and it is an owner decision:
-      //    the payload exists and is persisted; where a human reads it is not this file's call.
+      // ── The 呈现 SURFACE, CLOSED with the DEFAULT contract (⚠️ owner 待裁, 按默认值). ──
+      //
+      // ⛔ THE TRIPWIRE FIRED, AS DESIGNED. Until this commit these two lines asserted the DTO
+      // carried NO such channel, and the MD said 「the day a channel IS added, the line goes red
+      // and this OPEN item must be revisited rather than quietly staying open」. A channel was
+      // added, they went red, and they are REWRITTEN as positives rather than deleted — deleting
+      // them is the move §3.15.7 names ("nobody later 'fixes' the red by adding it to the
+      // exclusion table"). What is still open is narrower and is recorded in the MD: which surface
+      // a HUMAN reads, and whether the field must survive a reload on the DTO.
       const dto = (await approve.json()) as Record<string, unknown>
-      expect(JSON.stringify(dto)).not.toContain('unrecoverableExpired')
-      expect(JSON.stringify(dto)).not.toContain('reversal')
+      const outcome = dto.cancellationOutcome as { status?: string; reversal?: Record<string, unknown> } | undefined
+
+      // THE LOAD-BEARING ASSERTION is the STATUS TOKEN, not the number — §3.16 already owns 120.
+      // This is what the named mutation 「把该状态折叠成一般失败」 has to break: collapse this
+      // status into `cancelled` (plain success) or into any failure shape and this line goes red.
+      expect(outcome?.status).toBe('cancelled_with_unrecoverable_expired')
+      // ...and it is NOT 同形 with either neighbour, asserted rather than argued:
+      expect(outcome?.status).not.toBe('cancelled')
+      expect(outcome?.status).not.toBe('cancelled_reversal_unreported')
+      // The counters ride along, pinned as the whole object exactly as the seal above is.
+      expect(outcome?.reversal).toEqual({
+        reversed: 0,
+        lots: 0,
+        unrecoverableExpired: 120,
+        alreadyReversed: false,
+      })
+
+      // ── THE DURABLE HALF. The action response is transient; the approve audit row is not, and
+      //    it commits in the SAME transaction as the cancellation. Without this a reload loses the
+      //    presentation entirely, which is the failure mode an in-memory-only field would have.
+      const auditRow = await pool().query<{ metadata: { cancellationOutcome?: { status?: string } } }>(
+        `SELECT metadata FROM approval_records
+          WHERE instance_id = $1 AND action = 'approve' ORDER BY created_at DESC LIMIT 1`,
+        [fixture.roundInstanceId],
+      )
+      expect(auditRow.rows[0]?.metadata?.cancellationOutcome?.status).toBe(
+        'cancelled_with_unrecoverable_expired',
+      )
     },
   )
 })

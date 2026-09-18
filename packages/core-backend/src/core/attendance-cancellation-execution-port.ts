@@ -159,3 +159,97 @@ export function getAttendanceCancellationExecutionPort(): AttendanceCancellation
 }
 
 export { AttendanceCancellationExecutionRegistryImpl }
+
+// ---------------------------------------------------------------------------
+// lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,必须呈现)」
+// ---------------------------------------------------------------------------
+
+/**
+ * The reversal counters `reverseLeaveBalanceDeduction` returns
+ * (`plugins/plugin-attendance/index.cjs:19398/:19445`), carried verbatim.
+ */
+export interface CancelRoundReversalSummaryV1 {
+  readonly reversed: number
+  readonly lots: number
+  readonly unrecoverableExpired: number
+  readonly alreadyReversed: boolean
+}
+
+/**
+ * ⚠️ DEFAULT VALUE — OWNER 待裁, 按默认值 (see the design/verification MD's 呈现 section).
+ *
+ * lock:86 requires `unrecoverableExpired` to be 呈现 but names NO surface; §3.16 measured that the
+ * payload IS persisted (the W4 seal writes `response_snapshot` in the approval side's own
+ * transaction) while the approval side exposed no field carrying it. This type is the default
+ * presentation contract that closes the 呈现 half; an owner who wants a different shape replaces it.
+ *
+ * THREE STATUSES, NOT TWO, and the third is the §3.16.1 lesson applied to the wire shape: if the
+ * summary were simply ABSENT when nothing was reversed, 「nothing to reverse」 and 「the channel is
+ * not wired」 would be byte-identical — exactly the `0 === 0` that could not tell 「computed」 from
+ * 「never computed」. So a status token is carried on EVERY redemption:
+ *
+ *  - `cancelled`                          — reversal reported, every deducted minute returned.
+ *  - `cancelled_with_unrecoverable_expired` — reversal reported, and `unrecoverableExpired > 0`:
+ *      the cancellation SUCCEEDED, but some deducted minutes could not be returned because their
+ *      grant lots had expired (`index.cjs:19417-19425`, its own §3a). This is the status lock:86
+ *      demands be 呈现, and it is deliberately NOT 同形 with either neighbour: it is not
+ *      `cancelled` (a caller that only checks 「did it cancel」 still learns the balance is short)
+ *      and it is not a failure (nothing was rolled back; a generic-failure shape would be a LIE
+ *      about a committed cancellation).
+ *  - `cancelled_reversal_unreported`       — the W4 response carried no parseable reversal summary.
+ *      Distinct from both so an unwired/changed payload can never be read as 「zero expired」.
+ */
+export type CancelRoundCancellationOutcomeV1 =
+  | { readonly status: 'cancelled'; readonly reversal: CancelRoundReversalSummaryV1 }
+  | {
+    readonly status: 'cancelled_with_unrecoverable_expired'
+    readonly reversal: CancelRoundReversalSummaryV1
+  }
+  | { readonly status: 'cancelled_reversal_unreported'; readonly reversal: null }
+
+function finiteNumberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * Classify a successful W4 cancellation response into the outcome above.
+ *
+ * The shape read is the request-cancel adapter's own response envelope
+ * (`index.cjs:35275-35285`): `{ ok, data: { requestId, status, orgId, userId, reversal, … } }`,
+ * where `data.reversal` is `reverseLeaveBalanceDeduction`'s return value. Every success kind of
+ * `AttendanceRequestOperationBoundaryResultV1` (`legacy` / `legacy_compat` / `executed` / `replay`)
+ * carries `response`, so this is total over them; `business_refused` carries none and must never
+ * reach here (it is a `blocked` closure, not a cancellation).
+ *
+ * TOTAL AND NON-THROWING on purpose: this runs inside the caller's SERIALIZABLE transaction after
+ * the business cancellation has already been performed and sealed. A presentation classifier must
+ * not be able to roll back a committed cancellation, so a payload it cannot read degrades to
+ * `cancelled_reversal_unreported` rather than throwing.
+ */
+export function classifyCancelRoundCancellationOutcomeV1(
+  response: unknown,
+): CancelRoundCancellationOutcomeV1 {
+  const data = (response as { data?: unknown } | null | undefined)?.data
+  const reversal = (data as { reversal?: unknown } | null | undefined)?.reversal
+  if (typeof reversal !== 'object' || reversal === null) {
+    return { status: 'cancelled_reversal_unreported', reversal: null }
+  }
+  const raw = reversal as Record<string, unknown>
+  const unrecoverableExpired = finiteNumberOrNull(raw.unrecoverableExpired)
+  const reversed = finiteNumberOrNull(raw.reversed)
+  const lots = finiteNumberOrNull(raw.lots)
+  // `unrecoverableExpired` is THE field lock:86 names, so an unreadable one is unreported rather
+  // than defaulted to 0 — defaulting would manufacture the reassuring answer from missing data.
+  if (unrecoverableExpired === null || reversed === null || lots === null) {
+    return { status: 'cancelled_reversal_unreported', reversal: null }
+  }
+  const summary: CancelRoundReversalSummaryV1 = {
+    reversed,
+    lots,
+    unrecoverableExpired,
+    alreadyReversed: raw.alreadyReversed === true,
+  }
+  return unrecoverableExpired > 0
+    ? { status: 'cancelled_with_unrecoverable_expired', reversal: summary }
+    : { status: 'cancelled', reversal: summary }
+}
