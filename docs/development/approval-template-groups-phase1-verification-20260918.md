@@ -387,6 +387,8 @@ $ DATABASE_URL="postgres://localhost/metasheet2_lock_a" EXPECT_DB=1 pnpm exec vi
 ```
 （EXPECT_DB=1 使两个 `itIfExpectDb` 哨兵**实际运行**而非条件跳过——这是全部「23/23」里真正跑到的 23 条,不存在被静默 skip 又计入绿的用例；在**同一个** `metasheet2_lock_a` 库上、不带 `EXPECT_DB=1` 现场重跑同一条命令,现场得到 `21 passed | 2 skipped (23)`(而非援引 §8/§10.4 在 `_u3` 库上的旧结果),两个跳过的正是这两个哨兵,与任何验收行无关,已用 `grep -nE "it\(|itIfExpectDb|describeIf"` 对两个文件逐条核对过没有遗漏的隐藏 `it.skip`。）
 
+**CI 作用域披露(第 3 轮门审 P3-1,P3 卫生轮 2026-09-19 补全——此前三轮均已如实记录这一披露待补,现补上)**:`plugin-tests.yml` 全文 `EXPECT_DB` 计数为 **0**;这两个套件只接线进该 workflow,故其 `itIfExpectDb` 哨兵在 CI 中**不运行**(同一步骤另有 3 个既有文件也带同名哨兵,同样 dormant——它们各自另有专属的 `approval-realdb-*.yml` lane 设 `EXPECT_DB=1`,本切片两个新文件没有这样的专属 lane)。该 lane 今天对 missing-`DATABASE_URL` 的实际保护来自 `plugin-tests.yml:1578` 的 bash `: "${DATABASE_URL:?...}"`(先于 vitest 的 fail-closed),不是这两个哨兵。上面 §13.2 的 `EXPECT_DB=1` 运行是**本地**运行,不是这条 required lane 的行为。**哨兵在 `describeIfDatabase` 内部的嵌套放置本身维持不变**(第 3 轮门审当时的修法建议是移到模块顶层与同步骤 3 个既有兄弟对齐;第 4/6 轮门审复核后判定这是既有的、本切片独有部分在今天任何 lane 上零可观测差异的记账项,不作为本轮代码改动——移动测试拓扑属于对已结案范围决定的重新裁量,留给 owner 决定是否值得在开专属 lane 时一并做,见设计 MD §6)。
+
 ### 13.3 验收 I 本地 diff 取证(现场 HEAD 重跑)
 
 ```
