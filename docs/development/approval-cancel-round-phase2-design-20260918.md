@@ -16,10 +16,14 @@ phase1-design-20260918.md` (C-1 合同层, Draft PR #5851). Companion verificati
 this branch and 2479 lines at this head: `approval-cancel-round-phase2-verification-20260918.md` —
 this design document restates its findings at the level the goal document's template asks for
 (scope, data flow, interfaces, transactions, seams, owner items) and cites the verification MD's own
-§-numbers rather than re-deriving evidence a second time. Every code `file:line` citation below was
-re-derived fresh against `a02930896` by this document's own `grep`/`sed` (shown inline), not copied
-from the verification MD's earlier-head citations, which the verification MD itself flags as
-head-scoped in its own §3.15.1.
+§-numbers rather than re-deriving its test evidence a second time. Every code `file:line` citation
+below was checked by this document's own `grep`/`sed` against `a02930896` (shown inline where the
+check mattered) — not assumed current from the verification MD's own citations, which are head-scoped
+to each unit's HEAD at the time it was written (its own §3.15.1 states this explicitly, after phase 1
+moved out from under phase 2's base mid-slice). Two sites the verification MD cites were found
+DRIFTED at `a02930896` (three line numbers total: the decision adapter's two `FOR UPDATE` lines,
+§1.1/§4.3; the `bulkReassignApprovals` call site, one line, §4.3) and are corrected in place with
+the verification MD's own number kept alongside for traceability, rather than silently overwritten.
 
 **This document is documentation only.** Per this lane's own mandate, it makes no code or test edit;
 every fact below was read off the tree, not written into it by this pass.
@@ -48,7 +52,10 @@ by unit (verification MD §-numbers in the right column):
 ### 1.1 Explicitly NOT in this slice (deferred, per §7 below and the verification MD's own §4)
 
 - **The decision adapter's matching reorder.** §3.10 fixes the CANCEL adapter only; the DECISION
-  adapter (`index.cjs:37596`/`:37617`) is *also* `attendance_requests → approval_instances` and is
+  adapter (`executeRequestDecisionInTransaction`, `index.cjs:37626` `attendance_requests FOR UPDATE`
+  / `:37647` `approval_instances FOR UPDATE` — re-derived against this tree; the verification MD's
+  own §3.10.3 cites `:37596`/`:37617`, its pre-merge head) is *also* `attendance_requests →
+  approval_instances` and is
   gated on the same `requestRow.status === 'pending'` population `bulkReassignApprovals` reaches with
   the instance row already held — the **same cycle, same shape, still live** (verification §3.10.3,
   §0 R-3). Pinned by Q-G LEG 4 so a future reorder there must update the census; owed to the
@@ -80,6 +87,13 @@ by unit (verification MD §-numbers in the right column):
   (§7, lock:159-162) for the entire first-slice program.
 
 ## 2. Data flow and the round's state machine
+
+**Data model**: unchanged from phase 1. This slice adds no migration and no column — `git diff
+--stat feat/approval-cancel-round-phase1..HEAD -- 'packages/core-backend/src/db/migrations/*'`
+against `a02930896` is empty. The template's "数据模型与约束" heading is therefore covered by
+phase-1 design §2 (the `approval_rounds` table, the Q1c FK pairing, the seed chain); what this
+slice adds is behaviour over that unchanged schema, hence "data FLOW", not a second data model
+section.
 
 ### 2.1 The outcome state machine (`approval_rounds.outcome`, lock §4/§14.2/§14.3)
 
@@ -122,7 +136,7 @@ mutation is what proves the round write is load-bearing rather than decorative).
 |---|---|---|---|---|---|
 | `pending → rejected` (A7, judgment III) | `status='rejected'` (real reviewer) | `outcome='rejected', ended_at=now()` | one (ordinary reject completion) | released via engine closure | phase-1 design §5; `ApprovalProductService.ts:11750` (this tree) |
 | `pending → withdrawn` (A4, judgment III) | `status='revoked'` | `outcome='withdrawn', ended_at=now()` | one (ordinary revoke completion) | released | phase-1 design §5; `:11263` (this tree) |
-| `pending → applied` (outlet #5, judgment II) | `status='approved'` (unchanged fall-through) → **C-1 executes and separately writes the ORIGINAL document's own instance** `approved→cancelled` | `outcome='applied', ended_at=now()` | **exactly one** — the cancel round's OWN approve completion (not a second event for the original document) | released; cancel round's own seats deactivate through the ordinary approve path | verification §3.11.6 (redeem case) |
+| `pending → applied` (outlet #5, judgment II) | `status='approved'` (unchanged fall-through) → **C-1 executes and separately writes the ORIGINAL document's own instance** `approved→cancelled` | `outcome='applied', ended_at=now()` | **exactly one** APPROVAL-domain completion event, measured, and it is the cancel round's OWN — §3.11.6's case does not itself assert the original document's instance produces none (C-1 is an attendance-domain operation and never calls `dispatchAction`/`buildCompletionEvent` on the original, so none is expected by construction, but that is a construction argument here, not a case that asserts a zero on the original). C-1's OWN attendance-domain event, `attendance.request.cancelled`, is a separate thing this row does not cover — §3.15.11 measures it at **0/0 on both twins**, but only because the fixture's org resolves `legacy_projection_only`; the `authoritative`/`shadow` branches are unexercised, so that 0/0 is parity of two skips, not a closed claim that the event never fires | released; cancel round's own seats deactivate through the ordinary approve path | verification §3.11.6 (redeem case), §3.15.11 |
 | `pending → expired` (#5′, judgment IV) | `status='rejected'`, actor=`system:approval-cancel-round`, `metadata.cancelRoundCloseReason='round_expired'` | `outcome='expired', ended_at, block_reason=NULL, policy_snapshot_at_decision` | **zero** | seats deactivated by the closure writer | §3.1, §3.2 |
 | `pending → blocked` (#5′, judgment IV, via C-1's `business_refused`) | same system-sentinel shape, `metadata.cancelRoundCloseReason='business_blocked:<code>'`, `cancelRoundBlockDetail` **beside** the bounded reason token, never concatenated into it | `outcome='blocked', block_reason, ended_at, policy_snapshot_at_decision` | **zero** | deactivated | §3.11.6 (`business_refused` case) |
 
@@ -283,7 +297,8 @@ Independent of the two locks above: the lock's global order also places `attenda
 `attendance_requests` first. This is a **second, independently live** cycle (not a hypothetical one):
 core's `classifyAndLockAttendanceRequestForInstance` locks `attendance_requests` with the
 `approval_instances` row already `FOR UPDATE`-held (`dispatchAction`'s entry, `bulkReassignApprovals`
-`:9346`, `w4c3b-central-approval-hooks.ts:247`), while the plugin adapter locked
+`ApprovalProductService.ts:9509` — re-derived against this tree, drifted from the verification MD's
+own `:9346` — and `w4c3b-central-approval-hooks.ts:247`), while the plugin adapter locked
 `attendance_requests` FIRST and `approval_instances` SECOND — both reachable on the SAME `(request,
 instance)` pair while the request is `pending`.
 
@@ -312,7 +327,7 @@ and `execute`, the 409 message changes from `'Request changed during cancellatio
 |---|---|
 | rollout/advisory 锁 | `dispatchAction`'s pre-read + `acquireAttendanceCalculationRolloutLock` (§4.2), FIRST statement after `BEGIN ISOLATION LEVEL SERIALIZABLE` |
 | 轮次引擎实例 | the round's own `approval_instances` row — the SAME `FOR UPDATE` `dispatchAction` already took at entry (no second lock; the round IS the dispatched instance) |
-| 原单据实例 | `evaluateCancelRoundFinalInLock`'s own lock on the ORIGINAL document (§4.1) — and, inside C-1, the cancel adapter's now-first `approval_instances` lock (§4.3) |
+| 原单据实例 | `evaluateCancelRoundFinalInLock`'s own lock on the ORIGINAL document (§4.1). When `redeem` proceeds, C-1 runs on the SAME transaction client (lock §3 C-1 「仅移交连接与事务生命周期的所有权」) and its cancel adapter also takes `approval_instances … FOR UPDATE` on that SAME row (§4.3) — this is a **re-acquisition of a lock this transaction already holds**, a no-op under Postgres row-lock semantics (not a second, independent lock, and not a self-deadlock risk), not two separate locks on two different rows |
 | `attendance_requests` | the cancel adapter's now-second `attendance_requests` lock (§4.3) |
 | 余额批次 | `reverseLeaveBalanceDeduction`'s own row scan — not independently re-ordered by this slice; no lock census leg targets it |
 
@@ -358,7 +373,7 @@ Per instruction, this section quotes the lock's 抬头 RATIFY record without par
 >   `…create_recovery_archive_derived_effects.ts` 与本锁无关。锁文正文保留基线行号,以本条为准换算。
 > - **裁决结果(按建议值)**:§9-1 模型与三份契约按 v5.9 ratify;§9-8 Q1 轮次身份 =
 >   `workflow_key='approval.cancel-round'` + `source_system='platform'`(**采纳**);§9-9 允许集 =
->   {approve, reject, revoke, comment},拒 transfer/add_sign/reduce_sign;§9-10 首期 DDL/seed 三件与
+>   {approve, reject, revoke, comment},拒 transfer/add_sign/reduce_sign;§9-10 首期 DDL/seed 三件 +
 >   迁移与写入方同一发布 = **接受**;§9-11 C-3 情形 2 边界**接受引擎现状**,专用定义 `approvalMode` 取
 >   会签 `'all'`(与 §9-3 G3 联动:一个定义一种模式);§9-2/3/4/5/6/7 按锁文正文的建议值(C-1 status 择定;
 >   **G1–G4 按 §2 收敛版确认**,其中 G3 与 §9-11 联动——一个专用定义一种模式、首期会签 `'all'`,G2 的
@@ -396,9 +411,11 @@ list that attaches to 判据 II / the slice as a whole rather than to C-3 narrow
 - **卡片失效 for a carded cancel round** (C-3 row 3's third column) — possible, pre-existing, unswept
   (verification §3.8). Not a regression this slice introduces; not verified closed either.
 - **Only ONE of the two terminal outcome writers for the `applied` transition is probed.** §3.14's I3
-  mutation drives the round through the #5′/C-3 closure writer; the C-2 success writer at `:9108`-ish
-  region (`outcome='applied'`) is commented as an I3 site in the test file but has **no** probe of its
-  own — building one needs the attendance target plus the double (verification §3.14.5's table).
+  mutation drives the round through the #5′/C-3 closure writer; the C-2 success writer
+  (`ApprovalProductService.ts:9106-9112`, inside `redeemCancelRoundInTxn`, `SET outcome = 'applied'`
+  at `:9109` — re-derived against this tree) is commented as an I3 site in the test file but has
+  **no** probe of its own — building one needs the attendance target plus the double (verification
+  §3.14.5's table).
 - **R1's count (lock §8 期 1, "9 处") does not yet include the new #5′ anchor.** #5′ is an outlet
   anchor for judgment IV, not a chokepoint guard, so it takes no `CANCEL_ROUND_OUTLET_FORBIDDEN`
   negative control by construction — whether §8 期 1's R1 count should grow to 10 to register it is
