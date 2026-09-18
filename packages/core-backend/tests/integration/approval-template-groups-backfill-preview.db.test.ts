@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { query } from '../../src/db/pg'
-import { previewApprovalTemplateGroupBackfill } from '../../src/routes/approvals'
+import { executeApprovalTemplateGroupBackfill, previewApprovalTemplateGroupBackfill } from '../../src/routes/approvals'
 import type { ApprovalTemplateVisibilityActor } from '../../src/services/ApprovalProductService'
 
 /**
@@ -10,8 +10,11 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
  * by existing category") — real-DB acceptance for **W7 preview only**
  * (`docs/development/approval-template-groups-phase2-design-20260918.md` §5,
  * `previewApprovalTemplateGroupBackfill` in `src/routes/approvals.ts`). W8 execute / W9 rollback
- * are separate, later units (still unimplemented as of this file) — this suite does not exercise
- * them and does not exercise any L0-taking transaction (preview takes no lock at all, §5.2).
+ * are separate units with their own dedicated `.db.test.ts` files and are not otherwise exercised
+ * here — the one exception is the changesRequired #12 `candidateCount` coupling case below, which
+ * calls the real `executeApprovalTemplateGroupBackfill` (not a copy of its query) specifically to
+ * prove preview's count and execute's actual processed count cannot drift apart; every other case
+ * in this file does not exercise any L0-taking transaction (preview itself takes no lock, §5.2).
  *
  * Most cases call the exported service-layer function directly (same style as the phase 2 DDL
  * schema suite, `approval-template-groups-backfill-schema.db.test.ts`) — no HTTP round trip
@@ -80,6 +83,12 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
 
   afterAll(async () => {
     for (const org of orgTags.splice(0)) {
+      // The changesRequired #12 coupling case below is this file's only test that calls real
+      // execute, so it is the only one that ever writes a batch header row — deleted first
+      // (cascades to its own `..._batch_groups`/`..._batch_links` rows, §2's FK shape) so the
+      // group/link deletes below never see a batch row still pointing at what they are about to
+      // remove; a no-op for every other test's org.
+      await query(`DELETE FROM approval_template_group_backfill_batches WHERE org_id = $1`, [org])
       await query(`DELETE FROM approval_template_group_links WHERE org_id = $1`, [org])
       await query(`DELETE FROM approval_template_groups WHERE org_id = $1`, [org])
     }
@@ -167,6 +176,10 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
     expect(financeBucket!.action).toBe('create')
     expect(financeBucket!.templateCount).toBe(1)
     expect(financeBucket!.templateIds).toEqual([finance])
+
+    // changesRequired #12 (P2-2 cap branch): candidateCount = sum of every bucket's
+    // templateCount (2 HR + 1 Finance).
+    expect(preview.candidateCount).toBe(3)
   })
 
   it('buckets: action="attach" with the existing active group id when an active group already has this name (btrim-matched)', async () => {
@@ -227,6 +240,33 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
 
     // None of the skipped rows leak into buckets.
     expect(preview.buckets).toHaveLength(0)
+    // changesRequired #12: skipped rows are never candidates — all three templates here are
+    // skip-only, so candidateCount is 0, not 3.
+    expect(preview.candidateCount).toBe(0)
+  })
+
+  it('changesRequired #12: candidateCount is the SAME population execute actually processes, computed from the SAME predicate (not a second, independently-drifting query) — asserted by running both against one org with a skip-eligible mix', async () => {
+    const org = trackOrg(`atgp-candidatecount-${TS}`)
+    await createTemplate(`atgp-cc-hr1-${TS}`, 'HR')
+    await createTemplate(`atgp-cc-hr2-${TS}`, 'HR')
+    await createTemplate(`atgp-cc-fin-${TS}`, 'Finance')
+    await createTemplate(`atgp-cc-cjk-${TS}`, '人事') // skip-eligible: CATEGORY_NOT_STORABLE_AS_GROUP_NAME
+    await createTemplate(`atgp-cc-blank-${TS}`, '   ') // skip-eligible: CATEGORY_BLANK_AFTER_TRIM
+
+    const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
+    expect(preview.candidateCount).toBe(3) // 2 HR + 1 Finance — the two skip rows excluded
+    // Defense-in-depth, not a substitute for the cross-call assertion below: candidateCount must
+    // equal what a reader summing `buckets[].templateCount` themselves would get.
+    expect(preview.candidateCount).toBe(preview.buckets.reduce((sum, b) => sum + b.templateCount, 0))
+
+    // The actual cross-check: execute (§13.2's `eligible` query, changesRequired #3's IDENTICAL
+    // `btrim(category) ~ '[!-~]'` predicate) must process EXACTLY `candidateCount` templates — the
+    // number preview told the caller to expect BEFORE any write happened. Calling execute after
+    // reading `preview.candidateCount` (not before) is what proves this is a same-predicate
+    // coupling and not two independently-typed counts that merely happen to agree today.
+    const executed = await executeApprovalTemplateGroupBackfill(org, managerActor, `probe-${TS}`)
+    const executedCount = executed.groups.reduce((sum, g) => sum + g.templateIds.length, 0)
+    expect(executedCount).toBe(preview.candidateCount)
   })
 
   it('I2′ population (§5.1): a template already linked to ANY group (even after being unlinked and never relinked would still be excluded — this asserts the still-linked leg) never appears in buckets or skipped', async () => {
@@ -359,7 +399,7 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
   // ci-wiring guard both only prove a path STRING exists somewhere in source, never that this
   // specific guard actually answers that path at runtime).
   describe('route wiring: GET /api/approval-template-groups/backfill/preview (real HTTP, real guard)', () => {
-    it('an admin actor gets 200 with {scope, buckets, skipped}', async () => {
+    it('an admin actor gets 200 with {scope, candidateCount, buckets, skipped}', async () => {
       const org = trackOrg(`atgp-http-admin-${TS}`)
       await createTemplate(`atgp-http-admin-tpl-${TS}`, 'HR')
       // Same fixture shape as the phase 1 lifecycle suite's own "F: authorization" positive
@@ -371,8 +411,12 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
 
       const res = await httpReq(base, '/api/approval-template-groups/backfill/preview', admin)
       expect(res.status).toBe(200)
-      const body = (await res.json()) as { scope: string; buckets: unknown[]; skipped: unknown[] }
+      const body = (await res.json()) as { scope: string; candidateCount: number; buckets: unknown[]; skipped: unknown[] }
       expect(body.scope).toBe('org-complete')
+      // changesRequired #12: this is the field's ONLY over-the-HTTP-wire assertion in this file —
+      // every other case calls the exported function directly, which would not catch a JSON
+      // serialization regression (e.g. Express's default JSON replacer dropping an `undefined`).
+      expect(body.candidateCount).toBe(1)
       expect(Array.isArray(body.buckets)).toBe(true)
       expect(Array.isArray(body.skipped)).toBe(true)
       expect((body.buckets as Array<{ category: string }>).some((b) => b.category === 'HR')).toBe(true)
