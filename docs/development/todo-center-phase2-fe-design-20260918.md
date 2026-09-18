@@ -326,6 +326,27 @@ mutation(验证 MD mutation 5):让 `publishTodoCountsUpdate` 忽略注入的 `co
 `'reuses the injected countPendingForUser fetcher ...'` 的用例(以及另外三个)转红,恢复后转绿,
 `cmp` 确认字节级还原。
 
+**撤回(gate `impl-gate-B2-round1-20260918.md` P1-1/P2-1,修复轮 1,20260918)**:上一段的结论过强。
+mutation 5 改的是 `publishTodoCountsUpdate` 消费**被注入的** `countPendingForUser`——它证明的只是
+「函数会调用交给它的 fetcher、并原样转发其返回值」,**不证明**「生产默认路径就是
+`pendingSourceRegistry.countPendingForUser`」。生产从不传 `countPendingForUser`(`routes/approvals.ts`
+的调用点没有这个字段),走的永远是 `defaultCountPendingForUser`——而全部 5 条旧用例**都注入了**
+fetcher,从未执行过这一行。门审换了一条不同的 mutation(把 `defaultCountPendingForUser` 本身换成
+本段第一句点名的已知发散实现 `computeApprovalPendingCounts`,不是验证 MD mutation 5 那条)亲跑证实:
+`packages/core-backend/tests/unit` 全量在该 mutation 下报 **794/12709 全绿**(门审报告 §5 M5 行,
+含上面那 5 条旧用例);required 检查 `test (20.x)` 跑的默认 `vitest run` 也全绿(门审对 M6——删掉
+整条触发调用——单独跑的是 932/14716,同样全绿)。「不重复 P1-1 的错误」这句话在生产默认路径上是
+**零判别力的注释断言**,不是被测行为。
+
+修复轮 1 新增 `tests/unit/todo-realtime.test.ts` 里**不注入** fetcher 的用例
+`'the DEFAULT path (no injected fetcher) calls pendingSourceRegistry.countPendingForUser ...'`——
+它 `vi.spyOn` 打在 `pendingSourceRegistry.countPendingForUser` 本身上,断言默认路径确实调用了这个
+共享单例。本轮亲跑同一条 `computeApprovalPendingCounts` mutation(只跑新文件,不是整个
+`tests/unit`):这条新用例**精确转红**(1 failed / 5 passed——5 条旧用例照样绿,印证上一段「零判别力」
+的诊断),`cp` 还原后 `cmp` 字节相同。本轮修复前(未 mutation)的当前基线是
+933 文件 / 14720 测试全绿(见验证 MD §10.5)——这是**清洁跑**的数字,不是 mutation 下的数字,两者
+不要混读。证据与新用例正文见验证 MD §10。
+
 已知的、非本切片引入的输入缺口(`services/todo-realtime.ts:16-27` 自述):
 `publishApprovalCountsForUsers` 只把「其它用户」的 `roles` 传给两个发布函数,从不传 `permissions`——
 这是 `publishApprovalCountsUpdate` 早就有的限制(它的调用点同样不传 `permissions`),`publishTodoCountsUpdate`
