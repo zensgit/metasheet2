@@ -553,3 +553,27 @@ L0(顾问锁)
 ### 13.7 验证 MD 状态
 
 本切片的验证 MD(`docs/development/approval-template-groups-phase2-verification-*.md`)**尚不存在**——按目标文档 §"每个切片的交付物"的要求,验证 MD 随 Draft PR 一并提交,本步只交付设计文档的门审裁定落地,不构成验证 MD 的替代,记入 remaining。
+
+## 14. 续做步骤 8:批次表 DDL 代码化 + 真库回归(2026-09-18)
+
+本步只做§2 的 DDL 代码化这一个最小单元,不写 W7/W8/W9 的 `.ts` 服务/路由代码(仍在 remaining)。
+
+- **迁移文件**:`packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts`——三张表(`approval_template_group_backfill_batches` / `_batch_groups` / `_batch_links`)+ `..._org_created_idx` 索引,逐字落地 §2.1–2.3 现场标注后的最终形状(含 changesRequired #4 的 `atgbbl_link_fk` CASCADE 修正、#5 的索引)。`up`/`down` 均为 additive-only、`IF NOT EXISTS`/`IF EXISTS` 幂等。
+- **已在私有库 `metasheet2_lock_a3` 应用**(`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 npx tsx src/db/migrate.ts`,`packages/core-backend` 内)——**未**应用到任何共享/CI/生产库。
+- **真库测试(新文件)**:`packages/core-backend/tests/integration/approval-template-groups-backfill-schema.db.test.ts`,8 例,全部针对 DDL 本身(尚无路由/服务层,W7/W8/W9 未写):
+  1. changesRequired #5 索引存在;
+  2. 四条 FK 的 `confdeltype` 逐一核对(`atgbbg_batch_fk`=c、`atgbbg_group_fk`=a、`atgbbl_batch_fk`=c、`atgbbl_link_fk`=c)——机核 Q5 裁定,不是散文;
+  3. **M6 正控**:硬删一个已挂接模板,断言级联穿过 `..._links` 直达 `..._batch_links`(零行残留、无 FK 报错);
+  4. **M6 反控(mutation)**:同一条事务内把 `atgbbl_link_fk` 现场改回提案原始的 `NO ACTION`(`DROP CONSTRAINT` + `ADD CONSTRAINT`),对同一条删除断言必炸(`atgbbl_link_fk`),再断言事务 ROLLBACK 后目录里的 `confdeltype` 确已还原为 `c`——DDL 的 mutation 是事务性的,不需要 `cp` 文件级备份/还原;
+  5/6. `atgbbg_group_fk`/`atgbbl_link_fk` 的跨 org 复合 FK 拒绝(两个独立反例);
+  7. 批次头删除级联到两张子表,但不牵动它们各自指向的 groups/links 行。
+- **对迁移文件本身的 mutation 探针**(遵守硬规矩:`cp` 备份 → 改 → 单独跑 → 还原 → `cmp`):把 `.ts` 源文件里的 `atgbbl_link_fk` 现场改回 `NO ACTION`,`DROP TABLE`+重新 `migrate` 使其在私有库生效,重跑同一文件——3/8 例转红(FK 形状断言、M6 正控、M6 反控的"已还原"断言),其余 5 例仍绿;`cp` 还原源文件后 `cmp` 确认字节级一致,再次 `DROP TABLE`+`migrate`+重跑,8/8 转绿。这证明这 3 例是本 DDL 修正的真实回归证据,不是空转断言。
+- **CI 两点接线 + 第三点(执行性)+ s6a 重钉**(新文件,之前不存在):
+  - `packages/core-backend/vitest.config.ts` 的 `exclude` 数组新增该文件路径(见现场行,`grep -n "approval-template-groups-backfill-schema" packages/core-backend/vitest.config.ts` 命中 2 处:exclude 条目 + 注释引用);
+  - `.github/workflows/plugin-tests.yml` 的 `approval-real-db-integration` 步骤整文件参数列表末尾追加该文件(`grep -n "approval-template-groups-backfill-schema.db.test.ts" .github/workflows/plugin-tests.yml` 命中 1 处,即该 vitest 参数行本身;独立 wiring 守卫步骤引用的是另一个文件名 `approval-template-groups-backfill-schema-ci-wiring.test.mjs`,见下一条);
+  - 新增 `scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs`(仿 `b4-department-bindings-ci-wiring.test.mjs` 形状:两点接线 + 文件存在性 + "不得误连到 multitable 真库步骤"反例),并在 `plugin-tests.yml` 的无 DB `test` job 里新增一步 `A3 backfill-schema CI wiring contract` 去 `node --test` 它——否则这个新 wiring 守卫本身不会被任何 CI job 执行(纯本地存在,CI 里空转)。
+  - 由于改了 `plugin-tests.yml`,按硬规矩同一提交重算 s6a `pluginTestsWorkflow` 钉:`shasum -a 256 .github/workflows/plugin-tests.yml` 从 `f08ea1a…` 变为 `33befe4…`,已写回 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`;改前 `node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 亲跑转红(`SEALED_EXPORT_INTERNAL_ERROR`),改后重跑转绿(`sealed-export-package-provenance.test.cjs OK`)。
+  - **本条不适用于 A-1 的两个既有文件**(`approval-template-groups-lifecycle.db.test.ts` / `approval-template-groups-serialization.db.test.ts`)——它们仍只受步骤脚本的 bash `:?` 保护、没有专属 `*-ci-wiring.test.mjs`,这是 §9/P3-2 已披露的既有残留,本步没有现场回填(不在本单元范围内,记入 remaining,补写时机=写 W7/W8/W9 真库测试文件时一并处理更合理,因为那时才会真正调用这两个文件里定义的原语)。
+- **回归证据(A-1 两个既有真库文件,未改动,亲跑)**:`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run tests/integration/approval-template-groups-lifecycle.db.test.ts tests/integration/approval-template-groups-serialization.db.test.ts tests/integration/approval-template-groups-backfill-schema.db.test.ts --reporter=dot`(`packages/core-backend` 内)→ `Test Files 3 passed (3)` / `Tests 34 passed (34)`(16 + 10 + 8)。
+- `npx tsc --noEmit -p tsconfig.json`(`packages/core-backend`)对迁移文件与新测试文件均**零错误**。
+- **未做**(remaining,交后续单元):W7 preview / W8 execute / W9 rollback 的路由与服务层 `.ts` 代码(含 `beginApprovalTemplateGroupTxn` 品牌类型、`GET …/backfill/batches` 端点、changesRequired #13 的三条组合调用判别力测试);A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(见上一条);验证 MD(§13.7,仍不存在)。
