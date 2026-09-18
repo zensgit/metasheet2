@@ -989,7 +989,7 @@ $ git diff --stat
  docs/development/approval-template-groups-phase2-backfill-verification-20260918.md | <本节自身>
  4 files changed
 ```
-零生产代码改动(§11.4 的 mutation 探针已 `cmp` 确认字节级复原,不计入本次提交);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-backfill-batches-list.db.test.ts`/`approval-template-groups-lifecycle.db.test.ts`/`approval-template-groups-serialization.db.test.ts` 按 §11.3「步骤④机械核查」小节的 `grep` + 逐命中行走查 + 84 文件污染库实测三重证据保持不动,不是仅凭「两个库都绿」。§10 是既有编号(修复轮 3),本节按既有编号序延续为 §11——三个文件里的代码注释本身已经这样自称(「§11 CI fix」),本节把编号落回 MD 正文,不是新起一套编号。
+零生产代码改动(§11.4 的 mutation 探针已 `cmp` 确认字节级复原,不计入本次提交);`approval-template-groups-backfill-schema.db.test.ts`/`approval-template-groups-backfill-batches-list.db.test.ts`/`approval-template-groups-lifecycle.db.test.ts`/`approval-template-groups-serialization.db.test.ts` 按 §11.3「步骤④机械核查」小节的 `grep` + 逐命中行走查 + 84 文件污染库实测三重证据保持不动,不是仅凭「两个库都绿」。**求值(2026-09-19,round-4 gate P3-2,`impl-gate-A3-round4-20260918.md` §4):这句「保持不动」名单里的 `approval-template-groups-backfill-batches-list.db.test.ts` 已在 §12.1(修复轮 4)被改动——新增了本文件自己独立的第四份 `sinkForeignTemplates` 副本 + 2 处调用,详见 §12.6 的 `git diff --stat`。此处原句按记忆 `feedback_supersession_marker_must_evaluate_not_void` 的要求不删除,只贴求值:`schema`/`lifecycle`/`serialization` 三个文件对本句仍然成立,只有 `batches-list` 一项从这份名单里移出,不得单读本段就以为它至今未被触碰。**§10 是既有编号(修复轮 3),本节按既有编号序延续为 §11——三个文件里的代码注释本身已经这样自称(「§11 CI fix」),本节把编号落回 MD 正文,不是新起一套编号。
 
 **遗留(如实记录,不算已满足)**:`directory-binding-admin-routes.db.test.ts` 的跨文件 flake 未定位根因,只确认与本切片无关且不可能是本切片下游;是否需要单独立项排查,交 owner/后续 lane 裁决。
 
@@ -1002,6 +1002,8 @@ $ git diff --stat
 ### 12.1 P2-1(唯一阻断项)—— `sinkForeignTemplates` 只关「精确集合/计数」轴,未关「500 上限」轴
 
 **发现原文**(门审 E14,亲跑):往同一 org 池注入 634 行外来未链接模板后,`executeApprovalTemplateGroupBackfillWithClient` 在分桶前对 `eligible.length`(617)做的上限检查(`routes/approvals.ts:694-701`,`APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500`)先于任何 sink 生效,导致 10 个未 sink 的 `execute` 调用点全部抛 `ServiceError`——execute 文件的 idempotency(:335 起,现已随本轮改动移位)/cross-verification/route-wiring admin,rollback 文件的 attach/extadd/double/notfound/route-wiring admin,batches-list 文件的 route-wiring admin/smoke。execute 文件里 idempotency(原 `:328-333`)与 cross-verification(原 `:386-389`)两处豁免注释的 `regardless of how many foreign rows` / `never changes` 是被这条反例证伪的绝对断言。
+
+**求值(2026-09-19,round-4 gate P3-3,`impl-gate-A3-round4-20260918.md` §4/§0):「634 行」本身不是承重的量,承重的是通过上限检查(`eligible.length`,即 §3.1 候选谓词——`NOT EXISTS` 链接排除 + `btrim(category) ~ '[!-~]'`)的行数,这里记 `storable_unlinked`。上面这次注入恰好 `storable_unlinked = 617`(> 500,越限),是因为这批插入全部使用非 NULL 分类(`'Pollute' || (g % 7)`),全部通过 `btrim(...) ~ '[!-~]'`;门审第 4 轮独立复核过一个**不越限**的反例——同样插入 634 行,但按「NULL/非 NULL 各半」配比,`storable_unlinked` 只有 317(< 500),5 个文件全绿但根本没碰到上限分支。所以「634 行」这个数字不能脱离分类配比单独当复现口径读;下面 §12.5 回归表与本节其余「634」引用记的都是**这一批全非 NULL 的注入**(`storable_unlinked = 617`),读者若照抄「634 行」去构造别的验证集,必须先确认自己的分类配比也全部落在 `btrim(...) ~ '[!-~]'` 之内,否则可能像门审第 4 轮 E5 那样测不到这条轴。**
 
 **修法(两条都做,按门审措辞对应)**:
 
@@ -1109,7 +1111,7 @@ EXIT=0,与门审 E11 的计数逐字相同(`1107`/`16326`),不是巧合——收
 | tsc | `cd packages/core-backend && npx tsc --noEmit` | EXIT=0,零错误(含 §12.1 新增的 `assertEligibleCandidateCountWithinCap`/常量重排) |
 | 建库 + 迁移 | `dropdb --if-exists metasheet2_lock_a3_r4 && createdb metasheet2_lock_a3_r4` + `DATABASE_URL=… pnpm run db:migrate` | 全量迁移,末条 `zzzz20260919090000_create_approval_template_group_backfill_batches`,与门审报告一致 |
 | A-3 五文件 + A-1 两文件,处女库,污染前 | `vitest --config vitest.integration.config.ts run <7 个文件> --reporter=dot` | `Test Files 7 passed (7)` / `Tests 86 passed (86)` |
-| E14 复现(§12.1) | 634 行污染 → 4 文件 45 用例 | 全绿(此前 10 failed) |
+| E14 复现(§12.1) | 634 行污染(全非 NULL 分类 ⇒ `storable_unlinked = 617` > 500,承重量见 §12.1 求值)→ 4 文件 45 用例 | 全绿(此前 10 failed) |
 | Mutation(§12.1) | 去掉 double 用例的 sink,635 超限 | 1 failed(仅该用例)/ 10 passed;`cmp` 复原 |
 | 84 文件 required real-DB 步骤逐字复现(按 `.github/workflows/plugin-tests.yml:1613-1699` 原样抄出,唯一改动是 `DATABASE_URL` 指向本次私有库) | `DATABASE_URL=… EXPECT_DB=1 bash -e /tmp/a3r4-realdb-step.sh` | `Test Files 84 passed (84)` / `Tests 943 passed (943)` / EXIT=0——**本轮零失败**,门审 E2 记录的那条跨文件既有 flake(`directory-binding-admin-routes.db.test.ts`)本次未复现,与 §11.5 遗留段"未定位根因的跨文件 flake"记录一致(间歇性,不是每次都触发) |
 | 84 文件跑完后 `approval_templates`/`approval_template_groups`/`approval_template_group_links` 残留 | `psql` 计数 | `0 \| 0 \| 0`——与 §12.3 的「本步骤自身残留为 0」结论一致,再次实测确认 |
