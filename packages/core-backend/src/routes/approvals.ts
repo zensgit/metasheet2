@@ -78,12 +78,14 @@ import {
 import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import {
   archiveApprovalTemplateGroup,
+  classifyBackfillCategory,
   createApprovalTemplateGroup,
   linkApprovalTemplateToGroup,
   listApprovalTemplateGroups,
   renameApprovalTemplateGroup,
   unarchiveApprovalTemplateGroup,
   unlinkApprovalTemplateFromGroup,
+  type BackfillCategorySkipReason,
 } from '../services/ApprovalTemplateGroupService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
@@ -460,6 +462,127 @@ export async function isApprovalTemplateVisibleForGroupLink(
   applyTemplateVisibilityFilter(conditions, params, 2, actor)
   const result = await query(`SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`, params)
   return (result.rowCount ?? 0) > 0
+}
+
+// ── A-3 backfill — design-gate A3-phase2, W7 preview ────────────────────────────────────────────
+// `docs/development/approval-template-groups-phase2-design-20260918.md` §5. Read-only: no lock,
+// no write — the candidate population is §5.1's I2′ predicate (`NOT EXISTS` in
+// `approval_template_group_links` for this org) plus the SAME `applyTemplateVisibilityFilter`
+// every other template read in this router uses (defined here, not the service file, for the SAME
+// reason `isApprovalTemplateVisibleForGroupLink` above lives here rather than in
+// `ApprovalTemplateGroupService.ts`: it needs `applyTemplateVisibilityFilter`, which that file does
+// not import, to avoid a cross-service import for a single query).
+
+export interface ApprovalTemplateGroupBackfillBucket {
+  category: string
+  action: 'create' | 'attach'
+  existingGroupId: string | null
+  templateIds: string[]
+  templateCount: number
+}
+
+export interface ApprovalTemplateGroupBackfillSkip {
+  category: string
+  reason: BackfillCategorySkipReason
+  templateIds: string[]
+  templateCount: number
+}
+
+export interface ApprovalTemplateGroupBackfillPreview {
+  scope: 'org-complete' | 'visible-to-you'
+  buckets: ApprovalTemplateGroupBackfillBucket[]
+  skipped: ApprovalTemplateGroupBackfillSkip[]
+}
+
+const EMPTY_EXISTING_GROUP_MAP: ReadonlyMap<string, string> = new Map()
+
+export async function previewApprovalTemplateGroupBackfill(
+  orgId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+): Promise<ApprovalTemplateGroupBackfillPreview> {
+  // §5.1: "从未被这个 org 关联过" — the identical I2′ NOT EXISTS predicate execute's `eligible`
+  // query (§3.1) uses, plus the same visibility filter every other template read applies.
+  const conditions: string[] = [
+    'NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)',
+  ]
+  const params: unknown[] = [orgId]
+  applyTemplateVisibilityFilter(conditions, params, 2, actor)
+  const candidates = await query<{ id: string; category: string | null }>(
+    `SELECT t.id, t.category FROM approval_templates t WHERE ${conditions.join(' AND ')}`,
+    params,
+  )
+
+  // Pass 1 — skip/eligible determination never depends on which groups already exist (§5.2:
+  // `classifyBackfillCategory`'s skip branch ignores `existingGroupIdByTrimmedName`), so an empty
+  // map is safe here; it only collects the set of trimmed category names pass 2 needs to look up.
+  const firstPass = candidates.rows.map((row) => ({
+    row,
+    classification: classifyBackfillCategory(row.category, EMPTY_EXISTING_GROUP_MAP),
+  }))
+  const eligibleTrimmedCategories = new Set<string>()
+  for (const { classification } of firstPass) {
+    if (classification.action !== 'skip') eligibleTrimmedCategories.add(classification.trimmedCategory)
+  }
+
+  const existingGroupIdByTrimmedName = new Map<string, string>()
+  if (eligibleTrimmedCategories.size > 0) {
+    const existing = await query<{ id: string; name: string }>(
+      `SELECT id, name FROM approval_template_groups
+        WHERE org_id = $1 AND archived_at IS NULL AND name = ANY($2::text[])`,
+      [orgId, Array.from(eligibleTrimmedCategories)],
+    )
+    for (const g of existing.rows) existingGroupIdByTrimmedName.set(g.name, g.id)
+  }
+
+  const bucketsByCategory = new Map<string, ApprovalTemplateGroupBackfillBucket>()
+  const skippedByCategory = new Map<string, ApprovalTemplateGroupBackfillSkip>()
+
+  for (const { row, classification: firstClassification } of firstPass) {
+    if (firstClassification.action === 'skip') {
+      const key = row.category ?? ''
+      let bucket = skippedByCategory.get(key)
+      if (!bucket) {
+        bucket = { category: key, reason: firstClassification.reason, templateIds: [], templateCount: 0 }
+        skippedByCategory.set(key, bucket)
+      }
+      bucket.templateIds.push(row.id)
+      bucket.templateCount++
+      continue
+    }
+    // Pass 2 — same category, now with the real existing-group map, to resolve create vs attach.
+    const classification = classifyBackfillCategory(row.category, existingGroupIdByTrimmedName)
+    if (classification.action === 'skip') continue // unreachable: pass 1 already proved this row's category non-skip
+    let bucket = bucketsByCategory.get(classification.trimmedCategory)
+    if (!bucket) {
+      bucket = {
+        category: classification.trimmedCategory,
+        action: classification.action,
+        existingGroupId: classification.action === 'attach' ? classification.existingGroupId : null,
+        templateIds: [],
+        templateCount: 0,
+      }
+      bucketsByCategory.set(classification.trimmedCategory, bucket)
+    }
+    bucket.templateIds.push(row.id)
+    bucket.templateCount++
+  }
+
+  return {
+    // §5.2 changesRequired #16: "org-complete" iff `applyTemplateVisibilityFilter` is a no-op for
+    // this actor (the SAME condition that function itself short-circuits on) — not "actor is a
+    // manager" restated, but the literal predicate this preview's own candidate query just ran.
+    scope: !actor || actor.isTemplateManager ? 'org-complete' : 'visible-to-you',
+    // §3.1 "categories ← … 按字典序排序" — plain code-point order (NOT `localeCompare`, which is
+    // locale/ICU-dependent and can disagree with SQL `ORDER BY` under a C-collation database; see
+    // `finding_prod_pg15_never_tested` for this repo's live glibc/musl collation gap), so preview's
+    // ordering cannot silently drift from whatever ORDER BY W8's execute eventually uses.
+    buckets: Array.from(bucketsByCategory.values()).sort(byCategoryCodePoint),
+    skipped: Array.from(skippedByCategory.values()).sort(byCategoryCodePoint),
+  }
+}
+
+function byCategoryCodePoint(a: { category: string }, b: { category: string }): number {
+  return a.category < b.category ? -1 : a.category > b.category ? 1 : 0
 }
 
 function approvalVersionConflictResponse(currentVersion: number) {
@@ -1257,6 +1380,29 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       res.status(204).end()
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED', 'Failed to unlink approval template from group')
+    }
+  })
+
+  // ── A-3 backfill ("按现有 category 建组并挂接") — design-gate A3-phase2 W7 ───────────────────
+  // Phase 2 design doc §6.1/§6.2 (changesRequired #8/Q2, ownerLevel=true, default applied):
+  // preview is READ-ONLY but gated by `approvalTemplateAdminGuard` (the SAME writer-only guard as
+  // execute/rollback below it), not `rbacGuard('approvals:read')` — a deliberate, disclosed
+  // deviation from I7's literal read/write guard split (see the design doc §6.2 / §13.1 #8 for the
+  // three-part rationale and the owner-confirmation obligation this carries).
+  r.get('/api/approval-template-groups/backfill/preview', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const preview = await previewApprovalTemplateGroupBackfill(orgId, actor)
+      res.json(preview)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_GROUP_BACKFILL_PREVIEW_FAILED',
+        'Failed to preview approval template group backfill',
+      )
     }
   })
 

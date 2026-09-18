@@ -1846,6 +1846,14 @@ export default defineConfig({
       // 1 files above, which rely only on the step's bash `:?` — a disclosed residual, see this
       // design doc's §13.6 PR-body checklist item citing P3-2).
       'tests/integration/approval-template-groups-backfill-schema.db.test.ts',
+      // Same slice, W7 preview unit: `previewApprovalTemplateGroupBackfill`
+      // (`src/routes/approvals.ts`) — read-only, takes no lock, calls into real Postgres via the
+      // exported `query()` helper (same style as the schema suite above rather than an HTTP round
+      // trip — the write-endpoint guard mechanism is already proven end-to-end by the phase 1
+      // lifecycle suite). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it.
+      // Has its own dedicated `approval-template-groups-backfill-preview-ci-wiring.test.mjs` guard
+      // (same rationale as the schema suite's own dedicated guard, above).
+      'tests/integration/approval-template-groups-backfill-preview.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
