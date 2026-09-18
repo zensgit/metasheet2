@@ -219,7 +219,13 @@ resolution `catch`, an unrelated fail-closed no-manager path).
 
 ### 3.3 The allowed action set (lock §14.2, lock:342)
 
-`ApprovalProductService.ts:4253-4264`:
+`ApprovalProductService.ts` (design-time sketch; re-derive this tree's actual lines with
+`grep -n "^const CANCEL_ROUND_ALLOWED_ACTIONS\|^function assertCancelRoundActionAllowed"
+ApprovalProductService.ts` rather than trusting a pinned literal here — P3 hygiene round,
+2026-09-19, gate round-5 P3-2 found this section's `:4253-4264` and §7's `:4253-4272` both off by
+a few lines from this tree's real block, `:4251-4256` (const) / `:4258-4266` (function); per
+`feedback_digest_pin_is_not_a_behavioural_gate`, re-deriving rather than re-pinning a corrected
+literal is the fix, since a fresh literal drifts the same way on the next edit):
 
 ```
 const CANCEL_ROUND_ALLOWED_ACTIONS: ReadonlySet<ApprovalActionType> =
@@ -454,7 +460,7 @@ implementation):
 |---|---|---|
 | Identity predicate, zero-import leaf module | `packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts:27,34-38` | `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`, `isCancelRoundInstance` |
 | Re-export into the service file every chokepoint imports from | `src/services/ApprovalProductService.ts:4242` | `export { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'` |
-| Action-allow gate, single call site | `src/services/ApprovalProductService.ts:4253-4272`, called at `:9928` | `CANCEL_ROUND_ALLOWED_ACTIONS`, `assertCancelRoundActionAllowed` |
+| Action-allow gate, single call site | `src/services/ApprovalProductService.ts` (re-derive, see §3.3 — this tree's block is `:4251-4266`, not the `:4253-4272` this row previously said; P3 hygiene round, gate round-5 P3-2), called at `:9928` (unchanged, verified correct) | `CANCEL_ROUND_ALLOWED_ACTIONS`, `assertCancelRoundActionAllowed` |
 | Creation method | `src/services/ApprovalProductService.ts:8308-8542` | `createCancelRoundInstance` |
 | A4 (revoke) round-close | `src/services/ApprovalProductService.ts:10641-10652` | 判据 III half 1 |
 | A7 (reject) round-close | `src/services/ApprovalProductService.ts:11128-11140` | 判据 III half 2 |
