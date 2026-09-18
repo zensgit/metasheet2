@@ -1815,14 +1815,19 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    *       reverse and BOTH paths produce `reversal.reversed = 0`. Parity of a zero is parity; it
    *       is not the `unrecoverableExpired > 0` presentation lock:86 demands. CLOSED by the last
    *       case, which seeds an EXPIRED lot and gets 120.
-   *   (b) **the approval side's RETURN VALUE has no channel for it.** `redeemCancelRoundInTxn`
-   *       receives `{ kind: 'executed', response }` from the entry and returns `{ kind: 'applied' }`
-   *       — the W4 response payload, `reversal` and all, is DISCARDED on that path.
-   *       ⛔ The stronger form of this sentence — 「the approval side has no channel to present it
-   *       on AT ALL」 — is RETRACTED: the W4 seal writes the same object into
-   *       `attendance_result_operations.response_snapshot` on the caller's own transaction client,
-   *       so it IS persisted and queryable. What is still open is only which USER-FACING surface
-   *       renders it, which is why the DTO negative at the bottom of this case stands.
+   *   (b) **the approval side's RETURN VALUE DOES carry a channel for it.** `redeemCancelRoundInTxn`
+   *       receives `{ kind: 'executed', response }` from the entry, derives
+   *       `outcome = classifyCancelRoundCancellationOutcomeV1(result.response)` from that SAME
+   *       payload, and returns `{ kind: 'applied', outcome }` — nothing is discarded on this path.
+   *       ⛔ CORRECTED (P3 hygiene pass, 2026-09-19): this bullet previously claimed "no channel
+   *       for it" / payload "DISCARDED"; checked against the production return type
+   *       (`ApprovalProductService.ts:9015-9017`, `:9141`) and found FALSE, not merely overstated.
+   *       The W4 seal separately persists the same payload into
+   *       `attendance_result_operations.response_snapshot`, so a persisted channel exists too. What
+   *       remains open is only which USER-FACING surface renders `outcome`, and whether it must
+   *       survive a cross-reload read — not whether a return-value channel exists. (The DTO
+   *       assertion at the bottom of THIS case, `outcomeA` below, is already POSITIVE — there is no
+   *       "DTO negative" standing here.)
    * The narrower open item is registered in the phase-2 verification MD. This case closes the
    * ROW-LEVEL half of the 账侧 line (the end state the two paths leave in the database).
    */
@@ -1904,11 +1909,16 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(cancelB.status, await cancelB.clone().text()).toBe(200)
 
       // ── The W4 RESULT PAYLOAD, pinned. This is 「完整取消结果」 as the existing path returns it.
-      //    `redeemCancelRoundInTxn` returns `{ kind: 'applied' }` and drops
-      //    `{ kind: 'executed', response }`, so the redemption path has no RETURN-VALUE counterpart
-      //    to compare against. ⚠️ It does have a PERSISTED one — the W4 seal writes the same object
-      //    into `attendance_result_operations.response_snapshot` — which is what the LAST case in
-      //    this file measures, and which narrows finding (b) of the doc comment above.
+      //    `redeemCancelRoundInTxn` derives `outcome` from that SAME entry response
+      //    (`classifyCancelRoundCancellationOutcomeV1(result.response)`) and returns
+      //    `{ kind: 'applied', outcome }` — the redemption path DOES have a RETURN-VALUE
+      //    counterpart to compare against. ⛔ CORRECTED (P3 hygiene pass, 2026-09-19): this
+      //    comment previously said the payload was dropped and there was "no RETURN-VALUE
+      //    counterpart"; checked against the production return type and found FALSE. It ALSO has
+      //    a PERSISTED copy — the W4 seal writes the same object into
+      //    `attendance_result_operations.response_snapshot` — which is what the LAST case in this
+      //    file measures, narrowing finding (b) of the doc comment above to just the
+      //    presentation-surface question.
       const payloadB = (await cancelB.json()) as {
         ok?: boolean
         data?: { requestId?: string; status?: string; orgId?: string; userId?: string; reversal?: unknown }
