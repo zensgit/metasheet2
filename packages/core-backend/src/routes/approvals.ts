@@ -393,16 +393,39 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
 
 // §2 (ratified) "模板可见性仍走原权限谓词……一个组织只能给自己能看到的模板归组(挂接时按原谓词
 // 校验可见)": exported (not inlined at the one call site) so a real-DB test can exercise the
-// predicate directly with a NON-manager actor — `approvalTemplateAdminGuard` makes every actor
-// that can reach the link endpoint today `isTemplateManager` (guard population ⊆ manager ⊆ sees
-// everything, so `applyTemplateVisibilityFilter` short-circuits to an existence-only check for
-// them), which is why this is intentionally testable OUTSIDE the guard rather than only through
-// it — see the lifecycle suite's "§2 link-time visibility" block. LINK ONLY (the lock's clause
-// names 挂接, not unlink) — an implementer's choice to mask "exists but invisible" the SAME way
-// as every other actor-gated template lookup in this router (`:921`'s `APPROVAL_TEMPLATE_NOT_FOUND`),
-// not a second ratified code; a nonexistent template also returns `false` here (the `id = $1`
-// predicate matches nobody), so this doubles as the group-link path's template-existence check —
-// today unreachable another way (`mapGroupConstraintError` has no 23503 branch for `template_id`).
+// predicate directly with a NON-manager actor.
+//
+// CORRECTED (design-gate-A3-phase2-20260918.md §2 Q2 / P2-5, 2026-09-18 回流修复): an earlier
+// version of this comment claimed "`approvalTemplateAdminGuard` makes every actor that can reach
+// the link endpoint today `isTemplateManager` (guard population ⊆ manager ⊆ sees everything)".
+// That is a strictly-narrower claim than the code supports and is FALSE for two actor shapes that
+// pass the guard but that `isTemplateManager` above cannot see:
+//   (1) a wildcard permission code — `rbac/rbac.ts:21-25`'s `hasPermissionCode` admits
+//       `approval-templates:*` (and `approvals:*`/`*:*`) via RESOURCE-prefix expansion, so
+//       `approvalTemplateAdminGuard`'s `rbacGuardAny(['approval-templates:manage',
+//       'approvals:admin-templates'])` lets it through; `isTemplateManager` above tests
+//       `permissions.includes(...)` on those SAME two exact strings plus `'*:*'`/`'approvals:*'`
+//       only — `'approval-templates:*'` is not one of them, so it is admitted by the guard but
+//       invisible to this actor derivation.
+//   (2) a DB-side admin — `rbacGuardAny`'s final fallback calls `isAdmin(userId)`
+//       (`rbac/service.ts`, `user_roles WHERE role_id = 'admin'`), independent of anything on the
+//       JWT/`req.user` this function reads (`req.user.role`, `.roles`, `.permissions`). A principal
+//       admitted ONLY through that DB row is likewise invisible to `isTemplateManager` above.
+// So the true relationship is: guard population ⊋ manager population (a strict superset, not
+// equal, not a subset relation at all) — `applyTemplateVisibilityFilter` does NOT short-circuit
+// for every actor able to reach this endpoint, only for the ones `isTemplateManager` actually
+// recognizes. This is exactly why exporting the predicate for a direct, non-manager-actor unit
+// test (below) was never sufficient on its own — see the lifecycle suite's REAL, guard-passing,
+// non-manager HTTP case ("§2(c): a DB-side-admin actor" block) added in the same 回流修复, which
+// proves the filter still narrows what such an actor's link REQUEST can see, not merely what the
+// predicate returns when called directly with a hand-built actor object.
+//
+// LINK ONLY (the lock's clause names 挂接, not unlink) — an implementer's choice to mask "exists
+// but invisible" the SAME way as every other actor-gated template lookup in this router (`:921`'s
+// `APPROVAL_TEMPLATE_NOT_FOUND`), not a second ratified code; a nonexistent template also returns
+// `false` here (the `id = $1` predicate matches nobody), so this doubles as the group-link path's
+// template-existence check — today unreachable another way (`mapGroupConstraintError` has no
+// 23503 branch for `template_id`).
 export async function isApprovalTemplateVisibleForGroupLink(
   templateId: string,
   actor: ApprovalTemplateVisibilityActor | undefined,

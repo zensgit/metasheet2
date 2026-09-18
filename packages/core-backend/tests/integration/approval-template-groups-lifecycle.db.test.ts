@@ -195,6 +195,12 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   let base = ''
   const templateIds: string[] = []
   const orgTags: string[] = []
+  // §2(c) (design-gate A3 P2-5 回流修复) grants a REAL `user_roles(role_id='admin')` row to prove
+  // the DB-side isAdmin guard-pass path — this file's shared `metasheet_test` DB context (see the
+  // header note above) means that row must be torn down explicitly, the same as every other
+  // fixture row this file writes; a unique `TS`-suffixed userId avoids a PK collision but does NOT
+  // avoid indefinite accumulation of `role_id='admin'` rows across CI runs.
+  const dbGrantedAdminUserIds: string[] = []
 
   itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
@@ -219,6 +225,9 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     }
     for (const id of templateIds.splice(0)) {
       await query(`DELETE FROM approval_templates WHERE id = $1`, [id])
+    }
+    for (const userId of dbGrantedAdminUserIds.splice(0)) {
+      await query(`DELETE FROM user_roles WHERE user_id = $1`, [userId])
     }
     await server?.stop()
   })
@@ -555,17 +564,63 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect((await missingGroupId.json()).error.code).toBe('APPROVAL_GROUP_ID_REQUIRED')
   })
 
-  // ── §2 link-time visibility (ratified, gate P2-1) ─────────────────────────────────────────────
-  // Two legs, per the finding this closes: `approvalTemplateAdminGuard`'s permission codes are a
-  // SUBSET of `isTemplateManager`'s derivation (`resolveApprovalTemplateVisibilityActor` above), so
-  // every actor able to reach the link ENDPOINT today is a manager and `applyTemplateVisibilityFilter`
-  // short-circuits for them — an HTTP-only test could never turn red on the visibility half of the
-  // predicate. Leg (a) therefore calls the exported predicate directly with a hand-built NON-manager
-  // actor (real judgement: mutating `isApprovalTemplateVisibleForGroupLink` to drop the
+  // ── design-gate A-3 回流修复 (2026-09-18, P1-3 / M5) ──────────────────────────────────────────
+  // `design-gate-A3-phase2-20260918.md` §3 P1-3: the ratified §2 non-blank CHECK
+  // (`atg_name_nonblank CHECK (name ~ '[!-~]')`) is printable-ASCII-only and rejects every
+  // pure-CJK name — a routine input this product's OWN category placeholder text recommends
+  // (`TemplateAuthoringView.vue:221`, "如 请假 / 采购 / 报销"). Before this fix, that DB rejection
+  // reached the caller as a RAW `DatabaseError` (see the probe transcript in this slice's
+  // verification MD): `mapGroupConstraintError` only special-cased 23505, so `handleApprovalsError`
+  // fell through to its undifferentiated 500. This does NOT loosen the CHECK (that is a lock-text
+  // change, owner-gated — see the verification MD's "owner 勘误请示") — a pure-CJK name is still
+  // rejected; only the SHAPE of the rejection changes, from an opaque 500 to a typed 400 whose body
+  // names the offending constraint. Mutation (recorded in the verification MD, not automated here
+  // per this suite's cp-backup/edit/run/restore/cmp convention): deleting the 23514 branch from
+  // `mapGroupConstraintError` turns this test's first assertion red (500, not 400).
+  it('P1-3 (design-gate A-3, 2026-09-18): a pure-CJK group name maps to 400 GROUP_NAME_UNSUPPORTED, not a raw 500 — an ASCII name in the same org still succeeds', async () => {
+    const org = trackOrg(`atg-cjk-${TS}`)
+    const admin = await tok(base, `cjk-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    const cjkName = `人事`
+    const cjkRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: cjkName } })
+    expect(cjkRes.status).toBe(400)
+    const cjkBody = (await cjkRes.json()) as { error: { code: string; message: string; details?: { constraint?: string } } }
+    expect(cjkBody.error.code).toBe('GROUP_NAME_UNSUPPORTED')
+    expect(cjkBody.error.details?.constraint).toBe('atg_name_nonblank')
+    // The response body must name the offending constraint AND carry the owner-erratum notice —
+    // silently downgrading either half back to a bare "bad request" would re-hide the same fact
+    // the raw 500 was hiding, just one layer up.
+    expect(cjkBody.error.message).toContain('当前锁文 CHECK 只接受可打印 ASCII');
+    expect(cjkBody.error.message).toContain('owner 勘误')
+    const cjkRows = await query(`SELECT 1 FROM approval_template_groups WHERE org_id = $1 AND name = $2`, [org, cjkName])
+    expect(cjkRows.rowCount).toBe(0)
+
+    // Positive control: this is a request-shape mapping, not a guard/auth regression — the SAME
+    // admin, SAME org, an ASCII name, still gets 201.
+    const asciiRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `HR ${TS}` } })
+    expect(asciiRes.status).toBe(201)
+  })
+
+  // ── §2 link-time visibility (ratified, gate P2-1; CORRECTED design-gate A3 §2 Q2/P2-5, 2026-09-18) ─
+  // Leg (a) calls the exported predicate directly with a hand-built NON-manager actor (real
+  // judgement: mutating `isApprovalTemplateVisibleForGroupLink` to drop the
   // `applyTemplateVisibilityFilter` call turns the "hidden" assertion red). Leg (b) goes through the
   // real HTTP endpoint to prove the call SITE is wired (mutating the route handler to remove the call
   // turns this red too — a nonexistent template's INSERT falls through to a raw 23503, which
   // `mapGroupConstraintError` does not map, landing on the generic 500 fallback instead of 404).
+  //
+  // This block used to justify leg (a)'s existence with "`approvalTemplateAdminGuard`'s permission
+  // codes are a SUBSET of `isTemplateManager`'s derivation... every actor able to reach the link
+  // ENDPOINT today is a manager" — that claim is FALSE (see the block comment above
+  // `isApprovalTemplateVisibleForGroupLink` in `routes/approvals.ts`, corrected the same round: a
+  // wildcard `approval-templates:*` permission code and a DB-side-only `isAdmin(userId)` both pass
+  // the guard without `isTemplateManager` recognizing them). Leg (a) therefore does NOT rest on
+  // "no real actor could ever be both guard-passing and non-manager" — it rests on leg (c) below
+  // ("§2(c): a DB-side-admin actor") being a REAL, guard-passing, non-manager HTTP case that proves
+  // the same filtering leg (a) exercises directly. Leg (a) remains useful on its own merits (it can
+  // probe the predicate with actor shapes — e.g. a non-existent template id — that are awkward to
+  // reach purely through HTTP), it is just no longer the ONLY thing standing between "the guard
+  // admits only managers" and reality.
   it('§2(a): the exported visibility predicate — visible to a non-manager in its own scope, hidden outside it, and false for a nonexistent id', async () => {
     const deptId = `vis-dept-${TS}`
     const visibleTpl = await createTemplate(`atg-vis-visible-${TS}`, { type: 'dept', ids: [deptId] })
@@ -602,6 +657,56 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
       [org, missingId],
     )
     expect(row.rowCount).toBe(0)
+  })
+
+  // ── §2(c): guard-passing NON-manager, real HTTP + real DB (design-gate A3 §2 Q2/P2-5 回流修复) ──
+  // Corrects the block comment above `isApprovalTemplateVisibleForGroupLink`: it used to assert
+  // "guard population ⊆ manager population", which is false. This actor is constructed to be a
+  // COUNTEREXAMPLE to that retracted claim: it reaches `approvalTemplateAdminGuard` ONLY through
+  // `rbacGuardAny`'s DB-side `isAdmin(userId)` fallback (`rbac/service.ts`: a `user_roles` row with
+  // `role_id = 'admin'`) — its dev-token carries `roles=user, perms=` (no admin/manager claim at
+  // all), so `resolveApprovalTemplateVisibilityActor` (which reads ONLY `req.user`, never the DB)
+  // computes `isTemplateManager: false` for it. If the retracted comment's claim had been true,
+  // no such actor could exist. Positive control (the dept-scoped template) proves the guard
+  // genuinely let this actor through (a failed guard would 403 on EVERY sub-case, including this
+  // one) rather than the endpoint being unreachable for some other reason.
+  it('§2(c): a DB-side-admin actor (guard passes; NOT isTemplateManager) still has its LINK request visibility-filtered', async () => {
+    const org = trackOrg(`atg-vis3-${TS}`)
+    const dbAdminUserId = `vis3-dbadmin-${TS}`
+    // No `roles`/`perms` claim of any kind — the ONLY thing that will let this actor through
+    // `approvalTemplateAdminGuard` is the `user_roles` row inserted below.
+    const dbAdmin = await tok(base, dbAdminUserId, { roles: 'user', perms: '', tenantId: org })
+    await query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`, [dbAdminUserId])
+    dbGrantedAdminUserIds.push(dbAdminUserId) // torn down in afterAll — see the array's doc comment
+
+    // Guard-pass proof #1: this actor can perform approvalTemplateAdminGuard-gated WRITES
+    // (create) despite carrying zero admin/manager claim on the token itself.
+    const groupRes = await httpReq(base, '/api/approval-template-groups', dbAdmin, { method: 'POST', body: { name: `Vis3 ${TS}` } })
+    expect(groupRes.status).toBe(201)
+    const group = (await groupRes.json()).group
+
+    const otherDept = `vis3-dept-other-${TS}`
+    const hiddenTpl = await createTemplate(`atg-vis3-hidden-${TS}`, { type: 'dept', ids: [otherDept] })
+    const visibleTpl = await createTemplate(`atg-vis3-visible-${TS}`) // default visibility_scope: {type:'all', ids:[]}
+
+    // Guard-pass proof #2 + the actual finding: NOT a 403 (guard genuinely passed) but a 404 — the
+    // link REQUEST is still narrowed by `applyTemplateVisibilityFilter` exactly as it would be for
+    // any other non-manager actor, because guard admission and `isTemplateManager` are two
+    // independent judgements, not a subset relation.
+    const hiddenRes = await httpReq(base, `/api/approval-templates/${hiddenTpl}/group`, dbAdmin, { method: 'POST', body: { groupId: group.id } })
+    expect(hiddenRes.status).toBe(404)
+    expect((await hiddenRes.json()).error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+    const hiddenRow = await query(`SELECT 1 FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`, [org, hiddenTpl])
+    expect(hiddenRow.rowCount).toBe(0)
+
+    // Positive control: the SAME actor, SAME guard, an `'all'`-scoped template — 201. Mutation
+    // (recorded in the verification MD, cp-backup/edit/run/restore/cmp, not automated here):
+    // hard-coding `isTemplateManager: true` inside `resolveApprovalTemplateVisibilityActor` turns
+    // the hidden-template assertion above red (200/201 instead of 404) while leaving this one
+    // green — it is the hidden-template leg, not this one, that carries this test's discriminating
+    // power.
+    const visibleRes = await httpReq(base, `/api/approval-templates/${visibleTpl}/group`, dbAdmin, { method: 'POST', body: { groupId: group.id } })
+    expect(visibleRes.status).toBe(201)
   })
 
   // ── G ──────────────────────────────────────────────────────────────────────────────────────
