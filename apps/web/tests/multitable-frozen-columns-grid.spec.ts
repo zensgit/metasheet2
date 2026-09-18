@@ -147,6 +147,69 @@ describe('MetaGridTable — sticky header row (#5863)', () => {
   })
 })
 
+describe('MetaGridTable — frozen top rows (#5863c, frozenTopRowCount)', () => {
+  const ROWS = [
+    { id: 'r1', version: 1, data: { f1: 'A' } },
+    { id: 'r2', version: 1, data: { f1: 'B' } },
+    { id: 'r3', version: 1, data: { f1: 'C' } },
+  ]
+
+  it('with frozenTopRowCount=2, rows 0-1 carry the frozen-row class + sticky top; row 2 does not', () => {
+    const root = mountGrid({ rows: ROWS, frozenTopRowCount: 2, enableMultiSelect: false })
+    const rows = Array.from(root.querySelectorAll('.meta-grid__row')) as HTMLElement[]
+    expect(rows).toHaveLength(3)
+    expect(rows[0].classList.contains('meta-grid__row--frozen-top')).toBe(true)
+    expect(rows[1].classList.contains('meta-grid__row--frozen-top')).toBe(true)
+    expect(rows[2].classList.contains('meta-grid__row--frozen-top')).toBe(false)
+
+    const cells = (r: HTMLElement) => r.querySelector('.meta-grid__cell') as HTMLElement
+    expect(cells(rows[0]).style.position).toBe('sticky')
+    expect(cells(rows[0]).style.top).not.toBe('')
+    expect(cells(rows[1]).style.position).toBe('sticky')
+    expect(cells(rows[1]).style.top).not.toBe('')
+    expect(cells(rows[2]).style.top).toBe('') // row 2 is not frozen — no top stickiness
+  })
+
+  it('frozen-row + frozen-column cell has a higher zIndex than a frozen-row-only (non-frozen-column) cell', () => {
+    const root = mountGrid({
+      rows: ROWS,
+      frozenTopRowCount: 1,
+      frozenLeftColumnIds: ['f1'],
+      columnWidths: { f1: 100 },
+      enableMultiSelect: false,
+    })
+    const firstRow = root.querySelector('.meta-grid__row--frozen-top') as HTMLElement
+    const bothAxesCell = firstRow.querySelector('.meta-grid__cell') as HTMLElement // f1: frozen row AND frozen column
+    expect(bothAxesCell.style.position).toBe('sticky')
+    expect(bothAxesCell.style.left).not.toBe('')
+    expect(bothAxesCell.style.top).not.toBe('')
+
+    // A frozen-row-only cell (no column freeze at all) for comparison.
+    const rowOnlyRoot = mountGrid({ rows: ROWS, frozenTopRowCount: 1, enableMultiSelect: false })
+    const rowOnlyCell = (rowOnlyRoot.querySelector('.meta-grid__row--frozen-top') as HTMLElement)
+      .querySelector('.meta-grid__cell') as HTMLElement
+    expect(rowOnlyCell.style.left).toBe('') // no column freeze
+
+    expect(Number(bothAxesCell.style.zIndex)).toBeGreaterThan(Number(rowOnlyCell.style.zIndex))
+  })
+
+  it('the row-freeze pin toggles frozenTopRowCount via set-frozen-rows (capped at MAX)', () => {
+    const onSetFrozenRows = vi.fn()
+    const root = mountGrid({ rows: ROWS, frozenTopRowCount: 0, enableMultiSelect: false, onSetFrozenRows })
+    const pins = Array.from(root.querySelectorAll('.meta-grid__row-pin')) as HTMLButtonElement[]
+    pins[1].click() // freeze up to row index 1 (the 2nd row) → count = 2
+    expect(onSetFrozenRows).toHaveBeenCalledWith(2)
+  })
+
+  it('clicking the current boundary row-pin unfreezes (0)', () => {
+    const onSetFrozenRows = vi.fn()
+    const root = mountGrid({ rows: ROWS, frozenTopRowCount: 2, enableMultiSelect: false, onSetFrozenRows })
+    const pins = Array.from(root.querySelectorAll('.meta-grid__row-pin')) as HTMLButtonElement[]
+    pins[1].click() // row index 1 is the current boundary (count=2) → unfreeze
+    expect(onSetFrozenRows).toHaveBeenCalledWith(0)
+  })
+})
+
 describe('MetaGridTable frozen columns — pin interaction', () => {
   it('clicking a non-boundary pin emits set-frozen with the left prefix', () => {
     const onSetFrozen = vi.fn()
