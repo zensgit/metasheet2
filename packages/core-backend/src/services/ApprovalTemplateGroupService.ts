@@ -107,6 +107,43 @@ import { classifyGroupName } from './approval-template-group-name-rule'
 /** Matches `transaction()`'s handler-client shape (`db/pg.ts`) — the connection a `...WithClient` primitive runs its statements on. */
 type TxClient = { query: (sql: string, params?: unknown[]) => Promise<QueryResult> }
 
+/**
+ * §13.2 changesRequired #10 (design-gate-A3-phase2, ownerLevel=false, already decided): the SET
+ * obligation becomes a typecheck gate, not a runtime assertion. `AtgTxClient` is `TxClient`
+ * branded with a `unique symbol` phantom property that exists ONLY at the type level — no object
+ * literal or plain `TxClient` value structurally has it, so TypeScript rejects passing a raw
+ * `TxClient` (or any value not produced by `beginApprovalTemplateGroupTxn` below) anywhere an
+ * `AtgTxClient` is required, with a "property is missing" error at compile time. This is
+ * deliberately NOT a `SELECT current_setting('transaction_isolation')` runtime check — the gate
+ * report explicitly rejected that approach: on this repo's READ COMMITTED default server config
+ * the assertion is always true regardless of whether THIS transaction issued its own SET, so it
+ * would be silently vacuous on exactly the failure path it exists to catch (lock v2.6 P2-C is the
+ * same shape of vacuous check). A missing SET here is a REPEATABLE-READ-pool correctness bug
+ * (§2/§3.0), not a value comparison — only a compile-time gate that is impossible to satisfy
+ * without calling `beginApprovalTemplateGroupTxn` can be trusted to catch it.
+ */
+declare const ATG_TX_BRAND: unique symbol
+export type AtgTxClient = TxClient & { readonly [ATG_TX_BRAND]: true }
+
+/**
+ * The ONLY producer of `AtgTxClient`. Issues `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` —
+ * which §2/§3.0 require to be the FIRST statement after `BEGIN` on the connection — and returns
+ * the SAME client object, now carrying the brand. All three `...WithClient` primitives below
+ * accept ONLY `AtgTxClient`, per §13.2's verbatim gate output (not narrowed to two of the three —
+ * see the file-header note above `linkApprovalTemplateToGroupWithClient`'s thin wrapper for why
+ * `link` gaining a SET it did not previously issue is a deliberate, disclosed consequence of this,
+ * not an oversight). A future composed caller (W8 execute / W9 rollback) calls this exactly ONCE
+ * at the top of its own single `transaction(...)` callback and threads the returned `AtgTxClient`
+ * into every `...WithClient` call in that transaction — calling it a second time on the same
+ * client would re-issue the SET after other statements have already run on the connection, which
+ * §2 forbids; nothing in this file's current callers does that (each opens its own transaction and
+ * calls this once), and this note exists for whoever writes the composed caller next.
+ */
+export async function beginApprovalTemplateGroupTxn(client: TxClient): Promise<AtgTxClient> {
+  await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+  return client as AtgTxClient
+}
+
 export interface ApprovalTemplateGroupRow {
   id: string
   orgId: string
@@ -369,7 +406,7 @@ export async function listApprovalTemplateGroups(orgId: string): Promise<Approva
  * itself (idempotently) so it is safe to call standalone via the wrapper below.
  */
 export async function createApprovalTemplateGroupWithClient(
-  client: TxClient,
+  client: AtgTxClient,
   orgId: string,
   name: string,
   createdBy: string,
@@ -399,8 +436,8 @@ export async function createApprovalTemplateGroup(
   const trimmedName = requireName(name)
   try {
     return await transaction(async (client) => {
-      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      return createApprovalTemplateGroupWithClient(client, orgId, trimmedName, createdBy)
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return createApprovalTemplateGroupWithClient(txClient, orgId, trimmedName, createdBy)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -446,7 +483,7 @@ export async function renameApprovalTemplateGroup(
  * Body only — no SET (see §3.0 file-header note: the wrapper below issues it).
  */
 export async function archiveApprovalTemplateGroupWithClient(
-  client: TxClient,
+  client: AtgTxClient,
   orgId: string,
   groupId: string,
 ): Promise<ApprovalTemplateGroupRow> {
@@ -485,8 +522,8 @@ export async function archiveApprovalTemplateGroupWithClient(
 export async function archiveApprovalTemplateGroup(orgId: string, groupId: string): Promise<ApprovalTemplateGroupRow> {
   try {
     return await transaction(async (client) => {
-      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      return archiveApprovalTemplateGroupWithClient(client, orgId, groupId)
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return archiveApprovalTemplateGroupWithClient(txClient, orgId, groupId)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -561,10 +598,12 @@ export async function unarchiveApprovalTemplateGroup(orgId: string, groupId: str
  * possible here since archive runs its unlink UPDATE only after re-checking under its OWN lock)
  * observes the fresh state (acceptance B). No L0: this path neither writes `name` nor assigns
  * `sort_order` (§2 锁序表 invariant). Body only (no SET either — link takes neither, see §3.0
- * file-header note).
+ * file-header note). The `client` parameter type is `AtgTxClient` (see the file-header note above
+ * `linkApprovalTemplateToGroup` below for why the thin wrapper now issues a SET this path never
+ * needed on its own).
  */
 export async function linkApprovalTemplateToGroupWithClient(
-  client: TxClient,
+  client: AtgTxClient,
   orgId: string,
   templateId: string,
   groupId: string,
@@ -595,7 +634,28 @@ export async function linkApprovalTemplateToGroupWithClient(
   return mapLinkRow(upserted.rows[0] as RawLinkRow)
 }
 
-/** Thin wrapper over `linkApprovalTemplateToGroupWithClient` — see §3.0 file-header note. */
+/**
+ * Thin wrapper over `linkApprovalTemplateToGroupWithClient` — see §3.0 file-header note.
+ *
+ * **Disclosed deviation from §3.0's "语句、顺序、错误映射逐字不变" promise (design-gate-A3-phase2
+ * §13.2 changesRequired #10, `AtgTxClient` retrofit, this step)**: `link` takes no L0 and, before
+ * this change, issued no `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` at all — nothing on its
+ * path reads a value (`MAX(sort_order)`, an existence check) that a REPEATABLE READ snapshot could
+ * make stale. §13.2 requires ALL THREE `...WithClient` primitives to accept only `AtgTxClient`,
+ * and the only way to produce that brand is `beginApprovalTemplateGroupTxn`, which unconditionally
+ * issues the SET. Narrowing "all three" to "the two that need it" would be treating the gate's own
+ * ownerLevel=false decision as implementer discretion (memory
+ * `feedback_second_narrower_artifact_is_contract_narrowing`), so this wrapper now issues a SET on
+ * every call, same as `create`/`archive` — a real, if inert, per-connection statement it did not
+ * emit before. Verified this does not change link's own behaviour: re-ran
+ * `approval-template-groups-lifecycle.db.test.ts` / `approval-template-groups-serialization.db.test.ts`
+ * against `metasheet2_lock_a3` after this change (results in this step's commit message) — link's
+ * assertions (upsert semantics, L1 ordering against archive, 23503/23514 mappings) are unaffected
+ * because none of them depend on isolation level; the SET's only observable effect is a slightly
+ * larger no-op on the wire. `rename`/`unarchive` are NOT part of this retrofit — they have no
+ * `...WithClient` split (§3.0 lists only create/archive/link) and keep issuing their own inline
+ * SET exactly as before this step.
+ */
 export async function linkApprovalTemplateToGroup(
   orgId: string,
   templateId: string,
@@ -603,7 +663,10 @@ export async function linkApprovalTemplateToGroup(
   linkedBy: string,
 ): Promise<ApprovalTemplateGroupLinkRow> {
   try {
-    return await transaction((client) => linkApprovalTemplateToGroupWithClient(client, orgId, templateId, groupId, linkedBy))
+    return await transaction(async (client) => {
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return linkApprovalTemplateToGroupWithClient(txClient, orgId, templateId, groupId, linkedBy)
+    })
   } catch (error) {
     throw mapGroupConstraintError(error)
   }
