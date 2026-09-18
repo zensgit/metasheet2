@@ -757,7 +757,7 @@ impossible: the global lock order at the hook.
 | `classifyAndLockAttendanceRequestForInstance` → a thin wrapper pinning `lock: 'for_update'` | same | pure extraction: every existing caller keeps its behaviour with no call-site edit |
 | `resolveCancelRoundRolloutLockRequirementV1` | `ApprovalProductService.ts` | §3 C-2 — 「does this dispatch take the rollout lock, and on WHICH org key?」, three hops per §3.3c |
 | pre-read before `BEGIN` + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + the rollout lock as the transaction's FIRST lock | `dispatchAction` | §3 C-2 全局锁序 `rollout/advisory → 轮次引擎实例 → 原单据实例` |
-| fail-closed re-assert after the instance row lock (`CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED`, 409) | same | §3.3c point 4 — load-bearing, because `attendance_requests.org_id` is NOT immutable |
+| fail-closed re-assert after the instance row lock (`CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED`, 409) | same | §3.3c point 4 — ⚠️ P3-hygiene (2026-09-19, retracts the prior "load-bearing" wording, impl-gate-C-slice2-round1 P3-2): redundant depth FOR CORRECTNESS — both drift directions are independently caught elsewhere (`none→required` by `CANCEL_ROUND_BUSINESS_TARGET_MISSING`; `required→required'` by the W4 entry's own `WHERE id=$1 AND org_id=$2` 404) — but still load-bearing FOR ERROR-CODE PRECISION. `attendance_requests.org_id` is NOT immutable |
 | `CANCEL_ROUND_DISPATCH_CONTENDED` (503) for 40001/40P01, scoped to the `required` branch | same | the new error surface this restructure opens |
 
 ### 3.9.2 TWO axes, not one — and the second was nearly missed
@@ -1850,10 +1850,10 @@ leaving **4 statements**, and zero hits under `plugins/` or in builder syntax:
 
 | Site | Outcome written | I3 mutation built? |
 |---|---|---|
-| `:8947` — `closeCancelRoundSystemTerminalInTxn` (C-3 system close) | `expired` / `blocked` | **YES — M-21, this unit** |
-| `:9108` — `redeemCancelRoundInTxn` (C-2 success) | `applied` | **YES — M-26, §3.18** (this row is UPDATED: when §3.14 was written the answer was 「NO, no probe exists」, and it was registered in §4 rather than smuggled in here). The probe needs the attendance target plus the double, which is why it landed as its own unit. §3.18.1 re-derives this whole population at the current head instead of inheriting it |
-| `:11263` — 判据 III, 发起人撤回 | `withdrawn` | out of this slice (phase 1) |
-| `:11750` — 判据 III, 审批人驳回 | `rejected` | out of this slice (phase 1) |
+| `UPDATE approval_rounds` ~L8957 — `closeCancelRoundSystemTerminalInTxn` (C-3 system close) | `expired` / `blocked` | **YES — M-21, this unit** |
+| `UPDATE approval_rounds` ~L9127 — `redeemCancelRoundInTxn` (C-2 success) | `applied` | **YES — M-30, §3.20** (this row is UPDATED: when §3.14 was written the answer was 「NO, no probe exists」, and it was registered in §4 rather than smuggled in here). The probe needs the attendance target plus the double, which is why it landed as its own unit. §3.20.1 re-derives this whole population at the current head instead of inheriting it |
+| `outcome = 'withdrawn', ended_at` ~L11287 — 判据 III, 发起人撤回 | `withdrawn` | out of this slice (phase 1) |
+| `outcome = 'rejected', ended_at` ~L11774 — 判据 III, 审批人驳回 | `rejected` | out of this slice (phase 1) |
 
 ### 3.14.6 Commands and results
 
@@ -1906,7 +1906,7 @@ This unit's compares cover **two** of them, and measures two more:
 | ③ 按运行模式追加取消计算 | **MEASURED equal (0/0)** — but skipped on BOTH under the org's legacy posture, §3.15.11 |
 | ④ 原实例 `approved → cancelled` + `approval_records` | **COMPARED column-for-column** |
 | ⑤ 请求 `cancelled` | **COMPARED column-for-column** |
-| ⑥ `reverseLeaveBalanceDeduction` → `unrecoverableExpired` | **UPDATED (was 「NOT closed」).** 呈现 half still owner's (§3.15.6). 账侧 half is now **MEASURED as a DECLARED DIVERGENCE**, not open: A seals it, B has no sealed row at all — §3.20, M-28 |
+| ⑥ `reverseLeaveBalanceDeduction` → `unrecoverableExpired` | **UPDATED (was 「NOT closed」).** 呈现 half still owner's (§3.15.6). 账侧 half is now **MEASURED as a DECLARED DIVERGENCE**, not open: A seals it, B has no sealed row at all — §3.22, M-32 |
 | ⑦ 发 `attendance.request.cancelled` | **MEASURED equal (0/0)** — skipped on BOTH, §3.15.11 |
 
 ### 3.15.0 ⛔ PROVENANCE CORRECTION: `attendance-parity.db.test.ts` is NOT named by the lock
@@ -2761,7 +2761,7 @@ $ (R5-M7 重放,本 head,新用例尚未写)
 
 | # | Mutation | site | expected | measured |
 |---|---|---|---|---|
-| M-25 | 门审 R5-M7 同一条:从 `CANCEL_ROUND_ALLOWED_ACTIONS` 删掉 `'approve'`(1 行),其余一字不改 | `ApprovalProductService.ts:4433` | 新用例红,且红在**成员判定**那一行、错误码逐字是 `CANCEL_ROUND_OUTLET_FORBIDDEN` | **单跑新用例:1 failed / 17 skipped**,红在 `approval-cancel-round-redemption.db.test.ts:1146:62`,`AssertionError: {"error":{"code":"CANCEL_ROUND_OUTLET_FORBIDDEN","message":"Cancel-round instances do not accept action \"approve\""}}: expected 409 to be 200`。**全文件:12 failed / 6 passed (18)**——即 §3.17.1 的 11 条后果红 + 本用例这 1 条成员红 |
+| M-29 | 门审 R5-M7 同一条:从 `CANCEL_ROUND_ALLOWED_ACTIONS` 删掉 `'approve'`(1 行),其余一字不改 | `ApprovalProductService.ts:4433` | 新用例红,且红在**成员判定**那一行、错误码逐字是 `CANCEL_ROUND_OUTLET_FORBIDDEN` | **单跑新用例:1 failed / 17 skipped**,红在 `approval-cancel-round-redemption.db.test.ts:1146:62`,`AssertionError: {"error":{"code":"CANCEL_ROUND_OUTLET_FORBIDDEN","message":"Cancel-round instances do not accept action \"approve\""}}: expected 409 to be 200`。**全文件:12 failed / 6 passed (18)**——即 §3.19.1 的 11 条后果红 + 本用例这 1 条成员红 |
 
 红落在 `:1146` 而不是更早的对照行,这一点本身是判据:对照半边(`handle` ⇒ 409、行不变)在
 mutation 下**仍然通过并被求值**,所以本用例的红确实是「`approve` 不再是成员」而不是「闸整个没了」
@@ -2820,13 +2820,13 @@ staging / 生产库。
 
 ---
 
-## 3.18 §5 I3 「终结即释放」 的 **C-2 半边** — 两个终态写入方里的第二个,现在也有了探针 (this unit)
+## 3.20 §5 I3 「终结即释放」 的 **C-2 半边** — 两个终态写入方里的第二个,现在也有了探针 (this unit)
 
 §3.14.5 把 `approval_rounds.outcome` 的终态写入方做了**全仓、双语法**普查,并在 §3.14 给其中一个
 建了 M-21。另一个——C-2 成功路径的 `applied` 写——当时**没有探针**,§3.14.5 自己的表里写着
 「**NO.** The test file comments it as I3 at `:1027`, but no probe exists」。本单元把它补上。
 
-### 3.18.1 普查在**本 head 上重新导出**,不继承 §3.14.5 的数
+### 3.20.1 普查在**本 head 上重新导出**,不继承 §3.14.5 的数
 
 §3.15.1 警告过:§3.15 以上的每个绝对数都是在 `7ef8e610e` 基点上量的、绑那个 head。本单元在
 `a02930896` 基点的工作树上原样重跑那条普查命令:
@@ -2837,7 +2837,7 @@ $ git grep -nE "UPDATE approval_rounds|approval_rounds['\"]?\)?[[:space:]]*\.set
 ApprovalProductService.ts:899    ← 散文注释
 ApprovalProductService.ts:8768   ← 散文注释
 ApprovalProductService.ts:8947   ← C-3 system close(`expired`/`blocked`)   M-21(§3.14)
-ApprovalProductService.ts:9108   ← C-2 success(`applied`)                  M-26(本单元)
+ApprovalProductService.ts:9108   ← C-2 success(`applied`)                  M-30(本单元)
 ApprovalProductService.ts:11263  ← 判据 III 发起人撤回(`withdrawn`)        phase 1
 ApprovalProductService.ts:11750  ← 判据 III 审批人驳回(`rejected`)          phase 1
 $ … | wc -l
@@ -2848,15 +2848,15 @@ $ … | wc -l
 head 上的结论逐项一致,但这是**本 head 自己的测量**,不是继承。本切片范围内的两个写入方现在**各有
 一个探针**。
 
-### 3.18.2 为什么又是一条独立用例,而不是往判据 II 上再加一行
+### 3.20.2 为什么又是一条独立用例,而不是往判据 II 上再加一行
 
 §3.14.1 的教训,在同一个文件里第二次适用:判据 II 那条用例的最后一行已经是
-`expect(round.outcome).toBe('applied')`,但那是**末态检查**——把 M-26 打上去,它就死在那一行,
+`expect(round.outcome).toBe('applied')`,但那是**末态检查**——把 M-30 打上去,它就死在那一行,
 **永远走不到任何「释放」子句**。所以释放子句要有自己的用例,并且 `createCancelRoundInstance`
-必须是兑现返回后的**第一条语句**。实测证实了这个排序的必要性:M-26 下判据 II 那条确实红在它自己的
+必须是兑现返回后的**第一条语句**。实测证实了这个排序的必要性:M-30 下判据 II 那条确实红在它自己的
 `applied` 断言上。
 
-### 3.18.3 ⚠️ 夹具前提是**测量出来的**,不是默认的
+### 3.20.3 ⚠️ 夹具前提是**测量出来的**,不是默认的
 
 这是本用例与 M-21 那条最不一样的地方,必须写清楚:
 
@@ -2872,19 +2872,19 @@ head 上的结论逐项一致,但这是**本 head 自己的测量**,不是继承
 后者锁文并未要求(§5 I6 「撤销不限次」讲的是**轮次**不限次,phase 1 的 chain 用例已覆盖)。真实
 边界下的兑现会不会让第二轮因单据状态被拒,**本用例不回答**,登记在 §4。
 
-### 3.18.4 Mutation 台账(this unit)
+### 3.20.4 Mutation 台账(this unit)
 
 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`。
 
 | # | Mutation | site | expected | measured |
 |---|---|---|---|---|
-| M-26 | 与 M-21 **同形**:在 `redeemCancelRoundInTxn` 里把 `UPDATE approval_rounds … SET outcome = 'applied', ended_at = now(), policy_snapshot_at_decision = $2`(`:9107-9114`)**与**它的 `if (roundResult.rowCount !== 1) throw`(`:9115-9121`)**一起**删掉,15 行换成 1 行标记 | `ApprovalProductService.ts:9108`(C-2 成功写入方) | 本用例红,且红在它的 **create 行**(即子句被求值后失败),而不是更早 | **单跑本用例:1 failed / 18 skipped**,红在 `redemption.db.test.ts:1217:20`,栈帧 `ApprovalProductService.createCancelRoundInstance src/services/ApprovalProductService.ts:8563:15`,`ServiceError: This document already has a cancel round in progress`,`{ statusCode: 409, code: 'CANCEL_ROUND_ALREADY_PENDING' }`。**全文件:5 failed / 14 passed (19)** |
+| M-30 | 与 M-21 **同形**:在 `redeemCancelRoundInTxn` 里把 `UPDATE approval_rounds … SET outcome = 'applied', ended_at = now(), policy_snapshot_at_decision = $2`(`:9107-9114`)**与**它的 `if (roundResult.rowCount !== 1) throw`(`:9115-9121`)**一起**删掉,15 行换成 1 行标记 | `ApprovalProductService.ts:9108`(C-2 成功写入方) | 本用例红,且红在它的 **create 行**(即子句被求值后失败),而不是更早 | **单跑本用例:1 failed / 18 skipped**,红在 `redemption.db.test.ts:1217:20`,栈帧 `ApprovalProductService.createCancelRoundInstance src/services/ApprovalProductService.ts:8563:15`,`ServiceError: This document already has a cancel round in progress`,`{ statusCode: 409, code: 'CANCEL_ROUND_ALREADY_PENDING' }`。**全文件:5 failed / 14 passed (19)** |
 
 两行**一起**删是刻意的,理由与 M-21 逐字相同:只删 `UPDATE` 会让 `roundResult` 变成 undefined,
 探针产出的是 `TypeError`,那是**另一种红**,不是这里要主张的那一种。
 
-全文件 5 条红是:判据 II、§9-9 成员钉(§3.17)、**本用例**、判据 II 端到端、§3.16 —— 前两条与后两条
-都死在**它们自己的 `applied` 断言**上,这正是 §3.18.2 的直接确认:**没有一条能承载这条 mutation**,
+全文件 5 条红是:判据 II、§9-9 成员钉(§3.19)、**本用例**、判据 II 端到端、§3.16 —— 前两条与后两条
+都死在**它们自己的 `applied` 断言**上,这正是 §3.20.2 的直接确认:**没有一条能承载这条 mutation**,
 只有把 create 排在第一位的本用例能。
 
 **门是预检,不是索引**——与 §0 R-7 对 M-21 的更正逐字同一条:红的栈帧是 `:8563:15`,即
@@ -2902,7 +2902,7 @@ $ git status --short
  M packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
 ```
 
-### 3.18.5 Commands and results
+### 3.20.5 Commands and results
 
 ```
 $ npx tsc --noEmit -p tsconfig.json
@@ -2911,23 +2911,23 @@ $ npx tsc --noEmit -p tsconfig.json
 $ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_DB=1 \
     npx vitest --config vitest.integration.config.ts run \
     tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
-      Tests  19 passed (19)        ← 新用例落地后(§3.17 的 18 + 本条)
+      Tests  19 passed (19)        ← 新用例落地后(§3.19 的 18 + 本条)
 ```
 
-### 3.18.6 Wiring — 无新增钉
+### 3.20.6 Wiring — 无新增钉
 
-同 §3.17.5:用例追加进已在 `plugin-tests.yml:1668` 的
+同 §3.19.5:用例追加进已在 `plugin-tests.yml:1668` 的
 `approval-cancel-round-redemption.db.test.ts`,无新文件 / 新 lib / 新表 ⇒ s6a、考勤四钉、W7-R10、
 `ci-realdb-step-contract.mjs` 全部零欠账。
 
 ---
 
-## 3.19 账侧七步的**逐步处置**,写成依据而不是表格单元 (this unit)
+## 3.21 账侧七步的**逐步处置**,写成依据而不是表格单元 (this unit)
 
 §3.15 用一张表给 C-1 七步各标了一个状态。本节把其中三类**写成依据**:①/② 为什么不是「跳过」而是
 **没有可比的终态**,③/⑦ 的开放项**究竟是什么**(不是它看起来的那样),⑥ 的平价半边**能不能构造**。
 
-### 3.19.1 ①「锁两行 `FOR UPDATE`」与 ②「状态复核」——依据,引锁文行号
+### 3.21.1 ①「锁两行 `FOR UPDATE`」与 ②「状态复核」——依据,引锁文行号
 
 锁文对这两步的原文在 **lock:84**:
 
@@ -2964,7 +2964,7 @@ $ … | wc -l
 ⇒ 这两个套件里**零**处把 `attendance_requests.status` 改成不可取消态。范围之外(别的套件、考勤线自己的
 套件)**我没有扫**,所以这条不是全仓断言。
 
-### 3.19.2 ⚠️ ③/⑦ 的开放项**不是**「把断言写出来」——它们已经是断言了
+### 3.21.2 ⚠️ ③/⑦ 的开放项**不是**「把断言写出来」——它们已经是断言了
 
 这一条是对一种**误读**的更正,而且这个误读容易发生,所以写在这里:§3.15.11 的标题是「why two of
 C-1's steps are **parity-trivial** here, not covered」,正文说 ③(取消计算)与 ⑦(事件)
@@ -3000,7 +3000,7 @@ $ … | wc -l
 ⚠️ 因此:本单元**不**把 ③/⑦ 标成已闭合,也**不**假装它们只差一个断言。§3.15.11 的
 「**OPEN**: a twin pair in a non-legacy org」保持 OPEN,措辞按本节澄清。
 
-### 3.19.3 ⑥ 的平价半边能不能构造 —— 取决于 B 侧封不封存 ⛔ **(标题原作「尚未测量」;§3.20 已测量:B 不封存,结论 OPERATIVE,机制两句有误)**
+### 3.21.3 ⑥ 的平价半边能不能构造 —— 取决于 B 侧封不封存 ⛔ **(标题原作「尚未测量」;§3.22 已测量:B 不封存,结论 OPERATIVE,机制两句有误)**
 
 ⑥(`reverseLeaveBalanceDeduction` 返回 `unrecoverableExpired`,lock:86「必须呈现」)现在是**两半**:
 
@@ -3022,21 +3022,21 @@ B 侧走的是 HTTP `POST /api/attendance/requests/:id/cancel`,它的 `operation
 > 若返回 null,⑥ 不是一条断言,而是一条**带理由的 declared divergence**(A 封存、B 不封存,因为两条
 > 路径的 operation 身份来源不同);若返回非 null,则它是一条可以写的比对。
 
-> ⛔ **SUPERSEDED BY §3.20 —— 这条判据本身的机制写错了两处,求值而不是作废。**
+> ⛔ **SUPERSEDED BY §3.22 —— 这条判据本身的机制写错了两处,求值而不是作废。**
 > **求值结果:被选中的是 null 分支,所以本节的结论(「A 封存、B 不封存」⇒ declared divergence)
-> OPERATIVE 且现已被实测证实**(`sealA='1'` / `sealB='0'`,M-28)。**但支撑它的两句机制是错的:**
+> OPERATIVE 且现已被实测证实**(`sealA='1'` / `sealB='0'`,M-32)。**但支撑它的两句机制是错的:**
 > (1) 「null ⇒ 走 `adapter.prepare`」**方向反了** —— `w4c3b-request-operation-boundary.ts:878-880`
 > 是 `input.operationId === null ? identityPrepared : await adapter.prepare(...)`,即 null ⇒ **不**走
 > `adapter.prepare`。(2) 封存**根本不由 `operationId` 把关** —— `sealAttendanceResultOperationV1`
 > 在 `:918` 无条件执行,唯一能在非拒绝路径上跳过它的提前返回是 `preflight.kind ===
 > 'legacy_no_operation'`(`:897`),而那要求 posture 为 `legacy_projection_only` **且** 命令无稳定身份
 > (`w4c0-operation-registry.ts:641-648`)。⇒ 「非 null ⇒ 一条可以写的比对」作为**双向判据是错的**:
-> 见 §3.20 的 2×2。更要紧的是,把 B 改成非 null **需要发一个合同里不存在的字段**
+> 见 §3.22 的 2×2。更要紧的是,把 B 改成非 null **需要发一个合同里不存在的字段**
 > (`attendance.yml:758-765` 只有 `comment`/`metadata`),那会**让 B 不再是生产的孪生**。
 
 登记在 §4,附这条可机核的判据,而不是含糊的「⑥ 开放」。
 
-### 3.19.4 两点接线,在**本 head** 上重新核过(不继承 §3.15.9)
+### 3.21.4 两点接线,在**本 head** 上重新核过(不继承 §3.15.9)
 
 §3.15.1 声明过:§3.15 以上的每个绝对数都绑 `7ef8e610e` 基点。两点接线的 exclude 半边本单元此前是
 **继承**的,这里在 `a02930896` 基点上重新量:
@@ -3062,17 +3062,17 @@ $ grep -n "itIfExpectDb\|EXPECT_DB" \
 (⚠️ 本节初稿把这个哨兵写成 `:63-66`,那是文件头 doc comment 的行,**写错了**;改成贴 grep 输出而不是
 再钉一个会腐烂的行号区间。)
 
-### 3.19.5 本节没有改动任何代码或测试
+### 3.21.5 本节没有改动任何代码或测试
 
 纯文档单元:把已有的测量换个说法、把误读挡掉、把三个开放项写成**可执行的下一步**而不是形容词。
 本节不产生任何新的绿。
 
-## 3.20 ⑥ 的账侧半边 —— 实测,结论是**声明式背离**而不是开放项 (this unit)
+## 3.22 ⑥ 的账侧半边 —— 实测,结论是**声明式背离**而不是开放项 (this unit)
 
-§3.19.3 把 ⑥ 登记成「判据已写、但没人去测」。本单元去测了。**它也推翻了那条判据的两句机制**,
+§3.21.3 把 ⑥ 登记成「判据已写、但没人去测」。本单元去测了。**它也推翻了那条判据的两句机制**,
 所以这里既是结论也是勘误。
 
-### 3.20.1 机制:闸不在 `operationId` 上,而是一个 2×2
+### 3.22.1 机制:闸不在 `operationId` 上,而是一个 2×2
 
 封存语句 `UPDATE attendance_result_operations … SET state = 'completed', response_snapshot = …`
 在 `w4c0-operation-registry.ts:764-789`,由边界在事务末尾 `w4c3b-request-operation-boundary.ts:918`
@@ -3091,7 +3091,7 @@ $ grep -n "itIfExpectDb\|EXPECT_DB" \
 ⚠️ 第三格还多依赖一条**我没有读过**的链:「`operationId === null` ⇒ `plan.legacyNullIdCount > 0`」。
 `plan` 的构造本单元没有读,所以第三格是**源码断言,不是行为断言**(本线 `源码文本断言≠行为断言`)。
 
-### 3.20.2 B 侧无身份是**生产的代表**,不是夹具图省事
+### 3.22.2 B 侧无身份是**生产的代表**,不是夹具图省事
 
 `resolveRequestOperationId`(`index.cjs:33304-33311`)只从**请求体**取 `operationId`/`operation_id`。
 
@@ -3135,7 +3135,7 @@ operation id,同样没有字段可填。
 ⇒ **把 B 改成会封存,等于发一个合同里不存在、任何客户端都不发的字段** —— 那是用「让 B 不再是孪生」
 换一行可比的数据。所以 ⑥ 的账侧平价**不是还没写,而是在代表性夹具上不可构造**。
 
-### 3.20.3 测量:一条谓词,两个输入
+### 3.22.3 测量:一条谓词,两个输入
 
 两半用**同一条 SQL、同一列**,只换 request id —— 这样 B 的 0 才有判别力(否则 B 的零可能只是谓词写错):
 
@@ -3157,7 +3157,7 @@ A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
 ⚠️ **A 也可能是 0** 是进场前就准备好的结果 —— 若两侧都不封存,该写的是「两条路都不封存」而不是背离。
 实测不是那样,所以这里写的是背离。
 
-### 3.20.4 结论:⑥ 的两个载体不同,所以没有行可比
+### 3.22.4 结论:⑥ 的两个载体不同,所以没有行可比
 
 | | A(兑现路径) | B(生产 HTTP 路径) |
 |---|---|---|
@@ -3168,19 +3168,19 @@ A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
 逐字节比对需要一对同类行,而这里一侧根本没有行 ⇒ **declared divergence with a mechanism**,
 登记在 §4,不再是 TODO。
 
-### 3.20.5 Mutation 台账(this unit)
+### 3.22.5 Mutation 台账(this unit)
 
 | id | mutation | 预期 | 实测 |
 |---|---|---|---|
-| M-27 | 删掉 `w4c3b-request-operation-boundary.ts:918-921` 整个 `sealAttendanceResultOperationV1` 调用 | 新断言红 | ⚠️ **混淆红,不采信为本断言的探针**:3 failed / 16 passed,全部是 `APPROVAL_ACTION_DISPATCH_FAILED` / `expected 500 to be 200` —— 变异触发了另一条真实规则(操作行停在 `claimed`),死在我的断言**之前**。按本线 `混淆的mutation要换成隔离2×2格` 换成 M-28 |
-| M-28 | **隔离变异**:封存照做,只把 `resolvedRequestId: result.resolvedRequestId` 改成 `resolvedRequestId: null`(1 行) | 只有 `sealA` 半边红 | ✅ **恰好 1 red / 18 passed (19)**,红在 `redemption.db.test.ts:2144`,`sealA` `'1'`→`'0'` 而 `sealB` **保持 `'0'` 不动** —— 变异只推动了它应该推动的那一半,断言承重且有判别力 |
+| M-31 | 删掉 `w4c3b-request-operation-boundary.ts:918-921` 整个 `sealAttendanceResultOperationV1` 调用 | 新断言红 | ⚠️ **混淆红,不采信为本断言的探针**:3 failed / 16 passed,全部是 `APPROVAL_ACTION_DISPATCH_FAILED` / `expected 500 to be 200` —— 变异触发了另一条真实规则(操作行停在 `claimed`),死在我的断言**之前**。按本线 `混淆的mutation要换成隔离2×2格` 换成 M-32 |
+| M-32 | **隔离变异**:封存照做,只把 `resolvedRequestId: result.resolvedRequestId` 改成 `resolvedRequestId: null`(1 行) | 只有 `sealA` 半边红 | ✅ **恰好 1 red / 18 passed (19)**,红在 `redemption.db.test.ts:2144`,`sealA` `'1'`→`'0'` 而 `sealB` **保持 `'0'` 不动** —— 变异只推动了它应该推动的那一半,断言承重且有判别力 |
 
 两次都 `cp` 备份 → 改 → 单独跑 → `cp` 还原 → `cmp` 逐字节一致;还原后 `git status` 仅显示测试文件,
 **生产代码零行改动**;还原后重跑 19 passed (19),`tsc --noEmit` 退出 0。
 
-### 3.20.6 这一节**不**证明什么
+### 3.22.6 这一节**不**证明什么
 
-- 不证明 2×2 的两个**非 legacy** 格(见 §3.20.1 的 NOT MEASURED 标注)。
+- 不证明 2×2 的两个**非 legacy** 格(见 §3.22.1 的 NOT MEASURED 标注)。
 - 不证明「呈现」的**用户可见面** —— 那仍是 §3.15.6/§3.16 登记的 owner 裁决,本节只动持久化侧。
 - 不证明 B 的响应体载体是**对的设计**;只记录今天它在那里,而 A 的 DTO 把它丢了(已断言为负例)。
 - ⚠️ 顺带的推论,**只登记不追**:§3.15.11 给 ③/⑦ 开的下一步是「非 legacy org 的孪生对」,而按本节
@@ -3188,14 +3188,14 @@ A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
   那个孪生对**可能根本构造不出来**,和 ⑥ 撞的是同一个陷阱。NOT MEASURED;交下一单元先验这一点
   再决定要不要建。
 
-### 3.20.7 Wiring — 无新增钉
+### 3.22.7 Wiring — 无新增钉
 
 断言追加进已在 `plugin-tests.yml:1668` 的 `approval-cancel-round-redemption.db.test.ts`,
 无新文件 / 新 lib / 新表 ⇒ s6a、考勤四钉、W7-R10、`ci-realdb-step-contract.mjs` 全部零欠账。
-两点接线同 §3.19.4(`vitest.config.ts:1846` exclude + `plugin-tests.yml:1668` 显式列出),
+两点接线同 §3.21.4(`vitest.config.ts:1846` exclude + `plugin-tests.yml:1668` 显式列出),
 顶层 `EXPECT_DB` 哨兵在本文件 `:70-71`。
 
-### 3.20.8 Commands and results
+### 3.22.8 Commands and results
 
 ```
 $ npx tsc --noEmit -p tsconfig.json > /tmp/u2-tsc.log 2>&1; echo $?
@@ -3222,7 +3222,7 @@ $ npx tsc --noEmit -p tsconfig.json --listFiles | grep -c "approval-cancel-round
 `Transform failed … Expected ";" but found "That"` 且 `no tests` 零执行。修好后才是 19 passed。
 
 ⚠️ 另:`npx tsc … | tail -N && echo $?` 取的是 `tail` 的退出码,**不是 `tsc` 的**,恒为 0。上面已改成
-先重定向再单独 `echo $?`。§3.16.7/§3.17.6/§3.18.5 的「tsc clean」行用的是旧写法,**同样只覆盖生产
+先重定向再单独 `echo $?`。§3.16.7/§3.19.6/§3.20.5 的「tsc clean」行用的是旧写法,**同样只覆盖生产
 源码、不覆盖测试文件**——见 §0 R-10。
 
 ---
@@ -3294,30 +3294,30 @@ they are.
   evidence it is tolerated, not proof.
 - **账侧完整取消结果逐字节等价** (lock §8 期 1) — **TWO of C-1's SEVEN steps COMPARED in §3.15**
   (④ 原实例+审计行, ⑤ 请求 `cancelled`), two more MEASURED equal-but-skipped (③ 取消计算, ⑦ 事件
-  — §3.15.11), ⑥ **measured as a declared divergence** (§3.20, was 「open」), ①/② not end-state-observable. NOT 「the rows are equal」: a twin-fixture
+  — §3.15.11), ⑥ **measured as a declared divergence** (§3.22, was 「open」), ①/② not end-state-observable. NOT 「the rows are equal」: a twin-fixture
   compare against the real `POST /api/attendance/requests/:id/cancel` path, with eight identity
   substitutions sourced from fixture facts and 13 declared divergences carried as data. Every other
   column is byte-equal after normalisation. M-22 red at the named site, 1 of 16.
-  ⚠️ **Step-by-step disposition, written as 依据 rather than as table cells: §3.19.** ①/② have no
+  ⚠️ **Step-by-step disposition, written as 依据 rather than as table cells: §3.21.** ①/② have no
   twin-comparable end state (a `FOR UPDATE` held inside a committed transaction leaves no row; a
   PASSING status recheck writes nothing — lock:84), and ① is covered where the lock actually
   constrains it, as lock ORDER by census Q-G (lock:227), not by the 账侧 door. ③/⑦ are **already
-  assertions** — §3.19.2 corrects the easy misreading of §3.15.11: nothing is `test.skip`ped, the
+  assertions** — §3.21.2 corrects the easy misreading of §3.15.11: nothing is `test.skip`ped, the
   counts are pinned as VALUES on both sides; what is skipped is the PRODUCTION branch under
   `legacy_projection_only`, so the open item is BRANCH coverage needing a non-legacy-org twin
   (rollout registry, `w4c0-operation-registry.ts:640`/`:877`) plus normalisation pairs for the rows
   that would then appear — a unit of its own. ⑥'s 账侧 parity half is **no longer open — it is MEASURED,
-  and the answer is a DECLARED DIVERGENCE** (§3.20, supersedes the criterion §3.19.3 stated): one
+  and the answer is a DECLARED DIVERGENCE** (§3.22, supersedes the criterion §3.21.3 stated): one
   SQL predicate run against both twins' request ids gives `sealA='1'` / `sealB='0'` — the redemption
   seals `unrecoverableExpired` into `attendance_result_operations.response_snapshot`, the HTTP path
   writes no sealed row at all, so there is no row pair to compare byte-for-byte. A's `1` is the
-  IN-CASE POSITIVE CONTROL for B's `0` (same SQL, same column, only the id differs). M-28
+  IN-CASE POSITIVE CONTROL for B's `0` (same SQL, same column, only the id differs). M-32
   (`resolvedRequestId: null`, seal itself intact) ⇒ exactly 1 red at `:2144`, `sealA` `1`→`0` while
-  `sealB` holds. ⚠️ Two of §3.19.3's supporting mechanism claims were WRONG and are corrected there.
+  `sealB` holds. ⚠️ Two of §3.21.3's supporting mechanism claims were WRONG and are corrected there.
   B's null identity is **representative, not a fixture shortcut**: the published contract
   (`attendance.yml:758-765`) offers only `comment`/`metadata`, and the sole production client sends
   `JSON.stringify({})` (`AttendanceView.vue:23128-23131`) — making B seal would require a field that
-  does not exist in the contract. NOT MEASURED: the two non-legacy cells of §3.20's 2×2.
+  does not exist in the contract. NOT MEASURED: the two non-legacy cells of §3.22's 2×2.
   ⚠️ Also NOT built anywhere on this branch: ②'s NEGATIVE direction — a fixture whose attendance
   request is no longer in a cancellable state, so the status recheck REFUSES. That is a behaviour
   assertion, not a parity one, and no case constructs it.
@@ -3368,8 +3368,8 @@ they are.
   `createCancelRoundInstance`'s own pre-check (`:8558-8568`, measured frame `:8563:15`,
   `CANCEL_ROUND_ALREADY_PENDING` 409), and reaching `uq_approval_rounds_pending_document` needs a
   constructed race this case does not build; (b) **only ONE of the two terminal outcome writers is
-  probed** — ⚠️ **THIS HALF IS NOW CLOSED; see §3.18.** The C-2 success writer at `:9108`
-  (`outcome = 'applied'`) had no probe when §3.14 landed. M-26 deletes the `applied` write and its
+  probed** — ⚠️ **THIS HALF IS NOW CLOSED; see §3.20.** The C-2 success writer at `:9108`
+  (`outcome = 'applied'`) had no probe when §3.14 landed. M-30 deletes the `applied` write and its
   `rowCount` guard together (same shape and same reason as M-21), and the new C-2 I3 case — whose
   `createCancelRoundInstance` is the FIRST post-redeem statement — goes red at
   `redemption.db.test.ts:1217:20`, frame `ApprovalProductService.ts:8563:15`,
@@ -3378,21 +3378,21 @@ they are.
   have carried it. §3.14.5's population was **re-derived at this head** (6 hits, 2 prose, 4
   statements, zero under `plugins/`, zero in builder syntax), not inherited from the `7ef8e610e`
   measurement. The door is again the application pre-check, NOT
-  `uq_approval_rounds_pending_document` — §0 R-7's correction applies verbatim to M-26.
-  ⚠️ What §3.18 does NOT establish, stated as the fixture premise it is: the case measures the
+  `uq_approval_rounds_pending_document` — §0 R-7's correction applies verbatim to M-30.
+  ⚠️ What §3.20 does NOT establish, stated as the fixture premise it is: the case measures the
   SLOT release using a test-double port that writes nothing, so the ORIGINAL document is still
   `approved` (**asserted** on the case's last line, not assumed). In production C-1 writes the
   original `approved → cancelled`, and `createCancelRoundInstance` is premised on an `approved`
   document — so whether a REAL-boundary redemption's second round would instead be refused for a
   document-status reason is **not answered** by this case. M-7 remains a mutation of the outcome's
   *value*, not its presence.
-- **§9-9 允许集的 `approve` 成员半边** (C-1 门审第 5 轮 P3-1 / R5-M7) — **承接并闭合在 §3.17**,
+- **§9-9 允许集的 `approve` 成员半边** (C-1 门审第 5 轮 P3-1 / R5-M7) — **承接并闭合在 §3.19**,
   但闭合的方式与门审建议的不同,且这一点是本节的要点:门审当时写的是「零判别力」,而在本分支
   head 上重放 R5-M7 已经是 **11 failed / 6 passed (17)** ——这一格早就被判据 II/IV、R2、账侧、
   §3.16 顺带钉住了。补的用例(`:1101-1163`)因此不是「从空到有」,而是把**后果红**换成**成员红**:
   11 条红全是 `expected 409 to be 200` 或「错误码不是我要的那个」,分不清「闸拒了」与「兑现在下游
   坏了」,且会随那些断言的重构悄悄空回去。新用例在同一实例上同时测量闸的两侧(非成员 `handle` ⇒
-  409 + 行逐列不变;成员 `approve` ⇒ 200 + 轮次 `applied` 正向断言),M-25 红在 `:1146:62` 且错误码
+  409 + 行逐列不变;成员 `approve` ⇒ 200 + 轮次 `applied` 正向断言),M-29 红在 `:1146:62` 且错误码
   逐字是 `CANCEL_ROUND_OUTLET_FORBIDDEN`,对照半边在 mutation 下仍被求值并通过。
   ⚠️ 不建立的:四成员的机械遍历(只钉 `approve` 一格,另三格仍是 C-1 R5-M8/M9/M10 的证据、绑 C-1 的
   head,本单元不继承不重跑);兑现半边用的是测试替身 port,与 §3.11.6 同层级。
@@ -4167,3 +4167,76 @@ paragraph was written, PR #5856's `test (18.x)` / `test (20.x)` at this same `HE
 for several minutes and were still `pending` (in progress, not queued) — this document does not claim
 those checks turned green, only that every local proxy for their content did, matching the pre-fix
 failure exactly and the post-fix pass exactly.
+
+## §N P3 卫生轮(2026-09-19)
+
+**Scope**: every still-open P3 named in `impl-gate-C-slice2-round1-20260918.md` (verdict head
+`d462677bd`, 0 P1/0 P2/8 P3) and `impl-gate-C-slice2-round2-20260918.md` (verdict head `006d9458e`,
+0 P1/0 P2/2 P3), plus round-1 §8's own "本轮未做" bullets. Both verdicts are **head-scoped** to SHAs
+that are no longer reachable — this branch was rebased onto a newer `feat/approval-cancel-round-phase1`
+tip in the same work session (`git rebase --rebase-merges origin/feat/approval-cancel-round-phase1`;
+a plain `git rebase` flattens this branch's `u2`/`u3` merge commits and produces a spurious conflict —
+see the commit history around the rebase for the diagnosis). Neither gate's basis changes: the two new
+upstream commits touch only `phase1-design`/`phase1-verification` MDs and one phase-1 test file, never
+this branch's own `phase2-verification` MD or `ApprovalProductService.ts` — confirmed by
+`git diff <old-tip> -- <these-two-files>` returning empty and `git diff --stat <old-tip> HEAD` showing
+only the three phase-1 files. So "DRAFT-READY" still holds; only the SHA a reader would cite changed.
+
+**Disposition legend**: CLOSED-测试 / CLOSED-注释 / CLOSED-MD (already-fixed-by-disclosure) /
+DEFERRED-需行为改动 / DEFERRED-owner项. Every CLOSED-测试/注释/MD row below is a comment, doc-string,
+title, or MD-prose edit only — no `src/` production file is touched by this pass (see the diff-stat
+at the end of this section). `ApprovalProductService.ts` and `plugins/plugin-attendance/index.cjs`
+are read-only in this pass; the former is the subject of R2-P3-2's OWN finding (touching it would
+re-shift every line number this pass just fixed), the latter already carries a complete, accurate
+disclosure (R1-P3-7) that needed no edit.
+
+| # | Report's one-line claim | Disposition | Where |
+|---|---|---|---|
+| R1-P3-1 | Test titles/comments in the redemption suite still describe the `unrecoverableExpired` DTO/audit-row channel as ABSENT ("carries no channel", "assert its absence as a negative", "goes red the day one is added") when §3.18 already added it and the suite's own runtime assertions are positive — 5 places named, "not guaranteed exhaustive" | **CLOSED-注释.** Mechanical sweep (`git grep -n` for the same negation family across the suite file) found exactly 5 live-claim hits matching the report's count; all 5 fixed in place (suite header, 判据 II title's stale "round id as its operation id" folded in as a 6th same-family fix, the 呈现 case's outer doc-comment intro + "WHAT THIS CASE DOES NOT ESTABLISH" bullet, and the `it()` title). Two adjacent sentences the sweep also matched (账侧 doc-comment bullet (b) ~L1794-1801, and its inline twin ~L1889) were checked and are ALREADY self-consistent — each already carries its own ⛔-marked retraction of the oversold half, added before round-1 even ran; left untouched. No MD table copies these titles verbatim (checked before editing any title string), so no downstream sync was needed. | `packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts` (suite header ~L43-50, 判据 II title ~L971-974, 呈现 case doc-comment ~L2208-2258, `it()` title ~L2262-2266) |
+| R1-P3-2 | `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` has zero test coverage while both MDs call it "load-bearing"; round-1's own re-review (twice) concluded both drift directions are independently fail-closed elsewhere, so "load-bearing" (implying correctness depends on it) is an overclaim, and recommended softening the wording | **CLOSED-MD** (treated as a retraction, per rule ③: full-branch grep). Both occurrences (design MD §3.2, verification MD §3.9.1) reworded to state it is redundant depth FOR CORRECTNESS (naming the two fail-closed backstops the gate found) but still load-bearing FOR ERROR-CODE PRECISION — neither the original overclaim nor its mirror-image ("not load-bearing at all") survives. `git grep -n "load-bearing"` combined with `SCOPE_CHANGED` across `*.md`/`*.ts`/`*.cjs`/`*.mjs` on the whole branch returns exactly these 2 (now-corrected) lines — zero unqualified hits remain. | `docs/development/approval-cancel-round-phase2-design-20260918.md:196`, `…verification-20260918.md:760` |
+| R1-P3-3 | `deactivateAllActiveAssignments` in the C-3 close (M-6) has zero discriminating power — every approve mode already deactivates the acting seat before the terminal advance, so the mutation stays green; the CODE COMMENT already discloses this accurately ("MEASURED, not assumed... this is defence in depth, not the cause of the released seat") | **CLOSED-MD (already correct; independently reconfirmed, not re-edited).** Read the comment at `ApprovalProductService.ts` (site not touched, per the R2-P3-2 line-stability constraint above) — it states exactly what the gate found, with no overclaim. Nothing to fix; recorded here so the disposition table is complete rather than silently dropping a P3 that turned out to need no action. | `ApprovalProductService.ts` (read-only; site is the `deactivateAllActiveAssignments` call inside the C-3 system-close terminal, per gate's own citation) |
+| R1-P3-4 | The C-3 closure's `getApproval` sits inside `try` (unlike the ordinary bottom-return's, which sits outside `try/finally`), so a throw there could 503-map an already-committed close; round-1's OWN re-review concluded the increment is unreachable (`getApproval` never produces `40001`/`40P01`) and the underlying "committed-yet-reported-failed" exposure is inherited from the pre-existing bottom-return path, not new — "维持 P3" both times | **CLOSED-MD** (reachability note recorded here rather than as a new code comment in `ApprovalProductService.ts`, to avoid re-shifting the line numbers R2-P3-2 just fixed). No test or code change: the gate's own re-review already supplies the closing argument (`isRetryableSqlState` matches only `40001`/`40P01`; `getApproval` takes an independent pooled connection, default READ COMMITTED, pure SELECT, no row lock ⇒ neither SQLSTATE is reachable from it), and it is reproduced verbatim above as the record of why this stays P3 rather than escalating. | verification MD (this section); `ApprovalProductService.ts` read-only |
+| R1-P3-5 | `assertExternalTransactionRolloutLockHeldV1`'s only red-making leg (census Q-E LEG 4) is a source-text scan (anchored at both ends), not a behavioral assertion; the behavioral side cannot be built because no non-compliant caller exists in the repo today | **CLOSED-测试** (positive format, not a behavioral test — the behavioral side genuinely cannot be built per the gate's own finding). Added a closed-world COUNT assertion over the WHOLE scanned file (not just the sliced excerpt the leg already anchors into) requiring exactly 1 occurrence of the call pattern, so a second call site added outside the anchored function — or the anchor silently drifting onto a stale occurrence — reddens instead of reading vacuously green. Verified by mutation: `toBe(1)`→`toBe(2)` (real population unchanged) reddens with `expected 1 to be 2`; reverted, `cmp` byte-identical. | `packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, LEG 4 (~L1081-1112) |
+| R1-P3-6 | The new `attendance-cancellation-execution-port.ts` port file sits outside all three W7-R10 walked roots; the guard itself is "(future, W7-1)" and has zero effect today | **DEFERRED-owner项.** `w7-w6r5-guard-root-set.ts` is a DIFFERENT, PROPOSED design-lock's artefact (`#4556` attendance W7/W6-R5, `OD-W7-0..10` OPEN owner decisions, status "PROPOSED / runtime HOLD"), explicitly framed as "a point-in-time fact about the W7-0 baseline" (`f364c7f9b3`) rather than a living list. Amending its root set from an unrelated PR (cancel-round C-2) would be registering a cross-line decision this PR has no standing to make, and the guard that would consume a 4th root does not exist yet regardless. Registration belongs to the W7-1 implementer under that line's own OD process; not actioned here. | `packages/core-backend/src/attendance/w7-w6r5-guard-root-set.ts` (not touched) |
+| R1-P3-7 | Reordering the adapter's row locks (lock §3 C-2 global order) changed which 409 message wins under a concurrent double-mutation ("Approval changed…" vs "Request changed…"); same status/code, no test asserts the precedence; round-1's re-review downgraded a P2 candidate to P3 and recommended recording the change rather than pinning a sequential-race test with zero discriminating power | **CLOSED-注释 (already complete; independently reconfirmed, not re-edited).** The adapter already carries a full, accurate disclosure at the exact site ("Behaviour note (disclosed, not buried)... and no test asserts the precedence"), added when the reorder landed. Advisor-reviewed alternative (a sequential test asserting message priority) was rejected: pinning it would need a CONSTRUCTED race to have any discriminating power, and would freeze an ordering the gate itself called incidental (status/code unchanged) — out of budget and out of proportion to what round-1 asked for. | `plugins/plugin-attendance/index.cjs:35118-35123` (read-only) |
+| R1-P3-8 | `CANCEL_ROUND_DISPATCH_CONTENDED`'s only leg (census LEG 6) is a source scan of `dispatchAction`'s catch block; the mapping has zero runtime coverage (self-disclosed in the test's own comment) | **CLOSED-测试**, same "positive format" treatment as R1-P3-5: a closed-world COUNT over the whole `ApprovalProductService.ts` source (not just the sliced `catchBody`) requiring exactly 1 occurrence, so a second throw site elsewhere in the file no longer hides from this leg. Verified by mutation: `toBe(1)`→`toBe(5)` reddens (`expected 1 to be 5`); reverted, `cmp` byte-identical. | same file, LEG 6 (~L1392-1432) |
+| R1-§8 (FE pin) | Round-1 §8's own list of what it deferred includes "前端侧(补充清单第 15 条 FE 同步钉)不在本切片改动面内,未审" — not a P3 finding, but an item the convergence section named and this pass should not silently drop | **DEFERRED-需行为改动.** No FE work exists in this branch to sync a pin against (confirmed: this branch's diff-stat contains no `apps/web` files at any point in its history). Registered so the disposition table is a complete answer to "以及报告收敛要求节", not a partial one. | supplementary checklist item 15 (unactioned, out of this slice's file scope per round-1) |
+| R2-P3-1 | `role-assignment-boundary.test.ts` and `w4c3a-rollout-control-inventory.test.ts` race under `pool: 'forks'` (one writes a scratch file into the source tree, the other globs+reads it at collection time) causing an intermittent `ENOENT` on `test (18.x)`/`test (20.x)`; measured non-deterministic (2 full runs: 1 red/1 green), pre-existing on `main`, gate explicitly recommends filing it separately rather than fixing it in this PR ("否则 one-concern-per-PR 被破") | **DEFERRED-owner项**, per the gate's own explicit recommendation. Not actioned: fixing a cross-suite race is a behavior-adjacent test-infra change (which file writes where, or which file tolerates a vanished path) that deserves its own review, not a hygiene-pass line item. Confirmed still pre-existing: `git diff --quiet origin/main -- <both files>` → both `IDENTICAL-TO-MAIN` on the current (rebased) tip too. | `packages/core-backend/tests/unit/role-assignment-boundary.test.ts:872`, `src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts:145` (neither touched) |
+| R2-P3-2 | `e90a44dbe` inserted 8 lines at `ApprovalProductService.ts:914-921`, one commit after the design MD's own line-number re-derivation pass (§10, pinned to `d462677bd`) — every citation below the insertion in both MDs drifted +8, and the final doc commit never re-pinned; gate recommends converting to `symbol + ~L` anchors (AGENTS.md's own convention for large files) to structurally end the drift class rather than re-pinning a third generation of exact numbers | **CLOSED-MD, for the named citations; the broader sweep is a registered follow-up.** Converted to `symbol/anchor, ~L<n>` form, each number independently re-derived by `grep -n` against the CURRENT tree (not by transcribing round-2's own now-additionally-stale `+8` table): design MD's §3.1 module-scope table (7 symbols), §4.2's `dispatchAction` block, §4.2's "called twice" sentence, §4.3's `bulkReassignApprovals` citation, §4.4's/§5's seam-table rows, §7.1's C-2-success-writer note, §10's own now-twice-stale table (left as an explicitly-labeled `d462677bd`-baseline historical record, per the same "explicit baseline SHA ⇒ not a false claim" reasoning round-2 itself used for P3-2's severity call — plus a new note explaining WHY it drifted again and pointing to the symbol-anchor conversion instead of a third re-pin); and verification MD §3.14.4's outcome-writer table (all 4 rows, not just the 2 the gate quoted — the other 2 in the SAME table were independently found stale by the same `grep -n` re-derivation and fixed for internal consistency). One occurrence was deliberately LEFT AS-IS: §3.20.1's captured `git grep` transcript is genuine historical command output, explicitly labeled with its own baseline (`a02930896`) — editing the code-block content would fabricate a transcript, so it stays as recorded evidence, unlike the live-reference table beside it. **NOT closed**: an independent `grep -noE` sweep of both MDs found roughly 20 additional raw `ApprovalProductService.ts:NNNN` citations outside round-2's named set (e.g. `:8514`, `:8331`, `:10929`, `:9346`, `:4433`…) — spot-checked, several are ALSO stale (this file's drift is not limited to the one +8 insertion round-2 measured; smaller ±2-line drifts predate it). Converting all of them was outside this step's budget; registered as a mechanical, comment/MD-only follow-up with no behavior risk. | `docs/development/approval-cancel-round-phase2-design-20260918.md` (§3.1, §4.2, §4.3, §4.4, §5, §7.1, §10); `…verification-20260918.md` §3.14.4 |
+
+**Retraction sweep (rule ③)**: `git grep -n "still carries no channel\|carries no channel for it\|assert its absence as a negative\|goes red the day one is added"` across `*.ts`/`*.md` → **0 hits** (was 5 before this pass). `git grep -n "load-bearing"` filtered to lines also matching `SCOPE_CHANGED` → exactly the 2 corrected lines, both now carrying the narrowed (not reversed) claim.
+
+**Tests run, virgin private DB `metasheet2_p3hygiene_p2` (dropped after)**:
+
+```
+$ tsc --noEmit -p tsconfig.json                                                          → clean
+$ vitest run tests/unit/approval-field-access-enum-mirror.test.ts                        → 50 passed (50)  [byte-identical guard, unaffected]
+$ vitest --config vitest.integration.config.ts run <7 approval-cancel-round-*.db.test.ts> → 78 passed (78)
+$ vitest --config vitest.integration.config.ts run <4 sibling suites>                     → 28 passed (28)
+```
+
+Both counts match round-2's own known-good shape exactly (no new `it()` added — the two P3-5/P3-8
+fixes extend existing cases, so no wiring/pin wave was triggered).
+
+**`git diff --stat` from the rebase's post-rebase tip to this pass's HEAD** (the correct starting
+point — NOT the old, now-unreachable `006d9458e` gate SHA, which would also show the 3 unrelated
+phase-1 files this rebase pulled in):
+
+```
+$ git diff --stat 1a4a4d992dbb68b9fc22ffa5311dde3a5809bfcc
+ docs/development/approval-cancel-round-phase2-design-20260918.md       | 74 +++++++++++++---------
+ docs/development/approval-cancel-round-phase2-verification-20260918.md | 92 +++++++++++++++++++++--
+ packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts | 18 ++
+ packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts        | 38 ++++----
+ 4 files changed, 175 insertions(+), 47 deletions(-)
+```
+
+⚠️ **Self-reference, disclosed rather than papered over** (same shape as the round-1 P3-hygiene
+commit `c4dc4b928` fixed for K7): this §N section's OWN insertion is counted inside the
+`…verification-20260918.md` line above, so the exact number moves by a few lines with any further
+wording pass over this section and is not chaseable to a fixed point without omitting real content.
+The number above is what `git diff --stat` prints against the post-rebase tip at commit time; it is
+kept as measured evidence, not rounded off or omitted. What it proves regardless of its exact value:
+two MD files, two `.db.test.ts` files, zero `src/` files, zero `.cjs`/`.mjs` files, zero migrations,
+zero `plugin-tests.yml` / `ci-realdb-step-contract.mjs` / `ci-wiring` changes — no new or renamed
+test file, so none of those pins move.
