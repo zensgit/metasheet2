@@ -306,16 +306,27 @@ $ grep -o "approvalTemplateCenterSections" apps/web/scripts/run-required-web-tes
 ```
 新 token `approvalTemplateCenterSections` 与既有 token `approvalTemplateCenterCategory` 互不为子串,vitest 的子串匹配不会把两者混为一谈(两者共享前缀 `approvalTemplateCenter` 但后半截不同,不构成 vitest CLI 参数级别的子串碰撞)。
 
-## 7. Mutation 台账(cp 备份 → 改 → 跑受影响用例 → 还原 → `cmp` 校验;仅报告本次会话内实际执行的探针,未执行的如实标注 NOT RUN)
+## 7. Mutation 台账(2026-09-18 修复轮 1 全量重写——并入门审 `impl-gate-A4-round1-20260918.md` 的 11 条台账,替换本节此前的 3 RUN / 3 NOT RUN;M10/M11 的「绿」原样保留,不因后续修复而抹去)
 
-| # | 目标文件 | 探针 | 命令与结果(节选) | 还原校验 |
-|---|---|---|---|---|
-| 1 | `ApprovalTemplateGroupSectionService.ts:149` | 删除 `buildSectionBucketCondition(...)` 调用,WHERE 条件替换为字面量 `'TRUE'` | 重跑 `approval-template-groups-sections.db.test.ts`:`4 failed \| 1 passed (5)`——「C 四桶」「D 后备」「C 分页」「C/J 400 正控格」全部转红(`TypeError: Cannot read properties of undefined`/`expected 500 to be 200`),仅 §4 C 的一条 400 反例格未受影响,与探针性质一致(去掉桶过滤只影响返回内容,不影响请求形状校验) | `cp` 恢复后 `cmp` 逐字节相同;恢复后重跑 4 文件 39/39 全绿 |
-| 2 | `ApprovalTemplateGroupSectionService.ts:108` | 删除 `ungrouped` 分支里 `OR t.category = ''` 半句(改成只判 `IS NULL`) | 重跑同文件:`1 failed \| 4 passed (5)`——**恰好**且**只有**「C: three tokens / four buckets」转红,断言`expected […] to include '<t4-id>'` 失败(`category=''` 的模板未落入 `ungrouped`)——与 v2.6 P2-A 的判别力描述完全吻合,不是笼统的"大面积变红" | `cp` 恢复后 `cmp` 逐字节相同;恢复后重跑 4 文件 39/39 全绿 |
-| 3 | `ApprovalTemplateGroupReorderService.ts:118` | 删除 `SELECT pg_advisory_xact_lock(...)`(L0 顾问锁) | 单独重跑该文件的并发用例(`-t "two concurrent reorders"`):`1 failed \| 4 skipped`,断言 `Error: timed out waiting for backend blocked by holder pid ... (never engaged the production lock — race golden would be vacuous)`——是一次响亮的红(硬失败 + 明确诊断信息),不是静默通过,与文件头注释「the concurrent test's `waitUntilBackendBlockedByHolder` call times out (a hard failure, not a silent pass)」逐字吻合 | `cp` 恢复后 `cmp` 逐字节相同;恢复后重跑 4 文件 39/39 全绿 |
-| 4 | `ApprovalTemplateGroupReorderService.ts:120`(`archived_at IS NULL` 半句) | **NOT RUN(本次会话)**——`approval-template-groups-reorder.db.test.ts` 文件头注释自陈「VERIFIED (2026-09-18, cp → edit → re-run → restore → cmp byte-identical)」,即这条探针已由**实现阶段**的会话执行并记录在源码注释里;本次验证 MD 撰写会话未独立重跑这一条,如实标注为「文档来源于源码注释的既有记录,未在本轮独立复核」而非「本轮验证」 | — |
-| 5 | `ApprovalTemplateGroupSectionService.ts`(路由层 `total`/`LIMIT`/`OFFSET` 组合) | **NOT RUN(本次会话)**——时间预算内选择了判别力最强的 3 条(桶谓词整体移除、`OR ''` 单独移除、L0 移除),分页字段组合改动留待下一轮门审或 owner 要求时补做 | — |
-| 6 | `ApprovalTemplateGroupReorderService.ts`(`ORDER BY id` … `index+1` off-by-one) | **NOT RUN(本次会话)**——同上,时间预算内的取舍,`validateApprovalTemplateGroupReorderIds` 的 7 条单元测试与「happy path」端到端用例的精确 `{id, sortOrder}` 断言已经是这条 off-by-one 的静态判别力来源,但未真正跑一遍改坏版本观察红 | — |
+**来源分工**:M1–M9 由门审报告 `impl-gate-A4-round1-20260918.md` §4 的门审者本人亲跑(`cp` 备份 → 改 → 跑 → 还原 → `cmp`),本文档按门审报告逐字转录,未在本轮修复会话中重跑(时间预算内不重复门审已完成的工作)。M10/M11 的**上半行**(green,即 P2-2/P2-1 的原始发现)同样来自门审报告。M10/M11 的**下半行**(修复后重跑同一探针转红)是本轮修复(round 1,2026-09-18)在私有库 `metasheet2_lock_a4` 上亲跑的——这是本节相对旧版最实质的更新。
+
+| # | 目标文件 | 探针 | 结果 | 还原校验 | 出处 |
+|---|---|---|---|---|---|
+| M1 | `routes/approvals.ts` | 删未知 `section=` 令牌的 400,改为静默下沉 | **红**,恰 1 条:`C/J: malformed section requests…` `expected 200 to be 400` | `cmp` 逐字节相同 | 门审报告 §4 |
+| M2 | `ApprovalTemplateGroupSectionService.ts` `buildSectionBucketCondition` | 删 `ungrouped` 桶的 `OR t.category = ''` 半句 | **红**,恰 1 条:`C: three tokens / four buckets…` `expected […] to include '<t4>'` | `cmp` 逐字节相同 | 门审报告 §4 |
+| M3 | 同上 | 每节 `total` 改由返回页拼(`result.rows.length`,**后端**) | **红**,恰 1 条:`C: pagination is scoped to the section…` `expected 1 to be 5` | `cmp` 逐字节相同 | 门审报告 §4 |
+| M4 | `ApprovalTemplateGroupReorderService.ts` | 删 `pg_advisory_xact_lock`(L0) | **红**:`E (phase 3): two concurrent reorders…` — `waitUntilBackendBlockedByHolder` 超时硬失败(「never engaged the production lock」) | `cmp` 逐字节相同 | 门审报告 §4 |
+| M5 | DB 约束 | `atg_sort_unique` drop + 重建为 **NOT DEFERRABLE** | **红** 2 条:happy path 与并发格双双 `expected 500 to be 200` | 约束改回 `DEFERRABLE INITIALLY DEFERRED`,`pg_constraint` 复核 `condeferrable=t, condeferred=t` | 门审报告 §4 |
+| M6 | `ApprovalTemplateGroupReorderService.ts` | 删 `activeRows` 查询的 `archived_at IS NULL` 半句 | **红**,恰 1 条:`400 GROUP_REORDER_SET_MISMATCH…archived…` `expected 500 to be 400` | `cmp` 逐字节相同 | 门审报告 §4 |
+| M7 | `routes/approvals.ts` | 删 `?category=` 与 `section` 同现的 400 | **红**,恰 1 条:`C/J: malformed section requests…` `expected 200 to be 400` | `cmp` 逐字节相同 | 门审报告 §4 |
+| M8 | `ApprovalTemplateGroupReorderService.ts` | off-by-one(`sortOrder = index` 而非 `index + 1`) | **红** 2 条:happy path 的 `{id,sortOrder}` 深比较 + 并发格 `expected [1,2,3] 类` 不等 | `cmp` 逐字节相同 | 门审报告 §4 |
+| M9 | `.github/workflows/plugin-tests.yml` | 从真库步骤 FILES 里删掉 `…-reorder.db.test.ts` | **红**:`approval-template-groups-ci-wiring.test.mjs` `pass 11 / fail 1`,退出码 1 | `cmp` 逐字节相同 | 门审报告 §4 |
+| **M10(修复前)** | `TemplateGroupSections.vue:307` | 每节 `total` 改由客户端拼(`res.data.length`,**前端**) | **绿 18/18 —— 判别力为零 ⇒ P2-2**(原夹具 `{data:[1行], total:1}` 让两种实现观测等价) | `cmp` 逐字节相同 | 门审报告 §4(**原样保留,不因下一行的修复而删除或改写**) |
+| **M10(修复后,本轮 2026-09-18 亲跑)** | 同上,夹具已改为 `{data:[1行], total:7}` | 同一处 mutation(`total: res.data.length`)**重新施加**在修复后的 `approvalTemplateCenterSections.spec.ts` 上 | **红**,恰 1 条:「renders per-section items and the section-own total…」`expected '1' to be '7'`;其余 17 条(含相邻的「shows "load more"…」)不受影响,与门审报告 §2 P2-2 对 `hasMore` 计算路径的分析一致 | `cp` 恢复 `TemplateGroupSections.vue` 后 `cmp` 逐字节相同;恢复后重跑 18/18 全绿 | 本轮修复(round 1) |
+| **M11(修复前)** | `routes/approvals.ts:1288` | 删 reorder 路由的 `approvalTemplateAdminGuard` | **全绿**(39/39 真库四文件 + 933/14737 全量无库 + 两个 ops 守卫)⇒ **P2-1**(仓内零断言覆盖该端点授权面) | `cmp` 逐字节相同 | 门审报告 §4(**原样保留**) |
+| **M11(修复后,本轮 2026-09-18 亲跑)** | 同上 | 同一处 mutation(删 guard)**重新施加**,针对新增的 `approval-template-groups-reorder.db.test.ts` 授权用例 | **红**,恰 1 条:「authorization: reorder requires approvalTemplateAdminGuard…」`expected 200 to be 403`;文件其余 5 条不受影响 | `cp` 恢复 `routes/approvals.ts` 后 `cmp` 逐字节相同;恢复后重跑 6/6 全绿(私有库 `metasheet2_lock_a4`) | 本轮修复(round 1) |
+
+任务书点名的三条必跑 mutation **全部覆盖**:DEFERRABLE 依赖 = **M5**(红);删 section 令牌校验 = **M1**(红);分页 total 改由客户端拼 = **M3**(后端,红)+ **M10**(前端,修复前**绿** = P2-2,修复后**红**)。
 
 **两个纯函数单元测试文件**(`approval-template-group-section-token.test.ts`、`approval-template-group-reorder-validation.test.ts`)本身就是穷举式正/反例(13 条 + 7 条),其判别力来自枚举覆盖而非事后 mutation,未对它们额外做源码级 mutation。
 
@@ -362,6 +373,78 @@ EXIT=0
 - **两个写入面换分组选择器(I4)**——未做,原因见设计 MD §1.2/§6。
 - **A-2 session-org 脱困入口未接入 `section=` 端点**——新披露的缺口,见设计 MD §6;本切片未修复,归入 owner 待裁的关联事实。
 - **Q5(`?category=`/`/categories` 去留)**——未裁,本切片按锁文字面"不动",但新增了一个具体的新消费方披露(设计 MD §7)。
-- **Mutation 台账 4/5/6 三条**——见 §7,NOT RUN,理由已写明(#4 是既有记录未独立复核;#5/#6 是本次会话的时间预算取舍)。
 - **移动/重排控件的客户端权限门控**——未做,依赖路由层 fail-closed,设计 MD §5.4 已写明是有意选择。
 - **前端两次 `section=` 请求之间的跨时刻一致性**——不作承诺,锁文原文明写,非本切片缺陷。
+- **门审 P2-1/P2-2**——已在修复轮 1(2026-09-18)修复并亲跑 mutation 转红,见 §11;§7 的 M1–M9 转录自门审报告未在本轮独立重跑(时间预算内不重复门审已完成的工作),如 owner 或下一轮门审要求可补做。
+- **门审 P3-1…P3-6(六条)**——本轮修复未处理(修复轮任务书要求「选尚未处理的一到三条」,本轮选择处理 P2-1/P2-2 两条,P3 六条留待后续轮次或 owner 裁决是否需要);逐条内容见 `impl-gate-A4-round1-20260918.md` §3。
+
+## 11. 修复轮 1(2026-09-18)——P2-1 / P2-2 收敛
+
+门审 `impl-gate-A4-round1-20260918.md`(verdict NEEDS-FIX,0 P1 / 2 P2 / 6 P3,绑定 head `2a687c7d1`)点名两条 P2,本轮全部处理。**本节与 §12 的全部测量均针对测试提交 `e214184afdd329ab9a80a24bb956e282dc9df3dd`(`test(approval): close P2-1/P2-2 gaps from A-4 round-1 gate`,分支头,先于本文档提交)——本文档自身不能引用自己所在的提交 SHA,故引用它所修复的那个代码提交**。
+
+### 11.1 P2-1 —— `POST /api/approval-template-groups/reorder` 授权面补测
+
+**门审发现**:该端点是本切片唯一新写端点,锁 §3 I7 与 §4 行 F 都点名它必须挂 `approvalTemplateAdminGuard`,但仓内没有任何断言能分辨这个端点有没有挂该 guard(门审 M11:删掉 guard 后四个真库套件 39/39、全量无库套件 933/14737、两个 ops 守卫**全部照常绿**)。
+
+**修复**:在 `packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts` 新增一格 `authorization: reorder requires approvalTemplateAdminGuard …`——`roles:'user'` + 无关权限 `multitable:read`(同 phase-1 lifecycle 文件行 F 的 actor 形状)发 reorder ⇒ 断言 **403** 且 `sort_order` 零变化(SELECT 现场核对);正控 = 同一 body 用 `roles:'admin', perms:'*:*'` 的 token ⇒ **200** 且排列生效。
+
+**判别力修正(草稿版 → 最终版)**:草稿版只断言 `.status.toBe(403)`。§9 表第 4 行点名本切片「错误码不得降级成裸 HTTP 状态」,而裸 `403` 本身分不清「guard 自己拒绝」与「guard 通过了、是下游 `resolveApprovalTemplateGroupOrgId` 返回的 403」(门审 P3-5 点名过后者存在,形状是 `{ok:false,error:{code:'SESSION_ORG_REQUIRED',...}}`)。最终版加了一行判别式断言:`expect((await asNobody.json()).error).toBe('Insufficient permissions')`——这是 `rbacGuardAny` 自己的拒绝体(`rbac/rbac.ts:174` 一行 `res.status(403).json({ error: 'Insufficient permissions' })`,裸字符串,无 `code` 字段),与 phase-1 lifecycle 文件 `§2(d)` 用例用的同一个判别式(见该文件 `:759-761` 的头注释)。这条断言把「本用例证明的是 guard 本身」与「本用例只是恰好也观测到 403」这两件不同的事分开。
+
+**本轮亲跑验证**(私有库 `metasheet2_lock_a4`,`DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a4 EXPECT_DB=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/approval-template-groups-reorder.db.test.ts`),均针对加了判别式断言之后的**最终版**测试文件跑:
+
+1. 修复后现状:**6/6 全绿**(含新用例,含判别式断言)。
+2. **证明旧实现会红**(`cp` 备份 `routes/approvals.ts` → 删 `:1288` 行的 `approvalTemplateAdminGuard` → 跑 → 还原):新用例**单独转红**(在 `.status` 那一行就先失败:`expected 200 to be 403`,判别式断言那行未执行到),其余 5 条不受影响——`cp` 恢复后 `cmp` 逐字节相同,恢复后重跑 6/6 全绿。见 §7 表 M11(修复后)行。
+3. **四文件合并重跑**(lifecycle + serialization + sections + reorder,同一私有库):`4 passed (4)` / `40 passed (40)`——40 = 门审报告记录的 39 + 本轮新增的 1 条,其余三个文件零改动,数字对得上(见 §12)。两个 CI 闭世界 ops 守卫(`approval-template-groups-ci-wiring.test.mjs`/`approval-data-closure-ci-wiring.test.mjs`)各 12/12,无回归。
+
+### 11.2 P2-2 —— 前端「每节 total 由服务端给」用例判别力归零的修复
+
+**门审发现**:唯一对口的前端用例 `renders per-section items and the section-own total (not a client-reconstructed count)` 的夹具是 `{data:[1行], total:1}`,`total === data.length`(1===1)让「服务端给」与「客户端拼」两种实现观测等价——门审 M10:把 `TemplateGroupSections.vue:307` 的 `total: res.total` 改成 `total: res.data.length`(客户端拼),该用例连同其余 17 条**全绿**,判别力为零。
+
+**修复**:把 `apps/web/tests/approvalTemplateCenterSections.spec.ts` 里这条用例的夹具改为 `{data:[1行], total:7}`(第 1 页只有 1 行,还有 6 行在后续页,`total ≠ data.length`),并把徽标断言从 `toBe('1')` 改为 `toBe('7')`。
+
+**本轮亲跑验证**(`cd apps/web && npx vitest run tests/approvalTemplateCenterSections.spec.ts`):
+
+1. 修复后现状:**18/18 全绿**。
+2. **证明旧实现会红**(`cp` 备份 `TemplateGroupSections.vue` → 把 `:307` 的 `total: res.total` 改成 `total: res.data.length` → 跑 → 还原):目标用例**单独转红**(`expected '1' to be '7'`),其余 17 条(含门审报告 §2 点名"接不住"的 `shows "load more"…`)不受影响,与门审对 `hasMore` 计算路径读取时机的分析吻合——`cp` 恢复后 `cmp` 逐字节相同,恢复后重跑 18/18 全绿。见 §7 表 M10(修复后)行。
+
+### 11.3 三条 required 重跑(改动落在 `apps/web/tests/**` 与 `packages/core-backend/tests/**`,两条会动)
+
+见 §12(本节新增,紧接本节之后)。
+
+### 11.4 收敛清单核对(对照门审 §10)
+
+| 门审 §10 要求 | 本轮处置 |
+|---|---|
+| 1. 两条都要亲跑旧实现证明会红 | ✅ 见上 §11.1/§11.2,均单独转红、其余用例不受影响 |
+| 2. 把 11 条 mutation 台账并进验证 MD §7,M10 的绿原样写进去 | ✅ 见 §7,M10(修复前)绿行原样保留,新增 M10/M11(修复后)行 |
+| 3. 重跑三条 required | ✅ 见 §12 |
+| 4. 不需要重算 s6a | ✅ 本轮零改动 `plugin-tests.yml` |
+| 5. 开第 2 轮门审 | 待下一步(本轮修复完成后由后续门审轮次执行) |
+
+## 12. 三条 required —— 修复轮 1 重跑(本次;数字与 §4 逐位相同,是复现确认,不是替换——§4 的数字没有被推翻,下表只是本轮独立重跑同一套命令后的观测)
+
+修复只改了 `apps/web/tests/approvalTemplateCenterSections.spec.ts` 与 `packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts` 两个测试文件——不改产品源码——所以三条 required 预期零回归;实测如下(worktree `wt-groups-p3`,分支 `feat/approval-template-groups-phase3-sections`)。
+
+| 命令 | 结果 | 与门审报告 §8 / §4 旧值对比 |
+|---|---|---|
+| `pnpm type-check` | `EXIT=0`,`packages/core-backend: Done` / `apps/web: Done`(含 `type-check:verification-approval`/`type-check:verification-stock-prep` 两个附属 project) | 与门审报告一致(`EXIT=0`,零报错) |
+| `CI=true pnpm --filter @metasheet/core-backend test`(全量,无库) | `Test Files 933 passed \| 175 skipped (1108)` / `Tests 14737 passed \| 1604 skipped (16341)`,`EXIT=0` | **逐位相同**——两个新用例都在 `.db.test.ts` 文件里,`describeIfDatabase` 无 `DATABASE_URL` 时整块跳过,故这条无库全量套件的数字不因新增用例而变 |
+| `bash -e apps/web/scripts/run-required-web-tests.sh` | `WEB_EXIT=0`;剥 ANSI 后机械求和(`grep "Test Files"`/`grep "Tests "` 逐段求和,`grep -c "^ FAIL"`)**19 段 / 568 files / 9122 tests 全 passed**,`^ FAIL` 计数 = **0** | **逐位相同**——修复只改了这条被 required 收的 `approvalTemplateCenterSections` token 命中的那一个文件内部的断言/夹具,文件数与用例数不变(仍是 1 个文件、18 条用例),只是其中一条用例的期望值从 `'1'` 改成了 `'7'` |
+
+另单独重跑两个改动文件本身(见 §11.1/§11.2):`approval-template-groups-reorder.db.test.ts` 私有库 `metasheet2_lock_a4` 上 **6/6**;`approvalTemplateCenterSections.spec.ts` **18/18**。
+
+**四个真库套件合并重跑(本轮,替换 §2.3 的 `4 passed (4)` / `39 passed (39)` 这条现状数字——§2.3 本身作为"rebase 后、本轮修复前"的历史记录原样保留,不删改,此处只是给出修复后的当前值)**:
+
+```
+$ DATABASE_URL="postgresql://postgres@localhost:5432/metasheet2_lock_a4" EXPECT_DB=1 \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-template-groups-lifecycle.db.test.ts \
+  tests/integration/approval-template-groups-serialization.db.test.ts \
+  tests/integration/approval-template-groups-sections.db.test.ts \
+  tests/integration/approval-template-groups-reorder.db.test.ts --reporter=dot
+
+Test Files  4 passed (4)
+     Tests  40 passed (40)
+```
+
+40 = 39(§2.3 的旧计数)+ 1(本轮新增的 reorder 授权用例)——四个文件里除 `reorder.db.test.ts` 外零改动,数字对得上。另单独重跑两个 CI 闭世界 ops 守卫(`approval-template-groups-ci-wiring.test.mjs` / `approval-data-closure-ci-wiring.test.mjs`),各 **12/12 pass**,无回归。
