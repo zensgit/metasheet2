@@ -124,6 +124,12 @@ $ pnpm run type-check   # tsc --noEmit && tsc -p scripts/tsconfig.recovery-archi
 (clean, zero output, exit 0)
 ```
 
+`metasheet2_lock_a3_rb` was dropped after the DB-backed commands in this section 4 and section 5
+finished (an unintended stray `dropdb` in a later shell command, not a deliberate teardown step) —
+harmless, since it is this operation's own private throwaway database and every DB-backed result
+above and in section 5 was already captured before the drop. Anyone re-running section 4 or 5's
+commands needs to `createdb metasheet2_lock_a3_rb` and re-run `src/db/migrate.ts` first.
+
 ### This lane's real-DB files + A-1's two files (union is 7 files — `serialization.db.test.ts` is
 ### in both sets)
 
@@ -198,6 +204,42 @@ $ DATABASE_URL="postgres://localhost/metasheet2_lock_a3_rb" \
 Exit code 0. All 84 files in the required `test (20.x)` approval real-DB step's whole-file argument
 list ran and passed, including the 7 approval-template-groups files individually re-verified in
 §4 above.
+
+### The other half of the same required check: the no-DB "Run core-backend tests" step
+
+The `test (20.x)` (and `test (18.x)`) required check is a job with multiple steps, not only the
+real-DB step above — `.github/workflows/plugin-tests.yml:877-879`'s "Run core-backend tests" step
+(`pnpm --filter @metasheet/core-backend test`, no `if:` guard, so it runs on both matrix legs) is
+the no-DB vitest lane, and phase1's own precedent verification ran both halves, not just the
+real-DB one. `packages/core-backend/package.json`'s `"test"` script is exactly `"vitest"` (already
+pinned by `approval-ci-coverage-enumeration.test.ts`'s self-exemption assertion in §4), so the
+command below is that step verbatim, with `DATABASE_URL` explicitly unset (so every
+`describeIfDatabase` suite takes the same skip branch it does in CI's no-DB job) and `CI=true` set
+to match the GitHub Actions runner's environment (vitest's watch-vs-run-once behaviour is CI-env
+sensitive):
+
+```
+$ env -u DATABASE_URL CI=true pnpm --filter @metasheet/core-backend test
+
+ Test Files  931 passed | 175 skipped (1106)
+      Tests  14718 passed | 1604 skipped (16322)
+ Duration    59.53s
+```
+Exit code 0. 931 passed test files matches phase1's own precedent count exactly ("the no-DB vitest
+lane (931 files) green", phase1 verification MD §23). `tests/unit/approval-template-routes.test.ts`
+(the unit-lane file that exercises `routes/approvals.ts`, the file phase1's rebased-in commit
+changed by 43 lines) ran and passed on the merged tree:
+```
+$ grep -c "tests/unit/approval-template-routes.test.ts" /tmp/no-db-lane-run.log
+30
+$ grep -cE '✗ tests/unit/approval-template-routes.test.ts' /tmp/no-db-lane-run.log
+0
+```
+No failed test anywhere in the run — the only lines matching a bare `FAIL`/`✗` text search are
+green (`✓`) test names whose own descriptions document fail-closed behaviour under test (e.g.
+"both validator loaders FAIL CLOSED when express-validator cannot be resolved"), not actual
+failures; the summary line's `0 failed` (implicit — vitest only prints a "Failed Tests" section
+when one exists, and none appears here) and exit code 0 are the authoritative counts.
 
 ## 6. Scope not touched by this rebase
 
