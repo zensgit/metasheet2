@@ -163,6 +163,64 @@ const EXEMPT: Record<string, string> = {
     'reads the CALLER’S OWN notification rows, keyed by user, not by sheet. It takes no sheet id.',
 }
 
+/**
+ * ORDER, for the sheet-row EXISTENCE PROBE. The classifier above counts `loadSheetRow` (and an inline
+ * `deleted_at IS NULL` sheet read) as a liveness guard, and it has no order rule. A probe that answers
+ * 404 for a soft-deleted or absent sheet BEFORE the handler's first authority refusal tells a caller
+ * who may not use that sheet whether it is still there — the oracle #5830 removed from
+ * `requireRecordReadable`, still present in the route handlers named below. The list is exact and can
+ * only shrink: a new handler of this shape reds, and a fixed one must leave.
+ */
+const EXISTENCE_PROBE = /\bawait\s+loadSheet(?:Row|RowShared|Summary)\s*\(|\bFROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL\b/
+/** Where a handler first refuses a caller for lack of authority (the shared record gate refuses inside). */
+const AUTHORITY_REFUSAL = /\.status\(\s*403\s*\)|\bstatus:\s*403\b|\bsend\w*Forbidden\w*\(|\bForbiddenError\b|\brequireRecordReadable\(/
+/** The probe's miss is answered with a 404 by the very next `if`. */
+const PROBE_MISS_IS_404 = /^(?:(?!\bif\b)[\s\S]){0,160}\bif\s*\(\s*(?:!\s*\w+|\w+\.rows\.length\s*===\s*0)\s*\)\s*(?:\{\s*)?(?:return\s+res\.status\(\s*404\s*\)|throw\s+new\s+NotFoundError\b|return\s*\{\s*kind:\s*'error',\s*status:\s*404\b)/
+
+function probesExistenceBeforeAuthority(body: string): boolean {
+  const probe = body.search(EXISTENCE_PROBE)
+  if (probe === -1) return false
+  const authority = body.search(AUTHORITY_REFUSAL)
+  return authority === -1 || probe < authority
+}
+
+const EXISTENCE_BEFORE_AUTHORITY_GAP = {
+  reason: 'GAP — tracked in #5839 — each handler below reads the sheet row (deleted_at IS NULL) and answers 404 '
+    + '(mostly echoing the id) before its first 403, so a signed-in caller the handler then refuses can tell a live '
+    + 'sheet from a soft-deleted or absent one. Fix per handler: drop the probe (sheetLiveness already refuses a '
+    + 'non-live sheet after the 403) or move it after the 403, with the values-free SHEET_NOT_FOUND_MESSAGE.',
+  handlers: [
+    'DELETE /sheets/:sheetId/records/:recordId/permissions/:permissionId',
+    'GET /fields',
+    'GET /records-summary',
+    'GET /sheets/:sheetId/conditional-rules',
+    'GET /sheets/:sheetId/config-history',
+    'GET /sheets/:sheetId/export-xlsx',
+    'GET /sheets/:sheetId/field-permissions',
+    'GET /sheets/:sheetId/form-share-candidates',
+    'GET /sheets/:sheetId/permission-candidates',
+    'GET /sheets/:sheetId/permissions',
+    'GET /sheets/:sheetId/person-fields/:fieldId/directory',
+    'GET /sheets/:sheetId/records/:recordId/permissions',
+    'GET /sheets/:sheetId/row-level-read-deny',
+    'GET /sheets/:sheetId/view-aggregate',
+    'GET /views',
+    'PATCH /records/:recordId',
+    'POST /attachments',
+    'POST /fields',
+    'POST /person-fields/prepare',
+    'POST /sheets/:sheetId/formula/dry-run',
+    'POST /sheets/:sheetId/import-xlsx',
+    'POST /views',
+    'POST /views/:viewId/submit',
+    'PUT /sheets/:sheetId/conditional-rules',
+    'PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId',
+    'PUT /sheets/:sheetId/permissions/:subjectType/:subjectId',
+    'PUT /sheets/:sheetId/records/:recordId/permissions',
+    'PUT /sheets/:sheetId/row-level-read-deny',
+  ],
+}
+
 describe('sheet-liveness closure over univer-meta routes', () => {
   const inScope = HANDLERS.filter(addressesASheet)
 
@@ -228,6 +286,43 @@ describe('sheet-liveness closure over univer-meta routes', () => {
       + `write must not proceed because the OTHER end happened to be live:\n`
       + offenders.map((r) => `  - ${r}`).join('\n'),
     ).toEqual([])
+  })
+
+  it('GAP ledger: the handlers that probe sheet existence before their first authority refusal are exactly the named ones', () => {
+    expect(EXISTENCE_BEFORE_AUTHORITY_GAP.reason).toMatch(/^GAP — tracked in #[1-9]\d* — \S/)
+    const found = inScope.filter((h) => probesExistenceBeforeAuthority(h.body)).map((h) => h.key).sort()
+    const named = [...EXISTENCE_BEFORE_AUTHORITY_GAP.handlers].sort()
+    expect(
+      found,
+      'A sheet-row existence probe answers 404 before the first 403: move it after the authority check '
+      + '(or drop it — sheetLiveness refuses after the 403). A fixed handler must leave the ledger.',
+    ).toEqual(named)
+    // What the reason rests on, per handler: the probe's miss is a 404.
+    const notA404 = inScope
+      .filter((h) => named.includes(h.key))
+      .filter((h) => !PROBE_MISS_IS_404.test(h.body.slice(h.body.search(EXISTENCE_PROBE))))
+      .map((h) => h.key)
+    expect(notA404).toEqual([])
+  })
+
+  it('the existence-before-authority check reads order, not presence', () => {
+    const probe = "const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)\n  if (!sheet) {\n    return res.status(404).json({})\n  }"
+    const inline = "const r = await pool.query(\n  'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',\n  [sheetId],\n)\nif (r.rows.length === 0) throw new NotFoundError('x')"
+    const cap = "const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, q, sheetId)"
+    const refuse = 'if (!capabilities.canRead) return sendForbidden(res)'
+    const liveness = "if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)"
+    expect(probesExistenceBeforeAuthority([probe, cap, refuse, liveness].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([inline, cap, refuse].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([probe, cap].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([probe, 'return res.status(403).json({})'].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([cap, refuse, liveness, probe].join('\n'))).toBe(false)
+    expect(probesExistenceBeforeAuthority(['if (!ok) return { kind: \'error\', status: 403 }', probe].join('\n'))).toBe(false)
+    expect(probesExistenceBeforeAuthority(['const r = await requireRecordReadable(req, q, sheetId, recordId)', probe].join('\n'))).toBe(false)
+    expect(probesExistenceBeforeAuthority([cap, refuse, liveness].join('\n'))).toBe(false)
+    expect(PROBE_MISS_IS_404.test(probe.slice(probe.search(EXISTENCE_PROBE)))).toBe(true)
+    expect(PROBE_MISS_IS_404.test(inline.slice(inline.search(EXISTENCE_PROBE)))).toBe(true)
+    const soft = "const sheet = await loadSheetRow(q, sheetId)\nif (flag) log()\nif (!sheet) return res.status(404).json({})"
+    expect(PROBE_MISS_IS_404.test(soft.slice(soft.search(EXISTENCE_PROBE)))).toBe(false)
   })
 
   // THE TRIPWIRE. A refactor that changes the registration STYLE (or a CRLF regression like the one

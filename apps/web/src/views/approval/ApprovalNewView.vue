@@ -625,7 +625,7 @@
         </el-form>
       </div>
 
-      <el-empty v-else-if="!templateStore.loading" description="未找到审批模板" />
+      <el-empty v-else-if="!templateStore.loading" description="未找到审批表单" />
     </div>
 
     <!-- FWB-0 Layer 2: dedicated record-link picker (pinned baseId+sheetId; no MetaField fabric). -->

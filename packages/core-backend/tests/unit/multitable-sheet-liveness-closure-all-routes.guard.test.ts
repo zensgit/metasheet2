@@ -957,22 +957,18 @@ const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; rea
 }
 
 /**
- * GAP — the vetted record gate asks liveness BEFORE authority. Every handler that relies on it alone
- * inherits a liveness oracle; they are enumerated here so the list cannot grow unnoticed.
+ * The vetted record gate is held to the SAME rule 3 as a route (#5830): the capability lookup runs
+ * first, its 401/403 precede the liveness 404, nothing — no record read — runs between, and the
+ * liveness it refuses is the one of the sheet it was given. Routes that rely on it alone (AI shortcut
+ * preview/run, button run, record approvals POST/GET) are GUARDED on the strength of that proof; their
+ * behaviour is pinned in multitable-record-gate-capability-before-liveness.test.ts.
  */
-const RECORD_GATE_ORDER_GAP = {
-  reason: 'GAP — tracked in #5830 — OWNED BY THE univer-meta.ts BRANCH (not edited from here): '
-    + 'requireRecordReadable answers 404 (record missing, SHEET_DELETED, `Sheet not found`) BEFORE its 401/403, so a '
-    + 'caller without read access can tell a live sheet from a deleted one through each route below. The '
-    + '"same 403 for live and deleted" property of this closed world holds only where the route’s own gate is '
-    + 'order-checked (rule 3), not for these.',
-  handlers: [
-    'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/preview',
-    'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/run',
-    'routes/multitable-button.ts POST /sheets/:sheetId/records/:recordId/fields/:fieldId/button/run',
-    'routes/multitable-record-approvals.ts POST /sheets/:sheetId/records/:recordId/approvals',
-    'routes/multitable-record-approvals.ts GET /sheets/:sheetId/records/:recordId/approvals',
-  ],
+const VETTED_RECORD_GATE_OPTIONS: AnalyzeOptions = {
+  vetted: new Map(),
+  delegated: null,
+  preGateCalls: new Set(),
+  requireOrder: true,
+  gateFirst: true,
 }
 
 const CHECKER_OPTIONS: AnalyzeOptions = {
@@ -1580,7 +1576,6 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(reasonProblems('k', { reason: `GAP — tracked in #5831 (see docs/development/no-such-doc.md)${why}` }).join('\n')).toMatch(/does not exist/)
     // Every reason in this file passes — including the ones nested in ledgers and the OPAQUE list.
     const reasons: Array<[string, { reason: string }]> = [
-      ['RECORD_GATE_ORDER_GAP', RECORD_GATE_ORDER_GAP],
       ...Object.entries(PROVIDER_LOOPS).map(([k, e]): [string, { reason: string }] => [`PROVIDER_LOOPS ${k}`, e]),
       ...Object.entries(COVERED).flatMap(([file, c]) => [
         ...Object.entries(c.exempt).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e]),
@@ -1740,16 +1735,25 @@ describe('sheet-liveness closure over EVERY route file', () => {
   })
 
   it('vetted external guards refuse a non-live sheet (their bodies, not their names)', () => {
-    // requireRecordReadable: resolves the sheet itself, binds and refuses its liveness on the same path.
+    // requireRecordReadable: resolves the sheet itself, binds and refuses its liveness on the same path —
+    // under the full route rules (VETTED_RECORD_GATE_OPTIONS): the resolver is the first thing awaited,
+    // its 401/403 come before the liveness 404, and no record read (or anything else) runs in between.
     const meta = scanRouteSource('routes/univer-meta.ts', readSource('routes/univer-meta.ts'))
     const defs = findFunctionsNamed(meta.sourceFile, 'requireRecordReadable')
     expect(defs, 'routes/univer-meta.ts must define requireRecordReadable exactly once').toHaveLength(1)
-    const unit: HandlerUnit = { label: 'handler', node: defs[0]!, code: codeOf(defs[0]!, meta.sourceFile) }
-    // Liveness is asked before authority in this helper — see RECORD_GATE_ORDER_GAP — so only
-    // bind-and-refuse is required here, not the order clause.
-    const analysis = analyzeHandler({ units: [unit] }, meta.sourceFile, CHECKER_OPTIONS)
+    const def = defs[0]!
+    const unit: HandlerUnit = { label: 'handler', node: def, code: codeOf(def, meta.sourceFile) }
+    const analysis = analyzeHandler({ units: [unit] }, meta.sourceFile, VETTED_RECORD_GATE_OPTIONS)
     expect(analysis.violations).toEqual([])
-    expect(analysis.sources.some((s) => s.startsWith('resolver '))).toBe(true)
+    expect(analysis.sources).toEqual(['resolver resolveSheetReadableCapabilities'])
+    // The liveness it refuses is that of the sheet it was GIVEN: the resolver takes the helper's own
+    // `sheetId` parameter, which the body never reassigns.
+    expect(def.parameters.map((p) => p.name.getText(meta.sourceFile))).toEqual(['req', 'query', 'sheetId', 'recordId'])
+    expect(unit.code).toMatch(/= await resolveSheetReadableCapabilities\(req, query, sheetId\)/)
+    expect(unit.code.match(/\bresolveSheet\w*Capabilities\w*\(/g)).toHaveLength(1)
+    expect(unit.code).not.toMatch(/\bsheetId\s*(?:[-+*\/]?=(?!=)|\+\+|--)/)
+    expect(unit.code).toMatch(/status:\s*401/)
+    expect(unit.code).toMatch(/status:\s*403/)
     expect(unit.code).toMatch(/status:\s*404/)
     // loadSheetRow: filters the SHEET table's deleted_at and answers null when the row is gone.
     const loader = functionCode('multitable/loaders.ts', 'loadSheetRow')
@@ -1758,24 +1762,19 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(Object.keys(VETTED_EXTERNAL_GUARDS).sort()).toEqual(['loadSheetRow', 'requireRecordReadable'])
   })
 
-  it(`GAP ledger: the routes that inherit requireRecordReadable's liveness-before-403 order are exactly the named ones`, () => {
-    expect(RECORD_GATE_ORDER_GAP.reason).toMatch(GAP_TRACKER)
-    expect(reasonProblems('RECORD_GATE_ORDER_GAP', RECORD_GATE_ORDER_GAP)).toEqual([])
-    const inheriting: string[] = []
-    for (const [file, config] of Object.entries(COVERED)) {
-      for (const h of scan(file).handlers.filter(addressesASheet)) {
-        if (h.key in config.exempt) continue
-        const sources = [...new Set(analysisOf(file, h).sources)]
-        if (sources.length > 0 && sources.every((s) => s === 'vetted requireRecordReadable')) inheriting.push(`${file} ${h.key}`)
-      }
-    }
-    expect(inheriting.sort()).toEqual([...RECORD_GATE_ORDER_GAP.handlers].sort())
-    // Still true: in the helper the liveness refusal precedes the 403. When that is fixed, drop the ledger.
+  it(`RECORD GATE ORDER (#5830): in requireRecordReadable, authority (401, 403) precedes liveness, which precedes the record read`, () => {
+    // Independent of the tree analysis above: the steps appear in this order in the helper's code.
     const code = functionCode('routes/univer-meta.ts', 'requireRecordReadable')
-    const liveAt = code.indexOf("sheetLiveness !== 'live'")
-    const forbiddenAt = code.indexOf('!capabilities.canRead')
-    expect(liveAt).toBeGreaterThan(-1)
-    expect(forbiddenAt).toBeGreaterThan(liveAt)
+    const order = [
+      code.indexOf('await resolveSheetReadableCapabilities('),
+      code.indexOf('!access.userId'),
+      code.indexOf('!capabilities.canRead'),
+      code.indexOf("sheetLiveness !== 'live'"),
+      code.indexOf('FROM meta_records'),
+    ]
+    expect(order.every((at) => at > -1), `missing step: ${JSON.stringify(order)}`).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(code.indexOf('FROM meta_records')).toBe(code.lastIndexOf('FROM meta_records'))
   })
 
   it('delegated guards: the route helper hands off to the injected resolver, and every injected resolver filters deleted sheets', () => {

@@ -27,7 +27,7 @@ import {
   scrubRecoveryArchiveDek,
 } from './recovery-archive-crypto'
 import type {
-  RecoveryArchiveKeyCustodyAdapter,
+  RecoveryArchiveCustodyInput,
   RecoveryArchiveTransactionDepthProbe,
 } from './recovery-archive-crypto'
 import { canonicalizeRecoveryArchiveSectionRows } from './recovery-archive-manifest'
@@ -127,7 +127,7 @@ export interface RecoveryArchiveSelectedBinding {
 
 export interface RecoveryArchiveReaderInput {
   readonly selectedBinding: RecoveryArchiveSelectedBinding
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly transactionDepth: RecoveryArchiveTransactionDepthProbe
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly manifestObject: RecoveryArchiveObjectExpectedBinding
@@ -207,7 +207,7 @@ export async function readRecoveryArchiveCompleteSectionsInternal(
     'RECOVERY_ARCHIVE_READER_INVALID_INPUT',
     () =>
       createTransactionGuardedKeyCustody(
-        admitted.keyCustody as RecoveryArchiveKeyCustodyAdapter,
+        admitted.keyCustody as RecoveryArchiveCustodyInput,
         admitted.transactionDepth as RecoveryArchiveTransactionDepthProbe,
       ),
   )
