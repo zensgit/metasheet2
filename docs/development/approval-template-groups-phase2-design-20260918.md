@@ -965,6 +965,8 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 
 ### 22.1 逐条核对(本步现场 grep/git log,不是重读 §13.1 旧文本)
 
+**落地 commit 的核实方法**:表里每个"@ SHA"引用都用 `git log --oneline -S "<该改动引入的一段独有文本>" -- <文件>` 核过,不是从 commit 主题行推断的——本节起草过程中曾先按主题行猜出一个 SHA(Q3 行的 preview 落地提交)写进表里,`-S` 核实时发现那个 SHA 根本不是仓内有效对象(`git cat-file -t <SHA>` 报错),已改正为 `-S` 核出的真实提交。Q2/Q4/Q6 三格随后补做同一验证:`git log --oneline -S "backfill/preview',"` → `d15dbe362`;`git log --oneline -S "BACKFILL_BATCH_ALREADY_ROLLED_BACK"` → `d2e96e833`;`git log --oneline -S "ATG_TX_BRAND"` → `06ac4927e`——三者与表中原有引用一致,无需改写。
+
 | 任务书条目 | 对应 changesRequired / Q | 状态 @ commit | 核对命令 |
 |---|---|---|---|
 | Q1 三表 FK 修正(含 `batch_links→links` CASCADE) | #4 | **已落地 @ `02775e95f`**(该文件唯一一次改动就是这次提交,`atgbbl_link_fk … ON DELETE CASCADE` 从落地起就是这个值,非后补勘误) | `git log --oneline --follow -- packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts` → 单一提交 `02775e95f`;`approval-template-groups-backfill-schema.db.test.ts` 的 M6 正/负控两例(均绿) |
@@ -986,6 +988,8 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 更关键的是,§13.2(逐字保留的门审成品)自己给出过一次**穷举式无环性证明**("建组 L0;改名 L0→L1;归档 L0→L1→L2;解档 L0→L1;重排 L0→L1;挂接 L1→L2;解除 L2;preview 不取锁;execute/rollback(修法后)L0→L1→L2。每条路径的取锁序列都是 L0≤L1≤L2 的非降序……⇒ 无环。")——锁序图无环是 Postgres 40P01(`deadlock_detected`)**发生的必要条件的否定**:两个事务只有在互相等待对方持有的锁(锁请求图成环)时才会被死锁检测器判定为死锁。修法后的锁序图已经证明不存在环,也就是说 **execute/rollback 之间、以及它们与挂接/解除/改名/归档/解档/重排之间,不再有 40P01 可以发生的路径**——不是"发生了但没人接住",是"结构上不会再发生"。给一个证明不可达的分支写运行时映射是死代码(记忆 `feedback_dead_code_defect_is_not_a_live_vulnerability` 的反向情形:这次不是"死代码里藏着活漏洞",而是"活修法让原来的症状变成了不可达分支"),而且会违反本仓"先证可达性再写"的验证纪律——加一行 `if (pgErr.code === '40P01') return new ServiceError(...)` 没有任何真库测试能触发它(触发需要先把 §13.2 的无环性证明打破,等于重新引入 M2/M3 的 bug),那样的分支本身就是本仓已经点名过的"注释断言不测=藏 bug"反面例子的镜像:一条**永远拿不到 mutation 正控的 catch 分支**。
 
 **结论**:Q7 的"40P01 有映射"半句按门审报告 §13.2 自身的证明判 **MOOT BY CONSTRUCTION**,不计入 unlanded,也不补代码。若 owner/下一轮门审认为"防御性映射"仍然值得加(例如未来分期 3 的重排逻辑改变了锁序、无环性证明需要重新过一遍),那是对 §13.2 证明范围的重新挑战,应作为独立 changesRequired 提出,不是本步能替 owner 决定的事。
+
+**证明的出处标注**:本节的"无环"结论**引用 §13.2 门审报告原文的枚举**(建组/改名/归档/解档/重排/挂接/解除/preview/execute/rollback 逐条路径),本步未重新独立枚举一遍全部取锁路径去验证该枚举本身是否穷尽——如果分期 3 或其它并行 lane 之后新增了一条本枚举没列出的、会取 L1 或 L2 的路径,MOOT 结论的前提就需要重新核对,不会自动继续成立。
 
 ### 22.3 任务书原文"execute 对其跳过并计数"与门审 #3 字面的分歧(如实披露,不悄悄改窄或改宽)
 
