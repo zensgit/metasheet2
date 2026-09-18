@@ -699,7 +699,58 @@ s6a `pluginTestsWorkflow` 钉重算(`.github/workflows/plugin-tests.yml` 两处�
 - changesRequired #13 的三条组合调用判别力测试(并发 execute 在 L0 停车 + 反向正控 `await` 导出函数会停车/超时;SET 义务格落在 RR 默认池文件,mutation=删 `beginApprovalTemplateGroupTxn` 内的 SET 语句;锁序格用 `waitUntilBackendBlockedByHolder` 断言停车点而非终态)——门审原文"同 PR"指的是这条分支未来会开出的 Draft PR,不是这一个提交,但仍是本分支必须在合入前补齐的义务,不因本步而消失。
 - `GET /api/approval-template-groups/backfill/batches` 列表端点(changesRequired #5)。
 - 规模上界(500)的真库测试(超出触发 400、零写入)——本步只在 `.ts` 里落地了这条分支,未写对应的真库夹具(构造 501 行代价较高,留给后续步骤连同 changesRequired #13 一起补)。
-- W9 rollback 全部(§4 pseudocode → `.ts`、事务骨架、rollback 路由、真库测试、CI 两点接线)。
+- ~~W9 rollback 全部(§4 pseudocode → `.ts`、事务骨架、rollback 路由、真库测试、CI 两点接线)。~~ **【已求值,续做步骤 12,见 §18】** 落地:`rollbackApprovalTemplateGroupBackfillWithClient` / `rollbackApprovalTemplateGroupBackfillBatch`(`ApprovalTemplateGroupService.ts`)+ 路由 + 11 例真库测试 + 两点 CI 接线 + s6a 重钉。
 - A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留,未因本步而变化)。
 - 验证 MD(§13.7,仍不存在)。
+- link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining,未因本步而变化,仍待 owner/下一轮门审)。
+
+## 18. 续做步骤 12:W9 rollback 落地(2026-09-18)
+
+本步实现 §4 的 rollback 算法(§13.1 changesRequired #1/#2/#4/#7 已求值的落地对象)+ 路由 + 首批真库验收。**不做**(原样结转,未因本步而变化):changesRequired #13 的三条组合调用判别力测试(§17 已记,现在同样适用于"execute 与 rollback 并发竞争同一把 L0"这个新变体)、`GET …/backfill/batches` 列表端点(changesRequired #5)、规模上界(500)真库测试、A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`、验证 MD(§13.7)。
+
+**放置位置,与 preview/execute 不同**:`rollbackApprovalTemplateGroupBackfillWithClient` / `rollbackApprovalTemplateGroupBackfillBatch` 落在 `ApprovalTemplateGroupService.ts`(不在 `routes/approvals.ts`)——rollback 不需要 `ApprovalTemplateVisibilityActor` / `applyTemplateVisibilityFilter`(它撤销的是批次记录下来的精确状态,与调用者当下的模板可见性范围无关),因此没有preview/execute 被推去 `routes/approvals.ts` 的那条理由。路由处理函数仍然照例注册在 `routes/approvals.ts`(所有端点都在那注册),只是导入的服务函数来自 `ApprovalTemplateGroupService.ts` 而非本文件自己定义。
+
+**算法落地要点(逐条对应 §13.1 changesRequired,§4 pseudocode → 代码)**:
+- §13 changesRequired #1(事务骨架):L0 → 批次头 `FOR UPDATE`(不存在→404;`rolled_back_at IS NOT NULL`→409)→ 只读取本批次触达的全部 group id(`UNION` 两张子表)→ §13.2 统一锁序的"一条 `ORDER BY id FOR UPDATE`"预锁全部既有组 → §4.2 的 L2 写 → §4.3 的归档判定(复用上一步的预锁快照,不第二次 `FOR UPDATE`)→ 批次头 `rolled_back_at = now()` → COMMIT。
+- §4.1(不调用 `unlinkApprovalTemplateFromGroup` / `archiveApprovalTemplateGroupWithClient`,因为两者都是无条件的,会撤销批次外状态)与"仍要求全仓只有一份语句文本"之间的张力,本步的落地做法:把 `archiveApprovalTemplateGroupWithClient` 内联的两条语句(unlink-all-members / archive-group-row)提成两个**命名导出的 SQL 文本常量**(`ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` / `ATG_ARCHIVE_GROUP_ROW_SQL`),而不是一个共享函数——原因是两个调用点需要在**不同的锁前提**下执行同一段文本:`archiveApprovalTemplateGroupWithClient` 自己的调用点在紧邻语句里持有 `FOR UPDATE`;rollback 的调用点复用的是骨架预锁步骤已经拿到的行锁,不能再发第二次 `FOR UPDATE`(见下一条)。`archiveApprovalTemplateGroupWithClient` 本身也改为调用这两个常量(不是复制文本两份),因此这一步顺带是一次无行为变化的重构。
+- §13 changesRequired #2(§4.2 落地,令牌全程不经 JS):`UPDATE approval_template_group_links l SET group_id = NULL, unlinked_at = now() FROM approval_template_group_backfill_batch_links b WHERE b.batch_id = $1 AND b.org_id = l.org_id AND b.template_id = l.template_id AND l.group_id = b.group_id AND l.linked_at = b.linked_at` —— 一条集合式服务端 join,`group_id` 与 `linked_at` 两列都在 SQL 内部比较,从未经过 JS。
+- §4.3 落地:对每个 `created_new = true` 的 `(group_id)`,从骨架预锁步骤的快照里读 `archived_at`(不存在或非 NULL 则跳过,不报错)→ `SELECT count(*) … WHERE unlinked_at IS NULL` 算 `remaining` → `remaining = 0` 才执行 `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` + `ATG_ARCHIVE_GROUP_ROW_SQL`(顺序上 §4.2 已经先跑完,所以 `remaining` 不会把本批次自己刚解除的成员算进去)。
+- §13 changesRequired #7(已裁,ownerLevel=false):已回滚批次再次调用 → 409 `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK`,`ServiceError` 的 `details.rolledBackAt` 带上第一次回滚的时间戳(经 `sendServiceError` 落进响应体 `error.details.rolledBackAt`)——不是幂等 200。
+- 404 `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND`:批次头查询的 `WHERE` 本身带 `org_id = $2`,不存在与"存在但属于别的 org"两种情况走同一条路径(同文件其余每个 org 域查询的惯例)。
+
+**真库测试**(新文件,11 例,`tests/integration/approval-template-groups-backfill-rollback.db.test.ts`):sentinel、happy path(创建路径的组归档 + 链接解除 + `rolled_back_at` 落地且与响应体逐字节一致)、attach 路径(`created_new=false` 的组即使回滚后零成员也不归档)、§4/§9 精确性的两种正面形态各一例——批次外**新增**成员使批次创建的组在回滚后存活(`remaining>0`)、批次外**移动**(挂到另一个组)让该链接的令牌不再匹配从而被跳过(且原组因此确实清空而被合法归档,不是 rollback 误伤)——以及新增的第三种精确性例:批次外**原地解除再重新挂回同一个组**(group_id 不变、linked_at 是新的)必须被跳过,这是 §4.2 令牌里 `linked_at` 那一半单独的判别力证据(前一个"移动"例的 `group_id` 本身就已经不同,不能证明 `linked_at` 有没有在起作用)、changesRequired #7 的 409 + `details.rolledBackAt`、跨 org batchId 与不存在 batchId 同归 404、三条路由级 HTTP 真实请求(admin 200/`approvals:read`-only 403/未认证 401)。
+
+**正控 mutation(cp/mutate/run/cmp-restore,两个,全部按预期变红后按原样还原,md5 一致 `8b8767516d49c4bd31bde05dd007cfe8`)**:
+1. 把 §4.2 UPDATE 的 `AND l.linked_at = b.linked_at` 删除(只留 `group_id` 匹配)→ **恰好 1 条**用例变红("detached and re-linked to the SAME group"那一条,`expected null to be 'atg_...'`)——证明 `linked_at` 半个谓词是这条用例唯一的判别力来源,不是装饰;"moved to a different group"那条**不会**因为这个 mutation 变红(`group_id` 本身已经不同),这是本节第一段特意把两种精确性测试分开写的原因。
+2. 把 §4.3 的 `remaining === 0` 判断改成 `if (true)`(始终归档)→ **恰好 2 条**用例变红:批次外新增成员那条(组被误归档,`archived_at` 从 `null` 变成时间戳)与"原地解除再挂回"那条(归档语句里的 `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` 把外部重新挂回的成员也强制解除,级联误伤)——happy path 与 attach 路径两条不受影响(前者本来就该归档,后者 `created_new=false` 从不进入这个分支)。
+每次探针都是 `cp` 备份 → 编辑 → 跑对应用例 → `cp` 还原 → `cmp` 逐字节核对与备份一致。
+
+**回归证据**(`metasheet2_lock_a3`,A-1 两个既有真库文件 + 本切片全部四个 W7/W8/W9/schema 文件一起跑作回归):
+```
+DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+  tests/integration/approval-template-groups-lifecycle.db.test.ts \
+  tests/integration/approval-template-groups-serialization.db.test.ts \
+  tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+  tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+  tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+  tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+  --reporter=dot
+```
+→ `Test Files 6 passed (6)` / `Tests 69 passed (69)`(16 + 10 + 8 + 13 + 11 + 11)。
+
+**CI 两点接线**(同一提交):`vitest.config.ts` exclude 新增一行;`.github/workflows/plugin-tests.yml` 的 `approval-real-db-integration` 步骤白名单新增一行 + 新增一个独立 `A3 backfill-rollback CI wiring contract` 步骤;新文件 `scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs`(复制自 execute 的同款守卫,换 `FILE` 常量)——已用同款 mutation 验证判别力(注释掉 `vitest.config.ts` 的 exclude 行 → 该守卫的第一条用例变红;还原后再次全绿)。`scripts/ops/*-ci-wiring.test.mjs` 全量重跑:**488 passed(485 + 本文件新增 3 条)**,零红。`scripts/ops/ci-realdb-step-contract.mjs` 再次确认无 `FILES` 闭世界导出(`grep -n "^export const FILES\|const FILES =" scripts/ops/ci-realdb-step-contract.mjs` → 零命中),与 W7/W8 记录一致,本步沿用同一机制。
+
+s6a `pluginTestsWorkflow` 钉重算(`.github/workflows/plugin-tests.yml` 两处编辑之后):`shasum -a 256 .github/workflows/plugin-tests.yml` → `b25d5b95a94633daa4873b7c20db65e0e5641fcd2297edc1c7798ea4205dac19`(替换旧值 `fb1f5901...`)。红/绿证据:`node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 在改 workflow 文件之后、重算钉之前先跑一次 → `SEALED_EXPORT_INTERNAL_ERROR`(红,drift 被正确检出);写入新钉之后重跑同一条命令 → `sealed-export-package-provenance.test.cjs OK`(绿)。
+
+`npx tsc --noEmit`(`packages/core-backend`)全量重跑:零错误。
+
+**本步不新增/不触碰**:`scripts/ops/ci-realdb-step-contract.mjs` 的任何导出;`GET …/backfill/batches` 端点;changesRequired #13 的三条组合调用判别力测试;规模上界(500)真库测试;apps/web(本切片全程无前端改动,没有需要接进 `run-required-web-tests.sh` 的新 spec)。
+
+**未做,原样结转的 remaining**:
+- changesRequired #13 的三条组合调用判别力测试——现在覆盖面比 §17 记录时更宽:除了"并发 execute"变体,还需要"execute 与 rollback 并发竞争同一把 L0"、"rollback 与手工建组/归档并发竞争同一把 L0"两个新变体,三者共用同一把 `atg:${orgId}` advisory lock,判别力测试的 fixture 需要覆盖这三种两两组合,不只是本切片三个函数各自独立起一次。
+- `GET /api/approval-template-groups/backfill/batches` 列表端点(changesRequired #5)。
+- 规模上界(500)真库测试(execute 侧,未因本步而变化)。
+- A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留,未因本步而变化)。
+- 验证 MD(§13.7,仍不存在)——现在 W7/W8/W9 三个单元都已落地,补这份 MD 的紧迫性比 §17 时更高,留给下一步或 owner 决定是否现在补。
 - link 薄封装新增 SET 这条偏离是否可接受(§16 记的 remaining,未因本步而变化,仍待 owner/下一轮门审)。
