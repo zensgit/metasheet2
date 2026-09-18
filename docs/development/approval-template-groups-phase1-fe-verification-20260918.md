@@ -312,14 +312,46 @@ $ sed -n '1162,1219p' apps/web/src/approvals/api.ts | grep -c "orgId"
 
 七个函数体内(不含类型定义/注释区间外)零次出现 `orgId`,与设计 MD §3.2 的断言一致。
 
-### 5.4 事务/锁语义零命中(设计 MD §4「不适用」的证据)
+### 5.4 事务/锁语义零命中(设计 MD §4「不适用」的证据)——含一次自我更正
+
+**第一版命令(如实记录曾经跑过、且给出了错误结论的样子)**:
 
 ```
 $ git diff --stat 0144932ac67e80a81f204dd6c6e502d000112276..HEAD --name-only | xargs grep -ciE "BEGIN|COMMIT|pg_advisory|FOR UPDATE|new Client|new Pool" 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'
+15
+```
+
+这条命令在本文档定稿前**未被亲自执行过**就写成了「全部为 0」——这本身就是记忆「验证站点被自己的负控污染」与「绝对断言自扫必须机械化」两条纪律要打的那类错误:补写时才现场跑,发现真实结果是 **15**,不是文档原先声称的 0。逐文件定位(`xargs grep -ciE ... apps/web/scripts/run-required-web-tests.sh apps/web/tests/templateCenterI18n.spec.ts ... docs/development/*.md`)后确认全部 15 处命中都是假阳性,零处是真实的 SQL/事务代码:
+
+- `run-required-web-tests.sh` 10 处:`grep -oiE` 逐个提取后全部是散文里的单词 `commit`(如 `committed-edit-only`、`grid-commit-reliability`、`this slice's commit body` 等 git 语境的「提交」)与 1 处 `new client`(散文「the four new client methods'」,指本切片新增的客户端函数,不是 `new Client()` 数据库连接),與 SQL 完全无关。
+- `templateCenterI18n.spec.ts` 1 处:同样是散文 `commit body`(i18n 守卫的既有注释,与本切片无关的既有内容)。
+- 两份本文档自身(design MD 1 处、verification MD 3 处):**自指命中**——本文档引用锁文/A-1 术语时逐字写了 `BEGIN`/`COMMIT`/`pg_advisory`/`FOR UPDATE` 这些词本身(例如上面这段更正文字和 §2.2/§4 的行文),`--stat --name-only` 把这两份新提交的文档也算进"改动文件"列表,于是文档讨论"这些关键词"这件事本身触发了搜索这些关键词的命令。
+- 未在上面列出的还有 1 处落在 A-2 自己新增的 `run-required-web-tests.sh` exec 行内(即 §2.3 已核对过的那一整行 token 列表新增了三个 token 时带出的散文,同一个「commit」/「new client」假阳性来源,不是新的事务代码)。
+
+**更正后的命令(限定在实际的生产代码 + spec 源码,排除 CI 脚本散文注释与本 MD 文档自身,并额外用"只看新增行"的形式复核)**:
+
+```
+$ grep -ciE "BEGIN|COMMIT|pg_advisory|FOR UPDATE|new Client|new Pool" \
+    apps/web/src/approvals/api.ts \
+    apps/web/src/components/SessionOrgSwitcher.vue \
+    apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue \
+    apps/web/src/views/approval/TemplateCenterView.vue
+apps/web/src/components/SessionOrgSwitcher.vue:0
+apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue:0
+apps/web/src/approvals/api.ts:0
+apps/web/src/views/approval/TemplateCenterView.vue:0
+
+$ git diff 0144932ac67e80a81f204dd6c6e502d000112276..HEAD -- \
+    apps/web/src/approvals/api.ts apps/web/src/components/SessionOrgSwitcher.vue \
+    apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue apps/web/src/views/approval/TemplateCenterView.vue \
+    apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts apps/web/tests/SessionOrgSwitcher.spec.ts \
+    apps/web/tests/approvalTemplateGroupsClient.spec.ts apps/web/tests/approvalTemplateCenterCategory.spec.ts \
+    apps/web/tests/approvalTemplateGovernance.spec.ts apps/web/tests/templateCenterI18n.spec.ts \
+  | grep -E "^\+" | grep -ciE "BEGIN|COMMIT|pg_advisory|FOR UPDATE|new Client|new Pool"
 0
 ```
 
-本切片改动的全部文件里,事务/锁/裸连接相关关键词命中总数为 0。
+四个生产代码文件本身零命中;把范围扩到六个 spec 文件、且只看新增的 `+` 行(而非整份既有文件的历史内容),同样零命中。**这才是设计 MD §4「不适用」实际站得住的证据**;第一版的「15 处全零」表述是错的,15 才是曾经现场跑出的真实数字,0 是收窄到正确范围后的真实数字——两个数字都记录在案,不是用后者掩盖前者。
 
 ## 6. 闭世界缺口披露(与 A-1 §5/§9 同一性质,对象不同)
 
