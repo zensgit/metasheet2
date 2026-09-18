@@ -48,6 +48,12 @@ by unit (verification MD §-numbers in the right column):
 | §5 I3 「终结即释放」, its own mutation | a dedicated case whose `createCancelRoundInstance` call is the FIRST statement after the close, so the clause carries the mutation | §3.14 |
 | 账侧验收 (lock §8 期 1, lock:169) | twin-fixture byte-compare against the real HTTP W4 path; found a real, disclosed divergence | §3.15 |
 | `unrecoverableExpired` 呈现, persistence half | the W4 seal (`sealAttendanceResultOperationV1`) persists the whole adapter response, `data.reversal` included, on the approval side's OWN transaction client, atomically with the approve | §3.16 |
+| `attendance-parity.db.test.ts` 退役对账, WIDENED (u3, landed post-merge) | provenance census widened from two sources to four (adds phase-1 verification MD and PR #5851's own body); verdict unchanged, nothing to restore (never existed on any ref) | §3.17 |
+| `unrecoverableExpired` 呈现, SURFACE half (u3, landed post-merge) | closed with a flagged DEFAULT, not left open: `UnifiedApprovalDTO.cancellationOutcome` (action response) + the approve audit row's `metadata.cancellationOutcome` (durable); three status tokens so "nothing to reverse" and "no channel" cannot collide | §3.18 |
+| §9-9 允许集 `approve` 成员半边 (u2, landed post-merge) | C-1 gate-review round-5 P3-1/R5-M7's member-half closure — a case that measures BOTH sides of the outlet gate on one instance (non-member `handle` refused, member `approve` redeems), so removing `approve` from the allow-set is red on membership itself, not on a downstream consequence | §3.19 |
+| §5 I3 「终结即释放」, C-2 half (u2, landed post-merge) | the SECOND of the two terminal `approval_rounds.outcome` writers now has its own I3 probe (§3.14 built the first, for the C-3 closure writer) | §3.20 |
+| 账侧七步逐步处置, written as 依据 (u2, landed post-merge) | ①–⑦ each given its own disposition rather than left as table cells; corrects two of its own supporting mechanism claims in the next unit | §3.21 |
+| ⑥ 的账侧半边 (`unrecoverableExpired`), MEASURED (u2, landed post-merge) | resolved as a DECLARED DIVERGENCE, not an open item: A (redemption) seals it into `response_snapshot`, B (HTTP path) carries it only in the response body and seals no row at all — no byte-comparable row pair exists, by mechanism (a 2×2 over posture × operationId), not by omission | §3.22 |
 
 ### 1.1 Explicitly NOT in this slice (deferred, per §7 below and the verification MD's own §4)
 
@@ -71,14 +77,15 @@ by unit (verification MD §-numbers in the right column):
   a `Map` keyed by instance id, so whichever row Postgres returns last silently wins the org), on a
   production path unrelated to this lock. Owed to the attendance line as a finding; nothing on this
   branch depends on it.
-- **Which user-facing surface renders `unrecoverableExpired`.** The persistence half is closed
-  (§3.16); the DTO/round-detail/notification surface is not — see §7 and §8.
+- **Which user-facing surface renders `unrecoverableExpired`.** ⚠️ HALF CLOSED post-merge: the
+  persistence half was already closed (§3.16); u3 (verification §3.18) now closes the DTO/audit-row
+  surface too, but with a flagged DEFAULT rather than a ratified choice, and no FE/notification
+  surface renders it — see §7 and §8 (updated) for the full statement.
 - **`attendance-parity.db.test.ts` as a named artefact.** Retired, not deferred: the filename is an
   implementer invention never named by the lock (`grep -c "attendance-parity" <lock>` → 0), and the
   requirement it stood for is implemented in the already-wired
-  `approval-cancel-round-redemption.db.test.ts` (§3.15.0). **The parallel u3 lane is landing the
-  presentation-surface work this retirement interacts with — see the "合流后待更新" section at the
-  end of this document.**
+  `approval-cancel-round-redemption.db.test.ts` (§3.15.0). u3 (verification §3.17) widened the
+  provenance census to four sources and reconfirmed the same verdict — see §8 (updated).
 - **FE / notification side.** C-3's 「卡片失效、端点返回一致」 column is untouched by this slice
   (verification §4, last bullet); 卡片失效 for a carded cancel round is possible, pre-existing and
   unswept (§3.8).
@@ -136,7 +143,7 @@ mutation is what proves the round write is load-bearing rather than decorative).
 |---|---|---|---|---|---|
 | `pending → rejected` (A7, judgment III) | `status='rejected'` (real reviewer) | `outcome='rejected', ended_at=now()` | one (ordinary reject completion) | released via engine closure | phase-1 design §5; `ApprovalProductService.ts:11750` (this tree) |
 | `pending → withdrawn` (A4, judgment III) | `status='revoked'` | `outcome='withdrawn', ended_at=now()` | one (ordinary revoke completion) | released | phase-1 design §5; `:11263` (this tree) |
-| `pending → applied` (outlet #5, judgment II) | `status='approved'` (unchanged fall-through) → **C-1 executes and separately writes the ORIGINAL document's own instance** `approved→cancelled` | `outcome='applied', ended_at=now()` | **exactly one** APPROVAL-domain completion event, measured, and it is the cancel round's OWN — §3.11.6's case does not itself assert the original document's instance produces none (C-1 is an attendance-domain operation and never calls `dispatchAction`/`buildCompletionEvent` on the original, so none is expected by construction, but that is a construction argument here, not a case that asserts a zero on the original). C-1's OWN attendance-domain event, `attendance.request.cancelled`, is a separate thing this row does not cover — §3.15.11 measures it at **0/0 on both twins**, but only because the fixture's org resolves `legacy_projection_only`; the `authoritative`/`shadow` branches are unexercised, so that 0/0 is parity of two skips, not a closed claim that the event never fires | released; cancel round's own seats deactivate through the ordinary approve path | verification §3.11.6 (redeem case), §3.15.11 |
+| `pending → applied` (outlet #5, judgment II) | `status='approved'` (unchanged fall-through) → **C-1 executes and separately writes the ORIGINAL document's own instance** `approved→cancelled` | `outcome='applied', ended_at=now()` | **exactly one** APPROVAL-domain completion event, measured, and it is the cancel round's OWN — §3.11.6's case does not itself assert the original document's instance produces none (C-1 is an attendance-domain operation and never calls `dispatchAction`/`buildCompletionEvent` on the original, so none is expected by construction, but that is a construction argument here, not a case that asserts a zero on the original). C-1's OWN attendance-domain event, `attendance.request.cancelled`, is a separate thing this row does not cover — §3.15.11 measures it at **0/0 on both twins**, but only because the fixture's org resolves `legacy_projection_only`; the `authoritative`/`shadow` branches are unexercised, so that 0/0 is parity of two skips, not a closed claim that the event never fires | released; cancel round's own seats deactivate through the ordinary approve path | verification §3.11.6 (redeem case), §3.15.11, §3.20 (this cell's own I3 slot-release probe, closed post-merge — see §7.1) |
 | `pending → expired` (#5′, judgment IV) | `status='rejected'`, actor=`system:approval-cancel-round`, `metadata.cancelRoundCloseReason='round_expired'` | `outcome='expired', ended_at, block_reason=NULL, policy_snapshot_at_decision` | **zero** | seats deactivated by the closure writer | §3.1, §3.2 |
 | `pending → blocked` (#5′, judgment IV, via C-1's `business_refused`) | same system-sentinel shape, `metadata.cancelRoundCloseReason='business_blocked:<code>'`, `cancelRoundBlockDetail` **beside** the bounded reason token, never concatenated into it | `outcome='blocked', block_reason, ended_at, policy_snapshot_at_decision` | **zero** | deactivated | §3.11.6 (`business_refused` case) |
 
@@ -410,12 +417,18 @@ list that attaches to 判据 II / the slice as a whole rather than to C-3 narrow
 
 - **卡片失效 for a carded cancel round** (C-3 row 3's third column) — possible, pre-existing, unswept
   (verification §3.8). Not a regression this slice introduces; not verified closed either.
-- **Only ONE of the two terminal outcome writers for the `applied` transition is probed.** §3.14's I3
-  mutation drives the round through the #5′/C-3 closure writer; the C-2 success writer
-  (`ApprovalProductService.ts:9106-9112`, inside `redeemCancelRoundInTxn`, `SET outcome = 'applied'`
-  at `:9109` — re-derived against this tree) is commented as an I3 site in the test file but has
-  **no** probe of its own — building one needs the attendance target plus the double (verification
-  §3.14.5's table).
+- **⚠️ CLOSED post-merge (u2, verification §3.20) — was "only ONE of the two terminal outcome
+  writers for the `applied` transition is probed".** §3.14's I3 mutation drives the round through
+  the #5′/C-3 closure writer; the C-2 success writer (`ApprovalProductService.ts:9106-9112`, inside
+  `redeemCancelRoundInTxn`, `SET outcome = 'applied'` at `:9109`) now has its own probe too: a
+  dedicated case whose `createCancelRoundInstance` call is the FIRST statement after the redemption
+  returns, so the I3 clause itself — not `round.outcome === 'applied'`'s later end-state check —
+  carries the mutation (M-30: the `applied` write and its `rowCount` guard deleted together, same
+  shape as §3.14's M-21; 5 red / 14 green, all four other reds dying on their own `applied`
+  assertions, confirming none of them could have carried it). What this probe does NOT establish,
+  stated as its own fixture premise: it measures the SLOT release with a test-double cancellation
+  port that writes nothing, so whether a REAL-boundary second round would instead be refused for a
+  document-status reason is unanswered (verification §3.20, §4).
 - **R1's count (lock §8 期 1, "9 处") does not yet include the new #5′ anchor.** #5′ is an outlet
   anchor for judgment IV, not a chokepoint guard, so it takes no `CANCEL_ROUND_OUTLET_FORBIDDEN`
   negative control by construction — whether §8 期 1's R1 count should grow to 10 to register it is
@@ -442,23 +455,37 @@ list that attaches to 判据 II / the slice as a whole rather than to C-3 narrow
 
 ## 8. Owner 待裁项
 
-- **`unrecoverableExpired` 的用户面呈现 — OPEN, and it is the headline of §3.15/§3.16.** The
-  PERSISTENCE half is closed: `sealAttendanceResultOperationV1` writes the whole adapter response —
-  `data.reversal`, and therefore `unrecoverableExpired`, included — into
-  `attendance_result_operations.response_snapshot` on the approval side's own transaction, committing
-  atomically with the approve (§3.16.1, measured at **120**, not `0 === 0`). What is NOT decided is
-  **which surface renders it**: `redeemCancelRoundInTxn` still discards the entry's `{ kind, response
-  }` at the call site, and the approve's `UnifiedApprovalDTO` carries no field for it — asserted as a
-  NEGATIVE in both the 账侧 case and §3.16's case, so the day a channel is added both go red and this
-  item must be revisited rather than quietly staying closed. Candidate surfaces named for owner
-  choice, not decided here: the `UnifiedApprovalDTO` itself, the round's own detail view, or a
-  notification. Inventing one here would be 另造 a presentation contract the lock does not name.
-- **`attendance-parity.db.test.ts` 退役** — the filename is retired as a deliverable (§3.15.0: it is
-  an implementer invention the phase-1 design MD mis-attributed to lock:169, which names a
-  requirement and no filename), and the requirement it stood for is implemented in the already-wired
-  `approval-cancel-round-redemption.db.test.ts` (§3.15). **The parallel u3 lane (呈现 + 对账) is
-  working this same area at the time of writing — 见 u3 合流后更新, below, before this bullet is
-  treated as the final word.**
+- **`unrecoverableExpired` 的用户面呈现 — ⚠️ HALF CLOSED post-merge (u3, verification §3.18), was
+  fully OPEN.** The PERSISTENCE half was already closed at this document's own base:
+  `sealAttendanceResultOperationV1` writes the whole adapter response — `data.reversal`, and
+  therefore `unrecoverableExpired`, included — into `attendance_result_operations.response_snapshot`
+  on the approval side's own transaction, committing atomically with the approve (§3.16.1, measured
+  at **120**, not `0 === 0`). u3 closes the SURFACE half with a flagged DEFAULT rather than leaving
+  it open: `UnifiedApprovalDTO.cancellationOutcome` (immediate, action-response scope) and the
+  approve audit row's `metadata.cancellationOutcome` (durable, read back via the history endpoint) —
+  THREE status tokens, not two (`cancelled` / `cancelled_with_unrecoverable_expired` /
+  `cancelled_reversal_unreported`), so a caller can never confuse "nothing to reverse" with "the
+  channel isn't wired". This IS an owner-visible default, not a ratified contract: `getApproval`
+  does not project the field (a reload reads it from the history endpoint, not the DTO itself), and
+  no FE surface renders it (`grep -rn "cancellationOutcome\|unrecoverableExpired" apps/web/src` → 0
+  hits, verification §3.18.4). An owner who wants a different shape — or the field projected onto
+  `getApproval` itself, a hot read path this default deliberately does not touch — replaces it; the
+  choice is documented on the type and the DTO field themselves, not only here (verification
+  §3.18.3, §3.18.7).
+- **`attendance-parity.db.test.ts` 退役 — ⚠️ VERDICT UNCHANGED post-merge, census WIDENED (u3,
+  verification §3.17).** The filename is retired as a deliverable (§3.15.0: it is an implementer
+  invention the phase-1 design MD mis-attributed to lock:169, which names a requirement and no
+  filename), and the requirement it stood for is implemented in the already-wired
+  `approval-cancel-round-redemption.db.test.ts` (§3.15). u3 widened the provenance census from two
+  sources to four — the lock (0 hits), phase-1 design MD (4), phase-1 verification MD (8), **and PR
+  #5851's own body (1, not previously checked)** — and found the filename named in that fourth,
+  implementer-authored source too. The verdict does not move: a Draft PR body opened by this same
+  implementation lane is the identical provenance class as the other three, not an owner
+  ratification, so 「只有任务书文本点名」 would have been false but 「no owner-ratified source names
+  it」 still holds. u3 also confirmed there is nothing TO restore — `find . -iname
+  "*attendance-parity*"` and `git log --all --diff-filter=A -- '*attendance-parity*'` both return
+  empty, so no ref ever created the file — and re-measured all four CI pins against the final
+  seven-file set (unperturbed; §3.17.3).
 - **The acting identity for C-1's audit row** (`approval_records.actor_id` on the `revoke` audit row
   C-1 writes) — this slice's redemption hook passes the cancel round's REQUESTER (verification
   §3.11.4), argued from 账侧 parity (the existing W4 path's actor is the requester) and from
@@ -485,27 +512,31 @@ list that attaches to 判据 II / the slice as a whole rather than to C-3 narrow
   choice, not a silent one.
 - **§8 期 1's R1 count** (see §7.1) — whether it should grow from 9 to 10 to register outlet #5′.
 
-## §9 合流后待更新
+## §9 合流后待更新 — ⚠️ DONE (merge commit `1c98ff937`, verified against the merged tree, not re-guessed)
 
-This document is written from the sub-lane's own read of `a02930896`. Two sibling sub-lanes are
-editing code and tests on the same slice in parallel and will land on this branch after this unit:
+This document was written from the sub-lane's own read of `a02930896`. u1/u2/u3 have since been
+merged `u1 → u3 → u2` onto `feat/approval-cancel-round-phase2`; every update this section originally
+called for has now been made, in place, at the citations named below (not re-summarized only here):
 
-- **u2 (tests)**: 账侧字节等价 + I3 + the `approve`-成员钉 carried from phase-1's P3-1 finding. When
-  u2 lands, **§2.2's table row for `pending → applied`**, **§7.1's "only one terminal writer is
-  probed" bullet**, and **§4.4's net-lock-order table** may need their citations and open-item status
-  refreshed against whatever u2 adds (in particular if u2 builds the missing C-2-success-writer I3
-  probe named in §7.1, that bullet's "no probe" claim must flip).
-- **u3 (呈现 + 对账)**: `unrecoverableExpired` 的用户面呈现 and `attendance-parity.db.test.ts`'s
-  retirement follow-through. When u3 lands, **§8's first two bullets** (呈现 surface, parity
-  retirement) are the ones to re-open and update — this document deliberately left them as open
-  owner items with a placeholder rather than guessing u3's resolution. **§1.1's** two bullets naming
-  the same two items should be checked against whatever u3 actually ships (a landed surface would
-  move the `unrecoverableExpired` bullet out of "deferred" and into "landed", changing §1's main
-  table too).
+- **u2 (tests)**: 账侧字节等价 + I3 + the `approve`-成员钉, landed. **§2.2's `pending → applied` row**
+  now cites §3.20 for the round-row's own I3 probe; **§7.1's "only one terminal writer is probed"
+  bullet flipped** to closed (M-30, 5 red / 14 green); **§4.4's net-lock-order table needed no
+  change** — u2 added no lock reordering, only test coverage over locks §4.1–§4.3 already ordered.
+  Two NEW `it()` cases landed in the existing `approval-cancel-round-redemption.db.test.ts` (no new
+  suite file, no census/s6a re-pin owed): the §9-9 member-pin (§3.19) and the C-2 I3 half (§3.20),
+  plus §3.21's step-by-step disposition and §3.22's ⑥ divergence measurement (both prose + assertions
+  inside the existing 账侧 case, not new `it()` blocks). §1's main table gained four rows for these.
+- **u3 (呈现 + 对账)**: `unrecoverableExpired`'s surface half and the `attendance-parity.db.test.ts`
+  retirement follow-through, landed. **§8's first two bullets are rewritten** (呈现: HALF CLOSED with
+  a flagged default, not OPEN; parity retirement: verdict UNCHANGED, census WIDENED to four sources).
+  **§1.1's two matching bullets updated** to point at the same resolution instead of a placeholder.
+  §1's main table gained two rows (§3.17, §3.18).
 
-Neither u2 nor u3's own commits are read by this document as of this HEAD (`a02930896` is this
-sub-lane's pinned base, per this document's own header) — the merge step that reconciles all three
-sub-lanes is what should perform the updates named above, re-deriving citations against the merged
-tree rather than assuming this document's numbers still hold (the same discipline phase-1's design MD
-names in its own header, and the one §3.15.1 of the verification MD had to apply after phase 1 moved
-out from under phase 2's own base).
+**Merge-time collision this section did not anticipate, resolved separately, not by this document**:
+u2 and u3 each independently numbered their own new verification-MD sections `3.17`–`3.20` (and
+mutation IDs `M-25`–`M-28`) starting from the SAME base (`a02930896`'s last section, `3.16`, and last
+mutation, `M-24`). The merge kept u3's numbers as-is (`3.17`/`3.18`, `M-25`–`M-27`, since u3 was
+merged first) and renumbered every one of u2's own sections and mutation IDs — headers, forward
+references in earlier tables (two stray cells outside the git-conflicted hunks), and the running §4
+summary — to `3.19`–`3.22` / `M-29`–`M-32`. This document's own citations above already use the
+POST-RENUMBER values; the verification MD's "合流记录" section (end of file) has the full account.
