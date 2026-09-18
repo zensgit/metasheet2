@@ -1088,6 +1088,15 @@ describeIfDatabase('WI-0 lock-order census (Q-E): which org key 判据 II must t
     const body = source.slice(protocolStart)
     expect(body.length).toBeGreaterThan(500)
 
+    // ⚠️ P3-hygiene (2026-09-19, positive format for impl-gate-C-slice2-round1 P3-5): a closed-
+    // world count on the WHOLE FILE, not just the sliced `body`. Without this, a second call site
+    // added OUTSIDE this function (or this leg's anchor drifting onto a stale one) would make the
+    // `.toContain` below vacuously true regardless of which call it actually found.
+    expect(
+      source.split('assertExternalTransactionRolloutLockHeldV1(trx,').length - 1,
+      'expected exactly one call site in this file — a second one would mean this leg no longer censuses the whole population',
+    ).toBe(1)
+
     // The assert is fed `identityPrepared.orgId` — NOT any approval-side column, and not a field
     // of the caller-supplied input (which `normalizeExternalTransactionInput` has no org in).
     expect(body).toContain('await assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)')
@@ -1409,6 +1418,15 @@ describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restr
     const catchEnd = source.indexOf('    } finally {', catchStart)
     expect(catchEnd).toBeGreaterThan(catchStart)
     const catchBody = source.slice(catchStart, catchEnd)
+
+    // ⚠️ P3-hygiene (2026-09-19, positive format for impl-gate-C-slice2-round1 P3-8): a closed-
+    // world count on the WHOLE FILE, not just the sliced `catchBody`. Without this, a second throw
+    // site added OUTSIDE `dispatchAction`'s catch block would leave this leg blind to it while
+    // still reading green off the one site it already knows about.
+    expect(
+      source.split('CANCEL_ROUND_DISPATCH_CONTENDED').length - 1,
+      'expected exactly one reference in this file — a second one would mean this leg no longer censuses the whole population',
+    ).toBe(1)
 
     expect(catchBody).toContain('CANCEL_ROUND_DISPATCH_CONTENDED')
     // Gated on the branch that opened SERIALIZABLE — NOT a repo-wide retry-semantics change.
