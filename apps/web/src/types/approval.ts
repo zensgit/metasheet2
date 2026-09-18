@@ -637,6 +637,21 @@ export interface ApprovalTemplateGroupDTO {
   archivedAt: string | null
 }
 
+/**
+ * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — the reorder
+ * endpoint's ACTUAL response shape. Mirrors the backend's `ApprovalTemplateGroupReorderResult`
+ * (`ApprovalTemplateGroupReorderService.ts`) byte-for-byte: `{id, sortOrder}` only — the reorder
+ * transaction never re-reads `name`/`createdBy`/`archivedAt` after its per-row `UPDATE`s, so those
+ * fields are NOT part of this response. Deliberately its own type, not `ApprovalTemplateGroupDTO`
+ * (which this endpoint's response was previously, incorrectly, typed as — a caller trusting the
+ * wider type for any field beyond `id`/`sortOrder` would read `undefined` at runtime despite the
+ * compiler believing otherwise).
+ */
+export interface ApprovalTemplateGroupReorderResultDTO {
+  id: string
+  sortOrder: number
+}
+
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
