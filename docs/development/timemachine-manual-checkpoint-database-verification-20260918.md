@@ -1154,3 +1154,76 @@ not filesystem WORM, NAS certification or customer-storage validation. Manual
 continuation still refuses attachments until source-pin verification, encrypted
 copy, attachment manifest/receipt finalization and restore consumption are
 connected and verified. This checkpoint is not end-to-end attachment archival.
+
+## Attachment AEAD Work In Progress (Not A Publication Checkpoint)
+
+Inspected remote base/main remains `bb77ca5f2ce3c2825265ec8877861d367d017ead`;
+published candidate remains `ec856b14317ce717e6df4e5e89cc0d68e49f365f`.
+The following evidence belongs to uncommitted working-tree changes, not either
+published SHA. Attachment AEAD binds the generation, source version, attachment
+identity and plaintext digest, with a domain separate from section encryption.
+Crypto/reader focused tests pass 78/78 and acceptance tsc passes. Removing the
+attachment identity from AAD produces the substitution negative. The prepared
+upload forwarding negative first reached the upload callback instead of refusing;
+passing the attachment plan into sealing restores the expected old-format refusal
+before ciphertext persistence/upload. Logs: `/private/tmp/tm-attachment-forward-{red,green,tsc}.log`.
+
+The owned synthetic database runner completed fresh/replay and existing manual
+capture/restore neighbors, with zero remaining database/connections and its
+cluster removed (`/private/tmp/tm-attachment-aead-realdb-neighbors.log`). This run
+does NOT prove binary attachment nonce registration or attachment restore.
+
+Authoritative schema inspection found a missing integration requirement:
+`meta_recovery_archive_nonce_reservations` has BOTH a `(dek_fingerprint, nonce)`
+primary key and a `(generation_id, section_name)` unique constraint. Therefore
+registering attachment nonces under `attachments_index` collides with the index
+section itself. The mock reservation callback does not exercise this constraint.
+The uncommitted batch integration is not publication-ready. A durable attachment
+identity must retain cross-section/attachment nonce uniqueness and per-object
+single-ciphertext authority without relaxing existing section protection. Verify
+that authority using real SQL before wiring source reads, persistent attachment
+ciphertext, upload receipts, publication and restore. Existing manual commands
+remain attachment-refusing; no flag, deployment or customer-storage action.
+
+## Attachment Nonce Authority Checkpoint
+
+The work-in-progress registry collision above is resolved at code commit
+`591c559f151c1579b006d748d231e12001b0b880`, tree
+`fe41c79a9ef3c19310099e679b89caa0b6e11f19`, parent
+`ec856b14317ce717e6df4e5e89cc0d68e49f365f`. Eight code/test files; no workflow,
+flag or permission edits. Nonce identity is `attachment:sha256(exact source ID)`;
+the AEAD binds the full ID and source version separately. The production ID
+shape `att_<uuid>` is covered, not incorrectly constrained to bare UUIDs.
+
+Evidence on final code:
+- crypto/reader 78/78; acceptance tsc and four-source ESLint PASS;
+- owned fresh full migration plus replay PASS; historical migration census now
+  31 and before/after catalog fingerprints identical;
+- real SQL admits index plus attachment reservations, refuses cross-object nonce
+  reuse and a second nonce for the same attachment, refuses invalid object names,
+  UPDATE/DELETE/TRUNCATE, and nonempty extension rollback;
+- direct up/down/down/up/up PASS; CHECK(true), old/new CHECK coexistence,
+  deferrable uniqueness, disabled row/truncate guard and replaced reservation/row
+  functions all cause drift refusal;
+- separately dropping each nonce/object unique arbiter makes its real refusal
+  assertion RED inside a rolled-back transaction; canonical up succeeds afterward;
+- existing real HTTP manual capture, preview and synthetic field restore PASS;
+- required migration wiring contract passes, including deleting the new migration
+  from replay census as a RED counterexample; diff-check PASS;
+- scratch database/connections zero, owned cluster stopped and removed.
+
+Logs: `/private/tmp/tm-nonce-object-restored-realdb.log`,
+`/private/tmp/tm-nonce-object-reviewed-{unit,tsc,lint}.log`,
+`/private/tmp/tm-nonce-object-final-wiring.log`.
+An intermediate mutation setup used unnamed replacement function parameters and
+failed before reaching the audit; that attempt is not counted. Corrected named
+parameters reached the intended refusal in the final full run.
+
+Sol read-only review found the original bare-UUID mismatch and audit omissions;
+both were corrected above. Its transaction concern was independently disproved
+against the installed Kysely Migrator and PostgreSQL adapter and explicitly
+withdrawn by the reviewer. No fresh external approval of the corrected full diff
+is claimed; session closed. This checkpoint is not attachment end-to-end proof:
+manual admission/continuation still refuse attachment capture; durable encrypted
+objects, verified upload/finalization and restore consumption remain incomplete.
+Remote CI for the new commit is pending publication, not a claimed pass.

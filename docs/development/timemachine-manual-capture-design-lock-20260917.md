@@ -486,3 +486,27 @@ Both existing archive and writer-fence flags must be exact true for guarded
 deletion; disabled deletion behavior is preserved. Mixed-version or differently
 flagged writers are not a validated deployment configuration. No runtime flags
 were enabled outside owned test processes.
+
+## Attachment Ciphertext Identity Substrate
+
+Implementation checkpoint `591c559f151c1579b006d748d231e12001b0b880`
+adds same-generation attachment AEAD, not an enabled attachment capture path.
+The AEAD domain binds the full original attachment ID, immutable source version,
+generation identity and plaintext digest. The nonce registry represents opaque
+attachment IDs (including production `att_...` IDs) as `attachment:` plus SHA-256
+of the exact UTF-8 ID. This is an internal object discriminator, not a new source
+ID or permission. A digest collision refuses a second object rather than
+allowing nonce reuse. Existing ten section names and their identity remain intact.
+
+The global `(dek_fingerprint, nonce)` primary key and generation/object unique
+constraint remain immediate and immutable. The batch reserves every nonce before
+any encryption. The registry migration extends the existing row shape guard and
+CHECK, audits both existing uniqueness arbiters, row/truncate triggers and the
+values-free reservation function. Rollback refuses once an attachment reservation
+exists; no safety tombstone is deleted. It runs within the production PostgreSQL
+Migrator's transactional DDL boundary, like the existing registry migrations.
+
+Prepared formats 1/2 explicitly reject attachment ciphertext; their upload
+continuation must not silently omit an attachment plan. Durable attachment
+envelopes, pin verification, provider receipts, finalization and restore-byte
+consumption remain required before declaring attachment archival supported.
