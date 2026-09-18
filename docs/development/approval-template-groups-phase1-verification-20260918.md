@@ -1721,14 +1721,16 @@ $ DATABASE_URL="postgresql://localhost:5432/metasheet2_lock_a1_fix" EXPECT_DB=1 
 
 ### 25.8 `git diff --stat` 证据(只动注释/测试/MD/scripts)
 
+**订正(本节第二次现场重跑)**:本节第一次起草时贴的数字(设计 MD `45 ++++++++-------`、总计 `137 insertions(+)`)本身就是那次自指披露里明说「不预期数字会再漂移」的反例——§25.4–§25.9 那之后仍在继续把内容写进本文档,本节自己的这次现场重跑就把验证 MD 的净增行数从 `45` 推到了下面这个更大的数,而这次重跑同样会被本次订正自身的编辑再推一点。这不是隐藏掉重新计数、悄悄换个数字了事——上一次「不预期再漂移」的判断错了,原句与错误一并留痕在这里,而不是删掉重写:
+
 ```
 $ git diff --stat a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- .
- docs/development/approval-template-groups-phase1-design-20260918.md         |  2 +-
- docs/development/approval-template-groups-phase1-verification-20260918.md   | 45 ++++++++-------
- packages/core-backend/src/routes/approvals.ts                               | 25 ++++++---
- .../approval-template-groups-lifecycle.db.test.ts                           | 44 +++++++++++++++
- scripts/dev/atg-retraction-sweep.sh                                         | 64 +++++++++++++++++-----
- 5 files changed, 137 insertions(+), 43 deletions(-)
+ docs/development/approval-template-groups-phase1-design-20260918.md         |   2 +-
+ docs/development/approval-template-groups-phase1-verification-20260918.md   | 184 ++++++++++++++++++---
+ packages/core-backend/src/routes/approvals.ts                               |  25 ++-
+ .../approval-template-groups-lifecycle.db.test.ts                           |  44 +++++
+ scripts/dev/atg-retraction-sweep.sh                                         |  64 +++++--
+ 5 files changed, 276 insertions(+), 43 deletions(-)
 
 $ git diff a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- packages/core-backend/src/routes/approvals.ts | grep -E '^[+-]' | grep -vE '^[+-]//|^\+\+\+|^---'
 (无输出——approvals.ts 的每一处改动行都以 `//` 开头,零生产代码行为改动)
@@ -1737,9 +1739,9 @@ $ git diff a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- packages/core-backend/tes
 (无输出——测试文件零删除,§2(d) 是纯增量插入)
 ```
 
-**行为面结论**:5 个改动文件里,`ApprovalTemplateGroupService.ts`、DDL 迁移文件、`vitest.config.ts`、s6a 钉均**零改动**(不在本轮 diff 里);`routes/approvals.ts` 的 25 行改动逐行核对全部是注释;`lifecycle.db.test.ts` 的 44 行改动逐行核对全部是新增(零删除);两份 MD 与 `atg-retraction-sweep.sh` 按定义就是文档/脚本。**本轮生产代码行为改动数 = 0**,与任务书硬规矩「生产代码零行为改动(允许:注释、测试、MD、scripts/dev)」逐字相符。
+**行为面结论(不受上述数字漂移影响——这四个文件的内容早已冻结,只有验证 MD 自己还在增长)**:5 个改动文件里,`ApprovalTemplateGroupService.ts`、DDL 迁移文件、`vitest.config.ts`、s6a 钉均**零改动**(不在本轮 diff 里);`routes/approvals.ts` 的 25 行改动逐行核对全部是注释;`lifecycle.db.test.ts` 的 44 行改动逐行核对全部是新增(零删除);两份 MD 与 `atg-retraction-sweep.sh` 按定义就是文档/脚本。**本轮生产代码行为改动数 = 0**,与任务书硬规矩「生产代码零行为改动(允许:注释、测试、MD、scripts/dev)」逐字相符——这一条结论不依赖验证 MD 自己的行数,`approvals.ts`/`lifecycle.db.test.ts` 两条 grep 证据在本节两次重跑之间逐字未变。
 
-**自指披露(与 §23.11/§23.12/§24.7 同一问题)**:上面这段 `git diff --stat` 是在起草本 §25 节时现场跑的,本节自己在这之后不会再显著增长(§25.9 只补提交信息),所以这次不预期数字会再漂移;若仍有出入,以推送前最后一次现场重跑为准。
+**自指披露,第二次(与 §23.11/§23.12/§24.7 同一问题,上面那次「不预期再漂移」的预测已被推翻,不再重复同一个错误预测)**:验证 MD 对自己行数的度量必然滞后一步——任何写进本节的数字,在落笔的瞬间就已经不包括这次落笔本身。本节到此为止不再新增大段落(§25.9 只补提交信息,通常是数行);**唯一权威的数字是推送前最后一次现场重跑 `git diff --stat a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- .` 的输出**,不是本节写死的这一份——这不是本节没做到位,而是同一份文档统计自己改动量这件事在结构上就做不到「文档写完的瞬间数字仍准」,与 §23.11/§23.12/§24.7 指出的是同一类问题。
 
 ### 25.9 提交与推送
 
