@@ -2184,7 +2184,16 @@ on `trx` — which, on this path, **is the approval side's own transaction clien
 false:
 
 1. the seal is **not** conditional on `isLegacyCompat` (only the outbox enqueue above it is), so it
-   runs on the legacy posture this fixture resolves to;
+   runs on the legacy posture this fixture resolves to.
+   ⚠️ Two halves, two provenances, because this bullet mixes them: the unconditionality is READ
+   from `w4c3b-request-operation-boundary.ts:905-921` (the `if (!isLegacyCompat)` wraps only the
+   enqueue; the `await sealAttendanceResultOperationV1(...)` sits outside it) — that half is source,
+   and it is also what M-23 exercises. **「this fixture resolves to the legacy posture」 is
+   INHERITED**, from §3.12.3's assertion on the END-TO-END case's fixture, not pinned by §3.16's
+   own case: the new case asserts nothing about `acceptedWritePosture` and adds no
+   zero-`approval_reversal` line of its own. The two fixtures are built by the same helpers, which
+   is why the inheritance is reasonable — but it is an inheritance, and if the posture ever changes
+   §3.12.3 is the line that goes red, not this one;
 2. `result.response` is the adapter's **whole** response object — `{ ok, data: { requestId, status,
    orgId, userId, reversal, … } }` (`index.cjs:35275-35285`) — so `data.reversal` and its
    `unrecoverableExpired` go in verbatim;
