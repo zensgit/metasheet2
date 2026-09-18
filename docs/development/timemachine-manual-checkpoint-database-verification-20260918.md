@@ -990,3 +990,44 @@ Scope: one scalar revert through real HTTP in a synthetic environment. This is
 not evidence of browser-driven restore confirmation, deleted-record/field replay,
 attachment copying, full authenticated Workbench UAT or production readiness.
 No customer data/storage, deployment, dispatch, Ready or merge action occurred.
+
+## Browser-Confirmed Restore And Coverage Copy
+
+Browser checkpoint: `c6d786ccfd3bb6bdec5392215ae6e3eacdfec429`.
+Copy fix: `d4c179ed0304957fb164d89b3fb3f3aa4de972ee`.
+
+At both 1440px and 390px, the production modal/client now completes capture,
+reload, catalog selection, no-change preview, then an executable preview after
+an explicitly synthetic SQL edit. Before checking the restore confirmation,
+execute is disabled and no write request occurs. After checking it, exactly one
+execute request returns one revert and no resurrection/deletion; the modal shows
+completion and clears confirmation. Independent DB readback proves the archived
+value, version increment from the synthetic edit plus restore, and one additional
+restore history revision. This is not a real Workbench editing/login flow.
+
+Mutation: remove the modal button's confirmation-dependent disabled condition.
+The browser fails precisely at the unconfirmed-disabled assertion; restoration
+returns the full driver/browser matrix to green. The prior real SQL no-op mutation
+also pins the database-value oracle independently of response success.
+
+Screenshot inspection exposed a copy defect: coverageRowCount includes sealed
+history/configuration evidence and is not a business-row count. The catalog now
+says "archive evidence entries" / "项归档证据". Two English/Chinese exact-text
+tests fail on the old copy and pass after the fix; no DTO/count semantics changed.
+
+Final: client/modal 147/147; application vue-tsc; scoped ESLint; acceptance tsc;
+exact-anchor wiring; full owned runner with 59 + 127 neighbors and both Chromium
+viewports PASS. ESLint initially could not resolve the already-installed Vue
+parser through isolated symlinks; a temporary NODE_PATH to existing pnpm packages
+allowed the scoped command, with no install or dependency changes.
+Logs: `/private/tmp/tm-manual-browser-execute-final.log`,
+`/private/tmp/tm-manual-browser-confirm-mutation.log`,
+`/private/tmp/tm-manual-coverage-label-{red,green}.log` and
+`/private/tmp/tm-manual-browser-execute-{tsc,app-tsc,lint-final,wiring}.log`.
+Screenshots in os.tmpdir() show the completion result and were visually inspected.
+All owned browser/server/cache/DB/cluster resources are cleaned.
+
+A bounded Sol read-only attachment review confirmed D1's immutable-source
+requirement but did not finish storage writer/deleter inspection; it is not a
+code-review approval or evidence of attachment support. Immutable attachments,
+full authenticated Workbench UAT and broader restore shapes remain open.
