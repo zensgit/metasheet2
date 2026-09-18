@@ -371,7 +371,7 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
    - **O2**:`atg_name_nonblank CHECK` 拒绝纯中文组名,是 A-1/#5852 上的活缺陷——A-3 在 owner ratify 该勘误前,对纯中文 category **功能性惰性**(诚实披露,见设计 MD 抬头块第 2 条)。
    - **O3**:preview/批次列表端点挂 `approvalTemplateAdminGuard`(偏离 I7 字面读/写二分)——建议按默认值,需 owner 一句话确认。
 7. **跨 lane 项,部分已随修复轮 1 解决,一处状态断言已被后续 rebase 更新**(设计 MD §13.5):A-1 Draft PR #5852 的"0 P1"结论需要因 P1-3(CJK 组名裸 `DatabaseError`,O2)重新求值——**这一半仍然开放**,是对另一个 Draft PR 的回流,本分支无权改 A-1 已落地代码。changesRequired #16 后半(`routes/approvals.ts:396-399` 的过强注释)——不是本分支现场改写 A-1 代码,而是 A-1 自己陆续多轮门审在真库证伪并重写这条注释:第 4/5 轮(`f7b929700`)先把"通配权限码单独过 guard"这条腿证伪,本分支第二次 rebase 时原样带入本树;第 6/7 轮(`3e53c52fe`)又进一步证伪了"guard ⊋ manager(严格超集)"这个结论本身,发现两个人口是**互不包含**(反方向反例:持 `approval-templates:manage` 但未过 namespace admission 的主体被 guard 403 却被 `isTemplateManager` 判成 manager),本分支**第三次** rebase(2026-09-18,到 `a728ed655`)已把这条修复原样带入本树。**这一半不是"已解决后维持不变",而是"随 A-1 的证伪推进被反复重写,当前树已是最新版本"**——本文档 §9 记录第三次 rebase 的 git 力学,§7.3 本节及 §13.6(设计 MD)已按互不包含改写措辞。
-8. **A-1 两个既有真库文件(`lifecycle`/`serialization`)未被任何 `*-ci-wiring.test.mjs` 覆盖**(P3-2 残留,本切片新增的五个文件继承同样的闭世界残留形态,不是本切片引入的新缺口,但也未被本切片修复)。
+8. **A-1 两个既有真库文件(`lifecycle`/`serialization`)未被任何 `*-ci-wiring.test.mjs` 覆盖**(P3-2 残留,不是本切片引入的新缺口,也未被本切片修复)。**订正(与 §2.4 对齐,原文字"本切片新增的五个文件继承同样的闭世界残留形态"与 §2.4 自相矛盾,现已删除该半句)**:本切片新增的五个 backfill 文件**不继承**这个残留——`node --test scripts/ops/approval-template-groups-backfill-{batches-list,execute,preview,rollback,schema}-ci-wiring.test.mjs` 显示每个新文件各有专属守卫,5×3=15 条断言全绿(见 §2.4),M6 已证该守卫承重。残留范围仅限 A-1 的两个既有文件。
 9. **一个非 manager 管理员执行 backfill 时,批次头不记录"只覆盖了部分模板"**(设计 MD §19.4 新披露 2):修法需要给批次头加列,超出本步范围(且需要新 DDL,不在本步动)。
 
 ---
@@ -461,7 +461,7 @@ IDENTICAL
 1. 三处"接线还不存在"的过期断言注释——**修复轮 2 已修,见 §8.1**。
 2. 12 处指向改名前文档路径的注释——**修复轮 2 已修,见 §8.2**。
 3. `atgbb_org_nonblank` 未进 `NONBLANK_CHECK_CONSTRAINTS`——**修复轮 2 已修 + 新增判别力测试,见 §8.3**(门审原文"需要服务层测试才能安全改,今天不可达"这句话本身有一处可拆分:端到端不可达是真的,但 `mapGroupConstraintError` 是纯函数,不需要真库/路由即可直接单元测试它对一个合成 `{code,constraint}` 对象的映射——见 §8.3 的判别力证据)。
-4. 验证 MD §5 第 8 条与 §2.4 自相矛盾——**本轮顺带核实但未改**:§2.4 与 §5.8 的矛盾在 rebase 前后没有变化,仍然是"§5.8 低估了自己",留给下一轮。
+4. 验证 MD §5 第 8 条与 §2.4 自相矛盾——**修复轮 3 已修,见 §5 项 8 与 §10.2**(`impl-gate-A3-round2-20260918.md` §7 P3-2)。
 5. 验收 E 终态腿未测——未动,已在 §5 项 1 记录为 remaining。**下一轮建议不选此条**:结果式竞态判据在 mutation 下也可能良性通过(记忆 `feedback_race_acceptance_assert_blocking_not_outcome`),一个弱化版本比不写更糟,需要认真设计而不是本轮体量的顺手修。
 6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——未动。**下一轮建议选此条,且按更便宜的那个选项**:CI 跑的是 `15-alpine`(musl、无 `en_US.utf8`,记忆 `finding_prod_pg15_never_tested`),在本机 glibc/`en_US.UTF-8` 上新增一条真库对拍测试只会在本机通过、对 CI 真正跑的那根轴什么也没证明——诚实的处置是在门审 §6 第 6 条已核实的机械对拍结论(E6,12287 码位零分歧)旁边把"已在 glibc/en_US.UTF-8 上机械对拍,musl 轴未验"这句话写全,而不是新增一条只能在错误的 collation 轴上通过的测试。
 7. 补充清单 #1 的"`ci-realdb-step-contract.mjs` 硬编码 `FILES` 数组"前提在本 head 上为假——未动(本文档 §4 第 1 行已经写了"零命中确认",未单独点出"清单前提本身过期"这句话,门审 §6 第 7 条建议在 PR body 里点名,留给开 PR 那一步)。
@@ -717,3 +717,7 @@ $ bash scripts/dev/atg-retraction-sweep.sh origin/feat/approval-template-groups-
 - `routes/approvals.ts` 的命中(4 处,均在 A-1 自己的注释块内,本 lane 未碰这些行)本身已经历"CORRECTED A THIRD TIME"的自我改写,现读结论是"the two populations are mutually non-inclusive — neither contains the other",与本 lane 的改写口径一致;不属于本 lane 需要处理的对象,如实记录不动。
 
 **要求达成**:零处以「成立」口吻断言任一方向包含关系(类别 2 = 0),符合任务书判据。
+
+### 10.2 P3-2——验证 MD §5 项 8 与 §2.4 自相矛盾
+
+原文"本切片新增的五个文件继承同样的闭世界残留形态"与 §2.4 记录的事实(五个新 backfill 文件各自有专属 `*-ci-wiring.test.mjs`,5×3=15 条断言全绿,M6 已证承重)直接矛盾。改写为:残留仅限 A-1 的两个既有文件(`lifecycle`/`serialization`),明确排除"本切片新文件继承"这句错误推论。设计 MD §13.6 PR body 必写清单里的同一句(P3-2 一行)同批改写,避免抄进 PR body。
