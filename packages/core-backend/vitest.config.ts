@@ -1835,9 +1835,11 @@ export default defineConfig({
       // ("backfill by existing category") batch-bookkeeping DDL
       // (`zzzz20260919090000_create_approval_template_group_backfill_batches.ts`), amended by the
       // independent design-gate verdict `reviews/design-gate-A3-phase2-20260918.md` folded into
-      // `docs/development/approval-template-groups-phase2-design-20260918.md` §13. Schema-only —
-      // no W7/W8/W9 route/service code exists yet — but real-Postgres-required: it proves the
-      // gate's changesRequired #4 fix (`atgbbl_link_fk` CASCADE, not the proposal's original NO
+      // `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §13.
+      // Schema-only (exercises the DDL, not the W7/W8/W9 route/service layer, which has since
+      // landed — see the sibling `backfill-{preview,execute,rollback}.db.test.ts` suites) but
+      // real-Postgres-required: it proves the gate's changesRequired #4 fix (`atgbbl_link_fk`
+      // CASCADE, not the proposal's original NO
       // ACTION — real-DB finding M6) is load-bearing at the catalog level via a positive control,
       // a same-transaction mutation negative control that reverts the constraint and observes the
       // pre-fix deadlock, and composite-FK org-consistency checks. DATABASE_URL-gated; excluded
