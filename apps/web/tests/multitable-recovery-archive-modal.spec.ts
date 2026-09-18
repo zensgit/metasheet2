@@ -259,6 +259,14 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe('RecoveryArchiveModal', () => {
+  it.each([
+    [false, '7 archive evidence entries'],
+    [true, '7 项归档证据'],
+  ])('does not present coverage evidence as business record count (Chinese=%s)', async (isZh, expected) => {
+    mount({ isZh })
+    await flush()
+    expect(q('.archive-recovery__entry-meta')?.textContent).toBe(expected)
+  })
   it('wires manual completion to catalog rediscovery without starting a restore', async () => {
     const captureArchive = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))
     const readCapture = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))

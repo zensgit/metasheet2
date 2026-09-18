@@ -354,7 +354,7 @@ function blockedLabel(reason: RecoveryArchivePreview['blockedReason']): string {
 }
 
 function coverageLabel(value: string): string {
-  return props.isZh ? `${value} 条覆盖记录` : `${value} covered records`
+  return props.isZh ? `${value} 项归档证据` : `${value} archive evidence entries`
 }
 
 function formatTime(value: string): string {
