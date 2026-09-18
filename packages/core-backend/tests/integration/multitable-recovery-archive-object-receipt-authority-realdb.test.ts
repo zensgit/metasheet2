@@ -350,11 +350,17 @@ async function truncateArchiveState(): Promise<void> {
   const legalHoldTarget = legalHoldTable.rows[0]?.present
     ? 'meta_recovery_archive_legal_holds,'
     : ''
+  const derivedEffectsTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_derived_effects') IS NOT NULL AS present`,
+  )
+  const derivedEffectTarget = derivedEffectsTable.rows[0]?.present
+    ? 'meta_recovery_archive_derived_effects,'
+    : ''
   const restoreJobsTable = await q(
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
   )
   const restoreJobTargets = restoreJobsTable.rows[0]?.present
-    ? `meta_recovery_archive_restore_plans,
+    ? `${derivedEffectTarget}meta_recovery_archive_restore_plans,
          meta_recovery_archive_job_chunks,
          meta_recovery_archive_sync_receipts,
          meta_recovery_token_burns,

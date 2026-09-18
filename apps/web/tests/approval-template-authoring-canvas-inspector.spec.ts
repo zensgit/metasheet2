@@ -1096,7 +1096,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // fixture with zero ratified policies renders NO third tab", which is the dedicated test below
   // ("A-2 (re-pointed by Lock-5 E-1) …"). This test keeps the per-tab-content and no-Save/Cancel
   // halves of A-1/A-8 against the SHIPPED registry.
-  it('A-1/A-8: the shipped registry renders 审批人设置/表单权限/操作权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
+  it('A-1/A-8: the shipped registry renders 审批人设置/字段权限/操作权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
     setRouteParams({ id: 'tpl_a1_a2' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
@@ -1108,7 +1108,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const tablist = inspector.querySelector('[data-testid="approval-canvas-inspector-tablist"]') as HTMLElement
     expect(tablist).not.toBeNull()
     const tabs = Array.from(tablist.querySelectorAll('[role="tab"]')) as HTMLElement[]
-    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '表单权限', '操作权限'])
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '字段权限', '操作权限'])
 
     // A-1 "per-tab content matches the L0-1 table" — not just tab labels: the CONTENT visibility
     // actually follows the active tab. `v-show` only toggles `style.display` (deliberately, so it
@@ -2064,7 +2064,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
     })
     const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((el) => el.textContent)
-    expect(tabs).toEqual(['审批人设置', '表单权限', '操作权限'])
+    expect(tabs).toEqual(['审批人设置', '字段权限', '操作权限'])
     unmount()
   })
 

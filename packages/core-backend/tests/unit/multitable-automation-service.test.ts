@@ -797,7 +797,7 @@ describe('AutomationService', () => {
   })
 
   describe('init / shutdown', () => {
-    it('subscribes to events on init and unsubscribes on shutdown', () => {
+    it('subscribes to events on init and unsubscribes on shutdown', async () => {
       const query = createMockQuery([])
       service = new AutomationService(bus, createMockDb([]) as never, query)
 
@@ -840,7 +840,7 @@ describe('AutomationService', () => {
         expect.any(Function),
       )
 
-      service.shutdown()
+      await service.shutdown()
       expect(unsubscribeSpy).toHaveBeenCalledTimes(9)
     })
   })

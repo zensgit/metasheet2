@@ -624,7 +624,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
 
   it('A2 — the set of methods holding ANY this.app.<verb> registration site is exactly this frozen set', () => {
     const byMethod = new Set(model.sites.map((s) => s.enclosingMethod))
-    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'start'])
+    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'startOnce'])
   })
 
   it('A3 — ordering: the gate, audit, and security sites all precede the route site, in setupMiddleware\'s own sequential order', () => {
@@ -660,7 +660,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'createCoreAPI', signature: '[methodLower](...)' },
       { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'registerPluginRoute', signature: "[methodLower as 'get' | 'post' | 'put' | 'delete' | 'patch'](...)" },
       { kind: 'ESCAPE', enclosingMethod: 'setupMiddleware', signature: 'installMetrics(...) arg0' },
-      { kind: 'ESCAPE', enclosingMethod: 'start', signature: 'new APIGateway(...) arg0' },
+      { kind: 'ESCAPE', enclosingMethod: 'startOnce', signature: 'new APIGateway(...) arg0' },
     ])
   })
 
@@ -1098,8 +1098,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 48
-  const FROZEN_SAFE_HASH = '491a38feac62706d5568953e8a424e60411b88f9ff547cc788d381152ef984a6'
+  const FROZEN_SAFE_COUNT = 50
+  const FROZEN_SAFE_HASH = '2e19c278e588cca8fe10af0595e4656e56526008e1a4a0aa3d617c14950696ff'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
@@ -1112,10 +1112,12 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.httpServer//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.injector//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.logger//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.manageProcessSignals//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.port//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.portLocked//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.recoveryArchiveApplication//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.snapshotService//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.startupSignal//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.initializeCache//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.registerInternalPluginApis//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.setupMiddleware//#0",
@@ -1196,7 +1198,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 48, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 50, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
@@ -1249,7 +1251,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(indexText).toContain(marker)
       const mutated = indexText.replace(marker, marker + '\n    const __p2bUnrelated = 1; void __p2bUnrelated;')
       const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
-      // the safe-eligible census is unchanged (same 48 keys)
+      // the safe-eligible census is unchanged (same 50 keys)
       expect(new Set(deriveSafeCensus(msrc, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
       const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
       expect(mpart.safe.length).toBe(FROZEN_SAFE_COUNT)

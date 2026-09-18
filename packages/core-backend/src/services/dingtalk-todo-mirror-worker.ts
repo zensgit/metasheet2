@@ -235,6 +235,8 @@ export class DingTalkTodoMirrorWorker {
   private readonly createTodoTask: NonNullable<DingTalkTodoMirrorWorkerOptions['createTodoTask']>
   private readonly completeTodoTask: NonNullable<DingTalkTodoMirrorWorkerOptions['completeTodoTask']>
   private running = false
+  private acceptingBatches = true
+  private inFlightBatch: Promise<TodoMirrorRunResult> | null = null
 
   constructor(options: DingTalkTodoMirrorWorkerOptions = {}) {
     this.query = options.query ?? (defaultQuery as unknown as TodoMirrorWorkerQuery)
@@ -313,11 +315,30 @@ export class DingTalkTodoMirrorWorker {
     return rows
   }
 
-  async runBatch(): Promise<TodoMirrorRunResult> {
+  runBatch(): Promise<TodoMirrorRunResult> {
     const result: TodoMirrorRunResult = {
       claimed: 0, created: 0, completed: 0, retrying: 0, failed: 0, skipped: 0, outcomeUnknown: 0, lostLease: 0,
     }
-    if (this.running) return result
+    if (!this.acceptingBatches || this.running) return Promise.resolve(result)
+    const task = this.runBatchOnce(result)
+    this.inFlightBatch = task
+    void task.then(
+      () => {
+        if (this.inFlightBatch === task) this.inFlightBatch = null
+      },
+      () => {
+        if (this.inFlightBatch === task) this.inFlightBatch = null
+      },
+    )
+    return task
+  }
+
+  async stopAndDrain(): Promise<void> {
+    this.acceptingBatches = false
+    await this.inFlightBatch
+  }
+
+  private async runBatchOnce(result: TodoMirrorRunResult): Promise<TodoMirrorRunResult> {
     this.running = true
     try {
       const rows = await this.claimDueRows()

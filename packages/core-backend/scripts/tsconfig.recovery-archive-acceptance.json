@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "noEmit": true,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": [
+    "../src/**/*",
+    "../core/**/*",
+    "../types/**/*",
+    "./verify-recovery-archive-server.mts",
+    "./verify-recovery-local-backup.mts",
+    "./verify-recovery-local-startup.mts",
+    "./start-recovery-local.mts"
+  ]
+}

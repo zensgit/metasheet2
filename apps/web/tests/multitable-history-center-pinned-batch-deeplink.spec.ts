@@ -7,7 +7,7 @@
  * independent of the paged list, and its "clear" affordance dismisses it without touching the list.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import HistoryCenterModal from '../src/multitable/components/HistoryCenterModal.vue'
 import type { HistoryBatchDetail, HistoryBatchSummary } from '../src/multitable/types'
 
@@ -39,14 +39,46 @@ function otherBatch(): HistoryBatchSummary {
 }
 
 function mountModal(initialBatchId: string | null) {
+  const { app, container } = mountReactiveModal(initialBatchId)
+  return { app, container }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function pinnedDetail(batchId: string, value: string): HistoryBatchDetail {
+  return {
+    batchId, actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
+    visibleAffectedRecordCount: 1, visibleAffectedFieldCount: 1,
+    changes: [{ sheetId: 'sheet_1', recordId: `rec_${batchId}`, action: 'update', version: 2, changedFieldIds: ['fld_name'], before: { fld_name: value }, after: { fld_name: value } }],
+  }
+}
+
+function mountReactiveModal(initialBatchId: string | null, baseId = 'base_1') {
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const app = createApp(HistoryCenterModal, {
-    open: true, baseId: 'base_1', initialBatchId,
-    fields: [{ id: 'fld_name', name: 'Name' }],
-  })
+  const open = ref(true)
+  const currentBaseId = ref(baseId)
+  const currentBatchId = ref<string | null>(initialBatchId)
+  const app = createApp(defineComponent({
+    setup() {
+      return () => h(HistoryCenterModal, {
+        open: open.value,
+        baseId: currentBaseId.value,
+        initialBatchId: currentBatchId.value,
+        fields: [{ id: 'fld_name', name: 'Name' }],
+      })
+    },
+  }))
   app.mount(container)
-  return { app, container }
+  return { app, container, open, currentBaseId, currentBatchId }
 }
 
 describe('HistoryCenterModal — W3-5b pinned-batch deep-link banner', () => {
@@ -124,6 +156,93 @@ describe('HistoryCenterModal — W3-5b pinned-batch deep-link banner', () => {
       // this file's tests, so an absolute "never called" assertion would be a false positive/negative).
       expect(mockGetHistoryBatch.mock.calls.length).toBe(callsBeforeOpen)
       expect(container.querySelector('[data-test="hist-pinned-batch"]')).toBeNull()
+    } finally {
+      app.unmount()
+      container.remove()
+    }
+  })
+
+  it('ignores a dismissed pin from an earlier open after the modal reopens on another base', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [], total: 0, nextCursor: null, searchTruncated: false })
+    const oldPin = deferred<HistoryBatchDetail | null>()
+    const currentPin = deferred<HistoryBatchDetail | null>()
+    mockGetHistoryBatch.mockReturnValueOnce(oldPin.promise).mockReturnValueOnce(currentPin.promise)
+    const { app, container, currentBaseId, currentBatchId, open } = mountReactiveModal('old_pin')
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-pinned-dismiss"]')!.click()
+      open.value = false
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-pinned-batch"]')).toBeNull()
+      currentBaseId.value = 'base_2'
+      currentBatchId.value = 'current_pin'
+      open.value = true
+      await flushPromises()
+
+      currentPin.resolve(pinnedDetail('current_pin', 'current value'))
+      await flushPromises()
+      oldPin.resolve(pinnedDetail('old_pin', 'stale value'))
+      await flushPromises()
+
+      expect(container.querySelector('[data-test="hist-pinned-batch"]')?.textContent).toContain('current value')
+      expect(container.textContent).not.toContain('stale value')
+    } finally {
+      app.unmount()
+      container.remove()
+    }
+  })
+
+  it('refetches a pin when only initialBatchId changes and ignores its earlier response', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [otherBatch()], total: 1, nextCursor: null, searchTruncated: false })
+    const oldPin = deferred<HistoryBatchDetail | null>()
+    const currentPin = deferred<HistoryBatchDetail | null>()
+    mockGetHistoryBatch.mockReturnValueOnce(oldPin.promise)
+      .mockResolvedValueOnce(pinnedDetail('batch_on_page', 'expanded row'))
+      .mockReturnValueOnce(currentPin.promise)
+    const { app, container, currentBatchId } = mountReactiveModal('old_pin')
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-detail"]')?.textContent).toContain('expanded row')
+      const listCalls = mockListHistoryEvents.mock.calls.length
+      currentBatchId.value = 'current_pin'
+      await flushPromises()
+      expect(mockGetHistoryBatch).toHaveBeenCalledWith('base_1', 'current_pin')
+      expect(mockListHistoryEvents.mock.calls.length).toBe(listCalls)
+      expect(container.querySelector('[data-test="hist-detail"]')?.textContent).toContain('expanded row')
+
+      currentPin.resolve(pinnedDetail('current_pin', 'current value'))
+      await flushPromises()
+      oldPin.resolve(pinnedDetail('old_pin', 'stale value'))
+      await flushPromises()
+
+      expect(container.querySelector('[data-test="hist-pinned-batch"]')?.textContent).toContain('current value')
+      expect(container.textContent).not.toContain('stale value')
+    } finally {
+      app.unmount()
+      container.remove()
+    }
+  })
+
+  it('does not render a list response that resolves after the modal closes and reopens', async () => {
+    const oldList = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    const currentList = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    mockListHistoryEvents.mockReturnValueOnce(oldList.promise).mockReturnValueOnce(currentList.promise)
+    const { app, container, open } = mountReactiveModal(null)
+    try {
+      await flushPromises()
+      open.value = false
+      await flushPromises()
+      open.value = true
+      await flushPromises()
+
+      oldList.resolve({ batches: [otherBatch()], total: 1, nextCursor: null, searchTruncated: false })
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-batch"]')).toBeNull()
+
+      currentList.resolve({ batches: [], total: 0, nextCursor: null, searchTruncated: false })
+      await flushPromises()
     } finally {
       app.unmount()
       container.remove()
