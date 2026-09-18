@@ -586,7 +586,7 @@ L0(顾问锁)
 - changesRequired #8:preview guard 偏离 I7 字面读/写二分的三条理由 + 请 owner 一句话确认。
 - changesRequired #15:Q1(b) 更宽普查记录(`operation_audit_logs` 自述占位且 schema 漂移两次;`attendance_import_rollback_*` 是正面先例而非仅驳回对象)。
 - changesRequired #16:`scope` 字段的存在理由——guard 人口与 manager 人口**互不包含**,不是 changesRequired #16 原文(`design-gate-A3-phase2-20260918.md`,上游绑定文本)所写的「guard 人口 ⊋ manager 人口」这个严格超集关系。两个方向各有一个端到端实测反例:①「过 guard 但非 manager」——DB 侧 `isAdmin(userId)` 一条腿(通配权限码 `approval-templates:*` 单独过 guard 已被 phase1 第 2/4 轮各真库证伪一次,不是第二条成立的腿,2026-09-18 rebase 后订正,见 impl-gate-A3-round1-20260918.md §5 P2 后果 (b));②「过 manager 但非 guard」——持 `approval-templates:manage` 权限码但未过 namespace admission 合取项的主体,被 `isTemplateManager` 精确 `.includes()` 判成 manager,却被 `rbacGuardAny` 拒绝(403),这是 phase1 第 6/7 轮门审新增的实测证伪(`3e53c52fe`),晚于本文档上一次写下 ⊋ 这句话。PR body 必须逐字写「互不包含,两方向各一条反例」,不得抄 changesRequired #16 原文的 ⊋ 措辞而不加订正标注。
-- P3-2:A-1 两文件不被任何 `*-ci-wiring.test.mjs` 覆盖的闭世界残留披露,本切片新文件继承同样残留。
+- P3-2:A-1 两个既有文件(`lifecycle`/`serialization`)不被任何 `*-ci-wiring.test.mjs` 覆盖的闭世界残留披露——**本切片新增的五个 backfill 文件不继承这个残留**,各自有专属的 `*-ci-wiring.test.mjs` 守卫(5×3=15 条断言,验证 MD §2.4),PR body 只需披露 A-1 两文件的残留,不得写成"本切片新文件继承同样残留"。
 - P3-3:`action` 判定函数抽取为只读小函数供 preview/execute 共用,且同时返回 `skipped` 判定。
 - Q6(a) 三条件:PR 必须堆叠在 A-1 之上(base=`feat/approval-template-groups-phase1`);mutation 台账位移声明(#5852 台账是对重构前函数体写的,需逐条说明目标已搬进 `...WithClient` 体内);A-1 若再有修复轮,A-3 必须 rebase 不得 cherry-pick。
 - changesRequired #5(续做步骤 18 新增):`GET …/backfill/batches` 是继 preview 之后**第二个**挂 `approvalTemplateAdminGuard` 而非 I7 字面 `rbacGuard('approvals:read')` 的只读端点——gate 本身已在 changesRequired #5 原文里点名这个 guard,不是本步现场裁量,但 O3 的 owner 一句话确认原文只提名了 preview 一个端点。PR body 需要把这条偏离扩写成"两个端点",不能让 owner 以为只有 preview 一处需要确认。
