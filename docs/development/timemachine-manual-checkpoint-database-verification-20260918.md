@@ -293,3 +293,25 @@ the historical tests. Current checkpoint, prepared-byte and continuation
 acceptance follows that replay; the owned database/connections and cluster are
 removed on success or failure. This is fixture/migration-order repair, not a new
 manual-capture capability or permission expansion.
+
+## Canonical Manual Continuation Authority
+
+Local successor to `2132c1b63662b1aaa6973e430f8906bdad45f5bd` extracts the
+existing recovery worker scope evaluator without changing worker job-ID checks.
+The internal `createRecoveryArchiveManualContinuation` factory binds that
+evaluator to the existing `hasFullTableReadAccess` policy and supplies the
+prepared-upload authority callback itself. It registers no HTTP route.
+
+Focused worker/crypto suites pass 73/73 using query-model fixtures, not live
+permission/UAT proof. A resumed ten-section upload reads the database actor
+eleven times (entry plus each upload); initial and mid-upload deactivation,
+scope drift, mismatched crypto scope and lookup errors refuse. A separate
+negative proves management authority cannot bypass a denied full-read result.
+Neutralizing the manual continuation's denied-authority guard makes the inactive
+actor negative fail (promise resolves); restoration returns green. Existing
+worker apply/plan/stabilization neighbors retain their previous outcomes.
+Acceptance TypeScript compilation, scoped module lint and diff-check pass.
+
+Outstanding: durable request/actor admission, real-DB permission-race acceptance,
+source locking/revalidation, provider receipt persistence and catalog publication.
+No archive command, flag, deployment, customer data or external storage was used.

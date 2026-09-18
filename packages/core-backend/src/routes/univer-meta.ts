@@ -76,7 +76,9 @@ import {
   createRecoveryAuthorizationStabilizer,
   createRecoveryPlanAuthorization,
 } from '../multitable/recovery-plan-authorization'
-import { bindRecoveryArchiveWorkerAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveWorkerAuthorization, bindRecoveryArchiveScopeAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveManualContinuation } from '../multitable/recovery-archive-manual-continuation'
+import type { RecoveryArchivePreparedUploadInput } from '../multitable/recovery-archive-prepared-upload'
 import { bindRecoveryArchiveDerivedProcessor, runRecoveryArchiveDerivedTransaction } from '../multitable/recovery-archive-derived-processor'
 import type { RecoveryArchiveDerivedWork } from '../multitable/recovery-archive-derived-effects'
 import {
@@ -7235,6 +7237,13 @@ const runRecoveryPostCommitSideEffects = async (
     ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
   ]
   return { yjsRecordIds: [...new Set(yjsRecordIds)] }
+}
+
+/** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualContinuation(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualContinuation(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
 }
 
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */

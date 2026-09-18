@@ -186,3 +186,13 @@ change later section bytes. Upload receipt construction/persistence remains the
 caller responsibility; successful callback completion does not publish a catalog.
 No HTTP route uses this continuation yet. Its authorization and transaction ports
 must be bound to existing runtime authority before exposing the manual command.
+
+The internal manual-continuation factory now binds the same database actor,
+live sheet/base/workspace, manage-access and conservative full-table-read policy
+used by recovery workers. Callers of that factory cannot substitute a permissive
+authorization callback. The persisted request admission still needs to supply
+the server-owned identity; no HTTP body identity is admitted by this factory.
+Identity and crypto scope must agree before capture or upload. Every resumed
+section rechecks current authority in a short transaction; policy lookup errors
+are normalized to a values-free unavailable code. This does not yet provide a
+locked permission/source snapshot or authorize catalog publication.
