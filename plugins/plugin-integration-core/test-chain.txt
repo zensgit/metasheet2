@@ -259,3 +259,4 @@ node __tests__/sealed-export-s6a-runtime-config.test.cjs
 node __tests__/sealed-export-s6a-runtime-persist.test.cjs
 node __tests__/sealed-export-s6a-runtime-core.test.cjs
 node __tests__/sealed-export-s6a-product-runtime.test.cjs
+node __tests__/scenario-b-staging-persist.test.cjs
