@@ -38,6 +38,7 @@ import {
   type RecoveryArchiveTransactionDepthProbe,
 } from "../../src/multitable/recovery-archive-crypto";
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from "../../src/multitable/recovery-archive-contract";
+import { decodeRecoveryArchivePreparedEnvelope, encodeRecoveryArchivePreparedEnvelope, uploadRecoveryArchivePreparedCapture } from "../../src/multitable/recovery-archive-prepared-upload";
 
 const WORKSPACE = "ws_d2h_unit";
 const BASE = "base_d2h_unit";
@@ -227,6 +228,89 @@ async function capture(
   }
   throw new Error("expected_recovery_archive_crypto_refusal");
 }
+
+describe("Prepared sealed-envelope continuation", () => {
+  test("closed envelope roundtrips exact ciphertext and rejects malformed wire fields", async () => {
+    const result = await reserveThenSealRecoveryArchiveSections({
+      binding: generationBinding(), keyCustody: createTestCustody(), transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" }, sections: fullSnapshotSections(), reserveNonces: async () => {},
+    });
+    const payload = encodeRecoveryArchivePreparedEnvelope(result);
+    const decoded = decodeRecoveryArchivePreparedEnvelope(payload);
+    expect(decoded.sections).toEqual(result.sealedSections);
+    expect(decoded.wrappedDek).toEqual(Buffer.from(result.wrappedDek));
+    expect(decoded.binding).toEqual(result.binding);
+    const mutations = [
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.rawDek = "forbidden"; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.binding.extra = true; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections.pop(); },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections.reverse(); },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[0].nonce = "!"; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[1].nonce = wire.sections[0].nonce; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[0].authTag = "AA=="; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[0].plaintext = "forbidden"; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.wrappedDek = ""; },
+    ];
+    for (const mutate of mutations) {
+      const wire = JSON.parse(payload.toString());
+      mutate(wire);
+      expect(() => decodeRecoveryArchivePreparedEnvelope(Buffer.from(JSON.stringify(wire))))
+        .toThrow("RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID");
+    }
+  });
+
+  test("interrupted upload resumes persisted ciphertext without another capture or nonce reservation", async () => {
+    const binding = generationBinding();
+    const custody = createTestCustody();
+    let stored: Buffer | null = null;
+    let depth = 0;
+    let captures = 0;
+    let reservations = 0;
+    let allowed = true;
+    const uploads: Buffer[] = [];
+    const query = async (text: string, params?: unknown[]): Promise<{ rows: unknown[] }> => {
+      if (text.includes("pg_current_xact_id")) return { rows: [{ xid: "1" }] };
+      if (text.includes("FOR UPDATE")) return { rows: [{ generation_id: binding.generationId }] };
+      if (text.startsWith("INSERT")) { stored ??= Buffer.from(params![5] as Buffer); return { rows: [] }; }
+      return { rows: stored ? [{ payload: stored, payload_sha256: createHash("sha256").update(stored).digest("hex") }] : [] };
+    };
+    const input = {
+      binding, owner: { generationId: binding.generationId, ownerKind: "archive_builder", ownerId: "test",
+        ownerFence: "1", sourceVectorHash: "a".repeat(64) },
+      transaction: async <T,>(work: (q: typeof query) => Promise<T>): Promise<T> => {
+        depth++; try { return await work(query); } finally { depth--; }
+      },
+      checkAuthority: async () => { if (!allowed) throw new Error("AUTHORITY_REVOKED"); },
+      transactionDepth: { currentTransactionDepth: () => depth },
+      capture: async () => { captures++; return {
+        binding, keyCustody: custody, transactionDepth: depthProbe(0), dekSource: { kind: "produce" as const },
+        sections: fullSnapshotSections(), reserveNonces: async () => { reservations++; },
+      }; },
+      upload: async (_envelope: unknown, section: RecoveryArchiveSealedSection) => {
+        expect(depth).toBe(0); expect(stored).not.toBeNull(); uploads.push(Buffer.from(section.ciphertext));
+        throw new Error("SYNTHETIC_UPLOAD_INTERRUPTION");
+      },
+    };
+    await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow("SYNTHETIC_UPLOAD_INTERRUPTION");
+    const original = Buffer.from(stored!);
+    await uploadRecoveryArchivePreparedCapture({ ...input, capture: async () => { throw new Error("MUST_NOT_RECAPTURE"); },
+      upload: async (_envelope, section) => { uploads.push(Buffer.from(section.ciphertext)); section.ciphertext.fill(0); },
+    });
+    expect(captures).toBe(1); expect(reservations).toBe(1);
+    expect(uploads).toHaveLength(11); expect(uploads[0]).toEqual(uploads[1]); expect(stored).toEqual(original);
+    allowed = false;
+    await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow("AUTHORITY_REVOKED");
+    expect(uploads).toHaveLength(11);
+    allowed = true;
+    await expect(uploadRecoveryArchivePreparedCapture({ ...input, binding: { ...binding, sheetId: "different" } }))
+      .rejects.toThrow("RECOVERY_ARCHIVE_PREPARED_UPLOAD_BINDING_MISMATCH");
+    expect(uploads).toHaveLength(11);
+    await expect(uploadRecoveryArchivePreparedCapture({ ...input,
+      upload: async () => { allowed = false; uploads.push(Buffer.from("one")); },
+    })).rejects.toThrow("AUTHORITY_REVOKED");
+    expect(uploads).toHaveLength(12);
+  });
+});
 
 describe("Phase D2h AEAD seal/open", () => {
   test("round trips the exact plaintext bytes under the exact AAD binding", () => {

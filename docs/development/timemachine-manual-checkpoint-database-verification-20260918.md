@@ -239,3 +239,31 @@ This proves cross-connection durable byte storage, not an end-to-end process
 restart, real wrapped-key envelope, object-store resume, permission recheck,
 request binding or archive publication. Those coordinator obligations remain OPEN.
 Only a disposable synthetic database was used; no customer storage or flags.
+
+## Prepared Envelope Continuation
+
+Successor to local `88a8add2786ab0f465b08562a51e383bba23fa0c` connects existing
+reserve-then-seal to immutable persistence before any upload. An existing
+envelope bypasses capture, custody and encryption. Closed-envelope negatives
+cover extra envelope/binding/plaintext keys, missing/reordered sections, invalid
+base64, duplicate nonces, short tags and empty wrapped material. Crypto and
+snapshot-planner focused suites pass 71/71. The new tests live in the already
+required crypto whole-file suite; no selector change was necessary.
+
+The unit interruption test uses an in-memory query model and the existing
+synthetic custody adapter; it is not real custody assurance. It proves upload
+starts only after persistence, retry performs no capture/reservation, callback
+mutation leaves the retained payload unchanged, mismatched sheet binding refuses,
+and injected authority revocation stops subsequent uploads. Forcing the resume
+branch to recapture produces `MUST_NOT_RECAPTURE`; restoration returns 71/71.
+
+The owned PostgreSQL driver independently stores a presealed ten-section fixture,
+interrupts a synthetic upload callback, closes/replaces the DB connection and
+resumes all ten original sections without invoking capture. It preserves the
+exact envelope and refuses an injected revoked-authority callback. The fixture's
+wrapped handle is synthetic, not a KMS/local-custody proof; no object provider is
+contacted. Fresh/replay, 29-migration catalog fingerprint and 59 legacy tests
+remain green; database/connections and owned cluster are cleaned.
+
+Actual actor/request binding, source consistency, runtime permission integration,
+object PUT/HEAD receipts, catalog publication and the manual UI remain OPEN.

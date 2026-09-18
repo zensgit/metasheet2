@@ -170,3 +170,19 @@ Object upload and provider calls remain outside the database transaction.
 
 Storage acceptance alone does not close durable command identity, consistent
 source capture, fresh authorization, full receipt publication, restore or UI.
+
+The internal prepared-upload continuation now serializes a versioned closed
+envelope containing the existing crypto binding, opaque wrapped DEK and exactly
+ten ordered sealed sections. It validates canonical base64, nonce uniqueness,
+tag/nonce lengths and the existing AAD binding before use. It is a structural
+validator, not a substitute for AEAD authentication during restore.
+
+The continuation loads an existing envelope before invoking capture. On a fresh
+attempt it calls the existing reserve-then-seal implementation with no upload
+callback, commits the complete envelope, then begins uploading. Each upload
+rechecks the injected authorization port and active generation ownership.
+Provider callbacks receive fresh decoded copies, so callback mutation cannot
+change later section bytes. Upload receipt construction/persistence remains the
+caller responsibility; successful callback completion does not publish a catalog.
+No HTTP route uses this continuation yet. Its authorization and transaction ports
+must be bound to existing runtime authority before exposing the manual command.

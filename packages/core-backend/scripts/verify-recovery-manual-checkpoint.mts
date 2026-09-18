@@ -12,6 +12,9 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const preparedUpload = require('../src/multitable/recovery-archive-prepared-upload.ts') as typeof import('../src/multitable/recovery-archive-prepared-upload')
+const archiveCrypto = require('../src/multitable/recovery-archive-crypto.ts') as typeof import('../src/multitable/recovery-archive-crypto')
+const archiveContract = require('../src/multitable/recovery-archive-contract.ts') as typeof import('../src/multitable/recovery-archive-contract')
 const prepared = require('../src/multitable/recovery-archive-prepared-capture.ts') as typeof import('../src/multitable/recovery-archive-prepared-capture')
 const preparedMigration = require('../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures.ts') as typeof import('../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures')
 const bootstrap = require('../src/multitable/recovery-archive-section-bootstrap.ts') as typeof import('../src/multitable/recovery-archive-section-bootstrap')
@@ -389,6 +392,54 @@ try {
   }
   await db.transaction().execute(preparedMigration.up)
   console.log('PASS: immutable prepared bytes persist across connections; exact retry/conflict; expired owner/fence/transaction guards; drift and nonempty down refused')
+  // A presealed fixture exercises continuation, not custody/nonce issuance or source capture.
+  const uploadPlan = await transaction(() => claim('section_checkpoint', 's', true))
+  const binding = { formatVersion: 1, generationId: uploadPlan.generationId, workspaceId: 'w', baseId: 'b',
+    sheetId: 's', anchorOperationId: uploadPlan.snapshotOperationId, anchorSeq: uploadPlan.snapshotSeq,
+    checkpointId: 'trust', keyId: 'synthetic-key', aeadAlgorithm: 'aes-256-gcm' as const }
+  const fullBinding = { ...binding, wrappedDekId: 'synthetic-wrapped', dekFingerprint: 'a'.repeat(64) }
+  const syntheticKey = randomBytes(32)
+  let fixture: Buffer
+  try {
+    fixture = preparedUpload.encodeRecoveryArchivePreparedEnvelope({
+      binding: fullBinding, wrappedDekId: fullBinding.wrappedDekId, dekFingerprint: fullBinding.dekFingerprint,
+      wrappedDek: randomBytes(64), reservations: [],
+      sealedSections: archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => {
+        const plaintext = Buffer.from(`synthetic ${sectionName}`)
+        return archiveCrypto.sealRecoveryArchiveSection({ binding: { ...fullBinding, sectionName,
+          plaintextSha256: archiveCrypto.recoveryArchivePlaintextSha256(plaintext) },
+        dek: syntheticKey, nonce: randomBytes(12), plaintext })
+      }),
+    })
+  } finally { syntheticKey.fill(0) }
+  await transaction(() => prepared.persistRecoveryArchivePreparedCapture(query, uploadPlan, fixture))
+  const delivered: Buffer[] = []
+  let revoked = false
+  const uploadInput = {
+    owner: uploadPlan, binding,
+    transaction: <T,>(work: (q: typeof query) => Promise<T>) => transaction(() => work(query)),
+    transactionDepth: { currentTransactionDepth: () => 0 },
+    checkAuthority: async () => { if (revoked) throw new Error('SYNTHETIC_AUTHORITY_REVOKED') },
+    capture: async (): Promise<never> => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') },
+    upload: async (_envelope: unknown, section: { ciphertext: Buffer }) => {
+      delivered.push(Buffer.from(section.ciphertext))
+      throw new Error('SYNTHETIC_INTERRUPTION')
+    },
+  }
+  await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture(uploadInput), { message: 'SYNTHETIC_INTERRUPTION' })
+  await client.end()
+  client = new Client({ ...connection, database })
+  await client.connect()
+  await preparedUpload.uploadRecoveryArchivePreparedCapture({ ...uploadInput,
+    upload: async (_envelope, section) => { delivered.push(Buffer.from(section.ciphertext)) },
+  })
+  assert.equal(delivered.length, 11)
+  assert.deepEqual(delivered[0], delivered[1])
+  assert.deepEqual(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, uploadPlan)), fixture)
+  revoked = true
+  await assert.rejects(preparedUpload.uploadRecoveryArchivePreparedCapture(uploadInput), { message: 'SYNTHETIC_AUTHORITY_REVOKED' })
+  assert.equal(delivered.length, 11)
+  console.log('PASS: presealed-envelope upload interruption/new connection resumes original ten sections without capture; injected authority revocation refuses')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')
