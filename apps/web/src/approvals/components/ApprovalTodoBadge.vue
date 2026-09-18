@@ -149,8 +149,8 @@
 //
 // CHECKED (fix round 4, gate `impl-gate-B2-round1-20260918.md` P3-7 — this was previously left as
 // an open question, not asserted either way; it is now): `todo:counts-updated`'s room is
-// per-user only, NOT per-org (`buildAuthenticatedUserRoom(userId)` returns the literal string
-// `auth-user:${userId}`, `CollabService.ts:8-10` — no tenant/org component). But the deeper
+// per-user only, NOT per-org (`buildAuthenticatedUserRoom(userId)` returns the room name
+// "auth-user:" followed by the raw userId, `CollabService.ts:8-10` — no tenant/org component). But the deeper
 // reason a stale push here is harmless is that the COUNT ITSELF has no org dimension to be stale
 // about, at any layer this pipeline touches:
 //   grep -n 'tenant\|org' packages/core-backend/src/services/approval-pending-query.ts   → 0 hits
