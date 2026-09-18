@@ -58,20 +58,32 @@
 // OUTGOING session — an anonymous request on sign-out, or the departing principal's on a login.
 // Deferring the re-read to a microtask lets that synchronous storage write land first).
 //
-// VERIFIED WIRING, STATED PLAINLY: `notifyAuthPrincipalChange()` is called from exactly one place
-// in `useAuth.ts` — `resetSessionBootstrap`, reached by `setToken` (login) and `clearToken`
-// (sign-out/401). It is grepped, not assumed:
-//   grep -n 'notifyAuthPrincipalChange' src/composables/useAuth.ts  →  one import line, one call
-//   site, both inside `resetSessionBootstrap`.
-// The explicit in-session org switch (`setExplicitSessionOrg`) does NOT call it — that function
-// writes `auth_token`/`jwt` and installs the explicit-session marker directly, with no call to
-// `resetSessionBootstrap` or `notifyAuthPrincipalChange` anywhere in its body. So today an org
-// switch fires NO notification, and this guard — though it would handle one correctly if it fired —
-// is not actually exercised by the org-switch code path in production. This is a PRE-EXISTING gap
-// shared with `useApprovalAdminCapability`'s identical mechanism (same missing wiring, same blast
-// radius), not something this commit introduces or can fix by itself: wiring
-// `notifyAuthPrincipalChange()` into `setExplicitSessionOrg` is a change to a shared auth funnel
-// with its own rollback path, and belongs to its own reviewed unit, not this one.
+// VERIFIED WIRING, STATED PLAINLY, CORRECTED (B-2 step 9): a prior version of this note claimed
+// the explicit in-session org switch (`setExplicitSessionOrg`) does not call
+// `notifyAuthPrincipalChange()` and so this guard is never exercised by an org switch in
+// production. That claim was checked against a stale copy of `useAuth.ts` and is FALSE as of
+// `5f4b643b78` (2026-09-08, predates this branch): `setExplicitSessionOrg` DOES call it, via
+// `resetSessionBootstrap` right before its own `return true`.
+//   grep -n 'resetSessionBootstrap(' src/composables/useAuth.ts  →  4 call sites: `setToken`,
+//   `clearToken`, `setExplicitSessionOrg`, and the forced-relogin branch inside `bootstrapSession`.
+// So an org switch DOES fire this notification, and this guard's reaction — the SAME generic
+// `onAuthPrincipalChange` code whether the trigger is sign-out, login, or an org switch — IS
+// exercised by it in production, not merely "would handle one correctly if it fired". Proven, not
+// re-asserted: `apps/web/tests/useAuth.spec.ts`'s "fires the auth-principal-change notification
+// synchronously on a successful org switch" test drives the REAL `setExplicitSessionOrg` (no mock
+// of `onAuthPrincipalChange` itself) and is mutation-probed against that call site.
+// One real, still-accurate asymmetry: `setToken`/`clearToken` call `resetSessionBootstrap` BEFORE
+// writing `auth_token`/`jwt` to storage — the reason this file's own microtask defer below exists,
+// so the synchronous storage write lands first. `setExplicitSessionOrg` writes storage FIRST and
+// notifies LAST, so a subscriber reading storage synchronously inside the callback already sees
+// the new org's token; the microtask defer is harmless for this transition but not load-bearing
+// for it the way it is for login/sign-out.
+// Checked, not merely assumed to share the same story: `useApprovalAdminCapability`'s identical
+// mechanism (referenced below as where this one was copied from) makes NO claim about
+// `setExplicitSessionOrg` at all —
+//   grep -n 'setExplicitSessionOrg\|onAuthPrincipalChange' src/approvals/useApprovalAdminCapability.ts
+//   → only `onAuthPrincipalChange` (the subscription itself), zero mentions of `setExplicitSessionOrg`
+// — so there is no duplicated false claim in that file to correct alongside this one.
 //
 // Two INDEPENDENT bumps, each pinned by its own test because neither covers the other, for the two
 // transitions THIS mechanism does receive:
@@ -114,11 +126,17 @@
 // is actually resolved, so that is where `acceptPushes` is set. This closes the SIGN-OUT half (a
 // push landing on the still-open socket after a CONFIRMED sign-out is dropped, matching the
 // listener's own synchronous zeroing — see the E3 test). The ORG-SWITCH half remains open:
-// a session remains (so `acceptPushes` stays/returns `true`) across a switch, so a push landing on
-// the still-open socket afterward can still describe the departing principal. Closing that requires
-// reconnecting the socket itself (re-authenticating with the new token) on `onAuthPrincipalChange`
-// — a change to this composable's own connection lifecycle, not to the backend query, and a
-// separate, larger unit than this commit.
+// `onAuthPrincipalChange` DOES fire on a switch (see the corrected wiring note above), so the
+// microtask explicitly sets `acceptPushes = true` (a session remains) rather than merely leaving it
+// at its prior value — but the socket itself is never reconnected, so a push landing on the still-
+// open socket afterward can still describe the departing principal's data. Closing that requires
+// reconnecting the socket itself (re-authenticating with the new token) on the SAME
+// `onAuthPrincipalChange` event this file already subscribes to for the REST half — a change to
+// this composable's own connection lifecycle, not to the backend query, and a separate, larger unit
+// than this commit. Not narrowed further than that: whether `todo:counts-updated`'s room/payload is
+// even scoped per-org (as opposed to per-user, in which case a stale push might already be
+// harmless) has not been checked here — left as an open question for that unit, not asserted either
+// way.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { getTodoCount, isTodoResponseDegraded, type TodoCountResponse } from '../../todo/api'
 import { useLocale } from '../../composables/useLocale'
