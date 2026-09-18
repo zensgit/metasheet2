@@ -514,6 +514,14 @@ jobs:
       - name: Approval data-closure CI wiring contract
         run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
 
+      # Approval form grouping (design lock v2.13) CI two-point wiring contract: all four
+      # approval-template-groups real-DB suites (phase-1 lifecycle/serialization, phase-3
+      # sections/reorder) must stay wired into BOTH vitest.config.ts (exclude) AND the approval
+      # real-DB step here (whole-file, on the required 20.x leg). Step-id-anchored (never by
+      # title), so a name-prefix decoy cannot stand in for the real step.
+      - name: Approval template-groups CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs
+
       # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
       # only ever exercises the verify script against a NORMAL package — it never proves the
       # loopback-config negative case. Without an automated caller, deleting the loopback
