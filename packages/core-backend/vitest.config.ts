@@ -1831,6 +1831,21 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it. Same
       // plugin-tests.yml override and s6a re-pin note as the lifecycle file above.
       'tests/integration/approval-template-groups-serialization.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3
+      // ("backfill by existing category") batch-bookkeeping DDL
+      // (`zzzz20260919090000_create_approval_template_group_backfill_batches.ts`), amended by the
+      // independent design-gate verdict `reviews/design-gate-A3-phase2-20260918.md` folded into
+      // `docs/development/approval-template-groups-phase2-design-20260918.md` §13. Schema-only —
+      // no W7/W8/W9 route/service code exists yet — but real-Postgres-required: it proves the
+      // gate's changesRequired #4 fix (`atgbbl_link_fk` CASCADE, not the proposal's original NO
+      // ACTION — real-DB finding M6) is load-bearing at the catalog level via a positive control,
+      // a same-transaction mutation negative control that reverts the constraint and observes the
+      // pre-fix deadlock, and composite-FK org-consistency checks. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-schema-ci-wiring.test.mjs` guard (unlike the two phase
+      // 1 files above, which rely only on the step's bash `:?` — a disclosed residual, see this
+      // design doc's §13.6 PR-body checklist item citing P3-2).
+      'tests/integration/approval-template-groups-backfill-schema.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
