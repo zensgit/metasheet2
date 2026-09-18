@@ -611,16 +611,24 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   //
   // This block used to justify leg (a)'s existence with "`approvalTemplateAdminGuard`'s permission
   // codes are a SUBSET of `isTemplateManager`'s derivation... every actor able to reach the link
-  // ENDPOINT today is a manager" — that claim is FALSE (see the block comment above
-  // `isApprovalTemplateVisibleForGroupLink` in `routes/approvals.ts`, corrected the same round: a
-  // wildcard `approval-templates:*` permission code and a DB-side-only `isAdmin(userId)` both pass
-  // the guard without `isTemplateManager` recognizing them). Leg (a) therefore does NOT rest on
-  // "no real actor could ever be both guard-passing and non-manager" — it rests on leg (c) below
-  // ("§2(c): a DB-side-admin actor") being a REAL, guard-passing, non-manager HTTP case that proves
-  // the same filtering leg (a) exercises directly. Leg (a) remains useful on its own merits (it can
-  // probe the predicate with actor shapes — e.g. a non-existent template id — that are awkward to
-  // reach purely through HTTP), it is just no longer the ONLY thing standing between "the guard
-  // admits only managers" and reality.
+  // ENDPOINT today is a manager" — that claim is FALSE, and this round's first fix (see the block
+  // comment above `isApprovalTemplateVisibleForGroupLink` in `routes/approvals.ts`, CORRECTED AGAIN
+  // impl-gate-A-slice1-round4-20260918.md §2 P2-1) replaced it with a SECOND false claim: that a
+  // wildcard `approval-templates:*` permission code, by itself, passes the guard. It does not —
+  // `rbacGuardAny`'s permission leg is a conjunction (`requestUserHasResolvedPermission(...) &&
+  // isPermissionAllowedByNamespaceAdmission(...)`, `rbac/rbac.ts:134-142`), `approval-templates` is
+  // an admission-controlled resource, and absent an extra namespace-admission grant both
+  // `approval-templates:*` and the guard's own literal `approval-templates:manage` get 403 —
+  // real-DB falsified twice now (round 2's gate, and this round's gate re-testing this very
+  // comment). The ONLY actor shape actually demonstrated end-to-end this round is a DB-side-only
+  // `isAdmin(userId)` grant, which does pass the guard without `isTemplateManager` recognizing it.
+  // Leg (a) therefore does NOT rest on "no real actor could ever be both guard-passing and
+  // non-manager" — it rests on leg (c) below ("§2(c): a DB-side-admin actor") being a REAL,
+  // guard-passing, non-manager HTTP case that proves the same filtering leg (a) exercises directly.
+  // Leg (a) remains useful on its own merits (it can probe the predicate with actor shapes — e.g. a
+  // non-existent template id — that are awkward to reach purely through HTTP), it is just no longer
+  // the ONLY thing standing between "the guard admits only managers" and reality. None of this
+  // changes any runtime behavior — only what these comments claim about existing behavior.
   it('§2(a): the exported visibility predicate — visible to a non-manager in its own scope, hidden outside it, and false for a nonexistent id', async () => {
     const deptId = `vis-dept-${TS}`
     const visibleTpl = await createTemplate(`atg-vis-visible-${TS}`, { type: 'dept', ids: [deptId] })
