@@ -179,10 +179,11 @@ interface TodoGroup {
 // A site-relative path: starts with exactly one leading `/` (not `//`, which a browser/router can
 // treat as protocol-relative), not a backslash variant of the same trick, and carries no URL scheme
 // (`javascript:`, `https:`, ...) before its first `/`/`?`/`#` — rejected defensively even though
-// `router-link` would not execute it as a URL. Local to this component: it is not exported, and it
-// is not the shared `isTodoResponseDegraded`-style rule the badge and this page both apply — this
-// page is the only consumer of `item.href`, so there is nothing to centralize (see `todo/api.ts`'s
-// corrected docblock for the sibling mistake of overclaiming a shared rule that had only one user).
+// `router-link` would not execute it as a URL. Local to this component, not exported: unrelated to
+// `isTodoResponseDegraded` (`todo/api.ts`), which only `ApprovalTodoBadge.vue` calls — this page is
+// the only consumer of `item.href`, so there is nothing here to centralize with anything else (see
+// `todo/api.ts`'s corrected docblock for the sibling mistake of overclaiming a shared rule that had
+// only one caller).
 function isSameOriginRelativeHref(href: string): boolean {
   if (typeof href !== 'string' || href.length === 0) return false
   if (!href.startsWith('/') || href.startsWith('//') || href.startsWith('/\\')) return false
