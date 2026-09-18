@@ -67,6 +67,9 @@ export const ZH = {
   groupSectionMoveUp: '上移分组',
   groupSectionMoveDown: '下移分组',
   groupReorderError: '调整分组顺序失败',
+  groupItemMovePlaceholder: '移动到…',
+  groupItemMoveLabel: '将表单移动到分组',
+  groupItemMoveError: '移动表单分组失败',
 } as const
 
 export const EN: Record<keyof typeof ZH, string> = {
@@ -121,4 +124,7 @@ export const EN: Record<keyof typeof ZH, string> = {
   groupSectionMoveUp: 'Move group up',
   groupSectionMoveDown: 'Move group down',
   groupReorderError: 'Failed to reorder groups',
+  groupItemMovePlaceholder: 'Move to...',
+  groupItemMoveLabel: 'Move template to group',
+  groupItemMoveError: 'Failed to move template',
 }
