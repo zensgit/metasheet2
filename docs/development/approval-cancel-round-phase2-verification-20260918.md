@@ -1869,7 +1869,7 @@ This unit's compares cover **two** of them, and measures two more:
 | ③ 按运行模式追加取消计算 | **MEASURED equal (0/0)** — but skipped on BOTH under the org's legacy posture, §3.15.11 |
 | ④ 原实例 `approved → cancelled` + `approval_records` | **COMPARED column-for-column** |
 | ⑤ 请求 `cancelled` | **COMPARED column-for-column** |
-| ⑥ `reverseLeaveBalanceDeduction` → `unrecoverableExpired` | **NOT closed** — §3.15.6, the headline |
+| ⑥ `reverseLeaveBalanceDeduction` → `unrecoverableExpired` | **UPDATED (was 「NOT closed」).** 呈现 half still owner's (§3.15.6). 账侧 half is now **MEASURED as a DECLARED DIVERGENCE**, not open: A seals it, B has no sealed row at all — §3.20, M-28 |
 | ⑦ 发 `attendance.request.cancelled` | **MEASURED equal (0/0)** — skipped on BOTH, §3.15.11 |
 
 ### 3.15.0 ⛔ PROVENANCE CORRECTION: `attendance-parity.db.test.ts` is NOT named by the lock
@@ -2963,7 +2963,7 @@ $ … | wc -l
 ⚠️ 因此:本单元**不**把 ③/⑦ 标成已闭合,也**不**假装它们只差一个断言。§3.15.11 的
 「**OPEN**: a twin pair in a non-legacy org」保持 OPEN,措辞按本节澄清。
 
-### 3.19.3 ⑥ 的平价半边能不能构造 —— 取决于 B 侧封不封存,而这一点**尚未测量**
+### 3.19.3 ⑥ 的平价半边能不能构造 —— 取决于 B 侧封不封存 ⛔ **(标题原作「尚未测量」;§3.20 已测量:B 不封存,结论 OPERATIVE,机制两句有误)**
 
 ⑥(`reverseLeaveBalanceDeduction` 返回 `unrecoverableExpired`,lock:86「必须呈现」)现在是**两半**:
 
@@ -2984,6 +2984,18 @@ B 侧走的是 HTTP `POST /api/attendance/requests/:id/cancel`,它的 `operation
 > ⑥ 的账侧平价能否构造 = 「twin 夹具 B 的取消请求体是否让 `resolveRequestOperationId` 返回非 null」。
 > 若返回 null,⑥ 不是一条断言,而是一条**带理由的 declared divergence**(A 封存、B 不封存,因为两条
 > 路径的 operation 身份来源不同);若返回非 null,则它是一条可以写的比对。
+
+> ⛔ **SUPERSEDED BY §3.20 —— 这条判据本身的机制写错了两处,求值而不是作废。**
+> **求值结果:被选中的是 null 分支,所以本节的结论(「A 封存、B 不封存」⇒ declared divergence)
+> OPERATIVE 且现已被实测证实**(`sealA='1'` / `sealB='0'`,M-28)。**但支撑它的两句机制是错的:**
+> (1) 「null ⇒ 走 `adapter.prepare`」**方向反了** —— `w4c3b-request-operation-boundary.ts:878-880`
+> 是 `input.operationId === null ? identityPrepared : await adapter.prepare(...)`,即 null ⇒ **不**走
+> `adapter.prepare`。(2) 封存**根本不由 `operationId` 把关** —— `sealAttendanceResultOperationV1`
+> 在 `:918` 无条件执行,唯一能在非拒绝路径上跳过它的提前返回是 `preflight.kind ===
+> 'legacy_no_operation'`(`:897`),而那要求 posture 为 `legacy_projection_only` **且** 命令无稳定身份
+> (`w4c0-operation-registry.ts:641-648`)。⇒ 「非 null ⇒ 一条可以写的比对」作为**双向判据是错的**:
+> 见 §3.20 的 2×2。更要紧的是,把 B 改成非 null **需要发一个合同里不存在的字段**
+> (`attendance.yml:758-765` 只有 `comment`/`metadata`),那会**让 B 不再是生产的孪生**。
 
 登记在 §4,附这条可机核的判据,而不是含糊的「⑥ 开放」。
 
@@ -3017,6 +3029,121 @@ $ grep -n "itIfExpectDb\|EXPECT_DB" \
 
 纯文档单元:把已有的测量换个说法、把误读挡掉、把三个开放项写成**可执行的下一步**而不是形容词。
 本节不产生任何新的绿。
+
+## 3.20 ⑥ 的账侧半边 —— 实测,结论是**声明式背离**而不是开放项 (this unit)
+
+§3.19.3 把 ⑥ 登记成「判据已写、但没人去测」。本单元去测了。**它也推翻了那条判据的两句机制**,
+所以这里既是结论也是勘误。
+
+### 3.20.1 机制:闸不在 `operationId` 上,而是一个 2×2
+
+封存语句 `UPDATE attendance_result_operations … SET state = 'completed', response_snapshot = …`
+在 `w4c0-operation-registry.ts:764-789`,由边界在事务末尾 `w4c3b-request-operation-boundary.ts:918`
+**无条件**调用。非拒绝路径上唯一能跳过它的提前返回是 `:897` 的
+`preflight.kind === 'legacy_no_operation'`;而注册表只在 **posture 为 `legacy_projection_only`
+且命令无稳定身份**时返回该 kind(`w4c0-operation-registry.ts:641-648`,注释原文
+「Null-ID legacy commands create no operation row」)。所以真正的闸是 (posture × operationId) 的 2×2:
+
+| posture | operationId | 结果 | 证据类别 |
+|---|---|---|---|
+| `legacy_projection_only` | null | `legacy_no_operation` ⇒ **不封存** | **MEASURED**(本单元,B 侧 `sealB='0'`) |
+| `legacy_projection_only` | 非 null | 封存,返回 `legacy_compat` | **MEASURED**(本单元,A 侧 `sealA='1'`) |
+| 非 legacy | null | `fail('W4C0_OPERATION_ID_REQUIRED')`(`:650-653`) | ⚠️ **NOT MEASURED** —— 纯源码文本 |
+| 非 legacy | 非 null | 封存,返回 `executed` | ⚠️ **NOT MEASURED** —— 纯源码文本 |
+
+⚠️ 第三格还多依赖一条**我没有读过**的链:「`operationId === null` ⇒ `plan.legacyNullIdCount > 0`」。
+`plan` 的构造本单元没有读,所以第三格是**源码断言,不是行为断言**(本线 `源码文本断言≠行为断言`)。
+
+### 3.20.2 B 侧无身份是**生产的代表**,不是夹具图省事
+
+`resolveRequestOperationId`(`index.cjs:33304-33311`)只从**请求体**取 `operationId`/`operation_id`。
+
+- **合同里没有这个字段**:`packages/openapi/src/paths/attendance.yml:758-765` 的 requestBody 只声明
+  `comment` 与 `metadata`。客户端**没有地方**放 operation id。
+- **唯一的生产客户端发空体**:`apps/web/src/views/AttendanceView.vue:23128-23131`,
+  `body: JSON.stringify({})`。用例里的 `body: {}` 是它的抄本。
+
+普查(排除 node_modules / docs / 测试):
+
+```
+$ grep -rn "attendance/requests/" . | grep -v node_modules | grep -i cancel | grep -v "\.md:"
+⇒ 生产客户端 1(AttendanceView.vue:23128)
+  路由注册 1(index.cjs:38634)+ DELETE 别名 1(:38638-38642,同一个 cancelRequest 处理器)
+  合同 1(attendance.yml:748)、SDK 类型 1、entrypoint 常量 1(w4c3b:386)
+  其余全部是测试文件
+```
+
+⇒ **把 B 改成会封存,等于发一个合同里不存在、任何客户端都不发的字段** —— 那是用「让 B 不再是孪生」
+换一行可比的数据。所以 ⑥ 的账侧平价**不是还没写,而是在代表性夹具上不可构造**。
+
+### 3.20.3 测量:一条谓词,两个输入
+
+两半用**同一条 SQL、同一列**,只换 request id —— 这样 B 的 0 才有判别力(否则 B 的零可能只是谓词写错):
+
+```sql
+SELECT count(*)::text FROM attendance_result_operations WHERE resolved_request_id = $1::uuid
+```
+
+实测 `sealA = '1'`、`sealB = '0'`。**A 的 1 就是 B 的 0 的 in-case 正控**:证明表在、谓词命中、列有值。
+A 的那一行:`entrypoint='request_cancel'`、`state='completed'`、
+`response_snapshot.data.reversal = {lots:0, reversed:0, alreadyReversed:false, unrecoverableExpired:0}`
+—— 锁:86 要的 `unrecoverableExpired` **持久化在这里**。用例断言的是**键存在**而不是 0,所以将来
+值变了不红、载体被摘掉才红(本夹具不种假期额度;§3.16 那条种了过期额度的夹具把它驱到 120)。
+
+⚠️ **A 也可能是 0** 是进场前就准备好的结果 —— 若两侧都不封存,该写的是「两条路都不封存」而不是背离。
+实测不是那样,所以这里写的是背离。
+
+### 3.20.4 结论:⑥ 的两个载体不同,所以没有行可比
+
+| | A(兑现路径) | B(生产 HTTP 路径) |
+|---|---|---|
+| `attendance_result_operations` 封存行 | **1**(带 `reversal.unrecoverableExpired`) | **0** |
+| HTTP 响应体 `data.reversal` | —(DTO 丢弃,已断言为负例) | **有**(`payloadB`,同用例断言) |
+
+`unrecoverableExpired` **两条路都「呈现」了,但呈现在不同的工件上**:A 在封存快照里,B 在响应体里。
+逐字节比对需要一对同类行,而这里一侧根本没有行 ⇒ **declared divergence with a mechanism**,
+登记在 §4,不再是 TODO。
+
+### 3.20.5 Mutation 台账(this unit)
+
+| id | mutation | 预期 | 实测 |
+|---|---|---|---|
+| M-27 | 删掉 `w4c3b-request-operation-boundary.ts:918-921` 整个 `sealAttendanceResultOperationV1` 调用 | 新断言红 | ⚠️ **混淆红,不采信为本断言的探针**:3 failed / 16 passed,全部是 `APPROVAL_ACTION_DISPATCH_FAILED` / `expected 500 to be 200` —— 变异触发了另一条真实规则(操作行停在 `claimed`),死在我的断言**之前**。按本线 `混淆的mutation要换成隔离2×2格` 换成 M-28 |
+| M-28 | **隔离变异**:封存照做,只把 `resolvedRequestId: result.resolvedRequestId` 改成 `resolvedRequestId: null`(1 行) | 只有 `sealA` 半边红 | ✅ **恰好 1 red / 18 passed (19)**,红在 `redemption.db.test.ts:2144`,`sealA` `'1'`→`'0'` 而 `sealB` **保持 `'0'` 不动** —— 变异只推动了它应该推动的那一半,断言承重且有判别力 |
+
+两次都 `cp` 备份 → 改 → 单独跑 → `cp` 还原 → `cmp` 逐字节一致;还原后 `git status` 仅显示测试文件,
+**生产代码零行改动**;还原后重跑 19 passed (19),`tsc --noEmit` 退出 0。
+
+### 3.20.6 这一节**不**证明什么
+
+- 不证明 2×2 的两个**非 legacy** 格(见 §3.20.1 的 NOT MEASURED 标注)。
+- 不证明「呈现」的**用户可见面** —— 那仍是 §3.15.6/§3.16 登记的 owner 裁决,本节只动持久化侧。
+- 不证明 B 的响应体载体是**对的设计**;只记录今天它在那里,而 A 的 DTO 把它丢了(已断言为负例)。
+- ⚠️ 顺带的推论,**只登记不追**:§3.15.11 给 ③/⑦ 开的下一步是「非 legacy org 的孪生对」,而按本节
+  的 2×2,非 legacy + null 会直接 `fail('W4C0_OPERATION_ID_REQUIRED')` —— 若 B 仍要忠实地发 `body: {}`,
+  那个孪生对**可能根本构造不出来**,和 ⑥ 撞的是同一个陷阱。NOT MEASURED;交下一单元先验这一点
+  再决定要不要建。
+
+### 3.20.7 Wiring — 无新增钉
+
+断言追加进已在 `plugin-tests.yml:1668` 的 `approval-cancel-round-redemption.db.test.ts`,
+无新文件 / 新 lib / 新表 ⇒ s6a、考勤四钉、W7-R10、`ci-realdb-step-contract.mjs` 全部零欠账。
+两点接线同 §3.19.4(`vitest.config.ts:1846` exclude + `plugin-tests.yml:1668` 显式列出),
+顶层 `EXPECT_DB` 哨兵在本文件 `:70-71`。
+
+### 3.20.8 Commands and results
+
+```
+$ npx tsc --noEmit -p tsconfig.json
+[exited with code 0]
+
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_lock_c2_u2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-redemption.db.test.ts --reporter=dot
+      Tests  19 passed (19)
+```
+
+---
 
 ## 4. What this slice has NOT proven yet
 
@@ -3085,7 +3212,7 @@ they are.
   evidence it is tolerated, not proof.
 - **账侧完整取消结果逐字节等价** (lock §8 期 1) — **TWO of C-1's SEVEN steps COMPARED in §3.15**
   (④ 原实例+审计行, ⑤ 请求 `cancelled`), two more MEASURED equal-but-skipped (③ 取消计算, ⑦ 事件
-  — §3.15.11), ⑥ open, ①/② not end-state-observable. NOT 「the rows are equal」: a twin-fixture
+  — §3.15.11), ⑥ **measured as a declared divergence** (§3.20, was 「open」), ①/② not end-state-observable. NOT 「the rows are equal」: a twin-fixture
   compare against the real `POST /api/attendance/requests/:id/cancel` path, with eight identity
   substitutions sourced from fixture facts and 13 declared divergences carried as data. Every other
   column is byte-equal after normalisation. M-22 red at the named site, 1 of 16.
@@ -3097,10 +3224,18 @@ they are.
   counts are pinned as VALUES on both sides; what is skipped is the PRODUCTION branch under
   `legacy_projection_only`, so the open item is BRANCH coverage needing a non-legacy-org twin
   (rollout registry, `w4c0-operation-registry.ts:640`/`:877`) plus normalisation pairs for the rows
-  that would then appear — a unit of its own. ⑥'s 账侧 parity half is gated on a MEASURABLE question
-  nobody has measured: whether `resolveRequestOperationId` (`index.cjs:33304`, called at `:38484`
-  /`:38570`) returns non-null for fixture B's own cancel request body — null ⇒ B never seals ⇒ ⑥ is
-  a declared divergence with a reason, not an assertion. Registered with that criterion attached.
+  that would then appear — a unit of its own. ⑥'s 账侧 parity half is **no longer open — it is MEASURED,
+  and the answer is a DECLARED DIVERGENCE** (§3.20, supersedes the criterion §3.19.3 stated): one
+  SQL predicate run against both twins' request ids gives `sealA='1'` / `sealB='0'` — the redemption
+  seals `unrecoverableExpired` into `attendance_result_operations.response_snapshot`, the HTTP path
+  writes no sealed row at all, so there is no row pair to compare byte-for-byte. A's `1` is the
+  IN-CASE POSITIVE CONTROL for B's `0` (same SQL, same column, only the id differs). M-28
+  (`resolvedRequestId: null`, seal itself intact) ⇒ exactly 1 red at `:2144`, `sealA` `1`→`0` while
+  `sealB` holds. ⚠️ Two of §3.19.3's supporting mechanism claims were WRONG and are corrected there.
+  B's null identity is **representative, not a fixture shortcut**: the published contract
+  (`attendance.yml:758-765`) offers only `comment`/`metadata`, and the sole production client sends
+  `JSON.stringify({})` (`AttendanceView.vue:23128-23131`) — making B seal would require a field that
+  does not exist in the contract. NOT MEASURED: the two non-legacy cells of §3.20's 2×2.
   ⚠️ Also NOT built anywhere on this branch: ②'s NEGATIVE direction — a fixture whose attendance
   request is no longer in a cancellable state, so the status recheck REFUSES. That is a behaviour
   assertion, not a parity one, and no case constructs it.
