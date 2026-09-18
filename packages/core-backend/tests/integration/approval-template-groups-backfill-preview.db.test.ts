@@ -331,21 +331,24 @@ describeIfDatabase('approval template groups — phase 2 backfill preview (W7, d
   // suite's advisor review flagged before it shipped.
   it('buckets/skipped are ordered by plain code-point order, not locale-collated order', async () => {
     const org = trackOrg(`atgp-order-${TS}`)
-    await createTemplate(`atgp-order-a-${TS}`, 'zebra')
-    await createTemplate(`atgp-order-b-${TS}`, 'Apple')
+    await createTemplate(`atgp-order-a-${TS}`, 'Zebra')
+    await createTemplate(`atgp-order-b-${TS}`, 'apple')
     await createTemplate(`atgp-order-c-${TS}`, '100')
 
     const preview = await previewApprovalTemplateGroupBackfill(org, managerActor)
     const categories = preview.buckets.map((b) => b.category)
-    // Code-point order: digits (0x3x) < uppercase (0x4x-0x5x) < lowercase (0x6x-0x7x), so
-    // '100' < 'Apple' < 'zebra'. `'Apple'.localeCompare('zebra')` under most ICU locales agrees
-    // here (case-insensitive collation still puts A before z), but `'100'` vs the letters is
-    // where a collation-aware compare and code-point order provably diverge in general — the
-    // in-repo regression is `.sort()`'s default (code-point-ish but not identical for surrogate
-    // pairs) vs `localeCompare`'s ICU tables, and this fixture is the minimal one that pins the
-    // INTENDED behavior (plain `<`/`>`) rather than merely matching whatever `localeCompare`
-    // happens to do on the current Node/ICU build.
-    expect(categories).toEqual(['100', 'Apple', 'zebra'])
+    // This EXACT pair is the one that discriminates (verified live on this Node/ICU build,
+    // `node -e "console.log(['Zebra','apple'].sort((a,b)=>a.localeCompare(b)), ['Zebra','apple']
+    // .sort((a,b)=>a<b?-1:a>b?1:0))"` → localeCompare gives `['apple','Zebra']` (case-insensitive
+    // primary-level collation puts lowercase 'a' before uppercase 'Z'), plain `<`/`>` gives
+    // `['Zebra','apple']` (all uppercase code points precede all lowercase). An EARLIER version of
+    // this fixture used 'zebra'/'Apple' (lowercase z, uppercase A) — that pair happens to agree
+    // under BOTH orderings on this build (case-insensitive collation still puts 'A' before 'z',
+    // same as code-point order), so it had zero power to catch a regression back to
+    // `localeCompare` (`feedback_ineffective_mutation_looks_like_a_useless_test`). '100' stays in
+    // the fixture too: it sorts first under both orderings here, so it does not by itself
+    // discriminate, but keeps the "digits are storable and eligible" leg covered.
+    expect(categories).toEqual(['100', 'Zebra', 'apple'])
   })
 
   // §13.1 changesRequired #8 / §6.2 (ownerLevel=true, ratified DEFAULT): preview is READ-ONLY but
