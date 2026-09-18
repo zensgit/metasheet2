@@ -145,7 +145,7 @@ collisions new-vs-old: []
 
 **更正实现者提交里的一处措辞**(commit `f3d7c69c9` 曾在 `run-required-web-tests.sh` 的注释里写"394 tokens"/"395 tokens"——那是开发过程中逐个添加 token 时的中间快照,不是最终计数;本节现场重算的最终值是 396(run-required-web-tests.sh)与 106(approval-web-guard.yml :1026),已在 `cb6d7fa9f`(同一分支的后续提交)里就近似问题做过一次修正,本节是**本文档自己的独立重算**,不是转抄该提交的说法。**声明范围的更正**:碰撞扫描只证明「3 个新 token 与各自文件里的旧 token 之间」双向子串扫描为空——不断言旧 token 集合内部彼此无碰撞(旧集合里确实存在如 `approval-record-link`/`approval-record-link-picker` 这类前缀碰撞,是既有惯例,与本切片无关,本切片不引入新的此类碰撞)。
 
-**P3 卫生轮再更正(2026-09-19,§12.9)**:上面这个"396"从一开始就算错了对象——它取的是文件里**两条**几乎相同的 `exec npx vitest run` 巨行里排在后面、实际上从未被 bash 执行到的那一条(`exec` 无条件替换进程,排在前面的那条才是活的),本三个新 token 因此在此前的每一个 HEAD 上都**没有**真正进入 required 的 `web-tests` job。修复(合并两行为一)后,唯一存活的 `exec` 行的最终 token 数是 **397**,不是 396。完整根因、修复过程与影响声明见验证 MD §12.9,不在此处重复。
+**P3 卫生轮再更正(2026-09-19,§12.9;经复核修正)**:本节最初的这条更正说"本三个新 token 因此在此前的每一个 HEAD 上都没有真正进入 required 的 `web-tests` job"——这句全称式判断是错的,已被独立复核门审(`p3-hygiene-gate-A2-20260919.md` §P2-1)证伪并撤回。准确的表述是:上面这次"396"计数(在 `cb6d7fa9f`/`d3097be00` 这两个更早的 head 上现场重算)本身**是对的**——那两个 head 上只有**一条** exec 行,三个新 token 全在其中,`web-tests` job 确实跑到了它们。重复行是后来一次 rebase(committer date 09-18 20:56:36)才制造出来的,只影响 `5d0f780f5`/`b1e5c745f` 这两个更晚的 head(该 head 上有两条 exec 行,三个 token 落在从未执行的那一条上)。修复(合并两行为一)后,唯一存活的 `exec` 行的最终 token 数是 **397**,不是 396。完整根因、逐 head 核对与影响声明见验证 MD §12.9,不在此处重复。
 
 **Token 实际解析验证(现场跑,非静态断言)**——见 §1 的三份 spec 均已现场跑绿;此外验证「`SessionOrgSwitcher.spec.ts` 全文件名 token 是否真的会连带匹配到 `AttendanceSessionOrgSwitcher.spec.ts`」(设计上的已知重复覆盖,非缺口):
 
@@ -511,11 +511,13 @@ $ pnpm --filter @metasheet/web exec vue-tsc -b
 | P3-2 | `ApprovalTemplateGroupErrorCode` 全仓零消费方,18 码与后端的重合只由一次性脚本保证,无常驻守卫,后端改码时前端联合类型会静默腐烂 | CLOSED-MD(取报告给出的第二个选项——收窄 `.code` 类型需要改生产代码 `api.ts`,本轮禁止) | 本节 §12.3 登记腐烂风险到「未验/风险」清单 |
 | P3-3 | 新 token 把被刻意隔离的考勤会话 spec(`:477` 单进程池)拉回默认池重跑一遍;A-2 自己会铸 token 的 `ApprovalTemplateGroupsPanel.spec.ts` 也没放隔离行 | CLOSED-MD(说明,不挪动 token——挪动需要重新验证隔离池夹具和两处闭世界 census,风险/收益不对称,本轮不做) | 本节 §12.4 |
 | P3-4 | `run-required-web-tests.sh` 注释里「lands in a later slice」已 stale(该 slice 已落地);token 计数注释仍是「394/395」快照;两份 MD 抬头 HEAD 仍是 `cb6d7fa9f`(被审 head 晚两提交) | CLOSED-测试+注释(计数)/ CLOSED-注释(措辞)/ CLOSED-MD(抬头) | commit 修 `run-required-web-tests.sh` 三处注释;两份 MD 抬头见 design MD 本次编辑 + 本节 §12.0 |
-| P3-5 | 正控「单 org 成员从不见到选择器」对应的 `toBeNull()` 断言在自己的夹具下永远不可能红(mock 对 session-orgs 端点只会 throw,组件自身 `v-if` 已经因 `orgs` 为空把它藏掉);承重的是旁边的调用普查断言 | DEFERRED-需行为改动(记录了一次已验证不成立的候选修法,不落地) | 本节 §12.5——尝试过给 `/api/auth/session-orgs` 补一个非空返回值,亲跑 M6 复现证明**仍然不解决**(`loadGroups()` 自己的成功分支会把 `showSessionOrgSwitcher` 重新置回 `false`,覆盖掉 `handleSessionOrgRequired` 刚置的 `true`);已用 `cp` 备份 → 改 → 跑 → 验证不成立 → 用 `cp` 逐字节还原两个文件(测试文件与生产文件都已确认零残留改动) |
+| P3-5 | 正控「单 org 成员从不见到选择器」对应的 `toBeNull()` 断言在自己的夹具下永远不可能红(mock 对 session-orgs 端点只会 throw,组件自身 `v-if` 已经因 `orgs` 为空把它藏掉);承重的是旁边的调用普查断言 | DEFERRED-需重构夹具(记录了一次已验证不成立的候选修法,不落地;**理由口径已更正,见 §12.5 复核修正**——是范围/风险判断,不是"规矩不允许") | 本节 §12.5——尝试过给 `/api/auth/session-orgs` 补一个非空返回值,亲跑 M6 复现证明**仍然不解决**(`loadGroups()` 自己的成功分支会把 `showSessionOrgSwitcher` 重新置回 `false`,覆盖掉 `handleSessionOrgRequired` 刚置的 `true`);已用 `cp` 备份 → 改 → 跑 → 验证不成立 → 用 `cp` 逐字节还原两个文件(测试文件与生产文件都已确认零残留改动) |
 | P3-6 | 共享组件常量 DOM id(`session-org-switcher-select`)+ 面板从不传 `hasUsableClaim`,与考勤宿主行为有差异,两份 MD 未记 | CLOSED-MD | 本节 §12.6 |
 | P3-7 | 目标文档 DoD 要求「切片 = 分支 + Draft PR」,报告写门审时尚无 Draft PR;#5/#6 披露还没进 PR body | DEFERRED-🔒不可操作(硬规矩禁止本轮动 PR 状态与 body) | 本节 §12.7——Draft PR #5854 现已存在(报告当时的「无 PR」已 stale);PR body 待披露的两句原文见 §12.7,留给下一次允许编辑 PR body 的轮次原样粘贴 |
 | P3-8 | 两个新前端面(`SessionOrgSwitcher.vue`、`ApprovalTemplateGroupsPanel.vue`)在 `templateCenterI18n.spec.ts:765` 的 i18n 闭世界硬编码文件清单之外 | CLOSED-测试 | `apps/web/tests/templateCenterI18n.spec.ts` 新增两条守卫测试(见 §12.8),亲跑正向格(注入未翻译中文字符串)证明判别力,`cp` 备份/还原,`cmp` 字节相同 |
 | P3-9(卫生轮自身发现,不在原报告 8 条内) | `run-required-web-tests.sh` 里存在两份几乎相同的 `exec npx vitest run ...` 巨行——第一份(旧)在前、含本切片三个新 token 的那份(重复)在后;bash `exec` 无条件替换进程,第一份一执行,后面整个脚本(含第二份)永不到达。三个新 token 因此**从未被 `web-tests` required job 实际跑过**,报告 §1.4「令牌解析验证」与两份 MD §1/§2.1/§2.3 的「required 覆盖」结论在当前 HEAD 上是假的 | CLOSED-测试+脚本(scripts/dev,允许本轮改) | 本节 §12.9——merge 两行为一行,三个新 token 移到唯一存活行的 `--reporter=dot` 前;`bash -n` 通过;merged 后 token 计数从 394/395(报告口径)变为 **397**;`pnpm --filter @metasheet/web exec vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel --reporter=dot` 现场 4 文件 15 用例全绿 |
+| 复核修正(2026-09-19)— P2-1 | 独立复核门审(`p3-hygiene-gate-A2-20260919.md` §P2-1)证伪本节原 §12.9 的根因("实现者在死副本上继续追加、无人发现")、全称撤回("此前的每一个 HEAD 上都是假的")、以及由此产生的错误"影响声明"三处;逐 commit numstat 核对显示真根因是 rebase/三方合并对单条超长 exec 行的复制(`2699e0a07` 17+/1− vs `2ef7add98` 17+/0−),且 `cb6d7fa9f`/`d3097be00` 两个更早 head 上本无重复、结论本就成立 | CLOSED-MD | §12.9 全文重写(根因表、逐 head 核对表、真机制段、机械前置段、更正后的影响声明);代码修复(合并两条 exec 行)不回退;diffstat 见 §12.12 |
+| 复核修正(2026-09-19)— 报告自身 P3-1 | 同一份复核报告 findings §P3-1(对应本文档 §12.5/原处置表 P3-5):§12.5 把 DEFERRED 的理由写成"超出本轮闭合定义"(暗示规矩不允许),但拆用例/改夹具形状本身落在本轮允许的"测试"改动类别内;真实理由是范围/风险判断 | CLOSED-MD(理由口径更正,处置本身仍是 DEFERRED,不落地) | §12.5 末段重写;diffstat 见 §12.12 |
 
 ### 12.2 P3-1:挂载点人口 5 行表(补齐两份 MD 未点名的两份)
 
@@ -531,7 +533,7 @@ $ grep -rn "approval/TemplateCenterView" apps/web/tests/ apps/web/src/
 | `approval-e2e-permissions.spec.ts` | `:565` | `...actual` 展开 | **否**——但已现场重跑 244/244 绿(见 gate 报告 §1.2),真实挂载 5 次,走 `...actual` 的真客户端函数 |
 | `approval-e2e-lifecycle.spec.ts` | `:629` | `...actual` 展开 | **否**——同上 |
 
-**口径更正**:本文档 §8「既有 spec 接缝回归」原先只覆盖三份替换式 mock 的 spec;现补记——`...actual` 展开的两份不需要打接缝补丁(它们走真实客户端函数,不会因为面板新增无条件挂载而抛出未捕获异常),但也因此**不在**本切片新增的任何 mock 覆盖之内。gate 报告记录了一处未查清现象(两份 spec 内 `listApprovalTemplateGroups()` 在用例存续期内既未 resolve 也未 reject)——本轮未进一步排查(未验项,不属于本轮 4 类可闭合范围),原样保留报告措辞,不升级也不擅自下结论。
+**口径更正**:本文档 §8「既有 spec 接缝回归」原先只覆盖三份替换式 mock 的 spec;现补记——`...actual` 展开的两份不需要打接缝补丁(它们走真实客户端函数,不会因为面板新增无条件挂载而抛出未捕获异常),但也因此**不在**本切片新增的任何 mock 覆盖之内。gate 报告记录了一处未查清现象(两份 spec 内 `listApprovalTemplateGroups()` 在用例存续期内既未 resolve 也未 reject)——**本轮未进一步排查,理由是范围/时间预算,不是规矩禁止**(读代码定位 promise 未决原因、必要时加临时诊断断言再用 `cp` 逐字节还原,都落在"测试"这一允许类别内,§12.5/§7 的 mutation 台账本身就是这么做的先例;把它记成"不属于本轮 4 类可闭合范围"会误导读者以为规矩挡住了这件事)。排查这一现象需要单独构造诊断,与本轮"逐条核对既有处置表 + 修复卫生轮自身发现的一条缺陷"这个收尾窗口不成比例,留给下一轮;未验项,原样保留报告措辞,不升级也不擅自下结论。
 
 ### 12.3 P3-2:错误码联合类型腐烂风险(登记,不改生产代码)
 
@@ -554,7 +556,9 @@ $ grep -rn "approval/TemplateCenterView" apps/web/tests/ apps/web/src/
 
 **根本原因**:mutation 后的 `onMounted` 依次调用 `handleSessionOrgRequired(loadGroups)`(同步把 `showSessionOrgSwitcher.value` 置 `true`)、然后又调用一次独立的 `loadGroups()`;后者的 `try` 块在其 `await listApprovalTemplateGroups()` 成功后会**无条件**把 `showSessionOrgSwitcher.value` 重新置回 `false`(`ApprovalTemplateGroupsPanel.vue:133`)——这次成功的微任务链比 `loadSessionOrgs()` 的链更短,先落地,把刚置上的 `true` 覆盖掉。只要这个夹具里的列表调用最终会成功(而"single-org member"这条用例的全部意义就在于列表调用确实成功),`toBeNull()` 在 `settle()` 结束时就结构性地不可能红——与报告原文「结构性,不只是某条 mutation 的巧合」完全吻合,不是可以用一行 mock 修补的。
 
-生产文件与测试文件均已用 `cp` 逐字节还原,`cmp` 确认;`git status --porcelain` 对两个文件均为空。**处置**:DEFERRED-需行为改动——真正让该断言承重需要重构这条用例本身的夹具形状(例如拆成两条更细的用例,或改用一个不依赖列表调用结果的独立断言点),这是测试设计层面的行为变动,超出本轮"闭合"定义,留给下一轮。
+生产文件与测试文件均已用 `cp` 逐字节还原,`cmp` 确认;`git status --porcelain` 对两个文件均为空。
+
+**处置口径更正(2026-09-19 复核修正,报告 `p3-hygiene-gate-A2-20260919.md` §P3-1)**:上一版把这条的处置理由写成"这是测试设计层面的行为变动,超出本轮'闭合'定义"——不准确。本轮自定的允许四类正是"测试/注释/MD/scripts/dev",拆用例、改 mock 形状本身就是**纯测试改动**,并不落在"本轮规矩不允许"之外;可闭合 ≠ 不值得闭合。真实理由是范围/风险判断:让这条断言真正承重,需要重新设计这条用例的夹具形状(拆成至少两条更细的用例,或换一个不依赖列表调用结果的独立断言点),并对新形状重新走一遍 §7 的 mutation 台账逐条验证判别力——这部分工作量与本轮"逐条核对既有处置表 + 修复卫生轮自身发现的一条缺陷"这个收尾窗口不成比例;而且这条用例与 P3-4(`ApprovalTemplateGroupsPanel.spec.ts` 是否应挪进 `:477` 单进程隔离池)共享同一份夹具上下文,两处若在同一轮内都动,会让本轮改动面失去"每处都能独立核实"的粒度。**处置:本轮不做,理由是范围/风险判断,不是规矩禁止**;留给下一个专门做测试重构与验证的轮次。
 
 ### 12.6 P3-6:共享组件差异登记
 
@@ -577,13 +581,15 @@ $ grep -rn "approval/TemplateCenterView" apps/web/tests/ apps/web/src/
 
 两条测试都带正控(表/配对调用集合非空 + 确有 CJK)。**Mutation 验证**(`cp` 备份 → 注入未翻译中文 → 跑 → 全部按预期变红 → `cp` 还原 → `cmp` 字节相同):在 `SessionOrgSwitcher.vue` 的 `<label>` 内插入一段裸中文、在 `ApprovalTemplateGroupsPanel.vue` 的 create 按钮文案后追加一段裸中文,两条新守卫连同一条既有的 `TemplateCenterView` 渲染断言（因为该面板挂载在其下）一并变红(3 个测试失败);还原后 18/18 全绿。
 
-### 12.9 P3-9:required 覆盖被自己的重复行悄悄吞掉(卫生轮自身发现)
+### 12.9 P3-9:required 覆盖曾被单条超长 exec 行的 rebase 复制悄悄吞掉(卫生轮自身发现;根因经复核修正)
 
-**措辞更正**:修复提交(fix(approval): fold A-2's dead duplicate exec line...)的 message 里「were never actually exercised by the required web-tests job」这句比事实宽——`web-tests` 那次运行仍然会跑活行里已有的 `templateCenterI18n`/`approvalTemplateCenterCategory`/`approvalTemplateGovernance` 三个 token,而这三份 spec 本身就会挂载 `ApprovalTemplateGroupsPanel`(P3-1 的挂载点普查),所以面板代码路径并非从未被跑过。准确的表述是本节标题与下面「影响声明」段的措辞:**`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel` 这三份带验收 J 断言的 spec 文件本身从未被 required job 执行**,不是"这个前端面从未被跑过"。commit message 已推送,不可改写,更正记在此处。
+**复核修正(2026-09-19,报告 `p3-hygiene-gate-A2-20260919.md` §P2-1)**:本节最初版本把这处重复行的根因、影响范围与撤回对象都判断错了——错误方向是**把一份正确的旧证据判成假的**,并把一个**会在下一次 rebase 复发**的真实机制写成了"实现者在死副本上继续追加、无人发现"这种一次性失误。以下三段(根因/逐 head 核对/真机制)按复核报告原文改写。**代码修复本身(合并两条 exec 行为一条)是对的,不回退,本节改动只涉及叙事,不涉及任何代码或脚本回退。**
+
+**措辞更正**(此前已修,予以保留):修复提交(`fix(approval): fold A-2's dead duplicate exec line...`)的 message 里「were never actually exercised by the required web-tests job」这句比事实宽——`web-tests` 那次运行仍然会跑活行里已有的 `templateCenterI18n`/`approvalTemplateCenterCategory`/`approvalTemplateGovernance` 三个 token,而这三份 spec 本身就会挂载 `ApprovalTemplateGroupsPanel`(P3-1 的挂载点普查),所以面板代码路径并非从未被跑过。准确的表述是本节标题的措辞:**`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel` 这三份带验收 J 断言的 spec 文件本身从未被 required job 执行**,不是"这个前端面从未被跑过"。commit message 已推送,不可改写,更正记在此处。
 
 **如何被发现**:核对 P3-4 的「394/395 token」措辞时,重算 `run-required-web-tests.sh` 的最终 token 数,Python 脚本按文件里**第一条**匹配 `exec npx vitest run` 的行取值,结果与预期不符(394 而非应有的 397),顺着这条线索发现文件里有 **两条** `^exec npx vitest run` 开头的行,而不是一条。
 
-**根因(逐条 commit 核对,非推测)**:
+**根因(逐 commit 机械核对;不是原始提交所加,是 rebase/三方合并对单条超长 exec 行的复制)**:
 
 ```
 $ git log --oneline -S"exec npx vitest run" -- apps/web/scripts/run-required-web-tests.sh
@@ -591,11 +597,37 @@ $ git log --oneline -S"exec npx vitest run" -- apps/web/scripts/run-required-web
 e0defbe26 ci(attendance): publish a stable web guard check (#4585)
 ```
 
-`96c512876`(经 `git diff 96c512876^..96c512876` 与 `git diff 2ef7add98^..2ef7add98` 逐字节比对确认,与本分支 rebase 前的 `2ef7add98` 是同一份改动、diff 完全相同,只是 hash 因 rebase 不同——不是仅凭 commit subject 相同推断的)的 diff 是**纯追加 17 行**——包括一份完整的、内容与既有末行几乎相同的第二条 `exec npx vitest run ...` 巨行副本,把新 token `SessionOrgSwitcher.spec.ts` 追加在这份**副本**的 `--reporter=dot` 之后,而不是编辑原本那一行。后续三个提交(`54da3d9b5`/`c86b09fd4`/`14c6d7112`,对应 approvalTemplateGroupsClient / ApprovalTemplateGroupsPanel 两个 token)都在这份死副本上继续追加,无人发现。
+| commit | committer date 是否 = author date | `^exec npx vitest run` 行数 | numstat(该脚本) |
+|---|---|---|---|
+| `2699e0a07`(**真正的原始提交**,author/committer 均 09-18 06:57:35) | 是 | **1** | **17 insertions / 1 deletion**(改写既有行 + 加 16 行注释) |
+| `2ef7add98`(`2699e0a07` 的 rebase 复制,committer 09-18 20:56:36) | **否** | **2** | **17 insertions / 0 deletions**(纯追加,含一整条 exec 行副本) |
+| `96c512876`(`2ef7add98` 的再一次 rebase 复制,committer 09-19 01:45:13) | 否 | 2(承袭) | 与 `2ef7add98` 逐字节相同(上一版复核已核实) |
 
-**为什么两轮验证都没抓到**:gate 报告 §1.4 用 `tail -1 ... | wc -w` 只看文件最后一行(恰好就是死副本,词数因此"对得上");两份 MD §2.3 的 Python 脚本用 `for line in content.splitlines(): if line.strip().startswith(marker): return line`——`.startswith` 命中的是**第一条**匹配行,而第一条（活的）那时还没加新 token,所以脚本的"394"输出其实是在告诉我们"活的那一行还没有新 token"，只是没人意识到"第一条"和"最后一条"是两条不同的行。这正是"扫描窗口两头都骗人"——`tail -1` 骗在只看窗口尾部,`.startswith` 的 first-match 骗在只看窗口头部,两个工具分别被两端的假象说服。
+`2699e0a07` 与 `2ef7add98` author date 逐秒相同(同一份改动)、diff 形状却不同:`2699e0a07` 编辑既有行,`2ef7add98` 是纯追加、制造出一份副本。**上一版复核已验证 `96c512876` 与 `2ef7add98` diff 逐字节相同,但那只证明两个 rebase 副本互相一致,不能证明"重复"这件事本身是原始提交所为**——真正该对照的原件是 `2699e0a07`(该提交无重复,numstat 17/1),不是 `2ef7add98`(该提交已经是重复,numstat 17/0)。head commit `f3137d0de`「verified commit equivalence」验的是"副本↔副本"这一步,不是"原件↔副本"这一步。
 
-**修复**(scripts/dev,允许本轮改):合并两行为一行——死副本独有的三个新 token(`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel`,丢弃死副本里重复的 `categoryCandidateInput`,活行里已有)追加到活行的 `--reporter=dot` 之前;删除死副本整行;三段说明注释一并移到活行之前并修正措辞(P3-4)。
+**这条重复不是"此前的每一个 HEAD 上都存在"——逐 head 核对(exec 行数 + 三个新 token 命中位置)**:
+
+| head | 说明 | exec 行数 | 三个新 token |
+|---|---|---|---|
+| `cb6d7fa9f` | 两份 MD 的写作 head | **1** | 全部命中,在唯一那条(活)行里 |
+| `d3097be00` | 第 1 轮门审的被审 head | **1** | 全部命中,在唯一那条(活)行里 |
+| `5d0f780f5` | 本轮 rebase 前的尖端 | **2** | 只命中第二条(死)行;第一条(活)行零命中 |
+| `b1e5c745f` | `5d0f780f5` 的 rebase 等价物 | **2** | 同上 |
+
+也就是说,**在被门审的那个 head(`d3097be00`)与两份 MD 撰写时的 head(`cb6d7fa9f`)上,三份 spec 确实在 required 的 `web-tests` job 里**——gate 报告 §1.4「令牌解析验证」与两份 MD §1/§2.1/§2.3 在它们各自运行的那个 head 上**都是对的**,不是被 `tail -1` / first-match 这两个工具的窗口盲区骗过。重复行是后来(committer date)09-18 20:56:36 那次 rebase 才制造出来的,发生在 `d3097be00` 之后、`5d0f780f5` 尖端形成之时。**上一版"此前的每一个 HEAD 上都是假的"这句全称式判断是一次错误撤回**——它撤销的是一份原本正确的证据(记忆:"失效标记要求值不要作废整节")。真正需要更正的只是"当前 HEAD"之前那些**含重复行**的 head(`5d0f780f5`/`b1e5c745f`),不是此前全部历史。
+
+**真机制(此前未被记录,且是活风险)**:`2699e0a07^`(= A-1 尖端 `0144932ac`)那条 exec 行**不含** `StockPreparationDataSourceRegistry`;而 `2ef7add98^`(= 后来的 A-1 尖端 `cb9cdf9f6`)那条**已经含有**这个 token(现场 `git diff 2699e0a07^..2ef7add98^ -- apps/web/scripts/run-required-web-tests.sh` 确认这条巨行在两个 A-1 尖端之间已经独立变化过一次)。09-18 20:56:36 那次 rebase 把 A-2 对这条巨行的编辑(`2699e0a07`)重放到一个"同一条巨行已经被独立改过"的新基线(`cb9cdf9f6`)上:两边都改了同一条超长行,rebase/三方合并没有报冲突,而是把两份都保留了下来——A-2 新加的三个 token 落在后面追加的那份(从未被执行的)副本上。仓内已有两处独立实测记录**这条巨行就是并行车道在本仓库里的已知必冲点**,解法一贯是"取并集":`docs/development/integration-ui-consolidation-program-20260910.md:157`(「只冲一个文件的一行——`run-required-web-tests.sh` 的 `exec…`」,「解法是机械的:取并集——两侧出现过的每个 token 都保留,一个不删、不重复」)、`:167`(根治建议:改成每行一个 token,当时刻意未做);以及 `docs/development/multitable-remaining-development-inventory-and-sequencing-20260712.md:112`(「冲突解错会静默丢 token 且 CI 零信号」「冲突一律解成 UNION」)。**未验证**09-18 20:56:36 那次 rebase 具体由谁在什么命令下发起,只证到重复行确实源自这次 rebase、以及它是"同一条巨行各自独立演进"的产物,不是任何一次显式冲突解决时人为选错分支。
+
+**为什么这不是记账级问题(会复发,且现有读取者都测不出)**:
+(a) #5854 是堆叠分支,合并前必然再 rebase 至少一次;这条巨行已被证实是本仓库跨车道并行开发时的已知反复冲突点,同一种"三方合并把两份都留下"的失败模式没有理由不再发生一次。
+(b) **修复前**仓内没有任何守卫断言 `^exec npx vitest run` 只有一条(`git grep` 实测零命中;本轮新增的 `scripts/dev/atg-exec-line-post-rebase-check.sh` 是人工前置,不在任何 CI lane / vitest 配置内,不构成"守卫",故不推翻这句"零命中")。已知会读这条 exec 行的至少有四处,分两种语义,两种都测不出死副本:
+  - **first-match / tail 语义**(只取命中的第一条或最后一条,新增第二条时会读到"某一条"、但不会把另一条的 token 算进"已覆盖"):`apps/web/tests/attendance-web-guard-workflow.spec.ts:57`、`plugins/plugin-integration-core/__tests__/stock-preparation-handoff.test.cjs:2888`、MD 自己的 §2.3 脚本。
+  - **并集语义**(遍历所有匹配 `vitest run` 的逻辑行,把每一行的 token 都并起来,不判断该行是否会被前面的无条件 `exec` 短路):见 (c)。
+(c) **并集语义的读取者现场核实有两处,不是一处**:`packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts` 的 `extractVitestTokensFromBashScript`(`:119-145`)与 `packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts` 的 `requiredLaneTokens`(`:61-79`,现场读了实现——`for (const line of joined.split('\n'))` 遍历每一条含 `vitest run` 的逻辑行,逐行把 token 追加进同一个数组,同样不区分某一行是否可达)。这一类的失真方向更隐蔽:死副本上的 token 会被两处都判定"已进入 required lane",看起来像覆盖到了,实际上从未被执行到。修复前,这两处守卫对这三份 spec 的 covered 判定本身就是错的。
+
+**机械前置(供未来 rebase,供下一轮/下一次改动这条 exec 行时核)**:任何一次改动或合并涉及 `apps/web/scripts/run-required-web-tests.sh` 的这条 `exec npx vitest run` 巨行之后,必须核两件事:①`grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh` 恒等于 1;②如果 rebase/合并呈现过该行的两个版本,合并后单行的 token 集合必须等于两个版本 token 集合的**并集**(不丢、不重复)。机械脚本见本轮新增的 `scripts/dev/atg-exec-line-post-rebase-check.sh`(只读,不改脚本本体;退出码非零时打印重复行数与——若提供两个待比较的 ref——双向 token 差集,供人工核对)。
+
+**修复本身(scripts/dev,本轮允许改;不回退)**:合并两行为一行——死副本独有的三个新 token(`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel`,丢弃死副本里重复的 `categoryCandidateInput`,活行里已有)追加到活行的 `--reporter=dot` 之前;删除死副本整行;三段说明注释一并移到活行之前并修正措辞(P3-4)。
 
 ```
 $ grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh
@@ -609,7 +641,7 @@ $ pnpm --filter @metasheet/web exec vitest run SessionOrgSwitcher.spec.ts approv
 
 Token 计数重算(合并后):`run-required-web-tests.sh` 从报告记录的 394/395/396(三次开发中途快照)变为 **397**(392 条共享前缀 + `categoryCandidateInput` + `StockPreparationDataSourceRegistry`,这两个是 rebase 带入的、A-2 之外的既有 token + 本切片 3 个新 token);双向子串碰撞扫描零命中。`approval-web-guard.yml:1026` 那一行本身没有这个重复行问题(核对 `run: pnpm --filter @metasheet/web exec vitest run` 只有 2 处匹配,与报告一致,:925 是无关 job);其 YAML 可解析、job key 唯一(`approval-web-guard`),该文件 push/pull_request 两个 `paths` 列表之间存在一处非对称缺口(6 个既有 approval 文件只在 pull_request 侧、不在 push 侧),但该缺口在 rebase 前的 A-1 尖端就已存在,与本切片改动无关,不在本轮范围内,不处理。
 
-**影响声明(供下一轮门审核对)**:gate 报告 `impl-gate-A2-round1-20260918.md` §1.4「令牌解析验证」与两份 MD 的 §1/§2.1/§2.3 在**当前 HEAD**(本次修复提交)之前的所有历史 HEAD 上,关于「三个新 token 已进入 required `web-tests` job」的结论都是**假的**——`web-tests` job 实际执行的是死副本前面那条活行,从未包含这三个新 token。DRAFT-READY 裁决本身建立在直接现场重跑三份 spec(而非依赖这条 exec 行)得到的绿证据上,裁决不受影响;但任何引用"required 覆盖已确认"这句话的后续文档,都应改指向本节和本次修复的 commit,不再引用报告 §1.4 原文的现场输出作为"required 覆盖"的证据。
+**影响声明更正(2026-09-19 复核修正)**:上一版在此处写"gate 报告 §1.4 与两份 MD 的 §1/§2.1/§2.3 在当前 HEAD 之前的所有历史 HEAD 上……结论都是假的"——按上文逐 head 核对,这句话不成立。准确的表述是:那几份结论**在它们各自运行的那个 head(`cb6d7fa9f`/`d3097be00`)上是真的**;只是重复行导致后来的 head(`5d0f780f5`及其 rebase 等价物 `b1e5c745f`,直到本次修复提交为止)不再具备同样的性质。DRAFT-READY 裁决本身建立在直接现场重跑三份 spec(而非依赖这条 exec 行)得到的绿证据上,裁决不受影响;但任何引用"required 覆盖已确认"这句话的后续文档,如果指向的是本次修复提交**之前、含重复行的那些 head**,都应改指向本节和本次修复的 commit,不再引用报告 §1.4 原文在那些 head 上的现场输出作为"required 覆盖"的证据——但不应把这句更正泛化成对 `cb6d7fa9f`/`d3097be00` 那两个更早、单行、结论本就正确的 head 的否定。
 
 ### 12.10 撤回类改动扫描(实测结果,非"零命中"——按"求值,不作废整节"的纪律逐条判读)
 
@@ -640,3 +672,32 @@ $ git diff --stat b1e5c745f8fbc6d63987223d3af1e56b9b835ef5
 ```
 
 四个文件全部落在 scripts / 测试 / MD 三类,零 `src/**` 生产代码改动(`ApprovalTemplateGroupsPanel.spec.ts` 的 P3-5 尝试性 mock 改动已用 `cp` 逐字节还原,不出现在这份 diffstat 里)。
+
+### 12.12 复核修正(2026-09-19)— diffstat 证据:只动 MD/scripts/dev
+
+对象:独立门审 `p3-hygiene-gate-A2-20260919.md`(NEEDS-FIX,0 P1/1 P2/6 P3)。本节处置该报告的 P2-1(§12.9 根因/全称撤回/影响声明三处证伪)与报告自身 findings §P3-1(§12.5 DEFERRED 理由口径错,对应本文档 P3-5)。报告裁决原文只记 1 条 P2(`P2-1`);其余 6 条落在报告自定的"新 P3 只记不阻塞"收敛口径内,本轮不逐条处理,留给下一次允许更广改动面的轮次(报告 §5 的 P3-2..P3-6 分别涉及生产代码判据强度、mutation 证据形状、DOM id 共享等,均非本轮"只改 MD/注释/scripts/dev"能安全闭合的项)。
+
+硬规矩:生产代码零行为改动;只许 MD/注释/scripts/dev;不动 PR 状态与 body;不改锁文;不 rebase 到 base 分支(只 `git rebase origin/main` 保活,本轮未再次 rebase)。
+
+```
+$ git diff --name-status c41710ab0
+M	docs/development/approval-template-groups-phase1-fe-verification-20260918.md
+A	scripts/dev/atg-exec-line-post-rebase-check.sh
+```
+
+`--name-status`(而不是 `--stat` 的行数/字节数)是本节的主要证据,因为它在这段文字自己被写入文件之后再重跑也不会变——`--stat` 的行数会随着"把这段证据本身写进文档"这个动作而回退性地对不上,是自指的。截至本节写作时的一次性快照供参考:`git diff --stat c41710ab0` → `2 files changed, 204 insertions(+), 11 deletions(-)`(该数字是**插入本段之前**的计数,之后每次编辑本节都会使其略微过期,不作为判据——上面的 `--name-status` 才是)。
+
+两个文件零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"验证 MD"与"新增的 scripts/dev 只读检查脚本"两类。`scripts/dev/atg-exec-line-post-rebase-check.sh` 不是测试文件(不在任何 `tests/`、不带 `.spec.`/`.test.` 后缀、不被任何 CI workflow 或 vitest 配置引用),是 §12.9"机械前置"要求的独立小工具;本轮亲跑三条自测(正控:对本次真实的 bug 提交 `b1e5c745f` 复现检测出 2 条 exec 行,退出码 1;正控:对当前已修复文件 + `cb6d7fa9f`/`d3097be00` 两个真实 head 跑 union 检查,退出码 0;负控攻判据:临时把当前文件的 exec 行摘掉一个 token 后再跑,退出码 2 且报出被摘掉的具体 token),跑完用 `cp` 备份/还原、`cmp` 确认字节相同,`git status --porcelain` 对被 mutate 的文件为空。
+
+**撤回类改动自扫**(比照 §12.10 的纪律,对本节改写自己扫一遍,确认被证伪的三句话零处以"成立"口吻残留):
+
+```
+$ git grep -n "此前的每一个" -- '*.md'
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:(本节改写说明自身引用旧文措辞)
+$ git grep -n "无人发现" -- '*.md'
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:(本节改写说明自身引用旧文措辞)
+$ git grep -n "在.*之前的所有历史 HEAD 上.*都是假的" -- '*.md'
+(零命中——旧句已整句替换,不是"引用后限定"这种保留形式)
+```
+
+逐条判读:前两处命中都出现在"上一版最初把……写成……"这类回顾性说明句里,不是独立、无限定地重申旧结论;第三处(全称撤回原句)在改写后已**整句删除**,不是像 P3-4 那样以"originally said"限定词保留。按"失效标记要求值不要作废整节"的纪律:本节要撤回的是旧版 §12.9 那三处结论本身,而不是"这些字符串不得再出现"。
