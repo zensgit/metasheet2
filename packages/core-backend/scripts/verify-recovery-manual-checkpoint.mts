@@ -815,6 +815,15 @@ try {
   assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs
     WHERE attachment_id IN ('manual-live-attachment','manual-deleted-attachment')`)).rows[0].n, 2)
   console.log('PASS: all live/deleted attachment candidates atomically receive mutable source intents with exact lease/owner; retry unchanged; second pin failure rolls back generation/request/first pin without leaking provider values')
+  const purgedRequest = { ...admissionRequest, requestId: randomUUID() }
+  const beforePurged = await generationCount()
+  await query(`UPDATE multitable_attachments SET blob_purged_at=now() WHERE id='manual-deleted-attachment'`)
+  await assert.rejects(admit(purgedRequest), { message: 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE' })
+  assert.equal(await generationCount(), beforePurged)
+  assert.equal(await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query, purgedRequest)), null)
+  assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs
+    WHERE attachment_id IN ('manual-live-attachment','manual-deleted-attachment')`)).rows[0].n, 2)
+  console.log('PASS: physically purged in-scope attachment refuses fresh admission with zero generation/request/pin side effects')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

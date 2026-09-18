@@ -149,6 +149,9 @@ export function bindRecoveryArchiveManualAdmission(
       else await persistRecoveryArchiveSnapshotReservations(query, plan, allocated)
       await bindRecoveryArchiveManualRequest(query, identity, generationId)
       const snapshot = await readRecoveryArchiveCaptureSource(query, identity)
+      if (snapshot.attachmentCandidates.some((attachment) => attachment.blobPurged)) {
+        throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+      }
       const leaseUntil = (generation.rows[0] as { lease_until?: unknown } | undefined)?.lease_until
       if (typeof leaseUntil !== 'string') throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
       // Intent only: immutable version/hash/bytes must be verified outside this admission.

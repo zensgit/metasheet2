@@ -288,3 +288,18 @@ This is an intent, not proof of bytes, an archive object reference or a verified
 attachment. Immutable source capture, AEAD object copy and durable receipts still
 have to succeed before verification/publication. No cleanup or retention behavior
 is added or changed by this composition.
+
+### Unavailable Attachment Sources
+
+Fresh admission refuses any in-scope attachment marked `blob_purged_at`, including
+deleted/unreferenced attachment rows. The generation, request binding and source
+intents roll back together. A live metadata row or absence of that marker is not
+proof that bytes exist or are immutable.
+
+The current `StorageService.downloadByKey` contract supplies bytes but no immutable
+version/generation or storage-enforced content identity. It must not be reused as
+a successful immutable-source adapter merely by hashing one download. D1 attachment
+source requirements remain in force: missing, mutable-without-version or drifting
+sources cannot produce a verified archive. The archive object-store's exclusive
+destination writes do not establish immutability of the source. Source capability
+admission and encrypted copy/receipt integration remain open, not silently waived.

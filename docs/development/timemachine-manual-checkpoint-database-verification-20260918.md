@@ -484,3 +484,17 @@ and new-main comment route tests pass 114/114. Acceptance TypeScript, scoped lin
 static wiring 37/37 and full S5 pass. Local logs:
 `/private/tmp/tm-manual-attachment-{final,unit-final,wiring,s5}.log`.
 No new remote terminal CI result is implied by these local results.
+
+## Physically Purged Attachment Refusal
+
+The synthetic driver marks its deleted attachment's blob physically purged, then
+attempts a fresh manual request. Admission must return only
+`RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE`; generation count, durable request
+lookup and source-pin count prove zero partial admission. Existing live/deleted
+non-purged candidates remain the positive control. This is a catalog refusal test,
+not an assertion that unmarked attachment bytes are available or immutable.
+
+Read-only source audit found `StorageService.downloadByKey` has no versioned-source
+contract. The existing archive object-store validates immutable destination objects,
+but does not prove the legacy attachment source was immutable during copying.
+No customer path was read; no alternate source assurance was invented.
