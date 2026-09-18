@@ -29,6 +29,15 @@ interface Harness {
   intentInserts: number
 }
 
+/**
+ * G05: `send_webhook` is now SSRF-gated, and the gate resolves the target name. Inject a
+ * deterministic PUBLIC resolution (TEST-NET-3, RFC 5737 — reserved for documentation and not
+ * routable) so these specs never touch real DNS: without it the run depends on the network and
+ * `example.test` (RFC 6761, guaranteed NXDOMAIN) stalls for the resolver timeout, then fails closed.
+ * This seam only supplies ADDRESSES — the gate still judges them, so it cannot hide a regression.
+ */
+const PUBLIC_LOOKUP = async () => [{ address: '203.0.113.10', family: 4 }]
+
 /** A response-shaped stub for the send spy. */
 const resp = (status: number) => ({ ok: status >= 200 && status < 300, status }) as unknown as Response
 
@@ -70,7 +79,7 @@ function makeHarness(fetchImpl: (call: number) => unknown): Harness {
     return { rows: [], rowCount: 1 }
   }) as unknown as AutomationDeps['queryFn']
   return {
-    deps: { eventBus: new EventBus(), queryFn, fetchFn: fetchSpy as unknown as typeof fetch },
+    deps: { eventBus: new EventBus(), queryFn, fetchFn: fetchSpy as unknown as typeof fetch, ssrfLookupFn: PUBLIC_LOOKUP },
     fetch: fetchSpy,
     intent,
     get intentInserts() { return state.intentInserts },
