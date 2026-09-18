@@ -617,3 +617,41 @@ L0(顾问锁)
   1. **preview/execute 在规模上界上会分道**:changesRequired #12 只给 execute 定了 500 条候选的硬上界(`APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE`,400,零行写入);preview 没有这个上界,也不在响应里标"候选数是否已过线"。一个有 600 条 eligible 模板的 org,preview 会照常展示全部 600 条"将建/将挂"的清单,而随后调用 execute 会 400——这正是 §5.2"preview 与 execute 必须共用同一条 SQL,否则展示与实际不一致"这个论证本身要防的失配,只是这次是从"规模上界"这条路绕过去的,不是从"分类谓词不同"绕过去的。是否要给 preview 也加同一条 500 上界的提示(比如响应体加 `candidateCount`/`overLimit` 字段),还是接受"preview 可能展示一个 execute 不会真的执行的计划"作为已知边界,留给 W8 一并裁决——不在本步现场改。
   2. **`skipped` 桶把 `null` category 与字面量空串 `''` 合并成一个条目**:两者的 `row.category ?? ''` 都映射到同一个桶键 `''`,导致响应里"这个模板从没设过 category"与"这个模板的 category 显式存了一个空字符串"分不出来——§5.2"原始值,未 trim,便于管理员核对哪一行没被处理"这条理由原本就是为了保留这种区分度,这里丢了一部分。没有夹具覆盖这一点。是否需要用一个哨兵值(如 `category: null` 单独返回,而非折成 `''`)区分两者,留给下一实现单元或门审裁决。
 - **对上一次续做步骤(9)的一处措辞更正**:该步提交说明(commit `d15dbe362`)描述 guard mutation 探针时写"observing it turn green"——这是误写,实测方向是**转红**(把 guard 现场改成 `rbacGuard('approvals:read')` 后,`approvals:read`-only 非管理员那条断言从期望的 403 变成收到 200,断言本身转红;`cp` 还原后重新亲跑才转绿)。本文档正文(见上一条 mutation 探针段)一直是对的;仅那条提交说明的英文转述有误,记此更正,不改已推送的提交(硬规矩:不 amend 已推送提交)。
+
+## 16. 续做步骤 11:`AtgTxClient` 品牌类型落地(§13.2 changesRequired #10,W8 编译期前提)
+
+本步只做**这一个**最小单元:落地 §13.2 逐字给出的 SET 义务品牌类型方案,把 `beginApprovalTemplateGroupTxn(client) → AtgTxClient` 变成 W8 execute/rollback 唯一合法的取事务方式;**不写 execute/rollback 本身**(算法、路由、`.db.test.ts`、CI 两点接线均仍是 remaining,见下)。
+
+- **落地**(`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`):
+  - `declare const ATG_TX_BRAND: unique symbol` + `export type AtgTxClient = TxClient & { readonly [ATG_TX_BRAND]: true }`(`:109-110`)——纯类型层面的品牌,不存在任何运行时对象真的带这个 symbol 属性键,所以任何非经 `beginApprovalTemplateGroupTxn` 产出的值结构性地缺这个必需属性,赋值处直接编译期报错(见下方 mutation 证据),这正是门审驳回 `current_setting('transaction_isolation')` 运行时断言、要求"忘发 SET 变成 typecheck 红"这句话的字面落地。
+  - `export async function beginApprovalTemplateGroupTxn(client: TxClient): Promise<AtgTxClient>`(`:126`)——唯一生产者,发 `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` 后把同一个 `client` 断言成 `AtgTxClient` 返回。
+  - 三个 `...WithClient` 原语签名的 `client` 参数类型从 `TxClient` 改为 `AtgTxClient`:`createApprovalTemplateGroupWithClient`(`:265`)、`archiveApprovalTemplateGroupWithClient`(`:342`)、`linkApprovalTemplateToGroupWithClient`(`:462`)——§13.2 原文是"三个 `...WithClient` 只接受该类型",不是"需要 SET 的那两个",本步按字面全落,不做"link 本来不需要 SET 所以只改两个"这种收窄(记忆 `feedback_second_narrower_artifact_is_contract_narrowing`:另造更窄同类物是合同变更,不是实现者裁量)。
+  - 三个薄封装(`createApprovalTemplateGroup:288`、`archiveApprovalTemplateGroup:379`、`linkApprovalTemplateToGroup:516`)的 `transaction(async (client) => { await client.query('SET ...'); return xWithClient(client, ...) })` 改写成 `transaction(async (client) => { const txClient = await beginApprovalTemplateGroupTxn(client); return xWithClient(txClient, ...) })`——`create`/`archive` 只是把内联的 SET 语句换成同一条语句的函数封装,行为不变;`link` 是唯一有实质变化的一个,见下条披露。
+
+- **已披露偏离(不是静默的,现场标注在 `:516` 上方注释)——link 薄封装新增一条它此前从不发的 SET**:重构前 `linkApprovalTemplateToGroup` 是 `transaction((client) => linkApprovalTemplateToGroupWithClient(client, ...))`,全程不发 SET(link 不取 L0,§2 锁序表本就不要求它对隔离级别敏感)。§13.2 "三个都只接受 `AtgTxClient`"没有给 link 开口子,而 `AtgTxClient` 只能经 `beginApprovalTemplateGroupTxn` 产出——所以 link 薄封装现在每次调用都会多发一条 `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`。这是一条真实的、非零的协议变化(多一次网络往返的语句),不是"重构等价"的例外;§3.0 file-header 原文"语句、顺序、错误映射逐字不变"的承诺对 link 这条路径不再字面成立,本节与 `:516` 上方注释都现场记这条偏离,不藏进 diff 里。**理由**:门审 changesRequired #10 是 ownerLevel=false(已裁,非待裁),字面"三个都要"没有给 link 一个排除条款;把它读成"只有两个需要"是本实现者自行narrow 掉门审已经拍板的范围,属于越权收窄,不属于本步可以自主决定的空间。若 owner/下一轮门审认为这条新增 SET 不可接受(比如认为 link 高频调用、多一次往返有性能考量),修法是回去改门审裁定本身(把"三个"改成"两个" + 给 `linkApprovalTemplateToGroupWithClient` 单独定义一个不需要品牌的签名),不是本实现者绕开裁定自己决定——留给 owner。
+
+- **正控 mutation(证明品牌真的有判别力,不是"结构上凑巧总能满足")**:`cp` 备份 → 把 `createApprovalTemplateGroup` 薄封装里 `createApprovalTemplateGroupWithClient(txClient, ...)` 的实参从 `txClient` 改回裸 `client` → `npx tsc --noEmit -p tsconfig.json`:
+
+  ```
+  src/services/ApprovalTemplateGroupService.ts(297,52): error TS2345: Argument of type '{ query: (sql: string, params?: unknown[]) => Promise<QueryResult<any>>; }' is not assignable to parameter of type 'AtgTxClient'.
+    Property '[ATG_TX_BRAND]' is missing in type '{ query: (sql: string, params?: unknown[]) => Promise<QueryResult<any>>; }' but required in type '{ readonly [ATG_TX_BRAND]: true; }'.
+  ```
+
+  `cp` 还原 → `cmp` 逐字节比对与备份一致(`IDENTICAL restore OK`)→ 还原后 `tsc --noEmit` 重新零错误。品牌对"跳过 `beginApprovalTemplateGroupTxn` 直接传裸连接"这个具体错误有判别力,不是零判别力的装饰。
+
+- **外部调用面普查(签名收紧前必须确认没有第三方直接传裸 `TxClient` 进来)**:`grep -rln "createApprovalTemplateGroupWithClient\|archiveApprovalTemplateGroupWithClient\|linkApprovalTemplateToGroupWithClient" packages apps plugins --include="*.ts" 2>/dev/null | grep -v node_modules` → 唯一命中 `packages/core-backend/src/services/ApprovalTemplateGroupService.ts` 自身(1 个文件)——三个原语今天只被本文件内的三个薄封装调用,签名收紧不破坏任何调用点。A-1/W7 的四个真库测试文件(`approval-template-groups-lifecycle.db.test.ts`/`-serialization.db.test.ts`/`-backfill-preview.db.test.ts`/`-backfill-schema.db.test.ts`)全部经 `MetaSheetServer` HTTP 路由调用,不直接 import 这三个原语,同一次普查已确认(`grep -n "^import" <四文件>`,均无 `ApprovalTemplateGroupService` 直接导入)。
+
+- **回归验证(§3.0 登记的义务,本步兑现)**:私有库 `metasheet2_lock_a3`(`DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 npx tsx src/db/migrate.ts --list` → `Applied: 408 / Pending: 0`,含 §14 的批次表迁移)上原样重跑 A-1 两个既有真库文件:
+
+  ```
+  DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=dot
+  ```
+
+  → `Test Files 2 passed (2)` / `Tests 26 passed (26)`——与 §11/§12 此前重跑的结果一致,link 新增的 SET 没有让 E/K 两个顺序/停车敏感断言变红。顺带重跑 W7 的两个真库文件(`approval-template-groups-backfill-preview.db.test.ts` 13 例 + `-backfill-schema.db.test.ts` 8 例)确认它们同样不受影响 → `Test Files 2 passed (2)` / `Tests 21 passed (21)`(这两个文件不是 §3.0 登记的回归义务对象,重跑只是本步顺手的完整性检查,不算作"新增判别力证据")。
+
+- **本步不新增/不触碰**:任何 `.db.test.ts` 文件、`plugin-tests.yml`、`vitest.config.ts` 的 exclude、s6a 钉(`s6a-package-provenance-pins.json`)、`scripts/ops/ci-realdb-step-contract.mjs` 的 FILES 数组——本步是纯 `.ts` 内部重构 + 复用既有真库文件做回归证据,没有新的真库测试入口需要两点接线,所以补充清单 #1/#2/#3(共用三条)在本步不适用,不是遗漏。
+
+- **未做,原样结转的 remaining(不因本步而缩小)**:W8 execute 的服务函数(§3.1 pseudocode → `.ts`)、`POST …/backfill/execute` 路由、`GET …/backfill/batches` 列表端点(changesRequired #5)、changesRequired #13 的三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 默认池文件;锁序格断言停车点非终态)、§15 记的"SQL 谓词 vs `classifyBackfillCategory` 交叉验证"义务;W9 rollback 全部(§4 pseudocode → `.ts`、事务骨架、rollback 路由);A-1 两个既有真库文件补 `*-ci-wiring.test.mjs`(§9/P3-2 已披露残留);验证 MD(§13.7,仍不存在);step 10 记的两条披露(preview/execute 规模上界分道、`skipped` 桶 `null`/`''` 合并)仍未处理,原样结转给 W8。**本步新增的一条 remaining**:link 薄封装新增 SET 这条偏离是否可接受,留给 owner/下一轮门审(见上文披露段)。
