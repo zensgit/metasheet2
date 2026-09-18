@@ -563,29 +563,29 @@ round-2 门审已实测收窄:`packages/core-backend/vitest.integration.config.t
 
 ### 14.10 撤回类改动的全分支扫描(item ③)
 
-**订正(本节最初写成「以下四条模式核实为零命中」——这句本身已被下面的重跑推翻,同一类自引用问题 §1.4/§24.1 处理过两次:一份记录自己写作过程的文档,在它自己完成写作之后,会开始命中它自己引用/转述过的那句被撤回的话。判读规则不变——判"是否以现在时重申",不是判"grep 数字是否为零";下面逐条给出在**当前 head**(含本节自身、§14.1/§14.6/§14.8 已提交的文本)上重新跑出的真实计数与分类,不再声称任何一条是 0 hits 而不解释):**
+**方法论说明(自引用问题,已两次绕进去,现固定处理方式)**:本节讨论并展示这四条 grep 模式本身,而这四条模式又要拿来扫描"仓内是否还有人以现在时重申这几句被撤回/被降级的话"——这意味着**本节自己**(以及 §14.1/§14.2/§14.6/§14.8 转述这些原话的地方)从写下的那一刻起就会命中自己,而且每编辑一次本文档,命中数就可能再变一次(本节初版声称"0 hits",一次重跑就命中了自己;第二次重写给出的具体数字,又被本次编辑追加的说明文字再次推高)。这不是测量错误,是"用会变的东西描述自己"这类陈述的结构性性质,phase1-verification 的 §24.1/§24.6 在同一类问题上得出的规程是:**不钉一个会漂移的数字,钉判读规则**("是否以现在时重申",不是"grep 数字是否为零")。本节照此收敛,把范围**显式排除本文档自身**,只报告"这份文档之外,仓库其它地方"的命中——这个数字不会因为继续编辑本文档而变化:
 
 ```
-$ grep -rln "3218a4aaa" .
+$ git grep -l "3218a4aaa" -- . ':(exclude)docs/development/approval-template-groups-phase3-sections-verification-20260918.md'
 ```
-命中 **1 个文件**(本文档自身),**3 处**:§14.1 处置表第 7 行、§14.8 正文、以及本节展示的这条命令注释里各引用一次这个已撤回的 SHA——三处都是"点名它已被撤回/已不在目标文档里"的元描述,零处以现在时断言它仍然出现在目标文档里。分类:category-3(历史/元叙事)。
+**0 个文件**(本文档之外)。
 
 ```
-$ grep -rl "两个新用例都在 \`\.db\.test\.ts\` 里,\`describeIfDatabase\` 无 \`DATABASE_URL\` 时整块跳过" . | wc -l
+$ git grep -l "两个新用例都在 \`\.db\.test\.ts\` 里,\`describeIfDatabase\` 无 \`DATABASE_URL\` 时整块跳过" -- . ':(exclude)docs/development/approval-template-groups-phase3-sections-verification-20260918.md'
 ```
-**0**——这条是被撤回措辞的**逐字原句**,不含在 §14.2 的转述文字里(§14.2 转述时改写了措辞,没有逐字引用整句),所以这一条确实是零命中,不是自引用陷阱。
+**0 个文件**——这条本身也是本文档自己在 §12 改写前后引用过的逐字原句,但改写后 §12 用的是新措辞而非旧句,连本文档自身现在也不命中。
 
 ```
-$ grep -n "NOT RUN" docs/development/approval-template-groups-phase3-sections-verification-20260918.md docs/development/approval-template-groups-phase3-sections-design-20260918.md
+$ git grep -n "NOT RUN" -- docs/development/approval-template-groups-phase3-sections-design-20260918.md
 ```
-命中 **1 处**:§7 标题里回顾"替换了本节此前的 3 RUN / 3 NOT RUN"——这是标题自身对"发生过什么"的元描述,不是一张现存的台账;§14.2/§14.10 讨论这件事时用的是"NOT RUN"这个词组本身,不会新增命中(该词组没有出现在本节或 §14.2 的正文里)。分类:category-3。
+**0 处**(设计 MD 里从未出现过这个词组;验证 MD 自身的 §7 标题命中被排除法则排除,不在本次计数里,是元描述,category-3,详见 §14.2 的说明)。
 
 ```
-$ grep -rln "必须加.*pageSize\|pageSize.*必须" docs/development apps/web/tests packages/core-backend/tests
+$ git grep -l -E "必须加.*pageSize|pageSize.*必须" -- . ':(exclude)docs/development/approval-template-groups-phase3-sections-verification-20260918.md'
 ```
-命中 **3 个文件**:(a)本文档自身——§14.1 处置表第 5 行 + §14.6 正文各引用一次「必须加 `pageSize`」这句被降级的原话,均为"这句已被降级"的元描述,零处现在时重申;(b)`docs/development/attendance-dingtalk-benchmark-target-and-tracker-20260601.md:367` 与 `docs/development/multitable-nongrid-view-materialization-designlock-20260708.md:390`——逐句读过,**均为正则假阳性**:前者「pageSize 上限 20」与后半句「必须 staging ... 后才翻 ✅」是同一行里两个不相关的子句(考勤线的分页参数说明 + 考勤线自己的 staging 门槛判据),`.*` 跨子句连了起来;后者「`pageSize` 取 10/50/200 三次挂载」与「INV-6 的三次挂载断言必须红」同理,是多维表甘特图设计锁自己的 mutation-red 判据,与本切片的 `ungrouped` 桶分页无关。两处均与 `approval-template-groups`/`ungrouped`/A-4 主题无关,不是本轮遗留的过强声明。
+**3 个文件**,与本切片/本轮修复主题**均无关**,逐一读过确认是正则假阳性(`.*` 跨越了同一行/同一表格单元格里两个不相关的子句):`docs/development/attendance-dingtalk-benchmark-target-and-tracker-20260601.md:367`(「pageSize 上限 20」与同一段落末尾「必须 staging ... 后才翻 ✅」——考勤线自己的 staging 门槛判据,与分页参数无关);`docs/development/multitable-crosspage-grouping-datamodel-designlock-20260708.md:307` 与 `docs/development/multitable-nongrid-view-materialization-designlock-20260708.md:390`(两处都是「`pageSize`/`offset += pageSize` ... **mutation-red**:...断言必须红」——多维表分组/甘特图设计锁自己的 mutation-red 判据措辞,与本切片 `ungrouped` 桶的分页无关)。
 
-**结论**:四条模式里,只有第 2 条(逐字原句)是真正的"零命中";其余三条在本文档完成自身写作后都会命中自己——命中内容逐条读过均为元描述/历史叙事/不相关假阳性,**零处**以现在时重申任何一条已被撤回或已被降级的断言。
+**结论**:排除本文档自身后,四条模式里三条零命中,第四条的全部命中都是与本切片无关的正则假阳性——仓内没有任何地方以现在时重申这几句已被撤回或已被降级的断言。本文档自身命中自己(§14.1/§14.2/§14.6/§14.8 转述这些原话的地方)是预期的元描述,不逐次重新计数,判读标准见上。
 
 另:`bash scripts/dev/atg-retraction-sweep.sh` 现场重跑(post-rebase + post-本轮编辑),`EXIT=0`;扫描范围内本轮新增的命中(`⊇`/`⊂`/`subset`/`superset` 若干处,均在 `origin/main` 自身前进带来的无关文件里,如 `plugin-attendance/index.cjs` 的考勤三层嵌套、`univer-meta.ts` 字段收窄)逐条读过,**零处**触及 `approvalTemplateAdminGuard`/`isTemplateManager` 主题,判定结论(guard/manager 两个方向互不包含)不受影响——已把这次现场重跑的脚注写回 §8(phase1-verification 那份历史更正另见其自身文档,不在本 lane 职责范围内重复维护)。
 
