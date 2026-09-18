@@ -1174,3 +1174,67 @@ $ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3_r4 EXPECT_DB=1 pnp
 关闭以上「未修」两行是**独立于本轮**的决定,不在本次派工范围内;本轮的职责边界是 P2-1 点名的 10 个调用点,已经全部关闭并复核(§12.1)。
 
 **未做、也未被授权做**:合并、undraft、开/改 PR、把迁移应用到任何共享/staging/prod 库、改锁文、改任何产线代码;`serialization` 与 `batches-list` cross-org 用例的这两类已知暴露面本轮**同样未修**(见 §12.7),留给 owner/后续 lane。
+
+---
+
+## 13. P3 卫生轮(2026-09-19)
+
+范围:`impl-gate-A3-round4-20260918.md` 与 `impl-gate-A3-round2-20260918.md` 两份门审报告里**全部**仍开放的 P3(round-3 的 3 条 P3 已在 §12.2–§12.4 全部闭合,round-2 的 6 条 P3 里已有 4 条在 §10.1–§10.4 闭合——见下表,均在本轮之前;本轮新处理的是这两份报告余下未闭合的项)。硬规矩:本轮**生产代码零行为改动**,只允许测试、注释、MD、`scripts/dev`;含 DDL/需要新并发测试/owner 裁决的项只登记不做。
+
+### 13.1 处置表
+
+| # | 原文一句 | 处置 | commit |
+|---|---|---|---|
+| R2-P3-1 | round-2 §7 item 1(最高优先级):lane 自有 MD 四处把「guard 人口 ⊋ manager 人口」当今天的事实断言,另一处「已解决」状态断言过期 | **PRE-CLOSED**(本轮之前;§10.1,改写为「互不包含,两方向各一条反例」+ 22 模式 sweep 复核类别 2 命中为 0) | `0af172a94`(rebase 后 SHA;本轮未新增改动) |
+| R2-P3-2 | round-2 §7 item 2:验证 MD §5 项 8「本切片新增五个文件继承同样闭世界残留形态」与 §2.4 自相矛盾 | **PRE-CLOSED**(本轮之前;§10.2,改写为残留仅限 A-1 两个既有文件) | `81d296f10` |
+| R2-P3-3 | round-2 §7 item 3:验收 E 姊妹判据的终态腿(两个真并发 execute 都提交,后到者退化 `{batchId:null}`)未测,只有设计论证 | **DEFERRED-需行为改动** —— 需要构造真并发的真库测试(两个连接、真实竞态,不是顺序论证),属新增测试工作量而非本轮定义的机械闭合(改注释/改断言格式/补正控);MD §5 项 1 已如实记录为「未做/未验」,本轮未新增证据,不虚报为已闭合 | — |
+| R2-P3-4 | round-2 §7 item 4:`btrim(...) ~ '[!-~]'` 的 SQL/JS 等价缺少 collation 限定语 | **PRE-CLOSED**(本轮之前;§10.3,三处代码/测试注释加 collation caveat,指回同一主锚点) | `463f42986` |
+| R2-P3-5 | round-2 §7 item 5:补充清单 #1 的前提在本 head 为假,仍未写成独立勘误句 | **PRE-CLOSED**(本轮之前;§10.4,拆成两句独立结论) | `b7737152b` |
+| R2-P3-6 | round-2 §7 item 6(新发现):`atgbb_org_nonblank` 的「今天不可达」是声明,不是检查——`resolveApprovalTemplateGroupOrgId` 只保证非空,不保证 ASCII | **CLOSED-注释**(本轮) | `55eea3a47` |
+| R3-P3-1 | round-3 §3:验证 MD `:789` 一处标「原话」的引用,`carries` 的前三个字母被换成了西里尔同形字 | **PRE-CLOSED**(本轮之前;§12.2,python 精确替换 + 复扫零残留;门审报告自身两处副本不在授权范围内,如实记录未改) | `c6f700fe1` |
+| R3-P3-2 | round-3 §3:三个文件写死的「污染来源」机制(「同一次 run 里某个 OTHER 更早文件」)与实测不符(该步骤自身残留实测为 0) | **PRE-CLOSED**(本轮之前;§12.3,改写为「来源未定位、体量未测量、暴露已确证」) | `c6f700fe1` |
+| R3-P3-3 | round-3 §3:MD §11.5 把 `test:unit` 称作「core-backend 全量无 DB 单测」,窄于 required lane 真正跑的 `pnpm --filter @metasheet/core-backend test` | **PRE-CLOSED**(本轮之前;§12.4,按正确命令改记数字) | `c6f700fe1` |
+| R4-P3-1 | round-4 §4:`batches-list` 新 helper 注释把 cross-org 用例的假绿写成「unaffected either way」,与同一提交 §12.7 的自我指控「假绿」不同调 | **CLOSED-注释**(本轮;与 §12.7 同调改写为「vacuous above the cap」,并注明这是发现但未修的暴露面,不是「无需动作」) | `b9f00f9d0` |
+| R4-P3-2 | round-4 §4:MD §11.6「保持不动」名单在原地已过期(`batches-list` 已在 §12.1 被改动),失效标记只活在 §12.6 | **CLOSED-MD**(本轮;按 `feedback_supersession_marker_must_evaluate_not_void` 贴到 §11.6 原句求值,不删除原句) | `e4cf5e107` |
+| R4-P3-3 | round-4 §4:「634 行」被当成 E14 复现口径记录,但承重的量是通过上限检查的 `eligible.length`(`storable_unlinked`),不是插入行数;门审第 4 轮已用「NULL/非 NULL 各半」配比测出反例(634 行仅 317 可归组,不越限) | **CLOSED-MD**(本轮;§12.1 补求值段落 + §12.5 表格行注明实测承重量 617) | `e4cf5e107` |
+
+### 13.2 撤回类改动的全分支 grep 扫描(零命中要求)
+
+| 撤回的措辞 | 扫描范围 | 结果 |
+|---|---|---|
+| `unaffected either way`(round-4 P3-1 的原句,限定在被改写的那个语境) | `packages/core-backend/tests/integration/approval-template-groups-backfill-batches-list.db.test.ts` | `grep -c` = **0**(该文件内)。全仓 `grep -rn` 命中 2 处,均是与本主题无关的既有短语(`src/types/plugin.ts:513` 讲插件覆盖安装、`src/routes/approvals.ts:3419` 讲 G-12(b) 的另一条正控),不是被撤回的那句 |
+| 「every org id already IN the database is ASCII」(round-2 P3-6 的原句) | `packages/core-backend/src` 全目录 | **0** |
+| 本轮三处新增文字自身的绝对词族普查(`regardless`/`never`/`always`/`impossible`/`guarantee`/`cannot` 等 13 词族,沿用 round-4 门审 §3 的扩展词表) | `git diff 623a0447f..e4cf5e107` 的全部新增行(`+` 行,三个修复提交,不含本节自身的记账文字) | 4 处命中,逐条求值:两处是描述**代码实际保证边界**的事实陈述(`only GUARANTEES .trim().length > 0` / `does NOT guarantee ASCII`,可读源码验证),一处是「无论假设是否成立,这个映射都安全」的条件安全性陈述(`regardless of whether the observation holds`,承重于映射函数是纯函数 + 有单元测试),一处是「这条单测测不到可达性」的能力否定陈述(`it cannot exercise reachability itself`,描述测试设计本身,可读测试源码验证)。四处均非「不看条件、宣称任意场景恒真」的过强断言,PASS |
+
+### 13.3 同形字 / 隐藏字符机械复扫(本轮三处编辑)
+
+python `unicodedata` 逐字符扫描本轮编辑的 3 个文件(Cyrillic/Greek/组合符/NUL/零宽/NBSP 区段):**全 0 命中**。
+
+### 13.4 回归证据(本轮,私有库 `ms2_p3hygiene_r1`,处女库,用完 `dropdb`)
+
+| 步骤 | 命令 / 要点 | 结果 |
+|---|---|---|
+| tsc | `cd packages/core-backend && npx tsc --noEmit` | EXIT=0,零输出(R2-P3-6 提交前后各跑一次,均 0) |
+| 建库 + 迁移 | `dropdb --if-exists ms2_p3hygiene_r1 && createdb ms2_p3hygiene_r1` + `DATABASE_URL=… pnpm run db:migrate` | 全量迁移,末条 `zzzz20260919090000_create_approval_template_group_backfill_batches` |
+| A-1 两文件 + A-3 五文件,处女库 | `EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run <7 个文件> --reporter=dot` | `Test Files 7 passed (7)` / `Tests 86 passed (86)`——与 §10.5/§12.5 记录的基线数字逐字相同 |
+| `atgbb_org_nonblank` 单元测试(R2-P3-6 触碰的注释所在文件的判别力测试) | `EXPECT_DB=1 npx vitest run tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts --reporter=dot` | `Test Files 1 passed (1)` / `Tests 3 passed (3)` |
+| required real-DB 步骤整份 84 文件逐字复现(`plugin-tests.yml:1613-1699` 原样抄出,唯一改动是 `DATABASE_URL`) | `EXPECT_DB=1 bash -e /tmp/p3hygiene-realdb-step.sh` | `Test Files 84 passed (84)` / `Tests 943 passed (943)` / **EXIT=0**——与 §11.5/§12.5 记录的基线数字逐字相同 |
+| core-backend 全量无库 lane(required `test (20.x)` 的另一半) | `env -u DATABASE_URL -u EXPECT_DB CI=true pnpm --filter @metasheet/core-backend test --reporter=dot` | `Test Files 932 passed \| 175 skipped (1107)` / `Tests 14722 passed \| 1604 skipped (16326)` / EXIT=0——与 §12.4/门审 E11/E15 记录的数字逐字相同;`grep -c "tests/integration/approval-template-groups"` = 0(零收集),正控 `grep -c "tests/integration/"` = 209(非空转) |
+| 清库 | `dropdb ms2_p3hygiene_r1` → `psql -lqt \| cut -d'\|' -f1 \| grep -c ms2_p3hygiene_r1` | **0** |
+
+### 13.5 `git diff --stat`(证明只动测试/注释/MD/scripts;起点 = rebase 后本轮开始处)
+
+```
+$ git diff --stat 623a0447f32ad80b02cfd61cb70787f3df04179d..e4cf5e107 (R2-P3-6 + R4-P3-1 + R4-P3-2/3 三个修复提交,不含本节自身)
+ .../approval-template-groups-phase2-backfill-verification-20260918.md |  6 ++++--
+ .../src/services/ApprovalTemplateGroupService.ts                      | 19 ++++++++++++++++---
+ .../approval-template-groups-backfill-batches-list.db.test.ts         | 14 +++++++++++---
+ 3 files changed, 31 insertions(+), 8 deletions(-)
+```
+
+文件集合核验:`git diff --name-only 623a0447f..e4cf5e107 | grep -v -E "\.md$|tests/integration/.*\.db\.test\.ts$"` 命中 1 个文件——`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`(R2-P3-6);已在本节 §13.2 上方逐 hunk 核过:该文件的改动**全部落在 `/** ... */` doc-comment 块内**(`git diff` 的每一行 `+`/`-` 都在注释符号之间),零一行可执行语句/声明/类型改动,`const NONBLANK_CHECK_CONSTRAINTS = new Set([...])` 本身未变。本节自身(§13)是对同一份验证 MD 的第 4 次追加编辑,不引入新文件,不改变以上文件集合结论。
+
+### 13.6 未闭合项与下一步(如实登记,不算已满足)
+
+- **R2-P3-3(验收 E 终态腿)**:需要一个真正构造并发(两个连接、两次真并发 `POST …/execute`)的真库测试,证明后到者退化为 `{batchId:null}` 而不是重复归组。这不是本轮「改注释/改断言/补正控」的机械范围,记入下一实现步骤(与 §5 项 1 保持一致的记账,不重复计一次新发现)。
+- 本轮**没有**触碰 `serialization.db.test.ts`/`batches-list.db.test.ts` 的产线暴露面本身(§12.7 已知的两类超限行为问题)——那两类需要给测试新增真实的 sink/断言,超出「注释/MD 措辞收口」的边界,继续留给 owner/后续 lane,如实不算作本轮已处置。
