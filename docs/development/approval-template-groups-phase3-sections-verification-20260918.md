@@ -330,6 +330,28 @@ $ grep -o "approvalTemplateCenterSections" apps/web/scripts/run-required-web-tes
 
 **两个纯函数单元测试文件**(`approval-template-group-section-token.test.ts`、`approval-template-group-reorder-validation.test.ts`)本身就是穷举式正/反例(13 条 + 7 条),其判别力来自枚举覆盖而非事后 mutation,未对它们额外做源码级 mutation。
 
+### 7.1 Round-2 门审的独立 12 条 mutation 台账(`impl-gate-A4-round2-20260918.md` §3,round-2 门审者亲跑,本轮 P3 卫生轮未重跑)
+
+round-2 门审对本切片跑了一轮**独立于**上面 §7 表(round-1 台账,M1–M11)的 12 条 mutation,命名 `MD1`–`MD12`(与上表 M1–M11 是**两套独立编号**,不要按数字对齐合并——例如 `MD6` 与 `M3` 都是"每节 total 改由后端返回页拼"同一处探针,由两个不同的人在两次不同的轮次各自亲跑,结果一致但不是同一条记录)。round-2 门审要求「第 3 轮的第一件事就是 commit 这份 MD 并把本轮 12 条台账一并并入」——本节即完成这项要求。**出处**:全部 12 条转录自门审报告本身,round-2 门审者亲自 `cp` 备份 → 改 → 跑 → 还原 → `cmp` 逐字节校验;本 P3 卫生轮(2026-09-19)只转录、未重跑这 12 条(时间预算内不重复门审已完成的工作,同 §7 对 round-1 M1–M9 的处理方式)。
+
+| # | 目标 | 探针 | 结果 | 还原 |
+|---|---|---|---|---|
+| MD1 | `TemplateGroupSections.vue:307` | 每节 `total` 改由客户端拼(`res.data.length`) | **红**,恰 1 条:`renders per-section items and the section-own total…` `expected '1' to be '7'`(17 条兄弟全绿)⇒ **P2-2 已闭合** | `cmp` 逐字节相同 |
+| MD1b | 同上 | 同一 mutation 下跑整条 required 前端门(`run-required-web-tests.sh`) | **`WEB_EXIT=1`**,`Tests 1 failed \| 7181 passed (7182)`,`FAIL tests/approvalTemplateCenterSections.spec.ts` ⇒ required 车道真的收住了这条修复 | 同上 |
+| MD2 | `routes/approvals.ts:1288` | **删**reorder 路由的 `approvalTemplateAdminGuard` | **红**,恰 1 条:`authorization: reorder requires approvalTemplateAdminGuard…` `expected 200 to be 403` ⇒ **P2-1 已闭合** | `cmp` 逐字节相同 |
+| MD3 | 同上 | **换**成 `rbacGuard('approvals:read')`(不是删) | **绿 6/6 —— 判别力为零** ⇒ round-2 gate P3-2(锁未点名的残留)——**本轮(2026-09-19)已闭合,见 §14** | `cmp` 逐字节相同 |
+| MD4 | `routes/approvals.ts:663-667` | 删未知 `section=` 令牌的 400,改为静默下沉 | **红**,恰 1 条:`C/J: malformed section requests…` `expected 200 to be 400` | `cmp` 逐字节相同 |
+| MD5 | `routes/approvals.ts:649-656` | 删 `?category=` 与 `section` 同现的 400 | **红**,恰 1 条:同上用例 `expected 200 to be 400` | `cmp` 逐字节相同 |
+| MD6 | `ApprovalTemplateGroupSectionService.ts:182` | 每节 `total` 改由返回页拼(`result.rows.length`,后端) | **红**,恰 1 条:`C: pagination is scoped to the section…` `expected 1 to be 5` | `cmp` 逐字节相同 |
+| MD7 | DB 约束 | `atg_sort_unique` drop + 重建为 **NOT DEFERRABLE** | **红 3 条**:happy path / 授权用例的管理员正控腿 / 并发格,全部 `expected 500 to be 200` | 约束改回 `DEFERRABLE INITIALLY DEFERRED`,`pg_constraint` 复核 |
+| MD8 | `ApprovalTemplateGroupReorderService.ts:118` | 删 `SELECT pg_advisory_xact_lock`(L0) | **红**:`waitUntilBackendBlockedByHolder` 超时硬失败,不是静默通过 | `cmp` 逐字节相同 |
+| MD9 | 同上 `:130` | off-by-one(`sortOrder = index` 而非 `index + 1`) | **红 3 条**:happy path 深比较、授权用例、并发格 | `cmp` 逐字节相同 |
+| MD10 | 同上 `:120` | 删 `activeRows` 查询的 `archived_at IS NULL` 半句 | **红**,恰 1 条:`400 GROUP_REORDER_SET_MISMATCH…` `expected 500 to be 400` | `cmp` 逐字节相同 |
+| MD11 | `…SectionService.ts:108` | 删 `ungrouped` 桶的 `OR t.category = ''` 半句 | **红**,恰 1 条:四桶 ④ | `cmp` 逐字节相同 |
+| MD12 | `…SectionService.ts:117-121` | 锁 §4 行 D 自己点名的 B′ 形态:`NOT EXISTS(…AND l.group_id IS NOT NULL)` | **红**,恰 1 条:行 D 的后备谓词承重(round-1 门审对行 D 的判定是**推断**,MD12 是本轮相对 round-1 的增量,把它真的跑出来了) | `cmp` 逐字节相同 |
+
+任务书点名的三条必跑 mutation round-2 也全部覆盖且全部红:DEFERRABLE 依赖 = MD7;删 section 令牌校验 = MD4;分页 total 改由客户端拼 = MD6(后端)+ MD1(前端)。
+
 ## 8. 撤销/重数脚本 —— 并入本文档之后的重跑(替换 §1.4 的旧行号锚点)
 
 `rebase-note` 文件已删除,其自身的两处历史命中(旧 `:33`/`:61`)不再存在于 diff 面里。按 `atg-retraction-sweep.sh` 自身「任何进一步编辑后重跑」的要求,在本次删除+新增两份 MD 的提交之后重跑:
@@ -428,7 +450,7 @@ EXIT=0
 | 命令 | 结果 | 与门审报告 §8 / §4 旧值对比 |
 |---|---|---|
 | `pnpm type-check` | `EXIT=0`,`packages/core-backend: Done` / `apps/web: Done`(含 `type-check:verification-approval`/`type-check:verification-stock-prep` 两个附属 project) | 与门审报告一致(`EXIT=0`,零报错) |
-| `CI=true pnpm --filter @metasheet/core-backend test`(全量,无库) | `Test Files 933 passed \| 175 skipped (1108)` / `Tests 14737 passed \| 1604 skipped (16341)`,`EXIT=0` | **逐位相同**——两个新用例都在 `.db.test.ts` 文件里,`describeIfDatabase` 无 `DATABASE_URL` 时整块跳过,故这条无库全量套件的数字不因新增用例而变 |
+| `CI=true pnpm --filter @metasheet/core-backend test`(全量,无库) | `Test Files 933 passed \| 175 skipped (1108)` / `Tests 14737 passed \| 1604 skipped (16341)`,`EXIT=0` | **逐位相同**——**机制更正(2026-09-19 P3 卫生轮,round-2 门审 P3-1 第 2 点)**:这条数字不动,原因不是 `describeIfDatabase`/`describe.skip`;真正的机制是 `packages/core-backend/vitest.config.ts` 把四个 `approval-template-groups-*.db.test.ts` 整文件排除在这条无库套件的收集面之外——文件根本没被收集,新用例连带整个文件都不参与这次统计。判别式:若真的只靠 `describe.skip`(文件被收集、只是内部整块跳过),新增的这条授权用例会让 `skipped` 从 1604 涨到 1605、`total` 从 16341 涨到 16342(`describe.skip` 仍然收集并计数跳过的用例);实测两个数字都未变,说明文件确实未进入收集面,不是「收集了但跳过」 |
 | `bash -e apps/web/scripts/run-required-web-tests.sh` | `WEB_EXIT=0`;剥 ANSI 后机械求和(`grep "Test Files"`/`grep "Tests "` 逐段求和,`grep -c "^ FAIL"`)**19 段 / 568 files / 9122 tests 全 passed**,`^ FAIL` 计数 = **0** | **逐位相同**——修复只改了这条被 required 收的 `approvalTemplateCenterSections` token 命中的那一个文件内部的断言/夹具,文件数与用例数不变(仍是 1 个文件、18 条用例),只是其中一条用例的期望值从 `'1'` 改成了 `'7'` |
 
 另单独重跑两个改动文件本身(见 §11.1/§11.2):`approval-template-groups-reorder.db.test.ts` 私有库 `metasheet2_lock_a4` 上 **6/6**;`approvalTemplateCenterSections.spec.ts` **18/18**。
@@ -470,3 +492,99 @@ Test Files  4 passed (4)
 修复:无。四条腿全绿,未触碰任何生产代码,未修改任何测试,未应用迁移到共享库(`metasheet2_a4_ci` 为本次新建的一次性专用库)。收尾 `dropdb metasheet2_a4_ci`;`df -h /` 释放前 5.8Gi、释放后 5.9Gi 可用。
 
 本节之外一点记录在案、不在本轮四条腿范围内:本分支同一份 diff 里给 `plugin-tests.yml` 新增了一个独立具名步骤「Approval template-groups CI wiring contract」(`node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs`,行 ~519),脚本文件已在分支上存在;它既不在 `scripts/ops/__tests__/*.test.mjs` 通配符里也不影响 `EXPECTED_OPS_TESTS_COUNT=48` 计数闸,未纳入本次①-④复现,如实记录供开 PR 后核对该步骤本身是否绿。
+
+## 14. P3 卫生轮(2026-09-19)
+
+**范围**:门审报告 `impl-gate-A4-round1-20260918.md` §3(6 条)与 `impl-gate-A4-round2-20260918.md` §2/§9(round-2 自己新记的 3 条,含对 round-1 P3-4 的反驳/收窄,以及 round-1 P3-2/P3-3/P3-5/P3-6「本轮零处置」的重申)——两份报告合计的「仍开放 P3」去重后是 **8 条**(round-1 P3-1 的诉求已被 round-2 P3-1 吸收重述,不单列)。
+
+**前置**:本轮开工前先 `git rebase origin/feat/approval-template-groups-phase1`(栈底 phase1 分支在两份门审报告落笔之后又推进了约 35 个提交,含它自己的一轮 P3 卫生),`git rebase` **零冲突**(`Successfully rebased`,45/45),`git push --force-with-lease` 已执行一次。rebase 后重新核对 round-2 §6.5 的 s6a 钉:`sha256sum` 现算 `c63eeb5bfabc0aaf74552be66fe8fd7e744e1fcdfcc78dafd45ed1a59a2ee6f4`,与 `s6a-package-provenance-pins.json` 里的 `pluginTestsWorkflow` 逐字节相同——phase1 的重进展里虽然有一次 `plugin-tests.yml` + s6a 的同步再钉提交(`645209861`),但那次改动已经把两者钉在一起,rebase 未引入新的漂移,**无需重算**。
+
+### 14.1 处置表
+
+| # | 出处 | 原文一句 | 处置 |
+|---|---|---|---|
+| 1 | round-2 §2 P3-1(吸收 round-1 §3 P3-1 的诉求) | 「验证 MD §7 的 mutation 台账...在暂存区,没有进任何提交」+「§12 有一处理由不精确:...真正让计数不动的是 `vitest.config.ts:1850` 的 exclude,`describe.skip` 那一半在这里不起作用」 | **CLOSED-MD** — 见 §14.2 |
+| 2 | round-2 §2 P3-2 | 「新授权用例只对『删』掉 guard 有判别力,对『换』成另一把 guard 没有...一行修法:补一个『有 `approvals:read`、没有 `approval-templates:manage`/`approvals:admin-templates`』的第三个 actor」 | **CLOSED-测试** — 见 §14.3 |
+| 3 | round-1 §3 P3-2 | 「`mapReorderConstraintError` 的 `GROUP_SORT_CONFLICT` 有映射但无正向用例」 | **DEFERRED-需行为改动** — 见 §14.4 |
+| 4 | round-1 §3 P3-3 | 「`expect(listApprovalTemplateGroupsSpy).not.toHaveBeenCalled()` 是『断言不发生』,同文件内无正控」 | **CLOSED-测试** — 见 §14.5 |
+| 5 | round-2 §2 P3-4(反驳/收窄 round-1 §3 P3-4) | 「实测该失败模式在本 lane 的配置下不可达...建议把这条从『必须加 `pageSize`』降级为『加了更稳、不加不算缺陷』」 | **CLOSED-MD** — 见 §14.6 |
+| 6 | round-1 §3 P3-5 | 「A-2 的 session-org 脱困入口没接到新的 `section=` 读路径...A-2↔A-4 的合流顺序需要 owner 一句」 | **DEFERRED-owner项** — 见 §14.7 |
+| 7 | round-1 §3 P3-6 | 「目标文档 `goal-three-locks-full-implementation-20260918.md` 的 A-4 状态行已过期:写着『已落 @`3218a4aaa`...』」 | **CLOSED-MD**(外部文档,已由其它 lane 更新;本轮验证一致)— 见 §14.8 |
+| 8 | round-2 §2 P3-5 | 「`EXPECT_DB` 在 `plugin-tests.yml` 里一处都没设...这些哨兵在 CI 里恒为 `it.skip`,从不执行」 | **DEFERRED-需行为改动** — 见 §14.9 |
+
+### 14.2 #1 CLOSED-MD — 验证 MD 提交状态 + §12 机制理由
+
+round-2 门审的 P3-1 有两层:(a)round-1 收敛项 2 要求的「11 条台账并入 §7」在 round-2 审查的 head(`e214184af`)上还只在暂存区——这一层在本轮修复轮内(`aa105931b`,2026-09-18)已经提交,不是本次 P3 卫生轮做的;(b)round-2 自己新加的两项要求当时确实还没有任何提交做过:round-2 自己亲跑的 **12 条**(`MD1`–`MD12`,与 round-1 的 `M1`–`M11` 是不同编号)从未并入本文档,以及 §12 那句「两个新用例...`describeIfDatabase` 无 `DATABASE_URL` 时整块跳过」的机制解释本身不精确(真正机制是 `vitest.config.ts` 的 exclude,不是 `describe.skip`——若只靠 `describe.skip`,`skipped`/`total` 计数会随新用例增加而变动,实测未变动)。
+
+本轮处置:新增 §7.1(round-2 的 12 条独立台账,标注为「round-2 门审者亲跑,本轮未重跑」,不与 §7 的 round-1 台账混编号)+ 改写 §12 第二行(机制更正,给出判别式)。
+
+### 14.3 #2 CLOSED-测试 — reorder 授权用例补第三个 actor
+
+`packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts` 的 `authorization: reorder requires approvalTemplateAdminGuard...` 用例新增 `readerOnly` actor(`roles:'user', perms:'approvals:read'`),断言与 `nobody` actor 相同的判别式拒绝体(403 + `{error:'Insufficient permissions'}`)。
+
+**本轮亲跑验证**(私有库 `ms2_a4_p3hygiene_20260919`,处女库):
+
+1. 修复后现状:**6/6 全绿**(含新 actor)。
+2. **mutation 探针**(`cp` 备份 `routes/approvals.ts` → 把 `:1288` 的 `approvalTemplateAdminGuard` **换**成 `rbacGuard('approvals:read')`——round-2 门审 MD3 的同一处替换探针,不是删除):同一命令重跑,**恰 1 条转红**——新增的 `readerOnly` 腿 `expected 200 to be 403`(其判别式断言那行未执行到),其余 5 条(含 `nobody` 腿)不受影响;这就是 round-2 MD3 发现「`nobody` 一个人扛不住换 guard」的那个缺口现在被堵上的直接证据。
+3. `cp` 恢复 `routes/approvals.ts` 后 `cmp` 逐字节相同;恢复后重跑本文件 **6/6 全绿**;随后与 lifecycle/serialization/sections 三个兄弟文件合并重跑 **4 passed (4) / 40 passed (40)**,无回归。
+
+### 14.4 #3 DEFERRED-需行为改动 — `mapReorderConstraintError` 无正向用例
+
+`ApprovalTemplateGroupReorderService.ts:44` 的 `mapReorderConstraintError` 是模块私有函数(未 `export`)。要给它加一条正向格式用例(不经过真实约束违反,直接构造一个 postgres 约束错误对象喂给它),唯一途径是把它从私有函数改成 `export function`——这是对生产源码可见性面的改动,不在本轮「只允许测试、注释、MD、scripts/dev」的范围内(即使调用点行为零变化)。round-1 门审已确认它在正确实现下不可达(reorder 全程持 L0 + 写完整活跃集),不是活缺口,只是防御性分支缺一条正向格。登记为 DEFERRED,交下一轮实现性修复(需要 owner 认可"导出一个私有符号供测试直调"这个改动形状,或改用集成层面的构造手法)处理。
+
+### 14.5 #4 CLOSED-测试 — `not.toHaveBeenCalled()` 的同文件正控
+
+侦察结论(与 advisor 复核一致):`apps/web/tests/approvalTemplateCenterCategory.spec.ts` 挂载的是 `TemplateCenterView.vue`,而这个组件的脚本**从未**导入 `listApprovalTemplateGroups`(只有 `TemplateGroupSections.vue` 会调用它,做 phase-3 的分组视图)——所以「同一文件内构造一条会真的调用这个函数的路径」这件事,在这个组件身上**架构上不存在**,不是没找而是没有。
+
+本轮处置(同文件,两部分):
+
+1. **注释**:在 `not.toHaveBeenCalled()` 断言下方写明上述架构原因,并交叉引用真正的调用点正控——`approvalTemplateCenterSections.spec.ts` 的 `expect(listApprovalTemplateGroupsSpy).toHaveBeenCalledTimes(1)`(同一个 spy 函数,不同组件,`TemplateGroupSections.vue` 确实会调它)。
+2. **测试**:新增一条同文件内的「mock 接线」正控——直接 `await import('../src/approvals/api')` 拿到被 `vi.mock` 接管的真实导出并调用一次,断言 `listApprovalTemplateGroupsSpy` 被记录到这一次调用。这不证明「组件会调用它」(架构上不会),证明的是「如果组件调用了,`not.toHaveBeenCalled()` 不会因为 mock 接线本身坏掉(错路径/被覆盖/热更新失效)而误判为通过」——这是 `not.toHaveBeenCalled()` 唯一可能在本文件内被证伪的失效模式,现在被堵上。
+
+**本轮亲跑验证**:`npx vitest run tests/approvalTemplateCenterCategory.spec.ts` **8/8 全绿**(含新增断言)。
+
+### 14.6 #5 CLOSED-MD — `ungrouped` 正控的 pageSize 降级记录
+
+round-2 门审已实测收窄:`packages/core-backend/vitest.integration.config.ts:26-27` 是 `fileParallelism: false` + `maxConcurrency: 1`(注释原文「Run files serially」),而四桶测试里的 `t1`…`t5` 夹具是在同一条用例里、断言前一刻经生产路径创建的——它们的 `updated_at` 严格新于库里任何既有行,按 `ORDER BY updated_at DESC` 恒在首页前五。要把它们挤出首页需要有并发写入方在同一毫秒窗口内造出 ≥20 条新模板,而串行配置排除了这一点。round-2 因此把这条从「必须加 `pageSize`」降级为「加了更稳、不加不算缺陷」。
+
+本轮处置:仅记录这条降级判定(本节 + 处置表),**不改动测试文件**——round-2 已经给出机械证据,给 `ungrouped` 桶的三次 section 请求追加显式 `pageSize` 是一次纯粹的防御性加固,不修复任何当前会红的东西,在一个已绿的套件上做零风险收益的改动没有必要占用本轮的 mutation-probe 预算;全仓检索确认仓内没有任何地方把「必须加 `pageSize`」写成现在时的强断言需要撤回(`grep -rn` 零命中,见 §14.10)。
+
+### 14.7 #6 DEFERRED-owner项 — A-2 session-org 未接入 section= 读路径
+
+`grep -rn "SessionOrgSwitcher" apps/web/src` 命中的 3 处全部是 `AttendanceSessionOrgSwitcher`(考勤线自己的组件,`apps/web/src/views/attendance/AttendanceSessionOrgSwitcher.vue`),approval 线 A-2 的 `apps/web/src/components/SessionOrgSwitcher.vue` 在本分支**依旧不存在**(`ls` 确认 No such file or directory)——round-1 的披露在 rebase 到最新 phase1 之后仍然成立。这是 A-2(尚未落地/未合并到本 lane)与 A-4(本切片)之间的合流顺序问题,不是本切片能单方面修复的缺陷;继续登记为待 owner 裁决项,设计 MD §6 / 验证 MD §10 的既有披露保持原样。
+
+### 14.8 #7 CLOSED-MD — 目标文档状态行(外部文件,已被其它 lane 更新)
+
+`goal-three-locks-full-implementation-20260918.md` 位于 `~/.claude/projects/.../reviews/`,不在本 git 仓库/本分支内(`grep -rn "3218a4aaa" .` 在整个 worktree 内零命中,该文档也确实不在 `find` 结果里)。现场读取该外部文件:A-4 那一行已经是「**Draft PR #5878**(第 2 轮门审 DRAFT-READY 0 P1/0 P2/5 P3 @e214184af;required 四条复现全绿 @dab7670b6;堆叠在 #5852)」——round-1 点名的 `@3218a4aaa` 已经不在里面,说明这一行在 round-2 门审运行期间或之后已被其它 lane/session 更新过。本轮验证其现状与两份门审报告的事实一致,不重复编辑;提醒:该行引用的 `@e214184af`/`@dab7670b6` 是本轮 rebase 之前的旧头,rebase+push 之后会再次过期,但更新这份跨三把锁的目标文档不属于本 lane 的职责范围,留给下一次触碰该文档的 session。
+
+### 14.9 #8 DEFERRED-需行为改动 — `EXPECT_DB` 在 real-DB 步骤未设
+
+现场重跑 `grep -c "EXPECT_DB" .github/workflows/plugin-tests.yml`(post-rebase head)= **0**,与 round-2 门审的披露一致,rebase 未改变这一点。这不是本切片(phase 3)引入的缺口——四个 phase-3 文件只是复制了 phase-1 两个原始文件已经在用的同一套 `itIfExpectDb` 哨兵模式,且这套模式在仓内约 60 个 `.db.test.ts` 文件里普遍存在,`plugin-tests.yml` 的 `approval-real-db-integration` 步骤从一开始就不设 `EXPECT_DB`,不是本切片改坏的。修复需要给该步骤的 `env:` 加一行 `EXPECT_DB: '1'`——这是对 `.github/workflows/plugin-tests.yml` 的改动,不在本轮「只允许测试、注释、MD、scripts/dev」范围内(工作流文件的改动惯例上还会级联触发 s6a 重新计算,影响面覆盖这条 real-DB 步骤下的全部 60+ 文件,不只是本切片的四个)。登记为 DEFERRED,交 owner 决定是否要把这行加上(以及由谁承担 s6a 重钉与安静窗口协调)。
+
+### 14.10 撤回类改动的全分支扫描(item ③)
+
+以下每条模式在当前分支(`git grep`,含 worktree 全部已跟踪文件)上核实为零命中,证明本轮没有遗留任何应撤回的过强/失真措辞:
+
+```
+$ grep -rn "3218a4aaa" .                                                              # 0 hits(§14.8)
+$ grep -rn "两个新用例都在 \`\.db\.test\.ts\` 里,\`describeIfDatabase\` 无 \`DATABASE_URL\` 时整块跳过" .   # 0 hits(§14.2,旧措辞已被 §12 的更正段替换)
+$ grep -n "NOT RUN" docs/development/approval-template-groups-phase3-sections-verification-20260918.md docs/development/approval-template-groups-phase3-sections-design-20260918.md   # 仅 1 处,是 §7 标题里回顾「替换了什么」的历史提法,非现存台账行
+$ grep -rn "必须加.*pageSize\|pageSize.*必须" docs/development apps/web/tests packages/core-backend/tests   # 0 hits(§14.6,round-1 那句「必须加 pageSize」只存在于外部门审报告,从未写进仓内文件)
+```
+
+另:`bash scripts/dev/atg-retraction-sweep.sh` 现场重跑(post-rebase + post-本轮编辑),`EXIT=0`;扫描范围内本轮新增的命中(`⊇`/`⊂`/`subset`/`superset` 若干处,均在 `origin/main` 自身前进带来的无关文件里,如 `plugin-attendance/index.cjs` 的考勤三层嵌套、`univer-meta.ts` 字段收窄)逐条读过,**零处**触及 `approvalTemplateAdminGuard`/`isTemplateManager` 主题,判定结论(guard/manager 两个方向互不包含)不受影响——已把这次现场重跑的脚注写回 §8(phase1-verification 那份历史更正另见其自身文档,不在本 lane 职责范围内重复维护)。
+
+### 14.11 本轮改动范围(`git diff --stat`)
+
+见 PR/commit 附带的 `git diff --stat <本轮起点>..HEAD`(仓根目录执行,起点 = rebase 完成、push 之前的 head)——改动文件限定为:两个测试文件(`packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts`、`apps/web/tests/approvalTemplateCenterCategory.spec.ts`)与本验证 MD(`docs/development/approval-template-groups-phase3-sections-verification-20260918.md`)三个文件,零生产代码改动,零 workflow 改动,零迁移。
+
+### 14.12 本轮全绿复核(处女库 `ms2_a4_p3hygiene_20260919`,用完 `dropdb`)
+
+- 四个真库套件合并重跑:`Test Files 4 passed (4)` / `Tests 40 passed (40)`。
+- `node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs`:`pass 12 / fail 0`。
+- 两个纯函数单测(`approval-template-group-reorder-validation.test.ts` + `approval-template-group-section-token.test.ts`):`2 passed (2)` / `19 passed (19)`。
+- `apps/web` 改动文件本身:`tests/approvalTemplateCenterCategory.spec.ts` **8/8**。
+- `pnpm type-check`:`EXIT=0`(`packages/core-backend: Done` / `apps/web: Done`)。
+- 收尾 `dropdb ms2_a4_p3hygiene_20260919`。
+
+**处置汇总(8 条:CLOSED 4 / DEFERRED 3 / CLOSED-MD 外部文档确认 1)**:#1 CLOSED-MD、#2 CLOSED-测试、#3 DEFERRED-需行为改动、#4 CLOSED-测试、#5 CLOSED-MD、#6 DEFERRED-owner项、#7 CLOSED-MD(外部)、#8 DEFERRED-需行为改动。三条 DEFERRED 均已登记原因与所需的下一步(owner 裁决或需要一次超出本轮范围的生产/workflow 改动),未做任何生产代码或 workflow 改动。
