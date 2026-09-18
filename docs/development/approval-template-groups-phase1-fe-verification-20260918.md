@@ -518,6 +518,13 @@ $ pnpm --filter @metasheet/web exec vue-tsc -b
 | P3-9(卫生轮自身发现,不在原报告 8 条内) | `run-required-web-tests.sh` 里存在两份几乎相同的 `exec npx vitest run ...` 巨行——第一份(旧)在前、含本切片三个新 token 的那份(重复)在后;bash `exec` 无条件替换进程,第一份一执行,后面整个脚本(含第二份)永不到达。三个新 token 因此**从未被 `web-tests` required job 实际跑过**,报告 §1.4「令牌解析验证」与两份 MD §1/§2.1/§2.3 的「required 覆盖」结论在当前 HEAD 上是假的 | CLOSED-测试+脚本(scripts/dev,允许本轮改) | 本节 §12.9——merge 两行为一行,三个新 token 移到唯一存活行的 `--reporter=dot` 前;`bash -n` 通过;merged 后 token 计数从 394/395(报告口径)变为 **397**;`pnpm --filter @metasheet/web exec vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel --reporter=dot` 现场 4 文件 15 用例全绿 |
 | 复核修正(2026-09-19)— P2-1 | 独立复核门审(`p3-hygiene-gate-A2-20260919.md` §P2-1)证伪本节原 §12.9 的根因("实现者在死副本上继续追加、无人发现")、全称撤回("此前的每一个 HEAD 上都是假的")、以及由此产生的错误"影响声明"三处;逐 commit numstat 核对显示真根因是 rebase/三方合并对单条超长 exec 行的复制(`2699e0a07` 17+/1− vs `2ef7add98` 17+/0−),且 `cb6d7fa9f`/`d3097be00` 两个更早 head 上本无重复、结论本就成立 | CLOSED-MD | §12.9 全文重写(根因表、逐 head 核对表、真机制段、机械前置段、更正后的影响声明);代码修复(合并两条 exec 行)不回退;diffstat 见 §12.12 |
 | 复核修正(2026-09-19)— 报告自身 P3-1 | 同一份复核报告 findings §P3-1(对应本文档 §12.5/原处置表 P3-5):§12.5 把 DEFERRED 的理由写成"超出本轮闭合定义"(暗示规矩不允许),但拆用例/改夹具形状本身落在本轮允许的"测试"改动类别内;真实理由是范围/风险判断 | CLOSED-MD(理由口径更正,处置本身仍是 DEFERRED,不落地) | §12.5 末段重写;diffstat 见 §12.12 |
+| **第三次修正(2026-09-19,`p3-hygiene-gate2-A2-20260919.md`)— P2-1** | 上一轮把 §12.9 的叙事改对了,但同一批被证伪的句子("were ever exercised … until this commit"全称式、"96c512876 added the duplicate copy rather than editing in place"根因、"three later commits kept appending … without anyone noticing"、"tail -1 / first-match … picked the wrong one")在 `apps/web/scripts/run-required-web-tests.sh:1237-1248` 的生产脚本注释里逐字、无限定地存活——本轮未碰这个文件,§12.12 的自扫又带 `-- '*.md'` 限定,结构上看不见 `.sh` | CLOSED-注释 | `apps/web/scripts/run-required-web-tests.sh` 该注释块按本节 §12.9 的真机制改写(rebase 复制根因、`2699e0a07`/`2ef7add98` 的编辑↔追加对照);**exec 行零改动**(改前后 `grep -c "^exec npx vitest run" apps/web/scripts/run-required-web-tests.sh` 均为 1,该行 md5 均为 `03f7fa1797a449fc9b5c2df6ff3e6351`) |
+| **第三次修正 — P2-2** | §12.12 的"撤回类改动自扫"不是真实命令输出:前两条把 `git grep -n` 的多行输出压成一句括号内概括(真实命中 5/3 条而非转录暗示的 1 条);第三条"零命中"与"不是引用后限定这种保留形式"两句都被同一条命令的真实输出推翻(真实命中 2 条,其中一条恰恰就是那种保留形式) | CLOSED-MD | 本节自扫块换成逐字重跑的真实命令(去掉 `-- '*.md'`,改全仓 `-- .`,只取 `file:line`);三条命中数改为如实的 5/3/2 并逐条判读,不再假装零命中或压缩成一行 |
+| **第三次修正 — P3-1** | `scripts/dev/atg-exec-line-post-rebase-check.sh` 的 Check 2(现 Check 3)只实现了"不丢"(`comm -23` 超集判定),`extract_tokens_from_stream` 的 `sort -u` 又把重复证据抹掉,"不重复"这半条判据零覆盖 | CLOSED-脚本 | 新增独立 Check 2(在现有 Check 1 之后、REF_A/REF_B 之前无条件运行):比较当前 exec 行的原始(未去重)token 列表长度与去重后长度,不等则 FAIL 并打印重复 token;mutation 复现 review 原探针(exec 行插入重复 `ApprovalTemplateGroupsPanel`)从 PASS/exit 0 变为 FAIL/exit 2,`cp` 备份/还原、`cmp` 字节相同 |
+| **第三次修正 — P3-2** | Check 2(现 Check 3)在 `git show "$REF:$SCRIPT_PATH"` 解析失败时被 `2>/dev/null \|\| true` 吞掉,`TMP_A`/`TMP_B` 静默变空,并集缩小,`comm` 无缺失,打印 PASS;`:113-115` 的 `if …; then : ; fi` 是纯死代码 | CLOSED-脚本 | 新增 `ref_resolves()`(`git rev-parse --verify --quiet "<ref>^{commit}"` + `git cat-file -e "<ref>:<path>"`),Check 3 运行前先验两个 ref,任一不resolve 立即 FAIL 退出码 4;删除死代码 `if` 块;mutation 复现 review 原探针(`deadbeef1 deadbeef2`)从 PASS/exit 0 变为 FAIL/exit 4 |
+| **第三次修正 — P3-3** | 脚本头部自称"a real precondition gate, not a reporting-only tool",与 §12.12"不构成'守卫'"互相矛盾 | CLOSED-脚本 | 头部改为"a manual precondition … NOT wired into any CI workflow or vitest config",并列出验证依据(`git grep` 该脚本名在 `.github/`、`package.json`/vitest 配置零命中);与 §12.12 措辞不再冲突(现场 `git grep -n "real precondition gate\|reporting-only tool" -- .` 零命中) |
+| **第三次修正 — P3-4** | §12.9 点名的 `2699e0a07`/`2ef7add98`/`96c512876`/`cb6d7fa9f`/`d3097be00`/`5d0f780f5`/`b1e5c745f`/`0144932ac`/`cb9cdf9f6`/`f3137d0de` 十个 SHA 在本 PR 当前谱系(`git merge-base --is-ancestor`)全部 NOT-ANCESTOR,PR 读者 clone 后不可复核 | CLOSED-MD | 两张表各补一列"当前谱系对应件"(按 author date + commit subject 精确匹配,并用 `git patch-id --stable` 交叉验证——除 `2699e0a07` 本身无独立对应件、其"编辑既有行"的形状已被后续 rebase 吸收成"追加"外,其余 9 个均定位到唯一、可达、patch-id 相符的当前谱系提交) |
+| **第三次修正 — P3-5** | §12.12"本轮未再次 rebase"字面成立但读起来像"谱系自上次门审未变",而本轮基线 `c41710ab0` 本身就是把上一门审 head `f3137d0de` 重放到 `origin/main` 新尖端的产物,75 条祖先 hash 全变 | CLOSED-MD | §12.12 硬规矩段改写为如实的谱系陈述:`f3137d0de` → `c41710ab0`(rebase 保活,树逐字节不变)→ `f9cb22666`(本节改写提交,当时的分支尖端);`f9cb22666` 之后(本轮)未再 rebase |
 
 ### 12.2 P3-1:挂载点人口 5 行表(补齐两份 MD 未点名的两份)
 
@@ -597,22 +604,30 @@ $ git log --oneline -S"exec npx vitest run" -- apps/web/scripts/run-required-web
 e0defbe26 ci(attendance): publish a stable web guard check (#4585)
 ```
 
-| commit | committer date 是否 = author date | `^exec npx vitest run` 行数 | numstat(该脚本) |
-|---|---|---|---|
-| `2699e0a07`(**真正的原始提交**,author/committer 均 09-18 06:57:35) | 是 | **1** | **17 insertions / 1 deletion**(改写既有行 + 加 16 行注释) |
-| `2ef7add98`(`2699e0a07` 的 rebase 复制,committer 09-18 20:56:36) | **否** | **2** | **17 insertions / 0 deletions**(纯追加,含一整条 exec 行副本) |
-| `96c512876`(`2ef7add98` 的再一次 rebase 复制,committer 09-19 01:45:13) | 否 | 2(承袭) | 与 `2ef7add98` 逐字节相同(上一版复核已核实) |
+**可达性披露(2026-09-19,第三次复核修正,`p3-hygiene-gate2-A2-20260919.md` §P3-4)**:下表点名的 3 个 SHA(`2699e0a07`/`2ef7add98`/`96c512876`)在本 PR 当前谱系(`origin/feat/approval-template-groups-phase1-fe`)里全部 `git merge-base --is-ancestor … HEAD` → NOT-ANCESTOR——原对象仍在本地 object store(`git cat-file -e` 可核),但 PR 读者 clone 后未必保留。"当前谱系对应件"一列按 author date + commit subject 逐字匹配定位(而不是内容 patch-id——三条里 `2ef7add98`/`96c512876` 与 `9685c6474` patch-id 相同,可独立验证是同一次改动的 rebase 副本;但 `2699e0a07` 作为改行前的**原始**编辑,其 diff 形状本身就与后续 rebase 副本的追加形状不同,因此**没有**独立于 `9685c6474` 之外的"原始编辑形状"对应件——这恰恰是本节机制段的证据之一:同一份改动被 rebase 后从"编辑"变成"追加"):
+
+| commit | committer date 是否 = author date | `^exec npx vitest run` 行数 | numstat(该脚本) | 当前谱系对应件 |
+|---|---|---|---|---|
+| `2699e0a07`(**真正的原始提交**,author/committer 均 09-18 06:57:35) | 是 | **1** | **17 insertions / 1 deletion**(改写既有行 + 加 16 行注释) | 无独立对应件(见上方披露;其"编辑既有行"这一形状在当前谱系里已被 rebase 吸收进下一行的"追加"形状) |
+| `2ef7add98`(`2699e0a07` 的 rebase 复制,committer 09-18 20:56:36) | **否** | **2** | **17 insertions / 0 deletions**(纯追加,含一整条 exec 行副本) | `9685c6474`(同一 author date + subject,patch-id 逐字相同) |
+| `96c512876`(`2ef7add98` 的再一次 rebase 复制,committer 09-19 01:45:13) | 否 | 2(承袭) | 与 `2ef7add98` 逐字节相同(上一版复核已核实) | `9685c6474`(同一 author date + subject,patch-id 逐字相同——`2ef7add98`/`96c512876`/`9685c6474` 三者互为 rebase 副本) |
 
 `2699e0a07` 与 `2ef7add98` author date 逐秒相同(同一份改动)、diff 形状却不同:`2699e0a07` 编辑既有行,`2ef7add98` 是纯追加、制造出一份副本。**上一版复核已验证 `96c512876` 与 `2ef7add98` diff 逐字节相同,但那只证明两个 rebase 副本互相一致,不能证明"重复"这件事本身是原始提交所为**——真正该对照的原件是 `2699e0a07`(该提交无重复,numstat 17/1),不是 `2ef7add98`(该提交已经是重复,numstat 17/0)。head commit `f3137d0de`「verified commit equivalence」验的是"副本↔副本"这一步,不是"原件↔副本"这一步。
 
 **这条重复不是"此前的每一个 HEAD 上都存在"——逐 head 核对(exec 行数 + 三个新 token 命中位置)**:
 
-| head | 说明 | exec 行数 | 三个新 token |
-|---|---|---|---|
-| `cb6d7fa9f` | 两份 MD 的写作 head | **1** | 全部命中,在唯一那条(活)行里 |
-| `d3097be00` | 第 1 轮门审的被审 head | **1** | 全部命中,在唯一那条(活)行里 |
-| `5d0f780f5` | 本轮 rebase 前的尖端 | **2** | 只命中第二条(死)行;第一条(活)行零命中 |
-| `b1e5c745f` | `5d0f780f5` 的 rebase 等价物 | **2** | 同上 |
+下表同样按 author date + subject 定位当前谱系对应件——`0144932ac`(A-1 尖端)与 `cb9cdf9f6`(后来的 A-1 尖端)一并列入,供与上表"真机制"段交叉核对;`f3137d0de`(上一份报告的被审 head)对应件已在 §0 记录为 `c41710ab0`(树逐字节相同),此处一并收录:
+
+| head | 说明 | exec 行数 | 三个新 token | 当前谱系对应件 |
+|---|---|---|---|---|
+| `0144932ac` | A-1 尖端(`2699e0a07^`) | 1 | 0(该行本身尚不含 `StockPreparationDataSourceRegistry`) | `a33f55796`(同 author date + subject) |
+| `cb9cdf9f6` | 后来的 A-1 尖端(`2ef7add98^`) | 1 | 0,但**含** `StockPreparationDataSourceRegistry` | `fa73b39f0`(同 author date + subject) |
+| `cb6d7fa9f` | 两份 MD 的写作 head | **1** | 全部命中,在唯一那条(活)行里 | `3a30f6ba2`(同 author date + subject) |
+| `d3097be00` | 第 1 轮门审的被审 head | **1** | 全部命中,在唯一那条(活)行里 | `6e24b8854`(同 author date + subject;`d3097be00`/`5d0f780f5`/`b1e5c745f` 三者本身互为 rebase 副本,patch-id 逐字相同,故共享同一当前谱系对应件) |
+| `5d0f780f5` | 本轮 rebase 前的尖端 | **2** | 只命中第二条(死)行;第一条(活)行零命中 | `6e24b8854`(同上) |
+| `b1e5c745f` | `5d0f780f5` 的 rebase 等价物 | **2** | 同上 | `6e24b8854`(同上) |
+| `f3137d0de` | 上一份报告的被审 head | 2(承袭) | 同上 | `c41710ab0`(§0 已证树逐字节相同) |
+| — | **当前谱系** | 1(修复后) | 全部命中,在唯一那条(活)行里 | `f9cb22666`(本文档被审 head) |
 
 也就是说,**在被门审的那个 head(`d3097be00`)与两份 MD 撰写时的 head(`cb6d7fa9f`)上,三份 spec 确实在 required 的 `web-tests` job 里**——gate 报告 §1.4「令牌解析验证」与两份 MD §1/§2.1/§2.3 在它们各自运行的那个 head 上**都是对的**,不是被 `tail -1` / first-match 这两个工具的窗口盲区骗过。重复行是后来(committer date)09-18 20:56:36 那次 rebase 才制造出来的,发生在 `d3097be00` 之后、`5d0f780f5` 尖端形成之时。**上一版"此前的每一个 HEAD 上都是假的"这句全称式判断是一次错误撤回**——它撤销的是一份原本正确的证据(记忆:"失效标记要求值不要作废整节")。真正需要更正的只是"当前 HEAD"之前那些**含重复行**的 head(`5d0f780f5`/`b1e5c745f`),不是此前全部历史。
 
@@ -677,7 +692,7 @@ $ git diff --stat b1e5c745f8fbc6d63987223d3af1e56b9b835ef5
 
 对象:独立门审 `p3-hygiene-gate-A2-20260919.md`(NEEDS-FIX,0 P1/1 P2/6 P3)。本节处置该报告的 P2-1(§12.9 根因/全称撤回/影响声明三处证伪)与报告自身 findings §P3-1(§12.5 DEFERRED 理由口径错,对应本文档 P3-5)。报告裁决原文只记 1 条 P2(`P2-1`);其余 6 条落在报告自定的"新 P3 只记不阻塞"收敛口径内,本轮不逐条处理,留给下一次允许更广改动面的轮次(报告 §5 的 P3-2..P3-6 分别涉及生产代码判据强度、mutation 证据形状、DOM id 共享等,均非本轮"只改 MD/注释/scripts/dev"能安全闭合的项)。
 
-硬规矩:生产代码零行为改动;只许 MD/注释/scripts/dev;不动 PR 状态与 body;不改锁文;不 rebase 到 base 分支(只 `git rebase origin/main` 保活,本轮未再次 rebase)。
+硬规矩:生产代码零行为改动;只许 MD/注释/scripts/dev;不动 PR 状态与 body;不改锁文;不 rebase 到 base 分支。**谱系陈述更正(2026-09-19,第三次复核修正,`p3-hygiene-gate2-A2-20260919.md` §P3-5)**:上一版这里写"本轮未再次 rebase"——字面在"改写提交之后未再 rebase"这个意义上成立,但读起来像"自上次门审以来谱系未变",而谱系已变,容易误导。如实的顺序是:本节改写提交(`f9cb22666`,当时的分支尖端)之前,曾对上一轮门审的被审 head 做过一次 `git rebase origin/main` 保活——`f3137d0de`(上一份报告的被审 head)→ `c41710ab0`(rebase 后的尖端,§0 已证 `git diff f3137d0de c41710ab0` 为空、树逐字节不变,只是 75 个祖先提交的 hash 全部改写)→ `f9cb22666`(在 `c41710ab0` 上追加本节 §12.9/§12.11/§12.12 的卫生修复,得到当时的分支尖端);`f9cb22666` 之后(本轮,第三次复核修正)只追加新提交,未再 rebase。
 
 ```
 $ git diff --name-status c41710ab0
@@ -687,17 +702,36 @@ A	scripts/dev/atg-exec-line-post-rebase-check.sh
 
 `--name-status`(而不是 `--stat` 的行数/字节数)是本节的主要证据,因为它在这段文字自己被写入文件之后再重跑也不会变——`--stat` 的行数会随着"把这段证据本身写进文档"这个动作而回退性地对不上,是自指的。截至本节写作时的一次性快照供参考:`git diff --stat c41710ab0` → `2 files changed, 204 insertions(+), 11 deletions(-)`(该数字是**插入本段之前**的计数,之后每次编辑本节都会使其略微过期,不作为判据——上面的 `--name-status` 才是)。
 
-两个文件零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"验证 MD"与"新增的 scripts/dev 只读检查脚本"两类。`scripts/dev/atg-exec-line-post-rebase-check.sh` 不是测试文件(不在任何 `tests/`、不带 `.spec.`/`.test.` 后缀、不被任何 CI workflow 或 vitest 配置引用),是 §12.9"机械前置"要求的独立小工具;本轮亲跑三条自测(正控:对本次真实的 bug 提交 `b1e5c745f` 复现检测出 2 条 exec 行,退出码 1;正控:对当前已修复文件 + `cb6d7fa9f`/`d3097be00` 两个真实 head 跑 union 检查,退出码 0;负控攻判据:临时把当前文件的 exec 行摘掉一个 token 后再跑,退出码 2 且报出被摘掉的具体 token),跑完用 `cp` 备份/还原、`cmp` 确认字节相同,`git status --porcelain` 对被 mutate 的文件为空。
+两个文件零 `src/**`、零 `apps/web/tests/**`、零 `packages/**`、零迁移、零 workflow、零锁文——全部落在"验证 MD"与"新增的 scripts/dev 只读检查脚本"两类。`scripts/dev/atg-exec-line-post-rebase-check.sh` 不是测试文件(不在任何 `tests/`、不带 `.spec.`/`.test.` 后缀、不被任何 CI workflow 或 vitest 配置引用),是 §12.9"机械前置"要求的独立小工具;本轮亲跑三条自测(正控:对本次真实的 bug 提交 `b1e5c745f` 复现检测出 2 条 exec 行,退出码 1;正控:对当前已修复文件 + `cb6d7fa9f`/`d3097be00` 两个真实 head 跑 union 检查,退出码 0;负控攻判据:临时把当前文件的 exec 行摘掉一个 token 后再跑,退出码 2 且报出被摘掉的具体 token),跑完用 `cp` 备份/还原、`cmp` 确认字节相同,`git status --porcelain` 对被 mutate 的文件为空。**退出码更正(第三次复核修正)**:上一句"退出码 2"是旧脚本(两检查版本)的编号;脚本改成三检查(新增独立的"不重复"判定)后,原来"缺 token"这半条判据的退出码改为 **3**(重跑上面同一个负控探针——对当前文件真实摘掉 `ApprovalTemplateGroupsPanel` 后跑 `cb6d7fa9f`/`d3097be00` union 检查——现场复现 `FAIL: … MISSING: ApprovalTemplateGroupsPanel`、`EXIT=3`,`cp` 备份/还原、`cmp` 字节相同);脚本自身头部注释与本文档处置表(第三次修正 P3-1/P3-2)已同步为新编号,此处历史记录不回改,仅在此更正指向。
 
-**撤回类改动自扫**(比照 §12.10 的纪律,对本节改写自己扫一遍,确认被证伪的三句话零处以"成立"口吻残留):
+**撤回类改动自扫(第三次复核修正,2026-09-19)**:比照 §12.10 的纪律,对本节改写自己扫一遍。**上一版此处的三条转录不是真实命令输出**——已被独立复核门审 `p3-hygiene-gate-A2-20260919.md` §P2-2 证伪:前两条把 `git grep -n` 的多行原始输出各压成一句括号内的概括,并把真实命中数说成 1;第三条的"零命中"与"不是引用后限定这种保留形式"两句,都被同一条命令的真实输出推翻。以下三条**去掉 `-- '*.md'`,改为全仓 `-- .`**、只取 `file:line`(不截取内容——上一版的问题正是编造内容摘要充当命令输出,这次不重犯)、逐字重跑。每条命令的搜索串本身会在下方 code fence 里出现一次,因此该命令行自身构成一条"自指"命中(展示搜索模式必然如此),不当残留计:
 
 ```
-$ git grep -n "此前的每一个" -- '*.md'
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:(本节改写说明自身引用旧文措辞)
-$ git grep -n "无人发现" -- '*.md'
-docs/development/approval-template-groups-phase1-fe-verification-20260918.md:(本节改写说明自身引用旧文措辞)
-$ git grep -n "在.*之前的所有历史 HEAD 上.*都是假的" -- '*.md'
-(零命中——旧句已整句替换,不是"引用后限定"这种保留形式)
+$ git grep -n "此前的每一个" -- . | cut -d: -f1,2
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:148
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:519
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:608
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:617
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:695
 ```
 
-逐条判读:前两处命中都出现在"上一版最初把……写成……"这类回顾性说明句里,不是独立、无限定地重申旧结论;第三处(全称撤回原句)在改写后已**整句删除**,不是像 P3-4 那样以"originally said"限定词保留。按"失效标记要求值不要作废整节"的纪律:本节要撤回的是旧版 §12.9 那三处结论本身,而不是"这些字符串不得再出现"。
+真实命中 **5** 处,不是上一版暗示的 1 处。`:148` 是 §12.9 开头的复核修正段,用"本节最初的这条更正说……——这句全称式判断是错的"的回顾句式转述并撤销;`:519` 是处置表行,转述报告原文指出的错误;`:608` 是 §12.9 一处小标题式的否定句("这条重复不是……——逐 head 核对……");`:617` 是 §12.9 影响声明段,同样以"……这句全称式判断是一次错误撤回"收尾;第 5 处是本条命令行自身。**逐条判读:全部回顾式/自指,零处以"成立"口吻残留。**
+
+```
+$ git grep -n "无人发现" -- . | cut -d: -f1,2
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:519
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:586
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:706
+```
+
+真实命中 **3** 处,不是上一版暗示的 1 处。`:519`/`:586` 都在转述并撤销原 §12.9 那句已证伪的根因描述("实现者在死副本上继续追加"那句的后半);第 3 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留。**
+
+```
+$ git grep -n "在.*之前的所有历史 HEAD 上.*都是假的" -- . | cut -d: -f1,2
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:644
+docs/development/approval-template-groups-phase1-fe-verification-20260918.md:715
+```
+
+真实命中 **2** 处,不是上一版声称的 0 处。`:644` 正文把这句被证伪的全称断言完整放在引号内、紧跟"按上文逐 head 核对,这句话不成立"——**恰恰就是**上一版宣称不存在的那种"引用后限定"保留形式(整句原文保留,不是"originally said"式的部分改写);第 2 处是本条命令行自身。**全部回顾式/自指,零处以"成立"口吻残留**——但上一版"零命中"与"不是引用后限定这种保留形式"两句表述本身是假的,已在本段开头更正,不再以转录形式重复出现在别处。
+
+三条搜索串给出的判读结论一致:被证伪的旧结论只以"上一版说过……"这类回顾性引用形式存在,没有一处以独立、无限定的当前事实口吻重新站立。按"失效标记要求值不要作废整节"的纪律,本节要撤回的是旧版 §12.9 那三处结论本身,而不是这些字符串一旦出现就必须清零——只要出现处都带着否定/回顾限定,就合乎要求。
