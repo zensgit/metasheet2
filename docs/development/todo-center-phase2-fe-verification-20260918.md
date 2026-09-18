@@ -584,6 +584,13 @@ no-op 路由;那半句仍是文件级注释里陈述的推理,不是本轮另跑
   `cmp` 字节相同。
 - 两次还原后 `git status --porcelain` 只剩本轮意图改动的四个路径(见 §11.5),无 mutation 残留。
 
+**自我更正,推送前发现(同一提交范围内,不是另一轮门审指出的)**:`isSameOriginRelativeHref` 上方
+的文档字符串曾写「it is not the shared `isTodoResponseDegraded`-style rule the badge and this page
+both apply」——单独按这一行读(不看否定词前的完整上下文),它断言的是「badge 与本页共用该规则」,与
+§11.2 在另外两处原地撤回的**同一条**过强声明字面矛盾,即便本句的原意是否定它。已改写为不含
+「both apply」这类措辞:新句只说该谓词与 `isTodoResponseDegraded` 无关、后者只有 `ApprovalTodoBadge.vue`
+一个调用方。
+
 ### 11.2 P3-4 —— `isTodoResponseDegraded`「徽标与中心页共用」的过强断言(两处文档字符串,均改)
 
 **位置与事实**:`apps/web/src/todo/api.ts:60-65`(函数自身文档字符串)与
@@ -639,12 +646,14 @@ clearToken, setExplicitSessionOrg, and the forced-relogin branch inside bootstra
 
 ### 11.5 重跑的闸(本轮改动只在 apps/web,零后端 diff)
 
+代码 diffstat 不含本 MD 自身(自指:这份文档的最终字节数只有写完本节之后才能知道,对自己取 diffstat
+会引用一个还没定型的数字——与 P3-1 同一类陷阱,这里直接避免而不是估算),命令逐字粘贴,未重排列宽:
 ```
-$ git diff --stat c31f928a6..HEAD
- apps/web/src/approvals/components/ApprovalTodoBadge.vue |  22 +++++--
- apps/web/src/todo/api.ts                                 |  21 +++++--
- apps/web/src/todo/views/TodoCenterView.vue                |  69 +++++++++++++++++++++-
- apps/web/tests/TodoCenterView.spec.ts                      |  38 ++++++++++++
+$ git diff --stat c31f928a6..HEAD -- apps/web
+ .../src/approvals/components/ApprovalTodoBadge.vue | 22 +++++--
+ apps/web/src/todo/api.ts                           | 21 +++++--
+ apps/web/src/todo/views/TodoCenterView.vue         | 69 +++++++++++++++++++++-
+ apps/web/tests/TodoCenterView.spec.ts              | 38 ++++++++++++
  4 files changed, 138 insertions(+), 12 deletions(-)
 ```
 零 `packages/core-backend` 改动 ⇒ 本轮未重跑后端真库套件(§7 项 5),那些证据仍以修复轮 1 的重跑
