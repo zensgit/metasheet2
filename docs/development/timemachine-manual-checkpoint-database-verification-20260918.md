@@ -187,3 +187,22 @@ the unfinished runtime manual-capture coordinator.
 
 No automatic scheduling, retention policy, cleanup, customer storage, flags,
 dispatch, staging, deployment, production, or hard-deleted-table resurrection.
+
+## Remote Proof And Interrupted-Upload Regression
+
+Published head `9072e1192b6f8d825413cf0815e7db255b22bef5` completed with
+34 successful checks and one expected skip. Plugin run `35285210558`, Node18
+job `105415896318` and Node20 job `105415896343`, each logs the new isolated
+checkpoint step: 28 migrations / 931 catalog objects with equal fingerprint,
+59 historical tests, checkpoint/concurrent retry/expiry acceptance, and zero
+database/connection residue followed by owned-cluster stop/removal.
+This closes the remote wiring gate for that head, not the manual runtime flow.
+
+A subsequent unit regression models one uploaded ciphertext followed by an
+interruption and another invocation using changed source bytes. The same nonce
+registry state refuses the retry before any new sealing/upload; the previously
+uploaded ciphertext remains unchanged. This is an in-memory registry model,
+not a process-restart or durable-storage acceptance. Crypto 58/58 and snapshot
+planner 11/11 passed. Temporarily swallowing the production nonce reservation
+error makes the new test fail; restoration returns 69/69, with zero production
+diff. The interrupted-capture coordinator/original-byte persistence remains OPEN.

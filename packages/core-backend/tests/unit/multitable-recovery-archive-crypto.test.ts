@@ -1927,6 +1927,51 @@ describe("Phase D2h reservation before encryption and upload", () => {
     );
   });
 
+  test("interrupted upload cannot re-encrypt changed source bytes with an already reserved generation nonce", async () => {
+    const custody = createTestCustody();
+    const plan = fullSnapshotSections();
+    const binding = generationBinding();
+    // This models durable registry state across invocations, not a process/DB restart proof.
+    const reserved = new Set<string>();
+    const reserveNonces: Parameters<typeof reserveThenSealRecoveryArchiveSections>[0]["reserveNonces"] = async (rows) => {
+      const keys = rows.map((row) => `${row.dekFingerprint}:${row.nonceHex}`);
+      if (keys.some((key) => reserved.has(key))) {
+        throw new Error("recovery_archive_nonce_reservation_conflict");
+      }
+      keys.forEach((key) => reserved.add(key));
+    };
+    const first = harness();
+    expect(await asyncCodeOf(() => reserveThenSealRecoveryArchiveSections({
+      binding, keyCustody: custody, transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" }, sections: plan, reserveNonces,
+      sealSection: first.sealSection,
+      uploadSealedSection: async (section) => {
+        await first.uploadSealedSection(section);
+        throw new Error("synthetic_upload_interruption");
+      },
+    }))).toBe("RECOVERY_ARCHIVE_CRYPTO_PROVIDER_FAILED");
+    expect(reserved.size).toBe(10);
+    expect(first.sealCalls).toHaveLength(10);
+    expect(first.uploadCalls).toHaveLength(1);
+    const originalCiphertext = Buffer.from(first.uploadCalls[0].ciphertext);
+
+    const retry = harness();
+    const changedPlan = plan.map((section) => ({
+      ...section, plaintext: Buffer.from('{"changed":"after interruption"}'),
+    }));
+    expect(changedPlan[0].plaintext).not.toEqual(plan[0].plaintext);
+    expect(await asyncCodeOf(() => reserveThenSealRecoveryArchiveSections({
+      binding, keyCustody: custody, transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" }, sections: changedPlan, reserveNonces,
+      sealSection: retry.sealSection, uploadSealedSection: retry.uploadSealedSection,
+    }))).toBe("RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED");
+    expect(retry.sealCalls).toEqual([]);
+    expect(retry.uploadCalls).toEqual([]);
+    expect(reserved.size).toBe(10);
+    expect(Buffer.from(first.uploadCalls[0].ciphertext)).toEqual(originalCiphertext);
+    expect(custody.calls).not.toContain("macManifestRoot");
+  });
+
   test("a refused (duplicate) reservation leaves zero seal calls, zero uploads, zero ciphertext", async () => {
     const custody = createTestCustody();
     const spy = harness();
