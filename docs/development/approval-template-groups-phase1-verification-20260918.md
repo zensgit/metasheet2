@@ -1749,3 +1749,85 @@ $ git diff a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- packages/core-backend/tes
 ### 25.9 提交与推送
 
 本节记录的 P2-1/P3-1/P3-2/P3-3/P3-4 五项处置,提交方式同 §23.11/§24.8 的约定:不在本节钉死 commit SHA,完整、无歧义的提交列表以**推送前最后一次** `git log --oneline a789422b5..HEAD` 现场输出为准。硬规矩重申(本轮全程遵守,现场核对):只在指定 worktree 内工作;未 `git checkout --`、未 `git reset --hard`、未 stash 丢弃;mutation 探针全部 `cp` 备份 → 改 → 单独跑 → 还原 → `cmp`(§25.3);未合并、未 undraft、未开/动 PR、未动 `origin/main`、未应用任何迁移到共享库;未改锁文(`approval-form-group-entity-design-lock-draft-20260916.md` 零改动);DDL 文件零改动;**本轮生产代码零行为改动**(§25.8);P3-4 保密纪律全程遵守,不得公开披露的内容只出现在仓外 `reviews/` 目录。
+
+## 26. P3 卫生轮(2026-09-19)—— 第 7 轮门审(全部 4 条)+ 第 3 轮门审仍开放条目的处置表
+
+**起点**:`a728ed65532918e3726171d0c42f44d6be7e0ba9`(第 7 轮门审 `impl-gate-A-slice1-round7-20260918.md` 的「被审 head」,即本轮编辑前的 HEAD;第 3 轮门审 `impl-gate-A-slice1-round3-20260918.md` 审的是更早的 `0144932ac`,其 6 条 P3 中 3 条已在第 4/5/6 轮修复轮里通过后续 gate 的重写关闭,本表对每一条现场核对现状,不假设未变)。**范围**:任务书指定的两份报告(第 7 轮、第 3 轮),不含中间第 4/5/6 轮门审自己的 P3(它们的处置已被各自下一轮门审复核为如实,不在本轮任务书点名范围内)。
+
+### 26.1 处置表
+
+| # | 来源 | 原文一句(压缩) | 处置 |
+|---|---|---|---|
+| 1 | 第 7 轮 P3-1 | §24.1/§25.5「新增文件里没有一处命中…包含关系符号或词」——现场重跑发现假(`index.cjs:83` 的 `⊇`、`univer-meta.ts:7045` 的 `⊂` 等确有命中,均无关主题) | **CLOSED-MD**——§24.1、§25.5 抬头/符号表格行/脚注四处全称否定改写为「已核对、均为不相关主题」的分类判定;commit 见 §26.3 |
+| 2 | 第 7 轮 P3-2 | §25.6 的 P3-1 处置行只记「已修复——改为『本轮为 12 个文件』」这个中间态,漏记同一次编辑后来又整段去钉绝对数的最终态 | **CLOSED-MD**——处置行改写为「已修复(两次)」,补上第二步 |
+| 3 | 第 7 轮 P3-3 | 设计 MD `:169`、验证 MD `:705`/`:1281` 概括「两个方向各有一个**端到端实测**反例」——方向二(manager 判定腿)是对导出解析器的直调,不是端到端 HTTP | **CLOSED-MD**——3 处概括句改写为「方向一端到端实测;方向二 guard 拒绝端到端实测,manager 判定由直调实测,附负控」;`routes/approvals.ts` **未改动**(生产注释本就写对,第 7 轮 §7 已核实,改它只会破坏其 stripped-comment md5 证据链) |
+| 4 | 第 7 轮 P3-4 🔒 | 验证 MD `:1641`(§25.3)、`:1704`(§25.6 表)两处新增的「未提及可见性短路或列表端点后果」——虽是否定句,但点名了被保密内容的主题 | **CLOSED-MD**——两处改为不点名主题的措辞(「本节不含门审报告 🔒 项点名的保密内容」);本节与本表自身同样不重复该主题词 |
+| 5 | 第 3 轮 P3-1(a) | 两个新真库套件的 `itIfExpectDb` 哨兵嵌套在 `describeIfDatabase` 内部,与同步骤 3 个既有兄弟(顶层放置)不一致 | **DEFERRED-owner 项**——第 4 轮门审("与第 3 轮 P3-1 的披露一致,本轮未变化")与第 6 轮门审复核后均未要求移动测试拓扑,原因是该 lane 今天不设 `EXPECT_DB`,放在哪一层都是同样 dormant,本切片独有的部分零可观测差异;移动拓扑属于对已结案范围决定的重新裁量,留给 owner 在决定是否为这两个套件开专属 lane 时一并做(design MD §6 已有对应行) |
+| 6 | 第 3 轮 P3-1(b) | 验证 MD §13.2 一直未写「该 lane 不设 `EXPECT_DB`、哨兵在 CI 不运行、真正保护是 bash `:?`」这句作用域披露 | **CLOSED-MD**——§13.2 补上该披露段,现场核对 `plugin-tests.yml` 的 `EXPECT_DB` 计数为 0、`:1578` 的 `DATABASE_URL:?` 仍在 |
+| 7 | 第 3 轮 P3-2(= 第 2 轮 P3-3) | `serialization.db.test.ts` 头部 mutation 配方 (4) 点名一个全仓不存在的函数 `takeOrgLock`,且写成「两行」 | **CLOSED-注释**——改写为实际形状(`renameApprovalTemplateGroup` 内单行内联的 `pg_advisory_xact_lock` 调用),措辞照抄配方 (2);纯 JSDoc 注释改动,`git diff` 核对改动行全部以 `*` 开头 |
+| 8 | 第 3 轮 P3-3(= 第 2 轮 P3-4) | `routes/approvals.ts:396-399`「guard population ⊆ manager」是零 grep 计数的全称断言 | **CLOSED(已由第 6 轮修复轮闭合,第 7 轮门审确认零处活断言)**——本轮登记备查,无新增改动;与本轮 #1/#3 是同一条注释链的后续更正,已在其中一并核对 |
+| 9 | 第 3 轮 P3-4(= 第 2 轮 P3-5) | `git log` 里仍有 `wip: carry step-agent changes forward (to be squashed by the lane)` 提交 | **DEFERRED-owner 项**——squash 需要 force-push,本轮硬规矩明确禁止("不 force"、"绝不 git reset --hard"精神下的同类限制);现场核对该提交仍在(`f6e8ea2d8`),仍已 push,不影响任何验收结论 |
+| 10 | 第 3 轮 P3-5(= 第 2 轮 P3-6) | 两个新真库套件仍无 `*-ci-wiring.test.mjs` 守卫 | **DEFERRED-owner 项**——design MD §6 已有「未排期,留给后续单元或 owner 裁决是否现在做」一行(本轮核对仍在、仍准确);新建守卫文件是范围扩张,不是本轮「测试/注释/MD/scripts 层闭合」的机械修复,维持既有处置 |
+| 11 | 第 3 轮 P3-6(ii) | 设计 MD §6「留给后续切片的项」未收录 P2-1 引入的响应形状副作用(非法 `templateId` + 不存在的 `groupId`:404→500) | **CLOSED-MD**——补一行,点名机制与验证 MD §22.5 出处,不涉及行为改动 |
+| 12 | 第 3 轮 P3-6(iii) | 建议下一切片给 `mapGroupConstraintError` 补 22P02 → 400 映射 | **DEFERRED-需行为改动**——改服务层代码,超出本轮「零生产代码行为改动」范围,已通过 #11 的 MD 行转交后续切片 |
+| 13 | 第 3 轮 NIT | `applyTemplateVisibilityFilter` 对 `actor === undefined` 的 fail-open 分支(`!actor` 直接放行)未被任何用例实测,只有静态可达性论证 | **DEFERRED-owner 项**——新增用例是范围扩张;静态论证(链接 handler 上 `visibilityActor` 不可能为 `undefined`,因两次调用共享同一个 `resolveApprovalActorId(req)`)第 2/3 轮门审均未提出异议,维持原状 |
+
+### 26.2 撤回类改动的全分支零命中扫描
+
+本轮撤回/更正的是四句**曾经站着的全称否定/过强概括**(表中 #1/#3 的原文),不是新引入的断言,按记忆 `feedback_absolute_claim_sweep_must_be_mechanical` 的纪律,扫描目标是"这四句被撤回的原文本身"是否还以现役断言的身份存在于分支任何文件:
+
+```
+$ git grep -F -c "新增的这些文件里没有一处命中" -- . | awk -F: '{s+=$2} END{print s+0}'   → 0
+$ git grep -F -c "新增的文件里没有一处命中任何一个包含关系符号或词" -- . | awk -F: '{s+=$2} END{print s+0}'  → 0
+$ git grep -F -c "没有一处贡献新的命中" -- . | awk -F: '{s+=$2} END{print s+0}'                          → 0
+$ git grep -F -c "两个方向各有一个端到端实测反例" -- . | awk -F: '{s+=$2} END{print s+0}'                  → 0
+$ git grep -F -c "未提及可见性短路或列表端点后果" -- . | awk -F: '{s+=$2} END{print s+0}'                  → 0
+$ git grep -F -c "不描述可见性短路或列表端点后果" -- . | awk -F: '{s+=$2} END{print s+0}'                  → 0
+```
+六句全部 **0 命中**。唯一的例外性命中是「零处出现在其它文件」——只出现一次,在本轮自己新写的 §25.5 表格行里,作为**引用**上一版误写的原句加引号呈现(「上一版此处误写为『……』」),与本文档一贯的历史引用惯例一致,不是重申。
+
+**`atg-retraction-sweep.sh` 复跑(P3 卫生轮 2026-09-19,现场执行,22 个模式)**:范围内文件数 **159**(`origin/main` 继续前进的自然结果,非本分支产物);逐条核对本轮新增/改写的段落自身命中(引用 `⊇`/`⊂`/`subset`/`superset` 等符号描述漂移文件的具体命中位置)均为**元讨论/引用**,不是重申;**零处**以现时事实口吻断言 `approvalTemplateAdminGuard`/`isTemplateManager` 的任一方向包含关系——分类结论与第 6 轮修复轮(§25.5)一致,详见本文档 §24.1/§25.5(本轮已更正)。
+
+### 26.3 提交与推送
+
+（推送前以 `git log --oneline a728ed655..HEAD` 现场输出为准,不在此钉 SHA——同一自指问题见 §23.11/§24.7/§25.8,本节沿用同一约定。）
+
+### 26.4 私有处女库重跑 + tsc(现场执行,命令与输出原样贴入)
+
+```
+$ dropdb --if-exists metasheet2_p3hygiene_r1 && createdb metasheet2_p3hygiene_r1
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_p3hygiene_r1" \
+  MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,\
+049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,\
+20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql \
+  pnpm --filter @metasheet/core-backend db:migrate
+  … migration "zzzz20260918090000_create_approval_template_groups" was executed successfully
+  MIGRATE_EXIT=0   （本切片迁移为最后一条 executed,与 round1-7 各轮门审记录一致)
+
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_p3hygiene_r1" EXPECT_DB=1 \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=verbose
+  Test Files  2 passed (2)
+       Tests  29 passed (29)      零 skip      VITEST_EXIT=0   （与第 7 轮门审的 29/29 一致——本轮零测试断言改动,只改了 serialization 文件的 JSDoc 头部注释)
+
+$ pnpm --filter @metasheet/core-backend exec tsc --noEmit
+  TSC_EXIT=0   （零行输出）
+
+$ dropdb --if-exists metasheet2_p3hygiene_r1
+  DROP_EXIT=0（处女库已按硬规矩用完即删,不留存）
+```
+
+### 26.5 `git diff --stat` 证据(只动注释/测试/MD/scripts)
+
+**自指注记(同 §23.11/§24.7/§25.8/§25.8 一贯的问题)**:下方是本节自身这次落笔**之前**两个提交的现场输出——本节写完之后,记录本节内容的这次提交会再产生一行验证 MD 自己的 diffstat,这个数字从落笔的瞬间起就已经过期。**唯一权威的数字是推送前最后一次现场重跑** `git diff --stat a728ed655..HEAD`。
+
+```
+$ git diff --stat a728ed65532918e3726171d0c42f44d6be7e0ba9..HEAD
+ docs/development/approval-template-groups-phase1-design-20260918.md         |  3 ++-
+ docs/development/approval-template-groups-phase1-verification-20260918.md   | 21 ++++++++++++---------
+ .../approval-template-groups-serialization.db.test.ts                       |  7 +++++--
+ 3 files changed, 19 insertions(+), 12 deletions(-)
+```
+
+三个文件:两份 MD + 一个测试文件的 JSDoc 头部注释(逐行核对,见提交 2 的记录,改动行全部以 `*` 开头)。**零 `packages/*/src` 文件、零 DDL、零 `scripts/dev` 之外的文件**——本表数字尚不含本节自身这次提交,权威判读见上方自指注记。
