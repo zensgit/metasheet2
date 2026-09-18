@@ -312,28 +312,32 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 ```
 输出的索引名(`atg_org_id_uni`、`atg_sort_unique` DEFERRABLE INITIALLY DEFERRED、`uq_atg_org_name_active` 部分唯一)、CHECK 名(`atg_org_nonblank`/`atg_name_nonblank`/`atg_sort_archived_pair`/`atgl_org_nonblank`/`atgl_state_check`)、复合 FK(`atgl_group_fk` → `approval_template_groups(org_id, id)`)与 PK(`approval_template_group_links_pkey` on `(org_id, template_id)`)逐条比对设计 MD §2 表,**字节形状一致**;迁移已应用、非幂等空跑(`pnpm exec tsx src/db/migrate.ts` 对该库无输出)。
 
-## 12. 锁文验收表 → 测试文件 + 用例名 + lane(全表,含分期 3 的「不在本切片」行)
+## 12. 锁文验收表 → 测试文件 + 用例名 + lane(全表,含分期 3 的「不在本切片」行;锚点改用「符号 + 近似行号」,impl-gate-A-slice1-round4-20260918.md P3-1 收口)
 
-| 验收行 | 判据摘要 | 测试文件 | 用例名(逐字) | lane |
+**为什么改格式**:下表此前逐行记录「原 `:NNN`,修复轮 X +Y、修复轮 Z 再 +W……」这类逐提交位移算术——本轮(P2-1 提交)在 `it('§2(a)...'` 之前的块注释又插入了净 +8 行,使 G/H/B″/I′ 四行的数字**再次**全部位移,而这类算术本身就是易错、易漏更新的来源(本文档 §12/§18/§19 已经被同一问题打过好几次)。下表的「测试文件」列现在给**用例名的引号内前缀**(逐字,`grep -F` 可直接定位,不受行号漂移影响)+ 一个现场 `grep -n` 得到的近似行号,不再维护位移算术:
+
+| 验收行 | 判据摘要 | 测试文件(用例名前缀,`grep -n "^ *it('<前缀>" <file>` 现场定位) | 行(~,本 P3-1 提交现场值) | lane |
 |---|---|---|---|---|
-| A | 同 org 同名活跃冲突 409;跨 org 可同名;归档后可重用 | `approval-template-groups-lifecycle.db.test.ts:242`(原 `:237`,修复轮 1 后 +5) | `A: same-org active-name conflict is 409; a different org may reuse the name; an archived name may be reused` | `plugin-tests.yml` → `approval-real-db-integration`(`test (20.x)`,required) |
-| A′ | 跨 org 不覆盖 | 同文件 `:269`(原 `:264` +5) | `A′: cross-org does not overlap — the SAME global template goes into DIFFERENT groups for DIFFERENT orgs` | 同上 |
-| A″ | 跨 org 挂接 404;复合 FK 兜底 23503 | 同文件 `:317`(原 `:312` +5) | `A″: cross-org link is 404 (org-scoped row-lock SELECT); the composite FK is the last-resort DB guard` | 同上 |
-| A‴ | org 只取 `authenticatedTenantId`(三格) | 同文件 `:349`(原 `:344` +5) | `A‴: org comes ONLY from req.authenticatedTenantId — body/query orgId rejected, forged header ignored, missing tenant fails closed` | 同上 |
-| B | 归档是一个事务;并发挂接见证已归档态 | 同文件 `:397`(原 `:392` +5) | `B: archive is one transaction (members unlinked, never deleted); a concurrent link blocks then sees the archived state` | 同上 |
-| B′ | 解除关联不回落 category;从未关联仍显示 | 同文件 `:447`(原 `:437`,修复轮 1 +5、修复轮 3 再 +5——round 3 在 `it(` 上方插入了 5 行 NOTE 注释,见 §20.2) | `B′ (DB-level predicate only, no display consumer until A-4): "no link row exists" — not "group_id IS NULL" — is the correct never-grouped predicate`(修复轮 3 收窄前的原名见 §13.2 逐字记录 / §20.2) | 同上(**§13.5 披露**:本用例只做 DB 谓词层面演示,不经任何服务/路由代码) |
-| B″ | 首次/重新挂接同一 upsert;并发首次挂接双成功 | 同文件 `:713`(原 `:669`,与 G/H/I′ 同一组三次提交下位移完全相同——修复轮 1 后 `:594→669(+75)`,`cbaa1bc13`(修复轮 3)+20 → `:689`,`5b3d6310c`(修复轮 4)+24 → `:713`;已在修复轮 5/§22.2 逐提交现场核对,见 P3-2) | `B″: first-link and re-link share ONE atomic upsert; two concurrent FIRST links to different groups both succeed, later commit wins` | 同上 |
-| C | `section=` 分节 | **不在本切片** — 锁文 §6「期 3」;`section` 查询参数在分期 1 不存在(A‴ 测试文件 `:391-392`(原 `:386-387` +5)自陈) | — | A-4 |
+| A | 同 org 同名活跃冲突 409;跨 org 可同名;归档后可重用 | `approval-template-groups-lifecycle.db.test.ts`,`A: same-org active-name conflict is 409…` | ~251 | `plugin-tests.yml` → `approval-real-db-integration`(`test (20.x)`,required) |
+| A′ | 跨 org 不覆盖 | 同文件,`A′: cross-org does not overlap…` | ~278 | 同上 |
+| A″ | 跨 org 挂接 404;复合 FK 兜底 23503 | 同文件,`A″: cross-org link is 404…` | ~326 | 同上 |
+| A‴ | org 只取 `authenticatedTenantId`(三格) | 同文件,`A‴: org comes ONLY from req.authenticatedTenantId…` | ~358 | 同上 |
+| B | 归档是一个事务;并发挂接见证已归档态 | 同文件,`B: archive is one transaction…` | ~406 | 同上 |
+| B′ | 解除关联不回落 category;从未关联仍显示 | 同文件,`B′ (DB-level predicate only, no display consumer until A-4)…` | ~456 | 同上(**§13.5 披露**:本用例只做 DB 谓词层面演示,不经任何服务/路由代码) |
+| B″ | 首次/重新挂接同一 upsert;并发首次挂接双成功 | 同文件,`B″: first-link and re-link share ONE atomic upsert…` | ~826 | 同上 |
+| C | `section=` 分节 | **不在本切片** — 锁文 §6「期 3」;`section` 查询参数在分期 1 不存在(A‴ 用例体内注释,`grep -n "Unknown .section=. token"` 现场定位,~401 附近自陈) | — | A-4 |
 | D | category 后备(仅从未关联) | **不在本切片** — 同上;其底层 `NOT EXISTS` 判据已由 B′ 间接验证(见 §13.5),但 D 本身的展示/筛选端点属分期 3 | — | A-4 |
-| E(前半:序号 + COMMIT 映射) | 并发建组 n+1/n+2;COMMIT 期 DEFERRABLE 映射 500;正控(裸 SQL 撞 `atg_sort_unique`/`atg_sort_archived_pair`);RR-默认池前提哨兵 | `approval-template-groups-serialization.db.test.ts:161,194,221,233,278,300`(原 `:162,195,222,234,279,301`,修复轮 3 把头部注释从 6 行改成 5 行后全表 off-by-one,已在修复轮 5/§22 现场 `grep -n "^  it("` 重算,见 P3-2) | `sentinel: the service pool REALLY runs repeatable-read default — a bare-BEGIN generic transaction is RR`(harness 非空转前提);`E positive control: two same-org active groups committing the SAME sort_order hit 23505 on atg_sort_unique at COMMIT, not at INSERT`;`E positive control: archiving without clearing sort_order hits the paired CHECK (atg_sort_archived_pair) immediately`;`E: two concurrent creates via the PRODUCTION path get sort_order n+1/n+2 …`;`E: negative control — an unrelated advisory key never blocks a concurrent create …`;`E: COMMIT-time (not statement-time) DEFERRABLE violation on the production create path maps to 500 GROUP_SORT_CONFLICT` | 同上 |
+| E(前半:序号 + COMMIT 映射) | 并发建组 n+1/n+2;COMMIT 期 DEFERRABLE 映射 500;正控(裸 SQL 撞 `atg_sort_unique`/`atg_sort_archived_pair`);RR-默认池前提哨兵 | `approval-template-groups-serialization.db.test.ts`(本轮零改动,§4 已现场核对,九个锚点仍全中) | `sentinel` ~161,两条 positive control ~194/~221,`E: two concurrent creates` ~233,`E: negative control` ~278,`E: COMMIT-time` ~300 | 同上 |
 | E(后半:并发重排) | 并发重排终态是其中一方完整排列 | **不在本切片** — 重排端点是分期 3(§6) | — | A-4 |
-| F | 授权面:写端点 admin guard,读端点 `approvals:read` | 同 lifecycle 文件 `:504`(原 `:485`;精确按提交拆分:`cbaa1bc13`(修复轮 3)+13 → `:498`,`5b3d6310c`(修复轮 4)在 F 用例正上方新增块注释 +6 → `:504`,合计 +19;已在修复轮 5/§22.2 用 `git show <commit>:<path> | grep -n` 逐提交现场核对,见 P3-2) | `F: authorization — write endpoints require approvalTemplateAdminGuard, the list endpoint requires approvals:read; denial writes zero rows` | `approval-real-db-integration` |
-| G | 解档:干净态/同名活跃阻塞/改名冲入阻塞 | 同文件 `:638`(原 `:594`;精确按提交拆分:修复轮 1 后 +69 → `:594`,`cbaa1bc13`(修复轮 3)+20 → `:614`,`5b3d6310c`(修复轮 4,F 用例体内新增 18 行 + F 上方块注释 6 行)+24 → `:638`;已在修复轮 5/§22.2 逐提交现场核对,见 P3-2) | `G: unarchive — clean case; blocked by another ACTIVE group with the same name; blocked by a group renamed into that name` | 同上 |
-| H | 解除幂等 | 同文件 `:680`(原 `:636`,与 G 同一组三次提交下位移完全相同——`:636→656(+20)→680(+24)`,因 G/H 之间无插入,已重算) | `H: unlink is idempotent — never-linked, already-unlinked, and active-link cases` | 同上 |
+| F | 授权面:写端点 admin guard,读端点 `approvals:read` | lifecycle 文件,`F: authorization — write endpoints require approvalTemplateAdminGuard…` | ~513 | `approval-real-db-integration` |
+| G | 解档:干净态/同名活跃阻塞/改名冲入阻塞 | 同文件,`G: unarchive — clean case…` | ~751 | 同上 |
+| H | 解除幂等 | 同文件,`H: unlink is idempotent…` | ~793 | 同上 |
 | I | I6 爆炸半径零(本地机械 diff) | 非 vitest 用例——本地命令(§6,已用现场 HEAD 重跑,见 §13.1) | — | 本地,非 CI |
-| I′ | I6 行为门(自动化 actor 未变) | 同 lifecycle 文件 `describe:753`,`(a):796`,`(b):824`(原 `:709`/`:752`/`:780`,与 G/H 同一组位移,已重算) | `(a) MAIN sees exactly {dept-scoped, role-scoped}, never the unseen template; CONTROL sees nothing (positive control)`;`(b) all three actor constructors return EXACTLY the ApprovalTemplateVisibilityActor key set at runtime (no stray optional field)` | `approval-real-db-integration` |
-| J | 多 org 成员脱困(403 + 前端选择器 + 未知 `section=` 400) | **后端半**:同 A‴ 用例第 (iii) 格(`:382-389`,原 `:377-384` +5,A‴ 测试自陈「This is also J's only backend-observable leg」);**前端半 + 未知 token 400**:不在本切片(见设计 MD §1.3,归 A-2/A-4) | `approval-real-db-integration`(后端半) |
-| K | 改名/建组/解档持 L0,阻塞可证伪 | `approval-template-groups-serialization.db.test.ts:328,350,372`(原 `:329,351,373`,同 E 前半的 off-by-one,已重算) | `K: an L0-only holder (no L1 row lock) stalls a concurrent CREATE in the same org`;`K: an L0-only holder stalls a concurrent RENAME of an existing group in the same org`;`K: an L0-only holder stalls a concurrent UNARCHIVE of an archived group in the same org` | 同上 |
+| I′ | I6 行为门(自动化 actor 未变) | 同 lifecycle 文件,`describe('I′: I6 explosion-radius…`、`(a) MAIN sees exactly {dept-scoped, role-scoped}…`、`(b) all three actor constructors…` | describe ~866,(a) ~909,(b) ~937 | `approval-real-db-integration` |
+| J | 多 org 成员脱困(403 + 前端选择器 + 未知 `section=` 400) | **后端半**:A‴ 用例体内 case (iii)(`noTenantRes`,~389-401,A‴ 测试自陈「This is also J's only backend-observable leg」);**前端半 + 未知 token 400**:不在本切片(见设计 MD §1.3,归 A-2/A-4) | — | `approval-real-db-integration`(后端半) |
+| K | 改名/建组/解档持 L0,阻塞可证伪 | serialization 文件(本轮零改动),`K: an L0-only holder…`(CREATE/RENAME/UNARCHIVE 三条) | ~328/~350/~372 | 同上 |
+
+**行号免责声明(与 §3.1/§3.3 相同)**:以上 `~NNN` 是本 P3-1 提交现场 `grep -nE "^ *(it|describe)\('"` 的结果,不是精确锚点,后续任何在这些用例**之前**的插入/删除都会使其整体位移;不要对着这些数字做位移算术,改用用例名前缀重新 `grep -n` 现场定位——`grep -F` 匹配用例名字符串比对行号更稳定,因为它不受行数变化影响。
 
 ## 13. 命令逐字 + 结果关键行(现场重跑,`metasheet2_lock_a`)
 
@@ -622,9 +626,9 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 
 **可达性披露(与设计 MD §3.5 一致,不重复夸大)**:`approvalTemplateAdminGuard` 的人口 ⊆ `isTemplateManager`,而 manager 让 `applyTemplateVisibilityFilter` 短路、不加条件——今天没有 HTTP 可达路径能让这条检查因「看不见该模板」而拒绝;它在生产流量下退化为「模板是否存在」的检查(附带修好了一个既有空白:`mapGroupConstraintError` 未映射 `atgl_template_fk` 的 23503,此前对不存在的模板 id 会 500,现在 404)。真正的可见性判别力只在**直接调用**导出函数时才被验证(两条腿,理由见「判据本身也要被攻击/单一定义防漂移不防定义太窄」两条纪律——纯 HTTP 测试在当前 guard 形状下无法制造一个「过 guard 但非 manager」的反例)。
 
-**两腿测试**(`approval-template-groups-lifecycle.db.test.ts`,新增两个 `it()`,紧接 F 之后;**行号已在修复轮 5/§22 按修复轮 4 之后的现场 HEAD 重算,原 `:521-552`/`:554-568` 是本轮(修复轮 1)落地时的行号,后续三轮插入代码使其漂移,详见 P3-2/§22**):
-- `§2(a)`(`:558-589`,含双腿说明的块注释)——谓词直调:手写一个 `isTemplateManager: false` 的 actor(不经 HTTP/guard),对 dept 作用域内的模板返回 `true`、作用域外的返回 `false`、不存在的 `randomUUID()` 返回 `false`;并证明同一 hidden 模板对 `isTemplateManager: true` 的同一 actor 返回 `true`(manager 短路的机制证据,不只是断言)。
-- `§2(b)`(`:591-605`)——端点调用点:admin token(guard 内唯一可达的 actor 形状)对一个 `randomUUID()`(不存在)的模板 id 发起挂接 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`,`approval_template_group_links` 零行。
+**两腿测试**(`approval-template-groups-lifecycle.db.test.ts`,新增两个 `it()`,紧接 F 之后;**锚点改用「符号 + 近似行号」,impl-gate-A-slice1-round4-20260918.md P3-1 收口——此前三轮各自维护过一版「原 `:NNN`,某轮 +M」的位移记录,每次都在下一轮插入代码后失效,不再续写这类算术,下方 `~` 值是本 P3-1 提交现场 `grep -n` 所得**):
+- `§2(a)`(块注释 + `it()` 本体,`grep -n "§2 link-time visibility" lifecycle.db.test.ts` 定位块注释起点,~604;`it('§2(a):`,~632)——谓词直调:手写一个 `isTemplateManager: false` 的 actor(不经 HTTP/guard),对 dept 作用域内的模板返回 `true`、作用域外的返回 `false`、不存在的 `randomUUID()` 返回 `false`;并证明同一 hidden 模板对 `isTemplateManager: true` 的同一 actor 返回 `true`(manager 短路的机制证据,不只是断言)。
+- `§2(b)`(`it('§2(b):`,~654)——端点调用点:admin token(guard 内唯一可达的 actor 形状)对一个 `randomUUID()`(不存在)的模板 id 发起挂接 ⇒ 404 `APPROVAL_TEMPLATE_NOT_FOUND`,`approval_template_group_links` 零行。
 
 **Mutation 探针(两条,`cp` 备份 → 改 → 单独跑受影响用例 → `cp` 还原 → `cmp` → 全量重跑确认回绿;`/tmp/gateA-fix1-probe-backups/`)**:
 
@@ -637,9 +641,9 @@ $ psql "postgres://localhost/metasheet2_lock_a" -c "\d approval_template_group_l
 
 ### 18.2 P2-4 —— 10 个错误码的绝对断言(4 码零命中)+ `GROUP_NOT_ARCHIVED` 零覆盖
 
-**补的三格**(均在 `approval-template-groups-lifecycle.db.test.ts`;**行号已在修复轮 5/§22 按修复轮 4 之后的现场 HEAD 重算**,原 `:594-`/`:598-602`/`:507-519` 是本轮落地时的行号):
-- `GROUP_NOT_ARCHIVED`——在既有 G 用例(`:638-`)开头插入:对刚建的、仍活跃的 `g1` 直接调 `/unarchive` ⇒ 409 `GROUP_NOT_ARCHIVED`(`:643-647`),再继续 G 原有的归档/解档/同名冲突流程,不改动 G 原有断言。
-- `GROUP_NAME_REQUIRED` / `APPROVAL_GROUP_ID_REQUIRED`——新增独立用例 `request-shape codes: ...`(`:544-556`,紧接 F 之后、`§2` 系列之前):建组传全空白 `name` ⇒ 400 `GROUP_NAME_REQUIRED`;链接端点传空 body(无 `groupId`)⇒ 400 `APPROVAL_GROUP_ID_REQUIRED`。
+**补的三格**(均在 `approval-template-groups-lifecycle.db.test.ts`;**锚点改用「符号 + 近似行号」,impl-gate-A-slice1-round4-20260918.md P3-1 收口,理由同上——不再续写位移算术**):
+- `GROUP_NOT_ARCHIVED`——在既有 `it('G: unarchive...` 用例(~751)开头插入:对刚建的、仍活跃的 `g1` 直接调 `/unarchive` ⇒ 409 `GROUP_NOT_ARCHIVED`(`grep -n "GROUP_NOT_ARCHIVED" lifecycle.db.test.ts`,~759-760),再继续 G 原有的归档/解档/同名冲突流程,不改动 G 原有断言。
+- `GROUP_NAME_REQUIRED` / `APPROVAL_GROUP_ID_REQUIRED`——新增独立用例 `it('request-shape codes: ...`(~553,紧接 F 之后、`§2` 系列之前):建组传全空白 `name` ⇒ 400 `GROUP_NAME_REQUIRED`;链接端点传空 body(无 `groupId`)⇒ 400 `APPROVAL_GROUP_ID_REQUIRED`。
 - `APPROVAL_ACTOR_REQUIRED` 保持零覆盖,理由见 §14(修复轮 1)行:`authenticate` 中间件已放行之后才可能调用 `resolveApprovalActorId`,触发它要求一个已验签但 `user.id/userId/sub` 三者皆缺的 token,本文件的 `tok()` helper 铸不出这种 token——harness 内不可达,不是遗漏。
 
 **§14 全称句撤回**——原句「本锁自己新增的全部 10 个码……逐条都有对应的 `error.code` 断言」为假(gate 机械计数:`GROUP_NOT_ARCHIVED`/`GROUP_NAME_REQUIRED`/`APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 四码原为零命中),已在 §14 表格原地改写为逐码计数 + grep 命令(`grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 | wc -l`,逐码跑),不再是全称句。
@@ -690,7 +694,7 @@ $ git status --porcelain    (本轮全部 mutation 探针还原后)
 1. 验证 MD §15.1「结论」段——原句「这不是缺陷,是……已被架构自身文档化的现象」改写为:锁文 G 行只要求「同名冲入阻塞」这一可观察行为,不要求两层独立防御;第二层(`mapGroupConstraintError:137`)是共享基础设施,第一层(`:311-317` 的显式预检查)是本实现在其上追加的选择;该层可安全删除且不引入 TOCTOU(同 org 三条写路径共享同一把 L0 advisory lock,预检查与 UPDATE 之间没有可被并发利用的窗口);保留它的理由(避免 L0 临界区内一次注定失败的写)较薄,如实写明「较薄」而非包装成充分理由;明确请 owner 在 (a) 删除预检查 / (b) 接受现状为实现选择之间二选一。
 2. 验证 MD §17 新增条目 #10,把这条实现者裁量并入 #8/#9 所在的「门审需明确认可或要求改动」桶,并注明 PR body 开出时需与 #2/#8/#9 同批点名。
 
-**测试文件注释同步**(`lifecycle.db.test.ts:607-637`,G 用例正上方的整段块注释;原记录 `:591-` 是本轮落地时的行号,已在修复轮 5/§22 按修复轮 4 之后的现场 HEAD 重算,见 P3-2):删除被门审明确驳回的一句——「this is a lock-vs-implementation contract gap……since strengthening it would mean inventing a new mutation not in the lock」(门审原话:「不必发明锁文之外的新 mutation」,该句断言的前提是假的)。替换为:指出这是实现选择而非锁文缺口,第一层是在共享分支之上的额外添加,删除第一层即可恢复单条判别力且不触碰锁文文本要求任何东西,并指向验证 MD §15.1/§17 #10 的 owner 裁决点。**这是纯注释改动**,零行为代码变化。
+**测试文件注释同步**(`lifecycle.db.test.ts`,`it('G: unarchive...` 正上方的整段块注释,以 `── G ──` 分隔符起始,`grep -n "── G ──" lifecycle.db.test.ts` 定位,~720;**锚点改用「符号 + 近似行号」,impl-gate-A-slice1-round4-20260918.md P3-1 收口,不再续写「原 `:NNN` → 现 `:MMM`」的位移链——历史链见 §22.2,该节按当时的 head 记录,不重算**):删除被门审明确驳回的一句——「this is a lock-vs-implementation contract gap……since strengthening it would mean inventing a new mutation not in the lock」(门审原话:「不必发明锁文之外的新 mutation」,该句断言的前提是假的)。替换为:指出这是实现选择而非锁文缺口,第一层是在共享分支之上的额外添加,删除第一层即可恢复单条判别力且不触碰锁文文本要求任何东西,并指向验证 MD §15.1/§17 #10 的 owner 裁决点。**这是纯注释改动**,零行为代码变化。
 
 **回归确认**(同一 `metasheet2_lock_a`,注释改动不需要 mutation 探针,只需确认套件仍然全绿且未引入语法/类型错误):
 
@@ -1095,7 +1099,7 @@ statusCode: undefined
 message: new row for relation "approval_template_groups" violates check constraint "atg_name_nonblank"
 ```
 
-这与 A-3 门审 M5 的现场测量逐字一致(`code=23514 constraint=atg_name_nonblank statusCode=undefined`,`ServiceError` 之外的裸 `DatabaseError`)。`handleApprovalsError`(`routes/approvals.ts:509-524`)只对 `error instanceof ServiceError` 特判,裸 `DatabaseError` 落到函数尾部的通用 500 兜底——即端点 `POST /api/approval-template-groups {name:'人事'}` 今天确实是 500,不是假设。
+这与 A-3 门审 M5 的现场测量逐字一致(`code=23514 constraint=atg_name_nonblank statusCode=undefined`,`ServiceError` 之外的裸 `DatabaseError`)。`handleApprovalsError`(符号定位,`grep -n "function handleApprovalsError" routes/approvals.ts`,~546-566——**锚点改用「符号 + 近似行号」,impl-gate-A-slice1-round4-20260918.md P3-1 收口**,上一版写的 `:509-524` 在本轮已漂移)只对 `error instanceof ServiceError` 特判,裸 `DatabaseError` 落到函数尾部的通用 500 兜底——即端点 `POST /api/approval-template-groups {name:'人事'}` 今天确实是 500,不是假设。
 
 ### 23.2 修法 —— 在既有 23505 映射的同一处(`mapGroupConstraintError`)把 23514 映射为 400 `GROUP_NAME_UNSUPPORTED`
 
@@ -1121,6 +1125,8 @@ if (
 三个约束(`atg_name_nonblank`/`atg_org_nonblank`/`atgl_org_nonblank`)一并映射——任务书点名的集合;后两个是防御性的(路由层已在 `resolveApprovalTemplateGroupOrgId` 里对空白 `org_id` 先行 403,正常路径到不了它们,详见服务文件里新增的文档注释)。**如实披露:`atg_org_nonblank`/`atgl_org_nonblank` 这两条分支本轮零行为覆盖**——§23.3 的真库用例只打了 `atg_name_nonblank`;`mapGroupConstraintError` 未导出,没有绕过路由层直接命中这两条分支的单元测试路径;这两条分支目前只受 tsc 编译检查与代码走查保护,是本轮已知但未关闭的覆盖缺口,不是被验证过的行为,留待日后若要单独测试它们时需要先导出该函数或新造一条能绕过路由层前置校验的调用路径。**不放宽 CHECK**——`atg_name_nonblank` 本身仍是 `CHECK (name ~ '[!-~]')`,一个纯中文名依然建不出组;改变的只是失败的**形状**(400 + 具名错误码 + 携带 `constraint` 字段,而不是不透明的 500)。这是请求形状映射,不是 DDL 变更,不需要 owner 闸;§23.4 是另外一条、且是 DDL 的、确实需要 owner 裁决的勘误请示。
 
 **用词披露**:`ServiceError` 的 `message` 字段本轮用了中文原句「当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误」——这是本文件里**唯一**一条非英文的 `ServiceError` message(其余六个既有错误码的 message 全是英文),且「owner 勘误」是内部治理词汇,不是面向最终用户的产品文案,原样出现在一个生产 HTTP 响应体里。这不是疏忽:任务书原文逐字要求「错误体带 constraint 名与一句『当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误』」,本节按字面执行,`{constraint}` 放进 `details`、这句话放进 `message`——两者任务书都点了名,`details` 已经满足「错误体带 constraint 名」,message 的中文/内部措辞是对任务书那句原文的直接落实,不是本轮自行引入的风格漂移。若这条错误信息将来要国际化或改用面向用户的措辞,是一次独立的、需要另行裁量的改动,不属于本回流修复的范围。
+
+**补充披露(impl-gate-A-slice1-round4-20260918.md P3-3,处置=如实披露,不改动断言)**:`lifecycle.db.test.ts`(`grep -n "toContain" lifecycle.db.test.ts | grep -i 锁文` 定位,~593-594)用 `expect(cjkBody.error.message).toContain('当前锁文 CHECK 只接受可打印 ASCII')` + `.toContain('owner 勘误')` 把上面这两句中文子串**冻结成了测试断言**——这与「message 本身是任务书原句的直接落实」是两件事:后者说的是这句话**从哪来**(如实、有出处),前者说的是这句话**现在被谁钉住**(未来想国际化或改面向用户的措辞,必须同时改这两行断言,而单纯改测试断言在后续门审眼里可能被误读成「测试被放宽以掩盖行为降级」,即便实际情况是「文案本来就该改」)。**本轮选择不动断言**(§0 硬规矩:不擅自决定合同层面的取舍;报告建议的收窄方向——把断言改成「`message` 非空 + `details.constraint` 命中」——虽然技术上可行且不会削弱 M1 mutation 的判别力(该 mutation 已经通过 `details.constraint` 与 `status` 两个字段独立判别,不依赖 `message` 文案),但那是对「这句文案算不算需要维护的公开合同」的一次实质裁决,不是本轮该单方面做的收窄):**如果/当** owner 就 §23.5 的 `atg_name_nonblank` CHECK 勘误做出裁决(改或不改 DDL),这两行 `toContain` 断言应该在同一次改动里被owner 一并裁决是否收窄——不要等到国际化需求出现时才发现测试把内部治理词汇焊死在了公开响应体的契约里。
 
 复现同一探针(未改任何测试文件,只改了服务文件)确认已修复:
 
@@ -1237,6 +1243,24 @@ MD5 (…/approvals.ts) = 058c6cd157611be3f86f089986c5b4f0
 
 **结论**:这条真库用例证明了「存在过 guard 但非 manager 的主体,走到 link 端点时可见性过滤仍生效」——`applyTemplateVisibilityFilter` 不是靠 `isTemplateManager` 的短路才「恰好」安全,guard 与可见性判定是两个独立生效的判断层,即便某个主体绕过了 `isTemplateManager` 的识别(如本用例),可见性过滤仍然会把它限制在能看到的模板范围内。这**不是**说撤回的那句过强声明没有安全后果——它错误描述了一个不变量的**成立范围**(把「对多数今天真实存在的管理员成立」误写成「对整个 guard 人口成立」),如果日后有代码路径**依赖**「guard 人口就是 manager 人口」这个假设(例如一条「guard 通过就跳过可见性检查」的优化),那才会真正引入漏洞——本节的用例正是防止这类依赖被引入的回归锚点。
 
+### 23.7a P3-4 收口 —— §2(c) 授予平台管理员角色的清理从「只靠 afterAll」改为「beforeAll 前置幂等扫 + afterAll 双保险」(impl-gate-A-slice1-round4-20260918.md P3-4)
+
+**报告发现的残留风险**:§2(c) 往 CI 共享库 `metasheet_test` 写 `user_roles(user_id='vis3-dbadmin-<TS>', role_id='admin')`,清理只在 `afterAll`;如果进程在 INSERT 之后、`afterAll` 之前被中断(超时/OOM/`onTaskUpdate` 家族的间歇),会在共享库里留下一行**平台管理员**——这与文件里其它 fixture(留下的是 dept/role 作用域角色行)不同级,而且下一次运行(不同的 `TS`)永远不会去清理上一次运行留下的这一行,因为清理数组 `dbGrantedAdminUserIds` 只认本次运行自己 push 进去的 userId。
+
+**已实现的修法**(不是仅披露——`beforeAll` 新增一条前置幂等 sweep,见 `lifecycle.db.test.ts` 的 `beforeAll` 块):
+```ts
+await query(`DELETE FROM user_roles WHERE user_id LIKE 'vis3-dbadmin-%' AND role_id = 'admin'`)
+```
+这条 sweep 匹配的是**跨运行稳定的字面前缀**(`vis3-dbadmin-`,不含 `TS` 后缀),不是本次运行的具体 userId——所以它能清掉**任意一次更早的、被中断的**运行留下的孤儿行,即便那次运行的 `TS` 与本次不同。这把「谁来清理孤儿行」从「本次运行自己的 afterAll(如果它跑到)」变成了「下一次运行开始时的前置清理(不依赖上一次运行是否跑完)」——前置清理天然抗中断,后置清理不抗。
+
+**为什么不做「事务内」或「唯一临时用户」**(报告给的两个替代方案,均评估后放弃,理由记录):
+- **事务内**:这一行 `user_roles` 授予必须在提交后仍然可查(`approvalTemplateAdminGuard` 是 HTTP 请求处理链路里的独立查询,不与测试代码共享事务/连接),整个用例的判别力恰恰来自「这行数据对后续 HTTP 请求可见」——放进一个不提交的事务会让 guard 查不到这行,测试本身就失效,不是清理方式的选择问题。
+- **唯一临时用户**:`userId` 已经是 `TS` 后缀的唯一值(不会与并发运行的其它 `TS` 冲突),问题从来不是「本次运行内的唯一性」,而是「跨运行的孤儿累积」——换一个「更唯一」的 userId 生成方式不会让孤儿行消失,只会让每个孤儿行的 `user_id` 都长得不一样,反而让前缀 sweep 失去唯一可用的抓手。**前缀 sweep 是唯一同时满足「本次运行不冲突」与「能清理不知道具体是哪次运行留下的孤儿」这两个要求的方案**。
+
+**残留(如实标注,不是新引入,是缓解后的剩余量)**:如果连续两次运行都在 INSERT 之后、下一次 `beforeAll` 运行之前被中断(需要恰好在测试库长期无人运行的窗口内连续发生),孤儿行仍会短暂存在,直到再有一次这个文件的运行执行到 `beforeAll`。这与「完全消灭孤儿窗口」不同,但比「只能靠这次运行自己跑完」的原状好——多次连续中断需要比单次中断更巧合的时机。
+
+anchor:`packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts`(`beforeAll` 前置 sweep,`grep -n "vis3-dbadmin-%" lifecycle.db.test.ts` 定位,~236)
+
 ### 23.8 本切片(A-1)真库套件全量重跑(含新增两条用例)
 
 ```
@@ -1328,4 +1352,6 @@ $ cd packages/core-backend && CI=true pnpm exec vitest run --reporter=dot
 
 ### 23.11 提交与推送
 
-见 `git log`——本节改动随本切片 A-1 分支正常提交推送,提交信息见对应的 commit(conventional commits,含 `Co-Authored-By` 尾行),不在此重复粘贴 SHA(以 `git log`/`git push` 的现场输出为准)。
+本回流修复(§23)唯一提交:`03ee9f4bb6c7eb67349da5cda332cf4e4d6ceaac`(`fix(approval): map CJK-name CHECK violation to 400, correct guard/manager overclaim`)——**NIT 收口(impl-gate-A-slice1-round4-20260918.md §5 NIT)**:上一版本节只写「不在此重复粘贴 SHA」,本轮门审指出这样这份 MD 自身就不带 provenance,已改为直接写死 SHA。
+
+`impl-gate-A-slice1-round4-20260918.md` P2/P3 收口(本次修复,commit 列表以 `git log --oneline 03ee9f4bb..HEAD -- docs/development/approval-template-groups-phase1-verification-20260918.md packages/core-backend/src/routes/approvals.ts packages/core-backend/src/services/ApprovalTemplateGroupService.ts packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts docs/development/approval-template-groups-phase1-design-20260918.md scripts/dev/atg-verification-recount.sh` 现场输出为准,§23.12 附最终 SHA 列表):见 §23.12。
