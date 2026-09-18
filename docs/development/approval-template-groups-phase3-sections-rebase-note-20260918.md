@@ -64,6 +64,8 @@ DATABASE_URL="postgresql://postgres@localhost/metasheet2_lock_a4_rb" EXPECT_DB=1
 
 两脚本均为报告/计数工具(exit code 恒 0),真正的判据是人工读每一条命中的完整句子(见上),不是脚本自身的退出码。
 
+**收尾复核:本文档写入后自身进入了 `atg-retraction-sweep.sh` 的扫描范围**(其扫描面是 `git diff --name-only origin/main..HEAD`,写入本文档的提交把它自己变成了这个 diff 的一部分),原始的一次运行结果已对不上当前分支头,按脚本自身「§5 任何进一步编辑后重跑」的说明重跑:命中本文档 `:33`(`guard⊆manager → guard⊋manager → 互不包含` 的压缩叙事,以否定式「互不包含」收尾,不是重申某个方向的包含)与 `:61`(逐字引用脚本自身的模式列表,做的是「这个脚本扫什么」的元描述,与脚本注释里引用同一组符号是同一类合法自指命中)——两处均为脚本自身分类规则下的合法命中,零处新增现在时包含断言。重跑还额外带出 15 个此前未见的文件(`packages/core-backend/src/di/identifiers.ts`/`src/routes/comments.ts`/`src/services/CommentService.ts` 等 comment 功能文件):核实是 `origin/main` 在本次执行期间从 `aebed089654f756a76b024a98e051f65e59a1969` 前进到了 `3c6c28958c2ce51334b8f02df13272ef0ae77889`(仓库有其它并行合并,与本 lane 无关),扩大了默认基线 `origin/main..HEAD` 的 diff 面,而不是本分支新引入了这些文件的改动——`git diff --name-only origin/main..27bb6edfe6cdca22d4a0265463f029a67722b795` 现场用固定的两个 SHA 复算恒定为 104(加本文档提交后 105),与新的完整命令行输出一致。这些新增文件里的全部 `subset` 命中(`mentionUnreadCount`/评论计数相关,4 处)与 `approvalTemplateAdminGuard`/`isTemplateManager` 无关,是模式误命中,不是本 lane 的遗留。
+
 ## 4. 三条 required 逐字复现
 
 ### `pnpm type-check`
@@ -79,7 +81,7 @@ Test Files  933 passed | 175 skipped (1108)
      Tests  14737 passed | 1604 skipped (16341)
 ```
 
-全文件零 `FAIL`(`grep -c "^ FAIL"` = 0)。重跑两遍数字一致。
+全文件零 `FAIL`(`grep -c "^ FAIL"` = 0)。第一遍在后台跑(记录了完整 stdout,但没单独捕获 `$?`);为了拿到硬退出码,追加重跑一遍并显式 `echo "EXIT=$?"`——第二遍同样是 `EXIT=0`,`933 passed | 175 skipped (1108)` / `14737 passed | 1604 skipped (16341)`,与第一遍逐位一致,零 `FAIL`。
 
 ### `bash -e apps/web/scripts/run-required-web-tests.sh`
 
