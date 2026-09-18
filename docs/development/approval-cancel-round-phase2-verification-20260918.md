@@ -4133,3 +4133,37 @@ false collision at its root, leaving the census guard — the file the task brie
 be edited ("不改锁文") — byte-identical. No allowlist entry was needed; the option is documented above,
 not silently dropped, per this document's own "不裁决,只如实列" convention for paths considered and
 not taken.
+
+**旁注:「2 failed / 49 passed」→「50 passed」不是用例计数错配.** The pre-fix single-file run's total
+(51 = 2 + 49) is one MORE than the post-fix total (50), because the guard generates one dynamic `it()`
+per DISCOVERED cluster line (`packages/core-backend/src/services/ApprovalProductService.ts
+@432550-432767` was itself one such generated case, alongside the "carrier file census" aggregate
+case whose own expected-array shrank from 14 to 13 entries) — removing the collision removes the
+cluster, which removes ITS test case, not just flips its verdict. This is the same shape §3.19 of this
+document already retracted an R-9 misreading over (an it()-count that changes across a code diff is
+expected when the diff changes how many things the guard enumerates), named here so a fixed-count
+assumption is not re-applied to this section by a later pass.
+
+**本节的独立复核(同日,第二遍;不同会话).** Re-run from a cold read of this section only (not trusting
+its numbers), before touching anything: `git status`/`git log -1` on this worktree showed the fix
+above ALREADY committed and pushed (`origin/feat/approval-cancel-round-phase2` at the same SHA) —
+i.e. this second pass started from "verify it actually holds," not "make the fix." Independently
+reproduced, this session, all matching the numbers above without relying on them: (1) `pnpm --filter
+@metasheet/core-backend exec vitest run tests/unit/approval-field-access-enum-mirror.test.ts` at
+current `HEAD` → **50 passed / 50**; (2) `pnpm exec tsc --noEmit` (package `@metasheet/core-backend`)
+→ clean; (3) the two `.db.test.ts` suites against the SAME pre-existing `metasheet2_lock_c2_fix`
+database (own is `chouhua`, not the `.env` `metasheet` role — the earlier `metasheet` connection
+attempt got `permission denied for schema public` because that role isn't the database owner, a
+connection-string mismatch rather than a test regression) → **44 passed / 2 skipped**, unchanged; (4)
+read the RAW pre-fix CI log directly (`grep -nE 'FAIL|Tests +[0-9]+ failed' job20.clean`) rather than
+trusting this document's characterization of it — confirms `approval-field-access-enum-mirror.test.ts`
+is the ONLY failing file in that run (`Test Files 1 failed | 933 passed | 175 skipped (1109)`, `Tests 2
+failed | 14749 passed | 1604 skipped (16355)`), i.e. the fix above targets the lane's entire red
+surface, not one failure among several; (5) confirmed the CI-run command really is the whole-package
+`pnpm --filter @metasheet/core-backend test` (`.github/workflows/plugin-tests.yml:842-844`,
+`Run core-backend tests` step, both matrix legs), not a narrower unit-only invocation, so (4)'s
+whole-suite framing is the right scope for "only red site" rather than an assumption. At the time this
+paragraph was written, PR #5856's `test (18.x)` / `test (20.x)` at this same `HEAD` had been running
+for several minutes and were still `pending` (in progress, not queued) — this document does not claim
+those checks turned green, only that every local proxy for their content did, matching the pre-fix
+failure exactly and the post-fix pass exactly.
