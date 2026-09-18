@@ -439,3 +439,21 @@ this local batch main advanced from `89f1ecdee2c3b70205a318074824c834bc6a5c7e`
 to `62aa4dc4cdf99ecad72f3acb2b34430d8524a3dc`, including shared route changes.
 This batch does not claim then-current-main equivalence, remote successor CI or
 complete manual archive readiness. Integration and publication gates remain separate.
+
+## Current-Main Replay
+
+True merge `140aa46d1043a4a470f88d1d5eb3a1a3b5abffbe` has ordered parents
+`8d47548c93d4583eafae6bdae63b5d3c5230f211` and then-current main
+`aebed089654f756a76b024a98e051f65e59a1969`; tree
+`76985019006378fe117f91bb7368cc1749d16280`. The merge is conflict-free,
+with no manual resolutions. The shared route delta relative to main contains only
+the manual archive imports/factories; main's record authorization-before-liveness
+change is preserved and its 33 behavior tests pass alongside 115 archive tests.
+
+Post-merge local evidence: 148/148 focused tests, complete isolated checkpoint DB
+driver including prior neighbors, acceptance TypeScript, static wiring 37/37 and
+full S5 pass. Logs are `/private/tmp/tm-manual-current-main-{unit,db,wiring,s5}.log`.
+Owned DB/connections and temporary cluster are removed. First-parent diff-check
+reports seven existing main documentation EOF blank lines; these unrelated files
+are not edited. The candidate-versus-main diff-check is the owned-change gate.
+This records local replay, not new remote CI, archive publication or deployment.
