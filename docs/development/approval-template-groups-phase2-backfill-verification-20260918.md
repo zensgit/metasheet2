@@ -324,7 +324,7 @@ $ git status --short src/services/ApprovalTemplateGroupService.ts
 
 | # | 项 | 本切片评估 |
 |---|---|---|
-| 1 | `*-ci-wiring.test.mjs` 闭世界,新文件须逐个普查 | **已核**:五个 backfill 文件各自有独立 `*-ci-wiring.test.mjs`(非"闭世界数组"式,是"逐文件 guard"式,`ci-realdb-step-contract.mjs` 本身无硬编码 `FILES` 数组——`grep -n "^export const FILES\|const FILES ="` 零命中,§19.2 已核过),§2.4 全量重跑 491 passed。**披露文件数分歧**:清单原文「共 45 个」,现场 `find` 得 43 个,数字不一致,见 §2.4 尾注 |
+| 1 | `*-ci-wiring.test.mjs` 闭世界,新文件须逐个普查 | **已核**:五个 backfill 文件各自有独立 `*-ci-wiring.test.mjs`(非"闭世界数组"式,是"逐文件 guard"式,`ci-realdb-step-contract.mjs` 本身无硬编码 `FILES` 数组——`grep -n "^export const FILES\|const FILES ="` 零命中,§19.2 已核过),§2.4 全量重跑 491 passed。**独立勘误(不是未深挖的分歧,是本清单条目的前提在本 head 上不成立)**:清单 #1 原文的隐含陷阱是"存在一个硬编码的逐文件 `FILES` 数组,新文件必须手工塞进去,否则漏接线"——这个前提对本切片不适用,因为 `ci-realdb-step-contract.mjs` 根本不存在这样的数组(只导出 `REAL_DB_STEP_IDS` 这个 id 字符串映射 + 一组解析函数),五个新文件的两点接线(`vitest.config.ts` exclude + `plugin-tests.yml` 白名单)靠的是各自独立的 `*-ci-wiring.test.mjs` 守卫,不是往共享数组里追加条目。清单原文另写「同族 *-ci-wiring 共 45 个」,现场 `find . -iname '*-ci-wiring.test.mjs' -not -path '*/node_modules/*' | wc -l` = **43**,不是 45——这处文件计数分歧本身不改变上一句结论(陷阱不适用),两条各自独立记录,不合并成一句"未深挖" |
 | 2 | `vitest.config.ts` exclude 惯例与 `plugin-tests.yml` 钉 | **已核**:五个 backfill 文件均在 `vitest.config.ts` exclude 名单里(ci-wiring 守卫 (a) 分支断言),且都进了 `plugin-tests.yml` 的 `approval-real-db-integration` 白名单(守卫 (b) 分支断言),与锁 §6 裁定一致 |
 | 3 | 改 `plugin-tests.yml` 的 s6a 重钉 | **不适用于本步**:本步(文档定稿)未改 `plugin-tests.yml`;上一次实际改动(续做步骤 18 新增批次列表端点的 CI 接线)已重钉,§2.5 核对字节相同,当前钉是最新值 |
 | 4 | 错误码不得降级成裸 HTTP 状态 | **已核**:§7 错误码表(设计 MD)七个专用码(`GROUP_NAME_TAKEN`/`GROUP_SORT_CONFLICT`/`APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE`/`…_BATCH_NOT_FOUND`/`…_BATCH_ALREADY_ROLLED_BACK` 等)均在测试断言里按码名而非裸状态码判定(如 rollback 文件的 `changesRequired #7` 用例名直接点名码) |
@@ -464,7 +464,7 @@ IDENTICAL
 4. 验证 MD §5 第 8 条与 §2.4 自相矛盾——**修复轮 3 已修,见 §5 项 8 与 §10.2**(`impl-gate-A3-round2-20260918.md` §7 P3-2)。
 5. 验收 E 终态腿未测——未动,已在 §5 项 1 记录为 remaining。**下一轮建议不选此条**:结果式竞态判据在 mutation 下也可能良性通过(记忆 `feedback_race_acceptance_assert_blocking_not_outcome`),一个弱化版本比不写更糟,需要认真设计而不是本轮体量的顺手修。
 6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——**修复轮 3 已修,见 §10.3**(`impl-gate-A3-round2-20260918.md` §7 P3-4):按本条上面已经选定的更便宜的选项,把"已在 glibc/en_US.UTF-8 上机械对拍,musl 轴未验"这句限定语写全,写进 `ApprovalTemplateGroupService.ts` 的 `STORABLE_GROUP_NAME_PATTERN` doc-comment(主锚点)+ `routes/approvals.ts` 的 SQL 谓词旁 + `-execute.db.test.ts` 交叉验证用例旁(各一句指回主锚点的注释),不是新增测试。
-7. 补充清单 #1 的"`ci-realdb-step-contract.mjs` 硬编码 `FILES` 数组"前提在本 head 上为假——未动(本文档 §4 第 1 行已经写了"零命中确认",未单独点出"清单前提本身过期"这句话,门审 §6 第 7 条建议在 PR body 里点名,留给开 PR 那一步)。
+7. 补充清单 #1 的"`ci-realdb-step-contract.mjs` 硬编码 `FILES` 数组"前提在本 head 上为假——**修复轮 3 已改写成独立勘误句,见 §4 第 1 行与 §10.4**(`impl-gate-A3-round2-20260918.md` §7 P3-5):不再是"披露一处数字分歧,不深挖",而是明确写出"该数组不存在,清单#1描述的陷阱对本切片不适用"这句结论,与「45 vs 43」的文件计数分歧分开各自成句。
 
 ---
 
@@ -728,3 +728,41 @@ $ bash scripts/dev/atg-retraction-sweep.sh origin/feat/approval-template-groups-
 - **主锚点**:`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`,`STORABLE_GROUP_NAME_PATTERN` 的 doc-comment——新增一段说明该 JS/SQL 等价只在 glibc/`en_US.utf8` collation 上测过,production 的 `15-alpine`(musl、无 `en_US.utf8`)轴未验(记忆 `finding_prod_pg15_never_tested`)。
 - `packages/core-backend/src/routes/approvals.ts`,execute 的 `eligible` 查询 `btrim(t.category) ~ '[!-~]'` 谓词旁,加一句指回主锚点。
 - `packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts`,SQL/JS 交叉验证用例(`SQL/JS cross-verification: …`)上方,加一句说明该测试只在 glibc/`en_US.utf8` 上跑过,绿不代表 musl 轴已覆盖。
+
+### 10.4 P3-5——补充清单 #1 的前提在本 head 为假,改写成独立勘误句
+
+原文把"清单 #1 描述的陷阱(硬编码 `FILES` 数组)对本切片不适用"与"文件计数 45 vs 43 的分歧"混写成一句"如实记录不一致,不强行对齐"——按门审要求拆成两句独立结论:第一句明确断言"该数组不存在,清单 #1 的陷阱不适用"(不是留待判断的分歧),第二句单独记录文件计数分歧(45 vs 43),两者不互相稀释。改动位置:验证 MD §4 补充清单表第 1 行 + §7.4 项 7。
+
+### 10.5 回归验证(证明零行为改动)
+
+```
+$ npx tsc --noEmit
+```
+exit 0,零输出(commit 3/4 各自单独验证过一次)。
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_rb \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+    --reporter=dot
+ Test Files  7 passed (7)
+      Tests  79 passed | 7 skipped (86)
+```
+与 §9.3 rebase 后首次重跑的计数逐字相同(79/7/86)——本轮四个提交(comment/MD-only)未改变任何一条断言的红绿结果。
+
+```
+$ git diff --stat a4bf9f742..HEAD
+ docs/development/approval-template-groups-phase2-backfill-design-20260918.md               | 14 ++--
+ docs/development/approval-template-groups-phase2-backfill-verification-20260918.md         | 92 ++++++++++++++++++++--
+ packages/core-backend/src/routes/approvals.ts                                              |  4 +
+ packages/core-backend/src/services/ApprovalTemplateGroupService.ts                         | 13 +++
+ packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts | 6 ++
+ 5 files changed, 116 insertions(+), 13 deletions(-)
+```
+（`a4bf9f742` = §9 rebase-note 提交,是本轮四个修复提交的起点。）只 5 个文件,四个提交(35a5e2ddd/a0ff59eeb/bf1d75d14/本提交)各自负责其中一部分;`git diff` 逐行核对:两份 MD 全是散文改写,三个源码文件的改动全在 `//` 或 `/** */` 注释块内,零一行可执行代码/SQL/正则/类型改动。
