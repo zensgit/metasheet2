@@ -1315,7 +1315,20 @@ try {
           console.log('PASS: public HTTP capture/catalog/preview; unchanged no_changes; edited field exact executable plan without apply; missing/corrupt object refuses; restored reads recover')
           if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
             const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
-            await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`)
+            await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, async () => {
+              const before = (await query(`SELECT data,version FROM meta_records WHERE id='manual-source-record'`)).rows[0]
+              const historyCount = async () => (await query(`SELECT count(*)::int AS n FROM meta_record_revisions
+                WHERE record_id='manual-source-record' AND source='restore'`)).rows[0].n
+              const beforeHistory = await historyCount()
+              await query(`UPDATE meta_records SET data='{"manual-source-field":"synthetic-browser-edit"}',
+                version=version+1 WHERE id='manual-source-record'`)
+              return async () => {
+                const after = (await query(`SELECT data,version FROM meta_records WHERE id='manual-source-record'`)).rows[0]
+                assert.deepEqual(after.data, before.data)
+                assert.equal(Number(after.version), Number(before.version) + 2)
+                assert.equal(await historyCount(), beforeHistory + 1)
+              }
+            })
           }
         } finally {
           try {

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // Called only by the owned synthetic database driver, while its production HTTP router is alive.
-export async function verifyManualArchiveBrowser(backendOrigin) {
+export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit) {
   const target = new URL(backendOrigin)
   assert.equal(target.hostname, '127.0.0.1')
   assert.equal(target.protocol, 'http:')
@@ -88,11 +88,40 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       assert.equal(preview.data.executable, false)
       assert.equal(await page.locator('[data-test="archive-recovery-execute"]').count(), 0)
       assert.deepEqual(forbiddenWrites, [])
+      const verifyRestored = await syntheticEdit()
+      const changedPreviewPromise = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname.endsWith('/recovery-archive/preview'))
+      await page.locator('[data-test="archive-recovery-request-preview"]').click()
+      const changedPreviewResponse = await changedPreviewPromise
+      assert.equal(changedPreviewResponse.status(), 200)
+      const changedPreview = await changedPreviewResponse.json()
+      assert.equal(changedPreview.data.executable, true)
+      assert.equal(changedPreview.data.summary.effectiveWriteCount, 1)
+      const execute = page.locator('[data-test="archive-recovery-execute"]')
+      await execute.waitFor()
+      assert.equal(await execute.isDisabled(), true)
+      assert.deepEqual(forbiddenWrites, [], 'preview must not execute a recovery')
+      await page.locator('[data-test="archive-recovery-confirm-input"]').check()
+      const executePromise = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname.endsWith('/recovery-archive/execute'))
+      await execute.click()
+      const executeResponse = await executePromise
+      assert.equal(executeResponse.status(), 200)
+      const executed = await executeResponse.json()
+      assert.equal(executed.data.revertedCount, 1)
+      assert.equal(executed.data.resurrectedCount, 0)
+      assert.equal(executed.data.deletedCount, 0)
+      await page.locator('[data-test="archive-recovery-result"]').waitFor()
+      assert.equal(await execute.isDisabled(), true)
+      assert.equal(forbiddenWrites.length, 1)
+      assert.ok(new URL(forbiddenWrites[0]).pathname.endsWith('/recovery-archive/execute'))
+      await verifyRestored()
       assert.deepEqual(errors, [])
       assert.equal(await page.locator('[role="dialog"]').evaluate(element => element.scrollWidth > element.clientWidth), false)
+      await page.locator('[data-test="archive-recovery-result"]').scrollIntoViewIfNeeded()
       await page.screenshot({ path: join(tmpdir(), `tm-manual-http-browser-${width}.png`), fullPage: true })
       await page.close()
-      console.log(`PASS: Chromium ${width} production component/client -> HTTP capture/reload/catalog/preview; no restore request`)
+      console.log(`PASS: Chromium ${width} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request and database/history readback`)
     }
   } catch (error) {
     for (const context of browser?.contexts() ?? []) {
