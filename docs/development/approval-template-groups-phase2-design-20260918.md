@@ -33,6 +33,8 @@
 
 **批次机制选择:新表,不复用既有审计/批次机制**——现场核对:全仓无「可回滚批次」的通用机制(`grep -rl "operation_batch\|bulk_operation\|rollback_batch\|undo_batch" packages/core-backend/src/db/migrations/` 零命中;唯一形态相近的先例 `zzzz20260731120000_w4c3a_import_rollback_foundation.ts` 是考勤导入子系统的「header 表 + 逐行 witness 表」模式,表结构与本场景语义完全不同,不能跨子系统直接挂接——所以按锁文自己给出的另一个选项「新表」,DDL 照 §2 的惯例(Kysely `sql` 模板、组织级 CHECK、复合 FK 钉 org 一致性)。
 
+**【§13 changesRequired #15,本步(续做步骤 5)落地——更宽普查,取代上一段的四 token 表述】** 门审 Q1(b) 指出四 token grep 本身是记忆 `finding_o2_census_token_list_enumeration_trap` 点名的陷阱(token 列表决定分母),要求换成对 approval 域候选表逐个读定义的更宽普查。复核结果(`ls packages/core-backend/src/db/migrations | grep -iE "audit|event|batch|rollback|import"`,逐个读表定义):`operation_audit_logs`(`20250926_create_operation_audit_logs.ts:5` 注释原文 `minimal placeholder to satisfy startup writes`;`zzzz20260209100000_fix_operation_audit_logs_schema.ts` 又一次列名对齐)——无 org 列、无任何 FK,是自述占位且 schema 已漂移两次的表,不能把 rollback 的真值挂在它上面;`oapi_write_audit` / `automation_action_applied` / `approval_form_field_revisions` 各自域内,均无 org 列、无 FK。上一段引用的 `zzzz20260731120000_w4c3a_import_rollback_foundation.ts`(header + 逐行 witness)不只是「表结构不同不能跨子系统挂接」的驳回对象——它同时是**本仓已有的 header+detail 回滚模式正面先例**,本提案 §2 的三表形状与它同族,该点上一段没写出来,这里补上。
+
 迁移文件(拟):`packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts`(**含 DDL,Draft only,不应用不合并**)。
 
 ### 2.1 `approval_template_group_backfill_batches`(批次头,一次 execute 一行)
@@ -50,6 +52,13 @@ CREATE TABLE approval_template_group_backfill_batches (
   CONSTRAINT atgbb_org_id_uni UNIQUE (id, org_id)
 );
 ```
+
+```sql
+CREATE INDEX approval_template_group_backfill_batches_org_created_idx
+  ON approval_template_group_backfill_batches (org_id, created_at DESC);
+```
+
+**【§13 changesRequired #5,本步(续做步骤 5)落地】** changesRequired #5 原文「新增 `GET …/backfill/batches` + 索引」——上面 `CREATE TABLE` 原文没有索引,补一条 `(org_id, created_at DESC)` 支持"按 org 取最近批次,分页"这个访问形状;端点本身见 §6.1 新增行。`rolled_back_at` 不需要单独索引(列表端点返回全部批次,`rolledBackAt` 是否为空由客户端渲染,不是过滤谓词)。
 
 - 与 `approval_template_groups`/`_links` 同款「组织内容非空」CHECK,复用同一字符类正则 `'[!-~]'`(先例 `zzzz20260715210000_create_approval_attachments.ts:24`,A-1 已引用)。
 - **不设**「执行中」状态列——execute 是单事务,要么全成功要么全回滚(见 §3),不存在"进行中"的可观测中间态。**【§13 changesRequired #14 / P2-3,已求值】收窄:上一句只对 DB 行成立,改读「无 DB 行级中间态」——对操作者(请求超时/连接断开后无法区分「已提交」与「已回滚」)不成立,该缺口由 §13 changesRequired #5 的批次列表端点(`GET …/backfill/batches`)接住,不在这里现场改写批次头 DDL。**
@@ -113,13 +122,17 @@ CREATE TABLE approval_template_group_backfill_batch_links (
 
 ### 3.1 execute 算法(单个 `transaction(...)` 回调,`client` 全程同一条连接)
 
+**【§13 changesRequired #1,本步(续做步骤 5)按 §13.2 统一锁序整段改写;下方代码块取代改写前的"逐类目循环回头取 L1"版本,旧版本见本文件 git 历史(commit 027a1f9cd 及以前)】**
+
 ```
 BEGIN
-SET TRANSACTION ISOLATION LEVEL READ COMMITTED          -- 必须是第一条语句,同 A-1 §2
-SELECT pg_advisory_xact_lock(hashtext('atg:' || org))    -- 与手工建组/归档/改名/解档竞争同一把锁
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED          -- 必须是第一条语句,同 A-1 §2;W8 落地为
+                                                          -- beginApprovalTemplateGroupTxn(client) 返回
+                                                          -- 品牌类型 AtgTxClient(§13.2 changesRequired #10)
+SELECT pg_advisory_xact_lock(hashtext('atg:' || org))    -- L0,与手工建组/归档/改名/解档竞争同一把锁
 
 eligible ← SELECT id, category FROM approval_templates t
-             WHERE btrim(category) ~ '[!-~]'              -- 【§13 changesRequired #3,已求值,取代下一行】
+             WHERE btrim(category) ~ '[!-~]'              -- 【§13 changesRequired #3,已求值,取代原谓词】
                AND NOT EXISTS (
                  SELECT 1 FROM approval_template_group_links l
                   WHERE l.org_id = $org AND l.template_id = t.id
@@ -134,35 +147,65 @@ eligible ← SELECT id, category FROM approval_templates t
 
 IF eligible 为空:
   COMMIT                                                  -- 空事务,零行写入,不建批次头
-  RETURN { batchId: null, groups: [] }                    -- 幂等的"第二次零变化"由这里保证
+  RETURN { batchId: null, groups: [], scope }             -- 幂等的"第二次零变化"由这里保证;
+                                                           -- scope 见 §5.2(changesRequired #16,本步落地)
+
+-- 【§13 changesRequired #12,本步落地】规模上界:默认 500(硬编码常量,非配置项——本切片不提供规模-
+-- 耗时曲线,门审给的是"二选一",本文档选前者)。超出即中止,零行写入,不建批次头,不做部分执行。
+IF count(eligible) > 500:
+  ROLLBACK
+  抛 APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE (400)     -- §7 已补码
+
+categories ← eligible.category 去重,按字典序排序               -- 决定性排序,便于测试断言;
+                                                                -- 不是锁序承重来源(锁序由下面的
+                                                                -- ORDER BY id 承担,与遍历顺序无关)
+existingByCategory ← SELECT id, name FROM approval_template_groups
+                       WHERE org_id = $org AND name = ANY($categories)
+                         AND archived_at IS NULL
+                       -- 只读,不取锁;在 L0 之内该读稳定——任何会修改这些行的其它事务此刻都在
+                       -- pg_advisory_xact_lock 上等同一把 org 级锁,不存在读后失效的窗口
+existingIds ← existingByCategory 的全部 id
+
+IF existingIds 非空:
+  SELECT id FROM approval_template_groups                  -- 【§13.2 逐字保留的统一锁序,原文见该节,
+   WHERE org_id = $org AND id = ANY($existingIds)           -- 本处是其落地,不是转述】L0 之后、任何
+   ORDER BY id FOR UPDATE                                   -- L2 写之前,一条语句按确定性行序预锁
+                                                             -- 本次要触达的全部既有组行
 
 batchId ← newBatchId()
 INSERT INTO approval_template_group_backfill_batches (id, org_id, created_by) VALUES (...)
 
-FOR EACH category IN GROUP BY eligible.category:
-  existing ← SELECT id FROM approval_template_groups
-              WHERE org_id = $org AND name = $category AND archived_at IS NULL
-  IF existing 存在:
-    groupId ← existing.id; createdNew ← false
+FOR EACH category IN categories:                            -- 顺序不再是锁序承重来源:既有组已在
+                                                              -- 上一步预锁完毕,这里不存在"取过某组
+                                                              -- 的 L2 后回头对下一个组取 L1"的旧路径
+  IF category IN existingByCategory:
+    groupId ← existingByCategory[category].id; createdNew ← false   -- 行锁已在预锁步骤持有
   ELSE:
-    -- 内联 createApprovalTemplateGroupWithClient 的语句体(MAX+1 → INSERT)
+    -- 内联 createApprovalTemplateGroupWithClient 的语句体(MAX+1 → INSERT)——新行,无 L1 争用
     groupId ← 新建组; createdNew ← true
   INSERT INTO approval_template_group_backfill_batch_groups (batch_id, org_id, group_id, created_new)
     VALUES ($batchId, $org, $groupId, $createdNew)
 
   FOR EACH template IN eligible WHERE category = 该 category:
-    -- 内联 linkApprovalTemplateToGroupWithClient 的语句体(FOR UPDATE → upsert),RETURNING linked_at
-    INSERT INTO approval_template_group_backfill_batch_links
-      (batch_id, org_id, template_id, group_id, linked_at)
-      VALUES ($batchId, $org, $template.id, $groupId, $返回的linked_at)
+    -- 内联 linkApprovalTemplateToGroupWithClient 的语句体,写入改用数据修改 CTE(§4.2 changesRequired #2
+    -- 落地 SQL 的写入侧对偶——令牌全程不经 JS,回滚时才不会在 §4.2 撞上精度损失):
+    -- WITH upserted AS (
+    --   INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_at, unlinked_at)
+    --     VALUES ($org, $template.id, $groupId, now(), NULL)
+    --   ON CONFLICT (org_id, template_id) DO UPDATE
+    --     SET group_id = EXCLUDED.group_id, linked_at = now(), unlinked_at = NULL
+    --   RETURNING template_id, group_id, linked_at
+    -- )
+    -- INSERT INTO approval_template_group_backfill_batch_links (batch_id, org_id, template_id, group_id, linked_at)
+    --   SELECT $batchId, $org, template_id, group_id, linked_at FROM upserted
 
 COMMIT
-RETURN { batchId, groups: [...] }
+RETURN { batchId, groups: [...], scope }                   -- scope 见 §5.2
 ```
 
-**catch 分支**:任何一步抛错(包括 `mapGroupConstraintError` 映射出的 `GROUP_NAME_TAKEN`/`GROUP_SORT_CONFLICT`)⇒ 整个 `transaction()` 自动 ROLLBACK(`connection-pool.ts:199-203`),零行写入——这与"重名走 GROUP_NAME_TAKEN 语义"的字面矛盾需要澄清:**正常路径下不会撞见 `GROUP_NAME_TAKEN`**,因为"先查后建"发生在同一把 L0 锁之内,不存在竞态窗口(见下条);它只在 L0 本身失守(实现 bug)时才会被 `mapGroupConstraintError` 兜底,而不是设计出的正常分支。
+**catch 分支**:任何一步抛错(包括 `mapGroupConstraintError` 映射出的 `GROUP_NAME_TAKEN`/`GROUP_SORT_CONFLICT`)⇒ 整个 `transaction()` 自动 ROLLBACK(`connection-pool.ts:199-203`),零行写入——这与"重名走 GROUP_NAME_TAKEN 语义"的字面矛盾需要澄清:**正常路径下不会撞见 `GROUP_NAME_TAKEN`**,因为"先查后建"发生在同一把 L0 锁之内,不存在竞态窗口(见下条);它只在 L0 本身失守(实现 bug)时才会被 `mapGroupConstraintError` 兜底,而不是设计出的正常分支。**【§13 changesRequired #11 前半,已求值】** 这句"整个 `transaction()` 自动 ROLLBACK"描述的正是要求的代码形状——`mapGroupConstraintError` 的 catch 写在 `await transaction(cb)` 这次调用**外面**(`try { const r = await transaction(cb) } catch (e) { throw mapGroupConstraintError(e) }`),不是在回调内部逐条语句套 catch:`atg_sort_unique` 是 `DEFERRABLE INITIALLY DEFERRED`,真重复要等 COMMIT 才报 23505,回调内部任何一条语句上的 try/catch 都看不到它,只有包在整次 `transaction()` 调用外面的 catch 能接住 COMMIT 阶段抛出的错误。后半(§7 错误码表补 `GROUP_SORT_CONFLICT` 行)已在 §7 落地。
 
-**【§13 changesRequired #1,已求值,实测 M2】上面 §3.1 的逐类目循环(L1→L2→L1,在取过某组的 L2 之后回头对下一个组取 L1)与 A-1 挂接路径(L1→L2,不取 L0)确定性死锁,牺牲者是同时段任何普通挂接请求且拿到未映射的通用 500——不是纸面推理,是本会话真库实测(`reviews/a3-probe/execute-lockorder-probe.cjs`)。落地(execute 与 rollback 必须写成同一条要求,详见 §13 changesRequired #1 与 §11 附录的完整伪代码):在 L0 之后、任何 L2 写之前,用一条语句按确定性行序预锁本次要触达的全部既有组行(`SELECT id FROM approval_template_groups WHERE org_id=$1 AND id=ANY($2) ORDER BY id FOR UPDATE`),取代逐类目循环里"回头取 L1"的写法;预锁之后 `linkApprovalTemplateToGroupWithClient` 内部的 `FOR UPDATE` 退化为对本事务已持有行锁的再取,不新增取锁顺序。`mapGroupConstraintError` 的 catch 须套在整个 `transaction()` 调用之外(§13 changesRequired #11),因为 `atg_sort_unique` 是 `DEFERRABLE INITIALLY DEFERRED`,真重复在 COMMIT 时才报 23505——逐原语套 catch 看不到它。此条为 W8 实现单元的落地对象,本步不改写 pseudocode 本体,只记入求值。**
+**【§13 changesRequired #1,已求值,实测 M2 —— 本步(续做步骤 5)已按此改写上方代码块,不再是"待 W8 落地对象"】** 旧版本的逐类目循环(L1→L2→L1,在取过某组的 L2 之后回头对下一个组取 L1)与 A-1 挂接路径(L1→L2,不取 L0)确定性死锁,牺牲者是同时段任何普通挂接请求且拿到未映射的通用 500——不是纸面推理,是门审会话真库实测(`reviews/a3-probe/execute-lockorder-probe.cjs`)。上方代码块已经是落地后的版本:L0 之后、任何 L2 写之前,一条语句按确定性行序预锁本次要触达的全部既有组行;预锁之后 `linkApprovalTemplateToGroupWithClient` 内部的 `FOR UPDATE`(若组合调用时仍保留该语句)退化为对本事务已持有行锁的再取,不新增取锁顺序。**代码化仍待 W8**——本节交付的是 pseudocode 级别的落地,不是 `.ts` 实现;W8 的真库测试须覆盖组合调用路径(见 §9 changesRequired #13 三条判别力测试)。
 
 ### 3.2 并发语义(E 的姊妹判据,复用同一 L0)
 
@@ -178,6 +221,41 @@ RETURN { batchId, groups: [...] }
 - `archiveApprovalTemplateGroup(orgId, groupId)`(A-1,`:241-278`)在归档时会**无条件解除该组当前的全部成员**(`UPDATE … SET group_id = NULL … WHERE org_id = $1 AND group_id = $2`,不区分是不是本批次挂上去的)。如果这个批次新建的组,在 execute 之后被**另一个人**手工挂了一个不相关的模板进来,rollback 若直接调用这个函数归档该组,会把那个不相关模板也解除——同一个 mutation 判据的另一半。
 
 **决策**:rollback 不调用这两个导出函数,而是内联同样的语句,但**加两层精确性前置条件**(见 §4.2/§4.3)。这仍然是「解除是独立 UPDATE」「归档是事务」这两条既有原语的**语句**复用,只是补上了"只对本批次仍然原样成立的那部分状态生效"这个额外 WHERE 谓词/前置检查——不是发明新的写路径形状。
+
+**【§13 changesRequired #1,本步(续做步骤 5)补齐——rollback 的整体事务骨架】** 原文只分别给了 §4.2(链接回滚)与 §4.3(分组归档)两段独立代码块,没有写出把它们装进同一个事务、同一把锁序里的骨架,这正是 M3 死锁实测打中的缺口。骨架:
+
+```
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED    -- 同 §3.1;W9 落地为 beginApprovalTemplateGroupTxn(client)
+SELECT pg_advisory_xact_lock(hashtext('atg:' || org))   -- L0,与手工建组/归档/execute 竞争同一把锁
+
+batch ← SELECT rolled_back_at FROM approval_template_group_backfill_batches
+          WHERE id = $batchId AND org_id = $org FOR UPDATE
+IF batch 不存在: ROLLBACK; 抛 APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND (404)
+IF batch.rolled_back_at IS NOT NULL: ROLLBACK; 抛 APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK (409,带 rolledBackAt——changesRequired #7)
+
+targetGroupIds ← (SELECT DISTINCT group_id FROM approval_template_group_backfill_batch_links WHERE batch_id = $batchId)
+                  UNION
+                  (SELECT group_id FROM approval_template_group_backfill_batch_groups WHERE batch_id = $batchId)
+                  -- 只读,不取锁;§13.2 定义的 rollback 锁序里的"$2"
+
+IF targetGroupIds 非空:
+  SELECT id, archived_at FROM approval_template_groups   -- 【§13.2 逐字保留的统一锁序,本处落地,不是转述】
+   WHERE org_id = $org AND id = ANY($targetGroupIds)      -- L0 之后、任何 L2 写之前,一条语句按
+   ORDER BY id FOR UPDATE                                 -- 确定性行序预锁全部既有组行,结果集保留供
+                                                           -- §4.3 复用(不再对单行发第二次 FOR UPDATE)
+
+-- 此刻执行 §4.2 的集合式 UPDATE(L2 写,见下方该节代码块)
+-- 然后执行 §4.3 的 remaining 计算与归档(见下方该节代码块;顺序要求见 §4.3 落地段——
+-- remaining 必须在 §4.2 之后算,与本骨架的先后关系不冲突:两者都排在"预锁"之后)
+
+UPDATE approval_template_group_backfill_batches SET rolled_back_at = now()
+  WHERE id = $batchId AND org_id = $org
+COMMIT
+RETURN { rolledBackAt: <刚写入的时间戳> }
+```
+
+批次头的 `FOR UPDATE`(锁 `approval_template_group_backfill_batches` 一行)与预锁既有组的 `ORDER BY id FOR UPDATE`(锁 `approval_template_groups` 多行)是两张不同表上的行锁,不构成同一张表内的锁序问题;`approval_template_group_backfill_batches` 只有 rollback 会 `FOR UPDATE` 它(execute 只 INSERT 新批次头行,不碰已有行),不参与 §13.2 针对 `approval_template_groups` 的 L1 竞争分析。
 
 ### 4.2 链接回滚:乐观令牌精确匹配
 
@@ -206,11 +284,14 @@ UPDATE approval_template_group_links l
 
 ### 4.3 分组回滚:仅归档"批次新建 且 回滚后零剩余成员"的组
 
+**【§13 changesRequired #1,本步(续做步骤 5)按 §13.2 统一锁序改写:下方 `locked` 不再对单行发第二次 `FOR UPDATE`,而是复用上方骨架预锁步骤已经读回的快照】**
+
 ```
 FOR EACH (groupId, createdNew) IN batch_groups WHERE batch_id = $batchId:
   IF NOT createdNew: CONTINUE                      -- 挂到已有组的,从不归档
-  locked ← SELECT archived_at FROM approval_template_groups
-             WHERE org_id = $org AND id = $groupId FOR UPDATE
+  locked ← 上方骨架"预锁既有组"步骤已经读回的该 groupId 行(archived_at)——行锁已在那一步
+           取得,这里不再发第二次 `FOR UPDATE`,避免"先做链接回滚(L2)再对组取 FOR UPDATE(L1)"
+           这个 M3 实测出的 L2→L1 死锁写法
   IF locked 为空 OR locked.archived_at IS NOT NULL: CONTINUE   -- 组已不存在或已被归档(如被手工归档过),跳过不报错
   remaining ← SELECT count(*) FROM approval_template_group_links
                 WHERE org_id = $org AND group_id = $groupId AND unlinked_at IS NULL
@@ -252,6 +333,16 @@ FOR EACH (groupId, createdNew) IN batch_groups WHERE batch_id = $batchId:
 ```jsonc
 GET /api/approval-template-groups/backfill/preview →
 {
+  "scope": "org-complete",        // "org-complete" | "visible-to-you" —— 【§13 changesRequired #16,
+                                   // 本步落地】见 §6.2 现场标注:过 approvalTemplateAdminGuard 的主体
+                                   // 不保证等于 isTemplateManager 人口(通配权限码展开 / isAdmin(userId)
+                                   // 两类主体都能过 guard 但可能不是 manager)——eligible 查询仍然套用
+                                   // applyTemplateVisibilityFilter,对非 manager 主体这会**收窄**候选
+                                   // 模板集合。该字段如实标注:actor 的可见性判定若等价于"org 全量可见"
+                                   // (即 applyTemplateVisibilityFilter 对该 actor 是恒真析取项)则为
+                                   // "org-complete";否则为"visible-to-you",提醒调用方这份 buckets
+                                   // 不是 org 的完整候选清单。计算不新造判定——直接复用
+                                   // resolveApprovalTemplateVisibilityActor 已经解析出的 actor 种类。
   "buckets": [
     {
       "category": "HR",
@@ -260,11 +351,31 @@ GET /api/approval-template-groups/backfill/preview →
       "templateIds": ["...", "..."],
       "templateCount": 2
     }
+  ],
+  "skipped": [                     // 【§13 changesRequired #3 后半,本步(续做步骤 5)补齐——见 advisor
+                                    // 复核:§3.1 pseudocode 注释、§8 item 2、O2 三处已经承诺"进 preview
+                                    // 的 skipped 桶(带 reason)",本响应形状此前未把这个承诺写成字段】
+    {
+      "category": "请假",          // 原始 category 值(未 trim,便于管理员核对哪一行没被处理)
+      "reason": "CATEGORY_NOT_STORABLE_AS_GROUP_NAME", // 枚举 reason 码,不是自由文本(记忆
+                                    // feedback_exemption_reasons_rot_make_them_data:豁免理由要是数据,
+                                    // 不是散文)——两个已知值:
+                                    // "CATEGORY_BLANK_AFTER_TRIM"(btrim(category) = ''——锁 §4 D
+                                    //   谓词本身漏掉的纯空白遗留形态,§8 item 2 已裁);
+                                    // "CATEGORY_NOT_STORABLE_AS_GROUP_NAME"(btrim(category) 非空但不
+                                    //   匹配 '[!-~]'——今天等价于"纯非 ASCII 可打印字符",例如纯中文
+                                    //   category;O2 待 owner ratify `atg_name_nonblank` 勘误前的诚实
+                                    //   披露落在这里,勘误后此原因值集合会变窄但字段本身不变)
+      "templateIds": ["...", "..."],
+      "templateCount": 3
+    }
   ]
 }
 ```
 
-`action` 由"§org 内是否已存在同名活跃组"预先判定——与 execute 内部的判定逻辑必须是**同一条 SQL**(否则 preview 展示的结果可能与 execute 实际发生的不一致);因此建议把"给定 org + category 列表,判定 create/attach"抽成一个只读小函数,preview 和 execute 都调用它,唯一区别是 execute 在 L0 锁内调用、preview 在锁外调用(preview 本身不修改状态,不需要锁;但这意味着 **preview 展示的"将建/将挂接"是快照,不是承诺**——如果 preview 之后、execute 之前发生了并发的手工建组,execute 时看到的"是否已存在同名组"可能与 preview 展示的不同。这是"预览"语义的正常边界,不是缺陷,写清楚防止门审误判为竞态漏洞)。
+`skipped` 与 `buckets` 的并集加上"已挂接、被 `NOT EXISTS` 排除"的模板,才等于该 actor 可见的全部模板——`skipped` 存在的意义是让管理员能回答"这条 category 是没有模板还是被排除了",呼应记忆 `finding_attendance_denied_renders_as_all_clear`(空态必须能区分"零条"与"没查成"/这里是"被排除")。execute 侧对同一批 `skipped` category **跳过而非抛错**(§3.1 已落地),两侧共用同一条谓词与同一个只读判定函数(见下段)。
+
+`action` 由"§org 内是否已存在同名活跃组"预先判定——与 execute 内部的判定逻辑必须是**同一条 SQL**(否则 preview 展示的结果可能与 execute 实际发生的不一致);因此建议把"给定 org + category 列表,判定 create/attach"抽成一个只读小函数,preview 和 execute 都调用它,唯一区别是 execute 在 L0 锁内调用、preview 在锁外调用(preview 本身不修改状态,不需要锁;但这意味着 **preview 展示的"将建/将挂接"是快照,不是承诺**——如果 preview 之后、execute 之前发生了并发的手工建组,execute 时看到的"是否已存在同名组"可能与 preview 展示的不同。这是"预览"语义的正常边界,不是缺陷,写清楚防止门审误判为竞态漏洞)。**【§13 P3-3,本步(续做步骤 5)落地】** 门审采纳这个抽取建议并追加一条:该函数必须**同时**返回 `skipped` 判定(即上方 `skipped` 桶的成员资格 + `reason`),不能只返回 create/attach 二选一——否则 preview 与 execute 对"哪些 category 被跳过"仍会各自判断一次而分叉,重蹈 §5.2 一开始就要避免的"两者不是同一条 SQL"问题。函数签名建议:`classifyBackfillCategory(org, category, existingGroupsByName) → { action: 'create'|'attach'|'skip', existingGroupId?, reason? }`。
 
 ## 6. 端点、guard 与一处需要门审/owner 裁决的授权面冲突
 
@@ -275,6 +386,7 @@ GET /api/approval-template-groups/backfill/preview →
 | `GET /api/approval-template-groups/backfill/preview` | §3.1 的只读候选查询 | `approvalTemplateAdminGuard`(任务书原文) |
 | `POST /api/approval-template-groups/backfill/execute` | §3 execute | `approvalTemplateAdminGuard` |
 | `POST /api/approval-template-groups/backfill/batches/:batchId/rollback` | §4 rollback | `approvalTemplateAdminGuard` |
+| `GET /api/approval-template-groups/backfill/batches` | 批次列表(分页,含 `rolledBackAt`)——**【§13 changesRequired #5,本步落地】** 供管理员核对"哪些批次已回滚"而不必逐个猜 batchId;分页参数与响应形状照 A-1 既有列表端点惯例(游标或 limit/offset,待实现阶段与 A-1 对齐,不在本提案新造分页协议) | `approvalTemplateAdminGuard`(与其余三个端点同一 guard,同 §6.2 现场标注的三条实证理由——它暴露的是"哪些写计划已生效/已撤销",与 preview 同属"写操作的伴随读") |
 
 ### 6.2 授权面冲突(必须在实现前解决,列为本提案的第一个待裁决项)
 
@@ -301,6 +413,9 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 |---|---|---|
 | `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND` | 404 | rollback 指向不存在于该 org 的批次 id |
 | `APPROVAL_ACTOR_REQUIRED` | 401 | 沿用 A-1 既有码(execute/rollback 都需要 actor id) |
+| `GROUP_SORT_CONFLICT` | 500 | **【§13 changesRequired #11 后半,本步落地】** execute 建组撞 `atg_sort_unique`(`DEFERRABLE INITIALLY DEFERRED`,COMMIT 时才报 23505)经 `mapGroupConstraintError` 映射;前半(catch 须套在整个 `transaction()` 调用之外)已在 §3.1 现场标注 |
+| `APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE` | 400 | **【§13 changesRequired #12,本步落地】** execute 的 `eligible` 候选人口超过规模上界(默认 500,见 §3.1 现场标注)——ROLLBACK,零行写入,不建批次头 |
+| `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK` | 409 | rollback 对 `rolled_back_at IS NOT NULL` 的批次再次调用(响应体带 `rolledBackAt`)——已在 §4.4 point 1 提出(changesRequired #7),本步顺带同步进本表,非本轮新增裁决 |
 
 `handleApprovalsError` 兜底码(名字含端点动作,同 A-1 惯例):`APPROVAL_TEMPLATE_GROUP_BACKFILL_PREVIEW_FAILED` / `_EXECUTE_FAILED` / `_ROLLBACK_FAILED`。
 
@@ -364,22 +479,22 @@ I7 是锁文 §3 不变量、属于抬头 RATIFY 记录里"已 ratify"的第 2 �
 
 | # | 门审要求(摘) | 本文档落地位置 | 状态 |
 |---|---|---|---|
-| 1 | execute 与 rollback 改成"L0 → 一条 `ORDER BY id FOR UPDATE` 预锁全部目标既有组 → 所有 L2 写 → 归档"(实测 M2/M3) | §3.1 pseudocode 后现场标注(execute)+ §4.3 `remaining` 段后现场标注(rollback);完整语句见下方 13.2 | 设计已落地(pseudocode 本体待 W8/W9 改写) |
+| 1 | execute 与 rollback 改成"L0 → 一条 `ORDER BY id FOR UPDATE` 预锁全部目标既有组 → 所有 L2 写 → 归档"(实测 M2/M3) | §3.1 pseudocode 本体已整段改写(取代旧的逐类目循环)+ §4 新增 rollback 事务骨架(BEGIN…COMMIT,含批次头 FOR UPDATE + 预锁既有组)+ §4.3 `locked` 已改为复用骨架读回的快照 | **pseudocode 已落地(续做步骤 5);`.ts` 代码化仍待 W8/W9** |
 | 2 | `linked_at` 令牌全程不经 JS:写入用数据修改 CTE,回滚用集合式 join(实测 M4) | §4.2「已知残留」段已重写 + 成品 SQL 已贴入该节 | **已落地(含成品 SQL)** |
 | 3 | preview/execute 共用同一条可入库谓词 `btrim(category) ~ '[!-~]'`,必须在 `eligible` 查询内部而非循环 `continue`(实测 M5) | §3.1 eligible 谓词已替换 + 注释说明机制 | **已落地** |
 | 4 | `atgbbl_link_fk` 改 `ON DELETE CASCADE`;另两条 FK 维持原值(实测 M6) | §2.3 CREATE TABLE 后现场标注 + §4.4 point 2 现场标注(区分两条不同的 FK,不得混淆) | **已落地** |
-| 5 | 新增 `GET /api/approval-template-groups/backfill/batches`(admin guard,分页,含 `rolledBackAt`)+ 索引 | §2.1 段现场标注引用本条;§6.1 端点表本身未加这一行 | **未落地(见 §13.3)** |
+| 5 | 新增 `GET /api/approval-template-groups/backfill/batches`(admin guard,分页,含 `rolledBackAt`)+ 索引 | §2.1 段已加 `..._backfill_batches_org_created_idx` 索引 DDL;§6.1 端点表已补该行(`approvalTemplateAdminGuard`) | **已落地(续做步骤 5)** |
 | 6 | 分桶键/组名一律 `btrim(category)`,不折大小写,不回写 `category` 列 | §8 item 2 现场标注 | **已落地** |
 | 7 | rollback 对已回滚批次返回 409 + 专用码 + `rolledBackAt` | §4.4 point 1 现场标注 | **已落地** |
 | 8 | preview 挂 `approvalTemplateAdminGuard`,PR body 逐字披露对 I7 的偏离 | §6.2「本提案倾向」段后现场标注 | 设计已落地;PR body 义务见 §13.4 |
 | 9 | execute 调用 `...WithClient` 原语,不得抄语句;rollback 共用语句须提炼命名常量/附加谓词形参 | §1 表三行现场标注 | 设计已落地(代码化待 W8/W9) |
 | 10 | SET 义务变成 typecheck 门:唯一 `beginApprovalTemplateGroupTxn(client)` 返回品牌类型 `AtgTxClient`;明确不采用运行时 `current_setting` 断言 | 本节 §13.2 逐字保留门审给出的成品设计;§11 附录原文的"SET 由薄封装发出"承诺在此升级为机械约束 | 设计已落地(品牌类型待 W8 实现) |
-| 11 | `mapGroupConstraintError` 套在整个 `transaction()` 之外;§7 错误码表补 `GROUP_SORT_CONFLICT` | §3.1 lock-order 现场标注已提及 catch 套法(前半);§7 错误码表本身未加 `GROUP_SORT_CONFLICT` 这一行(后半) | **前半已求值/后半未落地(见 §13.3)** |
-| 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一 | 未在正文现场标注(§3 pseudocode 未涉及规模上界);记入 §13.3 待补小节 | **未落地,记入 remaining** |
+| 11 | `mapGroupConstraintError` 套在整个 `transaction()` 之外;§7 错误码表补 `GROUP_SORT_CONFLICT` | §3.1 catch 分支段已现场标注 try/catch 包裹形状(前半);§7 错误码表已补 `GROUP_SORT_CONFLICT` 行(后半) | **已落地(续做步骤 5,含前后两半)** |
+| 12 | execute 加规模上界(默认 500,超出 400 `…_BACKFILL_TOO_LARGE`)或给出规模-耗时曲线,二选一 | §3.1 pseudocode 已加 `IF count(eligible) > 500` 中止分支(选"上界"一侧,非规模-耗时曲线);§7 错误码表已补 `APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE` 行 | **已落地(续做步骤 5)** |
 | 13 | W8 同 PR 补三条组合调用判别力测试(组合正例+反向正控停车/超时;SET 义务格落在 RR 池文件;锁序格断言停车点非终态) | §9 验证计划纲要目前只有粗粒度描述;本条细化待 §9 改写(下一实现单元) | 设计已知悉,§9 待补三条具体用例名 |
 | 14 | §1 表逐格改调用级复用;§2.1"无可观测中间态"收窄为"无 DB 行级中间态" | §1 表三行 + §2.1 段,均已现场标注 | **已落地** |
-| 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | 未加现场标注,原因见 §13.3 | **未落地(见 §13.3)** |
-| 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard⊋manager 的事实(前半道理已求值);`scope` 字段本身未写入 §5.2 响应形状(中段未落地);回流 #5852 是跨 lane 动作,本分支无权限做(后半见 §13.5) | **中段未落地(见 §13.3),后半记入 remaining(见 §13.5)** |
+| 15 | Q1(b) 普查改写:把"四 token 零命中"换成更宽普查记录,`attendance_import_rollback_*` 作为正面先例引用 | §"批次机制选择"段(原§1 前)已加现场标注,补更宽普查(`operation_audit_logs` 自述占位且 schema 漂移两次、无 org 无 FK;`oapi_write_audit`/`automation_action_applied`/`approval_form_field_revisions` 各自域内无 FK;`attendance_import_rollback_*` 改列为正面先例而非仅驳回对象) | **已落地(续做步骤 5)** |
+| 16 | preview/execute 响应带 `scope: 'org-complete' \| 'visible-to-you'`;不得假设"所有管理员都是 manager";`routes/approvals.ts:396-399` 过强注释回流 #5852 | §6.2 现场标注已引用 guard⊋manager 的事实(前半道理已求值);`scope` 字段已写入 §5.2 响应形状(jsonc 示例)与 §3.1 execute 的两处 `RETURN`(中段已落地);回流 #5852 是跨 lane 动作,本分支无权限做(后半见 §13.5) | **前半+中段已落地(续做步骤 5),后半记入 remaining(见 §13.5)** |
 
 ### 13.2 逐字保留的门审成品(供 W7/W8/W9 直接抄用,不得转述)
 
@@ -407,15 +522,11 @@ L0(顾问锁)
 
 ### 13.3 尚未落地 / 待下一实现单元补的项(不在本步现场改写,如实列出)
 
-- §7 错误码表补一行 `GROUP_SORT_CONFLICT`(500,判 `error.constraint === 'atg_sort_unique'`)。
-- §2.1 段引用的批次列表端点(changesRequired #5)未加入 §6.1 端点表,`GET /api/approval-template-groups/backfill/batches` 待补。
-- §5.2 响应形状未加 `scope: 'org-complete' | 'visible-to-you'` 字段(changesRequired #16)。
-- §3 execute pseudocode 本体未按 13.2 的统一锁序改写(仍是旧的逐类目循环文本,现场标注已指出但未替换整段——整段替换是 W8 的代码化前奏,留给下一实现单元一并做,避免本步在"设计门审裁定落地"与"重写算法"两件事之间来回横跳)。
-- §3 execute 未加规模上界或规模-耗时曲线(changesRequired #12)。
-- §9 验证计划纲要未细化 changesRequired #13 的三条组合调用判别力测试用例名。
-- Q1(b) 的普查改写(changesRequired #15)——本文档"批次机制选择"段仍是原始四 token 表述,未加现场标注;本步选择不动它,因为该段是"决策已做出、证据不够宽"性质的问题,不影响后续 DDL/算法落地,留给下一实现单元或 PR body 一并披露。
+**【本节自 2026-09-18 续做步骤 5 起大部分已关闭】** 上一版本(commit `027a1f9cd` 及以前)列了六项;本步(续做步骤 5)已把其中五项现场改写进正文——changesRequired #5(§2.1 索引 + §6.1 端点行)、#11(§3.1 catch 段 + §7 错误码表行)、#12(§3.1 规模上界 + §7 错误码表行)、#15(§"批次机制选择"段更宽普查)、#16 中段(§5.2 `scope` 字段 + §3.1 execute 两处 `RETURN`),以及 §3/§4 execute+rollback pseudocode 本体按 §13.2 统一锁序的整段重写(changesRequired #1)。逐条状态见上方 §13.1 表(均已改为**已落地**)。剩下唯一未关闭的一项:
 
-以上六项在下一实现单元(W7 preview 或 §3/§9 算法重写)开始前必须先补,否则会重复门审已经点名的 P2-4 同类"标记贴在附录、正文未回写"问题。
+- §9 验证计划纲要未细化 changesRequired #13 的三条组合调用判别力测试用例名(组合正例+反向正控停车/超时;SET 义务格落在 RR 默认池文件;锁序格断言停车点非终态)——这一项本质上是下一实现单元(W8 真库测试文件)的用例命名前奏,留给写 `.db.test.ts` 时一并定名,不在本步单独为一段散文预先杜撰用例名(先例:记忆 `feedback_audit_surface_must_not_fabricate` 禁止编造值)。
+
+以上这一项在下一实现单元(§3 execute/rollback 的 `.ts` 代码化 + 首批 `.db.test.ts`)落地时一并补齐,不再重复门审已经点名的 P2-4 同类"标记贴在附录、正文未回写"问题。
 
 ### 13.4 owner 待裁,按默认值(ownerLevel = true,Draft 按此推进,不等 owner)
 
