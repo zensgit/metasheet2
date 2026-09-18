@@ -463,7 +463,7 @@ IDENTICAL
 3. `atgbb_org_nonblank` 未进 `NONBLANK_CHECK_CONSTRAINTS`——**修复轮 2 已修 + 新增判别力测试,见 §8.3**(门审原文"需要服务层测试才能安全改,今天不可达"这句话本身有一处可拆分:端到端不可达是真的,但 `mapGroupConstraintError` 是纯函数,不需要真库/路由即可直接单元测试它对一个合成 `{code,constraint}` 对象的映射——见 §8.3 的判别力证据)。
 4. 验证 MD §5 第 8 条与 §2.4 自相矛盾——**修复轮 3 已修,见 §5 项 8 与 §10.2**(`impl-gate-A3-round2-20260918.md` §7 P3-2)。
 5. 验收 E 终态腿未测——未动,已在 §5 项 1 记录为 remaining。**下一轮建议不选此条**:结果式竞态判据在 mutation 下也可能良性通过(记忆 `feedback_race_acceptance_assert_blocking_not_outcome`),一个弱化版本比不写更糟,需要认真设计而不是本轮体量的顺手修。
-6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——未动。**下一轮建议选此条,且按更便宜的那个选项**:CI 跑的是 `15-alpine`(musl、无 `en_US.utf8`,记忆 `finding_prod_pg15_never_tested`),在本机 glibc/`en_US.UTF-8` 上新增一条真库对拍测试只会在本机通过、对 CI 真正跑的那根轴什么也没证明——诚实的处置是在门审 §6 第 6 条已核实的机械对拍结论(E6,12287 码位零分歧)旁边把"已在 glibc/en_US.UTF-8 上机械对拍,musl 轴未验"这句话写全,而不是新增一条只能在错误的 collation 轴上通过的测试。
+6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——**修复轮 3 已修,见 §10.3**(`impl-gate-A3-round2-20260918.md` §7 P3-4):按本条上面已经选定的更便宜的选项,把"已在 glibc/en_US.UTF-8 上机械对拍,musl 轴未验"这句限定语写全,写进 `ApprovalTemplateGroupService.ts` 的 `STORABLE_GROUP_NAME_PATTERN` doc-comment(主锚点)+ `routes/approvals.ts` 的 SQL 谓词旁 + `-execute.db.test.ts` 交叉验证用例旁(各一句指回主锚点的注释),不是新增测试。
 7. 补充清单 #1 的"`ci-realdb-step-contract.mjs` 硬编码 `FILES` 数组"前提在本 head 上为假——未动(本文档 §4 第 1 行已经写了"零命中确认",未单独点出"清单前提本身过期"这句话,门审 §6 第 7 条建议在 PR body 里点名,留给开 PR 那一步)。
 
 ---
@@ -721,3 +721,10 @@ $ bash scripts/dev/atg-retraction-sweep.sh origin/feat/approval-template-groups-
 ### 10.2 P3-2——验证 MD §5 项 8 与 §2.4 自相矛盾
 
 原文"本切片新增的五个文件继承同样的闭世界残留形态"与 §2.4 记录的事实(五个新 backfill 文件各自有专属 `*-ci-wiring.test.mjs`,5×3=15 条断言全绿,M6 已证承重)直接矛盾。改写为:残留仅限 A-1 的两个既有文件(`lifecycle`/`serialization`),明确排除"本切片新文件继承"这句错误推论。设计 MD §13.6 PR body 必写清单里的同一句(P3-2 一行)同批改写,避免抄进 PR body。
+
+### 10.3 P3-4——`btrim(...) ~ '[!-~]'` SQL/JS 等价的 collation 限定语,写进注释
+
+按验证 MD §7.4 项 6 早先已选定的更便宜方案(不新增只能在错误 collation 轴上通过的测试,而是把限定语写全),在三处代码注释追加 collation caveat,互相用一句话指回同一个主锚点,不重复整段:
+- **主锚点**:`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`,`STORABLE_GROUP_NAME_PATTERN` 的 doc-comment——新增一段说明该 JS/SQL 等价只在 glibc/`en_US.utf8` collation 上测过,production 的 `15-alpine`(musl、无 `en_US.utf8`)轴未验(记忆 `finding_prod_pg15_never_tested`)。
+- `packages/core-backend/src/routes/approvals.ts`,execute 的 `eligible` 查询 `btrim(t.category) ~ '[!-~]'` 谓词旁,加一句指回主锚点。
+- `packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts`,SQL/JS 交叉验证用例(`SQL/JS cross-verification: …`)上方,加一句说明该测试只在 glibc/`en_US.utf8` 上跑过,绿不代表 musl 轴已覆盖。
