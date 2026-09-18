@@ -853,3 +853,160 @@ YAML OK
 `git status --porcelain` 在本节两处改动写完后只剩本轮意图改动的两个路径,无 mutation 或探针残留(本
 轮未做需要 `cp` 备份/还原的代码级 mutation——§12.1/§12.2 均为注释/文档改动,零可执行行为变化,理由见
 各自小节)。
+
+## 13. 修复轮 4(20260918)—— 关闭 P3-7;P3-8 处置(仍 blocked-with-reason,不构成新工作)
+
+被审 head 与本节起点:`2081e0fa6`(修复轮 3 的收尾提交,已合入本分支)。门审剩余两条 P3 里,本轮**只
+处理 P3-7**——它是唯一一条本轮能在「不开 PR、不动共享库、只在本 worktree 内」的硬规矩下实际推进的:
+P3-7 是「未核实」,可以通过读代码+机核关闭;P3-8 是「PR body 待写条款」,在没有 PR 的情况下天然无法
+再往前走一步(§12.3 已经把待誊抄的条款原样写好,本轮不重复劳动,只在下面 §13.4 确认它原样未变)。
+
+### 13.1 P3-7 —— `todo:counts-updated` 的房间/负载是否按 org 隔离,机核结论
+
+门审原文(`impl-gate-B2-round1-20260918.md` P3-7):「`todo:counts-updated` 的 room / 负载是否按 org
+(而非仅按用户)隔离**未核**——设计 MD §4.4 与 §7-4 自陈。它决定『换 org 后旧 socket 上的迟到推送』这
+条已知半闭合缺口的真实影响面。」`ApprovalTodoBadge.vue` 自己的文件级 docblock(本次会话读取时的行
+`:148-151`)把它写成一句悬而未决的开放问题:「whether `todo:counts-updated`'s room/payload is even
+scoped per-org ... has not been checked here — left as an open question ... not asserted either
+way.」
+
+本轮机核,逐层往下追,读代码而非猜测:
+
+**第一层:房间键本身**
+```
+$ sed -n '8,10p' packages/core-backend/src/services/CollabService.ts
+export function buildAuthenticatedUserRoom(userId: string): string {
+  return `auth-user:${userId}`
+}
+$ grep -n "buildAuthenticatedUserRoom" packages/core-backend/src/services/CollabService.ts
+8:export function buildAuthenticatedUserRoom(userId: string): string {
+121:      socket.join(buildAuthenticatedUserRoom(userId))
+```
+房间键只含 `userId`,不含 tenant/org。`todo-realtime.ts:73` 与 `approval-realtime.ts:117` 都直接调用
+这同一个函数——两条推送共用同一套按用户分房的规则,没有第二套按 org 分房的规则存在。
+
+**第二层(比房间键更深):这条推送读的那份共享谓词本身有没有 tenant/org 维度**——房间只决定「谁能收
+到」,真正决定「换 org 后一条迟到推送是否描述了『错误的』数据」的是查询本身是否会因 org 不同而产出不
+同的数:
+```
+$ grep -n "tenant\|org" packages/core-backend/src/services/approval-pending-query.ts
+(无输出)
+```
+`approval-pending-query.ts`(`GET /api/todo/count`、`todo:counts-updated`、`GET
+/api/approvals/pending-count`、`approval:counts-updated` 共用的唯一一份 SQL)里,**零处**引用
+tenant/org。往上一层,喂给这份查询的 viewer 类型本身也不带 tenant 字段:
+```
+$ sed -n '30,37p' packages/core-backend/src/routes/todo.ts
+function resolveTodoViewer(req: Request): PendingViewer | null {
+  const actorId = resolveApprovalActorId(req)
+  if (!actorId) return null
+  return {
+    actorId,
+    roles: resolveApprovalActorRoles(req),
+    permissions: resolveApprovalActorPermissions(req),
+  }
+
+$ grep -n "interface PendingViewer" -A4 packages/core-backend/src/services/pending-source-registry.ts
+33:export interface PendingViewer {
+34-  actorId: string
+35-  roles: string[]
+36-  permissions: string[]
+
+$ sed -n '26,30p' packages/core-backend/src/services/approval-pending-source.ts
+  return {
+    actorId: viewer.actorId,
+    roles: viewer.roles,
+    permissions: viewer.permissions,
+```
+三处(`routes/todo.ts` 的 `resolveTodoViewer`、`pending-source-registry.ts` 的 `PendingViewer` 类型
+定义、`approval-pending-source.ts` 的 `toApprovalPendingViewer`)构造/转换的 viewer 对象字面只有
+`{ actorId, roles, permissions }` 三个字段——没有 tenant 字段可供任何一层去按 org 过滤,即使想加也
+无处挂。
+
+**第三层:换 org 本身会不会让 `roles`/`permissions` 变化**(即使查询不按 tenant 过滤,如果换 org 后
+token 里的 `roles`/`permissions` 变了,数字理论上仍可能因此改变,推送就可能读到旧 org 下算出的旧
+`roles`/`permissions` 对应的旧数字):
+```
+$ sed -n '1219,1240p' packages/core-backend/src/routes/auth.ts
+```
+`POST /auth/session-org`(`setExplicitSessionOrg` 对应的后端端点)的成功路径是:
+```
+const tokenUser = { ...user, tenantId: chosen }
+const nextToken = authService.createToken(tokenUser, { sid: sessionId })
+```
+`user`(连同它的 `roles`/`permissions`)整体展开进新 `tokenUser`,只有 `tenantId` 字段被覆写——换句
+话说,**换 org 这个动作本身不会重新计算这个用户的 `roles`/`permissions`**,新旧两个 token 对同一个
+`actorId` 喂给上面那份查询的三元组(`actorId`/`roles`/`permissions`)逐字段相同。
+
+**结论(三层证据合起来读)**:对同一个已登录用户,这份查询在换 org 前后产出**同一个数字**——不是
+「碰巧现在两个 org 恰好相等」,而是这条数据管线里**没有任何一层**(房间键、SQL、viewer 类型、
+token 铸造)引用 org/tenant,所以从数据源头开始就没有「按 org 变化的数字」这回事。因此:一条在换 org
+之后落在仍然打开着的旧 socket 上的迟到推送,并**不是**「描述了另一个 org 的数据」——它描述的是与换
+org 后立刻发起的一次 REST 重读会算出的**同一个**org-invariant 数字。门审 P3-7 问的「房间/负载是否已
+按 org 隔离」这个问题本身预设了「数字会随 org 变化」,而机核结果是这个预设不成立,所以问题在这份实
+现里没有第二种答案要去区分——房间不按 org 分,是因为数字本来就不按 org 分。
+
+**如实框定这条结论的边界,不过度声称**:
+- **不是新引入的行为,也不是本切片能单方面改的**:`approval:counts-updated`(`approval-realtime.ts`)
+  读同一份查询、走同一个 `buildAuthenticatedUserRoom`,这个「待办/审批数量不分 org、跨用户所有 org
+  汇总」的特征是平台既有行为,B-2 原样继承,没有让它变得更宽或更窄。
+- **这不等于「换 org 半边的 socket 重连缺口已关闭」**——docblock 里紧邻这段之前的那一条(「the socket
+  itself is never reconnected ... a separate, larger unit than this commit」)是一个不同的问题(连接
+  用哪个 token 认证),本轮结论不触碰它,也没有让它变得不重要:如果未来这份查询真的加上了 tenant 过
+  滤,重连缺口会从「无害」变回「有害」,那时候需要重新审视,不能引用本轮结论当作那条也已关闭的证据。
+- **不代表「待办数量应该按 org 隔离」是错误设计**——这是一个产品问题,不是本条门审发现要回答的问题;
+  本轮只回答「今天的实现是否按 org 隔离」(否),不回答「今天的实现该不该按 org 隔离」。
+
+**改了什么**:`apps/web/src/approvals/components/ApprovalTodoBadge.vue` 文件级 docblock 末段——把
+「has not been checked here — left as an open question ... not asserted either way」替换为上面三层
+证据的浓缩版(含 grep 命令、行号、结论边界),同时明确保留紧邻的 socket 重连缺口段落原文不动(不同问
+题,不应被本轮结论覆盖或误读为已解决)。`TodoCenterView.vue` 的对应段落(`ORG-SWITCH HALF`,
+`:126-140`)本身没有重复「room/payload 是否按 org」这句断言——它只是指向 `ApprovalTodoBadge.vue`
+「the badge's documented gap」,本轮机核之后那个被指向的位置已经更新,不需要在 `TodoCenterView.vue`
+里另外改一份重复的文字。`todo-center-phase2-fe-design-20260918.md`(设计 MD)不改——遵循修复轮 2/3
+已确立的惯例(设计 MD 是撰写当时的快照,后续修复轮只更新本验证 MD 和被点名的源码 docblock,不回填设
+计 MD)。
+
+### 13.2 测试与类型检查(本条是纯 docblock 改动,零行为变化)
+
+零可执行行为改变——`ApprovalTodoBadge.vue` 只有注释文本变化,`<script setup>` 的可执行部分、
+`<template>`、`<style>` 逐字未动:
+```
+$ git diff apps/web/src/approvals/components/ApprovalTodoBadge.vue | grep -E "^[+-]" | grep -vE "^[+-]//|^\+\+\+|^---"
+(无输出 —— 每一行非 diff-header 的改动都以 // 开头,零非注释行改动)
+```
+因此本条同样不发明一个对注释文本零判别力的假 mutation 探针(同 §12.1 的既定判断)。重跑受影响的前端
+spec(证明改动没有破坏解析或引入语法错误)与 typecheck:
+```
+$ cd apps/web && npx vitest run approvalNavTodoBadge TodoCenterView --reporter=dot
+ Test Files  2 passed (2)
+      Tests  34 passed (34)
+
+$ pnpm --filter @metasheet/web type-check
+EXIT=0   # vue-tsc -b + 两个 verification tsconfig,均无输出即通过
+```
+
+### 13.3 越界检查
+
+```
+$ git diff --stat -- apps/web/src/approvals/components/ApprovalTodoBadge.vue
+ .../src/approvals/components/ApprovalTodoBadge.vue | 34 +++++++++++++++++++---
+ 1 file changed, 30 insertions(+), 4 deletions(-)
+```
+(本 MD 自身的追加不计入该条 diffstat——对自己取 diffstat 会引用一个还没定型的数字,同 `4e97acd92`
+已修过的自指陷阱,§12.3 已用过同一处理方式,这里延续。)
+只碰了门审 P3-7 点名的那一份 docblock 与本验证 MD;零 `packages/core-backend` 改动,零迁移,零锁文,
+零 workflow 文件改动。
+
+### 13.4 P3-8 处置(如实记录:blocked-with-reason,非本轮遗漏)
+
+P3-8(「导航入口的范围扩张自陈需要写进 PR body」)在修复轮 3(§12.3)已经把待誊抄的条款原样写好并
+点名了它的性质——**这本身就是在硬规矩(本轮及此前所有修复轮都不开 PR)下这条能做到的全部**:没有
+PR,就没有 PR body 可以真正把这段话写进去;提前在源码或本 MD 里"标记为已完成"反而会造成"这条已经
+处理"的假象。本轮确认 §12.3 那段待誊抄文本原样未变(`git diff` 对 §12.3 所在行范围为空,只在文件末
+尾追加了本 §13),不重复劳动,也不因为"看起来简单"就换一种方式提前把它写掉。
+
+**两条门审 P3 项的最终状态,截至本轮**:P3-7 CLOSED(§13.1,证据完整、docblock 已更正);P3-8
+BLOCKED-WITH-REASON(待开 PR,非代码/文档缺口,不可在当前硬规矩下继续推进)。至此,门审
+`impl-gate-B2-round1-20260918.md` 点名的 1 P1 + 1 P2 + 8 P3 共 10 条,除 P3-8 外的 9 条均已在修复轮
+1-4 里逐条关闭。
