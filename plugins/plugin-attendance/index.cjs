@@ -6091,9 +6091,36 @@ function isEncryptedSecretValue(value) {
   return typeof value === 'string' && value.startsWith(SECRET_PREFIX)
 }
 
+// Same sentinels / same posture as packages/core-backend/src/security/encrypted-secrets.ts
+// (resolveEncryptionMaterial). This file is CJS and cannot import the TS helper, so the production
+// check is re-stated minimally here; keep the two in sync. Precedent for an in-plugin production
+// gate: plugins/plugin-integration-core/lib/credential-store.cjs:63-71.
+const DEFAULT_INTEGRATION_SECRET_KEY = 'default-key-change-in-production'
+const DEFAULT_INTEGRATION_SECRET_SALT = 'default-salt-change-in-production'
+
 function getIntegrationSecretKey() {
-  const masterKey = process.env.ENCRYPTION_KEY || 'default-key-change-in-production'
-  const salt = Buffer.from(process.env.ENCRYPTION_SALT || 'default-salt-change-in-production')
+  const rawKey = process.env.ENCRYPTION_KEY
+  const rawSalt = process.env.ENCRYPTION_SALT
+  // Trim before comparing, matching auth-runtime-config.ts `isProductionRuntime` (which
+  // encrypted-secrets.ts reuses). A strict === here made NODE_ENV=" production " fail-close in
+  // core-backend while this plugin quietly wrote appSecrets under the built-in default key.
+  if (normalizeTextValue(process.env.NODE_ENV) === 'production') {
+    // values-free: variable names + reason only, never the value.
+    const issues = []
+    const key = normalizeTextValue(rawKey)
+    const salt = normalizeTextValue(rawSalt)
+    if (!key) issues.push('ENCRYPTION_KEY not configured / not set')
+    else if (key === DEFAULT_INTEGRATION_SECRET_KEY) issues.push('ENCRYPTION_KEY uses the built-in default placeholder value')
+    if (!salt) issues.push('ENCRYPTION_SALT not configured / not set')
+    else if (salt === DEFAULT_INTEGRATION_SECRET_SALT) issues.push('ENCRYPTION_SALT uses the built-in default placeholder value')
+    if (issues.length > 0) {
+      throw new Error(`[plugin-attendance] Invalid encryption material for production: ${issues.join('; ')}`)
+    }
+  }
+  // Derivation keeps using the RAW value (not the trimmed one): trimming would change pbkdf2's
+  // output for any deployment whose key has stray whitespace and orphan every stored secret.
+  const masterKey = rawKey || DEFAULT_INTEGRATION_SECRET_KEY
+  const salt = Buffer.from(rawSalt || DEFAULT_INTEGRATION_SECRET_SALT)
   return crypto.pbkdf2Sync(masterKey, salt, SECRET_KEY_ITERATIONS, SECRET_KEY_LENGTH, 'sha256')
 }
 
@@ -24552,6 +24579,10 @@ module.exports = {
   // node 18/20 matrix is the old-ICU oracle that makes the leg discriminating.
   __buildZonedDateForTests: buildZonedDate,
   __getZonedMinutesForTests: getZonedMinutes,
+  // The REAL symbols the DingTalk appSecret write (normalizeIntegrationConfigForStorage) and read
+  // (normalizeIntegrationConfig) go through, so the production encryption-material gate is proven
+  // on the production code path rather than on a copy.
+  __attendanceIntegrationSecretForTests: { getIntegrationSecretKey, encryptIntegrationSecretValue, decryptIntegrationSecretValue },
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
