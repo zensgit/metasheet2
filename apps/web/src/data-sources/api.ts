@@ -50,7 +50,7 @@ interface SelectEnvelope {
 }
 
 interface ErrorEnvelope {
-  error?: { code?: string; message?: string }
+  error?: { code?: string; message?: string; details?: { referenceCount?: number } }
 }
 
 /** Read the backend's structured error message off a non-ok Response, falling back to status text. */
@@ -102,10 +102,26 @@ export async function rotateDataSourceCredentials(
   }
 }
 
+/**
+ * Delete a source. The referential guard answers 409 with a coded body, so this reads the envelope
+ * itself instead of `errorFrom`: the thrown Error carries the server's `code` and
+ * `details.referenceCount` as own properties, which is what lets deleteRefusalCopy say something
+ * true in the operator's language rather than echoing English prose about an internal table.
+ *
+ * Duck-typed properties (not a subclass) on purpose — the same convention as
+ * approvals/memberActionErrorCopy, and it survives module mocking in tests.
+ */
 export async function deleteDataSource(id: string): Promise<void> {
   const res = await apiFetch(`/api/data-sources/${encodeURIComponent(id)}`, { method: 'DELETE' })
   if (!res.ok) {
-    throw new Error(await errorFrom(res, 'Failed to delete data source'))
+    const body = (await res.json().catch(() => null)) as ErrorEnvelope | null
+    const message = body?.error?.message || `Failed to delete data source (${res.status} ${res.statusText})`
+    const error = new Error(message)
+    if (body?.error?.code) Object.assign(error, { code: body.error.code })
+    if (typeof body?.error?.details?.referenceCount === 'number') {
+      Object.assign(error, { referenceCount: body.error.details.referenceCount })
+    }
+    throw error
   }
 }
 

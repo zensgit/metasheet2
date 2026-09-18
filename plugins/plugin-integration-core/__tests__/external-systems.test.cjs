@@ -1461,19 +1461,31 @@ async function testBridgeEditPreservesFullConfig() {
   const unchanged = db.rows.find((row) => row.id === 'sys_bridge')
   assert.equal(unchanged.config.dataSourceId, 'ds-1', 'the refused repoint left the stored pointer alone')
 
-  const repointed = await registry.upsertExternalSystem({
-    tenantId: 'tenant_1',
-    id: 'sys_bridge',
-    name: 'SQL bridge repointed',
-    kind: 'data-source:sql-readonly',
-    role: 'source',
-    status: 'active',
-    principal: 'owner_1',
-    config: { dataSourceId: 'ds-2' },
-  })
-  assert.equal(repointed.config.dataSourceId, 'ds-2', 'an owner may repoint the binding')
-  assert.equal(repointed.config.dataSourceOwnerId, 'owner_1', 're-stamped by the validated principal')
-  assert.equal(repointed.config.schema, 'dbo', 'and a repoint still preserves the rest of the config')
+  // 4b. Proving ownership is necessary but NO LONGER SUFFICIENT on a row that is still marked
+  //     rollback-eligible: this is the shape seeded above (connection_id NULL + marker TRUE), and
+  //     MIN-PR2-i forbids moving its pointer while it stays legacy. The owner's repoint is refused
+  //     until it carries `connectionId`, which converts the row — that conversion, and the rest of
+  //     the invariant, live in __tests__/legacy-binding-canonical-invariant.test.cjs.
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      id: 'sys_bridge',
+      name: 'SQL bridge repointed',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      status: 'active',
+      principal: 'owner_1',
+      config: { dataSourceId: 'ds-2' },
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'LEGACY_BINDING_DATASOURCE_CHANGE_REQUIRES_CONNECTION_ID',
+    'even the owner cannot silently repoint a rollback-eligible legacy binding',
+  )
+  const stillPointed = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(stillPointed.config.dataSourceId, 'ds-1', 'the refused repoint left the stored pointer alone')
+  assert.equal(stillPointed.config.dataSourceOwnerId, 'owner_1', 'and left the stored stamp alone')
+  assert.equal(stillPointed.config.schema, 'dbo', 'and preserved the rest of the config')
+  assert.equal(stillPointed.legacy_connection_fallback_eligible, true, 'and left the marker alone')
 
   // 5. Clearing stays possible and stays explicit: an explicit null releases the pin, and the
   //    orphaned stamp goes with it rather than leaving an un-attributable reference behind.

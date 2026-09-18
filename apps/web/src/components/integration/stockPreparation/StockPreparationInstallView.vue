@@ -24,6 +24,7 @@
       :can-run-install="canRun"
       :busy="busy"
       :source-check-control="wizardSourceCheckControl"
+      :can-open-data-factory="canOpenDataFactory"
       @run-preflight-check="loadPreflight"
       @run-source-preflight="loadSourcePreflight()"
       @run-install="startInstall"
@@ -970,6 +971,7 @@ import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
+import type { StockPrepGettingStartedBinding } from '../../../services/integration/stockPreparation/gettingStarted'
 import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
 import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
@@ -1099,11 +1101,11 @@ const twoPreflightRelation = STOCK_PREP_TWO_PREFLIGHT_RELATION
 const sourcePreflightButtonNote = STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE
 
 /**
- * WHAT THE SOURCE-BINDING PANEL BELOW ANSWERED, for the wizard's steps ①③ (see that panel's
- * `binding-read` note). `null` = no answer on this page — never 「没绑」.
+ * WHAT THE SOURCE-BINDING PANEL BELOW ANSWERED, for the wizard's steps (1b) and (3) (see that
+ * panel's `binding-read` note). `null` = no answer on this page — never 「没绑」.
  */
-const sourceBinding = ref<{ effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null>(null)
-function onBindingRead(binding: { effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null): void {
+const sourceBinding = ref<StockPrepGettingStartedBinding | null>(null)
+function onBindingRead(binding: StockPrepGettingStartedBinding | null): void {
   sourceBinding.value = binding
 }
 
@@ -1144,6 +1146,22 @@ const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
 const sourcePreflightErrorStatus = ref<number | null>(null)
 const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
 const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
+
+/**
+ * 整合切片 (2026-09-09) — whether 向导①'s 「去数据工厂 · 连接管理」 LINKS may render at all.
+ * ①拆分 (2026-09-10): there are now TWO of them — ①a「登记外接数据源」 and ①b「新增 SQL 绑定」
+ * — pointing at the top and the bottom of the SAME 连接管理 section, so one computed gates both.
+ *
+ * 外接数据源 is now a section of the 数据工厂 workbench, whose route declares
+ * `permissions: ['integration:write']` (router/appRoutes.ts). This is the SAME probe the router
+ * guard runs (`auth.hasPermission`, via routeAccess.isRoutePermitted), so a reader who gets the
+ * link is a reader the guard lets through. A `stock-prep:admin` holder does not hold
+ * integration:write — for them the wizard prints who to ask instead of a link that redirects.
+ *
+ * NOT a permission of its own: it decides only what step ① says. Nothing on the other side of
+ * the link is gated by this computed.
+ */
+const canOpenDataFactory = computed(() => auth.hasPermission('integration:write'))
 
 /**
  * WHETHER THE WIZARD CARRIES STEP ②'s OWN RUN CONTROL — and it does so in `mode="wizard"` alone.

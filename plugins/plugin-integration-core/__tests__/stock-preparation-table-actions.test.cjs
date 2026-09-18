@@ -1356,6 +1356,12 @@ async function main() {
   await testX6AbsentIdentityKeyDoesNotHoldTheDryRun()
   // 反驳 r2 blocker B2 —— 生产闸 cleanRowCount = add + update 的触发量,前后钉死。
   await testX6ProductionCleanRowBoundCountsOnlyRowsTheIntakeReallyChanged()
+  // #5860 option A — one sheet = one project: foreign ACTIVE rows refuse dry-run and apply before any write.
+  await testForeignActiveRowsRefuseDryRunAndApplyBeforeAnyWrite()
+  await testForeignRowsThatAreAllInactiveDoNotBlockThePull()
+  await testSameProjectAndEmptySheetStayAllowed()
+  await testForeignScanMirrorsTheExistingRowsTruncationPolicy()
+  await testForeignActiveReadsLikeTheFillViewAndProjectNoIsRawEquality()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -3043,6 +3049,274 @@ async function testX6ProductionCleanRowBoundCountsOnlyRowsTheIntakeReallyChanged
     false,
     '403 在任何写入之前',
   )
+}
+
+// ---------------------------------------------------------------------------------------------
+// #5860 option A — one sheet = one project. The project-scoped existing-row read cannot see another
+// project's rows, so mark_inactive never sweeps them; the table-level guard refuses the pull instead.
+// ---------------------------------------------------------------------------------------------
+function foreignProjectRow(projectNo, componentSourceId, overrides = {}) {
+  return {
+    projectNo,
+    idempotencyKey: JSON.stringify({ projectNo, componentSourceId, parentSourceId: null, path: [componentSourceId] }),
+    componentSourceId,
+    parentSourceId: null,
+    path: JSON.stringify([componentSourceId]),
+    depth: 0,
+    componentCode: 'X-' + componentSourceId,
+    componentName: 'foreign ' + componentSourceId,
+    material: 'Steel',
+    sourceVersion: 'V1',
+    rawQuantity: 1,
+    totalQuantity: 1,
+    active: true,
+    lastPlmRefreshAt: '2026-09-01T00:00:00.000Z',
+    lastPlmRefreshRunId: 'run-foreign',
+    ...overrides,
+  }
+}
+
+function assertNoWrites(records, label) {
+  assert.equal(
+    records.calls.some((call) => call[0] === 'createRecord' || call[0] === 'patchRecord'),
+    false,
+    label,
+  )
+}
+
+function isForeignProjectRefusal(err) {
+  return err instanceof StockPreparationTableActionError
+    && err.status === 409
+    && err.code === 'TARGET_SHEET_FOREIGN_PROJECT'
+    && /目标表已包含其他项目的有效行/.test(err.message)
+}
+
+async function testForeignActiveRowsRefuseDryRunAndApplyBeforeAnyWrite() {
+  // (1) sheet holds ACTIVE rows of two other projects -> 409, zero writes, values-free details.
+  const records = createRecordsApi({
+    existing: [
+      foreignProjectRow('P-777', 'PART-F1'),
+      foreignProjectRow('P-777', 'PART-F2'),
+      foreignProjectRow('P-888', 'PART-F3'),
+    ],
+  })
+  const storage = createMemoryStorage()
+  let caught = null
+  await assert.rejects(
+    () => dryRunStockPreparationAction({
+      action: baseAction(),
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: createSourceAdapter().adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+    }),
+    (err) => { caught = err; return isForeignProjectRefusal(err) },
+    '#5860: dry-run into a sheet holding another project\'s active rows is refused with 409 TARGET_SHEET_FOREIGN_PROJECT',
+  )
+  assert.deepEqual(caught.details, { foreignProjectCount: 2, foreignActiveRowCount: 3 }, 'details are two integers, nothing else')
+  const serialized = JSON.stringify({ message: caught.message, details: caught.details })
+  assert.equal(serialized.includes('P-777') || serialized.includes('P-888') || serialized.includes('PART-F'), false, 'refusal is values-free')
+  assertNoWrites(records, '#5860: refusal happens before any write')
+  assert.equal(storage.map.size, 0, 'no dry-run token is minted on a refused dry-run')
+  const foreignScan = records.calls.find((call) => call[0] === 'queryRecords' && Object.keys(call[1].filters || {}).length === 0)
+  assert.ok(foreignScan, 'the foreign scan reads the sheet unfiltered (no active=true text-equality pushdown)')
+  assert.equal(foreignScan[1].sheetId, 'sheet_stock', 'the foreign scan stays on the configured target sheet')
+
+  // Apply path: a token minted on a clean sheet, then a foreign active row lands before apply.
+  const late = createRecordsApi()
+  const lateStorage = createMemoryStorage()
+  const dryRun = await dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter().adapter,
+    recordsApi: late.recordsApi,
+    tokenStore: lateStorage,
+  })
+  assert.equal(dryRun.status, 'ready')
+  late.rows.push({ id: 'rec_foreign', sheetId: 'sheet_stock', version: 1, data: foreignProjectRow('P-777', 'PART-F1') })
+  const writesBefore = late.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action: baseAction(),
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: dryRun.dryRunToken,
+      sourceAdapter: createSourceAdapter().adapter,
+      recordsApi: late.recordsApi,
+      tokenStore: lateStorage,
+      permission: 'write',
+      sandboxPolicy: SANDBOX_POLICY,
+    }),
+    isForeignProjectRefusal,
+    '#5860: apply recomputes the dry-run and is refused by the same guard',
+  )
+  assert.equal(
+    late.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length,
+    writesBefore,
+    '#5860: apply refusal happens before any write',
+  )
+  assert.equal(writesBefore, 0)
+  // The refusal sits BEFORE the token consume: the same token still reaches the guard on a retry
+  // (409 TARGET_SHEET_FOREIGN_PROJECT again, not TABLE_ACTION_DRY_RUN_TOKEN_INVALID)...
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      action: baseAction(),
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: dryRun.dryRunToken,
+      sourceAdapter: createSourceAdapter().adapter,
+      recordsApi: late.recordsApi,
+      tokenStore: lateStorage,
+      permission: 'write',
+      sandboxPolicy: SANDBOX_POLICY,
+    }),
+    isForeignProjectRefusal,
+    '#5860: the single-use token is not burned by the refusal',
+  )
+  // ...and once the foreign row is gone the very same token applies.
+  late.rows.splice(late.rows.findIndex((row) => row.id === 'rec_foreign'), 1)
+  const applied = await applyStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter().adapter,
+    recordsApi: late.recordsApi,
+    tokenStore: lateStorage,
+    permission: 'write',
+    sandboxPolicy: SANDBOX_POLICY,
+  })
+  assert.equal(applied.status, 'succeeded', 'the token the refusal spared still applies the proven plan')
+}
+
+async function testForeignActiveReadsLikeTheFillViewAndProjectNoIsRawEquality() {
+  const target = { sheetId: 'sheet_stock', objectId: 'stockPreparationMain', fieldIdMap: {} }
+  const guard = tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows
+  // Fill-view truthy shapes (toComparableBoolean): numeric 1, "yes", "y", "TRUE", "1", any other
+  // non-empty string -> active -> 409. These are exactly what an `active = 'true'` filter would miss.
+  for (const active of [1, 'yes', 'y', 'TRUE', '1', 'whatever']) {
+    const api = createRecordsApi({ existing: [foreignProjectRow('P-777', 'PART-F1', { active })] })
+    await assert.rejects(
+      () => guard(api.recordsApi, target, 'P-001'),
+      (err) => isForeignProjectRefusal(err) && err.details.foreignActiveRowCount === 1,
+      'active=' + JSON.stringify(active) + ' is active to the fill view, so it is active here',
+    )
+  }
+  // Falsy / absent shapes -> not active -> allowed.
+  for (const active of [false, 'false', 0, '0', 'no', 'n', '', null, undefined]) {
+    const api = createRecordsApi({ existing: [foreignProjectRow('P-777', 'PART-F1', { active })] })
+    await guard(api.recordsApi, target, 'P-001')
+  }
+  // projectNo is RAW exact equality (what the project-scoped SQL read matches): a stored "P-001 "
+  // is never swept by mark_inactive for "P-001", so it is foreign here too.
+  const padded = createRecordsApi({ existing: [foreignProjectRow('P-001 ', 'PART-F1')] })
+  await assert.rejects(
+    () => guard(padded.recordsApi, target, 'P-001'),
+    (err) => isForeignProjectRefusal(err) && err.details.foreignProjectCount === 1 && err.details.foreignActiveRowCount === 1,
+    'trimmed-equal but not exact counts as foreign (fail-closed)',
+  )
+  const exact = createRecordsApi({ existing: [foreignProjectRow('P-001', 'PART-F1')] })
+  await guard(exact.recordsApi, target, 'P-001')
+  const rule = tableActionInternals.stockPreparationRowIsActive
+  assert.deepEqual([1, 'yes', 'y', 'TRUE', '1', 'x', true].map(rule), [true, true, true, true, true, true, true])
+  assert.deepEqual([false, 'false', 0, '0', 'no', 'n', '', ' ', null, undefined].map(rule), [false, false, false, false, false, false, false, false, false, false])
+}
+
+async function testForeignRowsThatAreAllInactiveDoNotBlockThePull() {
+  // (2) the other project's rows are all inactive -> allowed (the customer already swept them).
+  const records = createRecordsApi({
+    existing: [
+      foreignProjectRow('P-777', 'PART-F1', { active: false }),
+      foreignProjectRow('P-888', 'PART-F2', { active: false }),
+    ],
+  })
+  const dryRun = await dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter().adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: createMemoryStorage(),
+  })
+  assert.equal(dryRun.status, 'ready', 'inactive foreign rows do not block')
+  assert.equal(dryRun.evidence.plan.existingRows, 0, 'the project-scoped read still ignores them')
+}
+
+async function testSameProjectAndEmptySheetStayAllowed() {
+  // (3) same project only -> allowed (and the row is planned as before).
+  const same = createRecordsApi({ existing: x4ExistingRecords().slice(0, 1) })
+  const sameDryRun = await dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter().adapter,
+    recordsApi: same.recordsApi,
+    tokenStore: createMemoryStorage(),
+  })
+  assert.equal(sameDryRun.status, 'ready', 'same-project rows are not foreign')
+  assert.equal(sameDryRun.evidence.plan.existingRows, 1)
+
+  // (4) empty sheet -> allowed.
+  const empty = createRecordsApi()
+  const emptyDryRun = await dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter().adapter,
+    recordsApi: empty.recordsApi,
+    tokenStore: createMemoryStorage(),
+  })
+  assert.equal(emptyDryRun.status, 'ready', 'an empty sheet is not foreign')
+  assert.equal(emptyDryRun.evidence.plan.existingRows, 0)
+
+  // Physical field map: the scan filters by the PHYSICAL active id, and reads projectNo back through
+  // the inverse map — a foreign row under physical ids is still caught.
+  const physical = createRecordsApi({
+    existing: [{ fld_projectNo: 'P-777', fld_active: true, fld_componentSourceId: 'PART-F1' }],
+  })
+  await assert.rejects(
+    () => dryRunStockPreparationAction({
+      action: baseAction({ target: { sheetId: 'sheet_stock', objectId: 'stockPreparationMain', fieldIdMap: PHYSICAL_FIELD_ID_MAP } }),
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: createSourceAdapter().adapter,
+      recordsApi: physical.recordsApi,
+      tokenStore: createMemoryStorage(),
+    }),
+    isForeignProjectRefusal,
+    'physical-id targets are guarded too',
+  )
+  const physicalScan = physical.calls.find((call) => call[0] === 'queryRecords' && Object.keys(call[1].filters || {}).length === 0)
+  assert.ok(physicalScan, 'the unfiltered scan runs under physical ids too and reads active/projectNo back through the inverse map')
+}
+
+async function testForeignScanMirrorsTheExistingRowsTruncationPolicy() {
+  const guard = tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows
+  const target = { sheetId: 'sheet_stock', objectId: 'stockPreparationMain', fieldIdMap: {} }
+  // Bound hit with >= 1 foreign row seen -> still refused, and the refusal says the scan was partial.
+  const partial = createRecordsApi({
+    existing: [foreignProjectRow('P-777', 'PART-F1'), foreignProjectRow('P-777', 'PART-F2'), foreignProjectRow('P-888', 'PART-F3')],
+  })
+  await assert.rejects(
+    () => guard(partial.recordsApi, target, 'P-001', { limit: 1, maxPages: 1 }),
+    (err) => isForeignProjectRefusal(err)
+      && err.details.scanTruncated === true
+      && err.details.foreignActiveRowCount === 1
+      && err.details.foreignProjectCount === 1,
+    'a partial scan that saw one foreign active row refuses with scanTruncated: true',
+  )
+  // Bound hit with 0 foreign rows seen -> the SAME fail-closed code the project-scoped read raises at
+  // its bound (readExistingStockPreparationRows never tolerates truncation; neither does this scan).
+  const own = createRecordsApi({ existing: x4ExistingRecords() })
+  await assert.rejects(
+    () => guard(own.recordsApi, target, 'P-001', { limit: 1, maxPages: 1 }),
+    (err) => err instanceof StockPreparationTableActionError
+      && err.status === 422
+      && err.code === 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE'
+      && err.details.maxPages === 1
+      && err.details.scan === 'foreign_project',
+    'a truncated scan with no foreign row seen fails closed like the project-scoped read',
+  )
+  await assert.rejects(
+    () => tableActionInternals.readExistingStockPreparationRows(own.recordsApi, target, 'P-001', { limit: 1, maxPages: 1 }),
+    (err) => err.code === 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE',
+    'control: the project-scoped read raises the same code at the same bound',
+  )
+  // Complete scan of the same rows -> no throw.
+  await guard(own.recordsApi, target, 'P-001')
 }
 
 main().catch((err) => {
