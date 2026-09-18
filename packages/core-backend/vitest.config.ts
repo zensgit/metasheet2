@@ -578,6 +578,15 @@ export default defineConfig({
       // .github/workflows/approval-realdb-projection-key-parity.yml lane (NOT plugin-tests.yml — see
       // that lane's own header for the s6a sha256-pinned-provenance rationale), which arms EXPECT_DB=1.
       'tests/integration/approval-projection-key-parity.db.test.ts',
+      // P3-2(a)/P3-1: the approval detail response's `projectionEntry` navigation handle
+      // (design-lock 2026-09-12) — the CANONICAL participant predicate's real `meta_sheets` JOIN
+      // `meta_records`, the default-view lookup against real `meta_views`, and BOTH DTO builders
+      // (the GET detail read `ApprovalBridgeService.getApproval` AND the dispatch-action DTO
+      // `ApprovalProductService.getApproval`, P3-1 fix) actually populating it end to end over
+      // real HTTP. Excluded from the no-DB default job so `describeIfDatabase` cannot skip-green
+      // it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-projection-entry.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-projection-entry.db.test.ts',
       // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
