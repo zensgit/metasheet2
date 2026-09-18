@@ -155,9 +155,17 @@ describeIfDatabase('approval template groups — phase 2 backfill batch list (de
   // (`executeApprovalTemplateGroupBackfillWithClient` counts every org-unlinked storable template
   // BEFORE bucketing, `routes/approvals.ts:694-701`). This file's other three `it`s
   // (ordering/pagination, rolledBackAt/org-scoping, the cross-org HTTP isolation case) either
-  // insert batch rows directly (`insertBatch`, no candidate query involved at all) or — the
-  // cross-org case — never assert on `execRes`'s status/body, so they are unaffected either way;
-  // left untouched, not silently exempted by a new prose claim.
+  // insert batch rows directly (`insertBatch`, no candidate query involved at all), OR — the
+  // cross-org case — are VACUOUS above the cap: it never asserts on `execRes`'s status/body (only
+  // that org B's own batch list omits `execBody.batchId`), so above the 500-candidate cap it still
+  // passes without having verified `execute` actually succeeded (`execBody.batchId` is `undefined`
+  // when `execute` 400s, and "list omits a batch id of `undefined`" is trivially true) — a real
+  // gap, not a documentation nicety; left un-sunk here on purpose (round-4 gate P3-1,
+  // `impl-gate-A3-round4-20260918.md` §4, disclosed in this file's own verification MD §12.7 under
+  // the SAME name) rather than silently exempted by a prose claim that it is "unaffected either
+  // way" — it is not unaffected, it is untested in that regime. Fixing it (asserting `execRes.
+  // status` for real) needs a decision on what that assertion should require and is out of this
+  // fix round's scope; tracked as an open item, not closed by this comment.
   const FOREIGN_SINK_GROUP_NAME = '__a3_ci_foreign_template_sink__'
   const FOREIGN_SINK_SORT_ORDER = 999999
 
