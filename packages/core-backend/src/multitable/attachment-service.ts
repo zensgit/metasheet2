@@ -16,6 +16,7 @@ import * as path from 'path'
 
 import type { StorageServiceImpl } from '../services/StorageService'
 import type { StorageFile } from '../types/plugin'
+import { archiveSourceProtectionEnabled, claimDirectAttachmentPurge, type AttachmentPurgeTransaction } from './attachment-purge-claim'
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -141,7 +142,8 @@ export type SoftDeleteAttachmentInput = {
 }
 
 export type DeleteAttachmentBinaryInput = {
-  storage: StorageServiceImpl
+  transaction?: AttachmentPurgeTransaction
+  storage: Pick<StorageServiceImpl, 'delete' | 'deleteByKey'>
   storageFileId: string
   /** F9 design-lock GF9-1: the persisted physical storage key. When present, the delete is index-free
    * (`deleteByKey`) — mirrors `readAttachmentBinary`'s storagePath branch. Optional/defensive only:
@@ -608,6 +610,10 @@ export async function deleteAttachmentBinary(
 ): Promise<void> {
   const { storage, storageFileId, storagePath, query, attachmentId } = input
   try {
+    if (archiveSourceProtectionEnabled()) {
+      if (!input.transaction || !attachmentId || !query) return
+      if (!await claimDirectAttachmentPurge(input.transaction, attachmentId, storageFileId, storagePath)) return
+    }
     if (typeof storagePath === 'string' && storagePath.length > 0) {
       await storage.deleteByKey(storagePath)
     } else {

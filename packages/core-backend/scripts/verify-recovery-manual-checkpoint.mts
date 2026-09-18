@@ -1380,6 +1380,13 @@ try {
     console.log('PASS: server-owned ten-row nonce transaction; caller sink ignored; last-row conflict rolls back earlier nine, no prepared ciphertext/upload; resume keeps original reservations')
   } finally { sourceKey.fill(0) }
   console.log('PASS: source generation binding and single use; tampered relational plaintext refused before custody; interrupted first seal resumes ten authenticated original sections without source or recapture')
+  const purgeMigration = require('../src/db/migrations/zzzz20260919120000_add_attachment_blob_purge_claim.ts') as typeof import('../src/db/migrations/zzzz20260919120000_add_attachment_blob_purge_claim')
+  for (const step of [purgeMigration.down, purgeMigration.down, purgeMigration.up, purgeMigration.up]) await step(db)
+  await query('ALTER TABLE multitable_attachments ALTER COLUMN blob_purge_claimed_at SET DEFAULT now()')
+  try {
+    await assert.rejects(purgeMigration.up(db), { message: 'ATTACHMENT_PURGE_CLAIM_SCHEMA_DRIFT' })
+  } finally { await query('ALTER TABLE multitable_attachments ALTER COLUMN blob_purge_claimed_at DROP DEFAULT') }
+  await purgeMigration.up(db)
   await query(`INSERT INTO multitable_attachments
     (id,sheet_id,storage_file_id,filename,mime_type,size,storage_path,deleted_at,blob_purged_at)
     VALUES ('manual-live-attachment','no-genesis','manual-live-file','synthetic','text/plain',3,'synthetic/live',NULL,NULL),
@@ -1412,6 +1419,77 @@ try {
   assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs
     WHERE attachment_id IN ('manual-live-attachment','manual-deleted-attachment')`)).rows[0].n, 2)
   console.log('PASS: all live/deleted attachment candidates atomically receive mutable source intents with exact lease/owner; retry unchanged; second pin failure rolls back generation/request/first pin without leaking provider values')
+  const { deleteAttachmentBinary } = require('../src/multitable/attachment-service.ts') as typeof import('../src/multitable/attachment-service')
+  let pinnedSourceDeletes = 0
+  const oldArchiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+  const oldFenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+  const purgeClient = new Client({ ...connection, database })
+  try {
+    await purgeClient.connect()
+    process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    await deleteAttachmentBinary({
+      storage: { deleteByKey: async () => { pinnedSourceDeletes += 1 },
+        delete: async () => { throw new Error('UNEXPECTED_LEGACY_DELETE') } },
+      storageFileId: 'manual-deleted-file', storagePath: 'synthetic/deleted',
+      query, attachmentId: 'manual-deleted-attachment',
+      transaction: <T,>(work: (client: { query: typeof query }) => Promise<T>) => transaction(() => work({ query })),
+    })
+    assert.equal(pinnedSourceDeletes, 0, 'PINNED_SOURCE_MUST_NOT_REACH_PHYSICAL_DELETE')
+    assert.equal((await query(`SELECT blob_purged_at FROM multitable_attachments
+      WHERE id='manual-deleted-attachment'`)).rows[0].blob_purged_at, null)
+    await query(`INSERT INTO multitable_attachments
+      (id,sheet_id,storage_file_id,filename,mime_type,size,storage_path,deleted_at)
+      VALUES ('manual-purge-claim','no-genesis','manual-purge-file','synthetic','text/plain',3,'synthetic/purge',now())`)
+    const purgeTransaction = async <T,>(work: (client: { query: typeof query }) => Promise<T>): Promise<T> => {
+      await purgeClient.query('BEGIN')
+      try {
+        const result = await work({ query: purgeClient.query.bind(purgeClient) })
+        await purgeClient.query('COMMIT')
+        return result
+      } catch (error) { await purgeClient.query('ROLLBACK'); throw error }
+    }
+    const refusedDuringDelete = { ...admissionRequest, requestId: randomUUID() }
+    const beforePurgeAdmission = await generationCount()
+    let providerAttempts = 0
+    const purgeInput = {
+      storageFileId: 'manual-purge-file', storagePath: 'synthetic/purge',
+      attachmentId: 'manual-purge-claim', query, transaction: purgeTransaction,
+      storage: {
+        delete: async () => { throw new Error('UNEXPECTED_LEGACY_DELETE') },
+        deleteByKey: async () => {
+          providerAttempts += 1
+          // The separate claim connection has committed before this provider barrier.
+          assert.equal((await query(`SELECT blob_purge_claimed_at IS NOT NULL AS claimed,
+            blob_purged_at IS NULL AS unconfirmed FROM multitable_attachments
+            WHERE id='manual-purge-claim'`)).rows[0].claimed, true)
+          await assert.rejects(admit(refusedDuringDelete), { message: 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE' })
+          throw new Error('SYNTHETIC_PROVIDER_DELETE_FAILED')
+        },
+      },
+    }
+    await deleteAttachmentBinary(purgeInput)
+    assert.equal(providerAttempts, 1)
+    assert.equal(await generationCount(), beforePurgeAdmission)
+    assert.equal(await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query, refusedDuringDelete)), null)
+    assert.deepEqual((await query(`SELECT blob_purge_claimed_at IS NOT NULL AS claimed,
+      blob_purged_at IS NULL AS unconfirmed FROM multitable_attachments
+      WHERE id='manual-purge-claim'`)).rows, [{ claimed: true, unconfirmed: true }])
+    await deleteAttachmentBinary({ ...purgeInput, storage: { ...purgeInput.storage,
+      deleteByKey: async () => { providerAttempts += 1 } } })
+    assert.equal(providerAttempts, 2)
+    assert.equal((await query(`SELECT blob_purged_at IS NOT NULL AS purged FROM multitable_attachments
+      WHERE id='manual-purge-claim'`)).rows[0].purged, true)
+    await purgeMigration.up(db)
+    await assert.rejects(purgeMigration.down(db), { message: 'ATTACHMENT_PURGE_CLAIM_DOWN_IN_USE' })
+    console.log('PASS: pin-first refuses direct physical delete; separate-connection purge-first blocks admission; provider failure retains claim without purge stamp; retry confirms purge; nonempty rollback refused')
+  } finally {
+    await purgeClient.end()
+    if (oldArchiveFlag === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+    else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = oldArchiveFlag
+    if (oldFenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    else process.env.MULTITABLE_ENABLE_WRITER_FENCE = oldFenceFlag
+  }
   const purgedRequest = { ...admissionRequest, requestId: randomUUID() }
   const beforePurged = await generationCount()
   await query(`UPDATE multitable_attachments SET blob_purged_at=now() WHERE id='manual-deleted-attachment'`)

@@ -5,6 +5,7 @@ import { query, transaction } from '../db/pg'
 import { fenceWriterEntry, type FenceQuery } from './canonical-sheet-fence'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { resolveWithinBase } from '../services/StorageService'
+import { hasActiveArchiveSourcePin, markAttachmentPurgeClaim } from './attachment-purge-claim'
 
 type AttachmentTransaction = <T>(work: (client: { query: FenceQuery }) => Promise<T>) => Promise<T>
 
@@ -92,26 +93,7 @@ function isArchiveSourcePinGuardEnabled(): boolean {
     && process.env.MULTITABLE_ENABLE_WRITER_FENCE === 'true'
 }
 
-async function hasActiveArchiveSourcePin(queryFn: FenceQuery, attachmentId: string): Promise<boolean> {
-  const result = await queryFn(
-    `SELECT 1
-       FROM meta_recovery_archive_attachment_refs attachment_ref
-       JOIN meta_recovery_archives archive
-         ON archive.generation_id = attachment_ref.generation_id
-      WHERE attachment_ref.attachment_id = $1
-        AND attachment_ref.reference_class = 'source'
-        AND attachment_ref.reference_state = 'building'
-        AND archive.state = 'building'
-        AND archive.build_status = 'active'
-        AND archive.coverage_status = 'incomplete'
-      LIMIT 1`,
-    [attachmentId],
-  )
-  return result.rows.length > 0
-}
-
-// This protects pins that already exist. The future archive claimant must take the same sheet fence,
-// lock the live attachment row, and refuse deleted rows before inserting a new source pin.
+// Admission takes the same sheet fence and rejects durable purge claims, including deleted rows.
 
 async function claimOrphanAttachmentForPurge(
   transactionFn: AttachmentTransaction,
@@ -144,7 +126,9 @@ async function claimOrphanAttachmentForPurge(
         RETURNING id, sheet_id, storage_file_id, storage_path`,
       [attachment.id],
     )
-    return (updated.rows[0] as GuardedAttachmentCleanupRow | undefined) ?? null
+    const claimed = (updated.rows[0] as GuardedAttachmentCleanupRow | undefined) ?? null
+    if (claimed) await markAttachmentPurgeClaim(transactionQuery, claimed.id)
+    return claimed
   })
 }
 
@@ -171,6 +155,7 @@ async function claimAttachmentBlobPurge(
       || attachment.sheet_id !== row.sheet_id
       || await hasActiveArchiveSourcePin(transactionQuery, attachment.id)
     ) return null
+    await markAttachmentPurgeClaim(transactionQuery, attachment.id)
     return attachment
   })
 }

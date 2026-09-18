@@ -18653,6 +18653,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // `blob_purged_at` for the compensating sweep.
       await deleteAttachmentBinaryShared({
         storage,
+        transaction: pool.transaction.bind(pool),
         storageFileId: attachmentRow.storageFileId,
         storagePath: attachmentRow.storagePath,
         query: pool.query.bind(pool),

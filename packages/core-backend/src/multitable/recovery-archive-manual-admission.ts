@@ -276,6 +276,9 @@ export function bindRecoveryArchiveManualAdmission(
       else await persistRecoveryArchiveSnapshotReservations(query, plan, allocated)
       await bindRecoveryArchiveManualRequest(query, identity, generationId)
       const snapshot = await readRecoveryArchiveCaptureSource(query, identity)
+      const purgeClaims = await query(`SELECT id FROM multitable_attachments
+        WHERE sheet_id=$1 AND blob_purge_claimed_at IS NOT NULL LIMIT 1`, [identity.sheetId])
+      if (purgeClaims.rows.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
       if (snapshot.attachmentCandidates.some((attachment) => attachment.blobPurged)) {
         throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
       }
