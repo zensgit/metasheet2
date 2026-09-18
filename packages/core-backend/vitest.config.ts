@@ -1862,6 +1862,15 @@ export default defineConfig({
       // `approval-template-groups-backfill-execute-ci-wiring.test.mjs` guard (same convention as
       // the two suites above).
       'tests/integration/approval-template-groups-backfill-execute.db.test.ts',
+      // Same slice, W9 rollback unit: `rollbackApprovalTemplateGroupBackfillBatch`
+      // (`src/services/ApprovalTemplateGroupService.ts` — unlike preview/execute, rollback needs
+      // no template-visibility actor, so it lives in the service file rather than
+      // `routes/approvals.ts`). Covers §4.2's set-based token-match rollback and §4.3's
+      // created_new/remaining=0 archive precision. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-rollback-ci-wiring.test.mjs` guard (same convention as
+      // the three suites above).
+      'tests/integration/approval-template-groups-backfill-rollback.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

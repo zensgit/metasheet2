@@ -482,6 +482,29 @@ export async function renameApprovalTemplateGroup(
 }
 
 /**
+ * Shared statement TEXT for "unlink every member of a group" / "archive a group row" — design doc
+ * §4.1's requirement, on top of §13 changesRequired #9's "the repo may keep only ONE copy of a
+ * reused statement's text": W9 rollback (`rollbackApprovalTemplateGroupBackfillWithClient` below)
+ * must NOT call this function (it is unconditional — see that function's own file-header note for
+ * why an unconditional archive would undo batch-external state), but it must also not paste a
+ * second copy of these two statements' SQL text. A shared plain FUNCTION (rather than these two
+ * exported strings) was rejected: the two call sites need the identical text run under DIFFERENT
+ * surrounding lock discipline — this function's caller takes `groupId`'s `FOR UPDATE` in the
+ * statement immediately below; rollback's caller has already taken that same row lock in its own
+ * §13.2 unified pre-lock step and must NOT re-issue a second `FOR UPDATE` here (doing so is the
+ * exact L2→L1 sequence design-gate M3 found deadlocking against a concurrent plain link/unlink
+ * request's L1→L2 order — see rollback's file-header note). A function wrapping both statements
+ * would need a "caller already holds the lock" flag threaded through both call sites just to skip
+ * its own lock acquisition; a plain exported SQL-text constant keeps each caller's own lock
+ * sequencing visible at its own call site instead of hidden behind a parameter.
+ */
+export const ATG_UNLINK_ALL_GROUP_MEMBERS_SQL =
+  'UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2'
+export const ATG_ARCHIVE_GROUP_ROW_SQL = `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
+   WHERE org_id = $1 AND id = $2
+   RETURNING ${GROUP_COLUMNS}`
+
+/**
  * L0→L1→L2 (batch). Transactional per I2: lock the group row, unlink every member (an UPDATE,
  * never a DELETE — I2′), THEN clear sort_order and set archived_at. Concurrent link/re-link
  * attempts block on the SAME group row's FOR UPDATE (their own L1 acquire in
@@ -510,17 +533,9 @@ export async function archiveApprovalTemplateGroupWithClient(
   // 必须带 org 谓词"), even though `atg_<uuid>` ids are already globally unique and the
   // composite `atgl_group_fk` makes a cross-org link row for this exact groupId impossible
   // today: correctness should rest on this predicate, not on an invariant enforced elsewhere.
-  await client.query(
-    `UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2`,
-    [orgId, groupId],
-  )
+  await client.query(ATG_UNLINK_ALL_GROUP_MEMBERS_SQL, [orgId, groupId])
 
-  const updated = await client.query(
-    `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
-       WHERE org_id = $1 AND id = $2
-       RETURNING ${GROUP_COLUMNS}`,
-    [orgId, groupId],
-  )
+  const updated = await client.query(ATG_ARCHIVE_GROUP_ROW_SQL, [orgId, groupId])
   return mapGroupRow(updated.rows[0] as RawGroupRow)
 }
 
@@ -766,4 +781,168 @@ export function classifyBackfillCategory(
   return existingGroupId
     ? { action: 'attach', trimmedCategory, existingGroupId }
     : { action: 'create', trimmedCategory }
+}
+
+// ── A-3 backfill — design-gate A3-phase2, W9 rollback (2026-09-18, 续做步骤 12) ─────────────────
+// `docs/development/approval-template-groups-phase2-design-20260918.md` §4 / §13.1 changesRequired
+// #1/#2/#4/#7 (verbatim, folded into the proposal). Lives HERE, unlike preview/execute — rollback
+// needs no `ApprovalTemplateVisibilityActor` / `applyTemplateVisibilityFilter` (it undoes exactly
+// what a batch recorded, regardless of the caller's template-visibility scope), so it has none of
+// the reason those two functions were pushed out to `routes/approvals.ts`.
+
+export interface ApprovalTemplateGroupBackfillRollbackResult {
+  rolledBackAt: string
+}
+
+/**
+ * §4's transaction skeleton (§13 changesRequired #1 — the pseudocode's original two independent
+ * code blocks, §4.2 and §4.3, had no shared skeleton naming ONE lock order across both; that gap
+ * is exactly what design-gate M3 found deadlocking).
+ *
+ * Does NOT call `unlinkApprovalTemplateFromGroup` / `archiveApprovalTemplateGroupWithClient` (§4.1
+ * — both are UNCONDITIONAL: the former clears `group_id` on any row that currently has one, the
+ * latter unlinks every current member of a group; either would undo batch-EXTERNAL state a
+ * subsequent manual action produced after this batch's `execute` ran). Instead:
+ *  - §4.2: a single set-based `UPDATE … FROM` join against `..._batch_links`, whose join
+ *    predicate is the optimistic-concurrency token this batch itself recorded (`group_id` AND
+ *    `linked_at`, both still exactly what `execute` wrote) — a row that no longer matches BOTH is
+ *    SKIPPED (left exactly as some other, later action left it), not an error.
+ *  - §4.3: for each group THIS batch created (`created_new = true` in `..._batch_groups`), archive
+ *    it ONLY if, after the §4.2 unlink above has already run, it has zero remaining members — using
+ *    `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` / `ATG_ARCHIVE_GROUP_ROW_SQL` (the SAME statement text
+ *    `archiveApprovalTemplateGroupWithClient` runs, reused as text per §4.1, not called as a
+ *    function). A group attached to (`created_new = false`) is NEVER archived by rollback — it
+ *    predates this batch, so archiving it would be a batch-external write.
+ *
+ * §13.2 unified lock order, landed here exactly as execute lands it: L0 → ONE deterministic
+ * `ORDER BY id FOR UPDATE` pre-locking every EXISTING group this batch touches → every L2 write
+ * below. The §4.3 loop reads its `archived_at` snapshot from that SAME pre-lock result and never
+ * re-issues a second `FOR UPDATE` on a group row — re-locking there would be "unlink batch links
+ * (L2) THEN take a group's FOR UPDATE (L1)", the literal L2→L1 order design-gate M3 reproduced a
+ * deterministic deadlock against a concurrent plain link/unlink request's L1→L2 order.
+ */
+export async function rollbackApprovalTemplateGroupBackfillWithClient(
+  client: AtgTxClient,
+  orgId: string,
+  batchId: string,
+): Promise<ApprovalTemplateGroupBackfillRollbackResult> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`]) // L0 — same key as create/archive/link/execute; rollback competes on the same org-wide lock.
+
+  const batchRow = await client.query(
+    `SELECT rolled_back_at FROM approval_template_group_backfill_batches WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+    [batchId, orgId],
+  )
+  const batchRows = batchRow.rows as Array<{ rolled_back_at: string | Date | null }>
+  if (batchRows.length === 0) {
+    // org_id = $2 is part of the WHERE, not a separate check after a bare id lookup — a batchId
+    // that exists but belongs to a DIFFERENT org is indistinguishable from "does not exist" here,
+    // the same fail-closed shape every other org-scoped lookup in this file already uses.
+    throw new ServiceError('Backfill batch not found', 404, 'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND')
+  }
+  const existingRolledBackAt = batchRows[0].rolled_back_at
+  if (existingRolledBackAt !== null) {
+    // §13 changesRequired #7 (design-gate Q4, already ratified into the proposal): 409, NOT an
+    // idempotent 200. A second rollback call on an already-rolled-back batch cannot tell "nothing
+    // to undo because this batch was already undone" apart from "nothing to undo because every one
+    // of this batch's rows happens to have been mutated by something else since" — a 200 with an
+    // empty result would let those two render identically (the `finding_attendance_denied_renders_as_all_clear`
+    // shape). The 409's `details.rolledBackAt` lets a caller that retried after a timeout tell
+    // "already done" apart from "never happened" without a second ambiguous 200.
+    throw new ServiceError(
+      'Backfill batch was already rolled back',
+      409,
+      'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK',
+      { rolledBackAt: toIso(existingRolledBackAt) },
+    )
+  }
+
+  // §13.2 unified lock order: read (not lock) every group id this batch touched — from EITHER
+  // detail table, a group could appear in `..._batch_groups` only (attach path, no links if the
+  // category had zero eligible templates — not reachable from execute today, but this query does
+  // not assume otherwise) or in `..._batch_links` only were that ever possible — then pre-lock all
+  // of them in ONE deterministic-order statement before any L2 write below.
+  const targetGroupIdsResult = await client.query(
+    `SELECT group_id FROM approval_template_group_backfill_batch_links WHERE batch_id = $1 AND org_id = $2
+     UNION
+     SELECT group_id FROM approval_template_group_backfill_batch_groups WHERE batch_id = $1 AND org_id = $2`,
+    [batchId, orgId],
+  )
+  const targetGroupIds = (targetGroupIdsResult.rows as Array<{ group_id: string }>).map((row) => row.group_id)
+
+  const archivedAtByGroupId = new Map<string, string | Date | null>()
+  if (targetGroupIds.length > 0) {
+    const lockedResult = await client.query(
+      `SELECT id, archived_at FROM approval_template_groups WHERE org_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE`,
+      [orgId, targetGroupIds],
+    )
+    for (const row of lockedResult.rows as Array<{ id: string; archived_at: string | Date | null }>) {
+      archivedAtByGroupId.set(row.id, row.archived_at)
+    }
+  }
+
+  // §4.2 landed SQL (§13 changesRequired #2): set-based server-side join, the optimistic-
+  // concurrency token compared entirely inside Postgres — `linked_at` never round-trips through
+  // JS on either the write side (execute, already fixed) or here on the compare side. A batch-link
+  // row whose `(group_id, linked_at)` no longer BOTH match the live `approval_template_group_links`
+  // row has been touched by something else since `execute` ran and is left exactly as that other
+  // action left it.
+  await client.query(
+    `UPDATE approval_template_group_links l
+        SET group_id = NULL, unlinked_at = now()
+       FROM approval_template_group_backfill_batch_links b
+      WHERE b.batch_id = $1 AND b.org_id = l.org_id AND b.template_id = l.template_id
+        AND l.group_id = b.group_id AND l.linked_at = b.linked_at`,
+    [batchId],
+  )
+
+  // §4.3: `remaining` is computed AFTER the §4.2 unlink above (so this batch's own now-undone
+  // members never count toward it), for every group this batch marked `created_new = true` only.
+  const batchGroupsResult = await client.query(
+    `SELECT group_id, created_new FROM approval_template_group_backfill_batch_groups WHERE batch_id = $1 AND org_id = $2`,
+    [batchId, orgId],
+  )
+  for (const row of batchGroupsResult.rows as Array<{ group_id: string; created_new: boolean }>) {
+    if (!row.created_new) continue // attached to an already-existing group — never rollback's to archive (§4.3)
+    if (!archivedAtByGroupId.has(row.group_id)) continue // no longer exists (impossible today — groups are never hard-deleted — kept fail-safe) — skip, not an error
+    if (archivedAtByGroupId.get(row.group_id) !== null) continue // already archived (e.g. by a manual archive after execute) — skip, not an error
+    const remaining = await client.query(
+      `SELECT count(*)::text AS n FROM approval_template_group_links WHERE org_id = $1 AND group_id = $2 AND unlinked_at IS NULL`,
+      [orgId, row.group_id],
+    )
+    if (Number((remaining.rows[0] as { n: string }).n) === 0) {
+      // The SAME two statements `archiveApprovalTemplateGroupWithClient` issues, reused as
+      // exported SQL text (§4.1) — NOT a second `FOR UPDATE` (already held by the pre-lock step
+      // above; see this function's file-header note for the M3 deadlock a re-lock here would
+      // reintroduce).
+      await client.query(ATG_UNLINK_ALL_GROUP_MEMBERS_SQL, [orgId, row.group_id])
+      await client.query(ATG_ARCHIVE_GROUP_ROW_SQL, [orgId, row.group_id])
+    }
+    // ELSE: remaining > 0 — a batch-external action added a member to this batch-created group
+    // after `execute` ran. Left active, untouched — this is the batch-external-state guarantee
+    // §4/§9 name, not a partial failure.
+  }
+
+  const rolledBack = await client.query(
+    `UPDATE approval_template_group_backfill_batches SET rolled_back_at = now() WHERE id = $1 AND org_id = $2 RETURNING rolled_back_at`,
+    [batchId, orgId],
+  )
+  return { rolledBackAt: toIso((rolledBack.rows[0] as { rolled_back_at: string | Date }).rolled_back_at) }
+}
+
+/**
+ * Thin wrapper — opens the ONE `transaction(...)` call this composed operation runs on, the same
+ * convention as every other composed operation in this file (§3.0 file-header note).
+ */
+export async function rollbackApprovalTemplateGroupBackfillBatch(
+  orgId: string,
+  batchId: string,
+): Promise<ApprovalTemplateGroupBackfillRollbackResult> {
+  try {
+    return await transaction(async (client) => {
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return rollbackApprovalTemplateGroupBackfillWithClient(txClient, orgId, batchId)
+    })
+  } catch (error) {
+    throw mapGroupConstraintError(error)
+  }
 }

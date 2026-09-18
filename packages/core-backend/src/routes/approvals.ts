@@ -88,6 +88,7 @@ import {
   listApprovalTemplateGroups,
   mapGroupConstraintError,
   renameApprovalTemplateGroup,
+  rollbackApprovalTemplateGroupBackfillBatch,
   unarchiveApprovalTemplateGroup,
   unlinkApprovalTemplateFromGroup,
   type AtgTxClient,
@@ -1631,6 +1632,32 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       )
     }
   })
+
+  // W9 rollback (design doc §4 / §13.1 changesRequired #1/#2/#4/#7). Same guard as execute — a
+  // write endpoint, so `approvalTemplateAdminGuard` is I7's own literal rule here, not a disclosed
+  // deviation (unlike preview's §6.2 situation). No actor id is required: rollback writes no
+  // actor-attributed column (the batch header already carries `created_by` from execute).
+  r.post(
+    '/api/approval-template-groups/backfill/batches/:batchId/rollback',
+    authenticate,
+    approvalTemplateAdminGuard,
+    async (req: Request, res: Response) => {
+      try {
+        const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+        if (!orgId) return
+        const batchId = String(req.params.batchId ?? '')
+        const result = await rollbackApprovalTemplateGroupBackfillBatch(orgId, batchId)
+        res.status(200).json(result)
+      } catch (error) {
+        handleApprovalsError(
+          res,
+          error,
+          'APPROVAL_TEMPLATE_GROUP_BACKFILL_ROLLBACK_FAILED',
+          'Failed to rollback approval template group backfill batch',
+        )
+      }
+    },
+  )
 
   // B3-04: participant candidate-user directory. Registered BEFORE '/api/approvals/:id' so
   // 'directory' is never matched as an :id. Reuses searchDirectoryUsers (active-only, {id,name,email},
