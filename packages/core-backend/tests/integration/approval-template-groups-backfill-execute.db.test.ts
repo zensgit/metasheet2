@@ -9,8 +9,9 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
 /**
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3 ("backfill
  * by existing category") — real-DB acceptance for **W8 execute** (`executeApprovalTemplateGroupBackfill`
- * in `src/routes/approvals.ts`, `docs/development/approval-template-groups-phase2-design-20260918.md`
- * §3 / §13.2). W9 rollback is a separate, later unit (still unimplemented as of this file).
+ * in `src/routes/approvals.ts`, `docs/development/approval-template-groups-phase2-backfill-design-20260918.md`
+ * §3 / §13.2). W9 rollback is a separate unit with its own dedicated
+ * `approval-template-groups-backfill-rollback.db.test.ts` file and is not otherwise exercised here.
  *
  * This is the FIRST real-DB coverage of the §13.2 unified lock order's "pre-lock every existing
  * group, ORDER BY id FOR UPDATE" statement and of a single `transaction()` callback composing

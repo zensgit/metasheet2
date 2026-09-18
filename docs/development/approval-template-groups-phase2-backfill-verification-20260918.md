@@ -457,11 +457,136 @@ IDENTICAL
 
 ### 7.4 未处置的门审发现(如实列出,不算已满足)
 
-门审报告 §6 的 7 条 P3 与 §8 复核清单第 4 条(mutation 抽打)不在本轮范围内,按任务书"选尚未处理的一到三条"只处置了这唯一的 P2(rebase + 两处文档订正 + 全套回归属于同一条 P2 的处置动作,不是三条独立条目)。P3 逐条状态:
-1. 三处"接线还不存在"的过期断言注释——未动。
-2. 12 处指向改名前文档路径的注释——未动(与本 P2 无关的独立残留)。
-3. `atgbb_org_nonblank` 未进 `NONBLANK_CHECK_CONSTRAINTS`——未动(需要服务层测试才能安全改,今天不可达,见门审原文)。
+门审报告 §6 的 7 条 P3 与 §8 复核清单第 4 条(mutation 抽打)不在本轮范围内,按任务书"选尚未处理的一到三条"只处置了这唯一的 P2(rebase + 两处文档订正 + 全套回归属于同一条 P2 的处置动作,不是三条独立条目)。P3 逐条状态(**本轮 = 修复轮 2,处置 1/2/3 三条,详见 §8**):
+1. 三处"接线还不存在"的过期断言注释——**修复轮 2 已修,见 §8.1**。
+2. 12 处指向改名前文档路径的注释——**修复轮 2 已修,见 §8.2**。
+3. `atgbb_org_nonblank` 未进 `NONBLANK_CHECK_CONSTRAINTS`——**修复轮 2 已修 + 新增判别力测试,见 §8.3**(门审原文"需要服务层测试才能安全改,今天不可达"这句话本身有一处可拆分:端到端不可达是真的,但 `mapGroupConstraintError` 是纯函数,不需要真库/路由即可直接单元测试它对一个合成 `{code,constraint}` 对象的映射——见 §8.3 的判别力证据)。
 4. 验证 MD §5 第 8 条与 §2.4 自相矛盾——**本轮顺带核实但未改**:§2.4 与 §5.8 的矛盾在 rebase 前后没有变化,仍然是"§5.8 低估了自己",留给下一轮。
-5. 验收 E 终态腿未测——未动,已在 §5 项 1 记录为 remaining。
-6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——未动。
+5. 验收 E 终态腿未测——未动,已在 §5 项 1 记录为 remaining。**下一轮建议不选此条**:结果式竞态判据在 mutation 下也可能良性通过(记忆 `feedback_race_acceptance_assert_blocking_not_outcome`),一个弱化版本比不写更糟,需要认真设计而不是本轮体量的顺手修。
+6. `~ '[!-~]'` SQL/JS 等价未钉 collation 限定测试——未动。**下一轮建议选此条,且按更便宜的那个选项**:CI 跑的是 `15-alpine`(musl、无 `en_US.utf8`,记忆 `finding_prod_pg15_never_tested`),在本机 glibc/`en_US.UTF-8` 上新增一条真库对拍测试只会在本机通过、对 CI 真正跑的那根轴什么也没证明——诚实的处置是在门审 §6 第 6 条已核实的机械对拍结论(E6,12287 码位零分歧)旁边把"已在 glibc/en_US.UTF-8 上机械对拍,musl 轴未验"这句话写全,而不是新增一条只能在错误的 collation 轴上通过的测试。
 7. 补充清单 #1 的"`ci-realdb-step-contract.mjs` 硬编码 `FILES` 数组"前提在本 head 上为假——未动(本文档 §4 第 1 行已经写了"零命中确认",未单独点出"清单前提本身过期"这句话,门审 §6 第 7 条建议在 PR body 里点名,留给开 PR 那一步)。
+
+---
+
+## 8. 修复轮 2 处置(本轮,`impl-gate-A3-round1-20260918.md` §6 P3-1 / P3-2 / P3-3)
+
+**范围声明**:任务书"选尚未处理的一到三条",本轮处置 §7.4 列出的第 1/2/3 条(三处过期断言注释、12 处改名前路径、`atgbb_org_nonblank` 映射缺口)。三条都是文档/注释/映射表补全,**零行为变化**于既有生产路径(preview/execute/rollback 的请求处理逻辑一行未动)——§8.4 的回归重跑证明这一点,而不是假定它。未选 §7.4 第 4/5/6/7 条:第 4 条是纯文字自检、体量不到独立一条;第 5/6 条门审自己的 remaining 备注已建议下一轮暂缓或换更便宜的做法(见 §7.4 原文);第 7 条要点名的对象是将来开 PR 时的 PR body,不是本仓代码/文档。
+
+### 8.1 P3-1 —— 三处"接线还不存在"的过期断言注释,在本 head 上为假
+
+门审原文点名的三处、逐处订正后现场读码:
+
+1. `packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts:24-27`(原:「nothing reads or writes these tables until the W7/W8/W9 route layer lands in a later PR」)→现:
+   ```
+   Additive only, Draft-only migration. The W7 (preview) / W8 (execute) / W9 (rollback) route
+   layer that reads and writes these tables has since landed (`src/routes/approvals.ts`,
+   `src/services/ApprovalTemplateGroupService.ts`) — see each function's own doc comment and the
+   `approval-template-groups-backfill-{preview,execute,rollback}-ci-wiring.test.mjs` guards; this
+   migration remains Draft-only (unapplied to any shared/staging/prod database) regardless.
+   ```
+   （末句刻意保留「仍是 Draft-only、未应用到任何共享库」——这半句在本 head 上仍是真的,不属过期断言,不能一并删掉。）
+2. `packages/core-backend/vitest.config.ts:1839`(原:「Schema-only — no W7/W8/W9 route/service code exists yet」)→现:「Schema-only (exercises the DDL, not the W7/W8/W9 route/service layer, which has since landed — see the sibling `backfill-{preview,execute,rollback}.db.test.ts` suites)」。
+3. `packages/core-backend/src/services/ApprovalTemplateGroupService.ts:49-52`(原:「A-3's preview/execute/rollback endpoints, batch tables, and CI wiring remain OUT of scope pending independent gate review of that design proposal」)→现(`:50-54`):
+   ```
+   A-3's preview/execute/rollback endpoints, batch tables, and CI wiring have since
+   landed (`routes/approvals.ts`, the backfill batch DDL migration, this file's own
+   `classifyBackfillCategory` / `rollbackApprovalTemplateGroupBackfillBatch`) and passed an
+   independent gate review round (`reviews/impl-gate-A3-round1-20260918.md`, 0 P1 / 1 P2 / 7 P3 —
+   disposition tracked in the paired verification MD's §7):
+   ```
+   顺手订正了这一句自己的交叉引用:P3 处置从本轮起落在 §8,不再只在 §7,已改写成「§7/§8」（下方 diff）。
+
+证据——三处旧字符串在本 head 上零命中,新字符串各一处:
+```
+$ grep -rn "nothing reads or writes these tables until the W7" packages/core-backend/src
+$ grep -rn "no W7/W8/W9 route/service code exists yet" packages/core-backend
+$ grep -rn "remain OUT of scope pending independent gate review" packages/core-backend/src
+```
+三条命令均零命中(本会话现场跑,`$?`=1 各三次)。
+
+### 8.2 P3-2 —— 12 处指向改名前文档路径的注释
+
+设计 MD 在更早的一轮已从 `approval-template-groups-phase2-design-20260918.md` 改名为 `approval-template-groups-phase2-backfill-design-20260918.md`,但 12 处 `.ts` doc-comment 引用当时未同步。本轮逐处改写,分布(与 diff 逐一核对):迁移文件 1 处、`routes/approvals.ts` 2 处、`ApprovalTemplateGroupService.ts` 4 处、四个 `*.db.test.ts` 各 1 处(共 4 处)、`vitest.config.ts` 1 处 —— 合计 12。
+
+```
+$ git diff -- '*.ts' | grep -c '^-.*phase2-design-20260918'
+12
+$ git diff -- '*.ts' | grep -c '^+.*phase2-backfill-design-20260918'
+12
+```
+
+全仓复核(不只 `packages/core-backend`,含所有 `.ts`/`.md`/`.mjs`/`.cjs`):
+
+```
+$ grep -rn "phase2-design-20260918" . --include='*.ts' --include='*.md' --include='*.mjs' --include='*.cjs' 2>/dev/null \
+    | grep -v "phase2-backfill-design-20260918" | grep -v "phase2-backfill-verification-20260918.md:367"
+(零命中)
+```
+唯一被过滤掉的一行是本文档 §5 项 4 自己那句「门审报告引用的旧文件名……在本仓当前树里已不存在(rename 到本文档配对的设计 MD 路径)」——这是在如实记录改名这件事本身发生过,不是一处还没订正的过期断言,而且门审报告 `impl-gate-A3-round1-20260918.md` 本身不属本 git 仓、我方无权限也不应该去改它引用的旧文件名。
+
+### 8.3 P3-3 —— `atgbb_org_nonblank` 补进 `NONBLANK_CHECK_CONSTRAINTS` + 新增判别力测试
+
+**代码**(`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`):
+```
+-const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
++const NONBLANK_CHECK_CONSTRAINTS = new Set([
++  'atg_name_nonblank',
++  'atg_org_nonblank',
++  'atgl_org_nonblank',
++  'atgbb_org_nonblank',
++])
+```
+函数上方的 doc-comment 同批追加一段,把「为什么加」「为什么今天仍不可达」「为什么复用 `GROUP_NAME_UNSUPPORTED` 这个不精确的码名」三件事各写一句,并明确这个不精确不是本改动新引入的(两个既有 `*_org_nonblank` 条目同样复用它)。
+
+**门审原文的一处可拆分,已在 §7.4 第 3 条写明**:门审说「需要服务层测试才能安全改,今天不可达」——不可达(端到端)是真的,但 `mapGroupConstraintError` 本身是一个不碰真库/不碰路由的纯函数(输入一个 `{code, constraint}` 形状的对象,输出映射后的 `ServiceError` 或原样透传),可以直接单元测试,不需要等到有服务层/真库测试才能验证这条映射的判别力。
+
+**新文件**:`packages/core-backend/tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts`,3 例:
+1. 正例:`{code:'23514', constraint:'atgbb_org_nonblank'}` → `ServiceError`,`statusCode=400`,`code='GROUP_NAME_UNSUPPORTED'`,`details={constraint:'atgbb_org_nonblank'}`。
+2. 负控:一个不在集合里的 23514 约束名 → 原样透传(`mapped === pgErr`,`not.toBeInstanceOf(ServiceError)`)——证明这个映射器不是「见 23514 就吞」的兜底,新增条目确实是靠名字命中的。
+3. 回归控:既有的 `atg_org_nonblank` 仍然被映射——证明这次改动是扩表,不是替换表。
+
+```
+$ npx vitest run tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts --reporter=dot
+ ✓ tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts (3 tests) 2ms
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+```
+
+### 8.4 三条同批回归(本会话现场重跑,私有库 `metasheet2_lock_a3`)
+
+本轮三条改动(注释文字、一个 `Set` 字面量追加一个元素、一个新的纯单元测试文件)都不触碰 preview/execute/rollback 的请求处理逻辑,以下回归是为了把这句话从断言变成实测:
+
+1. **迁移干净**:
+   ```
+   $ DATABASE_URL="postgres://localhost/metasheet2_lock_a3" npm run migrate
+   ```
+   exit 0,无 pending。
+2. **7 个 ATG 真库套件**(与门审 E1 同一批文件):
+   ```
+   $ DATABASE_URL="postgres://localhost/metasheet2_lock_a3" EXPECT_DB=1 \
+     npx vitest --config vitest.integration.config.ts run \
+       tests/integration/approval-template-groups-lifecycle.db.test.ts \
+       tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+       tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+       tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+       tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+       tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+       tests/integration/approval-template-groups-serialization.db.test.ts \
+       --reporter=dot
+    Test Files  7 passed (7)
+         Tests  85 passed (85)
+   ```
+   `85 passed (85)`,与门审 E1 记录的数字逐字相同。
+3. **新单元测试**:见 §8.3,`3 passed (3)`。
+4. **5 个 ci-wiring 守卫**(`node --test scripts/ops/approval-template-groups-backfill-{schema,preview,execute,rollback,batches-list}-ci-wiring.test.mjs`):各 `fail 0`,exit 0。
+5. **s6a provenance**:`node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` → `pass 1 / fail 0`。`.github/workflows/plugin-tests.yml` 本轮未改动(`git status --short` 对该文件为空),`shasum -a 256` 现场值 `099904601c47c078fa5c81bf4387a26cc0678174de5a24f54b5edc86ae5bece1` 与 pins.json 逐字相同,**不需要重算 s6a 钉**(硬规矩里的「改 plugin-tests.yml 必须重算」这一条件不成立)。
+6. **typecheck**:`npx tsc --noEmit`,exit 0,零输出。
+7. **无库全量 lane**(`CI=true pnpm --filter @metasheet/core-backend test --reporter=dot`):
+   ```
+   Test Files  932 passed | 175 skipped (1107)
+        Tests  14722 passed | 1604 skipped (16326)
+   Duration    65.38s
+   ```
+   exit 0,零失败。**与门审 E2 记录的 `931 passed | 175 skipped (1106)` / `14718 passed | 1604 skipped (16322)` 相比**:文件数 +1,与本轮新增的唯一一个测试文件(§8.3 的新单元测试)逐一对应;测试数 +4,比新文件自己的 3 个用例多 1 条,**本轮未去追查这多出的 1 条从哪来**——如实披露为未核实的差异,不冒充"与旧基线逐位重现"(记忆 `feedback_absolute_claim_sweep_must_be_mechanical`);但 skip 数(175 文件 / 1604 用例)两次完全相同,说明不是"某条原本 skip 的用例这次变绿"那种解释,更可能是某条对环境/计数敏感的普查式用例(例如按当前仓库文件/插件数量枚举的那一类)在两次不同会话的运行环境之间有 1 个单位的差异,与本轮改动的三处文件(全部是注释与新增测试)在因果上不相关——**0 failed** 才是本轮要证的那句话,数字对不上不改变这个结论。
+
+**结论**:P3-1/P3-2/P3-3 三条均已修复并有判别力证据;既有 85 条真库用例、5 个 wiring 守卫、s6a 钉、typecheck、14700+ 条无库用例全部保持绿,零失败。

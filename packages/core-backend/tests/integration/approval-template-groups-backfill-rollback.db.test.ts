@@ -10,7 +10,7 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3 ("backfill
  * by existing category") real-DB acceptance for **W9 rollback**
  * (`rollbackApprovalTemplateGroupBackfillBatch`, `src/services/ApprovalTemplateGroupService.ts`,
- * `docs/development/approval-template-groups-phase2-design-20260918.md` §4 / §13.1 changesRequired
+ * `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §4 / §13.1 changesRequired
  * #1/#2/#4/#7). Sibling to the W7 preview and W8 execute real-DB suites — same
  * `describeIfDatabase` / `EXPECT_DB` sentinel convention, same org-per-test-tag teardown shape.
  *

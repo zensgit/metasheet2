@@ -53,12 +53,14 @@
  * arm is being KEPT (not deleted) until the owner actually confirms.
  *
  * §3.0 `...WithClient` split (added for the A-3 backfill design proposal,
- * `docs/development/approval-template-groups-phase2-design-20260918.md` §3.0 — the split itself
- * ships here ahead of any A-3 handler code because it is a hard prerequisite for A-3's
- * execute/rollback to exist at all, not because A-3 is implemented in this commit; A-3's
- * preview/execute/rollback endpoints, batch tables, and CI wiring remain OUT of scope pending
- * independent gate review of that design proposal — see taskbook
- * `impl-taskbook-A-grouping-20260918.md:72,:227`):
+ * `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §3.0 — the
+ * split itself shipped ahead of any A-3 handler code in this file's history because it is a hard
+ * prerequisite for A-3's execute/rollback to exist at all, not because A-3 landed in that same
+ * commit). A-3's preview/execute/rollback endpoints, batch tables, and CI wiring have since
+ * landed (`routes/approvals.ts`, the backfill batch DDL migration, this file's own
+ * `classifyBackfillCategory` / `rollbackApprovalTemplateGroupBackfillBatch`) and passed an
+ * independent gate review round (`reviews/impl-gate-A3-round1-20260918.md`, 0 P1 / 1 P2 / 7 P3 —
+ * disposition tracked in the paired verification MD's §7 (the P2) and §8 (the P3s)):
  *
  * `createApprovalTemplateGroup` / `linkApprovalTemplateToGroup` / `archiveApprovalTemplateGroup`
  * each open their OWN `transaction(...)` call, which — per `connection-pool.ts`'s
@@ -242,8 +244,29 @@ function newGroupId(): string {
  * — see `mapGroupConstraintError`'s doc comment below for the current, accurate status of this
  * Set and the branch that consumes it). `atg_org_nonblank` / `atgl_org_nonblank` keep the
  * ratified `~ '[!-~]'` predicate and this Set still maps them.
+ *
+ * `atgbb_org_nonblank` (A-3 backfill batch header,
+ * `zzzz20260919090000_create_approval_template_group_backfill_batches.ts`) is the SAME shape of
+ * CHECK on the SAME kind of column as `atg_org_nonblank` / `atgl_org_nonblank` above — added here
+ * (gate `impl-gate-A3-round1-20260918.md` §6 P3-3) for the identical defense-in-depth reason: the
+ * batch-header INSERT inside `executeApprovalTemplateGroupBackfill{,WithClient}` is the FIRST
+ * write of that transaction, so an org id that is blank or contains a non-printable-ASCII
+ * character would otherwise surface as this constraint's raw, unmapped 23514 (generic 500)
+ * instead of the typed 400 every other CHECK in this set already gets. Reusing
+ * `GROUP_NAME_UNSUPPORTED` for it is imprecise (the violation is on `org_id`, not a group `name`;
+ * so is reusing it for the two pre-existing `*_org_nonblank` entries above — a pre-existing
+ * imprecision this change does not introduce or widen) but matches this file's own stated
+ * convention for org-column CHECKs: a typed, if generically-worded, 400 rather than a DB leak.
+ * Unreachable in production today for the SAME reason as the two org entries above (route layer
+ * 403s a blank `req.authenticatedTenantId` first, and every org id already IN the database is
+ * ASCII) — this is depth-of-defense consistency across A-3's own table, not a live-path fix.
  */
-const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
+const NONBLANK_CHECK_CONSTRAINTS = new Set([
+  'atg_name_nonblank',
+  'atg_org_nonblank',
+  'atgl_org_nonblank',
+  'atgbb_org_nonblank',
+])
 
 /**
  * Maps raw PostgreSQL constraint violations onto the lock's typed `ServiceError`s:
@@ -712,7 +735,7 @@ export async function unlinkApprovalTemplateFromGroup(
 
 // ── A-3 backfill ("按现有 category 建组并挂接") — design-gate A3-phase2, W7 preview ─────────────
 //
-// `docs/development/approval-template-groups-phase2-design-20260918.md` §5.2 / P3-3
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §5.2 / P3-3
 // (design-gate changesRequired, `reviews/design-gate-A3-phase2-20260918.md`): preview and (later)
 // execute MUST decide "create a new group for this category / attach to an existing one / skip
 // this category entirely" through the SAME function, or the two can silently diverge (preview
@@ -784,7 +807,7 @@ export function classifyBackfillCategory(
 }
 
 // ── A-3 backfill — design-gate A3-phase2, W9 rollback (2026-09-18, 续做步骤 12) ─────────────────
-// `docs/development/approval-template-groups-phase2-design-20260918.md` §4 / §13.1 changesRequired
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §4 / §13.1 changesRequired
 // #1/#2/#4/#7 (verbatim, folded into the proposal). Lives HERE, unlike preview/execute — rollback
 // needs no `ApprovalTemplateVisibilityActor` / `applyTemplateVisibilityFilter` (it undoes exactly
 // what a batch recorded, regardless of the caller's template-visibility scope), so it has none of
@@ -948,7 +971,7 @@ export async function rollbackApprovalTemplateGroupBackfillBatch(
 }
 
 // ── A-3 backfill — batch list (design-gate A3-phase2, P1-5 / changesRequired #5, 2026-09-18) ────
-// `docs/development/approval-template-groups-phase2-design-20260918.md` §2.1 index / §6.1 endpoint
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §2.1 index / §6.1 endpoint
 // row / §13.1 changesRequired #5 (real-DB M-series gate report, `reviews/design-gate-A3-phase2-
 // 20260918.md`): a `batchId` appears in exactly one other place today — execute's own response —
 // so an operator whose execute request timed out, or who simply wants to audit what has already

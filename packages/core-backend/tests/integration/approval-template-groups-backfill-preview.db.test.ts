@@ -8,7 +8,7 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
 /**
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3 ("backfill
  * by existing category") — real-DB acceptance for **W7 preview only**
- * (`docs/development/approval-template-groups-phase2-design-20260918.md` §5,
+ * (`docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §5,
  * `previewApprovalTemplateGroupBackfill` in `src/routes/approvals.ts`). W8 execute / W9 rollback
  * are separate units with their own dedicated `.db.test.ts` files and are not otherwise exercised
  * here — the one exception is the changesRequired #12 `candidateCount` coupling case below, which
