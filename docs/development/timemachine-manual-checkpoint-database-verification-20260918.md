@@ -615,3 +615,29 @@ unit neighbors 3 files, 66/66; acceptance TypeScript, scoped source ESLint,
 static wiring 37/37, full S5 and diff check pass. The mutation fails precisely
 `27 !== 28` in the decrypted coverage assertion, then restoration is green.
 No new remote CI result is claimed for this local follow-up.
+
+## Local Ciphertext Upload And Receipt Integration
+
+An internal factory using the canonical recovery authorizer composes the existing
+transaction-guarded PUT/HEAD compiler with the database uploaded-receipt helper.
+Acceptance resumes an already prepared ten-section envelope into an owned temporary
+filesystem provider. Each callback deliberately supplies different plaintext-like
+bytes; provider GET must return the original persisted ciphertext instead. Two complete
+resumes leave exactly ten `section` receipts, all `uploaded`, never `verified`.
+
+A separate connection deactivates the synthetic actor during provider HEAD. The
+post-IO authorization check must refuse and leave zero receipts for that generation.
+Mutation bypassing that check fails with one unauthorized receipt instead of zero;
+it is restored before final gates. Database and provider fixtures are disposable.
+The first development runs exposed a test transaction-adapter mismatch, a wrong
+receipt table name and a missing test import; these were corrected without changing
+the existing storage/receipt authorities.
+
+Logs: `/private/tmp/tm-manual-object-upload-{mutation,final}.log`. No manifest/root
+receipt, verified transition, final publication, local custody integration or customer
+storage acceptance is claimed by these section-upload tests.
+
+Final gates: complete owned-PG acceptance and cleanup pass; receipt-compiler/worker
+unit neighbors 2 files, 23/23; acceptance TypeScript, upload-module ESLint, wiring
+37/37, full S5 and diff check pass. The owning temporary provider directory is removed
+by the driver's final cleanup. All plaintext and storage paths are synthetic.

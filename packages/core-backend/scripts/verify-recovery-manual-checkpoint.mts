@@ -1,7 +1,7 @@
 /** Synthetic full-schema checkpoint acceptance; never use a customer database. */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { createCipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto'
+import { createCipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -474,7 +474,8 @@ try {
   console.log('PASS: presealed-envelope upload interruption/new connection resumes original ten sections without capture; injected authority revocation refuses')
   const actorId = randomUUID()
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
-  const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+  const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck,
+    createRecoveryArchiveManualObjectUpload } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -844,6 +845,46 @@ try {
       upload: async () => { repeatedUploads++ } })
     assert.equal(repeatedUploads, 10)
     assert.deepEqual(await sealedMembers(repeated.binding.anchorOperationId), expectedMembers(repeated, 'section_checkpoint'))
+    const stores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
+    const provider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') })
+    const objectUpload = createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...repeated, provider })
+    const objectExpiry = (await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid',
+      [repeated.owner.generationId])).rows[0].expires_at.toISOString()
+    const resumeWithObjects = () => manual({ ...repeated, source: null,
+      capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') }, upload: async (envelope, section) => {
+        await objectUpload(envelope, { ...section, ciphertext: Buffer.from('SYNTHETIC_UNTRUSTED_PLAINTEXT') })
+        const digest = createHash('sha256').update(section.ciphertext).digest('hex')
+        const stored = await provider.get({ generationId: repeated.owner.generationId, objectId: digest,
+          expectedVersion: digest, expectedSha256: digest, expectedSize: String(section.ciphertext.length), expectedExpiresAt: objectExpiry })
+        assert.ok(Buffer.from(stored.bytes).equals(section.ciphertext))
+      } })
+    await resumeWithObjects()
+    await resumeWithObjects()
+    const receipts = (await query(`SELECT object_class,section_name,state FROM meta_recovery_archive_objects
+      WHERE generation_id=$1::uuid ORDER BY section_name`, [repeated.owner.generationId])).rows
+    assert.equal(receipts.length, 10)
+    assert.deepEqual(receipts.map((row) => row.section_name).sort(), [...archiveContract.RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
+    assert.ok(receipts.every((row) => row.object_class === 'section' && row.state === 'uploaded'))
+    const revokedUpload = await continuation()
+    const revoker = new Client({ ...connection, database })
+    await revoker.connect()
+    try {
+      const revokingProvider = { ...provider, async head(request: Parameters<typeof provider.head>[0]) {
+        const result = await provider.head(request)
+        await revoker.query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+        return result
+      } }
+      await assert.rejects(manual({ ...revokedUpload,
+        capture: async (snapshot) => ({ ...await capture(snapshot), binding: revokedUpload.binding }),
+        upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...revokedUpload, provider: revokingProvider }) }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+      assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
+        [revokedUpload.owner.generationId])).rows[0].n, 0)
+    } finally {
+      await revoker.query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+      await revoker.end()
+    }
+    console.log('PASS: real local ciphertext PUT/HEAD records ten uploaded receipts; exact resume adds no rows or captures; no verified/publication claim')
     console.log('PASS: manual bootstrap/repeat seal exact nine data hashes; real 28-row coverage replaces callback input; nonce failure leaves only historical seals')
     const drift = await continuation()
     const driftWriter = new Client({ ...connection, database })

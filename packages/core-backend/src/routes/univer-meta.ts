@@ -77,7 +77,7 @@ import {
   createRecoveryPlanAuthorization,
 } from '../multitable/recovery-plan-authorization'
 import { bindRecoveryArchiveWorkerAuthorization, bindRecoveryArchiveScopeAuthorization } from '../multitable/recovery-archive-worker-authorization'
-import { bindRecoveryArchiveManualContinuation } from '../multitable/recovery-archive-manual-continuation'
+import { bindRecoveryArchiveManualContinuation, bindRecoveryArchiveManualObjectUpload } from '../multitable/recovery-archive-manual-continuation'
 import { bindRecoveryArchiveManualAdmission, bindRecoveryArchiveManualSourceRecheck, type RecoveryArchiveManualAdmissionPolicy } from '../multitable/recovery-archive-manual-admission'
 import type { RecoveryArchivePreparedUploadInput } from '../multitable/recovery-archive-prepared-upload'
 import { bindRecoveryArchiveDerivedProcessor, runRecoveryArchiveDerivedTransaction } from '../multitable/recovery-archive-derived-processor'
@@ -7275,6 +7275,15 @@ export function createRecoveryArchiveManualContinuation(transaction: RecoveryArc
   return bindRecoveryArchiveManualContinuation(transaction, bindRecoveryArchiveScopeAuthorization(
     (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
   ))
+}
+
+export function createRecoveryArchiveManualObjectUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  input: Parameters<typeof bindRecoveryArchiveManualObjectUpload>[2],
+) {
+  return bindRecoveryArchiveManualObjectUpload(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), input)
 }
 
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */

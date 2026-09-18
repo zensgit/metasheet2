@@ -345,3 +345,20 @@ not permit recapture of the consumed source. Prepared-envelope resume does not r
 These seals and the 28-row coverage prove this snapshot's source roots only, not
 arbitrary historical pruning authority. Immutable attachments, provider receipts and
 the final publication fence remain open.
+
+### Durable Section Upload Adapter
+
+The internal manual object-upload factory binds the canonical recovery authorizer,
+server identity/owner and an existing object-store provider. Before external IO it
+loads the durable prepared envelope and database expiry under fresh authority/owner
+checks. Only the selected original ciphertext is uploaded; callback-provided bytes
+are ignored. Its SHA-256 is the generation-scoped object ID and immutable version.
+The existing receipt compiler performs guarded PUT and HEAD outside transactions.
+
+Before recording an `uploaded` receipt, a new transaction rechecks current authority,
+owner/lease and the identical durable envelope. Revocation can leave an unreferenced
+encrypted object, but cannot create an authorized receipt. No automatic deletion is
+added. Receipt `verified` transitions remain tied to the later finalization transaction;
+this adapter neither publishes an archive nor grants recovery access. The synthetic
+acceptance uses only the existing test-local provider, not customer storage or a
+production-provider readiness claim.
