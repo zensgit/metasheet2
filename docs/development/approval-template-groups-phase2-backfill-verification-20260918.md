@@ -601,3 +601,90 @@ $ npx vitest run tests/unit/approval-template-group-backfill-batch-org-nonblank.
 8. **retraction sweep**(gate §8 复核清单第 2 条建议、本轮改了 `routes/approvals.ts` 的注释故顺手跑一遍):`bash scripts/dev/atg-retraction-sweep.sh`,exit 0,两处命中均落在该脚本自己定义的"类别 3——叙述一件已经被撤回的事实,不是把它当今天成立的事实来断言"(命中原文都在讲"通配腿已被 phase1 证伪",不是在断言通配腿今天成立),脚本自己的判据要求类别 2(仍在断言为今天事实)命中数必须为 0——本次为 0。
 
 **结论**:P3-1/P3-2/P3-3 三条均已修复并有判别力证据;既有 85 条真库用例、5 个 wiring 守卫、s6a 钉、typecheck、14700+ 条无库用例(含 350 条枚举守卫用例,+1 逐一对应本轮新文件,零未解释漂移)、retraction sweep 全部保持绿,零失败。
+
+## 9. rebase 到 A-1 a728ed655(2026-09-18)
+
+A-1(`origin/feat/approval-template-groups-phase1`)在 §8 处置完成之后又推进到 `a728ed65532918e3726171d0c42f44d6be7e0ba9`(23514→400 映射、注释改写、新用例、`scripts/dev/atg-retraction-sweep.sh` 与 `atg-verification-recount.sh`,DDL 零改动)。本节记录本 lane 第三次 rebase 的 git 力学 + 全量真库/required 复现,不重复 §1–8 已经定案的判据文字。
+
+### 9.1 rebase 前后
+
+- **rebase 前 HEAD**:`6495bfe70fb0102a44936eb5b15f9ca74aad7710`(§8 定稿时的 head)。
+- **rebase 前 worktree**:`git status --porcelain` 为空,与 `origin/feat/approval-template-groups-phase2-backfill` 一致。
+- **rebase 前基点形状**(`git diff --stat 03ee9f4bb..HEAD`):26 个文件,`6411 insertions(+), 186 deletions(-)`。
+- **新 phase1 tip**:`a728ed65532918e3726171d0c42f44d6be7e0ba9`(`git fetch origin feat/approval-template-groups-phase1` 现取)。
+- **操作**:`git rebase origin/feat/approval-template-groups-phase1`,回放本 lane 全部 35 个提交。**零冲突**(`Successfully rebased and updated refs/heads/feat/approval-template-groups-phase2-backfill.`,`Rebasing (1/35)` … `(35/35)`)。
+- **rebase 后 HEAD**:`64b1261da20fc3f9632eac6a567d882f38377723`。
+- **冲突标记扫描**:`grep -rn '<<<<<<<\|>>>>>>>' packages apps .github` 命中 12 处,全部落在 `packages/claudedocs/BATCH2_MERGE_SUMMARY.md`(一份记录历史合并的文档,文件内容本身逐字包含 `<<<<<<<`/`>>>>>>>` 字面文本)。`git diff origin/feat/approval-template-groups-phase1 HEAD -- packages/claudedocs/BATCH2_MERGE_SUMMARY.md` 输出为空——该文件在两侧字节相同,本 lane 与本次 rebase 均未触碰,不是未消解冲突。判据要求的"零处真实冲突标记"成立。
+- **祖先关系**:`git merge-base --is-ancestor origin/feat/approval-template-groups-phase1 HEAD` → `YES`;`git rev-list --count origin/feat/approval-template-groups-phase1 ^HEAD` → `0`。
+- **rebase 后 diff 形状**(`git diff --stat origin/feat/approval-template-groups-phase1..HEAD`):21 个文件,`5784 insertions(+), 81 deletions(-)`(§1 的 5 个 backfill ci-wiring `.test.mjs` 与 lifecycle/serialization 两个真库测试文件均在列,归属 phase1 侧新增/改动的文件不再出现在这个 diff 里,符合预期)。
+
+### 9.2 range-diff(证明本 lane 自己的 diff 未变,只是 rebase 换了父提交)
+
+```
+$ git range-diff 03ee9f4bb..6495bfe70fb0102a44936eb5b15f9ca74aad7710 a728ed65532918e3726171d0c42f44d6be7e0ba9..HEAD
+```
+输出 44 行比较项:前 9 行(`f7b929700`…`a789422b5`)在新区间侧标 `-: ---------`——这 9 个提交是 A-1 自己的历史(phase1 在 `03ee9f4bb` 之后、`a789422b5` 之前落的提交),本来就已经整体包含在 `origin/feat/approval-template-groups-phase1` 的当前谱系里,不是本 lane 的内容,rebase 后自然不再出现在"本 lane 对 phase1 tip 的差集"里,不算内容丢失。后 35 行(`f5b57b9b1`…`6495bfe70` 对 `323d10bec`…`64b1261da`)**逐一标记为 `=`**——git 判定两侧提交内容(diff)完全相同,只有提交 SHA 因为父提交换了而不同。**本 lane 自己的 35 个提交,rebase 前后 diff 内容零差异**,没有"顺手改了冲突解法之外的东西"。
+
+### 9.3 私有库 `metasheet2_lock_a3_rb` 全量真库复现
+
+```
+$ dropdb -U postgres -h localhost metasheet2_lock_a3_rb 2>/dev/null; createdb -U postgres -h localhost metasheet2_lock_a3_rb
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_rb \
+  MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql \
+  pnpm --filter @metasheet/core-backend db:migrate
+```
+全部迁移成功执行,含本 lane 自己的 `zzzz20260919090000_create_approval_template_group_backfill_batches`。事后 `db:list`:`Applied: 402` / `Pending: 6`(pending 的 6 个恰好是 `MIGRATION_EXCLUDE` 列出的 6 个,与 CI 同款排除集合逐一对应)。
+
+```
+$ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_lock_a3_rb \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+    --reporter=dot
+ Test Files  7 passed (7)
+      Tests  79 passed | 7 skipped (86)
+```
+（lifecycle/serialization 为 A-1 侧改动过的两个文件,backfill-5 为本 lane 自有文件,与门审 E1 同一批文件清单。）
+
+```
+$ npx tsc --noEmit
+```
+exit 0,零输出。
+
+### 9.4 三条 required 逐字复现
+
+1. **仓根 `pnpm type-check`**:
+   ```
+   $ pnpm type-check
+   Scope: 13 of 14 workspace projects
+   packages/core-backend type-check$ tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json
+   packages/core-backend type-check: Done
+   apps/web type-check$ vue-tsc -b && pnpm run type-check:verification-approval && pnpm run type-check:verification-stock-prep
+   apps/web type-check: Done
+   ```
+   13/13 workspace 项目 `Done`,零 TS 错误。
+
+2. **`CI=true pnpm --filter @metasheet/core-backend test`(全量,无库+真库混合套件)**:
+   ```
+   Test Files  932 passed | 175 skipped (1107)
+        Tests  14722 passed | 1604 skipped (16326)
+     Duration  133.85s
+   ```
+   exit 0,零失败。
+
+3. **`bash -e apps/web/scripts/run-required-web-tests.sh`**(本 lane 不碰 `apps/web`,仍全量跑一遍以证明未破坏):脚本内含约 30 次独立 `npx vitest run` 调用(`set -euo pipefail`,任一调用非零退出即整脚本失败),全程无一次非零退出,跑到脚本最后一个调用并打出干净的收尾统计:
+   ```
+   Test Files  465 passed (465)
+        Tests  7164 passed (7164)
+     Duration  77.83s
+   ```
+   对全量日志(`/tmp/web-required-tests.log`,14435 行)做过三项交叉检查:`grep -n "FAIL\b"` 零命中;`grep -c "failed"` 命中 12 处,逐一核对后全部是测试用例描述文字(例如"a failed ensure says so…"、"surfaces failed branch status…")或被测代码里模拟网络失败的 `console.error`,不是任何一条 `Test Files … failed` 汇总行;逐个 `Test Files` 汇总行本身也无一处出现 `failed` 计数。三者共同确认零真实失败。
+
+### 9.5 结论
+
+rebase 零冲突、range-diff 证明本 lane 35 个提交内容逐一不变、私有库 `metasheet2_lock_a3_rb` 上本 lane 7 个真库文件与 tsc 均绿、三条 required 逐字复现全绿(仓根 type-check 13/13、core-backend 全量 932 文件/14722 用例、apps/web required 网关 465 文件/7164 用例,零失败)。rebase 后 HEAD:`64b1261da20fc3f9632eac6a567d882f38377723`。
