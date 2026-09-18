@@ -72,14 +72,23 @@ try {
     ['vitest', '--config', 'vitest.integration.config.ts', 'run',
       'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts', '--reporter=dot'],
+    ['vitest', '--config', 'vitest.integration.config.ts', 'run',
+      'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts', '--reporter=dot'],
+    // Prove old migration suites restored the complete current catalog, not just their own layer.
+    ['tsx', 'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'],
   ]
   for (const args of neighbors) {
     const run = spawnSync('pnpm', ['--filter', '@metasheet/core-backend', 'exec', ...args], {
       cwd: repo, env: { ...env, METASHEET_REAL_DB_TEST_STEP: '1' }, encoding: 'utf8',
       timeout: 240000, maxBuffer: 16 * 1024 * 1024,
     })
-    console.log((run.stdout ?? '').slice(-4000))
-    if (run.status !== 0) console.error((run.stderr ?? '').slice(-8000))
+    console.log(run.status === 0 ? (run.stdout ?? '').slice(-4000) : (run.stdout ?? ''))
+    if (run.status !== 0) console.error(run.stderr ?? '')
     assert.equal(run.status, 0, 'MIGRATION_NEIGHBOR_FAILED')
   }
   client = new Client({ ...connection, database })

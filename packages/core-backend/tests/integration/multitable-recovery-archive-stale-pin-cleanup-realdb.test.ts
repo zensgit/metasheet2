@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { suspendPreparedMigrationLayer, restorePreparedMigrationLayer } from '../utils/recovery-prepared-migration-layer'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
@@ -441,6 +442,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await suspendPreparedMigrationLayer(db)
     await installCleanupProtocolIfAbsent()
     await truncateCatalog()
     await provisionFixtureKeyIfRequired()
@@ -487,7 +489,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       await q('DELETE FROM meta_bases WHERE id=$1', [BASE]).catch(() => {})
       await removeFixtureKeyIfRequired()
     } finally {
-      await db.destroy()
+      try { await restorePreparedMigrationLayer(db) } finally { await db.destroy() }
     }
   })
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
+import { suspendPreparedMigrationLayer, restorePreparedMigrationLayer } from '../utils/recovery-prepared-migration-layer'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
@@ -362,6 +363,7 @@ describeIfRealDbStep('Phase D2d2-PREP-A coverage section/root binding (real DB)'
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await suspendPreparedMigrationLayer(db)
     await installIfAbsent()
     await provisionFixtureKey()
     initialFingerprint = await bindingFingerprint()
@@ -399,7 +401,7 @@ describeIfRealDbStep('Phase D2d2-PREP-A coverage section/root binding (real DB)'
       await cleanupSourceFixtures()
       await removeFixtureKey()
     } finally {
-      await db.destroy()
+      try { await restorePreparedMigrationLayer(db) } finally { await db.destroy() }
     }
   })
 

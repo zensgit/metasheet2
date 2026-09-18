@@ -267,3 +267,29 @@ remain green; database/connections and owned cluster are cleaned.
 
 Actual actor/request binding, source consistency, runtime permission integration,
 object PUT/HEAD receipts, catalog publication and the manual UI remain OPEN.
+
+## Legacy Migration Layer CI Repair
+
+Remote `79798b1b4ee2db65125299ba913ed7d3d1155153` is NOT all-green: Node18
+passed, but Node20 job `105468004548` in run `35302546154` failed in the broad
+multitable real-DB step (six suites). The first concrete failure was PostgreSQL
+0A000: the new prepared-capture FK prevented old catalog fixture TRUNCATE.
+Follow-on transaction failures were not classified as flakes and no rerun was used.
+
+Six historical migration suites now use a test-only layer helper. It audits and
+rolls back empty prepared storage and checkpoint amendments in one transaction,
+runs the original suite, then restores and audits both layers before DB closure.
+Production down guards remain intact: populated storage cannot be removed.
+No foreign key, immutable trigger, production constraint or test assertion was
+weakened, and no CASCADE was introduced. Legal-hold migration tests also need
+the old checkpoint parent function definition during their exact-schema checks.
+
+Discriminating local progression: unwinding only prepared storage made all 127
+historical assertions pass but the following checkpoint audit failed with
+SCHEMA_DRIFT. Unwinding/restoring both layers for all six suites closes that
+gap. The owned-cluster driver now explicitly runs those six suites (127/127),
+the original two suites (59/59), and repeats the full 29-migration replay after
+the historical tests. Current checkpoint, prepared-byte and continuation
+acceptance follows that replay; the owned database/connections and cluster are
+removed on success or failure. This is fixture/migration-order repair, not a new
+manual-capture capability or permission expansion.
