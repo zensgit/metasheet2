@@ -387,6 +387,13 @@ jobs:
       - name: B4 department-bindings CI wiring contract
         run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
 
+      # Approval form grouping design lock v2.13 phase 2 slice A-3 — CI two-point wiring contract
+      # (no DB): the backfill-batch DDL schema suite (design-gate changesRequired #4 FK proof)
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the atgbbl_link_fk CASCADE proof.
+      - name: A3 backfill-schema CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs
+
       # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
@@ -1660,6 +1667,7 @@ jobs:
             tests/integration/approval-lock9-process-attachments-realdb.db.test.ts \
             tests/integration/approval-template-groups-lifecycle.db.test.ts \
             tests/integration/approval-template-groups-serialization.db.test.ts \
+            tests/integration/approval-template-groups-backfill-schema.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
