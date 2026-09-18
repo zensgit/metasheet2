@@ -326,6 +326,8 @@ import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
 import { authenticate as authenticateElearningApp } from './middleware/auth'
+import { methodOverrideMiddleware } from './middleware/method-override'
+import { methodProbeRouter } from './routes/method-probe'
 import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
@@ -1734,6 +1736,13 @@ export class MetaSheetServer {
       return next()
     })
 
+    // DELETE method-override (POST + X-HTTP-Method-Override: DELETE -> DELETE). Mounted directly
+    // AFTER the global JWT gate so an unauthenticated override is just an unauthenticated request,
+    // and the middleware itself is a no-op unless `req.user` is set (see middleware/method-override.ts
+    // for why mount order alone is not enough: whitelisted paths and the OAPI `mst_` allowlist pass
+    // the gate without `req.user`).
+    this.app.use(methodOverrideMiddleware)
+
     // Post-auth enrichment: correlation ALS starts before auth so preflights
     // are covered; once auth runs, attach user/tenant for downstream logs.
     this.app.use(correlationContextEnrichmentMiddleware)
@@ -1783,6 +1792,8 @@ export class MetaSheetServer {
     }
     this.app.get('/health', healthHandler)
     this.app.get('/api/health', healthHandler)
+    // DELETE transport probe (authenticated by the global gate above; see routes/method-probe.ts).
+    this.app.use(methodProbeRouter())
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
