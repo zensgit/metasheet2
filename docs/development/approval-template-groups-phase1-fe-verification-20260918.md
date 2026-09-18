@@ -501,7 +501,7 @@ $ pnpm --filter @metasheet/web exec vue-tsc -b
 
 ### 12.0 前置:本轮先对栈底 rebase
 
-本 lane 是 Draft PR #5854(`feat/approval-template-groups-phase1-fe`),堆叠在 `feat/approval-template-groups-phase1`(A-1)之上。A-1 自己已经跑过一轮同名的 P3 卫生轮(`fbb5b38d8 docs(approval): P3 hygiene disposition table + evidence (sec26)`)并把 `origin/main` 的后续提交带了进来,本分支落后于新尖端。本轮第一步 `git rebase origin/feat/approval-template-groups-phase1`——**零冲突**(git 自动跳过 33 个内容已存在于新尖端的重复提交,只重放了本分支真正独有的 8 个提交),随后 `git push --force-with-lease` 一次同步远端。旧尖端 `5d0f780f5` → 新尖端见 `git log -1`。
+本 lane 是 Draft PR #5854(`feat/approval-template-groups-phase1-fe`),堆叠在 `feat/approval-template-groups-phase1`(A-1)之上。A-1 自己已经跑过一轮同名的 P3 卫生轮(`fbb5b38d8 docs(approval): P3 hygiene disposition table + evidence (sec26)`)并把 `origin/main` 的后续提交带了进来,本分支落后于新尖端。本轮第一步 `git rebase origin/feat/approval-template-groups-phase1`——**零冲突**(git 自动跳过 33 个内容已存在于新尖端的重复提交,只重放了本分支真正独有的 8 个提交),随后 `git push --force-with-lease` 一次同步远端。旧尖端 `5d0f780f53dffd006c27634aca2cbc8503859627` → rebase 后尖端 `b1e5c745f8fbc6d63987223d3af1e56b9b835ef5`(§12.11 diffstat 的起点)→ 本卫生轮结束时尖端 `1bd6c2e1d04fb6487fabf84a8cae132c96e5e49e`。
 
 ### 12.1 处置表
 
@@ -579,6 +579,8 @@ $ grep -rn "approval/TemplateCenterView" apps/web/tests/ apps/web/src/
 
 ### 12.9 P3-9:required 覆盖被自己的重复行悄悄吞掉(卫生轮自身发现)
 
+**措辞更正**:修复提交(fix(approval): fold A-2's dead duplicate exec line...)的 message 里「were never actually exercised by the required web-tests job」这句比事实宽——`web-tests` 那次运行仍然会跑活行里已有的 `templateCenterI18n`/`approvalTemplateCenterCategory`/`approvalTemplateGovernance` 三个 token,而这三份 spec 本身就会挂载 `ApprovalTemplateGroupsPanel`(P3-1 的挂载点普查),所以面板代码路径并非从未被跑过。准确的表述是本节标题与下面「影响声明」段的措辞:**`SessionOrgSwitcher.spec.ts`/`approvalTemplateGroupsClient`/`ApprovalTemplateGroupsPanel` 这三份带验收 J 断言的 spec 文件本身从未被 required job 执行**,不是"这个前端面从未被跑过"。commit message 已推送,不可改写,更正记在此处。
+
 **如何被发现**:核对 P3-4 的「394/395 token」措辞时,重算 `run-required-web-tests.sh` 的最终 token 数,Python 脚本按文件里**第一条**匹配 `exec npx vitest run` 的行取值,结果与预期不符(394 而非应有的 397),顺着这条线索发现文件里有 **两条** `^exec npx vitest run` 开头的行,而不是一条。
 
 **根因(逐条 commit 核对,非推测)**:
@@ -589,7 +591,7 @@ $ git log --oneline -S"exec npx vitest run" -- apps/web/scripts/run-required-web
 e0defbe26 ci(attendance): publish a stable web guard check (#4585)
 ```
 
-`96c512876`(等价于本分支 rebase 前的 `2ef7add98`,内容相同、hash 因 rebase 不同)的 diff 是**纯追加 17 行**——包括一份完整的、内容与既有末行几乎相同的第二条 `exec npx vitest run ...` 巨行副本,把新 token `SessionOrgSwitcher.spec.ts` 追加在这份**副本**的 `--reporter=dot` 之后,而不是编辑原本那一行。后续三个提交(`54da3d9b5`/`c86b09fd4`/`14c6d7112`,对应 approvalTemplateGroupsClient / ApprovalTemplateGroupsPanel 两个 token)都在这份死副本上继续追加,无人发现。
+`96c512876`(经 `git diff 96c512876^..96c512876` 与 `git diff 2ef7add98^..2ef7add98` 逐字节比对确认,与本分支 rebase 前的 `2ef7add98` 是同一份改动、diff 完全相同,只是 hash 因 rebase 不同——不是仅凭 commit subject 相同推断的)的 diff 是**纯追加 17 行**——包括一份完整的、内容与既有末行几乎相同的第二条 `exec npx vitest run ...` 巨行副本,把新 token `SessionOrgSwitcher.spec.ts` 追加在这份**副本**的 `--reporter=dot` 之后,而不是编辑原本那一行。后续三个提交(`54da3d9b5`/`c86b09fd4`/`14c6d7112`,对应 approvalTemplateGroupsClient / ApprovalTemplateGroupsPanel 两个 token)都在这份死副本上继续追加,无人发现。
 
 **为什么两轮验证都没抓到**:gate 报告 §1.4 用 `tail -1 ... | wc -w` 只看文件最后一行(恰好就是死副本,词数因此"对得上");两份 MD §2.3 的 Python 脚本用 `for line in content.splitlines(): if line.strip().startswith(marker): return line`——`.startswith` 命中的是**第一条**匹配行,而第一条（活的）那时还没加新 token,所以脚本的"394"输出其实是在告诉我们"活的那一行还没有新 token"，只是没人意识到"第一条"和"最后一条"是两条不同的行。这正是"扫描窗口两头都骗人"——`tail -1` 骗在只看窗口尾部,`.startswith` 的 first-match 骗在只看窗口头部,两个工具分别被两端的假象说服。
 
