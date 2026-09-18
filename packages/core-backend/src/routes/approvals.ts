@@ -672,6 +672,10 @@ export async function executeApprovalTemplateGroupBackfillWithClient(
   // `NOT EXISTS`, so `eligible` would never be empty, so the "eligible empty ⇒ batchId: null"
   // branch below would never fire, and a CJK-only-category org would grow one empty batch header
   // row per execute call (the exact mechanism design-gate M5/changesRequired #3 names).
+  // Collation caveat: this `~ '[!-~]'` range match's SQL/JS equivalence with
+  // `STORABLE_GROUP_NAME_PATTERN` (ApprovalTemplateGroupService.ts) is only measured against
+  // glibc/`en_US.utf8` collation — see that constant's doc-comment for the musl/`15-alpine` axis,
+  // which is unverified (`finding_prod_pg15_never_tested`).
   const conditions: string[] = [
     'NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)',
     "btrim(t.category) ~ '[!-~]'",

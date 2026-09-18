@@ -775,6 +775,19 @@ function pgBtrim(value: string): string {
  * all use for "storable as a group name". `test()` on a non-empty match anywhere in the string is
  * the same semantics as SQL's `~` operator against this pattern (a containment match, not a
  * full-string anchor).
+ *
+ * **Collation caveat (unverified axis, `finding_prod_pg15_never_tested`)**: this SQL/JS equivalence
+ * has only been measured against the CI/dev Postgres's glibc-based collation (`en_US.utf8`/`C`).
+ * POSIX bracket-expression range matching (`~` against a literal `!-~` range) is, per the SQL
+ * standard and Postgres's own regex docs, collation-dependent for locales that reorder the
+ * printable-ASCII code points — production's `15-alpine` image ships musl libc, has no
+ * `en_US.utf8` locale installed, and musl's collation ordering is not glibc's. This module's JS
+ * `RegExp` always uses a fixed, code-point-ordered `[!-~]` regardless of the process locale, so a
+ * musl-collation divergence (if one exists for this specific range) would only ever show up on the
+ * SQL side, not here — the cross-verification test in
+ * `approval-template-groups-backfill-execute.db.test.ts` ("SQL/JS cross-verification: …") has only
+ * ever run against glibc/`en_US.utf8`-collation Postgres, never against `musl`/`15-alpine`. Do not
+ * read that test's green as covering the musl axis.
  */
 const STORABLE_GROUP_NAME_PATTERN = /[!-~]/
 
