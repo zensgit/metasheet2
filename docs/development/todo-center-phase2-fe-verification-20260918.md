@@ -253,6 +253,11 @@ $ git show 1c08a4ac8feb0e443134ae20af283d836ff30300:.github/workflows/approval-w
 若要修,应去掉三组各自的一次重复,是后续清理项,不影响本切片任何判据的通过与否——vitest 对重复文件
 名令牌只是多跑一次同一份测试,不影响结果正确性,已由 §2.3 的 1958-passed 结果覆盖)。
 
+**更正(修复轮 3,20260918,门审 `impl-gate-B2-round1-20260918.md` P3-2 独立指出同一处)**:上一段
+「不改动该行……改 YAML 不在本次任务范围」这一决定,在修复轮 3 已不再成立——§12.1 把这句「no
+duplicates」按字面为假的措辞改写掉了(不是去掉三组字面重复本身,那仍是本段说的「后续清理项」,未
+做)。这里保留原段落是记录原始决定的时间点,不代表现在仍然「未改」。
+
 ### 4.4 判据 B(推送同源)的 required 检查覆盖——`test (20.x)` 的裸 `vitest run` 机核
 
 `packages/core-backend` 的 `test` 脚本(`package.json:26`)是裸 `"test": "vitest"`,无路径过滤;
@@ -517,14 +522,16 @@ mutation 7 的 `cmp` 已在 §10.3 单独确认过字节相同。)
 ### 10.6 本轮未处理(修复轮 2 已使这条部分过期,见 §11 开头的更正)
 
 门审十项发现(1 P1 + 1 P2 + 8 P3)里的八条 P3(P3-1 已通过 10 节开头的更正部分处理;P3-2~P3-8 未动,留给下一轮或 owner
-排期,如实列出,不在本轮声称交付)。**更正(修复轮 2,20260918)**:本行「P3-2~P3-8 未动」在 P3-4/P3-5/P3-6 三条上已不成立——见 §11。仍未动的是 P3-2/P3-3/P3-7/P3-8 四条(§11.4)。
+排期,如实列出,不在本轮声称交付)。**更正(修复轮 2,20260918)**:本行「P3-2~P3-8 未动」在 P3-4/P3-5/P3-6 三条上已不成立——见 §11。仍未动的是 P3-2/P3-3/P3-7/P3-8 四条(§11.4)。**再更正(修复轮 3,20260918)**:P3-2 与 P3-3 也已关闭——见 §12。仍未动的只剩 P3-7/P3-8 两条。
 
 ## 11. 修复轮 2(20260918)—— 关闭 P3-4、P3-5、P3-6
 
 被审 head 与本节起点:`c31f928a6`(修复轮 1 的提交,已合入本分支)。本节选取门审十项发现里剩余八条 P3
 中的三条:**P3-4**(`isTodoResponseDegraded`「徽标与中心页共用」的过强断言)、**P3-5**
 (`resetSessionBootstrap`「4 处调用点」少算一处)、**P3-6**(中心页 `item.href` 交给 `router-link`
-前零校验)。其余四条(P3-2/P3-3/P3-7/P3-8)本轮未动,见 §11.4。
+前零校验)。其余四条(P3-2/P3-3/P3-7/P3-8)本轮未动,见 §11.4。**更正(修复轮 3,20260918)**:
+P3-2/P3-3 已在 §12 关闭;本段「其余四条」这句按「本轮(修复轮 2)」的时点仍然属实,不代表 P3-2/P3-3
+现在仍未处理。
 
 ### 11.1 P3-6 —— `TodoCenterView.vue` 的 href 守卫(唯一有行为改动的一条)
 
@@ -644,6 +651,9 @@ clearToken, setExplicitSessionOrg, and the forced-relogin branch inside bootstra
 - **P3-7**(`todo:counts-updated` 房间/负载是否按 org 隔离未核):需要新的调查,未做。
 - **P3-8**(导航入口的范围扩张自陈是否写进 PR body):PR body 撰写项,Draft PR 尚未开出,未做。
 
+**更正(修复轮 3,20260918)**:上面四条里的 **P3-2** 与 **P3-3** 已关闭,见 §12——本节这两条 bullet
+是修复轮 2 时点的如实记录,不代表现在的状态。仍未动的只剩 **P3-7**、**P3-8** 两条。
+
 ### 11.5 重跑的闸(本轮改动只在 apps/web,零后端 diff)
 
 代码 diffstat 不含本 MD 自身(自指:这份文档的最终字节数只有写完本节之后才能知道,对自己取 diffstat
@@ -682,3 +692,143 @@ $ git status --porcelain
  M apps/web/src/todo/views/TodoCenterView.vue
  M apps/web/tests/TodoCenterView.spec.ts
 ```
+
+## 12. 修复轮 3(20260918)—— 关闭 P3-2、P3-3
+
+被审 head 与本节起点:`4e97acd92`(修复轮 2 的收尾提交,已合入本分支)。本节选取门审剩余四条 P3 中
+的两条:**P3-2**(`approval-web-guard.yml` 「no duplicates」断言按字面不成立)、**P3-3**(每个审批
+动作新增一次每用户查询、连接池占用 +33% 的成本未记账)。其余两条(P3-7/P3-8)本轮未动,见 §12.3。
+
+### 12.1 P3-2 —— `approval-web-guard.yml` 的「no duplicates」过强断言(纯注释改动,零行为变化)
+
+**先在当前 HEAD 重新机核,不转抄门审报告在旧 head 算出的数字**(该报告绑定的被审 head 是
+`396cd9b92`,本条断言所在的注释块从那以后未被任何 fix round 碰过,但普查动作本身必须对当前 HEAD 重
+做,不能假设行号/数字没变):
+
+```
+$ git grep -n "no duplicates" -- ':!*.md' | wc -l
+32
+```
+32 处命中里,只有 `.github/workflows/approval-web-guard.yml`(改动前行号 `:999`)那一处讨论的是本切
+片新增的三个 token(`todoApi`/`TodoCenterView`/`todoCountsRealtime`);其余 31 处分布在
+`run-required-web-tests.sh`(七处,各自讨论其他、无关切片新增的 token 组)、`.env.example`、多个
+`*.test.ts`/`*.test.mjs`/`*.test.cjs`(讨论各自模块内部的去重不变量),逐一读过标题行确认与本条门审
+发现无关——**只有一处**需要改。
+
+```python
+# 对该 run: 行机械解析(split on whitespace,剥离 "pnpm … vitest run" 前缀与 "--reporter=dot" 后缀)
+# 改动前:
+token count: 106
+literal duplicate pairs: {'approval-condition-summary': 2, 'approval-amount-in-words': 2, 'approval-form-draft': 2}
+```
+三对字面重复继承自更早轮次(不是本切片引入),`vitest run` 对同一个 positional 重复不会重跑两次(inert,
+不是要另修的第二个 bug)。「no duplicates」按字面(整份 106-token 列表零重复)为**假**;唯一有判别力、
+且仍然成立的断言是「三个新 token 互不为对方子串,也不是其余 103 个(含既有重复对)里任意一个的子串
+或反过来」。
+
+**改了什么**:把该注释里「106 after, no duplicates」改写为「106 after.」加一段独立的 CORRECTION,点名
+门审编号 `impl-gate-B2-round1-20260918.md` P3-2,如实陈述上面这条事实,并保留、重申唯一成立的子串
+唯一性断言。**只改注释,`run:` 那一行本身一个字符都没动**——避免「顺手把断言对象也改了」这类事故:
+
+```
+$ git diff --stat .github/workflows/approval-web-guard.yml
+ .github/workflows/approval-web-guard.yml | 11 +++++++++--
+$ git diff .github/workflows/approval-web-guard.yml | grep -E "^\+run:|^-run:"
+(无输出 —— run: 行未被触碰)
+```
+
+**YAML 仍然合法**:
+```
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/approval-web-guard.yml')); print('YAML OK')"
+YAML OK
+```
+
+**改动后用同一脚本对新行号重新机核**(证明本次只是纠正措辞、没有顺手改变实际列表):
+```
+line number of run: 1013   # 原 999,因本条改动自身新增 7 行注释而下移,run: 行内容逐字未变
+token count: 106
+others count (raw, incl. pre-existing dupes): 103
+substring collisions between new tokens and the other 103 (raw list): []
+literal duplicate pairs in full 106-token list: {'approval-condition-summary': 2, 'approval-amount-in-words': 2, 'approval-form-draft': 2}
+```
+与改动前逐字段相同 —— 本条修的是**断言的措辞**,不是列表本身。
+
+**测试,如实说明能证明什么、不能证明什么**:这是纯注释改动,没有可被 mutation 探针辨别的行为——本条
+不发明一个对注释文本零判别力的假探针(呼应门审自己点名的 `feedback_ineffective_mutation_looks_like_a_useless_test`)。
+证据集合是:(a) 上面的 `git diff --stat` + `grep "^+run:|^-run:"` 证明 `run:` 行字节未变;(b) YAML
+parse 通过;(c) 改动前后用同一脚本逐字段核对列表本身未变。**不声称**的事:本轮**未**重跑
+`approval-web-guard` 完整 104-file/1958-test lane(advisory,非 required;且上面(a)(c)已经比一次完整
+重跑更直接地证明「没有动到实际执行内容,只动了旁边的注释」)。
+
+### 12.2 P3-3 —— 每个审批动作新增一次每用户查询、连接池占用 +33% 的成本记账(纯文档改动,无代码变化)
+
+**先重新核实门审报告点名的三处调用点在当前 HEAD 的行号**——门审绑定的 head 是 `396cd9b92`,修复轮 1
+(`c31f928a6`)已经往 `routes/approvals.ts` 加了 9 行(`publishApprovalCountsForUsers` 的 `export` +
+docblock),门审原引用的 `:2387`/`:2965`/`:3123` 在当前 HEAD 必然已经漂移,**不能照抄**:
+
+```
+$ grep -n "publishApprovalCountsForUsers\|client.query('COMMIT')\|client.release()" packages/core-backend/src/routes/approvals.ts
+```
+当前 HEAD 上,`COMMIT` 之后仍持有 `client`、直到稍后 `finally` 里才 `release()` 的三处调用点:
+`:2394`(`COMMIT` 在 `:2391`,`release` 在 `:2416`)、`:2972`(`COMMIT` 在 `:2968`,`release` 在
+`:2993`)、`:3130`(`COMMIT` 在 `:3126`,`release` 在 `:3151`)——与门审指出的同一类形状,只是行号因
+修复轮 1 插入的 9 行而整体下移了约 7 行。
+
+**查询数重新推导(读源码,不转抄门审报告的算术)**:
+- `publishApprovalCountsUpdate` → `buildApprovalCountsUpdatedPayload`(`approval-realtime.ts:73-90`):
+  `Promise.all` 并发 3 次 `computeApprovalPendingCounts`(`sourceSystem` 分别为 `all`/`platform`/
+  `plm`)→ 3 条独立 SQL 往返。
+- `publishTodoCountsUpdate` → `defaultCountPendingForUser` → `pendingSourceRegistry.countPendingForUser`
+  → 当前唯一注册的 source(`approval-pending-source.ts`)的 `countPendingForUser` →
+  `countApprovalPendingForViewer`(`approval-pending-query.ts:137-`)→ 1 条 SQL(含 `NOT EXISTS` 办理
+  节点排除 + 已发布定义 join,即锁 §3 要求复用的那同一份共享谓词)。
+- 因此 `publishApprovalCountsForUsers` 现在对每个 `uniqueUser` 并发发起 **3 + 1 = 4** 条查询(改动前
+  是 3 条)——`(4-3)/3 ≈ +33.3%`,与门审的算术一致(本轮重新推导得出,不是转抄)。
+
+**成本性质,如实说明**:这是设计锁 §4 明文要求的行为(「实时:复用按用户 room,发
+`todo:counts-updated`」),属于 §9/§10.6 已判定的「在范围内的新增」,**不是**待修的 bug——本条记账关
+闭的是「两份 MD 都没写这项成本」这个文档缺口,不是要撤销这条查询或声称已经优化它。
+
+**未做的部分,如实列出(不在本轮声称交付)**:
+- 未做负载测试,没有测过 +33% 这个比例在生产连接池水位下的真实影响。
+- 若未来要收紧,候选方向:(a) 把 todo 的 1 条查询与 approval 的 3 条查询合并成同一次往返(目前是
+  两个独立模块各自发起、互不知道对方);(b) 把 `todo:counts-updated` 的发布做成请求路径外的
+  fire-and-forget 队列,而不是 `publishApprovalCountsForUsers` 的 `Promise.all` 的一部分。两者都不
+  在本轮任务范围,留给 owner 或后续切片裁决。
+
+本条为纯文档记账,`git diff` 只命中本 MD 自身,不涉及代码或 workflow 文件。
+
+### 12.3 本轮仍未处理
+
+- **P3-7**(`todo:counts-updated` 房间/负载是否按 org 隔离未核):需要读 `CollabService.buildAuthenticatedUserRoom`
+  的房间键是否含 org、以及真实换 org 场景下的行为——本轮未做新的调查。
+- **P3-8**(导航入口的范围扩张自陈是否写进 PR body):硬规矩本轮不开 PR,无法把这条写进一个尚不存在
+  的 PR body。补一条待誊抄条款,供下一步真正开 Draft PR 时直接使用(本身**不构成**「已开 PR」或
+  「已完成 P3-8」):
+
+  > **PR body 待写条款(P3-8,门审 `impl-gate-B2-round1-20260918.md`)**:导航入口(commit
+  > `4b3f8f483`,`App.vue:38,:52`)派生自设计锁 §2「前端壳」表最后第 2 行(「中心替换/推广该徽标」),
+  > **不是**锁 §4 前端段的字面条款。理由:页面没有入口就不可达,派生合理,但这是本切片唯一一处超出
+  > 锁 §4 字面范围的改动,如实点名,不在 diff 里悄悄带过。
+
+### 12.4 重跑的闸
+
+本轮零代码 diff,只改了两个文件:`.github/workflows/approval-web-guard.yml` 的一段注释(逐字见
+§12.1,+9/-2)、以及本 MD 自身(逐字数字本节不引用——对自己取 diffstat 会引用一个还没定型的数字,同
+`4e97acd92` 已修过的那个自指陷阱,这里直接避免而不是估算)。零 `apps/web`、零
+`packages/core-backend` 代码文件改动 ⇒ 本轮不需要、也没有重跑 §7 项 1/2/3/5(前端
+spec 组 / 后端默认 vitest / M5-M6 mutation / B-1 真库 project)——那些证据仍以此前各轮的重跑为准,未
+受本轮影响。本轮实际执行、与本轮改动直接相关的检查:
+```
+$ pnpm type-check      # = pnpm -r type-check;apps/web 的 vue-tsc -b + 两个 verification tsconfig,core-backend 的 tsc --noEmit
+EXIT=0
+packages/core-backend type-check: Done
+apps/web type-check: Done
+```
+```
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/approval-web-guard.yml')); print('YAML OK')"
+YAML OK
+```
+`git status --porcelain` 在本节两处改动写完后只剩本轮意图改动的两个路径,无 mutation 或探针残留(本
+轮未做需要 `cp` 备份/还原的代码级 mutation——§12.1/§12.2 均为注释/文档改动,零可执行行为变化,理由见
+各自小节)。
