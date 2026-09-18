@@ -738,7 +738,18 @@ try {
       reserveNonces: async (rows: readonly unknown[]) => { reserved += rows.length },
     }
   }
-  const upload = async () => { throw new Error('SYNTHETIC_SOURCE_UPLOAD_INTERRUPTION') }
+  const upload = async () => {
+    const nonceObserver = new Client({ ...connection, database })
+    await nonceObserver.connect()
+    try {
+      assert.equal((await nonceObserver.query(`SELECT count(*)::int AS n
+        FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1::uuid`,
+      [first.owner.generationId])).rows[0].n, 10, 'reservations must be committed before upload')
+    } finally { await nonceObserver.end() }
+    throw new Error('SYNTHETIC_SOURCE_UPLOAD_INTERRUPTION')
+  }
+  const nonceCount = async (generationId: string) => (await query(`SELECT count(*)::int AS n
+    FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1::uuid`, [generationId])).rows[0].n
   try {
     await assert.rejects(manual({ ...first, source: null, capture, upload }),
       { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE' })
@@ -762,7 +773,8 @@ try {
       { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE' })
     await assert.rejects(manual({ ...first, capture, upload }), { message: 'SYNTHETIC_SOURCE_UPLOAD_INTERRUPTION' })
     assert.equal(produced, 1)
-    assert.equal(reserved, 10)
+    assert.equal(reserved, 0, 'caller-owned reservation callback must never run')
+    assert.equal(await nonceCount(first.owner.generationId), 10)
     const captureCount = captures
     let resumedSections = 0
     await manual({ ...first, source: null, capture: async () => { throw new Error('SYNTHETIC_RECAPTURE_FORBIDDEN') },
@@ -780,7 +792,22 @@ try {
     assert.equal(resumedSections, 10)
     assert.equal(captures, captureCount)
     assert.equal(produced, 1)
-    assert.equal(reserved, 10)
+    assert.equal(reserved, 0)
+    assert.equal(await nonceCount(first.owner.generationId), 10)
+    const conflict = await continuation()
+    const conflictPlan = await capture(manualAdmission.readRecoveryArchiveManualSource(conflict.source))
+    conflictPlan.binding = conflict.binding
+    const last = conflictPlan.sections.at(-1)!
+    const fingerprint = createHmac('sha256', sourceKey).update(archiveCrypto.RECOVERY_ARCHIVE_DEK_FINGERPRINT_DOMAIN).digest('hex')
+    await query(`SELECT meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,$5,1)`,
+      [fingerprint, last.nonce.toString('hex'), conflict.owner.generationId, last.sectionName, 'aes-256-gcm'])
+    let conflictUploads = 0
+    await assert.rejects(manual({ ...conflict, capture: async () => conflictPlan,
+      upload: async () => { conflictUploads++ } }), { message: 'RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED' })
+    assert.equal(conflictUploads, 0)
+    assert.equal(await nonceCount(conflict.owner.generationId), 1, 'earlier nine reservations must roll back')
+    assert.equal(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, conflict.owner)), null)
+    console.log('PASS: server-owned ten-row nonce transaction; caller sink ignored; last-row conflict rolls back earlier nine, no prepared ciphertext/upload; resume keeps original reservations')
   } finally { sourceKey.fill(0) }
   console.log('PASS: source generation binding and single use; tampered relational plaintext refused before custody; interrupted first seal resumes ten authenticated original sections without source or recapture')
   await query(`INSERT INTO multitable_attachments

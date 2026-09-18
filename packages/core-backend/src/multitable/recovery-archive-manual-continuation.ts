@@ -4,7 +4,7 @@ import {
   type RecoveryArchivePreparedUploadInput,
 } from './recovery-archive-prepared-upload'
 import type { SealQuery } from './recovery-archive-seals'
-import { bindRecoveryArchiveManualSourceRecheck, takeRecoveryArchiveManualSource,
+import { bindRecoveryArchiveManualSourceRecheck, bindRecoveryArchiveManualNonceReservation, takeRecoveryArchiveManualSource,
   type RecoveryArchiveManualSource } from './recovery-archive-manual-admission'
 import type { RecoveryArchiveCaptureSource } from './recovery-archive-relational-source'
 import { buildRecoveryArchiveSectionRows } from './recovery-archive-section-rows'
@@ -52,7 +52,8 @@ export function bindRecoveryArchiveManualContinuation(
           }
         }
         await recheckSource(source)
-        return { ...proposed, binding: { ...proposed.binding }, sections }
+        return { ...proposed, binding: { ...proposed.binding }, sections,
+          reserveNonces: bindRecoveryArchiveManualNonceReservation(transaction, authorize, source) }
       },
       transactionDepth: input.transactionDepth, transaction,
       checkAuthority: async () => {

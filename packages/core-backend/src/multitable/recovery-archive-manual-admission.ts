@@ -12,6 +12,8 @@ import { readRecoveryArchiveCaptureSource, type RecoveryArchiveCaptureSource } f
 import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
 import { readRecoveryArchivePreparedCapture, type RecoveryArchivePreparedCaptureOwner } from './recovery-archive-prepared-capture'
 import { claimRecoveryArchiveSourcePinIntent } from './recovery-archive-source-pin'
+import type { RecoveryArchiveNonceReservationSink } from './recovery-archive-crypto'
+import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from './recovery-archive-contract'
 
 const sourceBrand = Symbol('manual-capture-source')
 export interface RecoveryArchiveManualSource { readonly [sourceBrand]: true }
@@ -27,6 +29,7 @@ const sources = new WeakMap<RecoveryArchiveManualSource, {
   hash: string
   binding: RecoveryArchivePreparedUploadInput['binding']
   consumed: boolean
+  keyRowVersion: string
 }>()
 
 function sourceHash(source: RecoveryArchiveCaptureSource): string {
@@ -62,19 +65,52 @@ export function bindRecoveryArchiveManualSourceRecheck(
   authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
 ) {
   return async (source: RecoveryArchiveManualSource): Promise<void> => {
-    const entry = sources.get(source)
-    if (!entry) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+    await transaction(async (query) => { await recheckManualSource(query, source, authorize) })
+  }
+}
+
+async function recheckManualSource(
+  query: SealQuery, source: RecoveryArchiveManualSource,
+  authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
+) {
+  const entry = sources.get(source)
+  if (!entry) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
+  await acquireCanonicalSheetFence(query, entry.identity.sheetId)
+  await lockActiveRecoveryArchiveKeyForReference(query, {
+    keyId: entry.binding.keyId, expectedRowVersion: entry.keyRowVersion,
+  })
+  let allowed = false
+  try { allowed = await authorize(query, entry.identity) } catch {
+    throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
+  }
+  if (!allowed) throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
+  await assertNoActiveWriterBlock(query, entry.identity.sheetId)
+  await readRecoveryArchivePreparedCapture(query, entry.owner)
+  const current = await readRecoveryArchiveCaptureSource(query, entry.identity)
+  if (sourceHash(current) !== entry.hash) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED')
+  return entry
+}
+
+/** Server-owned atomic nonce sink. Never delegates reservation authority to a capture callback. */
+export function bindRecoveryArchiveManualNonceReservation(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
+  source: RecoveryArchiveManualSource,
+): RecoveryArchiveNonceReservationSink {
+  return async (input) => {
+    const rows = input.map((row) => ({ ...row }))
     await transaction(async (query) => {
-      await acquireCanonicalSheetFence(query, entry.identity.sheetId)
-      let allowed = false
-      try { allowed = await authorize(query, entry.identity) } catch {
-        throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
+      const entry = await recheckManualSource(query, source, authorize)
+      if (!entry.consumed || rows.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length
+        || rows.some((row, index) => row.sectionName !== RECOVERY_ARCHIVE_V1_SECTION_NAMES[index]
+          || row.generationId !== entry.binding.generationId || row.formatVersion !== entry.binding.formatVersion
+          || row.aeadAlgorithm !== entry.binding.aeadAlgorithm || row.dekFingerprint !== rows[0]!.dekFingerprint)) {
+        throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_BINDING_MISMATCH')
       }
-      if (!allowed) throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
-      await assertNoActiveWriterBlock(query, entry.identity.sheetId)
-      await readRecoveryArchivePreparedCapture(query, entry.owner)
-      const current = await readRecoveryArchiveCaptureSource(query, entry.identity)
-      if (sourceHash(current) !== entry.hash) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED')
+      try {
+        for (const row of rows) await query(`SELECT public.meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,$5,$6)`,
+          [row.dekFingerprint, row.nonceHex, row.generationId, row.sectionName, row.aeadAlgorithm, row.formatVersion])
+      } catch { throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_RESERVATION_REFUSED') }
     })
   }
 }
@@ -163,7 +199,7 @@ export function bindRecoveryArchiveManualAdmission(
       const source: RecoveryArchiveManualSource = Object.freeze({ [sourceBrand]: true as const })
       sources.set(source, { identity, owner: { generationId, ownerKind: plan.ownerKind,
         ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot),
-      consumed: false, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
+      consumed: false, keyRowVersion: policy.keyRowVersion, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
         baseId: identity.baseId, sheetId: identity.sheetId, anchorOperationId: allocated.snapshotOperationId,
         anchorSeq: allocated.snapshotSeq, checkpointId, keyId: policy.keyId, aeadAlgorithm: 'aes-256-gcm' } })
       return { generationId, replayed: false, source }

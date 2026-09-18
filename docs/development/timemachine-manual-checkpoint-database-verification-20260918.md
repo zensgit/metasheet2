@@ -506,3 +506,35 @@ for the exact unavailable code. Restored final acceptance passes on merge
 are removed on both results. Source/source-pin wiring/worker unit tests: 57/57;
 acceptance TypeScript, scoped lint, static wiring 37/37 and full S5 pass. Logs:
 `/private/tmp/tm-manual-purged-{final,mutation,unit,wiring,s5}.log`.
+
+## Server-Owned Nonce Reservation
+
+Local bounded delta from `21c5ac49ec8136a5db26ca4d8e43db0cbc52430a` replaces
+the caller's reservation callback with the manual continuation's transactional sink.
+The existing nonce registry remains authoritative. The synthetic driver proves:
+
+- The caller-owned callback is never invoked; exactly ten registry rows exist.
+- An independent connection inside the first upload callback sees all ten committed
+  rows. Interrupted upload resumes the original prepared sections without another
+  capture, DEK or reservation.
+- Pre-inserting the final section reservation makes capture fail with the existing
+  values-free `RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED`. The first nine inserts
+  roll back, the original conflict row remains, and no prepared envelope or upload
+  is produced. Existing crypto unit coverage supplies reserve-before-seal ordering;
+  this DB test does not independently instrument AES calls.
+- Restoring the caller-owned sink is a discriminating mutation: the exact callback
+  assertion fails (`10 !== 0`). Restoring the implementation returns the full driver
+  to green. The initial conflict test used an incorrect expected error-code spelling;
+  that test expectation was corrected to the existing crypto contract.
+
+Final owned-cluster acceptance passes, including the 30-migration replay and earlier
+DB neighbors. Database/connections are zero and the owned cluster is removed.
+Worker/crypto unit tests pass 73/73; acceptance TypeScript, production-file ESLint
+and static wiring 37/37 pass. Logs are local evidence only:
+`/private/tmp/tm-manual-nonce-{final,mutation,unit,s5}.log`.
+
+This checkpoint does not claim fresh remote CI or then-current-main equivalence.
+PR #5849's preceding head had one cloud schema-gate timeout; it is not classified
+as a flake. Source seals, immutable attachment copy, object receipts and catalog
+publication remain separate incomplete gates. No customer storage, flags or
+deployment are involved.

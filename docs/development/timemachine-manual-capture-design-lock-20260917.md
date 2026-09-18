@@ -303,3 +303,20 @@ source requirements remain in force: missing, mutable-without-version or driftin
 sources cannot produce a verified archive. The archive object-store's exclusive
 destination writes do not establish immutability of the source. Source capability
 admission and encrypted copy/receipt integration remain open, not silently waived.
+
+### Durable Nonce Authority
+
+Manual continuation replaces the capture callback's nonce sink with its own
+transactional sink. The private source handle retains the admitted key row version.
+The sink reacquires the canonical sheet fence, locks the exact active key version,
+rechecks current scope authority, writer exclusion, owner/lease and source digest,
+then reserves exactly ten ordered sections through the existing
+`meta_recovery_archive_reserve_nonce` function. All entries must match the source
+generation/format/algorithm and one DEK fingerprint. Failure rolls back the entire
+batch. The crypto engine cannot seal until this transaction has returned committed.
+
+The existing permanent nonce registry and generation/section uniqueness remain the
+authority; no new registry, nonce deletion or duplicate-as-success retry is added.
+Prepared ciphertext resumes without another reservation. Source handles still cannot
+be recreated for a generation whose plaintext was lost. This does not yet complete
+source sealing, immutable attachment copy, object receipts or catalog publication.
