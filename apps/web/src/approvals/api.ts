@@ -466,6 +466,35 @@ export async function reorderApprovalTemplateGroups(
 }
 
 /**
+ * Approval form grouping lock v2.13 §2 "挂接(首次与重新)是同一条原子 upsert" — link (or re-link) a
+ * template to a group; the route always 201s on success and 404s `GROUP_NOT_FOUND` / 409s
+ * `GROUP_ARCHIVED` on the stale-target races `TemplateGroupSections.vue`'s move-to-group control
+ * surfaces inline (same non-blocking-error convention as `reorderApprovalTemplateGroups` above —
+ * neither wrapper here parses the response body's error code, only `apiPost`'s generic
+ * `API error: <status> <statusText>` message, matching every other write call in this file).
+ */
+export async function linkApprovalTemplateToGroup(templateId: string, groupId: string): Promise<void> {
+  if (USE_MOCK) return
+  await apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/group`, { groupId })
+}
+
+/**
+ * Approval form grouping lock v2.13 §2 "解除关联...是一条独立 UPDATE" — idempotent 204 whether the
+ * template was linked, already unlinked, or never linked at all (acceptance H). No `apiDelete`
+ * helper exists in `utils/api.ts` (every other write in this file is a POST), so this calls
+ * `apiFetch` directly with `method: 'DELETE'` and never attempts to parse the empty 204 body.
+ */
+export async function unlinkApprovalTemplateFromGroup(templateId: string): Promise<void> {
+  if (USE_MOCK) return
+  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}/group`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`)
+  }
+}
+
+/**
  * Wave 2 WP4 slice 1 — update a template's category inline. Thin PATCH
  * wrapper; we do not expose a generic `updateTemplate` because slice 1 only
  * touches category, not the form/graph.

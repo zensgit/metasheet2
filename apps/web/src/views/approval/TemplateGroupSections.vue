@@ -13,6 +13,38 @@
   无排序") and only `group:` sections carry these controls (`ungrouped`/`category:<name>` are not
   ordered rows).
 
+  §6 表第 3 行's "拖拽归组" (drag templates into groups) is implemented here as a per-item
+  keyboard-operable `<select>` ("移动到…"), NOT native HTML5 drag-and-drop — same deliberate
+  substitution and rationale as the group-order buttons above (equal-or-wider input coverage,
+  consistent with this file's one prior precedent, named explicitly here so it does not need to be
+  re-derived). Calls the phase-1 link/unlink endpoints (`linkApprovalTemplateToGroup` /
+  `unlinkApprovalTemplateFromGroup`, real-DB tested since phase 1's B/B′/B″/H) — NOT the two
+  write-face forms, which is I4 and stays deferred (see above). Target-set rules (`moveTargetsFor`
+  below), each one closing a distinct correctness trap:
+  - Targets are the CURRENTLY RENDERED `group:` sections only (never a live re-fetch mid-select) —
+    same acceptable staleness as the reorder permutation above (a target archived by someone else
+    between load and click surfaces as the endpoint's own 409 `GROUP_ARCHIVED`, handled identically
+    to a failed reorder: non-blocking inline error, row left exactly where it was).
+  - "未分组" is offered ONLY from a `group:<id>` section. Offering it from `ungrouped` is a no-op by
+    definition; offering it from a `category:<name>` section would silently do nothing useful too —
+    unlink's `WHERE … AND group_id IS NOT NULL` matches 0 rows for a template that was NEVER
+    linked (I2′), so no link row is created, `NOT EXISTS` stays true, and the row would (correctly)
+    stay under its category — but a UI that showed a success state for that would be lying about
+    having moved anything.
+  - Moving the LAST row out of a `category:<name>` section removes that section from `sections`
+    entirely (same "drop when `total` hits 0" invariant `loadAll()` already applies to candidates —
+    applied here too so a move cannot leave a stale zero-row candidate section on screen).
+
+  Neither this control nor the group-order buttons above are gated on `canManageTemplates` in this
+  component — both rely on the routes' own `approvalTemplateAdminGuard` (I7) to fail closed with a
+  403 surfaced the same way as any other request error. This is a deliberate, matched choice for
+  BOTH write controls in this file (not a per-control judgment call) — gating one but not the other
+  would split a guard across sibling surfaces in the same component. Gating client-side would also
+  require this file to depend on `useApprovalPermissions()`, which the isolation note below (and
+  `approvalTemplateCenterSections.spec.ts`'s own header comment) currently states this file does
+  NOT need; adding it is a legitimate follow-up but changes what every existing test in that spec
+  has to mock, so it is out of scope for this addition.
+
   Kept as its OWN component (not folded into TemplateCenterView.vue) so the existing flat-table /
   gallery paths and their specs (`approvalTemplateCenterCategory.spec.ts`, `templateCenterI18n.spec.ts`)
   are untouched — this file is mounted only when the parent's `viewMode` is 'grouped' (default
@@ -60,6 +92,13 @@
       >
         {{ reorderError }}
       </div>
+      <div
+        v-if="moveError"
+        class="template-group-sections__reorder-error"
+        data-testid="template-group-sections-move-error"
+      >
+        {{ moveError }}
+      </div>
       <section
         v-for="section in sections"
         :key="section.token"
@@ -106,7 +145,24 @@
             :data-testid="`template-group-section-item-${item.id}`"
             @click="emit('select', item.id)"
           >
-            {{ item.name }}
+            <span class="template-group-sections__item-name">{{ item.name }}</span>
+            <select
+              v-if="moveTargetsFor(section.token).length > 0"
+              class="template-group-sections__move-select"
+              :data-testid="`template-group-section-move-${item.id}`"
+              :aria-label="t.groupItemMoveLabel"
+              :disabled="movingItemId === item.id"
+              :value="''"
+              @click.stop
+              @change="onMoveItem(section, item, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="" disabled>{{ t.groupItemMovePlaceholder }}</option>
+              <option
+                v-for="target in moveTargetsFor(section.token)"
+                :key="target.token"
+                :value="target.token"
+              >{{ target.label }}</option>
+            </select>
           </li>
         </ul>
         <p v-else class="template-group-sections__empty">{{ t.groupSectionEmpty }}</p>
@@ -132,10 +188,12 @@ import type {
   ApprovalTemplateStatus,
 } from '../../types/approval'
 import {
+  linkApprovalTemplateToGroup,
   listApprovalTemplateGroups,
   listTemplateCategories,
   listTemplatesBySection,
   reorderApprovalTemplateGroups,
+  unlinkApprovalTemplateFromGroup,
 } from '../../approvals/api'
 import { useLocale } from '../../composables/useLocale'
 import { ZH, EN } from './templateCenterLabels'
@@ -170,6 +228,7 @@ interface SectionState {
 
 const PAGE_SIZE = 10
 const GROUP_TOKEN_PREFIX = 'group:'
+const UNGROUPED_TOKEN = 'ungrouped'
 
 const loadingGroups = ref(false)
 const loadError = ref<string | null>(null)
@@ -181,6 +240,12 @@ const sections = ref<SectionState[]>([])
 // a second click cannot race the first against the same L0 critical section.
 const reorderError = ref<string | null>(null)
 const reorderingToken = ref<string | null>(null)
+
+// Item-to-group assignment (§6 表第 3 行 "拖拽归组") — see header comment. Same non-blocking-error /
+// single-in-flight-guard convention as the group-order controls above, scoped per ITEM rather than
+// per section since a move only ever touches one row.
+const moveError = ref<string | null>(null)
+const movingItemId = ref<string | null>(null)
 
 function isGroupToken(token: string): boolean {
   return token.startsWith(GROUP_TOKEN_PREFIX)
@@ -318,6 +383,72 @@ function applyGroupOrder(results: ApprovalTemplateGroupReorderResultDTO[]): void
   sections.value = [...groupSections, ...otherSections]
 }
 
+/**
+ * Valid move-to-group targets for an item currently in `currentToken` (§6 表第 3 行 "拖拽归组" —
+ * see header comment for the full rationale). Every `group:<id>` section OTHER than the item's own
+ * is always offered; "未分组" is offered ONLY when `currentToken` is itself a `group:<id>` section
+ * (unlinking from `ungrouped`/`category:<name>` is a no-op — see header comment). Drawn from
+ * `sections.value`, not a live re-fetch — same acceptable staleness as `groupTokenOrder` above.
+ */
+function moveTargetsFor(currentToken: string): { token: string; label: string }[] {
+  const groupTargets = sections.value
+    .filter((s) => isGroupToken(s.token) && s.token !== currentToken)
+    .map((s) => ({ token: s.token, label: s.title }))
+  if (isGroupToken(currentToken)) {
+    return [{ token: UNGROUPED_TOKEN, label: t.value.categoryEmpty }, ...groupTargets]
+  }
+  return groupTargets
+}
+
+/**
+ * Moves `item` (currently rendered in `section`) to `targetToken` — `unlinkApprovalTemplateFromGroup`
+ * for `ungrouped`, `linkApprovalTemplateToGroup` for a `group:<id>` target (the same atomic upsert
+ * §2 uses for both first-link and re-link, so this one call covers moving OUT of `ungrouped` /
+ * `category:<name>` too). On success the item is removed from `section` locally (no re-fetch of
+ * either section — same "position/membership changes, not re-fetched" convention as group-order
+ * moves) and, if the target section is currently rendered, its `total`/`hasMore` are bumped (the
+ * moved item is NOT inserted into the target's already-loaded `items` — it may not belong on that
+ * page; `loadMore`/a future `loadAll()` will surface it). A `category:<name>` section emptied by
+ * this move is dropped from `sections` entirely (same 0-total-candidate rule as `loadAll()`). A
+ * failed move is a NON-blocking inline error (`moveError`) — the row is left exactly where it was.
+ */
+async function onMoveItem(
+  section: SectionState,
+  item: ApprovalTemplateListItemDTO,
+  targetToken: string,
+): Promise<void> {
+  if (!targetToken || targetToken === section.token || movingItemId.value !== null) return
+  moveError.value = null
+  movingItemId.value = item.id
+  try {
+    if (targetToken === UNGROUPED_TOKEN) {
+      await unlinkApprovalTemplateFromGroup(item.id)
+    } else {
+      await linkApprovalTemplateToGroup(item.id, targetToken.slice(GROUP_TOKEN_PREFIX.length))
+    }
+    applyItemMove(section, item, targetToken)
+  } catch (e: any) {
+    moveError.value = e?.message ?? t.value.groupItemMoveError
+  } finally {
+    movingItemId.value = null
+  }
+}
+
+function applyItemMove(section: SectionState, item: ApprovalTemplateListItemDTO, targetToken: string): void {
+  section.items = section.items.filter((i) => i.id !== item.id)
+  section.total = Math.max(0, section.total - 1)
+  section.hasMore = section.items.length < section.total
+  if (!section.alwaysShow && section.total === 0) {
+    sections.value = sections.value.filter((s) => s.token !== section.token)
+  }
+
+  const target = sections.value.find((s) => s.token === targetToken)
+  if (target) {
+    target.total += 1
+    target.hasMore = target.items.length < target.total
+  }
+}
+
 defineExpose({ loadAll })
 
 onMounted(loadAll)
@@ -401,13 +532,37 @@ onMounted(loadAll)
 }
 
 .template-group-sections__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-2, 8px);
   padding: 6px 4px;
-  cursor: pointer;
   border-radius: 4px;
 }
 
 .template-group-sections__item:hover {
   background: var(--el-fill-color-light, #f5f7fa);
+}
+
+.template-group-sections__item-name {
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+
+.template-group-sections__move-select {
+  font-size: 12px;
+  color: var(--ms-text-2);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 4px;
+  background: var(--ms-bg-1, #fff);
+  padding: 2px 4px;
+  max-width: 140px;
+}
+
+.template-group-sections__move-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .template-group-sections__empty {
