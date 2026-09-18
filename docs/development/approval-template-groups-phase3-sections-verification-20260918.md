@@ -576,7 +576,22 @@ $ grep -rn "必须加.*pageSize\|pageSize.*必须" docs/development apps/web/tes
 
 ### 14.11 本轮改动范围(`git diff --stat`)
 
-见 PR/commit 附带的 `git diff --stat <本轮起点>..HEAD`(仓根目录执行,起点 = rebase 完成、push 之前的 head)——改动文件限定为:两个测试文件(`packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts`、`apps/web/tests/approvalTemplateCenterCategory.spec.ts`)与本验证 MD(`docs/development/approval-template-groups-phase3-sections-verification-20260918.md`)三个文件,零生产代码改动,零 workflow 改动,零迁移。
+起点 = rebase-onto-phase1 完成、push 之前的 head `aad08d275168c127d4d66758a3bc0977654f8e56`(与本文档 §13 记录的 HEAD `bdcdfebc4` 之后、rebase 之后的最新一次提交一致)。命令(仓根目录):
+
+```
+$ git diff --stat aad08d275..HEAD
+```
+
+本节写入之前一刻的实测输出(与本段落自身、以及本段落之后 §14.12 的收尾复核记录一并构成本文档自己的提交,故此处的数字**不包含本次文档编辑自身**——同 §1.4 对自引用行号问题的处理方式一致,不把文档正在记录的这次改动算进它自己描述的范围):
+
+```
+ .../tests/approvalTemplateCenterCategory.spec.ts   |  21 ++
+ ...groups-phase3-sections-verification-20260918.md | 120 ++++++++++++++++++++-
+ .../approval-template-groups-reorder.db.test.ts    |  27 ++++-
+ 3 files changed, 166 insertions(+), 2 deletions(-)
+```
+
+三个文件:两个测试文件(`packages/core-backend/tests/integration/approval-template-groups-reorder.db.test.ts`、`apps/web/tests/approvalTemplateCenterCategory.spec.ts`)与本验证 MD 自身——零生产代码改动、零 workflow 改动、零迁移、零新文件、零重命名。`git diff --name-only aad08d275..HEAD -- packages/core-backend/src apps/web/src '.github/workflows' 'packages/core-backend/src/db/migrations'` 现场核对为**零命中**,机械确认上一句不是自述。
 
 ### 14.12 本轮全绿复核(处女库 `ms2_a4_p3hygiene_20260919`,用完 `dropdb`)
 
