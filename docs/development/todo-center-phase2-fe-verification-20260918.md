@@ -709,11 +709,31 @@ $ git status --porcelain
 $ git grep -n "no duplicates" -- ':!*.md' | wc -l
 32
 ```
-32 处命中里,只有 `.github/workflows/approval-web-guard.yml`(改动前行号 `:999`)那一处讨论的是本切
-片新增的三个 token(`todoApi`/`TodoCenterView`/`todoCountsRealtime`);其余 31 处分布在
-`run-required-web-tests.sh`(七处,各自讨论其他、无关切片新增的 token 组)、`.env.example`、多个
-`*.test.ts`/`*.test.mjs`/`*.test.cjs`(讨论各自模块内部的去重不变量),逐一读过标题行确认与本条门审
-发现无关——**只有一处**需要改。
+32 处命中里,逐一读过标题行/上下文,**只有** `.github/workflows/approval-web-guard.yml`(改动前行号
+`:999`)那一处讨论的是本切片新增的三个 token(`todoApi`/`TodoCenterView`/`todoCountsRealtime`)——
+其余 31 处各自讨论别的、无关模块的去重不变量(分布在 `.ts`/`.mjs`/`.cjs`/`.sh` 多种文件里,不逐一列
+文件形状,以免把「只有一处相关」这句机核结论绑到一份可能漏项的分类枚举上)。**只有一处**需要改。
+
+**旁证:`run-required-web-tests.sh` 是否有第二处针对同三个 token 的「no duplicates」断言**——它在
+`:1182` 有一句相邻的「... over all 490 parsed tokens (no duplicates) ...」,但读上下文(`:1178-1184`)
+确认那是**另一个**、更早(`roleManagementSave`)token 加入时的时点快照,不覆盖之后追加的
+`categoryCandidateInput`/`todoApi`/`TodoCenterView`/`todoCountsRealtime` 四个 token,不构成第二处
+需要修的断言。对**当前 HEAD** 该 exec 行(`:1186`)重新机核(丢弃 `exec`/`npx`/`vitest`/`run`/
+`--reporter=dot` 五个字面 token,不假设它们只出现在首尾——该行 `--reporter=dot` 之后仍有 4 个测试
+名 positional):
+```
+token count (excl skip): 396   dupes: {}
+substring collisions between the 4 newest tokens and the other 392: []
+```
+与门审 §4.4 在旧 head 上算出的「396/[]」逐字一致——这条文件里没有需要修的假断言。
+
+**旁证:`approval-ci-coverage-enumeration.test.ts` 是否解析 `approval-web-guard.yml` 的内容/行号**
+——机核该文件自己的文档字符串「W3(`approval-web-guard.yml`)deliberately NOT parsed」(`:60`),并
+重跑确认本条改动没有让它转红:
+```
+$ cd packages/core-backend && npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot
+ Test Files  1 passed (1) / Tests  343 passed (343)
+```
 
 ```python
 # 对该 run: 行机械解析(split on whitespace,剥离 "pnpm … vitest run" 前缀与 "--reporter=dot" 后缀)
@@ -745,7 +765,8 @@ YAML OK
 
 **改动后用同一脚本对新行号重新机核**(证明本次只是纠正措辞、没有顺手改变实际列表):
 ```
-line number of run: 1013   # 原 999,因本条改动自身新增 7 行注释而下移,run: 行内容逐字未变
+line number of run: 1013   # 改动前 run: 行在 1006(注释块起点在 999);本条改动在注释块内新增 7 行,
+                           # 使 run: 行下移到 1013,run: 行内容逐字未变
 token count: 106
 others count (raw, incl. pre-existing dupes): 103
 substring collisions between new tokens and the other 103 (raw list): []
