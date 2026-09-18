@@ -1,6 +1,7 @@
 <template>
   <div class="meta-notif-bell" data-test="notification-bell">
     <button
+      ref="btnRef"
       type="button"
       class="meta-notif-bell__btn"
       :class="{ 'meta-notif-bell__btn--attention': hasUnread }"
@@ -11,7 +12,12 @@
       🔔 {{ l('notification.bell') }}
       <span v-if="hasUnread" class="meta-notif-bell__badge" data-test="notification-bell-badge">{{ unreadCount }}</span>
     </button>
-    <div v-if="open" class="meta-notif-bell__panel" data-test="notification-panel">
+    <div
+      v-if="open"
+      class="meta-notif-bell__panel"
+      :class="{ 'meta-notif-bell__panel--align-left': alignLeft }"
+      data-test="notification-panel"
+    >
       <div class="meta-notif-bell__head">
         <span class="meta-notif-bell__title">{{ l('notification.title') }}</span>
         <MtLink
@@ -71,6 +77,9 @@ const { notifications, unreadCount, loading, error, hasUnread, eventLabel, loadI
   useNotificationInbox(props.apiClient)
 
 const open = ref(false)
+const alignLeft = ref(false)
+const btnRef = ref<HTMLButtonElement | null>(null)
+const PANEL_WIDTH = 320
 
 function formatTime(value: string): string {
   if (!value) return ''
@@ -80,7 +89,16 @@ function formatTime(value: string): string {
 
 async function toggle(): Promise<void> {
   open.value = !open.value
-  if (open.value) await loadInbox({ limit: 50 })
+  if (open.value) {
+    const rect = btnRef.value?.getBoundingClientRect()
+    // In SSR/jsdom environments without layout, the rect collapses to all
+    // zeros — treat that as "no measurement available" and keep the
+    // default right-anchored alignment rather than misreading it as
+    // overflowing the left edge.
+    const hasLayout = !!rect && !(rect.width === 0 && rect.right === 0)
+    alignLeft.value = hasLayout ? rect!.right - PANEL_WIDTH < 8 : false
+    await loadInbox({ limit: 50 })
+  }
 }
 
 async function onItemClick(n: MetaRecordSubscriptionNotification): Promise<void> {
@@ -113,7 +131,8 @@ scheduleIdle(() => {
 .meta-notif-bell { position: relative; display: inline-block; }
 .meta-notif-bell__btn { position: relative; }
 .meta-notif-bell__badge { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: #ef4444; color: #fff; font-size: 11px; line-height: 16px; text-align: center; }
-.meta-notif-bell__panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: 320px; max-height: 420px; overflow-y: auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); }
+.meta-notif-bell__panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: 320px; max-width: calc(100vw - 16px); max-height: 420px; overflow-y: auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); }
+.meta-notif-bell__panel--align-left { left: 0; right: auto; }
 .meta-notif-bell__head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
 .meta-notif-bell__title { font-weight: 600; color: #0f172a; }
 /* .meta-notif-bell__mark-all: its only sharer is now <MtLink> (UI-P2-1c T3); the bespoke #2563eb text
