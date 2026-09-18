@@ -434,7 +434,9 @@ export async function storeAttachment(
   const extension = path.extname(file.originalname || '')
   const storageFilename = `${randomUUID()}${extension}`
 
-  const uploaded = await storage.upload(file.buffer, {
+  const upload = archiveSourceProtectionEnabled()
+    ? storage.uploadContentAddressed.bind(storage) : storage.upload.bind(storage)
+  const uploaded = await upload(file.buffer, {
     filename: storageFilename,
     contentType: file.mimetype,
     path: path.join(sheetId, fieldId ?? 'unassigned'),
