@@ -64,6 +64,7 @@ import {
 } from '../services/approval-bridge-types'
 import { sanitizeCsvRow, CSV_LINE_TERMINATOR } from '../services/csv-cell'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
+import { publishTodoCountsUpdate } from '../services/todo-realtime'
 import {
   searchDirectoryUsers,
   listDirectoryRoles,
@@ -479,13 +480,27 @@ async function publishApprovalCountsForUsers(
     uniqueUsers.set(userId, user.roles ?? [])
   }
 
-  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => publishApprovalCountsUpdate({
-    injector: options?.injector,
-    logger,
-    userId,
-    roles,
-    reason,
-  })))
+  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => Promise.all([
+    publishApprovalCountsUpdate({
+      injector: options?.injector,
+      logger,
+      userId,
+      roles,
+      reason,
+    }),
+    // todo-center-design-lock v2.14 §3/§4: reuses `pendingSourceRegistry.countPendingForUser` — the
+    // SAME query `GET /api/todo/count` reads — never a second copy of the pending predicate. See
+    // `services/todo-realtime.ts`'s docblock for why this is NOT the P1-1 mistake B-1's fix-round
+    // removed (that version was wired onto `approval-realtime.ts`'s divergent
+    // `computeApprovalPendingCounts` instead).
+    publishTodoCountsUpdate({
+      injector: options?.injector,
+      logger,
+      userId,
+      roles,
+      reason,
+    }),
+  ])))
 }
 
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {
