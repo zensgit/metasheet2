@@ -46,15 +46,13 @@ import { query } from '../../src/db/pg'
  *       `index + 1`) → the happy-path test's exact `{id, sortOrder}` assertions catch the
  *       off-by-one directly.
  *
- * DISCLOSED RESIDUAL (carried forward from the sections file, same reason): no dedicated
- * `*-ci-wiring.test.mjs` closed-world guard exists for this feature's `.db.test.ts` family —
- * `grep -rl "approval-template-groups-lifecycle" --include=*.ts --include=*.mjs --include=*.yml .`
- * (run 2026-09-18, excluding node_modules) returns exactly the three files that ALREADY carry the
- * two-point wiring (`vitest.config.ts`, `plugin-tests.yml`, and the sibling `.db.test.ts` files'
- * own header prose) and no fourth guard file. Building one requires its own additional
- * `plugin-tests.yml` step (guards are matched by an explicit `run:` invocation, not
- * auto-discovered) — out of this slice's scope for the same reason the two earlier phase-3/phase-1
- * files gave.
+ * RESIDUAL CLOSED (2026-09-18, same day as disclosure): the missing `*-ci-wiring.test.mjs`
+ * closed-world guard for this feature's `.db.test.ts` family now exists —
+ * `scripts/ops/approval-template-groups-ci-wiring.test.mjs`, modeled whole on
+ * `t2-source-freeze-ci-wiring.test.mjs` (step-id-anchored, executability-pinned, on-disk-existence
+ * checked), covering all four files (both phase-1 originals and both phase-3 additions) — wired
+ * into `plugin-tests.yml`'s required no-DB `test` job as its own `node --test` step, with the
+ * `pluginTestsWorkflow` s6a pin recomputed in the same commit.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const EXPECT_DB = process.env.EXPECT_DB === '1'
