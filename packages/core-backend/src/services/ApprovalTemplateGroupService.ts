@@ -241,9 +241,22 @@ function newGroupId(): string {
  * so is reusing it for the two pre-existing `*_org_nonblank` entries above — a pre-existing
  * imprecision this change does not introduce or widen) but matches this file's own stated
  * convention for org-column CHECKs: a typed, if generically-worded, 400 rather than a DB leak.
- * Unreachable in production today for the SAME reason as the two org entries above (route layer
- * 403s a blank `req.authenticatedTenantId` first, and every org id already IN the database is
- * ASCII) — this is depth-of-defense consistency across A-3's own table, not a live-path fix.
+ * Unreachable in production today for the SAME reason as the two org entries above, with one
+ * caveat this comment previously overstated (round-2 gate P3-6, `impl-gate-A3-round2-20260918.md`
+ * §7 item 6): `resolveApprovalTemplateGroupOrgId` (`routes/approvals.ts`) only GUARANTEES
+ * `authenticatedTenantId.trim().length > 0` (non-blank) before any call into this file — it does
+ * NOT guarantee ASCII. "Every org id already in the database is ASCII" is an OPERATIONAL
+ * OBSERVATION about today's data (org ids are provisioned as UUIDs/slugs, never free text), not a
+ * mechanically-checked invariant enforced anywhere in this code path — an org id composed
+ * ENTIRELY of non-printable-ASCII characters (e.g. all-CJK, all-Cyrillic) would fail `[!-~]` and
+ * hit this exact CHECK for real. The mapping this comment documents (23514 on
+ * `atgbb_org_nonblank` → typed 400, not a raw 500) is what makes that theoretical case safe
+ * regardless of whether the observation holds; `tests/unit/approval-template-group-backfill-batch-
+ * org-nonblank.test.ts` exercises the mapper directly against a synthetic `{code, constraint}`
+ * pair (it cannot exercise reachability itself — that needs an actual non-ASCII
+ * `authenticatedTenantId`, which nothing in this test suite injects) — this is depth-of-defense
+ * consistency across A-3's own table, not a live-path fix, and not a claim that the input is
+ * provably unreachable.
  */
 const NONBLANK_CHECK_CONSTRAINTS = new Set([
   'atg_name_nonblank',
