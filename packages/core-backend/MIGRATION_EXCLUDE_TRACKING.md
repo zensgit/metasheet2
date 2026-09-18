@@ -4,12 +4,32 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 7 files (union across occurrences)
+**Current Exclude Count**: 4 files (union across occurrences)
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924140000_create_gantt_tables.ts, 20250925_create_view_tables.sql, zzzz20260114110000_create_user_orgs_table.ts`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql`; observability/safety/replay also exclude `zzzz20260114110000_create_user_orgs_table.ts`
 
-**Last Updated**: 2026-07-13 (#4162 follow-up — see the re-enable section below; T8 docs-only pass
-2026-07-12 added the cross-list context without changing any exclude value)
+**Last Updated**: 2026-07-14 (#4162 closure — see both re-enable sections below; T8 docs-only
+pass 2026-07-12 added the cross-list context without changing any exclude value)
+
+---
+
+## #4162 closure (2026-07-14): final 3 items RE-ENABLED across all workflow lists
+
+The remaining view-table cluster tail is no longer excluded:
+
+- `042a_core_model_views.sql` now reaches `SUPERSEDED_LEGACY_SQL_MIGRATIONS` and records its
+  audited no-op history marker. Its redundant CI-level drop was not protecting any live body.
+- `20250924140000_create_gantt_tables.ts` now executes after the UUID `views` migration and
+  creates all four Gantt tables, indexes, triggers, and constraints.
+- `20250925_create_view_tables.sql` now executes in the five per-PR gate occurrences that still
+  excluded it. Its owner-id FK type guard was fixed by #3627 and had already run green in
+  `migration-replay.yml` since #3632.
+
+Proofs on current `main`: a fresh no-exclude migration, an exact old-plugin-list database upgraded
+to the new list, and a second tracked-skip migrate all exited 0. The upgrade applied all three
+previously absent names; the four `gantt_*` tables plus `chk_no_self_dependency` and
+`chk_valid_date_range` were present. The workflow lists, guard baseline/fixtures, provider comments,
+and this ledger were updated together so a removed item cannot remain silently documented as live.
 
 ---
 
@@ -27,7 +47,7 @@ Why: `snapshot-protection.test.ts` (the GHSA-h8mf "Snapshot Protection System E2
 queries `views` / `view_states` — so a CI test-DB without these migrations cannot run that suite at
 all (it failed with `column "tags" of relation "snapshots" does not exist` when first wired in
 PR #4218). The old per-item exclusion reasons were re-tested and found stale — the same class of
-staleness as the `20250925` row below. Proof carried by the re-enable PR: fresh-DB full migrate,
+staleness later closed for `20250925`. Proof carried by the re-enable PR: fresh-DB full migrate,
 second-pass **tracked-skip replay** (a second `migrateToLatest()` skips already-applied items via
 the migration history — it does NOT re-run the four `up()` bodies), a **separate upgrade proof**
 (old-list DB → new-list migrate, which is what actually re-executes the newly-enabled `up()`
@@ -51,28 +71,27 @@ workflows/jobs that depend on each one's specific shape. Full detail:
    marker) so CI's schema-build order can succeed despite that migration's known conflicts.
 2. **`migration-replay.yml`'s own `MIGRATION_EXCLUDE` subset** — a narrower, independently
    evolving list for a different job (run `db:migrate` twice against a fresh db, assert the
-   second pass is a clean tracked-skip replay). Its list is not identical to #1's (7-item
-   union as of 2026-07-13) today.
+   second pass is a clean tracked-skip replay). Its list is not identical to #1's (4-item
+   union as of 2026-07-14) today.
 3. **`SUPERSEDED_LEGACY_SQL_MIGRATIONS`** in `packages/core-backend/src/db/migration-provider.ts`
    — a disjoint-purpose list of ~29 legacy numeric SQL migrations turned into no-op history
-   markers (name stays, body doesn't run) rather than dropped. Overlaps #1 on exactly three
-   items (`042a_core_model_views`, `048_create_event_bus_tables`,
-   `049_create_bpmn_workflow_tables`) — confirmed intentional/harmless double-listing by the
-   2026-07-10 audit.
+   markers (name stays, body doesn't run) rather than dropped. Overlaps #1 on exactly two
+   items (`048_create_event_bus_tables`, `049_create_bpmn_workflow_tables`) — confirmed
+   intentional/harmless double-listing. `042a_core_model_views` remains a superseded no-op but
+   is no longer redundantly dropped by CI.
 
 **Known, verified divergences between the 7 occurrences of #1/#2** (git-blame-checked, not
 guessed):
 
 | Item | Present in | Absent from | Why |
 |---|---|---|---|
-| `20250925_create_view_tables.sql` | plugin-tests.yml (both jobs), observability-strict/e2e.yml, safety-guard-e2e.yml | migration-replay.yml | The owner_id FK bug this item guards against was fixed by #3627; migration-replay.yml dropped the exclusion in #3632 (verified passing). The other 4 occurrences were never re-verified/updated to match — **possibly stale**, not resolved here (still open for `20250925` specifically). The snapshot-protection-blocking part of #4162 was executed 2026-07-13 (see the re-enable section above); `20250925` itself remains excluded outside migration-replay.yml. |
 | `zzzz20260114110000_create_user_orgs_table.ts` | observability-strict/e2e.yml, safety-guard-e2e.yml, migration-replay.yml | plugin-tests.yml (both jobs) | Removed from plugin-tests.yml's `test` job in commit `b1fc1e19d1` ("ci(attendance): run integration gate against postgres") because attendance auto-absence needs the `user_orgs` table applied in that job. The **same commit** also removed it from the `after-sales-integration` job in the same file, which does not obviously touch attendance/user_orgs — that second removal may be an unverified side-effect of a file-wide edit rather than a deliberate per-job decision. Flagged, not resolved here. |
 
 **Known asymmetry this doc does not close**: production and on-prem `db:migrate` runs use **no**
 `MIGRATION_EXCLUDE` at all — every migration listed above runs in a real deploy. Only CI's per-PR
-gate trims the list. **Since the 2026-07-13 #4162 follow-up, the views/view_states + snapshot/
-protection-rule/change-management migrations DO get per-PR green CI runs**; the asymmetry now
-covers only the still-excluded remainder (008/048/049, 042a, gantt, 20250925).
+gate trims the list. **Since the two #4162 re-enable tranches, views/view_states, gantt, 20250925,
+and the snapshot/protection/change-management cluster get per-PR CI runs.** The asymmetry now covers
+only 008/048/049 and `user_orgs` outside plugin-tests.
 
 **Guard**: `scripts/ci/validate-migration-exclude.sh` cross-checks all of the above for
 undocumented drift (warn-only; see that script's header for what it covers and does not cover).
@@ -103,20 +122,23 @@ without re-reading that design doc first.
 ### Current CI Exclusions
 
 #### `042a_core_model_views.sql`
-**Status**: ❌ Excluded
-**Issue**: References non-existent `last_accessed` column during replay paths.
+**Status**: ✅ RE-ENABLED 2026-07-14 (#4162 closure)
+**Disposition**: Still an audited `SUPERSEDED_LEGACY_SQL_MIGRATIONS` no-op history marker; the
+redundant CI-level exclusion was removed.
 
 #### `20250924120000_create_views_view_states.ts`
 **Status**: ✅ RE-ENABLED 2026-07-13 (#4162 follow-up — see section above)
 **Issue**: Creates view-state foreign keys against pre-fix `text` view ids, which fails once replay paths rebuild the newer UUID-based schema.
 
 #### `20250924140000_create_gantt_tables.ts`
-**Status**: ❌ Excluded
-**Issue**: Creates gantt foreign keys against the same pre-fix `text` view ids and fails with `uuid` vs `text` FK incompatibility during replay paths.
+**Status**: ✅ RE-ENABLED 2026-07-14 (#4162 closure)
+**Disposition**: Current `views.id` is UUID. Fresh and old-list upgrade migrations create all four
+Gantt tables and their constraints successfully.
 
 #### `20250925_create_view_tables.sql`
-**Status**: ❌ Excluded
-**Issue**: Applies `tables_owner_id_fkey` against a legacy `owner_id` shape that no longer exists in replay-built schemas, causing `owner_id` foreign-key failures.
+**Status**: ✅ RE-ENABLED 2026-07-14 (#4162 closure)
+**Disposition**: #3627 added the owner-id FK type guard; #3632 proved replay, and #4162 aligned the
+remaining workflow occurrences after fresh/upgrade verification.
 
 #### `20251117000001_add_snapshot_labels.ts`
 **Status**: ✅ RE-ENABLED 2026-07-13 (#4162 follow-up — see section above)
