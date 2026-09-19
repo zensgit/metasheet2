@@ -12,6 +12,38 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Internal Cleanup Runtime Evidence (2026-09-20)
+
+Code `f9d461ea944bad70912b4553502bba0efa0153af`, tree
+`72031b8692498dd9a0ef069c7ae9ceceb8b6c1f4`; five code/test files only.
+
+- Application and server wiring: 2 files / 58 tests PASS. Explicit storage is
+  bound once; disabled/missing-port calls refuse; stop waits for accepted cleanup,
+  refuses new cleanup and releases custody only after drain; provider errors are
+  values-free. Server-level OFF entry does not resolve the pool or factory.
+- Drain mutation: removing the active-cleanup wait initially survived a test that
+  inspected only one microtask. The test now waits a full event-loop turn. The
+  same mutation fails with stopped=true while cleanup is unresolved; restoring
+  the wait returns the complete 58-test suite to GREEN.
+- Real PG/local-storage application composition PASS:
+  `/private/tmp/tm-cleanup-application-realdb-20260920.log`. Expiry/reference
+  refusal, durable abandonment before IO, failed-retirement retry and terminal
+  reconciliation are exercised through the application method. After stop it
+  refuses. The separate apply-versus-cleanup race still tests the ledger helper.
+  Stage database/connections=0; owned cluster stopped and removed.
+- Core plus acceptance-script typecheck PASS; source ESLint 0 errors with 22
+  existing index warnings. Default ESLint cannot parse the acceptance script
+  because it is outside its configured project; the dedicated acceptance tsc
+  covers it. No lint configuration was widened.
+- Existing exact-anchor CI wiring 39/39 PASS; diff-check PASS.
+
+Sol's bounded broader read-only audit ended without a terminal verdict and was
+closed; no fresh external APPROVE is claimed. This is local evidence, not the
+new remote exact-head CI result. Internal entry binding is closed in this scope;
+applied/displaced-object cleanup, partial-proof deletion, public scheduling and
+real environment operations are not claimed. Prior SHA-scoped Workbench and HTTP
+evidence remains distinct and is not rebranded as new customer acceptance.
+
 ## Inspector Restore Execution (2026-09-20)
 
 ### Scope Relocation And Accepted Batch Result

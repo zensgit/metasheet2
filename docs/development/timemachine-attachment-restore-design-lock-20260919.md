@@ -2,6 +2,25 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Internal Cleanup Composition (2026-09-20)
+
+Code `f9d461ea944bad70912b4553502bba0efa0153af`, tree
+`72031b8692498dd9a0ef069c7ae9ceceb8b6c1f4`, binds the existing one-object
+expired-stage retirement to the application and MetaSheetServer. The server
+accepts only an object ID; storage is an explicitly supplied, snapshotted trusted
+capability. Missing capability and disabled runtime refuse before cleanup IO.
+The existing expiry, current-reference, ownership and commit-before-IO rules are
+unchanged. Shutdown rejects new requests and drains accepted cleanup before
+custody release and database shutdown; timeout retains the existing fail-closed
+shutdown behavior. There is no HTTP cleanup route, timer or retention default.
+
+This supersedes earlier notes that internal cleanup has no runtime entry point.
+It does not authorize cleanup of applied/displaced objects, markerless or partial
+ownership proof, hostile NAS storage, or automatic scheduling. Full successor CI
+and final independent integration review remain open. Existing synthetic
+Workbench/browser evidence is not customer UAT. The nightly plan below remains
+offline/read-only planning only; no real environment access was performed.
+
 ## Scope Relocation And Accepted Batch Execution (2026-09-20)
 
 Code `74bfcae9e821813da91519b0c487ce45cd6e998f`, tree
