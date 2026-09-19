@@ -503,6 +503,66 @@ describe('MultitableWorkbench BATCH-restore handler wiring (bulk → preview →
     expect(showErrorSpy).toHaveBeenCalledTimes(1)
   })
 
+  it.each(['cancel', 'sheet', 'base'])('invalidates batch preview on %s', async (action) => {
+    const open = await mountAndGetBulkRestore()
+    await open(['A', 'C']); await flushUi()
+    if (action === 'cancel') (capturedBatchDialogAttrs!.onCancel as () => void)()
+    else if (action === 'sheet') workbenchMock.activeSheetId.value = 'other-sheet'
+    else workbenchMock.activeBaseId.value = 'other-base'
+    await flushUi()
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)()
+    expect(workbenchMock.client.restoreBatchExecute).not.toHaveBeenCalled()
+    expect(capturedBatchDialogAttrs!.visible).toBe(false)
+  })
+
+  it('cannot confirm a pending advanced preview using the previous identity', async () => {
+    const open = await mountAndGetBulkRestore()
+    await open(['A', 'C']); await flushUi()
+    let resolve!: (value: unknown) => void
+    workbenchMock.client.restoreBatchPreview.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    ;(capturedBatchDialogAttrs!.onPreviewVersion as (version: number) => void)(3)
+    await flushUi()
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)()
+    expect(workbenchMock.client.restoreBatchExecute).not.toHaveBeenCalled()
+    resolve({ records: [], scope: [], restorableCount: 0, skippedCount: 0, previewIdentity: null })
+    await flushUi()
+  })
+
+  it('ignores a late batch execute after navigation and prevents duplicate confirmation', async () => {
+    const open = await mountAndGetBulkRestore()
+    await open(['A', 'C']); await flushUi()
+    let resolve!: (value: unknown) => void
+    workbenchMock.client.restoreBatchExecute.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const confirm = capturedBatchDialogAttrs!.onConfirm as () => Promise<void>
+    const pending = confirm()
+    await confirm()
+    expect(workbenchMock.client.restoreBatchExecute).toHaveBeenCalledTimes(1)
+    ;(capturedBatchDialogAttrs!.onPreviewVersion as (version: number) => void)(4)
+    expect(workbenchMock.client.restoreBatchPreview).toHaveBeenCalledTimes(1)
+    workbenchMock.activeSheetId.value = 'other-sheet'
+    resolve({ records: [], restoredCount: 2, skippedCount: 0 })
+    await pending; await flushUi()
+    expect(gridMock.loadViewData).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    expect(capturedBatchDialogAttrs!.visible).toBe(false)
+  })
+
+  it.each(['cancel', 'roundtrip', 'unmount'])('drops a pending batch preview error after %s', async (action) => {
+    const open = await mountAndGetBulkRestore()
+    let reject!: (error: Error) => void
+    workbenchMock.client.restoreBatchPreview.mockReturnValueOnce(new Promise((_resolve, r) => { reject = r }))
+    await open(['A']); await flushUi()
+    if (action === 'cancel') (capturedBatchDialogAttrs!.onCancel as () => void)()
+    else if (action === 'unmount') { app!.unmount(); app = null }
+    else {
+      workbenchMock.activeSheetId.value = 'other-sheet'
+      workbenchMock.activeSheetId.value = 'sheet_orders'
+    }
+    reject(new Error('obsolete batch preview'))
+    await flushUi()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
   it('out-of-order Advanced previews: a stale earlier-version response never overwrites the latest (seq guard)', async () => {
     const onBulkRestore = await mountAndGetBulkRestore()
     await onBulkRestore(['A', 'B', 'C']); await flushUi() // initial v1 preview (default mock)
