@@ -46,6 +46,8 @@ const connection = { host: '127.0.0.1', port: Number(adminUrl.port), user: 'tm_m
 const admin = new Client({ ...connection, database: 'postgres', connectionTimeoutMillis: 5000 })
 const database = `tm_manual_checkpoint_${randomUUID().replaceAll('-', '')}`
 const root = await mkdtemp(join(tmpdir(), 'tm-manual-checkpoint-run-'))
+const originalAttachmentPath = process.env.ATTACHMENT_PATH
+process.env.ATTACHMENT_PATH = join(root, 'attachment-source')
 let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
@@ -1910,6 +1912,61 @@ try {
       for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(commandState, row.id).bytes,
         Buffer.from(`synthetic-${row.id}`))
       console.log('PASS: manual command captures live/deleted source attachments, publishes and reads exact bytes; exact retry never rereads source')
+      const express = require('express') as typeof import('express')
+      const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+      const attachmentApp = express()
+      attachmentApp.use(express.json())
+      attachmentApp.use((req, _res, next) => {
+        if (req.headers.authorization === 'Bearer synthetic-manual-owner') req.user = { id: actorId, role: 'admin' }
+        next()
+      })
+      attachmentApp.use('/api/multitable', univerMetaRouter({
+        recoveryArchiveRuntime: { keyCustody: attachmentCustody,
+          transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
+        recoveryArchiveDatabaseRuntime: { query, transaction: uploadInput.transaction,
+          transactionDepthProbe: attachmentCapture.transactionDepth },
+        recoveryArchiveAuditedReplayHorizonMs: 60000,
+        recoveryArchiveManualPolicy: admissionPolicy,
+      }))
+      const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
+      try {
+        await new Promise<void>((resolve, reject) => { attachmentServer.once('listening', resolve); attachmentServer.once('error', reject) })
+        const address = attachmentServer.address()
+        assert.ok(address && typeof address !== 'string')
+        const url = `http://127.0.0.1:${address.port}/api/multitable/sheets/no-genesis/recovery-archive/captures`
+        const headers = { 'content-type': 'application/json', authorization: 'Bearer synthetic-manual-owner' }
+        const requestId = randomUUID()
+        const beforeHttp = await generationCount()
+        assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ requestId }) })).status, 401)
+        assert.equal((await fetch(url, { method: 'POST', headers,
+          body: JSON.stringify({ requestId, storagePath: '/synthetic-untrusted' }) })).status, 400)
+        assert.equal(await generationCount(), beforeHttp)
+        const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ requestId }) })
+        assert.equal(response.status, 200)
+        const result = await response.json() as { ok: boolean; data: { requestId: string; generationId: string; state: string } }
+        assert.deepEqual(result, { ok: true, data: { requestId, generationId: result.data.generationId, state: 'recoverable' } })
+        const retry = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ requestId }) })
+        assert.equal(retry.status, 200)
+        assert.deepEqual(await retry.json(), result)
+        assert.equal(await generationCount(), beforeHttp + 1)
+        const authority = await attachmentPreview.loadRecoveryArchiveAuthorityInternal(uploadInput.transaction, {
+          ...commandRequest, generationId: result.data.generationId, recheckAuthority: async () => true,
+        })
+        const state = await attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput,
+          selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
+          sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects, query })
+        for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(state, row.id).bytes,
+          Buffer.from(`synthetic-${row.id}`))
+        const catalog = await fetch(url.replace('/captures', `/catalog/${result.data.generationId}`), { headers })
+        assert.equal(catalog.status, 200)
+        assert.equal((await catalog.json() as { data: { generationId: string } }).data.generationId, result.data.generationId)
+        console.log('PASS: real HTTP manual attachment capture uses server local storage, refuses anonymous/client paths, retries one generation, and exposes catalog with independently decrypted exact files')
+      } finally {
+        attachmentServer.closeIdleConnections()
+        await new Promise<void>((resolve, reject) => attachmentServer.close(error => error ? reject(error) : resolve()))
+        assert.equal(attachmentServer.address(), null)
+      }
     } finally {
       if (commandFlags.archive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = commandFlags.archive
@@ -1923,6 +1980,8 @@ try {
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')
 } finally {
+  if (originalAttachmentPath === undefined) delete process.env.ATTACHMENT_PATH
+  else process.env.ATTACHMENT_PATH = originalAttachmentPath
   await db?.destroy()
   await client?.end()
   if (created) {
