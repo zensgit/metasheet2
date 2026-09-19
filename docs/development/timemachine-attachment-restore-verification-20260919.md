@@ -12,6 +12,31 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Post-Preview Identity Refusal (2026-09-20)
+
+Test-only code `e24c7bc7fd55c1d05c9dd84e5be717db19e88666`, tree
+`6a5bdcc0a6754e60aa282dc9300e07b34d93edaa`, adds two real HTTP cases to the
+existing owned checkpoint runner. The run began before commit with exactly the
+committed script content; no production code changed.
+
+`/private/tmp/tm-restore-identity-realdb-20260920.log` records exit 0 for the full
+default runner, including fresh/replay, historical neighbors, checkpoint/restore
+and stage gates. After a valid attachment preview:
+
+- Deactivating the original actor makes execute refuse 401, then the fixture
+  restores the actor in finally.
+- A second synthetic admin logs in through the production login route and gets
+  a distinct authenticated user ID; using the original preview refuses 409.
+- Both refusals preserve record data/version, attachment storage metadata, stage
+  count, revision/operation counts, token burns and receipts.
+- The same original preview then succeeds for its original active actor, returns
+  original binaries and refuses replay, providing the matching positive control.
+
+Core type-check, wiring 39/39 and diff-check pass. Owned and stage databases and
+connections are zero, and the cluster is stopped/removed. This proves post-preview
+actor revocation/substitution, not a second-tenant test or a new mutation verdict.
+The broader authorization gate remains open for its other explicitly listed axes.
+
 ## Inspector Deleted-Value Regression (2026-09-20)
 
 Code `ec3cf65f6f88ea3157c8bfb912b8c7e45aa77d6f`, tree

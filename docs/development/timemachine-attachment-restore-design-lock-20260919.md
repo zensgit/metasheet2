@@ -2,6 +2,17 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Post-Preview Identity Acceptance (2026-09-20)
+
+Test-only checkpoint `e24c7bc7fd55c1d05c9dd84e5be717db19e88666` verifies
+existing identity authority through real synthetic logins: inactive original actor
+refuses execution, and another authenticated administrator cannot reuse that
+actor's signed preview. Both refuse without record, metadata, staging, history,
+token or receipt effects; the original active actor then succeeds with the same
+preview. No permissions or recovery semantics changed. This closes those two
+local acceptance axes only, not second-tenant isolation or full authorization
+completion. No real-environment operation was performed.
+
 ## Right-Side Deleted History Values (2026-09-20)
 
 Checkpoint `ec3cf65f6f88ea3157c8bfb912b8c7e45aa77d6f`, tree
