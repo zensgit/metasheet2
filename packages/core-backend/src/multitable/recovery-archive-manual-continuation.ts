@@ -6,6 +6,7 @@ import {
 } from './recovery-archive-prepared-upload'
 import type { SealQuery } from './recovery-archive-seals'
 import { bindRecoveryArchiveManualSourceRecheck, bindRecoveryArchiveManualNonceReservation, bindRecoveryArchiveManualSectionPlan, takeRecoveryArchiveManualSource,
+  bindRecoveryArchiveManualAttachmentRead, readRecoveryArchiveManualAttachmentIndex,
   type RecoveryArchiveManualSource } from './recovery-archive-manual-admission'
 import type { RecoveryArchiveCaptureSource } from './recovery-archive-relational-source'
 import { buildRecoveryArchiveSectionRows } from './recovery-archive-section-rows'
@@ -130,10 +131,12 @@ export type RecoveryArchiveManualContinuationInput =
 export function bindRecoveryArchiveManualContinuation(
   transaction: RecoveryArchivePreparedUploadInput['transaction'],
   authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
+  readContentAddressed?: Parameters<typeof bindRecoveryArchiveManualAttachmentRead>[2],
 ) {
   const recheckSource = bindRecoveryArchiveManualSourceRecheck(transaction, authorize)
   const prepareSections = bindRecoveryArchiveManualSectionPlan(transaction, authorize)
   const manifestBinding = bindRecoveryArchiveManualManifestBinding(transaction, authorize)
+  const readAttachments = readContentAddressed ? bindRecoveryArchiveManualAttachmentRead(transaction, authorize, readContentAddressed) : undefined
   return async (input: RecoveryArchiveManualContinuationInput): Promise<void> => {
     const identity = Object.freeze({ ...input.identity })
     const binding = Object.freeze({ ...input.binding })
@@ -146,18 +149,27 @@ export function bindRecoveryArchiveManualContinuation(
       || identity.workspaceId !== binding.workspaceId) {
       throw new Error('RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH')
     }
-    await uploadRecoveryArchivePreparedCapture({
+    let attachmentSources: Awaited<ReturnType<NonNullable<typeof readAttachments>>> = []
+    try { await uploadRecoveryArchivePreparedCapture({
       owner, binding, upload: input.upload, uploadAttachment: input.uploadAttachment,
       capture: async () => {
         if (!source) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
         const snapshot = takeRecoveryArchiveManualSource(source, identity, owner, binding)
-        if (snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+        if (snapshot.attachmentCandidates.length) {
+          if (!readAttachments) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+          attachmentSources = await readAttachments(source)
+        }
         await recheckSource(source)
         const expected = structuredClone(snapshot)
         const proposed = await capture(snapshot)
         const sections = proposed.sections.map((section) => ({ sectionName: section.sectionName,
           plaintext: Buffer.from(section.plaintext), nonce: Buffer.from(section.nonce) }))
-        const sectionRows = { ...expected.sections, attachments_index: [], permission_evidence: [] }
+        const attachmentIndex = readRecoveryArchiveManualAttachmentIndex(source)
+        const sectionRows = { ...expected.sections, attachments_index: attachmentIndex, permission_evidence: [] }
+        for (const section of sections) if (attachmentIndex.length && section.sectionName === 'attachments_index') {
+          section.plaintext = Buffer.from(canonicalizeRecoveryArchiveSectionRows('attachments_index',
+            buildRecoveryArchiveSectionRows('attachments_index', attachmentIndex)).canonicalJson)
+        }
         for (const name of Object.keys(sectionRows) as (keyof typeof sectionRows)[]) {
           const matches = sections.filter((section) => section.sectionName === name)
           const canonical = canonicalizeRecoveryArchiveSectionRows(name, buildRecoveryArchiveSectionRows(name, sectionRows[name]))
@@ -172,6 +184,8 @@ export function bindRecoveryArchiveManualContinuation(
         const canonicalSections = await prepareSections(source, nonces)
         prepared = { plan: canonicalSections, keyCustody: proposed.keyCustody }
         return { ...proposed, binding: { ...proposed.binding }, sections: canonicalSections,
+          attachments: attachmentSources.map((attachment) => ({ attachmentId: attachment.attachmentId,
+            sourceVersion: attachment.sourceVersion, plaintext: attachment.plaintext, nonce: randomBytes(12) })),
           reserveNonces: bindRecoveryArchiveManualNonceReservation(transaction, authorize, source) }
       },
       authenticateCapture: async (sealed) => {
@@ -192,7 +206,7 @@ export function bindRecoveryArchiveManualContinuation(
         }
         if (!allowed) throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
       },
-    })
+    }) } finally { for (const attachment of attachmentSources) attachment.plaintext.fill(0) }
   }
 }
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'

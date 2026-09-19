@@ -1763,6 +1763,93 @@ try {
   assert.equal(transitions, 2)
   assert.ok((await pins(rollbackSource.generationId)).every((row) => row.availability === 'mutable'))
   console.log('PASS: real local attachment reads outside transactions atomically verify source pins; digest/version/size/revocation/source movement and second-pin failure refuse without partial available pins')
+  const attachmentCapture = await continuation()
+  const attachmentKey = randomBytes(32)
+  const attachmentCustody = { ...custody,
+    async produceGenerationDek() { return { dek: Buffer.from(attachmentKey), wrappedDekId: 'synthetic-attachment-wrapped', wrappedDek: randomBytes(64) } },
+    async macManifestRoot({ preimage }: { preimage: Uint8Array }) { return createHmac('sha256', attachmentKey).update(preimage).digest() },
+    async verifyManifestRootMac({ preimage, mac }: { preimage: Uint8Array; mac: Uint8Array }) {
+      return createHmac('sha256', attachmentKey).update(preimage).digest().equals(Buffer.from(mac))
+    },
+  }
+  const attachmentContinuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
+  const attachmentStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
+  const attachmentProvider = attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') })
+  const attachmentShared = { ...attachmentCapture, provider: attachmentProvider }
+  let captureSourceReads = 0
+  const withAttachments = attachmentContinuationBindings.bindRecoveryArchiveManualContinuation(uploadInput.transaction,
+    async () => true, async (key) => { captureSourceReads++; return sourceStorage.readContentAddressed(key) })
+  const persistAttachment = attachmentContinuationBindings.bindRecoveryArchiveManualAttachmentUpload(uploadInput.transaction, async () => true, attachmentShared)
+  const attachmentCaptureInput = { ...attachmentCapture,
+    capture: async (source: Parameters<typeof capture>[0]) => ({ ...await capture(source), binding: attachmentCapture.binding,
+      keyCustody: attachmentCustody,
+      attachments: [{ attachmentId: 'UNTRUSTED', sourceVersion: 'UNTRUSTED', plaintext: Buffer.from('UNTRUSTED'), nonce: randomBytes(12) }] }),
+    upload: attachmentContinuationBindings.bindRecoveryArchiveManualObjectUpload(uploadInput.transaction, async () => true, attachmentShared),
+    uploadAttachment: async (...args: Parameters<typeof persistAttachment>) => {
+      await persistAttachment(...args)
+      throw new Error('SYNTHETIC_ATTACHMENT_CAPTURE_INTERRUPTION')
+    },
+  }
+  try {
+    await assert.rejects(withAttachments(attachmentCaptureInput), { message: 'SYNTHETIC_ATTACHMENT_CAPTURE_INTERRUPTION' })
+    const encryptedCapture = await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, attachmentCapture.owner))
+    assert.ok(encryptedCapture)
+    const sealedCapture = preparedUpload.decodeRecoveryArchivePreparedEnvelope(encryptedCapture)
+    assert.ok(sealedCapture.manifestEnvelope)
+    assert.equal(sealedCapture.attachments!.length, syntheticAttachments.length)
+    assert.equal(captureSourceReads, syntheticAttachments.length)
+    const indexSection = sealedCapture.sections.find((section) => section.sectionName === 'attachments_index')!
+    const indexRows = JSON.parse(Buffer.from(archiveCrypto.openRecoveryArchiveSection({ binding: { ...sealedCapture.binding,
+      sectionName: 'attachments_index', plaintextSha256: indexSection.plaintextSha256 }, dek: attachmentKey,
+      nonce: indexSection.nonce, ciphertext: indexSection.ciphertext, authTag: indexSection.authTag })).toString('utf8'))
+    assert.deepEqual(indexRows.map((row: { payload: { attachment_id: string } }) => row.payload.attachment_id).sort(), syntheticAttachments.map((row) => row.id).sort())
+    assert.ok(indexRows.some((row: { payload: { deleted: boolean } }) => row.payload.deleted))
+    const nonceRows = (await query('SELECT section_name FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1', [attachmentCapture.owner.generationId])).rows
+    assert.equal(nonceRows.length, 10 + syntheticAttachments.length)
+    assert.deepEqual(nonceRows.filter((row) => row.section_name.startsWith('attachment:')).map((row) => row.section_name).sort(),
+      syntheticAttachments.map((row) => attachmentCrypto.recoveryArchiveAttachmentNonceIdentity(row.id)).sort())
+    await withAttachments({ ...attachmentCaptureInput, source: null,
+      capture: async () => { throw new Error('SYNTHETIC_ATTACHMENT_RECAPTURE_FORBIDDEN') }, uploadAttachment: persistAttachment })
+    assert.equal(captureSourceReads, syntheticAttachments.length)
+    assert.deepEqual(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, attachmentCapture.owner)), encryptedCapture)
+    assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1', [attachmentCapture.owner.generationId])).rows[0].n, 10 + syntheticAttachments.length)
+    const finalizeAttachments = require('../src/multitable/recovery-archive-manual-finalization.ts') as typeof import('../src/multitable/recovery-archive-manual-finalization')
+    const finalizer = finalizeAttachments.bindRecoveryArchiveManualFinalization(uploadInput.transaction, async () => true)
+    const finalizationInput = { ...attachmentCapture, key: { keyId: admissionPolicy.keyId, expectedRowVersion: admissionPolicy.keyRowVersion }, keyCustody: attachmentCustody }
+    await assert.rejects(finalizer(finalizationInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    assert.ok((await pins(attachmentCapture.owner.generationId)).every((row) => row.reference_class === 'source'))
+    await attachmentContinuationBindings.bindRecoveryArchiveManualManifestUpload(uploadInput.transaction, async () => true, attachmentShared)()
+    const movedAttachmentId = syntheticAttachments[0].id
+    const originalPath = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [movedAttachmentId])).rows[0].storage_path
+    try {
+      await query('UPDATE multitable_attachments SET storage_path=$2 WHERE id=$1', [movedAttachmentId, `${randomUUID()}/sha256-${'0'.repeat(64)}`])
+      await assert.rejects(finalizer(finalizationInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    } finally { await query('UPDATE multitable_attachments SET storage_path=$2 WHERE id=$1', [movedAttachmentId, originalPath]) }
+    let sourceReleases = 0
+    const failingFinalize = finalizeAttachments.bindRecoveryArchiveManualFinalization(
+      (work) => transaction(() => work(async (text, params) => {
+        if (text.includes('DELETE FROM meta_recovery_archive_attachment_refs') && ++sourceReleases === 2) {
+          throw new Error('SYNTHETIC_PRIVATE_PUBLICATION_FAILURE')
+        }
+        return query(text, params)
+      })), async () => true)
+    await assert.rejects(failingFinalize(finalizationInput), { message: 'RECOVERY_ARCHIVE_MANUAL_FINALIZATION_REFUSED' })
+    assert.equal(sourceReleases, 2)
+    assert.ok((await pins(attachmentCapture.owner.generationId)).every((row) => row.reference_class === 'source'))
+    assert.ok((await query('SELECT state FROM meta_recovery_archive_objects WHERE generation_id=$1', [attachmentCapture.owner.generationId])).rows.every((row) => row.state === 'uploaded'))
+    await finalizer(finalizationInput)
+    assert.deepEqual((await query('SELECT state,build_status,coverage_status FROM meta_recovery_archives WHERE generation_id=$1', [attachmentCapture.owner.generationId])).rows,
+      [{ state: 'verified', build_status: 'finalized', coverage_status: 'complete' }])
+    const archiveReferences = await pins(attachmentCapture.owner.generationId)
+    assert.equal(archiveReferences.length, syntheticAttachments.length)
+    assert.ok(archiveReferences.every((row) => row.reference_class === 'archive_object' && row.reference_state === 'verified' && row.availability === 'available'))
+    const finalObjects = (await query('SELECT state,attachment_id,provider_version FROM meta_recovery_archive_objects WHERE generation_id=$1', [attachmentCapture.owner.generationId])).rows
+    assert.equal(finalObjects.length, 11 + syntheticAttachments.length)
+    assert.ok(finalObjects.every((row) => row.state === 'verified'))
+    for (const ref of archiveReferences) assert.equal(ref.immutable_version, finalObjects.find((row) => row.attachment_id === ref.attachment_id).provider_version)
+    console.log('PASS: live/deleted source files form authenticated attachment index and exact 10+N nonce reservations; caller attachment substitution ignored; durable interrupted capture resumes without reread/reseal')
+    console.log('PASS: missing manifest refuses publication and retains source pins; complete attachment roster atomically verifies catalog/receipts/archive refs and releases only its own source pins')
+  } finally { attachmentKey.fill(0) }
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

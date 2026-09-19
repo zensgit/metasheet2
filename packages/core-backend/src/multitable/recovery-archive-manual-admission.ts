@@ -20,6 +20,7 @@ import type { RecoveryArchiveNonceReservationSink } from './recovery-archive-cry
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from './recovery-archive-contract'
 import { buildRecoveryArchiveSnapshotPlan } from './recovery-archive-snapshot-plan'
 import type { RecoveryArchiveManifestBinding } from './recovery-archive-manifest'
+import { recoveryArchiveAttachmentNonceIdentity } from './recovery-archive-attachment-crypto'
 
 const sourceBrand = Symbol('manual-capture-source')
 export interface RecoveryArchiveManualSource { readonly [sourceBrand]: true }
@@ -38,6 +39,7 @@ const sources = new WeakMap<RecoveryArchiveManualSource, {
   keyRowVersion: string
   repeat: boolean
   leaseUntil: string
+  attachmentIndex?: Record<string, unknown>[]
 }>()
 
 function sourceHash(source: RecoveryArchiveCaptureSource): string {
@@ -116,12 +118,26 @@ export function bindRecoveryArchiveManualAttachmentRead(
           contentSha256: attachment.plaintextSha256, contentSizeBytes: String(attachment.sizeBytes),
         })
       })
+      entry.attachmentIndex = entry.snapshot.attachmentCandidates.map((candidate, index) => ({
+        attachment_id: candidate.attachmentId, record_id: candidate.recordId, field_id: candidate.fieldId,
+        immutable_object_version: attachments[index]!.sourceVersion,
+        plaintext_sha256: attachments[index]!.plaintextSha256, size_bytes: candidate.sizeBytes,
+        media_type: candidate.mediaType, deleted: candidate.deleted,
+      }))
       return attachments
     } catch (error) {
       for (const attachment of attachments) attachment.plaintext.fill(0)
       throw error
     }
   }
+}
+
+export function readRecoveryArchiveManualAttachmentIndex(source: RecoveryArchiveManualSource): Record<string, unknown>[] {
+  const entry = sources.get(source)
+  if (!entry || (entry.snapshot.attachmentCandidates.length && !entry.attachmentIndex)) {
+    throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+  }
+  return structuredClone(entry.attachmentIndex ?? [])
 }
 
 /** Manifest timestamps and source vector come from the admitted generation, never a caller clock. */
@@ -177,13 +193,14 @@ export function bindRecoveryArchiveManualNonceReservation(
     const rows = input.map((row) => ({ ...row }))
     await transaction(async (query) => {
       const entry = await recheckManualSource(query, source, authorize)
-      if (!entry.consumed || rows.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length
-        || rows.some((row, index) => row.sectionName !== RECOVERY_ARCHIVE_V1_SECTION_NAMES[index]
+      const identities = [...RECOVERY_ARCHIVE_V1_SECTION_NAMES,
+        ...readRecoveryArchiveManualAttachmentIndex(source).map((row) => recoveryArchiveAttachmentNonceIdentity(row.attachment_id as string))]
+      if (!entry.consumed || rows.length !== identities.length
+        || rows.some((row, index) => row.sectionName !== identities[index]
           || row.generationId !== entry.binding.generationId || row.formatVersion !== entry.binding.formatVersion
           || row.aeadAlgorithm !== entry.binding.aeadAlgorithm || row.dekFingerprint !== rows[0]!.dekFingerprint)) {
         throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_BINDING_MISMATCH')
       }
-      if (entry.snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
       try {
         for (const row of rows) await query(`SELECT public.meta_recovery_archive_reserve_nonce($1,$2,$3::uuid,$4,$5,$6)`,
           [row.dekFingerprint, row.nonceHex, row.generationId, row.sectionName, row.aeadAlgorithm, row.formatVersion])
@@ -200,8 +217,8 @@ export function bindRecoveryArchiveManualSectionPlan(
   return async (source: RecoveryArchiveManualSource, nonces: Record<string, Uint8Array>) => transaction(async (query) => {
     const entry = await recheckManualSource(query, source, authorize)
     if (!entry.consumed) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
-    if (entry.snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
-    const sectionRows = { ...entry.snapshot.sections, attachments_index: [], permission_evidence: [] }
+    const attachmentIndex = readRecoveryArchiveManualAttachmentIndex(source)
+    const sectionRows = { ...entry.snapshot.sections, attachments_index: attachmentIndex, permission_evidence: [] }
     const sections = RECOVERY_ARCHIVE_DATA_SECTION_NAMES.map((sectionKind) => {
       const canonical = canonicalizeRecoveryArchiveSectionRows(sectionKind,
         buildRecoveryArchiveSectionRows(sectionKind, sectionRows[sectionKind]))
@@ -210,7 +227,7 @@ export function bindRecoveryArchiveManualSectionPlan(
     const sealInput = { ...entry.owner, sheetId: entry.identity.sheetId, sections }
     const plan = entry.repeat ? await consumeRecoveryArchiveCheckpointReservations(query, sealInput)
       : await consumeRecoveryArchiveBootstrapReservations(query, sealInput)
-    return readRecoveryArchiveManualSnapshotPlan(query, plan.sheetId, plan.snapshotOperationId, entry.snapshot, nonces)
+    return readRecoveryArchiveManualSnapshotPlan(query, plan.sheetId, plan.snapshotOperationId, entry.snapshot, nonces, attachmentIndex)
   })
 }
 
@@ -218,9 +235,10 @@ export function bindRecoveryArchiveManualSectionPlan(
 export async function readRecoveryArchiveManualSnapshotPlan(
   query: SealQuery, sheetId: string, snapshotOperationId: string,
   snapshot: RecoveryArchiveCaptureSource, nonces: Record<string, Uint8Array>,
+  attachmentIndex: Record<string, unknown>[] = [],
 ) {
-  if (snapshot.attachmentCandidates.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
-  const sectionRows = { ...snapshot.sections, attachments_index: [], permission_evidence: [] }
+  if (snapshot.attachmentCandidates.length !== attachmentIndex.length) throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+  const sectionRows = { ...snapshot.sections, attachments_index: attachmentIndex, permission_evidence: [] }
   const members = await query(`SELECT sheet_id, parent_operation_id::text, ordinal, section_kind,
     source_head_kind, source_operation_id::text, source_head_seq::text, row_count::text, source_hash,
     to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at

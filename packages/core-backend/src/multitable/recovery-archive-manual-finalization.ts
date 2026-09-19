@@ -76,8 +76,29 @@ export function bindRecoveryArchiveManualFinalization(
           AND trusted_since_seq <= $3::bigint FOR SHARE`, [identity.sheetId, manifest.checkpoint_id, manifest.anchor_seq])
       if (trust.rows.length !== 1 || (trust.rows[0] as { id: string }).id !== manifest.checkpoint_id) refuse()
       const source = await readRecoveryArchiveCaptureSource(query, identity)
+      const attachments = envelope.attachments ?? []
+      const pins = (await query(`SELECT attachment_id,immutable_version,content_sha256,content_size_bytes::text,
+        source_owner_kind,source_owner_id,source_owner_fence::text FROM meta_recovery_archive_attachment_refs
+        WHERE generation_id=$1::uuid AND reference_class='source' AND reference_state='building'
+          AND availability='available' AND source_lease_until>clock_timestamp()
+          AND source_lease_until=(SELECT lease_expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid)
+        FOR UPDATE`, [owner.generationId])).rows as Record<string, unknown>[]
+      if (source.attachmentCandidates.length !== attachments.length || pins.length !== attachments.length) refuse()
+      const attachmentIndex = source.attachmentCandidates.map((candidate) => {
+        const object = attachments.find((item) => item.attachmentId === candidate.attachmentId)
+        const pin = pins.find((item) => item.attachment_id === candidate.attachmentId)
+        const localIdentity = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sha256-([0-9a-f]{64})$/.exec(candidate.storagePath)
+        if (!object || !pin || candidate.blobPurged || candidate.sizeBytes !== String(object.sizeBytes)
+          || candidate.storageProvider !== 'local' || !localIdentity || object.sourceVersion !== `sha256:${localIdentity[1]}`
+          || pin.immutable_version !== object.sourceVersion || pin.content_sha256 !== object.plaintextSha256
+          || pin.content_size_bytes !== candidate.sizeBytes || pin.source_owner_kind !== owner.ownerKind
+          || pin.source_owner_id !== owner.ownerId || pin.source_owner_fence !== owner.ownerFence) refuse()
+        return { attachment_id: candidate.attachmentId, record_id: candidate.recordId, field_id: candidate.fieldId,
+          immutable_object_version: object.sourceVersion, plaintext_sha256: object.plaintextSha256,
+          size_bytes: candidate.sizeBytes, media_type: candidate.mediaType, deleted: candidate.deleted }
+      })
       const nonces = Object.fromEntries(envelope.sections.map((section) => [section.sectionName, section.nonce]))
-      const plan = await readRecoveryArchiveManualSnapshotPlan(query, identity.sheetId, manifest.anchor_operation_id, source, nonces)
+      const plan = await readRecoveryArchiveManualSnapshotPlan(query, identity.sheetId, manifest.anchor_operation_id, source, nonces, attachmentIndex)
       if (plan.some((section, index) => section.rowCount !== manifest.sections[index]?.row_count
         || section.plaintextSha256 !== manifest.sections[index]?.plaintext_sha256)) refuse()
       const coverageSection = plan.find((section) => section.sectionName === 'coverage_index')!
@@ -89,19 +110,31 @@ export function bindRecoveryArchiveManualFinalization(
         head_receipt_sha256 AS "headReceiptSha256",owner_kind AS "ownerKind",owner_id AS "ownerId",owner_fence::text AS "ownerFence"
         FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid AND state='uploaded' FOR UPDATE`,
       [owner.generationId])).rows as RecoveryArchiveObjectReceiptEvidence[]
-      if (objects.length !== 11) refuse()
-      const expected = [...envelope.sections.map((section) => ({ objectClass: 'section', sectionName: section.sectionName,
+      if (objects.length !== 11 + attachments.length) refuse()
+      const expected = [...envelope.sections.map((section) => ({ objectClass: 'section', sectionName: section.sectionName, attachmentId: null,
         bytes: Buffer.concat([section.ciphertext, section.authTag]), plaintextHash: section.plaintextSha256 })),
-      { objectClass: 'manifest', sectionName: null, bytes: envelope.manifestEnvelope, plaintextHash: hash(envelope.manifestEnvelope) }]
+      ...attachments.map((attachment) => ({ objectClass: 'attachment', sectionName: null, attachmentId: attachment.attachmentId,
+        bytes: Buffer.concat([attachment.nonce, attachment.ciphertext, attachment.authTag]), plaintextHash: attachment.plaintextSha256 })),
+      { objectClass: 'manifest', sectionName: null, attachmentId: null, bytes: envelope.manifestEnvelope, plaintextHash: hash(envelope.manifestEnvelope) }]
       for (const item of expected) {
         const digest = hash(item.bytes)
-        const matches = objects.filter((object) => object.objectClass === item.objectClass && object.sectionName === item.sectionName)
+        const matches = objects.filter((object) => object.objectClass === item.objectClass && object.sectionName === item.sectionName
+          && object.attachmentId === item.attachmentId)
         const object = matches[0]
-        if (matches.length !== 1 || !object || object.attachmentId !== null || object.objectId !== digest
+        if (matches.length !== 1 || !object || object.objectId !== digest
           || object.providerVersion !== digest || object.ciphertextSha256 !== digest || object.keyId !== key.keyId
           || object.plaintextSha256 !== item.plaintextHash || object.sizeBytes !== String(item.bytes.byteLength)
           || object.ownerKind !== owner.ownerKind || object.ownerId !== owner.ownerId || object.ownerFence !== owner.ownerFence) refuse()
         await verifyRecoveryArchiveObjectReceipt(query, object)
+      }
+      for (const attachment of attachments) {
+        const object = objects.find((item) => item.attachmentId === attachment.attachmentId)!
+        await query(`INSERT INTO meta_recovery_archive_attachment_refs
+          (generation_id,attachment_id,reference_class,reference_state,availability,content_sha256,immutable_version,content_size_bytes)
+          VALUES ($1::uuid,$2,'archive_object','verified','available',$3,$4,$5::bigint)`,
+        [owner.generationId, attachment.attachmentId, attachment.plaintextSha256, object.providerVersion, String(attachment.sizeBytes)])
+        await query(`DELETE FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`, [owner.generationId, attachment.attachmentId])
       }
       for (const { payload: item } of coverage) {
         await query(`INSERT INTO meta_recovery_archive_coverage_items
