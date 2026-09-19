@@ -3063,9 +3063,27 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    *   - the emit chain:    `emitEvent` → `plugin-manager.ts:588-592` → `index.ts:1245`
    *                        → `EventBus.emit` (`event-bus.ts:70-72`) → `dispatch` (`:27-38`) — every
    *                        hop returns `void`, and each subscriber is additionally wrapped in the
-   *                        bus's own `try`/`catch` (`:43-50`).
-   * ⇒ a listener bug surfaces at `deliverCancelRoundCancelledEventPostCommit`'s `try` as a
-   *   SYNCHRONOUS throw, which is exactly what the first case injects.
+   *                        bus's own `try`/`catch` (`:46-50`).
+   * ⇒ a throw FROM THE DELIVERY HOP ITSELF surfaces at
+   *   `deliverCancelRoundCancelledEventPostCommit`'s `try` as a SYNCHRONOUS throw, which is exactly
+   *   what the first case injects.
+   *
+   * ── ⚠️ CORRECTION (2026-09-19, round-3 full gate P2-1 + P3-5) — comment only, no assertion moved. ──
+   * The line above used to read 「a LISTENER bug surfaces at … `:13406`'s `try`」. Both halves were wrong:
+   *   - the line number: the delivery's `try` is at `ApprovalProductService.ts:13479` (`catch` `:13481`,
+   *     block ends `:13486`). `:13406` belongs to a DIFFERENT method, `enqueueApprovalTaskCreatedEventsInTxn`.
+   *   - the mechanism (the part that matters): a listener bug CANNOT reach that `try` at all.
+   *     `event-bus.ts`'s `subscribe()` wraps EVERY handler in the bus's OWN `try`/`catch`
+   *     (`:46-50`, the `catch` only `logger.error`s) and registers that WRAPPER — not the handler —
+   *     via `this.emitter.on(pattern, wrapper)` (`:56`). A subscriber's exception is swallowed by
+   *     the bus and never propagates back up the emit chain.
+   *   The census rows just above already stated this fact correctly; it was the CONCLUSION that
+   *   mis-attributed it. Nothing about these cases is weakened: the injected shape (the delivery
+   *   function itself throwing synchronously) is still the faithful model of 「this hop throws」,
+   *   and M-PC1 (delete the `:13479-13486` try/catch ⇒ case (a) goes `expected 500 to be 200`)
+   *   proves that try/catch is load-bearing. What changes is only WHAT it defends against: a throw
+   *   from the delivery hop itself, not 「a listener has a bug」 — listeners are independently
+   *   isolated by the bus, so this try/catch is defence in depth for them, not their only guard.
    *
    * ── ⚠️ THE RAW `file:line` REFS IN THIS BLOCK ARE PINNED TO `4ded8c2bb` (POST-REBASE). ───────
    * The hazard this warning was written for ALREADY FIRED, mid-task: the merge train
@@ -3074,6 +3092,20 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * block and in the MD were re-anchored and then machine-verified line by line (35/35 anchors
    * assert the expected token is on the stated line). The refs pinned to the PRE-rebase
    * `c9cad2514` are RETRACTED — do not use that commit's numbers.
+   *
+   * ⚠️ FAILED-CLAIM MARKER (2026-09-19, round-3 full gate P2-1) — it voids the two universal
+   * quantifiers in the sentence above, and nothing else in this block.
+   * The 79/35-35 sentence is THAT pass's own self-report, not a verified fact at this head. A
+   * repo-wide census run at the delivery head `92d7bade24`
+   * (`grep -rn "13406\|13413" --include="*.md" --include="*.ts" --include="*.cjs" --include="*.mjs" .`,
+   * node_modules excluded) returns EXACTLY 2 hits, both in the verification MD — the same construct
+   * this very comment got wrong, which that pass fixed in the design MD (§D1 → `:13479-13486`) and
+   * missed here and there. So 「ALL 79 re-anchored」 and 「machine-verified 35/35」 do not hold: if
+   * those 2 were inside the 35 the reading was false, and if they were outside, the denominator was
+   * quietly shrunk. Both MD hits and this block's own bad ref are corrected in the same round; see
+   * the verification MD's 「第 3 轮记录修正(2026-09-19)」 for the commands and their raw output.
+   * The rest of that pass's re-anchoring is NOT voided by this marker — the refs independently
+   * re-derived this round (`:11011`, `:11656`, `:13479-13486`, `event-bus.ts:46-50`) are recorded there.
    *
    * It will fire again on the next rebase. This branch litigated the same thing once before
    * (`acfab57e7`, 「convert stale ApprovalProductService.ts line refs to symbol anchors」), so the
@@ -3329,9 +3361,13 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         // WHY THAT GATE AND NOT THE TERMINAL-STATUS ONE — measured, because the prediction was
         // wrong and a corrected prose claim would be unfalsifiable: the redemption's terminal
         // advance left the round instance with no ACTIVE seat, so the authorization gate answers
-        // first and `:11583` is never reached. Asserted as the whole grouped population, so a
-        // future change that leaves a seat active goes red here instead of silently re-routing (c)
-        // to a different guard.
+        // first and the terminal-status gate `instance.status !== 'pending'`
+        // (`ApprovalProductService.ts:11656`) is never reached. Asserted as the whole grouped
+        // population, so a future change that leaves a seat active goes red here instead of
+        // silently re-routing (c) to a different guard.
+        // ⚠️ 2026-09-19 (round-3 full gate P3-2): this comment used to name `:11583`, which is
+        //   `await client.query(` — an `UPDATE approval_assignments` inside the revoke branch, not
+        //   the terminal gate. Comment-only correction; the assertions below are untouched.
         const seats = await pool().query<{ is_active: boolean; n: string }>(
           `SELECT is_active, count(*)::text AS n FROM approval_assignments
             WHERE instance_id = $1 GROUP BY is_active ORDER BY is_active`,
