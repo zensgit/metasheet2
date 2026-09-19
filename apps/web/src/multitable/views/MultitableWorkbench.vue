@@ -558,6 +558,7 @@
       :visible="batchRestore.visible"
       :phase="batchRestore.phase"
       :loading="batchRestore.loading"
+      :executing="batchRestoreExecuting"
       :target-version="batchRestore.targetVersion"
       :preview-records="batchRestore.records"
       :restorable-count="batchRestore.restorableCount"
@@ -3131,12 +3132,13 @@ const batchRecordLabel = (recordId: string): string => {
 // Monotonic token: rapid Advanced version-switching (v3 → v4) can resolve out of order — only the LAST request's
 // response may land, or a slow v3 could overwrite v4's preview (wrong diff shown / identity mismatch at confirm).
 let batchPreviewSeq = 0
+const batchRestoreExecuting = computed(() => batchRestore.value.loading && batchRestore.value.identity !== null)
 watch(
   [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
-  onBatchRestoreCancel,
+  invalidateBatchRestore,
   { flush: 'sync' },
 )
-onBeforeUnmount(onBatchRestoreCancel)
+onBeforeUnmount(invalidateBatchRestore)
 async function runBatchPreview(version: number) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
@@ -3199,6 +3201,10 @@ function onBatchRestoreDone() {
   onBatchRestoreCancel()
 }
 function onBatchRestoreCancel() {
+  if (batchRestoreExecuting.value) return
+  invalidateBatchRestore()
+}
+function invalidateBatchRestore() {
   batchPreviewSeq++
   batchRestore.value = { visible: false, phase: 'preview', loading: false, targetVersion: 1, recordIds: [], records: [], scope: [], restorableCount: 0, skippedCount: 0, executable: false, identity: null, resultRecords: [], restoredCount: 0 }
 }

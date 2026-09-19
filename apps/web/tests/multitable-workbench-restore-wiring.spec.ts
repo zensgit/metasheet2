@@ -547,6 +547,23 @@ describe('MultitableWorkbench BATCH-restore handler wiring (bulk → preview →
     expect(capturedBatchDialogAttrs!.visible).toBe(false)
   })
 
+  it('ignores cancel during accepted batch execution and still displays its result', async () => {
+    const open = await mountAndGetBulkRestore()
+    await open(['A', 'C']); await flushUi()
+    let resolve!: (value: unknown) => void
+    workbenchMock.client.restoreBatchExecute.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const pending = (capturedBatchDialogAttrs!.onConfirm as () => Promise<void>)()
+    await flushUi()
+    ;(capturedBatchDialogAttrs!.onCancel as () => void)()
+    await flushUi()
+    expect(capturedBatchDialogAttrs!.visible).toBe(true)
+    resolve({ records: [], restoredCount: 2, skippedCount: 0 })
+    await pending; await flushUi()
+    expect(capturedBatchDialogAttrs!.phase).toBe('result')
+    expect(gridMock.loadViewData).toHaveBeenCalledTimes(1)
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['cancel', 'roundtrip', 'unmount'])('drops a pending batch preview error after %s', async (action) => {
     const open = await mountAndGetBulkRestore()
     let reject!: (error: Error) => void
