@@ -4747,8 +4747,14 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 
 ### 7.1 机制(file:line,逐条 `grep -n` 核过)
 
-> ⚠️ **本节所有裸 `file:line` 绑定提交 `c9cad2514`(父 `51e1f4210`)。** C-2 还要由合并列车
-> `rebase --onto` 到新 C-1,届时行号**全部**失效。本分支为同一件事改过一次
+> ⚠️ **本节所有裸 `file:line` 绑定 rebase **之后**的树:基点 `4ded8c2bb`(C-2 接上新 C-1)。**
+>
+> **这条警告写下当天就应验了。** 本切片写作期间,合并列车把 C-2 `rebase --onto` 到了新 C-1,
+> 行号**全部**位移(`deliver…` `:12688`→`:12761`、内层门 `:19398`→`:19425`,等等)。
+> 本节与设计 MD、测试注释里共 **79 处**引用已全部重锚,并**逐行机器核验**(35/35 锚点断言
+> 目标行确实含预期符号)。**此前绑定 `c9cad2514`(rebase 前)的行号一律撤回,不得再用。**
+>
+> 下次 rebase 会再犯。本分支为同一件事改过一次
 > (`acfab57e7`「convert stale ApprovalProductService.ts line refs to symbol anchors」),故此处同时给出
 > **符号锚点**,重核请认符号不认数字:`deliverCancelRoundCancelledEventPostCommit`、
 > `supersedeCardDeliveriesPostCommit`、`emitApprovalTaskCreatedEventsPostCommit`、
@@ -4759,29 +4765,29 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 
 | 位置 | file:line |
 |---|---|
-| `COMMIT` | `packages/core-backend/src/services/ApprovalProductService.ts:12667` |
-| ① 任务创建事件(提交后) | `:12668` → 方法体 `:13301-13302`,**内部整体 try/catch → logger.warn** |
-| ② 卡片 supersede(提交后) | `:12681` → 方法体 `:13359-13361`,**方法第一句就是 `try {`** |
-| ③ **取消宣告投递** | `:12688` → 方法体 `:13392`,**`try` 在 `:13406`,`catch → logger.warn` 至 `:13413`** |
-| 区段共用的外层 catch | `:12699`(`rollbackQuietly` → 重抛) |
+| `COMMIT` | `packages/core-backend/src/services/ApprovalProductService.ts:12740` |
+| ① 任务创建事件(提交后) | `:12741` → 方法体 `:13374-13375`,**内部整体 try/catch → logger.warn** |
+| ② 卡片 supersede(提交后) | `:12754` → 方法体 `:13432-13434`,**方法第一句就是 `try {`** |
+| ③ **取消宣告投递** | `:12761` → 方法体 `:13465`,**`try` 在 `:13406`,`catch → logger.warn` 至 `:13413`** |
+| 区段共用的外层 catch | `:12772`(`rollbackQuietly` → 重抛) |
 
 **重试拒绝的三道门(串联,本轮实测确认顺序)**
 
 | 顺位 | 门 | file:line | 实测答复 |
 |---|---|---|---|
-| 1 | 授权门 `actorCanAct` | `:10938-10940` | **403 `APPROVAL_ASSIGNMENT_REQUIRED`** |
-| 2 | 终态门 `instance.status !== 'pending'` | `:11583-11589` | 409 `INVALID_STATUS_TRANSITION`(「current status is approved」) |
+| 1 | 授权门 `actorCanAct` | `:11011-11013` | **403 `APPROVAL_ASSIGNMENT_REQUIRED`** |
+| 2 | 终态门 `instance.status !== 'pending'` | `:11656-11662` | 409 `INVALID_STATUS_TRANSITION`(「current status is approved」) |
 | 3 | 活动节点门 | 兑现后无活动节点 | 409 `INVALID_STATUS_TRANSITION`(「Approval does not have an active node」) |
 
 **余额冲销(考勤插件)**
 
 | 角色 | file:line |
 |---|---|
-| 冲销函数 | `plugins/plugin-attendance/index.cjs:19392` `reverseLeaveBalanceDeduction` |
-| ├ **内层幂等门** | `:19393-19397` 读同 `source_id` 的 `reverse` 行 → **`:19398` 命中即返回 `alreadyReversed:true`** |
-| ├ 扫描分支 | `:19400-19409`(过期谓词在 `:19403`)、`:19427` `restore = min(deducted, headroom)` |
-| └ 扫描分支的返回 | `:19445`,**恒 `alreadyReversed:false`** |
-| 唯一调用点 | `:35303` `if (approvedLeave)` → `:35304`;同事务的状态写在 `:35288-35296` |
+| 冲销函数 | `plugins/plugin-attendance/index.cjs:19419` `reverseLeaveBalanceDeduction` |
+| ├ **内层幂等门** | `:19420-19424` 读同 `source_id` 的 `reverse` 行 → **`:19425` 命中即返回 `alreadyReversed:true`** |
+| ├ 扫描分支 | `:19427-19436`(过期谓词在 `:19430`)、`:19454` `restore = min(deducted, headroom)` |
+| └ 扫描分支的返回 | `:19472`,**恒 `alreadyReversed:false`** |
+| 唯一调用点 | `:35334` `if (approvedLeave)` → `:35335`;同事务的状态写在 `:35319-35327` |
 
 ---
 
@@ -4793,7 +4799,7 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 | 跳 | file:line | 返回 |
 |---|---|---|
 | 合同 | `attendance-cancellation-execution-port.ts:306-309` | `(…) => void`,**不是** `Promise<void>` |
-| **唯一**绑定方 | `plugins/plugin-attendance/index.cjs:35831-35835` → 非 async 箭头 `emitRequestCancelledEventForOutcomeV1`(`:25026-25036`) | `boolean` |
+| **唯一**绑定方 | `plugins/plugin-attendance/index.cjs:35862-35866` → 非 async 箭头 `emitRequestCancelledEventForOutcomeV1`(`:25057-25067`) | `boolean` |
 | 插件 emit | `plugin-manager.ts:588-592` → `index.ts:1245` | `void` |
 | 总线 | `event-bus.ts:70-72` `emit` → `:27-38` `dispatch` | `void`;每个订阅者另有 `:43-50` 的 try/catch |
 
@@ -4804,7 +4810,7 @@ packages/core-backend/src/core/attendance-cancellation-execution-port.ts:314   #
 packages/core-backend/src/core/attendance-cancellation-execution-port.ts:324   # unregister 定义(子串命中)
 packages/core-backend/src/types/plugin.ts:1588                                 # 插件 API 接口声明
 packages/core-backend/src/index.ts:2769                                        # 宿主透传
-plugins/plugin-attendance/index.cjs:35832                                      # ★ 唯一真正喂入函数的一处
+plugins/plugin-attendance/index.cjs:35863                                      # ★ 唯一真正喂入函数的一处
 ```
 
 ⚠️ 这里用全仓普查而不是 `grep -c … plugins/plugin-attendance/index.cjs`:后者只数一个文件,
@@ -4840,10 +4846,10 @@ plugins/plugin-attendance/index.cjs:35832                                      #
 
 | # | 落点 | 改动 | 实测 |
 |---|---|---|---|
-| **M-PC1** | `ApprovalProductService.ts:13406-13413` | 删掉投递的 try/catch,只留裸 `deliver(...)` | **恰 1 红**,红在 P3-1 的 **(a)**:`expected 500 to be 200`,体 `{"code":"APPROVAL_ACTION_DISPATCH_FAILED"}`。其余 26 绿 |
-| **M-PC2** | `:10938` 授权门 | `if (false && …)` | **恰 2 红**,两条都红在 **(c)**:`expected 409 to be 403`(落到第 2 道门 `INVALID_STATUS_TRANSITION`)。其余 25 绿 |
+| **M-PC1** | `ApprovalProductService.ts:13479-13486` | 删掉投递的 try/catch,只留裸 `deliver(...)` | **恰 1 红**,红在 P3-1 的 **(a)**:`expected 500 to be 200`,体 `{"code":"APPROVAL_ACTION_DISPATCH_FAILED"}`。其余 26 绿 |
+| **M-PC2** | `:11011` 授权门 | `if (false && …)` | **恰 2 红**,两条都红在 **(c)**:`expected 409 to be 403`(落到第 2 道门 `INVALID_STATUS_TRANSITION`)。其余 25 绿 |
 | **M-PC3** | M-PC2 **再叠加** `:11583` 终态门 | 两道门同时失效;为越过状态断言短路,**临时**把用例里那句状态断言降级成 `console.log`(该改动同样 `cp` 还原 + `cmp` 核过) | 重试**仍被第 3 道门拒绝**:`409 INVALID_STATUS_TRANSITION / "Approval does not have an active node"`。**residual 用例整条全绿**——即两道重试门都拆掉,提交后人口仍**逐字节不变**、escape 计数仍 1、宣告仍 0 |
-| **M-INNER** | `index.cjs:19398` | **只删幂等门那一行,保留其上的查询**(门是被测对象,读不是) | **恰 1 红**,红在 P3-2:`expected 480 to be 420` —— 第二笔 `+60` 真的写进去了。其余 26 绿,**含既有 `unrecoverableExpired` 用例**(其批次已过期 ⇒ 返还路径恒等 ⇒ 该门本就不命中),这是隔离证据 |
+| **M-INNER** | `index.cjs:19425` | **只删幂等门那一行,保留其上的查询**(门是被测对象,读不是) | **恰 1 红**,红在 P3-2:`expected 480 to be 420` —— 第二笔 `+60` 真的写进去了。其余 26 绿,**含既有 `unrecoverableExpired` 用例**(其批次已过期 ⇒ 返还路径恒等 ⇒ 该门本就不命中),这是隔离证据 |
 
 **M-PC1 正是 owner 点名的那个场景**:隔离一旦去掉,通知抛错**确实**让已提交的取消对外返回 500 ——
 可诱发重试。现实现隔离在位,所以不发生。这不是推理,是两次运行的差。
@@ -4855,7 +4861,7 @@ plugins/plugin-attendance/index.cjs:35832                                      #
 
 ### 7.5 一条被实测推翻的预测(如实登记)
 
-写用例时我预测重试会被 `:11583` 终态门以 **409** 拒绝。**实测是 `:10938` 授权门的 403**:兑现的终态推进把轮次实例的
+写用例时我预测重试会被 `:11583` 终态门以 **409** 拒绝。**实测是 `:11011` 授权门的 403**:兑现的终态推进把轮次实例的
 席位置为 inactive,`actorCanAct` 先为假,终态门根本没被走到。用例已改成断言**实测值**,并补了一条把席位分组计数
 钉成 `[{is_active:false, n:'1'}]` 的断言,让这个先后次序是**量出来的事实**而不是散文
 (`feedback_not_this_error_is_not_an_outcome_assertion`:`notEqual` 族分不清「因已终态被拒」和「因别的原因失败」)。
@@ -4865,20 +4871,20 @@ plugins/plugin-attendance/index.cjs:35832                                      #
 ### 7.6 声明范围 —— 内层 `alreadyReversed` 到底证到了什么
 
 **证到的**:内层门经**生产调用路径**被执行(HTTP approve → `dispatchAction` → `executeInExternalTransaction` →
-真适配器 → `:35303` → `reverseLeaveBalanceDeduction`),**并且对它所见的账本状态承重**(M-INNER 删门即重复冲销)。
+真适配器 → `:35334` → `reverseLeaveBalanceDeduction`),**并且对它所见的账本状态承重**(M-INNER 删门即重复冲销)。
 外层 preflight 本轮**没有**短路——该轮次的 operation id 从未 seal 过,seal 行是这次兑现自己写的(断言为 1 行 `completed`),
 所以这次是真的走进去了,不是聚焦闸 §4.2 那种 `kind='replay'` 的外层短路。
 
 **没证到的,必须写清**:这个账本状态**今天的单一调用点产生不出来**。不可产生的不是「部分冲销」——
-`headroom < deducted` 时 helper 自己就会写一条部分 `reverse`(`:19427-19430`);**不可产生的是
-「source_id X 已有 reverse 行、而请求 X 仍是 approved」**,因为 `:35288-35296` 的状态写与 `:35304` 的冲销在**同一个事务**里,
+`headroom < deducted` 时 helper 自己就会写一条部分 `reverse`(`:19454-19457`);**不可产生的是
+「source_id X 已有 reverse 行、而请求 X 仍是 approved」**,因为 `:35319-35327` 的状态写与 `:35335` 的冲销在**同一个事务**里,
 且
 
 ```
 $ grep -n "'reverse'" plugins/plugin-attendance/index.cjs
-19388:  # 文档注释
-19395:  #   内层门自己的读
-19439:  #   helper 唯一的 INSERT
+19415:  # 文档注释
+19422:  #   内层门自己的读
+19466:  #   helper 唯一的 INSERT
 ```
 
 ⇒ 全仓 `reverse` 行**只有这一个写入方**。
@@ -4917,11 +4923,11 @@ $ grep -rn "updateTable('attendance_requests')" …(含双引号变体,排除 mi
 owner 的补救小句是**有条件的**——「**若**通知抛错能让已提交的取消返回失败 …… 这是缺陷」。该条件在本 head **不成立**
 (投递自带隔离,P3-1 (a) 实测 200)。缺的是证据,证据已补。
 
-**仍然存在的是另一件事**:区段内**上游**某一步外逃 ⇒ 落进 `:12699` 的共用 catch ⇒ 投递被跳过 + 已提交的取消对外报 500。
+**仍然存在的是另一件事**:区段内**上游**某一步外逃 ⇒ 落进 `:12772` 的共用 catch ⇒ 投递被跳过 + 已提交的取消对外报 500。
 P3-1 residual 用例把它**测了出来**并用两条 ⚠️ TRIPWIRE 钉住(`toBe(500)` / 宣告 `toBe(0)`)。今天上游两个方法都自吞异常
-(`:13301-13302` / `:13359-13361`),所以**不可达**。
+(`:13374-13375` / `:13432-13434`),所以**不可达**。
 
-**建议(owner 裁,本轮不做)**:把 `:12688` 的投递上移到紧接 `:12667` 的 `COMMIT` 之后。本轮不做的理由写明:
+**建议(owner 裁,本轮不做)**:把 `:12761` 的投递上移到紧接 `:12740` 的 `COMMIT` 之后。本轮不做的理由写明:
 (i) 这会改动聚焦闸在**当前顺序**下放行的提交后次序;(ii) C-2 还要由合并列车 `rebase --onto` 到新 C-1,
 `ApprovalProductService.ts` 是冲突面;(iii) 本轮任务定位是**补证据**,不是改行为。
 一旦采纳,上述两条 TRIPWIRE 会红,**应改写成更好的值,不得删除**(`feedback_tests_freeze_change_not_approve_it`)。
@@ -5009,7 +5015,7 @@ $ git status --porcelain                                          # 只剩测试
 - **不是 C-2 的全量门审。** 本节只回应 owner 点名的两条 P3。聚焦闸 §8 列出的未求值面(纯 `legacy` / `authoritative` /
   `shadow` / `eligible` 四条 posture、真实扣减产出的形状、消费者普查、并发竞态、C-3 `blocked` 半边、R1 九处出口、
   锁序 census、DDL 审)本节**同样未碰**。
-- **(c) 只证到引擎层。** 重试被 `:10938` 拒绝在进入 cancel-round 分支之前,**没有**走 W4 operation-id 重放 preflight;
+- **(c) 只证到引擎层。** 重试被 `:11011` 拒绝在进入 cancel-round 分支之前,**没有**走 W4 operation-id 重放 preflight;
   那一层由本文件既有的 `replay` 用例与聚焦闸 §4.2 覆盖(`feedback_verified_one_link_generalised_to_the_chain`)。
 - **扣减仍是手工种的。** 与聚焦闸 §8 同一条:本节的 `deduct` 行由 fixture 直接 `INSERT`,**没有**走
   `index.cjs:38193`/`:38221` 两个真实扣减写入点。所以证的是「给定一条形状良好的 deduct 行」的行为。
