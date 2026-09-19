@@ -1452,3 +1452,20 @@ attachment restore writes or real tenant login/UAT.
 Terra high reader-only review was closed while nonterminal at the bounded cutoff;
 no independent verdict is claimed. Canonical attachment restore-write policy is
 still unchanged and the proposed expansion remains pending owner confirmation.
+
+## Unsupported Attachment Preview Diagnostic
+
+Code `e40d32fd3`: backend preview/reader 28/28; client/modal 154/154; acceptance
+tsc, web app vue-tsc, backend source lint and web source lint PASS. Web lint first
+lacked the existing vue-eslint-parser link; rerun used NODE_PATH to the already
+installed pnpm store only, with no install or dependency changes. Diff-check PASS.
+New negatives cover whole-sheet/selected-record attachment differences, including
+zero scalar writes. Positives retain identical attachments and scalar-only field
+selection. Client accepts the closed blocked reason; both UI languages explain
+it and offer no execute action. Mutation skipping attachment-field enumeration
+causes exactly two backend failures, restored GREEN; log
+`/private/tmp/tm-attachment-preview-mutation.log`.
+
+This is a diagnostic refusal, not new attachment write authority. No dedicated
+real-DB/browser proof for this latest diagnostic is claimed yet; existing HTTP
+capture and scalar browser evidence precede this checkpoint.

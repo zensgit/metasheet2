@@ -629,3 +629,14 @@ existing writable original records/attachment fields; restore archived reference
 and files; no table/record/field resurrection or permission changes; drift or
 missing evidence refuses the whole apply. This proposal is PENDING, not ratified
 by this document. No attachment restore-write implementation is authorized here.
+
+## Unsupported Attachment Preview Diagnostic
+
+Code `e40d32fd3` preserves the existing no-attachment-write policy. After fresh
+plan authorization, preview compares attachment values only in the selected
+existing record/field scope. A difference yields `unsupported_attachments`, no
+preview identity and no executable plan, before no-change classification or
+async plan persistence. It does not silently label an attachment-only difference
+as no changes. Identical attachment values and scalar-only field selections
+retain existing behavior. Chinese/English UI explains the refusal; attachment
+restore writes remain pending the separate contract.
