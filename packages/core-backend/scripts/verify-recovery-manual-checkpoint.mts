@@ -1540,6 +1540,7 @@ try {
     }
     console.log('PASS: manual bootstrap/repeat seal exact nine data hashes; real 28-row coverage replaces callback input; nonce failure leaves only historical seals')
     const drift = await continuation()
+    const beforeCustodyDrift = (await query(`SELECT data,version,updated_at FROM meta_records WHERE id='manual-source-record'`)).rows[0]
     const driftWriter = new Client({ ...connection, database })
     await driftWriter.connect()
     let driftUploads = 0
@@ -1556,7 +1557,12 @@ try {
       assert.equal(driftUploads, 0)
       assert.equal(await nonceCount(drift.owner.generationId), 0)
       assert.equal(await transaction(() => prepared.readRecoveryArchivePreparedCapture(query, drift.owner)), null)
-    } finally { await driftWriter.end() }
+    } finally {
+      // This adversarial direct write has no history event; do not leak it into later archive fixtures.
+      await driftWriter.query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
+        [JSON.stringify(beforeCustodyDrift.data), beforeCustodyDrift.version, beforeCustodyDrift.updated_at])
+      await driftWriter.end()
+    }
     console.log('PASS: separate-connection source change during custody refuses reservation, prepared persistence and upload')
     console.log('PASS: server-owned ten-row nonce transaction; caller sink ignored; last-row conflict rolls back earlier nine, no prepared ciphertext/upload; resume keeps original reservations')
   } finally { sourceKey.fill(0) }
@@ -1767,6 +1773,9 @@ try {
   const attachmentKey = randomBytes(32)
   const attachmentCustody = { ...custody,
     async produceGenerationDek() { return { dek: Buffer.from(attachmentKey), wrappedDekId: 'synthetic-attachment-wrapped', wrappedDek: randomBytes(64) } },
+    async unwrapGenerationDek(input: { wrappedDekId: string; wrappedDek: Uint8Array }) {
+      return { dek: Buffer.from(attachmentKey), wrappedDekId: input.wrappedDekId, wrappedDek: Buffer.from(input.wrappedDek) }
+    },
     async macManifestRoot({ preimage }: { preimage: Uint8Array }) { return createHmac('sha256', attachmentKey).update(preimage).digest() },
     async verifyManifestRootMac({ preimage, mac }: { preimage: Uint8Array; mac: Uint8Array }) {
       return createHmac('sha256', attachmentKey).update(preimage).digest().equals(Buffer.from(mac))
@@ -1847,6 +1856,35 @@ try {
     assert.equal(finalObjects.length, 11 + syntheticAttachments.length)
     assert.ok(finalObjects.every((row) => row.state === 'verified'))
     for (const ref of archiveReferences) assert.equal(ref.immutable_version, finalObjects.find((row) => row.attachment_id === ref.attachment_id).provider_version)
+    const attachmentReader = require('../src/multitable/recovery-archive-reader.ts') as typeof import('../src/multitable/recovery-archive-reader')
+    const attachmentPreview = require('../src/multitable/recovery-archive-preview.ts') as typeof import('../src/multitable/recovery-archive-preview')
+    const readAuthority = await attachmentPreview.loadRecoveryArchiveAuthorityInternal(uploadInput.transaction, {
+      ...attachmentCapture.identity, generationId: attachmentCapture.owner.generationId, recheckAuthority: async () => true,
+    })
+    const readInput = { selectedBinding: readAuthority.selectedBinding, manifestObject: readAuthority.manifestObject,
+      sectionObjects: readAuthority.sectionObjects, attachmentObjects: readAuthority.attachmentObjects,
+      keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider }
+    const openedAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionsInternal(readInput)
+    const completeAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput, query })
+    assert.deepEqual(Object.keys(openedAttachments).sort(), ['manifest', 'sections'])
+    for (const row of syntheticAttachments) {
+      const binary = attachmentReader.readRecoveryArchiveAttachmentBytes(openedAttachments, row.id)
+      assert.deepEqual(binary.bytes, Buffer.from(`synthetic-${row.id}`))
+      binary.bytes.fill(0)
+      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(openedAttachments, row.id).bytes, Buffer.from(`synthetic-${row.id}`))
+      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id).bytes, Buffer.from(`synthetic-${row.id}`))
+    }
+    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionsInternal({ ...readInput, attachmentObjects: [] }),
+      { message: 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID' })
+    const swappedObjects = readAuthority.attachmentObjects!.map((item, index, all) => ({ ...item, binding: all[(index + 1) % all.length]!.binding }))
+    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionsInternal({ ...readInput, attachmentObjects: swappedObjects }))
+    const brokenObjectId = readAuthority.attachmentObjects![0]!.binding.objectId
+    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionsInternal({ ...readInput,
+      objectStore: { ...attachmentProvider, get: async (request: Parameters<typeof attachmentProvider.get>[0]) => {
+        if (request.objectId === brokenObjectId) throw new Error('SYNTHETIC_PRIVATE_MISSING_ATTACHMENT')
+        return attachmentProvider.get(request)
+      } } }), { message: 'RECOVERY_ARCHIVE_READER_OBJECT_STORE_FAILED' })
+    console.log('PASS: public archive authority includes exact attachments; reader authenticates/decrypts live/deleted binary frames with defensive private byte copies; missing/swapped objects refuse')
     console.log('PASS: live/deleted source files form authenticated attachment index and exact 10+N nonce reservations; caller attachment substitution ignored; durable interrupted capture resumes without reread/reseal')
     console.log('PASS: missing manifest refuses publication and retains source pins; complete attachment roster atomically verifies catalog/receipts/archive refs and releases only its own source pins')
   } finally { attachmentKey.fill(0) }

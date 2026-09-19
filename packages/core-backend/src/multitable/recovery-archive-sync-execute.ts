@@ -132,6 +132,7 @@ export async function executeRecoveryArchiveSync(
         transactionDepth: runtime.transactionDepth,
         manifestObject: archive.manifestObject,
         sectionObjects: archive.sectionObjects,
+        ...(archive.attachmentObjects ? { attachmentObjects: archive.attachmentObjects } : {}),
       },
       selectedRecordIds,
       selectedFieldIds,

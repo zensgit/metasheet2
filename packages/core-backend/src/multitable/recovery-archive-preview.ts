@@ -143,6 +143,7 @@ type ObjectRow = {
   object_id?: unknown
   object_class?: unknown
   section_name?: unknown
+  attachment_id?: unknown
   key_id?: unknown
   provider_version?: unknown
   ciphertext_sha256?: unknown
@@ -162,6 +163,7 @@ export type LoadedArchiveAuthority = {
   keyId: string
   manifestObject: RecoveryArchiveObjectExpectedBinding
   sectionObjects: readonly RecoveryArchiveObjectExpectedBinding[]
+  attachmentObjects?: readonly { attachmentId: string; binding: RecoveryArchiveObjectExpectedBinding }[]
 }
 
 /**
@@ -190,6 +192,7 @@ export async function previewRecoveryArchive(
       transactionDepth: runtime.transactionDepth,
       manifestObject: archive.manifestObject,
       sectionObjects: archive.sectionObjects,
+      ...(archive.attachmentObjects ? { attachmentObjects: archive.attachmentObjects } : {}),
       query,
     })
   } catch (error) {
@@ -541,12 +544,12 @@ export async function loadRecoveryArchiveAuthorityInternal(
     })
     const keyId = opaque(row.key_id)
     const objectResult = await query(
-      `SELECT generation_id::text AS generation_id, object_id, object_class, section_name,
+      `SELECT generation_id::text AS generation_id, object_id, object_class, section_name, attachment_id,
               key_id, provider_version, ciphertext_sha256, size_bytes::text AS size_bytes
          FROM public.meta_recovery_archive_objects
         WHERE generation_id = $1::uuid
           AND state = 'verified'
-          AND object_class IN ('manifest', 'section')
+          AND object_class IN ('manifest', 'section', 'attachment')
         ORDER BY object_class, section_name NULLS FIRST`,
       [selectedBinding.generationId],
     )
@@ -559,6 +562,10 @@ export async function loadRecoveryArchiveAuthorityInternal(
     const manifests = objects.filter((candidate) => candidate.objectClass === 'manifest')
     if (manifests.length !== 1) fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
     const sections = objects.filter((candidate) => candidate.objectClass === 'section')
+    const attachments = objects.filter((candidate) => candidate.objectClass === 'attachment')
+    if (new Set(attachments.map((candidate) => candidate.attachmentId)).size !== attachments.length) {
+      fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
+    }
     const sectionByName = new Map(
       sections.map((candidate) => [candidate.sectionName, candidate.binding] as const),
     )
@@ -576,6 +583,9 @@ export async function loadRecoveryArchiveAuthorityInternal(
       sectionObjects: Object.freeze(
         RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((name) => sectionByName.get(name)!),
       ),
+      ...(attachments.length ? { attachmentObjects: Object.freeze(attachments.map((item) => ({
+        attachmentId: item.attachmentId!, binding: item.binding,
+      }))) } : {}),
     })
   })
 }
@@ -590,10 +600,10 @@ function objectBinding(
     fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
   }
   const objectClass = row.object_class
-  if (objectClass !== 'manifest' && objectClass !== 'section') {
+  if (objectClass !== 'manifest' && objectClass !== 'section' && objectClass !== 'attachment') {
     fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
   }
-  const sectionName = objectClass === 'manifest'
+  const sectionName = objectClass !== 'section'
     ? row.section_name === null ? null : fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
     : typeof row.section_name === 'string' && RECOVERY_ARCHIVE_V1_SECTION_NAMES.includes(row.section_name as never)
       ? row.section_name
@@ -601,6 +611,7 @@ function objectBinding(
   return Object.freeze({
     objectClass,
     sectionName,
+    attachmentId: objectClass === 'attachment' ? opaque(row.attachment_id) : null,
     binding: Object.freeze({
       generationId,
       objectId: sha(row.object_id),

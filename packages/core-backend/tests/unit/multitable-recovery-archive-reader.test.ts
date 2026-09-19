@@ -48,6 +48,7 @@ import {
   RecoveryArchiveReaderError,
   readRecoveryArchiveCompleteSectionState,
   readRecoveryArchiveCompleteSectionsInternal,
+  readRecoveryArchiveAttachmentBytes,
   type RecoveryArchiveReaderErrorCode,
   type RecoveryArchiveSelectedBinding,
 } from '../../src/multitable/recovery-archive-reader'
@@ -178,7 +179,8 @@ function makeBinding(generationId: string): RecoveryArchiveManifestBinding {
   }
 }
 
-function makePlan() {
+type FixtureAttachment = { id: string; bytes: Buffer; deleted: boolean }
+function makePlan(attachments: FixtureAttachment[] = []) {
   const nonces = Object.fromEntries(
     RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((name, index) => [
       name,
@@ -196,7 +198,9 @@ function makePlan() {
       field_value_tombstones: [],
       link_tombstones: [],
       auto_number: [],
-      attachments_index: [],
+      attachments_index: attachments.map((item) => ({ attachment_id: item.id, record_id: null, field_id: null,
+        immutable_object_version: `sha256:${digest(item.bytes)}`, plaintext_sha256: digest(item.bytes),
+        size_bytes: String(item.bytes.length), media_type: 'application/octet-stream', deleted: item.deleted })),
       permission_evidence: [],
       views_config: [],
     },
@@ -212,6 +216,7 @@ type DurableArchive = {
   envelopeSha256: string
   sectionObjects: readonly Uint8Array[]
   manifest: RecoveryArchiveManifest
+  attachmentObjects?: { attachmentId: string; bytes: Uint8Array }[]
 }
 
 async function buildDurableArchive(options: {
@@ -220,12 +225,13 @@ async function buildDurableArchive(options: {
   mutateManifest?: (manifest: RecoveryArchiveManifest) => RecoveryArchiveManifest
   tamperSignedManifest?: (manifest: RecoveryArchiveManifest) => RecoveryArchiveManifest
   replaceRecordsPlaintext?: Uint8Array
+  attachments?: FixtureAttachment[]
 } = {}): Promise<DurableArchive> {
   const generationId = randomUUID()
   const binding = makeBinding(generationId)
   const produceCustody = options.local ?? createBoundCustody({ produceDek: randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES) })
   const keyId = options.local?.keyId ?? KEY_ID
-  const plan = makePlan()
+  const plan = makePlan(options.attachments)
   const sections = plan.map((section) => {
     if (options.replaceRecordsPlaintext && section.sectionName === 'records') {
       return {
@@ -257,6 +263,8 @@ async function buildDurableArchive(options: {
     transactionDepth: depthProbe(0),
     dekSource: { kind: 'produce' },
     sections,
+    attachments: options.attachments?.map((item) => ({ attachmentId: item.id,
+      sourceVersion: `sha256:${digest(item.bytes)}`, plaintext: item.bytes, nonce: randomBytes(12) })),
     reserveNonces: async () => {},
   })
 
@@ -383,7 +391,10 @@ async function buildDurableArchive(options: {
     manifest = envelope.manifest
   }
 
-  return { generationId, binding, envelopeBytes, envelopeSha256, sectionObjects, manifest }
+  return { generationId, binding, envelopeBytes, envelopeSha256, sectionObjects, manifest,
+    ...(sealResult.sealedAttachments?.length ? { attachmentObjects: sealResult.sealedAttachments.map((item) => ({
+      attachmentId: item.attachmentId, bytes: Buffer.concat([item.nonce, item.ciphertext, item.authTag]),
+    })) } : {}) }
 }
 
 const RECOVERY_ARCHIVE_V1_AEAD_ALGORITHM_VALUE = 'aes-256-gcm' as const
@@ -396,6 +407,7 @@ async function persistDurable(
   selectedBinding: RecoveryArchiveSelectedBinding
   manifestObject: RecoveryArchiveObjectExpectedBinding
   sectionObjects: RecoveryArchiveObjectExpectedBinding[]
+  attachmentObjects?: { attachmentId: string; binding: RecoveryArchiveObjectExpectedBinding }[]
 }> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d4-reader-'))
   temporaryRoots.push(root)
@@ -438,8 +450,21 @@ async function persistDurable(
       expectedExpiresAt: put.object.expiresAt,
     })
   }
+  const attachmentObjects = []
+  for (const item of durable.attachmentObjects ?? []) {
+    const put = await objectStore.put({ generationId: durable.generationId,
+      objectId: objectId(durable.generationId, `attachment:${item.attachmentId}`), version: '1',
+      sha256: digest(item.bytes), size: String(item.bytes.length), expiresAt: durable.manifest.expires_at,
+      pinned: true, bytes: item.bytes })
+    attachmentObjects.push({ attachmentId: item.attachmentId, binding: {
+      generationId: put.object.generationId, objectId: put.object.objectId,
+      expectedVersion: put.object.version, expectedSha256: put.object.sha256,
+      expectedSize: put.object.size, expectedExpiresAt: put.object.expiresAt,
+    } })
+  }
   return {
     objectStore,
+    ...(attachmentObjects.length ? { attachmentObjects } : {}),
     selectedBinding: {
       generationId: durable.binding.archive_generation_id,
       workspaceId: durable.binding.workspace_id,
@@ -472,6 +497,40 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test('authenticates attachment bytes privately and rejects absent, swapped and AEAD-corrupt objects', async () => {
+    const attachments = [
+      { id: 'att-live', bytes: Buffer.from([0, 255, 1, 2]), deleted: false },
+      { id: 'att-deleted', bytes: Buffer.from([128, 0, 3, 4]), deleted: true },
+    ]
+    const durable = await buildDurableArchive({ attachments })
+    const stored = await persistDurable(durable)
+    const input = { ...stored, keyCustody: createBoundCustody(), transactionDepth: depthProbe(0) }
+    const opened = await readRecoveryArchiveCompleteSectionsInternal(input)
+    expect(Object.keys(opened).sort()).toEqual(['manifest', 'sections'])
+    for (const item of attachments) {
+      const copy = readRecoveryArchiveAttachmentBytes(opened, item.id)
+      expect(copy.bytes).toEqual(item.bytes)
+      copy.bytes.fill(0)
+      expect(readRecoveryArchiveAttachmentBytes(opened, item.id).bytes).toEqual(item.bytes)
+    }
+    expect(() => readRecoveryArchiveAttachmentBytes({ ...opened }, 'att-live')).toThrow('RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
+    await expect(readRecoveryArchiveCompleteSectionsInternal({ ...input,
+      attachmentObjects: [...stored.attachmentObjects!, { ...stored.attachmentObjects![0]!, attachmentId: 'att-unlisted' }],
+    })).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID' })
+    await expect(readRecoveryArchiveCompleteSectionsInternal({ ...input, attachmentObjects: [] }))
+      .rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID' })
+    await expect(readRecoveryArchiveCompleteSectionsInternal({ ...input,
+      attachmentObjects: stored.attachmentObjects!.map((item, index, all) => ({ ...item, binding: all[1 - index]!.binding })),
+    })).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_READER_AEAD_OPEN_FAILED' })
+    const corrupt = { ...durable, attachmentObjects: durable.attachmentObjects!.map((item, index) => {
+      const bytes = Buffer.from(item.bytes)
+      if (index === 0) bytes[bytes.length - 1] ^= 1
+      return { ...item, bytes }
+    }) }
+    const corruptStored = await persistDurable(corrupt)
+    await expect(readRecoveryArchiveCompleteSectionsInternal({ ...input, ...corruptStored }))
+      .rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_READER_AEAD_OPEN_FAILED' })
+  })
   test('reopens persistent archive and encrypted custody roots, refusing missing or wrong recovery components', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-local-reopen-'))
     temporaryRoots.push(root)
