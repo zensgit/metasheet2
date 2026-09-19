@@ -548,6 +548,15 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     }
   }
 
+  /** Trusted launcher capability only; deliberately absent from service/plugin instances. */
+  static resolveLocalRecoveryCleanup(service: StorageServiceImpl): Readonly<{
+    retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void>
+  }> | undefined {
+    const provider = service.provider
+    if (!(provider instanceof LocalStorageProvider)) return undefined
+    return Object.freeze({ retireRecoveryAttachment: provider.retireRecoveryAttachment.bind(provider) })
+  }
+
   async upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile> {
     try {
       // 检查文件大小（如果是 Buffer）

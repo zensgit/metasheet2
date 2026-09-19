@@ -12,6 +12,8 @@ import { createLocalCustodyBackup, resolveLocalArchiveCustody } from '../../src/
 import { createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
 import { provisionRecoveryArchiveFileRoot } from '../../src/multitable/recovery-archive-file-store'
 import type { RecoveryArchiveApplicationDatabaseRuntime } from '../../src/multitable/recovery-archive-application'
+import { LocalStorageProvider, StorageServiceImpl } from '../../src/services/StorageService'
+import type { StorageProvider } from '../../src/services/StorageService'
 
 const roots: string[] = []
 const env = { MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' }
@@ -53,6 +55,49 @@ async function fixture() {
 }
 
 describe('locked local archive startup', () => {
+  it('composes cleanup from the same local attachment provider without widening the service instance', async () => {
+    const f = await fixture()
+    const provider = new LocalStorageProvider(path.join(f.root, 'attachments'))
+    const retire = vi.spyOn(provider, 'retireRecoveryAttachment').mockResolvedValue()
+    const storage = new StorageServiceImpl(provider)
+    const resolveCleanup = vi.fn(() => StorageServiceImpl.resolveLocalRecoveryCleanup(storage))
+    const local = (await prepareRecoveryLocalStartup({ ...f.input,
+      resolveAttachmentStorage: () => storage, resolveAttachmentCleanupStorage: resolveCleanup }))!
+    try {
+      expect(resolveCleanup).toHaveBeenCalledWith(storage)
+      expect(storage).not.toHaveProperty('retireRecoveryAttachment')
+      expect(retire).not.toHaveBeenCalled()
+      expect(local.composition.attachmentCleanupStorage).toBeDefined()
+      expect(Object.isFrozen(local.composition.attachmentCleanupStorage)).toBe(true)
+      await local.composition.attachmentCleanupStorage!.retireRecoveryAttachment('owned-key', 'owned-proof')
+      expect(retire).toHaveBeenCalledWith('owned-key', 'owned-proof')
+      expect(f.database.query).not.toHaveBeenCalled()
+    } finally { local.releaseCustody(); f.secret.fill(0) }
+  })
+
+  it('does not grant cleanup to an unsupported provider with a lookalike method', () => {
+    const retireRecoveryAttachment = vi.fn()
+    const storage = new StorageServiceImpl({ retireRecoveryAttachment } as unknown as StorageProvider)
+    expect(StorageServiceImpl.resolveLocalRecoveryCleanup(storage)).toBeUndefined()
+    expect(storage).not.toHaveProperty('retireRecoveryAttachment')
+    expect(retireRecoveryAttachment).not.toHaveBeenCalled()
+  })
+
+  it.each(['throw', 'cancel'] as const)('cleanup resolution %s refuses without returning unlocked composition', async mode => {
+    const f = await fixture()
+    const supplied = Buffer.from(f.secret)
+    f.input.readSecret.mockResolvedValue(supplied)
+    const retireRecoveryAttachment = vi.fn()
+    await expect(prepareRecoveryLocalStartup({ ...f.input, resolveAttachmentCleanupStorage: () => {
+      if (mode === 'throw') throw new Error('private cleanup provider')
+      f.cancellation.abort()
+      return { retireRecoveryAttachment }
+    } })).rejects.toThrow(refusal)
+    expect(supplied.every(byte => byte === 0)).toBe(true)
+    expect(retireRecoveryAttachment).not.toHaveBeenCalled()
+    f.secret.fill(0)
+  })
+
   it('manual capture requires an explicit closed policy and never inherits numeric defaults', async () => {
     const f = await fixture()
     expect(parseRecoveryLocalStartupConfig(f.config)).not.toHaveProperty('manualCapture')
@@ -108,11 +153,14 @@ describe('locked local archive startup', () => {
     const readSecret = vi.fn()
     const resolveDatabase = vi.fn()
     const resolveAttachmentStorage = vi.fn()
+    const resolveAttachmentCleanupStorage = vi.fn()
     await expect(prepareRecoveryLocalStartup({ env: flags, configPath: '/does-not-exist',
-      signal: AbortSignal.abort(), readSecret, resolveDatabase, resolveAttachmentStorage })).resolves.toBeUndefined()
+      signal: AbortSignal.abort(), readSecret, resolveDatabase, resolveAttachmentStorage,
+      resolveAttachmentCleanupStorage })).resolves.toBeUndefined()
     expect(readSecret).not.toHaveBeenCalled()
     expect(resolveDatabase).not.toHaveBeenCalled()
     expect(resolveAttachmentStorage).not.toHaveBeenCalled()
+    expect(resolveAttachmentCleanupStorage).not.toHaveBeenCalled()
   })
 
   it('waits locked for explicit input, scrubs it, creates authentic revocable custody and real callbacks', async () => {

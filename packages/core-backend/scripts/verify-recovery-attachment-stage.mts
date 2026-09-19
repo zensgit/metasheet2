@@ -10,7 +10,7 @@ import { CompiledQuery, Kysely, PostgresDialect, sql } from 'kysely'
 const require = createRequire(import.meta.url)
 const migration = require('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages.ts') as typeof import('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages')
 const { createArchiveAttachmentStageLedger, retireExpiredArchiveAttachmentStage } = require('../src/multitable/recovery-archive-attachment-stage-ledger.ts') as typeof import('../src/multitable/recovery-archive-attachment-stage-ledger')
-const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
+const { LocalStorageProvider, StorageServiceImpl } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
 const { createRecoveryArchiveApplication } = require('../src/multitable/recovery-archive-application.ts') as typeof import('../src/multitable/recovery-archive-application')
 const { stampClaimedAttachmentPurge } = require('../src/multitable/attachment-purge-claim.ts') as typeof import('../src/multitable/attachment-purge-claim')
 const { applyVerifiedArchiveAttachmentMetadata, hashArchiveAttachmentMetadata } = require('../src/multitable/recovery-archive-attachment-apply.ts') as typeof import('../src/multitable/recovery-archive-attachment-apply')
@@ -195,6 +195,8 @@ try {
   const untouched = await cleanupLedger.reserve({ ...cleanupIdentity, attachmentId: 'expired-unstarted' })
   const late = await cleanupLedger.reserve({ ...cleanupIdentity, attachmentId: 'expired-late' })
   const storage = new LocalStorageProvider(storageRoot)
+  const cleanupStorage = StorageServiceImpl.resolveLocalRecoveryCleanup(new StorageServiceImpl(storage))
+  assert.ok(cleanupStorage)
   const key = (objectId: string) => `${objectId}/sha256-${cleanupIdentity.plaintextSha256}`
   await storage.reserveRecoveryAttachment(key(uploaded.objectId), uploaded.ownershipKey)
   await storage.uploadByKey(key(uploaded.objectId), bytes)
@@ -217,7 +219,7 @@ try {
       storageCalls++
       assert.ok(['abandoned', 'cleaned'].includes((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
         WHERE object_id=${objectId}::uuid`.execute(db!)).rows[0]?.state ?? ''))
-      await storage.retireRecoveryAttachment(path, owner)
+      await cleanupStorage.retireRecoveryAttachment(path, owner)
       if (throwAfterRetire) throw new Error('SYNTHETIC_POST_RETIRE_FAILURE')
     } },
   }), () => ({ transaction, query: purgeQuery, transactionDepthProbe: { currentTransactionDepth: () => 0 } }),
