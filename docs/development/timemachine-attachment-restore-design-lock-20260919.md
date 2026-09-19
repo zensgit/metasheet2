@@ -291,6 +291,18 @@ withdrawing an incorrect infrastructure-error-classification concern. It ran no
 tests; executable evidence remains the owned local verification. Draft/HOLD stays
 in force pending successor CI and the remaining acceptance gates above.
 
+## Field And Record Lock Acceptance
+
+Authorization acceptance follow-up at code
+`84e975b2b131c1ed0ebadde93f8f5974ca01abfa` adds production HTTP proof for
+post-preview hidden/read-only attachment fields (403) and another actor's record
+lock (409 RECORD_LOCKED). The latter preserves live attachment metadata, record
+data/version, history, token and receipt; restoring the fixture permits the
+original positive recovery. This is existing lock semantics, not an administrator
+bypass or new unlock action. Staging may prepare private attempt-owned objects
+before the canonical record-lock refusal; no zero-staging claim is made for that
+case. Cross-tenant and full Workbench acceptance remain separately open.
+
 ## Nightly Plan Boundary
 
 No real environment access is authorized by this plan. Known artifact evidence:

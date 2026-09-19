@@ -614,7 +614,31 @@ These are local evidence, not a successor remote CI verdict. No full Workbench
 login-page/grid/download-link UAT, runtime cleanup registration, real environment
 or customer data acceptance is inferred. #5882 remains Draft/HOLD.
 
-## Open Gates
+## Field And Record Lock Acceptance
+
+Additional authorization code checkpoint:
+`84e975b2b131c1ed0ebadde93f8f5974ca01abfa`, tree
+`d6253c6cbeae7d09b7ef14dee5afc49bde9f5946` (one verifier file; no production
+change). After preview, both hidden and read-only field rows independently cause
+HTTP 403 with unchanged stage count and record. An unrelated locker with no owner
+bypass causes HTTP 409 RECORD_LOCKED; live attachment metadata, record data/version,
+revision/history counts, preview-token burns and sync receipts remain unchanged.
+The fixture lock/owner fields are restored in finally; subsequent positive apply
+succeeds exactly once and downloads the original two binaries. This does not
+assert zero private staging for the canonical record-lock refusal.
+
+Full owned runner exits 0, including historical 47/59/127, four desktop/mobile
+modal loops, production login/JWT/download, cleanup/apply races and zero database
+connections/removed cluster. Core typecheck PASS; exact-anchor CI wiring 37/37
+PASS; diff-check PASS. Logs:
+`/private/tmp/tm-attachment-lock-http-realdb-20260919.log`,
+`/private/tmp/tm-attachment-lock-http-tsc-20260919.log`, and
+`/private/tmp/tm-attachment-lock-http-wiring-20260919.log`.
+No new independent reviewer or record-lock guard mutation is claimed for this
+verifier-only extension. Existing production guard behavior was exercised through
+the actual HTTP route; remote CI for the new commit is not yet certified.
+
+## Remaining Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
