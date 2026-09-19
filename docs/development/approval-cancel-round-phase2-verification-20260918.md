@@ -4745,7 +4745,15 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 
 ---
 
-### 7.1 机制(file:line,对 `51e1f4210` 之后的工作树逐条 `grep -n` 核过)
+### 7.1 机制(file:line,逐条 `grep -n` 核过)
+
+> ⚠️ **本节所有裸 `file:line` 绑定提交 `c9cad2514`(父 `51e1f4210`)。** C-2 还要由合并列车
+> `rebase --onto` 到新 C-1,届时行号**全部**失效。本分支为同一件事改过一次
+> (`acfab57e7`「convert stale ApprovalProductService.ts line refs to symbol anchors」),故此处同时给出
+> **符号锚点**,重核请认符号不认数字:`deliverCancelRoundCancelledEventPostCommit`、
+> `supersedeCardDeliveriesPostCommit`、`emitApprovalTaskCreatedEventsPostCommit`、
+> `actorCanAct` 授权抛出、`instance.status !== 'pending'` 终态门、`reverseLeaveBalanceDeduction` 的
+> `already` 门。**§7.4 的 mutation 台账同样按行号写落点,同一条警告适用。**
 
 **提交后区段(`ApprovalProductService.dispatchAction`)**
 
@@ -4874,6 +4882,30 @@ $ grep -n "'reverse'" plugins/plugin-attendance/index.cjs
 ```
 
 ⇒ 全仓 `reverse` 行**只有这一个写入方**。
+
+**⚠️ 补一条被漏掉的普查(advisor 指出,本该同时做)。** 上面那句只证了「冲销行只有一个写入方」;
+「有 reverse 行 ⇒ 请求已 cancelled」还依赖**第二个前提**:没有任何写入方能把 `attendance_requests.status`
+**倒回** `'approved'`。补做,两种语法都扫(`feedback_writer_audit_both_query_syntaxes`):
+
+```
+$ grep -rn "UPDATE attendance_requests" packages plugins apps scripts | grep -v node_modules
+  … 生产侧 5 处,全在 plugins/plugin-attendance/index.cjs:
+$ grep -rn "updateTable('attendance_requests')" …(含双引号变体,排除 migrations)      ⇒ 0
+```
+
+| 生产写入点 | 写 `status`? | 谓词 |
+|---|---|---|
+| `index.cjs:34882` | **否**(只写 work_date/metadata/approval_* 等) | — |
+| `:35320` | `'cancelled'` | `WHERE … status = $5`(取消路径,本节被测对象) |
+| `:35697` | `'rejected'` | `WHERE … status = 'pending'` |
+| **`:38045`** | **`$2`——唯一可能写出 `'approved'` 的一处** | **`WHERE … status = 'pending'`** |
+| `:38061` | **否**(只写 metadata) | `WHERE … status = 'pending'` |
+
+⇒ **结论比原先的说法更强**:唯一能产出 `'approved'` 的写入点被 `status = 'pending'` 钉死,
+所以一行 `cancelled` 在生产上**回不到** `approved`。于是「有 reverse 行 ⇒ 请求已 cancelled」成立,
+内层门在今天的生产上确实不可达。
+(⚠️ 例外只在测试里:`tests/integration/attendance-w4c3b-request-snapshots.db.test.ts:517` 有一句无谓词的
+`SET status = 'approved'`——fixture,不是生产路径,列出以免将来有人把它当反例。)
 
 **因此本轮允许的写法是**:「余额冲销的内层幂等门**已被生产路径执行**,且对该账本状态**承重**;外层 preflight 是今天挡在
 生产与这一行之间的东西。」**不得**写成无限定的「余额冲销幂等已验证」。
