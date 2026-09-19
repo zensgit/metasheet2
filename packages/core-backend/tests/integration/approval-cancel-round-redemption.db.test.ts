@@ -3067,6 +3067,17 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * ⇒ a listener bug surfaces at `deliverCancelRoundCancelledEventPostCommit`'s `try` as a
    *   SYNCHRONOUS throw, which is exactly what the first case injects.
    *
+   * ── ⚠️ THE RAW `file:line` REFS IN THIS BLOCK ARE PINNED TO `c9cad2514`. ─────────────────────
+   * C-2 is scheduled to be `rebase --onto`'d to a new C-1 by the merge train, which moves every
+   * line number below. This branch already litigated this once (`acfab57e7`, 「convert stale
+   * ApprovalProductService.ts line refs to symbol anchors」), so the anchors are named here too and
+   * a re-gate should follow the SYMBOL, not the number:
+   *   `deliverCancelRoundCancelledEventPostCommit` (the delivery + its try/catch) ·
+   *   `supersedeCardDeliveriesPostCommit` / `emitApprovalTaskCreatedEventsPostCommit` (the two
+   *   upstream post-commit steps) · the `actorCanAct` authorization throw · the
+   *   `instance.status !== 'pending'` terminal guard · `reverseLeaveBalanceDeduction`'s `already`
+   *   latch. The MD's mutation ledger names its sites by line too, and carries the same warning.
+   *
    * ── WHAT THESE CASES DELIBERATELY DO NOT DO: change production. ──────────────────────────────
    * owner's remedial clause is conditional — 「若通知抛错能让已提交的取消返回失败 … 这是缺陷」. It does
    * NOT fire at this head: the delivery is already wrapped at `ApprovalProductService.ts:13406-13413`
@@ -3426,7 +3437,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         })
         // ⚠️ TRIPWIRE (see the doc comment): today a post-COMMIT escape is reported to the caller as
         //    a failed action even though the cancellation is durable.
-        expect(approve.status).toBe(500)
+        expect(approve.status, await approve.clone().text()).toBe(500)
         // NON-VACUITY: the escape really happened, exactly once, on this instance.
         expect(escapes).toBe(1)
 
