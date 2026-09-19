@@ -863,12 +863,22 @@ flags, dispatch, deployment or real environment access.
 
 ## Outstanding Full-Scope Acceptance
 
-Default runtime readiness and cleanup registration; prepared/displaced file
+Production local startup composition is wired (see the paired runtime audit at
+`f0af8722c1`); full launcher/application acceptance is not yet certified.
+Public/background cleanup scheduling remains contract-excluded, not implicitly
+authorized. Internal expired-stage retirement is locally verified. Open items:
+prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
 remaining purge/drift/retry concurrency; async contract;
 whole-operation negatives; full Workbench login, field authorization, grid refresh
 and browser attachment download acceptance beyond the synthetic modal loop;
 required exact-head CI and independent exact-head review.
+
+Next order: prove crash reconciliation ownership without a new retention policy;
+complete real application login/org/cell-edit acceptance; audit history/config/
+trash/diagnostics against their own locks. Do not substitute repeated image-helper
+verification for these remaining gates. Gallery/mobile improvements are now
+locally verified, not proof of full Time Machine completion.
 `unsupported_attachments` remains for absent/partial ports and over-threshold
 attachment selections. Explicit test composition is not production readiness.
 

@@ -245,15 +245,40 @@ temporary directories still require reconciliation; this is not product FINAL.
 
 | Gate | Required oracle | Status |
 | --- | --- | --- |
-| Faithful recovery | Existing row/field; changed/deleted attachment reference; original bytes readable after restore; scalar peers unchanged | OPEN |
+| Faithful recovery | Existing row/field; changed/deleted attachment reference; original bytes readable after restore; scalar peers unchanged | LOCAL VERIFIED: owned HTTP/PG and saved browser bytes; not production |
 | Authorization | Second tenant, hidden/read-only field, record lock, revoked access and actor/scope substitution refuse with zero live writes | OPEN |
 | Evidence | Missing/swapped/corrupt file, wrong original record/field, missing metadata and invalid reference shape refuse whole selection | OPEN |
 | Drift/concurrency | Preview then record/field/attachment mutation; purge race; two-client execute/retry; exactly one canonical effect | OPEN |
-| Atomicity | Second file failure and last metadata/write failure leave no partial live restore; owned staging cleanup/restart proof | OPEN |
-| History | Restored reference changes have canonical sealed revision/history and visible refresh; no caller-supplied authority | OPEN |
-| Browser | Real preview/confirmation/download through production client/router and synthetic owned DB/storage, desktop/mobile | OPEN |
+| Atomicity | Second file failure and last metadata/write failure leave no partial live restore; owned staging cleanup/restart proof | PARTIAL: live transaction failures/retry verified; displaced/private-directory crash reconciliation open |
+| History | Restored reference changes have canonical sealed revision/history and visible refresh; no caller-supplied authority | LOCAL VERIFIED for original-row attachment restore; not all history/config/trash workflows |
+| Browser | Real preview/confirmation/download through production client/router and synthetic owned DB/storage, desktop/mobile | LOCAL VERIFIED for owned component loop; full application login/org/cell-edit UAT open |
 | Mutations | Remove permission, original binding, digest, drift, transactional write or cleanup ownership guard: matching test RED, restored GREEN | OPEN |
 | Integration | Focused neighbors, type/lint, required selector union, exact-head CI, independent bounded review and exact-SHA report | OPEN |
+
+### Runtime Audit at f0af8722c1
+
+This is not production sign-off. The complete local runner binds code
+`7912fb96b1c27e4efa71d167a37041bebe67e440`; documentation child
+`f0af8722c1f6e520c5a733ba51edf45552fdf467` has no product delta. Main remains
+`868c8d2b26424fcaa8405661a6999abb17ec6d93`.
+
+Confirmed wiring, not missing implementation:
+- `scripts/start-recovery-local.mts` passes the existing server attachment store
+  into `prepareRecoveryLocalStartup`, then injects its composition into MetaSheetServer.
+- `recovery-local-startup.ts::prepareRecoveryLocalStartup` unlocks custody before
+  resolving storage; failure locks the session and finally zeroes the secret.
+- `recovery-archive-application.ts::snapshotAttachmentStorage` requires/binds all
+  three functions and passes them into the route and worker runtime.
+- `recovery-archive-preview.ts` deliberately refuses incomplete ports and
+  over-threshold attachment selections; this is not an async attachment promise.
+
+Internal one-object expired-stage retirement exists with real-DB arbitration
+evidence. Public/background scheduling is explicitly excluded, not a missing
+authorized feature merely because older prose says registration OPEN.
+Displaced objects and unpublished private reservation directories remain actual
+crash-cleanup gaps. Do not delete them by guessed age, path prefix or a new
+retention default. Full application UAT, broader history/config/trash audit,
+successor exact-head CI and independent end-to-end review remain open.
 
 ## Synthetic Browser Progress
 
