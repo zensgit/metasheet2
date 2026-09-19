@@ -191,8 +191,8 @@ generic HTTP-status-only shape):
 | `CANCEL_ROUND_REQUESTER_ONLY` | 403 | `actor.userId` does not match `requester_snapshot.id` on the original instance | lock §6 (lock:157, "仅原 requester"); **implementer erratum** — lock names no code for this rejection |
 | `CANCEL_ROUND_SUITE_FORBIDDEN` (own class `CancelRoundSuiteForbiddenError extends ServiceError`) | 409 | `metadata.suite === 'forbidden'` on the original instance | lock §14.3 (lock:357, v5.8) — **lock-anchored**, dedicated error class required verbatim |
 | `CANCEL_ROUND_ALREADY_PENDING` | 409 | A `pending` round already exists for this document (pre-check, and the authoritative 23505-translation backstop on `uq_approval_rounds_pending_document`) | lock §5 I3 / §14.1 I3 discipline; erratum — no explicit code named, chosen for symmetry with the constraint it backstops |
-| `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` | 409 | The graph executor's initial-state resolution does not land on `pending`/the cancel node/≥1 assignment | fail-closed backstop per lock §14.1's "NEVER auto-approve, NEVER zero seats" discipline; erratum |
-| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one original approver is no longer eligible to hold a seat, judged by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all). `details = { ineligibleCount, reasons }` — categories only, never an id | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
+| `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` | 409 | **(a)** every `approve` row on the original carries a `system:` sentinel, so no human seat survives the namespace drop — `details = { reason: 'no_human_approver' }`, a category, never an id (gate round 6, G6-1); **(b)** the graph executor's initial-state resolution does not land on `pending`/the cancel node — no `details` (see §3.4: the "≥1 assignment" leg of (b) is unreachable, because the executor throws `400 APPROVAL_ASSIGNEE_EMPTY` first) | fail-closed backstop per lock §14.1's "NEVER auto-approve, NEVER zero seats" discipline (lock:335 席位 N ≥ 1, lock:337 I″ 至少一个活动席位); erratum. One code, two arms — a fifth code is deliberately NOT minted |
+| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one original approver is no longer eligible to hold a seat, judged by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all). `details = { ineligibleCount, reasons }` — categories only, never an id. **Judged only on claimed PERSONS**: `system:`-namespaced actors are dropped before this gate runs, so `reasons: ['not_found']` can no longer mean "a sentinel" (gate round 6, G6-1) | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
 | `CANCEL_ROUND_SUITE_UNKNOWN` | 409 | `metadata.suite` is present but outside the closed set `{attendance, leave, other, forbidden}`. `details = { allowedSuites }` — never the offending value | lock:143 (`suite ∈ {四值}`); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
 | `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` | 409 | `metadata.windowDays` is present but is not an integer in `[0, suite ceiling]`. `details = { suite, ceiling }` — never the offending value | lock:143 (`windowDays ∈ [0, 上限]`, 「由模板管理员在上限内设」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
 | `CANCEL_ROUND_CREATE_FAILED` | 500 | Post-commit read-back of the newly created approval returns nothing (should not happen; defensive) | not a lock condition — implementation defensive branch |
@@ -278,10 +278,29 @@ several conditions hold at once:
    Step 4 short-circuits the window check for `forbidden` and returns lock:143's fixed
    `windowDays = 0`, so this LOCK-ANCHORED code always wins over a window complaint for that suite.
 6. no pending round → else 409 `CANCEL_ROUND_ALREADY_PENDING`
-7. read the seat set off `approval_records(action='approve')`
-8. **`assertCancelRoundSeatsEligibleInTxn`** (lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
-9. resolver / initial-state backstop → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`
-10. first INSERT
+7. read the seat set off `approval_records(action='approve')`, **dropping `system:`-namespaced
+   sentinel actors** (gate round 6, G6-1 — shared predicate `isSystemSentinelActor`)
+8. **seat set empty after the drop** → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
+   `details.reason = 'no_human_approver'` (gate round 6, G6-1)
+9. **`assertCancelRoundSeatsEligibleInTxn`** (lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
+10. resolver / initial-state backstop → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` (no `details`)
+11. first INSERT
+
+Step 8 is an EXPLICIT check and not a fall-through to step 10, because step 10's
+`initialAssignmentCount === 0` leg is **unreachable**: with zero seats
+`ApprovalGraphExecutor.resolveInitialState` throws `400 APPROVAL_ASSIGNEE_EMPTY` from the
+`assignments.length === 0` arm of `resolveFromNode` before returning (the dedicated seed graph
+deliberately omits `emptyAssigneePolicy`). What step 10 actually guards is `initial.status !==
+'pending'` / a wrong `currentNodeKey` — a seed graph edited into auto-approving or re-routed. The
+round-6 erratum is recorded at both sites in the source; mutation R7-M2 (delete step 8) turns 负控 N3
+into a `400 APPROVAL_ASSIGNEE_EMPTY`, which is the probe that proves step 8, not the executor,
+produces the contract code.
+
+Step 7's drop is namespace-scoped and nothing more. 负控 N4 (auto-approval + one DEACTIVATED human)
+pins that a human survives the drop and is still re-qualified — it answers
+`SEAT_INELIGIBLE`/`inactive`, never `NO_ELIGIBLE_APPROVER` and never a partial 会签 roster. Mutation
+R7-M3 (replace the step-9 block with a filter-and-continue that then leans on step 8) turns N1, N2
+and N4 red together, so step 8 did not become a laundering path for the filter the lock forbids.
 
 Config errors (4/5) are therefore reported before state errors (6): a document that is BOTH
 mis-tagged AND already has a pending round answers `SUITE_UNKNOWN`, not `ALREADY_PENDING`.
@@ -327,13 +346,81 @@ even though the person cannot log in.
 **Pre-existing, out of scope, disclosed:** the seat query's own
 `.filter((id) => typeof id === 'string' && id.length > 0)` silently drops a NULL `actor_id`. That is
 a filter-and-continue of exactly the kind the report forbids, it predates this fix, and it is NOT
-closed here. A mechanical census of every `action='approve'` record writer
-(`ApprovalProductService.ts` ×4 via `insertApprovalRecord`, `ApprovalBridgeService.ts:1148`,
-`plugin-attendance/index.cjs:35197/:35577/:37793`) shows all of them pass a real acting user id, and
-auto-approve-at-create writes `action:'created'`, not `'approve'`
-(`multitable/approval-record-projection-service.ts:376-377`) — so no synthetic-actor seat is known to
-be reachable today, and this fix does not make any previously-cancellable document un-cancellable on
-that account.
+closed here.
+
+> **RETRACTED 2026-09-19 (gate round 6, G6-2).** This paragraph previously continued: "A mechanical
+> census of every `action='approve'` record writer (`ApprovalProductService.ts` **×4** via
+> `insertApprovalRecord`, `ApprovalBridgeService.ts:1148`,
+> `plugin-attendance/index.cjs:35197/:35577/:37793`) shows all of them pass a real acting user id,
+> and auto-approve-at-create writes `action:'created'`, not `'approve'`
+> (`multitable/approval-record-projection-service.ts:376-377`) — so **no synthetic-actor seat is
+> known to be reachable today**, and **this fix does not make any previously-cancellable document
+> un-cancellable on that account**." Both clauses were **false**, and the sentence is withdrawn in
+> full — not amended by changing a number. Three separate errors produced it:
+> 1. The census was a single-syntax literal grep (`action: 'approve'`), so it could not see the one
+>    writer that is a ternary.
+> 2. The rebuttal citation was misread: `approval-record-projection-service.ts:375-377` is a
+>    READ-model comment about which row `loadTerminalDecision` excludes when picking the terminal
+>    decider. It says nothing about what the create path WRITES. (「注释断言 ≠ 不变量」.)
+> 3. Two of the three `plugin-attendance` anchors cited as evidence are not `approve` writers at all
+>    (at this head they are `'revoke'` and `'reject'`).
+>
+> The absolute claim was falsified by a real-DB A/B before the fix and is now falsified in-repo: the
+> three new cases (正控 P3 / 负控 N3 / 负控 N4) are RED against the pre-fix implementation and green
+> against the fix. Retraction propagation: this paragraph, the verification MD §M, and the PR body
+> (see §M6 for the verbatim replacement text — the body is not edited from this lane).
+
+**The census, redone by closing the world instead of grepping a literal (2026-09-19).** The
+denominator is "every writer of an `approval_records` row", enumerated three ways:
+
+| How the world is closed | Count | Approve-capable |
+|---|---|---|
+| (i) every `insertApprovalRecord(...)` call site (the helper is `private` to `ApprovalProductService.ts`; 0 call sites in any other file), reading the `action` EXPRESSION each passes — not a literal match | 28 | **5** |
+| (ii) every raw `INSERT INTO approval_records` statement (case-insensitive, whitespace-tolerant), across `routes/approvals.ts` ×3, `approval-comment-service.ts`, `ApprovalBridgeService.ts`, `ApprovalProductService.ts` (the helper's own INSERT), `plugin-attendance/index.cjs` ×3 | 9 | **3** |
+| (iii) kysely `insertInto('approval_records')` | 0 | 0 |
+
+The five approve-capable helper call sites — **five, not four**:
+
+| Site | `action` expression | `actorId` | Actor kind |
+|---|---|---|---|
+| `ApprovalProductService.ts:11483` | `'approve'` | `actor.userId` | real person |
+| `:11521` | `'approve'` | `actor.userId` | real person |
+| `:11664` | `'approve'` | `actor.userId` | real person |
+| `:11863` | `'approve'` | `actor.userId` | real person |
+| **`:12864`** (`insertAutoApprovalEvents`) | **`skipped ? 'sign' : 'approve'`** | **`actorIdForAutoApprovalEvent(event)`** | **synthetic `system:auto-approval` unless `metadata.actorMode === 'original_approver'`** |
+
+The three approve-capable raw-SQL writers: `routes/approvals.ts:2966` (literal `'approve'`, actor =
+the authenticated `userId`), `ApprovalBridgeService.ts:1148` (`request.action`, actor =
+`actor.userId`), `plugin-attendance/index.cjs:37824` (`action` variable, actor = `requesterId`). All
+three are real people. The other six raw writers are hardcoded `'remind'` / `'reject'` / `'comment'`
+/ `'revoke'` and never reach the seat query.
+
+**How "×4" was manufactured, so the shape is recognizable next time:** `grep -n "action: 'approve'"`
+on `ApprovalProductService.ts` returns 6; two of those (`:11239`, `:11921`) are `buildCompletionEvent`
+arguments — instance-level completion events, not audit rows — leaving 4. The arithmetic was
+self-consistent and entirely blind to `:12864`, because a ternary contains no such literal. This is
+the repo's own 「写入点审计要双语法」 rule, and what it missed here was precisely the only writer that
+emits a non-user actor.
+
+**Measured statement replacing the retracted one.** Exactly one `approval_records` writer in the repo
+produces a synthetic actor: `insertAutoApprovalEvents` at `ApprovalProductService.ts:12864`. It is
+reachable from production authoring — `createApproval` itself cascades into it, and the shipped
+template editor owns `mergeWithRequester` (`apps/web/src/types/approval.ts`,
+`apps/web/src/approvals/templateAuthoring.ts`) while never writing `actorMode`, so
+`getAutoApprovalActorMode`'s `?? 'system'` default applies. Its rows therefore DID land in the cancel
+round's seat query, and before this round they made every such document permanently un-cancellable.
+The fix drops the `system:` namespace (shared predicate `isSystemSentinelActor`) before the seat gate
+and answers `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` / `reason: 'no_human_approver'` when nothing human
+remains. Under `actorMode: 'original_approver'` the row carries a real id, which is kept and
+re-qualified like any other seat.
+
+**Near-miss, disclosed rather than closed:** the helper's own INSERT
+(`ApprovalProductService.ts:13143`) falls back to `record.actorId || 'system'` — a BARE `'system'`,
+outside the `system:` namespace, so `isSystemSentinelActor` would not drop it. It is unreachable from
+any approve-capable site today (all five pass a non-empty id), and the two sites that do pass a
+literal `'system'` write `action: 'sign'` (`:11877`, `:11896`), which the seat query never reads.
+Recorded here so that a future writer moving `'sign'` to `'approve'`, or passing a blank actor, is
+seen as a re-opening of G6-1 rather than a new mystery.
 
 ## 4. Outlet guards — the lock's §14.3 table, re-derived against this tree
 
@@ -563,6 +650,7 @@ implementation):
 | Outlets #4/#6 | `src/services/ApprovalProductService.ts:9924,9928` | `dispatchAction` action-judgment |
 | Outlet #12 | `src/services/ApprovalProductService.ts:8916-8922` (guard), `:8928` (classifier call it precedes) | `bulkReassignApprovals` typed skip |
 | Outlet #13 | `src/services/ApprovalProductService.ts:9300-9307` (guard), `:9318` (attendance-central check it precedes) | `applyApprovalDepartureTransfer` typed skip |
+| Sentinel-namespace predicate, now shared (gate round 6, G6-1) | `src/services/ApprovalAssigneeResolver.ts` `isSystemSentinelActor` — changed from module-private to **exported**; imported by `ApprovalProductService.ts` | The repo-wide `system:` non-user actor namespace. Two seat-derivation sites now call it: the cancel round's own filter, and `loadPriorNodeApproverDeciders` (Lock-1 §K3), whose inline `id.startsWith('system:')` was swapped to the import. That swap is behaviour-identical and is named here rather than left silent — leaving a hand-rolled copy in the same file that imports the shared predicate is what next round's finding would be |
 | Error classes | `src/services/ApprovalBridgeService.ts:1586-1611` | `CancelRoundOutletForbiddenError`, `CancelRoundSuiteForbiddenError`, `rejectIfCancelRound` |
 | Outlet #8 | `src/services/ApprovalBridgeService.ts:1077` | `ApprovalBridgeService.dispatchAction` guard |
 | Outlet #7 | `src/routes/approvals.ts:2954` (guard), `:3011-3016` (pass-through catch) | legacy `/approve` |
