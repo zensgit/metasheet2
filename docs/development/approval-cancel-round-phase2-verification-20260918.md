@@ -5966,13 +5966,19 @@ $ sed -n '13432,13434p' $S | nl -ba -v13432 -w5 -s': '
 **`:13463` 为什么没有在源码里带一段日期标记 —— 这是可测量的约束,不是省事**:
 
 ```
-$ grep -nE ":1346[5-9]|:1347[0-9]|:1348[0-6]|13479-13486" $(cat /tmp/c2-scope-files.txt) | wc -l
+$ git grep -nE ":1346[5-9]|:1347[0-9]|:1348[0-6]|13479-13486" \
+      673bb1e362347751abd9229259d7b7e07245a46e -- $(cat /tmp/c2-scope-files.txt) | wc -l
       22
 ```
 
-⇒ 编辑点(`:13461-13463`)**下方**有 22 处**活**引用钉在 `:13465` / `:13479` / `:13481` / `:13486`
-(两份 MD 的 §7.1 ③ 行、§7.2 结论句、§7.4 M-PC1、§D1,以及测试注释的 5 处)。
-**在 `src/` 里多加一行,就会让这 22 处同时过期** —— 那正是 P2-1 的形状,规模大 11 倍。
+⚠️ **这条必须 `git grep` 钉到 base SHA,不能对工作树跑** —— 本节自己要引用这四个锚点才能把约束说清楚,
+对当前 head 跑同一条会得到 **29**(多出来的 7 条全在本节内)。钉住基点,读者才复算得出 22。
+
+⇒ 编辑点(`:13461-13463`)**下方**共 **22 处命中**钉在 `:13465` / `:13479` / `:13481` / `:13486`:
+其中 **19 处是活引用**(设计 MD §D1、验证 MD 的 §7.1 ③ 行 / §7.2 结论句与改正段 / §7.4 M-PC1 与其抬头 /
+R3 节的重导段,以及测试注释的 6 处),另 **3 处是回显**(`:5751` 的词级 diff 被删词、
+`:5791` / `:5793` 两条正向锚点的 grep 命令原文)。
+**在 `src/` 里多加一行,那 19 处活引用会同时过期** —— 那正是 P2-1 的形状,规模大 9 倍。
 所以源码改写做成**逐行等量替换(3 行 → 3 行)**,日期标记与完整机制写在本节和测试注释里。
 证明见 ⑤(6)。
 
@@ -6021,7 +6027,7 @@ $ grep -c "round-3b gate P2-1" $T
 **(1) 改动面 —— 三个文件,其中一个在 `src/`,是故意的**
 
 ```
-$ git diff --name-only 673bb1e362347751abd9229259d7b7e07245a46e
+$ git diff --name-only 673bb1e362347751abd9229259d7b7e07245a46e..HEAD
 docs/development/approval-cancel-round-phase2-verification-20260918.md
 packages/core-backend/src/services/ApprovalProductService.ts
 packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
@@ -6034,20 +6040,23 @@ packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test
 **(2) 零代码、零测试断言 —— 对**两个**被改的代码文件各跑一次(不是目测)**
 
 ```
+$ B=673bb1e362347751abd9229259d7b7e07245a46e
 $ S=packages/core-backend/src/services/ApprovalProductService.ts
 $ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
 
+# ⚠️ 必须带 `$B..HEAD`:不带区间的 `git diff` 在提交之后对干净树返回空,
+#    那个 `0` 就变成「没东西可 diff」而不是「非注释变更行为零」——是空转绿,不是判据。
 # 变更行剥掉 +/- 与缩进后,不以 `*` 或 `//` 开头的行数(= 非注释变更行)
-$ git diff -U0 -- $S | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
+$ git diff -U0 $B..HEAD -- $S | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
     | sed -E 's/^[+-][[:space:]]*//' | grep -vE "^(\*|//)" | grep -vE "^$" | wc -l
        0
-$ git diff -U0 -- $T | …(同一条命令)…
+$ git diff -U0 $B..HEAD -- $T | …(同一条命令)…
        0
 
 # 变更行里含 `expect(` 的行数
-$ git diff -U0 -- $S | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
+$ git diff -U0 $B..HEAD -- $S | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
 0
-$ git diff -U0 -- $T | …(同一条命令)…
+$ git diff -U0 $B..HEAD -- $T | …(同一条命令)…
 0
 ```
 
@@ -6099,9 +6108,9 @@ LEG6 wholeFileContendedCount=1 inCatch=true gated=true bareRethrow=true
 **(5) 「只删不加」边界 —— 词级,不是行级**
 
 ```
-$ git diff -U0 $B | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
+$ git diff -U0 $B..HEAD | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
 0
-$ git diff --word-diff=porcelain $B | grep "^-" | grep -v "^---" | sort -u
+$ git diff --word-diff=porcelain $B..HEAD | grep "^-" | grep -v "^---" | sort -u
 -本节的机械自检(不靠肉眼「我看过了」)
 -*
 -`apps/web`。
@@ -6122,9 +6131,10 @@ $ git diff --word-diff=porcelain $B | grep "^-" | grep -v "^---" | sort -u
 **(6) 锚点零漂移 —— 本轮最重要的一条自检**
 
 ```
-$ git diff --numstat -- packages/core-backend/src/services/ApprovalProductService.ts
+$ git diff --numstat 673bb1e362347751abd9229259d7b7e07245a46e..HEAD \
+      -- packages/core-backend/src/services/ApprovalProductService.ts
 3       3       packages/core-backend/src/services/ApprovalProductService.ts
-$ sed -n '13465p;13479p;13481p;13486p' packages/core-backend/src/services/ApprovalProductService.ts
+$ git show HEAD:packages/core-backend/src/services/ApprovalProductService.ts | sed -n '13465p;13479p;13481p;13486p'
   private deliverCancelRoundCancelledEventPostCommit(
     try {
     } catch (error) {
