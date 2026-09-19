@@ -839,6 +839,28 @@ This closes the prior gallery authenticated-decoding gap, not full app login,
 organization selection, real cell editing or remaining runtime/cleanup gates.
 No new permissions, flags, deployment or real data access.
 
+## Gallery Cover Sizing Closure
+
+Code `7912fb96b1c27e4efa71d167a37041bebe67e440`, tree
+`16134a74c71078eab7665ebd71d58ecb8ae15083`: existing size values are now fixed
+heights, preserving object-fit cover and card layout. At 1440 and 390 the owned
+production browser changes small/large/medium using the actual select, requires
+PATCH success and exact 108/176/132px cover heights. A temporary height:auto
+override must exceed 176px; removal must restore 132px. Both screenshots were
+inspected and no longer show the oversized square-image card.
+
+`/private/tmp/tm-gallery-sizing-browser-final-20260920.log` exits 0 for the full
+owned migration, recovery, browser and cleanup runner. Connections=0, cluster
+removed. Gallery/attachment neighbors 16/16, scoped ESLint, syntax and diff-check
+pass (`tm-gallery-sizing-unit-20260920.log`, `tm-gallery-sizing-lint-20260920.log`).
+The first sizing attempt timed out on an exact label locator; it is not a pass.
+The final locator targets the labeled field's select and awaits selection and
+response together, preserving the height assertions and cleanup path.
+
+Sol's separate bounded runtime audit was closed without a terminal report; no
+independent verdict or runtime-gap closure is inferred. No new permissions,
+flags, dispatch, deployment or real environment access.
+
 ## Outstanding Full-Scope Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file

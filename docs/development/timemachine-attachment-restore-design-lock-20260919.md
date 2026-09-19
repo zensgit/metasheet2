@@ -2,6 +2,12 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+Cover sizing closure `7912fb96b1c27e4efa71d167a37041bebe67e440` replaces
+intrinsic-image expansion with existing small/medium/large heights 108/132/176px.
+Real 1440/390 Workbench changes and persists all three sizes; temporarily removing
+fixed height reproduces expansion. This supersedes the cover-height residual
+below, not the remaining runtime or full application UAT gates.
+
 Restored-gallery browser checkpoint `f18bbbc435fa43897135e440884498cdb416c013`
 now verifies authenticated decoding through production Workbench at 1440/390,
 after real archive restoration in the owned synthetic database. Gallery view
