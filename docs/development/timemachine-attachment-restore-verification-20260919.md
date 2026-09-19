@@ -12,6 +12,60 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Clean Candidate Full-Process Acceptance (2026-09-20)
+
+Exact clean head `0e7dc5c69617a11b3e9a55a7934a944bd3a005ca`, tree
+`fb5a98940b63753732f1f56312c4e4952118f86a`. No code was modified during
+either execution. These results supersede the historical lack of full launcher
+and Workbench evidence only for the cases below.
+
+### Actual Local Launcher
+
+`scripts/verify-recovery-local-startup.mts` passed five cases against a newly
+created exclusive PG15 cluster and synthetic local custody/archive. It invoked
+the actual `node --import tsx scripts/start-recovery-local.mts` child process:
+
+1. Wrong secret exits before any listener is available.
+2. Before FD3 unlock no listener is available.
+3. Real login and canonical HTTP async restore complete all 5001 scalar rows;
+   each restored value and version is checked against PostgreSQL.
+4. A restarted process remains locked without another FD3 delivery.
+5. Fresh FD3 delivery unlocks the restart and preserves terminal job state.
+
+Fresh migration and replay both passed. Evidence:
+`artifacts/recovery-local-startup/evidence.json` records source hashes,
+empty-diff SHA256, five cases, restoredCount=5001, and database/backend/path/
+process residue all zero with no cleanup errors. The outer owned cluster was
+stopped and removed. This proves real local startup, not async attachments or
+internal cleanup invocation through a public API.
+
+### Full Workbench
+
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --workbench`
+passed 8/8 at the same exact head. The actual LoginView, persisted session,
+production App/router/Workbench and MetaSheetServer verify:
+
+- opening history and retaining rows/fields/views on table deletion;
+- explicit recovery of that retained table through the table recycle bin;
+- named actor and all visible deleted values, then single-row recovery;
+- right-side history with deleted details and viewer-local time;
+- grid edit followed by preview/confirmation row restore, one version increment
+  and unchanged peer;
+- field deletion followed by typed configuration restore with captured values.
+
+Evidence: `artifacts/timemachine-workbench/evidence.json`, run
+`4139fc54-bc7e-443e-b33d-adb7dbad98c3`, clean worktree; all twelve fixture
+residue counters zero, no cleanup errors. Log:
+`/private/tmp/tm-current-workbench-20260920.log`; owned DB dropped, connections=0,
+cluster removed. The restored-column screenshot was visually inspected.
+No real customer data, flags, dispatch, deployment or hard-deleted-table revival.
+
+Luna medium's bounded diagnostics UI audit was stopped without a complete verdict;
+it reported no substantiated P1/P2 but explicitly did not approve the scope. Its
+partial review is not completion evidence. At the last remote observation of
+`0e7dc5c696`, 30 checks succeeded and web-tests/Node18/Node20 remained pending,
+with zero failures. This is not a terminal-green claim.
+
 ## Local Launcher Cleanup Evidence (2026-09-20)
 
 Code `4ef3222d146d271d73e00008b91b7c4b134c435b`, tree

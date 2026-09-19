@@ -2,6 +2,25 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Current Acceptance Reconciliation (2026-09-20)
+
+Clean candidate `0e7dc5c69617a11b3e9a55a7934a944bd3a005ca`, tree
+`fb5a98940b63753732f1f56312c4e4952118f86a`, now has fresh real-process
+local-startup and full Workbench evidence. This updates historical OPEN notes
+only for the explicitly listed scopes, not the entire product.
+
+| Scope | Current evidence and boundary |
+| --- | --- |
+| Local startup | Actual launcher rejects wrong secret before listening, accepts FD3 unlock, authenticates HTTP recovery of 5001 scalar rows, and requires fresh unlock after restart. Local synthetic acceptance, not customer operation. |
+| History/config/trash | Actual LoginView/App/router/Workbench proves eight flows including retained-table restore, deleted-row details/restore, right-side row restore, deleted-column typed restore, actor name and viewer-local time. No hard-deleted table resurrection. |
+| Attachment cleanup | Explicit local capability, ledger/filesystem arbitration and shutdown drain are verified separately. No cleanup request is sent through the child launcher; it has no public cleanup route. |
+| Attachment restore | Earlier original-row/original-field HTTP and desktop/mobile binary recovery evidence remains separately SHA-bound; the 5001-row startup run is scalar, not async attachment evidence. |
+| Outstanding integration | Successor exact-head CI and independent complete-scope review remain required. Narrow model reviews are not whole-PR approval. |
+| Outside these closures | Applied/displaced or unproven ownership cleanup, automatic scheduling/retention, hostile NAS guarantees, real environment and customer UAT are not inferred. New semantics need explicit contract. |
+
+The nightly alert plan remains offline evidence analysis only. No flags,
+dispatch, deployment, real storage or real environment access was performed.
+
 ## Local Launcher Cleanup Capability (2026-09-20)
 
 Code `4ef3222d146d271d73e00008b91b7c4b134c435b`, tree
