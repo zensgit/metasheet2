@@ -38,7 +38,7 @@ try {
   for (const script of scripts) {
     const code = await new Promise((accept, reject) => {
       const child = spawn('pnpm', ['--filter', '@metasheet/core-backend', 'exec', 'tsx', script], {
-        cwd: repo, stdio: 'inherit', timeout: 600000,
+        cwd: repo, stdio: 'inherit', timeout: 1200000,
         env: { ...env, NODE_ENV: 'test', TM_MANUAL_TEST_PGDATA: pgdata,
           ...(browser ? { TM_MANUAL_TEST_BROWSER: 'true' } : {}),
           TM_MANUAL_TEST_ADMIN_URL: `postgresql://tm_manual@127.0.0.1:${port}/postgres` },

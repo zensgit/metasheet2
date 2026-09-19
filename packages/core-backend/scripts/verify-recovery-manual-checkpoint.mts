@@ -96,10 +96,15 @@ try {
   for (const args of neighbors) {
     const run = spawnSync('pnpm', ['--filter', '@metasheet/core-backend', 'exec', ...args], {
       cwd: repo, env: { ...env, METASHEET_REAL_DB_TEST_STEP: '1' }, encoding: 'utf8',
-      timeout: 240000, maxBuffer: 16 * 1024 * 1024,
+      // The full historical suite includes real lease/expiry waits; retain a bounded CI budget.
+      timeout: 600000, maxBuffer: 16 * 1024 * 1024,
     })
     console.log(run.status === 0 ? (run.stdout ?? '').slice(-4000) : (run.stdout ?? ''))
-    if (run.status !== 0) console.error(run.stderr ?? '')
+    if (run.status !== 0) {
+      console.error(run.stderr ?? '')
+      const timedOut = run.error && 'code' in run.error && run.error.code === 'ETIMEDOUT'
+      console.error(timedOut ? 'MIGRATION_NEIGHBOR_TIMEOUT' : 'MIGRATION_NEIGHBOR_PROCESS_FAILED')
+    }
     assert.equal(run.status, 0, 'MIGRATION_NEIGHBOR_FAILED')
   }
   client = new Client({ ...connection, database })
