@@ -1070,6 +1070,154 @@ async function postApprovalJson<T>(path: string, payload: unknown): Promise<T> {
 }
 
 /**
+ * GET/PATCH/DELETE siblings of `postApprovalJson` above, surfacing a failed response the same
+ * way. Backs the approval form grouping endpoints below (design lock v2.13 §6 phase 1) — every
+ * one of the lock's seven endpoints needs the server's `error.code` to survive to the caller
+ * (acceptance J's session-org retry flow branches on `SESSION_ORG_REQUIRED`), which the generic
+ * `apiGet`/`apiPost` (utils/api.ts) do not preserve.
+ */
+async function getApprovalJson<T>(path: string): Promise<T> {
+  const response = await apiFetch(path)
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  return response.json()
+}
+
+async function patchApprovalJson<T>(path: string, payload: unknown): Promise<T> {
+  const response = await apiFetch(path, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  return response.json()
+}
+
+async function deleteApprovalJson(path: string): Promise<void> {
+  const response = await apiFetch(path, { method: 'DELETE' })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 client. Seven
+// endpoints; org is ALWAYS derived server-side from `req.authenticatedTenantId` (A‴) — none of
+// these functions accepts an orgId parameter, matching `routes/approvals.ts`'s
+// `resolveApprovalTemplateGroupOrgId` (an orgId in the body/query is rejected there with 400
+// `ORG_ID_NOT_ACCEPTED`, so the client must never send one). Field names mirror
+// `ApprovalTemplateGroupService.ts`'s `mapGroupRow`/`mapLinkRow` exactly (camelCase over the DB's
+// snake_case columns) — this file does not re-derive the shape.
+// ---------------------------------------------------------------------------
+
+export interface ApprovalTemplateGroupDTO {
+  id: string
+  orgId: string
+  name: string
+  sortOrder: number | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+}
+
+export interface ApprovalTemplateGroupLinkDTO {
+  orgId: string
+  templateId: string
+  groupId: string | null
+  linkedBy: string
+  linkedAt: string
+  unlinkedAt: string | null
+}
+
+/**
+ * The lock's ratified machine codes for the seven group endpoints (§2/§4), for callers that
+ * branch on `ApprovalApiError.code` — most importantly acceptance J's session-org retry flow,
+ * which must recognize `SESSION_ORG_REQUIRED` to show the session-org selector rather than a
+ * generic error toast. The `*_FAILED` members are each endpoint's `handleApprovalsError` fallback
+ * (`routes/approvals.ts` §6 phase 1 block) for an unexpected server-side failure.
+ */
+export type ApprovalTemplateGroupErrorCode =
+  | 'SESSION_ORG_REQUIRED'
+  | 'ORG_ID_NOT_ACCEPTED'
+  | 'APPROVAL_ACTOR_REQUIRED'
+  | 'APPROVAL_GROUP_ID_REQUIRED'
+  | 'APPROVAL_TEMPLATE_NOT_FOUND'
+  | 'GROUP_NOT_FOUND'
+  | 'GROUP_ARCHIVED'
+  | 'GROUP_NAME_TAKEN'
+  | 'GROUP_NOT_ARCHIVED'
+  | 'GROUP_NAME_REQUIRED'
+  | 'GROUP_SORT_CONFLICT'
+  | 'APPROVAL_TEMPLATE_GROUP_LIST_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_RENAME_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_ARCHIVE_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED'
+
+export async function listApprovalTemplateGroups(): Promise<ApprovalTemplateGroupDTO[]> {
+  const data = await getApprovalJson<{ groups: ApprovalTemplateGroupDTO[] }>('/api/approval-template-groups')
+  return data.groups
+}
+
+export async function createApprovalTemplateGroup(name: string): Promise<ApprovalTemplateGroupDTO> {
+  const data = await postApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    '/api/approval-template-groups',
+    { name },
+  )
+  return data.group
+}
+
+export async function renameApprovalTemplateGroup(
+  groupId: string,
+  name: string,
+): Promise<ApprovalTemplateGroupDTO> {
+  const data = await patchApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    `/api/approval-template-groups/${encodeURIComponent(groupId)}`,
+    { name },
+  )
+  return data.group
+}
+
+export async function archiveApprovalTemplateGroup(groupId: string): Promise<ApprovalTemplateGroupDTO> {
+  const data = await postApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    `/api/approval-template-groups/${encodeURIComponent(groupId)}/archive`,
+    {},
+  )
+  return data.group
+}
+
+export async function unarchiveApprovalTemplateGroup(groupId: string): Promise<ApprovalTemplateGroupDTO> {
+  const data = await postApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    `/api/approval-template-groups/${encodeURIComponent(groupId)}/unarchive`,
+    {},
+  )
+  return data.group
+}
+
+// Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
+export async function linkApprovalTemplateToGroup(
+  templateId: string,
+  groupId: string,
+): Promise<ApprovalTemplateGroupLinkDTO> {
+  const data = await postApprovalJson<{ link: ApprovalTemplateGroupLinkDTO }>(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/group`,
+    { groupId },
+  )
+  return data.link
+}
+
+// Unlink is idempotent 204 (acceptance H) whether the template was linked, already unlinked, or
+// never linked at all — no body to return.
+export async function unlinkApprovalTemplateFromGroup(templateId: string): Promise<void> {
+  await deleteApprovalJson(`/api/approval-templates/${encodeURIComponent(templateId)}/group`)
+}
+
+/**
  * RP-2 (route-preview lock, B3-05): read-only live route preview for the requester's CURRENT
  * form values — the backend walks the real create pipeline (same validation/branch resolution/
  * delegation substitution) without writing anything. Assignee `name` is display-enriched
