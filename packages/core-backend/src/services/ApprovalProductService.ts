@@ -179,8 +179,10 @@ import {
   classifyCancelRoundCancellationOutcomeV1,
   deriveCancelRoundW4OperationIdV1,
   getAttendanceCancellationExecutionPort,
+  getCancelRoundCancelledEventDelivery,
 } from '../core/attendance-cancellation-execution-port'
 import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
+import type { AttendanceRequestOperationBoundaryResultV1 } from '../attendance/w4c3b-request-operation-boundary'
 import {
   acquireAttendanceCalculationRolloutLock,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -9810,10 +9812,22 @@ export class ApprovalProductService {
    * then `approval_rounds.outcome = 'applied'`.
    *
    * What this deliberately does NOT write: the ORIGINAL document's `approved → cancelled`, its
-   * `approval_records(action='revoke', to_status='cancelled')`, the balance reversal, the
-   * `attendance.request.cancelled` event. Every one of those belongs to C-1 and is performed by the
-   * adapter inside the entry — lock §3 C-1 (「`status` 只允许 `approved → cancelled` 且只能经 C-1」)
-   * makes writing them here a contract violation, not a shortcut. This method's own writes are the
+   * `approval_records(action='revoke', to_status='cancelled')`, the balance reversal. Both belong
+   * to C-1 and are performed by the adapter inside the entry — lock §3 C-1 (「`status` 只允许
+   * `approved → cancelled` 且只能经 C-1」) makes writing them here a contract violation, not a
+   * shortcut.
+   *
+   * ⚠️ RETRACTION (Codex 审阅第 3 条修复, 2026-09-19). This list used to include the
+   * `attendance.request.cancelled` EVENT, over the claim that it too is 「performed by the adapter
+   * inside the entry」. That was FALSE on every posture any org runs today, and the falsehood is
+   * what hid the defect. The adapter only RETURNS the lifecycle event; the boundary decides whether
+   * to persist it, and under `legacy` / `legacy_compat` it persists nothing
+   * (`w4c3b-request-operation-boundary.ts:903-916` skips the outbox enqueue; the pure-`legacy` kind
+   * returns before reaching it). On the HTTP path the compensating in-process emit lives in the
+   * ROUTE, not in the entry. So this path announced the cancellation zero times where HTTP
+   * announced it once — measured `{sendsAfterA: 0, sendsAfterB: 1}` on the twin fixture. The send
+   * is now made explicitly, AFTER the caller's COMMIT, through the delivery bound by the same
+   * plugin (see the post-commit call in `dispatchAction`). This method's own writes are the
    * round row's, and the cancel round's OWN instance reaches `approved` by falling through to
    * `dispatchAction`'s ordinary status write (lock §3 C-2 step ⑥), which is also what produces the
    * 恰一个 completion event 判据 II names.
@@ -9840,7 +9854,16 @@ export class ApprovalProductService {
       readonly policySnapshotAtDecision: string
     },
   ): Promise<
-    | { readonly kind: 'applied'; readonly outcome: CancelRoundCancellationOutcomeV1 }
+    | {
+      readonly kind: 'applied'
+      readonly outcome: CancelRoundCancellationOutcomeV1
+      /**
+       * The W4 answer, carried out VERBATIM so the post-commit delivery can hand it back to the
+       * attendance plugin unchanged. This side deliberately does not inspect `w4Result.kind`:
+       * which kinds announce is the plugin's single gate, shared with the HTTP route.
+       */
+      readonly w4Result: AttendanceRequestOperationBoundaryResultV1
+    }
     | { readonly kind: 'blocked'; readonly code: string; readonly detail: string | null }
   > {
     const { engineInstanceId, instance, rolloutLock, roundId } = params
@@ -9965,7 +9988,7 @@ export class ApprovalProductService {
         'CANCEL_ROUND_INVARIANT_VIOLATION',
       )
     }
-    return { kind: 'applied', outcome }
+    return { kind: 'applied', outcome, w4Result: result }
   }
 
   /** T3-6: best-effort read-model projection at create — never throws into the approval flow. */
@@ -11344,6 +11367,13 @@ export class ApprovalProductService {
     // bottom `return`, which sits AFTER the `finally`. Stays `null` for every dispatch that is not
     // a redeemed cancel round, so no other action's response shape changes by one byte.
     let dispatchCancellationOutcome: CancelRoundCancellationOutcomeV1 | null = null
+    // Codex 审阅第 3 条修复 (2026-09-19). Set ONLY by a redemption that returned `applied`, and
+    // consumed ONLY after `COMMIT` — so C-3's early-return closures (`expired` / `blocked`), the
+    // fail-closed port-unavailable throw, and every rolled-back attempt announce nothing, exactly
+    // as the HTTP path announces nothing when its boundary call did not cancel anything.
+    let dispatchCancelledEventDelivery:
+      | { readonly result: AttendanceRequestOperationBoundaryResultV1; readonly requestId: string }
+      | null = null
     try {
       client = await pool.connect()
 
@@ -13036,6 +13066,13 @@ export class ApprovalProductService {
             }
           } else {
             dispatchCancellationOutcome = redemption.outcome
+            dispatchCancelledEventDelivery = {
+              result: redemption.w4Result,
+              // The id the entry was pinned to (`WHERE id = $1 AND org_id = $2`), used only as the
+              // fallback when the W4 response carries none — identical to what the HTTP route
+              // passes, which is its own `req.params.id`.
+              requestId: rolloutLock.requestId,
+            }
           }
         }
         if (finalEvaluation.decision !== 'redeem') {
@@ -13221,6 +13258,13 @@ export class ApprovalProductService {
       //     triggering card is excluded from the sweep below: it is already `acted`, not still `sent`.
       // Do NOT reintroduce a post-commit claim: a claim made after the decision is durable cannot gate it.
       await this.supersedeCardDeliveriesPostCommit(id, request.channelOrigin?.cardDeliveryId)
+      // Codex 审阅第 3 条修复 (2026-09-19) — 判据 II / lock §8 期 1 「完整取消结果逐字节等价于现有
+      // W4 路径」. AFTER the COMMIT above, never inside it: the business cancellation, the revoke
+      // audit row, the round's `applied` and the W4 seal are all durable by the time this runs, so
+      // a listener that throws cannot undo any of them (and a rolled-back attempt reaches this line
+      // not at all, because the `throw` skips straight to the outer catch). Best-effort, same
+      // family as the card sweep above.
+      this.deliverCancelRoundCancelledEventPostCommit(dispatchCancelledEventDelivery)
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
@@ -13901,6 +13945,49 @@ export class ApprovalProductService {
     } catch (error) {
       approvalProductLogger.warn(
         `approval card supersede sweep failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  /**
+   * Codex 审阅第 3 条修复 (2026-09-19) — announce the redeemed cancellation on the SAME send site
+   * the HTTP cancel route uses.
+   *
+   * SYNCHRONOUS AND UNAWAITED BY CONTRACT. The bound delivery is the plugin's `emitEvent`, i.e.
+   * `eventBus.emit`, which is in-process and returns nothing. This method is deliberately not
+   * `async`: an `await` here would let a slow subscriber delay the HTTP response for a decision
+   * that is already durable, and per
+   * `feedback_persistent_transition_must_not_depend_on_network_call` nothing persistent may hang
+   * off this call at all.
+   *
+   * EVERY failure mode is a warning:
+   *   - `null` argument  ⇒ this dispatch performed no redemption. Silent, not warned: the ordinary
+   *     case for every non-cancel-round approve that flows through this same post-commit region.
+   *   - delivery unbound ⇒ warned. Fails OPEN on purpose (see the registry's own doc comment).
+   *   - delivery threw   ⇒ warned. The outer `catch` of `dispatchAction` must NEVER see this: it
+   *     runs `rollbackQuietly` on an already-COMMITTED transaction and rethrows, which would turn a
+   *     successful, durable business cancellation into a 500 over a listener's bug.
+   */
+  private deliverCancelRoundCancelledEventPostCommit(
+    delivery:
+      | { readonly result: AttendanceRequestOperationBoundaryResultV1; readonly requestId: string }
+      | null,
+  ): void {
+    if (!delivery) return
+    const deliver = getCancelRoundCancelledEventDelivery()
+    if (!deliver) {
+      approvalProductLogger.warn(
+        `cancel-round redemption for request ${delivery.requestId} committed, but no `
+          + `attendance.request.cancelled delivery is bound — the cancellation was NOT announced`,
+      )
+      return
+    }
+    try {
+      deliver(delivery.result, delivery.requestId)
+    } catch (error) {
+      approvalProductLogger.warn(
+        `attendance.request.cancelled delivery failed for request ${delivery.requestId} (the `
+          + `cancellation itself is committed): ${error instanceof Error ? error.message : String(error)}`,
       )
     }
   }
