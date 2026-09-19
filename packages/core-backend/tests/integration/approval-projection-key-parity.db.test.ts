@@ -40,11 +40,19 @@
  *                           permission-service.ts) — the second hand-rolled copy the fix collapsed.
  *
  * `GET /api/multitable/context` is DELIBERATELY OMITTED from the "surfaces this fix reaches" list —
- * see the dedicated test below, which documents it as a VACUOUS control: that route applies NO
- * projection predicate at all (a separate, already-confirmed defect —
- * `docs`/memory `finding_context_endpoint_skips_projection_fence.md` — with an in-flight,
- * NOT-YET-MERGED fix on branch `fix/multitable-context-fenced-capabilities`). This key-derivation
- * fix has no mandate to change /context's behavior, and does not.
+ * this key-derivation fix (namespacing the predicate's key comparison) never touched /context, which
+ * at THIS commit (7c73f5276) still applied no projection predicate there at all: a separate,
+ * already-confirmed defect (`docs`/memory `finding_context_endpoint_skips_projection_fence.md`), with
+ * its own in-flight fix on branch `fix/multitable-context-fenced-capabilities`.
+ *
+ * REBASE ABSORPTION: that /context branch has since rebased onto this commit and wires /context
+ * through the SAME canonical predicate this file locks (`filterReadableSheetRowsForAccess` /
+ * `resolveSheetCapabilitiesForAccess`, permission-service.ts — no private copy). On a worktree that
+ * has absorbed both, /context is NO LONGER vacuous: it is a FIFTH consumer surface, and the dedicated
+ * test below now asserts the real, no-longer-vacuous behavior — see that test's own comment for the
+ * updated claim. This file's own scope is unchanged: it still locks the namespaced-key fix, not the
+ * /context fence itself (that fence's own acceptance lives in
+ * `multitable-context-approval-projection-fence-realdb.test.ts`).
  *
  * FIXTURE SHAPE (one template, ONE assignee P1, three instances on the SAME projection sheet — a
  * template's projection sheet id is deterministic per templateId, `deriveProjectionSheetId`):
@@ -406,23 +414,34 @@ describeIfDatabase('approval-projection key parity — real reconcile output, fo
     expect(admin.capabilities.canRead).toBe(true)
   })
 
-  // ── /context: VACUOUS control — documented, not claimed as fixed ──────────────────────────
+  // ── /context: no longer vacuous (C1 merged) — participant 200, non-participant 404 ───────
 
-  it('/context: VACUOUS control — this route applies NO projection predicate at all (pre-existing, separately tracked defect; unaffected by this fix)', async () => {
-    // univer-meta.ts's GET /context builds its OWN `readableSheetRows` from `canReadWithSheetGrant`
-    // only — it never calls `filterReadableSheetRowsForAccess`, `loadApprovalProjectionSheetIds`, or
-    // any approval-projection predicate. So EVERY actor with plain `multitable:read` — participant
-    // or not — currently gets 200 with the sheet's metadata, both BEFORE and AFTER this fix. That is
-    // NOT evidence this fix reaches /context; it is the opposite — documented here so a future
-    // reader does not mistake "200 for a participant" as this fix's doing. Fixing this endpoint's
-    // missing fence is a SEPARATE, already-confirmed defect with its own in-flight branch
-    // (`fix/multitable-context-fenced-capabilities`, not yet merged) — out of scope here: this fix
-    // changes readers of the projection predicate, not routes that never call it.
+  it('/context: absorbs the C1 fence (fix/multitable-context-fenced-capabilities, rebased onto this commit) — participant still 200, non-participant STRANGER gets the anti-oracle 404, not a leak', async () => {
+    // HISTORY: at 7c73f5276 (this file's own commit) /context built its OWN `readableSheetRows` from
+    // `canReadWithSheetGrant` only and never called `filterReadableSheetRowsForAccess` /
+    // `loadApprovalProjectionSheetIds` — every actor with plain `multitable:read`, participant or
+    // not, got 200. That was documented here as a VACUOUS control specifically so a future reader
+    // would not mistake "200 for a participant" as evidence of THIS file's key-derivation fix.
+    //
+    // ABSORBED: the separate, already-confirmed /context defect that made it vacuous now has its fix
+    // rebased onto this commit (`fix/multitable-context-fenced-capabilities`): /context routes
+    // through the SAME canonical resolvers (`filterReadableSheetRowsForAccess` /
+    // `resolveSheetCapabilitiesForAccess`, permission-service.ts — no private predicate copy in
+    // univer-meta.ts) every other sheet-addressed route already uses. So on a worktree carrying both
+    // fixes, /context is a genuine FIFTH consumer surface: a participant (R1) still reads 200, and
+    // STRANGER — a genuine non-participant with only global `multitable:read`, proven excluded on
+    // all four other surfaces above — now gets the byte-identical 404 anti-oracle
+    // (`multitable-context-approval-projection-fence-realdb.test.ts` pins the same shape), not the
+    // stale 200 this test used to assert. This is the negative control the task requires of /context:
+    // a non-participant must still get 404 through it, never a leak.
     asUser(R1)
     const participantRes = await request(app).get('/api/multitable/context').query({ sheetId })
     expect(participantRes.status).toBe(200)
+    expect(participantRes.body.data.sheet?.id).toBe(sheetId)
+
     asUser(STRANGER)
     const strangerRes = await request(app).get('/api/multitable/context').query({ sheetId })
-    expect(strangerRes.status).toBe(200) // unchanged — vacuous, not a pass/fail signal for this fix
+    expect(strangerRes.status).toBe(404)
+    expect(strangerRes.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
   })
 })
