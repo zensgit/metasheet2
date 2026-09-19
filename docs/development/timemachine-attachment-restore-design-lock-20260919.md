@@ -143,6 +143,36 @@ and final-receipt failures now prove rollback of metadata, record/history, adopt
 token and receipt with same-token retry. Abandoned/displaced-object cleanup and
 crash/concurrency gates remain open.
 
+## Local File Ownership And Durability
+
+Implementation checkpoints: `a6cad9ecb06a70dbdfce6bb8627b1242c4aa53a5`
+and `b1227f32ac86be4243e58d11d4fb6444a2b87344`.
+
+The durable stage identity derives a domain-separated ownership digest from its
+actor, token, object and complete original attachment binding. An existing local
+directory is not adopted merely because its payload bytes match. Its exact
+versioned ownership marker must match before upload or readback.
+
+A new marker is written and synced in a private sibling directory before atomic
+publication. Marker failure cannot poison the stable object directory. Payload
+verification reads and syncs the same descriptor, then syncs its parent directory,
+before the database can mark the stage verified. Unsupported providers refuse.
+
+The internal local retirement primitive places an empty directory at the exact
+payload key as an exclusive-create barrier. This prevents a late uploader from
+recreating a retired file; a writer holding the old unlinked descriptor cannot
+make its bytes visible at the key. A race that prevents barrier installation
+refuses completion rather than claiming cleanup. No recursive deletion is used.
+This primitive is not registered as a public or scheduled cleanup capability.
+Database abandonment/apply arbitration and reference-safe cleanup remain OPEN.
+
+These guarantees require a trusted, exclusively server-managed storage root.
+An actor able to replace directories between ownership validation and path-based
+operations is outside this checkpoint's guarantee (retained review P3). This is
+not shared-hostile-NAS, WORM or storage certification. A process crash before
+publication can leave a private temporary directory; its reconciliation is not
+implemented or silently authorized by this checkpoint.
+
 ## Required Evidence
 
 The preview now projects selected attachment changes into its true-delta permission

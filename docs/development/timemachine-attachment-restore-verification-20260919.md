@@ -342,6 +342,60 @@ Test commit: `a60a3d683280e6faeb7253c574bea6c94e0c62bd`.
 - Logs: `/private/tmp/tm-attachment-transaction-failure-reviewed-20260919.log`,
   `/private/tmp/tm-attachment-transaction-failure-{tsc,wiring}-20260919.log`.
 
+## Ownership And Durability Checkpoint
+
+Code: `a6cad9ecb06a70dbdfce6bb8627b1242c4aa53a5` followed by
+`b1227f32ac86be4243e58d11d4fb6444a2b87344`.
+
+- Real local filesystem tests reject unowned matching bytes, wrong ownership and
+  symlinks. Before-open, already-open and completed-upload retirement cases prove
+  late writes cannot recreate the payload after the internal barrier succeeds.
+- Marker write and marker sync faults leave no stable partial reservation; a new
+  provider retries successfully. Payload sync failure is reached and refuses
+  before the verified ledger transition. Restored reader 36/36; reader plus three
+  storage neighbors 4 files / 83 tests PASS.
+- Mutations: bypass reservation accepts unowned bytes (RED); remove tombstone
+  permits late writes (three RED); remove payload sync accepts durability failure
+  (one RED); create stable directory before marker leaves poisoned reservations
+  (two RED). Every mutation was restored before final verification.
+- Full owned PostgreSQL runner on the durability code PASS: D5 47/47, historical
+  neighbors 59/59 and 127/127; fresh/replay catalog 32 migrations / 995 objects,
+  unchanged fingerprint. Authenticated two-file facade, upload/metadata/receipt
+  fault rollback and same-token reuse PASS. Owned database/connections, stage DB
+  and temporary cluster cleanup completed.
+- Core typecheck, scoped source ESLint, exact-anchor wiring 37/37, archive wiring
+  6/6 and diff-check PASS. Prior ownership checkpoint S5 PASS; no provenance-bound
+  workflow or plugin files changed in the subsequent durability fix.
+- Sol read-only review found two P2 durability issues in the initial checkpoint.
+  Both were fixed and independently re-reviewed with no P1/P2 in those two fixes.
+  The trusted-exclusive-root P3 remains explicit; this is not broad product
+  approval. Review session closed; it did not run tests or modify files.
+- Logs: `/private/tmp/tm-attachment-ownership-durable-{restored,realdb,tsc,lint,exact-wiring,wiring}-20260919.log`,
+  `/private/tmp/tm-attachment-ownership-{sync,marker}-mutation-20260919.log`.
+- These are internal storage and facade results, not public attachment execution,
+  abandonment cleanup, shared-NAS certification or real Workbench browser UAT.
+
+## Historical Acceptance Process Budget
+
+Runner commit: `fb335f2177945906c0c123f3514cc154208d061b`.
+
+- Remote `79734540f8fb189da00b67a74f0a121bdf346cb4` Node18/20 both
+  failed in isolated manual acceptance, before any successful historical suite
+  summary. The final cleanup assertion observed three database connections and
+  masked the child failure; the owned outer cluster was stopped and removed.
+- Local full D5 takes about 223 seconds against the old 240-second child limit.
+  Process timeout is the working diagnosis, not a reproduced Node18 root cause.
+  Neighbor budget is now bounded at 600 seconds and outer script at 1200 seconds;
+  errors explicitly distinguish ETIMEDOUT from other process failures. No test,
+  assertion or zero-connection cleanup requirement was removed.
+- Full local rerun PASS again (47/59/127, unchanged 32/995 migration catalog,
+  complete two-file facade and stage acceptance, owned DB/cluster cleanup).
+  Typecheck and wiring 37/37 PASS. The final type narrowing changes only the
+  error diagnostic, not the exercised successful runner path.
+- Evidence: `/private/tmp/tm-5882-797345-failed.log` and
+  `/private/tmp/tm-attachment-ownership-ci-budget-{realdb,tsc,wiring}-20260919.log`.
+  Fresh remote exact-head CI is required before declaring the CI failure closed.
+
 ## Remaining Required Work
 
 Public reader/runtime registration; prepared/displaced file reference-safe crash cleanup;
