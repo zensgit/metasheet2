@@ -4,6 +4,7 @@ import type { ExactAnchorPlanAuthContext } from '../../src/multitable/exact-anch
 import type { QueryFn } from '../../src/multitable/permission-service'
 import type { RecoverySheetAuthority } from '../../src/multitable/recovery-authorization-stability'
 import { createRecoveryPlanAuthorization } from '../../src/multitable/recovery-plan-authorization'
+import { projectArchiveAttachmentCells } from '../../src/multitable/recovery-archive-attachment-plan'
 
 const authority = (): RecoverySheetAuthority => ({
   access: { userId: 'actor', permissions: [], isAdminRole: true },
@@ -17,6 +18,25 @@ const context = (): ExactAnchorPlanAuthContext => ({
 })
 
 describe('shared recovery true-delta authorization', () => {
+  test.each([
+    { property: {}, allowed: true },
+    { property: { readOnly: true }, allowed: false },
+    { property: { hidden: true }, allowed: false },
+  ])('attachment-only delta respects current property $property', async ({ property, allowed }) => {
+    const query: QueryFn = async (sql) => ({ rows: sql.includes('FROM meta_fields')
+      ? [{ id: 'attachment', name: 'Attachment', type: 'attachment', property }]
+      : sql.includes('SELECT id, created_by') ? [{ id: 'record', created_by: 'actor' }] : [] })
+    const ctx = context()
+    ctx.revertWrites = projectArchiveAttachmentCells([], new Map([
+      ['record', { data: { attachment: [] }, version: 1 }],
+    ]), [{ recordId: 'record', fieldId: 'attachment', beforeIds: [], targetIds: ['att-original'] }])
+    const current = authority()
+    const evaluate = createRecoveryPlanAuthorization('source', async () => current, async () => true)
+    expect(await evaluate(query, ctx)).toBe(allowed)
+    current.capabilities.canManageSheetAccess = false
+    expect(await evaluate(query, ctx)).toBe(false)
+  })
+
   test('uses the caller transaction and fresh resolver on every evaluation', async () => {
     const query: QueryFn = vi.fn(async () => ({ rows: [] }))
     const current = authority()

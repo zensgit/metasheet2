@@ -1,4 +1,5 @@
 import type { RecoveryArchiveRowEnvelope } from './recovery-archive-manifest'
+import type { ExactAnchorRevertWriteIntent } from './exact-anchor-recovery-execute'
 
 type TargetRecord = { exists: boolean; data?: Record<string, unknown> | null }
 type LiveRecord = { data: Record<string, unknown> }
@@ -63,6 +64,42 @@ export function planArchiveAttachmentCells(input: {
     }
   }
   return Object.freeze(plan)
+}
+
+/** Adds attachment fields to the same true-delta context used by canonical row/field authorization. */
+export function projectArchiveAttachmentCells(
+  writes: readonly ExactAnchorRevertWriteIntent[],
+  live: ReadonlyMap<string, LiveRecord & { version: number }>,
+  cells: readonly ArchiveAttachmentCellPlan[],
+): ExactAnchorRevertWriteIntent[] {
+  const result = new Map<string, ExactAnchorRevertWriteIntent>()
+  for (const write of writes) {
+    if (result.has(write.recordId)) invalid()
+    result.set(write.recordId, { ...write, changedFieldIds: [...write.changedFieldIds],
+      patch: { ...write.patch }, projectedData: { ...write.projectedData },
+      linkUpdates: write.linkUpdates.map(link => ({ ...link, targetIds: [...link.targetIds] })) })
+  }
+  const seen = new Set<string>()
+  for (const cell of cells) {
+    const key = JSON.stringify([cell.recordId, cell.fieldId])
+    if (seen.has(key)) invalid()
+    seen.add(key)
+    const row = live.get(cell.recordId)
+    const before = referenceIds(cell.beforeIds)
+    const target = referenceIds(cell.targetIds)
+    if (!row || !Number.isSafeInteger(row.version) || row.version < 0
+      || JSON.stringify(referenceIds(row.data[cell.fieldId])) !== JSON.stringify(before)
+      || JSON.stringify(before) === JSON.stringify(target)) invalid()
+    const write = result.get(cell.recordId) ?? { recordId: cell.recordId, liveVersion: row.version,
+      changedFieldIds: [], patch: {}, projectedData: { ...row.data }, linkUpdates: [] }
+    if (write.liveVersion !== row.version || write.changedFieldIds.includes(cell.fieldId)
+      || Object.hasOwn(write.patch, cell.fieldId)) invalid()
+    write.changedFieldIds.push(cell.fieldId)
+    write.patch[cell.fieldId] = [...target]
+    write.projectedData[cell.fieldId] = [...target]
+    result.set(cell.recordId, write)
+  }
+  return [...result.values()]
 }
 
 function selection(ids: readonly string[] | undefined): ReadonlySet<string> | undefined {

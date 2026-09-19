@@ -49,6 +49,7 @@ import {
   readRecoveryArchiveCompleteSectionState,
   readRecoveryArchiveCompleteSectionsInternal,
   readRecoveryArchiveAttachmentBytes,
+  readRecoveryArchiveAttachmentSource,
   type RecoveryArchiveReaderErrorCode,
   type RecoveryArchiveSelectedBinding,
 } from '../../src/multitable/recovery-archive-reader'
@@ -179,7 +180,7 @@ function makeBinding(generationId: string): RecoveryArchiveManifestBinding {
   }
 }
 
-type FixtureAttachment = { id: string; bytes: Buffer; deleted: boolean }
+type FixtureAttachment = { id: string; bytes: Buffer; deleted: boolean; recordId?: string; fieldId?: string }
 function makePlan(attachments: FixtureAttachment[] = []) {
   const nonces = Object.fromEntries(
     RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((name, index) => [
@@ -198,7 +199,7 @@ function makePlan(attachments: FixtureAttachment[] = []) {
       field_value_tombstones: [],
       link_tombstones: [],
       auto_number: [],
-      attachments_index: attachments.map((item) => ({ attachment_id: item.id, record_id: null, field_id: null,
+      attachments_index: attachments.map((item) => ({ attachment_id: item.id, record_id: item.recordId ?? null, field_id: item.fieldId ?? null,
         immutable_object_version: `sha256:${digest(item.bytes)}`, plaintext_sha256: digest(item.bytes),
         size_bytes: String(item.bytes.length), media_type: 'application/octet-stream', deleted: item.deleted })),
       permission_evidence: [],
@@ -497,6 +498,43 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test.each([false, true])('restore source is privately bound to the authenticated original scope (complete=%s)', async (complete) => {
+    const binary = Buffer.from([0, 255, 128, 1])
+    const durable = await buildDurableArchive({ attachments: [
+      { id: 'att-original', bytes: binary, deleted: false, recordId: 'record-1', fieldId: 'attachment' },
+      { id: 'att-deleted', bytes: binary, deleted: true, recordId: 'record-1', fieldId: 'attachment' },
+    ] })
+    const stored = await persistDurable(durable)
+    const input = { ...stored, keyCustody: createBoundCustody(), transactionDepth: depthProbe(0) }
+    const opened = complete ? await readRecoveryArchiveCompleteSectionState({ ...input,
+      query: async (sql: string) => {
+        if (sql.includes('meta_history_trust_checkpoints')) return { rows: [{
+          id: durable.binding.checkpoint_id, sheet_id: durable.binding.sheet_id,
+          state: 'active', trusted_since_seq: '0', trusted_from_at: null, system_kind: null, pruned_at: null,
+        }] }
+        if (sql.includes('UNION ALL') || sql.includes('meta_history_baselines')) return { rows: [] }
+        throw new Error(SENTINEL)
+      },
+    }) : await readRecoveryArchiveCompleteSectionsInternal(input)
+    const scope = { generationId: durable.generationId, workspaceId: durable.binding.workspace_id,
+      baseId: durable.binding.base_id, sheetId: durable.binding.sheet_id, recordId: 'record-1', fieldId: 'attachment' }
+    const source = readRecoveryArchiveAttachmentSource(opened, 'att-original', scope)
+    expect(source).toEqual({ sourceVersion: `sha256:${digest(binary)}`, plaintextSha256: digest(binary),
+      bytes: binary, sizeBytes: '4', mediaType: 'application/octet-stream' })
+    source.bytes.fill(0)
+    expect(readRecoveryArchiveAttachmentSource(opened, 'att-original', scope).bytes).toEqual(binary)
+    for (const key of Object.keys(scope) as Array<keyof typeof scope>) {
+      expect(() => readRecoveryArchiveAttachmentSource(opened, 'att-original', { ...scope, [key]: 'other' }))
+        .toThrow('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+    }
+    expect(() => readRecoveryArchiveAttachmentSource(opened, 'att-deleted', scope))
+      .toThrow('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+    expect(() => readRecoveryArchiveAttachmentSource(opened, 'att-missing', scope))
+      .toThrow('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+    expect(() => readRecoveryArchiveAttachmentSource({ ...opened }, 'att-original', scope))
+      .toThrow('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+  })
+
   test('authenticates attachment bytes privately and rejects absent, swapped and AEAD-corrupt objects', async () => {
     const attachments = [
       { id: 'att-live', bytes: Buffer.from([0, 255, 1, 2]), deleted: false },

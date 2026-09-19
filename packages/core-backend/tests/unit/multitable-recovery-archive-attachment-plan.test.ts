@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planArchiveAttachmentCells } from '../../src/multitable/recovery-archive-attachment-plan'
+import { planArchiveAttachmentCells, projectArchiveAttachmentCells } from '../../src/multitable/recovery-archive-attachment-plan'
 
 function fixture() {
   return {
@@ -13,6 +13,51 @@ function fixture() {
 }
 
 describe('archive attachment descriptive plan', () => {
+  it('includes attachment-only writes in the canonical authorization delta', () => {
+    const input = fixture()
+    const live = new Map([['row', { ...input.live.get('row')!, version: 7 }]])
+    expect(projectArchiveAttachmentCells([], live, planArchiveAttachmentCells(input))).toEqual([{
+      recordId: 'row', liveVersion: 7, changedFieldIds: ['files'],
+      patch: { files: ['att-original'] },
+      projectedData: { text: 'new', files: ['att-original'] }, linkUpdates: [],
+    }])
+  })
+
+  it('merges scalar and attachment deltas without dropping neighbors or mutating input', () => {
+    const input = fixture()
+    const live = new Map([['row', { ...input.live.get('row')!, version: 7 }]])
+    const writes = [{ recordId: 'row', liveVersion: 7, changedFieldIds: ['text'],
+      patch: { text: 'old' }, projectedData: { text: 'old', files: ['att-current'] }, linkUpdates: [] }]
+    const original = structuredClone(writes)
+    expect(projectArchiveAttachmentCells(writes, live, planArchiveAttachmentCells(input))).toEqual([{
+      recordId: 'row', liveVersion: 7, changedFieldIds: ['text', 'files'],
+      patch: { text: 'old', files: ['att-original'] },
+      projectedData: { text: 'old', files: ['att-original'] }, linkUpdates: [],
+    }])
+    expect(writes).toEqual(original)
+  })
+
+  it('refuses changed live references and duplicate cells as a whole', () => {
+    const input = fixture()
+    const cells = planArchiveAttachmentCells(input)
+    const live = new Map([['row', { ...input.live.get('row')!, version: 7 }]])
+    expect(() => projectArchiveAttachmentCells([], live, [...cells, ...cells]))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_PLAN_INVALID')
+    live.get('row')!.data.files = ['att-moved']
+    expect(() => projectArchiveAttachmentCells([], live, cells))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_PLAN_INVALID')
+  })
+
+  it('refuses scalar-plan version drift and conflicting ownership of an attachment field', () => {
+    const input = fixture()
+    const live = new Map([['row', { ...input.live.get('row')!, version: 7 }]])
+    for (const write of [
+      { recordId: 'row', liveVersion: 6, changedFieldIds: [], patch: {}, projectedData: {}, linkUpdates: [] },
+      { recordId: 'row', liveVersion: 7, changedFieldIds: ['files'], patch: {}, projectedData: {}, linkUpdates: [] },
+    ]) expect(() => projectArchiveAttachmentCells([write], live, planArchiveAttachmentCells(input)))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_PLAN_INVALID')
+  })
+
   it('plans exact ordered references without changing source objects or scalar data', () => {
     const input = fixture()
     const before = structuredClone(input)
