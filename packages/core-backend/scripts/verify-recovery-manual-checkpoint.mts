@@ -1885,6 +1885,37 @@ try {
         return attachmentProvider.get(request)
       } } }), { message: 'RECOVERY_ARCHIVE_READER_OBJECT_STORE_FAILED' })
     console.log('PASS: public archive authority includes exact attachments; reader authenticates/decrypts live/deleted binary frames with defensive private byte copies; missing/swapped objects refuse')
+    const commandModule = require('../src/multitable/recovery-archive-manual-command.ts') as typeof import('../src/multitable/recovery-archive-manual-command')
+    const commandFlags = { archive: process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED,
+      fence: process.env.MULTITABLE_ENABLE_WRITER_FENCE }
+    try {
+      process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
+      process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+      let commandSourceReads = 0
+      const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
+        { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
+        admissionPolicy, async (key) => { commandSourceReads++; return sourceStorage.readContentAddressed(key) })
+      const commandRequest = { ...admissionRequest, requestId: randomUUID() }
+      const commandStatus = await attachmentCommand.capture(commandRequest)
+      assert.equal(commandStatus.state, 'recoverable')
+      assert.equal(commandSourceReads, syntheticAttachments.length)
+      assert.deepEqual(await attachmentCommand.capture(commandRequest), commandStatus)
+      assert.equal(commandSourceReads, syntheticAttachments.length)
+      const commandAuthority = await attachmentPreview.loadRecoveryArchiveAuthorityInternal(uploadInput.transaction, {
+        ...commandRequest, generationId: commandStatus.generationId, recheckAuthority: async () => true,
+      })
+      const commandState = await attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput,
+        selectedBinding: commandAuthority.selectedBinding, manifestObject: commandAuthority.manifestObject,
+        sectionObjects: commandAuthority.sectionObjects, attachmentObjects: commandAuthority.attachmentObjects, query })
+      for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(commandState, row.id).bytes,
+        Buffer.from(`synthetic-${row.id}`))
+      console.log('PASS: manual command captures live/deleted source attachments, publishes and reads exact bytes; exact retry never rereads source')
+    } finally {
+      if (commandFlags.archive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = commandFlags.archive
+      if (commandFlags.fence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = commandFlags.fence
+    }
     console.log('PASS: live/deleted source files form authenticated attachment index and exact 10+N nonce reservations; caller attachment substitution ignored; durable interrupted capture resumes without reread/reseal')
     console.log('PASS: missing manifest refuses publication and retains source pins; complete attachment roster atomically verifies catalog/receipts/archive refs and releases only its own source pins')
   } finally { attachmentKey.fill(0) }

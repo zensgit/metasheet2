@@ -7309,7 +7309,7 @@ export function createRecoveryArchiveManualCommand(
 ) {
   return bindRecoveryArchiveManualCommand(transaction, bindRecoveryArchiveScopeAuthorization(
     (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
-  ), runtime, policy)
+  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey))
 }
 
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */

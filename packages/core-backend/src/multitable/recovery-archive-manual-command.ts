@@ -3,7 +3,7 @@ import { acquireCanonicalSheetFence } from './canonical-sheet-fence'
 import { bindRecoveryArchiveManualAdmission, snapshotRecoveryArchiveManualPolicy,
   type RecoveryArchiveManualAdmissionPolicy } from './recovery-archive-manual-admission'
 import { bindRecoveryArchiveManualContinuation, bindRecoveryArchiveManualObjectUpload,
-  bindRecoveryArchiveManualManifestUpload } from './recovery-archive-manual-continuation'
+  bindRecoveryArchiveManualManifestUpload, bindRecoveryArchiveManualAttachmentUpload } from './recovery-archive-manual-continuation'
 import { bindRecoveryArchiveManualFinalization } from './recovery-archive-manual-finalization'
 import { readRecoveryArchiveManualRequest, type RecoveryArchiveManualRequest } from './recovery-archive-manual-request'
 import type { RecoveryArchivePreparedUploadInput } from './recovery-archive-prepared-upload'
@@ -26,10 +26,11 @@ export function bindRecoveryArchiveManualCommand(
   authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
   runtime: RecoveryArchivePreviewRuntime,
   policyInput?: RecoveryArchiveManualAdmissionPolicy,
+  readContentAddressed?: Parameters<typeof bindRecoveryArchiveManualContinuation>[2],
 ) {
   const policy = policyInput === undefined ? undefined : snapshotRecoveryArchiveManualPolicy(policyInput)
   const admit = policy ? bindRecoveryArchiveManualAdmission(transaction, authorize, policy) : undefined
-  const continueCapture = bindRecoveryArchiveManualContinuation(transaction, authorize)
+  const continueCapture = bindRecoveryArchiveManualContinuation(transaction, authorize, readContentAddressed)
   const finalize = bindRecoveryArchiveManualFinalization(transaction, authorize)
   const assertEnabled = () => {
     if (!isRecoveryArchiveRestoreWorkerEnabled()) throw new Error('RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
@@ -92,7 +93,8 @@ export function bindRecoveryArchiveManualCommand(
             }),
             reserveNonces: async () => { throw new Error('RECOVERY_ARCHIVE_MANUAL_NONCE_BINDING_MISMATCH') },
           }),
-          upload: bindRecoveryArchiveManualObjectUpload(transaction, authorize, shared) })
+          upload: bindRecoveryArchiveManualObjectUpload(transaction, authorize, shared),
+          uploadAttachment: bindRecoveryArchiveManualAttachmentUpload(transaction, authorize, shared) })
         await bindRecoveryArchiveManualManifestUpload(transaction, authorize, shared)()
         await finalize({ ...shared, key: { keyId: policy.keyId, expectedRowVersion: policy.keyRowVersion },
           keyCustody: runtime.keyCustody })
