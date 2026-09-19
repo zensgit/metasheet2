@@ -7,8 +7,10 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // This runner owns its cluster. It never accepts a database URL or existing data directory.
-assert.ok(process.argv.slice(2).every(argument => argument === '--browser'), 'UNKNOWN_ACCEPTANCE_ARGUMENT')
+assert.ok(process.argv.slice(2).every(argument => ['--browser', '--attachment-stage'].includes(argument)), 'UNKNOWN_ACCEPTANCE_ARGUMENT')
 const browser = process.argv.includes('--browser')
+const attachmentStage = process.argv.includes('--attachment-stage')
+assert.ok(!(browser && attachmentStage), 'INCOMPATIBLE_ACCEPTANCE_ARGUMENTS')
 const bin = await realpath(process.env.TM_TEST_PG_BIN ?? '/invalid')
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const root = await mkdtemp(join(await realpath(tmpdir()), 'tm-manual-checkpoint-cluster-'))
@@ -31,18 +33,21 @@ try {
   const start = run('pg_ctl', ['-D', pgdata, '-l', join(root, 'server.log'), '-w', 'start',
     '-o', `-h 127.0.0.1 -p ${port} -c unix_socket_directories=''`])
   assert.equal(start.status, 0, 'SYNTHETIC_CLUSTER_START_FAILED')
-  const code = await new Promise((accept, reject) => {
-    const child = spawn('pnpm', ['--filter', '@metasheet/core-backend', 'exec', 'tsx',
-      'scripts/verify-recovery-manual-checkpoint.mts'], {
-      cwd: repo, stdio: 'inherit', timeout: 600000,
-      env: { ...env, NODE_ENV: 'test', TM_MANUAL_TEST_PGDATA: pgdata,
-        ...(browser ? { TM_MANUAL_TEST_BROWSER: 'true' } : {}),
-        TM_MANUAL_TEST_ADMIN_URL: `postgresql://tm_manual@127.0.0.1:${port}/postgres` },
+  const scripts = attachmentStage ? ['scripts/verify-recovery-attachment-stage.mts']
+    : ['scripts/verify-recovery-manual-checkpoint.mts', 'scripts/verify-recovery-attachment-stage.mts']
+  for (const script of scripts) {
+    const code = await new Promise((accept, reject) => {
+      const child = spawn('pnpm', ['--filter', '@metasheet/core-backend', 'exec', 'tsx', script], {
+        cwd: repo, stdio: 'inherit', timeout: 600000,
+        env: { ...env, NODE_ENV: 'test', TM_MANUAL_TEST_PGDATA: pgdata,
+          ...(browser ? { TM_MANUAL_TEST_BROWSER: 'true' } : {}),
+          TM_MANUAL_TEST_ADMIN_URL: `postgresql://tm_manual@127.0.0.1:${port}/postgres` },
+      })
+      child.once('error', reject)
+      child.once('exit', accept)
     })
-    child.once('error', reject)
-    child.once('exit', accept)
-  })
-  assert.equal(code, 0, 'SYNTHETIC_CHECKPOINT_ACCEPTANCE_FAILED')
+    assert.equal(code, 0, 'SYNTHETIC_CHECKPOINT_ACCEPTANCE_FAILED')
+  }
 } finally {
   if (initialized) {
     const status = run('pg_ctl', ['-D', pgdata, 'status'])
