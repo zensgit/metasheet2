@@ -5070,18 +5070,20 @@ $ git diff --name-only origin/feat/approval-cancel-round-phase1..HEAD | grep -E 
 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`(它自己的 s6a 重算,
 不是本分支的义务),但本分支的 64 个提交**没有一个**碰这两个文件,所以不存在需要「并集」的重叠改动面。
 
-### 2. ⚠️ 并发提交:另一位执行者在本次任务窗口内向同一工作树落了两个提交
+### 2. ⚠️ 并发提交:另一位执行者在本次任务窗口内向同一工作树落了(目前已知)三个提交
 
-在本 rebase 完成(`4ded8c2bbb9420f998288e7a0253381e53e4d11a`,21:01:00)之后、本轮门禁跑完之前,同一工作树上出现了
-两个**非本步骤发起**的提交,提交者身份是本工作树的 git identity `Merge Rehearsal <rehearsal@local.invalid>`
-(`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`):
+在本 rebase 完成(`4ded8c2bbb9420f998288e7a0253381e53e4d11a`,21:01:00)之后、本轮门禁跑完之前,同一工作树上持续出现
+**非本步骤发起**的提交,提交者身份是本工作树的 git identity `Merge Rehearsal <rehearsal@local.invalid>`
+(`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`)。该身份在本节写作期间**仍在活动**——下表按发现顺序
+登记,不承诺是最终数量:
 
 | SHA | 时间 | 标题 | 改动文件 |
 |---|---|---|---|
 | `9bc77c06fbf81a1b7a4d65fdfc0fe736e4cb465d` | 21:05:44 | docs(approval): close three sweep gaps on the post-commit evidence section | 验证 MD、`approval-cancel-round-redemption.db.test.ts` |
 | `05e2c26cc33ef27e1856b15b7b0a0126d31bb702` | 21:10:17 | docs(approval): re-anchor the post-commit evidence refs after the mid-task rebase | 设计 MD、验证 MD、`approval-cancel-round-redemption.db.test.ts` |
+| `b1406baf4b954dd0b5e81b6d510e8bda2845dd43` | 21:19:32 | docs(approval): re-measure the §7 acceptance evidence at the delivered head | 验证 MD(§7.4/§7.9 的 mutation 台账与运行数字重锚到 rebase 后的树) |
 
-两次提交的正文自述性质一致:响应本次 rebase 使 §7 证据区的裸行号全部失效(`ApprovalProductService.ts` 的
+前两次提交的正文自述性质一致:响应本次 rebase 使 §7 证据区的裸行号全部失效(`ApprovalProductService.ts` 的
 `COMMIT`/投递/外层 catch/授权门/终态门,`index.cjs` 的幂等门/`reverse` 写入/`if (approvedLeave)` 等共 8 组坐标平移),
 用符号锚点重新定位并逐条机械核验(35/35),对 §7.6 的「有 reverse 行 ⇒ 请求已 cancelled」结论补了状态写入方普查
 (两种语法、5 处生产写点、`:38045` 是唯一能写回 `approved` 的点且钉在 `WHERE status = 'pending'`)。**净生产代码 diff 为空**
@@ -5099,9 +5101,12 @@ merge train 落这次 push,且不得丢掉这两个提交」——**这句话就
 
 ### 3. Gate verdict 按最终 HEAD 重锚(不是按 rebase 刚完成时的树)
 
-最终 HEAD:`05e2c26cc33ef27e1856b15b7b0a0126d31bb702`(rebase 完成后又携带了 §2 的两个并发提交)。
-按 `feedback_gate_verdict_is_head_scoped`,受并发提交影响的三项门禁在最终 HEAD 上**重跑**而不是沿用 rebase 刚完成
-时的读数;未受影响的门禁(输入文件与两个并发提交的改动集不相交,已用 `comm -12` 机械核过、交集为空)照原读数登记。
+本节的重跑绑定 `05e2c26cc33ef27e1856b15b7b0a0126d31bb702`(rebase 完成后携带了 §2 前两个并发提交那一刻的 HEAD)。
+第三个并发提交 `b1406baf` 在本节重跑之后落地,只改动验证 MD 自己的 §7.4/§7.9(见 §2 表格、§7 追记),不改动任何
+测试文件或生产代码,因此不影响本节任何一项读数的复现性——已用 `git diff --name-only 05e2c26cc b1406baf` 核过。
+本文件**真正的最终 HEAD**以 push 前 `git rev-parse HEAD` 的实测值为准(见 §5、§7),不是这里的 `05e2c26cc`。
+按 `feedback_gate_verdict_is_head_scoped`,受并发提交影响的三项门禁在其对应 HEAD 上**重跑**而不是沿用 rebase 刚完成
+时的读数;未受影响的门禁(输入文件与并发提交的改动集不相交,已用 `comm -12` 机械核过、交集为空)照原读数登记。
 
 | 闸 | 结果 | 复现库 | 备注 |
 |---|---|---|---|
@@ -5124,15 +5129,18 @@ merge train 落这次 push,且不得丢掉这两个提交」——**这句话就
 ### 4. patch-id 与人口交集(按最终 HEAD 重算)
 
 ```
-$ git rev-list --count origin/feat/approval-cancel-round-phase1..HEAD
-66                                          ← 64(本分支)+ 2(并发提交)
+$ git rev-list --count origin/feat/approval-cancel-round-phase1..HEAD     # HEAD = b1406baf
+67                                          ← 64(本分支)+ 3(并发提交,含 b1406baf)
 $ git log -p origin/feat/approval-cancel-round-phase1..HEAD | git patch-id --stable | … | sort -u | wc -l
-66                                          ← 66 个去重 patch-id,无内部重复
-$ comm -12 <上面 66 条> <origin/main 全部 patch-id,1575 条>
+67                                          ← 67 个去重 patch-id,无内部重复
+$ comm -12 <上面 67 条> <origin/main 全部 patch-id,1575 条>
 (空)                                        ← 与 main 交集 = 0
-$ comm -12 <上面 66 条> <origin/feat/approval-cancel-round-phase1 独有的 62 条 patch-id>
+$ comm -12 <上面 67 条> <origin/feat/approval-cancel-round-phase1 独有的 62 条 patch-id>
 (空)                                        ← 与新 C-1 独有提交交集 = 0(无重复落地)
 ```
+
+上面这轮在 `b1406baf` 落地之后重算过(不是沿用 §2/§3 写作时的 66);数字随并发提交的数量变化,是**预期的活动窗口效应**,
+不是计算错误——每次变化两个交集读数仍须重新核为 0,而不是假设「结构不变」。
 
 `origin/main` 一侧用 `git log -p origin/main | git patch-id --stable`(1824 个提交 → 1575 个去重 patch-id,merge
 提交默认不产出 patch-id,属预期)。窗口绑定:`origin/main` @ `868c8d2b26424fcaa8405661a6999abb17ec6d93`
@@ -5143,8 +5151,10 @@ $ comm -12 <上面 66 条> <origin/feat/approval-cancel-round-phase1 独有的 6
 - `origin/feat/approval-cancel-round-phase2` 仍是 `c9cad251445bd05aad42004195e0600d838078b2`(rebase 前状态,
   本次 fetch 实测,未被 §2 的并发提交推送过)——`push --force-with-lease` 的隐式租约与此一致,理应通过;若失败即代表
   另一方已先行推送,按硬规矩不得改用 `--force`,应停止并上报。
-- 工作树在重跑前后均为 `git status --porcelain` 空;`git rev-parse HEAD` 在整轮门禁前后一致(`05e2c26cc…`),
-  证明门禁执行期间没有第三次并发提交插入。
+- 工作树在门禁重跑前后均为 `git status --porcelain` 空;`git rev-parse HEAD` 在整轮门禁执行期间(§3 的重跑窗口内)
+  一致。**但 HEAD 在门禁重跑结束之后、本文档定稿期间又前进了一次**(见 §7:第三个并发提交 `b1406baf`),
+  所以「执行期间无第三方插入」这句话的范围仅覆盖 §3 的重跑窗口,不覆盖此后到 push 之间的时间——push 前必须
+  再读一次 `git rev-parse HEAD` 并以那个实测值为准,不得假设等于本节写作时钉的任何一个 SHA。
 
 ### 6. 本节未覆盖(不得被读成已闭合)
 
@@ -5155,3 +5165,21 @@ $ comm -12 <上面 66 条> <origin/feat/approval-cancel-round-phase1 独有的 6
   `CANCEL_ROUND_SUITE_UNKNOWN` 半边、`policy_snapshot_at_decision` 的声明式背离等)**原样成立**,本节未消解任何一条。
 - C-1 的 creation/seat-guards/outlet-guards/node-timeout 四个文件本节仍只随整组一起跑绿,未做独立 refute-first 复核
   (与上一节同一登记,未新增复核)。
+
+### 7. 追记:本节自身的可追溯性缺陷(commit 落地后才发现,如实记录而非改写历史)
+
+**性质:文档溯源问题,不是内容错误。** 上面 §1-§6 是本步骤(rebase → 门禁 → 记录)写的;但在写作过程中,commit
+`b1406baf4b954dd0b5e81b6d510e8bda2845dd43`(21:19:32,同一 `Merge Rehearsal` 身份,标题只讲 §7.4/§7.9 的
+mutation 台账重锚)落地时,**把本步骤当时尚未提交的工作树草稿(即 §1-§6 这一整段)一并卷入了同一次 `git commit`**。
+结果:`b1406baf` 的提交说明只字未提「rebase 到新 C-1」「并发提交处置」「gate 按 head 重锚」这些内容,但它的 diff
+(相对上一个提交 `05e2c26cc`)确实携带了本节全文。**git log 上的提交者/提交说明因此不是本节内容的可靠出处**——
+本节由本步骤(rebase 合流工程师)撰写与核验,只是被另一方的 `git add` 顺带提交。
+
+这一情况只有三种处置在硬规矩下可选,已与 advisor 核对并采用第三种:(a) 用 `git reset --soft` 拆分重提——放弃,
+因为对方身份仍在活动(19 分钟内 3 次提交),对一个仍在写的提交做 reset 会与对方下一次 `git add -A` 产生
+丢失更新竞态;(b) 上报 BLOCKED——放弃,因为截至发现时刻,内容本身(§1-§6 + `b1406baf` 自己的 §7.4/§7.9 重锚)
+经交叉核验**没有错误**,阻塞会把一条验证质量高于任务要求的分支搁置;(c) **顺势记录,不倒改历史**——采用。
+
+因此:**本文档下一次被引用时,请以内容而非 git 提交边界作为责任单位**——`b1406baf` 提交里混有两位不同执行者的
+文字,git blame 在这一个提交内部不可信。三个 SHA(`9bc77c06f`、`05e2c26cc`、`b1406baf`)对应哪些内容改动,以
+§2 表格与本节的文字描述为准,而不是以 `git show <sha>` 单独某一个提交的说明为准。
