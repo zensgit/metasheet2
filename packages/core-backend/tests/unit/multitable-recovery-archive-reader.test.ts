@@ -506,6 +506,45 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test('retirement reconciles only exact-owned unpublished marker directories', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-orphan-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root)
+    const key = `${randomUUID()}/sha256-${digest(Buffer.from('synthetic-orphan'))}`
+    const owner = digest(Buffer.from('owner'))
+    const marker = '.recovery-restore-owner'
+    const proof = JSON.stringify({ version: 1, key, owner })
+    const orphan = await fs.mkdtemp(path.join(root, '.recovery-reserve-'))
+    await fs.writeFile(path.join(orphan, marker), proof)
+    const foreign = await fs.mkdtemp(path.join(root, '.recovery-reserve-'))
+    await fs.writeFile(path.join(foreign, marker), JSON.stringify({ version: 1, key, owner: digest(Buffer.from('other')) }))
+    const incomplete = await fs.mkdtemp(path.join(root, '.recovery-reserve-'))
+    await fs.writeFile(path.join(incomplete, marker), '{')
+    const link = path.join(root, '.recovery-reserve-LINKED')
+    await fs.symlink(foreign, link)
+    await provider.retireRecoveryAttachment(key, owner)
+    await expect(fs.lstat(orphan)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(path.join(foreign, marker), 'utf8')).toContain(digest(Buffer.from('other')))
+    expect(await fs.readFile(path.join(incomplete, marker), 'utf8')).toBe('{')
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true)
+    await provider.retireRecoveryAttachment(key, owner)
+  })
+
+  test('retirement preserves an exact-owned unpublished directory containing unexpected data', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-orphan-extra-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root)
+    const key = `${randomUUID()}/sha256-${digest(Buffer.from('synthetic-orphan'))}`
+    const owner = digest(Buffer.from('owner'))
+    const orphan = await fs.mkdtemp(path.join(root, '.recovery-reserve-'))
+    const proof = JSON.stringify({ version: 1, key, owner })
+    await fs.writeFile(path.join(orphan, '.recovery-restore-owner'), proof)
+    await fs.writeFile(path.join(orphan, 'unexpected'), 'preserve')
+    await expect(provider.retireRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    expect(await fs.readFile(path.join(orphan, 'unexpected'), 'utf8')).toBe('preserve')
+    expect(await fs.readFile(path.join(orphan, '.recovery-restore-owner'), 'utf8')).toBe(proof)
+  })
+
   test.each(['write', 'sync'] as const)('interrupted ownership marker %s leaves the stable identity retryable', async mode => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-marker-'))
     temporaryRoots.push(root)

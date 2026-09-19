@@ -34,6 +34,21 @@ function hasCode(error: unknown, code: string): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === code)
 }
 
+async function reconcileUnpublishedMarkers(target: Awaited<ReturnType<typeof location>>): Promise<void> {
+  for (const entry of await fs.readdir(target.base, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^\.recovery-reserve-[A-Za-z0-9]{6}$/.test(entry.name)) continue
+    const directory = path.join(target.base, entry.name)
+    const marker = path.join(directory, markerName)
+    // A name is only a candidate; only the complete original proof authorizes removal.
+    try { await assertOwned({ ...target, directory, marker }) } catch { continue }
+    const entries = await fs.readdir(directory)
+    if (entries.length !== 1 || entries[0] !== markerName) refused()
+    await fs.unlink(marker)
+    await fs.rmdir(directory)
+  }
+  await syncDirectory(target.base)
+}
+
 /** A preexisting directory without this exact proof is never adopted, even if bytes match. */
 export async function reserveLocalRecoveryAttachment(root: string, key: string, owner: string): Promise<void> {
   try {
@@ -99,6 +114,7 @@ export async function retireLocalRecoveryAttachment(root: string, key: string, o
       if (stat.isDirectory()) {
         if ((await fs.readdir(target.payload)).length) refused()
         await syncDirectory(target.directory)
+        await reconcileUnpublishedMarkers(target)
         return
       }
       if (!stat.isFile()) refused()
@@ -109,6 +125,7 @@ export async function retireLocalRecoveryAttachment(root: string, key: string, o
     await fs.mkdir(target.payload)
     await syncDirectory(target.payload)
     await syncDirectory(target.directory)
+    await reconcileUnpublishedMarkers(target)
   } catch { refused() }
 }
 
