@@ -90,7 +90,7 @@ import {
   isEmptyValue,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
-import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
+import { fieldDerivedAssigneeSourceKey, isSystemSentinelActor, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
 import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
 import {
   buildApprovalDesignatedFallbackResolver,
@@ -416,6 +416,28 @@ function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): Cancel
  * Lock §2-G3 — the machine-checkable reason categories a cancel-round seat can be refused for.
  * Categories only: the error body NEVER carries a person id or name (「提示管理员」 lands in the message
  * and the audit trail, not in a values-bearing `details`).
+ *
+ * Per-member reachability, MEASURED at gate round 6 rather than asserted (this repo's
+ * 「豁免理由会腐烂,要变成数据」 discipline — every claim below is pinned by a live test, not by a
+ * comment):
+ * - `inactive` — `is_active = FALSE` or `role = 'disabled'`. Covered by 负控 N1 / N2.
+ * - `pending_activation` — `activation_status = 'pending_activation'`. Covered by 负控 N2.
+ * - `not_found` — a claimed PERSON id with no `users` row. Covered by 负控 N2 (deletes the row) and
+ *   by 负控 N4 (proves the sentinel drop did not swallow humans into this bucket). Its production
+ *   population is narrow and that is DATA, not an assumption: a two-syntax census at this head finds
+ *   17 `DELETE FROM users` sites, all 13 files under `scripts/ops/` (staging smoke scripts, each
+ *   narrowed to its own fixture prefix), ZERO under any package `src`, `plugins`, or web-app `src`
+ *   tree; the kysely syntax (`deleteFrom('users')`) is 0 repo-wide; positive control (the same grep
+ *   against the `tests` trees) is 294. Runtime departures set `is_active = FALSE`
+ *   (`directory/deprovision-ledger.ts`), they do not delete. Before gate round 6 this bucket ALSO
+ *   caught the `system:auto-approval` sentinel — that was G6-1, and it is fixed by dropping the
+ *   `system:` namespace before the gate runs, never by making this bucket fail open.
+ * - `activation_invalid` — `parseUserActivationStatus` rejecting the stored value. UNREACHABLE while
+ *   `users.activation_status` carries `users_activation_status_check` and NOT NULL; kept as the
+ *   fail-closed landing spot if that constraint is ever relaxed. That reachability claim is NOT left
+ *   as prose: `approval-cancel-round-creation.db.test.ts` reads `pg_constraint` / `information_schema`
+ *   LIVE and pins both the allowed value set and the NOT NULL, so relaxing either turns the test red
+ *   at exactly the place this member would start mattering.
  */
 const CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS = [
   'inactive',
@@ -8611,14 +8633,56 @@ export class ApprovalProductService {
         `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
         [documentId],
       )
+      // Gate round 6, G6-1 (P1, reproduced on a real DB before the fix): `system:`-namespaced
+      // SENTINEL actors are not people, and this was the ONE seat-derivation site in the repo that
+      // did not drop them. `insertAutoApprovalEvents` writes `action: skipped ? 'sign' : 'approve'`
+      // with `actorIdForAutoApprovalEvent(event)`, which returns the literal `'system:auto-approval'`
+      // whenever `metadata.actorMode !== 'original_approver'` — and `getAutoApprovalActorMode`
+      // DEFAULTS to `'system'` while the template-authoring UI never writes `actorMode` at all. So
+      // every document that passed through one `mergeWithRequester` auto-approval carried a sentinel
+      // row in this query's result, the seat gate below counted it as a person with no `users` row,
+      // and the document became PERMANENTLY un-cancellable behind a 409 telling the administrator to
+      // "restore" an account that does not and must not exist.
+      //
+      // The predicate is the shared `isSystemSentinelActor` (ApprovalAssigneeResolver.ts), the same
+      // one `loadPriorNodeApproverDeciders` — the sibling path that also derives seats from
+      // `approval_records(action='approve')`, Lock-1 §K3 — applies. Reused, not re-spelled: a second
+      // hand-rolled `startsWith` here would be exactly the "另造更窄/更宽同类物" this repo forbids.
+      // Under `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's
+      // real id, so that person IS kept and IS re-qualified — the drop is namespace-scoped, never
+      // "drop every auto-approved node's approver".
       const approverIds = approverRows.rows
         .map((row) => row.actor_id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0 && !isSystemSentinelActor(id))
+
+      // Zero HUMAN approvers (every `approve` row on the original was synthetic) is NOT
+      // `not_found` — there is nobody to restore. Lock §14.1 ratifies 席位 = 原单的原审批人 with
+      // N ≥ 1 (lock:335) and judgment I″ requires 「至少一个活动席位」 (lock:337); the fail-closed
+      // answer contract already registers for zero resolvable seats is `CANCEL_ROUND_NO_ELIGIBLE_
+      // APPROVER`, so this reuses that code rather than minting a fifth one.
+      //
+      // It is an EXPLICIT check, not a fall-through to the `initialAssignmentCount === 0` backstop
+      // below, because that backstop is NOT reachable for an empty seat set: the dedicated runtime
+      // graph deliberately omits `emptyAssigneePolicy`, so `ApprovalGraphExecutor.resolveInitialState`
+      // THROWS `400 APPROVAL_ASSIGNEE_EMPTY` (ApprovalGraphExecutor.ts, the `assignments.length === 0`
+      // arm of `resolveFromNode`) before `initialAssignmentCount` is ever evaluated. Without this
+      // line the fix would answer a bare generic 400 instead of a cancel-round contract code.
+      // `details.reason` is a category, never a person — the same values-free posture as
+      // `CANCEL_ROUND_SEAT_INELIGIBLE.details.reasons`.
+      if (approverIds.length === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: this document was approved entirely by automation, so there is no original approver to re-convene',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+          { reason: 'no_human_approver' },
+        )
+      }
 
       // Lock §2-G3 — re-qualify EVERY seat before any write, under the same `FOR UPDATE` taken
       // above. BLOCK on failure (never filter-and-continue: the cancel node is `approvalMode:
       // 'all'`, so dropping a seat would silently lower the co-sign threshold). See the helper's
       // own doc for what it reuses, why it is wider than the normal path, and what is left OPEN.
+      // Sentinels are already gone by here, so every id this sees is a claimed PERSON.
       await assertCancelRoundSeatsEligibleInTxn(client, approverIds)
 
       // §14.1 — `requesterSnapshot.id` MUST equal the original requester (the revoke gate at the
@@ -8643,9 +8707,18 @@ export class ApprovalProductService {
 
       // Advisor note / I″ (lock §14.1): NEVER auto-approve and NEVER create with zero seats — the
       // seed deliberately omits `emptyAssigneePolicy: 'auto-approve'`, and this is the explicit,
-      // fail-closed backstop in case a future edit to the seed graph ever introduced one, or the
-      // original document's approver trail is empty (should not happen for an `approved` instance,
-      // but the seat query above is a LEFT-style read with no lock-time guarantee of non-emptiness).
+      // fail-closed backstop in case a future edit to the seed graph ever introduced one.
+      //
+      // Gate round 6, G6-1 erratum — this comment used to also claim it covered "the original
+      // document's approver trail is empty". It does NOT, and never did: with zero seats the
+      // executor throws `400 APPROVAL_ASSIGNEE_EMPTY` from the `assignments.length === 0` arm of
+      // `resolveFromNode` before returning, so `initialAssignmentCount === 0` is UNREACHABLE while
+      // the seed omits `emptyAssigneePolicy`. The empty-seat case is answered by the explicit
+      // pre-check above instead. What this backstop really guards is `initial.status !== 'pending'`
+      // / a wrong `currentNodeKey` — i.e. a seed graph edited into auto-approving or re-routed.
+      // No `details` payload here deliberately: a payload no test can construct would be an
+      // assertion about an unreachable branch (the pre-check above carries the one that IS
+      // constructible, `reason: 'no_human_approver'`).
       if (initial.status !== 'pending' || initial.currentNodeKey !== CANCEL_ROUND_APPROVAL_NODE_KEY || initialAssignmentCount === 0) {
         throw new ServiceError(
           'Cancel round could not be started: no eligible approver seat could be resolved',
@@ -12680,7 +12753,10 @@ export class ApprovalProductService {
       const seen = new Set<string>()
       const pushDecider = (actorId: string): void => {
         const id = actorId.trim()
-        if (!id || id.startsWith('system:') || seen.has(id)) return
+        // Gate round 6, G6-1: was an inline `id.startsWith('system:')`. Behaviour-identical, but
+        // now the SAME exported predicate the cancel-round seat derivation calls — one definition
+        // of the non-user namespace instead of two copies that can drift.
+        if (!id || isSystemSentinelActor(id) || seen.has(id)) return
         seen.add(id)
         deciders.push(id)
       }
