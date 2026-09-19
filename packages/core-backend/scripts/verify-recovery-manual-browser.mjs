@@ -35,7 +35,7 @@ import { createPinia } from 'pinia';
 import { createRouter, createWebHistory } from 'vue-router';
 localStorage.setItem('auth_token', ${JSON.stringify(bearer)});
 const router = createRouter({history:createWebHistory(),routes:[{path:'/:pathMatch(.*)*',component:{render:()=>null}}]});
-createApp({render:()=>h(MultitableWorkbench,{baseId:'b',sheetId:'no-genesis',viewId:'manual-browser-grid',
+createApp({render:()=>h(MultitableWorkbench,{baseId:'b',sheetId:'no-genesis',viewId:new URLSearchParams(location.search).get('view')||'manual-browser-grid',
 onReady:()=>{document.documentElement.dataset.workbenchReady='true'}})})
 .use(createPinia()).use(ElementPlus).use(router).mount('#app');` : `
 import RecoveryArchiveModal from '/src/multitable/components/RecoveryArchiveModal.vue';
@@ -213,6 +213,16 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
         assert.equal(attachmentId, 'manual-live-attachment')
         const expectedBytes = Buffer.from(`synthetic-${attachmentId}`)
         assert.deepEqual(await readFile(downloadPath), expectedBytes, 'Saved browser download must equal archived source bytes')
+        await page.goto(`http://127.0.0.1:${address.port}/__manual_archive?view=manual-browser-gallery`)
+        await page.locator('html[data-workbench-ready="true"]').waitFor()
+        const cover = page.locator('.meta-gallery__cover-image')
+        await cover.waitFor()
+        await page.waitForFunction(() => {
+          const image = document.querySelector('.meta-gallery__cover-image')
+          return image instanceof HTMLImageElement && image.complete && image.naturalWidth === 1 && image.src.startsWith('blob:')
+        })
+        await page.screenshot({ path: join(tmpdir(), `tm-restored-gallery-${width}.png`), fullPage: true })
+        console.log(`PASS: Chromium ${width} restored gallery cover authenticated and decoded original PNG`)
         assert.deepEqual(errors, [])
         assert.deepEqual(apiFailures, [])
       }

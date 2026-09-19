@@ -1737,11 +1737,11 @@ try {
     await sourceFence.fenceWriterEntry(query, 'no-genesis')
     const ledger = await sourceLedger.mintOperation(query, 'no-genesis')
     assert.ok(ledger.operationId)
-    const changed = (await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','["manual-live-attachment","manual-second-attachment"]'),
+    const changed = (await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','["manual-second-attachment","manual-live-attachment"]'),
       version=version+1 WHERE id='manual-source-record' RETURNING data,version`)).rows[0]
     await sourceHistory.recordRecordRevision(query, { sheetId: 'no-genesis', recordId: 'manual-source-record',
       version: changed.version, action: 'update', source: 'rest', actorId,
-      changedFieldIds: ['manual-attachment-field'], patch: { 'manual-attachment-field': ['manual-live-attachment', 'manual-second-attachment'] },
+      changedFieldIds: ['manual-attachment-field'], patch: { 'manual-attachment-field': ['manual-second-attachment', 'manual-live-attachment'] },
       snapshot: changed.data, ledger })
     assert.equal(await sourceLedger.sealOperation(query, ledger), true)
   }) } finally {
@@ -2368,6 +2368,9 @@ try {
           await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'attachment', loginToken)
           await query(`INSERT INTO meta_views(id,sheet_id,name,type) VALUES
             ('manual-browser-grid','no-genesis','Synthetic archive grid','grid')`)
+          await query(`INSERT INTO meta_views(id,sheet_id,name,type,config) VALUES
+            ('manual-browser-gallery','no-genesis','Synthetic archive gallery','gallery',
+             '{"coverFieldId":"manual-attachment-field","columns":1}')`)
           await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'workbench', loginToken)
         }
         await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
