@@ -550,8 +550,6 @@ database. Database name and role are checked before the download route runs.
   not browser link clicks or real Workbench login. No new production code,
   permission or flag changed. No new independent-review verdict is claimed.
 
-## Remaining Required Work
-
 ## Production Login And JWT Checkpoint
 
 Code `4b5a6a52e5593cba730dec97a3e9628a8af7b631`, tree
@@ -572,11 +570,49 @@ Logs: `/private/tmp/tm-attachment-login-browser-restored-20260919.log` and
 `/private/tmp/tm-attachment-login-final-tsc-20260919.log`.
 
 Sol high reviewed the permission/original-binding chain read-only at f215ba1f1a:
-no P1; P2 OPEN for generic preparation errors becoming HTTP 500 after permission
+no P1; P2 was OPEN for generic preparation errors becoming HTTP 500 after permission
 or original-binding drift. It ran no tests and did not assess these verifier edits.
 Session closed. This checkpoint is local-only pending that bounded fix; remote
 CI on f215ba1f1a does not certify it. No Workbench login-page/grid/download-click
 acceptance, real environment, flag, dispatch or deployment is claimed.
+
+## Preparation Refusal Fix
+
+Code `6bff7a8d6645644ad07b77b606df265dc2842aa0`, tree
+`5e322c08b76f9f513b240b78f727ba0fdbe8aa04` (seven files), closes the
+bounded Sol finding above. Named permission errors survive preparation/staging;
+original metadata and plan errors use preview-drift. Unknown infrastructure
+failures are not relabeled as permission or drift errors.
+
+- Initial unit negatives failed for generic permission/binding errors. Final
+  sync-restore/attachment-plan/preview neighbors PASS: three files, 42/42.
+- Mutation restoring generic preparation permission failure makes the matching
+  unit RED; restored implementation is used for the complete final DB run.
+- Production HTTP: field permission revoked after preview returns 403; original
+  attachment field binding removed after preview returns 409. Both preserve
+  record data/version and stage count. Restored fixture then completes the
+  positive two-file restore with exact original-byte downloads.
+- Full owned PostgreSQL/browser runner exits 0: 32 migration replay census;
+  historical suites 47/47, 59/59 and 127/127; scalar and attachment modal loops
+  at 1440/390; production login/JWT/download; fault rollback and cleanup races.
+  Owned browser/listeners close, database connections reach zero, databases and
+  temporary cluster are removed.
+- Core typecheck, five source-file ESLint, D2 wiring 6/6 and diff-check PASS.
+- Terra bounded read-only review: no evidenced P1/P2 in the five source files.
+  Its initial concern about generic infrastructure errors was withdrawn after
+  tracing facade rethrow/HTTP 500; sanitization remains intentional. No tests
+  were run by that reviewer; session is closed.
+
+Logs under `/private/tmp/`:
+`tm-attachment-refusal-route-final-realdb-20260919.log`,
+`tm-attachment-refusal-final-unit-20260919.log`,
+`tm-attachment-refusal-final-tsc-20260919.log`,
+`tm-attachment-refusal-lint-20260919.log`,
+`tm-attachment-refusal-wiring-20260919.log`, and
+`tm-attachment-refusal-mutation-20260919.log`.
+These are local evidence, not a successor remote CI verdict. No full Workbench
+login-page/grid/download-link UAT, runtime cleanup registration, real environment
+or customer data acceptance is inferred. #5882 remains Draft/HOLD.
 
 ## Open Gates
 

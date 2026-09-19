@@ -257,8 +257,6 @@ same assertions run after each desktop/mobile restore. The process main pool is
 explicitly replaced with a verified owned synthetic database before any route
 query. This does not prove browser link interaction or Workbench login.
 
-## Nightly Read-Only Investigation Plan
-
 ## Authenticated Acceptance Follow-Up
 
 Code `4b5a6a52e5593cba730dec97a3e9628a8af7b631` replaces the attachment
@@ -271,8 +269,27 @@ organization selection, grid refresh or attachment-link-click UAT.
 Sol's bounded permission/original-binding review of `f215ba1f1a` found no P1 and
 one P2: preparation refusals can escape as HTTP 500 rather than canonical
 forbidden/drift responses. Fail-closed behavior is preserved but the diagnostic
-contract is not complete. Keep HOLD until typed refusals and route negatives
-close this finding; do not infer approval from successful authenticated recovery.
+contract was not complete at that checkpoint. The bounded fix below closes this
+finding; successful authenticated recovery alone was not sufficient evidence.
+
+## Typed Refusal Closure
+
+Code `6bff7a8d6645644ad07b77b606df265dc2842aa0`, tree
+`5e322c08b76f9f513b240b78f727ba0fdbe8aa04`, preserves named permission
+refusals through preparation and staging, and maps original metadata/plan drift
+to the existing preview-drift response. Unknown DB/storage failures remain generic
+server failures, with private provider details sanitized rather than exposed.
+
+The actual HTTP oracle previews first, then makes the original field read-only:
+execution returns 403 without new stages or record changes. Moving the original
+attachment out of its field returns 409 with the same zero-effect assertions.
+Restoring the fixture permits the unchanged positive two-file restoration and
+original-byte downloads. This does not add permission or recovery semantics.
+
+Terra read-only review found no evidenced P1/P2 in the five source-file fix after
+withdrawing an incorrect infrastructure-error-classification concern. It ran no
+tests; executable evidence remains the owned local verification. Draft/HOLD stays
+in force pending successor CI and the remaining acceptance gates above.
 
 ## Nightly Plan Boundary
 
