@@ -9,6 +9,7 @@ import { eventBus } from '../../src/integration/events/event-bus'
 import {
   deriveCancelRoundW4OperationIdV1,
   getAttendanceCancellationExecutionPort,
+  getCancelRoundCancelledEventDelivery,
   registerAttendanceCancellationExecutionProvider,
   unregisterAttendanceCancellationExecutionProvider,
   type AttendanceCancellationExecutionPort,
@@ -734,6 +735,50 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     }
   }
 
+  /**
+   * Codex 审阅第 3 条修复 (2026-09-19) — the REAL send site, observed.
+   *
+   * ⚠️ WHY THE BUS AND NOT THE OUTBOX. The finding this closes was invisible for exactly one
+   * reason: the only assertion in this file that named 「C-1 step ⑦ (发 attendance.request.cancelled)」
+   * counted rows in `attendance_result_event_outbox`, and under the `legacy` / `legacy_compat`
+   * postures — which is what every org in this fixture runs — NEITHER path writes that table. The
+   * HTTP path announces the cancellation on the in-process bus instead, so `0 === 0` compared two
+   * numbers that are structurally zero while the real send counts were 0 and 1. These assertions
+   * subscribe to the bus singleton the plugin's `emitEvent` actually publishes to
+   * (`index.cjs` → `context.api.events.emit` → `plugin-manager.ts:586-593` → `index.ts:1242` →
+   * `eventBus.emit`), which is the send site itself and not a proxy for it.
+   */
+  function captureCancelledEvents(): {
+    payloads: { requestId?: string; status?: string; orgId?: string; userId?: string }[]
+    forRequest: (requestId: string) => { requestId?: string }[]
+    stop: () => void
+  } {
+    const payloads: { requestId?: string; status?: string; orgId?: string; userId?: string }[] = []
+    const id = eventBus.subscribe('attendance.request.cancelled', (payload: unknown) => {
+      payloads.push((payload ?? {}) as { requestId?: string })
+    })
+    return {
+      payloads,
+      forRequest: (requestId: string) => payloads.filter((e) => e.requestId === requestId),
+      stop: () => eventBus.unsubscribe(id),
+    }
+  }
+
+  /**
+   * The POSITIVE CONTROL every zero-expecting assertion below needs, factored out so none of them
+   * can quietly skip it. A count of 0 is what you get when the send is correctly withheld — and it
+   * is ALSO what you get when the attendance plugin never bound a delivery in this process, in
+   * which case the case proves nothing and its mutation stays green. Asserting the binding turns
+   * 「it did not send」 into 「it could have sent and did not」.
+   */
+  function expectCancelledEventDeliveryBound(): void {
+    expect(
+      getCancelRoundCancelledEventDelivery(),
+      'no attendance.request.cancelled delivery is bound — every zero-send assertion in this file '
+        + 'would pass vacuously',
+    ).toBeDefined()
+  }
+
   function captureCompletionEvents(instanceId: string): { seen: string[]; stop: () => void } {
     const seen: string[] = []
     const ids = (['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'] as const).map(
@@ -760,6 +805,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       })
 
       const capture = captureCompletionEvents(fixture.roundInstanceId)
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
       let approve: Response
       try {
         approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
@@ -769,10 +816,16 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         expect(approve.status, await approve.clone().text()).toBe(200)
       } finally {
         capture.stop()
+        cancelledEvents.stop()
       }
 
       // 「零完成事件」. Its discriminating power is the sibling case below, which sees exactly one.
       expect(capture.seen).toEqual([])
+      // Codex 审阅第 3 条修复 (2026-09-19) — and ZERO cancellation announcements. C-3's closure
+      // `return`s before the post-commit region ever runs, and nothing was cancelled to announce.
+      // Discriminating because the delivery IS bound (asserted above) and because the mutation
+      // 「announce unconditionally」 makes this line red.
+      expect(cancelledEvents.payloads).toEqual([])
 
       // `return` 一个与 dispatchAction 自身底部 return 同形的 UnifiedApprovalDTO — a real DTO for
       // THIS instance, reporting the closed state, not the pre-close one.
@@ -1226,6 +1279,13 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       })
 
       const portStub = bindCancellationPort(async () => ({ kind: 'executed', response: { ok: true } }))
+      // Codex 审阅第 3 条修复 (2026-09-19) — free coverage of the `executed` half of the emit gate,
+      // because this case already drives that kind. On `executed` the boundary DID enqueue
+      // `attendance_result_event_outbox` and the W4C-2 dispatcher announces it on drain, so an
+      // in-process announcement here would be a SECOND delivery of one cancellation. The mutation
+      // 「announce unconditionally」 makes this line red.
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
       try {
         const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
           method: 'POST',
@@ -1234,8 +1294,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         expect(approve.status, await approve.clone().text()).toBe(200)
       } finally {
         portStub.stop()
+        cancelledEvents.stop()
       }
       expect(portStub.calls.length).toBe(1)
+      expect(cancelledEvents.payloads).toEqual([])
 
       // ── THE I3 CLAUSE, FIRST. Under M-26 the round row stays `pending`, this line throws
       // `CANCEL_ROUND_ALREADY_PENDING` (409) from `createCancelRoundInstance`'s own pre-check, and
@@ -1894,19 +1956,38 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       // a reason the twin construction did not intend. Asserted rather than assumed.
       expect(attachedA!.orgId).toBe(attachedB.orgId)
 
-      // ── Drive A: approve the cancel round. ──────────────────────────────────────────────────
-      const approveA = await jsonRequest(baseUrl, `/api/approvals/${a.roundInstanceId}/actions`, a.approverToken, {
-        method: 'POST',
-        body: { action: 'approve' },
-      })
-      expect(approveA.status, await approveA.clone().text()).toBe(200)
+      // ── Codex 审阅第 3 条修复 (2026-09-19). Subscribed BEFORE either path is driven, so A's
+      //    count is a real zero-or-one rather than a listener that attached too late. This is the
+      //    probe from `verify-codex-cancel-finding3-20260919.md` §3.3 turned into a standing
+      //    assertion: it read `{sendsAfterA: 0, sendsAfterB: 1}` at `4a08a576e`. ────────────────
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
+      let approveA: Response
+      let cancelB: Response
+      try {
+        // ── Drive A: approve the cancel round. ────────────────────────────────────────────────
+        approveA = await jsonRequest(baseUrl, `/api/approvals/${a.roundInstanceId}/actions`, a.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approveA.status, await approveA.clone().text()).toBe(200)
+        const sendsAfterA = cancelledEvents.payloads.length
 
-      // ── Drive B: the existing W4 path, as a user walks it. ──────────────────────────────────
-      const cancelB = await jsonRequest(baseUrl, `/api/attendance/requests/${attachedB.requestId}/cancel`, requesterTokenB, {
-        method: 'POST',
-        body: {},
-      })
-      expect(cancelB.status, await cancelB.clone().text()).toBe(200)
+        // ── Drive B: the existing W4 path, as a user walks it. ────────────────────────────────
+        cancelB = await jsonRequest(baseUrl, `/api/attendance/requests/${attachedB.requestId}/cancel`, requesterTokenB, {
+          method: 'POST',
+          body: {},
+        })
+        expect(cancelB.status, await cancelB.clone().text()).toBe(200)
+
+        // THE PARITY, counted at the send site. Read as an ORDERED pair, not two independent
+        // numbers: B's 1 is what proves the subscription was live for A's window, so A's 1 is a
+        // measured send and not an unattached listener.
+        expect({ sendsAfterA, sendsAfterB: cancelledEvents.payloads.length - sendsAfterA })
+          .toEqual({ sendsAfterA: 1, sendsAfterB: 1 })
+      } finally {
+        cancelledEvents.stop()
+      }
 
       // ── The W4 RESULT PAYLOAD, pinned. This is 「完整取消结果」 as the existing path returns it.
       //    `redeemCancelRoundInTxn` derives `outcome` from that SAME entry response
@@ -1984,6 +2065,25 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         for (const [from, to] of IDENTITY_SUBSTITUTIONS) text = text.split(from).join(to)
         return text
       }
+
+      // ── Codex 审阅第 3 条修复 (2026-09-19) — the ANNOUNCEMENT, compared the same way the rows
+      //    below are: one payload each, normalised through the SAME substitution map, then
+      //    required to be byte-equal. This is the 「完整取消结果逐字节等价于现有 W4 路径」 clause
+      //    (lock §8 期 1) applied to the event, which until this commit the redemption path did
+      //    not emit at all. Asserting equality rather than shape is what makes a future divergence
+      //    in `requestId` / `status` / `orgId` / `userId` go red instead of passing a shape check.
+      const eventA = cancelledEvents.forRequest(attachedA!.requestId)
+      const eventB = cancelledEvents.forRequest(attachedB.requestId)
+      expect({ a: eventA.length, b: eventB.length }).toEqual({ a: 1, b: 1 })
+      expect(normalise(eventA[0])).toBe(normalise(eventB[0]))
+      // …and pinned as VALUES too, so a normalisation that silently collapsed both to `null`
+      // could not carry the assertion above.
+      expect(eventB[0]).toEqual({
+        requestId: attachedB.requestId,
+        status: 'cancelled',
+        orgId: attachedB.orgId,
+        userId: requesterB,
+      })
 
       // ── The comparator. Returns the set of columns whose NORMALISED values differ. ───────────
       const divergentColumns = (rowA: Record<string, unknown>, rowB: Record<string, unknown>): string[] => {
@@ -2432,6 +2532,250 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(auditRow.rows[0]?.metadata?.cancellationOutcome?.status).toBe(
         'cancelled_with_unrecoverable_expired',
       )
+    },
+  )
+  /**
+   * ══ Codex 审阅第 3 条修复 (2026-09-19) — the three controls for the post-commit announcement ══
+   *
+   * THE DEFECT. Under `legacy` / `legacy_compat` — the only postures any org runs at this head —
+   * the boundary writes no outbox row, and the HTTP cancel route compensates by emitting
+   * `attendance.request.cancelled` in process. The redemption path never passes through that route
+   * (`cancelRequest`'s only two callers are the two HTTP routes), so it announced nothing. Measured
+   * `{sendsAfterA: 0, sendsAfterB: 1}`; see `verify-codex-cancel-finding3-20260919.md`.
+   *
+   * WHY THESE CASES BIND A DOUBLE FOR THE PORT BUT NOT FOR THE DELIVERY. The double is what lets a
+   * case choose the W4 `kind` it wants to exercise — `replay` in particular is otherwise
+   * unreachable (below). The DELIVERY is the real one the attendance plugin bound at activate, so
+   * what these cases observe is the production send site, not a stand-in for it. Every
+   * zero-expecting assertion asserts that binding first (`expectCancelledEventDeliveryBound`),
+   * because 0 is also what an unbound delivery produces.
+   */
+  it(
+    'Codex 3 / 判据 II + lock §8 期 1: a redeemed cancel round announces `attendance.request.cancelled` ' +
+      'EXACTLY ONCE on the real bus, with the same payload the HTTP path builds — the send the ' +
+      'redemption path did not make before this commit (M-C3-1: delete the post-commit delivery ⇒ red)',
+    async () => {
+      const suffix = `c3one-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+
+      // `legacy_compat` is the kind the REAL boundary returned for this fixture's org in the
+      // verification probe (`accepted_write_posture = legacy_projection_only`, operation row
+      // `state = completed`). Driving it through the double keeps the case pinned to that kind
+      // while the end-to-end parity is carried by the 账侧 twin case against the real boundary.
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'legacy_compat',
+        response: {
+          ok: true,
+          data: {
+            requestId: attached!.requestId,
+            status: 'cancelled',
+            orgId: attached!.orgId,
+            userId: fixture.requesterId,
+            reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
+          },
+        },
+      }))
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+        cancelledEvents.stop()
+      }
+
+      // The redemption ran — without this, a zero-or-one count below could not tell a correct
+      // send from a dispatch that never reached the redemption at all.
+      expect(portStub.calls.length).toBe(1)
+      expect(await roundOutcome(fixture.roundInstanceId)).toMatchObject({ outcome: 'applied' })
+
+      // EXACTLY ONCE, and the whole payload pinned as a value — the same four fields, built by the
+      // same function the HTTP route calls (`emitRequestCancelledEventForOutcomeV1`). A shape
+      // check would survive a second construction drifting away from the first; this does not.
+      expect(cancelledEvents.forRequest(attached!.requestId).length).toBe(1)
+      expect(cancelledEvents.payloads).toEqual([
+        {
+          requestId: attached!.requestId,
+          status: 'cancelled',
+          orgId: attached!.orgId,
+          userId: fixture.requesterId,
+        },
+      ])
+    },
+  )
+
+  it(
+    'Codex 3 / 持久化转换不得挂网络调用: when the dispatch transaction ROLLS BACK after a successful ' +
+      'redemption, the announcement is NOT made — the send sits after `COMMIT`, so nothing is ' +
+      'announced that is not durable (M-C3-2: move the delivery inside the transaction ⇒ red)',
+    async () => {
+      const suffix = `c3rb-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+
+      // ── THE LEVER, and why it is this one. The failure has to land STRICTLY BETWEEN the
+      //    redemption returning `applied` (which is what schedules the announcement) and the
+      //    `COMMIT` (which is what releases it). A failure before the redemption would prove
+      //    nothing — zero sends is trivially true when nothing was cancelled.
+      //
+      //    So the double, using the transaction client it is handed, arms a trigger that raises on
+      //    the NEXT `approval_records` INSERT. In the redeem branch that insert is
+      //    `insertApprovalRecord`, several statements after the redemption and several before the
+      //    COMMIT. Both the function and the trigger are created INSIDE the caller's transaction,
+      //    so PostgreSQL's transactional DDL rolls them away with everything else — verified
+      //    directly: after the ROLLBACK, `pg_proc` and `pg_trigger` both hold zero rows for these
+      //    names. Nothing leaks into the next case.
+      const probeName = `c2_evt_rollback_probe_${TS}`
+      const portStub = bindCancellationPort(async (input) => {
+        await input.client.query(
+          `CREATE FUNCTION public.${probeName}() RETURNS trigger LANGUAGE plpgsql AS `
+            + `$fn$ BEGIN RAISE EXCEPTION 'C2_EVT_FORCED_ROLLBACK'; END $fn$`,
+        )
+        await input.client.query(
+          `CREATE TRIGGER ${probeName}_trg BEFORE INSERT ON approval_records `
+            + `FOR EACH ROW EXECUTE FUNCTION public.${probeName}()`,
+        )
+        return {
+          kind: 'legacy_compat',
+          response: {
+            ok: true,
+            data: {
+              requestId: attached!.requestId,
+              status: 'cancelled',
+              orgId: attached!.orgId,
+              userId: fixture.requesterId,
+              reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
+            },
+          },
+        }
+      })
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
+      let approve: Response
+      let approveBody: string
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        approveBody = await approve.clone().text()
+      } finally {
+        portStub.stop()
+        cancelledEvents.stop()
+      }
+
+      // ── POSITIVE CONTROL 1: the redemption REALLY ran, and really succeeded. Without it, the
+      //    zero below is indistinguishable from a dispatch that failed before reaching C-1.
+      expect(portStub.calls.length).toBe(1)
+      // ── POSITIVE CONTROL 2: the transaction really rolled back. The raise is `P0001`, which is
+      //    not in `isRetryableSqlState`, so it surfaces as a 500 rather than the 503 contention
+      //    mapping.
+      expect(approve!.status, approveBody!).toBe(500)
+      // ── POSITIVE CONTROL 3: rolled back as DATA, not merely as a status code. The round keeps
+      //    its seat and stays `pending` — C-3 row 5's shape, the retryable one.
+      const round = await roundOutcome(fixture.roundInstanceId)
+      expect(round.outcome).toBe('pending')
+      expect(round.ended_at).toBeNull()
+      const instanceRow = await pool().query<{ status: string }>(
+        `SELECT status FROM approval_instances WHERE id = $1`,
+        [fixture.roundInstanceId],
+      )
+      expect(instanceRow.rows[0]?.status).toBe('pending')
+
+      // THE ASSERTION. A cancellation that did not commit was not announced.
+      expect(cancelledEvents.payloads).toEqual([])
+
+      // The probe left nothing behind — asserted, not assumed, because a leaked BEFORE INSERT
+      // trigger on `approval_records` would poison every later case in this file.
+      const leftovers = await pool().query<{ count: string }>(
+        `SELECT (SELECT count(*) FROM pg_proc WHERE proname = $1)
+              + (SELECT count(*) FROM pg_trigger WHERE tgname = $2) AS count`,
+        [probeName, `${probeName}_trg`],
+      )
+      expect(leftovers.rows[0].count).toBe('0')
+    },
+  )
+
+  /**
+   * ⚠️ REACHABILITY, STATED RATHER THAN IMPLIED (the report asked for a REAL replay; this is the
+   * honest answer instead of a weaker substitute).
+   *
+   * A `replay` answer is UNREACHABLE through the redemption path at this head, by this mechanism:
+   * the W4 seal that would make a later call a replay runs on the CALLER's client
+   * (`w4c3b-request-operation-boundary.ts:918-921`), so a rolled-back attempt leaves no operation
+   * row to replay against; and a committed one cannot re-enter, because the round is `applied` and
+   * `redeemCancelRoundInTxn`'s `WHERE outcome = 'pending'` plus the partial unique index let a
+   * round pass outlet #5 at most once. So the gate is DEFENSIVE — and it is gated anyway, because
+   * 「unreachable at this head」 is a property of today's code that a future change can remove
+   * silently. The double is not standing in for a reachable case here; it is the only way to
+   * exercise a branch that exists precisely so the path stays correct if it ever becomes reachable.
+   *
+   * THE IDEMPOTENCY IS THE EXISTING W4 REPLAY PREFLIGHT, not a new key or table: the boundary
+   * returns `replay` at `:870-874`, BEFORE its outbox enqueue, so the original run already
+   * announced and a re-run must not announce again.
+   */
+  it(
+    'Codex 3 / 幂等: a `replay` answer announces NOTHING — re-running one redemption does not ' +
+      'deliver a second `attendance.request.cancelled` (M-C3-3: drop the kind gate ⇒ red)',
+    async () => {
+      const suffix = `c3rep-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+
+      // The response a real replay carries: the FIRST run's sealed snapshot, replayed verbatim.
+      // Identical in every field to the success case's payload — which is the point. If the gate
+      // read the payload instead of the kind, this case and the success case would be
+      // indistinguishable, and dropping the gate would still look green.
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'replay',
+        response: {
+          ok: true,
+          data: {
+            requestId: attached!.requestId,
+            status: 'cancelled',
+            orgId: attached!.orgId,
+            userId: fixture.requesterId,
+            reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
+          },
+        },
+      }))
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+        cancelledEvents.stop()
+      }
+
+      // The redemption ran AND committed — so this zero is a withheld send, not an absent one.
+      expect(portStub.calls.length).toBe(1)
+      expect(await roundOutcome(fixture.roundInstanceId)).toMatchObject({ outcome: 'applied' })
+      expect(cancelledEvents.payloads).toEqual([])
     },
   )
 })
