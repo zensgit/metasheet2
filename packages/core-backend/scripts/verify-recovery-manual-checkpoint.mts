@@ -2241,9 +2241,9 @@ try {
         assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
         const stageCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages')).rows[0].n
         const stagesBeforePublic = await stageCount()
-        try {
+        for (const visible of [true, false]) try {
           await query(`INSERT INTO field_permissions (sheet_id,field_id,subject_type,subject_id,visible,read_only)
-            VALUES ($1,$2,'user',$3,true,true)`, ['no-genesis', fieldId, actorId])
+            VALUES ($1,$2,'user',$3,$4,true)`, ['no-genesis', fieldId, actorId, visible])
           const revokedField = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
           assert.equal(revokedField.status, 403, JSON.stringify(await revokedField.json()))
           assert.equal(await stageCount(), stagesBeforePublic, 'field permission revocation must refuse before staging')
@@ -2276,6 +2276,30 @@ try {
             scope: { ...publicScope, fieldIds: ['manual-source-field'] } }) })
         assert.equal(alteredSelection.status, 409, JSON.stringify(await alteredSelection.json()))
         assert.equal(await stageCount(), stagesBeforePublic, 'changed selection must refuse before staging')
+        const publicTokenDigest = createHash('sha256').update(publicPreview.previewIdentity!).digest('hex')
+        const publicEffectEvidence = async () => (await query(`SELECT
+          (SELECT count(*)::int FROM meta_record_revisions WHERE sheet_id='no-genesis') AS revisions,
+          (SELECT count(*)::int FROM meta_record_history_operations WHERE sheet_id='no-genesis') AS operations,
+          (SELECT count(*)::int FROM meta_recovery_token_burns WHERE token_sha256=$1) AS burns,
+          (SELECT count(*)::int FROM meta_recovery_archive_sync_receipts WHERE token_sha256=$1) AS receipts`,
+        [publicTokenDigest])).rows[0]
+        const beforeLockedApply = await publicEffectEvidence()
+        const originalLock = (await query('SELECT locked,locked_by,locked_at,created_by FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        const metadataBeforeLock = (await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows
+        try {
+          await query(`UPDATE meta_records SET locked=true,locked_by='synthetic-other-locker',created_by=NULL WHERE id=$1`, [recordId])
+          const lockedRestore = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          const lockedBody = await lockedRestore.json() as { error: { code: string } }
+          assert.equal(lockedRestore.status, 409, JSON.stringify(lockedBody))
+          assert.equal(lockedBody.error.code, 'RECORD_LOCKED')
+          assert.deepEqual(await publicEffectEvidence(), beforeLockedApply)
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+          assert.deepEqual((await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows, metadataBeforeLock)
+        } finally {
+          await query('UPDATE meta_records SET locked=$2,locked_by=$3,locked_at=$4,created_by=$5 WHERE id=$1',
+            [recordId, originalLock.locked, originalLock.locked_by, originalLock.locked_at, originalLock.created_by])
+        }
+        console.log('PASS: post-preview hidden/read-only field refuses 403; other-owner record lock refuses 409 without metadata, data, revision, token or receipt effects')
         const publicResponse = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
         const publicResult = await publicResponse.json()
         assert.equal(publicResponse.status, 200, JSON.stringify(publicResult))
