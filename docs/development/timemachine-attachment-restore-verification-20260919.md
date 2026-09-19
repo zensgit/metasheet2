@@ -5,6 +5,7 @@ Status: LOCAL IMPLEMENTATION IN PROGRESS; no executable attachment restore yet.
 Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
 Contract: `e4625f322` (full parent available in Git).
 First code checkpoint: `0158b581001d630a470d39b2476c2cfb0c48b16e`.
+Source/authorization checkpoint: `19d8e6e49996ff6a1083697dcaa22b118f463a2e`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Completed Local Evidence
@@ -27,6 +28,31 @@ Branch: `codex/timemachine-attachment-restore-20260919`.
 The helper is not called by runtime yet and is not an authorization proof. Its
 new unit file is not yet explicitly enrolled in the required archive CI lane;
 local success is not published-head CI evidence. No successor PR is published.
+
+## Source And Authorization Checkpoint
+
+- Attachment-only and mixed scalar/attachment plans project into the canonical
+  write-intent shape, preserving live versions, exact changed-field IDs, scalar
+  peers and input immutability. Drift, duplicate cells and conflicting ownership
+  reject the complete projection.
+- The existing canonical plan authorizer accepts a writable attachment field,
+  refuses hidden/read-only fields, and rechecks current management authority.
+  Omitting attachment changed-field IDs yields exactly two false-allow failures;
+  restoring the projection returns the suite to green.
+- The real encrypted reader now privately retains authenticated attachment
+  generation/workspace/base/sheet/record/field, deleted state, size and media
+  type. Restore-source access checks all original identities, refuses archived-
+  deleted/missing entries and forged state, and returns defensive binary copies.
+  This was exercised through both the internal reader and public complete-state
+  reconstruction. It does not invent the absent archived display filename.
+- Removing the original record/field checks produced the targeted real-reader
+  failure. Restored final run: four files / 58 tests PASS (reader, attachment plan,
+  canonical plan authorization and archive preview).
+- Core type-check (both projects), source ESLint and diff-check PASS.
+
+These are real reader and authorization-component checks, not end-to-end file
+restoration. No storage preparation, metadata update or live restore is enabled
+by this checkpoint. The public preview still refuses attachment differences.
 
 ## Remaining Required Work
 
