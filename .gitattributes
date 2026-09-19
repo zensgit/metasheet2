@@ -90,3 +90,14 @@ scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1 tex
 plugins/plugin-integration-core/__tests__/sealed-export-s6a-product-runtime.test.cjs text eol=lf
 scripts/ops/multitable-onprem-package-build.sh text eol=lf
 .github/workflows/plugin-tests.yml text eol=lf
+
+# ---------------------------------------------------------------------------
+# 场景 B 合成 BOM 夹具（W7-A1）
+# ---------------------------------------------------------------------------
+# fixtures/scenario-b-synthetic-bom/{01-schema,02-seed}.sql 是生成物，
+# plugins/plugin-integration-core/__tests__/scenario-b-synthetic-bom-source-run.test.cjs
+# 把它们与 scenario-b-synthetic-bom.cjs 的输出逐字节比对（生成器写 LF）。在
+# core.autocrlf=true 的 Windows 检出上，没有这条规则的话检出来的是 CRLF，比对必红。
+# 与上面的 pin 规则同理用 `text eol=lf` 而不是 `-text`：工作区是 LF，且 `git add` 时归一化，
+# 于是 CRLF 编辑器也塞不进 CRLF 字节。
+plugins/plugin-integration-core/fixtures/scenario-b-synthetic-bom/** text eol=lf
