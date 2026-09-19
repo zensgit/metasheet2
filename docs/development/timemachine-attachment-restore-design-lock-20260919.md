@@ -225,6 +225,21 @@ temporary directories still require reconciliation; this is not product FINAL.
 | Mutations | Remove permission, original binding, digest, drift, transactional write or cleanup ownership guard: matching test RED, restored GREEN | OPEN |
 | Integration | Focused neighbors, type/lint, required selector union, exact-head CI, independent bounded review and exact-SHA report | OPEN |
 
+## Synthetic Browser Progress
+
+At code `dc589e3e830d1cedaf29b4161839857612590816`, desktop 1440 and mobile
+390 production modal/client/router loops restore scalar and attachment changes
+against owned synthetic PostgreSQL/storage. The attachment loop verifies both
+original binary payloads, entire record equality, one restore history entry and
+one UI executed notification. Unsupported attachment copy now explains the
+current service/scope limitation instead of claiming universal non-support.
+
+The Browser gate above remains OPEN for full Workbench login, field authorization,
+actual grid refresh and browser download. Synthetic SQL edits, synthetic bearer
+authentication and direct storage byte readback do not substitute for those
+oracles. Cleanup registration, displaced-object reconciliation and full independent
+review also remain open. No new recovery semantics or production flag is enabled.
+
 ## Nightly Read-Only Investigation Plan
 
 No real environment access is authorized by this plan. Known artifact evidence:

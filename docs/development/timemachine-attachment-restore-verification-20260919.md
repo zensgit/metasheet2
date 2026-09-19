@@ -473,13 +473,49 @@ Tree: `b93f8883072586cad761331f71c4470e03dce878` (eight-file code/test delta).
   under `/private/tmp`. HTTP authentication is synthetic, not Workbench login/UAT.
 - Remote exact-head CI for this new checkpoint is pending publication/rerun.
 
+## Synthetic Browser Attachment Checkpoint
+
+Code: `dc589e3e830d1cedaf29b4161839857612590816`.
+Tree: `9be618e686b89c8d8820763b3936ccca45a1a245` (five-file delta).
+
+- Chromium 1440/390 passed for both scalar and attachment capture, reload,
+  catalog, preview, explicit confirmation and synchronous restore through the
+  production modal/client/router. Failed or non-2xx API requests fail the gate.
+  Each loop requires exactly one execute request and one executed notification.
+- Attachment readback checks the entire record data, exactly one restore version
+  increment after the synthetic edit, one restore history entry and both original
+  binary payloads through local storage. This is not a browser download test or
+  proof that the Workbench grid consumed the notification.
+- Initial attachment browser run exposed a shared-client transaction fixture
+  problem during concurrent status/catalog reads. The fixture now uses an owned
+  pool with per-transaction checkout and async-local depth. Production main pool
+  already uses its transaction API; no production database behavior was changed.
+- Restored full runner exited 0: historical 47/47, 59/59 and 127/127;
+  32 migrations / 999 catalog objects; public HTTP, stage cleanup/concurrency,
+  all four browser loops. Owned DB connections, clusters, browser and Vite/cache
+  were closed/removed. Log:
+  `/private/tmp/tm-attachment-public-browser-restored-20260919.log`.
+- Modal/client 2 files / 154 tests, core/web typechecks, scoped ESLint, wiring
+  37/37 and diff-check passed. Unsupported-copy assertions were RED before the
+  bilingual correction and GREEN after it. Full required-web was not rerun
+  locally for this checkpoint; these existing specs retain their two-point wiring.
+- Screenshots `tm-manual-http-browser-attachment-{1440,390}.png` in the runner's
+  OS temporary directory were visually inspected; no dialog overflow or control
+  overlap observed. Authentication is synthetic and edits are synthetic SQL.
+- Luna narrow read-only review returned no evidenced P1/P2 before session close.
+  It made no edits and ran no tests; this verdict covers this five-file patch,
+  not full Workbench UAT or the complete attachment product.
+- New exact-head remote CI remains pending publication. No real environment,
+  flags, dispatch, deployment or customer storage was accessed.
+
 ## Remaining Required Work
 
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
 remaining purge/drift/retry concurrency; async contract;
-whole-operation negatives; real isolated database/storage and desktop/mobile
-browser acceptance; required CI wiring and independent exact-head review.
+whole-operation negatives; full Workbench login, field authorization, grid refresh
+and browser attachment download acceptance beyond the synthetic modal loop;
+required exact-head CI and independent exact-head review.
 `unsupported_attachments` remains for absent/partial ports and over-threshold
 attachment selections. Explicit test composition is not production readiness.
 
