@@ -2,6 +2,21 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Record History Presentation Checkpoint (2026-09-20)
+
+Code `10a665746c94baa21864267386efbe82f34532a3`, tree
+`67c3fc3e9b427bfe9bc7975966bcb7445a28f69b`, aligns the existing record-history
+timestamp presentation with configuration history and sheet trash. It reuses
+their formatter: viewer device timezone (not the actor/server timezone), current
+UI language, 24-hour clock and visible zone label. The semantic time element
+retains the original timestamp in datetime/title; invalid legacy input remains
+verbatim. Existing actor-name/ID fallback remains unchanged.
+
+This changes no history storage, permission masking, restore selection, preview,
+execution or trash semantics. No timezone preference is invented. The record
+inspector's already enrolled browser-component spec covers the actual history tab;
+no new shared workflow or selector is needed. Full application UAT remains open.
+
 Interruption-safe marker cleanup checkpoint
 `29e123f7a870d568b48b13c5e3d00abc2b1164e6` supersedes the unlink/rmdir gap
 described below for imported proven directories. After validating exact proof,

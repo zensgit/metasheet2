@@ -11,6 +11,49 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Latest Record History Presentation Evidence (2026-09-20)
+
+Code: `10a665746c94baa21864267386efbe82f34532a3`.
+Tree: `67c3fc3e9b427bfe9bc7975966bcb7445a28f69b`.
+Parent: `60908afd4536fc8ae93dfb52b4a120485bb0c247`.
+Two product/test files only: MetaRecordHistoryPanel.vue and the existing
+multitable-record-inspector.spec.ts. No DB/backend/workflow changes.
+
+- Old implementation: both new English/Chinese history-tab cases RED because
+  the original timestamp/semantic time element was absent.
+- Final six-suite regression: 127/127 PASS (record inspector, history panel,
+  drawer history diff, drawer restore, configuration history and sheet trash).
+- Final restoration under `TZ=UTC`: the same 127/127 PASS. Explicit
+  `TZ=Asia/Taipei`: both new cases PASS. Each expects the device-local time,
+  visible zone, UI language, original datetime/title, invalid legacy fallback,
+  actor display name and missing-name ID fallback.
+- Mutation replacing the shared formatter with plain toLocaleString: both new
+  cases RED on the rendered text; restored before final runs and commit.
+- App vue-tsc PASS. Scoped ESLint: zero errors, seven existing multi-component
+  harness warnings. Diff-check PASS.
+- Existing `multitable-record-inspector` token covers this spec in both
+  multitable-web-guard and run-required-web-tests.sh; no new spec or selector.
+- Logs: `/private/tmp/tm-history-time-{red,green,mutation,final-utc,final-taipei,tsc,lint}-20260920.log`.
+
+These are mounted component tests, not full application login/org-selection UAT.
+Remote CI for this new code is not yet claimed. PR #5882 stays Draft/HOLD.
+
+## Exact Parent Stage-Ledger Reverification
+
+At clean `60908afd4536fc8ae93dfb52b4a120485bb0c247`, the owned runner
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --attachment-stage`
+completed with exit 0. Fresh isolated PostgreSQL stage-ledger replay, drift,
+concurrency, metadata authorization/rollback, abandonment-before-storage,
+reference refusal, late-writer barrier, retirement retry and cleanup-versus-apply
+passed. Database/connections=0; owned cluster stopped and removed. Log:
+`/private/tmp/tm-stage-exact-60908afd-20260920.log`.
+
+This extends the prior marker-cleanup local evidence, not a whole-product
+completion claim. The terminal cleaned-state replay intentionally performs no
+additional storage IO; its pinned contract was not changed. Unprovable residual
+objects, general late-process-death reconciliation, displaced objects and full
+application acceptance remain separate residuals. No real environment accessed.
+
 ## Completed Local Evidence
 
 - Internal descriptive cell planner preserves original reference ordering and
