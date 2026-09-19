@@ -863,6 +863,23 @@ flags, dispatch, deployment or real environment access.
 
 ## Outstanding Full-Scope Acceptance
 
+Latest interruption refinement: code
+`29e123f7a870d568b48b13c5e3d00abc2b1164e6`, tree
+`f18871361dbecd852a5bb1b73aa1ab4b2c34504d`. Injected rmdir failure immediately
+after marker removal reproduces an old unprovable leftover; new provider instance
+retry now removes the imported empty directory while preserving the permanent
+payload tombstone. Restoring the old unlink-before-transfer order makes that
+exact test RED. Wrong imported proof/extra data/symlink negatives preserve their
+sentinels and refuse. Final reader/application neighbors pass 84/84; core tsc,
+source ESLint and diff-check pass. Logs:
+`/private/tmp/tm-orphan-retry-{red,mutation,final,tsc,lint}-20260920.log`.
+
+No SQL or public API changed. Full PG/browser was not rerun for this filesystem
+refinement; the preceding real-DB checkpoint remains previous-code evidence.
+No new independent review is claimed. Tests model deterministic interruption,
+not an OS power cut. Missing original proof, late-writer crash after terminal
+cleanup, displaced objects and full product acceptance remain open.
+
 Latest bounded cleanup evidence: code
 `2aef32ff8edb01981a923bfe7e312164ba626253`, tree
 `bd1666275020951b8c0f4c49f749924a39a9768c`. Two new local filesystem cases

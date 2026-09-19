@@ -2,6 +2,19 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+Interruption-safe marker cleanup checkpoint
+`29e123f7a870d568b48b13c5e3d00abc2b1164e6` supersedes the unlink/rmdir gap
+described below for imported proven directories. After validating exact proof,
+retirement atomically moves the directory into the stable owned object namespace
+and syncs both parent directories before unlinking the private marker. Retry can
+remove an empty imported directory under that retained ownership proof. Imported
+wrong proof, extra contents and symlinks refuse without deletion. There is no
+recursive delete. The trusted, exclusively server-managed root assumption remains.
+
+Originally absent/incomplete proof outside that namespace is still preserved.
+This checkpoint does not prove reconciliation of every late-writer/process-death
+interleaving, physical power loss, displaced live objects or general storage GC.
+
 Proven unpublished-marker reconciliation at
 `2aef32ff8edb01981a923bfe7e312164ba626253` extends only the internal one-object
 retirement primitive. After the canonical tombstone is durable, private reserve
