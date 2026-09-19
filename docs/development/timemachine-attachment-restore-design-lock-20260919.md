@@ -115,11 +115,26 @@ receipt and token burn together. Neither a forged displaced location nor a wrong
 operation can commit. Applied rows cannot be rewritten or deleted. This is a
 commit-time proof, not a permanent foreign key to retention-managed history.
 
-No executable preview is enabled yet. The public reader/staging facade, v2 preview
+No executable preview is enabled yet. Public runtime registration, v2 preview
 minting, abandon/displaced-object cleanup, async attachment contract and browser
 loop remain mandatory. Retaining displaced identity is not proof of safe cleanup;
 physical deletion still requires current reference/pin and ownership arbitration.
 Do not infer public completeness from the internal transaction evidence.
+
+## Authenticated File Preparation Facade
+
+The internal sync facade accepts a server-owned storage port; the public runtime
+does not register it. Before archive reads it checks the signed token, token burn,
+current key, catalog binding and legal holds. Each stage authorization reuses the
+same source guard. File IO remains outside SQL transactions. Database-derived
+metadata, actual field deltas and v2 identity must agree before staging; callers
+cannot supply trusted paths, hashes or attachment descriptors. Entry inputs are
+snapshotted and known refusals retain canonical structured responses.
+
+An isolated binary acceptance now runs the authenticated reader, durable staging,
+canonical metadata/reference/history transaction and readback of original bytes.
+Its authorization callbacks and signed token are synthetic: it is not public
+preview, real login or browser UAT. Cleanup and concurrent failure gates remain open.
 
 ## Required Evidence
 
@@ -128,7 +143,7 @@ context and diagnostic summary. It still refuses executable attachment previews.
 The internal sync plan supports a domain-separated v2 identity carrying a closed,
 sorted attachment/original-record/original-field/metadata-hash roster; absence of
 that roster preserves v1 hashes exactly. Public database-derived roster collection,
-token minting with v2 and reader/staging-to-executor wiring are not yet connected.
+token minting with v2 and public runtime registration are not yet connected.
 Never treat the new hash compiler as proof of that end-to-end binding.
 
 | Gate | Required oracle | Status |

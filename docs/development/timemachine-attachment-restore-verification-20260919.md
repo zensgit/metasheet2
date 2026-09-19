@@ -1,6 +1,6 @@
 # Attachment Restore Verification
 
-Status: LOCAL IMPLEMENTATION IN PROGRESS; no executable attachment restore yet.
+Status: IMPLEMENTATION IN PROGRESS; public attachment restore remains unavailable.
 
 Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
 Contract: `e4625f322` (full parent available in Git).
@@ -263,10 +263,38 @@ Six code/test files; no public restore entry point enabled.
   `/private/tmp/tm-attachment-displaced-mutation-20260919.log`, and
   `/private/tmp/tm-attachment-adoption-{unit,tsc,lint,wiring}-20260919.log`.
 
+## Authenticated File Facade Checkpoint
+
+Code commit: `e750e620fcaee89ff8a15aba30205a2f30d022a7`.
+
+- Actual authenticated binary reader -> durable staging -> canonical attachment
+  metadata/reference/history/receipt -> original byte readback PASS. This uses
+  synthetic authorization and a test-issued v2 token, not public preview or UAT.
+- Full-read denial, retiring key and active hold refuse before upload. Injected
+  upload failure leaves record/version unchanged and one reserved object; retry
+  adopts the same object identity. Consumed-token replay refuses without upload.
+- Removing the prepared batch from the facade produces the exact identity-invalid
+  RED; source restored before the final full run.
+- Final unfiltered owned PostgreSQL runner PASS: D5 47/47, historical neighbors
+  59/59 and 127/127; 32 migrations / 995 catalog objects with repeated fingerprint
+  `ce2c18ede8fb173e59f9171aee86c4f50a1ace81f5092f81119625ed40162110`.
+  Owned DB, connections, cluster and temporary storage residue zero.
+- Seven unit files 92/92, two-project typecheck, source ESLint, wiring 37/37 and
+  full sealed-export S5 PASS. S5 initially lacked local mssql resolution; rerun
+  used the already-installed package through temporary NODE_PATH, without install.
+- Sol identified missing pre-IO source authority and escaping structured refusal;
+  both were fixed and tested. Narrow terminal review found no remaining P1/P2 in
+  orchestration, not an approval of cleanup, public restore or the complete product.
+- Initial fixture failures exposed absent live reference/sealed history/original
+  scope and an inactive test fence. Fixtures were corrected without weakening
+  production validation. Temporary test filters were removed before the full run.
+- Logs: `/private/tmp/tm-attachment-facade-{final,mutation,unit,tsc,lint,wiring,s5}-20260919.log`.
+- Successor remote exact-head CI has not yet been collected.
+
 ## Remaining Required Work
 
-Authenticated-reader integration; prepared/displaced file reference-safe crash cleanup;
-public preview/token binding and reader/staging-to-canonical facade integration;
+Public reader/runtime registration; prepared/displaced file reference-safe crash cleanup;
+public preview/token binding;
 end-user attachment field authorization; purge/drift/retry concurrency; async contract;
 whole-operation negatives; real isolated database/storage and desktop/mobile
 browser acceptance; required CI wiring and independent exact-head review.
