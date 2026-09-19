@@ -5282,3 +5282,31 @@ $ git rev-parse origin/feat/approval-cancel-round-phase2   993b462fbd8dd3bfc59ad
 - 未重新评估 `ba8a0133d → b8b71539a` 这次迁移目标本身是否正确——这是任务给定的输入,不在本步骤的裁决范围内。
 - C-1 的 creation/seat-guards/outlet-guards/node-timeout 四个文件仍只随整组跑绿,未做独立 refute-first 复核
   (与上一节同一登记)。
+
+## 四次调度 —— 结构核对,不重跑门禁(2026-09-19,合流工程师 Sonnet 第三实例)
+
+入场即 `origin/feat/approval-cancel-round-phase2` = `d627327ff0d548ba9d66f0dbee8d2cc0993e6010`,`git status --porcelain` 空,
+新 C-1(`feat/approval-cancel-round-phase1` @ `b8b71539a`)未变。独立复算(未读文档抄数):`git merge-base --is-ancestor
+ba8a0133d HEAD` → NO,`ba8a0133d..HEAD` 有 251 个提交(含 main 自己新增的);`b8b71539a` 是 HEAD 祖先 → YES;
+`origin/main..HEAD`(131)与 `origin/main` 的 patch-id 交集 = 0;lane 独有提交(69)与 phase1 独有提交(62)patch-id 交集 = 0
+（用 `git log -p | git patch-id --stable` 逐一算,非读前两节数字)。**结论与前两节一致:字面 `rebase --onto` 命令今天
+仍是破坏性的,未执行。**
+
+`git diff --name-only 993b462fb d627327ff` 只命中本文件自己一行——上一次调度(三次复核)落地之后到本次入场之间,
+生产代码、测试文件、迁移、workflow 一个字节都没变,因此「三次复核」一节记录的全部门禁读数(tsc 0 输出、cancel-round
+七文件 90/97 与 EXPECT_DB=1 下 97/97、C-1 两套 54/54、四个 unit 文件 214/214、六个守卫全绿)在当前 HEAD 上机械成立,
+不构成第四次重跑的理由(相同输入不可能产出不同判定)。
+
+另外两项独立正控(未被前三节直接测过的角度):`shasum -a 256 .github/workflows/plugin-tests.yml` =
+`ee9e4f49b6b2aeffc1a790492bb0699c354e626580154648014fc5475e9d3874`,与 s6a 钉 `pluginTestsWorkflow` 字段逐字节相等;
+`git diff --name-only origin/feat/approval-cancel-round-phase1..HEAD`(lane 自己的 16 个改动文件)不含
+`plugin-tests.yml` 与 `s6a-package-provenance-pins.json` ——s6a 重算对本 lane 确实是 no-op,不是漏做。
+
+push 前复读:三个 ref(`origin/…phase1`、`origin/…phase2`、本地 `HEAD`)与入场时逐字节相同,无第三方并发提交介入本轮。
+本节是唯一未推送的改动,线性快进,用普通 `git push`,不消耗 `--force-with-lease`。
+
+**未覆盖(继承前两节同名登记,未新增复核):** 三个并发提交(`9bc77c06f`/`05e2c26cc`/`b1406baf`)自称的符号锚点核验与
+§7.6 状态写入方普查本身仍未逐条复核;C-1 的 creation/seat-guards/outlet-guards/node-timeout 四文件仍只随整组跑绿,
+未做独立 refute-first;C-1 两套件需要 `postgres` 角色(非 `metasheet`)连接才能过 `session_replication_role = replica`
+一项;`origin/main` patch-id 全集按当前 `origin/main`(`868c8d2b2`)未重算(沿用前节窗口,增量为 main 自身新提交,与
+lane 无关)。PR #5856 仍为 Draft,未 undraft、未合并、未动 PR 状态。
