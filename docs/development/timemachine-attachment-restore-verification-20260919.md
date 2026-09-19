@@ -1,7 +1,8 @@
 # Attachment Restore Verification
 
 Status: IMPLEMENTATION IN PROGRESS; explicitly composed synchronous attachment
-restore passes isolated HTTP acceptance. No production enablement or browser UAT.
+restore passes isolated HTTP and synthetic full-application browser acceptance.
+No production enablement or real-tenant UAT.
 
 Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
 Contract: `e4625f322` (full parent available in Git).
@@ -10,6 +11,73 @@ Source/authorization checkpoint: `19d8e6e49996ff6a1083697dcaa22b118f463a2e`.
 File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
+
+## Full Application Acceptance Passed (2026-09-20)
+
+Code `2e86dd86af1e5105e7987fd8d43f59cbe61ca7dd`, tree
+`d709609381a3679d11bfd366ee3de231dfcc965f`, parent
+`b4f5dea11654dfb82cab98b73a9763af5cfba435`. Two acceptance scripts only;
+production code, permissions, schema and feature defaults are unchanged.
+
+The full command
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser`
+exited naturally with code 0. Log:
+`/private/tmp/tm-full-app-clean-exit-20260920.log`.
+
+- Real LoginView obtains a production login response for the synthetic account;
+  browser storage initially contains no token. The real main entry, App shell,
+  protected router and MetaSheetServer serve the subsequent requests.
+- Both 1440/390 application legs pass archive capture/reload, actual cell-editor
+  deletion of two attachments, preview/explicit confirmation, one restore request,
+  record version/history readback, authenticated image/gallery decode and saved
+  original download-byte equality. No failed/non-2xx API or page error is tolerated.
+- Application startup uses an allowlisted synthetic environment, loopback listener,
+  owned database/storage and disabled external/plugin integrations. No fake plugin
+  discovery response or manually injected browser token is used on this leg.
+- Owned shutdown explicitly destroys the admin SafetyGuard and in-memory
+  idempotency singletons via their existing APIs after server stop. The resource
+  guard reports zero remaining referenced timers. The earlier no-cleanup run
+  failed on exactly those two timers; no forced successful exit or timer unref
+  workaround is used. This proves acceptance cleanup, not general server.stop
+  singleton ownership.
+- Full historical neighbors, migration replay, manual checkpoint and the subsequent
+  attachment-stage ledger sequence pass. Both databases/connections are zero;
+  browser, Vite cache/listener and the owned PostgreSQL cluster are closed/removed.
+- Core type-check, JavaScript syntax check, wiring 37/37 and diff-check pass.
+  Logs: `/private/tmp/tm-full-app-clean-exit-{tsc,wiring}-20260920.log`.
+
+Inspected screenshots under the system temporary directory:
+`tm-manual-http-browser-application-{1440,390}.png` and
+`tm-restored-gallery-390.png`. The controls remain within the viewport. This is
+synthetic full-application acceptance, not organization-switching or real-tenant
+UAT. Broader Time Machine completion is still open. This checkpoint's remote
+exact-head CI is separate and pending publication; #5882 remains Draft/HOLD.
+
+## Earlier Full Application Diagnostic (2026-09-20)
+
+Uncommitted acceptance-only work on parent
+`b4f5dea11654dfb82cab98b73a9763af5cfba435`; not published evidence.
+The real LoginView, main application entry/router/shell and MetaSheetServer
+ran against the owned synthetic database and local attachment store. No token
+was injected into browser storage on this application leg. Startup uses an
+allowlisted environment, disables external/plugin integrations and binds loopback.
+
+Log `/private/tmp/tm-full-application-browser-final-20260920.log` records both
+1440/390 application legs passing capture, actual cell-editor attachment deletion,
+confirmed restore, database/history readback, decoded gallery image and original
+download-byte checks. Failed/non-2xx API responses remain fatal. The standalone
+Workbench overflow mutation remains in its own leg; the full App outlet contains
+overflow differently and is subject to the positive viewport check instead.
+
+**Overall result: NOT PASS.** After application stop and zero database/connection
+readback, the checkpoint process did not exit naturally. The owned child was
+terminated; the outer runner failed and stopped/removed its cluster. The subsequent
+stage-ledger leg was not run. A duplicate pool-close diagnostic also occurred;
+its acceptance cleanup adjustment was then unverified. Do not force a successful
+process exit, count this as full UAT, or infer production lifecycle correctness.
+The passing checkpoint above supersedes this incomplete run after identifying
+the two admin singleton timers and rerunning the complete driver. No real organization-selection or customer
+environment evidence is claimed. The nightly investigation remains plan-only.
 
 ## Latest Real Grid-Editor Deletion Evidence (2026-09-20)
 

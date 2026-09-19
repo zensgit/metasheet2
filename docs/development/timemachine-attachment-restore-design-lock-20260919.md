@@ -2,6 +2,30 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Synthetic Full Application Acceptance (2026-09-20)
+
+Checkpoint `2e86dd86af1e5105e7987fd8d43f59cbe61ca7dd`, tree
+`d709609381a3679d11bfd366ee3de231dfcc965f`, extends the existing acceptance
+scripts to the real LoginView, main application entry/router/shell and
+MetaSheetServer. Browser authentication comes from the login form, not injected
+storage. At 1440/390, the synthetic user captures an archive, deletes attachments
+through the cell editor, previews/confirms restoration and reads the original
+download bytes and decoded image. No recovery semantics or production code change.
+
+The acceptance process owns an allowlisted environment, temporary database/local
+storage and loopback listeners. After server stop it explicitly disposes the
+process-global admin SafetyGuard/idempotency services, asserts the latter is the
+in-memory store, and verifies no referenced timers remain. Those globals are not
+owned by the current server.stop implementation; this test cleanup does not claim
+to repair general embedded-server lifecycle behavior. No forced successful exit.
+
+The complete owned driver exits naturally and removes databases/connections,
+browser/Vite resources and the PostgreSQL cluster. This supersedes the earlier
+LoginView/app-shell evidence gap, not organization-switching, real-tenant UAT or
+the broader storage/crash-reconciliation boundaries. See the paired verification
+report for exact logs, counterexample and screenshots. No real environment access,
+flag enablement, dispatch or deployment is authorized or performed.
+
 ## Real Grid-Editor Deletion Acceptance (2026-09-20)
 
 Checkpoint `0aac78fcee2393f57f8e107287706b62ba8de136`, tree
