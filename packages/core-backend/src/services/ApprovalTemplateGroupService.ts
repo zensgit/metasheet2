@@ -39,9 +39,12 @@
  *
  * `GROUP_NAME_UNSUPPORTED` (400, added in the design-gate-A3 回流修复 round, 2026-09-18) is
  * likewise an implementer's request-shape mapping, not a ninth ratified code — see
- * `mapGroupConstraintError`'s doc comment. It exists ONLY because the ratified §2 non-blank CHECKs
- * reject non-ASCII input; it does not widen, and must not be read as widening, what those CHECKs
- * accept.
+ * `mapGroupConstraintError`'s doc comment. Erratum 3 is a CANDIDATE (PROPOSED 2026-09-19, pending
+ * owner confirmation — NOT owner-ratified, NOT authorized; see the lock's "勘误 3" header entry)
+ * that narrows the `name` CHECK's trigger surface to non-blank-via-btrim, leaving the two `org_id`
+ * non-blank CHECKs untouched. On THIS candidate branch that means the `name` arm of
+ * `mapGroupConstraintError`'s 23514 mapping cannot currently fire — see that function's doc
+ * comment for why the arm is being KEPT (not deleted) until the owner actually confirms.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -140,6 +143,11 @@ function newGroupId(): string {
  * serves. `org_id`'s two occurrences are defense-in-depth only — the route layer already 403s a
  * blank `req.authenticatedTenantId` before any call into this file (§2 "org 从哪来" / A‴) — mapped
  * anyway so any other caller of these exported functions gets a typed 400, not a DB leak.
+ *
+ * The above describes the state as RATIFIED. On THIS branch, `name`'s CHECK has since been edited
+ * to an Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation — see
+ * `mapGroupConstraintError`'s doc comment below for the current, accurate status of this Set and
+ * the branch that consumes it).
  */
 const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
 
@@ -152,10 +160,20 @@ const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonbla
  *    intent was a sort-order collision (§2 / acceptance E, "同名行会先撞立即唯一索引").
  *  - 23514 (check_violation) on one of `NONBLANK_CHECK_CONSTRAINTS` — see the block comment above.
  *    This is a REQUEST-SHAPE mapping, not a loosening of the CHECK: the constraint itself is a
- *    RATIFIED §2 clause and only an owner-approved lock erratum can widen it (this slice's
- *    verification MD carries the "owner 勘误请示": `CHECK (btrim(name) <> '')`). Until that lands,
- *    a pure-CJK (or otherwise non-printable-ASCII) name still cannot be created — this function's
- *    only job is to stop the raw DB error from leaking through as an undifferentiated 500.
+ *    RATIFIED §2 clause and only an owner-approved lock erratum can widen it. This slice's
+ *    verification MD's §23.5 "owner 勘误请示" asked to widen `atg_name_nonblank` to
+ *    `CHECK (btrim(name) <> '')`; on THIS branch that widening has been applied to the migration
+ *    as an Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation — NOT
+ *    owner-ratified, NOT authorized; see the lock's own "勘误 3" header entry and
+ *    `lock-errata-proposed-grouping-v2.13-20260919.md`). As a direct consequence, the
+ *    `atg_name_nonblank` member of `NONBLANK_CHECK_CONSTRAINTS` can no longer actually raise 23514
+ *    for `name` — a pure-CJK (or any other non-blank) name now passes that CHECK. This branch of
+ *    the `if` below, and `atg_name_nonblank` in the Set above, are being KEPT — not deleted — on
+ *    purpose: deleting them would be an unreviewed narrowing of this mapping's surface bundled
+ *    into a candidate that has not been confirmed, which is exactly the kind of unilateral call
+ *    this file must not make. Delete only once the owner actually confirms Erratum 3 (or rejects
+ *    it, in which case the branch reverts to load-bearing and nothing here needs to change). The
+ *    two `org_id` members are UNCHANGED by this candidate and remain (defense-in-depth) reachable.
  * Anything else (including an already-typed `ServiceError` thrown deeper in the same transaction,
  * e.g. GROUP_NOT_FOUND/GROUP_ARCHIVED) passes through unchanged.
  */
@@ -177,6 +195,10 @@ function mapGroupConstraintError(error: unknown): unknown {
     && typeof pgErr.constraint === 'string'
     && NONBLANK_CHECK_CONSTRAINTS.has(pgErr.constraint)
   ) {
+    // `atg_name_nonblank` arm: unreachable on this branch since Erratum 3 candidate (PROPOSED
+    // 2026-09-19, pending owner confirmation — see doc comment above). KEPT, not deleted, until
+    // the owner actually confirms — do not narrow this Set or this branch as part of the
+    // candidate; that would be an implementer decision the candidate does not license.
     return new ServiceError(
       '当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误',
       400,

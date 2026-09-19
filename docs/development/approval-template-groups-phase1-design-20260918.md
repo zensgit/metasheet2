@@ -59,29 +59,31 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 ### 2.1 `approval_template_groups`
 
-| 约束/列 | 迁移文件行 | 锁文 §2 出处 |
-|---|---|---|
-| `id text PRIMARY KEY`,`'atg_' + randomUUID()` 由服务层生成 | `:38`(DDL);`ApprovalTemplateGroupService.ts:120-122` `newGroupId()` | §2「`approval_template_groups(id text PK 'atg_…' …)`」 |
-| `org_id text NOT NULL CONSTRAINT atg_org_nonblank CHECK (org_id ~ '[!-~]')` | `:39-40` | §2 约束清单「`atg_org_nonblank`」 |
-| `name text NOT NULL CONSTRAINT atg_name_nonblank CHECK (name ~ '[!-~]')` | `:41-42` | §2 约束清单「`atg_name_nonblank`」 |
-| `sort_order int`(可空) | `:45` | §2「序号可空 + 与 archived_at 配对 CHECK」 |
-| `CONSTRAINT atg_org_id_uni UNIQUE (org_id, id)`(复合 FK 被引用侧) | `:52` | §2「`atg_org_id_uni`……否则 42830」 |
-| `CONSTRAINT atg_sort_unique UNIQUE (org_id, sort_order) DEFERRABLE INITIALLY DEFERRED` | `:58` | §2「`atg_sort_unique`……DEFERRABLE 的三条副作用」 |
-| `CONSTRAINT atg_sort_archived_pair CHECK ((archived_at IS NULL) = (sort_order IS NOT NULL))` | `:62` | §2「`atg_sort_archived_pair`」 |
-| `CREATE UNIQUE INDEX uq_atg_org_name_active ON … WHERE archived_at IS NULL`(部分唯一,只能是索引) | `:71-75` | §2「部分唯一只能是索引……」 |
-| **不另建** `idx_atg_org_sort`(`atg_sort_unique` 隐式索引已覆盖) | 迁移中确实无此索引(`:37-64` 只有上述三个约束 + 一个部分索引) | §2「不另建 idx_atg_org_sort」 |
-| `down()` 镜像(先删 links 表,再删索引,再删 groups 表) | `:109-113` | §2「`down()` 镜像」 |
+**候选列口径**:「候选(2026-09-19,待 owner 确认)」一列标记 Erratum 3 CANDIDATE(`lock-errata-proposed-grouping-v2.13-20260919.md` 勘误 3 / 锁文自己的「勘误 3」抬头条目)对该行的影响——PROPOSED,未 ratify,不是「已授权」;门审通过只证明技术验证通过,不构成 ratify、合并或迁移应用的许可。未点名的行按 v2.13 ratify 原样,不受本候选影响。
+
+| 约束/列 | 迁移文件行 | 锁文 §2 出处 | 候选(2026-09-19,待 owner 确认) |
+|---|---|---|---|
+| `id text PRIMARY KEY`,`'atg_' + randomUUID()` 由服务层生成 | `:38`(DDL);`ApprovalTemplateGroupService.ts:120-122` `newGroupId()` | §2「`approval_template_groups(id text PK 'atg_…' …)`」 | — 不受影响 |
+| `org_id text NOT NULL CONSTRAINT atg_org_nonblank CHECK (org_id ~ '[!-~]')` | `:39-40` | §2 约束清单「`atg_org_nonblank`」 | — 候选**未改**此行(单列请示明确保持 `org_id` 两处 CHECK 不变) |
+| `name text NOT NULL CONSTRAINT atg_name_nonblank CHECK (btrim(name) <> '')`(**候选**;ratified 原文是 `CHECK (name ~ '[!-~]')`) | `:41-63`(候选分支现状;原 ratified 行号 `:41-42`) | §2 约束清单「`atg_name_nonblank`」——**候选改写此行的谓词**,ratify 对象本身未变 | **是**——候选把该 CHECK 从「可打印 ASCII」改为「非空白(`btrim`)」;单列请示等 owner 亲自确认,`GROUP_NAME_UNSUPPORTED` 的 `name` 分支因此在候选分支上不可达(见服务层 `mapGroupConstraintError` 文档注释) |
+| `sort_order int`(可空) | `:45`→候选分支下约 `:66` | §2「序号可空 + 与 archived_at 配对 CHECK」 | — 不受影响 |
+| `CONSTRAINT atg_org_id_uni UNIQUE (org_id, id)`(复合 FK 被引用侧) | `:52`→候选分支下约 `:73` | §2「`atg_org_id_uni`……否则 42830」 | — 不受影响 |
+| `CONSTRAINT atg_sort_unique UNIQUE (org_id, sort_order) DEFERRABLE INITIALLY DEFERRED` | `:58`→候选分支下约 `:79` | §2「`atg_sort_unique`……DEFERRABLE 的三条副作用」 | — 不受影响 |
+| `CONSTRAINT atg_sort_archived_pair CHECK ((archived_at IS NULL) = (sort_order IS NOT NULL))` | `:62`→候选分支下约 `:83` | §2「`atg_sort_archived_pair`」 | — 不受影响 |
+| `CREATE UNIQUE INDEX uq_atg_org_name_active ON … WHERE archived_at IS NULL`(部分唯一,只能是索引) | `:71-75`→候选分支下约 `:92-96` | §2「部分唯一只能是索引……」 | — 不受影响 |
+| **不另建** `idx_atg_org_sort`(`atg_sort_unique` 隐式索引已覆盖) | 迁移中确实无此索引 | §2「不另建 idx_atg_org_sort」 | — 不受影响 |
+| `down()` 镜像(先删 links 表,再删索引,再删 groups 表) | `:109-113`→候选分支下约 `:130-133` | §2「`down()` 镜像」 | — 不受影响 |
 
 ### 2.2 `approval_template_group_links`
 
-| 约束/列 | 迁移文件行 | 锁文 §2 出处 |
-|---|---|---|
-| `org_id text NOT NULL CONSTRAINT atgl_org_nonblank CHECK (org_id ~ '[!-~]')` | `:79-80` | §2「关联表约束清单」 |
-| `template_id uuid NOT NULL REFERENCES approval_templates(id) ON DELETE CASCADE` | `:81-82` | §2「`FOREIGN KEY (template_id) … ON DELETE CASCADE`」 |
-| `group_id text`(**可空**,与 I2′ 一致) | `:87` | §2「`group_id` 可空」 |
-| `PRIMARY KEY (org_id, template_id)` | `:91` | §2「`PRIMARY KEY (org_id, template_id)`」 |
-| `CONSTRAINT atgl_group_fk FOREIGN KEY (org_id, group_id) REFERENCES approval_template_groups (org_id, id) ON DELETE NO ACTION ON UPDATE NO ACTION` | `:98-100` | §2「**不得**改成 `SET NULL`/`CASCADE`」 |
-| `CONSTRAINT atgl_state_check CHECK ((group_id IS NULL) = (unlinked_at IS NOT NULL))` | `:104` | §2「三种状态……`CHECK`」 |
+| 约束/列 | 迁移文件行 | 锁文 §2 出处 | 候选(2026-09-19,待 owner 确认) |
+|---|---|---|---|
+| `org_id text NOT NULL CONSTRAINT atgl_org_nonblank CHECK (org_id ~ '[!-~]')` | `:79-80`→候选分支下约 `:100-101` | §2「关联表约束清单」 | — 候选**未改**此行(单列请示明确保持两处 `org_id` CHECK 不变) |
+| `template_id uuid NOT NULL REFERENCES approval_templates(id) ON DELETE CASCADE` | `:81-82`→候选分支下约 `:102-103` | §2「`FOREIGN KEY (template_id) … ON DELETE CASCADE`」 | — 不受影响 |
+| `group_id text`(**可空**,与 I2′ 一致) | `:87`→候选分支下约 `:108` | §2「`group_id` 可空」 | — 不受影响 |
+| `PRIMARY KEY (org_id, template_id)` | `:91`→候选分支下约 `:112` | §2「`PRIMARY KEY (org_id, template_id)`」 | — 不受影响 |
+| `CONSTRAINT atgl_group_fk FOREIGN KEY (org_id, group_id) REFERENCES approval_template_groups (org_id, id) ON DELETE NO ACTION ON UPDATE NO ACTION` | `:98-100`→候选分支下约 `:119-121` | §2「**不得**改成 `SET NULL`/`CASCADE`」 | — 不受影响 |
+| `CONSTRAINT atgl_state_check CHECK ((group_id IS NULL) = (unlinked_at IS NOT NULL))` | `:104`→候选分支下约 `:125` | §2「三种状态……`CHECK`」 | — 不受影响 |
 
 ### 2.3 现场核对(不是照抄迁移文件,是对 `metasheet2_lock_a` 里已应用的真实 schema 核对)
 
