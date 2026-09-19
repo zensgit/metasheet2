@@ -736,3 +736,12 @@ and adds the record-history-panel spec to the domain guard, with source/spec
 paths on pull_request and push. Required-web remains unchanged because it already
 selects this spec. The existing exact-anchor wiring test now rejects losing either
 lane or either trigger path. This closes a verification gap, not new UI semantics.
+
+## Cleanup/adoption ordering evidence (2026-09-20)
+
+`c23aefafc2ae7b031fe154a42857be5b1ad7e26a` tests cleanup-first ordering at
+the actual post-commit/pre-storage boundary: the canonical metadata adopter
+rejects the expired, abandoned stage without changing live metadata. Existing
+apply-first locking remains covered separately. The contract does not treat
+arbitrary direct SQL storage-reference fabrication as a supported restore path;
+this evidence adds no new deletion authority or database-wide write policy.

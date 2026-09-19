@@ -1559,3 +1559,28 @@ The review's lack-of-real-cleanup-coverage assertion is contradicted by
 abandonment/retry and two-connection apply-wins arbitration are implemented and
 passed in the recorded full owned runs. That does not prove the newly suggested
 reverse race. Review session closed; no whole-PR independent clearance claimed.
+
+## Cleanup-first canonical adoption counterexample (2026-09-20)
+
+Exact test code `c23aefafc2ae7b031fe154a42857be5b1ad7e26a`. At the real
+cleanup storage callback, after SQL abandonment commits and before physical
+retirement, a separate transaction attempts the canonical metadata-adoption
+participant with the original actor/token/object/metadata hash. It must reject
+with `ARCHIVE_ATTACHMENT_RESTORE_APPLY_REFUSED`, preserve the entire metadata
+row, and allow cleanup to finish as cleaned. The fixture uses a genuinely expired
+confirmation token, as required by cleanup, not an arbitrary time bypass.
+
+`run-recovery-manual-checkpoint.mjs --attachment-stage` exits 0; log
+`/private/tmp/tm-cleanup-first-race-final-20260920.log`. Existing apply-first
+two-connection arbitration also passes. Stage DB/connections zero; owned cluster
+stopped and removed. Core plus acceptance typechecks and diff-check pass. First
+attempt proved the new behavior but failed only the old final fixture census
+(7 versus 6); final census is exactly 7. No product code or new guard mutation.
+
+This refutes the proposed race through the canonical adoption participant under
+its current expiry/state contract. It does not prove arbitrary SQL or a future
+writer cannot manufacture a new storage reference: raw metadata UPDATE can do
+so and is deliberately used by existing reference-refusal fixtures. Ordinary
+upload obtains new random provider objects; no public caller-specified adoption
+path was found in the current source census. Do not broaden this result into
+universal database tamper resistance or whole-PR independent approval.
