@@ -2,6 +2,22 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Acceptance Backend Drain Correction (2026-09-20)
+
+The later documentation head `a05a2a420b49d3986d3169be5667cb1c8aff971d`
+failed Node18 in run `35474600187`: attachment-stage assertions passed, but the
+immediate post-pool-close backend census returned one instead of zero. Node20's
+same isolated checkpoint step passed; this is not a terminal-green claim for
+that workflow or a reason to discard the Node18 failure.
+
+The stage verifier now polls only its randomly named, owned synthetic database,
+up to 101 observations separated by 50 ms. Pool shutdown does not itself prove
+that PostgreSQL has observed every disconnect. Persistent connections still
+raise `ATTACHMENT_STAGE_BACKEND_DRAIN_TIMEOUT`; no backend termination, forced
+database drop or relaxed zero-residue assertion is introduced. A held real
+connection must cause refusal before it is explicitly closed by the fixture.
+This changes acceptance timing only, not product cleanup or access semantics.
+
 ## Current Closeout Disposition (2026-09-20)
 
 Inspected candidate `28742c41dab1290550037fef1d6b19e0a761c26e`, tree

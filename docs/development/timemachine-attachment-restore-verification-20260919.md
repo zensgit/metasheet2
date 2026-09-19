@@ -12,6 +12,48 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## CI Backend Drain Fix (2026-09-20)
+
+Code checkpoint: `6664885d5ae18e315bf4798a1bc9f576011629e7`, tree
+`777d001742f0c4ef9b6ad7d9b4fa3f79797f8e57`. Tests ran on the identical
+script bytes before commit; a design-report edit was present, so these runs are
+not claimed to have started from a clean committed tree.
+
+At predecessor `a05a2a420b49d3986d3169be5667cb1c8aff971d`, Node18 job
+`105981553863` in run `35474600187` failed only at the immediate stage teardown
+backend census (one connection, expected zero), after the stage assertions.
+Node20 passed that same checkpoint step; its overall job was still pending at
+inspection. Prior `28742c41` green checks below do not override this failure.
+Installed pg-pool removes clients from its client list before client.end's
+callback, while pool.end resolves on that empty list. Therefore pool shutdown
+alone is insufficient evidence for an immediate server-side zero census.
+
+The verifier polls the exact owned database with a bounded attempt count;
+persistent connections still fail and are never terminated by this check.
+The held-client negative uses a real PostgreSQL connection. Replacing the timeout
+throw with return made the gate fail with `Missing expected rejection`; restoring
+the throw restored success. Both mutation and final runs removed the owned
+cluster. Existing zero-backend and zero-database assertions remain unchanged.
+
+| Local gate | Result |
+| --- | --- |
+| Owned stage-only runner | PASS, held-client refusal and database/connections zero |
+| Full owned manual-checkpoint runner | PASS, 32 migration replay gates, historical 47/47 + 59/59 + 127/127, HTTP restoration and stage races; databases/connections zero, cluster removed |
+| Backend type-check | PASS; the script itself is outside the main TSConfig |
+| Exact-anchor CI wiring | 40/40 PASS |
+| Script ESLint | NOT VALIDATED: existing parserOptions.project excludes this .mts file; no shared configuration changed |
+| Diff check | PASS |
+| New remote exact-head CI | PENDING publication/checks; no inherited green claim |
+
+Logs: `/private/tmp/tm-stage-drain-final-20260920.log`,
+`/private/tmp/tm-stage-drain-mutation-20260920.log`,
+`/private/tmp/tm-drain-full-restored-20260920.log`,
+`/private/tmp/tm-drain-tsc-20260920.log`,
+`/private/tmp/tm-drain-wiring-20260920.log`, and
+`/private/tmp/tm-drain-lint-20260920.log`.
+No production code, permissions, real environment access, flags, dispatch or
+deployment changed. The detached-ID and second-tenant dispositions remain open.
+
 ## Current Gate Reconciliation (2026-09-20)
 
 Evidence candidate: `28742c41dab1290550037fef1d6b19e0a761c26e`, tree
