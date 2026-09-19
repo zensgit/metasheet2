@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, realpath, rename } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -1961,6 +1961,31 @@ try {
         const catalog = await fetch(url.replace('/captures', `/catalog/${result.data.generationId}`), { headers })
         assert.equal(catalog.status, 200)
         assert.equal((await catalog.json() as { data: { generationId: string } }).data.generationId, result.data.generationId)
+        const unavailableId = syntheticAttachments[0].id
+        const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
+        const sourcePath = join(root, 'attachment-source', sourceKey)
+        const parkedPath = join(root, 'parked-synthetic-source')
+        await rename(sourcePath, parkedPath)
+        try {
+          const unavailableRequest = randomUUID()
+          const unavailable = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ requestId: unavailableRequest }) })
+          assert.equal(unavailable.status, 503)
+          const failedGeneration = await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query,
+            { ...commandRequest, requestId: unavailableRequest }))
+          assert.ok(failedGeneration)
+          const failed = (await query('SELECT state,coverage_status FROM meta_recovery_archives WHERE generation_id=$1', [failedGeneration])).rows[0]
+          assert.deepEqual(failed, { state: 'building', coverage_status: 'incomplete' })
+          assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1', [failedGeneration])).rows[0].n, 0)
+          const retained = await pins(failedGeneration)
+          assert.equal(retained.length, syntheticAttachments.length)
+          assert.ok(retained.every(row => row.reference_class === 'source' && row.availability === 'mutable'))
+          const isolated = await attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput,
+            selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
+            sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects, query })
+          for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(isolated, row.id).bytes,
+            Buffer.from(`synthetic-${row.id}`))
+        } finally { await rename(parkedPath, sourcePath) }
+        console.log('PASS: unavailable live source refuses fresh HTTP publication with pins retained; completed archive still independently reads exact files')
         console.log('PASS: real HTTP manual attachment capture uses server local storage, refuses anonymous/client paths, retries one generation, and exposes catalog with independently decrypted exact files')
       } finally {
         attachmentServer.closeIdleConnections()
