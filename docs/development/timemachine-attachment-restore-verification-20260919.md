@@ -228,9 +228,44 @@ rechecked `868c8d2b26424fcaa8405661a6999abb17ec6d93`.
   UUID stage boundary; the new fixture now uses a synthetic UUID, without relaxing
   production validation. The successful full log has no skipped D5 tests.
 
+## Durable Adoption Checkpoint
+
+Exact code: `0ddbab86007424ebb72c740ee76f3e87872c865e` (local only).
+Six code/test files; no public restore entry point enabled.
+
+- Verified stages transition once to applied, carrying the canonical operation
+  and displaced storage identity. The BEFORE guard locks and checks the old
+  attachment binding before replacement; the deferred AFTER guard checks the new
+  object, original record reference, receipt and token burn at transaction commit.
+  Applied rows remain immutable. This does not yet implement physical cleanup.
+- Full D5 real-DB suite 47/47 PASS, including success, rollback, denial, drift,
+  missing receipt, wrong adoption operation and wrong displaced storage path.
+  All refusal cases preserve metadata/record state and leave no applied journal,
+  canonical history or token burn. These are internal-kernel synthetic fixtures,
+  not public HTTP attachment restore or browser UAT.
+- Missing receipt first triggers the existing token-burn receipt guard; the
+  initial new-error expectation was corrected, not the production guard weakened.
+- Neutralizing the deferred adoption guard makes only wrong-adoption falsely
+  succeed; neutralizing the original-binding guard makes only wrong-displaced
+  falsely succeed. Each mutation was restored before final unfiltered testing.
+- Full fresh/replay: 32 Time Machine migrations, 995 catalog objects, repeated
+  fingerprint `ce2c18ede8fb173e59f9171aee86c4f50a1ace81f5092f81119625ed40162110`.
+  Historical neighbors 59/59 and 127/127 PASS; existing manual capture, reader,
+  scalar HTTP and stage/metadata gates PASS. Owned DB/connections/cluster residue 0.
+- Unit neighbors 3 files/40 tests; two-project typecheck, source ESLint, wiring
+  37/37 and diff-check PASS. The temporary D5 mutation filter was removed; the
+  committed driver still runs the whole D5 file without a title filter.
+- Sol high identified the original displaced-binding P2, now fixed and killed
+  by the dedicated mutation. Narrow follow-up: no P1/P2 in that fix; session
+  closed. It does not approve public facade, cleanup or the complete product.
+- Logs: `/private/tmp/tm-attachment-adoption-final-20260919.log`,
+  `/private/tmp/tm-attachment-adoption-mutation-20260919.log`,
+  `/private/tmp/tm-attachment-displaced-mutation-20260919.log`, and
+  `/private/tmp/tm-attachment-adoption-{unit,tsc,lint,wiring}-20260919.log`.
+
 ## Remaining Required Work
 
-Authenticated-reader integration; prepared file ownership and crash cleanup;
+Authenticated-reader integration; prepared/displaced file reference-safe crash cleanup;
 public preview/token binding and reader/staging-to-canonical facade integration;
 end-user attachment field authorization; purge/drift/retry concurrency; async contract;
 whole-operation negatives; real isolated database/storage and desktop/mobile

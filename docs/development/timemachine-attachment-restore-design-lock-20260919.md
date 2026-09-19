@@ -10,7 +10,8 @@ attachment restore, and prepare only a read-only nightly investigation plan.
 checks and one intentional skip before Ready and merge. Merge/base:
 `868c8d2b26424fcaa8405661a6999abb17ec6d93`, ordered parents
 `bb77ca5f2ce3c2825265ec8877861d367d017ead` and the authorized PR head.
-Post-merge CI is a separate gate, not yet claimed here.
+Post-merge CI is a separate gate; its terminal base evidence is recorded in the
+paired verification report and is not successor CI evidence.
 
 Development branch: `codex/timemachine-attachment-restore-20260919`.
 Only isolated synthetic files/databases and ordinary Draft publication are
@@ -106,10 +107,18 @@ Metadata updates, reference version-CAS, canonical revision/seal, token burn and
 sync receipt share the existing transaction. Dedicated real-DB cases cover this
 internal executor, not public HTTP attachment restoration.
 
+The canonical batch also marks each verified stage applied with its operation ID
+and displaced old storage identity before replacing the attachment metadata. A
+BEFORE trigger locks and checks the original database storage binding. A deferred
+commit-time trigger checks the adopted object, original record reference, sync
+receipt and token burn together. Neither a forged displaced location nor a wrong
+operation can commit. Applied rows cannot be rewritten or deleted. This is a
+commit-time proof, not a permanent foreign key to retention-managed history.
+
 No executable preview is enabled yet. The public reader/staging facade, v2 preview
-minting, durable adoption/abandon cleanup, async attachment contract and browser
-loop remain mandatory. Cleanup must also retain the displaced old storage-object
-identity before replacement; a new path alone does not prove old-object cleanup.
+minting, abandon/displaced-object cleanup, async attachment contract and browser
+loop remain mandatory. Retaining displaced identity is not proof of safe cleanup;
+physical deletion still requires current reference/pin and ownership arbitration.
 Do not infer public completeness from the internal transaction evidence.
 
 ## Required Evidence
@@ -118,8 +127,8 @@ The preview now projects selected attachment changes into its true-delta permiss
 context and diagnostic summary. It still refuses executable attachment previews.
 The internal sync plan supports a domain-separated v2 identity carrying a closed,
 sorted attachment/original-record/original-field/metadata-hash roster; absence of
-that roster preserves v1 hashes exactly. Database-derived roster collection,
-token minting with v2 and canonical execution rechecks are not yet connected.
+that roster preserves v1 hashes exactly. Public database-derived roster collection,
+token minting with v2 and reader/staging-to-executor wiring are not yet connected.
 Never treat the new hash compiler as proof of that end-to-end binding.
 
 | Gate | Required oracle | Status |
