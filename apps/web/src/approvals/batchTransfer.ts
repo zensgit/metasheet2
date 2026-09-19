@@ -33,6 +33,11 @@ export const APPROVAL_BATCH_TRANSFER_SKIP_LABELS: Record<string, { zh: string; e
   'target-already-assignee': { zh: '目标用户已是该审批的处理人', en: 'Target user already holds a seat' },
   'target-user-invalid': { zh: '目标用户在该审批的范围内不可用', en: 'Target user is not valid for this approval' },
   error: { zh: '该审批处理未成功', en: 'This approval was not processed' },
+  // Design lock §14.3 #12: the seat is mid cancel-round and must not be
+  // reassigned (§6 — only the original requester may act on it). Dedicated
+  // copy, not the unknown-reason fallback, so an operator understands why the
+  // row was skipped rather than reading it as an unexplained failure.
+  cancel_round: { zh: '该审批处于撤销轮中，暂不可改派', en: 'This approval is in a cancel round and cannot be reassigned' },
 }
 
 const UNKNOWN_SKIP_LABEL = { zh: '未转交（原因未知）', en: 'Not transferred (unrecognised reason)' }

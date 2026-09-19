@@ -250,6 +250,21 @@ function mockInsertOnlyClient() {
 // per-test mock router's "Unhandled" throw. This keeps the strict routers useful without copying
 // infrastructure-only fixtures into every behavioral test.
 function commonApprovalClientMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+  // dispatchAction's cancel-round rollout-lock pre-read (lock §3 C-2 全局锁序). It runs BEFORE
+  // `BEGIN` on EVERY dispatch and short-circuits on the first row for anything that is not a
+  // cancel round, which is what every fixture in this file is — so the honest mock is a real row
+  // carrying a non-cancel-round `workflow_key`, and the three further reads the resolver would do
+  // for a cancel round are deliberately NOT mocked: a fixture that ever reached them would fail
+  // loudly here rather than silently taking the `none` branch.
+  //
+  // This is a MOCK, not the contract (`feedback_mock_is_not_the_contract.md`). The production
+  // behaviour of that resolver — including WHICH org it returns and when it demands no lock at
+  // all — is measured against real PostgreSQL in the Q-F census legs of
+  // `tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, not here.
+  if (statement.startsWith('SELECT id, workflow_key FROM approval_instances')) {
+    return { rows: [{ id: 'approval-1', workflow_key: null }], rowCount: 1 }
+  }
+
   // nodeEntryEpoch (2026-07-03): use a stable activation sequence and keep legacy mock instances
   // on the NULL cutoff fallback so pre-existing round-scoping assertions stay unchanged.
   if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
@@ -8532,6 +8547,46 @@ describe('ApprovalProductService', () => {
 
       await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
         .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
+    })
+  })
+
+  /**
+   * Lock §3 C-2 step ④'s replay key. These four assertions are the ones the integration
+   * double-backed cases structurally CANNOT make: a test double never normalizes its input, so the
+   * raw-`roundId` defect (`approval_rounds.id` is `text`, minted `apr_<uuid>`; the boundary's
+   * `uuidOrNull` refuses it with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`, 500) was green in four of
+   * them until the end-to-end case ran the real boundary.
+   */
+  describe('deriveCancelRoundW4OperationIdV1 (lock §3 C-2 step ④ replay key)', () => {
+    it('derives a UUIDv5 from a round id, deterministically and distinctly, and refuses an empty one', async () => {
+      const { deriveCancelRoundW4OperationIdV1 } = await import('../../src/core/attendance-cancellation-execution-port')
+      const roundId = 'apr_2f1f2ad0-9f3d-4b3c-8e6a-1b6b6a2a7c11'
+
+      // UUID-shaped, version 5, RFC 4122 variant — what the boundary's `uuidOrNull` accepts and
+      // what `approval_rounds.id` is NOT.
+      const derived = deriveCancelRoundW4OperationIdV1(roundId)
+      expect(derived).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      expect(derived).not.toBe(roundId)
+
+      // Deterministic: a retry of the SAME round after a rolled-back attempt replays under the
+      // same W4 operation rather than minting a second one.
+      expect(deriveCancelRoundW4OperationIdV1(roundId)).toBe(derived)
+
+      // Distinct: two rounds must never share a replay key, or the second would replay the first's
+      // response and report a cancellation it never performed.
+      expect(deriveCancelRoundW4OperationIdV1(`${roundId}x`)).not.toBe(derived)
+
+      // Fail closed rather than hand every empty identity one shared key.
+      expect(() => deriveCancelRoundW4OperationIdV1('')).toThrow()
+
+      // ── GOLDEN VALUE. The three assertions above are self-consistency: they hold for ANY
+      // derivation, including one whose namespace, name-bytes framing or hash changed. This one
+      // pins the ACTUAL key. It matters because the key is durable state: a round that already
+      // cancelled real business rows must replay under the same W4 operation, so a silent change
+      // here would make every already-redeemed round mint a second operation. The port module
+      // calls the namespace 「frozen from here on」 — this is the test that makes that sentence
+      // more than an asserted invariant.
+      expect(derived).toBe('46c05da2-ae5a-53c4-ac85-61190e0571ff')
     })
   })
 })

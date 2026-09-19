@@ -1562,6 +1562,32 @@ export interface PluginServices {
     createRequestOperationBoundary(config: {
       adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
     }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /**
+     * Approval-change-request lock §3 C-1 — bind the boundary built by `createRequestOperationBoundary`
+     * as the process-wide 完整业务取消 provider, so the approval side's cancel-round redemption can
+     * reach it through `attendance-cancellation-execution-port` without a compile-time dependency on
+     * this plugin. Registers the WHOLE boundary (lock §3 C-1 「复用同一套 W4 操作协议 … 仅移交连接与
+     * 事务生命周期的所有权」 — never a narrower cancel-only entry). Unbound ⇒ the approval side FAILS
+     * CLOSED (the round stays `pending`), unlike `workdayCalendar`, which fails open.
+     */
+    registerCancelRoundExecutionBoundary(
+      boundary: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1,
+    ): void
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+     * delivery. Separate from `registerCancelRoundExecutionBoundary` because it is NOT part of the
+     * W4 transaction protocol: it runs after the approval side's COMMIT, owns no connection and no
+     * transaction, and writes nothing. The bound function is the SAME one the plugin's HTTP cancel
+     * route calls, so the emit gate (`legacy` / `legacy_compat` only) and the payload shape exist
+     * once; the approval side hands over the W4 result verbatim and decides nothing.
+     *
+     * Unbound ⇒ the approval side logs a warning and proceeds (fail OPEN), the opposite of the
+     * execution boundary: by the time this is reached the business cancellation is already
+     * committed, so a throw could not undo it and would only turn a success into a 500.
+     */
+    registerCancelRoundCancelledEventDelivery(
+      deliver: import('../core/attendance-cancellation-execution-port').CancelRoundCancelledEventDeliveryV1,
+    ): void
     /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
     createRecordOperationBoundary(config: {
       adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
