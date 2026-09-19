@@ -2,6 +2,22 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Local Launcher Cleanup Capability (2026-09-20)
+
+Code `4ef3222d146d271d73e00008b91b7c4b134c435b`, tree
+`bce3bf5a2d97f1d1d5649a9384dcbe8a596bc335`, completes the trusted local
+startup composition left absent at `f9d461ea94`. The launcher resolves cleanup
+from the same attachment service, only for its concrete LocalStorageProvider.
+The resolver is static and returns a frozen bound port; no cleanup method is
+added to a storage service instance, plugin StorageService interface, HTTP route
+or timer. Unsupported providers yield no cleanup capability. Disabled startup
+does not resolve it; cancellation or resolution failure publishes no composition.
+
+The application still applies the existing expired-stage/reference/ownership
+authority. This is not a generic filesystem delete permission, automatic
+retention policy or proof of hostile-NAS compatibility. Complete enabled-launcher
+acceptance remains distinct from unit composition plus real stage verification.
+
 ## Internal Cleanup Composition (2026-09-20)
 
 Code `f9d461ea944bad70912b4553502bba0efa0153af`, tree

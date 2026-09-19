@@ -12,6 +12,35 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Local Launcher Cleanup Evidence (2026-09-20)
+
+Code `4ef3222d146d271d73e00008b91b7c4b134c435b`, tree
+`bce3bf5a2d97f1d1d5649a9384dcbe8a596bc335`; five code/test files.
+Audit found that the preceding internal API checkpoint had no cleanup capability
+in the real local launcher. This checkpoint adds that bounded composition.
+
+- New startup test first failed because the cleanup resolver was never called.
+  Startup/application/reader neighbors then passed 3 files / 107 tests.
+- A lookalike method on a non-local provider does not grant cleanup. OFF startup
+  never calls the resolver. Throw/cancel while resolving refuses and scrubs the
+  supplied secret. Service instances have no retireRecoveryAttachment method.
+- Removing attachmentCleanupStorage from returned composition makes the positive
+  startup test RED; restored full startup suite 20/20 GREEN.
+- The real stage verifier now obtains its storage port through the same static
+  local-service resolver, then invokes application cleanup against real PG and
+  filesystem. `/private/tmp/tm-local-cleanup-composition-realdb-20260920.log`
+  passes expiry/reference/commit-before-IO/retry/race gates; database/connections=0
+  and owned cluster removed. It does not invoke cleanup through an enabled child
+  launcher, and is not claimed as such.
+- Core plus acceptance-script typecheck PASS; changed source ESLint 0 errors and
+  warnings; diff-check PASS. Existing selected spec/runner paths unchanged.
+- Terra medium narrow read-only review of committed `f9d461ea94` cleanup lifecycle
+  returned no P1/P2 and was closed. It did not review this later launcher patch
+  or the complete PR. No broad independent APPROVE is claimed.
+
+Remote CI must bind the new pushed head; earlier green checks do not prove it.
+No real environment/storage, flags, dispatch, deployment or merge was performed.
+
 ## Internal Cleanup Runtime Evidence (2026-09-20)
 
 Code `f9d461ea944bad70912b4553502bba0efa0153af`, tree
