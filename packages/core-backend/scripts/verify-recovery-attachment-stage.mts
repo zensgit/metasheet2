@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises'
+import { lstat, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -205,8 +205,8 @@ try {
   const retire = (objectId: string) => retireExpiredArchiveAttachmentStage({ objectId, transaction,
     transactionDepth: { currentTransactionDepth: () => 0 }, storage: { retireRecoveryAttachment: async (path, owner) => {
       storageCalls++
-      assert.equal((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
-        WHERE object_id=${objectId}::uuid`.execute(db!)).rows[0]?.state, 'abandoned')
+      assert.ok(['abandoned', 'cleaned'].includes((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
+        WHERE object_id=${objectId}::uuid`.execute(db!)).rows[0]?.state ?? ''))
       await storage.retireRecoveryAttachment(path, owner)
       if (throwAfterRetire) throw new Error('SYNTHETIC_POST_RETIRE_FAILURE')
     } } })
@@ -232,8 +232,27 @@ try {
     throwAfterRetire = false
     await retire(uploaded.objectId)
     const afterRetry = storageCalls
+    const terminalBeforeRetry = (await sql`SELECT * FROM meta_recovery_archive_attachment_stages
+      WHERE object_id=${uploaded.objectId}::uuid`.execute(db)).rows
+    const lateMarker = await mkdtemp(join(storageRoot, '.recovery-reserve-'))
+    await writeFile(join(lateMarker, '.recovery-restore-owner'), JSON.stringify({ version: 1,
+      key: key(uploaded.objectId), owner: uploaded.ownershipKey }))
+    const unknownMarker = await mkdtemp(join(storageRoot, '.recovery-reserve-'))
+    await writeFile(join(unknownMarker, '.recovery-restore-owner'), 'incomplete-proof')
     await retire(uploaded.objectId)
-    assert.equal(storageCalls, afterRetry)
+    await assert.rejects(lstat(lateMarker), { code: 'ENOENT' })
+    assert.equal((await lstat(unknownMarker)).isDirectory(), true)
+    assert.equal(storageCalls, afterRetry + 1)
+    assert.deepEqual((await sql`SELECT * FROM meta_recovery_archive_attachment_stages
+      WHERE object_id=${uploaded.objectId}::uuid`.execute(db)).rows, terminalBeforeRetry)
+    const beforeReferencedReplay = storageCalls
+    await sql`UPDATE multitable_attachments SET storage_file_id=${uploaded.objectId}
+      WHERE id='att-original'`.execute(db)
+    await assert.rejects(retire(uploaded.objectId))
+    assert.equal(storageCalls, beforeReferencedReplay)
+    await sql`UPDATE multitable_attachments SET storage_file_id=${first.objectId}
+      WHERE id='att-original'`.execute(db)
+    console.log('PASS: terminal cleanup replay reconciles proven late markers, preserves unknown proof and immutable terminal row, and refuses current references before storage')
     await retire(untouched.objectId)
     await retire(late.objectId)
     await delayed.writeFile(bytes)

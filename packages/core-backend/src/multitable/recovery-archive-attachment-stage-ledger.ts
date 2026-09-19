@@ -120,10 +120,9 @@ export async function retireExpiredArchiveAttachmentStage(input: {
         FOR UPDATE`, [objectId])
       if (result.rows.length !== 1) refused()
       const row = result.rows[0] as Record<string, unknown>
-      if (row.state === 'cleaned') return undefined
       const identity = snapshot(Object.fromEntries(columns.map((column, index) => [keys[index],
         column === 'size_bytes' ? String(row[column]) : row[column]])) as unknown as ArchiveAttachmentStageIdentity)
-      if (row.state !== 'abandoned') {
+      if (row.state !== 'abandoned' && row.state !== 'cleaned') {
         const changed = await query(`UPDATE public.meta_recovery_archive_attachment_stages
           SET state='abandoned',abandoned_at=clock_timestamp()
           WHERE object_id=$1::uuid AND state IN ('reserved','verified') RETURNING object_id`, [objectId])
@@ -132,7 +131,7 @@ export async function retireExpiredArchiveAttachmentStage(input: {
       return { key: `${objectId}/sha256-${identity.plaintextSha256}`,
         owner: deriveOwnershipKey(String(row.actor_id), String(row.token_hash), objectId, identity) }
     })
-    if (!claim) return
+    // Terminal retries still reconcile proven late filesystem remnants; never reopen the ledger.
     if (transactionDepth.currentTransactionDepth() !== 0) refused()
     await storage.retireRecoveryAttachment(claim.key, claim.owner)
     if (transactionDepth.currentTransactionDepth() !== 0) refused()
