@@ -1219,8 +1219,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
           method: 'POST',
           body: { action: 'approve' },
         })
-        // ⚠️ This is the line that carries the mutation (phase-2 MD §3.17, M-25). Its failure
-        // message prints the body, so a red NAMES the door that refused — under M-25 it reads
+        // ⚠️ This is the line that carries the mutation (phase-2 MD §3.19, M-29). Its failure
+        // message prints the body, so a red NAMES the door that refused — under M-29 it reads
         // `CANCEL_ROUND_OUTLET_FORBIDDEN`, which is the membership claim, not a downstream one.
         expect(approve.status, await approve.clone().text()).toBe(200)
       } finally {
@@ -1269,7 +1269,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       '`applied` and the document\'s pending SLOT is released — measured as slot state, with the ' +
       'ORIGINAL document asserted still `approved` because the cancellation port is a double (in ' +
       'production C-1 would cancel it and no second round would be possible). The create is the ' +
-      'FIRST post-redeem statement, which is what makes the clause carry its own mutation (M-26) ' +
+      'FIRST post-redeem statement, which is what makes the clause carry its own mutation (M-30) ' +
       'instead of dying behind 判据 II\'s end-state check',
     async () => {
       const suffix = `i3c2-${TS}`
@@ -1301,7 +1301,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(portStub.calls.length).toBe(1)
       expect(cancelledEvents.payloads).toEqual([])
 
-      // ── THE I3 CLAUSE, FIRST. Under M-26 the round row stays `pending`, this line throws
+      // ── THE I3 CLAUSE, FIRST. Under M-30 the round row stays `pending`, this line throws
       // `CANCEL_ROUND_ALREADY_PENDING` (409) from `createCancelRoundInstance`'s own pre-check, and
       // nothing below is evaluated — which is the whole point of the ordering.
       const next = await new ApprovalProductService().createCancelRoundInstance(fixture.documentId, {
@@ -2296,7 +2296,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
       // The SAME value on B lives in the HTTP RESPONSE BODY and in no sealed row at all. The
       // earlier `hasOwnProperty` line only pins that the `reversal` KEY is there; the divergence
-      // table in §3.20.4 claims the two carriers hold the SAME inner field, so the inner key is
+      // table in §3.22.4 claims the two carriers hold the SAME inner field, so the inner key is
       // asserted here too — otherwise B's half of that table would be weaker than A's.
       expect(
         Object.keys((payloadB.data as { reversal?: Record<string, unknown> }).reversal ?? {}),
