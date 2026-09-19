@@ -11,6 +11,8 @@ import {
   getAttendanceCancellationExecutionPort,
   getCancelRoundCancelledEventDelivery,
   registerAttendanceCancellationExecutionProvider,
+  registerCancelRoundCancelledEventDelivery,
+  unregisterCancelRoundCancelledEventDelivery,
   unregisterAttendanceCancellationExecutionProvider,
   type AttendanceCancellationExecutionPort,
 } from '../../src/core/attendance-cancellation-execution-port'
@@ -2776,6 +2778,74 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(portStub.calls.length).toBe(1)
       expect(await roundOutcome(fixture.roundInstanceId)).toMatchObject({ outcome: 'applied' })
       expect(cancelledEvents.payloads).toEqual([])
+    },
+  )
+  /**
+   * The FAIL-OPEN half, which until this case was an assertion in a doc comment and nothing else
+   * (`feedback_asserted_invariant_is_a_bug`: 注释断言不测 = 藏 bug). The delivery registry
+   * deliberately fails OPEN where the EXECUTION port fails CLOSED, and the asymmetry is load
+   * bearing — by the time the delivery is read, the business cancellation is already COMMITTED, so
+   * throwing could not undo it and would only turn a durable success into a 500.
+   *
+   * This is also the ONLY consumer of `unregisterCancelRoundCancelledEventDelivery`. That is
+   * deliberate rather than incidental: an exported unbind with no caller is indistinguishable from
+   * a leak path nobody exercises.
+   */
+  it(
+    'Codex 3 / fail-OPEN: with the delivery UNBOUND, a redemption still commits — the round is ' +
+      '`applied` and the approve returns 200 (an unbound announcer must never fail a cancellation ' +
+      'that is already durable), and nothing is announced',
+    async () => {
+      const suffix = `c3open-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+        await setDocumentWindowDays(documentId, 365)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'legacy_compat',
+        response: {
+          ok: true,
+          data: {
+            requestId: attached!.requestId,
+            status: 'cancelled',
+            orgId: attached!.orgId,
+            userId: fixture.requesterId,
+            reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
+          },
+        },
+      }))
+      // SAVE AND RESTORE, same discipline as `bindCancellationPort`: the registry is process-wide
+      // and the attendance plugin bound the real delivery at activate. Clearing it for good would
+      // leave every later case asserting against a registry this one emptied — a state no
+      // production process is ever in, and one that would make the other cases' zeros vacuous.
+      const previousDelivery = getCancelRoundCancelledEventDelivery()
+      expect(previousDelivery, 'nothing to restore ⇒ this case is not testing what it claims').toBeDefined()
+      unregisterCancelRoundCancelledEventDelivery()
+      expect(getCancelRoundCancelledEventDelivery()).toBeUndefined()
+      const cancelledEvents = captureCancelledEvents()
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        // THE ASSERTION: 200, not 500. A throw from the unbound branch would surface here.
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+        cancelledEvents.stop()
+        if (previousDelivery) registerCancelRoundCancelledEventDelivery(previousDelivery)
+      }
+
+      // The cancellation is DURABLE despite the announcement being impossible.
+      expect(portStub.calls.length).toBe(1)
+      expect(await roundOutcome(fixture.roundInstanceId)).toMatchObject({ outcome: 'applied' })
+      expect(cancelledEvents.payloads).toEqual([])
+      // And the registry is back, or every later case in this file silently loses its control.
+      expect(getCancelRoundCancelledEventDelivery()).toBeDefined()
     },
   )
 })
