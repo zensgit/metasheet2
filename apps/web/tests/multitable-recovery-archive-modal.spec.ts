@@ -721,6 +721,33 @@ describe('RecoveryArchiveModal', () => {
     expect(ctx.onExecuted).toHaveBeenCalledTimes(1)
   })
 
+  it('discovers a new durable job on reopen despite a retained synchronous result', async () => {
+    const listJobs = vi.fn().mockResolvedValueOnce({ entries: [], nextCursor: null })
+      .mockResolvedValue({ entries: [jobSnapshot('paused_retryable')], nextCursor: null })
+    const ctx = mount({ listJobs })
+    await flush()
+    q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+    await flush()
+    q('[data-test="archive-recovery-request-preview"]')!.click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    q('[data-test="archive-recovery-execute"]')!.click()
+    await flush()
+    expect(q('[data-test="archive-recovery-result"]')).not.toBeNull()
+    ctx.visible.value = false
+    await flush()
+    ctx.visible.value = true
+    await flush()
+    expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Paused and resumable')
+    expect(ctx.listCatalog).toHaveBeenCalledTimes(1)
+    expect(ctx.acceptJob).not.toHaveBeenCalled()
+    expect(ctx.resumeJob).not.toHaveBeenCalled()
+  })
+
   it('pins the recovery point while a synchronous restore is pending', async () => {
     const otherId = '11111111-1111-4111-8111-111111111111'
     let finish!: (result: RecoveryArchiveExecuteResult) => void

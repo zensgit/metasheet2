@@ -470,7 +470,7 @@ async function loadCatalog(reset: boolean): Promise<void> {
   }
 }
 
-async function discoverCurrentSheetJob(): Promise<void> {
+async function discoverCurrentSheetJob(preserveResult = false): Promise<void> {
   const sheetId = props.sheetId
   if (!sheetId || job.value) {
     jobDiscoveryResolved.value = Boolean(job.value)
@@ -486,7 +486,7 @@ async function discoverCurrentSheetJob(): Promise<void> {
     jobDiscoveryResolved.value = true
     const next = page.entries[0]
     if (next) applyJobSnapshot(sheetId, next)
-    else await loadCatalog(true)
+    else if (!preserveResult) await loadCatalog(true)
   } catch (error) {
     if (request === jobDiscoveryRequest && props.visible && sheetId === props.sheetId) {
       jobDiscoveryError.value = messageFor(error)
@@ -749,7 +749,7 @@ watch(
       return
     }
     if (job.value) void refreshCurrentJob(true)
-    else if (!executing.value && !result.value) void discoverCurrentSheetJob()
+    else if (!executing.value) void discoverCurrentSheetJob(Boolean(result.value))
   },
   { immediate: true },
 )
