@@ -3972,6 +3972,7 @@ real item to make the arithmetic work. Each row below is tagged by which contrac
 | `filterBulkReassignDiscoveryForAttendance` 的非确定性 org 解析 | 考勤线发现,本分支零依赖(§3.3d) |
 | lock:227 未排级的两个关系(`attendance_schedule_dispatch_requests`、`attendance_request_calculation_snapshots`) | owner 登记项,未擅自排序(§3.10.1) |
 | 账侧比对的 non-legacy(authoritative/shadow)双胞胎 | 需要 rollout-registry 夹具工作,本分支未做(§3.15.11) |
+| **提交后区段的上游外逃暴露**(⚠️ 2026-09-19 并表,第 3 轮全量闸 P3-4:此前这条**只活在 §7.7**,没有向上归并到本表,只读本表的 owner 会漏掉)。形状:`dispatchAction` 提交后区段内**上游**某一步外逃 ⇒ 落进共用 catch(`:12772`)⇒ **投递被跳过** + 已提交的取消**对外报 500** | **今天不可达**——上游两个方法(`:13374-13375` / `:13432-13434`)都自吞异常;P3-1 residual 用例已把该形状**测出来**并用两条 ⚠️ TRIPWIRE 钉住(`toBe(500)` / 宣告 `toBe(0)`)。**建议值(owner 裁,本轮不做)**:把 `:12761` 的投递上移到紧接 `:12740` `COMMIT` 之后;三条不做的理由与「一旦采纳,两条 TRIPWIRE **应改写成更好的值、不得删除**」的约束,**完整正文仍在 §7.7**,本行是指针不是替代 |
 
 ---
 
@@ -4202,7 +4203,7 @@ disclosure (R1-P3-7) that needed no edit.
 | R1-P3-8 | `CANCEL_ROUND_DISPATCH_CONTENDED`'s only leg (census LEG 6) is a source scan of `dispatchAction`'s catch block; the mapping has zero runtime coverage (self-disclosed in the test's own comment) | **CLOSED-测试**, same "positive format" treatment as R1-P3-5: a closed-world COUNT over the whole `ApprovalProductService.ts` source (not just the sliced `catchBody`) requiring exactly 1 occurrence, so a second throw site elsewhere in the file no longer hides from this leg. Verified by mutation: `toBe(1)`→`toBe(5)` reddens (`expected 1 to be 5`); reverted, `cmp` byte-identical. | same file, LEG 6 (~L1392-1432) |
 | R1-§8 (FE pin) | Round-1 §8's own list of what it deferred includes "前端侧(补充清单第 15 条 FE 同步钉)不在本切片改动面内,未审" — not a P3 finding, but an item the convergence section named and this pass should not silently drop | **CLOSED (复核修正 2026-09-19).** RETRACTED: the parenthetical "confirmed: this branch's diff-stat contains no `apps/web` files at any point in its history" was FALSE — `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- apps/web` shows 3 files (`api.ts`, `batchTransfer.ts`, `approvalBatchTransferView.spec.ts`), all from base-branch (phase-1) commits `a166f5ca0`/`ee5905796`/`f482f97e5`/`c03fdb6c5`. The operational half of round-1's note still holds (THIS slice's OWN diff touches zero `apps/web` files, so there is no FE change here to sync a pin against) — but item 15 itself is not merely out of this slice's scope, it is ALREADY DONE: `ee5905796` (an ancestor of this head) states "Checklist item 15 closed" in its own commit message, and the phase-1 verification MD's Part C (round 4) records the fix, the exact required-lane rerun (`approvalBatchTransferView.spec.ts` 72/72, plus the named-suite required-lane invocation 107/107), and two mutation probes. Nothing here is DEFERRED. | phase-1 verification MD Part C (round 4); `ee5905796` (ancestor of head `d8669db96`); `git diff --stat` cited above |
 | R2-P3-1 | `role-assignment-boundary.test.ts` and `w4c3a-rollout-control-inventory.test.ts` race under `pool: 'forks'` (one writes a scratch file into the source tree, the other globs+reads it at collection time) causing an intermittent `ENOENT` on `test (18.x)`/`test (20.x)`; measured non-deterministic (2 full runs: 1 red/1 green), pre-existing on `main`, gate explicitly recommends filing it separately rather than fixing it in this PR ("否则 one-concern-per-PR 被破") | **DEFERRED-owner项**, per the gate's own explicit recommendation. Not actioned: fixing a cross-suite race is a behavior-adjacent test-infra change (which file writes where, or which file tolerates a vanished path) that deserves its own review, not a hygiene-pass line item. Confirmed still pre-existing: `git diff --quiet origin/main -- <both files>` → both `IDENTICAL-TO-MAIN` on the current (rebased) tip too. | `packages/core-backend/tests/unit/role-assignment-boundary.test.ts:872`, `src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts:145` (neither touched) |
-| R2-P3-2 | `e90a44dbe` inserted 8 lines at `ApprovalProductService.ts:914-921`, one commit after the design MD's own line-number re-derivation pass (§10, pinned to `d462677bd`) — every citation below the insertion in both MDs drifted +8, and the final doc commit never re-pinned; gate recommends converting to `symbol + ~L` anchors (AGENTS.md's own convention for large files) to structurally end the drift class rather than re-pinning a third generation of exact numbers | **CLOSED-MD, for the named citations; the broader sweep is a registered follow-up.** Converted to `symbol/anchor, ~L<n>` form, each number independently re-derived by `grep -n` against the CURRENT tree (not by transcribing round-2's own now-additionally-stale `+8` table): design MD's §3.1 module-scope table (7 symbols), §4.2's `dispatchAction` block, §4.2's "called twice" sentence, §4.3's `bulkReassignApprovals` citation, §4.4's/§5's seam-table rows, §7.1's C-2-success-writer note, §10's own now-twice-stale table (left as an explicitly-labeled `d462677bd`-baseline historical record, per the same "explicit baseline SHA ⇒ not a false claim" reasoning round-2 itself used for P3-2's severity call — plus a new note explaining WHY it drifted again and pointing to the symbol-anchor conversion instead of a third re-pin); and verification MD §3.14.4's outcome-writer table (all 4 rows, not just the 2 the gate quoted — the other 2 in the SAME table were independently found stale by the same `grep -n` re-derivation and fixed for internal consistency). One occurrence was deliberately LEFT AS-IS: §3.20.1's captured `git grep` transcript is genuine historical command output, explicitly labeled with its own baseline (`a02930896`) — editing the code-block content would fabricate a transcript, so it stays as recorded evidence, unlike the live-reference table beside it. **NOT closed**: an independent `grep -noE` sweep of both MDs found roughly 20 additional raw `ApprovalProductService.ts:NNNN` citations outside round-2's named set (e.g. `:8514`, `:8331`, `:10929`, `:9346`, `:4433`…) — spot-checked, several are ALSO stale (this file's drift is not limited to the one +8 insertion round-2 measured; smaller ±2-line drifts predate it). Converting all of them was outside this step's budget; registered as a mechanical, comment/MD-only follow-up with no behavior risk. | `docs/development/approval-cancel-round-phase2-design-20260918.md` (§3.1, §4.2, §4.3, §4.4, §5, §7.1, §10); `…verification-20260918.md` §3.14.4 |
+| R2-P3-2 | `e90a44dbe` inserted 8 lines at `ApprovalProductService.ts:914-921`, one commit after the design MD's own line-number re-derivation pass (§10, pinned to `d462677bd`) — every citation below the insertion in both MDs drifted +8, and the final doc commit never re-pinned; gate recommends converting to `symbol + ~L` anchors (AGENTS.md's own convention for large files) to structurally end the drift class rather than re-pinning a third generation of exact numbers | **CLOSED-MD, for the named citations; the broader sweep is a registered follow-up.** Converted to `symbol/anchor, ~L<n>` form, each number independently re-derived by `grep -n` against the CURRENT tree (not by transcribing round-2's own now-additionally-stale `+8` table): design MD's §3.1 module-scope table (7 symbols), §4.2's `dispatchAction` block, §4.2's "called twice" sentence, §4.3's `bulkReassignApprovals` citation, §4.4's/§5's seam-table rows, §7.1's C-2-success-writer note, §10's own now-twice-stale table (left as an explicitly-labeled `d462677bd`-baseline historical record, per the same "explicit baseline SHA ⇒ not a false claim" reasoning round-2 itself used for P3-2's severity call — plus a new note explaining WHY it drifted again and pointing to the symbol-anchor conversion instead of a third re-pin); and verification MD §3.14.4's outcome-writer table (all 4 rows, not just the 2 the gate quoted — the other 2 in the SAME table were independently found stale by the same `grep -n` re-derivation and fixed for internal consistency). One occurrence was deliberately LEFT AS-IS: §3.20.1's captured `git grep` transcript is genuine historical command output, explicitly labeled with its own baseline (`a02930896`) — editing the code-block content would fabricate a transcript, so it stays as recorded evidence, unlike the live-reference table beside it. **NOT closed**: an independent `grep -noE` sweep of both MDs found roughly 20 additional raw `ApprovalProductService.ts:NNNN` citations outside round-2's named set (e.g. `:8514`, `:8331`, `:10929`, `:9346`, `:4433`…) — spot-checked, several are ALSO stale (this file's drift is not limited to the one +8 insertion round-2 measured; smaller ±2-line drifts predate it). Converting all of them was outside this step's budget; registered as a mechanical, comment/MD-only follow-up with no behavior risk. **⚠️ 失效标记(2026-09-19,第 3 轮全量闸 P3-1)——只让「against the CURRENT tree」这一个短语失效,本行其余处置不受影响。** 该短语写下时所在的树**不是交付 head**。本轮在 head `92d7bade24` 上逐符号 `grep -n` 重导设计 MD §3.1 落点表:表内 **10 个 `~L` 数字(分布在 9 行)全部与 head 不符**,偏移 **+3 ~ +358**(其中 8 个在 +217~+358,`~L341`→`396` 偏 +55,`~L69`→`72` 偏 +3)。判别性证据:表头自陈的基点 `a02930896` 经 `git merge-base --is-ancestor a02930896 HEAD` → **NO**(分支此后被 `rebase --onto` 过),且 `git show a02930896:…/ApprovalProductService.ts | grep -n "APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR ="` → **859**(≈ 表里的 `~L861`)⇒ **那批数字对它自己声明的基点大致正确**,被证伪的不是数字而是「CURRENT tree」这句元声明。10 个数字已于本轮全部重导改正、表头重钉到交付 head;命令与输出见文末「第 3 轮记录修正(2026-09-19)」。 | `docs/development/approval-cancel-round-phase2-design-20260918.md` (§3.1, §4.2, §4.3, §4.4, §5, §7.1, §10); `…verification-20260918.md` §3.14.4 |
 
 **Retraction sweep (rule ③)** — **corrected 2026-09-19 (gate2 P3-2): this line originally claimed
 "0 hits", head-measured re-run shows 2, classified below instead of re-asserting a bare count.**
@@ -4754,6 +4755,16 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 > 本节与设计 MD、测试注释里共 **79 处**引用已全部重锚,并**逐行机器核验**(35/35 锚点断言
 > 目标行确实含预期符号)。**此前绑定 `c9cad2514`(rebase 前)的行号一律撤回,不得再用。**
 >
+> ⚠️ **失效标记(2026-09-19,第 3 轮全量闸 P2-1)——只让上面那句的两个全称量词失效,不作废本节。**
+> 上面这句是**那一轮自己的声明**,本轮不继承、不背书。本轮在交付 head `92d7bade24` 上跑全仓普查
+> `grep -rn "13406\|13413" --include="*.md" --include="*.ts" --include="*.cjs" --include="*.mjs" .`
+> (排除 `node_modules`),**恰 2 命中**,都在本文件:§7.1 表的 ③ 行与 §7.2 的结论句。那一轮把**同一个构造**
+> 在设计 MD §D1 改对成 `:13479-13486` 时,**漏改了这 2 处**。⇒ 「**已全部**重锚」与「逐行机器核验(**35/35**)」
+> 这两个全称量词在本 head 上**不成立**:若这 2 处在 35 之内,35/35 是假读数;若不在,分母被悄悄缩小。
+> 两处已于本轮改正,命令与输出见文末「**第 3 轮记录修正(2026-09-19)**」。
+> **本标记只贴在那一句话上**:本节其余重锚未被作废——本轮另行重导了 §7.1 的 `:11011` / `:11656`、
+> §7.4 的四个 mutation 落点、§7.2 的总线 try/catch 行,结果同样写在文末新节。
+>
 > 下次 rebase 会再犯。本分支为同一件事改过一次
 > (`acfab57e7`「convert stale ApprovalProductService.ts line refs to symbol anchors」),故此处同时给出
 > **符号锚点**,重核请认符号不认数字:`deliverCancelRoundCancelledEventPostCommit`、
@@ -4768,7 +4779,7 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 | `COMMIT` | `packages/core-backend/src/services/ApprovalProductService.ts:12740` |
 | ① 任务创建事件(提交后) | `:12741` → 方法体 `:13374-13375`,**内部整体 try/catch → logger.warn** |
 | ② 卡片 supersede(提交后) | `:12754` → 方法体 `:13432-13434`,**方法第一句就是 `try {`** |
-| ③ **取消宣告投递** | `:12761` → 方法体 `:13465`,**`try` 在 `:13406`,`catch → logger.warn` 至 `:13413`** |
+| ③ **取消宣告投递** | `:12761` → 方法体 `:13465` `deliverCancelRoundCancelledEventPostCommit`,**`try` 在 `:13479`,`catch → logger.warn` 至 `:13486`**(⚠️ 2026-09-19 改正,第 3 轮闸 P2-1:原记 `:13406` / `:13413` 是**另一个方法** `enqueueApprovalTaskCreatedEventsInTxn` 的行,本轮 `grep -n` 输出见文末新节) |
 | 区段共用的外层 catch | `:12772`(`rollbackQuietly` → 重抛) |
 
 **重试拒绝的三道门(串联,本轮实测确认顺序)**
@@ -4801,7 +4812,7 @@ cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复�
 | 合同 | `attendance-cancellation-execution-port.ts:306-309` | `(…) => void`,**不是** `Promise<void>` |
 | **唯一**绑定方 | `plugins/plugin-attendance/index.cjs:35862-35866` → 非 async 箭头 `emitRequestCancelledEventForOutcomeV1`(`:25057-25067`) | `boolean` |
 | 插件 emit | `plugin-manager.ts:588-592` → `index.ts:1245` | `void` |
-| 总线 | `event-bus.ts:70-72` `emit` → `:27-38` `dispatch` | `void`;每个订阅者另有 `:43-50` 的 try/catch |
+| 总线 | `event-bus.ts:70-72` `emit` → `:27-38` `dispatch` | `void`;每个订阅者另有 **`:46-50`** 的 try/catch(⚠️ 2026-09-19 重导,第 3 轮闸 P3-5:原记 `:43-50`;`subscribe` 的 `wrapper` 在 `:45-51`,其 `try` 在 `:46`、`catch` 在 `:48-50`,`emitter.on(pattern, wrapper)` 在 `:56`。同表 `emit` / `dispatch` 两格亦轻微过期——实测 `emit` `:72-74`、`dispatch` `:27-40`——**本轮故意不改**,理由与该残留的登记见文末新节) |
 
 **绑定方普查(全仓闭世界,`grep -rn` 扫 packages/plugins/apps/scripts,排除 node_modules 与 tests)⇒ 5 处:**
 
@@ -4816,7 +4827,24 @@ plugins/plugin-attendance/index.cjs:35863                                      #
 ⚠️ 这里用全仓普查而不是 `grep -c … plugins/plugin-attendance/index.cjs`:后者只数一个文件,
 答案会**偏小**,而「唯一」是个全仓断言(`feedback_absolute_claim_sweep_must_be_mechanical`)。
 
-⇒ 整条链同步,监听器的 bug 在 `:13406` 的 `try` 处表现为**同步 throw**。本节用例正是注入这个形状。
+⇒ 整条链同步,**投递这一跳自己抛出的异常**会在 `:13479` 的 `try` 处表现为**同步 throw**。本节用例正是注入这个形状。
+
+⚠️ **改正(2026-09-19,第 3 轮全量闸 P2-1 第二处同族 + P3-5)——只改这一句结论,本节的逐跳普查与绑定方普查一个数字都不动。**
+原句是「**监听器的 bug** 在 `:13406` 的 `try` 处表现为同步 throw」,两处都不成立:
+
+1. **行号**:真实的 `try` 在 `:13479`(`:13406` 属 `enqueueApprovalTaskCreatedEventsInTxn`,见 §7.1 的同一条改正)。
+2. **机制(这条更重要)**:**监听器抛错根本到不了那道 `try`**。
+   `packages/core-backend/src/integration/events/event-bus.ts` 的 `subscribe()` 给**每个** handler 套了
+   **总线自己的** try/catch(`:46-50`,`catch` 里只 `logger.error`),而注册进 `this.emitter.on(pattern, wrapper)`
+   (`:56`)的是那个 **wrapper**、不是 handler ⇒ 订阅者的异常被**总线**吞掉,**永远走不到**投递的 try。
+   上面那张表的最后一行本来就把这条事实列对了(「每个订阅者另有 … 的 try/catch」),**是结论句落错了**。
+
+⚠️ **本标记不作废本节的任何东西,也不削弱 §7.3/§7.4 的任何读数**:注入形状(**投递函数自己**同步抛)仍然是忠实的——
+它模型化的是「投递这一跳自身抛错」,而 **M-PC1**(把 `:13479-13486` 整段 try/catch 删掉 ⇒ P3-1 (a) `expected 500 to be 200`)
+证明那道 try/catch **承重**。变的只是它**防的是什么**:防的是**投递跳自身抛错**,不是「监听器有 bug」——
+监听器那一层已由总线独立隔离,投递的 try/catch 对它属**纵深防御**而非唯一防线。
+该结论句的同一份英文副本在 `packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts`
+的注释里(本轮一并改正,**只改注释、零测试断言改动**)。
 
 ---
 
@@ -4857,7 +4885,7 @@ plugins/plugin-attendance/index.cjs:35863                                      #
 |---|---|---|---|
 | **M-PC1** | `ApprovalProductService.ts:13479-13486` | 删掉投递的 try/catch,只留裸 `deliver(...)` | **恰 1 红**,红在 P3-1 的 **(a)**:`expected 500 to be 200`,体 `{"code":"APPROVAL_ACTION_DISPATCH_FAILED"}`。其余 26 绿 |
 | **M-PC2** | `:11011` 授权门 | `if (false && …)` | **恰 2 红**,两条都红在 **(c)**:`expected 409 to be 403`(落到第 2 道门 `INVALID_STATUS_TRANSITION`)。其余 25 绿 |
-| **M-PC3** | M-PC2 **再叠加** `:11583` 终态门 | 两道门同时失效;为越过状态断言短路,**临时**把用例里那句状态断言降级成 `console.log`(该改动同样 `cp` 还原 + `cmp` 核过) | 重试**仍被第 3 道门拒绝**:`409 INVALID_STATUS_TRANSITION / "Approval does not have an active node"`。**residual 用例整条全绿**——即两道重试门都拆掉,提交后人口仍**逐字节不变**、escape 计数仍 1、宣告仍 0 |
+| **M-PC3** | M-PC2 **再叠加** `:11656` 终态门 `instance.status !== 'pending'`(⚠️ 2026-09-19 改正,第 3 轮闸 P3-2:原记 `:11583`,那一行是 `await client.query(`——revoke 分支里一条 `UPDATE approval_assignments`,与终态门无关;正确值就是本节 `重试拒绝的三道门` 表第 2 行早已写对的 `:11656-11662`) | 两道门同时失效;为越过状态断言短路,**临时**把用例里那句状态断言降级成 `console.log`(该改动同样 `cp` 还原 + `cmp` 核过) | 重试**仍被第 3 道门拒绝**:`409 INVALID_STATUS_TRANSITION / "Approval does not have an active node"`。**residual 用例整条全绿**——即两道重试门都拆掉,提交后人口仍**逐字节不变**、escape 计数仍 1、宣告仍 0 |
 | **M-INNER** | `index.cjs:19425` | **只删幂等门那一行,保留其上的查询**(门是被测对象,读不是) | **恰 1 红**,红在 P3-2:`expected 480 to be 420` —— 第二笔 `+60` 真的写进去了。其余 26 绿,**含既有 `unrecoverableExpired` 用例**(其批次已过期 ⇒ 返还路径恒等 ⇒ 该门本就不命中),这是隔离证据 |
 
 **M-PC1 正是 owner 点名的那个场景**:隔离一旦去掉,通知抛错**确实**让已提交的取消对外返回 500 ——
@@ -4870,7 +4898,7 @@ plugins/plugin-attendance/index.cjs:35863                                      #
 
 ### 7.5 一条被实测推翻的预测(如实登记)
 
-写用例时我预测重试会被 `:11583` 终态门以 **409** 拒绝。**实测是 `:11011` 授权门的 403**:兑现的终态推进把轮次实例的
+写用例时我预测重试会被 `:11656` 终态门以 **409** 拒绝(⚠️ 2026-09-19 改正,同 P3-2:原记 `:11583`;**被记错的只是行号,这条预测被推翻的记录本身原样保留**)。**实测是 `:11011` 授权门的 403**:兑现的终态推进把轮次实例的
 席位置为 inactive,`actorCanAct` 先为假,终态门根本没被走到。用例已改成断言**实测值**,并补了一条把席位分组计数
 钉成 `[{is_active:false, n:'1'}]` 的断言,让这个先后次序是**量出来的事实**而不是散文
 (`feedback_not_this_error_is_not_an_outcome_assertion`:`notEqual` 族分不清「因已终态被拒」和「因别的原因失败」)。
@@ -4928,6 +4956,11 @@ $ grep -rn "updateTable('attendance_requests')" …(含双引号变体,排除 mi
 ---
 
 ### 7.7 残留暴露 P3-1 与建议(交 owner,本轮**未**改生产)
+
+> ✅ **已并表(2026-09-19,第 3 轮全量闸 P3-4)**:本节的残留项此前**只活在本节**,没有出现在上文
+> 「Owner 待裁项 + 「留给 C-3」的项」那张合并总表里,只读总表的 owner 会漏掉它。现已在该表的**残留项**表
+> 末尾加了一行指针(形状 / 今天不可达的理由 / 建议值 / TRIPWIRE 约束)。**那一行是指针,不是替代**:
+> 完整正文、三条不做的理由与 TRIPWIRE 的措辞约束仍以本节为准。
 
 owner 的补救小句是**有条件的**——「**若**通知抛错能让已提交的取消返回失败 …… 这是缺陷」。该条件在本 head **不成立**
 (投递自带隔离,P3-1 (a) 实测 200)。缺的是证据,证据已补。
@@ -5310,3 +5343,478 @@ push 前复读:三个 ref(`origin/…phase1`、`origin/…phase2`、本地 `HEAD
 未做独立 refute-first;C-1 两套件需要 `postgres` 角色(非 `metasheet`)连接才能过 `session_replication_role = replica`
 一项;`origin/main` patch-id 全集按当前 `origin/main`(`868c8d2b2`)未重算(沿用前节窗口,增量为 main 自身新提交,与
 lane 无关)。PR #5856 仍为 Draft,未 undraft、未合并、未动 PR 状态。
+
+---
+
+## 第 3 轮记录修正(2026-09-19)
+
+第 3 轮全量闸(`impl-gate-C-slice2-round3-20260919.md`,判定 **NOT DRAFT-READY:0 P1 / 1 P2 / 5 P3;
+四项行为全部通过**)的**记录级**修正第 1 步。闸的结论是「**代码零缺陷**,P 全部落在文档/证据侧」,
+本节因此**只改 MD 与注释**:零生产代码、零迁移、零测试断言改动。
+
+**本节纪律(自绑,便于下一个复核者攻击)**
+- **每一个写进本节的行号/计数都来自本会话亲跑的命令**,命令与原始输出**逐条贴在旁边**;不转抄闸报告的读数,
+  闸报告与我读数不一致的地方**按我的读数写并点名差异**。
+- **「只删不加」**:只删被证伪的**句子**,不删任何有效断言、失败证据或未解决项。本节的每一条改正都是
+  **失效标记 + 改正值**,原句作为「那一轮的自述」保留(`feedback_supersession_marker_must_evaluate_not_void`:
+  标记要**求值**,不作废整节)。
+- **不扩大战线**:发现的同族但不在本步骤范围内的项,**测量后如实登记为 OPEN**,不偷偷修、也不假装闭合。
+
+**入场状态(亲跑)**
+
+```
+$ git rev-parse HEAD
+92d7bade243cbd47b647b5daf743c5b313070566
+$ git rev-parse origin/feat/approval-cancel-round-phase2
+92d7bade243cbd47b647b5daf743c5b313070566
+$ git status --porcelain
+(空)
+```
+
+---
+
+### R3-P2-1(闸判 P2)—— §7 的「79 处已全部重锚 / 逐行机器核验 35-35」在交付 head 上被证伪
+
+**重导命令与输出**
+
+```
+$ grep -n "deliverCancelRoundCancelledEventPostCommit" packages/core-backend/src/services/ApprovalProductService.ts
+12761:      this.deliverCancelRoundCancelledEventPostCommit(dispatchCancelledEventDelivery)
+13465:  private deliverCancelRoundCancelledEventPostCommit(
+
+$ sed -n '13479,13487p' packages/core-backend/src/services/ApprovalProductService.ts | nl -ba -v13479 -w5 -s': '
+13479:     try {
+13480:       deliver(delivery.result, delivery.requestId)
+13481:     } catch (error) {
+13482:       approvalProductLogger.warn(
+13483:         `attendance.request.cancelled delivery failed for request ${delivery.requestId} (the `
+13484:           + `cancellation itself is committed): ${error instanceof Error ? error.message : String(error)}`,
+13485:       )
+13486:     }
+13487:   }
+
+$ sed -n '13406,13413p' packages/core-backend/src/services/ApprovalProductService.ts | nl -ba -v13406 -w5 -s': '
+13406:   private async enqueueApprovalTaskCreatedEventsInTxn(
+13407:     client: ApprovalDbClient,
+13408:     instanceId: string,
+13409:     tasks: ApprovalTaskCreatedTaskSnapshot[],
+13410:   ): Promise<void> {
+13411:     if (!isDurableDeliveryEnabled()) return
+13412:     if (tasks.length === 0) return
+13413:     const events = await collectLiveApprovalTaskCreatedEvents(
+```
+
+⇒ 真实的 `try` 在 **`:13479`**、`catch` 在 **`:13481`**、整段止于 **`:13486`**;
+`:13406` / `:13413` 属 **`enqueueApprovalTaskCreatedEventsInTxn`**。与设计 MD §D1 早已写对的
+`:13479-13486` 一致。
+
+**全仓闭世界普查(错行号还活在哪里)**
+
+```
+$ grep -rn "13406\|13413" --include="*.md" --include="*.ts" --include="*.cjs" --include="*.mjs" . | grep -v node_modules
+docs/development/approval-cancel-round-phase2-verification-20260918.md:4771:| ③ **取消宣告投递** | …**`try` 在 `:13406`,`catch → logger.warn` 至 `:13413`** |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:4819:⇒ 整条链同步,监听器的 bug 在 `:13406` 的 `try` 处表现为**同步 throw**。…
+```
+
+**恰 2 命中**(行号为**改动前**的值;两行的行内长表格/长句已用 `…` 截断,截断处不含任何行号)。设计 MD **0 命中** ⇒ 那一轮把同一构造在设计 MD 改对时,**漏改了验证 MD 的这 2 处**。
+
+**处置**
+1. §7.1 表的 ③ 行:`:13406`/`:13413` → **`:13479`/`:13486`**,并补上符号锚点 `deliverCancelRoundCancelledEventPostCommit`。
+2. §7.2 的结论句:见下面的 R3-P3-5(同一句,两个缺陷)。
+3. §7.1 抬头那条「79 处**已全部**重锚 + **逐行机器核验 35/35**」**加失效标记**:原句**保留**并标注为**那一轮的自述**,
+   标记只让两个全称量词失效,并写明两种读法都不成立(2 处若在 35 内 ⇒ 35/35 是假读数;若在 35 外 ⇒ 分母被缩小)。
+4. **同一条全称句的英文副本在交付的测试注释里**(`approval-cancel-round-redemption.db.test.ts`,
+   "All 79 refs … machine-verified line by line (35/35 …)")——闸报告只锚了 MD,这条是**我本轮的全仓普查**
+   (上面的 `grep -rn "35/35\|79 处\|79 refs"`)找到的;**同样加了失效标记**,否则交付分支仍在发运被证伪的声明。
+
+**未改、如实登记**:`二次 Rebase 到新 C-1` 一节里的 `(35/35)` 是在**转述三个并发提交自述**的语境里,
+该节自己的「未覆盖」段落早已写明「未逐条复核三个并发提交自称的『35 处符号锚点机械核验』」⇒ **已经是诚实的自述框架**,
+不属被证伪的全称声明,本轮不动。
+
+---
+
+### R3-P3-1 —— 设计 MD §3.1 落点表的 `~L` 在交付 head 上全部过期;被证伪的是那句元声明
+
+**先定性(判别性证据,避免误判成「表写错了」)**
+
+```
+$ git merge-base --is-ancestor a02930896 HEAD ; echo $?
+1                 # NO —— §3.1 抬头自陈的基点不是 head 的祖先(此后被 rebase --onto 过)
+
+$ git show a02930896:packages/core-backend/src/services/ApprovalProductService.ts \
+    | grep -n "APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR ="
+859:const APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'
+```
+
+⇒ 表里写 `~L861`,该基点实测 `859` ⇒ **那批数字对它自己声明的基点大致正确**,不是凭空编的。
+**被证伪的是元声明**:本文件 `§N P3 卫生轮` 的 R2-P3-2 处置行写着这批数字
+「each number independently re-derived by `grep -n` against the **CURRENT tree**」——在交付 head 上不成立。
+
+**逐符号重导(全部亲跑,`grep -n -F`)**
+
+```
+$ F=packages/core-backend/src/services/ApprovalProductService.ts
+$ grep -n -F "function deriveCancelRoundRoundPolicy" $F
+396:function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): CancelRoundRoundPolicy {
+$ grep -n -F "APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR =" $F
+1078:const APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'
+$ grep -n -F "export async function resolveCancelRoundRolloutLockRequirementV1" $F
+1147:export async function resolveCancelRoundRolloutLockRequirementV1(
+$ grep -n -F "private async evaluateCancelRoundFinalInLock" $F
+9042:  private async evaluateCancelRoundFinalInLock(
+$ grep -n -F "private async closeCancelRoundSystemTerminalInTxn" $F
+9211:  private async closeCancelRoundSystemTerminalInTxn(
+$ grep -n -F "private async redeemCancelRoundInTxn" $F
+9341:  private async redeemCancelRoundInTxn(
+$ grep -n -F "async dispatchAction(" $F
+10846:  async dispatchAction(
+$ grep -n -F "resolution.status === 'approved' && isCancelRoundInstance(instance)" $F
+12525:      if (resolution.status === 'approved' && isCancelRoundInstance(instance)) {
+$ grep -n -F "return closedApproval" $F
+12598:          return closedApproval
+$ grep -n -F "export function deriveCancelRoundW4OperationIdV1" \
+    packages/core-backend/src/core/attendance-cancellation-execution-port.ts
+72:export function deriveCancelRoundW4OperationIdV1(roundId: string): string {
+```
+
+| 符号(表的主键) | MD 原写 | 实测(交付 head) | Δ |
+|---|---|---|---|
+| `function deriveCancelRoundRoundPolicy` | `~L341` | **396** | +55 |
+| `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR =` | `~L861` | **1078** | +217 |
+| `export async function resolveCancelRoundRolloutLockRequirementV1` | `~L930` | **1147** | +217 |
+| `private async evaluateCancelRoundFinalInLock` | `~L8761` | **9042** | +281 |
+| `private async closeCancelRoundSystemTerminalInTxn` | `~L8888` | **9211** | +323 |
+| `private async redeemCancelRoundInTxn` | `~L9006` | **9341** | +335 |
+| `async dispatchAction(` | `~L10502` | **10846** | +344 |
+| outlet #5′ `if (resolution.status === 'approved' && …)` | `~L12174` | **12525** | +351 |
+| outlet #5′ `return closedApproval` | `~L12240` | **12598** | +358 |
+| `export function deriveCancelRoundW4OperationIdV1`(另一文件) | `~L69` | **72** | +3 |
+
+**与闸报告的差(点名,不掩盖)**:闸报告 P3-1 的表是 **8 行 / 7 行偏移**,并把 `~L69` 记为 ✅。
+我的机械计数是:
+
+```
+# 改动前(表当时在 180-189 行)
+$ sed -n '180,189p' docs/development/approval-cancel-round-phase2-design-20260918.md | grep -o "~L[0-9]*" | wc -l
+      10          # 10 个 ~L 数字
+$ sed -n '180,189p' docs/development/approval-cancel-round-phase2-design-20260918.md | grep -c "~L"
+9                 # 分布在 9 行(outlet #5′ 那一行带 2 个数字)
+
+# 改动后(加了重锚标记,表下移到 207-216 行)—— 数量不变,值全换
+$ sed -n '207,216p' docs/development/approval-cancel-round-phase2-design-20260918.md | grep -o "~L[0-9]*" | wc -l
+      10
+$ sed -n '207,216p' docs/development/approval-cancel-round-phase2-design-20260918.md | grep -o "~L[0-9]*" | tr '\n' ' '
+~L396 ~L1078 ~L1147 ~L9042 ~L9211 ~L9341 ~L72 ~L10846 ~L12525 ~L12598
+```
+
+⇒ **10 个数字全部与 head 不符**,偏移 **+3 ~ +358**。闸报告漏掉的是 `deriveCancelRoundRoundPolicy ~L341 → 396`
+(+55),并把 `~L69 → 72` 判成 ✅(它确实是最小漂移,但**不是相等**)。**以本节读数为准。**
+
+**处置**:10 个 `~L` 全部改为实测值(**符号仍是主键、数字仍带 `~`**);§3.1 抬头的基点从 `a02930896`
+**重钉到交付 head** `92d7bade243cbd47b647b5daf743c5b313070566` 并写明重导方法;
+R2-P3-2 处置行的「against the CURRENT tree」**加失效标记**(只作废那一个短语)。
+
+**⚠️ 本步骤范围内故意未改、测量后登记为 OPEN(不得读成已闭合)**
+
+| 位置 | 原写 | 实测 | 为什么这一步不改 |
+|---|---|---|---|
+| 设计 MD §4.2 开头句、§5 接缝表 | `async dispatchAction(` `~L10502` | **10846** | 不在本步骤点名的 §3.1 范围内 |
+| 设计 MD §4.2「同一个函数被调用两次」句 | def `~L930` / 预读调用 `~L10530` / 重断言调用 `~L10558` | **1147** / **10881** / **10909**(`grep -n "resolveCancelRoundRolloutLockRequirementV1(" ` → `1147` / `10881` / `10909`) | 同上;且它与紧邻的**带行号源码摘录块**互相交叉引用,单改一处会把那段自洽性拆掉 |
+| 设计 MD §5 接缝表 outlet #5′ 行 | `~L12174` / `~L12219` / `~L12240` | **12525** / **12577**(`grep -n "closeCancelRoundSystemTerminalInTxn(" ` → `9211` 定义、`12577` 调用)/ **12598** | 同上 |
+| 设计 MD §4.2 的带行号源码摘录块及其脚注 | 脚注写「Every line number above is this document's OWN fresh `grep -n`/`sed -n` extract at **current HEAD**」 | **该绝对声明在交付 head 上同样不成立**(块内 `10530` = 预读调用,实测 **10881**) | 与 R3-P2-1 同族的**又一条被证伪的全称句**。它是一段**捕获式摘录**,重写其数字有伪造 transcript 的风险(本文件 R2-P3-2 已对 §3.20.1 的 `git grep` transcript 用过同一理由);其承重的是它记录的**控制流顺序**(未变),不是绝对行号 |
+
+这四条已在设计 MD §3.1 的重锚标记里**逐条点名并附实测值**,读者落在任一处都能一眼看到活的锚点;
+**本轮不改它们,也不声称它们已闭合。**
+
+---
+
+### R3-P3-2 —— M-PC3 的终态门落点 `:11583` 与同节自己的 `:11656` 矛盾
+
+```
+$ grep -n "instance.status !== 'pending'" packages/core-backend/src/services/ApprovalProductService.ts
+9542:      if (instance.status !== 'pending') {
+9844:        if (instance.status !== 'pending') {
+10233:        if (instance.status !== 'pending') {
+10546:      if (instance.status !== 'pending') {
+11656:      if (instance.status !== 'pending') {
+12119:        // second reject can never reach this branch — `instance.status !== 'pending'` 409s first
+
+$ sed -n '11656,11662p' packages/core-backend/src/services/ApprovalProductService.ts | nl -ba -v11656 -w5 -s': '
+11656:       if (instance.status !== 'pending') {
+11657:         throw new ServiceError(
+11658:           `Cannot ${request.action}: current status is ${instance.status}`,
+11659:           409,
+11660:           APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+11661:         )
+11662:       }
+
+$ sed -n '11583,11584p' packages/core-backend/src/services/ApprovalProductService.ts | nl -ba -v11583 -w5 -s': '
+11583:         await client.query(
+11584:           `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
+```
+
+⇒ `:11656-11662` 是 `dispatchAction` 的终态门(第 2 道门,答 409 `INVALID_STATUS_TRANSITION`);
+`:11583` 是 **revoke 分支里的一条 `UPDATE approval_assignments`**,与终态门无关。按 `:11583` 打 mutation
+会落在无关语句上、跑出假台账(`feedback_ineffective_mutation_looks_like_a_useless_test`)。
+顺带亲核第 1 道门:
+
+```
+$ sed -n '11011,11013p' packages/core-backend/src/services/ApprovalProductService.ts | nl -ba -v11011 -w5 -s': '
+11011:       if (request.action !== 'revoke' && !actorCanAct) {
+11012:         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
+11013:       }
+```
+⇒ §7.1 三道门表的 `:11011-11013` **正确**,不改。
+
+**全仓普查 —— 闸报告点名 1 处,我的普查找到 3 处**
+
+```
+$ grep -rn "11583" --include="*.md" --include="*.ts" --include="*.cjs" --include="*.mjs" . | grep -v node_modules
+…verification-20260918.md:4860:| **M-PC3** | M-PC2 **再叠加** `:11583` 终态门 …     ← 闸报告点名的那一处
+…verification-20260918.md:4873:写用例时我预测重试会被 `:11583` 终态门以 **409** 拒绝。…
+…approval-cancel-round-redemption.db.test.ts:3332:        // first and `:11583` is never reached. …
+```
+
+(三个行号都是**改动前**的值;改动后这些位置都换成了 `:11656` + 一条点名原值的改正标记。)
+
+**处置**:**3 处全改**为 `:11656`(只改行号;§7.5 那条「预测被实测推翻」的记录本身、测试里的断言,
+都**原样保留**)。只改 1 处会把 P2-1 的形状原样复制一遍(同一构造在交付件里给出两组行号)。
+
+---
+
+### R3-P3-3 —— 闭世界普查令牌把自己算进人口(**归 C-1,本切片不改**)
+
+**锚点**:`packages/core-backend/src/services/ApprovalProductService.ts:446` 的注释块。
+
+```
+$ grep -rn "DELETE FROM users" packages/*/src plugins apps/*/src scripts | grep -v node_modules | wc -l
+      18
+$ grep -rln "DELETE FROM users" packages/*/src plugins apps/*/src scripts | grep -v node_modules | wc -l
+      14
+$ grep -rn "DELETE FROM users" packages/core-backend/src | grep -v node_modules
+packages/core-backend/src/services/ApprovalProductService.ts:446: *   17 `DELETE FROM users` sites, all 13 files under `scripts/ops/` …
+$ grep -rln "DELETE FROM users" scripts | wc -l
+      13
+$ grep -rln "DELETE FROM users" scripts/ops | wc -l
+      13          # 13 个文件全部落在 scripts/ops/ 下,不只是 scripts/ 下
+```
+
+(第三条命令的输出行是被 `…` 截断的注释原文,截断处不含任何计数。)
+
+⇒ 注释声明的 **17 处 / 13 文件**在**扣掉注释自身**后**数字正确**:18−1 = 17、14−1 = 13,且这 13 个文件**确实全部落在 `scripts/ops/` 下**(上面第四条命令单独量过,不是从 `scripts/` 的读数推出来的)。
+坏的是**形状**:普查令牌写进了被普查的人口,下一次重算必然对不上
+(`finding_p26_census_nearest_symbol_collision` 同族)。
+
+**⚠️ 我本轮另测到同一注释的第二条轴,闸报告未点名**:
+
+```
+$ grep -rn "deleteFrom('users')\|deleteFrom(\"users\")" packages plugins apps scripts | grep -v node_modules
+packages/core-backend/src/services/ApprovalProductService.ts:448: *   tree; the kysely syntax (`deleteFrom('users')`) is 0 repo-wide; …
+```
+
+⇒ 注释写「kysely 语法 **0** repo-wide」,而今天**唯一**的命中就是这句注释自己。同一缺陷,第二个令牌。
+
+**归属(亲跑,不靠推断)**
+
+```
+$ git log --format="%h %s" -1 -L 446,446:packages/core-backend/src/services/ApprovalProductService.ts
+88445c9067 fix(approval): drop system sentinel actors from cancel-round seats (gate round 6 G6-1)
+$ git merge-base --is-ancestor 88445c9067 b8b71539a ; echo $?
+0                 # YES —— 该提交是 C-1 base 的祖先
+```
+
+⇒ **归 C-1(G6-1),经 rebase 带入本分支,本切片不改**。修法(拆开字面量,或把普查搬进测试)**同时要覆盖两个令牌**,
+且必须先普查再收窄(`feedback_narrowing_fix_read_parity_write_reject`)——属 C-1 的账,本节只登记。
+
+---
+
+### R3-P3-4 —— §7.7 的残留暴露没有向上归并
+
+闸报告的读法我复核认同:§7.7 完整登记了残留(提交后区段上游外逃 ⇒ 投递被跳过 + 已提交的取消对外 500)、
+建议值、三条不做的理由与两条 ⚠️ TRIPWIRE,但**合并总表里没有这一行**,只读总表的 owner 会漏掉。
+
+**处置**:在「Owner 待裁项 + 「留给 C-3」的项」那一节的**残留项**表末尾新增一行(形状 / 今天不可达的理由 /
+建议值 / TRIPWIRE 约束),并在 §7.7 抬头加一条回指,写明**新增的那一行是指针不是替代**,完整正文仍以 §7.7 为准。
+⇒ **净增一条登记,零删除**。
+
+---
+
+### R3-P3-5 —— 基线 O-6 仍活:「监听器抛错」被当成投递 `try` 要防的故障模式
+
+**亲核机制**
+
+```
+$ sed -n '42,56p' packages/core-backend/src/integration/events/event-bus.ts | nl -ba -v42 -w5 -s': '
+   42:   subscribe<T = EventPayload>(pattern: string | RegExp, handler: EventHandler<T>, plugin?: string): string {
+   43:     const id = `evt_${++_idSeq}`
+   44:     // Type assertion needed here as we're storing generic handlers
+   45:     const wrapper = (data: unknown) => {
+   46:       try {
+   47:         handler(data as T)
+   48:       } catch (e) {
+   49:         logger.error(`Handler error for pattern ${String(pattern)} (id: ${id})`, e instanceof Error ? e : undefined)
+   50:       }
+   51:     }
+   52: 
+   53:     // If pattern is string, direct subscribe.
+   54:     if (typeof pattern === 'string') {
+   55:       this.listeners.set(id, { id, plugin, pattern, handler: handler as EventHandler, emitterHandler: wrapper })
+   56:       this.emitter.on(pattern, wrapper)
+```
+
+⇒ `subscribe()` 给**每个** handler 套了**总线自己的** try/catch(`:46-50`),并把 **wrapper**(不是 handler)
+注册进 `this.emitter.on(pattern, wrapper)`(`:56`)⇒ **订阅者的异常被总线吞掉,永远走不到投递的 try**。
+§7.2 的逐跳表最后一行本来就把这条事实列对了,**是结论句落错了**。
+
+**处置(只改结论句/注释,零断言改动)**
+- §7.2 结论句:「**监听器的 bug** 在 `:13406` 的 `try` 处表现为同步 throw」→「**投递这一跳自己抛出的异常**
+  会在 `:13479` 的 `try` 处表现为同步 throw」,并补一段说明监听器已由总线独立隔离(纵深防御)。
+- 交付的测试注释(`approval-cancel-round-redemption.db.test.ts` 的同一句英文副本)**同样改正**。
+- §7.2 逐跳表里的总线 try/catch 行号 `:43-50` → **`:46-50`**(改正后的结论句要靠这个数字,它承重)。
+
+**⚠️ 不作废任何读数**:注入形状(投递函数**自己**同步抛)仍忠实;**M-PC1**(删 `:13479-13486` 整段
+⇒ P3-1 (a) `expected 500 to be 200`)仍然证明那道 try/catch **承重**。变的只是它**防什么**。
+
+**同表两格轻微过期,测量后故意不改**:
+
+```
+$ grep -n "  emit<T\|  private dispatch(" packages/core-backend/src/integration/events/event-bus.ts
+27:  private dispatch(type: string, payload: EventPayload): void {
+72:  emit<T = EventPayload>(type: string, payload?: T): void {
+```
+⇒ 表里写 `emit` `:70-72` / `dispatch` `:27-38`,实测 `emit` **`:72-74`** / `dispatch` **`:27-40`**。
+这两格**对本轮任何一条被改正的结论都不承重**,改了只会把 diff 摊大;**登记为 OPEN,不声称闭合**。
+
+---
+
+### 本节未覆盖 / 不得被读成已闭合
+
+- **闸报告的 P2-1 判级本身**(P2 还是 P3)是 owner 的事,本节只执行修正、不改判。
+- 上面 R3-P3-1 表里四条设计 MD 同族过期锚点 + §4.2 摘录块脚注的「at current HEAD」绝对声明:**OPEN**。
+- R3-P3-3 的两个自含令牌:**OPEN,归 C-1**。
+- §7.2 逐跳表的 `emit` / `dispatch` 两格:**OPEN**。
+- 本节**没有重跑任何门禁**:第 3 轮全量闸的四项行为、mutation 台账、required 两条(84 files / 944 passed;
+  950 files / 15128 passed)都在闸报告里,**本节零代码改动 ⇒ 那些读数按构造仍成立**,但那是闸报告的账,不是本节新测的。
+- 本节**未**改任何锁文、**未**动 `origin/main`、**未** rebase、**未** undraft、**未**合并、**未**应用迁移。
+
+---
+
+### 本节的机械自检(不靠肉眼「我看过了」)
+
+**(1) 改动面 —— 只有两份 MD 与一个测试文件的注释**
+
+```
+$ git diff --name-only 92d7bade243cbd47b647b5daf743c5b313070566..HEAD
+docs/development/approval-cancel-round-phase2-design-20260918.md
+docs/development/approval-cancel-round-phase2-verification-20260918.md
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+⇒ 零 `src/`、零 `plugins/`、零 `.github/`、零 `scripts/`、零迁移、零 `apps/web`。
+
+**(2) 测试文件**:证明是注释级改动,而不是「我读了一遍觉得是」
+
+```
+$ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+$ git diff --numstat -- $T
+42      6       packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+
+# 变更行里剥掉 +/- 与缩进后,不以 `*` 或 `//` 开头的行数(= 非注释变更行)
+$ git diff -U0 -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
+    | sed -E 's/^[+-][[:space:]]*//' | grep -vE "^(\*|//)" | grep -vE "^$" | wc -l
+       0
+
+# 变更行里含 `expect(` 的行数
+$ git diff -U0 -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
+0
+```
+
+⇒ **非注释变更行 = 0,触及断言的变更行 = 0。**
+
+**(3) 「只删不加」边界**
+
+```
+$ git diff -U0 | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
+0
+```
+
+并且对两份 MD 做**词级**审计,列出全部被删掉的词:
+
+```
+$ git diff --word-diff=porcelain -- docs/development/approval-cancel-round-phase2-verification-20260918.md \
+      docs/development/approval-cancel-round-phase2-design-20260918.md | grep "^-" | grep -v "^---" | sort -u
+-整条链同步,监听器的 bug 在 `:13406`
+-拒绝。**实测是
+-`:11583`
+-`:13406`,`catch
+-`:13413`**
+-`:13465`,**`try`
+-`:43-50`
+-`a02930896`)
+-~L10502
+-~L12174
+-~L12240
+-~L341
+-~L69
+-~L861
+-~L8761
+-~L8888
+-~L9006
+-~L930
+-try/catch
+```
+
+⇒ 被删掉的**只有被证伪的行号 token 与它们所在小句**。那条最长的 `R2-P3-2` 处置行在 `--stat` 里显示为
+「删 1 加 1」,但词级 diff 证明它**一个词都没少**——失效标记是**追加**在原文末尾的。
+**零有效断言、零失败证据、零未解决项被删。**
+
+**(4) 类型检查(注释改动唯一可能的破坏方式是弄坏块注释)**
+
+```
+$ cd packages/core-backend && npx tsc --noEmit -p tsconfig.json ; echo "EXIT=$?"
+EXIT=0          # 零输出
+```
+
+**(5) 改正后的复查 —— 用正向断言,因为反向计数在这里是自指的**
+
+⚠️ **先说为什么不用「旧行号还剩几处」当判据**:本节自己要**引用**那些被证伪的行号才能把记录说清楚
+(改正标记里的「原记 `:13406`」、上文贴的命令原文与 grep 输出)。所以 `grep -c "13406"` 的分母**包含本节自身**,
+每多写一句就变一次——这正是本轮 R3-P3-3 点名的那个形状(`finding_p26_census_nearest_symbol_collision`:
+普查令牌写进被普查的人口)。**我不在这里重犯一次。**
+
+改用**正向、稳定、可机械复算**的断言:每一个**活的**锚点现在都指向本轮实测值。
+
+```
+$ V=docs/development/approval-cancel-round-phase2-verification-20260918.md
+$ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+
+$ grep -c '方法体 `:13465` `deliverCancelRoundCancelledEventPostCommit`,\*\*`try` 在 `:13479`' $V
+1                 # §7.1 表 ③ 行
+$ grep -c '投递这一跳自己抛出的异常\*\*会在 `:13479` 的 `try`' $V
+1                 # §7.2 结论句
+$ grep -c '每个订阅者另有 \*\*`:46-50`\*\* 的 try/catch' $V
+1                 # §7.2 逐跳表 总线行
+$ grep -c 'M-PC2 \*\*再叠加\*\* `:11656` 终态门' $V
+1                 # §7.4 M-PC3
+$ grep -c '我预测重试会被 `:11656` 终态门以 \*\*409\*\* 拒绝' $V
+1                 # §7.5
+$ grep -c "a throw FROM THE DELIVERY HOP ITSELF" $T
+1                 # 测试注释的同一条结论句
+$ grep -c "bus's own \`try\`/\`catch\` (\`:46-50\`)" $T
+1                 # 测试注释的总线 try/catch 行号
+$ grep -c 'ApprovalProductService.ts:11656' $T
+1                 # 测试注释的终态门
+```
+
+(每条模式都刻意带上 `\*` 转义或后半句,**使命令原文自己不匹配自己** —— 否则连这张自检表都会掉进
+同一个自指陷阱。)
+
+⇒ **8 个活锚点,8 个命中本轮实测值。** 旧行号只出现在两类位置:**改正标记内部**(逐字引用原值,是记录的一部分,
+按「只删不加」**必须保留**)与**本节贴出的命令/输出原文**。二者都不是对当前树的断言。
+
+**(6) 本节自身的元声明 —— 故意写成可核的,不写全称句**
+
+本节**不**声称「全部引用已重锚」。本节声称的是:**闸报告点名的 6 条(P2-1、P3-1…P3-5)已按上文逐条处置**,
+其中 P3-3 的处置是「归 C-1、本切片不改、只登记」;**另有 6 条同族项经测量后登记为 OPEN**
+(设计 MD §4.2/§5 的 3 组过期锚点、§4.2 摘录块脚注的「at current HEAD」绝对声明、P3-3 的第二个自含令牌、
+§7.2 逐跳表的 `emit`/`dispatch` 两格)。分母、方法与每一条的实测值都在上文,可逐条复算。
