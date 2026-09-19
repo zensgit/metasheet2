@@ -665,8 +665,8 @@ Codex 第 3 条被独立验证为 **CONFIRMED**(`reviews/verify-codex-cancel-fin
 | 提交后投递注册 | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts:306`(类型)、`:314`(register)、`:336`(get) | **兄弟注册表,不是 port 上的新方法** |
 | 宿主接线 | `src/types/plugin.ts:1588`、`src/index.ts:210`/`:2768` | 与 `registerCancelRoundExecutionBoundary` 并排 |
 | 插件绑定 | `index.cjs:35831-35833` | 绑的就是上面那个唯一发送函数 |
-| 审批侧携出 W4 结果 | `ApprovalProductService.ts:9038`(返回类型)、`:9164`(返回值) | **逐字携出,不解读 kind** |
-| 提交后发送 | `:12440`(调用,在 `COMMIT` 之后)、`:13144`(方法本体) | 自带 try/catch |
+| 审批侧携出 W4 结果 | `ApprovalProductService.ts` `redeemCancelRoundInTxn` 的 `readonly w4Result`(`:9286` 返回类型、`:9412` 返回值) | **逐字携出,不解读 kind** |
+| 提交后发送 | `dispatchAction` 里的 `this.deliverCancelRoundCancelledEventPostCommit(...)`(`:12688`,在 `:12667` 的 `COMMIT` 之后)、方法本体 `deliverCancelRoundCancelledEventPostCommit`(`:13392`) | 自带 try/catch |
 
 **三处刻意的设计选择,每处都有反面理由:**
 
@@ -712,4 +712,138 @@ Codex 第 3 条被独立验证为 **CONFIRMED**(`reviews/verify-codex-cancel-fin
 - **P5 `executed` 真 posture 变体未做。** 验证报告给的 P5 要求把 org posture 抬到非 legacy、断言 outbox 落 1 行而总线直发 0 次。**本切片只用 double 覆盖了 `executed` 这个 kind 的门**(I3 用例),没有做真 posture 变体——它需要一个现有夹具没有的 `attendance_calculation_rollout_state` 播种 helper。按报告自己给的两条路「要么做,要么显式登记为 owner 待裁的延后项」,此处**显式登记为延后项**,理由是成本,不是发现成本后悄悄丢掉。
 - **纯 `legacy` posture 仍未被执行覆盖。** 实测跑到的是 `legacy_compat`。纯 `legacy` 分支上的行为仍是源码阅读结论。
 - `authoritative` / `shadow` / `eligible` posture 在两条路径上仍未被任何用例跑过。
-- 本节只处理 Codex 第 3 条。第 1 条(撤销轮未重验原审批人当前资格)与第 2 条(撤销窗口上限未执行)**未验、未修**。
+- 本节只处理 Codex 第 3 条。第 1 条(撤销轮未重验原审批人当前资格)与第 2 条(撤销窗口上限未执行)**由 C-1**
+  在 `ba8a0133d` 上修复,本分支 rebase 后把它们作为**基点**继承——不是本节的成果,本节也没有独立重验它们;
+  C-1 的证据在 `approval-cancel-round-phase1-verification-20260918.md`。本分支为消费 C-1 的收窄而做的适配与
+  新增闸,见下面的「Rebase 到 C-1」小节。
+
+---
+
+## Rebase 到 C-1 `ba8a0133d`(2026-09-19,本节全部结论绑定新基点)
+
+上面每一节原先绑定的基点是 `4a08a576e`(旧 C-1 头 `c4dc4b928`)。C-1 在同一天推进到
+`ba8a0133dd1eb3ff6700cccc2f185636e799c8b9`(Codex 第 1/2 条:席位资格重验 + 撤销窗口域执行),本分支据此重放:
+
+```
+$ git rebase --onto origin/feat/approval-cancel-round-phase1 c4dc4b928 feat/approval-cancel-round-phase2
+Rebasing (58/58)   Successfully rebased and updated refs/heads/feat/approval-cancel-round-phase2.
+```
+
+58 条非 merge 提交被重放(原分支 62 条,差额是 3 条 `merge(approval): fold uN lane` 加 1 条被 C-1 同内容吸收的)。
+新头 `40b07e3646c48c3978378f69f01397b43d801d79`;`git merge-base --is-ancestor origin/feat/approval-cancel-round-phase1 HEAD` ⇒ 真。
+
+### R1. 冲突与它们的处置(4 处,逐条)
+
+| # | 文件 | 形状 | 处置 |
+|---|---|---|---|
+| 1 | `ApprovalProductService.ts` | C-2 在 C-1 新写的 `deriveCancelRoundRoundPolicy` 调用点上方加了 2 行注释 | 保留该注释(它描述的「单一推导、两个时点」正是 C-1 做的事) |
+| 2 | `approval-cancel-round-redemption.db.test.ts` | C-1 的 `mintedUserIds` 清理块 vs C-2 的 `createdDirectoryUserIds` 清理块 | **列表 union**:两块都留,C-1 的 `users` 删除排在最后(其余集合先删完引用它的行) |
+| 3 | 同上 | C-1 的 `mintedUserIds` 块 vs C-2 的 `createdLeaveBalanceIds` 块 | 同上,union,保持原分支的相对次序 |
+| 4 | `approval-cancel-round-phase2-verification-20260918.md` | 两个 lane 各自写了一节 `## 3.17` | 原分支是在 merge 提交里消解的(u2 的 `M-25→M-29` 重编号 + `§3.17→§3.19`),rebase 丢掉了那些 merge ⇒ 按原分支的最终编号重放:ours 保 3.17/3.18,theirs 重编为 **3.19** |
+
+另有 1 处 `## 3.14.5` 表格冲突:取 theirs(95e929961 把裸行号换成符号锚点,是本仓明令的方向)。
+
+**忠实性不是靠「看起来对」,是三路核对出来的。** 对每个被两边同时改过的文件跑
+`git merge-file -p <C-2 旧头版本> <C-1 旧基点版本> <C-1 新头版本>`,再与 rebase 结果逐字节比:
+
+- `ApprovalProductService.ts`:差异**只有**第 1 处冲突(理想合并留了标记,rebase 结果是我的消解)。
+- `approval-cancel-round-phase1-design-20260918.md`:`merge-file` 干净退出,与 rebase 结果 **IDENTICAL**。
+- `approval-cancel-round-phase2-verification-20260918.md`:与 rebase 前**逐字节相同**(`git diff` 空)。
+- C-1 独有的 6 个文件(phase1 验证 MD、`approval-schema-bootstrap.ts`、creation / node-timeout / outlet-guards / seat-guards 四个套件):与 `ba8a0133d` **逐字节相同**。
+- `approval-cancel-round-redemption.db.test.ts`:差异是第 2/3 处 union,**外加 5 处被 rebase 回退的 §/M 交叉引用**——它们原本是在被丢弃的 merge 提交里改的。已由 `05fbc5d46` 单独修回(`§3.17→§3.19`、`M-25→M-29`、`M-26→M-30`、`§3.20.4→§3.22.4`)。
+
+### R2. C-1 的收窄撞上了本分支(不是合并错误,是行为门)
+
+`tsc --noEmit` 立刻红:`TS2393 Duplicate function implementation` ×2 + `TS2304` ×3。两份
+`deriveCancelRoundRoundPolicy` 都活了下来,因为它们落在不同偏移上,三路合并**静默**地各留了一份。
+
+它们不是兄弟:C-1 的**执行** lock:143 的两个域,C-2 的**默默兜底**。处置写在 `b4c59c3b5`:删 C-2 的那份(改名 =
+另造更窄同类物),把 判据 IV 的最终评估接到 C-1 那份上,并按 C-1 自己 doc comment 的**逐字处方**——
+「treat a throw as `blocked` + the thrown code — never as a silent `expired`」——处理抛出。
+
+**由此产生一条新的生产分支,以及一个必须登记的实现者裁量:**
+
+> 决策时点推导失败时,`policy_snapshot_at_decision` 写 `roundPolicy: null` + `roundPolicyError: <code>`。
+> **FLAGGED for owner registration**,与 `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` 同待遇。理由:策略本身就是评估失败
+> 的那个东西时,没有策略可快照;退回 C-1 之前的兜底去**造**一个 suite/window 对,正是 Codex 第 2 条点名的
+> 「污染 §5 I4 / §2-G4 指定的审计依据」。轮次落 `blocked` + `block_reason =
+> business_blocked:CANCEL_ROUND_WINDOW_OUT_OF_RANGE`,引擎落 `rejected`,零完成事件、零宣告、零业务取消。
+
+catch **按错误码匹配**,不用裸 `instanceof ServiceError`:同一段下方的 `CANCEL_ROUND_INVARIANT_VIOLATION` 与
+`CANCEL_ROUND_WINDOW_ANCHOR_MISSING` 是刻意的「抛 ⇒ 回滚 ⇒ 轮次留 `pending` 可重试」,把任一条变成**不可逆**的
+`blocked` 是数据缺陷。⚠️ **这条收窄今天没有 oracle**:`try` 里目前只有推导这一次调用,别的错误无从在里面发生。
+按实说登记为「有守卫、无闸」,不写成已测。
+
+### R3. 夹具落进 C-1 的域里(13 红 → 0)
+
+rebase 后套件 **13 failed / 10 passed**,全部同一根因:14 处 OPEN 窗口夹具用 `windowDays = 365` 配 200 天的 §2-G2
+时间锚,而 `leave` 的上限是 90 ⇒ 创建期即 409 `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`。这是 **C-1 的门,不是合并错误**。
+
+处置:把隔离论证里**被固定的那个字段倒过来**——窗口两边都坐在生产上限 90,改由**时间锚**承担差异(30 天 ⇒ 开,
+200 天 ⇒ 关)。隔离性一字未变,两边现在都是管理员真能设出来的值。
+
+### R4. 本基点上的重跑(全部在处女私有库 `metasheet2_fix_c2`,结束 dropdb)
+
+```
+$ createdb metasheet2_fix_c2 && DATABASE_URL=…/metasheet2_fix_c2 npx tsx src/db/migrate.ts
+  … zzzz20260918110000_add_attendance_requests_approval_workflow_key was executed successfully
+  public 表数 421;to_regclass('public.approval_rounds') ⇒ approval_rounds
+$ npx tsc --noEmit -p tsconfig.json                       ⇒ 干净(零输出)
+```
+
+| 闸 | 结果 |
+|---|---|
+| `plugin-tests.yml:1666-1672` 的**整组** cancel-round 真库步骤(7 个文件) | **90 passed (7 files)** |
+| ├─ `approval-cancel-round-redemption.db.test.ts` 单跑 | **24 passed (24)**(原 23 + 本次新增 1) |
+| `attendance-w4c3b-request-operation-routes.db.test.ts` + `attendance-w4c2-p12-migration-schema-gates.db.test.ts` | **54 passed (2 files)** |
+| `attendance-plugin.test.ts` | **166 passed** |
+| unit:`approval-product-service` + `approval-admin-jump-service` + `attendance-w4c3b-external-transaction-entry` + `attendance-uuid-validation-routes` | **295 passed (4 files)** |
+| `attendance-w4c2-ci-wiring.test.mjs` | **pass 262 / fail 0** |
+| `attendance-w4c0-dml-inventory-collector.test.mjs` | **pass 60 / fail 0** |
+| `t2-source-freeze-ci-wiring.test.mjs` | **pass 6 / fail 0** |
+| `attendance-onprem-package-verify-migrations.test.mjs` | **pass 4 / fail 0** |
+| s6a 钉 `sealed-export-s6a-product-runtime.test.cjs` | **pass 1 / fail 0** |
+
+### R5. s6a 钉:不需要重算,而且是查出来的不是推出来的
+
+`sealed-export-package-provenance.cjs` 的 `PINNED_*` 两张表共 **32** 个 `relativePath`。把它们与
+`c4dc4b928..ba8a0133d`(C-1)和 `ba8a0133d..HEAD`(C-2)两个改动集求交:
+
+```
+$ comm -12 <pinned 32 条,已排序> <两个改动集的并集,已排序>
+(空)
+```
+
+⇒ 包括 `.github/workflows/plugin-tests.yml` 在内,**没有任何被钉文件被改动**,所以 s6a 不需要重算;钉本身实跑
+`pass 1 / fail 0`。同理四道考勤普查钉全部实跑绿(上表),不是「大概不受影响」。
+
+### R6. 冲突标记与 patch-id
+
+```
+$ git diff --name-only ba8a0133d..HEAD | xargs grep -cE '^(<<<<<<<|>>>>>>>|=======$)' | awk -F: '{s+=$2} END {print s}'
+0                      ← 本分支改动的全部 16 个文件
+$ git grep -cE '^(<<<<<<<|>>>>>>>|=======$)' -- . | awk -F: '{s+=$NF} END {print s}'
+39                     ← 全工作树;全部落在 6 个 2025 年的历史 merge 报告 MD 里
+$ comm -12 <(git grep -lE '…' -- . | sort) <(git diff --name-only ba8a0133d..HEAD | sort) | wc -l
+0                      ← 这 6 个文件没有一个在本分支的改动集里
+```
+
+与 `origin/main`(`bb77ca5f2`)无交集,按 patch-id 而非按 SHA:
+
+```
+$ git log --format=%H origin/main..HEAD | while read s; do git show "$s" | git patch-id --stable; done | …   ⇒ 118 个去重 patch-id
+$ git log --format=%H HEAD..origin/main | while read s; do git show "$s" | git patch-id --stable; done | …   ⇒  26 个去重 patch-id
+$ join <两者> | wc -l                                                                                        ⇒   0
+```
+
+窗口写明:`HEAD..origin/main` 的 26 条就是分叉点之后 main 上、本分支没有的**全部**提交;更早的 main 提交已经是
+HEAD 的祖先,不构成「重复落地」。main 会动,该数字绑定 `bb77ca5f2ce3c2825265ec8877861d367d017ead`。
+
+### R7. 这次 rebase **没有**改变的结论
+
+- 发送条件在新基点上**重新推导过**,不是沿用:`evaluateCancelRoundFinalInLock` 的 `blocked`/`expired` 与
+  `redeemCancelRoundInTxn` 的 `business_refused` 都在到达投递之前就 return,所以到达门的 kind 集仍是
+  `legacy | legacy_compat | executed | replay`;门仍在 `index.cjs:25028`,仍只放 `legacy|legacy_compat`。
+- 提交后发送的位置**实测**仍在 `COMMIT` 之后:`:12667` 是 `COMMIT`,`:12688` 是投递。
+- §7 的四条未覆盖项**逐条仍然成立**(P5 真 posture 变体仍是登记在案的延后项——C-1 新增的
+  `approval-schema-bootstrap.ts` helper 是 `ensureLocalUserRow`,**不是** posture 播种器,所以延后的理由没有被消解)。

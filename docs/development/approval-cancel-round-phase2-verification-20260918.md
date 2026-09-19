@@ -4575,5 +4575,77 @@ error: C2_EVT_FORCED_ROLLBACK
 - **纯 `legacy` posture 未被执行覆盖**;实测走到的仍是 `legacy_compat`。
 - `authoritative` / `shadow` / `eligible` 两条路径上仍全部 UNEXERCISED。
 - **真实 `replay` 经此路径不可达**(见设计 MD 第 2 节第 3 点),对应用例是 double 驱动的防御闸,不是可达场景的覆盖。
-- 只做了 Codex 第 3 条。**第 1 条与第 2 条未验、未修。**
-- 本分支**未 rebase**,以上全部结论绑定 `4a08a576e` 这个基点;rebase 后需重跑。
+- ~~只做了 Codex 第 3 条。**第 1 条与第 2 条未验、未修。**~~ ⛔ **已求值,2026-09-19**:第 1/2 条由 **C-1**
+  在 `ba8a0133d` 上修复并自带证据(`approval-cancel-round-phase1-verification-20260918.md`);本分支 rebase
+  后把它们当**基点**继承,**没有独立重验它们**——「未修」失效,「本分支未验」仍然成立,不得读成本分支背书了
+  C-1 的那两条。
+- ~~本分支**未 rebase**,以上全部结论绑定 `4a08a576e` 这个基点;rebase 后需重跑。~~ ⛔ **已求值,2026-09-19**:
+  分支已 rebase 到 C-1 `ba8a0133d`,上述全部闸与全部 mutation 已在新基点、新处女库上重跑;**这一条的状态断言
+  作废,它指向的要求已履行**(见下面的「Rebase 到 C-1 —— 重跑与重锚」节)。§4 的行号锚点随之全部失效,该节
+  的 mutation 台账在下节以**符号锚点**重列。
+
+
+---
+
+## Rebase 到 C-1 `ba8a0133d` —— 重跑与重锚(2026-09-19)
+
+- 基点:`feat/approval-cancel-round-phase1` @ `ba8a0133dd1eb3ff6700cccc2f185636e799c8b9`(旧基点 `c4dc4b928`)
+- 新头:`40b07e3646c48c3978378f69f01397b43d801d79`
+- 工作树:`.../scratchpad/wt-cancel-round-p2`
+- 真库:`metasheet2_fix_c2`(**处女库**:`createdb` + 全量迁移 421 表,`to_regclass('public.approval_rounds')` 命中;审毕 `dropdb`)
+- 纪律:每个 mutation `cp` 备份 → 改 → **单独跑** → `cp` 还原 → `cmp`;还原后 `git status --porcelain` 只余预期文件
+
+### 1. 为什么这一节存在:行号锚点全部失效
+
+上面 §「Codex 审阅第 3 条修复 —— 验证」的 mutation 台账用的是 `ApprovalProductService.ts:12440`、`:12242`、
+`index.cjs:25027`。rebase 之后这三个位置**都不在那里了**。按旧行号打 mutation 会打到别的语句上,跑出来的红绿是
+**假台账**——这正是本分支自己的 `95e929961` 把裸行号换成符号锚点的原因。所以这里按**符号**重新定位、重新实测。
+
+### 2. Mutation 台账(重锚 + 重跑,全部在新基点)
+
+| # | Mutation | **符号锚点**(行号仅供本次参考) | 预期 | **实测** |
+|---|---|---|---|---|
+| **M-C3-1** | 删掉提交后投递调用 | `dispatchAction` 里的 `this.deliverCancelRoundCancelledEventPostCommit(dispatchCancelledEventDelivery)`(`:12688`) | 「恰一次」与账侧 twin 红 | **2 red / 21 green**。twin:`expected { sendsAfterA: +0, sendsAfterB: 1 } to deeply equal { sendsAfterA: 1, sendsAfterB: 1 }` —— 与 `4a08a576e` 上探针读到的原始缺陷签名**逐字相同**;恰一次:`expected +0 to be 1` |
+| **M-C3-2** | 把投递**搬进**事务(MOVE,不是复制) | 删 `:12688` 的调用,在 `redeemCancelRoundInTxn` 返回 `applied` 后紧接 `dispatchCancelledEventDelivery = { … }` 赋值处插入同一调用 | 回滚用例红 | **1 red / 22 green**,且**只有**回滚用例红:`expected [ { …(4) } ] to deeply equal []` |
+| **M-C3-3** | 去掉 kind 门(无条件发) | `plugins/plugin-attendance/index.cjs` `emitRequestCancelledEventForOutcomeV1` 的 `if (kind !== 'legacy' && kind !== 'legacy_compat') return false`(`:25028`) | replay 与 executed 用例红 | **2 red / 21 green**:replay 幂等用例 + §5 I3 C-2 半边(`executed`)用例 |
+| **M-C3-4** | 未绑定投递时 fail **CLOSED**(抛错) | `deliverCancelRoundCancelledEventPostCommit` 的 `if (!deliver)` 分支(`:13399`) | fail-OPEN 用例红 | **1 red / 22 green**,且只有该用例红:`expected 500 to be 200`,体 `APPROVAL_ACTION_DISPATCH_FAILED` |
+| **M-C3-5a**(新) | catch 里退回 C-1 之前的静默兜底(`policy = { suite: 'leave', windowDays: 90 }`,不 block 不 rethrow) | `evaluateCancelRoundFinalInLock` 的 `catch` 块 | 新增的 §2-G4 用例红,且红在「B 被兑现了」上 | **1 red / 23 green**:`expected 2 to be 1` —— `portStub.calls.length` 变 2,即 B 在域外策略下**照常兑现** |
+| **M-C3-5b**(新) | 把该分支的 `decision: 'blocked'` 改成 `'expired'`(C-1 处方明令禁止的那一条) | 同上 catch 块内的 `evaluation:` 字面量 | 同一用例红,且红在 blocked/expired 的区分上 | **1 red / 23 green**:`expected 'expired' to be 'blocked'` |
+
+**M-C3-2 的重锚是一次真实的纠错,记在这里免得下一个人重走。** 第一次按「`COMMIT` 前一行」插入 ⇒ **23/23 全绿**。
+原因是回滚用例的强制失败发生在 `insertApprovalRecord` 里,**早于**那个 `COMMIT`,所以插在 `COMMIT` 前的调用根本没被
+执行到——那是一个**无效 mutation**,而不是判别力不足的用例。改到旧台账真正用的位置(兑现返回 `applied` 的那一刻)
+之后才得到 1 red。**一个无效 mutation 与一个无用测试在输出上完全同形**,这次是靠对照旧台账的描述而不是靠看红绿分辨的。
+
+### 3. 新增闸的正控(§2-G4 域外策略 ⇒ `blocked`)
+
+「B 什么都没发生」这种断言天然 fail-open。该用例的正控是**同一次运行里的孪生 A**:同样的种子、同样的时间锚、
+同样合法的 90 天窗口、同样的 attendance 目标、同一个 port double、同一个动作,**只差一个字段**——B 的 `windowDays`
+在轮次**创建之后**被推出 `leave` 的上限。
+
+| 断言 | 它的正控 |
+|---|---|
+| B 零业务取消(`portStub.calls.length === 1`) | 那 1 次是 **A** 打的,并断言了 `routeInput.requestId === attachedA.requestId` —— 所以 B 的零是「被拦下」而不是「port 没接上」 |
+| B 零宣告 | A 在同一次运行里宣告了 **1** 次(`forRequest(attachedA.requestId).length === 1`),且 `expectCancelledEventDeliveryBound()` 先断言投递已绑定 |
+| B 零完成事件 | A 的 `captureA.seen === ['approval.approved']` |
+| B 轮次 `blocked` 而非创建期被拒 | 先把 B 的 `policy_snapshot_at_create.roundPolicy` 钉成值 `{ suite: 'leave', windowDays: 90 }` —— 证明它**是在合法策略下被创建**的 |
+
+### 4. 闸清单(全部在 `metasheet2_fix_c2` 同库复现)
+
+与设计 MD §R4 同表,不重复;要点:cancel-round 真库整组 **90 passed (7 files)**、redemption 单跑 **24 passed**、
+attendance 两个真库兄弟 **54 passed**、`attendance-plugin.test.ts` **166 passed**、unit 四件 **295 passed**、
+四道普查钉 262 / 60 / 6 / 4 全 `fail 0`、s6a 钉 `pass 1 / fail 0`、`tsc --noEmit` 零输出。
+
+### 5. 本节未覆盖(不得被读成已闭合)
+
+- **C-1 的第 1/2 条本分支未独立重验。** 只跑了 C-1 自带的套件(creation / seat-guards / outlet-guards /
+  node-timeout,随整组 90 passed 一起绿),没有对它们做独立的 refute-first 复核。
+- **`evaluateCancelRoundFinalInLock` 按错误码收窄 catch 这一条,今天没有 oracle。** `try` 内目前只有推导一次调用,
+  其它 `CANCEL_ROUND_*` 错误无从在里面发生 ⇒ 「换成裸 `instanceof ServiceError` 会红」**无法**被构造。登记为
+  「有守卫、无闸」。
+- **`CANCEL_ROUND_SUITE_UNKNOWN` 这一半未被执行覆盖。** 新增用例只驱动了 `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`;
+  同一个 catch 的另一个码是**源码阅读**结论。
+- **P5 真 posture 变体仍未做**(延后项理由未被消解:C-1 新增的 helper 是 `ensureLocalUserRow`,不是 posture 播种器)。
+- **纯 `legacy` posture 仍未被执行覆盖**;`authoritative` / `shadow` / `eligible` 两条路径上仍全部 UNEXERCISED。
+- **`policy_snapshot_at_decision` 在 blocked-by-配置 分支上写 `roundPolicy: null` + `roundPolicyError`** 是**实现者裁量**,
+  已 FLAGGED 待 owner 登记;它有闸(M-C3-5a/5b),但它不是锁文点名的形状。
