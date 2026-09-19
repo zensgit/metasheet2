@@ -13986,9 +13986,9 @@ export class ApprovalProductService {
    *   - `null` argument  ⇒ this dispatch performed no redemption. Silent, not warned: the ordinary
    *     case for every non-cancel-round approve that flows through this same post-commit region.
    *   - delivery unbound ⇒ warned. Fails OPEN on purpose (see the registry's own doc comment).
-   *   - delivery threw   ⇒ warned. The outer `catch` of `dispatchAction` must NEVER see this: it
-   *     runs `rollbackQuietly` on an already-COMMITTED transaction and rethrows, which would turn a
-   *     successful, durable business cancellation into a 500 over a listener's bug.
+   *   - delivery threw   ⇒ warned. The outer `catch` of `dispatchAction` must NEVER see this: it runs
+   *     `rollbackQuietly` on an already-COMMITTED transaction and rethrows, which would turn a successful,
+   *     durable business cancellation into a 500 over a failure in THIS delivery hop, not a listener's bug.
    */
   private deliverCancelRoundCancelledEventPostCommit(
     delivery:
