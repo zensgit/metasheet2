@@ -764,6 +764,10 @@ Rebasing (58/58)   Successfully rebased and updated refs/heads/feat/approval-can
 **由此产生一条新的生产分支,以及一个必须登记的实现者裁量:**
 
 > 决策时点推导失败时,`policy_snapshot_at_decision` 写 `roundPolicy: null` + `roundPolicyError: <code>`。
+> **这破坏了 §4 的「与创建快照同形」**(多一个键、`roundPolicy` 为 null),判据 IV `expired` 用例里那条
+> `Object.keys(decision).sort() === Object.keys(create).sort()` 因走另一条路而照常绿 —— 背离是新用例自己
+> 断言出来的,不是被既有闸抓到的。闭世界读者普查(验证 MD §6.2,26 处命中)显示**生产读取方 0 处**,所以
+> 今天不是活缺陷,是声明式背离 + 潜伏缺口。
 > **FLAGGED for owner registration**,与 `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` 同待遇。理由:策略本身就是评估失败
 > 的那个东西时,没有策略可快照;退回 C-1 之前的兜底去**造**一个 suite/window 对,正是 Codex 第 2 条点名的
 > 「污染 §5 I4 / §2-G4 指定的审计依据」。轮次落 `blocked` + `block_reason =
