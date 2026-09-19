@@ -25,6 +25,15 @@ limitations must not be read as the latest implementation status or erased.
 Commands and mutation logs remain in their respective sections. A newer CI
 result must bind its own exact head; this table is not a substitute for that gate.
 
+Terminal update: `2afb1cfaca48734aef82fb0cde8ec3bfa659ee9e` now has
+37 SUCCESS, one intentional Strict E2E SKIPPED, zero failure and zero pending.
+Both Node18 and Node20, multitable-web-guard and web-tests succeeded. This
+supersedes only that checkpoint's pending observation above. The subsequent
+report-only commits require their own published-head checks and do not alter the
+tested production/test tree. PR remains Draft/HOLD; no merge or enablement.
+The later bounded Luna diagnostic review was closed while running without a
+terminal verdict; it is not independent approval.
+
 ## Latest Full Local Regression
 
 Latest full local regression, 2026-09-19: clean
