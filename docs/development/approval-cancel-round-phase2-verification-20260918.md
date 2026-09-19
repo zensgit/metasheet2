@@ -5183,3 +5183,102 @@ mutation 台账重锚)落地时,**把本步骤当时尚未提交的工作树草�
 因此:**本文档下一次被引用时,请以内容而非 git 提交边界作为责任单位**——`b1406baf` 提交里混有两位不同执行者的
 文字,git blame 在这一个提交内部不可信。三个 SHA(`9bc77c06f`、`05e2c26cc`、`b1406baf`)对应哪些内容改动,以
 §2 表格与本节的文字描述为准,而不是以 `git show <sha>` 单独某一个提交的说明为准。
+
+## 三次复核 —— 独立重跑,不沿用自述(2026-09-19,合流工程师 Sonnet 另一实例)
+
+本节由本次任务(同一份「C-2 迁到新 C-1」指令的另一次调度)撰写。**入场时工作树已经是本文件上面「二次
+Rebase」一节记录的终态**:本地 `feat/approval-cancel-round-phase2` HEAD `993b462fbd8dd3bfc59adee3c029208c4b17f0c9`
+与 `origin/feat/approval-cancel-round-phase2` 逐字节相同,`git status --porcelain` 为空。上面两节的全部结论
+（rebase 力学、并发提交处置、gate 结果、patch-id 交集)在本节动手前**未被假定为真,而是逐条独立复算**,复算
+口径与结果如下:
+
+**结构性复核(独立算,不读文档抄数):**
+
+| 断言 | 独立复算命令/方法 | 结果 |
+|---|---|---|
+| 新 C-1 `b8b71539a` 是 HEAD 的祖先 | `git merge-base --is-ancestor b8b71539a… HEAD` | YES |
+| 旧 C-1 `ba8a0133d` **不**是 HEAD 的祖先(字面 `rebase --onto … ba8a0133d …` 命令今天会重放 250 个提交,其中约 180 个是 main 自己在 `ba8a0133d..新C-1` 之间新增的、不该进本 lane) | `git log --oneline ba8a0133d..HEAD \| wc -l` = 250;`git merge-base --is-ancestor ba8a0133d HEAD` → NO | 确认字面命令在今天执行会把 main 的提交注入本 lane,**未执行** |
+| 本 lane 提交与 `origin/main` 交集 = 0 | `git cherry origin/main HEAD`(130 条,全部 `+`,零 `-`) | 0 |
+| 本 lane 独有提交(`origin/feat/approval-cancel-round-phase1..HEAD`,68 个)与 phase1 独有提交(`origin/main..origin/feat/approval-cancel-round-phase1`,62 个)patch-id 交集 = 0 | 对两个集合逐提交 `git show \| git patch-id --stable`,`sort` + `comm -12` | 0 |
+| 冲突标记仅存在于历史文档的引用文本里,lane 自己改动的 16 个文件干净 | 对 `git diff --name-only origin/feat/approval-cancel-round-phase1..HEAD` 的 16 个文件逐个 `grep -nE '^(<<<<<<<\|=======\|>>>>>>>)'`;另对全树 `<<<<<<<`/`>>>>>>>` 分别 `grep -rl` | lane 内 16 文件 0 命中;全树命中的 9 个文件里,本 lane 自己的验证/设计 MD 命中的是**引用 grep 命令输出的 Markdown 代码块**(逐一读上下文确认),非真实冲突残留;另 6 个是 2025 年历史 merge 报告,均不在 lane 的 16 个改动文件内 |
+| 三个并发提交(`9bc77c06f`/`05e2c26cc`/`b1406baf`)未夹带生产代码 | 对三个 SHA 分别 `git show --stat` | 三者改动集合仅覆盖:验证 MD、设计 MD、`approval-cancel-round-redemption.db.test.ts`;零 `src/`、零 `plugins/**/*.cjs`,与上一节 §2/§3 的自述一致 |
+
+**全量门禁复跑(处女库 `metasheet2_c2_rb`,`createdb` → 全量迁移 → 跑 → `dropdb`,与任务指定库名一致):**
+
+```
+$ dropdb metasheet2_c2_rb   # does not exist(确认处女)
+$ createdb metasheet2_c2_rb
+$ DATABASE_URL=…metasheet2_c2_rb npx tsx src/db/migrate.ts     # 全部迁移执行成功,止于 zzzz20260919130000
+$ npx tsc --noEmit -p tsconfig.json ; echo $?                  # 0
+$ npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts tests/unit/approval-product-service.test.ts \
+    tests/unit/approval-admin-jump-service.test.ts tests/unit/attendance-w4c3b-external-transaction-entry.test.ts
+  Test Files  4 passed (4)   Tests  214 passed (214)
+$ DATABASE_URL=…metasheet2_c2_rb npx vitest --config vitest.integration.config.ts run <七个 approval-cancel-round-*.db.test.ts>
+  Test Files  7 passed (7)   Tests  90 passed | 7 skipped (97)     # 与 CI 实跑环境一致(只设 DATABASE_URL)
+$ 同上 + EXPECT_DB=1
+  Test Files  7 passed (7)   Tests  97 passed (97)                 # 0 skip,哨兵确认活着
+```
+
+**C-1 两套(`attendance-w4c3b-request-operation-routes.db.test.ts` + `attendance-w4c2-p12-migration-schema-gates.db.test.ts`)—— 一次角色踩坑,记录下来供下次复核者避坑:**
+
+首次用 `DATABASE_URL=postgresql://metasheet:metasheet123@…/metasheet2_c2_rb` 跑,**1 个用例失败**:
+`attendance-w4c2-p12-migration-schema-gates.db.test.ts` 里 `SET session_replication_role = replica` 抛
+`ERROR 42501 insufficient_privilege`。根因:该 GUC 在 PostgreSQL 里**仅 superuser 可设置**,而 `metasheet`
+角色的属性只有 `Create DB`(`\du metasheet` 核过),不是 superuser。核对 `.github/workflows/plugin-tests.yml`
+确认 CI 对需要真库的必需步骤统一用 `DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test`——
+**`postgres` 角色**,不是 `metasheet`。改用 `DATABASE_URL=postgresql://postgres@localhost:5432/metasheet2_c2_rb`
+(同一处女库,仅换连接角色为本机既有的 superuser)重跑:
+
+```
+Test Files  2 passed (2)   Tests  54 passed (54)
+```
+
+与上一节 gate 表登记的 `54 passed (2 files)` 一致——**这不是回归,是本次复核对连接角色的独立确认**;上一节的
+表格没有写出它当时用的是哪个角色连接,本次把这一步显式钉出来,供下一个跑这两个文件的人不要重犯 `metasheet`
+角色踩坑。
+
+**守卫(6 个脚本,全部独立重跑,非读文档抄结论):**
+
+```
+$ node scripts/ops/ci-realdb-step-contract.mjs ; echo $?                                0
+$ node scripts/ops/approval-browser-ci-wiring.test.mjs        # pass 3 / fail 0          0
+$ node scripts/ops/approval-data-closure-ci-wiring.test.mjs   # pass 12 / fail 0         0
+$ node scripts/ops/integration-guard-required-wiring-contract.test.mjs  # pass 62/fail 0 0
+$ node scripts/ops/stock-preparation-s6a-operator-preflight.test.mjs    # pass 23/fail 0 0
+$ node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs   # OK
+```
+
+**s6a 钉与四点接线,机械核(非推断):**
+
+```
+$ shasum -a 256 .github/workflows/plugin-tests.yml
+ee9e4f49b6b2aeffc1a790492bb0699c354e626580154648014fc5475e9d3874
+$ grep pluginTestsWorkflow plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json
+"pluginTestsWorkflow": "ee9e4f49b6b2aeffc1a790492bb0699c354e626580154648014fc5475e9d3874"   # 相等
+$ git diff --stat origin/feat/approval-cancel-round-phase1 HEAD -- .github/workflows/plugin-tests.yml   # 空,逐字节相同
+```
+
+四个 7-文件人口(磁盘文件数 / `vitest.config.ts` / `CANCEL_ROUND_REALDB_FILES` 常量 / `plugin-tests.yml` run-list)
+逐一 `grep -c`/`ls | wc -l`,四者皆 = 7,彼此一致。**s6a 无需重钉,本轮为 no-op——这是跑出来的,不是读 diff 推断的。**
+
+**收尾:**
+
+```
+$ dropdb metasheet2_c2_rb ; echo $?           0
+$ git status --porcelain                       (空)
+$ git fetch origin feat/approval-cancel-round-phase2
+$ git rev-parse HEAD                           993b462fbd8dd3bfc59adee3c029208c4b17f0c9
+$ git rev-parse origin/feat/approval-cancel-round-phase2   993b462fbd8dd3bfc59adee3c029208c4b17f0c9   # 逐字节相同
+```
+
+**push:** 本节动手前后 local 与 `origin/feat/approval-cancel-round-phase2` 全程一致——本节新增的这段文字是唯一
+未推送的改动,是一次线性快进,普通 `git push` 即可,**未消耗任务允许的那一次 `--force-with-lease`**(留给真正
+需要它的场合:若本节记录之后 origin 被第三方改写,下一步骤需要 `--force-with-lease` 而非 `--force`)。
+
+**本节未覆盖(继承上一节同名登记,未新增复核):**
+
+- 未逐条复核三个并发提交自称的「35 处符号锚点机械核验」与「§7.6 状态写入方普查」本身的完整性——只验证了它们
+  touch 到的文件在本轮门禁下测试绿,这一登记与上一节 §2/§6 相同,未升级为已复核。
+- 未重新评估 `ba8a0133d → b8b71539a` 这次迁移目标本身是否正确——这是任务给定的输入,不在本步骤的裁决范围内。
+- C-1 的 creation/seat-guards/outlet-guards/node-timeout 四个文件仍只随整组跑绿,未做独立 refute-first 复核
+  (与上一节同一登记)。
