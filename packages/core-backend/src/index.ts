@@ -3369,6 +3369,12 @@ export class MetaSheetServer {
     })
   }
 
+  /** Internal operator composition only; no route, timer or caller-supplied storage path. */
+  async retireExpiredRecoveryAttachmentStage(objectId: string): Promise<void> {
+    if (this.stopPromise) throw new Error('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    await this.recoveryArchiveApplication.retireExpiredAttachmentStage(objectId)
+  }
+
   private async waitForShutdownBarrier(
     tasks: Array<Promise<unknown>>,
     failureCode: string,

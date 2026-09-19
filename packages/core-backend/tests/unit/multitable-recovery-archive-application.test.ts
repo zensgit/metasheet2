@@ -4,6 +4,11 @@ import { createLocalCustodyBackup, createLocalCustodySession, resolveLocalArchiv
 
 const workerMocks = vi.hoisted(() => ({
   createRecoveryArchiveRestoreWorker: vi.fn(),
+  retireExpiredArchiveAttachmentStage: vi.fn(),
+}))
+
+vi.mock('../../src/multitable/recovery-archive-attachment-stage-ledger', () => ({
+  retireExpiredArchiveAttachmentStage: workerMocks.retireExpiredArchiveAttachmentStage,
 }))
 
 vi.mock('../../src/multitable/recovery-archive-restore-worker', async (importOriginal) => ({
@@ -48,6 +53,7 @@ const PROVIDER_METHODS = [
 ] as const
 
 beforeEach(() => {
+  workerMocks.retireExpiredArchiveAttachmentStage.mockReset().mockResolvedValue(undefined)
   workerMocks.createRecoveryArchiveRestoreWorker.mockReset()
   workerMocks.createRecoveryArchiveRestoreWorker.mockImplementation(() => idleWorker())
 })
@@ -58,6 +64,54 @@ afterEach(() => {
 })
 
 describe('recovery archive application composition', () => {
+  it('refuses internal cleanup when disabled or without explicit storage, before any cleanup access', async () => {
+    const factory = vi.fn(() => fakeComposition(fakeProviders()))
+    const resolve = vi.fn(() => fakeDatabaseRuntime().runtime)
+    const disabled = createRecoveryArchiveApplication(factory, resolve, {})
+    await expect(disabled.retireExpiredAttachmentStage(randomUUID())).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    expect(factory).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+    const enabled = createRecoveryArchiveApplication(factory, resolve, ENABLED_ENV)
+    await expect(enabled.retireExpiredAttachmentStage(randomUUID())).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    expect(workerMocks.retireExpiredArchiveAttachmentStage).not.toHaveBeenCalled()
+    await enabled.stopWorker()
+  })
+
+  it('binds cleanup storage once and drains accepted cleanup before releasing custody', async () => {
+    let finish!: () => void
+    const storage = { retireRecoveryAttachment: vi.fn(() => new Promise<void>(resolve => { finish = resolve })) }
+    const original = storage.retireRecoveryAttachment
+    workerMocks.retireExpiredArchiveAttachmentStage.mockImplementation(input => input.storage.retireRecoveryAttachment('owned-key', 'owned-proof'))
+    const application = createRecoveryArchiveApplication(() => ({ ...fakeComposition(fakeProviders()), attachmentCleanupStorage: storage }),
+      () => fakeDatabaseRuntime().runtime, ENABLED_ENV)
+    storage.retireRecoveryAttachment = vi.fn()
+    const objectId = randomUUID()
+    const operation = application.retireExpiredAttachmentStage(objectId)
+    expect(workerMocks.retireExpiredArchiveAttachmentStage).toHaveBeenCalledWith(expect.objectContaining({ objectId }))
+    expect(original).toHaveBeenCalledTimes(1)
+    expect(storage.retireRecoveryAttachment).not.toHaveBeenCalled()
+    let stopped = false
+    const stop = application.stopWorker().then(() => { stopped = true })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(stopped).toBe(false)
+    expect(() => application.releaseCustody()).toThrow('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED')
+    await expect(application.retireExpiredAttachmentStage(randomUUID())).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    finish()
+    await operation
+    await stop
+    expect(stopped).toBe(true)
+    expect(() => application.releaseCustody()).not.toThrow()
+  })
+
+  it('sanitizes failed cleanup without preventing shutdown after it settles', async () => {
+    workerMocks.retireExpiredArchiveAttachmentStage.mockRejectedValue(new Error('private provider location'))
+    const application = createRecoveryArchiveApplication(() => ({ ...fakeComposition(fakeProviders()),
+      attachmentCleanupStorage: { retireRecoveryAttachment: vi.fn() } }), () => fakeDatabaseRuntime().runtime, ENABLED_ENV)
+    await expect(application.retireExpiredAttachmentStage(randomUUID())).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    await application.stopWorker()
+    expect(() => application.releaseCustody()).not.toThrow()
+  })
+
   it('snapshots the complete attachment port without calling storage during composition', async () => {
     const attachmentStorage = {
       uploadByKey: vi.fn(async function (this: unknown) { expect(this).toBe(attachmentStorage) }),

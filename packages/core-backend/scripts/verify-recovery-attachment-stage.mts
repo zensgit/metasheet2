@@ -11,6 +11,7 @@ const require = createRequire(import.meta.url)
 const migration = require('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages.ts') as typeof import('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages')
 const { createArchiveAttachmentStageLedger, retireExpiredArchiveAttachmentStage } = require('../src/multitable/recovery-archive-attachment-stage-ledger.ts') as typeof import('../src/multitable/recovery-archive-attachment-stage-ledger')
 const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
+const { createRecoveryArchiveApplication } = require('../src/multitable/recovery-archive-application.ts') as typeof import('../src/multitable/recovery-archive-application')
 const { stampClaimedAttachmentPurge } = require('../src/multitable/attachment-purge-claim.ts') as typeof import('../src/multitable/attachment-purge-claim')
 const { applyVerifiedArchiveAttachmentMetadata, hashArchiveAttachmentMetadata } = require('../src/multitable/recovery-archive-attachment-apply.ts') as typeof import('../src/multitable/recovery-archive-attachment-apply')
 assert.equal(process.env.NODE_ENV, 'test')
@@ -202,14 +203,26 @@ try {
   const delayed = await open(join(storageRoot, key(late.objectId)), 'wx')
   let storageCalls = 0
   let throwAfterRetire = true
-  const retire = (objectId: string) => retireExpiredArchiveAttachmentStage({ objectId, transaction,
-    transactionDepth: { currentTransactionDepth: () => 0 }, storage: { retireRecoveryAttachment: async (path, owner) => {
+  const unrelated = (): never => { throw new Error('UNEXPECTED_CLEANUP_DEPENDENCY') }
+  const cleanupApplication = createRecoveryArchiveApplication(() => ({
+    keyCustody: { produceGenerationDek: unrelated, unwrapGenerationDek: unrelated, deriveDekFingerprint: unrelated,
+      macManifestRoot: unrelated, verifyManifestRootMac: unrelated },
+    objectStore: { put: unrelated, get: unrelated, head: unrelated, deleteExpired: unrelated, pin: unrelated },
+    auditedReplayHorizonMs: 0, asyncResumeHorizonMs: 1, workerIntervalMs: 1,
+    worker: { recheckAuthority: unrelated, processDerivedWork: unrelated, leaseMs: 1, replayHorizonMs: 0,
+      apply: { preliminaryFullRead: unrelated, stabilizeAuthorization: unrelated,
+        finalLockedFullRead: unrelated, evaluatePlanAuthorization: unrelated } },
+    attachmentCleanupStorage: { retireRecoveryAttachment: async (path, owner) => {
+      const objectId = path.split('/')[0]!
       storageCalls++
       assert.ok(['abandoned', 'cleaned'].includes((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
         WHERE object_id=${objectId}::uuid`.execute(db!)).rows[0]?.state ?? ''))
       await storage.retireRecoveryAttachment(path, owner)
       if (throwAfterRetire) throw new Error('SYNTHETIC_POST_RETIRE_FAILURE')
-    } } })
+    } },
+  }), () => ({ transaction, query: purgeQuery, transactionDepthProbe: { currentTransactionDepth: () => 0 } }),
+  { MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' })
+  const retire = (objectId: string) => cleanupApplication.retireExpiredAttachmentStage(objectId)
   try {
     await assert.rejects(retire(uploaded.objectId))
     assert.equal(storageCalls, 0)
@@ -266,7 +279,9 @@ try {
         abandoned_at=NULL,cleaned_at=NULL,verified_at=clock_timestamp() WHERE object_id=${row.objectId}::uuid`.execute(db))
     }
     console.log('PASS: expired-only abandonment commits before storage; live references refuse; post-retirement failure retries; unstarted and late writer cleanup cannot reopen apply')
-  } finally { await delayed.close() }
+  } finally { await cleanupApplication.stopWorker(); cleanupApplication.releaseCustody(); await delayed.close() }
+  await assert.rejects(retire(uploaded.objectId), { message: 'RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED' })
+  console.log('PASS: explicitly composed cleanup uses real ledger/local storage and refuses after application stop; no worker or unrelated provider called')
   // Real row-lock arbitration: an apply admitted before expiry commits while cleanup waits.
   await sql`ALTER TABLE meta_records ADD COLUMN data jsonb NOT NULL DEFAULT '{}'::jsonb`.execute(db)
   await sql`UPDATE meta_records SET data='{"f":["att-original","att-race"]}'::jsonb WHERE id='r'`.execute(db)

@@ -36,13 +36,13 @@ describe('MetaSheetServer recovery archive wiring', () => {
     vi.restoreAllMocks()
   })
 
-  it('keeps both router calls zero-argument and never invokes the factory with flags off', () => {
+  it('keeps both router calls zero-argument and never invokes the factory with flags off', async () => {
     const factory = vi.fn(() => {
       throw new Error('factory must remain unreachable')
     })
     const getMainPool = vi.spyOn(poolManager, 'get')
 
-    new MetaSheetServer({
+    const server = new MetaSheetServer({
       port: 0,
       host: '127.0.0.1',
       pluginDirs: [],
@@ -53,6 +53,10 @@ describe('MetaSheetServer recovery archive wiring', () => {
     expect(getMainPool).not.toHaveBeenCalled()
     expect(routeMocks.univerMetaRouter).toHaveBeenCalledTimes(2)
     expect(routeMocks.univerMetaRouter.mock.calls).toEqual([[], []])
+    await expect(server.retireExpiredRecoveryAttachmentStage('00000000-0000-0000-0000-000000000000'))
+      .rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    expect(factory).not.toHaveBeenCalled()
+    expect(getMainPool).not.toHaveBeenCalled()
   })
 
   it('passes the exact same options and runtime identity to both mounts', () => {

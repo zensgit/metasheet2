@@ -11,6 +11,7 @@ import type {
   RecoveryArchiveWorkerLifecycle,
 } from './recovery-archive-observability'
 import type { RecoveryArchivePreviewRuntime } from './recovery-archive-preview'
+import { retireExpiredArchiveAttachmentStage } from './recovery-archive-attachment-stage-ledger'
 import {
   bootRecoveryArchiveRestoreWorker,
   createRecoveryArchiveRestoreWorker,
@@ -43,6 +44,7 @@ export interface RecoveryArchiveApplicationComposition {
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
   readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
   readonly attachmentStorage?: RecoveryArchivePreviewRuntime['attachmentStorage']
+  readonly attachmentCleanupStorage?: { retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> }
 }
 
 export type RecoveryArchiveApplicationCompositionFactory = () => RecoveryArchiveApplicationComposition
@@ -52,6 +54,7 @@ export interface RecoveryArchiveApplication {
   startWorker(): void
   stopWorker(): Promise<void>
   releaseCustody(): void
+  retireExpiredAttachmentStage(objectId: string): Promise<void>
 }
 
 const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
@@ -61,6 +64,7 @@ const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
 const WORKER_STOPPED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
 const WORKER_STOP_TIMEOUT_MS = 10_000
+const ATTACHMENT_CLEANUP_REFUSED = 'RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED'
 
 export function createRecoveryArchiveApplication(
   factory: RecoveryArchiveApplicationCompositionFactory | undefined,
@@ -78,6 +82,7 @@ export function createRecoveryArchiveApplication(
       startWorker() {},
       async stopWorker() {},
       releaseCustody() {},
+      async retireExpiredAttachmentStage() { throw new Error(ATTACHMENT_CLEANUP_REFUSED) },
     })
   }
   if (!factory) throw new Error(COMPOSITION_INVALID)
@@ -127,10 +132,22 @@ export function createRecoveryArchiveApplication(
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
   let workerDrained = false
+  const activeCleanups = new Set<Promise<void>>()
   const releaseCustody = resolveLocalArchiveCustodyRelease(composition.keyCustody)
 
   return Object.freeze({
     routerOptions,
+    async retireExpiredAttachmentStage(objectId: string) {
+      if (workerState === 'stopped' || workerState === 'failed' || !composition.attachmentCleanupStorage) {
+        throw new Error(ATTACHMENT_CLEANUP_REFUSED)
+      }
+      const pending = retireExpiredArchiveAttachmentStage({ objectId,
+        transaction: database.transaction, transactionDepth: database.transactionDepthProbe,
+        storage: composition.attachmentCleanupStorage })
+      activeCleanups.add(pending)
+      try { await pending } catch { throw new Error(ATTACHMENT_CLEANUP_REFUSED) }
+      finally { activeCleanups.delete(pending) }
+    },
     startWorker() {
       if (workerState === 'stopped') throw new Error(WORKER_STOPPED)
       if (workerState === 'failed') throw new Error(WORKER_BOOT_FAILED)
@@ -153,12 +170,15 @@ export function createRecoveryArchiveApplication(
     async stopWorker() {
       workerState = 'stopped'
       if (workerStop) return workerStop
-      if (!workerLoop) {
+      if (!workerLoop && activeCleanups.size === 0) {
         workerDrained = true
         return
       }
       const loop = workerLoop
-      workerStop = stopRecoveryArchiveWorkerLoop(loop).then(
+      workerStop = stopRecoveryArchiveWorkerLoop({ async stop() {
+        await loop?.stop()
+        await Promise.allSettled([...activeCleanups])
+      } }).then(
         () => {
           workerDrained = true
           recordLifecycleSafely(observability, 'drained')
@@ -192,7 +212,7 @@ function recordLifecycleSafely(
   }
 }
 
-function stopRecoveryArchiveWorkerLoop(loop: RecoveryArchiveRestoreWorkerLoop): Promise<void> {
+function stopRecoveryArchiveWorkerLoop(loop: Pick<RecoveryArchiveRestoreWorkerLoop, 'stop'>): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(WORKER_STOP_FAILED))
@@ -223,6 +243,7 @@ function snapshotComposition(
     worker: snapshotWorkerDependencies(source.worker),
     ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
     ...(source.attachmentStorage === undefined ? {} : { attachmentStorage: snapshotAttachmentStorage(source.attachmentStorage) }),
+    ...(source.attachmentCleanupStorage === undefined ? {} : { attachmentCleanupStorage: snapshotAttachmentCleanupStorage(source.attachmentCleanupStorage) }),
   }
   if (!composition.keyCustody || typeof composition.keyCustody !== 'object') throw new Error(COMPOSITION_INVALID)
   // Resolve only authentic local capabilities; preserve the original input and its revocation checks.
@@ -251,6 +272,11 @@ function snapshotComposition(
     throw new Error(COMPOSITION_INVALID)
   }
   return Object.freeze(composition)
+}
+
+function snapshotAttachmentCleanupStorage(source: NonNullable<RecoveryArchiveApplicationComposition['attachmentCleanupStorage']>) {
+  if (!source || typeof source.retireRecoveryAttachment !== 'function') throw new Error(COMPOSITION_INVALID)
+  return Object.freeze({ retireRecoveryAttachment: source.retireRecoveryAttachment.bind(source) })
 }
 
 function snapshotAttachmentStorage(source: NonNullable<RecoveryArchivePreviewRuntime['attachmentStorage']>):
