@@ -7,6 +7,7 @@ Contract: `e4625f322` (full parent available in Git).
 First code checkpoint: `0158b581001d630a470d39b2476c2cfb0c48b16e`.
 Source/authorization checkpoint: `19d8e6e49996ff6a1083697dcaa22b118f463a2e`.
 File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
+Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Completed Local Evidence
@@ -83,6 +84,40 @@ by this checkpoint. The public preview still refuses attachment differences.
   `/private/tmp/tm-attachment-stage-verified-20260919.log`.
 - Latest merge-main check snapshot: 27 checks, only Node20 pending, no failed
   check. Not yet claimed terminal combined-main green.
+
+## Durable Ledger Checkpoint
+
+- The PostgreSQL staging identity is keyed by actor/token hash/attachment and
+  binds the complete archive/original scope, source version, digest, size and a
+  unique object UUID. Scope/content cannot be rewritten; the only implemented
+  state transition is reserved to verified. This does not yet implement applying
+  or retiring prepared objects.
+- Each adapter call owns and completes a transaction before file I/O. Source
+  archive is locked before the stage row in both methods. Current authorization,
+  source state and expiry are checked again, including verified retries.
+- Isolated PG15 proves concurrent same-request identity, changed-content refusal,
+  new-pool replay, exact verified receipt, authority denial, expiry rejection,
+  immutability, empty down/down/up and populated-down refusal. Dropped NOT NULL,
+  disabled row/truncate triggers, absent unique, deferred primary key, CHECK(true)
+  and replaced function all make migration replay RED; transaction rollback and
+  canonical replay restore GREEN. Removing the adapter's exact identity compare
+  makes changed-content replay falsely succeed and the gate RED.
+- The focused ledger fixture uses a minimal owning archive table and does not
+  claim the whole production archive admission protocol. Separately, the complete
+  owned-cluster driver passed fresh full migration and replay, 32-migration census
+  (989 catalog objects; fingerprint
+  `e89ec920a16e18b651df5a062a4ab31183010fa43d8c93472a3584c8e68d9d3c`),
+  historical neighbors 59/59 and 127/127, manual attachment capture and HTTP scalar
+  restore. The driver then runs the new ledger gate unconditionally.
+- Initial full-neighbor failure was new-child FK cleanup omission in the older
+  migration suites. The existing empty-layer suspension helper now unwinds and
+  restores this layer; production FK and nonempty-down guards remain intact.
+- Default-driver removal mutation and new migration removal mutation are pinned
+  in the wiring contract: 37/37 PASS. Core type-check, source ESLint and diff-check
+  PASS. All owned databases/connections and cluster directories were cleaned.
+- Log: `/private/tmp/tm-attachment-stage-full-neighbors-20260919.log`.
+- Merged #5849 base `868c8d2b...` now has 29 terminal checks, zero pending/bad.
+  This is base evidence, not CI for this unpublished successor.
 
 ## Remaining Required Work
 

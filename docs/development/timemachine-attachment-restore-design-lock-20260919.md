@@ -72,6 +72,19 @@ existing scalar executor already meets them. Missing retained attachment metadat
 must fail closed unless all required metadata can be authenticated; a successful
 file decryption alone is insufficient. Do not widen row/field resurrection scope.
 
+### Preparation Ledger
+
+The bounded implementation uses `meta_recovery_archive_attachment_stages` to
+persist actor/token-hash/attachment identity before file I/O, with complete original
+scope, source version/digest/size and a unique server object UUID. Identity is
+immutable; reserved-to-verified is monotonic. Both adapter calls check current
+authorization and verified, unexpired source archive authority. No retention or
+automatic cleanup interval is introduced. This ledger is not a restore receipt:
+prepared bytes remain invisible until the canonical metadata/reference/history
+transaction is implemented. Apply/abandon/cleanup coordination and reference-
+aware deletion are still required before exposure; do not infer those guarantees
+from the reservation and verified states alone.
+
 ## Required Evidence
 
 | Gate | Required oracle | Status |
