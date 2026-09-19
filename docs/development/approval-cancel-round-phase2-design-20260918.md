@@ -173,20 +173,47 @@ decision into a C-3 closure mid-transaction when the business evaluation inside 
 
 ## 3. Interface and error codes
 
-### 3.1 What this slice adds (module scope, `packages/core-backend/src/services/ApprovalProductService.ts` unless noted; re-derived against `a02930896`)
+### 3.1 What this slice adds (module scope, `packages/core-backend/src/services/ApprovalProductService.ts` unless noted; every `~L` below re-derived by `grep -n` against the delivery head `92d7bade243cbd47b647b5daf743c5b313070566`, 2026-09-19)
+
+> ⚠️ **Re-anchor record (2026-09-19, round-3 full gate P3-1).** This header previously pinned
+> `a02930896`. That commit is **not an ancestor of the delivery head** — `git merge-base --is-ancestor
+> a02930896 HEAD` → **NO**; the branch was `rebase --onto`'d afterwards — so every number below was
+> stale **for a reader at this head**, by **+3 to +358** (10 `~L` numbers across 9 rows, all 10 moved).
+> The numbers were *not* wrong against their own declared baseline
+> (`git show a02930896:…ApprovalProductService.ts | grep -n "APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR ="` → **859**,
+> i.e. the old `~L861`); what was false is the verification MD's meta-claim that they had been
+> "independently re-derived … against the CURRENT tree" (that sentence now carries its own 失效标记).
+> **Read the SYMBOL, not the number** — the symbol is this table's primary key and survives every rebase;
+> the `~L` is a locator. Commands and raw output: verification MD, 「第 3 轮记录修正(2026-09-19)」.
+>
+> ⚠️ **Scope of this re-anchor, stated so nobody reads it wider than it is: ONLY this §3.1 table was
+> re-derived.** The same symbols are cited with their OLD (pre-rebase) numbers elsewhere in this
+> document and are **deliberately left alone in this step** — named here rather than silently left to
+> contradict the table above. Measured at the delivery head today, the live values are:
+> `async dispatchAction(` = **10846** (cited `~L10502` at §4.2's opening line and in §5's seam table),
+> `export async function resolveCancelRoundRolloutLockRequirementV1` = **1147**, its pre-read call = **10881**
+> and its re-assert call = **10909** (cited `~L930` / `~L10530` / `~L10558` in §4.2's "same function called
+> twice" sentence and inside §4.2's numbered source excerpt), outlet #5′'s `if (…)` = **12525**, its
+> `closeCancelRoundSystemTerminalInTxn(` call = **12577**, its `return closedApproval` = **12598**
+> (cited `~L12174` / `~L12219` / `~L12240` in §5's seam table). ⚠️ **§4.2's numbered source excerpt also
+> carries its own absolute claim** — "Every line number above is this document's OWN fresh `grep -n`/`sed -n`
+> extract at current HEAD" — which does **not** hold at the delivery head by the same measurement; that
+> excerpt's value is the CONTROL-FLOW ORDER it documents (unchanged), not its absolute line numbers.
+> Both are registered as open, measured, comment/MD-only follow-ups in the verification MD's
+> 「第 3 轮记录修正(2026-09-19)」; they are **not** claimed closed.
 
 | Piece | Where (this tree) | Lock clause |
 |---|---|---|
-| `deriveCancelRoundRoundPolicy` | `function deriveCancelRoundRoundPolicy`, ~L341 | §4 `roundPolicy={windowDays,suite}` — ONE derivation, shared by `createCancelRoundInstance` (phase 1) and the final evaluation (this slice), so I4's two snapshots cannot drift |
-| `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'` | `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR =`, ~L861 | §3 C-3 「actor = 系统终结身份」; same `system:` prefix as the timeout/departure sentinels, so `isSystemSentinelActor` covers it by construction |
-| `resolveCancelRoundRolloutLockRequirementV1` | `export async function resolveCancelRoundRolloutLockRequirementV1` (exported), ~L930 | §3 C-2 — "does this dispatch take the rollout lock, and on which org key" — three-hop resolution per §3.3c |
-| `evaluateCancelRoundFinalInLock` (private) | `private async evaluateCancelRoundFinalInLock`, ~L8761 | §3 C-2 step ③ 「锁内最终评估」 |
-| `closeCancelRoundSystemTerminalInTxn` (private) | `private async closeCancelRoundSystemTerminalInTxn`, ~L8888 | §3 C-3 「持久化收口」 |
-| `redeemCancelRoundInTxn` (private) | `private async redeemCancelRoundInTxn`, ~L9006 | §3 C-2 steps ④–⑤; §14.2 判据 II |
+| `deriveCancelRoundRoundPolicy` | `function deriveCancelRoundRoundPolicy`, ~L396 | §4 `roundPolicy={windowDays,suite}` — ONE derivation, shared by `createCancelRoundInstance` (phase 1) and the final evaluation (this slice), so I4's two snapshots cannot drift |
+| `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'` | `APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR =`, ~L1078 | §3 C-3 「actor = 系统终结身份」; same `system:` prefix as the timeout/departure sentinels, so `isSystemSentinelActor` covers it by construction |
+| `resolveCancelRoundRolloutLockRequirementV1` | `export async function resolveCancelRoundRolloutLockRequirementV1` (exported), ~L1147 | §3 C-2 — "does this dispatch take the rollout lock, and on which org key" — three-hop resolution per §3.3c |
+| `evaluateCancelRoundFinalInLock` (private) | `private async evaluateCancelRoundFinalInLock`, ~L9042 | §3 C-2 step ③ 「锁内最终评估」 |
+| `closeCancelRoundSystemTerminalInTxn` (private) | `private async closeCancelRoundSystemTerminalInTxn`, ~L9211 | §3 C-3 「持久化收口」 |
+| `redeemCancelRoundInTxn` (private) | `private async redeemCancelRoundInTxn`, ~L9341 | §3 C-2 steps ④–⑤; §14.2 判据 II |
 | `AttendanceCancellationExecutionPort` + its singleton registry (`register`/`unregister`/`get`/`has`/`clear`) | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts` (new file) | §3 C-1 「审批侧只调用」 — modelled line-for-line on the existing `workday-calendar-port.ts` host↔plugin pattern, the one precedent for approval calling INTO attendance (verification §3.11.1) |
-| `deriveCancelRoundW4OperationIdV1(roundId)` | same file, `export function deriveCancelRoundW4OperationIdV1`, ~L69 (unchanged despite that file's own growth — insertions landed below this declaration) | the W4 replay key (§14.1's operation-registry contract) — the round's own id, which is why it must be a UUID (the P1 §3.12.1 fixed) |
-| the pre-read + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + rollout-lock-first + fail-closed re-assert | `ApprovalProductService.ts`, `async dispatchAction(` ~L10502 through the re-assert throw (see §4.2 below and §10) | §3 C-2 全局锁序 |
-| outlet #5′ branch + early `return` | `ApprovalProductService.ts`, `if (resolution.status === 'approved' && isCancelRoundInstance(instance))` ~L12174 through `return closedApproval` ~L12240 (see §4.1 and §2.3 above) | §14.2 判据 IV |
+| `deriveCancelRoundW4OperationIdV1(roundId)` | same file, `export function deriveCancelRoundW4OperationIdV1`, ~L72 (unchanged despite that file's own growth — insertions landed below this declaration) | the W4 replay key (§14.1's operation-registry contract) — the round's own id, which is why it must be a UUID (the P1 §3.12.1 fixed) |
+| the pre-read + conditional `BEGIN ISOLATION LEVEL SERIALIZABLE` + rollout-lock-first + fail-closed re-assert | `ApprovalProductService.ts`, `async dispatchAction(` ~L10846 through the re-assert throw (see §4.2 below and §10) | §3 C-2 全局锁序 |
+| outlet #5′ branch + early `return` | `ApprovalProductService.ts`, `if (resolution.status === 'approved' && isCancelRoundInstance(instance))` ~L12525 through `return closedApproval` ~L12598 (see §4.1 and §2.3 above) | §14.2 判据 IV |
 
 ### 3.2 Error codes this slice introduces, each traced to the throw site (this tree)
 
