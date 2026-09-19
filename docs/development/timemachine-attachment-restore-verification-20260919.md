@@ -11,6 +11,46 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Latest Real Grid-Editor Deletion Evidence (2026-09-20)
+
+Code `0aac78fcee2393f57f8e107287706b62ba8de136`, tree
+`115d353c180056ef1b951d47b814d1c299d12325`, parent
+`532109af3b15f956d94386dc56ba7835920a4e81`. Two acceptance scripts only;
+no production/runtime/schema edits.
+
+Command:
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser`
+completed exit 0. Log `/private/tmp/tm-real-cell-delete-browser-20260920.log`.
+The owned fresh PostgreSQL/manual checkpoint/stage-ledger sequence passes and
+all owned databases, connections, cluster, browser, Vite listener and cache are
+cleaned at completion.
+
+At both 1440 and 390 pixels, the actual Workbench now:
+1. Captures and reloads a recoverable archive; unchanged preview performs zero writes.
+2. Opens the original attachment cell through double-click and invokes Clear All.
+3. Receives two successful production attachment DELETE responses. Database
+   readback requires the empty attachment field, two version increments, two
+   `source=attachment` revisions with the exact changed field, and final empty patch.
+4. Previews one changed row and executes only after explicit confirmation.
+5. Restores the complete prior row data, exactly one additional record version and
+   one restore revision. The grid changes from zero to two attachment references.
+6. Reads both restored original binaries, decodes the image/lightbox/gallery cover,
+   and verifies the browser's saved download bytes against the archived source.
+
+No failed/non-2xx API request or page error is accepted. Screenshots were inspected
+at both widths: `tm-manual-http-browser-workbench-{1440,390}.png` under the owned
+temporary screenshot directory. No horizontal overflow was found. Existing
+toolbar/cover counterexamples and SQL seal-guard mutation in the full runner remain
+discriminating; no new production guard was introduced in this test-only change.
+Core type-check, JavaScript syntax check, 37/37 existing CI wiring checks and
+diff-check PASS. Logs: `/private/tmp/tm-real-cell-delete-{tsc,wiring}-20260920.log`.
+
+This supersedes the earlier SQL-only Workbench edit limitation, not the complete
+application UAT limitation: the account logs in through production HTTP, but the
+real LoginView/organization selection/app shell are not yet exercised. Standalone
+scalar/modal legs remain explicitly synthetic SQL edits. Exact-head remote CI
+for this checkpoint is pending; #5882 remains Draft/HOLD.
+
 ## Latest Archive Modal Lifetime Evidence (2026-09-20)
 
 Code `27aa9351fc8b093576941017e7875431c0ae59e5`, tree

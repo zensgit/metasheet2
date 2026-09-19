@@ -2,6 +2,24 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Real Grid-Editor Deletion Acceptance (2026-09-20)
+
+Checkpoint `0aac78fcee2393f57f8e107287706b62ba8de136`, tree
+`115d353c180056ef1b951d47b814d1c299d12325`, strengthens the Workbench browser
+acceptance without changing production code. The synthetic owner now double-clicks
+the attachment cell and uses its real Clear All command. Both production DELETE
+requests must succeed; persisted attachment-source revisions and an empty cell
+are checked before preview/restore. This replaces SQL-only mutation for the
+Workbench leg; standalone scalar/modal fixture legs still use their declared SQL
+mutation.
+
+Real editor deletion, confirmed archive restore, current grid refresh, authenticated
+image/gallery rendering and saved download byte equality are now locally proved at
+1440 and 390 pixels. Authentication still uses the production login API with a
+synthetic account, then mounts the Workbench through an owned Vite harness. The
+full application's LoginView, organization-selection shell and navigation remain
+unverified. No full application/tenant UAT completion is claimed.
+
 ## Archive Modal Lifetime Checkpoint (2026-09-20)
 
 Code `27aa9351fc8b093576941017e7875431c0ae59e5`, tree
