@@ -76,6 +76,9 @@ try {
   // Historical migration tests must unwind newer layers and restore them. Run
   // the actual CI replay/neighbor entrypoints before the new protocol tests.
   const neighbors = [
+    ['vitest', '--config', 'vitest.integration.config.ts', 'run',
+      'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
+      '--reporter=dot'],
     ['tsx', 'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'],
     ['vitest', '--config', 'vitest.integration.config.ts', 'run',
       'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
