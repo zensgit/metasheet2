@@ -770,6 +770,29 @@ their authenticated browser behavior remains an explicit audit item, not covered
 by the grid/lightbox pass. Full application login/organization selection, remaining
 runtime/cleanup requirements and successor remote CI are still not certified.
 
+## Saved Browser Download Bytes Checkpoint
+
+Code `c6813cf79503794c625fb1bfe4fa07e856470b3c`, tree
+`70a75c47761d292b621f064b104c86ba054ed25b`, adds an exact saved-file
+oracle to the existing production Workbench synthetic browser loop. At both
+1440 and 390, the authenticated original download must identify the expected
+attachment, complete without a download error, persist a file, and contain
+exactly the original synthetic archive bytes. HTTP 200 alone is insufficient.
+
+The owned full runner passes in
+`/private/tmp/tm-browser-download-saved-bytes-20260920.log`; database connections
+are zero and the synthetic cluster is removed. Syntax and diff checks pass.
+The preceding run in `/private/tmp/tm-browser-download-bytes-20260920.log`
+failed because Playwright response.body() returned an empty buffer. That
+transport-observation assertion was replaced with the stronger user-delivered
+download.path() file read, not relaxed to status-only acceptance. The saved
+file contains the exact expected 32 bytes. No claim about the cause of the
+empty response observation is made. Existing direct HTTP/storage byte checks
+remain unchanged. This is test-only; no new product permission or restore semantic.
+
+Gallery cover rendering and full application login/organization selection
+remain separate open acceptance items. No flags, deployment or real environment.
+
 ## Outstanding Full-Scope Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file

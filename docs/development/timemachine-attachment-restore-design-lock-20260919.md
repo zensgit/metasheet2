@@ -2,6 +2,14 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+Saved-download acceptance checkpoint: code
+`c6813cf79503794c625fb1bfe4fa07e856470b3c` (tree
+`70a75c47761d292b621f064b104c86ba054ed25b`) verifies actual browser-persisted
+original attachment bytes at desktop/mobile widths through the synthetic owned
+production Workbench loop. A successful HTTP status or download event alone
+does not satisfy this gate. See the paired verification report for the exact
+runner and failed response-observation boundary; full-scope acceptance remains open.
+
 ## Baseline And Authority
 
 Owner authorized the recommended sequence: merge #5849, implement bounded
