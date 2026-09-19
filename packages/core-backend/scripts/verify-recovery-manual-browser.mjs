@@ -164,6 +164,21 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       await page.screenshot({ path: join(tmpdir(), `tm-manual-http-browser-${kind}-${width}.png`), fullPage: true })
       if (workbench) {
         await page.getByRole('dialog', { name: 'Archive recovery', exact: true }).getByRole('button', { name: 'Close archive recovery', exact: true }).click()
+        const thumbnail = page.locator('.meta-grid__row .meta-attachment-list__thumb')
+        await thumbnail.waitFor()
+        await page.waitForFunction(() => {
+          const image = document.querySelector('.meta-grid__row .meta-attachment-list__thumb')
+          return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+        })
+        assert.match(await thumbnail.getAttribute('src'), /^blob:/)
+        await page.locator('.meta-grid__row .meta-attachment-list__card--preview').click()
+        await page.locator('.meta-attachment-list__lightbox-image').waitFor()
+        await page.waitForFunction(() => {
+          const image = document.querySelector('.meta-attachment-list__lightbox-image')
+          return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+        })
+        assert.equal(await page.locator('.meta-attachment-list__lightbox-image').evaluate(image => image.naturalWidth), 1)
+        await page.getByRole('button', { name: 'Close attachment preview', exact: true }).click()
         const attachmentResponse = page.context().waitForEvent('response', {
           predicate: response => response.request().method() === 'GET'
             && new URL(response.url()).pathname.startsWith('/api/multitable/attachments/'),
@@ -173,6 +188,8 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
         const downloaded = await attachmentResponse
         assert.equal(downloaded.status(), 200, 'Workbench attachment click must authenticate through the real browser')
         assert.equal(await (await downloadEvent).failure(), null)
+        assert.deepEqual(errors, [])
+        assert.deepEqual(apiFailures, [])
       }
       await page.close()
       console.log(`PASS: Chromium ${width} ${kind} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request, ${workbench ? 'empty-to-two attachment grid refresh' : 'one refresh event'} and database/history readback`)

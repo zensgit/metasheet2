@@ -1710,11 +1710,16 @@ try {
   console.log('PASS: physically purged in-scope attachment refuses fresh admission with zero generation/request/pin side effects')
   const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
   const sourceStorage = new LocalStorageProvider(join(root, 'attachment-source'))
+  const expectedAttachmentBytes = (id: string): Buffer => id === 'manual-second-attachment'
+    ? Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=', 'base64')
+    : Buffer.from('synthetic-' + id)
   await query(`INSERT INTO multitable_attachments(id,sheet_id,storage_file_id,filename,mime_type,size,storage_path)
     VALUES ('manual-second-attachment','no-genesis','manual-second-file','synthetic','text/plain',3,'synthetic/second')`)
   const syntheticAttachments = (await query(`SELECT id FROM multitable_attachments WHERE sheet_id='no-genesis' ORDER BY id`)).rows
+  await query(`UPDATE multitable_attachments SET filename='synthetic.png',mime_type='image/png'
+    WHERE id='manual-second-attachment'`)
   for (const row of syntheticAttachments) {
-    const bytes = Buffer.from(`synthetic-${row.id}`)
+    const bytes = expectedAttachmentBytes(row.id)
     const file = await sourceStorage.uploadContentAddressed(bytes, { filename: 'source.bin', contentType: 'application/octet-stream' })
     await query(`UPDATE multitable_attachments SET storage_path=$2,size=$3,storage_provider='local',
       blob_purged_at=NULL,blob_purge_claimed_at=NULL WHERE id=$1`, [row.id, file.path, bytes.length])
@@ -1765,7 +1770,7 @@ try {
   const verifiedAttachments = await readAttachments(verifiedSource.source!)
   assert.equal(reads, syntheticAttachments.length)
   for (const attachment of verifiedAttachments) {
-    assert.deepEqual(attachment.plaintext, Buffer.from(`synthetic-${attachment.attachmentId}`))
+    assert.deepEqual(attachment.plaintext, expectedAttachmentBytes(attachment.attachmentId))
     const pin = (await pins(verifiedSource.generationId)).find((row) => row.attachment_id === attachment.attachmentId)
     assert.equal(pin.availability, 'available')
     assert.equal(pin.content_sha256, attachment.plaintextSha256)
@@ -1800,7 +1805,7 @@ try {
       assert.ok((await pins(attempt.generationId)).every((row) => row.availability === 'mutable'))
     } finally {
       if (failure === 'source-change') for (const row of syntheticAttachments) {
-        await query('UPDATE multitable_attachments SET size=$2 WHERE id=$1', [row.id, Buffer.byteLength(`synthetic-${row.id}`)])
+        await query('UPDATE multitable_attachments SET size=$2 WHERE id=$1', [row.id, expectedAttachmentBytes(row.id).length])
       }
     }
   }
@@ -1915,9 +1920,9 @@ try {
     const completeAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionState(readInput)
     for (const row of syntheticAttachments) {
       const binary = attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id)
-      assert.deepEqual(binary.bytes, Buffer.from(`synthetic-${row.id}`))
+      assert.deepEqual(binary.bytes, expectedAttachmentBytes(row.id))
       binary.bytes.fill(0)
-      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id).bytes, Buffer.from(`synthetic-${row.id}`))
+      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id).bytes, expectedAttachmentBytes(row.id))
     }
     await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput, attachmentObjects: [] }),
       { message: 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID' })
@@ -1955,7 +1960,7 @@ try {
         selectedBinding: commandAuthority.selectedBinding, manifestObject: commandAuthority.manifestObject,
         sectionObjects: commandAuthority.sectionObjects, attachmentObjects: commandAuthority.attachmentObjects, query })
       for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(commandState, row.id).bytes,
-        Buffer.from(`synthetic-${row.id}`))
+        expectedAttachmentBytes(row.id))
       console.log('PASS: manual command captures live/deleted source attachments, publishes and reads exact bytes; exact retry never rereads source')
       const express = require('express') as typeof import('express')
       const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
@@ -2049,7 +2054,7 @@ try {
           selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
           sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects, query })
         for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(state, row.id).bytes,
-          Buffer.from(`synthetic-${row.id}`))
+          expectedAttachmentBytes(row.id))
         const catalog = await fetch(url.replace('/captures', `/catalog/${result.data.generationId}`), { headers })
         assert.equal(catalog.status, 200)
         assert.equal((await catalog.json() as { data: { generationId: string } }).data.generationId, result.data.generationId)
@@ -2235,7 +2240,7 @@ try {
         assert.equal(uploadAttempts, 3, 'retry must not reupload the already verified first file')
         for (const id of restoredIds) {
           const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
-          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
+          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, expectedAttachmentBytes(id))
         }
         const afterUploads = uploadAttempts
         assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'token-replayed' })
@@ -2324,7 +2329,7 @@ try {
         assert.equal(Number(afterPublic.version), Number(beforePublic.version) + 1)
         for (const id of restoredIds) {
           const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
-          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
+          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, expectedAttachmentBytes(id))
         }
         assert.equal((await fetch(executeUrl, { method: 'POST', headers, body: executeBody })).status, 409)
         assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], afterPublic)
@@ -2334,7 +2339,7 @@ try {
             const downloadUrl = `http://127.0.0.1:${address.port}/api/multitable/attachments/${encodeURIComponent(id)}`
             const response = await fetch(downloadUrl, { headers })
             assert.equal(response.status, 200)
-            assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(`synthetic-${id}`))
+            assert.deepEqual(Buffer.from(await response.arrayBuffer()), expectedAttachmentBytes(id))
             assert.equal((await fetch(downloadUrl)).status, 401)
           }
         }
@@ -2355,7 +2360,7 @@ try {
               assert.equal(await historyCount(), beforeHistory + 1)
               for (const id of restoredIds) {
                 const metadata = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
-                assert.deepEqual((await sourceStorage.readContentAddressed(metadata.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
+                assert.deepEqual((await sourceStorage.readContentAddressed(metadata.storage_path)).bytes, expectedAttachmentBytes(id))
               }
               await verifyDownloads()
             }
@@ -2393,7 +2398,7 @@ try {
             selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
             sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects, query })
           for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(isolated, row.id).bytes,
-            Buffer.from(`synthetic-${row.id}`))
+            expectedAttachmentBytes(row.id))
         } finally { await rename(parkedPath, sourcePath) }
         console.log('PASS: unavailable live source refuses fresh HTTP publication with pins retained; completed archive still independently reads exact files')
         console.log('PASS: real HTTP manual attachment capture uses server local storage, refuses anonymous/client paths, retries one generation, and exposes catalog with independently decrypted exact files')

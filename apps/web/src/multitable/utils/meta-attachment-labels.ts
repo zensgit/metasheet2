@@ -7,11 +7,13 @@ export type MetaAttachmentLabelKey =
   | 'attachment.openOriginal'
   | 'attachment.closePreview'
   | 'attachment.downloadFailed'
+  | 'attachment.previewFailed'
 
 const META_ATTACHMENT_LABELS: Record<MetaAttachmentLabelKey, { en: string; zh: string }> = {
   'attachment.openOriginal': { en: 'Open original', zh: '打开原文件' },
   'attachment.closePreview': { en: 'Close attachment preview', zh: '关闭附件预览' },
   'attachment.downloadFailed': { en: 'Attachment download unavailable. Please retry.', zh: '附件暂时无法下载，请重试。' },
+  'attachment.previewFailed': { en: 'Image preview unavailable.', zh: '图片预览暂时不可用。' },
 }
 
 export function attachmentLabel(key: MetaAttachmentLabelKey, isZh: boolean): string {
