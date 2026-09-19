@@ -640,3 +640,74 @@ the top of the file, growing to +14/+16 by the redemption/outlet region, and a n
 for reasons unrelated to this merge). The mechanism (where u3's ~41 new lines landed) was not traced
 line-by-line beyond what the table above needed; the verified REAL numbers are what matters for a
 reader following a citation, not a reconstruction of every intermediate edit.
+
+---
+
+## Codex 审阅第 3 条修复(2026-09-19)
+
+**状态**:已实现并验证。**归属**:C-2(`feat/approval-cancel-round-phase2`)。**严重度**:P3。
+
+### 1. 机制(被修的那件事)
+
+Codex 第 3 条被独立验证为 **CONFIRMED**(`reviews/verify-codex-cancel-finding3-20260919.md`,四个分句无一被证伪,但严重度从 P2 下调到 P3,因为该事件在本仓**零订阅者**)。
+
+在 `legacy` 与 `legacy_compat` 两种 posture 下——也就是**今天唯一存在的 posture**(三个考勤开关全 OFF,`attendance_calculation_rollout_state` 为空)——边界**不写** `attendance_result_event_outbox`(`w4c3b-request-operation-boundary.ts:903-916` 的 `if (!isLegacyCompat)`;纯 `legacy` 在 `:826/:851/:898` 更早返回,根本到不了 enqueue)。普通 HTTP 取消路径用一次**进程内直发**来补偿这件事,而那段直发**内联在路由处理函数 `cancelRequest` 里**;该函数**仅有的两个调用方**是两条 HTTP 路由。兑现路径不经过它 ⇒ 按构造取不到发送点 ⇒ **零次发送**,而 HTTP 路径发**一次**。
+
+这是对锁文 §8 期 1「完整取消结果**逐字节等价于现有 W4 路径**」的背离。它不是推理出来的:双夹具上的总线探针实测 `{sendsAfterA: 0, sendsAfterB: 1}`。
+
+### 2. 修法形状
+
+**一个发送点,两个调用方。** 门与载荷构造从路由里提出来,合成插件内的单一函数;HTTP 路由与审批侧都经它发送,**不另造第二份事件构造**。
+
+| 件 | 位置 | 说明 |
+|---|---|---|
+| 唯一发送点(门 + 载荷) | `plugins/plugin-attendance/index.cjs:25026` `emitRequestCancelledEventForOutcomeV1` | HTTP 路由改为调用它(`:38632`) |
+| 提交后投递注册 | `packages/core-backend/src/core/attendance-cancellation-execution-port.ts:306`(类型)、`:314`(register)、`:336`(get) | **兄弟注册表,不是 port 上的新方法** |
+| 宿主接线 | `src/types/plugin.ts:1588`、`src/index.ts:210`/`:2768` | 与 `registerCancelRoundExecutionBoundary` 并排 |
+| 插件绑定 | `index.cjs:35831-35833` | 绑的就是上面那个唯一发送函数 |
+| 审批侧携出 W4 结果 | `ApprovalProductService.ts:9038`(返回类型)、`:9164`(返回值) | **逐字携出,不解读 kind** |
+| 提交后发送 | `:12440`(调用,在 `COMMIT` 之后)、`:13144`(方法本体) | 自带 try/catch |
+
+**三处刻意的设计选择,每处都有反面理由:**
+
+1. **为什么是兄弟注册表而不是 port 上加方法。** port 的类型**就是** `AttendanceRequestOperationBoundaryV1`,锁 §3 C-1 刻意不窄化它。投递不属于事务协议:它在调用方 `COMMIT` **之后**跑,不持连接、不持事务、不写库。给那个接口加方法等于为一个调用方改动所有 W4 路由共享的边界合同。
+
+2. **为什么门写在插件里而不是审批侧。** 「哪些 kind 该发」必须与 HTTP 路由**逐字同构**,否则两条路径会漂成两套门。审批侧把拿到的 W4 结果原样递回,**不 inspect `kind`**,所以它无从漂移。门本身是**推导**出来的,不是顺手抄的:
+
+   - `executed` ⇒ **不发**。边界已入 outbox,W4C-2 投递器(`w4c2-outbox-dispatcher.ts:85-168`)会在 drain 时发;这里再发就是**双发**。
+   - `replay` ⇒ **不发**。边界在 replay 预检早返回(`:870-874`),在 enqueue **之前**;首次运行已经发过,这里再发就是**重放即重复投递**。
+   - `business_refused` / 其余 ⇒ 什么都没取消,没有要宣告的东西。
+
+3. **幂等 = 既有 W4 replay 预检,不新造表、不新造键。** 另有两层:轮次经出口 #5 **至多一次**(`WHERE outcome = 'pending'` 的部分唯一索引 + `applied` 写),且 seal 跑在**调用方的 client** 上(`:918-921`),所以回滚掉的尝试**不留下可被重放的 operation 行**。
+
+   ⚠️ 由此得出一条必须写明的结论:**真实 `replay` 在本 head 上经此路径不可达**。所以那道门是**防御性**的,对应用例用 double 驱动——这不是拿 double 替换一个可达用例,而是**登记该用例不可达,并仍然给该分支上闸**,因为「今天不可达」是今天这份代码的性质,将来一次改动就能悄悄取消它。
+
+### 3. 失败语义(持久化转换不得挂网络调用)
+
+发送**在 `COMMIT` 之后**,且**自带 try/catch**。两条都是承重的:
+
+- 在事务内发 ⇒ 回滚后仍已宣告一次没有发生的取消(用例 M-C3-2 就是这条)。
+- 不自带 catch ⇒ 异常落到 `dispatchAction` 的外层 catch,那里会对一个**已经 COMMIT 的事务**跑 `rollbackQuietly` 并重抛,把一次成功且持久的业务取消变成 500。与 `supersedeCardDeliveriesPostCommit` 同形。
+
+证据行承重、告警派生:请求行、revoke 审计行、轮次 `applied`、W4 seal —— 全部在本次发送之前就已提交;投递失败只产生一条 warn。未绑定投递时**fail OPEN**(与执行 port 的 fail CLOSED 刻意相反):到达这里时业务取消已经持久,抛错既撤销不了什么,又只会把成功变成 500。
+
+### 4. 账侧等价的更新
+
+`approval-cancel-round-redemption.db.test.ts` 的 **账侧 twin 用例**原先唯一一处点名「C-1 step ⑦(发 `attendance.request.cancelled`)」的断言,比较的是 `attendance_result_event_outbox` 的行数,并把 `outboxA`/`outboxB` 钉死为 `'0'`。在 legacy 系 posture 下**两条路径都不写那张表**,所以那是在比两个结构性的零,而真实发送数是 0 和 1——**两个谓词的交集是空的**。
+
+现在该用例在**发送点**上测量两条路径,并要求两份载荷经**同一套身份归一**后**逐字节相等**(`:1945-1969` 订阅与计数,归一后的载荷比较紧随三处行比较之前)。outbox 的 `'0'` 断言**保留**:它仍然是 posture 假设的正控。
+
+### 5. 同 PR 修正的过强声明
+
+`ApprovalProductService.ts` 中 `redeemCancelRoundInTxn` 的 doc comment 原文把 `attendance.request.cancelled` 列进「由 entry 内的 adapter 执行」。**这句话在今天任何 posture 上都是假的**,而且正是它把缺口藏住了:adapter 只**返回** lifecycle event,由边界决定是否落盘,而 legacy 系 posture 下边界什么都不落;HTTP 侧的补偿直发住在**路由**里,不在 entry 里。该句已改为带 ⛔ RETRACTION 的更正。
+
+### 6. 接线义务:本次为零
+
+新增的都是**追加到既有文件**的用例(`approval-cancel-round-redemption.db.test.ts` 已在 `plugin-tests.yml:1668` 接线),因此**两点接线、哨兵、`plugin-tests.yml` 清单、ci-wiring 人口、ci-realdb-step-contract、s6a 钉六项全部免除**——不是被跳过,是按该文件自己 doc comment 的同一条理由不产生义务。`plugins/plugin-attendance/index.cjs` 被改动但**未新增任何 SQL**,DML 盘点(60/60)与 ci-wiring(262/262)已实跑确认不动。
+
+### 7. 本节未覆盖(不得被读成已闭合)
+
+- **P5 `executed` 真 posture 变体未做。** 验证报告给的 P5 要求把 org posture 抬到非 legacy、断言 outbox 落 1 行而总线直发 0 次。**本切片只用 double 覆盖了 `executed` 这个 kind 的门**(I3 用例),没有做真 posture 变体——它需要一个现有夹具没有的 `attendance_calculation_rollout_state` 播种 helper。按报告自己给的两条路「要么做,要么显式登记为 owner 待裁的延后项」,此处**显式登记为延后项**,理由是成本,不是发现成本后悄悄丢掉。
+- **纯 `legacy` posture 仍未被执行覆盖。** 实测跑到的是 `legacy_compat`。纯 `legacy` 分支上的行为仍是源码阅读结论。
+- `authoritative` / `shadow` / `eligible` posture 在两条路径上仍未被任何用例跑过。
+- 本节只处理 Codex 第 3 条。第 1 条(撤销轮未重验原审批人当前资格)与第 2 条(撤销窗口上限未执行)**未验、未修**。
