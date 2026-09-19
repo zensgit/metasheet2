@@ -5851,7 +5851,7 @@ defineExpose({
    `--primary` amber variant below is deliberately KEPT as an additive class — MtButton has no
    warning/amber variant, so it preserves the banner's attention fill on the retry action. */
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
-.mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__capability-banner {
   margin: 8px 16px 0;
   padding: 3px 10px;
@@ -5865,7 +5865,7 @@ defineExpose({
   font-size: 12px;
   line-height: 1.6;
   color: var(--ms-text-2, #646a73);
-  max-width: 100%;
+  max-width: calc(100% - 32px);
 }
 .mt-workbench__capability-banner::before {
   content: '\1F512';

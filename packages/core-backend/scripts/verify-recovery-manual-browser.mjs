@@ -86,6 +86,24 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       const openWorkbenchArchive = async () => {
         await page.locator('html[data-workbench-ready="true"]').waitFor()
         await page.locator('.meta-grid__row').first().waitFor()
+        const layout = await page.evaluate(() => ({
+          viewport: window.innerWidth,
+          document: document.documentElement.scrollWidth,
+          containers: ['.mt-workbench__actions', '.meta-toolbar', '.meta-toolbar__left', '.meta-toolbar__right', '.mt-workbench__capability-banner'].map(selector => {
+            const element = document.querySelector(selector)
+            const bounds = element?.getBoundingClientRect()
+            return { selector, left: bounds?.left, right: bounds?.right }
+          }),
+        }))
+        assert.ok(layout.document <= layout.viewport + 1, `Workbench horizontal overflow: ${JSON.stringify(layout)}`)
+        if (width === 390) {
+          const nowrap = await page.addStyleTag({ content: '.mt-workbench__actions,.meta-toolbar,.meta-toolbar__left,.meta-toolbar__right{flex-wrap:nowrap!important}' })
+          try {
+            assert.ok(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
+              'Removing toolbar wrapping must reproduce whole-page overflow')
+          } finally { await nowrap.evaluate(element => element.remove()) }
+          assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1))
+        }
         await page.locator('[data-action="open-archive-recovery"]').click()
       }
       if (workbench) await openWorkbenchArchive()
