@@ -98,8 +98,14 @@ export function fieldDerivedAssigneeSourceKey(
  * hand-assembled `priorNodeApprovers` map. The `system:` prefix is the repo-wide non-user actor
  * namespace (directory-sync.ts applies the same predicate to reject `system:`-prefixed ids as
  * user ids).
+ *
+ * EXPORTED (gate round 6, G6-1): `ApprovalProductService` derives seats from
+ * `approval_records(action='approve')` in TWO places — `loadPriorNodeApproverDeciders` (Lock-1 §K3)
+ * and `createCancelRoundInstance` (change-request lock §14.1). Both must drop the same namespace,
+ * and both now call THIS function rather than re-spelling `startsWith('system:')` inline, so the
+ * namespace has one definition instead of three copies that can drift apart.
  */
-function isSystemSentinelActor(actorId: string): boolean {
+export function isSystemSentinelActor(actorId: string): boolean {
   return actorId.startsWith('system:')
 }
 

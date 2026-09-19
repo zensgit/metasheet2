@@ -96,11 +96,20 @@ function oneNodeGraph(approverId: string) {
 }
 
 /**
- * `start -> approval_a -> end` with TWO assignees and `approvalMode: 'all'` (会签). Needed by the
- * seat-eligibility tests: with a single approver, "block" and "filter the ineligible one out and
- * continue" are indistinguishable at the seat table (both end with a seat count that is not 1
- * vs 1), so the M2 mutation — turning the block into a filter — would pass unnoticed. With two
- * approvers the positive control can assert seat count === approver count, which a filter breaks.
+ * `start -> approval_a -> end` with TWO assignees and `approvalMode: 'all'` (会签).
+ *
+ * Gate round 6, G6-3 — corrected wording. This comment used to call the P1 positive control below
+ * "the anti-filter oracle", i.e. claim that turning the block into a filter (mutation M2) would be
+ * caught by P1's `seat count === approver count` assertion. MEASURED, that is false: under M2 P1
+ * stays GREEN, because both of P1's approvers are eligible and a filter is the identity map on
+ * them. What actually goes red under M2 is 负控 N1/N2 — their zero-row assertions. P1's exact-count
+ * assertion is DEFENCE IN DEPTH (it would catch a filter that dropped an ELIGIBLE id, which no
+ * current mutation produces), not the oracle for M2. The verification MD's L4 already carried this
+ * correction; the code comment did not, so the same criterion read as "oracle" here and as
+ * "defence in depth" there.
+ *
+ * Two approvers are still required here, for a reason that does hold: with a single approver, a
+ * blocked creation and a filtered-to-empty creation are not distinguishable at the seat table.
  */
 function twoApproverNodeGraph(approverA: string, approverB: string) {
   return {
@@ -639,16 +648,19 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     return { documentId, requesterId, approverA, approverB }
   }
 
-  it('§2-G3 正控 P1 — every original approver is still eligible ⇒ the round is created with ONE SEAT PER APPROVER (the anti-filter oracle)', async () => {
+  it('§2-G3 正控 P1 — every original approver is still eligible ⇒ the round is created with ONE SEAT PER APPROVER (defence in depth; M2 is caught by N1/N2, not here)', async () => {
     const { documentId, requesterId, approverA, approverB } = await coSignFixture('g3pos')
 
     const service = new ApprovalProductService()
     const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
     createdApprovalIds.add(dto.id)
 
-    // M2's oracle: seat COUNT equals approver count, not merely ">= 1". A "filter the ineligible
-    // out and continue" implementation lowers the 会签 threshold silently; only an exact-count
-    // (and exact-set) assertion can see that.
+    // Seat COUNT equals approver count, not merely ">= 1", and the SET is exact. Gate round 6,
+    // G6-3: this is defence in depth, NOT the M2 oracle — both approvers here are eligible, so a
+    // filter is the identity map on them and M2 leaves this test green (measured). It would catch a
+    // filter that dropped an ELIGIBLE id, which is why the exact set is asserted and not just the
+    // count. The mutation that IS caught here is the gate round 6 sentinel probe: remove the
+    // `isSystemSentinelActor` drop and 正控 P3 below goes red, this one does not.
     const seatRows = await pool().query<{ assignee_id: string; is_active: boolean; node_key: string }>(
       `SELECT assignee_id, is_active, node_key FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
       [dto.id],
@@ -777,6 +789,300 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     ])
     expect(roundRows.rows.length).toBe(1)
     createdRoundIds.add(roundRows.rows[0].id)
+  })
+
+  // ===========================================================================================
+  // Gate round 6 (impl-gate-C-slice1-round6-20260919.md) — G6-1 (P1) and G6-4 (P3).
+  //
+  // G6-1: `system:auto-approval` is written into `approval_records(action='approve')` by
+  // `insertAutoApprovalEvents`, so it lands in the cancel round's seat query. Before this round the
+  // seat gate counted it as a person with no `users` row and answered 409 SEAT_INELIGIBLE /
+  // `not_found` — permanently, with a hint telling the administrator to restore an account that
+  // cannot exist. The existing 13 cases had ZERO discriminative power over this (the gate's own
+  // G-M8 mutation, "add the sentinel filter", left all 13 green), so the three cases below are the
+  // coverage that branch never had.
+  // ===========================================================================================
+
+  /**
+   * A template whose FIRST approval node auto-approves at create time (`mergeWithRequester: true`
+   * with the requester as its only assignee — the one switch the shipped authoring UI owns) and
+   * whose SECOND node holds a real human. Creating an instance therefore writes a synthetic
+   * `approve` row (`actor_id = 'system:auto-approval'`) with no `actorMode`, i.e. the default
+   * `'system'` — exactly the production shape G6-1 describes.
+   *
+   * When `humanId` is null the template is ONE auto-approving node only, so the instance reaches
+   * `approved` at create with NO human `approve` row at all.
+   */
+  async function publishAutoApprovalTemplate(
+    adminToken: string,
+    requesterId: string,
+    humanId: string | null,
+    label: string,
+  ): Promise<string> {
+    const autoNode = {
+      key: 'approval_auto',
+      type: 'approval',
+      config: {
+        assigneeType: 'user',
+        assigneeIds: [requesterId],
+        approvalMode: 'single',
+        autoApprovalPolicy: { mergeWithRequester: true },
+      },
+    }
+    const humanNode = humanId
+      ? [{ key: 'approval_human', type: 'approval', config: { assigneeType: 'user', assigneeIds: [humanId], approvalMode: 'single' } }]
+      : []
+    const nodes = [
+      { key: 'start', type: 'start', config: {} },
+      autoNode,
+      ...humanNode,
+      { key: 'end', type: 'end', config: {} },
+    ]
+    const edges = humanId
+      ? [
+          { key: 'e-s-auto', source: 'start', target: 'approval_auto' },
+          { key: 'e-auto-human', source: 'approval_auto', target: 'approval_human' },
+          { key: 'e-human-end', source: 'approval_human', target: 'end' },
+        ]
+      : [
+          { key: 'e-s-auto', source: 'start', target: 'approval_auto' },
+          { key: 'e-auto-end', source: 'approval_auto', target: 'end' },
+        ]
+
+    const templateKey = `wi4-creation-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'WI-4 cancel-round creation fixture (auto-approval)',
+        description: 'approval-cancel-round-creation.db.test.ts',
+        formSchema: buildFormSchema(),
+        approvalGraph: { nodes, edges },
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
+    return template.id
+  }
+
+  /**
+   * Builds an approved original that went through auto-approval. Returns the seat set the cancel
+   * round will read, ASSERTED to contain the sentinel — so a future change that stops producing
+   * sentinels turns these tests into obvious no-ops rather than silently vacuous greens.
+   */
+  async function autoApprovedFixture(
+    label: string,
+    withHuman: boolean,
+  ): Promise<{ documentId: string; requesterId: string; humanId: string | null }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-req-${suffix}`
+    const humanId = withHuman ? `wi4-hum-${suffix}` : null
+    const adminId = `wi4-admin-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const humanToken = humanId ? await authToken(baseUrl, humanId) : null
+    const templateId = await publishAutoApprovalTemplate(adminToken, requesterId, humanId, label)
+
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const inst = (await create.json()) as { id: string }
+    createdApprovalIds.add(inst.id)
+
+    if (humanToken) {
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${inst.id}/actions`, humanToken, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, await approve.clone().text()).toBe(200)
+    }
+
+    const statusRow = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      inst.id,
+    ])
+    expect(statusRow.rows[0]?.status).toBe('approved')
+
+    // The seat set the cancel round reads, verbatim. The sentinel MUST be in it — that is the
+    // precondition of everything below, and asserting it here is what stops these cases from
+    // degrading into vacuous greens if auto-approval ever stops writing `action='approve'`.
+    const seatQuery = await pool().query<{ actor_id: string }>(
+      `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY actor_id`,
+      [inst.id],
+    )
+    const actorIds = seatQuery.rows.map((row) => row.actor_id)
+    expect(actorIds).toContain('system:auto-approval')
+    expect(actorIds).toEqual(humanId ? ['system:auto-approval', humanId].sort() : ['system:auto-approval'])
+
+    return { documentId: inst.id, requesterId, humanId }
+  }
+
+  it('§2-G3 正控 P3 (G6-1) — an auto-approved document with one eligible human approver IS cancellable, and the seat set is exactly that human (the sentinel is dropped, not seated, not counted as a missing person)', async () => {
+    const { documentId, requesterId, humanId } = await autoApprovedFixture('g6sent', true)
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+
+    // Seat count = number of HUMAN approvers (1), not the number of `approve` rows (2). This is the
+    // assertion that goes red if the `isSystemSentinelActor` drop is removed: without it the call
+    // throws 409 SEAT_INELIGIBLE / `not_found` and never reaches here.
+    const seatRows = await pool().query<{ assignee_id: string; is_active: boolean }>(
+      `SELECT assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    expect(seatRows.rows.length).toBe(1)
+    expect(seatRows.rows[0].assignee_id).toBe(humanId)
+    expect(seatRows.rows[0].is_active).toBe(true)
+    // No sentinel anywhere on the round — not as a seat, not as a requester-choice replay.
+    expect(seatRows.rows.map((row) => row.assignee_id)).not.toContain('system:auto-approval')
+    const snapshot = await pool().query<{ requester_snapshot: Record<string, unknown> }>(
+      `SELECT requester_snapshot FROM approval_instances WHERE id = $1`,
+      [dto.id],
+    )
+    expect(JSON.stringify(snapshot.rows[0].requester_snapshot)).not.toContain('system:auto-approval')
+
+    const roundRows = await pool().query<{ id: string; outcome: string }>(
+      `SELECT id, outcome FROM approval_rounds WHERE document_id = $1`,
+      [documentId],
+    )
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+    expect(roundRows.rows[0].outcome).toBe('pending')
+  })
+
+  it('§2-G3 负控 N3 (G6-1) — a document approved ENTIRELY by automation has no human seat: 409 CANCEL_ROUND_NO_ELIGIBLE_APPROVER (reason no_human_approver), never SEAT_INELIGIBLE/not_found, zero rows', async () => {
+    const { documentId, requesterId } = await autoApprovedFixture('g6allauto', false)
+
+    const service = new ApprovalProductService()
+    let thrown: unknown
+    try {
+      await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeTruthy()
+    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
+    // Lock §14.1 (lock:335 席位 = 原单的原审批人, N ≥ 1; lock:337 I″ 至少一个活动席位) — the
+    // contract answer for "no seat can be resolved", reusing the code that already exists for it.
+    expect(failure.statusCode).toBe(409)
+    expect(failure.code).toBe('CANCEL_ROUND_NO_ELIGIBLE_APPROVER')
+    expect(failure.details).toEqual({ reason: 'no_human_approver' })
+    // Positively NOT the old answer: nobody is being asked to restore a non-existent account.
+    expect(failure.code).not.toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
+    expect(String(failure.message)).not.toContain('restore')
+    // And positively NOT the executor's generic 400 — this is the probe that proves the explicit
+    // pre-check, not `APPROVAL_ASSIGNEE_EMPTY`, produced the answer (remove the pre-check and this
+    // becomes 400 / APPROVAL_ASSIGNEE_EMPTY).
+    expect(failure.statusCode).not.toBe(400)
+    expect(failure.code).not.toBe('APPROVAL_ASSIGNEE_EMPTY')
+    // Values-free: categories only, no person id, no sentinel id echoed back.
+    expect(Object.keys(failure.details ?? {})).toEqual(['reason'])
+    expect(JSON.stringify(failure.details)).not.toContain('system:')
+
+    await expectZeroCancelRoundRows(documentId)
+  })
+
+  it('§2-G3 负控 N4 (G6-1) — dropping the sentinel must NOT drop humans with it: auto-approval + one DEACTIVATED human still blocks with SEAT_INELIGIBLE/inactive (not not_found, not a success)', async () => {
+    const { documentId, requesterId, humanId } = await autoApprovedFixture('g6humkept', true)
+
+    const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [humanId])
+    expect(deactivated.rowCount).toBe(1)
+
+    const service = new ApprovalProductService()
+    // If the filter were widened from `system:`-namespace to "anything the directory dislikes", or
+    // if it dropped every auto-approved node's approvers, this fixture would resolve to zero seats
+    // and answer NO_ELIGIBLE_APPROVER — or worse, succeed with a partial 会签 roster. It must do
+    // neither: the human is still a seat, and that seat is still re-qualified.
+    await expect(service.createCancelRoundInstance(documentId, { userId: requesterId })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CANCEL_ROUND_SEAT_INELIGIBLE',
+      details: { ineligibleCount: 1, reasons: ['inactive'] },
+    })
+    await expectZeroCancelRoundRows(documentId)
+
+    // DISCRIMINATING CONTROL on the SAME document: reactivate and the identical call succeeds with
+    // exactly one seat — so the rejection above was the seat predicate, not the sentinel drop
+    // having eaten the roster.
+    await pool().query(`UPDATE users SET is_active = TRUE WHERE id = $1`, [humanId])
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1`,
+      [dto.id],
+    )
+    expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([humanId])
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+  })
+
+  it('§2-G3 (G6-4) — `activation_invalid` is unreachable BY CONSTRAINT, asserted against the live schema rather than claimed in a comment', async () => {
+    // Gate round 6, G6-4: `CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS` carries `activation_invalid`,
+    // which `evaluateUserAuthenticationGate` only produces when `parseUserActivationStatus` rejects
+    // the stored value. No test could construct it, and the exemption ("the CHECK constraint blocks
+    // it") lived only in prose — the rotting-exemption shape this repo requires be turned into data.
+    // So: read the constraint and the nullability LIVE. If either is relaxed, THIS goes red at
+    // exactly the place where `activation_invalid` would start being reachable, and whoever relaxes
+    // it has to decide what the seat gate should answer.
+    const check = await pool().query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(c.oid) AS definition
+         FROM pg_constraint c
+        WHERE c.conrelid = 'users'::regclass
+          AND c.conname = 'users_activation_status_check'`,
+    )
+    expect(check.rows.length, 'users_activation_status_check must exist').toBe(1)
+    const definition = check.rows[0].definition
+    // Value set pinned member-wise: a widened CHECK (a third value, or a `trim()`-tolerant one)
+    // fails here instead of silently making a fourth reason category live.
+    for (const allowed of ['pending_activation', 'activated']) {
+      expect(definition, `CHECK must still allow ${allowed}`).toContain(allowed)
+    }
+    expect(
+      definition.match(/'[^']+'::text/g)?.sort(),
+      'CHECK must allow EXACTLY these two values',
+    ).toEqual([`'activated'::text`, `'pending_activation'::text`])
+
+    // NOT NULL is the other half: the seat gate reads `activation_status: string | null`, so a
+    // nullable column would make `activation_invalid` reachable through NULL without touching the
+    // CHECK at all.
+    const nullable = await pool().query<{ is_nullable: string }>(
+      `SELECT is_nullable FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name = 'activation_status'`,
+    )
+    expect(nullable.rows.length).toBe(1)
+    expect(nullable.rows[0].is_nullable).toBe('NO')
+
+    // Behavioural closure of the two legs the CHECK is claimed to stop, run against the live DB
+    // rather than reasoned from the migration source: a value outside the set, and a value that
+    // `parseUserActivationStatus` would `trim()` into a legal one but the CHECK does not trim.
+    const probeId = `wi4-g64-${TS}`
+    await ensureLocalUserRow(probeId)
+    mintedUserIds.add(probeId)
+    for (const bogus of ['bogus', '', ' activated ']) {
+      await expect(
+        pool().query(`UPDATE users SET activation_status = $2 WHERE id = $1`, [probeId, bogus]),
+        `activation_status = ${JSON.stringify(bogus)} must be refused by the CHECK`,
+      ).rejects.toMatchObject({ code: '23514' })
+    }
+    await expect(
+      pool().query(`UPDATE users SET activation_status = NULL WHERE id = $1`, [probeId]),
+    ).rejects.toMatchObject({ code: '23502' })
+    const survived = await pool().query<{ activation_status: string }>(
+      `SELECT activation_status FROM users WHERE id = $1`,
+      [probeId],
+    )
+    expect(survived.rows[0].activation_status).toBe('activated')
   })
 
   it('lock:143 负控 A — windowDays outside [0, suite ceiling] blocks creation (409 CANCEL_ROUND_WINDOW_OUT_OF_RANGE, zero rows); the SAME document at windowDays=0 succeeds', async () => {
