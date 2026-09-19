@@ -17,6 +17,13 @@ export interface ArchiveAttachmentStageIdentity {
   sizeBytes: string
 }
 
+export class ArchiveAttachmentStageAuthorizationError extends Error {
+  constructor() {
+    super('ARCHIVE_ATTACHMENT_STAGE_FORBIDDEN')
+    this.name = 'ArchiveAttachmentStageAuthorizationError'
+  }
+}
+
 export interface ArchiveAttachmentStageLedger {
   /** Must return only after the attempt-owned object identity is durably committed. */
   reserve(identity: Readonly<ArchiveAttachmentStageIdentity>): Promise<{ objectId: string; ownershipKey: string; state: 'reserved' | 'verified' }>
@@ -40,7 +47,8 @@ export async function stageRecoveryArchiveAttachment(input: {
   const attachmentId = input.attachmentId
   const { storage, ledger, transactionDepth, authorize, state: archiveState } = input
   outsideTransaction(transactionDepth)
-  if (!(await authorize()) || typeof storage.readRecoveryAttachment !== 'function'
+  if (!(await authorize())) throw new ArchiveAttachmentStageAuthorizationError()
+  if (typeof storage.readRecoveryAttachment !== 'function'
     || typeof storage.reserveRecoveryAttachment !== 'function') refused()
   outsideTransaction(transactionDepth)
   const source = readRecoveryArchiveAttachmentSource(archiveState, attachmentId, original)
@@ -78,7 +86,8 @@ export async function stageRecoveryArchiveAttachment(input: {
     outsideTransaction(transactionDepth)
     await ledger.verified(objectId, identity)
     return Object.freeze({ ...identity, objectId, storageKey })
-  } catch {
+  } catch (error) {
+    if (error instanceof ArchiveAttachmentStageAuthorizationError) throw error
     refused()
   } finally {
     source.bytes.fill(0)

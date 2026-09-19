@@ -3,6 +3,9 @@ import type { StorageProvider } from '../services/StorageService'
 import type { QueryFn } from './permission-service'
 import { verifyExactArchiveRecoveryIdentity } from './restore-preview-identity'
 import { prepareArchiveAttachmentBatch } from './recovery-archive-attachment-prepare'
+import { ArchiveAttachmentMetadataBindingError } from './recovery-archive-attachment-apply'
+import { ArchiveAttachmentPlanError } from './recovery-archive-attachment-plan'
+import { ArchiveAttachmentStageAuthorizationError } from './recovery-archive-attachment-stage'
 import {
   applyMaterializedExactArchiveRecoverySyncInternal,
   ApplyRefusalError,
@@ -44,6 +47,10 @@ export async function applyRecoveryArchiveSyncRestore(
       selectedRecordIds: [...input.selectedRecordIds], selectedFieldIds: [...input.selectedFieldIds] })
   } catch (error) {
     if (error instanceof ApplyRefusalError) return { ok: false, reason: error.reason }
+    if (error instanceof ArchiveAttachmentStageAuthorizationError) return { ok: false, reason: 'forbidden' }
+    if (error instanceof ArchiveAttachmentMetadataBindingError || error instanceof ArchiveAttachmentPlanError) {
+      return { ok: false, reason: 'preview-drift' }
+    }
     throw error
   }
 }

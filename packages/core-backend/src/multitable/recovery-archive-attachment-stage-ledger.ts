@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { QueryFn } from './permission-service'
 import type { ArchiveAttachmentStageIdentity, ArchiveAttachmentStageLedger } from './recovery-archive-attachment-stage'
+import { ArchiveAttachmentStageAuthorizationError } from './recovery-archive-attachment-stage'
 
 const columns = ['attachment_id', 'generation_id', 'workspace_id', 'base_id', 'sheet_id',
   'record_id', 'field_id', 'source_version', 'plaintext_sha256', 'size_bytes'] as const
@@ -22,10 +23,13 @@ export function createArchiveAttachmentStageLedger(input: {
   async function run<T>(work: (query: QueryFn) => Promise<T>): Promise<T> {
     try {
       return await transaction(async query => {
-        if (!(await authorize(query))) refused()
+        if (!(await authorize(query))) throw new ArchiveAttachmentStageAuthorizationError()
         return work(query)
       })
-    } catch { refused() }
+    } catch (error) {
+      if (error instanceof ArchiveAttachmentStageAuthorizationError) throw error
+      refused()
+    }
   }
   return {
     reserve: async source => {

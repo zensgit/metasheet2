@@ -13,21 +13,28 @@ export function hashArchiveAttachmentMetadata(metadata: unknown): string {
 }
 
 /** Transaction-only preview/preparation binding, including removed as well as restored references. */
+export class ArchiveAttachmentMetadataBindingError extends Error {
+  constructor() {
+    super('ARCHIVE_ATTACHMENT_RESTORE_BINDING_REFUSED')
+    this.name = 'ArchiveAttachmentMetadataBindingError'
+  }
+}
+
 export async function loadArchiveAttachmentMetadataBindings(query: QueryFn, sheetId: string,
   cells: readonly ArchiveAttachmentCellPlan[]): Promise<RecoveryArchiveAttachmentMetadataBinding[]> {
   const bindings: RecoveryArchiveAttachmentMetadataBinding[] = []
   const seen = new Set<string>()
   for (const cell of cells) for (const attachmentId of new Set([...cell.beforeIds, ...cell.targetIds])) {
-    if (seen.has(attachmentId)) refused()
+    if (seen.has(attachmentId)) throw new ArchiveAttachmentMetadataBindingError()
     seen.add(attachmentId)
     const found = await query(`SELECT to_jsonb(a) AS metadata FROM multitable_attachments a
       WHERE id=$1 AND sheet_id=$2 AND record_id=$3 AND field_id=$4 FOR SHARE OF a`,
     [attachmentId, sheetId, cell.recordId, cell.fieldId])
-    if (found.rows.length !== 1) refused()
+    if (found.rows.length !== 1) throw new ArchiveAttachmentMetadataBindingError()
     const row = (found.rows[0] as { metadata?: Record<string, unknown> }).metadata
     if (!row || row.storage_provider !== 'local' || typeof row.storage_path !== 'string' || !row.storage_path
       || typeof row.storage_file_id !== 'string' || !row.storage_file_id
-      || typeof row.filename !== 'string' || !row.filename || typeof row.mime_type !== 'string' || !row.mime_type) refused()
+      || typeof row.filename !== 'string' || !row.filename || typeof row.mime_type !== 'string' || !row.mime_type) throw new ArchiveAttachmentMetadataBindingError()
     bindings.push({ attachmentId, recordId: cell.recordId, fieldId: cell.fieldId,
       metadataHash: hashArchiveAttachmentMetadata(row) })
   }

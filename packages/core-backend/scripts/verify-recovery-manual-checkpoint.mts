@@ -2131,6 +2131,10 @@ try {
         assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'forbidden' })
         assert.equal(uploadAttempts, 0)
         allowRestore = true
+        assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
+          apply: { ...facadeInput.apply, evaluatePlanAuthorization: async () => false } }),
+        { ok: false, reason: 'forbidden' })
+        assert.equal(uploadAttempts, 0, 'plan permission denial must refuse before staging')
         for (const unavailable of ['key', 'hold'] as const) {
           const blocked = await restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
             transaction: work => uploadInput.transaction(async q => {
@@ -2237,6 +2241,26 @@ try {
         assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
         const stageCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages')).rows[0].n
         const stagesBeforePublic = await stageCount()
+        try {
+          await query(`INSERT INTO field_permissions (sheet_id,field_id,subject_type,subject_id,visible,read_only)
+            VALUES ($1,$2,'user',$3,true,true)`, ['no-genesis', fieldId, actorId])
+          const revokedField = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(revokedField.status, 403, JSON.stringify(await revokedField.json()))
+          assert.equal(await stageCount(), stagesBeforePublic, 'field permission revocation must refuse before staging')
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        } finally {
+          await query(`DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2
+            AND subject_type='user' AND subject_id=$3`, ['no-genesis', fieldId, actorId])
+        }
+        try {
+          await query('UPDATE multitable_attachments SET field_id=NULL WHERE id=$1', [restoredIds[0]])
+          const movedBinding = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(movedBinding.status, 409, JSON.stringify(await movedBinding.json()))
+          assert.equal(await stageCount(), stagesBeforePublic, 'original binding drift must refuse before staging')
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        } finally {
+          await query('UPDATE multitable_attachments SET field_id=$2 WHERE id=$1', [restoredIds[0], fieldId])
+        }
         const retainedFilename = (await query('SELECT filename FROM multitable_attachments WHERE id=$1', [restoredIds[0]])).rows[0].filename
         try {
           await query('UPDATE multitable_attachments SET filename=$2 WHERE id=$1', [restoredIds[0], 'synthetic-metadata-drift.bin'])

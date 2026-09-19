@@ -4,7 +4,7 @@ import type { QueryFn } from './permission-service'
 import type { RecoveryArchiveCompleteSectionState } from './recovery-archive-reconstructor'
 import type { RecoveryArchiveReaderInput } from './recovery-archive-reader'
 import type { ExactAnchorApplyInput, MaterializedArchiveLink } from './exact-anchor-recovery-execute'
-import { lockArchiveSyncBinding, prepareMaterializedArchiveRecoveryPreviewScopeInternal } from './exact-anchor-recovery-execute'
+import { ApplyRefusalError, lockArchiveSyncBinding, prepareMaterializedArchiveRecoveryPreviewScopeInternal } from './exact-anchor-recovery-execute'
 import { buildPreviewPlanDetails, loadFieldSurfaceForPreview, loadLiveByIdForPreview } from './exact-anchor-recovery-route'
 import { hydrateLiveLinkProjection } from './live-link-projection-integrity'
 import { planArchiveAttachmentCells, projectArchiveAttachmentCells } from './recovery-archive-attachment-plan'
@@ -32,10 +32,10 @@ export async function prepareArchiveAttachmentBatch(input: {
   const tokenHash = createHash('sha256').update(apply.token).digest('hex')
   const sourceBinding = { claims, workspaceId: archive.selectedBinding.workspaceId, baseId: archive.selectedBinding.baseId }
   const prepared = await transaction(async query => {
-    if (!(await apply.preliminaryFullRead(query))) refused()
+    if (!(await apply.preliminaryFullRead(query))) throw new ApplyRefusalError('forbidden')
     await lockArchiveSyncBinding(query, apply, sourceBinding)
     const loaded = await loadLiveByIdForPreview(query, apply.sheetId)
-    if (!loaded.ok) refused()
+    if (!loaded.ok) throw new ApplyRefusalError('recovery-trust-required')
     const surface = await loadFieldSurfaceForPreview(query, apply.sheetId)
     const live = await hydrateLiveLinkProjection(query, loaded.liveById, surface.writableLinkFieldIds)
     const scope = prepareMaterializedArchiveRecoveryPreviewScopeInternal({
@@ -43,18 +43,19 @@ export async function prepareArchiveAttachmentBatch(input: {
       liveById: live, selectedRecordIds: input.selectedRecordIds, selectedFieldIds: input.selectedFieldIds,
       writableLinkFieldIds: surface.writableLinkFieldIds, restorableFieldIds: new Set(surface.fieldById.keys()),
     })
-    if (!scope.ok) refused()
+    if (scope.ok === false) throw new ApplyRefusalError(scope.reason)
     const cells = planArchiveAttachmentCells({ targets: state.records, live,
       fieldTypes: surface.rawTypeById, index: state.attachments_index,
       ...(input.selectedRecordIds.length ? { selectedRecordIds: input.selectedRecordIds } : {}),
       ...(input.selectedFieldIds.length ? { selectedFieldIds: input.selectedFieldIds } : {}) })
     const details = buildPreviewPlanDetails(scope.targetRecords, scope.liveById, surface.fieldIds,
       claims.mode, { fieldById: surface.fieldById, rawTypeById: surface.rawTypeById })
-    if (details.summary.driftCount || details.summary.resurrectIds.length) refused()
+    if (details.summary.driftCount) throw new ApplyRefusalError('schema-drift')
+    if (details.summary.resurrectIds.length) throw new ApplyRefusalError('inbound-unprovable')
     const context = { mode: claims.mode, sheetId: apply.sheetId, actorId: apply.actorId, plan: details.plan,
       revertWrites: projectArchiveAttachmentCells(details.revertWrites, live, cells),
       deleteRecordIds: details.deleteRecordIds }
-    if (!(await apply.evaluatePlanAuthorization(query, context))) refused()
+    if (!(await apply.evaluatePlanAuthorization(query, context))) throw new ApplyRefusalError('forbidden')
     const metadata = await loadArchiveAttachmentMetadataBindings(query, apply.sheetId, cells)
     const binding = archive.selectedBinding
     assertRecoveryArchiveSyncPlanMatchesClaims(compileRecoveryArchiveSyncPlan({
@@ -88,5 +89,3 @@ export async function prepareArchiveAttachmentBatch(input: {
   }
   return { index: state.attachments_index, metadata: prepared.metadata, staged }
 }
-
-function refused(): never { throw new Error('ARCHIVE_ATTACHMENT_RESTORE_PREPARATION_REFUSED') }
