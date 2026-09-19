@@ -1626,6 +1626,89 @@ try {
   assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs
     WHERE attachment_id IN ('manual-live-attachment','manual-deleted-attachment')`)).rows[0].n, 2)
   console.log('PASS: physically purged in-scope attachment refuses fresh admission with zero generation/request/pin side effects')
+  const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
+  const sourceStorage = new LocalStorageProvider(join(root, 'attachment-source'))
+  const syntheticAttachments = (await query(`SELECT id FROM multitable_attachments WHERE sheet_id='no-genesis' ORDER BY id`)).rows
+  for (const row of syntheticAttachments) {
+    const bytes = Buffer.from(`synthetic-${row.id}`)
+    const file = await sourceStorage.uploadContentAddressed(bytes, { filename: 'source.bin', contentType: 'application/octet-stream' })
+    await query(`UPDATE multitable_attachments SET storage_path=$2,size=$3,storage_provider='local',
+      blob_purged_at=NULL,blob_purge_claimed_at=NULL WHERE id=$1`, [row.id, file.path, bytes.length])
+  }
+  let attachmentTransaction = false
+  const attachmentReadTransaction: Parameters<typeof manualAdmission.bindRecoveryArchiveManualAttachmentRead>[0] =
+    (work) => transaction(async () => {
+      attachmentTransaction = true
+      try { return await work(query) } finally { attachmentTransaction = false }
+    })
+  const newAttachmentSource = async () => {
+    const result = await admit({ ...admissionRequest, requestId: randomUUID() })
+    assert.ok(result.source)
+    return result
+  }
+  const verifiedSource = await newAttachmentSource()
+  let reads = 0
+  const readAttachments = manualAdmission.bindRecoveryArchiveManualAttachmentRead(attachmentReadTransaction,
+    async () => true, async (key) => {
+      assert.equal(attachmentTransaction, false, 'SOURCE_FILE_IO_MUST_BE_OUTSIDE_TRANSACTION')
+      reads += 1
+      return sourceStorage.readContentAddressed(key)
+    })
+  const verifiedAttachments = await readAttachments(verifiedSource.source!)
+  assert.equal(reads, syntheticAttachments.length)
+  for (const attachment of verifiedAttachments) {
+    assert.deepEqual(attachment.plaintext, Buffer.from(`synthetic-${attachment.attachmentId}`))
+    const pin = (await pins(verifiedSource.generationId)).find((row) => row.attachment_id === attachment.attachmentId)
+    assert.equal(pin.availability, 'available')
+    assert.equal(pin.content_sha256, attachment.plaintextSha256)
+    assert.equal(pin.immutable_version, attachment.sourceVersion)
+    assert.equal(pin.content_size_bytes, String(attachment.sizeBytes))
+    attachment.plaintext.fill(0)
+  }
+  const deniedRead = manualAdmission.bindRecoveryArchiveManualAttachmentRead(attachmentReadTransaction,
+    async () => false, async () => { throw new Error('UNAUTHORIZED_SOURCE_IO') })
+  await assert.rejects(deniedRead(verifiedSource.source!), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+  for (const failure of ['digest', 'version', 'size', 'revocation', 'source-change', 'lease'] as const) {
+    const attempt = failure === 'lease'
+      ? await createRecoveryArchiveManualAdmission(uploadInput.transaction, { ...admissionPolicy, leaseSeconds: 1 })(
+        { ...admissionRequest, requestId: randomUUID() }) : await newAttachmentSource()
+    let allowed = true
+    const read = manualAdmission.bindRecoveryArchiveManualAttachmentRead(attachmentReadTransaction,
+      async () => allowed, async (key) => {
+        const result = await sourceStorage.readContentAddressed(key)
+        if (failure === 'digest') result.bytes[0] ^= 1
+        if (failure === 'version') result.immutableVersion = 'sha256:' + '0'.repeat(64)
+        if (failure === 'size') result.sizeBytes += 1
+        if (failure === 'revocation') allowed = false
+        if (failure === 'lease') await query('SELECT pg_sleep(1.1)')
+        if (failure === 'source-change') await query(`UPDATE multitable_attachments SET size=size+1 WHERE storage_path=$1`, [key])
+        return result
+      })
+    try {
+      await assert.rejects(read(attempt.source!), { message: failure === 'revocation'
+        ? 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' : failure === 'source-change'
+          ? 'RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED' : failure === 'lease'
+            ? 'RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE' : 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_CHANGED' })
+      assert.ok((await pins(attempt.generationId)).every((row) => row.availability === 'mutable'))
+    } finally {
+      if (failure === 'source-change') for (const row of syntheticAttachments) {
+        await query('UPDATE multitable_attachments SET size=$2 WHERE id=$1', [row.id, Buffer.byteLength(`synthetic-${row.id}`)])
+      }
+    }
+  }
+  const rollbackSource = await newAttachmentSource()
+  let transitions = 0
+  const failSecondTransition = manualAdmission.bindRecoveryArchiveManualAttachmentRead(
+    (work) => transaction(() => work(async (text, params) => {
+      if (text.includes('UPDATE public.meta_recovery_archive_attachment_refs source_pin') && ++transitions === 2) {
+        throw new Error('SYNTHETIC_PRIVATE_TRANSITION_FAILURE')
+      }
+      return query(text, params)
+    })), async () => true, (key) => sourceStorage.readContentAddressed(key))
+  await assert.rejects(failSecondTransition(rollbackSource.source!), { message: 'RECOVERY_ARCHIVE_SOURCE_PIN_VERIFICATION_REFUSED' })
+  assert.equal(transitions, 2)
+  assert.ok((await pins(rollbackSource.generationId)).every((row) => row.availability === 'mutable'))
+  console.log('PASS: real local attachment reads outside transactions atomically verify source pins; digest/version/size/revocation/source movement and second-pin failure refuse without partial available pins')
   console.log('PASS: bootstrap unchanged; two checkpoint generations and exact retries; changed content, missing genesis, ordinary forgery and extra payload refused')
   console.log('PASS: two-client retry waits at generation lock; one revision set; expired lease/expiry and mismatched fence reject with zero revisions')
   console.log('MUTATION: removing dedicated seal guard admits ordinary forgery; transaction rolled back, canonical function restored')

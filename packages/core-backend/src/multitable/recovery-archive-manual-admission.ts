@@ -14,7 +14,8 @@ import { readRecoveryArchiveCaptureSource, type RecoveryArchiveCaptureSource } f
 import { canonicalizeRecoveryArchiveJson, canonicalizeRecoveryArchiveSectionRows } from './recovery-archive-manifest'
 import { buildRecoveryArchiveSectionRows, RECOVERY_ARCHIVE_DATA_SECTION_NAMES } from './recovery-archive-section-rows'
 import { readRecoveryArchivePreparedCapture, type RecoveryArchivePreparedCaptureOwner } from './recovery-archive-prepared-capture'
-import { claimRecoveryArchiveSourcePinIntent } from './recovery-archive-source-pin'
+import { claimRecoveryArchiveSourcePinIntent, verifyRecoveryArchiveSourcePin } from './recovery-archive-source-pin'
+import type { ContentAddressedAttachmentSource } from '../services/StorageService'
 import type { RecoveryArchiveNonceReservationSink } from './recovery-archive-crypto'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from './recovery-archive-contract'
 import { buildRecoveryArchiveSnapshotPlan } from './recovery-archive-snapshot-plan'
@@ -36,6 +37,7 @@ const sources = new WeakMap<RecoveryArchiveManualSource, {
   consumed: boolean
   keyRowVersion: string
   repeat: boolean
+  leaseUntil: string
 }>()
 
 function sourceHash(source: RecoveryArchiveCaptureSource): string {
@@ -72,6 +74,53 @@ export function bindRecoveryArchiveManualSourceRecheck(
 ) {
   return async (source: RecoveryArchiveManualSource): Promise<void> => {
     await transaction(async (query) => { await recheckManualSource(query, source, authorize) })
+  }
+}
+
+/** Local content identity must already exist at upload time. IO never holds a database transaction. */
+export function bindRecoveryArchiveManualAttachmentRead(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveManualRequest) => Promise<boolean>,
+  readContentAddressed: (storageKey: string) => Promise<ContentAddressedAttachmentSource>,
+) {
+  return async (source: RecoveryArchiveManualSource) => {
+    const entry = await transaction((query) => recheckManualSource(query, source, authorize))
+    const attachments: Array<{ attachmentId: string; sourceVersion: string; plaintextSha256: string;
+      sizeBytes: number; plaintext: Buffer }> = []
+    try {
+      for (const candidate of entry.snapshot.attachmentCandidates) {
+        const match = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sha256-([0-9a-f]{64})$/.exec(candidate.storagePath)
+        if (candidate.storageProvider !== 'local' || candidate.blobPurged || !match) {
+          throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+        }
+        await transaction((query) => recheckManualSource(query, source, authorize))
+        let result: ContentAddressedAttachmentSource
+        try { result = await readContentAddressed(candidate.storagePath) } catch {
+          throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE')
+        }
+        const plaintext = Buffer.from(result.bytes)
+        attachments.push({ attachmentId: candidate.attachmentId, sourceVersion: result.immutableVersion,
+          plaintextSha256: result.contentSha256, sizeBytes: result.sizeBytes, plaintext })
+        if (result.immutableVersion !== `sha256:${match[1]}` || result.contentSha256 !== match[1]
+          || createHash('sha256').update(plaintext).digest('hex') !== match[1]
+          || result.sizeBytes !== plaintext.length || String(plaintext.length) !== candidate.sizeBytes) {
+          throw new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_CHANGED')
+        }
+      }
+      // All pin transitions commit together, only after a fresh source/permission/lease recheck.
+      await transaction(async (query) => {
+        await recheckManualSource(query, source, authorize)
+        for (const attachment of attachments) await verifyRecoveryArchiveSourcePin(query, {
+          ...entry.owner, keyId: entry.binding.keyId, leaseUntil: entry.leaseUntil,
+          attachmentId: attachment.attachmentId, immutableVersion: attachment.sourceVersion,
+          contentSha256: attachment.plaintextSha256, contentSizeBytes: String(attachment.sizeBytes),
+        })
+      })
+      return attachments
+    } catch (error) {
+      for (const attachment of attachments) attachment.plaintext.fill(0)
+      throw error
+    }
   }
 }
 
@@ -293,7 +342,7 @@ export function bindRecoveryArchiveManualAdmission(
       const source: RecoveryArchiveManualSource = Object.freeze({ [sourceBrand]: true as const })
       sources.set(source, { identity, owner: { generationId, ownerKind: plan.ownerKind,
         ownerId: plan.ownerId, ownerFence: plan.ownerFence, sourceVectorHash }, snapshot, hash: sourceHash(snapshot),
-      consumed: false, repeat, keyRowVersion: policy.keyRowVersion, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
+      consumed: false, repeat, leaseUntil, keyRowVersion: policy.keyRowVersion, binding: { formatVersion: 1, generationId, workspaceId: identity.workspaceId,
         baseId: identity.baseId, sheetId: identity.sheetId, anchorOperationId: allocated.snapshotOperationId,
         anchorSeq: allocated.snapshotSeq, checkpointId, keyId: policy.keyId, aeadAlgorithm: 'aes-256-gcm' } })
       return { generationId, replayed: false, source }
