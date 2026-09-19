@@ -51,12 +51,23 @@ process.env.ATTACHMENT_PATH = join(root, 'attachment-source')
 let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
+let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
 try {
   await admin.connect()
   assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
   assert.equal((await admin.query('SELECT current_user AS owner')).rows[0].owner, 'tm_manual')
   await admin.query(`CREATE DATABASE "${database}"`)
   created = true
+  // The real download route uses the main pool, not the archive injection port.
+  // Replace only this process's unused default with the verified owned database.
+  downloadPools = (require('../src/integration/db/connection-pool.ts') as typeof import('../src/integration/db/connection-pool')).poolManager
+  assert.equal(downloadPools.get().getInternalPool().totalCount, 0)
+  await downloadPools.close()
+  const downloadPool = downloadPools.createPool('main', { ...connection, database,
+    connectionString: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
+    max: 4, connectionTimeoutMillis: 5000 })
+  assert.deepEqual((await downloadPool.query('SELECT current_database() AS db,current_user AS owner')).rows[0],
+    { db: database, owner: 'tm_manual' })
   await writeFile(`${root}/config.json`, '{}', { mode: 0o600 })
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
@@ -2239,6 +2250,17 @@ try {
         assert.equal((await fetch(executeUrl, { method: 'POST', headers, body: executeBody })).status, 409)
         assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], afterPublic)
         console.log('PASS: public HTTP preview/execution restores both original attachment bytes, checks authentication, increments once and refuses token replay')
+        const verifyDownloads = async () => {
+          for (const id of restoredIds) {
+            const downloadUrl = `http://127.0.0.1:${address.port}/api/multitable/attachments/${encodeURIComponent(id)}`
+            const response = await fetch(downloadUrl, { headers })
+            assert.equal(response.status, 200)
+            assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(`synthetic-${id}`))
+            assert.equal((await fetch(downloadUrl)).status, 401)
+          }
+        }
+        await verifyDownloads()
+        console.log('PASS: production attachment download route returns both restored original binaries; anonymous download refuses')
         if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
           const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
           await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, async () => {
@@ -2256,6 +2278,7 @@ try {
                 const metadata = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
                 assert.deepEqual((await sourceStorage.readContentAddressed(metadata.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
               }
+              await verifyDownloads()
             }
           }, 'attachment')
         }
@@ -2311,6 +2334,7 @@ try {
   else process.env.ATTACHMENT_PATH = originalAttachmentPath
   await db?.destroy()
   await client?.end()
+  await downloadPools?.close()
   if (created) {
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
     await admin.query(`DROP DATABASE "${database}"`)
