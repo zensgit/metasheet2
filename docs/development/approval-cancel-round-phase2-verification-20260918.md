@@ -4649,3 +4649,83 @@ attendance 两个真库兄弟 **54 passed**、`attendance-plugin.test.ts` **166 
 - **纯 `legacy` posture 仍未被执行覆盖**;`authoritative` / `shadow` / `eligible` 两条路径上仍全部 UNEXERCISED。
 - **`policy_snapshot_at_decision` 在 blocked-by-配置 分支上写 `roundPolicy: null` + `roundPolicyError`** 是**实现者裁量**,
   已 FLAGGED 待 owner 登记;它有闸(M-C3-5a/5b),但它不是锁文点名的形状。
+
+
+### 6. 交付后自扫:两条更正 + 一次闭世界普查(同一轮,2026-09-19)
+
+按「绝对断言自扫必须机械化」,交付前把本轮写下的绝对断言逐条跑命令核。查出两条,都记在这里而不是悄悄改掉。
+
+#### 6.1 ⛔ 更正:`40b07e364` 的提交信息点错了钉的名字
+
+该提交正文写「already in the **ci-realdb-step-contract FILES array** and the ci-wiring population」。
+机械核:
+
+```
+$ grep -c "approval-cancel-round" scripts/ops/ci-realdb-step-contract.mjs
+0
+$ grep -l "cancel-round" scripts/ops/*-ci-wiring.test.mjs | wc -l
+0          ← scripts/ops 下 38 个 *-ci-wiring 守卫,没有一个点名 cancel-round
+```
+
+`ci-realdb-step-contract.mjs` 是**库**,不持有任何 FILES 数组;它导出 `REAL_DB_STEP_IDS` 与三个解析器。
+七个 cancel-round 套件的硬编码人口在**另一个文件**里:
+
+```
+$ grep -n "approval-cancel-round-redemption" packages/core-backend/tests/unit/approval-cancel-round-ci-wiring.test.ts
+63:  'tests/integration/approval-cancel-round-redemption.db.test.ts',
+```
+
+`packages/core-backend/tests/unit/approval-cancel-round-ci-wiring.test.ts` 的 `CANCEL_ROUND_REALDB_FILES`(七条),
+它**消费** `ci-realdb-step-contract.mjs` 的解析器来断言每条都是必需步骤 `approval-real-db-integration` 的整文件参数。
+所以**实质结论不变**(本文件确实在一个会因删除而变红的闭世界人口里),**但名字错了**,更正如上。实跑:
+
+```
+$ npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts     ⇒ 6 passed (6)
+$ npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts    ⇒ 351 passed (351)
+```
+
+补充清单第 1 条的闭世界陷阱**不适用于本文件**(它在人口内);但要说清:该人口是**七条硬编码**,新增第八个
+cancel-round 真库文件必须同时进那个数组,否则守卫照常绿。本轮没有新增文件,所以不触发这条义务。
+
+#### 6.2 ⚠️ 新分支破坏了 §4 的「同形」,而套件里没有任何东西会因此变红
+
+§4 要求 `policy_snapshot_at_decision` 与 `policy_snapshot_at_create` **同形**,且 判据 IV `expired` 用例把它钉成了
+断言(`Object.keys(decision).sort()` 等于 `Object.keys(create).sort()`)。本轮新增的 blocked-by-配置 分支**刻意**写了
+**不同的形状**:`roundPolicy: null` + 多一个 `roundPolicyError` 键。`expired` 用例走的是另一条路,所以它照常绿——
+**这个背离是我自己的新用例断言出来的,不是被既有闸抓出来的**。如实登记为背离,不是「顺便也覆盖了」。
+
+**它今天不是活缺陷,而这是查出来的,不是推出来的。** 该列的闭世界读者普查(排除 node_modules):
+
+```
+$ grep -rn "policy_snapshot_at_decision\|policySnapshotAtDecision" packages plugins apps scripts \
+    --include='*.ts' --include='*.cjs' --include='*.mjs' --include='*.vue' --include='*.js' | grep -v node_modules | wc -l
+26
+```
+
+26 处的分布:**写入方** 2 处(`ApprovalProductService.ts:9211` C-3 收口、`:9401` 兑现)、**构造方** 2 处
+(`:9071` 本轮新增分支、`:9081` 正常路径)、**参数传递/类型** 8 处、**迁移里的列定义与注释** 2 处、**注释** 1 处、
+**测试** 11 处(全在 `approval-cancel-round-redemption.db.test.ts`)。
+
+**生产读取方:0 处。** 全仓没有任何一处做 `snapshot.roundPolicy.windowDays` 之类的解引用或展开,所以一行
+`roundPolicy: null` 不会让任何已提交的行在读路径上抛错。结论:**声明式背离 + 潜伏缺口**,与本文件对 ⑥ 的处置同族,
+**不是**今天可观测的回归。
+
+⚠️ 但它是一条**需要 owner 登记**的合同形状变更,已在设计 MD §R2 以 FLAGGED 标出。若 owner 要求严格同形,替代形状
+是 `roundPolicy: { suite: null, windowDays: null }` + 另一列/另一键承载 code——**不要**退回 C-1 之前的兜底去造一个
+看起来合法的 suite/window 对。
+
+#### 6.3 本轮补跑:同一步骤里与 cancel-round 相邻的三个审批真库套件
+
+`plugin-tests.yml:1663-1665` 与七个 cancel-round 文件同属 `approval-real-db-integration` 这一个步骤,且它们都吃
+`ApprovalProductService.ts`(本轮改过)。在**同一个处女库** `metasheet2_fix_c2` 里补跑:
+
+```
+$ … run tests/integration/approval-instance-readability-s1.db.test.ts \
+      tests/integration/approval-comments.db.test.ts \
+      tests/integration/approval-lock9-process-attachments-realdb.db.test.ts
+  Test Files  3 passed (3)
+       Tests  124 passed (124)
+```
+
+⚠️ 该步骤的完整清单远不止这十个文件(`:1600-1672` 还有目录/考勤等一长串);本轮**只跑了这十个**——七个
+cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复现」。
