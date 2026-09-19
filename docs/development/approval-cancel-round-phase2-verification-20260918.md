@@ -4499,3 +4499,79 @@ tests/integration/approval-cancel-round-redemption.db.test.ts` → **18 passed |
 unchanged (this pass touched zero test files). No `src/` or test file in the branch diff was touched
 by this pass, so every previous pass's mutation probes (M-A/M-B), full real-DB/unit/type-check lane
 evidence, and the `ApprovalProductService.ts` production return-type citations stand unchanged.
+
+---
+
+## Codex 审阅第 3 条修复 —— 验证(2026-09-19)
+
+- 基线:`feat/approval-cancel-round-phase2` @ `4a08a576e`(缺陷存在的 head)
+- 工作树:`.../scratchpad/wt-cancel-round-p2`,**未 rebase**(C-1 并行修复中)
+- 真库:`metasheet2_fix_c2_evt`(本地私有,`createdb` + 全量迁移;审毕 `dropdb`)
+- 被验对象:本 PR 的两个提交(生产件 / 测试件各一)
+- 纪律:mutation 一律 `cp` 备份 → 改 → **单独跑** → `cp` 还原 → `cmp`;每次还原后 `git status --porcelain` 只余预期文件
+
+### 1. 判定
+
+**修复成立,且缺陷的原始签名被新用例逐字复现。** 全套件 **22/22 绿**(原 19 + 新 3),`tsc --noEmit` 干净。
+
+最强的一条证据不是新用例本身,而是 **M-C3-1**:删掉提交后投递,账侧 twin 用例报出 `expected { sendsAfterA: +0, sendsAfterB: 1 } to deeply equal { sendsAfterA: 1, sendsAfterB: 1 }` —— 与验证报告 §3.3 探针在 `4a08a576e` 上读到的 `{"sendsAfterA":0,"sendsAfterB":1}` **逐字相同**。也就是说这道闸复现的正是被修的那个缺陷,不是一个形似的替代物。
+
+### 2. Mutation 台账
+
+| # | Mutation | 改动点 | 预期 | **实测** |
+|---|---|---|---|---|
+| **M-C3-1** | 删掉提交后投递调用 | `ApprovalProductService.ts:12440` | 「恰一次」与 twin 用例红 | **2 红 / 20 绿**。twin:`{sendsAfterA: 0, sendsAfterB: 1}`(= 原始缺陷签名);恰一次:`expected +0 to be 1` |
+| **M-C3-2** | 把投递**搬进**事务(post-commit 点同时删除,是 MOVE 不是复制) | `:12242` 前插入 + `:12440` 删除 | 回滚用例红 | **1 红 / 21 绿**,且**只有**回滚用例红:`expected [ { …(4) } ] to deeply equal []` |
+| **M-C3-3** | 去掉 kind 门(无条件发) | `index.cjs:25027` | replay 与 executed 用例红 | **2 红 / 20 绿**:replay 幂等用例 + I3(`executed`)用例,均 `expected [ { …(4) } ] to deeply equal []` |
+
+**M-C3-2 的 21 绿是正确的,不是判别力不足。** 先跑的是「复制版」(保留 post-commit + 增加 in-txn),它红 3 条——但那测的是双发,不是位置。改成**纯 MOVE** 后只剩回滚用例红,这恰恰是应有的结果:其余每个用例都**提交成功**,而事务内发与提交后发在提交成功时字节等价,它们**结构上无法**区分二者。只有回滚用例能。
+
+### 3. 三道新闸各自的正控
+
+每条「断言零」都配了正控,因为 0 同样是「投递根本没绑定」的读数:
+
+| 用例 | 正控 |
+|---|---|
+| 恰一次 | double 被调用 1 次;轮次 `applied`;载荷**整体钉成值**(四字段),不是形状检查 |
+| 回滚零次 | ① double 被调用 1 次(证明兑现真的跑到了,不是更早就失败);② HTTP **500**(P0001 不在 `isRetryableSqlState` 里,所以不是 503 竞争映射);③ 轮次仍 `pending` 且 `ended_at IS NULL`、实例仍 `pending`(**回滚成数据,不只是状态码**);④ 探针零残留(`pg_proc` + `pg_trigger` 计数 0) |
+| replay 零次 | double 被调用 1 次;轮次 `applied`(**提交成功**,所以这个零是「被扣住的发送」而不是「不存在的发送」);replay 的 response 与成功用例**逐字段相同**——若门去读载荷而不是 kind,两个用例将不可区分,去掉门也会照样绿 |
+| 全部 | `expectCancelledEventDeliveryBound()` —— 断言投递**已绑定**,把「它没发」变成「它本可以发而没发」 |
+
+### 4. 回滚杠杆:为什么是它,以及它为什么安全
+
+失败必须落在**兑现返回 `applied` 之后、`COMMIT` 之前**这个夹缝里。更早的失败证明不了任何事(什么都没取消时,零发送是平凡真)。
+
+做法:double 用**被交接的那个事务 client**,建一个在下一次 `approval_records` INSERT 上抛异常的触发器。在 redeem 分支里那次 INSERT 是 `insertApprovalRecord`,距兑现返回若干语句、距 COMMIT 若干语句。实测栈逐字落在预期位置:
+
+```
+error: C2_EVT_FORCED_ROLLBACK
+    at ApprovalProductService.insertApprovalRecord (...:13692:20)
+    at ApprovalProductService.dispatchAction (...:12342:7)
+```
+
+**安全性是实测的,不是推断的。** PostgreSQL 的 DDL 是事务性的,函数与触发器随事务一起回滚——先在 psql 单独验过(`ROLLBACK` 后 `pg_proc`/`pg_trigger` 各 0 行),用例里又把这条做成了**常驻断言**,因为一个泄漏的 `approval_records` BEFORE INSERT 触发器会毒化本文件后面每一个用例。
+
+排除掉的其它杠杆,及排除理由(留档,免得下一个人重走):审批各表**无 DEFERRABLE 约束**(已 grep 全部迁移),所以 `SET CONSTRAINTS ALL DEFERRED` 路线不存在;SERIALIZABLE 竞争(40001)可构造但**非确定**;订阅者内跨连接读取轮次状态来判「提交前/后」**有竞态**(emit 不 await 订阅者,异步读可能在 COMMIT 之后才取快照)。
+
+### 5. 其它闸
+
+| 闸 | 结果 |
+|---|---|
+| `approval-cancel-round-redemption.db.test.ts` | **22/22 绿**(处女库) |
+| `approval-cancel-round-creation.db.test.ts` | 绿 |
+| `attendance-w4c3b-request-operation-routes.db.test.ts` | 绿(HTTP 取消路由被改为调用提出的函数,这是它的兄弟闸) |
+| `attendance-plugin.test.ts` | 绿 |
+| `attendance-w4c2-p12-migration-schema-gates.db.test.ts` | 绿 |
+| unit `approval-product-service.test.ts` + `attendance-uuid-validation-routes.test.ts` | 绿 |
+| `attendance-w4c0-dml-inventory-collector.test.mjs` | **60/60 绿**(index.cjs 被改但未新增 SQL) |
+| `attendance-w4c2-ci-wiring.test.mjs` | **262/262 绿** |
+| `tsc --noEmit` | 干净 |
+
+### 6. 本次验证未覆盖(不得被读成已闭合)
+
+- **P5 的真 posture 变体未做**,显式登记为延后项(见设计 MD 第 7 节)。本次只用 double 覆盖了 `executed` 这个 kind 的门。
+- **纯 `legacy` posture 未被执行覆盖**;实测走到的仍是 `legacy_compat`。
+- `authoritative` / `shadow` / `eligible` 两条路径上仍全部 UNEXERCISED。
+- **真实 `replay` 经此路径不可达**(见设计 MD 第 2 节第 3 点),对应用例是 double 驱动的防御闸,不是可达场景的覆盖。
+- 只做了 Codex 第 3 条。**第 1 条与第 2 条未验、未修。**
+- 本分支**未 rebase**,以上全部结论绑定 `4a08a576e` 这个基点;rebase 后需重跑。
