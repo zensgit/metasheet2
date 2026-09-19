@@ -2,7 +2,17 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump (S3b, P3-6 carried-hardening item) NAMES the `approval_comments
+// idempotent DDL. The current bump (P3-3 fix round, gate P3-5) adds the `approval_fd_signature_*`
+// CHECKs (non-blank + 8192-byte bound) to `approval_form_drafts.signature`, which previously had NO
+// bound at all — matches the amended production migration
+// zzzz20260914120000_create_approval_form_drafts.ts (owner-gated DDL, not applied anywhere outside
+// CI/throwaway test DBs). A DB already bootstrapped under the PRIOR P3-3 version (below) would
+// otherwise keep running with the old, unbounded `signature` column forever — this bump's ALTER
+// TABLE ... ADD CONSTRAINT statements are what force it to converge.
+// The bump before that (P3-3) added the `approval_form_drafts` table itself — matches the same
+// production migration (this bootstrap converges any such DB to the migration's shape without
+// requiring `db:migrate` to have run first).
+// The bump before that (S3b, P3-6 carried-hardening item) NAMES the `approval_comments
 // .instance_id` FK as `approval_cmt_instance_fk`, converging the bootstrap's DDL text with the
 // production migration's — before this bump the bootstrap's `CREATE TABLE`'s FK was UNNAMED
 // (`REFERENCES approval_instances(id) ON DELETE CASCADE` with no `CONSTRAINT` clause), so the two
@@ -28,7 +38,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // The bump before that added Lock-5's `policy_denied` action to the approval_records CHECK so the
 // per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the production
 // migration zzzz20260818090000_add_policy_denied_action_to_approval_records).
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s3b-p36-named-instance-fk'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260914-p33-approval-form-drafts-signature-bounds'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -498,6 +508,48 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_form_field_revisions_instance ON approval_form_field_revisions(instance_id, id)`)
+
+    // P3-3 — `approval_form_drafts` (server-side approval form draft storage). Idempotent
+    // convergence matches the production migration zzzz20260914120000_create_approval_form_drafts.ts
+    // (owner-gated DDL — not applied anywhere outside CI/throwaway test DBs). NO org_id column
+    // (contract §2) and deliberately NO FK to approval_templates (id-type mismatch + templates are
+    // deletable) — see the migration's own docblock for the full reasoning.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_form_drafts (
+        id           text PRIMARY KEY,
+        user_id      text NOT NULL,
+        template_id  text NOT NULL,
+        signature    text NOT NULL,
+        data         jsonb NOT NULL,
+        saved_at     timestamptz NOT NULL DEFAULT now()
+      )
+    `)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_user_nonblank`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_user_nonblank CHECK (user_id ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_template_nonblank`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_template_nonblank CHECK (template_id ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_payload_bounds`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_payload_bounds CHECK (octet_length(data::text) <= 262144)`)
+    // FIX 5 (gate P3-5) — signature previously had no bound at all; give it the same non-blank +
+    // size-bound shape as user_id/template_id/data.
+    // Gate2 P3-A: adding a CHECK to a table that already has a row violating it throws — and this
+    // bootstrap runs in `beforeAll` for every one of the ~85 approval real-DB suites, so ONE
+    // violating row anywhere (e.g. left over from pre-fix test code, or from a gate's own
+    // constructed oversized-signature probe row — both real, measured shapes) would take all of
+    // them down together. This is the TEST bootstrap on a throwaway/reused test DB, not the
+    // production migration (which does not get this treatment — see its own docblock: on a real
+    // table, deleting rows to force a migration through would be its own hazard, so that path is
+    // owner-gated instead) — there is nothing here worth preserving, so DELETE-before-ADD is safe
+    // and self-healing. `NOT VALID` + a separate `VALIDATE CONSTRAINT` (the right call when rows
+    // must not be deleted) would just be extra bootstrap machinery for no benefit in that context.
+    await client.query(
+      `DELETE FROM approval_form_drafts WHERE signature !~ '[!-~]' OR octet_length(signature) > 8192`,
+    )
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_signature_nonblank`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_signature_nonblank CHECK (signature ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_signature_bounds`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_signature_bounds CHECK (octet_length(signature) <= 8192)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_form_drafts_user_saved ON approval_form_drafts (user_id, saved_at DESC)`)
 
     await client.query(
       `INSERT INTO approval_test_schema_bootstrap_state (key, version, completed_at)

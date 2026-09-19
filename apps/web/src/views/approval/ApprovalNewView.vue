@@ -672,7 +672,10 @@ import {
 } from '../../approvals/numberFieldProps'
 import { amountToChineseWords } from '../../approvals/amountInWords'
 import { numberFieldScale } from '../../approvals/amountAutoSum'
-import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
+import { formSchemaSignature } from '../../approvals/formDraft'
+// P3-3: draft STORAGE moved server-side (cross-device + drafts inbox); the signature function
+// above (schema-drift guard) is unchanged and still computed client-side by the caller.
+import { clearFormDraftServer, loadFormDraftServer, saveFormDraftServer } from '../../approvals/serverFormDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalDepartmentPicker, {
   type ApprovalDepartmentValue,
@@ -925,25 +928,76 @@ async function removeAttachment(fieldId: string, attachmentId: string): Promise<
 // see `applyResubmitPrefill` below. Drives the "已从上一次申请预填" notice.
 const prefillNoticeVisible = ref(false)
 
-// G-B2-14: localStorage draft autosave/restore (per user+template; pure helpers in
-// approvals/formDraft.ts). The machinery arms only once BOTH the template and the user id are
-// known; a resubmit-prefill (B2-13) takes precedence — the restore offer is skipped entirely.
+// G-B2-14 / P3-3: server-backed draft autosave/restore (per user+template; storage lives in
+// `approval_form_drafts`, one row per (user, template) — the FE-visible shape is identical to the
+// former localStorage era, only the medium moved). The machinery arms only once the template, the
+// user id, AND (P3-3) the initial restore fetch have all settled — a resubmit-prefill (B2-13)
+// takes precedence and skips the restore offer entirely. `draftUserId` is also used elsewhere in
+// this file (selected-user defaults, :800/:1706) — kept as-is; the draft calls below no longer
+// need it themselves (the server derives the acting user from the auth token), only `templateId`.
 const draftUserId = ref<string | null>(null)
 const draftRestoreVisible = ref(false)
 const pendingDraft = ref<Record<string, unknown> | null>(null)
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
 let draftArmed = false
+// P3-3 FIX C (gate2 P3-D): the debounced SAVE this timer schedules is fire-and-forget
+// (`void saveFormDraftServer(...)`) — cancelling the TIMER (FIX 8, below) only stops a save that
+// has not been ISSUED yet. Once the timer fires, the HTTP request is in flight and clearing the
+// timer does nothing for it. `draftSaveInFlight` tracks that in-flight request's promise so a
+// later CLEAR (submit/discard) can wait for it to settle FIRST — see the submit handler below for
+// why this, and not a `res.ok`/abort-based approach, is what actually closes the race.
+//
+// FIX (this round, reviewer-found): the FIRST version of this fix let `scheduleDraftSave` simply
+// OVERWRITE this slot with each new save's own promise — a single slot, not a queue. That is only
+// correct while at most one save is ever outstanding, but two CAN be outstanding at once (the user
+// types again 800ms later while the first save's HTTP request is still on the wire). If the LATER
+// save's promise settles BEFORE the earlier one, the old `.finally` (keyed on
+// `draftSaveInFlight === <this call's own promise>`) nulled the slot while the earlier save was
+// still unsettled — a quiescing caller reading the slot at that instant saw "nothing in flight"
+// and issued its CLEAR immediately, and if the earlier save's transaction then committed AFTER
+// that CLEAR's DELETE had already committed, its INSERT resurrected the draft. Same resurrection
+// shape FIX C below closes for "one save in flight"; this is that same window reached through a
+// SECOND, later-issued save completing first, not through a rejected/late network response —
+// reproduced with an in-memory probe of the extracted save/clear helpers.
+//
+// This slot is now the TAIL of a promise CHAIN scoped to THIS COMPONENT INSTANCE, not a single
+// overwritten promise — see `scheduleDraftSave` below: each new save is chained onto whatever this
+// slot currently holds, so (a) saves issued from this instance run in the order they were
+// scheduled (a later save's fetch is not even issued until the earlier one has settled) and (b)
+// this slot always names the chain's current tail, so any quiescing caller reading it is always
+// waiting on the true tail, never a promise a later save has already superseded and nulled out
+// from under it. `cancelPendingDraftSaveThenClear` needed NO change for this — it already just
+// reads whatever is in this slot, and this slot is now always correct.
+//
+// Scope, precisely: NOT per-(user,template) — `currentDraftTemplateId()` is re-read independently
+// at each call site (this timer's own callback, and `cancelPendingDraftSaveThenClear`), so if this
+// instance were ever reused across a templateId change (Vue Router's default same-record-reuse
+// behavior — this route has no `:key` and no `beforeRouteUpdate` guard to force a remount, though
+// nothing here relies on one existing), a save queued for the OLD template would chain ahead of
+// one for the NEW template. That is a latency artifact, not a resurrection risk: every save/clear
+// still carries its OWN correct templateId captured at ITS OWN call time, so the wrong-order
+// effect is "the newer template's autosave is delayed," never "data lands under the wrong row."
+//
+// Chaining relies on `saveFormDraftServer` never rejecting (its own `try { … } catch {}` body in
+// serverFormDraft.ts) — a link that rejected would skip every save queued behind it. One accepted,
+// deliberate consequence: a slow save now makes later debounced saves QUEUE behind it in order
+// rather than fire independently of it — the most recently typed content still wins once the
+// chain drains, just later than before.
+let draftSaveInFlight: Promise<void> | null = null
 
-function draftStorageKey(): string | null {
+function currentDraftTemplateId(): string | null {
   const templateId = route.params.templateId as string
-  if (!draftUserId.value || !templateId || !template.value) return null
-  return formDraftKey(draftUserId.value, templateId)
+  if (!templateId || !template.value) return null
+  return templateId
 }
 
-function offerDraftRestore(): void {
-  const key = draftStorageKey()
-  if (!key || !template.value) return
-  const draft = loadFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema))
+/** P3-3: now async (a network round-trip, not a synchronous storage.getItem). Callers MUST await
+ *  this before arming `draftArmed` — see onMounted below — otherwise the 800ms autosave watcher
+ *  could fire (and clobber this restore, or be clobbered by it) while the GET is still in flight. */
+async function offerDraftRestore(): Promise<void> {
+  const templateId = currentDraftTemplateId()
+  if (!templateId || !template.value) return
+  const draft = await loadFormDraftServer(templateId, formSchemaSignature(template.value.formSchema))
   if (!draft) return
   pendingDraft.value = draft
   draftRestoreVisible.value = true
@@ -1005,9 +1059,45 @@ async function applyDraftRestore(): Promise<void> {
   }
 }
 
+/** P3-3 FIX C (gate2 P3-D) — the "quiesce then clear" sequence, factored out so the submit path and
+ *  the discard-restore path cannot drift onto different behavior again (which is exactly how
+ *  `discardDraftRestore` missed this fix the first time — gate2 P3-D residual #1). See the submit
+ *  call site's own comment (below) for the full race/residual/rejected-alternatives writeup this
+ *  sequence closes; this function IS that sequence: cancel the pending debounce timer (a save that
+ *  has not been ISSUED yet must never fire after the clear) and defer the CLEAR itself until any
+ *  already-IN-FLIGHT save (issued, HTTP request already sent) settles — because a save whose fetch
+ *  RESOLVES via a real response can only do so after its own server-side transaction has already
+ *  committed or rolled back, so once that promise settles there is no window left for this CLEAR to
+ *  land first.
+ *
+ *  Deliberately does NOT touch `draftArmed` — that is each CALL SITE's own decision, not shared.
+ *  `handleSubmit` sets `draftArmed = false` at its own call site because the component is about to
+ *  navigate away and never needs to autosave again; `discardDraftRestore` must NOT do that — it
+ *  runs early in this component's lifecycle (right after mount, before the user has necessarily
+ *  typed anything), and the user is expected to keep filling out THIS SAME form afterward. Sharing
+ *  a permanent disarm here would silently kill autosave for the rest of the session on every
+ *  discard — a session-wide, common-path regression, not a narrow one (unlike the submit call
+ *  site's own version of this hazard — see that site's comment).
+ *
+ *  Fire-and-forget from the CALLER's point of view — neither `saveFormDraftServer` nor
+ *  `clearFormDraftServer` ever throws, and nothing here needs to block the caller on a network
+ *  round-trip. */
+function cancelPendingDraftSaveThenClear(templateId: string | null): void {
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+  const pendingSave = draftSaveInFlight
+  if (templateId) {
+    void (pendingSave ?? Promise.resolve()).finally(() => {
+      void clearFormDraftServer(templateId)
+    })
+  }
+}
+
 function discardDraftRestore(): void {
-  const key = draftStorageKey()
-  if (key) clearFormDraft(window.localStorage, key)
+  const templateId = currentDraftTemplateId()
+  cancelPendingDraftSaveThenClear(templateId)
   pendingDraft.value = null
   draftRestoreVisible.value = false
 }
@@ -1016,8 +1106,8 @@ function scheduleDraftSave(): void {
   if (!draftArmed) return
   if (draftSaveTimer) clearTimeout(draftSaveTimer)
   draftSaveTimer = setTimeout(() => {
-    const key = draftStorageKey()
-    if (!key || !template.value) return
+    const templateId = currentDraftTemplateId()
+    if (!templateId || !template.value) return
     // Flag ON (#4195 G13): attachment ids ARE persisted in the draft, because the restore path now
     // detects stale refs (`applyDraftRestore` above) — a draft that outlives the 7-day unbound GC has
     // its swept ids dropped and surfaced at restore instead of being carried into a submission. Flag
@@ -1026,7 +1116,32 @@ function scheduleDraftSave(): void {
     const data = attachmentUploadEnabled.value
       ? { ...formData }
       : stripAttachmentFields(template.value.formSchema, { ...formData })
-    saveFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema), data)
+    // Snapshotted NOW, at debounce-fire time — same timing as `data` above, and as the whole
+    // pre-fix synchronous call — even though the actual network call below may not run until
+    // later (chained behind an earlier unsettled save). Reading `template.value` again from
+    // inside the (possibly much later) `.then()` callback instead would let a template swap that
+    // happens while this save is queued silently change what gets persisted.
+    const schemaSignature = formSchemaSignature(template.value.formSchema)
+    // Fire-and-forget from THIS call site's point of view — saveFormDraftServer never throws, and
+    // the 800ms debounce already keeps this off the hot path, so nothing here needs to await the
+    // network round-trip. The promise itself IS retained (`draftSaveInFlight`), though: it is the
+    // only way a later submit/discard-triggered CLEAR can tell "a save I already issued has not
+    // settled yet" and wait for it — see FIX C above and the submit handler below.
+    //
+    // Chained onto the EXISTING slot, not assigned over it (this round's fix — see the slot's own
+    // declaration comment above for the reverse-completion-order window this closes, and for this
+    // slot's exact scope): the actual `saveFormDraftServer` call is deferred inside the `.then()`,
+    // so if an earlier save from this instance is still unsettled, this one is not even ISSUED
+    // until that earlier one settles — saves from this instance always run in issue order, and
+    // this slot always names the chain's current TAIL, never a stale link a later save has already
+    // superseded.
+    const tail: Promise<void> = (draftSaveInFlight ?? Promise.resolve()).then(() =>
+      saveFormDraftServer(templateId, schemaSignature, data),
+    )
+    draftSaveInFlight = tail
+    void tail.finally(() => {
+      if (draftSaveInFlight === tail) draftSaveInFlight = null
+    })
   }, 800)
 }
 
@@ -1605,9 +1720,79 @@ async function handleSubmit() {
     })
     ElMessage.success('审批已提交')
     // G-B2-14: a successful submit consumes the draft.
+    // P3-3 FIX 8 (gate P3-3): the 800ms debounced autosave (`scheduleDraftSave`) can already have a
+    // SAVE timer PENDING at this exact moment (the user's last keystroke was < 800ms ago). Clearing
+    // the draft here without cancelling that timer lets it fire AFTER this clear — confirmed
+    // sequence `["CLEAR","SAVE"]` — resurrecting the draft the user just submitted. Pre-existing
+    // shape (the same race existed against the old localStorage clear), but P3-3 gives it a new
+    // blast radius: the resurrection is now server-side, so it reappears cross-device and in the
+    // drafts inbox, and CLEAR/SAVE are now two independently-ordered HTTP requests rather than two
+    // synchronous calls in one JS tick. Cancel the pending timer AND disarm further scheduling
+    // (`draftArmed = false`) — the deep `watch(formData, scheduleDraftSave)` below stays live until
+    // this component unmounts, so merely clearing the timer once would not stop a LATER edit (e.g.
+    // from a lingering render tick during navigation) from arming a fresh one.
+    //
+    // P3-3 FIX C (gate2 P3-D): cancelling the TIMER only closes the PENDING-debounce half of this
+    // race. The debounce can ALSO already have fired — the SAVE's HTTP request already issued,
+    // its promise sitting in `draftSaveInFlight`, unsettled — at the exact moment submit runs. If
+    // CLEAR is fired right away regardless, its DELETE can commit on the server BEFORE that
+    // in-flight SAVE's own transaction opens; the save then finds no existing row (`existingId`
+    // undefined, approval-form-draft-service.ts's upsert `else` branch) and INSERTs, resurrecting
+    // the draft the user just submitted — the exact "silently resurrect the row" outcome
+    // `clearApprovalFormDraft`'s own comment (approval-form-draft-service.ts) rejects for the
+    // narrower SELECT-vs-UPDATE window; this is that same rejection, widened to cover the
+    // already-in-flight-request window too.
+    //   - Chosen: AWAIT the in-flight save (if any) before issuing CLEAR. This closes the window
+    //     for the DOMINANT case: `saveFormDraftServer` never throws, but for a save whose fetch
+    //     RESOLVES (a real HTTP response — 2xx or otherwise — actually came back), that response can
+    //     only be sent after that save's own transaction has committed or rolled back. So once the
+    //     awaited promise settles via a genuine response, the save it was racing has unconditionally
+    //     finished on the server, and there is no window left for CLEAR to land first.
+    //     RESIDUAL (NOT closed by this fix, and shared with the rejected "abort" alternative below):
+    //     if the save's fetch instead REJECTS — network error, client-side timeout, dropped
+    //     connection — `saveFormDraftServer`'s own `catch {}` swallows that too, and its promise
+    //     still settles. But a rejection observed on the CLIENT does not mean the request never
+    //     reached the server: an abandoned-by-the-client request can still be sitting in flight (or
+    //     already committing) at the server when CLEAR is issued right after. Awaiting does not
+    //     close this narrower window — only a server-side guard (below) can, since it does not
+    //     depend on what the client believes happened.
+    //   - Rejected: aborting the in-flight fetch client-side. Same fundamental limit as the residual
+    //     above, not a different one: an `AbortController` only stops the CLIENT from waiting on the
+    //     response — over a real network the request may already have reached the server and
+    //     started its transaction by the time abort() runs, so it does not guarantee the server
+    //     won't still complete (and commit) the save. The chosen AWAIT approach is strictly no worse
+    //     — it gets the dominant (settles-via-response) case exactly right with a real
+    //     happens-before, which abort cannot offer either — so abort would add a mechanism without
+    //     closing anything AWAIT leaves open.
+    //   - Rejected: a server-side monotonic/epoch guard (compare each save's "captured at" against a
+    //     persisted "cleared at" high-water-mark). This is the more general fix — the ONLY one of the
+    //     three that would ALSO close the rejection-path residual above, since it never depends on
+    //     what the client observed. It would also close multi-tab / multi-device interleavings this
+    //     client-side await cannot (it can only order requests THIS tab issues). It requires a new
+    //     persisted marker that survives the row's own deletion — schema growth this final fix round
+    //     does not take on; left as a follow-up (see the PR body's disclosure list).
+    // The await is NOT on the outer `handleSubmit` (navigation/other post-submit work below must
+    // not block on a network round-trip that may already be seconds old) — only the CLEAR itself
+    // is deferred until the in-flight save (if any) settles, via `.finally()`.
+    //
+    // FIX (gate2 P3-D, this same fix round): the cancel-timer / await-in-flight-save / defer-clear
+    // sequence itself now lives in the shared `cancelPendingDraftSaveThenClear` helper (used by
+    // `discardDraftRestore` too — see its own comment for why `draftArmed = false` stays HERE,
+    // submit-only, rather than moving into the shared helper). Separately, `saveApprovalFormDraft`
+    // / `clearApprovalFormDraft` (server) now serialize against each other via a shared advisory
+    // lock, closing this same race INSIDE an overlapping transaction even without this client-side
+    // await — but that does not make this await redundant: it is what stops CLEAR from even being
+    // SENT until the dominant-case save is known-settled, and it is still the only thing that helps
+    // at all for the "save's fetch rejects but the request already reached the server" residual
+    // described two paragraphs up, which the server lock cannot see (the two requests never overlap
+    // as far as the lock is concerned once the earlier one has already fully committed).
     {
-      const key = draftStorageKey()
-      if (key) clearFormDraft(window.localStorage, key)
+      const submittedTemplateId = currentDraftTemplateId()
+      // Submit-only: the component is about to navigate away (see below) and will not autosave
+      // again, so a PERMANENT disarm here is safe. `discardDraftRestore` must NOT do this — see
+      // `cancelPendingDraftSaveThenClear`'s own comment for why.
+      draftArmed = false
+      cancelPendingDraftSaveThenClear(submittedTemplateId)
     }
     // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
     const submittedTemplate = template.value
@@ -1683,10 +1868,17 @@ onMounted(async () => {
   }
   await applyResubmitPrefill()
   ensureUserNamesResolved(collectSelectedUserIds())
-  // G-B2-14: arm the draft machinery once user id resolves; the restore offer only appears when
-  // NO resubmit prefill claimed the form (prefill wins — it is an explicit user intent).
+  // G-B2-14 / P3-3: arm the draft machinery once user id resolves AND (P3-3) the restore fetch
+  // itself has settled — the restore offer only appears when NO resubmit prefill claimed the form
+  // (prefill wins — it is an explicit user intent, contract §4 G). `draftArmed` is deliberately set
+  // AFTER `await`ing the restore GET: arming it earlier would let the 800ms autosave watcher fire
+  // (on any formData mutation, including the restore's own upcoming `Object.assign` once the user
+  // accepts it) while the initial GET is still in flight, racing an in-progress restore against an
+  // autosave of a still-empty/partial form.
   draftUserId.value = currentUserId
-  if (!prefillNoticeVisible.value) offerDraftRestore()
+  if (!prefillNoticeVisible.value) {
+    await offerDraftRestore()
+  }
   draftArmed = true
 })
 
