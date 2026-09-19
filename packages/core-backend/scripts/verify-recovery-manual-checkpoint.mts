@@ -1865,23 +1865,20 @@ try {
     })
     const readInput = { selectedBinding: readAuthority.selectedBinding, manifestObject: readAuthority.manifestObject,
       sectionObjects: readAuthority.sectionObjects, attachmentObjects: readAuthority.attachmentObjects,
-      keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider }
-    const openedAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionsInternal(readInput)
-    const completeAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput, query })
-    assert.deepEqual(Object.keys(openedAttachments).sort(), ['manifest', 'sections'])
+      keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider, query }
+    const completeAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionState(readInput)
     for (const row of syntheticAttachments) {
-      const binary = attachmentReader.readRecoveryArchiveAttachmentBytes(openedAttachments, row.id)
+      const binary = attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id)
       assert.deepEqual(binary.bytes, Buffer.from(`synthetic-${row.id}`))
       binary.bytes.fill(0)
-      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(openedAttachments, row.id).bytes, Buffer.from(`synthetic-${row.id}`))
       assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id).bytes, Buffer.from(`synthetic-${row.id}`))
     }
-    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionsInternal({ ...readInput, attachmentObjects: [] }),
+    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput, attachmentObjects: [] }),
       { message: 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID' })
     const swappedObjects = readAuthority.attachmentObjects!.map((item, index, all) => ({ ...item, binding: all[(index + 1) % all.length]!.binding }))
-    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionsInternal({ ...readInput, attachmentObjects: swappedObjects }))
+    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput, attachmentObjects: swappedObjects }))
     const brokenObjectId = readAuthority.attachmentObjects![0]!.binding.objectId
-    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionsInternal({ ...readInput,
+    await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput,
       objectStore: { ...attachmentProvider, get: async (request: Parameters<typeof attachmentProvider.get>[0]) => {
         if (request.objectId === brokenObjectId) throw new Error('SYNTHETIC_PRIVATE_MISSING_ATTACHMENT')
         return attachmentProvider.get(request)
@@ -1935,6 +1932,8 @@ try {
         assert.ok(address && typeof address !== 'string')
         const url = `http://127.0.0.1:${address.port}/api/multitable/sheets/no-genesis/recovery-archive/captures`
         const headers = { 'content-type': 'application/json', authorization: 'Bearer synthetic-manual-owner' }
+        await query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
+          VALUES ('manual-attachment-field','no-genesis','Synthetic files','attachment','{}',2)`)
         const requestId = randomUUID()
         const beforeHttp = await generationCount()
         assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1961,6 +1960,33 @@ try {
         const catalog = await fetch(url.replace('/captures', `/catalog/${result.data.generationId}`), { headers })
         assert.equal(catalog.status, 200)
         assert.equal((await catalog.json() as { data: { generationId: string } }).data.generationId, result.data.generationId)
+        const previewUrl = url.replace('/captures', '/preview')
+        const previewAttachmentScope = async (scope: Record<string, unknown>) => {
+          const response = await fetch(previewUrl, { method: 'POST', headers,
+            body: JSON.stringify({ generationId: result.data.generationId, mode: 'revert', scope }) })
+          assert.equal(response.status, 200)
+          return (await response.json() as { data: { blockedReason: string; executable: boolean; previewIdentity: string | null } }).data
+        }
+        assert.equal((await previewAttachmentScope({ kind: 'whole_sheet' })).blockedReason, 'no_changes')
+        const beforeAttachmentEdit = (await query(`SELECT data,version,updated_at FROM meta_records WHERE id='manual-source-record'`)).rows[0]
+        try {
+          await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}',$1::jsonb),version=version+1
+            WHERE id='manual-source-record'`, [JSON.stringify([syntheticAttachments[0].id])])
+          for (const scope of [{ kind: 'whole_sheet' },
+            { kind: 'selected_records', recordIds: ['manual-source-record'] },
+            { kind: 'selected_fields', recordIds: ['manual-source-record'], fieldIds: ['manual-attachment-field'] }]) {
+            const preview = await previewAttachmentScope(scope)
+            assert.equal(preview.blockedReason, 'unsupported_attachments')
+            assert.equal(preview.executable, false)
+            assert.equal(preview.previewIdentity, null)
+          }
+          assert.equal((await previewAttachmentScope({ kind: 'selected_fields', recordIds: ['manual-source-record'],
+            fieldIds: ['manual-source-field'] })).blockedReason, 'no_changes')
+        } finally {
+          await query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
+            [JSON.stringify(beforeAttachmentEdit.data), beforeAttachmentEdit.version, beforeAttachmentEdit.updated_at])
+        }
+        console.log('PASS: HTTP preview distinguishes attachment-only change from no_changes in whole/record/field scope; scalar-only selection preserved, no execution identity issued')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
