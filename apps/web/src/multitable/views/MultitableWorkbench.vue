@@ -3039,16 +3039,27 @@ const restorePreview = ref<{
 
 const restorePreviewFieldName = (fieldId: string): string => scopedAllFields.value.find((f) => f.id === fieldId)?.name ?? fieldId
 
+let restoreRequestId = 0
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  onCancelRestore,
+  { flush: 'sync' },
+)
+onBeforeUnmount(onCancelRestore)
+
 async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
+  const requestId = ++restoreRequestId
   // Full-record AND per-field (column-subset) both go through preview→confirm→execute now — fieldIds is carried
   // through so the preview shows exactly the selected changes and the identity binds that filtered set.
   restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion, fieldIds: payload.fieldIds } }
   try {
     const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion, payload.fieldIds)
+    if (requestId !== restoreRequestId) return
     restorePreview.value = { ...restorePreview.value, loading: false, changes: pv.changes, schemaDrift: pv.schemaDrift, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
   } catch (error) {
+    if (requestId !== restoreRequestId) return
     restorePreview.value = { ...restorePreview.value, visible: false }
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
@@ -3057,21 +3068,25 @@ async function onRestoreRecordVersion(payload: { recordId: string; targetVersion
 async function onConfirmRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = restorePreview.value
-  if (!sheetId || !state.payload || !state.identity) { restorePreview.value = { ...state, visible: false }; return }
+  if (!sheetId || !state.visible || state.loading || !state.payload || !state.identity) return
+  const requestId = ++restoreRequestId
   const { recordId, targetVersion, expectedVersion, fieldIds } = state.payload
   restorePreview.value = { ...state, visible: false }
   try {
     const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity, fieldIds)
+    if (requestId !== restoreRequestId) return
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
-    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
+    if (requestId === restoreRequestId && selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
   } catch (error) {
+    if (requestId !== restoreRequestId) return
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 
 function onCancelRestore() {
-  restorePreview.value = { ...restorePreview.value, visible: false }
+  restoreRequestId++
+  restorePreview.value = { visible: false, loading: false, changes: [], schemaDrift: false, executable: false, identity: null, payload: null }
 }
 
 // BS-4: scoped (multi-record) restore. Default entry = revert-to-original (v1); the dialog's Advanced picker

@@ -4,6 +4,14 @@ Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
 ## Inspector Historical-Version Execution (2026-09-20)
 
+Single-record preview now has a monotonic request identity. New requests,
+cancellation, synchronous base/sheet changes and unmount invalidate prior
+responses. Confirmation requires a visible, loaded preview. A dispatched
+restore is not cancelled server-side by navigation; its late result must not
+toast or refresh the new context. Backend signed preview and permission gates
+remain authoritative and unchanged.
+
+
 Test-only checkpoint `8420aea01b61b960c0fffaa4d3804ccfa004d6df`, tree
 `61cd16fa1db5e2c97acabf99a50990c194730d51`, exercises the existing right-side
 historical-version restoration through the actual Workbench. It edits a numeric

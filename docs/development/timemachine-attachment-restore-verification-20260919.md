@@ -14,6 +14,20 @@ Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Inspector Restore Execution (2026-09-20)
 
+### Async Preview Isolation Follow-up
+
+Local patch based on `c6541af54464c05d066e39975d5ab728c555d13b`:
+five new regression cases first failed against the previous implementation
+(out-of-order identity, cancel, sheet/base navigation, obsolete rejection).
+The final existing wiring suite passes 24/24; history panel neighbor 16/16.
+Additional cases cover pending success after cancel/unmount/sheet roundtrip and
+accepted execution settling after navigation without refreshing the new sheet.
+Application vue-tsc passes; scoped ESLint has zero errors and eight fixture
+multi-component warnings; diff-check passes. Owned synthetic Workbench browser
+acceptance passes 8/8 with this uncommitted patch, connections=0 and database/
+cluster removed. This is not remote CI or real-environment UAT evidence.
+
+
 Code `8420aea01b61b960c0fffaa4d3804ccfa004d6df`, tree
 `61cd16fa1db5e2c97acabf99a50990c194730d51`. One existing acceptance script
 only; production Workbench was restored byte-identically after mutation.

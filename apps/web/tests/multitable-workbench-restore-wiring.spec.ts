@@ -304,6 +304,79 @@ describe('MultitableWorkbench record-restore handler wiring (preview→execute, 
     expect(showSuccessSpy).not.toHaveBeenCalled()
   })
 
+  it('ignores an older preview after a newer request completes', async () => {
+    let resolveOld!: (value: typeof PREVIEW_OK) => void
+    workbenchMock.client.restorePreviewRecord.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
+    const onRestore = await mountAndGetRestore()
+    const old = onRestore({ recordId: 'rec_old', targetVersion: 1, expectedVersion: 5 })
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
+    resolveOld({ ...PREVIEW_OK, previewIdentity: 'old_token' })
+    await old
+    await flushUi()
+    await confirmDialog()
+    expect(workbenchMock.client.restoreExecuteRecord).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5, 'tok_preview', undefined)
+  })
+
+  it.each(['cancel', 'sheet', 'base'])('invalidates a ready preview on %s, even with forced confirmation', async (action) => {
+    const onRestore = await mountAndGetRestore()
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
+    await flushUi()
+    if (action === 'cancel') await cancelDialog()
+    else if (action === 'sheet') workbenchMock.activeSheetId.value = 'sheet_other'
+    else workbenchMock.activeBaseId.value = 'base_other'
+    await flushUi()
+    await confirmDialog()
+    expect(workbenchMock.client.restoreExecuteRecord).not.toHaveBeenCalled()
+    expect(capturedDialogAttrs!.visible).toBe(false)
+  })
+
+  it('ignores pending preview failures after cancellation', async () => {
+    let rejectOld!: (error: Error) => void
+    workbenchMock.client.restorePreviewRecord.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject }))
+    const onRestore = await mountAndGetRestore()
+    const pending = onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
+    await flushUi()
+    await cancelDialog()
+    rejectOld(new Error('obsolete preview'))
+    await pending
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['cancel', 'sheet-roundtrip', 'unmount'])('drops pending preview success after %s', async (action) => {
+    let resolvePreview!: (value: typeof PREVIEW_OK) => void
+    workbenchMock.client.restorePreviewRecord.mockImplementationOnce(() => new Promise((resolve) => { resolvePreview = resolve }))
+    const onRestore = await mountAndGetRestore()
+    const pending = onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
+    await flushUi()
+    const confirm = capturedDialogAttrs!.onConfirm as () => Promise<void>
+    if (action === 'cancel') await cancelDialog()
+    else if (action === 'unmount') { app!.unmount(); app = null }
+    else {
+      workbenchMock.activeSheetId.value = 'sheet_other'
+      workbenchMock.activeSheetId.value = 'sheet_orders'
+    }
+    resolvePreview(PREVIEW_OK)
+    await pending
+    await confirm()
+    expect(workbenchMock.client.restoreExecuteRecord).not.toHaveBeenCalled()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not refresh the new sheet when an accepted execute finishes after navigation', async () => {
+    let resolveExecute!: (value: unknown) => void
+    workbenchMock.client.restoreExecuteRecord.mockImplementationOnce(() => new Promise((resolve) => { resolveExecute = resolve }))
+    const onRestore = await mountAndGetRestore()
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
+    await flushUi()
+    const pending = confirmDialog()
+    workbenchMock.activeSheetId.value = 'sheet_other'
+    resolveExecute({ recordId: 'rec_42', newVersion: 6, noop: false, restoredFieldIds: ['fld_title'] })
+    await pending
+    expect(workbenchMock.client.restoreExecuteRecord).toHaveBeenCalledTimes(1)
+    expect(gridMock.loadViewData).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+  })
+
   it('no active sheet → no preview', async () => {
     const onRestore = await mountAndGetRestore()
     workbenchMock.activeSheetId.value = null
