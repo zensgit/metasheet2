@@ -244,3 +244,7 @@ U+3000                 :308
 选项 b                 0 命中
 §13-10 / §13-12 未裁   :9 :267 :268 :324 :359 :368
 ```
+
+### 加速补丁（同一分支，protection 当日重读）
+
+2026-09-19 `gh api repos/zensgit/metasheet2/branches/main/protection`：required 含 `test (20.x)`，不含 `test (18.x)`。锁 ④ 改为引这次实读，不再只引 2026-09-18 闸方记录。门 2 正控加「`role_id` 不得以 `_admin` 结尾」。workflow 残留 basename 改全路径（`web-tests.yml` / `docker-build.yml` / `attendance-web-guard.yml` / `approval-sequential-mode.db.test.ts`）。§13-10 / §13-12 仍未裁。

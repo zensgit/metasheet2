@@ -163,7 +163,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ① **exclude 逐文件字面量**：加进 `packages/core-backend/vitest.config.ts` 的 `test.exclude`。任务条目必须是逐文件字面量，**不得用 glob**。数组现存三条历史 glob 显式排除在集合比较之外：`'**/node_modules/**'`（本 SHA `:32`）、`'**/dist/**'`（`:33`）、`'tests/e2e/**'`（本 SHA **`:1812`**；计划写的 `:1782`、上一轮写的 `:1797` 均已漂移，`:1797` 现为 `elearning-media-quota.db.test.ts`）。验法：排除后 no-DB 配置对该路径报 **`No test files found`，不是 skipped**。
 
-② **独立证据 lane**：形状照 `.github/workflows/approval-realdb-comments.yml`：`workflow_dispatch` + `pull_request`（paths，**不加 `branches:`**，`:45-47`）+ `push main`；**不声明 `merge_group`** 仅在 lane 保留 paths 时成立（`:41`）；job 级 `DATABASE_URL`（postgres:16）+ `EXPECT_DB: '1'`（`:99`）；`MIGRATION_EXCLUDE` 标准 6 项（`:129` 逗号列表；`MIGRATION_EXCLUDE_TRACKING.md` 文案 union 为 7，新迁移不加进去）；`vitest --config vitest.integration.config.ts run <整文件> --reporter=verbose`（`:136`；verbose 是判据：lane 绿后从日志读出收集用例数写进 PR body，零收集的绿无效 `:133-135`）；测试顶部 `EXPECT_DB` 哨兵（`approval-sequential-mode.db.test.ts:14`）。
+② **独立证据 lane**：形状照 `.github/workflows/approval-realdb-comments.yml`：`workflow_dispatch` + `pull_request`（paths，**不加 `branches:`**，`:45-47`）+ `push main`；**不声明 `merge_group`** 仅在 lane 保留 paths 时成立（`:41`）；job 级 `DATABASE_URL`（postgres:16）+ `EXPECT_DB: '1'`（`:99`）；`MIGRATION_EXCLUDE` 标准 6 项（`:129` 逗号列表；`MIGRATION_EXCLUDE_TRACKING.md` 文案 union 为 7，新迁移不加进去）；`vitest --config vitest.integration.config.ts run <整文件> --reporter=verbose`（`:136`；verbose 是判据：lane 绿后从日志读出收集用例数写进 PR body，零收集的绿无效 `:133-135`）；测试顶部 `EXPECT_DB` 哨兵（`packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts:14`）。
 
 本 SHA 副作用（必须点名）：`packages/core-backend/vitest.integration.config.ts:21` `setupFiles: ['./tests/setup.integration.ts']`；`packages/core-backend/tests/setup.integration.ts:7` `process.env.RBAC_BYPASS = 'true'`，`:8` `process.env.RBAC_TOKEN_TRUST = 'true'`。`:8` 被 `packages/core-backend/src/rbac/rbac.ts:12` 模块装载读取，`:40-44` / `:85-91` 以 token `perms` 充当权限来源（仍与准入相与，绕过的是 §5.1 ①② 那一半，不是 ③）。任务套件若沿用该 setup，必须在套件顶部 `delete process.env.RBAC_BYPASS` 与 `delete process.env.RBAC_TOKEN_TRUST`（或显式 `'false'`），并在门 16 断言里证明两旗未设-or-false。
 
@@ -173,7 +173,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ④ **发现式覆盖枚举（已定，来源 计划 v5 §8-1 ④）**：自建 `task-ci-coverage-enumeration.test.ts`（`readdirSync`）：磁盘 `task-*.db.test.ts` 集合 = `vitest.config.ts` exclude 条目集合 = 证据 lane 文件清单，**三者相等**；各配扫描负控（集合非空、正则未失效，照 `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts:679-685`）。本文件**不**进 `test.exclude`、**不**进任何逐文件 run-list。
 
-承载：`.github/workflows/plugin-tests.yml` `test` job 的 `Run core-backend tests` 步（本 SHA `:842-844`，`pnpm --filter @metasheet/core-backend test`）。该步**无** `if: matrix.node-version`，矩阵两腿（18.x 与 20.x）都会跑到该文件。**required context 只认 `test (20.x)`**（workflow 自述 `:532-533`；2026-09-18 闸方实读 branch protection 只有 `test (20.x)`）。不得把 `test (18.x)` 写成 required 承载的一半。
+承载：`.github/workflows/plugin-tests.yml` `test` job 的 `Run core-backend tests` 步（本 SHA `:842-844`，`pnpm --filter @metasheet/core-backend test`）。该步**无** `if: matrix.node-version`，矩阵两腿（18.x 与 20.x）都会跑到该文件。**required context 只认 `test (20.x)`**（workflow 自述 `:532-533`；2026-09-19 `gh api repos/zensgit/metasheet2/branches/main/protection` required contexts 含 `test (20.x)`，**不含** `test (18.x)`）。不得把 `test (18.x)` 写成 required 承载的一半。
 
 与 §13-12 的关系：**不是无关**。④ 的三集合谓词不覆盖 required run-list。若 §13-12 裁 **(a)**（整文件加进 `plugin-tests.yml` `test` job run-list），该 run-list 是**第四集合**，必须在裁 (a) 的那个 PR 把 ④ 扩成四集合相等；裁 (a) 前不得声称 ④ 已覆盖 required 执行。若裁 **(b)**，④ 的三集合维持，但 ② 的 paths 形状被 (b) 取代，须同 PR 改 ② 正文。审批对物 `approval-ci-coverage-enumeration.test.ts` 今天由同一 `:842-844` 步执行。④ 自身 verbose 收集数：该步绿后从日志读出收集用例数写进 PR body，零收集的绿无效（与 ② 同一判据）。
 
@@ -183,9 +183,9 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 新 spec 必须两处齐才不是 skip-shaped green：
 
-① `.github/workflows/tasks-web-guard.yml`：paths 型（`apps/web/src/tasks/**`、`apps/web/src/views/tasks/**`、`apps/web/tests/tasks*.spec.ts`、`apps/web/src/router/guardPolicy.ts`、`apps/web/src/App.vue`、workflow 自身），`push main` 同 paths，**不声明 `merge_group`**。不抄 `attendance-web-guard.yml:2-3` 的无 paths 形状。step 用 `pnpm --filter @metasheet/web exec vitest run <逐文件路径> --reporter=verbose`。
+① `.github/workflows/tasks-web-guard.yml`：paths 型（`apps/web/src/tasks/**`、`apps/web/src/views/tasks/**`、`apps/web/tests/tasks*.spec.ts`、`apps/web/src/router/guardPolicy.ts`、`apps/web/src/App.vue`、workflow 自身），`push main` 同 paths，**不声明 `merge_group`**。不抄 `.github/workflows/attendance-web-guard.yml:2-3` 的无 paths 形状。step 用 `pnpm --filter @metasheet/web exec vitest run <逐文件路径> --reporter=verbose`。
 
-② token 加进 `apps/web/scripts/run-required-web-tests.sh` 的 `exec npx vitest run …` 行（本 SHA 在 **`:1186`**，不是计划写的 `:1069`；执行者 = always-on 必需 job `web-tests`，`web-tests.yml:77`）。双向碰撞检查覆盖 vitest 实际收集的人口（不只 `apps/web/tests`）：
+② token 加进 `apps/web/scripts/run-required-web-tests.sh` 的 `exec npx vitest run …` 行（本 SHA 在 **`:1186`**，不是计划写的 `:1069`；执行者 = always-on 必需 job `web-tests`，`.github/workflows/web-tests.yml:77`）。双向碰撞检查覆盖 vitest 实际收集的人口（不只 `apps/web/tests`）：
 
 - 正向：`find apps/web -path '*/node_modules' -prune -o -name '*.spec.ts' -print -o -name '*.test.ts' -print | grep -c -- '<token>'` **= 1**
 - 反向：token 不是其它任何路径的子串，且**不得命中 `apps/web/verification/`**（Playwright 用例；命中即红，不是「扫描人口包含 verification」）
@@ -197,11 +197,11 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 合并 → 构建 → 发布 → 部署 → 迁移是五个独立动作，不自动串联。
 
-1. **合并**进 main 只触发 `docker-build.yml` 的 build job **构建**（`:4-8`；`paths-ignore: docs/**`，纯 docs 合并如 PR-0 连 build 都不跑）。
+1. **合并**进 main 只触发 `.github/workflows/docker-build.yml` 的 build job **构建**（`:4-8`；`paths-ignore: docs/**`，纯 docs 合并如 PR-0 连 build 都不跑）。
 2. **发布镜像是 dispatch 门**：`publish_images` 步骤要 `publish_preflight.verified == 'true'`（`:111`），其上游 `publish_authorization.publish_requested`（`:96`）由 `scripts/ops/docker-publish-preflight.mjs:19` 决定：`if (context.eventName !== 'workflow_dispatch') return { publish: false }`。
 3. **生产部署 job** 仅在 `workflow_dispatch && inputs.deploy_production == true && github.ref == 'refs/heads/main' && needs.build.outputs.published == 'true'` 时运行（`:120-122`）。`published` 只能由同一次 dispatch 的发布步骤置真。
 4. 因此 prod 上线必须在**同一次 dispatch 同时给** `publish_images: true` 与 `deploy_production: true` 两个 input；只给后者会得到静默跳过的 deploy。staging 由 window-runner 部署，需 owner 指令。
-5. **迁移**只在该 deploy job 的「Remote deploy」步骤内执行（`docker-build.yml:484-488`，容器内 `node packages/core-backend/dist/src/db/migrate.js`，带 `MIGRATE START/END` 标记）。生产迁移与生产部署同门。
+5. **迁移**只在该 deploy job 的「Remote deploy」步骤内执行（`.github/workflows/docker-build.yml:484-488`，容器内 `node packages/core-backend/dist/src/db/migrate.js`，带 `MIGRATE START/END` 标记）。生产迁移与生产部署同门。
 
 含 DDL 的 PR body 首段写明：本 PR 合并后**不会**自动到达生产，迁移**不会**自动应用；`down()` 是否验证过。新迁移默认在 CI 跑，不加进 `MIGRATION_EXCLUDE`。
 
@@ -297,7 +297,7 @@ N/A:本线无媒体轨。
 ## 12. Ratify 验收门
 
 1. org 写路径无 claim ⇒ 422；读路径 `org_missing` / `predicate_error`；不写 `'default'`。
-2. 非 admin：**三件事齐全 ⇒ 200**（同一格正控；夹具必须同时具备 ① seed ② 非 admin 角色 `role_permissions` ③ admission 行，响应 `status === 200`）。三件事**缺一 ⇒ 403**（三格负控，各缺一件）。直授+admission 仍 403。码名与 seed 待 §13-10 裁；未裁前本门不可声称全绿。required 承载: TBD（§13-12 未裁）。
+2. 非 admin：**三件事齐全 ⇒ 200**（同一格正控；夹具必须同时具备 ① seed ② 非 admin 角色 `role_permissions` ③ admission 行，响应 `status === 200`）。正控夹具的 `role_id` **不得**以 `_admin` 结尾，避免 `deriveDelegatedAdminNamespace`（§5.1）把准入短路成第四通道。三件事**缺一 ⇒ 403**（三格负控，各缺一件）。直授+admission 仍 403。码名与 seed 待 §13-10 裁；未裁前本门不可声称全绿。required 承载: TBD（§13-12 未裁）。
 3. 完成判定网格 any/all × 增删人 × 切模式 × {0,1,n}。切模式格依赖 §13-9 **未裁**（见 §6.2）。
 4. 可见 ≠ pending（self_completed 正反）。
 5. PendingItem：**必须有夹具**，空列表不能单独过门。无截止日夹具：响应恰五键 `source/id/title/href/updatedAt`。有截止日夹具：恰六键且 `dueAt` 不得为 null/空串。两夹具响应体都不含 `description` / `description_rich` 等正文字段。
