@@ -105,6 +105,14 @@ transaction participation only, not the yet-unwired history/record write chain.
 
 ## Required Evidence
 
+The preview now projects selected attachment changes into its true-delta permission
+context and diagnostic summary. It still refuses executable attachment previews.
+The internal sync plan supports a domain-separated v2 identity carrying a closed,
+sorted attachment/original-record/original-field/metadata-hash roster; absence of
+that roster preserves v1 hashes exactly. Database-derived roster collection,
+token minting with v2 and canonical execution rechecks are not yet connected.
+Never treat the new hash compiler as proof of that end-to-end binding.
+
 | Gate | Required oracle | Status |
 | --- | --- | --- |
 | Faithful recovery | Existing row/field; changed/deleted attachment reference; original bytes readable after restore; scalar peers unchanged | OPEN |

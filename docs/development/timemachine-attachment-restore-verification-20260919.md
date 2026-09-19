@@ -169,6 +169,34 @@ successor publication is claimed.
 - Sol high bounded read-only review was closed while running after its time
   limit, without a terminal verdict. No independent approval is claimed.
 
+## Preview Authority And Plan Identity
+
+Exact code: `359935892af0c13e73b3c432b7b71f9b1ec6e597`; main rechecked
+`868c8d2b26424fcaa8405661a6999abb17ec6d93`. Local only.
+
+- Production preview now includes real attachment field/reference deltas in
+  authorization and the blocked summary. Denial returns the existing values-free
+  authority error. Authorized attachment changes still have no executable token.
+- Internal sync-plan v2 binds a canonical closed metadata roster, with unique
+  attachment IDs, original record/field scope validation and detached frozen
+  entries. Omitting the roster retains the exact existing v1 hash; an explicit
+  empty roster is a distinct v2 identity, not an accidental downgrade.
+- Tests change every identity axis, reject malformed/extra/duplicate/out-of-scope
+  entries, and prove source mutation cannot change the compiled plan.
+- Mutation omitting roster hash content: 1 failure / 8 passes. Mutation omitting
+  attachment write projection: 3 failures / 10 passes, including permission denial.
+  Both restored; focused five-file suite 79/79 PASS.
+- Full owned DB driver PASS, including fresh/replay 32/989 catalog census,
+  59/59 + 127/127 historical neighbors, encrypted capture, existing scalar HTTP
+  restore and the new stage/metadata participant gates. All DB/connection/cluster
+  residue zero. Core type-check, source ESLint, wiring 37/37, diff-check PASS.
+- Logs: `/private/tmp/tm-attachment-preview-binding-{full,restored,wiring}-20260919.log`,
+  `/private/tmp/tm-attachment-plan-hash-mutation-20260919.log`, and
+  `/private/tmp/tm-attachment-preview-auth-mutation-20260919.log`.
+- No new external review this checkpoint. The production preview does NOT yet
+  collect database metadata fingerprints, mint v2 identities or invoke attachment
+  apply. No attachment restore browser/UAT evidence is claimed.
+
 ## Remaining Required Work
 
 Authenticated-reader integration; prepared file ownership and crash cleanup;
