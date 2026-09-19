@@ -1429,3 +1429,26 @@ No public attachment restore-write or full login/browser UAT is claimed. Current
 canonical restore excludes attachment fields; the proposed write-contract
 expansion is awaiting explicit confirmation. Existing scalar restoration remains
 a separate evidence class. No flags, customer storage or deployment changed.
+
+## Source Independence And Browser Regression
+
+Code `2cc9ebbf8705ca84a32c9395bdab58a63bbdfde4`: park one owned synthetic
+source file, submit a fresh HTTP capture, require 503/building/incomplete, zero
+archive objects and the full source-pin set retained as mutable. Independently
+reopen the previously completed generation while that source is absent: all
+attachment bytes match. Restore the parked file in finally. Full runner and
+acceptance tsc/diff-check PASS; log `/private/tmp/tm-attachment-source-independent.log`.
+
+Final browser rerun used the required runner `--browser` argument. Chromium at
+1440 and 390 exercises production component/client capture, reload, catalog,
+preview and confirmed scalar restore, exactly one restore request and independent
+database/history readback. Full attachment HTTP cases also pass in that run.
+Browser/Vite/cache and owned database/connections/cluster are cleaned.
+Log `/private/tmp/tm-manual-browser-attachment-final.log`. An earlier invocation
+using only an environment variable did not enter browser mode and is counted
+only as database acceptance, not browser evidence. This still does not prove
+attachment restore writes or real tenant login/UAT.
+
+Terra high reader-only review was closed while nonterminal at the bounded cutoff;
+no independent verdict is claimed. Canonical attachment restore-write policy is
+still unchanged and the proposed expansion remains pending owner confirmation.
