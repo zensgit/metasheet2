@@ -3026,4 +3026,591 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       )
     },
   )
+  /**
+   * ═══ POST-COMMIT EXCEPTION ISOLATION + THE REVERSAL HELPER'S OWN IDEMPOTENCY LATCH ═══
+   *
+   * owner directive, 2026-09-19, on the four-point focus gate
+   * (`impl-gate-C-slice2-focus4-20260919.md` §7 P3-1 / P3-2):
+   *
+   *   「post-commit 异常隔离:最终闸补定向故障注入。若通知抛错能让已提交的取消返回失败,会诱发重试,
+   *     不能只作披露。应证明异常不会改写已提交结果,且重试不重复兑现。
+   *     内层 alreadyReversed:按声明范围处理。当前证据只能写外层重放不重复退款。若要声称余额冲销自身
+   *     幂等,须让调用真正进入内层,补重复冲销场景及对应 mutation。」
+   *
+   * ── WHY THESE THREE CASES RUN AGAINST THE REAL BOUNDARY, NOT `bindCancellationPort`. ─────────
+   * A double returns a CANNED `reversal` object and writes no balance rows at all, so owner's
+   * assertion (b) 「余额已返还」 would be structurally unmeasurable against one — the numbers would
+   * be whatever the double was told to say, and the mutations below would stay green
+   * (`feedback_positive_control_not_failclosed`). These three therefore follow the
+   * `unrecoverableExpired` case's pattern: real port, real `seedDirectoryIdentity`, real W4
+   * preflight/seal — with a LIVE grant lot instead of an expired one, because an expired lot makes
+   * the whole reversal path an identity and would hide every difference these cases exist to see.
+   *
+   * ── THE SYNCHRONY CENSUS THAT MAKES A SYNCHRONOUS `throw` THE FAITHFUL INJECTION SHAPE. ──────
+   * A sync `try`/`catch` around an ASYNC callee catches nothing, so 「the delivery is isolated」
+   * would be a claim about a shape production never produces unless the whole chain is sync
+   * (`feedback_fixture_shape_must_match_named_scenario`). It is, read end to end and closed-world:
+   *   - the contract:      `CancelRoundCancelledEventDeliveryV1` is `(…) => void`
+   *                        (`attendance-cancellation-execution-port.ts:306-309`) — not `Promise<void>`.
+   *   - the ONLY binder:   `plugins/plugin-attendance/index.cjs:35831-35835` binds the non-async
+   *                        arrow `emitRequestCancelledEventForOutcomeV1` (`:25026-25036`). Census,
+   *                        repo-wide and closed-world (`grep -rn` over packages/plugins/apps/scripts,
+   *                        minus node_modules and tests) ⇒ 5 hits: the registry definition
+   *                        (`…execution-port.ts:314`), the unregister definition (`:324`, a substring
+   *                        match), the plugin-API interface declaration (`types/plugin.ts:1588`), the
+   *                        host's pass-through (`index.ts:2769`), and EXACTLY ONE site that supplies
+   *                        a delivery function — the plugin line above.
+   *   - the emit chain:    `emitEvent` → `plugin-manager.ts:588-592` → `index.ts:1245`
+   *                        → `EventBus.emit` (`event-bus.ts:70-72`) → `dispatch` (`:27-38`) — every
+   *                        hop returns `void`, and each subscriber is additionally wrapped in the
+   *                        bus's own `try`/`catch` (`:43-50`).
+   * ⇒ a listener bug surfaces at `deliverCancelRoundCancelledEventPostCommit`'s `try` as a
+   *   SYNCHRONOUS throw, which is exactly what the first case injects.
+   *
+   * ── WHAT THESE CASES DELIBERATELY DO NOT DO: change production. ──────────────────────────────
+   * owner's remedial clause is conditional — 「若通知抛错能让已提交的取消返回失败 … 这是缺陷」. It does
+   * NOT fire at this head: the delivery is already wrapped at `ApprovalProductService.ts:13406-13413`
+   * and the first case MEASURES that (200, not 500). What was missing was the evidence, which is
+   * what this block adds. The residual exposure the gate found — an UPSTREAM post-commit step
+   * escaping into the shared outer `catch`, which skips the delivery and 500s an already-committed
+   * cancellation — is measured by the second case and its remedy is registered for owner in the
+   * phase-2 MD rather than applied here (moving the delivery to sit immediately after `COMMIT`
+   * changes post-commit ordering the focus gate blessed at the current order, and this slice is
+   * rebased onto C-1 by the merge train).
+   */
+  async function seedLiveAnnualLotWithLedger(
+    orgId: string,
+    userId: string,
+    key: string,
+    ledger: {
+      amountMinutes: number
+      remainingMinutes: number
+      deductMinutes: number
+      requestId: string
+      priorReverseMinutes?: number
+    },
+  ): Promise<string> {
+    // A LIVE lot: `status='active'` and an `expires_at` in the FUTURE, so production's own expiry
+    // predicate — `(expires_at IS NOT NULL AND expires_at <= now())`, the one
+    // `reverseLeaveBalanceDeduction` reads at `index.cjs:19403` — answers false and the §3a
+    // non-resurrection branch is NOT the branch under test here.
+    const lot = await pool().query<{ id: string }>(
+      `INSERT INTO attendance_leave_balances
+         (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes,
+          source_type, source_key, granted_at, expires_at, status)
+       VALUES ($1, $2, 'annual', $4, $5, 'grant', $3,
+               now() - interval '10 days', now() + interval '300 days', 'active')
+       RETURNING id::text AS id`,
+      [orgId, userId, key, ledger.amountMinutes, ledger.remainingMinutes],
+    )
+    const lotId = lot.rows[0].id
+    createdLeaveBalanceIds.add(lotId)
+    await pool().query(
+      `INSERT INTO attendance_leave_balance_events
+         (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ($1, $2, $3::uuid, 'deduct', $4, 'leave_request', $5)`,
+      [orgId, userId, lotId, -ledger.deductMinutes, ledger.requestId],
+    )
+    if (ledger.priorReverseMinutes !== undefined) {
+      await pool().query(
+        `INSERT INTO attendance_leave_balance_events
+           (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ($1, $2, $3::uuid, 'reverse', $4, 'leave_request', $5)`,
+        [orgId, userId, lotId, ledger.priorReverseMinutes, ledger.requestId],
+      )
+    }
+    // NON-VACUITY, through production's own predicate rather than through the literals just
+    // inserted: if the lot were expired (or the deduct missing) every downstream number below
+    // would be produced by the boring reason instead of the interesting one.
+    const pre = await pool().query<{ expired: boolean; remaining_minutes: number; status: string }>(
+      `SELECT (b.expires_at IS NOT NULL AND b.expires_at <= now()) AS expired,
+              b.remaining_minutes, b.status
+         FROM attendance_leave_balances b WHERE b.id = $1::uuid`,
+      [lotId],
+    )
+    expect(pre.rows[0].expired).toBe(false)
+    expect(pre.rows[0].status).toBe('active')
+    expect(Number(pre.rows[0].remaining_minutes)).toBe(ledger.remainingMinutes)
+    return lotId
+  }
+
+  /**
+   * The COMMITTED-RESULT population, as ONE object so 「已提交结果不变」 can be asserted as a byte
+   * comparison (`expect(after).toEqual(before)`) instead of as a handful of individually chosen
+   * fields that a future narrowing could quietly shrink (the focus gate's §5.2 discipline).
+   * Covers every row the redemption writes: the original document, the business request row, the
+   * round row, the revoke audit row, the balance lot, the balance ledger, and the W4 seal.
+   */
+  async function committedCancellationSnapshot(
+    engineInstanceId: string,
+    documentId: string,
+    requestId: string,
+    orgId: string,
+    lotId: string,
+  ): Promise<Record<string, unknown>> {
+    const original = await pool().query<{ status: string; version: number }>(
+      `SELECT status, version FROM approval_instances WHERE id = $1`,
+      [documentId],
+    )
+    const request = await pool().query<{ status: string; resolved_by: string | null; resolved: boolean }>(
+      `SELECT status, resolved_by, (resolved_at IS NOT NULL) AS resolved
+         FROM attendance_requests WHERE id = $1::uuid`,
+      [requestId],
+    )
+    const round = await pool().query<{ outcome: string; ended: boolean }>(
+      `SELECT outcome, (ended_at IS NOT NULL) AS ended
+         FROM approval_rounds WHERE engine_instance_id = $1`,
+      [engineInstanceId],
+    )
+    const revokes = await pool().query<{ action: string; from_status: string; to_status: string; actor_id: string }>(
+      `SELECT action, from_status, to_status, actor_id FROM approval_records
+        WHERE instance_id = $1 AND action = 'revoke' ORDER BY created_at`,
+      [documentId],
+    )
+    const lot = await pool().query<{ remaining_minutes: number; status: string }>(
+      `SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1::uuid`,
+      [lotId],
+    )
+    const events = await pool().query<{ event_type: string; delta_minutes: number }>(
+      `SELECT event_type, delta_minutes FROM attendance_leave_balance_events
+        WHERE balance_id = $1::uuid ORDER BY event_type, delta_minutes`,
+      [lotId],
+    )
+    const roundIdRow = await pool().query<{ id: string }>(
+      `SELECT id FROM approval_rounds WHERE engine_instance_id = $1`,
+      [engineInstanceId],
+    )
+    const seal = await pool().query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM attendance_result_operations
+        WHERE org_id = $1 AND operation_id = $2::uuid`,
+      [orgId, deriveCancelRoundW4OperationIdV1(roundIdRow.rows[0].id)],
+    )
+    return {
+      original: original.rows[0],
+      request: request.rows[0],
+      round: round.rows[0],
+      revokes: revokes.rows,
+      lot: lot.rows[0],
+      events: events.rows,
+      sealRows: seal.rows[0].n,
+    }
+  }
+
+  /**
+   * P3-1 (a)(b)(c) — the NOTIFICATION itself throws.
+   *
+   * THE INJECTION POINT is the production registry, not a test-only seam added for this case: the
+   * bound delivery is replaced (save-and-restore, the convention `c3open` established in this file)
+   * with one that throws SYNCHRONOUSLY, which the census in the block comment above shows is the
+   * shape a real listener bug takes. No production line changes to make this case runnable.
+   *
+   * THE THREE ASSERTIONS owner named:
+   *   (a) the approve still returns 200 — the committed cancellation is NOT reported as a failure,
+   *       so nothing induces the client to retry at all.
+   *   (b) every committed row is exactly what it was — the exception rewrote nothing.
+   *   (c) retrying the same redemption does not redeem, refund or announce a second time.
+   *
+   * ⚠️ SCOPE OF (c), stated rather than implied (`feedback_verified_one_link_generalised_to_the_chain`;
+   * the focus gate's §4.2 caught exactly this over-read once already), and CORRECTED against what
+   * the run actually measured rather than against what was predicted. The retry below is refused
+   * with **403 `APPROVAL_ASSIGNMENT_REQUIRED`** at `dispatchAction`'s AUTHORIZATION gate
+   * (`ApprovalProductService.ts:10938-10940`) — NOT with 409 at the terminal-status guard
+   * (`:11583-11589`), which was the predicted answer and is wrong: the redemption's terminal advance
+   * deactivates the round instance's seats, so `actorCanAct` is already false by the time the status
+   * guard would be reached. The seat state is asserted below so that ordering is a measured fact
+   * and not a story. The two guards stand in series, and M-PC2/M-PC3 below walk the ladder.
+   *
+   * So what is proven here is ENGINE-LEVEL retry safety. It does NOT exercise the W4 operation-id
+   * replay preflight — that layer is covered by the `replay` case above and by the focus gate's
+   * §4.2. The seal-row and ledger counts below are asserted anyway so both layers' answers are
+   * visible rather than inferred.
+   */
+  it(
+    'P3-1 (a)(b)(c): a post-commit notification that THROWS does not fail the committed cancellation ' +
+      '(200, not 500), rewrites none of the committed rows, and a retry redeems/refunds/announces ' +
+      'nothing a second time (M-PC1: drop the delivery try/catch ⇒ (a) red; M-PC2: neuter the ' +
+      'authorization gate ⇒ (c) red)',
+    async () => {
+      const suffix = `pcthrow-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+      await seedDirectoryIdentity(fixture.requesterId, attached!.orgId)
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+
+      const lotId = await seedLiveAnnualLotWithLedger(attached!.orgId, fixture.requesterId, `wi13-pcthrow-${suffix}`, {
+        amountMinutes: 480,
+        remainingMinutes: 360,
+        deductMinutes: 120,
+        requestId: attached!.requestId,
+      })
+
+      // ── THE INJECTION. Save-and-restore: the registry is process-wide and the attendance plugin
+      //    bound the real delivery at activate, so leaving a throwing one behind would poison every
+      //    later case in this file.
+      const previousDelivery = getCancelRoundCancelledEventDelivery()
+      expect(
+        previousDelivery,
+        'no real delivery was bound ⇒ this case would inject into a registry production is never in',
+      ).toBeDefined()
+      let deliveryCalls = 0
+      registerCancelRoundCancelledEventDelivery(() => {
+        deliveryCalls += 1
+        throw new Error('PC-THROW-INJECTED: a post-commit listener blew up')
+      })
+
+      let approve: Response
+      let retry: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+
+        // ── (a) THE ASSERTION owner named. 200, not 500: a throw from an already-post-COMMIT
+        //    listener must not be reported to the caller as a failed cancellation, because a
+        //    reported failure is what induces the retry this case then has to defend against.
+        expect(approve.status, await approve.clone().text()).toBe(200)
+        // NON-VACUITY: the injected listener really ran and really threw. Without this, (a) would
+        // also be green if the delivery had simply never been reached.
+        expect(deliveryCalls).toBe(1)
+
+        // ── (b) THE COMMITTED RESULT, pinned as a whole object before the retry touches anything.
+        const committed = await committedCancellationSnapshot(
+          fixture.roundInstanceId, fixture.documentId, attached!.requestId, attached!.orgId, lotId,
+        )
+        expect(committed).toEqual({
+          original: { status: 'cancelled', version: 2 },
+          request: { status: 'cancelled', resolved_by: fixture.requesterId, resolved: true },
+          round: { outcome: 'applied', ended: true },
+          revokes: [{
+            action: 'revoke', from_status: 'approved', to_status: 'cancelled', actor_id: fixture.requesterId,
+          }],
+          // 480, i.e. the deducted 120 really came back — the assertion a canned double could not carry.
+          lot: { remaining_minutes: 480, status: 'active' },
+          events: [{ event_type: 'deduct', delta_minutes: -120 }, { event_type: 'reverse', delta_minutes: 120 }],
+          sealRows: '1',
+        })
+
+        // ── (c) THE RETRY. Same round, same actor, same action — the shape a client that saw a
+        //    failure would send.
+        retry = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        // The MEASURED semantics, asserted as a value rather than as `not.toBe(200)` — a
+        // `notEqual` family assertion cannot tell 「refused because the round is already spent」
+        // from 「failed for some other reason」 (`feedback_not_this_error_is_not_an_outcome_assertion`).
+        expect(retry.status, await retry.clone().text()).toBe(403)
+        const retryBody = (await retry.json()) as { error?: { code?: string } | string; code?: string }
+        const retryCode = typeof retryBody.error === 'object' ? retryBody.error?.code : retryBody.code
+        expect(retryCode).toBe('APPROVAL_ASSIGNMENT_REQUIRED')
+        // WHY THAT GATE AND NOT THE TERMINAL-STATUS ONE — measured, because the prediction was
+        // wrong and a corrected prose claim would be unfalsifiable: the redemption's terminal
+        // advance left the round instance with no ACTIVE seat, so the authorization gate answers
+        // first and `:11583` is never reached. Asserted as the whole grouped population, so a
+        // future change that leaves a seat active goes red here instead of silently re-routing (c)
+        // to a different guard.
+        const seats = await pool().query<{ is_active: boolean; n: string }>(
+          `SELECT is_active, count(*)::text AS n FROM approval_assignments
+            WHERE instance_id = $1 GROUP BY is_active ORDER BY is_active`,
+          [fixture.roundInstanceId],
+        )
+        expect(seats.rows).toEqual([{ is_active: false, n: '1' }])
+
+        // Nothing moved: not the rows, not the seal, not the ledger.
+        expect(
+          await committedCancellationSnapshot(
+            fixture.roundInstanceId, fixture.documentId, attached!.requestId, attached!.orgId, lotId,
+          ),
+        ).toEqual(committed)
+        // And the announcement was not attempted a second time either.
+        expect(deliveryCalls).toBe(1)
+      } finally {
+        if (previousDelivery) registerCancelRoundCancelledEventDelivery(previousDelivery)
+        else unregisterCancelRoundCancelledEventDelivery()
+      }
+      // The registry is back, or every later case in this file silently loses its control.
+      expect(getCancelRoundCancelledEventDelivery()).toBe(previousDelivery)
+    },
+  )
+
+  /**
+   * P3-1, the RESIDUAL half the gate could only disclose: an UPSTREAM post-commit step escapes.
+   *
+   * THE MECHANISM. `dispatchAction`'s post-commit region is
+   * `:12667 COMMIT` → `:12668 emitApprovalTaskCreatedEventsPostCommit` → `:12681 supersedeCardDeliveriesPostCommit`
+   * → `:12688 deliverCancelRoundCancelledEventPostCommit`, and the whole region shares the method's
+   * ONE outer `catch` (`:12699`). Both upstream calls swallow their own errors today
+   * (`:13301-13302` / `:13359-13360`), so 「the announcement happens」 rests on a property of two unrelated
+   * methods rather than on anything local. The gate measured the consequence with a confounded
+   * probe and recorded it as P3, disclosure only. This case converts it into an executed,
+   * instance-scoped assertion.
+   *
+   * WHY THE INJECTION IS NOT CONFOUNDED (unlike the gate's M6, which it names as such). The
+   * prototype override below throws ONLY for this fixture's round instance; every other dispatch in
+   * the process — including this fixture's own three setup approvals — passes straight through to
+   * the real implementation. So the reds this case can produce are reds about the redemption, not
+   * about fixture construction (`feedback_confounded_mutation_needs_isolated_variant_grid`).
+   *
+   * ⚠️ TWO OF THE ASSERTIONS BELOW ARE TRIPWIRES, NOT ENDORSEMENTS. `expect(approve.status).toBe(500)`
+   * and `expect(cancelledEvents.payloads.length).toBe(0)` pin TODAY'S EXPOSURE: a committed,
+   * refunded cancellation that is reported as a failure and is never announced. They are here so the
+   * exposure is a measured fact instead of prose. If the post-commit region is ever isolated, or the
+   * delivery hoisted to sit immediately after `COMMIT` (the remedy registered for owner in the
+   * phase-2 MD), these two lines go RED and must be REWRITTEN to the improved values — never
+   * deleted (`feedback_tests_freeze_change_not_approve_it`; the same tripwire discipline the
+   * `unrecoverableExpired` case above already fired once).
+   *
+   * WHAT IS NOT A TRIPWIRE, and is the reason owner asked for this injection: the committed rows are
+   * unchanged, and the retry that the 500 induces does not redeem, refund or announce twice. Those
+   * two hold under either remedy and are the load-bearing half of this case.
+   */
+  it(
+    'P3-1 residual: an UPSTREAM post-commit step escaping into the shared outer catch leaves every ' +
+      'committed row byte-identical and keeps the induced retry from redeeming/refunding twice — ' +
+      'while pinning today\'s exposure (the caller sees 500 and the cancellation is never announced)',
+    async () => {
+      const suffix = `pcesc-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+      await seedDirectoryIdentity(fixture.requesterId, attached!.orgId)
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+
+      const lotId = await seedLiveAnnualLotWithLedger(attached!.orgId, fixture.requesterId, `wi13-pcesc-${suffix}`, {
+        amountMinutes: 480,
+        remainingMinutes: 360,
+        deductMinutes: 120,
+        requestId: attached!.requestId,
+      })
+
+      // ── THE INJECTION: the real production method, overridden on the prototype and scoped to ONE
+      //    instance id. `supersedeCardDeliveriesPostCommit` is `private` in TypeScript only; at
+      //    runtime it is an ordinary prototype member, which is what makes an instance-scoped
+      //    override possible without a production test hook.
+      const prototype = ApprovalProductService.prototype as unknown as Record<string, unknown>
+      const originalSupersede = prototype.supersedeCardDeliveriesPostCommit as
+        (this: unknown, instanceId: string, excludeId?: string) => Promise<void>
+      expect(
+        typeof originalSupersede,
+        'the post-commit step this case injects into no longer exists under that name',
+      ).toBe('function')
+      let escapes = 0
+      prototype.supersedeCardDeliveriesPostCommit = async function (
+        this: unknown, instanceId: string, excludeId?: string,
+      ): Promise<void> {
+        if (instanceId === fixture.roundInstanceId) {
+          escapes += 1
+          throw new Error('PC-ESCAPE-INJECTED: an upstream post-commit step blew up')
+        }
+        return originalSupersede.call(this, instanceId, excludeId)
+      }
+
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
+      let approve: Response
+      let retry: Response
+      try {
+        approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        // ⚠️ TRIPWIRE (see the doc comment): today a post-COMMIT escape is reported to the caller as
+        //    a failed action even though the cancellation is durable.
+        expect(approve.status).toBe(500)
+        // NON-VACUITY: the escape really happened, exactly once, on this instance.
+        expect(escapes).toBe(1)
+
+        // ── THE LOAD-BEARING HALF (b). Every committed row is what a SUCCESSFUL redemption writes:
+        //    `rollbackQuietly` on an already-committed transaction undoes nothing, and must not.
+        const committed = await committedCancellationSnapshot(
+          fixture.roundInstanceId, fixture.documentId, attached!.requestId, attached!.orgId, lotId,
+        )
+        expect(committed).toEqual({
+          original: { status: 'cancelled', version: 2 },
+          request: { status: 'cancelled', resolved_by: fixture.requesterId, resolved: true },
+          round: { outcome: 'applied', ended: true },
+          revokes: [{
+            action: 'revoke', from_status: 'approved', to_status: 'cancelled', actor_id: fixture.requesterId,
+          }],
+          lot: { remaining_minutes: 480, status: 'active' },
+          events: [{ event_type: 'deduct', delta_minutes: -120 }, { event_type: 'reverse', delta_minutes: 120 }],
+          sealRows: '1',
+        })
+        // ⚠️ TRIPWIRE: the announcement was SKIPPED — `:12688` sits after the step that escaped.
+        expect(cancelledEvents.forRequest(attached!.requestId).length).toBe(0)
+
+        // ── THE LOAD-BEARING HALF (c). The 500 above is precisely what induces a client retry.
+        retry = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        // Same measured refusal as the case above (403 at the authorization gate, not 409 at the
+        // terminal-status guard) — and this is the retry that TODAY'S 500 actively induces, which
+        // is the whole reason owner asked for this injection.
+        expect(retry.status, await retry.clone().text()).toBe(403)
+        // The retry did not even reach the injected step, so the escape count is still 1 — and
+        // nothing in the committed population moved.
+        expect(escapes).toBe(1)
+        expect(
+          await committedCancellationSnapshot(
+            fixture.roundInstanceId, fixture.documentId, attached!.requestId, attached!.orgId, lotId,
+          ),
+        ).toEqual(committed)
+        expect(cancelledEvents.forRequest(attached!.requestId).length).toBe(0)
+      } finally {
+        prototype.supersedeCardDeliveriesPostCommit = originalSupersede
+        cancelledEvents.stop()
+      }
+      // Restored by identity, not by shape — a later case running against the override would be
+      // testing this case's injection instead of production.
+      expect(prototype.supersedeCardDeliveriesPostCommit).toBe(originalSupersede)
+    },
+  )
+
+  /**
+   * P3-2 — `reverseLeaveBalanceDeduction`'s OWN `alreadyReversed` latch, EXECUTED.
+   *
+   * WHAT THE FOCUS GATE COULD AND COULD NOT SAY (§4.2, quoted so this case is not read for more
+   * than it adds): its replay scenario measured `kind='replay'`, which means the boundary's
+   * `attendanceResultOperationPreflightV1` short-circuited at
+   * `w4c3b-request-operation-boundary.ts:870-874` BEFORE the adapter ran. So the evidence covered
+   * the OUTER preflight gate; the inner latch at `plugins/plugin-attendance/index.cjs:19394-19398`
+   * had ZERO executions. owner: 「若要声称余额冲销自身幂等,须让调用真正进入内层」.
+   *
+   * HOW THIS CASE GETS INSIDE. Not by calling the helper directly. The request is redeemed through
+   * the ordinary production path — HTTP approve → `dispatchAction` → `executeInExternalTransaction`
+   * → the real adapter → `:35303` `if (approvedLeave)` → `reverseLeaveBalanceDeduction` — on a
+   * round whose operation id has never been sealed, so the outer preflight does NOT short-circuit
+   * and the adapter really runs. What is arranged instead is the LEDGER: a `reverse` row for this
+   * `source_id` already exists when the helper's first statement reads it (`:19393-19397`).
+   *
+   * ⚠️ THE DECLARED SCOPE, precisely (owner: 「按声明范围处理」). What today's SINGLE call site
+   * cannot produce is not the partial reverse — the helper itself writes one whenever
+   * `headroom < deducted` (`:19427-19430`) — it is *a `reverse` row for source_id X while request X
+   * is still `approved`*, because `:35288-35296` flips the request to `cancelled` in the SAME transaction
+   * as `:35303`'s refund, and `grep -n "'reverse'" plugins/plugin-attendance/index.cjs` returns
+   * exactly three lines — the doc comment at `:19388`, the latch's own read at `:19395`, and the
+   * helper's single `INSERT` at `:19439` — i.e. ONE writer, which is this helper itself. So this case proves: THE LATCH IS EXECUTED THROUGH THE
+   * PRODUCTION CALL PATH AND IS LOAD-BEARING FOR THE LEDGER STATE IT SEES. It does NOT claim that
+   * state arises in production today — the outer preflight is what stands between production and
+   * this line, and that is the honest reading of 「余额冲销自身幂等」 at this head.
+   *
+   * WHY THE FIXTURE HAS HEADROOM, and why that is the whole point. amount 480 / remaining 420 with
+   * a prior `reverse +60` leaves 60 minutes of headroom against a `deduct −120`. Without the latch
+   * the scan at `:19400-19409` finds that deduct row, computes `restore = min(120, 60) = 60`, and
+   * refunds a SECOND time. A fixture with no headroom (remaining already back at `amount_minutes`)
+   * would make `restore <= 0` and `continue` — the case would pass with the latch DELETED, i.e. it
+   * would be a test with no discriminating power (`feedback_ineffective_mutation_looks_like_a_useless_test`).
+   */
+  it(
+    'P3-2 / 内层幂等 (index.cjs:19394-19398): with a `reverse` already on the ledger for this ' +
+      'source_id, the redemption enters `reverseLeaveBalanceDeduction` through the real adapter and ' +
+      'the latch refunds NOTHING a second time — zero balance change, no second ledger row, and ' +
+      '`alreadyReversed: true` on both carriers (M-INNER: delete the latch ⇒ a second +60 ⇒ red)',
+    async () => {
+      const suffix = `innerrev-${TS}`
+      let attached: { requestId: string; orgId: string } | undefined
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      expect(attached).toBeTruthy()
+      await seedDirectoryIdentity(fixture.requesterId, attached!.orgId)
+      expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+
+      const lotId = await seedLiveAnnualLotWithLedger(attached!.orgId, fixture.requesterId, `wi13-inner-${suffix}`, {
+        amountMinutes: 480,
+        remainingMinutes: 420,
+        deductMinutes: 120,
+        requestId: attached!.requestId,
+        priorReverseMinutes: 60,
+      })
+
+      // THE PRE-STATE the latch must see, measured rather than assumed: exactly one deduct and
+      // exactly one prior reverse on this source_id, and 60 minutes of headroom on the lot.
+      const preEvents = await pool().query<{ event_type: string; delta_minutes: number }>(
+        `SELECT event_type, delta_minutes FROM attendance_leave_balance_events
+          WHERE balance_id = $1::uuid AND source_id = $2 ORDER BY event_type`,
+        [lotId, attached!.requestId],
+      )
+      expect(preEvents.rows).toEqual([
+        { event_type: 'deduct', delta_minutes: -120 },
+        { event_type: 'reverse', delta_minutes: 60 },
+      ])
+
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, await approve.clone().text()).toBe(200)
+
+      // The redemption REALLY RAN — otherwise every zero below would be the boring zero of a
+      // cancellation that never happened, and the mutation would stay green.
+      expect(await roundOutcome(fixture.roundInstanceId)).toMatchObject({ outcome: 'applied' })
+      const cancelledRequest = await pool().query<{ status: string }>(
+        `SELECT status FROM attendance_requests WHERE id = $1::uuid`,
+        [attached!.requestId],
+      )
+      expect(cancelledRequest.rows[0]?.status).toBe('cancelled')
+
+      // ── THE LATCH. Zero balance change and no second ledger row: the whole table for this lot is
+      //    still the two rows seeded above.
+      const post = await pool().query<{ remaining_minutes: number; status: string }>(
+        `SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1::uuid`,
+        [lotId],
+      )
+      expect(Number(post.rows[0].remaining_minutes)).toBe(420)
+      expect(post.rows[0].status).toBe('active')
+      const postEvents = await pool().query<{ event_type: string; delta_minutes: number }>(
+        `SELECT event_type, delta_minutes FROM attendance_leave_balance_events
+          WHERE balance_id = $1::uuid ORDER BY event_type`,
+        [lotId],
+      )
+      expect(postEvents.rows).toEqual([
+        { event_type: 'deduct', delta_minutes: -120 },
+        { event_type: 'reverse', delta_minutes: 60 },
+      ])
+
+      // ── THE LATCH'S OWN ANSWER, on both carriers, pinned as whole objects. `alreadyReversed: true`
+      //    is the value ONLY `:19398` can produce — the scan branch at `:19445` always answers
+      //    `alreadyReversed: false` — so this is the field that says the inner gate, not the outer
+      //    preflight, is what produced these zeros.
+      const roundIdRow = await pool().query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixture.roundInstanceId],
+      )
+      const sealed = await pool().query<{ state: string; response_snapshot: { data?: { reversal?: unknown } } }>(
+        `SELECT state, response_snapshot FROM attendance_result_operations
+          WHERE org_id = $1 AND operation_id = $2::uuid`,
+        [attached!.orgId, deriveCancelRoundW4OperationIdV1(roundIdRow.rows[0].id)],
+      )
+      expect(sealed.rows.length).toBe(1)
+      expect(sealed.rows[0].state).toBe('completed')
+      expect(sealed.rows[0].response_snapshot.data?.reversal).toEqual({
+        reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: true,
+      })
+
+      const dto = (await approve.json()) as {
+        cancellationOutcome?: { status?: string; reversal?: Record<string, unknown> }
+      }
+      expect(dto.cancellationOutcome?.reversal).toEqual({
+        reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: true,
+      })
+      // `unrecoverableExpired` is 0 here, so the classifier's token is the plain one — asserted so
+      // a future classifier change cannot silently start reporting an already-reversed cancellation
+      // as the expired-loss variant.
+      expect(dto.cancellationOutcome?.status).toBe('cancelled')
+    },
+  )
 })

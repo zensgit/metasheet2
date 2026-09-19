@@ -4729,3 +4729,256 @@ $ … run tests/integration/approval-instance-readability-s1.db.test.ts \
 
 ⚠️ 该步骤的完整清单远不止这十个文件(`:1600-1672` 还有目录/考勤等一长串);本轮**只跑了这十个**——七个
 cancel-round + 这三个审批邻居。其余未跑,不得读成「整步已复现」。
+
+---
+
+## §7 post-commit 异常隔离 + 内层幂等(2026-09-19)
+
+**触发**:owner 对四重点聚焦闸(`impl-gate-C-slice2-focus4-20260919.md` §7)两条 P3 的裁决,原话:
+
+> post-commit 异常隔离:最终闸补定向故障注入。若通知抛错能让已提交的取消返回失败,会诱发重试,不能只作披露。
+> 应证明异常不会改写已提交结果,且重试不重复兑现。
+> 内层 alreadyReversed:按声明范围处理。当前证据只能写「外层重放不重复退款」。若要声称余额冲销自身幂等,
+> 须让调用真正进入内层,补重复冲销场景及对应 mutation。
+
+**本节交付**:3 条新真库用例 + 4 组 mutation。**生产代码零改动**(证据见 §7.8)。
+
+---
+
+### 7.1 机制(file:line,对 `51e1f4210` 之后的工作树逐条 `grep -n` 核过)
+
+**提交后区段(`ApprovalProductService.dispatchAction`)**
+
+| 位置 | file:line |
+|---|---|
+| `COMMIT` | `packages/core-backend/src/services/ApprovalProductService.ts:12667` |
+| ① 任务创建事件(提交后) | `:12668` → 方法体 `:13301-13302`,**内部整体 try/catch → logger.warn** |
+| ② 卡片 supersede(提交后) | `:12681` → 方法体 `:13359-13361`,**方法第一句就是 `try {`** |
+| ③ **取消宣告投递** | `:12688` → 方法体 `:13392`,**`try` 在 `:13406`,`catch → logger.warn` 至 `:13413`** |
+| 区段共用的外层 catch | `:12699`(`rollbackQuietly` → 重抛) |
+
+**重试拒绝的三道门(串联,本轮实测确认顺序)**
+
+| 顺位 | 门 | file:line | 实测答复 |
+|---|---|---|---|
+| 1 | 授权门 `actorCanAct` | `:10938-10940` | **403 `APPROVAL_ASSIGNMENT_REQUIRED`** |
+| 2 | 终态门 `instance.status !== 'pending'` | `:11583-11589` | 409 `INVALID_STATUS_TRANSITION`(「current status is approved」) |
+| 3 | 活动节点门 | 兑现后无活动节点 | 409 `INVALID_STATUS_TRANSITION`(「Approval does not have an active node」) |
+
+**余额冲销(考勤插件)**
+
+| 角色 | file:line |
+|---|---|
+| 冲销函数 | `plugins/plugin-attendance/index.cjs:19392` `reverseLeaveBalanceDeduction` |
+| ├ **内层幂等门** | `:19393-19397` 读同 `source_id` 的 `reverse` 行 → **`:19398` 命中即返回 `alreadyReversed:true`** |
+| ├ 扫描分支 | `:19400-19409`(过期谓词在 `:19403`)、`:19427` `restore = min(deducted, headroom)` |
+| └ 扫描分支的返回 | `:19445`,**恒 `alreadyReversed:false`** |
+| 唯一调用点 | `:35303` `if (approvedLeave)` → `:35304`;同事务的状态写在 `:35288-35296` |
+
+---
+
+### 7.2 同步性普查 —— 为什么「同步 throw」是忠实的注入形状
+
+同步 `try`/`catch` 包不住异步被调方。若投递链上任一跳是异步,「投递已被隔离」就是一条关于生产不会产生的形状的断言
+(`feedback_fixture_shape_must_match_named_scenario`)。**逐跳实读,闭世界**:
+
+| 跳 | file:line | 返回 |
+|---|---|---|
+| 合同 | `attendance-cancellation-execution-port.ts:306-309` | `(…) => void`,**不是** `Promise<void>` |
+| **唯一**绑定方 | `plugins/plugin-attendance/index.cjs:35831-35835` → 非 async 箭头 `emitRequestCancelledEventForOutcomeV1`(`:25026-25036`) | `boolean` |
+| 插件 emit | `plugin-manager.ts:588-592` → `index.ts:1245` | `void` |
+| 总线 | `event-bus.ts:70-72` `emit` → `:27-38` `dispatch` | `void`;每个订阅者另有 `:43-50` 的 try/catch |
+
+**绑定方普查(全仓闭世界,`grep -rn` 扫 packages/plugins/apps/scripts,排除 node_modules 与 tests)⇒ 5 处:**
+
+```
+packages/core-backend/src/core/attendance-cancellation-execution-port.ts:314   # 注册表定义
+packages/core-backend/src/core/attendance-cancellation-execution-port.ts:324   # unregister 定义(子串命中)
+packages/core-backend/src/types/plugin.ts:1588                                 # 插件 API 接口声明
+packages/core-backend/src/index.ts:2769                                        # 宿主透传
+plugins/plugin-attendance/index.cjs:35832                                      # ★ 唯一真正喂入函数的一处
+```
+
+⚠️ 这里用全仓普查而不是 `grep -c … plugins/plugin-attendance/index.cjs`:后者只数一个文件,
+答案会**偏小**,而「唯一」是个全仓断言(`feedback_absolute_claim_sweep_must_be_mechanical`)。
+
+⇒ 整条链同步,监听器的 bug 在 `:13406` 的 `try` 处表现为**同步 throw**。本节用例正是注入这个形状。
+
+---
+
+### 7.3 三条新用例(全部走**真边界**,不用 `bindCancellationPort`)
+
+双桩返回的是**写死的** `reversal` 对象、一行余额都不写,所以 owner 的判据 (b)「余额已返还」对它**按构造不可测**——
+数字是喂给它的,mutation 会照常绿(`feedback_positive_control_not_failclosed`)。三条用例因此沿用既有
+`unrecoverableExpired` 用例的真端口配方(`seedDirectoryIdentity` + 真 W4 preflight/seal),并把**过期批次换成活批次**:
+过期批次让整条返还路径成为恒等映射,会把这几条用例要看的差别全部藏掉。
+
+| 用例 | 注入点 | 断言 |
+|---|---|---|
+| **P3-1 (a)(b)(c)** | 经**生产注册表**换绑一个同步抛错的投递(save-and-restore) | (a) approve 仍 **200**;(b) 提交后人口**整体对象相等**;(c) 重试 **403** + 人口逐字节不变 + 投递未被再调用 |
+| **P3-1 residual** | 在 `ApprovalProductService.prototype` 上**按 instanceId 限定**覆盖 `supersedeCardDeliveriesPostCommit` 使其抛错 | (b) 人口整体相等;(c) 重试 403 + 人口不变 + 宣告仍 0;另有两条 ⚠️ TRIPWIRE 钉住今天的暴露 |
+| **P3-2 内层幂等** | 不注入;**布置账本**:活批次 480/420 + `deduct −120` + **已存在的 `reverse +60`** | 余额仍 420、台账仍两行、DTO 与 seal 的 `reversal` 均为 `alreadyReversed:true` |
+
+(b) 的「提交后人口」是**一个对象**而不是几个挑出来的字段,覆盖 7 组:原单 `status/version`、请求行
+`status/resolved_by/resolved_at`、轮次 `outcome/ended_at`、revoke 审计行全行、余额批次、余额台账全表、W4 seal 行数。
+按整体比较,将来有人悄悄削窄快照会直接红。
+
+**P3-1 residual 的注入不是 confounded**(聚焦闸的 M6 自认 confounded):原型覆盖**只对本 fixture 的轮次实例**抛错,
+同进程其它 dispatch(含本 fixture 自己的三次建单/审批)全部透传到真实现。
+
+---
+
+### 7.4 mutation 台账(每组:`cp` 备份 → 改 → 单跑 → `cp` 还原 → `cmp`)
+
+| # | 落点 | 改动 | 实测 |
+|---|---|---|---|
+| **M-PC1** | `ApprovalProductService.ts:13406-13413` | 删掉投递的 try/catch,只留裸 `deliver(...)` | **恰 1 红**,红在 P3-1 的 **(a)**:`expected 500 to be 200`,体 `{"code":"APPROVAL_ACTION_DISPATCH_FAILED"}`。其余 26 绿 |
+| **M-PC2** | `:10938` 授权门 | `if (false && …)` | **恰 2 红**,两条都红在 **(c)**:`expected 409 to be 403`(落到第 2 道门 `INVALID_STATUS_TRANSITION`)。其余 25 绿 |
+| **M-PC3** | M-PC2 **再叠加** `:11583` 终态门 | 两道门同时失效;为越过状态断言短路,**临时**把用例里那句状态断言降级成 `console.log`(该改动同样 `cp` 还原 + `cmp` 核过) | 重试**仍被第 3 道门拒绝**:`409 INVALID_STATUS_TRANSITION / "Approval does not have an active node"`。**residual 用例整条全绿**——即两道重试门都拆掉,提交后人口仍**逐字节不变**、escape 计数仍 1、宣告仍 0 |
+| **M-INNER** | `index.cjs:19398` | **只删幂等门那一行,保留其上的查询**(门是被测对象,读不是) | **恰 1 红**,红在 P3-2:`expected 480 to be 420` —— 第二笔 `+60` 真的写进去了。其余 26 绿,**含既有 `unrecoverableExpired` 用例**(其批次已过期 ⇒ 返还路径恒等 ⇒ 该门本就不命中),这是隔离证据 |
+
+**M-PC1 正是 owner 点名的那个场景**:隔离一旦去掉,通知抛错**确实**让已提交的取消对外返回 500 ——
+可诱发重试。现实现隔离在位,所以不发生。这不是推理,是两次运行的差。
+
+**M-PC3 是本节最强的一条**:owner 要的「重试不重复兑现」不止靠第一道门。把前两道门都拆掉,重试仍不重复兑现、
+不重复返还、不重复宣告。
+
+---
+
+### 7.5 一条被实测推翻的预测(如实登记)
+
+写用例时我预测重试会被 `:11583` 终态门以 **409** 拒绝。**实测是 `:10938` 授权门的 403**:兑现的终态推进把轮次实例的
+席位置为 inactive,`actorCanAct` 先为假,终态门根本没被走到。用例已改成断言**实测值**,并补了一条把席位分组计数
+钉成 `[{is_active:false, n:'1'}]` 的断言,让这个先后次序是**量出来的事实**而不是散文
+(`feedback_not_this_error_is_not_an_outcome_assertion`:`notEqual` 族分不清「因已终态被拒」和「因别的原因失败」)。
+
+---
+
+### 7.6 声明范围 —— 内层 `alreadyReversed` 到底证到了什么
+
+**证到的**:内层门经**生产调用路径**被执行(HTTP approve → `dispatchAction` → `executeInExternalTransaction` →
+真适配器 → `:35303` → `reverseLeaveBalanceDeduction`),**并且对它所见的账本状态承重**(M-INNER 删门即重复冲销)。
+外层 preflight 本轮**没有**短路——该轮次的 operation id 从未 seal 过,seal 行是这次兑现自己写的(断言为 1 行 `completed`),
+所以这次是真的走进去了,不是聚焦闸 §4.2 那种 `kind='replay'` 的外层短路。
+
+**没证到的,必须写清**:这个账本状态**今天的单一调用点产生不出来**。不可产生的不是「部分冲销」——
+`headroom < deducted` 时 helper 自己就会写一条部分 `reverse`(`:19427-19430`);**不可产生的是
+「source_id X 已有 reverse 行、而请求 X 仍是 approved」**,因为 `:35288-35296` 的状态写与 `:35304` 的冲销在**同一个事务**里,
+且
+
+```
+$ grep -n "'reverse'" plugins/plugin-attendance/index.cjs
+19388:  # 文档注释
+19395:  #   内层门自己的读
+19439:  #   helper 唯一的 INSERT
+```
+
+⇒ 全仓 `reverse` 行**只有这一个写入方**。
+
+**因此本轮允许的写法是**:「余额冲销的内层幂等门**已被生产路径执行**,且对该账本状态**承重**;外层 preflight 是今天挡在
+生产与这一行之间的东西。」**不得**写成无限定的「余额冲销幂等已验证」。
+
+---
+
+### 7.7 残留暴露 P3-1 与建议(交 owner,本轮**未**改生产)
+
+owner 的补救小句是**有条件的**——「**若**通知抛错能让已提交的取消返回失败 …… 这是缺陷」。该条件在本 head **不成立**
+(投递自带隔离,P3-1 (a) 实测 200)。缺的是证据,证据已补。
+
+**仍然存在的是另一件事**:区段内**上游**某一步外逃 ⇒ 落进 `:12699` 的共用 catch ⇒ 投递被跳过 + 已提交的取消对外报 500。
+P3-1 residual 用例把它**测了出来**并用两条 ⚠️ TRIPWIRE 钉住(`toBe(500)` / 宣告 `toBe(0)`)。今天上游两个方法都自吞异常
+(`:13301-13302` / `:13359-13361`),所以**不可达**。
+
+**建议(owner 裁,本轮不做)**:把 `:12688` 的投递上移到紧接 `:12667` 的 `COMMIT` 之后。本轮不做的理由写明:
+(i) 这会改动聚焦闸在**当前顺序**下放行的提交后次序;(ii) C-2 还要由合并列车 `rebase --onto` 到新 C-1,
+`ApprovalProductService.ts` 是冲突面;(iii) 本轮任务定位是**补证据**,不是改行为。
+一旦采纳,上述两条 TRIPWIRE 会红,**应改写成更好的值,不得删除**(`feedback_tests_freeze_change_not_approve_it`)。
+
+---
+
+### 7.8 回滚路径 —— 三件不同的事,不得混为一谈(owner 指令)
+
+| 类别 | 本切片的情况 | 撤回 PR 能否恢复 |
+|---|---|---|
+| **代码回退** | 本轮**生产代码零改动**:`git diff --stat HEAD -- packages/core-backend/src plugins/` 为**空**,改动只有 1 个测试文件 + 本 MD。回退即回到 `51e1f4210` 的行为 | **能** |
+| **迁移回退** | 本轮**零 DDL、零迁移**;私有处女库 `metasheet2_c2_pc` 用完即 `dropdb`,从未对任何共享库 apply | **不适用** |
+| **已兑现业务的补偿** | 兑现写的是**业务事实**:原单 `cancelled`、考勤请求行 `cancelled`、`reverse` 台账行与余额回补、W4 seal。**撤回 PR 代码不会自动恢复已取消的请假,也不会撤回已返还的余额** | **不能**——需要人工补偿流程,且没有反向业务动作 |
+
+⚠️ 这张表针对的是**本切片**。C-2 整体(已在此分支落地的兑现路径)一旦上线并真的兑现过,第三类同样成立:
+**代码回退 ≠ 业务回退**。合并裁决稿引用「回滚路径」时必须按这三类分写。
+
+---
+
+### 7.9 台架与逐字结果
+
+```
+$ git rev-parse HEAD                       # 起点,与 origin 一致、树净
+51e1f42106a0b441ef1a5914e483d4e80895015c
+$ dropdb metasheet2_c2_pc; createdb metasheet2_c2_pc          # 处女库
+$ DATABASE_URL=…metasheet2_c2_pc npx tsx src/db/migrate.ts     # exit 0(全量迁移)
+$ npx tsc --noEmit -p tsconfig.json ; echo $?
+0
+```
+
+**逐字复现 required 步骤(`plugin-tests.yml` `approval-real-db-integration`,20.x),整份清单同库:**
+
+```
+$ bash -eo pipefail  <该步骤 run: 正文逐字>      # DATABASE_URL 指向处女库
+ Test Files  84 passed (84)
+      Tests  940 passed | 10 skipped (950)
+   Duration  135.96s
+```
+
+(该步骤**不**设 `EXPECT_DB`,10 skipped 即各文件的 `itIfExpectDb` 哨兵——这是该 lane 的既有性质。)
+
+**七个 cancel-round 套件,`EXPECT_DB=1`,同库(证明哨兵活着,不是 skip-green):**
+
+```
+ Test Files  7 passed (7)
+      Tests  93 passed (93)          # 零 skip
+```
+
+其中 `approval-cancel-round-redemption.db.test.ts` 由 **24 → 27**(本节三条)。
+
+**接线/清单/哨兵/census(机械跑,不推断):**
+
+```
+$ git diff --stat HEAD -- .github/ scripts/          # 空 ⇒ 无新文件、无清单变更、无 s6a 重钉
+$ node scripts/ops/ci-realdb-step-contract.mjs ; echo $?                       0
+$ node scripts/ops/approval-browser-ci-wiring.test.mjs ; echo $?               0
+$ node scripts/ops/approval-data-closure-ci-wiring.test.mjs ; echo $?          0
+$ node scripts/ops/integration-guard-required-wiring-contract.test.mjs ; echo $? 0
+$ node scripts/ops/stock-preparation-s6a-operator-preflight.test.mjs ; echo $?  0
+$ pnpm exec vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts
+  Test Files  1 passed (1)   Tests  6 passed (6)      # CANCEL_ROUND_REALDB_FILES 人口
+```
+
+本轮**未新增真库测试文件**(三条用例追加进已接线的 `approval-cancel-round-redemption.db.test.ts`),故两点接线、
+`plugin-tests.yml` 清单、`ci-wiring` 人口、`ci-realdb-step-contract`、s6a 钉**全部为 no-op**——这是**跑出来**的,
+不是「看起来不用动」。
+
+⚠️ 对 §6.3 末尾那条范围警告的**更新**:那里写「本轮只跑了这十个文件,不得读成整步已复现」。**本轮已逐字跑完整步
+84 个文件 / 940 条**,该警告对**本 head** 不再适用;§6.3 的原文作为当时的时点记录保留。
+
+**mutation 还原核验(逐组)**:
+
+```
+M-PC1  cmp … ⇒ RESTORED-IDENTICAL
+M-PC2/M-PC3  cmp APS.ts + cmp 测试文件 ⇒ RESTORED-IDENTICAL(两个文件)
+M-INNER  cmp index.cjs ⇒ RESTORED-IDENTICAL
+$ git diff --stat HEAD -- packages/core-backend/src plugins/      # 空
+$ git status --porcelain                                          # 只剩测试文件与本 MD
+```
+
+---
+
+### 7.10 本节**未**覆盖(不得被读成已闭合)
+
+- **不是 C-2 的全量门审。** 本节只回应 owner 点名的两条 P3。聚焦闸 §8 列出的未求值面(纯 `legacy` / `authoritative` /
+  `shadow` / `eligible` 四条 posture、真实扣减产出的形状、消费者普查、并发竞态、C-3 `blocked` 半边、R1 九处出口、
+  锁序 census、DDL 审)本节**同样未碰**。
+- **(c) 只证到引擎层。** 重试被 `:10938` 拒绝在进入 cancel-round 分支之前,**没有**走 W4 operation-id 重放 preflight;
+  那一层由本文件既有的 `replay` 用例与聚焦闸 §4.2 覆盖(`feedback_verified_one_link_generalised_to_the_chain`)。
+- **扣减仍是手工种的。** 与聚焦闸 §8 同一条:本节的 `deduct` 行由 fixture 直接 `INSERT`,**没有**走
+  `index.cjs:38193`/`:38221` 两个真实扣减写入点。所以证的是「给定一条形状良好的 deduct 行」的行为。
+- **上游外逃的两条 TRIPWIRE 断言不是背书**,是把今天的暴露钉成可观测事实;它们红的那天是该改写,不是该删。
