@@ -2312,6 +2312,34 @@ try {
           assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
           assert.deepEqual((await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows, metadataBeforeLock)
         }
+        const originalScope = (await query(`SELECT s.base_id,b.workspace_id FROM meta_sheets s
+          JOIN meta_bases b ON b.id=s.base_id WHERE s.id='no-genesis'`)).rows[0]
+        const alternateBaseId = `synthetic-base-${randomUUID()}`
+        await query('INSERT INTO meta_bases(id,name,workspace_id) VALUES ($1,$2,$3)',
+          [alternateBaseId, 'Synthetic alternate base', originalScope.workspace_id])
+        try {
+          for (const drift of ['workspace', 'base'] as const) try {
+            if (drift === 'workspace') {
+              await query('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1',
+                [originalScope.base_id, `synthetic-workspace-${randomUUID()}`])
+            } else {
+              await query("UPDATE meta_sheets SET base_id=$1 WHERE id='no-genesis'", [alternateBaseId])
+            }
+            const response = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+            assert.equal(response.status, 404)
+            const body = await response.json() as { ok: boolean; error: { code: string } }
+            assert.equal(body.ok, false)
+            assert.equal(body.error.code, 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND')
+            await assertRejectedIdentityHasNoEffect()
+          } finally {
+            await query("UPDATE meta_sheets SET base_id=$1 WHERE id='no-genesis'", [originalScope.base_id])
+            await query('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1',
+              [originalScope.base_id, originalScope.workspace_id])
+          }
+        } finally {
+          await query('DELETE FROM meta_bases WHERE id=$1', [alternateBaseId])
+        }
+        console.log('PASS: post-preview workspace/base relocation rejects original archive identity with zero data/metadata/stage/history/token/receipt effects')
         try {
           await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
           const revokedExecution = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
