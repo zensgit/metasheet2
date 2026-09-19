@@ -508,7 +508,7 @@ Tree: `9be618e686b89c8d8820763b3936ccca45a1a245` (five-file delta).
 - New exact-head remote CI remains pending publication. No real environment,
   flags, dispatch, deployment or customer storage was accessed.
 
-## Remaining Required Work
+## Local Startup Binding
 
 Local startup binding checkpoint: code
 `6cb20af35dbd02a5f835027cd5190c917d1dd610`, tree
@@ -527,6 +527,30 @@ Launcher ESLint was attempted but excluded by the repository TSConfig (not a
 source lint pass); actual launcher OFF/wrong-secret/cancel subprocess tests pass.
 No new DB/browser run or independent review is claimed for this binding-only
 checkpoint; the previous synthetic router/browser proof is not full launcher UAT.
+
+## Production Download Route Acceptance
+
+Code: `d1ca403ddb8cd85fc28dbf7575d23a9956df808b`.
+Tree: `aac0a46df72a9ebf65eeb9b52b91cd3e1a795260` (one verifier file).
+The production attachment download route uses the process main pool rather than
+the recovery router injection port. The verifier asserts that the initial pool
+has zero connections, closes it and binds a pool to the separately verified owned
+database. Database name and role are checked before the download route runs.
+
+- Both restored files download byte-identically through the real GET route;
+  anonymous calls return 401. These checks also run after each desktop/mobile
+  browser restore, in addition to the prior direct storage readback.
+- Full `--browser` runner PASS: scalar and attachment 1440/390; historical
+  47/47 + 59/59 + 127/127, migration replay, fault rollback and cleanup races.
+  Main/download/stage DB connections are zero and databases/cluster removed.
+- Core typecheck and diff-check PASS. Log:
+  `/private/tmp/tm-attachment-download-browser-20260919.log`;
+  typecheck: `/private/tmp/tm-attachment-download-tsc-20260919.log`.
+- Download requests are Node HTTP requests using synthetic authentication,
+  not browser link clicks or real Workbench login. No new production code,
+  permission or flag changed. No new independent-review verdict is claimed.
+
+## Remaining Required Work
 
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;

@@ -240,7 +240,7 @@ authentication and direct storage byte readback do not substitute for those
 oracles. Cleanup registration, displaced-object reconciliation and full independent
 review also remain open. No new recovery semantics or production flag is enabled.
 
-## Nightly Read-Only Investigation Plan
+## Local Startup Binding
 
 Local startup follow-up: code `6cb20af35dbd02a5f835027cd5190c917d1dd610`
 binds the existing multitable attachment storage singleton into the local custody
@@ -249,6 +249,15 @@ failed unlock never resolve it. No separate attachment root, path override,
 permission, retention default or flag was added. Application admission retains
 the existing complete-port validation/snapshot. This closes the missing local
 launcher binding, not the full login/download or cleanup acceptance gates.
+
+Download evidence at `d1ca403ddb8cd85fc28dbf7575d23a9956df808b` now includes
+the existing production attachment GET route: both restored files return original
+bytes to the synthetic authenticated actor, anonymous requests refuse, and the
+same assertions run after each desktop/mobile restore. The process main pool is
+explicitly replaced with a verified owned synthetic database before any route
+query. This does not prove browser link interaction or Workbench login.
+
+## Nightly Read-Only Investigation Plan
 
 No real environment access is authorized by this plan. Known artifact evidence:
 External Metrics run `35414465715` and Regression run `35414586092`, main
