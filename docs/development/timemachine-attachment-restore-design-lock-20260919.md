@@ -2,6 +2,14 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+Gallery cover checkpoint `f92a6cfcf214b3770fae56384f5e50bc4b889b7d`
+replaces direct stored-URL image rendering with the existing authenticated,
+identity-derived attachment endpoint. Denial retains the filename fallback;
+replacement/unmount abort requests and revoke owned blob URLs. This preserves
+current download authorization and card layout, not a new permission or recovery
+semantic. Unit/domain evidence is recorded below in the paired report; actual
+gallery browser acceptance is still open.
+
 Saved-download acceptance checkpoint: code
 `c6813cf79503794c625fb1bfe4fa07e856470b3c` (tree
 `70a75c47761d292b621f064b104c86ba054ed25b`) verifies actual browser-persisted

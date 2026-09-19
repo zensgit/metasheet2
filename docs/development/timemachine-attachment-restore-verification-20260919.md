@@ -793,6 +793,30 @@ remain unchanged. This is test-only; no new product permission or restore semant
 Gallery cover rendering and full application login/organization selection
 remain separate open acceptance items. No flags, deployment or real environment.
 
+## Authenticated Gallery Cover Checkpoint
+
+Code `f92a6cfcf214b3770fae56384f5e50bc4b889b7d`, tree
+`88c4c04e958a30b2a818c8ed8235e26da3f3e8a6`, changes only the existing gallery
+component and its already-wired spec. Cover requests use encoded attachment ID
+through apiFetch, never the stored URL. Aborted requests cannot publish a blob;
+current covers are revoked on metadata/row changes and unmount. Unavailable
+covers keep the existing filename fallback.
+
+- Baseline: 4 failed/2 passed, `tm-gallery-auth-red-20260920.log`.
+- Focused gallery/attachment neighbors: 16/16, `tm-gallery-auth-green-20260920.log`.
+- Remove the abort publication check: removed-row case RED, 1 failed/5 passed;
+  restored before final gates, `tm-gallery-auth-mutation-20260920.log`.
+- Full unchanged multitable workflow targeted command: 295 files/4091 tests PASS,
+  `tm-gallery-full-domain-20260920.log`.
+- App-source vue-tsc, scoped ESLint and diff-check PASS;
+  `tm-gallery-auth-tsc-20260920.log`, `tm-gallery-auth-lint-20260920.log`.
+
+All logs are under `/private/tmp/`. Bounded Luna read-only review was closed
+without a terminal verdict, so no independent approval is claimed. Actual gallery
+browser decoding through the owned HTTP fixture remains open; grid/lightbox
+browser evidence is not substituted for it. No DB, flags or deployment in this
+checkpoint. Successor exact-head CI remains separate.
+
 ## Outstanding Full-Scope Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file
