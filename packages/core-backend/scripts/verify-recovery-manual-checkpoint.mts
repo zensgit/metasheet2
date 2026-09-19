@@ -2365,6 +2365,18 @@ try {
         await assertRejectedIdentityHasNoEffect()
         console.log('PASS: post-preview inactive actor and independently logged-in actor substitution refuse with zero data/metadata/stage/history/token/receipt effects')
         try {
+          await query("UPDATE users SET role='user' WHERE id=$1", [alternateActorId])
+          const deniedHeaders = { ...headers, authorization: `Bearer ${alternateSession.data.token}` }
+          const deniedCatalog = await fetch(url.replace('/captures', '/catalog'), { headers: deniedHeaders })
+          assert.equal(deniedCatalog.status, 403, JSON.stringify(await deniedCatalog.json()))
+          const deniedRestore = await fetch(executeUrl, { method: 'POST', headers: deniedHeaders, body: executeBody })
+          assert.equal(deniedRestore.status, 403, JSON.stringify(await deniedRestore.json()))
+          await assertRejectedIdentityHasNoEffect()
+        } finally {
+          await query("UPDATE users SET role='admin' WHERE id=$1", [alternateActorId])
+        }
+        console.log('PASS: database-revoked global admin cannot reuse an authenticated session to read archive catalog or execute restore; zero live effects')
+        try {
           await query(`UPDATE meta_records SET locked=true,locked_by='synthetic-other-locker',created_by=NULL WHERE id=$1`, [recordId])
           const lockedRestore = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
           const lockedBody = await lockedRestore.json() as { error: { code: string } }
