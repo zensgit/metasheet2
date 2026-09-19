@@ -147,6 +147,14 @@ describe('MultitableApiClient recovery archive routes', () => {
     await expect(client.readRecoveryArchiveCapture('sheet/a', manualRequestId)).rejects.toMatchObject({ status })
   })
 
+  it('accepts the explicit unsupported attachment reason without an execution identity', async () => {
+    const data = { ...validPreview, executable: false, previewIdentity: null, blockedReason: 'unsupported_attachments' }
+    const client = new MultitableApiClient({ fetchFn: vi.fn(async () => response({ ok: true, data })) })
+    await expect(client.previewRecoveryArchive('sheet/a', {
+      generationId: catalogEntry.generationId, mode: 'revert', scope: { kind: 'whole_sheet' },
+    })).resolves.toEqual(data)
+  })
+
   it('uses the sheet-scoped catalog, whole-sheet preview, and identity-only execute contracts', async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(response({ ok: true, data: {

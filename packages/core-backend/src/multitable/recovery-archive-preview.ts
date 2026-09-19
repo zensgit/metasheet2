@@ -15,6 +15,7 @@ import {
   loadAuthoritativeLiveLinkEdgesForSheet,
 } from './live-link-projection-integrity'
 import type { QueryFn } from './permission-service'
+import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
 import {
   RECOVERY_ARCHIVE_ASYNC_THRESHOLD,
 } from './recovery-archive-restore-plan'
@@ -109,6 +110,7 @@ export interface RecoveryArchivePreviewInput {
 
 export type RecoveryArchivePreviewBlockedReason =
   | 'no_changes'
+  | 'unsupported_attachments'
   | 'schema_drift'
   | 'inbound_unprovable'
   | 'async_plan_required'
@@ -277,6 +279,19 @@ export async function previewRecoveryArchive(
   }
   if (details.summary.resurrectIds.length > 0) {
     return blockedResult(admitted, 'inbound_unprovable', details.summary)
+  }
+  // Attachment writes are outside the current restore contract; do not report them as no-op.
+  for (const [recordId, target] of complete.records) {
+    if (!target.exists || (selectedRecordIds.length > 0 && !selectedRecordIds.includes(recordId))) continue
+    const live = authoritativeLiveById.get(recordId)
+    if (!live) continue
+    for (const [fieldId, type] of surface.rawTypeById) {
+      if (type !== 'attachment' || (selectedFieldIds.length > 0 && !selectedFieldIds.includes(fieldId))) continue
+      if (canonicalizeRecoveryArchiveJson(target.data?.[fieldId] ?? [])
+        !== canonicalizeRecoveryArchiveJson(live.data[fieldId] ?? [])) {
+        return blockedResult(admitted, 'unsupported_attachments', details.summary)
+      }
+    }
   }
   if (details.summary.effectiveWriteCount === 0) {
     return blockedResult(admitted, 'no_changes', details.summary)

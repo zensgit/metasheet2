@@ -798,6 +798,21 @@ describe('RecoveryArchiveModal', () => {
     expect(q('[data-test="archive-recovery-job-outcome"]')?.textContent).toContain('Only part of the job was applied')
   })
 
+  it.each([[false, 'Attachment recovery is not supported yet'], [true, '当前暂不支持恢复附件']] as const)(
+    'explains unsupported attachments without offering execution (Chinese=%s)', async (isZh, expected) => {
+      const props = mount({ isZh, previewArchive: vi.fn(async () => ({ ...syncPreview(),
+        executable: false, previewIdentity: null, blockedReason: 'unsupported_attachments' })) })
+      await flush()
+      q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+      await flush()
+      q('[data-test="archive-recovery-request-preview"]')!.click()
+      await flush()
+      expect(q('[data-test="archive-recovery-blocked"]')?.textContent).toContain(expected)
+      expect(q('[data-test="archive-recovery-execute"]')).toBeFalsy()
+      expect(props.executeArchive).not.toHaveBeenCalled()
+    },
+  )
+
   it('does not offer execution when the server withholds the preview identity', async () => {
     const props = mount({ previewArchive: vi.fn(async () => identityMissingPreview()) })
     await flush()

@@ -1199,7 +1199,7 @@ export interface RecoveryArchivePreview {
   scopeKind: RecoveryArchiveScope['kind']
   executionKind: 'sync' | 'async'
   executable: boolean
-  blockedReason: 'no_changes' | 'schema_drift' | 'inbound_unprovable' | 'async_plan_required' | null
+  blockedReason: 'no_changes' | 'unsupported_attachments' | 'schema_drift' | 'inbound_unprovable' | 'async_plan_required' | null
   previewIdentity: string | null
   summary: {
     reverts: Array<{ recordId: string; fieldIds: string[] }>
@@ -1305,6 +1305,7 @@ const RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS = [
 
 const RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS: ReadonlySet<unknown> = new Set([
   'no_changes',
+  'unsupported_attachments',
   'schema_drift',
   'inbound_unprovable',
   'async_plan_required',
