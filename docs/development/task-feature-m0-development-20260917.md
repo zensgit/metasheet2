@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：内容 SHA `f568e6c7e82fdb13fe3a2de666f380a3d50422a5`（闸 §7 修复；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`）。若其后有 SHA-record 提交，末次仅回填本行。
+- head SHA：本轮内容提交后 `git rev-parse HEAD`（闸 §8 形状甲 + 门 16 乙；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`）。内容 SHA 为前者；若其后有 SHA-record，末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -16,7 +16,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 ```
 
 完整 rollup 数组更长（attendance-web-guard / plugin-tests 多 job 等，当时 QUEUED 或 IN_PROGRESS）。`mergeable=MERGEABLE` 表示无冲突。
-- 一句话：普查 + PROPOSED 锁草案 + 本报告；闸 §7 起加专属 `vitest.tasks-auth.config.ts` / `tests/tasks-auth/setup.ts` / `tests/unit/tasks-auth-ci-wiring.test.ts`（不改 `plugin-tests.yml`）。Draft PR-0，不合并。
+- 一句话：普查 + PROPOSED 锁草案 + 本报告；docs-only Draft PR-0，不合并。专属 auth config/setup/wiring/`tasks-auth-gate.ts` 形状写入锁，**M2 同 PR 落**，本切片不落 `.ts`。
 
 按简报 §2 / 用户 §四 **明确没做什么**：
 
@@ -25,7 +25,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 3. 不合并任何 PR。
 4. 未创建 `zzzz*.ts` 迁移。
 5. 未在任何列上使用 `[!-~]`（无 DDL）。
-6. 未声称真库接线①②③④「门全绿」；§13-10 / §13-12 未裁。
+6. 未声称真库接线①②③④「门全绿」；§13-9 / §13-10 / §13-12 未裁。
 7. 未改 `tasks-web-guard.yml`（尚未存在）也未改 `run-required-web-tests.sh`。
 8. 未改 `plugin-tests.yml`、`table-classification.cjs`、`router/types.ts`、`guardPolicy.ts`。
 9. 未注册路由、未起服务器。
@@ -63,7 +63,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
 | 14 | 锁草案 §13 含题号 1–39 各恰一次 | 锁文件 | 见锁 §13 标题 `**N.`（N=1…39） | 39 题标题均在 |
-| 15 | §13-10 与 §13-12 标未裁 | 锁 §13 | `rg -n "未裁" docs/development/task-feature-design-lock-20260917.md` | 题 10、12 |
+| 15 | §13-9 / §13-10 / §13-12 标未裁 | 锁 §0 / §11 / §13 前言 / §14-3 | `grep -n -F "未裁" docs/development/task-feature-design-lock-20260917.md` | 四处清单均为 §13-9 / §13-10 / §13-12；§9 表另有这三行 |
 
 ---
 
@@ -103,9 +103,9 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 3. **仓根无 `CLAUDE.md`**：章程以 `AGENTS.md` + 工作区 `~/Downloads/Github/CLAUDE.md` 为准（Q6）。本 SHA `AGENTS.md:48-50` 不是两点接线段。
 4. **`user_orgs` 生产分布 UNCLEAR**（裁定不连生产）。本地活跃多成员 = 0。
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
-6. **§13-10 / §13-12 未裁**。
+6. **§13-9 / §13-10 / §13-12 未裁**。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **两轮对抗闸未齐**：第一轮 REJECT + 重跑 REJECT-with-findings；第二轮独立审 REJECT（`gate-task-m0-20260917.md` §6）。本轮吸收闸 §6 的 2 P1 / 8 P2 / 5 P3 + R1'-4 残留 2 P2 + A 的 3 P3。不声称 M0 退出门已过。
+8. **对抗闸未齐**：第四轮 REJECT（`gate-task-m0-20260917.md` §8，1 P1 / 5 P2 / 4 P3）。本轮走形状甲（三件 `.ts` 移出）+ 门 16 乙式姿态硬约束。不声称 M0 退出门已过。
 9. **飞书 `:21-23` vs 计划 §5-2**：计划把《完成与重启任务》:23 列为 `scope=self|all` 出处之一；锁按闸 P3-1 把 `:21-23` 标 IM 不对标，`:20` 单独支撑创建人完成范围。以闸 P3-1 为准，计划 :23 记偏离。
 
 ---
@@ -114,8 +114,8 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **两轮闸未齐**：两轮皆 REJECT-with-findings。本轮按闸 §6「一次改完」改锁；待闸方亲核 P1 面 + 机械 `sed -n` + Opus 只审 §12。
-4. **§13-10 / §13-12 未裁**。
+3. **闸未齐**：第四轮 REJECT。本轮按闸 §8 一次改完；待闸方亲核门 16 姿态 + 形状甲 + 机械 `sed -n`。
+4. **§13-9 / §13-10 / §13-12 未裁**。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
 7. 未改任何共享文件 / workflow / token 行。
@@ -125,27 +125,25 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 11. 飞书 IM/P2 篇在锁 §2 用计划已蒸馏的承重机制，未在本报告逐篇贴原文行。
 12. `mergeable` JSON 已回填 §0；当时 checks 未完成，未把 QUEUED 当绿。
 
-不许写「全部完成」。本切片交付 = 三份 docs + 专属 auth config/setup/wiring + Draft PR-0。
+不许写「全部完成」。本切片交付 = 三份 docs + Draft PR-0。
 
 ---
 
-## 6. 修复轮（闸 §7 第三轮 2 P1 + 5 P2 + 4 P3）
+## 6. 修复轮（闸 §8 第四轮 1 P1 / 5 P2 / 4 P3）
 
-未改 §13-10 / §13-12 的未裁状态。未合并。任务 B 未起。**表内不放正则命令**；命令在表下代码块，引用前已实跑。
+未改 §13-10 / §13-12 的未裁状态（§13-9 一并列入未裁清单，待 owner 定级）。未合并。任务 B 未起。形状裁决 **甲**：三个 `.ts` 移出 PR-0，回到 docs-only。门 16 走 **乙**（测试姿态硬约束，无 mutation 负控）。**表内不放正则命令**；命令在表下代码块，引用前已实跑。
 
 | finding | 改动 | 实际输出摘录 |
 |---|---|---|
-| P1-1 门 16 装载顺序 | 专属 `vitest.tasks-auth.config.ts` + `tests/tasks-auth/setup.ts` + `tests/unit/tasks-auth-ci-wiring.test.ts`；门 16 改为 token `perms` 正控 403 / config 改回 `'true'` 负控 200；不读 env 过门 | 锁 `:176` config；`:327` 门 16。wiring-shape PASS（node 复放 `assert.match`） |
-| P1-2 `:144` 判断句 | 撤回「绕过 ③」；改为 admission 行仍必需（`:347`）；通道让 namespace 凭角色名进 `controlledNamespaces`（`:196-199`）；削弱 ①② 哪一件待普查。§13-10b 同改 | 锁 `:146` / `:148` / `:374` |
-| P2 §9/§12/§13 三方 | §13-9 进 §9 **未裁**（阻断门 3）；§12 尾点名门 3；§13-7 只标建议、去掉「未裁/建议」双标 | 锁 `:279` / `:331` / `:364` |
-| P2 §4.4 自相矛盾 | 不得**直接**用 `resolveReminderTimeZone` 做 viewer 校验；`computeDateReminderOccurrence` `:253` 内部调用已披露；写入非法 tz ⇒ 422 进门 8 | 锁 `:132` / `:319` |
-| P2 门 9 锚点 | 先例改为 `loadDeniedRecordIds:1200`；500 不再合取 `toEqual([])`；负控乙只 500 | 锁 `:320` |
-| P2 `RBAC_OPTIONAL` 读点 | 三处：`namespace-admission.ts:9`、`rbac/service.ts:17`、`routes/permissions.ts:21` | 锁 `:115` / `:345` |
-| P2 required 冻结 | §9 拆出「required context 活体」行；以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读 | 锁 `:276` |
-| P3 门 16 信任面 | 不再自称整个信任面；`RBAC_BYPASS` 不构成本门判据 | 锁 `:327` |
-| P3 门 17 | 收集数 == `it(`/`test(` 静态计数；声明只证执行 | 锁 `:328` |
-| P3 报告 head 行 | 内容 SHA vs SHA-record 分写（见 §0） | 本文件 `:10` |
-| P3 报告 `:350` | 旧表已替换；§13-7 现 `:364` | 锁 `:364` |
+| P1-A 门 16 负控 | 乙式：静态钉 + 正控 403；明说无 mutation 负控（setup.ts:13 盖回 + :62-64 抛错） | 锁 `:329`「无 mutation 负控」 |
+| 形状甲 | `git rm` 三件 `.ts`；「M0 落」改「M2 与 tasks-auth-gate.ts 同 PR 落」；M2 验收补 `:71` existsSync(GATE) 与 `:107-166` | `git diff --name-only origin/main` 仅三份 docs（commit 后） |
+| P2-C :211 通则 | `paths-ignore` 命中才不跑 build；含 `packages/**` 会跑；本 PR-0 docs-only 命中豁免 | 锁 `:213`；`sed -n '4,8p' docker-build.yml` → docs/** + output/** |
+| P2-C 报告/普查 docs-only | `:19`/`:128` 回改 docs-only；`:24/:38/:72/:73/:75/:86` 与普查 `:202` 仍为 docs-only 且现为真 | 报告 `:19` 一句话；普查 `:202` |
+| P2-D 门 9 | 注入点 `:1288` loadApprovalProjectionDeniedRecordIds，或不属于 `:1273-1277` 三谓词；先例 `:1277` rethrow + `:1288` 冒泡 | 锁 `:322`；源 `:1277` `throw err`、`:1288` 调用 |
+| P2-E 未裁清单 | `:9` / `:25` / `:306` / `:427` 统一 §13-9 / §13-10 / §13-12 | `grep -n -F "§13-9 / §13-10 / §13-12"` 四行 |
+| 交叉引用 | §9 TASKS_* 行指向 §10+门 18；§12 尾补门 18；门 16 补 §13-10c 免责 | 锁 `:284` / `:333` / `:329` |
+| P3-B 门 8 | 追加 viewer tz 非法/缺失两格 + fallback 改 UTC 负控 | 锁 `:321` |
+| P3-C wiring-shape | 三件已移出，不再引用 `wiring-shape PASS` | 本表无该行 |
 
 ### 本轮实跑（merge-base `bb77ca5f2`）
 
@@ -155,45 +153,60 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 bb77ca5f2ce3c2825265ec8877861d367d017ead
 ```
 
-wiring 形状（worktree 无 node_modules，用 node `assert.match` 复放 wiring 测试；CI `test (20.x)` 默认 vitest 收集 `tests/unit/`）：
+`grep -n -F "§13-9 / §13-10 / §13-12" docs/development/task-feature-design-lock-20260917.md`：
 
 ```
-wiring-shape PASS
+9:- 实现者不得批准自己的安全结论。§13-9 / §13-10 / §13-12 标「未裁」。
+25:本锁 **PROPOSED**。M2 实体核心（DDL/路由/前端）要等 M1 ratify **且** §13-9 / §13-10 / §13-12 落槌。
+306:| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-12 落槌 |
+427:3. **§13-9 / §13-10 / §13-12 必须落槌** 才进入 M2。
 ```
 
-锁 §14-4 普查解析器（`TASK_FEATURE_PLAN_PATH` 指向计划绝对路径；缺则 fail-loud）：
+`sed -n '4,8p' .github/workflows/docker-build.yml`：
+
+```
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - 'docs/**'
+      - 'output/**'
+```
+
+`sed -n '1277,1288p' packages/core-backend/src/multitable/permission-service.ts`：
+
+```
+    ) throw err
+    // else: the grant tables are absent …
+  }
+  …
+  const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId, requested ?? undefined)
+```
+
+锁 §14-4 普查解析器：
 
 ```
 unique 133 OK_IN_RANGE 128 OOB 5 MISSING 0 AMBIGUOUS 11
 NOTE OK_IN_RANGE means line numbers fit the resolved file, not that the file is the intended one
-OOB ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '1763-1766')
+OOB ('index.ts', '1642')
+OOB ('index.ts', '1763-1777')
+OOB ('index.ts', '3836-3850')
+OOB ('index.ts', '3766')
 ambiguous_total 11
 ambiguous_basenames ['approvals/api.ts', 'index.ts', 'integrations/dingtalk/client.ts', 'plugin-tests.yml', 'routes/auth.ts']
 ```
 
 `TASK_FEATURE_PLAN_PATH` 未设：`TASK_FEATURE_PLAN_PATH: set me`（非零退出）。
 
-抽查 `sed -n`（同一 worktree）：
+抽查 `sed -n`：
 
 ```
-vitest.tasks-auth.config.ts:30-34  setupFiles + env RBAC_* false
-tests/tasks-auth/setup.ts:12-13    RBAC_BYPASS/TOKEN_TRUST = 'false'
 rbac.ts:12                         模块装载常量
-AuthService.ts:171                 调用期读
-namespace-admission.ts:9           RBAC_OPTIONAL 读点
-namespace-admission.ts:196-199     deriveDelegatedAdminNamespace 调用
-namespace-admission.ts:344-347     admin / controlledNamespaces / 降级 / admission 行仍必需
-rbac/service.ts:17                 RBAC_OPTIONAL 第二读点
-routes/permissions.ts:21           RBAC_OPTIONAL 第三读点
-automation-date-reminder.ts:253    resolveReminderTimeZone inside computeDateReminderOccurrence
-permission-service.ts:1200         loadDeniedRecordIds
+jwt-middleware.ts:101-104          authenticatedTenantId
 vitest.config.ts:1812              'tests/e2e/**'
 index.ts:1791                      approvalsRouter
-jwt-middleware.ts:101-104          authenticatedTenantId
 plugin-tests.yml:842-844           Run core-backend tests
+docker-build.yml:4-8               paths-ignore docs/** output/**
+permission-service.ts:1277 / :1288 throw err / loadApprovalProjectionDeniedRecordIds
 AGENTS.md:68 / 74 行
 ```
