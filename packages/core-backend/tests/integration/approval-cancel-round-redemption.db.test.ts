@@ -3320,7 +3320,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       let deliveryCalls = 0
       registerCancelRoundCancelledEventDelivery(() => {
         deliveryCalls += 1
-        throw new Error('PC-THROW-INJECTED: a post-commit listener blew up')
+        throw new Error('PC-THROW-INJECTED: a post-commit delivery blew up')
       })
 
       let approve: Response
@@ -3331,11 +3331,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
           body: { action: 'approve' },
         })
 
-        // ── (a) THE ASSERTION owner named. 200, not 500: a throw from an already-post-COMMIT
-        //    listener must not be reported to the caller as a failed cancellation, because a
+        // ── (a) THE ASSERTION owner named. 200, not 500: a throw from the already-post-COMMIT
+        //    delivery hop must not be reported to the caller as a failed cancellation, because a
         //    reported failure is what induces the retry this case then has to defend against.
         expect(approve.status, await approve.clone().text()).toBe(200)
-        // NON-VACUITY: the injected listener really ran and really threw. Without this, (a) would
+        // NON-VACUITY: the injected delivery really ran and really threw. Without this, (a) would
         // also be green if the delivery had simply never been reached.
         expect(deliveryCalls).toBe(1)
 

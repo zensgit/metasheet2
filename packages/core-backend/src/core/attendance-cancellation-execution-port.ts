@@ -301,7 +301,7 @@ export function classifyCancelRoundCancellationOutcomeV1(
  * nothing durable hangs off this. The evidence rows (the request row, the revoke audit row, the
  * round's `applied`, the W4 seal) are all written and committed by the transaction BEFORE this runs,
  * and a delivery failure is a warning, never a rollback — a committed business cancellation must not
- * be undone because an in-process listener threw.
+ * be undone because this delivery hop threw.
  */
 export type CancelRoundCancelledEventDeliveryV1 = (
   result: AttendanceRequestOperationExternalTransactionResultV1,
