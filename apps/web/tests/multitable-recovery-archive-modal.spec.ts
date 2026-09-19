@@ -696,6 +696,61 @@ describe('RecoveryArchiveModal', () => {
     expect(q('[data-test="archive-recovery-result"]')).toBeFalsy()
   })
 
+  it.each(['before-completion', 'after-completion'])('retains synchronous restore results when reopening %s', async timing => {
+    let finish!: (result: RecoveryArchiveExecuteResult) => void
+    const ctx = mount({ executeArchive: vi.fn(() => new Promise<RecoveryArchiveExecuteResult>(resolve => { finish = resolve })) })
+    await flush()
+    q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+    await flush()
+    q('[data-test="archive-recovery-request-preview"]')!.click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    q('[data-test="archive-recovery-execute"]')!.click()
+    await flush()
+    ctx.visible.value = false
+    await flush()
+    if (timing === 'after-completion') { finish(executeResult); await flush() }
+    ctx.visible.value = true
+    await flush()
+    if (timing === 'before-completion') { finish(executeResult); await flush() }
+    expect(q('[data-test="archive-recovery-result"]')).not.toBeNull()
+    expect(ctx.listCatalog).toHaveBeenCalledTimes(1)
+    expect(ctx.onExecuted).toHaveBeenCalledTimes(1)
+  })
+
+  it('pins the recovery point while a synchronous restore is pending', async () => {
+    const otherId = '11111111-1111-4111-8111-111111111111'
+    let finish!: (result: RecoveryArchiveExecuteResult) => void
+    const ctx = mount({
+      listCatalog: vi.fn(async () => ({ entries: [...catalog.entries, { ...catalog.entries[0], generationId: otherId }], nextCursor: null })),
+      executeArchive: vi.fn(() => new Promise<RecoveryArchiveExecuteResult>(resolve => { finish = resolve })),
+    })
+    await flush()
+    q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+    await flush()
+    q('[data-test="archive-recovery-request-preview"]')!.click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    q('[data-test="archive-recovery-execute"]')!.click()
+    await flush()
+    const other = q(`[data-test="archive-recovery-entry-${otherId}"]`) as HTMLButtonElement
+    expect(other.disabled).toBe(true)
+    other.dispatchEvent(new Event('click'))
+    await flush()
+    expect(q(`[data-test="archive-recovery-entry-${generationId}"]`)!.classList.contains('archive-recovery__entry--selected')).toBe(true)
+    finish(executeResult)
+    await flush()
+    expect(q('[data-test="archive-recovery-result"]')).not.toBeNull()
+    expect(ctx.executeArchive).toHaveBeenCalledTimes(1)
+    expect(other.disabled).toBe(false)
+  })
+
   it('finishes an in-flight synchronous restore after closing and reopening the same sheet', async () => {
     let resolveExecute!: (result: RecoveryArchiveExecuteResult) => void
     const executeArchive = vi.fn(() => new Promise<RecoveryArchiveExecuteResult>((resolve) => { resolveExecute = resolve }))

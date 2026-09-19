@@ -40,7 +40,7 @@
               class="archive-recovery__entry"
               :class="{ 'archive-recovery__entry--selected': selectedGenerationId === entry.generationId }"
               :data-test="`archive-recovery-entry-${entry.generationId}`"
-              :disabled="Boolean(job)"
+              :disabled="executing || Boolean(job)"
               @click="selectEntry(entry.generationId)"
             >
               <span class="archive-recovery__entry-time">{{ formatTime(entry.recoveryPointAt) }}</span>
@@ -412,7 +412,7 @@ function clearPreview(): void {
 }
 
 function selectEntry(generationId: string): void {
-  if (!jobDiscoveryResolved.value || job.value) return
+  if (!jobDiscoveryResolved.value || executing.value || job.value) return
   selectedGenerationId.value = generationId
   clearPreview()
 }
@@ -749,7 +749,7 @@ watch(
       return
     }
     if (job.value) void refreshCurrentJob(true)
-    else void discoverCurrentSheetJob()
+    else if (!executing.value && !result.value) void discoverCurrentSheetJob()
   },
   { immediate: true },
 )
