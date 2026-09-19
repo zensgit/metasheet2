@@ -169,7 +169,14 @@ CJS-side mirror (lock's own convention, "插件侧镜像常量…由测试钉逐
 
 ## 3. Interface and error codes
 
-### 3.1 `createCancelRoundInstance` (`ApprovalProductService.ts:8308-8542`)
+### 3.1 `createCancelRoundInstance` (`ApprovalProductService.ts`, `async createCancelRoundInstance(` at `:8543` @ `5da9e5310`)
+
+> **Anchor discipline (gate round 6).** Every `file:line` in this document is a CONVENIENCE; the
+> SYMBOL is what is authoritative. Line numbers in this file had drifted by 200+ lines before this
+> round (the §8 table still said `:8308-8542` for a method that now opens at `:8543`, and `:4242`
+> for a re-export now at `:4477`), and this round's own comment insertions moved more. Every
+> anchor below and in §8 was re-derived mechanically against the committed head `5da9e5310`;
+> re-derive by symbol, not by line, when they disagree.
 
 ```
 async createCancelRoundInstance(
@@ -279,17 +286,17 @@ several conditions hold at once:
    `windowDays = 0`, so this LOCK-ANCHORED code always wins over a window complaint for that suite.
 6. no pending round → else 409 `CANCEL_ROUND_ALREADY_PENDING`
 7. read the seat set off `approval_records(action='approve')`, **dropping `system:`-namespaced
-   sentinel actors** (gate round 6, G6-1 — shared predicate `isSystemSentinelActor`)
+   sentinel actors** (`:8656`, gate round 6 G6-1 — shared predicate `isSystemSentinelActor`)
 8. **seat set empty after the drop** → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
-   `details.reason = 'no_human_approver'` (gate round 6, G6-1)
-9. **`assertCancelRoundSeatsEligibleInTxn`** (lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
+   `details.reason = 'no_human_approver'` (`:8677`, gate round 6 G6-1)
+9. **`assertCancelRoundSeatsEligibleInTxn`** (`:8686`, lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
 10. resolver / initial-state backstop → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` (no `details`)
 11. first INSERT
 
 Step 8 is an EXPLICIT check and not a fall-through to step 10, because step 10's
 `initialAssignmentCount === 0` leg is **unreachable**: with zero seats
 `ApprovalGraphExecutor.resolveInitialState` throws `400 APPROVAL_ASSIGNEE_EMPTY` from the
-`assignments.length === 0` arm of `resolveFromNode` before returning (the dedicated seed graph
+`assignments.length === 0` arm of `resolveFromNode` (`ApprovalGraphExecutor.ts:1390`) before returning (the dedicated seed graph
 deliberately omits `emptyAssigneePolicy`). What step 10 actually guards is `initial.status !==
 'pending'` / a wrong `currentNodeKey` — a seed graph edited into auto-approving or re-routed. The
 round-6 erratum is recorded at both sites in the source; mutation R7-M2 (delete step 8) turns 负控 N3
@@ -639,24 +646,24 @@ implementation):
 
 | Seam | File:line | What it does |
 |---|---|---|
-| Identity predicate, zero-import leaf module | `packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts:27,34-38` | `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`, `isCancelRoundInstance` |
-| Re-export into the service file every chokepoint imports from | `src/services/ApprovalProductService.ts:4242` | `export { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'` |
-| Action-allow gate, single call site | `src/services/ApprovalProductService.ts` (re-derive, see §3.3 — this tree's block is `:4251-4266`, not the `:4253-4272` this row previously said; P3 hygiene round, gate round-5 P3-2), called at `:9928` (unchanged, verified correct) | `CANCEL_ROUND_ALLOWED_ACTIONS`, `assertCancelRoundActionAllowed` |
-| Creation method | `src/services/ApprovalProductService.ts:8308-8542` | `createCancelRoundInstance` |
-| A4 (revoke) round-close | `src/services/ApprovalProductService.ts:10641-10652` | 判据 III half 1 |
-| A7 (reject) round-close | `src/services/ApprovalProductService.ts:11128-11140` | 判据 III half 2 |
-| Outlet #2 | `src/services/ApprovalProductService.ts:8580,8582` | `adminJump` guard |
-| Outlet #3 | `src/services/ApprovalProductService.ts:9627-9628` | node-timeout scanner skip |
-| Outlets #4/#6 | `src/services/ApprovalProductService.ts:9924,9928` | `dispatchAction` action-judgment |
-| Outlet #12 | `src/services/ApprovalProductService.ts:8916-8922` (guard), `:8928` (classifier call it precedes) | `bulkReassignApprovals` typed skip |
-| Outlet #13 | `src/services/ApprovalProductService.ts:9300-9307` (guard), `:9318` (attendance-central check it precedes) | `applyApprovalDepartureTransfer` typed skip |
-| Sentinel-namespace predicate, now shared (gate round 6, G6-1) | `src/services/ApprovalAssigneeResolver.ts` `isSystemSentinelActor` — changed from module-private to **exported**; imported by `ApprovalProductService.ts` | The repo-wide `system:` non-user actor namespace. Two seat-derivation sites now call it: the cancel round's own filter, and `loadPriorNodeApproverDeciders` (Lock-1 §K3), whose inline `id.startsWith('system:')` was swapped to the import. That swap is behaviour-identical and is named here rather than left silent — leaving a hand-rolled copy in the same file that imports the shared predicate is what next round's finding would be |
+| Identity predicate, zero-import leaf module | `attendance/w4c3b-central-approval-hooks.ts` — `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY` `:27`, `isCancelRoundInstance` `:34` | `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`, `isCancelRoundInstance` |
+| Re-export into the service file every chokepoint imports from | `ApprovalProductService.ts:4477` (was `:4242` — stale before this round) | `export { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'` |
+| Action-allow gate, single call site | `ApprovalProductService.ts` — `CANCEL_ROUND_ALLOWED_ACTIONS` `:4486-4491`, `assertCancelRoundActionAllowed` `:4493`, sole call site `:10222` (gate round 6 re-derivation; the `:4251-4266` / `:9928` this row previously carried were both stale) | `CANCEL_ROUND_ALLOWED_ACTIONS`, `assertCancelRoundActionAllowed` |
+| Creation method | `ApprovalProductService.ts` — `async createCancelRoundInstance(` at `:8543` (was `:8308-8542` — stale before this round) | `createCancelRoundInstance` |
+| A4 (revoke) round-close | `ApprovalProductService.ts:10937` — `UPDATE approval_rounds SET outcome = 'withdrawn', ended_at = now()` | 判据 III half 1 |
+| A7 (reject) round-close | `ApprovalProductService.ts:11424` — `UPDATE approval_rounds SET outcome = 'rejected', ended_at = now()` | 判据 III half 2 |
+| Outlet #2 | `ApprovalProductService.ts:8876` — `rejectIfCancelRound(instance, 'adminJump')` | `adminJump` guard |
+| Outlet #3 | `ApprovalProductService.ts:9922` — `consumeAndSkip('skipped_cancel_round', …)` | node-timeout scanner skip |
+| Outlets #4/#6 | `ApprovalProductService.ts:10222` — `assertCancelRoundActionAllowed(instance, request.action)` | `dispatchAction` action-judgment |
+| Outlet #12 | `ApprovalProductService.ts:9210` — `rejectIfCancelRound(instance, 'bulkReassignApprovals')` | `bulkReassignApprovals` typed skip |
+| Outlet #13 | `ApprovalProductService.ts:9594` — `rejectIfCancelRound(instance, 'applyApprovalDepartureTransfer')` | `applyApprovalDepartureTransfer` typed skip |
+| Sentinel-namespace predicate, now shared (gate round 6, G6-1) | `ApprovalAssigneeResolver.ts:102` `isSystemSentinelActor` — changed from module-private to **exported**; imported by `ApprovalProductService.ts:93`, called at `:8656` (cancel-round seat filter) and `:12759` (`loadPriorNodeApproverDeciders`) | The repo-wide `system:` non-user actor namespace. Two seat-derivation sites now call it: the cancel round's own filter, and `loadPriorNodeApproverDeciders` (Lock-1 §K3), whose inline `id.startsWith('system:')` was swapped to the import. That swap is behaviour-identical and is named here rather than left silent — leaving a hand-rolled copy in the same file that imports the shared predicate is what next round's finding would be |
 | Error classes | `src/services/ApprovalBridgeService.ts:1586-1611` | `CancelRoundOutletForbiddenError`, `CancelRoundSuiteForbiddenError`, `rejectIfCancelRound` |
-| Outlet #8 | `src/services/ApprovalBridgeService.ts:1077` | `ApprovalBridgeService.dispatchAction` guard |
+| Outlet #8 | `ApprovalBridgeService.ts:1077` — `rejectIfCancelRound(instance, 'ApprovalBridgeService.dispatchAction')` (verified unchanged) | `ApprovalBridgeService.dispatchAction` guard |
 | Outlet #7 | `src/routes/approvals.ts:2954` (guard), `:3011-3016` (pass-through catch) | legacy `/approve` |
 | Outlet #7′ | `src/routes/approvals.ts:3126` (guard), `:3185-3188` (pass-through catch) | legacy `/reject` |
 | `handleApprovalsError` real signature | `src/routes/approvals.ts:431-434` | 4-arg `(res, error, fallbackCode, fallbackMessage)` — both pass-through call sites use this exact shape |
-| Attendance mirror constant + defensive check | `plugins/plugin-attendance/index.cjs:167`, `:24291-24309` | `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY` mirror, `assertAttendanceApprovalPayloadNotCancelRound` |
+| Attendance mirror constant + defensive check | `plugin-attendance/index.cjs:170` (mirror constant), `:24333` (`assertAttendanceApprovalPayloadNotCancelRound`) | `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY` mirror, `assertAttendanceApprovalPayloadNotCancelRound` |
 | Five FK-pairing writers | `plugins/plugin-attendance/index.cjs` (five INSERT sites; exact line numbers drift per edit — see the FK-migration real-DB test's own per-writer assertions for the current five) | pairs `approval_instance_id` with the new `approval_workflow_key` column |
 
 ## 9. Items left for later slices
