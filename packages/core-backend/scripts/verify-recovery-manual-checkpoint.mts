@@ -52,6 +52,7 @@ let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
 let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
+let shutdownAuthMessaging: (() => Promise<void>) | undefined
 try {
   await admin.connect()
   assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
@@ -1960,10 +1961,17 @@ try {
       const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
       const attachmentApp = express()
       attachmentApp.use(express.json())
-      attachmentApp.use((req, _res, next) => {
-        if (req.headers.authorization === 'Bearer synthetic-manual-owner') req.user = { id: actorId, role: 'admin' }
-        next()
-      })
+      const { authRouter } = require('../src/routes/auth.ts') as typeof import('../src/routes/auth')
+      const { messageBus } = require('../src/integration/messaging/message-bus.ts') as typeof import('../src/integration/messaging/message-bus')
+      shutdownAuthMessaging = () => messageBus.shutdown()
+      const { jwtAuthMiddleware } = require('../src/auth/jwt-middleware.ts') as typeof import('../src/auth/jwt-middleware')
+      const bcrypt = require('bcryptjs') as typeof import('bcryptjs')
+      const loginIdentifier = `tm-${randomUUID()}@example.invalid`
+      const loginPassword = randomBytes(32).toString('hex')
+      await query('UPDATE users SET email=$2,password_hash=$3 WHERE id=$1',
+        [actorId, loginIdentifier, await bcrypt.hash(loginPassword, 4)])
+      attachmentApp.use('/api/auth', authRouter)
+      attachmentApp.use(jwtAuthMiddleware)
       const attachmentHttpPool = new Pool({ ...connection, database, max: 4 })
       const attachmentHttpDepth = new AsyncLocalStorage<number>()
       const attachmentHttpProbe = { currentTransactionDepth: () => attachmentHttpDepth.getStore() ?? 0 }
@@ -1995,7 +2003,17 @@ try {
         const address = attachmentServer.address()
         assert.ok(address && typeof address !== 'string')
         const url = `http://127.0.0.1:${address.port}/api/multitable/sheets/no-genesis/recovery-archive/captures`
-        const headers = { 'content-type': 'application/json', authorization: 'Bearer synthetic-manual-owner' }
+        const login = await fetch(`http://127.0.0.1:${address.port}/api/auth/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ identifier: loginIdentifier, password: loginPassword }),
+        })
+        assert.equal(login.status, 200)
+        const loginBody = await login.json() as { success: boolean; data: { token: string; user: { id: string } } }
+        assert.equal(loginBody.success, true)
+        assert.equal(loginBody.data.user.id, actorId)
+        const loginToken = loginBody.data.token
+        assert.equal(typeof loginToken, 'string')
+        const headers = { 'content-type': 'application/json', authorization: `Bearer ${loginToken}` }
         const requestId = randomUUID()
         const beforeHttp = await generationCount()
         assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -2280,8 +2298,14 @@ try {
               }
               await verifyDownloads()
             }
-          }, 'attachment')
+          }, 'attachment', loginToken)
         }
+        await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+        try {
+          const revoked = await fetch(`http://127.0.0.1:${address.port}/api/multitable/attachments/${encodeURIComponent(restoredIds[0])}`, { headers })
+          assert.equal(revoked.status, 401)
+        } finally { await query('UPDATE users SET is_active=true WHERE id=$1', [actorId]) }
+        console.log('PASS: production login and JWT authorize attachment capture/restore/download; inactive actor download refuses')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
@@ -2334,6 +2358,7 @@ try {
   else process.env.ATTACHMENT_PATH = originalAttachmentPath
   await db?.destroy()
   await client?.end()
+  await shutdownAuthMessaging?.()
   await downloadPools?.close()
   if (created) {
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)

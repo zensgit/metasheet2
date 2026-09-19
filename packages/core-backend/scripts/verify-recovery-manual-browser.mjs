@@ -6,8 +6,10 @@ import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // Called only by the owned synthetic database driver, while its production HTTP router is alive.
-export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, kind = 'scalar') {
+export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, kind = 'scalar', bearer = 'synthetic-manual-owner') {
   assert.ok(['scalar', 'attachment'].includes(kind))
+  assert.equal(typeof bearer, 'string')
+  assert.match(bearer, /^[A-Za-z0-9_.-]+$/)
   const target = new URL(backendOrigin)
   assert.equal(target.hostname, '127.0.0.1')
   assert.equal(target.protocol, 'http:')
@@ -28,7 +30,7 @@ import 'element-plus/dist/index.css';
 import '/src/styles/tokens.css';
 import RecoveryArchiveModal from '/src/multitable/components/RecoveryArchiveModal.vue';
 import { MultitableApiClient } from '/src/multitable/api/client.ts';
-const client = new MultitableApiClient({ fetchFn: (url, init={}) => fetch(url, {...init, headers: {...init.headers, authorization:'Bearer synthetic-manual-owner'}}) });
+const client = new MultitableApiClient({ fetchFn: (url, init={}) => fetch(url, {...init, headers: {...init.headers, authorization:${JSON.stringify(`Bearer ${bearer}`)}}}) });
 const wire = name => (...args) => client[name](...args);
 createApp({render:()=>h(RecoveryArchiveModal, {
 visible:true, sheetId:'no-genesis', sheetName:'Synthetic Projects', isZh:false,
