@@ -43,10 +43,25 @@ async function reconcileUnpublishedMarkers(target: Awaited<ReturnType<typeof loc
     try { await assertOwned({ ...target, directory, marker }) } catch { continue }
     const entries = await fs.readdir(directory)
     if (entries.length !== 1 || entries[0] !== markerName) refused()
-    await fs.unlink(marker)
+    // Transfer proof into the durable owned namespace before removing the last marker.
+    await fs.rename(directory, path.join(target.directory, entry.name))
+  }
+  await syncDirectory(target.directory)
+  await syncDirectory(target.base)
+  for (const entry of await fs.readdir(target.directory, { withFileTypes: true })) {
+    if (!/^\.recovery-reserve-[A-Za-z0-9]{6}$/.test(entry.name)) continue
+    if (!entry.isDirectory()) refused()
+    const directory = path.join(target.directory, entry.name)
+    const marker = path.join(directory, markerName)
+    const entries = await fs.readdir(directory)
+    if (entries.length) {
+      if (entries.length !== 1 || entries[0] !== markerName) refused()
+      await assertOwned({ ...target, directory, marker })
+      await fs.unlink(marker)
+    }
     await fs.rmdir(directory)
   }
-  await syncDirectory(target.base)
+  await syncDirectory(target.directory)
 }
 
 /** A preexisting directory without this exact proof is never adopted, even if bytes match. */

@@ -14,7 +14,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof fs>()
-  return { ...actual, open: vi.fn(actual.open) }
+  return { ...actual, open: vi.fn(actual.open), rmdir: vi.fn(actual.rmdir) }
 })
 
 import { authenticateRecoveryArchiveSealedSnapshotManifest } from '../../src/multitable/recovery-archive-authenticated-manifest'
@@ -506,6 +506,53 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test.each(['foreign-proof', 'extra-data', 'symlink'] as const)('retirement preserves invalid imported reservation: %s', async mode => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-imported-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root)
+    const key = `${randomUUID()}/sha256-${digest(Buffer.from('synthetic-imported'))}`
+    const owner = digest(Buffer.from('owner'))
+    await provider.reserveRecoveryAttachment(key, owner)
+    const imported = path.join(root, path.dirname(key), '.recovery-reserve-ABCDEF')
+    const outside = await fs.mkdtemp(path.join(root, 'untouched-'))
+    await fs.writeFile(path.join(outside, 'sentinel'), 'preserve')
+    if (mode === 'symlink') await fs.symlink(outside, imported)
+    else {
+      await fs.mkdir(imported)
+      await fs.writeFile(path.join(imported, '.recovery-restore-owner'), JSON.stringify({ version: 1, key,
+        owner: mode === 'foreign-proof' ? digest(Buffer.from('other')) : owner }))
+      if (mode === 'extra-data') await fs.writeFile(path.join(imported, 'extra'), 'preserve')
+    }
+    await expect(provider.retireRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    expect(await fs.readFile(path.join(outside, 'sentinel'), 'utf8')).toBe('preserve')
+    if (mode === 'symlink') expect((await fs.lstat(imported)).isSymbolicLink()).toBe(true)
+    else expect(await fs.readFile(path.join(imported, '.recovery-restore-owner'), 'utf8')).toContain('owner')
+    if (mode === 'extra-data') expect(await fs.readFile(path.join(imported, 'extra'), 'utf8')).toBe('preserve')
+  })
+
+  test('retirement retries a crash after an imported private marker is removed', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-orphan-crash-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root)
+    const key = `${randomUUID()}/sha256-${digest(Buffer.from('synthetic-orphan'))}`
+    const owner = digest(Buffer.from('owner'))
+    const orphan = await fs.mkdtemp(path.join(root, '.recovery-reserve-'))
+    const name = path.basename(orphan)
+    await fs.writeFile(path.join(orphan, '.recovery-restore-owner'), JSON.stringify({ version: 1, key, owner }))
+    const originalRmdir = (await vi.importActual<typeof fs>('node:fs/promises')).rmdir
+    vi.mocked(fs.rmdir).mockImplementation(async (...args) => {
+      if (path.basename(String(args[0])) === name) throw new Error('SYNTHETIC_AFTER_MARKER_REMOVAL')
+      return originalRmdir(...args)
+    })
+    try {
+      await expect(provider.retireRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    } finally { vi.mocked(fs.rmdir).mockImplementation(originalRmdir) }
+    await new LocalStorageProvider(root).retireRecoveryAttachment(key, owner)
+    await expect(fs.lstat(orphan)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.lstat(path.join(root, path.dirname(key), name))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await fs.lstat(path.join(root, key))).isDirectory()).toBe(true)
+  })
+
   test('retirement reconciles only exact-owned unpublished marker directories', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-orphan-'))
     temporaryRoots.push(root)
