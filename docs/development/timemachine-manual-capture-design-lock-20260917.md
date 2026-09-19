@@ -525,3 +525,20 @@ uploader before any section upload, rereads the immutable payload and authority
 for every object, and decodes fresh copies for each callback. It never recaptures
 or reseals a persisted batch. This replaces the earlier all-attachment envelope
 refusal, not the remaining manual admission/finalization safety boundary.
+
+## Pinned Local Attachment Reads
+
+Checkpoint `12e286316e1f8555943e5a4cef1f80cc638c3dd6` adds an internal
+server-bound source reader. It accepts only an admitted opaque source and existing
+local upload-time content-addressed keys. Legacy mutable paths are not upgraded
+by hashing their current bytes. Provider IO runs outside transactions; fresh
+authority, key, owner lease and original relational snapshot checks precede reads
+and all source-pin verification transitions. Digest, immutable version and size
+must match both stored identity and actual bytes. Every transition commits in one
+transaction, or none does; failed reads scrub owned plaintext copies.
+
+This is verified source acquisition, not the HTTP attachment capture release.
+Canonical attachment index construction, nonce/continuation wiring, authenticated
+provider receipts, publication/source release and restored byte consumption still
+require integration. Existing attachment-bearing manual captures remain refused
+until that whole chain is proven; no customer provider or runtime flag is enabled.

@@ -1277,3 +1277,30 @@ verdict is claimed for this increment. This checkpoint is local until a later
 ordinary push; remote CI must not be inferred from these local results.
 Source-pin reads, provider attachment receipts, finalization, source release and
 restored attachment-byte consumption still need end-to-end integration.
+
+## Pinned Local Source Read Checkpoint
+
+Code `12e286316e1f8555943e5a4cef1f80cc638c3dd6` changes only admission source
+preparation and the existing synthetic checkpoint driver. Real local storage
+objects are created through upload-time content addressing. The driver asserts
+file IO is outside transactions, exact source-pin version/hash/size on success,
+and zero partial available pins on digest/version/size mismatch, authorization
+revocation, source movement, lease expiry and second-pin transition failure.
+Initial authorization denial never reaches provider IO. The expiry test uses a
+one-second synthetic lease and natural expiry; an initial attempt to shorten a
+persisted lease was correctly refused by the DB and was replaced, not counted.
+
+Final full checkpoint driver PASS: fresh migration and replay, 31-migration
+catalog fingerprint replay, 59 and 127 neighboring real-DB assertions, existing
+manual HTTP/restore checks, and the new source-read cases. Database/connections
+zero and task-owned cluster stopped/removed. Acceptance tsc, source ESLint and
+diff-check pass; compiler/crypto neighbors pass 77/77. Removing the actual-byte
+digest comparison makes the corrupted-byte negative RED with missing rejection;
+restoration passes. Logs: `/private/tmp/tm-source-read-mutation.log` and
+`/private/tmp/tm-source-read-final.log`.
+
+Sol high bounded read-only review did not return a terminal verdict and was
+closed; no external approval is claimed. This does not prove HTTP attachment
+publication or attachment-byte restoration. Prior remote `f767b846...` migration
+replay failed while installing PostgreSQL because its package repository was
+unreachable; no migration ran in that job. Local evidence is not remote CI.
