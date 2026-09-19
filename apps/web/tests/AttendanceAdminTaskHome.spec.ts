@@ -6,6 +6,7 @@ type Group = {
   key: string
   title: string
   detail: string
+  status?: string
   linkActions: Array<{ key: string; label: string; href: string; primary?: boolean }>
   buttonActions: Array<{ key: string; label: string; sectionId: string; primary?: boolean }>
 }
@@ -205,5 +206,50 @@ describe('AttendanceAdminTaskHome', () => {
     const root = container!.querySelector('[data-admin-task-home="true"]')
     expect(root).toBeTruthy()
     expect(root?.textContent).toContain('Attendance management')
+  })
+
+  it('renders the four-state status badges from parent props and fail-closes missing/invalid to unknown', async () => {
+    const groups: Group[] = [
+      { ...FOUR_GROUPS[0], status: 'ok' },
+      { ...FOUR_GROUPS[1], status: 'needs_attention' },
+      { ...FOUR_GROUPS[2], status: 'not_configured' },
+      { ...FOUR_GROUPS[3], status: 'failed' },
+    ]
+    mount({ groups })
+    await flushUi()
+
+    const statuses = Array.from(container!.querySelectorAll('[data-admin-task-status]')).map((el) => ({
+      group: el.closest('[data-admin-task-group]')?.getAttribute('data-admin-task-group'),
+      status: el.getAttribute('data-admin-task-status'),
+      text: el.textContent?.trim(),
+    }))
+    expect(statuses).toEqual([
+      { group: 'daily-operations', status: 'ok', text: 'OK' },
+      { group: 'people-groups', status: 'needs_attention', text: 'Needs attention' },
+      { group: 'work-time-policies', status: 'not_configured', text: 'Not configured' },
+      { group: 'reporting-payroll', status: 'failed', text: 'Failed' },
+    ])
+    expect(container!.querySelector('.attendance__admin-task-status--ok')).toBeTruthy()
+    expect(container!.querySelector('.attendance__admin-task-status--needs_attention')).toBeTruthy()
+  })
+
+  it('does not render OK copy or ok style when status is missing or unrecognized', async () => {
+    mount({
+      groups: [
+        { ...FOUR_GROUPS[0], status: undefined },
+        { ...FOUR_GROUPS[1], status: 'ready' },
+      ],
+    })
+    await flushUi()
+
+    const badges = Array.from(container!.querySelectorAll('[data-admin-task-status]'))
+    expect(badges).toHaveLength(2)
+    for (const badge of badges) {
+      expect(badge.getAttribute('data-admin-task-status')).toBe('unknown')
+      expect(badge.textContent).toContain('Unknown')
+      expect(badge.textContent).not.toContain('OK')
+      expect(badge.classList.contains('attendance__admin-task-status--ok')).toBe(false)
+      expect(badge.classList.contains('attendance__admin-task-status--unknown')).toBe(true)
+    }
   })
 })
