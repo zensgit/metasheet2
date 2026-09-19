@@ -4512,7 +4512,7 @@ evidence, and the `ApprovalProductService.ts` production return-type citations s
 
 ### 1. 判定
 
-**修复成立,且缺陷的原始签名被新用例逐字复现。** 全套件 **22/22 绿**(原 19 + 新 3),`tsc --noEmit` 干净。
+**修复成立,且缺陷的原始签名被新用例逐字复现。** 全套件 **23/23 绿**(原 19 + 新 4),`tsc --noEmit` 干净。
 
 最强的一条证据不是新用例本身,而是 **M-C3-1**:删掉提交后投递,账侧 twin 用例报出 `expected { sendsAfterA: +0, sendsAfterB: 1 } to deeply equal { sendsAfterA: 1, sendsAfterB: 1 }` —— 与验证报告 §3.3 探针在 `4a08a576e` 上读到的 `{"sendsAfterA":0,"sendsAfterB":1}` **逐字相同**。也就是说这道闸复现的正是被修的那个缺陷,不是一个形似的替代物。
 
@@ -4523,6 +4523,7 @@ evidence, and the `ApprovalProductService.ts` production return-type citations s
 | **M-C3-1** | 删掉提交后投递调用 | `ApprovalProductService.ts:12440` | 「恰一次」与 twin 用例红 | **2 红 / 20 绿**。twin:`{sendsAfterA: 0, sendsAfterB: 1}`(= 原始缺陷签名);恰一次:`expected +0 to be 1` |
 | **M-C3-2** | 把投递**搬进**事务(post-commit 点同时删除,是 MOVE 不是复制) | `:12242` 前插入 + `:12440` 删除 | 回滚用例红 | **1 红 / 21 绿**,且**只有**回滚用例红:`expected [ { …(4) } ] to deeply equal []` |
 | **M-C3-3** | 去掉 kind 门(无条件发) | `index.cjs:25027` | replay 与 executed 用例红 | **2 红 / 20 绿**:replay 幂等用例 + I3(`executed`)用例,均 `expected [ { …(4) } ] to deeply equal []` |
+| **M-C3-4** | 未绑定投递时 fail **CLOSED**(抛错)而不是 fail OPEN | `ApprovalProductService.ts` 的未绑定分支 | fail-OPEN 用例红 | **1 红 / 22 绿**,且只有该用例红 |
 
 **M-C3-2 的 21 绿是正确的,不是判别力不足。** 先跑的是「复制版」(保留 post-commit + 增加 in-txn),它红 3 条——但那测的是双发,不是位置。改成**纯 MOVE** 后只剩回滚用例红,这恰恰是应有的结果:其余每个用例都**提交成功**,而事务内发与提交后发在提交成功时字节等价,它们**结构上无法**区分二者。只有回滚用例能。
 
@@ -4557,7 +4558,8 @@ error: C2_EVT_FORCED_ROLLBACK
 
 | 闸 | 结果 |
 |---|---|
-| `approval-cancel-round-redemption.db.test.ts` | **22/22 绿**(处女库) |
+| `approval-cancel-round-redemption.db.test.ts` | **23/23 绿**(处女库) |
+| `attendance-onprem-package-verify-migrations.test.mjs` | **4/4 绿**(仓内唯一另一处按路径点名 `index.cjs` 的脚本;打包清单性质,不钉内容) |
 | `approval-cancel-round-creation.db.test.ts` | 绿 |
 | `attendance-w4c3b-request-operation-routes.db.test.ts` | 绿(HTTP 取消路由被改为调用提出的函数,这是它的兄弟闸) |
 | `attendance-plugin.test.ts` | 绿 |
