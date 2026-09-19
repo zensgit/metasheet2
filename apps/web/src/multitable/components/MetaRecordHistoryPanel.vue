@@ -48,7 +48,7 @@
           >{{ restoredFromVersionBadge(item.restoredFromVersion, isZh) }}</span>
         </div>
         <div class="meta-record-drawer__history-meta">
-          <span>{{ formatHistoryTime(item.createdAt) }}</span>
+          <time :datetime="item.createdAt" :title="item.createdAt">{{ configHistoryTime(item.createdAt, isZh) }}</time>
           <span v-if="item.actorId">{{ historyActor(item.actorName || item.actorId, isZh) }}</span>
           <span>{{ item.source }}</span>
         </div>
@@ -107,6 +107,7 @@ import type {
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
+import { configHistoryTime } from '../utils/meta-config-history-labels'
 import {
   recordLabel,
   historyActor,
@@ -257,13 +258,6 @@ function historyFieldDiffs(item: MetaRecordRevision, index: number): HistoryFiel
       hasBefore,
     }
   })
-}
-
-function formatHistoryTime(value: string): string {
-  if (!value) return ''
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleString()
 }
 
 function formatValue(field: MetaField, v: unknown): string {
