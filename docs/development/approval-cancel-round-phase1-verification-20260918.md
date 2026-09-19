@@ -3460,3 +3460,341 @@ s6a 守卫 MATCH。私有库随后 `dropdb metasheet2_c1_rb`,未应用到任何�
   未改设计锁文。
 - 新 head:`da2688a591fcb929f72daac75cf56b3b906004c6`(57 个重放提交 + 1 个 pin 重算提交,
   共 58 个提交领先 `origin/main`)。
+
+---
+
+# Part M — 第 6 轮门审修复(2026-09-19)
+
+门审报告:`reviews/impl-gate-C-slice1-round6-20260919.md`(NEEDS-FIX,1 P1 / 1 P2 / 2 P3)。
+被审 head `ba8a0133d`;本轮起点 `6013343eb`(L12 的保活 rebase 之后,内容同源、SHA 不同)。
+处女私有库 `metasheet2_fix_c1_r7`,结束 `dropdb`。工具链 node 20.20.2 + pnpm 10.33.0(shim 目录),
+`CI=true`、`TZ=UTC` 全程。**未改锁文;未合并;未 undraft;未开/未动 PR 状态;未动 `origin/main`;
+未对任何共享/staging/生产库应用迁移;全程未用 `git stash` / `git checkout -- <path>` / `git reset --hard`。**
+
+## M0. 逐条处置
+
+| 门审编号 | 级别 | 处置 |
+|---|---|---|
+| G6-1 | P1 | **已修** —— 席位推导丢弃 `system:` 哨兵;滤空后专用码 + 三条新验收 + 旧码对照 + 三条 mutation |
+| G6-2 | P2 | **已撤回并重做** —— 设计 MD §3.4 的绝对断言整句撤回,普查按「调用点闭世界」重做,全分支零残留 |
+| G6-3 | P3 | **已改口** —— `twoApproverNodeGraph` 注释 + P1 用例标题改成「纵深」,与 L4 的自我纠正对齐 |
+| G6-4 | P3 | **已变成数据** —— `activation_invalid` 保留,新增一条读 `pg_constraint` / `information_schema` 的实测用例 |
+
+## M1. G6-1 —— 我先在本 head 上复现,再修
+
+门审是在 `ba8a0133d` 上复现的,我**不继承**它的观测。用一个临时探针
+(`zzprobe-r7-autoapproval.db.test.ts`,只用来取证,已删、未提交、未接线)在 `6013343eb` 上跑真实 HTTP:
+
+```
+【形状 A:唯一审批人 = 提交人本人,mergeWithRequester:true(全自动)】
+[PROBE] instance status            = approved
+[PROBE] records                    = [{"action":"approve","actor_id":"system:auto-approval"},
+                                      {"action":"created","actor_id":"pr-req-…"}]
+[PROBE] cancel-round seat query    = [{"actor_id":"system:auto-approval"}]
+[PROBE] createCancelRoundInstance -> THREW 409 CANCEL_ROUND_SEAT_INELIGIBLE
+        details={"ineligibleCount":1,"reasons":["not_found"]}
+
+【形状 B:自动通过节点 + 一名真人审批节点(真人真实 approve)】
+[PROBE B] records right after create = [{"action":"approve","actor_id":"system:auto-approval"},
+                                        {"action":"created","actor_id":"pr2-req-…"}]
+[PROBE B] db status                  = approved
+[PROBE B] cancel-round seat query    = [{"actor_id":"pr2-hum-…"},{"actor_id":"system:auto-approval"}]
+[PROBE B] createCancelRoundInstance -> THREW 409 CANCEL_ROUND_SEAT_INELIGIBLE
+        details={"ineligibleCount":1,"reasons":["not_found"]}
+```
+
+形状 B 是这条 P1 的要害:**单据有一名完全合格的真人审批人,照样永久发不起撤销轮**,
+而错误文案让管理员去「restore」一个不存在也不该存在的账号。两条都在本 head 上确认,不是转述。
+
+### 修法(§5.6 的形状,但第 2 条按实测改了)
+
+1. `ApprovalAssigneeResolver.ts` 的 `isSystemSentinelActor` 由模块私有改为 **exported**;
+   `ApprovalProductService.ts` import 它,用在撤销轮席位 `.filter(...)` 里。**复用,不另写 `startsWith`**。
+   同时把兄弟席位推导 `loadPriorNodeApproverDeciders` 里那行行内 `id.startsWith('system:')` 换成同一个
+   import —— 行为逐字不变,但「非用户命名空间」从此只有一个定义,不是三份会漂的拷贝。
+   这处顺带改动**在设计 MD §8 点名登记**,不留作静默改动。
+2. **门审 §5.6 第 2 条说「丢弃之后走 `initialAssignmentCount === 0` 的 fail-closed 背板」——
+   这条我实测下来是错的,按实测改。** 席位为空时 `ApprovalGraphExecutor.resolveInitialState`
+   在 `resolveFromNode` 的 `assignments.length === 0` 分支**直接抛 `400 APPROVAL_ASSIGNEE_EMPTY`**
+   (专用定义故意不带 `emptyAssigneePolicy`),**根本到不了** `initialAssignmentCount` 的判断。
+   照原话实现的话,全自动通过的单据会拿到一个**裸 400 通用码**,违反补充清单第 4 条。
+   所以改成**显式前置检查**:滤空 ⇒ 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
+   `details = { reason: 'no_human_approver' }`(类别,不是人)。
+   **复用既有错误码,不铸第五个码** —— 依据是锁 §14.1「席位 = 原单的原审批人(N ≥ 1)」(lock:335)
+   与判据 I″「至少一个活动席位」(lock:337),零席位的合同答案本来就是这个码。
+   那条背板保留,但它的注释同步纠正:它真正守的是 `initial.status !== 'pending'` / 节点键不对,
+   **不是**「审批轨迹为空」—— 原注释里那半句是错的,已在源码就地标成 round-6 勘误。
+3. **`details` 的不对称是有理由的,写明了**:新前置检查带 `{ reason: 'no_human_approver' }`(可构造、有用例),
+   背板**不带** —— 给一个没有任何用例能构造出来的分支加断言载荷,正是本仓禁止的「编造断言」。
+
+### `not_found` 的重新定义(门审 §5.6 第 4 条)
+
+**保留,但把它的人口写成数据,并且重新在本 head 上普查过**(门审是在 `ba8a0133d` 上跑的):
+
+```
+syntax 1  grep -rn  "DELETE FROM users"                packages/*/src plugins apps/*/src scripts  → 17(13 个文件,全在 scripts/ops/)
+          同一条 grep 只打运行时目录 packages/*/src plugins apps/*/src                            → 0
+syntax 2  grep -rnE "deleteFrom\(\s*['\"`]users['\"`]\s*\)"  packages plugins apps scripts        → 0
+syntax 3  grep -rniE "delete[[:space:]]+from[[:space:]]+users\b"  同 syntax 1 路径                → 17(与 syntax 1 一致)
+正控      同一条 grep 打 tests 树                                                                  → 294(证明 grep 本身有效)
+```
+
+⇒ 运行时不删用户(离职走 `is_active = FALSE`,`directory/deprovision-ledger.ts`);
+丢弃哨兵之后,`not_found` 今天的含义**只剩**「一个被声称的真人、目录行不在了」,
+由 N2(删 `users` 行)与 N4(证明丢弃没把真人一起吞掉)两条用例共同钉住。
+这段话现在写在 `CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS` 常量旁边,逐成员标注可达性与对应用例。
+
+## M2. 新增验收(3 条,全部进既有的 `approval-cancel-round-creation.db.test.ts`)
+
+**本轮零新增真库测试文件** ⇒ 两点接线 / 哨兵 / `plugin-tests.yml` 清单 / ci-wiring 人口 /
+ci-realdb-step-contract / s6a 钉**全部不动**(M5 机械核验)。
+
+| 用例 | 断言 |
+|---|---|
+| **正控 P3** 自动通过 + 一名合格真人 | 201;席位**恰为那一名真人**(数量 = 真人数 1,**不是** approve 行数 2);`approval_assignments` 与 `requester_snapshot` 里都搜不到 `system:auto-approval`;轮次 1 行 `pending` |
+| **负控 N3** 全自动通过(零真人 approve 行) | 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,`details` 逐字 `{reason:'no_human_approver'}`;**正向否定**三件:不是 `SEAT_INELIGIBLE`、文案不含 `restore`、不是 400 / `APPROVAL_ASSIGNEE_EMPTY`;values-free;三表零行 |
+| **负控 N4** 自动通过 + 一名**已停用**真人 | 仍 409 `CANCEL_ROUND_SEAT_INELIGIBLE` / `reasons:['inactive']`(**不是** `not_found`、**不是** `NO_ELIGIBLE_APPROVER`、**不是**半个会签名单);零行;**同单据判别控制**:恢复 `is_active` 后同一调用 201 且席位恰为那一人 |
+
+三条夹具都在 `autoApprovedFixture` 里**先断言哨兵确实在席位查询结果里**
+(`expect(actorIds).toContain('system:auto-approval')` + 全集逐字相等)——
+如果将来自动通过不再写 `action='approve'`,这三条会立刻变成显眼的红,而不是悄悄空转绿。
+
+## M3. 旧实现对照(证明是 fixed,不是 never-broken)
+
+`cp` 备份现源码 → `git show 6013343eb:<两个文件>` 覆盖 → 用**本轮新用例**跑同一个库 → `cp` 还原 → `cmp` identical。
+
+```
+旧实现:  3 failed | 14 passed (17)   ← 红的正是 P3 / N3 / N4
+新实现:  17 passed (17)
+```
+
+## M4. Mutation 台账(cp 备份 → 改 → 单独跑 → cp 还原 → cmp identical)
+
+备份 `/tmp/fix-c1-r7/mutbak/APS.FIXED.backup`、`AAR.FIXED.backup`;每条跑完 `cmp` **identical**。
+
+| Mutation | 改了什么 | 结果 | 变红的用例 | 红的**原因**核对 |
+|---|---|---|---|---|
+| **R7-M1** | 去掉席位 `.filter` 里的 `!isSystemSentinelActor(id)` | 3 failed / 14 passed | P3、N3、N4 | 逐字 `409 CANCEL_ROUND_SEAT_INELIGIBLE` / `reasons:['not_found']` —— **就是 G6-1 这个缺陷本身**,不是偶然红 |
+| **R7-M2** | 删掉滤空后的显式前置检查 | 1 failed / 16 passed | **只有 N3** | `expected 400 to be 409` —— 正是「没有前置检查就退化成执行器的裸 400」,**证明 409 由我的检查产出,不是执行器** |
+| **R7-M3** | 把 §2-G3 阻断换成「过滤掉不合格者再继续,然后靠新的滤空检查回答」 | 3 failed / 14 passed | N1、N2、**N4** | N4 收到 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` 而不是 `SEAT_INELIGIBLE` —— **证明新加的滤空检查没有变成 filter-and-continue 的洗白通道** |
+| **R7-M4a/b/c**(schema,打在私有库上) | a 删 CHECK / b 给 CHECK 加第三个值 / c 去掉 NOT NULL | 各 1 failed | G6-4 那条 | a `must exist: expected +0 to be 1`;b `must allow EXACTLY these two values`;c `expected 'YES' to be 'NO'` —— 三条腿各自独立承重 |
+
+R7-M1 与 R7-M2 的判别力**是分开的**:M1 下 N1 仍绿(它自己的谓词没被碰),M2 下只有 N3 红。
+两条各打中自己那一条轴,没有混淆。schema mutation 跑完已把 CHECK 与 NOT NULL 逐字恢复并复核
+(`pg_get_constraintdef` 回到 `CHECK ((activation_status = ANY (ARRAY['pending_activation'::text, 'activated'::text])))`,
+`is_nullable = NO`)。
+
+**仍然 NOT COVERED,如实写明**:`FOR UPDATE` 之外的竞态(理由同 L4 末段,不用顺序论证冒充竞态证据);
+把「丢弃哨兵」挪到事务外(同一条不可证伪性)。
+
+## M5. G6-2 —— 普查重做(按调用点闭世界,不按字面量)
+
+字面量 grep 是「×4」的产地,所以**不再用第二条字面量补救**,改成闭世界枚举:
+
+| 闭世界方式 | 人口 | 能写 `approve` 的 |
+|---|---|---|
+| (i) 全部 `insertApprovalRecord(...)` 调用点(该 helper 是 `ApprovalProductService.ts` 的 `private`,全仓其它文件 0 调用点),逐个读它传的 `action` **表达式** | 28 | **5** |
+| (ii) 全部裸 SQL `INSERT INTO approval_records`(大小写/空白容忍),分布在 `routes/approvals.ts` ×3、`approval-comment-service.ts`、`ApprovalBridgeService.ts`、`ApprovalProductService.ts`(helper 自己那条)、`plugin-attendance/index.cjs` ×3 | 9 | **3** |
+| (iii) kysely `insertInto('approval_records')` | 0 | 0 |
+
+五个 helper 侧写入方 —— **五个,不是四个**:`:11483` / `:11521` / `:11664` / `:11863` 都是字面
+`action: 'approve'` + `actorId: actor.userId`(真人),而 **`:12864`(`insertAutoApprovalEvents`)是
+`action: skipped ? 'sign' : 'approve'` + `actorId: actorIdForAutoApprovalEvent(event)`** ——
+三元表达式里没有那个字面量,字面量 grep 看不见它,而它是**全仓唯一产出合成 actor 的写入方**。
+三个裸 SQL 侧写入方(`routes/approvals.ts:2966`、`ApprovalBridgeService.ts:1148`、
+`plugin-attendance/index.cjs:37824`)都传真人。
+
+**「×4」是怎么造出来的**:`grep -n "action: 'approve'"` 在该文件上 6 行,减去 `:11239`/`:11921`
+两处 `buildCompletionEvent` 参数(实例级完成事件,不是审计行)= 4。算术自洽,且对 `:12864` 完全盲。
+
+**顺带更正门审也没点到的一处**:被撤回那句引的三个 `plugin-attendance` 锚点里,
+有两个在本 head 上根本不是 `approve` 写入方(是 `'revoke'` 与 `'reject'`)。
+
+**如实披露的近失**:helper 自己那条 INSERT(`ApprovalProductService.ts:13143`)回落
+`record.actorId || 'system'` —— **裸 `'system'`,不在 `system:` 命名空间里**,
+`isSystemSentinelActor` 不会丢弃它。今天从任何 approve 写入方都不可达(五个都传非空 id),
+两处传字面 `'system'` 的写 `action: 'sign'`(`:11877`/`:11896`),席位查询不读。
+写在这里,是为了让将来「把 `'sign'` 改成 `'approve'`」或「传空 actor」被认出来是 G6-1 复发,而不是新谜案。
+
+### 撤回传播 —— 全分支机械自扫,零残留
+
+自扫是在**全分支**(`--exclude-dir=node_modules --exclude-dir=.git`)上跑的。
+**计数在这里没有意义,因为这一节自己就会被自己的 grep 命中**(我第一版就是这么写的,数字当场对不上,
+撤下改成按命中点分类)。分类如下,逐条给出它为什么不是「仍在正面主张」:
+
+| 词条 | 命中点 | 性质 |
+|---|---|---|
+| `no synthetic-actor seat` | 设计 MD §3.4 撤回块内的引文 | 撤回对被撤句的原样引用 |
+| | 本节下方 M6 的 PR-body 建议文本内的引文 | 同上 |
+| | 本节这张表自己 | 自指 |
+| `un-cancellable on that account` | 设计 MD §3.4 撤回块内的引文 / 本表 | 同上 |
+| `known to be reachable` | 设计 MD §3.4 撤回块内的引文 / M6 引文 / 本表 | 同上 |
+| `anti-filter oracle` | `approval-cancel-round-creation.db.test.ts` 的 G6-3 改口注释内的引文 / 本表 | 改口对旧措辞的原样引用 |
+| `35197` / `35577` / `37793` | 设计 MD §3.4 撤回块内的引文 / 本表 | 撤回引用 |
+| | `docs/attendance-production-go-no-go-20260211.md`、`docs/development/attendance-comprehensive-hours-pr0-pr5-closeout-20260523.md` 各若干 | **无关**:GitHub Actions run id 的数字巧合,不是审批锚点 |
+
+⇒ **零处仍在正面主张这句话**;全部残留都是撤回/纠正文本对旧措辞的原样引用,
+这正是撤回该有的形态(留档不删,免得下一轮看不懂改了什么)。
+
+**PR #5851 body:只读核查过,body 里没有这句绝对断言的任何形式**
+(`gh pr view 5851 --json body` 逐条 grep `synthetic-actor` / `×4` / `un-cancellable` / `35197` /
+`anti-filter` / `census|writer|reachab|synthetic|auto-approv|seat`,只命中一条与本条无关的接线摘要行)。
+⇒ 本轮**没有需要传播到 PR body 的撤回**。body 仍应在下次更新时补一行第 6 轮说明,文本见 M6。
+**本轮未编辑 PR body,未动 PR 任何状态。**
+
+## M6. 供下次更新 PR body 时直接用的一段(不在本轮编辑)
+
+> 第 6 轮门审(`impl-gate-C-slice1-round6-20260919.md`,NEEDS-FIX 1 P1/1 P2/2 P3)已全部处置:
+> P1 G6-1 —— 撤销轮席位推导此前不丢弃 `system:` 哨兵,任何走过一次「提交人本人自动通过」的已批准单据
+> 永久发不起撤销轮(且提示管理员恢复一个不存在的账号);已复用既有 `isSystemSentinelActor` 丢弃哨兵,
+> 滤空后 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` / `reason: no_human_approver`,新增 3 条真库验收
+> (旧码下全红)+ 3 条源码 mutation + 3 条 schema mutation。
+> P2 G6-2 —— 设计 MD §3.4 那句「no synthetic-actor seat is known to be reachable today」**整句撤回**,
+> 普查改为按 `insertApprovalRecord` 调用点(28)+ 裸 SQL(9)+ kysely(0)闭世界重做,approve 写入方
+> 5 个而非 4 个。P3 G6-3/G6-4 —— 注释改口;`activation_invalid` 的豁免理由变成读 `pg_constraint` /
+> `information_schema` 的实测断言。
+
+## M7. 接线 / 哨兵 / 清单 / s6a —— 人口未变,机械核验
+
+```
+vitest.config.ts 的 approval-cancel-round 命中                      → 7
+plugin-tests.yml 的 approval-cancel-round 命中                       → 8 = 7 条 run-list 行 + 1 行注释(:1579)
+带 EXPECT_DB 哨兵的 cancel-round 套件                                 → 7
+磁盘上的 approval-cancel-round-*.db.test.ts                          → 7
+ci-wiring 闭世界数组 CANCEL_ROUND_REALDB_FILES                        → 7(逐字未改)
+approval-cancel-round-ci-wiring.test.ts                              → 6 passed
+scripts/ops/t2-source-freeze-ci-wiring.test.mjs                      → 6 pass / 0 fail
+sealed-export-s6a-product-runtime.test.cjs(s6a pin 守卫)             → 1 pass —— 本轮未改 plugin-tests.yml,pin 不动,不占合并串行化窗口
+ci-realdb-step-contract.mjs 的 REAL_DB_STEP_IDS                      → 仍只有 approval / multitable 两个稳定 id,不枚举文件名 ⇒ 本轮无需改
+W7-R10(补充清单第 13 条,目录 root 清单)                              → 本轮零新增文件,三个 root 的归属集合未变
+```
+
+## M8. 本切片自己的套件 + tsc
+
+```
+$ CI=true TZ=UTC DATABASE_URL=…/metasheet2_fix_c1_r7 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run $(ls tests/integration/approval-cancel-round-*.db.test.ts)
+ Test Files  7 passed (7)
+      Tests  59 passed (59)        ← 55(上一轮)+ 4(本轮:P3 / N3 / N4 / G6-4)
+
+$ npx tsc --noEmit
+（无输出，EXIT 0）
+```
+
+## M9. required `test (20.x)` —— 逐字复现、整份清单同库连跑
+
+### M9.1 人口在本 head 上**重新推导**(不沿用上一轮的 74)
+
+`plugin-tests.yml` 在 `ba8a0133d..6013343eb` 的 diff 里(main 带来的改动),所以数字必须重算。
+用 PyYAML 直接解析,不按行号切片:
+
+```
+job keys:                              ['runs-on', 'strategy', 'steps']
+job-level env present:                 False            ← 谓词闭合的前提,独立复现
+matrix node-version:                   ['18.x', '20.x']
+total steps in jobs.test:              100              ← 上一轮是 99;main 加了一步,但它不在人口里
+谓词选中(run 含 vitest | node --test | DATABASE_URL,或 step env 有 DATABASE_URL): 73
+run-blocks containing ${{ expressions: 0
+强制纳入 'Stop core backend':           1
+────────────────────────────────────────
+本轮重放人口:                           74
+```
+
+⇒ 分母从 99 变成 100,**人口仍是 74**,但这是我自己算出来的,不是继承的。
+
+### M9.2 执行方式
+
+每个 step 的 run 块原样落成 `.sh`,`bash -e -o pipefail` 跑(GH Actions 默认 shell),
+step env 逐条照抄(仅把 CI 的 `metasheet_test` 改写成私有库),按 job 内原顺序
+**在同一个处女库 `metasheet2_fix_c1_r7` 上连跑到底**;库由我 `createdb` 出来后**空着**,
+由清单里的 `Run DB migrations` 自己按 CI 同一条 `MIGRATION_EXCLUDE` 迁移。
+`CI=true`、`TZ=UTC`、node 20.20.2、pnpm 10.33.0。
+逐 step 日志 `/tmp/fix-c1-r7/req20x/step-*.log`,清单 `MANIFEST.json`,结果 `RESULTS.json`。
+
+### M9.3 结果:74 步里 73 步 exit 0
+
+| step | 名称 | rc | 观测 |
+|---|---|---|---|
+| 88 | 多维表真库 | **0** | `Test Files 262 passed (262)` / `Tests 2869 passed \| 2 skipped (2871)`,460.9s |
+| **89** | **审批真库(本切片的 lane)** | **0** | `Test Files 84 passed (84)` / `Tests 906 passed \| 10 skipped (916)`,142.7s |
+| 98 | 考勤真库 | **1** | `Test Files 1 failed \| 123 passed (124)` / `Tests 2 failed \| 1782 passed (1784)`,300.3s |
+| 其余 71 步 | —— | 0 | —— |
+
+**本切片的 7 个套件在 step 89 连跑中逐一绿(逐字):**
+
+```
+✓ approval-cancel-round-creation.db.test.ts               (17 tests | 1 skipped)   977ms
+✓ approval-cancel-round-lock-order-census.db.test.ts      (10 tests | 1 skipped)  4140ms
+✓ approval-cancel-round-outlet-guards.db.test.ts           (7 tests | 1 skipped)   780ms
+✓ approval-cancel-round-redemption.db.test.ts              (6 tests | 1 skipped)   565ms
+✓ approval-cancel-round-node-timeout-effect.db.test.ts     (5 tests | 1 skipped)   846ms
+✓ approval-cancel-round-seat-guards.db.test.ts             (3 tests | 1 skipped)   445ms
+✓ approval-cancel-round-attendance-fk-migration.db.test.ts (11 tests | 1 skipped) 1013ms
+```
+
+(每个文件那 1 个 skipped 就是 `EXPECT_DB` 哨兵 —— 该 step 不设 `EXPECT_DB`,与 CI 同形;
+`59 total − 7 skipped = 52 ran`,与 M8 里 `EXPECT_DB=1` 单独跑出的 `59 passed` 自洽。)
+上一轮门审在**它的** `:1568`(审批 lane)上撞到过一次 `ECONNRESET`;本轮该 lane **rc=0**。
+
+### M9.4 唯一那条红的归因 —— 我自己做的判别控制
+
+失败文件是 `attendance-w4c3a-p08-child-process.db.test.ts`(考勤 W4C-3a P08,与撤销轮无关),
+失败形态**不是断言不等**,而是子进程起连接时:
+
+```
+Error: Child B first execution failed status=1
+stderr={"ok":false,"error":"error: no PostgreSQL user name specified in startup packet …"}
+```
+
+**判别控制(同一棵树、同一个库,只改 URL 形状)**:我本地的 `DATABASE_URL` 写成
+`postgresql://localhost:5432/…`(**不带用户名** —— `psql` 能靠 `$USER` 默认连上,
+但这个测试 spawn 的子进程重新解析 URL 就没有用户名了);CI 用的是
+`postgresql://postgres@localhost:5432/…`(**带用户名**)。把用户名补上后单跑该文件:
+
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_fix_c1_r7 \
+    npx vitest … run tests/integration/attendance-w4c3a-p08-child-process.db.test.ts
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+```
+
+⇒ 这条红**完全由我本机 URL 形状解释**,是重放台的保真缺口(已记在此,下次照 CI 的 `postgres@` 形状写),
+**不是回归,也不在本切片改动路径上,没有去修**。
+
+**我还做了一件会削弱上面结论的事,一并如实写**:带用户名把整个 step 98 **再跑一遍**,
+仍然 rc=1,但**受害者换人了** —— 变成 `attendance-plugin.test.ts` 的两条
+(auto shift matching preview / W4C-3a governing-SHA golden),而 P08 那个文件这次是绿的。
+这属于本仓已知的「**同一个库上第二次跑**」残留家族(`attendance-plugin.test.ts` 在处女库上才是有效 oracle),
+**不是** URL 修复失败。两次红的文件互不相同、都在考勤线、都不含任何对撤销轮的断言。
+**边界声明:我没有做到「考勤步骤在处女库上一次全绿」这件事** —— 第一次跑被 URL 形状挡住,
+第二次跑已不在处女库上。我不把考勤步骤记成绿,也不把它记成回归。
+
+### M9.5 另外两条 required、不属于本人口的步骤
+
+```
+$ npx tsc --noEmit       → 无输出，EXIT 0（node 20.20.2 / pnpm 10.33.0）
+```
+
+最慢几步(秒):88 → 460.9、98 → 300.3、89 → 142.7、78 → 57.1、64 → 56.1、2 → 44.7。
+
+## M10. 本轮仍然 OPEN / 未做(如实列,非遗漏)
+
+- **G3 组织半边(「仍在该组织单元」)** —— 未实现,理由与上一轮逐字相同(全仓无 `user_orgs` 席位资格谓词;
+  `org_id` nullable 的 NULL 语义未定),owner 裁决项;常驻正控 P2 仍把 `org_id IS NULL` 钉在明处。
+- **把普通创建路径对齐到登录门** —— 已上线端点的行为变更,owner 裁决项,本轮仍不做。
+- **三个(现为三个)错误码未登记进锁文 §14.3 表** —— 锁文 owner 所有,本轮未改锁文;
+  `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` 现在有两条臂(哨兵滤空 / 执行器初态异常),同一个码,已在设计 MD §3.1 写明。
+- **`FOR UPDATE` 之外的竞态** —— NOT COVERED,理由见 M4 末。
+- **判据 II / 判据 IV / 账侧等价 / legacy 事件三条** —— 属兑现期(C-2),本 head 无实现可测,零结论。
+- **前端同步钉(补充清单第 15 条)** —— 本轮未碰 `apps/web`,未复核。
+- **考勤 required step 未能在处女库上一次全绿** —— 见 M9.4 的边界声明。
+- **PR #5851 body 尚未写入第 6 轮说明** —— 文本备在 M6,本轮不编辑 PR。
+
+## M11. 清理与纪律
+
+- 临时探针 `zzprobe-r7-autoapproval.db.test.ts` 取证后**已删**,未提交、未接线。
+- 两个被 mutation 碰过的源文件跑完全部 mutation 后 `cmp` **identical**;私有库的 CHECK / NOT NULL 已逐字恢复并复核。
+- 处女私有库 `metasheet2_fix_c1_r7` 结束 `dropdb`(凭据见提交后的收尾)。
+- 未改锁文;未合并;未 undraft;未开 PR;未动任何 PR 状态;未动 `origin/main`;
+  未对任何共享 / staging / 生产库应用迁移;全程未用 `git stash` / `git checkout -- <path>` / `git reset --hard`;
+  只删我自己建的东西(探针文件;本轮未新建 worktree)。
