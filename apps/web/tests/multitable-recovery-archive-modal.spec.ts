@@ -536,6 +536,58 @@ describe('RecoveryArchiveModal', () => {
     expect(readJob).not.toHaveBeenCalled()
   })
 
+  it.each(['success', 'failure'])('does not restart job polling after unmount on a late read %s', async (outcome) => {
+    vi.useFakeTimers()
+    let resolveRead!: (snapshot: RecoveryArchiveJobSnapshot) => void
+    let rejectRead!: (error: unknown) => void
+    const readJob = vi.fn(() => new Promise<RecoveryArchiveJobSnapshot>((resolve, reject) => {
+      resolveRead = resolve
+      rejectRead = reject
+    }))
+    const props = mount({
+      listJobs: vi.fn(async () => ({ entries: [jobSnapshot('planned')], nextCursor: null })),
+      readJob,
+    })
+    await flush()
+    ;(q('[data-test="archive-recovery-job-refresh"]') as HTMLButtonElement).click()
+    await flush()
+    expect(readJob).toHaveBeenCalledTimes(1)
+    props.unmount()
+    if (outcome === 'success') resolveRead(jobSnapshot('applying', '2500'))
+    else rejectRead(new Error('private-provider-error'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(readJob).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(props.cancelJob).not.toHaveBeenCalled()
+  })
+
+  it('does not restart job polling when async acceptance arrives after unmount', async () => {
+    vi.useFakeTimers()
+    let resolveAccept!: (snapshot: RecoveryArchiveJobSnapshot) => void
+    const acceptJob = vi.fn(() => new Promise<RecoveryArchiveJobSnapshot>((resolve) => { resolveAccept = resolve }))
+    const props = mount({ previewArchive: vi.fn(async () => asyncPreview()), acceptJob })
+    await flush()
+    ;(q(`[data-test="archive-recovery-entry-${generationId}"]`) as HTMLButtonElement).click()
+    await flush()
+    ;(q('[data-test="archive-recovery-request-preview"]') as HTMLButtonElement).click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    ;(q('[data-test="archive-recovery-execute"]') as HTMLButtonElement).click()
+    await flush()
+    expect(acceptJob).toHaveBeenCalledTimes(1)
+    props.unmount()
+    resolveAccept(jobSnapshot('planned'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(props.readJob).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(props.cancelJob).not.toHaveBeenCalled()
+  })
+
   it('executes only a server-executable whole-sheet preview after explicit confirmation', async () => {
     const props = mount()
     await flush()

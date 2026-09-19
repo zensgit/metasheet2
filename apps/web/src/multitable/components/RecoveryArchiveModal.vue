@@ -253,6 +253,7 @@ let executeRequest = 0
 let jobRequest = 0
 let jobDiscoveryRequest = 0
 let jobPollTimer: ReturnType<typeof setTimeout> | null = null
+let unmounted = false
 
 const selectedEntry = computed(() => entries.value.find((entry) => entry.generationId === selectedGenerationId.value) ?? null)
 const canPreview = computed(() => {
@@ -635,6 +636,7 @@ async function cancelCurrentJob(): Promise<void> {
 }
 
 function applyJobSnapshot(sheetId: string, next: RecoveryArchiveJobSnapshot): void {
+  if (unmounted) return
   const previous = jobsBySheet.get(sheetId)
   jobsBySheet.set(sheetId, next)
   if (sheetId !== props.sheetId) return
@@ -650,7 +652,7 @@ function applyJobSnapshot(sheetId: string, next: RecoveryArchiveJobSnapshot): vo
 
 function scheduleJobPoll(): void {
   clearJobPoll()
-  if (!props.visible || !jobActive.value) return
+  if (unmounted || !props.visible || !jobActive.value) return
   jobPollTimer = setTimeout(() => { void refreshCurrentJob(true) }, JOB_POLL_MS)
 }
 
@@ -753,6 +755,9 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  unmounted = true
+  executeRequest++
+  jobRequest++
   invalidateArchiveReads()
   clearJobPoll()
 })
