@@ -460,7 +460,7 @@ export type ExactAnchorMutationTxnHook = (query: QueryFn, mutation: ExactAnchorA
  * against ordinary shared-lease writers. Only that channel is eligible for the bounded backoff re-attempt;
  * every other refusal (including a genuine preview drift, which shares the same PUBLIC reason) stays
  * single-attempt so the retry loop can never mask a real drift/authorization refusal. */
-class ApplyRefusalError extends Error {
+export class ApplyRefusalError extends Error {
   constructor(
     readonly reason: ExactAnchorApplyRefusal,
     readonly leaseBusy: boolean = false,
@@ -1230,10 +1230,11 @@ function requireMaterializedArchiveAsyncFenceLease(
   }
 }
 
-async function lockArchiveSyncBinding(
+/** Shared by file preparation reservations and final canonical apply; requires a live transaction. */
+export async function lockArchiveSyncBinding(
   query: QueryFn,
-  input: ExactAnchorApplyInput,
-  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' }>,
+  input: Pick<ExactAnchorApplyInput, 'sheetId'>,
+  execution: Pick<Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' }>, 'claims' | 'workspaceId' | 'baseId'>,
 ): Promise<void> {
   const key = await query(
     `SELECT key_id

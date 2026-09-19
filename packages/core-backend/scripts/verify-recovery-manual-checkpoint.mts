@@ -1700,6 +1700,30 @@ try {
     await query(`UPDATE multitable_attachments SET storage_path=$2,size=$3,storage_provider='local',
       blob_purged_at=NULL,blob_purge_claimed_at=NULL WHERE id=$1`, [row.id, file.path, bytes.length])
   }
+  await query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
+    VALUES ('manual-attachment-field','no-genesis','Synthetic files','attachment','{}',2)`)
+  await query(`UPDATE multitable_attachments SET record_id='manual-source-record',field_id='manual-attachment-field'
+    WHERE id='manual-live-attachment'`)
+  const sourceLedger = require('../src/multitable/operation-ledger.ts') as typeof import('../src/multitable/operation-ledger')
+  const sourceHistory = require('../src/multitable/record-history-service.ts') as typeof import('../src/multitable/record-history-service')
+  const sourceFence = require('../src/multitable/canonical-sheet-fence.ts') as typeof import('../src/multitable/canonical-sheet-fence')
+  const beforeSourceFenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+  process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+  try { await transaction(async () => {
+    await sourceFence.fenceWriterEntry(query, 'no-genesis')
+    const ledger = await sourceLedger.mintOperation(query, 'no-genesis')
+    assert.ok(ledger.operationId)
+    const changed = (await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','["manual-live-attachment"]'),
+      version=version+1 WHERE id='manual-source-record' RETURNING data,version`)).rows[0]
+    await sourceHistory.recordRecordRevision(query, { sheetId: 'no-genesis', recordId: 'manual-source-record',
+      version: changed.version, action: 'update', source: 'rest', actorId,
+      changedFieldIds: ['manual-attachment-field'], patch: { 'manual-attachment-field': ['manual-live-attachment'] },
+      snapshot: changed.data, ledger })
+    assert.equal(await sourceLedger.sealOperation(query, ledger), true)
+  }) } finally {
+    if (beforeSourceFenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    else process.env.MULTITABLE_ENABLE_WRITER_FENCE = beforeSourceFenceFlag
+  }
   let attachmentTransaction = false
   const attachmentReadTransaction: Parameters<typeof manualAdmission.bindRecoveryArchiveManualAttachmentRead>[0] =
     (work) => transaction(async () => {
@@ -1889,10 +1913,12 @@ try {
     console.log('PASS: public archive authority includes exact attachments; reader authenticates/decrypts live/deleted binary frames with defensive private byte copies; missing/swapped objects refuse')
     const commandModule = require('../src/multitable/recovery-archive-manual-command.ts') as typeof import('../src/multitable/recovery-archive-manual-command')
     const commandFlags = { archive: process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED,
+      strict: process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT,
       fence: process.env.MULTITABLE_ENABLE_WRITER_FENCE }
     try {
       process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
       process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+      process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
       let commandSourceReads = 0
       const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
         { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
@@ -1935,8 +1961,6 @@ try {
         assert.ok(address && typeof address !== 'string')
         const url = `http://127.0.0.1:${address.port}/api/multitable/sheets/no-genesis/recovery-archive/captures`
         const headers = { 'content-type': 'application/json', authorization: 'Bearer synthetic-manual-owner' }
-        await query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
-          VALUES ('manual-attachment-field','no-genesis','Synthetic files','attachment','{}',2)`)
         const requestId = randomUUID()
         const beforeHttp = await generationCount()
         assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1990,6 +2014,106 @@ try {
             [JSON.stringify(beforeAttachmentEdit.data), beforeAttachmentEdit.version, beforeAttachmentEdit.updated_at])
         }
         console.log('PASS: HTTP preview distinguishes attachment-only change from no_changes in whole/record/field scope; scalar-only selection preserved, no execution identity issued')
+        // Exercise the production reader/staging/canonical facade without enabling its public preview.
+        const identityApi = require('../src/multitable/restore-preview-identity.ts') as typeof import('../src/multitable/restore-preview-identity')
+        const planApi = require('../src/multitable/recovery-archive-sync-plan.ts') as typeof import('../src/multitable/recovery-archive-sync-plan')
+        const metadataApi = require('../src/multitable/recovery-archive-attachment-apply.ts') as typeof import('../src/multitable/recovery-archive-attachment-apply')
+        const restoreApi = require('../src/multitable/recovery-archive-sync-restore.ts') as typeof import('../src/multitable/recovery-archive-sync-restore')
+        const recordId = 'manual-source-record'
+        const fieldId = 'manual-attachment-field'
+        const archived = state.records.get(recordId)!
+        const restoredIds = archived.data![fieldId] as string[]
+        assert.ok(restoredIds.length > 0)
+        await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+        const beforeRestore = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        const metadata = []
+        for (const id of restoredIds) {
+          const row = (await query('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [id])).rows[0]
+          metadata.push({ attachmentId: id, recordId, fieldId, metadataHash: metadataApi.hashArchiveAttachmentMetadata(row.metadata) })
+        }
+        const scopeHash = identityApi.hashAnchorRecoveryScope([{ recordId, exists: archived.exists, version: archived.version }])
+        const plan = planApi.compileRecoveryArchiveSyncPlan({ workspaceId: authority.selectedBinding.workspaceId,
+          baseId: authority.selectedBinding.baseId, sheetId: 'no-genesis', actorId, recoveryMode: 'revert',
+          scopeKind: 'selected_fields', scopeHash, archiveGenerationId: authority.selectedBinding.generationId,
+          archiveRootHash: authority.selectedBinding.rootHash, sourceVectorHash: authority.selectedBinding.sourceVectorHash,
+          keyId: authority.keyId, selectedRecordIds: [recordId], selectedFieldIds: [fieldId], attachmentMetadata: metadata })
+        const liveRows = (await query("SELECT id,version FROM meta_records WHERE sheet_id='no-genesis'")).rows
+        const schema = (await query("SELECT id,type,property FROM meta_fields WHERE sheet_id='no-genesis'")).rows
+        const token = identityApi.mintExactArchiveRecoveryIdentity({ sheetId: 'no-genesis', actorId, mode: 'revert',
+          anchorOperationId: authority.selectedBinding.anchorOperationId, anchorSeq: authority.selectedBinding.anchorSeq,
+          checkpointId: authority.selectedBinding.checkpointId, scopeHash,
+          liveSetHash: identityApi.hashExactAnchorLiveSet(liveRows.map(row => ({ recordId: row.id, version: row.version })), []),
+          schemaHash: identityApi.hashExactAnchorSchema(schema.map(row => ({ id: row.id, type: row.type, property: row.property }))),
+          authorizedScopeHash: identityApi.hashRecoveryAuthorizationScope({ sheetId: 'no-genesis', actorId }),
+          archiveGenerationId: authority.selectedBinding.generationId, archiveRootHash: authority.selectedBinding.rootHash,
+          archiveSourceVectorHash: authority.selectedBinding.sourceVectorHash, archiveKeyId: authority.keyId,
+          archivePlanHash: plan.planHash, scopeKind: 'selected_fields' })
+        let uploadAttempts = 0
+        let refuseUpload = true
+        let allowRestore = false
+        const facadeInput: Parameters<typeof restoreApi.applyRecoveryArchiveSyncRestore>[0] = {
+          query, transaction: uploadInput.transaction,
+          apply: { token, actorId, sheetId: 'no-genesis', preliminaryFullRead: async () => allowRestore,
+            stabilizeAuthorization: async () => 'ready', finalLockedFullRead: async () => allowRestore,
+            evaluatePlanAuthorization: async (_q, context) => {
+              assert.ok(context.revertWrites.some(write => write.recordId === recordId && write.changedFieldIds.includes(fieldId)))
+              return allowRestore
+            } },
+          archive: { selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
+            sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects,
+            keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
+          selectedRecordIds: [recordId], selectedFieldIds: [fieldId], auditedReplayHorizonMs: 60000,
+          attachmentStorage: { uploadByKey: async (...args) => {
+            assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
+            uploadAttempts++
+            if (refuseUpload) throw new Error('SYNTHETIC_RESTORE_UPLOAD_FAILED')
+            return sourceStorage.uploadByKey(...args)
+          }, readContentAddressed: async (...args) => {
+            assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
+            return sourceStorage.readContentAddressed(...args)
+          } },
+        }
+        assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'forbidden' })
+        assert.equal(uploadAttempts, 0)
+        allowRestore = true
+        for (const unavailable of ['key', 'hold'] as const) {
+          const blocked = await restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
+            transaction: work => uploadInput.transaction(async q => {
+              if (unavailable === 'key') await q(`UPDATE meta_recovery_archive_keys
+                SET state='retiring',row_version=row_version+1 WHERE key_id=$1`, [authority.keyId])
+              else await q(`INSERT INTO meta_recovery_archive_legal_holds
+                (id,workspace_id,base_id,sheet_id,generation_id,reason_code,placed_by_actor_id)
+                VALUES ($1::uuid,$2,$3,$4,$5::uuid,'SYNTHETIC_RESTORE_HOLD',$6)`,
+              [randomUUID(), authority.selectedBinding.workspaceId, authority.selectedBinding.baseId,
+                'no-genesis', authority.selectedBinding.generationId, actorId])
+              return work(q)
+            }) })
+          assert.deepEqual(blocked, { ok: false, reason: 'recovery-trust-required' })
+          assert.equal(uploadAttempts, 0)
+          assert.equal((await query('SELECT state FROM meta_recovery_archive_keys WHERE key_id=$1', [authority.keyId])).rows[0].state, 'active')
+          assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_legal_holds WHERE generation_id=$1::uuid',
+            [authority.selectedBinding.generationId])).rows[0].n, 0)
+        }
+        await assert.rejects(restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { message: 'RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED' })
+        assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforeRestore)
+        const reservedBeforeRetry = (await query('SELECT object_id FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid', [actorId])).rows
+        assert.equal(reservedBeforeRetry.length, 1)
+        refuseUpload = false
+        const appliedAttachments = await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput)
+        assert.equal(appliedAttachments.ok, true, JSON.stringify(appliedAttachments))
+        assert.deepEqual((await query('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[fieldId], restoredIds)
+        const adopted = (await query("SELECT object_id,state FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid", [actorId])).rows
+        assert.equal(adopted.length, restoredIds.length)
+        assert.ok(adopted.every(row => row.state === 'applied'))
+        assert.ok(adopted.some(row => row.object_id === reservedBeforeRetry[0].object_id))
+        for (const id of restoredIds) {
+          const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
+          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
+        }
+        const afterUploads = uploadAttempts
+        assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'token-replayed' })
+        assert.equal(uploadAttempts, afterUploads)
+        console.log('PASS: authenticated binary reader -> durable file staging/retry -> canonical attachment adoption/reference/history; denied and consumed identities do zero file writes')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
@@ -2026,6 +2150,8 @@ try {
       else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = commandFlags.archive
       if (commandFlags.fence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
       else process.env.MULTITABLE_ENABLE_WRITER_FENCE = commandFlags.fence
+      if (commandFlags.strict === undefined) delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+      else process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = commandFlags.strict
     }
     console.log('PASS: live/deleted source files form authenticated attachment index and exact 10+N nonce reservations; caller attachment substitution ignored; durable interrupted capture resumes without reread/reseal')
     console.log('PASS: missing manifest refuses publication and retains source pins; complete attachment roster atomically verifies catalog/receipts/archive refs and releases only its own source pins')

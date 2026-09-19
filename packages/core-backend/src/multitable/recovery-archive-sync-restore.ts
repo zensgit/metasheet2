@@ -1,6 +1,12 @@
+import { createHash } from 'node:crypto'
+import type { StorageProvider } from '../services/StorageService'
 import type { QueryFn } from './permission-service'
+import { verifyExactArchiveRecoveryIdentity } from './restore-preview-identity'
+import { prepareArchiveAttachmentBatch } from './recovery-archive-attachment-prepare'
 import {
   applyMaterializedExactArchiveRecoverySyncInternal,
+  ApplyRefusalError,
+  lockArchiveSyncBinding,
   type ExactAnchorApplyInput,
   type ExactAnchorApplyResult,
   type MaterializedArchiveLink,
@@ -21,6 +27,8 @@ export interface RecoveryArchiveSyncRestoreInput {
   readonly selectedFieldIds: readonly string[]
   /** Owner-policy value supplied by the server runtime, never by the HTTP request. */
   readonly auditedReplayHorizonMs: number
+  /** Server-owned isolated preparation port; public runtime stays unregistered until cleanup acceptance. */
+  readonly attachmentStorage?: Pick<StorageProvider, 'uploadByKey' | 'readContentAddressed'>
 }
 
 /**
@@ -30,6 +38,31 @@ export interface RecoveryArchiveSyncRestoreInput {
 export async function applyRecoveryArchiveSyncRestore(
   input: RecoveryArchiveSyncRestoreInput,
 ): Promise<ExactAnchorApplyResult> {
+  try {
+    return await applyArchiveRestore({ ...input, apply: { ...input.apply },
+      archive: { ...input.archive, selectedBinding: { ...input.archive.selectedBinding } },
+      selectedRecordIds: [...input.selectedRecordIds], selectedFieldIds: [...input.selectedFieldIds] })
+  } catch (error) {
+    if (error instanceof ApplyRefusalError) return { ok: false, reason: error.reason }
+    throw error
+  }
+}
+
+async function applyArchiveRestore(input: RecoveryArchiveSyncRestoreInput): Promise<ExactAnchorApplyResult> {
+  const verified = input.attachmentStorage ? verifyExactArchiveRecoveryIdentity(input.apply.token, {
+    sheetId: input.apply.sheetId, actorId: input.apply.actorId,
+  }) : undefined
+  if (input.attachmentStorage && (!verified?.valid || !verified.claims)) return { ok: false, reason: 'identity-invalid' }
+  if (input.attachmentStorage) {
+    if (!(await input.apply.preliminaryFullRead(input.query))) return { ok: false, reason: 'forbidden' }
+    const burned = await input.query('SELECT 1 FROM meta_recovery_token_burns WHERE token_sha256=$1',
+      [createHash('sha256').update(input.apply.token).digest('hex')])
+    if (burned.rows.length) return { ok: false, reason: 'token-replayed' }
+    await input.transaction(query => lockArchiveSyncBinding(query, input.apply, {
+      claims: verified!.claims!, workspaceId: input.archive.selectedBinding.workspaceId,
+      baseId: input.archive.selectedBinding.baseId,
+    }))
+  }
   const state = await readRecoveryArchiveCompleteSectionState({
     ...input.archive,
     query: input.query,
@@ -43,7 +76,11 @@ export async function applyRecoveryArchiveSyncRestore(
     }
     throw error
   }
+  const attachments = input.attachmentStorage && verified?.claims
+    ? await prepareArchiveAttachmentBatch({ ...input, state, targetLinks, claims: verified.claims,
+      storage: input.attachmentStorage }) : undefined
   return applyMaterializedExactArchiveRecoverySyncInternal(input.transaction, input.apply, {
+    ...(attachments ? { attachments } : {}),
     workspaceId: input.archive.selectedBinding.workspaceId,
     baseId: input.archive.selectedBinding.baseId,
     targetRecords: state.records,
