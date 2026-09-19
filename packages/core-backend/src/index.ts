@@ -205,7 +205,10 @@ import {
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
-import { registerAttendanceCancellationExecutionProvider } from './core/attendance-cancellation-execution-port'
+import {
+  registerAttendanceCancellationExecutionProvider,
+  registerCancelRoundCancelledEventDelivery,
+} from './core/attendance-cancellation-execution-port'
 import {
   deriveApprovalInstanceOrgIdWithSelector,
   ApprovalOrgUnresolvedError,
@@ -2757,6 +2760,13 @@ export class MetaSheetServer {
                 // owns the connection and the transaction.
                 registerCancelRoundExecutionBoundary: (boundary) =>
                   registerAttendanceCancellationExecutionProvider(boundary),
+                // Codex 审阅第 3 条修复 (2026-09-19) — the sibling POST-COMMIT delivery. One line
+                // for the same reason the line above is one line: what is bound is the plugin's
+                // own single `attendance.request.cancelled` send site, the one its HTTP cancel
+                // route already calls, so the redemption path announces the cancellation with the
+                // identical gate and the identical payload instead of not announcing it at all.
+                registerCancelRoundCancelledEventDelivery: (deliver) =>
+                  registerCancelRoundCancelledEventDelivery(deliver),
                 // W4C-3c: manual_edit / recompute / ops_retirement boundary.
                 createRecordOperationBoundary: (config: {
                   adapters: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1

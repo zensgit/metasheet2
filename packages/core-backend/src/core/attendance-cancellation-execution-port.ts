@@ -29,7 +29,10 @@
 
 import crypto from 'node:crypto'
 
-import type { AttendanceRequestOperationBoundaryV1 } from '../attendance/w4c3b-request-operation-boundary'
+import type {
+  AttendanceRequestOperationBoundaryV1,
+  AttendanceRequestOperationExternalTransactionResultV1,
+} from '../attendance/w4c3b-request-operation-boundary'
 
 /**
  * Lock §3 C-2 step ④'s replay key, derived — and NOT the round id itself.
@@ -252,4 +255,84 @@ export function classifyCancelRoundCancellationOutcomeV1(
   return unrecoverableExpired > 0
     ? { status: 'cancelled_with_unrecoverable_expired', reversal: summary }
     : { status: 'cancelled', reversal: summary }
+}
+
+// ---------------------------------------------------------------------------
+// Codex 审阅第 3 条修复 (2026-09-19) — the POST-COMMIT `attendance.request.cancelled` delivery.
+// ---------------------------------------------------------------------------
+
+/**
+ * ⛔ THE DEFECT THIS CLOSES (verified independently, `verify-codex-cancel-finding3-20260919.md`,
+ * VERDICT CONFIRMED / P3).
+ *
+ * Under the `legacy` and `legacy_compat` postures — the ONLY postures any org runs today, since
+ * the three attendance switches are OFF and `attendance_calculation_rollout_state` is empty — the
+ * boundary deliberately does NOT enqueue the result-event outbox row
+ * (`w4c3b-request-operation-boundary.ts:903-916`, `if (!isLegacyCompat)`; the pure-`legacy` kind
+ * returns at `:826/:851/:898`, before the enqueue). The HTTP cancel route compensates for that by
+ * emitting `attendance.request.cancelled` IN PROCESS, right after the boundary returns
+ * (`plugins/plugin-attendance/index.cjs`, `cancelRequest`). The redemption path never passes
+ * through `cancelRequest` — by construction, since that function's only two callers are the two
+ * HTTP routes — so it emitted the event ZERO times where the HTTP path emits it once. Measured, not
+ * reasoned: a bus probe over the twin fixture read `{sendsAfterA: 0, sendsAfterB: 1}` on the same
+ * org, same process, same bus singleton.
+ *
+ * That is a divergence from lock §8 期 1 「完整取消结果逐字节等价于现有 W4 路径」. It is P3 rather
+ * than P2 only because the event has ZERO subscribers at this head (§4 of the report: a closed-world
+ * census of `eventBus.subscribe` in `src`, of the three `events.subscribe: ["*"]` plugins, of
+ * `apps/`, and of the separate `EventBusService` bus the webhook route uses) — a latent gap for the
+ * first consumer, not a live regression.
+ *
+ * ⚠️ WHY A SECOND REGISTRY AND NOT A METHOD ON THE PORT ABOVE. The port's type IS
+ * `AttendanceRequestOperationBoundaryV1` — deliberately un-narrowed, because lock §3 C-1 forbids
+ * lifting a bespoke cancel-only entry out of the W4 protocol. Adding a delivery method to THAT
+ * interface would change the boundary contract every W4 route shares for the sake of one caller.
+ * This is a sibling capability, not part of the transaction protocol: it runs AFTER the caller's
+ * COMMIT, touches no database, and owns no transaction. It gets its own single-provider registry,
+ * bound by the same plugin at the same `activate`.
+ *
+ * ⚠️ WHY IT CARRIES THE WHOLE W4 RESULT AND DECIDES NOTHING ITSELF. 「不另造第二份事件构造」: the
+ * gate (`kind === 'legacy' || kind === 'legacy_compat'`) and the payload shaping live in ONE place,
+ * the plugin's `emitRequestCancelledEventForOutcomeV1`, which the HTTP route calls too. The approval
+ * side hands over the result it got and the request id it asked about, and learns nothing about
+ * which kinds emit — so the two paths cannot drift into two gates.
+ *
+ * ⚠️ NOT A PERSISTENCE HOOK. Per `feedback_persistent_transition_must_not_depend_on_network_call`:
+ * nothing durable hangs off this. The evidence rows (the request row, the revoke audit row, the
+ * round's `applied`, the W4 seal) are all written and committed by the transaction BEFORE this runs,
+ * and a delivery failure is a warning, never a rollback — a committed business cancellation must not
+ * be undone because an in-process listener threw.
+ */
+export type CancelRoundCancelledEventDeliveryV1 = (
+  result: AttendanceRequestOperationExternalTransactionResultV1,
+  fallbackRequestId: string,
+) => void
+
+let cancelRoundCancelledEventDelivery: CancelRoundCancelledEventDeliveryV1 | undefined
+
+/** Bind the process-wide delivery (the attendance plugin, once, at activate). */
+export function registerCancelRoundCancelledEventDelivery(
+  deliver: CancelRoundCancelledEventDeliveryV1,
+): void {
+  if (cancelRoundCancelledEventDelivery) {
+    console.warn('CancelRoundCancelledEventDelivery provider is being replaced')
+  }
+  cancelRoundCancelledEventDelivery = deliver
+}
+
+/** Unbind (plugin deactivate / test teardown). */
+export function unregisterCancelRoundCancelledEventDelivery(): void {
+  cancelRoundCancelledEventDelivery = undefined
+}
+
+/**
+ * Read the bound delivery. `undefined` ⇒ the approval side logs and moves on. This one FAILS OPEN,
+ * the opposite of `getAttendanceCancellationExecutionPort`, and the asymmetry is the point: an
+ * unbound EXECUTION port means the business cancellation would not happen at all, so it must abort
+ * the transaction; an unbound DELIVERY is discovered only after that cancellation is already
+ * committed and durable, where throwing could not undo anything and would merely turn a successful
+ * cancellation into a 500.
+ */
+export function getCancelRoundCancelledEventDelivery(): CancelRoundCancelledEventDeliveryV1 | undefined {
+  return cancelRoundCancelledEventDelivery
 }
