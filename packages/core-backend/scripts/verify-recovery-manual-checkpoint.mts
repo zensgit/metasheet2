@@ -1693,6 +1693,8 @@ try {
   console.log('PASS: physically purged in-scope attachment refuses fresh admission with zero generation/request/pin side effects')
   const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
   const sourceStorage = new LocalStorageProvider(join(root, 'attachment-source'))
+  await query(`INSERT INTO multitable_attachments(id,sheet_id,storage_file_id,filename,mime_type,size,storage_path)
+    VALUES ('manual-second-attachment','no-genesis','manual-second-file','synthetic','text/plain',3,'synthetic/second')`)
   const syntheticAttachments = (await query(`SELECT id FROM multitable_attachments WHERE sheet_id='no-genesis' ORDER BY id`)).rows
   for (const row of syntheticAttachments) {
     const bytes = Buffer.from(`synthetic-${row.id}`)
@@ -1703,7 +1705,7 @@ try {
   await query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
     VALUES ('manual-attachment-field','no-genesis','Synthetic files','attachment','{}',2)`)
   await query(`UPDATE multitable_attachments SET record_id='manual-source-record',field_id='manual-attachment-field'
-    WHERE id='manual-live-attachment'`)
+    WHERE id IN ('manual-live-attachment','manual-second-attachment')`)
   const sourceLedger = require('../src/multitable/operation-ledger.ts') as typeof import('../src/multitable/operation-ledger')
   const sourceHistory = require('../src/multitable/record-history-service.ts') as typeof import('../src/multitable/record-history-service')
   const sourceFence = require('../src/multitable/canonical-sheet-fence.ts') as typeof import('../src/multitable/canonical-sheet-fence')
@@ -1713,11 +1715,11 @@ try {
     await sourceFence.fenceWriterEntry(query, 'no-genesis')
     const ledger = await sourceLedger.mintOperation(query, 'no-genesis')
     assert.ok(ledger.operationId)
-    const changed = (await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','["manual-live-attachment"]'),
+    const changed = (await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','["manual-live-attachment","manual-second-attachment"]'),
       version=version+1 WHERE id='manual-source-record' RETURNING data,version`)).rows[0]
     await sourceHistory.recordRecordRevision(query, { sheetId: 'no-genesis', recordId: 'manual-source-record',
       version: changed.version, action: 'update', source: 'rest', actorId,
-      changedFieldIds: ['manual-attachment-field'], patch: { 'manual-attachment-field': ['manual-live-attachment'] },
+      changedFieldIds: ['manual-attachment-field'], patch: { 'manual-attachment-field': ['manual-live-attachment', 'manual-second-attachment'] },
       snapshot: changed.data, ledger })
     assert.equal(await sourceLedger.sealOperation(query, ledger), true)
   }) } finally {
@@ -2023,7 +2025,7 @@ try {
         const fieldId = 'manual-attachment-field'
         const archived = state.records.get(recordId)!
         const restoredIds = archived.data![fieldId] as string[]
-        assert.ok(restoredIds.length > 0)
+        assert.equal(restoredIds.length, 2)
         await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
         const beforeRestore = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
         const metadata = []
@@ -2066,7 +2068,7 @@ try {
           attachmentStorage: { uploadByKey: async (...args) => {
             assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
             uploadAttempts++
-            if (refuseUpload) throw new Error('SYNTHETIC_RESTORE_UPLOAD_FAILED')
+            if (refuseUpload && uploadAttempts === 2) throw new Error('SYNTHETIC_RESTORE_UPLOAD_FAILED')
             return sourceStorage.uploadByKey(...args)
           }, readContentAddressed: async (...args) => {
             assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
@@ -2096,8 +2098,14 @@ try {
         }
         await assert.rejects(restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { message: 'RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED' })
         assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforeRestore)
-        const reservedBeforeRetry = (await query('SELECT object_id FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid', [actorId])).rows
-        assert.equal(reservedBeforeRetry.length, 1)
+        const reservedBeforeRetry = (await query('SELECT object_id,state FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid', [actorId])).rows
+        assert.equal(uploadAttempts, 2)
+        assert.equal(reservedBeforeRetry.length, 2)
+        assert.deepEqual(reservedBeforeRetry.map(row => row.state).sort(), ['reserved', 'verified'])
+        for (const binding of metadata) {
+          const row = (await query('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [binding.attachmentId])).rows[0]
+          assert.equal(metadataApi.hashArchiveAttachmentMetadata(row.metadata), binding.metadataHash)
+        }
         refuseUpload = false
         const appliedAttachments = await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput)
         assert.equal(appliedAttachments.ok, true, JSON.stringify(appliedAttachments))
@@ -2105,7 +2113,8 @@ try {
         const adopted = (await query("SELECT object_id,state FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid", [actorId])).rows
         assert.equal(adopted.length, restoredIds.length)
         assert.ok(adopted.every(row => row.state === 'applied'))
-        assert.ok(adopted.some(row => row.object_id === reservedBeforeRetry[0].object_id))
+        assert.deepEqual(adopted.map(row => row.object_id).sort(), reservedBeforeRetry.map(row => row.object_id).sort())
+        assert.equal(uploadAttempts, 3, 'retry must not reupload the already verified first file')
         for (const id of restoredIds) {
           const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
           assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
@@ -2113,7 +2122,7 @@ try {
         const afterUploads = uploadAttempts
         assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'token-replayed' })
         assert.equal(uploadAttempts, afterUploads)
-        console.log('PASS: authenticated binary reader -> durable file staging/retry -> canonical attachment adoption/reference/history; denied and consumed identities do zero file writes')
+        console.log('PASS: authenticated two-file restore; second upload failure leaves metadata/record unchanged; retry reuses both objects without reuploading verified bytes; canonical adoption and token replay verified')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
