@@ -82,8 +82,8 @@ async function confirmManual() {
 
 describe('ManualArchiveCapture', () => {
   it.each([
-    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Manual archives containing attachments are not yet available; this archive is incomplete.'],
-    [true, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', '含附件的手动归档尚不可用；本次归档未完成。'],
+    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Attachment content or storage configuration is unavailable; this archive is incomplete.'],
+    [true, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', '附件内容或存储配置不可用；本次归档未完成。'],
     [false, 403, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Your current identity cannot archive this table'],
     [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE_private', 'Archive unavailable; check configuration and retry'],
   ])('uses exact safe manual diagnostics (%s/%s/%s)', async (isZh, status, code, expected) => {
@@ -798,7 +798,7 @@ describe('RecoveryArchiveModal', () => {
     expect(q('[data-test="archive-recovery-job-outcome"]')?.textContent).toContain('Only part of the job was applied')
   })
 
-  it.each([[false, 'Attachment recovery is not supported yet'], [true, '当前暂不支持恢复附件']] as const)(
+  it.each([[false, 'current service configuration or selected scope'], [true, '当前服务配置或所选范围']] as const)(
     'explains unsupported attachments without offering execution (Chinese=%s)', async (isZh, expected) => {
       const props = mount({ isZh, previewArchive: vi.fn(async () => ({ ...syncPreview(),
         executable: false, previewIdentity: null, blockedReason: 'unsupported_attachments' })) })

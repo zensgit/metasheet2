@@ -1953,12 +1953,28 @@ try {
         if (req.headers.authorization === 'Bearer synthetic-manual-owner') req.user = { id: actorId, role: 'admin' }
         next()
       })
+      const attachmentHttpPool = new Pool({ ...connection, database, max: 4 })
+      const attachmentHttpDepth = new AsyncLocalStorage<number>()
+      const attachmentHttpProbe = { currentTransactionDepth: () => attachmentHttpDepth.getStore() ?? 0 }
+      const attachmentHttpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
+        query: (text, params) => attachmentHttpPool.query(text, params),
+        transactionDepthProbe: attachmentHttpProbe,
+        async transaction(work) {
+          const owned = await attachmentHttpPool.connect()
+          try {
+            await owned.query('BEGIN')
+            const result = await attachmentHttpDepth.run(1, () => work((text, params) => owned.query(text, params)))
+            await owned.query('COMMIT')
+            return result
+          } catch (error) { await owned.query('ROLLBACK'); throw error }
+          finally { owned.release() }
+        },
+      }
       attachmentApp.use('/api/multitable', univerMetaRouter({
         recoveryArchiveRuntime: { keyCustody: attachmentCustody,
-          transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider,
+          transactionDepth: attachmentHttpProbe, objectStore: attachmentProvider,
           attachmentStorage: sourceStorage },
-        recoveryArchiveDatabaseRuntime: { query, transaction: uploadInput.transaction,
-          transactionDepthProbe: attachmentCapture.transactionDepth },
+        recoveryArchiveDatabaseRuntime: attachmentHttpDatabase,
         recoveryArchiveAuditedReplayHorizonMs: 60000,
         recoveryArchiveManualPolicy: admissionPolicy,
       }))
@@ -2223,6 +2239,26 @@ try {
         assert.equal((await fetch(executeUrl, { method: 'POST', headers, body: executeBody })).status, 409)
         assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], afterPublic)
         console.log('PASS: public HTTP preview/execution restores both original attachment bytes, checks authentication, increments once and refuses token replay')
+        if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
+          const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
+          await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, async () => {
+            const before = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+            const historyCount = async () => (await query(`SELECT count(*)::int AS n FROM meta_record_revisions
+              WHERE record_id=$1 AND source='restore'`, [recordId])).rows[0].n
+            const beforeHistory = await historyCount()
+            await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+            return async () => {
+              const after = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+              assert.deepEqual(after.data, before.data)
+              assert.equal(Number(after.version), Number(before.version) + 2)
+              assert.equal(await historyCount(), beforeHistory + 1)
+              for (const id of restoredIds) {
+                const metadata = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
+                assert.deepEqual((await sourceStorage.readContentAddressed(metadata.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
+              }
+            }
+          }, 'attachment')
+        }
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
@@ -2250,9 +2286,11 @@ try {
         console.log('PASS: unavailable live source refuses fresh HTTP publication with pins retained; completed archive still independently reads exact files')
         console.log('PASS: real HTTP manual attachment capture uses server local storage, refuses anonymous/client paths, retries one generation, and exposes catalog with independently decrypted exact files')
       } finally {
-        attachmentServer.closeIdleConnections()
-        await new Promise<void>((resolve, reject) => attachmentServer.close(error => error ? reject(error) : resolve()))
-        assert.equal(attachmentServer.address(), null)
+        try {
+          attachmentServer.closeIdleConnections()
+          await new Promise<void>((resolve, reject) => attachmentServer.close(error => error ? reject(error) : resolve()))
+          assert.equal(attachmentServer.address(), null)
+        } finally { await attachmentHttpPool.end() }
       }
     } finally {
       if (commandFlags.archive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED

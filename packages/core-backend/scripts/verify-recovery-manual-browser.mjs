@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // Called only by the owned synthetic database driver, while its production HTTP router is alive.
-export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit) {
+export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, kind = 'scalar') {
+  assert.ok(['scalar', 'attachment'].includes(kind))
   const target = new URL(backendOrigin)
   assert.equal(target.hostname, '127.0.0.1')
   assert.equal(target.protocol, 'http:')
@@ -31,7 +32,8 @@ const client = new MultitableApiClient({ fetchFn: (url, init={}) => fetch(url, {
 const wire = name => (...args) => client[name](...args);
 createApp({render:()=>h(RecoveryArchiveModal, {
 visible:true, sheetId:'no-genesis', sheetName:'Synthetic Projects', isZh:false,
-fields:[{id:'manual-source-field',name:'Synthetic'}], selectedRecordIds:[],
+fields:[{id:'manual-source-field',name:'Synthetic'},{id:'manual-attachment-field',name:'Synthetic files'}], selectedRecordIds:[],
+onExecuted:()=>{document.documentElement.dataset.archiveExecuted=String(Number(document.documentElement.dataset.archiveExecuted||0)+1)},
 captureArchive:wire('captureRecoveryArchive'),readCapture:wire('readRecoveryArchiveCapture'),
 listCatalog:wire('listRecoveryArchiveCatalog'),listJobs:wire('listRecoveryArchiveJobs'),
 previewArchive:wire('previewRecoveryArchive'),executeArchive:wire('executeRecoveryArchive'),
@@ -55,8 +57,15 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
     for (const width of [1440, 390]) {
       const page = await browser.newPage({ viewport: { width, height: 1000 } })
       const errors = []
+      const apiFailures = []
       const forbiddenWrites = []
       page.on('pageerror', error => errors.push(error.message))
+      page.on('requestfailed', request => {
+        if (new URL(request.url()).pathname.startsWith('/api/')) apiFailures.push('API_REQUEST_FAILED')
+      })
+      page.on('response', response => {
+        if (new URL(response.url()).pathname.startsWith('/api/') && !response.ok()) apiFailures.push(`API_STATUS_${response.status()}`)
+      })
       page.on('request', request => {
         if (request.method() !== 'GET' && /\/recovery-archive\/(execute|jobs)(?:\/|$)/.test(new URL(request.url()).pathname)) forbiddenWrites.push(request.url())
       })
@@ -112,16 +121,18 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       assert.equal(executed.data.resurrectedCount, 0)
       assert.equal(executed.data.deletedCount, 0)
       await page.locator('[data-test="archive-recovery-result"]').waitFor()
+      assert.equal(await page.locator('html').getAttribute('data-archive-executed'), '1')
       assert.equal(await execute.isDisabled(), true)
       assert.equal(forbiddenWrites.length, 1)
       assert.ok(new URL(forbiddenWrites[0]).pathname.endsWith('/recovery-archive/execute'))
       await verifyRestored()
       assert.deepEqual(errors, [])
+      assert.deepEqual(apiFailures, [])
       assert.equal(await page.locator('[role="dialog"]').evaluate(element => element.scrollWidth > element.clientWidth), false)
       await page.locator('[data-test="archive-recovery-result"]').scrollIntoViewIfNeeded()
-      await page.screenshot({ path: join(tmpdir(), `tm-manual-http-browser-${width}.png`), fullPage: true })
+      await page.screenshot({ path: join(tmpdir(), `tm-manual-http-browser-${kind}-${width}.png`), fullPage: true })
       await page.close()
-      console.log(`PASS: Chromium ${width} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request and database/history readback`)
+      console.log(`PASS: Chromium ${width} ${kind} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request, one refresh event and database/history readback`)
     }
   } catch (error) {
     for (const context of browser?.contexts() ?? []) {
