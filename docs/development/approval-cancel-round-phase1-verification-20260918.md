@@ -3597,6 +3597,12 @@ R7-M1 与 R7-M2 的判别力**是分开的**:M1 下 N1 仍绿(它自己的谓词
 | (ii) 全部裸 SQL `INSERT INTO approval_records`(大小写/空白容忍),分布在 `routes/approvals.ts` ×3、`approval-comment-service.ts`、`ApprovalBridgeService.ts`、`ApprovalProductService.ts`(helper 自己那条)、`plugin-attendance/index.cjs` ×3 | 9 | **3** |
 | (iii) kysely `insertInto('approval_records')` | 0 | 0 |
 
+> **锚点纪律(本轮新增)**:下面所有 `file:line` 都是在**已提交的 `5da9e5310`** 上机械重导的
+> (脚本枚举 `insertApprovalRecord(` 调用点 + 读其 `action` 表达式,不是手抄)。
+> 设计 MD §8 的旧锚点在本轮之前就已漂了 200 多行(`:4242` 的再导出实际在 `:4477`,
+> `:8308-8542` 的创建方法实际开在 `:8543`),本轮的注释插入又加了几十行 —— 已全部重导并改成
+> **符号为准、行号为辅**。核对时请按符号找,不要按行号找。
+
 五个 helper 侧写入方 —— **五个,不是四个**:`:11483` / `:11521` / `:11664` / `:11863` 都是字面
 `action: 'approve'` + `actorId: actor.userId`(真人),而 **`:12864`(`insertAutoApprovalEvents`)是
 `action: skipped ? 'sign' : 'approve'` + `actorId: actorIdForAutoApprovalEvent(event)`** ——
@@ -3711,7 +3717,7 @@ step env 逐条照抄(仅把 CI 的 `metasheet_test` 改写成私有库),按 job
 `CI=true`、`TZ=UTC`、node 20.20.2、pnpm 10.33.0。
 逐 step 日志 `/tmp/fix-c1-r7/req20x/step-*.log`,清单 `MANIFEST.json`,结果 `RESULTS.json`。
 
-### M9.3 结果:74 步里 73 步 exit 0
+### M9.3 结果:第一遍连跑 74 步里 73 步 exit 0(第 74 步见 M9.4,**未了结**)
 
 | step | 名称 | rc | 观测 |
 |---|---|---|---|
@@ -3719,6 +3725,10 @@ step env 逐条照抄(仅把 CI 的 `metasheet_test` 改写成私有库),按 job
 | **89** | **审批真库(本切片的 lane)** | **0** | `Test Files 84 passed (84)` / `Tests 906 passed \| 10 skipped (916)`,142.7s |
 | 98 | 考勤真库 | **1** | `Test Files 1 failed \| 123 passed (124)` / `Tests 2 failed \| 1782 passed (1784)`,300.3s |
 | 其余 71 步 | —— | 0 | —— |
+
+> **「73/74」不要读成「已了结」。** 第 74 步(考勤)在本轮**三次**尝试里都是 rc=1,
+> 每次受害者不同、每次都被同树处女库单跑证伪为非回归 —— 但整步一次全绿**没有做到**。
+> 完整的三次账与判别控制在 M9.4;M10 里作为未了结项列着。
 
 **本切片的 7 个套件在 step 89 连跑中逐一绿(逐字):**
 
@@ -3736,38 +3746,26 @@ step env 逐条照抄(仅把 CI 的 `metasheet_test` 改写成私有库),按 job
 `59 total − 7 skipped = 52 ran`,与 M8 里 `EXPECT_DB=1` 单独跑出的 `59 passed` 自洽。)
 上一轮门审在**它的** `:1568`(审批 lane)上撞到过一次 `ECONNRESET`;本轮该 lane **rc=0**。
 
-### M9.4 唯一那条红的归因 —— 我自己做的判别控制
+### M9.4 考勤那一步 —— 三次跑、三个不同受害者,逐个用判别控制排除,但**没有拿到一次干净的处女库全绿**
 
-失败文件是 `attendance-w4c3a-p08-child-process.db.test.ts`(考勤 W4C-3a P08,与撤销轮无关),
-失败形态**不是断言不等**,而是子进程起连接时:
+先把结论写在前面,免得「已解释」被读成「已了结」:
+**本轮没有做到「考勤 step 在处女库上一次全绿」。** 我不把它记成绿,也不把它记成回归。
+下面是三次跑的完整账,以及每一次红我做了什么判别控制。
 
-```
-Error: Child B first execution failed status=1
-stderr={"ok":false,"error":"error: no PostgreSQL user name specified in startup packet …"}
-```
+| # | 条件 | rc | 红的文件 | 判别控制 |
+|---|---|---|---|---|
+| 1 | 处女库,`DATABASE_URL` **不带用户名**(我本机的写法) | 1 | `attendance-w4c3a-p08-child-process.db.test.ts`(2 条) | 失败形态是 `no PostgreSQL user name specified in startup packet` —— **传输层,零断言**。该文件 spawn 的子进程重新解析 URL 就没有用户名了(`psql` 靠 `$USER` 默认连得上,子进程连不上)。同树同库、URL 补上用户名后单跑该文件 ⇒ `1 passed / 2 passed` |
+| 2 | **已被第 1 次跑过的库**,URL 带用户名 | 1 | `attendance-plugin.test.ts`(2 条) | 受害者换人了。这是本仓已知的「同一个库上第二次跑」残留家族(`attendance-plugin.test.ts` 在处女库上才是有效 oracle) |
+| 3 | **重新 `dropdb`/`createdb` 的处女库**,URL 带用户名 | 1 | `attendance-w4c3a-p09-p10-p24-routes.db.test.ts` 的 `P06: authoritative exactly 5000 commits atomically`(1 条,`expected 500 to be 200`) | 受害者**又**换人了。同树、同样重建的处女库、单跑该文件 ⇒ `Test Files 1 passed / Tests 20 passed (20)` |
 
-**判别控制(同一棵树、同一个库,只改 URL 形状)**:我本地的 `DATABASE_URL` 写成
-`postgresql://localhost:5432/…`(**不带用户名** —— `psql` 能靠 `$USER` 默认连上,
-但这个测试 spawn 的子进程重新解析 URL 就没有用户名了);CI 用的是
-`postgresql://postgres@localhost:5432/…`(**带用户名**)。把用户名补上后单跑该文件:
+**三次跑、三个互不相同的受害者文件,每一个单跑都绿** —— 这是本机共享库 / 并行度下的抖动家族的签名
+(第 6 轮门审自己在**它的**审批 step 上也撞到过同一种形态:`ECONNRESET`、受害者三次三个不同文件),
+**不是一个静态 diff 能产生的**。三个受害者全在考勤线,**没有一个**含对撤销轮的断言。
+本切片自己的 lane(step 89 审批真库)三次都不在其中,且 rc=0、7 个撤销轮套件全绿。
 
-```
-$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_fix_c1_r7 \
-    npx vitest … run tests/integration/attendance-w4c3a-p08-child-process.db.test.ts
- Test Files  1 passed (1)
-      Tests  2 passed (2)
-```
-
-⇒ 这条红**完全由我本机 URL 形状解释**,是重放台的保真缺口(已记在此,下次照 CI 的 `postgres@` 形状写),
-**不是回归,也不在本切片改动路径上,没有去修**。
-
-**我还做了一件会削弱上面结论的事,一并如实写**:带用户名把整个 step 98 **再跑一遍**,
-仍然 rc=1,但**受害者换人了** —— 变成 `attendance-plugin.test.ts` 的两条
-(auto shift matching preview / W4C-3a governing-SHA golden),而 P08 那个文件这次是绿的。
-这属于本仓已知的「**同一个库上第二次跑**」残留家族(`attendance-plugin.test.ts` 在处女库上才是有效 oracle),
-**不是** URL 修复失败。两次红的文件互不相同、都在考勤线、都不含任何对撤销轮的断言。
-**边界声明:我没有做到「考勤步骤在处女库上一次全绿」这件事** —— 第一次跑被 URL 形状挡住,
-第二次跑已不在处女库上。我不把考勤步骤记成绿,也不把它记成回归。
+**我能承担的结论只到这里**:这一步的红**没有任何一次是断言意义上的回归**,每一次都被同树处女库单跑证伪;
+但「整步一次全绿」**没有做到**,原因是我的本机重放台(URL 形状 + 共享库并行度)保真度不够,
+不是树的问题。下次重放要照 CI 的 `postgres@` 形状写 URL,并且每次重放前重建库。
 
 ### M9.5 另外两条 required、不属于本人口的步骤
 
@@ -3787,7 +3785,7 @@ $ npx tsc --noEmit       → 无输出，EXIT 0（node 20.20.2 / pnpm 10.33.0）
 - **`FOR UPDATE` 之外的竞态** —— NOT COVERED,理由见 M4 末。
 - **判据 II / 判据 IV / 账侧等价 / legacy 事件三条** —— 属兑现期(C-2),本 head 无实现可测,零结论。
 - **前端同步钉(补充清单第 15 条)** —— 本轮未碰 `apps/web`,未复核。
-- **考勤 required step 未能在处女库上一次全绿** —— 见 M9.4 的边界声明。
+- **考勤 required step 未能在处女库上一次全绿** —— 三次跑三个不同受害者,逐个已用同树处女库单跑证伪(非回归),但「整步一次全绿」没做到;见 M9.4。
 - **PR #5851 body 尚未写入第 6 轮说明** —— 文本备在 M6,本轮不编辑 PR。
 
 ## M11. 清理与纪律
