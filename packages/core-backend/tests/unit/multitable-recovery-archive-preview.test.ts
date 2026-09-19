@@ -420,13 +420,16 @@ describe('Time Machine recovery archive preview authority', () => {
   })
 
   it.each([
-    ['whole_sheet', false, 'unsupported_attachments'],
-    ['selected_records', false, 'unsupported_attachments'],
-    ['selected_fields', false, null],
-    ['whole_sheet', true, null],
-  ] as const)('reports attachment differences without broadening restore (%s, same=%s)', async (kind, same, blockedReason) => {
+    ['whole_sheet', false, 'unsupported_attachments', false],
+    ['selected_records', false, 'unsupported_attachments', false],
+    ['selected_fields', false, null, false],
+    ['whole_sheet', true, null, false],
+    ['whole_sheet', false, 'unsupported_attachments', true],
+  ] as const)('reports attachment differences without broadening restore (%s, same=%s, %s, denied=%s)', async (kind, same, blockedReason, denied) => {
     dependencies.readRecoveryArchiveCompleteSectionState.mockResolvedValue({
       records: new Map([[RECORD_ID, { ...targetRecords.get(RECORD_ID)!, data: { [FIELD_ID]: 'archived', files: ['att-old'] } }]]), links: [],
+      attachments_index: [{ entity_key: 'attachment/att-old', payload: {
+        attachment_id: 'att-old', record_id: RECORD_ID, field_id: 'files', deleted: false } }],
     })
     dependencies.loadLiveByIdForPreview.mockResolvedValue({ ok: true,
       liveById: new Map([[RECORD_ID, { data: { [FIELD_ID]: 'live', files: [same ? 'att-old' : 'att-new'] }, version: 7 }]]),
@@ -444,10 +447,24 @@ describe('Time Machine recovery archive preview authority', () => {
     const fixture = queryFixture()
     const scope = kind === 'whole_sheet' ? { kind } : kind === 'selected_fields'
       ? { kind, recordIds: [RECORD_ID], fieldIds: [FIELD_ID] } : { kind, recordIds: [RECORD_ID] }
-    const result = await previewRecoveryArchive(makeTransaction(fixture.query, { inTransaction: false }), fixture.query, runtime, makeInput({ scope }))
+    const input = makeInput({ scope, ...(denied ? {
+      evaluatePlanAuthorization: vi.fn<RecoveryArchivePreviewInput['evaluatePlanAuthorization']>(async (_query, context) =>
+        !context.revertWrites.some(write => write.changedFieldIds.includes('files'))),
+    } : {}) })
+    if (denied) {
+      await expect(previewRecoveryArchive(makeTransaction(fixture.query, { inTransaction: false }), fixture.query, runtime, input))
+        .rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_PREVIEW_AUTHORITY_DENIED' })
+      expect(dependencies.prepareRecoveryArchiveRestorePlan).not.toHaveBeenCalled()
+      return
+    }
+    const result = await previewRecoveryArchive(makeTransaction(fixture.query, { inTransaction: false }), fixture.query, runtime, input)
     expect(result.blockedReason).toBe(blockedReason)
     if (blockedReason) {
       expect(result.executable).toBe(false)
+      expect(result.summary.reverts).toContainEqual({ recordId: RECORD_ID, fieldIds: ['files'] })
+      expect(input.evaluatePlanAuthorization).toHaveBeenLastCalledWith(fixture.query, expect.objectContaining({
+        revertWrites: [expect.objectContaining({ recordId: RECORD_ID, changedFieldIds: ['files'], patch: { files: ['att-old'] } })],
+      }))
       expect(result.previewIdentity).toBeNull()
     }
   })

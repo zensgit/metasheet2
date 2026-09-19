@@ -51,6 +51,15 @@ export interface RecoveryArchiveSyncPlanInput {
   keyId: string
   selectedRecordIds: readonly string[]
   selectedFieldIds: readonly string[]
+  /** Server-derived locked metadata fingerprints; absent preserves the scalar/link v1 identity. */
+  attachmentMetadata?: readonly RecoveryArchiveAttachmentMetadataBinding[]
+}
+
+export interface RecoveryArchiveAttachmentMetadataBinding {
+  readonly attachmentId: string
+  readonly recordId: string
+  readonly fieldId: string
+  readonly metadataHash: string
 }
 
 export interface RecoveryArchiveSyncPlan extends RecoveryArchiveSyncPlanInput {
@@ -58,7 +67,9 @@ export interface RecoveryArchiveSyncPlan extends RecoveryArchiveSyncPlanInput {
 }
 
 export function compileRecoveryArchiveSyncPlan(input: unknown): RecoveryArchiveSyncPlan {
-  const source = exactRecord(input, INPUT_KEYS)
+  const hasAttachments = input !== null && typeof input === 'object'
+    && Object.hasOwn(input, 'attachmentMetadata')
+  const source = exactRecord(input, hasAttachments ? [...INPUT_KEYS, 'attachmentMetadata'] : INPUT_KEYS)
   const plan = {
     workspaceId: opaque(source.workspaceId),
     baseId: opaque(source.baseId),
@@ -73,6 +84,7 @@ export function compileRecoveryArchiveSyncPlan(input: unknown): RecoveryArchiveS
     keyId: opaque(source.keyId),
     selectedRecordIds: opaqueIdSet(source.selectedRecordIds),
     selectedFieldIds: opaqueIdSet(source.selectedFieldIds),
+    ...(hasAttachments ? { attachmentMetadata: attachmentMetadata(source.attachmentMetadata) } : {}),
   }
   assertSelectionShape(plan)
   return Object.freeze({
@@ -108,7 +120,7 @@ export function hashRecoveryArchiveSyncPlan(
 ): string {
   return createHash('sha256')
     .update(JSON.stringify([
-      'recovery-archive-sync-plan-v1',
+      plan.attachmentMetadata === undefined ? 'recovery-archive-sync-plan-v1' : 'recovery-archive-sync-plan-v2',
       plan.workspaceId,
       plan.baseId,
       plan.sheetId,
@@ -122,11 +134,16 @@ export function hashRecoveryArchiveSyncPlan(
       plan.keyId,
       plan.selectedRecordIds,
       plan.selectedFieldIds,
+      ...(plan.attachmentMetadata === undefined ? [] : [plan.attachmentMetadata]),
     ]))
     .digest('hex')
 }
 
 function assertSelectionShape(plan: Omit<RecoveryArchiveSyncPlan, 'planHash'>): void {
+  for (const binding of plan.attachmentMetadata ?? []) {
+    if ((plan.scopeKind !== 'whole_sheet' && !plan.selectedRecordIds.includes(binding.recordId))
+      || (plan.scopeKind === 'selected_fields' && !plan.selectedFieldIds.includes(binding.fieldId))) invalid()
+  }
   if (plan.scopeKind === 'whole_sheet') {
     if (plan.selectedRecordIds.length !== 0 || plan.selectedFieldIds.length !== 0) invalid()
     return
@@ -148,6 +165,18 @@ function assertSelectionShape(plan: Omit<RecoveryArchiveSyncPlan, 'planHash'>): 
   ) {
     invalid()
   }
+}
+
+function attachmentMetadata(value: unknown): readonly RecoveryArchiveAttachmentMetadataBinding[] {
+  if (!Array.isArray(value)) invalid()
+  const entries = value.map(item => {
+    const row = exactRecord(item, ['attachmentId', 'recordId', 'fieldId', 'metadataHash'])
+    return Object.freeze({ attachmentId: opaque(row.attachmentId), recordId: opaque(row.recordId),
+      fieldId: opaque(row.fieldId), metadataHash: sha(row.metadataHash) })
+  })
+  if (new Set(entries.map(entry => entry.attachmentId)).size !== entries.length) invalid()
+  entries.sort((a, b) => a.attachmentId < b.attachmentId ? -1 : a.attachmentId > b.attachmentId ? 1 : 0)
+  return Object.freeze(entries)
 }
 
 function exactRecord(value: unknown, expectedKeys: readonly string[]): Record<string, unknown> {
