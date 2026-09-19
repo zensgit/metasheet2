@@ -28,7 +28,7 @@ export interface RecoveryArchiveSyncRestoreInput {
   /** Owner-policy value supplied by the server runtime, never by the HTTP request. */
   readonly auditedReplayHorizonMs: number
   /** Server-owned isolated preparation port; public runtime stays unregistered until cleanup acceptance. */
-  readonly attachmentStorage?: Pick<StorageProvider, 'uploadByKey' | 'readContentAddressed' | 'reserveRecoveryAttachment'>
+  readonly attachmentStorage?: Pick<StorageProvider, 'uploadByKey' | 'readRecoveryAttachment' | 'reserveRecoveryAttachment'>
 }
 
 /**

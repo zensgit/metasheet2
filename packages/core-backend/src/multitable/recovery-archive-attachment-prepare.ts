@@ -26,7 +26,7 @@ export async function prepareArchiveAttachmentBatch(input: {
   selectedRecordIds: readonly string[]
   selectedFieldIds: readonly string[]
   claims: ExactArchiveRecoveryIdentityClaims
-  storage: Pick<StorageProvider, 'uploadByKey' | 'readContentAddressed' | 'reserveRecoveryAttachment'>
+  storage: Pick<StorageProvider, 'uploadByKey' | 'readRecoveryAttachment' | 'reserveRecoveryAttachment'>
 }): Promise<RecoveryArchiveAttachmentBatch | undefined> {
   const { transaction, apply, archive, state, claims, storage } = input
   const tokenHash = createHash('sha256').update(apply.token).digest('hex')

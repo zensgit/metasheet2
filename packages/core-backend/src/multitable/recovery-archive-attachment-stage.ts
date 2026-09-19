@@ -32,7 +32,7 @@ export async function stageRecoveryArchiveAttachment(input: {
   transactionDepth: RecoveryArchiveTransactionDepthProbe
   authorize: () => Promise<boolean>
   ledger: ArchiveAttachmentStageLedger
-  storage: Pick<StorageProvider, 'uploadByKey' | 'readContentAddressed' | 'reserveRecoveryAttachment'>
+  storage: Pick<StorageProvider, 'uploadByKey' | 'readRecoveryAttachment' | 'reserveRecoveryAttachment'>
 }): Promise<Readonly<ArchiveAttachmentStageIdentity & { objectId: string; storageKey: string }>> {
   const original = { generationId: input.original.generationId, workspaceId: input.original.workspaceId,
     baseId: input.original.baseId, sheetId: input.original.sheetId,
@@ -40,7 +40,7 @@ export async function stageRecoveryArchiveAttachment(input: {
   const attachmentId = input.attachmentId
   const { storage, ledger, transactionDepth, authorize, state: archiveState } = input
   outsideTransaction(transactionDepth)
-  if (!(await authorize()) || typeof storage.readContentAddressed !== 'function'
+  if (!(await authorize()) || typeof storage.readRecoveryAttachment !== 'function'
     || typeof storage.reserveRecoveryAttachment !== 'function') refused()
   outsideTransaction(transactionDepth)
   const source = readRecoveryArchiveAttachmentSource(archiveState, attachmentId, original)
@@ -70,7 +70,7 @@ export async function stageRecoveryArchiveAttachment(input: {
       }
     }
     outsideTransaction(transactionDepth)
-    const read = await storage.readContentAddressed(storageKey)
+    const read = await storage.readRecoveryAttachment(storageKey, ownershipKey)
     if (!Buffer.isBuffer(read.bytes) || read.immutableVersion !== `sha256:${identity.plaintextSha256}`
       || read.contentSha256 !== identity.plaintextSha256 || String(read.sizeBytes) !== identity.sizeBytes
       || String(read.bytes.length) !== identity.sizeBytes

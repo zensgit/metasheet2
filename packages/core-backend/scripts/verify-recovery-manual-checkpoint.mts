@@ -2071,9 +2071,9 @@ try {
             uploadAttempts++
             if (refuseUpload && uploadAttempts === 2) throw new Error('SYNTHETIC_RESTORE_UPLOAD_FAILED')
             return sourceStorage.uploadByKey(...args)
-          }, readContentAddressed: async (...args) => {
+          }, readRecoveryAttachment: async (...args) => {
             assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
-            return sourceStorage.readContentAddressed(...args)
+            return sourceStorage.readRecoveryAttachment(...args)
           } },
         }
         assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'forbidden' })

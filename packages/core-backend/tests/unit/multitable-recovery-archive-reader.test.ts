@@ -10,7 +10,12 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof fs>()
+  return { ...actual, open: vi.fn(actual.open) }
+})
 
 import { authenticateRecoveryArchiveSealedSnapshotManifest } from '../../src/multitable/recovery-archive-authenticated-manifest'
 import {
@@ -74,6 +79,7 @@ const SOURCE_VECTOR_HASH = 'b'.repeat(64)
 const temporaryRoots: string[] = []
 
 afterEach(async () => {
+  vi.mocked(fs.open).mockImplementation((await vi.importActual<typeof fs>('node:fs/promises')).open)
   await Promise.all(temporaryRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })))
 })
 
@@ -500,6 +506,31 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test.each(['write', 'sync'] as const)('interrupted ownership marker %s leaves the stable identity retryable', async mode => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-marker-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root)
+    const bytes = Buffer.from('synthetic-marker-retry')
+    const key = `${randomUUID()}/sha256-${digest(bytes)}`
+    const owner = digest(bytes)
+    const originalOpen = (await vi.importActual<typeof fs>('node:fs/promises')).open
+    const failure = vi.mocked(fs.open).mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args)
+      if (String(args[0]).endsWith('/.recovery-restore-owner')) {
+        if (mode === 'write') handle.writeFile = async () => { throw new Error('SYNTHETIC_MARKER_WRITE') }
+        else handle.sync = async () => { throw new Error('SYNTHETIC_MARKER_SYNC') }
+      }
+      return handle
+    })
+    try {
+      await expect(provider.reserveRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+      expect(await fs.readdir(root)).toEqual([])
+    } finally { failure.mockImplementation(originalOpen) }
+    await new LocalStorageProvider(root).reserveRecoveryAttachment(key, owner)
+    await provider.uploadByKey(key, bytes)
+    expect((await provider.readRecoveryAttachment(key, owner)).bytes).toEqual(bytes)
+  })
+
   test.each(['before-open', 'open-descriptor', 'uploaded'] as const)('owned tombstone blocks a late writer: %s', async mode => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-owned-'))
     temporaryRoots.push(root)
@@ -544,7 +575,7 @@ describe('recovery-archive D4 complete-section reader', () => {
     expect(await provider.downloadByKey(key)).toEqual(bytes)
   })
 
-  test.each(['success', 'crash-retry', 'verified-retry', 'collision', 'unowned-matching', 'unsupported', 'denied', 'transaction', 'receipt-failure', 'false-readback', 'mutating-upload'] as const)(
+  test.each(['success', 'crash-retry', 'verified-retry', 'collision', 'unowned-matching', 'unsupported', 'denied', 'transaction', 'receipt-failure', 'false-readback', 'mutating-upload', 'durability-failure'] as const)(
     'stages authenticated attachment bytes with owned identity: %s', async (mode) => {
       const binary = Buffer.from([0, 255, 128, 1])
       const durable = await buildDurableArchive({ attachments: [
@@ -569,6 +600,15 @@ describe('recovery-archive D4 complete-section reader', () => {
       const storageKey = `${objectId}/sha256-${digest(binary)}`
       const ownershipKey = digest(Buffer.from('synthetic-owner'))
       const events: string[] = []
+      let durabilityFaultReached = false
+      const originalOpen = (await vi.importActual<typeof fs>('node:fs/promises')).open
+      const failure = mode === 'durability-failure' ? vi.mocked(fs.open).mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args)
+        if (String(args[0]).endsWith(`/${storageKey}`) && typeof args[1] === 'number') {
+          handle.sync = async () => { durabilityFaultReached = true; throw new Error('SYNTHETIC_PAYLOAD_SYNC') }
+        }
+        return handle
+      }) : undefined
       let depth = 0
       if (mode === 'crash-retry' || mode === 'verified-retry' || mode === 'collision' || mode === 'unowned-matching') {
         if (mode === 'crash-retry' || mode === 'verified-retry') await service.reserveRecoveryAttachment(storageKey, ownershipKey)
@@ -600,9 +640,9 @@ describe('recovery-archive D4 complete-section reader', () => {
             if (mode === 'mutating-upload') bytes.fill(0)
             await service.uploadByKey(key, bytes, mediaType)
           },
-          readContentAddressed: async key => {
+          readRecoveryAttachment: async (key, owner) => {
             events.push('read')
-            const result = await StorageServiceImpl.createLocalService(root, '/synthetic-files').readContentAddressed(key)
+            const result = await StorageServiceImpl.createLocalService(root, '/synthetic-files').readRecoveryAttachment(key, owner)
             if (mode === 'false-readback') result.bytes = Buffer.alloc(binary.length)
             return result
           },
@@ -621,6 +661,8 @@ describe('recovery-archive D4 complete-section reader', () => {
         if (mode === 'unowned-matching') expect(await service.downloadByKey(storageKey)).toEqual(binary)
         if (mode === 'receipt-failure') expect(await service.downloadByKey(storageKey)).toEqual(binary)
       }
+      if (mode === 'durability-failure') expect(durabilityFaultReached).toBe(true)
+      failure?.mockImplementation(originalOpen)
     },
   )
 

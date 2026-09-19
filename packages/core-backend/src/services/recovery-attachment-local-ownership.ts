@@ -21,6 +21,7 @@ async function syncDirectory(directory: string): Promise<void> {
 
 async function assertOwned(target: Awaited<ReturnType<typeof location>>): Promise<void> {
   if (!(await fs.lstat(target.directory)).isDirectory()) refused()
+  if (!(await fs.lstat(target.marker)).isFile()) refused()
   const handle = await fs.open(target.marker, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const stat = await handle.stat()
@@ -37,20 +38,50 @@ function hasCode(error: unknown, code: string): boolean {
 export async function reserveLocalRecoveryAttachment(root: string, key: string, owner: string): Promise<void> {
   try {
     const target = await location(root, key, owner)
-    let created = false
-    try { await fs.mkdir(target.directory); created = true } catch (error) {
-      if (!hasCode(error, 'EEXIST')) throw error
+    let exists = true
+    try { await fs.lstat(target.directory) } catch (error) {
+      if (!hasCode(error, 'ENOENT')) throw error
+      exists = false
     }
-    if (created) {
-      const handle = await fs.open(target.marker, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-      try { await handle.writeFile(target.proof); await handle.sync() } finally { await handle.close() }
-      await syncDirectory(target.directory)
-      await syncDirectory(target.base)
+    if (!exists) {
+      const temporary = await fs.mkdtemp(path.join(target.base, '.recovery-reserve-'))
+      const marker = path.join(temporary, markerName)
+      try {
+        const handle = await fs.open(marker, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+        try { await handle.writeFile(target.proof); await handle.sync() } finally { await handle.close() }
+        await syncDirectory(temporary)
+        try { await fs.rename(temporary, target.directory) } catch (error) {
+          if (!hasCode(error, 'EEXIST') && !hasCode(error, 'ENOTEMPTY')) throw error
+        }
+      } finally {
+        // Remove only our unpublished marker and empty directory, never recursively delete contents.
+        await fs.unlink(marker).catch(error => { if (!hasCode(error, 'ENOENT')) throw error })
+        await fs.rmdir(temporary).catch(error => { if (!hasCode(error, 'ENOENT')) throw error })
+      }
     }
     await assertOwned(target)
+    await syncDirectory(target.directory)
+    await syncDirectory(target.base)
     try { if (!(await fs.lstat(target.payload)).isFile()) refused() } catch (error) {
       if (!hasCode(error, 'ENOENT')) throw error
     }
+  } catch { refused() }
+}
+
+/** Same descriptor supplies readback and fsync before the database may mark the object verified. */
+export async function readLocalRecoveryAttachment(root: string, key: string, owner: string): Promise<Buffer> {
+  try {
+    const target = await location(root, key, owner)
+    await assertOwned(target)
+    if (!(await fs.lstat(target.payload)).isFile()) refused()
+    const handle = await fs.open(target.payload, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      if (!(await handle.stat()).isFile()) refused()
+      const bytes = await handle.readFile()
+      await handle.sync()
+      await syncDirectory(target.directory)
+      return bytes
+    } finally { await handle.close() }
   } catch { refused() }
 }
 
