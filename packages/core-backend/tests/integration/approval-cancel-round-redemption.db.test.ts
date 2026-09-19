@@ -3052,8 +3052,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * (`feedback_fixture_shape_must_match_named_scenario`). It is, read end to end and closed-world:
    *   - the contract:      `CancelRoundCancelledEventDeliveryV1` is `(…) => void`
    *                        (`attendance-cancellation-execution-port.ts:306-309`) — not `Promise<void>`.
-   *   - the ONLY binder:   `plugins/plugin-attendance/index.cjs:35831-35835` binds the non-async
-   *                        arrow `emitRequestCancelledEventForOutcomeV1` (`:25026-25036`). Census,
+   *   - the ONLY binder:   `plugins/plugin-attendance/index.cjs:35862-35866` binds the non-async
+   *                        arrow `emitRequestCancelledEventForOutcomeV1` (`:25057-25067`). Census,
    *                        repo-wide and closed-world (`grep -rn` over packages/plugins/apps/scripts,
    *                        minus node_modules and tests) ⇒ 5 hits: the registry definition
    *                        (`…execution-port.ts:314`), the unregister definition (`:324`, a substring
@@ -3067,11 +3067,17 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * ⇒ a listener bug surfaces at `deliverCancelRoundCancelledEventPostCommit`'s `try` as a
    *   SYNCHRONOUS throw, which is exactly what the first case injects.
    *
-   * ── ⚠️ THE RAW `file:line` REFS IN THIS BLOCK ARE PINNED TO `c9cad2514`. ─────────────────────
-   * C-2 is scheduled to be `rebase --onto`'d to a new C-1 by the merge train, which moves every
-   * line number below. This branch already litigated this once (`acfab57e7`, 「convert stale
-   * ApprovalProductService.ts line refs to symbol anchors」), so the anchors are named here too and
-   * a re-gate should follow the SYMBOL, not the number:
+   * ── ⚠️ THE RAW `file:line` REFS IN THIS BLOCK ARE PINNED TO `4ded8c2bb` (POST-REBASE). ───────
+   * The hazard this warning was written for ALREADY FIRED, mid-task: the merge train
+   * `rebase --onto`'d C-2 onto the new C-1 while this slice was being written, and every number
+   * moved (`deliver…` :12688 → :12761, the latch :19398 → :19425, and so on). All 79 refs in this
+   * block and in the MD were re-anchored and then machine-verified line by line (35/35 anchors
+   * assert the expected token is on the stated line). The refs pinned to the PRE-rebase
+   * `c9cad2514` are RETRACTED — do not use that commit's numbers.
+   *
+   * It will fire again on the next rebase. This branch litigated the same thing once before
+   * (`acfab57e7`, 「convert stale ApprovalProductService.ts line refs to symbol anchors」), so the
+   * anchors are named here as well and a re-gate should follow the SYMBOL, not the number:
    *   `deliverCancelRoundCancelledEventPostCommit` (the delivery + its try/catch) ·
    *   `supersedeCardDeliveriesPostCommit` / `emitApprovalTaskCreatedEventsPostCommit` (the two
    *   upstream post-commit steps) · the `actorCanAct` authorization throw · the
@@ -3080,7 +3086,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    *
    * ── WHAT THESE CASES DELIBERATELY DO NOT DO: change production. ──────────────────────────────
    * owner's remedial clause is conditional — 「若通知抛错能让已提交的取消返回失败 … 这是缺陷」. It does
-   * NOT fire at this head: the delivery is already wrapped at `ApprovalProductService.ts:13406-13413`
+   * NOT fire at this head: the delivery is already wrapped at `ApprovalProductService.ts:13479-13486`
    * and the first case MEASURES that (200, not 500). What was missing was the evidence, which is
    * what this block adds. The residual exposure the gate found — an UPSTREAM post-commit step
    * escaping into the shared outer `catch`, which skips the delivery and 500s an already-committed
@@ -3103,7 +3109,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   ): Promise<string> {
     // A LIVE lot: `status='active'` and an `expires_at` in the FUTURE, so production's own expiry
     // predicate — `(expires_at IS NOT NULL AND expires_at <= now())`, the one
-    // `reverseLeaveBalanceDeduction` reads at `index.cjs:19403` — answers false and the §3a
+    // `reverseLeaveBalanceDeduction` reads at `index.cjs:19430` — answers false and the §3a
     // non-resurrection branch is NOT the branch under test here.
     const lot = await pool().query<{ id: string }>(
       `INSERT INTO attendance_leave_balances
@@ -3225,8 +3231,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * the focus gate's §4.2 caught exactly this over-read once already), and CORRECTED against what
    * the run actually measured rather than against what was predicted. The retry below is refused
    * with **403 `APPROVAL_ASSIGNMENT_REQUIRED`** at `dispatchAction`'s AUTHORIZATION gate
-   * (`ApprovalProductService.ts:10938-10940`) — NOT with 409 at the terminal-status guard
-   * (`:11583-11589`), which was the predicted answer and is wrong: the redemption's terminal advance
+   * (`ApprovalProductService.ts:11011-11013`) — NOT with 409 at the terminal-status guard
+   * (`:11656-11662`), which was the predicted answer and is wrong: the redemption's terminal advance
    * deactivates the round instance's seats, so `actorCanAct` is already false by the time the status
    * guard would be reached. The seat state is asserted below so that ordering is a measured fact
    * and not a story. The two guards stand in series, and M-PC2/M-PC3 below walk the ladder.
@@ -3354,10 +3360,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * P3-1, the RESIDUAL half the gate could only disclose: an UPSTREAM post-commit step escapes.
    *
    * THE MECHANISM. `dispatchAction`'s post-commit region is
-   * `:12667 COMMIT` → `:12668 emitApprovalTaskCreatedEventsPostCommit` → `:12681 supersedeCardDeliveriesPostCommit`
-   * → `:12688 deliverCancelRoundCancelledEventPostCommit`, and the whole region shares the method's
-   * ONE outer `catch` (`:12699`). Both upstream calls swallow their own errors today
-   * (`:13301-13302` / `:13359-13360`), so 「the announcement happens」 rests on a property of two unrelated
+   * `:12740 COMMIT` → `:12741 emitApprovalTaskCreatedEventsPostCommit` → `:12754 supersedeCardDeliveriesPostCommit`
+   * → `:12761 deliverCancelRoundCancelledEventPostCommit`, and the whole region shares the method's
+   * ONE outer `catch` (`:12772`). Both upstream calls swallow their own errors today
+   * (`:13374-13375` / `:13359-13360`), so 「the announcement happens」 rests on a property of two unrelated
    * methods rather than on anything local. The gate measured the consequence with a confounded
    * probe and recorded it as P3, disclosure only. This case converts it into an executed,
    * instance-scoped assertion.
@@ -3457,7 +3463,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
           events: [{ event_type: 'deduct', delta_minutes: -120 }, { event_type: 'reverse', delta_minutes: 120 }],
           sealRows: '1',
         })
-        // ⚠️ TRIPWIRE: the announcement was SKIPPED — `:12688` sits after the step that escaped.
+        // ⚠️ TRIPWIRE: the announcement was SKIPPED — `:12761` sits after the step that escaped.
         expect(cancelledEvents.forRequest(attached!.requestId).length).toBe(0)
 
         // ── THE LOAD-BEARING HALF (c). The 500 above is precisely what induces a client retry.
@@ -3495,36 +3501,36 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * than it adds): its replay scenario measured `kind='replay'`, which means the boundary's
    * `attendanceResultOperationPreflightV1` short-circuited at
    * `w4c3b-request-operation-boundary.ts:870-874` BEFORE the adapter ran. So the evidence covered
-   * the OUTER preflight gate; the inner latch at `plugins/plugin-attendance/index.cjs:19394-19398`
+   * the OUTER preflight gate; the inner latch at `plugins/plugin-attendance/index.cjs:19394-19425`
    * had ZERO executions. owner: 「若要声称余额冲销自身幂等,须让调用真正进入内层」.
    *
    * HOW THIS CASE GETS INSIDE. Not by calling the helper directly. The request is redeemed through
    * the ordinary production path — HTTP approve → `dispatchAction` → `executeInExternalTransaction`
-   * → the real adapter → `:35303` `if (approvedLeave)` → `reverseLeaveBalanceDeduction` — on a
+   * → the real adapter → `:35334` `if (approvedLeave)` → `reverseLeaveBalanceDeduction` — on a
    * round whose operation id has never been sealed, so the outer preflight does NOT short-circuit
    * and the adapter really runs. What is arranged instead is the LEDGER: a `reverse` row for this
-   * `source_id` already exists when the helper's first statement reads it (`:19393-19397`).
+   * `source_id` already exists when the helper's first statement reads it (`:19420-19424`).
    *
    * ⚠️ THE DECLARED SCOPE, precisely (owner: 「按声明范围处理」). What today's SINGLE call site
    * cannot produce is not the partial reverse — the helper itself writes one whenever
-   * `headroom < deducted` (`:19427-19430`) — it is *a `reverse` row for source_id X while request X
-   * is still `approved`*, because `:35288-35296` flips the request to `cancelled` in the SAME transaction
-   * as `:35303`'s refund, and `grep -n "'reverse'" plugins/plugin-attendance/index.cjs` returns
-   * exactly three lines — the doc comment at `:19388`, the latch's own read at `:19395`, and the
-   * helper's single `INSERT` at `:19439` — i.e. ONE writer, which is this helper itself. So this case proves: THE LATCH IS EXECUTED THROUGH THE
+   * `headroom < deducted` (`:19454-19457`) — it is *a `reverse` row for source_id X while request X
+   * is still `approved`*, because `:35319-35327` flips the request to `cancelled` in the SAME transaction
+   * as `:35334`'s refund, and `grep -n "'reverse'" plugins/plugin-attendance/index.cjs` returns
+   * exactly three lines — the doc comment at `:19415`, the latch's own read at `:19422`, and the
+   * helper's single `INSERT` at `:19466` — i.e. ONE writer, which is this helper itself. So this case proves: THE LATCH IS EXECUTED THROUGH THE
    * PRODUCTION CALL PATH AND IS LOAD-BEARING FOR THE LEDGER STATE IT SEES. It does NOT claim that
    * state arises in production today — the outer preflight is what stands between production and
    * this line, and that is the honest reading of 「余额冲销自身幂等」 at this head.
    *
    * WHY THE FIXTURE HAS HEADROOM, and why that is the whole point. amount 480 / remaining 420 with
    * a prior `reverse +60` leaves 60 minutes of headroom against a `deduct −120`. Without the latch
-   * the scan at `:19400-19409` finds that deduct row, computes `restore = min(120, 60) = 60`, and
+   * the scan at `:19427-19436` finds that deduct row, computes `restore = min(120, 60) = 60`, and
    * refunds a SECOND time. A fixture with no headroom (remaining already back at `amount_minutes`)
    * would make `restore <= 0` and `continue` — the case would pass with the latch DELETED, i.e. it
    * would be a test with no discriminating power (`feedback_ineffective_mutation_looks_like_a_useless_test`).
    */
   it(
-    'P3-2 / 内层幂等 (index.cjs:19394-19398): with a `reverse` already on the ledger for this ' +
+    'P3-2 / 内层幂等 (index.cjs:19394-19425): with a `reverse` already on the ledger for this ' +
       'source_id, the redemption enters `reverseLeaveBalanceDeduction` through the real adapter and ' +
       'the latch refunds NOTHING a second time — zero balance change, no second ledger row, and ' +
       '`alreadyReversed: true` on both carriers (M-INNER: delete the latch ⇒ a second +60 ⇒ red)',
@@ -3594,7 +3600,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       ])
 
       // ── THE LATCH'S OWN ANSWER, on both carriers, pinned as whole objects. `alreadyReversed: true`
-      //    is the value ONLY `:19398` can produce — the scan branch at `:19445` always answers
+      //    is the value ONLY `:19425` can produce — the scan branch at `:19472` always answers
       //    `alreadyReversed: false` — so this is the field that says the inner gate, not the outer
       //    preflight, is what produced these zeros.
       const roundIdRow = await pool().query<{ id: string }>(
