@@ -4,6 +4,7 @@ import { lstat, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { Client, Pool } from 'pg'
 import { CompiledQuery, Kysely, PostgresDialect, sql } from 'kysely'
 
@@ -29,6 +30,14 @@ assert.equal(dirname(dirname(pgdata)), await realpath(tmpdir()))
 const connection = { host: '127.0.0.1', port: Number(url.port), user: 'tm_manual' }
 const database = `tm_attachment_stage_${randomUUID().replaceAll('-', '')}`
 const admin = new Client({ ...connection, database: 'postgres' })
+async function awaitOwnedBackendExit(attempts = 101): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const count = (await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n
+    if (count === 0) return
+    if (attempt + 1 < attempts) await sleep(50)
+  }
+  throw new Error('ATTACHMENT_STAGE_BACKEND_DRAIN_TIMEOUT')
+}
 let created = false
 let db: Kysely<unknown> | undefined
 const storageRoot = await mkdtemp(join(await realpath(tmpdir()), 'tm-attachment-stage-storage-'))
@@ -393,9 +402,22 @@ try {
   await assert.rejects(ledger.verified(first.objectId, identity))
   assert.equal((await sql<{ n: number }>`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages`.execute(db)).rows[0]?.n, 7)
   console.log('PASS: stage ledger replay, empty rollback, drift, concurrency, identity conflict, authority and nonempty rollback')
+  await db.destroy()
+  db = undefined
+  await awaitOwnedBackendExit()
+  const held = new Client({ ...connection, database })
+  try {
+    await held.connect()
+    await assert.rejects(awaitOwnedBackendExit(2), { message: 'ATTACHMENT_STAGE_BACKEND_DRAIN_TIMEOUT' })
+  } finally {
+    await held.end()
+  }
+  console.log('PASS: backend drain refuses a held connection without terminating it')
 } finally {
   await db?.destroy()
   if (created) {
+    // Pool.end() can resolve before PostgreSQL observes every client disconnect.
+    await awaitOwnedBackendExit()
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
     await admin.query(`DROP DATABASE "${database}"`)
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_database WHERE datname=$1', [database])).rows[0].n, 0)
