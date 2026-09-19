@@ -75,9 +75,7 @@ export function projectArchiveAttachmentCells(
   const result = new Map<string, ExactAnchorRevertWriteIntent>()
   for (const write of writes) {
     if (result.has(write.recordId)) invalid()
-    result.set(write.recordId, { ...write, changedFieldIds: [...write.changedFieldIds],
-      patch: { ...write.patch }, projectedData: { ...write.projectedData },
-      linkUpdates: write.linkUpdates.map(link => ({ ...link, targetIds: [...link.targetIds] })) })
+    result.set(write.recordId, detached(write))
   }
   const seen = new Set<string>()
   for (const cell of cells) {
@@ -91,7 +89,7 @@ export function projectArchiveAttachmentCells(
       || JSON.stringify(referenceIds(row.data[cell.fieldId])) !== JSON.stringify(before)
       || JSON.stringify(before) === JSON.stringify(target)) invalid()
     const write = result.get(cell.recordId) ?? { recordId: cell.recordId, liveVersion: row.version,
-      changedFieldIds: [], patch: {}, projectedData: { ...row.data }, linkUpdates: [] }
+      changedFieldIds: [], patch: {}, projectedData: detached(row.data), linkUpdates: [] }
     if (write.liveVersion !== row.version || write.changedFieldIds.includes(cell.fieldId)
       || Object.hasOwn(write.patch, cell.fieldId)) invalid()
     write.changedFieldIds.push(cell.fieldId)
@@ -100,6 +98,10 @@ export function projectArchiveAttachmentCells(
     result.set(cell.recordId, write)
   }
   return [...result.values()]
+}
+
+function detached<T>(value: T): T {
+  try { return structuredClone(value) } catch { invalid() }
 }
 
 function selection(ids: readonly string[] | undefined): ReadonlySet<string> | undefined {

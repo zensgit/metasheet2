@@ -58,6 +58,8 @@ import { buildRecoveryArchiveSnapshotPlan } from '../../src/multitable/recovery-
 import { createLocalCustodyBackup, createLocalCustodySession, type LocalArchiveCustodyAdmission } from '../../src/multitable/recovery-local-custody'
 import { createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
 import { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } from '../../src/multitable/recovery-archive-file-store'
+import { stageRecoveryArchiveAttachment } from '../../src/multitable/recovery-archive-attachment-stage'
+import { StorageServiceImpl } from '../../src/services/StorageService'
 
 const SENTINEL = 'reader-sensitive-sentinel'
 const KEY_ID = 'kms-key-0001'
@@ -498,6 +500,82 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
+  test.each(['success', 'crash-retry', 'verified-retry', 'collision', 'denied', 'transaction', 'receipt-failure', 'false-readback', 'mutating-upload'] as const)(
+    'stages authenticated attachment bytes with owned identity: %s', async (mode) => {
+      const binary = Buffer.from([0, 255, 128, 1])
+      const durable = await buildDurableArchive({ attachments: [
+        { id: 'att-original', bytes: binary, deleted: false, recordId: 'record-1', fieldId: 'attachment' },
+      ] })
+      const stored = await persistDurable(durable)
+      const state = await readRecoveryArchiveCompleteSectionState({ ...stored,
+        keyCustody: createBoundCustody(), transactionDepth: depthProbe(0),
+        query: async (sql: string) => {
+          if (sql.includes('meta_history_trust_checkpoints')) return { rows: [{
+            id: durable.binding.checkpoint_id, sheet_id: durable.binding.sheet_id,
+            state: 'active', trusted_since_seq: '0', trusted_from_at: null, system_kind: null, pruned_at: null,
+          }] }
+          if (sql.includes('UNION ALL') || sql.includes('meta_history_baselines')) return { rows: [] }
+          throw new Error(SENTINEL)
+        },
+      })
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-stage-'))
+      temporaryRoots.push(root)
+      const service = StorageServiceImpl.createLocalService(root, '/synthetic-files')
+      const objectId = randomUUID()
+      const storageKey = `${objectId}/sha256-${digest(binary)}`
+      const events: string[] = []
+      let depth = 0
+      if (mode === 'crash-retry' || mode === 'verified-retry' || mode === 'collision') {
+        await service.uploadByKey(storageKey, mode === 'collision' ? Buffer.from('foreign') : binary)
+      }
+      const pending = stageRecoveryArchiveAttachment({ state, attachmentId: 'att-original',
+        original: { generationId: durable.generationId, workspaceId: durable.binding.workspace_id,
+          baseId: durable.binding.base_id, sheetId: durable.binding.sheet_id, recordId: 'record-1', fieldId: 'attachment' },
+        transactionDepth: { currentTransactionDepth: () => depth },
+        authorize: async () => mode !== 'denied',
+        ledger: {
+          reserve: async identity => {
+            events.push('reserved')
+            expect(identity.plaintextSha256).toBe(digest(binary))
+            if (mode === 'transaction') depth = 1
+            return { objectId, state: mode === 'verified-retry' ? 'verified' : 'reserved' }
+          },
+          verified: async id => {
+            events.push('verified')
+            expect(id).toBe(objectId)
+            if (mode === 'receipt-failure') throw new Error(SENTINEL)
+          },
+        },
+        storage: {
+          uploadByKey: async (key, bytes, mediaType) => {
+            expect(events).toEqual(['reserved'])
+            events.push('upload')
+            if (mode === 'mutating-upload') bytes.fill(0)
+            await service.uploadByKey(key, bytes, mediaType)
+          },
+          readContentAddressed: async key => {
+            events.push('read')
+            const result = await StorageServiceImpl.createLocalService(root, '/synthetic-files').readContentAddressed(key)
+            if (mode === 'false-readback') result.bytes = Buffer.alloc(binary.length)
+            return result
+          },
+        },
+      })
+      if (mode === 'success' || mode === 'crash-retry' || mode === 'verified-retry') {
+        expect(await pending).toMatchObject({ objectId, storageKey, plaintextSha256: digest(binary), sizeBytes: '4' })
+        expect(events).toEqual(mode === 'verified-retry' ? ['reserved', 'read', 'verified'] : ['reserved', 'upload', 'read', 'verified'])
+        expect(await service.downloadByKey(storageKey)).toEqual(binary)
+      } else {
+        await expect(pending).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED')
+        if (mode !== 'receipt-failure') expect(events).not.toContain('verified')
+        if (mode === 'denied') expect(events).toEqual([])
+        if (mode === 'transaction') expect(events).toEqual(['reserved'])
+        if (mode === 'collision') expect(await service.downloadByKey(storageKey)).toEqual(Buffer.from('foreign'))
+        if (mode === 'receipt-failure') expect(await service.downloadByKey(storageKey)).toEqual(binary)
+      }
+    },
+  )
+
   test.each([false, true])('restore source is privately bound to the authenticated original scope (complete=%s)', async (complete) => {
     const binary = Buffer.from([0, 255, 128, 1])
     const durable = await buildDurableArchive({ attachments: [

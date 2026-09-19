@@ -13,6 +13,23 @@ function fixture() {
 }
 
 describe('archive attachment descriptive plan', () => {
+  it.each([false, true])('detaches nested data before asynchronous authorization (scalar=%s)', scalar => {
+    const data = { files: ['att-current'], nested: { values: ['preserved'] } }
+    const patch = { nested: { values: ['restored'] } }
+    const writes = scalar ? [{ recordId: 'row', liveVersion: 7, changedFieldIds: ['nested'],
+      patch, projectedData: { ...data, ...patch }, linkUpdates: [] }] : []
+    const result = projectArchiveAttachmentCells(writes, new Map([['row', { data, version: 7 }]]),
+      [{ recordId: 'row', fieldId: 'files', beforeIds: ['att-current'], targetIds: ['att-original'] }])
+    data.nested.values.push('late-live-edit')
+    patch.nested.values.push('late-patch-edit')
+    const expected = scalar ? 'restored' : 'preserved'
+    expect(result[0]!.projectedData.nested).toEqual({ values: [expected] })
+    if (scalar) expect(result[0]!.patch.nested).toEqual({ values: ['restored'] })
+    ;(result[0]!.projectedData.nested as { values: string[] }).values.push('output-edit')
+    expect(data.nested.values).toEqual(['preserved', 'late-live-edit'])
+    expect(patch.nested.values).toEqual(['restored', 'late-patch-edit'])
+  })
+
   it('includes attachment-only writes in the canonical authorization delta', () => {
     const input = fixture()
     const live = new Map([['row', { ...input.live.get('row')!, version: 7 }]])
