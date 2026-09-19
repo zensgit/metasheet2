@@ -2306,6 +2306,36 @@ try {
         const beforeLockedApply = await publicEffectEvidence()
         const originalLock = (await query('SELECT locked,locked_by,locked_at,created_by FROM meta_records WHERE id=$1', [recordId])).rows[0]
         const metadataBeforeLock = (await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows
+        const assertRejectedIdentityHasNoEffect = async () => {
+          assert.equal(await stageCount(), stagesBeforePublic)
+          assert.deepEqual(await publicEffectEvidence(), beforeLockedApply)
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+          assert.deepEqual((await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows, metadataBeforeLock)
+        }
+        try {
+          await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+          const revokedExecution = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(revokedExecution.status, 401)
+          await assertRejectedIdentityHasNoEffect()
+        } finally {
+          await query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+        }
+        const alternateActorId = randomUUID()
+        const alternateLogin = `tm-${alternateActorId}@example.invalid`
+        await query(`INSERT INTO users(id,email,password_hash,role,is_active)
+          VALUES ($1,$2,$3,'admin',true)`, [alternateActorId, alternateLogin, await bcrypt.hash(loginPassword, 4)])
+        const alternateResponse = await fetch(`http://127.0.0.1:${address.port}/api/auth/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ identifier: alternateLogin, password: loginPassword }),
+        })
+        assert.equal(alternateResponse.status, 200)
+        const alternateSession = await alternateResponse.json() as typeof loginBody
+        assert.equal(alternateSession.data.user.id, alternateActorId)
+        const substitutedExecution = await fetch(executeUrl, { method: 'POST',
+          headers: { ...headers, authorization: `Bearer ${alternateSession.data.token}` }, body: executeBody })
+        assert.equal(substitutedExecution.status, 409, JSON.stringify(await substitutedExecution.json()))
+        await assertRejectedIdentityHasNoEffect()
+        console.log('PASS: post-preview inactive actor and independently logged-in actor substitution refuse with zero data/metadata/stage/history/token/receipt effects')
         try {
           await query(`UPDATE meta_records SET locked=true,locked_by='synthetic-other-locker',created_by=NULL WHERE id=$1`, [recordId])
           const lockedRestore = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
