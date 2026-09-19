@@ -325,8 +325,19 @@ authentication and server download authorization, deriving the API path from the
 encoded attachment identity, never a stored URL. No token is put in a URL; no
 anonymous route or new permission is introduced. Non-success responses cannot
 produce a download. The component cancels pending requests when unmounted and
-revokes temporary blob URLs after use. Image thumbnail/lightbox source loading is
-a separate remaining acceptance item; this change only covers original download.
+revokes temporary blob URLs after use. This original-download checkpoint alone
+does not prove image rendering; the following image-preview contract covers it.
+
+## Authenticated Image Preview
+
+Thumbnail and lightbox sources use the same authenticated attachment API, with
+the existing thumbnail=true read mode (currently original image bytes). Stored
+URLs are never used as credential destinations or rendered directly. Each mounted
+attachment list owns its image requests and object URLs. A change to attachment
+identity/source metadata aborts requests, revokes old URLs and closes the old
+lightbox. Unmount does the same; late results cannot publish new URLs after abort.
+Permission/network failure displays a values-free unavailable state, not a raw URL
+fallback. No server permission, anonymous access or recovery semantics change.
 
 ## Nightly Plan Boundary
 

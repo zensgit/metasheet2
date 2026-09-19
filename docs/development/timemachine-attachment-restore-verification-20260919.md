@@ -711,6 +711,39 @@ remain OPEN. No Ready/merge, flag, dispatch, deployment or real environment acce
 
 ## Remaining Acceptance
 
+Image-preview checkpoint `8528aa176d385f0a6134d580c14bbf31d981c327`, tree
+`7bbb591fd8b98cfc37b76dd941904d96582f1079`, supersedes the original-download
+checkpoint's open image-authentication item. Three initial image cases were RED
+because the component never made an authenticated image request. Final component
+and seven neighbor files pass 96/96. Removing the post-abort publication guard
+makes removed-image mode RED (1 failed/2 passed in the focused image cases);
+restoration returns the expanded suite to 96/96. Existing field-panel/drawer
+assertions now check blob image sources instead of raw URL strings.
+
+The full isolated runner exits 0 with a real synthetic PNG as the second archived
+attachment. All existing binary/hash/history assertions use the same expected
+fixture bytes, not substituted text. Both 1440/390 Workbench loops wait for a
+decoded thumbnail (naturalWidth > 0), open the lightbox and prove naturalWidth=1
+for the one-pixel PNG, then complete authenticated original download. Every API
+failure remains fatal. Owned DB connections=0 and the cluster is removed.
+Application and backend typechecks pass; scoped ESLint has zero errors;
+diff-check passes. The full web project-reference Vite dependency conflict from
+the prior checkpoint is not claimed resolved.
+
+Logs: `/private/tmp/tm-image-auth-red-20260920.log`,
+`/private/tmp/tm-image-auth-final-20260920.log`,
+`/private/tmp/tm-image-auth-mutation-20260920.log`,
+`/private/tmp/tm-image-auth-browser-20260920.log`,
+`/private/tmp/tm-image-auth-app-tsc-20260920.log`,
+`/private/tmp/tm-image-auth-core-tsc-20260920.log`, and
+`/private/tmp/tm-image-auth-final-lint-20260920.log`.
+Terra medium completed a bounded read-only review of the image component/test
+delta: 0 P1/P2. It ran no tests and did not certify the full PR; its session closed.
+Whole-page mobile overflow, full app-login/organization-selection UAT, cleanup
+composition, broader remaining acceptance and successor exact-head CI stay OPEN.
+
+## Remaining Full-Scope Acceptance
+
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
 remaining purge/drift/retry concurrency; async contract;
