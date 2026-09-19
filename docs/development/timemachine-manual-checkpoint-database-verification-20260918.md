@@ -1329,3 +1329,32 @@ guard; it was corrected using the existing pin authority, not by weakening the
 guard. No external review verdict is claimed. This local checkpoint is not yet
 pushed, to batch subsequent runtime integration without cancelling the current
 remote long lanes. It does not prove source-to-publication-to-restore completion.
+
+## Attachment Capture And Publication (Local Only)
+
+Code `dcbe71ebe5a7d581033abe36cee36df3b228373e` joins admitted real local files
+to authenticated index/sections, exact 10+N nonce reservations, durable prepared
+ciphertext, provider uploads and atomic catalog publication. The synthetic driver
+includes live and deleted attachments, supplies a deliberately false caller
+attachment plan, interrupts after an attachment upload, then resumes with no
+source/capture callback. Original prepared bytes and source-read count stay exact.
+
+Missing manifest refuses finalization with source pins retained. Changing the
+registered content-addressed source version also refuses. Injecting a failure on
+the second source release rolls back receipt verification, archive references and
+the first source deletion. Restored execution yields verified/finalized/complete,
+11+N verified objects, N archive references matching provider versions, and no
+source references for that generation. Other generations are not released.
+
+Final full checkpoint driver, fresh/replay and 31-migration catalog replay PASS;
+existing DB neighbors and manual HTTP cases stay green; owned database, connections
+and cluster cleaned. Crypto/compiler/receipt unit neighbors 87/87; acceptance tsc,
+three-source ESLint and diff-check PASS. Mutation removing final source-version
+validation makes the changed-source negative RED (missing rejection), restored
+full runner GREEN. Logs: `/private/tmp/tm-attachment-publication-mutation.log`
+and `/private/tmp/tm-attachment-publication-restored.log`.
+
+Terra high bounded read-only review timed out without a verdict and was closed;
+no external approval claimed. This is local internal runtime evidence, not a
+published exact-head CI result or public attachment restore acceptance. HTTP
+source-reader composition and archive-reader/restore consumption remain required.

@@ -558,3 +558,25 @@ Only an uploaded receipt is recorded here. A missing available source pin is
 still refused by database authority. This adapter neither verifies the receipt
 nor publishes the generation nor releases source references. HTTP attachment
 capture and archive-reader/restore integration remain OPEN.
+
+## Attachment Capture And Atomic Publication
+
+Local code `dcbe71ebe5a7d581033abe36cee36df3b228373e` connects verified local
+source reads to continuation when an explicit server-owned reader is bound.
+The opaque admission retains verified index metadata; caller attachment plans
+are replaced with server-derived bytes/identity/version and independent nonces.
+Nonce authority reserves exactly ten sections plus every verified attachment.
+The existing manifest compiler reconciles that index against sealed attachments.
+Plaintext owned by continuation is scrubbed on every exit.
+
+Finalization reconciles the current local content identity, source-pin exact
+owner/lease/version/hash/size, authenticated index and full durable object roster.
+It verifies all receipts, creates archive-object references with the archived
+provider version, releases only this generation's source references and publishes
+the catalog in one transaction. Missing manifests, source drift or mid-transaction
+failure do not partially publish or release sources.
+
+This supersedes the earlier internal all-attachment refusal, not the public
+readiness boundary. The command/startup composition has not yet bound its live
+source reader, and archive-reader/restore-byte integration remains OPEN. Existing
+no-attachment composition is preserved. No flag or customer storage is enabled.
