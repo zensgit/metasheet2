@@ -2,6 +2,28 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Right-Side Deleted History Values (2026-09-20)
+
+Checkpoint `ec3cf65f6f88ea3157c8bfb912b8c7e45aa77d6f`, tree
+`96a9f04c5d65282a1b7af780f56b469a3d3776e3`, closes a reproduced display gap:
+the right-side inspector loaded delete revisions but showed no field values,
+because delete revisions intentionally have empty changedFieldIds. Only delete
+entries now enumerate their server-filtered pre-delete snapshot. Other actions
+retain the existing changedFieldIds-only diff and restore-selection contract.
+
+Authority remains the existing history route: readable sheet/record checks,
+allowed-field and stored-formula masking, followed by redactRecordRevisionEntry
+on changedFieldIds, patch and snapshot. No client-side grant or raw storage read
+is added. Missing snapshots produce no invented values from current data or
+neighbor revisions. Deleted entries gain neither selection controls nor a restore
+button; deleted-row recovery remains the separate confirmed flow.
+
+Real LoginView/App/MetaSheetServer acceptance now enters the right inspector from
+the grid and checks its real history response, deleted values, actor and viewer
+timezone, alongside the existing whole-table/row/column recovery cases. This
+supersedes the earlier sidebar-read acceptance gap, not a separate historical
+version restoration acceptance or broader archive/storage completion.
+
 ## Owned Workbench Regression Driver (2026-09-20)
 
 Checkpoint `e219198d806a4383606bf0837e9e209db10b6a2b` adds an optional

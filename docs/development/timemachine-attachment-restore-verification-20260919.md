@@ -12,6 +12,46 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Inspector Deleted-Value Regression (2026-09-20)
+
+Code `ec3cf65f6f88ea3157c8bfb912b8c7e45aa77d6f`, tree
+`96a9f04c5d65282a1b7af780f56b469a3d3776e3`. Clean exact-head owned
+`--workbench` run `c3c1a0ff-ab31-411a-bbc8-02df947487a8` passes 7/7;
+log `/private/tmp/tm-inspector-clean-exact-20260920.log`. Its artifact records
+worktreeClean=true, all 12 fixture counts zero and cleanupErrors empty. The
+parent confirms zero connections, drops the database and removes the PG cluster.
+
+The added case opens the grid's real record inspector, selects History, requires
+the exact row-history GET to return 200/ok with nonempty items, matches rendered
+row count, and checks actor name, viewer-local timestamp and both deleted values.
+No API response is mocked. Screenshot `record-inspector-history.png` under
+`artifacts/timemachine-workbench` was visually inspected; deleted fields are now
+visible. Earlier screenshot showed the actual missing-value defect.
+
+- Focused component/drawer/restore/inspector: 4 files/65 tests pass, including
+  existing non-delete snapshot leak-lock and restore payload contracts.
+- New deleted-value case failed before implementation and fails again when the
+  delete-only display branch is removed (1 failure/15 pass); restoration passes.
+- Temporarily removing the real Workbench inspector apiClient binding makes the
+  browser gate fail waiting for its required history GET. Production binding
+  restored byte-identically; the clean final seven-case run passes.
+- Web application vue-tsc, scoped ESLint, wiring 39/39 and diff-check pass.
+  ESLint initially lacked the local parser link; it passed using the installed
+  canonical pnpm-store NODE_PATH, without installing or changing dependencies.
+- Existing two CI lanes already select multitable-record-history-panel by its
+  filename token; no selector change or new test file required.
+
+Logs use `/private/tmp/tm-{deleted-inspector,inspector}-*20260920.log` names.
+The first browser attempt used the wrong envelope level in the new assertion;
+it was corrected to the existing ok/data contract and is not a product failure.
+This synthetic acceptance does not certify real tenants, mobile inspector layout,
+sidebar historical-version execution, hard-delete revival or full TM completion.
+
+Sol medium independent read-only review of `def7e70a92..ec3cf65f6f` returned
+PASS with no P1/P2, confirming the delete snapshot is already filtered by the
+existing route authority and restore semantics are unchanged. Session closed;
+the reviewer did not rerun tests and this is not whole-PR approval.
+
 ## Owned Workbench Regression (2026-09-20)
 
 Code `e219198d806a4383606bf0837e9e209db10b6a2b`, tree
