@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor, ensureLocalUserRow } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ApprovalBridgeService } from '../../src/services/ApprovalBridgeService'
 import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
@@ -70,7 +70,20 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
   })
 }
 
+/**
+ * Lock §2-G3 fixture delta (Codex review 2026-09-19 finding 1). `GET /api/auth/dev-token` signs a
+ * JWT and writes NO `users` row, so before this fix every cancel-round fixture's approver was a
+ * person the directory had never heard of. The creation path now re-qualifies every seat against
+ * the directory with the shared login gate, and — like the precedent it reuses,
+ * `validateAndFreezeRequesterChoices`'s company-scope baseline — an id with no `users` row is not
+ * in the eligible set and fails closed. Production approvers always have a row (they authenticated
+ * to approve), so the fixtures are made production-shaped rather than the guard made fail-open.
+ */
+const mintedUserIds = new Set<string>()
+
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  await ensureLocalUserRow(userId)
+  mintedUserIds.add(userId)
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )
@@ -182,6 +195,11 @@ describeIfDatabase('cancel-round outlet guards (§14.3 #2/#4/#6/#7/#7′/#8): a 
         await pool().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      if (mintedUserIds.size > 0) {
+        // Lock §2-G3 fixture delta — drop the `users` rows this file's `authToken` minted.
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...mintedUserIds]])
+        mintedUserIds.clear()
       }
       if (grantedUserIds.size > 0) {
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])

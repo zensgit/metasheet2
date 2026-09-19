@@ -153,6 +153,15 @@ that adds no new require edge between `ApprovalProductService.ts` and `ApprovalB
 `ApprovalBridgeService.ts`, so the reverse direction would cycle). `ApprovalProductService.ts:4242`
 re-exports it; `ApprovalBridgeService.ts:48` imports it directly.
 
+`ApprovalProductService.ts` also owns the suite/window constants (re-derive with `grep -n
+"^const CANCEL_ROUND_SUITES\|^const CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS\|^const
+CANCEL_ROUND_DEFAULT_SUITE\|^function deriveCancelRoundRoundPolicy" <file>` rather than trusting a
+pinned literal here): `CANCEL_ROUND_SUITES` (lock:143's closed four-value domain),
+`CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS` (**renamed 2026-09-19** from
+`CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS` — lock:143 makes the table an enforced UPPER BOUND, and the
+old identifier named it a default, which is exactly the contract the code then failed to keep), and
+`CANCEL_ROUND_DEFAULT_SUITE`.
+
 CJS-side mirror (lock's own convention, "插件侧镜像常量…由测试钉逐字相等", lock:338):
 `plugins/plugin-attendance/index.cjs:167` — `const APPROVAL_CANCEL_ROUND_WORKFLOW_KEY =
 'approval.cancel-round'`, pinned byte-identical to the core constant by
@@ -183,10 +192,14 @@ generic HTTP-status-only shape):
 | `CANCEL_ROUND_SUITE_FORBIDDEN` (own class `CancelRoundSuiteForbiddenError extends ServiceError`) | 409 | `metadata.suite === 'forbidden'` on the original instance | lock §14.3 (lock:357, v5.8) — **lock-anchored**, dedicated error class required verbatim |
 | `CANCEL_ROUND_ALREADY_PENDING` | 409 | A `pending` round already exists for this document (pre-check, and the authoritative 23505-translation backstop on `uq_approval_rounds_pending_document`) | lock §5 I3 / §14.1 I3 discipline; erratum — no explicit code named, chosen for symmetry with the constraint it backstops |
 | `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` | 409 | The graph executor's initial-state resolution does not land on `pending`/the cancel node/≥1 assignment | fail-closed backstop per lock §14.1's "NEVER auto-approve, NEVER zero seats" discipline; erratum |
+| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one original approver is no longer eligible to hold a seat, judged by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all). `details = { ineligibleCount, reasons }` — categories only, never an id | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
+| `CANCEL_ROUND_SUITE_UNKNOWN` | 409 | `metadata.suite` is present but outside the closed set `{attendance, leave, other, forbidden}`. `details = { allowedSuites }` — never the offending value | lock:143 (`suite ∈ {四值}`); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
+| `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` | 409 | `metadata.windowDays` is present but is not an integer in `[0, suite ceiling]`. `details = { suite, ceiling }` — never the offending value | lock:143 (`windowDays ∈ [0, 上限]`, 「由模板管理员在上限内设」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
 | `CANCEL_ROUND_CREATE_FAILED` | 500 | Post-commit read-back of the newly created approval returns nothing (should not happen; defensive) | not a lock condition — implementation defensive branch |
 
-**Disclosed gap**: four of the six throw sites above (`DOCUMENT_NOT_APPROVED`,
-`REQUESTER_ONLY`, `ALREADY_PENDING`, `NO_ELIGIBLE_APPROVER`) have no lock-anchored code — the lock
+**Disclosed gap**: seven of the throw sites above (`DOCUMENT_NOT_APPROVED`,
+`REQUESTER_ONLY`, `ALREADY_PENDING`, `NO_ELIGIBLE_APPROVER`, and the three added on 2026-09-19 —
+`SEAT_INELIGIBLE`, `SUITE_UNKNOWN`, `WINDOW_OUT_OF_RANGE`) have no lock-anchored code — the lock
 only names dedicated codes for the 8 outlet-guard chokepoints (`CANCEL_ROUND_OUTLET_FORBIDDEN`) and
 the suite gate (`CANCEL_ROUND_SUITE_FORBIDDEN`). This is recorded in-code at each throw site
 ("flagged as an implementer erratum for owner/gate registration") and repeated here rather than
@@ -243,6 +256,84 @@ function assertCancelRoundActionAllowed(instance, action): void {
 Matches lock:342 exactly (`{approve, reject, revoke, comment}`; `handle`/`return`/`transfer`/
 `add_sign`/`reduce_sign` fall through to the throw). Single call site: `dispatchAction`,
 `ApprovalProductService.ts:9928` (this tree's current line; lock's baseline citation is `:9533`).
+
+### 3.4 Creation-time guard order, and the two G3 halves (added 2026-09-19)
+
+Two independently-verified Codex findings against this slice were fixed on 2026-09-19. Both defects
+were born in C-1 (evidence: the independent verification reports
+`verify-codex-cancel-finding1-20260919.md` §5.1 and `verify-codex-cancel-finding2-20260919.md` §7,
+which trace both to `c4dc4b928`'s own function body).
+
+**Guard order inside the creation transaction.** Every one of these runs under the SAME
+`SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE` and BEFORE the first INSERT, so a stale
+read can never authorize a round. The order is deliberate, and it also fixes which code wins when
+several conditions hold at once:
+
+1. instance exists → else 404 `APPROVAL_NOT_FOUND`
+2. `status = 'approved'` → else 409 `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`
+3. WI-16 requester identity → else 403 `CANCEL_ROUND_REQUESTER_ONLY`
+4. **`deriveCancelRoundRoundPolicy(metadata)`** — suite domain, then window domain → 409
+   `CANCEL_ROUND_SUITE_UNKNOWN` / `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`
+5. §14.3 #14 suite gate (`suite === 'forbidden'`) → 409 `CANCEL_ROUND_SUITE_FORBIDDEN`.
+   Step 4 short-circuits the window check for `forbidden` and returns lock:143's fixed
+   `windowDays = 0`, so this LOCK-ANCHORED code always wins over a window complaint for that suite.
+6. no pending round → else 409 `CANCEL_ROUND_ALREADY_PENDING`
+7. read the seat set off `approval_records(action='approve')`
+8. **`assertCancelRoundSeatsEligibleInTxn`** (lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
+9. resolver / initial-state backstop → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`
+10. first INSERT
+
+Config errors (4/5) are therefore reported before state errors (6): a document that is BOTH
+mis-tagged AND already has a pending round answers `SUITE_UNKNOWN`, not `ALREADY_PENDING`.
+
+**G3 half A — 在职 (shipped).** The gate reuses `validateAndFreezeRequesterChoices`'s company-scope
+IDIOM (read the directory for the ids, refuse if any id is not in the eligible set ⇒ a missing
+`users` row fails closed by construction) with `evaluateUserAuthenticationGate`'s PREDICATE (the
+shared gate for password login, token refresh/verify, DingTalk SSO and API tokens). It is therefore
+**wider**, never narrower, than the normal create path: it additionally refuses `role = 'disabled'`
+and `activation_status = 'pending_activation'`, which a bare `is_active = TRUE` check would seat
+even though the person cannot log in.
+
+**OPEN (owner call), not shipped, not silently skipped:**
+
+- **G3 half B — 仍在该组织单元.** No `user_orgs` (or any other) seat-eligibility predicate exists
+  anywhere in this repo today, so adding one is NEW behaviour, not parity with the normal path.
+  `approval_instances.org_id` is nullable with no default
+  (`zzzz20260821100000_add_approval_instance_org_id.ts`), so its NULL semantics must be defined
+  before any such predicate lands (recommended, not decided here: NULL ⇒ skip the org half rather
+  than refuse everyone). The binding verification report's own instruction is: 「If unruled, ship A
+  alone and record B as OPEN」. A standing positive control (`§2-G3 正控 P2`) pins that the shipped
+  half does not refuse an `org_id IS NULL` original, so a future org predicate cannot land without
+  facing that question. Note that `grantApprovalOrgMembership` already seats every integration
+  fixture actor in org `default`, so half B would be additive for the corpus, not a fixture rewrite.
+- **Aligning the NORMAL create path to the login gate.**
+  `validateAndFreezeRequesterChoices`'s company baseline is `is_active = TRUE` alone, i.e. narrower
+  than the shared login gate. Widening it is a behaviour change to a shipped endpoint
+  (`POST /api/approvals`) and is an owner call; it is deliberately NOT made in this slice. The
+  divergence is recorded here rather than laundered into a claim of parity.
+- **Three new error codes** — see §3.1; the lock file is owner-authored and is not edited from here.
+
+**Two things the fix deliberately does NOT do**, both of which the binding report names explicitly:
+
+- It never filters an ineligible id out of the seat list and continues. The cancel node is
+  `approvalMode: 'all'`, so a filter would silently lower the co-sign threshold — the opposite of
+  「阻断并提示管理员」. Pinned by the `§2-G3 负控 N1/N2` zero-row assertions (mutation M2 below).
+- It never clamps an out-of-range `windowDays` to the ceiling. A clamp turns a misconfiguration into
+  a silent 「悄悄按 90 算」, which contradicts lock:143's 「由模板管理员在上限内设」 auditability; the
+  repo's own narrowing-fix discipline is write-path REJECT. A second, decision-time clamp is
+  rejected for a further reason: lock §5 I4 / §2-G4 require the creation and decision points to use
+  ONE derivation, and a second one必然 drifts.
+
+**Pre-existing, out of scope, disclosed:** the seat query's own
+`.filter((id) => typeof id === 'string' && id.length > 0)` silently drops a NULL `actor_id`. That is
+a filter-and-continue of exactly the kind the report forbids, it predates this fix, and it is NOT
+closed here. A mechanical census of every `action='approve'` record writer
+(`ApprovalProductService.ts` ×4 via `insertApprovalRecord`, `ApprovalBridgeService.ts:1148`,
+`plugin-attendance/index.cjs:35197/:35577/:37793`) shows all of them pass a real acting user id, and
+auto-approve-at-create writes `action:'created'`, not `'approve'`
+(`multitable/approval-record-projection-service.ts:376-377`) — so no synthetic-actor seat is known to
+be reachable today, and this fix does not make any previously-cancellable document un-cancellable on
+that account.
 
 ## 4. Outlet guards — the lock's §14.3 table, re-derived against this tree
 
@@ -496,10 +587,13 @@ implementation):
   is service-layer only; no route file in this tree calls it (`grep -rn
   "createCancelRoundInstance" src/routes/` → 0 matches). A caller (route, or another slice's UI
   entry) is not part of this slice's checklist and is not added here.
-- **Four implementer-erratum error codes** (§3.1: `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`,
+- **Seven implementer-erratum error codes** (§3.1: `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`,
   `CANCEL_ROUND_REQUESTER_ONLY`, `CANCEL_ROUND_ALREADY_PENDING`, `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`)
+  `CANCEL_ROUND_SEAT_INELIGIBLE`, `CANCEL_ROUND_SUITE_UNKNOWN`, `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`)
   plus the two 判据 III `CANCEL_ROUND_INVARIANT_VIOLATION` throw sites: registered here for
-  owner/gate sign-off, since the lock names no code for any of these six conditions.
+  owner/gate sign-off, since the lock names no code for any of these nine conditions.
+- **G3 half B (组织单元) and the normal-path login-gate alignment** — both OPEN owner calls, stated
+  in full in §3.4.
 - **Q-A/Q-B/Q-C as owner-ratified lock order** (§9-4): still a review suggestion per lock §13's own
   framing; this slice's census (§6.3) supports the suggestion but does not convert it into a ratified
   fact, and does not yet exercise the real contended case (see §6.2's closing paragraph).
