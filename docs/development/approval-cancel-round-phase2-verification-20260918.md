@@ -4844,6 +4844,15 @@ plugins/plugin-attendance/index.cjs:35863                                      #
 
 ### 7.4 mutation 台账(每组:`cp` 备份 → 改 → 单跑 → `cp` 还原 → `cmp`)
 
+> **证据出处(head-scoped,`feedback_gate_verdict_is_head_scoped`)**:下表四组**已在交付 head
+> 重跑**(rebase 之后的树,基点 `4ded8c2bb`),**不是**沿用 rebase 前 `c9cad2514` 上的那一轮。
+> 四组落点的 `assert count==1` 全部命中 ⇒ C-1 没有改写任何一个 mutation 目标行;
+> 重跑结果与 rebase 前**逐条相同**(1 红 / 2 红 / 2 门拆掉仍被第三道门拒 / 1 红)。
+> 判别性检查:`git diff c9cad2514 4ded8c2bb -- plugins/plugin-attendance/index.cjs` 的两处 hunk 在
+> `:6101` 与 `:24612`,**不在** `reverseLeaveBalanceDeduction`(`:19419`)也不在取消适配器(`:35334`),
+> 即该文件对本轮只发生了行位移;`ApprovalProductService.ts` 的五处 hunk 在 `:90`/`:434`/`:8808`/`:8882`/`:13627`,
+> **均不在**提交后区段(`:12740-12772`)、两道重试门(`:11011`/`:11656`)或投递方法(`:13465-13486`)内。
+
 | # | 落点 | 改动 | 实测 |
 |---|---|---|---|
 | **M-PC1** | `ApprovalProductService.ts:13479-13486` | 删掉投递的 try/catch,只留裸 `deliver(...)` | **恰 1 红**,红在 P3-1 的 **(a)**:`expected 500 to be 200`,体 `{"code":"APPROVAL_ACTION_DISPATCH_FAILED"}`。其余 26 绿 |
@@ -4949,9 +4958,14 @@ P3-1 residual 用例把它**测了出来**并用两条 ⚠️ TRIPWIRE 钉住(`t
 
 ### 7.9 台架与逐字结果
 
+> **⚠️ 全节数字已于 rebase 后在交付 head 重新测过**,不是 rebase 前那一轮的转抄
+> (`feedback_gate_verdict_is_head_scoped`)。差异如实记录:required 步骤由 940 → **944**、
+> 七套件由 93 → **97**,增量来自新 C-1 自带的用例,不是本节新增。本节三条用例仍是 24 → **27**。
+
 ```
-$ git rev-parse HEAD                       # 起点,与 origin 一致、树净
+$ git rev-parse HEAD                       # 任务起点,与 origin 一致、树净
 51e1f42106a0b441ef1a5914e483d4e80895015c
+  ⚠️ 写作期间合并列车把 C-2 rebase --onto 到新 C-1;下列结果全部测于 rebase 后的树
 $ dropdb metasheet2_c2_pc; createdb metasheet2_c2_pc          # 处女库
 $ DATABASE_URL=…metasheet2_c2_pc npx tsx src/db/migrate.ts     # exit 0(全量迁移)
 $ npx tsc --noEmit -p tsconfig.json ; echo $?
@@ -4961,10 +4975,9 @@ $ npx tsc --noEmit -p tsconfig.json ; echo $?
 **逐字复现 required 步骤(`plugin-tests.yml` `approval-real-db-integration`,20.x),整份清单同库:**
 
 ```
-$ bash -eo pipefail  <该步骤 run: 正文逐字>      # DATABASE_URL 指向处女库
+$ bash -eo pipefail  <该步骤 run: 正文逐字>      # DATABASE_URL 指向处女库;exit 0
  Test Files  84 passed (84)
-      Tests  940 passed | 10 skipped (950)
-   Duration  135.96s
+      Tests  944 passed | 10 skipped (954)
 ```
 
 (该步骤**不**设 `EXPECT_DB`,10 skipped 即各文件的 `itIfExpectDb` 哨兵——这是该 lane 的既有性质。)
@@ -4973,7 +4986,7 @@ $ bash -eo pipefail  <该步骤 run: 正文逐字>      # DATABASE_URL 指向处
 
 ```
  Test Files  7 passed (7)
-      Tests  93 passed (93)          # 零 skip
+      Tests  97 passed (97)          # 零 skip
 ```
 
 其中 `approval-cancel-round-redemption.db.test.ts` 由 **24 → 27**(本节三条)。
@@ -4996,7 +5009,7 @@ $ pnpm exec vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts
 不是「看起来不用动」。
 
 ⚠️ 对 §6.3 末尾那条范围警告的**更新**:那里写「本轮只跑了这十个文件,不得读成整步已复现」。**本轮已逐字跑完整步
-84 个文件 / 940 条**,该警告对**本 head** 不再适用;§6.3 的原文作为当时的时点记录保留。
+84 个文件 / 944 条**(测于 rebase 后的交付 head),该警告对**本 head** 不再适用;§6.3 的原文作为当时的时点记录保留。
 
 **mutation 还原核验(逐组)**:
 
@@ -5020,3 +5033,125 @@ $ git status --porcelain                                          # 只剩测试
 - **扣减仍是手工种的。** 与聚焦闸 §8 同一条:本节的 `deduct` 行由 fixture 直接 `INSERT`,**没有**走
   `index.cjs:38193`/`:38221` 两个真实扣减写入点。所以证的是「给定一条形状良好的 deduct 行」的行为。
 - **上游外逃的两条 TRIPWIRE 断言不是背书**,是把今天的暴露钉成可观测事实;它们红的那天是该改写,不是该删。
+
+---
+
+## 二次 Rebase 到新 C-1 `b8b71539a` —— 迁移、并发提交、重验(2026-09-19)
+
+- 旧基点:`feat/approval-cancel-round-phase1` @ `ba8a0133dd1eb3ff6700cccc2f185636e799c8b9`
+- 新基点:`feat/approval-cancel-round-phase1` @ `b8b71539a6a89e51331e2e4874f994498df15c55`(`origin/main` 已是其祖先)
+- rebase 前 `origin/feat/approval-cancel-round-phase2`:`c9cad251445bd05aad42004195e0600d838078b2`(与本地 rebase 起点一致)
+- 命令:`git rebase --onto origin/feat/approval-cancel-round-phase1 ba8a0133d feat/approval-cancel-round-phase2`
+- 工作树:`.../scratchpad/wt-cancel-round-p2`;真库:**处女库** `metasheet2_c2_rb`(`createdb` + 全量迁移,423 张表,`to_regclass('public.approval_rounds')` 命中;审毕 `dropdb`)
+
+### 1. rebase 力学:零冲突
+
+64 个提交(`ba8a0133d..旧HEAD`)逐一重放到新基点,**全部干净应用**——`Successfully rebased and updated
+refs/heads/feat/approval-cancel-round-phase2`,过程中零次停顿、`.git/rebase-merge` 与 `.git/rebase-apply`
+均不存在。冲突标记精确扫描(`^(<<<<<<< |>>>>>>> |=======$)`,减去误报):
+
+```
+$ git grep -n -E '^(<<<<<<< |>>>>>>> |=======$)' -- .
+```
+
+命中 39 行,**全部**落在 6 个 2025-10/2025-11 的历史 merge 报告 MD 里(`claudedocs/PHASE2_PREPARATION_GUIDE.md`、
+`claudedocs/PR215_MERGE_REPORT_20251103.md`、`claudedocs/PR331_MERGE_REPORT_20251102.md`、
+`claudedocs/PR337_MANUAL_REBASE_GUIDE.md`、`docs/merge-reports-2025-10/PR151_MERGE_RESOLUTION_REPORT_20251027.md`、
+`packages/claudedocs/BATCH2_MERGE_SUMMARY.md`)——这些文件把冲突标记写作**文档内容**(教怎么解冲突),不是未解决的
+冲突。机械核实这 6 个文件不在本分支改动集里:
+
+```
+$ git diff --name-only origin/feat/approval-cancel-round-phase1..HEAD | grep -E '<6 个文件名>'
+(空)
+```
+
+⇒ 「按配方处理冲突(列表并集 / exec 行并集 / s6a 钉机械重算)」**没有触发**,因为没有一处真实冲突需要那三种处理。
+新 C-1 base 自己在 `ba8a0133d..b8b71539a` 之间动过 `.github/workflows/plugin-tests.yml` 和
+`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`(它自己的 s6a 重算,
+不是本分支的义务),但本分支的 64 个提交**没有一个**碰这两个文件,所以不存在需要「并集」的重叠改动面。
+
+### 2. ⚠️ 并发提交:另一位执行者在本次任务窗口内向同一工作树落了两个提交
+
+在本 rebase 完成(`4ded8c2bbb9420f998288e7a0253381e53e4d11a`,21:01:00)之后、本轮门禁跑完之前,同一工作树上出现了
+两个**非本步骤发起**的提交,提交者身份是本工作树的 git identity `Merge Rehearsal <rehearsal@local.invalid>`
+(`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`):
+
+| SHA | 时间 | 标题 | 改动文件 |
+|---|---|---|---|
+| `9bc77c06fbf81a1b7a4d65fdfc0fe736e4cb465d` | 21:05:44 | docs(approval): close three sweep gaps on the post-commit evidence section | 验证 MD、`approval-cancel-round-redemption.db.test.ts` |
+| `05e2c26cc33ef27e1856b15b7b0a0126d31bb702` | 21:10:17 | docs(approval): re-anchor the post-commit evidence refs after the mid-task rebase | 设计 MD、验证 MD、`approval-cancel-round-redemption.db.test.ts` |
+
+两次提交的正文自述性质一致:响应本次 rebase 使 §7 证据区的裸行号全部失效(`ApprovalProductService.ts` 的
+`COMMIT`/投递/外层 catch/授权门/终态门,`index.cjs` 的幂等门/`reverse` 写入/`if (approvedLeave)` 等共 8 组坐标平移),
+用符号锚点重新定位并逐条机械核验(35/35),对 §7.6 的「有 reverse 行 ⇒ 请求已 cancelled」结论补了状态写入方普查
+(两种语法、5 处生产写点、`:38045` 是唯一能写回 `approved` 的点且钉在 `WHERE status = 'pending'`)。**净生产代码 diff 为空**
+(逐 file 核对见下),提交正文自己写明「origin 仍在 rebase 前的 `c9cad2514`,本地已分叉,该 lane 不 force-push,由
+merge train 落这次 push,且不得丢掉这两个提交」——**这句话就是写给本步骤的**。
+
+**处置(与 advisor 核对过的裁决):两个提交予以携带,不丢弃、不改写、不 revert。** 理由:(a) `git diff --name-only
+4ded8c2bb 05e2c26cc` 只命中两个设计/验证 MD 与一个测试文件,零 `src/`、零 `plugins/**/index.cjs` 改动;(b) 提交正文
+明确以「merge train」「whoever lands this」指名下一步执行者,构成协作而非误触;(c) 丢弃需要对已落地历史做破坏性改写,
+被本任务硬规矩禁止。**但本步骤对这两个提交的内容本身未做独立审阅**——只验证了它们改动的文件在新 HEAD 上能跑绿,
+未逐字核对其 35 处符号锚点或 §7.6 的普查结论本身,如实登记为「携带,未复核」。
+
+`git diff --name-only 9bc77c06f 05e2c26cc` ⇒ 设计 MD、验证 MD、`approval-cancel-round-redemption.db.test.ts` 三个文件,
+这是唯二被并发提交改动过的、会影响门禁复现性的文件集(第一个提交落在本步骤所有测试跑之前,不需要单独重跑)。
+
+### 3. Gate verdict 按最终 HEAD 重锚(不是按 rebase 刚完成时的树)
+
+最终 HEAD:`05e2c26cc33ef27e1856b15b7b0a0126d31bb702`(rebase 完成后又携带了 §2 的两个并发提交)。
+按 `feedback_gate_verdict_is_head_scoped`,受并发提交影响的三项门禁在最终 HEAD 上**重跑**而不是沿用 rebase 刚完成
+时的读数;未受影响的门禁(输入文件与两个并发提交的改动集不相交,已用 `comm -12` 机械核过、交集为空)照原读数登记。
+
+| 闸 | 结果 | 复现库 | 备注 |
+|---|---|---|---|
+| `npx tsc --noEmit -p tsconfig.json` | **零输出**(重跑于最终 HEAD) | — | |
+| cancel-round 真库整组(`plugin-tests.yml:1666-1672`,7 文件,CI 实际 env 只设 `DATABASE_URL`) | **90 passed \| 7 skipped (97)**(重跑于最终 HEAD) | `metasheet2_c2_rb` | 7 个 skip 各是 1 个 `EXPECT_DB` 哨兵(见下) |
+| 同一组,加 `EXPECT_DB=1`(哨兵改跑而非跳过,更严的复验) | **97 passed (97)**,0 skip | `metasheet2_c2_rb` | 每文件恰 1 个哨兵变绿,无第二个红/绿变化 |
+| `approval-cancel-round-redemption.db.test.ts` 单跑(仅 `DATABASE_URL`) | **26 passed \| 1 skipped (27)** | `metasheet2_c2_rb` | 在提交 1(21:05:44)落地之后、提交 2(21:10:17)落地之前跑的,对提交 1 有效 |
+| 同一文件,`EXPECT_DB=1`,重跑于最终 HEAD(提交 2 之后) | **27 passed (27)**,0 skip | `metasheet2_c2_rb` | 覆盖提交 2 对该文件的改动 |
+| `attendance-w4c3b-request-operation-routes.db.test.ts` + `attendance-w4c2-p12-migration-schema-gates.db.test.ts`(C-1 两套) | **54 passed (2 files)** | `metasheet2_c2_rb` | 不在两个并发提交的改动集里,免重跑 |
+| `attendance-plugin.test.ts` | **166 passed** | `metasheet2_c2_rb` | 同上,免重跑 |
+| unit 四件(`approval-product-service` / `approval-admin-jump-service` / `attendance-w4c3b-external-transaction-entry` / `attendance-uuid-validation-routes`) | **295 passed (4 files)** | (无需真库) | 同上,免重跑 |
+| `attendance-w4c2-ci-wiring.test.mjs` | **pass 262 / fail 0** | — | 同上,免重跑 |
+| `attendance-w4c0-dml-inventory-collector.test.mjs` | **pass 60 / fail 0** | — | 同上,免重跑 |
+| `t2-source-freeze-ci-wiring.test.mjs` | **pass 6 / fail 0** | — | 同上,免重跑 |
+| `attendance-onprem-package-verify-migrations.test.mjs` | **pass 4 / fail 0** | — | 同上,免重跑 |
+| s6a 钉 `sealed-export-s6a-product-runtime.test.cjs` | **pass 1 / fail 0** | — | 同上,免重跑;新 C-1 base 自己动过的 `plugin-tests.yml`/pin json 在此钉下仍绿 |
+
+「免重跑」不是推断,是机械核过的:`comm -12 <两个并发提交改动集,已排序> <该批门禁的输入文件集,已排序>` 为空。
+
+### 4. patch-id 与人口交集(按最终 HEAD 重算)
+
+```
+$ git rev-list --count origin/feat/approval-cancel-round-phase1..HEAD
+66                                          ← 64(本分支)+ 2(并发提交)
+$ git log -p origin/feat/approval-cancel-round-phase1..HEAD | git patch-id --stable | … | sort -u | wc -l
+66                                          ← 66 个去重 patch-id,无内部重复
+$ comm -12 <上面 66 条> <origin/main 全部 patch-id,1575 条>
+(空)                                        ← 与 main 交集 = 0
+$ comm -12 <上面 66 条> <origin/feat/approval-cancel-round-phase1 独有的 62 条 patch-id>
+(空)                                        ← 与新 C-1 独有提交交集 = 0(无重复落地)
+```
+
+`origin/main` 一侧用 `git log -p origin/main | git patch-id --stable`(1824 个提交 → 1575 个去重 patch-id,merge
+提交默认不产出 patch-id,属预期)。窗口绑定:`origin/main` @ `868c8d2b26424fcaa8405661a6999abb17ec6d93`
+(= `git merge-base origin/feat/approval-cancel-round-phase1 origin/main`,且实测 `origin/main` 是新 C-1 的祖先)。
+
+### 5. push 前置校验
+
+- `origin/feat/approval-cancel-round-phase2` 仍是 `c9cad251445bd05aad42004195e0600d838078b2`(rebase 前状态,
+  本次 fetch 实测,未被 §2 的并发提交推送过)——`push --force-with-lease` 的隐式租约与此一致,理应通过;若失败即代表
+  另一方已先行推送,按硬规矩不得改用 `--force`,应停止并上报。
+- 工作树在重跑前后均为 `git status --porcelain` 空;`git rev-parse HEAD` 在整轮门禁前后一致(`05e2c26cc…`),
+  证明门禁执行期间没有第三次并发提交插入。
+
+### 6. 本节未覆盖(不得被读成已闭合)
+
+- **§2 两个并发提交的内容本身未经本步骤独立复核**——只验证了它们touch到的文件在新 HEAD 上测试绿,未逐条复核其
+  35 处符号锚点机械核验的重跑过程,也未复核 §7.6 状态写入方普查的完整性。这两个提交发布出去时,登记为「本步骤发布、
+  非本步骤审阅」。
+- 上一节(「Rebase 到 C-1 `ba8a0133d`」)登记的全部未覆盖项(P5 真 posture 变体、纯 `legacy` posture、
+  `CANCEL_ROUND_SUITE_UNKNOWN` 半边、`policy_snapshot_at_decision` 的声明式背离等)**原样成立**,本节未消解任何一条。
+- C-1 的 creation/seat-guards/outlet-guards/node-timeout 四个文件本节仍只随整组一起跑绿,未做独立 refute-first 复核
+  (与上一节同一登记,未新增复核)。
