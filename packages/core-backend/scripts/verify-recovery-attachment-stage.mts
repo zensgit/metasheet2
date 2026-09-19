@@ -414,15 +414,23 @@ try {
   }
   console.log('PASS: backend drain refuses a held connection without terminating it')
 } finally {
-  await db?.destroy()
-  if (created) {
-    // Pool.end() can resolve before PostgreSQL observes every client disconnect.
-    await awaitOwnedBackendExit()
-    assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
-    await admin.query(`DROP DATABASE "${database}"`)
-    assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_database WHERE datname=$1', [database])).rows[0].n, 0)
-    console.log('CLEAN: stage database and connections=0')
+  try {
+    await db?.destroy()
+    if (created) {
+      // Pool.end() can resolve before PostgreSQL observes every client disconnect.
+      await awaitOwnedBackendExit()
+      assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
+      await admin.query(`DROP DATABASE "${database}"`)
+      assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_database WHERE datname=$1', [database])).rows[0].n, 0)
+      console.log('CLEAN: stage database and connections=0')
+    }
+  } finally {
+    try {
+      await admin.end()
+    } finally {
+      await rm(storageRoot, { recursive: true })
+      await assert.rejects(lstat(storageRoot), { code: 'ENOENT' })
+      console.log('CLEAN: stage admin client closed and owned storage removed')
+    }
   }
-  await admin.end()
-  await rm(storageRoot, { recursive: true })
 }
