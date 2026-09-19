@@ -510,6 +510,24 @@ Tree: `9be618e686b89c8d8820763b3936ccca45a1a245` (five-file delta).
 
 ## Remaining Required Work
 
+Local startup binding checkpoint: code
+`6cb20af35dbd02a5f835027cd5190c917d1dd610`, tree
+`3447686772f4a15b0501252fd6713e5e8d92b84e` (four files).
+The actual local launcher supplies the existing upload/download storage singleton
+to custody startup, which forwards it only after unlock. OFF, wrong-secret,
+cancellation and root/receipt refusal preserve zero storage resolution; resolver
+throw/cancellation reject publication and scrub the supplied secret.
+
+Startup/application focused suites PASS 58/58, core typecheck PASS, startup source
+ESLint PASS, D2 archive wiring PASS 6/6, diff-check PASS. The initial new positive
+failed because the resolver was never called. Removing composition forwarding
+independently failed on missing attachmentStorage; restored suites PASS 58/58.
+Logs: `/private/tmp/tm-attachment-startup-{restored-tests,tsc,source-lint,wiring,port-mutation}-20260919.log`.
+Launcher ESLint was attempted but excluded by the repository TSConfig (not a
+source lint pass); actual launcher OFF/wrong-secret/cancel subprocess tests pass.
+No new DB/browser run or independent review is claimed for this binding-only
+checkpoint; the previous synthetic router/browser proof is not full launcher UAT.
+
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
 remaining purge/drift/retry concurrency; async contract;

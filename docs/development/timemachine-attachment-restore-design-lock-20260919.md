@@ -242,6 +242,14 @@ review also remain open. No new recovery semantics or production flag is enabled
 
 ## Nightly Read-Only Investigation Plan
 
+Local startup follow-up: code `6cb20af35dbd02a5f835027cd5190c917d1dd610`
+binds the existing multitable attachment storage singleton into the local custody
+composition. It resolves only after successful explicit custody unlock; OFF and
+failed unlock never resolve it. No separate attachment root, path override,
+permission, retention default or flag was added. Application admission retains
+the existing complete-port validation/snapshot. This closes the missing local
+launcher binding, not the full login/download or cleanup acceptance gates.
+
 No real environment access is authorized by this plan. Known artifact evidence:
 External Metrics run `35414465715` and Regression run `35414586092`, main
 `bb77ca5f2ce3c2825265ec8877861d367d017ead`, each report 11 checks, five
