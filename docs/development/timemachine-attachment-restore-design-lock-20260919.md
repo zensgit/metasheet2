@@ -2,6 +2,20 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+Proven unpublished-marker reconciliation at
+`2aef32ff8edb01981a923bfe7e312164ba626253` extends only the internal one-object
+retirement primitive. After the canonical tombstone is durable, private reserve
+directories with the exact key/owner/version marker and no additional contents
+can be removed without recursion. Different/incomplete proof and symlinks are
+preserved; exact proof plus unexpected contents refuses cleanup. Existing DB
+abandonment/current-reference arbitration is unchanged. No scheduler, age rule,
+retention default or user cleanup API is added.
+
+This is partial crash reconciliation: markerless/partially-written proof remains
+unprovable, and a crash between marker unlink and directory removal can leave an
+unprovable empty directory. Displaced live objects also remain separate. No full
+crash-cleanup completion or hostile shared-root guarantee is claimed.
+
 Cover sizing closure `7912fb96b1c27e4efa71d167a37041bebe67e440` replaces
 intrinsic-image expansion with existing small/medium/large heights 108/132/176px.
 Real 1440/390 Workbench changes and persists all three sizes; temporarily removing

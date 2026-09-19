@@ -863,6 +863,23 @@ flags, dispatch, deployment or real environment access.
 
 ## Outstanding Full-Scope Acceptance
 
+Latest bounded cleanup evidence: code
+`2aef32ff8edb01981a923bfe7e312164ba626253`, tree
+`bd1666275020951b8c0f4c49f749924a39a9768c`. Two new local filesystem cases
+first failed (36 existing passed), then reader/application neighbors passed
+80/80. Removing exact ownership verification caused the foreign-marker assertion
+to fail; restored before final tests. Core typecheck, source ESLint and diff-check
+pass. Logs under `/private/tmp/`: `tm-orphan-owned-{red,green,mutation,final,tsc,lint}-20260920.log`.
+
+`tm-orphan-owned-realdb-20260920.log` is a successful full owned runner without
+browser: fresh/replay, restore and stage abandonment/apply race gates passed;
+owned/stage connections zero, cluster removed. This new filesystem behavior is
+directly tested with synthetic local directories, not claimed as a real-DB fault
+injection of process death. Terra medium narrow read-only review returned no
+P1/P2 and was closed; it is not a full-PR approval. Markerless/partial-proof and
+unlink/rmdir-crash leftovers plus displaced objects remain open as described in
+the lock. No real storage, public cleanup API or background registration.
+
 Production local startup composition is wired (see the paired runtime audit at
 `f0af8722c1`); full launcher/application acceptance is not yet certified.
 Public/background cleanup scheduling remains contract-excluded, not implicitly
