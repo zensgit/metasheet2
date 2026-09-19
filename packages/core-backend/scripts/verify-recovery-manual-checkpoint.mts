@@ -2107,6 +2107,54 @@ try {
           assert.equal(metadataApi.hashArchiveAttachmentMetadata(row.metadata), binding.metadataHash)
         }
         refuseUpload = false
+        const tokenDigest = createHash('sha256').update(token).digest('hex')
+        const transactionEvidence = async () => (await query(`SELECT
+          (SELECT count(*)::int FROM meta_record_revisions WHERE sheet_id='no-genesis') AS revisions,
+          (SELECT count(*)::int FROM meta_record_history_operations WHERE sheet_id='no-genesis') AS operations,
+          (SELECT count(*)::int FROM meta_recovery_token_burns WHERE token_sha256=$1) AS burns,
+          (SELECT count(*)::int FROM meta_recovery_archive_sync_receipts WHERE token_sha256=$1) AS receipts`, [tokenDigest])).rows[0]
+        const beforeFailedApply = await transactionEvidence()
+        assert.equal(beforeFailedApply.burns, 0)
+        assert.equal(beforeFailedApply.receipts, 0)
+        for (const failurePoint of ['second-metadata', 'receipt'] as const) {
+          let metadataUpdates = 0
+          let faultReached = false
+          const failingApply = restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
+            transaction: work => uploadInput.transaction(q => work(async (statement, params) => {
+              if (failurePoint === 'receipt' && statement.includes('INSERT INTO public.meta_recovery_archive_sync_receipts')) {
+                faultReached = true
+                throw new Error('SYNTHETIC_RESTORE_RECEIPT_FAILED')
+              }
+              const result = await q(statement, params)
+              if (statement.includes('UPDATE multitable_attachments') && statement.includes('SET storage_file_id=$5')) {
+                metadataUpdates++
+                if (failurePoint === 'second-metadata' && metadataUpdates === 2) {
+                  faultReached = true
+                  throw new Error('SYNTHETIC_SECOND_METADATA_FAILED')
+                }
+              }
+              return result
+            })) })
+          if (failurePoint === 'second-metadata') {
+            assert.deepEqual(await failingApply, { ok: false, reason: 'preview-drift' })
+          } else {
+            await assert.rejects(failingApply, { message: 'SYNTHETIC_RESTORE_RECEIPT_FAILED' })
+          }
+          assert.equal(faultReached, true)
+          assert.equal(metadataUpdates, 2)
+          assert.deepEqual(await transactionEvidence(), beforeFailedApply)
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforeRestore)
+          for (const binding of metadata) {
+            const row = (await query('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [binding.attachmentId])).rows[0]
+            assert.equal(metadataApi.hashArchiveAttachmentMetadata(row.metadata), binding.metadataHash)
+          }
+          const unadopted = (await query(`SELECT state,applied_operation_id,applied_at,displaced_storage_file_id,displaced_storage_path
+            FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid`, [actorId])).rows
+          assert.equal(unadopted.length, 2)
+          assert.ok(unadopted.every(row => row.state === 'verified' && row.applied_operation_id === null
+            && row.applied_at === null && row.displaced_storage_file_id === null && row.displaced_storage_path === null))
+          assert.equal(uploadAttempts, 3)
+        }
         const appliedAttachments = await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput)
         assert.equal(appliedAttachments.ok, true, JSON.stringify(appliedAttachments))
         assert.deepEqual((await query('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[fieldId], restoredIds)
@@ -2122,7 +2170,7 @@ try {
         const afterUploads = uploadAttempts
         assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'token-replayed' })
         assert.equal(uploadAttempts, afterUploads)
-        console.log('PASS: authenticated two-file restore; second upload failure leaves metadata/record unchanged; retry reuses both objects without reuploading verified bytes; canonical adoption and token replay verified')
+        console.log('PASS: authenticated two-file restore; second upload, second metadata and final receipt failures leave no partial live effect; same-token retry reuses both files; canonical adoption and token replay verified')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
