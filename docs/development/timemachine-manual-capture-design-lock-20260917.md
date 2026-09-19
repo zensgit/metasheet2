@@ -598,3 +598,16 @@ checks and carries the private attachment state without changing its public keys
 This closes authenticated reader consumption only. Public capture source-reader
 composition, attachment file/metadata restore application and end-to-end public
 attachment restore acceptance remain OPEN. No operational flag is enabled.
+
+## Manual Command Source Composition
+
+Code `597ca95c7` binds the existing server-owned local attachment storage reader
+in the manual command factory. Requests cannot select storage roots or readers.
+The command passes the durable attachment uploader in addition to sections and
+manifest, preserving exact retry without recapture. Missing explicit policy and
+disabled runtime flags retain their existing refusals; no default policy is added.
+
+Isolated command acceptance now covers real synthetic source files through
+publication and complete authenticated reading. This does not prove HTTP/browser
+attachment restoration or file/metadata restore writes. Those remain OPEN;
+scalar restore evidence must not be substituted for attachment restore evidence.

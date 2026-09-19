@@ -1383,3 +1383,26 @@ Logs: `/private/tmp/tm-attachment-reader-realdb.log`,
 This is local evidence, not fresh remote CI or attachment restore-write proof.
 No external review verdict is claimed for this checkpoint. Public source-reader
 composition and file/metadata restore acceptance remain unfinished.
+
+## Manual Command Attachment Composition
+
+Code `597ca95c7` wires the server local source reader and durable attachment
+uploader. Full isolated database driver PASS before and after mutation restoration:
+command captures live/deleted synthetic files, returns recoverable, loads published
+authority and reconstructs complete state with byte-exact attachments. Repeating
+the same command returns the same result with no additional source reads.
+
+Mutation omitting the source-reader binding fails the new command positive with
+`RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE`; restored runner GREEN. Both
+runs clean the owned database/connections and stop/remove the synthetic cluster.
+Acceptance tsc, command-source ESLint and diff-check PASS.
+Logs: `/private/tmp/tm-attachment-command-realdb.log`,
+`/private/tmp/tm-attachment-command-mutation.log`,
+`/private/tmp/tm-attachment-command-restored.log`.
+
+The command test uses synthetic server adapters and is not HTTP/browser attachment
+acceptance. Production factory wiring reuses the existing attachment storage
+service; no environment flag or customer storage was changed. Attachment restore
+application and final end-to-end acceptance remain OPEN. Previous remote head
+`992f92716a306cf7f6f5b447c440c3fe3da688cf` had 37 SUCCESS and one SKIPPED at
+readback; that result does not cover these subsequent local commits.
