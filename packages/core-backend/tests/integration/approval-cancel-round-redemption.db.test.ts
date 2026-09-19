@@ -3250,8 +3250,19 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    *
    * THE INJECTION POINT is the production registry, not a test-only seam added for this case: the
    * bound delivery is replaced (save-and-restore, the convention `c3open` established in this file)
-   * with one that throws SYNCHRONOUSLY, which the census in the block comment above shows is the
-   * shape a real listener bug takes. No production line changes to make this case runnable.
+   * with one that throws SYNCHRONOUSLY — the shape a throw FROM THE DELIVERY HOP ITSELF takes,
+   * which is what the census in the block comment above establishes.
+   *
+   * ⚠️ CORRECTION (2026-09-19, round-3b gate P2-1) — comment only, no assertion moved. This
+   * sentence used to read 「the shape a real listener bug takes」, which contradicted the very
+   * block it cites as authority: that block's own CORRECTION note records that a listener bug
+   * CANNOT reach the delivery's try at all, because `event-bus.ts`'s `subscribe()` registers a
+   * WRAPPER holding the bus's own try/catch (`:46-50`) rather than the handler (`:56`), so a
+   * subscriber's exception never propagates back up the emit chain. Nothing about this case
+   * changes: the injected shape (the bound delivery itself throwing synchronously) was already
+   * the faithful model of 「this hop throws」; only the ATTRIBUTION was wrong.
+   *
+   * No production line changes to make this case runnable.
    *
    * THE THREE ASSERTIONS owner named:
    *   (a) the approve still returns 200 — the committed cancellation is NOT reported as a failure,
