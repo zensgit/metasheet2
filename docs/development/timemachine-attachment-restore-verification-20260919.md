@@ -136,6 +136,39 @@ by this checkpoint. The public preview still refuses attachment differences.
   and `/private/tmp/tm-attachment-purge-path-restored-20260919.log`.
 - This is a restore prerequisite, not metadata writeback or browser acceptance.
 
+## Metadata Transaction Participant
+
+Exact code checkpoint: `b50271ab2ef1c54ddb1d7751d2af0b546dd61b1d`, parent
+`2ba545173` (late purge completion protection). Local only; no remote CI or
+successor publication is claimed.
+
+- New internal participant locks the verified source/stage and existing original
+  attachment metadata, checks actor/token/object/source identity, original row and
+  field existence/type, retained metadata fingerprint and current authorization.
+  It preserves filename/media metadata, changes storage identity and clears purge/
+  deletion markers inside the caller transaction. No public entry point added.
+- Owned PostgreSQL positives/negatives cover authority denial, zero transaction
+  depth, actor/token/object/field substitution, unverified reserved stage, stale
+  fingerprint, missing original record, changed field type, metadata/provider
+  drift, successful metadata update and stale retry rejection.
+- A forced later failure rolls the entire metadata row back byte-equivalently.
+  This uses a synthetic enclosing transaction, NOT actual record/history apply.
+- Removing the metadata hash check causes an expected-rejection failure at
+  verifier line 135; removing the verified-state check causes one at line 144.
+  Both were restored and the complete stage gate passed afterwards.
+- Full owned driver: fresh migrations/replay (32 migration census, 989 catalog
+  objects), historical neighbors 59/59 and 127/127, existing encrypted capture/
+  reader and HTTP scalar restore, plus stage/metadata gates PASS. Fingerprint
+  remains `e89ec920a16e18b651df5a062a4ab31183010fa43d8c93472a3584c8e68d9d3c`.
+- Focused unit neighbors: six files / 118 tests PASS. Wiring contract: 37/37 PASS.
+  Core two-project type-check, new source ESLint and diff-check PASS. All owned
+  databases/connections and cluster directories removed.
+- Logs: `/private/tmp/tm-attachment-metadata-{full,restored,unit,wiring}-20260919.log`,
+  `/private/tmp/tm-attachment-metadata-hash-mutation-20260919.log`, and
+  `/private/tmp/tm-attachment-metadata-verified-mutation-20260919.log`.
+- Sol high bounded read-only review was closed while running after its time
+  limit, without a terminal verdict. No independent approval is claimed.
+
 ## Remaining Required Work
 
 Authenticated-reader integration; prepared file ownership and crash cleanup;

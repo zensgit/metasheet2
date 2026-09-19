@@ -85,6 +85,24 @@ transaction is implemented. Apply/abandon/cleanup coordination and reference-
 aware deletion are still required before exposure; do not infer those guarantees
 from the reservation and verified states alone.
 
+### Transactional Metadata Participant
+
+The internal metadata participant requires a nonzero transaction-depth probe and
+fresh authorization, then locks the verified source archive and the actor/token/
+attachment stage. It compares the complete reserved identity and object UUID.
+Only the existing original record and attachment field may join the retained
+attachment row. A fingerprint of its database JSON binds the pre-apply metadata;
+drift refuses rather than importing stale metadata. The original filename and
+media type are retained, size must match, and this bounded implementation supports
+the local provider only. A fresh stage object replaces storage identity while
+clearing deleted/purge markers in the same transaction.
+
+This participant is not a public entry point. Canonical writer fencing, locking,
+preview/token fingerprint binding, reference CAS, history, receipt consumption,
+cleanup ownership and runtime wiring remain mandatory. No executable preview is
+enabled by these internal changes. The test's forced enclosing rollback proves
+transaction participation only, not the yet-unwired history/record write chain.
+
 ## Required Evidence
 
 | Gate | Required oracle | Status |
