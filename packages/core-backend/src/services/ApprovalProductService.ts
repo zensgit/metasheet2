@@ -143,6 +143,11 @@ import type {
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import {
+  ACCOUNT_ACTIVATION_INVALID_CODE,
+  ACCOUNT_PENDING_ACTIVATION_CODE,
+  evaluateUserAuthenticationGate,
+} from '../auth/user-activation'
+import {
   ServiceError,
   CancelRoundOutletForbiddenError,
   CancelRoundSuiteForbiddenError,
@@ -302,18 +307,222 @@ function isPostgresUniqueViolation(error: unknown): boolean {
 }
 
 /**
- * Lock:143 — the `suite` ceilings from the decoded rule page (`reviews/设置审批撤销规则.txt:41-43`):
- * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` is blocked at creation (§14.3 #14)
- * before `windowDays` is ever consulted, so it carries no meaningful ceiling here. Phase 1 only
- * ships `leave`; the other keys are held for the suites the lock reserves for later phases so a
- * fixture that sets one of them does not silently fall through to `other`'s value.
+ * Lock:143 — the closed `suite` domain, verbatim: `suite ∈ {'attendance','leave','other','forbidden'}`.
+ * A value outside this set is a template/seed CONFIGURATION error, never a silently-defaulted one
+ * (Codex review 2026-09-19, finding 2: the pre-fix code kept the out-of-domain string verbatim and
+ * took `other`'s number, so a value like `'Forbidden'` walked straight through the lock's only
+ * named creation-time code, `CANCEL_ROUND_SUITE_FORBIDDEN` — §14.3 #14 — and landed in
+ * `policy_snapshot_at_create`, corrupting the very snapshot I4/G4 designate as the audit basis).
  */
-const CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS = Object.freeze({
+const CANCEL_ROUND_SUITES = ['attendance', 'leave', 'other', 'forbidden'] as const
+type CancelRoundSuite = (typeof CANCEL_ROUND_SUITES)[number]
+
+/** Lock:143 — phase 1 ships only `leave`; the tag is absent on every pre-existing instance. */
+const CANCEL_ROUND_DEFAULT_SUITE: CancelRoundSuite = 'leave'
+
+/**
+ * Lock:143 — the `suite` CEILINGS from the decoded rule page (`reviews/设置审批撤销规则.txt:41-43`):
+ * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` 0 (lock:143 fixes that suite's window
+ * at 0 and §14.3 #14 blocks it at creation before the number matters). Lock:143's
+ * `windowDays ∈ [0, 上限]` makes these an ENFORCED UPPER BOUND, not a default — renamed from
+ * `CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS` per Codex review 2026-09-19 finding 2 (命名即合同: the old
+ * identifier was itself the bug's self-description). They remain the value used when the tag is
+ * ABSENT, which is lock:143's 「由模板管理员在上限内设」 read: nothing set ⇒ the widest the suite allows.
+ */
+const CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS: Readonly<Record<CancelRoundSuite, number>> = Object.freeze({
   attendance: 180,
   leave: 90,
   other: 90,
   forbidden: 0,
-} as const)
+})
+
+export type CancelRoundRoundPolicy = { suite: CancelRoundSuite; windowDays: number }
+
+/**
+ * Lock:143 / §5 I4 / §2-G4 — the SINGLE derivation of `roundPolicy = { windowDays, suite }` for BOTH
+ * time points: the creation snapshot (`policy_snapshot_at_create`) and C-2's final in-transaction
+ * evaluation (`policy_snapshot_at_decision`). Deliberately ONE function: the lock requires both
+ * points to evaluate the same policy, and a second clamp/derivation at the decision point would
+ * drift from this one (Codex review 2026-09-19 finding 2 explicitly rejects a decision-side clamp).
+ *
+ * Domain, ENFORCED rather than assumed:
+ * - `suite`: absent (`undefined`/`null`) ⇒ `CANCEL_ROUND_DEFAULT_SUITE`. Anything else MUST be one of
+ *   `CANCEL_ROUND_SUITES`; out-of-domain is a 409 `CANCEL_ROUND_SUITE_UNKNOWN`, never a silent
+ *   fallback to `leave`/`other`.
+ * - `windowDays`: absent ⇒ the suite's ceiling. Anything else MUST be an INTEGER in `[0, ceiling]`
+ *   (`Number.isInteger` already excludes NaN/±Infinity and every non-number type); otherwise a 409
+ *   `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`. BLOCK, not clamp — lock:143 says `windowDays ∈ [0, 上限]`,
+ *   「由模板管理员在上限内设」, i.e. the bound is a domain constraint on what may be SET; a clamp
+ *   turns a misconfiguration into a silent 「悄悄按 90 算」 that no administrator can audit, and this
+ *   repo's narrowing-fix discipline is write-path REJECT with read-path byte parity.
+ * - `forbidden` short-circuits the window check and returns lock:143's fixed `windowDays = 0`, so
+ *   the LOCK-ANCHORED §14.3 #14 code (`CANCEL_ROUND_SUITE_FORBIDDEN`, raised by the caller right
+ *   after this call) always wins over a window complaint for that suite — a deliberate, documented
+ *   precedence, not an accident of statement order.
+ *
+ * Both rejections are values-free: `details` carries the closed set, or the already-validated suite
+ * and its ceiling — never the offending value (same discipline as
+ * `validateAndFreezeRequesterChoices`'s values-free 422s).
+ *
+ * C-2 consumption note (the second time point is NOT in this slice): the final in-transaction
+ * evaluation must call THIS function and treat a throw as `blocked` + the thrown code — never as a
+ * silent `expired`. `expired` is an irreversible terminal state and must not be built on a
+ * configuration error (same trade-off the lock already makes for `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`).
+ *
+ * NEW CODES — implementer erratum: neither `CANCEL_ROUND_SUITE_UNKNOWN` nor
+ * `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` is registered in the lock's §14.3 table (which names only
+ * `CANCEL_ROUND_OUTLET_FORBIDDEN` and `CANCEL_ROUND_SUITE_FORBIDDEN`). Registered instead in this
+ * slice's design MD §3.1 and flagged for owner registration — the lock file itself is
+ * owner-authored and is NOT edited from here. Same discipline as `CANCEL_ROUND_REQUESTER_ONLY`.
+ */
+function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): CancelRoundRoundPolicy {
+  const rawSuite = metadata.suite
+  let suite: CancelRoundSuite
+  if (rawSuite === undefined || rawSuite === null) {
+    suite = CANCEL_ROUND_DEFAULT_SUITE
+  } else if (typeof rawSuite === 'string' && (CANCEL_ROUND_SUITES as readonly string[]).includes(rawSuite)) {
+    suite = rawSuite as CancelRoundSuite
+  } else {
+    throw new ServiceError(
+      "This document's suite tag is not one this system recognises — ask an administrator to correct the template's suite configuration",
+      409,
+      'CANCEL_ROUND_SUITE_UNKNOWN',
+      { allowedSuites: [...CANCEL_ROUND_SUITES] },
+    )
+  }
+
+  const ceiling = CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS[suite]
+  if (suite === 'forbidden') return { suite, windowDays: ceiling }
+
+  const rawWindowDays = metadata.windowDays
+  if (rawWindowDays === undefined || rawWindowDays === null) return { suite, windowDays: ceiling }
+  if (
+    typeof rawWindowDays !== 'number'
+    || !Number.isInteger(rawWindowDays)
+    || rawWindowDays < 0
+    || rawWindowDays > ceiling
+  ) {
+    throw new ServiceError(
+      "This document's cancel window is outside the range its suite allows — ask an administrator to correct the template's window setting",
+      409,
+      'CANCEL_ROUND_WINDOW_OUT_OF_RANGE',
+      { suite, ceiling },
+    )
+  }
+  return { suite, windowDays: rawWindowDays }
+}
+
+/**
+ * Lock §2-G3 — the machine-checkable reason categories a cancel-round seat can be refused for.
+ * Categories only: the error body NEVER carries a person id or name (「提示管理员」 lands in the message
+ * and the audit trail, not in a values-bearing `details`).
+ */
+const CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS = [
+  'inactive',
+  'pending_activation',
+  'activation_invalid',
+  'not_found',
+] as const
+type CancelRoundSeatIneligibilityReason = (typeof CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS)[number]
+
+/**
+ * Lock §2-G3 (lock:74-76) — 「撤销:保留原节点的会签/或签语义,但**重新验证当前资格**(在职、仍在该
+ * 组织单元）;…资格不成立的席位 ⇒ 阻断并提示管理员」. Codex review 2026-09-19 finding 1
+ * (CONFIRMED P1, real-DB): the cancel round replays the original document's `approval_records
+ * (action='approve')` actor ids verbatim into `requesterSnapshot.requesterChoices`, and the
+ * `requester_choice` resolver's own module doc states it does NO live directory read because
+ * 「the choices were scope-validated at create」 — a precondition `createCancelRoundInstance` was the
+ * ONLY caller not satisfying. A deactivated approver was seated silently (201/pending), could not
+ * log in (`AuthService` → `evaluateUserAuthenticationGate`), could not be reassigned or transferred
+ * (§14.3 #12/#13 reject cancel rounds outright), and the `'all'` co-sign node therefore deadlocked
+ * behind `uq_approval_rounds_pending_document` forever.
+ *
+ * WHAT this reuses, and why it is WIDER than the normal path rather than a narrower lookalike:
+ * - The set-membership IDIOM is `validateAndFreezeRequesterChoices`'s company-scope baseline: read
+ *   the directory for the chosen ids, then refuse if ANY id is not in the eligible set. Absence of
+ *   a `users` row therefore FAILS CLOSED by construction, exactly as it does there (a missing row
+ *   is not in `activeIds`) — not an extra rule invented here.
+ * - The PREDICATE is `evaluateUserAuthenticationGate`, the shared gate for password login, token
+ *   refresh/verify, DingTalk SSO and API tokens. It denies `role = 'disabled'` and
+ *   `activation_status = 'pending_activation'` in addition to `is_active = FALSE`. Checking only
+ *   `is_active` would seat people the login gate refuses — i.e. would be a NARROWER lookalike of the
+ *   thing it claims to mirror, which is itself contract narrowing.
+ * - Consequence, disclosed rather than laundered: this gate is WIDER than
+ *   `validateAndFreezeRequesterChoices`'s own company baseline (`is_active = TRUE` alone). Aligning
+ *   the NORMAL create path to the login gate would be a behaviour change to a shipped endpoint and
+ *   is an OWNER call; it is deliberately NOT done here. See the slice's design MD §3.4.
+ *
+ * WHERE: the caller invokes this inside the creation transaction, under the SAME
+ * `SELECT * FROM approval_instances … FOR UPDATE` as the WI-16 requester gate and the §14.3 #14
+ * suite gate, and BEFORE the first INSERT — a stale read must not authorize a seat.
+ *
+ * HOW it fails: BLOCK with zero rows. It must NEVER drop an ineligible id and continue: the cancel
+ * node is `approvalMode: 'all'`, so filtering would silently LOWER the co-sign threshold — the
+ * opposite of 「阻断并提示管理员」.
+ *
+ * A directory read that THROWS is not wrapped into a named retryable (unlike
+ * `validateAndFreezeRequesterChoices`'s 503): inside this transaction any failed statement aborts
+ * the txn and the caller's `rollbackQuietly` guarantees zero rows, which is already the fail-closed
+ * outcome — adding a named code no real-DB test can exercise would be an untested assertion.
+ *
+ * NEW CODE — implementer erratum: `CANCEL_ROUND_SEAT_INELIGIBLE` is not registered in the lock's
+ * §14.3 table; registered in this slice's design MD §3.1 and flagged for owner.
+ *
+ * NOT IN THIS SLICE (「仍在该组织单元」, the org half of G3): no `user_orgs` seat-eligibility
+ * predicate exists ANYWHERE in this repo today, so adding one is NEW behaviour, not parity with the
+ * normal path — an owner call, and `approval_instances.org_id` is nullable so its NULL semantics
+ * must be defined first. Recorded OPEN in the design MD §3.4 and the verification MD, not silently
+ * skipped.
+ */
+async function assertCancelRoundSeatsEligibleInTxn(
+  client: ApprovalDbClient,
+  approverIds: readonly string[],
+): Promise<void> {
+  if (approverIds.length === 0) return
+  const ids = [...new Set(approverIds)]
+  const directory = await client.query<{
+    id: string
+    is_active: boolean | null
+    role: string | null
+    activation_status: string | null
+  }>(
+    `SELECT id, is_active, role, activation_status FROM users WHERE id = ANY($1::varchar[])`,
+    [ids],
+  )
+  const byId = new Map(directory.rows.map((row) => [row.id, row]))
+  const reasons = new Set<CancelRoundSeatIneligibilityReason>()
+  let ineligibleCount = 0
+  for (const id of ids) {
+    const row = byId.get(id)
+    if (!row) {
+      ineligibleCount += 1
+      reasons.add('not_found')
+      continue
+    }
+    const denial = evaluateUserAuthenticationGate(row)
+    if (!denial) continue
+    ineligibleCount += 1
+    reasons.add(
+      denial.code === ACCOUNT_PENDING_ACTIVATION_CODE
+        ? 'pending_activation'
+        : denial.code === ACCOUNT_ACTIVATION_INVALID_CODE
+          ? 'activation_invalid'
+          : 'inactive',
+    )
+  }
+  if (ineligibleCount === 0) return
+  throw new ServiceError(
+    'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore or replace the account, then retry',
+    409,
+    'CANCEL_ROUND_SEAT_INELIGIBLE',
+    {
+      ineligibleCount,
+      // Stable, deterministic order from the constant — never the iteration order of the seat list
+      // (which is itself derived from person ids).
+      reasons: CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS.filter((reason) => reasons.has(reason)),
+    },
+  )
+}
 
 type PublishedDefinitionRow = {
   id: string
@@ -8361,18 +8570,20 @@ export class ApprovalProductService {
       // 1 reads the suite tag off the ORIGINAL instance's own `metadata.suite` so a fixture/seed can
       // pin it directly (lock:143's "seed/夹具直接给出"), defaulting to `'leave'` — phase 1's only
       // shipped suite — when the tag is absent (every pre-existing instance in the corpus).
+      //
+      // The derivation below ENFORCES lock:143's two domains (`suite ∈ {four values}`,
+      // `windowDays ∈ [0, 上限]`) rather than defaulting around them — Codex review 2026-09-19
+      // finding 2. Order matters and is deliberate: the enum/range check runs first so an
+      // out-of-domain tag can never reach (and slip past) this literal `=== 'forbidden'` comparison,
+      // while `forbidden` itself short-circuits the window check inside the helper so THIS
+      // lock-anchored code still wins for that suite.
       const originalMetadata = toNullableRecord(original.metadata) ?? {}
-      const suite = typeof originalMetadata.suite === 'string' ? originalMetadata.suite : 'leave'
+      const { suite, windowDays } = deriveCancelRoundRoundPolicy(originalMetadata)
       if (suite === 'forbidden') {
         throw new CancelRoundSuiteForbiddenError(
           "This document's suite does not permit a cancel round",
         )
       }
-      const windowDays =
-        typeof originalMetadata.windowDays === 'number'
-          ? originalMetadata.windowDays
-          : CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS[suite as keyof typeof CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS]
-            ?? CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS.other
 
       // I3 (§5) is ultimately enforced by `uq_approval_rounds_pending_document` (caught below on
       // 23505) — this pre-check only turns the common case into a named error instead of a raw
@@ -8399,6 +8610,12 @@ export class ApprovalProductService {
       const approverIds = approverRows.rows
         .map((row) => row.actor_id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
+
+      // Lock §2-G3 — re-qualify EVERY seat before any write, under the same `FOR UPDATE` taken
+      // above. BLOCK on failure (never filter-and-continue: the cancel node is `approvalMode:
+      // 'all'`, so dropping a seat would silently lower the co-sign threshold). See the helper's
+      // own doc for what it reuses, why it is wider than the normal path, and what is left OPEN.
+      await assertCancelRoundSeatsEligibleInTxn(client, approverIds)
 
       // §14.1 — `requesterSnapshot.id` MUST equal the original requester (the revoke gate at the
       // A4 branch above reads exactly this key); `requesterChoices[CANCEL_ROUND_APPROVAL_NODE_KEY]`

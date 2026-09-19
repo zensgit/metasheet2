@@ -2852,3 +2852,274 @@ fetch of `main`, no push to it). Zero merge, undraft, PR-state, or PR-body chang
   current tree (quoted inline above), not copied from the gate report's prose — but none of it is a
   NEW behavioral claim requiring a NEW mutation; round-5's own R5-M1…M10 (`impl-gate-C-slice1-round5-20260918.md`
   §4) remain the mutation evidence for the 2×2 table in K2, cited, not rerun.
+
+# Part L — Codex 审阅 2026-09-19 修复(finding 1 席位再资格化 + finding 2 套件/窗口定域)
+
+**Pass**: fix round for the two independently-verified Codex findings against this slice.
+**Starting HEAD**: `c4dc4b9285260473cdc052c0f624cc2a72450c6f` (= `origin/feat/approval-cancel-round-phase1`
+at fetch time; `git status --porcelain` empty before the first edit).
+**Binding inputs** (read in full, not summarised from the task text):
+`reviews/verify-codex-cancel-finding1-20260919.md`(CONFIRMED P1,修 C-1)、
+`reviews/verify-codex-cancel-finding2-20260919.md`(CONFIRMED P2,策略函数+创建期守卫落 C-1)。
+**Private virgin DBs**, all `createdb`-ed here and `dropdb`-ed at the end; no shared/staging/prod DB
+was touched, no lock file was edited, no PR state changed:
+`metasheet2_fix_c1`(功能与 mutation)、`metasheet2_fix_c1_old`(旧实现对照,用后即删)、
+`metasheet2_fix_c1_full`(required `test (20.x)` 全量连跑)。
+
+## L0. 两处任务书与绑定报告冲突,以报告为准(如实记录,不是漏做)
+
+| 任务书 ① 的措辞 | 绑定报告的要求 | 本轮采用 | 理由 |
+|---|---|---|---|
+| detail 要能告诉管理员「**哪些席位**」 | finding-1 §5.2.2:**不得回显被停用者的 id/姓名**,`details` 只带可机核结构 | 报告 | 报告是绑定输入,且任务书自己引述的报告摘要里同样写着 "machine-checkable details only, never echoing ids";`validateAndFreezeRequesterChoices` 的既有纪律也是 values-free。「提示管理员」落在 message 与审计,不在错误体 |
+| 原因枚举含 `left-org` | finding-1 §5.2.1:组织半边是**新谓词 / 合同新增 / owner 裁**;「若 owner 不裁,先只落在职半边并逐字记 OPEN」 | 报告 | 全仓今天没有任何按 `user_orgs` 做席位资格的谓词(见设计 MD §3.4);本轮无 owner 裁决,故 A 独立落地、B 记 OPEN,并留一条 `org_id IS NULL` 正控把 NULL 语义问题钉在明处 |
+
+窗口越界的「阻断 vs 夹紧」二选一,按锁文措辞取**阻断**:lock:143 写的是 `windowDays ∈ [0, 上限]`、
+「由模板管理员在上限内设」——上限是**可设值的定义域约束**,越界即配置错误;夹紧会把配置错误变成
+「悄悄按 90 算」,与该句的可审性冲突,也与本仓「收窄修复 = 写路径拒绝」的既有纪律相反。
+依据逐字写在设计 MD §3.4 与 `deriveCancelRoundRoundPolicy` 的 doc comment 里。
+
+## L1. 改了什么(7 个文件)
+
+| 文件 | 改动 |
+|---|---|
+| `src/services/ApprovalProductService.ts` | 常量改名 `CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS` → `CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS`;新增 `CANCEL_ROUND_SUITES` 闭集与 `CANCEL_ROUND_DEFAULT_SUITE`;新增**唯一**派生函数 `deriveCancelRoundRoundPolicy`(枚举 + 范围,两处时点共用);新增 `assertCancelRoundSeatsEligibleInTxn`;`createCancelRoundInstance` 锁内接线(见设计 MD §3.4 的十步守卫序) |
+| `tests/helpers/approval-schema-bootstrap.ts` | 新增导出 `ensureLocalUserRow`(TEST-ONLY);**未** bump `APPROVAL_SCHEMA_BOOTSTRAP_VERSION`——本轮零 DDL 改动,bump 会逼所有套件重跑 bootstrap |
+| `tests/integration/approval-cancel-round-creation.db.test.ts` | 7 条新用例 + 会签夹具 + 零行 oracle;`authToken` 现在建 `users` 行 |
+| 另 4 个 `approval-cancel-round-*.db.test.ts`(node-timeout-effect / outlet-guards / redemption / seat-guards) | 只改 `authToken` 建 `users` 行 + afterAll 清理(见 L2) |
+
+### L2. 为什么 5 个夹具文件都要改:`dev-token` 不写 `users` 行
+
+`GET /api/auth/dev-token`(`src/routes/auth.ts:63-110`)只签 JWT 并 `createUserSession`,**不插 `users` 行**。
+修前基线库实测:跑完 7 个撤销轮套件后 `SELECT count(*) FROM users` = **0**。
+新守卫复用的先例(`validateAndFreezeRequesterChoices` 的 company 基线)是**集合成员判定**——
+`activeIds` 只装查回来的行,`ids.some(id => !activeIds.has(id))` 即拒——所以**查无此行天然 fail-closed**,
+这不是本轮另加的规则。让缺行通过才是「另造更窄同类物」。生产审批人必然有 `users` 行(他要登录才能审批),
+因此正确的修法是把夹具改成生产形状,而不是把守卫改成 fail-open。**这条是本轮唯一的跨文件外溢,已全量披露。**
+
+未打补丁时的实测(证明这 5 个文件确实是全部人口,且改动确实必要):
+```
+7 files / 20 failed | 28 passed (48)   ← 仅加守卫、未改夹具
+加 ensureLocalUserRow 后:7 files / 48 passed (48)   ← 与修前基线逐数相同,零附带行为变化
+```
+
+## L3. 验收行(新增 7 条,全部在既有文件 `approval-cancel-round-creation.db.test.ts` 内)
+
+新增用例**没有新建真库测试文件**,因此四道钉(两点接线 / 哨兵 / `plugin-tests.yml` 清单 / ci-wiring 人口 /
+ci-realdb-step-contract / s6a 钉)**人口未变**——机械核验见 L6。
+
+| # | 用例(verbatim 前缀) | 锚点 | 断言 |
+|---|---|---|---|
+| P1 | `§2-G3 正控 P1 — every original approver is still eligible ⇒ the round is created with ONE SEAT PER APPROVER` | G3 半 A | 会签 2 席位:**数量等于原审批人数**且集合逐字相等(反「过滤后继续」的 oracle) |
+| P2 | `§2-G3 正控 P2 — an original whose org_id IS NULL is NOT refused` | G3 半 B OPEN | `org_id IS NULL` 不被新门误杀;新实例 `org_id` 仍为 NULL;一行 pending 轮次 |
+| N1 | `§2-G3 负控 N1 — a DEACTIVATED original approver blocks creation` | G3 半 A | 409 `CANCEL_ROUND_SEAT_INELIGIBLE`;`details` 逐字 `{ineligibleCount:1, reasons:['inactive']}`;键集恰为两键;`details`/`message` 均**不含**被拒者 id;`approval_rounds` / 专用 `approval_instances` / 其上的 `approval_assignments` **三张表零行** |
+| N2 | `§2-G3 负控 N2 — the seat gate is the SHARED LOGIN gate, not a narrower is_active lookalike` | G3 半 A | 三腿逐一单变量:`pending_activation`(is_active 仍 TRUE)⇒ reasons `['pending_activation']`;`role='disabled'`(is_active 仍 TRUE)⇒ `['inactive']`;删 `users` 行 ⇒ `['not_found']`;每腿零行;**判别控制**:同一单据把行恢复后同一调用 201 |
+| A | `lock:143 负控 A — windowDays outside [0, suite ceiling] blocks creation` | lock:143 | `91` / `-1` / `90.5` / 字符串 `"90"` 四腿各 409 `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`、`details` 逐字 `{suite:'leave', ceiling:90}`、每腿零行;**判别控制**:同一单据 `windowDays=0` ⇒ 201 且快照逐字 `{suite:'leave', windowDays:0}` |
+| B | `lock:143 正控 B — windowDays = 90 (the leave ceiling, inclusive) is accepted` | lock:143 | 上界闭区间可用;`policy_snapshot_at_create.roundPolicy` 逐字 `{suite:'leave', windowDays:90}` |
+| C | `lock:143 正控 C — an out-of-domain suite tag ("Forbidden") is rejected` | lock:143 + §14.3 #14 | 409 `CANCEL_ROUND_SUITE_UNKNOWN`、`details.allowedSuites` 逐字四值、零行(这正是 finding-2 §6 在旧码上实测**走得过去**的那条路) |
+| D | (既有)`§14.3 #14 (WI-6) — suite="forbidden" is rejected before any write` | §14.3 #14 | 保持绿——证明新枚举门没有把锁文唯一点名的创建期错误码改道 |
+
+命令与结果(处女库 `metasheet2_fix_c1`,逐字):
+```
+$ DATABASE_URL=postgresql://chouhua@localhost:5432/metasheet2_fix_c1 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    $(ls tests/integration/approval-cancel-round-*.db.test.ts) --reporter=dot
+ Test Files  7 passed (7)
+      Tests  55 passed (55)          （修前基线同库同命令:48 passed (48);差 = 本轮 7 条）
+$ npx tsc --noEmit
+（无输出,EXIT 0）
+```
+
+## L4. Mutation 台账(cp 备份 → 改 → 单跑 → cp 还原 → cmp,逐条实跑)
+
+备份件:`reviews/c1-fix-mutbak/ApprovalProductService.ts.backup`;每次还原后 `cmp` **identical**,
+全部跑完后 `git status --porcelain` 只剩本轮的 7 个有意改动文件。逐条日志在 `reviews/c1-fix-mutbak/<MUT>.log`。
+
+| Mutation | 做了什么 | 结果 | 变红的用例(逐字) |
+|---|---|---|---|
+| **M1-GUARD-DELETED** | 整段删掉 `assertCancelRoundSeatsEligibleInTxn` 调用 | 2 failed / 11 passed | N1、N2 |
+| **M2-BLOCK-BECOMES-FILTER** | 把阻断换成「查 `is_active=TRUE` 后把不合格者过滤掉再继续」 | 2 failed / 11 passed | N1、N2 |
+| **M4-DETAILS-ECHO-IDS** | 错误体 `details` 里加回被拒者 id 数组 | 1 failed / 12 passed | N1 |
+| **M5-WINDOW-RANGE-DELETED** | 范围/类型判据恒假 | 1 failed / 12 passed | A |
+| **M6-ENUM-FALLS-BACK-TO-DEFAULT** | 域外 suite 回落到默认 `leave`(= 修前行为) | 1 failed / 12 passed | C |
+
+**M2 的判别力落点要说清楚,不要过强**:M2 下变红的是 **N1/N2 的「必须抛」+「三表零行」**两组断言,
+**不是** P1 的「席位数 = 审批人数」——P1 的夹具两人都合格,过滤器在它身上是恒等变换。
+P1 的精确计数断言是**纵深**(挡住「既过滤又仍然建单」的将来变体),不是本轮 M2 的承重探针。
+
+**M3(把资格校验挪到 `FOR UPDATE` 之外)—— NOT COVERED,理由写明,不用顺序论证冒充竞态证据。**
+`FOR UPDATE` 锁的是 `approval_instances` 的那一行,它**不**与 `UPDATE users SET is_active=FALSE`
+互斥(不同表、无锁关系)。READ COMMITTED 下资格 SELECT 在事务内无论放前放后都取新快照,
+「校验→INSERT」之间的窗口两种放法都存在。因此这条 mutation 在本谓词下**不可证伪**,本轮不构造竞态,
+如实记 NOT COVERED。同时声明:放在同一把 `FOR UPDATE` 之下的要求**没有被削弱**——它保证的是与
+WI-16 门、§14.3 #14 门、以及后续席位 INSERT 的**原子性**(期间没有第二个撤销轮创建能插进来)。
+
+## L5. 旧实现对照(证明是 fixed,不是 never-broken)
+
+`cp` 现源码留存 → `git show c4dc4b928:…/ApprovalProductService.ts > <同路径>` → 用**本轮的新用例**跑
+**独立处女库** `metasheet2_fix_c1_old` → `cp` 还原 → `cmp` identical。
+新用例**不 import** 任何本轮新增的服务端符号,所以旧码下的红是真红,不是模块解析错误。
+
+```
+$ git show c4dc4b928:packages/core-backend/src/services/ApprovalProductService.ts > <path>   # 12882 lines
+$ DATABASE_URL=…/metasheet2_fix_c1_old EXPECT_DB=1 npx vitest --config vitest.integration.config.ts \
+    run tests/integration/approval-cancel-round-creation.db.test.ts --reporter=dot
+ FAIL  §2-G3 负控 N1 — a DEACTIVATED original approver blocks creation …
+ FAIL  §2-G3 负控 N2 — the seat gate is the SHARED LOGIN gate, not a narrower is_active lookalike …
+ FAIL  lock:143 负控 A — windowDays outside [0, suite ceiling] blocks creation …
+ FAIL  lock:143 正控 C — an out-of-domain suite tag ("Forbidden") is rejected …
+      Tests  4 failed | 9 passed (13)
+$ cp <backup> <path> && cmp <backup> <path>   → identical
+```
+
+方向正确:**四条负控在旧码上红、在新码上绿**;三条正控(P1、P2、B)与 6 条既有用例**两边都绿**,
+即新门没有误伤既有行为。日志:`reviews/c1-fix-mutbak/OLD-CODE-c4dc4b928.log`。
+(该日志尾部另有一条 `approval_rounds_document_id_fkey` 的 teardown 报错——旧码在四条负控里**真的建出了轮次**,
+夹具从未登记那些 id,afterAll 删原单据时被 FK 挡住。这条报错本身就是「旧码确实放行」的附带实证,
+也是该对照必须跑在一次性库里的原因。)
+
+## L6. 四道钉 / 接线人口:未变,机械核验
+
+本轮**零新增真库测试文件**(新用例进既有的 `approval-cancel-round-creation.db.test.ts`),
+故 `plugin-tests.yml` 未改 ⇒ s6a `pluginTestsWorkflow` 钉不动 ⇒ 不占合并串行化窗口。
+
+```
+$ cd packages/core-backend && grep -c "approval-cancel-round" vitest.config.ts          → 7   （两点接线之一,未变）
+$ grep -c "tests/integration/approval-cancel-round-.*\.db\.test\.ts \\\\" .github/workflows/plugin-tests.yml → 7   （之二,未变）
+$ grep -l "EXPECT_DB === '1'" tests/integration/approval-cancel-round-*.db.test.ts | wc -l → 7   （哨兵普查)
+$ node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs  → pass 1 fail 0  （s6a 钉）
+$ node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs                        → pass 60 fail 0 （考勤四钉 DML 分类）
+$ npx vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts \
+                 tests/unit/approval-cancel-round-plugin-mirror-constant.test.ts                  → 2 files / 15 passed
+```
+```
+$ node --test scripts/ops/t2-source-freeze-ci-wiring.test.mjs                                     → exit 0  （闭世界 ci-wiring 守卫族的代表)
+$ CI=true npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts                       → 1 file / 351 passed （审批 CI 覆盖枚举)
+```
+W7-R10 分类钉:本轮**未新增任何文件**,故三个 root 清单的归属集合未变(按补充清单第 13 条,
+该钉是**目录 root 清单**,用文件基名 grep 必然 0 命中,不能当判据)。
+`tests/helpers/approval-schema-bootstrap.ts` 属于多条 lane 的 `paths` 触发集,本轮对它是**纯新增导出**,
+因此别的 lane 会被重跑——已在 PR body 说明,不是隐患。
+
+## L7. finding 2 的「夹具改回合法窗口」在 C-1 是空集(机械,不是「我没看到」)
+
+finding-2 §4 的 9 个依赖超限输入的 `it()` 块全部在 `approval-cancel-round-redemption.db.test.ts`
+的 **C-2 版本**里。对本分支的**修前树**(钉住 SHA,不是「我没看到」)机械普查:
+```
+$ git grep -c "setDocumentWindowDays" c4dc4b928 -- packages plugins apps
+（0 hits —— 那个夹具 helper 是 C-2 新增的,C-1 侧根本不存在）
+
+$ git grep -n "windowDays" c4dc4b928 -- 'packages/core-backend/tests/integration/approval-cancel-round-*'
+c4dc4b928:…/approval-cancel-round-creation.db.test.ts:298    （类型标注)
+c4dc4b928:…/approval-cancel-round-creation.db.test.ts:300    （键集断言 ['suite','windowDays'])
+c4dc4b928:…/approval-cancel-round-creation.db.test.ts:302    （expect(...).toBe(90) —— 合法,正是 leave 上限)
+c4dc4b928:…/approval-cancel-round-redemption.db.test.ts:26   （注释,回指上面那条断言)
+
+$ git grep -n '"suite"' c4dc4b928 -- packages plugins apps
+c4dc4b928:…/approval-cancel-round-creation.db.test.ts:461    （'{"suite":"forbidden"}' —— 合法枚举值)
+```
+⇒ **C-1 侧没有任何依赖超限窗口的夹具**,无需改；那 9 个块的修复属于 C-2,本轮不越界去改另一分支的文件。
+同理,finding-2 §8 C-1 第四条(最终评估复用同一函数、遇域外按 `blocked` 收口)的**调用点在 C-2**;
+本轮在 C-1 侧履行的是它的前提:**只有一份派生函数**,且它的 doc comment 逐字写明 C-2 必须
+catch-then-`blocked`、不得静默 `expired`。
+
+## L8. 本轮仍然 OPEN / 未做(如实列)
+
+- **G3 半 B(仍在该组织单元)**:owner 裁决项,未实现。理由、NULL 语义建议、以及它为什么不是
+  「对齐普通路径」而是合同新增,写在设计 MD §3.4;一条常驻正控(P2)把 `org_id IS NULL` 钉在明处。
+- **把普通创建路径对齐到登录门**:`validateAndFreezeRequesterChoices` 的 company 基线仍只看
+  `is_active`,比共享登录门窄。加宽它是对已上线端点 `POST /api/approvals` 的行为变更,owner 裁,未做。
+  本轮的分歧**写在账上**,不包装成「已对齐」。
+- **三个新错误码未登记进锁文 §14.3**:锁文是 owner 亲写件,本轮不改。登记在设计 MD §3.1 + PR body,
+  标 implementer erratum 交 owner,与 `CANCEL_ROUND_REQUESTER_ONLY` 同族。
+- **M3(锁外校验)NOT COVERED**,理由见 L4。
+- **既有 `actor_id` 空串/NULL 过滤**(`createCancelRoundInstance` 自己的 `.filter(...)`)是先于本轮存在的
+  「过滤后继续」,本轮**不修**,已在设计 MD §3.4 披露,并附全部 `action='approve'` 写入方普查
+  (核心 4 处 + Bridge 1 处 + 考勤插件 3 处,`actor_id` 全部来自真实操作人;自动通过在创建期写的是
+  `action:'created'` 而非 `'approve'`)。
+
+## L9. required `test (20.x)` 的全量 vitest / real-DB 步骤清单 —— 逐字复现、同库连跑
+
+**做法**:机械地从 `.github/workflows/plugin-tests.yml` 的 `test` job(第 174-1735 行,共 94 个 step)
+抽出**每一个 run 块里含 `vitest` 的 step**(21 个)**加上** `Run core-backend tests`(第 842 行,
+`pnpm --filter @metasheet/core-backend test`,run 块里不含 `vitest` 字面量但就是全量 vitest job)=
+**22 个 step**,按 job 内原顺序、**逐字**执行其 run 块(每个 step 的 run 块原样落成一个 `.sh`,用
+`bash -e -o pipefail` 跑,与 GH Actions 的默认 shell 一致),env 逐条照抄(`RBAC_BYPASS` /
+`RBAC_TOKEN_TRUST` / `PRODUCT_MODE` / `METASHEET_REAL_DB_TEST_STEP` 等),
+只把 `DATABASE_URL` 换成本地私有库。**同一个处女库 `metasheet2_fix_c1_full` 连跑到底**,
+建库后按 CI 的同一条 `MIGRATION_EXCLUDE` 迁移。
+另加 required 的 `Run linting`(:832)与 `Run type checking`(:837)。
+逐 step 日志:`reviews/c1-fix-mutbak/required-20x/*.log`;step 清单:同目录 `MANIFEST.txt`。
+
+**`CI=true` 是保真、不是本地偷工**:GH Actions runner 环境自带 `CI=true`,vitest 读它来决定
+「跑一次就退」而不是进 watch 模式。第一次试跑没加,`Run core-backend tests` 卡在
+`Tests failed. Watching for file changes...` —— 这次失败本身留了一条有用的记录,见下面 L9.2。
+
+### L9.1 结果(22 个 step + lint + type-check)
+
+| step(行号) | exit | 结果 |
+|---|---|---|
+| :762 attendance calc-group timeline / legacy audit | 0 | 2 files passed |
+| :772 attendance work-date resolver W2 | 0 | 2 files passed |
+| :783 attendance shift segments W3 | 0 | 1 file passed |
+| :793 attendance W4C-4 detail/diff contracts | 0 | 2 files passed |
+| **:842 core-backend 全量 vitest** | **0** | **933 passed / 175 skipped (1108 files);14735 passed / 1604 skipped (16339 tests)** |
+| :892 rich-text longText XSS canaries | 0 | 1 file passed |
+| :899 F3 storage-integrity canaries | 0 | 3 files passed |
+| :911 B3-07 approval-attachment canaries | 0 | 8 files passed |
+| :929 elearning V0.1 unit canaries | 0 | 106 + 1 files passed |
+| :1107 elearning content/assessment schema gate(real DB) | 0 | 41 files passed |
+| :1160 elearning media quota(real DB) | 0 | 2 files passed |
+| :1177 elearning auth/tenant/RBAC gate(real DB) | 0 | 1 file passed |
+| :1191 sealed-export S3(real DB) | 0 | 1 file passed |
+| :1202 sealed-export S4(real DB) | 0 | 1 file passed |
+| :1213 after-sales install(real DB) | 0 | 1 file passed |
+| :1229 BPMN timer write-and-claim(real DB) | 0 | 1 file passed |
+| :1249 BPMN startProcess zero-residue(real DB) | 0 | 1 file passed |
+| :1266 real-app assembly guard(real DB) | 0 | 1 file passed |
+| :1285 snapshot-protection E2E(real DB) | 0 | 1 file passed |
+| :1295 multitable real-DB integration | **1** | 1 failed / 261 passed (262 files);见 L9.2 |
+| **:1568 approval real-DB integration(本切片所在 lane)** | **0** | **84 files passed;902 passed / 10 skipped (912 tests)** |
+| :1675 comment-reaction keystone(real DB) | 0 | 1 file passed |
+| :832 `pnpm lint` | 0 | — |
+| :837 `pnpm type-check` | 0 | — |
+
+本切片的 7 条新用例就在 `:1568` 这一步里跑(该步的 run-list 尾部含七个 `approval-cancel-round-*.db.test.ts`),
+全绿。
+
+### L9.2 两条红,都不是本轮引入 —— 逐条归因,不含糊过去
+
+**(a) `:1295` multitable 里 `multitable-dashboard-chart-authz.test.ts > R4: reader without
+canManageViews cannot create, update, or delete charts`:`expected 401 to be 403`。**
+判据与本轮无关:
+- 我的 diff 里唯一的非测试源文件是 `ApprovalProductService.ts`(`git diff --name-only` 共 9 个文件:
+  2 个 MD、1 个服务、1 个测试 helper、5 个 `approval-cancel-round-*.db.test.ts`),改动全在
+  `createCancelRoundInstance` 及其两个新 helper 内;**零** multitable 源文件、**零**路由文件、
+  **零** auth 源文件被修改(对 `../auth/user-activation` 只是新增一条 `import` 去**读用**那个共享门,
+  该模块本身一字未改)。
+- 该 step 的 run-list 里**没有任何** `approval-cancel-round-*` 文件:
+  `grep -c "approval-cancel-round" <该 step 的 run 块>` → **0**;我改的 5 个夹具文件都只在 `:1568` 跑,
+  而 `:1568` 在 `:1295` **之后**。
+- 我对 `tests/helpers/approval-schema-bootstrap.ts` 的改动是**纯新增一个导出函数**,
+  `APPROVAL_SCHEMA_BOOTSTRAP_VERSION` 未 bump,对任何其他套件零行为差。
+- **判别控制**:同一棵树、同一个库单独重跑该文件 ⇒
+  `Test Files 1 passed (1) / Tests 10 passed (10)`。
+⇒ 262 个文件在一个共享库上并行跑时的跨套件干扰(本仓已知的 shared-DB fixture collision 家族),
+不是本轮的回归。**我没有去修它**(多维表线,不在本切片范围),如实记录在此。
+
+**(b) 第一次试跑(未设 `CI=true`)时 `:842` 报
+`tests/unit/role-assignment-boundary.test.ts > user_roles has exactly one writer > every writer of
+the table is the boundary module and nothing else` 失败**,报错是
+`ENOENT: no such file or directory, open '…/src/attendance/zz-nit3-untracked-scratch.ts'` ——
+**不是集合不等,是读文件时文件没了**。机械定位到成因(一条真实的、先于本轮存在的跨套件竞态):
+- `tests/unit/role-assignment-boundary.test.ts:840-875`:`collectSweptFiles()` 在 describe 收集期做
+  **裸文件系统遍历**(`fs.readdirSync`),随后 `every writer…` 用例再逐个 `fs.readFileSync`。
+- `src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts:145-152`(用例
+  "NIT-3: an untracked scratch file …"):在**同一棵树里** `fs.writeFileSync` 出
+  `packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts`,`finally` 里 `rmSync` 删掉。
+- 两者在 `pool: 'forks'` 下并行:遍历时文件在、读取时已删 ⇒ ENOENT。
+- 讽刺的是,前一个文件自己的 POSITIVE CONTROL 注释就写着「读到内存里改,**不往树上写**,那会 race
+  sibling suites under `pool: 'forks'`」——兄弟文件的 NIT-3 用例正好破了这条约定。
+- **本轮加了 `CI=true` 后的干净重跑:`:842` exit=0,933/1108 文件全过,零失败。**
+⇒ 归类为**先于本轮存在的跨套件竞态**(本轮 diff 不向 `SWEEP_ROOTS` 增删任何文件,
+且失败形态是 ENOENT 而非谓词不等)。同样**没有去修**(角色边界线,不在本切片范围),
+作为一条新发现如实登记,交对应线裁决。

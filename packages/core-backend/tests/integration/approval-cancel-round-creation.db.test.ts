@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor, ensureLocalUserRow } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { isCancelRoundInstance, APPROVAL_CANCEL_ROUND_WORKFLOW_KEY } from '../../src/attendance/w4c3b-central-approval-hooks'
 
@@ -34,7 +34,20 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
   })
 }
 
+/**
+ * Lock §2-G3 fixture delta (Codex review 2026-09-19 finding 1). `GET /api/auth/dev-token` signs a
+ * JWT and writes NO `users` row, so before this fix every cancel-round fixture's approver was a
+ * person the directory had never heard of. The creation path now re-qualifies every seat against
+ * the directory with the shared login gate, and — like the precedent it reuses,
+ * `validateAndFreezeRequesterChoices`'s company-scope baseline — an id with no `users` row is not
+ * in the eligible set and fails closed. Production approvers always have a row (they authenticated
+ * to approve), so the fixtures are made production-shaped rather than the guard made fail-open.
+ */
+const mintedUserIds = new Set<string>()
+
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  await ensureLocalUserRow(userId)
+  mintedUserIds.add(userId)
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )
@@ -72,6 +85,31 @@ function oneNodeGraph(approverId: string) {
         key: 'approval_a',
         type: 'approval',
         config: { assigneeType: 'user', assigneeIds: [approverId], approvalMode: 'single' },
+      },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e-s-a', source: 'start', target: 'approval_a' },
+      { key: 'e-a-end', source: 'approval_a', target: 'end' },
+    ],
+  }
+}
+
+/**
+ * `start -> approval_a -> end` with TWO assignees and `approvalMode: 'all'` (会签). Needed by the
+ * seat-eligibility tests: with a single approver, "block" and "filter the ineligible one out and
+ * continue" are indistinguishable at the seat table (both end with a seat count that is not 1
+ * vs 1), so the M2 mutation — turning the block into a filter — would pass unnoticed. With two
+ * approvers the positive control can assert seat count === approver count, which a filter breaks.
+ */
+function twoApproverNodeGraph(approverA: string, approverB: string) {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      {
+        key: 'approval_a',
+        type: 'approval',
+        config: { assigneeType: 'user', assigneeIds: [approverA, approverB], approvalMode: 'all' },
       },
       { key: 'end', type: 'end', config: {} },
     ],
@@ -121,6 +159,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
         await pool().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      if (mintedUserIds.size > 0) {
+        // Lock §2-G3 fixture delta — drop the `users` rows this file's `authToken` minted.
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...mintedUserIds]])
+        mintedUserIds.clear()
       }
       if (grantedUserIds.size > 0) {
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])
@@ -479,5 +522,339 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       [APPROVAL_CANCEL_ROUND_WORKFLOW_KEY, documentId],
     )
     expect(dedicatedRows.rows.length).toBe(0)
+  })
+
+  // ===========================================================================================
+  // Codex review 2026-09-19 — finding 1 (lock §2-G3 seat re-qualification) and finding 2
+  // (lock:143 suite/window domains). Both defects were born in this slice (C-1).
+  // ===========================================================================================
+
+  /** Publishes a co-sign (`approvalMode: 'all'`) template with two named approvers. */
+  async function publishTwoApproverTemplate(
+    adminToken: string,
+    approverA: string,
+    approverB: string,
+    label: string,
+  ): Promise<string> {
+    const templateKey = `wi4-creation-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'WI-4 cancel-round creation fixture (co-sign)',
+        description: 'approval-cancel-round-creation.db.test.ts',
+        formSchema: buildFormSchema(),
+        approvalGraph: twoApproverNodeGraph(approverA, approverB),
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
+    return template.id
+  }
+
+  /** Real create + BOTH real approvals, so `approval_records(action='approve')` carries two rows. */
+  async function createApprovedOriginalCoSign(
+    requesterToken: string,
+    approverTokenA: string,
+    approverTokenB: string,
+    templateId: string,
+  ): Promise<string> {
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const inst = (await create.json()) as { id: string }
+    createdApprovalIds.add(inst.id)
+
+    for (const token of [approverTokenA, approverTokenB]) {
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${inst.id}/actions`, token, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, await approve.clone().text()).toBe(200)
+    }
+
+    const row = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [inst.id])
+    expect(row.rows[0]?.status).toBe('approved')
+
+    // The seat set the cancel round will replay: BOTH approvers, from the audit trail itself.
+    const approvers = await pool().query<{ actor_id: string }>(
+      `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY actor_id`,
+      [inst.id],
+    )
+    expect(approvers.rows.length).toBe(2)
+    return inst.id
+  }
+
+  /**
+   * The zero-row oracle every creation-time rejection owes (lock §14.3's own "零行" requirement):
+   * no `approval_rounds` row, no dedicated `approval_instances` row, and no seat on one.
+   */
+  async function expectZeroCancelRoundRows(documentId: string): Promise<void> {
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(0)
+    const dedicatedRows = await pool().query<{ id: string }>(
+      `SELECT id FROM approval_instances WHERE workflow_key = $1 AND business_key = $2`,
+      [APPROVAL_CANCEL_ROUND_WORKFLOW_KEY, documentId],
+    )
+    expect(dedicatedRows.rows.length).toBe(0)
+    const seatRows = await pool().query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM approval_assignments a
+         JOIN approval_instances i ON i.id = a.instance_id
+        WHERE i.workflow_key = $1 AND i.business_key = $2`,
+      [APPROVAL_CANCEL_ROUND_WORKFLOW_KEY, documentId],
+    )
+    expect(seatRows.rows[0].n).toBe(0)
+  }
+
+  /** Builds an approved, co-signed original and returns everything the seat tests need. */
+  async function coSignFixture(label: string): Promise<{
+    documentId: string
+    requesterId: string
+    approverA: string
+    approverB: string
+  }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-req-${suffix}`
+    const approverA = `wi4-aprA-${suffix}`
+    const approverB = `wi4-aprB-${suffix}`
+    const adminId = `wi4-admin-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const tokenA = await authToken(baseUrl, approverA)
+    const tokenB = await authToken(baseUrl, approverB)
+    const templateId = await publishTwoApproverTemplate(adminToken, approverA, approverB, label)
+    const documentId = await createApprovedOriginalCoSign(requesterToken, tokenA, tokenB, templateId)
+    return { documentId, requesterId, approverA, approverB }
+  }
+
+  it('§2-G3 正控 P1 — every original approver is still eligible ⇒ the round is created with ONE SEAT PER APPROVER (the anti-filter oracle)', async () => {
+    const { documentId, requesterId, approverA, approverB } = await coSignFixture('g3pos')
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+
+    // M2's oracle: seat COUNT equals approver count, not merely ">= 1". A "filter the ineligible
+    // out and continue" implementation lowers the 会签 threshold silently; only an exact-count
+    // (and exact-set) assertion can see that.
+    const seatRows = await pool().query<{ assignee_id: string; is_active: boolean; node_key: string }>(
+      `SELECT assignee_id, is_active, node_key FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    expect(seatRows.rows.length).toBe(2)
+    expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([approverA, approverB].sort())
+    expect(seatRows.rows.every((row) => row.is_active)).toBe(true)
+
+    const roundRows = await pool().query<{ id: string; outcome: string }>(
+      `SELECT id, outcome FROM approval_rounds WHERE document_id = $1`,
+      [documentId],
+    )
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+    expect(roundRows.rows[0].outcome).toBe('pending')
+  })
+
+  it('§2-G3 正控 P2 — an original whose org_id IS NULL is NOT refused (the org half of G3 is OPEN, not silently shipped)', async () => {
+    const { documentId, requesterId } = await coSignFixture('g3null')
+
+    // `approval_instances.org_id` is nullable with no default (zzzz20260821100000). Half B of G3
+    // (「仍在该组织单元」) is an owner call and is NOT implemented in this slice; this control pins
+    // that the shipped half does not refuse the NULL-org corpus, so a later org predicate cannot
+    // land without deciding NULL semantics first.
+    await pool().query(`UPDATE approval_instances SET org_id = NULL WHERE id = $1`, [documentId])
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+
+    const instanceRow = await pool().query<{ org_id: string | null }>(
+      `SELECT org_id FROM approval_instances WHERE id = $1`,
+      [dto.id],
+    )
+    expect(instanceRow.rows[0].org_id).toBeNull()
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+  })
+
+  it('§2-G3 负控 N1 — a DEACTIVATED original approver blocks creation (409 CANCEL_ROUND_SEAT_INELIGIBLE, zero rows, values-free details)', async () => {
+    const { documentId, requesterId, approverA } = await coSignFixture('g3inact')
+
+    const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [approverA])
+    expect(deactivated.rowCount).toBe(1)
+
+    const service = new ApprovalProductService()
+    let thrown: unknown
+    try {
+      await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    } catch (error) {
+      thrown = error
+    }
+    // Positive assertion on the OUTCOME, not `notEqual(201)`: the named code, the status, and the
+    // machine-checkable detail shape.
+    expect(thrown).toBeTruthy()
+    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
+    expect(failure.statusCode).toBe(409)
+    expect(failure.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
+    expect(failure.details).toEqual({ ineligibleCount: 1, reasons: ['inactive'] })
+
+    // M4's oracle — values-free: neither the details object nor the message may carry a person id
+    // (the discipline `validateAndFreezeRequesterChoices`'s own 422s already follow).
+    expect(Object.keys(failure.details ?? {}).sort()).toEqual(['ineligibleCount', 'reasons'])
+    expect(JSON.stringify(failure.details)).not.toContain(approverA)
+    expect(String(failure.message)).not.toContain(approverA)
+
+    await expectZeroCancelRoundRows(documentId)
+  })
+
+  it('§2-G3 负控 N2 — the seat gate is the SHARED LOGIN gate, not a narrower is_active lookalike (pending_activation / role=disabled / no directory row)', async () => {
+    const { documentId, requesterId, approverA } = await coSignFixture('g3gate')
+    const service = new ApprovalProductService()
+
+    // Each leg leaves the account eligible again before the next, so exactly ONE predicate differs
+    // per attempt (a confounded mutation would otherwise make the reasons unattributable).
+    const legs: Array<{ label: string; apply: string; reason: string }> = [
+      {
+        label: 'pending_activation (is_active still TRUE)',
+        apply: `UPDATE users SET activation_status = 'pending_activation' WHERE id = $1`,
+        reason: 'pending_activation',
+      },
+      {
+        label: "role = 'disabled' (is_active still TRUE)",
+        apply: `UPDATE users SET role = 'disabled' WHERE id = $1`,
+        reason: 'inactive',
+      },
+    ]
+    for (const leg of legs) {
+      const applied = await pool().query(leg.apply, [approverA])
+      expect(applied.rowCount, leg.label).toBe(1)
+      await expect(
+        service.createCancelRoundInstance(documentId, { userId: requesterId }),
+        leg.label,
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CANCEL_ROUND_SEAT_INELIGIBLE',
+        details: { ineligibleCount: 1, reasons: [leg.reason] },
+      })
+      await expectZeroCancelRoundRows(documentId)
+      await pool().query(`UPDATE users SET activation_status = 'activated', role = 'user', is_active = TRUE WHERE id = $1`, [
+        approverA,
+      ])
+    }
+
+    // Absence fails closed, exactly as it does in the precedent this gate reuses: an id with no
+    // `users` row is not in the eligible set.
+    await pool().query(`DELETE FROM users WHERE id = $1`, [approverA])
+    await expect(service.createCancelRoundInstance(documentId, { userId: requesterId })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CANCEL_ROUND_SEAT_INELIGIBLE',
+      details: { ineligibleCount: 1, reasons: ['not_found'] },
+    })
+    await expectZeroCancelRoundRows(documentId)
+
+    // DISCRIMINATING CONTROL on the same document: restore the row and the SAME call succeeds, so
+    // the four rejections above were caused by the seat predicate and by nothing else about this
+    // fixture.
+    await ensureLocalUserRow(approverA)
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+  })
+
+  it('lock:143 负控 A — windowDays outside [0, suite ceiling] blocks creation (409 CANCEL_ROUND_WINDOW_OUT_OF_RANGE, zero rows); the SAME document at windowDays=0 succeeds', async () => {
+    const { documentId, requesterId } = await coSignFixture('winrange')
+    const service = new ApprovalProductService()
+
+    // `leave`'s ceiling is 90 (lock:143). Each leg is a different way of being outside the domain.
+    const outOfDomain = ['91', '-1', '90.5', '"90"']
+    for (const literal of outOfDomain) {
+      await pool().query(
+        `UPDATE approval_instances SET metadata = metadata || ('{"windowDays":' || $2::text || '}')::jsonb WHERE id = $1`,
+        [documentId, literal],
+      )
+      await expect(
+        service.createCancelRoundInstance(documentId, { userId: requesterId }),
+        `windowDays=${literal}`,
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CANCEL_ROUND_WINDOW_OUT_OF_RANGE',
+        details: { suite: 'leave', ceiling: 90 },
+      })
+      await expectZeroCancelRoundRows(documentId)
+    }
+
+    // DISCRIMINATING CONTROL — same document, same call, only the number changes: the lower bound
+    // of the domain is accepted. Without this the four rejections above could be caused by
+    // anything about this fixture rather than by the range predicate.
+    await pool().query(`UPDATE approval_instances SET metadata = metadata || '{"windowDays":0}'::jsonb WHERE id = $1`, [
+      documentId,
+    ])
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string; policy_snapshot_at_create: Record<string, unknown> }>(
+      `SELECT id, policy_snapshot_at_create FROM approval_rounds WHERE document_id = $1`,
+      [documentId],
+    )
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+    expect(roundRows.rows[0].policy_snapshot_at_create.roundPolicy).toEqual({ suite: 'leave', windowDays: 0 })
+  })
+
+  it('lock:143 正控 B — windowDays = 90 (the leave ceiling, inclusive) is accepted and frozen verbatim into policy_snapshot_at_create', async () => {
+    const { documentId, requesterId } = await coSignFixture('winceil')
+
+    await pool().query(`UPDATE approval_instances SET metadata = metadata || '{"windowDays":90}'::jsonb WHERE id = $1`, [
+      documentId,
+    ])
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+
+    const roundRows = await pool().query<{ id: string; policy_snapshot_at_create: Record<string, unknown> }>(
+      `SELECT id, policy_snapshot_at_create FROM approval_rounds WHERE document_id = $1`,
+      [documentId],
+    )
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+    expect(roundRows.rows[0].policy_snapshot_at_create.roundPolicy).toEqual({ suite: 'leave', windowDays: 90 })
+  })
+
+  it('lock:143 正控 C — an out-of-domain suite tag ("Forbidden") is rejected (409 CANCEL_ROUND_SUITE_UNKNOWN, zero rows), not silently defaulted past the §14.3 #14 gate', async () => {
+    const { documentId, requesterId } = await coSignFixture('suiteenum')
+
+    // Verified reachable on the pre-fix code: capitalised `Forbidden` walked through the literal
+    // `suite === 'forbidden'` comparison, created the round, and landed verbatim in
+    // `policy_snapshot_at_create` (independent verification report, 2026-09-19, finding 2 §6).
+    await pool().query(
+      `UPDATE approval_instances SET metadata = metadata || '{"suite":"Forbidden","windowDays":36500}'::jsonb WHERE id = $1`,
+      [documentId],
+    )
+
+    const service = new ApprovalProductService()
+    await expect(service.createCancelRoundInstance(documentId, { userId: requesterId })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CANCEL_ROUND_SUITE_UNKNOWN',
+      details: { allowedSuites: ['attendance', 'leave', 'other', 'forbidden'] },
+    })
+    await expectZeroCancelRoundRows(documentId)
   })
 })
