@@ -6,6 +6,7 @@ Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
 Contract: `e4625f322` (full parent available in Git).
 First code checkpoint: `0158b581001d630a470d39b2476c2cfb0c48b16e`.
 Source/authorization checkpoint: `19d8e6e49996ff6a1083697dcaa22b118f463a2e`.
+File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Completed Local Evidence
@@ -53,6 +54,35 @@ local success is not published-head CI evidence. No successor PR is published.
 These are real reader and authorization-component checks, not end-to-end file
 restoration. No storage preparation, metadata update or live restore is enabled
 by this checkpoint. The public preview still refuses attachment differences.
+
+## File Preparation Checkpoint
+
+- New internal staging function reads only a reader-authenticated source matching
+  its original scope, checks current authorization before reservation, waits for
+  the reservation port, and exclusively creates the fixed object path outside
+  database transactions. It independently checks readback bytes, digest, length
+  and immutable version before calling the verified-receipt port.
+- Tests use real encrypted archives and the real local filesystem provider,
+  including a freshly constructed read provider. Nine cases cover normal write,
+  crash-before-receipt retry, verified retry, conflicting existing bytes, denied
+  authorization, transaction-depth refusal, receipt failure, false readback and
+  provider mutation. Collision/error never deletes an existing object.
+- The reservation/receipt port is a test double here, NOT PostgreSQL durability
+  evidence. There is no production ledger adapter, cleanup worker or runtime
+  caller yet. Crash/retry in these tests means the owned identity is supplied
+  again; it does not prove process-restart recovery from a persistent ledger.
+- Removing independent readback hashing makes the false-readback test RED;
+  restoration returns the full matrix to GREEN.
+- Sol high independently reviewed committed `19d8e6e4` (not this new staging
+  module): no P1, one P2 for shallow nested aliases in projected intents. Both
+  scalar+attachment and attachment-only negatives reproduced RED. Deep copying
+  closes both and preserves input/output detachment. No fresh external approval
+  of the later staging module is claimed; the review session is closed.
+- Final local matrix: five files / 95 tests PASS, core type-check (both projects),
+  source ESLint and diff-check PASS. Log:
+  `/private/tmp/tm-attachment-stage-verified-20260919.log`.
+- Latest merge-main check snapshot: 27 checks, only Node20 pending, no failed
+  check. Not yet claimed terminal combined-main green.
 
 ## Remaining Required Work
 
