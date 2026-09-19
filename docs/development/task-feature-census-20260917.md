@@ -10,7 +10,29 @@
 
 ### 飞书离线语料行号口径
 
-语料目录只有 `.html`。锁与计划写的 `《篇名》:N` 是转换后 **1-indexed 文本行**，不是 `data-line-index`。配方：页眉 6 行 + `data-line-index`（0-based）。正控：`使用子任务` `data-line-index=1`（五层）→ 文本 :7；`添加任务负责人` `data-line-index=4`（创建人默认为负责人）→ 文本 :10。
+语料目录只有 `.html`。`《篇名》:N` = **渲染文本去空行后 1-indexed**；页眉占前 6 行。**不是** html 源码行，也**不是** `data-line-index`。
+
+一行脚本（`ARTICLE` 为篇 html 绝对路径，`N` 为行号）：
+
+```bash
+python3 -c "
+from pathlib import Path
+import re, html as H, sys
+raw=Path(sys.argv[1]).read_text(errors='replace')
+t=re.sub(r'<script[\s\S]*?</script>','',raw,flags=re.I)
+t=re.sub(r'<style[\s\S]*?</style>','',t,flags=re.I)
+t=re.sub(r'<br\s*/?>','\n',t,flags=re.I)
+t=re.sub(r'</(p|div|h[1-6]|li|tr)>','\n',t,flags=re.I)
+t=re.sub(r'<[^>]+>','',t)
+lines=[ln.strip() for ln in H.unescape(t).splitlines() if ln.strip()]
+n=int(sys.argv[2]); print(f'{n}:{lines[n-1]}')
+" \"\$ARTICLE\" N
+```
+
+正控（`data-line-index` ≠ 渲染行，故对口径有判别力；旧正控《使用子任务》idx=1→:7 与《添加任务负责人》idx=4→:10 在三种口径下同解，**不再用作口径正控**）：
+
+1. 《使用任务清单》`data-line-index=64`「清单归档后…不受影响」→ 渲染 **:67**
+2. 《创建任务》「提醒时间默认为…30 分钟 / 18:00」→ 渲染 **:20**（该句无独立 `data-line-index=14`，旧 idx+6 口径解不到）
 
 ---
 

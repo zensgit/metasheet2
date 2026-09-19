@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：内容 SHA `83697a4bd475f4e5a04e078e19496c2959b43504`（闸 §9；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
+- head SHA：本轮内容提交后回填（闸 §10；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。内容 SHA 为前者；若其后有 SHA-record，末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -25,7 +25,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 3. 不合并任何 PR。
 4. 未创建 `zzzz*.ts` 迁移。
 5. 未在任何列上使用 `[!-~]`（无 DDL）。
-6. 未声称真库接线①②③④「门全绿」；§13-9 / §13-10 / §13-12 未裁。
+6. 未声称真库接线①②③④「门全绿」；§13-9 / §13-10 / §13-11 / §13-12 未裁。
 7. 未改 `tasks-web-guard.yml`（尚未存在）也未改 `run-required-web-tests.sh`。
 8. 未改 `plugin-tests.yml`、`table-classification.cjs`、`router/types.ts`、`guardPolicy.ts`。
 9. 未注册路由、未起服务器。
@@ -63,7 +63,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
 | 14 | 锁草案 §13 含题号 1–39 各恰一次 | 锁文件 | 见锁 §13 标题 `**N.`（N=1…39） | 39 题标题均在 |
-| 15 | §13-9 / §13-10 / §13-12 标未裁 | 文件头 bullet `:9` / §0 `:25` / §11 `:307` / §14-3 `:436`；§13 前言 `:347` 用顿号，另核 | `grep -n -F "§13-9 / §13-10 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:307` `:436` 四行 |
+| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁 | 文件头 bullet `:9` / §0 `:25` / §11 `:310` / §14-3 `:439`；§13 前言 `:350` 顿号写法另核 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:310` `:439` 四行 |
 
 ---
 
@@ -103,9 +103,9 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 3. **仓根无 `CLAUDE.md`**：章程以 `AGENTS.md` + 工作区 `~/Downloads/Github/CLAUDE.md` 为准（Q6）。本 SHA `AGENTS.md:48-50` 不是两点接线段。
 4. **`user_orgs` 生产分布 UNCLEAR**（裁定不连生产）。本地活跃多成员 = 0。
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
-6. **§13-9 / §13-10 / §13-12 未裁**。
+6. **§13-9 / §13-10 / §13-11 / §13-12 未裁**（§13-11 不适用默认前进）。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **对抗闸未齐**：第五轮 REJECT（`gate-task-m0-20260917.md` §9，1 P1 / 10 P2 / 5 P3；第二轮独立审同 head 亦 REJECT）。本轮按 §9 一次改完。不声称 M0 退出门已过。
+8. **对抗闸未齐**：第六轮 REJECT（`gate-task-m0-20260917.md` §10，2 P1 / 7 P2 / 9 P3；第三轮独立审同 head 亦 REJECT）。本轮按 §10 一次改完、不 rebase。不声称 M0 退出门已过。
 9. **飞书 `:21-23` vs 计划 §5-2**：计划把《完成与重启任务》:23 列为 `scope=self|all` 出处之一；锁按闸 P3-1 把 `:21-23` 标 IM 不对标，`:20` 单独支撑创建人完成范围。以闸 P3-1 为准，计划 :23 记偏离。
 
 ---
@@ -114,8 +114,8 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **闸未齐**：第五轮 REJECT。本轮按闸 §9 一次改完、不 rebase；待闸方亲核门 16/2/8/9 文本与 §7 新句。
-4. **§13-9 / §13-10 / §13-12 未裁**。
+3. **闸未齐**：第六轮 REJECT。本轮按闸 §10 一次改完、不 rebase；待闸方亲核门 8/2/16、§13-11 六处、id 规则与引文口径。
+4. **§13-9 / §13-10 / §13-11 / §13-12 未裁**。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
 7. 未改任何共享文件 / workflow / token 行。
@@ -129,25 +129,22 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 ---
 
-## 6. 修复轮（闸 §9 第五轮 1 P1 / 10 P2 / 5 P3）
+## 6. 修复轮（闸 §10 第六轮 2 P1 / 7 P2 / 9 P3）
 
-未改 §13-9 / §13-10 / §13-12 的未裁状态。未合并。不 ratify。任务 B 未起。本轮不 rebase。**表内命令均已实跑。**
+未改 §13-9 / §13-10 / §13-11 / §13-12 的未裁状态。未合并。不 ratify。任务 B 未起。本轮不 rebase。表内命令均为完整路径、已实跑。
 
 | finding | 改动 | 命令 | 输出摘录 |
 |---|---|---|---|
-| ① 门 16 两格对照 | 判别格 403 / 对照格 200 / 自检 / 禁 ② 缺失当证据 / 禁 RBAC_OPTIONAL=1 | `grep -n -F "两格对照" docs/development/task-feature-design-lock-20260917.md` | `:332` 两格对照；`:337` 自检句 |
-| ② §7 deny 加载点 | 挂 §13-11；门 9 NOT RUN；负控乙改泄漏格 HTTP 200 | `grep -n -F "NOT RUN" …design-lock…` | `:262` `:323` `:341` `:390` |
-| ③ 门 8 due_at | 钉 `2026-09-15T18:00:00Z`；护栏不同本地日期 | `grep -n -F "2026-09-15T18:00:00Z" …design-lock…` | `:322` 含该瞬时与「不同本地日期」 |
-| ④ 门 2 FK | 负控缺②/缺③ 各 403 + 无①插② ⇒ 23503 | `grep -n -F "23503" …design-lock…` | `:23` `:142` `:316` |
-| ④ FK 源 | 迁移约束名 | `sed -n '108,112p' packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts` | `conname = 'role_permissions_permission_code_fkey'` / `ON DELETE CASCADE` |
-| ⑤ id `__` | CHECK `col !~ '__'` + parse 首个 `__` + 422 | `grep -n -F "col !~ '__'" …design-lock…` | `:92` `:259` |
-| ⑥ 三守卫 / 断言强度 / 先例区间 | 照抄 `:68-76`；matchAll===1；`:108-118`/`:120-168` | `grep -n -F ":108-118" …design-lock…` | `:178` `:330` |
-| ⑦ 解析器 | 脚本未删改真输出 | 见下代码块 | unique 133 / OOB 5 四元组 / AMBIGUOUS 11 行 / ambiguous_total 11 |
-| ⑦ #15 | 四行 slash 清单 | `grep -n -F "§13-9 / §13-10 / §13-12" …design-lock…` | `:9` `:25` `:307` `:436` |
-| ⑦ 形状 | vs merge-base name-status | `git diff --name-status $(git merge-base HEAD origin/main) HEAD` | 三行 `A docs/development/task-feature-…`（本轮 commit 后仍三 docs） |
-| ⑦ build 理由 | 无 pull_request 触发器 | `sed -n '3,9p' .github/workflows/docker-build.yml` | `on:` `push` + `workflow_dispatch`，无 `pull_request` |
-| ⑧ RBAC 计分 | §13-10 落槌前门 2/13/16 不进计分 | `grep -n -F "不进验收计分" …design-lock…` | `:316` `:327` `:337` `:341` |
-| ⑨ pin 漂移 | 本 SHA 5902a850；origin/main b37a589f | `sed -n '90p' …/s6a-package-provenance-pins.json` 与 `git show origin/main:… \| sed -n '90p'` | 本 SHA `5902a850…`；origin/main `b37a589f…` |
+| ① 门 8 A 支 | 只留 A：`Asia/Shanghai` + viewerNextMidnight 直接谓词；边界六格 | `grep -n -F "A 支" docs/development/task-feature-design-lock-20260917.md` | `:325` 含 `15T16:00Z ≤ 18:00Z < 16T00:00Z` 与六格 |
+| ② §13-11 入账 | 四处 slash + §9 表新行 + M2 退出 + §13-5 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:310` `:439` |
+| ③ 冒烟 | M2 退出与 §12 尾一致 | `grep -n -F "冒烟" docs/development/task-feature-design-lock-20260917.md` | `:311` `:344` |
+| ④ 门 2 码面 | 第三负控 + 直接 SQL 23503 + 403 体 | `grep -n -F "assertCodesInCatalog" docs/development/task-feature-design-lock-20260917.md` | `:319` |
+| ⑤ 信任面 | `buildTrustedTokenUser` + 三读点两轴 | `grep -n -F "buildTrustedTokenUser" docs/development/task-feature-design-lock-20260917.md` | `:115` `:174` `:333` |
+| ⑥ id | 四合取 CHECK + 剥 `rec_tsk_` + 前导/尾随 `_` | `grep -n -F "rec_tsk_" docs/development/task-feature-design-lock-20260917.md` | `:92` `:261` |
+| ⑦ 飞书 | 渲染去空行口径；清单归档 :67 | 见下 python 一行脚本 | `:67` 归档后任务不受影响；创建任务 `:20` 30 分钟/18:00 |
+| ⑧ 门 6 | `pg_blocking_pids` 并发构造 | `grep -n -F "pg_blocking_pids" docs/development/task-feature-design-lock-20260917.md` | `:254` `:323` |
+| ⑨ §14-4 (d) | 非穷举全锚点 | `grep -n -F "非穷举" docs/development/task-feature-design-lock-20260917.md` | `:444` |
+| ⑨ :132 | 未导出 + `:253` 在前置之后 | `sed -n '36p' packages/core-backend/src/multitable/automation-date-reminder.ts` | `function resolveReminderTimeZone`（无 export） |
 
 ### 本轮实跑（merge-base `bb77ca5f2`；不 rebase）
 
@@ -157,7 +154,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 bb77ca5f2ce3c2825265ec8877861d367d017ead
 ```
 
-`git diff --name-status $(git merge-base HEAD origin/main) HEAD`（commit 前 HEAD 仍为 `5ce1d0878` 三行 A；本轮提交后仍只三 docs）：
+`git diff --name-status $(git merge-base HEAD origin/main) HEAD`：
 
 ```
 A	docs/development/task-feature-census-20260917.md
@@ -165,54 +162,68 @@ A	docs/development/task-feature-design-lock-20260917.md
 A	docs/development/task-feature-m0-development-20260917.md
 ```
 
-`grep -n -F "§13-9 / §13-10 / §13-12" docs/development/task-feature-design-lock-20260917.md`：
+`grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md`：
 
 ```
-9:- 实现者不得批准自己的安全结论。§13-9 / §13-10 / §13-12 标「未裁」。
-25:本锁 **PROPOSED**。M2 实体核心（DDL/路由/前端）要等 M1 ratify **且** §13-9 / §13-10 / §13-12 落槌。
-307:| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-12 落槌 |
-436:3. **§13-9 / §13-10 / §13-12 必须落槌** 才进入 M2。
+9:- 实现者不得批准自己的安全结论。§13-9 / §13-10 / §13-11 / §13-12 标「未裁」。
+25:本锁 **PROPOSED**。M2 实体核心（DDL/路由/前端）要等 M1 ratify **且** §13-9 / §13-10 / §13-11 / §13-12 落槌。
+310:| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-11 / §13-12 落槌 |
+439:3. **§13-9 / §13-10 / §13-11 / §13-12 必须落槌** 才进入 M2。
 ```
 
-`sed -n '3,9p' .github/workflows/docker-build.yml`：
+`sed -n '171,176p' packages/core-backend/src/auth/AuthService.ts`：
 
 ```
-on:
-  push:
-    branches: [main, master]
-    paths-ignore:
-      - 'docs/**'
-      - 'output/**'
-  workflow_dispatch:
+    if (!(process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1')) {
+      return false
+    }
+
+    return process.env.NODE_ENV !== 'production'
 ```
 
-`sed -n '108,112p' packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts`：
+`sed -n '84,86p' packages/core-backend/src/security/auth-runtime-config.ts`：
 
 ```
-        SELECT 1 FROM pg_constraint WHERE conname = 'role_permissions_permission_code_fkey'
-      ) THEN
-        ALTER TABLE role_permissions
-        ADD CONSTRAINT role_permissions_permission_code_fkey
-        FOREIGN KEY (permission_code) REFERENCES permissions(code) ON DELETE CASCADE;
+  if (env.RBAC_TOKEN_TRUST === 'true' || env.RBAC_TOKEN_TRUST === '1') {
+    issues.push('RBAC_TOKEN_TRUST is ignored in production and must remain disabled')
+  }
 ```
 
-`sed -n '90p' plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`：
+`sed -n '28,33p' packages/core-backend/vitest.elearning-pilot-auth.config.ts`：
 
 ```
-    "pluginTestsWorkflow": "5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf"
+    setupFiles: ['./tests/elearning-pilot-auth/setup.ts'],
+    env: {
+      RBAC_BYPASS: 'false',
+      RBAC_TOKEN_TRUST: 'false',
+      PRODUCT_MODE: 'plm-workbench',
+    },
 ```
 
-`git show origin/main:plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json | sed -n '90p'`：
+`sed -n '36p' packages/core-backend/src/multitable/automation-date-reminder.ts`：
 
 ```
-    "pluginTestsWorkflow": "b37a589feff9ee45b804ab6936947053f4e813480bd69c7dfd4973f0a4790ba6"
+function resolveReminderTimeZone(raw: string | undefined): string | null {
+```
+
+`sed -n '108p' packages/core-backend/src/rbac/rbac.ts`：
+
+```
+      res.status(403).json({ error: 'Insufficient permissions' })
+```
+
+飞书口径正控（渲染去空行 1-indexed）：
+
+```
+67:清单归档后，清单中的任务不受影响，仍然展示在相关参与者的任务中心，可继续完成或编辑任务。
+20:提醒时间：如果任务已设置具体截止时间点，提醒时间默认为任务截止前 30 分钟；如果任务只设置了截止日期，提醒时间默认为截止日期当天 18:00。你可点击当前提醒时间进行修改。
 ```
 
 锁 §14-4 普查解析器。命令行：
 
 ```
 TASK_FEATURE_PLAN_PATH=/Users/chouhua/Downloads/Github/metasheet2/docs/development/task-feature-development-plan-20260915.md python3 - <<'PY'
-# body = census :216-283
+# body = docs/development/task-feature-census-20260917.md 解析器段
 ```
 
 未删改真输出：
@@ -239,16 +250,11 @@ AMBIGUOUS ('plugin-tests.yml', '5', '.github/workflows/plugin-tests.yml', 3)
 ambiguous_total 11
 ```
 
-`TASK_FEATURE_PLAN_PATH` 未设：`TASK_FEATURE_PLAN_PATH: set me`（非零退出）。
-
-抽查 `sed -n` / `grep -n`（本 SHA = merge-base `bb77ca5f2`）：
+抽查（本 SHA = merge-base `bb77ca5f2`）：
 
 ```
-vitest.config.ts:1812     'tests/e2e/**'
-index.ts:1791             this.app.use(approvalsRouter({
-run-required-web-tests.sh:1186  exec npx vitest run …
-plugin-tests.yml:842-844  Run core-backend tests
-plugin-tests.yml:1655     approval-comments.db.test.ts（origin/main 该行在 :1659）
-jwt-middleware.ts:101-104 authenticatedTenantId
-AGENTS.md 74 行 / :68
+packages/core-backend/vitest.config.ts:1812     'tests/e2e/**'
+packages/core-backend/src/index.ts:1791         this.app.use(approvalsRouter({
+apps/web/scripts/run-required-web-tests.sh:1186 exec npx vitest run …
+.github/workflows/plugin-tests.yml:842-844      Run core-backend tests
 ```
