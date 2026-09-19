@@ -2512,6 +2512,7 @@ async function applyExactAnchorRecoveryAttempt(
       if (execution.kind === 'archive_sync' && execution.attachments) {
         try {
           await applyArchiveAttachmentBatch(query, { actorId: input.actorId, tokenHash: tokenSha!,
+            operationId: op.operationId!,
             generationId: execution.claims.archiveGenerationId, workspaceId: execution.workspaceId,
             baseId: execution.baseId, sheetId: input.sheetId, cells: attachmentCells, batch: execution.attachments })
         } catch { throw new ApplyRefusalError('preview-drift') }

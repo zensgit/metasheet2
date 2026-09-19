@@ -57,6 +57,8 @@ try {
     `ALTER TABLE meta_recovery_archive_attachment_stages ALTER COLUMN field_id DROP NOT NULL`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DISABLE TRIGGER trg_mraas_row`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DISABLE TRIGGER trg_mraas_truncate`,
+    `ALTER TABLE meta_recovery_archive_attachment_stages DISABLE TRIGGER trg_mraas_apply_receipt`,
+    `ALTER TABLE meta_recovery_archive_attachment_stages ALTER COLUMN applied_operation_id TYPE text USING applied_operation_id::text`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DROP CONSTRAINT meta_recovery_archive_attachment_stages_object_id_key`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DROP CONSTRAINT meta_recovery_archive_attachment_stages_pkey,
       ADD PRIMARY KEY(actor_id,token_hash,attachment_id) DEFERRABLE INITIALLY DEFERRED`,

@@ -21,6 +21,7 @@ export async function applyVerifiedArchiveAttachmentMetadata(query: QueryFn, inp
   objectId: string
   identity: ArchiveAttachmentStageIdentity
   expectedMetadataHash: string
+  adoptionOperationId?: string
   transactionDepth: RecoveryArchiveTransactionDepthProbe
   authorize: (query: QueryFn) => Promise<boolean>
 }): Promise<void> {
@@ -42,9 +43,20 @@ export async function applyVerifiedArchiveAttachmentMetadata(query: QueryFn, inp
     const row = (found.rows[0] as { metadata?: Record<string, unknown> }).metadata
     // The signed archive has no display filename. Preserve retained original metadata, never invent it.
     if (!row || typeof row.filename !== 'string' || row.filename.length === 0
+      || typeof row.storage_file_id !== 'string' || row.storage_file_id.length === 0
+      || typeof row.storage_path !== 'string' || row.storage_path.length === 0
       || typeof row.mime_type !== 'string' || row.mime_type.length === 0
       || row.storage_provider !== 'local' || String(row.size) !== identity.sizeBytes
       || hashArchiveAttachmentMetadata(row) !== expectedMetadataHash) refused()
+    if (input.adoptionOperationId !== undefined) {
+      const adopted = await query(`UPDATE public.meta_recovery_archive_attachment_stages
+        SET state='applied',applied_operation_id=$4::uuid,applied_at=clock_timestamp(),
+          displaced_storage_file_id=$5,displaced_storage_path=$6
+        WHERE actor_id=$1::uuid AND token_hash=$2 AND attachment_id=$3 AND object_id=$7::uuid
+          AND state='verified' RETURNING object_id`,
+      [actorId, tokenHash, identity.attachmentId, input.adoptionOperationId, row.storage_file_id, row.storage_path, objectId])
+      if (adopted.rows.length !== 1) refused()
+    }
     const updated = await query(`UPDATE multitable_attachments
       SET storage_file_id=$5,storage_path=$6,deleted_at=NULL,blob_purged_at=NULL,
         blob_purge_claimed_at=NULL,updated_at=clock_timestamp()

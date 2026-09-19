@@ -15,6 +15,7 @@ export interface RecoveryArchiveAttachmentBatch {
 /** Canonical apply has already locked the sheet/records and authorized the complete true delta. */
 export async function applyArchiveAttachmentBatch(query: QueryFn, input: {
   actorId: string; tokenHash: string; generationId: string; workspaceId: string; baseId: string; sheetId: string
+  operationId: string
   cells: readonly ArchiveAttachmentCellPlan[]; batch: RecoveryArchiveAttachmentBatch
 }): Promise<void> {
   const identities = new Map<string, { recordId: string; fieldId: string }>()
@@ -46,6 +47,7 @@ export async function applyArchiveAttachmentBatch(query: QueryFn, input: {
       || source.recordId !== original.recordId || source.fieldId !== original.fieldId) refused()
     await applyVerifiedArchiveAttachmentMetadata(query, {
       actorId: input.actorId, tokenHash: input.tokenHash, objectId: source.objectId,
+      adoptionOperationId: input.operationId,
       identity: source, expectedMetadataHash: binding.metadataHash,
       // The canonical executor owns the live transaction and has completed locked plan authorization.
       transactionDepth: { currentTransactionDepth: () => 1 }, authorize: async () => true,

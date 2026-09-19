@@ -998,7 +998,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     else process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = previousStrictFlag
   })
 
-  test.each(['success', 'rollback', 'denied', 'drift'] as const)('attachment sync transaction: %s', async (scenario) => {
+  test.each(['success', 'rollback', 'denied', 'drift', 'missing-receipt', 'wrong-adoption', 'wrong-displaced'] as const)('attachment sync transaction: %s', async (scenario) => {
     const world = await seedSyncApplyWorld(`attachment_${scenario}`)
     const { fixture, recordId } = world
     fixture.actorId = randomUUID()
@@ -1031,7 +1031,19 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       expect(context.revertWrites[0]?.changedFieldIds).toContain(fieldId)
       return scenario !== 'denied'
     }
-    const run = () => applyMaterializedExactArchiveRecoverySyncInternal(transaction, applyInput, {
+    const applyTransaction: typeof transaction = work => transaction(query => work((text, params) => {
+      if (scenario === 'missing-receipt' && text.includes('INSERT INTO public.meta_recovery_archive_sync_receipts')) {
+        return Promise.resolve({ rows: [] })
+      }
+      if ((scenario === 'wrong-adoption' || scenario === 'wrong-displaced') && text.includes("SET state='applied',applied_operation_id=")) {
+        const changed = [...(params ?? [])]
+        if (scenario === 'wrong-adoption') changed[3] = randomUUID()
+        else changed[5] = 'unrelated/object'
+        return query(text, changed)
+      }
+      return query(text, params)
+    }))
+    const run = () => applyMaterializedExactArchiveRecoverySyncInternal(applyTransaction, applyInput, {
       workspaceId: fixture.workspaceId, baseId: fixture.baseId, targetRecords, targetLinks: [],
       selectedRecordIds: [], selectedFieldIds: [], auditedReplayHorizonMs: 0,
       attachments: { metadata, staged: [{ ...identity, objectId: reserved.objectId }],
@@ -1039,6 +1051,9 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           record_id: recordId, field_id: fieldId, deleted: false } }] },
     })
     if (scenario === 'rollback') await expect(run()).rejects.toThrow(rollback)
+    else if (scenario === 'missing-receipt') await expect(run()).rejects.toThrow('recovery_token_burn_sync_receipt_invalid')
+    else if (scenario === 'wrong-adoption') await expect(run()).rejects.toThrow('archive_attachment_restore_apply_receipt_missing')
+    else if (scenario === 'wrong-displaced') expect(await run()).toEqual({ ok: false, reason: 'preview-drift' })
     else if (scenario === 'denied') expect(await run()).toEqual({ ok: false, reason: 'forbidden' })
     else if (scenario === 'drift') expect(await run()).toEqual({ ok: false, reason: 'preview-drift' })
     else {
@@ -1050,6 +1065,14 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       expect((await q("SELECT changed_field_ids,patch,source FROM meta_record_revisions WHERE record_id=$1 AND source='restore'", [recordId])).rows)
         .toEqual([{ changed_field_ids: [world.fieldId, fieldId], patch: targetRecords.get(recordId)!.data, source: 'restore' }])
       expect((await q('SELECT count(*)::int AS n FROM meta_recovery_archive_sync_receipts WHERE sheet_id=$1', [fixture.sheetId])).rows).toEqual([{ n: 1 }])
+      expect((await q(`SELECT s.state,s.displaced_storage_file_id,s.displaced_storage_path,
+        s.applied_operation_id=r.operation_id AS receipt_bound,s.applied_at IS NOT NULL AS adopted
+        FROM meta_recovery_archive_attachment_stages s JOIN meta_recovery_archive_sync_receipts r
+          ON r.token_sha256=s.token_hash WHERE s.attachment_id=$1`, [attachmentId])).rows)
+        .toEqual([{ state: 'applied', displaced_storage_file_id: (metadataRow.metadata as { storage_file_id: string }).storage_file_id,
+          displaced_storage_path: 'old/object', receipt_bound: true, adopted: true }])
+      await expect(q(`UPDATE meta_recovery_archive_attachment_stages SET displaced_storage_path='changed'
+        WHERE attachment_id=$1`, [attachmentId])).rejects.toThrow('archive_attachment_restore_stage_transition')
       expect(await run()).toEqual({ ok: false, reason: 'token-replayed' })
       return
     }
@@ -1057,6 +1080,10 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     expect((await q('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [attachmentId])).rows).toEqual(beforeMetadata)
     expect((await q("SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id=$1 AND source='restore'", [recordId])).rows).toEqual([{ n: 0 }])
     expect((await q('SELECT count(*)::int AS n FROM meta_recovery_token_burns WHERE token_sha256=$1', [sha(token)])).rows).toEqual([{ n: 0 }])
+    expect((await q(`SELECT state,applied_operation_id,applied_at,displaced_storage_file_id,displaced_storage_path
+      FROM meta_recovery_archive_attachment_stages WHERE attachment_id=$1`, [attachmentId])).rows)
+      .toEqual([{ state: 'verified', applied_operation_id: null, applied_at: null,
+        displaced_storage_file_id: null, displaced_storage_path: null }])
   })
 
   test('applies a <=5000 archive sync through L8 and atomically binds burn, seal, and receipt', async () => {
