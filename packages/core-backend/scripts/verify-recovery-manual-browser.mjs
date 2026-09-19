@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+// Retain synthetic screenshots outside the disposable database fixture directory.
+const screenshotRoot = tmpdir()
+
 // Called only by the owned synthetic database driver, while its production HTTP router is alive.
-export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, kind = 'scalar', bearer = 'synthetic-manual-owner') {
-  assert.ok(['scalar', 'attachment', 'workbench'].includes(kind))
+export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, kind = 'scalar', bearer = 'synthetic-manual-owner', login) {
+  assert.ok(['scalar', 'attachment', 'workbench', 'application'].includes(kind))
   assert.equal(typeof bearer, 'string')
   assert.match(bearer, /^[A-Za-z0-9_.-]+$/)
   const target = new URL(backendOrigin)
@@ -23,7 +26,13 @@ export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, k
   const cache = await mkdtemp(join(tmpdir(), 'tm-manual-browser-cache-'))
   let server
   let browser
-  const workbench = kind === 'workbench'
+  const application = kind === 'application'
+  const workbench = kind === 'workbench' || application
+  if (application) {
+    assert.match(login?.identifier ?? '', /^tm-[a-f0-9-]+@example\.invalid$/)
+    assert.match(login?.password ?? '', /^[a-f0-9]{64}$/)
+    assert.equal(typeof login?.actorId, 'string')
+  }
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Synthetic archive acceptance</title></head>
 <body><div id="app"></div><script type="module">
 import { createApp, h } from 'vue';
@@ -55,6 +64,7 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
 </script><style>body{font:14px system-ui;margin:0}*{box-sizing:border-box}</style></body></html>`
   try {
     server = await createServer({ root: web, configFile: false, cacheDir: cache,
+      resolve: { alias: { '@': join(web, 'src') } },
       plugins: [vue(), { name: 'owned-manual-archive-browser-harness', configureServer(vite) {
         vite.middlewares.use('/__manual_archive', async (_req, res, next) => {
           try { res.setHeader('Content-Type', 'text/html'); res.end(await vite.transformIndexHtml('/__manual_archive', html)) }
@@ -82,9 +92,23 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       page.on('request', request => {
         if (request.method() !== 'GET' && /\/recovery-archive\/(execute|jobs)(?:\/|$)/.test(new URL(request.url()).pathname)) forbiddenWrites.push(request.url())
       })
-      await page.goto(`http://127.0.0.1:${address.port}/__manual_archive`)
+      const browserOrigin = `http://127.0.0.1:${address.port}`
+      const gridPath = '/multitable/no-genesis/manual-browser-grid?baseId=b'
+      await page.goto(application ? `${browserOrigin}/login?redirect=${encodeURIComponent(gridPath)}` : `${browserOrigin}/__manual_archive`)
+      if (application) {
+        assert.equal(await page.evaluate(() => localStorage.getItem('auth_token')), null)
+        await page.locator('input[autocomplete="username"]').fill(login.identifier)
+        await page.locator('input[autocomplete="current-password"]').fill(login.password)
+        const [loggedIn] = await Promise.all([
+          page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/auth/login'),
+          page.locator('.login-submit').click(),
+        ])
+        assert.equal(loggedIn.status(), 200)
+        assert.equal((await loggedIn.json()).data.user.id, login.actorId)
+        await page.waitForURL(url => url.pathname === '/multitable/no-genesis/manual-browser-grid')
+      }
       const openWorkbenchArchive = async () => {
-        await page.locator('html[data-workbench-ready="true"]').waitFor()
+        if (!application) await page.locator('html[data-workbench-ready="true"]').waitFor()
         await page.locator('.meta-grid__row').first().waitFor()
         const layout = await page.evaluate(() => ({
           viewport: window.innerWidth,
@@ -96,7 +120,8 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
           }),
         }))
         assert.ok(layout.document <= layout.viewport + 1, `Workbench horizontal overflow: ${JSON.stringify(layout)}`)
-        if (width === 390) {
+        // The isolated Workbench owns page overflow; App's shell clips its outlet.
+        if (width === 390 && !application) {
           const nowrap = await page.addStyleTag({ content: '.mt-workbench__actions,.meta-toolbar,.meta-toolbar__left,.meta-toolbar__right{flex-wrap:nowrap!important}' })
           try {
             assert.ok(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
@@ -189,7 +214,7 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       assert.deepEqual(apiFailures, [])
       assert.equal(await page.getByRole('dialog', { name: 'Archive recovery', exact: true }).evaluate(element => element.scrollWidth > element.clientWidth), false)
       await page.locator('[data-test="archive-recovery-result"]').scrollIntoViewIfNeeded()
-      await page.screenshot({ path: join(tmpdir(), `tm-manual-http-browser-${kind}-${width}.png`), fullPage: true })
+      await page.screenshot({ path: join(screenshotRoot, `tm-manual-http-browser-${kind}-${width}.png`), fullPage: true })
       if (workbench) {
         await page.getByRole('dialog', { name: 'Archive recovery', exact: true }).getByRole('button', { name: 'Close archive recovery', exact: true }).click()
         const thumbnail = page.locator('.meta-grid__row .meta-attachment-list__thumb')
@@ -223,8 +248,9 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
         assert.equal(attachmentId, 'manual-live-attachment')
         const expectedBytes = Buffer.from(`synthetic-${attachmentId}`)
         assert.deepEqual(await readFile(downloadPath), expectedBytes, 'Saved browser download must equal archived source bytes')
-        await page.goto(`http://127.0.0.1:${address.port}/__manual_archive?view=manual-browser-gallery`)
-        await page.locator('html[data-workbench-ready="true"]').waitFor()
+        await page.goto(application ? `${browserOrigin}/multitable/no-genesis/manual-browser-gallery?baseId=b`
+          : `${browserOrigin}/__manual_archive?view=manual-browser-gallery`)
+        if (!application) await page.locator('html[data-workbench-ready="true"]').waitFor()
         const cover = page.locator('.meta-gallery__cover-image')
         await cover.waitFor()
         await page.waitForFunction(() => {
@@ -249,7 +275,7 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
             'Removing fixed cover height must reproduce intrinsic-image expansion')
         } finally { await naturalHeight.evaluate(element => element.remove()) }
         assert.ok(await page.locator('.meta-gallery__cover').evaluate(element => Math.abs(element.getBoundingClientRect().height - 132) <= 1))
-        await page.screenshot({ path: join(tmpdir(), `tm-restored-gallery-${width}.png`), fullPage: true })
+        await page.screenshot({ path: join(screenshotRoot, `tm-restored-gallery-${width}.png`), fullPage: true })
         console.log(`PASS: Chromium ${width} restored gallery cover authenticated and decoded original PNG`)
         assert.deepEqual(errors, [])
         assert.deepEqual(apiFailures, [])
@@ -260,7 +286,7 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
   } catch (error) {
     for (const context of browser?.contexts() ?? []) {
       for (const page of context.pages()) {
-        await page.screenshot({ path: join(tmpdir(), 'tm-manual-http-browser-failure.png'), fullPage: true }).catch(() => {})
+        await page.screenshot({ path: join(screenshotRoot, 'tm-manual-http-browser-failure.png'), fullPage: true }).catch(() => {})
         await writeFile(join(tmpdir(), 'tm-manual-http-browser-failure.txt'), await page.locator('body').innerText()).catch(() => {})
       }
     }

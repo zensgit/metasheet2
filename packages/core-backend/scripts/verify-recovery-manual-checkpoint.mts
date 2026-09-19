@@ -1,6 +1,6 @@
 /** Synthetic full-schema checkpoint acceptance; never use a customer database. */
 import assert from 'node:assert/strict'
-import { AsyncLocalStorage } from 'node:async_hooks'
+import { AsyncLocalStorage, createHook } from 'node:async_hooks'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, rm, realpath, rename } from 'node:fs/promises'
@@ -52,6 +52,7 @@ let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
 let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
+let applicationClosedDownloadPool = false
 let shutdownAuthMessaging: (() => Promise<void>) | undefined
 try {
   await admin.connect()
@@ -2016,6 +2017,7 @@ try {
         recoveryArchiveManualPolicy: admissionPolicy,
       }))
       const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
+      let verifyFullApplication: (() => Promise<void>) | undefined
       try {
         await new Promise<void>((resolve, reject) => { attachmentServer.once('listening', resolve); attachmentServer.once('error', reject) })
         const address = attachmentServer.address()
@@ -2347,7 +2349,7 @@ try {
         console.log('PASS: production attachment download route returns both restored original binaries; anonymous download refuses')
         if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
           const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
-          const syntheticAttachmentEdit = async (editThroughBrowser?: () => Promise<void>) => {
+          const syntheticAttachmentEdit = async (editThroughBrowser?: () => Promise<void>, verifyRouterDownload = true) => {
             const before = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
             const historyCount = async () => (await query(`SELECT count(*)::int AS n FROM meta_record_revisions
               WHERE record_id=$1 AND source='restore'`, [recordId])).rows[0].n
@@ -2373,7 +2375,7 @@ try {
                 const metadata = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
                 assert.deepEqual((await sourceStorage.readContentAddressed(metadata.storage_path)).bytes, expectedAttachmentBytes(id))
               }
-              await verifyDownloads()
+              if (verifyRouterDownload) await verifyDownloads()
             }
           }
           await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'attachment', loginToken)
@@ -2383,6 +2385,72 @@ try {
             ('manual-browser-gallery','no-genesis','Synthetic archive gallery','gallery',
              '{"coverFieldId":"manual-attachment-field","columns":1}')`)
           await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'workbench', loginToken)
+          verifyFullApplication = async () => {
+            const timers = new Map<number, { timer: NodeJS.Timeout; stack: string }>()
+            const timerHook = createHook({
+              init(id, type, _trigger, resource) {
+                if (type === 'Timeout') timers.set(id, {
+                  timer: resource as NodeJS.Timeout,
+                  stack: new Error().stack?.split('\n').slice(2, 12).join('\n') ?? '',
+                })
+              },
+              destroy(id) { timers.delete(id) },
+            }).enable()
+            const fullEnv = {
+              ...env, VITEST: 'true',
+              SKIP_PLUGINS: 'true', DISABLE_EVENT_BUS: 'true', DISABLE_WORKFLOW: 'true',
+              DISABLE_REDIS_CIRCUIT_BREAKER_STORE: 'true', OTEL_SDK_DISABLED: 'true',
+              ATTACHMENT_PATH: join(root, 'attachment-source'),
+              MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+              MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
+            }
+            const priorEnv = { ...process.env }
+            for (const key of Object.keys(process.env)) delete process.env[key]
+            Object.assign(process.env, fullEnv)
+            let server: import('../src/index').MetaSheetServer | undefined
+            try {
+              const { MetaSheetServer, resolveRecoveryArchiveMainPoolRuntime } = require('../src/index.ts') as typeof import('../src/index')
+              const { createRecoveryArchiveWorkerCallbacks } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+              server = new MetaSheetServer({ host: '127.0.0.1', port: 0, pluginDirs: [], manageProcessSignals: false,
+                createRecoveryArchiveComposition: () => ({
+                  keyCustody: attachmentCustody, objectStore: attachmentProvider, attachmentStorage: sourceStorage,
+                  auditedReplayHorizonMs: 60000, asyncResumeHorizonMs: 60000, workerIntervalMs: 60000,
+                  manualCapture: admissionPolicy,
+                  worker: { ...createRecoveryArchiveWorkerCallbacks(resolveRecoveryArchiveMainPoolRuntime()),
+                    leaseMs: 30000, replayHorizonMs: 60000, sweepLimit: 1, maxChunksPerRun: 1,
+                    workerOwnerId: 'synthetic-full-app-worker' },
+                }),
+              })
+              await server.start()
+              const fullAddress = server.getAddress()
+              assert.ok(fullAddress && typeof fullAddress !== 'string' && fullAddress.address === '127.0.0.1')
+              await verifyManualArchiveBrowser(`http://127.0.0.1:${fullAddress.port}`,
+                edit => syntheticAttachmentEdit(edit, false), 'application', loginToken,
+                { identifier: loginIdentifier, password: loginPassword, actorId })
+            } finally {
+              try {
+                if (server) {
+                  await server.stop('SYNTHETIC_ACCEPTANCE_FINISHED')
+                  applicationClosedDownloadPool = true
+                  downloadPools?.get().stopMetricsCollection()
+                  // Admin route singletons are process-owned, not server.stop-owned.
+                  const { getSafetyGuard } = require('../src/guards/SafetyGuard.ts') as typeof import('../src/guards/SafetyGuard')
+                  const { getActiveStore, destroyIdempotency } = require('../src/guards/idempotency.ts') as typeof import('../src/guards/idempotency')
+                  assert.equal(getActiveStore().constructor.name, 'MemoryIdempotencyStore')
+                  getSafetyGuard().destroy()
+                  await destroyIdempotency()
+                }
+                await new Promise<void>(resolve => setImmediate(resolve))
+                const retained = [...timers.values()].filter(entry => entry.timer.hasRef())
+                console.log('SYNTHETIC_APPLICATION_RETAINED_TIMERS', retained.map(entry => entry.stack))
+                assert.equal(retained.length, 0, 'SYNTHETIC_APPLICATION_RETAINED_TIMERS')
+              } finally {
+                timerHook.disable()
+                for (const key of Object.keys(process.env)) delete process.env[key]
+                Object.assign(process.env, priorEnv)
+              }
+            }
+          }
         }
         await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
         try {
@@ -2423,6 +2491,7 @@ try {
           assert.equal(attachmentServer.address(), null)
         } finally { await attachmentHttpPool.end() }
       }
+      await verifyFullApplication?.()
     } finally {
       if (commandFlags.archive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = commandFlags.archive
@@ -2443,7 +2512,7 @@ try {
   await db?.destroy()
   await client?.end()
   await shutdownAuthMessaging?.()
-  await downloadPools?.close()
+  if (!applicationClosedDownloadPool) await downloadPools?.close()
   if (created) {
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
     await admin.query(`DROP DATABASE "${database}"`)
