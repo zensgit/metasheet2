@@ -25,16 +25,29 @@ function sha256(filePath) {
   return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
 }
 
+function pathForBash(filePath) {
+  if (process.platform !== 'win32') {
+    return filePath
+  }
+
+  const absolutePath = path.resolve(filePath)
+  const root = path.parse(absolutePath).root
+  return `/${root[0].toLowerCase()}/${absolutePath.slice(root.length).replaceAll('\\', '/')}`
+}
+
 function writeMinimumPackage(pkgRoot, options = {}) {
   const {
     omitDistMigration,
     extraSourceMigration,
     omitSupersededAuditMarker,
+    omitMssqlReadonlyUtils,
   } = options
 
   const placeholderFiles = [
     'apps/web/package.json',
     'packages/core-backend/package.json',
+    'packages/mssql-readonly-utils/package.json',
+    'packages/mssql-readonly-utils/index.cjs',
     'plugins/plugin-attendance/plugin.json',
     'plugins/plugin-attendance/index.cjs',
     'scripts/ops/attendance-onprem-start-pm2.ps1',
@@ -54,6 +67,9 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   ]
 
   for (const rel of placeholderFiles) {
+    if (omitMssqlReadonlyUtils && rel.startsWith('packages/mssql-readonly-utils/')) {
+      continue
+    }
     writeFile(pkgRoot, rel, `${rel}\n`)
   }
 
@@ -187,7 +203,7 @@ function withArchive(options, assertion) {
 }
 
 function runVerify(archivePath) {
-  return spawnSync('bash', [verifyScriptPath, archivePath], {
+  return spawnSync('bash', [pathForBash(verifyScriptPath), pathForBash(archivePath)], {
     cwd: repoRoot,
     env: { ...process.env, VERIFY_SHA: '1', VERIFY_NO_GITHUB_LINKS: '1' },
     encoding: 'utf8',
@@ -236,5 +252,17 @@ test('rejects a package when a source TS migration lacks compiled JS', () => {
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, new RegExp(extraSourceMigration))
     assert.match(result.stderr, /Package missing compiled JS for one or more core backend TS migrations/)
+  })
+})
+
+test('rejects a package missing the core-backend MSSQL workspace runtime dependency', () => {
+  withArchive({ omitMssqlReadonlyUtils: true }, (archivePath) => {
+    const result = runVerify(archivePath)
+
+    assert.notEqual(result.status, 0)
+    assert.match(
+      result.stderr,
+      /Required package content missing: packages\/mssql-readonly-utils\/package\.json/
+    )
   })
 })
