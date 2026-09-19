@@ -1304,3 +1304,28 @@ closed; no external approval is claimed. This does not prove HTTP attachment
 publication or attachment-byte restoration. Prior remote `f767b846...` migration
 replay failed while installing PostgreSQL because its package repository was
 unreachable; no migration ran in that job. Local evidence is not remote CI.
+
+## Attachment Provider Checkpoint (Local Only)
+
+Code `06d2a530d52d643674851276878709210e767b27` adds the server-owned durable
+attachment uploader and passes the attachment callback through continuation.
+The synthetic presealed binary fixture now exercises actual local PUT/HEAD/GET:
+callback ciphertext substitution is ignored, an unknown ID performs zero PUT,
+post-HEAD authority revocation leaves zero receipts, and a missing verified source
+pin refuses receipt insertion. After claiming/verifying the fixture source pin,
+two uploads yield one exact uploaded receipt. Downloaded nonce/ciphertext/tag
+decrypt to the original seven binary bytes with the original attachment AAD.
+
+Full checkpoint runner passes fresh/replay, existing real-DB neighbors and all
+manual acceptance cases; database/connection residue zero, owned cluster removed.
+Crypto/receipt compiler unit neighbors 74/74, acceptance tsc, source ESLint and
+diff-check pass. Mutation omitting the nonce from stored attachment bytes gives
+the expected receipt hash/size assertion RED; restored full runner GREEN. Logs:
+`/private/tmp/tm-attachment-provider-mutation.log` and
+`/private/tmp/tm-attachment-provider-final.log`.
+
+The initial fixture lacked a source pin and was refused by the production DB
+guard; it was corrected using the existing pin authority, not by weakening the
+guard. No external review verdict is claimed. This local checkpoint is not yet
+pushed, to batch subsequent runtime integration without cancelling the current
+remote long lanes. It does not prove source-to-publication-to-restore completion.

@@ -542,3 +542,19 @@ Canonical attachment index construction, nonce/continuation wiring, authenticate
 provider receipts, publication/source release and restored byte consumption still
 require integration. Existing attachment-bearing manual captures remain refused
 until that whole chain is proven; no customer provider or runtime flag is enabled.
+
+## Durable Attachment Provider Upload
+
+`06d2a530d52d643674851276878709210e767b27` extends the manual upload adapter
+with an attachment selector. It rereads authorized durable prepared ciphertext
+before provider IO and rechecks authority plus exact prepared bytes before receipt
+insertion. Callback bytes and metadata other than the selector are not trusted.
+Attachment objects contain the 12-byte nonce, ciphertext, then 16-byte GCM tag;
+the content-addressed object identity and provider receipt hash the entire frame.
+The original attachment identity, source version and plaintext digest remain in
+the encrypted index/AAD binding. No key/plaintext enters the object-store frame.
+
+Only an uploaded receipt is recorded here. A missing available source pin is
+still refused by database authority. This adapter neither verifies the receipt
+nor publishes the generation nor releases source references. HTTP attachment
+capture and archive-reader/restore integration remain OPEN.
