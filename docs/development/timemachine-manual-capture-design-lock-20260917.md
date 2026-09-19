@@ -580,3 +580,21 @@ This supersedes the earlier internal all-attachment refusal, not the public
 readiness boundary. The command/startup composition has not yet bound its live
 source reader, and archive-reader/restore-byte integration remains OPEN. Existing
 no-attachment composition is preserved. No flag or customer storage is enabled.
+
+## Authenticated Attachment Reader Checkpoint
+
+Local code `7f97b26f9` adds the exact attachment object roster to archive authority
+loading and the reader inputs used by preview, sync and async restore. The reader
+reconciles that roster with the authenticated index, validates size/expiry/nonce
+uniqueness, and opens each binary frame against generation, attachment identity,
+source version and plaintext hash. Missing, extra, swapped or corrupt objects
+refuse the read. Existing no-attachment input shapes remain valid.
+
+Binary bytes remain in a private weakly keyed reader state, not enumerable
+snapshot/preview data. The internal byte accessor returns defensive copies and
+rejects fabricated state. Complete historical reconstruction retains its overlap
+checks and carries the private attachment state without changing its public keys.
+
+This closes authenticated reader consumption only. Public capture source-reader
+composition, attachment file/metadata restore application and end-to-end public
+attachment restore acceptance remain OPEN. No operational flag is enabled.

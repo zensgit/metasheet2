@@ -1358,3 +1358,28 @@ Terra high bounded read-only review timed out without a verdict and was closed;
 no external approval claimed. This is local internal runtime evidence, not a
 published exact-head CI result or public attachment restore acceptance. HTTP
 source-reader composition and archive-reader/restore consumption remain required.
+
+## Authenticated Attachment Reads (Local Only)
+
+Code `7f97b26f9`: reader/preview/crypto 3 files, 88/88 PASS; acceptance tsc,
+four-source ESLint and diff-check PASS. Live/deleted binary fixtures prove byte
+fidelity and defensive copies, fabricated-state refusal, missing/extra descriptors,
+equal-size swapped objects and corrupted AEAD tags with recomputed provider hashes.
+Removing the exact roster count guard makes the extra-descriptor negative RED
+(1 failed, 15 passed); restoring it returns the full 88/88 GREEN.
+
+The full isolated checkpoint driver passes fresh/replay, migration catalog and
+neighbor gates, then loads published authority and invokes both internal section
+reading and complete historical reconstruction with actual synthetic attachments.
+Missing provider objects and swapped bindings refuse; owned database/connections
+and cluster are cleaned. The custody-race negative now restores its direct fixture
+write in finally: previously it polluted later fixtures with an unrecorded data
+change and correctly tripped the reconstructor overlap check. No production
+history guard was weakened.
+
+Logs: `/private/tmp/tm-attachment-reader-realdb.log`,
+`/private/tmp/tm-attachment-reader-mutation.log`,
+`/private/tmp/tm-attachment-reader-final.log`.
+This is local evidence, not fresh remote CI or attachment restore-write proof.
+No external review verdict is claimed for this checkpoint. Public source-reader
+composition and file/metadata restore acceptance remain unfinished.
