@@ -1532,3 +1532,30 @@ Terra medium completed a separate static review of UI commit `9a1751bd` with
 0 P1/P2/P3 in that narrow delta; no test execution or whole-PR verdict claimed.
 Agent closed. The general tenant policy limitation is recorded in the design lock;
 it remains an explicit unproven acceptance requirement, not a silently closed gate.
+
+## Web selector and bounded storage review (2026-09-20)
+
+CI code `41ae2e0f8390dbc0459bb7a8ea0e216293cb81e1` adds the previously
+missing record-history-panel invocation to multitable-web-guard and both event
+path lists. Required-web already selected this spec. The initial executable
+contract failed for the missing step; final wiring passes 40/40 with in-memory
+deletions of either lane selector and source/spec trigger each rejected. YAML
+parsed before/after comparison proves every old path and run command preserved.
+Nine history/inspector/drawer specs pass 203/203. No product or permission changes.
+Initial line-only census omitted YAML run prefixes and shell environment prefixes;
+only the corrected YAML/continued-command census supports the missing-selector
+finding. All ten changed Web specs are now selected by both lanes; grid-link uses
+the existing multitable-grid substring selector.
+
+Sol high reviewed the backend ownership/cleanup subset at `7b0c9c4b1c` and
+returned INCOMPLETE, not APPROVE. Its suggested claim-to-retire reference race
+requires independent reachability/reproduction before disposition: canonical
+attachment adoption locks the stage and rejects abandoned state, while ordinary
+upload uses provider-issued random objects. Arbitrary SQL mutation is not yet a
+demonstrated public write path. Keep this review question open.
+
+The review's lack-of-real-cleanup-coverage assertion is contradicted by
+`verify-recovery-attachment-stage.mts`: current-reference refusal, expired
+abandonment/retry and two-connection apply-wins arbitration are implemented and
+passed in the recorded full owned runs. That does not prove the newly suggested
+reverse race. Review session closed; no whole-PR independent clearance claimed.

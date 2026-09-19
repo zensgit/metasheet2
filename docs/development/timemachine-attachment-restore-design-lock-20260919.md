@@ -728,3 +728,11 @@ it can be certified; permission semantics remain unchanged meanwhile.
 The existing contract is strengthened by a real HTTP negative: an independently
 logged-in administrator is demoted in the database; its existing session must
 receive 403 from both catalog and execute, without live restore effects.
+
+## History-panel CI closure (2026-09-20)
+
+`41ae2e0f8390dbc0459bb7a8ea0e216293cb81e1` preserves existing Web commands
+and adds the record-history-panel spec to the domain guard, with source/spec
+paths on pull_request and push. Required-web remains unchanged because it already
+selects this spec. The existing exact-anchor wiring test now rejects losing either
+lane or either trigger path. This closes a verification gap, not new UI semantics.
