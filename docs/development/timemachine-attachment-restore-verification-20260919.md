@@ -14,6 +14,24 @@ Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## CI Backend Drain Fix (2026-09-20)
 
+Follow-up code: `494009d93dee52c64e581110fa4cade1b14440a4`, tree
+`678a9385c84a181516001c479e0619390b12fc57`. Luna's bounded static review
+of the prior correction found one valid P2: a drain rejection skipped admin
+client/storage cleanup. Nested finally blocks now release both even if database
+cleanup fails; a leaked database is not force-dropped. Injecting a drain timeout
+at the final cleanup call produced exit 1 with the original timeout, confirmed
+admin-client/storage cleanup, and outer owned-cluster removal. Restoring the call
+returned stage acceptance to exit 0 with database/connections zero. This is
+fault-injection evidence for the fix, not a fresh independent APPROVE verdict.
+
+Logs: `/private/tmp/tm-stage-finally-fault-20260920.log` and
+`/private/tmp/tm-stage-finally-restored-20260920.log`. Exact-anchor wiring again
+passes 40/40; diff-check passes. Full-run evidence below binds the earlier script;
+only the stage fixture's finally block changed afterward, with stage-only rerun.
+On clean predecessor `d45247e0b79964e8758ea86905bd6f1fb281ac7d`, the two
+archive Web suites also passed 161/161; no Web code changed in this follow-up.
+New-head remote CI remains pending publication and does not inherit prior checks.
+
 Code checkpoint: `6664885d5ae18e315bf4798a1bc9f576011629e7`, tree
 `777d001742f0c4ef9b6ad7d9b4fa3f79797f8e57`. Tests ran on the identical
 script bytes before commit; a design-report edit was present, so these runs are

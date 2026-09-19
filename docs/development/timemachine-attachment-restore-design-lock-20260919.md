@@ -17,6 +17,10 @@ raise `ATTACHMENT_STAGE_BACKEND_DRAIN_TIMEOUT`; no backend termination, forced
 database drop or relaxed zero-residue assertion is introduced. A held real
 connection must cause refusal before it is explicitly closed by the fixture.
 This changes acceptance timing only, not product cleanup or access semantics.
+The follow-up `494009d93dee52c64e581110fa4cade1b14440a4` also guarantees
+admin-client and owned-storage release through nested finally blocks when the
+drain fails. Failure stays visible; the test does not force-drop a leaked
+database. The external runner retains sole ownership of cluster removal.
 
 ## Current Closeout Disposition (2026-09-20)
 
