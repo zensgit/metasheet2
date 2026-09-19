@@ -14,6 +14,35 @@ Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Accepted Archive Result Regression (2026-09-20)
 
+### Consolidated acceptance refresh after rediscovery fix
+
+Executed on clean exact `fd85fbdd71d4156ab4b3eece802696f3e86c2aa4`, tree
+`2899c5ffa02b878a8cf1645bc0d0ab717395b51f`. Command:
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser`.
+Log `/private/tmp/tm-rediscovery-browser-20260920.log`, exit 0.
+This supersedes the later chronological note that no fresh DB/browser run was
+performed for the rediscovery delta. It does not inject the mounted response race
+into Playwright or constitute customer UAT.
+
+| Requirement | Current evidence / remaining boundary |
+| --- | --- |
+| Migrations and authority neighbors | 32 migration replay gates; 47/47, 59/59, 127/127 suites pass in this run. |
+| Original attachment restore | HTTP restores both original binary files; second-upload, metadata and receipt failure/retry oracles pass without partial live effects. |
+| Current field and actor authority | Real HTTP hidden/read-only field, record lock, inactive actor, independently logged-in actor substitution and workspace/base relocation negatives pass with no effects. The substitute is another administrator, NOT a second-tenant isolation proof. That named gate remains open. |
+| Browser integration | 1440/390 scalar and attachment component/client/HTTP loops pass; Workbench cell editor deletes two attachments and restores both; authenticated gallery PNG decoded. Full synthetic application loop also passes. |
+| Cleanup arbitration | Expired-stage commit-before-storage, retry, reference refusal, late writer and apply-wins race pass. Applied/displaced or unproven-ownership deletion is not authorized by these tests. |
+| Residue | Owned browser/listeners/cache closed; owned and stage DB connections zero; synthetic cluster stopped and removed. |
+| Async boundary | Actual local-launcher 5001-row scalar proof retains its earlier SHA. This run does not prove async attachment restore; over-threshold attachment operations remain refused. |
+| Whole-product review | Narrow independent findings have been fixed; no complete independent exact-head approval is claimed. |
+| Remote CI | At the read-only snapshot during this run: 29 success, 1 skipped, 4 running. This is not terminal success. |
+| Real environment | Nightly investigation plan only; no environment or customer storage/data access. |
+
+Next required evidence is the separately named second-tenant authorization
+negative and consolidated independent review, followed by terminal exact-head CI.
+Historical OPEN entries below are superseded only where a row or subsequent
+SHA-bound section explicitly supplies the corresponding evidence. No blanket
+Time Machine completion or merge authorization is inferred.
+
 Code `758e10b68f33c16bfcd2f01bf9690a398fb5c200`, tree
 `2293a137b97979a4136ac8b034d5a33e762f626e`; two files, three production
 lines changed. Three new mounted cases first failed: reopen before completion,
