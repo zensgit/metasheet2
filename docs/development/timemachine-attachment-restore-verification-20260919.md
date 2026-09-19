@@ -12,6 +12,36 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Owned Workbench Regression (2026-09-20)
+
+Code `e219198d806a4383606bf0837e9e209db10b6a2b`, tree
+`356a8508ea0ccd40cfe894bedcc79d8153f289db`. The existing owned PostgreSQL
+driver now accepts mutually exclusive `--workbench`, `--browser` and
+`--attachment-stage` modes. No production or permission semantics changed.
+
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --workbench`
+passed 6/6 on the clean exact code head. Evidence run
+`c0bfb031-1f76-444e-b062-349d3e6b914d` records `worktreeClean=true` in
+`artifacts/timemachine-workbench/evidence.json`. Log:
+`/private/tmp/tm-owned-workbench-clean-exact-20260920.log`.
+
+The real LoginView, App/router and MetaSheetServer verify retained whole-table
+deletion/restoration, deleted-row names and values followed by selected-row
+restoration, and deleted-column configuration restoration with captured values
+and viewer-local time. This is retained soft-delete recovery, not hard-deleted
+table resurrection. The history entry exercised here is the toolbar dialog,
+not an independent right-side record inspector acceptance.
+
+All 12 fixture residue counts are zero, cleanupErrors is empty, and the driver
+independently checks zero database connections, drops its generated database and
+stops/removes its cluster. Default-mode regression also exits 0 with historical,
+manual capture/restore and stage gates green; log
+`/private/tmp/tm-owned-runner-default-final-20260920.log`. The attachment-stage
+neighbor passes in `tm-owned-runner-stage-neighbor-20260920.log`.
+Wiring is 39/39; history/config/trash frontend neighbors are 9 files/176 tests.
+Initial new runner contract tests were red before implementation. These are local
+synthetic results, not remote CI, real-tenant UAT or full TM completion.
+
 ## Full Application Acceptance Passed (2026-09-20)
 
 Code `2e86dd86af1e5105e7987fd8d43f59cbe61ca7dd`, tree

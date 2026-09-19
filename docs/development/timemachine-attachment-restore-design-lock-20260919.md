@@ -2,6 +2,23 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Owned Workbench Regression Driver (2026-09-20)
+
+Checkpoint `e219198d806a4383606bf0837e9e209db10b6a2b` adds an optional
+`--workbench` mode to the existing isolated PostgreSQL driver. It migrates an
+owned generated empty database, runs the existing full-application Workbench
+acceptance, requires zero connections and removes the database and cluster.
+Mixed modes refuse before database setup. Default CI and attachment-stage modes
+retain their existing behavior and have been rerun successfully.
+
+The clean exact-head browser run passes six cases covering retained whole-table,
+row and column recovery through their distinct interfaces. No recovery authority,
+hard-delete semantics, scheduling or production default changes. This does not
+close the separate right-side history acceptance, storage crash-reconciliation
+or real-tenant UAT boundaries. The paired verification report binds exact evidence.
+Nightly operational investigation remains a read-only plan, not real-environment
+access.
+
 ## Synthetic Full Application Acceptance (2026-09-20)
 
 Checkpoint `2e86dd86af1e5105e7987fd8d43f59cbe61ca7dd`, tree
