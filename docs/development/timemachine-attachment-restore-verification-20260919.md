@@ -675,6 +675,40 @@ review found no evidenced P1/P2 in the initial Workbench oracle; it did not revi
 the later fixture dependency/locator adjustments. No new full independent verdict
 or successor remote CI success is claimed. PR remains Draft/HOLD.
 
+## Original Download Repair
+
+Code `0784b4c1cdb1cc3d16eb4ee24214538b57d619bc`, tree
+`d18add79b7230626ba79d85b5fadbe1a8bc4c1be`. Actual Workbench click before the
+repair failed 401 versus required 200, independently of the passing authenticated
+HTTP readback. Log `/private/tmp/tm-workbench-download-red-20260920.log`.
+After repair, the full owned PostgreSQL/browser runner exits 0 at 1440 and 390;
+the click obtains HTTP 200 and a completed browser download. No browser-wide extra
+headers or query-token bypass is used. This currently tests the first original
+download action, not thumbnail/lightbox rendering or full application login UI.
+Log `/private/tmp/tm-workbench-download-green-20260920.log`; database connections
+zero, synthetic cluster stopped/removed. Original binary fidelity continues to
+be checked by the HTTP/database fixture; downloaded-file byte comparison is not
+claimed for this browser-click assertion.
+
+Four component/neighbor files pass 27/27. Unit negatives prove denied response
+creates no blob/download, unmount aborts and suppresses a late download, and a
+hostile stored URL is not used as the authenticated request destination. Removing
+the HTTP-success guard makes exactly denied mode RED (1 failed/6 passed); restored
+neighbors return 27/27. Logs `/private/tmp/tm-attachment-download-mutation-20260920.log`
+and `/private/tmp/tm-attachment-download-restored-20260920.log`.
+Application `vue-tsc --noEmit -p tsconfig.app.json` passes. Full web type-check
+is NOT green: unchanged `vite.config.ts:28` reports incompatible Vite 5/7 plugin
+types in the available dependency tree. No dependencies/config were changed.
+Scoped ESLint passes with zero errors/five component-fixture warnings using only
+the already installed pnpm-store NODE_PATH (initial parser-resolution attempt
+failed). Diff-check passes. The existing attachment-list spec remains covered by
+both domain guard and required-web filters; no selectors changed.
+
+Luna's bounded read-only review remained running without a terminal verdict and
+was closed; no external approval is claimed. Successor remote CI remains pending
+verification. Workbench whole-page mobile overflow and authenticated image preview
+remain OPEN. No Ready/merge, flag, dispatch, deployment or real environment access.
+
 ## Remaining Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file

@@ -317,6 +317,17 @@ passes, but screenshot inspection exposes whole-Workbench horizontal overflow;
 mobile layout acceptance stays OPEN. The dialog-only overflow assertion does not
 prove whole-page responsiveness. No recovery permissions or runtime flags change.
 
+## Authenticated Original Download
+
+An actual restored Workbench attachment click returned HTTP 401 while explicit
+JWT HTTP download succeeded. Original-file actions must use the existing apiFetch
+authentication and server download authorization, deriving the API path from the
+encoded attachment identity, never a stored URL. No token is put in a URL; no
+anonymous route or new permission is introduced. Non-success responses cannot
+produce a download. The component cancels pending requests when unmounted and
+revokes temporary blob URLs after use. Image thumbnail/lightbox source loading is
+a separate remaining acceptance item; this change only covers original download.
+
 ## Nightly Plan Boundary
 
 No real environment access is authorized by this plan. Known artifact evidence:
