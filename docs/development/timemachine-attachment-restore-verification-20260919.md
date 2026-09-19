@@ -14,6 +14,25 @@ Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Inspector Restore Execution (2026-09-20)
 
+### Batch Isolation Checkpoint
+
+Code `fb881f3c869e86b2b093998f734fc0cf230dadc7`, tree
+`57f7e7851479055db3ac1b5b61d3275e33c315b7`. Five new cases fail against
+the previous implementation: cancel/base/sheet invalidation, pending advanced
+preview confirmation, and duplicate execution. Final existing wiring suite
+32/32 plus history panel 16/16 pass. Removing the cancellation sequence increment
+causes precisely two selected negatives to fail (cancel and sheet roundtrip);
+restoring it returns the full 48/48 to green. Unmount is separately covered but
+is not claimed as a discriminating case for that specific mutation.
+
+Application vue-tsc passes; ESLint zero errors/eight fixture warnings; wiring
+contract 39/39 and diff-check pass. Owned synthetic Workbench acceptance 8/8
+passes with final product bytes before commit, connections=0 and owned DB/cluster
+removed. Browser cases preserve existing flows; the async interleavings above
+are mounted-component evidence, not a claim of browser race injection. No remote
+CI success or full-product completion is inferred from this local checkpoint.
+
+
 ### Async Preview Isolation Follow-up
 
 Local patch based on `c6541af54464c05d066e39975d5ab728c555d13b`:

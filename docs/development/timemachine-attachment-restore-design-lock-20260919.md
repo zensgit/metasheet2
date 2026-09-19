@@ -2,6 +2,17 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Batch Restore Async Isolation (2026-09-20)
+
+Code `fb881f3c869e86b2b093998f734fc0cf230dadc7`, tree
+`57f7e7851479055db3ac1b5b61d3275e33c315b7`, extends existing batch request
+sequencing to cancel, completion, base/sheet navigation and unmount. Re-preview
+clears prior executable identity; confirmation requires a visible, loaded preview
+phase. Accepted execution cannot be submitted twice or superseded by the advanced
+picker. Navigation invalidates late UI effects, not the accepted server operation.
+Scope, expectedVersions and signed identity backend contracts are unchanged.
+
+
 ## Inspector Historical-Version Execution (2026-09-20)
 
 Single-record preview now has a monotonic request identity. New requests,
