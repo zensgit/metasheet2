@@ -347,6 +347,40 @@ try {
       WHERE object_id=${raceObject.objectId}::uuid`.execute(db)).rows[0]?.state, 'applied')
     console.log('PASS: cleanup waits on in-flight apply across token expiry; committed adoption wins with zero storage cleanup')
   } finally { release(); await writer; await cleaner }
+  // Reverse ordering: cleanup has committed its claim, but physical retirement has not run.
+  const cleanupFirstActor = randomUUID(), cleanupFirstToken = 'a'.repeat(64)
+  const cleanupFirstExpiry = new Date(Date.now() + 1500).toISOString()
+  const cleanupFirstLedger = createArchiveAttachmentStageLedger({ actorId: cleanupFirstActor,
+    tokenHash: cleanupFirstToken, tokenExpiresAt: cleanupFirstExpiry,
+    authorize: async () => true, transaction })
+  const cleanupFirstObject = await cleanupFirstLedger.reserve(raceIdentity)
+  await cleanupFirstLedger.verified(cleanupFirstObject.objectId, raceIdentity)
+  await storage.reserveRecoveryAttachment(key(cleanupFirstObject.objectId), cleanupFirstObject.ownershipKey)
+  await storage.uploadByKey(key(cleanupFirstObject.objectId), bytes)
+  const beforeLateApply = (await sql<{ metadata: Record<string, unknown> }>`SELECT to_jsonb(a) AS metadata
+    FROM multitable_attachments a WHERE id='att-race'`.execute(db)).rows[0]!.metadata
+  await sql`SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM ${cleanupFirstExpiry}::timestamptz-clock_timestamp()))+0.02)`.execute(db)
+  let lateApplyAttempts = 0
+  await retireExpiredArchiveAttachmentStage({ objectId: cleanupFirstObject.objectId, transaction,
+    transactionDepth: { currentTransactionDepth: () => 0 },
+    storage: { retireRecoveryAttachment: async (path, owner) => {
+      assert.equal((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
+        WHERE object_id=${cleanupFirstObject.objectId}::uuid`.execute(db!)).rows[0]?.state, 'abandoned')
+      lateApplyAttempts++
+      await assert.rejects(transaction(query => applyVerifiedArchiveAttachmentMetadata(query, {
+        ...applyInput, actorId: cleanupFirstActor, tokenHash: cleanupFirstToken,
+        objectId: cleanupFirstObject.objectId, identity: raceIdentity,
+        expectedMetadataHash: hashArchiveAttachmentMetadata(beforeLateApply), adoptionOperationId: randomUUID(),
+      })), { message: 'ARCHIVE_ATTACHMENT_RESTORE_APPLY_REFUSED' })
+      assert.deepEqual((await sql<{ metadata: Record<string, unknown> }>`SELECT to_jsonb(a) AS metadata
+        FROM multitable_attachments a WHERE id='att-race'`.execute(db!)).rows[0]!.metadata, beforeLateApply)
+      await cleanupStorage.retireRecoveryAttachment(path, owner)
+    } },
+  })
+  assert.equal(lateApplyAttempts, 1)
+  assert.equal((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
+    WHERE object_id=${cleanupFirstObject.objectId}::uuid`.execute(db)).rows[0]?.state, 'cleaned')
+  console.log('PASS: cleanup claim commits before a separate canonical adoption attempt; late adoption refuses without metadata effects before physical retirement')
   for (const destructive of [
     `DELETE FROM meta_recovery_archive_attachment_stages`,
     `TRUNCATE meta_recovery_archive_attachment_stages`,
@@ -357,7 +391,7 @@ try {
   await sql`UPDATE meta_recovery_archives SET expires_at=clock_timestamp()-interval '1 second'`.execute(db)
   await assert.rejects(ledger.reserve(identity))
   await assert.rejects(ledger.verified(first.objectId, identity))
-  assert.equal((await sql<{ n: number }>`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages`.execute(db)).rows[0]?.n, 6)
+  assert.equal((await sql<{ n: number }>`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages`.execute(db)).rows[0]?.n, 7)
   console.log('PASS: stage ledger replay, empty rollback, drift, concurrency, identity conflict, authority and nonempty rollback')
 } finally {
   await db?.destroy()
