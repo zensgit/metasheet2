@@ -6266,8 +6266,23 @@ $ git grep -nE "post-commit listener blew up|PC-THROW-INJECTED" 5a070851ed80041f
 5a070851ed80041ffb67afdfa59d12afffa324e1:packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3323:        throw new Error('PC-THROW-INJECTED: a post-commit listener blew up')
 ```
 
-⇒ **全仓恰 1 处命中,就是 throw 语句自己**。**零断言**引用该文案(没有任何 `toThrow` / `toMatch` / `toContain` 命中它),
-**零 MD** 引用该文案。改后同一条 grep(在工作树上,含全部 `*.ts` / `*.md` / `*.cjs` / `*.mjs` / `*.json` / `*.yml`):
+⇒ **全仓恰 1 处命中,就是 throw 语句自己** ⇒ **零 MD** 引用该文案。
+
+⚠️ **「零断言」不从上面这条推出来,单独验过**:整串 grep 对**子串匹配器**没有判别力
+(`toThrow(/blew up/)` 这种只引用文案的一部分,整串扫不到它 —— `feedback_attack_your_own_criterion`:判据本身也要被攻击):
+
+```
+$ git grep -nE "blew up" 5a070851ed80041ffb67afdfa59d12afffa324e1 | wc -l    # 整串之外再查子串
+       9      # 8 处在别的文件/别的用例,与本文案无关;第 9 处 = `:3323` 自己
+$ grep -nE "toThrow|toMatch|toContain" <该测试文件>                            # 该文件全部匹配器,逐条读
+      18      # 全部是 UUID 正则 / statusCode+code 对象 / 列名字符串 / outcome 对象
+```
+
+⇒ **18 条匹配器没有一条引用该文案的任何部分**;`toThrow` 在该文件**一次都没出现**。
+⚠️ 同文件 `:3477` 另有一条**兄弟**注入 `PC-ESCAPE-INJECTED: an upstream post-commit step blew up` —— 已亲读:
+它说的是「上游 post-commit **step**」,**不是** listener 归因,**不构成第五处 ¬X**,本轮不改、也不需要改。
+
+改后同一条 grep(在工作树上,含全部 `*.ts` / `*.md` / `*.cjs` / `*.mjs` / `*.json` / `*.yml`):
 
 ```
 $ grep -rn "post-commit listener blew up\|PC-THROW-INJECTED" --include="*.ts" --include="*.md" \
@@ -6283,7 +6298,9 @@ packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test
 
 #### 零位移证明(这是本轮最容易制造出**新** P2 的地方)
 
-四条全部**同行替换**,两个文件行数一字不动 ⇒ 两份 MD 里**每一个** `file:line` 锚点继续有效,
+四条全部**同行替换**,两个文件行数一字不动 ⇒ 两份 MD 里指向这两个文件的 `file:line` 锚点
+**不被本轮位移打歪**(严格地说只是「本轮没打歪它们」,**不**声称它们本来就全对 —— 约 500 处未逐条重导,
+仍是 ⑥ 里原样继承的未覆盖项),
 不重演上一区间 `+11` 位移必须逐条清算的那一幕:
 
 ```
