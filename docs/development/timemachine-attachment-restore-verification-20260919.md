@@ -291,6 +291,32 @@ Code commit: `e750e620fcaee89ff8a15aba30205a2f30d022a7`.
 - Logs: `/private/tmp/tm-attachment-facade-{final,mutation,unit,tsc,lint,wiring,s5}-20260919.log`.
 - Successor remote exact-head CI has not yet been collected.
 
+## Two-File Failure And Retry Checkpoint
+
+Test commit: `0c287ef7aab36b98e97d5b7baa838dcea8bdb159`.
+Published carrier: Draft/HOLD PR #5882. No public runtime enablement.
+
+- The real manual capture fixture now seals two original attachments in the same
+  original cell. The first upload succeeds and the second fails. Record data and
+  version and both complete attachment metadata hashes stay unchanged. Durable
+  stage states are exactly one verified and one reserved, not applied.
+- Retry preserves both object IDs, performs only one additional upload, commits
+  both stages applied, restores both original byte sequences and rejects consumed
+  token replay without another upload. This is resumable preparation, not proof
+  of abandoned-object cleanup or a final SQL-failure rollback across two files.
+- Full owned runner PASS: 47/47 D5, 59/59 and 127/127 historical neighbors, fresh
+  and repeated migration catalog 32/995 with the preceding exact fingerprint;
+  existing capture/HTTP/stage participants PASS; owned database, connections and
+  cluster removed. The final commit only clarified the successful console label
+  after this run; its test assertions and production bytes were unchanged.
+- Mutation: uploading a verified object again makes the focused verified-retry
+  test RED on the unexpected upload event. Restored production file byte-equal;
+  full reader 27/27 PASS; two-project typecheck and diff-check PASS.
+- Logs: `/private/tmp/tm-attachment-two-file-{final,mutation,unit,tsc}-20260919.log`.
+  This mutation is a focused reader test, not a second full database mutation run.
+- Remote checks for the new follow-up head are pending publication/rerun; earlier
+  head checks are not evidence for this commit.
+
 ## Remaining Required Work
 
 Public reader/runtime registration; prepared/displaced file reference-safe crash cleanup;

@@ -136,6 +136,11 @@ canonical metadata/reference/history transaction and readback of original bytes.
 Its authorization callbacks and signed token are synthetic: it is not public
 preview, real login or browser UAT. Cleanup and concurrent failure gates remain open.
 
+The two-file failure oracle now requires one verified and one reserved object
+after a second upload failure, unchanged live record and metadata, and a retry
+that reuses both identities without reuploading verified bytes. This does not
+close abandoned/displaced-object cleanup or final SQL-failure atomicity gates.
+
 ## Required Evidence
 
 The preview now projects selected attachment changes into its true-delta permission
