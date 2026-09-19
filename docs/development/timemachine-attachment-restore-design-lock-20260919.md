@@ -78,13 +78,26 @@ file decryption alone is insufficient. Do not widen row/field resurrection scope
 The bounded implementation uses `meta_recovery_archive_attachment_stages` to
 persist actor/token-hash/attachment identity before file I/O, with complete original
 scope, source version/digest/size and a unique server object UUID. Identity is
-immutable; reserved-to-verified is monotonic. Both adapter calls check current
-authorization and verified, unexpired source archive authority. No retention or
-automatic cleanup interval is introduced. This ledger is not a restore receipt:
-prepared bytes remain invisible until the canonical metadata/reference/history
-transaction is implemented. Apply/abandon/cleanup coordination and reference-
-aware deletion are still required before exposure; do not infer those guarantees
-from the reservation and verified states alone.
+immutable; reserved-to-verified is monotonic. The exact expiry of the verified
+signed confirmation token is persisted, compared on retries and checked against
+database time. Both adapter calls check current authorization and verified,
+unexpired source archive authority. No retention or automatic cleanup interval is
+introduced. This ledger is not a restore receipt: prepared bytes remain invisible
+until the canonical metadata/reference/history transaction commits.
+
+Expired, never-applied stages can transition to abandoned, then cleaned.
+Implementation checkpoint: `87f05247d1cdb9854bcf1f216ecd4a78424e229e`.
+This is an update to the same unpublished successor migration, not a rewrite of
+an already-landed migration.
+Internal cleanup accepts only the server object identity, not a path. It locks the same row
+as apply, refuses any attachment metadata reference to that object/path, commits
+abandonment before filesystem retirement, then stamps cleaned in another
+transaction. Failed storage work remains abandoned and retryable; cleaned is
+terminal. A restore admitted before expiry can finish while cleanup waits, after
+which its applied state refuses cleanup without storage I/O. Expiry is not a new
+schedule or policy default. No public or background cleanup registration is added.
+Applied/displaced old objects and private unpublished marker directories remain
+separate reference-safe cleanup work, not covered by this expired-stage operation.
 
 ### Transactional Metadata Participant
 
@@ -164,7 +177,9 @@ recreating a retired file; a writer holding the old unlinked descriptor cannot
 make its bytes visible at the key. A race that prevents barrier installation
 refuses completion rather than claiming cleanup. No recursive deletion is used.
 This primitive is not registered as a public or scheduled cleanup capability.
-Database abandonment/apply arbitration and reference-safe cleanup remain OPEN.
+The internal expired-stage operation coordinates this barrier with database
+abandonment/apply arbitration. Runtime registration and displaced-object cleanup
+remain OPEN.
 
 These guarantees require a trusted, exclusively server-managed storage root.
 An actor able to replace directories between ownership validation and path-based

@@ -396,6 +396,44 @@ Runner commit: `fb335f2177945906c0c123f3514cc154208d061b`.
   `/private/tmp/tm-attachment-ownership-ci-budget-{realdb,tsc,wiring}-20260919.log`.
   Fresh remote exact-head CI is required before declaring the CI failure closed.
 
+## Expired Stage Cleanup Checkpoint
+
+Code: `87f05247d1cdb9854bcf1f216ecd4a78424e229e` (seven files).
+
+- The server carries the verified signed token's exact expiry into immutable stage
+  identity. Retry must match that expiry; active prepare/apply checks database time.
+  No retention duration, schedule or public cleanup capability was introduced.
+- Real PG + local filesystem prove expired-only abandonment is committed before
+  storage retirement. Any attachment metadata reference by file ID or path refuses
+  cleanup. A post-retirement failure leaves abandoned/cleaned_at=NULL; retry stamps
+  completion, and subsequent replay makes no storage call. Never-started uploads
+  are retired safely; late open-descriptor writes cannot recreate the payload key.
+- A separate apply transaction acquires the stage before expiry and holds it across
+  expiry. `pg_blocking_pids` proves cleanup waits for that exact writer. Apply commits
+  its metadata, record reference, token burn and receipt; cleanup then refuses with
+  zero storage calls and stage remains applied. This is real lock arbitration, not
+  an elapsed-time-only concurrency assertion.
+- Mutations: removing the DB expiry guard admits premature direct abandonment;
+  skipping file retirement falsely completes; doing file retirement before claim
+  commit leaves verified instead of abandoned on failure. Each is RED, restored.
+- First full run found seven old attachment transaction fixtures missing the new
+  expiry argument (40/47 passed). Fixed that caller to use real token verification,
+  not a default timestamp. Restored full runner: 47/47, 59/59, 127/127, two-file
+  facade, stage cleanup/race gates PASS; owned DB/connections/cluster removed.
+- Fresh/replay: 32 migrations / 999 catalog objects; fingerprint
+  `651036c3ffcc978293e9e1bcfeb4de2d33458adfd80b88166ef1b50bf9d90063`.
+  Catalog growth is the three expiry/cleanup columns plus their CHECK constraint.
+- Unit neighbors: four files / 70 tests, execution/async neighbors three files /
+  26 tests PASS. Typecheck, source ESLint, wiring 37/37, S5 and diff-check PASS.
+- Sol bounded read-only review: no P1/P2 in expiry/abandonment/storage-order logic;
+  no tests or edits by reviewer; session closed. This does not approve the entire
+  attachment product or displaced-object cleanup.
+- Logs: `/private/tmp/tm-attachment-abandon-full-restored-realdb-20260919.log`,
+  `/private/tmp/tm-attachment-abandon-{expiry,storage,commit-order}-mutation-20260919.log`,
+  `/private/tmp/tm-attachment-abandon-{neighbors,execution-neighbors,final-tsc,lint,wiring,s5}-20260919.log`.
+- Public runtime, automatic scheduling, old displaced-object cleanup and browser
+  UAT remain unimplemented. No customer storage or real environment was accessed.
+
 ## Remaining Required Work
 
 Public reader/runtime registration; prepared/displaced file reference-safe crash cleanup;
