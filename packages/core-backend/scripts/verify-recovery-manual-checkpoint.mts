@@ -1972,6 +1972,19 @@ try {
         [actorId, loginIdentifier, await bcrypt.hash(loginPassword, 4)])
       attachmentApp.use('/api/auth', authRouter)
       attachmentApp.use(jwtAuthMiddleware)
+      if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
+        const { Injector } = require('@wendellhu/redi') as typeof import('@wendellhu/redi')
+        const { ICommentService } = require('../src/di/identifiers.ts') as typeof import('../src/di/identifiers')
+        const { CommentService } = require('../src/services/CommentService.ts') as typeof import('../src/services/CommentService')
+        const { CollabService } = require('../src/services/CollabService.ts') as typeof import('../src/services/CollabService')
+        const { EventBus } = require('../src/integration/events/event-bus.ts') as typeof import('../src/integration/events/event-bus')
+        const { Logger } = require('../src/core/logger.ts') as typeof import('../src/core/logger')
+        const { commentsRouter } = require('../src/routes/comments.ts') as typeof import('../src/routes/comments')
+        const logger = new Logger('SyntheticWorkbenchAcceptance')
+        const comments = new CommentService(new CollabService(logger, new EventBus()), logger)
+        const injector = new Injector([[ICommentService, { useValue: comments }]])
+        attachmentApp.use(commentsRouter(injector))
+      }
       const attachmentHttpPool = new Pool({ ...connection, database, max: 4 })
       const attachmentHttpDepth = new AsyncLocalStorage<number>()
       const attachmentHttpProbe = { currentTransactionDepth: () => attachmentHttpDepth.getStore() ?? 0 }
@@ -2329,7 +2342,7 @@ try {
         console.log('PASS: production attachment download route returns both restored original binaries; anonymous download refuses')
         if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
           const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
-          await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, async () => {
+          const syntheticAttachmentEdit = async () => {
             const before = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
             const historyCount = async () => (await query(`SELECT count(*)::int AS n FROM meta_record_revisions
               WHERE record_id=$1 AND source='restore'`, [recordId])).rows[0].n
@@ -2346,7 +2359,11 @@ try {
               }
               await verifyDownloads()
             }
-          }, 'attachment', loginToken)
+          }
+          await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'attachment', loginToken)
+          await query(`INSERT INTO meta_views(id,sheet_id,name,type) VALUES
+            ('manual-browser-grid','no-genesis','Synthetic archive grid','grid')`)
+          await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'workbench', loginToken)
         }
         await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
         try {

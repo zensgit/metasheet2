@@ -653,7 +653,14 @@ describe('recovery-archive D4 complete-section reader', () => {
         expect(events).toEqual(mode === 'verified-retry' ? ['reserved', 'read', 'verified'] : ['reserved', 'upload', 'read', 'verified'])
         expect(await service.downloadByKey(storageKey)).toEqual(binary)
       } else {
-        await expect(pending).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED')
+        if (mode === 'denied') {
+          await expect(pending).rejects.toMatchObject({
+            name: 'ArchiveAttachmentStageAuthorizationError',
+            message: 'ARCHIVE_ATTACHMENT_STAGE_FORBIDDEN',
+          })
+        } else {
+          await expect(pending).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED')
+        }
         if (mode !== 'receipt-failure') expect(events).not.toContain('verified')
         if (mode === 'denied' || mode === 'unsupported') expect(events).toEqual([])
         if (mode === 'transaction') expect(events).toEqual(['reserved'])
