@@ -162,6 +162,18 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       assert.equal(await page.getByRole('dialog', { name: 'Archive recovery', exact: true }).evaluate(element => element.scrollWidth > element.clientWidth), false)
       await page.locator('[data-test="archive-recovery-result"]').scrollIntoViewIfNeeded()
       await page.screenshot({ path: join(tmpdir(), `tm-manual-http-browser-${kind}-${width}.png`), fullPage: true })
+      if (workbench) {
+        await page.getByRole('dialog', { name: 'Archive recovery', exact: true }).getByRole('button', { name: 'Close archive recovery', exact: true }).click()
+        const attachmentResponse = page.context().waitForEvent('response', {
+          predicate: response => response.request().method() === 'GET'
+            && new URL(response.url()).pathname.startsWith('/api/multitable/attachments/'),
+        })
+        const downloadEvent = page.waitForEvent('download')
+        await page.locator('.meta-grid__row [data-attachment-download]').first().click()
+        const downloaded = await attachmentResponse
+        assert.equal(downloaded.status(), 200, 'Workbench attachment click must authenticate through the real browser')
+        assert.equal(await (await downloadEvent).failure(), null)
+      }
       await page.close()
       console.log(`PASS: Chromium ${width} ${kind} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request, ${workbench ? 'empty-to-two attachment grid refresh' : 'one refresh event'} and database/history readback`)
     }
