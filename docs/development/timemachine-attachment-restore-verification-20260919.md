@@ -12,6 +12,37 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Terminal Cleanup Reconciliation (2026-09-20)
+
+Code `df302d9b03b923e9ef106b64369fca9f710c7a45`, tree
+`8cd5fae0fb111ae8d832d4f17e6a7ecd77309c9d`. Two files only: the existing
+stage-ledger service and its owned real-DB acceptance script.
+
+`/private/tmp/tm-terminal-cleanup-red-20260920.log` proves the original early
+return leaves the exact-proof late directory present. Reinstating that return
+after the fix produces the same failing ENOENT oracle in
+`tm-terminal-cleanup-mutation-20260920.log`; mutation restored.
+The clean committed `--attachment-stage` run exits 0 in
+`tm-terminal-cleanup-exact-20260920.log` and proves:
+
+- A retry after cleaned reconciles a newly present exact-proof private directory.
+- Incomplete proof remains untouched; the complete terminal row is byte-equivalent
+  before/after replay, including timestamps.
+- A current metadata reference introduced before retry refuses with zero storage
+  calls. This is not a claim that arbitrary direct SQL is a supported writer.
+- Existing expiry, abandonment-before-IO, storage failure/retry, late open-file
+  writer, terminal-state and apply-vs-cleanup row-lock race cases still pass.
+- Database/connections zero, synthetic cluster stopped and removed.
+
+Reader/storage neighbor 42/42, core type-check, scoped ESLint, wiring 39/39 and
+diff-check pass. These local tests do not prove all possible process-death or
+power-loss interleavings, displaced-object cleanup, NAS behavior or production
+readiness. No schedules or customer environment were touched.
+
+Sol high bounded read-only review was closed while still running without a
+terminal verdict. It is not counted as approval. Local code review found no new
+permission/state transition; independent whole-PR review remains open.
+
 ## Post-Preview Identity Refusal (2026-09-20)
 
 Test-only code `e24c7bc7fd55c1d05c9dd84e5be717db19e88666`, tree

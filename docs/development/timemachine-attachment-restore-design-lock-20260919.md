@@ -2,6 +2,24 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Terminal Stage Cleanup Retry (2026-09-20)
+
+Code `df302d9b03b923e9ef106b64369fca9f710c7a45`, tree
+`8cd5fae0fb111ae8d832d4f17e6a7ecd77309c9d`, closes one late-remnant gap in
+the existing internal one-object cleanup. A cleaned row previously returned
+before storage reconciliation, leaving a later unpublished exact-proof marker
+directory unreachable by that cleanup retry.
+
+Terminal retries still require the same expired immutable stage identity and
+absence of current attachment metadata references. They rederive the same owner
+proof and call the existing idempotent storage retirement outside transactions.
+They do not change cleaned_at, reopen the stage, or make it eligible for apply.
+The permanent payload-directory barrier remains. Exact-proof private directories
+can be reconciled; incomplete/unknown proof is retained. Current references refuse
+before storage. No public API, scheduler, retention duration or automatic scan is
+introduced. Markerless remnants, hostile roots and displaced live-object cleanup
+remain separate boundaries.
+
 ## Post-Preview Identity Acceptance (2026-09-20)
 
 Test-only checkpoint `e24c7bc7fd55c1d05c9dd84e5be717db19e88666` verifies
