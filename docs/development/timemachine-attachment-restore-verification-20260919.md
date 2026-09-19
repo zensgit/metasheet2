@@ -744,6 +744,34 @@ composition, broader remaining acceptance and successor exact-head CI stay OPEN.
 
 ## Remaining Full-Scope Acceptance
 
+Mobile containment checkpoint `081a2644eb0f38fe3382a834f42b72d961f23a5e`, tree
+`b4a15a5456a0f0ab9c5a3a97007959caa3877c0c`, supersedes the earlier observed
+whole-page overflow item for the tested Workbench fixture. Baseline assertion
+reports viewport=390/document=1365, toolbar-right edge=1364.5625 and banner-right
+edge=406. Final owned browser/PG runner exits 0 at 1440 and 390; whole-page width
+fits, and in-browser nowrap mutation reproduces overflow before restoration.
+Screenshots were inspected at both widths. Existing capture/restore, image decode,
+authenticated download, database/history/byte readback and cleanup gates remain
+green. Owned database connections=0 and cluster removed. Logs:
+`/private/tmp/tm-workbench-mobile-red-20260920.log` and
+`/private/tmp/tm-workbench-mobile-green-20260920.log`.
+
+Exact remote `1c0ab0e11da8d33f830ec1594715d6be856cf5e7` domain CI failed one
+stale raw-thumbnail-URL assertion in multitable-grid-link-renderer.spec.ts; local
+reproduction was 1 failed/5 passed. Test-only commit `4658ac1f07` changes it to
+authenticated request plus blob source assertions. Focused image neighbors pass
+79/79. The full, unmodified workflow targeted command passes 295 files/4088 tests
+in `/private/tmp/tm-mobile-full-domain-guard-20260920.log`. Layout/toolbar/Workbench
+neighbors pass 196/196; scoped ESLint has zero errors with existing prop-default
+warnings. Syntax/diff checks pass. No new independent layout reviewer is claimed.
+
+Gallery cover images have a separate raw-URL rendering path (not changed here);
+their authenticated browser behavior remains an explicit audit item, not covered
+by the grid/lightbox pass. Full application login/organization selection, remaining
+runtime/cleanup requirements and successor remote CI are still not certified.
+
+## Outstanding Full-Scope Acceptance
+
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
 remaining purge/drift/retry concurrency; async contract;

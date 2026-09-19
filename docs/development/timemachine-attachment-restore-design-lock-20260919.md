@@ -339,6 +339,17 @@ lightbox. Unmount does the same; late results cannot publish new URLs after abor
 Permission/network failure displays a values-free unavailable state, not a raw URL
 fallback. No server permission, anonymous access or recovery semantics change.
 
+## Workbench Width Containment
+
+The synthetic 390px Workbench exposed a 1365px document: management actions and
+toolbar groups did not wrap, and the capability banner exceeded the viewport by
+its margin. These containers now wrap naturally; the banner's maximum width
+accounts for its existing margins. No controls are hidden, no body overflow mask
+is added, and the grid keeps its existing internal scrolling. Rail breakpoints,
+permissions and recovery actions are unchanged. Real browser acceptance checks
+the whole document against the viewport before opening recovery, then temporarily
+neutralizes wrapping to prove that the overflow guard detects regression.
+
 ## Nightly Plan Boundary
 
 No real environment access is authorized by this plan. Known artifact evidence:
