@@ -691,6 +691,8 @@ Codex 第 3 条被独立验证为 **CONFIRMED**(`reviews/verify-codex-cancel-fin
 
 证据行承重、告警派生:请求行、revoke 审计行、轮次 `applied`、W4 seal —— 全部在本次发送之前就已提交;投递失败只产生一条 warn。未绑定投递时**fail OPEN**(与执行 port 的 fail CLOSED 刻意相反):到达这里时业务取消已经持久,抛错既撤销不了什么,又只会把成功变成 500。
 
+这条 fail-OPEN **不是只写在注释里**(`feedback_asserted_invariant_is_a_bug`:注释断言不测 = 藏 bug)。它有自己的用例:解绑投递 ⇒ 兑现仍 `applied`、approve 仍 200、零宣告;mutation **M-C3-4**(把未绑定改成抛错)让它**单独红**。该用例同时是 `unregisterCancelRoundCancelledEventDelivery` 的**唯一消费方**——一个没有调用方的导出解绑函数,与一条没人走过的泄漏路径无法区分。
+
 ### 4. 账侧等价的更新
 
 `approval-cancel-round-redemption.db.test.ts` 的 **账侧 twin 用例**原先唯一一处点名「C-1 step ⑦(发 `attendance.request.cancelled`)」的断言,比较的是 `attendance_result_event_outbox` 的行数,并把 `outboxA`/`outboxB` 钉死为 `'0'`。在 legacy 系 posture 下**两条路径都不写那张表**,所以那是在比两个结构性的零,而真实发送数是 0 和 1——**两个谓词的交集是空的**。
