@@ -2,6 +2,14 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+Restored-gallery browser checkpoint `f18bbbc435fa43897135e440884498cdb416c013`
+now verifies authenticated decoding through production Workbench at 1440/390,
+after real archive restoration in the owned synthetic database. Gallery view
+metadata and image-first attachment ordering are synthetic fixtures. This does
+not replace full application login/organization selection UAT. Screenshot review
+also exposes an existing unbounded square-cover height at one-column desktop
+width; functional decoding passes, visual sizing remains a separate residual.
+
 Gallery cover checkpoint `f92a6cfcf214b3770fae56384f5e50bc4b889b7d`
 replaces direct stored-URL image rendering with the existing authenticated,
 identity-derived attachment endpoint. Denial retains the filename fallback;

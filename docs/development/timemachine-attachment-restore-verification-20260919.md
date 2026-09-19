@@ -817,6 +817,28 @@ browser decoding through the owned HTTP fixture remains open; grid/lightbox
 browser evidence is not substituted for it. No DB, flags or deployment in this
 checkpoint. Successor exact-head CI remains separate.
 
+## Restored Gallery Real Browser Checkpoint
+
+Code `f18bbbc435fa43897135e440884498cdb416c013`, tree
+`45897d89579090a4a0fbb347075528f5dce3fd1b`: fixture attachment ordering is
+image-first, preserving both original binaries; an owned gallery view uses that
+same attachment field. After archive restore, real production Workbench loads
+the gallery via its initial view ID. At 1440 and 390, its cover must complete,
+have naturalWidth=1 and an authenticated blob source. API failures remain fatal.
+Original file download saved bytes and database/history readback still pass.
+
+Full owned PG/browser runner exits 0:
+`/private/tmp/tm-gallery-browser-20260920.log`. Owned database/stage connections
+are zero, cluster removed, browser/Vite/cache closed. Syntax/diff checks pass.
+Screenshots `tm-restored-gallery-1440.png` and `tm-restored-gallery-390.png` under
+the OS temporary directory were inspected. The white 1x1 fixture really decodes;
+it is not a missing image. However one-column desktop cover height grows with
+image aspect ratio, leaving an oversized card: visual sizing is not certified.
+
+This closes the prior gallery authenticated-decoding gap, not full app login,
+organization selection, real cell editing or remaining runtime/cleanup gates.
+No new permissions, flags, deployment or real data access.
+
 ## Outstanding Full-Scope Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file
