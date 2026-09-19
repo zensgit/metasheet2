@@ -560,11 +560,13 @@ x-user-id: admin
 
 **Examples**:
 
+> Since PR #5677, the write endpoints (`POST /`, `PATCH /:id`, `DELETE /:id`, `POST /evaluate`) require an admin role via `requireAdminRole()`; identity is taken from `req.user`. The `x-user-id` header is ignored on these endpoints.
+
 ```bash
 # Create rule
 POST /api/admin/safety/rules
 Content-Type: application/json
-x-user-id: admin
+Authorization: Bearer $ADMIN_TOKEN
 
 {
   "rule_name": "Block Production Snapshot Deletion",
@@ -591,7 +593,7 @@ x-user-id: admin
 # Dry-run evaluation
 POST /api/admin/safety/rules/evaluate
 Content-Type: application/json
-x-user-id: admin
+Authorization: Bearer $ADMIN_TOKEN
 
 {
   "entity_type": "snapshot",
@@ -871,9 +873,11 @@ curl -X PUT http://localhost:8900/api/snapshots/test_id/tags \
   -d '{"add": ["test"]}'
 
 # Test rule creation
+# Since PR #5677, this write endpoint requires an admin role (requireAdminRole()); identity
+# comes from req.user. The x-user-id header is ignored.
 curl -X POST http://localhost:8900/api/admin/safety/rules \
   -H "Content-Type: application/json" \
-  -H "x-user-id: admin" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{
     "rule_name": "Test Rule",
     "target_type": "snapshot",
