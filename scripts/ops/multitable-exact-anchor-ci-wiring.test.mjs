@@ -35,6 +35,28 @@ const FILES = [
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
+function historyPanelWebContract(workflow, required) {
+  const step = namedStepBody(workflow, 'Run record history panel spec')
+  assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)
+  assert.match(step, /run: pnpm --filter @metasheet\/web exec vitest run multitable-record-history-panel --reporter=dot/)
+  for (const path of ['apps/web/src/multitable/components/MetaRecordHistoryPanel.vue', 'apps/web/tests/multitable-record-history-panel.spec.ts']) {
+    assert.equal(workflow.split('\n').filter(line => line.trim() === `- '${path}'`).length, 2)
+  }
+  const commands = required.replace(/\\\n/g, ' ').split('\n').filter(line => !/^\s*#/.test(line) && line.includes('vitest run '))
+  assert.ok(commands.some(line => line.split(/\s+/).includes('multitable-record-history-panel')))
+}
+
+test('record history panel remains selected in both web lanes and both guard triggers', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/multitable-web-guard.yml'), 'utf8')
+  const required = readFileSync(join(repoRoot, 'apps/web/scripts/run-required-web-tests.sh'), 'utf8')
+  historyPanelWebContract(workflow, required)
+  assert.throws(() => historyPanelWebContract(workflow.replace('vitest run multitable-record-history-panel ', 'vitest run missing-history-panel '), required))
+  assert.throws(() => historyPanelWebContract(workflow, required.replaceAll('multitable-record-history-panel', 'missing-history-panel')))
+  for (const path of ['apps/web/src/multitable/components/MetaRecordHistoryPanel.vue', 'apps/web/tests/multitable-record-history-panel.spec.ts']) {
+    assert.throws(() => historyPanelWebContract(workflow.replace(`- '${path}'`, "- 'missing-history-path'"), required))
+  }
+})
+
 function manualCheckpointContract(workflow) {
   const step = namedStepBody(workflow, 'Run isolated manual checkpoint acceptance')
   assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)

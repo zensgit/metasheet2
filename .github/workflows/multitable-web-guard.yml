@@ -16,6 +16,8 @@ name: Multitable Web Guard
 on:
   pull_request:
     paths:
+      - 'apps/web/src/multitable/components/MetaRecordHistoryPanel.vue'
+      - 'apps/web/tests/multitable-record-history-panel.spec.ts'
       # Personal-views write path (Slice 3c/3d + dedup): the guard MUST fire when these change, or the
       # reorder/additive read-merge-write goldens silently stop running (as happened on the dedup PR #3769,
       # which touched only reorder-view-fields.ts and triggered no web-guard).
@@ -459,6 +461,8 @@ on:
   push:
     branches: [main]
     paths:
+      - 'apps/web/src/multitable/components/MetaRecordHistoryPanel.vue'
+      - 'apps/web/tests/multitable-record-history-panel.spec.ts'
       # Personal-views write path (Slice 3c/3d + dedup): the guard MUST fire when these change, or the
       # reorder/additive read-merge-write goldens silently stop running (as happened on the dedup PR #3769,
       # which touched only reorder-view-fields.ts and triggered no web-guard).
@@ -933,6 +937,9 @@ jobs:
 
       - name: Run recovery archive web specs
         run: pnpm --filter @metasheet/web exec vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
+
+      - name: Run record history panel spec
+        run: pnpm --filter @metasheet/web exec vitest run multitable-record-history-panel --reporter=dot
 
       # r4 item 4/5 (2026-09-10): field-config panel empty-state copy + the panel's own scroll
       # region. Registered as a STANDALONE step, copying the recovery-archive step above,
