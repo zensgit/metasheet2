@@ -97,11 +97,20 @@ media type are retained, size must match, and this bounded implementation suppor
 the local provider only. A fresh stage object replaces storage identity while
 clearing deleted/purge markers in the same transaction.
 
-This participant is not a public entry point. Canonical writer fencing, locking,
-preview/token fingerprint binding, reference CAS, history, receipt consumption,
-cleanup ownership and runtime wiring remain mandatory. No executable preview is
-enabled by these internal changes. The test's forced enclosing rollback proves
-transaction participation only, not the yet-unwired history/record write chain.
+The internal canonical sync executor now accepts an authenticated preparation
+batch. It detaches input, binds its metadata roster to the v2 plan/token, rebuilds
+attachment changes under existing sheet/record/schema locks, and includes them in
+the locked true-delta permission check. Batch application requires an exact union
+of before/target metadata identities and exactly the target set of verified stages.
+Metadata updates, reference version-CAS, canonical revision/seal, token burn and
+sync receipt share the existing transaction. Dedicated real-DB cases cover this
+internal executor, not public HTTP attachment restoration.
+
+No executable preview is enabled yet. The public reader/staging facade, v2 preview
+minting, durable adoption/abandon cleanup, async attachment contract and browser
+loop remain mandatory. Cleanup must also retain the displaced old storage-object
+identity before replacement; a new path alone does not prove old-object cleanup.
+Do not infer public completeness from the internal transaction evidence.
 
 ## Required Evidence
 

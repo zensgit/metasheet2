@@ -197,11 +197,42 @@ Exact code: `359935892af0c13e73b3c432b7b71f9b1ec6e597`; main rechecked
   collect database metadata fingerprints, mint v2 identities or invoke attachment
   apply. No attachment restore browser/UAT evidence is claimed.
 
+## Canonical Sync Transaction Integration
+
+Exact code: `19f90ced8b09ebefc1b3cb6b1283c7fcde93b465`; remote main
+rechecked `868c8d2b26424fcaa8405661a6999abb17ec6d93`.
+
+- The internal materialized sync executor now validates the preparation roster
+  against the token's v2 plan hash, rebuilds attachment field changes after the
+  existing fence/row/schema checks, and submits those fields to locked plan
+  authorization. Scalar/link projection remains unchanged without a batch.
+- The batch requires exactly all before/target metadata identities, exactly the
+  target set of verified stages, exact original scope and current metadata hashes.
+  Metadata and record reference CAS now share canonical history/seal, token burn
+  and receipt transaction. No public HTTP attachment restore is enabled.
+- Four real-DB cases prove success, later-write rollback, authorization denial and
+  metadata drift. Success verifies metadata path identity, restored record data,
+  version increment, attachment-bearing history patch, one receipt and refusal of
+  the second token execution. Failure cases pin zero history/burn and unchanged
+  record/metadata. These are direct internal-kernel calls with synthetic verified
+  stage rows and authority callbacks, NOT file IO or end-user permission UAT.
+- Bypassing the batch apply call yields two exact failures: unchanged tombstoned
+  storage metadata on success, and drift incorrectly accepted. Restored GREEN.
+- Full D5 suite 44/44 PASS (including the four new cases); historical migration
+  neighbors 59/59 and 127/127 PASS; full fresh/replay/manual capture/scalar HTTP
+  and stage/metadata gates PASS. Owned DB/connections/cluster residue zero.
+- Five focused unit files 59/59 PASS; core two-project type-check, source ESLint,
+  diff-check and wiring contract 37/37 PASS. No new external review this checkpoint.
+- Logs: `/private/tmp/tm-attachment-canonical-{apply,mutation,full,unit,wiring}-20260919.log`.
+  The initial fixture used the legacy string actor ID and correctly failed the
+  UUID stage boundary; the new fixture now uses a synthetic UUID, without relaxing
+  production validation. The successful full log has no skipped D5 tests.
+
 ## Remaining Required Work
 
 Authenticated-reader integration; prepared file ownership and crash cleanup;
-preview/token binding; explicit attachment field authorization; canonical atomic
-metadata/reference/history apply; purge/drift/retry concurrency; async contract;
+public preview/token binding and reader/staging-to-canonical facade integration;
+end-user attachment field authorization; purge/drift/retry concurrency; async contract;
 whole-operation negatives; real isolated database/storage and desktop/mobile
 browser acceptance; required CI wiring and independent exact-head review.
 Existing `unsupported_attachments` remains in force until that chain is complete.
