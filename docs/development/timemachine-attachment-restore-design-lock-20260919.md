@@ -2,6 +2,56 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Current Closeout Disposition (2026-09-20)
+
+Inspected candidate `28742c41dab1290550037fef1d6b19e0a761c26e`, tree
+`8001a7fba9d5b7637c36eabbd9ef8ffd49249c79`, on unchanged main
+`868c8d2b26424fcaa8405661a6999abb17ec6d93`. PR #5882 remains Draft/HOLD.
+The paired verification report now binds both full Workbench and archive browser
+acceptance to this same clean candidate. Its remote checks are terminal green;
+this does not authorize Ready, merge or runtime enablement.
+
+The implemented attachment contract remains synchronous, whole-selection,
+original-existing-record/original-existing-field recovery. Current actor, sheet,
+field and record-lock authority is rechecked; missing/corrupt evidence, changed
+identity, unsupported storage or over-threshold attachment writes refuse. Scalar
+async recovery retains its separately verified contract; it is not evidence of
+async attachment support.
+
+Internal cleanup covers expired abandoned stages with proven server ownership,
+reference refusal and apply/cleanup arbitration. It does not grant deletion of
+applied/displaced/unproven objects, recursive storage cleanup or an automatic
+retention schedule. Whole-table recycle-bin acceptance concerns retained soft-
+deleted tables only, not resurrection after hard deletion.
+
+Closeout still needs disposition of the independent integration review and
+the named second-tenant acceptance contract. Existing global-admin/sheet policy
+must not be replaced with a new organization policy merely to turn that test
+green. Current permission negatives are verified, but are not second-tenant proof.
+The owner question recorded in the authority audit remains unresolved.
+
+Historical OPEN notes below are checkpoint-scoped. Use the paired current gate
+table for their specific disposition; neither old wording nor a narrow review
+is grounds for a blanket product-complete claim. The nightly work remains an
+offline/read-only plan without real-environment access.
+
+### Detached Attachment Access Decision
+
+Terra's integration review requested changes for an attachment removed from the
+current cell remaining downloadable/deletable by its known ID. An isolated HTTP
+diagnostic confirmed that behavior for an authorized user, but anonymous and
+database-revoked users were denied, explicit deletion made the old ID unavailable,
+and already sealed archive bytes remained readable and exact. No permission bypass
+or sealed-archive loss was reproduced. This is not a broad security-clearance claim.
+
+Existing read/delete helpers and sheet/row/field access rules predate this PR;
+normal draft-attachment deletion is also explicitly supported. Making current-cell
+membership mandatory is a new access/lifecycle rule, not a mechanical correction
+to the attachment-restoration transaction. Do not apply that rule wholesale or
+silently exempt draft cases. Owner disposition is pending: preserve existing
+permissions for this slice, or define a separate detach-revocation contract with
+draft and archive-recovery exceptions. No new rule was implemented or ratified.
+
 ## Accepted Archive Result Context (2026-09-20)
 
 Code `758e10b68f33c16bfcd2f01bf9690a398fb5c200`, tree

@@ -12,6 +12,80 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Current Gate Reconciliation (2026-09-20)
+
+Evidence candidate: `28742c41dab1290550037fef1d6b19e0a761c26e`, tree
+`8001a7fba9d5b7637c36eabbd9ef8ffd49249c79`; clean before and after both runs.
+Authoritative remote main remained the base above. This section supersedes only
+the corresponding old OPEN/pending statements, not their historical evidence.
+A subsequent documentation commit does not inherit an exact-SHA CI result.
+
+| Requirement | Inspected evidence and disposition |
+| --- | --- |
+| Original attachment recovery | Same-head `--browser` passes public capture, preview and explicit execution; both original binaries are restored to their existing original cell and downloaded through authenticated routes. Scalar peers, one version increment and token replay refusal remain checked. LOCAL VERIFIED. |
+| Current authorization | Same run covers hidden/read-only fields, another actor's record lock, inactive actor, logged-in actor substitution, scope relocation and database-demoted administrator with an existing session. Zero-effect assertions cover the relevant data/metadata/history/token/receipt state. LOCAL VERIFIED for these axes only. |
+| Second tenant | Ordinary sheet policy preserves existing global-admin authority; workspace relocation and another admin are not tenant proof. OPEN: needs an authoritative tenant fixture/contract; no new permission semantics introduced. |
+| Evidence and identity | Whole-selection source/original-binding and digest guards retain their focused negatives/mutations below; current HTTP tests reject metadata drift and changed selected fields before staging. Sol's narrow static review at this head found 0 P1/P2 in source-to-restore binding, not whole-PR approval. |
+| Atomicity and retries | Same-head owned PG run includes second-upload failure, second metadata-update fault, final receipt fault, unchanged live before-images and exact retry. Stage cleanup includes both apply-first blocking and cleanup-first canonical adoption refusal. LOCAL VERIFIED; arbitrary SQL reference fabrication is not claimed impossible. |
+| Cleanup and lifecycle | Same run passes owned expired-stage retirement, terminal late-marker reconciliation, current-reference refusal, shutdown refusal and zero residue. Existing ownership/durability mutations remain SHA-bound below. Applied/displaced/unproven-object deletion and automatic scheduling remain excluded. |
+| History/config/trash | Same-head full Workbench 8/8 passes real login/session/router, retained whole-table restore, deleted-row details/restore, right-side row restore, actor name/local time and deleted-column typed restore with captured values. LOCAL VERIFIED with synthetic data, not customer UAT. |
+| Browser and async | Archive browser includes 1440/390 scalar and attachment loops, actual cell-editor deletion and restored gallery image. Local-launcher 5001-row scalar restart/unlock evidence keeps its earlier SHA. Over-threshold attachments remain refused; no async attachment claim. |
+| Required CI | Exact head has 34 SUCCESS + 1 expected Strict E2E SKIPPED, 0 pending/failure. Plugin run 35470608400 has successful isolated manual-checkpoint acceptance on Node18 and Node20. Local wiring contract rerun: 40/40. TERMINAL for this SHA only. |
+| Independent integration review | Sol's full-scope attempt ended with service-capacity error and no verdict. Terra subsequently inspected production integration, migration/runtime, changed Web flows and CI shape; REQUEST_CHANGES for detached-ID access. Diagnostic and contract disposition below; not recorded as APPROVE. |
+| Real environment/nightly | Read-only investigation plan in the design lock only. No real-environment reads, generated operational activity, flag changes, dispatch, deployment or customer data/storage. |
+
+Exact commands, both exit 0:
+
+```sh
+TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --workbench
+TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser
+```
+
+Logs: `/private/tmp/tm-final-exact-workbench-20260920.log` and
+`/private/tmp/tm-final-exact-archive-browser-20260920.log`. Workbench evidence run
+`9a599df2-bdd2-4c93-84ca-911061039f4e` records its exact head/tree, eight cases,
+zero fixture counters and no cleanup errors. Restored-column screenshot inspected.
+Archive run passes 32-migration replay, historical 47/59/127 neighbors, HTTP and
+desktop/mobile browser loops and final stage arbitration. Both runs finish with
+owned database connections zero and their synthetic clusters removed.
+
+Remote evidence is also attached without changing the tested head:
+[terminal CI](https://github.com/zensgit/metasheet2/pull/5882#issuecomment-5745730421),
+[exact Workbench](https://github.com/zensgit/metasheet2/pull/5882#issuecomment-5745752817),
+[bounded source review](https://github.com/zensgit/metasheet2/pull/5882#issuecomment-5745754301).
+No Ready/merge or full-goal completion is inferred from these results.
+
+### Detached-ID Review Triage
+
+Terra reported one P1 candidate: a current-only attachment removed by archive
+restore remains publicly addressable by its previous ID. Independently inspected
+read/delete service lookups and route authority are unchanged from the base;
+existing draft-delete tests explicitly allow owner-authorized deletion without a
+record binding. The proposed blanket live-cell-membership condition therefore
+needs an access/lifecycle contract, not an inferred permission expansion/revocation.
+
+A temporary diagnostic block in the owned manual-checkpoint runner performed real
+HTTP upload and restore: add a new synthetic attachment to the current cell, restore
+the older two-attachment selection, and verify the extra ID is no longer in the
+cell. Its authorized download remained 200 with exact bytes; anonymous and inactive
+actor downloads returned 401. Explicit authorized DELETE returned 200, then GET
+returned 404. Fresh authenticated archive reconstruction still returned both
+original archived binaries exactly. No archive damage or unauthenticated/revoked
+access was reproduced; the observed authorized behavior alone does not establish
+the claimed P1 under the existing permission contract. Owner disposition remains
+open, not silently accepted as a new rule or declared independently cleared.
+
+Log `/private/tmp/tm-displaced-id-diagnostic-fixed-20260920.log`, exit 0, includes
+47/59/127 neighbors and final stage verification; owned/stage connections zero,
+synthetic cluster removed. The first diagnostic attempt read the upload response
+at `data.id` instead of its real `data.attachment.id` and failed its fixture assertion;
+it also cleaned its database/cluster. It is not evidence of a production failure.
+The successful diagnostic used a temporary uncommitted test block, not an
+unchanged exact-head run or a production-guard mutation. That block was removed;
+the script was restored byte-for-byte to HEAD, SHA-256
+`5ce69550208e3b749e039da92fa38600488bcbfe04fafba16de2af7537f802b6`.
+Only the two reports remain changed. No API/storage/permission behavior was edited.
+
 ## Accepted Archive Result Regression (2026-09-20)
 
 ### Consolidated acceptance refresh after rediscovery fix
