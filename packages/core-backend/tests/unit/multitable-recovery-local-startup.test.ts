@@ -46,7 +46,9 @@ async function fixture() {
   await fs.writeFile(configPath, JSON.stringify(config), { mode: 0o600 })
   const cancellation = new AbortController()
   const readSecret = vi.fn(async () => Buffer.from(secret))
-  const input = { env, configPath, signal: cancellation.signal, readSecret, resolveDatabase: vi.fn(() => database) }
+  const attachmentStorage = { uploadByKey: vi.fn(), readRecoveryAttachment: vi.fn(), reserveRecoveryAttachment: vi.fn() }
+  const input = { env, configPath, signal: cancellation.signal, readSecret, resolveDatabase: vi.fn(() => database),
+    resolveAttachmentStorage: vi.fn(() => attachmentStorage) }
   return { root, secret, config, configPath, cancellation, database, input }
 }
 
@@ -105,10 +107,12 @@ describe('locked local archive startup', () => {
   it.each([{}, { ...env, MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'TRUE' }, { ...env, MULTITABLE_ENABLE_WRITER_FENCE: '' }])('OFF ignores all configuration and IO (%s)', async flags => {
     const readSecret = vi.fn()
     const resolveDatabase = vi.fn()
+    const resolveAttachmentStorage = vi.fn()
     await expect(prepareRecoveryLocalStartup({ env: flags, configPath: '/does-not-exist',
-      signal: AbortSignal.abort(), readSecret, resolveDatabase })).resolves.toBeUndefined()
+      signal: AbortSignal.abort(), readSecret, resolveDatabase, resolveAttachmentStorage })).resolves.toBeUndefined()
     expect(readSecret).not.toHaveBeenCalled()
     expect(resolveDatabase).not.toHaveBeenCalled()
+    expect(resolveAttachmentStorage).not.toHaveBeenCalled()
   })
 
   it('waits locked for explicit input, scrubs it, creates authentic revocable custody and real callbacks', async () => {
@@ -120,9 +124,15 @@ describe('locked local archive startup', () => {
     await vi.waitFor(() => expect(f.input.readSecret).toHaveBeenCalledTimes(1))
     expect(settled).toBe(false)
     expect(f.database.query).not.toHaveBeenCalled()
+    expect(f.input.resolveAttachmentStorage).not.toHaveBeenCalled()
     const supplied = Buffer.from(f.secret)
     release(supplied)
     const local = (await startup)!
+    expect(f.input.resolveAttachmentStorage).toHaveBeenCalledTimes(1)
+    expect(local.composition.attachmentStorage).toBe(f.input.resolveAttachmentStorage.mock.results[0].value)
+    expect(local.composition.attachmentStorage!.uploadByKey).not.toHaveBeenCalled()
+    expect(local.composition.attachmentStorage!.readRecoveryAttachment).not.toHaveBeenCalled()
+    expect(local.composition.attachmentStorage!.reserveRecoveryAttachment).not.toHaveBeenCalled()
     expect(supplied.every(byte => byte === 0)).toBe(true)
     const operations = resolveLocalArchiveCustody(local.composition.keyCustody)!
     expect(operations).toBeDefined()
@@ -153,6 +163,26 @@ describe('locked local archive startup', () => {
     f.secret.fill(0)
   })
 
+  it.each(['throw', 'cancel'] as const)('storage resolution %s refuses without publishing composition', async mode => {
+    const f = await fixture()
+    const supplied = Buffer.from(f.secret)
+    f.input.readSecret.mockResolvedValue(supplied)
+    const storage = f.input.resolveAttachmentStorage()
+    f.input.resolveAttachmentStorage.mockClear()
+    f.input.resolveAttachmentStorage.mockImplementation(() => {
+      if (mode === 'throw') throw new Error('private-storage-detail')
+      f.cancellation.abort()
+      return storage
+    })
+    await expect(prepareRecoveryLocalStartup(f.input)).rejects.toThrow(refusal)
+    expect(f.input.resolveAttachmentStorage).toHaveBeenCalledTimes(1)
+    expect(supplied.every(byte => byte === 0)).toBe(true)
+    expect(storage.uploadByKey).not.toHaveBeenCalled()
+    expect(storage.readRecoveryAttachment).not.toHaveBeenCalled()
+    expect(storage.reserveRecoveryAttachment).not.toHaveBeenCalled()
+    f.secret.fill(0)
+  })
+
   it.each(['wrong-secret', 'cancel', 'tampered-receipt', 'root-replaced'] as const)('fails closed on %s and scrubs supplied bytes', async mode => {
     const f = await fixture()
     const supplied = mode === 'wrong-secret' ? randomBytes(32) : Buffer.from(f.secret)
@@ -170,6 +200,7 @@ describe('locked local archive startup', () => {
     await expect(prepareRecoveryLocalStartup(f.input)).rejects.toThrow(refusal)
     expect(supplied.every(byte => byte === 0)).toBe(true)
     expect(f.database.query).not.toHaveBeenCalled()
+    expect(f.input.resolveAttachmentStorage).not.toHaveBeenCalled()
     f.secret.fill(0)
   })
 
