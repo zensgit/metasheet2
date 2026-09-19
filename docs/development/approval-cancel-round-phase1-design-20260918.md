@@ -588,7 +588,7 @@ implementation):
   "createCancelRoundInstance" src/routes/` → 0 matches). A caller (route, or another slice's UI
   entry) is not part of this slice's checklist and is not added here.
 - **Seven implementer-erratum error codes** (§3.1: `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`,
-  `CANCEL_ROUND_REQUESTER_ONLY`, `CANCEL_ROUND_ALREADY_PENDING`, `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`)
+  `CANCEL_ROUND_REQUESTER_ONLY`, `CANCEL_ROUND_ALREADY_PENDING`, `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
   `CANCEL_ROUND_SEAT_INELIGIBLE`, `CANCEL_ROUND_SUITE_UNKNOWN`, `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`)
   plus the two 判据 III `CANCEL_ROUND_INVARIANT_VIOLATION` throw sites: registered here for
   owner/gate sign-off, since the lock names no code for any of these nine conditions.

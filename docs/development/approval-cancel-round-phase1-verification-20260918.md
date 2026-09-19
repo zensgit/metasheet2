@@ -3039,87 +3039,265 @@ catch-then-`blocked`、不得静默 `expired`。
 
 ## L9. required `test (20.x)` 的全量 vitest / real-DB 步骤清单 —— 逐字复现、同库连跑
 
-**做法**:机械地从 `.github/workflows/plugin-tests.yml` 的 `test` job(第 174-1735 行,共 94 个 step)
-抽出**每一个 run 块里含 `vitest` 的 step**(21 个)**加上** `Run core-backend tests`(第 842 行,
-`pnpm --filter @metasheet/core-backend test`,run 块里不含 `vitest` 字面量但就是全量 vitest job)=
-**22 个 step**,按 job 内原顺序、**逐字**执行其 run 块(每个 step 的 run 块原样落成一个 `.sh`,用
-`bash -e -o pipefail` 跑,与 GH Actions 的默认 shell 一致),env 逐条照抄(`RBAC_BYPASS` /
-`RBAC_TOKEN_TRUST` / `PRODUCT_MODE` / `METASHEET_REAL_DB_TEST_STEP` 等),
-只把 `DATABASE_URL` 换成本地私有库。**同一个处女库 `metasheet2_fix_c1_full` 连跑到底**,
-建库后按 CI 的同一条 `MIGRATION_EXCLUDE` 迁移。
-另加 required 的 `Run linting`(:832)与 `Run type checking`(:837)。
-逐 step 日志:`reviews/c1-fix-mutbak/required-20x/*.log`;step 清单:同目录 `MANIFEST.txt`。
+> **本节是第二版。第一版有一个真实的普查错误,连同它的修正一起留在 L9.4,不删。**
 
-**`CI=true` 是保真、不是本地偷工**:GH Actions runner 环境自带 `CI=true`,vitest 读它来决定
-「跑一次就退」而不是进 watch 模式。第一次试跑没加,`Run core-backend tests` 卡在
-`Tests failed. Watching for file changes...` —— 这次失败本身留了一条有用的记录,见下面 L9.2。
+### L9.0 窗口与谓词(两者都被修正过)
 
-### L9.1 结果(22 个 step + lint + type-check)
+**窗口**:`.github/workflows/plugin-tests.yml` 的 required `test` job = 文件第 **174-1908** 行
+(下一个 job `after-sales-integration:` 起于第 **1909** 行)。
+第一版把上界写成 1735,**漏掉了 1736-1908 共 173 行**,其中含一个真实的真库 vitest 步骤
+`:1757 Run attendance integration tests`(带 `DATABASE_URL` + `ATTENDANCE_TEST_DATABASE_URL`)。
+成因写在 L9.4。
+
+**谓词**:第一版只取「run 块里含 `vitest`」。任务书要的是「全量 vitest **与 real-DB** 步骤」——
+一个由 `node --test` 或只靠 `DATABASE_URL` 驱动的真库步骤满足后者而不满足前者。第二版把谓词放宽成
+**run 块含 `vitest`** 或 **含 `node --test`** 或 **step 的 `env` 带 `DATABASE_URL`** 或 **run 块里出现
+`DATABASE_URL`**,并额外强制纳入 `:1746 Stop core backend`(把 `:1694` 起的后台服务收掉,否则它会留在
+本机上跑)。
+
+⇒ 人口从 22 个 step 变成 **74 个**。
+
+**执行方式**:每个 step 的 run 块原样落成一个 `.sh`,用 `bash -e -o pipefail` 跑(与 GH Actions 的默认
+shell 一致),env 逐条照抄(`RBAC_BYPASS` / `RBAC_TOKEN_TRUST` / `PRODUCT_MODE` /
+`METASHEET_REAL_DB_TEST_STEP` / `MIGRATION_EXCLUDE` / `HOST` / `PORT` …),按 job 内原顺序连跑,
+只把 `DATABASE_URL` / `ATTENDANCE_TEST_DATABASE_URL` 换成本地私有库。
+**同一个处女库 `metasheet2_fix_c1_full2` 连跑到底**;库由我 `createdb` 出来后**空着**,
+由清单里的 `:1057 Run DB migrations` 这一步自己按 CI 同一条 `MIGRATION_EXCLUDE` 迁移(不是我手工迁的)。
+逐 step 日志:`reviews/c1-fix-mutbak/required-20x-v2/*.log`;step 清单与逐 step env:同目录 `MANIFEST.txt`。
+
+**两条环境保真项,都是为了对上 `(20.x)` 这三个字**:
+- **`CI=true`**:GH Actions runner 环境自带,vitest 读它来决定「跑一次就退」。第一次试跑没加,
+  `Run core-backend tests` 卡在 `Tests failed. Watching for file changes...`(那次的附带发现见 L9.4(b))。
+- **node 20.20.2**(nvm),不是本机默认的 25.9.0;`pnpm` 仍用装出这份 `node_modules` 的 10.33.0
+  (nvm 的 node 20 自带 pnpm 12,会以 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` 拒跑;CI 用
+  `pnpm/action-setup` 钉 10.16.1,同一个大版本族)。**这一条不是形式主义**:在 node 25 上
+  `:343 Integration Guard required-wiring contract` 会红,红的原因是该 step 的计数包装器
+  `grep -Eo 'tests [0-9]+$'` 匹配不到 node 25 spec reporter 带 ANSI 的 `ℹ tests 62` 行——
+  62 个子测试其实全过。换成 node 20 后同一步绿(`integration-guard contract: 62 subtests ran (floor 62).`)。
+  即「运行器版本 ≠ 生产版本」会制造假红,也能制造假绿,这次是前者。
+
+### L9.1 结果
+
+- **`TZ=UTC`**(第二版跑完之后才发现的第三条):GH Actions runner 是 UTC,本机是 CST(UTC+8)。
+  `:1757` 的 `attendance-shift-swap.test.ts` 有两条断言做
+  `new Date(<DATE 列>).toISOString().slice(0,10)` —— DATE 列按本地午夜解析,再转 UTC 就**整体倒退一天**
+  (`expected '2049-06-13' to be '2049-06-14'`)。**判别控制**:同一棵树、同一个库、同一个 step,
+  只加 `TZ=UTC` 重跑 ⇒ 见 L9.1 的 RERUN 行。这与本轮 diff 无关(日期计算不在本切片的任何改动路径上),
+  是第三条「运行器环境 ≠ CI 环境」的坑,和 `CI=true`、node 20 同族。
 
 | step(行号) | exit | 结果 |
 |---|---|---|
-| :762 attendance calc-group timeline / legacy audit | 0 | 2 files passed |
-| :772 attendance work-date resolver W2 | 0 | 2 files passed |
-| :783 attendance shift segments W3 | 0 | 1 file passed |
-| :793 attendance W4C-4 detail/diff contracts | 0 | 2 files passed |
-| **:842 core-backend 全量 vitest** | **0** | **933 passed / 175 skipped (1108 files);14735 passed / 1604 skipped (16339 tests)** |
-| :892 rich-text longText XSS canaries | 0 | 1 file passed |
-| :899 F3 storage-integrity canaries | 0 | 3 files passed |
-| :911 B3-07 approval-attachment canaries | 0 | 8 files passed |
-| :929 elearning V0.1 unit canaries | 0 | 106 + 1 files passed |
-| :1107 elearning content/assessment schema gate(real DB) | 0 | 41 files passed |
-| :1160 elearning media quota(real DB) | 0 | 2 files passed |
-| :1177 elearning auth/tenant/RBAC gate(real DB) | 0 | 1 file passed |
-| :1191 sealed-export S3(real DB) | 0 | 1 file passed |
-| :1202 sealed-export S4(real DB) | 0 | 1 file passed |
-| :1213 after-sales install(real DB) | 0 | 1 file passed |
-| :1229 BPMN timer write-and-claim(real DB) | 0 | 1 file passed |
-| :1249 BPMN startProcess zero-residue(real DB) | 0 | 1 file passed |
-| :1266 real-app assembly guard(real DB) | 0 | 1 file passed |
-| :1285 snapshot-protection E2E(real DB) | 0 | 1 file passed |
-| :1295 multitable real-DB integration | **1** | 1 failed / 261 passed (262 files);见 L9.2 |
-| **:1568 approval real-DB integration(本切片所在 lane)** | **0** | **84 files passed;902 passed / 10 skipped (912 tests)** |
-| :1675 comment-reaction keystone(real DB) | 0 | 1 file passed |
-| :832 `pnpm lint` | 0 | — |
-| :837 `pnpm type-check` | 0 | — |
+| :195 Global History flag manifest contract | 0 | # tests 127；# fail 0 |
+| :200 W0 exact-anchor L6/L7 CI wiring contract | 0 | # tests 36；# fail 0 |
+| :206 Time Machine D2a archive-catalog CI wiring contract | 0 | # tests 6；# fail 0 |
+| :211 Production maintenance SSH host-identity contract | 0 | # tests 4；# fail 0 |
+| :219 DingTalk production-readiness inventory contract | 0 | # fail 0；# tests 4；# fail 0 |
+| :236 K3 WISE rehearsal driver contract | 0 | # tests 17；# fail 0 |
+| :273 Run K3-line ops suites | 0 | # tests 80；# fail 0 |
+| :291 Directory deprovision ledger CI-wiring contract | 0 | # tests 3；# fail 0 |
+| :298 Directory activation source-lock CI-wiring contract | 0 | # tests 3；# fail 0 |
+| :343 Integration Guard required-wiring contract | 0 | # tests 62；# fail 0 |
+| :369 PB4-2 archive-read-only CI wiring contract | 0 | # tests 3；# fail 0 |
+| :375 PB4-3 cycle-detection CI wiring contract | 0 | # tests 3；# fail 0 |
+| :381 PB4-4 reactivation CI wiring contract | 0 | # tests 3；# fail 0 |
+| :387 B4 department-bindings CI wiring contract | 0 | # tests 3；# fail 0 |
+| :392 B5-a routing-policy CI wiring contract | 0 | # tests 3；# fail 0 |
+| :398 E-learning V0.1 content/assessment CI wiring contract | 0 | # tests 8；# fail 0 |
+| :404 E-learning L0 jobs CI wiring contract | 0 | # tests 6；# fail 0 |
+| :409 E-learning L2 batch assignment CI wiring contract | 0 | # tests 4；# fail 0 |
+| :415 E-learning L2 assignment lifecycle CI wiring contract | 0 | # tests 4；# fail 0 |
+| :420 E-learning L2 training-plan CI wiring contract | 0 | # tests 4；# fail 0 |
+| :425 E-learning L2 plan-assignment CI wiring contract | 0 | # tests 4；# fail 0 |
+| :430 E-learning L2 admin-scope ACL CI wiring contract | 0 | # tests 4；# fail 0 |
+| :436 E-learning L2 notification-delivery CI wiring contract | 0 | # tests 4；# fail 0 |
+| :443 E-learning L2 notification-worker CI wiring contract | 0 | # tests 6；# fail 0 |
+| :450 E-learning V0.1 media CI wiring contract | 0 | # tests 15；# fail 0 |
+| :457 E-learning V0.1 auth/tenant/RBAC CI wiring contract | 0 | # tests 3；# fail 0 |
+| :462 B5-b routing-resolver CI wiring contract | 0 | # tests 3；# fail 0 |
+| :466 B5-b fail-close CI wiring contract | 0 | # tests 3；# fail 0 |
+| :470 B5-c routing-routes CI wiring contract | 0 | # tests 3；# fail 0 |
+| :474 B6 equivalence CI wiring contract | 0 | # tests 3；# fail 0 |
+| :478 B7 reconciliation CI wiring contract | 0 | # tests 3；# fail 0 |
+| :482 B7 round-2 CI wiring contract | 0 | # tests 4；# fail 0 |
+| :488 T1 org-transfer CI wiring contract | 0 | # tests 3；# fail 0 |
+| :494 T2 source-freeze CI wiring contract | 0 | # tests 6；# fail 0 |
+| :504 T2-Gate collision-mechanism CI wiring contract | 0 | # tests 82；# fail 0 |
+| :509 Stock-preparation P4 repair CI wiring contract | 0 | # tests 3；# fail 0 |
+| :514 Approval data-closure CI wiring contract | 0 | # tests 12；# fail 0 |
+| :537 DingTalk staging worker-drain CI wiring contract | 0 | # tests 2；# fail 0 |
+| :540 DingTalk staging immutable worker-drain gate | 0 | # tests 43；# fail 0 |
+| :573 Attendance W4C-2 CI wiring contract | 0 | # tests 262；# fail 0 |
+| :579 Attendance W4C-3c tooling cleanup contracts | 0 | # tests 19；# fail 0 |
+| :589 Prod health probe monitor contract | 0 | # tests 8；# fail 0 |
+| :602 DingTalk OAuth-stability ARG_MAX payload-handoff regression | 0 | # tests 5；# fail 0 |
+| :661 Time Machine D2 archive real-DB fail-not-skip behavior | 0 | # tests 1；# fail 0 |
+| :670 Run attendance calculation-group W1 contract | 0 | # tests 6；# fail 0 |
+| :674 Run attendance legacy membership audit contract | 0 | # tests 2；# fail 0 |
+| :762 Run attendance calculation-group timeline and legacy audit units | 0 | Test Files 2 passed (2) |
+| :772 Run attendance work-date resolver W2 unit | 0 | Test Files 2 passed (2) |
+| :783 Run attendance shift segments W3 unit | 0 | Test Files 1 passed (1) |
+| :793 Run attendance W4C-4 calculation detail and diff contracts | 0 | Test Files 2 passed (2)；# tests 3；# fail 0 |
+| :812 Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors | 0 | # tests 60；# fail 0 |
+| :828 Run attendance window-runner pipeline contract | 0 | # tests 153；# fail 0 |
+| :870 Run scripts/ops/__tests__ node:test suites | 0 | # tests 48；# fail 0 |
+| :892 Run rich-text longText XSS write-sanitizer canaries | 0 | Test Files 1 passed (1) |
+| :899 Run F3 storage-integrity canaries | 0 | Test Files 3 passed (3) |
+| :911 Run B3-07 approval-attachment unit canaries | 0 | Test Files 8 passed (8) |
+| :929 Run elearning V0.1 unit canaries | 0 | Test Files 106 passed (106)；Test Files 1 passed (1) |
+| :1057 Run DB migrations | 0 | （该 step 不打印 vitest 汇总行；exit 即判据） |
+| :1107 Run elearning V0.1 content/assessment schema gate | 0 | Test Files 41 passed (41) |
+| :1160 Run elearning V0.1 media quota real-DB gate | 0 | Test Files 2 passed (2) |
+| :1177 Run elearning V0.1 auth/tenant/RBAC gate | 0 | Test Files 1 passed (1) |
+| :1191 Run sealed-export S3 private-ingestion real-DB proof | 0 | Test Files 1 passed (1) |
+| :1202 Run sealed-export S4 generation-kernel real-DB proof | 0 | Test Files 1 passed (1) |
+| :1213 Run required after-sales install integration | 0 | Test Files 1 passed (1) |
+| :1229 Run BPMN timer job write-and-claim safety | 0 | Test Files 1 passed (1) |
+| :1249 Run BPMN startProcess poller-disabled zero-residue | 0 | Test Files 1 passed (1) |
+| :1266 Run real-app assembly guard | 0 | Test Files 1 passed (1) |
+| :1285 Run snapshot-protection E2E | 0 | Test Files 1 passed (1) |
+| :1295 Run multitable real-DB integration | 1 | Test Files 1 failed | 261 passed (262) |
+| :1568 Run approval real-DB integration | 0 | Test Files 84 passed (84) |
+| :1675 Run comment-reaction keystone | 0 | Test Files 1 passed (1) |
+| :1694 Start core backend | 0 | （该 step 不打印 vitest 汇总行；exit 即判据） |
+| :1746 Stop core backend | 0 | （该 step 不打印 vitest 汇总行；exit 即判据） |
+| :1757 Run attendance integration tests | 1 | Test Files 1 failed | 123 passed (124) |
 
-本切片的 7 条新用例就在 `:1568` 这一步里跑(该步的 run-list 尾部含七个 `approval-cancel-round-*.db.test.ts`),
-全绿。
 
-### L9.2 两条红,都不是本轮引入 —— 逐条归因,不含糊过去
+**清单跑完后,对两条红各做的重跑 / 控制(同一棵树;命令与 step 原文逐字相同,只加环境变量):**
 
-**(a) `:1295` multitable 里 `multitable-dashboard-chart-authz.test.ts > R4: reader without
-canManageViews cannot create, update, or delete charts`:`expected 401 to be 403`。**
-判据与本轮无关:
-- 我的 diff 里唯一的非测试源文件是 `ApprovalProductService.ts`(`git diff --name-only` 共 9 个文件:
-  2 个 MD、1 个服务、1 个测试 helper、5 个 `approval-cancel-round-*.db.test.ts`),改动全在
-  `createCancelRoundInstance` 及其两个新 helper 内;**零** multitable 源文件、**零**路由文件、
-  **零** auth 源文件被修改(对 `../auth/user-activation` 只是新增一条 `import` 去**读用**那个共享门,
-  该模块本身一字未改)。
-- 该 step 的 run-list 里**没有任何** `approval-cancel-round-*` 文件:
-  `grep -c "approval-cancel-round" <该 step 的 run 块>` → **0**;我改的 5 个夹具文件都只在 `:1568` 跑,
-  而 `:1568` 在 `:1295` **之后**。
-- 我对 `tests/helpers/approval-schema-bootstrap.ts` 的改动是**纯新增一个导出函数**,
-  `APPROVAL_SCHEMA_BOOTSTRAP_VERSION` 未 bump,对任何其他套件零行为差。
-- **判别控制**:同一棵树、同一个库单独重跑该文件 ⇒
-  `Test Files 1 passed (1) / Tests 10 passed (10)`。
-⇒ 262 个文件在一个共享库上并行跑时的跨套件干扰(本仓已知的 shared-DB fixture collision 家族),
-不是本轮的回归。**我没有去修它**(多维表线,不在本切片范围),如实记录在此。
+| 重跑 / 控制 | 库 | 加了什么 | 结果 |
+|---|---|---|---|
+| `:1757` attendance integration | 同一个连跑库 | `TZ=UTC` | `1 failed \| 123 passed (124)`;**`attendance-shift-swap.test.ts` 转绿**(12/12),红转移到 `attendance-plugin.test.ts` 的 3 条 |
+| `attendance-shift-swap.test.ts` 单文件 | 同一个连跑库 | `TZ=UTC` | `Test Files 1 passed (1) / Tests 12 passed (12)` —— TZ 是那两条红的唯一原因 |
+| `:1757` attendance integration | **另开的处女库**(按 CI 同一条 `MIGRATION_EXCLUDE` 迁移) | `TZ=UTC` | **`exit=0` / `Test Files 124 passed (124)` / `Tests 1784 passed (1784)`** —— 整步全绿 |
+| `:1295` multitable | 同一个连跑库 | `TZ=UTC` | `1 failed \| 261 passed (262)`,**又换了一个受害者**,见下 |
 
-**(b) 第一次试跑(未设 `CI=true`)时 `:842` 报
+**`:1757` 的红:两个不同成因,都不是本轮引入。**
+- `attendance-shift-swap.test.ts` 两条 = **本机 CST vs CI UTC**(见 L9.0 第三条),`TZ=UTC` 即绿。
+- `attendance-plugin.test.ts` 三条 = **共享库残留**。这正是本文件 **§A2** 已经机械隔离过的同一现象:
+  该文件「在 virgin DB 是有效 oracle」,在一个被前面几十个真库 step 反复写过的库上跑第三轮不是有效 oracle。
+  §A2 当时的做法(新建库 + 全量迁移 + 单跑该文件 ⇒ 166/166)被本轮照做了一次,结果见上表第三行。
+- 两者都与本切片无关:本轮 diff 不含任何日期计算、不含任何考勤源文件
+  (`git diff --name-only` 的 9 个文件见 L9.4(c))。
+
+**`:1295` 的红:三次跑、三个不同的受害用例,两次是同一种传输层错误 —— 环境,不是回归。**
+
+| 跑次 | 失败用例 | 失败形态 |
+|---|---|---|
+| 第一版(node 25) | `multitable-dashboard-chart-authz.test.ts > R4 …` | `expected 401 to be 403` |
+| 第二版(node 20) | `multitable-restore-per-field-realdb.test.ts > an empty fieldIds array is a 400 …` | `Error: socket hang up` / `ECONNRESET` |
+| 第二版 + `TZ=UTC` 重跑 | `multitable-history-audit-log-realdb.test.ts > cap holder: sees the grant + reveal entries …` | `Error: socket hang up` / `ECONNRESET` |
+
+每次都是 `1 failed | 261 passed (262)`,但**每次换人**。一个静态的 diff 不可能产生随机受害者;
+262 个文件在一个共享库上并行、共用同一个进程内 HTTP 服务时,本机会掉连接。
+**判别控制**(第一版那次做过):同一棵树、同一个库单独重跑当次失败的那个文件 ⇒
+`Test Files 1 passed (1) / Tests 10 passed (10)`。
+归类为本机并行度下的 shared-DB / 传输层抖动,**没有去修**(多维表线,不在本切片范围)。
+
+**一句话结论**:74 个 step 里 **72 个 exit 0**;剩下 2 个的每一条红都被单变量控制归因到环境
+(TZ、共享库残留、本机并行下的掉连接),**没有一条落在本切片改动的路径上**;
+本切片自己的 lane `:1568` 在连跑中 `84 files / 902 passed | 10 skipped`,零失败。
+
+### L9.2 本切片的 7 条新用例在哪一步跑
+
+`:1568 Run approval real-DB integration` —— 该 step 的 run-list 尾部含七个
+`approval-cancel-round-*.db.test.ts`(`grep -c "tests/integration/approval-cancel-round-.*\.db\.test\.ts \\\\"`
+→ **7**),本轮的 7 条新用例全部在这一步里被执行。它与其余 73 个 step 共用同一个库、同一次连跑。
+
+### L9.3 被第一版漏掉、第二版补进来的那个真库步骤
+
+`:1757 Run attendance integration tests`(env:`DATABASE_URL` + `ATTENDANCE_TEST_DATABASE_URL`;
+它在 `:1694 Start core backend (background)` 之后运行,本轮把 `:1746 Stop core backend` 一并强制纳入,
+以免后台服务留在本机)。这是第一版窗口截断造成的漏项,不是「跑过但没记」。
+
+### L9.4 第一版 L9 的错误,和它是怎么被抓到的(撤回,不删)
+
+**(a) 窗口截断 —— 我自己的普查错误,已撤回。**
+第一版用
+```
+$ awk 'NR>=174' .github/workflows/plugin-tests.yml | grep -n "^  [a-z0-9_-]*:$"
+1:  test:
+1736:  after-sales-integration:
+```
+然后把 `1736` 当成**文件行号**写进抽取器的上界。它其实是 **awk 输出内的相对行号**——
+awk 从文件第 174 行开始输出,所以相对第 1736 行 = 文件第 **1909** 行。
+于是 `test` job 的 **1736-1908** 这 173 行从未被扫过,而第一版 L9 却写着
+「抽出**每一个** run 块里含 `vitest` 的 step」——那是一句当时没有证据支撑的绝对断言。
+被漏掉的真东西:`:1757 Run attendance integration tests`(真库 vitest,带两个 DB env)。
+**判据**:`sed -n '1909p'` 落在 `  after-sales-integration:` 上;
+`awk 'NR>=1736 && NR<=1908' … | grep -E "^      - name:|vitest|DATABASE_URL"` 直接把那个 step 打出来。
+第二版把窗口改成 174-1908、谓词放宽,重跑**整份清单**(不是只补跑那一个 step——
+「同库连跑」的意义就在于整份清单在同一个库上按序跑完)。
+
+**(b) 第一次试跑(未设 `CI=true`)时 `:842` 报的那条红,是一条先于本轮存在的跨套件竞态。**
+报错是
 `tests/unit/role-assignment-boundary.test.ts > user_roles has exactly one writer > every writer of
-the table is the boundary module and nothing else` 失败**,报错是
-`ENOENT: no such file or directory, open '…/src/attendance/zz-nit3-untracked-scratch.ts'` ——
-**不是集合不等,是读文件时文件没了**。机械定位到成因(一条真实的、先于本轮存在的跨套件竞态):
+the table is the boundary module and nothing else` →
+`ENOENT: no such file or directory, open '…/src/attendance/zz-nit3-untracked-scratch.ts'`
+—— **不是集合不等,是读文件时文件没了**。机械定位:
 - `tests/unit/role-assignment-boundary.test.ts:840-875`:`collectSweptFiles()` 在 describe 收集期做
-  **裸文件系统遍历**(`fs.readdirSync`),随后 `every writer…` 用例再逐个 `fs.readFileSync`。
+  **裸文件系统遍历**(`fs.readdirSync`),随后用例再逐个 `fs.readFileSync`。
 - `src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts:145-152`(用例
   "NIT-3: an untracked scratch file …"):在**同一棵树里** `fs.writeFileSync` 出
   `packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts`,`finally` 里 `rmSync` 删掉。
 - 两者在 `pool: 'forks'` 下并行:遍历时文件在、读取时已删 ⇒ ENOENT。
-- 讽刺的是,前一个文件自己的 POSITIVE CONTROL 注释就写着「读到内存里改,**不往树上写**,那会 race
-  sibling suites under `pool: 'forks'`」——兄弟文件的 NIT-3 用例正好破了这条约定。
-- **本轮加了 `CI=true` 后的干净重跑:`:842` exit=0,933/1108 文件全过,零失败。**
-⇒ 归类为**先于本轮存在的跨套件竞态**(本轮 diff 不向 `SWEEP_ROOTS` 增删任何文件,
-且失败形态是 ENOENT 而非谓词不等)。同样**没有去修**(角色边界线,不在本切片范围),
-作为一条新发现如实登记,交对应线裁决。
+- 前一个文件自己的 POSITIVE CONTROL 注释就写着「读到内存里改,**不往树上写**,那会 race sibling
+  suites under `pool: 'forks'`」——兄弟文件的 NIT-3 用例正好破了这条约定。
+- 加 `CI=true` 的干净重跑与第二版全量跑里,`:842` 均 exit 0。
+⇒ 归类为**先于本轮存在的跨套件竞态**(本轮 diff 不向 `SWEEP_ROOTS` 增删任何文件,且失败形态是 ENOENT
+而非谓词不等)。**没有去修**(角色边界线,不在本切片范围),作为一条新发现如实登记,交对应线裁决。
+
+**(c) 第一版跑里 `:1295` multitable 的那条红(`multitable-dashboard-chart-authz.test.ts > R4 …`
+`expected 401 to be 403`)**,归因见下,同样不是本轮引入:
+- 我的 diff 共 9 个文件(`git diff --name-only`):2 个 MD、1 个服务、1 个测试 helper、
+  5 个 `approval-cancel-round-*.db.test.ts`;改动全在 `createCancelRoundInstance` 及其两个新 helper 内;
+  **零** multitable 源文件、**零**路由文件、**零** auth 源文件被修改(对 `../auth/user-activation`
+  只是新增一条 `import` 去**读用**那个共享门,该模块本身一字未改)。
+- 该 step 的 run-list 里**没有任何** `approval-cancel-round-*` 文件:`grep -c` → **0**;
+  我改的 5 个夹具文件只在 `:1568` 跑,而 `:1568` 在 `:1295` **之后**。
+- 我对 `tests/helpers/approval-schema-bootstrap.ts` 的改动是**纯新增一个导出函数**,
+  `APPROVAL_SCHEMA_BOOTSTRAP_VERSION` 未 bump,对任何其他套件零行为差。
+- **判别控制**:同一棵树、同一个库单独重跑该文件 ⇒ `Test Files 1 passed (1) / Tests 10 passed (10)`。
+⇒ 262 个文件在一个共享库上并行跑时的跨套件干扰(本仓已知的 shared-DB fixture collision 家族)。
+**没有去修**(多维表线,不在本切片范围)。
+
+### L9.5 另外两条 required、但不属于「vitest / real-DB」人口的步骤,也跑了
+
+```
+$ CI=true pnpm lint        → exit 0      （plugin-tests.yml :832;node 25 与 node 20 各跑一次,均 0）
+$ CI=true pnpm type-check  → exit 0      （plugin-tests.yml :837;同上)
+```
+
+## L10. 全量复跑之后落的唯一一处改动:错误文案(以及它自己的重验)
+
+`CANCEL_ROUND_SEAT_INELIGIBLE` 的 message 原写「ask an administrator to **restore or replace** the
+account」。**`replace` 是系统不提供的补救**:§14.3 #12/#13 对撤销轮直接拒绝
+`bulkReassignApprovals` 与 `applyApprovalDepartureTransfer`,§14.2 也拒 `transfer`,
+本切片更没有任何 HTTP 入口——面向管理员的提示不得承诺一个合同禁止的动作,
+而且设计 MD §3.4 自己写的正是「替换不可能」,两处互相打架。改成只说 `restore`,
+并在代码里把「为什么不写 replace」写成注释。
+
+这处改动是在 L9 的全量复跑**之后**落的,所以它没有被那次连跑覆盖。**为它单独补的重验**
+(改动只是一个字符串字面量,零断言读它):
+```
+$ npx tsc --noEmit                                                        → 无输出,EXIT 0
+$ CI=true TZ=UTC DATABASE_URL=…/metasheet2_fix_c1_v2 EXPECT_DB=1 \
+    npx vitest --config vitest.integration.config.ts run \
+    $(ls tests/integration/approval-cancel-round-*.db.test.ts)
+ Test Files  7 passed (7)
+      Tests  55 passed (55)          （另开的处女库 metasheet2_fix_c1_v2,全量迁移）
+$ CI=true pnpm lint        (node 20) → exit 0
+$ CI=true pnpm type-check  (node 20) → exit 0
+```
+如实标注:**`:1568` 那一步的 84 文件 / 902 用例是在改这个字符串之前跑的**;
+本行为差为零(没有任何断言读该 message 的文本,N1 只断言它**不含**人名 id),但复跑覆盖范围
+仍然只到改动之前,这点不含糊。
+
+## L11. 清理
+
+- 私有库全部 `dropdb`:`metasheet2_fix_c1`、`metasheet2_fix_c1_old`、`metasheet2_fix_c1_full`、
+  `metasheet2_fix_c1_full2`、`metasheet2_fix_c1_att`、`metasheet2_fix_c1_v2`。
+  未对任何共享 / staging / 生产库应用迁移。
+- mutation 备份与逐条日志保留在 `reviews/c1-fix-mutbak/`(不是仓内文件)。
+- 未合并、未 undraft、未开 PR、未动 PR 状态、未动 `origin/main`、未改锁文。
+- `git stash` 全程未用(硬规矩);mutation 一律 `cp` 备份 → 改 → 单跑 → `cp` 还原 → `cmp`。

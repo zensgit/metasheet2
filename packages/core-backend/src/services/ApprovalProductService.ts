@@ -511,8 +511,12 @@ async function assertCancelRoundSeatsEligibleInTxn(
     )
   }
   if (ineligibleCount === 0) return
+  // The hint says RESTORE, deliberately not "restore or replace": §14.3 #12/#13 reject
+  // `bulkReassignApprovals` and `applyApprovalDepartureTransfer` on cancel rounds outright, and
+  // §14.2 rejects `transfer`, so replacing the person is not a remedy this system offers. An
+  // admin-facing message must not promise an action the contract forbids.
   throw new ServiceError(
-    'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore or replace the account, then retry',
+    'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore the account, then retry',
     409,
     'CANCEL_ROUND_SEAT_INELIGIBLE',
     {
