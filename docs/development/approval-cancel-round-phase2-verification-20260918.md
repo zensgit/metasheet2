@@ -3972,7 +3972,7 @@ real item to make the arithmetic work. Each row below is tagged by which contrac
 | `filterBulkReassignDiscoveryForAttendance` 的非确定性 org 解析 | 考勤线发现,本分支零依赖(§3.3d) |
 | lock:227 未排级的两个关系(`attendance_schedule_dispatch_requests`、`attendance_request_calculation_snapshots`) | owner 登记项,未擅自排序(§3.10.1) |
 | 账侧比对的 non-legacy(authoritative/shadow)双胞胎 | 需要 rollout-registry 夹具工作,本分支未做(§3.15.11) |
-| **提交后区段的上游外逃暴露**(⚠️ 2026-09-19 并表,第 3 轮全量闸 P3-4:此前这条**只活在 §7.7**,没有向上归并到本表,只读本表的 owner 会漏掉)。形状:`dispatchAction` 提交后区段内**上游**某一步外逃 ⇒ 落进共用 catch(`:12772`)⇒ **投递被跳过** + 已提交的取消**对外报 500** | **今天不可达**——上游两个方法(`:13374-13375` / `:13432-13434`)都自吞异常;P3-1 residual 用例已把该形状**测出来**并用两条 ⚠️ TRIPWIRE 钉住(`toBe(500)` / 宣告 `toBe(0)`)。**建议值(owner 裁,本轮不做)**:把 `:12761` 的投递上移到紧接 `:12740` `COMMIT` 之后;三条不做的理由与「一旦采纳,两条 TRIPWIRE **应改写成更好的值、不得删除**」的约束,**完整正文仍在 §7.7**,本行是指针不是替代 |
+| **提交后区段的上游外逃暴露**(⚠️ 2026-09-19 并表,第 3 轮全量闸 P3-4:此前这条**只活在 §7.7**,没有向上归并到本表,只读本表的 owner 会漏掉)。形状:`dispatchAction` 提交后区段内**上游**某一步外逃 ⇒ 落进共用 catch(`:12772`)⇒ **投递被跳过** + 已提交的取消**对外报 500** | **今天不可达**——上游两个方法(`:13374-13375` / `:13432-13434`)都自吞异常;P3-1 residual 用例已把该形状**测出来**并用两条 ⚠️ TRIPWIRE 钉住(`toBe(500)` / 宣告 `toBe(0)`)。**建议值(owner 裁,本轮不做)**:把 `:12761` 的投递上移到紧接 `:12740` `COMMIT` 之后;三条不做的理由与「一旦采纳,两条 TRIPWIRE **应改写成更好的值、不得删除**」的约束,**完整正文仍在 §7.7**,本行是指针不是替代。⚠️ 2026-09-19 round-3b P3-2:本行这 5 个行号(`:12772` / `:13374-13375` / `:13432-13434` / `:12761` / `:12740`)此前是从 §7.1 转抄的、旁边没有命令;本轮已在**本会话**逐个重导,5/5 命中,命令与逐行输出见文末 round-3b 节的「② P3-2」。数字的权威仍是 §7.1 / §7.7,本行只是指针 |
 
 ---
 
@@ -5699,18 +5699,18 @@ $ grep -n "  emit<T\|  private dispatch(" packages/core-backend/src/integration/
 
 ---
 
-### 本节的机械自检(不靠肉眼「我看过了」)
+### 本节的机械自检(不靠肉眼「我看过了」)—— ⚠️ 全节读数钉死在 `673bb1e362347751abd9229259d7b7e07245a46e`(第 3 轮记录修正的交付 head)
 
 **(1) 改动面 —— 只有两份 MD 与一个测试文件的注释**
 
 ```
-$ git diff --name-only 92d7bade243cbd47b647b5daf743c5b313070566..HEAD
+$ git diff --name-only 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e   # ⚠️ 本轮把原来的 `..HEAD` 钉成显式 SHA:round-3b 的提交会让 `..HEAD` 多出一个 `src/` 文件
 docs/development/approval-cancel-round-phase2-design-20260918.md
 docs/development/approval-cancel-round-phase2-verification-20260918.md
 packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
 ```
 
-⇒ 零 `src/`、零 `plugins/`、零 `.github/`、零 `scripts/`、零迁移、零 `apps/web`。
+⇒ 零 `src/`、零 `plugins/`、零 `.github/`、零 `scripts/`、零迁移、零 `apps/web`。**⚠️ 这是 `673bb1e362` 那一次的形状。** round-3b **故意改变了这个形状**:它必须改正一条 C-2 自写的**生产源码注释**(闸 P3-1),所以 round-3b 的改动面里有 1 个 `src/` 文件 —— 仍是**注释级、零代码行**,证明见文末 round-3b 节的「⑤ 自检」。
 
 **(2) 测试文件**:证明是注释级改动,而不是「我读了一遍觉得是」
 
@@ -5818,3 +5818,403 @@ $ grep -c 'ApprovalProductService.ts:11656' $T
 其中 P3-3 的处置是「归 C-1、本切片不改、只登记」;**另有 6 条同族项经测量后登记为 OPEN**
 (设计 MD §4.2/§5 的 3 组过期锚点、§4.2 摘录块脚注的「at current HEAD」绝对声明、P3-3 的第二个自含令牌、
 §7.2 逐跳表的 `emit`/`dispatch` 两格)。分母、方法与每一条的实测值都在上文,可逐条复算。
+
+---
+
+## 第 3 轮记录修正的第二次(round 3b,2026-09-19)—— 机制陈述的全分支扫描与收敛
+
+**触发**:`impl-gate-C-slice2-round3b-20260919.md`(NEEDS-FIX:**0 P1 / 1 P2 / 2 P3**)。
+它的 P2-1 **是上一节自己造出来的**:上一节把测试文件的结论块改对了,却漏改了 180 行之下那句
+**以该块为权威**的话,于是同一个文件对同一机制同时写着 X 与 ¬X,而 ¬X 还自称由 X 支持。
+闸把根因写成可机核的一句:**同一提交内部普查密度不对称** —— 对被点名的两处跑了全仓普查,
+**唯独对它自己撤回的那条机制归因跑了零次**(`feedback_absolute_claim_sweep_must_be_mechanical`:
+撤回必须机械地传播,不能只传播到被点名的位置)。
+
+**所以本轮不再逐处改,改做「机制陈述扫描」**:先把全分支关于这一机制的**每一处**陈述用命令列出来,
+再逐条求值;只有这样,「只剩一个一致陈述」才是可复算的,而不是又一次目测。
+
+### ⓪ 唯一版本的机制 —— 本会话在 `673bb1e362` 上重导一次,不转抄闸报告
+
+```
+$ sed -n '45,51p' packages/core-backend/src/integration/events/event-bus.ts | nl -ba -v45 -w5 -s': '
+   45:     const wrapper = (data: unknown) => {
+   46:       try {
+   47:         handler(data as T)
+   48:       } catch (e) {
+   49:         logger.error(`Handler error for pattern ${String(pattern)} (id: ${id})`, e instanceof Error ? e : undefined)
+   50:       }
+   51:     }
+$ sed -n '56p' packages/core-backend/src/integration/events/event-bus.ts | nl -ba -v56 -w5 -s': '
+   56:       this.emitter.on(pattern, wrapper)
+
+$ sed -n '13479,13486p' packages/core-backend/src/services/ApprovalProductService.ts | nl -ba -v13479 -w5 -s': '
+13479:     try {
+13480:       deliver(delivery.result, delivery.requestId)
+13481:     } catch (error) {
+13482:       approvalProductLogger.warn(
+13483:         `attendance.request.cancelled delivery failed for request ${delivery.requestId} (the `
+13484:           + `cancellation itself is committed): ${error instanceof Error ? error.message : String(error)}`,
+13485:       )
+13486:     }
+```
+
+⇒ **X(唯一版本)**:`subscribe()` 把每个 handler 包进**总线自己的** try/catch(`:46-50`),
+注册进 emitter 的是那个 **wrapper**(`:56`)而不是 handler。订阅者的异常被总线吞掉,
+**到不了** `ApprovalProductService.ts:13479` 的 try。那道 try/catch 防的是**投递这一跳自身抛错**;
+对监听器而言它是**纵深防御**,不是唯一防线。
+⇒ **¬X**:任何把「监听器的 bug / a listener bug」说成**那道 try 要防的故障模式**的句子。
+
+### ① 全分支机制陈述普查(人口来自命令,不是手写清单)
+
+```
+$ git diff --name-only origin/feat/approval-cancel-round-phase1...673bb1e362347751abd9229259d7b7e07245a46e \
+    > /tmp/c2-scope-files.txt
+$ wc -l < /tmp/c2-scope-files.txt
+      16
+```
+
+三组关键词,在**这 16 个文件**上扫(`$B` = `673bb1e362347751abd9229259d7b7e07245a46e`,即改写**前**的树):
+
+```
+$ git grep -nE "listener'?s? bug|LISTENER bug|listener has a bug|a listener that throws|监听器的 bug|监听器有 bug|监听器抛错" \
+      $B -- $(cat /tmp/c2-scope-files.txt)        # SWEEP-M1 归因族
+$ git grep -nE "block comment above|census in the block|该块为权威|以上块|the block above" \
+      $B -- $(cat /tmp/c2-scope-files.txt)        # SWEEP-M2 「以上块为权威 / 见上」族
+$ git grep -nE "不可外逃|永远走不到|CANNOT reach that|never propagates|被总线吞掉|swallowed by" \
+      $B -- $(cat /tmp/c2-scope-files.txt)        # SWEEP-M3 传播族
+```
+
+**命中计数(命令自报,不是手数)**:
+
+```
+$ git grep -nE "<M1>" $B -- $(cat /tmp/c2-scope-files.txt) | wc -l
+      13
+$ git grep -nE "<M2>" $B -- $(cat /tmp/c2-scope-files.txt) | wc -l
+       5
+$ git grep -nE "<M3>" $B -- $(cat /tmp/c2-scope-files.txt) | wc -l
+       7
+$ { 三条 git grep; } | cut -d: -f1-3 | sort -u | wc -l        # 去重到 file:line
+      24
+```
+
+**命中清单与逐条求值**(下表 16 行覆盖 **18 个 file:line**(第 15、16 行各并了 2 处),
+表后另点名 **6 条与本机制无关**的命中,18 + 6 = **24**,与上面的去重计数对上):
+
+| # | file:line(@ `673bb1e362`) | 原句(截断处不含行号) | 判定 | 处置 |
+|---|---|---|---|---|
+| 1 | `…verification…md:4833` | 原句是「**监听器的 bug** 在 `:13406` 的 `try` 处表现为同步 throw」,两处都不成立: | **记录**(改正标记内部逐字引用被撤回的原句) | **保留**(「只删不加」:删了就没人知道改正了什么) |
+| 2 | `…verification…md:4836` | 2. **机制(这条更重要)**:**监听器抛错根本到不了那道 `try`**。 | **X**(正确陈述) | 保留 |
+| 3 | `…verification…md:4844` | …变的只是它**防的是什么**:防的是**投递跳自身抛错**,不是「监听器有 bug」—— | **X**(正确陈述) | 保留 |
+| 4 | `…verification…md:5416` | `…md:4819:⇒ 整条链同步,监听器的 bug 在 `:13406`…` | **命令回显**(R3-P3-1 那条 `grep -rn` 的原始输出,行号与内容都是改动**前**的值,原文已自陈) | 保留 |
+| 5 | `…verification…md:5642` | `### R3-P3-5 —— 基线 O-6 仍活:「监听器抛错」被当成投递 `try` 要防的故障模式` | **记录**(小节标题,命名的是**缺陷**不是断言) | 保留 |
+| 6 | `…verification…md:5670` | - §7.2 结论句:「**监听器的 bug** …」→「**投递这一跳自己抛出的异常**… | **记录**(处置行,左边是被撤回的原句、右边是改正值) | 保留 |
+| 7 | `…verification…md:5746` | `-整条链同步,监听器的 bug 在 `:13406`` | **命令回显**(`--word-diff=porcelain` 的被删词清单) | 保留 |
+| 8 | `ApprovalProductService.ts:12758` | `// a listener that throws cannot undo any of them (and a rolled-back attempt reaches this line` | **真,但不是 ¬X** —— 这是**持久性**断言(COMMIT 之后一切已 durable,监听器抛错**撤销不了**已提交的行),不是传播断言;它没有说监听器的异常会到达 `:13479` 的 try | **不改**(改真陈述超出「改正被证伪的句子」),但**登记为 OPEN**:措辞仍以 listener 为主角,读者可能顺着它再推出 ¬X。见 ⑥ |
+| 9 | `ApprovalProductService.ts:13463` | `*     successful, durable business cancellation into a 500 over a listener's bug.` | **¬X —— 闸 P3-1,C-2 本切片自己新写的生产源码注释** | **本轮改正**(见 ③) |
+| 10 | `…redemption.db.test.ts:3072` | `* The line above used to read 「a LISTENER bug surfaces at … `:13406`'s `try`」. Both halves were wrong:` | **记录**(改正标记内部) | 保留 |
+| 11 | `…redemption.db.test.ts:3075` | `*   - the mechanism (the part that matters): a listener bug CANNOT reach that `try` at all.` | **X**(正确陈述) | 保留 |
+| 12 | `…redemption.db.test.ts:3085` | `*   from the delivery hop itself, not 「a listener has a bug」 — listeners are independently` | **X**(正确陈述) | 保留 |
+| 13 | `…redemption.db.test.ts:3254` | `* shape a real listener bug takes. No production line changes to make this case runnable.` | **¬X —— 闸 P2-1**,且引用者把**被改正的块**当权威 | **本轮改正**(见 ③) |
+| 14 | `…redemption.db.test.ts:3253` | `* with one that throws SYNCHRONOUSLY, which the census in the block comment above shows is the` | **¬X 的前半句**(与 13 同一句,SWEEP-M2 命中) | **本轮改正**(见 ③) |
+| 15 | `…verification…md:4839` / `:5666` | …订阅者的异常被**总线**吞掉,**永远走不到**投递的 try。 | **X**(SWEEP-M3,正确陈述) | 保留 |
+| 16 | `…redemption.db.test.ts:3078-3079` | `A subscriber's exception is swallowed by / the bus and never propagates back up the emit chain.` | **X**(SWEEP-M3,正确陈述) | 保留 |
+
+**与本机制无关的命中(同组关键词扫出来的,逐条点名以免被读成漏判)**:
+`…verification…md:2029`(exclusion table 的 swallow)、`:2855`(「永远走不到任何释放子句」,讲的是 I3 释放)、
+`:3558`(「the note on the block above」,指的是另一个摘录块)、`src/index.ts:4131` / `:4212`(retry scheduler)、
+`plugins/plugin-attendance/index.cjs:30528`(另一段计算)。**共 6 条,全部不涉及投递 try 的故障模式。**
+
+⇒ **求值结论:改写前,全分支的 ¬X 活断言恰 2 条**(#9 `:13463`、#13/#14 同一句 `:3253-3254`),
+**与闸报告点名的 2 条一字不差**;另有 1 条(#8 `:12758`)**为真但措辞以 listener 为主角**,登记为 OPEN。
+**闸报告没有找到第三类同族措辞,本轮的三组扫描也没有。**(闸自己在 §5 里写明它只跑了 `listener bug` 一族、
+未穷举「投递 try 防什么」的全部改写方式 —— 本轮的 M2/M3 就是去补那一面。)
+
+### ② P3-2 —— 并表指针行的 5 个行号,**本会话**逐个重导(不转抄闸报告的输出)
+
+闸 P3-2 说的是**记录规程**不是记录错误:那 5 个数字是从 §7.1 转抄的、旁边没有命令,
+而「转抄的数字」正是 P2-1 的发生方式。命令与逐行输出:
+
+```
+$ S=packages/core-backend/src/services/ApprovalProductService.ts
+$ sed -n '12740p' $S | nl -ba -v12740 -w5 -s': '
+12740:       await client.query('COMMIT')
+$ sed -n '12761p' $S | nl -ba -v12761 -w5 -s': '
+12761:       this.deliverCancelRoundCancelledEventPostCommit(dispatchCancelledEventDelivery)
+$ sed -n '12772p' $S | nl -ba -v12772 -w5 -s': '
+12772:     } catch (error) {
+$ sed -n '13374,13375p' $S | nl -ba -v13374 -w5 -s': '
+13374:   private async emitApprovalTaskCreatedEventsPostCommit(
+13375:     instanceId: string,
+$ sed -n '13432,13434p' $S | nl -ba -v13432 -w5 -s': '
+13432:   private async supersedeCardDeliveriesPostCommit(instanceId: string, excludeId?: string): Promise<void> {
+13433:     try {
+13434:       await supersedeDingTalkApprovalCardDeliveriesForInstance(
+```
+
+⇒ **5/5 正确**。两个**区间**值也逐行覆盖到了(闸只贴了锚点行):`:13374-13375` 是方法签名的两行,
+`:13432-13434` 覆盖「方法第一句就是 `try {`」(`:13433`)这条论证所依赖的那一行。
+并表指针行已就地补上指向本小节的回指;**数字的权威仍是 §7.1 / §7.7,该行只是指针**。
+
+### ③ 本轮实际改写的 3 处(全部是注释,零断言、零代码)
+
+| file | 改写前 | 改写后 | 依据 |
+|---|---|---|---|
+| `ApprovalProductService.ts:13463` | `… into a 500 over a listener's bug.` | `… into a 500 over a failure in THIS delivery hop, not a listener's bug.` | 闸 P3-1。承重的半句(delivery threw ⇒ warned;外层 catch 绝不能看到它)**一字未动**,只换归因 |
+| `…redemption.db.test.ts:3253-3254` | `…which the census in the block comment above shows is the shape a real listener bug takes.` | `— the shape a throw FROM THE DELIVERY HOP ITSELF takes, which is what the census in the block comment above establishes.` | 闸 P2-1。引用者现在引用的是那个块**真正确立**的东西 |
+| 同上,`:3256-3263` 新增 | (无) | `⚠️ CORRECTION (2026-09-19, round-3b gate P2-1)` 一段:逐字保留被撤回的原句、给出机制、并写明**注入形状与任何读数都不变,错的只是归因** | 「只删不加」:被撤回的原句必须留在树里 |
+
+**`:13463` 为什么没有在源码里带一段日期标记 —— 这是可测量的约束,不是省事**:
+
+```
+$ grep -nE ":1346[5-9]|:1347[0-9]|:1348[0-6]|13479-13486" $(cat /tmp/c2-scope-files.txt) | wc -l
+      22
+```
+
+⇒ 编辑点(`:13461-13463`)**下方**有 22 处**活**引用钉在 `:13465` / `:13479` / `:13481` / `:13486`
+(两份 MD 的 §7.1 ③ 行、§7.2 结论句、§7.4 M-PC1、§D1,以及测试注释的 5 处)。
+**在 `src/` 里多加一行,就会让这 22 处同时过期** —— 那正是 P2-1 的形状,规模大 11 倍。
+所以源码改写做成**逐行等量替换(3 行 → 3 行)**,日期标记与完整机制写在本节和测试注释里。
+证明见 ⑤(6)。
+
+### ④ 改完重跑同一组 grep —— 判据是**分划**,不是「计数归零」
+
+⚠️ **先说为什么不能写「零处 ¬X 残留」的 `grep -c` = 0**:本节自己必须**逐字引用**被撤回的那两句
+(上面 ① 的清单、③ 的对照表)才能把记录说清楚,所以同一组 grep 的分母**必然包含本节自身**,
+写多少句就涨多少。这正是 R3-P3-3 点名的那个形状(普查令牌写进被普查的人口),
+上一节也是因此改用正向断言。**本节不重犯**,改用一个**可加总的分划**:每一条命中必须落进
+下面 5 类之一,类计数之和 = 总命中数,而**「活的 ¬X 断言」这一类恰为空**。
+
+```
+$ grep -nE "listener'?s? bug|LISTENER bug|listener has a bug|a listener that throws|监听器的 bug|监听器有 bug|监听器抛错" \
+      $(cat /tmp/c2-scope-files.txt)      # SWEEP-M1,改写后
+$ grep -nE "block comment above|census in the block|该块为权威|以上块|the block above" \
+      $(cat /tmp/c2-scope-files.txt)      # SWEEP-M2,改写后
+```
+
+**分划(在写本节**之前**的树上跑的一遍,因此分母里没有本节;本节写完后的复跑见 ⑤(7))**:
+
+| 类 | SWEEP-M1(14 条) | SWEEP-M2(5 条) | 说明 |
+|---|---|---|---|
+| (a) **活的 ¬X 断言** | **0** | **0** | ← 本轮的判据 |
+| (b) 活的 X 断言(正确陈述) | **6**:`:4836`、`:4844`、`S:13463`(改写后)、test `:3075`、`:3085`、`:3258` | **1**:test `:3254`(改写后) | `S:13463` 仍被命中,是因为改正值里带着 `not a listener's bug` 这半句**撤回** |
+| (c) 改正标记内部的逐字引用(记录) | **5**:`:4833`、`:5642`、`:5670`、test `:3072`、`:3257` | 0 | 「只删不加」要求保留 |
+| (d) 命令/输出原文回显 | **2**:`:5416`、`:5746` | 0 | 行号与内容都是改动**前**的值,原文已自陈 |
+| (e) 为真但以 listener 为主角(已登记 OPEN) | **1**:`S:12758` | 0 | 见 ⑥ |
+| (f) 与本机制无关 | 0 | **4**:`:3558`、`index.ts:4131`、`:4212`、`index.cjs:30528` | 逐条点名 |
+| **合计** | **0+6+5+2+1+0 = 14** | **0+1+0+0+0+4 = 5** | 与 grep 行数逐行对得上 |
+
+**再加正向锚点**(模式刻意带后半句或转义,使命令原文自己不匹配自己):
+
+```
+$ S=packages/core-backend/src/services/ApprovalProductService.ts
+$ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+$ grep -c "over a failure in THIS delivery hop, not a listener" $S
+1
+$ grep -c "a throw FROM THE DELIVERY HOP ITSELF" $T
+2                 # ⚠️ 上一节记录的是 1;本轮把 `:3253` 也改成同一措辞,所以恰好涨到 2
+$ grep -c "round-3b gate P2-1" $T
+1
+```
+
+### ⑤ 本轮的机械自检
+
+**(1) 改动面 —— 三个文件,其中一个在 `src/`,是故意的**
+
+```
+$ git diff --name-only 673bb1e362347751abd9229259d7b7e07245a46e
+docs/development/approval-cancel-round-phase2-verification-20260918.md
+packages/core-backend/src/services/ApprovalProductService.ts
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+⚠️ **上一节的自检写的是「零 `src/`」,本轮不是** —— 闸 P3-1 点名的就是一条 **C-2 自己新写的生产源码注释**,
+不动它就等于「既没改、也没测、也没登记」(闸原话)。**形状变了,所以必须单独证明它仍是注释级**:见 (2)。
+上一节那段自检已就地钉死到 `673bb1e362347751abd9229259d7b7e07245a46e`,不会被本轮的提交悄悄变成假话。
+
+**(2) 零代码、零测试断言 —— 对**两个**被改的代码文件各跑一次(不是目测)**
+
+```
+$ S=packages/core-backend/src/services/ApprovalProductService.ts
+$ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+
+# 变更行剥掉 +/- 与缩进后,不以 `*` 或 `//` 开头的行数(= 非注释变更行)
+$ git diff -U0 -- $S | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
+    | sed -E 's/^[+-][[:space:]]*//' | grep -vE "^(\*|//)" | grep -vE "^$" | wc -l
+       0
+$ git diff -U0 -- $T | …(同一条命令)…
+       0
+
+# 变更行里含 `expect(` 的行数
+$ git diff -U0 -- $S | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
+0
+$ git diff -U0 -- $T | …(同一条命令)…
+0
+```
+
+⇒ **两个文件都是非注释变更行 = 0、触及断言的变更行 = 0。**
+
+**(3) 类型检查 —— 注释改动唯一可能的破坏方式是弄坏块注释**
+
+```
+$ cd packages/core-backend && npx tsc --noEmit -p tsconfig.json ; echo "EXIT=$?"
+EXIT=0          # 零输出
+```
+
+(上一节把这条登记为「新 worktree 无 `node_modules`,**未复现**」;本 worktree 有依赖,**本轮真跑了**,
+顺带把闸 round3b §5 的那条未覆盖项闭掉。)
+
+**(4) 改 `src/` 的真正风险是扰动**源码文本普查**,不是编译 —— 所以两面都查**
+
+可直接跑的(不需要库):
+
+```
+$ npx vitest run tests/unit/approval-field-access-enum-mirror.test.ts \
+      tests/unit/approval-dept-head-chain.test.ts \
+      tests/unit/workflow-approval-automation-convergence.guard.test.ts \
+      tests/unit/approval-departure-transfer-ci-wiring.test.ts \
+      tests/unit/approval-product-service.test.ts --reporter=dot
+ Test Files  5 passed (5)
+      Tests  262 passed (262)
+```
+
+需要库、本轮跑不了的三条(`approval-cancel-round-lock-order-census.db.test.ts` 的源码扫描腿):
+它们是**偏移/计数**谓词,可以在不建库的情况下**逐条静态复现**。把三条谓词抄成一个脚本,
+**对同一脚本喂 base blob 与改写后的树各跑一次**(`feedback_prove_a_fix_by_running_the_old_implementation`:
+只跑新实现分不清「没坏」与「本来就不覆盖」):
+
+```
+$ git show $B:…/ApprovalProductService.ts > /tmp/c2base/…/ApprovalProductService.ts
+$ node /tmp/c2-census-replica.cjs      # 改写后的树
+scan(a) singleStart=true tailAnchor=true recordLinkHits=0
+LEG3 allFound=true preReadBeforeBegins=true rolloutBeforeRowLock=true rowLockBeforeReAssert=true
+LEG6 wholeFileContendedCount=1 inCatch=true gated=true bareRethrow=true
+$ (cd /tmp/c2base && node /tmp/c2-census-replica.cjs)    # base blob
+scan(a) singleStart=true tailAnchor=true recordLinkHits=0
+LEG3 allFound=true preReadBeforeBegins=true rolloutBeforeRowLock=true rowLockBeforeReAssert=true
+LEG6 wholeFileContendedCount=1 inCatch=true gated=true bareRethrow=true
+```
+
+⇒ **两边逐字节同读数**。这只是**静态复现**,**不是**把那三条 DB 门跑绿 —— 它们本轮**未执行**,登记在 ⑥。
+
+**(5) 「只删不加」边界 —— 词级,不是行级**
+
+```
+$ git diff -U0 $B | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
+0
+$ git diff --word-diff=porcelain $B | grep "^-" | grep -v "^---" | sort -u
+-本节的机械自检(不靠肉眼「我看过了」)
+-*
+-`apps/web`。
+-§7.7**,本行是指针不是替代
+-92d7bade243cbd47b647b5daf743c5b313070566..HEAD
+-shows is the
+-SYNCHRONOUSLY,
+-takes.
+```
+
+被删词共 8 项,逐项交代:前 4 项是**就地加长**的那几行(小节标题、`零 apps/web` 结论句、并表指针行、
+`..HEAD` → 显式 SHA)在词级 diff 里的左半,`+` 侧都含原词;`-*` 是重排的注释前缀;
+`shows is the` / `SYNCHRONOUSLY,` / `takes.` 是被改正的那一句的碎片 —— 其中
+**`the census in the block comment above` 与 `SYNCHRONOUSLY` 都在 `+` 侧原样保留**,
+**被撤回的整句也逐字留在新加的 CORRECTION 标记里**。
+**零有效断言、零失败证据、零未解决项被删。**
+
+**(6) 锚点零漂移 —— 本轮最重要的一条自检**
+
+```
+$ git diff --numstat -- packages/core-backend/src/services/ApprovalProductService.ts
+3       3       packages/core-backend/src/services/ApprovalProductService.ts
+$ sed -n '13465p;13479p;13481p;13486p' packages/core-backend/src/services/ApprovalProductService.ts
+  private deliverCancelRoundCancelledEventPostCommit(
+    try {
+    } catch (error) {
+    }
+```
+
+⇒ `src/` 侧**加 3 删 3**,`:13465` / `:13479` / `:13481` / `:13486` 四个锚点**逐个仍指向原来的语法结构**
+⇒ ③ 里点名的那 **22 处**活引用**一处都没过期**。
+测试文件净增 11 行,但它下方**没有任何活的行号断言**:
+
+```
+$ grep -noE "redemption\.db\.test\.ts:[0-9]+(-[0-9]+)?" $(cat /tmp/c2-scope-files.txt) \
+      | sed -E 's/.*test\.ts://' | sort -n -u | tr '\n' ' '
+0 489 780 810 863 1089-1091 1092 1146 1217 1433 1482 1809 1887 2013 2144 2204-2213 3072 3075 3078-3079 3085 3253 3254 3332
+$ …(同一条管道)… | awk '$1>=3254'
+3254
+3332
+```
+
+⚠️ **这条 grep 本身已被本节污染**:`3072` / `3075` / `3078-3079` / `3085` / `3253` / `3254` 是
+**本节 ① 的清单自己写下的坐标**(引用的是改写**前**的位置,属于上面分划里的 (c)/(d) 类)。
+剔除本节自身后,落在编辑点 `:3254` **之下**的只剩 **`3332`** 一个,而它在 `:5575` 的那条
+`grep -rn` 回显里、紧跟着的 `:5578` 已自陈「三个行号都是**改动前**的值」
+⇒ **历史记录,不是对当前树的活断言** ⇒ 测试文件净增 11 行,不会让任何活断言过期。
+
+**(7) 写完本节后的复跑 —— 分母现在包含本节,所以只能按「本节内 / 本节外」切开报**
+
+```
+$ M1 / M2 / M3 三条同上,扫同一批 16 个文件,统计总命中
+M1 total = 35   | 本节内(本节抬头 = 验证 MD 第 5824 行,`awk NR>=5824`)= 21 | 本节外 = 14
+M2 total = 13   | 本节内 = 8                        | 本节外 = 5
+M3 total = 14   | 本节内 = 6                        | 本节外 = 8
+```
+
+⚠️ **承重的是「本节外」那一列,不是 total** —— total 与「本节内」是快照,本节每多写一句就变一次
+(这正是不能把判据写成 `grep -c` = 0 的原因)。**「本节外」不随本节的篇幅变动**,它就是 ④ 的分划。
+
+**本节外的数字与 ④ 的分划逐条相等**(M1 = 14、M2 = 5),M3 的本节外 8 条逐条点名:
+`:2029`(exclusion table)、`:2855`(I3 释放子句)= 与本机制**无关**;
+`:4839`、`:5666`、test `:3075`、`:3078`、`:3079`、`:3261` = **全部是 X 的正确陈述**
+(比改写前多 1 条,因为新加的 CORRECTION 标记自己又把机制正确地说了一遍)。
+⇒ **三组扫描、本节外共 27 条命中,活的 ¬X 断言 = 0。**
+
+**(8) 上一节那 8 个正向锚点 —— 在本 head 重跑,逐条给新值**
+
+```
+$ V=docs/development/approval-cancel-round-phase2-verification-20260918.md
+$ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+
+$ grep -c '方法体 `:13465` `deliverCancelRoundCancelledEventPostCommit`,\*\*`try` 在 `:13479`' $V
+1                 # §7.1 表 ③ 行            —— 不变
+$ grep -c '投递这一跳自己抛出的异常\*\*会在 `:13479` 的 `try`' $V
+1                 # §7.2 结论句              —— 不变
+$ grep -c '每个订阅者另有 \*\*`:46-50`\*\* 的 try/catch' $V
+1                 # §7.2 逐跳表 总线行       —— 不变
+$ grep -c 'M-PC2 \*\*再叠加\*\* `:11656` 终态门' $V
+1                 # §7.4 M-PC3              —— 不变
+$ grep -c '我预测重试会被 `:11656` 终态门以 \*\*409\*\* 拒绝' $V
+1                 # §7.5                    —— 不变
+$ grep -c "a throw FROM THE DELIVERY HOP ITSELF" $T
+2                 # ⚠️ 上一节记录 1 → 本轮 2:`:3253` 被改成同一措辞,这是**预期的**涨,不是漂移
+$ grep -c "bus's own \`try\`/\`catch\` (\`:46-50\`)" $T
+1                 # 测试注释的总线 try/catch 行号 —— 不变
+$ grep -c 'ApprovalProductService.ts:11656' $T
+1                 # 测试注释的终态门         —— 不变
+```
+
+⇒ **8 条里 7 条不变、1 条按预期从 1 涨到 2**;上一节那段自检已就地钉到 `673bb1e362`,
+读到「1」的人会被同一行的钉点带到这里看新值。
+
+### ⑥ 本节未覆盖 / 登记为 OPEN(不得被读成已闭合)
+
+**本轮新登记(闸 round3b 指出「既没改、也没测、也没登记」的那一类,现在测了并登记)**
+
+| # | 项 | 状态 |
+|---|---|---|
+| O-1 | `ApprovalProductService.ts:12758` 的 `a listener that throws cannot undo any of them` | **OPEN(为真,不改)**。它是**持久性**断言不是传播断言(见 ① 第 8 行),不构成 ¬X;但措辞仍以 listener 为主角,建议值:改成「a throw anywhere below this COMMIT」。改它同样落在 `src/` 且同样受 ③ 那条 22 处锚点约束,**留给下一个能动 `src/` 的切片,owner 需要知道这个约束再裁** |
+| O-2 | `approval-cancel-round-lock-order-census.db.test.ts` 的三条源码扫描腿(`record-link` 缺席扫描 / LEG 3 / LEG 6) | **本轮未执行**(需真库)。⑤(4) 给的是**静态复现**、base 与 head 同读数,**不是**把那三条门跑绿 |
+| O-3 | 第 3 轮闸与 round3b 的**四项行为、mutation 台账、required 两条** | **本轮未跑**。依据是「零代码行 + 两个代码文件的非注释变更行 = 0」,**不是**「上一轮说跑过」 |
+
+**原样继承、本轮零消解的未覆盖项**(逐条,不做泛化):并发未构造;只走 `legacy_compat` posture,
+纯 `legacy` / `authoritative` / `shadow` / `eligible` 仍全部 UNEXERCISED;扣减仍非真实生产产出;
+`pr-validate` 等其余 required check 未本地复现;两份 MD 其余约 500 处 `file:line` 未逐条重导;
+C-1 的委托 G3 条款;上一节自己登记的 6 条 OPEN(设计 MD §4.2/§5 三组锚点、§4.2 摘录块脚注的
+「at current HEAD」全称句、R3-P3-3 的第二个自含令牌、§7.2 逐跳表的 `emit` / `dispatch` 两格)。
+
+**本节明确**不**声称的事**:
+- **不**声称「全分支所有引用已重锚」——本节只声称:**三组机制关键词在分支 diff 范围 16 个文件上的全部命中,
+  已逐条求值,活的 ¬X 断言为 0**。分母、命令、每一条的归类都在上面,可逐条复算。
+- **不**改闸对 P2-1 的判级(P2 还是 P3)——那是 owner 的事,本节只执行修正。
+- **未**改任何锁文、**未**动 `origin/main`、**未** rebase、**未** undraft、**未**合并、**未**应用迁移、
+  **未**建库、**未**跑任何 real-DB 用例、**零** mutation。
+
