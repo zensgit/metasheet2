@@ -170,6 +170,23 @@ Remaining work is not another reimplementation of these primitives:
 
 ### Operational attribution checkpoint (2026-09-15)
 
+Refresh on 2026-09-19: both latest scheduled workflows bind current main
+`bb77ca5f2ce3c2825265ec8877861d367d017ead` and remain terminal failures.
+External Metrics run `35414465715`, job `105820234434`, failed `Gate on PASS`;
+Regression run `35414586092`, job `105820583905`, failed
+`Fail if overall status is not pass`. Downloaded `phase5.json` artifacts from
+both independently show 11 checks, 5 passes, 0 measured failures, 6 N/A and
+overall fail. Missing assertions are plugin reload, snapshot create and snapshot
+restore p95/p99; the External Metrics percentile map is empty. This establishes
+continued missing-sample failure, not excessive measured latency and not its
+target/label/activity root cause. Only the JSON summary/assertion fields were
+used; no endpoint, credentials, token-fallback log or live environment was probed.
+No dispatch, rerun, configuration/threshold edit or sample-generating operation
+was performed. Local downloaded artifacts are under
+`/private/tmp/tm-nightly-audit-35414465715` and
+`/private/tmp/tm-nightly-audit-35414586092`; they are not committed. Alerts remain
+OPEN, separate from manual-capture PR CI. The older evidence below is retained.
+
 Read-only GitHub evidence, not a production probe or an alert-resolution claim:
 
 - Final artifact refresh retrieved External Metrics artifact `10377791613` from run `34919685921`. Its JSON summary independently confirms 11 checks / 5 passes / 0 measured failures / 6 N/A / overall fail. Only summary JSON/Markdown are present, not raw scrape samples, so target/label attribution remains open. All three latest-run queries now succeed and still identify the same failed scheduled runs below. No operational mutation was made.
