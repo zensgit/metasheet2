@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { QueryFn } from './permission-service'
 import type { ArchiveAttachmentStageIdentity, ArchiveAttachmentStageLedger } from './recovery-archive-attachment-stage'
 
@@ -39,7 +39,11 @@ export function createArchiveAttachmentStageLedger(input: {
           WHERE actor_id=$1::uuid AND token_hash=$2 AND attachment_id=$3 FOR UPDATE`,
         [actorId, tokenHash, identity.attachmentId])
         const row = exactRow(result.rows, identity)
-        return { objectId: String(row.object_id), state: row.state as 'reserved' | 'verified' }
+        const objectId = String(row.object_id)
+        const ownershipKey = createHash('sha256').update(JSON.stringify([
+          'archive-attachment-stage-owner-v1', actorId, tokenHash, objectId, ...keys.map(key => identity[key]),
+        ])).digest('hex')
+        return { objectId, ownershipKey, state: row.state as 'reserved' | 'verified' }
       })
     },
     verified: async (objectId, source) => {

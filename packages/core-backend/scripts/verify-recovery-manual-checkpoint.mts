@@ -2065,7 +2065,8 @@ try {
             sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects,
             keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
           selectedRecordIds: [recordId], selectedFieldIds: [fieldId], auditedReplayHorizonMs: 60000,
-          attachmentStorage: { uploadByKey: async (...args) => {
+          attachmentStorage: { reserveRecoveryAttachment: (...args) => sourceStorage.reserveRecoveryAttachment(...args),
+            uploadByKey: async (...args) => {
             assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
             uploadAttempts++
             if (refuseUpload && uploadAttempts === 2) throw new Error('SYNTHETIC_RESTORE_UPLOAD_FAILED')

@@ -59,7 +59,7 @@ import { createLocalCustodyBackup, createLocalCustodySession, type LocalArchiveC
 import { createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
 import { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } from '../../src/multitable/recovery-archive-file-store'
 import { stageRecoveryArchiveAttachment } from '../../src/multitable/recovery-archive-attachment-stage'
-import { StorageServiceImpl } from '../../src/services/StorageService'
+import { LocalStorageProvider, StorageServiceImpl } from '../../src/services/StorageService'
 
 const SENTINEL = 'reader-sensitive-sentinel'
 const KEY_ID = 'kms-key-0001'
@@ -500,7 +500,51 @@ function expectReaderError(error: unknown, code: RecoveryArchiveReaderErrorCode)
 }
 
 describe('recovery-archive D4 complete-section reader', () => {
-  test.each(['success', 'crash-retry', 'verified-retry', 'collision', 'denied', 'transaction', 'receipt-failure', 'false-readback', 'mutating-upload'] as const)(
+  test.each(['before-open', 'open-descriptor', 'uploaded'] as const)('owned tombstone blocks a late writer: %s', async mode => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-owned-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root, '/synthetic-files')
+    const bytes = Buffer.from('owned-synthetic-bytes')
+    const key = `${randomUUID()}/sha256-${digest(bytes)}`
+    const owner = digest(Buffer.from('synthetic-owner'))
+    await provider.reserveRecoveryAttachment(key, owner)
+    await new LocalStorageProvider(root).reserveRecoveryAttachment(key, owner)
+    const handle = mode === 'open-descriptor' ? await fs.open(path.join(root, key), 'wx') : undefined
+    try {
+      if (mode === 'uploaded') await provider.uploadByKey(key, bytes)
+      await expect(provider.retireRecoveryAttachment(key, digest(Buffer.from('wrong-owner'))))
+        .rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+      if (mode === 'uploaded') expect((await provider.readContentAddressed(key)).bytes).toEqual(bytes)
+      await provider.retireRecoveryAttachment(key, owner)
+      if (handle) await handle.writeFile(bytes)
+      await expect(provider.uploadByKey(key, bytes)).rejects.toBeDefined()
+      expect((await fs.lstat(path.join(root, key))).isDirectory()).toBe(true)
+      expect(await fs.readdir(path.join(root, key))).toEqual([])
+      await expect(provider.readContentAddressed(key)).rejects.toThrow('ATTACHMENT_SOURCE_UNAVAILABLE')
+      await expect(provider.reserveRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+      await new LocalStorageProvider(root).retireRecoveryAttachment(key, owner)
+    } finally { await handle?.close() }
+  })
+
+  test('never adopts or removes an unowned matching object or follows an object-directory symlink', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-restore-unowned-'))
+    temporaryRoots.push(root)
+    const provider = new LocalStorageProvider(root)
+    const bytes = Buffer.from('preexisting')
+    const key = `${randomUUID()}/sha256-${digest(bytes)}`
+    const owner = digest(bytes)
+    await provider.uploadByKey(key, bytes)
+    await expect(provider.reserveRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    await expect(provider.retireRecoveryAttachment(key, owner)).rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    expect(await provider.downloadByKey(key)).toEqual(bytes)
+    const linkedId = randomUUID()
+    await fs.symlink(path.dirname(path.join(root, key)), path.join(root, linkedId))
+    await expect(provider.reserveRecoveryAttachment(`${linkedId}/sha256-${digest(bytes)}`, owner))
+      .rejects.toThrow('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    expect(await provider.downloadByKey(key)).toEqual(bytes)
+  })
+
+  test.each(['success', 'crash-retry', 'verified-retry', 'collision', 'unowned-matching', 'unsupported', 'denied', 'transaction', 'receipt-failure', 'false-readback', 'mutating-upload'] as const)(
     'stages authenticated attachment bytes with owned identity: %s', async (mode) => {
       const binary = Buffer.from([0, 255, 128, 1])
       const durable = await buildDurableArchive({ attachments: [
@@ -523,9 +567,11 @@ describe('recovery-archive D4 complete-section reader', () => {
       const service = StorageServiceImpl.createLocalService(root, '/synthetic-files')
       const objectId = randomUUID()
       const storageKey = `${objectId}/sha256-${digest(binary)}`
+      const ownershipKey = digest(Buffer.from('synthetic-owner'))
       const events: string[] = []
       let depth = 0
-      if (mode === 'crash-retry' || mode === 'verified-retry' || mode === 'collision') {
+      if (mode === 'crash-retry' || mode === 'verified-retry' || mode === 'collision' || mode === 'unowned-matching') {
+        if (mode === 'crash-retry' || mode === 'verified-retry') await service.reserveRecoveryAttachment(storageKey, ownershipKey)
         await service.uploadByKey(storageKey, mode === 'collision' ? Buffer.from('foreign') : binary)
       }
       const pending = stageRecoveryArchiveAttachment({ state, attachmentId: 'att-original',
@@ -538,7 +584,7 @@ describe('recovery-archive D4 complete-section reader', () => {
             events.push('reserved')
             expect(identity.plaintextSha256).toBe(digest(binary))
             if (mode === 'transaction') depth = 1
-            return { objectId, state: mode === 'verified-retry' ? 'verified' : 'reserved' }
+            return { objectId, ownershipKey, state: mode === 'verified-retry' ? 'verified' : 'reserved' }
           },
           verified: async id => {
             events.push('verified')
@@ -547,6 +593,7 @@ describe('recovery-archive D4 complete-section reader', () => {
           },
         },
         storage: {
+          reserveRecoveryAttachment: mode === 'unsupported' ? undefined : (...args) => service.reserveRecoveryAttachment(...args),
           uploadByKey: async (key, bytes, mediaType) => {
             expect(events).toEqual(['reserved'])
             events.push('upload')
@@ -568,9 +615,10 @@ describe('recovery-archive D4 complete-section reader', () => {
       } else {
         await expect(pending).rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED')
         if (mode !== 'receipt-failure') expect(events).not.toContain('verified')
-        if (mode === 'denied') expect(events).toEqual([])
+        if (mode === 'denied' || mode === 'unsupported') expect(events).toEqual([])
         if (mode === 'transaction') expect(events).toEqual(['reserved'])
         if (mode === 'collision') expect(await service.downloadByKey(storageKey)).toEqual(Buffer.from('foreign'))
+        if (mode === 'unowned-matching') expect(await service.downloadByKey(storageKey)).toEqual(binary)
         if (mode === 'receipt-failure') expect(await service.downloadByKey(storageKey)).toEqual(binary)
       }
     },

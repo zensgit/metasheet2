@@ -19,7 +19,7 @@ export interface ArchiveAttachmentStageIdentity {
 
 export interface ArchiveAttachmentStageLedger {
   /** Must return only after the attempt-owned object identity is durably committed. */
-  reserve(identity: Readonly<ArchiveAttachmentStageIdentity>): Promise<{ objectId: string; state: 'reserved' | 'verified' }>
+  reserve(identity: Readonly<ArchiveAttachmentStageIdentity>): Promise<{ objectId: string; ownershipKey: string; state: 'reserved' | 'verified' }>
   /** Must compare the complete reserved identity; never adopt an unreserved object. */
   verified(objectId: string, identity: Readonly<ArchiveAttachmentStageIdentity>): Promise<void>
 }
@@ -32,7 +32,7 @@ export async function stageRecoveryArchiveAttachment(input: {
   transactionDepth: RecoveryArchiveTransactionDepthProbe
   authorize: () => Promise<boolean>
   ledger: ArchiveAttachmentStageLedger
-  storage: Pick<StorageProvider, 'uploadByKey' | 'readContentAddressed'>
+  storage: Pick<StorageProvider, 'uploadByKey' | 'readContentAddressed' | 'reserveRecoveryAttachment'>
 }): Promise<Readonly<ArchiveAttachmentStageIdentity & { objectId: string; storageKey: string }>> {
   const original = { generationId: input.original.generationId, workspaceId: input.original.workspaceId,
     baseId: input.original.baseId, sheetId: input.original.sheetId,
@@ -40,7 +40,8 @@ export async function stageRecoveryArchiveAttachment(input: {
   const attachmentId = input.attachmentId
   const { storage, ledger, transactionDepth, authorize, state: archiveState } = input
   outsideTransaction(transactionDepth)
-  if (!(await authorize()) || typeof storage.readContentAddressed !== 'function') refused()
+  if (!(await authorize()) || typeof storage.readContentAddressed !== 'function'
+    || typeof storage.reserveRecoveryAttachment !== 'function') refused()
   outsideTransaction(transactionDepth)
   const source = readRecoveryArchiveAttachmentSource(archiveState, attachmentId, original)
   try {
@@ -50,10 +51,14 @@ export async function stageRecoveryArchiveAttachment(input: {
       || String(source.bytes.length) !== identity.sizeBytes) refused()
     const reserved = await ledger.reserve(identity)
     const objectId = reserved.objectId
+    const ownershipKey = reserved.ownershipKey
     const state = reserved.state
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(objectId)
+      || !/^[0-9a-f]{64}$/.test(ownershipKey)
       || (state !== 'reserved' && state !== 'verified')) refused()
     const storageKey = `${objectId}/sha256-${identity.plaintextSha256}`
+    outsideTransaction(transactionDepth)
+    await storage.reserveRecoveryAttachment(storageKey, ownershipKey)
     outsideTransaction(transactionDepth)
     if (state === 'reserved') {
       try {

@@ -18,6 +18,7 @@ import type {
   StorageUsage
 } from '../types/plugin'
 import { Logger } from '../core/logger'
+import { reserveLocalRecoveryAttachment, retireLocalRecoveryAttachment } from './recovery-attachment-local-ownership'
 
 /**
  * F3 files-storage-integrity design-lock (2026-07-10), G1/G2: derive a display-only safe basename from
@@ -65,6 +66,7 @@ export type ContentAddressedAttachmentSource = {
 }
 
 export interface StorageProvider {
+  reserveRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<void>
   uploadContentAddressed?(file: Buffer, options: UploadOptions): Promise<StorageFile>
   readContentAddressed?(storageKey: string): Promise<ContentAddressedAttachmentSource>
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
@@ -253,6 +255,15 @@ class LocalStorageProvider implements StorageProvider {
     const digest = crypto.createHash('sha256').update(bytes).digest('hex')
     // The identity is fixed before exclusive-create, never discovered from mutable bytes during archive capture.
     return this.upload(bytes, { ...options, filename: `sha256-${digest}` })
+  }
+
+  async reserveRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    return reserveLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+  }
+
+  /** Internal cleanup port; not exposed by StorageService or the plugin capability interface. */
+  async retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    return retireLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
   }
 
   async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
@@ -557,6 +568,11 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
   async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
     if (!this.provider.readContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
     return this.provider.readContentAddressed(storageKey)
+  }
+
+  async reserveRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    if (!this.provider.reserveRecoveryAttachment) throw new Error('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    return this.provider.reserveRecoveryAttachment(storageKey, ownershipKey)
   }
 
   async download(fileId: string): Promise<Buffer> {
