@@ -112,7 +112,7 @@ P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` 
 - 写路径：claim 缺失一律 **422**，不 fallback、不写 `'default'`。`deriveApprovalInstanceOrgId` 不得作兜底。
 - 读路径：`listPendingForUser(userId, orgId)` 与四视角都带 `tasks.org_id = :orgId`；`orgId` 空 ⇒ 空列表 + `degraded: true, reason: 'org_missing'`；谓词抛错 ⇒ `reason: 'predicate_error'`。只有 `org_missing` 触发 session-org 引导。挂载先 `GET /api/tasks/context`。
 - `task_comments` / `task_events` 不设 org 列。
-- 残留披露（任务域不加固，见 §13-1d）：`RBAC_OPTIONAL` 读点 `packages/core-backend/src/rbac/namespace-admission.ts:9`（`:346` 是降级后果行，不是旗读点）；`RBAC_TOKEN_TRUST` 读点 `packages/core-backend/src/rbac/rbac.ts:12`（模块装载）与 `packages/core-backend/src/auth/AuthService.ts:171`。lane 前置断言见门 16。
+- 残留披露（任务域不加固，见 §13-1d）：`RBAC_OPTIONAL` **三个读点** — `packages/core-backend/src/rbac/namespace-admission.ts:9`、`packages/core-backend/src/rbac/service.ts:17`（同文件 `:105` 用该点）、`packages/core-backend/src/routes/permissions.ts:21`。`namespace-admission.ts:346` 是降级后果行，不是旗读点。`RBAC_TOKEN_TRUST` 两读点行为不同：`packages/core-backend/src/rbac/rbac.ts:12` 是**模块作用域常量**（装载时缓存）；`packages/core-backend/src/auth/AuthService.ts:171` 是**调用期**读。鉴权门禁见门 16（专属 config，不读 env 过门）。
 
 ### 4.4 日期与时区（**已定，来源 计划 v5 §2.6**）
 
@@ -129,7 +129,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 2. 定时 overdue_or_today = `due_at < viewerNextMidnight`（查看者当地次日零点瞬时）。
 3. 全天 overdue = `due_date < viewerToday`；overdue_or_today = `due_date <= viewerToday`。
 
-查看者时区：请求头 `x-viewer-time-zone`；服务端用 `isValidIanaTimeZone`（同上 `:54`）校验，**非法或缺失回退任务自身 `time_zone`**。显示：全天 floating 不换算日期。任务域**不得**走 `resolveReminderTimeZone`（`packages/core-backend/src/multitable/automation-date-reminder.ts:36-41`）——该函数对非法 tz **静默退化 UTC**，与本锁「回退任务 `time_zone`」冲突。
+查看者时区：请求头 `x-viewer-time-zone`；服务端用 `isValidIanaTimeZone`（同上 `:54`）校验，**非法或缺失回退任务自身 `time_zone`**。显示：全天 floating 不换算日期。任务域**不得直接**用 `resolveReminderTimeZone`（`packages/core-backend/src/multitable/automation-date-reminder.ts:36-41`）做查看者时区校验——该函数对非法 tz **静默退化 UTC**，与「回退任务 `time_zone`」冲突。`computeDateReminderOccurrence`（`:241`）内部第一句就是 `const tz = resolveReminderTimeZone(config.timezone)`（`:253`）；传入它的 `tasks.time_zone` 必须在**写入时**已经 `isValidIanaTimeZone` 校验过。写入非法 `time_zone` ⇒ 422（门 8）。
 
 `remind_at` 缺省（P1，**已定算法，来源 计划 v5 §5-13 / §2.6**；`task_user_settings` 表本身见 §13-7）：创建未显式给 `remind_at` 时**先**按用户 `default_remind_policy`（无该表/无行 = policy 缺省）；有 `due_time` ⇒ `due_at − 30min`（任务域自算纯函数；`due_time` 在 00:00–00:29 跨日回退到前一日）；全天（`due_time IS NULL`）⇒ `due_date` 在 **`tasks.time_zone`** 下的 18:00，经 `computeDateReminderOccurrence(due_date, {timeOfDay:'18:00', offsetDays:0, timezone: tasks.time_zone}, {floating:true})`（函数定义 `packages/core-backend/src/multitable/automation-date-reminder.ts:241`）。不用查看者时区。区分依据是四列，不是从 `timestamptz` 反推。P0-A 派生函数在 policy 缺省时即可单测两支；读 `task_user_settings` 要等该表落地（§13-7）。
 
@@ -141,7 +141,11 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 非 admin 可达需要三件事，缺一 403：① `permissions` seed；② 非 admin 角色在 `role_permissions` 带 `tasks:*`；③ `user_namespace_admissions(namespace='tasks', enabled=true)`。`user_permissions` 直授与 `users.permissions` jsonb 过不了准入。给 `admin` 绑码零增益。码名 `tasks:read|write|admin` 是 §13-10c **建议**，裁定前不得当已交付。
 
-第四通道（告知 owner，不扩成第四件事）：`deriveDelegatedAdminNamespace`（`packages/core-backend/src/rbac/namespace-admission.ts:102-108`，调用点同文件 `:196-199`）对 `*_admin` 角色名（例 `tasks_admin`）在无 `role_permissions` 行时仍把该 namespace 写入准入集合。这绕的是 ③ 的「必须有 admission 行」半边，不是 ①②。§13-10b 裁 seed 时必须知情：若 seed `tasks_admin` 形角色名，会走这条通道。本锁不把该通道收成第四件「事」，也不在 §13-10 未裁前关闭它。
+`deriveDelegatedAdminNamespace`（`packages/core-backend/src/rbac/namespace-admission.ts:102-108`，调用点同文件 `:196-199`）把 `*_admin` 角色名（例 `tasks_admin`）派生的 namespace 写入 `controlledNamespaces`。`tasks` 经 `:133-137` + `:11-38` 是受控资源，该通道对任务域为活。查询是 `LEFT JOIN role_permissions`（`:182-186`），零 `role_permissions` 行也成立。
+
+**admission 行仍必需**（`:347` `return admissions.get(normalizedNamespace)?.enabled === true`；其前 `:344` admin 短路、`:345` 不在 `controlledNamespaces` ⇒ false、`:346` 是表不可用时的降级，不是旗读点）。本通道**没有**绕过 ③。
+
+它实际做的是让 namespace 凭**角色名**进入 `controlledNamespaces`，而不是凭 `role_permissions` 派生（`:200-203`）。削弱 ①② 中哪一件，取决于 `rbacGuard` 另一合取项的权限码校验，**裁 §13-10b 前必须补普查**，本锁不另写未证断言。§13-10b 裁 seed 时必须知情：seed `tasks_admin` 形角色名会走这条通道。本锁不把该通道收成第四件「事」，也不在 §13-10 未裁前关闭它。
 
 `tasks` **不在** `NON_NAMESPACED_PERMISSION_RESOURCES`（本 SHA `packages/core-backend/src/rbac/namespace-admission.ts:11-38`）。验收非 admin 定义：`req.user.role/roles` 不含 admin **且** `user_roles` 无 `role_id='admin'`。
 
@@ -165,7 +169,14 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ② **独立证据 lane**：形状照 `.github/workflows/approval-realdb-comments.yml`：`workflow_dispatch` + `pull_request`（paths，**不加 `branches:`**，`:45-47`）+ `push main`；**不声明 `merge_group`** 仅在 lane 保留 paths 时成立（`:41`）；job 级 `DATABASE_URL`（postgres:16）+ `EXPECT_DB: '1'`（`:99`）；`MIGRATION_EXCLUDE` 标准 6 项（`:129` 逗号列表；`MIGRATION_EXCLUDE_TRACKING.md` 文案 union 为 7，新迁移不加进去）；`vitest --config vitest.integration.config.ts run <整文件> --reporter=verbose`（`:136`；verbose 是判据：lane 绿后从日志读出收集用例数写进 PR body，零收集的绿无效 `:133-135`）；测试顶部 `EXPECT_DB` 哨兵（`packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts:14`）。
 
-本 SHA 副作用（必须点名）：`packages/core-backend/vitest.integration.config.ts:21` `setupFiles: ['./tests/setup.integration.ts']`；`packages/core-backend/tests/setup.integration.ts:7` `process.env.RBAC_BYPASS = 'true'`，`:8` `process.env.RBAC_TOKEN_TRUST = 'true'`。`:8` 被 `packages/core-backend/src/rbac/rbac.ts:12` 模块装载读取，`:40-44` / `:85-91` 以 token `perms` 充当权限来源（仍与准入相与，绕过的是 §5.1 ①② 那一半，不是 ③）。任务套件若沿用该 setup，必须在套件顶部 `delete process.env.RBAC_BYPASS` 与 `delete process.env.RBAC_TOKEN_TRUST`（或显式 `'false'`），并在门 16 断言里证明两旗未设-or-false。
+本 SHA 副作用（必须点名，**不得沿用**）：`packages/core-backend/vitest.integration.config.ts:21` `setupFiles: ['./tests/setup.integration.ts']`；`packages/core-backend/tests/setup.integration.ts:7` `process.env.RBAC_BYPASS = 'true'`，`:8` `process.env.RBAC_TOKEN_TRUST = 'true'`。`:8` 被 `packages/core-backend/src/rbac/rbac.ts:12` 在**模块装载**时读成常量，`:40-44` / `:85-91` 以 token `perms` 充当权限来源（仍与准入相与）。套件顶部 `delete process.env.RBAC_TOKEN_TRUST` **改不了**该常量；门 16 不得靠读 `process.env` 过门。
+
+任务鉴权门禁用专属 config，照 `packages/core-backend/vitest.elearning-pilot-auth.config.ts:28-31` 与 `tests/elearning-pilot-auth/setup.ts` 先例：
+
+- `packages/core-backend/vitest.tasks-auth.config.ts`：`setupFiles: ['./tests/tasks-auth/setup.ts']` + `env: { RBAC_BYPASS: 'false', RBAC_TOKEN_TRUST: 'false', PRODUCT_MODE: 'plm-workbench' }`（均在模块装载前生效）；`include` 钉 `tests/tasks-auth/tasks-auth-gate.ts`；**不得**指向 `tests/setup.integration.ts`。
+- `packages/core-backend/tests/tasks-auth/setup.ts`：装载前把两旗写成 `'false'`；缺 `DATABASE_URL` 则抛、拒绝 skip-shaped green。
+- 接线测试 `packages/core-backend/tests/unit/tasks-auth-ci-wiring.test.ts`：静态钉住上两条（对照 `scripts/ops/elearning-v01-auth-ci-wiring.test.mjs:74-93`）。该文件在 `tests/unit/`，默认 vitest 收集，**不改** `plugin-tests.yml`。
+- `AuthService.ts:171` 是调用期读，与 `rbac.ts:12` 模块常量不是同一行为。
 
 ② 的「paths、不加 `branches:`、不声明 `merge_group`」是 **paths 保留时**的已定形状。若 §13-12 裁 (b)，该形状在裁 (b) 的 PR 上被取代（去 paths、声明 `merge_group`、四步 POST-append），不是本锁提前落槌 (b)。
 
@@ -177,7 +188,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 与 §13-12 的关系：**不是无关**。④ 的三集合谓词不覆盖 required run-list。若 §13-12 裁 **(a)**（整文件加进 `plugin-tests.yml` `test` job run-list），该 run-list 是**第四集合**，必须在裁 (a) 的那个 PR 把 ④ 扩成四集合相等；裁 (a) 前不得声称 ④ 已覆盖 required 执行。若裁 **(b)**，④ 的三集合维持，但 ② 的 paths 形状被 (b) 取代，须同 PR 改 ② 正文。审批对物 `approval-ci-coverage-enumeration.test.ts` 今天由同一 `:842-844` 步执行。④ 自身 verbose 收集数：该步绿后从日志读出收集用例数写进 PR body，零收集的绿无效（与 ② 同一判据）。
 
-本切片 docs-only，不建测试文件、不改 `vitest.config.ts`、不建 lane。
+本切片不改 `vitest.config.ts` exclude、不建 `task-*.db.test.ts`、不改 `plugin-tests.yml`。本轮加专属 auth config / setup / `tests/unit/tasks-auth-ci-wiring.test.ts`。行为正控/负控文件 `tests/tasks-auth/tasks-auth-gate.ts` 等 M2 任务路由落地后写；config `include` 已钉该路径。
 
 ### 5.3 前端两点接线（**已定，来源 计划 v5 §8-2**）
 
@@ -261,9 +272,11 @@ N/A:本线无媒体轨。
 | # | 题 | 状态 |
 |---|---|---|
 | 已定·约束 | 两类非空（§4.1）、日期三规则（§4.4）、锁协议锁序（§6.4）、投影复合键、deny 两族（§6.1 / §7） | 已定，来源计划 v5；ratify 时可改 |
-| 已定·接线 | 两点接线（§5.3）；真库 ① exclude 逐文件字面量；发现式覆盖枚举④（§5.2.1 ④；required 只认 `test (20.x)`）；五段部署链（§5.4） | 已定，来源计划 v5 |
+| 已定·接线 | 两点接线（§5.3）；真库 ① exclude 逐文件字面量；发现式覆盖枚举④（§5.2.1 ④ 三集合谓词）；五段部署链（§5.4）；专属 tasks-auth config/setup（§5.2.1 ②） | 已定，来源计划 v5 |
+| required context 活体 | `test (20.x)` 是否 required | **不是已定冻结**。以 §5.2.1 ④ 带日期的 `gh api …/protection` 实读为准；M2 接线 PR 必须重读 protection，不得抄本锁日期 |
 | 已定·产品缺省 | 导航/引导（§5.2）、PendingItem 五/六键+不带正文、§13-37/38/39 缺省 | 已定，来源计划 v5 |
 | 真库接线②形状 | paths、不加 `branches:`、不声明 `merge_group`（§5.2.1 ②） | **paths 保留时已定**。若 §13-12 裁 (b)，该形状被 (b) 取代，不是本行提前落槌 (b) |
+| §13-9 | 完成/重启对称性（切模式重算） | **未裁**（阻断门 3 切模式格；P0 未切模式的 any 路径不受阻） |
 | §13-10 | RBAC 豁免集 / `tasks_user` seed / 码名 | **未裁** |
 | §13-12 | 真库测试 required 承载（§5.2.1 ③ 的 (a)/(b)） | **未裁** |
 | `TASKS_*` 与 GH manifest | 章程 `AGENTS.md:68` 落地；计划 v5 无此条。义务推迟到首个引入 `TASKS_*` 源码读的 PR，届时同 PR 扩 `globalHistoryFlagsInSource()` 并补 manifest。本锁**不**把「无需登记」结为已定豁免。 | **未裁**（有期限推迟，不是豁免；无 owner 亲写豁免 comment） |
@@ -297,25 +310,25 @@ N/A:本线无媒体轨。
 ## 12. Ratify 验收门
 
 1. org 写路径无 claim ⇒ 422；读路径 `org_missing` / `predicate_error`；不写 `'default'`。
-2. 非 admin：**三件事齐全 ⇒ 200**（同一格正控；夹具必须同时具备 ① seed ② 非 admin 角色 `role_permissions` ③ admission 行，响应 `status === 200`）。正控夹具的 `role_id` **不得**以 `_admin` 结尾，避免 `deriveDelegatedAdminNamespace`（§5.1）把准入短路成第四通道。三件事**缺一 ⇒ 403**（三格负控，各缺一件）。直授+admission 仍 403。码名与 seed 待 §13-10 裁；未裁前本门不可声称全绿。required 承载: TBD（§13-12 未裁）。
+2. 非 admin：**三件事齐全 ⇒ 200**（同一格正控；夹具必须同时具备 ① seed ② 非 admin 角色 `role_permissions` ③ admission 行，响应 `status === 200`）。正控夹具的 `role_id` **不得**以 `_admin` 结尾，避免 `deriveDelegatedAdminNamespace` 把 namespace 凭角色名写入 `controlledNamespaces`（§5.1；admission 行仍必需）。三件事**缺一 ⇒ 403**（三格负控，各缺一件）。直授+admission 仍 403。码名与 seed 待 §13-10 裁；未裁前本门不可声称全绿。required 承载: TBD（§13-12 未裁）。
 3. 完成判定网格 any/all × 增删人 × 切模式 × {0,1,n}。切模式格依赖 §13-9 **未裁**（见 §6.2）。
 4. 可见 ≠ pending（self_completed 正反）。
 5. PendingItem：**必须有夹具**，空列表不能单独过门。无截止日夹具：响应恰五键 `source/id/title/href/updatedAt`。有截止日夹具：恰六键且 `dueAt` 不得为 null/空串。两夹具响应体都不含 `description` / `description_rich` 等正文字段。
 6. 树 depth 0..4、无环、交叉移动恰一成功。
 7. 锁键单点 + 锁序正/负控。
-8. 日期三规则固定 `now=2026-09-15T12:30Z` 三格。
-9. deny 注错：正控（未注错）投影读 `status === 200`，可见行非空、被拒行不在。负控甲：deny 查询抛错 ⇒ 整个投影读失败，HTTP **500**（任务线不改中间件；先例 `packages/core-backend/src/multitable/permission-service.ts:1044` 注释 + `:1315`/`:1388` `throw err`），响应体投影行 `toEqual([])`。负控乙：测试内把 deny 集合注成空集或反相 ⇒ 不得 `200`，必须是具体封闭码（默认 500；若实现显式 values-free 403 则该格写死 403），且投影行 `toEqual([])`。**禁止**仅 `expect(status).not.toBe(200)` 过门。required 承载: TBD（§13-12 未裁）。
+8. 日期三规则固定 `now=2026-09-15T12:30Z` 三格。写入非法 IANA `time_zone` ⇒ **422**（写入时 `isValidIanaTimeZone`；不把非法 tz 交给 `computeDateReminderOccurrence`）。
+9. deny 注错：正控（未注错）投影读 `status === 200`，可见行非空、被拒行不在。负控甲：deny 查询抛错 ⇒ 整个投影读失败，HTTP **500**（任务线不改中间件；先例 `packages/core-backend/src/multitable/permission-service.ts` `loadDeniedRecordIds` **`:1200`** 起的 fail-closed 抛出；`loadApprovalProjectionDeniedRecordIds` 是 `:1047-1090`，自身不捕获、靠 reject 冒泡。`:1315`/`:1388` 属 `loadConditionalRulesAndFields` / `loadRuleDeniedTrashRecordIds`，**不是**投影 deny 路径）。500 响应不要求投影行 `toEqual([])`（空转合取）。负控乙：测试内把 deny 集合注成空集或反相 ⇒ HTTP **500**（fail-closed 抛出），**禁止** 500/403 二选一，**禁止**仅 `expect(status).not.toBe(200)`。required 承载: TBD（§13-12 未裁）。
 10. 标题正控「备料复核」过（应用层归一后写入）。CHECK `btrim(col) <> ''` 只拦空串。下列四格必须 **422**（应用层 Unicode 归一后空）：`'\t'`、`'  \n '`、U+3000（`'　'`）、零宽（U+200B/U+200C/U+200D/U+FEFF）。负控：停掉归一函数（mutation `cp` 备份，不得 `git checkout --`）后这四格不再 422（CHECK 兜不住）⇒ 该格必须红。`[!-~]` 不在 title/name。
 11. 前端两点接线；flag OFF 与零任务不同形；404 不断言开关。
 12. 前端引导三触发 + `predicate_error` 不引导。
 13. 真起服务器静态路径；非 admin 打通一条任务路由（正控依赖门 2 的三件事齐全）。未裁 §13-10 则本门不可声称全绿。required 承载: TBD（§13-12 未裁）。
 14. 含 DDL 的 PR 首段标明未应用未合并；遵守 §5.4 五段部署链（合并≠发布≠部署≠迁移）。
 15. 生产源码注释不点名其他线符号。
-16. lane 断言整个信任面：`RBAC_OPTIONAL` **未设置**（不是 `'1'`），**且** `RBAC_TOKEN_TRUST` **未设置或为 `'false'`**（不是 `'true'`/`'1'`）。沿用 `vitest.integration.config.ts` setup 时，任务套件顶部必须 `delete`（或显式 false）`RBAC_TOKEN_TRUST` 与 `RBAC_BYPASS`，并在本门断言里读 `process.env` 证明。只断言 `RBAC_OPTIONAL` 未设 **不能**过门。
-17. 真库接线齐备：①（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ②（lane 绿后从 verbose 日志读出**收集用例数 > 0** 写进 PR body，零收集的绿无效）+ ④（三集合相等、扫描负控、正则未失效；④ 自身 verbose 收集数 > 0；required 只认 `test (20.x)`，承载 `.github/workflows/plugin-tests.yml:842-844`）。③ 的 required 承载: TBD（§13-12 未裁）。
+16. 任务鉴权门禁用专属 `packages/core-backend/vitest.tasks-auth.config.ts`（`env` 块 + `setupFiles` 均在模块装载前把 `RBAC_TOKEN_TRUST`/`RBAC_BYPASS` 设为 `'false'`；**不得** `setupFiles` 指向 `tests/setup.integration.ts`）。`rbac.ts:12` 是模块作用域常量，套件顶部 `delete process.env` 改不了它；`AuthService.ts:171` 是调用期读。**正控**：在该 config 下，携带 `perms: ['tasks:read']` 的 token、但该用户 `role_permissions` 无 `tasks:*` 行 ⇒ **403**。**负控**：把该 config 的 `RBAC_TOKEN_TRUST` 改回 `'true'`（mutation `cp` 备份，不得 `git checkout --`）后同一格转 **200**。本门不读 `process.env` 证明过门。`RBAC_BYPASS` 在 `packages/core-backend/src` 零读点（读者是 `plugins/plugin-attendance` 与 ops）；config 仍设 `'false'` 以对齐 elearning 先例，但不构成本门判据。M0 落 config + setup + wiring；行为正控/负控在 M2 写入 `tests/tasks-auth/tasks-auth-gate.ts`。
+17. 真库接线齐备：①（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ②（lane 绿后从 verbose 日志读出**收集用例数 == 该文件内 `it(` / `test(` 静态计数**，写进 PR body）+ ④（三集合相等、扫描负控、正则未失效；④ 自身收集数 == 该文件 `it(`/`test(` 静态计数；承载 `.github/workflows/plugin-tests.yml:842-844`；required 是否含 `test (20.x)` 以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读）。③ 的 required 承载: TBD（§13-12 未裁）。**门 17 只证执行发生，不证行为。**
 18. **首个**在 `packages/core-backend/src` 引入 `TASKS_*` 源码读的 PR 必须同 PR 扩 `globalHistoryFlagsInSource()` 覆盖 `TASKS_*_ENABLED` 并补 `scripts/ops/global-history-flag-manifest.mjs` 条目。负控：删掉该正则扩展（mutation `cp` 备份）后 `pnpm verify:global-history-flag-manifest:test` 必须红。本门在 M0（无源码读）不适用；从该 PR 起适用。
 
-门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。门 2/13 另被 §13-10 **未裁**阻断（码名/seed）。①②④ 可在 M2 接线 PR 上验（④ 的第四集合等 §13-12 裁 (a) 时才加）。
+门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。门 2/13 另被 §13-10 **未裁**阻断（码名/seed）。门 3 切模式格被 §13-9 **未裁**阻断。①②④ 可在 M2 接线 PR 上验（④ 的第四集合等 §13-12 裁 (a) 时才加）。门 16 行为格等 M2 路由落地。
 
 ---
 
@@ -329,7 +342,7 @@ N/A:本线无媒体轨。
 - **1a** `tasks.org_id` = `req.authenticatedTenantId`。**已定，来源 计划 v5 §2.4**。依据：`packages/core-backend/src/auth/jwt-middleware.ts:101-104`。
 - **1b** 建议：多组织用户先 `POST /api/auth/session-org`，请求不另带 orgId。依据：计划 §2.4 (a)；避免第二 org 来源。
 - **1c** 建议：不允许跨 org 负责人/关注人。依据：org 列是隔离键；跨 org 会变成第二数据源。
-- **1d** 建议：接受 `RBAC_TOKEN_TRUST` / `RBAC_OPTIONAL` 两条残留不加固。任务 lane（门 16）断言 **两旗**：`RBAC_OPTIONAL` 未设 **且** `RBAC_TOKEN_TRUST` 未设或 `'false'`。读点：`RBAC_OPTIONAL` = `packages/core-backend/src/rbac/namespace-admission.ts:9`（`:346` 是降级后果行，不是旗读点）；`RBAC_TOKEN_TRUST` = `packages/core-backend/src/rbac/rbac.ts:12` 与 `packages/core-backend/src/auth/AuthService.ts:171`。依据：计划 §2.4 披露。
+- **1d** 建议：接受 `RBAC_TOKEN_TRUST` / `RBAC_OPTIONAL` 两条残留不加固。任务鉴权门禁用专属 config（门 16 行为正控/负控，不读 env 过门）。`RBAC_OPTIONAL` 读点三处：`packages/core-backend/src/rbac/namespace-admission.ts:9`、`packages/core-backend/src/rbac/service.ts:17`、`packages/core-backend/src/routes/permissions.ts:21`（`:346` 是降级后果行，不是旗读点）。`RBAC_TOKEN_TRUST`：`rbac.ts:12` 模块装载常量 vs `AuthService.ts:171` 调用期读。依据：计划 §2.4 披露。
 - **1e** 本地普查已做（零活跃成员 68/115 @ Homebrew `metasheet_v2`；生产 UNCLEAR）。是否 M2 前回填生产 **请 owner 裁**。建议：M2 不回填生产，只在引导流渲染「未加入组织」。
 
 **2. 创建人默认负责人**
@@ -348,7 +361,7 @@ N/A:本线无媒体轨。
 双端授权 + 跨 org 禁止 + 父候选排除子孙。**已定，来源 计划 v5 §5-5**。
 
 **7. per-user 设置实体**
-建议：建 `task_user_settings`（P1）。**表本身未裁/建议**；`remind_at` 缺省算法已定（§4.4），无该表时按 policy 缺省两支跑。不建则每日提醒无扇出来源。
+建议：建 `task_user_settings`（P1）。表本身是**建议**（不是未裁）。`remind_at` 缺省算法已定（§4.4），无该表时按 policy 缺省两支跑。不建则每日提醒无扇出来源。
 
 **8. `event_type`**
 **已定，来源 计划 v5 §2.3**：P0-A 一次写全 CHECK（词表见计划 §2.3）。新增词 = 新 DDL + owner 合并授权。与 §4.2 一致，不再标「建议」。
@@ -358,7 +371,7 @@ N/A:本线无媒体轨。
 
 **10. RBAC（未裁）**
 - **10a** 建议：**不**把 `tasks` 加入 `NON_NAMESPACED_PERMISSION_RESOURCES`（保持受控）。代价：非 admin 可达要「角色授码 + 逐用户准入」两步 runbook；漏一步则静态绿、真机全 403（R10）。加入豁免 = 全员可达合同变更，与 approvals 同档。
-- **10b** 建议：不 seed `tasks_user`（stock-prep 先例零自动）。代价：每个租户要手工绑角色。seed 则要写清绑哪些角色、是否自动 admission。告知 owner：`deriveDelegatedAdminNamespace`（`packages/core-backend/src/rbac/namespace-admission.ts:102-108,:196-199`）会让 `tasks_admin` 形角色名在无 `role_permissions` 时仍获 namespace 准入（§5.1）。
+- **10b** 建议：不 seed `tasks_user`（stock-prep 先例零自动）。代价：每个租户要手工绑角色。seed 则要写清绑哪些角色、是否自动 admission。告知 owner：`deriveDelegatedAdminNamespace`（`packages/core-backend/src/rbac/namespace-admission.ts:102-108,:196-199`）让 namespace 凭角色名进 `controlledNamespaces`；**admission 行仍必需（`:347`）**。削弱 ①② 中哪一件待普查（§5.1）。seed `tasks_admin` 形角色名会走这条通道。
 - **10c** 建议三码名 `tasks:read/write/admin`。P0-A **不得**把三码当已交付 seed（§4.2）。
 - **本条未裁；M2 不得写「所有活跃用户可用」。**
 

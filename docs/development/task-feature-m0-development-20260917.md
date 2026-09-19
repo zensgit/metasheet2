@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：`43d2c4935a6d51cc72f4996d9296a6c6fa4f50a2`（加速补丁；repair 祖先 `df373559c`；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`）
+- head SHA：本轮内容提交后 `git rev-parse HEAD`（闸 §7 修复；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`）。内容提交与 SHA-record 若分两次，内容 SHA 为前者、末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -16,7 +16,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 ```
 
 完整 rollup 数组更长（attendance-web-guard / plugin-tests 多 job 等，当时 QUEUED 或 IN_PROGRESS）。`mergeable=MERGEABLE` 表示无冲突。
-- 一句话：在独立 worktree `grok/tasks-m0` 上写了普查、PROPOSED 锁草案（elearning §0–§15 编号、§8 N/A、39 题建议答案）、本报告；开 docs-only Draft PR-0，不合并。
+- 一句话：普查 + PROPOSED 锁草案 + 本报告；闸 §7 起加专属 `vitest.tasks-auth.config.ts` / `tests/tasks-auth/setup.ts` / `tests/unit/tasks-auth-ci-wiring.test.ts`（不改 `plugin-tests.yml`）。Draft PR-0，不合并。
 
 按简报 §2 / 用户 §四 **明确没做什么**：
 
@@ -125,37 +125,27 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 11. 飞书 IM/P2 篇在锁 §2 用计划已蒸馏的承重机制，未在本报告逐篇贴原文行。
 12. `mergeable` JSON 已回填 §0；当时 checks 未完成，未把 QUEUED 当绿。
 
-不许写「全部完成」。本切片交付 = 三份 docs + Draft PR-0。
+不许写「全部完成」。本切片交付 = 三份 docs + 专属 auth config/setup/wiring + Draft PR-0。
 
 ---
 
-## 6. 修复轮（闸 §6 第二轮 P1/P2/P3 + R1'-4 残留 + A 的 P3）
+## 6. 修复轮（闸 §7 第三轮 2 P1 + 5 P2 + 4 P3）
 
-未改 §13-10 / §13-12 的未裁状态。未合并。任务 B 未起。rebase 到 `origin/main` `bb77ca5f2` 后同一 head 改完。**表内不放正则命令**；命令在表下代码块，引用前已实跑。
+未改 §13-10 / §13-12 的未裁状态。未合并。任务 B 未起。**表内不放正则命令**；命令在表下代码块，引用前已实跑。
 
 | finding | 改动 | 实际输出摘录 |
 |---|---|---|
-| P1-1 门 16 / 门 2 / setup | §5.2.1 ② 点名 `setup.integration.ts:7-8`；门 16 枚举 `RBAC_OPTIONAL` 未设 **且** `RBAC_TOKEN_TRUST` 未设-or-false；门 2 同格正控「三件事齐全 ⇒ 200」 | 锁 `:168` setup 两行；门 16 `:314`；门 2 `:300`。源：setup `:7-8`、`rbac.ts:12`、`AuthService.ts:171`、`namespace-admission.ts:9` |
-| P1-2 GH 义务 | §10 改为有期限推迟；删除「无需登记」已定陈述；§9 该行进 **未裁**；§12 新门 18 | 锁 `:269` §9 未裁；`:278` 有期限推迟；门 18 `:316`。旧「既不登记也无需登排除列表」只出现在「本锁删除…作为已定陈述」句 |
-| P2 门 10 空白/零宽 | 四格 422 + 停归一负控 | 锁 `:308` 含 `'\t'` / `'  \n '` / U+3000 / 零宽 |
-| P2 门 2/13 免责 | 点名 §13-10 **且** §13-12 | 锁 `:318`「门 2/13 另被 §13-10 未裁阻断」 |
-| P2 门 9 notEqual | 正控 200 + 负控甲 500 + 负控乙具体封闭码；禁止 `not.toBe(200)` | 锁 `:307` |
-| P2 门 5 空列表 / 门 17 收集数 | 门 5 必须有夹具；门 17 ② 与 ④ 收集数 > 0 | 锁 `:303` / `:315` |
-| P2 `RBAC_TOKEN_TRUST` 读点 | 全路径 `rbac.ts:12` + `AuthService.ts:171`；`:346` 标后果行 | 锁 `:115` / `:332` |
-| P2 §2 html vs txt | 点名行号口径（普查配方） | 锁 `:52` |
-| P2 §4.4 时区锚点 | `isValidIanaTimeZone` `:54`；禁止 `resolveReminderTimeZone`；`computeDateReminderOccurrence` `:241` | 锁 `:119` / `:132` / `:134` |
-| P2 已定 vs 建议 | `event_type` CHECK §13-8 已定；`task_user_settings` 表仍 §13-7 建议、算法已定 | 锁 `:353` / `:350` |
-| P2 §6.2 any 不变量 | 切模式依赖 §13-9 未裁 | 锁 `:223` / `:301` / `:357` |
-| P3 `deriveDelegatedAdminNamespace` | §5.1 + §13-10b 告知 owner | 锁 `:144` / `:361` |
-| P3 basename 四处 | jwt / ns / index / s6a 全路径 | 锁 `:23` / `:146` / `:282` / `:369` |
-| P3 §2-8/§2-4 飞书 | 关注人引《快速上手》:45 + 《附件》:28-30/:37；排除子孙标自有加强 | 锁 `:59`（排除子孙自有加强） / `:63`（关注人 :45/:28-30/:37） |
-| P3 三码名 | P0-A 不得当已交付；§5.2 占位 | 锁 `:99` / `:152` |
-| P3 §9 超级单元格 / ② vs (b) | 已定块拆行；② 形状单独一行，裁 (b) 时被取代 | 锁 `:263-266` |
-| R1'-4 `test (18.x)` | required 只认 `test (20.x)`；18.x 是矩阵另一腿不是必需一半 | 锁 `:176` / `:264` / `:315`。workflow `:532-533` 自述 |
-| R1'-4 三集合 vs 第四集合 | ④「不是无关」；裁 (a) 扩四集合 | 锁 `:178` / `:318` / `:369` |
-| A P3 §5.2.1 标题 | 改为 ①②③④，标明不再写「三点」 | 锁 `:160` |
-| A P3 「选项 b」 | 删除孤立编号 | `grep -F "选项 b"` 0 命中 |
-| A P3 门 17 ④ 收集数 | ④ 自身 verbose 收集数 > 0 | 锁 `:178` / `:315` |
+| P1-1 门 16 装载顺序 | 专属 `vitest.tasks-auth.config.ts` + `tests/tasks-auth/setup.ts` + `tests/unit/tasks-auth-ci-wiring.test.ts`；门 16 改为 token `perms` 正控 403 / config 改回 `'true'` 负控 200；不读 env 过门 | 锁 `:176` config；`:327` 门 16。wiring-shape PASS（node 复放 `assert.match`） |
+| P1-2 `:144` 判断句 | 撤回「绕过 ③」；改为 admission 行仍必需（`:347`）；通道让 namespace 凭角色名进 `controlledNamespaces`（`:196-199`）；削弱 ①② 哪一件待普查。§13-10b 同改 | 锁 `:146` / `:148` / `:374` |
+| P2 §9/§12/§13 三方 | §13-9 进 §9 **未裁**（阻断门 3）；§12 尾点名门 3；§13-7 只标建议、去掉「未裁/建议」双标 | 锁 `:279` / `:331` / `:364` |
+| P2 §4.4 自相矛盾 | 不得**直接**用 `resolveReminderTimeZone` 做 viewer 校验；`computeDateReminderOccurrence` `:253` 内部调用已披露；写入非法 tz ⇒ 422 进门 8 | 锁 `:132` / `:319` |
+| P2 门 9 锚点 | 先例改为 `loadDeniedRecordIds:1200`；500 不再合取 `toEqual([])`；负控乙只 500 | 锁 `:320` |
+| P2 `RBAC_OPTIONAL` 读点 | 三处：`namespace-admission.ts:9`、`rbac/service.ts:17`、`routes/permissions.ts:21` | 锁 `:115` / `:345` |
+| P2 required 冻结 | §9 拆出「required context 活体」行；以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读 | 锁 `:276` |
+| P3 门 16 信任面 | 不再自称整个信任面；`RBAC_BYPASS` 不构成本门判据 | 锁 `:327` |
+| P3 门 17 | 收集数 == `it(`/`test(` 静态计数；声明只证执行 | 锁 `:328` |
+| P3 报告 head 行 | 内容 SHA vs SHA-record 分写（见 §0） | 本文件 `:10` |
+| P3 报告 `:350` | 旧表已替换；§13-7 现 `:364` | 锁 `:364` |
 
 ### 本轮实跑（merge-base `bb77ca5f2`）
 
@@ -165,7 +155,11 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 bb77ca5f2ce3c2825265ec8877861d367d017ead
 ```
 
-计划 v5：`md5 -q` = `f74e172840d2aa2502216d0dd8dff867`；`wc -l` = 288。
+wiring 形状（worktree 无 node_modules，用 node `assert.match` 复放 wiring 测试；CI `test (20.x)` 默认 vitest 收集 `tests/unit/`）：
+
+```
+wiring-shape PASS
+```
 
 锁 §14-4 普查解析器（`TASK_FEATURE_PLAN_PATH` 指向计划绝对路径；缺则 fail-loud）：
 
@@ -183,68 +177,23 @@ ambiguous_basenames ['approvals/api.ts', 'index.ts', 'integrations/dingtalk/clie
 
 `TASK_FEATURE_PLAN_PATH` 未设：`TASK_FEATURE_PLAN_PATH: set me`（非零退出）。
 
-抽查 `sed -n`（同一 worktree，本 SHA 源文件）：
+抽查 `sed -n`（同一 worktree）：
 
 ```
-vitest.config.ts:32-33     '**/node_modules/**' / '**/dist/**'（文件 1844 行）
-vitest.config.ts:1812      'tests/e2e/**'
-vitest.config.ts:1797      elearning-media-quota.db.test.ts
-index.ts:1791              this.app.use(approvalsRouter({
-run-required-web-tests.sh:1186  exec npx vitest run …（token 394；含 task = 0；dup = 0；first=StockPreparationProjectBoard；last=StockPreparationDataSourceRegistry）
-jwt-middleware.ts:101-104  authenticatedTenantId
-jwt-middleware.ts:106-109  header 回填 user.tenantId
-namespace-admission.ts:9   RBAC_OPTIONAL === '1'
-namespace-admission.ts:11-38  NON_NAMESPACED 止于 workflow，无 tasks
-namespace-admission.ts:102-108  deriveDelegatedAdminNamespace
-namespace-admission.ts:196-199  调用点
-namespace-admission.ts:346  admissionsTableUnavailable ⇒ true（后果行）
-rbac.ts:12                 RBAC_TOKEN_TRUST 模块装载
-rbac.ts:40-44 / :85-91     token perms 仍与准入相与
-AuthService.ts:171         RBAC_TOKEN_TRUST 第二读点
-setup.integration.ts:7-8   RBAC_BYPASS / RBAC_TOKEN_TRUST = 'true'
-vitest.integration.config.ts:21  setupFiles
-automation-timezone.ts:54  isValidIanaTimeZone
-automation-date-reminder.ts:36-41  resolveReminderTimeZone
-automation-date-reminder.ts:241  computeDateReminderOccurrence
-permission-service.ts:1044  THROWS 注释
-permission-service.ts:1315 / :1388  throw err
-approval-ci-coverage-enumeration.test.ts:679-685  scan negative control
-plugin-tests.yml:842-844   Run core-backend tests
-plugin-tests.yml:532-533   requires test (20.x); 18.x additional coverage
-docker-build.yml:4-8       paths-ignore docs/**
-docker-build.yml:96        publish_requested
-docker-build.yml:111       publish_preflight.verified
-docker-build.yml:120-122   deploy 四项 if
-docker-build.yml:484-488   MIGRATE START/END
-docker-publish-preflight.mjs:19  workflow_dispatch
-global-history-flag-manifest.test.mjs:143-151  MULTITABLE_ + ELEARNING_*_ENABLED
-:168-172                   phantom 断言
-s6a-package-provenance-pins.json:90  pluginTestsWorkflow
-web-tests.yml:77           run-required-web-tests.sh
-AGENTS.md:68               新增 env flag 必须登记
-AGENTS.md 行数 74
+vitest.tasks-auth.config.ts:30-34  setupFiles + env RBAC_* false
+tests/tasks-auth/setup.ts:12-13    RBAC_BYPASS/TOKEN_TRUST = 'false'
+rbac.ts:12                         模块装载常量
+AuthService.ts:171                 调用期读
+namespace-admission.ts:9           RBAC_OPTIONAL 读点
+namespace-admission.ts:196-199     deriveDelegatedAdminNamespace 调用
+namespace-admission.ts:344-347     admin / controlledNamespaces / 降级 / admission 行仍必需
+rbac/service.ts:17                 RBAC_OPTIONAL 第二读点
+routes/permissions.ts:21           RBAC_OPTIONAL 第三读点
+automation-date-reminder.ts:253    resolveReminderTimeZone inside computeDateReminderOccurrence
+permission-service.ts:1200         loadDeniedRecordIds
+vitest.config.ts:1812              'tests/e2e/**'
+index.ts:1791                      approvalsRouter
+jwt-middleware.ts:101-104          authenticatedTenantId
+plugin-tests.yml:842-844           Run core-backend tests
+AGENTS.md:68 / 74 行
 ```
-
-`grep -F` 锁条款（本轮改完后的锁文件）：
-
-```
-三件事齐全            :300 :311
-setup.integration.ts   :168
-deriveDelegatedAdminNamespace  :144 :361
-有期限推迟             :23 :269 :278
-required 只认          :264 :315
-第四集合               :178 :318
-不是无关               :178
-标题不再写             :160
-必须有夹具             :303
-U+3000                 :308
-门 18 正文             :316
-既不登记也无需登排除列表  :280（仅「本锁删除…作为已定陈述」）
-与 §13-12 无关         0 命中
-选项 b                 0 命中
-§13-10 / §13-12 未裁   :9 :267 :268 :324 :359 :368
-```
-
-### 加速补丁（同一分支，protection 当日重读）
-
-2026-09-19 `gh api repos/zensgit/metasheet2/branches/main/protection`：required 含 `test (20.x)`，不含 `test (18.x)`。锁 ④ 改为引这次实读，不再只引 2026-09-18 闸方记录。门 2 正控加「`role_id` 不得以 `_admin` 结尾」。workflow 残留 basename 改全路径（`web-tests.yml` / `docker-build.yml` / `attendance-web-guard.yml` / `approval-sequential-mode.db.test.ts`）。§13-10 / §13-12 仍未裁。
