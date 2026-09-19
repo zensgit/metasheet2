@@ -510,3 +510,18 @@ Prepared formats 1/2 explicitly reject attachment ciphertext; their upload
 continuation must not silently omit an attachment plan. Durable attachment
 envelopes, pin verification, provider receipts, finalization and restore-byte
 consumption remain required before declaring attachment archival supported.
+
+## Durable Attachment Continuation Format
+
+At `9c107f15a8ee1faef26cd853d07f7f55debfee0a`, prepared envelopes without
+attachments retain v1/v2. A nonempty attachment batch uses internal v3 with closed
+ciphertext descriptors (original ID, source version, plaintext digest, byte size,
+nonce, ciphertext, tag). No plaintext or raw DEK is persisted. Unsigned internal
+fixtures may have a null manifest; production manual continuation still requires
+the authenticated manifest and refuses attachment sources pending full wiring.
+The decoder rejects duplicate attachment identities, cross-section nonce reuse,
+wrong lengths, extra fields and version downgrade. Resume requires an attachment
+uploader before any section upload, rereads the immutable payload and authority
+for every object, and decodes fresh copies for each callback. It never recaptures
+or reseals a persisted batch. This replaces the earlier all-attachment envelope
+refusal, not the remaining manual admission/finalization safety boundary.

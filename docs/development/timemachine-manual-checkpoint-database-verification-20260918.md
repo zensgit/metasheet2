@@ -1227,3 +1227,32 @@ is claimed; session closed. This checkpoint is not attachment end-to-end proof:
 manual admission/continuation still refuse attachment capture; durable encrypted
 objects, verified upload/finalization and restore consumption remain incomplete.
 Remote CI for the new commit is pending publication, not a claimed pass.
+
+## Durable Attachment Continuation And CI Neighbor Repair
+
+Code `9c107f15a8ee1faef26cd853d07f7f55debfee0a`, tree
+`7bdac8c35c3eb9b99d35f4d18fbeea7c22454944`, adds internal v3 sealed attachment
+persistence and continuation in three files. Crypto/reader/manifest neighbors
+91/91, acceptance tsc, source ESLint and diff-check pass. An owned full fresh/replay
+PostgreSQL run persists synthetic binary ciphertext, interrupts its callback,
+reconnects, resumes identical bytes without capture/custody, decrypts to the
+original bytes, and verifies callback mutation did not alter persisted bytes.
+Missing uploader refuses before section upload; revoked authority refuses; manual
+unsigned-envelope rejection remains. The fixture proves persistence/continuation,
+not source-pin admission, signed attachment index, real provider receipts or
+attachment restore publication. Cluster/database/connections cleaned to zero.
+Mutation omitting attachments from the upload loop produces a precise RED;
+restored neighbors pass. Logs: `/private/tmp/tm-attachment-envelope-{realdb,tsc,lint,mutation,final-unit}.log`.
+Luna bounded read-only review did not return a terminal verdict and was closed;
+no external approval claimed.
+
+Remote exact `6c133be06f4746c2edf9851e27692e3e0b9aef6c` Node18/20 failed
+in `multitable-attachment-cleanup.test.ts`: two old SQL mocks did not handle the
+new durable purge-claim UPDATE. Local reproduction confirmed both failures.
+Test-only fix `9b7e6593a018c3ce4165e1be85dec05f2047c5e4` adds the expected
+returning row and requires claim plus commit before storage deletion. Production
+code is unchanged. Four focused/neighbor files pass 106/106. Removing the
+production claim makes the focused test RED; restoring it gives cleanup 15/15.
+Logs: `/private/tmp/tm-cleanup-ci-{red,green,mutation,restored}.log`.
+The old failed remote matrix is not treated as a pass; the next pushed SHA needs
+fresh CI. Attachment end-to-end capture/publication/restore remains incomplete.
