@@ -5716,16 +5716,16 @@ packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test
 
 ```
 $ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
-$ git diff --numstat -- $T
+$ git diff --numstat 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- $T
 42      6       packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
 
 # 变更行里剥掉 +/- 与缩进后,不以 `*` 或 `//` 开头的行数(= 非注释变更行)
-$ git diff -U0 -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
+$ git diff -U0 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
     | sed -E 's/^[+-][[:space:]]*//' | grep -vE "^(\*|//)" | grep -vE "^$" | wc -l
        0
 
 # 变更行里含 `expect(` 的行数
-$ git diff -U0 -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
+$ git diff -U0 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
 0
 ```
 
@@ -5734,14 +5734,14 @@ $ git diff -U0 -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "exp
 **(3) 「只删不加」边界**
 
 ```
-$ git diff -U0 | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
+$ git diff -U0 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
 0
 ```
 
 并且对两份 MD 做**词级**审计,列出全部被删掉的词:
 
 ```
-$ git diff --word-diff=porcelain -- docs/development/approval-cancel-round-phase2-verification-20260918.md \
+$ git diff --word-diff=porcelain 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- docs/development/approval-cancel-round-phase2-verification-20260918.md \
       docs/development/approval-cancel-round-phase2-design-20260918.md | grep "^-" | grep -v "^---" | sort -u
 -整条链同步,监听器的 bug 在 `:13406`
 -拒绝。**实测是
@@ -5924,7 +5924,7 @@ $ { 三条 git grep; } | cut -d: -f1-3 | sort -u | wc -l        # 去重到 file
 `:3558`(「the note on the block above」,指的是另一个摘录块)、`src/index.ts:4131` / `:4212`(retry scheduler)、
 `plugins/plugin-attendance/index.cjs:30528`(另一段计算)。**共 6 条,全部不涉及投递 try 的故障模式。**
 
-⇒ **求值结论:改写前,全分支的 ¬X 活断言恰 2 条**(#9 `:13463`、#13/#14 同一句 `:3253-3254`),
+⇒ **求值结论(⚠️ 范围限定 —— round-3c 闸 P2-1 更正)**:⚠️ 本行原文写的是「**求值结论:改写前,全分支的 ¬X 活断言恰 2 条**」,**那句没有范围限定词,已被证伪**(改写前按更宽谓词实为 **6** 条:本节点名的 2 条 + 测试 `:3323`/`:3334-3336`/`:3338` + `port.ts:304`;普查与命令见文末 **round-3c 节 ②**)。改正值:**在 `$B` = `673bb1e362…` 的树上、按本节这三组谓词 SWEEP-M1/M2/M3 的命中集,¬X 活断言恰 2 条**(#9 `:13463`、#13/#14 同一句 `:3253-3254`),
 **与闸报告点名的 2 条一字不差**;另有 1 条(#8 `:12758`)**为真但措辞以 listener 为主角**,登记为 OPEN。
 **闸报告没有找到第三类同族措辞,本轮的三组扫描也没有。**(闸自己在 §5 里写明它只跑了 `listener bug` 一族、
 未穷举「投递 try 防什么」的全部改写方式 —— 本轮的 M2/M3 就是去补那一面。)
@@ -6228,3 +6228,276 @@ C-1 的委托 G3 条款;上一节自己登记的 6 条 OPEN(设计 MD §4.2/§5 
 - **未**改任何锁文、**未**动 `origin/main`、**未** rebase、**未** undraft、**未**合并、**未**应用迁移、
   **未**建库、**未**跑任何 real-DB 用例、**零** mutation。
 
+
+
+---
+
+## round-3c 记录修正(**第三次**)—— 四条 ¬X 绑定枚举 + `:5927` 范围限定 + P3-2 补区间
+
+**闸**:`impl-gate-C-slice2-round3c-20260919.md`,**VERDICT NEEDS-FIX(0 P1 / 1 P2 / 2 P3)**,基点 `5a070851ed80041ffb67afdfa59d12afffa324e1`。
+**本节全部读数钉死在 `f000b043afe212181ab9887b28b3729854f15f29`** —— 本轮**第 1 个**提交,即四条代码/测试改动的**全部**;
+**第 2 个**提交(本节)只改**本 MD 一个文件**,不碰任何代码文件。
+
+⚠️ **本轮不再自造谓词。** 前两轮失败的机制**同一条**:*自己的正则比自己的 ¬X 定义窄*
+(`feedback_single_definition_does_not_make_a_narrow_predicate_correct`)。`:5865` 把 ¬X 定义成
+「**任何**把监听器抛错说成那道 try 要防的故障模式的句子」,而 SWEEP-M1 只认 `bug` 那几个词形,
+于是 `blew up` / `threw` / `injected …` 整族落在分母外。**本轮的自验正则直接抄闸报告 §2.2 的原文**
+(见 ④),不再由我重写 —— 我重写一次就可能再窄一次。
+
+### ① 绑定枚举:四条,一条不漏
+
+| # | 锚点(@`5a070851ed80041ffb67afdfa59d12afffa324e1`) | 改前 | 改后 |
+|---|---|---|---|
+| a | `…redemption.db.test.ts:3334-3336` | `a throw from an already-post-COMMIT` / `listener must not be reported…` | `a throw from the already-post-COMMIT` / `delivery hop must not be reported…` |
+| b | `…redemption.db.test.ts:3338` | `the injected listener really ran and really threw` | `the injected delivery really ran and really threw` |
+| c | `…redemption.db.test.ts:3323` | `throw new Error('PC-THROW-INJECTED: a post-commit listener blew up')` | `…: a post-commit delivery blew up')` |
+| d | `…/core/attendance-cancellation-execution-port.ts:304` | `be undone because an in-process listener threw.` | `be undone because this delivery hop threw.` |
+
+**a/b 关掉的是闸点名的「一条注释内部自相矛盾」**:`:3338` 原说 `listener`、紧接的 `:3339` 说 `the delivery`,
+指的是同一个被注入对象。改后 `:3338`/`:3339` 同名,且与抬头 `:3253-3263`(「投递跳自身抛出」)一致。
+
+#### (c) 是**本轮唯一的测试 token 改动** —— 先证零引用,再改
+
+`:3323` 是字符串字面量,**属代码 token**。改它之前先证明没有任何断言或文档依赖这段文本
+(`feedback_source_text_assertions_are_not_behaviour` 的反向:要改文本,先证没人拿它当判据):
+
+```
+$ git grep -nE "post-commit listener blew up|PC-THROW-INJECTED" 5a070851ed80041ffb67afdfa59d12afffa324e1
+5a070851ed80041ffb67afdfa59d12afffa324e1:packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3323:        throw new Error('PC-THROW-INJECTED: a post-commit listener blew up')
+```
+
+⇒ **全仓恰 1 处命中,就是 throw 语句自己**。**零断言**引用该文案(没有任何 `toThrow` / `toMatch` / `toContain` 命中它),
+**零 MD** 引用该文案。改后同一条 grep(在工作树上,含全部 `*.ts` / `*.md` / `*.cjs` / `*.mjs` / `*.json` / `*.yml`):
+
+```
+$ grep -rn "post-commit listener blew up\|PC-THROW-INJECTED" --include="*.ts" --include="*.md" \
+      --include="*.cjs" --include="*.mjs" --include="*.json" --include="*.yml" . | grep -v node_modules
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3323:        throw new Error('PC-THROW-INJECTED: a post-commit delivery blew up')
+```
+
+> **登记(不得被读成沿用上一轮的形状)**:**本轮的代码 token 变更 = 1**(这一条 Error 文案)。
+> 上一轮那句「代码 token 流逐个相同 / 非注释变更行 = 0」**本轮不成立、也不复用**。本轮实测的形状是:
+> **断言变更 = 0、生产代码行 = 0、`src/` 唯一改动 = `port.ts` 1 行 doc comment**。
+> 对应命令与读数:改动行里含 `expect(` 的 = **0**;测试文件非注释变更行 = **2**(= 该 Error 文案的 `-`/`+` 两侧);
+> `port.ts` 非注释变更行 = **0**。
+
+#### 零位移证明(这是本轮最容易制造出**新** P2 的地方)
+
+四条全部**同行替换**,两个文件行数一字不动 ⇒ 两份 MD 里**每一个** `file:line` 锚点继续有效,
+不重演上一区间 `+11` 位移必须逐条清算的那一幕:
+
+```
+$ wc -l <test> <port.ts>        # 改前 → 改后
+   3680 → 3680      338 → 338
+$ git diff --numstat 5a070851ed80041ffb67afdfa59d12afffa324e1..f000b043afe212181ab9887b28b3729854f15f29
+1	1	packages/core-backend/src/core/attendance-cancellation-execution-port.ts
+4	4	packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+```
+
+⇒ 每文件 `增 = 删`,**净 0 行**。**本 MD 的编辑同样是行数中性的**:`:5719`/`:5723`/`:5728`/`:5737`/`:5744`
+(见 ③)与 `:5927`(见 ②)全部**就地 1 行换 1 行**,本 MD 行数 **6230 → 6230**;新增内容**只**追加在文末。
+因此闸报告 round-3c 里点的 `:5927` / `:5928-5929` / `:5719…` / `:6002-6010` 等行号**在本次修正后仍然指向同一句话**。
+
+### ② `:5927` 的范围限定 —— 「改写前 6 条」是**我自己数出来的**,不是抄闸报告
+
+`:5927` 原文是一句**无范围限定**的全称句(「改写前,**全分支**的 ¬X 活断言恰 2 条」)。它被证伪:
+那个「2」是 **SWEEP-M1/M2/M3 这三组谓词的命中集**里的 2 条,不是全分支。**已就地加上范围限定**,
+并把被撤回的原句逐字留在同一行的改正标记内(「只删不加」)。
+
+**「6」由命令导出**(闸报告 §2.2 的正则原文,跑在 `:5876` 自己指定的「改写前的树」`$B` = `673bb1e362…` 上、
+`:5870` 自己导出的 16 文件人口上):
+
+```
+$ git diff --name-only origin/feat/approval-cancel-round-phase1...673bb1e362347751abd9229259d7b7e07245a46e \
+    > /tmp/c2-scope-files.txt ; wc -l < /tmp/c2-scope-files.txt
+      16
+$ git grep -nE "listener (bug|blew|threw|that throws|has a bug)|listener'?s bug|a post-commit listener|injected listener|in-process listener threw|监听器(的 bug|有 bug|抛错)" 673bb1e362347751abd9229259d7b7e07245a46e -- $(cat /tmp/c2-scope-files.txt) | wc -l
+      15
+```
+
+15 条命中逐条求值,**活的 ¬X = 5**:`port.ts:304`、`S:13463`、`test:3254`、`test:3312`、`test:3327`;
+其余 10 条为 X / 记录 / 命令回显 / `S:12758`(O-1,为真非 ¬X)。
+**再加 1 条该正则扫不到的**:`test:3323-3325`(即本节的 a;它跨行,`listener` 与 `throw` 不同行)——
+由裸 `listener` 扫到。**5 + 1 = 6。** 与闸报告 §5 的「6」独立吻合;**改写后(本节)= 0**(见 ④)。
+
+> ⚠️ **同时登记该正则自己的盲点**(它**不是**旧 SWEEP-M1 的超集,不得被当成「更宽就一定更全」):
+> `test:3072` 的 `a LISTENER bug`(大写)**只有**旧 M1 扫得到,新正则漏掉。二者取并集才是本轮的分母。
+> 这条正是「另造更窄同类物」的反面教材 —— **换谓词必须验两个方向的差集**,不能只验「新的多扫到了什么」。
+
+> ⚠️ **`:5929` 的求值**(`feedback_supersession_marker_must_evaluate_not_void`:标记贴到那句话上、只让被证伪的断言失效):
+> `:5929` 写着「**闸报告没有找到第三类同族措辞,本轮的三组扫描也没有**」。**前半句仍为真**(指 round-3b 的闸);
+> **后半句已被 round-3c 闸证伪** —— 确实存在第三类同族措辞(`blew up` / `threw` / `injected …` / `in-process … threw`),
+> 共 4 处,即本节 ① 的 a/b/c/d,**现已全部改正**。该句其余部分(括号里对 M2/M3 动机的说明)不受影响。
+
+### ③ P3-2 —— 前一节(round-3 自检)那 5 条不带区间的 `git diff`,补区间并重跑
+
+闸 P3-2:`5a070851ed` 的存在理由就是关掉「不带区间的 `git diff` 对干净树返回空 = 空转绿」这个形状,
+但它只在 round-3b 节内补,**前一节的 5 条原样留着**。现已就地补上区间
+`92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e`(= 该节抬头自己钉的读数区间),行号不变:`:5719` / `:5723` / `:5728` / `:5737` / `:5744`。
+
+**本会话重跑,5/5 与原记录逐字一致**(所以是**可复算性**修复,不是读数修正):
+
+```
+$ T=packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+$ git diff --numstat 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- $T
+42	6	packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts
+$ git diff -U0 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" \
+    | sed -E 's/^[+-][[:space:]]*//' | grep -vE "^(\*|//)" | grep -vE "^$" | wc -l
+       0
+$ git diff -U0 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- $T | grep -E "^[+-]" | grep -vE "^(\+\+\+|---)" | grep -c "expect("
+0
+$ git diff -U0 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e | grep -E "^-" | grep -vE "^---" | grep -cE "OPEN|TODO|待裁|未解决|RESIDUAL"
+0
+$ git diff --word-diff=porcelain 92d7bade243cbd47b647b5daf743c5b313070566..673bb1e362347751abd9229259d7b7e07245a46e -- <两份 MD> | grep "^-" | grep -v "^---" | sort -u
+（18 行,与 `:5746-5764` 记录的清单逐字一致）
+```
+
+### ④ 自验 —— 用**复核的正则原文**,跑到「活的 ¬X = 0」
+
+**判据是分划,不是计数归零**(`:5987-5991` 已确立的规程,本节沿用):本节自己必须逐字引用被撤回的措辞
+才能把记录说清楚,所以同一组 grep 的**分母必然包含本节自身**。因此本节**不**声称「零命中」,
+只声称**类 (a)「活的 ¬X 断言」= 0**,并让各类计数之和 = grep 实际行数。
+
+**扫描的树** = `f000b043afe212181ab9887b28b3729854f15f29`(四条改动已落、本节尚未写入)。**人口** = 上面 16 文件。
+
+#### (i) 闸报告 §2.2 的正则原文(逐字复制,未改一个字符)
+
+```
+$ grep -nE "listener (bug|blew|threw|that throws|has a bug)|listener'?s bug|a post-commit listener|injected listener|in-process listener threw|监听器(的 bug|有 bug|抛错)" \
+      $(cat /tmp/c2-scope-files.txt)
+docs/development/approval-cancel-round-phase2-verification-20260918.md:4833:原句是「**监听器的 bug** 在 `:13406` 的 `try` 处表现为同步 throw」,两处都不成立:
+docs/development/approval-cancel-round-phase2-verification-20260918.md:4836:2. **机制(这条更重要)**:**监听器抛错根本到不了那道 `try`**。
+docs/development/approval-cancel-round-phase2-verification-20260918.md:4844:证明那道 try/catch **承重**。变的只是它**防的是什么**:防的是**投递跳自身抛错**,不是「监听器有 bug」——
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5416:docs/development/approval-cancel-round-phase2-verification-20260918.md:4819:⇒ 整条链同步,监听器的 bug 在 `:13406` 的 `try` 处表现为**同步 throw**。…
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5642:### R3-P3-5 —— 基线 O-6 仍活:「监听器抛错」被当成投递 `try` 要防的故障模式
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5670:- §7.2 结论句:「**监听器的 bug** 在 `:13406` 的 `try` 处表现为同步 throw」→「**投递这一跳自己抛出的异常**
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5746:-整条链同步,监听器的 bug 在 `:13406`
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5865:⇒ **¬X**:任何把「监听器的 bug / a listener bug」说成**那道 try 要防的故障模式**的句子。
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5879:$ git grep -nE "listener'?s? bug|LISTENER bug|listener has a bug|a listener that throws|监听器的 bug|监听器有 bug|监听器抛错" \
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5905:| 1 | `…verification…md:4833` | 原句是「**监听器的 bug** 在 `:13406` 的 `try` 处表现为同步 throw」,两处都不成立: | **记录**(改正标记内部逐字引用被撤回的原句) | **保留**(「只删不加」:删了就没人知道改正了什么) |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5906:| 2 | `…verification…md:4836` | 2. **机制(这条更重要)**:**监听器抛错根本到不了那道 `try`**。 | **X**(正确陈述) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5907:| 3 | `…verification…md:4844` | …变的只是它**防的是什么**:防的是**投递跳自身抛错**,不是「监听器有 bug」—— | **X**(正确陈述) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5908:| 4 | `…verification…md:5416` | `…md:4819:⇒ 整条链同步,监听器的 bug 在 `:13406`…` | **命令回显**(R3-P3-1 那条 `grep -rn` 的原始输出,行号与内容都是改动**前**的值,原文已自陈) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5909:| 5 | `…verification…md:5642` | `### R3-P3-5 —— 基线 O-6 仍活:「监听器抛错」被当成投递 `try` 要防的故障模式` | **记录**(小节标题,命名的是**缺陷**不是断言) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5910:| 6 | `…verification…md:5670` | - §7.2 结论句:「**监听器的 bug** …」→「**投递这一跳自己抛出的异常**… | **记录**(处置行,左边是被撤回的原句、右边是改正值) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5911:| 7 | `…verification…md:5746` | `-整条链同步,监听器的 bug 在 `:13406`` | **命令回显**(`--word-diff=porcelain` 的被删词清单) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5912:| 8 | `ApprovalProductService.ts:12758` | `// a listener that throws cannot undo any of them (and a rolled-back attempt reaches this line` | **真,但不是 ¬X** —— 这是**持久性**断言(COMMIT 之后一切已 durable,监听器抛错**撤销不了**已提交的行),不是传播断言;它没有说监听器的异常会到达 `:13479` 的 try | **不改**(改真陈述超出「改正被证伪的句子」),但**登记为 OPEN**:措辞仍以 listener 为主角,读者可能顺着它再推出 ¬X。见 ⑥ |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5913:| 9 | `ApprovalProductService.ts:13463` | `*     successful, durable business cancellation into a 500 over a listener's bug.` | **¬X —— 闸 P3-1,C-2 本切片自己新写的生产源码注释** | **本轮改正**(见 ③) |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5915:| 11 | `…redemption.db.test.ts:3075` | `*   - the mechanism (the part that matters): a listener bug CANNOT reach that `try` at all.` | **X**(正确陈述) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5916:| 12 | `…redemption.db.test.ts:3085` | `*   from the delivery hop itself, not 「a listener has a bug」 — listeners are independently` | **X**(正确陈述) | 保留 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5917:| 13 | `…redemption.db.test.ts:3254` | `* shape a real listener bug takes. No production line changes to make this case runnable.` | **¬X —— 闸 P2-1**,且引用者把**被改正的块**当权威 | **本轮改正**(见 ③) |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5929:**闸报告没有找到第三类同族措辞,本轮的三组扫描也没有。**(闸自己在 §5 里写明它只跑了 `listener bug` 一族、
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5962:| `ApprovalProductService.ts:13463` | `… into a 500 over a listener's bug.` | `… into a 500 over a failure in THIS delivery hop, not a listener's bug.` | 闸 P3-1。承重的半句(delivery threw ⇒ warned;外层 catch 绝不能看到它)**一字未动**,只换归因 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5963:| `…redemption.db.test.ts:3253-3254` | `…which the census in the block comment above shows is the shape a real listener bug takes.` | `— the shape a throw FROM THE DELIVERY HOP ITSELF takes, which is what the census in the block comment above establishes.` | 闸 P2-1。引用者现在引用的是那个块**真正确立**的东西 |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:5994:$ grep -nE "listener'?s? bug|LISTENER bug|listener has a bug|a listener that throws|监听器的 bug|监听器有 bug|监听器抛错" \
+docs/development/approval-cancel-round-phase2-verification-20260918.md:6005:| (b) 活的 X 断言(正确陈述) | **6**:`:4836`、`:4844`、`S:13463`(改写后)、test `:3075`、`:3085`、`:3258` | **1**:test `:3254`(改写后) | `S:13463` 仍被命中,是因为改正值里带着 `not a listener's bug` 这半句**撤回** |
+docs/development/approval-cancel-round-phase2-verification-20260918.md:6214:| O-1 | `ApprovalProductService.ts:12758` 的 `a listener that throws cannot undo any of them` | **OPEN(为真,不改)**。它是**持久性**断言不是传播断言(见 ① 第 8 行),不构成 ¬X;但措辞仍以 listener 为主角,建议值:改成「a throw anywhere below this COMMIT」。改它同样落在 `src/` 且同样受 ③ 那条 22 处锚点约束,**留给下一个能动 `src/` 的切片,owner 需要知道这个约束再裁** |
+packages/core-backend/src/services/ApprovalProductService.ts:12758:      // a listener that throws cannot undo any of them (and a rolled-back attempt reaches this line
+packages/core-backend/src/services/ApprovalProductService.ts:13463:   *     durable business cancellation into a 500 over a failure in THIS delivery hop, not a listener's bug.
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3075:   *   - the mechanism (the part that matters): a listener bug CANNOT reach that `try` at all.
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3085:   *   from the delivery hop itself, not 「a listener has a bug」 — listeners are independently
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3257:   * sentence used to read 「the shape a real listener bug takes」, which contradicted the very
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3258:   * block it cites as authority: that block's own CORRECTION note records that a listener bug
+```
+
+**33 行 = `docs/` 27 + `packages/` 6。** 代码侧 6 条逐条求值:
+
+| 锚点 | 判定 |
+|---|---|
+| `S:12758` | **非 ¬X**,为真的**持久性**断言;O-1 已登记 OPEN |
+| `S:13463` | **活的 X**(改写后;仍被扫到是因为改正值带着 `not a listener's bug` 这半句**撤回**) |
+| `test:3075` / `test:3085` / `test:3258` | **活的 X**(「listener bug **CANNOT** reach that try」一族) |
+| `test:3257` | **记录**(改正标记内逐字引用被撤回的原句) |
+
+`docs/` 27 条全部落在 **记录 / 命令原文与回显 / X / ¬X 定义(`:5865`)/ O-1 登记** 五类。
+**⇒ 类 (a) 活的 ¬X = 0**;闸点名的 a/b/c/d 四处**全部不再出现**(`port.ts:304`、`test:3323`、`test:3338` 已从命中表消失)。
+
+#### (ii) 再跑一次**裸 `listener`**(不带任何限定词,连 X 陈述一起扫出来),逐条分类
+
+```
+$ grep -nE "listener|监听器" $(grep -v '\.md$' /tmp/c2-scope-files.txt)      # 5 个代码文件
+packages/core-backend/src/index.ts:3428:    // completion listeners remain attached, so a terminal event emitted by already-admitted work is not lost.
+packages/core-backend/src/index.ts:4836:      // The injected worker is deliberately activated only after the HTTP listener is live.
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:1973:      //    count is a real zero-or-one rather than a listener that attached too late. This is the
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:1998:        // measured send and not an unattached listener.
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3075:   *   - the mechanism (the part that matters): a listener bug CANNOT reach that `try` at all.
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3085:   *   from the delivery hop itself, not 「a listener has a bug」 — listeners are independently
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3257:   * sentence used to read 「the shape a real listener bug takes」, which contradicted the very
+packages/core-backend/tests/integration/approval-cancel-round-redemption.db.test.ts:3258:   * block it cites as authority: that block's own CORRECTION note records that a listener bug
+packages/core-backend/src/services/ApprovalProductService.ts:12758:      // a listener that throws cannot undo any of them (and a rolled-back attempt reaches this line
+packages/core-backend/src/services/ApprovalProductService.ts:13463:   *     durable business cancellation into a 500 over a failure in THIS delivery hop, not a listener's bug.
+```
+
+| 锚点 | 分类 |
+|---|---|
+| `index.ts:3428`(completion listeners remain attached)、`index.ts:4836`(HTTP listener is live) | **无关**(另一机制:补投 / HTTP 监听) |
+| `test:1973`、`test:1998`(a listener that attached too late / an unattached listener) | **无关**(另一用例:通知发送计数的非空转) |
+| `S:13463`、`test:3075`、`test:3085`、`test:3258` | **活的 X 断言** |
+| `test:3257` | **合法叙事**(改正标记内的逐字引用) |
+| `S:12758` | **为真、非 ¬X**,已登记 O-1 OPEN |
+| **活的 ¬X 断言** | **0** |
+
+代码侧 **10 条 = 无关 4 + 活的 X 4 + 合法叙事 1 + O-1 1**,合计对上,**活的 ¬X = 0**。
+MD 侧同一条命令 **35 条**,行号:
+
+```
+$ grep -nE "listener|监听器" $(grep '\.md$' /tmp/c2-scope-files.txt) | cut -d: -f1,2 | wc -l
+      35
+# 行号(本 MD;两份 design MD 命中 0):
+673 4833 4836 4844 4845 5416 5642 5661 5670 5671 5746 5864 5865 5879 5905 5906 5907 5908 5909 5910 5911 5912 5913 5915 5916 5917 5928 5929 5962 5963 5994 6005 6008 6017 6214
+```
+
+分类:**活的 X 8**(`:4836` `:4844` `:4845` `:5864` `:5906` `:5907` `:5915` `:5916`)、
+**¬X 定义 1**(`:5865`)、**记录/处置行/表内逐字引用 13**(`:4833` `:5642` `:5670` `:5671` `:5905` `:5909` `:5910`
+`:5913` `:5917` `:5928` `:5929` `:5962` `:5963`)、**命令原文与回显 8**(`:5416` `:5661` `:5746` `:5879` `:5908`
+`:5911` `:5994` `:6017`)、**O-1 登记 3**(`:5912` `:6008` `:6214`)、**分区表行 1**(`:6005`)、**无关 1**(`:673`)。
+**8+1+13+8+3+1+1 = 35**,与命令行数对上。**活的 ¬X = 0。**
+
+> ⚠️ **本节自身会进入下一次扫描的分母**:上面两块粘贴的 grep 输出是**命令回显**,按本规程归类 (d)。
+> 这是「普查令牌写进被普查的人口」的已知形状(`finding_p26_census_nearest_symbol_collision`),
+> 也正是本节**只声称类 (a) = 0、不声称总数**的原因。下一轮若重跑,**总数会涨、类 (a) 应仍为 0**。
+
+### ⑤ 本轮区间的全量 diff
+
+```
+$ git diff --stat 5a070851ed80041ffb67afdfa59d12afffa324e1..f000b043afe212181ab9887b28b3729854f15f29
+ .../src/core/attendance-cancellation-execution-port.ts            | 2 +-
+ .../tests/integration/approval-cancel-round-redemption.db.test.ts | 8 ++++----
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+```
+
+```
+$ git diff 5a070851ed80041ffb67afdfa59d12afffa324e1..f000b043afe212181ab9887b28b3729854f15f29 -- packages/core-backend/src
+diff --git a/packages/core-backend/src/core/attendance-cancellation-execution-port.ts b/packages/core-backend/src/core/attendance-cancellation-execution-port.ts
+index 9858336029..fd1b4b117b 100644
+--- a/packages/core-backend/src/core/attendance-cancellation-execution-port.ts
++++ b/packages/core-backend/src/core/attendance-cancellation-execution-port.ts
+@@ -301,7 +301,7 @@ export function classifyCancelRoundCancellationOutcomeV1(
+  * nothing durable hangs off this. The evidence rows (the request row, the revoke audit row, the
+  * round's `applied`, the W4 seal) are all written and committed by the transaction BEFORE this runs,
+  * and a delivery failure is a warning, never a rollback — a committed business cancellation must not
+- * be undone because an in-process listener threw.
++ * be undone because this delivery hop threw.
+  */
+ export type CancelRoundCancelledEventDeliveryV1 = (
+   result: AttendanceRequestOperationExternalTransactionResultV1,
+```
+
+⇒ **`src/` 全部改动 = `port.ts:304` 这 1 行 doc comment**(闸 P3-1),与闸报告「应只有 port.ts:304」一致。
+(闸报告写的是「3 行换 3 行」—— 那是 `S:13463` 那次的形状;本处只需换 1 行即可完句,**同样零位移**,故按 1 行换 1 行落地。)
+
+> ⚠️ **为什么这两条读数钉 `f000b043afe212181ab9887b28b3729854f15f29` 而不写 `..HEAD`**:`..HEAD` 在本节被写进文件、提交之后就指向**另一个**树,
+> 粘贴的输出与命令将不再对应 —— 这正是 ③ 里 P3-2 要关掉的那个形状,**自指时同样成立,不能只在别处遵守**。
+> `f000b043afe212181ab9887b28b3729854f15f29` 之后本轮只有**一个**改本 MD 的提交,因此 `git diff 5a070851ed80041ffb67afdfa59d12afffa324e1..<最终 head> -- packages/core-backend/src`
+> 与上面**逐字相同**;`--stat` 则会多出本 MD 一行,可由读者自行重导。
+
+### ⑥ 本节**不**声称 / 未覆盖(不得被读成已闭合)
+
+- **不**声称「全分支再无任何 listener 措辞」——只声称:**上述两组扫描、在 16 文件人口上的全部命中已逐条归类,活的 ¬X = 0**。
+- **不**声称跑过任何行为:**四项行为、mutation 台账、required 两条本轮同样未跑**;本轮改动为注释 + 1 条 Error 文案,
+  **零断言、零生产代码行**,但这**不是**「行为已验证」的替代品。`npx tsc --noEmit` **本轮亦未跑**(worktree 无 `node_modules`)。
+- **O-1(`S:12758`)仍 OPEN,本轮未改**:它为真且非 ¬X,改它要动 `src/` 并受 §③ 那条锚点约束,**留给 owner 裁**。
+- **闸 P2-1 的判级(P2 还是 P3)属 owner**,本节只执行修正,不替 owner 定级。
+- 前三节自登记的未覆盖项**原样继承、本轮零消解**:并发未构造;只走 `legacy_compat` posture;扣减非真实生产产出;
+  `pr-validate` 未本地复现;两份 MD 其余约 500 处 `file:line` 未逐条重导;设计 MD `:690-696` 的旧锚点组;C-1 的委托 G3 条款。
+- **未**改任何锁文、**未**动 `origin/main`、**未** rebase、**未** undraft、**未**合并、**未**应用迁移、**零** mutation。
