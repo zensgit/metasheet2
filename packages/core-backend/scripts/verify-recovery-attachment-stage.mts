@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { Client, Pool } from 'pg'
 import { CompiledQuery, Kysely, PostgresDialect, sql } from 'kysely'
 
 const require = createRequire(import.meta.url)
 const migration = require('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages.ts') as typeof import('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages')
-const { createArchiveAttachmentStageLedger } = require('../src/multitable/recovery-archive-attachment-stage-ledger.ts') as typeof import('../src/multitable/recovery-archive-attachment-stage-ledger')
+const { createArchiveAttachmentStageLedger, retireExpiredArchiveAttachmentStage } = require('../src/multitable/recovery-archive-attachment-stage-ledger.ts') as typeof import('../src/multitable/recovery-archive-attachment-stage-ledger')
+const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
 const { stampClaimedAttachmentPurge } = require('../src/multitable/attachment-purge-claim.ts') as typeof import('../src/multitable/attachment-purge-claim')
 const { applyVerifiedArchiveAttachmentMetadata, hashArchiveAttachmentMetadata } = require('../src/multitable/recovery-archive-attachment-apply.ts') as typeof import('../src/multitable/recovery-archive-attachment-apply')
 assert.equal(process.env.NODE_ENV, 'test')
@@ -29,6 +30,7 @@ const database = `tm_attachment_stage_${randomUUID().replaceAll('-', '')}`
 const admin = new Client({ ...connection, database: 'postgres' })
 let created = false
 let db: Kysely<unknown> | undefined
+const storageRoot = await mkdtemp(join(await realpath(tmpdir()), 'tm-attachment-stage-storage-'))
 try {
   await admin.connect()
   assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
@@ -55,6 +57,7 @@ try {
   }
   for (const tamper of [
     `ALTER TABLE meta_recovery_archive_attachment_stages ALTER COLUMN field_id DROP NOT NULL`,
+    `ALTER TABLE meta_recovery_archive_attachment_stages ALTER COLUMN token_expires_at DROP NOT NULL`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DISABLE TRIGGER trg_mraas_row`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DISABLE TRIGGER trg_mraas_truncate`,
     `ALTER TABLE meta_recovery_archive_attachment_stages DISABLE TRIGGER trg_mraas_apply_receipt`,
@@ -84,6 +87,7 @@ try {
     plaintextSha256: 'a'.repeat(64), sizeBytes: '4' }
   let allowed = true
   const ledger = createArchiveAttachmentStageLedger({ actorId, tokenHash: 'b'.repeat(64),
+    tokenExpiresAt: new Date(Date.now() + 3600000).toISOString(),
     authorize: async () => allowed,
     transaction: work => db!.transaction().execute(tx => work(async (text, params) => ({
       rows: (await tx.executeQuery(CompiledQuery.raw(text, params))).rows,
@@ -137,6 +141,7 @@ try {
   await assert.rejects(apply({ expectedMetadataHash: 'd'.repeat(64) }))
   const pendingActor = randomUUID()
   const pending = createArchiveAttachmentStageLedger({ actorId: pendingActor, tokenHash: 'b'.repeat(64),
+    tokenExpiresAt: new Date(Date.now() + 3600000).toISOString(),
     authorize: async () => true,
     transaction: work => db!.transaction().execute(tx => work(async (text, params) => ({
       rows: (await tx.executeQuery(CompiledQuery.raw(text, params))).rows,
@@ -177,6 +182,135 @@ try {
     WHERE id='att-original'`.execute(db)).rows[0]!.path, `${first.objectId}/sha256-${identity.plaintextSha256}`)
   await assert.rejects(apply()) // A stale pre-apply metadata fingerprint cannot be replayed independently.
   console.log('PASS: verified stage metadata apply, current scope/auth/drift rejection and enclosing transaction rollback')
+  const transaction = <T,>(work: (query: typeof purgeQuery) => Promise<T>) => db!.transaction().execute(tx => work(async (text, params) => ({
+    rows: (await tx.executeQuery(CompiledQuery.raw(text, params))).rows,
+  })))
+  const expiresAt = new Date(Date.now() + 1500).toISOString()
+  const cleanupLedger = createArchiveAttachmentStageLedger({ actorId: randomUUID(), tokenHash: 'e'.repeat(64),
+    tokenExpiresAt: expiresAt, authorize: async () => true, transaction })
+  const bytes = Buffer.from('test')
+  const cleanupIdentity = { ...identity, plaintextSha256: createHash('sha256').update(bytes).digest('hex') }
+  const uploaded = await cleanupLedger.reserve({ ...cleanupIdentity, attachmentId: 'expired-upload' })
+  const untouched = await cleanupLedger.reserve({ ...cleanupIdentity, attachmentId: 'expired-unstarted' })
+  const late = await cleanupLedger.reserve({ ...cleanupIdentity, attachmentId: 'expired-late' })
+  const storage = new LocalStorageProvider(storageRoot)
+  const key = (objectId: string) => `${objectId}/sha256-${cleanupIdentity.plaintextSha256}`
+  await storage.reserveRecoveryAttachment(key(uploaded.objectId), uploaded.ownershipKey)
+  await storage.uploadByKey(key(uploaded.objectId), bytes)
+  await cleanupLedger.verified(uploaded.objectId, { ...cleanupIdentity, attachmentId: 'expired-upload' })
+  await storage.reserveRecoveryAttachment(key(late.objectId), late.ownershipKey)
+  const delayed = await open(join(storageRoot, key(late.objectId)), 'wx')
+  let storageCalls = 0
+  let throwAfterRetire = true
+  const retire = (objectId: string) => retireExpiredArchiveAttachmentStage({ objectId, transaction,
+    transactionDepth: { currentTransactionDepth: () => 0 }, storage: { retireRecoveryAttachment: async (path, owner) => {
+      storageCalls++
+      assert.equal((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
+        WHERE object_id=${objectId}::uuid`.execute(db!)).rows[0]?.state, 'abandoned')
+      await storage.retireRecoveryAttachment(path, owner)
+      if (throwAfterRetire) throw new Error('SYNTHETIC_POST_RETIRE_FAILURE')
+    } } })
+  try {
+    await assert.rejects(retire(uploaded.objectId))
+    assert.equal(storageCalls, 0)
+    await assert.rejects(sql`UPDATE meta_recovery_archive_attachment_stages
+      SET state='abandoned',abandoned_at=clock_timestamp() WHERE object_id=${uploaded.objectId}::uuid`.execute(db))
+    await sql`SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM ${expiresAt}::timestamptz-clock_timestamp()))+0.02)`.execute(db)
+    // The original metadata remains an authority reference, irrespective of logical deletion.
+    await sql`UPDATE multitable_attachments SET storage_file_id=${uploaded.objectId}
+      WHERE id='att-original'`.execute(db)
+    await assert.rejects(retire(uploaded.objectId))
+    assert.equal(storageCalls, 0)
+    await sql`UPDATE multitable_attachments SET storage_file_id=${first.objectId}
+      WHERE id='att-original'`.execute(db)
+    await assert.rejects(retire(uploaded.objectId))
+    assert.equal(storageCalls, 1)
+    const failed = (await sql<{ state: string; cleaned_at: unknown }>`SELECT state,cleaned_at
+      FROM meta_recovery_archive_attachment_stages WHERE object_id=${uploaded.objectId}::uuid`.execute(db)).rows[0]
+    assert.deepEqual(failed, { state: 'abandoned', cleaned_at: null })
+    await assert.rejects(cleanupLedger.verified(uploaded.objectId, { ...cleanupIdentity, attachmentId: 'expired-upload' }))
+    throwAfterRetire = false
+    await retire(uploaded.objectId)
+    const afterRetry = storageCalls
+    await retire(uploaded.objectId)
+    assert.equal(storageCalls, afterRetry)
+    await retire(untouched.objectId)
+    await retire(late.objectId)
+    await delayed.writeFile(bytes)
+    await delayed.sync()
+    assert.equal((await lstat(join(storageRoot, key(late.objectId)))).isDirectory(), true)
+    await assert.rejects(open(join(storageRoot, key(late.objectId)), 'wx'), { code: 'EEXIST' })
+    for (const row of [uploaded, untouched, late]) {
+      assert.equal((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
+        WHERE object_id=${row.objectId}::uuid`.execute(db)).rows[0]?.state, 'cleaned')
+      await assert.rejects(sql`UPDATE meta_recovery_archive_attachment_stages SET state='verified',
+        abandoned_at=NULL,cleaned_at=NULL,verified_at=clock_timestamp() WHERE object_id=${row.objectId}::uuid`.execute(db))
+    }
+    console.log('PASS: expired-only abandonment commits before storage; live references refuse; post-retirement failure retries; unstarted and late writer cleanup cannot reopen apply')
+  } finally { await delayed.close() }
+  // Real row-lock arbitration: an apply admitted before expiry commits while cleanup waits.
+  await sql`ALTER TABLE meta_records ADD COLUMN data jsonb NOT NULL DEFAULT '{}'::jsonb`.execute(db)
+  await sql`UPDATE meta_records SET data='{"f":["att-original","att-race"]}'::jsonb WHERE id='r'`.execute(db)
+  await sql`CREATE TABLE meta_recovery_archive_sync_receipts
+    (token_sha256 text,sheet_id text,operation_id uuid,archive_generation_id uuid)`.execute(db)
+  await sql`CREATE TABLE meta_recovery_token_burns
+    (token_sha256 text,actor_id text,sheet_id text,burn_kind text,sync_operation_id uuid,archive_generation_id uuid)`.execute(db)
+  await sql`INSERT INTO multitable_attachments (id,storage_path,sheet_id,record_id,field_id,
+    storage_file_id,filename,original_name,mime_type,size,storage_provider)
+    VALUES ('att-race','race/old','s','r','f','race-old','retained.bin','original.bin',
+      'application/octet-stream',4,'local')`.execute(db)
+  const raceActor = randomUUID(), raceOperation = randomUUID(), raceToken = '9'.repeat(64)
+  const raceExpiry = new Date(Date.now() + 1500).toISOString()
+  const raceIdentity = { ...cleanupIdentity, attachmentId: 'att-race' }
+  const raceLedger = createArchiveAttachmentStageLedger({ actorId: raceActor, tokenHash: raceToken,
+    tokenExpiresAt: raceExpiry, authorize: async () => true, transaction })
+  const raceObject = await raceLedger.reserve(raceIdentity)
+  await raceLedger.verified(raceObject.objectId, raceIdentity)
+  const raceMetadata = (await sql<{ metadata: Record<string, unknown> }>`SELECT to_jsonb(a) AS metadata
+    FROM multitable_attachments a WHERE id='att-race'`.execute(db)).rows[0]!.metadata
+  let admit!: () => void, release!: () => void
+  const admitted = new Promise<void>(resolve => { admit = resolve })
+  const commit = new Promise<void>(resolve => { release = resolve })
+  let writerPid = 0, cleanupPid = 0, unexpectedStorage = 0
+  const writer = transaction(async query => {
+    await applyVerifiedArchiveAttachmentMetadata(query, { ...applyInput, actorId: raceActor,
+      tokenHash: raceToken, objectId: raceObject.objectId, identity: raceIdentity,
+      expectedMetadataHash: hashArchiveAttachmentMetadata(raceMetadata), adoptionOperationId: raceOperation })
+    await query(`INSERT INTO meta_recovery_archive_sync_receipts VALUES ($1,'s',$2::uuid,$3::uuid)`,
+      [raceToken, raceOperation, generationId])
+    await query(`INSERT INTO meta_recovery_token_burns VALUES ($1,$2,'s','sync',$3::uuid,$4::uuid)`,
+      [raceToken, raceActor, raceOperation, generationId])
+    writerPid = Number(((await query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+    admit()
+    await commit
+  }).then(() => ({ ok: true }), error => { admit(); return { error } })
+  let cleaner: Promise<unknown> | undefined
+  try {
+    await admitted
+    assert.ok(writerPid > 0)
+    await sql`SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM ${raceExpiry}::timestamptz-clock_timestamp()))+0.02)`.execute(db)
+    cleaner = retireExpiredArchiveAttachmentStage({ objectId: raceObject.objectId,
+      transaction: work => transaction(async query => {
+        cleanupPid = Number(((await query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+        return work(query)
+      }), transactionDepth: { currentTransactionDepth: () => 0 },
+      storage: { retireRecoveryAttachment: async () => { unexpectedStorage++ } },
+    }).then(() => ({ ok: true }), error => ({ error }))
+    let blocked = false
+    for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+      if (cleanupPid) blocked = (await sql<{ blocked: boolean }>`SELECT ${writerPid}::int = ANY(pg_blocking_pids(${cleanupPid})) AS blocked`.execute(db)).rows[0]?.blocked === true
+      if (!blocked) await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(blocked, true)
+    release()
+    assert.deepEqual(await writer, { ok: true })
+    const cleanupResult = await cleaner as { error?: unknown }
+    assert.ok(cleanupResult.error)
+    assert.equal(unexpectedStorage, 0)
+    assert.equal((await sql<{ state: string }>`SELECT state FROM meta_recovery_archive_attachment_stages
+      WHERE object_id=${raceObject.objectId}::uuid`.execute(db)).rows[0]?.state, 'applied')
+    console.log('PASS: cleanup waits on in-flight apply across token expiry; committed adoption wins with zero storage cleanup')
+  } finally { release(); await writer; await cleaner }
   for (const destructive of [
     `DELETE FROM meta_recovery_archive_attachment_stages`,
     `TRUNCATE meta_recovery_archive_attachment_stages`,
@@ -187,7 +321,7 @@ try {
   await sql`UPDATE meta_recovery_archives SET expires_at=clock_timestamp()-interval '1 second'`.execute(db)
   await assert.rejects(ledger.reserve(identity))
   await assert.rejects(ledger.verified(first.objectId, identity))
-  assert.equal((await sql<{ n: number }>`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages`.execute(db)).rows[0]?.n, 2)
+  assert.equal((await sql<{ n: number }>`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages`.execute(db)).rows[0]?.n, 6)
   console.log('PASS: stage ledger replay, empty rollback, drift, concurrency, identity conflict, authority and nonempty rollback')
 } finally {
   await db?.destroy()
@@ -198,4 +332,5 @@ try {
     console.log('CLEAN: stage database and connections=0')
   }
   await admin.end()
+  await rm(storageRoot, { recursive: true })
 }

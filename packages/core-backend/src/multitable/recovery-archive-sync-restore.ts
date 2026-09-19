@@ -52,7 +52,7 @@ async function applyArchiveRestore(input: RecoveryArchiveSyncRestoreInput): Prom
   const verified = input.attachmentStorage ? verifyExactArchiveRecoveryIdentity(input.apply.token, {
     sheetId: input.apply.sheetId, actorId: input.apply.actorId,
   }) : undefined
-  if (input.attachmentStorage && (!verified?.valid || !verified.claims)) return { ok: false, reason: 'identity-invalid' }
+  if (input.attachmentStorage && (!verified?.valid || !verified.claims || !verified.expiresAt)) return { ok: false, reason: 'identity-invalid' }
   if (input.attachmentStorage) {
     if (!(await input.apply.preliminaryFullRead(input.query))) return { ok: false, reason: 'forbidden' }
     const burned = await input.query('SELECT 1 FROM meta_recovery_token_burns WHERE token_sha256=$1',
@@ -78,7 +78,7 @@ async function applyArchiveRestore(input: RecoveryArchiveSyncRestoreInput): Prom
   }
   const attachments = input.attachmentStorage && verified?.claims
     ? await prepareArchiveAttachmentBatch({ ...input, state, targetLinks, claims: verified.claims,
-      storage: input.attachmentStorage }) : undefined
+      tokenExpiresAt: verified.expiresAt!, storage: input.attachmentStorage }) : undefined
   return applyMaterializedExactArchiveRecoverySyncInternal(input.transaction, input.apply, {
     ...(attachments ? { attachments } : {}),
     workspaceId: input.archive.selectedBinding.workspaceId,

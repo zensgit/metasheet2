@@ -8,6 +8,7 @@ const columns = `actor_id uuid NOT NULL, token_hash text NOT NULL, attachment_id
   created_at timestamptz NOT NULL DEFAULT now(), verified_at timestamptz,
   applied_operation_id uuid, applied_at timestamptz,
   displaced_storage_file_id text, displaced_storage_path text,
+  token_expires_at timestamptz NOT NULL, abandoned_at timestamptz, cleaned_at timestamptz,
   PRIMARY KEY(actor_id,token_hash,attachment_id), UNIQUE(object_id),
   CHECK (token_hash ~ '^[0-9a-f]{64}$' AND plaintext_sha256 ~ '^[0-9a-f]{64}$' AND size_bytes>=0
     AND attachment_id<>'' AND attachment_id=btrim(attachment_id)
@@ -15,10 +16,15 @@ const columns = `actor_id uuid NOT NULL, token_hash text NOT NULL, attachment_id
     AND base_id<>'' AND base_id=btrim(base_id) AND sheet_id<>'' AND sheet_id=btrim(sheet_id)
     AND record_id<>'' AND record_id=btrim(record_id) AND field_id<>'' AND field_id=btrim(field_id)
     AND source_version<>'' AND source_version=btrim(source_version)),
-  CHECK (((state='reserved' AND verified_at IS NULL) OR (state='verified' AND verified_at IS NOT NULL))
+  CHECK (isfinite(token_expires_at) AND token_expires_at>created_at),
+  CHECK ((((state='reserved' AND verified_at IS NULL) OR (state='verified' AND verified_at IS NOT NULL))
+    AND abandoned_at IS NULL AND cleaned_at IS NULL
+    OR state='abandoned' AND abandoned_at IS NOT NULL AND cleaned_at IS NULL
+    OR state='cleaned' AND abandoned_at IS NOT NULL AND cleaned_at IS NOT NULL)
     AND applied_operation_id IS NULL AND applied_at IS NULL
     AND displaced_storage_file_id IS NULL AND displaced_storage_path IS NULL
     OR state='applied' AND verified_at IS NOT NULL AND applied_operation_id IS NOT NULL AND applied_at IS NOT NULL
+    AND abandoned_at IS NULL AND cleaned_at IS NULL
     AND displaced_storage_file_id IS NOT NULL AND displaced_storage_file_id<>''
     AND displaced_storage_path IS NOT NULL AND displaced_storage_path<>''
     AND displaced_storage_file_id<>object_id::text
@@ -55,12 +61,29 @@ BEGIN
       RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='archive_attachment_restore_stage_transition';
     END IF;
   ELSE
-    IF (to_jsonb(NEW)-ARRAY['state','verified_at','applied_operation_id','applied_at','displaced_storage_file_id','displaced_storage_path'])
-      IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['state','verified_at','applied_operation_id','applied_at','displaced_storage_file_id','displaced_storage_path'])
+    IF (to_jsonb(NEW)-ARRAY['state','verified_at','applied_operation_id','applied_at','displaced_storage_file_id','displaced_storage_path','abandoned_at','cleaned_at'])
+      IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['state','verified_at','applied_operation_id','applied_at','displaced_storage_file_id','displaced_storage_path','abandoned_at','cleaned_at'])
       OR NOT ((OLD.state='reserved' AND NEW.state='verified' AND NEW.verified_at IS NOT NULL)
-        OR (OLD.state='verified' AND NEW.state='applied' AND NEW.verified_at IS NOT DISTINCT FROM OLD.verified_at)) THEN
+        OR (OLD.state='verified' AND NEW.state='applied' AND NEW.verified_at IS NOT DISTINCT FROM OLD.verified_at)
+        OR (OLD.state IN ('reserved','verified') AND NEW.state='abandoned'
+          AND NEW.verified_at IS NOT DISTINCT FROM OLD.verified_at)
+        OR (OLD.state='abandoned' AND NEW.state='cleaned'
+          AND NEW.verified_at IS NOT DISTINCT FROM OLD.verified_at
+          AND NEW.abandoned_at IS NOT DISTINCT FROM OLD.abandoned_at)) THEN
       RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='archive_attachment_restore_stage_transition';
     END IF;
+  END IF;
+  IF NEW.state IN ('abandoned','cleaned') THEN
+    IF NEW.token_expires_at>clock_timestamp() OR EXISTS (
+      SELECT 1 FROM public.multitable_attachments a WHERE a.storage_file_id=NEW.object_id::text
+        OR a.storage_path=NEW.object_id::text||'/sha256-'||NEW.plaintext_sha256
+    ) THEN
+      RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='archive_attachment_restore_cleanup_refused';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.token_expires_at<=clock_timestamp() THEN
+    RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='archive_attachment_restore_token_expired';
   END IF;
   IF TG_OP='UPDATE' AND NEW.state='applied' THEN
     PERFORM 1 FROM public.multitable_attachments a

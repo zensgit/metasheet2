@@ -89,6 +89,10 @@ export async function readLocalRecoveryAttachment(root: string, key: string, own
 export async function retireLocalRecoveryAttachment(root: string, key: string, owner: string): Promise<void> {
   try {
     const target = await location(root, key, owner)
+    try { await fs.lstat(target.directory) } catch (error) {
+      if (!hasCode(error, 'ENOENT')) throw error
+      await reserveLocalRecoveryAttachment(root, key, owner)
+    }
     await assertOwned(target)
     try {
       const stat = await fs.lstat(target.payload)

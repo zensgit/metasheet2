@@ -90,6 +90,7 @@ import {
   hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   mintExactArchiveRecoveryIdentity,
+  verifyExactArchiveRecoveryIdentity,
   type ExactArchiveRecoveryIdentityClaims,
 } from '../../src/multitable/restore-preview-identity'
 import { compileRecoveryArchiveSyncPlan } from '../../src/multitable/recovery-archive-sync-plan'
@@ -1019,7 +1020,11 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const identity = { generationId: fixture.generationId, workspaceId: fixture.workspaceId, baseId: fixture.baseId,
       sheetId: fixture.sheetId, recordId, fieldId, attachmentId,
       sourceVersion: `sha256:${'a'.repeat(64)}`, plaintextSha256: 'a'.repeat(64), sizeBytes: '4' }
+    const verifiedToken = verifyExactArchiveRecoveryIdentity(token, { sheetId: fixture.sheetId, actorId: fixture.actorId })
+    expect(verifiedToken.valid).toBe(true)
+    expect(verifiedToken.expiresAt).toBeDefined()
     const ledger = createArchiveAttachmentStageLedger({ actorId: fixture.actorId, tokenHash: sha(token),
+      tokenExpiresAt: verifiedToken.expiresAt!,
       transaction, authorize: async () => true })
     const reserved = await ledger.reserve(identity)
     await ledger.verified(reserved.objectId, identity)

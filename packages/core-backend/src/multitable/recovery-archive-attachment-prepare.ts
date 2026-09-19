@@ -26,6 +26,7 @@ export async function prepareArchiveAttachmentBatch(input: {
   selectedRecordIds: readonly string[]
   selectedFieldIds: readonly string[]
   claims: ExactArchiveRecoveryIdentityClaims
+  tokenExpiresAt: string
   storage: Pick<StorageProvider, 'uploadByKey' | 'readRecoveryAttachment' | 'reserveRecoveryAttachment'>
 }): Promise<RecoveryArchiveAttachmentBatch | undefined> {
   const { transaction, apply, archive, state, claims, storage } = input
@@ -86,7 +87,8 @@ export async function prepareArchiveAttachmentBatch(input: {
     await lockArchiveSyncBinding(query, apply, sourceBinding)
     return true
   }
-  const ledger = createArchiveAttachmentStageLedger({ actorId: apply.actorId, tokenHash, transaction, authorize })
+  const ledger = createArchiveAttachmentStageLedger({ actorId: apply.actorId, tokenHash,
+    tokenExpiresAt: input.tokenExpiresAt, transaction, authorize })
   const staged: RecoveryArchiveAttachmentBatch['staged'][number][] = []
   for (const cell of prepared.cells) {
     for (const attachmentId of cell.targetIds) {
