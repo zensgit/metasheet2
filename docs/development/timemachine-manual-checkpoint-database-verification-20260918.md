@@ -25,6 +25,23 @@ limitations must not be read as the latest implementation status or erased.
 Commands and mutation logs remain in their respective sections. A newer CI
 result must bind its own exact head; this table is not a substitute for that gate.
 
+## Latest Full Local Regression
+
+Latest full local regression, 2026-09-19: clean
+`14a6e1d9ca1777d6f54029be1075a0387e06d287` ran
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser`
+with exit 0. Both 1440/390 production-component/client HTTP capture/reload/catalog/
+preview/confirmed scalar restore cases passed with independent DB/history readback.
+The same run includes the new whole/record/field attachment refusal diagnostic,
+scalar-only selection positive, source-loss independence, real local attachment
+capture/publication/reader, migration drift and nonce/pin/refusal cases. Neighbor
+real-DB suites passed 59/59 and 127/127; migration replay reported 31 migration
+fingerprints and 963 catalog objects. Browser/Vite/cache cleanup passed; owned
+database/connections were zero and the synthetic cluster was stopped/removed.
+This is a fresh run after the diagnostic/facade repair, not reused browser evidence.
+It remains synthetic component-to-HTTP acceptance, not full tenant login/UAT or
+attachment restore-write acceptance. Remote CI is separate.
+
 ## Historical Database Extension Baseline
 
 Parent: `b843d37cc21e665f7f0686a4d21b0cc14fc64105`.
