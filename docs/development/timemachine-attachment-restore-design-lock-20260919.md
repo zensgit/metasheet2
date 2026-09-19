@@ -128,16 +128,18 @@ receipt and token burn together. Neither a forged displaced location nor a wrong
 operation can commit. Applied rows cannot be rewritten or deleted. This is a
 commit-time proof, not a permanent foreign key to retention-managed history.
 
-No executable preview is enabled yet. Public runtime registration, v2 preview
-minting, abandon/displaced-object cleanup, async attachment contract and browser
+At that internal checkpoint no executable preview was enabled. The public sync
+checkpoint below supersedes that limitation only for an explicitly supplied
+server-owned storage port. Cleanup, async attachment contract and browser
 loop remain mandatory. Retaining displaced identity is not proof of safe cleanup;
 physical deletion still requires current reference/pin and ownership arbitration.
 Do not infer public completeness from the internal transaction evidence.
 
 ## Authenticated File Preparation Facade
 
-The internal sync facade accepts a server-owned storage port; the public runtime
-does not register it. Before archive reads it checks the signed token, token burn,
+The sync facade accepts a server-owned storage port; the public runtime now accepts
+an explicit composition port, without registering a default provider or enabling
+flags. Before archive reads it checks the signed token, token burn,
 current key, catalog binding and legal holds. Each stage authorization reuses the
 same source guard. File IO remains outside SQL transactions. Database-derived
 metadata, actual field deltas and v2 identity must agree before staging; callers
@@ -190,13 +192,26 @@ implemented or silently authorized by this checkpoint.
 
 ## Required Evidence
 
-The preview now projects selected attachment changes into its true-delta permission
-context and diagnostic summary. It still refuses executable attachment previews.
+The preview projects selected attachment changes into its true-delta permission
+context and diagnostic summary. Without a complete server-owned storage port it
+still refuses executable attachment previews.
 The internal sync plan supports a domain-separated v2 identity carrying a closed,
 sorted attachment/original-record/original-field/metadata-hash roster; absence of
 that roster preserves v1 hashes exactly. Public database-derived roster collection,
-token minting with v2 and public runtime registration are not yet connected.
-Never treat the new hash compiler as proof of that end-to-end binding.
+v2 token minting and synchronous execution are connected at
+`c97550f243d82060e1af88c1a90864cde78e4c93` (tree
+`b93f8883072586cad761331f71c4470e03dce878`). Preview locks and hashes both removed
+and restored original metadata; execution rederives the full plan before staging.
+The application snapshots and binds all three storage methods, rejecting a partial
+port before database resolution. Over-threshold attachment selections remain
+whole-selection refused, not silently downgraded to scalar or asynchronous work.
+
+The isolated HTTP/PG oracle now restores two original files, refuses anonymous
+execution, metadata drift and altered selected fields before staging, and refuses
+token replay without another version increment. It uses a synthetic authenticated
+middleware, not real login or browser UAT. No production composition or flag was
+enabled. Internal cleanup runtime registration, displaced objects and unpublished
+temporary directories still require reconciliation; this is not product FINAL.
 
 | Gate | Required oracle | Status |
 | --- | --- | --- |

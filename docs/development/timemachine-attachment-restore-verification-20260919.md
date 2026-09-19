@@ -1,6 +1,7 @@
 # Attachment Restore Verification
 
-Status: IMPLEMENTATION IN PROGRESS; public attachment restore remains unavailable.
+Status: IMPLEMENTATION IN PROGRESS; explicitly composed synchronous attachment
+restore passes isolated HTTP acceptance. No production enablement or browser UAT.
 
 Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
 Contract: `e4625f322` (full parent available in Git).
@@ -434,14 +435,53 @@ Code: `87f05247d1cdb9854bcf1f216ecd4a78424e229e` (seven files).
 - Public runtime, automatic scheduling, old displaced-object cleanup and browser
   UAT remain unimplemented. No customer storage or real environment was accessed.
 
+## Public Synchronous Attachment Checkpoint
+
+Code: `c97550f243d82060e1af88c1a90864cde78e4c93`.
+Tree: `b93f8883072586cad761331f71c4470e03dce878` (eight-file code/test delta).
+
+- Public preview fingerprints the database metadata of both removed and restored
+  attachment references under original sheet/record/field ownership. The v2 plan
+  is rederived and matched before file staging; final canonical apply still
+  rechecks metadata, current permission, record/schema locks and token authority.
+- The optional server-owned application port snapshots and binds all three
+  methods. Incomplete ports refuse before resolving DB; absent ports preserve the
+  attachment refusal. Over-threshold attachments remain blocked as a whole.
+- Real HTTP preview covers whole sheet, selected records and selected fields;
+  scalar-only no-op remains unchanged. Public execution restores two original
+  binary files to their existing original record/field, increments version once,
+  and refuses consumed-token replay. Anonymous calls are 401. Metadata drift and
+  altered selected fields are 409 with no new stage or live record change.
+- First full run correctly refused an old fixture that inserted an unbound
+  attachment into the cell (503). The positive now removes one actual original
+  reference instead; no production ownership guard was weakened.
+- Full restored owned PG runner PASS: fresh/replay 32 migrations / 999 catalog
+  objects, fingerprint unchanged; historical 47/47 + 59/59 + 127/127; prior
+  two-file upload/metadata/receipt fault rollback; public HTTP; expired-stage and
+  concurrent apply/cleanup arbitration. Database/connections/cluster removed.
+- Focused public suites 3 files / 62 tests and sync/async/attachment neighbors
+  5 files / 54 tests PASS. Core typecheck, source ESLint, wiring 37/37, full S5 and
+  diff-check PASS. No workflow or provenance pin changed.
+- Mutation replacing metadata hashes with a constant makes the public-preview
+  fingerprint test RED; restored full 62/62 GREEN. No mutation was committed.
+- Sol high read-only narrow review found no evidenced P1/P2 in public binding,
+  pre-IO validation or capability snapshot. Session closed; it ran no tests and
+  does not certify browser, cleanup or asynchronous restoration.
+- Logs: `/private/tmp/tm-attachment-public-http-realdb-20260919.log` (initial
+  fixture failure), `tm-attachment-public-http-restored-realdb-20260919.log`,
+  `tm-attachment-public-{unit,neighbors,metadata-mutation,final-tsc,lint,wiring,s5}-20260919.log`
+  under `/private/tmp`. HTTP authentication is synthetic, not Workbench login/UAT.
+- Remote exact-head CI for this new checkpoint is pending publication/rerun.
+
 ## Remaining Required Work
 
-Public reader/runtime registration; prepared/displaced file reference-safe crash cleanup;
-public preview/token binding;
-end-user attachment field authorization; purge/drift/retry concurrency; async contract;
+Default runtime readiness and cleanup registration; prepared/displaced file
+reference-safe crash cleanup; end-user attachment field authorization acceptance;
+remaining purge/drift/retry concurrency; async contract;
 whole-operation negatives; real isolated database/storage and desktop/mobile
 browser acceptance; required CI wiring and independent exact-head review.
-Existing `unsupported_attachments` remains in force until that chain is complete.
+`unsupported_attachments` remains for absent/partial ports and over-threshold
+attachment selections. Explicit test composition is not production readiness.
 
 Sol high's bounded read-only integration review was closed while running without
 a terminal verdict. No external approval is claimed. #5849 post-merge CI later
