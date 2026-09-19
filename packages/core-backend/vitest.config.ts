@@ -1808,6 +1808,29 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
+      // acceptance (normal-pool half: A/A'/A''/A'''/B/B'/B''/F/G/H/I'). Requires real PostgreSQL
+      // (composite-FK archive/reattach concurrency, org-scoped uniqueness). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it. NOTE: this deliberately OVERRIDES
+      // the local convention stated just above at "NOT plugin-tests.yml (s6a sha256-pinned
+      // provenance input)" — lock §6 explicitly assigns phase 1's two new suites into
+      // plugin-tests.yml (the only real-DB step that runs on the required `test (20.x)` leg), so
+      // both files ARE wired there and the sealed-export S6-A provenance pin
+      // (plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json,
+      // evidenceFiles.pluginTestsWorkflow) was recomputed in the same change.
+      'tests/integration/approval-template-groups-lifecycle.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
+      // acceptance (RR-default-pool half: E/K). Runs the ENTIRE service pool under
+      // default_transaction_isolation=repeatable read (vi.hoisted DATABASE_URL amendment) —
+      // deliberately NOT the isolation level production uses. Production relies on an explicit
+      // per-transaction `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` inside
+      // createApprovalTemplateGroup; forcing the pool DEFAULT to RR here makes that `SET`
+      // load-bearing and observable — without it, a stale RR snapshot would leak into this
+      // file's E/K assertions instead of RC's read-per-statement behavior. (This file has no
+      // export/serialization "goldens"; that wording was borrowed from elsewhere and is wrong.)
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it. Same
+      // plugin-tests.yml override and s6a re-pin note as the lifecycle file above.
+      'tests/integration/approval-template-groups-serialization.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
