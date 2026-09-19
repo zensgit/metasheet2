@@ -643,26 +643,6 @@ async function assertCancelRoundSeatsEligibleInTxn(
 }
 
 /**
- * Lock §4 `roundPolicy = { windowDays, suite }` — the SINGLE derivation, read off the ORIGINAL
- * document instance's own metadata. Extracted so the two time points of §5 I4 / §2-G4
- * (creation snapshot, final-decision snapshot) cannot drift apart: a divergence between them would
- * read as "the policy changed" and silently expire a live round. `createCancelRoundInstance` and
- * the §14.2 判据 IV in-lock final evaluation both call THIS, never a second copy.
- */
-function deriveCancelRoundRoundPolicy(
-  originalMetadata: Record<string, unknown> | null,
-): { readonly suite: string; readonly windowDays: number } {
-  const metadata = originalMetadata ?? {}
-  const suite = typeof metadata.suite === 'string' ? metadata.suite : 'leave'
-  const windowDays =
-    typeof metadata.windowDays === 'number'
-      ? metadata.windowDays
-      : CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS[suite as keyof typeof CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS]
-        ?? CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS.other
-  return { suite, windowDays }
-}
-
-/**
  * Lock §14.2 判据 IV — what the in-lock final evaluation answers. `redeem` is 判据 II's branch
  * (C-1 through the W4 external transaction entry); the other two are C-3's persistent closure.
  * `blocked` carries the bounded code that the engine record's reason `business_blocked:<code>` is
@@ -9656,7 +9636,49 @@ export class ApprovalProductService {
     // §2-G4 「双时点按当前策略评估」 — re-derive from the original document's CURRENT metadata, so a
     // policy that changed between creation and decision is what this evaluation sees. §4: the
     // decision snapshot is written 同形 with the creation snapshot, on BOTH branches.
-    const { suite, windowDays } = deriveCancelRoundRoundPolicy(toNullableRecord(original.metadata))
+    //
+    // REBASE onto C-1 @`ba8a0133d` (Codex review 2026-09-19 finding 2): C-1 replaced the silently
+    // defaulting derivation this slice used with one that ENFORCES lock:143's two domains, and
+    // `deriveCancelRoundRoundPolicy`'s own doc comment prescribes THIS consumer's handling verbatim
+    // — 「the final in-transaction evaluation must call THIS function and treat a throw as `blocked`
+    // + the thrown code — never as a silent `expired`」. Followed literally; the phase-2 copy of the
+    // derivation (weaker, defaulting) was DELETED rather than renamed, because a second narrower
+    // same-kind artefact is contract narrowing and because §5 I4 / §2-G4's whole point is that the
+    // two time points evaluate ONE policy.
+    //
+    // Matched BY CODE, never by a bare `instanceof ServiceError`: the two sibling refusals a few
+    // statements below (`CANCEL_ROUND_INVARIANT_VIOLATION`, `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`)
+    // are deliberately throw ⇒ rollback ⇒ the round stays `pending`, seats kept, retryable. A
+    // class-level catch would convert either into an IRREVERSIBLE `blocked` close the day a
+    // statement moves inside this `try` — the judgment-predicate-is-itself-the-hole failure mode.
+    let policy: CancelRoundRoundPolicy
+    try {
+      policy = deriveCancelRoundRoundPolicy(toNullableRecord(original.metadata) ?? {})
+    } catch (error) {
+      if (
+        error instanceof ServiceError
+        && (error.code === 'CANCEL_ROUND_SUITE_UNKNOWN' || error.code === 'CANCEL_ROUND_WINDOW_OUT_OF_RANGE')
+      ) {
+        // Implementer choice, FLAGGED for owner registration — same treatment as
+        // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` below: there is NO policy to snapshot when the policy
+        // is itself what failed to evaluate, so the decision snapshot carries `roundPolicy: null`
+        // plus the blocking code. It deliberately does NOT fall back to the pre-C-1 defaulting to
+        // manufacture a suite/window pair — fabricating the very snapshot §5 I4 / §2-G4 designate as
+        // the audit basis is exactly the corruption finding 2 named.
+        return {
+          roundId: round.id,
+          documentId: round.document_id,
+          evaluation: { decision: 'blocked', code: error.code, detail: null },
+          policySnapshotAtDecision: JSON.stringify({
+            definitionPolicy: original.policy_snapshot,
+            roundPolicy: null,
+            roundPolicyError: error.code,
+          }),
+        }
+      }
+      throw error
+    }
+    const { suite, windowDays } = policy
     const policySnapshotAtDecision = JSON.stringify({
       definitionPolicy: original.policy_snapshot,
       roundPolicy: { windowDays, suite },
