@@ -25032,6 +25032,41 @@ module.exports = {
       }
     }
 
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — THE single `attendance.request.cancelled` send site.
+     *
+     * Both the HTTP cancel route and the approval side's cancel-round redemption reach the event
+     * through THIS function and nothing else, so the gate and the payload exist once. Previously
+     * the gate and payload were inline in `cancelRequest`, and the redemption path (which never
+     * calls `cancelRequest` — its only two callers are the two HTTP routes) therefore emitted the
+     * event ZERO times under the `legacy` / `legacy_compat` postures, which are the only postures
+     * any org runs today. Measured: `{sendsAfterA: 0, sendsAfterB: 1}` over the twin fixture.
+     *
+     * ⚠️ THE GATE IS DERIVED, NOT COPIED FORWARD. Only `legacy` and `legacy_compat` emit here:
+     *   - `executed`  ⇒ the boundary enqueued `attendance_result_event_outbox` and the W4C-2
+     *                   dispatcher (`w4c2-outbox-dispatcher.ts:85-168`) emits it on drain. Emitting
+     *                   here as well would DOUBLE-send.
+     *   - `replay`    ⇒ the boundary returned at its replay preflight, BEFORE the enqueue
+     *                   (`w4c3b-request-operation-boundary.ts:870-874`); the original run already
+     *                   delivered. Emitting here would make a replay a duplicate delivery. This is
+     *                   the idempotency, reusing the W4 replay preflight — no new table, no new key.
+     *   - business_refused / anything else ⇒ nothing was cancelled; there is nothing to announce.
+     *
+     * Returns whether it sent, so callers can be asserted against rather than trusted.
+     */
+    const emitRequestCancelledEventForOutcomeV1 = (outcome, fallbackRequestId) => {
+      const kind = outcome?.kind
+      if (kind !== 'legacy' && kind !== 'legacy_compat') return false
+      const result = outcome.response?.data
+      emitEvent('attendance.request.cancelled', {
+        requestId: result?.requestId ?? fallbackRequestId,
+        status: result?.status ?? 'cancelled',
+        orgId: result?.orgId,
+        userId: result?.userId,
+      })
+      return true
+    }
+
     // W4C-2 (#4556 lock §12.2 last sentence; #4607 gate handover P3-4): default-rule and
     // shift timezone WRITES must pass the single strict W4 IANA validator
     // (`validateAttendanceIanaTimezoneV1`, host-provided via the least-privilege
@@ -35878,6 +35913,15 @@ module.exports = {
       && typeof attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary === 'function'
     ) {
       attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary(w4RequestOperationBoundary)
+      // Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+      // delivery to the SAME function the HTTP route calls. The approval side owns the transaction
+      // and calls this only after its COMMIT; the gate and the payload live here, once, so the two
+      // paths cannot drift into two event constructions.
+      if (typeof attendanceW4SegmentCalculationPort.registerCancelRoundCancelledEventDelivery === 'function') {
+        attendanceW4SegmentCalculationPort.registerCancelRoundCancelledEventDelivery(
+          (result, fallbackRequestId) => emitRequestCancelledEventForOutcomeV1(result, fallbackRequestId),
+        )
+      }
     }
 
     // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
@@ -38674,15 +38718,7 @@ module.exports = {
           },
         })
 
-        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
-          const result = outcome.response?.data
-          emitEvent('attendance.request.cancelled', {
-            requestId: result?.requestId ?? requestId,
-            status: result?.status ?? 'cancelled',
-            orgId: result?.orgId,
-            userId: result?.userId,
-          })
-        }
+        emitRequestCancelledEventForOutcomeV1(outcome, requestId)
         res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
