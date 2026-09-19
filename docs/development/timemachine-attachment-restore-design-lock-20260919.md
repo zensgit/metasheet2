@@ -2,6 +2,19 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Accepted Archive Result Context (2026-09-20)
+
+Code `758e10b68f33c16bfcd2f01bf9690a398fb5c200`, tree
+`2293a137b97979a4136ac8b034d5a33e762f626e`, fixes a reproduced UI-only
+context loss. Once execute/accept is in flight, catalog entry buttons and their
+handler cannot select a different recovery point. Closing remains allowed and
+does not imply server cancellation. Reopening the same sheet while synchronous
+execution is pending, or after its result arrived while hidden, preserves the
+original preview/result instead of automatically clearing it through discovery.
+Explicit recheck, selecting a recovery point after completion, and actual sheet
+changes retain their existing behavior. No token, permission or restore semantics
+change; backend request counts and effects are unchanged.
+
 ## Current Acceptance Reconciliation (2026-09-20)
 
 Clean candidate `0e7dc5c69617a11b3e9a55a7934a944bd3a005ca`, tree

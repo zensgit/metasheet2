@@ -12,6 +12,35 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Accepted Archive Result Regression (2026-09-20)
+
+Code `758e10b68f33c16bfcd2f01bf9690a398fb5c200`, tree
+`2293a137b97979a4136ac8b034d5a33e762f626e`; two files, three production
+lines changed. Three new mounted cases first failed: reopen before completion,
+reopen after hidden completion, and catalog selection during pending execution.
+After repair, modal 60/60 plus client 100/100 PASS. Existing sheet-switch,
+unmount and durable async job neighbors remain in that suite.
+
+Independent mutations: remove the handler execution guard while keeping the
+button disabled -> forced click changes the selected point, exact test RED;
+restore unconditional discovery on reopen -> both result retention cases RED.
+Both restored before the final 160/160 run. Web app vue-tsc PASS; scoped ESLint
+0 errors with two existing fixture warnings; exact-anchor wiring 39/39;
+diff-check PASS.
+
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser`
+passed with the same source/test bytes before commit. Log:
+`/private/tmp/tm-archive-result-retention-browser-20260920.log`. Includes 32
+migration replay gates, HTTP authority/failure/retry tests, scalar and attachment
+production browser loops at 1440/390, restored authenticated binary downloads,
+and stage cleanup arbitration. Owned and stage databases/connections=0, cluster
+stopped and removed. The new timing regressions are mounted tests, not browser
+response-delay injections; the browser run is integration regression evidence.
+
+Terra's narrow review timed out before inspection and returned no verdict; it was
+closed and is not counted as approval. Successor remote exact-head CI and final
+independent integration review remain separate gates.
+
 ## Clean Candidate Full-Process Acceptance (2026-09-20)
 
 Exact clean head `0e7dc5c69617a11b3e9a55a7934a944bd3a005ca`, tree
