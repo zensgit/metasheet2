@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：内容 SHA `ab5883398fa417baba8dff699aade2a8c85bbd15`（闸 §10；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
+- head SHA：内容 SHA 见本轮 SHA-record 提交（闸 §11 第七轮；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -53,17 +53,17 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 2 | 计划 v5 288 行且 MD5 匹配声明 | 计划文件 | `md5 -q …/task-feature-development-plan-20260915.md && wc -l …` | `f74e172840d2aa2502216d0dd8dff867` / `288` |
 | 3 | 飞书语料 html 篇数为 26 | 语料目录 | `ls …/articles/*.html \| wc -l` | `26` |
 | 4 | 本地主库 `to_regclass('public.tasks')` 为 NULL | census §1 | 见普查 SQL | `tasks` 列空 |
-| 5 | `createTable`/`CREATE TABLE` 扫描下没有表名 `tasks` 或 `task_*` | census §3 | 普查 §3 复现命令 | 命中仅 `gantt_tasks` / `gantt_task_resources` / `bpmn_user_tasks` / `bpmn_external_tasks` |
+| 5 | `createTable`/`CREATE TABLE` 扫描下没有表名 `tasks` 或 `task_*` | census §3 | `rg -n "createTable\(\s*['\"][^'\"]*task" packages/core-backend/src/db/migrations` ； `rg -n -i "CREATE TABLE[[:space:]]+(IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+)?(\"|')?[^\"']*task" packages/core-backend/src/db/migrations packages/core-backend/migrations` | 命中仅 `gantt_tasks` / `gantt_task_resources` / `bpmn_user_tasks` / `bpmn_external_tasks` |
 | 6 | 正控：`gantt_tasks` 出现在 `createTable` | `20250924140000_create_gantt_tables.ts:13` | `sed -n '13p' packages/core-backend/src/db/migrations/20250924140000_create_gantt_tables.ts` | `.createTable('gantt_tasks')` |
 | 7 | `NON_NAMESPACED_PERMISSION_RESOURCES` 不含 `'tasks'` | `namespace-admission.ts:11-38` | `sed -n '11,38p' packages/core-backend/src/rbac/namespace-admission.ts` | 集合止于 `'workflow'`，无 `tasks` |
 | 8 | `exec npx vitest run` 在 `:1186` 不在 `:1069`；token 394；含 `task` 的 token 数为 0 | `run-required-web-tests.sh` | census §4 命令 | 1069=注释；1186=`exec`；394；0 |
-| 9 | 拟用锁前缀 `task-structure:` / `task-projection:` / `tasks-scheduler:` 未作为既有字面键前缀出现 | census §2 | `rg -n "task-structure:|task-projection:|tasks-scheduler:" packages/core-backend/src plugins --glob '!**/node_modules/**'` | 实际：0 行输出、exit 1（无命中）。正控：同命令族可命中 `` `approval-projection:${instanceId}` ``（census §2.1 / `approval-record-projection-service.ts`） |
+| 9 | 拟用锁前缀 `task-structure:` / `task-projection:` / `tasks-scheduler:` 未作为既有字面键前缀出现 | census §2 | `rg -n "task-structure:\|task-projection:\|tasks-scheduler:" packages/core-backend/src plugins --glob '!**/node_modules/**'` ；正控 `rg -n "approval-projection:" packages/core-backend/src/multitable/approval-record-projection-service.ts` | 前命令 0 行。正控 `:246` `` `approval-projection:${instanceId}` `` |
 | 10 | 本地主库活跃多成员用户数 = 0（仅代表该库） | census §1.3 | QUERY B | `multi_active_member_users = 0`，分母 115 |
 | 11 | 审批路由挂载不在计划写的 `index.ts:1763-1777` | `index.ts:1791` | `grep -n -F "this.app.use(approvalsRouter" packages/core-backend/src/index.ts` | `1791:    this.app.use(approvalsRouter({` |
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
-| 14 | 锁草案 §13 含题号 1–39 各恰一次 | 锁文件 | 见锁 §13 标题 `**N.`（N=1…39） | 39 题标题均在 |
-| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁 | 文件头 bullet `:9` / §0 `:25` / §11 `:310` / §14-3 `:439`；§13 前言 `:350` 顿号写法另核 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:310` `:439` 四行 |
+| 14 | 锁草案 §13 含题号 1–39 各恰一次 | 锁文件 | `python3 -c "import re; from pathlib import Path; t=Path('docs/development/task-feature-design-lock-20260917.md').read_text(); found=sorted({int(n) for n in re.findall(r'\*\*(\d+)\.', t) if 1<=int(n)<=39}); print(found, 'count', len(found), 'missing', [i for i in range(1,40) if i not in found])"` | `count 39 missing []` |
+| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁 | 文件头 bullet `:9` / §0 `:25` / §11 `:315` / §14-3 `:452`；§13 前言顿号写法另核 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:315` `:452` 四行 |
 
 ---
 
@@ -105,8 +105,9 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
 6. **§13-9 / §13-10 / §13-11 / §13-12 未裁**（§13-11 不适用默认前进）。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **对抗闸未齐**：第六轮 REJECT（`gate-task-m0-20260917.md` §10，2 P1 / 7 P2 / 9 P3；第三轮独立审同 head 亦 REJECT）。本轮按 §10 一次改完、不 rebase。不声称 M0 退出门已过。
+8. **对抗闸未齐**：第七轮 REJECT（`reviews/gate-task-m0-20260917.md` §11，1 P1 / 9 P2 / 15 P3；第四轮独立审同 head 亦 REJECT）。本轮按 §11 一次改完、不 rebase。不声称 M0 退出门已过。
 9. **飞书 `:21-23` vs 计划 §5-2**：计划把《完成与重启任务》:23 列为 `scope=self|all` 出处之一；锁按闸 P3-1 把 `:21-23` 标 IM 不对标，`:20` 单独支撑创建人完成范围。以闸 P3-1 为准，计划 :23 记偏离。
+10. **`guardPolicy.ts` 行号漂移**：计划写 `:29` / `:77` / `:87-95`；本 SHA `ATTENDANCE_FOCUS_ALLOWED_PATHS` `:34`、`PLM_WORKBENCH_ALLOWED_PREFIXES` `:82`、`KNOWN_REQUIRED_FEATURES` `:100`，`/stock-prep` 无 `requiredFeature` 先例 `:90-99`（普查 §5.2 / §5.3）。
 
 ---
 
@@ -114,7 +115,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **闸未齐**：第六轮 REJECT。本轮按闸 §10 一次改完、不 rebase；待闸方亲核门 8/2/16、§13-11 六处、id 规则与引文口径。
+3. **闸未齐**：第七轮 REJECT。本轮按闸 §11 一次改完、不 rebase；待闸方亲核门 16 trust-off 前置、门 2/6/3/7、§13-5 入表、§14-4 (d) 两遍。
 4. **§13-9 / §13-10 / §13-11 / §13-12 未裁**。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
@@ -129,132 +130,248 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 ---
 
-## 6. 修复轮（闸 §10 第六轮 2 P1 / 7 P2 / 9 P3）
+## 6. 修复轮（闸 §11 第七轮 1 P1 / 9 P2 / 15 P3）
 
-未改 §13-9 / §13-10 / §13-11 / §13-12 的未裁状态。未合并。不 ratify。任务 B 未起。本轮不 rebase。表内命令均为完整路径、已实跑。
+未改 §13-9 / §13-10 / §13-11 / §13-12 的未裁状态。未合并。不 ratify。任务 B 未起。本轮不 rebase。表内命令均为完整路径、已实跑。每项附机制走查（合取顺序 / 装配链 / 数值可满足性 / 行号 `sed -n`）。
 
 | finding | 改动 | 命令 | 输出摘录 |
 |---|---|---|---|
-| ① 门 8 A 支 | 只留 A：`Asia/Shanghai` + viewerNextMidnight 直接谓词；边界六格 | `grep -n -F "A 支" docs/development/task-feature-design-lock-20260917.md` | `:325` 含 `15T16:00Z ≤ 18:00Z < 16T00:00Z` 与六格 |
-| ② §13-11 入账 | 四处 slash + §9 表新行 + M2 退出 + §13-5 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:310` `:439` |
-| ③ 冒烟 | M2 退出与 §12 尾一致 | `grep -n -F "冒烟" docs/development/task-feature-design-lock-20260917.md` | `:311` `:344` |
-| ④ 门 2 码面 | 第三负控 + 直接 SQL 23503 + 403 体 | `grep -n -F "assertCodesInCatalog" docs/development/task-feature-design-lock-20260917.md` | `:319` |
-| ⑤ 信任面 | `buildTrustedTokenUser` + 三读点两轴 | `grep -n -F "buildTrustedTokenUser" docs/development/task-feature-design-lock-20260917.md` | `:115` `:174` `:333` |
-| ⑥ id | 四合取 CHECK + 剥 `rec_tsk_` + 前导/尾随 `_` | `grep -n -F "rec_tsk_" docs/development/task-feature-design-lock-20260917.md` | `:92` `:261` |
-| ⑦ 飞书 | 渲染去空行口径；清单归档 :67 | 见下 python 一行脚本 | `:67` 归档后任务不受影响；创建任务 `:20` 30 分钟/18:00 |
-| ⑧ 门 6 | `pg_blocking_pids` 并发构造 | `grep -n -F "pg_blocking_pids" docs/development/task-feature-design-lock-20260917.md` | `:254` `:323` |
-| ⑨ §14-4 (d) | 非穷举全锚点 | `grep -n -F "非穷举" docs/development/task-feature-design-lock-20260917.md` | `:444` |
-| ⑨ :132 | 未导出 + `:253` 在前置之后 | `sed -n '36p' packages/core-backend/src/multitable/automation-date-reminder.ts` | `function resolveReminderTimeZone`（无 export） |
+| ① 门 16 P1 | 两格写全 trust-off DB 前置；对照格=写路由；`:206` 恒 null | 见下走查 ① | `sed -n '206p;273p;277p'` → `return null` / `evaluateUserAuthenticationGate` / `isUserSessionRevoked` |
+| ② 门 2 | 第三格钉 token 不带 perms；排除 `*:*` / 直授 / jsonb；2/13 行尾 TRUST 姿态 | `sed -n '8p' packages/core-backend/tests/setup.integration.ts` | `process.env.RBAC_TOKEN_TRUST = 'true'` |
+| ③ §13-5 | §9 表加行 + 四处「随 §13-11 落槌」+ 表头结构性约束 | `grep -n -F "§13-5 随 §13-11" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:315` `:363` `:384` `:452` |
+| ④ 门 6 | 第三连接 `pg_blocking_pids`；负控=`src/services/task-*.ts`；fence `:55-82` | `sed -n '81,82p' packages/core-backend/src/multitable/canonical-sheet-fence.ts` | `acquireCanonicalSheetFence` + `pg_advisory_xact_lock(hashtext($1))` |
+| ⑤ 门 3 | 增删人格与切模式格同受 §13-9；§6.2 候选 all→any 立即 done | `grep -n "增删人格" docs/development/task-feature-design-lock-20260917.md` | `:238` `:289` `:325` `:357` `:396` |
+| ⑥a 专属 OPTIONAL | config `RBAC_OPTIONAL: ''` + setup 第四条守卫；2/13/16 行尾 lane 断言 | `sed -n '9p;17p' …/namespace-admission.ts` 等 | 三读点皆 `const allowDegradation = process.env.RBAC_OPTIONAL === '1'` |
+| ⑥b ④ 中间集合 | exclude 匹配 `^tests/integration/task-.*\.db\.test\.ts$`；删三 glob 排除句 | 见下走查 ⑦ | 行首路径 400 / glob 3；naive 引号 456 / 含 `*` 5 |
+| ⑧ §13-4 | `badge_scope` 闭集三值；`all_open` 仅 pending scope；来源改 §2.1/§3、§13-3 改 §5-8 | `grep -n '来源 计划 v5 §13-' docs/development/task-feature-design-lock-20260917.md` | `NO_MATCH` |
+| ⑨ 门 7 | 扫描根 + POSIX ERE；除 keys 外零命中；正控 `:246`；负控插字面量 | `sed -n '246p' packages/core-backend/src/multitable/approval-record-projection-service.ts` | `pg_advisory_xact_lock(hashtext($1))` + `` `approval-projection:${instanceId}` `` |
+| ⑩ 普查 guardPolicy | 锚点 `:34/:82/:100` + `:90-99`；普查 §5.3 偏离表一行 | `sed -n '34p;82p;100p' apps/web/src/router/guardPolicy.ts` | `ATTENDANCE_FOCUS_ALLOWED_PATHS` / `PLM_WORKBENCH_ALLOWED_PREFIXES` / `KNOWN_REQUIRED_FEATURES` |
+| ⑪a `:234` | 信任通道写点 `:232`→`:234` | `sed -n '232,242p' packages/core-backend/src/auth/AuthService.ts` | `:234` `permissions,`；`:232` 为 `name,`；`:242` `perms: permissions` |
+| ⑪b §14-4 (d) | 两遍导出（路径形 + 裸 `:N`）标非穷举 | 见下 ⑫ | 路径形 unique 56；裸 `:N` unique 60 |
+| ⑪c 飞书脚本 | 末行 `"$ARTICLE" "$N"`；先 export；删「页眉占前 6 行」 | 见下走查 ⑪c | `:12` 删减任务负责人 |
+| ⑪d §2 引文 | 负责人 `:12`；附件 `:28-29` vs `:30` vs 关注 `:13` | 同飞书脚本 | 见摘录 |
+| ⑪e 门 10 | 点名 `parseTaskProjectionRecordId` 为投影写回 422 产生处 | `grep -n parseTaskProjectionRecordId docs/development/task-feature-design-lock-20260917.md` | `:263` `:332` |
+| ⑪f 门 17 | `.each` 计数规则（不禁用） | `rg -l --glob '*.db.test.ts' '\.each\(' packages/core-backend/tests/integration \| wc -l` | 13 / 260 |
+| ⑪g §5.3 ② | 反向命令 `grep -c 'apps/web/verification/'` = 0 | `grep -n "verification/" docs/development/task-feature-design-lock-20260917.md` | 锁 `:206` |
+| ⑪h §4.1 | 三合取收窄到任务域生成 id；`org_id`/`created_by` 只留 `^[!-~]+$` | `sed -n '92p' docs/development/task-feature-design-lock-20260917.md` | 见锁 `:92` / §9 `:283` |
+| ⑫ 同 head 两遍导出 | 本轮锁文上实跑并贴输出 | 见下 ⑫ | 56 + 60 |
 
-### 本轮实跑（merge-base `bb77ca5f2`；不 rebase）
+### 机制走查
 
-`git merge-base HEAD origin/main`：
+#### ① 门 16 trust-off 合取顺序
+
+`verifyToken` 装配链（trust-off）：
+
+1. `:259-264` 调 `buildTrustedTokenUser`；`:206` `if (!this.trustTokenClaimsEnabled()) return null`（专属 config `RBAC_TOKEN_TRUST='false'` ⇒ 恒 null）。claim `perms` **不**写入 `req.user.permissions`。`tenantId` claim 只作步骤 6 入参。
+2. `:267` `getUserById`；无行 ⇒ null（请求到不了 rbac）。
+3. `:273` `evaluateUserAuthenticationGate`：`user-activation.ts:78` `is_active===false` / `:84-96` pending/invalid ⇒ null。故夹具必须 `is_active` 且 `activation_status='activated'`。
+4. `:277` `isUserSessionRevoked` ⇒ 未 revoke。
+5. `:282-288` 有 `sid` 则必须活跃会话；无 `sid` 跳过。
+6. `:290-293` `tenantClaim` → `resolveSessionTenantId` `:387-405`：`user_orgs` 一行 `is_active` 且 `org_id = $2`（token claim）JOIN `users.is_active`。
+7. `jwt-middleware.ts:101-104` 仅当 `user.tenantId` 非空才写 `req.authenticatedTenantId`。写路径缺 org ⇒ 422；读路径缺 org ⇒ degraded 200。故对照格必须是写路由，否则自检「对照格 200」可被 degraded 读路径假绿。
+
+`sed -n '206p;234p;273p;277p;282p;387p' packages/core-backend/src/auth/AuthService.ts`：
 
 ```
-bb77ca5f2ce3c2825265ec8877861d367d017ead
+    if (!this.trustTokenClaimsEnabled()) return null
+      permissions,
+      if (evaluateUserAuthenticationGate(user)) {
+      if (await isUserSessionRevoked(user.id, payload.iat)) {
+      if (typeof payload.sid === 'string' && payload.sid.trim().length > 0) {
+  async resolveSessionTenantId(userId: string, requestedTenantId?: string): Promise<string | undefined> {
 ```
 
-`git diff --name-status $(git merge-base HEAD origin/main) HEAD`：
+自检句后加「对照格非 200 先核上述前置再判门不成立」。
 
-```
-A	docs/development/task-feature-census-20260917.md
-A	docs/development/task-feature-design-lock-20260917.md
-A	docs/development/task-feature-m0-development-20260917.md
-```
+#### ② 门 2 第三格 × TRUST='true'
+
+`tests/setup.integration.ts:8` `RBAC_TOKEN_TRUST = 'true'`。装配：`buildTrustedTokenUser:206` 不再恒 null；token `perms` 写成 `:234` `permissions` 与 `:242` `perms`，`rbac.ts:22` `hasPermissionCode` 把 `*:*` 当万能。故第三格必须钉 token 不带 `perms`，并排除 `*:*` / `user_permissions` 直授 / `users.permissions` jsonb。门 2/13 行尾声明该 harness 信任姿态。lane env：`RBAC_OPTIONAL` 未设置，否则本门红。
+
+#### ③ §13-5 入表
+
+「不适用默认前进」只在 §9 表内有效。正文 `:384` 已有该措辞，故必须有表行，否则锁自相矛盾不得 ratify（表头 `:279`）。四处 slash 仍是 9/10/11/12，另写「§13-5 随 §13-11 落槌，单独未裁亦阻断 M2」。
 
 `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md`：
 
 ```
-9:- 实现者不得批准自己的安全结论。§13-9 / §13-10 / §13-11 / §13-12 标「未裁」。
-25:本锁 **PROPOSED**。M2 实体核心（DDL/路由/前端）要等 M1 ratify **且** §13-9 / §13-10 / §13-11 / §13-12 落槌。
-310:| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-11 / §13-12 落槌 |
-439:3. **§13-9 / §13-10 / §13-11 / §13-12 必须落槌** 才进入 M2。
+9:…§13-9 / §13-10 / §13-11 / §13-12 标「未裁」。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2。
+25:…落槌。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2。
+315:| M1 | …落槌。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2 |
+452:3. **§13-9 / §13-10 / §13-11 / §13-12 必须落槌** 才进入 M2。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2。
 ```
 
-`sed -n '171,176p' packages/core-backend/src/auth/AuthService.ts`：
+#### ④ 门 6 第三连接 / 数值可满足性
 
-```
-    if (!(process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1')) {
-      return false
-    }
+`pg_blocking_pids(pid)` 返回**阻塞该 pid** 的 PID 数组。连接 2 在等 `pg_advisory_xact_lock` 时自身被阻塞，不能可靠自查，故用第三连接观察。
 
-    return process.env.NODE_ENV !== 'production'
-```
+可满足性脚本（M2 夹具；本切片 docs-only 未开三连接）：
 
-`sed -n '84,86p' packages/core-backend/src/security/auth-runtime-config.ts`：
-
-```
-  if (env.RBAC_TOKEN_TRUST === 'true' || env.RBAC_TOKEN_TRUST === '1') {
-    issues.push('RBAC_TOKEN_TRUST is ignored in production and must remain disabled')
-  }
+```sql
+-- conn1: BEGIN; SELECT pg_backend_pid(); SELECT pg_advisory_xact_lock(hashtext('task-structure:orgX')); -- 不提交
+-- conn2: BEGIN; SELECT pg_backend_pid(); SELECT pg_advisory_xact_lock(hashtext('task-structure:orgX')); -- 阻塞
+-- conn3:
+SELECT pg_blocking_pids(:pid2);  -- 必须包含 pid1
+SELECT pg_blocking_pids(:pid1);  -- 必须为空 {}
+SELECT wait_event FROM pg_stat_activity WHERE pid = :pid2;  -- 'advisory'
 ```
 
-`sed -n '28,33p' packages/core-backend/vitest.elearning-pilot-auth.config.ts`：
+负控目标 = `src/services/task-*.ts` 的 `pg_advisory_xact_lock` 调用行（`task-lock-keys.ts` 只生成键）。mutation 生效判据：连接 2 不再 `wait_event='advisory'`。中间步复用 `canonical-sheet-fence.ts:55-82`，键 `meta:auto-number:sheet:*` 不进三键集合。
+
+#### ⑤ 门 3 × §13-9
+
+不把计划 §5-4 四条抄成已定（§13-9 未裁）。增删人格与切模式格同阻断。§6.2 候选支：`all→any` 已有任一 completed ⇒ 立即 done。
+
+#### ⑥a `RBAC_OPTIONAL` 装载链
+
+三读点皆模块顶 `const allowDegradation = process.env.RBAC_OPTIONAL === '1'`（`namespace-admission.ts:9`、`service.ts:17`、`permissions.ts:21`）。夹具 `delete process.env.RBAC_OPTIONAL` 改不了已装载常量。故专属 config `env` 钉 `RBAC_OPTIONAL: ''`（模块装载前），setup 第四条守卫 `=== '1'`（或非空）则抛。门 2/13 跑 integration harness（不经过专属 config），行尾断言 lane 未设置该变量。
+
+#### ⑦ §5.2.1 ④ 中间集合（原 ⑥b）
+
+`vitest.config.ts` `test.exclude` 本 SHA：
 
 ```
-    setupFiles: ['./tests/elearning-pilot-auth/setup.ts'],
-    env: {
-      RBAC_BYPASS: 'false',
-      RBAC_TOKEN_TRUST: 'false',
-      PRODUCT_MODE: 'plm-workbench',
-    },
+# 去 // 后行首路径条目
+python3 … → line-start quoted entries 400 ; globs 3
+  **/node_modules/**  :32
+  **/dist/**          :33
+  tests/e2e/**        :1812
+# naive 数组体 '…'（含注释内引号）
+naive quoted 456 ; naive with star 5
 ```
 
-`sed -n '36p' packages/core-backend/src/multitable/automation-date-reminder.ts`：
+闸写 455/5 与 naive 同量级。旧文「三条历史 glob 排除在集合比较之外」既不是 3、也不能让「磁盘 = 整个 exclude 数组」可满足。中间集合改为匹配 `^tests/integration/task-.*\.db\.test\.ts$` 的 exclude 条目。
+
+#### ⑧ §13-4 闭集
+
+计划 v5 §2.1：`badge_scope CHECK IN ('off','overdue','overdue_or_today')`。语料无 `all_open` 作为红点档位（红点 `:14` 已逾期 / 已逾期和今天截止；`:15-16` 关闭；任务设置 `:15-16` 同）。`all_open` 是计划 §3 `/pending` 的 scope 参数。`grep '来源 计划 v5 §13-'` → `NO_MATCH`。§13-3 来源改计划 §5-8。
+
+#### ⑨ 门 7 扫描
+
+POSIX ERE `pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*\(`。扫描根 `src/tasks` + `src/services/task-*.ts` + `routes/tasks*.ts`，排除 `task-lock-keys.ts` 后零命中。正控同命令对 `approval-record-projection-service.ts` 必命中 `:246`。负控：services 内插该字面量 ⇒ 非零。
+
+#### ⑩ / ⑪c 飞书脚本
+
+先 `export ARTICLE` / `export N`，末行 `"$ARTICLE" "$N"`（旧文 `" \"\$ARTICLE\" N` 在 bash 下不把 `N` 当参数）。口径 = 非空渲染列表绝对行号。本轮：
 
 ```
-function resolveReminderTimeZone(raw: string | undefined): string | null {
+export ARTICLE=…/7049628517652070428-添加任务负责人.html
+export N=12
+# → 12:…进行删减任务负责人的操作。
 ```
 
-`sed -n '108p' packages/core-backend/src/rbac/rbac.ts`：
+关注任务 `:13` 完成/重启/删除通知。附件 `:28-29` 评论加附件；`:30` 附件评论通知。红点 `:14/:15-16`。任务设置 `:15-16`。清单 `:67` 归档后不受影响。
 
-```
-      res.status(403).json({ error: 'Insufficient permissions' })
-```
+#### ⑪a `:234`
 
-飞书口径正控（渲染去空行 1-indexed）：
+`sed -n '232,242p' packages/core-backend/src/auth/AuthService.ts`：`:232` `name,`；`:233` `role,`；`:234` `permissions,`；`:242` `perms: permissions`。
 
-```
-67:清单归档后，清单中的任务不受影响，仍然展示在相关参与者的任务中心，可继续完成或编辑任务。
-20:提醒时间：如果任务已设置具体截止时间点，提醒时间默认为任务截止前 30 分钟；如果任务只设置了截止日期，提醒时间默认为截止日期当天 18:00。你可点击当前提醒时间进行修改。
-```
+#### ⑪f `.each`
 
-锁 §14-4 普查解析器。命令行：
+本 SHA `tests/integration/*.db.test.ts` 260 文件、13 个含 `.each(`。规则：展开后静态计数 = 无 table 的 `it(`/`test(` + 每个 `it.each`/`test.each` 表行数（不含表头）；PR body 必须写出展开表行数。
 
-```
-TASK_FEATURE_PLAN_PATH=/Users/chouhua/Downloads/Github/metasheet2/docs/development/task-feature-development-plan-20260915.md python3 - <<'PY'
-# body = docs/development/task-feature-census-20260917.md 解析器段
-```
+#### ⑫ §14-4 (d) 两遍导出（同 head，本轮锁文）
 
-未删改真输出：
-
-```
-unique 133 OK_IN_RANGE 128 OOB 5 MISSING 0 AMBIGUOUS 11
-NOTE OK_IN_RANGE means line numbers fit the resolved file, not that the file is the intended one
-OOB ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 69)
-OOB ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 69)
-AMBIGUOUS ('routes/auth.ts', '1220-1251', 'packages/core-backend/src/routes/auth.ts', 2)
-AMBIGUOUS ('routes/auth.ts', '1230-1232', 'packages/core-backend/src/routes/auth.ts', 2)
-AMBIGUOUS ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 18)
-AMBIGUOUS ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 18)
-AMBIGUOUS ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 18)
-AMBIGUOUS ('approvals/api.ts', '37-38', 'apps/web/src/utils/api.ts', 3)
-AMBIGUOUS ('integrations/dingtalk/client.ts', '1067', 'apps/web/src/multitable/api/client.ts', 4)
-AMBIGUOUS ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 18)
-AMBIGUOUS ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 18)
-AMBIGUOUS ('plugin-tests.yml', '1655', '.github/workflows/plugin-tests.yml', 3)
-AMBIGUOUS ('plugin-tests.yml', '5', '.github/workflows/plugin-tests.yml', 3)
-ambiguous_total 11
+```bash
+LOCK=docs/development/task-feature-design-lock-20260917.md
+grep -oE '[A-Za-z0-9_./-]+\.(ts|js|cjs|mjs|yml|yaml|md|vue|sh|json):[0-9]+(-[0-9]+)?' "$LOCK" | sort -u | wc -l
+# 56
+grep -oE "$(printf '\140'):[0-9]+(-[0-9]+)?" "$LOCK" | sort -u | wc -l
+# 60
 ```
 
-抽查（本 SHA = merge-base `bb77ca5f2`）：
+路径形样本（头/尾）：
+
+```
+.github/workflows/attendance-web-guard.yml:2-3
+.github/workflows/docker-build.yml:484-488
+.github/workflows/plugin-tests.yml:842-844
+…
+tests/setup.integration.ts:8
+user-activation.ts:78
+vitest.config.ts:1782
+vitest.elearning-pilot-auth.config.ts:28-33
+```
+
+裸 `:N` 全集 60 条（非穷举；无反引号的散文行号不在内）：
+
+```
+`:105
+`:106-109
+`:1069
+`:108-118
+`:11-38
+`:111
+`:1186
+`:12
+`:120-122
+`:120-168
+`:1277
+`:1288
+`:129
+`:133-135
+`:133-137
+`:136
+`:143-151
+`:144-147
+`:1655
+`:1659
+`:167
+`:168-172
+`:171-176
+`:1782
+`:1785
+`:1797
+`:1812
+`:182-186
+`:196-199
+`:200-203
+`:203-243
+`:234
+`:241
+`:242
+`:246
+`:246-252
+`:253
+`:277
+`:282-288
+`:302
+`:344
+`:345
+`:346
+`:347
+`:387-405
+`:4-8
+`:41
+`:45-47
+`:532-533
+`:54
+`:68-70
+`:71
+`:71-73
+`:74-76
+`:77-83
+`:8
+`:84-96
+`:842-844
+`:96
+`:99
+```
+
+抽查（本 SHA = merge-base `bb77ca5f2`；不 rebase）：
 
 ```
 packages/core-backend/vitest.config.ts:1812     'tests/e2e/**'
 packages/core-backend/src/index.ts:1791         this.app.use(approvalsRouter({
 apps/web/scripts/run-required-web-tests.sh:1186 exec npx vitest run …
 .github/workflows/plugin-tests.yml:842-844      Run core-backend tests
+AuthService.ts:234                              permissions,
+guardPolicy.ts:34 / :82 / :100                  三常量
 ```
+
+普查解析器（计划 v5，`TASK_FEATURE_PLAN_PATH`）：
+
+```
+unique 133 OK_IN_RANGE 128 OOB 5 MISSING 0 AMBIGUOUS 11
+```
+
+`git diff --name-status $(git merge-base HEAD origin/main) HEAD` 仍为三份 docs `A`（SHA-record 提交后同）。

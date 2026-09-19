@@ -10,11 +10,13 @@
 
 ### 飞书离线语料行号口径
 
-语料目录只有 `.html`。`《篇名》:N` = **渲染文本去空行后 1-indexed**；页眉占前 6 行。**不是** html 源码行，也**不是** `data-line-index`。
+语料目录只有 `.html`。`《篇名》:N` = **非空渲染列表的绝对行号**（1-indexed）。**不是** html 源码行，也**不是** `data-line-index`。锁 §2 散文以本脚本为规范。
 
-一行脚本（`ARTICLE` 为篇 html 绝对路径，`N` 为行号）：
+一行脚本（先 `export ARTICLE` 为篇 html 绝对路径、`export N` 为行号，再跑；末行把两个位置参数交给 python）：
 
 ```bash
+export ARTICLE=/path/to/article.html
+export N=12
 python3 -c "
 from pathlib import Path
 import re, html as H, sys
@@ -26,7 +28,7 @@ t=re.sub(r'</(p|div|h[1-6]|li|tr)>','\n',t,flags=re.I)
 t=re.sub(r'<[^>]+>','',t)
 lines=[ln.strip() for ln in H.unescape(t).splitlines() if ln.strip()]
 n=int(sys.argv[2]); print(f'{n}:{lines[n-1]}')
-" \"\$ARTICLE\" N
+" "$ARTICLE" "$N"
 ```
 
 正控（`data-line-index` ≠ 渲染行，故对口径有判别力；旧正控《使用子任务》idx=1→:7 与《添加任务负责人》idx=4→:10 在三种口径下同解，**不再用作口径正控**）：
@@ -356,10 +358,16 @@ PY
 | `tests/setup.integration.ts:7-8` | `RBAC_BYPASS='true'` / `RBAC_TOKEN_TRUST='true'`（`vitest.integration.config.ts:21` setupFiles） |
 | `rbac.ts:69` / `:110-111` | admin 短路；守卫自身抛错 500 |
 | `index.ts` 审批挂载 | 计划 `:1763-1777` **漂移**（现为 `/health`）。实际 `this.app.use(approvalsRouter(` 在 **`:1791`**（上一轮 `:1785` 再漂移） |
-| `guardPolicy.ts:29` / `:77` / `:87-95` | 焦点白名单仍无 `/tasks`；`KNOWN_REQUIRED_FEATURES` 无 `tasks`；`/stock-prep` 不加 `requiredFeature` 先例仍在 |
+| `guardPolicy.ts:34` / `:82` / `:100`（计划写 `:29` / `:77` / `:87-95`，偏离见下） | `ATTENDANCE_FOCUS_ALLOWED_PATHS` `:34`；`PLM_WORKBENCH_ALLOWED_PREFIXES` `:82`；`KNOWN_REQUIRED_FEATURES` `:100`；`/stock-prep` 不加 `requiredFeature` 先例 `:90-99` |
 | `App.vue:7-74` | 三互斥分支仍在；默认分支 `:30-74` |
 | `src/multitable/permission-service.ts:1044` + `:1315`/`:1388` | 计划指 rethrow 契约；函数 `loadApprovalProjectionDeniedRecordIds` 从 `:1047` 起；fail-closed `throw err` 在 `:1315`/`:1388` |
 | `elearning/feature-flags.ts:32` | `env[name] === 'true'` |
+
+### 5.3 偏离（计划行号 vs 本 SHA）
+
+| 计划锚点 | 本 SHA | 说明 |
+|---|---|---|
+| `guardPolicy.ts:29` / `:77` / `:87-95` | `:34` `ATTENDANCE_FOCUS_ALLOWED_PATHS` / `:82` `PLM_WORKBENCH_ALLOWED_PREFIXES` / `:100` `KNOWN_REQUIRED_FEATURES`；先例 `:90-99` `/stock-prep` 不加 `requiredFeature` | 计划行号已漂；本 SHA 以 §5.2 实读为准 |
 
 ---
 
