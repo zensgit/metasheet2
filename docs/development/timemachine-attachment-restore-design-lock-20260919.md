@@ -2,6 +2,17 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Archive Modal Lifetime Checkpoint (2026-09-20)
+
+Code `27aa9351fc8b093576941017e7875431c0ae59e5`, tree
+`105d3eaaf54e43da863b19b8cc10329f0711d4c3`, terminates client-side ownership
+when the recovery modal unmounts: outstanding execute/job request identities are
+invalidated, late job snapshots cannot enter the disposed component, and no
+poll timer can be created after disposal. This is not server-job cancellation.
+While still mounted, late async acceptance remains cached for its originating
+sheet; reopening continues to discover/read the durable server job. No backend
+job state, authorization, restore scope or retry policy changes.
+
 ## Record History Presentation Checkpoint (2026-09-20)
 
 Code `10a665746c94baa21864267386efbe82f34532a3`, tree

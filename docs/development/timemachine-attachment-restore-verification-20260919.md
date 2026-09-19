@@ -11,6 +11,35 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Latest Archive Modal Lifetime Evidence (2026-09-20)
+
+Code `27aa9351fc8b093576941017e7875431c0ae59e5`, tree
+`105d3eaaf54e43da863b19b8cc10329f0711d4c3`, parent
+`02e521c0e6f7d8cedd3ae2e4dace1304ccd402d4`.
+
+Three deferred-response negatives reproduce the old behavior: an in-flight job
+read succeeding or failing after unmount restarts polling, and late async job
+acceptance also starts a read after unmount. All three RED before implementation.
+The fix guards disposed snapshots/timers and invalidates execute/job identities.
+Removing the unmount assignment/invalidation makes exactly these three cases
+RED again. Restore, then final archive modal/client/workbench restore-wiring:
+3 files / 172 tests PASS, including original-sheet acceptance and reopen cases.
+Every new case also asserts no cancelJob invocation: UI disposal must not cancel
+server work.
+
+The unchanged main multitable-web-guard Vitest command passes 295 files / 4093
+tests (includes the previous history-time cases). This large command does not
+replace the separately executed archive-specific 172-test gate above. App
+vue-tsc, scoped ESLint and diff-check PASS. No DB migration or real environment
+operation was needed for this two-file UI lifetime change.
+
+Logs: `/private/tmp/tm-archive-unmount-{red,green,mutation,final,domain,tsc,lint}-20260920.log`.
+Luna medium bounded read-only review did not return a terminal verdict before
+closure; session `01a0bad9-dae6-7390-a234-4ad282dd0600` is closed and no external
+approval is claimed. Code remains in #5882 Draft/HOLD, remote exact-head CI is
+not yet a completion claim. Full application UAT and storage residual boundaries
+remain open as documented below.
+
 ## Latest Record History Presentation Evidence (2026-09-20)
 
 Code: `10a665746c94baa21864267386efbe82f34532a3`.
