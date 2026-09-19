@@ -1511,3 +1511,24 @@ existing pnpm NODE_PATH passed without installation). CI wiring 39/39 and
 diff-check pass. These are mounted regressions, not browser race injection.
 No fresh DB/browser run is claimed for this UI-only delta. Earlier runtime
 evidence retains its own SHA. Remote exact-head CI remains a separate gate.
+
+## Database-fresh administrator revocation (2026-09-20)
+
+Test code `ac1aae767a5e4a491fd703b0d6913c814d052826`, one acceptance script,
+no production changes. The existing alternate admin login/409 actor-substitution
+positive is followed by database role demotion. Both archive catalog and execute
+using that already-issued session return 403; the shared zero-effect oracle checks
+record data/version, attachment metadata, stage/history/token/receipt state.
+Role restoration is in finally. No second-tenant isolation claim is made.
+
+Default owned runner exits 0 with these exact script bytes:
+`/private/tmp/tm-revoked-admin-realdb-20260920.log`; fresh/replay, existing restore
+and stage arbitration gates pass, owned/stage connections zero, cluster removed.
+Core and acceptance-script typechecks pass; three authority/route neighbors pass
+64/64; diff-check passes. This test-only addition has no new production mutation
+result; prior guard mutations retain their own checkpoints.
+
+Terra medium completed a separate static review of UI commit `9a1751bd` with
+0 P1/P2/P3 in that narrow delta; no test execution or whole-PR verdict claimed.
+Agent closed. The general tenant policy limitation is recorded in the design lock;
+it remains an explicit unproven acceptance requirement, not a silently closed gate.

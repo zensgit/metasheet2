@@ -712,3 +712,19 @@ the catalog. A discovered job takes precedence. In-flight execution continues
 to defer discovery, and sheet changes retain existing sequence invalidation.
 Explicit recheck still clears context and performs full discovery/catalog reload.
 This is UI read behavior only; no restore authority or operational scope changes.
+
+## Authority audit boundary (2026-09-20)
+
+At `ac1aae767a5e4a491fd703b0d6913c814d052826`, ordinary archive routes
+resolve database-fresh actor and sheet capabilities, then obtain base/workspace
+from the target sheet. The shared resolver retains global-administrator authority;
+it does not define a generic organization-to-workspace membership policy for
+ordinary sheets. Specialized projection policy is not a universal tenant policy.
+Do not equate workspace relocation or another logged-in admin with second-tenant
+isolation, or retrofit a new organization restriction within this restore slice.
+That named gate requires an authoritative tenant-scoped fixture/contract before
+it can be certified; permission semantics remain unchanged meanwhile.
+
+The existing contract is strengthened by a real HTTP negative: an independently
+logged-in administrator is demoted in the database; its existing session must
+receive 403 from both catalog and execute, without live restore effects.
