@@ -138,8 +138,10 @@ preview, real login or browser UAT. Cleanup and concurrent failure gates remain 
 
 The two-file failure oracle now requires one verified and one reserved object
 after a second upload failure, unchanged live record and metadata, and a retry
-that reuses both identities without reuploading verified bytes. This does not
-close abandoned/displaced-object cleanup or final SQL-failure atomicity gates.
+that reuses both identities without reuploading verified bytes. Real second-metadata
+and final-receipt failures now prove rollback of metadata, record/history, adoption,
+token and receipt with same-token retry. Abandoned/displaced-object cleanup and
+crash/concurrency gates remain open.
 
 ## Required Evidence
 

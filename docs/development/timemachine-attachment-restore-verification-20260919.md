@@ -317,6 +317,31 @@ Published carrier: Draft/HOLD PR #5882. No public runtime enablement.
 - Remote checks for the new follow-up head are pending publication/rerun; earlier
   head checks are not evidence for this commit.
 
+## Transaction Failure Checkpoint
+
+Test commit: `a60a3d683280e6faeb7253c574bea6c94e0c62bd`.
+
+- After both original files are prepared, the production facade is interrupted
+  after its second live attachment metadata UPDATE, then independently before
+  its final sync receipt INSERT. The latter point follows record/history writes,
+  token burn and operation sealing inside the same real PostgreSQL transaction.
+- Both injected faults are reached with exactly two metadata updates. After each
+  rollback, the live record data/version and both full attachment metadata hashes
+  match their before-images. Revision/operation row counts are unchanged; token
+  burns and receipts remain zero. Both stages are verified, with applied operation,
+  time and both displaced storage fields NULL. No partial adoption remains.
+- The original signed token subsequently succeeds and adopts both existing files
+  without another upload. This establishes rollback/retry for these two precise
+  failure points, not arbitrary crashes or abandoned/displaced-object reclamation.
+- Terra read-only review found no P1 and requested an explicit displaced file-ID
+  assertion. Added it and reran the full owned runner: 47/47, 59/59, 127/127;
+  migration replay 32/995 with unchanged fingerprint; real two-file flow PASS;
+  DB/connections/cluster/storage cleanup completed. No broad product approval.
+- Typecheck, wiring 37/37 and diff-check PASS. This is fault injection, not a new
+  production-guard mutation; earlier guard mutation evidence remains separate.
+- Logs: `/private/tmp/tm-attachment-transaction-failure-reviewed-20260919.log`,
+  `/private/tmp/tm-attachment-transaction-failure-{tsc,wiring}-20260919.log`.
+
 ## Remaining Required Work
 
 Public reader/runtime registration; prepared/displaced file reference-safe crash cleanup;
