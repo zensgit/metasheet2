@@ -592,9 +592,18 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   // 判据 IV (§14.2) — C-3's system-side close at the NEW outlet #5′.
   //
   // The two cases below are an ISOLATED pair: identical fixture, identical action, ONE field
-  // different (the original document's `windowDays`, 90 by default vs. 365). Everything else —
-  // the §2-G2 anchor moved 200 days into the past, the seat, the approver, the route — is held
-  // constant, so a difference in outcome can only be the window predicate. Without the second
+  // different — the §2-G2 anchor's age (30 days vs. 200). Everything else, INCLUDING the window
+  // itself (90 days, the `leave` suite ceiling, in both halves), plus the seat, the approver and
+  // the route, is held constant, so a difference in outcome can only be the window predicate.
+  //
+  // WHICH FIELD IS HELD CONSTANT WAS INVERTED by the rebase onto C-1 @`ba8a0133d`. Until then the
+  // pair held the anchor at 200 days and widened the OPEN half's window to 365. C-1 (Codex review
+  // 2026-09-19 finding 2) made lock:143's `windowDays ∈ [0, 上限]` an ENFORCED domain —— `leave`'s
+  // ceiling is 90, so 365 is no longer a configuration this system accepts and creation now
+  // refuses it with 409 `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` (C-1's own 负控 A,
+  // `approval-cancel-round-creation.db.test.ts:782`). The isolation argument is unchanged; only
+  // which of the two fields carries it moved, and BOTH halves now sit at the production ceiling
+  // rather than at a value no administrator could have set. Without the second
   // case, "the round closed as expired" would also be satisfied by an implementation that closes
   // EVERY cancel-round approve, and the 「零完成事件」 assertion would have no evidence that the
   // channel it counts on can go non-zero at all.
@@ -1052,9 +1061,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `iiok-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        // 365 > 200 — the window is OPEN, so the in-lock evaluation answers `redeem`.
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        // 90 (the `leave` ceiling, lock:143) > 30 — the window is OPEN, so the in-lock evaluation
+        // answers `redeem`.
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -1173,10 +1183,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `m7pin-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        // 365 > 200 — the window is OPEN, so the in-lock evaluation answers `redeem` and the
+        await ageApprovedAnchor(documentId, 30)
+        // 90 (the `leave` ceiling) > 30 — the window is OPEN, so the in-lock evaluation answers `redeem` and the
         // `approve` half below reaches the redemption rather than the #5′ system close.
-        await setDocumentWindowDays(documentId, 365)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -1274,9 +1284,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     async () => {
       const suffix = `i3c2-${TS}`
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        // 365 > 200 — the window is OPEN, so the in-lock evaluation answers `redeem`.
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        // 90 (the `leave` ceiling, lock:143) > 30 — the window is OPEN, so the in-lock evaluation
+        // answers `redeem`.
+        await setDocumentWindowDays(documentId, 90)
         await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
 
@@ -1356,8 +1367,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     async () => {
       const suffix = `iiblk-${TS}`
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
 
@@ -1418,8 +1429,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     async () => {
       const suffix = `iinoport-${TS}`
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
 
@@ -1470,8 +1481,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       // The SAME fixture shape as the redeeming case above, minus `attachAttendanceRequest` — the
       // isolated variant that makes the attendance backing the only difference.
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
       })
 
       const portStub = bindCancellationPort(async () => {
@@ -1560,8 +1571,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `iie2e-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -1929,8 +1940,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffixA = `parity-a-${TS}`
       let attachedA: { requestId: string; orgId: string } | undefined
       const a = await seedPendingCancelRound(suffixA, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attachedA = await attachAttendanceRequest(documentId, `wi13-req-${suffixA}`)
       })
       expect(attachedA).toBeTruthy()
@@ -1949,8 +1960,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const approverTokenB = await authToken(baseUrl, approverB)
       const templateB = await publishOneNodeTemplate(adminTokenB, approverB, suffixB)
       const documentB = await createApprovedOriginal(requesterB, requesterTokenB, approverTokenB, templateB)
-      await ageApprovedAnchor(documentB, 200)
-      await setDocumentWindowDays(documentB, 365)
+      await ageApprovedAnchor(documentB, 30)
+      await setDocumentWindowDays(documentB, 90)
       const attachedB = await attachAttendanceRequest(documentB, requesterB)
       await seedDirectoryIdentity(requesterB, attachedB.orgId)
 
@@ -2398,8 +2409,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `uexp-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -2560,8 +2571,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `c3one-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -2624,8 +2635,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `c3rb-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -2738,8 +2749,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `c3rep-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -2799,8 +2810,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const suffix = `c3open-${TS}`
       let attached: { requestId: string; orgId: string } | undefined
       const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
-        await ageApprovedAnchor(documentId, 200)
-        await setDocumentWindowDays(documentId, 365)
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
         attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
       })
       expect(attached).toBeTruthy()
@@ -2846,6 +2857,173 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(cancelledEvents.payloads).toEqual([])
       // And the registry is back, or every later case in this file silently loses its control.
       expect(getCancelRoundCancelledEventDelivery()).toBeDefined()
+    },
+  )
+  /**
+   * REBASE onto C-1 @`ba8a0133d` — §2-G4 「双时点按当前策略评估」 meets lock:143's now-ENFORCED domain.
+   *
+   * WHY THIS CASE EXISTS AT ALL. C-1 (Codex review 2026-09-19 finding 2) replaced the silently
+   * defaulting `deriveCancelRoundRoundPolicy` with one that REFUSES an out-of-domain `suite` /
+   * `windowDays` (409 `CANCEL_ROUND_SUITE_UNKNOWN` / `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`), and this
+   * slice's own weaker copy of that function was deleted in the rebase rather than renamed. C-1's
+   * doc comment prescribes THIS consumer's handling verbatim — 「the final in-transaction evaluation
+   * must call THIS function and treat a throw as `blocked` + the thrown code — never as a silent
+   * `expired`」 — so the rebase created a NEW production branch inside
+   * `evaluateCancelRoundFinalInLock`. A new branch that only a comment describes is a latent defect
+   * in this repo's discipline, so it is gated here.
+   *
+   * WHY IT IS REACHABLE, not a theoretical cell. §2-G4 is explicitly a TWO-TIME-POINT evaluation:
+   * the decision re-derives from the original document's CURRENT metadata, so a template/seed whose
+   * policy was legal at creation and was re-tagged afterwards lands here. That is exactly what
+   * fixture B does — one `UPDATE` between creation and decision, nothing else.
+   *
+   * THE ISOLATION. A and B are seeded identically (same anchor age, same legal 90-day window, same
+   * attendance target, same port double, same action) and differ in ONE field: B's `windowDays` is
+   * pushed out of `leave`'s ceiling AFTER its round exists. A is therefore the in-case positive
+   * control for every zero B asserts — without it, `blocked` would also be what a fixture that
+   * never redeems in the first place produces.
+   *
+   * WHAT THIS CASE DOES NOT PROVE, stated rather than implied: the `catch` matches the two
+   * derivation codes BY CODE rather than by `instanceof ServiceError`, which is defensive against a
+   * future statement moving inside the `try` (`CANCEL_ROUND_INVARIANT_VIOLATION` and
+   * `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` must stay rollback-and-retry, never an irreversible
+   * `blocked`). TODAY the `try` contains only the derivation call, so no other error can arise
+   * inside it and that narrowing has NO oracle here. It is disclosed as a guard without a gate, not
+   * claimed as tested.
+   */
+  it(
+    '判据 IV / §2-G4 (rebase onto C-1): a `windowDays` that became OUT-OF-DOMAIN between creation ' +
+      'and decision closes the round `blocked` with the derivation\'s own code — never a silent ' +
+      '`expired`, never a redemption, zero completion events and zero announcements — while the ' +
+      'twin whose policy stayed legal redeems and announces once',
+    async () => {
+      const suffixA = `g4ok-${TS}`
+      const suffixB = `g4blk-${TS}`
+      let attachedA: { requestId: string; orgId: string } | undefined
+      let attachedB: { requestId: string; orgId: string } | undefined
+      const fixtureA = await seedPendingCancelRound(suffixA, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        attachedA = await attachAttendanceRequest(documentId, `wi13-req-${suffixA}`)
+      })
+      const fixtureB = await seedPendingCancelRound(suffixB, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        attachedB = await attachAttendanceRequest(documentId, `wi13-req-${suffixB}`)
+      })
+      expect(attachedA).toBeTruthy()
+      expect(attachedB).toBeTruthy()
+
+      // B's round was created under a LEGAL policy — pinned as a value, so the block below cannot
+      // be confused with a creation that was refused (C-1's 负控 A covers the creation-time half).
+      const createSnapshotB = await pool().query<{ policy_snapshot_at_create: Record<string, unknown> }>(
+        `SELECT policy_snapshot_at_create FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixtureB.roundInstanceId],
+      )
+      expect(createSnapshotB.rows[0].policy_snapshot_at_create.roundPolicy).toEqual({
+        suite: 'leave',
+        windowDays: 90,
+      })
+
+      // ── THE ONE FIELD. 365 > `leave`'s ceiling of 90, applied AFTER the round exists, so only the
+      //    DECISION-time derivation sees it.
+      await setDocumentWindowDays(fixtureB.documentId, 365)
+
+      const portStub = bindCancellationPort(async (input) => ({
+        kind: 'legacy_compat',
+        response: {
+          ok: true,
+          data: {
+            requestId: input.routeInput.requestId,
+            status: 'cancelled',
+            orgId: input.routeInput.orgId,
+            userId: input.routeInput.actorId,
+            reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
+          },
+        },
+      }))
+      expectCancelledEventDeliveryBound()
+      const cancelledEvents = captureCancelledEvents()
+      const captureA = captureCompletionEvents(fixtureA.roundInstanceId)
+      const captureB = captureCompletionEvents(fixtureB.roundInstanceId)
+      let approveB: Response
+      try {
+        const approveA = await jsonRequest(
+          baseUrl,
+          `/api/approvals/${fixtureA.roundInstanceId}/actions`,
+          fixtureA.approverToken,
+          { method: 'POST', body: { action: 'approve' } },
+        )
+        expect(approveA.status, await approveA.clone().text()).toBe(200)
+        approveB = await jsonRequest(
+          baseUrl,
+          `/api/approvals/${fixtureB.roundInstanceId}/actions`,
+          fixtureB.approverToken,
+          { method: 'POST', body: { action: 'approve' } },
+        )
+        // 200, not a 409 rethrow: the derivation's refusal is CONVERTED into a durable C-3 close,
+        // which is what 「never as a silent expired」 and 「never a 500」 both come down to.
+        expect(approveB.status, await approveB.clone().text()).toBe(200)
+      } finally {
+        captureA.stop()
+        captureB.stop()
+        portStub.stop()
+        cancelledEvents.stop()
+      }
+
+      // ── THE CONTROL (A): the identical fixture whose policy stayed legal redeemed and announced.
+      expect(captureA.seen).toEqual(['approval.approved'])
+      expect(await roundOutcome(fixtureA.roundInstanceId)).toMatchObject({ outcome: 'applied' })
+      expect(cancelledEvents.forRequest(attachedA!.requestId).length).toBe(1)
+
+      // ── THE SUBJECT (B). C-1 was NOT invoked for B — the port saw exactly the ONE call A made,
+      //    so 「零业务取消」 is a measured absence and not an empty fixture.
+      expect(portStub.calls.length).toBe(1)
+      expect(portStub.calls[0].routeInput.requestId).toBe(attachedA!.requestId)
+      expect(cancelledEvents.forRequest(attachedB!.requestId).length).toBe(0)
+      expect(captureB.seen).toEqual([])
+
+      const dtoB = (await approveB.json()) as { id?: string; status?: string }
+      expect(dtoB.id).toBe(fixtureB.roundInstanceId)
+      expect(dtoB.status).toBe('rejected')
+
+      // `blocked`, NOT `expired` — the distinction C-1's prescription is about. `block_reason`
+      // carries the derivation's own code through the bounded `business_blocked:<code>` token.
+      const roundB = await pool().query<{
+        outcome: string
+        ended_at: Date | null
+        block_reason: string | null
+        policy_snapshot_at_decision: Record<string, unknown> | null
+      }>(
+        `SELECT outcome, ended_at, block_reason, policy_snapshot_at_decision
+           FROM approval_rounds WHERE engine_instance_id = $1`,
+        [fixtureB.roundInstanceId],
+      )
+      expect(roundB.rows.length).toBe(1)
+      expect(roundB.rows[0].outcome).toBe('blocked')
+      expect(roundB.rows[0].outcome).not.toBe('expired')
+      expect(roundB.rows[0].ended_at).not.toBeNull()
+      expect(roundB.rows[0].block_reason).toBe('business_blocked:CANCEL_ROUND_WINDOW_OUT_OF_RANGE')
+
+      // The decision snapshot says 「the policy could not be evaluated, and here is why」 rather than
+      // fabricating a suite/window pair — the implementer choice registered in the design MD.
+      expect(roundB.rows[0].policy_snapshot_at_decision).not.toBeNull()
+      const decisionB = roundB.rows[0].policy_snapshot_at_decision as Record<string, unknown>
+      expect(decisionB.roundPolicy).toBeNull()
+      expect(decisionB.roundPolicyError).toBe('CANCEL_ROUND_WINDOW_OUT_OF_RANGE')
+
+      // The system sentinel closed it, and the audit row names the same code — 「历史记录必须能查出来」.
+      const recordsB = await pool().query<{ actor_id: string; metadata: Record<string, unknown> }>(
+        `SELECT actor_id, metadata FROM approval_records
+          WHERE instance_id = $1 AND to_status = 'rejected'`,
+        [fixtureB.roundInstanceId],
+      )
+      expect(recordsB.rows.length).toBe(1)
+      expect(recordsB.rows[0].actor_id).toBe('system:approval-cancel-round')
+      expect(recordsB.rows[0].metadata.cancelRoundOutcome).toBe('blocked')
+      expect(recordsB.rows[0].metadata.cancelRoundCloseReason).toBe(
+        'business_blocked:CANCEL_ROUND_WINDOW_OUT_OF_RANGE',
+      )
     },
   )
 })
