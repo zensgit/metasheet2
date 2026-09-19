@@ -56,6 +56,20 @@ export const ZH = {
   unarchiveSuccess: '已启用表单',
   unarchiveError: '启用表单失败',
   cancel: '取消',
+  // Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive "分组视图" toggle. `viewMode`
+  // defaults to 'flat' (unchanged existing behavior); these keys back the new sectioned view only.
+  viewModeFlat: '平铺视图',
+  viewModeGrouped: '分组视图',
+  groupSectionsLoading: '正在加载分组…',
+  groupSectionsLoadError: '加载分组失败',
+  groupSectionEmpty: '此分组暂无表单',
+  groupSectionLoadMore: '加载更多',
+  groupSectionMoveUp: '上移分组',
+  groupSectionMoveDown: '下移分组',
+  groupReorderError: '调整分组顺序失败',
+  groupItemMovePlaceholder: '移动到…',
+  groupItemMoveLabel: '将表单移动到分组',
+  groupItemMoveError: '移动表单分组失败',
 } as const
 
 export const EN: Record<keyof typeof ZH, string> = {
@@ -101,4 +115,16 @@ export const EN: Record<keyof typeof ZH, string> = {
   unarchiveSuccess: 'Template enabled',
   unarchiveError: 'Failed to enable template',
   cancel: 'Cancel',
+  viewModeFlat: 'Flat view',
+  viewModeGrouped: 'Grouped view',
+  groupSectionsLoading: 'Loading groups...',
+  groupSectionsLoadError: 'Failed to load groups',
+  groupSectionEmpty: 'No templates in this group',
+  groupSectionLoadMore: 'Load more',
+  groupSectionMoveUp: 'Move group up',
+  groupSectionMoveDown: 'Move group down',
+  groupReorderError: 'Failed to reorder groups',
+  groupItemMovePlaceholder: 'Move to...',
+  groupItemMoveLabel: 'Move template to group',
+  groupItemMoveError: 'Failed to move template',
 }

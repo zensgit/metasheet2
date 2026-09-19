@@ -85,10 +85,19 @@ const cloneTemplateSpy = vi.fn<[string], Promise<any>>().mockResolvedValue({
   name: 'Clone',
   visibilityScope: { type: 'all', ids: [] },
 })
+// Approval form grouping lock v2.13 §4 row D / §6 phase 3 (A-4) — NOT imported by
+// TemplateCenterView.vue's own script (only TemplateGroupSections.vue calls it). Present here
+// solely as a discriminating spy for 'renders a category tag per row' below: I6 confines the
+// org-scoped group join to the additive section/reorder endpoints, so the flat table's category
+// tag must never reach this function. If it ever did, this mock still supplies a value (rather
+// than leaving the import undefined and throwing) so the failure surfaces as a red assertion on
+// the spy, not an unrelated TypeError.
+const listApprovalTemplateGroupsSpy = vi.fn<[], Promise<unknown[]>>().mockResolvedValue([])
 
 vi.mock('../src/approvals/api', () => ({
   listTemplateCategories: () => listTemplateCategoriesSpy(),
   cloneTemplate: (id: string) => cloneTemplateSpy(id),
+  listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
 }))
 
 // ---------------------------------------------------------------------------
@@ -386,6 +395,8 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     loadTemplatesSpy.mockResolvedValue(undefined)
     listTemplateCategoriesSpy.mockClear()
     listTemplateCategoriesSpy.mockResolvedValue(['请假', '采购'])
+    listApprovalTemplateGroupsSpy.mockClear()
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
     cloneTemplateSpy.mockClear()
     cloneTemplateSpy.mockResolvedValue({
       id: 'tpl_clone_new',
@@ -486,14 +497,60 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     expect(arg?.category).toBeUndefined()
   })
 
+  // Approval form grouping lock v2.13 §4 row D pins this test BY NAME for phase 3 re-pinning
+  // ("按测试名钉,不按行号" — the earlier draft's "语义保留" claim conflicted with §6 and was
+  // withdrawn). What actually changed with grouping's arrival is NOT this tag's rendering — I6
+  // confines the org-scoped group join to the additive `section=`/reorder endpoints and
+  // explicitly forbids it from reaching `listTemplates`/`applyTemplateVisibilityFilter` (the flat
+  // path this view reads) — it is what the test asserts. Re-pinned to (a) also cover row D's
+  // `category <> ''` exclusion at the display layer (previously only implicit in `v-if`'s JS
+  // truthiness, never asserted) and (b) make the flat/grouped split a tested invariant rather
+  // than an implicit one: this view's category tag must never consult group linkage.
   it('renders a category tag per row', async () => {
+    mockTemplates.value = [
+      buildTemplate({ id: 'tpl_a', name: '出差申请', category: '请假' }),
+      buildTemplate({ id: 'tpl_b', name: '采购申请', category: '采购' }),
+      buildTemplate({ id: 'tpl_c', name: '其他申请', category: null }),
+      // §4 row D: the empty-string legacy edge case ("空串是只能直连 DB 写出的遗留形态") is
+      // explicitly excluded from the category fallback, same footing as null — pinned here at
+      // the display layer, not just the section-listing read path (already covered by row D's
+      // own real-DB case, approval-template-groups-sections.db.test.ts:218).
+      buildTemplate({ id: 'tpl_d', name: '遗留申请', category: '' }),
+    ]
+    mockTotal.value = mockTemplates.value.length
     await mountView()
     const tags = container!.querySelectorAll('[data-testid="template-center-row-category"]')
-    // 2 rows have a non-null category; the uncategorized one shows `未分组`.
+    // Still 2 — null AND '' both fall through to the empty state (`未分类`), neither renders a tag.
     expect(tags.length).toBe(2)
     const tagTexts = Array.from(tags).map((el) => (el.textContent ?? '').trim())
     expect(tagTexts).toContain('请假')
     expect(tagTexts).toContain('采购')
+
+    // I6 guard: the flat table's tag is the raw `category` column alone — it must never trigger
+    // a group-linkage lookup. Mutation target: make this branch consult group state (eg call
+    // listApprovalTemplateGroups() to decide tag visibility) → this assertion goes red.
+    expect(listApprovalTemplateGroupsSpy).not.toHaveBeenCalled()
+
+    // Gate impl-gate-A4-round1-20260918.md P3-3: the assertion above is "asserts not called" with
+    // no SAME-FILE positive control proving the spy would register a call if one were made — i.e.
+    // nothing here rules out the assertion passing vacuously because the mock wiring itself is
+    // broken (wrong module path, a hoisting break, a stale import), independent of what
+    // `TemplateCenterView.vue` actually does.
+    //
+    // A call-SITE positive control (proving THIS component calls the function on some other path)
+    // cannot be built in this file: `TemplateCenterView.vue`'s own script never imports
+    // `listApprovalTemplateGroups` at all (only `TemplateGroupSections.vue` does, for the phase-3
+    // grouped view) — see that real call-site positive control at
+    // `approvalTemplateCenterSections.spec.ts`'s `expect(listApprovalTemplateGroupsSpy)
+    // .toHaveBeenCalledTimes(1)` assertion, same spy function, different component.
+    //
+    // What CAN be checked here, in this file, is that the mock wiring is the live binding rather
+    // than a dead one: call the mocked module's own export directly and confirm it reaches this
+    // exact spy instance. This does not prove the component calls it — it proves that if the
+    // component ever did, `not.toHaveBeenCalled()` above would not pass vacuously.
+    const { listApprovalTemplateGroups } = await import('../src/approvals/api')
+    await listApprovalTemplateGroups()
+    expect(listApprovalTemplateGroupsSpy).toHaveBeenCalledTimes(1)
   })
 
   it('renders visibility scope summary per row', async () => {
