@@ -88,9 +88,12 @@ Result: **3/3 runs reproduced** the exact reported failure —
 the table is the boundary module and nothing else` → `ENOENT: no such file or directory,
 open '.../packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts'` at
 `role-assignment-boundary.test.ts:893` (`fs.readFileSync(path.join(REPO_ROOT, file),
-'utf8')`), byte-identical to the two Opus reports. The instrumentation was reverted via
-`cp` backup/restore (`cmp` confirmed byte-identical to the pre-instrumentation original)
-before any real change was made — nothing from this step is in the diff.
+'utf8')`), byte-identical to the two Opus reports. (Line 893 is in the temporarily
+instrumented copy of the file used for this repro run — the handshake code shifts line
+numbers; the shipped, uninstrumented `role-assignment-boundary.test.ts` has the same
+`readFileSync` call at line 872.) The instrumentation was reverted via `cp` backup/restore
+(`cmp` confirmed byte-identical to the pre-instrumentation original) before any real
+change was made — nothing from this step is in the diff.
 
 ## 4. Fix (option (a) — isolate the fixture, never touch the live tree)
 
@@ -128,22 +131,89 @@ confirmed byte-identical to the fixed version.
 Temporarily reverted the fix in a copy of the fixed file (scratch file written back to
 `packages/core-backend/src/attendance/` inside the live tree, exactly as before), re-added
 the §3 handshake instrumentation to both files, and re-ran the same deterministic repro
-command. Result: **reds again**, the identical `ENOENT` at
-`role-assignment-boundary.test.ts:891`. This confirms the isolation in §4 — not something
-else — is what removes the race. Reverted via `cp` backup/restore; `cmp` confirmed both
-files byte-identical to their intended final state (fixed inventory test with no
-instrumentation; untouched original `role-assignment-boundary.test.ts`).
+command. Result: **reds again**, the identical `ENOENT` at the same read site (line 891 in
+that run's instrumented copy — the instrumentation added to `role-assignment-boundary.test.ts`
+for this probe shifts its line numbers by two versus the shipped file's line 872, same
+caveat as §3). This confirms the isolation in §4 — not something else — is what removes
+the race. Reverted via `cp` backup/restore; `cmp` confirmed both files byte-identical to
+their intended final state (fixed inventory test with no instrumentation; untouched
+original `role-assignment-boundary.test.ts`).
 
 ## 6. Post-fix confirmation
 
 - `NIT-3` alone, and the full `w4c3a-rollout-control-inventory.test.ts` file (16/16),
   pass unchanged.
-- The two implicated files run together, `--pool=forks`, **20/20 consecutive clean runs,
-  zero `ENOENT`** (`for i in 1..20; do vitest run --pool=forks <both files>; done`).
 - `role-assignment-boundary.test.ts` is untouched — `cmp` against `origin/main`'s copy is
   byte-identical (zero diff on that file in the final PR).
+- The two implicated files run together, `--pool=forks`, **20/20 consecutive clean runs,
+  zero `ENOENT`** — but this by itself is **not discriminating evidence for the fix**: an
+  isolated two-file run of the ORIGINAL (buggy) pair was already shown in §2/§3 to be
+  green too (both forks start together and `role-assignment-boundary.test.ts` finishes its
+  listing before the inventory test even reaches `NIT-3`), so the same 20 plain runs would
+  have passed before the fix as well. Recorded here only as a cheap smoke check, not as
+  proof.
+- The actual proof that the race is gone, not just harder to hit, is structural plus
+  Mutation B: §3's deterministic handshake method has no precondition left to exploit
+  post-fix, because its precondition — a transient write to a path
+  `role-assignment-boundary.test.ts` sweeps — no longer exists (the scratch file lives in
+  an isolated `os.tmpdir()` git repo that shares no path with `packages/core-backend/src`
+  or `plugins`). §5 Mutation B is the discriminating test: re-introducing the live-tree
+  write and re-running the identical deterministic method reproduces the exact `ENOENT`
+  again, which is what shows the fix — not incidental timing — is what closes the race.
 
-## 7. Attendance four-census-pin check
+## 7. Sweep for other live-tree writers (is this the only instance?)
+
+`collectSweptFiles()` walks all of `packages/core-backend/src` and `plugins`, not just
+the `attendance/` subtree, and `role-assignment-boundary.test.ts`'s own header already
+names this exact hazard as established doctrine ("never a write into the real tree,
+which would race sibling suites under `pool: 'forks'`"). Fixing the one instance the
+brief named is not the same claim as "the flake is closed" unless nothing else in the
+tree does the same thing, so this was checked directly rather than assumed.
+
+**Static sweep** — every `writeFileSync` / `appendFileSync` / `renameSync` /
+`symlinkSync` / `copyFileSync` call in every `*.test.*`/`*.spec.*` file under
+`packages/core-backend` and `plugins` (90 call sites) was enumerated and each
+destination traced. Findings:
+
+- The `plugin-integration-core` provenance-clone helpers (`copyFileSync` into `dest`)
+  write into their own `fs.mkdtempSync(os.tmpdir())` clone, never into the live tree —
+  read-only against `REPO_ROOT`, safe.
+- Two OTHER test files in `packages/core-backend` already carry this exact hazard as
+  **known, previously-fixed** history, both with their own explicit code comments
+  naming it:
+  - `tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts` — its decoy
+    scratch file "previously lived at `src/attendance/zz-w6r4-decoy-scratch.ts`" (inside
+    a pinned `w7-w6r5` guard root) and was moved to
+    `packages/core-backend/tests/unit/zz-w6r4-decoy-scratch.ts` specifically because that
+    prior location raced `attendance-w7-w6r5-preservation-guard.test.ts` under
+    `pool: 'forks'` — the comment describes catching this as a "latent nondeterministic
+    red" independently. `tests/unit/` is outside both that guard's pinned roots and
+    `role-assignment-boundary.test.ts`'s `SWEEP_ROOTS` (`packages/core-backend/src`,
+    `plugins`), so this is already safe with respect to the bug fixed here.
+  - `tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts` — its
+    untracked-scope decoy is written to `path.dirname(fileURLToPath(import.meta.url))`
+    (its own test-file directory, `tests/unit/`), with a comment stating plainly that the
+    positive-control decoys in the same file "intentionally never touch the real
+    `packages/core-backend/src/` tree (another suite walks it recursively and races a
+    transient file there)". Also outside `SWEEP_ROOTS` — already safe.
+- No other call site in the 90 writes into a path resolved against `ROOT` / `REPO_ROOT`
+  / `__dirname` / `process.cwd()` under `packages/core-backend/src` or `plugins`; every
+  other write target is either an isolated `mkdtemp` directory, the test file's own
+  `tests/unit`/`__tests__` directory (outside both `SWEEP_ROOTS`), or a fixture path
+  that never resolves under either swept root.
+
+**Empirical corroboration** — polled `git status --porcelain packages/core-backend/src
+plugins` every 150ms for the full duration of a second complete
+`CI=true pnpm --filter @metasheet/core-backend test` run (945/1120 files passed, 0
+failed, same as §9): **zero transient entries observed**. This is a sampling check (a
+write-then-delete narrower than the poll interval could be missed), so it corroborates
+rather than substitutes for the static sweep above, which is exhaustive by construction.
+
+**Conclusion**: the fixed `NIT-3` was the only live, unguarded writer into
+`role-assignment-boundary.test.ts`'s swept roots. The claim in §9 ("full-suite green")
+is not resting on the absence of other writers being merely assumed.
+
+## 8. Attendance four-census-pin check
 
 Per `feedback_attendance_new_file_census_trio`, the four pins (s6a workflow-hash pin,
 W7-R10 `classification.ts`, the `attendance-w4c2-ci-wiring` CI-suite corpus, and the
@@ -164,7 +234,7 @@ as a mechanical sanity pass, and all four are green with no re-pin required:
 
 No pin file was modified.
 
-## 8. Full-suite confirmation
+## 9. Full-suite confirmation
 
 `CI=true pnpm --filter @metasheet/core-backend test` (the exact required `test (20.x)`
 step, `vitest` default discovery, `pool: 'forks'`), one run, full corpus:
@@ -176,7 +246,7 @@ Test Files  945 passed | 175 skipped (1120)
 
 Zero failures, zero `ENOENT`.
 
-## 9. Scope
+## 10. Scope
 
 Only test files were touched:
 `packages/core-backend/src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts`
