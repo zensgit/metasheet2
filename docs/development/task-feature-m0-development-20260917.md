@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：`df373559c39f84336bf8ae91294c0a6d9d420f10`（本轮提交；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；祖先 `136dbcea3` 是 rebase 后的上一修复轮 SHA-record）
+- head SHA：`43d2c4935a6d51cc72f4996d9296a6c6fa4f50a2`（加速补丁；repair 祖先 `df373559c`；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`）
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
