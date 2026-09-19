@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -205,7 +205,14 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
         await page.locator('.meta-grid__row [data-attachment-download]').first().click()
         const downloaded = await attachmentResponse
         assert.equal(downloaded.status(), 200, 'Workbench attachment click must authenticate through the real browser')
-        assert.equal(await (await downloadEvent).failure(), null)
+        const download = await downloadEvent
+        assert.equal(await download.failure(), null)
+        const downloadPath = await download.path()
+        assert.ok(downloadPath, 'Browser must persist the restored attachment download')
+        const attachmentId = decodeURIComponent(new URL(downloaded.url()).pathname.split('/').at(-1))
+        assert.equal(attachmentId, 'manual-live-attachment')
+        const expectedBytes = Buffer.from(`synthetic-${attachmentId}`)
+        assert.deepEqual(await readFile(downloadPath), expectedBytes, 'Saved browser download must equal archived source bytes')
         assert.deepEqual(errors, [])
         assert.deepEqual(apiFailures, [])
       }
