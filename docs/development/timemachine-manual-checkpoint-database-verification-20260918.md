@@ -1469,3 +1469,24 @@ causes exactly two backend failures, restored GREEN; log
 This is a diagnostic refusal, not new attachment write authority. No dedicated
 real-DB/browser proof for this latest diagnostic is claimed yet; existing HTTP
 capture and scalar browser evidence precede this checkpoint.
+
+## HTTP Attachment Diagnostic And CI Facade Repair
+
+Code `ce9dbc7c5` adds a real attachment field before HTTP capture, then changes
+only that live field. Whole-sheet, selected-record and selected-attachment-field
+preview return `unsupported_attachments`, executable=false and null identity.
+Unchanged state and scalar-only selection return no_changes. Fixture data/version/
+timestamp are restored in finally. Full isolated runner PASS, with database,
+connections and cluster cleaned. Removing attachment enumeration yields the
+precise HTTP semantic failure no_changes instead of unsupported_attachments;
+restored full runner GREEN. Logs `/private/tmp/tm-attachment-preview-realdb.log`,
+`/private/tmp/tm-attachment-preview-http-mutation.log` and
+`/private/tmp/tm-attachment-preview-http-restored.log`.
+
+Remote `da985c8e131a47f1501b7df6b12fc3fa4d1719e2` Node18 job 105850321249
+failed the reconstructor's production-consumer census because the acceptance
+script called the internal section reader. This was a deterministic integration
+mistake, not a runner flake. The script now uses only the public complete-state
+facade for positive and refusal reads. The consumer guard was NOT changed.
+Reconstructor/reader/preview 3 files 44/44, acceptance tsc and diff-check PASS.
+Fresh remote CI is still required for the repaired head.
