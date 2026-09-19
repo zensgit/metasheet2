@@ -10,6 +10,7 @@ import { CompiledQuery, Kysely, PostgresDialect, sql } from 'kysely'
 const require = createRequire(import.meta.url)
 const migration = require('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages.ts') as typeof import('../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages')
 const { createArchiveAttachmentStageLedger } = require('../src/multitable/recovery-archive-attachment-stage-ledger.ts') as typeof import('../src/multitable/recovery-archive-attachment-stage-ledger')
+const { stampClaimedAttachmentPurge } = require('../src/multitable/attachment-purge-claim.ts') as typeof import('../src/multitable/attachment-purge-claim')
 assert.equal(process.env.NODE_ENV, 'test')
 const url = new URL(process.env.TM_MANUAL_TEST_ADMIN_URL ?? 'http://invalid')
 assert.equal(url.protocol, 'postgresql:')
@@ -33,6 +34,17 @@ try {
   await admin.query(`CREATE DATABASE "${database}"`)
   created = true
   db = new Kysely({ dialect: new PostgresDialect({ pool: new Pool({ ...connection, database, max: 3 }) }) })
+  await sql`CREATE TABLE multitable_attachments (id text PRIMARY KEY,storage_path text,
+    deleted_at timestamptz,blob_purge_claimed_at timestamptz,blob_purged_at timestamptz)`.execute(db)
+  const purgeQuery = async (text: string, params?: unknown[]) => ({ rows: (await db!.executeQuery(CompiledQuery.raw(text, params))).rows })
+  await sql`INSERT INTO multitable_attachments VALUES ('attachment','old/object',NULL,now(),NULL)`.execute(db)
+  assert.equal(await stampClaimedAttachmentPurge(purgeQuery, 'attachment', 'old/object'), false)
+  await sql`UPDATE multitable_attachments SET storage_path='restored/object',deleted_at=now()`.execute(db)
+  assert.equal(await stampClaimedAttachmentPurge(purgeQuery, 'attachment', 'old/object'), false)
+  assert.equal((await sql<{ value: unknown }>`SELECT blob_purged_at AS value FROM multitable_attachments`.execute(db)).rows[0]?.value, null)
+  assert.equal(await stampClaimedAttachmentPurge(purgeQuery, 'attachment', 'restored/object'), true)
+  assert.equal(await stampClaimedAttachmentPurge(purgeQuery, 'attachment', 'restored/object'), false)
+  console.log('PASS: late purge completion cannot stamp a restored or replacement attachment object')
   // Minimal owning-table fixture: this gate proves the new ledger, not the complete migration stream.
   await sql`CREATE TABLE public.meta_recovery_archives (
     generation_id uuid PRIMARY KEY,workspace_id text,base_id text,sheet_id text,

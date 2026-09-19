@@ -119,6 +119,23 @@ by this checkpoint. The public preview still refuses attachment differences.
 - Merged #5849 base `868c8d2b...` now has 29 terminal checks, zero pending/bad.
   This is base evidence, not CI for this unpublished successor.
 
+## Late Purge Completion Protection
+
+- Guarded direct/orphan/sweep completion stamps require the claimed storage path,
+  a deleted row, an outstanding purge claim and no previous completion. An old
+  storage callback cannot mark a restored or replacement attachment as purged.
+  Flag-disabled legacy stamp SQL is unchanged.
+- Attachment service/cleanup unit tests: 49/49 PASS, including stale completion
+  counted as skipped rather than deleted. Core two-project type-check PASS.
+- Owned PostgreSQL stage gate: active row refused; old path after replacement
+  refused; matching deleted object stamped once; repeat refused. Ledger gates
+  remain green. Database/connections zero and owned cluster removed.
+- Mutation removed the storage-path predicate: real PostgreSQL assertion at
+  `verify-recovery-attachment-stage.mts:43` failed (true versus false). Restored
+  implementation passed. Logs: `/private/tmp/tm-attachment-purge-path-mutation-20260919.log`
+  and `/private/tmp/tm-attachment-purge-path-restored-20260919.log`.
+- This is a restore prerequisite, not metadata writeback or browser acceptance.
+
 ## Remaining Required Work
 
 Authenticated-reader integration; prepared file ownership and crash cleanup;
@@ -129,8 +146,8 @@ browser acceptance; required CI wiring and independent exact-head review.
 Existing `unsupported_attachments` remains in force until that chain is complete.
 
 Sol high's bounded read-only integration review was closed while running without
-a terminal verdict. No external approval is claimed. #5849 post-merge CI was
-still running with no observed failure; PR-head green is not substituted for it.
+a terminal verdict. No external approval is claimed. #5849 post-merge CI later
+reached the terminal base result recorded above; it is not successor CI evidence.
 No flags, dispatch, deployment, real environment or customer storage/data access.
 The read-only nightly plan is in the paired design lock; it has not been executed
 against any real environment.
