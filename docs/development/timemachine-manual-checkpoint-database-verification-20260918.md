@@ -1,6 +1,31 @@
 # Manual Archive Checkpoint Database Verification
 
-Status: LOCAL CANDIDATE; no runtime caller, enablement or deployment.
+Status: Draft/HOLD #5849; runtime caller implemented; no enablement or deployment.
+
+## Current Evidence Matrix (2026-09-19)
+
+Checkpoint: `2afb1cfaca48734aef82fb0cde8ec3bfa659ee9e`.
+Remote main observed: `bb77ca5f2ce3c2825265ec8877861d367d017ead`.
+The sections below are chronological, SHA-scoped evidence. Their original
+limitations must not be read as the latest implementation status or erased.
+
+| Requirement | Evidence and current boundary |
+| --- | --- |
+| Server-owned capture scope and policy | Actual HTTP registrar and canonical authorization/database: anonymous 401, injected storage path 400, zero generation side effects; synthetic authentication, not tenant login |
+| Complete immutable capture and retry | HTTP capture/status/catalog, closed recoverable result, same-request retry with exactly one generation; see HTTP Attachment Capture Acceptance |
+| Attachment source independence | Completed generation returns exact archived bytes while an owned source file is absent; a fresh capture fails incomplete without publishing objects |
+| Existing scalar restore loop | Production component/client at 1440/390 through HTTP, confirmed scalar restore, one request and independent DB/history readback; see Source Independence And Browser Regression |
+| Attachment restore boundary | Not authorized or implemented as a write; real HTTP preview returns unsupported_attachments with no token for differing attachment fields; scalar-only selection remains supported |
+| Diagnostic regression | Reader/reconstructor/preview 44/44; client/modal 154/154; HTTP enumeration-removal mutation RED, restored full isolated runner GREEN |
+| Source and fixture containment | Task-owned synthetic storage/PostgreSQL only; source file and DB fixture values restored in finally; owned database/connections/cluster cleaned |
+| Latest remote acceptance | Still pending at this observation; no failure reported, but Node18/20 and two Web gates remain in progress; not a terminal-green claim |
+| Independent review | Bounded Terra reader review produced no terminal verdict; no independent approval claimed |
+| Operational acceptance | No full tenant login/UAT, customer storage, flag enablement or deployment; whole hard-deleted table resurrection excluded |
+
+Commands and mutation logs remain in their respective sections. A newer CI
+result must bind its own exact head; this table is not a substitute for that gate.
+
+## Historical Database Extension Baseline
 
 Parent: `b843d37cc21e665f7f0686a4d21b0cc14fc64105`.
 Main inspected: `89f1ecdee2c3b70205a318074824c834bc6a5c7e`.

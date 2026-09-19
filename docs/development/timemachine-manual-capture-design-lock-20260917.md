@@ -1,8 +1,33 @@
 # Time Machine Manual Capture Contract
 
-Status: OWNER-CONFIRMED bounded scope; implementation and acceptance OPEN.
+Status: OWNER-CONFIRMED bounded scope; Draft/HOLD #5849; remote acceptance OPEN.
 
-Latest local acceptance: `067b0154794a91222407e29e9c8ae84c5d2208d2` joins
+## Current Evidence Index (2026-09-19)
+
+Evidence checkpoint: `2afb1cfaca48734aef82fb0cde8ec3bfa659ee9e`.
+Remote main observed: `bb77ca5f2ce3c2825265ec8877861d367d017ead`.
+This index supersedes the status wording in the chronological checkpoints below,
+not their SHA-specific evidence or the owner-confirmed authority boundaries.
+
+- Manual HTTP capture, durable retry/status, catalog and existing scalar restore
+  have isolated synthetic PostgreSQL acceptance. Production component/client
+  capture and scalar restore also have 1440/390 Chromium evidence.
+- Immutable attachment capture, authenticated complete-state reading and reading
+  a completed archive after loss of its original source file have local evidence.
+  This replaces the early statement that all immutable attachment work is open.
+- Attachment restore writes remain outside the confirmed contract. Preview now
+  refuses differing attachment values with `unsupported_attachments`, no execution
+  token and no write. Scalar-only selection retains its existing behavior.
+- Exact checkpoint remote CI is not terminal at this observation. Prior green
+  heads do not prove this head. Full login/tenant UAT, enablement and deployment
+  are not claimed; hard-deleted table resurrection remains excluded.
+
+See `timemachine-manual-checkpoint-database-verification-20260918.md` for the
+requirement-to-evidence matrix and the limitations of each evidence class.
+
+## Historical Implementation Checkpoints
+
+Earlier local acceptance: `067b0154794a91222407e29e9c8ae84c5d2208d2` joins
 the production modal/client to HTTP capture, status, catalog and preview at desktop
 and mobile widths. `49a590333952d88a37435253cdfe94b061dcdcd1` additionally
 executes a real HTTP restore of a synthetic changed scalar field, proves its sealed
