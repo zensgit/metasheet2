@@ -1256,3 +1256,24 @@ production claim makes the focused test RED; restoring it gives cleanup 15/15.
 Logs: `/private/tmp/tm-cleanup-ci-{red,green,mutation,restored}.log`.
 The old failed remote matrix is not treated as a pass; the next pushed SHA needs
 fresh CI. Attachment end-to-end capture/publication/restore remains incomplete.
+
+## Attachment Manifest Reconciliation (Local Checkpoint)
+
+`f7284a457b0e4771196547642bc79d5031a93356` extends the existing sealed snapshot
+manifest compiler, preserving the ten-section manifest shape. Before building the
+unsigned manifest/MAC preimage, it reconciles every attachments_index row with
+exactly one sealed attachment and its reserved object nonce. Original ID, immutable
+source version, plaintext digest and byte size must agree. It rejects absent/extra
+attachments, swapped identities/versions/digests, wrong size/tag, nonce reuse and
+wrong reservation identity. A deleted attachment index row is included in the
+positive case. This is compiler evidence, not a runtime attachment source proof.
+
+Crypto/reader/compiler neighbors: 3 files, 92/92. Acceptance tsc, source ESLint and
+diff-check pass. Temporarily removing reconciliation makes the exact attachment
+test RED; restoration returns all tests GREEN. Logs:
+`/private/tmp/tm-attachment-manifest-{unit,mutation,final,tsc,lint}.log`.
+No DB run was needed for these two pure compiler/test files. No external review
+verdict is claimed for this increment. This checkpoint is local until a later
+ordinary push; remote CI must not be inferred from these local results.
+Source-pin reads, provider attachment receipts, finalization, source release and
+restored attachment-byte consumption still need end-to-end integration.
