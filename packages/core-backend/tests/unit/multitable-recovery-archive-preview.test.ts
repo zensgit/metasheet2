@@ -187,6 +187,7 @@ function objectRows() {
 function queryFixture(options: {
   archiveVisible?: boolean
   objects?: readonly Record<string, unknown>[]
+  attachmentMetadata?: Record<string, Record<string, unknown>>
 } = {}) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     const normalized = sql.replace(/\s+/g, ' ')
@@ -219,6 +220,12 @@ function queryFixture(options: {
     }
     if (normalized.includes('FROM meta_fields')) {
       return { rows: [{ id: FIELD_ID, type: 'text', property: {} }] }
+    }
+    if (normalized.includes('FROM multitable_attachments a')) {
+      expect(normalized).toContain('FOR SHARE OF a')
+      expect(params?.slice(1)).toEqual([SHEET_ID, RECORD_ID, 'files'])
+      const metadata = options.attachmentMetadata?.[String(params?.[0])]
+      return { rows: metadata ? [{ metadata }] : [] }
     }
     throw new Error(`unexpected query: ${normalized}`)
   })
@@ -467,6 +474,56 @@ describe('Time Machine recovery archive preview authority', () => {
       }))
       expect(result.previewIdentity).toBeNull()
     }
+  })
+
+  it('binds both removed and restored attachment metadata without storage IO during preview', async () => {
+    dependencies.readRecoveryArchiveCompleteSectionState.mockResolvedValue({
+      records: new Map([[RECORD_ID, { ...targetRecords.get(RECORD_ID)!, data: { files: ['att-old'] } }]]), links: [],
+      attachments_index: [{ entity_key: 'attachment/att-old', payload: {
+        attachment_id: 'att-old', record_id: RECORD_ID, field_id: 'files', deleted: false } }],
+    })
+    dependencies.loadLiveByIdForPreview.mockResolvedValue({ ok: true,
+      liveById: new Map([[RECORD_ID, { data: { files: ['att-new'] }, version: 7 }]]),
+    })
+    dependencies.loadFieldSurfaceForPreview.mockResolvedValue({
+      fieldIds: new Set(['files']), fieldById: new Map([['files', { type: 'attachment' }]]),
+      rawTypeById: new Map([['files', 'attachment']]), writableLinkFieldIds: new Set(),
+    })
+    const attachmentStorage = { uploadByKey: vi.fn(), readRecoveryAttachment: vi.fn(), reserveRecoveryAttachment: vi.fn() }
+    const metadata = { storage_provider: 'local', storage_file_id: 'retained-file', storage_path: 'retained-path',
+      filename: 'synthetic.bin', mime_type: 'application/octet-stream', size: 3 }
+    const attachmentMetadata = { 'att-old': { ...metadata }, 'att-new': { ...metadata } }
+    const fixture = queryFixture({ attachmentMetadata })
+    const preview = () => previewRecoveryArchive(makeTransaction(fixture.query, { inTransaction: false }), fixture.query,
+      { ...runtime, attachmentStorage }, makeInput())
+    const first = await preview()
+    expect(first).toMatchObject({ executable: true, blockedReason: null })
+    const claims = (result: typeof first) => verifyExactArchiveRecoveryIdentity(result.previewIdentity!, {
+      sheetId: SHEET_ID, actorId: ACTOR_ID,
+    })
+    const original = claims(first)
+    expect(original.valid).toBe(true)
+    for (const id of ['att-old', 'att-new'] as const) {
+      attachmentMetadata[id].storage_path += '-changed'
+      const next = claims(await preview())
+      expect(next.valid).toBe(true)
+      if (original.valid && next.valid) expect(next.claims.archivePlanHash).not.toBe(original.claims.archivePlanHash)
+      attachmentMetadata[id].storage_path = metadata.storage_path
+    }
+    attachmentMetadata['att-old'].storage_provider = 'unsupported'
+    await expect(preview()).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID' })
+    const missing = queryFixture()
+    await expect(previewRecoveryArchive(makeTransaction(missing.query, { inTransaction: false }), missing.query,
+      { ...runtime, attachmentStorage }, makeInput()))
+      .rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID' })
+    attachmentMetadata['att-old'].storage_provider = 'local'
+    dependencies.buildPreviewPlanDetails.mockReturnValueOnce({
+      summary: summary(), plan: { reverts: [], resurrects: [], createdAfterAnchor: [], deletedAtAnchorLiveNow: [] },
+      revertWrites: [], deleteRecordIds: Array.from({ length: 5000 }, (_, index) => `delete-${index}`),
+    })
+    expect(await preview()).toMatchObject({ executable: false, blockedReason: 'unsupported_attachments', previewIdentity: null })
+    expect(dependencies.buildRecoveryArchiveAsyncPlan).not.toHaveBeenCalled()
+    for (const callback of Object.values(attachmentStorage)) expect(callback).not.toHaveBeenCalled()
   })
 
   it('does not mint a token for no-op, schema-drift, or resurrection plans', async () => {

@@ -1955,7 +1955,8 @@ try {
       })
       attachmentApp.use('/api/multitable', univerMetaRouter({
         recoveryArchiveRuntime: { keyCustody: attachmentCustody,
-          transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
+          transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider,
+          attachmentStorage: sourceStorage },
         recoveryArchiveDatabaseRuntime: { query, transaction: uploadInput.transaction,
           transactionDepthProbe: attachmentCapture.transactionDepth },
         recoveryArchiveAuditedReplayHorizonMs: 60000,
@@ -1998,21 +1999,22 @@ try {
         const previewAttachmentScope = async (scope: Record<string, unknown>) => {
           const response = await fetch(previewUrl, { method: 'POST', headers,
             body: JSON.stringify({ generationId: result.data.generationId, mode: 'revert', scope }) })
-          assert.equal(response.status, 200)
-          return (await response.json() as { data: { blockedReason: string; executable: boolean; previewIdentity: string | null } }).data
+          const body = await response.json() as { data: { blockedReason: string; executable: boolean; previewIdentity: string | null } }
+          assert.equal(response.status, 200, JSON.stringify(body))
+          return body.data
         }
         assert.equal((await previewAttachmentScope({ kind: 'whole_sheet' })).blockedReason, 'no_changes')
         const beforeAttachmentEdit = (await query(`SELECT data,version,updated_at FROM meta_records WHERE id='manual-source-record'`)).rows[0]
         try {
           await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}',$1::jsonb),version=version+1
-            WHERE id='manual-source-record'`, [JSON.stringify([syntheticAttachments[0].id])])
+            WHERE id='manual-source-record'`, [JSON.stringify((state.records.get('manual-source-record')!.data!['manual-attachment-field'] as string[]).slice(0, 1))])
           for (const scope of [{ kind: 'whole_sheet' },
             { kind: 'selected_records', recordIds: ['manual-source-record'] },
             { kind: 'selected_fields', recordIds: ['manual-source-record'], fieldIds: ['manual-attachment-field'] }]) {
             const preview = await previewAttachmentScope(scope)
-            assert.equal(preview.blockedReason, 'unsupported_attachments')
-            assert.equal(preview.executable, false)
-            assert.equal(preview.previewIdentity, null)
+            assert.equal(preview.blockedReason, null)
+            assert.equal(preview.executable, true)
+            assert.equal(typeof preview.previewIdentity, 'string')
           }
           assert.equal((await previewAttachmentScope({ kind: 'selected_fields', recordIds: ['manual-source-record'],
             fieldIds: ['manual-source-field'] })).blockedReason, 'no_changes')
@@ -2020,8 +2022,8 @@ try {
           await query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
             [JSON.stringify(beforeAttachmentEdit.data), beforeAttachmentEdit.version, beforeAttachmentEdit.updated_at])
         }
-        console.log('PASS: HTTP preview distinguishes attachment-only change from no_changes in whole/record/field scope; scalar-only selection preserved, no execution identity issued')
-        // Exercise the production reader/staging/canonical facade without enabling its public preview.
+        console.log('PASS: HTTP preview binds attachment-only change in whole/record/field scope; scalar-only no_changes preserved')
+        // Keep fault-injection coverage at the canonical facade before exercising public execution.
         const identityApi = require('../src/multitable/restore-preview-identity.ts') as typeof import('../src/multitable/restore-preview-identity')
         const planApi = require('../src/multitable/recovery-archive-sync-plan.ts') as typeof import('../src/multitable/recovery-archive-sync-plan')
         const metadataApi = require('../src/multitable/recovery-archive-attachment-apply.ts') as typeof import('../src/multitable/recovery-archive-attachment-apply')
@@ -2177,6 +2179,50 @@ try {
         assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'token-replayed' })
         assert.equal(uploadAttempts, afterUploads)
         console.log('PASS: authenticated two-file restore; second upload, second metadata and final receipt failures leave no partial live effect; same-token retry reuses both files; canonical adoption and token replay verified')
+        await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+        const publicScope = { kind: 'selected_fields', recordIds: [recordId], fieldIds: [fieldId] }
+        const publicPreview = await previewAttachmentScope(publicScope)
+        assert.equal(publicPreview.executable, true)
+        assert.equal(typeof publicPreview.previewIdentity, 'string')
+        const executeUrl = url.replace('/captures', '/execute')
+        const executeBody = JSON.stringify({ previewIdentity: publicPreview.previewIdentity, scope: publicScope })
+        const beforePublic = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        assert.equal((await fetch(executeUrl, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: executeBody })).status, 401)
+        assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        const stageCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages')).rows[0].n
+        const stagesBeforePublic = await stageCount()
+        const retainedFilename = (await query('SELECT filename FROM multitable_attachments WHERE id=$1', [restoredIds[0]])).rows[0].filename
+        try {
+          await query('UPDATE multitable_attachments SET filename=$2 WHERE id=$1', [restoredIds[0], 'synthetic-metadata-drift.bin'])
+          const drifted = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(drifted.status, 409, JSON.stringify(await drifted.json()))
+          assert.equal(await stageCount(), stagesBeforePublic, 'metadata drift must refuse before staging')
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        } finally {
+          await query('UPDATE multitable_attachments SET filename=$2 WHERE id=$1', [restoredIds[0], retainedFilename])
+        }
+        const alteredSelection = await fetch(executeUrl, { method: 'POST', headers,
+          body: JSON.stringify({ previewIdentity: publicPreview.previewIdentity,
+            scope: { ...publicScope, fieldIds: ['manual-source-field'] } }) })
+        assert.equal(alteredSelection.status, 409, JSON.stringify(await alteredSelection.json()))
+        assert.equal(await stageCount(), stagesBeforePublic, 'changed selection must refuse before staging')
+        const publicResponse = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+        const publicResult = await publicResponse.json()
+        assert.equal(publicResponse.status, 200, JSON.stringify(publicResult))
+        assert.equal(publicResult.ok, true)
+        assert.equal(publicResult.data.revertedCount, 1)
+        assert.equal(publicResult.data.resurrectedCount, 0)
+        const afterPublic = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        assert.deepEqual(afterPublic.data[fieldId], restoredIds)
+        assert.equal(Number(afterPublic.version), Number(beforePublic.version) + 1)
+        for (const id of restoredIds) {
+          const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
+          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, Buffer.from(`synthetic-${id}`))
+        }
+        assert.equal((await fetch(executeUrl, { method: 'POST', headers, body: executeBody })).status, 409)
+        assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], afterPublic)
+        console.log('PASS: public HTTP preview/execution restores both original attachment bytes, checks authentication, increments once and refuses token replay')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)

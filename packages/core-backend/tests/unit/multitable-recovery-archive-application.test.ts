@@ -58,6 +58,36 @@ afterEach(() => {
 })
 
 describe('recovery archive application composition', () => {
+  it('snapshots the complete attachment port without calling storage during composition', async () => {
+    const attachmentStorage = {
+      uploadByKey: vi.fn(async function (this: unknown) { expect(this).toBe(attachmentStorage) }),
+      readRecoveryAttachment: vi.fn(), reserveRecoveryAttachment: vi.fn(),
+    }
+    const originalUpload = attachmentStorage.uploadByKey
+    const app = createRecoveryArchiveApplication(() => ({ ...fakeComposition(fakeProviders()), attachmentStorage }),
+      () => fakeDatabaseRuntime().runtime, ENABLED_ENV)
+    const captured = app.routerOptions?.recoveryArchiveRuntime?.attachmentStorage
+    expect(captured).toBeDefined()
+    expect(Object.isFrozen(captured)).toBe(true)
+    for (const method of Object.values(attachmentStorage)) expect(method).not.toHaveBeenCalled()
+    attachmentStorage.uploadByKey = vi.fn()
+    await captured!.uploadByKey('synthetic-key', Buffer.from('synthetic'))
+    expect(originalUpload).toHaveBeenCalledTimes(1)
+    expect(attachmentStorage.uploadByKey).not.toHaveBeenCalled()
+    await app.stopWorker()
+  })
+
+  it.each(['uploadByKey', 'readRecoveryAttachment', 'reserveRecoveryAttachment'] as const)(
+    'rejects incomplete attachment capability missing %s before resolving the database', missing => {
+      const attachmentStorage = { uploadByKey: vi.fn(), readRecoveryAttachment: vi.fn(), reserveRecoveryAttachment: vi.fn() }
+      delete (attachmentStorage as Partial<typeof attachmentStorage>)[missing]
+      const resolveDatabase = vi.fn(() => fakeDatabaseRuntime().runtime)
+      expect(() => createRecoveryArchiveApplication(() => ({ ...fakeComposition(fakeProviders()), attachmentStorage }),
+        resolveDatabase, ENABLED_ENV)).toThrow('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED')
+      expect(resolveDatabase).not.toHaveBeenCalled()
+    },
+  )
+
   it('forwards only explicitly configured immutable manual capture policy', async () => {
     const manualCapture = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 60, expiresAfterSeconds: 600 }
     const composition = { ...fakeComposition(fakeProviders()), manualCapture }

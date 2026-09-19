@@ -8,12 +8,11 @@ import { lockArchiveSyncBinding, prepareMaterializedArchiveRecoveryPreviewScopeI
 import { buildPreviewPlanDetails, loadFieldSurfaceForPreview, loadLiveByIdForPreview } from './exact-anchor-recovery-route'
 import { hydrateLiveLinkProjection } from './live-link-projection-integrity'
 import { planArchiveAttachmentCells, projectArchiveAttachmentCells } from './recovery-archive-attachment-plan'
-import { hashArchiveAttachmentMetadata } from './recovery-archive-attachment-apply'
+import { loadArchiveAttachmentMetadataBindings } from './recovery-archive-attachment-apply'
 import type { RecoveryArchiveAttachmentBatch } from './recovery-archive-attachment-batch'
 import { createArchiveAttachmentStageLedger } from './recovery-archive-attachment-stage-ledger'
 import { stageRecoveryArchiveAttachment } from './recovery-archive-attachment-stage'
-import { assertRecoveryArchiveSyncPlanMatchesClaims, compileRecoveryArchiveSyncPlan,
-  type RecoveryArchiveAttachmentMetadataBinding } from './recovery-archive-sync-plan'
+import { assertRecoveryArchiveSyncPlanMatchesClaims, compileRecoveryArchiveSyncPlan } from './recovery-archive-sync-plan'
 import type { ExactArchiveRecoveryIdentityClaims } from './restore-preview-identity'
 
 /** Server-only preparation. No caller-supplied path, metadata hash or staged descriptor is trusted. */
@@ -56,20 +55,7 @@ export async function prepareArchiveAttachmentBatch(input: {
       revertWrites: projectArchiveAttachmentCells(details.revertWrites, live, cells),
       deleteRecordIds: details.deleteRecordIds }
     if (!(await apply.evaluatePlanAuthorization(query, context))) refused()
-    const metadata: RecoveryArchiveAttachmentMetadataBinding[] = []
-    const seen = new Set<string>()
-    for (const cell of cells) {
-      for (const attachmentId of new Set([...cell.beforeIds, ...cell.targetIds])) {
-        if (seen.has(attachmentId)) refused()
-        seen.add(attachmentId)
-        const found = await query(`SELECT to_jsonb(a) AS metadata FROM multitable_attachments a
-          WHERE id=$1 AND sheet_id=$2 AND record_id=$3 AND field_id=$4`,
-        [attachmentId, apply.sheetId, cell.recordId, cell.fieldId])
-        if (found.rows.length !== 1) refused()
-        metadata.push({ attachmentId, recordId: cell.recordId, fieldId: cell.fieldId,
-          metadataHash: hashArchiveAttachmentMetadata((found.rows[0] as { metadata: unknown }).metadata) })
-      }
-    }
+    const metadata = await loadArchiveAttachmentMetadataBindings(query, apply.sheetId, cells)
     const binding = archive.selectedBinding
     assertRecoveryArchiveSyncPlanMatchesClaims(compileRecoveryArchiveSyncPlan({
       workspaceId: binding.workspaceId, baseId: binding.baseId, sheetId: apply.sheetId, actorId: apply.actorId,

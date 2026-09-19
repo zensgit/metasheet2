@@ -4,10 +4,34 @@ import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-cr
 import type { ArchiveAttachmentStageIdentity } from './recovery-archive-attachment-stage'
 import { lockVerifiedArchiveAttachmentStage } from './recovery-archive-attachment-stage-ledger'
 import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
+import type { ArchiveAttachmentCellPlan } from './recovery-archive-attachment-plan'
+import type { RecoveryArchiveAttachmentMetadataBinding } from './recovery-archive-sync-plan'
 
 /** Fingerprint only database JSON metadata; no pathname/filename is placed in a preview response. */
 export function hashArchiveAttachmentMetadata(metadata: unknown): string {
   return createHash('sha256').update(canonicalizeRecoveryArchiveJson(metadata)).digest('hex')
+}
+
+/** Transaction-only preview/preparation binding, including removed as well as restored references. */
+export async function loadArchiveAttachmentMetadataBindings(query: QueryFn, sheetId: string,
+  cells: readonly ArchiveAttachmentCellPlan[]): Promise<RecoveryArchiveAttachmentMetadataBinding[]> {
+  const bindings: RecoveryArchiveAttachmentMetadataBinding[] = []
+  const seen = new Set<string>()
+  for (const cell of cells) for (const attachmentId of new Set([...cell.beforeIds, ...cell.targetIds])) {
+    if (seen.has(attachmentId)) refused()
+    seen.add(attachmentId)
+    const found = await query(`SELECT to_jsonb(a) AS metadata FROM multitable_attachments a
+      WHERE id=$1 AND sheet_id=$2 AND record_id=$3 AND field_id=$4 FOR SHARE OF a`,
+    [attachmentId, sheetId, cell.recordId, cell.fieldId])
+    if (found.rows.length !== 1) refused()
+    const row = (found.rows[0] as { metadata?: Record<string, unknown> }).metadata
+    if (!row || row.storage_provider !== 'local' || typeof row.storage_path !== 'string' || !row.storage_path
+      || typeof row.storage_file_id !== 'string' || !row.storage_file_id
+      || typeof row.filename !== 'string' || !row.filename || typeof row.mime_type !== 'string' || !row.mime_type) refused()
+    bindings.push({ attachmentId, recordId: cell.recordId, fieldId: cell.fieldId,
+      metadataHash: hashArchiveAttachmentMetadata(row) })
+  }
+  return bindings
 }
 
 /**

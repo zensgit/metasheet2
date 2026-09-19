@@ -17,6 +17,7 @@ import { applyRecoveryArchiveSyncRestore } from './recovery-archive-sync-restore
 import {
   assertRecoveryArchiveSyncPlanMatchesClaims,
   compileRecoveryArchiveSyncPlan,
+  RecoveryArchiveSyncPlanError,
 } from './recovery-archive-sync-plan'
 import { verifyExactArchiveRecoveryIdentity } from './restore-preview-identity'
 
@@ -87,7 +88,8 @@ export async function executeRecoveryArchiveSync(
       selectedRecordIds,
       selectedFieldIds,
     })
-    assertRecoveryArchiveSyncPlanMatchesClaims(plan, verified.claims)
+    // With the attachment port, preparation re-derives the complete v1/v2 plan before any file write.
+    if (!runtime.attachmentStorage) assertRecoveryArchiveSyncPlanMatchesClaims(plan, verified.claims)
   } catch {
     return { ok: false, reason: 'identity-invalid' }
   }
@@ -137,8 +139,10 @@ export async function executeRecoveryArchiveSync(
       selectedRecordIds,
       selectedFieldIds,
       auditedReplayHorizonMs: input.auditedReplayHorizonMs,
+      ...(runtime.attachmentStorage ? { attachmentStorage: runtime.attachmentStorage } : {}),
     })
   } catch (error) {
+    if (error instanceof RecoveryArchiveSyncPlanError) return { ok: false, reason: 'identity-invalid' }
     if (error instanceof RecoveryArchiveReaderError) {
       throw new RecoveryArchivePreviewError('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
     }
