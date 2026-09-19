@@ -135,7 +135,17 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       assert.equal(preview.data.executable, false)
       assert.equal(await page.locator('[data-test="archive-recovery-execute"]').count(), 0)
       assert.deepEqual(forbiddenWrites, [])
-      const verifyRestored = await syntheticEdit()
+      const verifyRestored = await syntheticEdit(workbench ? async () => {
+        await page.getByRole('dialog', { name: 'Archive recovery', exact: true }).getByRole('button', { name: 'Close archive recovery', exact: true }).click()
+        await page.getByRole('gridcell', { name: 'Synthetic files', exact: true }).dblclick()
+        const deleted = await Promise.all([
+          ...['manual-second-attachment', 'manual-live-attachment'].map(id => page.waitForResponse(response =>
+            response.request().method() === 'DELETE' && new URL(response.url()).pathname === `/api/multitable/attachments/${id}`)),
+          page.locator('.meta-cell-editor__clear-btn').click(),
+        ])
+        for (const response of deleted.slice(0, 2)) assert.equal(response.status(), 200)
+        await page.waitForFunction(() => document.querySelectorAll('.meta-grid__row .meta-attachment-list__item').length === 0)
+      } : undefined)
       if (workbench) {
         await page.reload()
         await openWorkbenchArchive()
@@ -245,7 +255,7 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
         assert.deepEqual(apiFailures, [])
       }
       await page.close()
-      console.log(`PASS: Chromium ${width} ${kind} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request, ${workbench ? 'empty-to-two attachment grid refresh' : 'one refresh event'} and database/history readback`)
+      console.log(`PASS: Chromium ${width} ${kind} production component/client -> HTTP capture/reload/catalog/preview/confirmed restore; one explicit restore request, ${workbench ? 'real cell-editor two-attachment deletion and empty-to-two grid restore' : 'one refresh event'} and database/history readback`)
     }
   } catch (error) {
     for (const context of browser?.contexts() ?? []) {

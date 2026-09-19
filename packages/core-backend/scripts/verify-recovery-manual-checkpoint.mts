@@ -2347,16 +2347,27 @@ try {
         console.log('PASS: production attachment download route returns both restored original binaries; anonymous download refuses')
         if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
           const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
-          const syntheticAttachmentEdit = async () => {
+          const syntheticAttachmentEdit = async (editThroughBrowser?: () => Promise<void>) => {
             const before = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
             const historyCount = async () => (await query(`SELECT count(*)::int AS n FROM meta_record_revisions
               WHERE record_id=$1 AND source='restore'`, [recordId])).rows[0].n
             const beforeHistory = await historyCount()
-            await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+            if (editThroughBrowser) await editThroughBrowser()
+            else await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+            const edited = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+            assert.deepEqual(edited.data['manual-attachment-field'], [])
+            assert.equal(Number(edited.version), Number(before.version) + (editThroughBrowser ? restoredIds.length : 1))
+            if (editThroughBrowser) {
+              const revisions = (await query(`SELECT changed_field_ids,patch FROM meta_record_revisions
+                WHERE record_id=$1 AND version>$2 AND source='attachment' ORDER BY version`, [recordId, before.version])).rows
+              assert.equal(revisions.length, restoredIds.length)
+              assert.ok(revisions.every(row => JSON.stringify(row.changed_field_ids) === JSON.stringify([fieldId])))
+              assert.deepEqual(revisions.at(-1)?.patch, { [fieldId]: [] })
+            }
             return async () => {
               const after = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
               assert.deepEqual(after.data, before.data)
-              assert.equal(Number(after.version), Number(before.version) + 2)
+              assert.equal(Number(after.version), Number(edited.version) + 1)
               assert.equal(await historyCount(), beforeHistory + 1)
               for (const id of restoredIds) {
                 const metadata = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
