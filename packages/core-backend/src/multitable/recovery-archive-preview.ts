@@ -15,7 +15,9 @@ import {
   loadAuthoritativeLiveLinkEdgesForSheet,
 } from './live-link-projection-integrity'
 import type { QueryFn } from './permission-service'
-import { canonicalizeRecoveryArchiveJson } from './recovery-archive-manifest'
+import type { StorageProvider } from '../services/StorageService'
+import { planArchiveAttachmentCells, projectArchiveAttachmentCells, type ArchiveAttachmentCellPlan } from './recovery-archive-attachment-plan'
+import { loadArchiveAttachmentMetadataBindings } from './recovery-archive-attachment-apply'
 import {
   RECOVERY_ARCHIVE_ASYNC_THRESHOLD,
 } from './recovery-archive-restore-plan'
@@ -84,6 +86,8 @@ export interface RecoveryArchivePreviewRuntime {
   readonly keyCustody: RecoveryArchiveCustodyInput
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly transactionDepth: RecoveryArchiveTransactionDepthProbe
+  /** Server-owned only; absence preserves attachment refusal and scalar/link behavior. */
+  readonly attachmentStorage?: Pick<StorageProvider, 'uploadByKey' | 'readRecoveryAttachment' | 'reserveRecoveryAttachment'>
 }
 
 export type RecoveryArchivePreviewScope =
@@ -263,6 +267,26 @@ export async function previewRecoveryArchive(
     fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
   }
 
+  let attachmentChanges = false
+  let attachmentCells: readonly ArchiveAttachmentCellPlan[] = []
+  if (details.summary.driftCount === 0 && details.summary.resurrectIds.length === 0
+    && [...surface.rawTypeById.values()].includes('attachment')) {
+    try {
+      const cells = planArchiveAttachmentCells({ targets: complete.records, live: authoritativeLiveById,
+        fieldTypes: surface.rawTypeById, index: complete.attachments_index,
+        ...(selectedRecordIds.length ? { selectedRecordIds } : {}),
+        ...(selectedFieldIds.length ? { selectedFieldIds } : {}) })
+      attachmentChanges = cells.length > 0
+      attachmentCells = cells
+      if (attachmentChanges) {
+        const writes = projectArchiveAttachmentCells(details.revertWrites, authoritativeLiveById, cells)
+        details = { ...details, revertWrites: writes, summary: { ...details.summary,
+          reverts: writes.map(write => ({ recordId: write.recordId, fieldIds: write.changedFieldIds })),
+          effectiveWriteCount: writes.length + details.summary.resurrectIds.length + details.deleteRecordIds.length } }
+      }
+    } catch { fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID') }
+  }
+
   if (!(await admitted.evaluatePlanAuthorization(query, {
     mode: admitted.mode,
     sheetId: admitted.sheetId,
@@ -280,18 +304,11 @@ export async function previewRecoveryArchive(
   if (details.summary.resurrectIds.length > 0) {
     return blockedResult(admitted, 'inbound_unprovable', details.summary)
   }
-  // Attachment writes are outside the current restore contract; do not report them as no-op.
-  for (const [recordId, target] of complete.records) {
-    if (!target.exists || (selectedRecordIds.length > 0 && !selectedRecordIds.includes(recordId))) continue
-    const live = authoritativeLiveById.get(recordId)
-    if (!live) continue
-    for (const [fieldId, type] of surface.rawTypeById) {
-      if (type !== 'attachment' || (selectedFieldIds.length > 0 && !selectedFieldIds.includes(fieldId))) continue
-      if (canonicalizeRecoveryArchiveJson(target.data?.[fieldId] ?? [])
-        !== canonicalizeRecoveryArchiveJson(live.data[fieldId] ?? [])) {
-        return blockedResult(admitted, 'unsupported_attachments', details.summary)
-      }
-    }
+  if (attachmentChanges && (typeof runtime.attachmentStorage?.uploadByKey !== 'function'
+    || typeof runtime.attachmentStorage.readRecoveryAttachment !== 'function'
+    || typeof runtime.attachmentStorage.reserveRecoveryAttachment !== 'function'
+    || BigInt(details.summary.effectiveWriteCount) > RECOVERY_ARCHIVE_ASYNC_THRESHOLD)) {
+    return blockedResult(admitted, 'unsupported_attachments', details.summary)
   }
   if (details.summary.effectiveWriteCount === 0) {
     return blockedResult(admitted, 'no_changes', details.summary)
@@ -430,6 +447,11 @@ export async function previewRecoveryArchive(
     keyId: archive.keyId,
     selectedRecordIds,
     selectedFieldIds,
+    ...(attachmentChanges ? { attachmentMetadata: await transaction(async lockedQuery => {
+      if (!(await admitted.recheckAuthority(lockedQuery))) fail('RECOVERY_ARCHIVE_PREVIEW_AUTHORITY_DENIED')
+      try { return await loadArchiveAttachmentMetadataBindings(lockedQuery, admitted.sheetId, attachmentCells) }
+      catch { fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID') }
+    }) } : {}),
   })
   const previewIdentity = mintExactArchiveRecoveryIdentity({
     sheetId: admitted.sheetId,

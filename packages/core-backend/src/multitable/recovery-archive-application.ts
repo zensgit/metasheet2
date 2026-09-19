@@ -42,6 +42,7 @@ export interface RecoveryArchiveApplicationComposition {
   readonly workerIntervalMs: number
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
   readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
+  readonly attachmentStorage?: RecoveryArchivePreviewRuntime['attachmentStorage']
 }
 
 export type RecoveryArchiveApplicationCompositionFactory = () => RecoveryArchiveApplicationComposition
@@ -99,6 +100,7 @@ export function createRecoveryArchiveApplication(
     keyCustody: composition.keyCustody,
     objectStore: composition.objectStore,
     transactionDepth: database.transactionDepthProbe,
+    ...(composition.attachmentStorage ? { attachmentStorage: composition.attachmentStorage } : {}),
   })
   const workerInput: Readonly<CreateRecoveryArchiveRestoreWorkerInput> = Object.freeze({
     transaction: database.transaction,
@@ -220,6 +222,7 @@ function snapshotComposition(
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
     ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
+    ...(source.attachmentStorage === undefined ? {} : { attachmentStorage: snapshotAttachmentStorage(source.attachmentStorage) }),
   }
   if (!composition.keyCustody || typeof composition.keyCustody !== 'object') throw new Error(COMPOSITION_INVALID)
   // Resolve only authentic local capabilities; preserve the original input and its revocation checks.
@@ -248,6 +251,15 @@ function snapshotComposition(
     throw new Error(COMPOSITION_INVALID)
   }
   return Object.freeze(composition)
+}
+
+function snapshotAttachmentStorage(source: NonNullable<RecoveryArchivePreviewRuntime['attachmentStorage']>):
+  NonNullable<RecoveryArchivePreviewRuntime['attachmentStorage']> {
+  if (!source || typeof source.uploadByKey !== 'function' || typeof source.readRecoveryAttachment !== 'function'
+    || typeof source.reserveRecoveryAttachment !== 'function') throw new Error(COMPOSITION_INVALID)
+  return Object.freeze({ uploadByKey: source.uploadByKey.bind(source),
+    readRecoveryAttachment: source.readRecoveryAttachment.bind(source),
+    reserveRecoveryAttachment: source.reserveRecoveryAttachment.bind(source) })
 }
 
 function snapshotDatabaseRuntime(

@@ -149,16 +149,49 @@ export interface RecoveryArchiveOpenedSnapshot {
   readonly sections: RecoveryArchiveOpenedSections
 }
 
-type OpenedAttachment = { sourceVersion: string; plaintextSha256: string; bytes: Buffer }
+type AttachmentOriginalScope = {
+  generationId: string
+  workspaceId: string
+  baseId: string
+  sheetId: string
+  recordId: string | null
+  fieldId: string | null
+}
+type OpenedAttachment = {
+  sourceVersion: string; plaintextSha256: string; bytes: Buffer
+  original: AttachmentOriginalScope
+  sizeBytes: string
+  mediaType: string | null
+  deleted: boolean
+}
 const openedAttachments = new WeakMap<object, ReadonlyMap<string, OpenedAttachment>>()
 
 /** Internal bytes stay off serialized preview DTOs; each access returns an independent copy. */
 export function readRecoveryArchiveAttachmentBytes(
   state: RecoveryArchiveOpenedSnapshot | RecoveryArchiveCompleteSectionState, attachmentId: string,
-): OpenedAttachment {
+): Pick<OpenedAttachment, 'sourceVersion' | 'plaintextSha256' | 'bytes'> {
   const attachment = openedAttachments.get(state)?.get(attachmentId)
   if (!attachment) fail('RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
-  return { ...attachment, bytes: Buffer.from(attachment.bytes) }
+  return { sourceVersion: attachment.sourceVersion, plaintextSha256: attachment.plaintextSha256,
+    bytes: Buffer.from(attachment.bytes) }
+}
+
+/** Restore source authority comes from the private authenticated index, never a caller's row projection. */
+export function readRecoveryArchiveAttachmentSource(
+  state: RecoveryArchiveOpenedSnapshot | RecoveryArchiveCompleteSectionState,
+  attachmentId: string,
+  original: AttachmentOriginalScope & { recordId: string; fieldId: string },
+): Pick<OpenedAttachment, 'sourceVersion' | 'plaintextSha256' | 'bytes' | 'sizeBytes' | 'mediaType'> {
+  const attachment = openedAttachments.get(state)?.get(attachmentId)
+  if (!attachment || attachment.deleted || !original.recordId || !original.fieldId
+    || attachment.original.generationId !== original.generationId
+    || attachment.original.workspaceId !== original.workspaceId
+    || attachment.original.baseId !== original.baseId
+    || attachment.original.sheetId !== original.sheetId
+    || attachment.original.recordId !== original.recordId
+    || attachment.original.fieldId !== original.fieldId) fail('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+  return { ...readRecoveryArchiveAttachmentBytes(state, attachmentId),
+    sizeBytes: attachment.sizeBytes, mediaType: attachment.mediaType }
 }
 
 function readerKeys(input: unknown, keys: readonly string[]): readonly string[] {
@@ -387,7 +420,11 @@ export async function readRecoveryArchiveCompleteSectionsInternal(
         const id = item.attachment_id
         if (typeof id !== 'string' || attachments.has(id) || typeof item.immutable_object_version !== 'string'
           || !item.immutable_object_version.trim() || !isLowercaseSha256Hex(item.plaintext_sha256)
-          || !isCanonicalNonnegativeDecimalString(item.size_bytes)) fail('RECOVERY_ARCHIVE_READER_PLAINTEXT_INVALID')
+          || !isCanonicalNonnegativeDecimalString(item.size_bytes)
+          || (item.record_id !== null && typeof item.record_id !== 'string')
+          || (item.field_id !== null && typeof item.field_id !== 'string')
+          || (item.media_type !== null && typeof item.media_type !== 'string')
+          || typeof item.deleted !== 'boolean') fail('RECOVERY_ARCHIVE_READER_PLAINTEXT_INVALID')
         const object = attachmentObjects.get(id)
         if (!object || object.expectedExpiresAt !== manifest.expires_at) fail('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
         const bytes = Buffer.from(await readObjectBytes(store, object))
@@ -405,7 +442,14 @@ export async function readRecoveryArchiveCompleteSectionsInternal(
           dek: unwrapped.dek, sealed: { nonce, ciphertext: bytes.subarray(12, -16), authTag: bytes.subarray(-16) },
         }))
         attachments.set(id, { sourceVersion: item.immutable_object_version, plaintextSha256: item.plaintext_sha256,
-          bytes: Buffer.from(plaintext) })
+          bytes: Buffer.from(plaintext), sizeBytes: item.size_bytes,
+          mediaType: typeof item.media_type === 'string' ? item.media_type : null,
+          deleted: item.deleted, original: {
+            generationId: manifest.archive_generation_id, workspaceId: manifest.workspace_id,
+            baseId: manifest.base_id, sheetId: manifest.sheet_id,
+            recordId: typeof item.record_id === 'string' ? item.record_id : null,
+            fieldId: typeof item.field_id === 'string' ? item.field_id : null,
+          } })
         plaintext.fill(0)
       }
       const result = freezeOpenedSnapshot(manifest, opened as RecoveryArchiveOpenedSections)

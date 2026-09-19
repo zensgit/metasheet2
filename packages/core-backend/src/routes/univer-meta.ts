@@ -5462,7 +5462,7 @@ function toSummaryDisplay(value: unknown): string {
   return JSON.stringify(value)
 }
 
-function getAttachmentStorageService(): StorageServiceImpl {
+export function getAttachmentStorageService(): StorageServiceImpl {
   if (!multitableAttachmentStorage) {
     const baseUrl = process.env.ATTACHMENT_STORAGE_BASE_URL || 'http://localhost:8900/files'
     multitableAttachmentStorage = StorageServiceImpl.createLocalService(ATTACHMENT_PATH, baseUrl)

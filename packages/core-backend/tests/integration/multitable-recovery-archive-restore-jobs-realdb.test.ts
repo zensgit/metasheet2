@@ -90,9 +90,13 @@ import {
   hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   mintExactArchiveRecoveryIdentity,
+  verifyExactArchiveRecoveryIdentity,
   type ExactArchiveRecoveryIdentityClaims,
 } from '../../src/multitable/restore-preview-identity'
 import { compileRecoveryArchiveSyncPlan } from '../../src/multitable/recovery-archive-sync-plan'
+import type { RecoveryArchiveAttachmentMetadataBinding } from '../../src/multitable/recovery-archive-sync-plan'
+import { createArchiveAttachmentStageLedger } from '../../src/multitable/recovery-archive-attachment-stage-ledger'
+import { hashArchiveAttachmentMetadata } from '../../src/multitable/recovery-archive-attachment-apply'
 import { canonicalizeRecoveryArchiveJson } from '../../src/multitable/recovery-archive-manifest'
 import {
   createRecoveryArchiveDurableFixture,
@@ -705,6 +709,7 @@ function mintScopedSyncToken(
     schema: readonly { id: string; type: string; property: unknown }[]
     selectedRecordIds: readonly string[]
     selectedFieldIds: readonly string[]
+    attachmentMetadata?: readonly RecoveryArchiveAttachmentMetadataBinding[]
   },
 ) {
   const anchorIds = input.scopeKind === 'whole_sheet'
@@ -729,6 +734,7 @@ function mintScopedSyncToken(
     keyId: fixture.keyId,
     selectedRecordIds: input.selectedRecordIds,
     selectedFieldIds: input.selectedFieldIds,
+    ...(input.attachmentMetadata ? { attachmentMetadata: input.attachmentMetadata } : {}),
   })
   const token = mintExactArchiveRecoveryIdentity({
     sheetId: fixture.sheetId,
@@ -883,6 +889,8 @@ async function cleanupFixtures(): Promise<void> {
     )
     const sheetIds = sheets.rows.map((row) => row.id)
     if (sheetIds.length > 0) {
+      await client.query(`DELETE FROM public.meta_recovery_archive_attachment_stages WHERE sheet_id=ANY($1::text[])`, [sheetIds])
+      await client.query(`DELETE FROM public.multitable_attachments WHERE sheet_id=ANY($1::text[])`, [sheetIds])
       await client.query(`DELETE FROM public.meta_recovery_token_burns WHERE sheet_id=ANY($1::text[])`, [sheetIds])
       await client.query(`DELETE FROM public.meta_recovery_archive_sync_receipts WHERE sheet_id=ANY($1::text[])`, [sheetIds])
       await client.query(`DELETE FROM public.meta_recovery_archive_restore_plans WHERE sheet_id=ANY($1::text[])`, [sheetIds])
@@ -989,6 +997,98 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousWriterFenceFlag
     if (previousStrictFlag === undefined) delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     else process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = previousStrictFlag
+  })
+
+  test.each(['success', 'rollback', 'denied', 'drift', 'missing-receipt', 'wrong-adoption', 'wrong-displaced'] as const)('attachment sync transaction: %s', async (scenario) => {
+    const world = await seedSyncApplyWorld(`attachment_${scenario}`)
+    const { fixture, recordId } = world
+    fixture.actorId = randomUUID()
+    const fieldId = `${fixture.sheetId}_files`
+    const attachmentId = `att_${randomUUID()}`
+    await q(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order") VALUES ($1,$2,'Files','attachment','{}',2)`, [fieldId, fixture.sheetId])
+    await q(`INSERT INTO multitable_attachments(id,sheet_id,record_id,field_id,storage_file_id,filename,mime_type,size,storage_path,deleted_at,blob_purged_at)
+      VALUES ($1,$2,$3,$4,$5,'retained.bin','application/octet-stream',4,'old/object',now(),now())`,
+    [attachmentId, fixture.sheetId, recordId, fieldId, randomUUID()])
+    const metadataRow = (await q('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [attachmentId])).rows[0] as { metadata: unknown }
+    const metadata = [{ attachmentId, recordId, fieldId, metadataHash: hashArchiveAttachmentMetadata(metadataRow.metadata) }]
+    const targetRecords = new Map([[recordId, { recordId, exists: true, version: 1,
+      data: { ...world.archivedData, [fieldId]: [attachmentId] } }]])
+    const { token } = mintScopedSyncToken(fixture, { scopeKind: 'whole_sheet', targetRecords,
+      liveRecords: [{ recordId, version: 2 }], selectedRecordIds: [], selectedFieldIds: [],
+      schema: [{ id: world.fieldId, type: 'string', property: {} }, { id: fieldId, type: 'attachment', property: {} }],
+      attachmentMetadata: metadata })
+    const identity = { generationId: fixture.generationId, workspaceId: fixture.workspaceId, baseId: fixture.baseId,
+      sheetId: fixture.sheetId, recordId, fieldId, attachmentId,
+      sourceVersion: `sha256:${'a'.repeat(64)}`, plaintextSha256: 'a'.repeat(64), sizeBytes: '4' }
+    const verifiedToken = verifyExactArchiveRecoveryIdentity(token, { sheetId: fixture.sheetId, actorId: fixture.actorId })
+    expect(verifiedToken.valid).toBe(true)
+    expect(verifiedToken.expiresAt).toBeDefined()
+    const ledger = createArchiveAttachmentStageLedger({ actorId: fixture.actorId, tokenHash: sha(token),
+      tokenExpiresAt: verifiedToken.expiresAt!,
+      transaction, authorize: async () => true })
+    const reserved = await ledger.reserve(identity)
+    await ledger.verified(reserved.objectId, identity)
+    if (scenario === 'drift') await q('UPDATE multitable_attachments SET filename=$2 WHERE id=$1', [attachmentId, 'changed.bin'])
+    const beforeMetadata = (await q('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [attachmentId])).rows
+    const rollback = new Error('synthetic_attachment_later_write_failure')
+    const applyInput = syncApplyInput(fixture, token, scenario === 'rollback' ? async () => { throw rollback } : undefined)
+    applyInput.evaluatePlanAuthorization = async (_query, context) => {
+      expect(context.revertWrites[0]?.changedFieldIds).toContain(fieldId)
+      return scenario !== 'denied'
+    }
+    const applyTransaction: typeof transaction = work => transaction(query => work((text, params) => {
+      if (scenario === 'missing-receipt' && text.includes('INSERT INTO public.meta_recovery_archive_sync_receipts')) {
+        return Promise.resolve({ rows: [] })
+      }
+      if ((scenario === 'wrong-adoption' || scenario === 'wrong-displaced') && text.includes("SET state='applied',applied_operation_id=")) {
+        const changed = [...(params ?? [])]
+        if (scenario === 'wrong-adoption') changed[3] = randomUUID()
+        else changed[5] = 'unrelated/object'
+        return query(text, changed)
+      }
+      return query(text, params)
+    }))
+    const run = () => applyMaterializedExactArchiveRecoverySyncInternal(applyTransaction, applyInput, {
+      workspaceId: fixture.workspaceId, baseId: fixture.baseId, targetRecords, targetLinks: [],
+      selectedRecordIds: [], selectedFieldIds: [], auditedReplayHorizonMs: 0,
+      attachments: { metadata, staged: [{ ...identity, objectId: reserved.objectId }],
+        index: [{ entity_key: `attachment/${attachmentId}`, payload: { attachment_id: attachmentId,
+          record_id: recordId, field_id: fieldId, deleted: false } }] },
+    })
+    if (scenario === 'rollback') await expect(run()).rejects.toThrow(rollback)
+    else if (scenario === 'missing-receipt') await expect(run()).rejects.toThrow('recovery_token_burn_sync_receipt_invalid')
+    else if (scenario === 'wrong-adoption') await expect(run()).rejects.toThrow('archive_attachment_restore_apply_receipt_missing')
+    else if (scenario === 'wrong-displaced') expect(await run()).toEqual({ ok: false, reason: 'preview-drift' })
+    else if (scenario === 'denied') expect(await run()).toEqual({ ok: false, reason: 'forbidden' })
+    else if (scenario === 'drift') expect(await run()).toEqual({ ok: false, reason: 'preview-drift' })
+    else {
+      expect(await run()).toMatchObject({ ok: true, applied: { reverts: 1 } })
+      expect((await q('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows)
+        .toEqual([{ data: targetRecords.get(recordId)!.data, version: 3 }])
+      expect((await q('SELECT storage_file_id,deleted_at,blob_purged_at FROM multitable_attachments WHERE id=$1', [attachmentId])).rows)
+        .toEqual([{ storage_file_id: reserved.objectId, deleted_at: null, blob_purged_at: null }])
+      expect((await q("SELECT changed_field_ids,patch,source FROM meta_record_revisions WHERE record_id=$1 AND source='restore'", [recordId])).rows)
+        .toEqual([{ changed_field_ids: [world.fieldId, fieldId], patch: targetRecords.get(recordId)!.data, source: 'restore' }])
+      expect((await q('SELECT count(*)::int AS n FROM meta_recovery_archive_sync_receipts WHERE sheet_id=$1', [fixture.sheetId])).rows).toEqual([{ n: 1 }])
+      expect((await q(`SELECT s.state,s.displaced_storage_file_id,s.displaced_storage_path,
+        s.applied_operation_id=r.operation_id AS receipt_bound,s.applied_at IS NOT NULL AS adopted
+        FROM meta_recovery_archive_attachment_stages s JOIN meta_recovery_archive_sync_receipts r
+          ON r.token_sha256=s.token_hash WHERE s.attachment_id=$1`, [attachmentId])).rows)
+        .toEqual([{ state: 'applied', displaced_storage_file_id: (metadataRow.metadata as { storage_file_id: string }).storage_file_id,
+          displaced_storage_path: 'old/object', receipt_bound: true, adopted: true }])
+      await expect(q(`UPDATE meta_recovery_archive_attachment_stages SET displaced_storage_path='changed'
+        WHERE attachment_id=$1`, [attachmentId])).rejects.toThrow('archive_attachment_restore_stage_transition')
+      expect(await run()).toEqual({ ok: false, reason: 'token-replayed' })
+      return
+    }
+    expect((await q('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows).toEqual([{ data: world.liveData, version: 2 }])
+    expect((await q('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [attachmentId])).rows).toEqual(beforeMetadata)
+    expect((await q("SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id=$1 AND source='restore'", [recordId])).rows).toEqual([{ n: 0 }])
+    expect((await q('SELECT count(*)::int AS n FROM meta_recovery_token_burns WHERE token_sha256=$1', [sha(token)])).rows).toEqual([{ n: 0 }])
+    expect((await q(`SELECT state,applied_operation_id,applied_at,displaced_storage_file_id,displaced_storage_path
+      FROM meta_recovery_archive_attachment_stages WHERE attachment_id=$1`, [attachmentId])).rows)
+      .toEqual([{ state: 'verified', applied_operation_id: null, applied_at: null,
+        displaced_storage_file_id: null, displaced_storage_path: null }])
   })
 
   test('applies a <=5000 archive sync through L8 and atomically binds burn, seal, and receipt', async () => {

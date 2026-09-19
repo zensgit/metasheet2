@@ -154,13 +154,14 @@ describe('cleanupOrphanMultitableAttachments', () => {
     expect(storage.delete).not.toHaveBeenCalled()
   })
 
-  it('commits the orphan tombstone before calling storage when both flags are enabled', async () => {
+  it.each([false, true])('commits the orphan tombstone before storage and rejects stale completion=%s', async (stale) => {
     vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
     vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
     let committed = false
-    const queryFn = vi.fn().mockResolvedValue({
-      rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_file_id: 'file-1', storage_path: 'sheet-a/unassigned/file-1.bin' }],
-    })
+    const queryFn = vi.fn(async (text: string) => ({
+      rows: stale && text.startsWith('UPDATE') ? []
+        : [{ id: 'att-1', sheet_id: 'sheet-a', storage_file_id: 'file-1', storage_path: 'sheet-a/unassigned/file-1.bin' }],
+    }))
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
@@ -190,11 +191,13 @@ describe('cleanupOrphanMultitableAttachments', () => {
       transactionFn,
       storage,
       logger: new Logger('AttachmentCleanupTest'),
-    })).resolves.toEqual({ inspected: 1, deleted: 1, skipped: 0 })
+    })).resolves.toEqual({ inspected: 1, deleted: stale ? 0 : 1, skipped: stale ? 1 : 0 })
 
     expect(queryFn).toHaveBeenLastCalledWith(
-      'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
-      ['att-1'],
+      `UPDATE multitable_attachments SET blob_purged_at=clock_timestamp()
+    WHERE id=$1 AND storage_path IS NOT DISTINCT FROM $2 AND deleted_at IS NOT NULL
+      AND blob_purge_claimed_at IS NOT NULL AND blob_purged_at IS NULL RETURNING id`,
+      ['att-1', 'sheet-a/unassigned/file-1.bin'],
     )
   })
 

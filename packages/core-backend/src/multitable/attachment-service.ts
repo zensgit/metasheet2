@@ -16,7 +16,7 @@ import * as path from 'path'
 
 import type { StorageServiceImpl } from '../services/StorageService'
 import type { StorageFile } from '../types/plugin'
-import { archiveSourceProtectionEnabled, claimDirectAttachmentPurge, type AttachmentPurgeTransaction } from './attachment-purge-claim'
+import { archiveSourceProtectionEnabled, claimDirectAttachmentPurge, stampClaimedAttachmentPurge, type AttachmentPurgeTransaction } from './attachment-purge-claim'
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -611,8 +611,9 @@ export async function deleteAttachmentBinary(
   input: DeleteAttachmentBinaryInput,
 ): Promise<void> {
   const { storage, storageFileId, storagePath, query, attachmentId } = input
+  const sourceProtected = archiveSourceProtectionEnabled()
   try {
-    if (archiveSourceProtectionEnabled()) {
+    if (sourceProtected) {
       if (!input.transaction || !attachmentId || !query) return
       if (!await claimDirectAttachmentPurge(input.transaction, attachmentId, storageFileId, storagePath)) return
     }
@@ -629,6 +630,10 @@ export async function deleteAttachmentBinary(
 
   if (query && attachmentId) {
     try {
+      if (sourceProtected) {
+        await stampClaimedAttachmentPurge(query, attachmentId, storagePath)
+        return
+      }
       await query(
         'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
         [attachmentId],

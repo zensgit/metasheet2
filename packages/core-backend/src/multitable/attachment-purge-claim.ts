@@ -23,6 +23,17 @@ export async function markAttachmentPurgeClaim(query: FenceQuery, attachmentId: 
   if (result.rows.length !== 1) throw new Error('ATTACHMENT_PURGE_CLAIM_REFUSED')
 }
 
+/** Storage I/O finishes outside the claim transaction; never stamp a replacement object by ID alone. */
+export async function stampClaimedAttachmentPurge(
+  query: FenceQuery, attachmentId: string, storagePath: string | null | undefined,
+): Promise<boolean> {
+  const result = await query(`UPDATE multitable_attachments SET blob_purged_at=clock_timestamp()
+    WHERE id=$1 AND storage_path IS NOT DISTINCT FROM $2 AND deleted_at IS NOT NULL
+      AND blob_purge_claimed_at IS NOT NULL AND blob_purged_at IS NULL RETURNING id`,
+  [attachmentId, storagePath ?? null])
+  return result.rows.length === 1
+}
+
 export async function claimDirectAttachmentPurge(
   transaction: AttachmentPurgeTransaction, attachmentId: string,
   storageFileId: string, storagePath: string | null | undefined,
