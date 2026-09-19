@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：内容 SHA `3aba5d2aa545340416eac7666f291a759ffc16e0`（闸 §8 形状甲 + 门 16 乙；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`）。若其后有 SHA-record 提交，末次仅回填本行。
+- head SHA：本轮内容提交后回填（闸 §9；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。内容 SHA 为前者；若其后有 SHA-record，末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -63,14 +63,14 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
 | 14 | 锁草案 §13 含题号 1–39 各恰一次 | 锁文件 | 见锁 §13 标题 `**N.`（N=1…39） | 39 题标题均在 |
-| 15 | §13-9 / §13-10 / §13-12 标未裁 | 锁 §0 / §11 / §13 前言 / §14-3 | `grep -n -F "未裁" docs/development/task-feature-design-lock-20260917.md` | 四处清单均为 §13-9 / §13-10 / §13-12；§9 表另有这三行 |
+| 15 | §13-9 / §13-10 / §13-12 标未裁 | 文件头 bullet `:9` / §0 `:25` / §11 `:307` / §14-3 `:436`；§13 前言 `:347` 用顿号，另核 | `grep -n -F "§13-9 / §13-10 / §13-12" docs/development/task-feature-design-lock-20260917.md` | `:9` `:25` `:307` `:436` 四行 |
 
 ---
 
 ## 2. 测试
 
 - **本地**：本切片 docs-only，**没有**新增/运行产品测试。未跑 `pnpm test`、未跑 vitest、未跑浏览器。
-- **收集用例数**：本地 0（未收集）。CI：纯 `docs/**` PR 按 `docker-build.yml:6-7` 不跑 build；`web-tests.yml` 无 paths 会跑 required web 闸（既有 394 token，与本 diff 无关）。**不得把 web-tests 绿当成任务 spec 已接线。**
+- **收集用例数**：本地 0（未收集）。CI：`docker-build.yml:3-9` 只有 `push.branches` 与 `workflow_dispatch`，**无 `pull_request` 触发器**，PR 阶段本就不跑 build；合并后因 `paths-ignore` 命中 `docs/**` 不跑 build。`web-tests.yml` 无 paths 会跑 required web 闸（既有 394 token，与本 diff 无关）。**不得把 web-tests 绿当成任务 spec 已接线。**
 - **CI lane**：开 PR 当时 `web-tests` QUEUED（run `https://github.com/zensgit/metasheet2/actions/runs/35171274285`）；`test (20.x)` QUEUED（plugin-tests 工作流 `35171274259`）。日志收集用例数当时尚未写出。纯 docs 变更不证明任务 spec 已接线。
 - **mutation 探针**：未改生产守卫。docs-only 无「neuter 守卫 → 测试红」探针。
 - **正控**：双语法正控见断言 #6；token 行正控见 census §4 首尾 token；`user_orgs` 正控为 QUERY A/B 分母等于 `COUNT(*) FROM users`（115）。
@@ -92,7 +92,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 8-9 DML 分类 | 未登记 `table-classification.cjs` | 未改该文件 |
 | 8-10 RBAC_OPTIONAL 断言 | 无新 lane | — |
 
-`plugin-tests.yml` 未改（s6a pin `:90` 仍为 `5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf`）。
+`plugin-tests.yml` 未改。s6a pin `:90` 本 merge-base 仍为 `5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf`；origin/main（本轮不 rebase）已漂到 `b37a589feff9ee45b804ab6936947053f4e813480bd69c7dfd4973f0a4790ba6`。ratify 前必须重核（锁 §14-4 (b)）。
 
 ---
 
@@ -105,7 +105,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
 6. **§13-9 / §13-10 / §13-12 未裁**。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **对抗闸未齐**：第四轮 REJECT（`gate-task-m0-20260917.md` §8，1 P1 / 5 P2 / 4 P3）。本轮走形状甲（三件 `.ts` 移出）+ 门 16 乙式姿态硬约束。不声称 M0 退出门已过。
+8. **对抗闸未齐**：第五轮 REJECT（`gate-task-m0-20260917.md` §9，1 P1 / 10 P2 / 5 P3；第二轮独立审同 head 亦 REJECT）。本轮按 §9 一次改完。不声称 M0 退出门已过。
 9. **飞书 `:21-23` vs 计划 §5-2**：计划把《完成与重启任务》:23 列为 `scope=self|all` 出处之一；锁按闸 P3-1 把 `:21-23` 标 IM 不对标，`:20` 单独支撑创建人完成范围。以闸 P3-1 为准，计划 :23 记偏离。
 
 ---
@@ -114,7 +114,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **闸未齐**：第四轮 REJECT。本轮按闸 §8 一次改完；待闸方亲核门 16 姿态 + 形状甲 + 机械 `sed -n`。
+3. **闸未齐**：第五轮 REJECT。本轮按闸 §9 一次改完、不 rebase；待闸方亲核门 16/2/8/9 文本与 §7 新句。
 4. **§13-9 / §13-10 / §13-12 未裁**。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
@@ -129,23 +129,27 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 ---
 
-## 6. 修复轮（闸 §8 第四轮 1 P1 / 5 P2 / 4 P3）
+## 6. 修复轮（闸 §9 第五轮 1 P1 / 10 P2 / 5 P3）
 
-未改 §13-10 / §13-12 的未裁状态（§13-9 一并列入未裁清单，待 owner 定级）。未合并。任务 B 未起。形状裁决 **甲**：三个 `.ts` 移出 PR-0，回到 docs-only。门 16 走 **乙**（测试姿态硬约束，无 mutation 负控）。**表内不放正则命令**；命令在表下代码块，引用前已实跑。
+未改 §13-9 / §13-10 / §13-12 的未裁状态。未合并。不 ratify。任务 B 未起。本轮不 rebase。**表内命令均已实跑。**
 
-| finding | 改动 | 实际输出摘录 |
-|---|---|---|
-| P1-A 门 16 负控 | 乙式：静态钉 + 正控 403；明说无 mutation 负控（setup.ts:13 盖回 + :62-64 抛错） | 锁 `:329`「无 mutation 负控」 |
-| 形状甲 | `git rm` 三件 `.ts`；「M0 落」改「M2 与 tasks-auth-gate.ts 同 PR 落」；M2 验收补 `:71` existsSync(GATE) 与 `:107-166` | `git diff --name-only origin/main` 仅三份 docs（commit 后） |
-| P2-C :211 通则 | `paths-ignore` 命中才不跑 build；含 `packages/**` 会跑；本 PR-0 docs-only 命中豁免 | 锁 `:213`；`sed -n '4,8p' docker-build.yml` → docs/** + output/** |
-| P2-C 报告/普查 docs-only | `:19`/`:128` 回改 docs-only；`:24/:38/:72/:73/:75/:86` 与普查 `:202` 仍为 docs-only 且现为真 | 报告 `:19` 一句话；普查 `:202` |
-| P2-D 门 9 | 注入点 `:1288` loadApprovalProjectionDeniedRecordIds，或不属于 `:1273-1277` 三谓词；先例 `:1277` rethrow + `:1288` 冒泡 | 锁 `:322`；源 `:1277` `throw err`、`:1288` 调用 |
-| P2-E 未裁清单 | `:9` / `:25` / `:306` / `:427` 统一 §13-9 / §13-10 / §13-12 | `grep -n -F "§13-9 / §13-10 / §13-12"` 四行 |
-| 交叉引用 | §9 TASKS_* 行指向 §10+门 18；§12 尾补门 18；门 16 补 §13-10c 免责 | 锁 `:284` / `:333` / `:329` |
-| P3-B 门 8 | 追加 viewer tz 非法/缺失两格 + fallback 改 UTC 负控 | 锁 `:321` |
-| P3-C wiring-shape | 三件已移出，不再引用 `wiring-shape PASS` | 本表无该行 |
+| finding | 改动 | 命令 | 输出摘录 |
+|---|---|---|---|
+| ① 门 16 两格对照 | 判别格 403 / 对照格 200 / 自检 / 禁 ② 缺失当证据 / 禁 RBAC_OPTIONAL=1 | `grep -n -F "两格对照" docs/development/task-feature-design-lock-20260917.md` | `:332` 两格对照；`:337` 自检句 |
+| ② §7 deny 加载点 | 挂 §13-11；门 9 NOT RUN；负控乙改泄漏格 HTTP 200 | `grep -n -F "NOT RUN" …design-lock…` | `:262` `:323` `:341` `:390` |
+| ③ 门 8 due_at | 钉 `2026-09-15T18:00:00Z`；护栏不同本地日期 | `grep -n -F "2026-09-15T18:00:00Z" …design-lock…` | `:322` 含该瞬时与「不同本地日期」 |
+| ④ 门 2 FK | 负控缺②/缺③ 各 403 + 无①插② ⇒ 23503 | `grep -n -F "23503" …design-lock…` | `:23` `:142` `:316` |
+| ④ FK 源 | 迁移约束名 | `sed -n '108,112p' packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts` | `conname = 'role_permissions_permission_code_fkey'` / `ON DELETE CASCADE` |
+| ⑤ id `__` | CHECK `col !~ '__'` + parse 首个 `__` + 422 | `grep -n -F "col !~ '__'" …design-lock…` | `:92` `:259` |
+| ⑥ 三守卫 / 断言强度 / 先例区间 | 照抄 `:68-76`；matchAll===1；`:108-118`/`:120-168` | `grep -n -F ":108-118" …design-lock…` | `:178` `:330` |
+| ⑦ 解析器 | 脚本未删改真输出 | 见下代码块 | unique 133 / OOB 5 四元组 / AMBIGUOUS 11 行 / ambiguous_total 11 |
+| ⑦ #15 | 四行 slash 清单 | `grep -n -F "§13-9 / §13-10 / §13-12" …design-lock…` | `:9` `:25` `:307` `:436` |
+| ⑦ 形状 | vs merge-base name-status | `git diff --name-status $(git merge-base HEAD origin/main) HEAD` | 三行 `A docs/development/task-feature-…`（本轮 commit 后仍三 docs） |
+| ⑦ build 理由 | 无 pull_request 触发器 | `sed -n '3,9p' .github/workflows/docker-build.yml` | `on:` `push` + `workflow_dispatch`，无 `pull_request` |
+| ⑧ RBAC 计分 | §13-10 落槌前门 2/13/16 不进计分 | `grep -n -F "不进验收计分" …design-lock…` | `:316` `:327` `:337` `:341` |
+| ⑨ pin 漂移 | 本 SHA 5902a850；origin/main b37a589f | `sed -n '90p' …/s6a-package-provenance-pins.json` 与 `git show origin/main:… \| sed -n '90p'` | 本 SHA `5902a850…`；origin/main `b37a589f…` |
 
-### 本轮实跑（merge-base `bb77ca5f2`）
+### 本轮实跑（merge-base `bb77ca5f2`；不 rebase）
 
 `git merge-base HEAD origin/main`：
 
@@ -153,60 +157,98 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 bb77ca5f2ce3c2825265ec8877861d367d017ead
 ```
 
+`git diff --name-status $(git merge-base HEAD origin/main) HEAD`（commit 前 HEAD 仍为 `5ce1d0878` 三行 A；本轮提交后仍只三 docs）：
+
+```
+A	docs/development/task-feature-census-20260917.md
+A	docs/development/task-feature-design-lock-20260917.md
+A	docs/development/task-feature-m0-development-20260917.md
+```
+
 `grep -n -F "§13-9 / §13-10 / §13-12" docs/development/task-feature-design-lock-20260917.md`：
 
 ```
 9:- 实现者不得批准自己的安全结论。§13-9 / §13-10 / §13-12 标「未裁」。
 25:本锁 **PROPOSED**。M2 实体核心（DDL/路由/前端）要等 M1 ratify **且** §13-9 / §13-10 / §13-12 落槌。
-306:| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-12 落槌 |
-427:3. **§13-9 / §13-10 / §13-12 必须落槌** 才进入 M2。
+307:| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-12 落槌 |
+436:3. **§13-9 / §13-10 / §13-12 必须落槌** 才进入 M2。
 ```
 
-`sed -n '4,8p' .github/workflows/docker-build.yml`：
+`sed -n '3,9p' .github/workflows/docker-build.yml`：
 
 ```
+on:
   push:
     branches: [main, master]
     paths-ignore:
       - 'docs/**'
       - 'output/**'
+  workflow_dispatch:
 ```
 
-`sed -n '1277,1288p' packages/core-backend/src/multitable/permission-service.ts`：
+`sed -n '108,112p' packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts`：
 
 ```
-    ) throw err
-    // else: the grant tables are absent …
-  }
-  …
-  const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId, requested ?? undefined)
+        SELECT 1 FROM pg_constraint WHERE conname = 'role_permissions_permission_code_fkey'
+      ) THEN
+        ALTER TABLE role_permissions
+        ADD CONSTRAINT role_permissions_permission_code_fkey
+        FOREIGN KEY (permission_code) REFERENCES permissions(code) ON DELETE CASCADE;
 ```
 
-锁 §14-4 普查解析器：
+`sed -n '90p' plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`：
+
+```
+    "pluginTestsWorkflow": "5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf"
+```
+
+`git show origin/main:plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json | sed -n '90p'`：
+
+```
+    "pluginTestsWorkflow": "b37a589feff9ee45b804ab6936947053f4e813480bd69c7dfd4973f0a4790ba6"
+```
+
+锁 §14-4 普查解析器。命令行：
+
+```
+TASK_FEATURE_PLAN_PATH=/Users/chouhua/Downloads/Github/metasheet2/docs/development/task-feature-development-plan-20260915.md python3 - <<'PY'
+# body = census :216-283
+```
+
+未删改真输出：
 
 ```
 unique 133 OK_IN_RANGE 128 OOB 5 MISSING 0 AMBIGUOUS 11
 NOTE OK_IN_RANGE means line numbers fit the resolved file, not that the file is the intended one
-OOB ('index.ts', '1763-1766')
-OOB ('index.ts', '1642')
-OOB ('index.ts', '1763-1777')
-OOB ('index.ts', '3836-3850')
-OOB ('index.ts', '3766')
+OOB ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 69)
+OOB ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 69)
+AMBIGUOUS ('routes/auth.ts', '1220-1251', 'packages/core-backend/src/routes/auth.ts', 2)
+AMBIGUOUS ('routes/auth.ts', '1230-1232', 'packages/core-backend/src/routes/auth.ts', 2)
+AMBIGUOUS ('index.ts', '1763-1766', 'apps/web/src/multitable/index.ts', 18)
+AMBIGUOUS ('index.ts', '1642', 'apps/web/src/multitable/index.ts', 18)
+AMBIGUOUS ('index.ts', '1763-1777', 'apps/web/src/multitable/index.ts', 18)
+AMBIGUOUS ('approvals/api.ts', '37-38', 'apps/web/src/utils/api.ts', 3)
+AMBIGUOUS ('integrations/dingtalk/client.ts', '1067', 'apps/web/src/multitable/api/client.ts', 4)
+AMBIGUOUS ('index.ts', '3836-3850', 'apps/web/src/multitable/index.ts', 18)
+AMBIGUOUS ('index.ts', '3766', 'apps/web/src/multitable/index.ts', 18)
+AMBIGUOUS ('plugin-tests.yml', '1655', '.github/workflows/plugin-tests.yml', 3)
+AMBIGUOUS ('plugin-tests.yml', '5', '.github/workflows/plugin-tests.yml', 3)
 ambiguous_total 11
-ambiguous_basenames ['approvals/api.ts', 'index.ts', 'integrations/dingtalk/client.ts', 'plugin-tests.yml', 'routes/auth.ts']
 ```
 
 `TASK_FEATURE_PLAN_PATH` 未设：`TASK_FEATURE_PLAN_PATH: set me`（非零退出）。
 
-抽查 `sed -n`：
+抽查 `sed -n` / `grep -n`（本 SHA = merge-base `bb77ca5f2`）：
 
 ```
-rbac.ts:12                         模块装载常量
-jwt-middleware.ts:101-104          authenticatedTenantId
-vitest.config.ts:1812              'tests/e2e/**'
-index.ts:1791                      approvalsRouter
-plugin-tests.yml:842-844           Run core-backend tests
-docker-build.yml:4-8               paths-ignore docs/** output/**
-permission-service.ts:1277 / :1288 throw err / loadApprovalProjectionDeniedRecordIds
-AGENTS.md:68 / 74 行
+vitest.config.ts:1812     'tests/e2e/**'
+index.ts:1791             this.app.use(approvalsRouter({
+run-required-web-tests.sh:1186  exec npx vitest run …
+plugin-tests.yml:842-844  Run core-backend tests
+plugin-tests.yml:1655     approval-comments.db.test.ts（origin/main 该行在 :1659）
+jwt-middleware.ts:101-104 authenticatedTenantId
+AGENTS.md 74 行 / :68
 ```

@@ -299,9 +299,9 @@ PY
 | `:133-136` | verbose / 整文件 | 一致 |
 | `approval-sequential-mode.db.test.ts:14` | EXPECT_DB sentinel | 一致 |
 | `plugin-tests.yml:5` | `merge_group:` | 一致 |
-| `plugin-tests.yml:1655` | `tests/integration/approval-comments.db.test.ts \` | 仍在 required run-list |
+| `plugin-tests.yml:1655` | `tests/integration/approval-comments.db.test.ts \` | 本 merge-base 仍在 required run-list。origin/main（2026-09-19 实读、本轮不 rebase）已漂到 **`:1659`**；ratify 前必须重核（锁 §14-4 (a)） |
 | s6a `sealed-export-package-provenance.cjs:298-300` | 仍钉 `plugin-tests.yml` | 一致 |
-| s6a pin json `:90` | `"pluginTestsWorkflow": "5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf"` | **本切片禁止改 `plugin-tests.yml`** |
+| s6a pin json `:90` | 本 merge-base `"pluginTestsWorkflow": "5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf"` | **本切片禁止改 `plugin-tests.yml`**。origin/main 已漂到 **`b37a589feff9ee45b804ab6936947053f4e813480bd69c7dfd4973f0a4790ba6`**；ratify 前必须重核（锁 §14-4 (b)） |
 | `web-tests.yml:8-9,17-22,26-27,77` | paths 脚注 / POST-append / `merge_group` / `run-required-web-tests.sh` | 一致；文件共 77 行 |
 | `tests/unit/approval-ci-coverage-enumeration.test.ts:299-339,:409,:577,:679-685` | `classifyT3` / lane 正则 / 文件发现 / 扫描负控（`:679-685` 仍是 scan negative control） | 一致；`task-*` 仍被忽略 |
 | `AGENTS.md:48-50` **漂移** | 现为章程「当前唯一优先级」备料段 | 两点接线正文 **不在** 本 SHA 的 `AGENTS.md`（74 行）。计划自述「基线版 AGENTS.md 无此段」。纪律仍按计划 §8-2 + 工作区未提交的 canonical `AGENTS.md` 执行，不把本 SHA `:48-50` 当两点接线证据 |
