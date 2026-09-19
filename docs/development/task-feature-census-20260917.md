@@ -283,11 +283,13 @@ ok=oob=miss=amb=0
 oob_files=[]; amb_files=[]
 for pathish, spec in uniq:
     paths, is_amb = resolve(pathish)
+    if not paths:
+        miss += 1
+        continue
     if is_amb:
         amb += 1
-        amb_files.append((pathish, spec, str(paths[0].relative_to(wt)) if paths else None, len(idx.get(pathlib.Path(pathish).name, []))))
-    if not paths:
-        miss += 1; continue
+        amb_files.append((pathish, spec, str(paths[0].relative_to(wt)), len(idx.get(pathlib.Path(pathish).name, []))))
+        continue
     n=len(paths[0].read_text(errors='replace').splitlines())
     bad=False
     for part in spec.split(','):
@@ -299,16 +301,18 @@ for pathish, spec in uniq:
     else:
         ok += 1
 print('unique', len(uniq), 'OK_IN_RANGE', ok, 'OOB', oob, 'MISSING', miss, 'AMBIGUOUS', amb)
-print('NOTE OK_IN_RANGE means line numbers fit the resolved file, not that the file is the intended one')
+print('NOTE mutually exclusive: AMBIGUOUS is not also OK/OOB; OOB details printed below in this same run')
+print('NOTE OK_IN_RANGE means line numbers fit the uniquely resolved file, not that the file is the intended one')
 for row in oob_files:
     print('OOB', row)
-for row in amb_files[:20]:
+print('oob_total', oob)
+for row in amb_files:
     print('AMBIGUOUS', row)
 print('ambiguous_total', amb)
 PY
 ```
 
-本 merge-base 实测输出见报告 §6（同一 head 上跑）。§5.1 / §5.2 两张表是逐条 `sed -n`。
+本 merge-base 实测输出见报告 §6（同一 head 上跑）。分类互斥：AMBIGUOUS 不再兼入 OK/OOB；OOB 明细与 `oob_total` 在同一次运行打印。§5.1 / §5.2 两张表是逐条 `sed -n`。
 
 ### 5.1 计划 §8 逐条（新 SHA 必核）
 
