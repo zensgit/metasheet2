@@ -12,6 +12,32 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Inspector Restore Execution (2026-09-20)
+
+Code `8420aea01b61b960c0fffaa4d3804ccfa004d6df`, tree
+`61cd16fa1db5e2c97acabf99a50990c194730d51`. One existing acceptance script
+only; production Workbench was restored byte-identically after mutation.
+Clean owned `--workbench` run `9ec19e86-34df-40f6-ba1b-fa706e57c845` passes
+8/8, artifact worktreeClean=true, all fixture counts zero, cleanupErrors empty.
+Log `/private/tmp/tm-inspector-restore-exact-20260920.log`; database/connections
+zero and cluster stopped/removed.
+
+The new case edits Quantity from 7 to 42 through the real numeric grid editor and
+requires a successful production patch request. It opens inspector History and
+previews v1, verifies persisted data/version are still unchanged before confirm,
+then confirms and requires the real restore-execute request to succeed. Data equals
+the retained earlier row; version increments exactly once; the peer row remains
+identical. Refreshed history displays the restored-from badge. Screenshot
+`artifacts/timemachine-workbench/record-inspector-restored.png` was inspected and
+shows Quantity 42 -> 7 with Restored from v1.
+
+Mutation changes the Workbench execute targetVersion to targetVersion+1 while
+keeping its preview identity. The real endpoint responds 409 and the new browser
+case fails at the 200 oracle (`tm-inspector-restore-mutation-20260920.log`).
+Restoring the production line produces the clean eight-case pass. Wiring 39/39
+and diff-check pass. This is a synthetic desktop positive, not all field types,
+mobile inspector execution or customer UAT; exact-head CI is separate.
+
 ## Terminal Cleanup Reconciliation (2026-09-20)
 
 Code `df302d9b03b923e9ef106b64369fca9f710c7a45`, tree

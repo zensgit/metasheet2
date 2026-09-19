@@ -2,6 +2,21 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Inspector Historical-Version Execution (2026-09-20)
+
+Test-only checkpoint `8420aea01b61b960c0fffaa4d3804ccfa004d6df`, tree
+`61cd16fa1db5e2c97acabf99a50990c194730d51`, exercises the existing right-side
+historical-version restoration through the actual Workbench. It edits a numeric
+cell, opens the inspector history, previews the prior version, confirms explicitly,
+and verifies restored data, exactly one version increment, unchanged peer row and
+refreshed restored-from history. No production change or new recovery semantics.
+
+This closes the local synthetic desktop sidebar execution acceptance missing in
+the prior checkpoint. It does not establish every field type, tenant switch,
+mobile inspector layout or real-customer UAT. Displaced old-file cleanup still
+requires its own reference/ownership proof; the safe terminal-stage cleanup is
+not authority to delete those applied objects.
+
 ## Terminal Stage Cleanup Retry (2026-09-20)
 
 Code `df302d9b03b923e9ef106b64369fca9f710c7a45`, tree
