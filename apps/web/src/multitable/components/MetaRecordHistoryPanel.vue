@@ -18,12 +18,11 @@
   has NO direct-restore path and does not call any restore/execute API itself.
 
   FIELD-MASK INVARIANT (lock §4.4, gate-emphasized -- LEAK-SAFE BY CONSTRUCTION): `historyFieldDiffs`
-  below iterates ONLY the server-masked `item.changedFieldIds` and reads ONLY the server-masked
-  `item.patch` / `item.snapshot` -- moved VERBATIM from the drawer. Do NOT "helpfully" read raw
-  snapshot keys or enumerate `Object.keys(item.snapshot)` -- that would bypass the server's field mask
-  (redactRecordRevisionEntry / maskStoredRecordFieldIds already strip fields this actor can't see from
-  changedFieldIds AND patch AND snapshot before they reach the wire). See the mutation note in the PR
-  body: flipping the iteration source to raw snapshot keys must turn
+  below iterates server-masked `item.changedFieldIds` for non-delete revisions. Delete revisions have
+  no patch and display only their server-masked pre-delete snapshot, never current record values.
+  redactRecordRevisionEntry / maskStoredRecordFieldIds strip fields this actor can't see from
+  changedFieldIds AND patch AND snapshot before they reach the wire. Non-delete diffs must NOT
+  enumerate snapshot keys: flipping their iteration source must turn
   `meta-record-drawer-history-diff.spec.ts`'s LEAK-LOCK test red.
 
   `formatValue` / `textControlValue` delegate to the shared `../utils/recordDisplay.ts` module (W2 S2
@@ -52,7 +51,7 @@
           <span v-if="item.actorId">{{ historyActor(item.actorName || item.actorId, isZh) }}</span>
           <span>{{ item.source }}</span>
         </div>
-        <div v-if="item.changedFieldIds.length" class="meta-record-drawer__history-fields">
+        <div v-if="historyDisplayFieldIds(item).length" class="meta-record-drawer__history-fields">
           <div
             v-for="d in historyFieldDiffs(item, idx)"
             :key="d.fieldId"
@@ -233,23 +232,27 @@ function requestRestore(item: MetaRecordRevision): void {
 
 // Per-field before→after diff for a revision. LEAK-SAFE BY CONSTRUCTION: the backend
 // (redactRecordRevisionEntry / maskStoredRecordFieldIds) already strips fields this actor can't see
-// from changedFieldIds AND patch AND snapshot before they reach the wire, so iterating changedFieldIds
-// and reading only patch/snapshot cannot surface a masked field. `after` = the value at this revision
+// from changedFieldIds AND patch AND snapshot before they reach the wire. Deletes show the retained
+// snapshot without a comparison; other revisions iterate changedFieldIds. `after` = the value at this revision
 // (snapshot preferred, patch fallback when snapshot is unavailable); `before` = the value at the
 // next-older visible revision's snapshot (absent when there's no prior snapshot — e.g. the create row,
 // a pruned gap, or an unavailable snapshot → show after only).
 interface HistoryFieldDiff { fieldId: string; label: string; before: string; after: string; hasBefore: boolean }
+function historyDisplayFieldIds(item: MetaRecordRevision): string[] {
+  // Delete revisions carry an empty patch; only their server-masked pre-delete snapshot is evidence.
+  return item.action === 'delete' ? Object.keys(item.snapshot ?? {}) : item.changedFieldIds
+}
 function historyFieldDiffs(item: MetaRecordRevision, index: number): HistoryFieldDiff[] {
   const olderSnap = historyItems.value[index + 1]?.snapshot ?? null
   const has = (obj: Record<string, unknown> | null | undefined, key: string): boolean =>
     !!obj && Object.prototype.hasOwnProperty.call(obj, key)
-  return item.changedFieldIds.map((fieldId) => {
+  return historyDisplayFieldIds(item).map((fieldId) => {
     const field = props.fields.find((f) => f.id === fieldId) ?? null
     const fmt = (v: unknown): string => (field ? formatValue(field, v) : textControlValue(v))
     const afterRaw = has(item.snapshot, fieldId)
       ? item.snapshot![fieldId]
       : has(item.patch, fieldId) ? item.patch[fieldId] : undefined
-    const hasBefore = has(olderSnap, fieldId)
+    const hasBefore = item.action !== 'delete' && has(olderSnap, fieldId)
     return {
       fieldId,
       label: fieldLabelById.value.get(fieldId) ?? fieldId,
