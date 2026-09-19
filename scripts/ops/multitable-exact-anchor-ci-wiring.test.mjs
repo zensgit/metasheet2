@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -64,6 +65,36 @@ test('required plugin lane runs the owned-cluster manual checkpoint driver witho
   )))
   assert.match(runner, /scripts\/verify-recovery-manual-checkpoint\.mts/)
   assert.match(runner, /assert\.equal\(code, 0,/)
+})
+
+function ownedWorkbenchContract(runner) {
+  assert.match(runner, /const workbench = process\.argv\.includes\('--workbench'\)/)
+  assert.match(runner, /if \(workbench\) \{/)
+  assert.match(runner, /runPnpm\(\['migrate'\], databaseEnv\)/)
+  assert.match(runner, /runPnpm\(\['exec', 'tsx', 'scripts\/verify-timemachine-workbench\.mts'\], databaseEnv\)/)
+  assert.match(runner, /SELECT count\(\*\) FROM pg_stat_activity WHERE datname=/)
+  assert.match(runner, /'WORKBENCH_DATABASE_CONNECTIONS_REMAIN'/)
+  assert.match(runner, /run\('dropdb',/)
+}
+
+test('optional full-workbench acceptance owns its migrated database and residue gate', () => {
+  const runner = readFileSync(join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), 'utf8')
+  ownedWorkbenchContract(runner)
+  assert.throws(() => ownedWorkbenchContract(runner.replace(
+    'scripts/verify-timemachine-workbench.mts', 'scripts/disabled-workbench.mts',
+  )))
+  assert.throws(() => ownedWorkbenchContract(runner.replace('WORKBENCH_DATABASE_CONNECTIONS_REMAIN', 'ignored')))
+  assert.throws(() => ownedWorkbenchContract(runner.replace('if (workbench)', 'if (false && workbench)')))
+})
+
+test('owned acceptance modes cannot silently suppress one another', () => {
+  for (const modes of [['--browser', '--workbench'], ['--attachment-stage', '--workbench'], ['--browser', '--attachment-stage']]) {
+    const result = spawnSync(process.execPath, [join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), ...modes], {
+      env: {}, encoding: 'utf8', timeout: 10000,
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /INCOMPATIBLE_ACCEPTANCE_ARGUMENTS/)
+  }
 })
 
 function maskCommentsAndStrings(src) {
