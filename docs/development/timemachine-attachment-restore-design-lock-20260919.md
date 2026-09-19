@@ -259,6 +259,23 @@ query. This does not prove browser link interaction or Workbench login.
 
 ## Nightly Read-Only Investigation Plan
 
+## Authenticated Acceptance Follow-Up
+
+Code `4b5a6a52e5593cba730dec97a3e9628a8af7b631` replaces the attachment
+verifier's synthetic identity middleware with production login and JWT middleware
+using an isolated synthetic account. Capture, preview, restore and download use
+the resulting session; inactive-actor download refuses. Desktop/mobile modal
+acceptance passes with that token. This still is not Workbench login-page,
+organization selection, grid refresh or attachment-link-click UAT.
+
+Sol's bounded permission/original-binding review of `f215ba1f1a` found no P1 and
+one P2: preparation refusals can escape as HTTP 500 rather than canonical
+forbidden/drift responses. Fail-closed behavior is preserved but the diagnostic
+contract is not complete. Keep HOLD until typed refusals and route negatives
+close this finding; do not infer approval from successful authenticated recovery.
+
+## Nightly Plan Boundary
+
 No real environment access is authorized by this plan. Known artifact evidence:
 External Metrics run `35414465715` and Regression run `35414586092`, main
 `bb77ca5f2ce3c2825265ec8877861d367d017ead`, each report 11 checks, five

@@ -552,6 +552,34 @@ database. Database name and role are checked before the download route runs.
 
 ## Remaining Required Work
 
+## Production Login And JWT Checkpoint
+
+Code `4b5a6a52e5593cba730dec97a3e9628a8af7b631`, tree
+`4a0e4bbed602bffe73c2786038c532b584f29aa1` (two verifier files).
+An isolated synthetic user logs in through the production auth route; attachment
+requests and desktop/mobile modal calls use the returned token and production
+JWT middleware. Capture/restore/download pass; anonymous and subsequently
+deactivated actor downloads return 401. Scalar fixtures retain their earlier
+synthetic middleware and are not claimed as production-login coverage.
+
+The first run completed behavioral assertions and DB cleanup but remained alive
+because importing auth routes started message-bus resources. It was explicitly
+terminated and is not a full PASS. The corrected verifier shuts down that owned
+singleton in finally. The complete restored runner exits 0, including four browser
+loops, historical 47/59/127, stage cleanup arbitration and zero remaining DB
+connections/removed cluster. Core typecheck, JS syntax and diff-check PASS.
+Logs: `/private/tmp/tm-attachment-login-browser-restored-20260919.log` and
+`/private/tmp/tm-attachment-login-final-tsc-20260919.log`.
+
+Sol high reviewed the permission/original-binding chain read-only at f215ba1f1a:
+no P1; P2 OPEN for generic preparation errors becoming HTTP 500 after permission
+or original-binding drift. It ran no tests and did not assess these verifier edits.
+Session closed. This checkpoint is local-only pending that bounded fix; remote
+CI on f215ba1f1a does not certify it. No Workbench login-page/grid/download-click
+acceptance, real environment, flag, dispatch or deployment is claimed.
+
+## Open Gates
+
 Default runtime readiness and cleanup registration; prepared/displaced file
 reference-safe crash cleanup; end-user attachment field authorization acceptance;
 remaining purge/drift/retry concurrency; async contract;
