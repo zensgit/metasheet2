@@ -14,6 +14,38 @@ Branch: `codex/timemachine-attachment-restore-20260919`.
 
 ## Inspector Restore Execution (2026-09-20)
 
+### Scope Relocation And Accepted Batch Result
+
+Code `74bfcae9e821813da91519b0c487ce45cd6e998f`, tree
+`7a316ec7d77c4f4b8d645c0cd28a99414f851c5e`; HTTP test parent
+`3031025e0d2ee2bebfb744893328be1b0356fd33`.
+
+The owned full default runner passes with the exact HTTP test bytes before
+commit (`/private/tmp/tm-scope-relocation-realdb-20260920.log`). After an executable
+attachment preview, independent workspace/base relocations each return 404 with
+`RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND`. Records, attachment storage metadata,
+stages, history operations/revisions, token burns and receipts remain unchanged.
+Fixture scope is restored in finally and the original positive execution succeeds.
+This is scope relocation, not a second-tenant user isolation claim. The full run
+also passes migration replay, existing history/authority neighbors and the stage
+cleanup verifier; owned database/connections=0 and cluster removed.
+
+Sol medium read-only review (session `01a0bb45-039d-7f91-b478-083dc087c5f0`,
+closed) found one P2 in the preceding UI delta: cancelling an accepted batch
+execute hid its eventual result. A new mounted regression first fails on that
+code. The fix separates context invalidation from cancel, disables executing
+dialog controls, and retains result/refresh in the original context. Removing
+the handler guard reproduces the same exact failure; restoring it passes.
+Four focused files pass 69/69, core/app typecheck pass, scoped ESLint has zero
+errors/eight fixture warnings, wiring 39/39 and diff-check pass. No fresh
+independent APPROVE or remote exact-head CI completion is claimed.
+
+Clean exact-code owned Workbench browser run at `74bfcae9e8` passes 8/8
+(`/private/tmp/tm-batch-cancel-exact-browser-20260920.log`), with database/
+connections=0 and cluster removed. These preserve actual application recovery
+flows; the cancellation race itself is the discriminating mounted test above.
+
+
 ### Batch Isolation Checkpoint
 
 Code `fb881f3c869e86b2b093998f734fc0cf230dadc7`, tree

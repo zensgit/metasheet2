@@ -2,6 +2,22 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Scope Relocation And Accepted Batch Execution (2026-09-20)
+
+Code `74bfcae9e821813da91519b0c487ce45cd6e998f`, tree
+`7a316ec7d77c4f4b8d645c0cd28a99414f851c5e`, includes test-only parent
+`3031025e0d2ee2bebfb744893328be1b0356fd33`. Public authenticated attachment
+execution refuses the old preview when the sheet's base or its base's workspace
+changes. No permission model is widened; this proves source-scope binding, not
+an independent cross-tenant user/session authorization contract.
+
+Batch UI cancellation is distinct from navigation invalidation: after submit,
+close/backdrop/cancel/advanced controls cannot hide or supersede the accepted
+operation. Its result and refresh remain observable in the original context.
+Leaving that context still discards late UI effects without claiming server-side
+cancellation. This corrects the previous batch isolation checkpoint's cancel gap.
+
+
 ## Batch Restore Async Isolation (2026-09-20)
 
 Code `fb881f3c869e86b2b093998f734fc0cf230dadc7`, tree
