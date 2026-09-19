@@ -221,6 +221,24 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
           const image = document.querySelector('.meta-gallery__cover-image')
           return image instanceof HTMLImageElement && image.complete && image.naturalWidth === 1 && image.src.startsWith('blob:')
         })
+        for (const [size, height] of [['small', 108], ['large', 176], ['medium', 132]]) {
+          const [persisted] = await Promise.all([
+            page.waitForResponse(response => response.request().method() === 'PATCH'
+              && new URL(response.url()).pathname.endsWith('/views/manual-browser-gallery')),
+            page.locator('.meta-gallery__toolbar-field').filter({ hasText: 'Card size' }).locator('select').selectOption(size),
+          ])
+          assert.equal(persisted.status(), 200)
+          await page.waitForFunction(({ size, height }) => {
+            const element = document.querySelector(`.meta-gallery__card--${size} .meta-gallery__cover`)
+            return element && Math.abs(element.getBoundingClientRect().height - height) <= 1
+          }, { size, height })
+        }
+        const naturalHeight = await page.addStyleTag({ content: '.meta-gallery__cover{height:auto!important;min-height:132px!important}' })
+        try {
+          assert.ok(await page.locator('.meta-gallery__cover').evaluate(element => element.getBoundingClientRect().height > 176),
+            'Removing fixed cover height must reproduce intrinsic-image expansion')
+        } finally { await naturalHeight.evaluate(element => element.remove()) }
+        assert.ok(await page.locator('.meta-gallery__cover').evaluate(element => Math.abs(element.getBoundingClientRect().height - 132) <= 1))
         await page.screenshot({ path: join(tmpdir(), `tm-restored-gallery-${width}.png`), fullPage: true })
         console.log(`PASS: Chromium ${width} restored gallery cover authenticated and decoded original PNG`)
         assert.deepEqual(errors, [])

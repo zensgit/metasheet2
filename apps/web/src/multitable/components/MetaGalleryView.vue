@@ -449,9 +449,9 @@ function getColumnsCount(): number {
 .meta-gallery__card--large { padding: 18px 20px; }
 .meta-gallery__card:hover { border-color: #409eff; box-shadow: 0 2px 8px rgba(64,158,255,.15); }
 .meta-gallery__card:focus-visible { outline: 2px solid #409eff; outline-offset: 1px; }
-.meta-gallery__cover { margin: -14px -16px 12px; border-bottom: 1px solid #eef2f7; background: #f8fafc; min-height: 132px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px 8px 0 0; }
-.meta-gallery__card--small .meta-gallery__cover { min-height: 108px; margin: -12px -14px 10px; }
-.meta-gallery__card--large .meta-gallery__cover { min-height: 176px; margin: -18px -20px 14px; }
+.meta-gallery__cover { margin: -14px -16px 12px; border-bottom: 1px solid #eef2f7; background: #f8fafc; height: 132px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px 8px 0 0; }
+.meta-gallery__card--small .meta-gallery__cover { height: 108px; margin: -12px -14px 10px; }
+.meta-gallery__card--large .meta-gallery__cover { height: 176px; margin: -18px -20px 14px; }
 .meta-gallery__cover-image { width: 100%; height: 100%; object-fit: cover; display: block; }
 .meta-gallery__cover-fallback { padding: 24px; font-size: 12px; color: #64748b; text-align: center; }
 .meta-gallery__card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
