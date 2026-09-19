@@ -73,6 +73,21 @@ async function lockSource(query: QueryFn, identity: ArchiveAttachmentStageIdenti
   if (source.rows.length !== 1) refused()
 }
 
+/** Called inside canonical apply's existing transaction, never an independent autocommit. */
+export async function lockVerifiedArchiveAttachmentStage(query: QueryFn, input: {
+  actorId: string; tokenHash: string; objectId: string; identity: ArchiveAttachmentStageIdentity
+}): Promise<void> {
+  const { actorId, tokenHash, objectId } = input
+  const identity = snapshot(input.identity)
+  await lockSource(query, identity)
+  const result = await query(`SELECT ${columns.join(',')},object_id::text,state
+    FROM public.meta_recovery_archive_attachment_stages
+    WHERE actor_id=$1::uuid AND token_hash=$2 AND attachment_id=$3 FOR UPDATE`,
+  [actorId, tokenHash, identity.attachmentId])
+  const row = exactRow(result.rows, identity)
+  if (row.state !== 'verified' || row.object_id !== objectId) refused()
+}
+
 function snapshot(source: Readonly<ArchiveAttachmentStageIdentity>): ArchiveAttachmentStageIdentity {
   const result = Object.fromEntries(keys.map(key => [key, source[key]])) as unknown as ArchiveAttachmentStageIdentity
   if (keys.some(key => typeof result[key] !== 'string' || !result[key] || result[key].trim() !== result[key])
