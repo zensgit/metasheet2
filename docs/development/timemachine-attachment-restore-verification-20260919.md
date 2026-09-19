@@ -1463,3 +1463,22 @@ reached the terminal base result recorded above; it is not successor CI evidence
 No flags, dispatch, deployment, real environment or customer storage/data access.
 The read-only nightly plan is in the paired design lock; it has not been executed
 against any real environment.
+
+## Retained-result job rediscovery verification (2026-09-20)
+
+Exact code: `9a1751bd1aeeed9f2b7b6eec39d38bc413cc572f`.
+Kimi 0.40.1 completed a bounded, read-only review of the preceding UI delta
+and identified one P2: retained results prevented later same-sheet job discovery.
+Its verdict was narrow, not approval of this PR or this subsequent fix.
+
+The added mounted case reproduced RED before implementation (one discovery
+call instead of two). After fixing discovery independently of catalog reset,
+the new paused job is visible without accept/resume writes. Modal 61/61 and
+client 100/100 pass after restoration. Removing the preserve-result condition
+produced a separate precise RED in the after-completion reopen case; restored
+combined run is 161/161. Web app vue-tsc passes; scoped ESLint passes with two
+existing fixture warnings (initial parser resolution failed, rerun using the
+existing pnpm NODE_PATH passed without installation). CI wiring 39/39 and
+diff-check pass. These are mounted regressions, not browser race injection.
+No fresh DB/browser run is claimed for this UI-only delta. Earlier runtime
+evidence retains its own SHA. Remote exact-head CI remains a separate gate.

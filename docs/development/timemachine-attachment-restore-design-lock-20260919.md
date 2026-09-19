@@ -701,3 +701,14 @@ configured family/label selectors and observed samples offline first. Distinguis
 wrong target, missing family, label mismatch and no activity. A synthetic fixture
 can prove parser behavior, never production population. Do not generate reload/
 restore activity, change thresholds, dispatch workflows or claim the alerts closed.
+
+## Same-sheet rediscovery correction (2026-09-20)
+
+Code `9a1751bd1aeeed9f2b7b6eec39d38bc413cc572f` supersedes the
+result-present rediscovery suppression in `758e10b68f`. Reopening after a
+synchronous result must still discover the current durable job. When none
+exists, preserve the accepted result and its catalog context instead of resetting
+the catalog. A discovered job takes precedence. In-flight execution continues
+to defer discovery, and sheet changes retain existing sequence invalidation.
+Explicit recheck still clears context and performs full discovery/catalog reload.
+This is UI read behavior only; no restore authority or operational scope changes.
