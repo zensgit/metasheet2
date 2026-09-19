@@ -598,6 +598,60 @@ try {
       checkAuthority: async () => { throw new Error('SYNTHETIC_AUTHORITY_REVOKED') },
     }), { message: 'SYNTHETIC_AUTHORITY_REVOKED' })
     assert.equal(binaryDelivered.length, 2)
+    const continuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
+    const binaryStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
+    const binaryProvider = binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') })
+    let binaryAllowed = true
+    let revokeAfterHead = false
+    let binaryPuts = 0
+    const ownedBinaryUpload = continuationBindings.bindRecoveryArchiveManualAttachmentUpload(uploadInput.transaction,
+      async () => binaryAllowed, { identity: { actorId: 'synthetic', workspaceId: 'w', baseId: 'b', sheetId: 's' },
+        owner: binaryOwner, transactionDepth: binaryInput.transactionDepth,
+        provider: { ...binaryProvider,
+          put: async (input) => { binaryPuts++; return binaryProvider.put(input) },
+          head: async (input) => { const result = await binaryProvider.head(input); if (revokeAfterHead) binaryAllowed = false; return result },
+        } })
+    const binaryEnvelope = preparedUpload.decodeRecoveryArchivePreparedEnvelope(binaryPayload)
+    const binaryObject = binaryEnvelope.attachments![0]!
+    const untrustedBinaryObject = { ...binaryObject, ciphertext: Buffer.from('UNTRUSTED_CALLBACK_BYTES') }
+    await assert.rejects(ownedBinaryUpload(binaryEnvelope, { ...untrustedBinaryObject, attachmentId: 'unknown' }),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH' })
+    assert.equal(binaryPuts, 0)
+    revokeAfterHead = true
+    await assert.rejects(ownedBinaryUpload(binaryEnvelope, untrustedBinaryObject),
+      { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
+    assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1', [binaryOwner.generationId])).rows[0].n, 0)
+    revokeAfterHead = false
+    binaryAllowed = true
+    await assert.rejects(ownedBinaryUpload(binaryEnvelope, untrustedBinaryObject),
+      { message: 'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED' })
+    const binaryPinAuthority = require('../src/multitable/recovery-archive-source-pin.ts') as typeof import('../src/multitable/recovery-archive-source-pin')
+    await transaction(async () => {
+      const leaseUntil = (await query('SELECT lease_expires_at::text AS lease FROM meta_recovery_archives WHERE generation_id=$1', [binaryOwner.generationId])).rows[0].lease
+      const pinOwner = { ...binaryOwner, keyId: binaryBinding.keyId, attachmentId: binaryId, leaseUntil }
+      await binaryPinAuthority.claimRecoveryArchiveSourcePinIntent(query, pinOwner)
+      await binaryPinAuthority.verifyRecoveryArchiveSourcePin(query, { ...pinOwner,
+        immutableVersion: binaryObject.sourceVersion, contentSha256: binaryHash, contentSizeBytes: String(binaryPlaintext.length) })
+    })
+    await ownedBinaryUpload(binaryEnvelope, untrustedBinaryObject)
+    await ownedBinaryUpload(binaryEnvelope, untrustedBinaryObject)
+    const binaryReceipts = (await query(`SELECT object_class,section_name,attachment_id,state,object_id,provider_version,
+      ciphertext_sha256,plaintext_sha256,size_bytes::text FROM meta_recovery_archive_objects WHERE generation_id=$1`, [binaryOwner.generationId])).rows
+    const binaryObjectBytes = Buffer.concat([binaryObject.nonce, binaryObject.ciphertext, binaryObject.authTag])
+    const binaryObjectHash = createHash('sha256').update(binaryObjectBytes).digest('hex')
+    assert.deepEqual(binaryReceipts, [{ object_class: 'attachment', section_name: null, attachment_id: binaryId,
+      state: 'uploaded', object_id: binaryObjectHash, provider_version: binaryObjectHash,
+      ciphertext_sha256: binaryObjectHash, plaintext_sha256: binaryHash, size_bytes: String(binaryObjectBytes.length) }])
+    const binaryExpiry = (await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1', [binaryOwner.generationId])).rows[0].expires_at.toISOString()
+    const storedBinary = await binaryProvider.get({ generationId: binaryOwner.generationId, objectId: binaryObjectHash,
+      expectedVersion: binaryObjectHash, expectedSha256: binaryObjectHash,
+      expectedSize: String(binaryObjectBytes.length), expectedExpiresAt: binaryExpiry })
+    const restoredBinary = Buffer.from(storedBinary.bytes)
+    assert.deepEqual(restoredBinary, binaryObjectBytes)
+    assert.deepEqual(attachmentCrypto.openRecoveryArchiveAttachment({ binding: { generation: binaryEnvelope.binding,
+      attachmentId: binaryId, sourceVersion: binaryObject.sourceVersion, plaintextSha256: binaryHash }, dek: binaryKey,
+      sealed: { nonce: restoredBinary.subarray(0, 12), ciphertext: restoredBinary.subarray(12, -16), authTag: restoredBinary.subarray(-16) } }), binaryPlaintext)
+    console.log('PASS: real attachment PUT/HEAD/GET uses durable nonce+ciphertext+tag, ignores callback bytes, records one uploaded receipt; unknown ID and post-IO revocation refuse')
   } finally { binaryKey.fill(0); binaryPlaintext.fill(0) }
   console.log('PASS: binary attachment envelope persists exact bytes; interruption/new connection resumes without recapture; missing uploader and revoked authority refuse')
   const actorId = randomUUID()

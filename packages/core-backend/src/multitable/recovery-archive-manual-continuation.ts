@@ -44,11 +44,21 @@ export function bindRecoveryArchiveManualManifestUpload(
   return () => upload(null)
 }
 
+/** Attachment bytes are selected from the immutable prepared batch, never supplied by the callback. */
+export function bindRecoveryArchiveManualAttachmentUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
+  input: ManualObjectUploadInput,
+): NonNullable<RecoveryArchivePreparedUploadInput['uploadAttachment']> {
+  const upload = bindManualObjectUpload(transaction, authorize, input)
+  return async (_envelope, attachment) => upload({ attachmentId: attachment.attachmentId })
+}
+
 function bindManualObjectUpload(
   transaction: RecoveryArchivePreparedUploadInput['transaction'],
   authorize: (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>,
   input: ManualObjectUploadInput,
-): (name: RecoveryArchiveSectionName | null) => Promise<void> {
+): (name: RecoveryArchiveSectionName | null | { attachmentId: string }) => Promise<void> {
   const identity = Object.freeze({ ...input.identity })
   const owner = Object.freeze({ ...input.owner })
   const provider = input.provider
@@ -75,10 +85,15 @@ function bindManualObjectUpload(
       return { ...original, expiresAt: expiry.toISOString() }
     })
     // Always upload the durable original, never bytes supplied by the callback caller.
-    const section = name === null ? null : admitted.envelope.sections.find((candidate) => candidate.sectionName === name)
-    // The v1 reader splits the final 16 bytes as the GCM tag.
+    const attachmentId = name !== null && typeof name === 'object' ? name.attachmentId : null
+    const attachment = attachmentId === null ? undefined
+      : admitted.envelope.attachments?.find((candidate) => candidate.attachmentId === attachmentId)
+    const section = typeof name !== 'string' ? null : admitted.envelope.sections.find((candidate) => candidate.sectionName === name)
+    // Sections take their nonce from the manifest. Attachment objects prefix the 12-byte nonce;
+    // both formats end with the 16-byte GCM tag, and the receipt hashes the complete framing.
     const bytes = name === null ? admitted.envelope.manifestEnvelope
-      : section ? Buffer.concat([section.ciphertext, section.authTag]) : undefined
+      : attachment ? Buffer.concat([attachment.nonce, attachment.ciphertext, attachment.authTag])
+        : section ? Buffer.concat([section.ciphertext, section.authTag]) : undefined
     if (!bytes) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH')
     if (name === null) {
       const signed = parseRecoveryArchiveManifestObjectEnvelope(bytes)
@@ -91,8 +106,9 @@ function bindManualObjectUpload(
       object: { generationId: owner.generationId, objectId: sha256, version: sha256,
         sha256, size: String(bytes.byteLength), bytes,
         expiresAt: admitted.expiresAt, pinned: false },
-      objectClass: name === null ? 'manifest' : 'section', sectionName: name, attachmentId: null,
-      keyId: admitted.envelope.binding.keyId, plaintextSha256: section?.plaintextSha256 ?? sha256,
+      objectClass: name === null ? 'manifest' : attachment ? 'attachment' : 'section',
+      sectionName: typeof name === 'string' ? name : null, attachmentId,
+      keyId: admitted.envelope.binding.keyId, plaintextSha256: attachment?.plaintextSha256 ?? section?.plaintextSha256 ?? sha256,
       ownerKind: owner.ownerKind, ownerId: owner.ownerId, ownerFence: owner.ownerFence })
     await transaction(async (query) => {
       const current = await authorizedPayload(query)
@@ -131,7 +147,7 @@ export function bindRecoveryArchiveManualContinuation(
       throw new Error('RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH')
     }
     await uploadRecoveryArchivePreparedCapture({
-      owner, binding, upload: input.upload,
+      owner, binding, upload: input.upload, uploadAttachment: input.uploadAttachment,
       capture: async () => {
         if (!source) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
         const snapshot = takeRecoveryArchiveManualSource(source, identity, owner, binding)
