@@ -638,6 +638,43 @@ No new independent reviewer or record-lock guard mutation is claimed for this
 verifier-only extension. Existing production guard behavior was exercised through
 the actual HTTP route; remote CI for the new commit is not yet certified.
 
+## Workbench And Reader CI Checkpoint
+
+Code checkpoint: `580577ecda412f0a28e7e017dad58d3f481b19bf`, tree
+`691a1d37198e6068db7b3c1058c48737af8b2f7c` (three verifier/test files,
+no production change).
+Owned runner `TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node
+scripts/ops/run-recovery-manual-checkpoint.mjs --browser` exits 0. In addition to
+the existing modal loops, production Workbench loops at 1440 and 390 prove real
+capture/catalog/preview/confirmation, exactly one execute request, empty-to-two
+attachment grid refresh and database/history/binary readback. All API non-2xx
+responses remain fatal. Production comment routes, not successful mocks, satisfy
+the Workbench dependency reads. Owned database connections are zero and the
+synthetic cluster is removed. Log:
+`/private/tmp/tm-workbench-archive-final-realdb-20260919.log`.
+
+Earlier runs failed on missing fixture comment routes and a locator matching both
+the hidden recycle-bin dialog and archive dialog. These are not counted as passes.
+The final run mounts real comment services and selects the named archive dialog.
+Both screenshots were inspected. At 390px the full-page image exposes horizontal
+Workbench overflow despite a passing dialog-width check; mobile layout remains
+OPEN. This is a functional small-viewport result, not responsive-layout signoff.
+Full app login/org selection, real cell edits and browser-click download remain
+OPEN; HTTP download with an explicit JWT is a different evidence class.
+
+Remote Node18/20 at `2ef3cdcb18a8da647e9e422555629e7748943ac3` failed the same
+reader denied-mode stale error expectation. Local reproduction was 1 failed/35
+passed. Only denied mode now requires the typed authorization error and exact
+`ARCHIVE_ATTACHMENT_STAGE_FORBIDDEN` message; its zero-storage-events assertion
+and all other refusal cases remain. Restored reader is 36/36; reader/sync-restore/
+attachment-plan/preview neighbors are 4 files/78 tests PASS. Logs:
+`/private/tmp/tm-reader-refusal-red-20260920.log` and
+`/private/tmp/tm-reader-refusal-neighbors-20260920.log`.
+Core typecheck, wiring 37/37 and diff-check PASS. Earlier bounded Luna read-only
+review found no evidenced P1/P2 in the initial Workbench oracle; it did not review
+the later fixture dependency/locator adjustments. No new full independent verdict
+or successor remote CI success is claimed. PR remains Draft/HOLD.
+
 ## Remaining Acceptance
 
 Default runtime readiness and cleanup registration; prepared/displaced file

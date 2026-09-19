@@ -303,6 +303,20 @@ bypass or new unlock action. Staging may prepare private attempt-owned objects
 before the canonical record-lock refusal; no zero-staging claim is made for that
 case. Cross-tenant and full Workbench acceptance remain separately open.
 
+## Workbench Acceptance Boundary
+
+The production Workbench, client, archive toolbar and recovery modal are now
+exercised against the owned synthetic PostgreSQL/storage composition. Production
+login supplies the JWT; production comment routes supply Workbench dependencies.
+No API-success mocks or browser-wide authorization headers are substituted.
+Synthetic SQL clears the field between capture and recovery. The real grid must
+show zero attachments before confirmation and exactly two after its recovery
+refresh. This does not prove login-page/organization-selection UAT, user-driven
+cell editing, or attachment-link browser downloads. The 390px functional loop
+passes, but screenshot inspection exposes whole-Workbench horizontal overflow;
+mobile layout acceptance stays OPEN. The dialog-only overflow assertion does not
+prove whole-page responsiveness. No recovery permissions or runtime flags change.
+
 ## Nightly Plan Boundary
 
 No real environment access is authorized by this plan. Known artifact evidence:
