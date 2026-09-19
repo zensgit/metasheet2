@@ -1831,3 +1831,131 @@ $ git diff --stat a728ed65532918e3726171d0c42f44d6be7e0ba9..HEAD
 ```
 
 三个文件:两份 MD + 一个测试文件的 JSDoc 头部注释(逐行核对,见提交 2 的记录,改动行全部以 `*` 开头)。**零 `packages/*/src` 文件、零 DDL、零 `scripts/dev` 之外的文件**——本表数字尚不含本节自身这次提交,权威判读见上方自指注记。
+
+## 27. 勘误 3 候选的技术验证(2026-09-19,待 owner 确认)
+
+### 27.0 状态声明(先于任何证据)
+
+**Erratum 3 是 CANDIDATE——PROPOSED,未 ratify,不是「已授权」。** 本节记录的一切(下方 27.1-27.7 的迁移/服务层/测试改动与全绿证据)都只是**技术验证**,不构成 ratify、合并或迁移应用的许可,也不是对 §23.5「owner 勘误请示」的自我批准。
+
+**归属纠正(2026-09-19,owner 本人指出)**:本轮更早的一次落笔曾把「owner 的『并行可收口分组中文 CHECK 的勘误,但不要把它夹进撤销修复』」误记为对勘误 3 本身的批准,并在迁移文件、服务层注释里写成「owner-ratified 2026-09-19」——owner 同日纠正:那句话是**审阅建议**,不是对勘误 3 的批准,也没有裁定「只改 `name`、保留两处 `org_id` CHECK」这个具体形状。本节与迁移/服务层的措辞已按此边界改写(见 27.1/27.2);锁文自己的「勘误 3」抬头条目与 `lock-errata-proposed-grouping-v2.13-20260919.md` 是这次归属纠正的权威口径,本节照抄,不另造新措辞。
+
+**单列请示(逐字,等 owner 亲自确认,不在本节被回答)**:是否批准**仅**将 `approval_template_groups.atg_name_nonblank` 的谓词由 `name ~ '[!-~]'` 改为 `btrim(name) <> ''`,而 `atg_org_nonblank` / `atgl_org_nonblank` 两处 `org_id ~ '[!-~]'` **保持不变**?
+
+### 27.1 迁移改动(候选,DDL 未应用到任何共享/staging/生产库)
+
+`packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts`:`atg_name_nonblank` 的谓词由 `CHECK (name ~ '[!-~]')` 改为 `CHECK (btrim(name) <> '')`(现场行号 `:63`);`atg_org_nonblank`(`:40`)与 `atgl_org_nonblank`(`:101`)两处 **不变**。列上方的多行注释按 27.0 的措辞重写为「Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation …NOT owner-ratified, NOT authorized)」,并记录了一个本轮修复的真实事故:该注释块位于 `sql\`...\`` 标签模板字面量内部,更早一版注释里内嵌了反引号(用反引号包住标识符,如常规 JSDoc 注释的写法)——这在模板字面量内部会提前终止字符串,`tsx`/`esbuild` 转译时报 `Expected ";" but found "lock"`(实测,现场复现见下方 27.3);已改为不含任何反引号字符的写法,并在注释里加了一句显式提醒,防止未来编辑再引入同一个错误。
+
+### 27.2 服务层改动(候选,零行为收窄)
+
+`packages/core-backend/src/services/ApprovalTemplateGroupService.ts`:
+
+- 文件头 JSDoc(`GROUP_NAME_UNSUPPORTED` 段落)与 `NONBLANK_CHECK_CONSTRAINTS` 上方的块注释、`mapGroupConstraintError` 自己的文档注释——三处「owner-ratified」措辞全部改写为「Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation — NOT owner-ratified, NOT authorized)」,并补充「见锁文自己的『勘误 3』抬头条目」的出处指引。
+- `mapGroupConstraintError` 里 23514 → `GROUP_NAME_UNSUPPORTED` 的映射分支**保留,未删除**——该分支的 `atg_name_nonblank` 成员在本候选分支上已不可达(CHECK 谓词变了,不会再对 `name` 触发 23514),但删除它是一次未经 owner 确认就收窄错误码映射面的单方面决定,不是本候选被授权做的事;分支上新增行内注释说明这一点,`org_id` 的两个成员不受影响、仍是 defense-in-depth 生效路径。
+- `requireName`(仅 trim + 非空校验,不含 ASCII 限制)**未改动**——这本来就不含 ASCII 限制,与候选变更方向一致,不需要动。
+- 错误消息文案(`'当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误'`)**未改动**——按硬规矩「不做收窄删除,避免夹带」,该文案是否需要跟着候选的裁决结果调整,留给 owner 与 DDL 裁决一并做。
+
+### 27.3 迁移文件语法事故与修复(mutation 之外的一次真实红,现场记录)
+
+修复 27.1 提到的反引号问题之前,`db:migrate` 在私有库上现场报错:
+
+```
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_a1_erratum" \
+    MIGRATION_EXCLUDE="008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql" \
+    pnpm --filter @metasheet/core-backend db:migrate
+failed to migrate
+Error: Transform failed with 1 error:
+.../zzzz20260918090000_create_approval_template_groups.ts:44:25: ERROR: Expected ";" but found "lock"
+```
+
+改用不含反引号的措辞后,同一条 `db:migrate` 命令在同一私有库上干净执行到底(见 27.6)。记入本节是因为这个语法问题是**本轮接手时既有的、未提交状态里就带着的缺陷**(候选迁移的注释块在被交接前就已内嵌反引号),不是本轮新引入的——本轮的贡献是发现并修掉它,顺带证明了这份未提交候选此前从未被实际跑过 `db:migrate`。
+
+### 27.4 测试改动:此前「CJK ⇒ 400 GROUP_NAME_UNSUPPORTED」用例改为正向
+
+`packages/core-backend/tests/integration/approval-template-groups-lifecycle.db.test.ts`(现场行号 `:600`):design-gate A-3 回流修复轮(2026-09-18)新增的 `it('P1-3 (design-gate A-3, 2026-09-18): a pure-CJK group name maps to 400 GROUP_NAME_UNSUPPORTED, …')` 改写为 `it('Erratum 3 candidate (pending owner confirmation): a pure-CJK group name creates 201 with the name read back verbatim, renames to another CJK name 200, and a blank name is still 400', …)`,同一个位置,断言方向反转以匹配候选分支现状:
+
+1. `POST /api/approval-template-groups {name:'请假'}` ⇒ **201**,响应体 `group.name === '请假'`,并直接 `SELECT name FROM approval_template_groups WHERE org_id=$1 AND id=$2` 核对 DB 行的 `name` 逐字等于 `'请假'`(不只信响应体回显)。
+2. `PATCH /api/approval-template-groups/:id {name:'培训'}` ⇒ **200**,响应体与 DB 行的 `name` 都变成 `'培训'`。
+3. `POST … {name:'   '}` ⇒ **400** `GROUP_NAME_REQUIRED`——这一步走的是 `requireName` 的应用层 trim+非空校验(在任何 DB 往返之前就短路),与候选是否改动 DB 层 CHECK 无关;记入本用例是为了在同一处把「候选不改变空白名仍被拒绝」这件事说清楚,不是声称这条断言由 DB 层 `btrim` CHECK 把关。
+4. 正控延续自被取代的旧用例:同一 org 一个 ASCII 名字仍然 **201**——候选是放宽,不是收紧。
+
+两个真库文件总用例数**不变**(29 个),因为这是对既有一条 `it` 的重写,不是新增测试。
+
+### 27.5 mutation(CHECK 改回 `~ '[!-~]'`,私有库重建 ⇒ 中文用例红)
+
+遵守本仓 mutation 探针纪律:`cp` 备份 → 改 → 单独跑受影响用例 → `cp` 还原 → `cmp` 逐字节核对。这里的「改」是 DDL 谓词本身,所以还需要重建私有库(仅 source 文件的 mutation 不够——CHECK 已经落进已迁移的 schema 里)。
+
+```
+$ md5 src/services/../db/migrations/zzzz20260918090000_create_approval_template_groups.ts
+MD5 (…) = 3c3f7ea5e534c25b9a0fa71de8805a95
+# python3 精确文本替换：CHECK (btrim(name) <> '') → CHECK (name ~ '[!-~]')（唯一一处，替换前校验命中数=1）
+$ dropdb --if-exists metasheet2_a1_erratum && createdb metasheet2_a1_erratum
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_a1_erratum" MIGRATION_EXCLUDE="…（同 27.1 六个排除项）…" \
+    pnpm --filter @metasheet/core-backend db:migrate
+  … migration "zzzz20260918090000_create_approval_template_groups" was executed successfully
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_a1_erratum" EXPECT_DB=1 \
+    pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts -t "Erratum 3 candidate" --reporter=verbose
+ ❯ … Erratum 3 candidate (pending owner confirmation): a pure-CJK group name creates 201 …
+   AssertionError: expected 400 to be 201
+ Test Files  1 failed (1)
+      Tests  1 failed | 18 skipped (19)
+# 还原
+$ cp /tmp/a1-erratum3-probe/migration.orig.ts src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts
+$ cmp /tmp/a1-erratum3-probe/migration.orig.ts src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts && echo RESTORED-IDENTICAL
+RESTORED-IDENTICAL
+$ md5 src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts
+MD5 (…) = 3c3f7ea5e534c25b9a0fa71de8805a95
+```
+
+把 `name` 的 CHECK 改回可打印-ASCII-only 后,私有库重建 + 重新迁移,同一用例的第一个断言从 201 变红成 400(`GROUP_NAME_UNSUPPORTED`,响应体证据未逐条重复贴出,机制与 §23.4 的旧 mutation 一致,只是方向相反)——证明这条 CHECK 谓词是本用例正向断言的承重点,不是装饰性断言。还原后 MD5 与还原前逐字节一致。
+
+### 27.6 私有处女库(`metasheet2_a1_erratum`)重跑 + tsc(现场执行,命令与输出原样贴入)
+
+```
+$ dropdb --if-exists metasheet2_a1_erratum && createdb metasheet2_a1_erratum
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_a1_erratum" \
+  MIGRATION_EXCLUDE="008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql" \
+  pnpm --filter @metasheet/core-backend db:migrate
+  … migration "zzzz20260918090000_create_approval_template_groups" was executed successfully
+  （本切片迁移仍是最后一条 executed，与历史各轮一致）
+
+$ DATABASE_URL="postgresql://localhost:5432/metasheet2_a1_erratum" EXPECT_DB=1 \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=dot
+  Test Files  2 passed (2)
+       Tests  29 passed (29)      零 skip
+
+$ pnpm --filter @metasheet/core-backend exec tsc --noEmit
+  （零行输出，退出码 0）
+```
+
+### 27.7 required 检查 `test (20.x)` 的全量命令逐字复现(同 §23.10 的方法论,换成本候选私有库)
+
+同 §23.10 的划界:只逐字复现该 required job 里点住本切片两个真库文件的那一步(`id: approval-real-db-integration`,79 个 whole-file 路径,来源 `.github/workflows/plugin-tests.yml:1579-1658`,现场核对行号未变),把 `DATABASE_URL` 换成本轮私有库,其余(排除列表、`--config`、`--reporter`、79 个文件路径顺序与拼写)逐字未改:
+
+```
+$ export DATABASE_URL="postgresql://localhost:5432/metasheet2_a1_erratum"
+$ export EXPECT_DB=1
+$ pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run <79 个文件，逐字同 plugin-tests.yml:1579-1658> --reporter=dot
+ Test Files  79 passed (79)
+      Tests  886 passed (886)
+   Duration  132.46s
+```
+
+79/79 文件全绿、886/886 全过、零 skip、零失败。**与 §23.10 记录的历史基线(880 passed | 5 skipped，885 总数)对不上**——这是预期的分支自然漂移,不是本候选引入的效应:§23.10 是 round-7/8 时期的一次性快照,此后这条分支上落了大量与 A-1 无关的 docs/test 卫生轮提交(见文件顶部 git log,`fbb5b38d8` 等一串 `docs(approval)`/`test(approval)` 提交),会独立改变同一批 79 个文件里其它文件的用例数与 skip 数;本节唯一的判读点是「79/79 文件、零失败」,不是这个总数是否与某个历史快照相等。
+
+**no-DB 单元测试 lane 未在本轮单独重跑**——27.1/27.2 的改动只触及 `db/migrations/`(不参与 no-DB lane)与 `services/ApprovalTemplateGroupService.ts` 的注释/文档字符串(零可执行语句改动;`requireName`、`mapGroupConstraintError` 的运行时逻辑逐字未变,唯一的运行时差异来自 DDL 本身,不在这条 lane 的覆盖范围内),真库套件(27.6/27.7)与 `tsc --noEmit`(27.6)已经覆盖了本轮唯一有行为差异的层面(DB CHECK 谓词);因此判定 no-DB lane 与本轮零重叠,不必为零改动的一层重复跑一次仅由 CI 编排巧合放在同一 job 里的独立 lane。
+
+### 27.8 设计 MD §2 同步
+
+`approval-template-groups-phase1-design-20260918.md` §2.1/§2.2 两张约束表各加一列「候选(2026-09-19,待 owner 确认)」,标注哪些行受本候选影响(仅 `atg_name_nonblank` 一行「是」,`atg_org_nonblank`/`atgl_org_nonblank` 两行显式标「候选未改」,其余行「不受影响」),并把候选分支下的现场行号与原 ratified 行号并列列出。
+
+### 27.9 前瞻披露:A-3 与本候选的耦合点
+
+A-3(分期 3,`?category=`/`/categories`,尚未在本分支落地)的 `classifyBackfillCategory` 对 CJK `category` 值的 skipped 处置,在候选被批准后需要同步复核——候选改变的是 `approval_template_groups.name` 这一列的 CHECK,不是 `approval_templates.category`,两者目前是不同的列、不同的校验路径,但 A-3 设计门审(`design-gate-A3-phase2-20260918.md` §5 O2)本身就是本候选的源头,若 owner 批准候选,A-3 落地时该函数对 CJK 输入的处置逻辑应当回头核对是否仍然合理,不能假定两处独立无关。本节仅记录这个耦合点,不预判 A-3 该怎么改——`classifyBackfillCategory` 在本分支尚不存在,无代码可动。
+
+### 27.10 提交与推送
+
+（推送前以 `git log --oneline <起点>..HEAD` 现场输出为准,不在此钉 SHA——同一自指问题见 §23.11/§24.7/§25.8/§26.3,本节沿用同一约定。）

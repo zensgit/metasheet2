@@ -39,7 +39,28 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       org_id       text NOT NULL
                      CONSTRAINT atg_org_nonblank CHECK (org_id ~ '[!-~]'),
       name         text NOT NULL
-                     CONSTRAINT atg_name_nonblank CHECK (name ~ '[!-~]'),
+                     -- Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation —
+                     -- see the lock's own '勘误 3' header entry and
+                     -- lock-errata-proposed-grouping-v2.13-20260919.md 勘误 3 for the exact
+                     -- wording; NOT owner-ratified, NOT authorized — this DDL edit is a candidate
+                     -- sitting on an unmerged/unapplied branch, awaiting the owner's own word):
+                     -- non-blank via btrim, NOT printable-ASCII-only. The original '~ [!-~]'
+                     -- form was copied from
+                     -- zzzz20260715210000_create_approval_attachments.ts:24, which guards two
+                     -- IDENTIFIER columns — applied here to a human-typed display name it
+                     -- rejected every pure-CJK group name, including this product's OWN
+                     -- placeholder text (TemplateAuthoringView.vue:221: "如 请假 / 采购 / 报销").
+                     -- atg_org_nonblank / atgl_org_nonblank below are UNCHANGED by this
+                     -- candidate — org_id stays a system/session-derived identifier column, same
+                     -- footing as the precedent; the owner's single standing question is whether
+                     -- to approve narrowing ONLY this name CHECK, leaving both org_id CHECKs
+                     -- untouched. NOTE: no backtick characters anywhere in this comment block —
+                     -- it lives inside the JS/TS sql-tagged template literal below (an outer pair
+                     -- of backtick delimiters wraps this whole CREATE TABLE statement), where one
+                     -- more literal backtick would terminate that template early. The file's own
+                     -- top-of-file JSDoc block uses backticks freely because it sits OUTSIDE that
+                     -- template.
+                     CONSTRAINT atg_name_nonblank CHECK (btrim(name) <> ''),
       -- Nullable: archived groups carry no sort position (paired CHECK below). Assigned by the
       -- route layer inside the org-level advisory lock (COALESCE(MAX(sort_order), 0) + 1).
       sort_order   int,

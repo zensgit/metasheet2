@@ -582,39 +582,65 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect((await missingGroupId.json()).error.code).toBe('APPROVAL_GROUP_ID_REQUIRED')
   })
 
-  // ── design-gate A-3 回流修复 (2026-09-18, P1-3 / M5) ──────────────────────────────────────────
-  // `design-gate-A3-phase2-20260918.md` §3 P1-3: the ratified §2 non-blank CHECK
-  // (`atg_name_nonblank CHECK (name ~ '[!-~]')`) is printable-ASCII-only and rejects every
-  // pure-CJK name — a routine input this product's OWN category placeholder text recommends
-  // (`TemplateAuthoringView.vue:221`, "如 请假 / 采购 / 报销"). Before this fix, that DB rejection
-  // reached the caller as a RAW `DatabaseError` (see the probe transcript in this slice's
-  // verification MD): `mapGroupConstraintError` only special-cased 23505, so `handleApprovalsError`
-  // fell through to its undifferentiated 500. This does NOT loosen the CHECK (that is a lock-text
-  // change, owner-gated — see the verification MD's "owner 勘误请示") — a pure-CJK name is still
-  // rejected; only the SHAPE of the rejection changes, from an opaque 500 to a typed 400 whose body
-  // names the offending constraint. Mutation (recorded in the verification MD, not automated here
-  // per this suite's cp-backup/edit/run/restore/cmp convention): deleting the 23514 branch from
-  // `mapGroupConstraintError` turns this test's first assertion red (500, not 400).
-  it('P1-3 (design-gate A-3, 2026-09-18): a pure-CJK group name maps to 400 GROUP_NAME_UNSUPPORTED, not a raw 500 — an ASCII name in the same org still succeeds', async () => {
+  // ── Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation) ────────────────────
+  // `lock-errata-proposed-grouping-v2.13-20260919.md` 勘误 3 / the lock's own "勘误 3" header
+  // entry: NOT owner-ratified, NOT authorized — a single standing question sits with the owner
+  // ("是否批准仅将 name 改为 btrim(name) <> ''、两处 org_id CHECK 保持不变?"). This test exercises
+  // what THIS candidate branch's migration currently does, not a ratified outcome: it supersedes
+  // the design-gate A-3 test that used to live here (`P1-3 (design-gate A-3, 2026-09-18)`, which
+  // asserted a pure-CJK name mapped to 400 `GROUP_NAME_UNSUPPORTED` against the pre-candidate
+  // `atg_name_nonblank CHECK (name ~ '[!-~]')`). Passing this suite is TECHNICAL VERIFICATION of
+  // the candidate only — it is not, and must not be read as, ratification, merge, or migration
+  // application.
+  //
+  // Mutation (recorded in this slice's verification MD §27, not automated here per this suite's
+  // cp-backup/edit/run/restore/cmp convention): reverting the migration's `atg_name_nonblank`
+  // predicate back to `CHECK (name ~ '[!-~]')` in a private rebuilt database turns this test's
+  // first assertion (the CJK create) red (400 `GROUP_NAME_UNSUPPORTED`, not 201).
+  it('Erratum 3 candidate (pending owner confirmation): a pure-CJK group name creates 201 with the name read back verbatim, renames to another CJK name 200, and a blank name is still 400', async () => {
     const org = trackOrg(`atg-cjk-${TS}`)
     const admin = await tok(base, `cjk-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
 
-    const cjkName = `人事`
+    // (1) Pure-CJK create — this product's OWN category placeholder text recommends exactly this
+    // kind of input (`TemplateAuthoringView.vue:221`, "如 请假 / 采购 / 报销").
+    const cjkName = `请假`
     const cjkRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: cjkName } })
-    expect(cjkRes.status).toBe(400)
-    const cjkBody = (await cjkRes.json()) as { error: { code: string; message: string; details?: { constraint?: string } } }
-    expect(cjkBody.error.code).toBe('GROUP_NAME_UNSUPPORTED')
-    expect(cjkBody.error.details?.constraint).toBe('atg_name_nonblank')
-    // The response body must name the offending constraint AND carry the owner-erratum notice —
-    // silently downgrading either half back to a bare "bad request" would re-hide the same fact
-    // the raw 500 was hiding, just one layer up.
-    expect(cjkBody.error.message).toContain('当前锁文 CHECK 只接受可打印 ASCII');
-    expect(cjkBody.error.message).toContain('owner 勘误')
-    const cjkRows = await query(`SELECT 1 FROM approval_template_groups WHERE org_id = $1 AND name = $2`, [org, cjkName])
-    expect(cjkRows.rowCount).toBe(0)
+    expect(cjkRes.status).toBe(201)
+    const cjkBody = (await cjkRes.json()) as { group: { id: string; name: string } }
+    expect(cjkBody.group.name).toBe(cjkName)
+    const cjkRow = await query<{ name: string }>(
+      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, cjkBody.group.id],
+    )
+    expect(cjkRow.rowCount).toBe(1)
+    expect(cjkRow.rows[0].name).toBe(cjkName)
 
-    // Positive control: this is a request-shape mapping, not a guard/auth regression — the SAME
-    // admin, SAME org, an ASCII name, still gets 201.
+    // (2) Rename to a DIFFERENT CJK name — 200, and the new name is what comes back, not the old
+    // one or a truncated/mangled one.
+    const renamedTo = `培训`
+    const renameRes = await httpReq(base, `/api/approval-template-groups/${cjkBody.group.id}`, admin, {
+      method: 'PATCH',
+      body: { name: renamedTo },
+    })
+    expect(renameRes.status).toBe(200)
+    const renameBody = (await renameRes.json()) as { group: { name: string } }
+    expect(renameBody.group.name).toBe(renamedTo)
+    const renamedRow = await query<{ name: string }>(
+      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, cjkBody.group.id],
+    )
+    expect(renamedRow.rows[0].name).toBe(renamedTo)
+
+    // (3) All-whitespace name is still rejected — this is `requireName`'s app-level trim+non-empty
+    // guard (unaffected by the candidate's DDL edit: it runs before any DB round-trip), so a name
+    // that is nothing but blanks is 400 whether or not the CHECK ever loosens further. `btrim` at
+    // the DB layer would reject the same value if it were ever reached directly.
+    const blankRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: '   ' } })
+    expect(blankRes.status).toBe(400)
+    expect((await blankRes.json()).error.code).toBe('GROUP_NAME_REQUIRED')
+
+    // Positive control, carried over from the superseded test: an ASCII name in the same org still
+    // succeeds too — this candidate widens what `name` accepts, it does not narrow anything.
     const asciiRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `HR ${TS}` } })
     expect(asciiRes.status).toBe(201)
   })
