@@ -1406,3 +1406,26 @@ service; no environment flag or customer storage was changed. Attachment restore
 application and final end-to-end acceptance remain OPEN. Previous remote head
 `992f92716a306cf7f6f5b447c440c3fe3da688cf` had 37 SUCCESS and one SKIPPED at
 readback; that result does not cover these subsequent local commits.
+
+## HTTP Attachment Capture Acceptance
+
+Test code `e29903468`: actual Express registrar, canonical authorization/database,
+server local attachment provider and authenticated reader. Test-only storage root
+is set before route module loading and restored during cleanup. Synthetic
+authentication is the only authentication substitute; this is not tenant UAT.
+
+Full driver GREEN: anonymous capture 401, caller storage path 400, both zero
+generation side effects; valid capture 200 with closed recoverable DTO; retry
+same DTO and exactly one new generation; catalog 200 and exact generation;
+independent complete reconstruction returns exact live/deleted file bytes.
+Acceptance tsc and diff-check PASS. Mutation removing the route factory source
+binding yields HTTP 503 instead of 200; restore returns full driver GREEN.
+Owned database/connections and synthetic cluster clean on both paths.
+
+Logs: `/private/tmp/tm-attachment-http-realdb.log`,
+`/private/tmp/tm-attachment-http-mutation.log`,
+`/private/tmp/tm-attachment-http-restored.log`.
+No public attachment restore-write or full login/browser UAT is claimed. Current
+canonical restore excludes attachment fields; the proposed write-contract
+expansion is awaiting explicit confirmation. Existing scalar restoration remains
+a separate evidence class. No flags, customer storage or deployment changed.

@@ -611,3 +611,21 @@ Isolated command acceptance now covers real synthetic source files through
 publication and complete authenticated reading. This does not prove HTTP/browser
 attachment restoration or file/metadata restore writes. Those remain OPEN;
 scalar restore evidence must not be substituted for attachment restore evidence.
+
+## HTTP Attachment Acceptance And Restore Boundary
+
+Test code `e29903468` exercises the real HTTP registrar and its existing local
+storage factory using an isolated synthetic attachment root. Authentication is
+synthetic; authority, database, source files, archive store and reader are real.
+Anonymous requests and client-selected storage paths refuse; a valid capture and
+retry produce one recoverable generation, catalog access and independently
+authenticated byte-exact live/deleted attachment contents.
+
+Restore-write scope is not implicitly expanded by this acceptance. The canonical
+`record-restore-diff.ts` currently excludes attachment fields and preserves their
+live values. The archive sync apply receives records/links, not a file restore
+transaction. A proposed separate contract was sent for owner confirmation: only
+existing writable original records/attachment fields; restore archived references
+and files; no table/record/field resurrection or permission changes; drift or
+missing evidence refuses the whole apply. This proposal is PENDING, not ratified
+by this document. No attachment restore-write implementation is authorized here.
