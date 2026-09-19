@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
   ApprovalActionRequest,
+  ApprovalActionType,
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
   ApprovalAutoApprovalReason,
@@ -89,7 +90,7 @@ import {
   isEmptyValue,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
-import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
+import { fieldDerivedAssigneeSourceKey, isSystemSentinelActor, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
 import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
 import {
   buildApprovalDesignatedFallbackResolver,
@@ -141,7 +142,24 @@ import type {
   UnifiedApprovalDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
-import { ServiceError } from './ApprovalBridgeService'
+import {
+  ACCOUNT_ACTIVATION_INVALID_CODE,
+  ACCOUNT_PENDING_ACTIVATION_CODE,
+  evaluateUserAuthenticationGate,
+} from '../auth/user-activation'
+import {
+  ServiceError,
+  CancelRoundOutletForbiddenError,
+  CancelRoundSuiteForbiddenError,
+  rejectIfCancelRound,
+} from './ApprovalBridgeService'
+import {
+  CANCEL_ROUND_TEMPLATE_ID,
+  CANCEL_ROUND_TEMPLATE_VERSION_ID,
+  CANCEL_ROUND_PUBLISHED_DEFINITION_ID,
+  CANCEL_ROUND_APPROVAL_NODE_KEY,
+  buildCancelRoundRuntimeGraph,
+} from '../db/seeds/approval-cancel-round-published-definition'
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
@@ -150,6 +168,8 @@ import {
   filterBulkReassignDiscoveryForAttendance,
   type AttendanceReassignAuditWitnessV1,
   AttendanceCentralApprovalError,
+  isCancelRoundInstance,
+  APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
 } from '../attendance/w4c3b-central-approval-hooks'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
@@ -286,6 +306,250 @@ function isPostgresUniqueViolation(error: unknown): boolean {
     && (error as { code?: unknown }).code === '23505'
 }
 
+/**
+ * Lock:143 — the closed `suite` domain, verbatim: `suite ∈ {'attendance','leave','other','forbidden'}`.
+ * A value outside this set is a template/seed CONFIGURATION error, never a silently-defaulted one
+ * (Codex review 2026-09-19, finding 2: the pre-fix code kept the out-of-domain string verbatim and
+ * took `other`'s number, so a value like `'Forbidden'` walked straight through the lock's only
+ * named creation-time code, `CANCEL_ROUND_SUITE_FORBIDDEN` — §14.3 #14 — and landed in
+ * `policy_snapshot_at_create`, corrupting the very snapshot I4/G4 designate as the audit basis).
+ */
+const CANCEL_ROUND_SUITES = ['attendance', 'leave', 'other', 'forbidden'] as const
+type CancelRoundSuite = (typeof CANCEL_ROUND_SUITES)[number]
+
+/** Lock:143 — phase 1 ships only `leave`; the tag is absent on every pre-existing instance. */
+const CANCEL_ROUND_DEFAULT_SUITE: CancelRoundSuite = 'leave'
+
+/**
+ * Lock:143 — the `suite` CEILINGS from the decoded rule page (`reviews/设置审批撤销规则.txt:41-43`):
+ * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` 0 (lock:143 fixes that suite's window
+ * at 0 and §14.3 #14 blocks it at creation before the number matters). Lock:143's
+ * `windowDays ∈ [0, 上限]` makes these an ENFORCED UPPER BOUND, not a default — renamed from
+ * `CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS` per Codex review 2026-09-19 finding 2 (命名即合同: the old
+ * identifier was itself the bug's self-description). They remain the value used when the tag is
+ * ABSENT, which is lock:143's 「由模板管理员在上限内设」 read: nothing set ⇒ the widest the suite allows.
+ */
+const CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS: Readonly<Record<CancelRoundSuite, number>> = Object.freeze({
+  attendance: 180,
+  leave: 90,
+  other: 90,
+  forbidden: 0,
+})
+
+export type CancelRoundRoundPolicy = { suite: CancelRoundSuite; windowDays: number }
+
+/**
+ * Lock:143 / §5 I4 / §2-G4 — the SINGLE derivation of `roundPolicy = { windowDays, suite }` for BOTH
+ * time points: the creation snapshot (`policy_snapshot_at_create`) and C-2's final in-transaction
+ * evaluation (`policy_snapshot_at_decision`). Deliberately ONE function: the lock requires both
+ * points to evaluate the same policy, and a second clamp/derivation at the decision point would
+ * drift from this one (Codex review 2026-09-19 finding 2 explicitly rejects a decision-side clamp).
+ *
+ * Domain, ENFORCED rather than assumed:
+ * - `suite`: absent (`undefined`/`null`) ⇒ `CANCEL_ROUND_DEFAULT_SUITE`. Anything else MUST be one of
+ *   `CANCEL_ROUND_SUITES`; out-of-domain is a 409 `CANCEL_ROUND_SUITE_UNKNOWN`, never a silent
+ *   fallback to `leave`/`other`.
+ * - `windowDays`: absent ⇒ the suite's ceiling. Anything else MUST be an INTEGER in `[0, ceiling]`
+ *   (`Number.isInteger` already excludes NaN/±Infinity and every non-number type); otherwise a 409
+ *   `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`. BLOCK, not clamp — lock:143 says `windowDays ∈ [0, 上限]`,
+ *   「由模板管理员在上限内设」, i.e. the bound is a domain constraint on what may be SET; a clamp
+ *   turns a misconfiguration into a silent 「悄悄按 90 算」 that no administrator can audit, and this
+ *   repo's narrowing-fix discipline is write-path REJECT with read-path byte parity.
+ * - `forbidden` short-circuits the window check and returns lock:143's fixed `windowDays = 0`, so
+ *   the LOCK-ANCHORED §14.3 #14 code (`CANCEL_ROUND_SUITE_FORBIDDEN`, raised by the caller right
+ *   after this call) always wins over a window complaint for that suite — a deliberate, documented
+ *   precedence, not an accident of statement order.
+ *
+ * Both rejections are values-free: `details` carries the closed set, or the already-validated suite
+ * and its ceiling — never the offending value (same discipline as
+ * `validateAndFreezeRequesterChoices`'s values-free 422s).
+ *
+ * C-2 consumption note (the second time point is NOT in this slice): the final in-transaction
+ * evaluation must call THIS function and treat a throw as `blocked` + the thrown code — never as a
+ * silent `expired`. `expired` is an irreversible terminal state and must not be built on a
+ * configuration error (same trade-off the lock already makes for `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`).
+ *
+ * NEW CODES — implementer erratum: neither `CANCEL_ROUND_SUITE_UNKNOWN` nor
+ * `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` is registered in the lock's §14.3 table (which names only
+ * `CANCEL_ROUND_OUTLET_FORBIDDEN` and `CANCEL_ROUND_SUITE_FORBIDDEN`). Registered instead in this
+ * slice's design MD §3.1 and flagged for owner registration — the lock file itself is
+ * owner-authored and is NOT edited from here. Same discipline as `CANCEL_ROUND_REQUESTER_ONLY`.
+ */
+function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): CancelRoundRoundPolicy {
+  const rawSuite = metadata.suite
+  let suite: CancelRoundSuite
+  if (rawSuite === undefined || rawSuite === null) {
+    suite = CANCEL_ROUND_DEFAULT_SUITE
+  } else if (typeof rawSuite === 'string' && (CANCEL_ROUND_SUITES as readonly string[]).includes(rawSuite)) {
+    suite = rawSuite as CancelRoundSuite
+  } else {
+    throw new ServiceError(
+      "This document's suite tag is not one this system recognises — ask an administrator to correct the template's suite configuration",
+      409,
+      'CANCEL_ROUND_SUITE_UNKNOWN',
+      { allowedSuites: [...CANCEL_ROUND_SUITES] },
+    )
+  }
+
+  const ceiling = CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS[suite]
+  if (suite === 'forbidden') return { suite, windowDays: ceiling }
+
+  const rawWindowDays = metadata.windowDays
+  if (rawWindowDays === undefined || rawWindowDays === null) return { suite, windowDays: ceiling }
+  if (
+    typeof rawWindowDays !== 'number'
+    || !Number.isInteger(rawWindowDays)
+    || rawWindowDays < 0
+    || rawWindowDays > ceiling
+  ) {
+    throw new ServiceError(
+      "This document's cancel window is outside the range its suite allows — ask an administrator to correct the template's window setting",
+      409,
+      'CANCEL_ROUND_WINDOW_OUT_OF_RANGE',
+      { suite, ceiling },
+    )
+  }
+  return { suite, windowDays: rawWindowDays }
+}
+
+/**
+ * Lock §2-G3 — the machine-checkable reason categories a cancel-round seat can be refused for.
+ * Categories only: the error body NEVER carries a person id or name (「提示管理员」 lands in the message
+ * and the audit trail, not in a values-bearing `details`).
+ *
+ * Per-member reachability, MEASURED at gate round 6 rather than asserted (this repo's
+ * 「豁免理由会腐烂,要变成数据」 discipline — every claim below is pinned by a live test, not by a
+ * comment):
+ * - `inactive` — `is_active = FALSE` or `role = 'disabled'`. Covered by 负控 N1 / N2.
+ * - `pending_activation` — `activation_status = 'pending_activation'`. Covered by 负控 N2.
+ * - `not_found` — a claimed PERSON id with no `users` row. Covered by 负控 N2 (deletes the row) and
+ *   by 负控 N4 (proves the sentinel drop did not swallow humans into this bucket). Its production
+ *   population is narrow and that is DATA, not an assumption: a two-syntax census at this head finds
+ *   17 `DELETE FROM users` sites, all 13 files under `scripts/ops/` (staging smoke scripts, each
+ *   narrowed to its own fixture prefix), ZERO under any package `src`, `plugins`, or web-app `src`
+ *   tree; the kysely syntax (`deleteFrom('users')`) is 0 repo-wide; positive control (the same grep
+ *   against the `tests` trees) is 294. Runtime departures set `is_active = FALSE`
+ *   (`directory/deprovision-ledger.ts`), they do not delete. Before gate round 6 this bucket ALSO
+ *   caught the `system:auto-approval` sentinel — that was G6-1, and it is fixed by dropping the
+ *   `system:` namespace before the gate runs, never by making this bucket fail open.
+ * - `activation_invalid` — `parseUserActivationStatus` rejecting the stored value. UNREACHABLE while
+ *   `users.activation_status` carries `users_activation_status_check` and NOT NULL; kept as the
+ *   fail-closed landing spot if that constraint is ever relaxed. That reachability claim is NOT left
+ *   as prose: `approval-cancel-round-creation.db.test.ts` reads `pg_constraint` / `information_schema`
+ *   LIVE and pins both the allowed value set and the NOT NULL, so relaxing either turns the test red
+ *   at exactly the place this member would start mattering.
+ */
+const CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS = [
+  'inactive',
+  'pending_activation',
+  'activation_invalid',
+  'not_found',
+] as const
+type CancelRoundSeatIneligibilityReason = (typeof CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS)[number]
+
+/**
+ * Lock §2-G3 (lock:74-76) — 「撤销:保留原节点的会签/或签语义,但**重新验证当前资格**(在职、仍在该
+ * 组织单元）;…资格不成立的席位 ⇒ 阻断并提示管理员」. Codex review 2026-09-19 finding 1
+ * (CONFIRMED P1, real-DB): the cancel round replays the original document's `approval_records
+ * (action='approve')` actor ids verbatim into `requesterSnapshot.requesterChoices`, and the
+ * `requester_choice` resolver's own module doc states it does NO live directory read because
+ * 「the choices were scope-validated at create」 — a precondition `createCancelRoundInstance` was the
+ * ONLY caller not satisfying. A deactivated approver was seated silently (201/pending), could not
+ * log in (`AuthService` → `evaluateUserAuthenticationGate`), could not be reassigned or transferred
+ * (§14.3 #12/#13 reject cancel rounds outright), and the `'all'` co-sign node therefore deadlocked
+ * behind `uq_approval_rounds_pending_document` forever.
+ *
+ * WHAT this reuses, and why it is WIDER than the normal path rather than a narrower lookalike:
+ * - The set-membership IDIOM is `validateAndFreezeRequesterChoices`'s company-scope baseline: read
+ *   the directory for the chosen ids, then refuse if ANY id is not in the eligible set. Absence of
+ *   a `users` row therefore FAILS CLOSED by construction, exactly as it does there (a missing row
+ *   is not in `activeIds`) — not an extra rule invented here.
+ * - The PREDICATE is `evaluateUserAuthenticationGate`, the shared gate for password login, token
+ *   refresh/verify, DingTalk SSO and API tokens. It denies `role = 'disabled'` and
+ *   `activation_status = 'pending_activation'` in addition to `is_active = FALSE`. Checking only
+ *   `is_active` would seat people the login gate refuses — i.e. would be a NARROWER lookalike of the
+ *   thing it claims to mirror, which is itself contract narrowing.
+ * - Consequence, disclosed rather than laundered: this gate is WIDER than
+ *   `validateAndFreezeRequesterChoices`'s own company baseline (`is_active = TRUE` alone). Aligning
+ *   the NORMAL create path to the login gate would be a behaviour change to a shipped endpoint and
+ *   is an OWNER call; it is deliberately NOT done here. See the slice's design MD §3.4.
+ *
+ * WHERE: the caller invokes this inside the creation transaction, under the SAME
+ * `SELECT * FROM approval_instances … FOR UPDATE` as the WI-16 requester gate and the §14.3 #14
+ * suite gate, and BEFORE the first INSERT — a stale read must not authorize a seat.
+ *
+ * HOW it fails: BLOCK with zero rows. It must NEVER drop an ineligible id and continue: the cancel
+ * node is `approvalMode: 'all'`, so filtering would silently LOWER the co-sign threshold — the
+ * opposite of 「阻断并提示管理员」.
+ *
+ * A directory read that THROWS is not wrapped into a named retryable (unlike
+ * `validateAndFreezeRequesterChoices`'s 503): inside this transaction any failed statement aborts
+ * the txn and the caller's `rollbackQuietly` guarantees zero rows, which is already the fail-closed
+ * outcome — adding a named code no real-DB test can exercise would be an untested assertion.
+ *
+ * NEW CODE — implementer erratum: `CANCEL_ROUND_SEAT_INELIGIBLE` is not registered in the lock's
+ * §14.3 table; registered in this slice's design MD §3.1 and flagged for owner.
+ *
+ * NOT IN THIS SLICE (「仍在该组织单元」, the org half of G3): no `user_orgs` seat-eligibility
+ * predicate exists ANYWHERE in this repo today, so adding one is NEW behaviour, not parity with the
+ * normal path — an owner call, and `approval_instances.org_id` is nullable so its NULL semantics
+ * must be defined first. Recorded OPEN in the design MD §3.4 and the verification MD, not silently
+ * skipped.
+ */
+async function assertCancelRoundSeatsEligibleInTxn(
+  client: ApprovalDbClient,
+  approverIds: readonly string[],
+): Promise<void> {
+  if (approverIds.length === 0) return
+  const ids = [...new Set(approverIds)]
+  const directory = await client.query<{
+    id: string
+    is_active: boolean | null
+    role: string | null
+    activation_status: string | null
+  }>(
+    `SELECT id, is_active, role, activation_status FROM users WHERE id = ANY($1::varchar[])`,
+    [ids],
+  )
+  const byId = new Map(directory.rows.map((row) => [row.id, row]))
+  const reasons = new Set<CancelRoundSeatIneligibilityReason>()
+  let ineligibleCount = 0
+  for (const id of ids) {
+    const row = byId.get(id)
+    if (!row) {
+      ineligibleCount += 1
+      reasons.add('not_found')
+      continue
+    }
+    const denial = evaluateUserAuthenticationGate(row)
+    if (!denial) continue
+    ineligibleCount += 1
+    reasons.add(
+      denial.code === ACCOUNT_PENDING_ACTIVATION_CODE
+        ? 'pending_activation'
+        : denial.code === ACCOUNT_ACTIVATION_INVALID_CODE
+          ? 'activation_invalid'
+          : 'inactive',
+    )
+  }
+  if (ineligibleCount === 0) return
+  // The hint says RESTORE, deliberately not "restore or replace": §14.3 #12/#13 reject
+  // `bulkReassignApprovals` and `applyApprovalDepartureTransfer` on cancel rounds outright, and
+  // §14.2 rejects `transfer`, so replacing the person is not a remedy this system offers. An
+  // admin-facing message must not promise an action the contract forbids.
+  throw new ServiceError(
+    'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore the account, then retry',
+    409,
+    'CANCEL_ROUND_SEAT_INELIGIBLE',
+    {
+      ineligibleCount,
+      // Stable, deterministic order from the constant — never the iteration order of the seat list
+      // (which is itself derived from person ids).
+      reasons: CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS.filter((reason) => reasons.has(reason)),
+    },
+  )
+}
+
 type PublishedDefinitionRow = {
   id: string
   template_id: string
@@ -361,6 +625,17 @@ export type ApprovalBulkReassignSkipReason =
   | 'target-is-requester'
   | 'target-already-assignee'
   | 'target-user-invalid'
+  /**
+   * Lock §14.3 #12 (lock:373) — the cancel-round outlet chokepoint at `rejectIfCancelRound`.
+   * Byte-exact `cancel_round` (underscore, NOT the kebab-case `cancel-round` every sibling
+   * literal in this union uses): this is the one bulk-reassign skip reason that reaches the
+   * frontend (`ApprovalBulkReassignSkipReason` → `apps/web/src/approvals/api.ts:1646` →
+   * `batchTransfer.ts:28`'s label map → the sync pin at
+   * `apps/web/tests/approvalBatchTransferView.spec.ts:284-298`), and that pin compares this
+   * exact string against the FE mapping key — a normalized `cancel-round` would silently miss
+   * it and render "原因未知" instead of the dedicated copy.
+   */
+  | 'cancel_round'
   | 'error'
 
 export type ApprovalBulkReassignRequest = {
@@ -494,6 +769,14 @@ export type ApprovalDepartureTransferSkipReason =
   | 'no-active-seat'
   | 'target-is-requester'
   | 'target-already-assignee'
+  /**
+   * Lock §14.3 #13 (lock:374) — same mechanism and literal as
+   * `ApprovalBulkReassignSkipReason`'s `'cancel_round'` above; this union has no route to the
+   * frontend (its sole consumer is `approval-departure-transfer-dispatch.ts:92`), so no FE pin
+   * applies here, but the literal is kept byte-identical for consistency across the two
+   * §14.3 #12/#13 seat-write chokepoints.
+   */
+  | 'cancel_round'
   | 'error'
 
 export interface ApprovalDepartureTransferSkip {
@@ -740,6 +1023,9 @@ export type ApprovalNodeTimeoutEffectOutcome =
   | 'skipped_invalid_config'
   | 'skipped_terminal_gated'
   | 'skipped_parallel_state'
+  // Lock §14.3 outlet #3 — a cancel-round instance never advances through the timeout scanner's
+  // transfer/jump firer; logged/metrics-only, never surfaced to the frontend (v5.9 lock text).
+  | 'skipped_cancel_round'
 // Lock-4 (docs/development/approval-lock4-flow-policies-20260817.md) F4-E — 离职自动转上级, OD-L4-9(a):
 // system sentinel recorded as the actor of an out-of-band departure transfer. `isSystemSentinelActor`
 // (ApprovalAssigneeResolver.ts) drops any `system:`-prefixed actor on a bare `startsWith` predicate, so
@@ -4178,6 +4464,41 @@ function toUnifiedApprovalDTO(
  * every existing importer and `path:line` reference keeps resolving.
  */
 export { assignmentMatchesActor } from './approval-seat-authorization'
+
+/**
+ * Approval change-request design lock v5.9 §14.1 (判据 I, lock:104) — the cancel-round identity
+ * predicate. The BODY lives in `../attendance/w4c3b-central-approval-hooks` (a deliberate leaf
+ * module with zero imports of its own): `ApprovalBridgeService.ts` needs it too (outlet #8,
+ * `Bridge:1077`), and `ApprovalProductService` already imports `ApprovalBridgeService` for
+ * `ServiceError` — so the other direction would be a cycle, same reasoning as
+ * `assignmentMatchesActor` above. Re-exported from here so `createCancelRoundInstance` and every
+ * chokepoint in this file can import it as `./ApprovalProductService`.
+ */
+export { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'
+
+/**
+ * Lock §9-9 (lock:143 area) — the allowed action set on a cancel-round instance:
+ * `{approve, reject, revoke, comment}`. Everything else (`handle`, `return`, `transfer`,
+ * `add_sign`, `reduce_sign`) is rejected here, at `dispatchAction`'s single action-judgment call
+ * site (outlets #4/#5/#6 in lock §14.3 share this one call point — #5 is the one action this
+ * function LETS THROUGH, not a separate branch). No-op for a non-cancel-round instance.
+ */
+const CANCEL_ROUND_ALLOWED_ACTIONS: ReadonlySet<ApprovalActionType> = new Set([
+  'approve',
+  'reject',
+  'revoke',
+  'comment',
+])
+
+function assertCancelRoundActionAllowed(
+  instance: { workflow_key?: string | null },
+  action: ApprovalActionType,
+): void {
+  if (!isCancelRoundInstance(instance) || CANCEL_ROUND_ALLOWED_ACTIONS.has(action)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances do not accept action "${action}"`,
+  )
+}
 
 /**
  * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
@@ -8193,6 +8514,327 @@ export class ApprovalProductService {
     return approval
   }
 
+  /**
+   * Approval change-request design lock v5.9 §14.1 (WI-4) — the dedicated creation path for a
+   * cancel round. `createApproval` above hardcodes `workflow_key = 'approval-product-template'`
+   * (`:8052` literal) and runs the FULL org/role/department/delegation/group snapshot assembly a
+   * general-purpose template never needs for this one fixed, single-node, `requester_choice`-only
+   * graph — so this is a separate, narrower path, not a call into `createApproval`/
+   * `assembleCreationContext` with a different templateId (the latter's `templateVisibleAtCreateBoundary`
+   * / `applyTemplateVisibilityFilter` gate on department/role audience targeting that this
+   * system-only template was never given, and never should be — it is not reachable through
+   * template-center browsing).
+   *
+   * Reuses the class's own private DML helpers (`insertAssignments`, `insertApprovalRecord`,
+   * `bumpNodeActivationSeq`, `enqueueApprovalTaskCreatedEventsInTxn`, `projectApprovalOnCreate`,
+   * `emitApprovalTaskCreatedEventsPostCommit`, `getApproval`) so the round's own instance behaves
+   * byte-identically to any other platform instance for every reader downstream (detail GET,
+   * pending-count projection, `canDecideCurrentNode`), and the seed's fixed `runtime_graph` /
+   * `ApprovalGraphExecutor` / `buildApprovalAssignmentResolver` so seat resolution goes through the
+   * SAME `requester_choice` code path §14.1's module doc names, not a hand-rolled assignment insert.
+   *
+   * WI-16 (lock §6, "仅原 requester"): only the original document's `requester_snapshot.id` may
+   * call this — enforced here, at create time, under the SAME `FOR UPDATE` lock as the suite gate
+   * below (a stale read cannot authorize). The lock names no error code for this rejection (unlike
+   * the 8 outlet-guard codes and `CANCEL_ROUND_SUITE_FORBIDDEN`, which are lock-anchored) — flagged
+   * as an implementer erratum for owner/gate registration, same discipline as
+   * `CANCEL_ROUND_INVARIANT_VIOLATION` in the revoke/reject branches above.
+   */
+  async createCancelRoundInstance(
+    documentId: string,
+    actor: { userId: string; userName?: string },
+    options: { reason?: string | null } = {},
+  ): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const instanceId = crypto.randomUUID()
+    // lock:140 — `apr_…` is an APPLICATION-generated id, not part of the DDL's own generation.
+    const roundId = `apr_${crypto.randomUUID()}`
+    const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
+    let client: ApprovalDbClient | null = null
+    let initialAssignmentCount = 0
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      // §9-4 order for this path: no rollout/advisory lock is taken here at all (creation never
+      // touches W4 attendance calculation) — the only row this transaction must serialize against
+      // is the original document instance itself, locked FIRST and before any INSERT (Q-A).
+      const originalResult = await client.query<ApprovalInstanceRow & { org_id: string | null }>(
+        `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
+        [documentId],
+      )
+      const original = originalResult.rows[0]
+      if (!original) {
+        throw new ServiceError('Approval instance not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+      if (original.status !== 'approved') {
+        // Lock §0/§1 — a cancel round only exists for an already-approved document. No lock-
+        // anchored code for this rejection either; same erratum class as WI-16 above.
+        throw new ServiceError(
+          'A cancel round can only be started for an approved document',
+          409,
+          'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+        )
+      }
+
+      // WI-16 — see method doc. `requester_snapshot` is `NOT NULL DEFAULT '{}'::jsonb`, so a
+      // legacy/malformed row with no `.id` fails closed (never `undefined === undefined`).
+      const originalRequesterSnapshot = toNullableRecord(original.requester_snapshot)
+      const originalRequesterId =
+        typeof originalRequesterSnapshot?.id === 'string' ? originalRequesterSnapshot.id : null
+      if (!originalRequesterId || originalRequesterId !== actor.userId) {
+        throw new ServiceError(
+          'Only the original requester may start a cancel round for this document',
+          403,
+          'CANCEL_ROUND_REQUESTER_ONLY',
+        )
+      }
+
+      // §14.3 #14 (WI-6) — suite gate, BEFORE any write, per the lock's own zero-row requirement.
+      // No production template→suite mapping table exists yet (lock:375 defers that to §9-5); phase
+      // 1 reads the suite tag off the ORIGINAL instance's own `metadata.suite` so a fixture/seed can
+      // pin it directly (lock:143's "seed/夹具直接给出"), defaulting to `'leave'` — phase 1's only
+      // shipped suite — when the tag is absent (every pre-existing instance in the corpus).
+      //
+      // The derivation below ENFORCES lock:143's two domains (`suite ∈ {four values}`,
+      // `windowDays ∈ [0, 上限]`) rather than defaulting around them — Codex review 2026-09-19
+      // finding 2. Order matters and is deliberate: the enum/range check runs first so an
+      // out-of-domain tag can never reach (and slip past) this literal `=== 'forbidden'` comparison,
+      // while `forbidden` itself short-circuits the window check inside the helper so THIS
+      // lock-anchored code still wins for that suite.
+      const originalMetadata = toNullableRecord(original.metadata) ?? {}
+      const { suite, windowDays } = deriveCancelRoundRoundPolicy(originalMetadata)
+      if (suite === 'forbidden') {
+        throw new CancelRoundSuiteForbiddenError(
+          "This document's suite does not permit a cancel round",
+        )
+      }
+
+      // I3 (§5) is ultimately enforced by `uq_approval_rounds_pending_document` (caught below on
+      // 23505) — this pre-check only turns the common case into a named error instead of a raw
+      // constraint violation for the concurrent/rare case.
+      const pendingRound = await client.query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`,
+        [documentId],
+      )
+      if (pendingRound.rows.length > 0) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
+
+      // Seats (§14.1) — the original document's approvers, read off its own audit trail rather
+      // than its (possibly since-deactivated) `approval_assignments` rows, so a reassigned/expired
+      // seat cannot silently drop the person who actually approved.
+      const approverRows = await client.query<{ actor_id: string }>(
+        `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+        [documentId],
+      )
+      // Gate round 6, G6-1 (P1, reproduced on a real DB before the fix): `system:`-namespaced
+      // SENTINEL actors are not people, and this was the ONE seat-derivation site in the repo that
+      // did not drop them. `insertAutoApprovalEvents` writes `action: skipped ? 'sign' : 'approve'`
+      // with `actorIdForAutoApprovalEvent(event)`, which returns the literal `'system:auto-approval'`
+      // whenever `metadata.actorMode !== 'original_approver'` — and `getAutoApprovalActorMode`
+      // DEFAULTS to `'system'` while the template-authoring UI never writes `actorMode` at all. So
+      // every document that passed through one `mergeWithRequester` auto-approval carried a sentinel
+      // row in this query's result, the seat gate below counted it as a person with no `users` row,
+      // and the document became PERMANENTLY un-cancellable behind a 409 telling the administrator to
+      // "restore" an account that does not and must not exist.
+      //
+      // The predicate is the shared `isSystemSentinelActor` (ApprovalAssigneeResolver.ts), the same
+      // one `loadPriorNodeApproverDeciders` — the sibling path that also derives seats from
+      // `approval_records(action='approve')`, Lock-1 §K3 — applies. Reused, not re-spelled: a second
+      // hand-rolled `startsWith` here would be exactly the "另造更窄/更宽同类物" this repo forbids.
+      // Under `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's
+      // real id, so that person IS kept and IS re-qualified — the drop is namespace-scoped, never
+      // "drop every auto-approved node's approver".
+      const approverIds = approverRows.rows
+        .map((row) => row.actor_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0 && !isSystemSentinelActor(id))
+
+      // Zero HUMAN approvers (every `approve` row on the original was synthetic) is NOT
+      // `not_found` — there is nobody to restore. Lock §14.1 ratifies 席位 = 原单的原审批人 with
+      // N ≥ 1 (lock:335) and judgment I″ requires 「至少一个活动席位」 (lock:337); the fail-closed
+      // answer contract already registers for zero resolvable seats is `CANCEL_ROUND_NO_ELIGIBLE_
+      // APPROVER`, so this reuses that code rather than minting a fifth one.
+      //
+      // It is an EXPLICIT check, not a fall-through to the `initialAssignmentCount === 0` backstop
+      // below, because that backstop is NOT reachable for an empty seat set: the dedicated runtime
+      // graph deliberately omits `emptyAssigneePolicy`, so `ApprovalGraphExecutor.resolveInitialState`
+      // THROWS `400 APPROVAL_ASSIGNEE_EMPTY` (ApprovalGraphExecutor.ts, the `assignments.length === 0`
+      // arm of `resolveFromNode`) before `initialAssignmentCount` is ever evaluated. Without this
+      // line the fix would answer a bare generic 400 instead of a cancel-round contract code.
+      // `details.reason` is a category, never a person — the same values-free posture as
+      // `CANCEL_ROUND_SEAT_INELIGIBLE.details.reasons`.
+      if (approverIds.length === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: this document was approved entirely by automation, so there is no original approver to re-convene',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+          { reason: 'no_human_approver' },
+        )
+      }
+
+      // Lock §2-G3 — re-qualify EVERY seat before any write, under the same `FOR UPDATE` taken
+      // above. BLOCK on failure (never filter-and-continue: the cancel node is `approvalMode:
+      // 'all'`, so dropping a seat would silently lower the co-sign threshold). See the helper's
+      // own doc for what it reuses, why it is wider than the normal path, and what is left OPEN.
+      // Sentinels are already gone by here, so every id this sees is a claimed PERSON.
+      await assertCancelRoundSeatsEligibleInTxn(client, approverIds)
+
+      // §14.1 — `requesterSnapshot.id` MUST equal the original requester (the revoke gate at the
+      // A4 branch above reads exactly this key); `requesterChoices[CANCEL_ROUND_APPROVAL_NODE_KEY]`
+      // is the `requester_choice` assignee source's ONLY input (module doc on the seed file).
+      const requesterSnapshot: ApprovalRequesterSnapshot & { requesterChoices: Record<string, string[]> } = {
+        id: originalRequesterId,
+        name:
+          typeof originalRequesterSnapshot?.name === 'string' ? originalRequesterSnapshot.name : originalRequesterId,
+        requesterChoices: { [CANCEL_ROUND_APPROVAL_NODE_KEY]: approverIds },
+      }
+
+      const runtimeGraph = buildCancelRoundRuntimeGraph()
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSchema: undefined,
+        formSnapshot: {},
+        requesterSnapshot: requesterSnapshot as unknown as Record<string, unknown>,
+      })
+      const executor = new ApprovalGraphExecutor(runtimeGraph, {}, { assignmentResolver })
+      const initial = executor.resolveInitialState()
+      initialAssignmentCount = initial.assignments.length
+
+      // Advisor note / I″ (lock §14.1): NEVER auto-approve and NEVER create with zero seats — the
+      // seed deliberately omits `emptyAssigneePolicy: 'auto-approve'`, and this is the explicit,
+      // fail-closed backstop in case a future edit to the seed graph ever introduced one.
+      //
+      // Gate round 6, G6-1 erratum — this comment used to also claim it covered "the original
+      // document's approver trail is empty". It does NOT, and never did: with zero seats the
+      // executor throws `400 APPROVAL_ASSIGNEE_EMPTY` from the `assignments.length === 0` arm of
+      // `resolveFromNode` before returning, so `initialAssignmentCount === 0` is UNREACHABLE while
+      // the seed omits `emptyAssigneePolicy`. The empty-seat case is answered by the explicit
+      // pre-check above instead. What this backstop really guards is `initial.status !== 'pending'`
+      // / a wrong `currentNodeKey` — i.e. a seed graph edited into auto-approving or re-routed.
+      // No `details` payload here deliberately: a payload no test can construct would be an
+      // assertion about an unreachable branch (the pre-check above carries the one that IS
+      // constructible, `reason: 'no_human_approver'`).
+      if (initial.status !== 'pending' || initial.currentNodeKey !== CANCEL_ROUND_APPROVAL_NODE_KEY || initialAssignmentCount === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
+
+      const requestNo = await this.allocateRequestNo()
+      const title = `撤销「${original.title ?? documentId}」`
+
+      await client.query(
+        `INSERT INTO approval_instances
+         (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
+          requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+          current_step, total_steps, sync_status, sync_error,
+          template_id, template_version_id, published_definition_id, request_no, form_snapshot, current_node_key,
+          created_at, updated_at, org_id)
+         VALUES
+         ($1, $2, 0, 'platform', NULL, $3, $4, $5,
+          $6, $7, $8, $9,
+          $10, $11, 'ok', NULL,
+          $12, $13, $14, $15, $16, $17,
+          now(), now(), $18)`,
+        [
+          instanceId,
+          initial.status,
+          APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+          documentId,
+          title,
+          JSON.stringify(requesterSnapshot),
+          JSON.stringify({}),
+          JSON.stringify({ allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          JSON.stringify({ cancelRoundDocumentId: documentId }),
+          initial.currentStep ?? 0,
+          initial.totalSteps,
+          CANCEL_ROUND_TEMPLATE_ID,
+          CANCEL_ROUND_TEMPLATE_VERSION_ID,
+          CANCEL_ROUND_PUBLISHED_DEFINITION_ID,
+          requestNo,
+          JSON.stringify({}),
+          initial.currentNodeKey,
+          original.org_id,
+        ],
+      )
+
+      const initialEntryEpoch = await this.bumpNodeActivationSeq(client, instanceId)
+      createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, initial.assignments, initialEntryEpoch)))
+      await this.insertApprovalRecord(client, instanceId, {
+        action: 'created',
+        actorId: actor.userId,
+        actorName: actor.userName || actor.userId,
+        comment: options.reason ?? null,
+        fromStatus: null,
+        toStatus: initial.status,
+        fromVersion: null,
+        toVersion: 0,
+        metadata: { nodeKey: 'start', requestNo, cancelRoundDocumentId: documentId },
+      })
+
+      // §4 — one `approval_rounds` row, `kind = 'cancel'`, keyed to THIS instance as its engine
+      // instance; `policy_snapshot_at_create.definitionPolicy` freezes the ORIGINAL document's own
+      // policy object verbatim (lock:143 "所读…策略对象原样") — the object that actually governs
+      // whether/how this document may be cancelled, distinct from the cancel round's OWN
+      // `policy_snapshot` (`allowRevoke`) written above, which governs the ROUND's redemption
+      // mechanics, not the original document's cancellability.
+      await client.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, reason, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', $3, $4, $5, 'pending', $6)`,
+        [
+          roundId,
+          documentId,
+          instanceId,
+          actor.userId,
+          options.reason ?? null,
+          JSON.stringify({
+            definitionPolicy: original.policy_snapshot,
+            roundPolicy: { windowDays, suite },
+          }),
+        ],
+      )
+
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
+      await client.query('COMMIT')
+    } catch (error) {
+      await rollbackQuietly(client)
+      // The pre-check above cannot close a concurrent-insert race by itself — this is the
+      // authoritative backstop (I3, §5): translate the partial unique index's raw 23505 into the
+      // SAME named error the pre-check throws, rather than letting a constraint-name/SQLSTATE leak
+      // to the caller.
+      if (
+        isPostgresUniqueViolation(error)
+        && (error as { constraint?: unknown }).constraint === 'uq_approval_rounds_pending_document'
+      ) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
+      throw error
+    } finally {
+      client?.release()
+    }
+
+    await this.projectApprovalOnCreate(instanceId)
+    await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents)
+
+    const approval = await this.getApproval(instanceId, actor.userId, [])
+    if (!approval) {
+      throw new ServiceError('Cancel round approval not found after creation', 500, 'CANCEL_ROUND_CREATE_FAILED')
+    }
+    return approval
+  }
+
   /** T3-6: best-effort read-model projection at create — never throws into the approval flow. */
   private async projectApprovalOnCreate(instanceId: string): Promise<void> {
     try {
@@ -8230,6 +8872,8 @@ export class ApprovalProductService {
       }
       // P17/P26: admin jump mutates assignments — attendance fails closed before DML.
       await guardAttendanceCentralMutationOrThrow(client, instance)
+      // Lock §14.3 outlet #2 — a cancel-round instance is never admin-jumped.
+      rejectIfCancelRound(instance, 'adminJump')
       if (instance.version !== request.version) {
         throw new ServiceError(
           'Approval instance version mismatch',
@@ -8555,6 +9199,23 @@ export class ApprovalProductService {
 
         // Holds instance FOR UPDATE — concurrent decision/reassign must wait here.
         await awaitBulkReassignTestBarrier('after_instance_lock', instanceId)
+
+        // Lock §14.3 outlet #12 — a cancel-round instance's seat may never be reassigned through
+        // this admin path (§6 "仅原 requester"; §2-G3 re-qualification is the only thing allowed
+        // to touch its seat). Guard BEFORE `classifyAndLockAttendanceRequestForInstance` below, not
+        // after: rejecting here avoids taking the `attendance_requests` row lock that call acquires
+        // on a path that is about to abort — §11/§13 leave the cancel-round lock-order questions
+        // (Q-A/Q-B) undecided, so a rejected instance should touch as few locks as possible.
+        try {
+          rejectIfCancelRound(instance, 'bulkReassignApprovals')
+        } catch (error) {
+          if (error instanceof CancelRoundOutletForbiddenError) {
+            await client.query('ROLLBACK')
+            skip(instanceId, 'cancel_round')
+            continue
+          }
+          throw error
+        }
 
         // P26: classify + lock request org before actor/target authorization (never trust JSON org).
         let attendanceReassignAudit: AttendanceReassignAuditWitnessV1 | null = null
@@ -8925,6 +9586,21 @@ export class ApprovalProductService {
           continue
         }
 
+        // Lock §14.3 outlet #13 — same rule and same placement rationale as outlet #12 above: a
+        // cancel-round instance's seat may never move through this SYSTEM-actor departure path,
+        // and the guard runs before the attendance-central fail-closed check immediately below so
+        // a rejected instance never reaches that check's own DML.
+        try {
+          rejectIfCancelRound(instance, 'applyApprovalDepartureTransfer')
+        } catch (error) {
+          if (error instanceof CancelRoundOutletForbiddenError) {
+            await client.query('ROLLBACK')
+            skipDepartureTransfer(instanceId, 'cancel_round')
+            continue
+          }
+          throw error
+        }
+
         // P26: attendance-central instances are not a departure-transfer target on this system
         // writer path, mirroring the identical guard in `applyNodeTimeoutEffect` immediately above
         // (both are SYSTEM-actor writers, not an authorized-human admin path like
@@ -9237,6 +9913,15 @@ export class ApprovalProductService {
         return 'skipped_stale'
       }
 
+      // Lock §14.3 outlet #3 — a cancel-round instance shares only the identity predicate
+      // `isCancelRoundInstance` here, not the throw-based `rejectIfCancelRound` used at the other
+      // chokepoints: this outlet's contract is a returned scanner outcome, not a rejected promise.
+      // Must consume the now-reverified deadline (not just skip) so the scanner does not re-pick up
+      // the same instance on the next tick.
+      if (isCancelRoundInstance(instance)) {
+        return await consumeAndSkip('skipped_cancel_round', 'cancel_round_instance')
+      }
+
       // P26: attendance instances are not timeout-transfer/jump targets on the central path.
       // Only consume a deadline after proving this scanner call still owns the exact armed row;
       // stale calls must not clear a newer activation's deadline.
@@ -9531,6 +10216,10 @@ export class ApprovalProductService {
       // P17/P22/P26: attendance instances fail closed before assignment/instance DML
       // (including adversarial rows carrying published_definition_id).
       await guardAttendanceCentralMutationOrThrow(client, instance)
+      // Lock §14.3 outlets #4/#6 (and the allow-branch that becomes #5) — the single action-
+      // judgment call site for a cancel-round instance: `{approve,reject,revoke,comment}` pass,
+      // everything else (`handle`/`return`/`transfer`/`add_sign`/`reduce_sign`) is rejected here.
+      assertCancelRoundActionAllowed(instance, request.action)
       if (!instance.published_definition_id) {
         throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
       }
@@ -10230,6 +10919,33 @@ export class ApprovalProductService {
         )
         // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the revoke transition above.
         await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        // Lock §14.2 判据 III (A4) — a cancel-round instance's own revoke terminates its round
+        // row in the SAME transaction as the instance transition above (same `client`, one
+        // `COMMIT` below). `engine_instance_id` (not `document_id`) is this instance's own id —
+        // the round row it drives, per the migration header on `approval_rounds`. WI-4 writes the
+        // instance and its round row together, so exactly one `pending` round must exist here —
+        // this is NOT a re-entrancy guard (a second revoke on the same instance can never reach
+        // this branch: `APPROVAL_TERMINAL_STATUSES` above 409s first, and the instance is held
+        // FOR UPDATE with a version check). `rowCount !== 1` means the invariant is already
+        // broken (dangling/duplicate round row) and must fail closed rather than silently commit
+        // an orphaned `pending` round that would permanently block re-issuing one for this
+        // document (§5 I3, `uq_approval_rounds_pending_document`). The lock gives no error-code
+        // contract for this branch (only WI-16's create-time check has the same gap) — this code
+        // is an implementer choice, flagged for owner/gate registration, not a lock edit.
+        if (isCancelRoundInstance(instance)) {
+          const roundResult = await client.query(
+            `UPDATE approval_rounds SET outcome = 'withdrawn', ended_at = now()
+             WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [id],
+          )
+          if (roundResult.rowCount !== 1) {
+            throw new ServiceError(
+              'Cancel-round instance has no single matching pending round to terminate',
+              409,
+              'CANCEL_ROUND_INVARIANT_VIOLATION',
+            )
+          }
+        }
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
@@ -10694,6 +11410,29 @@ export class ApprovalProductService {
         )
         // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the reject transition above.
         await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        // Lock §14.2 判据 III (A7) — same mechanism, same fail-closed rationale, and same
+        // implementer-erratum error-code caveat as the revoke branch above: a cancel-round
+        // instance's own reject terminates its round row (`engine_instance_id = id`) in the SAME
+        // transaction as the instance transition, and `rowCount !== 1` means the one-round-per-
+        // instance invariant (WI-4) is already broken, not that this is a re-entrant call (a
+        // second reject can never reach this branch — `instance.status !== 'pending'` 409s first
+        // below, and the instance is held FOR UPDATE with a version check). The comment-required
+        // front gate above (§1.3, `REJECT_COMMENT_REQUIRED`) is unchanged — this only appends a
+        // write.
+        if (isCancelRoundInstance(instance)) {
+          const roundResult = await client.query(
+            `UPDATE approval_rounds SET outcome = 'rejected', ended_at = now()
+             WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [id],
+          )
+          if (roundResult.rowCount !== 1) {
+            throw new ServiceError(
+              'Cancel-round instance has no single matching pending round to terminate',
+              409,
+              'CANCEL_ROUND_INVARIANT_VIOLATION',
+            )
+          }
+        }
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
@@ -12014,7 +12753,10 @@ export class ApprovalProductService {
       const seen = new Set<string>()
       const pushDecider = (actorId: string): void => {
         const id = actorId.trim()
-        if (!id || id.startsWith('system:') || seen.has(id)) return
+        // Gate round 6, G6-1: was an inline `id.startsWith('system:')`. Behaviour-identical, but
+        // now the SAME exported predicate the cancel-round seat derivation calls — one definition
+        // of the non-user namespace instead of two copies that can drift.
+        if (!id || isSystemSentinelActor(id) || seen.has(id)) return
         seen.add(id)
         deciders.push(id)
       }

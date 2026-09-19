@@ -21,8 +21,10 @@ import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../se
 import {
   APPROVAL_LIST_SCOPE_NO_MATCH,
   ApprovalBridgeService,
+  CancelRoundOutletForbiddenError,
   ServiceError,
   buildApprovalListScopeCondition,
+  rejectIfCancelRound,
 } from '../services/ApprovalBridgeService'
 import {
   assertAttendanceCentralMutationFailClosed,
@@ -203,6 +205,10 @@ interface ApprovalInstance {
   status: string
   version: number
   source_system?: string | null
+  // Lock §14.3 outlets #7/#7′ — `SELECT *` already returns this column; typed here (it was
+  // previously untyped-but-present) so `rejectIfCancelRound`'s `{ workflow_key?: ... }` parameter
+  // has a real property in common with `ApprovalInstance` (bare structural weak-type check, TS2559).
+  workflow_key?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -2939,6 +2945,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           throw error
         }
 
+        // Lock §14.3 outlet #7 — this legacy endpoint never checks `isTemplateRuntimeInstance`
+        // (that dispatch lives at `:2796-2799`, several hundred lines away) and locks ANY
+        // `platform` pending instance by id above, so a cancel-round instance is reachable here.
+        // Its `reject`/`revoke` must go through `dispatchAction` (judged §14.2), and approve is
+        // never in the cancel-round allowed set at all — action-independent, so this rejects
+        // before the action-specific DML below regardless of which legacy verb the request used.
+        rejectIfCancelRound(instance, 'legacy POST /:id/approve')
+
         const newVersion = instance.version + 1
 
         await client.query(
@@ -2994,6 +3008,13 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         client.release()
       }
     } catch (error) {
+      // Lock §14.3 outlet #7 — this catch does NOT call `handleApprovalsError` (unlike almost
+      // every other route in this file), so `rejectIfCancelRound`'s `ServiceError` subclass would
+      // otherwise fall through to the generic 500 below. Must run before `isDatabaseSchemaError`,
+      // which has a message-substring fallback (`utils/database-errors.ts:23-36`).
+      if (error instanceof CancelRoundOutletForbiddenError) {
+        return handleApprovalsError(res, error, 'APPROVAL_APPROVE_FAILED', 'Failed to approve request')
+      }
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!approvalsDegraded) {
           logger.warn('Approvals service degraded - tables not found')
@@ -3096,6 +3117,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           throw error
         }
 
+        // Lock §14.3 outlet #7′ — same reachability as #7 above (no `isTemplateRuntimeInstance`
+        // check, no action check, locks any `platform` pending instance by id). A cancel-round
+        // reject must go through `dispatchAction` because `approval_rounds.outcome` is only
+        // written there (判据 III) — letting this endpoint reject directly would leave the
+        // instance `rejected` with the round still `pending`, a permanent placeholder that blocks
+        // re-issuing a cancel round for the same document (§5 I3 "terminal releases the slot").
+        rejectIfCancelRound(instance, 'legacy POST /:id/reject')
+
         const newVersion = instance.version + 1
 
         await client.query(
@@ -3152,6 +3181,12 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         client.release()
       }
     } catch (error) {
+      // Lock §14.3 outlet #7′ — same rationale as the `/approve` catch above: this catch does not
+      // call `handleApprovalsError`, so the cancel-round guard's `ServiceError` subclass needs an
+      // explicit passthrough here, ahead of the message-substring `isDatabaseSchemaError` fallback.
+      if (error instanceof CancelRoundOutletForbiddenError) {
+        return handleApprovalsError(res, error, 'APPROVAL_REJECT_FAILED', 'Failed to reject request')
+      }
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!approvalsDegraded) {
           logger.warn('Approvals service degraded - tables not found')
