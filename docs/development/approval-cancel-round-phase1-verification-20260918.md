@@ -3319,3 +3319,144 @@ N1 只断言它**不含**人名 id;M4 的锚点 `{ ineligibleCount,` 也一字�
 - mutation 备份与逐条日志保留在 `reviews/c1-fix-mutbak/`(不是仓内文件)。
 - 未合并、未 undraft、未开 PR、未动 PR 状态、未动 `origin/main`、未改锁文。
 - `git stash` 全程未用(硬规矩);mutation 一律 `cp` 备份 → 改 → 单跑 → `cp` 还原 → `cmp`。
+
+## L12. 保活 rebase 到 main 868c8d2b2
+
+`origin/main` 在本轮开工前已合并 #5849(timemachine manual-capture),把分支起点从
+`89f1ecdee2c3b70205a318074824c834bc6a5c7e` 推进到 `868c8d2b26424fcaa8405661a6999abb17ec6d93`
+(120 个新提交,221 文件,+32982/-1322)。为不让 Draft PR #5851 落后过久,本节做一次纯保活
+rebase(不改任何业务逻辑),把本分支的 57 个提交(旧 head `ba8a0133d`)重放到该新基点之上。
+
+### 配方与结果
+
+```
+$ git fetch origin
+$ git rebase origin/main
+```
+
+- 57 个提交里,只有 1 个在应用时产生真实内容冲突:`ci(approval): promote cancel-round
+  real-DB suites into required test (20.x)`(旧 SHA `e394c9e9c`,rebase 后 `e7d863d65`)——
+  它自己就是"把 plugin-tests.yml 里 approval-real-db-integration 步骤的 run-list 与
+  s6a pin 的 evidenceFiles.pluginTestsWorkflow 一起改"的提交,而 main 侧的 120 个提交里
+  也有改 `.github/workflows/plugin-tests.yml`(新增 timemachine 相关必需步骤)的提交,
+  两侧都动了同一个文件、同一个被冻结摘要覆盖的 evidenceFiles 键,冲突精确落在
+  `s6a-package-provenance-pins.json` 的 `pluginTestsWorkflow` 一行(其余键零冲突,自动合并)。
+  `.github/workflows/plugin-tests.yml` 本身、`packages/core-backend/vitest.config.ts` 的
+  exclude 块、新增的 `approval-cancel-round-ci-wiring.test.ts`、`approval-realdb-cancel-round.yml`
+  的删除,均由 git 自动合并干净,未产生冲突标记。
+- 其余 56 个提交(K1-K8、Part L 的 L0-L11 等文档/测试提交)与 main 新增的 120 个提交路径不重叠,
+  全部无冲突自动重放。
+- 冲突解决:先任取一侧(HEAD 侧的旧值)消解冲突标记,`git add`,`git rebase --continue`
+  完成整条 rebase;随后按 L12.1 机械重算该键的正确值并单独提交(不属于 rebase 冲突消解本身,
+  是 rebase 完成后的必需收尾步骤)。
+- 全仓 grep 冲突标记(排除历史文档里作为**引用文本**出现的 `<<<<<<<`/`=======`/`>>>>>>>`,
+  那些是 `claudedocs/`、`docs/merge-reports-2025-10/`、`packages/claudedocs/` 里 2025 年旧
+  merge 报告的字面内容,经 `git diff --stat origin/main..HEAD -- <这些路径>` 确认本轮零改动
+  ——即它们既不是本次 rebase 引入的,也不是残留冲突标记):
+  `git grep -n "^<<<<<<<\|^=======$\|^>>>>>>>"` 命中的全部是这些历史文档,零命中在实际代码/配置文件。
+
+### patch-id 交集核验
+
+```
+$ git log -p --no-merges origin/main..HEAD  | git patch-id --stable | sort > ours.txt   # 57 条
+$ git log -p --no-merges <旧merge-base>..origin/main | git patch-id --stable | sort > main.txt  # 115 条
+$ comm -12 <(awk '{print $1}' ours.txt) <(awk '{print $1}' main.txt) | wc -l
+0
+```
+
+57 个本分支提交与 main 侧 115 个提交的 patch-id 交集为 **0**——本分支没有任何提交与 main
+上已存在的改动重复(即 rebase 没有把 main 已经吸收的内容再摞一遍)。
+
+### zzzz 迁移排序
+
+本分支自带 3 件迁移(`packages/core-backend/src/db/migrations/`):
+`zzzz20260918090000_create_approval_rounds.ts`、
+`zzzz20260918100000_seed_approval_cancel_round_published_definition.ts`、
+`zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts`。
+main 新增 5 件:`…120000_add_recovery_archive_section_checkpoints.ts`、
+`…130000_create_recovery_archive_prepared_captures.ts`、
+`…140000_create_recovery_archive_manual_requests.ts`、
+`…20260919120000_add_attachment_blob_purge_claim.ts`、
+`…20260919130000_extend_archive_nonce_object_identity.ts`。
+按文件名时间戳排序,本分支的三件(`090000`/`100000`/`110000`,同为 0918)严格排在 main 五件
+(`120000` 起,0918 与 0919)之前,时间戳零碰撞、零需要人工改名重排——迁移顺序天然正确。
+
+### s6a pin 机械重算
+
+冲突消解时先任取一侧(留下占位值),rebase 完成后按 `computePackageProvenancePinSet(repoRoot)`
+(`plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs`)
+机械重算整份 pin 集合,与活树 diff:
+
+```
+$ node -e "…computePackageProvenancePinSet(process.cwd())…" > /tmp/computed-pins.json
+$ diff <(json.tool 活文件) <(json.tool computed-pins.json)
+90c90
+<     "pluginTestsWorkflow": "b048a17f…"   # 冲突消解时任取的占位值
+---
+>     "pluginTestsWorkflow": "ee9e4f49…"   # 机械重算的正确值
+```
+
+只有这一个键差,与提交 e394c9e9c 自己的记录("recomputed … confirmed to be the only key that
+moved")一致——因为 rebase 后 `plugin-tests.yml` 的最终字节内容(main 的 timemachine 步骤
++ 本分支的 approval-real-db-integration 促升,两者都在文件里)与 e394c9e9c 提交时的字节内容
+不同,digest 必然重算。写回该键后 diff 为空(exit 0)。新提交 `da2688a59`
+(`chore(approval): recompute s6a pluginTestsWorkflow pin after main rebase`)记录此收尾,
+不与冲突消解本身的提交合并。
+
+守卫复跑(`plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs`,
+其 `assert.deepEqual(live.evidenceFiles, frozen.evidenceFiles)` 覆盖包括 `pluginTestsWorkflow`
+在内的全部 evidenceFiles 键,非部分核验):
+
+```
+$ node --test __tests__/sealed-export-package-provenance.test.cjs
+✔ sealed-export-package-provenance.test.cjs
+tests 1  pass 1  fail 0
+```
+
+MATCH。
+
+### 处女私有库全量重验(`metasheet2_c1_rb`)
+
+```
+$ psql …/postgres -c "DROP DATABASE IF EXISTS metasheet2_c1_rb;"
+$ psql …/postgres -c "CREATE DATABASE metasheet2_c1_rb OWNER metasheet;"
+$ DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet2_c1_rb \
+    pnpm exec tsx src/db/migrate.ts
+```
+
+全部迁移(含本分支 3 件 + main 新增 5 件,共 98 条 `zzzz*` 迁移里最新的部分)执行成功,
+零报错、零跳过。
+
+```
+$ DATABASE_URL=…/metasheet2_c1_rb EXPECT_DB=1 \
+    pnpm exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
+    tests/integration/approval-cancel-round-creation.db.test.ts \
+    tests/integration/approval-cancel-round-redemption.db.test.ts \
+    tests/integration/approval-cancel-round-seat-guards.db.test.ts \
+    tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts \
+    tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
+    tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts
+ Test Files  7 passed (7)
+      Tests  55 passed (55)
+
+$ pnpm exec tsc --noEmit
+(无输出,exit 0)
+
+$ pnpm exec vitest run tests/unit/approval-cancel-round-ci-wiring.test.ts
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+```
+
+全绿:7 个 real-DB 文件 / 55 用例(处女库,`metasheet2_c1_rb`,`main` 新迁移与本分支迁移
+共存后的最终 schema)、`tsc --noEmit` 干净、`approval-cancel-round-ci-wiring.test.ts` 6/6
+(两点接线 / run-list 去重 / 单例排他 / 独立 lane 已删除,均未因 rebase 走样)、
+s6a 守卫 MATCH。私有库随后 `dropdb metasheet2_c1_rb`,未应用到任何共享库。
+
+### 收尾
+
+- `git push --force-with-lease` 一次(rebase 后允许);此后按硬规矩转普通 push。
+- 未合并、未 undraft、未开/动 PR 状态、未动 `origin/main`、未应用迁移到共享/staging/生产库、
+  未改设计锁文。
+- 新 head:`da2688a591fcb929f72daac75cf56b3b906004c6`(57 个重放提交 + 1 个 pin 重算提交,
+  共 58 个提交领先 `origin/main`)。
