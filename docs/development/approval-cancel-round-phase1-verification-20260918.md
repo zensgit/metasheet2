@@ -3055,6 +3055,22 @@ catch-then-`blocked`、不得静默 `expired`。
 `DATABASE_URL`**,并额外强制纳入 `:1746 Stop core backend`(把 `:1694` 起的后台服务收掉,否则它会留在
 本机上跑)。
 
+**谓词是闭的 —— 这次先证,不再假定。** 抽取器只从 step 级(10 空格缩进)读 `env:`;
+若 `jobs.test` 在 `steps:` 之前挂了**job 级** `env:`(4 空格缩进),一个既无 step 级 env、run 文本里
+又不出现 `DATABASE_URL` 的 step 仍可能是真库 step,那样「74 是全部」就会重蹈 L9.4(a) 的覆辙。
+逐字核过:
+```
+$ sed -n '174,196p' .github/workflows/plugin-tests.yml
+  test:
+    runs-on: ubuntu-latest
+    strategy: { fail-fast: false, matrix: { node-version: [18.x, 20.x] } }
+    steps:
+      - name: Checkout repository
+      …
+```
+`test:` 从 `runs-on` 直接走到 `strategy` 再到 `steps:`,**没有 job 级 `env:` 块** ⇒ 谓词闭合,
+step 级 env + run 文本两处已覆盖全部 `DATABASE_URL` 来源。
+
 ⇒ 人口从 22 个 step 变成 **74 个**。
 
 **执行方式**:每个 step 的 run 块原样落成一个 `.sh`,用 `bash -e -o pipefail` 跑(与 GH Actions 的默认
@@ -3289,9 +3305,11 @@ $ CI=true TZ=UTC DATABASE_URL=…/metasheet2_fix_c1_v2 EXPECT_DB=1 \
 $ CI=true pnpm lint        (node 20) → exit 0
 $ CI=true pnpm type-check  (node 20) → exit 0
 ```
-如实标注:**`:1568` 那一步的 84 文件 / 902 用例是在改这个字符串之前跑的**;
-本行为差为零(没有任何断言读该 message 的文本,N1 只断言它**不含**人名 id),但复跑覆盖范围
-仍然只到改动之前,这点不含糊。
+如实标注,覆盖边界对称地写清楚:**`:1568` 那一步的 84 文件 / 902 用例、以及 L4 的五条 mutation
+与 L5 的旧码对照,全部是在改这个字符串之前、对 `a77d848c0` 的服务端文件跑的**。
+本行为差为零(改的只是一个字符串字面量加一段注释;没有任何断言读该 message 的文本,
+N1 只断言它**不含**人名 id;M4 的锚点 `{ ineligibleCount,` 也一字未动),
+但那些证据的覆盖范围仍然只到改动之前,这点不含糊 —— 上面这组重验就是为这段边界补的。
 
 ## L11. 清理
 
