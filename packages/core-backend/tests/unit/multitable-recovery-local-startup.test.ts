@@ -51,6 +51,21 @@ async function fixture() {
 }
 
 describe('locked local archive startup', () => {
+  it('manual capture requires an explicit closed policy and never inherits numeric defaults', async () => {
+    const f = await fixture()
+    expect(parseRecoveryLocalStartupConfig(f.config)).not.toHaveProperty('manualCapture')
+    const manualCapture = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 60, expiresAfterSeconds: 600 }
+    const parsed = parseRecoveryLocalStartupConfig({ ...f.config, manualCapture })
+    manualCapture.leaseSeconds = 1
+    expect(parsed.manualCapture).toEqual({ ...manualCapture, leaseSeconds: 60 })
+    expect(Object.isFrozen(parsed.manualCapture)).toBe(true)
+    for (const policy of [null, {}, { ...manualCapture, expiresAfterSeconds: 0 },
+      { ...manualCapture, leaseSeconds: 0 }, { ...manualCapture, keyId: '' },
+      { ...manualCapture, keyRowVersion: '0' }, { ...manualCapture, retention: 1 }]) {
+      expect(() => parseRecoveryLocalStartupConfig({ ...f.config, manualCapture: policy })).toThrow(refusal)
+    }
+    f.secret.fill(0)
+  })
   it.each(['off', 'wrong-secret', 'cancel'] as const)('actual launcher refuses %s without listening', async mode => {
     const f = await fixture()
     const launcher = fileURLToPath(new URL('../../scripts/start-recovery-local.mts', import.meta.url))

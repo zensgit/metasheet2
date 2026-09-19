@@ -22,6 +22,33 @@ discard existing work or silently rewrite another candidate.
 
 ## Execution queue
 
+### Reconciled Main And Candidate Inventory (2026-09-19)
+
+Authoritative main observed: `bb77ca5f2ce3c2825265ec8877861d367d017ead`.
+GitHub readback confirms #5709, #5725, #5744, #5847 and #5848 are MERGED.
+The full-workbench recovery acceptance commit
+`890f39e3295e5f44ca85d84423b70cc842216071` is an ancestor of that main.
+#5848's exact authorized head `add0a1a8f930a614c0da7792dc182a02597dea08`
+merged as `89f1ecdee2c3b70205a318074824c834bc6a5c7e`.
+These are merge/ancestry facts, not fresh test runs or deployment evidence.
+
+| Area | Current disposition | Next evidence or boundary |
+| --- | --- | --- |
+| History/configuration history/retained-table recycle bin | Existing combined UX and full-workbench acceptance ancestry are on main | Do not reimplement the old Draft queue; preserve row/column/table distinctions and hard-delete exclusion |
+| Archive readiness/runtime integration | Earlier readiness/runtime carriers are merged | Historical exact-SHA DB/browser evidence remains scoped to its tested commits, not automatically rerun on current main |
+| Explicit local custody startup | #5848 merged | Local composition is not customer-storage or production authorization |
+| Manual capture and immutable attachment reading | Existing Draft #5849 at `2afb1cfaca48734aef82fb0cde8ec3bfa659ee9e` | Current-head CI: 32 success, one intentional skip, four running at observation; not terminal green |
+| Manual capture acceptance reports | Current matrix in the manual-capture design and checkpoint verification reports | Includes isolated HTTP/DB capture, source-independent reading, scalar browser restore and attachment refusal diagnostic; no full tenant UAT |
+| Attachment restore writes | Explicit contract expansion still awaiting confirmation | Capture/read evidence does not authorize attachment writes; unsupported attachment differences refuse preview without a token |
+| Nightly missing-sample alerts | Historical attribution is not a resolution | A fresh authoritative run/sample audit is still required; no threshold relaxation or production sampling implied |
+
+The chronological checkpoints below retain their original evidence. Their old
+Draft/merge and provider-selection wording must not be used as today's inventory.
+Open docs-only #5201 still references the August D2-D7 checkpoint; it is not a
+current feature backlog and is not closed or rewritten by this audit. No legacy
+PR disposition, new restore semantics or operational action is authorized here.
+The overall goal remains ACTIVE; this reconciliation is not product FINAL.
+
 ### Completion Shutdown Integration Checkpoint
 
 Local clean `4bd71a62834bbee6d3764dd8ff9b16223a102ed0` integrates #5768/#5758
@@ -142,6 +169,23 @@ Remaining work is not another reimplementation of these primitives:
 - GitHub API reads have intermittently failed with timeout/EOF. Ordinary Git pushes do not prove exact-head CI green. Keep Draft/HOLD and recheck the published head when API access returns.
 
 ### Operational attribution checkpoint (2026-09-15)
+
+Refresh on 2026-09-19: both latest scheduled workflows bind current main
+`bb77ca5f2ce3c2825265ec8877861d367d017ead` and remain terminal failures.
+External Metrics run `35414465715`, job `105820234434`, failed `Gate on PASS`;
+Regression run `35414586092`, job `105820583905`, failed
+`Fail if overall status is not pass`. Downloaded `phase5.json` artifacts from
+both independently show 11 checks, 5 passes, 0 measured failures, 6 N/A and
+overall fail. Missing assertions are plugin reload, snapshot create and snapshot
+restore p95/p99; the External Metrics percentile map is empty. This establishes
+continued missing-sample failure, not excessive measured latency and not its
+target/label/activity root cause. Only the JSON summary/assertion fields were
+used; no endpoint, credentials, token-fallback log or live environment was probed.
+No dispatch, rerun, configuration/threshold edit or sample-generating operation
+was performed. Local downloaded artifacts are under
+`/private/tmp/tm-nightly-audit-35414465715` and
+`/private/tmp/tm-nightly-audit-35414586092`; they are not committed. Alerts remain
+OPEN, separate from manual-capture PR CI. The older evidence below is retained.
 
 Read-only GitHub evidence, not a production probe or an alert-resolution claim:
 

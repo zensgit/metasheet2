@@ -709,6 +709,9 @@
       v-if="showRecoveryArchive || workbench.activeSheetId.value"
       :visible="showRecoveryArchive"
       :sheet-id="workbench.activeSheetId.value"
+      :sheet-name="activeSheetExportName"
+      :capture-archive="recoveryArchiveCaptureWire"
+      :read-capture="recoveryArchiveReadCaptureWire"
       :is-zh="isZh"
       :fields="scopedGridFields"
       :selected-record-ids="[...exportSelectedRecordIds]"
@@ -1028,6 +1031,10 @@ const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage
 // D6 archive recovery is a server-led sheet surface. There is no local flag or capability inference:
 // catalog, preview, sync execute, and durable job actions render only the server's current decision.
 const showRecoveryArchive = ref(false)
+const recoveryArchiveCaptureWire = (sheetId: string, requestId: string) =>
+  workbench.client.captureRecoveryArchive(sheetId, requestId)
+const recoveryArchiveReadCaptureWire = (sheetId: string, requestId: string) =>
+  workbench.client.readRecoveryArchiveCapture(sheetId, requestId)
 const recoveryArchiveCatalogWire = (sheetId: string, params?: { cursor?: string; limit?: number }) =>
   workbench.client.listRecoveryArchiveCatalog(sheetId, params)
 const recoveryArchiveListJobsWire = (

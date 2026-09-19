@@ -1054,6 +1054,10 @@ jobs:
         run: |
           createdb -U postgres metasheet_test || true
 
+      - name: Run isolated manual checkpoint acceptance
+        run: |
+          TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
+
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test

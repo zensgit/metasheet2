@@ -48,6 +48,7 @@ import type {
   RecoveryArchiveObjectStoreProvider,
 } from './recovery-archive-object-store'
 import type { QueryFn } from './permission-service'
+import { openRecoveryArchiveAttachment } from './recovery-archive-attachment-crypto'
 import {
   reconstructRecoveryArchiveCompleteSectionsInternal,
   type RecoveryArchiveCompleteSectionState,
@@ -132,6 +133,7 @@ export interface RecoveryArchiveReaderInput {
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly manifestObject: RecoveryArchiveObjectExpectedBinding
   readonly sectionObjects: readonly RecoveryArchiveObjectExpectedBinding[]
+  readonly attachmentObjects?: readonly { attachmentId: string; binding: RecoveryArchiveObjectExpectedBinding }[]
 }
 
 export interface RecoveryArchiveCompleteStateReaderInput extends RecoveryArchiveReaderInput {
@@ -147,6 +149,23 @@ export interface RecoveryArchiveOpenedSnapshot {
   readonly sections: RecoveryArchiveOpenedSections
 }
 
+type OpenedAttachment = { sourceVersion: string; plaintextSha256: string; bytes: Buffer }
+const openedAttachments = new WeakMap<object, ReadonlyMap<string, OpenedAttachment>>()
+
+/** Internal bytes stay off serialized preview DTOs; each access returns an independent copy. */
+export function readRecoveryArchiveAttachmentBytes(
+  state: RecoveryArchiveOpenedSnapshot | RecoveryArchiveCompleteSectionState, attachmentId: string,
+): OpenedAttachment {
+  const attachment = openedAttachments.get(state)?.get(attachmentId)
+  if (!attachment) fail('RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
+  return { ...attachment, bytes: Buffer.from(attachment.bytes) }
+}
+
+function readerKeys(input: unknown, keys: readonly string[]): readonly string[] {
+  return input !== null && typeof input === 'object' && Object.hasOwn(input, 'attachmentObjects')
+    ? [...keys, 'attachmentObjects'] : keys
+}
+
 /**
  * The single D4 authority consumed by later preview/apply work. It first opens
  * the authenticated archive outside database transactions, then composes that
@@ -157,7 +176,7 @@ export async function readRecoveryArchiveCompleteSectionState(
 ): Promise<RecoveryArchiveCompleteSectionState> {
   const admitted = snapshotExactRecord(
     input,
-    COMPLETE_STATE_INPUT_KEYS,
+    readerKeys(input, COMPLETE_STATE_INPUT_KEYS),
     'RECOVERY_ARCHIVE_READER_INVALID_INPUT',
   )
   if (typeof admitted.query !== 'function') {
@@ -170,11 +189,15 @@ export async function readRecoveryArchiveCompleteSectionState(
     objectStore: admitted.objectStore,
     manifestObject: admitted.manifestObject,
     sectionObjects: admitted.sectionObjects,
+    ...(admitted.attachmentObjects === undefined ? {} : { attachmentObjects: admitted.attachmentObjects }),
   })
-  return reconstructRecoveryArchiveCompleteSectionsInternal({
+  const state = await reconstructRecoveryArchiveCompleteSectionsInternal({
     query: admitted.query as QueryFn,
     openedArchive,
   })
+  const attachments = openedAttachments.get(openedArchive)
+  if (attachments) openedAttachments.set(state, attachments)
+  return state
 }
 
 /**
@@ -190,7 +213,7 @@ export async function readRecoveryArchiveCompleteSectionsInternal(
 ): Promise<RecoveryArchiveOpenedSnapshot> {
   const admitted = snapshotExactRecord(
     input,
-    INPUT_KEYS,
+    readerKeys(input, INPUT_KEYS),
     'RECOVERY_ARCHIVE_READER_INVALID_INPUT',
   )
   const selectedBinding = admitSelectedBinding(admitted.selectedBinding)
@@ -202,6 +225,19 @@ export async function readRecoveryArchiveCompleteSectionsInternal(
     admitted.sectionObjects,
     selectedBinding.generationId,
   )
+  const attachmentObjects = new Map<string, RecoveryArchiveObjectExpectedBinding>()
+  if (admitted.attachmentObjects !== undefined) {
+    if (!Array.isArray(admitted.attachmentObjects)) fail('RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
+    for (const raw of admitted.attachmentObjects) {
+      const row = snapshotExactRecord(raw, ['attachmentId', 'binding'], 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
+      if (typeof row.attachmentId !== 'string' || !row.attachmentId.trim() || attachmentObjects.has(row.attachmentId)) {
+        fail('RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
+      }
+      const binding = admitObjectBinding(row.binding)
+      if (binding.generationId !== selectedBinding.generationId) fail('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+      attachmentObjects.set(row.attachmentId, binding)
+    }
+  }
 
   const custody = callClosed(
     'RECOVERY_ARCHIVE_READER_INVALID_INPUT',
@@ -341,7 +377,44 @@ export async function readRecoveryArchiveCompleteSectionsInternal(
       opened[expectedName] = rows
     }
 
-    return freezeOpenedSnapshot(manifest, opened as RecoveryArchiveOpenedSections)
+    const attachments = new Map<string, OpenedAttachment>()
+    try {
+      const rows = opened.attachments_index!
+      if (rows.length !== attachmentObjects.size) fail('RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID')
+      const nonces = new Set(manifest.sections.map((section) => section.nonce))
+      for (const row of rows) {
+        const item = row.payload as Record<string, unknown>
+        const id = item.attachment_id
+        if (typeof id !== 'string' || attachments.has(id) || typeof item.immutable_object_version !== 'string'
+          || !item.immutable_object_version.trim() || !isLowercaseSha256Hex(item.plaintext_sha256)
+          || !isCanonicalNonnegativeDecimalString(item.size_bytes)) fail('RECOVERY_ARCHIVE_READER_PLAINTEXT_INVALID')
+        const object = attachmentObjects.get(id)
+        if (!object || object.expectedExpiresAt !== manifest.expires_at) fail('RECOVERY_ARCHIVE_READER_BINDING_MISMATCH')
+        const bytes = Buffer.from(await readObjectBytes(store, object))
+        if (bytes.length < 28 || String(bytes.length - 28) !== item.size_bytes) fail('RECOVERY_ARCHIVE_READER_AUTH_TAG_INVALID')
+        const nonce = bytes.subarray(0, 12)
+        if (nonces.has(nonce.toString('hex'))) fail('RECOVERY_ARCHIVE_READER_AUTH_TAG_INVALID')
+        nonces.add(nonce.toString('hex'))
+        const plaintext = callClosed('RECOVERY_ARCHIVE_READER_AEAD_OPEN_FAILED', () => openRecoveryArchiveAttachment({
+          binding: { generation: { formatVersion: RECOVERY_ARCHIVE_FORMAT_VERSION,
+            generationId: manifest.archive_generation_id, workspaceId: manifest.workspace_id,
+            baseId: manifest.base_id, sheetId: manifest.sheet_id, anchorOperationId: manifest.anchor_operation_id,
+            anchorSeq: manifest.anchor_seq, checkpointId: manifest.checkpoint_id, keyId: first.key_id,
+            wrappedDekId: first.wrapped_dek_id, dekFingerprint: first.dek_fingerprint, aeadAlgorithm: RECOVERY_ARCHIVE_AEAD_ALGORITHM },
+          attachmentId: id, sourceVersion: item.immutable_object_version as string, plaintextSha256: item.plaintext_sha256 as string },
+          dek: unwrapped.dek, sealed: { nonce, ciphertext: bytes.subarray(12, -16), authTag: bytes.subarray(-16) },
+        }))
+        attachments.set(id, { sourceVersion: item.immutable_object_version, plaintextSha256: item.plaintext_sha256,
+          bytes: Buffer.from(plaintext) })
+        plaintext.fill(0)
+      }
+      const result = freezeOpenedSnapshot(manifest, opened as RecoveryArchiveOpenedSections)
+      openedAttachments.set(result, attachments)
+      return result
+    } catch (error) {
+      for (const attachment of attachments.values()) attachment.bytes.fill(0)
+      throw error
+    }
   } finally {
     scrubRecoveryArchiveDek(dek)
   }

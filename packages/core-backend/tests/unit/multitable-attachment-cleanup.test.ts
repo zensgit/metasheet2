@@ -335,6 +335,7 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
     vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
     vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
     let committed = false
+    let claimed = false
     const queryFn = vi.fn().mockResolvedValue({
       rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_path: 'sheet-a/deleted/file-1.bin' }],
     })
@@ -346,6 +347,10 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
         return { rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_path: 'sheet-a/deleted/file-1.bin' }] }
       }
       if (text.startsWith('SELECT 1')) return { rows: [] }
+      if (text.startsWith('UPDATE multitable_attachments') && text.includes('blob_purge_claimed_at')) {
+        claimed = true
+        return { rows: [{ id: 'att-1' }] }
+      }
       throw new Error('unexpected_transaction_query')
     })
     const transactionFn = async (work: (client: { query: typeof transactionQuery }) => Promise<unknown>) => {
@@ -355,6 +360,7 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
     }
     const storage = {
       deleteByKey: vi.fn(async () => {
+        expect(claimed).toBe(true)
         expect(committed).toBe(true)
       }),
     }
@@ -369,6 +375,8 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
 
     const lockedRead = transactionQuery.mock.calls.find(([text]) => String(text).startsWith('SELECT id, sheet_id, storage_path'))
     expect(lockedRead?.[1]).toEqual(['att-1', 24])
+    const claimWrite = transactionQuery.mock.calls.find(([text]) => String(text).includes('SET blob_purge_claimed_at'))
+    expect(claimWrite?.[1]).toEqual(['att-1'])
   })
 
   it('keeps guarded blob-purge storage failures values-free', async () => {
@@ -386,6 +394,9 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
         return { rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_path: sentinel }] }
       }
       if (text.startsWith('SELECT 1')) return { rows: [] }
+      if (text.startsWith('UPDATE multitable_attachments') && text.includes('blob_purge_claimed_at')) {
+        return { rows: [{ id: 'att-1' }] }
+      }
       throw new Error('unexpected_transaction_query')
     })
     const logger = new Logger('AttachmentPurgeTest')

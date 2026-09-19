@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 import * as sectionCausalityMigration from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
+import * as checkpointMigration from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
 import { OperationLedger, sealOperation } from '../../src/multitable/operation-ledger'
 import {
   allocateRecoveryArchiveSnapshotIdentities,
@@ -85,6 +86,7 @@ let db: Kysely<unknown>
 let schemaIsUp = false
 let keyRegistryIsUp = false
 let initialFingerprint = ''
+let restoreCheckpointSchema = false
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
 
@@ -499,6 +501,18 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    // Exercise this historical migration on its own layer, then restore the
+    // later checkpoint amendment before returning the shared test database.
+    const checkpoint = await sql<{ present: boolean }>`SELECT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_constraint
+      WHERE conrelid=pg_catalog.to_regclass('public.meta_record_history_operations')
+        AND conname='chk_mrho_operation_kind'
+        AND pg_catalog.pg_get_constraintdef(oid) LIKE '%section_checkpoint%'
+    ) AS present`.execute(db)
+    if (checkpoint.rows[0]?.present) {
+      await db.transaction().execute(checkpointMigration.down)
+      restoreCheckpointSchema = true
+    }
     await installIfAbsent()
     await provisionFixtureKey()
     initialFingerprint = await causalityFingerprint()
@@ -851,7 +865,11 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
       await q(`DELETE FROM meta_bases WHERE id = ANY($1::text[])`, [[BASE, OTHER_BASE]]).catch(() => {})
       await removeFixtureKey()
     } finally {
-      await db.destroy()
+      try {
+        if (restoreCheckpointSchema) await db.transaction().execute(checkpointMigration.up)
+      } finally {
+        await db.destroy()
+      }
     }
   })
 

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { suspendPreparedMigrationLayer, restorePreparedMigrationLayer } from '../utils/recovery-prepared-migration-layer'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
@@ -312,6 +313,7 @@ describeIfRealDbStep('Phase D3 legal-hold storage authority (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 8 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await suspendPreparedMigrationLayer(db)
     const present = await q(
       `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present`,
     )
@@ -357,7 +359,7 @@ describeIfRealDbStep('Phase D3 legal-hold storage authority (real DB)', () => {
         await query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
       })
     } finally {
-      await db.destroy()
+      try { await restorePreparedMigrationLayer(db) } finally { await db.destroy() }
     }
   })
 

@@ -294,6 +294,7 @@ async function materializeWorkerChunk(
       objectStore: input.runtime.objectStore,
       manifestObject: archive.manifestObject,
       sectionObjects: archive.sectionObjects,
+      ...(archive.attachmentObjects ? { attachmentObjects: archive.attachmentObjects } : {}),
     })
     const targetRecords = materializeWorkerTargetRecords(
       binding.recoveryMode,

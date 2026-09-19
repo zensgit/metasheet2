@@ -2,6 +2,10 @@
  * MultitableApiClient — typed wrapper for all /api/multitable/* endpoints.
  * Uses apiFetch from project utils; accepts optional fetchFn for tests.
  */
+import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
+  type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+
 import type {
   MetaBase,
   MetaSheet,
@@ -1195,7 +1199,7 @@ export interface RecoveryArchivePreview {
   scopeKind: RecoveryArchiveScope['kind']
   executionKind: 'sync' | 'async'
   executable: boolean
-  blockedReason: 'no_changes' | 'schema_drift' | 'inbound_unprovable' | 'async_plan_required' | null
+  blockedReason: 'no_changes' | 'unsupported_attachments' | 'schema_drift' | 'inbound_unprovable' | 'async_plan_required' | null
   previewIdentity: string | null
   summary: {
     reverts: Array<{ recordId: string; fieldIds: string[] }>
@@ -1301,6 +1305,7 @@ const RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS = [
 
 const RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS: ReadonlySet<unknown> = new Set([
   'no_changes',
+  'unsupported_attachments',
   'schema_drift',
   'inbound_unprovable',
   'async_plan_required',
@@ -2997,6 +3002,20 @@ export class MultitableApiClient implements CommentsApiClient {
   // binds a generation and scope, and both sync execute and async accept consume
   // only that server identity. Job state and owner actions never accept a plan,
   // worker fence, or caller-provided progress.
+  async captureRecoveryArchive(sheetId: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> {
+    requireRecoveryArchiveRequestId(requestId)
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/captures`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId }),
+    })
+    return requireRecoveryArchiveCaptureStatus(await this.parseJson<unknown>(res), requestId)
+  }
+
+  async readRecoveryArchiveCapture(sheetId: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> {
+    requireRecoveryArchiveRequestId(requestId)
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/captures/${requestId}`)
+    return requireRecoveryArchiveCaptureStatus(await this.parseJson<unknown>(res), requestId)
+  }
+
   async listRecoveryArchiveCatalog(
     sheetId: string,
     params?: { cursor?: string; limit?: number },

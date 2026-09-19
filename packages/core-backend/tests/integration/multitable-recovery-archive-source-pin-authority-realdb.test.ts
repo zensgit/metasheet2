@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { suspendPreparedMigrationLayer, restorePreparedMigrationLayer } from '../utils/recovery-prepared-migration-layer'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as sourcePinMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
@@ -371,6 +372,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await suspendPreparedMigrationLayer(db)
     await installIfAbsent()
     await truncateCatalog()
     await q('INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)', [KEY_ID])
@@ -417,7 +419,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
         await query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
       })
     } finally {
-      await db.destroy()
+      try { await restorePreparedMigrationLayer(db) } finally { await db.destroy() }
     }
   })
 

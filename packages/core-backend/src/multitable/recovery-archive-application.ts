@@ -5,6 +5,7 @@ import type {
 import type { RecoveryArchiveCustodyInput, RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
 import { resolveLocalArchiveCustody, resolveLocalArchiveCustodyRelease } from './recovery-local-custody'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import { snapshotRecoveryArchiveManualPolicy, type RecoveryArchiveManualAdmissionPolicy } from './recovery-archive-manual-admission'
 import type {
   RecoveryArchiveObservability,
   RecoveryArchiveWorkerLifecycle,
@@ -40,6 +41,7 @@ export interface RecoveryArchiveApplicationComposition {
   readonly asyncResumeHorizonMs: number
   readonly workerIntervalMs: number
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
+  readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
 }
 
 export type RecoveryArchiveApplicationCompositionFactory = () => RecoveryArchiveApplicationComposition
@@ -117,6 +119,7 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveDatabaseRuntime: database,
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
+    ...(composition.manualCapture ? { recoveryArchiveManualPolicy: composition.manualCapture } : {}),
   })
   let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
@@ -216,6 +219,7 @@ function snapshotComposition(
     asyncResumeHorizonMs: source.asyncResumeHorizonMs,
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
+    ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
   }
   if (!composition.keyCustody || typeof composition.keyCustody !== 'object') throw new Error(COMPOSITION_INVALID)
   // Resolve only authentic local capabilities; preserve the original input and its revocation checks.

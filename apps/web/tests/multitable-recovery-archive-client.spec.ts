@@ -97,6 +97,64 @@ const recoveryArchiveOperationCases: Array<{
 ]
 
 describe('MultitableApiClient recovery archive routes', () => {
+  const manualRequestId = '11111111-1111-4111-8111-111111111111'
+  const manualStatus = { requestId: manualRequestId, generationId: catalogEntry.generationId, state: 'pending' }
+
+  it.each(['pending', 'incomplete', 'recoverable'])('captures and reads closed manual state %s with request identity only', async (state) => {
+    const data = { ...manualStatus, state }
+    const fetchFn = vi.fn(async () => response({ ok: true, data }, state === 'pending' ? 202 : 200))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.captureRecoveryArchive('sheet/a', manualRequestId)).resolves.toEqual(data)
+    await expect(client.readRecoveryArchiveCapture('sheet/a', manualRequestId)).resolves.toEqual(data)
+    expect(fetchFn.mock.calls).toEqual([
+      ['/api/multitable/sheets/sheet%2Fa/recovery-archive/captures', expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ requestId: manualRequestId }),
+      })],
+      [`/api/multitable/sheets/sheet%2Fa/recovery-archive/captures/${manualRequestId}`],
+    ])
+  })
+
+  it.each([
+    null, [], {},
+    { ...manualStatus, state: 'done' },
+    { ...manualStatus, actorId: 'private-actor' },
+    { ...manualStatus, generationId: 'not-a-uuid' },
+    { ...manualStatus, requestId: plannedJob.jobId },
+    { requestId: manualRequestId, state: 'recoverable' },
+    { ...manualStatus, state: null },
+    { ...manualStatus, state: ['pending'] },
+  ])('rejects malformed or mismatched manual status without echoing values: %#', async (data) => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn(async () => response({ ok: true, data })) })
+    await expect(client.captureRecoveryArchive('sheet/a', manualRequestId))
+      .rejects.toThrow('Invalid recovery archive capture response')
+    await expect(client.readRecoveryArchiveCapture('sheet/a', manualRequestId))
+      .rejects.toThrow('Invalid recovery archive capture response')
+  })
+
+  it.each(['', '../other', '11111111-1111-4111-8111-11111111111Z'])('rejects malformed manual request before IO: %s', async (requestId) => {
+    const fetchFn = vi.fn()
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.captureRecoveryArchive('sheet/a', requestId)).rejects.toThrow('Invalid recovery archive request identity')
+    await expect(client.readRecoveryArchiveCapture('sheet/a', requestId)).rejects.toThrow('Invalid recovery archive request identity')
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it.each([401, 403, 404, 409, 503])('keeps manual HTTP %s errors distinct from success', async (status) => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn(async () => response({
+      ok: false, error: { code: 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE' },
+    }, status)) })
+    await expect(client.captureRecoveryArchive('sheet/a', manualRequestId)).rejects.toMatchObject({ status })
+    await expect(client.readRecoveryArchiveCapture('sheet/a', manualRequestId)).rejects.toMatchObject({ status })
+  })
+
+  it('accepts the explicit unsupported attachment reason without an execution identity', async () => {
+    const data = { ...validPreview, executable: false, previewIdentity: null, blockedReason: 'unsupported_attachments' }
+    const client = new MultitableApiClient({ fetchFn: vi.fn(async () => response({ ok: true, data })) })
+    await expect(client.previewRecoveryArchive('sheet/a', {
+      generationId: catalogEntry.generationId, mode: 'revert', scope: { kind: 'whole_sheet' },
+    })).resolves.toEqual(data)
+  })
+
   it('uses the sheet-scoped catalog, whole-sheet preview, and identity-only execute contracts', async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(response({ ok: true, data: {
