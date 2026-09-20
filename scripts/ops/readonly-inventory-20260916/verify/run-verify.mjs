@@ -24,6 +24,12 @@
 //                            files whose columns are absent (never a zero)
 //         * lock timeout   → psql aborts, NO INVENTORY_RESULT line at all
 //         * permission denied → same abort shape
+//   F6  02-trg04's ACTIONABLE http:// count matches only the jsonpaths the
+//       executor dereferences (`config.url` at the top level and one branch
+//       level down). A user-authored `body.callbackUrl` and a mis-cased
+//       `config.URL` are proven to be OUT of that count while still visible in
+//       the labelled upper-bound column, and the pre-narrowing `$.**`
+//       predicate is re-run standalone to show it returned the larger number.
 //
 // USAGE
 //   DATABASE_URL=postgresql://user:pw@127.0.0.1:5432/scratch node run-verify.mjs
@@ -48,7 +54,13 @@ function run(args, { input } = {}) {
   const r = spawnSync(PSQL, ['-d', process.env.DATABASE_URL, '--no-psqlrc', ...args], {
     encoding: 'utf8',
     input,
-    env: process.env,
+    // PGCLIENTENCODING is pinned because every file in this pack (SQL + fixtures)
+    // is UTF-8, while psql otherwise derives `client_encoding` from the console
+    // code page. On a Chinese-locale Windows host that is GBK, and loading
+    // fixture-modern.sql then dies with
+    // `character with byte sequence 0x80 0xe2 in encoding "GBK"` on the em dashes
+    // in its comments — an environment-dependent flake, not a pack defect.
+    env: { ...process.env, PGCLIENTENCODING: 'UTF8' },
   })
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' }
 }
@@ -149,6 +161,28 @@ export const OLD_HTTP_PREDICATE_SQL = schema => `
   SELECT count(*)::int FROM automation_rules
    WHERE actions::text ILIKE '%"url":"http://%'`
 
+/**
+ * F6 evidence: the pre-narrowing WIDE predicate, run standalone. It is the
+ * `$.**` recursion plus the seven-name key allowlist — i.e. exactly what
+ * 02-trg04 used to count as "http egress targets". The pack still reports this
+ * number, but now as an explicitly-labelled UPPER BOUND, never as the number
+ * that sizes the breakage. Asserting `wide > narrow` on the same fixture is the
+ * measurement that the narrowing actually removed something.
+ */
+export const OLD_WIDE_HTTP_PREDICATE_SQL = schema => `
+  SET search_path = "${schema}";
+  SELECT count(*)::int FROM automation_rules ar
+   WHERE EXISTS (
+           SELECT 1
+             FROM jsonb_path_query(ar.actions, '$.**') AS node
+             CROSS JOIN LATERAL jsonb_each_text(
+                   CASE WHEN jsonb_typeof(node) = 'object' THEN node ELSE '{}'::jsonb END
+                 ) AS m(key, val)
+            WHERE lower(regexp_replace(m.key, '[^A-Za-z0-9]', '', 'g'))
+                  IN ('url', 'weburl', 'webhookurl', 'endpoint', 'endpointurl', 'targeturl', 'callbackurl')
+              AND btrim(m.val) ILIKE 'http://%'
+         )`
+
 export function checkModern(schema) {
   const out = {}
 
@@ -173,32 +207,77 @@ export function checkModern(schema) {
   out.r01 = resultLine(o1.stdout, '01-cred06-secret-keys.sql')
   assert.match(out.r01, /status=complete shapes=A /)
 
-  // ── 02 / F3 ──────────────────────────────────────────────────────────────
+  // ── 02 / F3 + F6 ─────────────────────────────────────────────────────────
   const o2 = runPackFile('02-trg04-http-targets.sql', schema)
   assert.equal(o2.status, 0, `02 exited ${o2.status}: ${o2.stderr}`)
-  const httpRules = Number(block(o2.stdout, 'http_rules')[0].rows[0])
-  const ruleIds = block(o2.stdout, 'id|sheet_id')[0].rows.map(r => r.split('|')[0]).sort()
-  assert.deepEqual(ruleIds, ['r-nested', 'r-spaced', 'r-top', 'r-upper'],
-    'F3: top-level + nested + spaced-layout + upper-case must all be found')
-  assert.equal(httpRules, 4)
-  assert.equal(ruleIds.length, httpRules, 'F3/F4 invariant: |ids| == count')
-  for (const neg of ['r-https', 'r-https-upper', 'r-decoy']) {
-    assert.ok(!ruleIds.includes(neg), `F3 negative leaked in: ${neg}`)
+  const [httpRules, httpRulesBound] = block(o2.stdout, 'http_rules|http_rules_upper_bound')[0]
+    .rows[0].split('|').map(Number)
+  const ruleRows = block(o2.stdout, 'id|sheet_id|narrow_hit|upper_bound_hit')[0].rows
+    .map(r => r.split('|'))
+    .map(([id, sheetId, n, u]) => ({ id, sheetId, narrow: n === 't', bound: u === 't' }))
+  const narrowIds = ruleRows.filter(r => r.narrow).map(r => r.id).sort()
+  const listedIds = ruleRows.map(r => r.id).sort()
+
+  // F3 (kept): layout and VALUE case must not change the answer.
+  assert.deepEqual(narrowIds,
+    ['r-default', 'r-internal', 'r-nested', 'r-spaced', 'r-top', 'r-upper'],
+    'narrow set must be exactly the six read-path http:// rows')
+  assert.equal(httpRules, 6)
+  assert.equal(narrowIds.length, httpRules, 'F4 invariant: |narrow ids| == narrow count')
+
+  // F6 (the narrowing): a user-authored `body.callbackUrl` and a mis-cased
+  // `config.URL` member are NOT egress targets — they must be OUT of the
+  // narrow set and IN the upper bound, so no information is lost.
+  for (const fp of ['r-body-callback', 'r-keycase']) {
+    assert.ok(!narrowIds.includes(fp), `F6: false positive leaked into the narrow set: ${fp}`)
+    assert.ok(listedIds.includes(fp), `F6: ${fp} must still be visible as upper-bound-only`)
+    const row = ruleRows.find(r => r.id === fp)
+    assert.equal(row.narrow, false)
+    assert.equal(row.bound, true)
   }
+  assert.equal(httpRulesBound, 8, 'upper bound = narrow 6 + the two non-target http:// strings')
+  assert.equal(listedIds.length, httpRulesBound,
+    'F4 invariant: |listed ids| == upper-bound count (narrow is a subset)')
+  assert.ok(httpRules < httpRulesBound, 'F6: the narrowing must actually remove rows')
+
+  // Negatives: neither reading may count https, HTTPS or the text decoy.
+  for (const neg of ['r-https', 'r-https-upper', 'r-decoy']) {
+    assert.ok(!listedIds.includes(neg), `negative leaked in: ${neg}`)
+  }
+
   const oldHttp = Number(scalar(OLD_HTTP_PREDICATE_SQL(schema)))
   // THE F3 BUG, measured: the pre-repair textual predicate reports ZERO on a
-  // fixture that holds four genuine http:// targets — jsonb re-renders members
+  // fixture that holds six genuine http:// targets — jsonb re-renders members
   // as `"url": "http://…"` (with a space), so `'%"url":"http://%'` never hits.
   assert.equal(oldHttp, 0, 'F3 evidence: the old text pattern under-reports to zero')
   assert.notEqual(oldHttp, httpRules, 'F3 evidence: old vs new predicates disagree')
-  const legacyCol = Number(block(o2.stdout, 'http_rules_legacy_column')[0].rows[0])
-  assert.equal(legacyCol, 1, 'legacy action_config http row')
+  // THE F6 BUG, measured: the pre-narrowing wide predicate, run standalone,
+  // returns the upper bound — i.e. two rows more than the number that actually
+  // breaks. Same number the pack still reports, now correctly labelled.
+  const oldWideHttp = Number(scalar(OLD_WIDE_HTTP_PREDICATE_SQL(schema)))
+  assert.equal(oldWideHttp, httpRulesBound, 'F6 evidence: the wide reading IS the upper bound')
+  assert.ok(oldWideHttp > httpRules,
+    'F6 evidence: the pre-narrowing predicate over-counted the breakage')
+
+  const [legacyCol, legacyColBound] = block(
+    o2.stdout, 'http_rules_legacy_column|http_rules_legacy_column_upper_bound',
+  )[0].rows[0].split('|').map(Number)
+  assert.equal(legacyCol, 2, 'legacy action_config: $.url + branch-nested config.url')
+  assert.equal(legacyColBound, 3, 'legacy upper bound also counts the body callbackUrl row')
+
+  const q7 = block(o2.stdout, 'source|internal_target_rows|internal_target_rows_upper_bound')[0]
+    .rows[0].split('|')
+  assert.equal(q7[0], 'automation_rules')
+  assert.equal(Number(q7[1]), 1, 'Q7 narrow: only r-internal sits on a read path')
+  assert.equal(Number(q7[2]), 1)
+
   const wh = block(o2.stdout, 'active|http_webhooks')[0].rows.map(r => r.split('|'))
   const whTotal = wh.reduce((a, r) => a + Number(r[1]), 0)
   const whIds = block(o2.stdout, 'id|active|created_by')[0].rows.map(r => r.split('|')[0]).sort()
   assert.deepEqual(whIds, ['w-http', 'w-http-off', 'w-http-upper', 'w-internal'])
   assert.equal(whIds.length, whTotal, 'webhook count/ids invariant')
-  out.f3 = { httpRules, ruleIds, oldHttp, legacyCol, whTotal, whIds }
+  out.f3 = { httpRules, narrowIds, oldHttp, legacyCol, whTotal, whIds }
+  out.f6 = { httpRules, httpRulesBound, listedIds, oldWideHttp, legacyCol, legacyColBound }
   out.r02 = resultLine(o2.stdout, '02-trg04-http-targets.sql')
   assert.match(out.r02, /status=complete scope=automation_rules\+multitable_webhooks/)
 
@@ -247,7 +326,18 @@ export function checkLegacy(schema) {
   assert.equal(o2.status, 0, `02 legacy exited ${o2.status}: ${o2.stderr}`)
   out.r02 = resultLine(o2.stdout, '02-trg04-http-targets.sql')
   assert.match(out.r02, /status=incomplete reason=missing-column:automation_rules\.actions/)
-  assert.ok(!/http_rules\b/.test(o2.stdout), 'Q2 must be skipped, not silently zero')
+  assert.ok(!/http_rules\|http_rules_upper_bound/.test(o2.stdout),
+    'Q2 must be skipped, not silently zero')
+  // F6 on the old schema: `action_config` IS the executed config here (no
+  // `actions` column ⇒ toExecutorRule's fallback always applies), so Q4's
+  // narrow number is the one that breaks; the body-callbackUrl row shows up
+  // only in the upper bound.
+  const [legacyCol, legacyColBound] = block(
+    o2.stdout, 'http_rules_legacy_column|http_rules_legacy_column_upper_bound',
+  )[0].rows[0].split('|').map(Number)
+  assert.equal(legacyCol, 1, 'legacy narrow: only r-b-legacy is on a read path')
+  assert.equal(legacyColBound, 2, 'legacy upper bound also counts r-b-body')
+  out.f6Legacy = { legacyCol, legacyColBound }
   const whIds = block(o2.stdout, 'id|active|created_by')[0].rows.map(r => r.split('|')[0])
   assert.deepEqual(whIds, ['w-b-http'], 'the webhook half still runs')
 

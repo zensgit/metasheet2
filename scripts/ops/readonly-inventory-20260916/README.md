@@ -1,4 +1,4 @@
-# 只读盘点包（2026-09-16，2026-09-18 复核返修）— CRED-06 / TRG-04 / ADM-08 / ADM-13
+# 只读盘点包（2026-09-16，2026-09-18 复核返修，2026-09-20 TRG-04 收窄）— CRED-06 / TRG-04 / ADM-08 / ADM-13
 
 这是一个**只读盘点包**：四个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
 `SELECT` / `WITH … SELECT`，没有任何 `INSERT` / `UPDATE` / `DELETE` / DDL。目的是在合并
@@ -19,12 +19,30 @@
 
 证据与正反例清单见 `docs/development/readonly-inventory-pack-verification-20260916.md` §“复核返修”。
 
+## 0b. 2026-09-20 复核返修（F6：TRG-04 的 HTTP 目标白名单收窄）
+
+| 编号 | 问题 | 修法 |
+|---|---|---|
+| F6 | `02-trg04` 的命中判据在两个方向上都过宽：① 键名白名单有 7 个名字，其中只有 `url` 会被代码读去发请求，另外 6 个（`webUrl`/`webhookUrl`/`endpoint`/`endpointUrl`/`targetUrl`/`callbackUrl`）在这两张表的取值路径上**零读取点**；② `jsonb_path_query(actions,'$.**')` 递归整棵 `config`，会钻进 `send_webhook` 里**用户自撰的 `body` / `headers`**——`body` 是被序列化后 POST 给 `config.url` 的载荷，里面一个叫 `callbackUrl` 的 `http://` 字符串会被算成"出网目标"，把 owner 用来判断"能不能开 https-only"的数字吹大 | **窄口径**只匹配执行器真正解引用的 jsonpath：`$[*].config.url`、`$[*].config.branches[*].actions[*].config.url`、`$[*].config.defaultBranch.actions[*].config.url`（旧列 `action_config` 同理，上移一层）。键的大小写**敏感**（`config.url` 是 JS 属性读取，存成 `"URL"` 根本读不到），值的 scheme 判定仍然大小写不敏感。**原 `$.**` + 7 键逻辑一条不删**，作为显式标注的**参考上界**列 `*_upper_bound` 并排输出 |
+
+读取点依据（本 worktree 亲读）：
+
+| 键 / 列 | 唯一读取点 |
+|---|---|
+| `automation_rules.actions[*].config.url` | `packages/core-backend/src/multitable/automation-executor.ts:4199`（`const url = config.url …`），派发在 `:2591`；契约 `SendWebhookConfig` 在 `automation-actions.ts:144-151`；前端只写这一个成员 `apps/web/src/multitable/components/MetaAutomationRuleEditor.vue:504` |
+| `automation_rules.action_config`（旧列） | `automation-service.ts:1187-1190` 的回退：`actions` 为 NULL/空时，执行器读的就是 `action_config` |
+| `multitable_webhooks.url` | `packages/core-backend/src/multitable/webhook-service.ts:394`（`this.fetchFn(wh.url, …)`） |
+
+一层嵌套就是全部：`condition_branch` 读 `config.branches[*].actions`（`automation-executor.ts:2348`、`:2378`）与 `config.defaultBranch.actions`（`:2342`、`:2372-2373`），`parallel_branch` 读 `config.branches[*].actions`（`:2247`）；保存期校验拒绝分支内再套分支（`automation-service.ts:874`、`:877`、`:902`、`:905`），所以没有第三层。
+
+证据与正反例见 `docs/development/readonly-inventory-http-target-allowlist-narrow-verification-20260920.md`。
+
 ## 1. 这四份文件分别解锁什么
 
 | 文件 | 编号 | 解锁 / 喂给 | 一句话 |
 |---|---|---|---|
 | `01-cred06-secret-keys.sql` | CRED-06 | PR #5648、PR #5681 | `data_sources` 里还有多少行的连接配置（两种列形状）带着秘密形状的键名 |
-| `02-trg04-http-targets.sql` | TRG-04 | PR #5619、PR #5649 | 自动化规则（`automation_rules.actions`）和 webhook 订阅（`multitable_webhooks.url`）里还有多少条 `http://`（非 https）目标 |
+| `02-trg04-http-targets.sql` | TRG-04 | PR #5619、PR #5649 | 自动化规则（`automation_rules.actions`）和 webhook 订阅（`multitable_webhooks.url`）里还有多少条 `http://`（非 https）目标；**窄口径 = 会坏的条数，另给一列参考上界**（见 §0b / §4b） |
 | `03-adm08-wildcard-permissions.sql` | ADM-08 | 喂 ADM-07 的裁决 | `users.permissions`（两种列形状）、`user_permissions`、`role_permissions`（含经 `user_roles` 继承）里现在有多少行/多少用户持有 `*:*` |
 | `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（不回填） | 有多少用户满足声明式 admin 字段，但 `user_roles` 里没有 `role_id='admin'` 那一行 |
 
@@ -101,8 +119,23 @@ INVENTORY_RESULT file=<文件名> status=incomplete reason=<原因> …
 |---|---|---|
 | `01` | Q2/Q3（形状 A 计数 + id）或 Q4/Q5（形状 B，自动分派） | 贴进 PR #5648 / #5681 的合并前检查项；计数 > 0 时是否要配套去键 UPDATE 另开工单（嵌套 `connection.headers` 可能是在用凭证，不能和顶层一起无脑跑） |
 | `01` | Q6/Q7（键名普查，`-v census=1` 才跑） | 人工比对词表找漏判形状，回报给 #5648/#5681 的作者；**默认不外传** |
-| `02` | Q2/Q3（`automation_rules` 计数 + id/sheet_id） | 贴进 PR #5619 的合并前盘点；按 `sheet_id` 通知团队 |
+| `02` | Q2/Q3（`automation_rules` 计数 + id/sheet_id） | 贴进 PR #5619 的合并前盘点；**只按 `http_rules` / `narrow_hit=t` 通知 `sheet_id` 对应团队**，上界列见下表 |
+| `02` | Q4（旧列 `action_config` 计数） | 同上；`actions` 为 NULL/空的行，这一列就是执行器读的配置 |
 | `02` | Q5/Q6（`multitable_webhooks` 计数 + id/created_by） | 贴进 PR #5649 的合并前盘点；按 `created_by` 通知用户 |
+
+### 4b. `02-trg04` 的窄口径 / 上界两个数怎么读（2026-09-20 起）
+
+| 结果字段 | 口径 | 怎么用 |
+|---|---|---|
+| `http_rules` | **窄（actionable）**：只数落在执行器真正解引用的 jsonpath 上的 `http://` | **这是会坏的条数。** 合并 #5619 前按它评估影响面、按它通知团队 |
+| `http_rules_upper_bound` | **参考上界**：旧的 `$.**` 递归 + 7 键白名单 | 只做参考。差额 = "长得像 http 目标但没人读它"（`send_webhook` 的 `body`/`headers` 载荷、大小写写错的键名）。**不要**用它评估破坏面 |
+| Q3 的 `narrow_hit` / `upper_bound_hit` | 上面两列的逐行版 | `narrow_hit=t` → 该规则会坏；`narrow_hit=f AND upper_bound_hit=t` → 规则里某处有 `http://` 字符串但不是出网目标，仅供排查 |
+| `http_rules_legacy_column` / `…_upper_bound` | 同一对口径，作用在旧列 `action_config` 上 | 同上 |
+| `internal_target_rows` / `…_upper_bound` | 同一对口径，作用在"明显内网字面量"上 | 分母/上下文；本来就是**下界**（漏 172.16/12、`*.internal`、IPv6 ULA 等） |
+| Q5/Q6 的 `http_webhooks` | 只有一个口径 | `multitable_webhooks.url` 是专用 `text` 列，没有键名要猜、没有 JSON 要递归，本来就是窄的，**没有上界孪生列** |
+
+不变量（由 `verify/run-verify.mjs` 断言）：
+`count(Q3 rows WHERE narrow_hit) == Q2.http_rules`，`count(Q3 rows) == Q2.http_rules_upper_bound`，且窄口径恒 ⊆ 上界。
 | `03` | 全部 | 交给 ADM-07 的裁决；本文件只给现状 |
 | `04` | Q2/Q3（计数 + id，按声明字段分类） | 交给 PR #5665 / #5677，**只作为盘点输入，不回填** |
 
@@ -137,3 +170,4 @@ DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scratch \
 
 - 设计：`docs/development/readonly-inventory-pack-design-20260916.md`
 - 验证：`docs/development/readonly-inventory-pack-verification-20260916.md`
+- TRG-04 收窄验证（F6，2026-09-20）：`docs/development/readonly-inventory-http-target-allowlist-narrow-verification-20260920.md`
