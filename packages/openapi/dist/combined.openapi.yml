@@ -22754,6 +22754,133 @@ paths:
                     error:
                       code: RUN_READ_NOT_IMPLEMENTED
                       message: Run read is not implemented
+  /api/integration/runs/{runId}/provenance:
+    get:
+      summary: List one run's provenance timeline
+      description: >-
+        Read-only per-run provenance timeline, scoped by (tenantId, workspaceId,
+        runId) and ordered by `eventIndex` (the migration-060 view's WITH
+        ORDINALITY over the run's persisted `provenance_events`, i.e. write
+        order). The run is resolved first through the same three-key lookup the
+        single-run read uses, so another tenant's run id and a run id that does
+        not exist return the SAME details-free 404 — an unknown run is never
+        answered with an empty timeline. `attrs` were redacted at write
+        (DF-N2-2b scrub gate); this read path does not re-redact and never
+        returns raw payloads. No write, replay or retry.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          description: Pipeline run id.
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: >-
+            Workspace scope. Omitted means the null workspace — the same
+            normalization the run reads apply.
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max events to return. Capped at 500 at the route and at 1000 in the
+            registry (the tighter wins); a non-numeric or non-positive value is
+            silently ignored and the server-held default page size (200)
+            applies.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ProvenanceTimelineEntry'
+                    required:
+                      - items
+        '400':
+          description: runId missing from the path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                run_id_required:
+                  value:
+                    ok: false
+                    error:
+                      code: RUN_ID_REQUIRED
+                      message: runId is required
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            Run not visible in the caller's (tenant, workspace) scope. Identical
+            body for a non-existent id and another tenant's id; carries no
+            `details`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                run_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: RUN_NOT_FOUND
+                      message: pipeline run not found
+        '501':
+          description: >-
+            The host's pipeline registry implements neither the per-run
+            provenance read (PROVENANCE_READ_NOT_IMPLEMENTED) nor the single-run
+            read the scope probe needs (RUN_READ_NOT_IMPLEMENTED) —
+            optional-method wiring older than this route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                provenance_read_not_implemented:
+                  value:
+                    ok: false
+                    error:
+                      code: PROVENANCE_READ_NOT_IMPLEMENTED
+                      message: Provenance read is not implemented
+                run_read_not_implemented:
+                  value:
+                    ok: false
+                    error:
+                      code: RUN_READ_NOT_IMPLEMENTED
+                      message: Run read is not implemented
   /api/multitable/bases:
     get:
       summary: List multitable bases

@@ -30,6 +30,11 @@ const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancel
 const SOURCE_ROLES = new Set(['source', 'bidirectional'])
 const TARGET_ROLES = new Set(['target', 'bidirectional'])
 const RUNNING_RUN_UNIQUE_INDEX = 'uniq_integration_runs_one_running_per_pipeline'
+// Q4a: by-run provenance page size. Server-held, not caller-tunable beyond the cap — a single
+// run's event array is bounded by what the runner wrote, and an unbounded read would let one
+// request materialize the whole view page for a pathological run.
+const PROVENANCE_BY_RUN_LIMIT_DEFAULT = 200
+const PROVENANCE_BY_RUN_LIMIT_MAX = 1000
 
 class PipelineValidationError extends Error {
   constructor(message, details = {}) {
@@ -369,6 +374,14 @@ function normalizeProvenanceWindowBound(value, field) {
     throw new PipelineValidationError(`${field} must be an ISO date-time`, { field })
   }
   return value
+}
+
+// Q4a: a caller-supplied limit is clamped to [1, PROVENANCE_BY_RUN_LIMIT_MAX]; anything that is
+// not a positive integer (undefined, 0, -1, '50', NaN) falls back to the default rather than
+// being rejected — same "silently ignore a junk page size" convention the list routes use.
+function normalizeProvenanceRunLimit(value) {
+  if (!Number.isInteger(value) || value <= 0) return PROVENANCE_BY_RUN_LIMIT_DEFAULT
+  return Math.min(value, PROVENANCE_BY_RUN_LIMIT_MAX)
 }
 
 function compareProvenanceEntries(a, b) {
@@ -774,6 +787,33 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     return entries
   }
 
+  // Q4a: read-only provenance timeline for ONE run, the run-detail counterpart of
+  // listProvenanceByRow. Same view, same projection, same scope discipline — only the extra
+  // predicate differs (run_id instead of row_id), so the two reads cannot drift apart in what
+  // they expose. The WHERE carries tenant_id + workspace_id + run_id: another tenant's run id
+  // and a non-existent one both select zero view rows, so this method is not an existence
+  // oracle on its own (the route's 404 comes from getPipelineRun, which has the same property).
+  // Ordering is by event_index — within one run that IS the write order (the view's WITH
+  // ORDINALITY over the persisted provenance_events array), so no secondary run-time sort is
+  // needed here. attrs were redacted at write (DF-N2-2b scrub gate); this path does NOT
+  // re-redact, exactly like listProvenanceByRow.
+  async function listProvenanceByRun(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input.workspaceId)
+    const runId = requiredString(input.runId, 'runId')
+    const where = { ...scopeWhere({ tenantId, workspaceId }), run_id: runId }
+    const rows = unwrapRows(await db.select(PROVENANCE_VIEW, {
+      where,
+      orderBy: ['event_index', 'ASC'],
+      limit: normalizeProvenanceRunLimit(input.limit),
+    }))
+    const entries = rows.map(rowToProvenanceEntry)
+    // Defensive in-app re-sort: the DB ORDER BY above is the contract, but a host db layer that
+    // ignores `orderBy` must not be able to hand the operator a shuffled timeline.
+    entries.sort((a, b) => (a.eventIndex || 0) - (b.eventIndex || 0))
+    return entries
+  }
+
   // Marks 'running' runs that started more than `olderThanMs` milliseconds ago as 'failed'.
   // Called on plugin startup or before creating a new run to recover from crashed runner processes
   // that never called failRun(). Without this, a crash between startRun and finishRun permanently
@@ -822,6 +862,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     listPipelineRuns,
     getPipelineRun,
     listProvenanceByRow,
+    listProvenanceByRun,
     abandonStaleRuns,
   }
 }
@@ -841,6 +882,9 @@ module.exports = {
     RUNS_TABLE,
     PROVENANCE_VIEW,
     PROVENANCE_TIMELINE_ENTRY_FIELDS,
+    PROVENANCE_BY_RUN_LIMIT_DEFAULT,
+    PROVENANCE_BY_RUN_LIMIT_MAX,
+    normalizeProvenanceRunLimit,
     rowToProvenanceEntry,
     VALID_MODES,
     VALID_RUN_MODES,
