@@ -307,6 +307,23 @@ prompt 写「`USE_MOCK` 短路若 A-4 的 spec 需要则以同一 guard 保留�
 | **从**(管理入口) | `ApprovalTemplateGroupsPanel`(A-2) | 仅管理员、**仅分组视图**、且**折叠**在「管理分组 / Manage groups」披露开关之后;只有管理员显式展开时才挂载(才读一次它要编辑的权威列表) |
 | 同步 | `changed` 事件 | 面板新建成功 ⇒ `emit('changed')` ⇒ 视图调分节视图已 `defineExpose` 的 `loadAll()` |
 
+**⚠️ 这一步收窄了验收 J 的页面级入口 —— owner 待裁(新增,本节唯一的 owner 项)**
+
+锁文 §2 原文要求「首期必须……提供 session-org 选择入口」,A-2 把这个入口实现成:
+管理员打开模板中心页 ⇒ 面板 `onMounted` 即调 `listApprovalTemplateGroups()` ⇒ 多 org 成员吃 403
+`SESSION_ORG_REQUIRED` ⇒ 共享选择器自动出现。**合流后这条路径变成两步**:先切到分组视图,再点开「管理分组」。
+并且第一步里 `TemplateGroupSections` 会先用同一个端点吃到同一个 403,而它的 catch 不读 `.code`
+(§8.5 第 4 行的缺口),所以多 org 成员**先看到的是一条通用错误**,要自己想到再点两下才能拿到选择器。
+
+组件级的验收 J 一个字没改(`ApprovalTemplateGroupsPanel.spec.ts` 3/3 仍绿,面板仍是 403→选择器→重试→201);
+**被收窄的是页面级入口的可达性**。按「另造更窄同类物 = 合同变更」的判据,这属于 owner 裁,不属于实现细节,
+本分支不替 owner 决定,原样披露:
+
+> **待裁(D3-1)**:接受「验收 J 入口从页面加载即触发收窄为分组视图 + 展开管理器两步」,
+> 还是要求把 `SESSION_ORG_REQUIRED` 的识别接进 `TemplateGroupSections`(即把 §8.5 第 4 行那条缺口
+> 一并关掉,让分组视图自己也能弹选择器)?
+> 两个选项都不阻塞本分支的构建闸;第二个选项是新增行为,需要新的用例与一次 lane 内的实现轮。
+
 **没有把分组列表上提到父组件共享一份 state**:`approvalTemplateCenterSections.spec.ts:150` 钉的是
 「分节视图自己调 `listApprovalTemplateGroups()` 恰好 1 次」,上提会直接打破 A-4 自己的验收。
 因此「共享同一份数据」在本分支实现为**单一权威呈现面 + 默认渲染路径零重复拉取 + 变更后主动重读**,
@@ -319,7 +336,7 @@ prompt 写「`USE_MOCK` 短路若 A-4 的 spec 需要则以同一 guard 保留�
 | §5.1 | 「默认值保持 `'flat'`,故 `approvalTemplateCenterCategory.spec.ts`/`templateCenterI18n.spec.ts` 等既有 spec 在从不触碰 `viewMode` 时行为逐字节不变」 | **对 A-4 自己的改动仍然成立**(A-4 相对其底座没动平铺分支)。**在本合流分支上不可再读作「页面平铺视图与 A-2 head 相同」**:平铺视图里 A-2 的分组面板被移走了(§8.4)。两条 spec 仍然全绿,但原因变了——不是「没被触碰」,是「面板不再挂在这里」。 |
 | §5.1 | 「`TemplateGroupSections` 作为兄弟模板(`v-else`)」 | **仍然成立**,形状略变:`v-else` 现在是一个 `<template v-else>`,里面依次是(管理员才有的)折叠管理入口与分节视图本身。分节视图相对既有表格/画廊仍是兄弟,不是包装层。 |
 | §6 表「前端会话-组织接入 `section=`」行 | 「本分支不含 A-2 的任何提交,`SessionOrgSwitcher.vue` 在这个 worktree 里**不存在**(`find` 零命中)」 | **这半句在本分支被推翻**:底座就是 A-2,`apps/web/src/components/SessionOrgSwitcher.vue` 存在。 |
-| 同上 | 「`TemplateGroupSections.vue` 的 `loadAll`/`loadMore` 只把异常的 `message` 塞进通用错误字符串,没有对 `SESSION_ORG_REQUIRED` 单独识别」 | **仍然成立(OPERATIVE)**。缺口没被合流关掉,只是从「想接也没有组件可接」变成「组件与带 `.code` 的错误都有了,纯粹是没接」——§8.2 的收口顺带把这条路径的错误类型从裸 `Error` 换成了 `ApprovalApiError`,所以**接线的前置条件现在具备了**。仍为 owner 待裁项(验证 MD §14.7 的 DEFERRED-owner 项),本分支不擅自接。 |
+| 同上 | 「`TemplateGroupSections.vue` 的 `loadAll`/`loadMore` 只把异常的 `message` 塞进通用错误字符串,没有对 `SESSION_ORG_REQUIRED` 单独识别」 | **仍然成立(OPERATIVE),而且后果比合流前更靠前**。缺口没被关掉,只是从「想接也没有组件可接」变成「组件与带 `.code` 的错误都有了,纯粹是没接」——§8.2 的收口顺带把这条路径的错误类型从裸 `Error` 换成了 `ApprovalApiError`,**接线的前置条件现在具备了**。但同时:分节视图成了分组的主呈现面(§8.4),多 org 成员现在**先**撞上它的通用错误,**再**才有机会点开管理器拿到选择器——所以这条缺口从「另一条读路径上的未处理码」升级成「验收 J 页面级入口的第一跳」。合并进 §8.4 的 owner 待裁项 **D3-1**,本分支不擅自接。 |
 | §5.4 | 「上移/下移与移动 `<select>` 都不在组件里再做 `canManageTemplates` 客户端门控」 | **仍然成立**,本分支未触碰 `TemplateGroupSections.vue` 的门控面。注意新增的**管理入口**(§8.4)确实带 `v-if="canManageTemplates"`——那是 A-2 面板的原有门控随挂载点一起搬过来的,不是给 A-4 控件新加的门控。 |
 | §7 / §6 其余行 | Q5 悬空、I4 未到、`/categories` 新消费方披露等 | **全部不受合流影响,原样成立**;`listTemplateCategories()` 的新消费方仍在 `TemplateGroupSections.vue`。 |
 
