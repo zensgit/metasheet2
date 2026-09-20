@@ -130,8 +130,15 @@ export function onAuthPrincipalChange(listener: AuthPrincipalChangeListener): ()
  * being installed or cleared around an unchanged token. Unreadable explicit metadata (a partial
  * switch, which `getAuthPrincipalKey` throws on) collapses to one constant: it is not a session,
  * so it compares equal to itself and differs from every real one.
+ *
+ * EXPORTED so that a cache which answers a REQUEST can stamp that request with the session it was
+ * issued for and re-check it when the answer lands — `approvals/templateStore`'s list read does
+ * exactly that. A subscriber (`onAuthSessionSwitch` below) is told about transitions this process
+ * performs; a request already in flight needs the VALUE, because nobody notifies a pending promise.
+ * The two are the same comparison applied at different moments, and they must read the same source
+ * or they can disagree about whether the session changed.
  */
-function readAuthSessionSignature(): string {
+export function readAuthSessionSignature(): string {
   let key: string | null
   try {
     key = getAuthPrincipalKey()
