@@ -4726,6 +4726,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
 
@@ -4950,6 +4957,13 @@ describe('ApprovalProductService', () => {
           }],
           rowCount: 1,
         }
+      }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
       }
       throw new Error(`Unhandled pool query: ${statement}`)
     })

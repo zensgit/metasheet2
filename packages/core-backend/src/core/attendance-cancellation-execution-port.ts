@@ -258,6 +258,173 @@ export function classifyCancelRoundCancellationOutcomeV1(
 }
 
 // ---------------------------------------------------------------------------
+// Owner ruling 2026-09-20 — the DURABLE read half of lock:86's 呈现, as a PER-KEY-PATH WHITELIST.
+// ---------------------------------------------------------------------------
+
+/**
+ * ⛔ THE CONSTRAINT THIS ENCODES, in the owner's own terms (2026-09-20):
+ * 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接暴露整个 metadata。」
+ *
+ * `approval_records.metadata` is a free-form jsonb blob that also carries INTERNAL keys —
+ * `w4ActorPosture` (lock:94), `parallelCancelledAssignees`, `cancelRoundBlockDetail` (free text
+ * straight from the attendance adapter), `approvalThreshold`, `channel`/`cardDeliveryId`. The
+ * read surfaces' explicit SELECT lists are a deliberate confidentiality boundary; projecting the
+ * bare column would hand every one of those keys to any participant. So the two functions below
+ * are the ONLY way a metadata value reaches a read response, and each REBUILDS its result field
+ * by field from a fixed key set rather than passing the stored object through. A key the writer
+ * adds tomorrow — or a hostile/corrupt blob — cannot ride out on an object these return.
+ *
+ * Both are TOTAL and NON-THROWING: they run on a read path, and an unreadable value degrades to
+ * `null` (the key is then simply absent from the response) rather than failing the read. They do
+ * NOT fabricate: a value they cannot fully validate is dropped, never defaulted.
+ *
+ * Defensive against the jsonb arriving already-parsed (`pg`'s default type parser, the common
+ * case) or as a raw JSON string — the same two shapes `extractRiderAttachmentIds` handles in
+ * `routes/approval-history.ts`.
+ */
+function parseMaybeJsonValue(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whitelist-projects `metadata.cancellationOutcome` to exactly
+ * `{ status, reversal: { reversed, lots, unrecoverableExpired, alreadyReversed } | null }`.
+ *
+ * `reversal: null` is EMITTED, not omitted, for `cancelled_reversal_unreported` — the three-token
+ * design exists precisely so 「nothing to reverse」 and 「the channel is not wired」 are not
+ * byte-identical on the wire (see `CancelRoundCancellationOutcomeV1`'s docblock), and collapsing
+ * an explicit `null` into an absent key would destroy that distinction at the last hop.
+ */
+export function projectCancelRoundCancellationOutcomeForReadV1(
+  raw: unknown,
+): CancelRoundCancellationOutcomeV1 | null {
+  const value = parseMaybeJsonValue(raw)
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+  const status = source.status
+  if (status === 'cancelled_reversal_unreported') {
+    return { status, reversal: null }
+  }
+  if (status !== 'cancelled' && status !== 'cancelled_with_unrecoverable_expired') return null
+  const reversalValue = source.reversal
+  if (typeof reversalValue !== 'object' || reversalValue === null || Array.isArray(reversalValue)) return null
+  const reversalSource = reversalValue as Record<string, unknown>
+  const reversed = finiteNumberOrNull(reversalSource.reversed)
+  const lots = finiteNumberOrNull(reversalSource.lots)
+  const unrecoverableExpired = finiteNumberOrNull(reversalSource.unrecoverableExpired)
+  const alreadyReversed = reversalSource.alreadyReversed
+  if (reversed === null || lots === null || unrecoverableExpired === null) return null
+  if (typeof alreadyReversed !== 'boolean') return null
+  return {
+    status,
+    reversal: { reversed, lots, unrecoverableExpired, alreadyReversed },
+  }
+}
+
+/** The bounded close-reason token C-3's system closure writes (`cancelRoundCloseReason`). */
+export const CANCEL_ROUND_CLOSE_REASON_EXPIRED = 'round_expired'
+/** Its `blocked` sibling's prefix; the `<code>` after it comes from C-1's `business_refused.code`. */
+export const CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX = 'business_blocked:'
+/**
+ * A sanity ceiling, NOT a charset rule. `AttendanceRequestOperationBusinessRefusalV1.code` is
+ * typed `string` and validated only for `typeof === 'string' && length > 0` at the boundary
+ * (`w4c3b-request-operation-boundary.ts`'s `takeBusinessRefusal`) — nothing constrains its
+ * charset, so a charset regex here would silently DROP a legitimate code and re-open the very
+ * read gap this projection closes. Structure (exact token / known prefix) plus a generous length
+ * ceiling is what can be checked without inventing a contract the writer does not honour.
+ */
+export const CANCEL_ROUND_CLOSE_REASON_MAX_LENGTH = 256
+
+/**
+ * Whitelist-projects `metadata.cancelRoundCloseReason` — `round_expired` (窗口/策略已关) or
+ * `business_blocked:<code>` (业务不可逆). This is what makes those two closures DISTINGUISHABLE on
+ * the wire; before it they were byte-identical (`verify-c2-history-dto-cancellation-outcome-
+ * 20260920.md` §4.2 — same `action`, same `to_status`, same version fields).
+ *
+ * `cancelRoundBlockDetail` (the adapter's free-text cause, written BESIDE this token) is
+ * deliberately NOT whitelisted: its value is uncontrolled text, and the bounded token already
+ * answers the user-facing question 「为什么没成」.
+ */
+export function projectCancelRoundCloseReasonForReadV1(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  if (raw.length > CANCEL_ROUND_CLOSE_REASON_MAX_LENGTH) return null
+  if (raw === CANCEL_ROUND_CLOSE_REASON_EXPIRED) return raw
+  if (
+    raw.startsWith(CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX)
+    && raw.length > CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX.length
+  ) {
+    return raw
+  }
+  return null
+}
+
+/** Minimal query surface the reader below needs — deliberately not `pg`'s `Pool`, so this core
+ *  module keeps taking no database dependency and either service can hand it their own client. */
+export type CancelRoundReadProjectionQueryV1 = (
+  text: string,
+  values: unknown[],
+) => Promise<{ rows: Record<string, unknown>[] }>
+
+/** What the two detail read surfaces attach to their DTO. Absent keys mean 「this instance has no
+ *  such durable value」 — never a fabricated default. */
+export interface CancelRoundReadProjectionV1 {
+  cancellationOutcome?: CancelRoundCancellationOutcomeV1
+  cancelRoundCloseReason?: string
+}
+
+/**
+ * THE ONE durable-read query, shared by BOTH `getApproval` implementations
+ * (`ApprovalBridgeService`'s — the one `GET /api/approvals/:id` actually calls — and
+ * `ApprovalProductService`'s, which builds every ACTION response). Two copies of this SQL is
+ * exactly how the two surfaces would drift into disagreeing about what a refresh shows, and the FE
+ * store publishes an action response into the slot the detail read fills, so a field present on one
+ * and absent on the other flips to `undefined` the moment someone acts.
+ *
+ * ⚠️ NOT a bare `metadata` projection: two key paths are asked of the DB, and each value is then
+ * REBUILT field by field by the projectors above. `cancelRoundBlockDetail` (free text) and every
+ * internal key (`w4ActorPosture`, `parallelCancelledAssignees`, `nodeEntryEpoch`, …) stay in the
+ * column.
+ *
+ * UNCONDITIONAL, deliberately — no second 「is this a cancel round」 predicate. Such a predicate
+ * would not be the writer's, and its failure mode is SILENT ABSENCE, which is the exact defect
+ * shape this closes. The predicate is the KEY's presence, answered by the DB over
+ * `idx_approval_records_instance`; a non-cancel-round instance simply matches no row.
+ *
+ * ONE row: a round produces at most one carrier — the approve row on the redeemed path, or the
+ * system-closure row on the expired/blocked path — and those are mutually exclusive outcomes of
+ * the same round.
+ */
+export async function readCancelRoundDurableProjectionV1(
+  query: CancelRoundReadProjectionQueryV1,
+  instanceId: string,
+): Promise<CancelRoundReadProjectionV1> {
+  const result = await query(
+    `SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw,
+            metadata->>'cancelRoundCloseReason' AS cancel_round_close_reason_raw
+       FROM approval_records
+      WHERE instance_id = $1
+        AND (metadata->'cancellationOutcome' IS NOT NULL
+             OR metadata->>'cancelRoundCloseReason' IS NOT NULL)
+      ORDER BY occurred_at DESC, id DESC
+      LIMIT 1`,
+    [instanceId],
+  )
+  const row = result.rows[0]
+  if (!row) return {}
+  const projection: CancelRoundReadProjectionV1 = {}
+  const cancellationOutcome = projectCancelRoundCancellationOutcomeForReadV1(row.cancel_round_outcome_raw)
+  if (cancellationOutcome) projection.cancellationOutcome = cancellationOutcome
+  const cancelRoundCloseReason = projectCancelRoundCloseReasonForReadV1(row.cancel_round_close_reason_raw)
+  if (cancelRoundCloseReason !== null) projection.cancelRoundCloseReason = cancelRoundCloseReason
+  return projection
+}
+
+// ---------------------------------------------------------------------------
 // Codex 审阅第 3 条修复 (2026-09-19) — the POST-COMMIT `attendance.request.cancelled` delivery.
 // ---------------------------------------------------------------------------
 
