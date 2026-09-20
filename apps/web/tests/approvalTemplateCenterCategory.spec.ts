@@ -2140,19 +2140,30 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
       // the throw aborted `redetermineEligibilityAndReload()` before `reloadOrgScopedSurfaces()`.
       expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
 
-      // The organization-list re-ask is ATTEMPTED and fails in this window — `authHeaders()`
-      // (`utils/api.ts:167`) reads the same explicit metadata with no guard of its own, so every
-      // request out of this app throws until the switch lands. That is registered as an
-      // out-of-population sibling of C-1, not fixed here; what matters for THIS page is that the
-      // failure is rendered as recoverable rather than as a silent disappearance.
-      expect(sessionOrgsCalls).toBe(1)
-      expect(container!.querySelectorAll('[data-testid="template-center-session-orgs-retry"]').length).toBe(1)
+      // WHAT IS DELIBERATELY NOT PINNED HERE, and why. `authHeaders()` (`utils/api.ts:167`) reads
+      // the same explicit metadata with no guard of its own, so TODAY every request out of this app
+      // throws until the switch lands and the organization-list re-ask cannot get out. That is an
+      // out-of-population sibling of C-1, disclosed and left OPEN for the owner (design MD §9.1) —
+      // so asserting "the lookup did not go out" would pin a defect as though it were the
+      // specification, which is exactly what round 2b's P2-D caught in this same file.
+      //
+      // What this page owes the admin either way is a WAY OUT: whichever way the lookup went, the
+      // grouped view must offer something to act on rather than silently show nothing. That holds
+      // today (lookup fails ⇒ the retry control) and it still holds if `api.ts` is ever guarded
+      // (lookup succeeds ⇒ the switcher). On the round-5 head, and under M-U, it is NEITHER,
+      // because the re-read never happened at all.
+      const waysOut = container!.querySelectorAll('[data-testid="session-org-switcher"]').length
+        + container!.querySelectorAll('[data-testid="template-center-session-orgs-retry"]').length
+      expect(waysOut).toBeGreaterThanOrEqual(1)
 
       // The other tab publishes the final marker. Everything is readable again, and the entry
       // comes back with no reload — the page was never in a dead state.
       completeForeignSwitch(incoming, 'org-b')
       await flushUi(16)
-      expect(sessionOrgsCalls).toBe(2)
+      // `>= 2` for the same reason as above: how many lookups got out DURING the unreadable window
+      // depends on `utils/api.ts:167`, which is not this round's to decide. The re-read count and
+      // the rendered entry do not — the store is mocked here, so neither goes through `apiFetch`.
+      expect(sessionOrgsCalls).toBeGreaterThanOrEqual(2)
       expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
       expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(2)
     } finally {
