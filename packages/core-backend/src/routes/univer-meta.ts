@@ -12974,6 +12974,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // refused could tell a live sheet from a soft-deleted or absent one just by reading the status.
         // Nothing the capability resolver consumes reads `meta_sheets.deleted_at`, so a caller without
         // canManageSheetAccess now gets the SAME 403 in all three states.
+        // SCOPE, so this is not read as more than it is: the resolver does read `meta_sheets` in ONE
+        // place — its own approval-projection fence (`loadApprovalProjectionSheetIds`,
+        // multitable/permission-service.ts: `id = ANY($1::text[]) AND base_id = $2`, deliberately with
+        // no `deleted_at` filter). For an id inside that admin-only base the fence hits for a live AND
+        // for a soft-deleted sheet and strips canManageSheetAccess, so PRESENT (403) is still
+        // distinguishable from ABSENT (404 below) there, at one extra round trip. Strictly narrower
+        // than the probe removed here (which split live from soft-deleted on every base); pinned as a
+        // named RESIDUAL in tests/unit/multitable-sheet-existence-oracle-b4.test.ts.
         const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
           query,
           sheetId,
@@ -13076,7 +13084,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
         // ORDER (#5839): same as PUT — authority first, then existence. The pre-403 sheet-row probe
         // told a caller this route was about to refuse whether the sheet was live, soft-deleted or
-        // never there; the capability inputs do not read `meta_sheets`, so all three now answer 403.
+        // never there; nothing the capability inputs consume reads `meta_sheets.deleted_at`, so a
+        // caller without canManageSheetAccess now gets the same 403 in all three states. Same SCOPE
+        // caveat as the PUT twin above: the resolver's approval-projection fence DOES read
+        // `meta_sheets` by id (multitable/permission-service.ts, no `deleted_at` filter), so inside
+        // that admin-only base present stays distinguishable from absent. Pinned as a RESIDUAL in
+        // tests/unit/multitable-sheet-existence-oracle-b4.test.ts.
         const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
           query,
           sheetId,

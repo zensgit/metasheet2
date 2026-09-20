@@ -16,6 +16,19 @@
  * looks identical but takes a state-dependent number of round trips is still an oracle to anyone who
  * can watch the database; pinning the statement list is what makes "identical" mean identical.
  *
+ * ── SCOPE of that constancy, and the RESIDUAL it does not cover ───────────────
+ * The round-trip constancy holds for sheets OUTSIDE the approval-projection base. The resolver does
+ * read `meta_sheets` in exactly one place: its own projection fence — `loadApprovalProjectionSheetIds`
+ * (`multitable/permission-service.ts`, `SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND
+ * base_id = $2`, deliberately WITHOUT a `deleted_at` filter). For an id inside that base the fence
+ * hits for a live AND for a soft-deleted sheet, adds a participant round trip, and strips
+ * `canManageSheetAccess`. Consequences, both pinned below as named RESIDUAL cases rather than left to
+ * be rediscovered: the 403 BODY still closes over the three states, but (a) the pre-403 statement
+ * count is 1 higher for present than for absent, and (b) a caller holding `multitable:share` gets
+ * 403 / 403 / 404 — still able to split PRESENT from ABSENT inside that one base. That is strictly
+ * narrower than the probe this PR removed (which also split live from soft-deleted, on every base),
+ * so it is a residual, not a regression.
+ *
  * The prelude is pre-403 BY DESIGN (see the comment at the PUT handler): the shared authority locks
  * and the row-auth advisory must be held before the capability read so a concurrent approval-create
  * final recheck serialises against a deny INSERT. It is therefore pinned here as a KNOWN constant
@@ -29,8 +42,17 @@
  * and refuses with the values-free bodies from `multitable/sheet-liveness.ts`.
  *
  * ── Seams ─────────────────────────────────────────────────────────────────────
- * One self-contained fake pool answers by SQL SHAPE and records every statement; its `transaction()`
- * hands the handler THE SAME query function, so the recorded log is exactly what the transaction did.
+ * One self-contained fake pool answers by SQL SHAPE **and by params**, and records both. Two things
+ * it deliberately keeps apart:
+ *   - INSIDE vs OUTSIDE the transaction. `pool.query` has its OWN recorder (`outsideLog`) and is NOT
+ *     the function `transaction()` hands the handler. A read that takes a second pooled connection
+ *     while this transaction holds `meta_sheets … FOR SHARE` plus the row-auth advisory escapes the
+ *     snapshot the handler's own comment says it relies on (and is a self-deadlock shape under pool
+ *     saturation), so `loadSheetLiveness(pool.query.bind(pool), …)` must be distinguishable from
+ *     `loadSheetLiveness(query, …)`. It is: the former lands in `outsideLog`.
+ *   - WHICH id a statement was issued for. `calls` keeps `{ sql, params }` and the sheet-keyed
+ *     answers are selected by `params[0]`, so resolving liveness for the RECORD id (or any other id)
+ *     answers `absent` instead of silently passing.
  * The expected statement lists are COMPUTED by running the real prelude helpers and the real resolver
  * against that same fake — never hand-listed — so a change in either shows up here as a diff rather
  * than as a stale expectation that keeps passing.
@@ -45,6 +67,7 @@ import {
   SHEET_DELETED_CODE,
   SHEET_DELETED_MESSAGE,
   SHEET_NOT_FOUND_MESSAGE,
+  loadSheetLiveness,
 } from '../../src/multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../../src/multitable/sheet-refusals'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
@@ -101,6 +124,10 @@ const RECORD_LINK_LOCK_PRELUDE: readonly string[] = [
 
 /** The one liveness round trip the handler adds AFTER the 403. */
 const LIVENESS_SQL = 'SELECT deleted_at FROM meta_sheets WHERE id = $1'
+/** The prelude's shared lock on the sheet row — the ONE pre-403 statement whose answer knows `absent`. */
+const SHEET_FOR_SHARE_SQL = 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE'
+/** The resolver's approval-projection fence (`loadApprovalProjectionSheetIds`). No `deleted_at` filter. */
+const PROJECTION_FENCE_SQL = 'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND base_id = $2'
 
 /**
  * Lock / transaction-control forms are EXEMPT from the beyond-capability rule: they are the pinned
@@ -122,8 +149,19 @@ function touchesRecordPermissionWrite(sql: string): boolean {
     || /^DELETE FROM record_permissions\b/.test(sql)
 }
 
+/** A statement as the fake saw it. The params are what make "which id?" an answerable question. */
+interface RecordedCall {
+  sql: string
+  params: unknown[]
+}
+
 interface Fake {
+  /** Text of every statement issued INSIDE the transaction, in order. */
   sqlLog: string[]
+  /** The same statements WITH their params. */
+  calls: RecordedCall[]
+  /** Statements issued on the POOL, outside any transaction. A correct handler leaves this empty. */
+  outsideLog: string[]
   query: (sql: string, params?: unknown[]) => Promise<QueryResult>
   pool: {
     query: (sql: string, params?: unknown[]) => Promise<QueryResult>
@@ -133,31 +171,60 @@ interface Fake {
   committed: () => boolean
 }
 
+interface FakeOpts {
+  state: SheetState
+  canShare: boolean
+  /**
+   * Whether this sheet id lives in the ADMIN-ONLY approval-projection base. Off by default (the
+   * ordinary sheet). On, the resolver's own fence hits — see the SCOPE section of the file docblock.
+   */
+  projection?: boolean
+}
+
 /**
  * Self-contained fake pool. `canShare` decides the ONLY authority input that matters here
  * (`multitable:share` ⇒ `canManageSheetAccess`); the actor is never a DB admin, so the resolver
  * always walks its full stage list and the SQL shape does not depend on the answer.
+ *
+ * Sheet-keyed answers are selected by `params[0]`, not by the statement text alone: a handler that
+ * resolved liveness for the RECORD id would otherwise be indistinguishable from the correct one.
  */
-function createFake(opts: { state: SheetState; canShare: boolean }): Fake {
+function createFake(opts: FakeOpts): Fake {
   const sqlLog: string[] = []
+  const calls: RecordedCall[] = []
+  const outsideLog: string[] = []
   let committed = false
+
+  /** Is this statement addressed at the sheet under test? `absent` is the answer for any other id. */
+  const isThisSheet = (value: unknown): boolean => value === SHEET_ID
 
   const answer = (q: string, params: unknown[]): QueryResult => {
     if (/^SAVEPOINT\b/.test(q) || /^RELEASE SAVEPOINT\b/.test(q) || /^ROLLBACK TO SAVEPOINT\b/.test(q)) {
       return { rows: [] }
     }
 
-    // ── sheet rows, by state ────────────────────────────────────────────────
-    if (q === 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE') {
+    // ── sheet rows, by state AND by id ──────────────────────────────────────
+    if (q === SHEET_FOR_SHARE_SQL) {
       // FOR SHARE on zero rows returns normally — the ABSENT path must not throw.
-      return { rows: opts.state === 'absent' ? [] : [{ id: params[0] }] }
+      if (!isThisSheet(params[0]) || opts.state === 'absent') return { rows: [] }
+      return { rows: [{ id: params[0] }] }
     }
     if (q === LIVENESS_SQL) {
-      if (opts.state === 'absent') return { rows: [] }
+      // Keyed on params[0]: liveness asked about any other id resolves `absent`, so a handler that
+      // passes the wrong id cannot ride the sheet's state.
+      if (!isThisSheet(params[0]) || opts.state === 'absent') return { rows: [] }
       return { rows: [{ deleted_at: opts.state === 'deleted' ? '2026-09-01T00:00:00.000Z' : null }] }
     }
-    // approval-projection probe: this sheet is not a projection sheet in any state.
-    if (q === 'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND base_id = $2') return { rows: [] }
+    // Approval-projection fence. NOTE the missing `deleted_at` filter — faithful to
+    // permission-service.ts: a soft-deleted projection sheet still hits.
+    if (q === PROJECTION_FENCE_SQL) {
+      if (!opts.projection || opts.state === 'absent') return { rows: [] }
+      const ids = Array.isArray(params[0]) ? (params[0] as unknown[]) : []
+      return { rows: ids.filter(isThisSheet).map((id) => ({ id })) }
+    }
+    // Participant probe — only reached on a fence hit. The actor is never a participant, so the
+    // fence stays at its full admin-only shape.
+    if (q.startsWith('SELECT DISTINCT s.id')) return { rows: [] }
 
     // ── lock prelude ────────────────────────────────────────────────────────
     if (q === 'SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE') return { rows: [] }
@@ -185,20 +252,32 @@ function createFake(opts: { state: SheetState; canShare: boolean }): Fake {
     throw new Error(`Unhandled SQL in #5839 B4 existence-oracle fake: ${q}`)
   }
 
+  /** The transaction-bound query. Everything it sees is, by construction, inside the transaction. */
   const query = async (sql: string, params: unknown[] = []): Promise<QueryResult> => {
     const q = normalizeSql(sql)
     sqlLog.push(q)
+    calls.push({ sql: q, params })
+    return answer(q, params)
+  }
+
+  /**
+   * The POOL-level query — a DIFFERENT function with a DIFFERENT recorder. Taking a second pooled
+   * connection mid-transaction leaves the txn snapshot and the locks it holds, so it must not be
+   * silently equivalent to `query`.
+   */
+  const poolQuery = async (sql: string, params: unknown[] = []): Promise<QueryResult> => {
+    const q = normalizeSql(sql)
+    outsideLog.push(q)
     return answer(q, params)
   }
 
   const transaction = async <T>(handler: (client: { query: typeof query }) => Promise<T>): Promise<T> => {
-    // Same query function inside the transaction, so sqlLog IS the transaction's statement list.
     const result = await handler({ query })
     committed = true
     return result
   }
 
-  return { sqlLog, query, pool: { query, transaction }, committed: () => committed }
+  return { sqlLog, calls, outsideLog, query, pool: { query: poolQuery, transaction }, committed: () => committed }
 }
 
 function installApp(fake: Fake) {
@@ -221,14 +300,45 @@ function installApp(fake: Fake) {
   return app
 }
 
-/** Run a production helper against a fresh fake and return the statements it issued. */
+/** Run a production helper against a fresh fake and return that fake, with everything it recorded. */
 async function recordStandalone(
-  opts: { state: SheetState; canShare: boolean },
+  opts: FakeOpts,
   run: (query: Fake['query']) => Promise<unknown>,
-): Promise<string[]> {
+): Promise<Fake> {
   const fake = createFake(opts)
   await run(fake.query)
-  return [...fake.sqlLog]
+  return fake
+}
+
+/** The statements a helper issued, text only. */
+async function statementsOf(
+  opts: FakeOpts,
+  run: (query: Fake['query']) => Promise<unknown>,
+): Promise<string[]> {
+  return [...(await recordStandalone(opts, run)).sqlLog]
+}
+
+/**
+ * Of the calls actually RECORDED from a run, which ones does the fake answer differently between two
+ * sheet states? Replayed with the REAL params, so this is a property of the statements the route
+ * issued — not of a hand-guessed probe. Used to say, in machine-checked form, WHY two states are
+ * indistinguishable: because nothing the route asked before its 403 has a state-dependent answer.
+ */
+async function callsAnsweredDifferently(
+  recorded: readonly RecordedCall[],
+  states: readonly [SheetState, SheetState],
+  opts: { canShare: boolean; projection?: boolean },
+): Promise<string[]> {
+  const differing: string[] = []
+  for (const call of recorded) {
+    const answers: string[] = []
+    for (const state of states) {
+      const probe = createFake({ ...opts, state })
+      answers.push(JSON.stringify(await probe.query(call.sql, call.params)))
+    }
+    if (answers[0] !== answers[1] && !differing.includes(call.sql)) differing.push(call.sql)
+  }
+  return differing
 }
 
 /** The real prelude, as the two production helpers issue it. */
@@ -260,6 +370,33 @@ function bodyFrom(send: (res: never) => unknown): { status: number; body: unknow
   return { status, body }
 }
 
+/**
+ * Everything that must hold about the liveness round trip on a run that gets PAST the 403:
+ *   - it sits behind the AUTHORITY GATE — the pinned prelude plus the one capability resolution,
+ *     both COMPUTED from the production helpers. `>= prelude.length` would also be satisfied by a
+ *     handler that resolved liveness before the capability read (re-opening the oracle), so the
+ *     index is compared against the end of the resolver, not the end of the locks;
+ *   - it happens INSIDE the transaction — `pool.query` has its own recorder, and a read that takes a
+ *     second pooled connection while this txn holds FOR SHARE + the advisory would land there;
+ *   - it asks about the ADDRESSED SHEET — params, not just statement text.
+ */
+async function expectLivenessBehindAuthorityGate(fake: Fake, opts: FakeOpts): Promise<number> {
+  const resolverSql = await statementsOf(opts, runResolver)
+  const gate = RECORD_LINK_LOCK_PRELUDE.length + resolverSql.length
+  expect(fake.sqlLog.slice(0, gate), 'the pre-403 statements drifted from prelude + one resolver run')
+    .toEqual([...RECORD_LINK_LOCK_PRELUDE, ...resolverSql])
+  const livenessAt = fake.sqlLog.indexOf(LIVENESS_SQL)
+  expect(livenessAt, 'liveness must be resolved AFTER the capability read, not merely after the locks')
+    .toBe(gate)
+  expect(fake.sqlLog.filter((q) => q === LIVENESS_SQL), 'liveness was resolved more than once').toHaveLength(1)
+  expect(fake.outsideLog, 'a statement escaped the transaction onto a second pooled connection').toEqual([])
+  expect(
+    fake.calls.find((c) => c.sql === LIVENESS_SQL)?.params,
+    'liveness was resolved for an id other than the addressed sheet',
+  ).toEqual([SHEET_ID])
+  return livenessAt
+}
+
 const FORBIDDEN = bodyFrom((res) => sendForbidden(res))
 const NOT_LIVE_DELETED = bodyFrom((res) => sendSheetNotLive(res, 'deleted'))
 const NOT_LIVE_ABSENT = bodyFrom((res) => sendSheetNotLive(res, 'absent'))
@@ -273,9 +410,19 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
 
   it('the pinned prelude is the real prelude, and it is state-independent', async () => {
     for (const state of STATES) {
-      const observed = await recordStandalone({ state, canShare: false }, runPrelude)
-      expect(observed, `prelude drifted on the ${state} sheet`).toEqual([...RECORD_LINK_LOCK_PRELUDE])
+      const fake = await recordStandalone({ state, canShare: false }, runPrelude)
+      expect(fake.sqlLog, `prelude drifted on the ${state} sheet`).toEqual([...RECORD_LINK_LOCK_PRELUDE])
+      // WHICH id: the prelude's shared lock is taken on the ADDRESSED sheet, not on some other id.
+      const forShare = fake.calls.filter((c) => c.sql === SHEET_FOR_SHARE_SQL)
+      expect(forShare, `prelude locked the wrong row count on the ${state} sheet`).toHaveLength(1)
+      expect(forShare[0]!.params, `prelude locked an id other than the addressed sheet`).toEqual([SHEET_ID])
     }
+    // The liveness helper, likewise, is a statement ABOUT a given id — pinned here so the routes'
+    // assertions below ("issued with [SHEET_ID]") are comparing against the helper's real contract.
+    const livenessProbe = await recordStandalone({ state: 'live', canShare: false }, async (query) => {
+      await loadSheetLiveness(query, SHEET_ID)
+    })
+    expect(livenessProbe.calls).toEqual([{ sql: LIVENESS_SQL, params: [SHEET_ID] }])
     // The shared refusal helpers agree with what the routes must answer.
     expect(FORBIDDEN).toEqual({
       status: 403,
@@ -304,13 +451,27 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
 
   for (const route of ROUTES) {
     it(`${route.name}: a caller without canManageSheetAccess gets the SAME 403 on live / deleted / absent`, async () => {
-      const seen: Array<{ state: SheetState; status: number; body: unknown; sql: string[] }> = []
+      const seen: Array<{
+        state: SheetState
+        status: number
+        body: unknown
+        sql: string[]
+        calls: RecordedCall[]
+        outside: string[]
+      }> = []
 
       for (const state of STATES) {
         const fake = createFake({ state, canShare: false })
         pinned.setApp(installApp(fake))
         const res = await route.send()
-        seen.push({ state, status: res.status, body: res.body, sql: [...fake.sqlLog] })
+        seen.push({
+          state,
+          status: res.status,
+          body: res.body,
+          sql: [...fake.sqlLog],
+          calls: [...fake.calls],
+          outside: [...fake.outsideLog],
+        })
         vi.restoreAllMocks()
       }
 
@@ -324,7 +485,9 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
 
       // (b) EVIDENCE: the statement list is prelude + exactly one real resolver run, computed by
       // running the production resolver — never hand-listed — and identical in all three states.
-      const resolverSql = await recordStandalone({ state: 'live', canShare: false }, runResolver)
+      // SCOPE: `projection: false` — an ordinary sheet. The projection-base residual is pinned by its
+      // own cases at the bottom of this file, where this constancy provably does NOT hold.
+      const resolverSql = await statementsOf({ state: 'live', canShare: false }, runResolver)
       const expected = [...RECORD_LINK_LOCK_PRELUDE, ...resolverSql]
       for (const s of seen) {
         expect(s.sql, `${s.state} issued a different statement list`).toEqual(expected)
@@ -349,10 +512,34 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
         expect(s.sql.filter(isBeyondCapability), `${s.state} made a beyond-capability query`).toEqual([])
       }
 
-      // The liveness round trip belongs AFTER the 403 — a refused caller never triggers it.
+      // The liveness round trip belongs AFTER the 403 — a refused caller never triggers it, on the
+      // pooled connection no more than inside the transaction.
       for (const s of seen) {
         expect(s.sql.includes(LIVENESS_SQL), `${s.state} resolved liveness for a refused caller`).toBe(false)
+        expect(s.outside, `${s.state} issued a statement outside the transaction`).toEqual([])
       }
+
+      // (e) WHY live and deleted come out identical — stated as a property of the ROUTE, not assumed
+      // from the fake. Replaying the statements the route ACTUALLY issued (with their real params)
+      // against a live and a soft-deleted fake must produce the same answers everywhere: the route
+      // asks nothing before its 403 whose answer knows about `deleted_at`. Without this, "live and
+      // deleted got the same 403" is only a restatement of the fake answering them alike; a new
+      // pre-403 `deleted_at` read would slip through. (`s.calls` is the same for all three states by
+      // (b); the live run is used as the witness.)
+      const liveVsDeleted = await callsAnsweredDifferently(seen[0]!.calls, ['live', 'deleted'], { canShare: false })
+      expect(
+        liveVsDeleted,
+        'a statement issued BEFORE the 403 distinguishes a live sheet from a soft-deleted one',
+      ).toEqual([])
+
+      // And the ABSENT column is NOT the same input replayed: the prelude's shared lock on the sheet
+      // row answers zero rows there. So the identical 403 across live|deleted|absent rests on a real
+      // difference the route swallows without branching — exactly one statement, named.
+      const liveVsAbsent = await callsAnsweredDifferently(seen[0]!.calls, ['live', 'absent'], { canShare: false })
+      expect(
+        liveVsAbsent,
+        'the absent case must differ from the live case in the pinned FOR SHARE prelude row only',
+      ).toEqual([SHEET_FOR_SHARE_SQL])
     })
   }
 
@@ -374,12 +561,11 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
       },
     })
     expect(fake.committed()).toBe(true)
-    // Liveness is resolved once, after the 403 gate and before the write.
-    const livenessAt = fake.sqlLog.indexOf(LIVENESS_SQL)
+    // Liveness is resolved once, inside the transaction, for THIS sheet, after the 403 gate — and
+    // before the write.
+    const livenessAt = await expectLivenessBehindAuthorityGate(fake, { state: 'live', canShare: true })
     const insertAt = fake.sqlLog.findIndex((q) => q.startsWith('INSERT INTO record_permissions'))
-    expect(livenessAt).toBeGreaterThanOrEqual(RECORD_LINK_LOCK_PRELUDE.length)
     expect(insertAt).toBeGreaterThan(livenessAt)
-    expect(fake.sqlLog.filter((q) => q === LIVENESS_SQL)).toHaveLength(1)
   })
 
   it('PUT: a canManageSheetAccess caller is refused 404 on a DELETED sheet and writes nothing', async () => {
@@ -391,7 +577,7 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
     expect(res.status).toBe(404)
     expect(res.body).toEqual(NOT_LIVE_DELETED.body)
     expect(res.body?.error?.code).toBe(SHEET_DELETED_CODE)
-    expect(fake.sqlLog.includes(LIVENESS_SQL)).toBe(true)
+    await expectLivenessBehindAuthorityGate(fake, { state: 'deleted', canShare: true })
     expect(fake.sqlLog.filter(touchesRecordPermissionWrite)).toEqual([])
   })
 
@@ -406,6 +592,7 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
     expect(res.body?.error?.message).toBe(SHEET_NOT_FOUND_MESSAGE)
     // Values-free: the refusal never echoes the id the caller probed with.
     expect(JSON.stringify(res.body)).not.toContain(SHEET_ID)
+    await expectLivenessBehindAuthorityGate(fake, { state: 'absent', canShare: true })
     expect(fake.sqlLog.filter(touchesRecordPermissionWrite)).toEqual([])
   })
 
@@ -418,9 +605,8 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true, data: { deleted: true, permissionId: PERMISSION_ID } })
     expect(fake.committed()).toBe(true)
-    const livenessAt = fake.sqlLog.indexOf(LIVENESS_SQL)
+    const livenessAt = await expectLivenessBehindAuthorityGate(fake, { state: 'live', canShare: true })
     const deleteAt = fake.sqlLog.findIndex((q) => q.startsWith('DELETE FROM record_permissions'))
-    expect(livenessAt).toBeGreaterThanOrEqual(RECORD_LINK_LOCK_PRELUDE.length)
     expect(deleteAt).toBeGreaterThan(livenessAt)
   })
 
@@ -433,6 +619,7 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
     expect(res.status).toBe(404)
     expect(res.body).toEqual(NOT_LIVE_DELETED.body)
     expect(res.body?.error?.code).toBe(SHEET_DELETED_CODE)
+    await expectLivenessBehindAuthorityGate(fake, { state: 'deleted', canShare: true })
     expect(fake.sqlLog.filter(touchesRecordPermissionWrite)).toEqual([])
   })
 
@@ -446,6 +633,73 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
     expect(res.body).toEqual(NOT_LIVE_ABSENT.body)
     expect(res.body?.error?.message).toBe(SHEET_NOT_FOUND_MESSAGE)
     expect(JSON.stringify(res.body)).not.toContain(SHEET_ID)
+    await expectLivenessBehindAuthorityGate(fake, { state: 'absent', canShare: true })
     expect(fake.sqlLog.filter(touchesRecordPermissionWrite)).toEqual([])
   })
+
+  /**
+   * ── RESIDUAL: the approval-projection base ──────────────────────────────────
+   * The claim "the pre-403 statement list is a CONSTANT" is scoped to ordinary sheets. The resolver's
+   * OWN fence reads `meta_sheets` by id with no `deleted_at` filter
+   * (`loadApprovalProjectionSheetIds`, multitable/permission-service.ts) and, on a hit, takes a second
+   * participant round trip and strips `canManageSheetAccess`. So inside that one admin-only base:
+   *   - the 403 BODY still closes over the three states (the wire-level oracle stays shut), but
+   *   - the pre-403 round-trip COUNT is 1 higher for present than for absent, and
+   *   - a caller holding `multitable:share` — refused by the fence, not by the sheet — gets
+   *     403 / 403 / 404, i.e. can still split PRESENT from ABSENT.
+   * Pinned so it cannot widen unnoticed, and so nobody reports it later as a new hole. It is strictly
+   * narrower than the removed probe, which split live from soft-deleted on EVERY base.
+   */
+  for (const route of ROUTES) {
+    it(`${route.name}: RESIDUAL — on an approval-projection sheet the 403 body still closes, but the pre-403 round trips do NOT`, async () => {
+      const seen: Array<{ state: SheetState; status: number; body: unknown; sql: string[] }> = []
+      for (const state of STATES) {
+        const fake = createFake({ state, canShare: false, projection: true })
+        pinned.setApp(installApp(fake))
+        const res = await route.send()
+        seen.push({ state, status: res.status, body: res.body, sql: [...fake.sqlLog] })
+        vi.restoreAllMocks()
+      }
+
+      // Wire level: unchanged — still one 403 for all three.
+      for (const s of seen) {
+        expect(s.status, `${s.state} answered ${s.status}`).toBe(403)
+        expect(s.body, `${s.state} body differs`).toEqual(FORBIDDEN.body)
+      }
+
+      // Evidence level: NOT constant. The fence hits for live and for soft-deleted (no `deleted_at`
+      // filter), which adds the participant statement; the absent id misses it.
+      const live = seen[0]!
+      const deleted = seen[1]!
+      const absent = seen[2]!
+      expect(deleted.sql, 'a soft-deleted projection sheet must look exactly like a live one').toEqual(live.sql)
+      const extra = live.sql.filter((q) => !absent.sql.includes(q))
+      expect(extra.every((q) => q.startsWith('SELECT DISTINCT s.id')), `unexpected extra statements: ${extra.join(' | ')}`).toBe(true)
+      expect(live.sql.length, 'the projection residual changed shape').toBe(absent.sql.length + 1)
+      // The statement responsible is the fence itself, and it is issued for the addressed sheet.
+      expect(live.sql.includes(PROJECTION_FENCE_SQL)).toBe(true)
+      // No liveness for a refused caller here either: the refusal is still authority-first.
+      for (const s of seen) expect(s.sql.includes(LIVENESS_SQL), `${s.state} resolved liveness`).toBe(false)
+    })
+
+    it(`${route.name}: RESIDUAL — inside the projection base a multitable:share caller still splits present (403) from absent (404)`, async () => {
+      const answers: Array<{ state: SheetState; status: number; code: unknown }> = []
+      for (const state of STATES) {
+        const fake = createFake({ state, canShare: true, projection: true })
+        pinned.setApp(installApp(fake))
+        const res = await route.send()
+        answers.push({ state, status: res.status, code: (res.body as { error?: { code?: string } })?.error?.code })
+        vi.restoreAllMocks()
+      }
+
+      expect(answers).toEqual([
+        { state: 'live', status: 403, code: 'FORBIDDEN' },
+        { state: 'deleted', status: 403, code: 'FORBIDDEN' },
+        // The fence never hits an id with no row, so the share grant survives the 403 and the
+        // liveness check answers. This is the residual — narrower than the removed probe, which
+        // ALSO told live apart from soft-deleted, and on every base.
+        { state: 'absent', status: 404, code: 'NOT_FOUND' },
+      ])
+    })
+  }
 })
