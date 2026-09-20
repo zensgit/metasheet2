@@ -13,6 +13,9 @@
  * (`ok` + 0) stays distinguishable from "could not check" (`unavailable`).
  */
 
+import { Logger } from '../core/logger'
+import { getRequestContext } from '../context/request-context'
+
 export interface PendingItem {
   source: string
   id: string
@@ -56,6 +59,27 @@ export interface PendingCountResult {
   sources: Record<string, PendingSourceStatus>
 }
 
+const logger = new Logger('PendingSourceRegistry')
+
+/** Structured, value-free failure signal for a source's fail-closed catch (acceptance finding F-2,
+ *  `todo-center-real-browser-acceptance-20260920.md` §6 P2: two bare `catch` blocks below had zero
+ *  logging, so a source outage was invisible to the backend). Logs the failing source's name, the
+ *  request's org (tenant) when known, and the error's `message`/`code` — never the error's stack or
+ *  any query result — so an outage becomes observable without widening what a degraded response can
+ *  leak to the client. Purely an operational signal: the fail-closed return shape
+ *  (`sources[name] = 'unavailable'`) and every existing degradation assertion are unchanged. */
+function logSourceFailure(op: 'list' | 'count', sourceName: string, error: unknown): void {
+  const rawCode = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined
+  logger.warn(`Pending source '${sourceName}' failed to ${op} pending items; reporting unavailable`, {
+    sourceId: sourceName,
+    org: getRequestContext()?.tenantId,
+    error: error instanceof Error ? error.message : String(error),
+    code: typeof rawCode === 'string' || typeof rawCode === 'number' ? rawCode : undefined,
+  })
+}
+
 export class PendingSourceRegistry {
   private readonly sources = new Map<string, PendingSource>()
 
@@ -79,9 +103,10 @@ export class PendingSourceRegistry {
         const sourceItems = await source.listPendingForUser(viewer)
         items.push(...sourceItems)
         sources[source.name] = 'ok'
-      } catch {
+      } catch (error) {
         // Fail-closed: this source contributes nothing and is flagged `unavailable`, never folded
         // into "zero pending" and never allowed to 500 the aggregate response.
+        logSourceFailure('list', source.name, error)
         sources[source.name] = 'unavailable'
       }
     }
@@ -100,7 +125,8 @@ export class PendingSourceRegistry {
           count += sourceItems.length
         }
         sources[source.name] = 'ok'
-      } catch {
+      } catch (error) {
+        logSourceFailure('count', source.name, error)
         sources[source.name] = 'unavailable'
       }
     }
