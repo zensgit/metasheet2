@@ -151,7 +151,7 @@ $ grep -n "r\.\(get\|post\|patch\|delete\)('/api/approval-template-groups\|r\.\(
 
 | 码 | HTTP | 触发点(符号 + 近似行号) | 性质 |
 |---|---|---|---|
-| `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts`,函数 ~198,抛出 ~200),建组/改名 name 为空、纯空白,或(**第 2 轮修复新增**)不含任何可见字符 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
+| `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts` 内的同名函数;**第 4 轮起它只把 verdict 翻成 `ServiceError`,判定本体是 `approval-template-group-name-rule.ts` 的 `classifyGroupName`** —— 原锚点写的行号 `~198/~200` 对本轮的树已失效,改用符号定位),建组/改名 name 为空、纯空白,或(**第 2 轮修复新增**)不含任何可见字符 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
 | `GROUP_NAME_TOO_LONG`(**勘误 3 候选第 2 轮修复新增,2026-09-20;锁 §2 无长度条款 ⇒ 这是新增,待 owner 裁**) | 400 | `requireName`(符号定位),**提交值**(未裁剪)的码点数 > `GROUP_NAME_MAX_LENGTH`(255);`details` 带 `maxLength` / `actualLength`,`actualLength` 即提交值的码点数。**第 3 轮修复(2026-09-20)把这个闸从「裁剪后」移到了「裁剪前」**——见验证 MD §30:一个 259 码点、裁剪后 255 的名字现在是 400 `GROUP_NAME_TOO_LONG`(第 2 轮是 409 `GROUP_NAME_TAKEN`),这是一条**行为变化**,作为独立待裁点列给 owner | 输入形状校验。**为什么是 255**:该列是 `text`(无长度上限可读),所以上限是应用层的候选决定,由两条可核事实推导 —— 仓内人工显示名的 `varchar(255)` 先例,以及 255 码点 ≤ 1020 UTF-8 字节、远低于 `uq_atg_org_name_active` 的 btree 索引元组 2704 字节上限。闭的是门审 P3-1(超长名撞 btree `54000`、映射面不含它 ⇒ 不透明 500)。**残留**:直连 SQL 仍可撞 54000(真库用例正向断言) |
 | `APPROVAL_GROUP_ID_REQUIRED` | 400 | link 端点(`routes/approvals.ts` ~1224),`groupId` 缺失/空白 | 同上 |
 | `APPROVAL_ACTOR_REQUIRED` | 401 | 建组端点 ~1169、link 端点 ~1220,`resolveApprovalActorId` 返回 null | 沿用本路由既有惯例 |

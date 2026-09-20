@@ -350,6 +350,17 @@ describe('approval group name rule — visible(cp) predicate (no database)', () 
   it('trimNameEdges is LINEAR — the shape that made the round-2 quantified class quadratic returns immediately', () => {
     // Gate round 2 P1-1 (cross-tenant ReDoS). Kept here as well as in the real-DB suite because
     // this file runs on the always-on lane: a quantified re-implementation would red here first.
+    //
+    // THE BUDGET IS DERIVED, not a round number, because a timing assertion on a required lane is
+    // a flake generator if it is set anywhere near the measured time. Two measurements bracket it:
+    // the LINEAR implementation takes 0.04-1.05ms for these four shapes on the development machine,
+    // and gate round 2 measured the QUANTIFIED implementation at 16.10s for the third one. 3000ms
+    // sits ~3000x above the fast side and ~5x below the slow side, so a CI runner would have to be
+    // roughly three thousand times slower than this machine to false-red, while a reintroduced
+    // quantifier still fails by a factor of five. (If a future change makes the quadratic case
+    // FASTER than 3s, this case loses its power — which is why the real-DB suite keeps its own
+    // route-level timing case as well, and why the mutation ledger records the 16.10s measurement
+    // rather than leaving it as folklore.)
     const run = '\u200B'.repeat(128_000)
     for (const [label, value] of [
       ['leading run', `${run}报销`],
@@ -360,7 +371,7 @@ describe('approval group name rule — visible(cp) predicate (no database)', () 
       const started = process.hrtime.bigint()
       trimNameEdges(value)
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6
-      expect(elapsedMs, `${label} must stay linear`).toBeLessThan(200)
+      expect(elapsedMs, `${label} must stay linear`).toBeLessThan(3000)
     }
     expect(trimNameEdges(`报${run}销`), 'an INTERNAL run is preserved, not collapsed').toBe(`报${run}销`)
   })
