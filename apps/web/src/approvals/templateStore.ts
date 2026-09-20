@@ -58,19 +58,50 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
   //     still the session's — a read issued before a sign-out or an organization switch answers a
   //     question about a context this app has left, and its answer (including its failure) is not
   //     an answer about the current one.
-  //   • `loading` is released on GENERATION alone, deliberately. It is a one-bit slot owned by the
-  //     newest read: if a newer read exists it will clear it, and if none does this read must clear
-  //     it even though the session has changed — otherwise a sign-out (or any switch that issues no
-  //     successor read) leaves the spinner up with nothing left alive to take it down.
+  //   • `loading` is released on the SHARED TICKET below, deliberately. It is a one-bit slot owned
+  //     by the newest read of ANY kind: if a newer read exists it will clear it, and if none does
+  //     this read must clear it even though the session has changed — otherwise a sign-out (or any
+  //     switch that issues no successor read) leaves the spinner up with nothing left alive to take
+  //     it down.
   //
   // The return value is how a caller learns which of the three happened to ITS read, instead of
   // inferring it from a slot it does not own.
+  //
+  // ── WHO OWNS THE SHARED SLOTS, stated accurately (round-5, gate C-7 / P3-3) ──────────────────
+  //
+  // `loading` and `error` are ONE slot each for the whole app and this store has THREE writers, not
+  // one: `loadTemplates`, `loadTemplate` and `loadVersion`. Round 4 gave the algebra to the list
+  // read only and then described `loading` as "a one-bit slot owned by the newest read" — which was
+  // an assertion, not an invariant, because a per-kind counter cannot arbitrate between kinds. The
+  // reachable consequence was measured, not predicted: all three sibling routes bind these slots
+  // (`ApprovalNewView.vue:12,25`, `TemplateDetailView.vue:17,49,62`, `ApprovalDetailView.vue:89,103`),
+  // so navigating away from the template centre with a list read still in flight let that read's
+  // `finally` clear the spinner the DETAIL page was holding — `ApprovalDetailView.vue:1269` already
+  // had to keep a detail-scoped flag of its own because of it.
+  //
+  // `loading` is therefore arbitrated by ONE ticket taken by every read of every kind, which is what
+  // makes the sentence above true as written. The CONTENT slots stay per-kind on purpose:
+  // `ApprovalDetailView.vue:2957,2964` issues `loadTemplate` and `loadVersion` CONCURRENTLY into
+  // different slots, so arbitrating those two against each other with a single counter would throw
+  // away whichever of them answered second-to-last.
+  //
+  // WHAT THIS DOES NOT CLOSE, said plainly rather than left for a reader to discover: `error` is
+  // still written per-kind. Each writer now suppresses its own stale/foreign-session answer, but a
+  // list read's failure and a detail read's failure are not arbitrated against EACH OTHER — the
+  // later writer wins, as before. Closing that means either a per-surface error slot or a shared
+  // ticket on `error` too, and it is outside the population round 4's gate named (two overlapping
+  // `loadData()` calls on one page). It is registered here, not asserted away.
   let listGeneration = 0
+  let detailGeneration = 0
+  let versionGeneration = 0
+  let sharedLoadingTicket = 0
 
   async function loadTemplates(query?: TemplateListQuery): Promise<ApprovalTemplateListOutcome> {
     const generation = ++listGeneration
+    const ticket = ++sharedLoadingTicket
     const signature = readAuthSessionSignature()
     const isLatest = () => generation === listGeneration
+    const ownsLoadingSlot = () => ticket === sharedLoadingTicket
     const isCurrent = () => isLatest() && signature === readAuthSessionSignature()
     loading.value = true
     error.value = null
@@ -85,31 +116,47 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
       error.value = e.message ?? '加载审批表单列表失败'
       return 'failed'
     } finally {
-      if (isLatest()) loading.value = false
+      if (ownsLoadingSlot()) loading.value = false
     }
   }
 
   async function loadTemplate(id: string) {
+    const generation = ++detailGeneration
+    const ticket = ++sharedLoadingTicket
+    const signature = readAuthSessionSignature()
+    const isCurrent = () => generation === detailGeneration && signature === readAuthSessionSignature()
+    const ownsLoadingSlot = () => ticket === sharedLoadingTicket
     loading.value = true
     error.value = null
     try {
-      activeTemplate.value = await getTemplate(id)
+      const detail = await getTemplate(id)
+      if (!isCurrent()) return
+      activeTemplate.value = detail
     } catch (e: any) {
+      if (!isCurrent()) return
       error.value = e.message ?? '加载审批表单详情失败'
     } finally {
-      loading.value = false
+      if (ownsLoadingSlot()) loading.value = false
     }
   }
 
   async function loadVersion(templateId: string, versionId: string) {
+    const generation = ++versionGeneration
+    const ticket = ++sharedLoadingTicket
+    const signature = readAuthSessionSignature()
+    const isCurrent = () => generation === versionGeneration && signature === readAuthSessionSignature()
+    const ownsLoadingSlot = () => ticket === sharedLoadingTicket
     loading.value = true
     error.value = null
     try {
-      activeVersion.value = await getTemplateVersion(templateId, versionId)
+      const version = await getTemplateVersion(templateId, versionId)
+      if (!isCurrent()) return
+      activeVersion.value = version
     } catch (e: any) {
+      if (!isCurrent()) return
       error.value = e.message ?? '加载表单版本失败'
     } finally {
-      loading.value = false
+      if (ownsLoadingSlot()) loading.value = false
     }
   }
 

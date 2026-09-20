@@ -416,8 +416,10 @@ import TemplateGroupSections from './TemplateGroupSections.vue'
 import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
 import { useSessionOrg } from '../../composables/useSessionOrg'
 import {
+  explicitSessionOrg,
   getAuthPrincipalKey,
   onAuthSessionSwitch,
+  readAuthSessionSignature,
   readStoredToken,
 } from '../../composables/authPrincipal'
 import { ref, computed, nextTick, onMounted, onScopeDispose, provide, watch } from 'vue'
@@ -727,13 +729,77 @@ provide(SessionOrgHostKey, { sessionOrg: pageSessionOrg, notifySessionOrgRequire
 // principal change → CLEAR everything derived from the old context → RE-DETERMINE eligibility →
 // re-fetch for the identity that holds the session now, or stay gone if it holds none.
 //
-// `true` for exactly the window in which THIS page's switcher is driving the transition. The
-// distinction matters because the two transitions need different handling and are otherwise
-// indistinguishable at the listener: `useSessionOrg.switchSessionOrg` captures the membership
-// list before it remints the token and restores it immediately afterwards — synchronously, in the
-// same run as the notification — so the page's own switch needs no organization re-read, only
-// data re-reads. A change from anywhere else leaves the list empty and must be re-asked.
-let pageOwnedSwitchInFlight = false
+// WHICH transition this page is driving — not merely "is one in flight". The distinction between
+// the page's own switch and an external one matters because they need different handling:
+// `useSessionOrg.switchSessionOrg` captures the membership list before it remints the token and
+// restores it immediately afterwards — synchronously, in the same run as the notification — so the
+// page's own switch needs no organization re-read, only data re-reads. A change from anywhere else
+// leaves the list empty and must be re-asked.
+//
+// ROUND-5 (gate C-1 / P2): rounds 3-4 spelled this as a BARE BOOLEAN, `pageOwnedSwitchInFlight`.
+// A bare boolean answers "is one of my switches in flight?" — it cannot answer "is the transition
+// I am being notified about THE one my switch caused?", so every external transition that arrived
+// inside the `POST /api/auth/session-org` round trip was labelled "mine". The consequence was the
+// dead state round 3's C-1 had already produced through the adjacent door: the claim was kept
+// (so `ensurePageSessionOrgsLoaded` short-circuits forever), the listener's re-read was skipped,
+// and the page's own POST then returned `false` (its token had changed under it) so ITS replay was
+// skipped too — a blank flat table with no banner and no Reload, and no organization switcher to
+// leave by. That is the same lesson round 3 applied to `pageSessionOrgsClaim` (M-C: a bare boolean
+// is not an identity) applied to the OTHER half of the pair: who may CLAIM a transition.
+//
+// A claim therefore carries an identity: the session signature this page held when it issued the
+// switch, and the organization it asked for. Only a transition that matches BOTH is "mine".
+//
+// WHY THE TARGET ORGANISATION IS A SUFFICIENT SECOND HALF, by mechanism rather than by assertion:
+// `useAuth.setExplicitSessionOrg` is the ONLY transition that calls `resetSessionBootstrap(…, true)`
+// — `preserveExplicitSession` — so it is the only one that leaves a `state:'ready'` explicit-session
+// marker standing (`useAuth.ts:301`, `useAuth.ts:124`). Every `setToken`/`clearToken` transition
+// (invite acceptance, DingTalk callback, forced password change, dev-token refresh, the bootstrap's
+// 401 branch, sign-out) clears it, so those read back as "no explicit organization" and can never
+// match a target. What CAN still match is another tab's switch, which the storage listener
+// republishes with the marker preserved (`useAuth.ts:74-79`): if that tab switched to the SAME
+// organization this page is asking for, the two are genuinely indistinguishable HERE — which is
+// what `pageOwnedSwitchClaimed` below exists to catch, on the other side of the await.
+type PageOwnedSwitch = { from: string; to: string }
+let pageOwnedSwitch: PageOwnedSwitch | null = null
+// Set when the listener accepted a transition as this page's own. Read only by the `!ok` branch of
+// `onPageSessionOrgChange`, which is the one place that learns — after the fact — that the switch
+// the listener credited to this page is not the switch that actually landed.
+let pageOwnedSwitchClaimed = false
+// The signature this page last SAW a transition settle on. `onAuthSessionSwitch` reads the new
+// signature one microtask after the notification (so storage already holds the incoming session),
+// which means the listener cannot see the outgoing one; this is the page's own copy of it.
+let lastSeenSessionSignature = readAuthSessionSignature()
+
+/** The organization of the explicit session this process holds now, or `null` for any other state. */
+function currentExplicitSessionOrg(): string | null {
+  try {
+    return explicitSessionOrg(readStoredToken())
+  } catch {
+    // A partial switch (the barrier is installed but not yet resolved) is not a session at all, so
+    // it is not this page's switch either. Defence in depth, not a load-bearing guard: every path
+    // that reaches this listener has already completed a transition.
+    return null
+  }
+}
+
+/**
+ * Is the transition just notified the one THIS page issued? Consumes the claim when it is, so one
+ * switch can be credited with at most one transition.
+ */
+function claimOwnSwitchTransition(signatureBefore: string): boolean {
+  const claim = pageOwnedSwitch
+  if (!claim) return false
+  // (a) Nothing else has moved the session since this page issued its switch. Without this, the
+  //     SECOND transition of a window could still be credited to a switch the FIRST one already
+  //     invalidated.
+  if (claim.from !== signatureBefore) return false
+  // (b) The session this page now holds is the one that switch asked for.
+  if (currentExplicitSessionOrg() !== claim.to) return false
+  pageOwnedSwitch = null
+  pageOwnedSwitchClaimed = true
+  return true
+}
 
 // Every org-scoped read this page owns, re-issued for whoever holds the session NOW.
 function reloadOrgScopedSurfaces(): void {
@@ -744,11 +810,24 @@ function reloadOrgScopedSurfaces(): void {
   loadRecentTemplates()
 }
 
+// (3) RE-DETERMINE ELIGIBILITY and (4) RE-READ, for a transition this page did not perform. Shared
+// by the listener and by `onPageSessionOrgChange`'s `!ok` branch so the two cannot drift apart.
+function redetermineEligibilityAndReload(): void {
+  // Signed out: no token, so every one of these reads would be a no-op or a 401. The surfaces
+  // stay cleared and the entry stays gone — with no error banner, which is the correct
+  // rendering of "this identity is not eligible", not a failure to be retried.
+  if (!readStoredToken()) return
+  if (viewMode.value === 'grouped') ensurePageSessionOrgsLoaded()
+  reloadOrgScopedSurfaces()
+}
+
 const stopPrincipalLifecycle = onAuthSessionSwitch(() => {
   // (1) CLEAR — synchronous, so not one frame renders the previous identity's or organization's
   // data. `useSessionOrg` clears `orgs`/`currentOrgId`/`errorMessage` in its own listener and the
   // two grouped children clear theirs in theirs; this covers what the PAGE owns.
-  const ownSwitch = pageOwnedSwitchInFlight
+  const signatureBefore = lastSeenSessionSignature
+  lastSeenSessionSignature = readAuthSessionSignature()
+  const ownSwitch = claimOwnSwitchTransition(signatureBefore)
   sessionOrgRequiredSeen.value = false
   pageSessionOrgsFailed.value = false
   flatListStale.value = true
@@ -772,27 +851,41 @@ const stopPrincipalLifecycle = onAuthSessionSwitch(() => {
     // The page's own switch has its own replay in `onPageSessionOrgChange`, which knows whether
     // the switch was actually accepted; re-reading here too would double every request.
     if (ownSwitch) return
-    // Signed out: no token, so every one of these reads would be a no-op or a 401. The surfaces
-    // stay cleared and the entry stays gone — with no error banner, which is the correct
-    // rendering of "this identity is not eligible", not a failure to be retried.
-    if (!readStoredToken()) return
-    if (viewMode.value === 'grouped') ensurePageSessionOrgsLoaded()
-    reloadOrgScopedSurfaces()
+    redetermineEligibilityAndReload()
   })
 })
 onScopeDispose(stopPrincipalLifecycle)
 
 async function onPageSessionOrgChange(orgId: string): Promise<void> {
-  pageOwnedSwitchInFlight = true
+  // The claim carries the identity it is a claim ABOUT: the session held at issue time, and the
+  // organization asked for. `switchSessionOrg` trims the same way before it installs the marker,
+  // so the target compared later is the one that will actually be written.
+  pageOwnedSwitch = { from: readAuthSessionSignature(), to: orgId.trim() }
+  pageOwnedSwitchClaimed = false
   let ok = false
   try {
     ok = await switchPageSessionOrg(orgId)
   } finally {
-    pageOwnedSwitchInFlight = false
+    pageOwnedSwitch = null
   }
-  // A REFUSED switch fires no principal change at all, so nothing was cleared and nothing needs
-  // re-reading: the admin is still in the organization they were in.
-  if (!ok) return
+  if (!ok) {
+    // A REFUSED switch fires no principal change at all, so nothing was cleared and nothing needs
+    // re-reading: the admin is still in the organization they were in — and `pageOwnedSwitchClaimed`
+    // is false, because no transition happened for the listener to credit to this page.
+    //
+    // The OTHER way to get here is the one the listener cannot tell apart (see the block above):
+    // somebody else moved this session to the very organization this page was asking for, the
+    // listener credited that transition to this page, and this switch was then superseded. The
+    // listener took the "mine" path — no claim dropped, no re-read — and this branch is the only
+    // place that learns it was wrong. Recover here rather than leave the admin on a blank table.
+    if (pageOwnedSwitchClaimed) {
+      pageOwnedSwitchClaimed = false
+      pageSessionOrgsClaim = null
+      redetermineEligibilityAndReload()
+    }
+    return
+  }
+  pageOwnedSwitchClaimed = false
   // Re-read every surface that reads this org's data — same "tell the parent to re-read" rule
   // `handleGroupsChanged` already follows. This is also the replay for whatever a hosted child was
   // blocked on: both children's blocked entry point is their own load (`loadAll` / `loadGroups`),

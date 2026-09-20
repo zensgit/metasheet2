@@ -117,6 +117,15 @@ const listTemplatesSpy = vi
 const listTemplatesBySectionSpy = vi
   .fn<[unknown], Promise<{ data: unknown[]; total: number }>>()
   .mockResolvedValue({ data: [], total: 0 })
+// Round 5 — the OTHER two writers of the store's shared `loading`/`error` slots (gate round-4 C-7).
+// Same standing as `listTemplatesSpy`: only the request-algebra describe at the bottom of this file
+// drives them, through the real store; every component test here keeps the replacement store mock.
+const getTemplateSpy = vi
+  .fn<[string], Promise<unknown>>()
+  .mockImplementation(async (id: string) => ({ id }))
+const getTemplateVersionSpy = vi
+  .fn<[string, string], Promise<unknown>>()
+  .mockImplementation(async (templateId: string, versionId: string) => ({ templateId, versionId }))
 
 vi.mock('../src/approvals/api', () => ({
   listTemplateCategories: () => listTemplateCategoriesSpy(),
@@ -135,12 +144,12 @@ vi.mock('../src/approvals/api', () => ({
   ApprovalApiError: class ApprovalApiError extends Error {},
   listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
   listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
-  // The three the REAL templateStore imports (see `listTemplatesSpy` above). `getTemplate` /
-  // `getTemplateVersion` are never called here; they exist because an ES module mock must carry
-  // every named import of its consumers or the import itself fails.
+  // The three the REAL templateStore imports (see `listTemplatesSpy` above). Round 5 promoted
+  // `getTemplate` / `getTemplateVersion` from fixed resolvers to spies so the shared-slot cases at
+  // the bottom of this file can hold one read in flight while another settles.
   listTemplates: (query: unknown) => listTemplatesSpy(query),
-  getTemplate: (id: string) => Promise.resolve({ id }),
-  getTemplateVersion: (templateId: string, versionId: string) => Promise.resolve({ templateId, versionId }),
+  getTemplate: (id: string) => getTemplateSpy(id),
+  getTemplateVersion: (templateId: string, versionId: string) => getTemplateVersionSpy(templateId, versionId),
   createApprovalTemplateGroup: (name: string) => Promise.resolve({
     id: 'atg_test', orgId: 'org_test', name, sortOrder: 1,
     createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
@@ -1846,6 +1855,209 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     expect(mockTemplates.value.map((t: { id: string }) => t.id)).toEqual(['tpl_a'])
     expect(container!.querySelectorAll('[data-el-row]').length).toBe(0)
     expect(container!.textContent).not.toContain('Org A Template')
+
+    // ROUND 5 (gate round-4 C-1, 修法 item 4) — the half this case was missing. Its sibling
+    // `(③ FLAT, failure exit)` pins the recovery affordance; this one asserted only that the rows
+    // are not declared current, so "blank table, no banner, no Reload, and no organization entry
+    // to leave by" — the exact rendered終态 C-1 produces — would have passed it unchanged. An
+    // empty state is only acceptable while a way OUT of it is still on screen.
+    await enterGroupedView()
+    await flushUi(8)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+
+    // ...and the blank state is not absorbing: the next answer that IS current re-exposes rows.
+    loadTemplatesSpy.mockReset()
+    loadTemplatesSpy.mockImplementation(async () => {
+      mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+      mockTotal.value = 1
+      return 'applied'
+    })
+    await enterFlatView()
+    ;(container!.querySelector('[data-testid="template-center-category-filter"]') as HTMLSelectElement).value = ''
+    ;(container!.querySelector('[data-testid="template-center-category-filter"]') as HTMLSelectElement)
+      .dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org B Template')
+  })
+
+  // ═══ ROUND 5 — who may CLAIM a transition (gate `impl-gate-A5-daily-ops-round4-20260921.md` C-1) ═
+  //
+  // Round 3 taught `pageSessionOrgsClaim` that a bare boolean is not an identity (M-C). Round 4's
+  // gate found the same shape one door along: `pageOwnedSwitchInFlight` answered only "is one of my
+  // switches in flight?", so ANY external transition that arrived inside the
+  // `POST /api/auth/session-org` round trip was labelled "mine" — claim kept, listener re-read
+  // skipped, and the page's own replay skipped too because its POST then returned `false`. The
+  // rendered終态 is C-1's: blank flat table, no banner, no Reload, no organization switcher.
+  //
+  // The three cases below drive the three ways a transition can arrive in that window. All three
+  // keep the page's own POST IN FLIGHT at the moment of the external transition wherever the
+  // listener is the thing under test, so nothing downstream of the `await` can mask a listener that
+  // mis-credits it.
+
+  it('(① C-1) an EXTERNAL identity change landing inside this page\'s own switch window is NOT credited to this page: one re-read, the organization list is re-asked, the entry stays, the flat table comes back', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+
+    let sessionOrgsCalls = 0
+    let releaseSwitchPost: (() => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        await new Promise<void>((resolve) => { releaseSwitchPost = resolve })
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    // The window really is open — otherwise this case would be testing nothing.
+    expect(releaseSwitchPost).not.toBeNull()
+
+    // A transition this page did NOT perform, through the real `useAuth` funnel: the same producer
+    // as an invite acceptance, a DingTalk callback, a forced password change or a dev-token
+    // refresh. `setToken` does NOT preserve the explicit-session marker, so the session this page
+    // now holds carries no organization at all — it cannot be the switch this page asked for.
+    mockTemplates.value = [lifecycleTemplate('tpl_x', 'External Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwtFor('actor', 'org-x', 7))
+    await flushUi(14)
+
+    // Boundary ① in full: cleared → eligibility re-determined → re-read, exactly once.
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+
+    await enterFlatView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('External Template')
+  })
+
+  it('(① C-1, second transition) a LATER external change that happens to land on this page\'s target organization is still external — the claim was already invalidated by the first one', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+
+    let sessionOrgsCalls = 0
+    let releaseSwitchPost: (() => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        await new Promise<void>((resolve) => { releaseSwitchPost = resolve })
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    expect(releaseSwitchPost).not.toBeNull()
+
+    // First external transition: a bare token swap, no organization marker ⇒ plainly external.
+    useAuth().setToken(jwtFor('actor', 'org-x', 5))
+    await flushUi(14)
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+
+    // Second external transition, and this one DOES land on `org-b` — the organization this page
+    // asked for — with the explicit marker preserved, exactly as another tab's switch arrives here
+    // (`useAuth.ts:74-79` republishes it with `preserveExplicitSession`). Matching the target is
+    // therefore not sufficient on its own: this page's claim was invalidated by the FIRST
+    // transition, and only the signature half can see that.
+    const carrier = localStorage.getItem('auth_token')!
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-b', 9), 'org-b', carrier)).toBe(true)
+    await flushUi(14)
+
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(2)
+    expect(sessionOrgsCalls).toBe(3)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+  })
+
+  it('(① C-1, indistinguishable case) a foreign switch to this page\'s OWN target organization is credited to the page at the listener — and the superseded switch is what recovers from it', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+
+    let sessionOrgsCalls = 0
+    let releaseSwitchPost: (() => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        await new Promise<void>((resolve) => { releaseSwitchPost = resolve })
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    expect(releaseSwitchPost).not.toBeNull()
+
+    // Somebody else switches THIS session to the very organization this page is asking for, marker
+    // preserved. At the listener the two are genuinely the same event, and the page credits it to
+    // itself — that is recorded here rather than papered over.
+    const carrier = localStorage.getItem('auth_token')!
+    mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+    mockTotal.value = 1
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-b', 9), 'org-b', carrier)).toBe(true)
+    await flushUi(14)
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(0)
+    expect(sessionOrgsCalls).toBe(1)
+
+    // The page's own POST now lands and is refused by `useSessionOrg`'s own guard (the token it was
+    // issued under is gone). THIS is where the page learns the transition it credited to itself was
+    // not its own — and it must recover rather than return into a blank table.
+    releaseSwitchPost!()
+    await flushUi(16)
+
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+    await enterFlatView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org B Template')
   })
 
   it("(② M-F) the page's OWN organization switch re-reads every org-scoped surface exactly ONCE", async () => {
@@ -2024,6 +2236,10 @@ describe('approvals/templateStore — list request algebra (three exits + identi
 
   beforeEach(() => {
     listTemplatesSpy.mockReset()
+    getTemplateSpy.mockReset()
+    getTemplateSpy.mockImplementation(async (id: string) => ({ id }))
+    getTemplateVersionSpy.mockReset()
+    getTemplateVersionSpy.mockImplementation(async (templateId: string, versionId: string) => ({ templateId, versionId }))
     localStorage.clear()
     useAuth().setToken(tokenFor('actorA'))
   })
@@ -2172,6 +2388,107 @@ describe('approvals/templateStore — list request algebra (three exits + identi
 
     expect(await call).toBe('superseded')
     expect(store.templates).toEqual([])
+  })
+
+  // ── ROUND 5 (gate round-4 C-7 / P3-3): the shared slots have THREE writers ───────────────────
+  //
+  // `loading` and `error` are one slot each for the whole app, and `loadTemplate` / `loadVersion`
+  // wrote them with no algebra at all. Round 4's comment nevertheless called `loading` "a one-bit
+  // slot owned by the newest read", which a per-kind counter cannot make true. One case per writer
+  // below, plus the positive control that separates "fixed" from "never broken".
+
+  it('(C-7 positive control) a lone DETAIL read owns the shared loading slot and releases it', async () => {
+    const store = await freshStore()
+    const inflight = deferred<{ id: string }>()
+    getTemplateSpy.mockImplementationOnce(() => inflight.promise)
+
+    const call = store.loadTemplate('tpl_1')
+    expect(store.loading).toBe(true)
+    inflight.resolve({ id: 'tpl_1' })
+    await call
+    expect(store.loading).toBe(false)
+    expect(store.activeTemplate).toEqual({ id: 'tpl_1' })
+  })
+
+  it('(C-7, loadTemplates writer) a LIST read settling while a detail read is in flight does not take down the detail read\'s spinner', async () => {
+    const store = await freshStore()
+    const list = deferred<{ data: unknown[]; total: number }>()
+    const detail = deferred<{ id: string }>()
+    listTemplatesSpy.mockImplementationOnce(() => list.promise)
+    getTemplateSpy.mockImplementationOnce(() => detail.promise)
+
+    // The production shape: the template centre's list read is still in flight when the admin
+    // navigates to a detail route, which starts its own read into the same one-bit slot.
+    const listCall = store.loadTemplates({ page: 1 })
+    const detailCall = store.loadTemplate('tpl_1')
+    expect(store.loading).toBe(true)
+
+    list.resolve({ data: [row('LIST')], total: 1 })
+    await listCall
+    // The detail page is still waiting for ITS answer. A generation counter that only counts list
+    // reads says "I am the latest" here and clears the slot out from under it.
+    expect(store.loading).toBe(true)
+
+    detail.resolve({ id: 'tpl_1' })
+    await detailCall
+    expect(store.loading).toBe(false)
+  })
+
+  it('(C-7, loadTemplate writer) a detail read settling while a VERSION read is in flight leaves the shared loading slot alone, and a detail answer for the PREVIOUS session applies nothing', async () => {
+    const store = await freshStore()
+    const detail = deferred<{ id: string }>()
+    const version = deferred<{ templateId: string; versionId: string }>()
+    getTemplateSpy.mockImplementationOnce(() => detail.promise)
+    getTemplateVersionSpy.mockImplementationOnce(() => version.promise)
+
+    // `ApprovalDetailView.vue:2957,2964` issues exactly this pair, concurrently.
+    const detailCall = store.loadTemplate('tpl_1')
+    const versionCall = store.loadVersion('tpl_1', 'ver_1')
+    detail.resolve({ id: 'tpl_1' })
+    await detailCall
+    expect(store.loading).toBe(true)
+    // Both CONTENT slots are still filled: the two reads fill different slots, so arbitrating them
+    // against each other would throw one of the two answers away.
+    expect(store.activeTemplate).toEqual({ id: 'tpl_1' })
+    version.resolve({ templateId: 'tpl_1', versionId: 'ver_1' })
+    await versionCall
+    expect(store.activeVersion).toEqual({ templateId: 'tpl_1', versionId: 'ver_1' })
+    expect(store.loading).toBe(false)
+
+    // Identity half: a detail read issued for the session that has since been signed out of is an
+    // answer about a context this app has left.
+    const stale = deferred<{ id: string }>()
+    getTemplateSpy.mockImplementationOnce(() => stale.promise)
+    const staleCall = store.loadTemplate('tpl_previous')
+    useAuth().clearToken()
+    stale.resolve({ id: 'tpl_previous' })
+    await staleCall
+    expect(store.activeTemplate).toEqual({ id: 'tpl_1' })
+  })
+
+  it('(C-7, loadVersion writer) a version read settling while a detail read is in flight leaves the shared loading slot alone, and a version answer for the PREVIOUS session applies nothing', async () => {
+    const store = await freshStore()
+    const version = deferred<{ templateId: string; versionId: string }>()
+    const detail = deferred<{ id: string }>()
+    getTemplateVersionSpy.mockImplementationOnce(() => version.promise)
+    getTemplateSpy.mockImplementationOnce(() => detail.promise)
+
+    const versionCall = store.loadVersion('tpl_1', 'ver_1')
+    const detailCall = store.loadTemplate('tpl_1')
+    version.resolve({ templateId: 'tpl_1', versionId: 'ver_1' })
+    await versionCall
+    expect(store.loading).toBe(true)
+    detail.resolve({ id: 'tpl_1' })
+    await detailCall
+    expect(store.loading).toBe(false)
+
+    const stale = deferred<{ templateId: string; versionId: string }>()
+    getTemplateVersionSpy.mockImplementationOnce(() => stale.promise)
+    const staleCall = store.loadVersion('tpl_previous', 'ver_previous')
+    useAuth().clearToken()
+    stale.resolve({ templateId: 'tpl_previous', versionId: 'ver_previous' })
+    await staleCall
+    expect(store.activeVersion).toEqual({ templateId: 'tpl_1', versionId: 'ver_1' })
   })
 })
 
