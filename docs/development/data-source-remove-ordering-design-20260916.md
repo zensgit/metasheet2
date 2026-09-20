@@ -61,7 +61,7 @@
 
 ### `force` 与路由契约
 
-- 路由契约**未变**：`?force=true` 仍由路由判定（`referenceCount > 0` + `actor.platformAdmin === true`，否则 403 `DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY`；不带 force 则 409 带 `details.referenceCount`），审计仍记 `forcedReferenceBreak` + `referenceCount`。
+- （**历史描述，PR-A 当时成立；2026-09-20 起 force 已取消**，现状见 `data-source-live-id-fk-binding-lock-design-20260920.md` §3：任何层级带不带 force 都是 409，`forcedReferenceBreak` 不再审计。）路由契约**未变**：`?force=true` 仍由路由判定（`referenceCount > 0` + `actor.platformAdmin === true`，否则 403 `DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY`；不带 force 则 409 带 `details.referenceCount`），审计仍记 `forcedReferenceBreak` + `referenceCount`。
 - 路由把这个**已经授权过**的判定透传给 manager：`packages/core-backend/src/routes/data-sources.ts:861` `removeDataSource(id, { force: forcedReferenceBreak })`。传的是 `forcedReferenceBreak`（引用存在 **且** 是平台管理员）而不是 `forceRequested`，所以一个"带了 force 但本来就没引用"的请求不会拿到 manager 侧的豁免。
 - manager 自己**重新数一遍**，而不是信任调用方传进来的数字。直接调 manager 的非路由调用方（将来的后台任务、脚本）因此也过同一道门——这是收紧，不是放松。
 - 路由 catch 里新增 `codedGateRefusal(error)` 映射（`routes/data-sources.ts:891`），让 manager 的 409 / `DATA_SOURCE_DELETE_NOT_PERSISTED` 保住自己的 status 与 code，而不是塌成一个读起来像"删了一半"的通用 500。

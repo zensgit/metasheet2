@@ -96,6 +96,7 @@ W7BB_MUTATION=drop-fk-mapping        npx vitest run --config w7bb-mutation.vites
 | 插件 | `node --test __tests__/external-systems.test.cjs` | pass 1 / fail 0（该文件是单脚本多段式，新增段 `connection FK violation (23503) maps to EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE OK`） |
 | 前端 | `npx vitest run tests/dataSourcesDeleteRefusal.spec.ts tests/dataSourcesPanelEmbedded.spec.ts` | 2 files / 21 passed |
 | openapi dist | `npx tsx tools/build.ts` 后 `git diff --stat packages/openapi/dist` | 只有 DELETE `/api/data-sources/{id}` 描述、`force` 参数 `deprecated: true`、409 描述三处变化（36+/17-） |
+| openapi dist-sdk（反驳者 blocker ④，CI `test (20.x)` 在 `plugin-tests.yml:799-802` 跑 `build`/`validate`/`generate:sdk` 后 `git diff --exit-code -- packages/openapi/dist packages/openapi/dist-sdk/index.d.ts`） | 在 `dist-sdk/` 按 `scripts/build.mjs` 同样两步手跑：`pnpm exec openapi-typescript ../dist/openapi.yaml --output ./index.d.ts` + `pnpm exec tsc client.ts --declaration --module NodeNext --moduleResolution NodeNext --target ES2020 --skipLibCheck`（`build.mjs` 用无 shell 的 `execFileSync('pnpm')`，Windows 上 ENOENT；CI 为 Linux 不受影响） | `index.d.ts` 6+/3-：DELETE 描述、`force` 参数 `@deprecated` JSDoc、409 描述三处，与 `src/paths/data-sources.yml` 一致；`client.{js,d.ts}`/`index.js` 无内容差（仅 CRLF 告警，已还原）。提交后 `git diff --exit-code` 该两路径为空 |
 | `tests/unit` 里 `request(app)`（#4154） | 新增 spec 为纯文件/导出结构钉，不起服务 | 无 |
 | 反斜杠折叠扫描 | `git diff origin/main \| grep -P '\x08'` | 空 |
 

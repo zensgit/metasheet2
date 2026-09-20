@@ -8106,12 +8106,15 @@ export interface paths {
         post?: never;
         /**
          * Delete data source
-         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, naming the reference count) while any integration external system's config.dataSourceId references this source. force=true (platform-admin only) breaks the reference deliberately and is audited.
+         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, details.referenceCount) while any integration external system references this source (canonical connection_id, or an owner-attributed legacy config.dataSourceId). There is no bypass: unbind the external systems first. The check runs inside the delete transaction under a row lock, and the database's foreign key onto data_sources.live_id refuses the soft delete itself while a canonical binding exists (reported as the same 409, with details.referenceCount null).
          */
         delete: {
             parameters: {
                 query?: {
-                    /** @description Platform-admin only — delete even while referenced by external systems. */
+                    /**
+                     * @deprecated
+                     * @description Retired 2026-09-20 (owner ruling: a referenced source cannot be deleted). The server ignores this parameter for every tier, platform admins included, and answers the same 409. Kept only so old clients still validate; do not send it.
+                     */
                     force?: boolean;
                 };
                 header?: never;
@@ -8131,7 +8134,7 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Referenced by external systems (reference count in the error body) */
+                /** @description Referenced by external systems (details.referenceCount in the error body; unbind first) */
                 409: {
                     headers: {
                         [name: string]: unknown;

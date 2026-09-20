@@ -39,7 +39,7 @@ ALTER TABLE integration_external_systems
 3. **有 canonical 引用时，软删本身被数据库拒绝**（同一约束、同一 SQLSTATE，触发在 `UPDATE data_sources` 上；FK 未声明 `ON UPDATE` 动作，默认 NO ACTION）。这就是 `force=true` 在新 FK 下「根本做不到」的原因——owner 据此裁决取消 force，而不是让 FK `ON UPDATE CASCADE/SET NULL` 去静默改写绑定行。
 
 ### 为什么 NOT VALID
-库里**已经**存在的悬空行（本守卫诞生前积累的，含每一次历史 force 删除）会让带校验的 `ADD CONSTRAINT` 失败、卡住部署。NOT VALID 只跳过对**存量**行的扫描；此后每一条 INSERT/UPDATE 都完整检查、完整取锁。存量悬空行**原样保留**，留给 owner 可见的单独清理，不在迁移里静默改写。实测：预置 `es_stale → ds_dead(已软删)` 后迁移通过、该行保留、新的悬空插入被拒。
+库里**已经**存在的悬空行（本守卫诞生前积累的，含每一次历史 force 删除）会让带校验的 `ADD CONSTRAINT` 失败、卡住部署。NOT VALID 只跳过对**存量**行的扫描；此后每一条**写入 `connection_id` 的** INSERT/UPDATE 都完整检查、完整取锁（PG 的子表 RI 检查只在 FK 列被写入时触发：一条存量悬空行若只更新别的列——`external-systems.cjs` update 分支只在 payload 带 `connectionId` 时才写该列——不会被复查、仍保持悬空，这与「存量行原样保留」的意图一致）。存量悬空行**原样保留**，留给 owner 可见的单独清理，不在迁移里静默改写。实测：预置 `es_stale → ds_dead(已软删)` 后迁移通过、该行保留、新的悬空插入被拒。
 
 ### 不是放宽
 `ON DELETE RESTRICT` 保留：硬删一个**活着**且被引用的源仍被数据库拒绝。硬删一个**已软删**的源不再撞 RESTRICT（其 `live_id` 为 NULL，无人引用）——与应用语义一致：这种源已经没了，它残留的绑定正是 NOT VALID 容忍的存量行。
@@ -91,6 +91,7 @@ ALTER TABLE integration_external_systems
 | 2 | `upsertExternalSystem` UPDATE（重绑） | 同上 update 分支 | **covered（canonical）**，同 #1；错误映射同样接线 |
 | 3 | `deleteExternalSystem` | `external-systems.cjs` | n/a：减少引用 |
 | 4 | 切换迁移 backfill | `zzzz20260902120000:97-105` | covered：离线一次性 |
+| 5 | `DELETE/PUT /api/admin/data/bulk` 以 `data_sources` 为目标（PUT 可直接 set `deleted_at`） | `routes/admin-routes.ts:1197` / `:1283` | **uncovered（非本刀引入，已登记）**：对被 canonical 绑定引用的源做批量软删会撞新 FK 的 23503，该路由的 catch 只回 `err.message`，落成裸 500——行未动、值面不泄漏，但没有稳定 code。收口属 admin 批量路由自己的错误映射，不在本刀 |
 
 **uncovered（已登记，本刀明确不关）：**
 
@@ -98,6 +99,7 @@ ALTER TABLE integration_external_systems
 - **其它持 dataSourceId 指针但删除守卫不计数的表**：`integration_stock_prep_source_binding`（079）、read-source-config store 等。它们不在 `countExternalSystemReferences` 里，也没有指向 `data_sources` 的 FK，删除守卫与本 FK 都看不见——既有缺口，非本刀引入。
 - **存量悬空行**：NOT VALID 容忍、原样保留；`VALIDATE CONSTRAINT` 需先清理，属 owner 可见的单独动作。
 - **硬删**：RESTRICT 保护不变；未新增也未削弱。
+- **兜底映射的口径**：`DataSourceManager.ts` 的 `isLiveConnectionFkViolation` 在约束名缺失时把任意 23503 当引用 409，前提是今天没有其它 RESTRICT/NO ACTION FK 指向 `data_sources`（`20251206000001_create_data_sources_table.ts:114/183`、`migrations/040_data_sources.sql` 全部 `ON DELETE CASCADE`，079 明确不建 FK）。这个前提没有绊线；后人若加一条 RESTRICT FK 指向 `data_sources`，需同步收窄该映射（按约束名主判）。
 
 ## 8. 部署顺序与回滚
 
