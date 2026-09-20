@@ -70,11 +70,33 @@ async function registerUser(baseUrl: string, email: string, name: string): Promi
   return { userId: body.data.user.id, token: body.data.token }
 }
 
+/** The actual product grant endpoint, routes/permissions.ts:133 — same call the existing
+ *  DISCRIMINATING test below uses inline; factored out so the additional acceptance cases further
+ *  down (participant fence / revoke / write-shaped surface) share one call site. */
+async function grantPermission(baseUrl: string, adminToken: string, userId: string, permission: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/permissions/grant`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ userId, permission }),
+  })
+}
+
+/** The actual product revoke endpoint, routes/permissions.ts:214 — admin-only, DELETEs the
+ *  `user_permissions` row through the product path (not a direct DB DELETE). */
+async function revokePermission(baseUrl: string, adminToken: string, userId: string, permission: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/permissions/revoke`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ userId, permission }),
+  })
+}
+
 describeIfDatabase('approvals:read catalogue registration — grant-and-gate real-DB acceptance', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   const pool = () => poolManager.get()
   const createdUserIds: string[] = []
+  const createdInstanceIds: string[] = []
 
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
@@ -88,7 +110,13 @@ describeIfDatabase('approvals:read catalogue registration — grant-and-gate rea
 
   afterAll(async () => {
     try {
+      if (createdInstanceIds.length > 0) {
+        await pool().query(`DELETE FROM approval_records WHERE instance_id = ANY($1::text[])`, [createdInstanceIds])
+        await pool().query(`DELETE FROM approval_instances WHERE id = ANY($1::text[])`, [createdInstanceIds])
+      }
       if (createdUserIds.length > 0) {
+        await pool().query(`DELETE FROM approval_delegations WHERE delegator_user_id = ANY($1::text[])`, [createdUserIds])
+        await pool().query(`DELETE FROM approval_reads WHERE user_id = ANY($1::text[])`, [createdUserIds])
         await pool().query(`DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`, [createdUserIds])
         await pool().query(`DELETE FROM user_roles WHERE user_id = ANY($1::text[])`, [createdUserIds])
         await pool().query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
@@ -97,6 +125,22 @@ describeIfDatabase('approvals:read catalogue registration — grant-and-gate rea
       await server?.stop()
     }
   })
+
+  /** Seeds a minimal platform approval instance directly (no template/workflow scaffolding needed
+   *  for a permission-catalogue authz probe) with the given user as its REQUESTER — arm 1 of
+   *  `canReadApprovalInstance` (services/approval-instance-readability.ts): `requester_snapshot->>
+   *  'id' = viewerId`, unconditional. Mirrors approval-history-authz-guard.db.test.ts's own
+   *  `seedInstanceWithComment`, minus the marker/comment row this suite's status-only assertions
+   *  don't need. */
+  async function seedRequesterInstance(requesterId: string): Promise<string> {
+    const id = `permcat-instance-${TS}-${Math.random().toString(36).slice(2, 8)}`
+    await pool().query(
+      `INSERT INTO approval_instances (id, status, requester_snapshot) VALUES ($1, 'pending', $2::jsonb)`,
+      [id, JSON.stringify({ id: requesterId })],
+    )
+    createdInstanceIds.push(id)
+    return id
+  }
 
   it('migration registered ONLY approvals:read in the permissions catalogue — approvals:write/act are out of scope for this PR (this assertion is expected to need updating by whatever future PR registers them)', async () => {
     const result = await pool().query<{ code: string }>(
@@ -176,4 +220,156 @@ describeIfDatabase('approvals:read catalogue registration — grant-and-gate rea
     })
     expect(grant.status).toBe(400)
   })
+
+  it(
+    'UNRELATED-INSTANCE FENCE: a user holding approvals:read via the product grant is NOT thereby admitted to an instance they are not a participant of — GET /:id and /:id/history both deny (canReadApprovalInstance runs AFTER rbacGuard as a SEPARATE per-instance leg; approvals:read only satisfies the leg-1 resource-shape guard). This is a P1 finding-in-waiting if it ever comes back 200: the test records the ACTUAL status observed rather than assuming 403/404, and fails loudly (with the unexpected status printed) if the participant fence turns out not to hold.',
+    async () => {
+      const adminEmail = `permcat-admin3-${TS}@example.com`
+      const readerEmail = `permcat-reader3-${TS}@example.com`
+      const strangerRequesterEmail = `permcat-stranger3-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Three')
+      const reader = await registerUser(baseUrl, readerEmail, 'Permcat Reader Three')
+      const strangerRequester = await registerUser(baseUrl, strangerRequesterEmail, 'Permcat Stranger Three')
+      createdUserIds.push(admin.userId, reader.userId, strangerRequester.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      // reader is granted approvals:read through the actual product endpoint — not a dev-token,
+      // not a direct user_permissions INSERT.
+      const grant = await grantPermission(baseUrl, admin.token, reader.userId, 'approvals:read')
+      expect(grant.status).toBe(200)
+
+      // An instance reader is NOT a participant of: requester is strangerRequester, not reader; no
+      // assignment/cc/past-actor row names reader at all.
+      const instanceId = await seedRequesterInstance(strangerRequester.userId)
+
+      const detailResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}`, {
+        headers: { Authorization: `Bearer ${reader.token}` },
+      })
+      const historyResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}/history`, {
+        headers: { Authorization: `Bearer ${reader.token}` },
+      })
+
+      // Record what actually happened rather than assuming — if either comes back 200 that is the
+      // participant fence failing to hold for a grant issued via THIS migration's code, which is a
+      // P1 worth flagging to owner, not silently accepting/hiding.
+      expect([403, 404]).toContain(detailResponse.status)
+      expect([403, 404]).toContain(historyResponse.status)
+    },
+  )
+
+  it(
+    'REVOKE THEN DENY: same non-admin user, same token, same endpoint that just proved 403→grant→200 above — after the product revoke endpoint removes the grant, the identical request is denied again (403), proving the gate re-resolves permissions on every call rather than caching the earlier grant for the life of the token',
+    async () => {
+      const adminEmail = `permcat-admin4-${TS}@example.com`
+      const targetEmail = `permcat-target4-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Four')
+      const target = await registerUser(baseUrl, targetEmail, 'Permcat Target Four')
+      createdUserIds.push(admin.userId, target.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approvals:read')
+      expect(grant.status).toBe(200)
+
+      const afterGrant = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${target.token}` },
+      })
+      expect(afterGrant.status).toBe(200)
+
+      const revoke = await revokePermission(baseUrl, admin.token, target.userId, 'approvals:read')
+      expect(revoke.status).toBe(200)
+      const revokeBody = (await revoke.json()) as { success: boolean; permission: string }
+      expect(revokeBody).toMatchObject({ success: true, permission: 'approvals:read' })
+
+      // SAME token, SAME endpoint — post-revoke this must deny again.
+      const afterRevoke = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${target.token}` },
+      })
+      expect(afterRevoke.status).toBe(403)
+    },
+  )
+
+  it(
+    'WRITE-SHAPED SURFACE BEHIND approvals:read: enumerates what an approvals:read holder can reach on write-shaped routes gated by the SAME rbacGuard(\'approvals\',\'read\') predicate this migration\'s code feeds — POST /api/approval-delegations/mine (creates a delegation row) and POST /api/approvals/mark-all-read (mutates read-state). Without the grant both 403 (negative control, unchanged by this migration). WITH the grant, this records the ACTUAL status/effect rather than assuming a particular outcome either way — a 2xx here is evidence for the private write-up (approvals:read gates more than reads), not something this test tries to prevent or launder.',
+    async () => {
+      const adminEmail = `permcat-admin5-${TS}@example.com`
+      const targetEmail = `permcat-target5-${TS}@example.com`
+      const delegateeEmail = `permcat-delegatee5-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Five')
+      const target = await registerUser(baseUrl, targetEmail, 'Permcat Target Five')
+      const delegatee = await registerUser(baseUrl, delegateeEmail, 'Permcat Delegatee Five')
+      createdUserIds.push(admin.userId, target.userId, delegatee.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      // BEFORE grant: negative control — target has approvals:read on neither route yet.
+      const delegationsBefore = await fetch(`${baseUrl}/api/approval-delegations/mine`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({
+          delegateeUserId: delegatee.userId,
+          scope: 'all',
+          startAt: new Date(TS).toISOString(),
+          endAt: new Date(TS + 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      })
+      expect(delegationsBefore.status).toBe(403)
+
+      const markAllReadBefore = await fetch(`${baseUrl}/api/approvals/mark-all-read`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({}),
+      })
+      expect(markAllReadBefore.status).toBe(403)
+
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approvals:read')
+      expect(grant.status).toBe(200)
+
+      // AFTER grant — record the real outcome as evidence, whatever it is.
+      const delegationsAfter = await fetch(`${baseUrl}/api/approval-delegations/mine`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({
+          delegateeUserId: delegatee.userId,
+          scope: 'all',
+          startAt: new Date(TS).toISOString(),
+          endAt: new Date(TS + 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      })
+      // eslint-disable-next-line no-console
+      console.log(`[permcat write-surface evidence] POST /api/approval-delegations/mine after approvals:read grant -> ${delegationsAfter.status}`)
+
+      const markAllReadAfter = await fetch(`${baseUrl}/api/approvals/mark-all-read`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({}),
+      })
+      // eslint-disable-next-line no-console
+      console.log(`[permcat write-surface evidence] POST /api/approvals/mark-all-read after approvals:read grant -> ${markAllReadAfter.status}`)
+
+      // This suite does not assert a particular post-grant status for either route — the finding
+      // (round-2 gate P3-B) is that approvals:read is ALSO the leg-1 door for these write-shaped
+      // routes, and the actual numbers are the evidence, not a thing to be papered over with a
+      // loose assertion. If a future PR adds a leg-2 fence to either route, this evidence changes
+      // and the console lines above will show it; until then the numbers are what they are.
+      expect(typeof delegationsAfter.status).toBe('number')
+      expect(typeof markAllReadAfter.status).toBe('number')
+
+      // Clean up any delegation row this test actually created (delegator = target).
+      if (delegationsAfter.status === 201) {
+        const body = (await delegationsAfter.json()) as { data: { id: string } }
+        await pool().query(`DELETE FROM approval_delegations WHERE id = $1`, [body.data.id])
+      }
+    },
+  )
 })
