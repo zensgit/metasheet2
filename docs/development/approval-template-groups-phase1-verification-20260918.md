@@ -2540,6 +2540,8 @@ $ scripts/dev/atg-verification-recount.sh
 
 **37 passed / 2 skipped(39)**:那 2 条仍是 `itIfExpectDb` 的 anti-skip-green 哨兵(CI 的真库步骤不设 `EXPECT_DB`)。上一轮同一份清单是 **34 passed / 2 skipped(36)**,本轮 **+3 个 `it`**(全区间等价扫描 / 直接计时 / 经路由计时)。
 
+**这份清单在 CI 里怎么才会「跑不成还是绿的」,逐条写清**(「被触发 ≠ 被验证」的同族问题;下面是读代码得到的机制,不是推测):本文件的 DB 闸 `describeIfDatabase`(`:47`)判的是 **`process.env.DATABASE_URL` 有没有被设**,**不是 PG 通不通**。⇒ (a) `DATABASE_URL` 未设 ⇒ 整个 `describe` skip;(b) 设了但 PG 连不上 ⇒ 用例照常执行并**报错变红**,不会 skip-green。`plugin-tests.yml` 里跑这份清单的那一步**显式设了** `DATABASE_URL`,并且该步第一行就是 `: "${DATABASE_URL:?…}"` 的 fail-loud 守卫⇒ 在 CI 里走的是 (b) 那一支,本轮三个新用例(全区间等价扫描 / 直接计时 / 经路由计时)都有真实 CI 信号。**另一条轴是 `EXPECT_DB`**:`itIfExpectDb`(`:49`)在 CI(不设 `EXPECT_DB`)下是 `it.skip`,那 2 条 skip 正是**这条轴唯一的 anti-skip-green 哨兵**,本轮没有增减它们。
+
 **本轮新增的路由计时用例写成普通 `it`,不是 `itIfExpectDb`** —— 这是故意的:`plugin-tests.yml` 的真库步骤里 `grep -c EXPECT_DB` = 0,写成 `itIfExpectDb` 会在 CI 里 skip-green。本文件的 DB 闸是 `describeIfDatabase`,`itIfExpectDb` 只留给那条哨兵。
 
 `plugin-tests.yml` 本轮**未改**,所以 s6a 的 `pluginTestsWorkflow` 钉**不需要重算**(上式 EXIT=0 即为核对)。
@@ -2571,7 +2573,7 @@ PG:`PostgreSQL 15.17 (Homebrew) on aarch64-apple-darwin25.2.0`。
 | **MUT-R3-C**(整体退回第 2 轮 `requireName`) | ① `AssertionError: visible + run + visible took 15642.9ms through the route, ceiling 2000ms: expected 15642.851416000001 to be less than 2000`;② `AssertionError: the cap reads the SUBMITTED value, not the trimmed one: expected 409 to be 400 // Object.is equality` | ① `1 failed / 2 passed / 26 skipped (29)`(直接计时用例仍绿);② 顺序用例红,与上表结论一致 |
 | **MUT-R3-F**(路由计时上限 → 0.0001) | `AssertionError: visible + run + visible took 9.6ms through the route, ceiling 0.0001ms: expected 9.63037499999973 to be less than 0.0001` | 清白值 **9.6ms**(上表 9.4ms),同量级 |
 
-四条都是 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`,服务与测试两个文件还原后均逐字节一致;没有用过 `git checkout --` / `reset --hard`。
+四条都是 `cp` 备份 → 改 → 跑 → `cp` 还原,每条**只动它自己那一个文件**(B / C 改服务层,A / F 改测试文件),还原后对被改的那个文件 `cmp` 逐字节一致;四条跑完后对**服务与测试两个文件**各再 `cmp` 一次,同样逐字节一致,工作树 `git status --porcelain` 只剩本轮有意提交的两个文件。没有用过 `git checkout --` / `reset --hard` / `stash drop`。
 
 **MUT1-R3 的读法**:它证明可见字符判定**承重**(有行变红),同时把 P3-3 那句话变成实测 —— 11 行里只有 3 行真的走到 (2),其余 8 行是被边缘裁剪关掉的。**MUT-R3-B 与 MUT-R3-C 合起来**才是「两半各自承重」的证据:B 只红直接计时用例、C 只红路由计时与顺序用例。
 
