@@ -72,14 +72,6 @@
       </template>
     </PageHeader>
 
-    <!-- Design lock v2.13 (RATIFIED 2026-09-18) §6 phase 1 / A-2 scope item 2 — admin-only minimal
-         group management entry point; the panel itself owns the acceptance J session-org 403
-         retry flow. Gated the same as the management table below (approvalTemplateAdminGuard on
-         every write endpoint the panel calls; the read endpoint's broader `approvals:read` guard
-         is intentionally not exercised by non-admins in this slice — phase 3 wires the two
-         template write faces to a group picker for every writer). -->
-    <ApprovalTemplateGroupsPanel v-if="canManageTemplates" :tr="tr" />
-
     <!-- B1-08: 最近使用 — 发起热路径从「进模板全表找行」降到 1 击。localStorage per-user，
          点击已删除/已归档模板时由填单页的加载错误 + 返回兜底。 -->
     <div
@@ -282,12 +274,45 @@
       />
     </div>
     </template>
-    <TemplateGroupSections
-      v-else
-      :status="statusTab === 'all' ? undefined : statusTab"
-      :search="searchText || undefined"
-      @select="handleSectionItemSelect"
-    />
+    <template v-else>
+      <!-- A-2 x A-4 merge convergence (2026-09-20) — master/subordinate for the two grouping
+           surfaces this page grew, one per lane. A-4's TemplateGroupSections is the PRIMARY
+           grouping surface: it owns the rendered group order and every section's rows, and it is
+           the only thing that loads groups on entering the grouped view. A-2's
+           ApprovalTemplateGroupsPanel is the MANAGEMENT ENTRY: admin-only, disclosure-gated
+           (collapsed by default), and it mounts — and therefore calls
+           `listApprovalTemplateGroups()` — only once an admin explicitly opens it, so no default
+           render path fetches the group list twice. On a successful mutation the panel emits
+           `changed` and this view re-runs the sections' own `loadAll()`, closing the state
+           desync (creating a group in the manager used to leave the section list stale).
+
+           The panel is NOT mounted in the flat view at all. That is what keeps A-4's I6
+           invariant ("the flat table's category tag never triggers a group-linkage lookup",
+           asserted in approvalTemplateCenterCategory.spec.ts) literally true after the merge
+           rather than rewritten: the assertion is unchanged from A-4's head. See the phase-3
+           design MD's "A-2 x A-4 合流" section. -->
+      <div v-if="canManageTemplates" class="template-center__group-manager">
+        <el-button
+          size="small"
+          data-testid="template-center-group-manager-toggle"
+          :aria-expanded="showGroupManager ? 'true' : 'false'"
+          @click="showGroupManager = !showGroupManager"
+        >
+          {{ showGroupManager ? t.groupManagerHide : t.groupManagerShow }}
+        </el-button>
+        <ApprovalTemplateGroupsPanel
+          v-if="showGroupManager"
+          :tr="tr"
+          @changed="handleGroupsChanged"
+        />
+      </div>
+      <TemplateGroupSections
+        ref="groupSectionsRef"
+        :status="statusTab === 'all' ? undefined : statusTab"
+        :search="searchText || undefined"
+        @select="handleSectionItemSelect"
+      />
+    </template>
 
     <el-pagination
       v-if="viewMode === 'flat' && store.total > pageSize"
@@ -436,6 +461,19 @@ function handleRowClick(row: ApprovalTemplateListItemDTO) {
 // template id (it has no dependency on vue-router itself, unlike handleRowClick's row object).
 function handleSectionItemSelect(templateId: string) {
   router.push({ path: `/approval-templates/${templateId}` })
+}
+
+// A-2 x A-4 merge convergence — the group MANAGER (A-2's panel) is collapsed by default and
+// lives inside the grouped view only; see the template comment on `template-center__group-manager`
+// for why (I6 in the flat view, single group fetch on the default grouped render).
+const showGroupManager = ref(false)
+const groupSectionsRef = ref<InstanceType<typeof TemplateGroupSections> | null>(null)
+
+// The manager mutated the org's groups (create). The sections view owns the rendered group order,
+// so it — not the panel — is the surface that must re-read; `loadAll` is the same entry point the
+// sections view runs on mount (it already `defineExpose`s it).
+function handleGroupsChanged() {
+  void groupSectionsRef.value?.loadAll()
 }
 
 function startApproval(templateId: string) {

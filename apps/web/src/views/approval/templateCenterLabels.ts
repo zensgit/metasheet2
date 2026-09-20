@@ -70,6 +70,10 @@ export const ZH = {
   groupItemMovePlaceholder: '移动到…',
   groupItemMoveLabel: '将表单移动到分组',
   groupItemMoveError: '移动表单分组失败',
+  // A-2 x A-4 merge convergence (2026-09-20) — disclosure toggle for A-2's group MANAGEMENT panel
+  // inside the grouped view. See TemplateCenterView.vue's `template-center__group-manager` block.
+  groupManagerShow: '管理分组',
+  groupManagerHide: '收起分组管理',
 } as const
 
 export const EN: Record<keyof typeof ZH, string> = {
@@ -127,4 +131,6 @@ export const EN: Record<keyof typeof ZH, string> = {
   groupItemMovePlaceholder: 'Move to...',
   groupItemMoveLabel: 'Move template to group',
   groupItemMoveError: 'Failed to move template',
+  groupManagerShow: 'Manage groups',
+  groupManagerHide: 'Hide group manager',
 }
