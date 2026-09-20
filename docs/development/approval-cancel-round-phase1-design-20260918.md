@@ -286,7 +286,12 @@ several conditions hold at once:
    `windowDays = 0`, so this LOCK-ANCHORED code always wins over a window complaint for that suite.
 6. no pending round → else 409 `CANCEL_ROUND_ALREADY_PENDING`
 7. read the seat set off `approval_records(action='approve')`, **dropping `system:`-namespaced
-   sentinel actors** (`:8656`, gate round 6 G6-1 — shared predicate `isSystemSentinelActor`)
+   sentinel actors** (`:8656`, gate round 6 G6-1 — shared predicate `isSystemSentinelActor`).
+   (**candidate only, NOT part of the ratified order**: on this branch the read is preceded by the
+   PROPOSED reading-(a) delegation restore — see the G3 half C block below. The restore sits between
+   the trail read and the sentinel drop and changes WHO is seated, not the order of any step here;
+   if owner rules against reading (a) it comes out and step 7 is unchanged)
+
 8. **seat set empty after the drop** → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
    `details.reason = 'no_human_approver'` (`:8677`, gate round 6 G6-1)
 9. **`assertCancelRoundSeatsEligibleInTxn`** (`:8686`, lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
@@ -338,6 +343,120 @@ even though the person cannot log in.
   (`POST /api/approvals`) and is an owner call; it is deliberately NOT made in this slice. The
   divergence is recorded here rather than laundered into a claim of parity.
 - **Three new error codes** — see §3.1; the lock file is owner-authored and is not edited from here.
+- **G3 half C — 历史委托不自动成为当前授权 (OPEN, owner call; a candidate implementation is PROPOSED
+  below, NOT ruled).** The shipped seat derivation read `approval_records(action='approve').actor_id`
+  verbatim, so when the original document's seat had been produced by a delegation the seat replayed
+  onto the cancel round was the DELEGATEE, and today's delegation state was never consulted. Measured
+  on a real DB (independent verification 2026-09-19,
+  `reviews/verify-c1-lock-g3-delegation-20260919.md` §2.2): a delegation still active, one revoked
+  (`active = FALSE`), one whose window has expired, and one deleted outright all yielded the
+  BYTE-IDENTICAL seat set and a 201 — the seat set is insensitive to the clause's own predicate. The
+  eligibility gate compounds the asymmetry: deactivating the DELEGATOR did not block, deactivating
+  the DELEGATEE did.
+  - **Provenance exists and is reachable inside the creation transaction.** NOT in
+    `approval_records` (that table has no `delegated_from`-style column, and the approve row's
+    metadata carries none) but in `approval_assignments.metadata.delegatedFrom`, written by
+    `ApprovalAssigneeResolver.pushResolved` — the repo's single delegation substitution point — and
+    KEPT after approve as `is_active = FALSE` audit history. `ApprovalDelegationConfig
+    .countDelegatedApprovals` already reads exactly that column, with no `is_active` filter, and its
+    own comment calls it an audit trail.
+  - **Two readings are open, and they are not interchangeable.** (a) the seat belongs to the
+    ORIGINAL APPROVER — 委托 is acting-on-behalf-of, never a transfer of authority; (b) the delegatee
+    keeps the seat only if that delegation is still live at the moment the cancel round opens, and
+    otherwise the seat returns to the delegator. They differ on exactly one leg (delegation still
+    valid) and both differ from the pre-candidate behaviour on all four legs. A third reading —
+    「不要把原单冻结的委托映射带到新轮」 — is satisfied BY CONSTRUCTION and is NOT a substitute for
+    either: the cancel round's own `requester_snapshot` key set is verbatim
+    `["id","name","requesterChoices"]`, with no `delegations` key (measured). If THAT reading is the
+    one ratified, it needs a standing positive control pinning that key set, or one future spread
+    silently regresses it.
+  - **Scope trap, for whichever reading lands.** `resolveActiveDelegationMap` filters
+    `scope='template'` rows by templateId. A cancel round runs on its OWN dedicated published
+    definition, so any re-resolution must be given the ORIGINAL document's `template_id`; passing the
+    round's own would silently narrow support to `scope='all'` rows. `approval_instances.template_id`
+    is nullable, so a NULL-template original can only ever match `scope='all'` rows — that semantic
+    must be stated, not inherited by accident. Reading (a) below never calls that resolver, so it
+    neither hits nor answers this trap; reading (b) would.
+  - **Why this bullet stays OPEN even though a candidate is implemented on this branch.** The clause
+    is RATIFIED and its reading is not. Landing the candidate does not rule it, and deleting this
+    registration would launder an owner decision that has not been made. The bullet is discharged by
+    an owner ruling, not by a green suite.
+
+**§2-G3 逐句求值(lock:74 三个分句,第一个分句含两个半边;逐条求值,不按节给一个总状态):**
+
+| # | 锁文原句 | 本 head 的状态 | 证据 |
+|---|---|---|---|
+| 1a | 分句一:「重新验证当前资格(**在职**…)」 | **SHIPPED** (half A) | `assertCancelRoundSeatsEligibleInTxn`;`§2-G3 正控 P1` / `负控 N1` / `负控 N2` |
+| 1b | 分句一:「…**仍在该组织单元**」 | **OPEN** (half B) — 未实现、已登记 | 常驻 `正控 P2`(`org_id IS NULL` 的原单不被拒) |
+| 2 | 分句二:「历史委托不自动成为当前授权」 | **OPEN(读法未裁)+ 候选 (a) PROPOSED 已落在本分支** | 独立验证 §2.2 四腿逐字相同;本轮 11 条真库用例 + 两条 mutation(见验证 MD Part N) |
+| 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤) | `负控 N1/N2` 的零行断言;mutation R7-M3 |
+
+分句二那一行是本次新增的一行:在此之前它既不在 SHIPPED 一侧、也不在 OPEN 清单上,而同一条款的组织半边
+(half B,上表 1b)一直被明文登记 —— 同条款内处置不对称本身就是披露缺口(独立验证 §8 把它记为 P2,
+阻塞的是**登记**而非实现)。
+
+**候选实现(PROPOSED,读法 (a);owner 未裁前不得被当成合同)** — `reading-a` 候选补丁已落在
+`feat/approval-cancel-round-phase1-g3-reading-a` 分支上并已真库跑通。它**不是**本切片的已定合同,
+本节其余部分描述的是「若 owner 裁读法 (a),落地后的语义是什么」。
+
+The seat query restores the delegatee back to the DELEGATOR before anything else runs: 委托 is
+acting-on-behalf-of (履职代理), not a transfer of the seat, so a cancel round re-convenes the person
+whose authority the original decision carried. The restore is a LEFT JOIN on
+`(instance_id, node_key, assignee_id)` — deliberately not `(instance_id, assignee_id)`: a delegatee
+who also holds a seat OF THEIR OWN at another node keeps that seat as their own, which an
+instance-wide match would fold into the delegator too (measured both ways, 验证 MD Part N §N3).
+`entry_epoch` is deliberately NOT in the join (it is NULL on pre-migration rows, and `NULL = NULL`
+would turn the whole restore into a silent no-op for exactly the legacy corpus this method is
+likeliest to meet).
+
+**Why the candidate shares ONE eligibility predicate with half A rather than adding a
+delegation-specific gate.** The restore is inserted between the approve-trail read and the sentinel
+drop, so the rest of the sequence is untouched: sentinel drop → zero-human-seat pre-check →
+`assertCancelRoundSeatsEligibleInTxn`. `evaluateUserAuthenticationGate` remains the single seat
+predicate; it now simply runs on the person actually being seated. A second, delegation-specific
+eligibility rule here would be the narrower-lookalike this slice already refuses elsewhere.
+
+**Behaviour delta, stated rather than discovered later** (the BEFORE column is measured, independent
+verification 2026-09-19 §2.2; the AFTER column is measured on this branch, 验证 MD Part N):
+
+| scenario | before | after, IF reading (a) is ruled |
+|---|---|---|
+| delegation still active | seat = delegatee | seat = **delegator** |
+| delegation revoked / expired / out of scope / exactly in scope | seat = delegatee | seat = **delegator** |
+| DELEGATOR deactivated | creation succeeds | **409 `CANCEL_ROUND_SEAT_INELIGIBLE`, zero rows** |
+| DELEGATEE deactivated | 409, zero rows | **creation succeeds**, seat = delegator |
+
+Reading (a) answers 「原审批人」 uniformly, so a still-valid delegation does NOT route the cancel
+round to the delegatee. That is a consequence of the cancel round's own snapshot carrying no
+`delegations` key (measured: its `requester_snapshot` key set is verbatim
+`["id","name","requesterChoices"]`), i.e. the resolver never re-applies a substitution on the new
+round. The alternative reading 「restore, then RE-RESOLVE against today's delegation」 — which would
+seat today's delegatee, or a third person if the delegator has since re-delegated — is a DIFFERENT
+contract and is not implemented here.
+
+**NOT closed by the candidate (recorded, not laundered):**
+
+- **Approve rows with no `nodeKey`.** The legacy `POST /api/approvals/:id/approve` route copies
+  `metadata` verbatim out of the request body, so an approve row written there carries no `nodeKey`;
+  the join then misses and the actor keeps the seat un-restored — i.e. the pre-candidate behaviour
+  for that row. MEASURED, not predicted (验证 MD Part N §N4): a document approved through that route
+  under an active delegation seats the DELEGATEE. The failure direction is deliberate (never a wider
+  seat), and the alternative — an instance-wide match — would mis-fold the sibling-seat case above.
+  The writers that DO carry `nodeKey` were read individually: the template-runtime dispatch's
+  `insertApprovalRecord` callers and `insertAutoApprovalEvents`. `ApprovalBridgeService`'s writer
+  does not, but bridge instances never pass through `createApproval` and so carry no `delegatedFrom`
+  row for the join to find.
+- **Seat-count collapse when the same person holds both a role seat and a delegated user seat.**
+  Delegation substitutes only `assignmentType === 'user'` seats, so a document approved by A through
+  a role node AND by D as A's delegate at a user node has two seats before and one after the restore
+  — a genuine reduction of the 会签 threshold. The block-never-filter invariant covers INELIGIBLE
+  seats, not this same-person merge. Owner call; not decided here, and not covered by a test.
+- **Re-entered nodes.** `entry_epoch` is out of the join by design (above), so a node re-entered
+  after a reject→resubmit can carry several delegated assignment rows for the same
+  `(instance, node_key, assignee)`. Not measured in this round; recorded as the known mirror of the
+  collapse risk rather than claimed absent.
+- **G3 half B (组织单元)** remains OPEN exactly as registered above.
+
 
 **Two things the fix deliberately does NOT do**, both of which the binding report names explicitly:
 
