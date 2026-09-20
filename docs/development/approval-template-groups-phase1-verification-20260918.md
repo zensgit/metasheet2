@@ -2600,3 +2600,109 @@ PG:`PostgreSQL 15.17 (Homebrew) on aarch64-apple-darwin25.2.0`。
 2. **255 码点长度上限** —— 锁 §2 无此条款,是新增。
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动,响应体文案变了。
 4. **【新】长度闸的度量对象从「裁剪后」改成「提交值」** —— 这是一条**行为变化**,不是纯内部重构:提交 259 码点、裁剪后 255 的名字,第 2 轮接受(或按同名 409),第 3 轮是 400 `GROUP_NAME_TOO_LONG`。它随第 2 项(上限本身)一起裁,但**单独列出**,因为即便 owner 接受 255 这个数,「量哪个值」仍是一个独立的取舍。
+
+---
+
+## 31. 勘误 3 候选 —— 第 4 轮修复(2026-09-20,owner 裁「暂缓定案」之后;仍待 owner 确认)
+
+> **本节不构成 ratify、不构成合并授权、不构成迁移应用许可。** 迁移 `git diff` 为空(两处 `org_id` CHECK 与 `atg_name_nonblank` 谓词逐字未动),锁文正文未动。
+
+### 31.0 owner 裁决原文与本轮的求值
+
+| owner 原话(2026-09-20 决策简报 §勘误 3 / 逐项建议第 4+16 项) | 本轮怎么执行 |
+|---|---|
+| 「名称规则仍有反例。简报提出的 `[\p{L}\p{N}\p{P}\p{S}]` 判断,我实测对 U+3164、U+115F、U+2800 都返回 true。字符属于这些类别,不等于可见。」 | **测量属实,且本轮把它变成用例**(`tests/unit/approval-group-name-rule.test.ts` 第一条:`isVisibleCategory` 对三者返回 `true`,完整谓词返回 `false`,同一条用例里两半都断言)。**被证伪的是文档的措辞,不是实现**:第 3 轮的实现已经排除了 `Default_Ignorable_Code_Point` 与 U+2800;是设计/验证 MD 把规则写成了裸字符类。**根因处置见 31.1** —— 不是「把文档写清楚」,而是让规则**可被无库 import**,owner 下次核验不必重新手打一遍谓词 |
+| 「两层防线方向可以,但不能据此批准『至少一个可见字符』已成立。」 | 本节所有断言均为**技术验证**;§31.6 的待裁点原样结转并新增两条 |
+| 「先提交准确字符规则及上述反例测试」 | §31.2 显式谓词(单一出处)+ §31.3 反例矩阵(13 码点 × 裸/夹心 = 26 行经真实 HTTP 路由) |
+| 「两处 org_id CHECK 不动」 | **未动**;`git diff -- packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts` 输出 **0 行**(现场跑) |
+
+### 31.1 根因处置:规则搬进一个零依赖模块
+
+owner 的探针跑在自己的机器上、没有数据库,所以它**只能重新手打**谓词——而手打的那一份和线上那一份可以不一致,本轮就是这么发生的。因此:
+
+- 新文件 `packages/core-backend/src/services/approval-template-group-name-rule.ts`,**零运行时 import**(不碰 pg、不碰 express)。裁剪集、`BLANK_GLYPH_SET`、四条合取、长度上限、`classifyGroupName` 全在这里,**单一出处**。
+- `ApprovalTemplateGroupService.ts` 的 `requireName` 改为调用 `classifyGroupName` 并把 verdict 翻成 `ServiceError`;**行为逐字不变**(真库 31/31 + 序列化 10/10 全绿,见 §31.4)。
+- 真库套件与新增的无库单测**同 import 这一个模块**;`NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_CODE_POINT_SET` 的导出面从 service 挪到规则模块,消费方不变。
+
+### 31.2 显式谓词(与实现逐字同源)
+
+```
+visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
+             ∧ cp ∉ \p{Default_Ignorable_Code_Point}
+             ∧ cp ∉ BLANK_GLYPH_CODE_POINTS
+             ∧ cp ∉ \p{White_Space}
+```
+
+名字被接受 ⟺ 经边缘裁剪后**至少含一个** `visible` 为真的码点(长度闸在最前,读**提交值**)。
+
+`BLANK_GLYPH_CODE_POINTS` **显式列出 56 个成员**(与 DI 重叠的也显式列,防属性表版本差异):`U+2800`、Hangul filler 家族 `U+115F / U+1160 / U+3164 / U+FFA0`、`U+3000`、`U+180E`、`U+200B–U+200F`、`U+2028–U+202F`、`U+2060–U+206F`、`U+FEFF`、`U+FE00–U+FE0F`、`U+034F`、`U+00AD`、`U+061C`。
+
+**哪几条合取今天真的承重 —— 实测,而不是声称**(`feedback_exemption_reasons_rot_make_them_data`;全区间扫描见单测的 NECESSITY 用例):
+
+| 合取 | 今天是否必要 | 证据 |
+|---|---|---|
+| `[\p{L}\p{N}\p{P}\p{S}]` | **必要** | 删掉它,80 万+ 码点变成可接受名;U+FE0F / U+061C / U+2062 / U+E0001 由它单独决定 |
+| `∉ BLANK_GLYPH_CODE_POINTS` | **必要,且只通过一个成员** | 删掉整张表,**恰好 U+2800** 变成可接受名(MUT-R4-A:真库两条用例红,单测 5 条红) |
+| `∉ Default_Ignorable_Code_Point` | **今天冗余** | `L/N/P/S ∧ DI` 恰好是四个 Hangul filler,全部已在枚举表内 ⇒ 删掉这条合取,**真库 31/31、单测 12/12 全绿**(MUT-R4-B,现场跑)。保留它的理由是**未来 Unicode 新增的 DI 码点无需改代码**,不是「它今天在挡什么」 |
+| `∉ \p{White_Space}` | **今天冗余,且无见证** | `White_Space ∩ L/N/P/S = ∅`(全区间扫描断言) |
+
+> **这条更正是本轮自查出来的,且推翻了我自己刚写下的话。** 规则模块的第一版注释把 DI 合取写成「load-bearing,见证是 U+FFA0」,单测第一版也按「第一个命中的合取」记录 `decidedBy`。跑 MUT-R4-B 时**全绿**,才发现「求值顺序」不等于「必要性」:U+FFA0 同时在枚举表里。现在 (a) 注释改成上表的实测措辞,(b) 单测记录**所有**命中的合取而不是第一个,(c) 新增 NECESSITY 用例把上表四行**从全码点区间推导出来**,所以注释不可能再和代码漂移。**MUT-R4-B 全绿是设计结果,不是覆盖漏洞** —— 写在这里,免得下一轮门审把它读成后者。
+
+### 31.3 反例与正控(经真实 HTTP 路由)
+
+**13 个码点,每个单独成名**(owner 的三个 + 第 1 轮门审的七个 + 本轮新增六个),**每个再额外夹在两个 U+FE0F 之间**提交一次,共 **26 行**,全部 **400 `GROUP_NAME_REQUIRED`**,列表端点保持空、`count(*) = 0`:
+
+`U+3164` `U+115F` `U+2800`(owner)· `U+00AD` `U+180E` `U+034F` `U+FE0F`(门审 r1)· `U+1160` `U+FFA0` `U+3000` `U+061C` `U+2062` `U+E0001`(本轮)
+
+**为什么必须有「夹心」那一半**:13 个里有 8 个在**边缘裁剪集**内,裸提交时被裁成空串,`!trimmed` 分支就 400 了 —— **根本走不到可见字符规则**,对 owner 关心的那条谓词零判别力(`feedback_failclosed_doors_cover_for_each_other`)。U+FE0F 故意不在裁剪集里,夹心后被测码点处于**内部**,裁剪碰不到它。实测:MUT-R4-A(从 `BLANK_GLYPH_CODE_POINTS` 删 U+2800)**只翻夹心那一行**(`… [wrapped] -> 201 CREATED`),裸 U+2800 那行照旧 400。
+
+**正控 6 条**(全部 201 且按字节存回):`请假` / `採購` / `日本語` / `한국어` / `😀` / `a` + U+200B + `b`。`한국어` 是把「Hangul 被拒」和「Hangul **filler** 被拒」分开的那一行(四个 filler 都是 Hangul 区码点);`😀` 是代理对,同时守住长度计数与裁剪的配对算术。
+
+### 31.4 现场数字(本轮 head,逐字粘贴)
+
+| 项 | 数字 |
+|---|---|
+| 两个分组真库文件(库 `metasheet2_namerule_r4_20260920`,owner `ms2testbed` 非超级,PG 15.17) | **41 passed / 41**(lifecycle 31 + serialization 10;第 3 轮是 39,本轮 +2 条新用例) |
+| 无库单测 `tests/unit/approval-group-name-rule.test.ts` | **12 passed / 12**,0.3s |
+| `tsc --noEmit -p tsconfig.json`(core-backend) | **exit 0,零输出** |
+| `CI=true pnpm --filter @metasheet/core-backend test` 全量 | **15104 passed / 1609 skipped(16713)**,948 files passed / 175 skipped,exit 0,226.17s(逐字见 §31.5) |
+| 迁移 diff | **0 行** |
+
+### 31.5 全量与锚点求值
+
+**全量(现场粘贴,本轮 head,工作树 `/private/tmp/…/wt-namerule-r4`,`CI=true pnpm --filter @metasheet/core-backend test --reporter=dot`)**:
+
+```
+ Test Files  948 passed | 175 skipped (1123)
+      Tests  15104 passed | 1609 skipped (16713)
+   Duration  226.17s
+exit 0
+```
+
+(无 `DATABASE_URL`,所以两个分组真库文件在这条 lane 里 skip —— 它们的数字在 §31.4,由一次性库单独跑出。新增的无库单测**不在** skip 之列,它就是为了进这条 always-on lane 才单独建文件的。)
+
+**mutation(cp 备份 → 改 → 跑 → 还原 → `cmp` 逐字节相同,全部现场跑)**:
+
+| 代号 | 改动 | 观测 |
+|---|---|---|
+| **MUT-R4-A** | 从 `BLANK_GLYPH_CODE_POINTS` 删 `0x2800` | 真库 lifecycle **2 failed / 29 passed**:`U+FE0F + INTERNAL U+2800 + U+FE0F … -> 201 CREATED`、`U+2800 … [wrapped] -> 201 CREATED`,**裸 U+2800 两行照旧 400**;无库单测 **5 failed / 7 passed**(含 NECESSITY 用例:`expected [] to deeply equal [ 'U+2800' ]`)。还原后 `cmp` 通过 |
+| **MUT-R4-B** | 删掉 `&& !isDefaultIgnorable(codePoint)` 整条合取 | 真库 lifecycle **31/31 全绿**,无库单测 **12/12 全绿** ⇒ 该合取今天**冗余**(§31.2 已据此更正模块注释与单测记录方式)。还原后 `cmp` 通过 |
+
+**对 §28–§30 里文件/符号锚点的逐条求值(失效标记贴在那句话上,不作废整节)**:
+
+| 位置 | 原文锚点 | 第 4 轮求值 |
+|---|---|---|
+| §28.2 小标题 | 「应用层镜像(`ApprovalTemplateGroupService.ts` `requireName`)」 | `requireName` **仍在该文件**,但它只把 verdict 翻成 `ServiceError`;规则本体在 `approval-template-group-name-rule.ts`。**结论不变,文件锚点半变** |
+| §29.2 (1) 行位置列 | 「`ApprovalTemplateGroupService.ts` `NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_CODE_POINTS` + `trimNameEdges`」 | **符号名全部未变,文件已变**为 `approval-template-group-name-rule.ts`;成员集逐字未动 |
+| §29.2 (2)(3) 行 | `NAME_VISIBLE_CHAR_PATTERN` / `GROUP_NAME_MAX_LENGTH` / `countCodePoints` | `GROUP_NAME_MAX_LENGTH` / `countCodePoints` **同名迁入新模块**;`NAME_VISIBLE_CHAR_PATTERN`(单个负向先行断言正则)**已被四条具名合取取代**(`isVisibleCategory` / `isDefaultIgnorable` / `BLANK_GLYPH_CODE_POINTS` / `isUnicodeWhiteSpace` → `isVisibleCodePoint`),**判定结果逐值相同**(真库 41/41 + 全量绿) |
+| §30.5 的 MUT-R3-D(`U+FE0F U+3164 U+FE0F` 见证 `Default_Ignorable`) | 「只翻自己那一行」 | 对 head `ddc934fb63` **仍真**;**对当前树为假** —— 本轮把四个 Hangul filler 也写进了枚举表,于是该行由两条合取共同拒绝(MUT-R4-B 实测全绿)。已在测试文件该夹具注释处贴出更正 |
+| §30.5 的 MUT-R3-E(`U+FE0F U+2800 U+FE0F` 见证 U+2800) | 「只翻自己那一行」 | **仍真**,本轮以 MUT-R4-A 重新实测确认 |
+
+### 31.6 待裁点(第 2/3 轮三条原样结转,本轮新增两条)
+
+1. **可见字符规则的排除项** —— 现在是**四条合取的显式写法**,其中 DI 与 White_Space 今天冗余(§31.2 实测)。owner 若只想要「必要的那两条」,删 DI/White_Space 今天零行为变化,但会失去对未来 Unicode 新增码点的自动覆盖。
+2. **255 码点长度上限** —— 锁 §2 无此条款,新增。
+3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动。
+4. **长度闸度量「提交值」而非「裁剪后」** —— 行为变化,随第 2 项一起裁但单独列。
+5. **【新】`BLANK_GLYPH_CODE_POINTS` 这张 56 成员的显式表** —— 它把「不可见」从一个纯属性判断变成了「属性 ∪ 人工清单」。好处是 owner 点名的码点在代码里看得见、属性表版本变化不会静默放行;代价是清单要人维护,且它让 DI 合取变成冗余(§31.2)。**是否采用「枚举 + 属性」而不是「纯属性」,请 owner 裁。**
+6. **【新】新增无库单测文件 + `scripts/dev/probe-group-name-rule.mjs` + `scripts/dev/README.md`** —— 单测进的是 always-on 的 `test (20.x)` lane(`pnpm --filter @metasheet/core-backend test`),**未改 `plugin-tests.yml`,s6a 钉不受影响**(该钉只哈希固定文件清单,不含 `src/**` 与 `scripts/dev/**`)。

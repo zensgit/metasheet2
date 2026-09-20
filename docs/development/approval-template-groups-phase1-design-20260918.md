@@ -61,6 +61,15 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 **候选列口径**:「候选(2026-09-19,待 owner 确认)」一列标记 Erratum 3 CANDIDATE(`lock-errata-proposed-grouping-v2.13-20260919.md` 勘误 3 / 锁文自己的「勘误 3」抬头条目)对该行的影响——PROPOSED,未 ratify,不是「已授权」;门审通过只证明技术验证通过,不构成 ratify、合并或迁移应用的许可。未点名的行按 v2.13 ratify 原样,不受本候选影响。
 
+**第 4 轮修复(2026-09-20,owner 裁「暂缓定案:支持两层规则,但先提交准确字符规则及上述反例测试;两处 org_id CHECK 不动」之后)。** owner 用无库探针实测 `[\p{L}\p{N}\p{P}\p{S}]` 对 U+3164 / U+115F / U+2800 返回 `true`,并指出「字符属于这些类别,不等于可见」。**这条测量属实,被证伪的是文档的措辞而不是实现**——第 3 轮的 `requireName` 已经排除了 `Default_Ignorable_Code_Point` 与 U+2800,是本 MD 和验证 MD 把规则写成了裸字符类。本轮的处置不是「把文档写清楚」,而是消除「文档转抄谓词」这一步:
+
+- **规则搬进零依赖模块** `packages/core-backend/src/services/approval-template-group-name-rule.ts`(不 import pg / express),服务层、真库套件、无库探针**同 import 同一份**;行为逐字不变(真库 41/41)。
+- **显式谓词(单一出处,与实现逐字同源)**:`visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}] ∧ cp ∉ \p{Default_Ignorable_Code_Point} ∧ cp ∉ BLANK_GLYPH_CODE_POINTS ∧ cp ∉ \p{White_Space}`;名字被接受 ⟺ 边缘裁剪后至少含一个 `visible` 为真的码点(长度闸最前,读提交值)。`BLANK_GLYPH_CODE_POINTS` **显式列 56 个成员**(与 DI 重叠的也列,防属性表版本差异):U+2800、Hangul filler 家族 U+115F/U+1160/U+3164/U+FFA0、U+3000、U+180E、U+200B–U+200F、U+2028–U+202F、U+2060–U+206F、U+FEFF、U+FE00–U+FE0F、U+034F、U+00AD、U+061C。
+- **owner 可无库运行的探针**:`node scripts/dev/probe-group-name-rule.mjs U+3164 U+115F U+2800 请假`,逐码点打印 `cp / category / defaultIgnorable / visible / verdict`,读的是上面那个模块,不重打谓词。
+- **哪几条合取今天真的承重(实测,不是声称)**:正类与 `BLANK_GLYPH_CODE_POINTS` **必要**(删表 ⇒ 恰好 U+2800 变可接受);`Default_Ignorable` 与 `White_Space` **今天冗余**——`L/N/P/S ∧ DI` 恰是那四个 Hangul filler,已全部在枚举表内,删掉该合取真库 31/31 + 单测 12/12 全绿(MUT-R4-B)。保留它们是为覆盖未来 Unicode 新增码点,**不是**「它们今天在挡什么」。详见验证 MD §31.2(含本轮自我更正)。
+- **反例测试**:13 个码点(owner 三个 + 门审 r1 七个 + 本轮 U+1160/U+FFA0/U+3000/U+061C/U+2062/U+E0001)各自单独成名,**并各自再夹在两个 U+FE0F 之间**提交一次(裸提交时其中 8 个会被边缘裁剪吃掉,走不到可见字符规则),26 行全部 400 `GROUP_NAME_REQUIRED`;正控 `请假 / 採購 / 日本語 / 한국어 / 😀 / 含内部零宽` 全部 201 且按字节存回。
+- **两处 `org_id` CHECK 与 `atg_name_nonblank` 谓词逐字未动**(迁移 `git diff` 为 0 行);仍是 PROPOSED,仍未 ratify。
+
 **勘误 3 候选已进入 REDRAFT v2(2026-09-20)**:第 8 轮门审 P2-1 证伪了第一版候选谓词 `btrim(name) <> ''`(`btrim/2` 默认裁剪集只有 ASCII 空格,全 U+200B 的名字照样 201 入库);owner 同日原话「我之前建议的简单 `btrim(name)` 也不够覆盖纯不可见字符,应以修订后的名称规则验收,不能直接沿用旧建议」。本表下面凡标「勘误 3 候选」的句子,谓词一律以重拟选项 (i) 为准。**第 2 轮修复(2026-09-20,`impl-gate-A-slice1-name-rule-candidate-round1-20260920.md` 之后)**:成员集**逐字未扩**(仍是十个码位),但四个控制/空格成员的**拼写**改成 `chr()`,避免约束定义里出现真实 CR/LF 字节(门审 P3-6):`btrim(name, ' ' || chr(9) || chr(13) || chr(10) || chr(12288) || chr(8203) || chr(8204) || chr(8205) || chr(8288) || chr(65279)) <> ''`。**更重要的一点**:这条 CHECK **不再被描述为「非空白保证」**——它是**枚举集 + 明示残留**的防线,「名字必须含至少一个可见字符」的**主规则搬到了应用层**(`requireName`);门审 P2-1 实测 U+00AD / U+180E / U+2800 / U+3164 / U+034F / U+FE0F / U+115F 两层皆不拦、经真实 HTTP 端点 201 入库,镜像式的应用层补不上这个洞。详见验证 MD §29。仍是 PROPOSED,仍未 ratify。
 
 | 约束/列 | 迁移文件行 | 锁文 §2 出处 | 候选(2026-09-19,待 owner 确认) |
