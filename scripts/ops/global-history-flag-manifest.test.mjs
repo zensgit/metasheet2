@@ -131,6 +131,11 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
+  // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
+  // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
+  // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the
+  // manifest instead.
+  'DINGTALK_TODO_MIRROR_STATUSES',
 ])
 
 function grepFlagTokens(pattern) {
@@ -155,7 +160,14 @@ function globalHistoryFlagsInSource() {
   // E-learning V0.1 flags live in this same operator registry (AGENTS.md: every new env flag).
   // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags.
   const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning])].sort()
+  // DingTalk todo-mirror (plan B, #5772/#5768) flags live in this same operator registry (AGENTS.md:
+  // every new env flag). Unlike the elearning family both real flags are needed (ENABLED and the
+  // worker's INTERVAL_MS), so this is NOT restricted to *_ENABLED; DINGTALK_TODO_MIRROR_STATUSES (the
+  // non-flag status-vocabulary constant) is excluded via NON_GH_EXACT instead.
+  const dingtalkTodoMirror = grepFlagTokens('DINGTALK_TODO_MIRROR_[A-Z_0-9]+')
+    .filter((t) => !t.endsWith('_'))
+    .filter((t) => !NON_GH_EXACT.has(t))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
