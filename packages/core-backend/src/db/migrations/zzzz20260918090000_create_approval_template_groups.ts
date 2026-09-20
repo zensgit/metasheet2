@@ -99,13 +99,28 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                      -- Both families are RESIDUE AT THIS LAYER, and the real-DB suite asserts
                      -- them as such (cases named RESIDUE: direct INSERT succeeds and the row is
                      -- readable) rather than pretending they are rejected. What closes them is
-                     -- the APPLICATION layer: ApprovalTemplateGroupService.requireName requires
-                     -- at least one glyph-carrying character (in L/N/P/S, not
-                     -- Default_Ignorable_Code_Point, not U+2800) and 400s every value in (a) and
-                     -- (b) before any DB round-trip — asserted through the production route for
-                     -- every one of them. This CHECK is the DEFENCE-IN-DEPTH layer for a direct
-                     -- SQL writer, bounded to its ten members; the primary rule lives in the
-                     -- service.
+                     -- the APPLICATION layer: ApprovalTemplateGroupService.requireName strips a
+                     -- SUPERSET of this set from both edges and then requires at least one
+                     -- glyph-carrying character (in L/N/P/S, not Default_Ignorable_Code_Point,
+                     -- not U+2800), before any DB round-trip.
+                     --
+                     -- WHAT IS MEASURED vs WHAT FOLLOWS FROM THE PREDICATE — gate round 2 P3-1.
+                     -- Round 2 wrote that the route 400s "every value in (a) and (b) ... for every
+                     -- one of them". The BEHAVIOUR is right; the COVERAGE claim was false, and a
+                     -- coverage claim that can be checked and found false is worse than none.
+                     -- Submitted through the production route and OBSERVED as 400
+                     -- GROUP_NAME_REQUIRED by the real-DB suite: from family (a), U+00A0 only;
+                     -- from family (b), all seven (U+00AD, U+180E, U+2800, U+3164, U+034F,
+                     -- U+FE0F, U+115F) plus four mixed names built from them; and from this
+                     -- CHECK's own ten members, U+0020, TAB, LF, U+3000, U+200B and U+FEFF.
+                     -- The REST of family (a) — U+000B, U+000C, U+1680, U+2000-U+200A, U+202F,
+                     -- U+205F, U+2028, U+2029 — is rejected by the same code path, because every
+                     -- one of them is whitespace String.prototype.trim strips, and the service's
+                     -- edge-trim set contains that whole set (the suite sweeps that set against
+                     -- its specification code point by code point). That is an argument from the
+                     -- predicate, NOT a measurement through the route: no case submits them.
+                     -- This CHECK is the DEFENCE-IN-DEPTH layer for a direct SQL writer, bounded
+                     -- to its ten members; the primary rule lives in the service.
                      --
                      -- SPELLING OF THE FOUR CONTROL/SPACE MEMBERS, ROUND-2 FIX (gate round 1
                      -- P3-6). The proposal spells them E' <TAB><CR><LF>'. PostgreSQL evaluates

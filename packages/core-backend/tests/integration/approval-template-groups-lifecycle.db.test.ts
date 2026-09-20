@@ -17,6 +17,11 @@ import {
 } from '../../src/multitable/automation-approval-template-access'
 import type { QueryFn } from '../../src/multitable/permission-service'
 import type { ApprovalTemplateVisibilityActor } from '../../src/services/ApprovalProductService'
+import {
+  NAME_EDGE_TRIM_CLASS,
+  NAME_EDGE_TRIM_CODE_POINT_SET,
+  trimNameEdges,
+} from '../../src/services/ApprovalTemplateGroupService'
 
 /**
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 real-DB
@@ -639,6 +644,32 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   //                          back. The candidate does not extend the owner's ten-codepoint set,
   //                          so this is a disclosed residue and the test says so in its own name
   //                          rather than pretending the value is rejected at both layers.
+  //
+  // WHICH HALF OF `requireName` ACTUALLY CLOSES EACH ROW — gate round 2 P3-3. The round-2 text
+  // above reads as if every row here exercised the VISIBLE-CHARACTER rule ("the load-bearing
+  // half"). It does not, and the correction is measured rather than argued (mutation MUT1-R3,
+  // verification MD §30.5, deletes the visible-character test and watches which of the eleven
+  // rows flip — exactly three do):
+  //   - EIGHT rows are built only from EDGE-TRIM members (every row below except the three that
+  //     contain U+FE0F), so `trimNameEdges` reduces each to the empty string and the `!trimmed`
+  //     arm rejects them — part (1). Deleting the visible-character test does not change them.
+  //   - `U+FE0F alone` survives the trim (U+FE0F is deliberately NOT in the trim set) and is
+  //     rejected by part (2) — but by its POSITIVE class, not by either exclusion: U+FE0F is
+  //     `Mn`, so plain `/[\p{L}\p{N}\p{P}\p{S}]/u` already rejects it. That is why a lone
+  //     U+FE0F row CANNOT serve as the witness for exclusion (iii).
+  //   - The last two rows are the ONLY ones that reach part (2)'s two EXCLUSIONS, and each
+  //     reaches exactly one of them. They wrap an excluded codepoint in U+FE0F so the trim
+  //     cannot touch the edges and the excluded codepoint stays INTERNAL:
+  //       `U+FE0F U+3164 U+FE0F`  — U+3164 is `Lo` (a visible general category) AND
+  //                                `\p{Default_Ignorable_Code_Point}`. Drop that exclusion and
+  //                                this row alone turns 201.
+  //       `U+FE0F U+2800 U+FE0F`  — U+2800 is `So` and is NOT default-ignorable; it is the ONE
+  //                                explicit exception in the predicate. Drop it and this row
+  //                                alone turns 201.
+  //     Round 2 had no such row: after the trim set grew to include U+3164/U+115F/U+1160/U+2800,
+  //     every EDGE-position instance of those codepoints is consumed by part (1) before part (2)
+  //     is reached, so the owner's two pending exclusions (gate round 2 §9 item 1) had probe
+  //     evidence only. These two rows give each exclusion its own failing witness in the suite.
   const NEITHER_SET_INVISIBLES: Array<{ label: string; value: string }> = [
     { label: 'U+00AD SOFT HYPHEN', value: '\u00AD' },
     { label: 'U+180E MONGOLIAN VOWEL SEPARATOR', value: '\u180E' },
@@ -649,6 +680,14 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     { label: 'U+115F HANGUL CHOSEONG FILLER', value: '\u115F' },
     { label: 'U+2800 x3 (repeat — a longer all-invisible name is still invisible)', value: '\u2800\u2800\u2800' },
     { label: 'U+3164 + U+00AD (mixed, both invisible)', value: '\u3164\u00AD' },
+    {
+      label: 'U+FE0F + INTERNAL U+3164 + U+FE0F (the only row that reaches the Default_Ignorable exclusion)',
+      value: '\uFE0F\u3164\uFE0F',
+    },
+    {
+      label: 'U+FE0F + INTERNAL U+2800 + U+FE0F (the only row that reaches the U+2800 exception)',
+      value: '\uFE0F\u2800\uFE0F',
+    },
   ]
 
   // The migration's trim set, spelled out ONE MEMBER PER ROW. Gate round 1 P3-7: only U+200B had
@@ -1023,13 +1062,41 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect(renameRes.status).toBe(400)
     expect(((await renameRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_TOO_LONG')
 
-    // The cap is measured AFTER trimming — padding does not eat into it.
+    // ROUND-3 ORDERING (gate round 2 P1-1, fix part 2). The cap now reads the value AS SUBMITTED,
+    // ahead of the trim, so a padded name whose SUBMITTED length is over the cap is a 400 even
+    // though its trimmed length would have fitted. Round 2 asserted 409 here under the heading
+    // "cap is applied to the TRIMMED name"; that sentence is SUPERSEDED — see verification MD
+    // §30, where the ordering change is carried as its own owner decision point rather than folded
+    // into the round-2 cap item. Both directions are pinned below, because one alone cannot tell
+    // "the cap moved" apart from "the trim stopped running".
+    //
+    // (a) 259 submitted code points, 255 after trimming ⇒ 400 GROUP_NAME_TOO_LONG, and the
+    //     reported `actualLength` is the SUBMITTED count.
     const padded = `\u200B\u3000${atCap}\uFEFF\u2060`
+    expect([...padded].length).toBe(259)
     const paddedRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: padded } })
-    // Same trimmed value as `atCap`, which already exists in this org ⇒ 409, NOT 400: the length
-    // check saw 255, not 259. A 400 GROUP_NAME_TOO_LONG here would mean the cap runs before trim.
-    expect(paddedRes.status, 'cap is applied to the TRIMMED name').toBe(409)
-    expect(((await paddedRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_TAKEN')
+    expect(paddedRes.status, 'the cap reads the SUBMITTED value, not the trimmed one').toBe(400)
+    const paddedBody = (await paddedRes.json()) as {
+      error: { code: string; details?: { maxLength?: number; actualLength?: number } }
+    }
+    expect(paddedBody.error.code).toBe('GROUP_NAME_TOO_LONG')
+    expect(paddedBody.error.details?.actualLength, 'actualLength is the SUBMITTED count').toBe(259)
+
+    // (b) The trim ITSELF still runs, and its output is not re-measured against the cap: a
+    //     251-code-point name wrapped in the same four padding characters is 255 SUBMITTED —
+    //     inside the cap — trims back to the name that already exists in this org, and therefore
+    //     COLLIDES (409 GROUP_NAME_TAKEN) instead of creating a second row. If the trim had been
+    //     dropped this would be a 201 with a padded name; if the cap were still applied to the
+    //     trimmed value, (a) would be a 409.
+    const shortName = `S${TS}`.padEnd(251, '龍').slice(0, 251)
+    expect([...shortName].length).toBe(251)
+    const shortRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: shortName } })
+    expect(shortRes.status, 'the 251-code-point name creates first').toBe(201)
+    const shortPadded = `\u200B\u3000${shortName}\uFEFF\u2060`
+    expect([...shortPadded].length).toBe(255)
+    const shortPaddedRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: shortPadded } })
+    expect(shortPaddedRes.status, 'trim still runs — the padded twin collides').toBe(409)
+    expect(((await shortPaddedRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_TAKEN')
 
     // RESIDUE, disclosed: the btree limit itself has not moved. A DIRECT SQL writer can still
     // reach 54000 — the application cap is what keeps the route away from it, and `org_id` (the
@@ -1043,6 +1110,127 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
       'RESIDUE: direct insert of a btree-overflowing name still raises 54000',
     ).rejects.toMatchObject({ code: '54000' })
   })
+
+  // ── ROUND-3 regression cases (gate round 2 P1-1) ────────────────────────────────────────────
+  //
+  // The fix has TWO halves — a linear edge trim and a length gate that runs before it — and EACH
+  // ONE ALONE keeps the production route fast. One case therefore cannot show that both are
+  // load-bearing: reverting either half on its own leaves a single route-level timing case green,
+  // which is the "ineffective mutation looks like a useless test" shape
+  // (`feedback_ineffective_mutation_looks_like_a_useless_test`). Each half is given its OWN
+  // oracle, and the verification MD §30 records which case reds under which revert:
+  //   - `trimNameEdges` is timed DIRECTLY (reds whenever the trim goes back to a quantified
+  //     character class, whatever the length gate does);
+  //   - the production route is timed (reds only when BOTH halves are reverted);
+  //   - the ORDERING is pinned by BEHAVIOUR, not by a clock, in the length case above: 259
+  //     submitted code points that trim to 255 are a 400, not a 409.
+  //
+  // The ceilings are upper bounds with deliberate headroom, not benchmarks. The linear scan costs
+  // well under a millisecond at n = 128000; a quantified character class anchored at `$` costs
+  // time quadratic in n over the same input. A ceiling three orders of magnitude above the
+  // measured cost still separates the two, and will not red on a loaded CI runner.
+
+  it('Erratum 3 candidate v2 ROUND-3 FIX (gate round 2 P1-1): the edge-trim code-point Set is EXACTLY the round-2 character class — swept over every code point in 0..0x10FFFF, not over the members someone remembered', () => {
+    // The Set is the round-3 IMPLEMENTATION; the class string is the round-2 SPECIFICATION. This
+    // is what turns "the trim set is unchanged, only its spelling is" from a sentence in a comment
+    // into a machine-checked fact, and it is a SWEEP rather than an enumeration
+    // (`feedback_retraction_must_be_a_sweep_not_an_enumeration`) — an enumeration would agree with
+    // whatever the author happened to list twice.
+    const singleCharClass = new RegExp(`^[${NAME_EDGE_TRIM_CLASS}]$`, 'u')
+    const mismatches: string[] = []
+    for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+      const inClass = singleCharClass.test(String.fromCodePoint(cp))
+      const inSet = NAME_EDGE_TRIM_CODE_POINT_SET.has(cp)
+      if (inClass !== inSet) {
+        mismatches.push(`U+${cp.toString(16).toUpperCase().padStart(4, '0')} class=${inClass} set=${inSet}`)
+      }
+    }
+    expect(mismatches, 'Set and character class must agree on EVERY code point').toEqual([])
+
+    // Positive controls on the COMPARISON itself: a class that never matched anything, or an empty
+    // Set, would also produce an empty mismatch list. These two pairs make that impossible.
+    expect(singleCharClass.test('\u200B'), 'control: U+200B is in the class').toBe(true)
+    expect(NAME_EDGE_TRIM_CODE_POINT_SET.has(0x200b), 'control: U+200B is in the Set').toBe(true)
+    expect(singleCharClass.test('报'), 'control: a CJK character is in neither').toBe(false)
+    expect(NAME_EDGE_TRIM_CODE_POINT_SET.has(0x62a5), 'control: a CJK character is in neither').toBe(false)
+    // U+FE0F is deliberately OUTSIDE the trim set (trimming it would rewrite a trailing emoji's
+    // presentation); if a future edit adds it, this line reds before any behaviour does.
+    expect(NAME_EDGE_TRIM_CODE_POINT_SET.has(0xfe0f), 'U+FE0F must stay out of the trim set').toBe(false)
+  })
+
+  it('Erratum 3 candidate v2 ROUND-3 FIX (gate round 2 P1-1): trimNameEdges is LINEAR — a 128000-code-point edge run returns inside the ceiling in every shape, including the one a quantified character class handles quadratically', () => {
+    const RUN = 128000
+    const CEILING_MS = 200
+    const shapes: Array<{ label: string; value: string; expected: string }> = [
+      // The shape whose cost explodes under `[CLASS]+$`: the trailing run is followed by a
+      // character that is NOT in the class, so the anchored repetition fails and is retried from
+      // every start offset inside the run.
+      { label: 'visible + run + visible', value: `a${'\u200B'.repeat(RUN)}b`, expected: `a${'\u200B'.repeat(RUN)}b` },
+      // Linear controls, kept from the gate's own measurement set: these are cheap under BOTH
+      // implementations, so they are controls for the MEASUREMENT (they show the ceiling is not
+      // simply "any string of this size is slow"), not discriminators for the fix.
+      { label: 'leading run only', value: `${'\u200B'.repeat(RUN)}b`, expected: 'b' },
+      { label: 'trailing run only', value: `a${'\u200B'.repeat(RUN)}`, expected: 'a' },
+      { label: 'all trim-set members', value: '\u200B'.repeat(RUN), expected: '' },
+    ]
+    const timings: string[] = []
+    for (const { label, value, expected } of shapes) {
+      const started = performance.now()
+      const trimmed = trimNameEdges(value)
+      const elapsed = performance.now() - started
+      // The OUTPUT is asserted too: a trim that returned its argument unchanged would be fast and
+      // wrong, and a timing-only assertion cannot tell those apart.
+      expect(trimmed, `trimmed value for ${label}`).toBe(expected)
+      timings.push(`${label} -> ${elapsed.toFixed(1)}ms`)
+      expect(
+        elapsed,
+        `${label} took ${elapsed.toFixed(1)}ms, ceiling ${CEILING_MS}ms (timings: ${timings.join(' | ')})`,
+      ).toBeLessThan(CEILING_MS)
+    }
+    expect(timings, 'every shape must have been timed').toHaveLength(shapes.length)
+  }, 120_000)
+
+  it('Erratum 3 candidate v2 ROUND-3 FIX (gate round 2 P1-1): a 128000-code-point edge run through the PRODUCTION route is a typed 400 GROUP_NAME_TOO_LONG inside the ceiling, and the endpoint keeps serving afterwards', async () => {
+    const org = trackOrg(`atg-nr-linear-${TS}`)
+    const admin = await tok(base, `nr-linear-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    const RUN = 128000
+    // Wider than the direct case's ceiling on purpose: this one includes an HTTP round trip and
+    // JSON-parsing a body of roughly 768 KB (each U+200B is escaped as six characters), neither of
+    // which the direct case pays. It is still two orders of magnitude below the quadratic cost of
+    // the round-2 shape at this n, so it discriminates without being a benchmark.
+    const CEILING_MS = 2000
+    const shapes: Array<{ label: string; value: string }> = [
+      { label: 'visible + run + visible', value: `a${'\u200B'.repeat(RUN)}b` },
+      { label: 'trailing run only (linear control)', value: `${'\u200B'.repeat(RUN)}b` },
+    ]
+    const observed: string[] = []
+    for (const { label, value } of shapes) {
+      const started = performance.now()
+      const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: value } })
+      const body = (await res.json()) as { error?: { code?: string } }
+      const elapsed = performance.now() - started
+      observed.push(`${label} -> ${res.status} ${body.error?.code ?? 'CREATED'}`)
+      expect(
+        elapsed,
+        `${label} took ${elapsed.toFixed(1)}ms through the route, ceiling ${CEILING_MS}ms`,
+      ).toBeLessThan(CEILING_MS)
+    }
+    // The OUTCOME is asserted positively (a typed 400 with its code), not as "not a 500" and not
+    // as "it was fast": `feedback_not_this_error_is_not_an_outcome_assertion`.
+    expect(observed).toEqual(shapes.map(({ label }) => `${label} -> 400 GROUP_NAME_TOO_LONG`))
+
+    const written = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_template_groups WHERE org_id = $1`,
+      [org],
+    )
+    expect(written.rows[0].n, 'zero rows written').toBe(0)
+
+    // Positive control AFTER the long requests, on the same server: the endpoint still creates.
+    // Without it, a route that had stopped working for every input would read as a pass.
+    const ok = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `报销 linear ${TS}` } })
+    expect(ok.status, 'positive control must still create after the long requests').toBe(201)
+  }, 120_000)
 
   it('Erratum 3 candidate v2 leaves both org_id CHECKs exactly as ratified: atg_org_nonblank and atgl_org_nonblank still reject a pure-CJK org_id and still accept an ASCII one', async () => {
     const org = trackOrg(`atg-nr-org-${TS}`)
