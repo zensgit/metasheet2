@@ -2031,7 +2031,11 @@ describe('sheet-liveness closure over EVERY route file', () => {
     // checked after the provider call
     expect(redFor(withoutStop.replace(send, `${send}${stop![0].slice(1)}`))).toMatch(/BEFORE the provider call/)
     // checked ahead of the cancel check
-    const cancelCheck = "      if ((await readJobStatus(query, jobId)) !== 'running') {\n"
+    // (#5842 re-pointed this needle: the per-row cancel check now asks the GENERATING-status
+    // predicate instead of comparing to the `running` literal, because the commit phase got its
+    // own status. The mutation below is unchanged — it still moves the liveness gate ahead of
+    // whatever the cancel check is.)
+    const cancelCheck = "      if (!isGeneratingBulkJobStatus(await readJobStatus(query, jobId))) {\n"
     expect(source).toContain(cancelCheck)
     expect(redFor(withoutStop.replace(cancelCheck, `${stop![0].slice(1)}${cancelCheck}`))).toMatch(/follow the per-row cancel/)
     // asks about another id

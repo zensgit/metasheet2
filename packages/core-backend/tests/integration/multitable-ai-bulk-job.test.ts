@@ -6,7 +6,10 @@
  * (BJ-1…BJ-10).
  *
  * Locks the Slice-1 acceptance subjects:
- *  - Job lifecycle: queued → running → suspended(manual_task) → running(commit) → resolved.
+ *  - Job lifecycle: queued → running → suspended(manual_task) → committing(commit) → resolved.
+ *    (#5842: the commit phase has its OWN status; `running` is the GENERATE phase and the only
+ *    status the worker calls the provider in. The claim is identity-bearing — see
+ *    claimBulkJobCommit / heartbeatBulkJobCommit / finishBulkJobCommit / releaseBulkJobCommitClaim.)
  *  - Charge-on-generation at scale: the ledger token-sum delta == provider usage-sum (== fetch calls).
  *  - QUOTA-PAUSE (BJ-2): generation stops at the quota wall → suspended + quota_paused;
  *    generated rows are charged + committable; the remainder rows are
@@ -43,10 +46,14 @@ import {
   AI_BULK_JOB_TABLE,
   AI_BULK_JOB_ROWS_TABLE,
   cancelBulkJob,
-  setHeaderRunning,
+  claimBulkJobCommit,
+  finishBulkJobCommit,
+  heartbeatBulkJobCommit,
+  releaseBulkJobCommitClaim,
   insertBulkJobHeader,
   insertBulkJobRowsPending,
   reconcileOrphanedBulkJobs,
+  BULK_ROW_CANCELLED_AFTER_CHARGE,
 } from '../../src/services/ai-bulk-job-service'
 import { QueueServiceImpl } from '../../src/services/QueueService'
 import type { PoolLike } from '../../src/services/ai-bulk-shared'
@@ -273,7 +280,9 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
   })
 
   // ── Lifecycle + charge-on-generation at scale + commit ─────────────────────
-  test('lifecycle queued→running→suspended→running(commit)→resolved + charge == provider calls', async () => {
+  // (#5842: the commit phase is `committing`, NOT a second `running` — `running` is the GENERATE
+  // phase, the only status the worker sends provider calls in.)
+  test('lifecycle queued→running→suspended→committing(commit)→resolved + charge == provider calls', async () => {
     stubUsage = { input_tokens: 30, output_tokens: 12 } // 42 tokens/charged row
     const R1 = `rec_b4_l1_${TS}`
     const R2 = `rec_b4_l2_${TS}`
@@ -433,7 +442,7 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
   })
 
   // ── CANCEL MID-RUN (BJ-4: the worker stops at the next row; charge stays truthful) ──
-  test('cancel MID-RUN: the worker stops at the next row boundary; a row charged as the cancel lands reads `generated` (never pending_not_generated); header stays rejected', async () => {
+  test('cancel MID-RUN: the worker stops at the next row boundary; a row charged as the cancel lands reads `failure`/cancelled_after_charge (CHARGED, not committable, never pending_not_generated); header stays rejected', async () => {
     // stubUsage default = 20+10 = 30 tokens / charged row.
     const ids = [0, 1, 2, 3].map((i) => `rec_b4_mrc${i}_${TS}`)
     for (const id of ids) await seedRecord(id, { [FLD_SRC]: `mrc ${id}` }, ACTOR)
@@ -452,25 +461,46 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     const rows = await dbJobRows(jobId)
     const generated = rows.filter((r) => r.state === 'generated')
     const notGenerated = rows.filter((r) => r.state === 'pending_not_generated')
+    const chargedNotOffered = rows.filter((r) => r.state === 'failure' && r.reason === BULK_ROW_CANCELLED_AFTER_CHARGE)
 
-    // Rows 1+2 were charged before the worker observed the cancel → BOTH read `generated`.
-    // markRowGenerated is UNCONDITIONAL, so row 2 (which the cancel momentarily flipped to
-    // pending_not_generated) is re-recorded as generated — never charged-but-shown-uncharged.
-    expect(generated.length).toBe(2)
+    // Row 1 finished before the cancel → `generated` (committable). Row 2 was AT THE PROVIDER
+    // when the cancel landed, so the cancel had already taken it out of `pending`: #5842 makes
+    // markRowGenerated CONDITIONAL on `pending`, so row 2 is NOT resurrected as a committable
+    // row the user just cancelled. Its money is real, so it is booked `failure` with the
+    // cancelled_after_charge provenance — CHARGED, visible, and NOT offered for commit.
+    expect(generated.length).toBe(1)
+    expect(chargedNotOffered.length).toBe(1)
     expect(notGenerated.length).toBe(2)
-    // KEYSTONE invariant: no row is charged (usage_tokens > 0) yet shown pending_not_generated.
+    expect(Number(chargedNotOffered[0]!.usage_tokens)).toBe(30)
+    expect(chargedNotOffered[0]!.proposed_value).toBeNull() // nothing offered to write
+    // KEYSTONE invariant (unchanged): no row is charged (usage_tokens > 0) yet shown
+    // pending_not_generated, which is documented as UNCHARGED.
     expect(rows.every((r) => r.state !== 'pending_not_generated' || Number(r.usage_tokens) === 0)).toBe(true)
     for (const r of generated) expect(Number(r.usage_tokens)).toBe(30)
-    // Ledger token-sum == generated count × 30 — row 2's charge is counted as generated, not lost.
-    // (Were row 2 wrongly left pending_not_generated, the ledger would hold 60 while generated == 1.)
-    expect(await ledgerTokenSum()).toBe(generated.length * 30)
+    // ITS TWIN, the money check that does not silently narrow to generated-only: the ledger
+    // equals what EVERY charged row carries, whatever state that row ended in (2 × 30 here —
+    // one generated, one cancelled-after-charge). Were row 2's charge dropped from the rows,
+    // this would read 60 against a row-sum of 30.
+    const chargedRows = rows.filter((r) => Number(r.usage_tokens) > 0)
+    expect(chargedRows).toHaveLength(2)
+    expect(await ledgerTokenSum()).toBe(chargedRows.reduce((sum, r) => sum + Number(r.usage_tokens), 0))
+    expect(await ledgerTokenSum()).toBe(2 * 30)
 
     // The worker STOPPED at row 3 (the next boundary): exactly 2 provider calls, and it did
     // NOT overwrite the cancel — the header stays `rejected` (BJ-4), not `suspended`.
     expect(fetchCallCount).toBe(2)
     const header = await dbJobHeader(jobId)
     expect(header!.status).toBe('rejected')
-    expect(Number(header!.generated)).toBe(2)
+    // Only row 1 is offered for commit, so the header's `generated` counter is 1 …
+    expect(Number(header!.generated)).toBe(1)
+    // … while the cost carries BOTH charged rows: the spend is never under-reported.
+    expect(Number(header!.settled_cost)).toBeGreaterThan(0)
+
+    // And the commit route honours it: the cancelled-after-charge row cannot be written.
+    const commit = await commitJob(jobId, rows.map((r) => String(r.record_id)))
+    expect(commit.status).toBe(200)
+    expect(commit.body.counts.committed).toBe(1)
+    expect(await recordValue(String(chargedNotOffered[0]!.record_id), FLD_TARGET)).toBeNull()
   })
 
   // ── COMMIT STATE GUARD (BJ-4 / BJ-5) ────────────────────────────────────────
@@ -513,13 +543,13 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
   })
 
   // ── COMMITTABLE-SET MATRIX (the guarded commit-phase claim) ──────────────────
-  test('setHeaderRunning committable-set: {suspended,errored,rejected} claim (true → running); {queued,running,resolved} refuse (false, status unchanged)', async () => {
+  test('claimBulkJobCommit committable-set: {suspended,errored,rejected} claim (true → committing, claim id stamped); {queued,running,committing,resolved} refuse (false, status unchanged)', async () => {
     const queryFn = q as unknown as AiUsageQueryFn
     const make = async (suffix: string, status: string) => {
       const jid = `aibulkjob_csm_${suffix}_${TS}`
       // Distinct field_id per header: the BJ-7 active-job unique index is on
       // (actor_id, sheet_id, field_id), so several ACTIVE headers (suspended/queued/
-      // running) for one target would collide — the matrix needs independent rows.
+      // running/committing) for one target would collide — the matrix needs independent rows.
       await insertBulkJobHeader(queryFn, {
         jobId: jid,
         actorId: ACTOR,
@@ -532,18 +562,211 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
       return jid
     }
 
-    // Committable (the worker is no longer mutating) → claims, returns true, → running.
+    // Committable (the worker is no longer mutating) → claims, returns true, → `committing`
+    // (#5842: NOT `running`, which is the GENERATE phase — a commit must never put a cancelled
+    // job back into a status the worker generates in) and stamps THIS claimant's id.
     for (const s of ['suspended', 'errored', 'rejected']) {
       const jid = await make(`ok_${s}`, s)
-      expect(await setHeaderRunning(queryFn, jid)).toBe(true)
-      expect((await dbJobHeader(jid))!.status).toBe('running')
+      expect(await claimBulkJobCommit(queryFn, jid, `claim_${s}`)).toBe(true)
+      const header = await dbJobHeader(jid)
+      expect(header!.status).toBe('committing')
+      expect(header!.commit_claim_id).toBe(`claim_${s}`)
     }
-    // Non-committable (worker active, or already committed) → refuses, returns false, unchanged.
-    for (const s of ['queued', 'running', 'resolved']) {
+    // Non-committable → refuses, returns false, unchanged. `committing` is the row the old
+    // matrix could not have: a LIVE commit claim is not re-claimable, which is what makes
+    // "a job is committed once" hold (BJ-10).
+    for (const s of ['queued', 'running', 'committing', 'resolved']) {
       const jid = await make(`no_${s}`, s)
-      expect(await setHeaderRunning(queryFn, jid)).toBe(false)
+      expect(await claimBulkJobCommit(queryFn, jid, `claim_no_${s}`)).toBe(false)
       expect((await dbJobHeader(jid))!.status).toBe(s)
     }
+  })
+
+  // ── COMMIT CLAIM IDENTITY + the `committing` exits (#5842) ───────────────────
+  test('a commit claim is identity-bearing: only the holder may finish/heartbeat/release it; a STALE claim is reclaimable by the next commit and by the user cancel (never a dead end)', async () => {
+    const queryFn = q as unknown as AiUsageQueryFn
+    const make = async (suffix: string) => {
+      const jid = `aibulkjob_claimid_${suffix}_${TS}`
+      await insertBulkJobHeader(queryFn, {
+        jobId: jid,
+        actorId: ACTOR,
+        sheetId: SHEET_ID,
+        fieldId: `${FLD_TARGET}_claimid_${suffix}`,
+        scopeFingerprint: `fp_claimid_${suffix}`,
+        total: 0,
+      })
+      await q(`UPDATE ${AI_BULK_JOB_TABLE} SET status = 'suspended' WHERE job_id = $1`, [jid])
+      return jid
+    }
+    const ageHeader = async (jid: string, minutes: number) =>
+      q(`UPDATE ${AI_BULK_JOB_TABLE} SET updated_at = NOW() - ($2::int * INTERVAL '1 minute') WHERE job_id = $1`, [jid, minutes])
+
+    // (1) A request that does NOT hold the claim can neither resolve it nor error it out.
+    const jid1 = await make('identity')
+    expect(await claimBulkJobCommit(queryFn, jid1, 'claim_A')).toBe(true)
+    expect(await finishBulkJobCommit(queryFn, jid1, { confirmed: 0 }, 'claim_B')).toBe(false)
+    expect(await releaseBulkJobCommitClaim(queryFn, jid1, 'claim_B')).toBe(false)
+    expect(await heartbeatBulkJobCommit(queryFn, jid1, 'claim_B')).toBe(false)
+    expect((await dbJobHeader(jid1))!.status).toBe('committing') // A's claim survived all three
+    expect(await finishBulkJobCommit(queryFn, jid1, { confirmed: 0 }, 'claim_A')).toBe(true)
+    expect((await dbJobHeader(jid1))!.status).toBe('resolved')
+    expect((await dbJobHeader(jid1))!.commit_claim_id).toBeNull()
+
+    // (2) A LIVE claim is not reclaimable and not cancellable — a commit really is writing.
+    const jid2 = await make('live')
+    expect(await claimBulkJobCommit(queryFn, jid2, 'claim_live')).toBe(true)
+    expect(await claimBulkJobCommit(queryFn, jid2, 'claim_second')).toBe(false)
+    expect(await cancelBulkJob(queryFn, jid2)).toBe(false)
+    expect((await dbJobHeader(jid2))!.commit_claim_id).toBe('claim_live')
+
+    // (3) A claim that stopped heartbeating is a DEAD commit request (pod restart / OOM), and
+    // `committing` must not become a dead end: the next commit reclaims it …
+    const jid3 = await make('stale_claim')
+    expect(await claimBulkJobCommit(queryFn, jid3, 'claim_dead')).toBe(true)
+    await ageHeader(jid3, 5)
+    expect(await claimBulkJobCommit(queryFn, jid3, 'claim_heir', { staleAfterMs: 60_000 })).toBe(true)
+    expect((await dbJobHeader(jid3))!.commit_claim_id).toBe('claim_heir')
+    // … and the zombie waking up can no longer finish or release what it lost.
+    expect(await finishBulkJobCommit(queryFn, jid3, { confirmed: 0 }, 'claim_dead')).toBe(false)
+    expect(await releaseBulkJobCommitClaim(queryFn, jid3, 'claim_dead')).toBe(false)
+    expect((await dbJobHeader(jid3))!.status).toBe('committing')
+
+    // (4) … and the USER's own exit works too: a stale `committing` IS cancellable, so the
+    // owner of a job whose commit died can abandon it without waiting for a process restart.
+    const jid4 = await make('stale_cancel')
+    expect(await claimBulkJobCommit(queryFn, jid4, 'claim_dead2')).toBe(true)
+    expect(await cancelBulkJob(queryFn, jid4, { commitStaleAfterMs: 60_000 })).toBe(false) // still live
+    await ageHeader(jid4, 5)
+    expect(await cancelBulkJob(queryFn, jid4, { commitStaleAfterMs: 60_000 })).toBe(true)
+    const cancelled = await dbJobHeader(jid4)
+    expect(cancelled!.status).toBe('rejected')
+    expect(cancelled!.commit_claim_id).toBeNull()
+
+    // (5) A live heartbeat keeps a long commit OUT of every staleness window.
+    const jid5 = await make('heartbeat')
+    expect(await claimBulkJobCommit(queryFn, jid5, 'claim_beating')).toBe(true)
+    await ageHeader(jid5, 5)
+    expect(await heartbeatBulkJobCommit(queryFn, jid5, 'claim_beating')).toBe(true)
+    expect(await claimBulkJobCommit(queryFn, jid5, 'claim_thief', { staleAfterMs: 60_000 })).toBe(false)
+    expect(await cancelBulkJob(queryFn, jid5, { commitStaleAfterMs: 60_000 })).toBe(false)
+    // The boot sweep cannot reach it either. (Its RETURN count is global — other suites' jobs
+    // live in the same database — so the assertion is on THIS header, not on the tally.)
+    await reconcileOrphanedBulkJobs(queryFn, { staleAfterMs: 60_000 })
+    const beating = await dbJobHeader(jid5)
+    expect(beating!.status).toBe('committing')
+    expect(beating!.commit_claim_id).toBe('claim_beating')
+  })
+
+  // ── ROUTE-level commit claim: the 409, the release-on-throw, and no double write ──
+  test('ROUTE: two concurrent commits of the same job → exactly ONE writes (one 200 + one 409); the job resolves once and the record is written once', async () => {
+    const ids = [0, 1].map((i) => `rec_b4_cc${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `cc ${id}` }, ACTOR)
+    const start = await bulkPreview({ fieldId: FLD_TARGET, scope: 'sheet' })
+    const jobId = start.body.jobId as string
+    await runJob(jobId)
+    expect((await dbJobHeader(jobId))!.status).toBe('suspended')
+
+    // Both requests are in flight at once against the SAME job.
+    const [a, b] = await Promise.all([commitJob(jobId, ids), commitJob(jobId, ids)])
+    const statuses = [a.status, b.status].sort()
+    expect(statuses).toEqual([200, 409])
+    const winner = a.status === 200 ? a : b
+    const loser = a.status === 200 ? b : a
+    // Which of the two refusals the loser gets depends on WHERE it lost: the early read
+    // (`committing` already on the header → BULK_JOB_NOT_COMMITTABLE) or the conditional claim
+    // itself (both read a committable status, one claim won → BULK_JOB_COMMIT_IN_PROGRESS).
+    // Both are the same guarantee at different depths; the invariants below are what matter.
+    expect(['BULK_JOB_NOT_COMMITTABLE', 'BULK_JOB_COMMIT_IN_PROGRESS']).toContain(loser.body.error.code)
+    expect(winner.body.state).toBe('resolved')
+
+    const header = await dbJobHeader(jobId)
+    expect(header!.status).toBe('resolved')
+    expect(header!.commit_claim_id).toBeNull()
+    // Written ONCE: every row is `committed` exactly once and holds the AI output.
+    const rows = await dbJobRows(jobId)
+    expect(rows.filter((r) => r.state === 'committed')).toHaveLength(ids.length)
+    for (const id of ids) expect(await recordValue(id, FLD_TARGET)).toBe('AI OUT')
+    // The commit never charges — the ledger is what generation settled (2 rows × 30).
+    expect(await ledgerTokenSum()).toBe(2 * 30)
+  })
+
+  test('ROUTE: a commit that THROWS releases its own claim → the header comes back `errored` (never stuck `committing`) and a retry commits', async () => {
+    const ids = [0, 1].map((i) => `rec_b4_ct${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `ct ${id}` }, ACTOR)
+    const start = await bulkPreview({ fieldId: FLD_TARGET, scope: 'sheet' })
+    const jobId = start.body.jobId as string
+    await runJob(jobId)
+
+    // Make the commit throw AFTER the claim: the write-set read runs under the claim, so
+    // failing exactly that statement exercises the catch with `commitClaimed === true`.
+    const realPool = poolManager.get()
+    const realGet = poolManager.get.bind(poolManager)
+    const throwingPool = new Proxy(realPool as unknown as Record<string, unknown>, {
+      get(target, prop) {
+        if (prop !== 'query') {
+          // Bind to the REAL pool: pg's methods keep state on `this`, which must not be the proxy.
+          const value = Reflect.get(target, prop, target)
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value
+        }
+        return (sql: string, params?: unknown[]) => {
+          if (typeof sql === 'string' && sql.includes("state = 'generated'")) {
+            return Promise.reject(new Error('injected commit failure'))
+          }
+          return (realPool as unknown as { query: (s: string, p?: unknown[]) => Promise<unknown> }).query(sql, params)
+        }
+      },
+    })
+    ;(poolManager as unknown as { get: () => unknown }).get = () => throwingPool
+    let failed: Awaited<ReturnType<typeof commitJob>>
+    try {
+      failed = await commitJob(jobId, ids)
+    } finally {
+      ;(poolManager as unknown as { get: () => unknown }).get = realGet
+    }
+    expect(failed.status).toBe(500)
+    expect(failed.body.error.code).toBe('INTERNAL_ERROR')
+
+    // The claim was handed back: `errored` is committable again, and nothing was written.
+    const afterThrow = await dbJobHeader(jobId)
+    expect(afterThrow!.status).toBe('errored')
+    expect(afterThrow!.commit_claim_id).toBeNull()
+    for (const id of ids) expect(await recordValue(id, FLD_TARGET)).toBeNull()
+
+    // A retry is accepted (no restart, no manual DB fix) and writes.
+    const retry = await commitJob(jobId, ids)
+    expect(retry.status).toBe(200)
+    expect(retry.body.state).toBe('resolved')
+    for (const id of ids) expect(await recordValue(id, FLD_TARGET)).toBe('AI OUT')
+  })
+
+  test('ROUTE: while another request holds the commit claim, a commit is refused AND the user cancel is refused — the claim is never stolen from a live commit', async () => {
+    const ids = [0, 1].map((i) => `rec_b4_held${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `held ${id}` }, ACTOR)
+    const start = await bulkPreview({ fieldId: FLD_TARGET, scope: 'sheet' })
+    const jobId = start.body.jobId as string
+    await runJob(jobId)
+
+    // Another request holds the claim (this is exactly what the route does before it writes).
+    expect(await claimBulkJobCommit(q as unknown as AiUsageQueryFn, jobId, 'claim_other_request')).toBe(true)
+
+    const refused = await commitJob(jobId, ids)
+    expect(refused.status).toBe(409)
+    expect(refused.body.error.code).toBe('BULK_JOB_NOT_COMMITTABLE')
+    for (const id of ids) expect(await recordValue(id, FLD_TARGET)).toBeNull()
+
+    // The cancel route reports the REAL status instead of pretending it cancelled a job
+    // whose records are being written right now.
+    const cancelled = await cancelJob(jobId)
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body.cancelled).toBe(false)
+    expect(cancelled.body.state).toBe('committing')
+    const header = await dbJobHeader(jobId)
+    expect(header!.status).toBe('committing')
+    expect(header!.commit_claim_id).toBe('claim_other_request')
+
+    // The poll route surfaces the same status to the UI (it is part of the wire contract).
+    const poll = await pollJob(jobId)
+    expect(poll.body.state).toBe('committing')
   })
 
   // ── PRODUCTION WIRING (finding #1): the injected queue drives the worker out-of-band ──
@@ -685,6 +908,11 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     const staleQueued = await mk('stale_queued', 'queued', 5)
     const recentRunning = await mk('recent_running', 'running', 0)
     const suspendedOld = await mk('suspended_old', 'suspended', 5)
+    // #5842: a commit is an in-REQUEST phase, so a restart leaves `committing` with nobody to
+    // finish it — it is swept for the same reason queued/running are. A LIVE commit heartbeats
+    // its header per chunk, so the staleness window is what keeps the sweep off it.
+    const staleCommitting = await mk('stale_committing', 'committing', 5)
+    const recentCommitting = await mk('recent_committing', 'committing', 0)
 
     // Quiet window 60s: the 5-min-stale active jobs are orphaned; the just-updated
     // one is a live worker; the suspended one is excluded by STATUS regardless of age.
@@ -694,7 +922,14 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     expect((await dbJobHeader(staleQueued))!.status).toBe('errored')
     expect((await dbJobHeader(recentRunning))!.status).toBe('running')
     expect((await dbJobHeader(suspendedOld))!.status).toBe('suspended')
-    expect(reconciled).toBeGreaterThanOrEqual(2)
+    // The abandoned commit is re-opened (errored IS committable, so the rows that were not
+    // written can still be committed) and its claim id is cleared, so the dead request cannot
+    // resolve or release the job if it ever wakes up. The fresh one is untouched.
+    const sweptCommit = await dbJobHeader(staleCommitting)
+    expect(sweptCommit!.status).toBe('errored')
+    expect(sweptCommit!.commit_claim_id).toBeNull()
+    expect((await dbJobHeader(recentCommitting))!.status).toBe('committing')
+    expect(reconciled).toBeGreaterThanOrEqual(3)
   })
 
   test('hard-restart reconcile (TRUTHFUL ROWS): seeded rows → errored; generated stays charged, pending → pending_not_generated, skipped untouched, NO raw pending leaks', async () => {

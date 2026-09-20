@@ -46,6 +46,32 @@ describe('meta-ai-bulk-labels — distinct state copy', () => {
     expect(aiBulkFailureReason('mystery', false)).toBe('mystery')
   })
 
+  // #5842: the backend books a row that was AT the provider when it left `pending` as
+  // `failure` with one of two reasons. They are user-visible provenance for a REAL charge, so
+  // neither may fall through to the raw-token default (a zh user would read
+  // `cancelled_after_charge`), and they must not read the same — one says the user cancelled,
+  // the other says something else interrupted the job.
+  it('the charged-but-not-offered reasons (#5842) are localised and DISTINCT from each other', () => {
+    const reasons = ['cancelled_after_charge', 'interrupted_after_charge']
+    for (const reason of reasons) {
+      for (const isZh of [false, true]) {
+        // Not the raw token: a translated label was actually found.
+        expect(aiBulkFailureReason(reason, isZh)).not.toBe(reason)
+      }
+      // zh is real Chinese copy, not the en string reused.
+      expect(aiBulkFailureReason(reason, true)).not.toBe(aiBulkFailureReason(reason, false))
+      // The money is named in both locales — this is a charged row.
+      expect(aiBulkFailureReason(reason, false).toLowerCase()).toContain('charged')
+      expect(aiBulkFailureReason(reason, true)).toContain('扣费')
+    }
+    expect(aiBulkFailureReason('cancelled_after_charge', false)).not.toBe(aiBulkFailureReason('interrupted_after_charge', false))
+    expect(aiBulkFailureReason('cancelled_after_charge', true)).not.toBe(aiBulkFailureReason('interrupted_after_charge', true))
+    // …and distinct from the two pre-existing charged failures, so the review page can tell all
+    // four apart.
+    const all = ['provider_error_charged', 'cache_failed_after_generation', ...reasons].map((r) => aiBulkFailureReason(r, true))
+    expect(new Set(all).size).toBe(all.length)
+  })
+
   it('every COMMIT outcome maps to a DISTINCT label; only "written" reads as success', () => {
     const outcomes = ['written', 'stale_reprev', 'write_conflict', 'not_in_cache', 'skipped_no_perm']
     const en = outcomes.map((o) => aiBulkOutcomeLabel(o, false))
