@@ -159,6 +159,89 @@ function scenarioBDiffRows(): unknown {
   }
 }
 
+// ── Q3a：v2 快照（第二批次）经 diff 引擎的四类变更 ────────────────────────────────────────────
+// 后端实证形状见 plugins/plugin-integration-core/__tests__/scenario-b-v2-snapshot-diff.test.cjs：
+// v1/v2 各 54 行、只差四处 -> 55 条 diff（changed 2 / added 1 / removed 1 / unchanged 51），held 4。
+// 这里复用同一批数字，验证的是**页面怎么渲染这份形状**，不重跑后端分类。
+const SCENARIO_B_BATCH_ID_V2 = 'batch-scenario-b-02'
+const SCENARIO_B_RUN_ID_V2 = 'run-scenario-b-02'
+const SCENARIO_B_V2_DIFF_ROW_COUNT = 55
+const SCENARIO_B_V2_UNCHANGED_COUNT = 51
+
+function scenarioBTwoBatchList(): StockPreparationSnapshotBatchListResult {
+  return {
+    projectId: SCENARIO_B_PROJECT_ID,
+    batchCount: 2,
+    // 后端按版本降序返回：v2 在前。
+    batches: [
+      {
+        snapshotBatchId: SCENARIO_B_BATCH_ID_V2,
+        snapshotVersion: 2,
+        snapshotStatus: 'active',
+        syncRunId: SCENARIO_B_RUN_ID_V2,
+        lineCount: SCENARIO_B_LINE_COUNT,
+        createdAtPresent: true,
+        incomplete: false,
+      },
+      {
+        snapshotBatchId: SCENARIO_B_BATCH_ID,
+        snapshotVersion: 1,
+        snapshotStatus: 'active',
+        syncRunId: SCENARIO_B_RUN_ID,
+        lineCount: SCENARIO_B_LINE_COUNT,
+        createdAtPresent: true,
+        incomplete: false,
+      },
+    ],
+  } as unknown as StockPreparationSnapshotBatchListResult
+}
+
+function scenarioBV2DiffSummary(): StockPreparationSnapshotDiffSummary {
+  return {
+    snapshotBatchId: SCENARIO_B_BATCH_ID_V2,
+    baseSnapshotBatchId: SCENARIO_B_BATCH_ID,
+    changeCounts: {
+      added: 1,
+      removed: 1,
+      quantityChanged: 1,
+      unitChanged: 0,
+      versionChanged: 0,
+      pathChanged: 0,
+      missingChildBom: 0,
+      // 已知缺口：汇总词表里没有 componentCodeChanged —— 原位物料替换在这张汇总表上只能以
+      // fingerprintChanged 露头（2 = 改数量那行 + 替换那行）。逐行明细里才点名（见下）。
+      fingerprintChanged: 2,
+    },
+    blockingExceptionCount: 0,
+  }
+}
+
+function scenarioBV2DiffRows(): unknown {
+  const hex = (n: number): string => n.toString(16).padStart(16, '0')
+  const row = (i: number, diffType: string, changeTypes: string[]) => ({
+    diffId: `stockprep_diff_${hex(i)}`,
+    diffType,
+    reviewStatus: changeTypes.length ? 'held' : 'ready',
+    changeTypes,
+    rowCount: 1,
+    keyFingerprint: `sha16:${hex(i)}`,
+  })
+  const rows = [
+    row(0, 'changed', ['quantity_changed', 'source_fingerprint_changed']),
+    row(1, 'changed', ['component_code_changed', 'source_fingerprint_changed']),
+    row(2, 'added', ['added']),
+    row(3, 'removed', ['removed']),
+    ...Array.from({ length: SCENARIO_B_V2_UNCHANGED_COUNT }, (_, i) => row(4 + i, 'unchanged', [])),
+  ]
+  return {
+    snapshotBatchId: SCENARIO_B_BATCH_ID_V2,
+    baseSnapshotBatchId: SCENARIO_B_BATCH_ID,
+    rowCount: SCENARIO_B_V2_DIFF_ROW_COUNT,
+    heldRowCount: 4,
+    rows,
+  }
+}
+
 function mockDashboardClearStageReads(): void {
   h.listSnapshotBatches.mockResolvedValue(scenarioBBatchList())
   h.getMappingSummary.mockResolvedValue({
@@ -274,6 +357,63 @@ describe('StockPreparationScenarioBAcceptance (W7-A3, values-free)', () => {
     const diffRows = root.querySelectorAll('[data-testid="stock-prep-snapshot-diff-row"]')
     expect(diffRows.length).toBe(SCENARIO_B_LINE_COUNT) // all 54 rows render — this is the mutation target
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-meta"]')?.textContent).toContain('54')
+  })
+
+  // ── ⑥ 两批次对账：四类变更在详情页各自渲染出来（Q3a）──────────────────────────────────────────
+  it('⑥ two-batch diff renders all four change kinds (changed×2 / added / removed) plus 51 unchanged', async () => {
+    h.listSnapshotBatches.mockResolvedValue(scenarioBTwoBatchList())
+    h.getDiff.mockResolvedValue(scenarioBV2DiffSummary())
+    h.listDiffRows.mockResolvedValue(scenarioBV2DiffRows())
+    const root = mountDiffView()
+    await flushUi()
+
+    // 两个批次都完整（没有 incomplete 徽标）→ diff 入口可用。
+    expect(root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-row"]').length).toBe(2)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-incomplete-badge"]')).toBeNull()
+
+    // 选最新的那个批次（v2）——列表按版本降序，第一个就是它。
+    const selects = root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')
+    expect(selects.length).toBe(2)
+    ;(selects[0] as HTMLButtonElement).click()
+    await flushUi()
+
+    // 汇总面：拿来比较的是前一个批次（v1），四类变更的计数按 data-kind 逐个读出来。
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-base"]')?.textContent)
+      .toContain(SCENARIO_B_BATCH_ID)
+    const countOf = (kind: string): string =>
+      root.querySelector(`[data-testid="stock-prep-snapshot-diff-count"][data-kind="${kind}"]`)?.textContent || ''
+    expect(countOf('added')).toContain('1')
+    expect(countOf('removed')).toContain('1')
+    expect(countOf('quantityChanged')).toContain('1')
+    expect(countOf('fingerprintChanged')).toContain('2')
+    expect(countOf('unitChanged')).toContain('0')
+    // 汇总词表里根本没有 componentCodeChanged 这一格（后端 changeCounts 也不产它）——
+    // 这是已知缺口，钉成断言而不是写成散文。
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-count"][data-kind="componentCodeChanged"]')).toBeNull()
+
+    // 逐行明细：55 行，四类各自可数；原位物料替换在这一层**被点名**。
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    const rows = root.querySelectorAll('[data-testid="stock-prep-snapshot-diff-row"]')
+    expect(rows.length).toBe(SCENARIO_B_V2_DIFF_ROW_COUNT)
+    const byType = (diffType: string): number =>
+      root.querySelectorAll(`[data-testid="stock-prep-snapshot-diff-row"][data-diff-type="${diffType}"]`).length
+    expect(byType('changed')).toBe(2)
+    expect(byType('added')).toBe(1)
+    expect(byType('removed')).toBe(1)
+    expect(byType('unchanged')).toBe(SCENARIO_B_V2_UNCHANGED_COUNT)
+    expect(root.querySelectorAll('[data-testid="stock-prep-snapshot-diff-row"][data-review-status="held"]').length).toBe(4)
+    const changedText = Array.from(
+      root.querySelectorAll('[data-testid="stock-prep-snapshot-diff-row"][data-diff-type="changed"]'),
+    ).map((el) => el.textContent || '').join(' ')
+    expect(changedText).toContain('quantity_changed')
+    expect(changedText).toContain('component_code_changed')
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-meta"]')?.textContent).toContain('55')
+
+    // values-free：整页渲染里没有任何图号/路径样式的业务值。
+    const text = root.textContent || ''
+    expect(text).not.toMatch(/SYN-/)
+    expect(text).not.toMatch(/https?:\/\//i)
   })
 
   // ── ③ 空态：0 批次 ─────────────────────────────────────────────────────────────────────────────
