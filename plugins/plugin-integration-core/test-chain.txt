@@ -60,6 +60,7 @@ node __tests__/stock-preparation-erp-material-sync-persist.test.cjs
 node __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs
 node __tests__/stock-preparation-readonly-source-run.test.cjs
 node __tests__/scenario-b-synthetic-bom-source-run.test.cjs
+node __tests__/scenario-b-staging-persist.test.cjs
 node __tests__/stock-preparation-plm-source-persist-bridge.test.cjs
 node __tests__/stock-preparation-snapshot-reads.test.cjs
 node __tests__/stock-preparation-confirm-writes.test.cjs
@@ -237,6 +238,7 @@ node __tests__/integration-g4-m2-adapter-load-hard-dependency.test.cjs
 
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
+# --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---
 node __tests__/sealed-export-s4-generation-kernel.test.cjs
 node __tests__/sealed-export-s4-generation-migration.test.cjs
 node __tests__/sealed-export-sqlserver-sealed-snapshot-profile.test.cjs
