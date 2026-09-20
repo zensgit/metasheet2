@@ -414,10 +414,16 @@ export async function listTemplateCategories(): Promise<string[]> {
 // The three duplicates are now defined ONCE, in the phase 1 block below, on A-2's typed path:
 // acceptance J (multi-org member → 403 `SESSION_ORG_REQUIRED` → shared session-org selector →
 // retry) branches on `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'` in
-// `ApprovalTemplateGroupsPanel.vue:135/:155`, and A-4's wrapper threw a bare
-// `Error('API error: …')` with no `code` at all, so keeping A-4's version would have turned that
-// whole retry flow into dead code with no test able to see it. `TemplateGroupSections.vue`'s own
-// catch sites read only `message`, so they are unaffected by the widening.
+// `ApprovalTemplateGroupsPanel.vue`'s `loadGroups` / `onCreate` catch sites (symbol anchors, not
+// line numbers: the line numbers this comment originally carried were copied over from a report
+// written against the MERGE tree and were already wrong for this REBASE tree), and A-4's wrapper
+// threw a bare `Error('API error: …')` with no `code` at all, so keeping A-4's version would have
+// turned that whole retry flow into dead code with no test able to see it.
+//
+// `TemplateGroupSections.vue` then took the SAME branch for its own mount-time `loadAll()`
+// (gate D3-1, 2026-09-20 — page-level acceptance J), so the A-2 contract is now load-bearing on
+// both surfaces. Its remaining catch sites (`loadMore` / `moveGroupSection` / `onMoveItem`) still
+// read only `message` — deliberately, see that file's own D3-1 scope note.
 //
 // Only `listTemplatesBySection` and `reorderApprovalTemplateGroups` below are A-4-only (no A-2
 // counterpart) and therefore keep their original bodies, `USE_MOCK` branch included. See the
