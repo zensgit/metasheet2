@@ -61,6 +61,15 @@ describe('IntegrationMonitoringSection (unit)', () => {
       bi,
       runRowSummaries: () => [],
       isRunExpanded: () => false,
+      // SC-04 run-detail dialog props: closed by default ('' id), so every pre-existing case
+      // renders exactly the DOM it did before this slice.
+      runDetailId: '',
+      runDetailLoading: false,
+      runDetailError: '',
+      runDetail: null,
+      runDetailPayloadText: '',
+      openRunDetail: vi.fn(noopFn),
+      closeRunDetail: vi.fn(noopFn),
       deadLetterErrorLabel: () => '',
       deadLetterErrorHint: () => null,
       isDeadLetterReplayable: () => false,

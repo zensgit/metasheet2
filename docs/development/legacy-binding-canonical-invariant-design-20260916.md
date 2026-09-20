@@ -166,3 +166,22 @@ LEGACY_BINDING_DATASOURCE_CHANGE_REQUIRES_CONNECTION_ID`。
   依赖于指针是否变化,反而更难解释。
 - HTTP 层没有新增专门的路由测试:本层改动的 400 映射完全由既有 `inferHttpStatus` 的类名规则决定,新增
   路由用例会引入 `lib/http-routes.cjs` 相关的 pin/冲突风险,收益不抵风险。
+
+## 10. 退役条件收窄（2026-09-20 后续 PR）
+
+§9 第 2 条留给 owner 的那个取舍已经执行：**标记退役不再是「带了 `connectionId` 就退役」，而是
+「请求的连接 `!==` 这一行的生效指针」才退役**。
+
+促成它的真实后果（实读）：工作台编辑抽屉把草稿的 `connectionId` 填成这一行自己的连接
+（`apps/web/src/views/IntegrationWorkbenchView.vue:2309`/`:2325`），并在 bridge kind 下每次保存都带上
+（`:2445`），`lib/http-routes.cjs:4889` 原样透传 —— 于是**一次纯改名保存就退役标记**，
+再经 `lib/external-systems.cjs:797-798` 删掉 `config.dataSourceId`，回滚凭证静默消失。
+
+判据用「生效指针」= `connection_id ?? config.dataSourceId`（canonical 优先，与读侧
+`lib/connection-resolver.cjs` 的分支顺序一致），**不是**「payload 的 `config.dataSourceId` 是否变化」——
+后者会放过迁移形状上「只改 `connectionId` 不带 `config`」的写入，造出 canonical A + legacy 指针 B 的
+僵尸行，被 `lib/connection-resolver.cjs:193-200` 的 `CONNECTION_BINDING_MISMATCH` 每次读都拒死。
+
+本节对应的 PR **放松了触发条件，须单独复核**；设计与反证逐条见
+`docs/development/legacy-binding-retire-only-on-pointer-change-design-20260920.md`，
+验证记录见同名 `-verification-20260920.md`。§9 第 1 条（存量巡检）仍未做，仍属 owner 层。

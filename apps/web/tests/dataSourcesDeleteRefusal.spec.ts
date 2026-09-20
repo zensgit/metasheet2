@@ -27,10 +27,9 @@ function referentialRefusal(referenceCount: number): Response {
       error: {
         code: 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS',
         message:
-          `Data source 'a' is referenced by ${referenceCount} external system(s) ` +
-          '(integration_external_systems.config.dataSourceId) and deleting it would leave dangling ' +
-          'references. A platform admin may repeat the request with force=true to break the ' +
-          'reference deliberately.',
+          `Data source 'a' is referenced by ${referenceCount} external system(s); unbind them first — ` +
+          `请先解绑 ${referenceCount} 个外部系统。Deleting a referenced source is refused; ` +
+          'force=true is no longer accepted.',
         details: { referenceCount },
       },
     }),

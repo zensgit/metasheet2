@@ -1075,6 +1075,19 @@ export interface AnalyzeOptions {
    * this is set or `requireOrder` is on.
    */
   refusalReturn?: string
+  /**
+   * Same-file helpers whose liveness refusal stops an IN-REQUEST EGRESS LOOP instead of answering the
+   * request (#5838: the inline AI bulk-preview loop asks before every provider call). Their refusal must
+   * be inert and must return `false` and NOTHING ELSE — fail-closed for the caller, which is what stops
+   * the sending. NAMED, never inferred: every helper not listed here must still answer 403/404/410, and
+   * the caller side (that a `false` really leaves the loop) is proven where the helper is named.
+   *
+   * The excuse is exactly that — an excuse from ANSWERING, not a promotion: a listed helper is also
+   * struck from every handler's liveness `sources` — as is any helper that merely RELAYS its verdict
+   * (all of whose liveness exits come from struck sites, to any depth) — so no route can ever prove its
+   * liveness with a question that answers nothing, directly or through a wrapper.
+   */
+  egressStops?: Set<string>
 }
 
 export interface HandlerAnalysis {
@@ -1288,10 +1301,42 @@ function returnsExactly(stmt: ts.Statement, expected: string, sf: ts.SourceFile)
 const AUTHORITY_REFUSAL = /\b40[13]\b|\bsendForbidden\(|\bsendUnauthorized\(|'FORBIDDEN'|'UNAUTHORIZED'|'UNAUTHENTICATED'/
 const NOT_LIVE_ANSWER = /\bsendSheetNotLive\(|\bstatus\(\s*(?:403|404|410)\s*\)|\bstatus:\s*(?:403|404|410)\b|^\s*throw\b|[;{]\s*throw\b/
 
+/**
+ * The refusal branch tells its caller `false` and has NO WAY to tell it anything else: its last
+ * statement is `return false` (so a log line may precede), and EVERY `return` it can reach — not just
+ * the last one — returns exactly `false`. Checking only the last statement would accept a refusal that
+ * is fail-open on a sub-case (`if (liveness === 'deleted') return true; return false`): "keep sending"
+ * on precisely the case the guard exists for, with the trailing `return false` as cover.
+ */
+function refusesOnlyFalse(branch: ts.Statement, sf: ts.SourceFile): boolean {
+  const last = ts.isBlock(branch) ? branch.statements[branch.statements.length - 1] : branch
+  if (!last || !ts.isReturnStatement(last) || !last.expression || collapsed(codeOf(last.expression, sf)) !== 'false') return false
+  let onlyFalse = true
+  const walk = (node: ts.Node): void => {
+    if (ts.isReturnStatement(node) && (!node.expression || collapsed(codeOf(node.expression, sf)) !== 'false')) onlyFalse = false
+    // A nested function's `return` belongs to that function, not to the refusal.
+    if (node === branch || !isFnNode(node)) ts.forEachChild(node, walk)
+  }
+  walk(branch)
+  return onlyFalse
+}
+
 /** Why the branch of a liveness refusal does not really refuse (null when it does). */
-function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile): string | null {
+function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile, unitLabel = ''): string | null {
   const branch = refusal.thenStatement
   const text = collapsed(codeOf(branch, sf))
+  if (options.egressStops?.has(unitLabel)) {
+    // An EGRESS-STOP helper, named by the caller's guard (#5838): it is not asked whether to ANSWER the
+    // request — it is asked, between two outbound provider calls, whether the request may keep sending.
+    // Its refusal therefore reports `false` to its caller instead of a status; it must still be inert (a
+    // refusal only answers) and must have no way to report anything else. That the CALLER then leaves
+    // the egress loop is proven where the helper is named, not here.
+    if (!inert(branch, true)) return `its liveness refusal branch awaits or calls a data source (\`${text.slice(0, 80)}\`) — a refusal only answers`
+    if (!refusesOnlyFalse(branch, sf)) {
+      return `its liveness refusal must end in \`return false\` and return nothing else — an egress-stop helper reports the refusal to its caller (\`${text.slice(0, 80)}\`)`
+    }
+    return null
+  }
   if (options.refusalReturn !== undefined) {
     if (returnsExactly(branch, options.refusalReturn, sf)) return null
     return `its liveness refusal does \`${text.slice(0, 80)}\` — it must be exactly \`return ${options.refusalReturn}\``
@@ -1431,7 +1476,7 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
           if (windowRule) {
             // A REFUSAL MUST REFUSE, and nothing but an authority refusal or an inert declaration may run
             // between the binding and it (a write there lands on a deleted sheet).
-            const branch = refusalBranchProblem(refusal.stmt, options, sf)
+            const branch = refusalBranchProblem(refusal.stmt, options, sf, unit.label)
             if (branch) violations.add(`${where}: ${branch}`)
             let holder: ts.Node = site.call.parent
             while (ts.isAwaitExpression(holder) || ts.isParenthesizedExpression(holder) || ts.isAsExpression(holder) || ts.isNonNullExpression(holder)) {
@@ -1487,11 +1532,37 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
     results = evaluate()
   }
 
+  // An EGRESS-STOP helper (#5838) is excused from answering 403/404/410 because it does not answer the
+  // request at all — it tells an in-request send loop to stop. It can therefore never BE a route's
+  // liveness proof: a handler whose only liveness question is such a helper would be counted GUARDED
+  // while answering 200 on a soft-deleted sheet, and the excuse granted for the loop would have silently
+  // bought that too. Neither may a RELAY launder it: a helper whose liveness exits all come from
+  // egress-stopped sites only passes the stop signal on, so it is struck as well — to any depth
+  // (fixpoint), while one genuinely answering source among its exits keeps it a real gate. The helper's
+  // caller side (that a `false` really leaves the loop, uncharged) is proven by name, per loop.
+  const stopNames = new Set(options.egressStops ?? [])
+  for (let round = 0; stopNames.size > 0 && round < results.length + 1; round += 1) {
+    let grew = false
+    for (const r of results) {
+      if (roots.has(r.unit.node) || stopNames.has(r.unit.label)) continue
+      const own = ownExits(r)
+      if (own.length > 0 && own.every((e) => stopNames.has(e.site.name))) {
+        stopNames.add(r.unit.label)
+        grew = true
+      }
+    }
+    if (!grew) break
+  }
+
   const sources: string[] = []
   for (const r of results) {
     const own = ownExits(r)
     if (roots.has(r.unit.node)) {
-      for (const e of own) if (e.exit !== 'loop') sources.push(`${e.site.kind} ${e.site.name}`)
+      for (const e of own) {
+        if (e.exit === 'loop') continue
+        if (stopNames.has(e.site.name)) continue
+        sources.push(`${e.site.kind} ${e.site.name}`)
+      }
       continue
     }
     const classes = own.map(exitClass)
