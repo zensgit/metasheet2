@@ -1197,8 +1197,11 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     const RUN = 128000
     // Wider than the direct case's ceiling on purpose: this one includes an HTTP round trip and
     // JSON-parsing a body of roughly 768 KB (each U+200B is escaped as six characters), neither of
-    // which the direct case pays. It is still two orders of magnitude below the quadratic cost of
-    // the round-2 shape at this n, so it discriminates without being a benchmark.
+    // which the direct case pays. Both sides of the margin are MEASURED rather than asserted to be
+    // comfortable (verification MD §30.5): the clean cost of this request is ~9 ms — measured by
+    // MUT-R3-F, which sets this ceiling to 0.0001 so the passing path prints its elapsed — and the
+    // round-2 implementation costs ~16.5 s at this n (MUT-R3-C). The ceiling sits ~200x above the
+    // former and ~8000x below the latter, so it discriminates without being a benchmark.
     const CEILING_MS = 2000
     const shapes: Array<{ label: string; value: string }> = [
       { label: 'visible + run + visible', value: `a${'\u200B'.repeat(RUN)}b` },
