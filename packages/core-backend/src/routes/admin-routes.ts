@@ -1488,8 +1488,18 @@ router.delete(
 /**
  * GET /api/admin/shards
  * Get health status of all database shards/pools
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. It returns
+ * poolManager.getPoolStats() plus getMetricsSnapshot() — the name, status, live/idle/waiting
+ * connection counts and last driver error string of every database pool the process holds
+ * (integration/db/connection-pool.ts:302 and :359). Nothing in that shape is tenant-scoped: it is
+ * the platform's database topology and saturation profile, so any authenticated caller of any
+ * tenant could map the shard layout and watch pool pressure. Gated on platform admin like the
+ * sibling admin operations (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/shards', async (req: Request, res: Response) => {
+router.get('/shards', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const stats = await poolManager.getPoolStats();
     const metricsSnapshot = poolManager.getMetricsSnapshot();
@@ -1534,8 +1544,16 @@ router.get('/shards', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/shards/:name
  * Get detailed status of a specific shard
+ *
+ * SECURITY (issue #5678, batch 2): same exposure as GET /shards for one pool, and additionally an
+ * enumeration oracle — the 404 vs 200 split answers "does a shard with this name exist?" one guess
+ * at a time, so an unauthenticated-by-role caller could recover the shard naming scheme even
+ * without listing. Gated on platform admin (requireAdminRole: no user or non-admin -> 403
+ * ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false ->
+ * 403, see guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the
+ * lookup, so the 404/200 distinction is never reached by a denied caller.
  */
-router.get('/shards/:name', async (req: Request, res: Response) => {
+router.get('/shards/:name', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { name } = req.params;
     const stats = await poolManager.getPoolStats();
@@ -1580,8 +1598,18 @@ router.get('/shards/:name', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/queues
  * Get queue statistics (MessageBus + DLQ)
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. It returns the
+ * in-process MessageBus stats (queue depth, exact/pattern subscription counts, pending RPC count)
+ * and, via three dlqService.list() calls, the platform-wide dead-letter totals. Those totals come
+ * from the same untenanted `dead_letter_queue` table that forced the batch-1 gate on GET /dlq
+ * (services/DeadLetterQueueService.ts:151 — no tenant_id column, no tenant predicate), so the
+ * counts are every tenant's failures aggregated, readable by any authenticated caller. Gated on
+ * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/queues', async (req: Request, res: Response) => {
+router.get('/queues', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     // Get MessageBus stats
     const messageBusStats = messageBus.getStats();
@@ -1887,8 +1915,18 @@ import { getHealthAggregator } from '../services/HealthAggregatorService';
 /**
  * GET /api/admin/health/detailed
  * Get detailed health status of all subsystems
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. Unlike
+ * GET /health/summary (deliberately left alone in this batch, see the design note), it returns the
+ * FULL per-subsystem payload from HealthAggregatorService.checkHealth()
+ * (services/HealthAggregatorService.ts:209): database, messageBus, plugins, rateLimiting and system
+ * details plus the raw `warnings` and `errors` arrays, which carry failure text produced by the
+ * underlying subsystems. That is platform-level operational state, not tenant state, and any
+ * authenticated caller of any tenant could poll it. Gated on platform admin (requireAdminRole: no
+ * user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool ->
+ * isAdmin returns false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/health/detailed', async (req: Request, res: Response) => {
+router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const healthAggregator = getHealthAggregator();
     const health = await healthAggregator.checkHealth();
@@ -1949,8 +1987,17 @@ router.get('/health/summary', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/health/subsystem/:name
  * Get health status of a specific subsystem
+ *
+ * SECURITY (issue #5678, batch 2): same exposure as GET /health/detailed narrowed to one subsystem
+ * — the handler runs the same checkHealth() and returns that subsystem's detail object verbatim,
+ * so `?name=database` alone hands over the database subsystem's diagnostic shape. The 400 branch
+ * also echoes the whitelist of valid subsystem names, which is a free map of what this deployment
+ * runs. Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED;
+ * isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the name
+ * validation, so a denied caller cannot read the whitelist out of the 400 either.
  */
-router.get('/health/subsystem/:name', async (req: Request, res: Response) => {
+router.get('/health/subsystem/:name', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { name } = req.params;
     const validSubsystems = ['database', 'messageBus', 'plugins', 'rateLimiting', 'system'];
