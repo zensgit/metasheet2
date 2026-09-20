@@ -36,6 +36,10 @@ import { messageBus } from '../integration/messaging/message-bus';
 import { getRateLimiter } from '../integration/rate-limiting';
 import { pluginConfigManager } from '../core/plugin-config-manager';
 import { isDatabaseSchemaError } from '../utils/database-errors';
+import {
+  DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+  isLiveConnectionFkViolation
+} from '../data-adapters/DataSourceManager';
 import type { PluginManifest } from '../types/plugin';
 
 const logger = new Logger('AdminRoutes');
@@ -1186,6 +1190,122 @@ router.post(
 // ═══════════════════════════════════════════════════════════════════
 
 /**
+ * REFERENTIAL REFUSAL for the two bulk data routes when their target is `data_sources`.
+ *
+ * Since #5896, `integration_external_systems.connection_id` is a foreign key onto
+ * `data_sources(live_id)` — a STORED generated column that holds the row's own id while the row is
+ * live and NULL once `deleted_at` is set (migration zzzz20260920120000). Consequence for THESE two
+ * routes: a bulk HARD delete of a referenced source, and a bulk update that sets `deleted_at` on
+ * one, are both refused by PostgreSQL with SQLSTATE 23503 on
+ * `fk_integration_external_systems_live_connection_id`. Until now each handler dropped that into its
+ * generic catch and answered a bare 500 carrying `err.message` — the rows were never touched, but
+ * the caller had no stable code to branch on and the driver's own prose reached the client. This is
+ * row 5 of the coverage matrix in
+ * docs/development/data-source-live-id-fk-binding-lock-design-20260920.md §7.
+ *
+ * TWO LAYERS, deliberately:
+ *   ① a PRE-CHECK that resolves the ids the mutation would hit and refuses 409 before any write is
+ *      attempted — this is the only layer that can NAME the offending ids;
+ *   ② the CATCH mapping, which is what actually removes the bare 500: a bind that commits between
+ *      the pre-check and the mutation still trips the constraint, and the pre-check is advisory
+ *      (see referencedDataSourceIdsForRefusal) so it must never be the sole guard.
+ *
+ * The predicate and the code are the ones DataSourceManager already uses for the single-source
+ * delete (`isLiveConnectionFkViolation`, DataSourceManager.ts:50, and
+ * DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE): SQLSTATE first, constraint name second, message
+ * prose NEVER — this deployment's PostgreSQL runs a zh_CN locale and the English
+ * "violates foreign key constraint" sentence simply is not there. Any OTHER 23503 (another table's
+ * constraint, or any table other than data_sources) keeps its existing status code.
+ */
+const DATA_SOURCES_TABLE = 'data_sources';
+const UNDEFINED_TABLE_SQLSTATE = '42P01';
+
+/** Values-free 409 body: the code, the target table and the ids the caller itself asked about. */
+function referencedRefusalBody(ids: string[]) {
+  return {
+    success: false,
+    error:
+      'One or more target data sources are still referenced by an integration external system; unbind them first — 请先解绑引用它们的外部系统。',
+    code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+    details: { table: DATA_SOURCES_TABLE, ids }
+  };
+}
+
+/**
+ * The ids among the `data_sources` rows matching `filters` that an integration external system
+ * canonically points at (`connection_id`) — i.e. exactly the rows the live-id foreign key protects.
+ *
+ * CANONICAL SHAPE ONLY. The legacy shape (`connection_id IS NULL` + `config->>'dataSourceId'` with
+ * the owner stamp) has no foreign key, so a bulk mutation does not trip on it and naming it here
+ * would claim a guarantee the database does not make; it stays registered as uncovered in §7 of the
+ * design note. Owner attribution — the reason DataSourceManager.countExternalSystemReferences reads
+ * that stamp — does not apply to the canonical column, which is server-written and unambiguous.
+ *
+ * 42P01 (integration schema not installed) means nothing can reference anything: zero, exact, and
+ * judged STRICTLY by the SQLSTATE, never by message prose — same posture as
+ * DataSourceManager.countExternalSystemReferences (DataSourceManager.ts:710).
+ */
+async function findReferencedDataSourceIds(filters: Record<string, unknown>): Promise<string[]> {
+  // Same filter application as the mutation below, so the pre-check and the write see the same set.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let idQuery = db.selectFrom(DATA_SOURCES_TABLE as any).select('id' as any) as any;
+  for (const [key, value] of Object.entries(filters)) {
+    idQuery = idQuery.where(key, '=', value);
+  }
+  const candidateRows = (await idQuery.execute()) as Array<{ id?: unknown }>;
+  const candidateIds = candidateRows
+    .map((row) => row?.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (candidateIds.length === 0) return [];
+
+  let referenceRows: Array<{ connection_id?: unknown }>;
+  try {
+    referenceRows = (await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .selectFrom('integration_external_systems' as any)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .select('connection_id' as any)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .where('connection_id' as any, 'in', candidateIds as any)
+      .execute()) as Array<{ connection_id?: unknown }>;
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return [];
+    throw err;
+  }
+
+  const referenced = new Set(
+    referenceRows
+      .map((row) => row?.connection_id)
+      .filter((id): id is string => typeof id === 'string')
+  );
+  return candidateIds.filter((id) => referenced.has(id));
+}
+
+/**
+ * ADVISORY wrapper around findReferencedDataSourceIds: used both for the pre-check and to name the
+ * ids in the catch-mapped refusal.
+ *
+ * A failure of the LOOKUP is not a failure of the request: the authoritative guard is the database
+ * constraint, which refuses the write whatever this read returned, and the catch below maps it. So a
+ * broken pre-check must not convert a legitimate bulk mutation into a new 500 it did not have
+ * before — it logs (values-free: the SQLSTATE only, never the driver's text, which embeds host,
+ * port, database and login) and returns "nothing known to be referenced". The cost of that choice is
+ * bounded: the refusal may then carry an empty `ids` list, never a wrong status.
+ */
+async function referencedDataSourceIdsForRefusal(filters: Record<string, unknown>): Promise<string[]> {
+  try {
+    return await findReferencedDataSourceIds(filters);
+  } catch (err) {
+    logger.warn('Reference lookup for bulk data_sources mutation failed; the database constraint remains the guard', {
+      context: 'AdminRoutes',
+      table: DATA_SOURCES_TABLE,
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown'
+    });
+    return [];
+  }
+}
+
+/**
  * DELETE /api/admin/data/bulk
  * Bulk delete data
  */
@@ -1234,6 +1354,22 @@ router.delete(
         return;
       }
 
+      // ① Referential pre-check (see the block comment above "Data Operations"). A hard delete of
+      // a source an external system still points at is refused by the live-id foreign key; answer
+      // 409 with the ids BEFORE attempting the write, so the caller learns which rows to unbind.
+      if (table === DATA_SOURCES_TABLE) {
+        const referencedIds = await referencedDataSourceIdsForRefusal(filters);
+        if (referencedIds.length > 0) {
+          logger.warn('Bulk deletion refused: target data sources are still referenced', {
+            context: 'AdminRoutes',
+            table,
+            referencedCount: referencedIds.length
+          });
+          res.status(409).json(referencedRefusalBody(referencedIds));
+          return;
+        }
+      }
+
       // Build and execute delete query
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query = db.deleteFrom(table as any) as any;
@@ -1261,6 +1397,19 @@ router.delete(
       });
     } catch (error) {
       const err = error as Error;
+      // ② Database backstop: a binding that committed after the pre-check (or a pre-check that
+      // could not run) still trips the live-id foreign key. Same DECISION as ①, so the same 409 —
+      // never the bare 500 this route used to answer. Judged by SQLSTATE + constraint name, so a
+      // 23503 raised by ANY other constraint, or against any other table, keeps its 500.
+      if (table === DATA_SOURCES_TABLE && isLiveConnectionFkViolation(err)) {
+        logger.warn('Bulk deletion refused by the binding foreign key', {
+          context: 'AdminRoutes',
+          table,
+          constraint: (err as { constraint?: string }).constraint
+        });
+        res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
+        return;
+      }
       logger.error('Bulk deletion failed', err);
       res.status(500).json({
         success: false,
@@ -1328,6 +1477,28 @@ router.put(
         return;
       }
 
+      // ① Referential pre-check, NARROWED to the update that actually clears `live_id`: the
+      // generated column is NULL exactly when `deleted_at` is not null, so only an update that
+      // SETS `deleted_at` can trip the foreign key. An update of `name`, `status` … does not touch
+      // a key column (PostgreSQL takes FOR NO KEY UPDATE) and must not be refused here — widening
+      // this to "any update of data_sources" would break legitimate bulk edits of referenced rows.
+      const clearsLiveId =
+        Object.prototype.hasOwnProperty.call(updates, 'deleted_at') &&
+        (updates as Record<string, unknown>).deleted_at !== null &&
+        (updates as Record<string, unknown>).deleted_at !== undefined;
+      if (table === DATA_SOURCES_TABLE && clearsLiveId) {
+        const referencedIds = await referencedDataSourceIdsForRefusal(filters);
+        if (referencedIds.length > 0) {
+          logger.warn('Bulk update refused: target data sources are still referenced', {
+            context: 'AdminRoutes',
+            table,
+            referencedCount: referencedIds.length
+          });
+          res.status(409).json(referencedRefusalBody(referencedIds));
+          return;
+        }
+      }
+
       // Build and execute update query
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query = (db.updateTable(table as any) as any).set(updates);
@@ -1355,6 +1526,16 @@ router.put(
       });
     } catch (error) {
       const err = error as Error;
+      // ② Database backstop — same shape as the DELETE route above.
+      if (table === DATA_SOURCES_TABLE && isLiveConnectionFkViolation(err)) {
+        logger.warn('Bulk update refused by the binding foreign key', {
+          context: 'AdminRoutes',
+          table,
+          constraint: (err as { constraint?: string }).constraint
+        });
+        res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
+        return;
+      }
       logger.error('Bulk update failed', err);
       res.status(500).json({
         success: false,
