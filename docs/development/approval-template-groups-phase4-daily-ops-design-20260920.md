@@ -247,3 +247,116 @@
 7. 本轮仍**零新增文件、零 CI 文件改动、零迁移、零新端点、零 flag、零 DDL**。
 8. 真浏览器只跑了 ①②④;③(三出口)是竞态,留在 vitest 层用可控 resolver 驱动,真浏览器未构造(登记为 NOT RUN)。
 
+
+---
+
+## 7. 第 4 轮设计增补(对齐 `impl-gate-A5-daily-ops-round3-20260921.md` 的 1 P1 / 1 P2 / 3 P3)
+
+> **状态仍是 PROPOSED 候选件。** 未合并、未 undraft、未开 PR、未 ratify。本节只增,不改写 §1-§6 已经写下的判断;凡被第 4 轮取代的**具体句子**,在 §7.6 逐句写明「哪一句失效、哪一句仍然生效」,不作废整节。
+
+### 7.1 P1:请求代数 + 身份签名下沉到 `templateStore`,平铺错误按请求归属
+
+第 3 轮把代数正确地装在了页面**自有的五个 ref** 上(面板 / 分节 / 分类 / 最近使用各自的 generation,以及平铺的 `flatListGeneration`),但把平铺面「这一轮读成功了吗」的判据接到了**全应用共享的 pinia 槽位** `store.error` 上:
+
+```ts
+// 第 3 轮(已替换)
+const settle = () => {
+  if (generation !== flatListGeneration) return
+  if (!store.error) flatListStale.value = false   // ← 共享槽位,没有请求身份
+}
+```
+
+共享槽位没有代数,于是**被作废的那次读照样能替当前这次读回答**。门审在真浏览器里复现的后果:切组织 ⇒ 旧组织的读 500 ⇒ `store.error` 被写上 ⇒ 新组织的读成功、行已经躺在 store 里,`flatListStale` 却**永不落**,管理表格 / 申请人画廊 / 分页三处全渲染空态,旧错误横幅压在上面;唯一可见的操作(关横幅)只清 `store.error`,不重跑 settle,**不恢复**。
+
+**判断**:一个页面自有的代数**管不住它不拥有的槽位**。行、总数、错误、loading 四个 ref 都属于 `templateStore`,写它们的是 `loadTemplates` 自己,所以仲裁必须放在写入点。第 4 轮把代数搬进 store,并给它配一个**身份签名**:
+
+```ts
+// apps/web/src/approvals/templateStore.ts
+let listGeneration = 0
+async function loadTemplates(query?): Promise<ApprovalTemplateListOutcome> {
+  const generation = ++listGeneration
+  const signature = readAuthSessionSignature()          // 与 onAuthSessionSwitch 同一个函数
+  const isLatest  = () => generation === listGeneration
+  const isCurrent = () => isLatest() && signature === readAuthSessionSignature()
+  loading.value = true; error.value = null
+  try   { const r = await listTemplates(query); if (!isCurrent()) return 'superseded'
+          templates.value = r.data; total.value = r.total; return 'applied' }
+  catch (e: any) { if (!isCurrent()) return 'superseded'
+          error.value = e.message ?? '加载审批表单列表失败'; return 'failed' }
+  finally { if (isLatest()) loading.value = false }
+}
+```
+
+三条**明确不同**的规则,以及每一条为什么必须是它自己那一条:
+
+| 出口 | 守卫 | 为什么不是另一个 |
+|---|---|---|
+| 成功(写 `templates`/`total`) | `isCurrent()` = 最新 **且** 同一身份 | 只判代数的话,「身份换了但还没发出新读」的窗口(最典型的就是登出:监听器 `if (!readStoredToken()) return`,**根本不发后继读**)里,旧身份的答复仍是「最新」的,会把上一个账号的行写进 store |
+| 失败(写 `error`) | 同上 | 登出后弹「加载审批表单列表失败」是在回答没人提的问题;边界 ① 明文要求这一条 |
+| `finally`(清 `loading`) | **只判 `isLatest()`**,刻意不判身份 | `loading` 是一个被**最新读独占**的一位槽:有后继读时由后继读清;没有后继读时必须由这次读清。若这里也判身份,上面那个登出窗口会让转圈永远停不下来——没有任何人还活着来清它 |
+
+**错误状态因此按请求归属**:共享槽位只接受当前代数 + 当前身份的写入,被作废的读一个字都不写。页面侧只剩一个决定:
+
+```ts
+// TemplateCenterView.vue — loadData()
+).then((outcome) => { if (outcome === 'applied') flatListStale.value = false }, () => {})
+```
+
+`failed` 与 `superseded` 一视同仁:两者都表示**这一页对它所问的上下文一无所知**,所以平铺三面继续渲染空态,而不是把已经离开的上下文重新端出来。
+
+**页面层的 `flatListGeneration` 随之删除**,而不是留着当第二道保险。它在新结构下**没有任何可达输入**:每一条会推进它的路径,要么同时推进 store 的代数(`loadData` 自己),要么必然伴随签名变化(身份监听器——它只在签名真的变了时才触发)。留一个永远红不了的守卫,等于给它写一条会腐烂的豁免理由;删掉它并把判别力集中到一处,是本仓「单一定义」这条规矩的直接应用。代数的**承重证明**因此从一条(`M-B`)变成四条(`M-B′` + store 三出口),映射见验证 MD §11.3。
+
+**关横幅可恢复**:上面那种「数据已经在 store 里却被藏起来」的状态在新结构下**不可达**——`flatListStale` 只由成功落地的那次读放下,它压根不问 `store.error`。剩下的一种「blank + 横幅」是**当前**这次读真的失败了,此时空表回答不了「零条还是没查成」,而横幅里那个 Reload 是唯一的出路;所以在**这一个状态下**横幅不可关闭(`:closable="!flatListStale"`),其余场合(上下文没变、旧行还在屏幕上的普通失败)与本轮之前逐字一致,仍可关闭。这是一个属性,不是一个新处理器:没有「关掉就自动重发」那种会在后端持续故障时反复弹回的回路。
+
+### 7.2 P2:五个幸存 mutation 各自的承重腿
+
+| 门审探针 | 第 4 轮的承重腿 | 用例 |
+|---|---|---|
+| **M-B**(平铺 settle 代数) | 机制下沉到 store,承重点变四个:`M-B′`(页面 `outcome === 'applied'`)、`M-B-S` / `M-B-C` / `M-B-F`(store 三出口) | `(③ FLAT, failure exit)` / `(③ FLAT, superseded exit)` / `(③ success exit)` / `(③ catch exit)` / `(③ finally exit)` |
+| **M-D**(`onAuthSessionSwitch` 的 `disposed`) | 构造真实窗口:通知已发出、微任务已排队、订阅者在微任务跑之前被拆卸 ⇒ 监听器**不得**被调用;另有一条「被同一次通知里的另一个监听器拆卸」 | `composables/authPrincipal — onAuthSessionSwitch closes its deferred window on unsubscribe` 三条(含正控) |
+| **M-F**(`ownSwitch` 防双发) | 页面自己的切换后,每个 org 域读的次数写成**确切数字**(平铺 1、分组 1、分类 2 = host 自己一次 + 分节视图一次),`>= 1` 对双发没有判别力 | `(② M-F) the page's OWN organization switch re-reads every org-scoped surface exactly ONCE` |
+| **M-J**(`loadCategories` 代数) | 上一个身份的分类答复晚到 ⇒ 下拉里不得出现它 | `(① M-J) a category answer issued for the PREVIOUS identity …` |
+| **M-K**(`loadRecentTemplates` 代数) | 上一个账号的最近使用答复晚到 ⇒ 不得出现在新账号页面上 | `(① M-K) a recent-templates answer resolved for the PREVIOUS account …` |
+
+### 7.3 P3-2:平铺面的 org 域 —— **当前后端没有可保护的对象,是否删机制交 owner**
+
+本轮在一次性真库上重新机械核对(验证 MD §11.5):
+
+- `approval_templates` **没有 `org_id` 列**(`information_schema.columns` 命中 0);`approval_template_groups` **有**(命中 1)。
+- 同一账号的两份 token(分别绑定 org-alpha / org-beta)读 `/api/approval-templates?status=published`:`total=2`,行名**逐字相同**。分组端点则确实按 org 隔离(ALPHA-ONLY-GROUP / BETA-ONLY-GROUP)。
+
+⇒ 边界 ②「请求期间不能把旧组织数据显示为新组织结果」在**平铺面**今天没有可保护的对象。门审据此给出 **fix option 0**(删掉 `flatListStale` / `visibleTemplates`,平铺面回到 `store.templates` 直出)。
+
+**本轮不删机制**,理由写清楚而不是留白:
+
+1. 这条与「`GET /api/approval-templates` 到底该不该按 session org 收窄」是**同一个决定**——若该收窄,平铺置空是前端这一半的正确实现,删了就是把缺口全留在后端;若不该收窄,边界 ② 对平铺面的要求本身需要重述。两者都不是实现者可以拍板的。
+2. 机制在本轮被重写之后**不再是 P1 的成本来源**:P1 的成因是「用共享槽位当判据」,不是 `flatListStale` 本身;门审 C-1 的空白在本轮真浏览器复跑里已经消失(§11.4 的红/绿对照)。
+3. 机制按边界 ② 实现,覆盖的是「切组织后窗口期不得显示上一个组织的行」——这一条**今天就能被观测到**(切 org 时页面确实重读,窗口期渲染空态),与「行本身有没有换一批」是两件事。
+
+**交 owner 的具体问题**:是否执行 fix option 0(删机制),还是保留机制并把「列表端点按 session org 收窄」作为后端的独立一票。**本代理不做裁决。**
+
+### 7.4 P3-1:已披露的不可达守卫 —— 保留,登记正控
+
+`TemplateCenterView.vue` 的 `ensurePageSessionOrgsLoaded().settle` 里 `if (pageSessionOrgsClaim !== claim) return`:第 4 轮重跑 **M-H 仍然全绿(118 passed)**。这与实现者自述、门审 §C-4 的结论一致——`useSessionOrg.loadSessionOrgs` 自己的三重 `current()` 已经压住了陈旧答复的错误写入,未能构造出使该行可观测的输入。
+
+**正控(证明不是整段 `settle` 死掉)**:同一个函数里失败分支的 `pageSessionOrgsClaim = null`(**M-G**)被中和 ⇒ **2 failed**。即 `settle` 本身被用例驱动着,只有这一行没有判别输入。按门审结论保留、记 P3、不要求补测。
+
+### 7.5 P3-3:两个 `Bin` 提交 —— 已在本分支历史里压平
+
+`dec28f0595`(引入本轮生命周期机制)与 `7204c94cce`(拔掉那颗 NUL)两个提交都把 `apps/web/src/composables/authPrincipal.ts` 变成 git-binary,逐提交 review / 按提交跑的 secret-scan 对它们的内容失明。第 4 轮在自己的工作树上把这两个提交**压成一个干净的文本提交**(把 NUL 移除与 `disposed` 修复折回引入提交),其余三个提交的树按原样重建:
+
+- 新历史 `288530a0cd..HEAD` 每个提交 `git show --stat | grep ' Bin '` = **0**(旧历史同一扫描 = 2 个提交各 1 命中)。
+- 压平点的树与 `c3ea127b12a95cc04db7628a0689af4f25d8c1b1` **逐字节相同**,`git diff c3ea127b12 <压平点>` 为空。
+
+### 7.6 对 §6.7 的逐句求值(不作废整节)
+
+| §6.7 条目 | 第 4 轮求值 |
+|---|---|
+| 1(host settle 身份比对是纵深防御,无判别输入) | **仍然成立**;本轮重跑 M-H 仍全绿,并补了 M-G 正控(§7.4) |
+| 2(`loadCategories` / `loadRecentTemplates` 代数「未被单独用例压住…不声称承重」) | **这一句失效**:两条各有一条隔离用例,M-J / M-K 各 **1 failed**(§7.2) |
+| 3(新增共享导出 `onAuthSessionSwitch`) | **仍然成立**,并在本轮新增第二个导出 `readAuthSessionSignature`(store 与监听器必须读同一个函数,否则两者会对「会话变了吗」给出不同答案) |
+| 4(平铺列表在真后端上不是 org 作用域) | **仍然成立**,本轮在新的一次性库上重新取证,并升格为交 owner 的裁决项(§7.3) |
+| 5(`flatListStale` 不是第二个闩锁) | **仍然成立,但理由换了一半**:原文的「失败时保持抬起 + 告警条自带 Reload」仍然是出路;本轮补上的是 `:closable="!flatListStale"`——在那个状态下 Reload 不能被关掉 |
+| 6(`disposed` 关闭延后窗口) | **仍然成立**,并且本轮起**有用例**(§7.2 的 M-D 腿) |
+| 7(零新增文件 / 零 CI 改动 / 零迁移 / 零新端点 / 零 flag / 零 DDL) | **仍然成立**(§11.6 逐条机械复核) |
+| 8(真浏览器只跑了 ①②④,③ 登记 NOT RUN) | **这一句失效**:③ 本轮在真后端 + 自起 headless chromium 上跑了,且用**真 500**(重命名 `approval_templates` 表)而非拦截伪造,含四组对照(§11.4) |
