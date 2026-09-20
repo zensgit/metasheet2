@@ -350,3 +350,137 @@ $ cd packages/core-backend && npx tsc --noEmit
   因此不需要重打 pin。
 - 临时探针（`w3g-prefix-baseline.probe.test.ts`、`w3g-mut-*.test.ts`）跑完即删，未进入任何提交。
 - 文档/日志/测试里不含真实主机、账号、口令；确认令牌已打码。
+
+---
+
+## 8. 2026-09-20：rebase 到 main 后的复跑与复核
+
+- worktree：`metasheet-wt-w8k`（本轮），不是 09-12 那个 `metasheet-wt-w3g`。
+- 起点 `3c79b2059` → `git rebase origin/main`（`36d659c8a`）**无冲突**，三个 commit 原样重放；
+  `admin-routes.ts` 的 diff 与 rebase 前逐字相同（`83 ++-`，无一行被 rebase 改写）。
+- 本节新增的东西只有一个：spec 里补了一条**闭世界**用例（设计文档 §5.5）。
+
+### 8.1 spec 复跑 —— 全绿（18 → 25）
+
+```
+$ npx vitest run tests/unit/admin-safety-toggle-and-bulk-authz.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  25 passed (25)
+```
+
+原有 18 条一条不改、全部仍绿；新增 7 条来自闭世界那一节（4 条识别器正反自证 + 1 条防空转绿 +
+1 条闭世界主张 + 1 条「豁免表里没有已不存在的路由」）。
+
+spec 仍然用 `usePinnedServer()` + `request(pinned.url())`，**没有**任何 `request(app)`
+（`tests/unit` 里 `request(app)` 会让 CI test 泳道整条红）。
+
+### 8.2 闭世界用例的两条独立口径互相印证
+
+**口径 A（运行时，spec 内）**：从 `initAdminRoutes({})` 返回的 module-singleton router 上取
+`router.stack`，收根路由的写方法，比对首位 handler 的 `toString()` 与 `requireAdminRole()` 的。
+结果：violations = `[]`。
+
+**口径 B（静态，一次性脚本，跑完即删）**：直接扫 `admin-routes.ts` 的
+`router.<method>(` 注册文本，看紧跟路径的第一个 token。结果：
+
+```
+== root writes: 25 ==   (GATED 22 / OPEN 3)
+OPEN   :790  POST /plugins/reload-all-unsafe
+OPEN   :841  POST /plugins/:id/reload-unsafe
+OPEN   :2338 POST /health/check
+
+== root reads ungated ==
+OPEN   :1591 GET /slo/status
+(read total=16, ungated=1)
+```
+
+两条口径给出的「无门写路由」集合完全一致，且恰等于豁免表那三条。口径 B 同时给出读侧的
+当前状态：16 条根 GET 里只剩 `/slo/status` 无门（详见设计文档 §5.4）。
+
+### 8.3 变异自证 —— 12 条门逐条，内存级
+
+做法：在 spec 之外跑一份一次性探针（`tests/unit/w8k-mutation-probe.test.ts`，跑完即删、未提交）。
+它 **不改任何源文件**：import 回 router 对象后，把某一条路由 `route.stack` 里那个 handler 的
+`.handle` 就地换成 passthrough，断言完在 `finally` 里还原。落盘变异一次都没有做过。
+
+每条断言两件事：①闭世界审计把这条路由点名为 violation（⇒ 闭世界用例会红）；
+②该端点不再答 `403 ADMIN_REQUIRED`（⇒ 对应的行为用例会红）。下面是变异后实际拿到的响应：
+
+| 被换掉门的路由 | 变异后响应 | 闭世界点名 |
+|---|---|---|
+| POST `/safety/enable` | **200** `success:true` | ✓ |
+| POST `/safety/disable` | **200** `success:true` | ✓ |
+| POST `/cache/clear` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| POST `/metrics/reset` | **200** `success:true` | ✓ |
+| PUT `/data/bulk` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| DELETE `/data/bulk` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| POST `/dlq/:id/retry` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| DELETE `/dlq/:id` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| POST `/dlq/retry-all` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| POST `/dlq/cleanup` | 403 `SAFETY_CHECK_REQUIRED` | ✓ |
+| POST `/ratelimits/:key/reset` | **200** `success:true` | ✓ |
+| POST `/ratelimits/reset-all` | **200** `success:true` | ✓ |
+
+```
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+```
+
+（14 = 基线「零 violation」1 条 + 12 条变异 + 还原后「重新归零」1 条。）
+
+那 **4 条变异后直接 200** 的（`/safety/enable`、`/safety/disable`、`/metrics/reset`、两条
+`/ratelimits/*` 里的 reset）正是设计文档 §1.2 那个论点的实测形态：`RESET_METRICS` 是 LOW，
+`requiresConfirmation` 对 LOW 为假，确认层**一个令牌都不要**就放行 —— 确认层在这些端点上
+根本不构成任何阻挡，去掉 admin 门就等于完全敞开。其余 8 条降级成 403 `SAFETY_CHECK_REQUIRED`
+并附一枚可用令牌，也不是授权。
+
+`/safety/enable` 那条同时钉死了闭世界用例的载荷性：把它的门去掉，闭世界用例立刻点名并红。
+
+### 8.4 相邻 spec 不回归
+
+```
+$ npx vitest run \
+    tests/unit/admin-safety-toggle-and-bulk-authz.test.ts \
+    tests/unit/admin-read-gates-batch2-authz.test.ts \
+    tests/unit/admin-read-gates-batch3-authz.test.ts \
+    tests/unit/admin-safety-confirm-authz.test.ts \
+    tests/unit/safety-guard-confirm-flow.test.ts \
+    tests/unit/require-admin-role-fail-closed.test.ts \
+    tests/unit/admin-snapshot-delete-authz.test.ts \
+    tests/unit/admin-dlq-read-authz.test.ts --reporter=dot
+
+ Test Files  8 passed (8)
+      Tests  111 passed (111)
+```
+
+（输出里的 `error: RBAC check failed` 是 fail-closed 用例**期望内**的日志，不是失败。）
+
+### 8.5 类型检查 —— 并且确认不是假绿
+
+`packages/core-backend/tsconfig.json` 的 `exclude` 含 `**/*.test.ts`，所以
+**`npx tsc --noEmit` 根本不会检查本 spec**，拿它当「spec 类型没问题」的证据是假绿。
+两步都做了：
+
+1. `npx tsc --noEmit` → 退出码 0（证明 `src` 侧没被本改动破坏）。
+2. 一次性 `tsconfig`（跑完即删）把 `src/**` 加上本 spec 与 `tests/utils/pinned-server.ts`
+   一起编译，其余测试文件仍排除（仓里既有的测试类型债与本 PR 无关）：
+   `npx tsc --noEmit -p <临时配置>` → **0 个 error**。
+
+### 8.6 09-12 以来事实变化的复核（否定性结论都给了 path:line）
+
+- `protection-rules.ts` 四条写端点**不再**零授权门：`:236` / `:328` / `:369` / `:392` 首位都是
+  `requireAdminRole()`。设计文档 §2.1 与 §4 第 7 条已就地标注作废并指向 §5.3。
+- `x-user-id` 在 `protection-rules.ts` 里只剩 `:20` 一条历史注释，不再是任何路由的身份来源。
+- `GET /dlq`（`:1641`）等一族读端点已由 #5710 / #5897 补门；根 GET 现在只剩
+  `/slo/status`（`:1591`）无门。
+- 设计文档正文里所有指向 `admin-routes.ts` / `index.ts` / `guards/*` / `rbac/service.ts` 的行号
+  已按 `36d659c8a` 重新实读订正；标「修前」的历史行号保留。
+
+### 8.7 边界自检
+
+- 只在 worktree `metasheet-wt-w8k` 内改动；主检出与其他 `metasheet-*` 目录只读，未触碰。
+- 未合任何 PR、未碰 `main`、未改 `.github/`、未改 `plugins/` 与任何 pin 文件。
+- 两个一次性探针（`w8k-mutation-probe.test.ts`、临时 `tsconfig`）跑完即删，未进入任何提交；
+  删后 `git status` 只剩本 PR 自己的改动。
+- 变异全部内存级，源文件零改动。
+- 未连接任何真实数据库；文档与输出里不含主机 / 账号 / 口令 / 令牌值。
