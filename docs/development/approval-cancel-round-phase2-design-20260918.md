@@ -520,16 +520,36 @@ list that attaches to 判据 II / the slice as a whole rather than to C-3 narrow
   on the approval side's own transaction, committing atomically with the approve (§3.16.1, measured
   at **120**, not `0 === 0`). u3 closes the SURFACE half with a flagged DEFAULT rather than leaving
   it open: `UnifiedApprovalDTO.cancellationOutcome` (immediate, action-response scope) and the
-  approve audit row's `metadata.cancellationOutcome` (durable, read back via the history endpoint) —
-  THREE status tokens, not two (`cancelled` / `cancelled_with_unrecoverable_expired` /
-  `cancelled_reversal_unreported`), so a caller can never confuse "nothing to reverse" with "the
-  channel isn't wired". This IS an owner-visible default, not a ratified contract: `getApproval`
-  does not project the field (a reload reads it from the history endpoint, not the DTO itself), and
-  no FE surface renders it (`grep -rn "cancellationOutcome\|unrecoverableExpired" apps/web/src` → 0
-  hits, verification §3.18.4). An owner who wants a different shape — or the field projected onto
-  `getApproval` itself, a hot read path this default deliberately does not touch — replaces it; the
-  choice is documented on the type and the DTO field themselves, not only here (verification
-  §3.18.3, §3.18.7).
+  approve audit row's `metadata.cancellationOutcome` (durable) — THREE status tokens, not two
+  (`cancelled` / `cancelled_with_unrecoverable_expired` / `cancelled_reversal_unreported`), so a
+  caller can never confuse "nothing to reverse" with "the channel isn't wired". No FE surface
+  renders it (verification §3.18.4's grep over `apps/web/src` → 0 hits).
+
+  **⚠️ TWO CORRECTIONS, 2026-09-20 (owner ruling). Both statements this bullet used to make were
+  wrong; they are recorded here rather than silently rewritten.**
+
+  1. 「durable, **read back via the history endpoint**」 — **measured FALSE** for platform
+     instances. `UnifiedApprovalHistoryDTO` does carry `metadata` verbatim, but it is only ever
+     built inside `routes/approval-history.ts`'s `plm:` branch; a cancel-round id is a bare UUID
+     and takes the platform branch, whose SELECT list never asked the DB for `metadata` at all. A
+     requester reading `GET /api/approvals/:id/history` over real HTTP got the approve row with
+     **no `metadata` key** (`verify-c2-history-dto-cancellation-outcome-20260920.md` §3.1–§3.2,
+     real DB + real HTTP). The row was durable and UNREADABLE.
+  2. 「This IS an owner-visible default … `getApproval` **does not project the field** (a reload
+     reads it from the history endpoint, not the DTO itself) … An owner who wants … the field
+     projected onto `getApproval` itself … replaces it」 — framed the reload as an OPEN default.
+     The owner closed it on 2026-09-20: 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,
+     不能直接暴露整个 metadata。」
+
+  **What is implemented now** (candidate branch `feat/approval-cancel-round-phase2-history-projection`,
+  no PR): a **per-key-path whitelist** on BOTH read surfaces — the platform history SELECT and
+  `getApproval` — projecting exactly `metadata.cancellationOutcome` (rebuilt field by field as
+  `{status, reversal: {reversed, lots, unrecoverableExpired, alreadyReversed} | null}`) and
+  `metadata.cancelRoundCloseReason` (`round_expired` / `business_blocked:<code>`). Never the bare
+  `metadata` column, and never a whitelisted object passed through verbatim. `cancelRoundBlockDetail`
+  (free text) and every internal key (`w4ActorPosture`, `parallelCancelledAssignees`, …) stay in.
+  The close-reason token additionally makes the two 系统收口 causes (`expired` vs `blocked`)
+  distinguishable on the wire, which §4.2 of the same verification measured they were not.
 - **`attendance-parity.db.test.ts` 退役 — ⚠️ VERDICT UNCHANGED post-merge, census WIDENED (u3,
   verification §3.17).** The filename is retired as a deliverable (§3.15.0: it is an implementer
   invention the phase-1 design MD mis-attributed to lock:169, which names a requirement and no

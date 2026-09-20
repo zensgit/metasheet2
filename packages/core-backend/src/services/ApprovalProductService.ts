@@ -180,6 +180,7 @@ import {
   deriveCancelRoundW4OperationIdV1,
   getAttendanceCancellationExecutionPort,
   getCancelRoundCancelledEventDelivery,
+  readCancelRoundDurableProjectionV1,
 } from '../core/attendance-cancellation-execution-port'
 import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
 import type { AttendanceRequestOperationBoundaryResultV1 } from '../attendance/w4c3b-request-operation-boundary'
@@ -13180,9 +13181,19 @@ export class ApprovalProductService {
       if (dispatchCancellationOutcome) {
         // The DURABLE half of lock:86's 呈现. Same audit-row family the lock already uses for
         // `metadata.w4ActorPosture` (lock:94), written in the SAME transaction as the business
-        // cancellation and the round's `applied`, so it commits atomically with them and is
-        // readable afterwards through the existing history endpoint (`UnifiedApprovalHistoryDTO`
-        // carries `metadata` verbatim). The DTO field below is the immediate half.
+        // cancellation and the round's `applied`, so it commits atomically with them.
+        //
+        // ⚠️ CORRECTED 2026-09-20 (owner ruling). This comment used to add 「and is readable
+        // afterwards through the existing history endpoint (`UnifiedApprovalHistoryDTO` carries
+        // `metadata` verbatim)」. That was measured FALSE for platform instances: the DTO does
+        // carry `metadata` verbatim, but it is only ever built inside `routes/approval-history.ts`'s
+        // `plm:` branch, which a bare-UUID cancel-round id never enters — so the row committed here
+        // was durable but UNREADABLE (`verify-c2-history-dto-cancellation-outcome-20260920.md`
+        // §3.1/§3.2, real HTTP as the requester: the `metadata` key was absent entirely). The read
+        // half now exists, and it is a per-key-path WHITELIST, not a verbatim `metadata` pass-through:
+        // `routes/approval-history.ts`'s platform SELECT + `getApproval` below both project exactly
+        // `cancellationOutcome` and `cancelRoundCloseReason` through
+        // `projectCancelRound*ForReadV1`. The DTO field on the action response is the immediate half.
         approveRecordMetadata.cancellationOutcome = dispatchCancellationOutcome
       }
       if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
@@ -13322,13 +13333,15 @@ export class ApprovalProductService {
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
-    // The IMMEDIATE half of lock:86's 呈现 (default contract; owner 待裁). `getApproval` is a
-    // read-back of `approval_instances` and does NOT join the audit rows, so the outcome is
-    // attached here from the value the redemption returned in-transaction.
-    // ⚠️ SCOPE, stated rather than implied: this field is populated on the ACTION RESPONSE only.
-    // A later `GET /approvals/:id` will not carry it; the durable read is the approve audit row's
-    // `metadata.cancellationOutcome` via the history endpoint. Registered as an owner decision —
-    // if 呈现 must survive a reload on the DTO itself, `getApproval` has to project it.
+    // The IMMEDIATE half of lock:86's 呈现 (default contract; owner 待裁). It is attached here from
+    // the value the redemption returned in-transaction rather than re-read, so the action response
+    // carries it even when the read-back below races the audit row's visibility.
+    // ⚠️ CORRECTED 2026-09-20 (owner ruling: 「呈现默认值不能替代持久读取能力」). This comment used to
+    // say 「A later `GET /approvals/:id` will not carry it」 and 「`getApproval` … does NOT join the
+    // audit rows」. Both were true when written and are false now: `getApproval` whitelist-projects
+    // `cancellationOutcome` (and `cancelRoundCloseReason`) off the audit row, which is the branch
+    // this comment had left as an open owner decision. The two halves agree on value — the audit
+    // row is written from this same `dispatchCancellationOutcome` inside the same transaction.
     if (dispatchCancellationOutcome) {
       return { ...approval, cancellationOutcome: dispatchCancellationOutcome }
     }
@@ -13506,6 +13519,24 @@ export class ApprovalProductService {
       viewerUserId: viewerUserId ?? null,
       viewerRoles: viewerRoles ?? null,
     })
+
+    // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
+    // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a requester who reloads
+    // `GET /api/approvals/:id` after the decision reads the SAME two values the history surface
+    // whitelists, off the durable audit row that committed with the cancellation itself. Before
+    // this, the numbers existed only on the one action response that produced them (F-5).
+    //
+    // ⚠️ THIS IS THE ACTION-RESPONSE BUILDER, NOT the `GET /api/approvals/:id` handler — that route
+    // calls `ApprovalBridgeService.getApproval`, a SECOND implementation (measured: patching only
+    // this one left the refresh path still returning `undefined`). Both call the SAME shared reader
+    // below for exactly that reason; see its docblock for the whitelist and the no-second-predicate
+    // argument. Here it matters because the FE store publishes an action response into the slot the
+    // detail read fills: a field the detail read carries and the action response drops would flip to
+    // `undefined` the moment an approver acts.
+    Object.assign(dto, await readCancelRoundDurableProjectionV1(
+      (text, values) => pool!.query(text, values),
+      id,
+    ))
     return dto
   }
 
