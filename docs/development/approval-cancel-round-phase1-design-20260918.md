@@ -320,6 +320,97 @@ shared gate for password login, token refresh/verify, DingTalk SSO and API token
 and `activation_status = 'pending_activation'`, which a bare `is_active = TRUE` check would seat
 even though the person cannot log in.
 
+**G3 half C — 「历史委托不自动成为当前授权」(候选 reading (b),状态 PROPOSED,等 owner 定读法).**
+
+> **本小节是候选,不是已裁定的合同。** 它只覆盖锁 §2-G3 **第三句**,**不作废**本节其余任何一句:
+> 上面的 half A(在职,shipped)与下面 OPEN 清单里的 half B(组织单元)一字未动,求值状态不变。
+> 实现补丁与本小节同批落在候选分支 `feat/approval-cancel-round-phase1-g3-reading-b`(**裸分支,未开 PR,不合并**),
+> owner 若裁定另一读法((a) 席位一律回 A / (a′) 回 A 后按今天的委托重解析 / (b′) 委托失效即 409 阻断),
+> 本小节整体替换,已落的验收骨架可直接复用。
+
+**锁 §2-G3(lock:74)三句逐句求值** —— 一句一行,状态互斥,**不用一句的绿去覆盖另一句**:
+
+| 锁文句 | 谓词 | 本 head 状态 | 证据 |
+|---|---|---|---|
+| 第一句 —— 重新验证**当前**资格 | `evaluateUserAuthenticationGate` 作用于每个席位 | **SHIPPED**(half A) | 正控 P1/P2、负控 N1/N2/N3/N4 |
+| 第二句 —— 仍在该组织单元 | 需要 `user_orgs` 一类席位资格谓词 | **OPEN**(owner 裁,全仓无此谓词) | 见下方 OPEN 清单;常驻正控 P2 |
+| 第三句 —— 历史委托不自动成为当前授权 | 席位对委托状态必须敏感 | **候选 reading (b) PROPOSED**(本小节) | 正控 P4…P15(b) / 负控 N5…N7(b),真库实测,见验证 MD §N |
+
+委托审批在 `approval_records(action='approve').actor_id` 上留下的是**被委托人 D**;记录「这次决定是以谁的权限做的」的
+**唯一**一处是 `approval_assignments.metadata.delegatedFrom`,由 `ApprovalAssigneeResolver.pushResolved`
+(全仓唯一一处委托替换点)写入,approve 之后以 `is_active = FALSE` 作为审计历史保留 —— 正是
+`ApprovalDelegationConfig.countDelegatedApprovals` 今天已经在读、且不带 `is_active` 过滤、其注释自称 audit trail 的那一列。
+创建序列第 6 步读出这份 provenance,然后**在撤销轮自己的授权时刻重新求值**:「不自动成为」实现为
+「不自动——要重新核」,于是被委托人保住席位**当且仅当**产生它的那份委托今天仍然有效,否则席位回到原审批人。
+
+「今天仍然有效」= `resolveActiveDelegationMap(原单 templateId, now)[delegator] === delegatee` ——
+复用 `createApproval` 提单时冻结的**同一个**解析器(`active` ∧ 窗口覆盖 `now` ∧ 作用域匹配),不另写一份更窄的同类物。
+判据是 `=== delegatee` 而**不是**「delegator 名下还有某条有效委托」:若 delegator 此后改委托给第三人,
+产生这个席位的那份授权已经不在了,席位回到 **delegator**,**不是**那个第三人 —— 把撤销轮交给一个从未参与原决定的人是另一份合同。
+
+**作用域。** map 读传的是**原单的** `template_id`,绝不是撤销轮自己的专用已发布定义 —— 后者会把支持面悄悄收窄到只剩
+`scope='all'` 行,原模板上的 `scope='template'` 委托一条都匹配不上。`approval_instances.template_id` 可为 NULL,
+NULL 原单以 `''` 解析。**这里的论据是列类型,不是 CHECK 约束**(2026-09-20 对本轮私有库实测 `\d approval_delegations`):
+`scope_template_id` 是 **TEXT**,所以 `''` 按文本绑定、不可能触发 `22P02`;在此之上
+`chk_approval_delegations_scope_target` 保证没有任何 `scope='template'` 行的目标是 `''`,而 `scope='all'` 行忽略该参数 ——
+即「无模板的原单只可能吃到 all-scope 委托」,是显式语义而非继承来的。
+**披露**:`createCancelRoundInstance` 并**不**要求原单是模板运行时实例,所以 `template_id IS NULL` 的原单在原理上可达;
+本文件所有夹具都走 `publishOneNodeTemplate`,`template_id` 恒非空,**这条腿没有验收覆盖**。
+
+钉住作用域处理的是**正好命中**那一腿:`scope='template'` 指向**原单自己**的模板且仍有效 ⇒ 席位必须是**被委托人**。
+反向那一腿(模板行指向别处 ⇒ 席位回 delegator)对「到底传了哪个 templateId」**零判别力** —— 撤销轮自己的定义 id、空串、
+打错的 id 三者结果同形 —— 所以它记作控制项,**不**作为作用域处理正确的证据。这个不对称已被 mutation G-2c 实测
+(把 templateId 换成 `''`:P11(b) 红、P7(b) 仍绿)。
+
+**失败姿态 —— 刻意不照抄创建路径的 best-effort。** `createApproval` 自己的委托读裹在 try/warn 里,
+让配置表抖动永远挡不住提单。这里不行:这张 map 是**授权输入**,把读失败降级成「没人被委托」就是悄悄改判据,
+所以本读**抛**:语句失败即 abort 本事务,调用方 `rollbackQuietly` 保证零行 —— 正是
+`assertCancelRoundSeatsEligibleInTxn` 自己的文档已经认可的 fail-closed 出口。
+该读跑在持有原单 `FOR UPDATE` 的**同一条连接**上,因此它看不到别的事务未提交的委托编辑,本方法内也不会被一次中途提交劈成两半;
+**但 `now` 取的是应用侧墙钟(`new Date()`),不是事务的 `now()`** —— 两者不是一回事,此处不合并表述。
+
+**为什么与 half A 共用**一条**资格谓词。** 重核插在「读 approve 轨迹」与「丢哨兵」之间;丢哨兵 → 零人类席位预检 →
+`assertCancelRoundSeatsEligibleInTxn` 一行没动。`evaluateUserAuthenticationGate` 仍是**唯一**席位谓词,
+只是现在作用在重核决定的那个人身上。**没有**新增委托专用的资格规则。
+
+**行为变化(BEFORE 列 = 本轮把席位推导整体还原成补丁前基线后的读数,AFTER 列 = 候选补丁的读数,两列都在 2026-09-20 的私有库上实测)。**
+**provenance 要分清**:前四行的 BEFORE 读数是本轮**独立重测**,与 2026-09-19 独立验证报告 §2.2(有效/已撤销/已过期 一律 `[D]`)
+与 LEG 3a/3b(停权 A 不阻断 / 停权 D 阻断 409)一致,**不是首次实测**;**只有「改委托给第三人」一行是首次实测**
+(§2.2 的第四腿是「已删除」,谓词不同)。
+
+| 场景 | before(实测) | after(reading (b),实测) | 钉住它的用例 |
+|---|---|---|---|
+| 委托今天仍有效 | 席位 = 被委托人 | 席位 = 被委托人(**不变**) | 正控 P4(b) |
+| 委托已撤销 / 窗口已过期 / 作用域不再覆盖本模板 | 席位 = 被委托人 | 席位 = **原审批人** | 正控 P5/P6/P7(b) |
+| 原审批人此后改委托给第三人 | 席位 = 被委托人 | 席位 = **原审批人**(不是第三人) | 正控 P9(b) |
+| 委托失效 + **原审批人**停权 | 建轮成功 | **409 `CANCEL_ROUND_SEAT_INELIGIBLE`,零行** | 负控 N6(b) |
+| 委托失效 + **被委托人**停权 | 409,零行 | **建轮成功**,席位 = 原审批人 | 正控 P10(b) |
+
+不新增错误码、不动 §14.3 出口表:委托失效是**回退**到原审批人而不是阻断。更严的形状(失效即以专用
+`CANCEL_ROUND_SEAT_DELEGATION_LAPSED` 阻断)是另一份合同,要 owner 亲写 §14.3 条目,本候选不做。
+
+**本候选**没有**关掉的(登记,不洗白):**
+
+- **没有 `nodeKey` 的 approve 行。** 还原 provenance 的 JOIN 匹配 `(instance_id, node_key, assignee_id)` ——
+  刻意不是 `(instance_id, assignee_id)`,否则被委托人在**另一个节点上自己**那份席位会被错记到原审批人名下。
+  legacy `POST /api/approvals/:id/approve` 把请求体的 `metadata` 逐字落库,那里写出的 approve 行可以没有 `nodeKey`;
+  JOIN 于是落空、查不到 provenance、actor 保住席位**不被重核** —— 对那一行而言就是补丁前的行为,绝不会是更宽的席位。
+  **本轮已把这条缺口从注释变成数据**:正控 P15(b) 真的走了一次 legacy 端点并实测席位(委托已撤销仍为被委托人),
+  而 G-3 mutation(删掉 node_key 合取)会让 P14(b) 与 P15(b) **一起**红 —— 兄弟席位腿塌成一人、legacy 腿反被错记。
+  写 `nodeKey` 的写入方逐个读过:模板运行时派发的 `insertApprovalRecord` 各调用点、`insertAutoApprovalEvents`。
+  `entry_epoch` 刻意不进 JOIN(迁移前旧行上为 NULL,`NULL = NULL` 会让重核对那批语料静默失效)。
+- **同一个人既有角色席位又有被委托的用户席位时,席位数会收缩。** 委托只替换 `assignmentType === 'user'` 的席位,
+  所以「A 通过角色节点批过 + D 作为 A 的(现已失效)代理在用户节点批过」的单据今天两个席位、回退后一个 ——
+  会签门槛确实降低了。「阻断而非过滤」的不变量管的是**不合格**席位,不管这种同一人合并。owner 裁决项,此处不决。
+- **哨兵过滤排在重核之后(顺序披露,今天不可达)。** 代码顺序是「先按 provenance 重核 → 再 `isSystemSentinelActor` 丢弃」。
+  于是**假如**某条 approve 行的 actor 是 `system:` 哨兵、而同节点又存在一条带 `delegatedFrom` 的 user 型 assignment,
+  重核会把它映射成那个人类 delegator,该人类随后通过哨兵过滤而入席 —— 等于从一条合成行里生出一个人类席位。
+  **今天不可达**:`approval_delegations.delegatee_user_id` 永远是真实用户,解析器从不把席位指派给 `system:` 命名空间,
+  所以没有任何一条哨兵 actor 能带上 provenance。此处**只登记顺序与不可达论证**,不据此写紧迫性,也不为它造常驻用例。
+- **G3 half B(组织单元)** 仍然 OPEN,与上面逐字相同。注意第四条验收腿「跨组织委托」**造不出来**:
+  `approval_delegations` 没有 org 维度(`scope ∈ {all, template}`),所以该腿落成**作用域不匹配**
+  (`scope='template'` 指向别的模板),在 half B 落地前一直如此。
+
 **OPEN (owner call), not shipped, not silently skipped:**
 
 - **G3 half B — 仍在该组织单元.** No `user_orgs` (or any other) seat-eligibility predicate exists

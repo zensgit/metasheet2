@@ -3796,3 +3796,260 @@ $ npx tsc --noEmit       → 无输出，EXIT 0（node 20.20.2 / pnpm 10.33.0）
 - 未改锁文;未合并;未 undraft;未开 PR;未动任何 PR 状态;未动 `origin/main`;
   未对任何共享 / staging / 生产库应用迁移;全程未用 `git stash` / `git checkout -- <path>` / `git reset --hard`;
   只删我自己建的东西(探针文件;本轮未新建 worktree)。
+
+---
+
+## N. 锁 §2-G3 第三句 —— 读法 (b) 候选的真库实跑(2026-09-20)
+
+**状态:候选实跑完成,PROPOSED,等 owner 定读法。未合并、未 undraft、未开 PR、未改锁文、未对任何共享/staging/生产库应用迁移。**
+
+- **基线 head**:`b8b71539a6a89e51331e2e4874f994498df15c55`(`origin/feat/approval-cancel-round-phase1`)。
+- **候选分支**:`feat/approval-cancel-round-phase1-g3-reading-b`(Draft 之前的裸分支,只 push 不开 PR)。
+- **私有一次性库**:`metasheet2_c1_deleg_b_20260920`(owner `ms2testbed`,非超级;`postgres` 只用于 `createdb`/`dropdb`),
+  `pnpm run migrate` 全量迁移一次,跑完 `dropdb`。
+- **落地方式**:`git apply --index reading-b.patch`,**一次干净应用,无冲突、无手工落地**;
+  应用前两份基线文件 sha256 与候选作者记录逐字相等
+  (`ApprovalProductService.ts` = `f35a38d4…c7ea`,`approval-cancel-round-creation.db.test.ts` = `c354a50e…fad3`);
+  `git diff --cached --stat` = **2 文件 / +407 / −5**,与候选 README §3.1 的声明一致。
+
+### N.1 本轮在候选补丁之外**另加**的四腿(全部进同一个测试文件)
+
+> 行数分账:候选 `reading-b.patch` 对该测试文件 **+319**;本轮在其上再 **+328**
+> (四腿 + N.3.1 的 `afterAll` 清理前移),该文件本分支合计 **+647 / −0**;
+> 源文件 `ApprovalProductService.ts` 全部来自候选补丁,**本轮一个字节都没改**(+88 / −5)。
+
+候选 README §6.2 点名「门审必须另加、补丁里没有」的四条,本轮全部落成常驻用例:
+
+| 用例 | 覆盖的腿 | 判别力(能否区分「席位 = A」与「席位 = D」) |
+|---|---|---|
+| 正控 **P12(b)** | **哨兵 × 委托**:自动审批哨兵行 + 被委托人 D 的人工审批行,委托已撤销 ⇒ 席位恰好 `[A]`,哨兵不入席、也没把 A 一起丢掉 | **有**(M-B1 下红,Received = D) |
+| 负控 **N7(b)** | **零席位出口**:整单自动审批完成 + 配置表里有一条今天有效的 A→D 委托 ⇒ 仍是 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` / `no_human_approver` / 零行 | **无,已在用例名里明说** —— 整单没有任何带 provenance 的 approve 行,`delegationMapNow` 的结果从不被消费;它钉的是「这条**非** best-effort 的新读不得把零席位出口变成 500 或凭空造席位」。席位侧 oracle 是既有的负控 N3 |
+| 正控 **P14(b)**(README 的 G-3) | **JOIN 的 `node_key` 合取**(2026-09-19 独立验证的 M-1 未覆盖):D 在节点 1 是 A 的代理、在节点 2 有**自己**的席位,委托已撤销 ⇒ 席位 = `{A, D}` **两人** | **有**(M-B1 与 G-3 mutation 下都红) |
+| 正控 **P15(b)**(README 的 G-4) | **legacy 无 `nodeKey` 缺口**:真的走一次 `POST /api/approvals/:id/approve`(不是手工 UPDATE metadata),写出 `metadata = {}` 的 approve 行 | **有**(G-3 mutation 下红) |
+
+P14(b) 的夹具形状有独立正控(否则红了归因不到 JOIN):断言两条 approve 行都由 D 写、`nodeKey` 分别是
+`approval_a`/`approval_b`,且**只有**节点 1 那条 assignment 带 `delegatedFrom`。
+
+### N.2 §「门审用例」全部腿的落点
+
+| 腿 | 用例 | 结果 |
+|---|---|---|
+| 委托有效 | 正控 P4(b) | 席位 `[D]` ✅ |
+| 委托失效 —— 已撤销 | 正控 P5(b) | 席位 `[A]` ✅ |
+| 委托失效 —— 已过期 | 正控 P6(b) | 席位 `[A]` ✅ |
+| 作用域不匹配 | 正控 P7(b) | 席位 `[A]` ✅ |
+| 作用域正好命中 | 正控 P11(b) | 席位 `[D]` ✅ |
+| 改委托给第三人 | 正控 P9(b) | 席位 `[A]`,既非 D 亦非 E ✅ |
+| 哨兵 | 正控 P12(b)(本轮新增) | 席位 `[A]`,哨兵不入席 ✅ |
+| 零席位 | 负控 N7(b)(本轮新增) | 409 `NO_ELIGIBLE_APPROVER` / 零行 ✅ |
+| 资格闸人口跟着席位翻转 | 负控 N5(b) / N6(b) / 正控 P10(b) | 三腿全绿 ✅ |
+| JOIN node_key 合取 | 正控 P14(b)(本轮新增) | 席位 `{A, D}` ✅ |
+| legacy 无 nodeKey 缺口 | 正控 P15(b)(本轮新增) | 席位 `[D]`(= 补丁前行为)✅ |
+
+### N.3 套件读数(全部在 `metasheet2_c1_deleg_b_20260920` 上、`EXPECT_DB=1`)
+
+| 人口 | 结果 |
+|---|---|
+| `approval-cancel-round-creation.db.test.ts`(含本轮全部新增) | **30 passed / 30** |
+| 其余 6 个 `approval-cancel-round-*.db.test.ts`(attendance-fk-migration / lock-order-census / node-timeout-effect / outlet-guards / redemption / seat-guards) | **42 passed / 42** |
+| 与委托相关的既有真库件(`approval-delegation-api` / `-selfservice` / `-seam` / `approval-route-preview-substrate` / `approval-departure-transfer` / `approval-can-decide-current-node`) | **39 passed / 39** |
+| 与委托相关的既有单元件(`approval-delegation-config` / `approval-admin-jump-migration`) | **34 passed / 34** |
+| `pnpm exec tsc --noEmit`(core-backend) | **exit 0,零输出**(应用补丁后一次、加完四腿后再一次) |
+
+### N.3.1 G-6 夹具污染复核 —— 一条**实测出来的**清理缺陷,以及它的修法与正控
+
+候选 README §6.2 的 G-6 要求「在共享库上确认清理真的跑到」。**跑到了一半,照实记**:
+
+1. **全绿的跑**:每一次全绿跑之后 `SELECT count(*) FROM approval_delegations` = **0**,清理确实执行。
+2. **失败的跑**:M-B1 与 G-2b 两次 mutation 跑(各有 负控 停止抛错)之后,该表留下了 **26 行**,
+   同时还留下 47 条 instance / 2 条 round / 26 个模板 / 102 个 `users` 行 —— 也就是说
+   **`afterAll` 从中途就整段没跑完**。
+3. **机制(实测,不是推断)**:`approval_rounds.document_id` 对 `approval_instances(id)` 有外键
+   (`approval_rounds_document_id_fkey`,`\d approval_rounds` 实读)。负控一旦不再抛错,它建出的撤销轮
+   **没有被登记**进 `createdRoundIds` / `createdApprovalIds`;于是 `afterAll` 里
+   `DELETE FROM approval_instances WHERE id = ANY(...)` 撞 23503 抛出,**同一个 try 块里排在它后面的每一条
+   DELETE 都被跳过** —— 包括本补丁新加的 `approval_delegations` 清理(它原本排在最后一条)。
+   留在库里的是 `'all'` 作用域的委托配置行,而这种行会给**后面每一个恰好用到同名 delegator 的套件**做席位替换。
+4. **修法(本轮落地,只动这一处)**:把 `approval_delegations` 的清理挪到 `afterAll` try 块的**第一条**。
+   该表在本文件涉及的表里没有任何外键依赖,所以「先删」既安全,又是唯一能让新夹具的卫生**不被既有删除链绑架**的顺序。
+   **既有删除链自身的脆弱性是先于本补丁存在的,本轮不重写它**,只登记在此。
+5. **正控(证明修法承重,不是自证)**:把席位推导再次退回基线、在同一条件下重跑 —— 仍然 **8 failed / 5 passed**、
+   仍然留下 1 条孤儿 round(证明删除链**照旧**在同一处中断),但 `approval_delegations` = **0**。
+   修法前同样的跑留 26 行,修法后留 0 行,变量只有清理语句的位置。
+
+**修法后的终态复核**:`tsc --noEmit` exit 0 / 零输出;`approval-cancel-round-creation.db.test.ts` **30 passed / 30**;
+`SELECT count(*) FROM approval_delegations` = **0**。
+
+### N.4 Mutation 台账(`cp` 备份 → 改 → 单独跑 → `cp` 还原 → `cmp`;全程未用 `git checkout --` / `reset --hard`)
+
+补丁后源文件 sha256 = `db3dd8f8defac0c3d165c29ef1438dc0700602cdc1e6f4663bb8cced679ba227`;
+**四次 mutation 之后三次 `cmp` 全部 identical、sha256 逐字回到上值**。
+
+四条 mutation **划分**了这 13 条腿 —— 任何单独一条都**不可能**让「新用例全红」,这一点必须直说:
+
+| mutation | 改动 | 红 | 绿 |
+|---|---|---|---|
+| **M-B1**(任务书点名的那条)把席位推导整体退回补丁前基线(直接 `cp` 候选作者的 `.baseline/ApprovalProductService.ts.base`,sha256 = `f35a38d4…c7ea`) | 8 failed / 5 passed | **P5, P6, P7, P9, N6, P10, P12, P14** | P4, P11, N5, N7, P15 |
+| **G-2b** 把 `delegationMapNow` 硬写成 `{}`(anchor 命中数实测 = 1) | 3 failed / 10 passed | **P4, P11, N5** | 其余 10 |
+| **G-2c** 把 `templateId: original.template_id ?? ''` 换成 `templateId: ''` | 1 failed / 12 passed | **P11** | **P7 仍绿** —— 这就是 README §3.2 说的判别力不对称,本轮亲眼看到 |
+| **G-3** 删掉 JOIN 里的 `AND a.node_key = r.metadata->>'nodeKey'` | 2 failed / 11 passed | **P14, P15** | 其余 11 |
+
+**每条 mutation 跑开始时的库状态(照实记,因为 §N.3.1 刚证明本库上残留是真的)**:M-B1 从**干净**库开始;
+G-2b / G-2c / G-3 三条**是在 M-B1 与 G-2b 留下的 26 行陈旧委托行仍在库里的情况下**跑的。
+**为什么这些残留对这三条读数是惰性的**(机械论证,不是「应该没事」):每个夹具 id 都带本次运行的 `TS` 后缀,
+所以残留行的 delegator 不是任何后续运行用到的人;`delegationMapNow[delegatedFrom]` 只会去查**当次运行**的那个 A;
+`uq_approval_delegations_active` 按 delegator 分键,所以插入不可能与残留行冲突。
+G-2c(`templateId: ''`)下残留的 `scope='all'` 行**确实进了 map**,但按同一条理由仍然惰性(map 里多了几个没人查的键)。
+**N.3.1 修法之后的 M-B1 重跑用的是 `--reporter=dot`**,所以我拿到的是**计数**(8 failed / 5 passed,与修法前逐字相同),
+**没有重新采集那 8 条的身份**;此处只主张计数相同,不主张集合相同。
+
+**红的并集 = 12 / 13**。唯一在四条 mutation 下都绿的是 **N7(b)**,它在用例名里已自述零判别力(见 N.1)。
+`P4(b)` 与 `P11(b)` 在 M-B1 下绿**是预期**(补丁前的实现本来就给 D,而这两腿正是断言 D)——
+所以它们的承重由 **G-2b** 证,不由 M-B1 证;把「新用例必须红」写成 M-B1 一条就能满足,是不成立的。
+
+#### M-B1 红的原文(节选,逐字)
+
+```
+ FAIL  tests/integration/approval-cancel-round-creation.db.test.ts > … > §2-G3 第三句 正控 P5(b) — 委托已撤销(active = FALSE):席位回到原审批人 A
+AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
+
+- Expected
++ Received
+
+  Array [
+-   "wi4-delA-g3dlg-revoked-1789891793028",
++   "wi4-delD-g3dlg-revoked-1789891793028",
+  ]
+ ❯ tests/integration/approval-cancel-round-creation.db.test.ts:1384:19
+```
+
+```
+ FAIL  … > §2-G3 第三句 负控 N6(b) — 委托已撤销 ⇒ 席位是 A ⇒ 停权 A 阻断(409 SEAT_INELIGIBLE,零行);实测今天不阻断,资格闸人口跟着席位走
+AssertionError: expected undefined to be truthy
+
+- Expected:
+undefined
+
++ Received:
+false
+ ❯ tests/integration/approval-cancel-round-creation.db.test.ts:1457:20
+```
+
+```
+ FAIL  … > §2-G3 第三句 正控 P10(b) — 委托已撤销 + 停权 D:不再阻断,席位是 A(今天为 409;…)
+ServiceError: A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore the account, then retry
+ ❯ assertCancelRoundSeatsEligibleInTxn src/services/ApprovalProductService.ts:540:9
+ ❯ ApprovalProductService.createCancelRoundInstance src/services/ApprovalProductService.ts:8686:7
+Serialized Error: { statusCode: 409, code: 'CANCEL_ROUND_SEAT_INELIGIBLE', details: { ineligibleCount: 1, reasons: [ 'inactive' ] } }
+```
+
+```
+ FAIL  … > §2-G3 第三句 正控 P12(b) — 哨兵 × 委托合成:… ⇒ 席位恰好 [A],哨兵既不入席也没把 A 一起丢掉
+AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
+
+- Expected
++ Received
+
+  Array [
+-   "wi4-dsdelA-g3dlg-sent-1789891793028",
++   "wi4-dsdelD-g3dlg-sent-1789891793028",
+  ]
+ ❯ tests/integration/approval-cancel-round-creation.db.test.ts:1622:19
+```
+
+```
+ FAIL  … > §2-G3 第三句 正控 P14(b) / 候选 README 门审 G-3 —— JOIN 的 node_key 合取…
+AssertionError: expected [ Array(1) ] to deeply equal [ …(2) ]
+
+- Expected
++ Received
+
+  Array [
+-   "wi4-dbdelA-g3dlg-sib-1789891793028",
+    "wi4-dbdelD-g3dlg-sib-1789891793028",
+  ]
+ ❯ tests/integration/approval-cancel-round-creation.db.test.ts:1727:57
+```
+
+(另两条 P6(b)/P7(b) 与 P5(b) 同形,`Expected` 是 `…delA…`、`Received` 是 `…delD…`;
+P9(b) 同形,`Received` 是 `…delD…`,**不是** E。)
+
+#### G-2b 红的原文(逐字)
+
+```
+ FAIL  … > §2-G3 第三句 正控 P4(b) — 委托今天仍然有效:席位仍是被委托人 D…
+AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
+-   "wi4-delD-g3dlg-valid-1789891879765",
++   "wi4-delA-g3dlg-valid-1789891879765",
+
+ FAIL  … > §2-G3 第三句 正控 P11(b) — 委托作用域正好覆盖本单模板…
+-   "wi4-delD-g3dlg-scopehit-1789891879765",
++   "wi4-delA-g3dlg-scopehit-1789891879765",
+
+ FAIL  … > §2-G3 第三句 负控 N5(b) — 委托仍有效 ⇒ 席位是 D ⇒ 停权 D 阻断…
+AssertionError: expected undefined to be truthy
+```
+
+#### G-2c 红的原文(逐字,**只有一条**)
+
+```
+ FAIL  … > §2-G3 第三句 正控 P11(b) — 委托作用域正好覆盖本单模板(scope=template 指向原单自己的模板)且仍有效:席位是 D;这一腿是 templateId 作用域唯一有判别力的正控
+AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
+-   "wi4-delD-g3dlg-scopehit-1789891928324",
++   "wi4-delA-g3dlg-scopehit-1789891928324",
+```
+
+#### G-3 红的原文(逐字)
+
+```
+ FAIL  … > §2-G3 第三句 正控 P14(b) / 候选 README 门审 G-3 …
+AssertionError: expected [ Array(1) ] to deeply equal [ …(2) ]
+    "wi4-dbdelA-g3dlg-sib-1789891955293",
+-   "wi4-dbdelD-g3dlg-sib-1789891955293",
+
+ FAIL  … > §2-G3 第三句 正控 P15(b) / 候选 README 门审 G-4 …
+AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
+-   "wi4-dldelD-g3dlg-legacy-1789891955293",
++   "wi4-dldelA-g3dlg-legacy-1789891955293",
+```
+
+### N.5 legacy 无 `nodeKey` 那条腿的**实测结果**(任务书点名要照实写,无论结果如何)
+
+**做法**:真的走生产写入方,不是手工 UPDATE 一行 metadata。建一张委托席位的单据(节点点名 A,
+'all' 作用域 A→D 委托在创建时把席位换成 D,`metadata.delegatedFrom = A`、`node_key = 'approval_a'`),
+然后以 D 的身份调 `POST /api/approvals/{id}/approve`(legacy 端点,body 只带 `version`,**不带 metadata**),
+再把委托 `active` 置 FALSE,最后开撤销轮。
+
+**实测**:
+
+1. legacy 端点返回 **200**;它写出的 approve 行 `SELECT actor_id, metadata->>'nodeKey'` = `{ actor_id: D, node_key: null }` —— **确认该端点确实写得出无 `nodeKey` 的 approve 行**(这不是推断,是读数)。
+2. 委托已撤销的前提下,撤销轮席位 = **`[D]`**。
+3. 同样「委托已撤销」的 P5(b) 给的是 `[A]`。**两腿的唯一差别就是这条 approve 行的 metadata 里有没有 `nodeKey`** —— 缺口的边界就是这一格。
+4. 失败方向 = **补丁前的行为**(席位不被重核),**不是**更宽的席位;这与候选 README §2.3 的声明一致,现在它是数据不是声明。
+5. G-3 mutation(删掉 node_key 合取)会把这一腿翻成 `[A]`(见上面红的原文)—— 也就是说「不带 node_key 的 instance 级匹配」确实能「补」上 legacy 腿,但代价是 P14(b) 的兄弟席位腿同时塌成一人。
+   **措辞收窄(不要读成一般性结论)**:本轮实测的**这一个**替代形状(整段删掉合取)两者不可兼得;
+   **是否存在第三种形状,本轮未设计、未测** —— 例如只对 `nodeKey` 为 NULL 的行退回 instance 级匹配
+   (`AND (a.node_key = r.metadata->>'nodeKey' OR r.metadata->>'nodeKey' IS NULL)`)。它有自己的问题
+   (一条无 nodeKey 的行会在被委托人的多条 assignment 上扇出,给出有歧义的 pair 集),所以那是设计题不是白捡的,
+   此处按候选 README 的取舍保留 node_key 合取,把 legacy 腿登记成已披露缺口。
+
+### N.6 本轮顺带核实、并据此改写设计 MD 论据的两条
+
+1. **`approval_delegations.scope_template_id` 是 `TEXT`,不是 `uuid`**(对本轮私有库 `\d approval_delegations` 实测,
+   并与迁移 `zzzz20260622060000_create_approval_delegations.ts:25` 及 `tests/helpers/approval-schema-bootstrap.ts` 的表定义一致)。
+   所以 `original.template_id ?? ''` 传空串**不可能**触发 `22P02`;设计 MD 的论据已从「CHECK 约束」改写成「列类型 + CHECK」,
+   因为 CHECK 只管行是否匹配,管不了绑定期的类型转换。
+2. **`createCancelRoundInstance` 并不要求原单是模板运行时实例**(方法体内只有 `status='approved'`、请求人、suite、
+   pending 轮四道前置),所以 `template_id IS NULL` 的原单在原理上可达;**本文件所有夹具都走 `publishOneNodeTemplate`,
+   `template_id` 恒非空,这条腿没有验收覆盖**——已登记进设计 MD,未凭空造夹具。
+
+### N.7 本轮**没有**做、没有主张的
+
+- **没有**裁定读法。(b) 只是候选;(a)/(a′)/(b′) 三种读法本轮一行代码都没写。
+- **没有**改任何锁文正文;**没有**新增错误码;**没有**动 §14.3 出口表。
+- **没有**合并、**没有** undraft、**没有**开 PR、**没有**动任何既有 PR 的状态。
+- **没有**对共享 / staging / 生产库或 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_*` 应用迁移。
+- **没有**跑 C-2:候选 README §5 说 C-2 的 rebase 一定会在这段代码上冲突,那是另一轮的活。
+- **没有**碰 `apps/web`;前端同步钉未复核。
+- **没有**在本轮解除 2026-09-19 验证报告 §8 的 P2 阻塞 —— 解除条件里「实现 (i) 并配四项验收」现在有了**候选实现 + 实测验收**,
+  但 §8 同时要求 owner **裁定读法**,而那一步仍未发生;本轮把材料备齐,裁决权不在实现侧。

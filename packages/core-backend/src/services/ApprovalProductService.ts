@@ -8629,10 +8629,71 @@ export class ApprovalProductService {
       // Seats (§14.1) — the original document's approvers, read off its own audit trail rather
       // than its (possibly since-deactivated) `approval_assignments` rows, so a reassigned/expired
       // seat cannot silently drop the person who actually approved.
-      const approverRows = await client.query<{ actor_id: string }>(
-        `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+      //
+      // READING (b) of lock §2-G3's THIRD sentence (lock:74) 「历史委托不自动成为当前授权」: the delegatee
+      // D keeps the seat ONLY IF the delegation that produced it is still a live authorization at the
+      // moment the cancel round opens; otherwise the seat returns to the delegator A. 「不自动成为」 is
+      // read here as "not automatically — re-check it at the new authorization instant", not as "never".
+      //
+      // The audit trail names the person who pressed the button (D). The ONE table that records WHOSE
+      // authority they pressed it under is `approval_assignments.metadata.delegatedFrom`, written by
+      // `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution point) and
+      // KEPT after approve as `is_active = FALSE` audit history — `ApprovalDelegationConfig
+      // .countDelegatedApprovals` already reads exactly this column as a persistent audit fact, with no
+      // `is_active` filter of its own. This query reads the provenance; the map read below decides
+      // whether it is still authority TODAY.
+      //
+      // JOIN PRECISION: the match is on (instance, node_key, assignee), NOT (instance, assignee). A
+      // delegatee who also holds a seat OF THEIR OWN at another node must keep that seat as their own;
+      // an instance-wide match would attribute it to the delegator as well. `node_key` is written on
+      // every assignment row (`insertAssignments`), and `metadata.nodeKey` on every approve record
+      // written by the template-runtime dispatch and by `insertAutoApprovalEvents`. `entry_epoch` is
+      // deliberately NOT part of the join: it is NULL on pre-migration rows, and `NULL = NULL` would turn
+      // the whole re-check into a silent no-op for exactly the legacy corpus this method is likeliest to
+      // meet.
+      //
+      // DISCLOSED GAP (fails to TODAY's behaviour, never to a wider seat): the legacy
+      // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
+      // (routes/approvals.ts), so an approve row written there can carry no `nodeKey`; the LEFT JOIN then
+      // misses, `delegated_from` is NULL, and the actor keeps the seat un-rechecked. Registered in the
+      // design MD §3.4 rather than papered over with an instance-wide match, which would mis-attribute
+      // the sibling-seat case above.
+      const approverRows = await client.query<{ actor_id: string; delegated_from: string | null }>(
+        `SELECT DISTINCT r.actor_id AS actor_id, a.metadata->>'delegatedFrom' AS delegated_from
+           FROM approval_records r
+           LEFT JOIN approval_assignments a
+             ON a.instance_id = r.instance_id
+            AND a.assignee_id = r.actor_id
+            AND a.assignment_type = 'user'
+            AND a.node_key = r.metadata->>'nodeKey'
+            AND a.metadata->>'delegatedFrom' IS NOT NULL
+          WHERE r.instance_id = $1 AND r.action = 'approve'`,
         [documentId],
       )
+
+      // TODAY's delegation map — the same resolver `createApproval` freezes at submit time
+      // (`resolveActiveDelegationMap`), re-read at the cancel round's own authorization instant. Reused,
+      // not re-spelled: a second hand-rolled `active AND start_at <= now AND end_at > now AND scope…`
+      // predicate here would be a narrower lookalike of the shipped one.
+      //
+      // SCOPE: it filters `scope='template'` rows by templateId, so it MUST be given the ORIGINAL
+      // document's template — never the cancel round's own dedicated published definition, which would
+      // silently reduce support to `scope='all'` rows. `ApprovalInstanceRow.template_id` is nullable; a
+      // NULL-template original can only ever match `scope='all'` rows, which `''` expresses exactly (no
+      // `scope='template'` row can carry an empty target — `chk_approval_delegations_scope_target` — and
+      // `scope='all'` rows ignore the parameter).
+      //
+      // NOT best-effort, unlike `createApproval`'s own delegation read (which warns and continues so a
+      // config-table blip can never block a submission): here the map is an AUTHORIZATION input, so a
+      // failed read must not degrade into "nobody is delegated". A thrown statement aborts this
+      // transaction and the caller's `rollbackQuietly` guarantees zero rows — the fail-closed outcome
+      // `assertCancelRoundSeatsEligibleInTxn`'s own doc already ratifies for this method. The read runs on
+      // `client`, the connection holding the original document's `FOR UPDATE`, so the delegation state it
+      // sees is the same snapshot that authorizes these seats.
+      const delegationMapNow = await resolveActiveDelegationMap(client.query.bind(client), {
+        templateId: original.template_id ?? '',
+        now: new Date(),
+      })
       // Gate round 6, G6-1 (P1, reproduced on a real DB before the fix): `system:`-namespaced
       // SENTINEL actors are not people, and this was the ONE seat-derivation site in the repo that
       // did not drop them. `insertAutoApprovalEvents` writes `action: skipped ? 'sign' : 'approve'`
@@ -8651,9 +8712,31 @@ export class ApprovalProductService {
       // Under `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's
       // real id, so that person IS kept and IS re-qualified — the drop is namespace-scoped, never
       // "drop every auto-approved node's approver".
-      const approverIds = approverRows.rows
-        .map((row) => row.actor_id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0 && !isSystemSentinelActor(id))
+      // READING (b) seat resolution. `delegationMapNow[A] === D` is the whole predicate: the delegation
+      // that produced this seat must STILL be the live one.
+      //
+      // WHY `=== D` AND NOT `!== undefined`: if A has since re-delegated to a THIRD person E, the
+      // authority that produced D's seat is gone, so D loses the seat — and it returns to A, NOT to E.
+      // Seating E would be a different reading ((a′): restore, then re-resolve against today's map),
+      // deliberately NOT implemented here: it would hand a cancel round to somebody who took no part in
+      // the original decision. Pinned by 正控 P9 in `approval-cancel-round-creation.db.test.ts`.
+      //
+      // The explicit `new Set` is load-bearing now: `SELECT DISTINCT` above dedups (actor, delegatedFrom)
+      // PAIRS, and two different pairs can fall back onto the same person (A approving one node directly
+      // while D approved another as A's lapsed delegate). Without it `requesterChoices` would carry a
+      // duplicate id.
+      const approverIds = [
+        ...new Set(
+          approverRows.rows
+            .map((row) => {
+              const delegatedFrom =
+                typeof row.delegated_from === 'string' && row.delegated_from.length > 0 ? row.delegated_from : null
+              if (!delegatedFrom) return row.actor_id
+              return delegationMapNow[delegatedFrom] === row.actor_id ? row.actor_id : delegatedFrom
+            })
+            .filter((id): id is string => typeof id === 'string' && id.length > 0 && !isSystemSentinelActor(id)),
+        ),
+      ]
 
       // Zero HUMAN approvers (every `approve` row on the original was synthetic) is NOT
       // `not_found` — there is nobody to restore. Lock §14.1 ratifies 席位 = 原单的原审批人 with
