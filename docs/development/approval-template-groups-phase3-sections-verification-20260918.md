@@ -660,7 +660,10 @@ vite.config.ts(28,29): error TS2769: No overload matches this call.
 EXIT=2        # 错误条数:1,且就是这一条
 ```
 
-⇒ 这条错误在 `origin/main` 上就存在,与两条 lane 无关(错误文本点名 pnpm store 里的 `vite@5.4.21` 与 `vite@7.3.6` 两份)。
+⇒ 这条错误在**本机的** `origin/main` 检出上就存在,与两条 lane 无关(错误文本点名 pnpm store 里的
+`vite@5.4.21` 与 `vite@7.3.6` 两份)。同一个 SHA 在 GitHub Actions 上 `build` / `test (20.x)` / `web-tests`
+三个 check 都是 success(`gh api …/check-runs`),所以这条 TS2769 同样是**本机装配**的产物
+——本次**没有**逐 job 核对哪一个 job 真的跑 `vue-tsc`,故只作「CI 侧无对应红」的旁证,不作更强断言。
 **因此 `pnpm type-check` 在本分支仍然非零退出,但错误集合与 `origin/main` 逐字相同**——这是基线相等,不是本分支新引入的红。
 
 日志:`soak-working/d3-groups-merge-20260920/baseline-originmain-vuetsc.log`
@@ -671,7 +674,7 @@ EXIT=2        # 错误条数:1,且就是这一条
 |---|---|---|
 | 1 `apps/web` 类型 | `npx vue-tsc -b` | **只剩** `vite.config.ts(28,29) TS2769` 一条,与 §15.3 的 `origin/main` 基线**逐字相同**;13 条合流引入的错误全部消失 |
 | 2 `apps/web` 构建 | `npx vite build` | **exit 0**,`✓ built in 38.73s`(报告里 esbuild 的 6 条 `Multiple exports with the same name` 全部消失) |
-| 3 required web lane | `bash -e apps/web/scripts/run-required-web-tests.sh` | **exit 1**,但死在**与两条 lane 无关的、`origin/main` 自身就红的**一条上 —— 见 §15.5 |
+| 3 required web lane | `bash -e apps/web/scripts/run-required-web-tests.sh` | **本机 exit 1**,死在一条**与两条 lane 无关、在本机的 `origin/main` 干净检出上同样红、而在 GitHub Actions 上 `origin/main` 是绿**的用例上 ⇒ 环境项 —— 见 §15.5 |
 | 4 两条 lane 定向 spec | `npx vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel approvalTemplateCenterSections approvalTemplateCenterCategory templateCenterI18n approvalTemplateGovernance` | **8 files / 65 tests 全绿**(报告 Tree B2 同一组命令是 `Test Files 1 failed \| 7 passed (8)` / `Tests 1 failed \| 62 passed (63)`,那一条红就是 P2-1;本分支 65 = 报告的 63 + 本轮在 `approvalTemplateCenterCategory.spec.ts` 新增的 2 条分组视图用例,该文件因此由 8 条变 10 条) |
 | 5 后端 | `npx tsc --noEmit -p tsconfig.json`(core-backend) | **exit 0,零错** |
 | 6 CI 两点接线 | `node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs` | **12/12 pass** |
@@ -680,7 +683,7 @@ EXIT=2        # 错误条数:1,且就是这一条
 | 9 A-4 闭世界普查 | `npx vitest run approval-member-identity-coverage-enumeration` | **16/16 pass** |
 | 10 审批 CI 覆盖枚举 | `CI=true npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts` | **350/350 pass**(按报告 P1-2 的告诫,这条绿**不**被当作 exec 行覆盖证据,只作回归) |
 
-### 15.5 闸 3 的诚实结论:退出码 1 来自 `origin/main` 自身的一条红,不是合流
+### 15.5 闸 3 的诚实结论:退出码 1 来自**本机环境**的一条红(`origin/main` 在 CI 上是绿的),不是合流
 
 `run-required-web-tests.sh` 共有 **19** 条可执行的 `npx vitest run` 调用(全文件 50 行含这个字样,其余 31 行都在注释里)。
 本次运行在**第 9 条**(脚本 `:606`)被 `set -euo pipefail` 打断:
@@ -693,13 +696,25 @@ Test Files  1 failed | 1 passed (2)      Tests  1 failed | 153 passed (154)
 REQUIRED_WEB_EXIT=1
 ```
 
-**归因(实测,不是推断)**:
+**归因(实测,不是推断;三步,第三步把结论从「main 红」改成「本机环境红」)**:
 
 1. 这个 spec 与它 import 的全部 `src`(`apps/web/src/multitable/**`)在本分支与 `origin/main` **零差异**
    (`git diff --name-only origin/main HEAD -- apps/web/tests/multitable-recovery-archive-modal.spec.ts apps/web/src/multitable/ …` 输出 0 行);
-2. 在 `origin/main`(`123b1d1e54`)的独立干净工作树里跑**同一条命令**,得到**逐字相同的红**:
-   `Test Files 1 failed | 1 passed (2)` / `Tests 1 failed | 153 passed (154)`。
-   日志:`soak-working/d3-groups-merge-20260920/baseline-originmain-multitable-recovery.log`。
+2. 在 `origin/main`(`123b1d1e54`)的独立干净工作树里(**同一台机器、同一份软链 `node_modules`**)跑**同一条命令**,
+   得到**逐字相同的红**:`Test Files 1 failed | 1 passed (2)` / `Tests 1 failed | 153 passed (154)`。
+   日志:`soak-working/d3-groups-merge-20260920/baseline-originmain-multitable-recovery.log`;
+3. **但 CI 上同一个 SHA 是绿的**——`web-tests` 这个 job 跑的就是本脚本
+   (`.github/workflows/web-tests.yml:77` `run: bash apps/web/scripts/run-required-web-tests.sh`):
+
+   ```
+   $ gh api repos/zensgit/metasheet2/commits/123b1d1e54250ba9e96b33dcbb8112cf2fcdf8af/check-runs \
+       --jq '.check_runs[] | "\(.name)\t\(.conclusion)"' | grep web-tests
+   web-tests    success
+   ```
+
+⇒ 正确的归因是:**这条红是本机环境产物**(共享 pnpm store / 软链 `node_modules` 的本地装配),
+既不是两条 lane 引入的,也**不是** `origin/main` 在 CI 上的缺陷。前一版本节把它写成「`origin/main` 自身就红」,
+那是**只测了本机一侧**就下的结论,已在此更正。
 
 **剩余 10 条调用(含最后那条 `exec` 行)是否也绿**:为了回答这个问题(errexit 让它们在上面那次根本没跑到),
 把脚本复制成一个**未跟踪的探针副本**,只把 `:606` 那一条调用注释掉,其余逐字不动,跑完后删除探针文件
@@ -719,8 +734,16 @@ PROBE_REQUIRED_EXIT=0          # 18/18 条调用全部执行,全部通过
 | A-2 | `tests/ApprovalTemplateGroupsPanel.spec.ts` | 1 |
 | A-4 | `tests/approvalTemplateCenterSections.spec.ts` | 1 |
 
-即报告 P1-2 指出的「A-4 那 18 个 `approvalTemplateCenterSections` 测试在任何 CI lane 上都不会被执行」
-**在本分支已经不成立**:token 在唯一的活 exec 行上,并且实测被执行。
+关于报告 P1-2(「A-4 那 18 个 `approvalTemplateCenterSections` 测试在任何 CI lane 上都不会被执行」)——
+**本分支的证据链有三段,第三段是推论不是实测,按此读**:
+
+1. **实测**:token 在**唯一的一条活 exec 行**上(`atg-exec-line-post-rebase-check.sh` PASS,§15.4 闸 8),
+   报告里「token 落在死行」的那个形态已经不存在;
+2. **实测**:本机跑到那条 exec 行时,四个 lane spec 文件都被收集并通过(上表 + 472 文件 / 7273 用例全绿);
+3. **推论(未在本分支的 CI 上验证)**:`web-tests` 在 `origin/main` 上是 success(上面第 3 步),
+   说明本机那条挡路的红在 CI 上不会发生,因此 CI 上脚本会一路跑到第 19 条调用。
+   **本分支尚未跑过任何 CI**(未开 PR),所以「A-4 的 spec 在 CI 上确实被执行」这句在本分支是
+   **UNVERIFIED**,要等这条分支/它的 PR 第一次 `web-tests` 绿才算实测。
 
 日志:`soak-working/d3-groups-merge-20260920/run-required-web-tests.log`(原样,exit 1)、
 `…/run-required-web-tests-minus-main-red.log`(探针,exit 0)。
