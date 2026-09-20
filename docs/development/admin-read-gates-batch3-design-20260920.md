@@ -106,7 +106,7 @@
 
 口径本身不是新定的：#5678 的盘点原文就把 `router.use` 挂进来的子路由 GET 算在内（点名 `protection-rules.ts` 的 `GET /` 与 `GET /:id`），只是漏登记了 `snapshot-labels.ts`。因此同一个 PR 里做了三件事而不是收窄措辞：① 给 `snapshot-labels.ts:145` 补 `requireAdminRole()`；② 把闭世界扫描改成**递归**下钻 `router.use()` 子路由、路径按挂载前缀拼接；③ 新增一条反盲区用例，直接断言扫描确实看得见 `/snapshots`、`/safety/rules`、`/safety/rules/:id`（零断言必须先证明镜头能看见目标）。
 
-补门只收窄受众，不改查询：`snapshots` 三条查询缺租户谓词这一条**仍是未清零残余**，登记在验证稿的「残余」一节。
+补门只收窄受众，不改查询：`snapshots` 三条查询缺租户谓词这一条**仍是未清零残余**，登记在验证稿的「残余」一节，跟进见 #5918。
 
 本批其余残余（`openapi/admin-api.yaml` 全文件缺 `securitySchemes`、500 分支回显 `err.message`）不在该 PR 范围内，仍然是残余。
 

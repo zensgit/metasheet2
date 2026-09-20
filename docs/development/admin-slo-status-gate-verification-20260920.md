@@ -94,7 +94,7 @@
 
 ## 残余
 
-- **`snapshots` 表的三条查询仍无租户谓词**：`SnapshotService.ts:1169 / :1197 / :1220` 的 `selectFrom('snapshots').selectAll()` 只按 tag / level / channel 过滤。本 PR 把受众收窄到平台管理员，**没有**把查询改成租户内查询；`GET /api/snapshots`（`src/routes/snapshots.ts`）等其它入口的租户口径也未在本 PR 核查。作为独立残余登记，建议单开跟进（改查询签名会波及调用方，不该混在补门 PR 里）。
+- **`snapshots` 表的三条查询仍无租户谓词**：`SnapshotService.ts:1169 / :1197 / :1220` 的 `selectFrom('snapshots').selectAll()` 只按 tag / level / channel 过滤。本 PR 把受众收窄到平台管理员，**没有**把查询改成租户内查询；`GET /api/snapshots`（`src/routes/snapshots.ts`）等其它入口的租户口径也未在本 PR 核查。作为独立残余登记，已开跟进 #5918（改查询签名会波及调用方，不该混在补门 PR 里）。
 - **#5665 / #5680 的后续**：#5665 合并、分支删除时 GitHub 自动把 #5680 的 base 改指 main，其反向对照用例即失去素材，必须改成正向形式；本 PR 只负责把 main 上的洞补掉并在两处文件头留下指针，不动那两个 PR 的任何文件。
 - **`packages/core-backend/openapi/admin-api.yaml`**：整份 yaml 没有 `securitySchemes`（`grep -n security` 空），连早就要求管理员的端点也没写，因此没有只给这两条补 403 的写法能不造出新的不一致。与批次 2、批次 3 的同一条残余合并处理。
 - **500 分支回显 `err.message`**：`/slo/status`（`admin-routes.ts:1395-1399`）与 `snapshot-labels.ts` 的 catch 块都直接回显驱动原文。加门后受众已收敛到管理员，脱敏是独立取舍点，沿用前两批的留置。
