@@ -45,6 +45,32 @@ const LIVE_CONNECTION_FK = 'fk_integration_external_systems_live_connection_id'
 const LEGACY_CONNECTION_FK = 'fk_integration_external_systems_connection_id'
 const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 
+// SECOND-ORDER POINTERS AT THIS TABLE (the delete guard's blind spot until now).
+//
+// `countPipelineReferences` below counts `integration_pipelines` and nothing else, so a system that
+// nothing pipelines at but that a stock-prep SOURCE BINDING (079) or a read-source CONFIG (062)
+// points at was deletable. Both store the external-system id as a plain TEXT reference and
+// DELIBERATELY carry no foreign key (079's own header says so at
+// `migrations/079_create_integration_stock_prep_source_binding.sql:16-23`), so the database will not
+// refuse the delete either — the row just goes dangling, and the read path only discovers it at the
+// next request (`TABLE_ACTION_SOURCE_INVALID`).
+//
+// That dangle is also what opens the SECOND-ORDER hole on the data source underneath: the external
+// system is what `DataSourceManager.countExternalSystemReferences` counts when a data source is
+// deleted, so once the system is gone the data source it named counts zero references and is itself
+// deletable — while 079/062 still point (now at nothing) and an operator still believes the binding
+// is live. Counting these two tables here closes the first link of that chain.
+const STOCK_PREP_SOURCE_BINDING_TABLE = 'integration_stock_prep_source_binding'
+const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
+// 062's lifecycle is draft -> approved -> retired (`lib/read-source-config-store.cjs:23-28`).
+// `retired` is the terminal, deliberately non-consumable state: a retired version can never go back
+// to approved, so it is history, not a live pointer, and must NOT keep a system undeletable forever.
+const LIVE_READ_SOURCE_CONFIG_STATUSES = Object.freeze(['draft', 'approved'])
+// undefined_table. Judged by SQLSTATE, never by message prose: the 222 server runs a zh_CN locale
+// where the English "relation ... does not exist" text never appears (same posture as
+// `translateConnectionFkViolation` below and `DataSourceManager.ts:20`).
+const UNDEFINED_TABLE_SQLSTATE = '42P01'
+
 class ExternalSystemValidationError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -1190,6 +1216,71 @@ function createExternalSystemRegistry({
     }
   }
 
+  function isUndefinedTableError(error) {
+    return Boolean(error) && typeof error === 'object' && error.code === UNDEFINED_TABLE_SQLSTATE
+  }
+
+  /**
+   * Count one dependent table, tolerating ONLY "the table is not there".
+   *
+   * A deployment that never ran 079 (or 062) has no such relation, and the delete it used to allow
+   * must keep working — that is the single tolerated case, and it is decided by SQLSTATE. EVERY
+   * other failure (permission, connection, syntax, a timeout) PROPAGATES, which is the fail-closed
+   * half: a guard that cannot read its own evidence must not let the delete proceed as if the
+   * evidence said zero.
+   */
+  async function countDependentRows(table, where) {
+    try {
+      return Number(await db.countRows(table, where)) || 0
+    } catch (error) {
+      if (isUndefinedTableError(error)) return 0
+      throw error
+    }
+  }
+
+  /**
+   * Second-order references at this system: stock-prep source bindings (079) and read-source
+   * configs (062). Both are tenant-scoped pointers by external-system id.
+   *
+   * NOTE WHAT IS NOT IN THE FILTER: `workspace_id`. Callers may pass a `workspaceId`; it is
+   * deliberately ignored here, unlike `countPipelineReferences`, and that asymmetry is the whole
+   * correctness of this guard:
+   *
+   *   - 079 rows are legitimately TENANT-WIDE (`workspace_id` is nullable —
+   *     `migrations/079_create_integration_stock_prep_source_binding.sql:43`), and the read path
+   *     itself resolves a tenant-wide caller onto a workspace-scoped binding through the
+   *     `single_workspace_binding` fallback (`lib/http-routes.cjs:4617-4626`). A workspace-filtered
+   *     count would therefore miss rows that the READER can still reach — a guard that goes green
+   *     while a live pointer exists, which is worse than no guard.
+   *   - Widening the count only ever REFUSES more deletes. It never reveals a row and never widens
+   *     what a caller may reach: both queries still carry the caller's own `tenant_id`, so another
+   *     tenant's binding is neither counted nor disclosed, and the conflict details carry counts,
+   *     never ids.
+   *
+   * 062 is filtered by status: `draft` and `approved` are live pointers, `retired` is terminal
+   * history (see LIVE_READ_SOURCE_CONFIG_STATUSES). `db.countRows`'s where-builder renders a plain
+   * equality per key with no IN support (`lib/db.cjs:buildWhereClause` — an array value would be
+   * JSON-stringified into `= $n` and silently match nothing), so the two live statuses are counted
+   * as two equality queries and summed rather than smuggled in as a list.
+   */
+  async function countDependentBindingReferences({ tenantId, id }) {
+    const [stockPrepSourceBindingCount, ...readSourceConfigCounts] = await Promise.all([
+      countDependentRows(STOCK_PREP_SOURCE_BINDING_TABLE, {
+        tenant_id: tenantId,
+        external_system_id: id,
+      }),
+      ...LIVE_READ_SOURCE_CONFIG_STATUSES.map((status) => countDependentRows(READ_SOURCE_CONFIG_TABLE, {
+        tenant_id: tenantId,
+        system_id: id,
+        status,
+      })),
+    ])
+    return {
+      stockPrepSourceBindingCount,
+      readSourceConfigCount: readSourceConfigCounts.reduce((sum, count) => sum + count, 0),
+    }
+  }
+
   async function deleteExternalSystem(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
@@ -1204,16 +1295,32 @@ function createExternalSystemRegistry({
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
 
+    // BOTH count sets run BEFORE the delete, and either one being non-zero refuses it. The
+    // dependent counts are NOT a second, weaker check bolted after the pipeline one: they raise the
+    // SAME ExternalSystemConflictError (409 — `http-routes.cjs:871` maps any `*Conflict*` name), so
+    // a caller cannot tell "referenced by a pipeline" from "referenced by a binding" by status code
+    // and then treat one of them as retryable.
     const references = await countPipelineReferences({ tenantId, workspaceId, id })
+    const dependents = await countDependentBindingReferences({ tenantId, id })
     const referencedPipelineCount = references.sourcePipelineCount + references.targetPipelineCount
-    if (referencedPipelineCount > 0) {
-      throw new ExternalSystemConflictError('external system is used by pipelines', {
-        id,
-        tenantId,
-        workspaceId,
-        referencedPipelineCount,
-        ...references,
-      })
+    const referencedBindingCount = dependents.stockPrepSourceBindingCount + dependents.readSourceConfigCount
+    if (referencedPipelineCount > 0 || referencedBindingCount > 0) {
+      throw new ExternalSystemConflictError(
+        // The pipeline wording is preserved EXACTLY when pipelines are what refuse, because it is
+        // already on the wire (`__tests__/http-routes.test.cjs:974`).
+        referencedPipelineCount > 0
+          ? 'external system is used by pipelines'
+          : 'external system is used by source bindings or read-source configs',
+        {
+          id,
+          tenantId,
+          workspaceId,
+          referencedPipelineCount,
+          referencedBindingCount,
+          ...references,
+          ...dependents,
+        },
+      )
     }
 
     const deleted = await publicRow(credentialStore, row)
