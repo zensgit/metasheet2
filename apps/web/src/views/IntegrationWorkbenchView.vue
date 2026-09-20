@@ -385,6 +385,11 @@
       :bi="bi"
       :run-row-summaries="runRowSummaries"
       :is-run-expanded="isRunExpanded"
+      :run-detail-id="runDetailId"
+      :run-detail-loading="runDetailLoading"
+      :run-detail-error="runDetailError"
+      :run-detail="runDetail"
+      :run-detail-payload-text="runDetailPayloadText"
       :dead-letter-error-label="deadLetterErrorLabel"
       :dead-letter-error-hint="deadLetterErrorHint"
       :is-dead-letter-replayable="isDeadLetterReplayable"
@@ -398,6 +403,8 @@
       :row-provenance-attrs-summary="rowProvenanceAttrsSummary"
       :refresh-pipeline-observation="refreshPipelineObservation"
       :toggle-run-summaries="toggleRunSummaries"
+      :open-run-detail="openRunDetail"
+      :close-run-detail="closeRunDetail"
       :request-replay="requestReplay"
       :cancel-replay="cancelReplay"
       :replay-dead-letter="replayDeadLetter"
@@ -463,6 +470,7 @@ import {
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
   getExternalSystemSchema,
+  getIntegrationRun,
   getPlmDataSourceCapabilities,
   installIntegrationStaging,
   integrationApiErrorCode,
@@ -904,6 +912,17 @@ function deadLetterErrorHint(deadLetter: IntegrationDeadLetter): string | null {
   return integrationErrorCodeHint(deadLetter.errorCode, locale.value)
 }
 const expandedRunIds = ref<Set<string>>(new Set())
+// SC-04 (read-only): single-run detail dialog state. `runDetailId` doubles as the open/closed
+// flag ('' = closed) so there is exactly ONE source of truth for "which run is open" — a separate
+// boolean could disagree with the id after a fast open→open→close sequence. The fetched run is
+// kept apart from `pipelineRuns` so a refresh of the list never silently rewrites the open dialog.
+const runDetailId = ref('')
+const runDetailLoading = ref(false)
+const runDetailError = ref('')
+const runDetail = ref<IntegrationPipelineRun | null>(null)
+// Monotonic request token: a second 详情 click while the first GET is still in flight must not let
+// the slower answer paint over the newer one.
+let runDetailRequestId = 0
 // DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
 // on expand by the row's idempotency key (rowId). No write/replay affordance here.
 const expandedDeadLetterProvenanceIds = ref<Set<string>>(new Set())
@@ -3456,6 +3475,71 @@ function toggleRunSummaries(runId: string): void {
   else next.add(runId)
   expandedRunIds.value = next
 }
+
+// SC-04 (read-only): one run's detail, fetched on demand from GET /api/integration/runs/:runId.
+// Observation only — no replay/retry/write affordance is added here. The dialog reads the SINGLE
+// read rather than the already-listed row on purpose: the list is capped at 5 and status/finishedAt
+// move after a run starts, so the detail must be able to show state the cached list row predates.
+function closeRunDetail(): void {
+  runDetailId.value = ''
+  runDetail.value = null
+  runDetailError.value = ''
+  runDetailLoading.value = false
+  // Bump the token so an answer still in flight cannot re-open a dialog the user just closed.
+  runDetailRequestId += 1
+}
+
+// Branch on the machine-readable CODE, never on the server's prose: a re-worded message or a
+// backend running under another locale must not make these two states fall through to the raw
+// message (the same failure mode as the PG-locale English-prose guards). Anything else keeps the
+// server message, which parseIntegrationResponse already produced.
+function runDetailErrorCopy(error: unknown): string {
+  const code = integrationApiErrorCode(error)
+  if (code === 'RUN_NOT_FOUND') {
+    return bi(
+      '运行不存在或不可见（可能属于其它租户/工作区，或已被清理）。',
+      'This run does not exist or is not visible in your scope.',
+    )
+  }
+  if (code === 'RUN_READ_NOT_IMPLEMENTED') {
+    return bi(
+      '当前版本未启用单条运行详情读取。',
+      'Single-run detail read is not enabled in this version.',
+    )
+  }
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function openRunDetail(runId: string): Promise<void> {
+  if (!runId) return
+  runDetailRequestId += 1
+  const requestId = runDetailRequestId
+  runDetailId.value = runId
+  runDetail.value = null
+  runDetailError.value = ''
+  runDetailLoading.value = true
+  try {
+    // Same scope the list query used — currentScope() is the single source for both, so the
+    // detail can never be looked up in a workspace the row was not listed under.
+    const run = await getIntegrationRun(runId, currentScope())
+    if (requestId !== runDetailRequestId) return
+    runDetail.value = run
+  } catch (error) {
+    if (requestId !== runDetailRequestId) return
+    runDetailError.value = runDetailErrorCopy(error)
+  } finally {
+    if (requestId === runDetailRequestId) runDetailLoading.value = false
+  }
+}
+
+// details is the run's JSONB as persisted; it is rendered read-only as pretty JSON (the same
+// affordance the row-level results already use) and nothing here can edit or resubmit it.
+// '' means "loaded but carries no detail payload" — the dialog's empty state.
+const runDetailPayloadText = computed(() => {
+  const details = runDetail.value?.details
+  if (!details || typeof details !== 'object' || Object.keys(details).length === 0) return ''
+  return JSON.stringify(details, null, 2)
+})
 
 // DF-N2-3 (read-only): a dead-letter's row (idempotency key) is the only typed rowId
 // in this panel. Expanding fetches that row's cross-run provenance timeline once via

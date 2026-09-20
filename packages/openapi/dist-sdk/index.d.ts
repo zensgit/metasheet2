@@ -9920,6 +9920,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline run
+         * @description Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is resolved from the verified session claim; `tenantId` may be echoed as a query parameter but must MATCH the caller's own tenant (a mismatch is 403), so this parameter cannot widen scope. Another tenant's run id and a run id that does not exist return the SAME details-free 404 — the route is not a cross-tenant existence oracle. No write, replay or retry is performed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the list route applies, so a run written under the null workspace is read back there. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"];
+                        };
+                    };
+                };
+                /** @description runId missing from the path */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -17476,6 +17556,33 @@ export interface components {
              * @description Run creation time; the read-route from/to window bounds whole runs by this field.
              */
             runCreatedAt: string;
+        };
+        /** @description SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/runs) and the single-run read (GET /api/integration/runs/{runId}) — the single read does no extra join, so the two projections cannot drift. */
+        IntegrationPipelineRun: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            pipelineId: string;
+            /** @description Run mode recorded by the runner (e.g. dry-run vs. a real write run). */
+            mode: string;
+            triggeredBy?: string | null;
+            status: string;
+            rowsRead: number;
+            rowsCleaned: number;
+            rowsWritten: number;
+            rowsFailed: number;
+            /** Format: date-time */
+            startedAt?: string | null;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            durationMs?: number | null;
+            errorSummary?: string | null;
+            /** @description Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries, watermarkAdvanced). Forward-compatible: unknown keys are passed through unchanged. Already sanitized at write time; this read path does NOT re-redact, so nothing secret may be written into it. */
+            details?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt?: string | null;
         };
         /**
          * @description DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.
