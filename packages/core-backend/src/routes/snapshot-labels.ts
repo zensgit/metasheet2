@@ -141,8 +141,25 @@ router.patch('/:id/release-channel', requireAdminRole(), async (req, res) => {
  * GET /api/snapshots
  * Query snapshots with optional filters
  * Supports filtering by: tags, protection_level, release_channel
+ *
+ * SECURITY (issue #5678, batch 3): this read carried no authorization at all since the router
+ * landed (b08a71705a), while the three mutations above it (:40/:74/:109) have been platform-admin
+ * for a while. Because admin-routes.ts:2142 mounts this router with `router.use('/snapshots', ...)`
+ * and NOT through a router-level guard, `GET /api/admin/snapshots?protection_level=protected` was
+ * reachable by any authenticated caller of any tenant. Worse than the siblings gated in this batch:
+ * SnapshotService.getByTags/getByProtectionLevel/getByReleaseChannel (SnapshotService.ts:1169/1197/
+ * 1220) each run `selectFrom('snapshots').selectAll()` with only a tag / level / channel predicate —
+ * no tenant predicate anywhere — so the response is every tenant's snapshot rows, whole. Gated on
+ * platform admin exactly like the mutations in this file and like the batch-3 siblings in
+ * admin-routes.ts (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 RBAC_CHECK_FAILED fail-closed; no database pool -> isAdmin() returns false at
+ * rbac/service.ts:20 -> 403, never an open door — see guards/audit-integration.ts:113).
+ *
+ * The missing tenant predicate in the three service queries is NOT fixed here — the gate narrows
+ * the audience to platform admins, it does not make the query tenant-scoped. Tracked as a residual
+ * in docs/development/admin-slo-status-gate-verification-20260920.md.
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAdminRole(), async (req, res) => {
   try {
     const { tags, protection_level, release_channel } = req.query;
 

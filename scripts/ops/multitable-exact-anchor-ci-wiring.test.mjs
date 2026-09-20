@@ -1,8 +1,26 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync as readFileSyncRaw } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+
+/**
+ * LINE ENDINGS: every repo source this guard parses is read through this wrapper, which
+ * normalizes CRLF to LF. The guard's parsers and its in-memory mutation fixtures are all
+ * line-oriented over LF-joined literals (`.split('\n')`, `/.*$/`, `"...\n    name: ...\n"`),
+ * and none of those match a line that ends in a carriage return. On a Windows checkout
+ * (`core.autocrlf=true`) that made the whole file read red for a reason unrelated to any
+ * change under test, while CI stayed green. Normalizing at the READ boundary is a no-op on
+ * CI (Linux checkouts are already LF, so `String#replace` returns the identical string), so
+ * this widens nothing: the same bytes are parsed, and every assertion below is unchanged.
+ *
+ * @param {Parameters<typeof readFileSyncRaw>[0]} path
+ * @param {Parameters<typeof readFileSyncRaw>[1]} [encoding]
+ */
+function readFileSync(path, encoding) {
+  const text = readFileSyncRaw(path, encoding)
+  return typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : text
+}
 
 // W0 L6-b CI two-point wiring contract. The exact-anchor authority suite is DATABASE_URL-gated and
 // must have BOTH (1) a vitest.config.ts exclusion so the no-DB lane cannot skip-green it and (2) a
@@ -106,7 +124,19 @@ function maskCommentsAndStrings(src) {
   return out
 }
 
-function testExcludeEntries(src) {
+// LINE ENDINGS: normalize to LF before any line-oriented parsing below. `.` never matches
+// a carriage return and `$` without the `m` flag only anchors at end-of-input, so on a CRLF
+// checkout (Windows `core.autocrlf`) the `//`-comment strip silently no-ops and the first
+// apostrophe inside a surviving comment shifts quote pairing for every entry after it. On LF
+// input `String#replace` returns an identical string, so CI (Linux, LF) is bit-for-bit
+// unchanged. Same defect and same fix as `extractTestExcludeArrayBody` in
+// `./ci-realdb-step-contract.mjs`; this file predates that shared module and keeps its own copy.
+function normalizeEol(text) {
+  return text.replace(/\r\n?/g, '\n')
+}
+
+function testExcludeEntries(rawSrc) {
+  const src = normalizeEol(rawSrc)
   const masked = maskCommentsAndStrings(src)
   const testKey = /\btest\s*:\s*\{/.exec(masked)
   assert.ok(testKey, 'vitest config must contain a test object')
@@ -138,8 +168,11 @@ function testExcludeEntries(src) {
   return []
 }
 
-function namedStepBody(workflow, nameNeedle) {
-  const lines = workflow.split('\n')
+function namedStepBody(rawWorkflow, nameNeedle) {
+  // Same CRLF reason as normalizeEol above: the `- name:` line regex below ends in `.*$`,
+  // which matches NOTHING on a line whose last character is a carriage return, so every
+  // step lookup in this file failed on a Windows checkout.
+  const lines = normalizeEol(rawWorkflow).split('\n')
   let start = -1
   let indent = ''
   for (let i = 0; i < lines.length; i++) {
