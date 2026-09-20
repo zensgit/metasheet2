@@ -107,6 +107,12 @@ describe('Spreadsheet Integration Tests', () => {
    * #5828 — every `:sheetId` route now runs loadLiveSpreadsheetSheet first: the parent `spreadsheets`
    * row (`deleted_at IS NULL`) and then the `sheets` row bound to that parent. Queue those two answers
    * BEFORE the test's own `mockReturnValueOnce` chain, so the happy paths below still reach their route.
+   *
+   * NOTE on where this file is enforced: it is excluded from the unit config (vitest.config.ts) and no
+   * workflow runs vitest.integration.config.ts over it (those lanes name approval-* files), so these
+   * wirings are LOCAL evidence only — which is also how a test in here could sit red on main unnoticed.
+   * The CI-enforced evidence for #5828 is tests/unit/spreadsheets-legacy-sheet-parent-liveness.test.ts
+   * plus the closure guards.
    */
   function mockLiveParentSheet(sheet: unknown = BASIC_SHEET): void {
     const once = (result: unknown) => {
@@ -578,6 +584,15 @@ describe('Spreadsheet Integration Tests', () => {
       // Mock existing cell
       const existingCell = TEST_CELLS.TEXT_CELL
 
+      // Hoisted out of the transaction callback so this test can assert what its NAME promises — that a
+      // `cell_versions` row carrying the PREVIOUS value was inserted — and not merely that some
+      // transaction ran. (#5828 fix round; the mock shape itself is unchanged.)
+      const versionValues = vi.fn().mockReturnThis()
+      const insertIntoSpy = vi.fn().mockReturnValue({
+        values: versionValues,
+        execute: vi.fn().mockResolvedValue({})
+      })
+
       const transactionMock = {
         execute: vi.fn().mockImplementation(async (fn) => {
           const trx = {
@@ -602,10 +617,7 @@ describe('Spreadsheet Integration Tests', () => {
                 value: 'Updated Value'
               })
             }),
-            insertInto: vi.fn().mockReturnValue({
-              values: vi.fn().mockReturnThis(),
-              execute: vi.fn().mockResolvedValue({})
-            })
+            insertInto: insertIntoSpy
           }
           return await fn(trx)
         })
@@ -629,6 +641,14 @@ describe('Spreadsheet Integration Tests', () => {
 
       // Verify version history was created (through transaction)
       expect(transactionMock.execute).toHaveBeenCalled()
+      expect(insertIntoSpy).toHaveBeenCalledWith('cell_versions')
+      expect(versionValues).toHaveBeenCalledWith(expect.objectContaining({
+        cell_id: existingCell.id,
+        sheet_id: TEST_IDS.SHEET_1,
+        version_number: 1,
+        value: { value: existingCell.value },
+        change_type: 'update'
+      }))
     })
 
     test('should retrieve cell version history', async () => {

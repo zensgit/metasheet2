@@ -22,6 +22,14 @@
  *     a 404 that had already written would have been the same hole with a nicer answer;
  *  6. positive control: the live, bound case still answers 200 on all three routes.
  *
+ * Which of the 14 DISCRIMINATE — i.e. red when the product change is reverted to origin/main — is 8:
+ * the three soft-deleted-parent refusals, the three fail-closed 500s, the no-oracle test, and the
+ * cross-parent CELL WRITE. The other six are regression pins that were already true: the three positive
+ * controls, the live sibling, and the cross-parent PUT …/sheets/:sheetId and GET …/cells — those two
+ * handlers already carried `.where('spreadsheet_id', '=', id)` on their inline `sheets` lookup before
+ * this change. Only PUT …/cells read `req.params.sheetId` with no `:id` at all, and it is the one that
+ * was a cross-spreadsheet WRITE.
+ *
  * Transport: usePinnedServer() + request(pinned.url()) — tests/unit may never call request(app)
  * (#4154; tests/unit/supertest-app-mode.guard.test.ts is zero-tolerance).
  */
@@ -305,8 +313,12 @@ describe('#5828 legacy spreadsheet `:sheetId` routes — parent liveness and :sh
     })
   })
 
+  // Binding `:sheetId` to `:id`. The first two cases were ALREADY true before #5828 (both handlers bound
+  // `spreadsheet_id` on their own inline `sheets` lookup) — they are regression pins that must keep
+  // holding now that the binding moved into the shared gate. The third is the actual #5828 primitive:
+  // PUT …/cells took `req.params.sheetId` and never looked at `:id`, so A's path wrote B's cells.
   describe('cross-spreadsheet addressing: A’s path, B’s sheet (both parents live)', () => {
-    it('PUT …/sheets/:sheetId refuses and leaves B’s sheet untouched', async () => {
+    it('PUT …/sheets/:sheetId refuses and leaves B’s sheet untouched (pin: already true before #5828)', async () => {
       const res = await putMeta(SS_A, SHEET_B)
       expect(res.status).toBe(404)
       expect(res.body).toEqual(NOT_FOUND_BODY)
@@ -314,7 +326,7 @@ describe('#5828 legacy spreadsheet `:sheetId` routes — parent liveness and :sh
       expect(fake.tables.sheets!.find((s) => s.id === SHEET_B)!.row_count).toBe(10)
     })
 
-    it('GET …/sheets/:sheetId/cells refuses and reads none of B’s cells', async () => {
+    it('GET …/sheets/:sheetId/cells refuses and reads none of B’s cells (pin: already true before #5828)', async () => {
       const res = await getCells(SS_A, SHEET_B)
       expect(res.status).toBe(404)
       expect(res.body).toEqual(NOT_FOUND_BODY)

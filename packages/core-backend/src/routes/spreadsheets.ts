@@ -155,6 +155,13 @@ class CellVersionConflictError extends Error {
  * "wrong parent" from "no such sheet" — no existence oracle. A query that throws propagates to the
  * caller's catch, which answers 500 without reading or writing a sheet-keyed row (fail-closed).
  *
+ * "Fail-closed" here is scoped to the REFUSAL: on a refusal (or a throw) no sheet-keyed row is read or
+ * written. It is NOT a claim about concurrency — this is two reads, not one joined read, and the write
+ * each caller then makes is a further statement/transaction (the same read-then-write shape as the rest
+ * of this file), so a parent soft-deleted in the window between them is still served. Closing that would
+ * need the liveness re-checked under the writing transaction (row lock / conditional write); out of
+ * scope for #5828, whose subject is that the check was ABSENT.
+ *
  * Callers must run this AFTER their rbacGuard and refuse on a falsy result before reading or writing
  * any sheet-keyed row.
  */

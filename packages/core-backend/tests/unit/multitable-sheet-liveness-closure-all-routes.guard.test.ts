@@ -39,10 +39,12 @@
  *     - LEGACY entities (#5828): `routes/spreadsheets.ts` addresses rows of the legacy `sheets` table,
  *       which has no `deleted_at` — soft delete lives on the parent `spreadsheets` row, so `meta_sheets`
  *       never appears and the multitable resolvers do not apply. A kysely
- *       `selectFrom('<parent>') … .where('id','=',…) … .where('deleted_at','is',null) … .execute*()`
- *       counts as liveness ONLY in a file whose PARENT_LIVENESS_TABLES entry names that table, so no
- *       other file's closed world is widened by it. The other half of #5828 — that `:sheetId` belongs to
- *       `:id` — is not a liveness fact and is asserted in "LEGACY SPREADSHEET SHEETS".
+ *       `selectFrom('<parent>') … .where('id','=',<an id the request addresses>) …
+ *       .where('deleted_at','is',null) … .executeTakeFirst[OrThrow]()` counts as liveness ONLY in a file
+ *       whose PARENT_LIVENESS_TABLES entry names that table, so no other file's closed world is widened
+ *       by it. That shape proves a LIVE PARENT ROW and no more: which of the request's ids it is asked
+ *       about, and the other half of #5828 — that `:sheetId` belongs to `:id`, which is not a liveness
+ *       fact — are pinned per file in "LEGACY SPREADSHEET SHEETS".
  *  4. POPULATION. Each covered file must yield at least its recorded number of handlers and of
  *     sheet-addressed handlers; the behaviour tests of comments.ts, dashboard.ts and multitable-ai.ts
  *     pin their route tables to the SAME scan (`sheetAddressedRouteKeys`), so a new route reds there
@@ -192,8 +194,9 @@ function vettedGuardsFor(file: string, sf: ScannedRouteFile['sourceFile']): Map<
  * LEGACY PARENT LIVENESS (#5828). `routes/spreadsheets.ts` addresses rows of the legacy `sheets` table,
  * which has no `deleted_at` of its own — soft delete lives on its parent `spreadsheets` row. So for THIS
  * file (and no other; every other file's closed world is untouched) a kysely
- * `selectFrom('spreadsheets') … .where('id','=',…) … .where('deleted_at','is',null)` IS the liveness of
- * the sheet the request names. The other half — that `:sheetId` really belongs to `:id` — is not a
+ * `selectFrom('spreadsheets') … .where('id','=',<an addressed id>) … .where('deleted_at','is',null)` IS
+ * the liveness of the sheet the request names. It is the SHAPE that is recognised: which addressed id
+ * the chain is asked about, and the other half — that `:sheetId` really belongs to `:id` — is not a
  * liveness fact and is asserted separately in "LEGACY SPREADSHEET SHEETS".
  */
 const PARENT_LIVENESS_TABLES: Record<string, string[]> = {
@@ -1348,6 +1351,35 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(parent(LIVE_CHAIN.replace(".where('id', '=', req.params.id)", ''), '    if (!row) return res.status(404).end()').sources).toEqual([])
     // …not on a chain that was built but never run (no executor),
     expect(parent(LIVE_CHAIN.replace('.executeTakeFirst()', ''), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    // …not on an ARRAY executor: `.execute()` answers `[]`, which is truthy, so the falsy refusal this
+    // analyzer demands under it is dead code that could never refuse (#5828 fix round),
+    expect(parent(LIVE_CHAIN.replace('.executeTakeFirst()', '.execute()'), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    // …but the OTHER single-row executor is fine: `executeTakeFirstOrThrow` refuses by throwing, which
+    // reaches the handler's catch (500) instead of being read as "live" — fail-closed either way.
+    expect(parent(LIVE_CHAIN.replace('.executeTakeFirst()', '.executeTakeFirstOrThrow()'), '    if (!row) return res.status(404).end()').sources)
+      .toEqual(['parent-liveness-query spreadsheets … deleted_at is null'])
+    // …not under a JOIN: the bare `'id'` / `'deleted_at'` strings name the parent only while the parent
+    // is the chain's sole table — joined, they may be the other table's, so the chain is refused. EVERY
+    // join kysely 0.28 ships is checked, not just `innerJoin`: one name missed by the refusal is one
+    // ambiguous-column chain counted as liveness (`crossJoinLateral` was missed by the first cut),
+    for (const join of ['innerJoin', 'leftJoin', 'rightJoin', 'fullJoin', 'crossJoin', 'innerJoinLateral', 'leftJoinLateral', 'crossJoinLateral']) {
+      expect(parent(LIVE_CHAIN.replace(".selectFrom('spreadsheets')", `.selectFrom('spreadsheets').${join}('sheets', 'sheets.spreadsheet_id', 'spreadsheets.id')`), '    if (!row) return res.status(404).end()').sources, join).toEqual([])
+    }
+    // …and a multi-table `selectFrom([…])` — an implicit join — is refused by the same reasoning.
+    expect(parent(LIVE_CHAIN.replace(".selectFrom('spreadsheets')", ".selectFrom(['spreadsheets', 'sheets'])"), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    // …not when the id it asks about is NOT one the request addresses — such a chain proves some OTHER
+    // row live, never the addressed one: a constant, a body field, or a local read from the body,
+    expect(parent(LIVE_CHAIN.replace('req.params.id', "'some-other-spreadsheet'"), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    expect(parent(LIVE_CHAIN.replace('req.params.id', 'req.body.spreadsheetId'), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    const localId = route([
+      '    const otherId = req.body.spreadsheetId',
+      `    const row = await ${LIVE_CHAIN.replace('req.params.id', 'otherId')}`,
+      '    if (!row) return res.status(404).end()',
+      '    await svc.write()',
+    ])
+    expect(analyzeHandler(localId.h, localId.s.sourceFile, parentOptions).sources).toEqual([])
+    // (the ADDRESSED forms are `req.params.<x>` — above — and a gate helper's own parameter, which is the
+    // shipped shape asserted against the real file in "LEGACY SPREADSHEET SHEETS")
     // …and not when its result is ignored. One chain is ONE site (the executor), never one per `.where`.
     expect(parent(LIVE_CHAIN, '    console.log(row)').sources).toEqual([])
     expect(parent(LIVE_CHAIN, '    console.log(row)').violations.join('\n')).toMatch(/is not checked by the very next statement/)
@@ -1808,22 +1840,47 @@ describe('sheet-liveness closure over EVERY route file', () => {
       // The handler never re-reads the legacy sheet row itself — the gate is the only `sheets` read.
       expect(h.code, h.key).not.toMatch(/selectFrom\('sheets'\)/)
     }
-    // No other handler in the file reaches a legacy sheet by an id taken from the REQUEST: exactly one
-    // other handler names a sheet id, and it MINTS one for a row it creates itself beside its parent.
+    // No other handler in the file reaches an EXISTING legacy sheet: exactly one other handler names a
+    // sheet id, and it only INSERTs, under the spreadsheet it creates in the same transaction. That id
+    // may well come from the request BODY (`initial_sheets[].id`, defaulted with randomUUID) — it is the
+    // PATH it never reads — and an id that already exists collides with the `sheets` PRIMARY KEY and
+    // aborts the transaction, so no existing sheet can be addressed or written through it.
     const othersNamingASheet = s.handlers.filter((x) => !legacy.includes(x) && /\bsheetId\b/.test(x.code))
     expect(othersNamingASheet.map((h) => h.key)).toEqual(['POST /api/spreadsheets'])
     expect(othersNamingASheet[0]!.code).toMatch(/const sheetId = sheet\.id \?\? randomUUID\(\);/)
     expect(othersNamingASheet[0]!.code).not.toMatch(/req\.params/)
+    // …INSERT only (no update/delete of a `sheets` row), bound to the spreadsheet minted right above it,
+    expect(othersNamingASheet[0]!.code).toMatch(/\.insertInto\('sheets'\)\s*\.values\(\{\s*id: sheetId,\s*spreadsheet_id: spreadsheetId,/)
+    expect(othersNamingASheet[0]!.code).not.toMatch(/updateTable\('sheets'\)|deleteFrom\('sheets'\)|selectFrom\('sheets'\)/)
+    // …and the PK that makes a colliding id abort instead of overwrite (the checkable half of the reason).
+    // The wildcard is TEMPERED so the match cannot slide past `sheets` into a later `createTable` in the
+    // same migration (`cells`, `cell_versions`, `named_ranges` each declare an identical `id` PK, so a
+    // plain `[\s\S]*?` would stay green with sheets' OWN primary key deleted — checked right below).
+    const SHEETS_ID_PK = /\.createTable\('sheets'\)(?:(?!\.createTable\()[\s\S])*?\.addColumn\('id', 'text', col => col\.primaryKey\(\)/
+    const gridDdl = readFileSync(join(__dirname, '../../src/db/migrations/zzzz20260117120000_create_spreadsheet_grid_tables.ts'), 'utf8')
+    expect(gridDdl).toMatch(SHEETS_ID_PK)
+    expect(gridDdl.replace(/(\.createTable\('sheets'\)(?:(?!\.createTable\()[\s\S])*?col => col)\.primaryKey\(\)/, '$1'))
+      .not.toMatch(SHEETS_ID_PK)
     // The gate itself: the PARENT row by :id and NOT soft-deleted first (a falsy return, so the caller's
     // `if (!…)` stops it), then the sheet row by BOTH ids — `sheets` carries no deleted_at of its own.
     const gate = functionCode(file, 'loadLiveSpreadsheetSheet')
     expect(gate).toMatch(/^async function loadLiveSpreadsheetSheet\(db: SpreadsheetDb, id: string, sheetId: string\)/)
-    expect(gate).toMatch(/const parent = await db\s*\.selectFrom\('spreadsheets'\)[\s\S]*?\.where\('id', '=', id\)[\s\S]*?\.where\('deleted_at', 'is', null\)[\s\S]*?\.executeTakeFirst\(\);\s*if \(!parent\)\s*return undefined;/)
-    expect(gate).toMatch(/\.selectFrom\('sheets'\)[\s\S]*?\.where\('id', '=', sheetId\)[\s\S]*?\.where\('spreadsheet_id', '=', id\)/)
+    // ANCHORED to the helper's FIRST statement and to its LAST (#5828 fix round): pinning the two
+    // queries "somewhere in the body" would still pass if a later edit made the parent check
+    // conditional (`if (process.env.X !== 'true') { …the same chain… }`) or appended a second,
+    // unbound `sheets` read after the bound one. The gate is the whole body, in this order.
+    expect(gate).toMatch(/^async function loadLiveSpreadsheetSheet\(db: SpreadsheetDb, id: string, sheetId: string\)\s*\{\s*const parent = await db\s*\.selectFrom\('spreadsheets'\)\s*\.select\('id'\)\s*\.where\('id', '=', id\)\s*\.where\('deleted_at', 'is', null\)\s*\.executeTakeFirst\(\);\s*if \(!parent\)\s*return undefined;/)
+    expect(gate).toMatch(/if \(!parent\)\s*return undefined;\s*return await db\s*\.selectFrom\('sheets'\)\s*\.selectAll\(\)\s*\.where\('id', '=', sheetId\)\s*\.where\('spreadsheet_id', '=', id\)\s*\.executeTakeFirst\(\);\s*\}$/)
     // Fail-closed: the gate answers nothing itself, so a throwing query reaches the caller's catch (500)
     // instead of being read as "live".
     expect(gate).not.toMatch(/\bres\b|\bcatch\b/)
     // The mechanism is named for THIS file only — no other file's world was widened to close #5828.
+    // Keep it that way: the generic machinery proves LIVENESS (a live parent row, addressed by an id the
+    // request supplies) and nothing else. It does not decide WHICH addressed id was asked about, and the
+    // child binding (`:sheetId` really belongs to `:id`) is not a liveness fact at all — both are pinned
+    // for this file by the two `expect(gate)` regexes above plus the runtime cross-parent specs in
+    // spreadsheets-legacy-sheet-parent-liveness.test.ts. A second opted-in file would inherit the
+    // liveness proof and NOT those pins, so it would need its own.
     expect(Object.keys(PARENT_LIVENESS_TABLES)).toEqual([file])
     expect(PARENT_LIVENESS_TABLES[file]).toEqual(['spreadsheets'])
   })

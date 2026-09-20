@@ -943,8 +943,15 @@ export function sheetTableLivenessFilter(sql: string): boolean {
   return false
 }
 
-/** Kysely terminators that RUN a built query — the one call in a chain that is the query. */
-const KYSELY_EXECUTORS = new Set(['execute', 'executeTakeFirst', 'executeTakeFirstOrThrow'])
+/**
+ * Kysely terminators that RUN a built query and answer with ONE row or nothing — the only shape the
+ * falsy check this analyzer demands can actually refuse on.
+ *
+ * `execute` is deliberately NOT here: it answers an ARRAY, and `[]` is truthy, so `if (!rows) return …`
+ * under such a chain is dead code that refuses nothing. A liveness chain that ends in `.execute()` is
+ * therefore not recognised at all (fail closed: its handler stays UNGUARDED).
+ */
+const KYSELY_ROW_EXECUTORS = new Set(['executeTakeFirst', 'executeTakeFirstOrThrow'])
 
 /** `a.b('x').c('y')` read back as the steps `[b('x'), c('y')]`; empty when it is not such a chain. */
 function builderChain(call: ts.CallExpression): Array<{ name: string; args: ts.NodeArray<ts.Expression> }> {
@@ -961,25 +968,74 @@ const stringLiteralOf = (e: ts.Expression | undefined): string | null =>
   e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) ? e.text : null
 
 /**
- * `<db>.selectFrom('<parent>') … .where('id', '=', …) … .where('deleted_at', 'is', null) … .execute*()`
- * — a kysely liveness filter on ONE row of a soft-deletable PARENT table, bound by id.
+ * An id a liveness chain may be asked about: an id the enclosing code is ADDRESSED by — one of the
+ * enclosing function's own parameters (a gate helper's `id`), or `<req>.params.<x>` (a route handler
+ * reading its own path). A literal, a body/query field or an unrelated local asks about some OTHER row
+ * than the request's, so such a chain is not this request's liveness and is not recognised.
+ *
+ * Two things this does NOT decide, both pinned per file by the guard's own assertions rather than here:
+ *  - WHICH addressed id it is (`:id` vs `:sheetId` — both are addressed);
+ *  - for the PARAMETER form, what the caller actually passes. A helper's parameter is only as addressed
+ *    as its call sites, which are outside this expression; the guard pins those call sites separately
+ *    (for #5828: `loadLiveSpreadsheetSheet(db, id, sheetId)` with `const { id, sheetId } = req.params`).
+ */
+function addressedIdArgument(value: ts.Expression | undefined, call: ts.CallExpression): boolean {
+  if (!value) return false
+  const e = unwrap(value)
+  // `req.params.<x>` — the owner of the property being read is itself `<something>.params`.
+  if (ts.isPropertyAccessExpression(e)) {
+    const owner = unwrap(e.expression)
+    return ts.isPropertyAccessExpression(owner) && owner.name.text === 'params'
+  }
+  if (!ts.isIdentifier(e)) return false
+  const fn = enclosingFunction(call)
+  if (!fn) return false
+  return fn.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === e.text)
+}
+
+/**
+ * Any builder step that JOINs. A PATTERN rather than a list on purpose: kysely 0.28 ships eight
+ * (`inner|left|right|full|cross` × `Join`, plus `innerJoinLateral` / `leftJoinLateral` /
+ * `crossJoinLateral`) and an enumerated set goes silently stale the moment one is added or missed —
+ * a missed name would make an ambiguous-column chain count as liveness. Over-matching is harmless
+ * because a chain that matches is REFUSED, which leaves its handler UNGUARDED (louder, not quieter);
+ * no step of a select chain this analyzer recognises otherwise mentions a join.
+ */
+const KYSELY_JOIN_STEP = /join/i
+
+/**
+ * `<db>.selectFrom('<parent>') … .where('id', '=', <addressed id>) … .where('deleted_at', 'is', null)
+ *  … .executeTakeFirst()` — a kysely liveness filter on ONE row of a soft-deletable PARENT table.
  *
  * A LEGACY entity keeps soft delete on its parent only (`sheets` has no `deleted_at`; its parent
  * `spreadsheets` does), so the parent row IS the child's liveness and `meta_sheets` never appears.
  * Nothing is recognised by default: only the tables a caller names in `AnalyzeOptions.parentLivenessTables`
  * count, so no other file's closed world is widened by this. Matches the query's EXECUTOR call only,
- * so one chain is one site.
+ * so one chain is one site, and only a single-row executor counts (`KYSELY_ROW_EXECUTORS`).
+ *
+ * What this recognises is the SHAPE — a live-parent row addressed by an id the request supplies. It does
+ * NOT decide which of the addressed ids that is (a chain asked about `req.params.sheetId` has the same
+ * shape as one asked about `req.params.id`), and it says nothing about the child row belonging to that
+ * parent: the child binding is not a liveness fact, and both are pinned per file by the guard test.
+ *
+ * A chain that JOINS another table is not recognised either: the columns this reads are the bare
+ * strings `'id'` / `'deleted_at'`, which name the parent only while the parent is the chain's sole
+ * table — under a join they may be the other table's, so such a chain is refused rather than guessed at
+ * (`KYSELY_JOIN_STEP`, and a multi-table `selectFrom([…])` fails the single string-literal check below).
  */
 export function parentTableLivenessChain(call: ts.CallExpression, tables: Set<string>): string | null {
   if (tables.size === 0) return null
   const steps = builderChain(call)
   const last = steps[steps.length - 1]
-  if (!last || !KYSELY_EXECUTORS.has(last.name)) return null
+  if (!last || !KYSELY_ROW_EXECUTORS.has(last.name)) return null
   const from = steps.find((s) => s.name === 'selectFrom')
   const table = from && from.args.length === 1 ? stringLiteralOf(from.args[0]) : null
   if (table === null || !tables.has(table)) return null
+  if (steps.some((s) => KYSELY_JOIN_STEP.test(s.name))) return null
   const wheres = steps.filter((s) => s.name === 'where' && s.args.length === 3)
-  const bound = wheres.some((w) => stringLiteralOf(w.args[0]) === 'id' && stringLiteralOf(w.args[1]) === '=')
+  const bound = wheres.some((w) => stringLiteralOf(w.args[0]) === 'id'
+    && stringLiteralOf(w.args[1]) === '='
+    && addressedIdArgument(w.args[2], call))
   const live = wheres.some((w) => stringLiteralOf(w.args[0]) === 'deleted_at'
     && stringLiteralOf(w.args[1]) === 'is'
     && w.args[2]!.kind === ts.SyntaxKind.NullKeyword)
