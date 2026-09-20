@@ -4090,4 +4090,112 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(systemDetail.dto.cancelRoundCloseReason).toBe('round_expired')
     },
   )
+
+  it(
+    'owner ruling 2026-09-20 (third status token): `cancelled_reversal_unreported` survives the ' +
+      'whitelist with its EXPLICIT `"reversal":null` on both surfaces — the one status whose whole ' +
+      'purpose is that 「nothing to reverse」 and 「the channel is not wired」 not be byte-identical',
+    async () => {
+      // WHY THIS CASE EXISTS. The projector has a dedicated early return for this token. Without a
+      // case reaching it, deleting that return left all 32 siblings green while the field vanished
+      // for exactly the status that exists to be distinguishable — F-5 re-opened for one branch,
+      // silently. The classifier reaches the token by the shortest real route: a success response
+      // with NO `data.reversal` at all (its first guard), which is what a boundary kind that does
+      // not report a reversal actually returns.
+      const suffix = `projunrep-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'executed',
+        response: { ok: true, data: {} },
+      }))
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+      }
+
+      // 正控: the row really carries the third token (not a missing key the surfaces would omit
+      // for an unrelated reason).
+      const stored = await readStoredMetadata(fixture.roundInstanceId, 'approve')
+      expect((stored.cancellationOutcome as Record<string, unknown>).status).toBe('cancelled_reversal_unreported')
+      expect((stored.cancellationOutcome as Record<string, unknown>).reversal).toBeNull()
+
+      const expected = { status: 'cancelled_reversal_unreported', reversal: null }
+      // The EXPLICIT null, pinned in its byte form — an implementation that omitted the key on a
+      // null reversal would make this status indistinguishable from an unwired channel.
+      const expectedBytes = '"cancellationOutcome":{"status":"cancelled_reversal_unreported","reversal":null}'
+
+      const history = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
+      const approveItem = history.items.find((item) => item.action === 'approve')
+      expect(approveItem!.metadata).toEqual({ cancellationOutcome: expected })
+      expect(history.text).toContain(expectedBytes)
+
+      const detail = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
+      expect(detail.dto.cancellationOutcome).toEqual(expected)
+      expect(detail.text).toContain(expectedBytes)
+    },
+  )
+
+  it(
+    'owner ruling 2026-09-20 (the close-reason validator is load-bearing): a STRUCTURALLY INVALID ' +
+      '`cancelRoundCloseReason` planted on a real system-closure row is dropped by both surfaces, ' +
+      'while the same row\'s conforming value crossed moments earlier',
+    async () => {
+      // WHY THIS CASE EXISTS. Every value the writer produces conforms, so the structure check
+      // (`round_expired` | `business_blocked:<code>` + a length ceiling) could be replaced with a
+      // bare `typeof raw === 'string'` and no sibling case would notice. This plants a value the
+      // writer cannot produce and asserts the projector refuses it.
+      //
+      // ⚠️ THE TENSION, named rather than left for a reviewer: this validator fails by SILENT
+      // ABSENCE, which is the same failure mode the `workflow_key` gate was rejected for. The
+      // difference is domain closure, not taste — `cancelRoundCloseReason()` is the ONLY producer
+      // of this key and its codomain is exactly the two shapes accepted here, so "rejected" can
+      // only ever mean "not written by that function". The `workflow_key` gate had no such
+      // property: the column is mutable by anything that can UPDATE the row.
+      const suffix = `projbogus-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+      })
+      const approve = await jsonRequest(
+        baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken,
+        { method: 'POST', body: { action: 'approve' } },
+      )
+      expect(approve.status, await approve.clone().text()).toBe(200)
+
+      // DISCRIMINATING STEP 1 — the conforming value DOES cross. Without this the absence below
+      // would also pass against a surface that never carried the key at all.
+      const before = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
+      expect(before.dto.cancelRoundCloseReason).toBe('round_expired')
+
+      // DISCRIMINATING STEP 2 — replace it, in place, with a value `cancelRoundCloseReason()`
+      // cannot produce. Everything else about the row is untouched.
+      const planted = await pool().query(
+        `UPDATE approval_records
+            SET metadata = metadata || jsonb_build_object('cancelRoundCloseReason', 'totally-bogus')
+          WHERE instance_id = $1 AND action = 'reject'`,
+        [fixture.roundInstanceId],
+      )
+      expect(planted.rowCount).toBe(1)
+      const stored = await readStoredMetadata(fixture.roundInstanceId, 'reject')
+      expect(stored.cancelRoundCloseReason).toBe('totally-bogus')
+
+      const history = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
+      const rejectItem = history.items.find((item) => item.action === 'reject')
+      expect(Object.prototype.hasOwnProperty.call(rejectItem!, 'metadata')).toBe(false)
+      expect(history.text.includes('totally-bogus')).toBe(false)
+      expect(history.text.includes('cancelRoundCloseReason')).toBe(false)
+
+      const after = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
+      expect(Object.prototype.hasOwnProperty.call(after.dto, 'cancelRoundCloseReason')).toBe(false)
+      expect(after.text.includes('totally-bogus')).toBe(false)
+    },
+  )
 })
