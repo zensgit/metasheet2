@@ -91,7 +91,7 @@ ALTER TABLE integration_external_systems
 | 2 | `upsertExternalSystem` UPDATE（重绑） | 同上 update 分支 | **covered（canonical）**，同 #1；错误映射同样接线 |
 | 3 | `deleteExternalSystem` | `external-systems.cjs` | n/a：减少引用 |
 | 4 | 切换迁移 backfill | `zzzz20260902120000:97-105` | covered：离线一次性 |
-| 5 | `DELETE/PUT /api/admin/data/bulk` 以 `data_sources` 为目标（PUT 可直接 set `deleted_at`） | `routes/admin-routes.ts:1197` / `:1283` | **uncovered（非本刀引入，已登记）**：对被 canonical 绑定引用的源做批量软删会撞新 FK 的 23503，该路由的 catch 只回 `err.message`，落成裸 500——行未动、值面不泄漏，但没有稳定 code。收口属 admin 批量路由自己的错误映射，不在本刀 |
+| 5 | `DELETE/PUT /api/admin/data/bulk` 以 `data_sources` 为目标（PUT 可直接 set `deleted_at`） | `routes/admin-routes.ts` 两条 `/data/bulk` | **covered（canonical）——本刀之后由 H2 收口**：两条路由各加①预检（按 filters 解析目标 id → 查 canonical `connection_id` 引用，有引用则写前 409 并带 `ids`）与②兜底（catch 里复用 `isLiveConnectionFkViolation`，23503 + 约束名 → 同一个 409 `DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS`，`details={table,ids}`）。别的约束的 23503、别的目标表、非 23503 一律保持原状态码。设计/验证见 `docs/development/admin-bulk-data-sources-fk-409-design-20260920.md`。legacy 形态与其它持指针的表仍不在覆盖内（下方登记不变） |
 
 **uncovered（已登记，本刀明确不关）：**
 
