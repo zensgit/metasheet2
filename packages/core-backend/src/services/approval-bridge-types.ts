@@ -94,17 +94,42 @@ export interface UnifiedApprovalDTO {
    * 呈现 channel, DEFAULT CONTRACT (⚠️ owner 待裁, 按默认值; the alternatives are listed with the
    * type in `core/attendance-cancellation-execution-port.ts`).
    *
-   * Present ONLY on the response of the approve action that REDEEMED a 撤销 round; `undefined` on
-   * every other approval and every other action, so no existing consumer's shape changes by a
-   * byte. Values-free: a status token plus integer counters — no ids, no names, no free text.
+   * Present on the response of the approve action that REDEEMED a 撤销 round, AND — since the
+   * owner's 2026-09-20 ruling — on `getApproval`, read back from the approve audit row that
+   * committed in the same transaction as the cancellation. `undefined` on every other approval and
+   * every other action, so no existing consumer's shape changes by a byte. Values-free: a status
+   * token plus integer counters — no ids, no names, no free text.
    *
-   * ⚠️ ACTION-RESPONSE SCOPE, stated rather than implied: `getApproval` does NOT project it, so a
-   * later `GET /approvals/:id` omits it. The durable read is the approve audit row's
-   * `metadata.cancellationOutcome`, carried verbatim by `UnifiedApprovalHistoryDTO.metadata` and
-   * committed in the same transaction as the cancellation itself. Whether 呈现 must also survive a
-   * reload on THIS type is the owner decision registered alongside the default.
+   * ⚠️ CORRECTED 2026-09-20 (this docblock previously claimed two things that were false; both are
+   * recorded rather than silently rewritten):
+   *  - 「`getApproval` does NOT project it, so a later `GET /approvals/:id` omits it」 — true when
+   *    written, no longer true: `getApproval` now whitelist-projects it, which is exactly the
+   *    「呈现 must also survive a reload」 branch this text had left as an open owner decision. The
+   *    owner ruled it must: 「呈现默认值不能替代持久读取能力」.
+   *  - 「carried verbatim by `UnifiedApprovalHistoryDTO.metadata`」 — MEASURED FALSE on the HTTP
+   *    surface (`verify-c2-history-dto-cancellation-outcome-20260920.md` §3.1, real-DB + real
+   *    HTTP). `loadLocalHistory` does carry `metadata` verbatim onto that DTO, but its only
+   *    production call site sits inside `routes/approval-history.ts`'s `plm:` branch, and a
+   *    platform (bare-UUID) cancel-round id never enters it — so for platform instances that DTO
+   *    is never constructed and the promised durable read did not exist. What the platform history
+   *    surface carries today is a per-key-path WHITELIST (`cancellationOutcome`,
+   *    `cancelRoundCloseReason`, plus Lock-9's `attachmentIds`), never verbatim `metadata`.
    */
   cancellationOutcome?: CancelRoundCancellationOutcomeV1 | null
+  /**
+   * The bounded close-reason token of a cancel round the system CLOSED without redeeming —
+   * `round_expired` (窗口/策略已关) or `business_blocked:<code>` (业务不可逆) — whitelist-projected
+   * from the system-closure audit row's `metadata.cancelRoundCloseReason`.
+   *
+   * Owner ruling 2026-09-20. Before it, a 驳回 by the system closure and a 驳回 by a human approver
+   * were byte-identical on this surface (same `status`, same version fields; the only difference
+   * was the sentinel `actor_id`, which reaches no rendered field) — and `expired` vs `blocked` were
+   * indistinguishable from each other too (§4.2 of the verification MD, measured). `undefined` on
+   * every approval that is not a system-closed cancel round.
+   *
+   * The adapter's finer free-text cause (`cancelRoundBlockDetail`) is deliberately NOT carried.
+   */
+  cancelRoundCloseReason?: string
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state for the 待我处理 (pending) tab — `true` once the

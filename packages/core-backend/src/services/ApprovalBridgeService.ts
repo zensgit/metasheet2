@@ -20,6 +20,7 @@ import {
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
 import { resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { readCancelRoundDurableProjectionV1 } from '../core/attendance-cancellation-execution-port'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -1014,6 +1015,32 @@ export class ApprovalBridgeService {
         viewerUserId,
         queryFn,
       )
+    }
+    // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
+    // 暴露整个 metadata。」 THIS is the `GET /api/approvals/:id` handler's `getApproval` (the route
+    // builds an `ApprovalBridgeService`, `routes/approvals.ts`'s `getBridgeService`), so this is the
+    // 刷新 path the ruling names. It shares ONE reader with `ApprovalProductService.getApproval`,
+    // the action-response builder, so the two cannot disagree about what a reload shows.
+    //
+    // Runs AFTER the per-instance admission the route applies ahead of this call
+    // (`canReadApprovalInstance`, Lock-10 S1) — a non-participant is 404'd before any of this, so
+    // the fence over these values is the existing one, unchanged and not re-implemented here.
+    //
+    // PLATFORM IDS ONLY — the SAME `isPlmId` branch this method opens with (`:915`), the route
+    // applies before its fence, and Lock-10 OD-S1-18(a) pins ("`plm:` ids are NEVER routed through
+    // the predicate — platform posture only"). A cancel round is minted by
+    // `createCancelRoundInstance` as a PLATFORM instance with a bare-UUID id (the verification
+    // measured `idHasPlmPrefix = false` on a real one), so for a `plm:` mirror this read can only
+    // ever match zero rows. Skipping it there is the architectural branch, not a new predicate.
+    // ⚠️ Deliberately NOT gated on `isCancelRoundInstance(row)` / `workflow_key`, which would be a
+    // tempting second narrowing: `workflow_key` is MUTABLE on an existing row (this corpus's own
+    // fixtures re-key instances with a bare UPDATE), and a read gated on a mutable column fails by
+    // SILENT ABSENCE — the exact defect shape this change exists to close.
+    if (dto && !isPlmId(id)) {
+      Object.assign(dto, await readCancelRoundDurableProjectionV1(
+        (text, values) => pool!.query(text, values),
+        id,
+      ))
     }
     return dto
   }

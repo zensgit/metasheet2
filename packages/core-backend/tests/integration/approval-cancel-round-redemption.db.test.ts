@@ -3677,4 +3677,417 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(dto.cancellationOutcome?.status).toBe('cancelled')
     },
   )
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  // OWNER RULING 2026-09-20 — the DURABLE READ half, as a PER-KEY-PATH WHITELIST.
+  //
+  //   「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接暴露整个 metadata。」
+  //
+  // WHAT THESE CASES ARE FOR, and why they are not redundant with the 呈现 cases above. The cases
+  // above assert the IMMEDIATE half (the one action response) and the DB row. An independent
+  // verification (`verify-c2-history-dto-cancellation-outcome-20260920.md`, real DB + real HTTP)
+  // then measured that the durable row, though committed, was UNREADABLE for platform instances:
+  //   - F-5: the requester's `GET /api/approvals/:id/history` returned the approve row with the
+  //     `metadata` key ABSENT ENTIRELY (`"cancellationOutcome"` substring count: 0), because the
+  //     DTO that carries `metadata` verbatim is only built inside the route's `plm:` branch and a
+  //     cancel-round id is a bare UUID.
+  //   - F-4: `expired` and `blocked` system closures were byte-identical on the wire — the two
+  //     responses differed only in `id` and `occurred_at`.
+  // Both halves are now closed by a WHITELIST, and these cases gate the whitelist's two duties at
+  // once: the named business fields ARRIVE, and everything else in the same stored blob does NOT.
+  //
+  // POSITIVE CONTROL DISCIPLINE. Every 「key X must not appear」 assertion below is paired with a
+  // DB read proving X IS in that row's stored `metadata` at the moment of the HTTP read. Without
+  // it, an absence assertion would also pass against a row that never had the key — the
+  // `0 === 0` shape this corpus keeps re-learning.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+  /** The internal keys that live in the SAME `metadata` blob and must never cross to a client. */
+  const FORBIDDEN_ON_THE_WIRE = [
+    'secretKey',
+    'MUST-NOT-APPEAR',
+    'aggregateComplete',
+    'nodeEntryEpoch',
+  ] as const
+
+  function expectNoForbiddenKeys(bodyText: string, where: string): void {
+    for (const token of FORBIDDEN_ON_THE_WIRE) {
+      expect(bodyText.includes(token), `${where}: forbidden token ${token} reached the wire`).toBe(false)
+    }
+  }
+
+  /** The stored blob, read back so the absence assertions above are about a key that EXISTS. */
+  async function readStoredMetadata(instanceId: string, action: string): Promise<Record<string, unknown>> {
+    const row = await pool().query<{ metadata: Record<string, unknown> | null }>(
+      `SELECT metadata FROM approval_records
+        WHERE instance_id = $1 AND action = $2
+        ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+      [instanceId, action],
+    )
+    expect(row.rows.length).toBe(1)
+    return (row.rows[0].metadata ?? {}) as Record<string, unknown>
+  }
+
+  async function historyItems(instanceId: string, token: string): Promise<{
+    text: string
+    items: { action?: string; metadata?: Record<string, unknown> }[]
+  }> {
+    const response = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+    expect(response.status, await response.clone().text()).toBe(200)
+    const text = await response.text()
+    const parsed = JSON.parse(text) as { data?: { items?: { action?: string; metadata?: Record<string, unknown> }[] } }
+    return { text, items: parsed.data?.items ?? [] }
+  }
+
+  async function detailDto(instanceId: string, token: string): Promise<{
+    text: string
+    dto: Record<string, unknown>
+  }> {
+    const response = await jsonRequest(baseUrl, `/api/approvals/${instanceId}`, token)
+    expect(response.status, await response.clone().text()).toBe(200)
+    const text = await response.text()
+    return { text, dto: JSON.parse(text) as Record<string, unknown> }
+  }
+
+  it(
+    'owner ruling 2026-09-20 (F-5): the REQUESTER reads the redeemed round\'s `cancellationOutcome` ' +
+      'back from BOTH durable surfaces (`/history` and `GET /api/approvals/:id`) — whitelisted key ' +
+      'paths only, with three planted non-whitelisted keys (top-level, nested in the outcome, and ' +
+      'nested in `reversal`) proven present in the stored row and absent from both responses',
+    async () => {
+      const suffix = `projwl-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'executed',
+        response: {
+          ok: true,
+          data: { reversal: { reversed: 360, lots: 1, unrecoverableExpired: 120, alreadyReversed: false } },
+        },
+      }))
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+      }
+
+      // ── PLANT the non-whitelisted keys in three positions the SELECT list alone cannot all
+      //    exclude: a bare `metadata->'cancellationOutcome'` projection would carry the two nested
+      //    ones straight through. This is what makes the whitelist a REBUILD, not a key-path pick.
+      const planted = await pool().query(
+        `UPDATE approval_records
+            SET metadata = jsonb_set(
+                  jsonb_set(
+                    metadata || jsonb_build_object('secretKey', 'MUST-NOT-APPEAR-TOP'),
+                    '{cancellationOutcome,secretKey}', '"MUST-NOT-APPEAR-NESTED"'::jsonb, true),
+                  '{cancellationOutcome,reversal,secretKey}', '"MUST-NOT-APPEAR-DEEP"'::jsonb, true)
+          WHERE instance_id = $1 AND action = 'approve'`,
+        [fixture.roundInstanceId],
+      )
+      expect(planted.rowCount).toBe(1)
+
+      // 正控: the four forbidden tokens are genuinely IN the row right now.
+      const stored = await readStoredMetadata(fixture.roundInstanceId, 'approve')
+      expect(stored.secretKey).toBe('MUST-NOT-APPEAR-TOP')
+      expect(stored.aggregateComplete).toBe(true)
+      expect(stored.nodeEntryEpoch).toBe(1)
+      const storedOutcome = stored.cancellationOutcome as Record<string, unknown>
+      expect(storedOutcome.secretKey).toBe('MUST-NOT-APPEAR-NESTED')
+      expect((storedOutcome.reversal as Record<string, unknown>).secretKey).toBe('MUST-NOT-APPEAR-DEEP')
+
+      const expectedOutcome = {
+        status: 'cancelled_with_unrecoverable_expired',
+        reversal: { reversed: 360, lots: 1, unrecoverableExpired: 120, alreadyReversed: false },
+      }
+      // The byte form, pinned: key ORDER is the projector's construction order, not the stored
+      // object's, so a future re-ordering of either is a visible change.
+      const expectedBytes = '"cancellationOutcome":{"status":"cancelled_with_unrecoverable_expired",'
+        + '"reversal":{"reversed":360,"lots":1,"unrecoverableExpired":120,"alreadyReversed":false}}'
+
+      // ── SURFACE 1: `/history` as the REQUESTER (the person F-5 measured could not read this).
+      const history = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
+      const approveItem = history.items.find((item) => item.action === 'approve')
+      expect(approveItem, 'the approve audit row must still be in the timeline').toBeTruthy()
+      // The WHOLE metadata object, not just its cancellationOutcome key — this is the assertion a
+      // bare-`metadata` projection fails, because the row also holds nodeKey/approvalMode/…
+      expect(approveItem!.metadata).toEqual({ cancellationOutcome: expectedOutcome })
+      expect(history.text).toContain(expectedBytes)
+      expectNoForbiddenKeys(history.text, 'history')
+      // `nodeKey` exists on BOTH audit rows of this instance and appears nowhere in this response.
+      expect(history.text.includes('"nodeKey"')).toBe(false)
+      expect(history.text.includes('cancelRoundDocumentId')).toBe(false)
+
+      // ── SURFACE 2: the REFRESH path. F-5's key-set measurement listed 23 keys, none of them this.
+      const detail = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
+      expect(detail.dto.cancellationOutcome).toEqual(expectedOutcome)
+      expect(detail.text).toContain(expectedBytes)
+      expectNoForbiddenKeys(detail.text, 'detail')
+      // A redeemed round has no system closure — the sibling whitelisted key must stay ABSENT
+      // rather than arrive as null/empty.
+      expect(Object.prototype.hasOwnProperty.call(detail.dto, 'cancelRoundCloseReason')).toBe(false)
+    },
+  )
+
+  it(
+    'owner ruling 2026-09-20 (F-5, attachment flag independence): the cancel-round whitelist is NOT ' +
+      'gated on `APPROVAL_ATTACHMENTS_ENABLED` — with the SAME row carrying BOTH `attachmentIds` ' +
+      'and `cancellationOutcome`, flag ON emits both keys and flag OFF emits only the outcome',
+    async () => {
+      const suffix = `projflag-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'executed',
+        response: {
+          ok: true,
+          data: { reversal: { reversed: 5, lots: 2, unrecoverableExpired: 0, alreadyReversed: false } },
+        },
+      }))
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+      }
+
+      // ⚠️ THE DISCRIMINATING SETUP (this is the lesson §3.2(v) of the verification MD paid for):
+      // a fixture row with NO `attachmentIds` takes the same branch flag-ON and flag-OFF, so the
+      // flag pair proves nothing. Both keys go on the SAME row so the two runs differ in ONE thing.
+      const seeded = await pool().query(
+        `UPDATE approval_records
+            SET metadata = metadata || jsonb_build_object('attachmentIds', jsonb_build_array('proj-att-1'))
+          WHERE instance_id = $1 AND action = 'approve'`,
+        [fixture.roundInstanceId],
+      )
+      expect(seeded.rowCount).toBe(1)
+      const stored = await readStoredMetadata(fixture.roundInstanceId, 'approve')
+      expect(stored.attachmentIds).toEqual(['proj-att-1'])
+      expect(stored.cancellationOutcome).toBeTruthy()
+
+      const expectedOutcome = {
+        status: 'cancelled',
+        reversal: { reversed: 5, lots: 2, unrecoverableExpired: 0, alreadyReversed: false },
+      }
+      const previousFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      try {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+        const on = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
+        const onItem = on.items.find((item) => item.action === 'approve')
+        expect(onItem!.metadata).toEqual({
+          cancellationOutcome: expectedOutcome,
+          attachmentIds: ['proj-att-1'],
+        })
+
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = 'false'
+        const off = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
+        const offItem = off.items.find((item) => item.action === 'approve')
+        expect(offItem!.metadata).toEqual({ cancellationOutcome: expectedOutcome })
+        expect(off.text.includes('proj-att-1')).toBe(false)
+      } finally {
+        if (previousFlag === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        else process.env.APPROVAL_ATTACHMENTS_ENABLED = previousFlag
+      }
+    },
+  )
+
+  it(
+    'owner ruling 2026-09-20 (F-4): `expired` and `blocked` system closures are DISTINGUISHABLE on ' +
+      'the wire via the whitelisted `cancelRoundCloseReason`, on both surfaces — while the free-text ' +
+      '`cancelRoundBlockDetail` beside it (proven present in the row) never crosses',
+    async () => {
+      // ── (a) window closed ⇒ `round_expired`
+      const expiredSuffix = `projexp-${TS}`
+      const expiredFixture = await seedPendingCancelRound(expiredSuffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+      })
+      const expiredApprove = await jsonRequest(
+        baseUrl, `/api/approvals/${expiredFixture.roundInstanceId}/actions`, expiredFixture.approverToken,
+        { method: 'POST', body: { action: 'approve' } },
+      )
+      expect(expiredApprove.status, await expiredApprove.clone().text()).toBe(200)
+
+      // ── (b) business refusal ⇒ `business_blocked:<code>`
+      const blockedSuffix = `projblk-${TS}`
+      const blockedFixture = await seedPendingCancelRound(blockedSuffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        await attachAttendanceRequest(documentId, `wi13-req-${blockedSuffix}`)
+      })
+      const blockedStub = bindCancellationPort(async () => ({
+        kind: 'business_refused',
+        code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+        detail: 'frozen parent calculation missing',
+      }))
+      try {
+        const blockedApprove = await jsonRequest(
+          baseUrl, `/api/approvals/${blockedFixture.roundInstanceId}/actions`, blockedFixture.approverToken,
+          { method: 'POST', body: { action: 'approve' } },
+        )
+        expect(blockedApprove.status, await blockedApprove.clone().text()).toBe(200)
+      } finally {
+        blockedStub.stop()
+      }
+
+      // 正控: the free text really is in the blocked row, beside the bounded token.
+      const blockedStored = await readStoredMetadata(blockedFixture.roundInstanceId, 'reject')
+      expect(blockedStored.cancelRoundBlockDetail).toBe('frozen parent calculation missing')
+      expect(blockedStored.cancelRoundCloseReason).toBe('business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
+
+      const expiredHistory = await historyItems(expiredFixture.roundInstanceId, expiredFixture.requesterToken)
+      const blockedHistory = await historyItems(blockedFixture.roundInstanceId, blockedFixture.requesterToken)
+      const expiredItem = expiredHistory.items.find((item) => item.action === 'reject')
+      const blockedItem = blockedHistory.items.find((item) => item.action === 'reject')
+      expect(expiredItem!.metadata).toEqual({ cancelRoundCloseReason: 'round_expired' })
+      expect(blockedItem!.metadata).toEqual({
+        cancelRoundCloseReason: 'business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+      })
+
+      // THE F-4 ASSERTION ITSELF: each token appears on exactly one of the two, so the two
+      // responses are no longer byte-identical modulo id/timestamp.
+      expect(expiredHistory.text.includes('"cancelRoundCloseReason":"round_expired"')).toBe(true)
+      expect(expiredHistory.text.includes('business_blocked')).toBe(false)
+      expect(blockedHistory.text.includes('business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')).toBe(true)
+      expect(blockedHistory.text.includes('round_expired')).toBe(false)
+      // The free-text cause stays behind on BOTH.
+      expect(blockedHistory.text.includes('frozen parent calculation missing')).toBe(false)
+      expect(blockedHistory.text.includes('cancelRoundBlockDetail')).toBe(false)
+      expect(blockedHistory.text.includes('cancelRoundOutcome')).toBe(false)
+
+      // Same two, on the REFRESH path.
+      const expiredDetail = await detailDto(expiredFixture.roundInstanceId, expiredFixture.requesterToken)
+      const blockedDetail = await detailDto(blockedFixture.roundInstanceId, blockedFixture.requesterToken)
+      expect(expiredDetail.dto.cancelRoundCloseReason).toBe('round_expired')
+      expect(blockedDetail.dto.cancelRoundCloseReason)
+        .toBe('business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
+      expect(blockedDetail.text.includes('frozen parent calculation missing')).toBe(false)
+      // Neither closure redeemed anything, so the sibling key stays absent on both.
+      expect(Object.prototype.hasOwnProperty.call(expiredDetail.dto, 'cancellationOutcome')).toBe(false)
+      expect(Object.prototype.hasOwnProperty.call(blockedDetail.dto, 'cancellationOutcome')).toBe(false)
+    },
+  )
+
+  it(
+    'owner ruling 2026-09-20 (fence unchanged): a NON-PARTICIPANT still gets the values-free 404 on ' +
+      'both surfaces — the new whitelist widened WHAT a participant reads, never WHO reads it',
+    async () => {
+      const suffix = `projfence-${TS}`
+      const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 30)
+        await setDocumentWindowDays(documentId, 90)
+        await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+      })
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'executed',
+        response: {
+          ok: true,
+          data: { reversal: { reversed: 7, lots: 1, unrecoverableExpired: 3, alreadyReversed: false } },
+        },
+      }))
+      try {
+        const approve = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverToken, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approve.status, await approve.clone().text()).toBe(200)
+      } finally {
+        portStub.stop()
+      }
+
+      // 正控 (otherwise a 404 for a bad id would pass this case): the SAME instance, read by a
+      // participant, does carry the values.
+      const participant = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
+      expect((participant.dto.cancellationOutcome as { reversal?: { unrecoverableExpired?: number } })?.reversal?.unrecoverableExpired)
+        .toBe(3)
+
+      // A stranger: `users` row exists (so this is not an identity failure) but no requester seat,
+      // no assignment, no audit row, no cc, `role = 'user'` — none of `canReadApprovalInstance`'s
+      // five arms. RBAC_BYPASS is on in this harness, so the ONLY thing denying here is S1.
+      const strangerToken = await authToken(baseUrl, `wi13-stranger-${suffix}`)
+      const strangerHistory = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}/history`, strangerToken)
+      expect(strangerHistory.status).toBe(404)
+      const strangerHistoryText = await strangerHistory.text()
+      expect(JSON.parse(strangerHistoryText)).toEqual({
+        ok: false,
+        error: { code: 'APPROVAL_NOT_FOUND', message: 'Approval instance not found' },
+      })
+      expect(strangerHistoryText.includes('cancellationOutcome')).toBe(false)
+      expect(strangerHistoryText.includes('unrecoverableExpired')).toBe(false)
+
+      const strangerDetail = await jsonRequest(baseUrl, `/api/approvals/${fixture.roundInstanceId}`, strangerToken)
+      expect(strangerDetail.status).toBe(404)
+      const strangerDetailText = await strangerDetail.text()
+      expect(strangerDetailText.includes('cancellationOutcome')).toBe(false)
+      expect(strangerDetailText.includes('unrecoverableExpired')).toBe(false)
+    },
+  )
+
+  it(
+    'owner ruling 2026-09-20 (counterexample — the whitelist reports, it does not fabricate): a ' +
+      'cancel round a HUMAN approver rejected carries NEITHER whitelisted key on either surface, ' +
+      'while the system-closed sibling in the same run carries `cancelRoundCloseReason`',
+    async () => {
+      // WHY THIS CASE EXISTS. Every other case here asserts that a value ARRIVES. A projection that
+      // emitted `round_expired` for any terminal cancel round would satisfy all of them — and would
+      // be a fabricated answer on the one closure the lock says must stay distinguishable from a
+      // system close (「系统终结身份(非真人 actor)与专用 reason 是区分『审批人驳回』的唯一依据」).
+      // The two fixtures below run in the same file, on the same code path, differing ONLY in who
+      // ended the round.
+      const humanSuffix = `projhuman-${TS}`
+      const human = await seedPendingCancelRound(humanSuffix)
+      const humanReject = await jsonRequest(
+        baseUrl, `/api/approvals/${human.roundInstanceId}/actions`, human.approverToken,
+        { method: 'POST', body: { action: 'reject', comment: '不同意撤销' } },
+      )
+      expect(humanReject.status, await humanReject.clone().text()).toBe(200)
+
+      // 正控: the round really is terminal and really is `rejected` — this is not an un-decided
+      // round whose keys are absent because nothing happened yet.
+      const humanRound = await roundOutcome(human.roundInstanceId)
+      expect(humanRound.outcome).toBe('rejected')
+      expect(humanRound.ended_at).not.toBeNull()
+      // 正控 2: the human's reject row exists and carries NO close-reason key at all.
+      const humanStored = await readStoredMetadata(human.roundInstanceId, 'reject')
+      expect(Object.prototype.hasOwnProperty.call(humanStored, 'cancelRoundCloseReason')).toBe(false)
+
+      const humanHistory = await historyItems(human.roundInstanceId, human.requesterToken)
+      const humanRejectItem = humanHistory.items.find((item) => item.action === 'reject')
+      expect(humanRejectItem, 'the human reject row must be in the timeline').toBeTruthy()
+      expect(Object.prototype.hasOwnProperty.call(humanRejectItem!, 'metadata')).toBe(false)
+      expect(humanHistory.text.includes('cancelRoundCloseReason')).toBe(false)
+      expect(humanHistory.text.includes('round_expired')).toBe(false)
+
+      const humanDetail = await detailDto(human.roundInstanceId, human.requesterToken)
+      expect(Object.prototype.hasOwnProperty.call(humanDetail.dto, 'cancelRoundCloseReason')).toBe(false)
+      expect(Object.prototype.hasOwnProperty.call(humanDetail.dto, 'cancellationOutcome')).toBe(false)
+
+      // The discriminating half: a SYSTEM close in the same run does carry it, so the absence above
+      // is a property of the human path and not of this file's plumbing.
+      const systemSuffix = `projsys-${TS}`
+      const system = await seedPendingCancelRound(systemSuffix, async (documentId) => {
+        await ageApprovedAnchor(documentId, 200)
+      })
+      const systemApprove = await jsonRequest(
+        baseUrl, `/api/approvals/${system.roundInstanceId}/actions`, system.approverToken,
+        { method: 'POST', body: { action: 'approve' } },
+      )
+      expect(systemApprove.status, await systemApprove.clone().text()).toBe(200)
+      const systemDetail = await detailDto(system.roundInstanceId, system.requesterToken)
+      expect(systemDetail.dto.cancelRoundCloseReason).toBe('round_expired')
+    },
+  )
 })
