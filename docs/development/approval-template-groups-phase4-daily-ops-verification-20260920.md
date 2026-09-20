@@ -841,3 +841,156 @@ patch 后:pull_request.paths 269 条 / push.paths 257 条,同一键 → True（�
 7. **`approval-web-guard.yml` 之外的门未逐条复核**:本轮只核了这一条 workflow 的 `paths` 是否覆盖
    `templateStore.ts`,没有把仓里其余 workflow 的 path filter 对本轮改动集再做一次全量普查。**登记。**
 8. 合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— **全部未做,仍需 owner 逐条授权**。本件不含任何「已裁 / 已 ratify」的记述。
+
+---
+
+## 12. 第 5 轮验证(对齐 `impl-gate-A5-daily-ops-round4-20260921.md`:0 P1 / 1 P2 / 4 P3)
+
+> **PROPOSED —— 未过门审,未 ratify,未合并,未 undraft,未开 PR。** 本节的每个数字都逐字抄自本轮输出。
+> 起点 head = `4e94e8fe0219be61a908f42d5af13dee7e189e1a`(`git rev-parse origin/feat/approval-template-groups-phase4-daily-ops`,与门审报告抬头逐字一致);`#5878`(`e90d16c90f58a58789a6acd589df362aaa2c2f42`)`git merge-base --is-ancestor` **PASS**。
+
+### 12.1 改了什么(2 个源文件 + 1 个 spec + 2 个 MD;零新增文件)
+
+代码侧的 diffstat 特意**限定在 `apps/` 下**,因为本节自己就在被改的两个 MD 里——把一个包含本文件的计数写进本文件,是一个自指快照,下一次改动这两个 MD 就会让它对不上(「记录修复轮只删不加、不手写数字」)。两个 MD 的路径在下方用文字点名。
+
+```
+git diff --stat 4e94e8fe0219be61a908f42d5af13dee7e189e1a -- apps/
+ apps/web/src/approvals/templateStore.ts            |  65 +++-
+ apps/web/src/views/approval/TemplateCenterView.vue | 131 +++++++--
+ .../tests/approvalTemplateCenterCategory.spec.ts   | 327 ++++++++++++++++++++-
+ 3 files changed, 490 insertions(+), 33 deletions(-)
+```
+
+另两个被改文件是本轮的记录件本身:
+`docs/development/approval-template-groups-phase4-daily-ops-design-20260920.md`(新增 §8)与
+`docs/development/approval-template-groups-phase4-daily-ops-verification-20260920.md`(新增 §12)。**零新增文件。**
+
+`git diff --name-only <r4 head> -- .github/ '**/package.json' '**/s6a-package-provenance-pins.json' apps/web/scripts/` = **空**。⇒ 零 CI 改动、零 s6a pin 变动、零迁移、零 DDL、零新端点、零新 flag。三个被改文件都**已经**在 `approval-web-guard.yml` 的两个 `paths:` 触发器里(命中数 2 / 3 / 2),不需要新的接线。
+
+### 12.2 新增用例(7 条,全部落在既有文件)
+
+| # | 用例(原文) | 钉的是 |
+|---|---|---|
+| 1 | `(① C-1) an EXTERNAL identity change landing inside this page's own switch window is NOT credited to this page: one re-read, the organization list is re-asked, the entry stays, the flat table comes back` | 设计 MD §8.1 判据 (b) |
+| 2 | `(① C-1, second transition) a LATER external change that happens to land on this page's target organization is still external — the claim was already invalidated by the first one` | §8.1 判据 (a) |
+| 3 | `(① C-1, indistinguishable case) a foreign switch to this page's OWN target organization is credited to the page at the listener — and the superseded switch is what recovers from it` | §8.1 兜底条款 |
+| 4 | `(C-7 positive control) a lone DETAIL read owns the shared loading slot and releases it` | 正控:区分「修好了」与「本来就没坏」 |
+| 5 | `(C-7, loadTemplates writer) a LIST read settling while a detail read is in flight does not take down the detail read's spinner` | §8.2 共享票(写入方 1) |
+| 6 | `(C-7, loadTemplate writer) a detail read settling while a VERSION read is in flight leaves the shared loading slot alone, and a detail answer for the PREVIOUS session applies nothing` | §8.2 共享票 + 身份签名(写入方 2) |
+| 7 | `(C-7, loadVersion writer) a version read settling while a detail read is in flight leaves the shared loading slot alone, and a version answer for the PREVIOUS session applies nothing` | §8.2 共享票 + 身份签名(写入方 3) |
+
+另有**一条既有用例被加强**(门审 C-1 修法第 4 项):`(③ FLAT, superseded exit)` 原先只断言 `rows === 0`,现在追加断言「出路仍在」——重进分组视图 `switchers === 1`,且下一条**当前**答案能把行重新放出来。**这条加强的标定要说准**:它**不是**由 C-1 自身的探针变红(C-1 的死态发生在另一条路径上),它的**正控**是 `M7d'`(把页面切换器的 `v-if` 关成 `false`)—— 该探针下这条用例**变红**,证明新断言确实被求值、不是空转。
+
+**先红后绿(把两个源文件逐字还原成 head 的内容,只留新用例)**:
+
+```
+Tests  6 failed | 49 passed (55)
+× (① C-1) an EXTERNAL identity change landing inside this page's own switch window …
+× (① C-1, second transition) a LATER external change that happens to land …
+× (① C-1, indistinguishable case) a foreign switch to this page's OWN target …
+× (C-7, loadTemplates writer) a LIST read settling while a detail read is in flight …
+× (C-7, loadTemplate writer) a detail read settling while a VERSION read is in flight …
+× (C-7, loadVersion writer) a version read settling while a detail read is in flight …
+```
+
+还原为修复版后 `cmp` 两文件一致(`RESTORE-CMP-OK`),同一命令:`Tests  55 passed (55)`。
+
+> 第 4 条(正控)在红的那一轮就是绿的——**这正是正控该有的行为**,它的作用是证明「另外三条 C-7 用例的红不是因为机具本身跑不通」。
+
+### 12.3 Mutation 台账 —— 本轮 10 条新探针 + r1/r2/r2b/r3/r4 **按原编号重跑**
+
+规程:`cp` 备份到 `…/scratchpad/a5r5-mutbak/`(**显式相对路径白名单,绝不按 basename 匹配**——r4 的机具事故就出在这)→ 改坏 → 运行器自检「锚点存在且文件真的变了」→ 跑 → `cp` 还原 → `filecmp` 校验。**零 `git checkout --` / 零 `reset --hard` / 零 `stash`。** 探针全部跑完时 `git status --porcelain` 只剩本轮有意改的 3 个 `apps/` 文件(两个 MD 是随后才写的),7 个被探针碰过但未被本轮改动的文件(`authPrincipal.ts` / panel / sections / switcher / `api.ts` 等)逐个 `cmp` 与备份一致。
+
+基线:`approvalTemplateCenterCategory` 单文件 **55 passed**;5 个 spec 集合(category / sections / panel / switcher / groupsClient)**124 passed**;9 个 spec(+ e2e-lifecycle / e2e-permissions / governance / i18n)**259 passed**;邻居 8 个(useSessionOrg / AttendanceSessionOrgSwitcher / approvalNewView / templateDetailI18n / approvalDetailPolish / approvalTemplateVersionHistory / approval-detail-instance-consistency / approval-detail-can-decide-current-node)**135 passed**。
+
+#### (a) 本轮 10 条新探针
+
+| 探针 | 改坏了什么 | 结果 | 红在哪 |
+|---|---|---|---|
+| **M-L** | `claimOwnSwitchTransition` 退化成裸 `pageOwnedSwitch !== null`(= r4 的形状) | **2 failed** | `(① C-1)` / `(① C-1, second transition)` |
+| **M-L-a** | 只删判据 (a)(签名半边) | **1 failed** | `(① C-1, second transition)` |
+| **M-L-b** | 只删判据 (b)(目标组织半边) | **2 failed** | `(① C-1)` / `(① C-1, second transition)` |
+| **M-N** | 关掉 `!ok` 兜底 | **1 failed** | `(① C-1, indistinguishable case)` |
+| **M-O** | `loadTemplates` 的 `finally` 换回 r4 的 `isLatest()` | **1 failed** | `(C-7, loadTemplates writer)` |
+| **M-P** | 删 `loadTemplate` 的 `if (!isCurrent()) return`(内容 + 身份) | **1 failed** | `(C-7, loadTemplate writer)` |
+| **M-Q** | 删 `loadVersion` 的同一守卫 | **1 failed** | `(C-7, loadVersion writer)` |
+| **M-R** | `loadTemplate` 的 `ownsLoadingSlot()` → 恒 `true` | **1 failed** | `(C-7, loadTemplate writer)` |
+| **M-S** | `loadVersion` 的 `ownsLoadingSlot()` → 恒 `true` | **1 failed** | `(C-7, loadVersion writer)` |
+| **M-T** | claim 的 own-switch 重钥 → **一律保留** claim | **8 failed** | 5 条 ① + `(① C-1)` ×2 + ④ |
+
+**(a) 与 (b) 各自都有单独的判别输入**(M-L-a / M-L-b 各自单删只红对应用例),所以本轮没有留下一个「合取式里无人验证的那一项」。
+
+#### (b) 前轮探针按原编号重跑 —— **零回退**
+
+| 轮次 | 探针 | 本轮结果 |
+|---|---|---|
+| r4 | M-B′ / M-B-old / MUT-S1(=M-B-S)/ MUT-S2(=M-B-C)/ MUT-S3(=M-B-F)/ M-B-SIG / M-B-FSIG / M-CLOSABLE | 2 / 2 / 4 / 2 / 2 / 3 / 1 / 1 failed —— **8 条全承重** |
+| r3 | M-A / M-C / M-D / M-E / M-F / M-G / M-I / M-J / M-K | 4 / 1 / 2 / 1 / **2** / 2 / 15 / 1 / 1 failed —— **9 条全承重** |
+| r3 | **M-H** | **124 passed(仍存活)** —— 与 r3 / r4 结论一致,已披露不可达;**正控 M-G 同集合 2 failed** |
+| r2b | M-n / M-o / M-p / M-q / M-r / M-s / M-t / M-t2(=M-C)/ M-u / M-v(=M-G)/ M-w(=M-A)/ M-x / M-y / M-z(=M-I)/ M-aa / M-ab / M-ac / M-ad / M-ae / M-nitc | 3 / 2 / 1 / 1 / 1 / 1 / 1 / 1 / 16 / 2 / 4 / 10 / 1 / 15 / 1 / 1 / 1 / 1 / 1 / 1 failed —— **全承重** |
+| r2 | M-a / M-a2 / M-c / M-d / M-e / M-f / M-g / M-h / M-i | 5 / 2 / 3 / 1 / 2 / 1 / 1 / 1 / 2 failed —— **9 条全承重** |
+| r1 | M1 / M2 / M3 / M4 / M4b / M5 / M6 / M6b / M7′ / M7b′ / M7c′ / M7d′ | 2 / 1 / 1 / 2 / 4 / 1 / 1 / 1 / 5 / 21 / 7 / 24 failed —— **12 条全承重(M2 仍红)** |
+| r1 | **M8 / M8b / M9** | **NOT RUN**(后端真库探针;本轮 delta 零后端文件,见 §12.7-2) |
+| r2 | **M-b / M-b2** | **NOT RUN —— 且理由要说准**:前几轮台账只写了「可辩护地 inert」,**没有记下它们改的是哪一行**;本代理不按描述另造一个更窄的同类物冒充原探针。登记为「原始改法不可从台账复原」。 |
+
+> **前轮探针是按台账的**散文描述**重建的,不是原始补丁**——前几轮只把 `.orig` 备份留在 `reviews/a5r*-mutbak/`,**没有留下 mutation 脚本**。因此:
+> - 每条重建探针都经运行器自检「锚点存在 + 文件确实变了 + 不是语法崩溃(`NO-SUMMARY`)」;
+> - 重建探针**红在哪条用例**已逐条记录(上文各行),读者可据此核对它与原编号描述是否同一个机制;
+> - `M-b` / `M-b2` 的描述在台账里只有「可辩护地 inert」一句,**无法定位改的是哪一行**,因此登记 NOT RUN 而**不**另造一个同类物冒充(见「另造更窄同类物=合同变更」这条房规)。
+
+> **两处必须写明的锚点迁移**(否则下一轮会对着一个已不存在的行重跑):
+> 1. **MUT-S3 / M-B-F 的锚点变了**:原文是 `templateStore.ts` 的 `finally { if (isLatest()) loading.value = false }`;本轮起该行是 `finally { if (ownsLoadingSlot()) loading.value = false }`。探针语义不变(把 `finally` 改成无条件),**红在两条用例**(原来的 `(③ finally exit)` + 本轮新增的 `(C-7, loadTemplates writer)`)。
+> 2. **M-F 的锚点未变**(`if (ownSwitch) return`),但**红从 1 条变成 2 条**:原来的 `(② M-F)` 之外,本轮新增的 `(① C-1, indistinguishable case)` 也红。这是覆盖变宽,不是回退。
+> 其余被重跑探针的锚点(M-C / M-G / M-D / M-I / M-A / M-E / M-J / M-K / M-CLOSABLE)本轮逐条机械核对,**均未被本轮改动触碰**。
+
+### 12.4 静态门
+
+| 门 | 结果 |
+|---|---|
+| `vue-tsc --noEmit -p tsconfig.app.json` | **EXIT=0,零行输出** |
+| `vue-tsc -b --force` | **EXIT=2,1 个 `error TS2769`,唯一来源 `vite.config.ts`** —— **与 `origin/main`(`5edf4c3e17d3608fa4513b5ffd801142da026dcf`)同形**:在独立 main 工作树上跑同一命令得到**同一个** `TS2769` / 同一个文件;该 main 工作树的 `vue-tsc --noEmit -p tsconfig.app.json` 同样 EXIT=0。⇒ 本机共享 `node_modules` 里 vite 5.4.21 与 7.3.6 并存造成的**环境项**,不是本候选引入,按任务书「仅允许与 main 同形环境项」登记 |
+| `vite build` | **EXIT=0**,`✓ built in 12.23s`(仅既有 chunk-size 警告) |
+| `packages/core-backend` `tsc --noEmit` | **EXIT=0,零行输出** |
+
+### 12.5 required 门真正承重的那条活 `exec` 行 —— 直跑
+
+```
+grep -c '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh   → 1     (恰一条)
+该行位置 :1211 ;位置参数 401 个
+9/9 被改 / 相关 spec 的 token 都在该行上(category / sections / panel / switcher /
+   groupsClient / i18n / governance / e2e-lifecycle / e2e-permissions)
+
+本轮 head:   Test Files  473 passed (473)      Tests  7364 passed (7364)     EXIT=0
+r4 head 基线:Test Files  473 passed (473)      Tests  7357 passed (7357)     EXIT=0
+                                                    ^ 同一台机器、同一条命令、同一次会话
+Δ = +7 = 本轮新增用例数(§12.2),零既有用例丢失、零既有用例转红。
+```
+
+收集行(本轮 head):`Duration 54.26s (transform 25.60s, setup 3.17s, collect 134.39s, tests 190.58s, environment 88.64s, prepare 17.47s)`。
+
+> **不重走 `bash run-required-web-tests.sh` 整脚本**:门审 §C-9 已把原因查清——脚本 `:606` 的预检 spec 在**本机 Node 25**(CI 是 20.x)下红,`:473` 的 `set -euo pipefail` 让脚本就地中止,`:1211` 的 `exec` 根本到不了。该 spec 在 `origin/main` 同 SHA 上 CI 为绿,本分支对它零改动。本轮按任务书直跑活 `exec` 行,上表即是执行层证据 —— 这**补上了**门审 §C-9 结尾指出的缺口(「本候选的 spec 在 required lane 上确实被跑到」此前只有接线层证据)。
+
+### 12.6 全量实跑(数字逐字抄自输出)
+
+```
+# 被触碰 spec + 本分支 spec(9 个)
+Test Files  9 passed (9)        Tests  259 passed (259)
+
+# 邻居 8 个(useSessionOrg / AttendanceSessionOrgSwitcher / approvalNewView /
+#            templateDetailI18n / approvalDetailPolish / approvalTemplateVersionHistory /
+#            approval-detail-instance-consistency / approval-detail-can-decide-current-node)
+Test Files  8 passed (8)        Tests  135 passed (135)
+```
+
+> 邻居集合**本轮特意扩了 6 个**:`loadTemplate` / `loadVersion` 第一次带上身份签名,而这两个方法的真实消费者就在这些 spec 里。它们全绿是「内容槽位按种类各自计数」这条设计(设计 MD §8.2 第 2 点)没有误伤并发详情/版本读的证据。
+
+### 12.7 本轮未做 / 交 owner(不藏)
+
+1. **C-1 的真浏览器 / 双标签页重放:NOT RUN。** 本轮的证据全部来自 vitest 组件机具(真 `TemplateCenterView` + 真 `useAuth` 漏斗 + 真 `authPrincipal` + 真 `useSessionOrg`)。三条新用例里的外部转换是**直接调用生产 setter**(`useAuth().setToken` / `useAuth().setExplicitSessionOrg`)产生的,**没有**经过 `window` 的 `storage` 事件那一跳。「另一标签页的切换会保留 marker」这一条是**读源码**得出的(`useAuth.ts:74-79` 与 `:301` 都传 `preserveExplicitSession = true`,`:124` 是那个参数的唯一消费点),**未在浏览器里执行验证**。标 UNVERIFIED-IN-BROWSER。
+2. **后端真库步骤:零。** 本轮 delta 不含任何后端文件,也不含迁移 / DDL;因此**没有**建过一次性库,`plugin-tests.yml` 的真库套件与 r1 的 M8 / M8b / M9 **NOT RUN**,不用前几轮结果填充。
+3. **r1 的 21 条验收判据、③ 的真 500 真浏览器对照、P3-2 的真后端复核:本轮 NOT RUN**(均为第 4 轮/门审已做的项,本轮未重跑,也不据此声称本轮已验)。
+4. **PG15 轴 / musl collation 轴:NOT RUN。**
+5. **`error` 槽位的跨种类仲裁仍未关闭**(设计 MD §8.2 末段),**M-H 仍存活**(P3-1,保持披露)。
+6. **§11.7-1 / §11.7-2 两条 owner 项原样保留**:子组件 `isCurrent()` 仍只比代数不核 token;`useSessionOrg` 订阅裸 `onAuthPrincipalChange` 与宿主订阅 `onAuthSessionSwitch` 的判据仍不一致。
+7. **P3-2(平铺列表不是 org 域数据)仍是 owner 项**,本轮未改机制、未改措辞。
+8. **合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— 全部未做**,仍需 owner 逐条授权。本件不含任何「已裁 / 已 ratify」的记述。

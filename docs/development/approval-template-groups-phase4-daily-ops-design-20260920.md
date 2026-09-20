@@ -360,3 +360,81 @@ async function loadTemplates(query?): Promise<ApprovalTemplateListOutcome> {
 | 6(`disposed` 关闭延后窗口) | **仍然成立**,并且本轮起**有用例**(§7.2 的 M-D 腿) |
 | 7(零新增文件 / 零 CI 改动 / 零迁移 / 零新端点 / 零 flag / 零 DDL) | **仍然成立**(§11.6 逐条机械复核) |
 | 8(真浏览器只跑了 ①②④,③ 登记 NOT RUN) | **这一句失效**:③ 本轮在真后端 + 自起 headless chromium 上跑了,且用**真 500**(重命名 `approval_templates` 表)而非拦截伪造,含四组对照(§11.4) |
+
+---
+
+## 8. 第 5 轮设计增补(对齐 `impl-gate-A5-daily-ops-round4-20260921.md` 的 1 P2 / 4 P3)
+
+> **状态仍是 PROPOSED 候选件。** 未合并、未 undraft、未开 PR、未 ratify。本节只增,不改写 §1-§7 已写下的判断;凡被第 5 轮取代的**具体句子**,在 §8.5 逐句求值,不作废整节。
+> 门审 head = `4e94e8fe0219be61a908f42d5af13dee7e189e1a`,本节的每条改动都建立在该 head 上。
+
+### 8.1 P2(C-1):「自切」宣称必须带身份 —— 组织上下文生命周期的补充条款
+
+**门审认定的形状**:第 3 轮把 `pageSessionOrgsClaim` 从裸 boolean 升级成按 principal 加键(M-C),但**紧邻的另一半没有跟着升级**——`pageOwnedSwitchInFlight` 仍是一个**无身份的裸布尔**。它回答「此刻本页有没有一次切换在飞」,不回答「刚刚这次通知**是不是**那次切换引起的」。落在 `POST /api/auth/session-org` 往返窗口里的**任何**外部身份转换因此都会被贴上「自切」标签,于是:claim 不被丢弃(`ensurePageSessionOrgsLoaded` 永久短路)、监听器的重读被跳过(`if (ownSwitch) return`)、本页 POST 随后因 token 已变而返回 `false`、`if (!ok) return` 把自己的 replay 也跳过 ⇒ **平铺表空白、无横幅、无 Reload、组织切换入口消失**,与 r3 的 C-1(P1)/ r2b 的 P2-D 渲染終态同形。
+
+**本轮的生命周期条款(新增一条,写进 §6.1 的状态机而不是替换它)**:
+
+> **「本页发起的转换」是一个需要被**证明**的宣称,不是一个时间窗。** 本页发起切换时记录一枚**带身份的 claim**:发起瞬间的**会话签名**(`readAuthSessionSignature()` = principal key + token 文本)与**目标组织**。收到 principal 变更通知时,只有**两条同时成立**才算自切,且**一次 claim 只能认领一次转换**;否则一律按外部身份变化走完整生命周期(清理 → 资格判定 → 重取 / 消失)。
+
+两条判据:
+
+| | 判据 | 它挡住什么 |
+|---|---|---|
+| (a) | `claim.from === <通知前的签名>` | 窗口里的**第二次**转换不能再被记到一枚已被第一次转换作废的 claim 上 |
+| (b) | `currentExplicitSessionOrg() === claim.to` | 本次转换落到的会话**不是**本页要去的那个组织 ⇒ 不是本页的切换 |
+
+**(b) 为什么是充分的第二半——按机制,不是按断言**:`useAuth.setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换(`useAuth.ts:301` → `useAuth.ts:124`),也就是唯一一个会让 `state:'ready'` 的 explicit-session marker**留在原地**的转换。其余每一条 `setToken` / `clearToken` 路径(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)都会清掉 marker,因此它们读回来是「没有 explicit 组织」,**永远匹配不上任何目标**。
+
+**(b) 挡不住的那一格,以及为什么它不是一条被藏起来的残留**:另一个标签页的切换经 storage 监听器republish 时 marker 是**被保留**的(`useAuth.ts:74-79` 同样传 `preserveExplicitSession = true`)。若那个标签页切到的恰好**就是本页正在请求的组织**,两者在监听器处**确实无法分辨**——这不是实现缺陷,是该处可得信息的上限。所以本轮同时装了第二层:
+
+> **兜底条款**:本页 POST 返回 `false` 且**监听器已经把某次转换记到了本页名下**时,说明「被记到本页名下的那次转换」不是真正落地的那一次 ⇒ 在 `!ok` 分支丢 claim + 走一次完整的「资格判定 → 重读」。
+
+被拒绝的切换(服务端 403,根本没有 principal 变更)不满足「监听器记过一次」,因此**不会**触发兜底——第 3 轮「拒绝的切换什么都不重读」那条仍然成立。
+
+**修法落点**:`apps/web/src/views/approval/TemplateCenterView.vue`
+- `:763-800` —— `PageOwnedSwitch` 类型(`:763`)+ `pageOwnedSwitch`(`:764`)/ `pageOwnedSwitchClaimed`(`:768`)/ `lastSeenSessionSignature`(`:772`)、`currentExplicitSessionOrg()`(`:775`)、`claimOwnSwitchTransition()`(`:790`)
+- `:815-822` —— `redetermineEligibilityAndReload()`(监听器与 `!ok` 分支共用,防两处漂移)
+- `:828-830` —— 监听器改读 `claimOwnSwitchTransition(signatureBefore)`
+- `:859-888` —— `onPageSessionOrgChange` 记 claim(`:863`)/ `finally` 清 claim(`:869`)/ `!ok` 兜底(`:881-885`)
+
+### 8.2 P3-3(C-7):共享槽位有**三个**写入方,承重注释按实际归属改写
+
+`templateStore` 的 `loading` / `error` 是**整个 app 一份**,写入方是三个:`loadTemplates`、`loadTemplate`、`loadVersion`。第 4 轮只给列表读装了代数,却把 `loading` 描述成「a one-bit slot owned by the newest read」——**按每种读各自计数的 generation 永远证明不了这句话**,这正是仓内「注释断言≠不变量」要抓的形状。可达性是机械核过的:三个兄弟路由页都绑这两个槽位(`ApprovalNewView.vue:12,25`、`TemplateDetailView.vue:17,49,62`、`ApprovalDetailView.vue:89,103`),带着在飞的列表读导航到详情页,列表读落地时会清掉**详情页**正持有的 spinner——`ApprovalDetailView.vue:1269` 的既有注释已经为此另开了一个 detail-scoped 标志。
+
+**本轮的拆法(两层,不是一层)**:
+
+1. **共享的 `loading` 由一张跨种类的票仲裁**:`sharedLoadingTicket`,三个读每人取一张,`finally` 只在「我还是最新那张票」时释放。这使上面那句注释第一次**是真的**。
+2. **内容槽位保持按种类各自计数**:`listGeneration` / `detailGeneration` / `versionGeneration`,各自再叠一层身份签名。**这一条是被一个反例逼出来的**:`ApprovalDetailView.vue:2957,2964` 会**并发**发起 `loadTemplate` 与 `loadVersion`,它们写的是**不同**的内容槽位;若用同一个计数器互相仲裁,后发的那个会把先答的那个答案整个丢掉。
+
+**明确没有关掉、且不打算悄悄掩盖的那一格**:`error` 仍然按种类各写各的。每个写入方现在都会压住**自己**那一路的陈旧 / 换身份答案,但列表读的失败与详情读的失败**彼此之间**没有仲裁,后写者赢——这超出第 4 轮门审点名的人口(「本页两次重叠 `loadData()`」),登记在 `templateStore.ts:46-93` 的注释里(`:70-93` 是本轮新写的那一段),不声称已解决。
+
+**修法落点**:`apps/web/src/approvals/templateStore.ts:70-97`(改写后的注释 + 四个计数器,`sharedLoadingTicket` 在 `:97`)、`:99-121`(`loadTemplates`,`finally` 改取共享票)、`:123-141`(`loadTemplate`)、`:143-161`(`loadVersion`)。
+
+### 8.3 P3-1 / P3-2 / P3-4 的处置(不通胀、不改判)
+
+| 门审项 | 本轮处置 |
+|---|---|
+| **P3-1**(M-H 仍是已披露的不可达守卫) | **保持披露,不补测,不删。** §7.4 的记述整段仍然生效;本轮按 5 个 spec 重跑 M-H = **124 passed(存活)**,正控 M-G 同函数失败分支 = **2 failed**。 |
+| **P3-2**(平铺列表在真后端上不是 org 域数据) | **owner 项原样保留**(§7.3),本轮未改机制、未改措辞、未替 owner 裁决。 |
+| **P3-4**(required lane 在本机 Node 25 下跑不到巨行) | **登记,且不计入本候选**:本轮**不重走** `run-required-web-tests.sh`(门审已把原因查清到「本机 Node 大版本轴」),改为按任务书直跑那条**活 `exec` 行**,见验证 MD §12.5。 |
+
+### 8.4 本轮明确不做(锁外新能力,登记 OPEN)
+
+- 不给子组件(面板 / 分节视图)补 token 核对——`verify-a5-r3-three-p2-after-push-20260921.md` §1.4-R 自述那是合同级取舍,**仍交 owner**(§11.7-1 不变)。
+- 不动 `useSessionOrg` 订阅裸 `onAuthPrincipalChange` 与宿主订阅 `onAuthSessionSwitch` 的判据不一致(§11.7-2 不变)。
+- 不给 `error` 槽位加跨种类仲裁,也不给列表读单开 `listLoading`(见 §8.2 末段)。
+- 零新增文件、零迁移、零 DDL、零新端点、零新 flag、零 CI 接线改动(三个被改文件都已在 `approval-web-guard.yml` 的两个 `paths:` 触发器里)。
+
+### 8.5 对 §6.7 / §7.6 的逐句求值(失效标记只让状态断言失效,不作废整节)
+
+| 条目 | 第 5 轮求值 |
+|---|---|
+| §7.6-1(M-H 是纵深防御,无判别输入) | **仍然成立**;本轮重跑仍存活,正控仍红 |
+| §7.6-2(`loadCategories`/`loadRecentTemplates` 已有判别用例) | **仍然成立**(M-J / M-K 本轮各 1 failed) |
+| §7.6-3(新增共享导出 `readAuthSessionSignature`) | **仍然成立**,并在本轮由页面层**第二次**消费(`claimOwnSwitch` 的 `from`)——store 与页面读的是同一个函数,这一点是本轮修法成立的前提 |
+| §7.6-4(平铺列表不是 org 作用域,已升格为 owner 项) | **仍然成立**,本轮未重新取证(无真库步骤),也未改动该机制 |
+| §7.6-5(`flatListStale` 不是第二个闩锁) | **仍然成立,但理由再补一条**:C-1 那条路径上「空表 + 无横幅」曾经是一个**没有出路**的状态;本轮由 §8.1 的两层修法保证转换后必有一次重读,`(③ FLAT, superseded exit)` 也补上了「出路仍在」的断言 |
+| §7.6-6(`disposed` 关闭延后窗口,且有用例) | **仍然成立**(M-D 本轮 2 failed) |
+| §7.6-7(零新增文件 / 零迁移 / 零端点 / 零 flag / 零 DDL) | **仍然成立**;「零 CI 改动」这一句在第 4 轮已被自己撤回(新增一条 path),**第 5 轮重新成立**:本轮 delta 不含 `.github/` |
+| §7.6-8(③ 已在真浏览器跑过) | **仍然成立**(第 4 轮所做);第 5 轮**未重跑**真浏览器,见验证 MD §12.7 |
+| §6.1 的状态机 | **不作废,追加一条**:§8.1 的「自切宣称必须带身份」。原文「两种转换在监听器处否则无法分辨」这句**部分失效**——在装上身份后,除了「别人切到了本页的同一个目标组织」这一格之外,其余都可分辨;那一格由 §8.1 的兜底条款在 await 的另一侧接住 |
