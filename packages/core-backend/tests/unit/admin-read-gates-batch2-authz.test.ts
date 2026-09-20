@@ -28,6 +28,12 @@
  * reason (an in-flight change over /slo/status, a shared endpoint factory for /safety/status, and an
  * ops-consumer question for the /ratelimits* and /health/summary counters).
  *
+ * UPDATE (batch 3, issue #5678): four of those five are now gated — see
+ * tests/unit/admin-read-gates-batch3-authz.test.ts, which also answers the ops-consumer question
+ * with a repo-wide grep. Only GET /slo/status is still ungated on this tree, held back because
+ * #5680 uses it as a reverse control; batch 3's closed-world sweep pins exactly that. The paragraph
+ * above describes the tree as it stood when THIS batch landed, and is kept for that record.
+ *
  * These specs go through a real express mount (not direct handler invocation) so they prove the
  * guard is wired into the middleware chain AHEAD of the handler, and every denial case asserts the
  * underlying service was never called: a 403 produced after the stats had already been gathered
