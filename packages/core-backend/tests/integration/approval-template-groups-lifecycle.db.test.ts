@@ -710,6 +710,24 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
       [org],
     )
     expect(written.rows[0].n).toBe(0)
+
+    // The RENAME path calls the same `requireName`, so its behaviour is identical by construction
+    // — asserted anyway rather than argued, on one representative zero-width value, because "same
+    // helper" is a source-text claim and this is the endpoint a user actually reaches second.
+    const live = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `Rename Probe ${TS}` } })
+    expect(live.status).toBe(201)
+    const liveId = ((await live.json()) as { group: { id: string } }).group.id
+    const renameBlank = await httpReq(base, `/api/approval-template-groups/${liveId}`, admin, {
+      method: 'PATCH',
+      body: { name: '\u200B\u200B' },
+    })
+    expect(renameBlank.status).toBe(400)
+    expect(((await renameBlank.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_REQUIRED')
+    const unchanged = await query<{ name: string }>(
+      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, liveId],
+    )
+    expect(unchanged.rows[0].name).toBe(`Rename Probe ${TS}`)
   })
 
   it('Erratum 3 candidate v2: the DB CHECK itself rejects every blank/invisible-only name — direct INSERT raises 23514 atg_name_nonblank, not merely an app-layer 400', async () => {
@@ -804,9 +822,17 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     // predicate, and this reads the live catalog rather than trusting the migration source.
     const defs = await query<{ conname: string; def: string }>(
       `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
-        WHERE conname IN ('atg_org_nonblank', 'atgl_org_nonblank') ORDER BY conname`,
+        WHERE conname IN ('atg_org_nonblank', 'atgl_org_nonblank')`,
     )
-    expect(defs.rows.map((r) => r.conname)).toEqual(['atg_org_nonblank', 'atgl_org_nonblank'])
+    // Sorted in JS (UTF-16 code-unit order), NOT by SQL `ORDER BY conname`: a text ORDER BY is
+    // COLLATION-dependent and these two names differ at an underscore. Under macOS Homebrew's
+    // en_US.UTF-8 (effectively byte order) '_' (0x5F) < 'l', so atg_ sorts first; under glibc's
+    // en_US.utf8 (ISO 14651 demotes punctuation below the primary level) the keys compare as
+    // "atgorgnonblank" vs "atglorgnonblank", 'l' < 'o', and the rows come back the OTHER way
+    // round. CI runs ankane/setup-postgres (glibc, PG 14) while this was authored on Homebrew PG
+    // 15, so an ORDER BY here would have been a green-locally / red-in-CI assertion — the exact
+    // blind spot finding_prod_pg15_never_tested names.
+    expect(defs.rows.map((r) => r.conname).sort()).toEqual(['atg_org_nonblank', 'atgl_org_nonblank'])
     for (const row of defs.rows) {
       expect(row.def, `${row.conname} predicate`).toContain(`~ '[!-~]'`)
       expect(row.def, `${row.conname} must not have picked up the name rule`).not.toContain('btrim')
