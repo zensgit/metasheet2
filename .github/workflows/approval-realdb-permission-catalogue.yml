@@ -1,13 +1,15 @@
 name: Approval real-DB acceptance (permission catalogue registration)
 
-# EVIDENCE LANE for the approvals:read/write/act permission-catalogue registration real-DB
+# EVIDENCE LANE for the approvals:read permission-catalogue registration real-DB
 # acceptance suite (tests/integration/approval-permission-catalogue-grant.db.test.ts) — proves,
 # through the real HTTP register → admin-elevate(seed) → grant → gate round trip, that
-# migration zzzz20260920130000_add_approval_product_permissions makes the three codes exist in
+# migration zzzz20260920130000_add_approval_product_permissions makes approvals:read exist in
 # `permissions` and grantable through the product endpoint (routes/permissions.ts:133), and that a
 # non-admin holder of a grant then passes rbacGuard('approvals','read') on
-# GET /api/approvals/pending-count where it previously 403ed. Ephemeral first-party PostgreSQL
-# container; no customer source, no deployment, no flag change, no role_permissions default grant.
+# GET /api/approvals/pending-count where it previously 403ed. approvals:write/act are deliberately
+# out of scope for this migration and this lane (see the migration's own file header). Ephemeral
+# first-party PostgreSQL container; no customer source, no deployment, no flag change, no
+# role_permissions default grant.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
@@ -137,7 +139,7 @@ jobs:
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
             echo "suites=approval-permission-catalogue-grant.db.test.ts"
-            echo "scope=approvals:read/write/act catalogue registration + product grant endpoint + GET /api/approvals/pending-count gate"
+            echo "scope=approvals:read catalogue registration (write/act out of scope) + product grant endpoint + GET /api/approvals/pending-count gate"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
