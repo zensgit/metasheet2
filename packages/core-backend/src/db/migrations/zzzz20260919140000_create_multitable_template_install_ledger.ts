@@ -16,7 +16,7 @@ import { sql } from 'kysely'
  * scope_digest:安装意图的指纹 = sha256(['mt-template-install', tenantId, actorId, templateId,
  * workspaceId, baseName])。做 PRIMARY KEY —— 唯一索引本身就是并发下「同一意图只留一行」的
  * 兜底(UPSERT 的 ON CONFLICT 目标);真正的互斥来自安装事务开头的
- * `pg_advisory_xact_lock(hashtextextended(scope_digest, 0))`。
+ * `pg_try_advisory_xact_lock(hashtextextended(scope_digest, 0))`。
  *
  * tenant_id / actor_id:**不只是**给人看的。读侧在拿到行之后会再核对这四列与当前请求的
  * 作用域是否逐一相等,不相等就当没命中 —— 租户/用户边界因此不依赖「sha256 不碰撞」这个假设。
@@ -54,8 +54,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     )
   `.execute(db)
 
-  // 上面是 IF NOT EXISTS:若这台机器已经跑过本迁移的早期草稿(表已存在、没有 sheet_ids),
-  // CREATE 会整条跳过,列就永远补不上。补一条幂等 ALTER —— 只动本迁移自己建的这张表。
+  // 上面是 IF NOT EXISTS:对同名已记录的迁移不成立(迁移框架按名字去重,不会重跑),
+  // 只对这张表由别的途径预先存在的情况有效 —— 那种情况下 CREATE 会整条跳过,列就永远
+  // 补不上。补一条幂等 ALTER —— 只动本迁移自己建的这张表。
   await sql`
     ALTER TABLE meta_multitable_template_installs
       ADD COLUMN IF NOT EXISTS sheet_ids text[] NOT NULL DEFAULT '{}'
