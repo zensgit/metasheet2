@@ -681,8 +681,44 @@ let pageSessionOrgsClaim: PageSessionOrgsClaim | null = null
 // byte-identical on screen; this keeps them distinguishable and recoverable.
 const pageSessionOrgsFailed = ref(false)
 
+// READING THE PRINCIPAL KEY CAN THROW, and that is not a theoretical state on this page.
+// `getAuthPrincipalKey()` throws by design when the explicit-session metadata is self-inconsistent
+// (`utils/explicitSessionOrg.ts:10-28`, whose predicate is `:17` + `:23`;
+// `composables/authPrincipal.ts` says so in as many words: "Invalid/partial explicit metadata
+// throws"). Another tab's organization switch writes the barrier
+// marker, `auth_token`, `jwt` and the final marker as FOUR separate `setItem` calls, and each one
+// dispatches its own `storage` event, so `useAuth`'s storage listener (`useAuth.ts:65-78`)
+// republishes a principal change while the marker and the token still disagree.
+//
+// MEASURED, not predicted: the round-5 gate (`impl-gate-A5-daily-ops-round5-20260921.md` C-1) drove
+// a real cross-tab switch in a real browser and caught the throw escaping the `nextTick` callback
+// in the lifecycle listener below — `redetermineEligibilityAndReload()` aborted BEFORE
+// `reloadOrgScopedSurfaces()`, so one whole re-read was skipped with an uncaught exception as its
+// only trace. The page recovered only because a LATER notification from the same batch re-ran the
+// listener after the marker and the token had agreed again; nothing guarantees a later one.
+//
+// The sentinel below is justified by the shape of the KEY SPACE, not by a reachability argument:
+// `getAuthPrincipalKey()` returns `null`, `sub:…`, `token:…`, or a JSON array (a string starting
+// `[`). It can never return this constant, so an unreadable window can never collide with a real
+// identity's claim — the worst it can cost is one redundant organization-list re-ask.
+const UNREADABLE_PRINCIPAL = 'unreadable-principal'
+
+function tryReadAuthPrincipalKey(): string | null {
+  try {
+    return getAuthPrincipalKey()
+  } catch (err) {
+    // Observable on purpose: "the identity was unreadable for one notification" is a real event and
+    // a silent fallback would make it indistinguishable from an ordinary session change.
+    console.warn(
+      '[approval] template centre: the session principal is unreadable (a partially applied identity '
+      + 'transition); treating it as an identity of its own and running the full lifecycle', err,
+    )
+    return UNREADABLE_PRINCIPAL
+  }
+}
+
 function ensurePageSessionOrgsLoaded(): void {
-  const principal = getAuthPrincipalKey()
+  const principal = tryReadAuthPrincipalKey()
   if (pageSessionOrgsClaim && pageSessionOrgsClaim.principal === principal) return
   const claim: PageSessionOrgsClaim = { principal }
   pageSessionOrgsClaim = claim
@@ -750,16 +786,31 @@ provide(SessionOrgHostKey, { sessionOrg: pageSessionOrg, notifySessionOrgRequire
 // A claim therefore carries an identity: the session signature this page held when it issued the
 // switch, and the organization it asked for. Only a transition that matches BOTH is "mine".
 //
-// WHY THE TARGET ORGANISATION IS A SUFFICIENT SECOND HALF, by mechanism rather than by assertion:
-// `useAuth.setExplicitSessionOrg` is the ONLY transition that calls `resetSessionBootstrap(…, true)`
-// — `preserveExplicitSession` — so it is the only one that leaves a `state:'ready'` explicit-session
-// marker standing (`useAuth.ts:301`, `useAuth.ts:124`). Every `setToken`/`clearToken` transition
-// (invite acceptance, DingTalk callback, forced password change, dev-token refresh, the bootstrap's
-// 401 branch, sign-out) clears it, so those read back as "no explicit organization" and can never
-// match a target. What CAN still match is another tab's switch, which the storage listener
-// republishes with the marker preserved (`useAuth.ts:74-79`): if that tab switched to the SAME
-// organization this page is asking for, the two are genuinely indistinguishable HERE — which is
-// what `pageOwnedSwitchClaimed` below exists to catch, on the other side of the await.
+// WHY THE TARGET ORGANISATION IS A SUFFICIENT SECOND HALF, by mechanism rather than by assertion.
+//
+// Round 5 argued it from "`useAuth.setExplicitSessionOrg` is the ONLY transition that calls
+// `resetSessionBootstrap(…, preserveExplicitSession = true)`". A MECHANICAL CENSUS says that
+// premise is false (`git grep -n 'resetSessionBootstrap(' -- apps/web/src`): FOUR call sites pass
+// `true` — `useAuth.ts:77` (the storage listener), `:234` (`setToken`), `:249` (`clearToken`) and
+// `:301` (`setExplicitSessionOrg`); `:412` is the only one that leaves it at the default. `setToken`
+// and `clearToken` happen to call `clearExplicitSessionOrg()` themselves a few lines later, so the
+// round-5 sentence reached a true conclusion through a false premise (gate round-5 C-2).
+//
+// THE MECHANISM THAT ACTUALLY LOAD-BEARS IS IN THE READER, and it does not depend on anyone
+// clearing anything: `readExplicitSession` (`utils/explicitSessionOrg.ts:10-28`, whose predicate
+// is `:17` + `:23`) binds the marker to the EXACT token text — it requires
+// `marker.token === token` AND `localStorage.auth_token === token` AND
+// `localStorage.jwt === token`, and throws otherwise. Any transition that swaps the token
+// therefore makes the marker unreadable, which `currentExplicitSessionOrg()` below turns into
+// `null`. No `setToken`/`clearToken` path (invite acceptance, DingTalk callback, forced password
+// change, dev-token refresh, the bootstrap's 401 branch, sign-out) can match a target, and no marker
+// can outlive the token it was issued for.
+//
+// What CAN still match is another tab's switch, which installs a marker bound to the NEW token and
+// which the storage listener republishes (`useAuth.ts:77`, the same `preserveExplicitSession` flag):
+// if that tab switched to the SAME organization this page is asking for, the two are genuinely
+// indistinguishable HERE — which is what `pageOwnedSwitchClaimed` below exists to catch, on the
+// other side of the await.
 type PageOwnedSwitch = { from: string; to: string }
 let pageOwnedSwitch: PageOwnedSwitch | null = null
 // Set when the listener accepted a transition as this page's own. Read only by the `!ok` branch of
@@ -776,9 +827,16 @@ function currentExplicitSessionOrg(): string | null {
   try {
     return explicitSessionOrg(readStoredToken())
   } catch {
-    // A partial switch (the barrier is installed but not yet resolved) is not a session at all, so
-    // it is not this page's switch either. Defence in depth, not a load-bearing guard: every path
-    // that reaches this listener has already completed a transition.
+    // A partial switch — the barrier is installed, or the marker and the token disagree — is not a
+    // session at all, so it is not this page's switch either.
+    //
+    // THIS CATCH IS LOAD-BEARING. Round 5 wrote here "Defence in depth, not a load-bearing guard:
+    // every path that reaches this listener has already completed a transition." The round-5 gate
+    // falsified that sentence in a real browser (`impl-gate-A5-daily-ops-round5-20260921.md` C-1):
+    // a cross-tab switch is four separate `localStorage` writes, each dispatching its own `storage`
+    // event, so this listener DOES run inside the window where the marker and the token disagree —
+    // the sibling call two lines further down threw on exactly that input. The assertion is removed
+    // rather than re-argued.
     return null
   }
 }
@@ -841,7 +899,13 @@ const stopPrincipalLifecycle = onAuthSessionSwitch(() => {
   recentTemplates.value = []
   // (2) RE-KEY the claim. The page's own switch is the same person with the same memberships, so
   // the restored list is already the right answer for the new key; anything else must re-ask.
-  pageSessionOrgsClaim = ownSwitch ? { principal: getAuthPrincipalKey() } : null
+  // `tryReadAuthPrincipalKey` rather than the raw read, for the same reason as
+  // `ensurePageSessionOrgsLoaded` — with one honest difference: NO INPUT HAS BEEN FOUND THAT MAKES
+  // THIS ONE THROW. Reaching it needs `ownSwitch`, and `ownSwitch` needs `currentExplicitSessionOrg()`
+  // to have just read a marker successfully, with nothing between the two reads that can touch
+  // storage. It is registered as defence in depth here and in the verification MD, and is NOT
+  // claimed to be covered by a test.
+  pageSessionOrgsClaim = ownSwitch ? { principal: tryReadAuthPrincipalKey() } : null
 
   // (3) RE-DETERMINE ELIGIBILITY and (4) RE-READ, deferred one tick. Subscribers are notified in
   // subscription order and this host subscribes BEFORE its own children do; a re-read issued here

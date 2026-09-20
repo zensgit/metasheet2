@@ -2064,6 +2064,277 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     expect(container!.textContent).toContain('Org B Template')
   })
 
+  // ═══ ROUND 6 — gate round-5 C-1 (P2) and C-3 (P3) ════════════════════════════════════════
+  //
+  // C-1: the round-5 gate drove a real cross-tab organization switch in a real browser and caught
+  // an UNCAUGHT exception on this very path — `getAuthPrincipalKey()` throws when the explicit
+  // metadata is self-inconsistent, and the lifecycle listener's deferred re-read reached it while
+  // another tab was mid-switch. The re-read was skipped entirely. Round 5 had also written a
+  // comment asserting that state was unreachable here; it is not. Covered below.
+  //
+  // C-3: the three round-5 C-1 cases all satisfy criterion (b) by having NOTHING to read — a
+  // `setToken` leaves no marker, and the one case with a marker is the case where the marker was
+  // installed by the very transition being credited. None of them can tell "(b) rejected a valid
+  // competing marker" apart from "there was no marker". The three cases after the C-1 one below
+  // put a VALID, READY marker in place first, so (b) and (a) are each exercised on an input where
+  // the other half is satisfied.
+
+  /**
+   * Another tab, mid-switch. `setExplicitSessionOrg` is four separate `localStorage` writes — the
+   * `'changing'` barrier, `auth_token`, `jwt`, then the `'ready'` marker — and in a browser each
+   * one dispatches its own `storage` event into this tab. This helper reproduces the state after
+   * the token aliases have been swapped but before the final marker is published: every reader of
+   * the explicit metadata throws until `completeForeignSwitch` lands.
+   */
+  function beginForeignSwitchWithoutPublishing(incomingToken: string): void {
+    localStorage.setItem('metasheet.explicitSessionOrg.v1', JSON.stringify({ state: 'changing', epoch: 'foreign-epoch-1' }))
+    localStorage.setItem('auth_token', incomingToken)
+    localStorage.setItem('jwt', incomingToken)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'jwt', newValue: incomingToken }))
+  }
+
+  function completeForeignSwitch(incomingToken: string, orgId: string): void {
+    const payload = JSON.parse(atob(incomingToken.split('.')[1])) as Record<string, unknown>
+    const marker = JSON.stringify({
+      state: 'ready', token: incomingToken, actor: payload.userId, tenantId: orgId,
+      exp: payload.exp, epoch: 'foreign-epoch-1',
+    })
+    localStorage.setItem('metasheet.explicitSessionOrg.v1', marker)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'metasheet.explicitSessionOrg.v1', newValue: marker }))
+  }
+
+  it('(① C-1, partial transition) a cross-tab switch whose marker and token still disagree does NOT throw through the listener: the re-read happens, the failure is rendered as recoverable, and the entry comes back when the switch completes', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // The window the gate measured: token aliases already swapped, marker still `'changing'`.
+      const incoming = jwtFor('actor', 'org-b', 11)
+      mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+      mockTotal.value = 1
+      beginForeignSwitchWithoutPublishing(incoming)
+      await flushUi(16)
+
+      // The catch was ENTERED — this is what makes the case below a statement about the unreadable
+      // path and not about an ordinary session change.
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('session principal is unreadable'))).toBe(true)
+
+      // The whole point of C-1: the re-read is NOT skipped. On the round-5 head this is 0, because
+      // the throw aborted `redetermineEligibilityAndReload()` before `reloadOrgScopedSurfaces()`.
+      expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+
+      // The organization-list re-ask is ATTEMPTED and fails in this window — `authHeaders()`
+      // (`utils/api.ts:167`) reads the same explicit metadata with no guard of its own, so every
+      // request out of this app throws until the switch lands. That is registered as an
+      // out-of-population sibling of C-1, not fixed here; what matters for THIS page is that the
+      // failure is rendered as recoverable rather than as a silent disappearance.
+      expect(sessionOrgsCalls).toBe(1)
+      expect(container!.querySelectorAll('[data-testid="template-center-session-orgs-retry"]').length).toBe(1)
+
+      // The other tab publishes the final marker. Everything is readable again, and the entry
+      // comes back with no reload — the page was never in a dead state.
+      completeForeignSwitch(incoming, 'org-b')
+      await flushUi(16)
+      expect(sessionOrgsCalls).toBe(2)
+      expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+      expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(2)
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    await enterFlatView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org B Template')
+  })
+
+  it("(① C-1, criterion (b) discriminating) a foreign switch to a DIFFERENT organization is rejected while a VALID ready marker is standing — (b) works by reading a target, not by finding nothing to read", async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    // A REAL explicit session is standing before anything else happens, so `currentExplicitSessionOrg()`
+    // has something to read at every point below. The three round-5 cases never had one.
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-a', 2), 'org-a', localStorage.getItem('auth_token')!)).toBe(true)
+
+    let sessionOrgsCalls = 0
+    let releaseSwitchPost: (() => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        await new Promise<void>((resolve) => { releaseSwitchPost = resolve })
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwtFor('actor', 'org-b', 3) } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    expect(releaseSwitchPost).not.toBeNull()
+
+    // Somebody else moves this session to org-z, with a fully valid `state:'ready'` marker. The
+    // signature half (a) is SATISFIED — nothing has moved the session since this page issued its
+    // switch — so (b) is the only thing that can reject it, and it must: org-z is not org-b.
+    mockTemplates.value = [lifecycleTemplate('tpl_z', 'Org Z Template')]
+    mockTotal.value = 1
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-z', 9), 'org-z', localStorage.getItem('auth_token')!)).toBe(true)
+    await flushUi(16)
+
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+
+    // The page's own POST now lands and is refused by `useSessionOrg`'s own guard. The listener
+    // never credited anything to this page, so the `!ok` fallback must NOT fire a second re-read.
+    releaseSwitchPost!()
+    await flushUi(16)
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+
+    await enterFlatView()
+    expect(container!.textContent).toContain('Org Z Template')
+  })
+
+  it("(① C-1, criterion (a) with a valid marker standing) a SECOND foreign switch that lands on this page's own target is still external — (a) rejects it even though (b) matches", async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-a', 2), 'org-a', localStorage.getItem('auth_token')!)).toBe(true)
+
+    let sessionOrgsCalls = 0
+    let releaseSwitchPost: (() => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        await new Promise<void>((resolve) => { releaseSwitchPost = resolve })
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwtFor('actor', 'org-b', 3) } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    expect(releaseSwitchPost).not.toBeNull()
+
+    // First foreign switch: valid marker, WRONG organization ⇒ (b) rejects, claim NOT consumed.
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-z', 9), 'org-z', localStorage.getItem('auth_token')!)).toBe(true)
+    await flushUi(16)
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+
+    // Second foreign switch: valid marker, and it lands on org-b — the organization this page is
+    // asking for, so (b) MATCHES. Only the signature half can see that this page's claim was
+    // invalidated by the first transition. Same shape as `(① C-1, second transition)`, but with a
+    // readable marker standing throughout rather than a bare token swap.
+    mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+    mockTotal.value = 1
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-b', 13), 'org-b', localStorage.getItem('auth_token')!)).toBe(true)
+    await flushUi(16)
+
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(2)
+    expect(sessionOrgsCalls).toBe(3)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+    await enterFlatView()
+    expect(container!.textContent).toContain('Org B Template')
+  })
+
+  it("(① C-1, external transition AFTER this page's switch answered) a REFUSED switch leaves no claim behind for a later foreign transition to satisfy", async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-a', 2), 'org-a', localStorage.getItem('auth_token')!)).toBe(true)
+
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(403, { success: false, error: { code: 'SESSION_ORG_FORBIDDEN' } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const readsBefore = loadTemplatesSpy.mock.calls.length
+
+    // The page asks and is REFUSED: no principal change, nothing to clear, nothing to re-read.
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(16)
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(0)
+    expect(sessionOrgsCalls).toBe(1)
+
+    // LATER — strictly after this page's own request has answered — another tab really does move
+    // this session to org-b, the organization this page had asked for. Both criteria would say
+    // "mine" if the claim were still standing: nothing has moved the session since it was issued,
+    // and the target matches exactly. What makes this external is that the claim is GONE, dropped
+    // in `onPageSessionOrgChange`'s `finally` when the request answered.
+    mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+    mockTotal.value = 1
+    expect(useAuth().setExplicitSessionOrg(jwtFor('actor', 'org-b', 9), 'org-b', localStorage.getItem('auth_token')!)).toBe(true)
+    await flushUi(16)
+
+    expect(loadTemplatesSpy.mock.calls.length - readsBefore).toBe(1)
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+    await enterFlatView()
+    expect(container!.textContent).toContain('Org B Template')
+  })
+
   it("(② M-F) the page's OWN organization switch re-reads every org-scoped surface exactly ONCE", async () => {
     listTemplateCategoriesSpy.mockResolvedValue([])
     listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
