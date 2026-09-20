@@ -36,6 +36,15 @@ import { poolManager } from '../../src/integration/db/connection-pool'
  *
  * The discriminating pair is the SAME target user, SAME token, SAME endpoint, before vs. after the
  * grant: 403 → grant → 200. That isolates the catalogue-registration fix from every other variable.
+ *
+ * RUNNING THIS FILE OUTSIDE ITS CI LANE: this file calls `POST /api/auth/register` a dozen times.
+ * The lane (`.github/workflows/approval-realdb-permission-catalogue.yml`) sets
+ * `AUTH_REGISTER_MAX_PER_IP=50` in its job `env:` for exactly that reason. The route's own default
+ * (`routes/auth.ts`'s `maxRegisterPerIp`) is 3 per IP per window — running this file locally without
+ * that override 429s starting at the 4th registration, and the failure surfaces as an unrelated
+ * `expect(response.status).toBe(201)` mismatch with no hint that rate limiting is the real cause. Set
+ * `AUTH_REGISTER_MAX_PER_IP` to something well above the registration count in this file before
+ * running it directly.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -222,7 +231,7 @@ describeIfDatabase('approvals:read catalogue registration — grant-and-gate rea
   })
 
   it(
-    'UNRELATED-INSTANCE FENCE: a user holding approvals:read via the product grant is NOT thereby admitted to an instance they are not a participant of — GET /:id and /:id/history both deny (canReadApprovalInstance runs AFTER rbacGuard as a SEPARATE per-instance leg; approvals:read only satisfies the leg-1 resource-shape guard). This is a P1 finding-in-waiting if it ever comes back 200: the test records the ACTUAL status observed rather than assuming 403/404, and fails loudly (with the unexpected status printed) if the participant fence turns out not to hold.',
+    'UNRELATED-INSTANCE FENCE: a user holding approvals:read via the product grant is NOT thereby admitted to an instance they are not a participant of — GET /:id and /:id/history both deny (canReadApprovalInstance runs AFTER rbacGuard as a SEPARATE per-instance leg; approvals:read only satisfies the leg-1 resource-shape guard). This is a P1 finding-in-waiting if it ever comes back 200: the test records the ACTUAL status observed rather than assuming 403/404, and fails loudly (with the unexpected status printed) if the participant fence turns out not to hold. POSITIVE CONTROL, same instanceId: the instance\'s own requester (also granted approvals:read) asserts 200 on the identical two endpoints, so a 404 above can only mean "not a participant", never "the instance was never actually created" (gate r3 P2-1).',
     async () => {
       const adminEmail = `permcat-admin3-${TS}@example.com`
       const readerEmail = `permcat-reader3-${TS}@example.com`
@@ -242,6 +251,13 @@ describeIfDatabase('approvals:read catalogue registration — grant-and-gate rea
       const grant = await grantPermission(baseUrl, admin.token, reader.userId, 'approvals:read')
       expect(grant.status).toBe(200)
 
+      // strangerRequester is ALSO granted approvals:read — the positive control below needs them to
+      // clear the SAME leg-1 rbacGuard('approvals','read') reader just cleared, so that a 200 on
+      // their own instance is attributable to canReadApprovalInstance's arm 1 (participant), not to
+      // some other bypass.
+      const requesterGrant = await grantPermission(baseUrl, admin.token, strangerRequester.userId, 'approvals:read')
+      expect(requesterGrant.status).toBe(200)
+
       // An instance reader is NOT a participant of: requester is strangerRequester, not reader; no
       // assignment/cc/past-actor row names reader at all.
       const instanceId = await seedRequesterInstance(strangerRequester.userId)
@@ -253,11 +269,25 @@ describeIfDatabase('approvals:read catalogue registration — grant-and-gate rea
         headers: { Authorization: `Bearer ${reader.token}` },
       })
 
+      // POSITIVE CONTROL — SAME instanceId, the instance's own requester, own token: arm 1 of
+      // canReadApprovalInstance (`requester_snapshot->>'id' = viewerId`) admits them unconditionally,
+      // so this must be 200/200. Without this pair, the 404/404 above would read identically whether
+      // the fence is holding OR seedRequesterInstance's INSERT silently failed/wrote a different id —
+      // this closes that gap by proving the SAME id is hydratable by SOMEONE.
+      const requesterDetailResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}`, {
+        headers: { Authorization: `Bearer ${strangerRequester.token}` },
+      })
+      const requesterHistoryResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}/history`, {
+        headers: { Authorization: `Bearer ${strangerRequester.token}` },
+      })
+
       // Record what actually happened rather than assuming — if either comes back 200 that is the
       // participant fence failing to hold for a grant issued via THIS migration's code, which is a
       // P1 worth flagging to owner, not silently accepting/hiding.
       expect([403, 404]).toContain(detailResponse.status)
       expect([403, 404]).toContain(historyResponse.status)
+      expect(requesterDetailResponse.status).toBe(200)
+      expect(requesterHistoryResponse.status).toBe(200)
     },
   )
 

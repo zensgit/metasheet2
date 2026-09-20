@@ -42,11 +42,24 @@
  * permissions — it changes nothing until an admin explicitly grants `approvals:read` to someone through
  * `POST /api/permissions/grant`.
  *
- * `down()` removes only the `approvals:read` row, in FK order: `role_permissions` first (defensive —
- * this migration's own `up()` writes none, but an admin could have inserted a role_permissions row
- * referencing this code out-of-band after it shipped, and `down()` must still clear that so the later
- * `permissions` DELETE never violates the FK), then `user_permissions` (rows an admin may have granted
- * via the product path while this code existed), then the `permissions` row itself.
+ * `down()` deletes the `approvals:read` row from `role_permissions`, then `user_permissions`, then
+ * `permissions`, in that order. Both `role_permissions.permission_code` and
+ * `user_permissions.permission_code` carry an `ON DELETE CASCADE` foreign key to `permissions(code)`
+ * (`20250924190000_create_rbac_tables.ts:99-112` — verified `confdeltype='c'` on both constraints), so
+ * the final `permissions` DELETE alone would already cascade both rows away; the two explicit DELETEs
+ * above it are redundant-by-CASCADE, written out so the row-loss is visible at the call site rather
+ * than implicit in a constraint a future reader of this file would otherwise have to go look up.
+ * `role_permissions` has no row from this migration's own `up()`, but an admin could have added one
+ * out-of-band (a role bound to `approvals:read`) after this code started existing; `user_permissions`
+ * rows come from `POST /api/permissions/grant`.
+ *
+ * DISCLOSURE — rolling this migration back is NOT reversible for grant state: it permanently drops
+ * every `role_permissions`/`user_permissions` row for `approvals:read`, whether admin-issued or seeded
+ * out-of-band, with no compensation path and no audit trail of what was dropped. Re-running `up()`
+ * re-registers the catalogue row but does not restore who held it — an admin has to re-grant each
+ * holder one-by-one through `POST /api/permissions/grant`. Same shape as
+ * `zzzz20260915121000_add_multitable_submit_approval_permission`'s `down()`, which has the identical
+ * property for `approvals:write`.
  */
 
 import type { Kysely } from 'kysely'
@@ -57,7 +70,10 @@ const APPROVAL_PRODUCT_PERMISSIONS = [
   {
     code: 'approvals:read',
     name: 'Approvals Read',
-    description: 'Read approval instances, history, comments, delegations, and pending/todo queues',
+    description:
+      'Read approval instances, history, comments, delegations, and pending/todo queues — also gates ' +
+      'a few write-shaped actions sharing this same guard (see the migration file header); not a ' +
+      'pure read-only grant',
   },
 ] as const
 const APPROVAL_PRODUCT_PERMISSION_CODES = APPROVAL_PRODUCT_PERMISSIONS.map((permission) => permission.code)
