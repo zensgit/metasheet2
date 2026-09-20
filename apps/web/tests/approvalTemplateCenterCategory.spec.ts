@@ -855,4 +855,121 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
 
     expect(listApprovalTemplateGroupsSpy.mock.calls.length).toBeGreaterThan(readsBeforeSwitch)
   })
+
+  // ── P1-A (impl-gate-A5-daily-ops-round1-20260920.md) ────────────────────────────────────────
+  // The three cases above cover (a) an ALREADY-BOUND multi-org admin and (b) a single-org member.
+  // The population lock §2/§4 J actually names — a multi-org member with NO bound
+  // `authenticatedTenantId`, i.e. the default state for anyone in more than one org — was the
+  // missing (c), and it is the one hop where round 1 rendered TWO indistinguishable switchers
+  // (page-level + the sections view's reactive one, same testid, same markup, same options, and —
+  // before this round — the same hardcoded `<select>` DOM id). Which one the admin happened to
+  // click decided whether this slice's headline fix held: switching through the sections view's
+  // copy left the page with ZERO switchers, because `useSessionOrg`'s `onAuthPrincipalChange`
+  // empties `orgs` on every instance that did not perform the switch and only the switching one
+  // restores itself.
+  //
+  // Both cases below count with `querySelectorAll`, never `querySelector` — the round-1 specs used
+  // `querySelector`, which silently always took the page-level instance, i.e. the one side that
+  // worked, and therefore had zero discriminating power over the duplicate.
+  function sessionOrgRequiredError(ApiError: new (message: string) => Error): Error {
+    const err = new ApiError('An authenticated session organization is required') as Error & { code?: string }
+    err.code = 'SESSION_ORG_REQUIRED'
+    return err
+  }
+
+  /**
+   * Models the real server for an unbound multi-org admin: EVERY group endpoint fail-closes 403
+   * `SESSION_ORG_REQUIRED` until an org is chosen, and succeeds afterwards. `bound` is flipped by
+   * the `POST /api/auth/session-org` stub, not by the test, so the "after" state is reached the
+   * same way a real admin reaches it. Remounts from scratch so each instance can be exercised
+   * from the same starting state.
+   */
+  async function mountUnboundMultiOrgGroupedView(state: { bound: boolean }) {
+    if (app) app.unmount()
+    if (container) container.remove()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    state.bound = false
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+
+    const api = await import('../src/approvals/api')
+    listApprovalTemplateGroupsSpy.mockImplementation(async () => {
+      if (!state.bound) throw sessionOrgRequiredError(api.ApprovalApiError as unknown as new (m: string) => Error)
+      return []
+    })
+    // The token's own payload is irrelevant here — "unbound" is a SERVER-side property, which is
+    // why it is modelled by the 403 above; the client just needs a stored token for
+    // `useSessionOrg` to consider itself usable. Same `userId: 'actor'` helper the cases above use
+    // (a longer id makes `btoa` emit `=` padding, which `useAuth.setExplicitSessionOrg`'s JWT
+    // shape check rejects).
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        state.bound = true
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(10)
+  }
+
+  it('P1-A: an UNBOUND multi-org admin on the first grouped hop gets exactly ONE switcher, with a unique select id', async () => {
+    const state = { bound: false }
+    await mountUnboundMultiOrgGroupedView(state)
+
+    const switchers = container!.querySelectorAll('[data-testid="session-org-switcher"]')
+    expect(switchers.length).toBe(1)
+
+    const selects = Array.from(
+      container!.querySelectorAll('[data-testid="session-org-switcher"] select[name="sessionOrgId"]'),
+    ) as HTMLSelectElement[]
+    expect(selects.length).toBe(1)
+    // Every rendered select carries a non-empty id, and no id is shared — the `<label for=...>`
+    // pairing is then per instance instead of silently binding to whichever one rendered first.
+    const ids = selects.map((select) => select.id)
+    expect(ids.every((id) => id.length > 0)).toBe(true)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const id of ids) {
+      expect(container!.querySelectorAll(`[id="${id}"]`).length).toBe(1)
+      expect(container!.querySelector(`label[for="${id}"]`)).not.toBeNull()
+    }
+  })
+
+  it('P1-A: switching from EVERY rendered switcher instance leaves the page entry in place and re-reads the grouped view', async () => {
+    const state = { bound: false }
+    await mountUnboundMultiOrgGroupedView(state)
+
+    // Discovered, not hardcoded: on the round-1 head this is 2 and the second iteration ends with
+    // zero switchers on the page (the regression this case exists for).
+    const instanceCount = container!.querySelectorAll('[data-testid="session-org-switcher"]').length
+    expect(instanceCount).toBeGreaterThan(0)
+
+    for (let index = 0; index < instanceCount; index += 1) {
+      if (index > 0) await mountUnboundMultiOrgGroupedView(state)
+
+      const selects = Array.from(
+        container!.querySelectorAll('[data-testid="session-org-switcher"] select[name="sessionOrgId"]'),
+      ) as HTMLSelectElement[]
+      expect(selects.length).toBe(instanceCount)
+      const readsBeforeSwitch = listApprovalTemplateGroupsSpy.mock.calls.length
+
+      const select = selects[index]
+      select.value = 'org-b'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(10)
+
+      // The entry survives the switch no matter which instance performed it.
+      expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+      // …and the blocked grouped view was actually replayed.
+      expect(listApprovalTemplateGroupsSpy.mock.calls.length).toBeGreaterThan(readsBeforeSwitch)
+      expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    }
+  })
 })

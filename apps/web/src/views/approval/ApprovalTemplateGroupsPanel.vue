@@ -20,6 +20,15 @@
   moving or editing either would narrow `attendance-web-guard.yml:297-301,:397-400`'s closed-world
   census (design lock §2, 第 8 轮 P3-b).
 
+  P1-A (impl-gate-A5-daily-ops-round1-20260920.md, round 2): the paragraph above describes this
+  panel STANDALONE, which is still exactly what it does when nothing provides a `SessionOrgHost`
+  (its own spec mounts it that way, and acceptance J's mutation — remove the handling of that code
+  ⇒ the flow stops at 403 — is load-bearing there). Mounted inside TemplateCenterView the page is
+  the host: it owns the single `useSessionOrg()` instance, renders the single switcher and replays
+  `loadGroups()` after a switch; this panel then reports the 403 upward and draws no control of its
+  own. That is not a style preference — two live `useSessionOrg()` instances on one page destroy
+  each other's `orgs` (see `SessionOrgSwitcher.vue`'s `SessionOrgHost` doc comment).
+
   Daily-ops fix round (groups-daily-ops-real-browser-acceptance-20260920.md) added three things,
   none of them a new backend capability — every endpoint/client function below already shipped in
   §6 phase 1 (A-1/A-2), this only wires UI onto it:
@@ -64,7 +73,7 @@
     </p>
 
     <ul
-      v-if="!showSessionOrgSwitcher"
+      v-if="!sessionOrgBlocked"
       class="approval-template-groups-panel__list"
       data-testid="approval-template-groups-list"
     >
@@ -152,8 +161,8 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import SessionOrgSwitcher from '../../components/SessionOrgSwitcher.vue'
+import { computed, inject, onMounted, ref } from 'vue'
+import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
 import { useSessionOrg } from '../../composables/useSessionOrg'
 import {
   ApprovalApiError,
@@ -179,6 +188,11 @@ const props = defineProps<{
 // on a failed submit.
 const emit = defineEmits<{ changed: [] }>()
 
+// P1-A — the page's host instance when there is one, this panel's own otherwise (see the header
+// comment). `inject` with an explicit `null` default: no host is the normal case for every mount
+// outside TemplateCenterView.
+const sessionOrgHost = inject(SessionOrgHostKey, null)
+
 const {
   orgs,
   // `selectedOrgId` (not the raw `currentOrgId`) — the composable already normalizes `null` to
@@ -189,12 +203,17 @@ const {
   errorMessage: sessionOrgError,
   loadSessionOrgs,
   switchSessionOrg,
-} = useSessionOrg()
+} = sessionOrgHost?.sessionOrg ?? useSessionOrg()
 
 const groups = ref<ApprovalTemplateGroupDTO[]>([])
 const loading = ref(false)
 const loadError = ref('')
-const showSessionOrgSwitcher = ref(false)
+// "this panel's load/create is blocked on a session-org choice" — it suppresses the group list
+// (which is empty in that state, so the "No groups yet." empty row would be a lie) no matter who
+// renders the control.
+const sessionOrgBlocked = ref(false)
+// Whether THIS panel draws the control. Never while hosted: the page draws exactly one.
+const showSessionOrgSwitcher = computed(() => sessionOrgBlocked.value && sessionOrgHost === null)
 const newGroupName = ref('')
 const creating = ref(false)
 
@@ -207,14 +226,27 @@ const renamingId = ref<string | null>(null)
 const renameValue = ref('')
 const actionBusyId = ref<string | null>(null)
 
-// The one blocked action to replay once the session-org switch resolves. Only ever one of
-// `loadGroups`/`onCreate` is in flight from this panel at a time (both guard on
-// loading/creating), so a single slot is enough — no queue needed.
+// The one blocked action to replay once the session-org switch resolves. A single slot is enough
+// because this panel serializes its own writes: `loadGroups` and `onCreate` guard on
+// `loading`/`creating`, and `submitRename`/`onArchive`/`onUnarchive` (added in the daily-ops
+// round, NIT-3 of that round's gate: the old wording "only ever one of loadGroups/onCreate" named
+// two writers when there are now five) all guard on the single `actionBusyId` slot — so at most
+// one of the five is ever in flight, and at most one can be waiting on a session org.
+// Stays empty while hosted: the host replays `loadGroups()` itself after a successful switch.
 let pendingRetry: (() => Promise<void>) | null = null
 
 function handleSessionOrgRequired(retry: () => Promise<void>): void {
+  sessionOrgBlocked.value = true
+  if (sessionOrgHost) {
+    // Hosted: the page owns the one fetch, the one rendered control and the replay. It replays
+    // `loadGroups()` only — a blocked create/rename/archive/unarchive is deliberately NOT
+    // auto-resubmitted into a freshly-chosen organization (see TemplateCenterView's
+    // `onPageSessionOrgChange`); the admin re-submits it against the org they just picked.
+    pendingRetry = null
+    sessionOrgHost.notifySessionOrgRequired()
+    return
+  }
   pendingRetry = retry
-  showSessionOrgSwitcher.value = true
   // Fire-and-forget: populates the switcher's `orgs` list. A rejection here only leaves the
   // switcher's own errorMessage set (useSessionOrg's own failure surface); it must never throw
   // back into the caller's try/catch.
@@ -226,7 +258,7 @@ async function loadGroups(): Promise<void> {
   loadError.value = ''
   try {
     groups.value = await listApprovalTemplateGroups()
-    showSessionOrgSwitcher.value = false
+    sessionOrgBlocked.value = false
   } catch (err) {
     if (err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED') {
       handleSessionOrgRequired(loadGroups)
@@ -246,7 +278,7 @@ async function onCreate(): Promise<void> {
     const group = await createApprovalTemplateGroup(name)
     groups.value = [...groups.value, group]
     newGroupName.value = ''
-    showSessionOrgSwitcher.value = false
+    sessionOrgBlocked.value = false
     emit('changed')
   } catch (err) {
     if (err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED') {
@@ -270,6 +302,20 @@ function cancelRename(): void {
   renameValue.value = ''
 }
 
+/**
+ * In-place row swap, so the clicked row reflects the server's response immediately.
+ *
+ * P3-3 (impl-gate-A5-daily-ops-round1-20260920.md): this is a CONTENT update, never an ORDER
+ * update. The server orders the list `ORDER BY (archived_at IS NOT NULL), sort_order NULLS LAST,
+ * archived_at DESC NULLS LAST, name` (`ApprovalTemplateGroupService.ts:222`), and archiving nulls
+ * `sort_order` while unarchiving takes `MAX+1` — so both of those actions move the row, and an
+ * in-place swap alone leaves a just-archived group sitting among the active ones until the admin
+ * collapses and reopens the panel. Those two actions therefore re-read the list from the server
+ * (`loadGroups()`), which keeps the server the single ordering authority instead of reimplementing
+ * that four-key comparator here. Rename does NOT re-read: the rename control is rendered only for
+ * ACTIVE rows, and active rows are fully ordered by their unique non-null `sort_order`, so `name`
+ * — the last key — can never decide their order.
+ */
 function replaceGroup(updated: ApprovalTemplateGroupDTO): void {
   const idx = groups.value.findIndex((g) => g.id === updated.id)
   if (idx !== -1) groups.value.splice(idx, 1, updated)
@@ -308,6 +354,10 @@ async function onArchive(group: ApprovalTemplateGroupDTO): Promise<void> {
     const updated = await archiveApprovalTemplateGroup(group.id)
     replaceGroup(updated)
     emit('changed')
+    // P3-3 — archiving nulls `sort_order` and moves the row to the archived tail. Re-read so the
+    // panel's own order matches the server's (see `replaceGroup`'s doc comment). `loadGroups`
+    // never throws; a failure there lands in its own error surface.
+    await loadGroups()
   } catch (err) {
     if (err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED') {
       handleSessionOrgRequired(() => onArchive(group))
@@ -327,6 +377,9 @@ async function onUnarchive(group: ApprovalTemplateGroupDTO): Promise<void> {
     const updated = await unarchiveApprovalTemplateGroup(group.id)
     replaceGroup(updated)
     emit('changed')
+    // P3-3 — unarchiving takes `sort_order = MAX+1` and moves the row back among the active ones
+    // at the END of them. Re-read for the same reason as `onArchive`.
+    await loadGroups()
   } catch (err) {
     if (err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED') {
       handleSessionOrgRequired(() => onUnarchive(group))
@@ -341,7 +394,7 @@ async function onUnarchive(group: ApprovalTemplateGroupDTO): Promise<void> {
 async function onSessionOrgChange(orgId: string): Promise<void> {
   const ok = await switchSessionOrg(orgId)
   if (!ok) return
-  showSessionOrgSwitcher.value = false
+  sessionOrgBlocked.value = false
   const retry = pendingRetry
   pendingRetry = null
   if (retry) await retry()
